@@ -43,7 +43,7 @@ from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
-from g3ku.runtime.stage_prompt_compaction import decompose_stage_prompt_messages
+from g3ku.runtime.stage_prompt_compaction import compact_stage_prompt_messages_in_place
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
@@ -88,7 +88,6 @@ from main.runtime.tool_call_repair import (
 )
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
-    frontdoor_stage_archive_task_id,
     is_prompt_visible_message,
     persist_frontdoor_actual_request,
     strip_multimodal_blocks_from_message_records,
@@ -119,9 +118,6 @@ ToolExecutor = Callable[..., Awaitable[Any]]
 CeoGraphState = CeoPersistentState
 
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
-_FRONTDOOR_STAGE_ARCHIVE_RETAIN_COMPLETED = 20
-_FRONTDOOR_STAGE_ARCHIVE_BATCH_SIZE = 10
-_FRONTDOOR_STAGE_ARCHIVE_SOURCE_KIND = "stage_history_archive"
 _DEFAULT_IMAGE_ESTIMATION_METHOD = "openai_vision_heuristic"
 _OPENAI_DEFAULT_IMAGE_LOW_TOKENS = 70
 _OPENAI_DEFAULT_IMAGE_HIGH_BASE_TOKENS = 70
@@ -722,24 +718,26 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         cls,
         seed: list[dict[str, Any]] | None,
         stage_state: dict[str, Any] | None,
-    ) -> list[dict[str, Any]]:
-        """把续跑 seed（上一份请求体基线）裁到「前缀+压缩块+最近窗口」，
-        使存量大会话在续跑路径也能真正收缩，而不是携带未裁剪旧体重新膨胀。"""
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """把续跑 seed（上一份请求体基线）按阶段归属原位压缩：
+        过期阶段只移除工具肉身、压缩块落回原位、阶段外对话逐条保留，
+        使续跑路径真正收缩且不整体打碎前缀缓存。
+        返回 (裁剪结果, 本次是否实际移除了消息)。"""
         records = [dict(item) for item in list(seed or []) if isinstance(item, dict)]
         if not records or not list((stage_state or {}).get("stages") or []):
-            return records
-        parts = decompose_stage_prompt_messages(
+            return records, False
+        parts = compact_stage_prompt_messages_in_place(
             records,
             stage_state=stage_state,
             keep_latest_completed_stages=3,
             preserve_leading_system=True,
             preserve_leading_user=True,
         )
-        return [
+        trimmed = [
             *list(parts["prefix"]),
-            *list(parts["completed_blocks"]),
-            *list(parts["active_window"]),
+            *list(parts["rewritten"]),
         ]
+        return trimmed, bool(parts.get("stage_compaction_applied"))
 
     @classmethod
     def _reconcile_paused_user_turns_into_seed(
@@ -4072,137 +4070,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "stages": stages,
         }
 
-    def _externalize_frontdoor_stage_archive(
-        self,
-        *,
-        session_key: str,
-        stage_index_start: int,
-        stage_index_end: int,
-        stages: list[dict[str, Any]],
-    ) -> tuple[str, str]:
-        normalized_session_key = str(session_key or "").strip()
-        if not normalized_session_key:
-            return "", ""
-        service = getattr(self._loop, "main_task_service", None)
-        content_store = getattr(service, "content_store", None) if service is not None else None
-        summarize = getattr(content_store, "summarize_for_storage", None) if content_store is not None else None
-        if not callable(summarize):
-            return "", ""
-        archive_payload = {
-            "session_id": normalized_session_key,
-            "stage_index_start": stage_index_start,
-            "stage_index_end": stage_index_end,
-            "stages": [dict(stage) for stage in list(stages or []) if isinstance(stage, dict)],
-        }
-        summary, ref = summarize(
-            json.dumps(archive_payload, ensure_ascii=False, indent=2),
-            runtime={
-                "task_id": frontdoor_stage_archive_task_id(normalized_session_key),
-                "session_key": normalized_session_key,
-            },
-            display_name=f"stage-history:frontdoor:{stage_index_start}-{stage_index_end}",
-            source_kind=_FRONTDOOR_STAGE_ARCHIVE_SOURCE_KIND,
-            force=True,
-        )
-        return str(summary or "").strip(), str(ref or "").strip()
-
-    def _externalize_completed_frontdoor_stage_batches(
-        self,
-        *,
-        session_key: str,
-        stage_state: dict[str, Any],
-    ) -> dict[str, Any]:
-        normalized_state = self._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
-        stages = [dict(stage) for stage in list(normalized_state.get("stages") or []) if isinstance(stage, dict)]
-        if not stages:
-            return normalized_state
-        while True:
-            completed_normal = [
-                (index, stage)
-                for index, stage in enumerate(stages)
-                if str(stage.get("stage_kind") or "normal").strip() == "normal"
-                and str(stage.get("status") or "").strip().lower() != "active"
-            ]
-            if len(completed_normal) <= _FRONTDOOR_STAGE_ARCHIVE_RETAIN_COMPLETED:
-                break
-            batch = completed_normal[:_FRONTDOOR_STAGE_ARCHIVE_BATCH_SIZE]
-            archive_stages = [dict(stage) for _, stage in batch]
-            if not archive_stages:
-                break
-            stage_index_start = int(batch[0][1].get("stage_index") or 0)
-            stage_index_end = int(batch[-1][1].get("stage_index") or 0)
-            archive_summary, archive_ref = self._externalize_frontdoor_stage_archive(
-                session_key=session_key,
-                stage_index_start=stage_index_start,
-                stage_index_end=stage_index_end,
-                stages=archive_stages,
-            )
-            if not archive_ref:
-                break
-            compression_stage = {
-                "stage_id": f"frontdoor-compression-{stage_index_start}-{stage_index_end}",
-                "stage_index": stage_index_end,
-                "stage_kind": "compression",
-                "system_generated": True,
-                "mode": "自主执行",
-                "status": "completed",
-                "stage_goal": f"Archive completed stage history {stage_index_start}-{stage_index_end}",
-                "completed_stage_summary": (
-                    archive_summary
-                    or f"Archived completed stages {stage_index_start}-{stage_index_end} into stage history archive."
-                ),
-                "key_refs": [],
-                "archive_ref": archive_ref,
-                "archive_stage_index_start": stage_index_start,
-                "archive_stage_index_end": stage_index_end,
-                "tool_round_budget": 0,
-                "tool_rounds_used": 0,
-                "created_at": now_iso(),
-                "finished_at": now_iso(),
-                "rounds": [],
-            }
-            batch_indexes = {index for index, _stage in batch}
-            insert_at = min(batch_indexes)
-            next_stages: list[dict[str, Any]] = []
-            for index, stage in enumerate(stages):
-                if index == insert_at:
-                    next_stages.append(compression_stage)
-                if index in batch_indexes:
-                    continue
-                next_stages.append(dict(stage))
-            stages = next_stages
-        return {
-            "active_stage_id": str(normalized_state.get("active_stage_id") or "").strip(),
-            "transition_required": bool(normalized_state.get("transition_required")),
-            "stages": stages,
-        }
-
     def _merged_frontdoor_canonical_context(
         self,
         *,
         state: CeoGraphState,
         frontdoor_stage_state: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        session_key = str(state.get("session_key") or "").strip()
-
-        def _externalize_batch(
-            stages: list[dict[str, Any]],
-            stage_index_start: int,
-            stage_index_end: int,
-        ) -> tuple[str, str]:
-            if not session_key:
-                return "", ""
-            return self._externalize_frontdoor_stage_archive(
-                session_key=session_key,
-                stage_index_start=stage_index_start,
-                stage_index_end=stage_index_end,
-                stages=stages,
-            )
-
         return merge_turn_stage_state_into_canonical_context(
             self._frontdoor_canonical_context_snapshot(state),
             frontdoor_stage_state or self._default_frontdoor_stage_state(),
-            externalize_batch=_externalize_batch if session_key else None,
         )
 
     def _frontdoor_round_tool_entry(
@@ -4298,10 +4174,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ],
             text="" if stage_created_this_cycle else cycle_narration_text,
         )
-        return self._externalize_completed_frontdoor_stage_batches(
-            session_key=str(state.get("session_key") or "").strip(),
-            stage_state=updated_state,
-        )
+        return updated_state
 
     @classmethod
     def _complete_active_frontdoor_stage_state(
@@ -5108,13 +4981,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         current_turn_has_multimodal_uploads = multimodal_enabled and self._message_content_has_multimodal_blocks(
             current_turn_user_content
         )
+        seed_stage_compaction_applied = False
         if session_request_body_messages:
             # 接通 stage 数据源：优先 frontdoor_stage_state，为空时回退 canonical 的 stages，
             # 使续跑路径的 seed 裁剪能拿到完成阶段摘要（无损裁剪的前提）。
             seed_stage_state = dict(current_frontdoor_stage_state or {})
             if not list(seed_stage_state.get("stages") or []):
                 seed_stage_state = dict(current_frontdoor_canonical_context or {})
-            request_body_seed_messages = self._trim_frontdoor_seed_to_stage_window(
+            request_body_seed_messages, seed_stage_compaction_applied = self._trim_frontdoor_seed_to_stage_window(
                 session_request_body_messages, seed_stage_state
             )
             # 手动暂停回合的请求从未发出，其用户消息不在基线里；按转录对账补回，
@@ -5475,6 +5349,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 persisted_dynamic_appendix_messages = []
         shrink_reason = str(
             frontdoor_history_shrink_reason_from_prepare
+            or ("stage_compaction" if seed_stage_compaction_applied else "")
             or state.get("frontdoor_history_shrink_reason")
             or session_shrink_reason
             or ""

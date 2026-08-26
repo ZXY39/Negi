@@ -24,11 +24,10 @@ from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
     STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
+    compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
     completed_stage_blocks as _shared_completed_stage_blocks,
     current_stage_active_window as _shared_current_stage_active_window,
-    decompose_stage_prompt_messages as _shared_decompose_stage_prompt_messages,
     is_stage_context_message as _shared_is_stage_context_message,
-    prepare_stage_prompt_messages as _shared_prepare_stage_prompt_messages,
     retained_completed_stage_ids as _shared_retained_completed_stage_ids,
     stage_prompt_prefix as _shared_stage_prompt_prefix,
 )
@@ -6013,26 +6012,28 @@ class ReActToolLoop:
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
         normalized_messages = strip_turn_only_system_note_messages(strip_node_dynamic_contract_messages(messages))
         stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
-        parts = _shared_decompose_stage_prompt_messages(
+        parts = _shared_compact_stage_prompt_messages_in_place(
             normalized_messages,
             stage_state=stage_state,
             keep_latest_completed_stages=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
             stage_tool_name=STAGE_TOOL_NAME,
         )
+        rewritten = list(parts.get('rewritten') or [])
         visible_user_messages = [
             str(item.get('content') or '').strip()
-            for item in list(parts.get('active_window') or [])
+            for item in rewritten
             if isinstance(item, dict) and str(item.get('role') or '').strip().lower() == 'user'
         ]
         notice_tail_messages = self._append_notice_tail_messages(
             runtime_context=runtime_context,
             visible_user_messages=visible_user_messages,
         )
+        # notice_tail 保持在压缩内容之前；重写区内的块原位放置，输出头两条
+        # 恒为系统+首条用户，保证同回合 append-only 前缀探针不退化。
         return [
             *list(parts.get('prefix') or []),
             *notice_tail_messages,
-            *list(parts.get('completed_blocks') or []),
-            *list(parts.get('active_window') or []),
+            *rewritten,
         ]
 
     def _append_notice_tail_messages(

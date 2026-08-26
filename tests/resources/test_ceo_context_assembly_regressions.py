@@ -3403,7 +3403,7 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
 
 @pytest.mark.asyncio
 async def test_message_builder_trims_full_transcript_history_to_active_window() -> None:
-    """transcript/续跑全量历史必须裁到活动窗口，旧阶段原文不得与压缩块叠加重复。"""
+    """transcript/续跑全量历史按阶段归属原位压缩：过期阶段只删工具肉身，文本对话保留。"""
     prompt_builder = _SplitPromptBuilder()
     memory_manager = _MemoryManager(response="")
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
@@ -3468,14 +3468,16 @@ async def test_message_builder_trims_full_transcript_history_to_active_window() 
     )
 
     rendered = "\n\n".join(str(item.get("content") or "") for item in result.stable_messages)
-    # 旧阶段原文被裁掉（不再与压缩块叠加）
-    for index in range(1, 5):
-        assert f"stage {index} raw detail" not in rendered
+    # 过期阶段（阶段1）的工具肉身成对移除：5 个 submit 响应只剩 4 个
+    assert rendered.count('{"ok": true}') == 4
+    # 阶段文本汇报作为对话保留（不再盲切丢弃）
+    for index in range(1, 6):
+        assert f"stage {index} raw detail" in rendered
     # 活动窗口保留 active 阶段原文
     assert "stage 5 raw detail" in rendered
-    # 首条用户请求保留，且有压缩/外部化块代表旧阶段
+    # 首条用户请求保留，且有压缩块代表过期阶段（原位放置）
     assert "bootstrap request" in rendered
-    assert ("[G3KU_STAGE_COMPACT_V1]" in rendered) or ("[G3KU_STAGE_EXTERNALIZED_V1]" in rendered)
+    assert "[G3KU_STAGE_COMPACT_V1]" in rendered
 
 
 @pytest.mark.asyncio
@@ -3516,12 +3518,16 @@ async def test_seed_continuation_path_trims_old_raw_with_stage_summaries() -> No
     ]
 
     stage_state = {"active_stage_id": "frontdoor-stage-5", "transition_required": False, "stages": stages}
-    trimmed = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_to_stage_window(seed, stage_state)
+    trimmed, stage_compaction_applied = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_to_stage_window(
+        seed, stage_state
+    )
     rendered = "\n\n".join(str(item.get("content") or "") for item in trimmed)
-    # 旧阶段原文被裁（由压缩块代表），最近窗口保留
-    assert "stage 1 raw detail" not in rendered
+    assert stage_compaction_applied is True
+    # 过期阶段（阶段1）的 submit 调用与响应成对移除；文本汇报作为对话保留
+    assert rendered.count('{"ok": true}') == 4
+    assert "stage 1 raw detail" in rendered
     assert "stage 2 raw detail" in rendered
-    assert ("[G3KU_STAGE_COMPACT_V1]" in rendered) or ("[G3KU_STAGE_EXTERNALIZED_V1]" in rendered)
+    assert "[G3KU_STAGE_COMPACT_V1]" in rendered
 
 
 def _paused_user_transcript_message(text: str, **metadata_overrides: object) -> dict[str, object]:

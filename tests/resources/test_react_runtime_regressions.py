@@ -2706,7 +2706,10 @@ def test_prepare_messages_keeps_active_stage_and_latest_three_completed_stage_wi
     assert "stage four raw detail" in rendered_contents
     assert "current stage assistant detail" in rendered_contents
     assert "current stage tool output" in rendered_contents
-    assert "stage one raw detail" not in rendered_contents
+    # 过期阶段的工具肉身被移除，但其文本汇报作为对话保留
+    assert "stage one raw detail" in rendered_contents
+    # 阶段 1 的 submit 调用与响应成对移除：5 个阶段只剩 4 个 submit 响应
+    assert rendered_contents.count('{"ok": true}') == 4
 
     compact_blocks = [
         content
@@ -2717,6 +2720,9 @@ def test_prepare_messages_keeps_active_stage_and_latest_three_completed_stage_wi
     compact_payload = json.loads(compact_blocks[0].split("\n", 1)[1])
     assert compact_payload["stage_index"] == 1
     assert compact_payload["completed_stage_summary"] == "finished stage one"
+    # 压缩块原位放置：落在阶段 1 被移除工具消息的位置（其文本汇报之前）
+    block_index = rendered_contents.index(compact_blocks[0])
+    assert rendered_contents.index("stage one raw detail") == block_index + 1
 
 
 def test_prepare_messages_is_idempotent_for_compacted_stage_prompt() -> None:

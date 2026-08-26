@@ -180,10 +180,6 @@ class _DummyChatBackend:
         raise AssertionError(f"chat backend should not be used in this test: {kwargs!r}")
 
 
-def _frontdoor_stage_archive_task_id(session_id: str) -> str:
-    return f"frontdoor-stage-archive:{str(session_id or '').strip()}"
-
-
 @pytest.mark.asyncio
 async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_state(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
@@ -498,7 +494,7 @@ def test_frontdoor_final_stage_does_not_require_transition_when_budget_is_exhaus
 
 
 @pytest.mark.asyncio
-async def test_completed_frontdoor_stage_archives_oldest_ten_and_inserts_compression_stage(tmp_path: Path, monkeypatch) -> None:
+async def test_completed_frontdoor_stages_are_not_externalized_into_archives(tmp_path: Path, monkeypatch) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -561,33 +557,16 @@ async def test_completed_frontdoor_stage_archives_oldest_ten_and_inserts_compres
 
         assert result is not None
         stages = result["frontdoor_stage_state"]["stages"]
-        compression_stages = [stage for stage in stages if stage["stage_kind"] == "compression"]
-        assert len(compression_stages) == 1
-        compression = compression_stages[0]
-        assert compression["archive_stage_index_start"] == 1
-        assert compression["archive_stage_index_end"] == 10
-        assert str(compression["archive_ref"]).startswith("artifact:")
-
+        # 外置归档已删除：完成阶段再多也原位保留，不再改写为归档压缩阶段。
+        assert all(stage["stage_kind"] == "normal" for stage in stages)
         completed_normal = [
             stage["stage_index"]
             for stage in stages
             if stage["stage_kind"] == "normal" and stage["status"] != "active"
         ]
-        assert completed_normal == list(range(11, 23))
+        assert completed_normal == list(range(1, 23))
         active_stage = next(stage for stage in stages if stage["status"] == "active")
         assert active_stage["stage_index"] == 23
-
-        archive_artifact_id = str(compression["archive_ref"]).split(":", 1)[1]
-        archive_artifact = service.get_artifact(archive_artifact_id)
-        assert archive_artifact is not None
-        assert archive_artifact.task_id == _frontdoor_stage_archive_task_id("web:frontdoor-archive-demo")
-        archive_payload = json.loads(Path(archive_artifact.path).read_text(encoding="utf-8"))
-        assert archive_payload["session_id"] == "web:frontdoor-archive-demo"
-        assert archive_payload["stage_index_start"] == 1
-        assert archive_payload["stage_index_end"] == 10
-        assert len(archive_payload["stages"]) == 10
-        assert archive_payload["stages"][0]["key_refs"] == [
-            {"ref": "artifact:artifact:stage-1", "note": "note 1"}
-        ]
+        assert service.list_artifacts("frontdoor-stage-archive:web:frontdoor-archive-demo") == []
     finally:
         await service.close()

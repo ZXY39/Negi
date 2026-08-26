@@ -3434,7 +3434,7 @@ async def test_prepare_messages_keeps_append_notice_tail_before_stage_compaction
                             "notification_id": "notif:tail-1",
                             "epoch_id": "epoch:tail",
                             "source_node_id": root.node_id,
-                            "message": "必须按董事会模板输出",
+                            "message": "财务复核要求保留原始凭据",
                             "consumed_at": "2026-04-19T10:00:00+08:00",
                             "compression_stage_id": "",
                         }
@@ -3475,7 +3475,7 @@ async def test_prepare_messages_keeps_append_notice_tail_before_stage_compaction
         compact_index = next(index for index, content in enumerate(contents) if content.startswith("[G3KU_STAGE_COMPACT_V1]"))
 
         assert notice_index < compact_index
-        assert "必须按董事会模板输出" in contents[notice_index]
+        assert "财务复核要求保留原始凭据" in contents[notice_index]
     finally:
         await service.close()
 

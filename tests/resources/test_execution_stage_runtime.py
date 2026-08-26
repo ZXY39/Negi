@@ -2372,7 +2372,7 @@ async def test_submit_next_stage_ignores_completed_recap_without_active_stage(tm
 
 
 @pytest.mark.asyncio
-async def test_completed_stage_archives_oldest_ten_and_inserts_compression_stage(tmp_path: Path):
+async def test_completed_stages_are_not_externalized_into_archives(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / 'runtime.sqlite3',
@@ -2409,29 +2409,16 @@ async def test_completed_stage_archives_oldest_ten_and_inserts_compression_stage
         detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
         stages = detail['item']['execution_trace']['stages']
-        compression_stages = [stage for stage in stages if stage['stage_kind'] == 'compression']
-        assert len(compression_stages) == 1
-        compression = compression_stages[0]
-        assert compression['archive_stage_index_start'] == 1
-        assert compression['archive_stage_index_end'] == 10
-        assert str(compression['archive_ref']).startswith('artifact:')
-
+        # 外置归档已删除：完成阶段再多也原位保留，不再改写为归档压缩阶段。
+        assert all(stage['stage_kind'] == 'normal' for stage in stages)
         completed_normal = [
             stage['stage_index']
             for stage in stages
             if stage['stage_kind'] == 'normal' and stage['status'] != '进行中'
         ]
-        assert completed_normal == list(range(11, 22))
+        assert completed_normal == list(range(1, 22))
         active_stage = next(stage for stage in stages if stage['status'] == '进行中')
         assert active_stage['stage_index'] == 22
-
-        archive_artifact = service.get_artifact(str(compression['archive_ref']).split(':', 1)[1])
-        assert archive_artifact is not None
-        archive_payload = json.loads(Path(archive_artifact.path).read_text(encoding='utf-8'))
-        assert archive_payload['stage_index_start'] == 1
-        assert archive_payload['stage_index_end'] == 10
-        assert len(archive_payload['stages']) == 10
-        assert archive_payload['stages'][0]['key_refs'] == [{'ref': 'artifact:artifact:stage-1', 'note': 'note 1'}]
     finally:
         await service.close()
 

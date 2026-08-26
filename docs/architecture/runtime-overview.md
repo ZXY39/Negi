@@ -118,7 +118,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 - 运行时把追加的任务消息视为任务级控制事务：`MainRuntimeService.task_append_notice(...)` 把当前执行树快照进 epoch payload，请求任务级 barrier，并写入操作员可见的 `runtime_meta.distribution`。
 - Public distribution states are `barrier_requested -> barrier_draining -> distributing -> resume_ready`; the authoritative source is the task-level distribution state plus the epoch payload's `barrier_node_ids` / `drain_pending_node_ids`. `barrier_draining` is safe-boundary only: running leaves are not hard-interrupted, and a node drains only at an existing safe boundary (`before_model`, `waiting_tool_results`, `after_model`, `waiting_children`, `waiting_acceptance`). Draining also waits for active spawn rounds to finish materializing child execution nodes; distribution must not snapshot a partially materialized child round. `NodeRunner.reconcile_spawn_entry_child_bindings(...)` repairs durable parent-entry / child-row drift before spawn execution and barrier checks, binding the canonical child back into the parent entry and marking non-canonical siblings `duplicate_spawn_child` so they are excluded from the live tree.
 - Distribution turns are compact control turns (`node_message_distribution.md` + internal tool `submit_message_distribution`) that run through the ordinary `TaskActorService` / `TaskNodeDispatcher` / `NodeRunner` path and the same node send-side token preflight. `submit_message_distribution.children` is a complete per-child decision set: every live child appears exactly once with one of three actions — `distribute` (non-empty `message` delivered, child advances the frontier), `skip` (nothing delivered, non-empty `reason`), or `terminate` (the child's whole subtree is cancelled and forced terminal and its spawn entry marked terminated, non-empty `reason`; the child receives no message and is excluded from the frontier). `action` is authoritative when present; without it, `should_distribute` maps true→distribute and false→skip. Empty or partial decisions fail the control turn. The whole decision set is processed in a single synchronous pass, so distributing to some children and terminating others is decided within the same turn. On `/responses`-style providers the control turn uses the flat function selector form for `tool_choice`. When a distribution turn produces `next_frontier_node_ids`, the task is re-enqueued immediately; each frontier turn may accumulate an append-only `payload.debug_trace` for control-turn forensics.
-- Delivery to child execution nodes creates durable mailbox rows; delivering to a terminal execution node reactivates it and invalidates/detaches its old acceptance node instead of deleting it. Root appended messages keep node-local pending notice records plus epoch `decision_records`, not root mailbox rows. A notice flips to consumed as soon as the first ordinary model response that included those notice ids returns for the resumed node turn; until then it stays pending/delivered, including across `waiting_children` pauses. Ordinary execution re-scans newly delivered notices at each `before_model` safe boundary via append-only refresh, never a history rebuild. Consumed notices persist into node-local `append_notice_context` so they survive stage compaction; spawn review reads them as `consumed_distribution_notices` and treats the latest consumed distribution notice as the effective current requirement when it conflicts with older wording. Raw unconsumed notices render as a dedicated non-compressible tail block ahead of `STAGE_COMPACT` / `STAGE_EXTERNALIZED` blocks and roll into a compressed notice-tail segment at stage archival.
+- Delivery to child execution nodes creates durable mailbox rows; delivering to a terminal execution node reactivates it and invalidates/detaches its old acceptance node instead of deleting it. Root appended messages keep node-local pending notice records plus epoch `decision_records`, not root mailbox rows. A notice flips to consumed as soon as the first ordinary model response that included those notice ids returns for the resumed node turn; until then it stays pending/delivered, including across `waiting_children` pauses. Ordinary execution re-scans newly delivered notices at each `before_model` safe boundary via append-only refresh, never a history rebuild. Consumed notices persist into node-local `append_notice_context` so they survive stage compaction; spawn review reads them as `consumed_distribution_notices` and treats the latest consumed distribution notice as the effective current requirement when it conflicts with older wording. Raw unconsumed notices render as a dedicated non-compressible tail block ahead of stage compact blocks (`STAGE_COMPACT` 与遗留 `STAGE_EXTERNALIZED`)；历史数据中已存在的归档压缩段（`compression_segments`）继续按压缩通知尾段渲染。
 - Epoch completion and delayed notice consumption are separate states: once the epoch reaches `completed`, `runtime_meta.distribution.state/mode/active_epoch_id` are cleared even while `pending_notice_node_ids` / `pending_mailbox_count` remain — those fields only mean nodes still hold node-local pending notices or delivered mailbox rows, not that barrier/distribution is still active. Nodes blocked by `runtime_meta.distribution.blocked_node_ids` skip interrupted-turn recovery until the barrier releases them. A node holding an incomplete `spawn_child_nodes` round resumes with `resume_mode=wait_for_children` and consumes its held notice only after that round disappears (durable notice now, prompt consumption later). The first ordinary consumption of a held notice preserves the previous provider-facing request as an exact prefix: semantic node history comes from `runtime_frame.messages` / durable rebuild, while the latest actual request body is only a send-side seed scaffold.
 - Acceptance nodes are created eagerly with the spawn entry (root `final_acceptance` at task creation) and activated by execution success. Execution success is not terminal when acceptance is required: `submit_final_result(success + final)` first persists the candidate result and moves the node into `acceptance_handshake.state="waiting_acceptance"`. Child and root acceptance share one reflation loop: the first and second rejections feed acceptance feedback back into the execution node and reactivate it, the third rejection is terminal, and execution failure during any retry cancels the waiting acceptance path. `NodeRunner._run_child_pipeline(...)` loops `execution -> acceptance` until acceptance returns a terminal result. Acceptance prompt/input refresh happens at activation time from the latest execution output (`result_payload_ref`). Root final acceptance adds two guards against notice/submission races. Freeze: while the inspected root execution node still holds an unconsumed notice (node-local pending notice record or delivered mailbox row), the final acceptance node is held — `NodeRunner.run_node` returns a deferred `partial` before any model turn even if a verification notification is delivered, so acceptance cannot reach a verdict ahead of the execution node consuming its notice and resubmitting; the hold releases once the execution node has no pending notices. Terminal reset: if the execution node submits `success + final` while its final acceptance node is already terminal (`success`/`failed`), the runtime resets that acceptance node to `in_progress` (clearing the prior verdict) and proceeds with the normal handshake so the new submission is re-verified, instead of delivering a verification notification to a node that can never consume it. Both guards are root-final-acceptance only; child spawn acceptance is driven synchronously by the child pipeline and is unaffected.
 - Task-depth governance review is an execution-only inspection lane: acceptance/inspection nodes are filtered out of trigger stats and payload, each execution node's full `prompt` is the primary leaf-work evidence, and each review attempt writes its own `kind=task_governance_review` artifact referenced by `task_runtime_meta.governance.history[*].review_artifact_ref`.
@@ -126,7 +126,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 对于异步任务的回传：任务终态通过 task terminal callback / heartbeat 回到原 CEO 会话；heartbeat 的修复/回退语义与 `terminal_output` / `root_output` 双车道详见 `heartbeat-system.md`「Task Terminal Repair Contract」。
 
-当前 frontdoor 的上下文组织以阶段工作集为近场上下文：最近 3 个 completed stages 与当前 active stage 保留原始窗口，更早 completed stages 改写为 compact / externalized stage blocks（表示规则见本文「Runtime Contract Lane」）。全局语义摘要层不参与 prompt assembly；长会话的远场连续性由权威请求体基线、canonical context 链与压缩合同承担，收缩边界详见本文「Frontdoor Context Compression (Current Contract)」。
+当前 frontdoor 的上下文组织以阶段工作集为近场上下文：最近 3 个完成普通阶段与当前 active 阶段保留完整原始窗口（含工具调用），更早的完成普通阶段按阶段归属原位移除工具调用并以 compact 块回插原位，阶段之外的用户可见对话原位保留（表示规则见本文「Runtime Contract Lane」）。归档压缩阶段（`stage_kind="compression"`）是历史遗留表示数据：继续规范化与渲染为外置块，运行时不产生新的归档。全局语义摘要层不参与 prompt assembly；长会话的远场连续性由权威请求体基线、canonical context 链与压缩合同承担，收缩边界详见本文「Frontdoor Context Compression (Current Contract)」。
 
 前门提示词分成“静态协议层”和“动态注入层”两部分理解：
 
@@ -377,9 +377,9 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 
 Canonical 阶段状态按以下表示规则收敛（这是 canonical 链唯一允许的信息损失边界）：
 
-- 最近 3 个完成的普通阶段保持 `raw`。
+- 最近 3 个完成的普通阶段保持 `raw`；该规则与当时是否存在活动阶段无关，纯对话回合（无活动阶段）同样适用。
 - 更早的完成普通阶段变为 `compact`。
-- 完成普通阶段超过 20 个时，最旧的 10 个外置为归档支撑的压缩阶段。
+- canonical 链只有 `raw` 与 `compact` 两级表示：历史数据中已存在的归档压缩阶段（`stage_kind="compression"`，外置表示）继续规范化与渲染，运行时不把完成阶段合并成新的归档阶段；长会话的阶段体积由 `compact` 块承载，总体积兜底归 `token_compression`。
 
 另有两条运行时边界：
 
@@ -409,7 +409,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - `provider_tool_names`：构造真实模型请求时使用的 provider-facing schema bundle；新写入代表该 turn 家族已持久化的 RBAC-visible concrete-tool bundle。`pending_provider_tool_names` 仅是兼容字段，新写入保持 `[]`。
 - 节点发送 artifact 还记录 `provider_tool_exposure_revision`（真正到达 provider 的已持久化 provider bundle 的短哈希）；`provider_tool_exposure_commit_reason` 仅是兼容字段，新写入保持 `""`。
 
-这套分离只为在不削弱阶段门控与工具 hydration 规则的前提下提高 prompt cache 稳定性。同轮内节点多轮循环的 provider 请求构造走 append-only scaffold：上一份真实请求体 + 上一轮新增的 assistant / 工具结果消息 + 最新 `node_runtime_tool_contract` / turn-only note 尾部（契约在前、当轮 note 在后，末位是 user 回合提示）。它只是请求构造脚手架——不替代节点持久/压缩后的 `message_history`，也不重新定义哪些工具可调用；它存在的唯一目的是：当阶段压缩修剪活动窗口时，provider 看到的是 append-only 增长而不是早期前缀重写。`provider_tool_bundle_seeded` 只是兼容/诊断提示，真实行为由活跃/待定曝光状态加 token 压缩提交门控驱动。完整规则详见 `context-and-cache-troubleshooting.md`「append-only 规则」。
+这套分离只为在不削弱阶段门控与工具 hydration 规则的前提下提高 prompt cache 稳定性。同轮内节点多轮循环的 provider 请求构造走 append-only scaffold：上一份真实请求体 + 上一轮新增的 assistant / 工具结果消息 + 最新 `node_runtime_tool_contract` / turn-only note 尾部（契约在前、当轮 note 在后，末位是 user 回合提示）。它只是请求构造脚手架——不替代节点持久/压缩后的 `message_history`，也不重新定义哪些工具可调用；它存在的唯一目的是：当阶段压缩在回合边界修剪历史时，provider 看到的是 append-only 增长而不是早期前缀重写。`provider_tool_bundle_seeded` 只是兼容/诊断提示，真实行为由活跃/待定曝光状态加 token 压缩提交门控驱动。完整规则详见 `context-and-cache-troubleshooting.md`「append-only 规则」。
 
 ## Frontdoor Context Compression (Current Contract)
 
@@ -418,7 +418,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - `stage_compaction`
 - `token_compression`
 
-任何其他理由让下一轮请求基线变短，都应按回归排查。长上下文只由三项机制约束：近场 stage workset compaction（completed-stage compact 块 + 保留原始重放，与执行阶段提示词逻辑共享）、约束 canonical 阶段状态的阶段归档/外置（`stage_kind="compression"` + `archive_ref`）、以及在最终请求接近所选模型窗口时改写旧 body history 的内联 `token_compression`。
+任何其他理由让下一轮请求基线变短，都应按回归排查。长上下文只由两项机制约束：近场 stage workset compaction（按阶段归属原位压缩过期完成阶段的工具调用，与执行阶段提示词逻辑共享），以及在最终请求接近所选模型窗口时改写旧 body history 的内联 `token_compression`。归档压缩阶段（`stage_kind="compression"` + `archive_ref`）是历史遗留表示数据：持久化状态中已存在的归档阶段继续规范化与渲染，运行时不产生新的归档阶段。
 
 ### `token_compression`
 
@@ -428,6 +428,10 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 
 ### `stage_compaction`
 
+- 修剪的唯一真相源是 `stage_prompt_compaction.compact_stage_prompt_messages_in_place()`：最近 3 个完成普通阶段与活动阶段保留完整窗口；过期完成阶段的工具调用消息（`assistant+tool_calls` 与其配对 `tool` 响应）成对移除，对应 compact 块回插在该阶段首条被移除消息的位置（既有块按记忆位置回插）；阶段之外的用户可见对话原位保留；内部事件束（heartbeat / cron 载荷）随过期内容移除。
+- 原位放置是缓存硬约束：压缩块不整体收拢到上下文头部；除治愈遗留布局的一次性收敛外，每次压缩的前缀失效面从最早被压缩阶段的位置开始。
+- 该规则与是否存在活动阶段无关；无活动阶段的纯对话回合同样压缩过期阶段并保留最近 3 个。
+- 幂等：同一输入重写两次收敛为同一输出；归属保留阶段的残留旧块去重丢弃。
 - 可以缩短活动历史窗口或 stage workset，仍是下一轮基线的合法收缩理由。
 - 不是 provider schema 刷新边界：若某次发送的收缩原因是 `stage_compaction` 而 `provider_tool_names` 变了，按 provider-bundle 刷新路径 bug 排查。
 
@@ -436,7 +440,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - 旧的语义/全局摘要 lane 不再参与 prompt assembly；`compression_state` 只表示内联 `token_compression` 的实时进度，不再是“语义摘要就绪”的 durable 信号。
 - 续跑恢复依赖权威 frontdoor 基线、阶段状态、请求痕迹与收缩原因，不依赖单独的 `semantic_context_state` 交接块。
 - 不存在中间的“按消息条数压缩”阶段：一次性结构式 preflight compaction（`_run_frontdoor_token_preflight_compaction` / `compact_frontdoor_history_zone`）与 `_summarize_messages()` 兼容钩子都不在执行路径上。不要重新引入平行的结构式压缩——共享的 `stage_prompt_compaction` helper 是 stage-window 修剪的唯一真相源。
-- 续跑 seed / 全量转录原始历史在拼接 workset 块之前先裁到活动阶段窗口（`_trim_frontdoor_seed_to_stage_window`，经 `decompose_stage_prompt_messages`），使存量大基线真正收缩，而不是携带未裁剪旧体重新膨胀。修剪需要阶段列表：优先取 `frontdoor_stage_state`，为空时退回 `frontdoor_canonical_context.stages`；两者都没有阶段时修剪是安全 no-op（不做有损删除），收缩交给 `token_compression` 兜底。排查“seed 从不收缩”时，先确认会话是否把阶段持久化进了这两个来源之一。
+- 续跑 seed / 全量转录原始历史在拼接前先经过归属原位压缩（`_trim_frontdoor_seed_to_stage_window`，经 `compact_stage_prompt_messages_in_place`）：过期阶段的工具调用成对移除、块回插原位、对话保留，使存量大基线真正收缩，而不是携带未裁剪旧体重新膨胀。修剪需要阶段列表：优先取 `frontdoor_stage_state`，为空时退回 `frontdoor_canonical_context.stages`；两者都没有阶段时修剪是安全 no-op（不做有损删除），收缩交给 `token_compression` 兜底。排查“seed 从不收缩”时，先确认会话是否把阶段持久化进了这两个来源之一，再确认是否有阶段真正老化出最近 3 窗口（阶段数不足 4 个时本就没有可压缩对象）。
 
 ### Shrink-Guard Self-Heal（`context_shrink_quarantine`）
 

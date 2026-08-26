@@ -91,8 +91,6 @@ _EXECUTION_STAGE_STATUS_COMPLETED = '完成'
 _EXECUTION_STAGE_STATUS_FAILED = '失败'
 _EXECUTION_STAGE_KIND_NORMAL = 'normal'
 _EXECUTION_STAGE_KIND_COMPRESSION = 'compression'
-_STAGE_ARCHIVE_RETAIN_COMPLETED = 20
-_STAGE_ARCHIVE_BATCH_SIZE = 10
 _NON_BUDGET_EXECUTION_TOOLS = {
     _EXECUTION_STAGE_TOOL_NAME,
     FINAL_RESULT_TOOL_NAME,
@@ -2258,85 +2256,6 @@ class TaskLogService:
                 )
         return None
 
-    def _externalize_completed_stage_batches_locked(
-        self,
-        *,
-        task: TaskRecord,
-        node_id: str,
-        state: ExecutionStageState,
-    ) -> ExecutionStageState:
-        stages = list(state.stages or [])
-        if not stages:
-            return state
-        while True:
-            completed_normal = [
-                (index, stage)
-                for index, stage in enumerate(stages)
-                if str(stage.stage_kind or _EXECUTION_STAGE_KIND_NORMAL) == _EXECUTION_STAGE_KIND_NORMAL
-                and str(stage.status or '') != _EXECUTION_STAGE_STATUS_ACTIVE
-            ]
-            if len(completed_normal) <= _STAGE_ARCHIVE_RETAIN_COMPLETED:
-                break
-            batch = completed_normal[:_STAGE_ARCHIVE_BATCH_SIZE]
-            archive_stages = [stage.model_dump(mode='json') for _, stage in batch]
-            if not archive_stages:
-                break
-            stage_index_start = int(batch[0][1].stage_index or 0)
-            stage_index_end = int(batch[-1][1].stage_index or 0)
-            archive_payload = {
-                'task_id': str(task.task_id or ''),
-                'node_id': str(node_id or ''),
-                'stage_index_start': stage_index_start,
-                'stage_index_end': stage_index_end,
-                'stages': archive_stages,
-            }
-            archive_summary, archive_ref = self._summarize_content(
-                json.dumps(archive_payload, ensure_ascii=False, indent=2),
-                task_id=task.task_id,
-                node_id=node_id,
-                display_name=f'stage-history:{node_id}:{stage_index_start}-{stage_index_end}',
-                source_kind='stage_history_archive',
-                force=True,
-            )
-            compression_summary = (
-                archive_summary
-                or f'Archived completed stages {stage_index_start}-{stage_index_end} into stage history archive.'
-            )
-            compression_stage = ExecutionStageRecord(
-                stage_id=new_stage_id(),
-                stage_index=stage_index_end,
-                stage_kind=_EXECUTION_STAGE_KIND_COMPRESSION,
-                system_generated=True,
-                mode=_EXECUTION_STAGE_MODE_SELF,
-                status=_EXECUTION_STAGE_STATUS_COMPLETED,
-                stage_goal=f'Archive completed stage history {stage_index_start}-{stage_index_end}',
-                completed_stage_summary=compression_summary,
-                key_refs=[],
-                archive_ref=str(archive_ref or '').strip(),
-                archive_stage_index_start=stage_index_start,
-                archive_stage_index_end=stage_index_end,
-                tool_round_budget=0,
-                tool_rounds_used=0,
-                created_at=now_iso(),
-                finished_at=now_iso(),
-                rounds=[],
-            )
-            batch_indexes = {index for index, _stage in batch}
-            insert_at = min(batch_indexes)
-            next_stages: list[ExecutionStageRecord] = []
-            for index, stage in enumerate(stages):
-                if index == insert_at:
-                    next_stages.append(compression_stage)
-                if index in batch_indexes:
-                    continue
-                next_stages.append(stage)
-            stages = next_stages
-        return ExecutionStageState(
-            active_stage_id=str(state.active_stage_id or '').strip(),
-            transition_required=bool(state.transition_required),
-            stages=stages,
-        )
-
     def execution_stage_gate_snapshot(self, task_id: str, node_id: str) -> dict[str, Any]:
         with self._task_lock(task_id):
             node = self._store.get_node(node_id)
@@ -2536,7 +2455,6 @@ class TaskLogService:
                 transition_required=False,
                 stages=[*stages, next_stage],
             )
-            next_state = self._externalize_completed_stage_batches_locked(task=task, node_id=node_id, state=next_state)
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)
@@ -2657,7 +2575,6 @@ class TaskLogService:
                 transition_required=False,
                 stages=stages,
             )
-            next_state = self._externalize_completed_stage_batches_locked(task=task, node_id=node_id, state=next_state)
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)

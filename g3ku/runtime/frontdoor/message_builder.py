@@ -19,7 +19,7 @@ from g3ku.runtime.context.types import ContextAssemblyResult, RetrievedContextBu
 from g3ku.runtime.core_tools import resolve_core_tool_targets
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.stage_prompt_compaction import (
-    STAGE_EXTERNALIZED_PREFIX,
+    compact_stage_prompt_messages_in_place,
     completed_stage_blocks,
     current_stage_active_window,
     stage_prompt_prefix,
@@ -2030,20 +2030,36 @@ class CeoMessageBuilder:
             combined_frontdoor_context,
             skip_stage_ids=retained_completed_stage_ids,
         )
-        # 当 history 是全量 transcript/续跑体时，把旧阶段原文裁到活动窗口，
-        # 只留前缀 + 最近窗口原文；workset(压缩块+STAGE_RAW) 另行补充。
-        # checkpoint 路径 raw 本来就只剩 user，裁剪为 no-op，不影响既有用例。
+        # 双模式裁剪：含模型内容的历史走"按阶段归属原位压缩"（过期阶段只删工具肉身、
+        # 块落回原位、对话保留）；checkpoint 路径 raw 只剩 user，维持 workset 拼装。
         lead_prefix, raw_remainder = stage_prompt_prefix(
             raw_history_messages,
             preserve_leading_system=False,
             preserve_leading_user=True,
         )
-        raw_active_window = current_stage_active_window(
-            raw_remainder,
-            keep_completed_stages=0,
+        raw_has_model_content = any(
+            str((item or {}).get("role") or "").strip().lower() in ("assistant", "tool")
+            for item in raw_remainder
         )
-        trimmed_raw_history = [*lead_prefix, *raw_active_window]
-        stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
+        if raw_has_model_content:
+            in_place_parts = compact_stage_prompt_messages_in_place(
+                raw_history_messages,
+                stage_state=combined_frontdoor_context,
+                keep_latest_completed_stages=3,
+                preserve_leading_system=False,
+                preserve_leading_user=True,
+            )
+            trimmed_raw_history = [*list(in_place_parts["prefix"]), *list(in_place_parts["rewritten"])]
+            stage_workset_history: list[dict[str, Any]] = []
+            stage_compaction_applied = bool(in_place_parts.get("stage_compaction_applied"))
+        else:
+            raw_active_window = current_stage_active_window(
+                raw_remainder,
+                keep_completed_stages=0,
+            )
+            trimmed_raw_history = [*lead_prefix, *raw_active_window]
+            stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
+            stage_compaction_applied = bool(completed_blocks)
         history_zone_source = [
             *list(trimmed_raw_history),
             *list(stage_workset_history),
@@ -2067,9 +2083,7 @@ class CeoMessageBuilder:
             "source": "",
             "needs_recheck": False,
         }
-        frontdoor_history_shrink_reason = ""
-        if completed_blocks:
-            frontdoor_history_shrink_reason = "stage_compaction"
+        frontdoor_history_shrink_reason = "stage_compaction" if stage_compaction_applied else ""
         staged_history_for_injection = [
             *trimmed_raw_history,
             *stage_workset_history,
