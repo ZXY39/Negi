@@ -19,7 +19,7 @@ from g3ku.llm_config.enums import Capability
 from g3ku.llm_config.facade import LLMConfigFacade, MEMORY_EMBEDDING_CONFIG_ID
 from g3ku.llm_config.migration import _build_record
 from g3ku.llm_config.models import NormalizedProviderConfig
-from g3ku.providers.openai_codex_provider import _convert_messages
+from g3ku.providers.responses_protocol_helpers import _convert_messages
 from g3ku.resources import ResourceManager
 from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 from g3ku.security import get_bootstrap_security_service

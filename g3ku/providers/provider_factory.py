@@ -7,9 +7,7 @@ from g3ku.config.schema import Config
 from g3ku.llm_config.enums import ProtocolAdapter
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.providers.base import LLMProvider
-from g3ku.providers.custom_provider import CustomProvider
-from g3ku.providers.litellm_provider import LiteLLMProvider
-from g3ku.providers.openai_codex_provider import OpenAICodexProvider
+from g3ku.providers.openai_chat_provider import OpenAIChatProvider
 from g3ku.providers.responses_provider import ResponsesProvider
 from g3ku.utils.api_keys import (
     APIKeyConfigurationError,
@@ -18,6 +16,11 @@ from g3ku.utils.api_keys import (
     resolve_api_key_concurrency_layout,
 )
 from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
+
+_CHAT_PROTOCOL_ADAPTERS = {
+    ProtocolAdapter.OPENAI_COMPLETIONS.value,
+    ProtocolAdapter.CUSTOM_DIRECT.value,
+}
 
 
 @dataclass(slots=True)
@@ -35,25 +38,6 @@ class ProviderTarget:
     api_key_count: int = 0
     api_key_indexes: list[int] | None = None
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
-
-
-def _resolve_litellm_model(provider_id: str, model_id: str) -> str:
-    from g3ku.providers.registry import find_by_name
-
-    spec = find_by_name(provider_id)
-    if spec is None:
-        return model_id
-    resolved = model_id.strip()
-    if '/' in resolved:
-        explicit_prefix, remainder = resolved.split('/', 1)
-        if explicit_prefix.lower().replace('-', '_') == provider_id and remainder:
-            resolved = remainder
-    if spec.strip_model_prefix and '/' in resolved:
-        resolved = resolved.split('/')[-1]
-    if spec.litellm_prefix and not any(resolved.startswith(prefix) for prefix in spec.skip_prefixes):
-        if not resolved.startswith(f'{spec.litellm_prefix}/'):
-            resolved = f'{spec.litellm_prefix}/{resolved}'
-    return resolved
 
 
 def _require_non_empty_api_key(
@@ -80,17 +64,6 @@ def _protocol_adapter_value(target) -> str:
     if hasattr(raw, 'value'):
         raw = raw.value
     return str(raw or '').strip().lower()
-
-
-def _uses_openai_responses_protocol(target) -> bool:
-    return _protocol_adapter_value(target) == ProtocolAdapter.OPENAI_RESPONSES.value
-
-
-def _uses_openai_direct_chat_protocol(target) -> bool:
-    return _protocol_adapter_value(target) in {
-        ProtocolAdapter.OPENAI_COMPLETIONS.value,
-        ProtocolAdapter.CUSTOM_DIRECT.value,
-    }
 
 
 def build_provider_from_model_key(
@@ -144,7 +117,8 @@ def build_provider_from_model_key(
     api_key_indexes = list(key_layout.key_indexes or ([0] if not api_keys else []))
     extra_headers = dict(getattr(target, 'headers', {}) or {})
 
-    if provider_id == 'responses' or _uses_openai_responses_protocol(target):
+    adapter = _protocol_adapter_value(target)
+    if adapter == ProtocolAdapter.OPENAI_RESPONSES.value:
         provider = ResponsesProvider(
             api_key=_require_non_empty_api_key(
                 provider_id=provider_id,
@@ -156,41 +130,35 @@ def build_provider_from_model_key(
             default_model=model_id,
             extra_headers=extra_headers,
         )
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, api_key_indexes=api_key_indexes, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
-
-    if provider_id == 'openai_codex':
-        provider = OpenAICodexProvider(default_model=f'openai_codex/{model_id}')
-        return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=model_id, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, api_key_indexes=api_key_indexes, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))
-
-    if provider_id == 'custom' or _uses_openai_direct_chat_protocol(target):
-        provider = CustomProvider(
+    elif adapter in _CHAT_PROTOCOL_ADAPTERS:
+        provider = OpenAIChatProvider(
             api_key=api_key or 'no-key',
             api_base=api_base or 'http://localhost:8000/v1',
             default_model=model_id,
             extra_headers=extra_headers,
         )
-        return ProviderTarget(
-            provider_ref=provider_ref,
-            provider_id=provider_id,
-            model_id=model_id,
-            provider=provider,
-            model_parameters=model_parameters,
-            max_tokens_limit=max_tokens_limit,
-            default_temperature=default_temperature,
-            default_reasoning_effort=default_reasoning_effort,
-            retry_on=retry_on,
-            retry_count=retry_count,
-            api_key_count=api_key_count,
-            api_key_indexes=api_key_indexes,
-            single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None),
+    else:
+        raise ValueError(
+            "Unsupported protocol adapter for managed model binding.\n"
+            f"Model key: {provider_ref}\n"
+            f"Protocol adapter: {adapter or '<empty>'}\n"
+            "Supported protocol adapters: openai-completions (Chat Completions), "
+            "openai-responses (Responses).\n"
+            "Fix: rebind this model key to the `openai` or `responses` provider "
+            "with a matching protocol adapter."
         )
-
-    resolved_model = _resolve_litellm_model(provider_id, model_id)
-    provider = LiteLLMProvider(
-        api_key=api_key or None,
-        api_base=api_base,
-        default_model=resolved_model,
-        extra_headers=extra_headers,
-        provider_name=provider_id,
+    return ProviderTarget(
+        provider_ref=provider_ref,
+        provider_id=provider_id,
+        model_id=model_id,
+        provider=provider,
+        model_parameters=model_parameters,
+        max_tokens_limit=max_tokens_limit,
+        default_temperature=default_temperature,
+        default_reasoning_effort=default_reasoning_effort,
+        retry_on=retry_on,
+        retry_count=retry_count,
+        api_key_count=api_key_count,
+        api_key_indexes=api_key_indexes,
+        single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None),
     )
-    return ProviderTarget(provider_ref=provider_ref, provider_id=provider_id, model_id=resolved_model, provider=provider, model_parameters=model_parameters, max_tokens_limit=max_tokens_limit, default_temperature=default_temperature, default_reasoning_effort=default_reasoning_effort, retry_on=retry_on, retry_count=retry_count, api_key_count=api_key_count, api_key_indexes=api_key_indexes, single_api_key_max_concurrency=getattr(target, 'single_api_key_max_concurrency', None))

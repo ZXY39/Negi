@@ -13,12 +13,10 @@ from g3ku.llm_config.enums import AuthMode, Capability, ProbeStatus, ProtocolAda
 from g3ku.llm_config.models import NormalizedProviderConfig
 import g3ku.llm_config.probe_strategies as probe_strategies_module
 from g3ku.llm_config.probe_strategies import _build_openai_headers, probe_config, probe_config_for_concurrency
-from g3ku.providers.custom_provider import CustomProvider
+from g3ku.providers.openai_chat_provider import OpenAIChatProvider
 from g3ku.providers.provider_factory import ProviderTarget
 from g3ku.providers.fallback import FallbackProvider
 from g3ku.providers.base import LLMResponse
-from g3ku.providers.litellm_provider import LiteLLMProvider
-from g3ku.providers.openai_codex_provider import OpenAICodexProvider
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.responses_provider import ResponsesProvider
 
@@ -58,6 +56,7 @@ def test_build_provider_from_model_key_rejects_empty_responses_api_key(monkeypat
         "g3ku.providers.provider_factory.resolve_chat_target",
         lambda config, ref: SimpleNamespace(
             provider_id="responses",
+            protocol_adapter=ProtocolAdapter.OPENAI_RESPONSES,
             resolved_model="gpt-5.4",
             secret_payload={"api_key": ""},
             base_url="https://example.com/v1/responses",
@@ -82,7 +81,8 @@ def test_build_provider_from_model_key_selects_requested_api_key_index(monkeypat
     monkeypatch.setattr(
         "g3ku.providers.provider_factory.resolve_chat_target",
         lambda config, ref: SimpleNamespace(
-            provider_id="custom",
+            provider_id="openai",
+            protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
             resolved_model="gpt-4.1",
             secret_payload={"api_key": "key-1,key-2"},
             base_url="https://example.com/v1",
@@ -128,13 +128,13 @@ def test_build_provider_from_model_key_routes_openai_responses_protocol_to_direc
     assert target.provider.extra_headers == {"x-trace": "enabled"}
 
 
-def test_build_provider_from_model_key_routes_openai_completions_protocol_to_custom_provider(monkeypatch) -> None:
+def test_build_provider_from_model_key_routes_openai_completions_protocol_to_chat_provider(monkeypatch) -> None:
     monkeypatch.setattr(
         "g3ku.providers.provider_factory.resolve_chat_target",
         lambda config, ref: SimpleNamespace(
-            provider_id="openrouter",
+            provider_id="openai",
             protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
-            resolved_model="openai/gpt-4.1",
+            resolved_model="gpt-4.1",
             secret_payload={"api_key": "test-key"},
             base_url="https://example.com/v1",
             max_tokens_limit=None,
@@ -148,7 +148,7 @@ def test_build_provider_from_model_key_routes_openai_completions_protocol_to_cus
 
     target = build_provider_from_model_key(config, "primary")
 
-    assert isinstance(target.provider, CustomProvider)
+    assert isinstance(target.provider, OpenAIChatProvider)
     assert target.provider.api_base == "https://example.com/v1"
     assert target.provider.extra_headers == {"HTTP-Referer": "https://app.example"}
 
@@ -204,7 +204,7 @@ async def test_responses_provider_refuses_empty_bearer_header(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_custom_provider_forwards_request_timeout_to_openai_sdk(monkeypatch) -> None:
+async def test_openai_chat_provider_forwards_request_timeout_to_openai_sdk(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class _FakeCompletions:
@@ -225,9 +225,9 @@ async def test_custom_provider_forwards_request_timeout_to_openai_sdk(monkeypatc
             _ = args, kwargs
             self.chat = SimpleNamespace(completions=_FakeCompletions())
 
-    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr("g3ku.providers.openai_chat_provider.AsyncOpenAI", _FakeAsyncOpenAI)
 
-    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    provider = OpenAIChatProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
     response = await provider.chat(
         messages=[{"role": "user", "content": "ping"}],
         model="demo",
@@ -905,41 +905,7 @@ async def test_chat_backend_stops_model_fallback_after_visible_stream_text(monke
 
 
 @pytest.mark.asyncio
-async def test_litellm_provider_forwards_request_timeout(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def _fake_acompletion(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="ok", tool_calls=[]),
-                    finish_reason="stop",
-                )
-            ],
-            usage={},
-        )
-
-    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
-
-    provider = LiteLLMProvider(
-        api_key="test-key",
-        api_base="https://example.com/v1",
-        default_model="openai/gpt-4.1",
-        provider_name="openai",
-    )
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        model="openai/gpt-4.1",
-        request_timeout_seconds=9.5,
-    )
-
-    assert response.content == "ok"
-    assert captured["timeout"] == 9.5
-
-
-@pytest.mark.asyncio
-async def test_custom_provider_uses_streaming_path_when_stream_is_supported(monkeypatch) -> None:
+async def test_openai_chat_provider_uses_streaming_path_when_stream_is_supported(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
     class _FakeStream:
@@ -988,9 +954,9 @@ async def test_custom_provider_uses_streaming_path_when_stream_is_supported(monk
             _ = args, kwargs
             self.chat = SimpleNamespace(completions=_FakeCompletions())
 
-    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr("g3ku.providers.openai_chat_provider.AsyncOpenAI", _FakeAsyncOpenAI)
 
-    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    provider = OpenAIChatProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
     response = await provider.chat(
         messages=[{"role": "user", "content": "ping"}],
         model="demo",
@@ -1005,7 +971,7 @@ async def test_custom_provider_uses_streaming_path_when_stream_is_supported(monk
 
 
 @pytest.mark.asyncio
-async def test_custom_provider_falls_back_to_non_streaming_when_streaming_unsupported(monkeypatch) -> None:
+async def test_openai_chat_provider_falls_back_to_non_streaming_when_streaming_unsupported(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
     class _FakeCompletions:
@@ -1028,9 +994,9 @@ async def test_custom_provider_falls_back_to_non_streaming_when_streaming_unsupp
             _ = args, kwargs
             self.chat = SimpleNamespace(completions=_FakeCompletions())
 
-    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr("g3ku.providers.openai_chat_provider.AsyncOpenAI", _FakeAsyncOpenAI)
 
-    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    provider = OpenAIChatProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
     response = await provider.chat(
         messages=[{"role": "user", "content": "ping"}],
         model="demo",
@@ -1045,7 +1011,7 @@ async def test_custom_provider_falls_back_to_non_streaming_when_streaming_unsupp
 
 
 @pytest.mark.asyncio
-async def test_custom_provider_fallback_defaults_to_120_seconds_without_explicit_timeout(monkeypatch) -> None:
+async def test_openai_chat_provider_fallback_defaults_to_120_seconds_without_explicit_timeout(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
     class _FakeCompletions:
@@ -1068,9 +1034,9 @@ async def test_custom_provider_fallback_defaults_to_120_seconds_without_explicit
             _ = args, kwargs
             self.chat = SimpleNamespace(completions=_FakeCompletions())
 
-    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr("g3ku.providers.openai_chat_provider.AsyncOpenAI", _FakeAsyncOpenAI)
 
-    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    provider = OpenAIChatProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
     response = await provider.chat(
         messages=[{"role": "user", "content": "ping"}],
         model="demo",
@@ -1082,7 +1048,7 @@ async def test_custom_provider_fallback_defaults_to_120_seconds_without_explicit
 
 
 @pytest.mark.asyncio
-async def test_custom_provider_normalizes_flat_function_tool_schemas_before_transport(monkeypatch) -> None:
+async def test_openai_chat_provider_normalizes_flat_function_tool_schemas_before_transport(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
     class _FakeCompletions:
@@ -1105,7 +1071,7 @@ async def test_custom_provider_normalizes_flat_function_tool_schemas_before_tran
             _ = args, kwargs
             self.chat = SimpleNamespace(completions=_FakeCompletions())
 
-    monkeypatch.setattr("g3ku.providers.custom_provider.AsyncOpenAI", _FakeAsyncOpenAI)
+    monkeypatch.setattr("g3ku.providers.openai_chat_provider.AsyncOpenAI", _FakeAsyncOpenAI)
 
     flat_tool_schema = {
         "type": "function",
@@ -1118,7 +1084,7 @@ async def test_custom_provider_normalizes_flat_function_tool_schemas_before_tran
         },
     }
 
-    provider = CustomProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
+    provider = OpenAIChatProvider(api_key="test-key", api_base="https://example.com/v1", default_model="demo")
     response = await provider.chat(
         messages=[{"role": "user", "content": "ping"}],
         tools=[flat_tool_schema],
@@ -1144,374 +1110,6 @@ async def test_custom_provider_normalizes_flat_function_tool_schemas_before_tran
 
 
 @pytest.mark.asyncio
-async def test_litellm_provider_falls_back_to_non_streaming_when_streaming_unsupported(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-
-    async def _fake_acompletion(**kwargs):
-        calls.append(dict(kwargs))
-        if kwargs.get("stream"):
-            raise RuntimeError("stream unsupported by provider")
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="ok", tool_calls=[]),
-                    finish_reason="stop",
-                )
-            ],
-            usage={},
-        )
-
-    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
-
-    provider = LiteLLMProvider(
-        api_key="test-key",
-        api_base="https://example.com/v1",
-        default_model="openai/gpt-4.1",
-        provider_name="openai",
-    )
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        model="openai/gpt-4.1",
-        request_timeout_seconds=9.5,
-    )
-
-    assert response.content == "ok"
-    assert len(calls) == 2
-    assert calls[0]["stream"] is True
-    assert "stream" not in calls[1]
-    assert calls[1]["timeout"] == 9.5
-
-
-@pytest.mark.asyncio
-async def test_litellm_provider_normalizes_flat_function_tool_schemas_before_transport(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-
-    async def _fake_acompletion(**kwargs):
-        calls.append(dict(kwargs))
-        if kwargs.get("stream"):
-            raise RuntimeError("stream unsupported by provider")
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="ok", tool_calls=[]),
-                    finish_reason="stop",
-                )
-            ],
-            usage={},
-        )
-
-    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
-
-    flat_tool_schema = {
-        "type": "function",
-        "name": "exec",
-        "description": "Run a command",
-        "parameters": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-        },
-    }
-
-    provider = LiteLLMProvider(
-        api_key="test-key",
-        api_base="https://example.com/v1",
-        default_model="openai/gpt-4.1",
-        provider_name="openai",
-    )
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        tools=[flat_tool_schema],
-        model="openai/gpt-4.1",
-        request_timeout_seconds=9.5,
-    )
-
-    assert response.content == "ok"
-    assert len(calls) == 2
-    assert calls[1]["tools"] == [
-        {
-            "type": "function",
-            "function": {
-                "name": "exec",
-                "description": "Run a command",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"command": {"type": "string"}},
-                    "required": ["command"],
-                },
-            },
-        }
-    ]
-
-
-@pytest.mark.asyncio
-async def test_litellm_provider_uses_streaming_path_when_stream_is_supported(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-
-    class _FakeStream:
-        def __init__(self) -> None:
-            self._chunks = [
-                SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            delta=SimpleNamespace(content="O", reasoning_content=None, tool_calls=[]),
-                            finish_reason=None,
-                        )
-                    ],
-                    usage=None,
-                ),
-                SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            delta=SimpleNamespace(content="K", reasoning_content=None, tool_calls=[]),
-                            finish_reason="stop",
-                        )
-                    ],
-                    usage={"prompt_tokens": 1, "completion_tokens": 2},
-                ),
-            ]
-
-        def __aiter__(self):
-            self._index = 0
-            return self
-
-        async def __anext__(self):
-            if self._index >= len(self._chunks):
-                raise StopAsyncIteration
-            chunk = self._chunks[self._index]
-            self._index += 1
-            return chunk
-
-    async def _fake_acompletion(**kwargs):
-        calls.append(dict(kwargs))
-        if kwargs.get("stream"):
-            return _FakeStream()
-        raise AssertionError("non-stream fallback should not be used")
-
-    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
-
-    provider = LiteLLMProvider(
-        api_key="test-key",
-        api_base="https://example.com/v1",
-        default_model="openai/gpt-4.1",
-        provider_name="openai",
-    )
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        model="openai/gpt-4.1",
-        request_timeout_seconds=0.5,
-    )
-
-    assert response.content == "OK"
-    assert response.finish_reason == "stop"
-    assert response.usage == {"input_tokens": 1, "output_tokens": 2}
-    assert len(calls) == 1
-    assert calls[0]["stream"] is True
-
-
-@pytest.mark.asyncio
-async def test_litellm_provider_fallback_defaults_to_120_seconds_without_explicit_timeout(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-
-    async def _fake_acompletion(**kwargs):
-        calls.append(dict(kwargs))
-        if kwargs.get("stream"):
-            raise RuntimeError("stream unsupported by provider")
-        return SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(content="ok", tool_calls=[]),
-                    finish_reason="stop",
-                )
-            ],
-            usage={},
-        )
-
-    monkeypatch.setattr("g3ku.providers.litellm_provider.acompletion", _fake_acompletion)
-
-    provider = LiteLLMProvider(
-        api_key="test-key",
-        api_base="https://example.com/v1",
-        default_model="openai/gpt-4.1",
-        provider_name="openai",
-    )
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        model="openai/gpt-4.1",
-    )
-
-    assert response.content == "ok"
-    assert len(calls) == 2
-    assert calls[1]["timeout"] == 120.0
-
-
-@pytest.mark.asyncio
-async def test_openai_codex_provider_forwards_request_timeout(monkeypatch) -> None:
-    captured: list[float | None] = []
-
-    async def _fake_request_codex(url, headers, body, verify, timeout):
-        _ = url, headers, body, verify
-        captured.append(timeout)
-        return "ok", [], "stop", {}
-
-    monkeypatch.setattr(
-        "g3ku.providers.openai_codex_provider.get_codex_token",
-        lambda: SimpleNamespace(account_id="acct", access="token"),
-    )
-    monkeypatch.setattr("g3ku.providers.openai_codex_provider._request_codex", _fake_request_codex)
-
-    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        model="openai_codex/gpt-5.1-codex",
-        request_timeout_seconds=11.0,
-    )
-
-    assert response.content == "ok"
-    assert captured == [11.0]
-
-
-@pytest.mark.asyncio
-async def test_openai_codex_provider_times_out_when_first_chunk_exceeds_timeout(monkeypatch) -> None:
-    class _FakeResponse:
-        def __init__(self) -> None:
-            self.status_code = 200
-
-        async def aiter_lines(self):
-            await asyncio.sleep(0.03)
-            yield "event: response.created"
-
-    class _FakeStream:
-        async def __aenter__(self):
-            return _FakeResponse()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            _ = exc_type, exc, tb
-            return None
-
-    class _FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            _ = args, kwargs
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            _ = exc_type, exc, tb
-            return None
-
-        def stream(self, *args, **kwargs):
-            _ = args, kwargs
-            return _FakeStream()
-
-    monkeypatch.setattr(
-        "g3ku.providers.openai_codex_provider.get_codex_token",
-        lambda: SimpleNamespace(account_id="acct", access="token"),
-    )
-    monkeypatch.setattr("g3ku.providers.openai_codex_provider.httpx.AsyncClient", _FakeAsyncClient)
-
-    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        model="openai_codex/gpt-5.1-codex",
-        request_timeout_seconds=0.01,
-    )
-
-    assert response.finish_reason == "error"
-    assert "timeout" in str(response.content or "").lower()
-
-
-@pytest.mark.asyncio
-async def test_openai_codex_provider_times_out_when_stream_goes_idle_after_first_chunk(monkeypatch) -> None:
-    class _FakeResponse:
-        def __init__(self) -> None:
-            self.status_code = 200
-
-        async def aiter_lines(self):
-            yield "event: response.created"
-            await asyncio.sleep(0.03)
-            yield 'data: {"type":"response.created"}'
-
-    class _FakeStream:
-        async def __aenter__(self):
-            return _FakeResponse()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            _ = exc_type, exc, tb
-            return None
-
-    class _FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            _ = args, kwargs
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            _ = exc_type, exc, tb
-            return None
-
-        def stream(self, *args, **kwargs):
-            _ = args, kwargs
-            return _FakeStream()
-
-    monkeypatch.setattr(
-        "g3ku.providers.openai_codex_provider.get_codex_token",
-        lambda: SimpleNamespace(account_id="acct", access="token"),
-    )
-    monkeypatch.setattr("g3ku.providers.openai_codex_provider.httpx.AsyncClient", _FakeAsyncClient)
-
-    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        model="openai_codex/gpt-5.1-codex",
-        request_timeout_seconds=0.01,
-    )
-
-    assert response.finish_reason == "error"
-    assert "idle timeout" in str(response.content or "").lower()
-
-
-@pytest.mark.asyncio
-async def test_openai_codex_provider_preserves_flat_function_tool_schemas_in_transport_payload(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    async def _fake_request_codex(url, headers, body, verify, timeout):
-        captured["url"] = url
-        captured["headers"] = dict(headers or {})
-        captured["body"] = dict(body or {})
-        captured["verify"] = verify
-        captured["timeout"] = timeout
-        return "ok", [], "stop", {}
-
-    monkeypatch.setattr(
-        "g3ku.providers.openai_codex_provider.get_codex_token",
-        lambda: SimpleNamespace(account_id="acct", access="token"),
-    )
-    monkeypatch.setattr("g3ku.providers.openai_codex_provider._request_codex", _fake_request_codex)
-
-    flat_tool_schema = {
-        "type": "function",
-        "name": "exec",
-        "description": "Run a command",
-        "parameters": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-        },
-    }
-
-    provider = OpenAICodexProvider(default_model="openai_codex/gpt-5.1-codex")
-    response = await provider.chat(
-        messages=[{"role": "user", "content": "ping"}],
-        tools=[flat_tool_schema],
-        model="openai_codex/gpt-5.1-codex",
-    )
-
-    assert response.provider_request_body["tools"] == [flat_tool_schema]
-    assert dict(captured["body"])["tools"] == [flat_tool_schema]
-
-
 def test_build_openai_headers_omits_empty_authorization() -> None:
     config = _config(
         provider_id="responses",

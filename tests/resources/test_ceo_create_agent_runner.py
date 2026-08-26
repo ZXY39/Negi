@@ -523,8 +523,7 @@ def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(m
             app_config=SimpleNamespace(
                 get_role_model_keys=lambda role: [
                     "openai:gpt-4.1",
-                    "anthropic:claude-sonnet-4",
-                    "openrouter:claude-3.7-sonnet",
+                    "responses:gpt-5.4",
                 ]
             ),
             provider_name="openai",
@@ -542,13 +541,12 @@ def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(m
         ceo_support,
         "find_by_name",
         lambda name: SimpleNamespace(
-            supports_prompt_caching=name in {"anthropic", "openrouter"}
+            supports_prompt_caching=name == "responses"
         ),
     )
 
     assert runner._resolve_ceo_model_refs() == [
-        "anthropic:claude-sonnet-4",
-        "openrouter:claude-3.7-sonnet",
+        "responses:gpt-5.4",
     ]
 
 

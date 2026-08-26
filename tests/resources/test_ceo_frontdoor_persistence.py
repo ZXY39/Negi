@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import sys
-import types
 from types import SimpleNamespace
 
 import pytest
@@ -12,17 +10,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
-if "litellm" not in sys.modules:
-    litellm_stub = types.ModuleType("litellm")
-
-    async def _unreachable_acompletion(*args, **kwargs):
-        raise AssertionError("litellm acompletion should not be used in CEO persistence tests")
-
-    litellm_stub.acompletion = _unreachable_acompletion
-    litellm_stub.api_base = None
-    litellm_stub.suppress_debug_info = True
-    litellm_stub.drop_params = True
-    sys.modules["litellm"] = litellm_stub
 
 from g3ku.agent.tools.base import Tool
 from g3ku.core.messages import UserInputMessage

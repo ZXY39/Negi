@@ -583,7 +583,7 @@ async def test_direct_provider_chat_backend_omits_optional_model_parameters_when
     await backend.chat(
         messages=[{"role": "user", "content": "demo"}],
         tools=None,
-        model_refs=["custom:model"],
+        model_refs=["openai:model"],
     )
 
     assert "max_tokens" not in captured[0]
@@ -630,7 +630,7 @@ async def test_direct_provider_chat_backend_sanitizes_internal_runtime_message_f
     await backend.chat(
         messages=original_messages,
         tools=None,
-        model_refs=["custom:model"],
+        model_refs=["openai:model"],
     )
 
     assert original_messages[0]["finished_at"] == "2026-04-07T18:00:05+08:00"
@@ -812,7 +812,7 @@ def test_runtime_observed_input_truth_accepts_cache_read_tokens_alias() -> None:
 
     truth = build_runtime_observed_input_truth(
         usage={"input_tokens": 8000, "cache_read_tokens": 2200},
-        provider_model="custom:model",
+        provider_model="openai:model",
         actual_request_hash="req-hash",
         source="provider_usage",
     )

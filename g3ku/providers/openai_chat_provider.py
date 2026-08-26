@@ -1,4 +1,4 @@
-﻿"""Direct OpenAI-compatible provider 鈥?bypasses LiteLLM."""
+﻿"""OpenAI Chat Completions protocol provider (/v1/chat/completions)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from g3ku.providers.streaming_timeouts import (
 )
 
 
-class CustomProvider(LLMProvider):
+class OpenAIChatProvider(LLMProvider):
 
     def __init__(
         self,
@@ -74,7 +74,7 @@ class CustomProvider(LLMProvider):
                 kwargs["parallel_tool_calls"] = bool(parallel_tool_calls)
         endpoint = f"{self.api_base.rstrip('/')}/chat/completions" if self.api_base else None
         self._trace_request_payload(
-            provider="custom",
+            provider="openai_chat",
             endpoint=endpoint,
             body=dict(kwargs),
         )
@@ -88,7 +88,7 @@ class CustomProvider(LLMProvider):
             }
             try:
                 stream = await self._client.chat.completions.create(**stream_kwargs)
-                diagnostics = StreamingDiagnostics.start("custom")
+                diagnostics = StreamingDiagnostics.start("openai_chat")
                 content, tool_calls, finish_reason, usage, reasoning_content = await consume_openai_like_chat_stream(
                     stream,
                     diagnostics=diagnostics,

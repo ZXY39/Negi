@@ -1,20 +1,7 @@
 from __future__ import annotations
 
-import sys
-import types
 from types import SimpleNamespace
 
-if "litellm" not in sys.modules:
-    litellm_stub = types.ModuleType("litellm")
-
-    async def _unreachable_acompletion(*args, **kwargs):
-        raise AssertionError("litellm acompletion should not be used in websocket_ceo tests")
-
-    litellm_stub.acompletion = _unreachable_acompletion
-    litellm_stub.api_base = None
-    litellm_stub.suppress_debug_info = True
-    litellm_stub.drop_params = True
-    sys.modules["litellm"] = litellm_stub
 
 from g3ku.runtime.api import websocket_ceo
 

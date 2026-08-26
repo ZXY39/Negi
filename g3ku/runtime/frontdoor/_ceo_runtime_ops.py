@@ -37,7 +37,6 @@ from g3ku.providers.responses_protocol_helpers import (
     _convert_messages as _preview_responses_messages,
     _convert_tools as _preview_responses_tools,
     _prompt_cache_key as _preview_prompt_cache_key,
-    _strip_model_prefix as _preview_strip_model_prefix,
 )
 from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
@@ -1237,7 +1236,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ):
             prefix, sep, _rest = candidate.partition(":")
             normalized_prefix = prefix.strip().lower()
-            if sep and normalized_prefix in {"responses", "openai_codex"}:
+            if sep and normalized_prefix == "responses":
                 return normalized_prefix
         return ""
 
@@ -1251,7 +1250,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         parallel_tool_calls: bool | None,
     ) -> dict[str, Any]:
         provider_id = self._frontdoor_preview_provider_id(model_info=model_info)
-        if provider_id not in {"responses", "openai_codex"}:
+        if provider_id != "responses":
             return {
                 "input": list(request_messages),
                 "tools": list(tool_schemas or []),
@@ -1273,11 +1272,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 },
             )
         preview_body: dict[str, Any] = {
-            "model": (
-                _preview_strip_model_prefix(resolved_model)
-                if provider_id == "openai_codex"
-                else resolved_model
-            ),
+            "model": resolved_model,
             "store": False,
             "stream": True,
             "instructions": system_prompt,

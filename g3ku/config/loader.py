@@ -293,8 +293,6 @@ def _raw_uses_inline_model_payload(raw_data: dict[str, Any]) -> bool:
 
 
 def _binding_auth_mode(provider_id: str) -> str:
-    if provider_id in {"openai_codex", "github_copilot"}:
-        return "oauth_cache"
     return "api_key"
 
 

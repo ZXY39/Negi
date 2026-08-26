@@ -347,7 +347,7 @@ def build_middlewares(configs: list[AgentMiddlewareConfig] | None) -> list[Agent
                 "what tools can you use",
                 "tool list",
             )
-            default_skip_provider_types = ("ResponsesProvider", "OpenAICodexProvider")
+            default_skip_provider_types = ("ResponsesProvider", "OpenAIChatProvider")
 
             selector_min_tool_count = min_tool_count if isinstance(min_tool_count, int) else 8
             selector_min_tool_count = max(1, selector_min_tool_count)

@@ -561,26 +561,15 @@ class ProviderConfig(Base):
 
 
 class ProvidersConfig(Base):
-    """Configuration for LLM providers."""
+    """Configuration for LLM providers.
 
-    custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
-    anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
+    Only the two supported OpenAI protocol entries:
+    - openai:    Chat Completions protocol (/v1/chat/completions)
+    - responses: Responses protocol (/v1/responses)
+    """
+
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
-    openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
-    deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
-    groq: ProviderConfig = Field(default_factory=ProviderConfig)
-    zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
-    dashscope: ProviderConfig = Field(default_factory=ProviderConfig)  # DashScope API gateway
-    vllm: ProviderConfig = Field(default_factory=ProviderConfig)
-    gemini: ProviderConfig = Field(default_factory=ProviderConfig)
-    moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
-    minimax: ProviderConfig = Field(default_factory=ProviderConfig)
-    aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow API gateway
-    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine API gateway
-    openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
-    github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
-    responses: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Responses (/v1/responses)
+    responses: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 class WebConfig(Base):
@@ -1044,9 +1033,7 @@ class Config(BaseSettings):
         return p.api_key if p else None
 
     def get_api_base(self, model_key: str | None = None) -> str | None:
-        """Get API base URL for a managed model key, with gateway defaults."""
-        from g3ku.providers.registry import find_by_name
-
+        """Get API base URL for a managed model key."""
         managed = self.get_managed_model(model_key)
         if managed is None:
             raise ValueError(f"Unknown model key: {model_key}")
@@ -1062,9 +1049,6 @@ class Config(BaseSettings):
         p = getattr(self.providers, provider_id, None)
         if p and p.api_base:
             return p.api_base
-        spec = find_by_name(provider_id)
-        if spec and spec.is_gateway and spec.default_api_base:
-            return spec.default_api_base
         return None
 
     def get_model_runtime_profile(self, model_key: str | None = None) -> ManagedModelConfig | None:

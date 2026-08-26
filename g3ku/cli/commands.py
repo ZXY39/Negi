@@ -255,7 +255,7 @@ def onboard(
     console.print(f"\n{_logo()} g3ku is ready!")
     console.print("\nNext steps:")
     console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
-    console.print("     Get one at: https://openrouter.ai/keys")
+    console.print("     Bind an OpenAI Chat (/v1/chat/completions) or Responses (/v1/responses) endpoint")
     console.print("  2. Chat: [cyan]g3ku agent -m \"Hello!\"[/cyan]")
     if project:
         console.print("  3. Keep [cyan].g3ku/[/cyan], [cyan]memory/[/cyan], and [cyan]sessions/[/cyan] local; they contain private runtime state")
@@ -917,17 +917,8 @@ def status():
             p = getattr(config.providers, spec.name, None)
             if p is None:
                 continue
-            if spec.is_oauth:
-                console.print(f"{spec.label}: [green]OK[/green] (OAuth)")
-            elif spec.is_local:
-                # Local deployments show api_base instead of api_key
-                if p.api_base:
-                    console.print(f"{spec.label}: [green]OK[/green] {p.api_base}")
-                else:
-                    console.print(f"{spec.label}: [dim]not set[/dim]")
-            else:
-                has_key = bool(p.api_key)
-                console.print(f"{spec.label}: {'[green]OK[/green]' if has_key else '[dim]not set[/dim]'}")
+            has_key = bool(p.api_key)
+            console.print(f"{spec.label}: {'[green]OK[/green]' if has_key else '[dim]not set[/dim]'}")
 
 
 from g3ku.shells.memory_cli import build_memory_app

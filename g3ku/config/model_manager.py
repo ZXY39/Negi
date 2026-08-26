@@ -29,8 +29,6 @@ def _normalize_scope(value: str) -> str:
 
 
 def _infer_auth_mode(provider_id: str) -> AuthMode:
-    if provider_id in {"openai_codex", "github_copilot"}:
-        return AuthMode.OAUTH_CACHE
     return AuthMode.API_KEY
 
 
