@@ -204,6 +204,69 @@ def test_migration_cleans_legacy_default_model_parameters_from_saved_records(tmp
     assert record.parameters == {}
 
 
+def test_migration_rewrites_custom_provider_records_to_openai(tmp_path) -> None:
+    import json as _json
+
+    from g3ku.llm_config.facade import LLMConfigFacade
+    from g3ku.llm_config.models import StoredConfigSummary
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    facade = LLMConfigFacade(workspace)
+    now = datetime.now(UTC)
+
+    config_id = "cfg-custom"
+    (facade.repository.records_root / f"{config_id}.json").write_text(
+        _json.dumps(
+            {
+                "config_id": config_id,
+                "provider_id": "custom",
+                "display_name": "Custom OpenAI-Compatible",
+                "protocol_adapter": "custom-direct",
+                "capability": "chat",
+                "auth_mode": "api_key",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "default_model": "qwen3.8-flash",
+                "auth": {"type": "api_key", "api_key": ""},
+                "parameters": {"context_window_tokens": 390000, "auth_header": True, "api_mode": "custom-direct"},
+                "headers": {},
+                "extra_options": {"custom_model": True},
+                "template_version": "test",
+                "created_at": "2026-08-26T15:55:06.499386Z",
+                "updated_at": "2026-08-26T15:55:06.499386Z",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    facade.repository._write_index(
+        [
+            StoredConfigSummary(
+                config_id=config_id,
+                provider_id="custom",
+                display_name="Custom OpenAI-Compatible",
+                default_model="qwen3.8-flash",
+                last_probe_status="success",
+                created_at=now,
+                updated_at=now,
+            )
+        ]
+    )
+
+    _, changed = migrate_raw_config_if_needed(
+        {"models": {"catalog": [{"key": "m", "llmConfigId": config_id}]}},
+        workspace=workspace,
+    )
+
+    record = facade.repository.get(config_id)
+    assert changed is True
+    assert record.provider_id == "openai"
+    assert record.protocol_adapter == ProtocolAdapter.OPENAI_COMPLETIONS
+    assert "api_mode" not in record.parameters
+    assert record.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert record.default_model == "qwen3.8-flash"
+
+
 @pytest.mark.asyncio
 async def test_config_chat_backend_uses_config_center_model_parameters_when_not_overridden(monkeypatch) -> None:
     captured: list[dict[str, object]] = []

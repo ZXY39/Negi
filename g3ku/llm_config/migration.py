@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from .enums import AuthMode, Capability
+from .enums import AuthMode, Capability, ProtocolAdapter
 from .models import NormalizedProviderConfig
 from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
 
@@ -92,6 +93,55 @@ def _cleanup_repository_legacy_default_parameters(facade: LLMConfigFacade) -> bo
         )
         facade.repository.save(updated_record, last_probe_status=summary.last_probe_status)
         facade._store_record_secrets(updated_record)
+        changed = True
+    return changed
+
+
+def _migrate_custom_provider_records(facade: LLMConfigFacade) -> bool:
+    """Rewrite `custom`/`custom-direct` records to `openai`/`openai-completions`.
+
+    The `custom` provider was a direct OpenAI Chat Completions client with a
+    configurable base_url; it is protocol-equivalent to `openai` with a custom
+    base_url. This mapping is lossless and runs before the fail-fast guard so
+    legacy installs that used `custom` upgrade in place rather than aborting.
+
+    The old `custom-direct` adapter is no longer a valid enum value, so these
+    records cannot be deserialized until their raw JSON is rewritten in place.
+    """
+    changed = False
+    for summary in list(facade.repository.list_summaries()):
+        if _normalized_provider_id(summary.provider_id) != "custom":
+            continue
+        record_path = facade.repository.records_root / f"{summary.config_id}.json"
+        try:
+            raw = facade.repository._read_json_text(record_path)
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("protocol_adapter") or "").strip() != "custom-direct":
+                continue
+        except Exception:
+            continue
+
+        payload["provider_id"] = "openai"
+        payload["protocol_adapter"] = ProtocolAdapter.OPENAI_COMPLETIONS.value
+        parameters = payload.get("parameters")
+        if isinstance(parameters, dict):
+            parameters.pop("api_mode", None)
+        record_path.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+        try:
+            record = facade._hydrate_record_secrets(facade.repository.get(summary.config_id))
+        except Exception:
+            continue
+        updated = record.model_copy(update={"updated_at": datetime.now(UTC)})
+        facade.repository.save(
+            facade._sanitize_record_for_storage(updated),
+            last_probe_status=summary.last_probe_status,
+        )
+        facade._store_record_secrets(updated)
         changed = True
     return changed
 
@@ -215,6 +265,7 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
 
     facade = LLMConfigFacade(workspace)
     repository_changed = _cleanup_repository_legacy_default_parameters(facade)
+    repository_changed = _migrate_custom_provider_records(facade) or repository_changed
     protected_config_ids = {
         config_id
         for config_id in (_catalog_config_id(item) for item in catalog if isinstance(item, dict))
