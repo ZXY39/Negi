@@ -29,12 +29,6 @@ class CodexStreamError(RuntimeError):
         self.partial_content = str(partial_content or "")
 
 
-def _strip_model_prefix(model: str) -> str:
-    if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
-        return model.split("/", 1)[1]
-    return model
-
-
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert shared tool schemas into Responses/Codex flat function format."""
     return normalize_responses_tool_definitions(tools)

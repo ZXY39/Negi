@@ -219,8 +219,3 @@ class ModelBindingDraft(StrictModel):
         return normalize_single_api_key_max_concurrency(value)
 
 
-class MemoryModelBinding(StrictModel):
-    embedding_config_id: str | None = None
-    embedding_provider_model: str = ""
-    rerank_config_id: str | None = None
-    rerank_provider_model: str = ""

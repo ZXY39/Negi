@@ -23,7 +23,7 @@ def _build_service(tmp_path: Path) -> ConfigService:
 
 def _build_draft(api_key: str) -> ProviderConfigDraft:
     return ProviderConfigDraft(
-        provider_id="custom",
+        provider_id="openai",
         api_key=api_key,
         base_url="https://example.com/v1",
         default_model="custom-model",
@@ -32,7 +32,6 @@ def _build_draft(api_key: str) -> ProviderConfigDraft:
             "timeout_s": 8,
             "temperature": 0.2,
             "max_tokens": 64,
-            "api_mode": "custom-direct",
         },
     )
 
@@ -229,10 +228,10 @@ def test_probe_max_concurrency_route_returns_result(monkeypatch) -> None:
     app.include_router(admin_rest.router, prefix="/api")
     client = TestClient(app)
 
-    response = client.post("/api/llm/drafts/probe-max-concurrency", json={"provider_id": "custom"})
+    response = client.post("/api/llm/drafts/probe-max-concurrency", json={"provider_id": "openai"})
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
     assert payload["result"]["suggested_limits"] == [3, 5]
-    assert captured["payload"] == {"provider_id": "custom"}
+    assert captured["payload"] == {"provider_id": "openai"}

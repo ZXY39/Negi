@@ -1126,37 +1126,12 @@ def test_build_openai_headers_omits_empty_authorization() -> None:
     assert "x-api-key" not in headers
 
 
-@pytest.mark.parametrize(
-    ("protocol_adapter", "default_model"),
-    [
-        (ProtocolAdapter.DASHSCOPE_EMBEDDING, "qwen3-vl-embedding"),
-        (ProtocolAdapter.DASHSCOPE_RERANK, "qwen3-vl-rerank"),
-    ],
-)
-def test_probe_config_omits_empty_bearer_for_dashscope(protocol_adapter, default_model) -> None:
-    config = _config(
-        provider_id="dashscope",
-        protocol_adapter=protocol_adapter,
-        base_url="https://example.com",
-        default_model=default_model,
-        api_key="",
-    )
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        assert "authorization" not in request.headers
-        return httpx.Response(401, json={"error": "missing auth"})
-
-    result = probe_config(config, transport=httpx.MockTransport(_handler))
-
-    assert result.status == ProbeStatus.AUTH_ERROR
-
-
 def test_probe_config_reports_content_type_for_non_json_model_catalog() -> None:
     config = _config(
-        provider_id="custom",
-        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        provider_id="openai",
+        protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
         base_url="https://example.com/v1",
-        default_model="custom-model",
+        default_model="gpt-4.1",
         api_key="test-key",
     )
 
@@ -1211,10 +1186,10 @@ def test_probe_config_openai_responses_falls_back_when_model_catalog_returns_htm
 
 def test_probe_config_falls_back_when_model_catalog_returns_500() -> None:
     config = _config(
-        provider_id="custom",
-        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        provider_id="openai",
+        protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
         base_url="https://example.com/v1",
-        default_model="custom-model",
+        default_model="gpt-4.1",
         api_key="test-key",
     )
 
@@ -1235,10 +1210,10 @@ def test_probe_config_falls_back_when_model_catalog_returns_500() -> None:
 
 def test_probe_config_uses_30_second_timeout(monkeypatch) -> None:
     config = _config(
-        provider_id="custom",
-        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        provider_id="openai",
+        protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
         base_url="https://example.com/v1",
-        default_model="custom-model",
+        default_model="gpt-4.1",
         api_key="test-key",
     )
 
@@ -1267,10 +1242,10 @@ def test_probe_config_uses_30_second_timeout(monkeypatch) -> None:
 
 def test_probe_config_for_concurrency_uses_minimal_inference_request_for_openai_compatible() -> None:
     config = _config(
-        provider_id="custom",
-        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        provider_id="openai",
+        protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
         base_url="https://example.com/v1",
-        default_model="custom-model",
+        default_model="gpt-4.1",
         api_key="test-key",
     )
     seen_paths: list[str] = []
@@ -1289,10 +1264,10 @@ def test_probe_config_for_concurrency_uses_minimal_inference_request_for_openai_
 
 def test_probe_config_rotates_api_keys_after_auth_failure() -> None:
     config = _config(
-        provider_id="custom",
-        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        provider_id="openai",
+        protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
         base_url="https://example.com/v1",
-        default_model="custom-model",
+        default_model="gpt-4.1",
         api_key="bad-key,good-key",
     )
     seen_tokens: list[str] = []
@@ -1314,10 +1289,10 @@ def test_probe_config_rotates_api_keys_after_auth_failure() -> None:
 
 def test_probe_config_does_not_rotate_api_keys_after_bad_request() -> None:
     config = _config(
-        provider_id="custom",
-        protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+        provider_id="openai",
+        protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
         base_url="https://example.com/v1",
-        default_model="custom-model",
+        default_model="gpt-4.1",
         api_key="bad-key,good-key",
     )
     seen_tokens: list[str] = []
@@ -1336,37 +1311,4 @@ def test_probe_config_does_not_rotate_api_keys_after_bad_request() -> None:
     assert result.diagnostics["api_key_count"] == 2
     assert result.diagnostics["api_key_attempts"] == 1
     assert seen_tokens == ["Bearer bad-key", "Bearer bad-key"]
-
-
-@pytest.mark.parametrize(
-    ("protocol_adapter", "default_model", "first_status"),
-    [
-        (ProtocolAdapter.DASHSCOPE_EMBEDDING, "qwen3-vl-embedding", 429),
-        (ProtocolAdapter.DASHSCOPE_RERANK, "qwen3-vl-rerank", 401),
-    ],
-)
-def test_probe_config_rotates_api_keys_for_dashscope_capabilities(protocol_adapter, default_model, first_status) -> None:
-    config = _config(
-        provider_id="dashscope",
-        protocol_adapter=protocol_adapter,
-        base_url="https://example.com",
-        default_model=default_model,
-        api_key="key-1,key-2",
-    )
-    seen_tokens: list[str] = []
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        seen_tokens.append(request.headers.get("Authorization", ""))
-        if len(seen_tokens) == 1:
-            return httpx.Response(first_status, json={"error": "retry next key"})
-        if protocol_adapter == ProtocolAdapter.DASHSCOPE_EMBEDDING:
-            return httpx.Response(200, json={"output": {"embeddings": [{"embedding": [0.1], "text_index": 0}]}})
-        return httpx.Response(200, json={"output": {"results": [{"index": 0, "score": 0.9}]}})
-
-    result = probe_config(config, transport=httpx.MockTransport(_handler))
-
-    assert result.success is True
-    assert result.diagnostics["api_key_count"] == 2
-    assert result.diagnostics["api_key_attempts"] == 2
-    assert seen_tokens == ["Bearer key-1", "Bearer key-2"]
 

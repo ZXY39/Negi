@@ -19,7 +19,6 @@ from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS
 
 _CHAT_PROTOCOL_ADAPTERS = {
     ProtocolAdapter.OPENAI_COMPLETIONS.value,
-    ProtocolAdapter.CUSTOM_DIRECT.value,
 }
 
 

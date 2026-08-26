@@ -10,17 +10,9 @@ from .enums import AuthMode, Capability, FieldInputType, ProtocolAdapter
 from .models import FieldError, NormalizedProviderConfig, ProviderConfigDraft, ProviderTemplate
 from .template_registry import TemplateRegistry
 
-PROVIDER_ID_ALIASES = {
-    "z.ai": "zai",
-    "z-ai": "zai",
-}
-
 DERIVED_HEADER_FIELDS = {
-    "anthropic_version": "anthropic-version",
     "organization": "OpenAI-Organization",
     "project": "OpenAI-Project",
-    "site_url": "HTTP-Referer",
-    "site_name": "X-Title",
 }
 
 NON_PARAMETER_FIELDS = {"api_key", "base_url", "default_model", "extra_headers", "extra_options"}
@@ -28,14 +20,11 @@ COMMON_ENDPOINT_SUFFIX_HINTS = {
     "/chat/completions": "Base URL should point to the provider API root, not the /chat/completions endpoint.",
     "/responses": "Base URL should point to the provider API root, not the /responses endpoint.",
     "/models": "Base URL should point to the provider API root, not the /models endpoint.",
-    "/messages": "Base URL should point to the provider API root, not the /messages endpoint.",
-    "/api/tags": "Base URL should point to the provider API root, not the /api/tags endpoint.",
 }
 
 
 def normalize_provider_id(provider_id: str) -> str:
-    normalized = provider_id.strip().lower()
-    return PROVIDER_ID_ALIASES.get(normalized, normalized)
+    return provider_id.strip().lower()
 
 
 def _parse_number(value: Any, *, integer: bool) -> int | float | None:
@@ -76,12 +65,6 @@ def _base_url_endpoint_hint(value: str) -> str | None:
     for suffix, hint in COMMON_ENDPOINT_SUFFIX_HINTS.items():
         if path.endswith(suffix):
             return hint
-    if ":generatecontent" in path:
-        return "Base URL should point to the Gemini API root, not a model-specific :generateContent endpoint."
-    if path.endswith("/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"):
-        return "Base URL should point to the DashScope API root, not the embedding task endpoint."
-    if path.endswith("/api/v1/services/rerank/text-rerank/text-rerank"):
-        return "Base URL should point to the DashScope API root, not the rerank task endpoint."
     return None
 
 
@@ -135,12 +118,6 @@ def _build_headers(template: ProviderTemplate, parameters: dict[str, Any], extra
 
 
 def _resolve_protocol_adapter(template: ProviderTemplate, parameters: dict[str, Any]) -> ProtocolAdapter:
-    raw_mode = parameters.get("api_mode")
-    if isinstance(raw_mode, str):
-        try:
-            return ProtocolAdapter(raw_mode)
-        except ValueError:
-            return template.protocol_adapter
     return template.protocol_adapter
 
 

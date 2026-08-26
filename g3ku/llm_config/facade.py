@@ -8,7 +8,6 @@ from uuid import uuid4
 
 from g3ku.llm_config.models import (
     GenericRuntimeConfig,
-    MemoryModelBinding,
     ModelBindingDraft,
     NormalizedProviderConfig,
     ProviderConfigDraft,
@@ -29,8 +28,6 @@ from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS, split_retry_key
 
 
 MASKED_SECRET_VALUE = "********"
-MEMORY_EMBEDDING_CONFIG_ID = "memory_embedding_default"
-MEMORY_RERANK_CONFIG_ID = "memory_rerank_default"
 
 
 def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, Any]:
@@ -322,67 +319,6 @@ class LLMConfigFacade:
         setattr(config.models.roles, normalized, [str(item).strip() for item in model_keys if str(item).strip()])
         return self.get_routes(config)
 
-    def get_memory_binding(self) -> MemoryModelBinding:
-        binding_ids = self._memory_binding_ids()
-        embedding_config_id = binding_ids.get("embedding")
-        rerank_config_id = binding_ids.get("rerank")
-        embedding = self._get_optional_record(embedding_config_id) if embedding_config_id else None
-        rerank = self._get_optional_record(rerank_config_id) if rerank_config_id else None
-        return MemoryModelBinding(
-            embedding_config_id=embedding_config_id,
-            embedding_provider_model=self._provider_model_from_record(embedding),
-            rerank_config_id=rerank_config_id,
-            rerank_provider_model=self._provider_model_from_record(rerank),
-        )
-
-    def set_memory_binding(
-        self,
-        *,
-        embedding_config_id: str | None,
-        rerank_config_id: str | None,
-    ) -> MemoryModelBinding:
-        payload = {
-            "embedding_config_id": self._validate_memory_binding_config_id(
-                embedding_config_id,
-                capability="embedding",
-            ),
-            "rerank_config_id": self._validate_memory_binding_config_id(
-                rerank_config_id,
-                capability="rerank",
-            ),
-        }
-        path = self._memory_binding_path()
-        current_payload, loaded = self._read_memory_binding_payload()
-        if loaded and current_payload == payload:
-            return self.get_memory_binding()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        return self.get_memory_binding()
-
-    def resolve_memory_target(self, capability: str) -> RuntimeTarget:
-        normalized = str(capability or "").strip().lower()
-        if normalized == "embedding":
-            expected_capability = "embedding"
-            config_id = self._memory_binding_ids().get("embedding")
-        elif normalized == "rerank":
-            expected_capability = "rerank"
-            config_id = self._memory_binding_ids().get("rerank")
-        else:
-            raise ValueError(f"Unsupported memory capability: {capability}")
-        if not config_id:
-            raise ValueError(f"Memory {normalized} config is not configured")
-        record = self._hydrate_record_secrets(self.repository.get(config_id))
-        if record.capability.value != expected_capability:
-            raise ValueError(
-                f"Memory config {config_id} is not configured for {expected_capability} capability"
-            )
-        return self._runtime_target(
-            model_key=config_id,
-            record=record,
-            retry_on=[],
-            retry_count=0,
-            single_api_key_max_concurrency=None,
-        )
 
     def export_runtime_config(self, config_id: str) -> GenericRuntimeConfig:
         return to_generic_runtime_config(self._hydrate_record_secrets(self.repository.get(config_id)), include_secrets=True)
@@ -424,6 +360,7 @@ class LLMConfigFacade:
             "config_id": record.config_id,
         }
 
+
     def _get_optional_record(self, config_id: str) -> NormalizedProviderConfig | None:
         try:
             return self.repository.get(config_id)
@@ -433,10 +370,7 @@ class LLMConfigFacade:
     def _provider_model_from_record(self, record: NormalizedProviderConfig | None) -> str:
         if record is None:
             return ""
-        provider_id = record.provider_id
-        if provider_id in {"dashscope_embedding", "dashscope_rerank"}:
-            provider_id = "dashscope"
-        return f"{provider_id}:{record.default_model}"
+        return f"{record.provider_id}:{record.default_model}"
 
     @staticmethod
     def _binding_context_window_tokens(record: NormalizedProviderConfig | None) -> int | None:
@@ -487,47 +421,6 @@ class LLMConfigFacade:
         else:
             updates[self._llm_headers_overlay_key(record.config_id)] = None
         self.security.set_overlay_values(updates)
-
-    def _memory_binding_path(self) -> Path:
-        return _store_root(self.workspace) / "memory_binding.json"
-
-    def _read_memory_binding_payload(self) -> tuple[dict[str, str | None], bool]:
-        path = self._memory_binding_path()
-        if not path.exists():
-            return {}, False
-        try:
-            raw = json.loads(_read_utf8_json_text(path))
-        except Exception:
-            return {}, True
-        if not isinstance(raw, dict):
-            return {}, True
-        return {
-            "embedding_config_id": self._normalize_memory_binding_value(raw.get("embedding_config_id")),
-            "rerank_config_id": self._normalize_memory_binding_value(raw.get("rerank_config_id")),
-        }, True
-
-    @staticmethod
-    def _normalize_memory_binding_value(value: Any) -> str | None:
-        normalized = str(value or "").strip()
-        return normalized or None
-
-    def _memory_binding_ids(self) -> dict[str, str | None]:
-        payload, loaded = self._read_memory_binding_payload()
-        if not loaded:
-            return {"embedding": None, "rerank": None}
-        return {
-            "embedding": payload.get("embedding_config_id"),
-            "rerank": payload.get("rerank_config_id"),
-        }
-
-    def _validate_memory_binding_config_id(self, config_id: str | None, *, capability: str) -> str | None:
-        normalized = str(config_id or "").strip()
-        if not normalized:
-            return None
-        record = self.repository.get(normalized)
-        if record.capability.value != capability:
-            raise ValueError(f"Config {normalized} is not configured for {capability} capability")
-        return normalized
 
     @staticmethod
     def _validate_binding_api_key_limits(

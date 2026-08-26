@@ -134,12 +134,6 @@ def _build_openai_headers(config: NormalizedProviderConfig) -> dict[str, str]:
     return headers
 
 
-def _build_anthropic_url(base_url: str) -> str:
-    trimmed = base_url.rstrip("/")
-    if trimmed.endswith("/v1") or trimmed.endswith("/anthropic"):
-        return f"{trimmed}/messages"
-    return f"{trimmed}/v1/messages"
-
 
 def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[str, dict[str, Any]]:
     endpoint = "/responses" if config.protocol_adapter == ProtocolAdapter.OPENAI_RESPONSES else "/chat/completions"
@@ -291,205 +285,6 @@ def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderCon
     )
 
 
-def _probe_anthropic_compatible(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
-    headers = dict(config.headers)
-    headers["x-api-key"] = str(config.auth.get("api_key", ""))
-    headers.setdefault("anthropic-version", str(config.parameters.get("anthropic_version", "2023-06-01")))
-    payload = {
-        "model": config.default_model,
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "ping"}],
-    }
-    start = time.perf_counter()
-    response = client.post(_build_anthropic_url(config.base_url), headers=headers, json=payload)
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    if response.status_code in {401, 403}:
-        return _failure_result(
-            config,
-            status=ProbeStatus.AUTH_ERROR,
-            http_status=response.status_code,
-            latency_ms=latency_ms,
-            message="Authentication failed during anthropic-compatible probe.",
-        )
-    try:
-        payload = response.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=response,
-            latency_ms=latency_ms,
-            label="Anthropic-compatible endpoint returned a non-JSON response",
-        )
-    if 200 <= response.status_code < 300:
-        return _success_result(
-            config,
-            latency_ms=latency_ms,
-            http_status=response.status_code,
-            message="Anthropic-compatible probe succeeded.",
-            diagnostics={"response_keys": sorted(payload.keys()) if isinstance(payload, dict) else []},
-        )
-    return _failure_result(
-        config,
-        status=ProbeStatus.INVALID_RESPONSE,
-        http_status=response.status_code,
-        latency_ms=latency_ms,
-        message="Anthropic-compatible probe failed.",
-    )
-
-
-def _probe_gemini(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
-    api_version = str(config.parameters.get("api_version", "v1beta")).strip() or "v1beta"
-    prefix = config.base_url.rstrip("/")
-    if not prefix.endswith(f"/{api_version}"):
-        prefix = f"{prefix}/{api_version}"
-    endpoint = f"{prefix}/models/{config.default_model}:generateContent"
-    params = {"key": str(config.auth.get("api_key", ""))}
-    payload = {
-        "contents": [{"parts": [{"text": "ping"}]}],
-        "generationConfig": {"maxOutputTokens": 1},
-    }
-    start = time.perf_counter()
-    response = client.post(endpoint, params=params, json=payload, headers=config.headers)
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    if response.status_code in {401, 403}:
-        return _failure_result(
-            config,
-            status=ProbeStatus.AUTH_ERROR,
-            http_status=response.status_code,
-            latency_ms=latency_ms,
-            message="Authentication failed during Gemini probe.",
-        )
-    try:
-        payload = response.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=response,
-            latency_ms=latency_ms,
-            label="Gemini endpoint returned a non-JSON response",
-        )
-    if 200 <= response.status_code < 300:
-        return _success_result(
-            config,
-            latency_ms=latency_ms,
-            http_status=response.status_code,
-            message="Gemini probe succeeded.",
-            diagnostics={"response_keys": sorted(payload.keys()) if isinstance(payload, dict) else []},
-        )
-    return _failure_result(
-        config,
-        status=ProbeStatus.INVALID_RESPONSE,
-        http_status=response.status_code,
-        latency_ms=latency_ms,
-        message="Gemini probe failed.",
-    )
-
-
-def _probe_dashscope_embedding(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
-    endpoint = _join_url(
-        config.base_url,
-        "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding",
-    )
-    headers = _with_bearer_auth(config.headers, config.auth.get("api_key", ""))
-    payload = {
-        "model": config.default_model,
-        "input": {"contents": [{"text": "ping"}]},
-        "parameters": {"output_type": "dense"},
-    }
-    start = time.perf_counter()
-    response = client.post(endpoint, headers=headers, json=payload)
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    if response.status_code in {401, 403}:
-        return _failure_result(config, status=ProbeStatus.AUTH_ERROR, http_status=response.status_code, latency_ms=latency_ms, message="DashScope embedding auth failed.")
-    try:
-        payload = response.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=response,
-            latency_ms=latency_ms,
-            label="DashScope embedding returned a non-JSON response",
-        )
-    if 200 <= response.status_code < 300:
-        return _success_result(config, latency_ms=latency_ms, http_status=response.status_code, message="DashScope embedding probe succeeded.", diagnostics={"response_keys": sorted(payload.keys()) if isinstance(payload, dict) else []})
-    return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, http_status=response.status_code, latency_ms=latency_ms, message="DashScope embedding probe failed.")
-
-
-def _probe_dashscope_rerank(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
-    endpoint = _join_url(config.base_url, "/api/v1/services/rerank/text-rerank/text-rerank")
-    headers = _with_bearer_auth(config.headers, config.auth.get("api_key", ""))
-    payload = {
-        "model": config.default_model,
-        "input": {"query": "ping", "documents": [{"text": "ping"}]},
-        "parameters": {"return_documents": False, "top_n": 1},
-    }
-    start = time.perf_counter()
-    response = client.post(endpoint, headers=headers, json=payload)
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    if response.status_code in {401, 403}:
-        return _failure_result(config, status=ProbeStatus.AUTH_ERROR, http_status=response.status_code, latency_ms=latency_ms, message="DashScope rerank auth failed.")
-    try:
-        payload = response.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=response,
-            latency_ms=latency_ms,
-            label="DashScope rerank returned a non-JSON response",
-        )
-    if 200 <= response.status_code < 300:
-        return _success_result(config, latency_ms=latency_ms, http_status=response.status_code, message="DashScope rerank probe succeeded.", diagnostics={"response_keys": sorted(payload.keys()) if isinstance(payload, dict) else []})
-    return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, http_status=response.status_code, latency_ms=latency_ms, message="DashScope rerank probe failed.")
-
-
-def _probe_ollama(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
-    start = time.perf_counter()
-    response = client.get(_join_url(config.base_url, "/api/tags"), headers=config.headers)
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    if response.status_code in {401, 403}:
-        return _failure_result(
-            config,
-            status=ProbeStatus.AUTH_ERROR,
-            http_status=response.status_code,
-            latency_ms=latency_ms,
-            message="Authentication failed during Ollama probe.",
-        )
-    try:
-        payload = response.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=response,
-            latency_ms=latency_ms,
-            label="Ollama returned a non-JSON response",
-        )
-    models = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(models, list):
-        return _failure_result(
-            config,
-            status=ProbeStatus.INVALID_RESPONSE,
-            http_status=response.status_code,
-            latency_ms=latency_ms,
-            message="Ollama response did not include a models list.",
-        )
-    model_names = [entry.get("name") for entry in models if isinstance(entry, dict) and entry.get("name")]
-    if config.default_model not in model_names:
-        return _failure_result(
-            config,
-            status=ProbeStatus.INVALID_RESPONSE,
-            http_status=response.status_code,
-            latency_ms=latency_ms,
-            message="Configured Ollama model is not available on the server.",
-            diagnostics={"available_models": model_names},
-        )
-    return _success_result(
-        config,
-        latency_ms=latency_ms,
-        http_status=response.status_code,
-        message="Ollama probe succeeded.",
-        diagnostics={"available_models": model_names},
-    )
-
 
 def _probe_single_config(
     config: NormalizedProviderConfig,
@@ -499,22 +294,7 @@ def _probe_single_config(
     timeout_value = _PROBE_TIMEOUT_SECONDS
     try:
         with httpx.Client(timeout=timeout_value, transport=transport, follow_redirects=True) as client:
-            if config.protocol_adapter in {
-                ProtocolAdapter.OPENAI_COMPLETIONS,
-                ProtocolAdapter.OPENAI_RESPONSES,
-                ProtocolAdapter.CUSTOM_DIRECT,
-                ProtocolAdapter.OAUTH_PROXY,
-            }:
-                return _probe_openai_compatible(client, config)
-            if config.protocol_adapter == ProtocolAdapter.ANTHROPIC_MESSAGES:
-                return _probe_anthropic_compatible(client, config)
-            if config.protocol_adapter == ProtocolAdapter.GOOGLE_GENERATIVE_AI:
-                return _probe_gemini(client, config)
-            if config.protocol_adapter == ProtocolAdapter.DASHSCOPE_EMBEDDING:
-                return _probe_dashscope_embedding(client, config)
-            if config.protocol_adapter == ProtocolAdapter.DASHSCOPE_RERANK:
-                return _probe_dashscope_rerank(client, config)
-            return _probe_ollama(client, config)
+            return _probe_openai_compatible(client, config)
     except httpx.TimeoutException:
         return _failure_result(config, status=ProbeStatus.TIMEOUT, message="Probe timed out.")
     except (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError):
@@ -533,14 +313,7 @@ def _probe_single_config_for_concurrency(
     timeout_value = _PROBE_TIMEOUT_SECONDS
     try:
         with httpx.Client(timeout=timeout_value, transport=transport, follow_redirects=True) as client:
-            if config.protocol_adapter in {
-                ProtocolAdapter.OPENAI_COMPLETIONS,
-                ProtocolAdapter.OPENAI_RESPONSES,
-                ProtocolAdapter.CUSTOM_DIRECT,
-                ProtocolAdapter.OAUTH_PROXY,
-            }:
-                return _probe_openai_minimal_inference(client, config)
-            return _probe_single_config(config, transport=transport)
+            return _probe_openai_minimal_inference(client, config)
     except httpx.TimeoutException:
         return _failure_result(config, status=ProbeStatus.TIMEOUT, message="Probe timed out.")
     except (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError):

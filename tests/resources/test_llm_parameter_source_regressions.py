@@ -118,7 +118,7 @@ class _NestedSchemaTool(Tool):
 
 
 def test_template_marks_model_parameters_optional_and_removes_timeout() -> None:
-    template = TemplateRegistry().get_template("custom")
+    template = TemplateRegistry().get_template("openai")
     fields = {field.key: field for field in template.fields}
 
     assert "timeout_s" not in fields
@@ -142,12 +142,11 @@ def test_default_provider_attempt_timeout_seconds_is_sixty_seconds() -> None:
 def test_normalize_draft_omits_optional_model_parameters_when_left_blank() -> None:
     registry = TemplateRegistry()
     draft = ProviderConfigDraft(
-        provider_id="custom",
+        provider_id="openai",
         api_key="demo-key",
         base_url="https://example.com/v1",
         default_model="custom-model",
         parameters={
-            "api_mode": "custom-direct",
             "context_window_tokens": 200_000,
             "max_tokens": None,
             "temperature": "",
@@ -163,7 +162,6 @@ def test_normalize_draft_omits_optional_model_parameters_when_left_blank() -> No
     assert "temperature" not in normalized.parameters
     assert "reasoning_effort" not in normalized.parameters
     assert "timeout_s" not in normalized.parameters
-    assert normalized.parameters["api_mode"] == "custom-direct"
     assert normalized.parameters["context_window_tokens"] == 200_000
 
 
@@ -177,16 +175,15 @@ def test_migration_cleans_legacy_default_model_parameters_from_saved_records(tmp
     facade.repository.save(
         NormalizedProviderConfig(
             config_id="cfg-legacy",
-            provider_id="custom",
+            provider_id="openai",
             display_name="Custom",
-            protocol_adapter=ProtocolAdapter.CUSTOM_DIRECT,
+            protocol_adapter=ProtocolAdapter.OPENAI_COMPLETIONS,
             capability=Capability.CHAT,
             auth_mode=AuthMode.API_KEY,
             base_url="https://example.com/v1",
             default_model="custom-model",
             auth={"type": "api_key", "api_key": "demo-key"},
             parameters={
-                "api_mode": "custom-direct",
                 "max_tokens": 4096,
                 "temperature": 0.2,
                 "timeout_s": 8,
@@ -204,7 +201,7 @@ def test_migration_cleans_legacy_default_model_parameters_from_saved_records(tmp
     record = facade.repository.get("cfg-legacy")
 
     assert changed is True
-    assert record.parameters == {"api_mode": "custom-direct"}
+    assert record.parameters == {}
 
 
 @pytest.mark.asyncio
@@ -221,7 +218,7 @@ async def test_config_chat_backend_uses_config_center_model_parameters_when_not_
         "build_provider_from_model_key",
         lambda config, ref, api_key_index=None: ProviderTarget(
             provider_ref=str(ref),
-            provider_id="custom",
+            provider_id="openai",
             model_id="custom-model",
             provider=_RecorderProvider(),
             model_parameters={
@@ -272,7 +269,7 @@ async def test_config_chat_backend_omits_optional_model_parameters_when_unset(mo
         "build_provider_from_model_key",
         lambda config, ref, api_key_index=None: ProviderTarget(
             provider_ref=str(ref),
-            provider_id="custom",
+            provider_id="openai",
             model_id="custom-model",
             provider=_RecorderProvider(),
             retry_on=[],
@@ -308,7 +305,7 @@ async def test_config_chat_backend_sanitizes_internal_runtime_message_fields_bef
         "build_provider_from_model_key",
         lambda config, ref, api_key_index=None: ProviderTarget(
             provider_ref=str(ref),
-            provider_id="custom",
+            provider_id="openai",
             model_id="custom-model",
             provider=_RecorderProvider(),
             retry_on=[],
@@ -443,7 +440,7 @@ async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_ch
     targets = {
         "primary": ProviderTarget(
             provider_ref="primary",
-            provider_id="custom",
+            provider_id="openai",
             model_id="primary-model",
             provider=_Provider(),
             retry_on=["network", "429", "5xx"],
@@ -994,7 +991,7 @@ def test_build_send_provider_request_preview_sanitizes_messages_and_synthesizes_
         "build_provider_from_model_key",
         lambda config, ref, api_key_index=None: ProviderTarget(
             provider_ref=str(ref),
-            provider_id="custom",
+            provider_id="openai",
             model_id="custom-model",
             provider=SimpleNamespace(),
             model_parameters={"context_window_tokens": 32000},

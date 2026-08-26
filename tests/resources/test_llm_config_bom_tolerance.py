@@ -74,28 +74,3 @@ def test_repository_reads_record_with_utf8_bom(tmp_path) -> None:
     assert loaded.base_url == "https://example.com/v1"
 
 
-def test_facade_reads_memory_binding_with_utf8_bom(tmp_path) -> None:
-    workspace = tmp_path / "workspace"
-    store_root = workspace / ".g3ku" / "llm-config"
-    store_root.mkdir(parents=True, exist_ok=True)
-    memory_binding_path = store_root / "memory_binding.json"
-    memory_binding_path.write_text(
-        json.dumps(
-            {
-                "embedding_config_id": "emb-1",
-                "rerank_config_id": "rer-1",
-            },
-            indent=2,
-        ),
-        encoding="utf-8-sig",
-    )
-
-    facade = LLMConfigFacade(workspace)
-
-    payload, loaded = facade._read_memory_binding_payload()
-
-    assert loaded is True
-    assert payload == {
-        "embedding_config_id": "emb-1",
-        "rerank_config_id": "rer-1",
-    }

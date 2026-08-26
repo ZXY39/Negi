@@ -255,6 +255,38 @@ def _ensure_no_removed_gateway_config(raw_data: dict[str, Any]) -> None:
     )
 
 
+def _ensure_supported_llm_records(workspace: Path) -> None:
+    """Fail fast when remaining llm-config records use removed protocols."""
+    from g3ku.llm_config.facade import LLMConfigFacade
+
+    supported_adapters = {"openai-completions", "openai-responses"}
+    try:
+        facade = LLMConfigFacade(workspace)
+        summaries = facade.repository.list_summaries()
+    except Exception:
+        return
+    for summary in summaries:
+        try:
+            record = facade.repository.get(summary.config_id)
+            adapter = str(record.protocol_adapter.value)
+        except Exception as exc:
+            raise ValueError(
+                "Unsupported llm-config record left by an older install.\n"
+                f"Original record: config_id={summary.config_id!r}, "
+                f"provider={summary.provider_id!r}, model={summary.default_model!r}\n"
+                "Supported providers: openai (OpenAI Chat Completions), responses (OpenAI Responses).\n"
+                "Example fix: delete this record and create an 'openai' or 'responses' record "
+                "for the same endpoint."
+            ) from exc
+        if adapter not in supported_adapters:
+            raise ValueError(
+                "Unsupported protocol adapter in llm-config record.\n"
+                f"Original record: config_id={summary.config_id!r}, protocol_adapter={adapter!r}\n"
+                "Supported protocol adapters: openai-completions, openai-responses.\n"
+                "Example fix: recreate this record from the 'openai' or 'responses' template."
+            )
+
+
 def _referenced_provider_names(cfg: Config) -> list[str]:
     names: set[str] = set()
 
@@ -666,6 +698,7 @@ def load_config(config_path: Path | None = None) -> Config:
     if llm_changed:
         raw_data = migrated_llm
     changed = changed or llm_changed
+    _ensure_supported_llm_records(Path.cwd())
     changed = _ensure_role_iterations_defaults(raw_data) or changed
     changed = _ensure_role_concurrency_defaults(raw_data) or changed
     changed = _ensure_model_role_defaults(raw_data) or changed

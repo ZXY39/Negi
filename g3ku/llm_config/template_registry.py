@@ -4,11 +4,6 @@ from .exceptions import TemplateNotFoundError
 from .models import ProviderTemplate, ProviderTemplateSummary
 from .provider_snapshots import PROVIDER_TEMPLATES
 
-PROVIDER_ID_ALIASES = {
-    "z.ai": "zai",
-    "z-ai": "zai",
-}
-
 
 class TemplateRegistry:
     def __init__(self, templates: list[ProviderTemplate] | None = None):
@@ -32,7 +27,7 @@ class TemplateRegistry:
         return sorted(summaries, key=lambda item: (item.category, item.display_name.lower()))
 
     def get_template(self, provider_id: str) -> ProviderTemplate:
-        normalized = PROVIDER_ID_ALIASES.get(provider_id.strip().lower(), provider_id)
+        normalized = provider_id.strip().lower()
         try:
             return self._templates[normalized]
         except KeyError as exc:

@@ -36,7 +36,7 @@ def test_managed_model_config_rejects_separator_only_api_keys() -> None:
 def test_normalize_draft_accepts_multiple_api_keys() -> None:
     registry = TemplateRegistry()
     draft = ProviderConfigDraft(
-        provider_id="custom",
+        provider_id="openai",
         api_key="key-1\nkey-2",
         base_url="https://example.com/v1",
         default_model="custom-model",
@@ -45,7 +45,6 @@ def test_normalize_draft_accepts_multiple_api_keys() -> None:
             "timeout_s": 8,
             "temperature": 0.2,
             "max_tokens": 256,
-            "api_mode": "custom-direct",
         },
     )
 
@@ -57,7 +56,7 @@ def test_normalize_draft_accepts_multiple_api_keys() -> None:
 
 
 def test_api_key_field_help_mentions_multiple_keys() -> None:
-    template = TemplateRegistry().get_template("custom")
+    template = TemplateRegistry().get_template("openai")
     api_key_field = next(field for field in template.fields if field.key == "api_key")
 
     assert "comma-separated" in str(api_key_field.help or "")
@@ -118,7 +117,7 @@ def test_create_binding_rejects_duplicate_model_key_before_creating_config_recor
     with pytest.raises(ValueError, match="Model key already exists: primary"):
         facade.create_binding(
             config,
-            draft_payload={"provider_id": "custom"},
+            draft_payload={"provider_id": "openai"},
             binding_payload={
                 "key": "primary",
                 "config_id": "",

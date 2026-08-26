@@ -6,13 +6,6 @@ from enum import Enum
 class ProtocolAdapter(str, Enum):
     OPENAI_COMPLETIONS = "openai-completions"
     OPENAI_RESPONSES = "openai-responses"
-    ANTHROPIC_MESSAGES = "anthropic-messages"
-    GOOGLE_GENERATIVE_AI = "google-generative-ai"
-    OLLAMA = "ollama"
-    DASHSCOPE_EMBEDDING = "dashscope-embedding"
-    DASHSCOPE_RERANK = "dashscope-rerank"
-    CUSTOM_DIRECT = "custom-direct"
-    OAUTH_PROXY = "oauth-proxy"
 
 
 class FieldInputType(str, Enum):
@@ -36,12 +29,9 @@ class ProbeStatus(str, Enum):
 
 class Capability(str, Enum):
     CHAT = "chat"
-    EMBEDDING = "embedding"
-    RERANK = "rerank"
 
 
 class AuthMode(str, Enum):
     API_KEY = "api_key"
     TOKEN = "token"
-    OAUTH_CACHE = "oauth_cache"
     NONE = "none"
