@@ -36,10 +36,9 @@ from main.runtime.chat_backend import build_actual_request_diagnostics
 from main.prompts import load_prompt
 
 _NOTE_REF_RE = re.compile(r"(?:\bref:|见noteid:)(?P<ref>[a-z0-9_]+)\b")
-_REVIEW_MAX_TOOL_RECORDS_PER_TURN = 8
 _REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
 _REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
-_REVIEW_REPORTED_TOOL_ID_CAP = 500
+_REVIEW_REPORTED_TOOL_ID_CAP = 5000
 _STAGED_DOCUMENT_UNSET = object()
 _LEGACY_CLEANUP_RELATIVE_PATHS: tuple[str, ...] = (
     "memory/HISTORY.md",
@@ -2543,16 +2542,6 @@ class MemoryManager:
         return records
 
     @staticmethod
-    def _select_review_tool_records(new_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Pick at most the per-turn cap of records, errors first then most recent first."""
-
-        indexed = list(enumerate(list(new_records or [])))
-        ordered = sorted(indexed, key=lambda pair: (not bool(pair[1].get("is_error")), -pair[0]))
-        selected = ordered[: max(_REVIEW_MAX_TOOL_RECORDS_PER_TURN, 0)]
-        selected.sort(key=lambda pair: pair[0])
-        return [record for _index, record in selected]
-
-    @staticmethod
     def _merge_review_stage_payload(
         *,
         canonical_summary: dict[str, Any] | None,
@@ -2604,27 +2593,37 @@ class MemoryManager:
         merged: list[dict[str, Any]] = []
         emitted_stage_ids: set[str] = set()
 
-        def _build_stage_entry(stage_id: str) -> dict[str, Any] | None:
-            delta_entry = delta_stages.get(stage_id)
-            stage_records = records_by_stage.pop(stage_id, None)
-            if delta_entry is None and not stage_records:
-                return None
-            stage_entry: dict[str, Any] = {"stage_id": stage_id}
-            stage_goal = str((delta_entry or {}).get("stage_goal") or "").strip()
-            if stage_goal:
-                stage_entry["stage_goal"] = stage_goal
-            if stage_records:
-                stage_entry["tool_records"] = stage_records
-            completed_summary = str((delta_entry or {}).get("completed_stage_summary") or "").strip()
-            if completed_summary:
-                stage_entry["completed_stage_summary"] = completed_summary
-            return stage_entry
-
         canonical_stages = (
             list(canonical_summary.get("stages") or [])
             if isinstance(canonical_summary, dict)
             else []
         )
+        canonical_stage_by_id: dict[str, dict[str, Any]] = {}
+        for raw_stage in canonical_stages:
+            if isinstance(raw_stage, dict):
+                canonical_stage_id = str(raw_stage.get("stage_id") or "").strip()
+                if canonical_stage_id:
+                    canonical_stage_by_id.setdefault(canonical_stage_id, raw_stage)
+
+        def _build_stage_entry(stage_id: str) -> dict[str, Any] | None:
+            delta_entry = delta_stages.get(stage_id)
+            stage_records = records_by_stage.pop(stage_id, None)
+            if delta_entry is None and not stage_records:
+                return None
+            # 阶段条目必须自描述：目标/总结优先取本轮 delta；阶段只携带新工具记录时
+            # 回退可见面当前值，保证复核载荷里的阶段始终是完整未压缩形态。
+            source_entry = delta_entry or canonical_stage_by_id.get(stage_id) or {}
+            stage_entry: dict[str, Any] = {"stage_id": stage_id}
+            stage_goal = str(source_entry.get("stage_goal") or "").strip()
+            if stage_goal:
+                stage_entry["stage_goal"] = stage_goal
+            if stage_records:
+                stage_entry["tool_records"] = stage_records
+            completed_summary = str(source_entry.get("completed_stage_summary") or "").strip()
+            if completed_summary:
+                stage_entry["completed_stage_summary"] = completed_summary
+            return stage_entry
+
         for raw_stage in canonical_stages:
             if not isinstance(raw_stage, dict):
                 continue
@@ -2734,9 +2733,10 @@ class MemoryManager:
         new_tool_records = [
             record for record in collected_tool_records if record["key"] not in reported_tool_key_set
         ]
-        selected_tool_records = self._select_review_tool_records(new_tool_records)
+        # 记录时全量捕获：本轮新出现的工具记录不设每轮数量上限，全部固化进缓冲载荷，
+        # 保证复核窗口内的阶段始终以未压缩形态送达，不受会话侧阶段压缩影响。
         next_reported_tool_keys = (
-            reported_tool_keys + [str(record.get("key") or "").strip() for record in selected_tool_records]
+            reported_tool_keys + [str(record.get("key") or "").strip() for record in new_tool_records]
         )[-_REVIEW_REPORTED_TOOL_ID_CAP:]
         stage_summary_delta, next_stage_versions = self._compact_review_stage_summary_delta(
             canonical_summary=canonical_summary,
@@ -2754,7 +2754,7 @@ class MemoryManager:
             compression_summary=compression_summary,
             canonical_summary=canonical_summary,
             stage_delta=stage_summary_delta,
-            tool_records=selected_tool_records,
+            tool_records=new_tool_records,
         )
         if not payload_text:
             return {"ok": True, "status": "ignored", "reason": "empty_turn"}

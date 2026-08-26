@@ -2111,7 +2111,7 @@ async def test_v2_review_tool_record_cursor_survives_flush(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_v2_review_tool_records_per_turn_cap_prefers_errors(tmp_path: Path) -> None:
+async def test_v2_review_tool_records_full_capture_has_no_per_turn_cap(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -2148,14 +2148,75 @@ async def test_v2_review_tool_records_per_turn_cap_prefers_errors(tmp_path: Path
 
         state = manager._read_review_state()
         payload_text = state["sessions"]["web:shared"]["pending_turns"][0]["payload_text"]
-        cap = module._REVIEW_MAX_TOOL_RECORDS_PER_TURN
-        assert payload_text.count('"tool_name": "web_search"') == cap
-        # Both error records survive the cap.
-        assert "out-3" in payload_text
-        assert "out-7" in payload_text
-        # Oldest successful records are dropped first.
-        assert "out-0" not in payload_text
-        assert "out-1" not in payload_text
+        # Full capture: every new record of the turn lands in the buffered payload,
+        # regardless of status or recency — no per-turn count cap.
+        assert payload_text.count('"tool_name": "web_search"') == 10
+        assert all(f"out-{index}" in payload_text for index in range(10))
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_review_stage_with_new_records_carries_full_goal_summary(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        def _canonical_with_tools(*tool_call_ids: str) -> dict[str, Any]:
+            return {
+                "active_stage_id": "frontdoor-stage-1",
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_goal": "durable stage goal",
+                        "completed_stage_summary": "durable stage summary",
+                        "rounds": [
+                            {
+                                "round_id": "frontdoor-stage-1:round-1",
+                                "text": "",
+                                "tools": [
+                                    {
+                                        "tool_call_id": tool_call_id,
+                                        "tool_name": "web_search",
+                                        "status": "success",
+                                        "arguments_text": f"q={tool_call_id}",
+                                        "output_text": f"out-{tool_call_id}",
+                                    }
+                                    for tool_call_id in tool_call_ids
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-1",
+            user_messages=["first"],
+            assistant_text="first reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_tools("call-1"),
+        )
+        # Second turn adds one new tool record to the same stage; goal/summary unchanged.
+        await manager.record_turn_for_review(
+            session_key="web:shared",
+            turn_id="turn-2",
+            user_messages=["second"],
+            assistant_text="second reply",
+            compression_summary={},
+            canonical_summary=_canonical_with_tools("call-1", "call-2"),
+        )
+
+        state = manager._read_review_state()
+        pending = state["sessions"]["web:shared"]["pending_turns"]
+        second_payload = pending[1]["payload_text"]
+        # The stage entry stays self-describing and uncompressed: full goal/summary
+        # accompany the new record even without a stage delta this turn.
+        assert "durable stage goal" in second_payload
+        assert "durable stage summary" in second_payload
+        assert "q=call-2" in second_payload
+        # The already-reported record is not captured again.
+        assert "q=call-1" not in second_payload
     finally:
         manager.close()
 
