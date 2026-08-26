@@ -279,7 +279,7 @@ def _load_memory_runtime_settings(config: Config) -> MemoryRuntimeSettings | Non
 
 
 def _memory_startup_self_check(config: Config) -> None:
-    """Print startup diagnostics for memory runtime and catalog projection credentials."""
+    """Print startup diagnostics for the memory agent runtime."""
     mem_cfg = _load_memory_runtime_settings(config)
     if mem_cfg is None:
         console.print("[yellow]Memory self-check:[/yellow] tools/memory_runtime/resource.yaml is missing or invalid.")
@@ -289,55 +289,6 @@ def _memory_startup_self_check(config: Config) -> None:
         return
 
     console.print("[green]Memory self-check:[/green] queued markdown runtime enabled")
-
-    def _provider_from_model(value: str) -> str | None:
-        model = str(value or "").strip()
-        if not model:
-            return None
-        if ":" in model:
-            return model.split(":", 1)[0].strip().lower().replace("-", "_")
-        if model in {"qwen3-vl-embedding", "qwen3-vl-rerank"}:
-            return "dashscope"
-        return None
-
-    def _provider_has_key(provider_id: str | None) -> bool:
-        if not provider_id:
-            return True
-        provider_cfg = getattr(config.providers, provider_id, None)
-        has_cfg_key = bool(getattr(provider_cfg, "api_key", "") if provider_cfg else "")
-        has_env_key = any(os.environ.get(name, "").strip() for name in env_map.get(provider_id, []))
-        return has_cfg_key or has_env_key
-
-    try:
-        from g3ku.llm_config.facade import LLMConfigFacade
-
-        memory_binding = LLMConfigFacade(config.workspace_path).get_memory_binding()
-    except Exception:
-        memory_binding = None
-
-    provider_id = _provider_from_model(str(getattr(memory_binding, "embedding_provider_model", "") or ""))
-    if not provider_id:
-        return
-
-    env_map = {
-        "openai": ["OPENAI_API_KEY"],
-        "anthropic": ["ANTHROPIC_API_KEY"],
-        "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        "openrouter": ["OPENROUTER_API_KEY"],
-        "dashscope": ["DASHSCOPE_API_KEY"],
-        "zhipu": ["ZHIPU_API_KEY"],
-    }
-    if not _provider_has_key(provider_id):
-        console.print(
-            "[yellow]Memory self-check warning:[/yellow] embedding provider "
-            f"'{provider_id}' has no API key configured. Dense retrieval may fallback to sparse-only."
-        )
-    rerank_provider = _provider_from_model(str(getattr(memory_binding, "rerank_provider_model", "") or ""))
-    if rerank_provider and not _provider_has_key(rerank_provider):
-        console.print(
-            "[yellow]Memory self-check warning:[/yellow] rerank provider "
-            f"'{rerank_provider}' has no API key configured. Rerank stage will be skipped."
-        )
 
 
 def _make_agent_loop(

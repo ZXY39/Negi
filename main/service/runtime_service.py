@@ -557,11 +557,6 @@ class MainRuntimeService:
         self.reconcile_core_tool_families()
         self.policy_engine.sync_default_role_policies()
         self._record_resource_tree_state()
-        if self.memory_manager is not None and hasattr(self.memory_manager, 'sync_catalog'):
-            try:
-                await self.memory_manager.sync_catalog(self)
-            except Exception:
-                pass
         if self.execution_mode in {'embedded', 'worker'}:
             for task in self.store.list_tasks():
                 self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
@@ -3677,34 +3672,8 @@ class MainRuntimeService:
             for item in (tool_ids or set())
             if str(item or '').strip()
         }
-        if not normalized_skill_ids and not normalized_tool_ids:
-            return {
-                'catalog_synced': False,
-                'skill_ids': [],
-                'tool_ids': [],
-            }
-        memory_manager = getattr(self, 'memory_manager', None)
-        if memory_manager is None or not hasattr(memory_manager, 'sync_catalog'):
-            return {
-                'catalog_synced': False,
-                'skill_ids': sorted(normalized_skill_ids),
-                'tool_ids': sorted(normalized_tool_ids),
-            }
-        try:
-            result = await memory_manager.sync_catalog(
-                self,
-                skill_ids=normalized_skill_ids or None,
-                tool_ids=normalized_tool_ids or None,
-            )
-        except Exception:
-            return {
-                'catalog_synced': False,
-                'skill_ids': sorted(normalized_skill_ids),
-                'tool_ids': sorted(normalized_tool_ids),
-            }
         return {
-            'catalog_synced': True,
-            'catalog': dict(result or {}),
+            'catalog_synced': False,
             'skill_ids': sorted(normalized_skill_ids),
             'tool_ids': sorted(normalized_tool_ids),
         }

@@ -28,7 +28,6 @@ from g3ku.agent.markdown_memory import (
     parse_memory_document,
     validate_memory_document,
 )
-from g3ku.agent.memory_catalog_bridge import MemoryCatalogBridge
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.chatmodels import build_chat_model
@@ -968,14 +967,10 @@ class MemoryManager:
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._strategy = MemoryStrategyV2(config)
-        self._catalog_bridge: MemoryCatalogBridge | None = None
-        self.store = None
         if self._read_only_init:
             return
         preserved_document = self.memory_file.read_text(encoding="utf-8") if self.memory_file.exists() else ""
         preserved_notes = self._read_note_bodies()
-        self._catalog_bridge = MemoryCatalogBridge(self.workspace, config)
-        self.store = getattr(self._catalog_bridge, "store", None)
         self._ensure_layout()
         memory_state_db_path = str(getattr(config, "state_db_path", "") or "memory/memory_state.sqlite3")
         self._memory_repo = _MemorySqliteRepository(self.workspace / memory_state_db_path)
@@ -1386,38 +1381,12 @@ class MemoryManager:
             raise FileNotFoundError(f"memory note not found: {ref}")
         return path.read_text(encoding="utf-8")
 
-    async def sync_catalog(self, service: Any) -> Any:
-        return await self._require_catalog_bridge().sync_catalog(service)
-
-    async def ensure_catalog_bootstrap(self, service: Any) -> Any:
-        return await self._require_catalog_bridge().ensure_catalog_bootstrap(service)
-
-    async def semantic_search_context_records(self, **kwargs: Any) -> Any:
-        return await self._require_catalog_bridge().semantic_search_context_records(**kwargs)
-
-    async def list_context_records(self, **kwargs: Any) -> Any:
-        return await self._require_catalog_bridge().list_context_records(**kwargs)
-
-    async def put_context_record(self, **kwargs: Any) -> Any:
-        return await self._require_catalog_bridge().put_context_record(**kwargs)
-
-    async def delete_context_record(self, **kwargs: Any) -> Any:
-        return await self._require_catalog_bridge().delete_context_record(**kwargs)
-
     def close(self) -> None:
         self._stop_event.set()
         worker = self._worker_thread
         if worker is not None and worker.is_alive():
             worker.join(timeout=2.0)
         self._worker_thread = None
-        if self._catalog_bridge is not None:
-            self._catalog_bridge.close()
-
-    def _require_catalog_bridge(self) -> MemoryCatalogBridge:
-        bridge = self._catalog_bridge
-        if bridge is None:
-            raise RuntimeError("memory catalog bridge is unavailable in read-only initialization mode")
-        return bridge
 
     def _memory_worker_lock_path(self) -> Path:
         return self.mem_dir / ".worker.lock"

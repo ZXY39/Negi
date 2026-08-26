@@ -3157,21 +3157,6 @@ def test_load_config_rejects_legacy_tools_config(tmp_path: Path, monkeypatch):
         load_config()
 
 
-def test_admin_memory_trace_endpoints_return_payload():
-    class _StubService:
-        async def startup(self) -> None:
-            return None
-
-        async def get_context_traces(self, *, trace_kind: str, limit: int = 20):
-            return {'ok': True, 'items': [{'trace_kind': trace_kind, 'limit': limit}], 'trace_kind': trace_kind, 'limit': limit}
-
-    client = TestClient(_build_app(_StubService()))
-
-    retrieval = client.get('/api/memory/retrieval-traces?limit=3')
-    assert retrieval.status_code == 200
-    assert retrieval.json()['items'][0]['trace_kind'] == 'retrieval'
-
-
 def test_admin_memory_queue_and_processed_endpoints_return_paged_payloads(monkeypatch):
     class _StubMemoryManager:
         async def list_queue_page(self, *, limit: int, offset: int):
@@ -4059,290 +4044,6 @@ def test_llm_binding_per_key_concurrency_update_persists_without_provider_probe(
     assert saved['models']['catalog'][0]['singleApiKeyMaxConcurrency'] == [3, 5]
 
 
-def test_llm_memory_binding_update_refreshes_runtime(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class _StubFacade:
-        def get_memory_binding(self):
-            return SimpleNamespace(
-                embedding_config_id='cfg-embedding-old',
-                rerank_config_id='cfg-rerank-old',
-            )
-
-        def set_memory_binding(self, *, embedding_config_id: str | None, rerank_config_id: str | None):
-            captured['embedding_config_id'] = embedding_config_id
-            captured['rerank_config_id'] = rerank_config_id
-            return SimpleNamespace(
-                model_dump=lambda mode='json': {
-                    'embedding_config_id': embedding_config_id,
-                    'embedding_provider_model': 'dashscope:qwen3-vl-embedding',
-                    'rerank_config_id': rerank_config_id,
-                    'rerank_provider_model': 'dashscope:qwen3-vl-rerank',
-                }
-            )
-
-    class _StubManager:
-        def __init__(self):
-            self.facade = _StubFacade()
-
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
-        captured['force'] = force
-        captured['reason'] = reason
-        return True
-
-    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
-    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
-
-    app = FastAPI()
-    app.include_router(admin_rest.router, prefix='/api')
-    client = TestClient(app)
-
-    response = client.put(
-        '/api/llm/memory',
-        json={
-            'embedding_config_id': 'cfg-embedding-new',
-            'rerank_config_id': 'cfg-rerank-new',
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()['item']['embedding_config_id'] == 'cfg-embedding-new'
-    assert response.json()['item']['rerank_config_id'] == 'cfg-rerank-new'
-    assert captured == {
-        'embedding_config_id': 'cfg-embedding-new',
-        'rerank_config_id': 'cfg-rerank-new',
-        'force': True,
-        'reason': 'admin_llm_memory_update',
-    }
-
-
-def test_llm_memory_binding_partial_update_keeps_unspecified_side(monkeypatch):
-    captured: dict[str, object] = {}
-
-    class _StubFacade:
-        def get_memory_binding(self):
-            return SimpleNamespace(
-                embedding_config_id='cfg-embedding-old',
-                rerank_config_id='cfg-rerank-old',
-            )
-
-        def set_memory_binding(self, *, embedding_config_id: str | None, rerank_config_id: str | None):
-            captured['embedding_config_id'] = embedding_config_id
-            captured['rerank_config_id'] = rerank_config_id
-            return SimpleNamespace(
-                model_dump=lambda mode='json': {
-                    'embedding_config_id': embedding_config_id,
-                    'embedding_provider_model': 'dashscope:qwen3-vl-embedding',
-                    'rerank_config_id': rerank_config_id,
-                    'rerank_provider_model': 'dashscope:qwen3-vl-rerank',
-                }
-            )
-
-    class _StubManager:
-        def __init__(self):
-            self.facade = _StubFacade()
-
-    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
-        captured['force'] = force
-        captured['reason'] = reason
-        return True
-
-    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
-    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
-
-    app = FastAPI()
-    app.include_router(admin_rest.router, prefix='/api')
-    client = TestClient(app)
-
-    response = client.put(
-        '/api/llm/memory',
-        json={
-            'embedding_config_id': 'cfg-embedding-new',
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()['item']['embedding_config_id'] == 'cfg-embedding-new'
-    assert response.json()['item']['rerank_config_id'] == 'cfg-rerank-old'
-    assert captured == {
-        'embedding_config_id': 'cfg-embedding-new',
-        'rerank_config_id': 'cfg-rerank-old',
-        'force': True,
-        'reason': 'admin_llm_memory_update',
-    }
-
-
-def test_memory_dense_index_reset_endpoint_calls_memory_manager(monkeypatch):
-    calls: dict[str, object] = {}
-
-    class _StubMemoryManager:
-        async def reset_dense_index(self, *, reason: str = 'manual') -> dict[str, object]:
-            calls['reason'] = reason
-            return {'ok': True, 'dense_enabled': True}
-
-    monkeypatch.setattr(admin_rest, 'get_agent', lambda: SimpleNamespace(memory_manager=_StubMemoryManager()))
-
-    app = FastAPI()
-    app.include_router(admin_rest.router, prefix='/api')
-    client = TestClient(app)
-
-    response = client.post('/api/memory/dense-index/reset', json={'reason': 'embedding_model_changed'})
-
-    assert response.status_code == 200
-    assert response.json()['item']['ok'] is True
-    assert calls == {'reason': 'embedding_model_changed'}
-
-
-def test_memory_dense_index_rebuild_endpoint_calls_memory_manager(monkeypatch):
-    calls: dict[str, object] = {}
-
-    class _StubMemoryManager:
-        async def rebuild_dense_index(self, *, reason: str = 'manual') -> dict[str, object]:
-            calls['reason'] = reason
-            return {'ok': True, 'indexed': 26, 'dense_points': 26}
-
-    monkeypatch.setattr(admin_rest, 'get_agent', lambda: SimpleNamespace(memory_manager=_StubMemoryManager()))
-
-    app = FastAPI()
-    app.include_router(admin_rest.router, prefix='/api')
-    client = TestClient(app)
-
-    response = client.post('/api/memory/dense-index/rebuild', json={'reason': 'embedding_model_changed'})
-
-    assert response.status_code == 200
-    assert response.json()['item']['indexed'] == 26
-    assert calls == {'reason': 'embedding_model_changed'}
-
-
-def test_memory_embedding_atomic_save_returns_binding_and_rebuild_result(monkeypatch):
-    calls: dict[str, object] = {}
-
-    class _StubFacade:
-        pass
-
-    class _StubManager:
-        def __init__(self):
-            self.facade = _StubFacade()
-
-    async def _fake_atomic_save(*, facade, embedding_payload, rerank_payload=None):
-        calls['facade'] = facade
-        calls['embedding_payload'] = embedding_payload
-        calls['rerank_payload'] = rerank_payload
-        return {
-            'binding': {
-                'embedding_config_id': 'cfg-embedding-new',
-                'embedding_provider_model': 'dashscope:multimodal-embedding-v1',
-                'rerank_config_id': None,
-                'rerank_provider_model': '',
-            },
-            'reset': {'status': 'reset'},
-            'rebuild': {'status': 'ready', 'indexed': 26, 'dense_points': 26},
-        }
-
-    monkeypatch.setattr(admin_rest.ModelManager, 'load', classmethod(lambda cls: _StubManager()))
-    monkeypatch.setattr(admin_rest, '_save_memory_embedding_atomically', _fake_atomic_save)
-
-    app = FastAPI()
-    app.include_router(admin_rest.router, prefix='/api')
-    client = TestClient(app)
-
-    response = client.post(
-        '/api/llm/memory/embedding-atomic-save',
-        json={
-            'embedding': {'config_id': 'cfg-embedding-old', 'draft': {'default_model': 'multimodal-embedding-v1'}},
-            'rerank': None,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()['item']['rebuild']['indexed'] == 26
-    assert calls['embedding_payload'] == {'config_id': 'cfg-embedding-old', 'draft': {'default_model': 'multimodal-embedding-v1'}}
-    assert calls['rerank_payload'] is None
-
-
-@pytest.mark.asyncio
-async def test_memory_embedding_atomic_save_rolls_back_on_rebuild_failure(monkeypatch):
-    events: list[tuple[str, object]] = []
-
-    class _StubFacade:
-        def __init__(self):
-            self.binding = SimpleNamespace(embedding_config_id='cfg-embedding-old', rerank_config_id='cfg-rerank-old')
-            self.records = {
-                'cfg-embedding-old': SimpleNamespace(config_id='cfg-embedding-old', auth={'api_key': 'k'}, headers={}),
-                'cfg-rerank-old': SimpleNamespace(config_id='cfg-rerank-old', auth={'api_key': 'r'}, headers={}),
-            }
-            self.repository = SimpleNamespace(
-                list_summaries=lambda: [
-                    SimpleNamespace(config_id='cfg-embedding-old', last_probe_status='success'),
-                    SimpleNamespace(config_id='cfg-rerank-old', last_probe_status='success'),
-                ],
-                get=lambda config_id: self.records[config_id],
-                save=lambda config, last_probe_status=None: events.append(('save', getattr(config, 'config_id', None), last_probe_status)),
-            )
-
-        def get_memory_binding(self):
-            return self.binding
-
-        def _hydrate_record_secrets(self, record):
-            return record
-
-        def _sanitize_record_for_storage(self, record):
-            return record
-
-        def _store_record_secrets(self, record):
-            events.append(('store_secrets', getattr(record, 'config_id', None)))
-
-        def update_config_record(self, config_id, payload):
-            events.append(('update', config_id, dict(payload)))
-            self.records[config_id] = SimpleNamespace(config_id=config_id, auth={'api_key': 'new'}, headers={})
-            return {'config_id': config_id}
-
-        def create_config_record(self, payload):
-            raise AssertionError('create should not be called')
-
-        def delete_config_record(self, config_id):
-            events.append(('delete', config_id))
-
-        def set_memory_binding(self, *, embedding_config_id, rerank_config_id):
-            events.append(('set_binding', embedding_config_id, rerank_config_id))
-            self.binding = SimpleNamespace(embedding_config_id=embedding_config_id, rerank_config_id=rerank_config_id)
-            return SimpleNamespace(model_dump=lambda mode='json': {})
-
-    class _StubMemoryManager:
-        async def reset_dense_index(self, *, reason='manual'):
-            events.append(('reset_dense', reason))
-            return {'status': 'reset', 'dense_enabled': True}
-
-        async def rebuild_dense_index(self, *, reason='manual'):
-            events.append(('rebuild_dense', reason))
-            raise RuntimeError('dense rebuild failed')
-
-    async def _fake_refresh_web_agent_runtime(*, force=False, reason='runtime', force_memory_sync=False):
-        events.append(('refresh', force, reason, force_memory_sync))
-        return True
-
-    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh_web_agent_runtime)
-    monkeypatch.setattr(admin_rest, '_runtime_memory_manager', lambda: _StubMemoryManager())
-
-    with pytest.raises(Exception) as exc_info:
-        await admin_rest._save_memory_embedding_atomically(
-            facade=_StubFacade(),
-            embedding_payload={'config_id': 'cfg-embedding-old', 'draft': {'default_model': 'multimodal-embedding-v1'}},
-            rerank_payload=None,
-        )
-
-    detail = exc_info.value.detail
-    assert exc_info.value.status_code == 503
-    assert detail['code'] == 'memory_embedding_atomic_save_failed'
-    assert detail['saved'] is False
-    assert detail['rolled_back'] is True
-    assert ('update', 'cfg-embedding-old', {'default_model': 'multimodal-embedding-v1'}) in events
-    assert ('reset_dense', 'embedding_model_changed') in events
-    assert ('rebuild_dense', 'embedding_model_changed') in events
-    assert ('set_binding', 'cfg-embedding-old', 'cfg-rerank-old') in events
-    assert ('refresh', True, 'admin_llm_memory_embedding_atomic_rollback', True) in events
-
-
 def test_load_config_backfills_missing_role_iterations(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)
@@ -4859,35 +4560,26 @@ def test_china_bridge_channels_endpoint_hides_stale_host_pid(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-async def test_write_skill_file_async_triggers_targeted_catalog_sync(tmp_path: Path):
+async def test_write_skill_file_async_reports_catalog_sync_disabled(tmp_path: Path):
     skill_file = tmp_path / 'demo' / 'SKILL.md'
     skill_file.parent.mkdir(parents=True, exist_ok=True)
     skill_file.write_text('before', encoding='utf-8')
-
-    captured: dict[str, object] = {}
 
     class _Registry:
         def skill_file_map(self, skill_id: str):
             assert skill_id == 'demo_skill'
             return {'skill_doc': skill_file}
 
-    class _MemoryManager:
-        async def sync_catalog(self, service, *, skill_ids=None, tool_ids=None):
-            captured['skill_ids'] = set(skill_ids or set())
-            captured['tool_ids'] = set(tool_ids or set())
-            return {'created': 0, 'updated': 1, 'removed': 0}
-
     service = object.__new__(MainRuntimeService)
     service.resource_registry = _Registry()
-    service.memory_manager = _MemoryManager()
+    service.memory_manager = None
     service.reload_resources = lambda **kwargs: {'ok': True}
 
     item = await service.write_skill_file_async('demo_skill', 'skill_doc', 'after', session_id='web:shared')
 
     assert skill_file.read_text(encoding='utf-8') == 'after'
-    assert captured == {'skill_ids': {'demo_skill'}, 'tool_ids': set()}
-    assert item['catalog_synced'] is True
-    assert item['catalog']['updated'] == 1
+    assert item['catalog_synced'] is False
+    assert item['skill_ids'] == ['demo_skill']
 
 
 def test_tool_result_inline_full_flag_is_documented_in_tool_authoring_skills():
@@ -4953,17 +4645,8 @@ async def test_admin_skill_delete_endpoint_removes_files_and_syncs_catalog(tmp_p
         governance_store_path=tmp_path / 'governance.sqlite3',
     )
 
-    captured: dict[str, object] = {}
-
-    class _MemoryManager:
-        async def sync_catalog(self, service, *, skill_ids=None, tool_ids=None):
-            captured['skill_ids'] = set(skill_ids or set())
-            captured['tool_ids'] = set(tool_ids or set())
-            return {'created': 0, 'updated': 0, 'removed': 1}
-
     try:
         await service.startup()
-        service.memory_manager = _MemoryManager()
         client = TestClient(_build_app(service))
 
         response = client.delete('/api/resources/skills/demo_skill', params={'session_id': 'web:shared'})
@@ -4971,9 +4654,8 @@ async def test_admin_skill_delete_endpoint_removes_files_and_syncs_catalog(tmp_p
         assert response.status_code == 200
         payload = response.json()['item']
         assert payload['skill_id'] == 'demo_skill'
-        assert payload['catalog_synced'] is True
-        assert payload['catalog']['removed'] == 1
-        assert captured == {'skill_ids': {'demo_skill'}, 'tool_ids': set()}
+        assert payload['catalog_synced'] is False
+        assert payload['skill_ids'] == ['demo_skill']
         assert not (workspace / 'skills' / 'demo_skill').exists()
         assert service.get_skill_resource('demo_skill') is None
     finally:
@@ -5050,17 +4732,8 @@ async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(
         governance_store_path=tmp_path / 'governance.sqlite3',
     )
 
-    captured: dict[str, object] = {}
-
-    class _MemoryManager:
-        async def sync_catalog(self, service, *, skill_ids=None, tool_ids=None):
-            captured['skill_ids'] = set(skill_ids or set())
-            captured['tool_ids'] = set(tool_ids or set())
-            return {'created': 0, 'updated': 0, 'removed': 1}
-
     try:
         await service.startup()
-        service.memory_manager = _MemoryManager()
         client = TestClient(_build_app(service))
 
         response = client.delete('/api/resources/tools/external_browser', params={'session_id': 'web:shared'})
@@ -5068,9 +4741,8 @@ async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(
         assert response.status_code == 200
         payload = response.json()['item']
         assert payload['tool_id'] == 'external_browser'
-        assert payload['catalog_synced'] is True
-        assert payload['catalog']['removed'] == 1
-        assert captured == {'skill_ids': set(), 'tool_ids': {'external_browser'}}
+        assert payload['catalog_synced'] is False
+        assert payload['tool_ids'] == ['external_browser']
         assert not (workspace / 'tools' / 'external_browser').exists()
         assert not (workspace / '.g3ku' / 'external-tools' / 'external_browser').exists()
         assert service.get_tool_family('external_browser') is None

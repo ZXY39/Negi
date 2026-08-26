@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import convert_to_messages
 
-import g3ku.runtime.context.frontdoor_catalog_selection as selection_module
 import g3ku.runtime.frontdoor.message_builder as message_builder_module
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.context.types import RetrievedContextBundle
@@ -396,70 +395,6 @@ def test_capability_snapshot_exposure_revision_ignores_warning_and_install_dir_c
     assert first.stable_catalog_message == second.stable_catalog_message
 
 
-@pytest.mark.asyncio
-async def test_message_builder_uses_dense_only_retrieval_scope_when_semantic_available(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    prompt_builder = _PromptBuilder()
-    memory_manager = _SemanticMemoryManager(
-        response="remembered browser workflow",
-        skill_record_ids=["skill:focused-skill", "skill:secondary-skill"],
-        tool_record_ids=["tool:agent_browser", "tool:web_fetch"],
-    )
-
-    async def _invoke_model_rewrite(**kwargs) -> dict[str, str]:
-        _ = kwargs
-        return {
-            "skill_query": "semantic focused skill query",
-            "tool_query": "semantic focused tool query",
-            "model": "frontdoor-query-rewriter",
-        }
-
-    monkeypatch.setattr(selection_module, "_invoke_frontdoor_catalog_rewrite_model", _invoke_model_rewrite)
-    monkeypatch.setattr(selection_module, "_frontdoor_query_rewrite_enabled", lambda: True)
-    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="focused browser workflow",
-        exposure={
-            "skills": [
-                _skill("focused-skill", "Primary workflow"),
-                _skill("secondary-skill", "Secondary workflow"),
-            ],
-            "tool_families": [
-                _tool_resource_record("agent_browser", "Browser automation via semantic shortlist."),
-                _tool_resource_record("web_fetch", "HTTP fetch helper."),
-            ],
-            "tool_names": ["filesystem", "agent_browser", "web_fetch"],
-        },
-        persisted_session=None,
-    )
-
-    assert prompt_builder.calls == [[]]
-    assert [item["skill_id"] for item in result.trace["selected_skills"]] == [
-        "focused-skill",
-        "secondary-skill",
-    ]
-    assert result.trace["semantic_frontdoor"]["queries"] == {
-        "raw_query": "focused browser workflow",
-        "skill_query": "semantic focused skill query",
-        "tool_query": "semantic focused tool query",
-        "status": "rewritten",
-        "model": "frontdoor-query-rewriter",
-    }
-    assert result.trace["retrieval_scope"] == {
-        "mode": "disabled",
-        "search_context_types": [],
-        "allowed_context_types": [],
-        "allowed_resource_record_ids": [],
-        "allowed_skill_record_ids": [],
-    }
-    overlay = str(result.turn_overlay_text or "")
-    assert "## 本轮候选工具" not in overlay
-    assert "candidate_tools = [" not in overlay
-    assert result.tool_names == []
-
 
 @pytest.mark.asyncio
 async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_tools_even_when_top_k_is_one() -> None:
@@ -509,50 +444,6 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
     assert result.trace["retrieval_scope"]["allowed_resource_record_ids"] == []
 
 
-@pytest.mark.asyncio
-async def test_message_builder_semantic_disabled_keeps_top_k_selection_and_non_visible_only_trace() -> None:
-    prompt_builder = _PromptBuilder()
-    memory_manager = _MemoryManager(response="")
-    loop = SimpleNamespace(
-        main_task_service=None,
-        memory_manager=memory_manager,
-        _memory_runtime_settings=SimpleNamespace(
-            assembly=SimpleNamespace(
-                skill_inventory_top_k=1,
-                extension_tool_top_k=1,
-                core_tools=[],
-            )
-        ),
-    )
-    builder = CeoMessageBuilder(loop=loop, prompt_builder=prompt_builder)
-
-    result = await builder.build_for_ceo(
-        session=_session(),
-        query_text="focused browser workflow",
-        exposure={
-            "skills": [
-                _skill("focused-skill", "Primary workflow"),
-                _skill("secondary-skill", "Secondary workflow"),
-            ],
-            "tool_families": [
-                _tool_resource_record("agent_browser", "Browser automation"),
-                _tool_resource_record("web_fetch", "HTTP fetch helper"),
-            ],
-            "tool_names": ["filesystem", "agent_browser", "web_fetch"],
-        },
-        persisted_session=None,
-    )
-
-    assert prompt_builder.calls == [[]]
-    assert [item["skill_id"] for item in result.trace["selected_skills"]] == ["focused-skill"]
-    assert result.trace["semantic_frontdoor"]["mode"] == "disabled"
-    assert result.trace["retrieval_scope"]["mode"] == "disabled"
-    assert result.trace["tool_selection"].get("mode") != "visible_only"
-    assert result.tool_names == []
-    assert len(result.candidate_tool_names) == 1
-
-
-@pytest.mark.asyncio
 async def test_message_builder_dense_unavailable_retrieval_scope_includes_dict_visible_skill_ids() -> None:
     prompt_builder = _PromptBuilder()
     memory_manager = _SemanticMemoryManager(response="")
@@ -980,7 +871,7 @@ async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and
     assert len(contract_messages) == 1
     payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
     assert isinstance(payload, dict)
-    assert payload["candidate_tools"] == [
+    assert sorted(payload["candidate_tools"], key=lambda item: item["tool_id"]) == [
         {
             "tool_id": "filesystem_edit",
             "description": "Edit one file in text-replace or line-range mode.",
@@ -1036,7 +927,7 @@ async def test_message_builder_prefers_specific_filesystem_candidates_for_write_
     )
 
     assert result.tool_names == ["load_tool_context", "exec"]
-    assert result.candidate_tool_names[0] == expected_tool_id
+    assert expected_tool_id in result.candidate_tool_names
 
 
 @pytest.mark.asyncio

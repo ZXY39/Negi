@@ -108,8 +108,6 @@ class AgentRuntimeEngine:
         self._checkpointer_vacuum_interval_seconds = _DEFAULT_CHECKPOINTER_VACUUM_INTERVAL_SECONDS
         self._checkpointer_last_vacuum_monotonic = 0.0
         self._checkpointer_vacuum_in_flight = False
-        self._store = None
-        self._store_enabled = False
         self._memory_runtime_settings = None
         self._internal_tool_settings_fingerprints: dict[str, str] = {}
         self.memory_manager = None

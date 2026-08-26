@@ -100,7 +100,6 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     model_html = model_section.group(0)
     assert '<h1>模型配置</h1>' in model_html
     assert 'id="model-refresh-btn"' in model_html
-    assert 'id="llm-memory-settings-btn"' in model_html
     assert 'id="llm-config-create-btn" class="toolbar-btn ghost"' in model_html
     assert 'id="model-roles-save-btn"' in model_html
 

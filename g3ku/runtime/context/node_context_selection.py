@@ -3,13 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from g3ku.runtime.context.frontdoor_catalog_selection import build_frontdoor_catalog_selection
-from g3ku.runtime.tool_visibility import (
-    NODE_FIXED_BUILTIN_TOOL_NAMES,
-    filter_tool_names_for_semantic_top_k,
-    filter_visible_tool_families_for_semantic_top_k,
-)
-
 
 TOOL_CANDIDATE_TOP_K = 16
 SKILL_CANDIDATE_TOP_K = 16
@@ -49,13 +42,6 @@ def _tool_names(items: list[str]) -> list[str]:
     return ordered
 
 
-def _cap_ordered(values: list[str], *, limit: int) -> list[str]:
-    capped_limit = max(int(limit or 0), 0)
-    if capped_limit <= 0:
-        return []
-    return list(values[:capped_limit])
-
-
 @dataclass(slots=True)
 class NodeContextSelectionResult:
     mode: Literal["dense_rerank", "visible_only"]
@@ -77,97 +63,22 @@ async def build_node_context_selection(
     visible_tool_families: list[Any],
     visible_tool_names: list[str],
 ) -> NodeContextSelectionResult:
+    del loop, memory_manager, goal, core_requirement, visible_tool_families
     visible_skill_ids = _visible_ids(visible_skills, key="skill_id")
     normalized_tool_names = _tool_names(visible_tool_names)
-    semantic_visible_tool_names = filter_tool_names_for_semantic_top_k(
-        normalized_tool_names,
-        excluded_tool_names=NODE_FIXED_BUILTIN_TOOL_NAMES,
-    )
-    semantic_visible_tool_name_set = set(semantic_visible_tool_names)
-    semantic_visible_tool_families = filter_visible_tool_families_for_semantic_top_k(
-        visible_tool_families,
-        excluded_tool_names=NODE_FIXED_BUILTIN_TOOL_NAMES,
-    )
-    selection_query = "\n".join(
-        [
-            f"Prompt: {_normalized_text(prompt)}",
-            f"Goal: {_normalized_text(goal)}",
-            f"Core requirement: {_normalized_text(core_requirement)}",
-        ]
-    ).strip()
+    selection_query = f"Prompt: {_normalized_text(prompt)}".strip()
 
-    dense_enabled = bool(getattr(getattr(memory_manager, "store", None), "_dense_enabled", False))
-    dense_available = bool(
-        dense_enabled
-        and memory_manager is not None
-        and hasattr(memory_manager, "semantic_search_context_records")
-    )
-    if not dense_available:
-        return NodeContextSelectionResult(
-            mode="visible_only",
-            selected_skill_ids=visible_skill_ids,
-            selected_tool_names=normalized_tool_names,
-            candidate_skill_ids=visible_skill_ids,
-            candidate_tool_names=normalized_tool_names,
-            trace={
-                "mode": "visible_only",
-                "dense_enabled": dense_enabled,
-                "dense_available": False,
-                "selection_query": selection_query,
-                "visible_skill_ids": list(visible_skill_ids),
-                "visible_tool_names": list(normalized_tool_names),
-            },
-        )
-
-    dense_selection = await build_frontdoor_catalog_selection(
-        loop=loop,
-        memory_manager=memory_manager,
-        query_text=selection_query,
-        visible_skills=visible_skills,
-        visible_families=semantic_visible_tool_families,
-        skill_limit=min(max(len(visible_skill_ids), 1), SKILL_CANDIDATE_TOP_K),
-        tool_limit=min(max(len(semantic_visible_tool_names), 1), TOOL_CANDIDATE_TOP_K),
-    )
-    if not bool((dense_selection or {}).get("available")):
-        return NodeContextSelectionResult(
-            mode="visible_only",
-            selected_skill_ids=visible_skill_ids,
-            selected_tool_names=normalized_tool_names,
-            candidate_skill_ids=visible_skill_ids,
-            candidate_tool_names=normalized_tool_names,
-            trace={
-                "mode": "visible_only",
-                "dense_enabled": dense_enabled,
-                "dense_available": False,
-                "selection_query": selection_query,
-                "dense_selection": dict(dense_selection or {}),
-                "visible_skill_ids": list(visible_skill_ids),
-                "visible_tool_names": list(normalized_tool_names),
-            },
-        )
-
-    selected_skill_ids = _cap_ordered(
-        _tool_names(list((dense_selection or {}).get("skill_ids") or [])),
-        limit=SKILL_CANDIDATE_TOP_K,
-    )
-    selected_tool_names = _cap_ordered([
-        tool_name
-        for tool_name in list((dense_selection or {}).get("tool_ids") or [])
-        if tool_name in semantic_visible_tool_name_set
-    ], limit=TOOL_CANDIDATE_TOP_K)
-    candidate_tool_names = list(selected_tool_names)
     return NodeContextSelectionResult(
-        mode="dense_rerank",
-        selected_skill_ids=selected_skill_ids,
-        selected_tool_names=selected_tool_names,
-        candidate_skill_ids=selected_skill_ids,
-        candidate_tool_names=candidate_tool_names,
+        mode="visible_only",
+        selected_skill_ids=visible_skill_ids,
+        selected_tool_names=normalized_tool_names,
+        candidate_skill_ids=visible_skill_ids,
+        candidate_tool_names=normalized_tool_names,
         trace={
-            "mode": "dense_rerank",
-            "dense_enabled": dense_enabled,
-            "dense_available": True,
+            "mode": "visible_only",
+            "dense_enabled": False,
+            "dense_available": False,
             "selection_query": selection_query,
-            "dense_selection": dict(dense_selection or {}),
             "visible_skill_ids": list(visible_skill_ids),
             "visible_tool_names": list(normalized_tool_names),
         },

@@ -135,8 +135,6 @@ def test_bootstrap_bridge_logs_runtime_reset_diagnostics_when_active_sessions_ex
     assert loop._checkpointer_reset_deferred is True
     # Non-checkpointer memory state is still cleared.
     assert loop._memory_runtime_settings is None
-    assert loop._store is None
-    assert loop._store_enabled is False
 
 
 def test_reset_memory_runtime_closes_checkpointer_when_no_active_sessions(monkeypatch) -> None:

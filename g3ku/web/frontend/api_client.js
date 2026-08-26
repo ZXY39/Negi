@@ -853,11 +853,6 @@ class ApiClient {
         };
     }
 
-    static async getLlmMemoryModels() {
-        const data = await this.get("/api/llm/memory");
-        return data.item || null;
-    }
-
     static async getMemoryQueue({ limit = 20, offset = 0 } = {}) {
         const data = await this._request("GET", "/api/memory/queue", {
             params: { limit, offset },
@@ -886,26 +881,6 @@ class ApiClient {
         const data = await this._request("GET", `/api/memory/notes/${encodeURIComponent(ref)}`, {
             requestKey: `memory:note:${String(ref || "").trim()}`,
         });
-        return data.item || null;
-    }
-
-    static async updateLlmMemoryModels(payload) {
-        const data = await this.put("/api/llm/memory", payload || {});
-        return data.item || null;
-    }
-
-    static async resetMemoryDenseIndex(payload) {
-        const data = await this.post("/api/memory/dense-index/reset", payload || {});
-        return data.item || null;
-    }
-
-    static async rebuildMemoryDenseIndex(payload) {
-        const data = await this.post("/api/memory/dense-index/rebuild", payload || {});
-        return data.item || null;
-    }
-
-    static async atomicSaveMemoryEmbedding(payload) {
-        const data = await this.post("/api/llm/memory/embedding-atomic-save", payload || {});
         return data.item || null;
     }
 

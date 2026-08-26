@@ -264,12 +264,10 @@ class RuntimeBootstrapBridge:
             self._close_value(commit_service)
         self._loop.commit_service = None
 
-        memory_cfg = getattr(self._loop, '_memory_runtime_settings', None)
         memory_manager = getattr(self._loop, 'memory_manager', None)
         if memory_manager is not None:
             self._close_value(memory_manager)
         self._loop.memory_manager = None
-        self._purge_stale_dense_backends(memory_cfg)
 
         if preserve_checkpointer:
             # Keep the checkpointer (and its context manager) alive: the
@@ -292,8 +290,6 @@ class RuntimeBootstrapBridge:
             self._loop._checkpointer_reset_deferred = False
 
         self._loop._memory_runtime_settings = None
-        self._loop._store = None
-        self._loop._store_enabled = False
 
         runner = getattr(self._loop, 'multi_agent_runner', None)
         invalidate = getattr(runner, 'invalidate_runtime_bindings', None)
@@ -321,32 +317,6 @@ class RuntimeBootstrapBridge:
         self._loop._checkpointer = None
         self._loop._checkpointer_cm = None
         self._loop._checkpointer_reset_deferred = False
-
-    def _purge_stale_dense_backends(self, memory_cfg: Any | None) -> None:
-        store_cfg = getattr(memory_cfg, 'store', None) if memory_cfg is not None else None
-        if store_cfg is None:
-            return
-        try:
-            from g3ku.agent.catalog_store import G3kuHybridStore
-
-            qdrant_path = resolve_path_in_workspace(
-                getattr(store_cfg, 'qdrant_path', 'memory/qdrant'),
-                self._loop.workspace,
-            )
-            qdrant_collection = str(getattr(store_cfg, 'qdrant_collection', '') or '').strip()
-            purged = G3kuHybridStore.purge_process_local_dense_backends(
-                qdrant_path=qdrant_path,
-                qdrant_collection=qdrant_collection,
-            )
-            if purged:
-                logger.info(
-                    'Purged {} stale process-local dense backend(s) for {} ({})',
-                    purged,
-                    qdrant_path,
-                    qdrant_collection or 'default',
-                )
-        except Exception as exc:
-            logger.debug('stale dense backend purge skipped: {}', exc)
 
     def _close_value(self, value) -> None:
         close = getattr(value, 'close', None)
@@ -384,20 +354,12 @@ class RuntimeBootstrapBridge:
             start = getattr(self._loop.memory_manager, 'start', None)
             if callable(start):
                 start()
-            self._loop._store = getattr(self._loop.memory_manager, 'store', None)
-            self._loop._store_enabled = self._loop._store is not None
             if getattr(self._loop, 'main_task_service', None) is not None:
                 self._loop.main_task_service.memory_manager = self._loop.memory_manager
-            if self._loop._store is not None:
-                logger.info('Memory runtime enabled with catalog store ({})', type(self._loop._store).__name__)
-            else:
-                logger.info('Memory runtime enabled without a catalog store projection.')
-            self._schedule_catalog_bootstrap()
+            logger.info('Memory runtime enabled')
         except Exception as exc:
             logger.warning('Memory runtime init failed: {}', exc)
             self._loop.memory_manager = None
-            self._loop._store = None
-            self._loop._store_enabled = False
 
         if getattr(self._loop, '_checkpointer', None) is not None:
             # A checkpointer is still alive (retained by a deferred reset while
@@ -462,27 +424,3 @@ class RuntimeBootstrapBridge:
             self._loop._checkpointer_backend = 'disabled'
             self._loop._checkpointer_enabled = False
 
-    def _schedule_catalog_bootstrap(self) -> None:
-        memory_manager = getattr(self._loop, 'memory_manager', None)
-        service = getattr(self._loop, 'main_task_service', None)
-        if memory_manager is None or service is None:
-            return
-        ensure = getattr(memory_manager, 'ensure_catalog_bootstrap', None)
-        if not callable(ensure):
-            return
-        self._close_async(self._run_catalog_bootstrap(memory_manager, service))
-
-    @staticmethod
-    async def _run_catalog_bootstrap(memory_manager, service) -> None:
-        try:
-            result = await memory_manager.ensure_catalog_bootstrap(service)
-        except Exception as exc:
-            logger.debug('memory catalog bootstrap skipped: {}', exc)
-            return
-        if bool((result or {}).get('synced')):
-            logger.info(
-                'Memory catalog bootstrap synced (created={}, updated={}, removed={})',
-                int((result or {}).get('created', 0) or 0),
-                int((result or {}).get('updated', 0) or 0),
-                int((result or {}).get('removed', 0) or 0),
-            )

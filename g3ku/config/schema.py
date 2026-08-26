@@ -593,37 +593,6 @@ class MemoryCheckpointerConfig(Base):
     vacuum_interval_seconds: float = Field(default=21600.0, ge=0.0)
 
 
-class MemoryStoreBackendConfig(Base):
-    """Hybrid memory store backend configuration."""
-
-    backend: Literal["hybrid"] = "hybrid"
-    qdrant_path: str = "memory/qdrant"
-    qdrant_collection: str = "g3ku_memory"
-    sqlite_path: str = "memory/memory.db"
-
-
-class MemoryRetrievalConfig(Base):
-    """RAG retrieval controls."""
-
-    dense_top_k: int = 24
-    sparse_top_k: int = 24
-    fused_top_k: int = 12
-    context_top_k: int = 8
-    sentence_window: int = 3
-    max_context_tokens: int = 1200
-    default_load_level: Literal["l0", "l1", "l2"] = "l1"
-    rerank_model_key: str | None = None
-    rerank_provider_model: str = ""
-
-
-class MemoryEmbeddingConfig(Base):
-    """Embedding source configuration."""
-
-    model_key: str | None = None
-    provider_model: str = ""
-    batch_size: int = 32
-
-
 class MemoryIsolationConfig(Base):
     """Namespace isolation controls."""
 
@@ -645,7 +614,6 @@ class MemoryFeaturesConfig(Base):
     layered_loading: bool = True
     query_planner: bool = True
     commit_pipeline: bool = True
-    split_store: bool = True
     observability: bool = True
 
 
@@ -718,12 +686,6 @@ class MemoryAssemblyConfig(Base):
     )
 
 
-class MemoryCatalogSummaryConfig(Base):
-    """Catalog summary model selection for skill/tool layered abstracts."""
-
-    model_key: str | None = None
-
-
 class MemoryToolsConfig(Base):
     """Queued Markdown memory runtime configuration."""
 
@@ -731,15 +693,11 @@ class MemoryToolsConfig(Base):
     arch_version: Literal["v1", "v2"] = "v2"
     features: MemoryFeaturesConfig = Field(default_factory=MemoryFeaturesConfig)
     checkpointer: MemoryCheckpointerConfig = Field(default_factory=MemoryCheckpointerConfig)
-    store: MemoryStoreBackendConfig = Field(default_factory=MemoryStoreBackendConfig)
-    retrieval: MemoryRetrievalConfig = Field(default_factory=MemoryRetrievalConfig)
-    embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
     isolation: MemoryIsolationConfig = Field(default_factory=MemoryIsolationConfig)
     guard: MemoryGuardConfig = Field(default_factory=MemoryGuardConfig)
     commit: MemoryCommitConfig = Field(default_factory=MemoryCommitConfig)
     cost: MemoryCostConfig = Field(default_factory=MemoryCostConfig)
     assembly: MemoryAssemblyConfig = Field(default_factory=MemoryAssemblyConfig)
-    catalog_summary: MemoryCatalogSummaryConfig = Field(default_factory=MemoryCatalogSummaryConfig)
     retention_days: int | None = None
     document: MemoryDocumentConfig = Field(default_factory=MemoryDocumentConfig)
     queue: MemoryQueueConfig = Field(default_factory=MemoryQueueConfig)

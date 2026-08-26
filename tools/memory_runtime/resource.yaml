@@ -48,7 +48,6 @@ settings:
     layered_loading: true
     query_planner: true
     commit_pipeline: true
-    split_store: true
     observability: true
   checkpointer:
     backend: sqlite
@@ -57,21 +56,6 @@ settings:
     trim_interval_seconds: 300
     vacuum_min_file_size_bytes: 536870912
     vacuum_interval_seconds: 21600
-  store:
-    backend: hybrid
-    qdrant_path: memory/qdrant
-    qdrant_collection: g3ku_memory
-    sqlite_path: memory/memory.db
-  retrieval:
-    dense_top_k: 24
-    sparse_top_k: 24
-    fused_top_k: 12
-    context_top_k: 8
-    sentence_window: 3
-    max_context_tokens: 1200
-    default_load_level: l1
-  embedding:
-    batch_size: 32
   isolation:
     mode: global
     namespace_template:
@@ -103,8 +87,6 @@ settings:
     - memory_note
     - task_runtime
     - skill_access
-  catalog_summary:
-    model_key: ceo_primary
   retention_days: null
 parameters:
   type: object

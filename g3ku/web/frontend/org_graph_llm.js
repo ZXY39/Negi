@@ -2,21 +2,6 @@
   const DEFAULT_RETRY_ON = ["network", "429"];
   const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };
 
-  function emptyMemorySection(label, capability) {
-    return {
-      label,
-      capability,
-      configId: "",
-      providerId: "",
-      providerModel: "",
-      templateProviderId: "",
-      jsonText: "",
-      initialJsonText: "",
-      validation: null,
-      probe: null,
-      error: "",
-    };
-  }
 
   function emptyEditorState() {
     return {
@@ -37,12 +22,6 @@
       initialImageMultimodalEnabled: false,
       validation: null,
       probe: null,
-      memory: {
-        loading: false,
-        error: "",
-        embedding: emptyMemorySection("Embedding", "embedding"),
-        rerank: emptyMemorySection("Rerank", "rerank"),
-      },
     };
   }
 
@@ -68,7 +47,6 @@
   }
 
   function refs() {
-    U.llmMemorySettings = document.getElementById("llm-memory-settings-btn");
     U.llmConfigCreate = document.getElementById("llm-config-create-btn");
     U.llmBindingsList = document.getElementById("llm-bindings-list");
     U.llmEditorPanel = document.querySelector(".llm-editor-panel");
@@ -298,25 +276,11 @@
     const providerId = trim(draft?.provider_id);
     const defaultModel = trim(draft?.default_model);
     if (!providerId && !defaultModel) return "";
-    const displayProvider = providerId === "dashscope_embedding" || providerId === "dashscope_rerank"
-      ? "dashscope"
-      : providerId;
+    const displayProvider = providerId;
     if (!displayProvider) return defaultModel;
     return defaultModel ? `${displayProvider}:${defaultModel}` : displayProvider;
   }
 
-  function memoryTemplates(capability) {
-    const expectedCapability = trim(capability);
-    return llmState().templates.filter((item) => trim(item.capability || "chat") === expectedCapability);
-  }
-
-  function defaultMemoryTemplateProviderId(capability, providerId = "") {
-    const requested = trim(providerId);
-    const templates = memoryTemplates(capability);
-    if (!templates.length) return "";
-    if (requested && templates.some((item) => trim(item.provider_id) === requested)) return requested;
-    return trim(templates[0]?.provider_id);
-  }
 
   function draftFromConfig(record) {
     return {
@@ -347,23 +311,6 @@
     return parsed;
   }
 
-  function parseMemoryDraftJson(raw, providerId, capability, label) {
-    const parsed = parseDraftJson(raw, providerId);
-    const normalizedCapability = trim(parsed.capability || capability) || capability;
-    if (normalizedCapability !== capability) {
-      throw new Error(`${label} JSON 的 capability 必须保持为 ${capability}`);
-    }
-    parsed.capability = capability;
-    return parsed;
-  }
-
-  function memoryTextareaId(sectionKey) {
-    return `llm-memory-${sectionKey}-json`;
-  }
-
-  function memoryTemplateSelectId(sectionKey) {
-    return `llm-memory-${sectionKey}-template`;
-  }
 
   function draftFailureMessage(target, fallback = "请检查 JSON 配置中的必填项、地址和密钥。") {
     const validationErrors = Array.isArray(target?.validation?.errors) ? target.validation.errors : [];
@@ -386,252 +333,6 @@
     state.editor.probe = await ApiClient.probeLlmDraft(draft);
     renderAll();
     return !!state.editor.probe?.success;
-  }
-
-  async function probeMemoryDraft(sectionKey, draft) {
-    const section = llmState().editor.memory?.[sectionKey];
-    if (!section) return false;
-    section.validation = await ApiClient.validateLlmDraft(draft);
-    if (!section.validation?.valid) {
-      section.probe = null;
-      renderAll();
-      return false;
-    }
-    section.probe = await ApiClient.probeLlmDraft(draft);
-    renderAll();
-    return !!section.probe?.success;
-  }
-
-  async function loadMemorySection(editor, sectionKey, meta) {
-    const section = editor.memory?.[sectionKey];
-    if (!section) return;
-    section.configId = trim(meta?.configId);
-    section.providerId = "";
-    section.providerModel = trim(meta?.providerModel);
-    section.templateProviderId = "";
-    section.jsonText = "";
-    section.initialJsonText = "";
-    section.validation = null;
-    section.probe = null;
-    section.error = "";
-    section.modelKey = "";
-    if (!section.configId) {
-      section.error = `${section.label} 配置记录尚未创建。`;
-      return;
-    }
-    {
-      const record = await ApiClient.getLlmConfig(section.configId, { includeSecrets: true });
-      const draft = draftFromConfig(record);
-      section.providerId = trim(draft.provider_id);
-      section.providerModel = trim(meta?.providerModel || providerModelFromDraft(draft));
-      section.templateProviderId = defaultMemoryTemplateProviderId(section.capability, section.providerId);
-      section.jsonText = JSON.stringify(draft, null, 2);
-      section.initialJsonText = section.jsonText;
-      return;
-    }
-    if (!section.modelKey) {
-      section.error = `${section.label} 模型尚未配置。`;
-      return;
-    }
-    const binding = llmState().bindingMap[section.modelKey] || null;
-    if (!binding) {
-      section.error = `${section.label} 绑定不存在：${section.modelKey}`;
-      return;
-    }
-    section.configId = trim(binding.config_id || binding.llm_config_id);
-    if (!section.configId) {
-      section.error = `${section.label} 绑定缺少配置记录。`;
-      return;
-    }
-    const record = await ApiClient.getLlmConfig(section.configId, { includeSecrets: true });
-    const draft = draftFromConfig(record);
-    section.providerId = trim(draft.provider_id);
-    section.jsonText = JSON.stringify(draft, null, 2);
-    section.initialJsonText = section.jsonText;
-  }
-
-  async function loadMemorySectionConfig(editor, sectionKey, meta) {
-    const section = editor.memory?.[sectionKey];
-    if (!section) return;
-    section.configId = trim(meta?.configId);
-    section.providerId = "";
-    section.providerModel = trim(meta?.providerModel);
-    section.templateProviderId = "";
-    section.jsonText = "";
-    section.initialJsonText = "";
-    section.validation = null;
-    section.probe = null;
-    section.error = "";
-    if (!section.configId) {
-      section.templateProviderId = defaultMemoryTemplateProviderId(section.capability);
-      if (!section.templateProviderId) {
-        section.error = `${section.label} 暂无可用模板。`;
-        return;
-      }
-      await ensureTemplate(section.templateProviderId);
-      const draft = buildDraftFromTemplate(section.templateProviderId, section.capability);
-      section.providerId = trim(draft.provider_id);
-      section.providerModel = providerModelFromDraft(draft);
-      section.jsonText = JSON.stringify(draft, null, 2);
-      section.initialJsonText = section.jsonText;
-      return;
-    }
-    const record = await ApiClient.getLlmConfig(section.configId, { includeSecrets: true });
-    const draft = draftFromConfig(record);
-    section.providerId = trim(draft.provider_id);
-    section.providerModel = trim(meta?.providerModel || providerModelFromDraft(draft));
-    section.templateProviderId = defaultMemoryTemplateProviderId(section.capability, section.providerId);
-    section.jsonText = JSON.stringify(draft, null, 2);
-    section.initialJsonText = section.jsonText;
-  }
-
-  function syncMemorySectionText(sectionKey) {
-    const section = llmState().editor.memory?.[sectionKey];
-    if (!section) return null;
-    const textarea = document.getElementById(memoryTextareaId(sectionKey));
-    if (textarea) section.jsonText = textarea.value || "";
-    return section;
-  }
-
-  function memorySectionIsModified(section) {
-    if (!section) return false;
-    return trim(section.jsonText) !== trim(section.initialJsonText);
-  }
-
-  function memorySectionNeedsInitialSave(section) {
-    if (!section) return false;
-    return !trim(section.configId) && !trim(section.error) && !!trim(section.jsonText) && !trim(section.initialJsonText);
-  }
-
-  function memorySectionHasPendingChanges(section) {
-    return memorySectionNeedsInitialSave(section) || memorySectionIsModified(section);
-  }
-
-  function modifiedMemorySectionKeys(memory = llmState().editor.memory) {
-    return ["embedding", "rerank"].filter((sectionKey) => memorySectionHasPendingChanges(memory?.[sectionKey]));
-  }
-
-  function initialMemorySectionProviderModel(section) {
-    if (!section) return "";
-    const initialText = trim(section.initialJsonText || "");
-    if (!initialText) return trim(section.providerModel || "");
-    try {
-      const draft = parseMemoryDraftJson(
-        initialText,
-        section.providerId || "",
-        section.capability,
-        section.label || section.capability || "memory"
-      );
-      return providerModelFromDraft(draft);
-    } catch (_error) {
-      return trim(section.providerModel || "");
-    }
-  }
-
-  function memorySaveRequiresRebuildConfirmation({
-    currentEmbeddingProviderModel = "",
-    nextEmbeddingProviderModel = "",
-    embeddingModified = false,
-    rerankModified = false,
-  } = {}) {
-    void rerankModified;
-    const currentModel = trim(currentEmbeddingProviderModel);
-    const nextModel = trim(nextEmbeddingProviderModel);
-    return Boolean(embeddingModified && currentModel && nextModel && currentModel !== nextModel);
-  }
-
-  function memorySectionKeyFromTextareaId(elementId) {
-    const text = trim(elementId);
-    if (!text.startsWith("llm-memory-") || !text.endsWith("-json")) return "";
-    return trim(text.slice("llm-memory-".length, -"-json".length));
-  }
-
-  function refreshMemorySaveButtonState() {
-    const button = U.llmEditorShell?.querySelector('[data-llm-action="save-memory"]');
-    if (!button) return;
-    button.disabled = !canSaveMemoryEditor() || !!llmState().saving;
-  }
-
-  function handleMemorySectionInput(sectionKey) {
-    const section = syncMemorySectionText(sectionKey);
-    if (!section) return;
-    section.validation = null;
-    section.probe = null;
-    refreshMemorySaveButtonState();
-  }
-
-  function setMemorySectionValidationError(section, message, field = "json") {
-    if (!section) return;
-    section.validation = {
-      valid: false,
-      errors: [{ field, code: "invalid", message: String(message || "Validation failed.") }],
-    };
-    section.probe = null;
-  }
-
-  function prepareMemorySectionDraft(sectionKey) {
-    const section = syncMemorySectionText(sectionKey);
-    if (!section) {
-      return { section: null, draft: null, message: "Section not found." };
-    }
-    if (!trim(section.jsonText)) {
-      const message = `${section.label || sectionKey} JSON is empty.`;
-      setMemorySectionValidationError(section, message);
-      return { section, draft: null, message };
-    }
-    try {
-      const draft = parseMemoryDraftJson(
-        section.jsonText || "",
-        section.providerId || "",
-        section.capability,
-        section.label || sectionKey
-      );
-      section.providerId = trim(draft.provider_id);
-      section.providerModel = providerModelFromDraft(draft);
-      section.templateProviderId = defaultMemoryTemplateProviderId(section.capability, section.providerId);
-      return { section, draft, message: "" };
-    } catch (error) {
-      const message = error?.message || `${section.label || sectionKey} JSON is invalid.`;
-      setMemorySectionValidationError(section, message);
-      return { section, draft: null, message };
-    }
-  }
-
-  async function persistMemorySectionDraft(section, draft) {
-    if (!section || !draft) return null;
-    const configResult = trim(section.configId)
-      ? await ApiClient.updateLlmConfig(section.configId, draft)
-      : await ApiClient.createLlmConfig(draft);
-    const config = configResult?.item || configResult;
-    section.configId = trim(config?.config_id || section.configId);
-    return config;
-  }
-
-  async function handleMemoryTemplateChange(sectionKey) {
-    const section = llmState().editor.memory?.[sectionKey];
-    if (!section) return;
-    const providerId = trim(document.getElementById(memoryTemplateSelectId(sectionKey))?.value || section.templateProviderId);
-    if (!providerId) return;
-    await ensureTemplate(providerId);
-    const draft = buildDraftFromTemplate(providerId, section.capability);
-    section.templateProviderId = providerId;
-    section.providerId = trim(draft.provider_id);
-    section.providerModel = providerModelFromDraft(draft);
-    section.jsonText = JSON.stringify(draft, null, 2);
-    section.validation = null;
-    section.probe = null;
-    section.error = "";
-    renderAll();
-  }
-
-  function canSaveMemoryEditor() {
-    const memory = llmState().editor.memory;
-    return Boolean(
-      memory
-      && !memory.loading
-      && !trim(memory.error)
-      && modifiedMemorySectionKeys(memory).length
-    );
   }
 
   async function openCreateModal() {
@@ -697,47 +398,6 @@
     renderAll();
   }
 
-  async function openMemoryModal() {
-    const state = llmState();
-    if (!state.loading && !state.bindings.length) {
-      await loadAll();
-    }
-    const editor = {
-      ...emptyEditorState(),
-      open: true,
-      mode: "memory",
-      memory: {
-        loading: true,
-        error: "",
-        embedding: emptyMemorySection("Embedding", "embedding"),
-        rerank: emptyMemorySection("Rerank", "rerank"),
-      },
-    };
-    state.editor = editor;
-    renderAll();
-    try {
-      const memoryBinding = await ApiClient.getLlmMemoryModels();
-      if (llmState().editor !== editor) return;
-      await Promise.all([
-        loadMemorySectionConfig(editor, "embedding", {
-          configId: memoryBinding?.embedding_config_id,
-          providerModel: memoryBinding?.embedding_provider_model,
-        }),
-        loadMemorySectionConfig(editor, "rerank", {
-          configId: memoryBinding?.rerank_config_id,
-          providerModel: memoryBinding?.rerank_provider_model,
-        }),
-      ]);
-    } catch (error) {
-      if (llmState().editor !== editor) return;
-      editor.memory.error = error.message || "记忆模型配置加载失败";
-    } finally {
-      if (llmState().editor !== editor) return;
-      editor.memory.loading = false;
-      renderAll();
-    }
-  }
-
   function closeEditor() {
     llmState().editor = emptyEditorState();
     renderAll();
@@ -755,41 +415,6 @@
     return validationMarkup + probeMarkup;
   }
 
-  function renderMemorySection(sectionKey, section) {
-    const templates = memoryTemplates(section?.capability);
-    return `
-      <section class="llm-section llm-memory-section">
-        <div class="llm-memory-row">
-          <div>
-            <h3>${escv(section?.label || sectionKey)}</h3>
-            <p class="llm-muted">保存时会自动验证 JSON 并测试当前连接。</p>
-          </div>
-          <span class="llm-capability-badge ${escv(section?.capability || sectionKey)}">${escv(capabilityLabel(section?.capability || sectionKey))}</span>
-        </div>
-        <div class="llm-memory-meta">
-          <span class="policy-chip neutral">Config: ${escv(section?.configId || "-")}</span>
-          <span class="policy-chip neutral">${escv(section?.providerModel || section?.providerId || "-")}</span>
-        </div>
-        ${section?.error ? `<div class="llm-memory-banner">${escv(section.error)}</div>` : ""}
-        <div class="llm-form-grid single">
-          <label class="resource-field">
-            <span class="resource-field-label">模板</span>
-            <select id="${escv(memoryTemplateSelectId(sectionKey))}" class="resource-search resource-select" data-llm-memory-template="${escv(sectionKey)}" data-resource-select-label="${escv(`${section?.label || sectionKey} template`)}"${section?.error || !templates.length ? " disabled" : ""}>
-              ${templates.length
-                ? templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(section?.templateProviderId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")
-                : '<option value="">暂无可用模板</option>'}
-            </select>
-          </label>
-        </div>
-        <label class="resource-field">
-          <span class="resource-field-label">JSON 配置</span>
-          <textarea id="${escv(memoryTextareaId(sectionKey))}" class="llm-json-editor" rows="18" spellcheck="false"${section?.error ? " disabled" : ""}>${escv(section?.jsonText || "")}</textarea>
-        </label>
-        <p class="llm-muted">"api_key" 支持用逗号或换行填写多把 key，例如 key1,key2。多个 key 会按顺序轮换。</p>
-        ${renderStatus(section)}
-      </section>`;
-  }
-
   function parseBindingRetryOn(raw) {
     return String(raw || "")
       .split(/[\n,]/)
@@ -799,7 +424,7 @@
 
   function syncBindingInputs() {
     const editor = llmState().editor;
-    if (!editor || editor.mode === "memory") return editor;
+    if (!editor) return editor;
     const modelKeyInput = document.getElementById("llm-model-key-input");
     const providerSelect = document.getElementById("llm-provider-select");
     const jsonEditor = document.getElementById("llm-json-editor");
@@ -845,7 +470,7 @@
 
   function setBindingJsonEditorValue(nextText) {
     const editor = llmState().editor;
-    if (!editor || editor.mode === "memory") return false;
+    if (!editor) return false;
     const normalized = String(nextText || "");
     editor.jsonText = normalized;
     const jsonEditor = document.getElementById("llm-json-editor");
@@ -855,7 +480,7 @@
 
   function syncContextWindowTokensIntoJsonEditor(tokens) {
     const editor = llmState().editor;
-    if (!editor || editor.mode === "memory") return false;
+    if (!editor) return false;
     const resolved = validContextWindowTokensValue(tokens);
     if (!Number.isInteger(resolved)) return false;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
@@ -875,7 +500,7 @@
 
   function syncContextWindowTokensInputValue(tokens) {
     const editor = llmState().editor;
-    if (!editor || editor.mode === "memory") return false;
+    if (!editor) return false;
     const normalized = Number.isInteger(validContextWindowTokensValue(tokens)) ? String(validContextWindowTokensValue(tokens)) : "";
     editor.contextWindowTokens = normalized;
     const input = document.getElementById("llm-binding-context-window-tokens");
@@ -885,7 +510,7 @@
 
   function handleBindingContextWindowInput() {
     const editor = llmState().editor;
-    if (!editor || editor.mode === "memory") return;
+    if (!editor) return;
     const input = document.getElementById("llm-binding-context-window-tokens");
     editor.contextWindowTokens = trim(input?.value || editor.contextWindowTokens);
     const resolved = validContextWindowTokensValue(editor.contextWindowTokens);
@@ -894,7 +519,7 @@
 
   function handleBindingJsonEditorInput() {
     const editor = llmState().editor;
-    if (!editor || editor.mode === "memory") return;
+    if (!editor) return;
     const jsonEditor = document.getElementById("llm-json-editor");
     editor.jsonText = String(jsonEditor?.value || editor.jsonText || "");
     const resolved = contextWindowTokensFromDraftText(editor.jsonText, editor.providerId || "");
@@ -903,7 +528,7 @@
 
   function reconcileBindingContextWindowTokens() {
     const editor = syncBindingInputs();
-    if (!editor || editor.mode === "memory") return editor;
+    if (!editor) return editor;
     const providerId = trim(editor.providerId || "");
     const jsonText = String(editor.jsonText || "");
     const inputTokens = validContextWindowTokensValue(editor.contextWindowTokens);
@@ -1184,28 +809,6 @@
             </div>
           </div>
         </article>`;
-    } else if (state.editor.mode === "memory") {
-      const memory = state.editor.memory;
-      const saveDisabled = !canSaveMemoryEditor() || state.saving;
-      U.llmEditorShell.innerHTML = `
-        <article class="model-detail-card model-config-shell llm-memory-shell">
-          <div class="detail-modal-header model-config-header">
-            <div class="detail-modal-title">
-              <h2>RAG模型设置</h2>
-              <p class="subtitle">编辑 Memory Runtime 当前使用的 Embedding 与 Rerank JSON，保存时会自动测试连通性并刷新运行时。</p>
-            </div>
-            <div class="detail-modal-actions">
-              <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
-              <button type="button" class="toolbar-btn success" data-llm-action="save-memory"${saveDisabled ? " disabled" : ""}>保存并测试</button>
-            </div>
-          </div>
-          <div class="detail-modal-body model-config-body">
-            ${memory?.error ? `<div class="llm-memory-banner">${escv(memory.error)}</div>` : ""}
-            ${memory?.loading
-              ? '<div class="empty-state compact">正在加载记忆模型配置...</div>'
-              : `<div class="llm-memory-grid">${renderMemorySection("embedding", memory.embedding)}${renderMemorySection("rerank", memory.rerank)}</div>`}
-          </div>
-        </article>`;
     } else {
       const binding = currentBinding();
       U.llmEditorShell.innerHTML = `
@@ -1290,28 +893,6 @@
                 <button type="button" class="toolbar-btn success" data-llm-action="save-create">添加模型</button>
               </div>
             </div>
-          </div>
-        </article>`;
-    } else if (state.editor.mode === "memory") {
-      const memory = state.editor.memory;
-      const saveDisabled = !canSaveMemoryEditor() || state.saving;
-      U.llmEditorShell.innerHTML = `
-        <article class="model-detail-card model-config-shell llm-memory-shell">
-          <div class="detail-modal-header model-config-header">
-            <div class="detail-modal-title">
-              <h2>RAG模型设置</h2>
-              <p class="subtitle">编辑 Memory Runtime 当前使用的 Embedding 与 Rerank JSON，保存时会自动测试连通性并刷新运行时。</p>
-            </div>
-            <div class="detail-modal-actions">
-              <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
-              <button type="button" class="toolbar-btn success" data-llm-action="save-memory"${saveDisabled ? " disabled" : ""}>保存并测试</button>
-            </div>
-          </div>
-          <div class="detail-modal-body model-config-body">
-            ${memory?.error ? `<div class="llm-memory-banner">${escv(memory.error)}</div>` : ""}
-            ${memory?.loading
-              ? '<div class="empty-state compact">正在加载记忆模型配置...</div>'
-              : `<div class="llm-memory-grid">${renderMemorySection("embedding", memory.embedding)}${renderMemorySection("rerank", memory.rerank)}</div>`}
           </div>
         </article>`;
     } else {
@@ -1777,300 +1358,6 @@
     }
   }
 
-  async function handleMemorySave() {
-    const state = llmState();
-    if (!canSaveMemoryEditor()) {
-      throw new Error(
-        state.editor.memory?.error
-        || state.editor.memory?.embedding?.error
-        || state.editor.memory?.rerank?.error
-        || "记忆模型配置尚未就绪"
-      );
-    }
-    const embeddingSection = syncMemorySectionText("embedding");
-    const rerankSection = syncMemorySectionText("rerank");
-    const embeddingDraft = parseMemoryDraftJson(
-      embeddingSection?.jsonText || "",
-      embeddingSection?.providerId || "",
-      "embedding",
-      embeddingSection?.label || "Embedding"
-    );
-    const rerankDraft = parseMemoryDraftJson(
-      rerankSection?.jsonText || "",
-      rerankSection?.providerId || "",
-      "rerank",
-      rerankSection?.label || "Rerank"
-    );
-    embeddingSection.providerId = trim(embeddingDraft.provider_id);
-    embeddingSection.providerModel = providerModelFromDraft(embeddingDraft);
-    embeddingSection.templateProviderId = defaultMemoryTemplateProviderId("embedding", embeddingSection.providerId);
-    rerankSection.providerId = trim(rerankDraft.provider_id);
-    rerankSection.providerModel = providerModelFromDraft(rerankDraft);
-    rerankSection.templateProviderId = defaultMemoryTemplateProviderId("rerank", rerankSection.providerId);
-    state.saving = true;
-    renderAll();
-    try {
-      showToast({
-        title: "测试中",
-        text: "正在测试 Embedding 配置连接...",
-        kind: "info",
-        persistent: true,
-      });
-      const embeddingOk = await probeMemoryDraft("embedding", embeddingDraft);
-      if (!embeddingOk) {
-        throw new Error(`Embedding 测试未通过：${draftFailureMessage(embeddingSection)}`);
-      }
-      showToast({
-        title: "测试中",
-        text: "Embedding 已通过，正在测试 Rerank 配置连接...",
-        kind: "info",
-        persistent: true,
-      });
-      const rerankOk = await probeMemoryDraft("rerank", rerankDraft);
-      if (!rerankOk) {
-        throw new Error(`Rerank 测试未通过：${draftFailureMessage(rerankSection)}`);
-      }
-      showToast({
-        title: "保存中",
-        text: "连接测试通过，正在保存记忆模型配置...",
-        kind: "info",
-        persistent: true,
-      });
-      const embeddingConfigResult = trim(embeddingSection.configId)
-        ? await ApiClient.updateLlmConfig(embeddingSection.configId, embeddingDraft)
-        : await ApiClient.createLlmConfig(embeddingDraft);
-      const rerankConfigResult = trim(rerankSection.configId)
-        ? await ApiClient.updateLlmConfig(rerankSection.configId, rerankDraft)
-        : await ApiClient.createLlmConfig(rerankDraft);
-      const embeddingConfig = embeddingConfigResult?.item || embeddingConfigResult;
-      const rerankConfig = rerankConfigResult?.item || rerankConfigResult;
-      embeddingSection.configId = trim(embeddingConfig?.config_id || embeddingSection.configId);
-      rerankSection.configId = trim(rerankConfig?.config_id || rerankSection.configId);
-      await ApiClient.updateLlmMemoryModels({
-        embedding_config_id: embeddingSection.configId,
-        rerank_config_id: rerankSection.configId,
-      });
-      showToast({
-        title: "保存成功",
-        text: "记忆模型配置已更新",
-        kind: "success",
-      });
-      closeEditor();
-      await loadAll();
-    } finally {
-      state.saving = false;
-      renderAll();
-    }
-  }
-
-  async function handleMemorySavePartial() {
-    const state = llmState();
-    if (!canSaveMemoryEditor()) {
-      const modifiedKeys = modifiedMemorySectionKeys(state.editor.memory);
-      throw new Error(
-        (!modifiedKeys.length ? "当前没有已修改的记忆模型配置。" : "")
-        || state.editor.memory?.error
-        || state.editor.memory?.embedding?.error
-        || state.editor.memory?.rerank?.error
-        || "Memory model config is not ready."
-      );
-    }
-    // Persist current textarea edits into state before any rerender happens.
-    syncMemorySectionText("embedding");
-    syncMemorySectionText("rerank");
-    const sectionKeys = modifiedMemorySectionKeys(state.editor.memory);
-    if (!sectionKeys.length) {
-      throw new Error("当前没有已修改的记忆模型配置。");
-    }
-    state.saving = true;
-    renderAll();
-    try {
-      const preparedBySection = new Map();
-      sectionKeys.forEach((sectionKey) => {
-        preparedBySection.set(sectionKey, prepareMemorySectionDraft(sectionKey));
-      });
-      const embeddingSection = state.editor.memory?.embedding;
-      const preparedEmbedding = preparedBySection.get("embedding");
-      const rebuildRequired = memorySaveRequiresRebuildConfirmation({
-        currentEmbeddingProviderModel: initialMemorySectionProviderModel(embeddingSection),
-        nextEmbeddingProviderModel: preparedEmbedding?.draft ? providerModelFromDraft(preparedEmbedding.draft) : "",
-        embeddingModified: sectionKeys.includes("embedding"),
-        rerankModified: sectionKeys.includes("rerank"),
-      });
-      if (rebuildRequired) {
-        const { confirmed } = await requestInlineConfirm({
-          title: "确认重建向量数据库？",
-          text: "检测到 Embedding 模型已更改，需要立即全量重建数据库。确认后将保存新模型，并立即清空本地 Qdrant 后重新全量构建。",
-          confirmLabel: "保存并重建",
-          confirmKind: "danger",
-        });
-        if (!confirmed) {
-          return;
-        }
-      }
-
-      if (rebuildRequired) {
-        const embeddingPrepared = preparedBySection.get("embedding");
-        const rerankPrepared = sectionKeys.includes("rerank")
-          ? (preparedBySection.get("rerank") || prepareMemorySectionDraft("rerank"))
-          : null;
-        const validationResults = [];
-        for (const [sectionKey, prepared] of preparedBySection.entries()) {
-          const section = prepared.section;
-          const label = section?.label || capabilityLabel(sectionKey);
-          if (!section || !prepared.draft) {
-            validationResults.push({ sectionKey, label, ok: false, message: prepared.message || `${label} is invalid.` });
-            continue;
-          }
-          showToast({
-            title: "Testing",
-            text: `Testing ${label} connection...`,
-            kind: "info",
-            persistent: true,
-          });
-          const ok = await probeMemoryDraft(sectionKey, prepared.draft);
-          validationResults.push({ sectionKey, label, ok, message: ok ? "" : draftFailureMessage(section) });
-        }
-        const failedValidation = validationResults.filter((item) => !item.ok);
-        if (failedValidation.length) {
-          throw new Error(failedValidation.map((item) => `${item.label}: ${item.message}`).join("; "));
-        }
-
-        showToast({
-          title: "Saving",
-          text: "Saving memory embedding config...",
-          kind: "info",
-          persistent: true,
-        });
-        const atomicResult = await ApiClient.atomicSaveMemoryEmbedding({
-          embedding: {
-            config_id: trim(embeddingPrepared?.section?.configId || ""),
-            draft: embeddingPrepared?.draft || null,
-          },
-          rerank: rerankPrepared?.draft
-            ? {
-                config_id: trim(rerankPrepared.section?.configId || ""),
-                draft: rerankPrepared.draft,
-              }
-            : null,
-        });
-        showToast({
-          title: "Save Complete",
-          text: `Memory embedding updated. Dense rebuild indexed ${Number(atomicResult?.rebuild?.indexed || 0)} records.`,
-          kind: "success",
-        });
-        closeEditor();
-        await loadAll();
-        return;
-      }
-
-      const results = [];
-      const bindingPayload = {};
-      for (const sectionKey of sectionKeys) {
-        const prepared = preparedBySection.get(sectionKey) || prepareMemorySectionDraft(sectionKey);
-        const section = prepared.section;
-        const label = section?.label || capabilityLabel(sectionKey);
-        if (!section || !prepared.draft) {
-          results.push({ sectionKey, label, saved: false, message: prepared.message || `${label} is invalid.` });
-          continue;
-        }
-        showToast({
-          title: "Testing",
-          text: `Testing ${label} connection...`,
-          kind: "info",
-          persistent: true,
-        });
-        const ok = await probeMemoryDraft(sectionKey, prepared.draft);
-        if (!ok) {
-          results.push({ sectionKey, label, saved: false, message: draftFailureMessage(section) });
-          continue;
-        }
-        try {
-          showToast({
-            title: "Saving",
-            text: `Saving ${label} config...`,
-            kind: "info",
-            persistent: true,
-          });
-          await persistMemorySectionDraft(section, prepared.draft);
-          section.initialJsonText = section.jsonText;
-          if (trim(section.configId)) {
-            bindingPayload[`${sectionKey}_config_id`] = section.configId;
-          }
-          results.push({ sectionKey, label, saved: true, message: `${label} saved.` });
-        } catch (error) {
-          const message = error?.message || `${label} save failed.`;
-          section.probe = { success: false, message };
-          results.push({ sectionKey, label, saved: false, message });
-        }
-      }
-
-      const savedItems = results.filter((item) => item.saved);
-      const failedItems = results.filter((item) => !item.saved);
-      let rebuildResult = null;
-
-      if (Object.keys(bindingPayload).length) {
-        const updatedBinding = await ApiClient.updateLlmMemoryModels(bindingPayload);
-        if (updatedBinding) {
-          const embeddingSection = state.editor.memory?.embedding;
-          const rerankSection = state.editor.memory?.rerank;
-          if (embeddingSection && Object.prototype.hasOwnProperty.call(bindingPayload, "embedding_config_id")) {
-            embeddingSection.configId = trim(updatedBinding.embedding_config_id || embeddingSection.configId);
-            embeddingSection.providerModel = trim(updatedBinding.embedding_provider_model || embeddingSection.providerModel);
-          }
-          if (rerankSection && Object.prototype.hasOwnProperty.call(bindingPayload, "rerank_config_id")) {
-            rerankSection.configId = trim(updatedBinding.rerank_config_id || rerankSection.configId);
-            rerankSection.providerModel = trim(updatedBinding.rerank_provider_model || rerankSection.providerModel);
-          }
-        }
-      }
-
-      if (rebuildRequired && savedItems.some((item) => item.sectionKey === "embedding")) {
-        showToast({
-          title: "\u91cd\u5efa\u4e2d",
-          text: "\u6b63\u5728\u6e05\u7a7a\u672c\u5730 Qdrant...",
-          kind: "info",
-          persistent: true,
-        });
-        await ApiClient.resetMemoryDenseIndex({ reason: "embedding_model_changed" });
-        showToast({
-          title: "\u91cd\u5efa\u4e2d",
-          text: "\u6b63\u5728\u5168\u91cf\u91cd\u5efa\u5411\u91cf\u6570\u636e\u5e93...",
-          kind: "info",
-          persistent: true,
-        });
-        rebuildResult = await ApiClient.rebuildMemoryDenseIndex({ reason: "embedding_model_changed" });
-      }
-
-      if (!savedItems.length) {
-        throw new Error(failedItems.map((item) => `${item.label}: ${item.message}`).join("; ") || "No memory configs were saved.");
-      }
-
-      if (!failedItems.length) {
-        showToast({
-          title: "Save Complete",
-          text: rebuildResult
-            ? `Memory model settings updated. Dense rebuild indexed ${Number(rebuildResult.indexed || 0)} records.`
-            : "Memory model settings updated.",
-          kind: "success",
-        });
-        closeEditor();
-        await loadAll();
-        return;
-      }
-
-      showToast({
-        title: "Partial Save",
-        text: `Saved: ${savedItems.map((item) => item.label).join(", ")}. Pending: ${failedItems.map((item) => `${item.label} (${item.message})`).join("; ")}`,
-        kind: "info",
-      });
-      await loadAll();
-    } finally {
-      state.saving = false;
-      renderAll();
-    }
-  }
-
   async function handleDelete() {
     const binding = currentBinding();
     if (!binding) return;
@@ -2147,17 +1434,10 @@
     if (llmState().eventsBound) return;
     refs();
     bindList();
-    U.llmMemorySettings?.addEventListener("click", () => void openMemoryModal().catch((error) => {
-      llmState().error = error.message || "加载失败";
-      showToast({ title: "打开失败", text: llmState().error, kind: "error" });
-      renderAll();
-    }));
     U.llmConfigCreate?.addEventListener("click", () => void openCreateModal());
     U.llmEditorBackdrop?.addEventListener("click", closeEditor);
     U.llmEditorShell?.addEventListener("change", (event) => {
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
-      const memoryTemplateSection = event.target?.dataset?.llmMemoryTemplate;
-      if (memoryTemplateSection) void handleMemoryTemplateChange(memoryTemplateSection);
     });
     U.llmEditorShell?.addEventListener("input", (event) => {
       if (event.target?.id === "llm-binding-context-window-tokens") {
@@ -2167,9 +1447,6 @@
       if (event.target?.id === "llm-json-editor") {
         handleBindingJsonEditorInput();
       }
-      const sectionKey = memorySectionKeyFromTextareaId(event.target?.id);
-      if (!sectionKey) return;
-      handleMemorySectionInput(sectionKey);
     });
     U.llmEditorShell?.addEventListener("click", (event) => {
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
@@ -2178,7 +1455,6 @@
       if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "save-memory") { void handleMemorySavePartial().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
     });
     llmState().eventsBound = true;
@@ -2188,17 +1464,10 @@
     if (llmState().eventsBound) return;
     refs();
     bindList();
-    U.llmMemorySettings?.addEventListener("click", () => void openMemoryModal().catch((error) => {
-      llmState().error = error.message || "加载失败";
-      showToast({ title: "打开失败", text: llmState().error, kind: "error" });
-      renderAll();
-    }));
     U.llmConfigCreate?.addEventListener("click", () => void openCreateModal());
     U.llmEditorBackdrop?.addEventListener("click", closeEditor);
     U.llmEditorShell?.addEventListener("change", (event) => {
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
-      const memoryTemplateSection = event.target?.dataset?.llmMemoryTemplate;
-      if (memoryTemplateSection) void handleMemoryTemplateChange(memoryTemplateSection);
     });
     U.llmEditorShell?.addEventListener("input", (event) => {
       if (event.target?.id === "llm-binding-context-window-tokens") {
@@ -2208,9 +1477,6 @@
       if (event.target?.id === "llm-json-editor") {
         handleBindingJsonEditorInput();
       }
-      const sectionKey = memorySectionKeyFromTextareaId(event.target?.id);
-      if (!sectionKey) return;
-      handleMemorySectionInput(sectionKey);
     });
     U.llmEditorShell?.addEventListener("click", (event) => {
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
@@ -2220,7 +1486,6 @@
       if (action === "test-max-concurrency") { void handleTestMaxConcurrency().catch((error) => { llmState().error = error.message || "测试最大并发数失败"; showToast({ title: "测试最大并发数失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "save-memory") { void handleMemorySavePartial().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
     });
     llmState().eventsBound = true;
@@ -2242,8 +1507,6 @@
     bindingNameLabel,
     bindingNameRequiredMessage,
     normalizeBindingNameText,
-    memorySaveRequiresRebuildConfirmation,
-    modifiedMemorySectionKeys,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.roleEditing) {

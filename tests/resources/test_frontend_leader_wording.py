@@ -17,8 +17,6 @@ def test_frontend_model_and_session_wording_matches_latest_copy() -> None:
     assert 'aria-label="会话列表"' in html
     assert 'aria-label="会话视图"' in html
     assert 'aria-label="会话批量操作"' in html
-    assert 'id="llm-memory-settings-btn" class="toolbar-btn ghost" type="button">RAG模型设置</button>' in html
-    assert 'id="llm-memory-settings-btn" class="toolbar-btn ghost" type="button">记忆模型设置</button>' not in html
     assert "<span>Leader 会话</span>" not in html
     assert "CEO 会话" not in html
     assert "CEO 回合" not in html
@@ -38,8 +36,6 @@ def test_frontend_model_and_session_wording_matches_latest_copy() -> None:
 
     assert 'const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };' in llm_js
     assert 'const SCOPE_LABELS = { ceo: "CEO", execution: "Execution", inspection: "Inspection" };' not in llm_js
-    assert llm_js.count("<h2>RAG模型设置</h2>") == 2
-    assert "<h2>记忆模型设置</h2>" not in llm_js
 
     assert "主Agent（Leader）角色" in api_client_js
     assert "主Agent（CEO）角色" not in api_client_js

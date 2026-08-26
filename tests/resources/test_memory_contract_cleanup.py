@@ -105,4 +105,7 @@ def test_memory_tools_config_no_longer_exposes_legacy_transition_fields() -> Non
     assert "backend" not in payload
     assert "bootstrap_mode" not in payload
     assert "compat" not in payload
-    assert payload["store"]["qdrant_collection"] == "g3ku_memory"
+    assert "store" not in payload
+    assert "retrieval" not in payload
+    assert "embedding" not in payload
+    assert "catalog_summary" not in payload

@@ -1301,7 +1301,6 @@ class CeoMessageBuilder:
                     await maybe_refresh(
                         session_id=str(getattr(getattr(session, 'state', None), 'session_key', '') or 'web:shared').strip() or 'web:shared',
                     )
-                await memory_manager.sync_catalog(main_service)
             except Exception:
                 pass
 

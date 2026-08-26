@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from g3ku.agent.catalog_store import ContextRecordV2
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.main_runtime import LoadSkillContextTool, LoadToolContextTool
 from g3ku.content import ContentNavigationService, parse_content_envelope
