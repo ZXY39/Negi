@@ -33,7 +33,7 @@ from g3ku.json_schema_utils import (
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError
-from g3ku.providers.openai_codex_provider import (
+from g3ku.providers.responses_protocol_helpers import (
     _convert_messages as _preview_responses_messages,
     _convert_tools as _preview_responses_tools,
     _prompt_cache_key as _preview_prompt_cache_key,

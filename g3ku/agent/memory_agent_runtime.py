@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import tool
 from loguru import logger
 
-from g3ku.agent.catalog_store import _release_file_lock, _try_acquire_file_lock
+from g3ku.agent.file_locks import _release_file_lock, _try_acquire_file_lock
 from g3ku.agent.markdown_memory import (
     MemoryEntry,
     format_memory_entry,

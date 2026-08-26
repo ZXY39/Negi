@@ -11,7 +11,7 @@ import httpx
 from loguru import logger
 
 from g3ku.providers.base import LLMProvider, LLMResponse
-from g3ku.providers.openai_codex_provider import (
+from g3ku.providers.responses_protocol_helpers import (
     _convert_messages,
     _convert_tools,
     _consume_sse,

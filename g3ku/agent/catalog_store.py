@@ -55,53 +55,15 @@ def _decode_ns(raw: str) -> tuple[str, ...]:
 
 
 def _try_acquire_file_lock(path: Path, *, metadata: dict[str, object] | None = None) -> Any | None:
-    ensure_dir(path.parent)
-    handle = path.open("a+", encoding="utf-8")
-    try:
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
+    from g3ku.agent.file_locks import _try_acquire_file_lock as _acquire
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
-
-    if metadata:
-        handle.seek(0)
-        handle.truncate(0)
-        handle.write(json.dumps(metadata, ensure_ascii=False))
-        handle.flush()
-        try:
-            os.fsync(handle.fileno())
-        except OSError:
-            pass
-    return handle
+    return _acquire(path, metadata=metadata)
 
 
 def _release_file_lock(handle: Any) -> None:
-    if handle is None:
-        return
-    try:
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
+    from g3ku.agent.file_locks import _release_file_lock as _release
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-    try:
-        handle.close()
-    except Exception:
-        pass
+    _release(handle)
 
 
 def _dense_owner_lock_path(qdrant_path: Path) -> Path:
