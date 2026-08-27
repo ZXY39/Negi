@@ -9,7 +9,7 @@ import httpx
 from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
 
 from .enums import AuthMode, ProbeStatus, ProtocolAdapter
-from .models import NormalizedProviderConfig, ProbeResult
+from .models import ModelCatalogResult, NormalizedProviderConfig, ProbeResult
 
 _PROBE_TIMEOUT_SECONDS = 30
 
@@ -392,3 +392,156 @@ def probe_config_for_concurrency(
     if last_result is not None:
         return last_result
     return _failure_result(config, status=ProbeStatus.INVALID_RESPONSE, message="Probe failed.")
+
+
+def _model_catalog_result(
+    config: NormalizedProviderConfig,
+    *,
+    success: bool,
+    message: str,
+    models: list[str] | None = None,
+    http_status: int | None = None,
+    latency_ms: int | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> ModelCatalogResult:
+    return ModelCatalogResult(
+        success=success,
+        provider_id=config.provider_id,
+        resolved_base_url=config.base_url,
+        models=list(models or []),
+        message=message,
+        latency_ms=latency_ms,
+        http_status=http_status,
+        diagnostics=diagnostics or {},
+    )
+
+
+def _extract_model_ids(payload: Any) -> list[str]:
+    items: Any = None
+    if isinstance(payload, dict):
+        if isinstance(payload.get("data"), list):
+            items = payload["data"]
+        elif isinstance(payload.get("models"), list):
+            items = payload["models"]
+    elif isinstance(payload, list):
+        items = payload
+    if items is None:
+        return []
+    model_ids: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            value = item.strip()
+        elif isinstance(item, dict):
+            value = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+        else:
+            value = ""
+        if value and value not in model_ids:
+            model_ids.append(value)
+    return sorted(model_ids, key=str.lower)
+
+
+def _list_models_single_request(client: httpx.Client, config: NormalizedProviderConfig) -> ModelCatalogResult:
+    headers = _build_openai_headers(config)
+    start = time.perf_counter()
+    response = client.get(_join_url(config.base_url, "/models"), headers=headers)
+    latency_ms = int((time.perf_counter() - start) * 1000)
+    if response.status_code in {401, 403}:
+        return _model_catalog_result(
+            config,
+            success=False,
+            http_status=response.status_code,
+            latency_ms=latency_ms,
+            message="Authentication failed while requesting model catalog.",
+        )
+    if not 200 <= response.status_code < 300:
+        return _model_catalog_result(
+            config,
+            success=False,
+            http_status=response.status_code,
+            latency_ms=latency_ms,
+            message=f"Model catalog request failed with HTTP {response.status_code}.",
+            diagnostics={"body_preview": _response_body_preview(response)},
+        )
+    try:
+        payload = response.json()
+    except json.JSONDecodeError:
+        return _model_catalog_result(
+            config,
+            success=False,
+            http_status=response.status_code,
+            latency_ms=latency_ms,
+            message=(
+                "Model catalog returned a non-JSON response. "
+                "This usually means the Base URL points to a web page, auth portal, or full endpoint path instead of the provider API root."
+            ),
+            diagnostics={"body_preview": _response_body_preview(response)},
+        )
+    model_ids = _extract_model_ids(payload)
+    if not model_ids:
+        return _model_catalog_result(
+            config,
+            success=False,
+            http_status=response.status_code,
+            latency_ms=latency_ms,
+            message="Model catalog response has no recognizable model entries.",
+            diagnostics={"body_preview": _response_body_preview(response)},
+        )
+    return _model_catalog_result(
+        config,
+        success=True,
+        http_status=response.status_code,
+        latency_ms=latency_ms,
+        models=model_ids,
+        message=f"Model catalog returned {len(model_ids)} models.",
+    )
+
+
+def _list_models_single(
+    config: NormalizedProviderConfig,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> ModelCatalogResult:
+    try:
+        with httpx.Client(timeout=_PROBE_TIMEOUT_SECONDS, transport=transport, follow_redirects=True) as client:
+            return _list_models_single_request(client, config)
+    except httpx.TimeoutException:
+        return _model_catalog_result(config, success=False, message="Model catalog request timed out.")
+    except (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError):
+        return _model_catalog_result(
+            config,
+            success=False,
+            message="Could not connect to the provider endpoint.",
+        )
+
+
+def _should_switch_api_key_for_catalog_result(result: ModelCatalogResult) -> bool:
+    if result.http_status is not None:
+        return should_switch_api_key_for_http_status(result.http_status)
+    message = str(result.message or "").lower()
+    return "authentication" in message or "connect" in message or "timed out" in message
+
+
+def list_config_models(
+    config: NormalizedProviderConfig,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> ModelCatalogResult:
+    if config.auth_mode != AuthMode.API_KEY:
+        return _list_models_single(config, transport=transport)
+
+    api_keys = parse_api_keys(str(config.auth.get("api_key", "") or ""))
+    if not api_keys:
+        return _list_models_single(config, transport=transport)
+
+    last_result: ModelCatalogResult | None = None
+    for api_key in api_keys:
+        result = _list_models_single(_config_with_api_key(config, api_key), transport=transport)
+        if result.success:
+            return result
+        last_result = result
+        if not _should_switch_api_key_for_catalog_result(result):
+            return result
+
+    if last_result is not None:
+        return last_result
+    return _model_catalog_result(config, success=False, message="Model catalog request failed.")

@@ -49,6 +49,27 @@ The browser shell has a top-level `记忆管理` page. This is intentionally a r
 - If the queue page is stuck on one `processing` batch, treat that as a backend/runtime issue first, not as a frontend pagination bug.
 - Browser-side memory management remains read-only by default. If an operator expects a retry button in the UI, first check whether the feature was intentionally kept backend-only for the current build rather than debugging missing DOM wiring.
 
+## Model Config Page And Admin Contract
+
+The top-level `模型配置` page manages `llm-config` provider records and model bindings. Config source-of-truth, binding resolution, and secret handling are owned by `config-and-models.md`「llm_config 子系统」; this section covers the admin surface and the add/edit model workflow.
+
+### Frontend Responsibilities
+
+- The add/edit model modal keeps one provider-config JSON draft as its source of truth. Dedicated `请求地址` (`base_url`) and `Apikey` inputs stay two-way synced with that JSON draft, and the `模型ID` field is the binding key.
+- The JSON region renders collapsed by default and auto-expands when draft validation or the connection probe fails.
+- `获取模型列表` renders the provider catalog returned by the backend as a filterable list. Selecting an entry writes it into the draft's `default_model`; in create mode an empty `模型ID` is filled with the same value.
+- `测试最大并发数` requires an explicit confirmation dialog before running because the escalating probe can trigger provider rate limits.
+
+### Backend Responsibilities
+
+- `POST /api/llm/drafts/validate` and `POST /api/llm/drafts/probe` check an unsaved provider draft; `POST /api/llm/drafts/probe-max-concurrency` derives per-key concurrency limits; `POST /api/llm/drafts/models` fetches the provider model catalog (`GET {base_url}/models`) using the draft's credentials and rotates across multiple API keys on authentication failure.
+- Draft endpoints validate the draft first and report field-level errors without issuing provider requests when validation fails.
+
+### Maintenance Boundary
+
+- If `获取模型列表` fails but `测试连接` succeeds, compare the draft `base_url`/`api_key` sync state in `g3ku/web/frontend/org_graph_llm.js` with `POST /api/llm/drafts/models` before debugging the provider.
+- If catalog fetch returns a non-JSON or empty-catalog error, treat it as a provider endpoint-shape problem (same triage as a failed model-catalog connection probe), not as a frontend bug.
+
 ## Frontend I18n Runtime And Language Switching
 
 The frontend language switcher is architecture-relevant because it changes operator-visible workflow and UI state behavior.

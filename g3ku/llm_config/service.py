@@ -13,6 +13,7 @@ from .models import (
     APIKeyMaxConcurrencyProbeItem,
     GenericRuntimeConfig,
     MaxConcurrencyProbeResult,
+    ModelCatalogResult,
     NormalizedProviderConfig,
     ProbeResult,
     ProviderConfigDraft,
@@ -22,7 +23,7 @@ from .models import (
     ValidationResult,
 )
 from .normalization import normalize_draft
-from .probe_strategies import probe_config, probe_config_for_concurrency
+from .probe_strategies import list_config_models, probe_config, probe_config_for_concurrency
 from .repositories import EncryptedConfigRepository
 from .template_registry import TemplateRegistry
 from g3ku.utils.api_keys import parse_api_keys
@@ -83,6 +84,20 @@ class ConfigService:
                 diagnostics={"errors": [error.model_dump(mode="json") for error in validation.errors]},
             )
         return probe_config(validation.normalized_preview, transport=self.transport)
+
+    async def list_draft_models(self, draft: ProviderConfigDraft) -> ModelCatalogResult:
+        validation = self.validate_draft(draft)
+        if not validation.valid or validation.normalized_preview is None:
+            return ModelCatalogResult(
+                success=False,
+                provider_id=draft.provider_id,
+                resolved_base_url=draft.base_url,
+                message="Draft validation failed.",
+                diagnostics={"errors": [error.model_dump(mode="json") for error in validation.errors]},
+            )
+        return await asyncio.to_thread(
+            list_config_models, validation.normalized_preview, transport=self.transport
+        )
 
     async def probe_max_concurrency_draft(self, draft: ProviderConfigDraft) -> MaxConcurrencyProbeResult:
         validation = self.validate_draft(draft)

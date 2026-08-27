@@ -60,7 +60,7 @@ class ApiClient {
             case "memory_note_read_failed":
                 return "读取记忆 note 失败，请稍后重试。";
             case "llm_binding_key_exists":
-                return "配置名已存在，请使用其他配置名。";
+                return "模型ID已存在，请使用其他模型ID。";
             default:
                 return "";
         }
@@ -722,6 +722,14 @@ class ApiClient {
         const data = await this._request("POST", "/api/llm/drafts/probe-max-concurrency", {
             body: payload || {},
             timeoutMs: 120000,
+        });
+        return data.result || null;
+    }
+
+    static async listLlmDraftModels(payload) {
+        const data = await this._request("POST", "/api/llm/drafts/models", {
+            body: payload || {},
+            timeoutMs: 30000,
         });
         return data.result || null;
     }

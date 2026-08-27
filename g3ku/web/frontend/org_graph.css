@@ -5005,6 +5005,117 @@ textarea {
     min-height: 44px;
 }
 
+.llm-json-details {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--bg-app) 55%, transparent);
+    overflow: hidden;
+}
+
+.llm-json-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    cursor: pointer;
+    list-style: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.llm-json-summary:focus-visible {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: -2px;
+}
+
+.llm-json-summary::-webkit-details-marker {
+    display: none;
+}
+
+.llm-json-summary::after {
+    content: "";
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(45deg);
+    transition: transform var(--transition-fast);
+}
+
+.llm-json-details[open] .llm-json-summary::after {
+    transform: rotate(-135deg);
+}
+
+.llm-json-details .llm-json-editor {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    border-radius: 0;
+    min-height: 220px;
+}
+
+.llm-model-list-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+}
+
+.llm-model-list-panel[hidden] {
+    display: none;
+}
+
+.llm-model-list-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+}
+
+.llm-model-list-toolbar .resource-search {
+    flex: 1 1 220px;
+}
+
+.llm-model-list-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    max-height: 180px;
+    overflow: auto;
+}
+
+.llm-model-list-item {
+    padding: 6px 12px;
+    border-radius: var(--radius-full);
+    border: 1px solid var(--border-color);
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.llm-model-list-item:hover {
+    border-color: color-mix(in srgb, var(--brand-primary) 48%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-panel));
+}
+
+.llm-model-list-error {
+    color: var(--status-error-text, #dc2626);
+}
+
+.llm-model-list-field {
+    justify-content: flex-end;
+}
+
 .llm-config-reuse-banner {
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius-md);

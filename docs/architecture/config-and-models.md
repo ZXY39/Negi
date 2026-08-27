@@ -151,6 +151,7 @@ G3KU 的模型系统分两层：
 - 绑定模型 key 到 config record
 - 导出 runtime target
 - 把 secrets 存进安全 overlay，而不是明文长期放在 record 中
+- 为管理面「添加模型」流程提供 draft 校验、连接探测、最大并发探测与供应商模型目录拉取（管理面契约详见 `web-and-admin.md`「Model Config Page And Admin Contract」）
 
 ## 7. 运行时是如何拿到模型的
 

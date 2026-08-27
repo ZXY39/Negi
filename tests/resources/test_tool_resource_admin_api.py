@@ -4040,7 +4040,7 @@ def test_llm_binding_create_returns_structured_duplicate_name_error(monkeypatch)
     assert response.status_code == 400
     detail = response.json()['detail']
     assert detail['code'] == 'llm_binding_key_exists'
-    assert detail['message'] == '配置名已存在，请使用其他配置名。'
+    assert detail['message'] == '模型ID已存在，请使用其他模型ID。'
     assert detail['data']['key'] == 'primary'
 
 

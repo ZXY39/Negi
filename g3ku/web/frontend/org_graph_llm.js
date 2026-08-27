@@ -11,6 +11,8 @@
       configId: "",
       modelKey: "",
       providerId: "",
+      baseUrl: "",
+      apiKey: "",
       jsonText: "",
       initialJsonText: "",
       retryOn: [...DEFAULT_RETRY_ON],
@@ -22,6 +24,7 @@
       initialImageMultimodalEnabled: false,
       validation: null,
       probe: null,
+      modelList: null,
     };
   }
 
@@ -77,7 +80,7 @@
   }
 
   function bindingNameLabel() {
-    return "配置名 / 绑定名";
+    return "模型ID";
   }
 
   function bindingNameRequiredMessage() {
@@ -96,10 +99,6 @@
     });
     text = text.replaceAll(`${bindingNameLabel()} 不能为空`, bindingNameRequiredMessage());
     return text;
-  }
-
-  function capabilityLabel(value) {
-    return ({ chat: "Chat", embedding: "Embedding", rerank: "Rerank" })[String(value || "")] || String(value || "-");
   }
 
   function parseApiKeysFromValue(value) {
@@ -233,10 +232,10 @@
     if (state.loading) return hint("正在加载模型配置...");
     if (state.saving) return hint("正在保存模型配置...");
     if (state.error) return hint(`模型配置出错：${state.error}`, true);
-    if (!state.bindings.length) return hint("还没有保存的模型。点击“新建配置”开始添加。", false);
+    if (!state.bindings.length) return hint("还没有保存的模型。点击“添加模型”开始添加。", false);
     if (S.modelCatalog.roleEditing && S.modelCatalog.rolesDirty) return hint("模型链已修改，点击“保存模型链”提交。", false);
     if (S.modelCatalog.roleEditing) return hint("拖拽左侧模型到右侧角色列，完成后点击“保存模型链”。", false);
-    return hint("点击左侧模型可以查看对应 JSON 配置；点击“新建配置”可添加新模型。", false);
+    return hint("点击左侧模型可以查看对应 JSON 配置；点击“添加模型”可添加新模型。", false);
   }
 
   async function ensureTemplate(providerId) {
@@ -272,16 +271,6 @@
     return draft;
   }
 
-  function providerModelFromDraft(draft) {
-    const providerId = trim(draft?.provider_id);
-    const defaultModel = trim(draft?.default_model);
-    if (!providerId && !defaultModel) return "";
-    const displayProvider = providerId;
-    if (!displayProvider) return defaultModel;
-    return defaultModel ? `${displayProvider}:${defaultModel}` : displayProvider;
-  }
-
-
   function draftFromConfig(record) {
     return {
       provider_id: record?.provider_id || "",
@@ -310,7 +299,6 @@
     parsed.extra_options = parsed.extra_options && typeof parsed.extra_options === "object" && !Array.isArray(parsed.extra_options) ? parsed.extra_options : {};
     return parsed;
   }
-
 
   function draftFailureMessage(target, fallback = "请检查 JSON 配置中的必填项、地址和密钥。") {
     const validationErrors = Array.isArray(target?.validation?.errors) ? target.validation.errors : [];
@@ -356,6 +344,8 @@
       open: true,
       mode: "create",
       providerId: provider,
+      baseUrl: String(draft.base_url || ""),
+      apiKey: String(draft.api_key || ""),
       jsonText: JSON.stringify(draft, null, 2),
       initialJsonText: JSON.stringify(draft, null, 2),
       retryOn: [...DEFAULT_RETRY_ON],
@@ -382,6 +372,8 @@
       configId: trim(binding.config_id || binding.llm_config_id),
       modelKey: trim(binding.key),
       providerId: trim(record?.provider_id || ""),
+      baseUrl: String(draft.base_url || ""),
+      apiKey: String(draft.api_key || ""),
       jsonText,
       initialJsonText: jsonText,
       retryOn: Array.isArray(binding.retry_on) ? binding.retry_on.map((item) => trim(item)).filter(Boolean) : [...DEFAULT_RETRY_ON],
@@ -427,6 +419,8 @@
     if (!editor) return editor;
     const modelKeyInput = document.getElementById("llm-model-key-input");
     const providerSelect = document.getElementById("llm-provider-select");
+    const baseUrlInput = document.getElementById("llm-binding-base-url");
+    const apiKeyInput = document.getElementById("llm-binding-api-key");
     const jsonEditor = document.getElementById("llm-json-editor");
     const retryOnInput = document.getElementById("llm-binding-retry-on");
     const retryCountInput = document.getElementById("llm-binding-retry-count");
@@ -435,6 +429,8 @@
     const imageMultimodalEnabledInput = document.getElementById("llm-binding-image-multimodal-enabled");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
     if (providerSelect) editor.providerId = trim(providerSelect.value || editor.providerId);
+    if (baseUrlInput) editor.baseUrl = String(baseUrlInput.value ?? editor.baseUrl ?? "");
+    if (apiKeyInput) editor.apiKey = String(apiKeyInput.value ?? editor.apiKey ?? "");
     if (jsonEditor) editor.jsonText = String(jsonEditor.value || editor.jsonText || "");
     if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
     if (retryCountInput) {
@@ -508,6 +504,59 @@
     return true;
   }
 
+  function syncBaseUrlInputValue(value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const normalized = String(value ?? "");
+    editor.baseUrl = normalized;
+    const input = document.getElementById("llm-binding-base-url");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return true;
+  }
+
+  function syncApiKeyInputValue(value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const normalized = String(value ?? "");
+    editor.apiKey = normalized;
+    const input = document.getElementById("llm-binding-api-key");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return true;
+  }
+
+  function syncDraftFieldIntoJsonEditor(fieldName, value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
+    const currentText = String(document.getElementById("llm-json-editor")?.value || editor.jsonText || "");
+    let draft;
+    try {
+      draft = parseDraftJson(currentText, providerId);
+    } catch (_error) {
+      return false;
+    }
+    if (String(draft[fieldName] == null ? "" : draft[fieldName]) === String(value == null ? "" : value)) return false;
+    draft[fieldName] = String(value == null ? "" : value);
+    setBindingJsonEditorValue(JSON.stringify(draft, null, 2));
+    return true;
+  }
+
+  function handleBindingBaseUrlInput() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const input = document.getElementById("llm-binding-base-url");
+    editor.baseUrl = String(input?.value ?? editor.baseUrl ?? "");
+    syncDraftFieldIntoJsonEditor("base_url", editor.baseUrl);
+  }
+
+  function handleBindingApiKeyInput() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const input = document.getElementById("llm-binding-api-key");
+    editor.apiKey = String(input?.value ?? editor.apiKey ?? "");
+    syncDraftFieldIntoJsonEditor("api_key", editor.apiKey);
+  }
+
   function handleBindingContextWindowInput() {
     const editor = llmState().editor;
     if (!editor) return;
@@ -522,8 +571,18 @@
     if (!editor) return;
     const jsonEditor = document.getElementById("llm-json-editor");
     editor.jsonText = String(jsonEditor?.value || editor.jsonText || "");
-    const resolved = contextWindowTokensFromDraftText(editor.jsonText, editor.providerId || "");
-    if (Number.isInteger(resolved)) syncContextWindowTokensInputValue(resolved);
+    let draft = null;
+    try {
+      draft = parseDraftJson(editor.jsonText, editor.providerId || "");
+    } catch (_error) {
+      draft = null;
+    }
+    if (draft) {
+      syncBaseUrlInputValue(String(draft.base_url ?? ""));
+      syncApiKeyInputValue(String(draft.api_key ?? ""));
+      const resolved = validContextWindowTokensValue(draft?.parameters?.context_window_tokens);
+      if (Number.isInteger(resolved)) syncContextWindowTokensInputValue(resolved);
+    }
   }
 
   function reconcileBindingContextWindowTokens() {
@@ -571,7 +630,7 @@
       draft.api_key || ""
     );
     const contextWindowTokens = Number.parseInt(String(editor?.contextWindowTokens ?? "").trim(), 10);
-    if (requireModelKey && !modelKey) throw new Error("模型 Key 不能为空");
+    if (requireModelKey && !modelKey) throw new Error(bindingNameRequiredMessage());
     if (!Number.isInteger(retryCount) || retryCount < 0) {
       throw new Error("重试次数必须是不小于 0 的整数");
     }
@@ -625,7 +684,7 @@
       return `
         <div class="llm-form-grid">
           <label class="resource-field">
-            <span class="resource-field-label">Retry On</span>
+            <span class="resource-field-label">自动重试错误关键词</span>
             <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
           </label>
           <label class="resource-field">
@@ -648,93 +707,7 @@
     return `
       <div class="llm-form-grid llm-form-grid--binding-detail-policy">
         <label class="resource-field">
-          <span class="resource-field-label">Retry On</span>
-          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
-        </label>
-        <label class="resource-field">
-          <span class="resource-field-label">重试次数</span>
-          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
-        </label>
-        <label class="resource-field">
-          <span class="resource-field-label">单 API key 最大并发数</span>
-          <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="number" min="1" step="1" inputmode="numeric" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制">
-          <div class="llm-inline-field-actions llm-binding-concurrency-actions">
-            <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
-            ${editor.mode === "create" ? "" : renderImageMultimodalField({ layout: "inline" })}
-          </div>
-        </label>
-      </div>
-      <label class="resource-field">
-        <span class="resource-field-label">最大上下文TOKEN *</span>
-        <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
-      </label>`;
-  }
-
-  function renderApiKeyJsonHint() {
-    return '<p class="llm-muted">"api_key" 支持用逗号或换行填写多把 key，例如 key1,key2。多个 key 会按顺序轮换；设置多个 key 时，"retry_count" 以完整轮过所有 key 为一次。</p>';
-  }
-
-  function bindingDraftPayload({ requireModelKey = false } = {}) {
-    const editor = reconcileBindingContextWindowTokens();
-    const modelKey = trim(editor?.modelKey);
-    const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
-    const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);
-    const draft = parseDraftJson(editor?.jsonText || "", editor?.providerId || "");
-    const singleApiKeyMaxConcurrency = validateSingleApiKeyMaxConcurrencyInput(
-      String(editor?.singleApiKeyMaxConcurrency ?? ""),
-      draft.api_key || ""
-    );
-    const contextWindowTokens = Number.parseInt(String(editor?.contextWindowTokens ?? "").trim(), 10);
-    if (requireModelKey && !modelKey) throw new Error("模型 Key 不能为空");
-    if (!Number.isInteger(retryCount) || retryCount < 0) {
-      throw new Error("重试次数必须是不小于 0 的整数");
-    }
-    if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 25000) {
-      throw new Error("最大上下文TOKEN必须是大于 25000 的整数");
-    }
-    draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
-    draft.parameters.context_window_tokens = contextWindowTokens;
-    return {
-      modelKey,
-      retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
-      retryCount,
-      singleApiKeyMaxConcurrency,
-      contextWindowTokens,
-      imageMultimodalEnabled: Boolean(editor?.imageMultimodalEnabled),
-      draft,
-    };
-  }
-
-  function renderBindingPolicyFields() {
-    const editor = llmState().editor || emptyEditorState();
-    if (editor.mode === "create") {
-      return `
-        <div class="llm-form-grid">
-          <label class="resource-field">
-            <span class="resource-field-label">Retry On</span>
-            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
-          </label>
-          <label class="resource-field">
-            <span class="resource-field-label">重试次数</span>
-            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
-          </label>
-          <label class="resource-field">
-            <span class="resource-field-label">单 API key 最大并发数</span>
-            <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
-            <div class="llm-inline-field-actions llm-binding-concurrency-actions">
-              <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
-            </div>
-          </label>
-        </div>
-        <label class="resource-field">
-          <span class="resource-field-label">最大上下文TOKEN *</span>
-          <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
-        </label>`;
-    }
-    return `
-      <div class="llm-form-grid llm-form-grid--binding-detail-policy">
-        <label class="resource-field">
-          <span class="resource-field-label">Retry On</span>
+          <span class="resource-field-label">自动重试错误关键词</span>
           <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
         </label>
         <label class="resource-field">
@@ -756,8 +729,84 @@
       </label>`;
   }
 
-  function renderApiKeyJsonHint() {
-    return "";
+  function renderConnectionFields() {
+    const state = llmState();
+    return `
+      <div class="llm-form-grid llm-form-grid--binding-header">
+        <label class="resource-field">
+          <span class="resource-field-label">请求地址 *</span>
+          <input id="llm-binding-base-url" class="resource-search" type="text" value="${escv(state.editor.baseUrl)}" placeholder="例如：https://api.example.com/v1">
+        </label>
+        <label class="resource-field">
+          <span class="resource-field-label">Apikey *</span>
+          <input id="llm-binding-api-key" class="resource-search" type="text" value="${escv(state.editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
+        </label>
+        <div class="resource-field llm-model-list-field">
+          <span class="resource-field-label" aria-hidden="true">模型列表</span>
+          <div class="llm-inline-field-actions">
+            <button type="button" class="toolbar-btn ghost" data-llm-action="fetch-model-list">获取模型列表</button>
+          </div>
+        </div>
+      </div>
+      <div id="llm-model-list-panel" class="llm-model-list-panel" hidden></div>`;
+  }
+
+  function renderJsonDetails() {
+    const state = llmState();
+    return `
+      <details class="llm-json-details">
+        <summary class="llm-json-summary">JSON 配置</summary>
+        <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
+      </details>`;
+  }
+
+  function renderModelListPanel() {
+    const panel = document.getElementById("llm-model-list-panel");
+    if (!panel) return;
+    const modelList = llmState().editor?.modelList;
+    if (!modelList) {
+      panel.hidden = true;
+      panel.innerHTML = "";
+      return;
+    }
+    panel.hidden = false;
+    if (modelList.loading) {
+      panel.innerHTML = '<p class="llm-muted">正在获取模型列表...</p>';
+      return;
+    }
+    if (modelList.error) {
+      panel.innerHTML = `
+        <div class="llm-model-list-toolbar">
+          <span class="llm-muted llm-model-list-error">${escv(modelList.error)}</span>
+          <button type="button" class="toolbar-btn ghost small" data-llm-action="model-list-close">收起</button>
+        </div>`;
+      return;
+    }
+    panel.innerHTML = `
+      <div class="llm-model-list-toolbar">
+        <input id="llm-model-list-filter" class="resource-search" type="search" placeholder="筛选模型..." value="${escv(modelList.filter || "")}">
+        <span id="llm-model-list-count" class="llm-muted"></span>
+        <button type="button" class="toolbar-btn ghost small" data-llm-action="model-list-close">收起</button>
+      </div>
+      <div class="llm-model-list-items"></div>`;
+    renderModelListItems();
+  }
+
+  function renderModelListItems() {
+    const panel = document.getElementById("llm-model-list-panel");
+    if (!panel) return;
+    const modelList = llmState().editor?.modelList;
+    if (!modelList || modelList.loading || modelList.error) return;
+    const itemsHost = panel.querySelector(".llm-model-list-items");
+    if (!itemsHost) return;
+    const items = Array.isArray(modelList.items) ? modelList.items : [];
+    const filterText = trim(modelList.filter || "").toLowerCase();
+    const filtered = items.filter((item) => !filterText || String(item).toLowerCase().includes(filterText));
+    const countHost = panel.querySelector("#llm-model-list-count");
+    if (countHost) countHost.textContent = `${filtered.length} / ${items.length} 个模型`;
+    itemsHost.innerHTML = filtered.length
+      ? filtered.map((item) => `<button type="button" class="llm-model-list-item" data-llm-model-item="${escv(item)}" title="点击将该模型填入配置">${escv(item)}</button>`).join("")
+      : '<p class="llm-muted">没有匹配的模型。</p>';
   }
 
   function renderEditor() {
@@ -775,94 +824,8 @@
         <article class="model-detail-card model-config-shell">
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
-              <h2>新建模型</h2>
-              <p class="subtitle">先选择供应商，再基于预设 JSON 模板修改参数并测试连接。</p>
-            </div>
-            <div class="detail-modal-actions">
-              <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
-            </div>
-          </div>
-          <div class="detail-modal-body model-config-body">
-            <div class="llm-section">
-              <div class="llm-form-grid llm-form-grid--binding-header">
-                <label class="resource-field">
-                  <span class="resource-field-label">模型 Key *</span>
-                  <input id="llm-model-key-input" class="resource-search" type="text" value="${escv(state.editor.modelKey)}" placeholder="例如：ceo_primary">
-                </label>
-                <label class="resource-field">
-                  <span class="resource-field-label">供应商</span>
-                  <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
-                </label>
-                ${renderImageMultimodalField({ layout: "header" })}
-              </div>
-              ${renderBindingPolicyFields()}
-              <label class="resource-field">
-                <span class="resource-field-label">JSON 配置</span>
-                <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
-              </label>
-              ${renderApiKeyJsonHint()}
-              ${renderStatus()}
-              <div class="llm-inline-actions">
-                <button type="button" class="toolbar-btn ghost" data-llm-action="test-create">测试连接</button>
-                <button type="button" class="toolbar-btn success" data-llm-action="save-create">添加模型</button>
-              </div>
-            </div>
-          </div>
-        </article>`;
-    } else {
-      const binding = currentBinding();
-      U.llmEditorShell.innerHTML = `
-        <article class="model-detail-card model-config-shell">
-          <div class="detail-modal-header model-config-header">
-            <div class="detail-modal-title">
-              <h2>${escv(binding?.key || state.editor.bindingKey)}</h2>
-              <p class="subtitle">可同时编辑当前模型的 JSON 配置与降级重试策略。</p>
-            </div>
-            <div class="detail-modal-actions">
-              <button type="button" class="toolbar-btn ghost" data-llm-action="close">关闭</button>
-            </div>
-          </div>
-          <div class="detail-modal-body model-config-body">
-            <div class="llm-section">
-              ${renderBindingPolicyFields()}
-              <label class="resource-field">
-                <span class="resource-field-label">JSON 配置</span>
-                <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
-              </label>
-              ${renderApiKeyJsonHint()}
-              ${renderStatus()}
-              <div class="llm-inline-actions">
-                <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail">测试连接</button>
-                <button type="button" class="toolbar-btn success" data-llm-action="save-detail">保存修改</button>
-                <button type="button" class="toolbar-btn danger" data-llm-action="delete-detail">删除模型</button>
-              </div>
-            </div>
-          </div>
-        </article>`;
-    }
-
-    setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, true);
-    if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
-    icons();
-  }
-
-  function renderEditor() {
-    refs();
-    const state = llmState();
-    if (!U.llmEditorShell || !U.llmEditorPanel || !U.llmEditorBackdrop) return;
-    if (!state.editor.open) {
-      U.llmEditorShell.innerHTML = "";
-      setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, false);
-      return;
-    }
-
-    if (state.editor.mode === "create") {
-      U.llmEditorShell.innerHTML = `
-        <article class="model-detail-card model-config-shell">
-          <div class="detail-modal-header model-config-header">
-            <div class="detail-modal-title">
-              <h2>新建模型</h2>
-              <p class="subtitle">先选择供应商，再基于预设 JSON 模板修改参数并测试连接。</p>
+              <h2>添加模型</h2>
+              <p class="subtitle">选择供应商，填写请求地址与 Apikey 后可获取模型列表、测试连接。</p>
             </div>
             <div class="detail-modal-actions">
               ${renderBindingNoteAction()}
@@ -873,7 +836,7 @@
             <div class="llm-section">
               <div class="llm-form-grid llm-form-grid--binding-header">
                 <label class="resource-field">
-                  <span class="resource-field-label">模型 Key *</span>
+                  <span class="resource-field-label">模型ID *</span>
                   <input id="llm-model-key-input" class="resource-search" type="text" value="${escv(state.editor.modelKey)}" placeholder="例如：ceo_primary">
                 </label>
                 <label class="resource-field">
@@ -882,11 +845,9 @@
                 </label>
                 ${renderImageMultimodalField({ layout: "header" })}
               </div>
+              ${renderConnectionFields()}
               ${renderBindingPolicyFields()}
-              <label class="resource-field">
-                <span class="resource-field-label">JSON 配置</span>
-                <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
-              </label>
+              ${renderJsonDetails()}
               ${renderStatus()}
               <div class="llm-inline-actions">
                 <button type="button" class="toolbar-btn ghost" data-llm-action="test-create">测试连接</button>
@@ -911,11 +872,9 @@
           </div>
           <div class="detail-modal-body model-config-body">
             <div class="llm-section">
+              ${renderConnectionFields()}
               ${renderBindingPolicyFields()}
-              <label class="resource-field">
-                <span class="resource-field-label">JSON 配置</span>
-                <textarea id="llm-json-editor" class="llm-json-editor" rows="18" spellcheck="false">${escv(state.editor.jsonText)}</textarea>
-              </label>
+              ${renderJsonDetails()}
               ${renderStatus()}
               <div class="llm-inline-actions">
                 <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail">测试连接</button>
@@ -928,6 +887,13 @@
     }
 
     U.llmEditorShell.innerHTML = normalizeBindingNameText(U.llmEditorShell.innerHTML);
+    const jsonDetails = document.getElementById("llm-json-details");
+    if (jsonDetails) {
+      const validationFailed = !!state.editor.validation && state.editor.validation.valid === false;
+      const probeFailed = !!state.editor.probe && !state.editor.probe.success;
+      if (validationFailed || probeFailed) jsonDetails.open = true;
+    }
+    renderModelListPanel();
     setDrawerOpen(U.llmEditorBackdrop, U.llmEditorPanel, true);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
     icons();
@@ -963,48 +929,6 @@
           ${description ? `<div class="llm-binding-meta">${escv(description)}</div>` : ""}
           <div class="model-inline-meta">${item.enabled === false ? '<span class="policy-chip neutral">Disabled</span>' : '<span class="policy-chip risk-low">Enabled</span>'}${scopes.length ? scopes.map((scope) => `<span class="policy-chip neutral">${escv(SCOPE_LABELS[scope] || scope)}</span>`).join("") : '<span class="policy-chip neutral">未进入角色链</span>'}</div>
         </article>`;
-    }).join("");
-  }
-
-  function renderRoutes() {
-    if (!U.modelRoleEditors) return;
-    const editing = !!S.modelCatalog.roleEditing;
-    U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
-      const chain = modelScopeChain(scope.key);
-      const maxIterations = modelScopeIterations(scope.key);
-      return `
-        <section class="model-chain-card">
-          <div class="panel-header">
-            <div>
-              <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
-              <p class="subtitle">${escv(chain[0] ? `默认：${chain[0]}` : "尚未配置")}</p>
-            </div>
-            <div class="model-chain-card-meta">
-              <span class="policy-chip neutral">${chain.length} 个模型</span>
-              <label class="model-role-iterations-field">
-                <span class="model-role-iterations-label">最大轮数</span>
-                <input
-                  class="model-role-iterations-input"
-                  type="number"
-                  min="2"
-                  step="1"
-                  inputmode="numeric"
-                  value="${escv(maxIterations)}"
-                  ${editing ? "" : "disabled"}
-                  data-model-role-iterations="${scope.key}"
-                >
-              </label>
-            </div>
-          </div>
-          <div class="model-role-section">
-            <div class="model-role-section-title">ROLE CHAIN</div>
-            <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
-              const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
-              const key = trim(item?.key || ref);
-              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}">${editing ? '<button type="button" class="model-chain-handle" aria-label="拖拽排序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>' : ''}<button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(key)}</span><span class="resource-list-subtitle">${escv(item?.provider_model || ref)}</span><span class="model-inline-meta">${index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ''}</span></button>${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>` : ''}</article>`;
-            }).join("") : `<div class="empty-state compact">${editing ? '将左侧模型拖到这里，编排当前角色链。' : '点击“编辑模型链”后再调整角色链。'}</div>`}</div>
-          </div>
-        </section>`;
     }).join("");
   }
 
@@ -1063,7 +987,7 @@
       const [templates, bindingPayload] = await Promise.all([ApiClient.getLlmTemplates(), ApiClient.listLlmBindings()]);
       state.templates = Array.isArray(templates) ? templates : [];
       state.bindings = Array.isArray(bindingPayload?.items) ? bindingPayload.items : [];
-      state.routes = normalizeAllModelRoles(bindingPayload?.routes || EMPTY_MODEL_ROLES());
+      state.routes = normalizeAllModelRoles(bindingPayload?.routes || EMPTY_MODEL_ROUTES());
       state.roleIterations = normalizeRoleIterations(bindingPayload?.roleIterations || bindingPayload?.role_iterations || DEFAULT_ROLE_ITERATIONS());
       state.roleConcurrency = normalizeRoleConcurrency(bindingPayload?.roleConcurrency || bindingPayload?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());
       mapify();
@@ -1083,13 +1007,16 @@
     if (!providerId) return;
     state.editor.providerId = providerId;
     await ensureTemplate(providerId);
-    state.editor.jsonText = JSON.stringify(buildDraftFromTemplate(providerId), null, 2);
+    const nextDraft = buildDraftFromTemplate(providerId);
+    state.editor.jsonText = JSON.stringify(nextDraft, null, 2);
+    state.editor.baseUrl = String(nextDraft.base_url || "");
+    state.editor.apiKey = String(nextDraft.api_key || "");
     state.editor.validation = null;
     state.editor.probe = null;
     renderAll();
   }
 
-    async function handleTest() {
+  async function handleTest() {
     const state = llmState();
     reconcileBindingContextWindowTokens();
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
@@ -1124,9 +1051,93 @@
     });
   }
 
-    async function handleTestMaxConcurrency() {
+  async function handleFetchModelList() {
     const state = llmState();
     syncBindingInputs();
+    const editor = state.editor;
+    const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
+    editor.providerId = providerId;
+    const jsonText = String(document.getElementById("llm-json-editor")?.value || editor.jsonText || "");
+    editor.jsonText = jsonText;
+    let draft;
+    try {
+      draft = parseDraftJson(jsonText, providerId);
+    } catch (error) {
+      editor.modelList = { loading: false, error: error?.message || "JSON 配置解析失败。", items: [], filter: "" };
+      renderModelListPanel();
+      return;
+    }
+    if (trim(editor.baseUrl)) draft.base_url = trim(editor.baseUrl);
+    if (trim(editor.apiKey)) draft.api_key = trim(editor.apiKey);
+    editor.modelList = { loading: true, error: "", items: [], filter: "" };
+    renderModelListPanel();
+    try {
+      const result = await ApiClient.listLlmDraftModels(draft);
+      if (result?.success) {
+        const items = Array.isArray(result.models) ? result.models.map((item) => trim(item)).filter(Boolean) : [];
+        editor.modelList = { loading: false, error: "", items, filter: "" };
+        showToast({ title: "获取模型列表成功", text: `共获取到 ${items.length} 个模型。`, kind: "success", durationMs: 2200 });
+      } else {
+        const errors = Array.isArray(result?.diagnostics?.errors) ? result.diagnostics.errors : [];
+        const message = errors.length
+          ? errors.map((item) => `${item.field || "field"}: ${item.message || item.code || "错误"}`).join("；")
+          : trim(result?.message) || "获取模型列表失败。";
+        editor.modelList = { loading: false, error: message, items: [], filter: "" };
+      }
+    } catch (error) {
+      editor.modelList = { loading: false, error: error?.message || "获取模型列表失败。", items: [], filter: "" };
+    }
+    renderModelListPanel();
+  }
+
+  function applyModelListItem(modelId) {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const value = trim(modelId);
+    if (!value) return;
+    const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
+    const jsonText = String(document.getElementById("llm-json-editor")?.value || editor.jsonText || "");
+    let draft = null;
+    try {
+      draft = parseDraftJson(jsonText, providerId);
+    } catch (_error) {
+      draft = null;
+    }
+    if (!draft) {
+      showToast({ title: "无法填入模型", text: "当前 JSON 配置不可解析，请先修正 JSON 配置。", kind: "error" });
+      return;
+    }
+    draft.default_model = value;
+    setBindingJsonEditorValue(JSON.stringify(draft, null, 2));
+    let filledModelKey = false;
+    if (editor.mode === "create") {
+      const modelKeyInput = document.getElementById("llm-model-key-input");
+      if (modelKeyInput && !trim(modelKeyInput.value)) {
+        modelKeyInput.value = value;
+        editor.modelKey = value;
+        filledModelKey = true;
+      }
+    }
+    editor.modelList = null;
+    renderModelListPanel();
+    showToast({
+      title: "已填入模型",
+      text: filledModelKey ? `已将 ${value} 填入模型ID与 JSON 配置。` : `已将供应商模型设置为 ${value}。`,
+      kind: "success",
+      durationMs: 2600,
+    });
+  }
+
+  async function handleTestMaxConcurrency() {
+    const state = llmState();
+    syncBindingInputs();
+    const { confirmed } = await requestInlineConfirm({
+      title: "确认测试最大并发数？",
+      text: "测试会向供应商逐步发送递增的并发请求，可能触发限流或消耗 API 配额。是否继续？",
+      confirmLabel: "开始测试",
+      confirmKind: "danger",
+    });
+    if (!confirmed) return;
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     state.editor.jsonText = jsonText;
@@ -1210,14 +1221,14 @@
     showToast({ title: "已保存", text: "同步新配置仍在后台进行中。", kind: "warn", durationMs: 4200 });
   }
 
-    async function handleCreateSave() {
+  async function handleCreateSave() {
     const state = llmState();
     reconcileBindingContextWindowTokens();
     const bindingDraft = bindingDraftPayload({ requireModelKey: true });
     const modelKey = bindingDraft.modelKey;
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
-    if (!modelKey) throw new Error("模型 Key 不能为空");
+    if (!modelKey) throw new Error(bindingNameRequiredMessage());
     state.editor.modelKey = modelKey;
     state.editor.providerId = providerId;
     state.editor.jsonText = jsonText;
@@ -1246,53 +1257,20 @@
         kind: "success",
         persistent: true,
       });
-        const saveResult = await ApiClient.createLlmBinding({
-          binding: {
-            key: modelKey,
-            config_id: "",
-            enabled: true,
-            retry_on: [...bindingDraft.retryOn],
-            retry_count: bindingDraft.retryCount,
-            single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
-            image_multimodal_enabled: bindingDraft.imageMultimodalEnabled,
-          },
-          draft,
+      const saveResult = await ApiClient.createLlmBinding({
+        binding: {
+          key: modelKey,
+          config_id: "",
+          enabled: true,
+          retry_on: [...bindingDraft.retryOn],
+          retry_count: bindingDraft.retryCount,
+          single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
+          image_multimodal_enabled: bindingDraft.imageMultimodalEnabled,
+        },
+        draft,
       });
       closeEditor();
       await waitForRuntimeRefreshAndUpdateToast(saveResult?.runtimeRefresh);
-      await loadAll();
-    } finally {
-      state.saving = false;
-      renderAll();
-    }
-  }
-
-  async function handleDetailSave() {
-    const state = llmState();
-    reconcileBindingContextWindowTokens();
-    const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
-    state.editor.jsonText = jsonText;
-    const draft = parseDraftJson(jsonText, state.editor.providerId);
-    state.saving = true;
-    renderAll();
-    try {
-      showToast({
-        title: "检测连接中",
-        text: "正在验证当前 JSON 配置并测试连接...",
-        kind: "success",
-        persistent: true,
-      });
-      const ok = await probeDraft(draft);
-      if (!ok) throw new Error("请先修正 JSON 配置并通过连接测试");
-      showToast({
-        title: "正在保存",
-        text: "连接检测通过，正在保存修改...",
-        kind: "success",
-        persistent: true,
-      });
-      await ApiClient.updateLlmConfig(state.editor.configId, draft);
-      showToast({ title: "修改成功", text: `${state.editor.bindingKey} 已更新`, kind: "success" });
-      closeEditor();
       await loadAll();
     } finally {
       state.saving = false;
@@ -1440,50 +1418,44 @@
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
     });
     U.llmEditorShell?.addEventListener("input", (event) => {
-      if (event.target?.id === "llm-binding-context-window-tokens") {
+      const targetId = event.target?.id;
+      if (targetId === "llm-binding-context-window-tokens") {
         handleBindingContextWindowInput();
         return;
       }
-      if (event.target?.id === "llm-json-editor") {
+      if (targetId === "llm-json-editor") {
         handleBindingJsonEditorInput();
-      }
-    });
-    U.llmEditorShell?.addEventListener("click", (event) => {
-      const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
-      if (!action) return;
-      if (action === "close") { closeEditor(); return; }
-      if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
-      if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
-    });
-    llmState().eventsBound = true;
-  }
-
-  async function bootstrap() {
-    if (llmState().eventsBound) return;
-    refs();
-    bindList();
-    U.llmConfigCreate?.addEventListener("click", () => void openCreateModal());
-    U.llmEditorBackdrop?.addEventListener("click", closeEditor);
-    U.llmEditorShell?.addEventListener("change", (event) => {
-      if (event.target?.id === "llm-provider-select") void handleProviderChange();
-    });
-    U.llmEditorShell?.addEventListener("input", (event) => {
-      if (event.target?.id === "llm-binding-context-window-tokens") {
-        handleBindingContextWindowInput();
         return;
       }
-      if (event.target?.id === "llm-json-editor") {
-        handleBindingJsonEditorInput();
+      if (targetId === "llm-binding-base-url") {
+        handleBindingBaseUrlInput();
+        return;
+      }
+      if (targetId === "llm-binding-api-key") {
+        handleBindingApiKeyInput();
+        return;
+      }
+      if (targetId === "llm-model-list-filter") {
+        const editor = llmState().editor;
+        if (editor?.modelList) {
+          editor.modelList.filter = String(event.target.value || "");
+          renderModelListItems();
+        }
       }
     });
     U.llmEditorShell?.addEventListener("click", (event) => {
+      const modelItem = event.target.closest("[data-llm-model-item]");
+      if (modelItem) {
+        applyModelListItem(modelItem.dataset.llmModelItem);
+        return;
+      }
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
       if (!action) return;
       if (action === "close") { closeEditor(); return; }
       if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "test-max-concurrency") { void handleTestMaxConcurrency().catch((error) => { llmState().error = error.message || "测试最大并发数失败"; showToast({ title: "测试最大并发数失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "fetch-model-list") { void handleFetchModelList().catch((error) => { showToast({ title: "获取模型列表失败", text: error?.message || "获取模型列表失败", kind: "error" }); }); return; }
+      if (action === "model-list-close") { const editor = llmState().editor; if (editor) editor.modelList = null; renderModelListPanel(); return; }
       if (action === "save-create") { void handleCreateSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }

@@ -215,7 +215,7 @@ def test_api_client_maps_duplicate_binding_name_error_code_to_clear_message() ->
         """
     )
 
-    assert result["message"] == "配置名已存在，请使用其他配置名。"
+    assert result["message"] == "模型ID已存在，请使用其他模型ID。"
 
 
 def test_api_client_maps_empty_model_chain_backend_message_to_clear_text() -> None:
@@ -414,9 +414,9 @@ def test_llm_frontend_uses_binding_name_wording_in_create_form() -> None:
         """
     )
 
-    assert result["label"] == "配置名 / 绑定名"
-    assert result["normalized"] == "配置名 / 绑定名 * / 配置名 / 绑定名 * / 配置名 / 绑定名 *"
-    assert "配置名 / 绑定名 / Provider / 模型" in html
+    assert result["label"] == "模型ID"
+    assert result["normalized"] == "模型ID * / 模型ID * / 模型ID *"
+    assert "模型ID / Provider / 模型" in html
 
 
 def test_binding_draft_payload_requires_model_key_with_readable_message() -> None:
@@ -503,4 +503,126 @@ def test_binding_draft_payload_requires_model_key_with_readable_message() -> Non
         """
     )
 
-    assert result["message"] == "模型 Key 不能为空"
+    assert result["message"] == "模型ID不能为空"
+
+
+def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        function makeEl() {
+          return {
+            innerHTML: "",
+            value: "",
+            hidden: false,
+            open: false,
+            style: {},
+            dataset: {},
+            classList: { add() {}, remove() {}, contains() { return false; } },
+            querySelector() { return null; },
+            querySelectorAll() { return []; },
+            setAttribute() {},
+            getAttribute() { return null; },
+            addEventListener() {},
+          };
+        }
+        const elementsById = {};
+        global.document = {
+          getElementById(id) {
+            if (!elementsById[id]) elementsById[id] = makeEl();
+            return elementsById[id];
+          },
+          querySelector() { return makeEl(); },
+          addEventListener() {},
+        };
+
+        global.window = global;
+        global.window.addEventListener = () => {};
+        global.S = {
+          modelCatalog: {},
+          llmCenter: {
+            loading: false,
+            saving: false,
+            error: "",
+            templates: [{ provider_id: "openai", display_name: "OpenAI" }],
+            templateMap: { openai: { provider_id: "openai", display_name: "OpenAI" } },
+            templateDetailMap: {},
+            bindings: [],
+            bindingMap: {},
+            routes: {},
+            roleIterations: {},
+            roleConcurrency: {},
+            editor: {
+              open: true,
+              mode: "create",
+              bindingKey: "",
+              configId: "",
+              modelKey: "",
+              providerId: "openai",
+              baseUrl: "https://api.test/v1",
+              apiKey: "sk-test",
+              jsonText: "{}",
+              initialJsonText: "{}",
+              retryOn: ["network", "429"],
+              retryCount: 0,
+              singleApiKeyMaxConcurrency: "",
+              contextWindowTokens: "32000",
+              initialContextWindowTokens: "",
+              imageMultimodalEnabled: false,
+              initialImageMultimodalEnabled: false,
+              validation: null,
+              probe: null,
+              modelList: null,
+            },
+            eventsBound: false,
+          },
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.requestInlineConfirm = async () => ({ confirmed: false });
+        global.esc = (value) => String(value ?? "");
+        global.EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [] });
+        global.DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+        global.normalizeAllModelRoles = (value) => value;
+        global.normalizeRoleIterations = (value) => value;
+        global.normalizeRoleConcurrency = (value) => value;
+        global.cloneModelRoles = (value) => value;
+        global.cloneRoleIterations = (value) => value;
+        global.cloneRoleConcurrency = (value) => value;
+        global.syncModelRoleDraftState = () => {};
+        global.MODEL_SCOPES = [];
+        global.modelScopeChain = () => [];
+        global.modelScopeIterations = () => 0;
+        global.modelScopeConcurrency = () => 0;
+        global.renderRoleLimitControl = () => "";
+        global.modelRefItem = () => null;
+        global.normalizeModelRoleChain = (value) => value;
+        global.hint = () => {};
+        global.setDrawerOpen = () => {};
+        global.icons = () => {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_llm.js", "utf8");
+        vm.runInThisContext(code);
+
+        window.renderModelDetail();
+        const html = global.document.getElementById("llm-editor-shell").innerHTML;
+        console.log(JSON.stringify({ html }));
+        """
+    )
+
+    html = str(result["html"])
+    assert "模型ID *" in html
+    assert "请求地址 *" in html
+    assert "Apikey *" in html
+    assert "获取模型列表" in html
+    assert "自动重试错误关键词" in html
+    assert "llm-binding-base-url" in html
+    assert "llm-binding-api-key" in html
+    assert "<details" in html
+    assert "llm-json-editor" in html
+    assert "添加模型" in html
+    assert "测试连接" in html

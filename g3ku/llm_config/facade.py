@@ -118,6 +118,10 @@ class LLMConfigFacade:
         draft = ProviderConfigDraft.model_validate(payload)
         return (await self.config_service.probe_max_concurrency_draft(draft)).model_dump(mode="json")
 
+    async def list_draft_models(self, payload: dict[str, Any]) -> dict[str, Any]:
+        draft = ProviderConfigDraft.model_validate(payload)
+        return (await self.config_service.list_draft_models(draft)).model_dump(mode="json")
+
     def list_config_records(self) -> list[dict[str, Any]]:
         return [item.model_dump(mode="json") for item in self.repository.list_summaries()]
 

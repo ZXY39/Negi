@@ -135,6 +135,17 @@ class ProbeResult(StrictModel):
     diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
+class ModelCatalogResult(StrictModel):
+    success: bool
+    provider_id: str
+    resolved_base_url: str
+    models: list[str] = Field(default_factory=list)
+    message: str
+    latency_ms: int | None = None
+    http_status: int | None = None
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
 class APIKeyMaxConcurrencyProbeItem(StrictModel):
     key_index: int
     api_key_mask: str

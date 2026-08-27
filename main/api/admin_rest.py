@@ -92,7 +92,7 @@ def _llm_binding_create_error_detail(exc: Exception) -> dict[str, Any] | str:
         duplicate_key = message[len(prefix):].strip()
         return {
             'code': 'llm_binding_key_exists',
-            'message': '配置名已存在，请使用其他配置名。',
+            'message': '模型ID已存在，请使用其他模型ID。',
             'data': {'key': duplicate_key},
         }
     return message
@@ -2075,6 +2075,15 @@ async def probe_llm_draft(payload: dict = Body(...)):
 async def probe_llm_draft_max_concurrency(payload: dict = Body(...)):
     try:
         result = await _llm_facade().probe_max_concurrency_draft(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'ok': True, 'result': result}
+
+
+@router.post('/llm/drafts/models')
+async def list_llm_draft_models(payload: dict = Body(...)):
+    try:
+        result = await _llm_facade().list_draft_models(payload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {'ok': True, 'result': result}
