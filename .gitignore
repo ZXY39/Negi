@@ -72,3 +72,10 @@ worktrees/
 
 # 生成产物（图片等）不入库
 output/
+assets/persona/
+hotdata/
+cli_help.txt
+image_help.txt
+
+# 本地启动配置（不入库）
+.claude/launch.json
