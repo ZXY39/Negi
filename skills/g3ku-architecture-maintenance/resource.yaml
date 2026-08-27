@@ -1,0 +1,24 @@
+schema_version: 1
+kind: skill
+name: g3ku-architecture-maintenance
+description: 维护 G3KU 架构文档（docs/architecture/）时使用。当代码变更影响未来维护者对系统的理解、运行时行为、契约或维护工作流时，判断是否需要更新架构文档、识别受影响的具体文档、就地更新内容并维护 docs/architecture/README.md 的导航与主题归属。遵循反膨胀规则：就地更新不追加、单一契约单一文档、指针只指向主题短语、只用现在时。
+trigger:
+  keywords:
+    - 架构文档
+    - 更新架构文档
+    - 维护架构文档
+    - architecture maintenance
+    - architecture docs
+    - docs/architecture
+    - 架构相关变更
+    - Architecture Doc Map
+  always: false
+requires:
+  tools: []
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true
