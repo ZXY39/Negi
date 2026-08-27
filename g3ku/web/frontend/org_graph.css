@@ -4764,14 +4764,6 @@ textarea {
     flex: 1 1 220px;
 }
 
-.llm-binding-concurrency-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-    justify-content: flex-start;
-}
-
 .llm-note-btn {
     flex: 0 0 auto;
 }
@@ -4829,10 +4821,6 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     row-gap: var(--space-3);
     align-items: start;
-}
-
-.llm-form-grid--binding-detail-policy .llm-binding-concurrency-actions {
-    grid-column: 3 / 4;
 }
 
 .llm-form-grid.single {
@@ -5116,6 +5104,41 @@ textarea {
     justify-content: flex-end;
 }
 
+.llm-fetch-btn {
+    width: 100%;
+    min-height: 46px;
+    border-radius: var(--radius-md);
+}
+
+.llm-concurrency-input-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.llm-concurrency-input-row .resource-search {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.llm-kebab-btn {
+    flex: 0 0 auto;
+    width: 42px;
+    min-height: 46px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    cursor: pointer;
+}
+
+.llm-concurrency-test-row {
+    margin-top: var(--space-2);
+}
+
+.llm-concurrency-test-row[hidden] {
+    display: none;
+}
+
 .llm-config-reuse-banner {
     padding: var(--space-3) var(--space-4);
     border-radius: var(--radius-md);
@@ -5161,10 +5184,6 @@ textarea {
     .llm-page-layout,
     .llm-form-grid {
         grid-template-columns: 1fr;
-    }
-
-    .llm-form-grid--binding-detail-policy .llm-binding-concurrency-actions {
-        grid-column: auto;
     }
 
     .llm-memory-grid {

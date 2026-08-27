@@ -13,6 +13,7 @@
       providerId: "",
       baseUrl: "",
       apiKey: "",
+      defaultModel: "",
       jsonText: "",
       initialJsonText: "",
       retryOn: [...DEFAULT_RETRY_ON],
@@ -346,6 +347,7 @@
       providerId: provider,
       baseUrl: String(draft.base_url || ""),
       apiKey: String(draft.api_key || ""),
+      defaultModel: String(draft.default_model || ""),
       jsonText: JSON.stringify(draft, null, 2),
       initialJsonText: JSON.stringify(draft, null, 2),
       retryOn: [...DEFAULT_RETRY_ON],
@@ -374,6 +376,7 @@
       providerId: trim(record?.provider_id || ""),
       baseUrl: String(draft.base_url || ""),
       apiKey: String(draft.api_key || ""),
+      defaultModel: String(draft.default_model || ""),
       jsonText,
       initialJsonText: jsonText,
       retryOn: Array.isArray(binding.retry_on) ? binding.retry_on.map((item) => trim(item)).filter(Boolean) : [...DEFAULT_RETRY_ON],
@@ -421,6 +424,7 @@
     const providerSelect = document.getElementById("llm-provider-select");
     const baseUrlInput = document.getElementById("llm-binding-base-url");
     const apiKeyInput = document.getElementById("llm-binding-api-key");
+    const defaultModelInput = document.getElementById("llm-binding-default-model");
     const jsonEditor = document.getElementById("llm-json-editor");
     const retryOnInput = document.getElementById("llm-binding-retry-on");
     const retryCountInput = document.getElementById("llm-binding-retry-count");
@@ -431,6 +435,7 @@
     if (providerSelect) editor.providerId = trim(providerSelect.value || editor.providerId);
     if (baseUrlInput) editor.baseUrl = String(baseUrlInput.value ?? editor.baseUrl ?? "");
     if (apiKeyInput) editor.apiKey = String(apiKeyInput.value ?? editor.apiKey ?? "");
+    if (defaultModelInput) editor.defaultModel = String(defaultModelInput.value ?? editor.defaultModel ?? "");
     if (jsonEditor) editor.jsonText = String(jsonEditor.value || editor.jsonText || "");
     if (retryOnInput) editor.retryOn = parseBindingRetryOn(retryOnInput.value || "");
     if (retryCountInput) {
@@ -524,6 +529,16 @@
     return true;
   }
 
+  function syncDefaultModelInputValue(value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const normalized = String(value ?? "");
+    editor.defaultModel = normalized;
+    const input = document.getElementById("llm-binding-default-model");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return true;
+  }
+
   function syncDraftFieldIntoJsonEditor(fieldName, value) {
     const editor = llmState().editor;
     if (!editor) return false;
@@ -557,6 +572,14 @@
     syncDraftFieldIntoJsonEditor("api_key", editor.apiKey);
   }
 
+  function handleBindingDefaultModelInput() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const input = document.getElementById("llm-binding-default-model");
+    editor.defaultModel = String(input?.value ?? editor.defaultModel ?? "");
+    syncDraftFieldIntoJsonEditor("default_model", editor.defaultModel);
+  }
+
   function handleBindingContextWindowInput() {
     const editor = llmState().editor;
     if (!editor) return;
@@ -580,6 +603,7 @@
     if (draft) {
       syncBaseUrlInputValue(String(draft.base_url ?? ""));
       syncApiKeyInputValue(String(draft.api_key ?? ""));
+      syncDefaultModelInputValue(String(draft.default_model ?? ""));
       const resolved = validContextWindowTokensValue(draft?.parameters?.context_window_tokens);
       if (Number.isInteger(resolved)) syncContextWindowTokensInputValue(resolved);
     }
@@ -691,18 +715,9 @@
             <span class="resource-field-label">重试次数</span>
             <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
           </label>
-          <label class="resource-field">
-            <span class="resource-field-label">单 API key 最大并发数</span>
-            <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
-            <div class="llm-inline-field-actions llm-binding-concurrency-actions">
-              <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
-            </div>
-          </label>
+          ${renderConcurrencyField(editor)}
         </div>
-        <label class="resource-field">
-          <span class="resource-field-label">最大上下文TOKEN *</span>
-          <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
-        </label>`;
+        ${renderContextWindowField(editor)}`;
     }
     return `
       <div class="llm-form-grid llm-form-grid--binding-detail-policy">
@@ -714,25 +729,37 @@
           <span class="resource-field-label">重试次数</span>
           <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
         </label>
+        ${renderConcurrencyField(editor)}
+      </div>`;
+  }
+
+  function renderFetchModelListField() {
+    return `
+        <div class="resource-field llm-model-list-field">
+          <span class="resource-field-label" aria-hidden="true">模型列表</span>
+          <button type="button" class="toolbar-btn ghost llm-fetch-btn" data-llm-action="fetch-model-list">获取模型列表</button>
+        </div>`;
+  }
+
+  function renderContextWindowField(editor) {
+    return `
         <label class="resource-field">
-          <span class="resource-field-label">单 API key 最大并发数</span>
-          <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
-        </label>
-        ${editor.mode === "create" ? "" : renderImageMultimodalField()}
-        <div class="llm-binding-concurrency-actions">
-          <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
-        </div>
-      </div>
-      <label class="resource-field">
-        <span class="resource-field-label">最大上下文TOKEN *</span>
-        <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
-      </label>`;
+          <span class="resource-field-label">最大上下文TOKEN *</span>
+          <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
+        </label>`;
   }
 
   function renderConnectionFields() {
     const state = llmState();
+    const isCreate = state.editor.mode === "create";
+    const modelIdField = isCreate ? "" : `
+        <label class="resource-field">
+          <span class="resource-field-label">模型ID</span>
+          <input id="llm-binding-default-model" class="resource-search" type="text" value="${escv(state.editor.defaultModel)}" placeholder="供应商模型ID，例如：gpt-4o">
+        </label>`;
     return `
       <div class="llm-form-grid llm-form-grid--binding-header">
+        ${modelIdField}
         <label class="resource-field">
           <span class="resource-field-label">请求地址 *</span>
           <input id="llm-binding-base-url" class="resource-search" type="text" value="${escv(state.editor.baseUrl)}" placeholder="例如：https://api.example.com/v1">
@@ -741,14 +768,29 @@
           <span class="resource-field-label">Apikey *</span>
           <input id="llm-binding-api-key" class="resource-search" type="text" value="${escv(state.editor.apiKey)}" placeholder="支持用逗号分隔填写多个 key">
         </label>
-        <div class="resource-field llm-model-list-field">
-          <span class="resource-field-label" aria-hidden="true">模型列表</span>
-          <div class="llm-inline-field-actions">
-            <button type="button" class="toolbar-btn ghost" data-llm-action="fetch-model-list">获取模型列表</button>
-          </div>
-        </div>
+        ${isCreate ? renderFetchModelListField() : ""}
       </div>
+      ${isCreate ? "" : `
+      <div class="llm-form-grid llm-form-grid--binding-header">
+        ${renderFetchModelListField()}
+        ${renderImageMultimodalField()}
+        ${renderContextWindowField(state.editor)}
+      </div>`}
       <div id="llm-model-list-panel" class="llm-model-list-panel" hidden></div>`;
+  }
+
+  function renderConcurrencyField(editor) {
+    return `
+          <label class="resource-field">
+            <span class="resource-field-label">单 API key 最大并发数</span>
+            <div class="llm-concurrency-input-row">
+              <input id="llm-binding-single-api-key-max-concurrency" class="resource-search" type="text" value="${escv(String(editor.singleApiKeyMaxConcurrency ?? ""))}" placeholder="留空表示不限制；多 key 可写 3,5,7">
+              <button type="button" class="icon-btn llm-kebab-btn" data-llm-action="toggle-concurrency-test" title="并发测试" aria-label="显示并发测试"><i data-lucide="more-horizontal"></i></button>
+            </div>
+            <div class="llm-concurrency-test-row" hidden>
+              <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
+            </div>
+          </label>`;
   }
 
   function renderJsonDetails() {
@@ -1011,6 +1053,7 @@
     state.editor.jsonText = JSON.stringify(nextDraft, null, 2);
     state.editor.baseUrl = String(nextDraft.base_url || "");
     state.editor.apiKey = String(nextDraft.api_key || "");
+    state.editor.defaultModel = String(nextDraft.default_model || "");
     state.editor.validation = null;
     state.editor.probe = null;
     renderAll();
@@ -1109,6 +1152,7 @@
     }
     draft.default_model = value;
     setBindingJsonEditorValue(JSON.stringify(draft, null, 2));
+    syncDefaultModelInputValue(value);
     let filledModelKey = false;
     if (editor.mode === "create") {
       const modelKeyInput = document.getElementById("llm-model-key-input");
@@ -1435,6 +1479,10 @@
         handleBindingApiKeyInput();
         return;
       }
+      if (targetId === "llm-binding-default-model") {
+        handleBindingDefaultModelInput();
+        return;
+      }
       if (targetId === "llm-model-list-filter") {
         const editor = llmState().editor;
         if (editor?.modelList) {
@@ -1452,6 +1500,12 @@
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
       if (!action) return;
       if (action === "close") { closeEditor(); return; }
+      if (action === "toggle-concurrency-test") {
+        const field = event.target.closest(".resource-field");
+        const row = field?.querySelector(".llm-concurrency-test-row");
+        if (row) row.hidden = !row.hidden;
+        return;
+      }
       if (action === "test-create" || action === "test-detail") { void handleTest().catch((error) => { llmState().error = error.message || "测试失败"; showToast({ title: "测试失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "test-max-concurrency") { void handleTestMaxConcurrency().catch((error) => { llmState().error = error.message || "测试最大并发数失败"; showToast({ title: "测试最大并发数失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "fetch-model-list") { void handleFetchModelList().catch((error) => { showToast({ title: "获取模型列表失败", text: error?.message || "获取模型列表失败", kind: "error" }); }); return; }

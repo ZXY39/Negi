@@ -41,13 +41,16 @@ def test_llm_binding_editor_uses_header_and_detail_row_image_multimodal_layout_v
     assert 'renderImageMultimodalField({ layout: "header" })' in llm_js
     assert 'editor.mode === "create"' in llm_js
     assert "llm-form-grid--binding-detail-policy" in llm_js
-    assert "llm-binding-concurrency-actions" in llm_js
-    assert 'editor.mode === "create" ? "" : renderImageMultimodalField()' in llm_js
+    assert "renderConcurrencyField(editor)" in llm_js
+    assert "toggle-concurrency-test" in llm_js
+    assert "llm-concurrency-test-row" in llm_js
+    assert "llm-binding-default-model" in llm_js
     assert ".llm-image-checkbox-field--header" in llm_css
     assert ".llm-image-checkbox-spacer" in llm_css
     assert ".llm-form-grid.llm-form-grid--binding-detail-policy" in llm_css
-    assert "grid-column: 3 / 4;" in llm_css
-    assert ".llm-binding-concurrency-actions" in llm_css
+    assert ".llm-kebab-btn" in llm_css
+    assert ".llm-concurrency-test-row" in llm_css
+    assert ".llm-fetch-btn" in llm_css
 
 
 def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in_detail_row() -> None:
@@ -173,6 +176,10 @@ def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in
           html,
           imageIndex: html.indexOf("是否为图像多模态"),
           buttonIndex: html.indexOf("测试最大并发数"),
+          kebabIndex: html.indexOf("toggle-concurrency-test"),
+          modelIdIndex: html.indexOf("llm-binding-default-model"),
+          fetchIndex: html.indexOf("获取模型列表"),
+          contextIndex: html.indexOf("最大上下文TOKEN"),
           detailGridIndex: html.indexOf("llm-form-grid llm-form-grid--binding-detail-policy"),
         }));
         """
@@ -181,7 +188,12 @@ def test_llm_detail_editor_renders_image_multimodal_before_concurrency_button_in
     assert result["detailGridIndex"] >= 0
     assert result["imageIndex"] >= 0
     assert result["buttonIndex"] >= 0
-    assert result["imageIndex"] < result["buttonIndex"]
+    assert result["kebabIndex"] >= 0
+    assert result["modelIdIndex"] >= 0
+    # 模型列表 / 多模态 / 上下文TOKEN 同一行，且位于并发测试（⋯ 折叠）之前
+    assert result["fetchIndex"] < result["imageIndex"] < result["contextIndex"]
+    assert result["contextIndex"] < result["kebabIndex"] < result["buttonIndex"]
+    assert 'class="llm-concurrency-test-row" hidden' in result["html"]
     assert 'class="resource-field llm-image-checkbox-field"' in result["html"]
 
 

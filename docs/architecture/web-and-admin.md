@@ -55,10 +55,10 @@ The top-level `模型配置` page manages `llm-config` provider records and mode
 
 ### Frontend Responsibilities
 
-- The add/edit model modal keeps one provider-config JSON draft as its source of truth. Dedicated `请求地址` (`base_url`) and `Apikey` inputs stay two-way synced with that JSON draft, and the `模型ID` field is the binding key.
+- The add/edit model modal keeps one provider-config JSON draft as its source of truth. Dedicated `请求地址` (`base_url`) and `Apikey` inputs stay two-way synced with that JSON draft. In create mode `模型ID` is the binding key; in edit mode an editable `模型ID` input shows the provider model (`default_model`), so switching models keeps the binding's position in role chains.
 - The JSON region renders collapsed by default and auto-expands when draft validation or the connection probe fails.
 - `获取模型列表` renders the provider catalog returned by the backend as a filterable list. Selecting an entry writes it into the draft's `default_model`; in create mode an empty `模型ID` is filled with the same value.
-- `测试最大并发数` requires an explicit confirmation dialog before running because the escalating probe can trigger provider rate limits.
+- `测试最大并发数` is folded behind a `⋯` button next to the per-key concurrency input and requires an explicit confirmation dialog before running because the escalating probe can trigger provider rate limits.
 
 ### Backend Responsibilities
 

@@ -609,20 +609,38 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
         vm.runInThisContext(code);
 
         window.renderModelDetail();
-        const html = global.document.getElementById("llm-editor-shell").innerHTML;
-        console.log(JSON.stringify({ html }));
+        const createHtml = global.document.getElementById("llm-editor-shell").innerHTML;
+
+        global.S.llmCenter.editor.mode = "detail";
+        global.S.llmCenter.editor.bindingKey = "demo";
+        global.S.llmCenter.editor.defaultModel = "gpt-4o";
+        window.renderModelDetail();
+        const detailHtml = global.document.getElementById("llm-editor-shell").innerHTML;
+
+        console.log(JSON.stringify({ createHtml, detailHtml }));
         """
     )
 
-    html = str(result["html"])
-    assert "模型ID *" in html
-    assert "请求地址 *" in html
-    assert "Apikey *" in html
-    assert "获取模型列表" in html
-    assert "自动重试错误关键词" in html
-    assert "llm-binding-base-url" in html
-    assert "llm-binding-api-key" in html
-    assert "<details" in html
-    assert "llm-json-editor" in html
-    assert "添加模型" in html
-    assert "测试连接" in html
+    create_html = str(result["createHtml"])
+    assert "模型ID *" in create_html
+    assert "请求地址 *" in create_html
+    assert "Apikey *" in create_html
+    assert "获取模型列表" in create_html
+    assert "自动重试错误关键词" in create_html
+    assert "llm-binding-base-url" in create_html
+    assert "llm-binding-api-key" in create_html
+    assert "llm-fetch-btn" in create_html
+    assert "toggle-concurrency-test" in create_html
+    assert "测试最大并发数" in create_html
+    assert "<details" in create_html
+    assert "llm-json-editor" in create_html
+    assert "添加模型" in create_html
+    assert "测试连接" in create_html
+
+    detail_html = str(result["detailHtml"])
+    assert "llm-binding-default-model" in detail_html
+    assert 'value="gpt-4o"' in detail_html
+    assert "获取模型列表" in detail_html
+    assert "llm-fetch-btn" in detail_html
+    assert "toggle-concurrency-test" in detail_html
+    assert "测试最大并发数" in detail_html
