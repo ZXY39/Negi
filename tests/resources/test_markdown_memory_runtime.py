@@ -1493,10 +1493,18 @@ def test_user_priority_prioritize_existing_entries_keeps_user_before_self(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_self_pruning_enqueue_write_request_ignores_session_boundary_flush(tmp_path: Path) -> None:
+async def test_self_pruning_enqueue_session_boundary_flushes_pending_turns(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
+        await manager.record_turn_for_review(
+            session_key="session-1",
+            turn_id="turn-1",
+            user_messages=["记住这个偏好"],
+            assistant_text="好的",
+            compression_summary={},
+            canonical_summary={"stages": []},
+        )
         result = await manager.enqueue_session_boundary_flush(
             session_key="session-1",
             channel="web",
@@ -1504,10 +1512,15 @@ async def test_self_pruning_enqueue_write_request_ignores_session_boundary_flush
             trigger_source="session_boundary_flush",
         )
 
-        assert result["ok"] is True
-        assert result["status"] == "ignored"
-        assert result["reason"] == "session_boundary_flush_disabled"
-        assert await manager.list_queue(limit=10) == []
+        assert result["status"] == "queued"
+        assert result["request_id"]
+        queue_items = await manager.list_queue(limit=10)
+        assert len(queue_items) == 1
+        assert queue_items[0]["op"] == "write"
+        assert queue_items[0]["trigger_source"] == "session_boundary"
+        # Boundary flush clears the session's review window afterwards.
+        state = manager._read_review_state()
+        assert "session-1" not in (state.get("sessions") or {})
     finally:
         manager.close()
 
@@ -1723,17 +1736,20 @@ async def test_v2_flush_review_window_ignores_non_compression_trigger(tmp_path: 
             canonical_summary={"stages": []},
         )
 
-        result = await manager.flush_review_window(
-            session_key="web:shared",
-            trigger_source="pre_compression_flush",
-        )
-        queue_items = await manager.list_queue(limit=10)
+        # Only token_compression and session_boundary may force-flush the window;
+        # stage_compaction (every-turn stage compaction) must keep the buffer intact.
+        for trigger_source in ("pre_compression_flush", "stage_compaction"):
+            result = await manager.flush_review_window(
+                session_key="web:shared",
+                trigger_source=trigger_source,
+            )
+            queue_items = await manager.list_queue(limit=10)
 
-        assert result["status"] == "ignored"
-        assert result["reason"] == "unsupported_trigger_source"
-        assert queue_items == []
-        state = manager._read_review_state()
-        assert len(state["sessions"]["web:shared"]["pending_turns"]) == 1
+            assert result["status"] == "ignored"
+            assert result["reason"] == "unsupported_trigger_source"
+            assert queue_items == []
+            state = manager._read_review_state()
+            assert len(state["sessions"]["web:shared"]["pending_turns"]) == 1
     finally:
         manager.close()
 

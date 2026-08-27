@@ -1890,6 +1890,7 @@ def test_ceo_session_delete_allows_unfinished_related_tasks(tmp_path: Path, monk
     assert captured == {
         'removed_session': current.key,
         'cancelled_session': current.key,
+        'flush_calls': [{'session_key': current.key}],
     }
 
 

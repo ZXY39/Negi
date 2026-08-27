@@ -3046,7 +3046,7 @@ class RuntimeAgentSession:
                         )
                 if getattr(self._loop, "memory_manager", None) is not None:
                     shrink_reason = str(getattr(self, "_frontdoor_history_shrink_reason", "") or "").strip()
-                    if shrink_reason in {"token_compression", "stage_compaction"}:
+                    if shrink_reason == "token_compression":
                         try:
                             flush_result = await self._loop.memory_manager.flush_review_window(
                                 session_key=self._state.session_key,

@@ -2191,7 +2191,7 @@ class MemoryManager:
 
     @staticmethod
     def _allowed_review_flush_sources() -> set[str]:
-        return {"token_compression", "stage_compaction"}
+        return {"token_compression", "session_boundary"}
 
     @staticmethod
     def _compact_review_stage_summary(canonical_summary: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2921,13 +2921,17 @@ class MemoryManager:
         self,
         *,
         session_key: str,
-        channel: str,
-        chat_id: str,
-        trigger_source: str,
+        channel: str = "",
+        chat_id: str = "",
+        trigger_source: str = "session_boundary",
     ) -> dict[str, Any]:
         _ = channel, chat_id, trigger_source
+        result = await self.flush_review_window(
+            session_key=session_key,
+            trigger_source="session_boundary",
+        )
         self.clear_review_window(session_key=session_key)
-        return {"ok": True, "status": "ignored", "reason": "session_boundary_flush_disabled"}
+        return result
 
     def _memory_agent_tools(self, session: _MemoryToolSession):
         @tool("memory_read_note")

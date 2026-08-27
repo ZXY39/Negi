@@ -382,7 +382,7 @@ async def _delete_single_ceo_session(
     memory_manager = getattr(agent, 'memory_manager', None) if agent is not None else None
     if memory_manager is not None:
         try:
-            memory_manager.clear_review_window(session_key=session_key)
+            await memory_manager.enqueue_session_boundary_flush(session_key=session_key)
         except Exception:
             pass
     delete_web_ceo_session_artifacts(
