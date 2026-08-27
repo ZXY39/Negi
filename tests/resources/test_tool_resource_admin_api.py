@@ -888,6 +888,40 @@ def test_main_runtime_service_node_detail_includes_matching_artifacts():
     assert result['artifacts'][0]['ref'] == 'artifact:artifact:1'
 
 
+def test_main_runtime_service_node_detail_normalizes_bare_node_id():
+    class _Store:
+        def list_artifacts(self, task_id: str):
+            return []
+
+    class _Task:
+        task_id = 'task:demo'
+
+    service = object.__new__(MainRuntimeService)
+    service.store = _Store()
+    service.get_task = lambda task_id: _Task() if task_id == 'task:demo' else None
+
+    captured: dict[str, str] = {}
+
+    def _detail(task_id, node_id, detail_level='summary'):
+        captured['task_id'] = task_id
+        captured['node_id'] = node_id
+        return {
+            'ok': True,
+            'task_id': task_id,
+            'node_id': node_id,
+            'item': {'task_id': task_id, 'node_id': node_id, 'status': 'success', 'detail_level': detail_level},
+        }
+
+    service.get_node_detail_payload = _detail
+
+    result = service.node_detail('demo', 'demo', detail_level='summary')
+
+    assert isinstance(result, dict)
+    assert captured['task_id'] == 'task:demo'
+    assert captured['node_id'] == 'node:demo'
+    assert result['node_id'] == 'node:demo'
+
+
 def test_main_runtime_service_node_detail_compacts_execution_trace_for_tool_output():
     class _Store:
         def list_artifacts(self, task_id: str):

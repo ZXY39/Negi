@@ -2801,6 +2801,12 @@ class MainRuntimeService:
             return raw
         return f'task:{raw}'
 
+    def normalize_node_id(self, node_id: str) -> str:
+        raw = str(node_id or '').strip()
+        if not raw or raw.startswith('node:') or ':' in raw:
+            return raw
+        return f'node:{raw}'
+
     def bind_resource_manager(self, resource_manager) -> None:
         self._resource_manager = resource_manager
         self.resource_registry.bind_resource_manager(resource_manager)
@@ -6255,12 +6261,13 @@ class MainRuntimeService:
 
     def get_node_detail_payload(self, task_id: str, node_id: str, detail_level: str = 'summary') -> dict[str, Any] | None:
         normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
         normalized_detail_level = self._normalize_node_detail_level(detail_level)
-        detail = self.query_service.get_node_detail(normalized_task_id, node_id, detail_level=normalized_detail_level)
+        detail = self.query_service.get_node_detail(normalized_task_id, normalized_node_id, detail_level=normalized_detail_level)
         if detail is None:
             return None
         item = self._repair_legacy_display_payload(detail.model_dump(mode='json'))
-        runtime_node = self.store.get_node(node_id)
+        runtime_node = self.store.get_node(normalized_node_id)
         runtime_metadata = dict((runtime_node.metadata or {}) if runtime_node is not None else {})
         latest_live_distribution_round_id = ''
         if runtime_node is not None:
@@ -6269,7 +6276,7 @@ class MainRuntimeService:
                 latest_live_distribution_round_id = str(latest_live_round[0] or '').strip()
             elif self.node_runner.node_is_in_live_distribution_tree(
                 task_id=normalized_task_id,
-                node_id=node_id,
+                node_id=normalized_node_id,
             ):
                 latest_live_distribution_round_id = str(runtime_metadata.get('spawn_owner_round_id') or '').strip()
         item['spawn_owner_parent_node_id'] = str(runtime_metadata.get('spawn_owner_parent_node_id') or '').strip()
@@ -6277,7 +6284,7 @@ class MainRuntimeService:
         item['spawn_owner_entry_index'] = int(runtime_metadata.get('spawn_owner_entry_index') or 0)
         item['spawn_owner_kind'] = str(runtime_metadata.get('spawn_owner_kind') or '').strip()
         item['latest_live_distribution_round_id'] = latest_live_distribution_round_id
-        latest_context = self.get_node_latest_context_payload(normalized_task_id, node_id)
+        latest_context = self.get_node_latest_context_payload(normalized_task_id, normalized_node_id)
         if latest_context is not None:
             if not str(item.get('actual_request_ref') or '').strip():
                 item['actual_request_ref'] = str(
@@ -6298,17 +6305,18 @@ class MainRuntimeService:
         return {
             'ok': True,
             'task_id': normalized_task_id,
-            'node_id': node_id,
+            'node_id': normalized_node_id,
             'item': item,
         }
 
     def get_node_latest_context_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
         normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
         task = self.get_task(normalized_task_id)
-        node = self.store.get_node(node_id)
+        node = self.store.get_node(normalized_node_id)
         if task is None or node is None or str(node.task_id or '').strip() != normalized_task_id:
             return None
-        frame = self.store.get_task_runtime_frame(normalized_task_id, node_id)
+        frame = self.store.get_task_runtime_frame(normalized_task_id, normalized_node_id)
         actual_request_ref = ''
         messages_ref = ''
         ref = ''
@@ -6352,7 +6360,7 @@ class MainRuntimeService:
         return {
             'ok': True,
             'task_id': normalized_task_id,
-            'node_id': node_id,
+            'node_id': normalized_node_id,
             'title': str(self._repair_legacy_display_text(node.goal or node.node_id)),
             'node_kind': str(node.node_kind or 'execution'),
             'status': str(node.status or 'in_progress'),
@@ -6379,14 +6387,15 @@ class MainRuntimeService:
 
     def node_detail(self, task_id: str, node_id: str, detail_level: str = 'summary') -> dict[str, Any] | str:
         normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
         task = self.get_task(normalized_task_id)
         if task is None:
             return f'Error: Task not found: {normalized_task_id}'
 
         normalized_detail_level = self._normalize_node_detail_level(detail_level)
-        payload = self.get_node_detail_payload(normalized_task_id, node_id, detail_level=normalized_detail_level)
+        payload = self.get_node_detail_payload(normalized_task_id, normalized_node_id, detail_level=normalized_detail_level)
         if payload is None:
-            return f'Error: Node not found: {node_id}'
+            return f'Error: Node not found: {normalized_node_id}'
 
         artifacts = [
             {
@@ -6394,7 +6403,7 @@ class MainRuntimeService:
                 'ref': f'artifact:{artifact.artifact_id}',
             }
             for artifact in self.list_artifacts(normalized_task_id)
-            if str(getattr(artifact, 'node_id', '') or '').strip() == str(node_id or '').strip()
+            if str(getattr(artifact, 'node_id', '') or '').strip() == str(normalized_node_id or '').strip()
             and str(getattr(artifact, 'kind', '') or '').strip() not in {'task_execution_trace', 'task_runtime_messages'}
         ]
         artifacts_preview = artifacts[:3]
