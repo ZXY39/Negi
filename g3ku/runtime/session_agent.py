@@ -110,6 +110,9 @@ class RuntimeAgentSession:
         self._frontdoor_history_shrink_reason: str = ""
         self._frontdoor_pending_shrink_reason: str = ""
         self._frontdoor_token_preflight_diagnostics: dict[str, Any] = {}
+        # 本轮是否真实发生过内联 token 压缩（任一请求 applied 即置位，轮首清零）。
+        # 只表达“当轮压缩事件”，与跨轮残留的 _frontdoor_history_shrink_reason 不同。
+        self._frontdoor_token_compression_applied_turn: bool = False
         self._frontdoor_compression_generation_seq: int = 0
         self._active_frontdoor_compression_generation: int | None = None
         self._cancelled_frontdoor_compression_generations: set[int] = set()
@@ -2789,6 +2792,7 @@ class RuntimeAgentSession:
                 self._frontdoor_actual_request_hash = ""
                 self._frontdoor_actual_request_message_count = 0
                 self._frontdoor_actual_tool_schema_hash = ""
+                self._frontdoor_token_compression_applied_turn = False
             self._state.is_running = True
             self._state.paused = False
             self._state.status = "running"
@@ -3045,12 +3049,14 @@ class RuntimeAgentSession:
                             text="Memory review enqueue failed; turn history is still available in session transcript.",
                         )
                 if getattr(self._loop, "memory_manager", None) is not None:
-                    shrink_reason = str(getattr(self, "_frontdoor_history_shrink_reason", "") or "").strip()
-                    if shrink_reason == "token_compression":
+                    # 只在本轮真实发生内联 token 压缩时冲刷复核窗口。
+                    # _frontdoor_history_shrink_reason 是“baseline 为何比上一轮短”的
+                    # 粘滞解释，会跨轮残留，不能当作本轮压缩事件信号。
+                    if bool(getattr(self, "_frontdoor_token_compression_applied_turn", False)):
                         try:
                             flush_result = await self._loop.memory_manager.flush_review_window(
                                 session_key=self._state.session_key,
-                                trigger_source=shrink_reason,
+                                trigger_source="token_compression",
                             )
                             if str(flush_result.get("status") or "").strip() == "queued":
                                 await self._loop.memory_manager.run_due_batch_once()

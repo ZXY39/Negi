@@ -5718,6 +5718,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 }
                 preflight_shrink_reason = str(preflight.history_shrink_reason or "").strip()
                 if preflight_shrink_reason == "token_compression":
+                    # 记录“本轮真实发生内联 token 压缩”，供轮末记忆复核冲刷判定；
+                    # 与跨轮残留的 frontdoor_history_shrink_reason 是两个概念。
+                    if runtime_session is not None:
+                        setattr(runtime_session, "_frontdoor_token_compression_applied_turn", True)
                     current_provider_tool_names = self._frontdoor_provider_visible_tool_names(
                         list(state_for_request.get("provider_tool_names") or [])
                     )
