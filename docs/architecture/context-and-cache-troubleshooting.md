@@ -152,6 +152,12 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 冷启动边界：内部事件消息只有在存在真实续跑基线时才并入续跑种子；无基线的内部轮（重启后首轮、全新会话首轮）必须走新建组装路径注入内部消息，基础系统提示保持首位。绝不能让仅有的内部事件消息冒充"完整旧请求体"触发续跑分支——续跑分支假定种子自带基础系统提示，会把基础提示静默丢掉，表现为内部轮模型行为失范、看不到人设/规则。
 - 症状：把上一真实请求与新的 heartbeat/cron 请求作 append-only 续接比较时出现大面积前缀断裂——通常说明 baseline 恢复、tool-schema seeding 或压缩发生了变化，而不是 runtime 切到了单独通道。
 
+### 3.11 残留 paused 转录条目反复补进种子尾部
+
+- 坑：手动暂停终止的回合把用户消息以 `_transcript_state=paused` 写进转录；暂停回合不会再走回合完成路径，缺少退役路径时条目一直卡在 paused。对账在每个回合 prepare 阶段把它补到种子尾部——紧邻当前用户消息、中间没有任何助手回复——轮末回写后嵌进基线；`token_compression` 把它改写掉，下一轮对账又重新补到新请求尾部。同一条问题以“从未被回答的用户提问”形态在请求尾部反复出现，诱导模型重复处理早已回答过的问题。
+- 不变量：残留 paused 条目随下一个用户可见回合正常完成被对账退役一次；运行时错误路径不退役（出错回合的请求体未必完成基线回写，提前退役会让对账停止补发、用户消息从模型上下文永久消失）。退役与对账的完整生命周期见「Baseline 合同与恢复顺序」。
+- 症状：连续多轮 actual request artifact 里同一条历史用户消息反复出现在请求体尾部，紧邻当前轮用户消息且前后都没有助手回复；模型重复处理或批量补答早已回答过的历史问题，甚至把多条这样的消息合并成一条虚构的用户请求。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。
@@ -174,7 +180,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 
 - `RuntimeAgentSession._frontdoor_request_body_messages` 是 session-owned request-body baseline：保存剥掉动态契约后的重建 provider request body，下一轮在尾部重建唯一一份新的权威契约。它是普通可见 turn 的 append-only 续接来源（不是旧会话兼容回退）：新 user/runtime 尾部内容直接追加其上，不再交给历史选择器判断“语义完整性”。
 - visible turn 期间 baseline 必须跟上真实请求增长：每次 provider 调用后反映剥契约后的最新 body，每个工具循环后把新 assistant/tool transcript 折回同一份 baseline。它也必须跨过 finalize 与可恢复快照边界存活：`inflight_turn_snapshot` / paused execution context 必须连同 `frontdoor_history_shrink_reason` 一起携带它，否则重建的会话会悄悄退回 transcript/history replay，在允许路径之外缩短下一轮。
-- 手动暂停发生在该轮首次 provider 请求发出之前时，被暂停回合的用户消息不进入基线（基线只在有真实 actual-request 证据后回写），而续跑种子路径也不读转录，该消息会因此从后续模型上下文缺席。prepare 阶段对续跑种子做转录对账来保住它：把 `_transcript_state=paused` 且 prompt-visible 的用户回合按转录顺序补到种子尾部；与种子既有用户消息或当前回合用户消息同文本的不重复补。对账只是尾部追加——不改动缓存前缀、不构成收缩、不改变恢复顺序。
+- 手动暂停发生在该轮首次 provider 请求发出之前时，被暂停回合的用户消息不进入基线（基线只在有真实 actual-request 证据后回写），而续跑种子路径也不读转录，该消息会因此从后续模型上下文缺席。prepare 阶段对续跑种子做转录对账来保住它：把 `_transcript_state=paused` 且 prompt-visible 的用户回合按转录顺序补到种子尾部；与种子既有用户消息或当前回合用户消息同文本的不重复补。对账只是尾部追加——不改动缓存前缀、不构成收缩、不改变恢复顺序。paused 条目没有独立的完成路径：暂停回合本身不会再走回合完成路径，残留 paused 条目随下一个用户可见回合正常完成被对账退役一次（同一路径同步执行 `clear_paused_execution_context()` 清掉暂停执行上下文）——此时它要么已被对账进种子并得到处理，要么已被新输入取代。运行时错误路径不退役 paused 条目：出错回合的请求体未必完成基线回写，提前退役会让对账停止补发，用户消息会从模型上下文永久消失。卡在 paused 的条目会触发「残留 paused 转录条目」陷阱。
 - `frontdoor_canonical_context` 保持 durable 单写者：turn 收尾可以合并已完成阶段数据，但 session 同步与请求组装不得把 visible projection 写回 durable 链。
 - 图像边界：只有所选模型绑定启用图像多模态输入时，当前 turn 的 live request 才允许 provider 可见图像块，且同轮须把附件提示替换为直接视觉引导（不得暴露本地上传路径）；历史图像经 `content_open` 重开是独立的 live-only 通道——durable baseline 可保留 `path` / `ref`，但直接视觉复用需要后续 turn 重新 `content_open`。durable baseline、inflight/paused snapshot、completed continuity sidecar 持久化前必须把 `image_url` / `input_image` 剥回文本投影；saved actual-request artifact 是刻意的取证例外——验证图像是否到达 provider 要查 artifact，而不是 durable baseline。
 - CEO continuity 恢复顺序：paused snapshot → inflight snapshot → completed continuity sidecar（`.g3ku/web-ceo-continuity/<session>.json`）→ 最新 actual-request artifact → transcript/history fallback。前三条是可信 sidecar 通道，第四条是保缓存的应急回退；sidecar 只有真正携带可用 `frontdoor_request_body_messages` baseline 时才获胜，文件存在本身不得压制更晚、更完整的恢复源。

@@ -2285,7 +2285,11 @@ async def test_runtime_agent_session_prompt_batch_after_manual_pause_preserves_p
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert [message["role"] for message in reloaded.messages] == ["user", "assistant", "user", "user", "assistant"]
     assert reloaded.messages[0]["content"] == "Original paused request"
-    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "paused"
+    # 后续用户回合正常完成后，残留的 paused 转录条目会被提升为 completed。
+    # 若保持 paused，frontdoor 的 _reconcile_paused_user_turns_into_seed 会在之后
+    # 每一轮把这条旧消息反复补到种子尾部（紧邻当前用户消息且无回复），诱导模型
+    # 重复处理早已回答过的问题。回合正常完成即代表暂停片段已被消费/取代。
+    assert reloaded.messages[0]["metadata"]["_transcript_state"] == "completed"
     assert reloaded.messages[1]["content"] == "已暂停"
     assert reloaded.messages[1]["status"] == "paused"
     assert reloaded.messages[1]["turn_id"] == reloaded.messages[0]["metadata"]["_transcript_turn_id"]

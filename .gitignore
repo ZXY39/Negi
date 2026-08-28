@@ -43,6 +43,7 @@ tests/resources/**/*.pyc
 !tests/test_china_bridge_transport.py
 !tests/test_web_outbound_drain.py
 !tests/test_channel_manager_china_bridge.py
+!tests/test_paused_turn_transcript_lifecycle.py
 
 # Runtime and local state
 .g3ku/

@@ -1163,6 +1163,50 @@ class RuntimeAgentSession:
         if hasattr(persisted_session, "updated_at"):
             persisted_session.updated_at = datetime.now()
 
+    def _complete_lingering_paused_user_messages(self, persisted_session: Any) -> int:
+        """一个用户可见回合正常完成后，把仍残留 paused 状态的转录用户条目提升为 completed。
+
+        paused 条目由 `_persist_manual_pause_user_messages` 写入：手动暂停的回合不会
+        再走完成路径，也没有其他路径把它们推进到 completed。而
+        `_reconcile_paused_user_turns_into_seed`（frontdoor 续跑种子对账）会在每个回合
+        开始时把所有 prompt-visible 的 paused 用户消息补到种子尾部——于是卡在 paused
+        的历史消息会在之后每一轮的请求体尾部、紧邻当前用户消息且没有任何助手回复地
+        反复出现，制造“从未被回答的用户提问”的假象，诱导模型重复处理早已回答过的
+        问题（详见 docs/architecture/context-and-cache-troubleshooting.md 的“残留
+        paused 转录条目”陷阱）。当一个新的用户回合正常完成时，这些残留条目要么已经
+        被对账进本轮或前几轮的种子并得到处理，要么已被新输入取代，应随回合完成退役。
+
+        注意：运行时错误路径不能调用本方法——出错回合的请求体未必完成基线回写，
+        此时把 paused 条目提升为 completed 会让对账机制停止补发，用户消息可能从此
+        在模型上下文里消失。"""
+        flipped = 0
+        messages = getattr(persisted_session, "messages", None)
+        if not isinstance(messages, list):
+            return 0
+        for index, raw in enumerate(list(messages)):
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("role") or "").strip().lower() != "user":
+                continue
+            metadata = raw.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() != _TRANSCRIPT_STATE_PAUSED:
+                continue
+            updated = dict(raw)
+            updated_metadata = dict(metadata)
+            updated_metadata[_TRANSCRIPT_STATE_KEY] = _TRANSCRIPT_STATE_COMPLETED
+            updated["metadata"] = updated_metadata
+            messages[index] = updated
+            flipped += 1
+        if flipped:
+            logger.debug(
+                "Completed {} lingering paused transcript user message(s) for {}",
+                flipped,
+                self._state.session_key,
+            )
+        return flipped
+
     async def _archive_inflight_assistant_for_follow_up_ui_history(
         self,
         *,
@@ -2200,6 +2244,7 @@ class RuntimeAgentSession:
         internal_source: str | None,
         route_kind: str,
         assistant_metadata: dict[str, Any] | None = None,
+        complete_lingering_paused_turns: bool = False,
     ) -> Any | None:
         persisted_session = None
         try:
@@ -2219,6 +2264,10 @@ class RuntimeAgentSession:
                     visible_user_texts.append(current_text)
                 if visible_user_texts:
                     user_text = visible_user_texts[-1]
+                if complete_lingering_paused_turns:
+                    # 仅在正常完成路径清理残留 paused 条目；错误路径的请求体未必完成
+                    # 基线回写，提前退役会让暂停消息从模型上下文永久消失。
+                    self._complete_lingering_paused_user_messages(persisted_session)
             assistant_payload: dict[str, Any] = {}
             canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
@@ -3019,6 +3068,7 @@ class RuntimeAgentSession:
                     internal_source=internal_source,
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                     assistant_metadata=assistant_metadata,
+                    complete_lingering_paused_turns=True,
                 )
                 if getattr(self._loop, "memory_manager", None) is not None:
                     # Memory review mirrors the user-visible surface: internal
