@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from g3ku.utils.api_keys import has_api_keys
 
@@ -16,11 +16,7 @@ DERIVED_HEADER_FIELDS = {
 }
 
 NON_PARAMETER_FIELDS = {"api_key", "base_url", "default_model", "extra_headers", "extra_options"}
-COMMON_ENDPOINT_SUFFIX_HINTS = {
-    "/chat/completions": "Base URL should point to the provider API root, not the /chat/completions endpoint.",
-    "/responses": "Base URL should point to the provider API root, not the /responses endpoint.",
-    "/models": "Base URL should point to the provider API root, not the /models endpoint.",
-}
+COMMON_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/models")
 
 
 def normalize_provider_id(provider_id: str) -> str:
@@ -62,10 +58,20 @@ def _base_url_endpoint_hint(value: str) -> str | None:
     path = parsed.path.rstrip("/").lower()
     if not path:
         return None
-    for suffix, hint in COMMON_ENDPOINT_SUFFIX_HINTS.items():
+    for suffix in COMMON_ENDPOINT_SUFFIXES:
         if path.endswith(suffix):
-            return hint
+            return suffix
     return None
+
+
+def _strip_common_endpoint_suffix(value: str) -> str:
+    """兼容用户填写完整端点地址：把 /chat/completions、/responses、/models 后缀归一为 API root。"""
+    parsed = urlparse(value)
+    raw_path = parsed.path.rstrip("/")
+    suffix = _base_url_endpoint_hint(value)
+    if suffix:
+        raw_path = raw_path[: len(raw_path) - len(suffix)]
+    return urlunparse(parsed._replace(path=raw_path))
 
 
 def _coerce_field_value(
@@ -144,18 +150,10 @@ def normalize_draft(
     base_url = draft.base_url.strip().rstrip("/")
     if not base_url:
         base_url = template.default_base_url.rstrip("/")
+    else:
+        base_url = _strip_common_endpoint_suffix(base_url).rstrip("/") or template.default_base_url.rstrip("/")
     if not _validate_url(base_url):
         errors.append(FieldError(field="base_url", code="invalid_url", message="Base URL is invalid."))
-    else:
-        endpoint_hint = _base_url_endpoint_hint(base_url)
-        if endpoint_hint:
-            errors.append(
-                FieldError(
-                    field="base_url",
-                    code="endpoint_path_not_base_url",
-                    message=endpoint_hint,
-                )
-            )
 
     default_model = draft.default_model.strip() or template.default_model
     if not default_model:

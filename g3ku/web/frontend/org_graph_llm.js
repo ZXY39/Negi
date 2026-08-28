@@ -326,7 +326,8 @@
 
   async function openCreateModal() {
     const state = llmState();
-    const provider = state.templates[0]?.provider_id || "";
+    const preferred = state.templates.find((item) => trim(item.provider_id) === "openai") || state.templates[0];
+    const provider = preferred?.provider_id || "";
     if (provider) await ensureTemplate(provider);
     const draft = provider ? buildDraftFromTemplate(provider) : {
       provider_id: "",
@@ -755,7 +756,7 @@
     const modelIdField = isCreate ? "" : `
         <label class="resource-field">
           <span class="resource-field-label">模型ID</span>
-          <input id="llm-binding-default-model" class="resource-search" type="text" value="${escv(state.editor.defaultModel)}" placeholder="供应商模型ID，例如：gpt-4o">
+          <input id="llm-binding-default-model" class="resource-search" type="text" value="${escv(state.editor.defaultModel)}" placeholder="模型ID，例如：gpt-4o">
         </label>`;
     return `
       <div class="llm-form-grid llm-form-grid--binding-header">
@@ -867,7 +868,7 @@
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
               <h2>添加模型</h2>
-              <p class="subtitle">选择供应商，填写请求地址与 Apikey 后可获取模型列表、测试连接。</p>
+              <p class="subtitle">选择协议，填写请求地址与 Apikey 后可获取模型列表、测试连接。</p>
             </div>
             <div class="detail-modal-actions">
               ${renderBindingNoteAction()}
@@ -882,7 +883,7 @@
                   <input id="llm-model-key-input" class="resource-search" type="text" value="${escv(state.editor.modelKey)}" placeholder="例如：ceo_primary">
                 </label>
                 <label class="resource-field">
-                  <span class="resource-field-label">供应商</span>
+                  <span class="resource-field-label">协议</span>
                   <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
                 </label>
                 ${renderImageMultimodalField({ layout: "header" })}
@@ -1049,11 +1050,21 @@
     if (!providerId) return;
     state.editor.providerId = providerId;
     await ensureTemplate(providerId);
-    const nextDraft = buildDraftFromTemplate(providerId);
-    state.editor.jsonText = JSON.stringify(nextDraft, null, 2);
-    state.editor.baseUrl = String(nextDraft.base_url || "");
-    state.editor.apiKey = String(nextDraft.api_key || "");
-    state.editor.defaultModel = String(nextDraft.default_model || "");
+    const currentText = String(document.getElementById("llm-json-editor")?.value || state.editor.jsonText || "");
+    let draft = null;
+    try {
+      draft = parseDraftJson(currentText, providerId);
+    } catch (_error) {
+      draft = null;
+    }
+    if (!draft) {
+      draft = buildDraftFromTemplate(providerId);
+      if (trim(state.editor.baseUrl)) draft.base_url = trim(state.editor.baseUrl);
+      if (trim(state.editor.apiKey)) draft.api_key = state.editor.apiKey;
+      if (trim(state.editor.defaultModel)) draft.default_model = trim(state.editor.defaultModel);
+    }
+    draft.provider_id = providerId;
+    state.editor.jsonText = JSON.stringify(draft, null, 2);
     state.editor.validation = null;
     state.editor.probe = null;
     renderAll();
@@ -1166,7 +1177,7 @@
     renderModelListPanel();
     showToast({
       title: "已填入模型",
-      text: filledModelKey ? `已将 ${value} 填入模型ID与 JSON 配置。` : `已将供应商模型设置为 ${value}。`,
+      text: filledModelKey ? `已将 ${value} 填入模型ID与 JSON 配置。` : `已将模型ID设置为 ${value}。`,
       kind: "success",
       durationMs: 2600,
     });

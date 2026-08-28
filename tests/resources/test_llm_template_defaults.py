@@ -56,7 +56,7 @@ def test_templates_offer_no_api_mode_selector():
         assert all(field.key != "api_mode" for field in template.fields)
 
 
-def test_normalize_draft_rejects_endpoint_style_base_url():
+def test_normalize_draft_strips_endpoint_suffix_from_base_url():
     registry = TemplateRegistry()
     draft = _draft_from_template("openai").model_copy(
         update={"base_url": "https://api.openai.com/v1/chat/completions"}
@@ -64,10 +64,20 @@ def test_normalize_draft_rejects_endpoint_style_base_url():
 
     normalized, errors = normalize_draft(draft, registry)
 
-    assert normalized is None
-    assert any(error.field == "base_url" for error in errors)
-    assert any(
-        error.code == "endpoint_path_not_base_url"
-        and "/chat/completions" in error.message
-        for error in errors
+    assert errors == []
+    assert normalized is not None
+    assert normalized.base_url == "https://api.openai.com/v1"
+
+
+@pytest.mark.parametrize("suffix", ["/responses", "/models", "/chat/completions"])
+def test_normalize_draft_strips_common_endpoint_suffixes(suffix: str):
+    registry = TemplateRegistry()
+    draft = _draft_from_template("openai").model_copy(
+        update={"base_url": f"https://api.openai.com/v1{suffix}"}
     )
+
+    normalized, errors = normalize_draft(draft, registry)
+
+    assert errors == []
+    assert normalized is not None
+    assert normalized.base_url == "https://api.openai.com/v1"

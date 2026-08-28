@@ -4846,12 +4846,12 @@ textarea {
 
 .llm-image-checkbox-control {
     width: 100%;
-    min-height: 44px;
+    height: 46px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 10px 14px;
+    padding: 0 14px;
     border-radius: 14px;
     border: 1px solid var(--border-strong);
     background: var(--bg-surface-inner);

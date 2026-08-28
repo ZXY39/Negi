@@ -623,6 +623,7 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
 
     create_html = str(result["createHtml"])
     assert "模型ID *" in create_html
+    assert "协议" in create_html
     assert "请求地址 *" in create_html
     assert "Apikey *" in create_html
     assert "获取模型列表" in create_html
@@ -644,3 +645,121 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     assert "llm-fetch-btn" in detail_html
     assert "toggle-concurrency-test" in detail_html
     assert "测试最大并发数" in detail_html
+
+
+def test_handle_provider_change_preserves_entered_values() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        function makeEl() {
+          return {
+            innerHTML: "", value: "", hidden: false, open: false,
+            style: {}, dataset: {},
+            classList: { add() {}, remove() {}, contains() { return false; } },
+            querySelector() { return null; },
+            querySelectorAll() { return []; },
+            setAttribute() {}, getAttribute() { return null; },
+            addEventListener() {},
+          };
+        }
+        const elementsById = {};
+        global.document = {
+          getElementById(id) {
+            if (!elementsById[id]) elementsById[id] = makeEl();
+            return elementsById[id];
+          },
+          querySelector() { return makeEl(); },
+          addEventListener() {},
+        };
+        global.window = global;
+        global.window.addEventListener = () => {};
+        global.S = {
+          modelCatalog: {},
+          llmCenter: {
+            loading: false, saving: false, error: "",
+            templates: [
+              { provider_id: "responses", display_name: "OpenAI Responses" },
+              { provider_id: "openai", display_name: "OpenAI Chat" },
+            ],
+            templateMap: {},
+            templateDetailMap: {},
+            bindings: [], bindingMap: {},
+            routes: null, roleIterations: null, roleConcurrency: null,
+            editor: {
+              open: true, mode: "create", bindingKey: "", configId: "", modelKey: "",
+              providerId: "openai", baseUrl: "", apiKey: "", defaultModel: "",
+              jsonText: "", initialJsonText: "",
+              retryOn: ["network", "429"], retryCount: 0,
+              singleApiKeyMaxConcurrency: "", contextWindowTokens: "", initialContextWindowTokens: "",
+              imageMultimodalEnabled: false, initialImageMultimodalEnabled: false,
+              validation: null, probe: null, modelList: null,
+            },
+            eventsBound: false,
+          },
+        };
+        global.U = {};
+        global.ApiClient = { getLlmTemplate: async () => null };
+        global.showToast = () => {};
+        global.requestInlineConfirm = async () => ({ confirmed: false });
+        global.esc = (value) => String(value ?? "");
+        global.EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [], memory: [] });
+        global.DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+        global.normalizeAllModelRoles = (value) => value;
+        global.normalizeRoleIterations = (value) => value;
+        global.normalizeRoleConcurrency = (value) => value;
+        global.cloneModelRoles = (value) => value;
+        global.cloneRoleIterations = (value) => value;
+        global.cloneRoleConcurrency = (value) => value;
+        global.syncModelRoleDraftState = () => {};
+        global.MODEL_SCOPES = [];
+        global.modelScopeChain = () => [];
+        global.modelScopeIterations = () => 0;
+        global.modelScopeConcurrency = () => 0;
+        global.renderRoleLimitControl = () => "";
+        global.modelRefItem = () => null;
+        global.normalizeModelRoleChain = (value) => value;
+        global.hint = () => {};
+        global.setDrawerOpen = () => {};
+        global.icons = () => {};
+        let code = fs.readFileSync("g3ku/web/frontend/org_graph_llm.js", "utf8");
+        code = code.replace(
+          "window.__llmTestHooks = {",
+          "window.__llmTestHooks = {\\n    handleProviderChange,"
+        );
+        vm.runInThisContext(code);
+
+        const editor = global.S.llmCenter.editor;
+        const entered = {
+          provider_id: "openai", capability: "chat", auth_mode: "api_key",
+          api_key: "sk-keep", base_url: "https://open.bigmodel.cn/api/v1/chat/completions",
+          default_model: "glm-5", parameters: { context_window_tokens: 390000 },
+        };
+        editor.jsonText = JSON.stringify(entered, null, 2);
+        const el = (id) => global.document.getElementById(id);
+        el("llm-json-editor").value = editor.jsonText;
+        el("llm-binding-base-url").value = entered.base_url;
+        el("llm-binding-api-key").value = entered.api_key;
+        el("llm-provider-select").value = "responses";
+
+        window.__llmTestHooks.handleProviderChange().then(() => {
+          const parsed = JSON.parse(global.S.llmCenter.editor.jsonText);
+          console.log(JSON.stringify({
+            provider: parsed.provider_id,
+            base_url: parsed.base_url,
+            api_key: parsed.api_key,
+            model: parsed.default_model,
+            ctx: parsed.parameters.context_window_tokens,
+          }));
+        });
+        """
+    )
+
+    assert result["provider"] == "responses"
+    assert result["base_url"] == "https://open.bigmodel.cn/api/v1/chat/completions"
+    assert result["api_key"] == "sk-keep"
+    assert result["model"] == "glm-5"
+    assert result["ctx"] == 390000

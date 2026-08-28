@@ -209,14 +209,14 @@ Linux / macOS:
 
 配置各自的模型链。
 
-### 新建模型时怎么选供应商
+### 新建模型时怎么选协议
 
-如果模型支持 OpenAI 协议兼容接口，优先建议选择下面两类供应商之一：
+添加模型时“协议”默认选择 `OpenAI Chat`。如果模型支持 OpenAI 协议兼容接口，优先建议选择下面两类协议之一：
 
-- `Custom OpenAI-Compatible`
+- `OpenAI Chat`
 - `OpenAI Responses`
 
-然后修改默认模板后保存。
+请求地址填写 API root 或完整端点（如以 `/chat/completions` 结尾）均可，系统会自动归一为 API root；切换协议时已填写的请求地址、Apikey 等内容会保留。然后修改默认模板后保存。
 
 ### JSON 配置里要填什么
 
