@@ -9278,7 +9278,7 @@ function ensureMemoryDetailPreviewUi() {
         <div class="detail-modal-body">
             <div class="memory-detail-preview-shell">
                 <div id="memory-detail-preview-meta" class="memory-detail-preview-groups"></div>
-                <section class="memory-detail-preview-text-section">
+                <section id="memory-detail-preview-primary-section" class="memory-detail-preview-text-section">
                     <div id="memory-detail-preview-primary-title" class="memory-detail-preview-text-title">正文内容</div>
                     <div id="memory-detail-preview-primary" class="memory-detail-preview-text-block memory-card-body-text-rich"></div>
                 </section>
@@ -9296,6 +9296,7 @@ function ensureMemoryDetailPreviewUi() {
     U.memoryDetailTitle = drawer.querySelector("#memory-detail-preview-title");
     U.memoryDetailSubtitle = drawer.querySelector("#memory-detail-preview-subtitle");
     U.memoryDetailMeta = drawer.querySelector("#memory-detail-preview-meta");
+    U.memoryDetailPrimarySection = drawer.querySelector("#memory-detail-preview-primary-section");
     U.memoryDetailPrimaryTitle = drawer.querySelector("#memory-detail-preview-primary-title");
     U.memoryDetailPrimary = drawer.querySelector("#memory-detail-preview-primary");
     U.memoryDetailSecondarySection = drawer.querySelector("#memory-detail-preview-secondary-section");
@@ -9326,23 +9327,11 @@ function renderMemoryDetailPreview() {
             ? explicitGroups
             : (preview.kind === "processed"
                 ? [
-                    { title: "基础信息", items: fallbackFields.slice(0, 4) },
-                    { title: "模型与用量", items: fallbackFields.slice(4) },
+                    { title: "基础信息", items: fallbackFields },
                 ]
                 : [
                     { title: "基础信息", items: fallbackFields.slice(0, 4) },
                     { title: "运行信息", items: fallbackFields.slice(4) },
-                ]);
-        const groups = explicitGroups.length
-            ? explicitGroups
-            : (preview.kind === "processed"
-                ? [
-                    { title: "鍩虹淇℃伅", items: fallbackFields.slice(0, 4) },
-                    { title: "妯″瀷涓庣敤閲?", items: fallbackFields.slice(4) },
-                ]
-                : [
-                    { title: "鍩虹淇℃伅", items: fallbackFields.slice(0, 4) },
-                    { title: "杩愯淇℃伅", items: fallbackFields.slice(4) },
                 ]);
         U.memoryDetailMeta.innerHTML = normalizedGroups.map((group) => {
             const items = Array.isArray(group?.items) ? group.items : [];
@@ -9386,6 +9375,14 @@ function renderMemoryDetailPreview() {
             U.memoryDetailSecondary.innerHTML = reconstructedHint + changeListHtml;
         } else {
             U.memoryDetailSecondary.innerHTML = secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "";
+        }
+    }
+    const shell = U.memoryDetailDrawer?.querySelector(".memory-detail-preview-shell") || null;
+    if (shell && U.memoryDetailSecondarySection && U.memoryDetailPrimarySection) {
+        if (preview.kind === "processed") {
+            shell.insertBefore(U.memoryDetailSecondarySection, U.memoryDetailPrimarySection);
+        } else {
+            shell.appendChild(U.memoryDetailSecondarySection);
         }
     }
     setDrawerOpen(U.memoryDetailBackdrop, U.memoryDetailDrawer, !!preview.open);
