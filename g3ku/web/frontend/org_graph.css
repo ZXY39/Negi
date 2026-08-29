@@ -4829,6 +4829,7 @@ textarea {
 
 .llm-image-checkbox-field {
     min-width: 0;
+    justify-content: flex-end;
 }
 
 .llm-image-checkbox-field--header {
