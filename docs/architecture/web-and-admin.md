@@ -67,6 +67,7 @@ The top-level `模型配置` page manages `llm-config` provider records and mode
 - `获取模型列表` renders the provider catalog returned by the backend as a filterable list. Selecting an entry writes it into the draft's `default_model`; in create mode an empty `模型ID` is filled with the same value.
 - When an edit changes `default_model` and the binding key still equals the previous `default_model` (an auto-derived key from create mode), the frontend renames the binding key to the new `default_model` via `POST /api/llm/bindings/{key}/rename`, so the displayed config name follows the model id. A key that differs from the model id (a custom name) is left unchanged.
 - `测试最大并发数` is folded behind a `⋯` button next to the per-key concurrency input and requires an explicit confirmation dialog before running because the escalating probe can trigger provider rate limits.
+- Per-role `最大轮数` / `最大并发数` limits live in a collapsible strip on the `模型配置` page header instead of inside the role chain cards, and the strip renders only while `编辑模型链` edit mode is active. Each limit group expands to one numeric input per role; `-1` means unlimited and is persisted as `null`, while the memory Agent `最大并发数` is fixed at 1 and renders as a non-editable pill.
 
 ### Backend Responsibilities
 

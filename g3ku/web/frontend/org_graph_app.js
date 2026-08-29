@@ -390,6 +390,7 @@ const U = {
     modelRolesCancel: document.getElementById("model-roles-cancel-btn"),
     modelRolesSave: document.getElementById("model-roles-save-btn"),
     modelRoleEditors: document.getElementById("model-role-editors"),
+    modelRoleLimitsBar: document.getElementById("model-role-limits-bar"),
     modelSearch: document.getElementById("model-search-input"),
     modelList: document.getElementById("model-list"),
     modelDetailEmpty: document.getElementById("model-detail-empty"),
@@ -7287,9 +7288,6 @@ async function persistModelRoleChains(scopes = MODEL_SCOPES.map((item) => item.k
 
 function renderRoleLimitControl({ scopeKey, kind, label, value, editing }) {
     const isFixedMemoryConcurrency = scopeKey === "memory" && kind === "concurrency";
-    const modeName = `model-role-${kind}-mode-${scopeKey}`;
-    const inputValue = value == null ? (isFixedMemoryConcurrency ? "1" : "") : String(value);
-    const isCustom = value != null;
     if (isFixedMemoryConcurrency) {
         return `
         <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}" data-model-role-fixed="1" data-model-role-fixed-value="1">
@@ -7300,28 +7298,19 @@ function renderRoleLimitControl({ scopeKey, kind, label, value, editing }) {
             <input type="hidden" value="1" data-model-role-limit-input="${esc(kind)}">
         </div>`;
     }
+    const inputValue = value == null ? "-1" : String(value);
     return `
         <div class="model-role-limit-field" data-model-role-limit-kind="${esc(kind)}" data-model-role-limit-scope="${esc(scopeKey)}">
             <span class="model-role-iterations-label">${esc(label)}</span>
-            <div class="llm-segmented-control">
-                <label class="llm-segmented-option">
-                    <input type="radio" name="${esc(modeName)}" value="unlimited" ${!isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
-                    <span class="llm-segmented-label">无限制</span>
-                </label>
-                <label class="llm-segmented-option">
-                    <input type="radio" name="${esc(modeName)}" value="custom" ${isCustom ? "checked" : ""} ${editing ? "" : "disabled"} data-model-role-limit-mode="${esc(kind)}" class="llm-segmented-radio">
-                    <span class="llm-segmented-label">自定义</span>
-                </label>
-            </div>
-            <input class="model-role-iterations-input model-role-limit-input spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(inputValue)}" placeholder="0" ${editing && isCustom ? "" : "disabled"} data-model-role-limit-input="${esc(kind)}">
+            <input class="model-role-limit-input spinless-number-input" type="number" min="-1" step="1" inputmode="numeric" value="${esc(inputValue)}" placeholder="-1" title="-1 代表不限制" ${editing ? "" : "disabled"} data-model-role-limit-input="${esc(kind)}">
         </div>`;
 }
 
 function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
-    if (!U.modelRoleEditors) return false;
-    let changed = false;
-    const groups = [...U.modelRoleEditors.querySelectorAll("[data-model-role-limit-kind][data-model-role-limit-scope]")];
+    const roots = [U.modelRoleLimitsBar, U.modelRoleEditors].filter(Boolean);
+    const groups = roots.flatMap((root) => [...root.querySelectorAll("[data-model-role-limit-kind][data-model-role-limit-scope]")]);
     if (!groups.length) return false;
+    let changed = false;
     groups.forEach((group) => {
         if (!(group instanceof HTMLElement)) return;
         const scope = String(group.dataset.modelRoleLimitScope || "").trim();
@@ -7329,6 +7318,8 @@ function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
         if (!scope || !kind) return;
         const input = group.querySelector("[data-model-role-limit-input]");
         if (!(input instanceof HTMLInputElement)) return;
+        const scopeLabel = MODEL_SCOPES.find((item) => item.key === scope)?.label || scope;
+        const label = kind === "iterations" ? "最大轮数" : "最大并发数";
         const fixed = String(group.dataset.modelRoleFixed || "").trim() === "1";
         if (fixed) {
             const fixedValue = normalizeInt(group.dataset.modelRoleFixedValue, 1);
@@ -7342,49 +7333,73 @@ function syncRoleIterationDraftsFromInputs({ requireValid = false } = {}) {
             input.setCustomValidity("");
             return;
         }
-        const scopeLabel = MODEL_SCOPES.find((item) => item.key === scope)?.label || scope;
-        const selectedMode = group.querySelector("[data-model-role-limit-mode]:checked");
-        const mode = selectedMode instanceof HTMLInputElement ? String(selectedMode.value || "unlimited") : "unlimited";
-        input.disabled = mode !== "custom" || !S.modelCatalog.roleEditing;
-        if (mode !== "custom") {
-            input.classList.remove("is-invalid");
-            input.setCustomValidity("");
-            const currentValue = kind === "iterations" ? modelScopeIterations(scope, "draft") : modelScopeConcurrency(scope, "draft");
-            if (currentValue !== null) {
-                if (kind === "iterations") S.modelCatalog.roleIterationDrafts[scope] = null;
-                if (kind === "concurrency") S.modelCatalog.roleConcurrencyDrafts[scope] = null;
-                changed = true;
-            }
-            return;
-        }
         let rawValue = String(input.value || "").trim();
-        if (rawValue === "" && mode === "custom" && !requireValid) {
-            rawValue = "0";
-            input.value = "0";
-        }
+        if (rawValue === "") rawValue = "-1";
         const cleanValue = Number.parseInt(rawValue, 10);
-        const invalid = !rawValue || !Number.isInteger(cleanValue) || cleanValue < 0;
-        const label = kind === "iterations" ? "最大轮数" : "最大并发数";
+        const invalid = !Number.isInteger(cleanValue) || cleanValue < -1;
         if (invalid) {
             input.classList.add("is-invalid");
-            input.setCustomValidity("请输入不为负数的整数");
+            input.setCustomValidity(`${label}必须是不小于 -1 的整数，-1 代表不限制`);
             if (requireValid) {
                 input.reportValidity();
-                throw new Error(`${scopeLabel} ${label}必须是不为负数的整数`);
+                throw new Error(`${scopeLabel} ${label}必须是不小于 -1 的整数`);
             }
             return;
         }
         input.classList.remove("is-invalid");
         input.setCustomValidity("");
+        const nextValue = cleanValue < 0 ? null : cleanValue;
         const currentValue = kind === "iterations" ? modelScopeIterations(scope, "draft") : modelScopeConcurrency(scope, "draft");
-        if (currentValue !== cleanValue) {
-            if (kind === "iterations") S.modelCatalog.roleIterationDrafts[scope] = cleanValue;
-            if (kind === "concurrency") S.modelCatalog.roleConcurrencyDrafts[scope] = cleanValue;
+        if (currentValue !== nextValue) {
+            if (kind === "iterations") S.modelCatalog.roleIterationDrafts[scope] = nextValue;
+            if (kind === "concurrency") S.modelCatalog.roleConcurrencyDrafts[scope] = nextValue;
             changed = true;
         }
     });
     if (changed) syncModelRoleDraftState();
     return changed;
+}
+
+function roleLimitSummary(kind) {
+    const customized = [];
+    MODEL_SCOPES.forEach((scope) => {
+        if (kind === "concurrency" && scope.key === "memory") return;
+        const value = kind === "iterations" ? modelScopeIterations(scope.key) : modelScopeConcurrency(scope.key);
+        if (value != null) customized.push(`${scope.label} ${value}`);
+    });
+    if (!customized.length) return "默认 -1 · 不限";
+    return `${customized.join(" / ")}，其余 -1`;
+}
+
+function renderRoleLimitsBar() {
+    const bar = U.modelRoleLimitsBar;
+    if (!bar) return;
+    if (!S.modelCatalog.roleEditing) {
+        bar.hidden = true;
+        bar.innerHTML = "";
+        return;
+    }
+    const expanded = S.modelCatalog.roleLimitsExpanded || (S.modelCatalog.roleLimitsExpanded = {});
+    bar.hidden = false;
+    bar.innerHTML = [
+        { kind: "iterations", title: "最大轮数" },
+        { kind: "concurrency", title: "最大并发数" },
+    ].map(({ kind, title }) => {
+        const isOpen = !!expanded[kind];
+        const rows = MODEL_SCOPES.map((scope) => {
+            const value = kind === "iterations" ? modelScopeIterations(scope.key) : modelScopeConcurrency(scope.key);
+            return renderRoleLimitControl({ scopeKey: scope.key, kind, label: scope.label, value, editing: true });
+        }).join("");
+        return `
+            <section class="model-role-limit-group${isOpen ? " is-open" : ""}">
+                <button type="button" class="model-role-limit-toggle" data-role-limit-toggle="${esc(kind)}" aria-expanded="${isOpen ? "true" : "false"}">
+                    <span class="model-role-limit-toggle-title">${esc(title)}</span>
+                    <span class="model-role-limit-toggle-summary">${esc(roleLimitSummary(kind))}</span>
+                    <span class="model-role-limit-toggle-caret" aria-hidden="true"></span>
+                </button>
+                <div class="model-role-limit-rows"${isOpen ? "" : " hidden"}>${rows}</div>
+            </section>`;
+    }).join("");
 }
 
 function startModelRoleEditing() {
@@ -10636,6 +10651,31 @@ function bind() {
             renderModelCatalog();
             return;
         }
+        try {
+            syncRoleIterationDraftsFromInputs({ requireValid: true });
+            renderModelCatalog();
+        } catch (error) {
+            S.modelCatalog.error = error.message || "save failed";
+            hint(`模型配置错误：${S.modelCatalog.error}`, true);
+        }
+    });
+    U.modelRoleLimitsBar?.addEventListener("click", (e) => {
+        const toggle = e.target.closest("[data-role-limit-toggle]");
+        if (!toggle) return;
+        const kind = String(toggle.dataset.roleLimitToggle || "").trim();
+        if (!kind) return;
+        const expanded = S.modelCatalog.roleLimitsExpanded || (S.modelCatalog.roleLimitsExpanded = {});
+        expanded[kind] = !expanded[kind];
+        renderRoleLimitsBar();
+    });
+    U.modelRoleLimitsBar?.addEventListener("input", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        if (!e.target.closest("[data-model-role-limit-input]")) return;
+        syncRoleIterationDraftsFromInputs({ requireValid: false });
+    });
+    U.modelRoleLimitsBar?.addEventListener("change", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        if (!e.target.closest("[data-model-role-limit-input]")) return;
         try {
             syncRoleIterationDraftsFromInputs({ requireValid: true });
             renderModelCatalog();

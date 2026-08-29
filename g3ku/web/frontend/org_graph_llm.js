@@ -980,16 +980,12 @@
     const editing = !!S.modelCatalog.roleEditing;
     U.modelRoleEditors.innerHTML = MODEL_SCOPES.map((scope) => {
       const chain = modelScopeChain(scope.key);
-      const maxIterations = modelScopeIterations(scope.key);
-      const maxConcurrency = modelScopeConcurrency(scope.key);
       return `
         <section class="model-chain-card">
           <div class="card-header">
             <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
             <p class="subtitle">${escv(chain.length ? `已配置 ${chain.length} 个模型` : "尚未配置")}</p>
           </div>
-          ${renderRoleLimitControl({ scopeKey: scope.key, kind: "iterations", label: "最大轮数", value: maxIterations, editing })}
-          ${renderRoleLimitControl({ scopeKey: scope.key, kind: "concurrency", label: "最大并发数", value: maxConcurrency, editing })}
           <div class="role-chain-section">
             <div class="role-chain-title">ROLE CHAIN · ${chain.length} 个模型</div>
             <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
@@ -1017,6 +1013,7 @@
     renderHint();
     renderBindings();
     renderRoutes();
+    if (typeof renderRoleLimitsBar === "function") renderRoleLimitsBar();
     renderEditor();
     icons();
   }
