@@ -1343,6 +1343,19 @@
     state.editor.jsonText = jsonText;
     const draft = bindingDraft.draft;
     const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "");
+    let previousDefaultModel = "";
+    try {
+      previousDefaultModel = trim(parseDraftJson(state.editor.initialJsonText || "", state.editor.providerId || "")?.default_model || "");
+    } catch (_error) {
+      previousDefaultModel = "";
+    }
+    const nextDefaultModel = trim(draft?.default_model || "");
+    const renameKey = (
+      nextDefaultModel &&
+      previousDefaultModel &&
+      nextDefaultModel !== previousDefaultModel &&
+      trim(binding.key) === previousDefaultModel
+    ) ? nextDefaultModel : "";
     const bindingPatch = {};
     if (JSON.stringify(bindingDraft.retryOn) !== JSON.stringify(binding.retry_on || [])) bindingPatch.retry_on = bindingDraft.retryOn;
     if (bindingDraft.retryCount !== Number.parseInt(String(binding.retry_count ?? 0), 10)) bindingPatch.retry_count = bindingDraft.retryCount;
@@ -1368,6 +1381,16 @@
         const configSaveResult = await ApiClient.updateLlmConfig(state.editor.configId, draft);
         runtimeRefresh = configSaveResult?.runtimeRefresh || runtimeRefresh;
       }
+      if (renameKey) {
+        showToast({
+          title: "Saving",
+          text: `同步模型配置名：${renameKey}`,
+          kind: "success",
+          persistent: true,
+        });
+        const renameResult = await ApiClient.renameLlmBinding(state.editor.bindingKey, renameKey);
+        runtimeRefresh = renameResult?.runtimeRefresh || runtimeRefresh;
+      }
       if (Object.keys(bindingPatch).length) {
         showToast({
           title: "Saving",
@@ -1375,7 +1398,7 @@
           kind: "success",
           persistent: true,
         });
-        const bindingSaveResult = await ApiClient.updateLlmBinding(state.editor.bindingKey, bindingPatch);
+        const bindingSaveResult = await ApiClient.updateLlmBinding(renameKey || state.editor.bindingKey, bindingPatch);
         runtimeRefresh = bindingSaveResult?.runtimeRefresh || runtimeRefresh;
       }
       if (!configChanged && !Object.keys(bindingPatch).length) {

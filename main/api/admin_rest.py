@@ -2169,6 +2169,18 @@ async def update_llm_binding(model_key: str, payload: dict = Body(...)):
     return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
 
 
+@router.post('/llm/bindings/{model_key:path}/rename')
+async def rename_llm_binding(model_key: str, payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        new_key = str((payload or {}).get('key') or '').strip()
+        item = manager.rename_model(model_key, new_key)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    runtime_refresh = await _refresh_runtime_after_save('admin_llm_binding_rename')
+    return {'ok': True, 'item': item, 'runtime_refresh': runtime_refresh}
+
+
 @router.get('/runtime-refresh/{command_id:path}')
 async def get_runtime_refresh_status(command_id: str):
     try:

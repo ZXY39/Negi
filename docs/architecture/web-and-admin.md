@@ -59,11 +59,13 @@ The top-level `模型配置` page manages `llm-config` provider records and mode
 - The protocol select (`协议`) defaults to `OpenAI Chat`; switching protocols only rewrites the draft's `provider_id` and preserves entered request address, Apikey, and parameters.
 - The JSON region renders collapsed by default and auto-expands when draft validation or the connection probe fails.
 - `获取模型列表` renders the provider catalog returned by the backend as a filterable list. Selecting an entry writes it into the draft's `default_model`; in create mode an empty `模型ID` is filled with the same value.
+- When an edit changes `default_model` and the binding key still equals the previous `default_model` (an auto-derived key from create mode), the frontend renames the binding key to the new `default_model` via `POST /api/llm/bindings/{key}/rename`, so the displayed config name follows the model id. A key that differs from the model id (a custom name) is left unchanged.
 - `测试最大并发数` is folded behind a `⋯` button next to the per-key concurrency input and requires an explicit confirmation dialog before running because the escalating probe can trigger provider rate limits.
 
 ### Backend Responsibilities
 
 - `POST /api/llm/drafts/validate` and `POST /api/llm/drafts/probe` check an unsaved provider draft; `POST /api/llm/drafts/probe-max-concurrency` derives per-key concurrency limits; `POST /api/llm/drafts/models` fetches the provider model catalog (`GET {base_url}/models`) using the draft's credentials and rotates across multiple API keys on authentication failure.
+- `POST /api/llm/bindings/{model_key}/rename` renames a binding key, rewrites matching references in `models.roles.*` and `agents.multi_agent.orchestrator_model_key`, and rejects an empty or duplicate key.
 - Draft endpoints validate the draft first and report field-level errors without issuing provider requests when validation fails. Draft validation normalizes endpoint-style `base_url` values (trailing `/chat/completions`, `/responses`, `/models`) to the provider API root instead of rejecting them.
 
 ### Maintenance Boundary

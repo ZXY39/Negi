@@ -235,6 +235,25 @@ class ModelManager:
         self.save()
         return self.get_model(key)
 
+    def rename_model(self, key: str, new_key: str) -> dict[str, Any]:
+        item = self._require_model(key)
+        clean_new_key = str(new_key or "").strip()
+        if not clean_new_key:
+            raise ValueError("Model key is required")
+        if clean_new_key == str(item.key or "").strip():
+            return self.get_model(key)
+        if self.config.get_managed_model(clean_new_key) is not None:
+            raise ValueError(f"Model key already exists: {clean_new_key}")
+        item.key = clean_new_key
+        for scope in VALID_SCOPES:
+            refs = getattr(self.config.models.roles, scope)
+            setattr(self.config.models.roles, scope, [clean_new_key if ref == key else ref for ref in refs])
+        if self.config.agents.multi_agent.orchestrator_model_key == key:
+            self.config.agents.multi_agent.orchestrator_model_key = clean_new_key
+        self._revalidate()
+        self.save()
+        return self.get_model(clean_new_key)
+
     def set_model_enabled(self, key: str, enabled: bool) -> dict[str, Any]:
         item = self._require_model(key)
         item.enabled = bool(enabled)

@@ -799,6 +799,17 @@ class ApiClient {
         };
     }
 
+    static async renameLlmBinding(modelKey, newKey) {
+        const data = await this._request("POST", `/api/llm/bindings/${encodeURIComponent(modelKey)}/rename`, {
+            body: { key: newKey },
+            timeoutMs: MODEL_SAVE_TIMEOUT_MS,
+        });
+        return {
+            item: data.item || null,
+            runtimeRefresh: data.runtime_refresh || data.runtimeRefresh || null,
+        };
+    }
+
     static async getRuntimeRefreshStatus(commandId) {
         const data = await this.get(`/api/runtime-refresh/${encodeURIComponent(commandId)}`);
         return data.item || null;

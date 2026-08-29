@@ -171,6 +171,8 @@ G3KU 的模型系统分两层：
 - 运行时看的是“role -> model key -> binding -> provider target”
 - 不是简单的“role 直接写死 provider:model”
 
+绑定 key 是稳定引用：它同时被 `models.catalog[]`、`models.roles.*` 和 `agents.multi_agent.orchestrator_model_key` 引用。管理面重命名某个 binding key 时（例如在编辑模型时把 `default_model` 改成新模型，且 key 原本就是按模型 id 自动生成的），会同步改写这些引用，而非只改 catalog 条目；命名逻辑详见 `web-and-admin.md`「Model Config Page And Admin Contract」。
+
 ## 8. secret 的真实去向
 
 配置里的 secret 不一定直接写回文件。
