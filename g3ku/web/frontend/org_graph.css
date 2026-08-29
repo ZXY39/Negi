@@ -8416,6 +8416,186 @@ textarea {
     scrollbar-gutter: stable;
 }
 
+/* Structured per-memory change blocks (processed-memory 变更内容) */
+.memory-change-list {
+    display: grid;
+    gap: 12px;
+}
+
+.memory-change-block {
+    display: grid;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: 16px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    background: color-mix(in srgb, var(--bg-surface-inner) 86%, var(--bg-panel) 14%);
+}
+
+.memory-change-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.memory-change-type {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--bg-panel) 70%, var(--bg-app) 30%);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+}
+
+.memory-change-block[data-change-type="rewrite"] .memory-change-type {
+    color: #b45309;
+}
+
+.memory-change-block[data-change-type="add"] .memory-change-type {
+    color: #047857;
+}
+
+.memory-change-block[data-change-type="delete"] .memory-change-type {
+    color: #b91c1c;
+}
+
+.memory-change-compare {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.memory-change-col {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.memory-change-col-label {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.memory-change-text {
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 84%, var(--bg-app) 16%);
+    color: var(--text-primary);
+    font-size: 0.86rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+    .memory-change-compare {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* View-memory browser modal */
+#memory-browser-backdrop.detail-backdrop {
+    z-index: 99;
+}
+
+.memory-browser-drawer {
+    top: 50%;
+    left: 50%;
+    right: auto;
+    bottom: auto;
+    width: min(1080px, calc(100vw - 32px));
+    max-height: min(88vh, calc(100dvh - 32px));
+    transform: translate(-50%, calc(-50% + 8px));
+    background: var(--bg-panel);
+    z-index: 100;
+}
+
+.memory-browser-head {
+    display: grid;
+    gap: 6px;
+}
+
+.memory-browser-toolbar {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.memory-browser-search-input {
+    flex: 1;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.memory-browser-table-wrap {
+    overflow: auto;
+    border-radius: 16px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 84%, var(--bg-app) 16%);
+}
+
+.memory-browser-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.84rem;
+    color: var(--text-primary);
+}
+
+.memory-browser-table thead th {
+    position: sticky;
+    top: 0;
+    text-align: left;
+    padding: 10px 12px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-weight: 700;
+    white-space: nowrap;
+    z-index: 1;
+}
+
+.memory-browser-table thead th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.memory-browser-table thead th.sortable:hover {
+    color: var(--text-primary);
+}
+
+.memory-browser-table tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+    vertical-align: top;
+}
+
+.memory-browser-cell-nowrap {
+    white-space: nowrap;
+}
+
+.memory-browser-cell-body {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-width: 260px;
+}
+
+.memory-browser-empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 24px 12px;
+}
+
+.sort-ind {
+    color: var(--text-primary);
+}
+
 .memory-note-ref-list {
     display: inline-flex;
     flex-wrap: wrap;

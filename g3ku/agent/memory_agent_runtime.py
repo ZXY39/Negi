@@ -596,6 +596,9 @@ class _MemoryValidatedWrite:
     compression_triggered: bool = False
     compressed_memory_ids: list[str] = field(default_factory=list)
     deleted_by_compression_ids: list[str] = field(default_factory=list)
+    # Original memory bodies (memory_id -> body) captured before a rewrite/delete
+    # is applied, so the processed record can show an original vs modified comparison.
+    original_bodies: dict[str, str] = field(default_factory=dict)
 
 
 class _MemoryAgentValidationError(ValueError):
@@ -913,6 +916,22 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
 
+    def fetch_bodies(self, memory_ids: list[str]) -> dict[str, str]:
+        """Return {memory_id: memory_body} for the given ids (missing ids omitted)."""
+        normalized_ids = sorted({str(item or "").strip() for item in list(memory_ids or []) if str(item or "").strip()})
+        if not normalized_ids:
+            return {}
+        conn = self._connect()
+        try:
+            placeholders = ", ".join("?" for _ in normalized_ids)
+            rows = conn.execute(
+                f"SELECT memory_id, memory_body FROM memories WHERE memory_id IN ({placeholders})",
+                tuple(normalized_ids),
+            ).fetchall()
+            return {str(row["memory_id"]): str(row["memory_body"] or "") for row in rows}
+        finally:
+            conn.close()
+
     def compression_candidates(self) -> list[dict[str, Any]]:
         conn = self._connect()
         try:
@@ -1108,6 +1127,18 @@ class MemoryManager:
             "total": len(ordered),
             "has_more": end < len(ordered),
         }
+
+    def list_current_memories(self) -> list[dict[str, Any]]:
+        """Return every memory row stored in sqlite, with all persisted fields.
+
+        Includes memory_id, memory_body, minimal_memory, source, from_user,
+        refresh_count, passed_count, is_compressed, created_at, updated_at.
+        Used by the read-only "view memories" admin surface.
+        """
+        repo = getattr(self, "_memory_repo", None)
+        if repo is None:
+            return []
+        return repo.list_memories()
 
     def doctor_report(
         self,
@@ -1964,6 +1995,67 @@ class MemoryManager:
             return ""
         return self._inline_preview_text("；".join(parts), max_chars=400)
 
+    def _build_structured_changes(self, validated: _MemoryValidatedWrite | None) -> list[dict[str, Any]]:
+        """Build a full, untruncated, per-memory description of every change in a batch.
+
+        Each entry describes a single memory mutation so the frontend can render one
+        block per memory and, for rewrites, show the original vs modified text.
+        """
+        if validated is None:
+            return []
+        if str(validated.noop_reason or "").strip():
+            return []
+
+        original_bodies = dict(validated.original_bodies or {})
+        changes: list[dict[str, Any]] = []
+        for item in list(validated.adds or []):
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            changes.append(
+                {
+                    "type": "add",
+                    "memory_id": str(item.get("id") or item.get("memory_id") or "").strip(),
+                    "content": str(item.get("content") or ""),
+                }
+            )
+        for item in list(validated.rewrites or []):
+            memory_id = str(item.get("id") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if not content and not memory_id:
+                continue
+            changes.append(
+                {
+                    "type": "rewrite",
+                    "memory_id": memory_id,
+                    "original_content": original_bodies.get(memory_id, ""),
+                    "content": str(item.get("content") or ""),
+                }
+            )
+        for memory_id in list(validated.deletes or []):
+            normalized_id = str(memory_id or "").strip()
+            if not normalized_id:
+                continue
+            changes.append(
+                {
+                    "type": "delete",
+                    "memory_id": normalized_id,
+                    "original_content": original_bodies.get(normalized_id, ""),
+                }
+            )
+        for ref, body in sorted(dict(validated.note_upserts or {}).items()):
+            normalized_ref = str(ref or "").strip()
+            if not normalized_ref:
+                continue
+            changes.append(
+                {
+                    "type": "note_upsert",
+                    "note_ref": normalized_ref,
+                    "content": str(body or ""),
+                }
+            )
+        return changes
+
     def _commit_validated_write(self, validated: _MemoryValidatedWrite) -> None:
         now_iso = self._now_iso()
         with self._io_lock:
@@ -1973,6 +2065,12 @@ class MemoryManager:
                 note_path.parent.mkdir(parents=True, exist_ok=True)
                 note_path.write_text(body, encoding="utf-8")
             self._sync_sqlite_from_snapshot_if_needed_locked(now_iso=now_iso)
+            # Capture the original bodies of rewritten/deleted memories before the
+            # mutation is applied so the processed record can show before/after text.
+            if not validated.original_bodies:
+                affected_ids = [str(item.get("id") or "").strip() for item in list(validated.rewrites or [])]
+                affected_ids += [str(item or "").strip() for item in list(validated.deletes or [])]
+                validated.original_bodies = self._memory_repo.fetch_bodies(affected_ids)
             has_structured_mutation = bool(
                 list(validated.adds or [])
                 or list(validated.rewrites or [])
@@ -2434,6 +2532,9 @@ class MemoryManager:
             change_preview = self._build_change_preview(validated)
             if change_preview:
                 payload["change_preview"] = change_preview
+            structured_changes = self._build_structured_changes(validated)
+            if structured_changes:
+                payload["changes"] = structured_changes
             payload["inspired_memory_ids"] = list(validated.inspired_memory_ids)
             payload["compression_triggered"] = bool(validated.compression_triggered)
             payload["compressed_memory_ids"] = list(validated.compressed_memory_ids)

@@ -59,6 +59,10 @@ class ApiClient {
                 return "未找到对应的记忆 note。";
             case "memory_note_read_failed":
                 return "读取记忆 note 失败，请稍后重试。";
+            case "memory_current_unavailable":
+                return "当前记忆列表暂不可用，请稍后刷新。";
+            case "memory_current_read_failed":
+                return "当前记忆暂时不可读取，请稍后刷新。";
             case "llm_binding_key_exists":
                 return "模型ID已存在，请使用其他模型ID。";
             default:
@@ -901,6 +905,16 @@ class ApiClient {
             requestKey: `memory:note:${String(ref || "").trim()}`,
         });
         return data.item || null;
+    }
+
+    static async getCurrentMemories() {
+        const data = await this._request("GET", "/api/memory/current", {
+            requestKey: "memory:current",
+        });
+        return {
+            items: data.items || [],
+            total: data.total || 0,
+        };
     }
 
     static async runLlmMigration() {

@@ -294,6 +294,17 @@ const S = {
         error: "",
         requestToken: 0,
     },
+    memoryBrowser: {
+        open: false,
+        busy: false,
+        error: "",
+        items: [],
+        total: 0,
+        search: "",
+        sortKey: "created_at",
+        sortDir: "desc",
+        requestToken: 0,
+    },
     memoryLastAlertText: "",
     memoryLastBlockedText: "",
     memoryPollIntervalId: null,
@@ -351,6 +362,7 @@ const U = {
     viewTaskDetails: document.getElementById("view-task-details"),
     memoryAdminActions: document.getElementById("memory-admin-actions"),
     memoryRefresh: document.getElementById("memory-refresh-btn"),
+    memoryViewCurrent: document.getElementById("memory-view-current-btn"),
     memoryQueueList: document.getElementById("memory-queue-list"),
     memoryQueueInfo: document.getElementById("memory-queue-info"),
     memoryQueueMore: document.getElementById("memory-queue-more-btn"),
@@ -9027,6 +9039,85 @@ function renderMemoryTextWithNoteRefs(text) {
     return html;
 }
 
+function memoryProcessedStructuredChanges(item) {
+    return Array.isArray(item?.changes) ? item.changes : [];
+}
+
+function memoryChangeTypeLabel(type) {
+    const normalized = String(type || "").trim().toLowerCase();
+    if (normalized === "add") return "新增";
+    if (normalized === "rewrite") return "修改";
+    if (normalized === "delete") return "删除";
+    if (normalized === "note_upsert") return "更新 Note";
+    return normalized || "变更";
+}
+
+function renderMemoryChangeBlock(change) {
+    const type = String(change?.type || "").trim().toLowerCase();
+    const typeLabel = memoryChangeTypeLabel(type);
+    const memoryId = String(change?.memory_id || "").trim();
+    const noteRef = String(change?.note_ref || "").trim();
+    const content = String(change?.content || "");
+    const original = String(change?.original_content || "");
+
+    let bodyHtml = "";
+    if (type === "rewrite") {
+        bodyHtml = `
+            <div class="memory-change-compare">
+                <div class="memory-change-col">
+                    <div class="memory-change-col-label">原文</div>
+                    <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
+                </div>
+                <div class="memory-change-col">
+                    <div class="memory-change-col-label">修改后</div>
+                    <div class="memory-change-text">${renderMemoryTextWithNoteRefs(content) || "-"}</div>
+                </div>
+            </div>
+        `;
+    } else if (type === "delete") {
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">删除的内容</div>
+                <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
+            </div>
+        `;
+    } else if (type === "note_upsert") {
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">Note 内容</div>
+                <div class="memory-change-text">${renderMemoryTextWithNoteRefs(content) || "-"}</div>
+            </div>
+        `;
+    } else {
+        bodyHtml = `
+            <div class="memory-change-col">
+                <div class="memory-change-col-label">新增内容</div>
+                <div class="memory-change-text">${renderMemoryTextWithNoteRefs(content) || "-"}</div>
+            </div>
+        `;
+    }
+
+    const idChip = type === "note_upsert" && noteRef
+        ? `<span class="policy-chip neutral">ref:${esc(noteRef)}</span>`
+        : (memoryId ? `<span class="policy-chip neutral">${esc(memoryId)}</span>` : "");
+
+    return `
+        <div class="memory-change-block" data-change-type="${esc(type)}">
+            <div class="memory-change-head">
+                <span class="memory-change-type">${esc(typeLabel)}</span>
+                ${idChip}
+            </div>
+            ${bodyHtml}
+        </div>
+    `;
+}
+
+function renderMemoryChangeList(changes) {
+    const items = Array.isArray(changes) ? changes : [];
+    if (!items.length) return "";
+    return `<div class="memory-change-list">${items.map((change) => renderMemoryChangeBlock(change)).join("")}</div>`;
+}
+
 function memoryPreviewText(text, maxChars = 240) {
     const value = String(text || "").trim();
     if (!value) return "";
@@ -9270,13 +9361,19 @@ function renderMemoryDetailPreview() {
         U.memoryDetailPrimary.innerHTML = renderMemoryTextWithNoteRefs(primaryText);
     }
     const secondaryText = String(preview.secondaryText || "").trim();
-    if (U.memoryDetailSecondarySection) U.memoryDetailSecondarySection.hidden = !secondaryText;
+    const changeListHtml = renderMemoryChangeList(preview.changes);
+    const hasSecondary = Boolean(changeListHtml) || Boolean(secondaryText);
+    if (U.memoryDetailSecondarySection) U.memoryDetailSecondarySection.hidden = !hasSecondary;
     if (U.memoryDetailSecondaryTitle) {
         U.memoryDetailSecondaryTitle.textContent = String(preview.secondaryTitle || "").trim()
             || (preview.kind === "processed" ? "变更内容" : "最近错误");
     }
     if (U.memoryDetailSecondary) {
-        U.memoryDetailSecondary.innerHTML = secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "";
+        if (changeListHtml) {
+            U.memoryDetailSecondary.innerHTML = changeListHtml;
+        } else {
+            U.memoryDetailSecondary.innerHTML = secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "";
+        }
     }
     setDrawerOpen(U.memoryDetailBackdrop, U.memoryDetailDrawer, !!preview.open);
 }
@@ -9334,8 +9431,221 @@ function openMemoryDetailPreview(kind, key) {
         secondaryText: isProcessed
             ? String(noopReason || memoryProcessedChangePreview(source) || "")
             : String(source?.last_error_text || ""),
+        changes: isProcessed ? memoryProcessedStructuredChanges(source) : [],
     };
     renderMemoryDetailPreview();
+}
+
+function ensureMemoryBrowserUi() {
+    if (U.memoryBrowserBackdrop && U.memoryBrowserDrawer) return;
+    const host = U.viewMemory || document.body;
+    const backdrop = document.createElement("div");
+    backdrop.id = "memory-browser-backdrop";
+    backdrop.className = "detail-backdrop";
+    backdrop.setAttribute("aria-hidden", "true");
+    const drawer = document.createElement("section");
+    drawer.id = "memory-browser-drawer";
+    drawer.className = "panel detail-drawer memory-browser-drawer";
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
+    drawer.setAttribute("aria-hidden", "true");
+    drawer.setAttribute("aria-labelledby", "memory-browser-title");
+    drawer.tabIndex = -1;
+    drawer.innerHTML = `
+        <div class="detail-modal-header">
+            <div class="memory-browser-head">
+                <h2 id="memory-browser-title">当前记忆</h2>
+                <p id="memory-browser-subtitle" class="subtitle">数据来自 sqlite 持久化存储。</p>
+            </div>
+            <button type="button" class="toolbar-btn ghost" data-memory-browser-close data-modal-close>关闭</button>
+        </div>
+        <div class="detail-modal-body">
+            <div class="memory-browser-toolbar">
+                <input id="memory-browser-search" class="resource-search memory-browser-search-input" type="search" placeholder="搜索关键词（内容 / ID / 来源）" aria-label="搜索当前记忆" />
+            </div>
+            <div class="memory-browser-table-wrap">
+                <table class="memory-browser-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable" data-memory-sort="created_at" tabindex="0" role="button">创建时间<span class="sort-ind" data-sort-ind="created_at"></span></th>
+                            <th class="sortable" data-memory-sort="refresh_count" tabindex="0" role="button">刷新值<span class="sort-ind" data-sort-ind="refresh_count"></span></th>
+                            <th class="sortable" data-memory-sort="passed_count" tabindex="0" role="button">通过次数<span class="sort-ind" data-sort-ind="passed_count"></span></th>
+                            <th>来源</th>
+                            <th>ID</th>
+                            <th>记忆内容</th>
+                        </tr>
+                    </thead>
+                    <tbody id="memory-browser-tbody"></tbody>
+                </table>
+            </div>
+            <div id="memory-browser-status" class="resource-page-indicator" aria-live="polite"></div>
+        </div>
+    `;
+    host.appendChild(backdrop);
+    host.appendChild(drawer);
+    U.memoryBrowserBackdrop = backdrop;
+    U.memoryBrowserDrawer = drawer;
+    U.memoryBrowserTitle = drawer.querySelector("#memory-browser-title");
+    U.memoryBrowserSubtitle = drawer.querySelector("#memory-browser-subtitle");
+    U.memoryBrowserSearch = drawer.querySelector("#memory-browser-search");
+    U.memoryBrowserTbody = drawer.querySelector("#memory-browser-tbody");
+    U.memoryBrowserStatus = drawer.querySelector("#memory-browser-status");
+    U.memoryBrowserClose = drawer.querySelector("[data-memory-browser-close]");
+    U.memoryBrowserClose?.addEventListener("click", () => closeMemoryBrowser());
+    U.memoryBrowserBackdrop?.addEventListener("click", () => closeMemoryBrowser());
+    U.memoryBrowserSearch?.addEventListener("input", () => {
+        S.memoryBrowser.search = U.memoryBrowserSearch.value || "";
+        renderMemoryBrowserList();
+    });
+    drawer.querySelectorAll("[data-memory-sort]").forEach((th) => {
+        const key = th.dataset.memorySort || "";
+        const activate = () => toggleMemoryBrowserSort(key);
+        th.addEventListener("click", activate);
+        th.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                activate();
+            }
+        });
+    });
+}
+
+function memoryBrowserFilteredItems() {
+    const items = Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items : [];
+    const needle = String(S.memoryBrowser.search || "").trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter((item) => {
+        const haystack = [
+            item?.memory_body,
+            item?.minimal_memory,
+            item?.memory_id,
+            item?.source,
+        ].map((value) => String(value || "").toLowerCase()).join("\n");
+        return haystack.includes(needle);
+    });
+}
+
+function memoryBrowserSortedItems(items) {
+    const key = String(S.memoryBrowser.sortKey || "created_at");
+    const dir = S.memoryBrowser.sortDir === "asc" ? 1 : -1;
+    const list = [...items];
+    list.sort((a, b) => {
+        if (key === "refresh_count" || key === "passed_count") {
+            const av = Number(a?.[key] || 0);
+            const bv = Number(b?.[key] || 0);
+            if (av === bv) return 0;
+            return av < bv ? -dir : dir;
+        }
+        const av = String(a?.[key] || "");
+        const bv = String(b?.[key] || "");
+        const cmp = av.localeCompare(bv);
+        if (cmp === 0) return 0;
+        return cmp < 0 ? -dir : dir;
+    });
+    return list;
+}
+
+function renderMemoryBrowserList() {
+    ensureMemoryBrowserUi();
+    if (!U.memoryBrowserTbody) return;
+    const filtered = memoryBrowserSortedItems(memoryBrowserFilteredItems());
+    if (S.memoryBrowser.busy) {
+        U.memoryBrowserTbody.innerHTML = '<tr><td colspan="6" class="memory-browser-empty">正在加载当前记忆...</td></tr>';
+    } else if (!filtered.length) {
+        const hasAny = Array.isArray(S.memoryBrowser.items) && S.memoryBrowser.items.length;
+        U.memoryBrowserTbody.innerHTML = `<tr><td colspan="6" class="memory-browser-empty">${hasAny ? "没有匹配的记忆。" : "当前没有记忆。"}</td></tr>`;
+    } else {
+        U.memoryBrowserTbody.innerHTML = filtered.map((item) => {
+            const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "-");
+            const source = String(item?.source || "").trim() || "-";
+            const memoryId = String(item?.memory_id || "").trim() || "-";
+            const body = String(item?.memory_body || "").trim() || "-";
+            return `
+                <tr>
+                    <td class="memory-browser-cell-nowrap">${esc(createdAt)}</td>
+                    <td class="memory-browser-cell-nowrap">${esc(String(item?.refresh_count ?? 0))}</td>
+                    <td class="memory-browser-cell-nowrap">${esc(String(item?.passed_count ?? 0))}</td>
+                    <td class="memory-browser-cell-nowrap">${esc(source)}</td>
+                    <td class="memory-browser-cell-nowrap">${esc(memoryId)}</td>
+                    <td class="memory-browser-cell-body">${esc(body)}</td>
+                </tr>
+            `;
+        }).join("");
+    }
+    const total = Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items.length : 0;
+    if (U.memoryBrowserStatus) {
+        const errorText = String(S.memoryBrowser.error || "").trim();
+        if (errorText) {
+            U.memoryBrowserStatus.textContent = errorText;
+            U.memoryBrowserStatus.classList.add("is-error");
+        } else {
+            U.memoryBrowserStatus.textContent = `共 ${total} 条记忆${S.memoryBrowser.search ? `，筛选出 ${filtered.length} 条` : ""}`;
+            U.memoryBrowserStatus.classList.remove("is-error");
+        }
+    }
+    if (U.memoryBrowserSubtitle) {
+        U.memoryBrowserSubtitle.textContent = `共 ${total} 条 · 点击「创建时间 / 刷新值 / 通过次数」表头可排序。`;
+    }
+    U.memoryBrowserDrawer?.querySelectorAll("[data-sort-ind]").forEach((ind) => {
+        const key = ind.dataset.sortInd || "";
+        const active = key === S.memoryBrowser.sortKey;
+        ind.textContent = active ? (S.memoryBrowser.sortDir === "asc" ? " ↑" : " ↓") : "";
+    });
+}
+
+function toggleMemoryBrowserSort(key) {
+    const normalized = String(key || "").trim();
+    if (!normalized) return;
+    if (S.memoryBrowser.sortKey === normalized) {
+        S.memoryBrowser.sortDir = S.memoryBrowser.sortDir === "asc" ? "desc" : "asc";
+    } else {
+        S.memoryBrowser.sortKey = normalized;
+        S.memoryBrowser.sortDir = normalized === "created_at" ? "desc" : "desc";
+    }
+    renderMemoryBrowserList();
+}
+
+function renderMemoryBrowser() {
+    ensureMemoryBrowserUi();
+    renderMemoryBrowserList();
+    setDrawerOpen(U.memoryBrowserBackdrop, U.memoryBrowserDrawer, !!S.memoryBrowser.open);
+}
+
+function closeMemoryBrowser() {
+    S.memoryBrowser.open = false;
+    renderMemoryBrowser();
+}
+
+async function loadMemoryBrowser() {
+    ensureMemoryBrowserUi();
+    S.memoryBrowser.busy = true;
+    S.memoryBrowser.error = "";
+    S.memoryBrowser.requestToken += 1;
+    const requestToken = S.memoryBrowser.requestToken;
+    renderMemoryBrowser();
+    try {
+        const payload = await ApiClient.getCurrentMemories();
+        if (requestToken !== S.memoryBrowser.requestToken) return;
+        S.memoryBrowser.items = Array.isArray(payload?.items) ? payload.items : [];
+        S.memoryBrowser.total = normalizeInt(payload?.total, S.memoryBrowser.items.length);
+        S.memoryBrowser.error = "";
+    } catch (error) {
+        if (requestToken !== S.memoryBrowser.requestToken) return;
+        S.memoryBrowser.error = error?.message || "当前记忆加载失败";
+        showToast({ title: "记忆加载失败", text: S.memoryBrowser.error, kind: "error" });
+    } finally {
+        if (requestToken === S.memoryBrowser.requestToken) {
+            S.memoryBrowser.busy = false;
+            renderMemoryBrowser();
+        }
+    }
+}
+
+async function openMemoryBrowser() {
+    ensureMemoryBrowserUi();
+    S.memoryBrowser.open = true;
+    renderMemoryBrowser();
+    await loadMemoryBrowser();
 }
 
 function setMemoryCardExpanded(kind, key, expanded) {
@@ -10089,6 +10399,7 @@ function switchView(view) {
     }
     if (view !== "memory" && S.memoryNotePreview.open) closeMemoryNotePreview();
     if (view !== "memory" && S.memoryDetailPreview.open) closeMemoryDetailPreview();
+    if (view !== "memory" && S.memoryBrowser.open) closeMemoryBrowser();
     if (view === "memory") startMemoryViewAutoRefresh();
     else stopMemoryViewAutoRefresh();
     if (view === "skills") void loadSkills();
@@ -10122,6 +10433,7 @@ function bind() {
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
     U.memoryRefresh?.addEventListener("click", () => void loadMemoryView({ force: true }));
+    U.memoryViewCurrent?.addEventListener("click", () => void openMemoryBrowser());
     U.memoryQueueMore?.addEventListener("click", () => void loadMoreMemoryQueue());
     U.memoryProcessedMore?.addEventListener("click", () => void loadMoreMemoryProcessed());
     U.memoryQueueList?.addEventListener("click", (e) => {

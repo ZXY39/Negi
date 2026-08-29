@@ -31,12 +31,15 @@ The browser shell has a top-level `记忆管理` page. This is intentionally a r
 - The left rail exposes `记忆管理` as its own top-level navigation item, not a nested subsection of model configuration.
 - The page shows two independent columns: unprocessed queue items oldest-first in real queue order, and terminal processed batches newest-first, including both applied and discarded outcomes.
 - Cards default to collapsed and stay compact; clicking a queue or processed card opens a frontend-owned read-only detail modal for the full payload, with long payloads kept inside scrollable text regions.
+- In a processed batch detail modal, the 变更内容 section renders the structured `changes` payload as one block per affected memory entry, each with its full untruncated content; rewrite entries render the original text and the modified text in a side-by-side comparison, and delete entries render the removed body. Rows without structured `changes` fall back to the legacy `change_preview` text.
+- The page header's 查看记忆 button opens a read-only memory browser drawer listing the current SQLite memory rows (创建时间, 刷新值, 通过次数, 来源, ID, 记忆内容). Sort toggles for 创建时间/刷新值/通过次数 and keyword search run browser-side over the fetched snapshot; the drawer holds no mutation controls.
 - `ref:note_xxxx` text is a read-only preview trigger: clicking a note ref opens a second frontend-owned drawer that only fetches and displays the note body and must not expose edit or save controls.
 - The page is read-only. There are no browser buttons for retry, delete, edit, or force-flush.
 
 ### Backend Responsibilities
 
-- `GET /api/memory/queue` and `GET /api/memory/processed` return queue-owned runtime state and terminal batch records (applied rows plus durable discarded rows), each with pagination metadata.
+- `GET /api/memory/queue` and `GET /api/memory/processed` return queue-owned runtime state and terminal batch records (applied rows plus durable discarded rows), each with pagination metadata. Terminal processed rows carry a structured `changes` list — one entry per add/rewrite/delete/note_upsert with `memory_id`, full `content`, and for rewrite/delete also `original_content`. The original bodies are fetched from the SQLite store inside the commit path before the mutation applies, so each terminal row records the before/after state of every affected memory.
+- `GET /api/memory/current` returns a read-only snapshot of the current SQLite memory rows (memory id, body, source, refresh count, passed count, compression flag, timestamps) and backs the memory browser drawer.
 - `memory/ops.jsonl` is a rolling processed-history surface rather than an append-forever archive; the backend prunes processed rows older than 7 days, so `/api/memory/processed` is the latest 7-day operator history window.
 - `GET /api/memory/notes/{ref}` is the minimal read-only note preview contract, returning the note body for an existing `ref:note_xxxx` entry or a clear not-found error when the note file is missing.
 - `POST /api/memory/admin/retry-head` exists as a guarded operator contract but is disabled by default; unless `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS` is enabled the backend returns `403` with `detail.code=memory_admin_mutation_disabled`, and successful calls append an audit record to `memory/admin_audit.jsonl`.
@@ -45,7 +48,9 @@ The browser shell has a top-level `记忆管理` page. This is intentionally a r
 
 - If the memory page looks wrong but the raw JSON from `/api/memory/queue` or `/api/memory/processed` is correct, debug `g3ku/web/frontend/*`.
 - If a `ref:note_xxxx` chip renders but the preview drawer cannot load, compare the frontend `ApiClient.getMemoryNote(...)` request with `GET /api/memory/notes/{ref}` before debugging the memory runtime itself.
-- If the page is missing fields, ordering, discarded statuses, `change_preview`, or request-artifact links already in the API response, debug the admin endpoints or `g3ku/agent/memory_agent_runtime.py`.
+- If the page is missing fields, ordering, discarded statuses, structured `changes`, `change_preview`, or request-artifact links already in the API response, debug the admin endpoints or `g3ku/agent/memory_agent_runtime.py`.
+- If a rewrite comparison shows the modified text but an empty original, inspect the original-body capture in the commit path of `g3ku/agent/memory_agent_runtime.py`; originals are read before the mutation applies and are not reconstructible after the commit.
+- If the memory browser drawer fails to load, compare `ApiClient.getCurrentMemories()` with `GET /api/memory/current`. A `404` on that route means the running web process predates the endpoint and needs a restart; frontend files are served from disk with no-cache headers, so frontend-only edits need only a browser refresh.
 - If the queue page is stuck on one `processing` batch, treat that as a backend/runtime issue first, not as a frontend pagination bug.
 - Browser-side memory management remains read-only by default. If an operator expects a retry button in the UI, first check whether the feature was intentionally kept backend-only for the current build rather than debugging missing DOM wiring.
 

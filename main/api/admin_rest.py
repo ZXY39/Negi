@@ -2854,6 +2854,28 @@ async def get_memory_processed(
     }
 
 
+@router.get('/memory/current')
+async def get_current_memories():
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'list_current_memories', None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail='memory_current_unavailable')
+    try:
+        items = reader()
+        if isawaitable(items):
+            items = await items
+    except Exception as exc:
+        raise _memory_read_error(
+            code='memory_current_read_failed',
+            message='当前记忆暂时不可读取，请稍后刷新。',
+        ) from exc
+    return {
+        'ok': True,
+        'items': list(items or []),
+        'total': len(list(items or [])),
+    }
+
+
 @router.get('/memory/notes/{ref}')
 async def get_memory_note(ref: str):
     manager = _runtime_memory_manager()
