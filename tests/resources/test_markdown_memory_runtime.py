@@ -740,6 +740,106 @@ def test_processed_history_records_refresh_and_compression_metadata(tmp_path: Pa
         manager.close()
 
 
+def test_parse_legacy_change_preview_splits_every_segment_type() -> None:
+    module = _load_memory_agent_runtime_module()
+    preview = (
+        "新增：全新的记忆甲；"
+        "修改 Ab12Z9：改写后的记忆乙；"
+        "修改：无 id 的改写丙；"
+        "删除 Zz9999；"
+        "更新 note ref:note_g3ku_persona：note 正文丁；"
+        "更新 note ref:note_empty"
+    )
+    changes = module.MemoryManager._parse_legacy_change_preview(preview)
+
+    assert [c["type"] for c in changes] == ["add", "rewrite", "rewrite", "delete", "note_upsert", "note_upsert"]
+    assert changes[0]["content"] == "全新的记忆甲"
+    assert changes[1]["memory_id"] == "Ab12Z9"
+    assert changes[1]["content"] == "改写后的记忆乙"
+    assert changes[1]["original_missing"] is True
+    assert changes[2]["memory_id"] == ""
+    assert changes[2]["content"] == "无 id 的改写丙"
+    assert changes[3]["memory_id"] == "Zz9999"
+    assert changes[3]["original_missing"] is True
+    assert changes[4]["note_ref"] == "note_g3ku_persona"
+    assert changes[4]["content"] == "note 正文丁"
+    assert changes[5]["note_ref"] == "note_empty"
+    assert changes[5]["content"] == ""
+
+
+def test_parse_legacy_change_preview_keeps_semicolons_inside_content() -> None:
+    module = _load_memory_agent_runtime_module()
+    preview = "新增：正文里带有；中文分号；的记忆；修改 Ab12Z9：改写也带；分号"
+    changes = module.MemoryManager._parse_legacy_change_preview(preview)
+
+    assert len(changes) == 2
+    assert changes[0]["type"] == "add"
+    assert changes[0]["content"] == "正文里带有；中文分号；的记忆"
+    assert changes[1]["type"] == "rewrite"
+    assert changes[1]["content"] == "改写也带；分号"
+
+
+def test_parse_legacy_change_preview_empty_and_markerless_inputs() -> None:
+    module = _load_memory_agent_runtime_module()
+    assert module.MemoryManager._parse_legacy_change_preview("") == []
+    assert module.MemoryManager._parse_legacy_change_preview("   ") == []
+    assert module.MemoryManager._parse_legacy_change_preview("没有任何标记的普通文本") == []
+
+
+@pytest.mark.asyncio
+async def test_list_processed_page_backfills_legacy_rows_and_preserves_new_rows(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+
+    try:
+        legacy_row = {
+            "batch_id": "write_legacy",
+            "op": "write",
+            "source_op": "write",
+            "status": "applied",
+            "processed_at": "2026-08-24T00:00:00+08:00",
+            "write_mode": "mixed",
+            "change_preview": "新增：旧格式新增内容；修改 Ab12Z9：旧格式改写内容",
+        }
+        modern_row = {
+            "batch_id": "write_modern",
+            "op": "write",
+            "source_op": "write",
+            "status": "applied",
+            "processed_at": "2026-08-29T00:00:00+08:00",
+            "changes": [{"type": "add", "memory_id": "", "content": "结构化新增"}],
+        }
+        noop_row = {
+            "batch_id": "write_noop",
+            "op": "write",
+            "source_op": "write",
+            "status": "applied",
+            "processed_at": "2026-08-28T00:00:00+08:00",
+            "noop_reason": "本批无稳定新内容",
+        }
+        manager._write_processed_batches([legacy_row, modern_row, noop_row])
+
+        page = await manager.list_processed_page(limit=20, offset=0)
+        items = {item["batch_id"]: item for item in page["items"]}
+
+        legacy = items["write_legacy"]
+        assert legacy["changes_reconstructed"] is True
+        assert [c["type"] for c in legacy["changes"]] == ["add", "rewrite"]
+        assert legacy["changes"][1]["original_missing"] is True
+        # The persisted row must not be rewritten by the read path.
+        assert "changes" not in legacy_row
+
+        modern = items["write_modern"]
+        assert "changes_reconstructed" not in modern
+        assert modern["changes"][0]["content"] == "结构化新增"
+
+        noop = items["write_noop"]
+        assert "changes" not in noop
+        assert "changes_reconstructed" not in noop
+    finally:
+        manager.close()
+
+
 def test_memory_commit_after_empty_snapshot_clears_stale_sqlite_rows(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())

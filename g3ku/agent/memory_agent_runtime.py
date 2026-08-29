@@ -1122,8 +1122,9 @@ class MemoryManager:
         start = max(int(offset or 0), 0)
         page_size = max(int(limit or 0), 0)
         end = start + page_size
+        items = [self._backfill_legacy_changes(row) for row in ordered[start:end]]
         return {
-            "items": ordered[start:end],
+            "items": items,
             "total": len(ordered),
             "has_more": end < len(ordered),
         }
@@ -2055,6 +2056,106 @@ class MemoryManager:
                 }
             )
         return changes
+
+    # Legacy processed rows kept only a flattened `新增：…；修改 ID：…；删除 ID；更新 note ref:…`
+    # preview. A new segment starts after a `；` that is followed by one of those markers.
+    _LEGACY_PREVIEW_SEGMENT_SPLIT = re.compile(r"；(?=(?:新增：|修改[ ：]|删除 |更新 note ref:))")
+
+    @classmethod
+    def _parse_legacy_change_preview(cls, preview: str) -> list[dict[str, Any]]:
+        """Best-effort reconstruction of structured changes from a legacy change_preview.
+
+        Rows committed before the structured `changes` payload carry only the joined,
+        whitespace-flattened, 400-char preview text. Split it back into per-memory
+        entries so the operator UI renders them in the same block layout. Original
+        bodies of rewrites/deletes were never captured for those rows, so the entries
+        are flagged with `original_missing` instead of inventing a before-text.
+        """
+        text = str(preview or "").strip()
+        if not text:
+            return []
+        changes: list[dict[str, Any]] = []
+        for segment in cls._LEGACY_PREVIEW_SEGMENT_SPLIT.split(text):
+            segment = segment.strip()
+            if not segment:
+                continue
+            if segment.startswith("新增："):
+                content = segment[len("新增："):].strip()
+                if content:
+                    changes.append({"type": "add", "memory_id": "", "content": content})
+                continue
+            if segment.startswith("修改："):
+                content = segment[len("修改："):].strip()
+                if content:
+                    changes.append(
+                        {
+                            "type": "rewrite",
+                            "memory_id": "",
+                            "original_content": "",
+                            "original_missing": True,
+                            "content": content,
+                        }
+                    )
+                continue
+            if segment.startswith("修改 "):
+                head, _, content = segment.partition("：")
+                memory_id = head[len("修改 "):].strip()
+                content = content.strip()
+                if memory_id or content:
+                    changes.append(
+                        {
+                            "type": "rewrite",
+                            "memory_id": memory_id,
+                            "original_content": "",
+                            "original_missing": True,
+                            "content": content,
+                        }
+                    )
+                continue
+            if segment.startswith("删除 "):
+                memory_id = segment[len("删除 "):].strip().rstrip("；").strip()
+                if memory_id:
+                    changes.append(
+                        {
+                            "type": "delete",
+                            "memory_id": memory_id,
+                            "original_content": "",
+                            "original_missing": True,
+                        }
+                    )
+                continue
+            if segment.startswith("更新 note ref:"):
+                head, separator, content = segment.partition("：")
+                note_ref = head[len("更新 note ref:"):].strip()
+                content = content.strip() if separator else ""
+                if note_ref:
+                    changes.append(
+                        {
+                            "type": "note_upsert",
+                            "note_ref": note_ref,
+                            "content": content,
+                        }
+                    )
+                continue
+        return changes
+
+    def _backfill_legacy_changes(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Attach reconstructed `changes` to a legacy processed row for display.
+
+        Read-only enrichment: the persisted row is never rewritten, and rows that
+        already carry structured `changes` (or have no parsable preview) pass through
+        unchanged. `changes_reconstructed` marks rows whose blocks were rebuilt from
+        the lossy preview rather than recorded at commit time.
+        """
+        if not isinstance(row, dict) or row.get("changes"):
+            return row
+        changes = self._parse_legacy_change_preview(row.get("change_preview"))
+        if not changes:
+            return row
+        enriched = dict(row)
+        enriched["changes"] = changes
+        enriched["changes_reconstructed"] = True
+        return enriched
 
     def _commit_validated_write(self, validated: _MemoryValidatedWrite) -> None:
         now_iso = self._now_iso()

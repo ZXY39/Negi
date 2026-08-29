@@ -9059,26 +9059,36 @@ function renderMemoryChangeBlock(change) {
     const noteRef = String(change?.note_ref || "").trim();
     const content = String(change?.content || "");
     const original = String(change?.original_content || "");
+    const originalMissing = Boolean(change?.original_missing);
 
     let bodyHtml = "";
     if (type === "rewrite") {
+        const originalHtml = originalMissing && !original.trim()
+            ? `<div class="memory-change-text memory-change-missing">历史批次未保留原文</div>`
+            : `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>`;
+        const modifiedHtml = content.trim()
+            ? `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(content)}</div>`
+            : `<div class="memory-change-text memory-change-missing">历史批次未保留修改后内容</div>`;
         bodyHtml = `
             <div class="memory-change-compare">
                 <div class="memory-change-col">
                     <div class="memory-change-col-label">原文</div>
-                    <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
+                    ${originalHtml}
                 </div>
                 <div class="memory-change-col">
                     <div class="memory-change-col-label">修改后</div>
-                    <div class="memory-change-text">${renderMemoryTextWithNoteRefs(content) || "-"}</div>
+                    ${modifiedHtml}
                 </div>
             </div>
         `;
     } else if (type === "delete") {
+        const deletedHtml = original.trim()
+            ? `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(original)}</div>`
+            : `<div class="memory-change-text memory-change-missing">${originalMissing ? "历史批次未保留被删内容，仅记录了 ID" : "-"}</div>`;
         bodyHtml = `
             <div class="memory-change-col">
                 <div class="memory-change-col-label">删除的内容</div>
-                <div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>
+                ${deletedHtml}
             </div>
         `;
     } else if (type === "note_upsert") {
@@ -9362,6 +9372,9 @@ function renderMemoryDetailPreview() {
     }
     const secondaryText = String(preview.secondaryText || "").trim();
     const changeListHtml = renderMemoryChangeList(preview.changes);
+    const reconstructedHint = changeListHtml && preview.changesReconstructed
+        ? `<div class="memory-change-reconstructed-hint">以下变更由历史摘要重建；当时的原文与删除内容未被保留。</div>`
+        : "";
     const hasSecondary = Boolean(changeListHtml) || Boolean(secondaryText);
     if (U.memoryDetailSecondarySection) U.memoryDetailSecondarySection.hidden = !hasSecondary;
     if (U.memoryDetailSecondaryTitle) {
@@ -9370,7 +9383,7 @@ function renderMemoryDetailPreview() {
     }
     if (U.memoryDetailSecondary) {
         if (changeListHtml) {
-            U.memoryDetailSecondary.innerHTML = changeListHtml;
+            U.memoryDetailSecondary.innerHTML = reconstructedHint + changeListHtml;
         } else {
             U.memoryDetailSecondary.innerHTML = secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "";
         }
@@ -9432,6 +9445,7 @@ function openMemoryDetailPreview(kind, key) {
             ? String(noopReason || memoryProcessedChangePreview(source) || "")
             : String(source?.last_error_text || ""),
         changes: isProcessed ? memoryProcessedStructuredChanges(source) : [],
+        changesReconstructed: isProcessed ? Boolean(source?.changes_reconstructed) : false,
     };
     renderMemoryDetailPreview();
 }
