@@ -6556,7 +6556,7 @@ textarea {
 }
 
 .role-chain-section {
-    margin-top: 16px;
+    margin-top: 0;
 }
 
 .role-chain-title {
@@ -9318,6 +9318,86 @@ textarea {
     max-height: min(42dvh, 420px);
     overflow-y: auto;
     padding-right: 4px;
+}
+
+.model-chain-list {
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+}
+
+.model-chain-slide {
+    position: relative;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-app) 78%, var(--bg-panel) 22%);
+}
+
+.model-chain-slide.is-editing {
+    cursor: grab;
+}
+
+.model-chain-slide.is-editing:active {
+    cursor: grabbing;
+}
+
+.model-chain-slide .model-chain-main {
+    width: 100%;
+}
+
+.model-chain-remove {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 2;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: color-mix(in srgb, var(--bg-panel) 82%, var(--bg-app) 18%);
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.model-chain-slide:hover .model-chain-remove,
+.model-chain-remove:focus-visible {
+    display: inline-flex;
+}
+
+.model-chain-remove:hover {
+    color: #ef4444;
+    border-color: color-mix(in srgb, #ef4444 48%, var(--border-color));
+}
+
+.model-chain-remove svg {
+    width: 14px;
+    height: 14px;
+}
+
+.model-iterations-toolbar-input {
+    width: 76px;
+    min-height: 34px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-surface-inner);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: center;
+}
+
+.model-iterations-toolbar-input.is-invalid {
+    border-color: color-mix(in srgb, #ef4444 56%, var(--border-strong));
+    box-shadow: 0 0 0 3px color-mix(in srgb, #ef4444 14%, transparent);
 }
 
 @media (max-width: 1200px) {

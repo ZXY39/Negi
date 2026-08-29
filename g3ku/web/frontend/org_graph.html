@@ -459,6 +459,8 @@
                     <div class="resource-header-actions model-page-actions">
                         <button id="model-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                         <button id="llm-config-create-btn" class="toolbar-btn ghost" type="button">添加模型</button>
+                        <button id="model-iterations-toggle-btn" class="toolbar-btn ghost" type="button" hidden aria-expanded="false">最大轮数</button>
+                        <input id="model-iterations-value-input" class="spinless-number-input model-iterations-toolbar-input" type="number" min="-1" step="1" inputmode="numeric" value="-1" title="-1 代表不限制" aria-label="最大轮数" hidden>
                         <button id="model-roles-save-btn" class="toolbar-btn success" type="button">编辑模型链</button>
                         <button id="model-roles-cancel-btn" class="toolbar-btn ghost" type="button" hidden>取消</button>
                     </div>

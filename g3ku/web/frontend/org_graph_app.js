@@ -7389,32 +7389,8 @@ function roleLimitSummary(kind) {
 function renderRoleLimitsBar() {
     const bar = U.modelRoleLimitsBar;
     if (!bar) return;
-    if (!S.modelCatalog.roleEditing) {
-        bar.hidden = true;
-        bar.innerHTML = "";
-        return;
-    }
-    const expanded = S.modelCatalog.roleLimitsExpanded || (S.modelCatalog.roleLimitsExpanded = {});
-    bar.hidden = false;
-    bar.innerHTML = [
-        { kind: "iterations", title: "最大轮数" },
-        { kind: "concurrency", title: "最大并发数" },
-    ].map(({ kind, title }) => {
-        const isOpen = !!expanded[kind];
-        const rows = MODEL_SCOPES.map((scope) => {
-            const value = kind === "iterations" ? modelScopeIterations(scope.key) : modelScopeConcurrency(scope.key);
-            return renderRoleLimitControl({ scopeKey: scope.key, kind, label: scope.label, value, editing: true });
-        }).join("");
-        return `
-            <section class="model-role-limit-group${isOpen ? " is-open" : ""}">
-                <button type="button" class="model-role-limit-toggle" data-role-limit-toggle="${esc(kind)}" aria-expanded="${isOpen ? "true" : "false"}">
-                    <span class="model-role-limit-toggle-title">${esc(title)}</span>
-                    <span class="model-role-limit-toggle-summary">${esc(roleLimitSummary(kind))}</span>
-                    <span class="model-role-limit-toggle-caret" aria-hidden="true"></span>
-                </button>
-                <div class="model-role-limit-rows"${isOpen ? "" : " hidden"}>${rows}</div>
-            </section>`;
-    }).join("");
+    bar.hidden = true;
+    bar.innerHTML = "";
 }
 
 function startModelRoleEditing() {

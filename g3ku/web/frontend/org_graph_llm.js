@@ -57,6 +57,8 @@
     U.llmEditorShell = document.getElementById("llm-editor-shell");
     U.llmEditorBackdrop = document.getElementById("llm-editor-backdrop");
     U.modelRolesCancel = document.getElementById("model-roles-cancel-btn");
+    U.modelIterationsToggle = document.getElementById("model-iterations-toggle-btn");
+    U.modelIterationsInput = document.getElementById("model-iterations-value-input");
     U.modelList = U.llmBindingsList || U.modelList;
   }
 
@@ -984,18 +986,17 @@
         <section class="model-chain-card">
           <div class="card-header">
             <h3>${escv(SCOPE_LABELS[scope.key] || scope.key)}</h3>
-            <p class="subtitle">${escv(chain.length ? `已配置 ${chain.length} 个模型` : "尚未配置")}</p>
           </div>
           <div class="role-chain-section">
-            <div class="role-chain-title">ROLE CHAIN · ${chain.length} 个模型</div>
             <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
               const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
               const key = trim(item?.key || ref);
-              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}">${editing ? '<button type="button" class="model-chain-handle" aria-label="拖拽排序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>' : ''}<button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(key)}</span><span class="resource-list-subtitle">${escv(item?.provider_model || ref)}</span><span class="model-inline-meta">${index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ''}</span></button>${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}">移除</button>` : ''}</article>`;
+              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(key)}</span><span class="resource-list-subtitle">${escv(item?.provider_model || ref)}</span><span class="model-inline-meta">${index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ''}</span></button>${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button>` : ''}</article>`;
             }).join("") : `<div class="empty-state compact">${editing ? '把左侧模型拖到这里，编排当前角色链。' : '点击“编辑模型链”后再调整角色链。'}</div>`}</div>
           </div>
         </section>`;
     }).join("");
+    icons();
   }
 
   function renderAll() {
@@ -1009,6 +1010,18 @@
     if (U.modelRolesSave) {
       U.modelRolesSave.disabled = state.loading || state.saving;
       U.modelRolesSave.textContent = S.modelCatalog.roleEditing ? (S.modelCatalog.rolesDirty ? "保存模型链" : "完成编辑") : "编辑模型链";
+    }
+    const iterationsOpen = !!S.modelCatalog.roleEditing && !!S.modelCatalog.roleIterationsOpen;
+    if (U.modelIterationsToggle) {
+      U.modelIterationsToggle.hidden = !S.modelCatalog.roleEditing;
+      U.modelIterationsToggle.disabled = state.loading || state.saving;
+      U.modelIterationsToggle.setAttribute("aria-expanded", iterationsOpen ? "true" : "false");
+    }
+    if (U.modelIterationsInput) {
+      U.modelIterationsInput.hidden = !iterationsOpen;
+      if (iterationsOpen && document.activeElement !== U.modelIterationsInput) {
+        U.modelIterationsInput.value = String(modelScopeIterations("ceo") ?? -1);
+      }
     }
     renderHint();
     renderBindings();
@@ -1488,6 +1501,27 @@
     refs();
     bindList();
     U.llmConfigCreate?.addEventListener("click", () => void openCreateModal());
+    U.modelIterationsToggle?.addEventListener("click", () => {
+      S.modelCatalog.roleIterationsOpen = !S.modelCatalog.roleIterationsOpen;
+      renderAll();
+      if (S.modelCatalog.roleIterationsOpen) U.modelIterationsInput?.focus();
+    });
+    U.modelIterationsInput?.addEventListener("input", () => {
+      const raw = String(U.modelIterationsInput.value || "").trim();
+      const parsed = raw === "" ? -1 : Number.parseInt(raw, 10);
+      if (!Number.isInteger(parsed) || parsed < -1) {
+        U.modelIterationsInput.classList.add("is-invalid");
+        return;
+      }
+      U.modelIterationsInput.classList.remove("is-invalid");
+      const next = parsed < 0 ? null : parsed;
+      ["ceo", "execution", "inspection"].forEach((scope) => {
+        S.modelCatalog.roleIterationDrafts[scope] = next;
+      });
+      syncModelRoleDraftState();
+      if (U.modelRolesSave) U.modelRolesSave.textContent = S.modelCatalog.rolesDirty ? "保存模型链" : "完成编辑";
+      renderHint();
+    });
     U.llmEditorBackdrop?.addEventListener("click", closeEditor);
     U.llmEditorShell?.addEventListener("change", (event) => {
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
@@ -1570,6 +1604,16 @@
       startModelRoleEditing();
       renderAll();
       return;
+    }
+    if (U.modelIterationsInput && !U.modelIterationsInput.hidden) {
+      const raw = String(U.modelIterationsInput.value || "").trim();
+      const parsed = raw === "" ? -1 : Number.parseInt(raw, 10);
+      if (!Number.isInteger(parsed) || parsed < -1) {
+        llmState().error = "最大轮数必须是不小于 -1 的整数，-1 代表不限制";
+        showToast({ title: "保存失败", text: llmState().error, kind: "error" });
+        renderAll();
+        return;
+      }
     }
     try {
       syncRoleIterationDraftsFromInputs({ requireValid: true });
