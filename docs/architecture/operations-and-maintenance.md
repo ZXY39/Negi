@@ -487,7 +487,7 @@ If tool/skill retrieval does not return after restart, first inspect resource ru
 `memory/checkpoints.sqlite3` is a bounded per-thread checkpoint cache, not an append-forever log. Two mechanisms keep it from growing without bound:
 
 - **Row trim**: each `(thread_id, checkpoint_ns)` keeps only the newest `max_checkpoints_per_thread` checkpoints; older rows are deleted. Because each checkpoint is a cumulative full graph snapshot, this knob is the biggest capacity lever — lowering it (e.g. 200 → 50) shrinks steady-state size far more than any VACUUM tuning.
-- **VACUUM**: row deletes only move pages to the SQLite freelist; the file does not shrink until a `VACUUM` rebuilds it. The engine runs a full `VACUUM` under the checkpointer lock when the file exceeds `vacuum_min_file_size_bytes` and at least `vacuum_interval_seconds` has passed since the last one. This is scheduled as a background task from `_ensure_checkpointer_ready`, so it never blocks the triggering turn. In-flight checkpoint writes serialize behind the VACUUM on the shared connection — they wait, they do not fail.
+- **VACUUM**: row deletes only move pages to the SQLite freelist; the file does not shrink until a `VACUUM` rebuilds it. VACUUM is operator-triggered, never scheduled by the runtime. `POST /api/admin/checkpoints/maintain` runs `reclaim_checkpointer_space(force=True)` under the checkpointer lock to trim and rebuild the file; in-flight checkpoint writes serialize behind the VACUUM on the shared connection — they wait, they do not fail. Keeping VACUUM off the request path matters because a multi-GB rebuild under the checkpointer lock blocks CEO session deletion, which shares that lock.
 
 Governance parameters live in `tools/memory_runtime/resource.yaml` under `settings.checkpointer`:
 
@@ -495,8 +495,8 @@ Governance parameters live in `tools/memory_runtime/resource.yaml` under `settin
 |---|---|---|
 | `max_checkpoints_per_thread` | `200` | checkpoints retained per thread |
 | `trim_interval_seconds` | `300` | min seconds between opportunistic trims |
-| `vacuum_min_file_size_bytes` | `536870912` (512 MiB) | only VACUUM once the file is this large |
-| `vacuum_interval_seconds` | `21600` (6 h) | min seconds between VACUUMs |
+| `vacuum_min_file_size_bytes` | `536870912` (512 MiB) | size gate for the background auto-vacuum scheduler (the runtime does not invoke it) |
+| `vacuum_interval_seconds` | `21600` (6 h) | interval gate for the background auto-vacuum scheduler (the runtime does not invoke it) |
 
 Editing `resource.yaml` changes the memory-runtime fingerprint, so the runtime rebuilds the memory runtime after sessions drain (see `runtime-overview.md`「Memory Runtime Reset Guard」).
 
@@ -510,5 +510,5 @@ Offline fallback when the runtime is stopped: `sqlite3 memory/checkpoints.sqlite
 Troubleshooting:
 
 - File large but `freelist_count` small → live data is genuinely large; lower `max_checkpoints_per_thread` rather than expecting VACUUM to help.
-- File large and `freelist_count` large but not shrinking → the size/interval gate has not fired (no frontdoor traffic); run the manual maintain endpoint.
-- VACUUM skipped with an operational error (lock contention or low disk) → it is logged and retried after `vacuum_interval_seconds`; check disk headroom.
+- File large and `freelist_count` large but not shrinking → auto vacuum does not run; use `POST /api/admin/checkpoints/maintain` to reclaim freed pages.
+- Maintain reports `vacuumed=false` with an operational error (lock contention or low disk) → check disk headroom and retry the endpoint.

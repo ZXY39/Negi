@@ -394,9 +394,8 @@ async def test_reclaim_checkpointer_space_shrinks_file(tmp_path: Path) -> None:
     aconn = await aiosqlite.connect(db_path)
     try:
         engine = _make_sqlite_engine(db_path, aconn, max_per_thread=2)
-        # Keep the size threshold above the seeded file so _ensure_checkpointer_ready
-        # does not spawn a competing background vacuum task; reclaim(force=True)
-        # still vacuums because force bypasses the gate.
+        # reclaim(force=True) vacuums regardless of the size/interval gate, so the
+        # threshold here only documents that this test exercises the force path.
         engine._checkpointer_vacuum_min_file_size_bytes = 10 * 1024 * 1024 * 1024
 
         report = await AgentRuntimeEngine.reclaim_checkpointer_space(engine, force=True)

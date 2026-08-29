@@ -654,7 +654,6 @@ class AgentRuntimeEngine:
                             self._checkpointer_path,
                             exc,
                         )
-                    self._maybe_schedule_checkpointer_vacuum()
                     return None
                 logger.warning(
                     'SQLite checkpointer connection inactive; rebuilding at {}',
@@ -682,7 +681,6 @@ class AgentRuntimeEngine:
                         cp_path,
                         exc,
                     )
-                self._maybe_schedule_checkpointer_vacuum()
             except Exception as exc:
                 logger.warning(
                     'SQLite checkpointer bootstrap failed; fallback to session-file history: {}',

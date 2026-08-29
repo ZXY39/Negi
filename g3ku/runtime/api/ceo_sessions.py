@@ -4,7 +4,7 @@ from datetime import datetime
 from inspect import isawaitable
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
 from loguru import logger
 
 from g3ku.runtime.frontdoor.checkpoint_inspection import (
@@ -355,6 +355,18 @@ def _aggregate_session_delete_payloads(items: list[dict]) -> dict:
     }
 
 
+async def _purge_checkpointer_thread_background(purge_fn, session_key: str) -> None:
+    try:
+        await purge_fn(session_key)
+    except Exception as exc:
+        logger.warning(
+            "Failed to purge SQLite checkpointer thread during CEO session delete "
+            "(session_key={}): {}",
+            session_key,
+            exc,
+        )
+
+
 async def _delete_single_ceo_session(
     agent,
     session_manager,
@@ -364,6 +376,7 @@ async def _delete_single_ceo_session(
     session_key: str,
     is_channel_session: bool,
     delete_task_records: bool,
+    background_tasks: BackgroundTasks | None = None,
 ) -> dict:
     stopped_background_tool_count = 0
     tool_execution_manager = getattr(agent, 'tool_execution_manager', None)
@@ -398,14 +411,13 @@ async def _delete_single_ceo_session(
         await cancel(session_key)
     purge_checkpointer_thread = getattr(agent, "purge_checkpointer_thread", None)
     if callable(purge_checkpointer_thread):
-        try:
-            await purge_checkpointer_thread(session_key)
-        except Exception as exc:
-            logger.warning(
-                "Failed to purge SQLite checkpointer thread during CEO session delete "
-                "(session_key={}): {}",
+        if background_tasks is None:
+            await _purge_checkpointer_thread_background(purge_checkpointer_thread, session_key)
+        else:
+            background_tasks.add_task(
+                _purge_checkpointer_thread_background,
+                purge_checkpointer_thread,
                 session_key,
-                exc,
             )
     return {
         "session_id": session_key,
@@ -706,7 +718,11 @@ async def get_ceo_sessions_bulk_delete_check(payload: dict | None = Body(default
 
 
 @router.delete("/ceo/sessions/{session_id}")
-async def delete_ceo_session(session_id: str, payload: dict | None = Body(default=None)):
+async def delete_ceo_session(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    payload: dict | None = Body(default=None),
+):
     agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
     session_key, is_channel_session = _resolve_bulk_session_key(
@@ -725,6 +741,7 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
             session_key=session_key,
             is_channel_session=is_channel_session,
             delete_task_records=delete_task_records,
+            background_tasks=background_tasks,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -750,7 +767,10 @@ async def delete_ceo_session(session_id: str, payload: dict | None = Body(defaul
 
 
 @router.post("/ceo/sessions/bulk-delete")
-async def bulk_delete_ceo_sessions(payload: dict | None = Body(default=None)):
+async def bulk_delete_ceo_sessions(
+    background_tasks: BackgroundTasks,
+    payload: dict | None = Body(default=None),
+):
     agent, session_manager, runtime_manager, state_store = _sessions()
     service = await _task_service(agent)
     session_ids = _normalize_bulk_session_ids((payload or {}).get('session_ids'))
@@ -774,6 +794,7 @@ async def bulk_delete_ceo_sessions(payload: dict | None = Body(default=None)):
                 session_key=session_key,
                 is_channel_session=is_channel_session,
                 delete_task_records=delete_task_records,
+                background_tasks=background_tasks,
             )
             result['result'] = 'deleted' if result.get('deleted') else 'cleared'
             results.append(result)
