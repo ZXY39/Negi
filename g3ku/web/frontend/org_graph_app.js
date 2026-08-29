@@ -3881,6 +3881,21 @@ function scrollCeoFeedToBottom() {
     };
     applyBottom();
     window.requestAnimationFrame(applyBottom);
+
+    // Lazy/async media can grow the feed after the initial scroll: attachment
+    // and inline images render with no reserved space and load asynchronously,
+    // and webfonts can reflow text. Without a re-apply, a freshly opened session
+    // stops short of the true bottom once those settle, so re-pin the feed as
+    // each pending image finishes and once fonts are ready.
+    const images = Array.from(U.ceoFeed.querySelectorAll?.("img") || []);
+    for (const img of images) {
+        if (!img || img.complete || typeof img.addEventListener !== "function") continue;
+        img.addEventListener("load", applyBottom, { once: true });
+        img.addEventListener("error", applyBottom, { once: true });
+    }
+    if (typeof document.fonts?.ready?.then === "function") {
+        document.fonts.ready.then(applyBottom).catch(() => {});
+    }
 }
 
 let ceoFeedBatchDepth = 0;
