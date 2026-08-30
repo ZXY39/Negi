@@ -775,6 +775,29 @@ class MainRuntimeService:
                 if task_id:
                     await self.cancel_task(task_id)
                 success = True
+            elif command_type == 'pause_node':
+                if task_id:
+                    result_payload = await self._apply_pause_node_command(
+                        task_id,
+                        node_ids=list(payload.get('node_ids') or []),
+                        cascade=bool(payload.get('cascade', False)),
+                        reason=str(payload.get('reason') or 'manual'),
+                        remark=str(payload.get('remark') or ''),
+                    )
+                success = True
+            elif command_type == 'resume_node':
+                if task_id:
+                    result_payload = await self._apply_resume_node_command(task_id, node_ids=list(payload.get('node_ids') or []), force=True)
+                success = True
+            elif command_type == 'fail_node':
+                if task_id:
+                    result_payload = await self._apply_fail_node_command(
+                        task_id,
+                        node_ids=list(payload.get('node_ids') or []),
+                        reason=str(payload.get('reason') or ''),
+                        force=True,
+                    )
+                success = True
             elif command_type == 'refresh_runtime_config':
                 changed = self.ensure_runtime_config_current(
                     force=True,
@@ -1093,6 +1116,271 @@ class MainRuntimeService:
                 },
             )
         return self.store.get_task(record.task_id) or record
+
+    def _node_subtree(self, task_id: str, node_id: str, *, include_root: bool = True) -> list[NodeRecord]:
+        nodes = [node for node in self.store.list_nodes(task_id) if str(node.task_id or '').strip() == str(task_id or '').strip()]
+        by_parent: dict[str, list[NodeRecord]] = {}
+        for item in nodes:
+            by_parent.setdefault(str(item.parent_node_id or '').strip(), []).append(item)
+        result: list[NodeRecord] = []
+        queue: list[str] = [str(node_id or '').strip()]
+        seen: set[str] = set()
+        while queue:
+            current_id = queue.pop(0)
+            if not current_id or current_id in seen:
+                continue
+            seen.add(current_id)
+            current = next((item for item in nodes if item.node_id == current_id), None)
+            if current is not None and (include_root or current_id != str(node_id or '').strip()):
+                result.append(current)
+            queue.extend(item.node_id for item in by_parent.get(current_id, []) if item.node_id not in seen)
+        return result
+
+    def _require_node_control_target(self, task_id: str, node_id: str) -> tuple[TaskRecord, NodeRecord]:
+        task = self.get_task(task_id)
+        node = self.get_node(node_id)
+        if task is None:
+            raise ValueError('task_not_found')
+        if node is None or str(node.task_id or '').strip() != str(task.task_id or '').strip():
+            raise ValueError('node_not_found')
+        return task, node
+
+    async def _apply_pause_node_command(
+        self,
+        task_id: str,
+        *,
+        node_ids: list[str],
+        cascade: bool = False,
+        reason: str = 'manual',
+        remark: str = '',
+    ) -> dict[str, Any]:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return {'ok': False, 'error': 'task_not_found', 'items': []}
+        normalized_reason = str(reason or 'manual').strip().lower()
+        if normalized_reason not in {'manual', 'agent', 'error'}:
+            raise ValueError('invalid_pause_reason')
+        targets: list[str] = []
+        seen: set[str] = set()
+        for raw_node_id in list(node_ids or []):
+            node_id = self.normalize_node_id(str(raw_node_id or '').strip())
+            for node in (self._node_subtree(normalized_task_id, node_id) if cascade else [self.get_node(node_id)]):
+                if node is None or node.node_id in seen:
+                    continue
+                seen.add(node.node_id)
+                targets.append(node.node_id)
+        results: list[dict[str, Any]] = []
+        for node_id in targets:
+            node = self.get_node(node_id)
+            if node is None:
+                results.append({'node_id': node_id, 'result': 'not_found'})
+                continue
+            if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
+                continue
+            updated = self.log_service.set_node_pause_state(
+                normalized_task_id,
+                node_id,
+                pause_requested=True,
+                is_paused=True if normalized_reason == 'error' else bool(node.is_paused),
+                pause_reason=normalized_reason,
+                remark=remark,
+            )
+            results.append({'node_id': node_id, 'result': 'paused' if updated is not None else 'not_found'})
+        return {'ok': True, 'task_id': normalized_task_id, 'items': results}
+
+    async def _apply_resume_node_command(self, task_id: str, *, node_ids: list[str], force: bool = False, schedule_if_inactive: bool = True) -> dict[str, Any]:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return {'ok': False, 'error': 'task_not_found', 'items': []}
+        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        results: list[dict[str, Any]] = []
+        for raw_node_id in list(node_ids or []):
+            node_id = self.normalize_node_id(str(raw_node_id or '').strip())
+            node = self.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                results.append({'node_id': node_id, 'result': 'not_found'})
+                continue
+            if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
+                continue
+            if not force and not (bool(node.is_paused) or bool(node.pause_requested)):
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
+                continue
+            updated = self.log_service.set_node_pause_state(
+                normalized_task_id,
+                node_id,
+                pause_requested=False,
+                is_paused=False,
+                pause_reason='',
+                remark='',
+            )
+            if dispatcher is not None and updated is not None:
+                await dispatcher.resume_node(node_id)
+            results.append({'node_id': node_id, 'result': 'resumed' if updated is not None else 'not_found'})
+        if schedule_if_inactive and dispatcher is None and any(item.get('result') == 'resumed' for item in results) and str(task.status or '').strip().lower() == 'in_progress' and not bool(task.is_paused):
+            await self.global_scheduler.enqueue_task(normalized_task_id)
+        return {'ok': True, 'task_id': normalized_task_id, 'items': results}
+
+    async def _apply_fail_node_command(self, task_id: str, *, node_ids: list[str], reason: str = '', force: bool = False) -> dict[str, Any]:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return {'ok': False, 'error': 'task_not_found', 'items': []}
+        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        results: list[dict[str, Any]] = []
+        for raw_node_id in list(node_ids or []):
+            node_id = self.normalize_node_id(str(raw_node_id or '').strip())
+            node = self.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                results.append({'node_id': node_id, 'result': 'not_found'})
+                continue
+            if str(node.status or '').strip().lower() in {'success', 'failed'} and not (force and dispatcher is not None and node_id in dispatcher._entries):
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
+                continue
+            if not force and not (bool(node.is_paused) or bool(node.pause_requested)):
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
+                continue
+            if dispatcher is not None:
+                result = await dispatcher.fail_node(node_id, reason)
+            else:
+                result = self.node_runner.fail_paused_node(normalized_task_id, node_id, reason)
+            results.append({'node_id': node_id, 'result': 'failed', 'status': result.status})
+        return {'ok': True, 'task_id': normalized_task_id, 'items': results}
+
+    async def pause_node(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        cascade: bool = False,
+        reason: str = 'manual',
+        remark: str = '',
+    ) -> NodeRecord | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
+        task, node = self._require_node_control_target(normalized_task_id, normalized_node_id)
+        if str(node.status or '').strip().lower() in {'success', 'failed'}:
+            raise ValueError('node_terminal')
+        normalized_reason = str(reason or 'manual').strip().lower()
+        if normalized_reason not in {'manual', 'agent', 'error'}:
+            raise ValueError('invalid_pause_reason')
+        if self.execution_mode == 'web':
+            self._assert_worker_available()
+        result = await self._apply_pause_node_command(
+            normalized_task_id,
+            node_ids=[normalized_node_id],
+            cascade=bool(cascade),
+            reason=normalized_reason,
+            remark=remark,
+        )
+        if self.execution_mode == 'web':
+            self._enqueue_task_command(
+                command_type='pause_node',
+                task_id=normalized_task_id,
+                session_id=task.session_id,
+                payload={'node_ids': [normalized_node_id], 'cascade': bool(cascade), 'reason': normalized_reason, 'remark': str(remark or '')},
+            )
+        return self.get_node(normalized_node_id)
+
+    async def resume_node(self, task_id: str, node_id: str) -> NodeRecord | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
+        task, _node = self._require_node_control_target(normalized_task_id, normalized_node_id)
+        if self.execution_mode == 'web':
+            self._assert_worker_available()
+        await self._apply_resume_node_command(normalized_task_id, node_ids=[normalized_node_id], schedule_if_inactive=self.execution_mode != 'web')
+        if self.execution_mode == 'web':
+            self._enqueue_task_command(
+                command_type='resume_node',
+                task_id=normalized_task_id,
+                session_id=task.session_id,
+                payload={'node_ids': [normalized_node_id]},
+            )
+        return self.get_node(normalized_node_id)
+
+    async def fail_node(self, task_id: str, node_id: str, reason: str = '') -> NodeRecord | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        normalized_node_id = self.normalize_node_id(node_id)
+        task, _node = self._require_node_control_target(normalized_task_id, normalized_node_id)
+        if self.execution_mode == 'web':
+            self._assert_worker_available()
+        await self._apply_fail_node_command(normalized_task_id, node_ids=[normalized_node_id], reason=reason)
+        if self.execution_mode == 'web':
+            self._enqueue_task_command(
+                command_type='fail_node',
+                task_id=normalized_task_id,
+                session_id=task.session_id,
+                payload={'node_ids': [normalized_node_id], 'reason': str(reason or '')},
+            )
+        return self.get_node(normalized_node_id)
+
+    async def control_nodes(
+        self,
+        task_id: str,
+        node_ids: list[str],
+        action: str,
+        *,
+        remark: str = '',
+    ) -> dict[str, Any]:
+        normalized_task_id = self.normalize_task_id(task_id)
+        action = str(action or '').strip().lower()
+        if action not in {'resume', 'keep_paused', 'fail', 'pause'}:
+            raise ValueError('invalid_node_action')
+        if action == 'keep_paused' and not str(remark or '').strip():
+            raise ValueError('remark_required_for_keep_paused')
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            raise ValueError('task_not_found')
+        normalized_ids = [self.normalize_node_id(str(item or '').strip()) for item in list(node_ids or []) if str(item or '').strip()]
+        if not normalized_ids:
+            raise ValueError('node_ids_required')
+        if self.execution_mode == 'web':
+            self._assert_worker_available()
+        results: list[dict[str, Any]] = []
+        valid_ids: list[str] = []
+        for node_id in normalized_ids:
+            node = self.get_node(node_id)
+            if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                results.append({'node_id': node_id, 'result': 'not_found'})
+                continue
+            status = str(node.status or '').strip().lower()
+            paused = bool(node.is_paused) or bool(node.pause_requested)
+            if status in {'success', 'failed'}:
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal'})
+                continue
+            if action == 'pause' and paused:
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_already_paused'})
+                continue
+            if action in {'resume', 'keep_paused', 'fail'} and not paused:
+                results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
+                continue
+            valid_ids.append(node_id)
+        if action == 'pause':
+            applied = await self._apply_pause_node_command(normalized_task_id, node_ids=valid_ids, reason='agent', remark=remark)
+        elif action == 'resume':
+            applied = await self._apply_resume_node_command(normalized_task_id, node_ids=valid_ids, schedule_if_inactive=self.execution_mode != 'web')
+        elif action == 'fail':
+            applied = await self._apply_fail_node_command(normalized_task_id, node_ids=valid_ids, reason=remark)
+        else:
+            for node_id in valid_ids:
+                row = self.store.get_task_node_pause(node_id)
+                if row is None:
+                    continue
+                self.log_service.register_node_pause(normalized_task_id, node_id, pause_reason=row.pause_reason, remark=str(remark or ''), delivered=bool(row.delivered))
+            applied = {'items': [{'node_id': node_id, 'result': 'kept_paused', 'remark': str(remark or '')} for node_id in valid_ids]}
+        results.extend(list(applied.get('items') or []))
+        if self.execution_mode == 'web' and valid_ids:
+            command_type = 'pause_node' if action == 'pause' else ('resume_node' if action == 'resume' else 'fail_node')
+            self._enqueue_task_command(
+                command_type=command_type,
+                task_id=normalized_task_id,
+                session_id=task.session_id,
+                payload={'node_ids': valid_ids, 'reason': 'agent' if action == 'pause' else '', 'remark': str(remark or '')},
+            )
+        return {'ok': True, 'task_id': normalized_task_id, 'action': action, 'items': results}
 
     async def cancel_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
@@ -2935,6 +3223,15 @@ class MainRuntimeService:
             active_bucket,
         )
         detail = self.get_task_detail_payload(task.task_id, mark_read=False) or {}
+        paused_nodes = [
+            {
+                'node_id': str(item.node_id or '').strip(),
+                'pause_reason': str(item.pause_reason or '').strip(),
+                'remark': str(item.remark or '').strip(),
+            }
+            for item in list(self.log_service.list_node_pauses(task.task_id) or [])
+            if str(item.node_id or '').strip()
+        ]
         return normalize_task_stall_payload(
             {
                 'task_id': task.task_id,
@@ -2947,6 +3244,7 @@ class MainRuntimeService:
                 'brief_text': str(getattr(task, 'brief_text', '') or '').strip(),
                 'latest_node_summary': self._task_stall_latest_node_summary(detail),
                 'runtime_summary_excerpt': self._task_stall_runtime_summary(detail),
+                'paused_nodes': paused_nodes,
             }
         )
 
@@ -6219,6 +6517,18 @@ class MainRuntimeService:
             return {'ok': True, 'items': [], 'trace_kind': trace_kind, 'limit': max(1, int(limit))}
         items = await manager.read_trace_file(trace_kind=trace_kind, limit=max(1, int(limit)))
         return {'ok': True, 'items': items, 'trace_kind': trace_kind, 'limit': max(1, int(limit))}
+
+    def get_task_error_log_payload(self, task_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return None
+        items = self.log_service.list_task_error_logs(normalized_task_id)
+        return {
+            'ok': True,
+            'task_id': normalized_task_id,
+            'items': [item.model_dump(mode='json') for item in items],
+        }
 
     def get_task_detail_payload(
         self,

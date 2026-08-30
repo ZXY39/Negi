@@ -24,6 +24,8 @@ from main.models import (
     NodeOutputEntry,
     NodeRecord,
     TaskRecord,
+    TaskErrorLogRecord,
+    TaskNodePauseRecord,
     normalize_failure_class,
     normalize_optional_text,
     normalize_execution_stage_metadata,
@@ -1315,11 +1317,16 @@ class TaskLogService:
                         'final_output_ref': final_ref or record.final_output_ref,
                         'failure_reason': failure_text or record.failure_reason,
                         'finished_at': changed_at if status in {'success', 'failed'} else record.finished_at,
+                        'pause_requested': False if status in {'success', 'failed'} else record.pause_requested,
+                        'is_paused': False if status in {'success', 'failed'} else record.is_paused,
+                        'pause_reason': '' if status in {'success', 'failed'} else record.pause_reason,
                         'updated_at': changed_at,
                     }
                 ),
             )
             propagated_node_ids: list[str] = []
+            if updated is not None and str(status or '').strip().lower() in {'success', 'failed'}:
+                self._store.delete_task_node_pause(node_id)
             if updated is not None:
                 propagated_node_ids = self._sync_acceptance_terminal_status(
                     task_id=task_id,
@@ -2113,6 +2120,108 @@ class TaskLogService:
         if record is None:
             return 1
         return len(list(record.output or [])) + 1
+
+    def register_node_pause(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        pause_reason: str,
+        remark: str = '',
+        delivered: bool = False,
+    ) -> TaskNodePauseRecord:
+        timestamp = now_iso()
+        existing = self._store.get_task_node_pause(node_id)
+        if existing is not None and delivered is False and bool(existing.delivered) and str(existing.pause_reason or '').strip().lower() == str(pause_reason or '').strip().lower():
+            delivered = True
+        return self._store.upsert_task_node_pause(
+            task_id=task_id,
+            node_id=node_id,
+            pause_reason=str(pause_reason or '').strip().lower(),
+            remark=str(remark or ''),
+            delivered=bool(delivered),
+            created_at=str(existing.created_at or timestamp) if existing is not None else timestamp,
+            updated_at=timestamp,
+        )
+
+    def clear_node_pause(self, task_id: str, node_id: str) -> None:
+        _ = task_id
+        self._store.delete_task_node_pause(node_id)
+
+    def list_node_pauses(self, task_id: str) -> list[TaskNodePauseRecord]:
+        return self._store.list_task_node_pauses(task_id)
+
+    def append_task_error_log(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        error_text: str,
+        node_title: str = '',
+    ) -> TaskErrorLogRecord:
+        node = self._store.get_node(node_id)
+        title = str(node_title or (node.goal if node is not None else node_id) or node_id).strip()
+        return self._store.append_task_error_log(
+            task_id=task_id,
+            node_id=node_id,
+            node_title=title,
+            error_text=str(error_text or '').strip(),
+            created_at=now_iso(),
+        )
+
+    def list_task_error_logs(self, task_id: str) -> list[TaskErrorLogRecord]:
+        return self._store.list_task_error_logs(task_id)
+
+    def set_node_pause_state(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        pause_requested: bool | None = None,
+        is_paused: bool | None = None,
+        pause_reason: str | None = None,
+        remark: str = '',
+        delivered: bool = False,
+    ) -> NodeRecord | None:
+        with self._task_lock(task_id):
+            changed_at = now_iso()
+            current = self._store.get_node(node_id)
+            if current is None or str(current.task_id or '').strip() != str(task_id or '').strip():
+                return None
+            next_requested = bool(current.pause_requested) if pause_requested is None else bool(pause_requested)
+            next_paused = bool(current.is_paused) if is_paused is None else bool(is_paused)
+            next_reason = str(current.pause_reason or '').strip().lower() if pause_reason is None else str(pause_reason or '').strip().lower()
+            if next_requested or next_paused:
+                next_reason = next_reason or 'manual'
+            else:
+                next_reason = ''
+            updated = self._store.update_node(
+                node_id,
+                lambda record: record.model_copy(update={
+                    'pause_requested': next_requested,
+                    'is_paused': next_paused,
+                    'pause_reason': next_reason,
+                    'updated_at': changed_at,
+                }),
+            )
+            if updated is None:
+                return None
+            if next_requested or next_paused:
+                self.register_node_pause(
+                    task_id,
+                    node_id,
+                    pause_reason=next_reason,
+                    remark=remark,
+                    delivered=delivered,
+                )
+            else:
+                self.clear_node_pause(task_id, node_id)
+            self._sync_node_read_models_locked(updated)
+            task = self._store.get_task(task_id)
+            if task is not None:
+                self._publish_task_node_patch_locked(task=task, node=updated)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return updated
 
     def set_pause_state(self, task_id: str, *, pause_requested: bool | None = None, is_paused: bool | None = None) -> TaskRecord | None:
         return self.update_task_control(task_id, pause_requested=pause_requested, is_paused=is_paused)
@@ -3387,6 +3496,9 @@ class TaskLogService:
                 'status': node.status,
                 'title': node.goal or node.node_id,
                 'updated_at': str(node.updated_at or ''),
+                'pause_requested': bool(node.pause_requested),
+                'is_paused': bool(node.is_paused),
+                'pause_reason': str(node.pause_reason or ''),
                 'default_round_id': default_round_id,
                 'selected_round_id': default_round_id,
                 'round_options_count': len(rounds),
@@ -4274,6 +4386,10 @@ class TaskLogService:
                 'final_output_ref': str(node.final_output_ref or ''),
                 'failure_reason': str(node.failure_reason or ''),
                 'check_result': str(node.check_result or ''),
+                'is_paused': bool(node.is_paused),
+                'pause_requested': bool(node.pause_requested),
+                'pause_reason': str(node.pause_reason or ''),
+                'pause_remark': str((self._store.get_task_node_pause(node.node_id).remark if self._store.get_task_node_pause(node.node_id) is not None else '') or ''),
                 'children_fingerprint': str(
                     getattr(projected, 'children_fingerprint', '')
                     or ((getattr(projected, 'payload', None) or {}).get('children_fingerprint') if projected is not None else '')

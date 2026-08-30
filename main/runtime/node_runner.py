@@ -13,7 +13,7 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
-from main.errors import TaskPausedError, describe_exception
+from main.errors import NodePausedError, TaskPausedError, describe_exception
 from main.ids import new_command_id, new_node_id
 from main.models import (
     NodeFinalResult,
@@ -401,6 +401,19 @@ class NodeRunner:
             node = self._refresh_acceptance_node_prompt(task=task, node=node)
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return self._result_from_record(node)
+        # Cancellation has priority over a node pause so a canceled task cannot
+        # leave a paused node and its dispatcher waiter stranded.
+        if bool(getattr(task, 'cancel_requested', False)):
+            return self._mark_failed(task_id, node.node_id, reason='canceled')
+        if bool(getattr(node, 'pause_requested', False)) or bool(getattr(node, 'is_paused', False)):
+            self._log_service.set_node_pause_state(
+                task_id,
+                node.node_id,
+                pause_requested=True,
+                is_paused=True,
+                pause_reason=str(getattr(node, 'pause_reason', '') or 'manual'),
+            )
+            raise NodePausedError(task_id, node.node_id)
         if self._distribution_mode_active(task_id=task_id, node_id=node.node_id):
             return await self._run_distribution_node(task=task, node=node)
         if self._pause_requested(task_id):
@@ -533,6 +546,10 @@ class NodeRunner:
                 self._mark_finished(task_id, node.node_id, result)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
                 raise TaskPausedError(task_id)
+            if self._node_pause_requested(task_id, node.node_id):
+                self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
+                self._mark_node_paused(task_id, node.node_id)
+                raise NodePausedError(task_id, node.node_id)
             terminal_reason = self._task_terminal_reason(task_id, task=task)
             if terminal_reason:
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
@@ -547,16 +564,34 @@ class NodeRunner:
         except TaskPausedError:
             self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
             raise
+        except NodePausedError:
+            self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
+            self._mark_node_paused(task_id, node.node_id)
+            raise
         except asyncio.CancelledError:
+            latest_task = self._store.get_task(task_id)
+            if latest_task is not None and bool(getattr(latest_task, 'cancel_requested', False)):
+                return self._mark_failed(task_id, node.node_id, reason='canceled')
             if self._pause_requested(task_id):
                 self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
                 raise TaskPausedError(task_id)
+            if self._node_pause_requested(task_id, node.node_id):
+                self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
+                self._mark_node_paused(task_id, node.node_id)
+                raise NodePausedError(task_id, node.node_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
             if isinstance(exc, MemoryError):
                 self._capture_memory_error_diagnostics(task_id=task_id, node_id=node.node_id, exc=exc)
-            return self._mark_failed(task_id, node.node_id, reason=describe_exception(exc))
+            latest_task = self._store.get_task(task_id)
+            terminal_reason = self._task_terminal_reason(task_id, task=latest_task or task)
+            if latest_task is not None and (bool(getattr(latest_task, 'cancel_requested', False)) or terminal_reason):
+                return self._mark_failed(task_id, node.node_id, reason=terminal_reason or 'canceled')
+            text = describe_exception(exc)
+            self._log_service.append_task_error_log(task_id, node.node_id, error_text=text, node_title=node.goal)
+            self._mark_node_paused(task_id, node.node_id, reason='error', remark=text)
+            raise NodePausedError(task_id, node.node_id) from exc
         finally:
             if self._context_finalizer is not None:
                 self._context_finalizer(task=task, node=node)
@@ -5191,6 +5226,37 @@ class NodeRunner:
                 blocking_reason=text,
             ),
         )
+
+    def _node_pause_requested(self, task_id: str, node_id: str) -> bool:
+        node = self._store.get_node(node_id)
+        if node is None or str(getattr(node, 'task_id', '') or '').strip() != str(task_id or '').strip():
+            return False
+        return bool(getattr(node, 'pause_requested', False)) or bool(getattr(node, 'is_paused', False))
+
+    def _mark_node_paused(self, task_id: str, node_id: str, *, reason: str = '', remark: str = '') -> NodeRecord | None:
+        node = self._store.get_node(node_id)
+        normalized_reason = str(reason or getattr(node, 'pause_reason', '') if node is not None else '').strip().lower() or 'manual'
+        existing = self._store.get_task_node_pause(node_id)
+        if not remark and existing is not None:
+            remark = str(existing.remark or '')
+        return self._log_service.set_node_pause_state(
+            task_id,
+            node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason=normalized_reason,
+            remark=remark,
+            delivered=bool(existing.delivered) if existing is not None else False,
+        )
+
+    def fail_paused_node(self, task_id: str, node_id: str, reason: str = '') -> NodeFinalResult:
+        node = self._store.get_node(node_id)
+        if node is None or str(node.task_id or '').strip() != str(task_id or '').strip():
+            raise ValueError(f'node not found: {node_id}')
+        if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
+            return self._result_from_record(node)
+        text = str(reason or node.failure_reason or 'failed by operator').strip() or 'failed by operator'
+        return self._mark_failed(task_id, node_id, reason=text)
 
     def _pause_requested(self, task_id: str) -> bool:
         task = self._store.get_task(task_id)

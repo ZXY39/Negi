@@ -248,6 +248,27 @@ class NodeToolFileChange(Model):
     change_type: Literal['created', 'modified', 'deleted'] = 'modified'
 
 
+class TaskNodePauseRecord(Model):
+    id: int = 0
+    task_id: str
+    node_id: str
+    pause_reason: str = ''
+    remark: str = ''
+    delivered: bool = False
+    created_at: str = ''
+    updated_at: str = ''
+    error_text: str = ''
+
+
+class TaskErrorLogRecord(Model):
+    seq: int = 0
+    task_id: str
+    node_id: str
+    node_title: str = ''
+    error_text: str = ''
+    created_at: str = ''
+
+
 class TaskRecord(Model):
     task_id: str
     session_id: str = 'web:shared'
@@ -293,6 +314,9 @@ class NodeRecord(Model):
     updated_at: str
     finished_at: str | None = None
     failure_reason: str = ''
+    pause_requested: bool = False
+    is_paused: bool = False
+    pause_reason: str = ''
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     token_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

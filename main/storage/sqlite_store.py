@@ -19,6 +19,8 @@ from main.models import (
     TaskArtifactRecord,
     TaskMessageDistributionEpoch,
     TaskNodeNotification,
+    TaskNodePauseRecord,
+    TaskErrorLogRecord,
     TaskRecord,
 )
 from main.monitoring.models import (
@@ -139,6 +141,28 @@ class SQLiteTaskStore:
                 node_id TEXT,
                 created_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_node_pauses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL UNIQUE,
+                pause_reason TEXT NOT NULL DEFAULT '',
+                remark TEXT NOT NULL DEFAULT '',
+                delivered INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS task_error_logs (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                node_title TEXT NOT NULL DEFAULT '',
+                error_text TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             ''',
             '''
@@ -388,6 +412,9 @@ class SQLiteTaskStore:
             ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_task_id ON task_node_pauses(task_id)',
+            'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_error_pending ON task_node_pauses(pause_reason, delivered)',
+            'CREATE INDEX IF NOT EXISTS idx_task_error_logs_task_id_seq ON task_error_logs(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_task_id ON artifacts(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_artifacts_node_id ON artifacts(node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_events_task_id_seq ON task_events(task_id, seq)',
@@ -575,6 +602,8 @@ class SQLiteTaskStore:
             conn.execute(f'DELETE FROM task_model_calls WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_node_tool_results WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_node_details WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_node_pauses WHERE node_id IN ({placeholders})', tuple(normalized_ids))
+            conn.execute(f'DELETE FROM task_error_logs WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_node_rounds WHERE parent_node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM task_nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
             conn.execute(f'DELETE FROM nodes WHERE node_id IN ({placeholders})', tuple(normalized_ids))
@@ -635,6 +664,8 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_nodes WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_model_calls WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_runtime_meta WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_node_pauses WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_error_logs WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
@@ -646,6 +677,98 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
         self._run_write(operation)
+
+
+    def upsert_task_node_pause(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        pause_reason: str,
+        remark: str = '',
+        delivered: bool = False,
+        created_at: str,
+        updated_at: str,
+    ) -> TaskNodePauseRecord:
+        task_id = str(task_id or '').strip()
+        node_id = str(node_id or '').strip()
+        pause_reason = str(pause_reason or '').strip().lower()
+        remark = str(remark or '')
+        def operation(conn: sqlite3.Connection) -> TaskNodePauseRecord:
+            conn.execute(
+                'INSERT INTO task_node_pauses (task_id, node_id, pause_reason, remark, delivered, created_at, updated_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?) '
+                'ON CONFLICT(node_id) DO UPDATE SET task_id=excluded.task_id, pause_reason=excluded.pause_reason, '
+                'remark=excluded.remark, delivered=excluded.delivered, updated_at=excluded.updated_at',
+                (task_id, node_id, pause_reason, remark, 1 if delivered else 0, str(created_at or ''), str(updated_at or '')),
+            )
+            row = conn.execute('SELECT id, task_id, node_id, pause_reason, remark, delivered, created_at, updated_at FROM task_node_pauses WHERE node_id = ?', (node_id,)).fetchone()
+            return TaskNodePauseRecord(
+                id=int(row['id'] or 0), task_id=str(row['task_id'] or ''), node_id=str(row['node_id'] or ''),
+                pause_reason=str(row['pause_reason'] or ''), remark=str(row['remark'] or ''), delivered=bool(row['delivered']),
+                created_at=str(row['created_at'] or ''), updated_at=str(row['updated_at'] or ''),
+            )
+        return self._run_write(operation)
+
+    def get_task_node_pause(self, node_id: str) -> TaskNodePauseRecord | None:
+        row = self._fetchone(
+            'SELECT id, task_id, node_id, pause_reason, remark, delivered, created_at, updated_at FROM task_node_pauses WHERE node_id = ?',
+            (str(node_id or '').strip(),),
+        )
+        if row is None:
+            return None
+        return TaskNodePauseRecord(
+            id=int(row['id'] or 0), task_id=str(row['task_id'] or ''), node_id=str(row['node_id'] or ''),
+            pause_reason=str(row['pause_reason'] or ''), remark=str(row['remark'] or ''), delivered=bool(row['delivered']),
+            created_at=str(row['created_at'] or ''), updated_at=str(row['updated_at'] or ''),
+        )
+
+    def list_task_node_pauses(self, task_id: str) -> list[TaskNodePauseRecord]:
+        rows = self._fetchall(
+            'SELECT id, task_id, node_id, pause_reason, remark, delivered, created_at, updated_at FROM task_node_pauses WHERE task_id = ? ORDER BY created_at ASC, id ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [TaskNodePauseRecord(
+            id=int(row['id'] or 0), task_id=str(row['task_id'] or ''), node_id=str(row['node_id'] or ''),
+            pause_reason=str(row['pause_reason'] or ''), remark=str(row['remark'] or ''), delivered=bool(row['delivered']),
+            created_at=str(row['created_at'] or ''), updated_at=str(row['updated_at'] or ''),
+        ) for row in rows]
+
+    def delete_task_node_pause(self, node_id: str) -> None:
+        self._execute_write('DELETE FROM task_node_pauses WHERE node_id = ?', (str(node_id or '').strip(),))
+
+    def mark_task_node_pause_delivered(self, pause_id: int) -> None:
+        self._execute_write('UPDATE task_node_pauses SET delivered = 1, updated_at = ? WHERE id = ?', (datetime.now().astimezone().isoformat(timespec='microseconds'), int(pause_id or 0)))
+
+    def mark_pause_delivered(self, pause_id: int) -> None:
+        self.mark_task_node_pause_delivered(pause_id)
+
+    def list_new_error_pauses(self) -> list[dict[str, Any]]:
+        rows = self._fetchall(
+            "SELECT p.id, p.task_id, p.node_id, p.pause_reason, p.remark, p.delivered, p.created_at, p.updated_at, "
+            "COALESCE((SELECT e.error_text FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS error_text, "
+            "COALESCE((SELECT e.node_title FROM task_error_logs e WHERE e.task_id = p.task_id AND e.node_id = p.node_id ORDER BY e.seq DESC LIMIT 1), '') AS node_title "
+            "FROM task_node_pauses p JOIN nodes n ON n.node_id = p.node_id "
+            "WHERE p.pause_reason = 'error' AND p.delivered = 0 AND n.status = 'in_progress' AND COALESCE(json_extract(n.payload_json, '$.is_paused'), 0) = 1 "
+            "ORDER BY p.created_at ASC, p.id ASC"
+        )
+        return [dict(row) for row in rows]
+
+    def append_task_error_log(self, *, task_id: str, node_id: str, node_title: str, error_text: str, created_at: str) -> TaskErrorLogRecord:
+        def operation(conn: sqlite3.Connection) -> TaskErrorLogRecord:
+            cursor = conn.execute(
+                'INSERT INTO task_error_logs (task_id, node_id, node_title, error_text, created_at) VALUES (?, ?, ?, ?, ?)',
+                (str(task_id or '').strip(), str(node_id or '').strip(), str(node_title or ''), str(error_text or ''), str(created_at or '')),
+            )
+            return TaskErrorLogRecord(seq=int(cursor.lastrowid or 0), task_id=str(task_id or '').strip(), node_id=str(node_id or '').strip(), node_title=str(node_title or ''), error_text=str(error_text or ''), created_at=str(created_at or ''))
+        return self._run_write(operation)
+
+    def list_task_error_logs(self, task_id: str) -> list[TaskErrorLogRecord]:
+        rows = self._fetchall(
+            'SELECT seq, task_id, node_id, node_title, error_text, created_at FROM task_error_logs WHERE task_id = ? ORDER BY seq ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [TaskErrorLogRecord(seq=int(row['seq'] or 0), task_id=str(row['task_id'] or ''), node_id=str(row['node_id'] or ''), node_title=str(row['node_title'] or ''), error_text=str(row['error_text'] or ''), created_at=str(row['created_at'] or '')) for row in rows]
 
     def upsert_task_runtime_meta(self, *, task_id: str, updated_at: str, payload: dict[str, object]) -> None:
         payload_json = json.dumps(payload)

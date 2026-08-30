@@ -31,6 +31,9 @@ class TaskTreeSnapshotNode(Model):
     parent_node_id: str | None = None
     node_kind: str = 'execution'
     status: NodeStatus = 'in_progress'
+    is_paused: bool = False
+    pause_reason: str = ''
+    pause_remark: str = ''
     title: str = ''
     updated_at: str = ''
     children_fingerprint: str = ''
@@ -254,6 +257,9 @@ class TaskProjectionNodeRecord(Model):
     depth: int = 0
     node_kind: str = 'execution'
     status: NodeStatus = 'in_progress'
+    is_paused: bool = False
+    pause_reason: str = ''
+    pause_remark: str = ''
     title: str = ''
     updated_at: str = ''
     default_round_id: str = ''

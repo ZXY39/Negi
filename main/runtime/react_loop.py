@@ -39,7 +39,7 @@ from g3ku.runtime.tool_watchdog import (
 )
 from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
 from main.governance.tool_context import apply_runtime_tool_context_projection
-from main.errors import TaskPausedError, describe_exception
+from main.errors import NodePausedError, TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
 from main.runtime.append_notice_context import (
@@ -217,7 +217,7 @@ class ReActToolLoop:
             ]
         while limit is None or attempts < limit:
             attempts += 1
-            self._check_pause_or_cancel(task.task_id)
+            self._check_pause_or_cancel(task.task_id, str(runtime_context.get('node_id') or '').strip())
             current_tools = dict(tools or {})
             if callable(tools_supplier):
                 supplied_tools = tools_supplier()
@@ -597,7 +597,7 @@ class ReActToolLoop:
             inflight_notice_callback_triggered = False
             try:
                 while True:
-                    self._check_pause_or_cancel(task.task_id)
+                    self._check_pause_or_cancel(task.task_id, str(runtime_context.get('node_id') or '').strip())
                     try:
                         self._set_model_await_marker(
                             task_id=task.task_id,
@@ -2739,7 +2739,7 @@ class ReActToolLoop:
 
         async def _run_call(index: int, call: Any, *, stage_turn_granted: bool | None = None) -> dict[str, Any]:
             async with semaphore:
-                self._check_pause_or_cancel(task.task_id)
+                self._check_pause_or_cancel(task.task_id, str(runtime_context.get('node_id') or '').strip())
                 started_at = now_iso()
                 started_monotonic = time.monotonic()
                 slot_lease = None
@@ -3260,13 +3260,13 @@ class ReActToolLoop:
         task_id = str(runtime_context.get('task_id') or '').strip()
         if not task_id:
             return
-        self._check_pause_or_cancel(task_id)
+        self._check_pause_or_cancel(task_id, str(runtime_context.get('node_id') or '').strip())
 
     def _snapshot_supplier(self, runtime_context: dict[str, Any]):
         supplier = runtime_context.get('tool_snapshot_supplier')
         return supplier if callable(supplier) else None
 
-    def _check_pause_or_cancel(self, task_id: str) -> None:
+    def _check_pause_or_cancel(self, task_id: str, node_id: str = '') -> None:
         task = self._log_service._store.get_task(task_id)
         if task is None:
             return
@@ -3280,6 +3280,21 @@ class ReActToolLoop:
         if bool(task.pause_requested):
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             raise TaskPausedError(task_id)
+        normalized_node_id = str(node_id or '').strip()
+        if normalized_node_id:
+            node = self._log_service._store.get_node(normalized_node_id)
+            if node is not None and (bool(getattr(node, 'pause_requested', False)) or bool(getattr(node, 'is_paused', False))):
+                existing = self._log_service._store.get_task_node_pause(normalized_node_id)
+                self._log_service.set_node_pause_state(
+                    task_id,
+                    normalized_node_id,
+                    pause_requested=True,
+                    is_paused=True,
+                    pause_reason=str(getattr(node, 'pause_reason', '') or (getattr(existing, 'pause_reason', '') if existing is not None else '') or 'manual'),
+                    remark=str(getattr(existing, 'remark', '') if existing is not None else ''),
+                    delivered=bool(getattr(existing, 'delivered', False)) if existing is not None else False,
+                )
+                raise NodePausedError(task_id, normalized_node_id)
 
     @staticmethod
     def _coerce_final_result_payload(raw_payload: dict[str, Any]) -> NodeFinalResult | None:

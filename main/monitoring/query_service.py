@@ -506,6 +506,9 @@ class TaskQueryService:
             depth=int(payload.get('depth') or node_payload.get('depth') or 0),
             node_kind=str(payload.get('node_kind') or node_payload.get('node_kind') or 'execution'),
             status=str(payload.get('status') or node_payload.get('status') or 'in_progress'),
+            is_paused=bool(getattr(runtime_node, 'is_paused', False) or node_payload.get('is_paused')),
+            pause_reason=str(getattr(runtime_node, 'pause_reason', '') or node_payload.get('pause_reason') or '').strip(),
+            pause_remark=str((self._store.get_task_node_pause(node_id).remark if self._store.get_task_node_pause(node_id) is not None else '') or node_payload.get('pause_remark') or '').strip(),
             goal=str(payload.get('goal') or ''),
             detail_level=normalized_detail_level,
             prompt=str(payload.get('prompt_summary') or detail_record.prompt_summary or ''),
@@ -1053,6 +1056,10 @@ class TaskQueryService:
         metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
         node_kind = str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution'
         status = str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress'
+        is_paused = bool(getattr(runtime_node, 'is_paused', False) or payload.get('is_paused'))
+        pause_reason = str(getattr(runtime_node, 'pause_reason', '') or payload.get('pause_reason') or '').strip()
+        pause_row = self._store.get_task_node_pause(node_id)
+        pause_remark = str(getattr(pause_row, 'remark', '') or payload.get('pause_remark') or '').strip()
         handshake_state = str(payload.get('acceptance_handshake_state') or '').strip()
         if not handshake_state:
             acceptance_handshake = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
@@ -1076,6 +1083,9 @@ class TaskQueryService:
             parent_node_id=str(getattr(record, 'parent_node_id', '') or '').strip() or None,
             node_kind=node_kind,
             status=status,
+            is_paused=is_paused,
+            pause_reason=pause_reason,
+            pause_remark=pause_remark,
             title=str(getattr(record, 'title', '') or node_id).strip() or node_id,
             updated_at=str(getattr(record, 'updated_at', '') or '').strip(),
             children_fingerprint=str(getattr(record, 'children_fingerprint', '') or '').strip(),

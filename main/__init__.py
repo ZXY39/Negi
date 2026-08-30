@@ -1,4 +1,4 @@
-from main.models import NodeFinalResult, NodeRecord, TaskArtifactRecord, TaskRecord
+from main.models import NodeFinalResult, NodeRecord, TaskArtifactRecord, TaskErrorLogRecord, TaskNodePauseRecord, TaskRecord
 from main.service.runtime_service import (
     GetTasksTool,
     MainRuntimeService,
@@ -23,6 +23,8 @@ __all__ = [
     'TaskSummaryTool',
     'TaskStatsTool',
     'TaskRecord',
+    'TaskNodePauseRecord',
+    'TaskErrorLogRecord',
     'TaskService',
     'ViewTaskProgressTool',
 ]

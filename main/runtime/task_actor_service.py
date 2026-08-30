@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from main.errors import TaskPausedError, describe_exception
+from main.errors import NodePausedError, TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata, normalize_result_payload
 from main.protocol import now_iso
 from main.runtime.acceptance_handshake import (
@@ -190,9 +190,35 @@ class TaskNodeDispatcher:
             entries.append(entry)
             if entry.task is not None and not entry.task.done():
                 entry.task.cancel()
+            elif not entry.future.done():
+                try:
+                    entry.future.set_result(self._node_runner.fail_paused_node(self._task_id, node_id, 'canceled'))
+                except Exception:
+                    entry.future.set_exception(asyncio.CancelledError())
         waits = [entry.future for entry in entries if not entry.future.done()]
         if waits:
             await asyncio.gather(*[asyncio.shield(future) for future in waits], return_exceptions=True)
+
+    async def resume_node(self, node_id: str) -> None:
+        normalized_node_id = str(node_id or '').strip()
+        entry = self._entries.get(normalized_node_id)
+        if entry is None:
+            entry = self._get_or_create_entry(normalized_node_id)
+        if entry.future.done():
+            return
+        if entry.task is None or entry.task.done():
+            entry.task = asyncio.create_task(
+                self._run_entry(entry),
+                name=f'task-node-resume:{self._task_id}:{normalized_node_id}',
+            )
+
+    async def fail_node(self, node_id: str, reason: str = '') -> NodeFinalResult:
+        normalized_node_id = str(node_id or '').strip()
+        entry = self._entries.get(normalized_node_id)
+        result = self._node_runner.fail_paused_node(self._task_id, normalized_node_id, reason)
+        if entry is not None and not entry.future.done():
+            entry.future.set_result(result)
+        return result
 
     async def close(self) -> None:
         if self._closed:
@@ -255,6 +281,14 @@ class TaskNodeDispatcher:
             lease = _DispatchLease(dispatcher=self, entry=entry, semaphore=semaphore)
             context_token = _CURRENT_DISPATCH_LEASE.set(lease)
             result = await self._node_runner.run_node(self._task_id, entry.node_id)
+        except NodePausedError as exc:
+            # Child entries keep their waiter future pending so the parent
+            # pipeline pauses naturally. The root has no parent waiter, so it
+            # must surface the pause to the task actor instead.
+            root = self._store.get_task(self._task_id)
+            if root is not None and str(root.root_node_id or '').strip() == entry.node_id and not entry.future.done():
+                entry.future.set_exception(exc)
+            return
         except asyncio.CancelledError:
             if not entry.future.done():
                 entry.future.cancel()
@@ -442,6 +476,15 @@ class TaskActorService:
                             await self._enqueue_acceptance_followup_if_needed(task_id)
                             control_only_return = True
                             return
+        except NodePausedError as exc:
+            control_only_return = True
+            self._log_service.set_node_pause_state(
+                task_id,
+                exc.node_id or str(getattr(root_node, 'node_id', '') or ''),
+                pause_requested=True,
+                is_paused=True,
+            )
+            return
         except TaskPausedError:
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             return

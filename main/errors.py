@@ -2,6 +2,13 @@ class TaskPausedError(Exception):
     pass
 
 
+class NodePausedError(Exception):
+    def __init__(self, task_id: str, node_id: str):
+        self.task_id = str(task_id or "").strip()
+        self.node_id = str(node_id or "").strip()
+        super().__init__(self.task_id, self.node_id)
+
+
 def describe_exception(exc: BaseException | None) -> str:
     if exc is None:
         return 'UnknownError'
