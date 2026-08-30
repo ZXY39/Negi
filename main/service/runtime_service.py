@@ -22,7 +22,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
-from g3ku.content import ContentNavigationService
+from g3ku.content import ContentNavigationService, artifact_ref_from_id
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.resources.models import ResourceKind
 from g3ku.resources.tool_settings import (
@@ -140,6 +140,7 @@ from main.service.task_stall_notifier import (
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_PATH,
     build_task_terminal_payload,
+    build_terminal_output_resolver,
     enrich_task_terminal_payload,
     load_task_terminal_callback_config,
     resolve_task_terminal_callback_token,
@@ -3123,6 +3124,7 @@ class MainRuntimeService:
             build_task_terminal_payload(task),
             task=task,
             node_detail_getter=self.get_node_detail_payload,
+            output_resolver=build_terminal_output_resolver(self.content_store),
         )
         if not payload:
             return
@@ -6710,7 +6712,7 @@ class MainRuntimeService:
         artifacts = [
             {
                 **artifact.model_dump(mode='json'),
-                'ref': f'artifact:{artifact.artifact_id}',
+                'ref': artifact_ref_from_id(artifact.artifact_id),
             }
             for artifact in self.list_artifacts(normalized_task_id)
             if str(getattr(artifact, 'node_id', '') or '').strip() == str(normalized_node_id or '').strip()
@@ -8547,7 +8549,7 @@ class MainRuntimeService:
                 mime_type='application/json',
                 preview_text=title,
             )
-            return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+            return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
         except Exception:
             return ''
 

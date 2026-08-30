@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.china_bridge.registry import china_channel_template
 from g3ku.config.loader import ensure_startup_config_ready
+from g3ku.content.navigation import _artifact_id_from_ref
 import g3ku.config.model_manager as model_manager
 from g3ku.llm_config.enums import ProbeStatus
 from g3ku.llm_config.facade import LLMConfigFacade
@@ -885,7 +886,7 @@ def test_main_runtime_service_node_detail_includes_matching_artifacts():
     assert result['node_id'] == 'node:demo'
     assert result['artifact_count'] == 1
     assert result['artifacts'][0]['artifact_id'] == 'artifact:1'
-    assert result['artifacts'][0]['ref'] == 'artifact:artifact:1'
+    assert result['artifacts'][0]['ref'] == 'artifact:1'
 
 
 def test_main_runtime_service_node_detail_normalizes_bare_node_id():
@@ -2032,8 +2033,8 @@ async def test_ceo_session_delete_removes_session_owned_frontdoor_stage_archives
 
         assert current_summary
         assert other_summary
-        current_artifact = service.get_artifact(str(current_ref).split(":", 1)[1])
-        other_artifact = service.get_artifact(str(other_ref).split(":", 1)[1])
+        current_artifact = service.get_artifact(_artifact_id_from_ref(str(current_ref)))
+        other_artifact = service.get_artifact(_artifact_id_from_ref(str(other_ref)))
         assert current_artifact is not None
         assert other_artifact is not None
 

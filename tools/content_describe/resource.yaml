@@ -20,7 +20,7 @@ parameters:
   properties:
     ref:
       type: string
-      description: Externalized content ref such as artifact:artifact:demo123.
+      description: Externalized content ref such as artifact:demo123 (legacy double-prefixed refs like artifact:artifact:demo123 are also accepted). Refs are system-assigned — use one exactly as it appears in a task terminal event, task/node detail output, or a previous content tool result; never guess or reformat an artifact id.
     path:
       type: string
       description: Absolute file path for path mode. Directories are not supported.

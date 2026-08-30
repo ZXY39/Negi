@@ -5383,7 +5383,7 @@ def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     assert payload["artifact_count"] == 1
     assert payload["artifacts_preview"][0]["artifact_id"] == matching.artifact_id
     assert payload["artifacts_preview"][0]["node_id"] == root.node_id
-    assert payload["artifacts_preview"][0]["ref"] == f'artifact:{matching.artifact_id}'
+    assert payload["artifacts_preview"][0]["ref"] == matching.artifact_id
     assert "artifacts" not in payload
 
 

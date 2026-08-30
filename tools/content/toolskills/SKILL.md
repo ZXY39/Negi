@@ -11,7 +11,7 @@ Use `content` only when an older flow still expects the combined `action=...` in
 
 Rules:
 - Do not request the full body first. Describe or search, then open only the relevant excerpt.
-- For `artifact:` refs, prefer `ref` mode. Do not pass content refs to `filesystem`.
+- For `artifact:` refs, prefer `ref` mode. Do not pass content refs to `filesystem`. Refs are system-assigned — reuse one exactly as given by a task event, task/node detail, or a prior content result; never guess or reformat an artifact id.
 - `path` mode accepts absolute paths only.
 - For `action=search` and `action=open`, if both `ref` and `path` are provided, the wrapper attempts both targets and returns separate per-target results.
 - For `action=open`, treat `start_line` / `end_line` and `around_line` / `window` as mutually exclusive selector families.

@@ -149,7 +149,45 @@ def _compact_summary_text(summary: str) -> str:
     return text
 
 
-_ARTIFACT_REF_PATTERN = re.compile(r"artifact:artifact:[A-Za-z0-9_-]+")
+_ARTIFACT_REF_PATTERN = re.compile(r"artifact:(?:artifact:)?[A-Za-z0-9_-]+")
+
+
+def artifact_ref_from_id(artifact_id: Any) -> str:
+    """Build the canonical content ref for an artifact id.
+
+    Artifact ids are already namespaced (``artifact:<hex>``), so the ref is
+    the id itself. Legacy double-prefixed refs (``artifact:artifact:<hex>``)
+    remain resolvable for backward compatibility, but new refs are always
+    single-prefixed.
+    """
+    normalized = str(artifact_id or "").strip()
+    if not normalized:
+        return ""
+    return normalized if normalized.startswith("artifact:") else f"artifact:{normalized}"
+
+
+def _artifact_id_from_ref(normalized_ref: str) -> str:
+    """Extract the lookup key from an artifact content ref.
+
+    Accepts both the current single-prefix form (``artifact:<hex>``) and the
+    legacy double-prefix form (``artifact:artifact:<hex>``).
+    """
+    remainder = normalized_ref.split(":", 1)[1]
+    if remainder.startswith("artifact:"):
+        return remainder
+    return f"artifact:{remainder}"
+
+
+def _artifact_not_found_message(artifact_id: str) -> str:
+    return (
+        f"artifact not found: {artifact_id}. "
+        "Artifact ids are system-assigned and cannot be guessed. "
+        "Use a ref exactly as provided by a task terminal event ('Result output ref'), "
+        "task progress/node detail output, or a previous content tool result, "
+        "and pass it via the ref parameter. "
+        "（artifact id 由系统分配，不能猜测；请使用任务终态事件、任务进度/节点详情"
+        "或先前 content 工具返回中给出的原始 ref。）"
+    )
 
 
 def _inline_tool_payload_fits_limits(payload: Any) -> bool:
@@ -705,15 +743,25 @@ class ContentNavigationService:
                 "source_kind": "file_path",
             }
         if not normalized_ref.startswith("artifact:"):
-            raise ValueError(f"unsupported content ref: {normalized_ref or '<empty>'}")
+            raise ValueError(
+                f"unsupported content ref: {normalized_ref or '<empty>'}. "
+                "Artifact content must be opened via an artifact: ref passed as `ref`; "
+                "filesystem paths must be passed via the `path` parameter instead."
+            )
         if normalized_ref in _visited_refs:
             raise ValueError("content ref cycle detected")
         if _wrapper_depth > _MAX_WRAPPER_DEPTH:
             raise ValueError(f"content ref wrapper depth exceeded: {_MAX_WRAPPER_DEPTH}")
-        artifact_id = normalized_ref.split(":", 1)[1]
+        artifact_id = _artifact_id_from_ref(normalized_ref)
         artifact = self._lookup_artifact(artifact_id)
+        if artifact is None:
+            bare_id = normalized_ref.split(":", 1)[1]
+            if bare_id != artifact_id:
+                artifact = self._lookup_artifact(bare_id)
+            if artifact is not None:
+                artifact_id = bare_id
         if artifact is None or not getattr(artifact, "path", None):
-            raise FileNotFoundError(f"artifact not found: {artifact_id}")
+            raise FileNotFoundError(_artifact_not_found_message(artifact_id))
         artifact_path = Path(str(artifact.path))
         mime_type = str(getattr(artifact, "mime_type", "") or "").strip() or self._guess_path_mime_type(artifact_path)
         requested_ref = _requested_ref or normalized_ref
@@ -934,15 +982,25 @@ class ContentNavigationService:
             )
             return text, handle
         if not normalized_ref.startswith("artifact:"):
-            raise ValueError(f"unsupported content ref: {normalized_ref or '<empty>'}")
+            raise ValueError(
+                f"unsupported content ref: {normalized_ref or '<empty>'}. "
+                "Artifact content must be opened via an artifact: ref passed as `ref`; "
+                "filesystem paths must be passed via the `path` parameter instead."
+            )
         if normalized_ref in _visited_refs:
             raise ValueError("content ref cycle detected")
         if _wrapper_depth > _MAX_WRAPPER_DEPTH:
             raise ValueError(f"content ref wrapper depth exceeded: {_MAX_WRAPPER_DEPTH}")
-        artifact_id = normalized_ref.split(":", 1)[1]
+        artifact_id = _artifact_id_from_ref(normalized_ref)
         artifact = self._lookup_artifact(artifact_id)
+        if artifact is None:
+            bare_id = normalized_ref.split(":", 1)[1]
+            if bare_id != artifact_id:
+                artifact = self._lookup_artifact(bare_id)
+            if artifact is not None:
+                artifact_id = bare_id
         if artifact is None or not getattr(artifact, "path", None):
-            raise FileNotFoundError(f"artifact not found: {artifact_id}")
+            raise FileNotFoundError(_artifact_not_found_message(artifact_id))
         artifact_path = Path(str(artifact.path))
         text = self._read_text_for_content_display(artifact_path)[0] if artifact_path.exists() else ""
         handle = self._build_handle(
@@ -1078,7 +1136,7 @@ class ContentNavigationService:
                     extension=".txt",
                     mime_type=mime_type,
                 )
-        ref = f"artifact:{artifact.artifact_id}" if artifact is not None else ""
+        ref = artifact_ref_from_id(getattr(artifact, "artifact_id", "")) if artifact is not None else ""
         uri = str(getattr(artifact, "path", "") or "")
         artifact_id = str(getattr(artifact, "artifact_id", "") or "")
         return self._build_handle(

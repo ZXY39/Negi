@@ -17,9 +17,9 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 
 ## Continuation Contract
 
-- Heartbeat and cron are assembled through the session-owned `frontdoor_request_body_messages` / actual-request scaffold used by the next visible CEO turn, not through a separate short `ceo_heartbeat` request lane on the main CEO path.
+- Heartbeat and cron are assembled through the session-owned `frontdoor_request_body_messages` / actual-request scaffold used by the next visible CEO turn, not a separate short `ceo_heartbeat` request lane.
 - Each internal activation resumes from that same scaffold.
-- When that authoritative frontdoor baseline already carries prior frontdoor contract state, heartbeat and cron inherit the previous callable/candidate/hydrated/provider-tool/visible-skill state directly instead of rerunning tool or skill selection.
+- When the authoritative frontdoor baseline already carries prior contract state, heartbeat and cron inherit the previous callable/candidate/hydrated/provider-tool/visible-skill state instead of rerunning tool or skill selection.
 - If no authoritative frontdoor baseline exists yet, internal turns fall back to the ordinary CEO/frontdoor exposure assembly path for that round.
 - Recovery of that baseline follows one strict restore order before a heartbeat turn runs: paused snapshot, then inflight snapshot, then completed continuity sidecar, then latest actual-request artifact. A stale sidecar file that lacks `frontdoor_request_body_messages` is not enough to block recovery from a richer later source.
 - Heartbeat still appends two hidden durable messages before the model call:
@@ -38,21 +38,21 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Frontend transcript views, session preview text, session message counts, and `snapshot.ceo.messages` must hide those internal prompt messages by filtering `ui_visible=false`, not by assuming every internal turn is transcript-hidden.
 - Heartbeat/cron assistant replies, tool calls, tool results, and stage/compression traces remain ordinary visible turn output unless the turn ends with the silent `HEARTBEAT_OK` ACK path.
 - Manual pause during a running heartbeat/cron turn still goes through the ordinary `client.pause_turn` path. The backend should treat that internal turn as the current active turn rather than as a side lane.
-- Maintenance boundary: an internal heartbeat/cron request artifact may be authoritative for billing and request forensics without being allowed to replace the session-owned baseline. If the new durable body is mostly heartbeat rule/event text, shorter/poorer than the existing baseline, and not explained by `token_compression` or `stage_compaction`, runtime must keep the richer baseline for the next turn instead of promoting the internal-only body into completed continuity.
+- Maintenance boundary: an internal heartbeat/cron request artifact may be authoritative for billing and forensics without being allowed to replace the session-owned baseline. If the new durable body is mostly heartbeat rule/event text, poorer than the existing baseline, and not explained by `token_compression` or `stage_compaction`, the runtime keeps the richer baseline for the next turn instead of promoting the internal-only body into completed continuity.
 
 ## Cron Reminder Contract
 
 - Cron is a structured reminder mechanism for the future agent, not a natural-language stop-condition engine.
-- Cron `message` should be understood as the reminder instruction for the future agent, not as a ready-to-send user reply.
-- Cron-internal and heartbeat-internal turns are not an internal-only tool lane. They reuse the ordinary CEO/frontdoor tool exposure for the current role (inheriting prior frontdoor contract state when it exists), and their callable/visible set always includes `submit_next_stage`, so an internal turn without an active stage opens a stage first and then proceeds with the reminded work; the execution gate and the exposed contract cannot disagree on internal turns.
-- The prompt-side cron rule is intentionally minimal: it tells the model that the reminder is an internal instruction, not a new user message, and that it should execute the reminded work immediately.
+- A cron `message` is the reminder instruction for the future agent, not a ready-to-send user reply.
+- Cron-internal and heartbeat-internal turns are not an internal-only tool lane. They reuse the ordinary CEO/frontdoor tool exposure for the current role (inheriting prior contract state when present), and their callable/visible set always includes `submit_next_stage`, so an internal turn without an active stage opens one first and then proceeds; the execution gate and the exposed contract cannot disagree on internal turns.
+- The prompt-side cron rule is intentionally minimal: it tells the model the reminder is an internal instruction, not a new user message, to be executed immediately.
 - The runtime does not hard-code a prompt-side ban on cron-tool mutations during structured reminder turns. If the reminded work itself is “send a plain-text reminder”, “create another cron”, or any other currently visible CEO action, the model may use the ordinary CEO tool surface for that work.
 - Repetition is enforced by service-side counters:
   - `payload.max_runs`
   - `state.delivered_runs`
 - A cron reminder only counts as delivered after the internal prompt is durably accepted by the runtime/session path.
-- When `delivered_runs >= max_runs`, the cron service removes the job immediately and does not schedule another wakeup.
-- One-shot `at` reminders are validated at creation time against the service clock. If the target timestamp is already in the past when `add_job()` runs, the cron service rejects creation immediately (the error quotes the service-local time and directs immediate execution or abandonment) instead of storing a dormant expired job.
+- When `delivered_runs >= max_runs`, the service removes the job and schedules no further wakeup.
+- One-shot `at` reminders are validated against the service clock at creation. If the target timestamp is already in the past when `add_job()` runs, the service rejects creation immediately (the error quotes service-local time and directs immediate execution or abandonment) instead of storing a dormant expired job.
 - One-shot `at` creation is also guarded against duplicate registration. `add_job()` rejects a new `at` job when an enabled job already exists for the same `(session_key, at_ms)` pair, returning `同一会话在 <time> 已存在一次性提醒 (id: …)，请勿重复创建；如需修改请先用 remove 删除旧任务，或改用其他时间`. The match is structural, not text-based: message wording is ignored, so reworded re-adds of the same reminder within one turn are caught. Different sessions may share a fire time; disabled jobs never block a fresh registration; recurring schedules are exempt. This complements claim-before-dispatch: that guarantee stops one job firing twice across a restart, this one stops two jobs existing for the same reminder.
 - If an old cron store uses the previous schema version, the runtime drops those jobs instead of attempting migration; maintainers should treat this as an intentional semantic reset.
 
@@ -64,7 +64,7 @@ Cron job delivery is claim-before-dispatch, which defines the restart/recovery g
   - one-shot `at` jobs are suppressed — disabled and not re-dispatched — because a duplicate reminder is worse than a missed one, and the original dispatch may already have reached the downstream handler;
   - recurring jobs simply resume their schedule.
 - The service also keeps an in-flight guard per job id, so an overlapping timer tick and a manual `run_job` for the same job do not produce a second concurrent dispatch.
-- New-maintainer caveat: if a one-shot reminder appears to have "not fired" after a restart, check for an `interrupted` / `running` state in the store first. The at-most-once guarantee means a missed one-shot is the *expected* outcome of a crash between claim and finalize, not a scheduler bug, and it must not be "fixed" by re-arming a duplicate job.
+- New-maintainer caveat: if a one-shot reminder appears not to have fired after a restart, check for an `interrupted` / `running` store state first. A missed one-shot is the *expected* outcome of a crash between claim and finalize under the at-most-once guarantee, not a scheduler bug, and must not be "fixed" by re-arming a duplicate job.
 
 ## Task Terminal Repair Contract
 
@@ -75,18 +75,19 @@ Cron job delivery is claim-before-dispatch, which defines the restart/recovery g
   - the outbox row is the durable callback boundary,
   - the heartbeat event queue only dedupes currently enqueued in-memory events.
 - Both boundaries key on the canonical dedupe key `task-terminal:{task_id}:{status}:{finished_at}`. `normalize_task_terminal_payload` always recomputes this key server-side and ignores any caller-supplied `dedupe_key`/`dedupeKey`. This is what guarantees one visible delivery per task terminal: probe/retry variants of the key cannot bypass exact-key dedupe and re-deliver the same result. Do not reintroduce caller-controlled dedupe keys.
-- Because in-memory dedupe is transient, `/api/internal/task-terminal` must also reject a repeated callback when the same outbox row is already `accepted=true` even if it is not yet `delivery_state=delivered`. Maintainers debugging "same failed task spawned two heartbeat replies" should inspect the task-terminal outbox row before blaming prompt behavior.
-- Session-level reply dedupe: heartbeat persists the `dedupe_key` of every `task_terminal` event that produced a visible reply into `session.metadata["handled_terminal_dedupe_keys"]` (bounded, string-only, de-duplicated). A later delivery of the same `dedupe_key` is consumed silently (`pop_many` + `mark_task_terminal_outbox_delivered`) without running the agent or re-publishing `ceo.reply.final`. This guards the crash window between reply persist and queue-pop/outbox-ack where the same terminal could otherwise be processed twice and produce two final replies on two different heartbeat turns.
+- Because in-memory dedupe is transient, `/api/internal/task-terminal` also rejects a repeated callback when the same outbox row is already `accepted=true` even if not yet `delivery_state=delivered`. Debugging "same failed task spawned two heartbeat replies": inspect the task-terminal outbox row before blaming prompt behavior.
+- Session-level reply dedupe: heartbeat persists the `dedupe_key` of every `task_terminal` event that produced a visible reply into `session.metadata["handled_terminal_dedupe_keys"]` (bounded, string-only, de-duplicated). A later delivery of the same `dedupe_key` is consumed silently (`pop_many` + `mark_task_terminal_outbox_delivered`) without running the agent or re-publishing `ceo.reply.final`, guarding the crash window between reply persist and queue-pop/outbox-ack where the same terminal could otherwise produce two final replies on two heartbeat turns.
 - The heartbeat final event (`ceo.reply.final`) carries the same canonical-context fields as the user-lane relay: it includes `canonical_context` + `canonical_context_delta` only when the just-persisted reply added new stage progress relative to the previous persisted assistant message; when the delta is empty both fields are omitted so the browser renders a plain reply bubble and never re-submits accumulated stage rails.
-- The task-terminal event payload has two result lanes that maintainers should keep separate:
-  - `terminal_*` still describes the true terminal node for the task-terminal event. When final acceptance fails, this remains the acceptance node result.
-  - `root_output` / `root_output_ref` carries the root execution deliverable separately so heartbeat can still show the main agent the full root-node final output even while the terminal node is `acceptance`.
+- The task-terminal event payload has two result lanes:
+  - `terminal_*` describes the true terminal node; when final acceptance fails, this stays the acceptance node result.
+  - `root_output` / `root_output_ref` carries the root execution deliverable so the full root-node output reaches the main agent even when the terminal node is `acceptance`.
 - Heartbeat task-terminal prompt assembly should therefore render both pieces when final acceptance fails:
   - the acceptance-node result (`Result output`, `Result check`, `Result failure reason`)
   - the root execution deliverable (`Execution output`, `Execution output ref`)
 - The full root execution output requirement applies to the heartbeat event bundle that the main agent reads, not to every later summary surface.
-- China-channel reply delivery: when the heartbeat session is a `china:*` session, the persisted reply is also handed to `reply_notifier` → `_notify_heartbeat_channel_reply`, which publishes an `OutboundMessage` onto the bus for the China drain. The channel/chat_id must come from china session-key parsing, never from a naive first-colon split of the key, and must not overwrite the owning transport's authoritative session meta; otherwise the outbound is published with a wrong `channel` and silently dropped. See `china-channels.md` §7.
-- Heartbeat service instance reuse: `build_web_session_heartbeat` reuses the live instance bound to the same agent/runtime-manager/task-service/session-manager instead of rebuilding it on every lookup. Comparing the reply-notifier closure by identity would always fail (callers pass a fresh closure) and rebuild a not-started instance, orphaning the started one and stranding enqueued events on it.
+- Externalized terminal output that fits the content-open inline budget is re-inlined: enrichment resolves `terminal_output` / `root_output` through their `*_output_ref` and, when the referenced text is textual and within 16000 chars / 260 lines, replaces the summary with the full text so the turn can deliver the complete result without a follow-up `content_open`. Oversized or non-textual output keeps the summary plus ref, which the heartbeat rules direct the model to open before finalizing.
+- China-channel reply delivery: for a `china:*` session, the persisted reply is also handed to `reply_notifier` → `_notify_heartbeat_channel_reply`, which publishes an `OutboundMessage` for the China drain. The channel/chat_id must come from china session-key parsing, never a naive first-colon split, and must not overwrite the owning transport's authoritative session meta; otherwise the outbound is published with a wrong `channel` and dropped. See `china-channels.md` §7.
+- Heartbeat service instance reuse: `build_web_session_heartbeat` reuses the live instance bound to the same agent/runtime-manager/task-service/session-manager instead of rebuilding it on every lookup. The reply-notifier closure cannot be compared by identity (callers pass a fresh one), so an identity-based reuse check rebuilds a not-started instance, orphaning the started one and stranding enqueued events on it.
 
 ## Task Node Error Delivery
 

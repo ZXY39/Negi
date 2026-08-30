@@ -34,11 +34,17 @@ from main.service.task_stall_callback import (
     normalize_task_stall_reason,
 )
 from main.service.task_stall_notifier import stalled_minutes_since, stall_bucket_minutes
-from main.service.task_terminal_callback import build_task_terminal_payload, enrich_task_terminal_payload, normalize_task_terminal_payload
+from main.service.task_terminal_callback import (
+    TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT,
+    build_task_terminal_payload,
+    build_terminal_output_resolver,
+    enrich_task_terminal_payload,
+    normalize_task_terminal_payload,
+)
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
 HeartbeatReplyNotifier = Callable[[str, str], Awaitable[None] | None]
-_TASK_TERMINAL_OUTPUT_INLINE_LIMIT = 4000
+_TASK_TERMINAL_OUTPUT_INLINE_LIMIT = TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
 _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT = 5
 _TASK_TERMINAL_INVALID_OUTPUT_LABEL = "<empty>"
 _HANDLED_TERMINAL_DEDUPE_KEYS_MAX = 16
@@ -151,6 +157,7 @@ class WebSessionHeartbeatService:
                 build_task_terminal_payload(record),
                 task=record,
                 node_detail_getter=getattr(self._main_task_service, 'get_node_detail_payload', None),
+                output_resolver=build_terminal_output_resolver(getattr(self._main_task_service, 'content_store', None)),
             )
         )
 
@@ -159,6 +166,7 @@ class WebSessionHeartbeatService:
             payload,
             task_getter=getattr(self._main_task_service, 'get_task', None),
             node_detail_getter=getattr(self._main_task_service, 'get_node_detail_payload', None),
+            output_resolver=build_terminal_output_resolver(getattr(self._main_task_service, 'content_store', None)),
         )
         session_id = str(normalized_payload.get("session_id") or "").strip()
         task_id = str(normalized_payload.get("task_id") or "").strip()

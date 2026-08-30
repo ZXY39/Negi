@@ -13,6 +13,18 @@ TASK_TERMINAL_CALLBACK_URL_ENV = 'G3KU_INTERNAL_CALLBACK_URL'
 TASK_TERMINAL_CALLBACK_TOKEN_ENV = 'G3KU_INTERNAL_CALLBACK_TOKEN'
 TASK_TERMINAL_CALLBACK_FILE = Path('.g3ku') / 'internal-callback.json'
 
+# Externalized terminal outputs are re-inlined into the terminal event when
+# they fit the same budget a content_open result would inline, so the heartbeat
+# turn can deliver the full result to the user without a follow-up tool call.
+TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT = 16000
+TASK_TERMINAL_OUTPUT_INLINE_LINE_LIMIT = 260
+_TERMINAL_OUTPUT_TEXT_MIME_PREFIXES = ('text/',)
+_TERMINAL_OUTPUT_TEXT_MIMES = {
+    'application/json',
+    'application/x-ndjson',
+    'application/markdown',
+}
+
 
 def callback_config_path(*, workspace: Path | str | None = None) -> Path:
     root = Path(workspace) if workspace is not None else Path.cwd()
@@ -68,10 +80,59 @@ def _normalize_task_terminal_text(value: Any) -> str:
     return str(value or '').strip()
 
 
+def build_terminal_output_resolver(content_store: Any | None) -> Callable[[str], str] | None:
+    """Build a resolver that re-inlines small externalized outputs.
+
+    Returns ``""`` when the referenced content is missing, non-textual, or too
+    large to inline; callers then keep the externalized summary + ref.
+    """
+    if content_store is None or not hasattr(content_store, 'read'):
+        return None
+
+    def resolve(ref: Any) -> str:
+        normalized_ref = _normalize_task_terminal_text(ref)
+        if not normalized_ref.startswith('artifact:'):
+            return ''
+        try:
+            payload = content_store.read(ref=normalized_ref, view='canonical')
+        except Exception:
+            return ''
+        if not isinstance(payload, dict) or not payload.get('ok'):
+            return ''
+        handle = payload.get('handle') if isinstance(payload.get('handle'), dict) else {}
+        mime_type = str(handle.get('mime_type') or '').strip().lower()
+        if mime_type and not (
+            mime_type.startswith(_TERMINAL_OUTPUT_TEXT_MIME_PREFIXES)
+            or mime_type in _TERMINAL_OUTPUT_TEXT_MIMES
+        ):
+            return ''
+        text = str(payload.get('content') or '')
+        if not text:
+            return ''
+        if len(text) > TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT:
+            return ''
+        if len(text.splitlines()) > TASK_TERMINAL_OUTPUT_INLINE_LINE_LIMIT:
+            return ''
+        return text
+
+    return resolve
+
+
+def _maybe_inline_externalized_output(output_text: str, output_ref: str, resolver: Callable[[str], str] | None) -> str:
+    if not output_ref or not callable(resolver):
+        return output_text
+    try:
+        inline_text = resolver(output_ref)
+    except Exception:
+        inline_text = ''
+    return inline_text or output_text
+
+
 def _task_terminal_delivery_payload(
     task: Any,
     *,
     node_detail_getter: Callable[[str, str], dict[str, Any] | None] | None = None,
+    output_resolver: Callable[[str], str] | None = None,
 ) -> dict[str, str]:
     task_id = _normalize_task_terminal_text(getattr(task, 'task_id', ''))
     root_node_id = _normalize_task_terminal_text(getattr(task, 'root_node_id', ''))
@@ -156,6 +217,9 @@ def _task_terminal_delivery_payload(
     if not root_output_ref:
         root_output_ref = _normalize_task_terminal_text(getattr(task, 'final_output_ref', ''))
 
+    terminal_output = _maybe_inline_externalized_output(terminal_output, terminal_output_ref, output_resolver)
+    root_output = _maybe_inline_externalized_output(root_output, root_output_ref, output_resolver)
+
     return {
         'root_node_id': root_node_id,
         'acceptance_node_id': acceptance_node_id,
@@ -198,6 +262,7 @@ def enrich_task_terminal_payload(
     task: Any | None = None,
     task_getter: Callable[[str], Any | None] | None = None,
     node_detail_getter: Callable[[str, str], dict[str, Any] | None] | None = None,
+    output_resolver: Callable[[str], str] | None = None,
 ) -> dict[str, str]:
     normalized = normalize_task_terminal_payload(payload)
     if not normalized:
@@ -210,7 +275,13 @@ def enrich_task_terminal_payload(
             task_record = None
     if task_record is None:
         return normalized
-    normalized.update(_task_terminal_delivery_payload(task_record, node_detail_getter=node_detail_getter))
+    normalized.update(
+        _task_terminal_delivery_payload(
+            task_record,
+            node_detail_getter=node_detail_getter,
+            output_resolver=output_resolver,
+        )
+    )
     return normalize_task_terminal_payload(normalized)
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from main.service.task_terminal_callback import TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
+
 
 @dataclass(slots=True)
 class HeartbeatPromptLane:
@@ -177,6 +179,10 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
     terminal_failure_reason = _non_empty_text(event.get("terminal_failure_reason"))
     root_output = _non_empty_text(event.get("root_output"))
     root_output_ref = _non_empty_text(event.get("root_output_ref"))
+    # Terminal deliverables are allowed to inline far more than ordinary event
+    # excerpts so the heartbeat turn can hand the user the full result without
+    # a follow-up content_open round-trip.
+    terminal_output_limit = max(output_inline_limit, TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT)
     _append_retrieval_parts(
         retrieval_parts,
         "task_terminal",
@@ -187,10 +193,10 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
         terminal_node_kind,
         terminal_node_id,
         terminal_reason,
-        terminal_output[:output_inline_limit] if terminal_output else "",
+        terminal_output[:terminal_output_limit] if terminal_output else "",
         terminal_check_result,
         terminal_failure_reason,
-        root_output[:output_inline_limit] if root_output and root_output != terminal_output else "",
+        root_output[:terminal_output_limit] if root_output and root_output != terminal_output else "",
     )
     lines = [
         f"- Task {title} ({task_id}) completed",
@@ -202,16 +208,16 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
     if terminal_reason:
         lines.append(f"  Result source: {terminal_reason}")
     if terminal_output:
-        if len(terminal_output) > output_inline_limit:
-            excerpt = terminal_output[:output_inline_limit].rstrip()
+        if len(terminal_output) > terminal_output_limit:
+            excerpt = terminal_output[:terminal_output_limit].rstrip()
             lines.append(f"  Result output excerpt: {excerpt}...")
         else:
             lines.append(f"  Result output: {terminal_output}")
     if terminal_output_ref:
         lines.append(f"  Result output ref: {terminal_output_ref}")
     if root_output and root_output != terminal_output:
-        if len(root_output) > output_inline_limit:
-            excerpt = root_output[:output_inline_limit].rstrip()
+        if len(root_output) > terminal_output_limit:
+            excerpt = root_output[:terminal_output_limit].rstrip()
             lines.append(f"  Execution output excerpt: {excerpt}...")
         else:
             lines.append(f"  Execution output: {root_output}")

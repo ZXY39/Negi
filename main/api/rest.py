@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
+from g3ku.content import artifact_ref_from_id
 from g3ku.shells.web import get_agent, is_no_ceo_model_configured_error
 
 router = APIRouter()
@@ -282,7 +283,7 @@ async def get_artifact(
     artifact = service.get_artifact(artifact_id)
     if artifact is None or artifact.task_id != task_id:
         raise HTTPException(status_code=404, detail='artifact_not_found')
-    ref = f'artifact:{artifact.artifact_id}'
+    ref = artifact_ref_from_id(artifact.artifact_id)
     content = ''
     excerpt = None
     if full:

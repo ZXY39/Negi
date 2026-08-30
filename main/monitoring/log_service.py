@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService, content_summary_and_ref, parse_content_envelope
+from g3ku.content import ContentNavigationService, artifact_ref_from_id, content_summary_and_ref, parse_content_envelope
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
@@ -1970,7 +1970,7 @@ class TaskLogService:
                     mime_type='application/json',
                     preview_text=display_name,
                 )
-                return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+                return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
             except MemoryError:
                 degraded_payload = self._degraded_actual_request_artifact_payload(
                     payload_with_mode,
@@ -1987,7 +1987,7 @@ class TaskLogService:
                         mime_type='application/json',
                         preview_text=f'{display_name} (degraded)',
                     )
-                    return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+                    return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
                 except MemoryError:
                     minimal_payload = self._minimal_actual_request_artifact_payload(
                         payload_with_mode,
@@ -2004,7 +2004,7 @@ class TaskLogService:
                             mime_type='application/json',
                             preview_text=f'{display_name} (minimal)',
                         )
-                        return f'artifact:{artifact.artifact_id}' if artifact is not None else ''
+                        return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
                     except MemoryError:
                         return ''
         try:
