@@ -111,6 +111,117 @@ def test_rendered_tree_builds_from_normalized_snapshot() -> None:
     assert result["aChildren"] == ["a1"]
 
 
+def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_pause_state() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: { task_id: "task:test", status: "in_progress", is_paused: true, pause_requested: true },
+          treeRootNodeId: "root",
+          treeNodesById: {},
+          treeSnapshotVersion: "",
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: {},
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          taskNodeDetails: {},
+          liveFrameMap: {},
+        };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        applyTaskTreeSnapshotPayload({
+          task_id: "task:test",
+          root_node_id: "root",
+          snapshot_version: "1",
+          nodes_by_id: {
+            root: {
+              node_id: "root",
+              title: "root",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [{ round_id: "r1", label: "Round 1", is_latest: true, child_ids: ["running", "done", "locally-paused"] }],
+              auxiliary_child_ids: [],
+            },
+            running: {
+              node_id: "running",
+              parent_node_id: "root",
+              title: "running",
+              status: "in_progress",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+            },
+            done: {
+              node_id: "done",
+              parent_node_id: "root",
+              title: "done",
+              status: "success",
+              node_kind: "execution",
+              rounds: [],
+              auxiliary_child_ids: [],
+            },
+            "locally-paused": {
+              node_id: "locally-paused",
+              parent_node_id: "root",
+              title: "locally paused",
+              status: "in_progress",
+              node_kind: "execution",
+              is_paused: true,
+              pause_reason: "manual",
+              rounds: [],
+              auxiliary_child_ids: [],
+            },
+          },
+        });
+
+        const pausedTree = buildExecutionTreeFromSnapshot();
+        const pausedById = Object.fromEntries(
+          [pausedTree, ...pausedTree.children].map((node) => [node.node_id, node])
+        );
+        S.currentTask = { task_id: "task:test", status: "in_progress", is_paused: false, pause_requested: false };
+        const resumedTree = buildExecutionTreeFromSnapshot();
+        const resumedById = Object.fromEntries(
+          [resumedTree, ...resumedTree.children].map((node) => [node.node_id, node])
+        );
+        console.log(JSON.stringify({
+          paused: {
+            root: [pausedById.root.display_state, pausedById.root.effective_is_paused, pausedById.root.is_paused, pausedById.root.task_paused],
+            running: [pausedById.running.display_state, pausedById.running.effective_is_paused, pausedById.running.is_paused],
+            done: [pausedById.done.display_state, pausedById.done.effective_is_paused],
+            local: [pausedById["locally-paused"].display_state, pausedById["locally-paused"].effective_is_paused, pausedById["locally-paused"].is_paused],
+          },
+          resumed: {
+            root: [resumedById.root.display_state, resumedById.root.effective_is_paused],
+            running: [resumedById.running.display_state, resumedById.running.effective_is_paused],
+            done: [resumedById.done.display_state, resumedById.done.effective_is_paused],
+            local: [resumedById["locally-paused"].display_state, resumedById["locally-paused"].effective_is_paused, resumedById["locally-paused"].is_paused],
+          },
+        }));
+        """
+    )
+
+    assert result["paused"]["root"] == ["\u4efb\u52a1\u6682\u505c", True, False, True]
+    assert result["paused"]["running"] == ["\u4efb\u52a1\u6682\u505c", True, False]
+    assert result["paused"]["done"] == ["SUCCESS", False]
+    assert result["paused"]["local"] == ["\u4efb\u52a1\u6682\u505c", True, True]
+    assert result["resumed"]["root"] == ["IN_PROGRESS", False]
+    assert result["resumed"]["running"] == ["IN_PROGRESS", False]
+    assert result["resumed"]["done"] == ["SUCCESS", False]
+    assert result["resumed"]["local"] == ["\u5df2\u6682\u505c\uff08manual\uff09", True, True]
+
+
 def test_ensure_task_tree_subtree_uses_new_snapshot_endpoint() -> None:
     result = _run_node_script(
         """

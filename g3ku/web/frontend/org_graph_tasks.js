@@ -1420,6 +1420,20 @@ function handleTaskEvent(payload) {
         patchTaskListItem(payload.data.task);
         renderTaskDetailHeader();
         renderTaskTokenStats();
+        if (String(S.treeRootNodeId || "").trim() && typeof renderTree === "function") {
+            renderTree();
+            const selectedNodeId = String(S.selectedNodeId || "").trim();
+            const selectedNode = selectedNodeId && typeof findTreeNode === "function"
+                ? findTreeNode(S.treeView, selectedNodeId)
+                : null;
+            if (
+                selectedNode
+                && String(S.currentNodeDetail?.node_id || "").trim() === selectedNodeId
+                && typeof renderTaskNodeDetailStatus === "function"
+            ) {
+                renderTaskNodeDetailStatus({ ...selectedNode, ...S.currentNodeDetail });
+            }
+        }
         return;
     }
     if (payload.type === "task.model.call") {

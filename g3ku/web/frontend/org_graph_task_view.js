@@ -489,7 +489,13 @@ function buildNodeRoundState(node, selections = S.treeSelectedRoundByNodeId) {
     };
 }
 
-function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = S.treeSelectedRoundByNodeId, seen = new Set(), distributionState = activeTaskDistributionState()) {
+function buildExecutionTreeFromSnapshot(
+    nodeId = S.treeRootNodeId,
+    selections = S.treeSelectedRoundByNodeId,
+    seen = new Set(),
+    distributionState = activeTaskDistributionState(),
+    taskPaused = taskPauseDisplayActive(),
+) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId || seen.has(normalizedNodeId)) return null;
     const snapshotNode = treeSnapshotNode(normalizedNodeId);
@@ -501,7 +507,7 @@ function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = 
     const title = resolveNodeTitle(snapshotNode, snapshotNode);
     const roundState = buildNodeRoundState(snapshotNode, selections);
     const visibleChildren = snapshotNodeVisibleChildIds(snapshotNode, selections, distributionState)
-        .map((childId) => buildExecutionTreeFromSnapshot(childId, selections, seen, distributionState))
+        .map((childId) => buildExecutionTreeFromSnapshot(childId, selections, seen, distributionState, taskPaused))
         .filter(Boolean);
     const inspectionNodes = [];
     const childNodes = [];
@@ -510,10 +516,12 @@ function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = 
         else childNodes.push(child);
     });
     const inspectionActive = inspectionNodes.some((child) => isInspectionActiveStatus(child?.visual_state || child?.state));
+    const effectiveIsPaused = effectiveTreeNodePaused(snapshotNode, taskPaused);
     const stateMeta = resolveTreeNodeStatusLabel(status, {
         kind,
         inspectionActive,
         isPaused: !!snapshotNode.is_paused,
+        taskPaused,
         pauseReason: String(snapshotNode.pause_reason || "").trim(),
         acceptanceDisplayPhase: String(snapshotNode.acceptance_display_phase || "").trim().toLowerCase(),
     });
@@ -544,6 +552,8 @@ function buildExecutionTreeFromSnapshot(nodeId = S.treeRootNodeId, selections = 
         tree_visible: snapshotNode.tree_visible !== false,
         acceptance_handshake_state: String(snapshotNode.acceptance_handshake_state || "").trim(),
         acceptance_display_phase: String(snapshotNode.acceptance_display_phase || "").trim(),
+        task_paused: taskPaused,
+        effective_is_paused: effectiveIsPaused,
         is_paused: !!snapshotNode.is_paused,
         pause_requested: !!snapshotNode.pause_requested,
         pause_reason: String(snapshotNode.pause_reason || "").trim(),
@@ -838,12 +848,37 @@ function isAcceptanceNodeKind(kind) {
     return String(kind || "").trim().toLowerCase() === "acceptance";
 }
 
+function taskPauseDisplayActive(task = S.currentTask) {
+    return !!(task?.is_paused || task?.pause_requested);
+}
+
+function effectiveTreeNodePaused(node, taskPaused = taskPauseDisplayActive()) {
+    const status = String(node?.state || node?.status || "").trim().toLowerCase();
+    return !isTerminalTreeNodeStatus(status) && (taskPaused || !!node?.is_paused);
+}
+
+function taskNodeDisplayState(node, taskPaused = taskPauseDisplayActive()) {
+    const status = String(node?.state || node?.status || "").trim().toLowerCase();
+    if (taskPaused && !isTerminalTreeNodeStatus(status)) return "任务暂停";
+    if (node?.is_paused) {
+        return `\u5df2\u6682\u505c\uff08${String(node.pause_reason || "").trim() || "manual"}\uff09`;
+    }
+    return String(node?.display_state || node?.state || node?.status || "").trim()
+        || String(node?.state || node?.status || "").toUpperCase();
+}
+
 function isInspectionActiveStatus(status) {
     return ["queued", "running", "pending", "waiting", "checking", "inspecting"].includes(String(status || "").trim().toLowerCase());
 }
 
-function resolveTreeNodeStatusLabel(status, { kind = "", inspectionActive = false, isPaused = false, pauseReason = "", acceptanceDisplayPhase = "" } = {}) {
+function resolveTreeNodeStatusLabel(status, { kind = "", inspectionActive = false, isPaused = false, taskPaused = false, pauseReason = "", acceptanceDisplayPhase = "" } = {}) {
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
+    if (taskPaused && !isTerminalTreeNodeStatus(normalizedStatus)) {
+        return {
+            visualState: normalizedStatus,
+            displayState: "任务暂停",
+        };
+    }
     if (isPaused) {
         return {
             visualState: normalizedStatus,
@@ -2067,6 +2102,14 @@ function treeNodeHasRunningChildren(node) {
 async function handleTreeNodePauseAction(node, event) {
     event?.preventDefault?.();
     event?.stopPropagation?.();
+    if (taskPauseDisplayActive()) {
+        showToast({
+            title: "任务已暂停",
+            text: "请先恢复任务后再操作单个节点",
+            kind: "warn",
+        });
+        return;
+    }
     const taskId = String(S.currentTaskId || "").trim();
     const nodeId = String(node?.node_id || "").trim();
     if (!taskId || !nodeId) return;
@@ -2151,7 +2194,9 @@ function renderTree() {
         const title = String(node.title || node.node_id || "");
         const fullTitle = String(node.fullTitle || title);
         const nodeStatus = String(node.visual_state || node.state || "").trim().toLowerCase();
-        const displayState = String(node.display_state || node.state || "").trim() || String(node.state || "").toUpperCase();
+        const taskPaused = taskPauseDisplayActive();
+        const effectivePaused = effectiveTreeNodePaused(node, taskPaused);
+        const displayState = taskNodeDisplayState(node, taskPaused);
         const button = document.createElement("button");
         button.type = "button";
         button.className = `execution-tree-node${S.selectedNodeId === node.node_id ? " selected" : ""}`;
@@ -2163,11 +2208,13 @@ function renderTree() {
         button.dataset.id = node.node_id;
         button.dataset.kind = node.kind || "execution";
         button.dataset.status = nodeStatus;
-        button.dataset.paused = node.is_paused ? "true" : "false";
+        button.dataset.paused = effectivePaused ? "true" : "false";
         button.dataset.pausedReason = String(node.pause_reason || "");
         button.title = node.pause_remark ? `${fullTitle} \u2014 ${node.pause_remark}` : fullTitle;
         button.setAttribute("aria-pressed", S.selectedNodeId === node.node_id ? "true" : "false");
-        const pauseAction = !isTerminalTreeNodeStatus(node.state) ? `<span class="execution-tree-node-pause-action" data-node-pause-action="true" role="button" tabindex="0" title="${node.is_paused ? "\u6062\u590d\u8282\u70b9" : "\u6682\u505c\u8282\u70b9"}">${node.is_paused ? "\u25b6" : "\u2161"}</span>` : "";
+        const pauseAction = !isTerminalTreeNodeStatus(node.state) && !taskPaused
+            ? `<span class="execution-tree-node-pause-action" data-node-pause-action="true" role="button" tabindex="0" title="${node.is_paused ? "\u6062\u590d\u8282\u70b9" : "\u6682\u505c\u8282\u70b9"}">${node.is_paused ? "\u25b6" : "\u2161"}</span>`
+            : "";
         button.innerHTML = `${showStaticSubtreeHint ? '<span class="execution-tree-node-note">\u6682\u65e0\u5176\u4ed6\u53ef\u5207\u6362\u5b50\u6811</span>' : ""}<span class="execution-tree-node-head"><span class="execution-tree-node-title">${esc(title)}</span><span class="status-badge" data-status="${esc(node.visual_state || node.state || "")}">${esc(displayState)}</span></span>${pauseAction}`;
         button.addEventListener("click", (event) => {
             if (event.target instanceof Element && event.target.closest("[data-node-pause-action]")) return;
@@ -2457,14 +2504,22 @@ async function handleNodeContextDisclosureToggle() {
     await loadSelectedNodeLatestContext({ force: true });
 }
 
+function renderTaskNodeDetailStatus(node) {
+    if (!U.adStatus || !node) return;
+    const taskPaused = taskPauseDisplayActive();
+    const effectivePaused = effectiveTreeNodePaused(node, taskPaused);
+    U.adStatus.textContent = taskNodeDisplayState(node, taskPaused);
+    U.adStatus.dataset.status = node.visual_state || node.state || node.status || "";
+    U.adStatus.dataset.paused = effectivePaused ? "true" : "false";
+}
+
 function showTaskNodeLoadingState(node) {
     S.currentNodeDetail = { ...node };
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
     setTaskSelectionEmptyVisible(false);
     if (U.adRole) U.adRole.hidden = true;
-    U.adStatus.textContent = String(node?.display_state || node?.state || node?.status || "");
-    U.adStatus.dataset.status = node?.visual_state || node?.state || node?.status || "";
+    renderTaskNodeDetailStatus(node);
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node?.roundSummary || "");
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
     if (U.adMessages) U.adMessages.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
@@ -2585,13 +2640,17 @@ function refreshRenderedTreeNodeStatuses() {
             const title = String(node.title || node.node_id || "");
             const fullTitle = String(node.fullTitle || title);
             const nodeStatus = String(node.visual_state || node.state || "").trim().toLowerCase();
-            const displayState = String(node.display_state || node.state || "").trim() || String(node.state || "").toUpperCase();
+            const taskPaused = taskPauseDisplayActive();
+            const effectivePaused = effectiveTreeNodePaused(node, taskPaused);
+            const displayState = taskNodeDisplayState(node, taskPaused);
             button.dataset.status = nodeStatus;
-            button.dataset.paused = node.is_paused ? "true" : "false";
+            button.dataset.paused = effectivePaused ? "true" : "false";
             button.dataset.pausedReason = String(node.pause_reason || "");
             button.title = node.pause_remark ? `${fullTitle} \u2014 ${node.pause_remark}` : fullTitle;
             const pauseEl = button.querySelector("[data-node-pause-action]");
             if (pauseEl instanceof HTMLElement) {
+                pauseEl.hidden = taskPaused;
+                pauseEl.setAttribute("aria-hidden", taskPaused ? "true" : "false");
                 pauseEl.textContent = node.is_paused ? "\u25b6" : "\u2161";
                 pauseEl.setAttribute("title", node.is_paused ? "\u6062\u590d\u8282\u70b9" : "\u6682\u505c\u8282\u70b9");
             }
@@ -2600,7 +2659,7 @@ function refreshRenderedTreeNodeStatuses() {
             const badgeEl = button.querySelector(".status-badge");
             if (badgeEl instanceof HTMLElement) {
                 badgeEl.dataset.status = String(node.visual_state || node.state || "");
-                badgeEl.textContent = node.is_paused ? `\u5df2\u6682\u505c\uff08${String(node.pause_reason || "").trim() || "manual"}\uff09` : displayState;
+                badgeEl.textContent = displayState;
             }
             const item = button.closest(".execution-tree-item");
             if (item instanceof HTMLElement) item.dataset.status = nodeStatus;
@@ -2665,11 +2724,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     setTaskSelectionEmptyVisible(false);
     if (U.adRole) U.adRole.hidden = true;
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
-    U.adStatus.textContent = mergedNode.is_paused
-        ? `\u5df2\u6682\u505c\uff08${String(mergedNode.pause_reason || "manual").trim()}\uff09`
-        : String(mergedNode.display_state || mergedNode.state || mergedNode.status || "");
-    U.adStatus.dataset.status = mergedNode.visual_state || mergedNode.state || mergedNode.status || node.visual_state || node.state || "";
-    U.adStatus.dataset.paused = mergedNode.is_paused ? "true" : "false";
+    renderTaskNodeDetailStatus(mergedNode);
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
     const traceChanged = !!renderExecutionTrace(mergedNode, { viewState });
     const messagesChanged = !!renderMessageList(mergedNode, { viewState });
