@@ -2811,6 +2811,21 @@ textarea {
     color: var(--text-muted);
     letter-spacing: 0.01em;
     user-select: text;
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.ceo-turn-message.usage-collapsed .ceo-turn-usage {
+    opacity: 0;
+    transform: translateY(2px);
+    pointer-events: none;
+}
+
+.ceo-turn-message.usage-collapsed:hover .ceo-turn-usage,
+.ceo-turn-message.usage-collapsed:focus-within .ceo-turn-usage {
+    opacity: 1;
+    transform: translateY(0);
 }
 
 .assistant-loading-indicator {
@@ -3645,8 +3660,8 @@ textarea {
     border-radius: 999px;
     --ceo-context-usage-color: hsl(145 82% 58%);
     --ceo-context-usage-glow: color-mix(in srgb, var(--ceo-context-usage-color) 30%, transparent);
-    opacity: 0;
-    pointer-events: none;
+    opacity: 1;
+    pointer-events: auto;
     transition:
         transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
         opacity 220ms ease;
@@ -3658,7 +3673,7 @@ textarea {
     inset: 2px;
     border-radius: 999px;
     background: radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--ceo-context-usage-color) 30%, transparent), transparent 72%);
-    opacity: 0;
+    opacity: 0.45;
     transition: opacity 220ms ease;
     pointer-events: none;
 }
@@ -3737,6 +3752,44 @@ textarea {
 
 .ceo-context-usage-brain:not(.is-active) .ceo-context-usage-brain-fill {
     opacity: 0.56;
+}
+
+.ceo-context-usage-brain-tip {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%) translateY(6px) scale(0.9);
+    transform-origin: bottom center;
+    background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+    color: var(--text-primary);
+    border: 1px solid color-mix(in srgb, var(--border-subtle) 82%, transparent);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 0.75rem;
+    line-height: 1.2;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 40;
+}
+
+.ceo-context-usage-brain-tip::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+}
+
+.ceo-context-usage-brain:hover .ceo-context-usage-brain-tip,
+.ceo-context-usage-brain:focus-visible .ceo-context-usage-brain-tip {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
 }
 
 @keyframes ceo-context-usage-brain-pulse {

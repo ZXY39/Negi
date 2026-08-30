@@ -1171,6 +1171,12 @@ async def ceo_websocket(websocket: WebSocket):
             if not turn_id:
                 if isinstance(snapshot, dict):
                     turn_id = str(snapshot.get('turn_id') or '').strip()
+            turn_usage = None
+            turn_usage_map = getattr(session, "_frontdoor_turn_usage", None)
+            if isinstance(turn_usage_map, dict) and turn_id:
+                turn_usage = turn_usage_map.get(turn_id) or None
+            if not turn_usage and isinstance(snapshot, dict):
+                turn_usage = snapshot.get("usage") or None
             if _is_internal_ack_message_end(payload):
                 reason = str(payload.get("heartbeat_reason") or "heartbeat_ok").strip() or "heartbeat_ok"
                 await _push_stream_event(
@@ -1193,11 +1199,7 @@ async def ceo_websocket(websocket: WebSocket):
                     'source': source,
                     'turn_id': turn_id,
                     **({'user_messages': user_messages} if user_messages else {}),
-                    **(
-                        {'usage': snapshot.get('usage')}
-                        if isinstance(snapshot, dict) and snapshot.get('usage')
-                        else {}
-                    ),
+                    **({'usage': turn_usage} if turn_usage else {}),
                     **final_reply_canonical_merge(canonical_context, canonical_context_delta),
                 },
             )

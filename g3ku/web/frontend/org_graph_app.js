@@ -351,6 +351,7 @@ const U = {
     ceoComposerUsageBrain: document.getElementById("ceo-context-usage-brain"),
     ceoComposerUsageBrainBase: document.getElementById("ceo-context-usage-brain-base"),
     ceoComposerUsageBrainFill: document.getElementById("ceo-context-usage-brain-fill"),
+    ceoComposerUsageBrainTip: document.getElementById("ceo-context-usage-brain-tip"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
     ceoSend: document.getElementById("ceo-send-btn"),
@@ -1482,10 +1483,12 @@ function syncCeoComposerUsageOutline() {
                 : estimate.would_trigger_token_compression ? "warning"
                     : "active"
     );
-    shell.title = hasEstimate
+    const tipLabel = hasEstimate
         ? `${estimate.provider_model || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
-        : "";
-    if (shell.setAttribute) shell.setAttribute("aria-label", shell.title || "");
+        : "等待 Leader 上下文预估";
+    if (U.ceoComposerUsageBrainTip) U.ceoComposerUsageBrainTip.textContent = tipLabel;
+    shell.removeAttribute?.("title");
+    if (shell.setAttribute) shell.setAttribute("aria-label", tipLabel);
 }
 
 async function refreshCeoComposerUsageEstimate() {
@@ -3566,6 +3569,7 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null } = {}) {
         } else {
             turn.flowEl.hidden = true;
         }
+        setCeoTurnUsageCollapsed(turn, true);
     }, { scrollMode: "preserve" });
     patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
@@ -4405,6 +4409,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
             turn.flowEl.hidden = false;
         }
         setCeoTurnUsage(turn, snapshot?.usage);
+        setCeoTurnUsageCollapsed(turn, status !== "running");
         icons();
     }, { scrollMode: "preserve" });
     if (targetSessionId) {
@@ -4592,6 +4597,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
         setCeoTurnUsage(turn, item?.usage);
+        setCeoTurnUsageCollapsed(turn, true);
         icons();
     }, { scrollMode: "preserve" });
     if (status === "paused") {
@@ -4928,6 +4934,11 @@ function setCeoTurnUsage(turn, usage = null) {
     ].join(" · ");
     turn.usageEl.hidden = false;
     turn.usageEl.removeAttribute?.("aria-hidden");
+}
+
+function setCeoTurnUsageCollapsed(turn, collapsed = true) {
+    if (!turn?.el?.classList) return;
+    turn.el.classList.toggle("usage-collapsed", !!collapsed);
 }
 
 function clearCeoToolReminder(turn, { executionId = "", force = false } = {}) {
@@ -5914,6 +5925,7 @@ function finalizeCeoTurn(text, meta = {}) {
             turn.flowEl.hidden = true;
         }
         setCeoTurnUsage(turn, meta?.usage);
+        setCeoTurnUsageCollapsed(turn, true);
         icons();
     }, { scrollMode: "preserve" });
     discardPendingCeoTurns({
