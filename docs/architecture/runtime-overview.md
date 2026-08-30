@@ -252,6 +252,16 @@ chat 调用的时间边界只有一种：**单次（单轮）provider 请求的�
 - 排查“节点为什么说没有 candidate skills”时，同时看 `contract_visible_skill_ids`（输入层可见性）与 `candidate_skill_ids`（selector 最终候选）；输入层为空时继续看 `skill_visibility_diagnostics`（registry 存在性 / role / policy effect）。首轮 `candidate_skill_ids=[]` 而 fresh contract 本应非空时，优先判断是否仍停留在 `initialize_task()` 的 bootstrap 空 frame。
 - CEO/frontdoor 采用同样的分层思想：稳定会话前缀不承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix 并随 turn state 刷新，overlay 保持 append-only。prompt cache key 未变但命中下跌时，先检查是否有 overlay 被拼回已有 user 消息。
 
+## Node-Level Pause and Recovery
+
+`main/runtime/` treats node pause as a node-local control state layered on `NodeRecord.status`. The pause reasons are `manual`, `agent`, and `error`; a paused node remains `status=in_progress` until it resumes or is explicitly failed.
+
+- `pause_node` targets the selected node by default. A parent with running descendants can be paused independently; the request takes effect when that parent reaches its next React-loop safe boundary. With `cascade=true`, the parent and every descendant, including inspection nodes, receive the pause request. Without cascade, descendants continue independently.
+- A runtime exception in `NodeRunner` is recorded in `task_error_logs`, registered in `task_node_pauses` with `pause_reason=error`, and surfaced as `NodePausedError`. Cancellation and task-terminal checks have priority, so cancellation resolves as `failed/canceled` rather than becoming an error pause.
+- `task_node_pauses` has one active row per node. It stores the reason, operator or agent remark, and heartbeat delivery marker. Terminal node cleanup removes the row; task deletion removes pause rows and error logs with the task.
+- A child pause leaves its dispatcher future pending so the parent pipeline waits without treating the child as a failed result. The root pause propagates to `TaskActorService`, which leaves the task runnable state paused. Failing a paused child resolves the original future with a failed result so the parent can apply its ordinary failure handling.
+- Resume clears the node pause state and restarts the same dispatcher entry. `NodeRunner._resume_react_state` restores the persisted `task_runtime_frames` frame, allowing the node to continue from its prior runtime context instead of starting a fresh node turn. Distribution barriers treat paused nodes as part of the in-progress frontier and do not wait on a paused child as if it were an unresolved safe-boundary drain.
+
 ## Prompt Cache Family And Actual Request
 
 基线合同摘要（完整取证与排查归缓存排查文档）：

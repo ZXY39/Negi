@@ -88,6 +88,13 @@ Cron job delivery is claim-before-dispatch, which defines the restart/recovery g
 - China-channel reply delivery: when the heartbeat session is a `china:*` session, the persisted reply is also handed to `reply_notifier` → `_notify_heartbeat_channel_reply`, which publishes an `OutboundMessage` onto the bus for the China drain. The channel/chat_id must come from china session-key parsing, never from a naive first-colon split of the key, and must not overwrite the owning transport's authoritative session meta; otherwise the outbound is published with a wrong `channel` and silently dropped. See `china-channels.md` §7.
 - Heartbeat service instance reuse: `build_web_session_heartbeat` reuses the live instance bound to the same agent/runtime-manager/task-service/session-manager instead of rebuilding it on every lookup. Comparing the reply-notifier closure by identity would always fail (callers pass a fresh closure) and rebuild a not-started instance, orphaning the started one and stranding enqueued events on it.
 
+## Task Node Error Delivery
+
+- It scans at startup and every 60 seconds. It selects undelivered `pause_reason=error` rows for nodes that remain `in_progress` and `is_paused`.
+- It groups rows by source session and enqueues `task_node_error` items with task/node identity, error text, reason, remark, and dedupe key `node-error:{task_id}:{node_id}:{pause_row_id}`.
+- It marks a row `delivered` only after enqueue accepts the payload. Failed enqueue retries on the next scan; delivered rows are not sent again after restart.
+- `prompt_lane` renders the event as a decision to use `manage_task_nodes` for resume, keep-paused-with-remark, fail, or related-node pause. Tool validation belongs to the tool contract; delivery belongs here.
+
 ## What Heartbeat Does Not Own
 
 The CEO inline tool reminder lane is not a heartbeat turn.

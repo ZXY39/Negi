@@ -288,13 +288,11 @@ The backend contract behind that UI behavior is:
 
 ### Task Hall Action Contract
 
-- The browser task hall only exposes `pause`, `resume`, and `delete` task actions.
-- `retry`, `continue-evaluate`, and `open continuation` actions are removed from both the UI flow and the REST surface.
-- Task list and task detail status pills derive from the current task `status` plus final-acceptance state; legacy continuation metadata fields are ignored even if older task records still carry them.
-- The task-hall multi-select `选择` menu has six backend-aligned buckets: `已暂停` / `完成` / `未读` / `失败` / `未通过` / `进行中`.
-- `完成` means strict `taskStatusKey(task) === "success"`, while `未通过` means strict `taskStatusKey(task) === "unpassed"`. Maintainers must not fold `unpassed` into the failed bucket just because final acceptance ended in a business rejection.
-- Task-hall batch delete is a backend-owned contract: the browser sends one `POST /api/tasks/bulk-delete` request with `task_ids` instead of fanning out one `DELETE /api/tasks/{task_id}` call per selected row.
-- The batch-delete response is per-task, not all-or-nothing. Frontend code should interpret each returned `items[]` row's `result` (`deleted`, `not_found`, `failed`) before choosing success/warn/error toast behavior.
+- The browser task hall exposes only `pause`, `resume`, and `delete` task actions; `retry`, `continue-evaluate`, and `open continuation` are absent from the UI and REST surface.
+- Status pills derive from the current task `status` plus final-acceptance state. The multi-select menu uses the backend buckets `已暂停` / `完成` / `未读` / `失败` / `未通过` / `进行中`; `完成` maps strictly to `success`, and `未通过` maps strictly to `unpassed`.
+- Batch delete sends one `POST /api/tasks/bulk-delete` request with `task_ids`. The per-task response is authoritative: inspect each `items[]` result (`deleted`, `not_found`, `failed`) before choosing toast behavior.
+- The task detail tree exposes node pause/resume controls. Pause is local by default; when a parent has running descendants, the browser asks whether to cascade to all descendants, including inspection nodes. The backend stores `pause_requested`, `is_paused`, `pause_reason`, and an optional remark; a non-cascaded child keeps running until the parent reaches its safe boundary.
+- The `错误日志` drawer reads `GET /api/tasks/{task_id}/error-log`, shows time, node, and error text, and treats the node id as a navigation target. Clicking it expands ancestors when possible, centers the tree node, and applies a one-shot highlight. Pause/resume changes arrive through the task-node patch/snapshot path, not by reconstructing state from raw storage tables.
 
 ### Task Message Distribution UI Contract
 

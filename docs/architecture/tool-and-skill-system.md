@@ -195,6 +195,14 @@ promotion 与前门状态：
 - 前门要区分两份工具集合：`tool_names` 保存阶段内可恢复的完整 callable pool；“当前轮合同暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮模型可见函数列表，也不要把 agent-facing 收紧误解成 provider `tools[]` 已同步收紧。
 - `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names` 是受保护运行时状态：工具合同刷新不能覆盖、清空或重置这些字段。
 
+### `manage_task_nodes` 节点控制工具
+
+`tools/manage_task_nodes_cn` 提供给 agent 处理错误暂停节点的 callable tool。它调用 `MainRuntimeService.control_nodes(...)`，一次请求可以包含多个同一任务的节点，并按节点返回结果。
+
+- `action` 取 `resume`、`keep_paused`、`fail`、`pause`。`keep_paused` 必须提供非空 `remark`；该备注写入节点暂停登记，供后续 heartbeat 决策使用。
+- `resume` 清除暂停并让运行中的 dispatcher 从持久化 runtime frame 续跑；`fail` 将暂停节点置为终态并释放父节点等待；`pause` 以 `pause_reason=agent` 登记 agent 发起的暂停。
+- 工具层只负责参数与结果契约，节点暂停的安全边界、future 等待和恢复语义归 `runtime-overview.md`「Node-Level Pause and Recovery」；错误暂停事件的投递归 `heartbeat-system.md`「Task Node Error Delivery」。不要通过普通 task 工具或直接改 SQLite 表替代此入口。
+
 ## 4. 一条从上下文到 callable tools 的链路
 
 1. 节点/CEO 进入一次新 turn。
