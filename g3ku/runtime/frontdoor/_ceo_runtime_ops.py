@@ -3469,6 +3469,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             setattr(target_session, "_frontdoor_actual_request_hash", str(record.get("actual_request_hash") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_message_count", int(record.get("actual_request_message_count") or 0))
             setattr(target_session, "_frontdoor_actual_tool_schema_hash", str(record.get("actual_tool_schema_hash") or "").strip())
+            usage_payload = dict(payload.get("usage") or {}) if isinstance(payload, dict) else {}
+            if turn_id and any(
+                int(usage_payload.get(field) or 0)
+                for field in ("input_tokens", "output_tokens", "cache_hit_tokens")
+            ):
+                turn_usage = getattr(target_session, "_frontdoor_turn_usage", None)
+                if not isinstance(turn_usage, dict):
+                    turn_usage = {}
+                    setattr(target_session, "_frontdoor_turn_usage", turn_usage)
+                entry = turn_usage.get(turn_id)
+                if not isinstance(entry, dict):
+                    entry = {"input_tokens": 0, "output_tokens": 0, "cache_hit_tokens": 0, "call_count": 0}
+                entry["input_tokens"] = int(entry.get("input_tokens") or 0) + int(usage_payload.get("input_tokens") or 0)
+                entry["output_tokens"] = int(entry.get("output_tokens") or 0) + int(usage_payload.get("output_tokens") or 0)
+                entry["cache_hit_tokens"] = int(entry.get("cache_hit_tokens") or 0) + int(usage_payload.get("cache_hit_tokens") or 0)
+                entry["call_count"] = int(entry.get("call_count") or 0) + 1
+                turn_usage[turn_id] = entry
             if frontdoor_token_preflight_diagnostics:
                 setattr(
                     target_session,

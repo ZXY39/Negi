@@ -174,6 +174,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - `visible_frontdoor`、`token_compression`、`inline_tool_reminder` 都落在同一 artifact 族：普通 send 与 internal subrequest 可以从同一条时间线解释。
 - artifact 内保存 runtime-side 投影（`model_messages` / `request_messages`、`actual_tool_schemas`、cache-family 诊断）与可用时的最终 transport payload（`provider_request_meta`、`provider_request_body`）；`request_messages` 是保存请求顺序的兼容权威，不要重新引入旧 `messages` 全量镜像。
 - 每条 artifact 还带归一化的 `usage`、`frontdoor_history_shrink_reason`、`frontdoor_token_preflight_diagnostics`：用它们比较“preflight 以为要发什么”与“provider 实际计费了什么”，不要只靠 transcript 时间线重建这层关系。
+- 前端每轮 token 展示与本取证合同同源：实时轮次读会话内存累积（`_frontdoor_turn_usage`），历史轮次重载按 `turn_id` 聚合本目录 artifact 的 `usage`（`input_tokens` / `output_tokens` / `cache_hit_tokens`）。聚合只读计费三通道、只服务 UI 展示，不参与 baseline/恢复判定——UI 合同见 `web-and-admin.md`「Per-Turn Token Usage Contract」。
 - 节点同样为每次 `call_model` 写专用 JSON，`actual_request_ref` / latest-context 指向该 artifact，不复用 runtime-frame `messages_ref`。restart/resume 的第一跳可以从最新 `actual_request_ref.request_messages` 取种子，让 same-turn append-only 增长跨过进程重启；该种子是一次性 scaffold，只服务第一条重建请求，一旦本轮重建出 pending tool/child turn 或发出新真实请求即丢弃，不得替换 durable 节点历史。
 
 ### 4.3 Baseline 合同与恢复顺序

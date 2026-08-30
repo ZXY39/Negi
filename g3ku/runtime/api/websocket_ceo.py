@@ -30,6 +30,7 @@ from g3ku.runtime.web_ceo_sessions import (
     is_internal_ceo_user_message,
     list_web_ceo_sessions,
     read_inflight_turn_snapshot,
+    read_session_turn_token_usage,
     resolve_execution_snapshot,
     resolve_active_ceo_session_id,
     transcript_messages,
@@ -593,6 +594,7 @@ def _build_ceo_snapshot(
     hide_pending_users = inflight_status in {"running", "in_progress", "active"}
     items: list[dict[str, Any]] = []
     previous_assistant_context: dict[str, Any] = {}
+    usage_by_turn = read_session_turn_token_usage(session_id) if session_id else {}
     for raw in list(messages or []):
         if not isinstance(raw, dict):
             continue
@@ -645,6 +647,10 @@ def _build_ceo_snapshot(
             previous_assistant_context = canonical_context
         if compression:
             item['compression'] = compression
+        if role == 'assistant' and turn_id:
+            turn_usage = usage_by_turn.get(turn_id)
+            if turn_usage:
+                item['usage'] = turn_usage
         items.append(item)
     return items
 
@@ -1187,6 +1193,11 @@ async def ceo_websocket(websocket: WebSocket):
                     'source': source,
                     'turn_id': turn_id,
                     **({'user_messages': user_messages} if user_messages else {}),
+                    **(
+                        {'usage': snapshot.get('usage')}
+                        if isinstance(snapshot, dict) and snapshot.get('usage')
+                        else {}
+                    ),
                     **final_reply_canonical_merge(canonical_context, canonical_context_delta),
                 },
             )

@@ -133,6 +133,9 @@ class RuntimeAgentSession:
         self._frontdoor_completed_continuity_bridge_pending: bool = False
         self._last_stop_reason: str = ""
         self._active_turn_id: str | None = None
+        # 每轮可见 frontdoor 请求的累计 token 用量（turn_id -> {input_tokens, output_tokens, cache_hit_tokens, call_count}）。
+        # 只在内存中累积、O(1) 更新，供气泡下方实时展示，不做磁盘读取。
+        self._frontdoor_turn_usage: dict[str, dict[str, int]] = {}
         self._active_batch_id: str | None = None
         self._active_user_batch_inputs: list[UserInputMessage] = []
         self._last_verified_task_ids: list[str] = []
@@ -2006,6 +2009,9 @@ class RuntimeAgentSession:
         turn_id = self._current_turn_id()
         if turn_id:
             snapshot["turn_id"] = turn_id
+        turn_usage = (getattr(self, "_frontdoor_turn_usage", None) or {}).get(turn_id)
+        if turn_usage:
+            snapshot["usage"] = copy.deepcopy(turn_usage)
         prompt = self._last_prompt
         prompt_source = self._internal_prompt_source(prompt)
         if prompt_source is not None:

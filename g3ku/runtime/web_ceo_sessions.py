@@ -1071,6 +1071,49 @@ def clear_actual_request_history(session_id: str) -> None:
         shutil.rmtree(request_dir, ignore_errors=True)
 
 
+def read_session_turn_token_usage(session_id: str) -> dict[str, dict[str, int]]:
+    """按 turn_id 聚合会话已持久化的 frontdoor 请求 token 用量（历史轮次，供会话重载展示）。
+
+    每个可见 frontdoor 模型调用会落一条请求快照（含 ``usage``），同一轮次可能多次调用，
+    这里按 ``turn_id`` 求和。只在会话快照构建时调用一次，不在轮次推进热路径上使用。
+    """
+    key = str(session_id or "").strip()
+    if not key:
+        return {}
+    request_dir = actual_request_dir_for_session(key, create=False)
+    if not request_dir.exists():
+        return {}
+    usage_by_turn: dict[str, dict[str, int]] = {}
+    try:
+        paths = sorted(request_dir.glob("*.json"))
+    except Exception:
+        return {}
+    for path in paths:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(record, dict):
+            continue
+        turn_id = str(record.get("turn_id") or "").strip()
+        usage = record.get("usage")
+        if not turn_id or not isinstance(usage, dict):
+            continue
+        entry = usage_by_turn.setdefault(
+            turn_id,
+            {"input_tokens": 0, "output_tokens": 0, "cache_hit_tokens": 0, "call_count": 0},
+        )
+        entry["input_tokens"] += int(usage.get("input_tokens") or 0)
+        entry["output_tokens"] += int(usage.get("output_tokens") or 0)
+        entry["cache_hit_tokens"] += int(usage.get("cache_hit_tokens") or 0)
+        entry["call_count"] += 1
+    return {
+        turn_id: entry
+        for turn_id, entry in usage_by_turn.items()
+        if any(entry.get(field) for field in ("input_tokens", "output_tokens", "cache_hit_tokens"))
+    }
+
+
 def is_restorable_inflight_turn_snapshot(snapshot: Any) -> bool:
     if not isinstance(snapshot, dict) or not snapshot:
         return False

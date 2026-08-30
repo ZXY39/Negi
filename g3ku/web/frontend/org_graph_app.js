@@ -1906,9 +1906,11 @@ function normalizeCeoSnapshotMessage(message = {}) {
         const status = String(message?.status || "").trim().toLowerCase();
         const canonicalContext = normalizeCeoSnapshotCanonicalContext(message?.canonical_context);
         const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(message?.canonical_context_delta);
+        const usage = normalizeCeoTurnUsage(message?.usage);
         if (status) next.status = status;
         if (canonicalContext) next.canonical_context = canonicalContext;
         if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
+        if (usage) next.usage = usage;
         if (!String(next.content || "").trim() && !canonicalContext && !canonicalContextDelta && status !== "paused") return null;
         return next;
     }
@@ -1977,6 +1979,8 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
     if (compression) next.compression = compression;
     if (errorMessage) next.last_error = { message: errorMessage };
     if (runtimeUsageDiagnostics) next.frontdoor_token_preflight_diagnostics = runtimeUsageDiagnostics;
+    const usage = normalizeCeoTurnUsage(snapshot?.usage);
+    if (usage) next.usage = usage;
     if (Number.isFinite(actualRequestMessageCount) && actualRequestMessageCount > 0) {
         next.actual_request_message_count = Math.floor(actualRequestMessageCount);
     }
@@ -4400,6 +4404,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         if (stageRoundCount) {
             turn.flowEl.hidden = false;
         }
+        setCeoTurnUsage(turn, snapshot?.usage);
         icons();
     }, { scrollMode: "preserve" });
     if (targetSessionId) {
@@ -4586,6 +4591,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         renderCeoStageTraceIntoTurn(turn, canonicalContext);
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
+        setCeoTurnUsage(turn, item?.usage);
         icons();
     }, { scrollMode: "preserve" });
     if (status === "paused") {
@@ -4664,6 +4670,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
         el.innerHTML = `
             <div class="msg-content ceo-turn-content">
                 <div class="assistant-text pending">${renderCeoAssistantLoadingMarkup()}</div>
+                <div class="ceo-turn-usage" hidden></div>
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
                         <span class="interaction-flow-title">Interaction Flow</span>
@@ -4682,6 +4689,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
         const turn = {
             el,
             textEl: el.querySelector(".assistant-text"),
+            usageEl: el.querySelector(".ceo-turn-usage"),
             flowEl: el.querySelector(".interaction-flow"),
             metaEl: el.querySelector(".interaction-flow-meta"),
             listEl: el.querySelector(".interaction-flow-list"),
@@ -4881,6 +4889,45 @@ function updateCeoTurnMeta(turn, stateLabel) {
     const stepLabel = turn.steps > 0 ? `${turn.steps} 个步骤` : "等待工具开始...";
     const nextStateLabel = String(stateLabel || "").trim();
     turn.metaEl.textContent = nextStateLabel && nextStateLabel !== stepLabel ? `${stepLabel} - ${nextStateLabel}` : stepLabel;
+}
+
+function formatCeoTokenCount(value) {
+    const n = Number(value) || 0;
+    if (n < 1000) return String(n);
+    if (n < 1000000) {
+        const k = n / 1000;
+        return `${k >= 100 ? Math.round(k) : k.toFixed(1)}k`;
+    }
+    const m = n / 1000000;
+    return `${m >= 100 ? Math.round(m) : m.toFixed(1)}M`;
+}
+
+function normalizeCeoTurnUsage(usage = null) {
+    if (!usage || typeof usage !== "object") return null;
+    const input = Number(usage?.input_tokens ?? usage?.inputTokens ?? 0) || 0;
+    const output = Number(usage?.output_tokens ?? usage?.outputTokens ?? 0) || 0;
+    const cache = Number(usage?.cache_hit_tokens ?? usage?.cacheHitTokens ?? 0) || 0;
+    const calls = Number(usage?.call_count ?? usage?.callCount ?? 0) || 0;
+    if (!input && !output && !cache) return null;
+    return { input_tokens: input, output_tokens: output, cache_hit_tokens: cache, call_count: calls };
+}
+
+function setCeoTurnUsage(turn, usage = null) {
+    if (!turn?.usageEl) return;
+    const normalized = normalizeCeoTurnUsage(usage);
+    if (!normalized) {
+        turn.usageEl.textContent = "";
+        turn.usageEl.hidden = true;
+        turn.usageEl.setAttribute?.("aria-hidden", "true");
+        return;
+    }
+    turn.usageEl.textContent = [
+        `输入 ${formatCeoTokenCount(normalized.input_tokens)}`,
+        `缓存命中 ${formatCeoTokenCount(normalized.cache_hit_tokens)}`,
+        `输出 ${formatCeoTokenCount(normalized.output_tokens)}`,
+    ].join(" · ");
+    turn.usageEl.hidden = false;
+    turn.usageEl.removeAttribute?.("aria-hidden");
 }
 
 function clearCeoToolReminder(turn, { executionId = "", force = false } = {}) {
@@ -5783,6 +5830,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 content: String(text || "").trim() || "Done.",
                 canonical_context: persistedCanonicalContext,
                 canonical_context_delta: finalTraceContext,
+                usage: meta?.usage || null,
             });
             return {
                 ...(entry || {}),
@@ -5831,6 +5879,7 @@ function finalizeCeoTurn(text, meta = {}) {
                 content: String(text || "").trim() || "Done.",
                 canonical_context: persistedCanonicalContext,
                 canonical_context_delta: finalTraceContext,
+                usage: meta?.usage || null,
                 }
             );
             return {
@@ -5864,6 +5913,7 @@ function finalizeCeoTurn(text, meta = {}) {
         } else {
             turn.flowEl.hidden = true;
         }
+        setCeoTurnUsage(turn, meta?.usage);
         icons();
     }, { scrollMode: "preserve" });
     discardPendingCeoTurns({
