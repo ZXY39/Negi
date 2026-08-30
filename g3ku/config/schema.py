@@ -633,7 +633,7 @@ class MemoryCostConfig(Base):
 class MemoryDocumentConfig(Base):
     """Markdown memory document limits and paths."""
 
-    summary_max_chars: int = Field(default=250, ge=1)
+    summary_max_chars: int = Field(default=300, ge=1)
     document_max_chars: int = Field(default=20000, ge=1)
     compress_trigger_chars: int = Field(default=16000, ge=1)
     compress_target_chars: int = Field(default=13000, ge=1)
@@ -655,7 +655,7 @@ class MemoryAgentConfig(Base):
     """Dedicated memory agent execution controls."""
 
     model_key: str = ""
-    repair_attempt_limit: int = Field(default=1, ge=0)
+    repair_attempt_limit: int = Field(default=2, ge=0)
 
 
 class MemoryAssemblyConfig(Base):

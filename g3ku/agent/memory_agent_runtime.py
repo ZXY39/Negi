@@ -1089,7 +1089,7 @@ class MemoryManager:
         document_text = self._document_text_from_sqlite_rows(self._memory_repo.list_memories(), now_iso=now_iso)
         validate_memory_document(
             document_text,
-            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 250) or 250),
+            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
             document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1),
         )
         self.memory_file.write_text(document_text, encoding="utf-8")
@@ -1148,7 +1148,7 @@ class MemoryManager:
         stuck_after_seconds: int = 300,
     ) -> dict[str, Any]:
         snapshot_text = self.snapshot_text()
-        summary_limit = int(getattr(self.config.document, "summary_max_chars", 250) or 250)
+        summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
         document_limit = int(getattr(self.config.document, "document_max_chars", 20000) or 20000)
         document_error = ""
         document_valid = True
@@ -1724,7 +1724,7 @@ class MemoryManager:
         document_text = "".join(format_memory_entry(entry) for entry in entries)
         validate_memory_document(
             document_text,
-            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 250) or 250),
+            summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
             document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
         )
         note_refs = self._collect_note_refs(document_text)
@@ -2389,6 +2389,85 @@ class MemoryManager:
         return normalized
 
     @staticmethod
+    def _content_exceeds_message(summary_max_chars: int) -> str:
+        limit = max(int(summary_max_chars or 0), 1)
+        return (
+            f"memory content exceeds {limit} chars；"
+            f"请压缩为“摘要 + note”：正文只保留一句不超过 {limit} 字的独立规则，细节放入 note"
+        )
+
+    def _minimal_compression_fallback_write(
+        self,
+        *,
+        batch: MemoryBatch,
+        before_text: str,
+        sessions: list[Any],
+    ) -> _MemoryValidatedWrite | None:
+        for session in sessions:
+            candidate = self._minimal_write_from_session(
+                batch=batch,
+                before_text=before_text,
+                session=session,
+            )
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _minimal_write_from_session(
+        self,
+        *,
+        batch: MemoryBatch,
+        before_text: str,
+        session: Any,
+    ) -> _MemoryValidatedWrite | None:
+        if getattr(session, "apply_batch_count", 0) != 1 or not isinstance(getattr(session, "applied_batch", None), dict):
+            return None
+        payload = dict(session.applied_batch or {})
+        minimal_adds: list[dict[str, str]] = []
+        for item in list(payload.get("adds") or []):
+            if not isinstance(item, dict):
+                continue
+            minimal = str(item.get("minimal_memory") or "").strip()
+            if not minimal:
+                continue
+            minimal_adds.append(
+                {
+                    "content": minimal,
+                    "minimal_memory": minimal,
+                    "decision_source": str(item.get("decision_source") or "").strip().lower(),
+                }
+            )
+        minimal_rewrites: list[dict[str, str]] = []
+        for item in list(payload.get("rewrites") or []):
+            if not isinstance(item, dict):
+                continue
+            memory_id = str(item.get("id") or "").strip()
+            minimal = str(item.get("minimal_memory") or "").strip()
+            if not memory_id or not minimal:
+                continue
+            minimal_rewrites.append({"id": memory_id, "content": minimal, "minimal_memory": minimal})
+        if not minimal_adds and not minimal_rewrites:
+            return None
+        fresh = _MemoryToolSession(snapshot_text=before_text, notes_dir=self.notes_dir)
+        fresh.apply_batch_count = 1
+        fresh.applied_batch = {
+            "adds": minimal_adds,
+            "rewrites": minimal_rewrites,
+            "deletes": list(payload.get("deletes") or []),
+            "note_upserts": dict(payload.get("note_upserts") or {}),
+            "inspired_memory_ids": list(payload.get("inspired_memory_ids") or []),
+            "noop_reason": str(payload.get("noop_reason") or "").strip(),
+        }
+        try:
+            return self._build_validated_write_from_apply_batch(
+                before_text=before_text,
+                session=fresh,
+                batch=batch,
+            )
+        except _MemoryAgentValidationError:
+            return None
+
+    @staticmethod
     def _allowed_review_flush_sources() -> set[str]:
         return {"token_compression", "session_boundary"}
 
@@ -2599,6 +2678,7 @@ class MemoryManager:
         provider_request_ids: list[str] | None = None,
         request_artifact_paths: list[str] | None = None,
         error: str = "",
+        fallback: str = "",
     ) -> dict[str, Any]:
         payload = {
             "batch_id": self._request_id(batch.op),
@@ -2626,6 +2706,9 @@ class MemoryManager:
         normalized_error = str(error or "").strip()
         if normalized_error:
             payload["error"] = normalized_error
+        normalized_fallback = str(fallback or "").strip()
+        if normalized_fallback:
+            payload["fallback"] = normalized_fallback
         if validated is not None:
             payload["memory_chars_after"] = len(self.snapshot_text())
             payload["note_refs_written"] = list(validated.note_refs_written)
@@ -3263,7 +3346,7 @@ class MemoryManager:
         rewrite_note_ref_by_id: dict[str, str] = {}
         effective_rewrites: list[dict[str, str]] = []
         minimal_note_refs: set[str] = set()
-        summary_limit = int(getattr(self.config.document, "summary_max_chars", 250) or 250)
+        summary_limit = int(getattr(self.config.document, "summary_max_chars", 300) or 300)
         for item in rewrites:
             if not isinstance(item, dict):
                 raise _MemoryAgentValidationError("rewrite item must be an object")
@@ -3302,6 +3385,8 @@ class MemoryManager:
             if entry.memory_id in rewrite_by_id:
                 updated_note_ref = rewrite_note_ref_by_id.get(entry.memory_id, "") or self._extract_note_ref(rewrite_by_id[entry.memory_id])
                 updated_summary = self._summary_with_note_ref(rewrite_by_id[entry.memory_id], updated_note_ref)
+                if len(updated_summary) > summary_limit:
+                    raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
                 updated = MemoryEntry(
                     memory_id=entry.memory_id,
                     date_text=date_text,
@@ -3346,6 +3431,8 @@ class MemoryManager:
             if add_note_ref:
                 minimal_note_refs.add(add_note_ref)
             summary = self._summary_with_note_ref(content, add_note_ref)
+            if len(summary) > summary_limit:
+                raise _MemoryAgentValidationError(self._content_exceeds_message(summary_limit))
             summary_key = (decision_source, summary)
             if summary_key in seen_summary_keys:
                 continue
@@ -3372,11 +3459,14 @@ class MemoryManager:
             )
 
         document_text = "".join(format_memory_entry(entry) for entry in after_entries)
-        validate_memory_document(
-            document_text,
-            summary_max_chars=summary_limit,
-            document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
-        )
+        try:
+            validate_memory_document(
+                document_text,
+                summary_max_chars=summary_limit,
+                document_max_chars=int(getattr(self.config.document, "document_max_chars", 20000) or 20000),
+            )
+        except ValueError as exc:
+            raise _MemoryAgentValidationError(str(exc or "memory document invalid").strip()) from exc
         existing_refs = {path.stem for path in self.notes_dir.glob("*.md")}
         normalized_note_upserts = {
             str(ref): self._normalize_note_text(content)
@@ -3513,8 +3603,11 @@ class MemoryManager:
                 ],
             )
 
-        total_attempts = 3
+        agent_cfg = getattr(self.config, "agent", None)
+        repair_attempt_limit = int(getattr(agent_cfg, "repair_attempt_limit", 2) if agent_cfg is not None else 2)
+        total_attempts = 1 + max(repair_attempt_limit, 0)
         last_error = "memory agent did not stage a batch"
+        attempt_sessions: list[Any] = []
         for attempt_index in range(total_attempts):
             if attempt_index > 0:
                 current_runtime_config, current_runtime_revision, current_model_chain = self._reload_runtime_config_for_memory_retry(
@@ -3533,6 +3626,7 @@ class MemoryManager:
             )
             self._merge_usage(total_usage, attempt.usage)
             request_artifacts.extend(list(attempt.request_artifacts or []))
+            attempt_sessions.append(attempt.session)
             try:
                 validated = self._validate_candidate_state(
                     batch=processing_batch,
@@ -3551,6 +3645,22 @@ class MemoryManager:
             except _MemoryAgentValidationError as exc:
                 last_error = str(exc or "memory agent output invalid").strip()
                 continue
+        fallback_validated = self._minimal_compression_fallback_write(
+            batch=processing_batch,
+            before_text=before_text,
+            sessions=attempt_sessions,
+        )
+        if fallback_validated is not None:
+            return {
+                "validated": fallback_validated,
+                "usage": total_usage,
+                "attempt_count": total_attempts,
+                "assessed_text": None,
+                "model_chain": list(current_model_chain),
+                "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                "fallback": "minimal_compression",
+            }
         return {
             "validated": None,
             "usage": total_usage,
@@ -3680,6 +3790,7 @@ class MemoryManager:
 
             self._commit_validated_write(result["validated"])
             processed_at = self._now_iso()
+            fallback = str(result.get("fallback") or "").strip()
             processed_payload = self._append_terminal_history(
                 batch=batch,
                 status="applied",
@@ -3691,6 +3802,7 @@ class MemoryManager:
                 validated=result["validated"],
                 provider_request_ids=list(result.get("provider_request_ids") or []),
                 request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                fallback=fallback,
             )
             return {
                 "ok": True,
@@ -3705,6 +3817,7 @@ class MemoryManager:
                 "request_artifact_paths": list(processed_payload["request_artifact_paths"]),
                 "processed_at": processed_at,
                 **({"noop_reason": str(processed_payload.get("noop_reason") or "").strip()} if str(processed_payload.get("noop_reason") or "").strip() else {}),
+                **({"fallback": fallback} if fallback else {}),
             }
         finally:
             _release_file_lock(worker_lease)

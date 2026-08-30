@@ -1306,6 +1306,48 @@ def test_memory_agent_apply_batch_rejects_minimal_memory_without_condition_arrow
         manager.close()
 
 
+def test_memory_agent_apply_batch_rejects_over_limit_content_with_summary_note_hint(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    cfg = _memory_cfg()
+    manager = module.MemoryManager(tmp_path, cfg)
+
+    try:
+        batch = module.MemoryBatch(
+            op="write",
+            items=[
+                module.MemoryQueueRequest(
+                    op="write",
+                    decision_source="self",
+                    payload_text="Use headings",
+                    created_at=manager._now_iso(),
+                    request_id="write_1",
+                )
+            ],
+        )
+        session = module._MemoryToolSession(snapshot_text=manager.snapshot_text(), notes_dir=manager.notes_dir)
+        result = session.apply_batch(
+            adds=[
+                {
+                    "content": "x" * 251,
+                    "minimal_memory": "when->use headings",
+                    "decision_source": "self",
+                }
+            ],
+        )
+
+        assert result["ok"] is True
+        with pytest.raises(ValueError, match="250") as exc_info:
+            manager._build_validated_write_from_apply_batch(
+                before_text=manager.snapshot_text(),
+                session=session,
+                batch=batch,
+            )
+        assert "摘要" in str(exc_info.value)
+        assert "note" in str(exc_info.value)
+    finally:
+        manager.close()
+
+
 @pytest.mark.parametrize("mode", ["add", "rewrite"])
 def test_memory_agent_apply_batch_prefers_minimal_memory_note_ref_over_stale_content_ref(
     tmp_path: Path,

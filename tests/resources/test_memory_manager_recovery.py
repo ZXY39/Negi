@@ -157,7 +157,7 @@ def test_memory_runtime_loads_memory_agent_prompt_from_main_prompts(tmp_path: Pa
     assert "优先使用 rewrite" in system_prompt
     assert "不得使用 adds" in system_prompt
     assert "noop_reason" in system_prompt
-    assert "250" in system_prompt
+    assert "300" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -281,6 +281,133 @@ async def test_v2_run_due_batch_once_accepts_explicit_noop_reason_without_changi
         assert len(processed) == 1
         assert processed[0]["request_ids"] == ["write_1"]
         assert processed[0]["noop_reason"] == "duplicate_of:Ab12Z9"
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_due_batch_once_falls_back_to_minimal_compression_after_attempts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="Remember to always preserve column order in CSV imports",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+        overlong_content = "x" * 251
+        responses = []
+        for _ in range(3):
+            responses.append(
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "adds": [
+                                    {
+                                        "content": overlong_content,
+                                        "minimal_memory": "csv->preserve column order",
+                                        "decision_source": "self",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                )
+            )
+            responses.append(_fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}))
+        fake_model = _FakeToolCallingModel(responses)
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/18", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        snapshot_text = manager.snapshot_text()
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+
+        assert report["status"] == "applied"
+        assert report.get("fallback") == "minimal_compression"
+        assert "csv->preserve column order" in snapshot_text
+        assert overlong_content not in snapshot_text
+        assert len(processed) == 1
+        assert processed[0]["fallback"] == "minimal_compression"
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_run_due_batch_once_respects_repair_attempt_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    cfg = _memory_cfg()
+    cfg.agent.repair_attempt_limit = 1  # 1 repair => 2 total attempts
+    manager = module.MemoryManager(tmp_path, cfg)
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="self",
+                payload_text="Remember to always preserve column order in CSV imports",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_1",
+            )
+        )
+        overlong_content = "x" * 251
+        responses = []
+        for _ in range(2):
+            responses.append(
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "adds": [
+                                    {
+                                        "content": overlong_content,
+                                        "minimal_memory": "csv->preserve column order",
+                                        "decision_source": "self",
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                )
+            )
+            responses.append(_fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}))
+        fake_model = _FakeToolCallingModel(responses)
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module.MemoryManager, "_memory_date_text", lambda self, now_iso=None: "2026/4/18", raising=False)
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+
+        assert report["status"] == "applied"
+        assert report["attempt_count"] == 2
+        assert report.get("fallback") == "minimal_compression"
     finally:
         manager.close()
 

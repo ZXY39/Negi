@@ -304,10 +304,12 @@ Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Fr
 Settings surface:
 
 - `document.*` controls the Markdown notebook layout, including `memory/MEMORY.md`, `memory/notes/`, the summary character limit, and the full document character ceiling.
-  - The default `document.summary_max_chars` is `250`.
+  - The default `document.summary_max_chars` is `300`.
   - `document.compress_trigger_chars` and `document.compress_target_chars` define the post-commit snapshot compaction thresholds.
 - `queue.*` controls the single durable queue, including `memory/queue.jsonl`, `memory/ops.jsonl`, batch size, max wait time, and the ordinary-turn review window size. `queue.review_interval_turns` is the per-session ordinary-turn review window size, defaulting to `5`.
 - `agent.*` controls the dedicated memory-maintenance worker behavior.
+  - `agent.repair_attempt_limit` is the number of repair retries after the first validation failure; total model attempts per batch = `1 + repair_attempt_limit` (default `2`, i.e. 3 attempts).
+  - When every attempt still fails validation, the runtime falls back to a best-effort "minimal compression" write (uses each item's `minimal_memory` as the stored summary) instead of discarding; the applied history row records `fallback: "minimal_compression"`.
 - `mode`, `backend`, `bootstrap_mode`, and `compat.dual_write_legacy_files` are not part of the active memory runtime settings surface.
 
 Project-config side keys:

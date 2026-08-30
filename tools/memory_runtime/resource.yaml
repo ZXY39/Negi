@@ -28,7 +28,7 @@ settings:
   enabled: true
   arch_version: v2
   document:
-    summary_max_chars: 250
+    summary_max_chars: 300
     document_max_chars: 20000
     compress_trigger_chars: 16000
     compress_target_chars: 13000
@@ -42,7 +42,7 @@ settings:
     review_interval_turns: 5
   agent:
     model_key: ""
-    repair_attempt_limit: 1
+    repair_attempt_limit: 2
   features:
     unified_context: true
     layered_loading: true
