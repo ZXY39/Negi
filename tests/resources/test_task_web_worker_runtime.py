@@ -40,7 +40,7 @@ from main.monitoring.query_service import TaskQueryService
 from main.prompts import load_prompt
 from main.protocol import now_iso
 from main.runtime.append_notice_context import APPEND_NOTICE_CONTEXT_KEY
-from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool
+from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
@@ -4929,6 +4929,91 @@ async def test_pending_notice_wait_for_children_blocks_new_spawn_round(tmp_path:
                 specs=[SpawnChildSpec(goal="new child", prompt="new prompt", execution_policy=_execution_policy())],
                 call_id="round-2",
             )
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_waiting_children_recovery_replays_original_spawn_round_despite_pending_tool_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+
+        original_call_id = "call:original-spawn"
+        spec = SpawnChildSpec(goal="existing child", prompt="existing prompt", execution_policy=_execution_policy())
+        child = service.node_runner._create_execution_child(task=task, parent=root, spec=spec)
+        assert child is not None
+        _stamp_incomplete_spawn_round(
+            service,
+            root_node_id=root.node_id,
+            round_id=original_call_id,
+            spec=spec,
+            child_node_id=child.node_id,
+        )
+        service.log_service.update_frame(
+            record.task_id,
+            root.node_id,
+            lambda frame: {
+                **frame,
+                "node_id": root.node_id,
+                "phase": "waiting_children",
+                "messages": [{"role": "system", "content": "system"}],
+                "pending_tool_calls": [
+                    {
+                        "id": original_call_id,
+                        "name": "spawn_child_nodes",
+                        "arguments": {"children": [spec.model_dump(mode="json")]},
+                    }
+                ],
+            },
+            publish_snapshot=False,
+        )
+
+        replayed: list[tuple[str, str, list[dict[str, object]]]] = []
+
+        async def capture_replay(*, response_tool_calls, **_kwargs):
+            replayed.extend(
+                (
+                    str(call.id or ""),
+                    str(call.name or ""),
+                    dict(call.arguments or {}).get("children") or [],
+                )
+                for call in response_tool_calls
+            )
+            return []
+
+        monkeypatch.setattr(service.node_runner._react_loop, "_execute_tool_calls", capture_replay)
+        resumed = await service.node_runner._react_loop._resume_waiting_children_turn_if_needed(
+            task=task,
+            node=service.get_node(root.node_id),
+            message_history=[{"role": "system", "content": "system"}],
+            tools={"spawn_child_nodes": SpawnChildNodesTool(lambda *_args, **_kwargs: None)},
+            runtime_context={"task_id": record.task_id, "node_id": root.node_id},
+        )
+
+        assert resumed is not None
+        assert replayed == [
+            (original_call_id, "spawn_child_nodes", [spec.model_dump(mode="json", exclude_none=True)])
+        ]
+        latest_parent = service.get_node(root.node_id)
+        assert latest_parent is not None
+        operations = dict((latest_parent.metadata or {}).get("spawn_operations") or {})
+        assert list(operations) == [original_call_id]
+        assert operations[original_call_id]["completed"] is False
+        assert operations[original_call_id]["entries"][0]["child_node_id"] == child.node_id
     finally:
         await service.close()
 

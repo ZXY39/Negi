@@ -227,23 +227,25 @@ class ReActToolLoop:
                 runtime_context=runtime_context,
                 node=node,
             )
-            resumed_history = await self._resume_pending_tool_turn_if_needed(
+            # A parent with an incomplete spawn operation is already committed to
+            # that child round. Recover it before generic pending-tool recovery so
+            # a resumed parent cannot ask the model for a replacement round.
+            resumed_history = await self._resume_waiting_children_turn_if_needed(
                 task=task,
                 node=node,
                 message_history=message_history,
                 tools=current_tools,
                 runtime_context=runtime_context,
             )
-            resumed_waiting_children = False
+            resumed_waiting_children = resumed_history is not None
             if resumed_history is None:
-                resumed_history = await self._resume_waiting_children_turn_if_needed(
+                resumed_history = await self._resume_pending_tool_turn_if_needed(
                     task=task,
                     node=node,
                     message_history=message_history,
                     tools=current_tools,
                     runtime_context=runtime_context,
                 )
-                resumed_waiting_children = resumed_history is not None
             if resumed_history is not None:
                 message_history = resumed_history
                 if resumed_waiting_children and waiting_children_recovery_only:
@@ -1625,9 +1627,10 @@ class ReActToolLoop:
             return None
         if str(frame.get('phase') or '').strip() != 'waiting_children':
             return None
-        if list(frame.get('pending_tool_calls') or []):
-            return None
 
+        # A waiting parent can retain its original spawn tool call in the frame.
+        # It is evidence of the round to resume, not a reason to route through
+        # generic pending-tool recovery and let the model create a replacement.
         replay_calls = self._recover_waiting_children_tool_calls(node=node)
         if not replay_calls:
             return None
@@ -3439,6 +3442,7 @@ class ReActToolLoop:
                 f'Invalid stage progression detected {int(count or 0)} consecutive times. '
                 f'Latest issue: {text}.{suffix}'
             ),
+            failure_disposition='pause',
         )
 
     @classmethod
@@ -3455,6 +3459,7 @@ class ReActToolLoop:
                 f'Invalid final result submission detected {int(count or 0)} consecutive times. '
                 f'Latest issue: {text}'
             ),
+            failure_disposition='pause',
         )
 
     @classmethod
@@ -3472,6 +3477,7 @@ class ReActToolLoop:
                 f'Ignored read-only repair guidance {int(count or 0)} times for the same call signature: '
                 f'{normalized_signature}. Latest repair guidance: {guidance}'
             ),
+            failure_disposition='pause',
         )
 
     @classmethod
@@ -3489,6 +3495,7 @@ class ReActToolLoop:
                 f'Repeated stage switching without progress detected {int(count or 0)} consecutive times.'
                 f'{suffix}'
             ),
+            failure_disposition='pause',
         )
 
     @staticmethod
@@ -3583,6 +3590,7 @@ class ReActToolLoop:
                 tool_names=tool_names,
                 content_excerpt=content_excerpt,
             ),
+            failure_disposition='pause',
         )
 
     @staticmethod
@@ -5961,6 +5969,7 @@ class ReActToolLoop:
             evidence=[],
             remaining_work=[],
             blocking_reason=blocking_reason,
+            failure_disposition='pause',
         )
 
     def _execution_stage_state_for_runtime(self, *, runtime_context: dict[str, Any]):

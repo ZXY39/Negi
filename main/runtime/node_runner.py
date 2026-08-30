@@ -542,6 +542,27 @@ class NodeRunner:
                 ),
             )
             _consume_inflight_notices_once()
+            if str(result.failure_disposition or '').strip().lower() == 'pause':
+                latest_task = self._store.get_task(task_id) or task
+                terminal_reason = self._task_terminal_reason(task_id, task=latest_task)
+                if bool(getattr(latest_task, 'cancel_requested', False)) or terminal_reason:
+                    return self._mark_failed(task_id, node.node_id, reason=terminal_reason or 'canceled')
+                if self._pause_requested(task_id):
+                    self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+                    raise TaskPausedError(task_id)
+                if self._node_pause_requested(task_id, node.node_id):
+                    self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
+                    self._mark_node_paused(task_id, node.node_id)
+                    raise NodePausedError(task_id, node.node_id)
+                error_text = result.failure_text
+                self._log_service.append_task_error_log(
+                    task_id,
+                    node.node_id,
+                    error_text=error_text,
+                    node_title=node.goal,
+                )
+                self._mark_node_paused(task_id, node.node_id, reason='error', remark=error_text)
+                raise NodePausedError(task_id, node.node_id)
             if self._pause_requested(task_id):
                 self._mark_finished(task_id, node.node_id, result)
                 self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)

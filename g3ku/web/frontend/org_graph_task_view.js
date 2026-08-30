@@ -2092,11 +2092,28 @@ function buildTaskTreeDistributionBubble(text = "") {
     return bubble;
 }
 
-function treeNodeHasRunningChildren(node) {
+function treeNodeHasActiveChildren(node) {
     return treeViewChildren(node).some((child) => {
         const status = String(child?.state || child?.status || "").trim().toLowerCase();
-        return status === "in_progress" && !child?.is_paused;
+        return !isTerminalTreeNodeStatus(status)
+            && !child?.is_paused
+            && !child?.effective_is_paused;
     });
+}
+
+async function submitTreeNodePause(taskId, nodeId, { cascade = false } = {}) {
+    try {
+        await ApiClient.pauseTaskNode(taskId, nodeId, { cascade: !!cascade });
+        showToast({
+            title: "节点暂停请求已提交",
+            text: cascade ? "已包含所有子节点" : nodeId,
+            kind: "success",
+        });
+        await loadTaskTreeSnapshot(taskId);
+        renderTree();
+    } catch (error) {
+        showToast({ title: "节点操作失败", text: error?.message || "操作未完成", kind: "error" });
+    }
 }
 
 async function handleTreeNodePauseAction(node, event) {
@@ -2116,18 +2133,29 @@ async function handleTreeNodePauseAction(node, event) {
     try {
         if (node?.is_paused) {
             await ApiClient.resumeTaskNode(taskId, nodeId);
-            showToast({ title: "\u8282\u70b9\u5df2\u6062\u590d", text: nodeId, kind: "success" });
-        } else {
-            const cascade = treeNodeHasRunningChildren(node)
-                ? window.confirm("\u8be5\u8282\u70b9\u5b58\u5728\u6b63\u5728\u8fd0\u884c\u7684\u5b50\u8282\u70b9\u3002\u662f\u5426\u540c\u65f6\u6682\u505c\u6240\u6709\u5b50\u8282\u70b9\uff08\u5305\u62ec\u68c0\u9a8c\u8282\u70b9\uff09\uff1f")
-                : false;
-            await ApiClient.pauseTaskNode(taskId, nodeId, { cascade });
-            showToast({ title: "\u8282\u70b9\u6682\u505c\u8bf7\u6c42\u5df2\u63d0\u4ea4", text: cascade ? "\u5df2\u5305\u542b\u6240\u6709\u5b50\u8282\u70b9" : nodeId, kind: "success" });
+            showToast({ title: "节点已恢复", text: nodeId, kind: "success" });
+            await loadTaskTreeSnapshot(taskId);
+            renderTree();
+            return;
         }
-        await loadTaskTreeSnapshot(taskId);
-        renderTree();
+        if (!treeNodeHasActiveChildren(node)) {
+            await submitTreeNodePause(taskId, nodeId);
+            return;
+        }
+        openConfirm({
+            title: "暂停节点",
+            text: "暂停父节点本身不会自动停止子节点。",
+            confirmLabel: "暂停节点",
+            confirmKind: "danger",
+            returnFocus: event?.currentTarget || null,
+            checkbox: {
+                label: "同时暂停所有子节点（包括检验节点）",
+                checked: false,
+            },
+            onConfirm: async ({ checked } = {}) => submitTreeNodePause(taskId, nodeId, { cascade: !!checked }),
+        });
     } catch (error) {
-        showToast({ title: "\u8282\u70b9\u64cd\u4f5c\u5931\u8d25", text: error?.message || "\u64cd\u4f5c\u672a\u5b8c\u6210", kind: "error" });
+        showToast({ title: "节点操作失败", text: error?.message || "操作未完成", kind: "error" });
     }
 }
 

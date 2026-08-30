@@ -9,6 +9,7 @@ import pytest
 from g3ku.heartbeat.node_error_scanner import NodeErrorScanner
 from main.errors import NodePausedError
 from main.models import NodeFinalResult, NodeRecord, SpawnChildSpec, TaskRecord, TokenUsageSummary
+from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskNodeDispatcher
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -170,6 +171,132 @@ async def test_node_error_becomes_error_pause_and_keeps_node_non_terminal(tmp_pa
         assert node.pause_reason == "error"
         assert service.log_service.list_task_error_logs(record.task_id)[0].error_text == "RuntimeError: provider unavailable"
         assert service.store.get_task_node_pause(record.root_node_id) is not None
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result_factory",
+    [
+        lambda: ReActToolLoop._invalid_final_submission_failure(reason="missing required status", count=1),
+        lambda: ReActToolLoop._invalid_stage_submission_failure(reason="invalid stage", count=1, stage_goal="stage"),
+        lambda: ReActToolLoop._read_only_repeat_failure(signature="same-call", count=1, repair_text="change the query"),
+        lambda: ReActToolLoop._stage_only_transition_failure(count=1, stage_goal="stage"),
+        lambda: ReActToolLoop._xml_repair_failure(count=1, tool_names=["exec"], content_excerpt="<tool>"),
+        lambda: ReActToolLoop._orphan_tool_result_failure(call_ids=["call:orphan"], strike_count=1),
+    ],
+)
+async def test_react_circuit_breakers_become_resumable_error_pauses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result_factory,
+) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("protocol circuit breaker", session_id="web:shared")
+        guarded_result = result_factory()
+        assert guarded_result.failure_disposition == "pause"
+        assert "failure_disposition" not in guarded_result.payload_dict()
+
+        async def return_guarded_result(**_kwargs) -> NodeFinalResult:
+            return guarded_result
+
+        monkeypatch.setattr(service.node_runner._react_loop, "run", return_guarded_result)
+        with pytest.raises(NodePausedError):
+            await service.node_runner.run_node(record.task_id, record.root_node_id)
+
+        paused = service.get_node(record.root_node_id)
+        assert paused is not None
+        assert paused.status == "in_progress"
+        assert paused.pause_requested is True
+        assert paused.is_paused is True
+        assert paused.pause_reason == "error"
+        assert service.log_service.list_task_error_logs(record.task_id)[0].error_text == guarded_result.failure_text
+        assert (paused.metadata or {}).get("result_payload") is None
+
+        resumed = await service.resume_node(record.task_id, record.root_node_id)
+        assert resumed is not None
+        assert resumed.pause_requested is False
+        assert resumed.is_paused is False
+
+        async def return_success(**_kwargs) -> NodeFinalResult:
+            return _success_result(record.root_node_id)
+
+        monkeypatch.setattr(service.node_runner._react_loop, "run", return_success)
+        completed = await service.node_runner.run_node(record.task_id, record.root_node_id)
+        assert completed.status == "success"
+        latest = service.get_node(record.root_node_id)
+        assert latest is not None and latest.status == "success"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_kind", ["canceled", "task_failed"])
+async def test_circuit_breaker_result_respects_cancellation_and_task_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_kind: str,
+) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task(f"terminal priority {terminal_kind}", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="priority child")
+        guarded_result = ReActToolLoop._invalid_final_submission_failure(
+            reason="missing required status",
+            count=1,
+        )
+
+        async def return_guarded_result(**_kwargs) -> NodeFinalResult:
+            if terminal_kind == "canceled":
+                service.log_service.request_cancel(record.task_id)
+            else:
+                service.log_service.mark_task_failed(record.task_id, reason="task terminal")
+            return guarded_result
+
+        monkeypatch.setattr(service.node_runner._react_loop, "run", return_guarded_result)
+        result = await service.node_runner.run_node(record.task_id, child.node_id)
+        assert result.status == "failed"
+        node = service.get_node(child.node_id)
+        assert node is not None and node.status == "failed"
+        assert node.is_paused is False
+        assert service.log_service.list_task_error_logs(record.task_id) == []
+        assert service.store.get_task_node_pause(child.node_id) is None
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_valid_failed_final_result_remains_terminal_not_error_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("business failure", session_id="web:shared")
+
+        async def return_business_failure(**_kwargs) -> NodeFinalResult:
+            return NodeFinalResult(
+                status="failed",
+                delivery_status="blocked",
+                summary="business validation failed",
+                answer="",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="business validation failed",
+            )
+
+        monkeypatch.setattr(service.node_runner._react_loop, "run", return_business_failure)
+        result = await service.node_runner.run_node(record.task_id, record.root_node_id)
+        assert result.status == "failed"
+        node = service.get_node(record.root_node_id)
+        assert node is not None and node.status == "failed"
+        assert node.is_paused is False
+        assert service.log_service.list_task_error_logs(record.task_id) == []
     finally:
         await service.close()
 

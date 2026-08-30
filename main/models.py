@@ -86,6 +86,9 @@ class NodeFinalResult(Model):
     evidence: list[NodeEvidenceItem] = Field(default_factory=list)
     remaining_work: list[str] = Field(default_factory=list)
     blocking_reason: str = ''
+    # This flag controls only the current runner handoff. Result payloads remain
+    # backwards-compatible and must never persist an internal pause instruction.
+    failure_disposition: Literal['terminal', 'pause'] = Field(default='terminal', exclude=True)
 
     @property
     def output(self) -> str:

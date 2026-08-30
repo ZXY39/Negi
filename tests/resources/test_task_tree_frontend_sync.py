@@ -111,6 +111,86 @@ def test_rendered_tree_builds_from_normalized_snapshot() -> None:
     assert result["aChildren"] == ["a1"]
 
 
+def test_tree_node_pause_confirmation_uses_inline_modal_and_only_sends_confirmed_cascade() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { currentTaskId: "task:test", currentTask: { is_paused: false, pause_requested: false } };
+        global.U = {};
+        const pauseCalls = [];
+        const toasts = [];
+        let confirmation = null;
+        global.ApiClient = {
+          pauseTaskNode: async (taskId, nodeId, payload) => { pauseCalls.push({ taskId, nodeId, payload }); },
+          resumeTaskNode: async () => { throw new Error("resume should not be called"); },
+        };
+        global.showToast = (payload) => { toasts.push(payload); };
+        global.loadTaskTreeSnapshot = async () => {};
+        global.renderTree = () => {};
+        global.openConfirm = (options) => { confirmation = options; };
+        global.window.confirm = () => { throw new Error("native confirmation must not be used"); };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const activeParent = {
+          node_id: "node:parent",
+          is_paused: false,
+          children: [{ node_id: "node:child", state: "in_progress", is_paused: false }],
+        };
+        const event = { preventDefault() {}, stopPropagation() {}, currentTarget: { id: "pause-button" } };
+        Promise.resolve(handleTreeNodePauseAction(activeParent, event))
+          .then(async () => {
+            const noRequestBeforeConfirmation = pauseCalls.length === 0;
+            const modal = confirmation && {
+              title: confirmation.title,
+              text: confirmation.text,
+              confirmLabel: confirmation.confirmLabel,
+              checkbox: confirmation.checkbox,
+              hasOnConfirm: typeof confirmation.onConfirm === "function",
+            };
+            await confirmation.onConfirm({ checked: true });
+            const afterConfirmedCascade = pauseCalls.slice();
+            confirmation = null;
+            await handleTreeNodePauseAction({
+              node_id: "node:solo",
+              is_paused: false,
+              children: [],
+            }, event);
+            console.log(JSON.stringify({
+              nativeConfirmPresent: code.includes("window.confirm"),
+              noRequestBeforeConfirmation,
+              modal,
+              afterConfirmedCascade,
+              afterDirectPause: pauseCalls.slice(),
+              toastCount: toasts.length,
+            }));
+          })
+          .catch((error) => { console.error(error); process.exitCode = 1; });
+        """
+    )
+
+    assert result["nativeConfirmPresent"] is False
+    assert result["noRequestBeforeConfirmation"] is True
+    assert result["modal"] == {
+        "title": "暂停节点",
+        "text": "暂停父节点本身不会自动停止子节点。",
+        "confirmLabel": "暂停节点",
+        "checkbox": {"label": "同时暂停所有子节点（包括检验节点）", "checked": False},
+        "hasOnConfirm": True,
+    }
+    assert result["afterConfirmedCascade"] == [
+        {"taskId": "task:test", "nodeId": "node:parent", "payload": {"cascade": True}}
+    ]
+    assert result["afterDirectPause"][-1] == {
+        "taskId": "task:test",
+        "nodeId": "node:solo",
+        "payload": {"cascade": False},
+    }
+
+
+
 def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_pause_state() -> None:
     result = _run_node_script(
         """
