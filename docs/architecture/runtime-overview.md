@@ -191,26 +191,27 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续
 - `MainRuntimeService` 既是服务层，也是系统集成层。
 - 它把存储、治理、工具选择、worker 状态、内容服务都绑在一起。
 
-### 5.1 Chat provider 超时边界（维护者必须掌握）
+### 5.1 Chat provider 超时与重试边界（维护者必须掌握）
 
-当前 chat 调用在 `main/runtime/chat_backend.py` 与 `g3ku/providers/fallback.py` 的外层重试逻辑里，会区分两类 provider：
+chat 调用的时间边界只有一种：**单次（单轮）provider 请求的响应时间上限，默认 10 分钟**（`DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS`）。不存在跨 attempt、跨链轮的总时长预算——可重试的整链重试是无限次的，节奏由退避控制而不是总预算控制，因此外层不能给整个 chat 调用套 `wait_for` 总预算。
 
-- provider 自己管理流式超时（`manages_request_timeout_internally=True`）
-- 仍由外层统一 `wait_for` 管理超时
+两类 provider 对单次上限的执行方式不同：
 
-对第一类（包括 `ResponsesProvider`、`OpenAIChatProvider`）：
+- 自己管理流式超时的（`manages_request_timeout_internally=True`，含 `ResponsesProvider`、`OpenAIChatProvider`）：外层不加硬截断（避免“流式持续出 chunk 却被总时长误杀”），provider 内部采用“streaming-first”语义——首个 chunk（任意 chunk，不要求文本 delta）与后续 idle chunk 的阈值都取单次请求上限；上游不支持流式时同一次 attempt 内自动回退非流式，非流式首响应阈值同样取该上限。
+- 其余 provider：由外层 `wait_for_model_attempt` 按同一上限截断。
 
-- 外层不会再施加单次 attempt 的硬总时长截断（避免“流式在持续出 chunk 但被总时长误杀”）
-- provider 内部采用“streaming-first”语义：
-  - 首个 chunk（任意 chunk，不要求文本 delta）60s 内必须到达
-  - 流开始后，连续 60s 没有任何新 chunk 视为 idle timeout
-  - 若上游不支持流式，provider 在同一次 attempt 内自动回退到非流式请求
-  - 非流式回退路径采用 120s 首响应超时
+重试边界（`main/runtime/chat_backend.py` 与 `g3ku/providers/fallback.py` 共用同一套语义）：
+
+- `retry_on` 关键词命中的错误（默认含网络类与 429/限流类）触发整链重试，**不限轮数**；轮与轮之间走封顶指数退避并带抖动（起点约 1s、封顶 60s），抖动用于打散并发节点的重试节奏，避免同步撞同一个限流窗口。
+- 重试循环在每个链轮边界对比 runtime config revision：revision 变化时抛出带 `config_revision_changed` 标记的可重试耗尽错误（`ModelProviderExhaustedError`），由上层重启回合/重建链，而不是继续用旧链空转。任务运行时侧见 `config-and-models.md`「模型链变更何时作用于在途回合」。
+- 关键词未命中的错误仍走有限路径：同轮内换 key、回退链上下一个模型；都不可用时抛出耗尽错误。
+- 已经出现可见流式文本的发送不做透明重试/回退（一个可见气泡不得由多个 provider/model attempt 拼接）。
 
 维护判断上要记住：
 
 - “首 token”在本项目语义里是“首个 chunk 到达”，不是“首个文本 token”
-- `request_timeout_seconds` 对上述 provider 表示“首 chunk / idle chunk 超时阈值”，不再是“整次请求必须在 N 秒内完成”
+- `request_timeout_seconds` 对上述 provider 表示“首 chunk / idle chunk 超时阈值”，不是“整次请求必须在 N 秒内完成”
+- 节点因限流长时间停在模型等待（`await_marker=model.chat.await_response`）可能是退避重试在正常推进，先看日志里的 `Retryable model-chain failure (round …)` 再判断是否卡死
 
 ## 6. 运行时里的状态与持久化
 

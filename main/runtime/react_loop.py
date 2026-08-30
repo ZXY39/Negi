@@ -614,24 +614,21 @@ class ReActToolLoop:
                             prompt_cache_key=turn_prompt_cache_key,
                             node_turn_lease=node_turn_lease,
                             model_concurrency_controller=getattr(self, '_model_concurrency_controller', None),
+                            model_refs_resolver=(model_refs_supplier if callable(model_refs_supplier) else None),
+                            single_request_timeout_seconds=self._resolved_model_response_timeout_seconds(
+                                model_refs=current_model_refs,
+                            ),
                         )
-                        timeout_seconds = self._resolved_model_response_timeout_seconds(
-                            model_refs=current_model_refs,
+                        # The chat backend now enforces the per-single-request
+                        # response limit itself and retries retryable chain
+                        # failures with backoff, so the loop must not wrap the
+                        # whole call in a total-budget timeout.
+                        response = await self._await_with_model_marker(
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                            marker='model.chat.await_response',
+                            awaitable=chat_coro,
                         )
-                        if timeout_seconds is not None:
-                            response = await self._await_with_model_marker(
-                                task_id=task.task_id,
-                                node_id=node.node_id,
-                                marker='model.chat.await_response',
-                                awaitable=asyncio.wait_for(chat_coro, timeout=timeout_seconds),
-                            )
-                        else:
-                            response = await self._await_with_model_marker(
-                                task_id=task.task_id,
-                                node_id=node.node_id,
-                                marker='model.chat.await_response',
-                                awaitable=chat_coro,
-                            )
                         consume_inflight_notice_callback = runtime_context.get('consume_inflight_notice_callback')
                         if callable(consume_inflight_notice_callback) and not inflight_notice_callback_triggered:
                             consume_inflight_notice_callback()
@@ -642,22 +639,13 @@ class ReActToolLoop:
                             marker='model.chat.response_postprocess',
                             started_at=now_iso(),
                         )
-                    except asyncio.TimeoutError:
-                        timeout_message = self._model_response_timeout_message(timeout_seconds=timeout_seconds)
-                        self._log_service.update_frame(
-                            task.task_id,
-                            node.node_id,
-                            lambda frame: {
-                                **frame,
-                                'last_error': timeout_message,
-                            },
-                            publish_snapshot=True,
-                        )
-                        raise RuntimeError(timeout_message)
                     except Exception as exc:
                         if not self._is_provider_chain_exhausted_error(exc):
                             raise
-                        if self._refresh_runtime_config_for_retry_invalidation():
+                        if (
+                            bool(getattr(exc, 'config_revision_changed', False))
+                            or self._refresh_runtime_config_for_retry_invalidation()
+                        ):
                             self._log_service.update_frame(
                                 task.task_id,
                                 node.node_id,
@@ -2946,14 +2934,6 @@ class ReActToolLoop:
             return None
         return normalized
 
-    def _normalized_model_response_timeout_seconds(self) -> float | None:
-        value = self._normalized_model_response_timeout_seconds_value(
-            getattr(self, '_model_response_timeout_seconds', _UNSET)
-        )
-        if value is _UNSET:
-            return _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS
-        return value
-
     def _resolved_model_response_timeout_seconds(self, *, model_refs: list[str] | None = None) -> float | None:
         override = self._normalized_model_response_timeout_seconds_value(
             getattr(self, '_model_response_timeout_seconds', _UNSET)
@@ -2973,13 +2953,6 @@ class ReActToolLoop:
         if normalized_recommended is None:
             return None
         return normalized_recommended
-
-    def _model_response_timeout_message(self, *, timeout_seconds: float | None | object = _UNSET) -> str:
-        if timeout_seconds is _UNSET:
-            timeout_seconds = self._resolved_model_response_timeout_seconds()
-        if timeout_seconds is None:
-            return 'model request timeout'
-        return f'model request timeout after {timeout_seconds:.3f}s'
 
     def _update_tool_live_state(
         self,

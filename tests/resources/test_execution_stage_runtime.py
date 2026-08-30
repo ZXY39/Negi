@@ -2734,21 +2734,84 @@ async def test_invalid_submit_final_result_fails_after_five_attempts(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_model_request_timeout_marks_task_failed(tmp_path: Path):
-    class _Backend:
+async def test_model_request_attempt_timeout_falls_back_within_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import main.runtime.chat_backend as chat_backend_module
+    from g3ku.providers.provider_factory import ProviderTarget
+
+    class _HangingProvider:
+        # Does not manage timeouts internally, so the backend applies the
+        # per-single-request attempt timeout around this call.
         async def chat(self, **kwargs):
             _ = kwargs
             await asyncio.Event().wait()
 
+    class _FinalResultProvider:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'done',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 4},
+            )
+
+    targets = {
+        'primary': ProviderTarget(
+            provider_ref='primary',
+            provider_id='openai',
+            model_id='primary-model',
+            provider=_HangingProvider(),
+            retry_on=['network', '429'],
+            retry_count=0,
+            api_key_count=1,
+            api_key_indexes=[0],
+        ),
+        'secondary': ProviderTarget(
+            provider_ref='secondary',
+            provider_id='openai',
+            model_id='secondary-model',
+            provider=_FinalResultProvider(),
+            retry_on=['network', '429'],
+            retry_count=0,
+            api_key_count=1,
+            api_key_indexes=[0],
+        ),
+    }
+    monkeypatch.setattr(
+        chat_backend_module,
+        'build_provider_from_model_key',
+        lambda config, ref, api_key_index=None: targets[str(ref)],
+    )
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    # Per-single-request response cap for one provider attempt; the hanging
+    # primary attempt hits it and the chain falls back to the secondary model
+    # instead of the task failing on a total-budget timeout.
+    backend._model_attempt_timeout_seconds = 0.05
+
     service = MainRuntimeService(
-        chat_backend=_Backend(),
+        chat_backend=backend,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
         governance_store_path=tmp_path / "governance.sqlite3",
+        execution_model_refs=['primary', 'secondary'],
         execution_mode="embedded",
     )
-    service._react_loop._model_response_timeout_seconds = 0.01
     try:
         record = await service.create_task("timeout model request", session_id="web:shared")
         await service.wait_for_task(record.task_id)
@@ -2756,9 +2819,8 @@ async def test_model_request_timeout_marks_task_failed(tmp_path: Path):
         root = service.store.get_node(record.root_node_id)
         assert task is not None
         assert root is not None
-        assert task.status == "failed"
-        assert root.status == "failed"
-        assert "model request timeout after" in str(task.failure_reason or "")
+        assert root.status == "success"
+        assert task.status == "success"
     finally:
         await service.close()
 

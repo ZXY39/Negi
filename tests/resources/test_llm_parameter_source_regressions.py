@@ -130,13 +130,13 @@ def test_template_marks_model_parameters_optional_and_removes_timeout() -> None:
     assert fields["reasoning_effort"].default is None
 
 
-def test_default_provider_attempt_timeout_seconds_is_sixty_seconds() -> None:
+def test_default_provider_attempt_timeout_seconds_is_ten_minutes() -> None:
     fallback_runtime = importlib.reload(fallback_module)
     chat_backend_runtime = importlib.reload(chat_backend_module)
     backend = chat_backend_runtime.ConfigChatBackend(config=SimpleNamespace())
 
-    assert fallback_runtime.DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS == 60.0
-    assert backend._model_attempt_timeout_seconds == 60.0
+    assert fallback_runtime.DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS == 600.0
+    assert backend._model_attempt_timeout_seconds == 600.0
 
 
 def test_normalize_draft_omits_optional_model_parameters_when_left_blank() -> None:
@@ -492,7 +492,7 @@ def test_sanitize_provider_messages_preserves_langchain_style_tool_call_args_for
 
 
 @pytest.mark.asyncio
-async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_chain_budget(monkeypatch) -> None:
+async def test_config_chat_backend_recommends_fixed_single_request_timeout(monkeypatch) -> None:
     chat_backend_runtime = importlib.reload(chat_backend_module)
 
     class _Provider:
@@ -531,7 +531,9 @@ async def test_config_chat_backend_recommends_dynamic_hard_timeout_from_model_ch
 
     backend = chat_backend_runtime.ConfigChatBackend(config=SimpleNamespace())
 
-    assert backend.recommended_model_response_timeout_seconds(model_refs=["primary", "secondary"]) == 8415.0
+    # Single-request response cap: independent of attempts/keys/retry budget.
+    assert backend.recommended_model_response_timeout_seconds(model_refs=["primary", "secondary"]) == 600.0
+    assert backend.recommended_model_response_timeout_seconds(model_refs=[]) == 600.0
 
 
 @pytest.mark.asyncio

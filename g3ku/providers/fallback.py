@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import random
 from typing import Any
 
 from loguru import logger
@@ -19,9 +20,17 @@ from g3ku.utils.retry_keywords import (
 )
 
 PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting the configured fallback chain."
-RETRYABLE_MODEL_CHAIN_MAX_ROUNDS = 10
-# Shared per-attempt provider timeout for CEO and task-runtime model chains.
-DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 60.0
+# Shared per-single-request provider response timeout for CEO and task-runtime
+# model chains: one provider request (single attempt) may take at most 10
+# minutes. This replaces the previous accumulated
+# "attempt timeout x attempts x chain rounds" total-budget semantics; retryable
+# chain retries are now unbounded in count and paced by backoff instead.
+DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 600.0
+# Retryable model-chain failures retry indefinitely with capped exponential
+# backoff plus jitter so concurrent nodes do not stampede the same rate window.
+RETRY_BACKOFF_BASE_SECONDS = 1.0
+RETRY_BACKOFF_CAP_SECONDS = 60.0
+RETRY_BACKOFF_JITTER_RATIO = 0.25
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",
@@ -52,12 +61,17 @@ class ModelProviderExhaustedError(RuntimeError):
         raw_message: str = "",
         retryable: bool = False,
         message: str = "",
+        config_revision_changed: bool = False,
     ) -> None:
         # Surface the original provider error untouched; fall back to the
         # public message only when no raw error text is available.
         super().__init__(str(message or "").strip() or PUBLIC_PROVIDER_FAILURE_MESSAGE)
         self.raw_message = str(raw_message or "")
         self.retryable = bool(retryable)
+        # Set when the chain retry loop aborted because the runtime config
+        # revision changed mid-retry, so callers should rebuild/restart with
+        # the refreshed model chain instead of counting a normal retry attempt.
+        self.config_revision_changed = bool(config_revision_changed)
 
 
 class ModelAttemptTimeoutError(TimeoutError):
@@ -249,6 +263,45 @@ def normalized_retry_count(value: int | None) -> int:
         return 0
 
 
+def model_retry_backoff_seconds(attempt_number: int) -> float:
+    """Capped exponential backoff with jitter for retryable model-chain rounds.
+
+    Retryable chain failures retry indefinitely; pacing comes from this delay.
+    Jitter keeps concurrently retrying nodes from waking up in lockstep and
+    hammering the same still-exhausted rate window.
+    """
+    exponent = max(0, int(attempt_number or 1) - 1)
+    delay = min(RETRY_BACKOFF_CAP_SECONDS, RETRY_BACKOFF_BASE_SECONDS * (2.0 ** exponent))
+    jitter = delay * RETRY_BACKOFF_JITTER_RATIO
+    return max(0.1, delay + random.uniform(-jitter, jitter))
+
+
+def current_runtime_config_revision() -> int:
+    """Best-effort snapshot of the live runtime config revision.
+
+    Used by model-chain retry loops to detect route/binding changes made while
+    they retry, so they can abort and let callers rebuild with the fresh chain.
+    Returns 0 when the revision is unavailable.
+    """
+    try:
+        from g3ku.config.live_runtime import peek_runtime_revision
+
+        return int(peek_runtime_revision() or 0)
+    except Exception:
+        return 0
+
+
+def retryable_chain_config_changed_error(reason: str = "") -> ModelProviderExhaustedError:
+    """Retryable exhaustion raised when the runtime config revision changed mid-retry."""
+    message = str(reason or "").strip() or "runtime config revision changed during model chain retry"
+    return ModelProviderExhaustedError(
+        raw_message=message,
+        message=message,
+        retryable=True,
+        config_revision_changed=True,
+    )
+
+
 def _build_provider_target_compat(build_provider_from_model_key, config: Config, model_key: str, *, api_key_index: int | None = None):
     if api_key_index is None:
         return build_provider_from_model_key(config, model_key)
@@ -306,9 +359,14 @@ class FallbackProvider(LLMProvider):
 
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
-        for chain_round_index in range(RETRYABLE_MODEL_CHAIN_MAX_ROUNDS):
+        start_revision = current_runtime_config_revision()
+        chain_round_index = 0
+        retryable_backoff_count = 0
+        while True:
+            chain_round_index += 1
             round_last_error: Exception | None = None
             retry_full_chain = False
+            retry_full_chain_reason = ""
             for model_key in chain:
                 try:
                     base_target = build_provider_from_model_key(self._config, model_key)
@@ -323,14 +381,9 @@ class FallbackProvider(LLMProvider):
                             exc,
                             retry_on=list(profile.retry_on) if profile is not None else None,
                         )
-                        if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
-                            logger.warning(
-                                "Retryable model-chain failure exhausted round {}/{}; retrying full chain: {}",
-                                chain_round_index + 1,
-                                RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
-                                exhausted.raw_message or exhausted,
-                            )
+                        if should_retry_model_chain_error(exhausted):
                             retry_full_chain = True
+                            retry_full_chain_reason = exhausted.raw_message or str(exhausted)
                             break
                         raise exhausted from exc
                     raise
@@ -388,7 +441,7 @@ class FallbackProvider(LLMProvider):
                             "tool_choice": tool_choice,
                             "parallel_tool_calls": parallel_tool_calls,
                             "prompt_cache_key": prompt_cache_key,
-                            "request_timeout_seconds": None if bool(getattr(target.provider, "manages_request_timeout_internally", False)) else request_timeout_seconds,
+                            "request_timeout_seconds": request_timeout_seconds,
                         }
                         if effective_max_tokens is not None:
                             provider_kwargs["max_tokens"] = effective_max_tokens
@@ -445,14 +498,9 @@ class FallbackProvider(LLMProvider):
                             break
                         if should_fallback_model_error(exc):
                             exhausted = exhausted_model_chain_error(exc, retry_on=target.retry_on)
-                            if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
-                                logger.warning(
-                                    "Retryable model-chain failure exhausted round {}/{}; retrying full chain: {}",
-                                    chain_round_index + 1,
-                                    RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
-                                    exhausted.raw_message or exhausted,
-                                )
+                            if should_retry_model_chain_error(exhausted):
                                 retry_full_chain = True
+                                retry_full_chain_reason = exhausted.raw_message or str(exhausted)
                                 break
                             raise exhausted from exc
                         raise
@@ -503,14 +551,9 @@ class FallbackProvider(LLMProvider):
                         break
                     if fallback_response:
                         last_response = sanitize_terminal_model_error(response)
-                        if retryable_response and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
-                            logger.warning(
-                                "Retryable model-chain response exhausted round {}/{}; retrying full chain: {}",
-                                chain_round_index + 1,
-                                RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
-                                response.error_text or response.content or response.finish_reason,
-                            )
+                        if retryable_response:
                             retry_full_chain = True
+                            retry_full_chain_reason = response.error_text or response.content or response.finish_reason
                             break
                         return last_response
                     return response
@@ -520,15 +563,21 @@ class FallbackProvider(LLMProvider):
                 if move_to_next_model:
                     continue
 
+            if not retry_full_chain and round_last_error is not None and should_retry_model_chain_error(round_last_error):
+                retry_full_chain = True
+                retry_full_chain_reason = getattr(round_last_error, "raw_message", "") or str(round_last_error)
             if retry_full_chain:
-                continue
-            if round_last_error is not None and should_retry_model_chain_error(round_last_error) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                if current_runtime_config_revision() != start_revision:
+                    raise retryable_chain_config_changed_error() from round_last_error
+                retryable_backoff_count += 1
+                delay_seconds = model_retry_backoff_seconds(retryable_backoff_count)
                 logger.warning(
-                    "Retryable model-chain round {}/{} ended without success; retrying full chain: {}",
-                    chain_round_index + 1,
-                    RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
-                    getattr(round_last_error, "raw_message", str(round_last_error)) or round_last_error,
+                    "Retryable model-chain failure (round {}); retrying full chain in {:.1f}s: {}",
+                    chain_round_index,
+                    delay_seconds,
+                    retry_full_chain_reason,
                 )
+                await asyncio.sleep(delay_seconds)
                 continue
             break
 

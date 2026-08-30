@@ -116,7 +116,7 @@
 - 配置刷新不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型；切换只作用于边界处重建的下一个请求。
 - CEO/frontdoor 在每次 `call_model` 迭代边界（含 provider-failure retry / empty-response retry 边界）对比 runtime revision：revision 变化时重新解析当前角色模型链并写回轮状态，下一次 provider 请求、上下文窗口估算与绑定模型链的能力判定（如 `content_open` 的多模态闸门）都跟随新链。轮状态用 `model_refs_revision` 记录解析时的 revision，作为下一次边界对比的基线。
 - 因此 `model_config set_scope_chain` 之后，同一轮的下一次模型调用即用新链；在同一步把切链与被门控的工具调用作为并行工具调用发出时，闸门仍按切换前的链判定。
-- Main runtime 节点在 provider retry 边界检查 runtime revision；memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
+- Main runtime 节点的模型链在任务运行时 chat 后端的每个链轮边界活解析（`model_refs_resolver` 读取当前角色链），路由/绑定变更在下一个链轮即生效，不必等下一个回合；可重试失败退避等待结束后同样先重新解析链再继续重试。若跨链轮边界时 runtime revision 已变化，重试循环抛出带 `config_revision_changed` 标记的可重试耗尽错误，react loop 以 `provider_retry_invalidation` 重建回合（重取链、重组请求）而不是继续用旧链消耗重试。memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
 
 维护上把这理解成“迭代/重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧模型还在用”，重点检查：
 

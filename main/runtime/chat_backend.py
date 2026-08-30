@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -15,13 +16,15 @@ from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
-    RETRYABLE_MODEL_CHAIN_MAX_ROUNDS,
+    current_runtime_config_revision,
     exhausted_model_chain_error,
+    model_retry_backoff_seconds,
     normalize_request_timeout_seconds,
     normalized_retry_count,
     response_requires_api_key_rotation,
     response_requires_retry,
     response_requires_fallback,
+    retryable_chain_config_changed_error,
     sanitize_terminal_model_error,
     should_rotate_api_key_error,
     should_fallback_model_error,
@@ -36,7 +39,6 @@ from g3ku.utils.api_keys import iter_api_key_retry_slots
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.node_turn_controller import NodeTurnLease
-_MODEL_CHAIN_HARD_TIMEOUT_SAFETY_SECONDS = 15.0
 _MISSING = object()
 
 
@@ -56,6 +58,8 @@ class ChatBackend(Protocol):
         node_turn_lease: NodeTurnLease | None = None,
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
         on_text_delta: Any = None,
+        model_refs_resolver: Any = None,
+        single_request_timeout_seconds: float | None = None,
     ) -> LLMResponse: ...
 
 
@@ -634,45 +638,16 @@ class ConfigChatBackend:
     def _normalized_model_attempt_timeout_seconds(self) -> float | None:
         return normalize_request_timeout_seconds(getattr(self, "_model_attempt_timeout_seconds", None))
 
-    def _estimated_attempt_count_for_model_ref(self, model_ref: str) -> int:
-        normalized_ref = str(model_ref or "").strip()
-        if not normalized_ref:
-            return 1
-        try:
-            target = build_provider_from_model_key(self._config, normalized_ref)
-        except Exception:
-            return 1
-        configured_api_key_indexes = getattr(target, "api_key_indexes", None)
-        if configured_api_key_indexes is None:
-            enabled_key_count = max(1, int(getattr(target, "api_key_count", 0) or 0))
-        else:
-            enabled_key_count = len([int(item) for item in configured_api_key_indexes])
-            if enabled_key_count <= 0:
-                enabled_key_count = 1
-        retry_count = normalized_retry_count(getattr(target, "retry_count", 0))
-        return max(1, enabled_key_count) * max(1, retry_count + 1)
-
     def recommended_model_response_timeout_seconds(self, *, model_refs: list[str] | None = None) -> float | None:
-        attempt_timeout_seconds = self._normalized_model_attempt_timeout_seconds()
-        refs = [
-            str(item or "").strip()
-            for item in list(model_refs or [])
-            if str(item or "").strip()
-        ]
-        if attempt_timeout_seconds is None or not refs:
-            return None
-        attempts_per_chain_round = sum(
-            self._estimated_attempt_count_for_model_ref(ref)
-            for ref in refs
-        )
-        if attempts_per_chain_round <= 0:
-            return None
-        total_attempt_budget_seconds = (
-            float(attempt_timeout_seconds)
-            * float(attempts_per_chain_round)
-            * float(RETRYABLE_MODEL_CHAIN_MAX_ROUNDS)
-        )
-        return float(total_attempt_budget_seconds + _MODEL_CHAIN_HARD_TIMEOUT_SAFETY_SECONDS)
+        """Response-time limit for a single (one-round) provider request.
+
+        No longer accumulated as "attempt timeout x attempts x chain rounds":
+        retryable chain retries are unbounded and paced by backoff, so the only
+        hard cap left is how long one provider request may take (10 minutes by
+        default).
+        """
+        _ = model_refs
+        return self._normalized_model_attempt_timeout_seconds()
 
     async def chat(
         self,
@@ -689,18 +664,49 @@ class ConfigChatBackend:
         node_turn_lease: NodeTurnLease | None = None,
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
         on_text_delta: Any = None,
+        model_refs_resolver: Any = None,
+        single_request_timeout_seconds: float | None = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
             raise ValueError('model_refs must not be empty')
+        request_attempt_timeout_seconds = normalize_request_timeout_seconds(
+            single_request_timeout_seconds
+            if single_request_timeout_seconds is not None
+            else self._model_attempt_timeout_seconds
+        )
+
+        def _resolved_model_refs() -> list[str]:
+            if not callable(model_refs_resolver):
+                return []
+            try:
+                candidate = model_refs_resolver()
+            except Exception:
+                return []
+            return [str(item or '').strip() for item in list(candidate or []) if str(item or '').strip()]
+
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
         attempts: list[LLMModelAttempt] = []
         held_turn_lease = node_turn_lease
+        start_revision = current_runtime_config_revision()
+        chain_round_index = 0
+        retryable_backoff_count = 0
         try:
-            for chain_round_index in range(RETRYABLE_MODEL_CHAIN_MAX_ROUNDS):
+            while True:
+                chain_round_index += 1
+                fresh_refs = _resolved_model_refs()
+                if fresh_refs and fresh_refs != refs:
+                    logger.info(
+                        "Model chain refreshed at chain-round boundary (round {}): {} -> {}",
+                        chain_round_index,
+                        ", ".join(refs),
+                        ", ".join(fresh_refs),
+                    )
+                    refs = fresh_refs
                 round_last_error: Exception | None = None
                 retry_full_chain = False
+                retry_full_chain_reason = ""
                 for index, ref in enumerate(refs):
                     try:
                         base_target = build_provider_from_model_key(self._config, ref)
@@ -720,8 +726,9 @@ class ConfigChatBackend:
                                 exc,
                                 retry_on=list(profile.retry_on) if profile is not None else None,
                             )
-                            if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                            if should_retry_model_chain_error(exhausted):
                                 retry_full_chain = True
+                                retry_full_chain_reason = exhausted.raw_message or str(exhausted)
                                 break
                             raise exhausted from exc
                         raise
@@ -768,7 +775,7 @@ class ConfigChatBackend:
                                 ref,
                                 api_key_index=selected_api_key_index,
                             )
-                            attempt_timeout_seconds = self._normalized_model_attempt_timeout_seconds()
+                            attempt_timeout_seconds = request_attempt_timeout_seconds
                             if use_held_turn_permit and held_turn_lease is not None:
                                 permit_lease = held_turn_lease.initial_model_permit
                                 held_turn_lease.initial_model_permit = None
@@ -793,7 +800,7 @@ class ConfigChatBackend:
                                 'messages': request_messages,
                                 'tools': request_tools,
                                 'model': target.model_id,
-                                'request_timeout_seconds': None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds,
+                                'request_timeout_seconds': attempt_timeout_seconds,
                             }
                             if on_text_delta is not None and bool(getattr(target.provider, 'supports_streaming', False)):
                                 provider_kwargs['on_text_delta'] = _provider_text_delta_callback
@@ -828,8 +835,9 @@ class ConfigChatBackend:
                                 break
                             if should_fallback_model_error(exc):
                                 exhausted = exhausted_model_chain_error(exc, retry_on=target.retry_on)
-                                if should_retry_model_chain_error(exhausted) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                                if should_retry_model_chain_error(exhausted):
                                     retry_full_chain = True
+                                    retry_full_chain_reason = exhausted.raw_message or str(exhausted)
                                     break
                                 raise exhausted from exc
                             raise
@@ -877,8 +885,9 @@ class ConfigChatBackend:
                             break
                         if fallback_response:
                             last_response = sanitize_terminal_model_error(response)
-                            if retryable_response and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                            if retryable_response:
                                 retry_full_chain = True
+                                retry_full_chain_reason = response.error_text or response.content or response.finish_reason
                                 break
                             return last_response
                         return response
@@ -886,9 +895,21 @@ class ConfigChatBackend:
                         break
                     if move_to_next_model:
                         continue
+                if not retry_full_chain and round_last_error is not None and should_retry_model_chain_error(round_last_error):
+                    retry_full_chain = True
+                    retry_full_chain_reason = getattr(round_last_error, "raw_message", "") or str(round_last_error)
                 if retry_full_chain:
-                    continue
-                if round_last_error is not None and should_retry_model_chain_error(round_last_error) and chain_round_index < RETRYABLE_MODEL_CHAIN_MAX_ROUNDS - 1:
+                    if current_runtime_config_revision() != start_revision:
+                        raise retryable_chain_config_changed_error() from round_last_error
+                    retryable_backoff_count += 1
+                    delay_seconds = model_retry_backoff_seconds(retryable_backoff_count)
+                    logger.warning(
+                        "Retryable model-chain failure (round {}); retrying full chain in {:.1f}s: {}",
+                        chain_round_index,
+                        delay_seconds,
+                        retry_full_chain_reason,
+                    )
+                    await asyncio.sleep(delay_seconds)
                     continue
                 break
             if last_error is not None:

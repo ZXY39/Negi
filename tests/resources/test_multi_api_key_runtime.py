@@ -271,7 +271,7 @@ async def test_config_chat_backend_retries_full_model_chain_on_retryable_exhaust
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "RETRYABLE_MODEL_CHAIN_MAX_ROUNDS", 2)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -305,7 +305,7 @@ async def test_fallback_provider_retries_full_model_chain_on_retryable_exhaustio
             api_key_count=1,
         )
 
-    monkeypatch.setattr(fallback_module, "RETRYABLE_MODEL_CHAIN_MAX_ROUNDS", 2)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
 
     provider = fallback_module.FallbackProvider(
@@ -320,11 +320,13 @@ async def test_fallback_provider_retries_full_model_chain_on_retryable_exhaustio
 
 
 @pytest.mark.asyncio
-async def test_config_chat_backend_fails_after_retryable_chain_round_limit(monkeypatch) -> None:
+async def test_config_chat_backend_retries_retryable_exhaustion_without_round_limit(monkeypatch) -> None:
     calls: list[str] = []
     providers = {
         "primary": _AlwaysRetryableChainProvider("primary", calls),
-        "secondary": _AlwaysRetryableChainProvider("secondary", calls),
+        # Succeeds on its 12th call: round 12 is beyond the historical
+        # 10-round cap, proving retryable retries are now unbounded.
+        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=12),
     }
 
     def _builder(config, model_key, *, api_key_index=None):
@@ -339,22 +341,173 @@ async def test_config_chat_backend_fails_after_retryable_chain_round_limit(monke
             api_key_count=1,
         )
 
-    monkeypatch.setattr(chat_backend_module, "RETRYABLE_MODEL_CHAIN_MAX_ROUNDS", 2)
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary", "secondary"],
+    )
+
+    assert response.content == "ok"
+    assert calls.count("primary") == 12
+    assert calls.count("secondary") == 12
+    assert calls[-1] == "secondary"
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_aborts_retry_loop_when_runtime_config_revision_changes(monkeypatch) -> None:
+    calls: list[str] = []
+    revisions = iter([5, 6])
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=_AlwaysRetryableChainProvider(str(model_key), calls),
+            retry_on=["network", "429", "502"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", lambda: next(revisions, 6))
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
 
-    with pytest.raises(
-        RuntimeError,
-        match=r"HTTP 502: upstream request failed",
-    ):
+    with pytest.raises(fallback_module.ModelProviderExhaustedError) as exc_info:
         await backend.chat(
             messages=[{"role": "user", "content": "demo"}],
             tools=None,
-            model_refs=["primary", "secondary"],
+            model_refs=["primary"],
         )
 
-    assert calls == ["primary", "secondary", "primary", "secondary"]
+    assert exc_info.value.retryable is True
+    assert exc_info.value.config_revision_changed is True
+    assert calls == ["primary"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_aborts_retry_loop_when_runtime_config_revision_changes(monkeypatch) -> None:
+    calls: list[str] = []
+    revisions = iter([5, 6])
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=_AlwaysRetryableChainProvider(str(model_key), calls),
+            retry_on=["network", "429", "502"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(fallback_module, "current_runtime_config_revision", lambda: next(revisions, 6))
+    monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
+
+    provider = fallback_module.FallbackProvider(
+        config=SimpleNamespace(),
+        model_chain=["primary"],
+        default_model_ref="primary",
+    )
+
+    with pytest.raises(fallback_module.ModelProviderExhaustedError) as exc_info:
+        await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
+
+    assert exc_info.value.retryable is True
+    assert exc_info.value.config_revision_changed is True
+    assert calls == ["primary"]
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_retry_backoff_is_cancellable(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=_AlwaysRetryableChainProvider(str(model_key), calls),
+            retry_on=["network", "429", "502"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    # Long backoff: the cancel must land while the retry loop sleeps.
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 30.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    task = asyncio.create_task(
+        backend.chat(
+            messages=[{"role": "user", "content": "demo"}],
+            tools=None,
+            model_refs=["primary"],
+        )
+    )
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while not calls and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert calls == ["primary"]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls == ["primary"]
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_refreshes_model_chain_between_retry_rounds(monkeypatch) -> None:
+    calls: list[str] = []
+    providers = {
+        "primary": _AlwaysRetryableChainProvider("primary", calls),
+        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=1),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429", "502"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    resolver_calls: list[int] = []
+
+    def _resolver():
+        resolver_calls.append(1)
+        # Round 1 keeps the original single-model chain; from round 2 onward
+        # the freshly added fallback model becomes visible.
+        return ["primary"] if len(resolver_calls) <= 1 else ["primary", "secondary"]
+
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary"],
+        model_refs_resolver=_resolver,
+    )
+
+    assert response.content == "ok"
+    assert calls == ["primary", "primary", "secondary"]
 
 
 @pytest.mark.asyncio
