@@ -30,7 +30,7 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
   - a structured cron event block
 - Those internal prompt messages must be persisted with `prompt_visible=true`, `ui_visible=false`, and an `internal_prompt_kind` that distinguishes heartbeat vs cron rule/event records.
 - Because the request is append-only against the previous authoritative scaffold, heartbeat/cron share the same prompt-cache family, token-preflight, token-compression, and continuity rules as ordinary CEO/frontdoor turns.
-- Silent `HEARTBEAT_OK` remains the only live-only exception. If an internal turn produces a real assistant reply, that reply is durable transcript history and should remain visible to later prompt assembly.
+- Silent `HEARTBEAT_OK` remains the only live-only exception. If an internal turn produces a real assistant reply, that reply is durable transcript history and stays visible to later prompt assembly: finalize folds the reply into the request-body baseline whenever it is non-empty and not `HEARTBEAT_OK`. The fold keys on the output content, never on whether the turn is heartbeat or cron. See `context-and-cache-troubleshooting.md`「finalize 没把 direct reply 补回 baseline」for the baseline-forensics invariant.
 
 ## Persistence And UI Boundary
 

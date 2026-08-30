@@ -104,7 +104,7 @@ Memory guard 维护要点：
 ### 3.4 finalize 没把 direct reply 补回 baseline
 
 - 坑：finalize payload 没重复带 `frontdoor_actual_request_path/history`，同步逻辑误判“没有 actual-request 证据”，final assistant reply 没进下一轮 baseline。
-- 不变量：当前 turn 已有真实 provider request 落盘后，`finalize` 阶段产出的可见最终回复必须补回 session-owned baseline；该规则不限于 `direct_reply`，普通工具（如 `message`）之后产出的用户可见 `final_output` 同样要补回。“同 turn 已有 actual-request 证据”与“fresh turn 没有 actual-request 证据”是两种不同状态，不能用同一条覆盖规则处理。
+- 不变量：当前 turn 已有真实 provider request 落盘后，`finalize` 阶段产出的可见最终回复必须补回 session-owned baseline；该规则不限于 `direct_reply`，普通工具（如 `message`）之后产出的用户可见 `final_output` 同样要补回。该规则同样覆盖 heartbeat/cron 内部回合的可见回复：补回与否按回复内容判定（非空且非 `HEARTBEAT_OK`），不看回合类型，仅静默 ACK（空输出或 `HEARTBEAT_OK`）豁免。“同 turn 已有 actual-request 证据”与“fresh turn 没有 actual-request 证据”是两种不同状态，不能用同一条覆盖规则处理。
 - 症状：transcript 里能看到上一轮最终回答，但下一轮第一跳 request body 里完全没有它。
 
 ### 3.5 普通 fresh-turn 第一跳没有沿用上一轮 actual request scaffold

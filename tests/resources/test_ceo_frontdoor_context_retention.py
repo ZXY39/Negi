@@ -563,6 +563,98 @@ async def test_finalize_turn_appends_visible_output_for_self_execute_route() -> 
 
 
 @pytest.mark.asyncio
+async def test_finalize_turn_appends_visible_heartbeat_reply_to_baseline() -> None:
+    # 回归：心跳 task_terminal 等内部回合产生的真实用户可见回复，必须像普通回合一样
+    # 进入 frontdoor_request_body_messages，否则下一轮上下文中模型会"失忆"。
+    runner = CeoFrontDoorRunner(loop=_loop_with_session("web:shared"))
+    visible_reply = "8/30 日报已收尾完成，落盘到 artifact:artifact:87386a520c68 可复查"
+    state = {
+        "query_text": "continue",
+        "route_kind": "direct_reply",
+        "final_output": visible_reply,
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "This is a background heartbeat. Do not explain internal mechanics."},
+        ],
+        "frontdoor_request_body_messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "older user"},
+            {"role": "assistant", "content": "older answer"},
+        ],
+        "frontdoor_history_shrink_reason": "stage_compaction",
+        "frontdoor_stage_state": {},
+        "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "heartbeat_internal": True,
+    }
+
+    finalized = await runner._graph_finalize_turn(state)
+
+    assert finalized["frontdoor_request_body_messages"] == [
+        *state["frontdoor_request_body_messages"],
+        {"role": "assistant", "content": visible_reply},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_finalize_turn_does_not_append_silent_heartbeat_ack_to_baseline() -> None:
+    # 静默 ACK（HEARTBEAT_OK）是 live-only 例外，不得污染跨回合基线。
+    runner = CeoFrontDoorRunner(loop=_loop_with_session("web:shared"))
+    state = {
+        "query_text": "continue",
+        "route_kind": "direct_reply",
+        "final_output": "HEARTBEAT_OK",
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "This is a background heartbeat. Do not explain internal mechanics."},
+        ],
+        "frontdoor_request_body_messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "older user"},
+            {"role": "assistant", "content": "older answer"},
+        ],
+        "frontdoor_history_shrink_reason": "",
+        "frontdoor_stage_state": {},
+        "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "heartbeat_internal": True,
+    }
+
+    finalized = await runner._graph_finalize_turn(state)
+
+    assert finalized["frontdoor_request_body_messages"] == [
+        *state["frontdoor_request_body_messages"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_finalize_turn_does_not_append_empty_heartbeat_output_to_baseline() -> None:
+    # 内部回合空输出（保持静默）不追加空 assistant 记录。
+    runner = CeoFrontDoorRunner(loop=_loop_with_session("web:shared"))
+    state = {
+        "query_text": "continue",
+        "route_kind": "direct_reply",
+        "final_output": "",
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+        ],
+        "frontdoor_request_body_messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "older user"},
+            {"role": "assistant", "content": "older answer"},
+        ],
+        "frontdoor_history_shrink_reason": "",
+        "frontdoor_stage_state": {},
+        "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "heartbeat_internal": True,
+    }
+
+    finalized = await runner._graph_finalize_turn(state)
+
+    assert finalized["frontdoor_request_body_messages"] == [
+        *state["frontdoor_request_body_messages"],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prepare_turn_quarantines_unexpected_context_shrink_without_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

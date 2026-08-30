@@ -6526,9 +6526,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         frontdoor_history_shrink_reason = str(state.get("frontdoor_history_shrink_reason") or "").strip()
         finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
-        should_append_visible_output = bool(output) and not bool(state.get("heartbeat_internal")) and not bool(
-            state.get("cron_internal")
-        )
+        is_internal_turn = bool(state.get("heartbeat_internal")) or bool(state.get("cron_internal"))
+        # 内部回合的真实可见回复必须像普通回合一样进基线，才能被下一轮上下文看见；
+        # 只排除静默 ACK（空输出或 HEARTBEAT_OK），与 session_agent 转录持久化的判据一致。
+        is_silent_internal_ack = is_internal_turn and str(output or "").strip() in {"", "HEARTBEAT_OK"}
+        should_append_visible_output = bool(output) and not is_silent_internal_ack
         if should_append_visible_output:
             messages.append({"role": "assistant", "content": output})
             authoritative_request_body_messages = [
