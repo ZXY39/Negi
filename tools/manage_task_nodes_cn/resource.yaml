@@ -1,0 +1,57 @@
+schema_version: 1
+kind: tool
+display_name: "处理暂停节点"
+name: manage_task_nodes
+description: Manage paused task nodes with resume, keep_paused, fail, or pause actions.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: Resource-local task runtime tool for reviewing and controlling paused nodes.
+  compare_rule: Treat manifest, main/, parameter contract, or toolskills changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    task_id:
+      type: string
+      description: Target task id.
+    node_ids:
+      type: array
+      minItems: 1
+      items:
+        type: string
+      description: One or more node ids to control.
+    action:
+      type: string
+      enum: [resume, keep_paused, fail, pause]
+      description: resume continues paused nodes; keep_paused records a required reason; fail terminates paused nodes; pause requests an agent pause for running nodes.
+    remark:
+      type: string
+      description: Required for keep_paused; optional annotation for other actions.
+  required: [task_id, node_ids, action]
+governance:
+  family: task_runtime
+  display_name: Task Runtime
+  description: Control paused task nodes after an error or operator review.
+  actions:
+    - id: manage_task_nodes
+      label: Manage Task Nodes
+      risk_level: medium
+      destructive: true
+      allowed_roles:
+        - ceo
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: true

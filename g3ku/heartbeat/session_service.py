@@ -107,6 +107,7 @@ class WebSessionHeartbeatService:
         self._start_lock = asyncio.Lock()
         self._prompt_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_terminal_rejection_reasons: dict[str, str] = {}
+        self._node_error_scanner = None
 
     async def start(self) -> None:
         if self._started:
@@ -118,9 +119,20 @@ class WebSessionHeartbeatService:
             for session_id in self._events.session_ids():
                 delay_s = self._events.next_delay(session_id)
                 self._wake.request(session_id, delay_s=0.25 if delay_s is None else max(0.0, delay_s))
+            from g3ku.heartbeat.node_error_scanner import NodeErrorScanner
+            self._node_error_scanner = NodeErrorScanner(
+                main_task_service=self._main_task_service,
+                heartbeat=self,
+                interval_seconds=60.0,
+            )
+            await self._node_error_scanner.start()
 
     async def stop(self) -> None:
         self._started = False
+        scanner = self._node_error_scanner
+        self._node_error_scanner = None
+        if scanner is not None:
+            await scanner.stop()
         await self._wake.close()
         prompt_tasks = list(self._prompt_tasks.values())
         self._prompt_tasks.clear()
@@ -206,6 +218,45 @@ class WebSessionHeartbeatService:
         if self._started:
             self._wake.request(session_id, delay_s=0.25)
         return True
+
+    def enqueue_task_node_error_payload(self, session_id: str, items: list[dict[str, Any]] | dict[str, Any] | None) -> bool:
+        key = str(session_id or '').strip()
+        if not key:
+            return False
+        raw_items = items.get('items') if isinstance(items, dict) else items
+        if isinstance(raw_items, dict):
+            raw_items = [raw_items]
+        accepted = False
+        for raw_item in list(raw_items or []):
+            if not isinstance(raw_item, dict):
+                continue
+            task_id = str(raw_item.get('task_id') or '').strip()
+            node_id = str(raw_item.get('node_id') or '').strip()
+            pause_row_id = int(raw_item.get('pause_row_id') or raw_item.get('id') or 0)
+            if not task_id or not node_id:
+                continue
+            dedupe_key = str(raw_item.get('dedupe_key') or f'node-error:{task_id}:{node_id}:{pause_row_id}').strip()
+            payload = {
+                **dict(raw_item),
+                'task_id': task_id,
+                'node_id': node_id,
+                'pause_row_id': pause_row_id,
+                'event_reason': 'task_node_error',
+                'dedupe_key': dedupe_key,
+            }
+            event = self._events.enqueue(
+                session_id=key,
+                source='main_runtime',
+                reason='task_node_error',
+                dedupe_key=dedupe_key,
+                payload=payload,
+                delay_seconds=0.0,
+            )
+            if event is not None:
+                accepted = True
+        if accepted and self._started:
+            self._wake.request(key, delay_s=0.25)
+        return accepted
 
     def enqueue_tool_background(self, *, session_id: str, payload: dict[str, Any] | None) -> None:
         key = str(session_id or "").strip()

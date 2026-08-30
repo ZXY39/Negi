@@ -117,7 +117,7 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
             "  Reason: worker_unavailable",
             "  Do not treat this as a task logic stall yet. Wait for worker recovery or restart.",
         ]
-    return [
+    lines = [
         f"- Task {title} ({task_id}) may be stalled",
         f"  Reason: {stall_reason}",
         f"  Silent for: {stalled_minutes} min",
@@ -126,9 +126,41 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
         f"  Brief: {brief_text}",
         f"  Latest node: {latest_node_summary}",
         f"  Runtime: {runtime_excerpt}",
+    ]
+    paused_nodes = [item for item in list(event.get("paused_nodes") or []) if isinstance(item, dict)]
+    if paused_nodes:
+        rendered = [
+            f"{_non_empty_text(item.get('node_id'))} ({_non_empty_text(item.get('pause_reason')) or 'manual'})"
+            for item in paused_nodes
+            if _non_empty_text(item.get('node_id'))
+        ]
+        if rendered:
+            lines.append(f"  Paused nodes: {', '.join(rendered)}")
+    lines.extend([
         "  Suggested first step: task_progress(task_id)",
         "  If needed: stop_tool_execution(task_id)",
+    ])
+    return lines
+
+
+def _task_node_error_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
+    task_id = _non_empty_text(event.get('task_id'))
+    node_id = _non_empty_text(event.get('node_id'))
+    node_title = _non_empty_text(event.get('node_title') or node_id) or 'node'
+    pause_reason = _non_empty_text(event.get('pause_reason')) or 'error'
+    error_text = _non_empty_text(event.get('error_text') or event.get('remark')) or 'Unknown node error.'
+    task_title = _non_empty_text(event.get('task_title') or task_id) or 'task'
+    _append_retrieval_parts(retrieval_parts, 'task_node_error', task_title, task_id, node_title, node_id, pause_reason, error_text[:output_inline_limit])
+    lines = [
+        f'- Task {task_title} ({task_id}) has a node paused after an error',
+        f'  Node: {node_title} ({node_id})',
+        f'  Pause reason: {pause_reason}',
+        f'  Error: {error_text}',
+        '  Use manage_task_nodes to resume, keep_paused with a reason, fail, or pause related nodes as appropriate.',
     ]
+    if len(error_text) > output_inline_limit:
+        lines[3] = f'  Error excerpt: {error_text[:output_inline_limit].rstrip()}...'
+    return lines
 
 
 def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
@@ -206,6 +238,9 @@ def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: 
             continue
         if reason == "task_stall":
             lines.extend(_task_stall_lines(event, retrieval_parts))
+            continue
+        if reason == "task_node_error":
+            lines.extend(_task_node_error_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
             continue
         lines.extend(
             _task_terminal_lines(
