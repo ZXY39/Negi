@@ -542,7 +542,12 @@
                         <span class="task-detail-pill-label">活跃节点</span>
                         <span id="td-active-count" class="task-detail-pill-value">0</span>
                     </div>
-                    <div class="header-actions"></div>
+                    <div class="header-actions">
+                        <button id="task-error-log-btn" class="task-detail-pill task-detail-error-log-btn" type="button" title="查看错误日志">
+                            <i data-lucide="triangle-alert"></i>
+                            <span>错误日志</span>
+                        </button>
+                    </div>
                 </header>
 
                 <div class="project-dashboard">
@@ -562,6 +567,21 @@
                         </div>
                         <div class="tree-container" id="org-tree-container">
                             <div class="empty-state">正在加载任务树...</div>
+                        </div>
+                    </div>
+
+                    <div id="task-error-log-backdrop" class="detail-backdrop" aria-hidden="true"></div>
+                    <div id="task-error-log-drawer" class="feed-panel panel detail-drawer task-error-log-drawer" role="dialog"
+                        aria-modal="true" aria-labelledby="task-error-log-title" tabindex="-1">
+                        <div class="panel-header">
+                            <div>
+                                <h2 id="task-error-log-title">任务错误日志</h2>
+                                <div id="task-error-log-summary" class="subtitle">记录任务运行中的节点错误</div>
+                            </div>
+                            <button id="task-error-log-close" class="toolbar-btn ghost" type="button">关闭</button>
+                        </div>
+                        <div id="task-error-log-content" class="task-error-log-content">
+                            <div class="empty-state">暂无错误日志</div>
                         </div>
                     </div>
 

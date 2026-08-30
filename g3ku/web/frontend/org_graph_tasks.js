@@ -1026,6 +1026,8 @@ function resetTaskView() {
     S.taskNodeLatestContextRequests = {};
     if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
     S.taskNodeBusy = false;
+    S.taskErrorLogs = [];
+    S.taskErrorLogOpen = false;
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
     S.artifactContent = "";
@@ -1079,6 +1081,98 @@ function resetTaskView() {
 
 function setTaskDetailOpen(open) {
     setDrawerOpen(U.taskDetailBackdrop, U.taskDetailDrawer, open);
+}
+
+function setTaskErrorLogOpen(open) {
+    S.taskErrorLogOpen = !!open;
+    if (typeof setDrawerOpen === "function") {
+        setDrawerOpen(U.taskErrorLogBackdrop, U.taskErrorLogDrawer, S.taskErrorLogOpen);
+    } else {
+        U.taskErrorLogBackdrop?.classList.toggle("is-open", S.taskErrorLogOpen);
+        U.taskErrorLogDrawer?.classList.toggle("is-open", S.taskErrorLogOpen);
+    }
+}
+
+function renderTaskErrorLog() {
+    if (!U.taskErrorLogContent) return;
+    const items = Array.isArray(S.taskErrorLogs) ? S.taskErrorLogs : [];
+    if (U.taskErrorLogSummary) U.taskErrorLogSummary.textContent = items.length ? `共 ${items.length} 条错误记录` : "暂无错误日志";
+    if (!items.length) {
+        U.taskErrorLogContent.innerHTML = '<div class="empty-state">暂无错误日志</div>';
+        return;
+    }
+    U.taskErrorLogContent.innerHTML = items.map((item) => {
+        const nodeId = String(item?.node_id || "").trim();
+        const title = String(item?.node_title || nodeId || "未知节点").trim();
+        const timestamp = String(item?.created_at || "").trim();
+        const errorText = String(item?.error_text || "").trim();
+        return `<article class="task-error-log-item">
+            <div class="task-error-log-meta"><time>${esc(timestamp)}</time><span>${esc(title)}</span></div>
+            <button type="button" class="task-error-log-node-link" data-error-node-id="${esc(nodeId)}">${esc(nodeId)}</button>
+            <pre class="task-error-log-text">${esc(errorText)}</pre>
+        </article>`;
+    }).join("");
+    U.taskErrorLogContent.querySelectorAll("[data-error-node-id]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const nodeId = String(button.dataset.errorNodeId || "").trim();
+            setTaskErrorLogOpen(false);
+            void focusErrorLogNode(nodeId);
+        });
+    });
+}
+
+async function openTaskErrorLog() {
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!taskId) return;
+    if (U.taskErrorLogContent) U.taskErrorLogContent.innerHTML = '<div class="empty-state">正在加载错误日志...</div>';
+    setTaskErrorLogOpen(true);
+    try {
+        const payload = await ApiClient.getTaskErrorLog(taskId);
+        if (String(S.currentTaskId || "").trim() !== taskId) return;
+        S.taskErrorLogs = Array.isArray(payload?.items) ? payload.items : [];
+        renderTaskErrorLog();
+    } catch (error) {
+        if (U.taskErrorLogContent) U.taskErrorLogContent.innerHTML = `<div class="empty-state error">${esc(error?.message || "错误日志加载失败")}</div>`;
+    }
+}
+
+async function focusErrorLogNode(nodeId) {
+    const targetId = String(nodeId || "").trim();
+    if (!targetId) return;
+    const target = treeSnapshotNode(targetId) || S.taskNodeDetails?.[targetId] || null;
+    const path = [];
+    let current = target;
+    while (current) {
+        const currentId = String(current?.node_id || "").trim();
+        if (!currentId || path.includes(currentId)) break;
+        path.push(currentId);
+        const parentId = String(current?.parent_node_id || "").trim();
+        current = parentId ? (treeSnapshotNode(parentId) || S.taskNodeDetails?.[parentId] || null) : null;
+    }
+    for (const parentId of path.slice(1).reverse()) {
+        const parent = treeSnapshotNode(parentId);
+        const childId = path[path.indexOf(parentId) - 1];
+        const round = (Array.isArray(parent?.rounds) ? parent.rounds : []).find((item) => Array.isArray(item?.child_ids) && item.child_ids.includes(childId));
+        if (round?.round_id) S.treeSelectedRoundByNodeId[parentId] = round.round_id;
+        if (typeof ensureTaskTreeSubtree === "function") await ensureTaskTreeSubtree(parentId, { force: true }).catch(() => null);
+    }
+    renderTree();
+    window.requestAnimationFrame(() => {
+        const button = U.tree?.querySelector(`.execution-tree-node[data-id="${CSS.escape(targetId)}"]`);
+        if (!(button instanceof HTMLElement)) return;
+        const containerRect = U.tree.getBoundingClientRect();
+        const nodeRect = button.getBoundingClientRect();
+        S.treePan.offsetX += (containerRect.left + containerRect.width / 2) - (nodeRect.left + nodeRect.width / 2);
+        S.treePan.offsetY += (containerRect.top + containerRect.height / 2) - (nodeRect.top + nodeRect.height / 2);
+        S.treePan.baseOffsetX = S.treePan.offsetX;
+        S.treePan.baseOffsetY = S.treePan.offsetY;
+        const canvas = U.tree.querySelector(".execution-tree");
+        if (canvas) canvas.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
+        button.classList.remove("task-tree-node-locate");
+        void button.offsetWidth;
+        button.classList.add("task-tree-node-locate");
+        window.setTimeout(() => button.classList.remove("task-tree-node-locate"), 900);
+    });
 }
 
 function setTaskTokenStatsOpen(open) {

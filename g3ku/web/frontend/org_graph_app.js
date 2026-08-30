@@ -168,6 +168,8 @@ const S = {
     taskWorkerStatusPollId: null,
     taskPerformanceRefreshId: null,
     taskTokenStatsOpen: false,
+    taskErrorLogs: [],
+    taskErrorLogOpen: false,
     taskModelCallsPage: 1,
     taskModelCallsPageSize: TASK_MODEL_CALLS_PAGE_SIZE,
     taskArtifacts: [],
@@ -422,6 +424,12 @@ const U = {
     tdStatusPill: document.getElementById("td-status-pill"),
     tdStatus: document.getElementById("td-status"),
     tdActiveCount: document.getElementById("td-active-count"),
+    taskErrorLogButton: document.getElementById("task-error-log-btn"),
+    taskErrorLogBackdrop: document.getElementById("task-error-log-backdrop"),
+    taskErrorLogDrawer: document.getElementById("task-error-log-drawer"),
+    taskErrorLogClose: document.getElementById("task-error-log-close"),
+    taskErrorLogSummary: document.getElementById("task-error-log-summary"),
+    taskErrorLogContent: document.getElementById("task-error-log-content"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
     taskGovernancePanel: document.getElementById("task-governance-panel"),
     taskGovernanceToggle: document.getElementById("task-governance-toggle"),
@@ -10882,6 +10890,9 @@ function bind() {
         await runTaskBatchAction(button.dataset.batchAction, { returnFocus: button });
     }));
     U.taskTreeResetRounds?.addEventListener("click", () => resetTaskTreeRoundSelections());
+    U.taskErrorLogButton?.addEventListener("click", () => void openTaskErrorLog());
+    U.taskErrorLogClose?.addEventListener("click", () => setTaskErrorLogOpen(false));
+    U.taskErrorLogBackdrop?.addEventListener("click", () => setTaskErrorLogOpen(false));
     U.closeAgent?.addEventListener("click", () => clearAgentSelection());
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
     [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetSkillPagination));
@@ -10922,6 +10933,10 @@ function bind() {
             return;
         }
         if (closeTaskMenus({ restoreFocus: true })) return;
+        if (S.taskErrorLogOpen) {
+            setTaskErrorLogOpen(false);
+            return;
+        }
         if (S.taskTokenStatsOpen) {
             setTaskTokenStatsOpen(false);
             return;

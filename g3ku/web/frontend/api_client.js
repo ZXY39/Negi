@@ -486,6 +486,24 @@ class ApiClient {
         return data.item || null;
     }
 
+    static async pauseTaskNode(taskId, nodeId, { cascade = false, remark = "" } = {}) {
+        const data = await this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/pause`, {
+            body: { cascade: !!cascade, remark: String(remark || "") },
+        });
+        return data.node || null;
+    }
+
+    static async resumeTaskNode(taskId, nodeId) {
+        const data = await this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/resume`);
+        return data.node || null;
+    }
+
+    static async getTaskErrorLog(taskId) {
+        return this._request("GET", `/api/tasks/${taskId}/error-log`, {
+            requestKey: `tasks:error-log:${taskId}`,
+        });
+    }
+
     static async getTaskNodeLatestContext(taskId, nodeId) {
         return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/latest-context`, {
             requestKey: `tasks:node-context:${taskId}:${nodeId}`,

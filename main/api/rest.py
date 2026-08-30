@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pathlib import Path
 
@@ -127,6 +127,53 @@ async def get_task_node_tree_subtree(
     )
     if payload is None:
         raise HTTPException(status_code=404, detail='node_not_found')
+    return payload
+
+
+@router.post('/tasks/{task_id}/nodes/{node_id}/pause')
+async def pause_task_node(task_id: str, node_id: str, payload: dict | None = Body(default=None)):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    try:
+        node = await service.pause_node(
+            service.normalize_task_id(task_id),
+            node_id,
+            cascade=bool((payload or {}).get('cascade', False)),
+            reason='manual',
+            remark=str((payload or {}).get('remark') or ''),
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
+    if node is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return {'ok': True, 'node': node.model_dump(mode='json')}
+
+
+@router.post('/tasks/{task_id}/nodes/{node_id}/resume')
+async def resume_task_node(task_id: str, node_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    try:
+        node = await service.resume_node(service.normalize_task_id(task_id), node_id)
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
+    if node is None:
+        raise HTTPException(status_code=404, detail='node_not_found')
+    return {'ok': True, 'node': node.model_dump(mode='json')}
+
+
+@router.get('/tasks/{task_id}/error-log')
+async def get_task_error_log(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    payload = service.get_task_error_log_payload(service.normalize_task_id(task_id))
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
     return payload
 
 
