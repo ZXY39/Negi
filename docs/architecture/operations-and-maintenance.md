@@ -200,6 +200,10 @@ Provider retry troubleshooting note:
 
 修复语义详见 `runtime-overview.md`「Node-Level Pause and Recovery」。这两个 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
 
+### 残留节点自愈
+
+任务终态仅由根节点 + 最终验收推导，终态流转本身不强制收尾残留节点（见 `runtime-overview.md`「Node-Level Pause and Recovery」）。真正“不会再被驱动”的残留节点由 worker 启动自愈清理：启动引导对每个终态任务调用 `log_service.sweep_residual_nodes`，把仍 `in_progress` 的节点置为 `failed`，`failure_reason` 带 `task_terminal_cleanup` 前缀并附产物定位（`execution_trace_ref` / `result_payload_ref`），只改状态、不删转录/产物，并发布 node patch 事件。因此终端里“重启后残留节点自动落终态”是预期行为，不是数据丢失；进行中任务不参与清扫。
+
 ### 缓存命中下降或上下文疑似丢失
 
 先看：

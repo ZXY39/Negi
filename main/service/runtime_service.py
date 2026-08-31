@@ -561,7 +561,11 @@ class MainRuntimeService:
         if self.execution_mode in {'embedded', 'worker'}:
             for task in self.store.list_tasks():
                 self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
-                if task.status != 'in_progress':
+                if str(task.status or '').strip().lower() != 'in_progress':
+                    # Self-heal: a terminal task must not retain orphaned in_progress
+                    # nodes. This only flips bookkeeping status and never deletes
+                    # transcripts/artifacts; see log_service._sweep_residual_nodes_locked.
+                    self.log_service.sweep_residual_nodes(task.task_id)
                     continue
                 if bool(task.is_paused) or bool(task.pause_requested):
                     continue

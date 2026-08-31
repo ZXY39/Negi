@@ -2904,6 +2904,68 @@ class TaskLogService:
             self._notify_task_terminal(updated, previous_status=str(task.status or ''))
             return updated
 
+    def sweep_residual_nodes(self, task_id: str) -> list[NodeRecord]:
+        """Force residual non-terminal nodes of an already-terminal task to a terminal state.
+
+        Public entrypoint used by worker startup self-healing. Does nothing when the
+        task is not yet terminal. See ``_sweep_residual_nodes_locked`` for the contract.
+        """
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            if task is None or not self._is_terminal_status(task.status):
+                return []
+            return self._sweep_residual_nodes_locked(task=task)
+
+    def _sweep_residual_nodes_locked(self, *, task: TaskRecord) -> list[NodeRecord]:
+        """Sweep orphaned ``in_progress`` nodes under a terminal task to ``failed``.
+
+        A task reaches terminal state from its root node plus final acceptance alone;
+        any node still non-terminal at that point is orphaned and its result can no
+        longer be consumed. This only changes bookkeeping status — the node's transcript
+        and artifacts remain intact, and their locator is appended to ``failure_reason``
+        so the partial work stays traceable. Must be called with the task lock held.
+        """
+        swept: list[NodeRecord] = []
+        for node in list(self._store.list_nodes(task.task_id) or []):
+            if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                continue
+            preserved_refs = [
+                str(value or '').strip()
+                for value in (
+                    (node.metadata or {}).get('execution_trace_ref'),
+                    (node.metadata or {}).get('result_payload_ref'),
+                    (node.metadata or {}).get('latest_runtime_messages_ref'),
+                )
+                if str(value or '').strip()
+            ]
+            reason = f'task_terminal_cleanup: task already {task.status}'
+            if preserved_refs:
+                reason += '; preserved at ' + ', '.join(preserved_refs)
+            updated = self._store.update_node(
+                node.node_id,
+                lambda record: record.model_copy(
+                    update={
+                        'status': 'failed',
+                        'failure_reason': reason,
+                        'finished_at': record.finished_at or now_iso(),
+                        'pause_requested': False,
+                        'is_paused': False,
+                        'pause_reason': '',
+                        'updated_at': now_iso(),
+                    }
+                ),
+            )
+            if updated is None:
+                continue
+            self._sync_node_read_models_locked(
+                updated,
+                externalize_execution_trace=False,
+                preserved_execution_trace_ref=str((node.metadata or {}).get('execution_trace_ref') or '').strip(),
+            )
+            self._publish_task_node_patch_locked(task=task, node=updated)
+            swept.append(updated)
+        return swept
+
     def update_task_runtime_meta(self, task_id: str, **payload: Any) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
