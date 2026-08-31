@@ -1364,3 +1364,94 @@ async def test_prepare_turn_ignores_stale_turn_only_note_when_checking_context_s
         {"role": "user", "content": "u1"},
         {"role": "user", "content": "new question"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_normalize_model_output_retries_standalone_tool_contract_echo() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    contract = (
+        "## Runtime Tool Contract\n"
+        "kind: frontdoor_runtime_tool_contract\n"
+        "callable_tools: `exec`"
+    )
+    state = {
+        "response_payload": {
+            "content": contract,
+            "tool_calls": [],
+            "finish_reason": "stop",
+        },
+        "tool_names": [],
+        "provider_tool_names": [],
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "verified_task_ids": [],
+        "frontdoor_stage_state": {},
+        "tool_contract_echo_attempt_count": 0,
+    }
+
+    normalized = await runner._graph_normalize_model_output(state, runtime=SimpleNamespace())
+
+    assert normalized["next_step"] == "call_model"
+    assert normalized["tool_contract_echo_attempt_count"] == 1
+    assert "Runtime Tool Contract" in normalized["repair_overlay_text"]
+    assert normalized["final_output"] == ""
+
+
+@pytest.mark.asyncio
+async def test_normalize_model_output_never_finalizes_repeated_tool_contract_echo() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    contract = (
+        "## Runtime Tool Contract\n"
+        "kind: frontdoor_runtime_tool_contract\n"
+        "callable_tools: `exec`"
+    )
+    state = {
+        "response_payload": {
+            "content": contract,
+            "tool_calls": [],
+            "finish_reason": "stop",
+        },
+        "tool_names": [],
+        "provider_tool_names": [],
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "verified_task_ids": [],
+        "frontdoor_stage_state": {},
+        "tool_contract_echo_attempt_count": 1,
+    }
+
+    normalized = await runner._graph_normalize_model_output(state, runtime=SimpleNamespace())
+
+    assert normalized["next_step"] == "finalize"
+    assert normalized["tool_contract_echo_attempt_count"] == 2
+    assert "Runtime Tool Contract" not in normalized["final_output"]
+    assert normalized["final_output"]
+
+
+@pytest.mark.asyncio
+async def test_normalize_model_output_strips_contract_suffix_from_visible_answer() -> None:
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    contract = (
+        "## Runtime Tool Contract\n"
+        "kind: frontdoor_runtime_tool_contract\n"
+        "callable_tools: `exec`"
+    )
+    state = {
+        "response_payload": {
+            "content": "Visible answer\n\n" + contract,
+            "tool_calls": [],
+            "finish_reason": "stop",
+        },
+        "tool_names": [],
+        "provider_tool_names": [],
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "verified_task_ids": [],
+        "frontdoor_stage_state": {},
+        "tool_contract_echo_attempt_count": 0,
+    }
+
+    normalized = await runner._graph_normalize_model_output(state, runtime=SimpleNamespace())
+
+    assert normalized["next_step"] == "finalize"
+    assert normalized["final_output"] == "Visible answer"

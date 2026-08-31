@@ -29,6 +29,19 @@ def _contract(payload: str = "payload-1") -> dict[str, str]:
     return {"role": "assistant", "content": f"## Runtime Tool Contract\n{payload}"}
 
 
+def test_tool_contract_echo_helpers_require_canonical_kind_marker() -> None:
+    from g3ku.runtime.frontdoor.tool_contract import (
+        is_frontdoor_tool_contract_echo_text,
+        strip_frontdoor_tool_contract_echo,
+    )
+
+    contract = "## Runtime Tool Contract\nkind: frontdoor_runtime_tool_contract\ncallable_tools: `exec`"
+    assert is_frontdoor_tool_contract_echo_text(contract) is True
+    assert strip_frontdoor_tool_contract_echo(contract) == ""
+    assert strip_frontdoor_tool_contract_echo("answer\n\n" + contract) == "answer"
+    assert is_frontdoor_tool_contract_echo_text("## Runtime Tool Contract\nordinary prose") is False
+
+
 # ---------------------------------------------------------------------------
 # shared note helpers
 # ---------------------------------------------------------------------------
@@ -203,10 +216,11 @@ def test_frontdoor_append_tail_cleans_stale_contract_from_body() -> None:
     )
     assert result == [
         {"role": "system", "content": "sys"},
-        {"role": "user", "content": "hello"},
         dict(contract),
+        {"role": "user", "content": "hello"},
     ]
-    assert result[-1] == contract
+    assert result[1] == contract
+    assert result[-1] == {"role": "user", "content": "hello"}
 
 
 def test_frontdoor_prompt_contract_key_stable_with_dirty_live_base() -> None:
@@ -250,8 +264,8 @@ def test_frontdoor_prompt_contract_key_stable_with_dirty_live_base() -> None:
     assert clean.prompt_cache_key == dirty.prompt_cache_key
     assert list(clean.request_messages) == list(dirty.request_messages) == [
         {"role": "system", "content": "sys"},
-        {"role": "user", "content": "hello"},
         dict(contract),
+        {"role": "user", "content": "hello"},
     ]
 
 # ---------------------------------------------------------------------------

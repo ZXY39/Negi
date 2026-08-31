@@ -191,6 +191,18 @@ def test_sanitize_channel_outbound_text_internal_only_returns_empty():
     assert sanitize_channel_outbound_text("[SESSION EVENTS]\ninternal") == ""
 
 
+def test_sanitize_channel_outbound_text_removes_runtime_tool_contract_echo():
+    from g3ku.china_bridge.protocol import sanitize_channel_outbound_text
+
+    contract = (
+        "## Runtime Tool Contract\n"
+        "kind: frontdoor_runtime_tool_contract\n"
+        "callable_tools: `exec`"
+    )
+    assert sanitize_channel_outbound_text(contract) == ""
+    assert sanitize_channel_outbound_text("Visible answer\n\n" + contract) == "Visible answer"
+
+
 @pytest.mark.asyncio
 async def test_transport_send_outbound_skips_message_that_sanitizes_to_empty():
     frames: list[dict] = []

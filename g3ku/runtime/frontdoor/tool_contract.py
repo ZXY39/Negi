@@ -473,6 +473,51 @@ def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
     return content.startswith(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING)
 
 
+def _frontdoor_tool_contract_heading_index(text: str) -> int:
+    """Return the start of a rendered contract embedded in ``text``.
+
+    The heading alone is not enough to classify ordinary user prose that
+    happens to mention the contract.  Requiring the canonical kind marker in
+    the nearby suffix keeps this helper focused on the provider-facing
+    contract summary that the runtime injects.
+    """
+    normalized = str(text or '')
+    heading_index = normalized.find(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING)
+    if heading_index < 0:
+        return -1
+    suffix = normalized[heading_index : heading_index + 512]
+    if f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}' not in suffix:
+        return -1
+    return heading_index
+
+
+def is_frontdoor_tool_contract_echo_text(text: Any) -> bool:
+    """Whether model/channel text is a standalone injected tool-contract echo."""
+    normalized = str(text or '').strip()
+    if not normalized:
+        return False
+    if normalized.startswith(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING):
+        return _frontdoor_tool_contract_heading_index(normalized) == 0
+    return is_frontdoor_tool_contract_message({'role': 'assistant', 'content': normalized})
+
+
+def strip_frontdoor_tool_contract_echo(text: Any) -> str:
+    """Remove a rendered runtime-tool-contract echo from user-facing text.
+
+    A standalone contract echo becomes empty.  If a model puts a visible
+    answer before the echoed block, preserve that answer and remove only the
+    internal suffix.  JSON contract payloads are handled by the standalone
+    classifier above.
+    """
+    normalized = str(text or '')
+    if is_frontdoor_tool_contract_echo_text(normalized):
+        return ''
+    heading_index = _frontdoor_tool_contract_heading_index(normalized)
+    if heading_index >= 0:
+        return normalized[:heading_index].strip()
+    return normalized.strip()
+
+
 def upsert_frontdoor_tool_contract_message(
     messages: list[dict[str, Any]] | None,
     contract: FrontdoorToolContract,

@@ -81,6 +81,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     xml_repair_last_issue: str
 
+    tool_contract_echo_attempt_count: int
+
     empty_response_retry_count: int
 
     heartbeat_internal: bool

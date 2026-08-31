@@ -108,8 +108,10 @@ from .state_models import (
 )
 from .tool_contract import (
     build_frontdoor_tool_contract,
+    is_frontdoor_tool_contract_echo_text,
     is_frontdoor_tool_contract_message,
     normalize_frontdoor_candidate_tool_items,
+    strip_frontdoor_tool_contract_echo,
     upsert_frontdoor_tool_contract_message,
 )
 
@@ -125,6 +127,11 @@ _OPENAI_DEFAULT_IMAGE_TILE_SIZE = 512
 _OPENAI_DEFAULT_IMAGE_MAX_SIDE = 2048
 _OPENAI_DEFAULT_IMAGE_TARGET_SHORT_SIDE = 768
 _PROVIDER_RETRY_LIMIT = 3
+_TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
+    'The previous response repeated the internal Runtime Tool Contract. '
+    'Do not output, summarize, or quote that contract. Return only the '
+    'user-facing answer, or use the structured tool-calling interface when a tool is required.'
+)
 
 
 @dataclass(slots=True)
@@ -5464,6 +5471,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "xml_repair_excerpt": "",
             "xml_repair_tool_names": [],
             "xml_repair_last_issue": "",
+            "tool_contract_echo_attempt_count": 0,
             "empty_response_retry_count": 0,
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
@@ -6009,6 +6017,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "xml_repair_excerpt": "",
                 "xml_repair_tool_names": [],
                 "xml_repair_last_issue": "",
+                "tool_contract_echo_attempt_count": 0,
                 "next_step": "review_tool_calls",
             }
 
@@ -6086,6 +6095,46 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
 
         text = self._content_text(response_view.content)
+        if not response_tool_calls and is_frontdoor_tool_contract_echo_text(text):
+            echo_attempt_count = int(state.get('tool_contract_echo_attempt_count', 0) or 0) + 1
+            if echo_attempt_count == 1:
+                return {
+                    'repair_overlay_text': _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE,
+                    'tool_contract_echo_attempt_count': echo_attempt_count,
+                    'final_output': '',
+                    'next_step': 'call_model',
+                }
+            # Never promote a repeated internal contract summary to final
+            # output.  The normal empty-response explanation is user-facing and
+            # contains no provider/runtime contract material.
+            return {
+                'final_output': self._empty_response_explanation(
+                    used_tools=used_tools,
+                    verified_task_ids=list(state.get('verified_task_ids') or []),
+                ),
+                'route_kind': self._route_kind_for_turn(
+                    used_tools=used_tools,
+                    default=current_route_kind,
+                    verified_task_ids=list(state.get('verified_task_ids') or []),
+                ),
+                'tool_contract_echo_attempt_count': echo_attempt_count,
+                'next_step': 'finalize',
+            }
+        if text.strip():
+            text = strip_frontdoor_tool_contract_echo(text)
+            if not text:
+                return {
+                    'final_output': self._empty_response_explanation(
+                        used_tools=used_tools,
+                        verified_task_ids=list(state.get('verified_task_ids') or []),
+                    ),
+                    'route_kind': self._route_kind_for_turn(
+                        used_tools=used_tools,
+                        default=current_route_kind,
+                        verified_task_ids=list(state.get('verified_task_ids') or []),
+                    ),
+                    'next_step': 'finalize',
+                }
         if text.strip():
             if stage_protocol_message and not str(state.get("repair_overlay_text") or "").strip():
                 return {

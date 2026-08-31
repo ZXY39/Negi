@@ -2217,8 +2217,8 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
 
     assert prepared["messages"] == [
         {"role": "system", "content": "system"},
-        {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+        {"role": "user", "content": "hello"},
     ]
     assert len(prepared["dynamic_appendix_messages"]) == 1
     contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
@@ -7059,10 +7059,10 @@ async def test_create_agent_dynamic_appendix_request_preserves_live_assistant_an
     ]
 
     assert contents == [
+        "## Retrieved Context\n- authoritative memory",
         "start",
         "working memory of the live turn",
         '{"result_text": "tool finished", "status": "success"}',
-        "## Retrieved Context\n- authoritative memory",
     ]
     assert "default overlay" in str(getattr(seen_request["system_message"], "content", ""))
 
@@ -7125,9 +7125,9 @@ async def test_create_agent_dynamic_appendix_request_does_not_duplicate_when_sta
         )
     ]
     assert contents == [
+        "## Retrieved Context\n- authoritative memory",
         "start",
         "working memory of the live turn",
-        "## Retrieved Context\n- authoritative memory",
     ]
 
 
@@ -7214,9 +7214,9 @@ async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendi
             }
         )
     ] == [
+        "## Retrieved Context\n- authoritative memory",
         "start",
         "assistant drift A",
-        "## Retrieved Context\n- authoritative memory",
     ]
     assert [
         str(getattr(message, "content", "") or "")
@@ -7228,10 +7228,10 @@ async def test_create_agent_stable_prefix_request_coherent_after_dynamic_appendi
             }
         )
     ] == [
+        "## Retrieved Context\n- authoritative memory",
         "start",
         "assistant drift B",
         '{"result_text": "done", "status": "success"}',
-        "## Retrieved Context\n- authoritative memory",
     ]
     first_blocks = list(getattr(seen_requests[0]["system_message"], "content_blocks", []))
     second_blocks = list(getattr(seen_requests[1]["system_message"], "content_blocks", []))
@@ -7277,8 +7277,8 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
         {"role": "system", "content": "stable system"},
         {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
-        {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+        {"role": "user", "content": "latest user"},
     ]
     assert contract.stable_messages == [
         {"role": "system", "content": "stable system"},
@@ -7327,8 +7327,8 @@ def test_create_agent_prompt_contract_does_not_treat_plain_short_recap_text_as_c
     assert non_contract_request_messages == [
         {"role": "system", "content": "stable system"},
         {"role": "assistant", "content": "Short recap: here's the answer you asked for."},
-        {"role": "user", "content": "latest user"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
+        {"role": "user", "content": "latest user"},
     ]
 
 

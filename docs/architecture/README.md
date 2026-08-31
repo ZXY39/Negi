@@ -41,6 +41,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `china-channels.md` (channel inbound) or `web-and-admin.md` (web upload/reopen)
 - Turn checkpoint write fails with `Cannot operate on a closed database`, or a config refresh disrupts an in-flight turn → `runtime-overview.md`「Memory Runtime Reset Guard」+ `config-and-models.md`「配置热刷新」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
+- QQ/China channel emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `china-channels.md`
 - Node error pause is not delivered to the source session -> `heartbeat-system.md`「Task Node Error Delivery」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」

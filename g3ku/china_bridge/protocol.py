@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from g3ku.china_bridge.models import ChinaAttachment, ChinaInboundEnvelope
+from g3ku.runtime.frontdoor.tool_contract import strip_frontdoor_tool_contract_echo
 
 
 def now_iso() -> str:
@@ -26,7 +27,7 @@ def sanitize_channel_outbound_text(text: str) -> str:
     stripped; an empty result means the whole message was internal-only and
     must not be delivered.
     """
-    cleaned = str(text or "")
+    cleaned = strip_frontdoor_tool_contract_echo(text)
     marker_index = cleaned.find(SESSION_EVENTS_MARKER)
     if marker_index >= 0:
         cleaned = cleaned[:marker_index]

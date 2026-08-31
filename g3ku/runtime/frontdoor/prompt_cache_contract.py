@@ -66,9 +66,11 @@ def _with_dynamic_appendix_at_tail(
         for item in normalized_dynamic_messages
         if not _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    # The carried body must never retain a stale contract or a stale turn-only note:
-    # exactly one newest contract is appended at the tail below, and the current
-    # turn-only note is appended separately by the turn overlay.
+    # The carried body must never retain a stale contract or a stale turn-only
+    # note.  The dynamic appendix is inserted immediately before the latest
+    # user message when one exists.  A contract is an assistant message, so
+    # placing it after the latest tool result makes some providers/models treat
+    # the contract summary as the assistant's next reply and echo it verbatim.
     stripped_request_messages = [
         dict(item)
         for item in normalized_request_messages
@@ -83,11 +85,24 @@ def _with_dynamic_appendix_at_tail(
                 merged_request_messages,
                 _dynamic_appendix_overlap_records(non_contract_messages),
             )
-        if not _records_contain_slice(merged_request_messages, non_contract_messages):
-            merged_request_messages = [*merged_request_messages, *non_contract_messages]
-    if contract_messages:
-        merged_request_messages = [*merged_request_messages, *contract_messages]
-    return merged_request_messages
+    appendix_messages = [*non_contract_messages, *contract_messages]
+    if not appendix_messages:
+        return merged_request_messages
+    latest_user_index = next(
+        (
+            index
+            for index in range(len(merged_request_messages) - 1, -1, -1)
+            if str(merged_request_messages[index].get('role') or '').strip().lower() == 'user'
+        ),
+        None,
+    )
+    if latest_user_index is None:
+        return [*merged_request_messages, *appendix_messages]
+    return [
+        *merged_request_messages[:latest_user_index],
+        *appendix_messages,
+        *merged_request_messages[latest_user_index:],
+    ]
 
 
 def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:
