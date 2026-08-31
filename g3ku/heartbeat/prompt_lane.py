@@ -13,6 +13,9 @@ class HeartbeatPromptLane:
     dynamic_appendix_messages: list[dict[str, Any]]
     request_messages: list[dict[str, Any]]
     retrieval_query: str
+    # 仅事件束本体（[SESSION EVENTS] 段），不含稳定规则文本。调用方若已把规则作为
+    # 独立 system 消息注入，应使用它作为 user 事件消息，避免规则在同一回合重复出现。
+    event_bundle_text: str = ""
 
 
 def _non_empty_text(value: Any) -> str:
@@ -298,6 +301,7 @@ def build_heartbeat_prompt_lane(
         dynamic_appendix_messages=dynamic_appendix_messages,
         request_messages=request_messages,
         retrieval_query=retrieval_query,
+        event_bundle_text=event_bundle_text,
     )
 
 

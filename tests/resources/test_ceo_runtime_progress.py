@@ -6691,9 +6691,10 @@ async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Pat
     prompt = live_session.prompts[0]
     assert isinstance(prompt, UserInputMessage)
     assert "tool-exec:1" in str(prompt.content)
-    assert "already been refreshed" in str(prompt.content)
-    assert "Do not start a new tool chain" in str(prompt.content)
-    assert "你正在处理内部事件，不是在处理新的用户输入" in str(prompt.content)
+    stable_rules_text = str(prompt.metadata["heartbeat_stable_rules_text"] or "")
+    assert "already been refreshed" in stable_rules_text
+    assert "Do not start a new tool chain" in stable_rules_text
+    assert "你正在处理内部事件，不是在处理新的用户输入" in stable_rules_text
     assert manager.calls == [("tool-exec:1", 0.1)]
     published_types = [envelope["type"] for _session_id, envelope in task_service.registry.published]
     assert "ceo.internal.ack" in published_types
@@ -6958,7 +6959,7 @@ async def test_web_session_heartbeat_repairs_task_terminal_when_model_returns_he
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
     assert len(task_service.delivered) == 1
     assert task_service.delivered[0][0] == "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00"
-    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].content)
+    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].metadata["heartbeat_stable_rules_text"] or "")
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "整理后的最终结论"
@@ -7004,7 +7005,7 @@ async def test_web_session_heartbeat_repairs_unpassed_task_terminal_when_model_r
     assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["source"] == "heartbeat"
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
-    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].content)
+    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].metadata["heartbeat_stable_rules_text"] or "")
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "虽然未通过验收，但结果已基本可交付。"

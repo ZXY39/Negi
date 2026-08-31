@@ -1158,6 +1158,13 @@ class WebSessionHeartbeatService:
                 for event in events
             ],
         )
+        # 事件束只包含 [SESSION EVENTS] 段；稳定规则由 heartbeat_stable_rules_text
+        # 作为独立 system 消息注入，二者不合并，避免同一回合把规则重复喂给模型。
+        event_bundle_text = str(heartbeat_lane.event_bundle_text or "").strip()
+        if not event_bundle_text and heartbeat_lane.request_messages:
+            event_bundle_text = str(
+                (heartbeat_lane.request_messages[-1] or {}).get("content") or ""
+            ).strip()
         metadata: dict[str, Any] = {
             "heartbeat_internal": True,
             "heartbeat_reason": heartbeat_reason,
@@ -1165,16 +1172,14 @@ class WebSessionHeartbeatService:
             "heartbeat_prompt_lane": heartbeat_lane.scope,
             "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
             "heartbeat_stable_rules_text": stable_rules_text,
-            "heartbeat_event_bundle_text": str(
-                (heartbeat_lane.request_messages[-1] if heartbeat_lane.request_messages else {}).get("content") or ""
-            ),
+            "heartbeat_event_bundle_text": event_bundle_text,
             "history_visibility": "internal_event",
         }
         if repair_attempt > 0:
             metadata["heartbeat_repair_attempt"] = int(repair_attempt)
             metadata["heartbeat_invalid_output"] = self._task_terminal_invalid_output_label(invalid_output)
         return UserInputMessage(
-            content=str(metadata.get("heartbeat_event_bundle_text") or ""),
+            content=event_bundle_text,
             metadata=metadata,
         )
 

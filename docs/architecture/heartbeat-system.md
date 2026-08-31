@@ -25,6 +25,7 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - Heartbeat still appends two hidden durable messages before the model call:
   - a `system` rule message
   - a `user` event-bundle message
+  - The rule text lives only in the `system` message; the `user` message carries the `[SESSION EVENTS]` bundle alone, so the same rules text is never duplicated into the user turn.
 - Cron appends two hidden durable `system` messages:
   - a cron rule message
   - a structured cron event block
