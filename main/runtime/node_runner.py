@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
@@ -2765,11 +2767,12 @@ class NodeRunner:
         cached_payload['completed'] = False
         self._save_spawn_cache(task.task_id, parent.node_id, cache_key, cached_payload)
 
-        spawn_review = await self._review_spawn_batch(
+        spawn_review = await self._reuse_or_review_spawn_batch(
             task=task,
             parent=parent,
             specs=specs,
             cache_key=cache_key,
+            cached_payload=cached_payload,
         )
         allowed_indexes = self._apply_spawn_review_results(
             task_id=task.task_id,
@@ -2862,6 +2865,51 @@ class NodeRunner:
             task_id=task.task_id,
             entries=[dict(item) for item in list(latest_payload.get('entries') or []) if isinstance(item, dict)],
             specs=specs,
+        )
+
+    def _materialized_spawn_round_review(self, *, specs: list[SpawnChildSpec]) -> dict[str, Any]:
+        specs_list = list(specs or [])
+        return {
+            'reviewed_at': _now(),
+            'requested_specs': [
+                self._spawn_review_requested_spec_payload(index=index, spec=spec)
+                for index, spec in enumerate(specs_list)
+            ],
+            'allowed_indexes': list(range(len(specs_list))),
+            'blocked_specs': [],
+            'error_text': '',
+        }
+
+    async def _reuse_or_review_spawn_batch(
+        self,
+        *,
+        task,
+        parent: NodeRecord,
+        specs: list[SpawnChildSpec],
+        cache_key: str,
+        cached_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        existing_review = cached_payload.get('spawn_review')
+        if isinstance(existing_review, dict) and existing_review:
+            return existing_review
+        # A round that already owns child/acceptance bindings must never be
+        # re-reviewed as if it were a fresh logical operation. Treat materialized
+        # entries as allowed so recovery resumes and waits on the existing subtree.
+        materialized = any(
+            isinstance(entry, dict)
+            and (
+                str(entry.get('child_node_id') or '').strip()
+                or str(entry.get('acceptance_node_id') or '').strip()
+            )
+            for entry in list(cached_payload.get('entries') or [])
+        )
+        if materialized:
+            return self._materialized_spawn_round_review(specs=specs)
+        return await self._review_spawn_batch(
+            task=task,
+            parent=parent,
+            specs=specs,
+            cache_key=cache_key,
         )
 
     async def _review_spawn_batch(
@@ -3274,6 +3322,34 @@ class NodeRunner:
                 reason=str(blocked_payload.get('reason') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON,
                 suggestion=str(blocked_payload.get('suggestion') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
             )
+            entries_so_far = list(cached_payload.get('entries') or [])
+            current_entry = dict(entries_so_far[index] or {}) if index < len(entries_so_far) else {}
+            live_node_reason = self._spawn_entry_non_terminal_node(current_entry)
+            if live_node_reason:
+                # The blocked spec already owns a live execution/acceptance node.
+                # Its review outcome must not overwrite the real pipeline status —
+                # the materialized subtree still needs to run to a terminal state.
+                self._warn_spawn_entry_review_over_live_node(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    index=index,
+                    entry=current_entry,
+                    reason=live_node_reason,
+                )
+                self._update_spawn_entry(
+                    task_id=task_id,
+                    parent_node_id=parent_node_id,
+                    cache_key=cache_key,
+                    cached_payload=cached_payload,
+                    index=index,
+                    review_decision='blocked',
+                    blocked_reason=str(blocked_payload.get('reason') or '').strip(),
+                    blocked_suggestion=str(blocked_payload.get('suggestion') or '').strip(),
+                    synthetic_result_summary=str(result.node_output_summary or ''),
+                    runtime_error_text='',
+                )
+                continue
             self._update_spawn_entry(
                 task_id=task_id,
                 parent_node_id=parent_node_id,
@@ -3382,17 +3458,112 @@ class NodeRunner:
                 node_ids.append(node_id)
         return node_ids
 
-    def _spawn_entry_is_active(self, entry: dict[str, Any]) -> bool:
-        status = str(entry.get('status') or '').strip().lower()
-        if status in {'queued', 'running'}:
-            return True
-        for node_id in self._spawn_entry_node_ids(entry):
+    def _spawn_entry_non_terminal_node(self, entry: dict[str, Any]) -> str:
+        """Return why an entry's bound node is still non-terminal.
+
+        Returns one of ``''``, ``'execution'``, or ``'acceptance'``. The real
+        node status — not the synthetic entry status — is the authoritative
+        signal that a materialized pipeline is still running.
+        """
+        for field, reason in (('child_node_id', 'execution'), ('acceptance_node_id', 'acceptance')):
+            node_id = str(entry.get(field) or '').strip()
+            if not node_id:
+                continue
             node = self._store.get_node(node_id)
             if node is None:
                 continue
             if self._normalized_status(getattr(node, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
-                return True
-        return False
+                return reason
+        return ''
+
+    def _spawn_entry_activity(self, entry: dict[str, Any]) -> tuple[bool, str]:
+        """Return ``(is_active, reason)`` for a spawn entry.
+
+        ``reason`` distinguishes *why* the entry is active:
+
+        * ``'entry'`` — the entry status itself is ``queued``/``running``;
+        * ``'execution'`` — the bound execution node is non-terminal;
+        * ``'acceptance'`` — the bound acceptance node is non-terminal.
+
+        A ``review_decision=blocked`` entry that still owns a live execution or
+        acceptance node is therefore treated as active, never as complete.
+        """
+        status = str(entry.get('status') or '').strip().lower()
+        if status in {'queued', 'running'}:
+            return True, 'entry'
+        non_terminal = self._spawn_entry_non_terminal_node(entry)
+        if non_terminal:
+            return True, non_terminal
+        return False, ''
+
+    def _spawn_entry_is_active(self, entry: dict[str, Any]) -> bool:
+        active, _reason = self._spawn_entry_activity(entry)
+        return active
+
+    @staticmethod
+    def _emit_spawn_diagnostic(
+        *,
+        title: str,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        index: int | None,
+        entry: dict[str, Any] | None,
+        detail: str,
+    ) -> None:
+        child_node_id = str((entry or {}).get('child_node_id') or '').strip()
+        acceptance_node_id = str((entry or {}).get('acceptance_node_id') or '').strip()
+        logger.warning(
+            '[g3ku spawn diagnostic] '
+            f'title={title} task_id={str(task_id or "").strip()} '
+            f'parent_node_id={str(parent_node_id or "").strip()} round_id={str(cache_key or "").strip()} '
+            f'entry_index={"" if index is None else str(index)} '
+            f'entry_status={(entry or {}).get("status") or ""} '
+            f'review_decision={(entry or {}).get("review_decision") or ""} '
+            f'has_synthetic_result={bool((entry or {}).get("synthetic_result_summary"))} '
+            f'child_node_id={child_node_id} acceptance_node_id={acceptance_node_id} '
+            f'detail={str(detail or "").strip()}'
+        )
+
+    def _warn_spawn_entry_review_over_live_node(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        index: int,
+        entry: dict[str, Any],
+        reason: str,
+    ) -> None:
+        self._emit_spawn_diagnostic(
+            title='spawn_blocked_review_over_materialized_round',
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            cache_key=cache_key,
+            index=index,
+            entry=entry,
+            detail=f'blocked review outcome did not terminate a live {reason} node',
+        )
+
+    def _warn_spawn_entry_inconsistent_terminal(
+        self,
+        *,
+        task_id: str,
+        parent_node_id: str,
+        cache_key: str,
+        index: int,
+        entry: dict[str, Any],
+        reason: str,
+    ) -> None:
+        self._emit_spawn_diagnostic(
+            title='spawn_entry_terminal_with_live_node',
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            cache_key=cache_key,
+            index=index,
+            entry=entry,
+            detail=f'entry status is terminal/blocked while a bound {reason} node is non-terminal',
+        )
 
     def _active_prior_spawn_operations(
         self,
@@ -3568,7 +3739,10 @@ class NodeRunner:
     ) -> tuple[SpawnChildResult, str, str, str | None]:
         goal = str(entry.get('goal') or fallback_goal or '').strip()
         review_decision = str(entry.get('review_decision') or '').strip().lower()
-        if review_decision == 'blocked':
+        child_node_id = str(entry.get('child_node_id') or '').strip()
+        acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
+        has_bound_node = bool(child_node_id or acceptance_node_id)
+        if review_decision == 'blocked' and not has_bound_node:
             blocked_reason = str(entry.get('blocked_reason') or '').strip()
             blocked_suggestion = str(entry.get('blocked_suggestion') or '').strip()
             result = self._spawn_review_blocked_result_by_goal(
@@ -3582,8 +3756,6 @@ class NodeRunner:
             result = self._spawn_runtime_result(goal, error_text=runtime_error_text)
             return result, 'error', 'failed', runtime_error_text
         requires_acceptance = bool(entry.get('requires_acceptance'))
-        child_node_id = str(entry.get('child_node_id') or '').strip()
-        acceptance_node_id = str(entry.get('acceptance_node_id') or '').strip()
         child = self._store.get_node(child_node_id) if child_node_id else None
         acceptance = self._store.get_node(acceptance_node_id) if acceptance_node_id else None
         child_summary = ''
@@ -3803,20 +3975,34 @@ class NodeRunner:
         entries = list(cached_payload.get('entries') or [])
         entry = dict(entries[index] or {})
         if str(entry.get('status') or '').strip().lower() in {'success', 'error'}:
-            existing_result = entry.get('result')
-            if isinstance(existing_result, dict):
-                try:
-                    return SpawnChildResult.model_validate(existing_result)
-                except Exception:
-                    pass
-            rebuilt_result, _status, _check_status, _child_check_result = self._rebuild_spawn_entry_result(
+            # A synthetic review result (or a stale terminal status) must not hide
+            # a still-running execution/acceptance node. When a bound node is
+            # non-terminal, fall through and resume the real pipeline instead of
+            # short-circuiting on the entry's synthetic terminal status.
+            live_node_reason = self._spawn_entry_non_terminal_node(entry)
+            if not live_node_reason:
+                existing_result = entry.get('result')
+                if isinstance(existing_result, dict):
+                    try:
+                        return SpawnChildResult.model_validate(existing_result)
+                    except Exception:
+                        pass
+                rebuilt_result, _status, _check_status, _child_check_result = self._rebuild_spawn_entry_result(
+                    task_id=task.task_id,
+                    entry=entry,
+                    fallback_goal=spec.goal,
+                    fallback_reason=self._spawn_exception_text(RuntimeError('child node missing')),
+                    error_source='runtime',
+                )
+                return rebuilt_result
+            self._warn_spawn_entry_inconsistent_terminal(
                 task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                index=index,
                 entry=entry,
-                fallback_goal=spec.goal,
-                fallback_reason=self._spawn_exception_text(RuntimeError('child node missing')),
-                error_source='runtime',
+                reason=live_node_reason,
             )
-            return rebuilt_result
 
         stop_reason = self._task_terminal_reason(task.task_id, task=task) or self._node_terminal_reason(
             self._store.get_node(parent.node_id) or parent,
@@ -4350,8 +4536,7 @@ class NodeRunner:
 
         self._log_service.update_frame(task_id, parent.node_id, _mutate, publish_snapshot=False)
 
-    @staticmethod
-    def _parent_spawn_frame_state(parent: NodeRecord) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
+    def _parent_spawn_frame_state(self, parent: NodeRecord) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], bool]:
         spawn_operations = (parent.metadata or {}).get('spawn_operations') if isinstance(parent.metadata, dict) else {}
         if not isinstance(spawn_operations, dict):
             return [], [], [], False
@@ -4379,6 +4564,10 @@ class NodeRunner:
                 status = str(entry.get('status') or '').strip().lower()
                 if status not in {'queued', 'running', 'success', 'error'}:
                     status = 'queued'
+                # A synthetic terminal status must not mask a live bound node:
+                # display the pipeline as running until every bound node is terminal.
+                if status in {'success', 'error'} and self._spawn_entry_non_terminal_node(entry):
+                    status = 'running'
                 child_pipelines.append(
                     {
                         'index': int(entry.get('index') or entry_index),

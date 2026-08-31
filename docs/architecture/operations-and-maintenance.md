@@ -184,6 +184,22 @@ Provider retry troubleshooting note:
 - `last_chunk_kind`
 - `stream_completed_ms` / `stream_failed_ms`
 
+### spawn 轮次过早完成或子节点被意外 supersede
+
+如果事件流里出现：父节点在验收节点仍为 `in_progress` 时提前进入 `before_model`；同一轮内出现第二次 `spawn_child_nodes` 且旧轮子节点被打上 `superseded by newer spawn round`；或帧里出现 `entry.status=success + acceptance.status=in_progress` 这种无效组合——按下面顺序排查。
+
+先看帧诊断字段（`_resume_waiting_children_turn_if_needed` 在恢复前写入当前帧）：
+
+- `spawn_recovery_mode`：`wait_existing_pipeline`（有存活子/验收节点，应等待现有管线）、`rematerialize_round`、`replay_completed_result`、`no_active_round`；
+- `spawn_recovery_round_id` / `spawn_recovery_round_ids` / `spawn_recovery_active_entry_indexes` / `spawn_recovery_active_node_ids`：定位仍活跃的 round、entry 与绑定节点。
+
+再在 worker 日志里搜 `[g3ku spawn diagnostic]` 开头的警告：
+
+- `title=spawn_blocked_review_over_materialized_round`：已物化轮被重新评审且判为 blocked，但运行时拒绝让其终结仍存活的子/验收节点（只写 `review_decision=blocked`，不把管线状态写成 `success`）；
+- `title=spawn_entry_terminal_with_live_node`：entry 状态已是 terminal/blocked，但绑定节点仍非终态，属无效状态组合信号。
+
+修复语义详见 `runtime-overview.md`「Node-Level Pause and Recovery」。这两个 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
+
 ### 缓存命中下降或上下文疑似丢失
 
 先看：

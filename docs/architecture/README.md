@@ -37,6 +37,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Reminder UI or `ceo.tool.reminder` timeout-stop failures → `heartbeat-system.md` (+ `web-and-admin.md` for UI rendering)
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
+- 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `china-channels.md` (channel inbound) or `web-and-admin.md` (web upload/reopen)
 - Turn checkpoint write fails with `Cannot operate on a closed database`, or a config refresh disrupts an in-flight turn → `runtime-overview.md`「Memory Runtime Reset Guard」+ `config-and-models.md`「配置热刷新」

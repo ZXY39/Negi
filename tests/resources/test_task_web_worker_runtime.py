@@ -10451,6 +10451,345 @@ async def test_resume_waiting_children_turn_replays_incomplete_spawn_operation(t
 
 
 @pytest.mark.asyncio
+async def test_materialized_spawn_recovery_skips_review_and_waits_for_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incident regression (spawn round early activation).
+
+    A materialized round whose review blocked all specs must not be re-blocked as
+    terminal success while its execution/acceptance subtree is still running.
+    Recovery must skip the review and wait for the real subtree to finish.
+    """
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("recover materialized blocked round", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+
+        round_id = "call:materialized"
+        spec = SpawnChildSpec(
+            goal="materialized child",
+            prompt="materialized prompt",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify materialized child",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key=round_id,
+            cached_payload=cached_payload,
+        )
+        root = service.get_node(root.node_id)
+        assert root is not None
+        entry = dict(root.metadata["spawn_operations"][round_id]["entries"][0])
+        child_id = str(entry["child_node_id"])
+        acceptance_id = str(entry["acceptance_node_id"])
+        assert child_id and acceptance_id
+
+        # Simulate the incident state: the round is materialized, its review
+        # blocked every spec, and its acceptance node is still non-terminal.
+        def _mutate(metadata: dict[str, object]) -> dict[str, object]:
+            operation = dict(metadata["spawn_operations"][round_id])
+            operation["spawn_review"] = {
+                "round_id": round_id,
+                "reviewed_at": now_iso(),
+                "requested_specs": [],
+                "allowed_indexes": [],
+                "blocked_specs": [{"index": 0, "reason": "scope overlap", "suggestion": "merge scopes"}],
+                "error_text": "",
+            }
+            entries = list(operation.get("entries") or [])
+            entries[0] = {**dict(entries[0]), "status": "running", "check_status": "running"}
+            operation["entries"] = entries
+            metadata["spawn_operations"][round_id] = operation
+            return metadata
+
+        service.log_service.update_node_metadata(root.node_id, _mutate)
+
+        review_calls: list[str] = []
+
+        async def _blocked_review(*, task, parent, specs, cache_key):
+            review_calls.append(str(cache_key))
+            return {
+                "reviewed_at": now_iso(),
+                "requested_specs": [],
+                "allowed_indexes": [],
+                "blocked_specs": [{"index": 0, "reason": "scope overlap", "suggestion": "merge scopes"}],
+                "error_text": "",
+            }
+
+        monkeypatch.setattr(service.node_runner, "_review_spawn_batch", _blocked_review)
+
+        observed_entry_status_at_acceptance: list[str] = []
+
+        async def _run_nested_node(task_id: str, node_id: str):
+            target = service.store.get_node(node_id)
+            assert target is not None
+            if target.node_kind == "execution":
+                return service.node_runner._mark_finished(
+                    task_id,
+                    node_id,
+                    NodeFinalResult(status="success", delivery_status="final", summary="child done", answer="child done", evidence=[], remaining_work=[], blocking_reason=""),
+                )
+            if target.node_kind == "acceptance":
+                parent_after = service.get_node(root.node_id)
+                assert parent_after is not None
+                live_entry = dict(parent_after.metadata["spawn_operations"][round_id]["entries"][0])
+                observed_entry_status_at_acceptance.append(str(live_entry.get("status") or ""))
+                return service.node_runner._mark_finished(
+                    task_id,
+                    node_id,
+                    NodeFinalResult(status="success", delivery_status="final", summary="accepted", answer="accepted", evidence=[], remaining_work=[], blocking_reason=""),
+                )
+            raise AssertionError(f"unexpected node kind: {target.node_kind}")
+
+        monkeypatch.setattr(service.node_runner, "_run_nested_node", _run_nested_node)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[spec],
+            call_id=round_id,
+        )
+
+        assert len(results) == 1
+        assert review_calls == []
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        assert set(operations) == {round_id}
+        assert "superseded" not in json.dumps(operations, ensure_ascii=False)
+        final_entry = operations[round_id]["entries"][0]
+        assert final_entry["status"] == "success"
+        assert final_entry["check_status"] == "passed"
+        assert service.store.get_node(child_id).status == "success"
+        assert service.store.get_node(acceptance_id).status == "success"
+        assert observed_entry_status_at_acceptance == ["running"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_waiting_children_recovery_stays_waiting_children_until_acceptance_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end recovery: the parent must not enter ``before_model`` while the
+    recovered round still has a live acceptance node."""
+    service = _build_service(tmp_path)
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+    try:
+        record = await service.create_task("recover waiting children blocked", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+
+        round_id = "call:materialized-blocked"
+        spec = SpawnChildSpec(
+            goal="blocked materialized child",
+            prompt="blocked materialized prompt",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify blocked materialized child",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key=round_id,
+            cached_payload=cached_payload,
+        )
+        root = service.get_node(root.node_id)
+        assert root is not None
+        entry = dict(root.metadata["spawn_operations"][round_id]["entries"][0])
+        child_id = str(entry["child_node_id"])
+        acceptance_id = str(entry["acceptance_node_id"])
+        assert child_id and acceptance_id
+
+        def _stamp_blocked_materialized(metadata: dict[str, object]) -> dict[str, object]:
+            operation = dict(metadata["spawn_operations"][round_id])
+            operation["spawn_review"] = {
+                "round_id": round_id,
+                "reviewed_at": now_iso(),
+                "requested_specs": [],
+                "allowed_indexes": [],
+                "blocked_specs": [{"index": 0, "reason": "scope overlap", "suggestion": "merge scopes"}],
+                "error_text": "",
+            }
+            entries = list(operation.get("entries") or [])
+            entries[0] = {**dict(entries[0]), "status": "running", "check_status": "running"}
+            operation["entries"] = entries
+            metadata["spawn_operations"][round_id] = operation
+            return metadata
+
+        service.log_service.update_node_metadata(root.node_id, _stamp_blocked_materialized)
+        service.log_service.replace_runtime_frames(
+            record.task_id,
+            active_node_ids=[root.node_id],
+            runnable_node_ids=[root.node_id],
+            waiting_node_ids=[root.node_id],
+            frames=[
+                {
+                    **service.log_service._default_frame(
+                        node_id=root.node_id,
+                        depth=root.depth,
+                        node_kind=root.node_kind,
+                        phase="waiting_children",
+                    ),
+                    "pending_tool_calls": [],
+                    "tool_calls": [],
+                    "child_pipelines": [],
+                    "pending_child_specs": [],
+                    "partial_child_results": [],
+                    "last_error": "",
+                }
+            ],
+            publish_snapshot=False,
+        )
+
+        async def _blocked_review(*, task, parent, specs, cache_key):
+            return {
+                "reviewed_at": now_iso(),
+                "requested_specs": [],
+                "allowed_indexes": [],
+                "blocked_specs": [{"index": 0, "reason": "scope overlap", "suggestion": "merge scopes"}],
+                "error_text": "",
+            }
+
+        monkeypatch.setattr(service.node_runner, "_review_spawn_batch", _blocked_review)
+
+        observed_frame_phase_at_acceptance: list[str] = []
+
+        async def _run_nested_node(task_id: str, node_id: str):
+            target = service.store.get_node(node_id)
+            assert target is not None
+            if target.node_kind == "execution":
+                return service.node_runner._mark_finished(
+                    task_id,
+                    node_id,
+                    NodeFinalResult(status="success", delivery_status="final", summary="child done", answer="child done", evidence=[], remaining_work=[], blocking_reason=""),
+                )
+            if target.node_kind == "acceptance":
+                frame = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
+                observed_frame_phase_at_acceptance.append(str(frame.get("phase") or ""))
+                return service.node_runner._mark_finished(
+                    task_id,
+                    node_id,
+                    NodeFinalResult(status="success", delivery_status="final", summary="accepted", answer="accepted", evidence=[], remaining_work=[], blocking_reason=""),
+                )
+            raise AssertionError(f"unexpected node kind: {target.node_kind}")
+
+        monkeypatch.setattr(service.node_runner, "_run_nested_node", _run_nested_node)
+
+        history = await service.node_runner._react_loop._resume_waiting_children_turn_if_needed(
+            task=task,
+            node=service.get_node(root.node_id),
+            message_history=[],
+            tools=service.node_runner._build_tools(task=task, node=root),
+            runtime_context={"task_id": record.task_id, "node_id": root.node_id, "node_kind": root.node_kind},
+        )
+
+        assert history is not None
+        assert observed_frame_phase_at_acceptance == ["waiting_children"]
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        assert set(operations) == {round_id}
+        assert "superseded" not in json.dumps(operations, ensure_ascii=False)
+        final_entry = operations[round_id]["entries"][0]
+        assert final_entry["status"] == "success"
+        assert service.store.get_node(child_id).status == "success"
+        assert service.store.get_node(acceptance_id).status == "success"
+        frame_after = service.log_service.read_runtime_frame(record.task_id, root.node_id) or {}
+        assert str(frame_after.get("phase") or "") == "before_model"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_materialized_spawn_recovery_without_review_metadata_resumes_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A materialized round with no persisted review must not be re-reviewed;
+    recovery resumes the existing execution subtree to a terminal state."""
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("recover materialized no review", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+
+        round_id = "call:no-review"
+        spec = SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy())
+        child = service.node_runner._create_execution_child(task=task, parent=root, spec=spec)
+        assert child is not None
+        _stamp_incomplete_spawn_round(
+            service,
+            root_node_id=root.node_id,
+            round_id=round_id,
+            spec=spec,
+            child_node_id=child.node_id,
+        )
+
+        review_calls: list[str] = []
+
+        async def _review_and_record(*, task, parent, specs, cache_key):
+            review_calls.append(str(cache_key))
+            return {
+                "reviewed_at": now_iso(),
+                "requested_specs": [],
+                "allowed_indexes": list(range(len(list(specs or [])))),
+                "blocked_specs": [],
+                "error_text": "",
+            }
+
+        monkeypatch.setattr(service.node_runner, "_review_spawn_batch", _review_and_record)
+
+        async def _finish_child(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(status="success", delivery_status="final", summary="child done", answer="child done", evidence=[], remaining_work=[], blocking_reason=""),
+            )
+
+        monkeypatch.setattr(service.node_runner, "_run_nested_node", _finish_child)
+
+        results = await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            specs=[spec],
+            call_id=round_id,
+        )
+
+        assert len(results) == 1
+        assert review_calls == []
+        root_after = service.get_node(root.node_id)
+        assert root_after is not None
+        operations = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        assert set(operations) == {round_id}
+        assert operations[round_id]["completed"] is True
+        assert operations[round_id]["entries"][0]["status"] == "success"
+        assert service.store.get_node(child.node_id).status == "success"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_distribution_barrier_preempts_waiting_children_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

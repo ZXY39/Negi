@@ -1698,6 +1698,7 @@ class ReActToolLoop:
             node.node_id,
             json.dumps(prepared_history, ensure_ascii=False, indent=2),
         )
+        recovery_diagnostic = self._spawn_recovery_diagnostic(node=node)
         self._log_service.update_frame(
             task.task_id,
             node.node_id,
@@ -1715,6 +1716,7 @@ class ReActToolLoop:
                 'child_pipelines': [],
                 'pending_child_specs': [],
                 'partial_child_results': [],
+                **recovery_diagnostic,
                 **self._execution_stage_frame_payload(
                     node_kind=node.node_kind,
                     stage_gate=self._execution_stage_gate(
@@ -1798,6 +1800,56 @@ class ReActToolLoop:
                 )
             )
         return replay_calls
+
+    def _spawn_recovery_diagnostic(self, *, node) -> dict[str, Any]:
+        metadata = dict(getattr(node, 'metadata', {}) or {})
+        spawn_operations = dict(metadata.get('spawn_operations') or {})
+        store = getattr(self._log_service, '_store', None)
+        get_node = getattr(store, 'get_node', None)
+        round_ids: list[str] = []
+        active_entry_indexes: list[int] = []
+        active_node_ids: list[str] = []
+        for cache_key, payload in spawn_operations.items():
+            if not isinstance(payload, dict) or bool(payload.get('completed')):
+                continue
+            round_ids.append(str(cache_key or '').strip())
+            for index, entry in enumerate(list(payload.get('entries') or [])):
+                if not isinstance(entry, dict):
+                    continue
+                status = str(entry.get('status') or '').strip().lower()
+                entry_active = status in {'queued', 'running'}
+                for field in ('child_node_id', 'acceptance_node_id'):
+                    bound_id = str(entry.get(field) or '').strip()
+                    if not bound_id or get_node is None:
+                        continue
+                    try:
+                        bound = get_node(bound_id)
+                    except Exception:
+                        bound = None
+                    if bound is None:
+                        continue
+                    bound_status = str(getattr(bound, 'status', '') or '').strip().lower()
+                    if bound_status and bound_status not in {'success', 'failed'}:
+                        entry_active = True
+                        if bound_id not in active_node_ids:
+                            active_node_ids.append(bound_id)
+                if entry_active and index not in active_entry_indexes:
+                    active_entry_indexes.append(index)
+        if active_node_ids:
+            mode = 'wait_existing_pipeline'
+        elif active_entry_indexes:
+            mode = 'rematerialize_round'
+        elif round_ids:
+            mode = 'replay_completed_result'
+        else:
+            mode = 'no_active_round'
+        return {
+            'spawn_recovery_mode': mode,
+            'spawn_recovery_round_id': round_ids[0] if round_ids else '',
+            'spawn_recovery_round_ids': round_ids,
+            'spawn_recovery_active_entry_indexes': sorted(active_entry_indexes),
+            'spawn_recovery_active_node_ids': active_node_ids,
+        }
 
     def _pending_tool_turn_content(self, *, node, pending_tool_calls: list[dict[str, Any]]) -> str:
         pending_ids = [str(item.get('id') or '').strip() for item in list(pending_tool_calls or []) if str(item.get('id') or '').strip()]
