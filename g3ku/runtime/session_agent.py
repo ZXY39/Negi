@@ -22,6 +22,8 @@ from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
     default_frontdoor_canonical_context,
     normalize_frontdoor_canonical_context,
+    project_canonical_context_for_transcript,
+    TRANSCRIPT_PROJECTION_MODE,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
@@ -36,6 +38,12 @@ _TRANSCRIPT_STATE_PAUSED = "paused"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 _ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS = 0.075
+
+
+def _project_transcript_canonical_context(canonical_context: Any) -> dict[str, Any]:
+    if not isinstance(canonical_context, dict) or not canonical_context:
+        return {}
+    return project_canonical_context_for_transcript(canonical_context)
 
 # User-facing message shown when a turn fails. The raw exception text is kept
 # for operators (error file / transcript metadata / "error" event) but never
@@ -1275,7 +1283,10 @@ class RuntimeAgentSession:
                 "metadata": metadata,
             }
             if canonical_context:
-                assistant_payload["canonical_context"] = canonical_context
+                projected = _project_transcript_canonical_context(canonical_context)
+                if projected:
+                    assistant_payload["canonical_context"] = projected
+                    assistant_payload["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
             if compression:
                 assistant_payload["compression"] = compression
             persisted_session.add_message("assistant", archived_text, **assistant_payload)
@@ -1378,7 +1389,10 @@ class RuntimeAgentSession:
             "metadata": metadata,
         }
         if canonical_context:
-            assistant_payload["canonical_context"] = canonical_context
+            projected = _project_transcript_canonical_context(canonical_context)
+            if projected:
+                assistant_payload["canonical_context"] = projected
+                assistant_payload["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
         if compression:
             assistant_payload["compression"] = compression
         try:
@@ -1393,9 +1407,16 @@ class RuntimeAgentSession:
                 archived_message["status"] = "paused"
                 archived_message["metadata"] = metadata
                 if canonical_context:
-                    archived_message["canonical_context"] = canonical_context
+                    projected = _project_transcript_canonical_context(canonical_context)
+                    if projected:
+                        archived_message["canonical_context"] = projected
+                        archived_message["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+                    else:
+                        archived_message.pop("canonical_context", None)
+                        archived_message.pop("canonical_context_projection", None)
                 else:
                     archived_message.pop("canonical_context", None)
+                    archived_message.pop("canonical_context_projection", None)
                 if compression:
                     archived_message["compression"] = compression
                 else:
@@ -2278,7 +2299,10 @@ class RuntimeAgentSession:
             canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
             if canonical_context:
-                assistant_payload["canonical_context"] = canonical_context
+                projected = _project_transcript_canonical_context(canonical_context)
+                if projected:
+                    assistant_payload["canonical_context"] = projected
+                    assistant_payload["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
             if compression:
                 assistant_payload["compression"] = compression
             metadata_payload = dict(assistant_metadata or {})

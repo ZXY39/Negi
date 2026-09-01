@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from loguru import logger
 from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
 from g3ku.config.loader import get_config_path, load_config
 from g3ku.runtime.frontdoor.canonical_context import canonical_context_tool_items
@@ -22,6 +23,13 @@ WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
 WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
 WEB_CEO_CONTINUITY_ROOT = Path(".g3ku") / "web-ceo-continuity"
 WEB_CEO_REQUEST_ROOT = Path(".g3ku") / "web-ceo-requests"
+FRONTDOOR_REQUEST_ARTIFACT_KEEP = 300
+# Pruning has to read the restorable sidecars, so it runs once per this many
+# persisted requests instead of on every model round. The on-disk bound stays
+# keep + interval.
+FRONTDOOR_REQUEST_ARTIFACT_PRUNE_INTERVAL = 25
+# Per-session counter used only to throttle how often pruning runs.
+_frontdoor_artifact_persist_count: dict[str, int] = {}
 WEB_CEO_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
@@ -1051,6 +1059,22 @@ def persist_frontdoor_actual_request(session_id: str, *, payload: dict[str, Any]
             )
             _atomic_write_json(path, minimal_record)
             record = minimal_record
+    try:
+        _frontdoor_artifact_persist_count[key] = _frontdoor_artifact_persist_count.get(key, 0) + 1
+        if _frontdoor_artifact_persist_count[key] % FRONTDOOR_REQUEST_ARTIFACT_PRUNE_INTERVAL == 1:
+            pruned = prune_frontdoor_actual_request_artifacts(key)
+            if pruned:
+                logger.info(
+                    "Pruned {} unreferenced frontdoor actual-request artifact(s) for session {}",
+                    pruned,
+                    key,
+                )
+    except Exception as exc:
+        logger.warning(
+            "Frontdoor artifact pruning failed for session {}: {}",
+            key,
+            exc,
+        )
     return {
         "request_id": request_id,
         "created_at": created_at,
@@ -1069,6 +1093,87 @@ def clear_actual_request_history(session_id: str) -> None:
     request_dir = actual_request_dir_for_session(session_id, create=False)
     if request_dir.exists():
         shutil.rmtree(request_dir, ignore_errors=True)
+    _frontdoor_artifact_persist_count.pop(str(session_id or "").strip(), None)
+
+
+def _referenced_request_artifact_paths(session_id: str) -> set[str]:
+    """Collect artifact paths still referenced by restorable sidecars."""
+    directory = actual_request_dir_for_session(session_id, create=False)
+    if not directory.exists():
+        return set()
+    try:
+        root = directory.resolve()
+    except Exception:
+        return set()
+    referenced: set[str] = set()
+    for reader in (
+        read_inflight_turn_snapshot,
+        read_paused_execution_context,
+        read_completed_continuity_snapshot,
+    ):
+        try:
+            payload = reader(session_id)
+        except Exception:
+            payload = None
+        if not payload:
+            continue
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                return
+            if not isinstance(value, str):
+                return
+            text = value.strip()
+            if not text.endswith(".json") or len(text) > 2048:
+                return
+            try:
+                candidate = Path(text).resolve()
+            except Exception:
+                return
+            if candidate.parent == root:
+                referenced.add(str(candidate))
+
+        walk(payload)
+    return referenced
+
+
+def prune_frontdoor_actual_request_artifacts(
+    session_id: str,
+    *,
+    keep: int = FRONTDOOR_REQUEST_ARTIFACT_KEEP,
+) -> int:
+    """Delete old unreferenced per-request artifacts, newest `keep` stay on disk.
+
+    Continuity restore only needs the artifacts the sidecars reference plus the
+    recent send ladder, so pruning older unreferenced files bounds disk use
+    without removing any restore or forensic source of truth.
+    """
+    key = str(session_id or "").strip()
+    if not key or keep <= 0:
+        return 0
+    directory = actual_request_dir_for_session(key, create=False)
+    if not directory.exists():
+        return 0
+    paths = sorted(directory.glob("*.json"), key=lambda item: item.name, reverse=True)
+    if len(paths) <= keep:
+        return 0
+    referenced = _referenced_request_artifact_paths(key)
+    deleted = 0
+    for artifact_path in paths[keep:]:
+        try:
+            if str(artifact_path.resolve()) in referenced:
+                continue
+            artifact_path.unlink()
+            deleted += 1
+        except Exception:
+            continue
+    return deleted
 
 
 def read_session_turn_token_usage(session_id: str) -> dict[str, dict[str, int]]:

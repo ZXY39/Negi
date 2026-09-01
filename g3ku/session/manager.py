@@ -1,6 +1,7 @@
 ﻿"""Session management for conversation history."""
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,70 @@ from typing import Any
 from loguru import logger
 
 from g3ku.utils.helpers import ensure_dir, safe_filename
+
+# Tail window read by `list_sessions` to pick up an incrementally appended
+# metadata row without parsing the whole transcript file.
+_METADATA_TAIL_WINDOW_BYTES = 512 * 1024
+
+
+class _TrackingList(list):
+    """List that records edits requiring a full-file rewrite.
+
+    Plain appends and extends are append-compatible with the JSONL store.
+    Any structural edit (insert, pop, replace, delete, clear, reorder) makes
+    the next save rewrite the whole file so the on-disk history stays exact.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.structural_edit = False
+
+    def _mark_edit(self) -> None:
+        self.structural_edit = True
+
+    def append(self, item: Any) -> None:
+        super().append(item)
+
+    def extend(self, items: Any) -> None:
+        super().extend(items)
+
+    def insert(self, index: int, item: Any) -> None:
+        self._mark_edit()
+        return super().insert(index, item)
+
+    def pop(self, index: int = -1) -> Any:
+        self._mark_edit()
+        return super().pop(index)
+
+    def remove(self, value: Any) -> None:
+        self._mark_edit()
+        return super().remove(value)
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._mark_edit()
+        return super().__setitem__(key, value)
+
+    def __delitem__(self, key: Any) -> None:
+        self._mark_edit()
+        return super().__delitem__(key)
+
+    def clear(self) -> None:
+        self._mark_edit()
+        return super().clear()
+
+    def sort(self, *args: Any, **kwargs: Any) -> None:
+        self._mark_edit()
+        return super().sort(*args, **kwargs)
+
+    def reverse(self) -> None:
+        self._mark_edit()
+        return super().reverse()
+
+    def __iadd__(self, other: Any) -> "_TrackingList":
+        self._mark_edit()
+        result = super().__iadd__(other)
+        self.structural_edit = True
+        return result
 
 
 @dataclass
@@ -22,12 +87,16 @@ class Session:
     """
 
     key: str  # channel:chat_id
-    messages: list[dict[str, Any]] = field(default_factory=list)
+    messages: _TrackingList = field(default_factory=_TrackingList)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_user_turn_at: str | None = None
     commit_turn_counter: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.messages, _TrackingList):
+            self.messages = _TrackingList(self.messages)
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -70,7 +139,11 @@ class Session:
 
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
-        self.messages = []
+        # Replacing the whole list is a structural edit even though the new
+        # list itself only ever receives appends afterwards.
+        messages = _TrackingList()
+        messages.structural_edit = True
+        self.messages = messages
         self.last_user_turn_at = None
         self.commit_turn_counter = 0
         self.updated_at = datetime.now()
@@ -87,6 +160,7 @@ class SessionManager:
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self._cache: dict[str, Session] = {}
+        self._file_states: dict[str, dict[str, Any]] = {}
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -124,7 +198,7 @@ class SessionManager:
             return None
 
         try:
-            messages = []
+            messages = _TrackingList()
             metadata = {}
             created_at = None
             last_user_turn_at: str | None = None
@@ -146,7 +220,7 @@ class SessionManager:
                     else:
                         messages.append(data)
 
-            return Session(
+            session = Session(
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
@@ -154,42 +228,176 @@ class SessionManager:
                 last_user_turn_at=last_user_turn_at,
                 commit_turn_counter=commit_turn_counter,
             )
+            self._migrate_oversized_records(session)
+            path_size = path.stat().st_size if path.exists() else 0
+            self._file_states[key] = {
+                "record_count": len(session.messages),
+                "size": path_size,
+            }
+            return session
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
             return None
 
+    def _migrate_oversized_records(self, session: Session) -> None:
+        """Shrink legacy transcript records once so future saves are append-only."""
+        try:
+            from g3ku.runtime.frontdoor.canonical_context import (
+                project_canonical_context_for_transcript,
+                TRANSCRIPT_PROJECTION_MODE,
+            )
+
+            messages = session.messages
+            migrated = 0
+            for index, message in enumerate(list(messages)):
+                if not isinstance(message, dict):
+                    continue
+                if str(message.get("canonical_context_projection") or "").strip():
+                    # Already a transcript projection: re-projecting cannot shrink
+                    # it further and would force a full rewrite on every load.
+                    continue
+                canonical_context = message.get("canonical_context")
+                if not isinstance(canonical_context, dict) or not canonical_context:
+                    continue
+                try:
+                    serialized = json.dumps(canonical_context, ensure_ascii=False)
+                except Exception:
+                    serialized = ""
+                if len(serialized) <= 256 * 1024:
+                    continue
+                projected = project_canonical_context_for_transcript(canonical_context)
+                if not list(projected.get("stages") or []):
+                    continue
+                updated = dict(message)
+                updated["canonical_context"] = projected
+                updated["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+                messages[index] = updated
+                migrated += 1
+            if migrated:
+                logger.info(
+                    "Projected {} oversized transcript record(s) for session {}; next save rewrites",
+                    migrated,
+                    session.key,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Skipped transcript projection migration for session {}: {}",
+                session.key,
+                exc,
+            )
+
+    def _metadata_line(self, session: Session) -> dict[str, Any]:
+        return {
+            "_type": "metadata",
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "last_user_turn_at": session.last_user_turn_at,
+            "commit_turn_counter": session.commit_turn_counter,
+        }
+
+    def _append_save(
+        self,
+        path: Path,
+        session: Session,
+        *,
+        start_index: int,
+    ) -> None:
+        with open(path, "a", encoding="utf-8") as f:
+            for msg in session.messages[start_index:]:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            f.write(json.dumps(self._metadata_line(session), ensure_ascii=False) + "\n")
+
     def save(self, session: Session) -> None:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
+        tracked = self._file_states.get(session.key)
+        messages = session.messages
+        appendable = (
+            tracked is not None
+            and path.exists()
+            and isinstance(messages, _TrackingList)
+            and not messages.structural_edit
+            and len(messages) >= int(tracked.get("record_count") or 0)
+            and path.stat().st_size == int(tracked.get("size") or -1)
+        )
+        if appendable:
+            self._append_save(path, session, start_index=int(tracked.get("record_count") or 0))
+            self._file_states[session.key] = {
+                "record_count": len(messages),
+                "size": path.stat().st_size,
+            }
+            self._cache[session.key] = session
+            return
 
         with open(path, "w", encoding="utf-8") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "last_user_turn_at": session.last_user_turn_at,
-                "commit_turn_counter": session.commit_turn_counter,
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
+            f.write(json.dumps(self._metadata_line(session), ensure_ascii=False) + "\n")
             for msg in session.messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
+        if isinstance(messages, _TrackingList):
+            messages.structural_edit = False
+        self._file_states[session.key] = {
+            "record_count": len(messages),
+            "size": path.stat().st_size,
+        }
         self._cache[session.key] = session
 
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
+        self._file_states.pop(key, None)
 
     def delete(self, key: str) -> bool:
         """Delete a session from disk and cache."""
         path = self._get_session_path(key)
         self.invalidate(key)
+        self._file_states.pop(key, None)
         if not path.exists():
             return False
         path.unlink()
         return True
+
+    @staticmethod
+    def _metadata_entry(line: str, path: Path) -> dict[str, Any] | None:
+        """Parse one JSONL line into a listing entry when it is a metadata row."""
+        text = (line or "").strip()
+        if not text:
+            return None
+        try:
+            data = json.loads(text)
+        except Exception:
+            return None
+        if not isinstance(data, dict) or data.get("_type") != "metadata":
+            return None
+        return {
+            "key": data.get("key") or path.stem.replace("_", ":", 1),
+            "created_at": data.get("created_at"),
+            "updated_at": data.get("updated_at"),
+            "path": str(path),
+        }
+
+    def _session_list_entry(self, path: Path) -> dict[str, Any] | None:
+        """Build the session listing entry without reading the whole transcript.
+
+        Incremental saves append a fresh metadata row, so the last metadata row
+        is authoritative for `updated_at` / `commit_turn_counter`, while the
+        first row still provides the original `created_at`. Only the head and a
+        bounded tail window are read.
+        """
+        with open(path, "rb") as f:
+            head = f.readline(_METADATA_TAIL_WINDOW_BYTES).decode("utf-8", errors="ignore")
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - _METADATA_TAIL_WINDOW_BYTES))
+            tail = f.read().decode("utf-8", errors="ignore")
+        head_entry = self._metadata_entry(head, path)
+        tail_lines = [item for item in tail.split("\n") if item.strip()]
+        tail_entry = self._metadata_entry(tail_lines[-1] if tail_lines else "", path)
+        if tail_entry and head_entry:
+            tail_entry["created_at"] = tail_entry.get("created_at") or head_entry.get("created_at")
+        return tail_entry or head_entry
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """
@@ -198,25 +406,15 @@ class SessionManager:
         Returns:
             List of session info dicts.
         """
-        sessions = []
+        entries: list[dict[str, Any]] = []
 
         for path in self.sessions_dir.glob("*.jsonl"):
             try:
-                # Read just the metadata line
-                with open(path, encoding="utf-8") as f:
-                    first_line = f.readline().strip()
-                    if first_line:
-                        data = json.loads(first_line)
-                        if data.get("_type") == "metadata":
-                            key = data.get("key") or path.stem.replace("_", ":", 1)
-                            sessions.append({
-                                "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
-                                "path": str(path)
-                            })
+                entry = self._session_list_entry(path)
             except Exception:
-                continue
+                entry = None
+            if entry:
+                entries.append(entry)
 
-        return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+        return sorted(entries, key=lambda x: x.get("updated_at", ""), reverse=True)
 

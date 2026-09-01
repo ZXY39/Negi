@@ -146,7 +146,8 @@ CEO/frontdoor 路径上，`frontdoor_stage_state.stages[].rounds[].tools` 是“
 
 - `_frontdoor_stage_state_after_tool_cycle()` 在工具循环完成时写入精确的 round 级工具记录。每条记录携带稳定身份（`tool_call_id`）与展示字段（`tool_name`、`status`、`arguments_text`、`output_preview_text` / `output_text`、`output_ref`、`timestamp`、`kind`、`source`）；`tool_names` / `tool_call_ids` 是派生提示，不是第二真相源。
 - stage/round 账本还携带展示文本：每个 round 记录有 `text`（该循环的轮中叙述），`submit_next_stage` 创建的阶段携带 `preamble_text`（随阶段调用发出的叙述，属于新阶段并渲染在其上方）。两者都是展示导向、只服务 Web 时间线，必须存活于每一个归一化跳板（`_frontdoor_stage_state_snapshot`、`canonical_context.py`、`raw_stage_renderer.py`），且不得喂给 prompt 组装或转录权威链。
-- durable 转录每轮只存最终 assistant 文本；每轮叙述在 reload 时从 assistant 条目上持久化的 `canonical_context` 恢复。
+- durable 转录每轮只存最终 assistant 文本；每轮叙述在 reload 时从 assistant 条目上持久化的投影 `canonical_context` 恢复。投影沿用最近 raw 阶段窗口，更早完成阶段以 compact 摘要保留，并对 raw round 内的工具正文与入参做转录专用限长。
+- `SessionManager` 以追加写入维护 JSONL：只新增转录记录时追加新记录与一条尾部 metadata；插入、删除、替换或外部改变文件布局时全量重写。读取以尾部 metadata 为当前会话状态，旧版超大 assistant 快照在加载时投影一次，下一次保存收敛文件体积。
 - `RuntimeAgentSession` 的 `latest_message` 只保存最新一段思考的 assistant 文本：模型调用开始标记段边界但不清空驻留文本，新一段首个流式 delta 到达时整体覆盖；`analysis` 进度事件直接替换驻留文本；UI 时间线从 stage/round 记录重建，`latest_message` 只是预览/回退气泡。
 
 `RuntimeAgentSession` 重建 `canonical_context` 时的合同：
@@ -369,6 +370,8 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 - 它是 durable 的跨回合阶段/历史视图；turn finalization 把当前轮阶段账本并入该结构。`frontdoor_stage_state` 与 `compression_state` 是运行时工作状态，不需要在每个新用户 / heartbeat / cron 轮次的 prompt 组装前清空；当前轮本地状态为空时，`prepare_turn` 可以复用 session-owned 请求体与这些快照重建下一个 provider 请求窗口。
 - session/runtime 同步不得把 request-local 投影写回 `frontdoor_canonical_context`：只有 turn finalization 允许向 durable canonical 链追加 completed-stage 数据；`frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生出的一切只是当前请求的可见 workset 数据。
 - 近场 stage workset 从 `frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生，不从 transcript `execution_trace_summary` 或平铺 `tool_events` 重建。round-level 工具记录同时保存归一化原始 `arguments`；小输出内联在 `output_text`，大输出外置为 `output_ref` + `output_preview_text`，prompt 渲染器不把 artifact 正文读回内联。
+- canonical 归一化以 `stage_id` 和完成阶段内容身份做 last-write collapse：同一逻辑阶段被 rebase 后再次并入时保留最新副本，不重复追加整个携带 workset。排查 sidecar 膨胀时，记录数应与 distinct stage 身份数一致；持续增长说明合并边界回归。
+- `project_canonical_context_for_transcript()` 只用于 assistant 转录记录：保留当前 canonical 表示窗口（最近 3 个完成普通阶段与活动阶段为 raw，更早阶段为 compact），并截短 raw round 内超大工具正文与入参。provider prompt 与 UI live snapshot 不读取这份转录投影，仍以 durable canonical context 和当前 stage state 为权威。
 - 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
 - UI 面向的 turn payload 暴露当前轮的 `canonical_context` 切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 

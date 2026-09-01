@@ -10,9 +10,13 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.core.results import RunResult
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
+from main.protocol import now_iso
 
 EventListener = Callable[[AgentEvent], Awaitable[None] | None]
 TaskRegistrar = Callable[[str, asyncio.Task[Any]], None]
+
+# Metadata key recorded when the runtime starts handling an inbound turn.
+TURN_INBOUND_RECEIVED_AT_KEY = "turn_inbound_received_at"
 
 
 @dataclass(slots=True)
@@ -23,6 +27,23 @@ class SessionSubscription:
 
 class SessionRuntimeBridge:
     """Shared session glue for web, CLI, and background services."""
+
+    @staticmethod
+    def _stamp_inbound_received_at(
+        message: str | UserInputMessage,
+    ) -> str | UserInputMessage:
+        """Stamp the bridge handoff time so provider artifacts can measure it.
+
+        Only UserInputMessage carries metadata, which is what the QQ and web
+        channels send. Plain strings are passed through unchanged.
+        """
+        if not isinstance(message, UserInputMessage):
+            return message
+        metadata = dict(getattr(message, "metadata", None) or {})
+        if not str(metadata.get(TURN_INBOUND_RECEIVED_AT_KEY) or "").strip():
+            metadata[TURN_INBOUND_RECEIVED_AT_KEY] = now_iso()
+            message.metadata = metadata
+        return message
 
     def __init__(self, manager: SessionRuntimeManager):
         self._manager = manager
@@ -68,7 +89,7 @@ class SessionRuntimeBridge:
         )
         task = asyncio.create_task(
             session.prompt(
-                message,
+                self._stamp_inbound_received_at(message),
                 persist_transcript=persist_transcript,
                 live_context=live_context,
             )
@@ -138,7 +159,7 @@ class SessionRuntimeBridge:
         )
         task = asyncio.create_task(
             session.prompt_batch(
-                messages,
+                [self._stamp_inbound_received_at(item) for item in list(messages or [])],
                 persist_transcript=persist_transcript,
                 live_context=live_context,
             )

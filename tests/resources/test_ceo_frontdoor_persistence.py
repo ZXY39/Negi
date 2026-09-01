@@ -2426,4 +2426,54 @@ async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_self_exe
     assert stage["finished_at"]
 
 
+def test_prune_frontdoor_request_artifacts_keeps_referenced_and_newest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+    directory = web_ceo_sessions.actual_request_dir_for_session("web:test")
+    referenced = directory / "20260101T000000_000000_referenced.json"
+    stale = directory / "20260101T000001_000000_stale.json"
+    newest = directory / "29991231T000000_000000_newest.json"
+    for path in (referenced, stale, newest):
+        path.write_text("{}", encoding="utf-8")
+    web_ceo_sessions.write_completed_continuity_snapshot(
+        "web:test",
+        {
+            "frontdoor_request_body_messages": [{"role": "user", "content": "hello"}],
+            "frontdoor_actual_request_path": str(referenced.resolve()),
+            "source_reason": "actual_request_sync",
+            "updated_at": "2026-09-01T00:00:00",
+        },
+    )
+
+    deleted = web_ceo_sessions.prune_frontdoor_actual_request_artifacts("web:test", keep=1)
+
+    assert deleted == 1
+    assert referenced.exists()
+    assert newest.exists()
+    assert not stale.exists()
+
+
+def test_persist_frontdoor_request_survives_pruning_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("pruning unavailable")
+
+    monkeypatch.setattr(web_ceo_sessions, "prune_frontdoor_actual_request_artifacts", _fail)
+
+    record = web_ceo_sessions.persist_frontdoor_actual_request(
+        "web:test",
+        payload={
+            "created_at": "2026-09-01T00:00:00",
+            "request_messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert Path(record["path"]).exists()
+
 

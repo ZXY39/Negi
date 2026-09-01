@@ -11,6 +11,7 @@ import math
 import re
 import uuid
 
+from datetime import datetime
 from loguru import logger
 from dataclasses import dataclass
 from pathlib import Path
@@ -3442,6 +3443,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
         usage: dict[str, Any] | None = None,
+        provider_request_started_at: str = "",
     ) -> dict[str, Any]:
         session_key = str(state.get("session_key") or getattr(getattr(runtime, "context", None), "session_key", "") or "").strip()
         if not session_key:
@@ -3470,6 +3472,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             usage=usage,
             request_kind="frontdoor_actual_request",
             request_lane="visible_frontdoor",
+            provider_request_started_at=provider_request_started_at,
         )
         if target_session is not None:
             restore_source = str(getattr(target_session, "_frontdoor_restore_source", "none") or "none").strip() or "none"
@@ -3609,6 +3612,49 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         merged["effective_input_tokens_source"] = str(truth.get("source") or "provider_usage")
         return merged
 
+    @staticmethod
+    def _parse_frontdoor_timing_timestamp(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.astimezone()
+        return parsed
+
+    def _frontdoor_turn_timing_fields(
+        self,
+        state: CeoGraphState,
+        *,
+        provider_request_started_at: str = "",
+    ) -> dict[str, Any]:
+        """Measure the pre-request window: bridge inbound → provider send.
+
+        ``created_at`` on an artifact is written after the provider response
+        returns, so it cannot expose dispatch, transcript persistence, prompt
+        assembly, or preflight time. These fields make first-hop latency
+        attributable instead of inferred.
+        """
+        metadata = _user_input_metadata(state.get("user_input"))
+        inbound_received_at = str(metadata.get("turn_inbound_received_at") or "").strip()
+        started_at = str(provider_request_started_at or "").strip()
+        fields: dict[str, Any] = {
+            "provider_request_started_at": started_at,
+            "turn_inbound_received_at": inbound_received_at,
+            "inbound_to_request_start_seconds": None,
+        }
+        inbound_dt = self._parse_frontdoor_timing_timestamp(inbound_received_at)
+        started_dt = self._parse_frontdoor_timing_timestamp(started_at)
+        if inbound_dt is not None and started_dt is not None:
+            fields["inbound_to_request_start_seconds"] = round(
+                (started_dt - inbound_dt).total_seconds(),
+                3,
+            )
+        return fields
+
     def _build_frontdoor_request_artifact_payload(
         self,
         *,
@@ -3626,6 +3672,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_kind: str,
         request_lane: str,
         parent_request_id: str = "",
+        provider_request_started_at: str = "",
     ) -> dict[str, Any]:
         diagnostics = dict(prompt_cache_diagnostics or {})
         provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
@@ -3649,6 +3696,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             preflight_diagnostics,
             observed_input_truth,
         )
+        turn_timing = self._frontdoor_turn_timing_fields(
+            state,
+            provider_request_started_at=provider_request_started_at,
+        )
         return {
             "type": str(request_kind or "").strip() or "frontdoor_actual_request",
             "request_kind": str(request_kind or "").strip() or "frontdoor_actual_request",
@@ -3657,6 +3708,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "turn_id": str(turn_id or "").strip(),
             "parent_request_id": str(parent_request_id or "").strip(),
             "created_at": now_iso(),
+            **turn_timing,
             "provider_model": resolved_provider_model,
             "model_refs": [
                 str(item or "").strip()
@@ -5891,8 +5943,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             provider_retry_count = 0
             empty_response_retry_count = 0
             restart_with_refreshed_runtime = False
+            provider_request_started_at = ""
             while True:
                 try:
+                    if not provider_request_started_at:
+                        provider_request_started_at = now_iso()
                     message = await self._call_model_with_tools(
                         messages=request_messages,
                         langchain_tools=langchain_tools,
@@ -5950,6 +6005,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 else {}
             ),
             usage=self._model_response_usage(message),
+            provider_request_started_at=provider_request_started_at,
         )
         message_state_update = (
             self._replace_messages_update(
