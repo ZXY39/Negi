@@ -158,6 +158,15 @@ class CeoRuntimeContext:
 
 @dataclass(slots=True)
 
+class CeoRuntime:
+
+    context: CeoRuntimeContext
+
+
+
+
+@dataclass(slots=True)
+
 class CeoPendingInterrupt:
 
     interrupt_id: str
@@ -170,13 +179,21 @@ class CeoPendingInterrupt:
 
 class CeoFrontdoorInterrupted(RuntimeError):  # noqa: N818
 
-    def __init__(self, *, interrupts: list[CeoPendingInterrupt], values: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        *,
+        interrupts: list[CeoPendingInterrupt],
+        values: dict[str, Any],
+        resume_state: dict[str, Any] | None = None,
+    ) -> None:
 
         super().__init__("ceo_frontdoor_interrupted")
 
         self.interrupts = list(interrupts or [])
 
         self.values = dict(values or {})
+
+        self.resume_state = dict(resume_state or {})
 
 
 
@@ -282,6 +299,8 @@ __all__ = [
     "CeoPersistentState",
 
     "CeoRuntimeContext",
+
+    "CeoRuntime",
 
     "initial_persistent_state",
 

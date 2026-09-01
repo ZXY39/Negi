@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import inspect
 import json
 from typing import Any
 
-from langchain_core.messages import BaseMessage, RemoveMessage, convert_to_messages
+from langchain_core.messages import BaseMessage, convert_to_messages
 from langchain_core.messages import SystemMessage as CoreSystemMessage
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
-from langgraph.types import Command
 
 from g3ku.core.messages import UserInputMessage
 
-from ._ceo_runtime_ops import CeoFrontDoorRuntimeOps
+from ._ceo_runtime_ops import CeoFrontDoorRuntimeOps, _NO_RESUME, raise_frontdoor_approval_interrupt
 from .ceo_agent_middleware import (
     CeoApprovalMiddleware,
     CeoModelOutputMiddleware,
@@ -22,6 +19,7 @@ from .ceo_agent_middleware import (
 )
 from .state_models import (
     CeoPersistentState,
+    CeoRuntime,
     CeoRuntimeContext,
     initial_persistent_state,
 )
@@ -37,42 +35,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
     def __init__(self, *, loop: Any) -> None:
         super().__init__(loop=loop)
         self._agent = None
-        self._agent_checkpointer_ref = None
-
-    def _invalidate_cached_runtime_bindings_if_stale(self) -> bool:
-        current_checkpointer = getattr(self._loop, "_checkpointer", None)
-        cached_checkpointer = getattr(self, "_agent_checkpointer_ref", None)
-        if self._agent is None and self._compiled_graph is None:
-            self._agent_checkpointer_ref = current_checkpointer
-            return False
-        if cached_checkpointer is current_checkpointer:
-            return False
-        self._agent = None
-        self._compiled_graph = None
-        self._agent_checkpointer_ref = current_checkpointer
-        return True
-
-    async def _ensure_runtime_bindings_ready(self) -> bool:
-        ensure_ready = getattr(self._loop, "_ensure_checkpointer_ready", None)
-        if callable(ensure_ready):
-            result = ensure_ready()
-            if inspect.isawaitable(result):
-                await result
-        changed = self._invalidate_cached_runtime_bindings_if_stale()
-        checkpointer = getattr(self._loop, "_checkpointer", None)
-        is_active = getattr(self._loop, "_sqlite_checkpointer_is_active", None)
-        if callable(is_active) and checkpointer is not None and not is_active(checkpointer):
-            if not changed:
-                self._agent = None
-                self._compiled_graph = None
-                self._agent_checkpointer_ref = checkpointer
-                changed = True
-            if callable(ensure_ready):
-                result = ensure_ready()
-                if inspect.isawaitable(result):
-                    await result
-            self._agent_checkpointer_ref = getattr(self._loop, "_checkpointer", None)
-        return changed
 
     def build_prompt_context(self, *, state, runtime, tools) -> dict[str, str]:
         _ = runtime, tools
@@ -365,7 +327,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         return system_message, list(convert_to_messages(normalized_records))
 
     def _replace_messages_update(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *list(messages or [])]}
+        return {"messages": list(messages or [])}
 
     def _request_messages_for_state(
         self,
@@ -492,7 +454,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             return payload
         prepared = await self._graph_prepare_turn(
             initial_persistent_state(user_input=user_input),
-            runtime=type("RuntimeShim", (), {"context": runtime_context})(),
+            runtime=CeoRuntime(context=runtime_context),
         )
         prepared["agent_runtime"] = "create_agent"
         refreshed = self._refresh_prompt_cache_state(state=dict(prepared))
@@ -505,7 +467,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         user_inputs: list[str | UserInputMessage],
         session,
     ) -> dict[str, Any]:
-        await self._ensure_runtime_bindings_ready()
         normalized_inputs: list[UserInputMessage] = []
         for raw in list(user_inputs or []):
             item = raw if isinstance(raw, UserInputMessage) else UserInputMessage(content=str(raw))
@@ -555,7 +516,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             },
             runtime_context=runtime_context,
         )
-        runtime_shim = type("RuntimeShim", (), {"context": runtime_context})()
+        runtime_shim = CeoRuntime(context=runtime_context)
         preflight = self._frontdoor_send_preflight_snapshot(
             state=dict(prepared or {}),
             runtime=runtime_shim,
@@ -756,8 +717,8 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             )
         return normalized
 
-    def _node_review_tool_calls(self, state, runtime) -> dict[str, Any]:
-        reviewed = self._graph_review_tool_calls(state, runtime=runtime)
+    def _node_review_tool_calls(self, state, runtime, resume_decision: Any = _NO_RESUME) -> dict[str, Any]:
+        reviewed = self._graph_review_tool_calls(state, runtime=runtime, resume_decision=resume_decision)
         self._sync_runtime_session_frontdoor_state(
             state={**dict(state or {}), **dict(reviewed or {})},
             runtime=runtime,
@@ -856,11 +817,50 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             return self._agent
         if self._compiled_graph is None:
             self._compiled_graph = self._build_compiled_graph()
-            self._agent_checkpointer_ref = getattr(self._loop, "_checkpointer", None)
         return self._compiled_graph
 
+    async def _run_step_loop(
+        self,
+        *,
+        state: dict[str, Any],
+        runtime: CeoRuntime,
+        entry: str,
+        resume_decision: Any = _NO_RESUME,
+    ) -> dict[str, Any]:
+        current_state = dict(state or {})
+        current = str(entry or "").strip()
+        pending_resume = resume_decision
+        while True:
+            if current == "prepare_turn":
+                update = await self._node_prepare_turn(current_state, runtime)
+                current_state.update(update)
+                current = "call_model"
+            elif current == "call_model":
+                update = await self._node_call_model(current_state, runtime)
+                current_state.update(update)
+                current = "normalize_model_output"
+            elif current == "normalize_model_output":
+                update = await self._node_normalize_model_output(current_state, runtime)
+                current_state.update(update)
+                current = self._graph_next_step(current_state)
+            elif current == "review_tool_calls":
+                update = self._node_review_tool_calls(current_state, runtime, resume_decision=pending_resume)
+                pending_resume = _NO_RESUME
+                current_state.update(update)
+                current = self._graph_next_step(current_state)
+            elif current == "execute_tools":
+                update = await self._node_execute_tools(current_state, runtime)
+                current_state.update(update)
+                current = self._graph_next_step(current_state)
+            elif current == "finalize":
+                update = await self._node_finalize_turn(current_state, runtime)
+                current_state.update(update)
+                break
+            else:
+                raise RuntimeError("ceo_frontdoor_unknown_step")
+        return current_state
+
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
-        await self._ensure_runtime_bindings_ready()
         setattr(session, "_last_route_kind", "direct_reply")
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         runtime_context = CeoRuntimeContext(
@@ -875,33 +875,39 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 "metadata": dict(getattr(user_input, "metadata", {}) or {}),
             },
         )
-        graph_output = await self._get_agent().ainvoke(
-            payload,
-            config=self._thread_config(session_key),
-            context=runtime_context,
-            version="v2",
+        values = await self._run_step_loop(
+            state=payload,
+            runtime=CeoRuntime(context=runtime_context),
+            entry="prepare_turn",
         )
-        values = self._unwrap_graph_output(graph_output)
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
         self._sync_runtime_session_frontdoor_state(state=values, session=session)
         return str(values.get("final_output") or "")
 
     async def resume_turn(self, *, session, resume_value, on_progress=None) -> str:
-        await self._ensure_runtime_bindings_ready()
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
-        graph_output = await self._get_agent().ainvoke(
-            Command(resume=resume_value),
-            config=self._thread_config(session_key),
-            context=CeoRuntimeContext(
-                loop=self._loop,
-                session=session,
-                session_key=session_key,
-                on_progress=on_progress,
-            ),
-            version="v2",
+        snapshot_getter = getattr(session, "paused_execution_context_snapshot", None)
+        paused_snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        graph_state_blob = (paused_snapshot or {}).get("graph_state") if isinstance(paused_snapshot, dict) else None
+        if (
+            not isinstance(graph_state_blob, dict)
+            or int(graph_state_blob.get("version") or 0) != 2
+            or not isinstance(graph_state_blob.get("state"), dict)
+        ):
+            raise RuntimeError("frontdoor_interrupt_resume_snapshot_unavailable")
+        runtime_context = CeoRuntimeContext(
+            loop=self._loop,
+            session=session,
+            session_key=session_key,
+            on_progress=on_progress,
         )
-        values = self._unwrap_graph_output(graph_output)
+        values = await self._run_step_loop(
+            state=dict(graph_state_blob["state"]),
+            runtime=CeoRuntime(context=runtime_context),
+            entry="review_tool_calls",
+            resume_decision=resume_value,
+        )
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
         self._sync_runtime_session_frontdoor_state(state=values, session=session)

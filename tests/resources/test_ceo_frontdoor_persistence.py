@@ -493,16 +493,17 @@ class _ExecTool(Tool):
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_runner_passes_thread_id_and_runtime_context() -> None:
-    ready_calls: list[str] = []
+async def test_ceo_frontdoor_runner_passes_thread_id_and_runtime_context(monkeypatch) -> None:
+    captured: dict[str, object] = {}
 
-    async def _noop_ready() -> None:
-        ready_calls.append("ready")
+    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
+        captured["state"] = state
+        captured["runtime"] = runtime
+        captured["entry"] = entry
+        return {"final_output": "ok", "route_kind": "tool_result", "verified_task_ids": []}
 
-    loop = SimpleNamespace(_ensure_checkpointer_ready=_noop_ready)
-    runner = CeoFrontDoorRunner(loop=loop)
-    compiled_graph = _CompiledGraphRecorder()
-    runner._compiled_graph = compiled_graph
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner._impl, "_run_step_loop", _fake_run_step_loop)
 
     async def _on_progress(content: str, **kwargs) -> None:
         _ = content, kwargs
@@ -519,18 +520,14 @@ async def test_ceo_frontdoor_runner_passes_thread_id_and_runtime_context() -> No
     )
 
     assert output == "ok"
-    assert ready_calls == ["ready"]
     assert getattr(session, "_last_route_kind") == "tool_result"
+    assert captured["entry"] == "prepare_turn"
 
-    assert len(compiled_graph.calls) == 1
-    call = compiled_graph.calls[0]
-    assert call["config"] == {"configurable": {"thread_id": "web:shared"}}
-
-    runtime_context = call["context"]
+    runtime_context = getattr(captured["runtime"], "context")
     assert runtime_context is not None
     assert getattr(runtime_context, "session_key") == "web:shared"
 
-    graph_input = dict(call["input"] or {})
+    graph_input = dict(captured["state"] or {})
     assert graph_input["user_input"] == {
         "content": "persist this turn",
         "metadata": {"cron_job_id": "cron-1"},
@@ -541,13 +538,19 @@ async def test_ceo_frontdoor_runner_passes_thread_id_and_runtime_context() -> No
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_run_turn_raises_structured_interrupt() -> None:
-    async def _noop_ready() -> None:
-        return None
+async def test_ceo_frontdoor_run_turn_raises_structured_interrupt(monkeypatch) -> None:
+    async def _raise_interrupt(*, state, runtime, entry, resume_decision=None):
+        _ = state, runtime, entry
+        raise CeoFrontdoorInterrupted(
+            interrupts=[
+                SimpleNamespace(interrupt_id="interrupt-1", value={"kind": "frontdoor_tool_approval"})
+            ],
+            values={"route_kind": "direct_reply"},
+            resume_state={},
+        )
 
-    loop = SimpleNamespace(_ensure_checkpointer_ready=_noop_ready)
-    runner = CeoFrontDoorRunner(loop=loop)
-    runner._compiled_graph = _InterruptingCompiledGraph()
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner._impl, "_run_step_loop", _raise_interrupt)
     session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
 
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
@@ -561,45 +564,22 @@ async def test_ceo_frontdoor_run_turn_raises_structured_interrupt() -> None:
     assert exc_info.value.interrupts[0].value["kind"] == "frontdoor_tool_approval"
 
 
-@pytest.mark.asyncio
-async def test_ceo_frontdoor_run_turn_serializes_interrupt_payloads() -> None:
+def test_ceo_frontdoor_run_turn_serializes_interrupt_payloads() -> None:
     class _OpaqueArg:
         def __str__(self) -> str:
             return "opaque-arg"
 
-    class _OpaqueInterruptingCompiledGraph:
-        async def ainvoke(self, input, config=None, *, context=None, version="v1", **kwargs):
-            _ = input, config, context, version, kwargs
-            payloads = [{"name": "create_async_task", "arguments": {"task": _OpaqueArg()}}]
-            return _FakeGraphOutput(
-                value={
-                    "approval_request": {"kind": "frontdoor_tool_approval", "tool_calls": payloads},
-                    "tool_call_payloads": payloads,
-                },
-                interrupts=(
-                    SimpleNamespace(
-                        id="interrupt-1",
-                        value={"kind": "frontdoor_tool_approval", "tool_calls": payloads},
-                    ),
-                ),
-            )
-
-    async def _noop_ready() -> None:
-        return None
-
-    loop = SimpleNamespace(_ensure_checkpointer_ready=_noop_ready)
-    runner = CeoFrontDoorRunner(loop=loop)
-    runner._compiled_graph = _OpaqueInterruptingCompiledGraph()
-    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
+    payloads = [{"name": "create_async_task", "arguments": {"task": _OpaqueArg()}}]
 
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
-        await runner.run_turn(
-            user_input=SimpleNamespace(content="create a task", metadata={}),
-            session=session,
-            on_progress=None,
+        ceo_runtime_ops.raise_frontdoor_approval_interrupt(
+            state={
+                "approval_request": {"kind": "frontdoor_tool_approval", "tool_calls": payloads},
+                "tool_call_payloads": payloads,
+            },
+            payload={"kind": "frontdoor_tool_approval", "tool_calls": payloads},
         )
 
-    assert exc_info.value.interrupts[0].interrupt_id == "interrupt-1"
     assert exc_info.value.interrupts[0].value == {
         "kind": "frontdoor_tool_approval",
         "tool_calls": [{"name": "create_async_task", "arguments": {"task": "opaque-arg"}}],
@@ -625,15 +605,23 @@ async def test_ceo_frontdoor_run_turn_serializes_interrupt_payloads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_resume_turn_uses_command_resume_on_same_thread() -> None:
-    async def _noop_ready() -> None:
-        return None
+async def test_ceo_frontdoor_resume_turn_uses_command_resume_on_same_thread(monkeypatch) -> None:
+    captured: dict[str, object] = {}
 
-    graph = _InterruptingCompiledGraph()
-    loop = SimpleNamespace(_ensure_checkpointer_ready=_noop_ready)
-    runner = CeoFrontDoorRunner(loop=loop)
-    runner._compiled_graph = graph
-    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"))
+    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
+        captured["state"] = state
+        captured["entry"] = entry
+        captured["resume_decision"] = resume_decision
+        return {"final_output": "approved reply", "route_kind": "direct_reply", "verified_task_ids": []}
+
+    runner = CeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner._impl, "_run_step_loop", _fake_run_step_loop)
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        paused_execution_context_snapshot=lambda: {
+            "graph_state": {"version": 2, "state": {"approval_request": {"kind": "frontdoor_tool_approval"}}}
+        },
+    )
 
     output = await runner.resume_turn(
         session=session,
@@ -642,9 +630,8 @@ async def test_ceo_frontdoor_resume_turn_uses_command_resume_on_same_thread() ->
     )
 
     assert output == "approved reply"
-    assert isinstance(graph.calls[0]["input"], Command)
-    assert graph.calls[0]["config"] == {"configurable": {"thread_id": "web:shared"}}
-    assert graph.calls[0]["version"] == "v2"
+    assert captured["entry"] == "review_tool_calls"
+    assert captured["resume_decision"] == {"approved": True}
 
 
 def test_ceo_frontdoor_review_tool_calls_ignores_resume_payload_tool_call_overrides(
@@ -656,8 +643,8 @@ def test_ceo_frontdoor_review_tool_calls_ignores_resume_payload_tool_call_overri
 
     monkeypatch.setattr(
         ceo_runtime_ops,
-        "interrupt",
-        lambda value: {"approved": True, "tool_calls": override_payloads},
+        "raise_frontdoor_approval_interrupt",
+        lambda *, state, payload: {"approved": True, "tool_calls": override_payloads},
     )
 
     result = runner._graph_review_tool_calls(
@@ -1018,8 +1005,7 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
     assert "response_message" not in update
     assert "response_content" not in update
     replaced_messages = list(update["messages"] or [])
-    assert getattr(replaced_messages[0], "id", "") == REMOVE_ALL_MESSAGES
-    assert replaced_messages[1:] == [{"role": "user", "content": "list files"}]
+    assert replaced_messages == [{"role": "user", "content": "list files"}]
     assert update["response_payload"] == {
         "content": "tool reply",
         "tool_calls": [{"id": "call-1", "name": "filesystem", "arguments": {"path": "."}}],

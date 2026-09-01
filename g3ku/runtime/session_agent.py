@@ -2682,7 +2682,7 @@ class RuntimeAgentSession:
                 **(self._build_execution_context_snapshot(allow_manual_pause=True, status_override="paused") or {}),
                 "source": "approval",
                 "interrupts": serialized_interrupts,
-                "graph_state": interrupt_values,
+                "graph_state": {"version": 2, "state": dict(getattr(exc, "resume_state", None) or {})},
             }
         )
         await self._emit("frontdoor_interrupt", interrupts=serialized_interrupts)

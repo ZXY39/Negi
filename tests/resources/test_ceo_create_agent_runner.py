@@ -633,75 +633,6 @@ def test_ceo_runner_always_selects_create_agent_impl(monkeypatch) -> None:
     assert isinstance(runner._impl, _New)
 
 
-def test_ceo_runner_invalidate_runtime_bindings_clears_cached_agent_and_graph() -> None:
-    runner = ceo_runner.CeoFrontDoorRunner(loop=SimpleNamespace())
-    runner._impl._agent = object()
-    runner._impl._compiled_graph = object()
-
-    runner.invalidate_runtime_bindings()
-
-    assert runner._impl._agent is None
-    assert runner._impl._compiled_graph is None
-
-
-def test_create_agent_runner_invalidates_cached_bindings_when_checkpointer_generation_changes() -> None:
-    original_checkpointer = object()
-    next_checkpointer = object()
-    loop = SimpleNamespace(_checkpointer=next_checkpointer)
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
-    runner._agent = object()
-    runner._compiled_graph = object()
-    runner._agent_checkpointer_ref = original_checkpointer
-
-    changed = runner._invalidate_cached_runtime_bindings_if_stale()
-
-    assert changed is True
-    assert runner._agent is None
-    assert runner._compiled_graph is None
-    assert runner._agent_checkpointer_ref is next_checkpointer
-
-
-def test_create_agent_runner_keeps_cached_bindings_when_checkpointer_generation_is_unchanged() -> None:
-    current_checkpointer = object()
-    loop = SimpleNamespace(_checkpointer=current_checkpointer)
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
-    cached_agent = object()
-    cached_graph = object()
-    runner._agent = cached_agent
-    runner._compiled_graph = cached_graph
-    runner._agent_checkpointer_ref = current_checkpointer
-
-    changed = runner._invalidate_cached_runtime_bindings_if_stale()
-
-    assert changed is False
-    assert runner._agent is cached_agent
-    assert runner._compiled_graph is cached_graph
-    assert runner._agent_checkpointer_ref is current_checkpointer
-
-
-@pytest.mark.asyncio
-async def test_create_agent_runner_invalidates_cached_bindings_when_current_checkpointer_connection_is_inactive() -> None:
-    current_checkpointer = object()
-    readiness_calls: list[str] = []
-    loop = SimpleNamespace(
-        _checkpointer=current_checkpointer,
-        _ensure_checkpointer_ready=lambda: readiness_calls.append("ready"),
-        _sqlite_checkpointer_is_active=lambda value: False if value is current_checkpointer else True,
-    )
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
-    runner._agent = object()
-    runner._compiled_graph = object()
-    runner._agent_checkpointer_ref = current_checkpointer
-
-    changed = await runner._ensure_runtime_bindings_ready()
-
-    assert changed is True
-    assert readiness_calls == ["ready", "ready"]
-    assert runner._agent is None
-    assert runner._compiled_graph is None
-    assert runner._agent_checkpointer_ref is current_checkpointer
-
-
 def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     monkeypatch.setattr(runner, "_effective_turn_overlay_text", lambda state: "overlay-text")
@@ -766,8 +697,7 @@ async def test_create_agent_runner_node_prepare_turn_replaces_messages_instead_o
         runtime=SimpleNamespace(),
     )
 
-    assert getattr(update["messages"][0], "id", "") == REMOVE_ALL_MESSAGES
-    assert update["messages"][1:] == [
+    assert update["messages"] == [
         {"role": "system", "content": "stable system"},
         {"role": "user", "content": "latest user"},
     ]
@@ -1272,27 +1202,23 @@ async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_passes_thread_id_and_context_with_minimal_initial_state() -> None:
+async def test_create_agent_runner_passes_thread_id_and_context_with_minimal_initial_state(monkeypatch) -> None:
     captured: dict[str, object] = {}
-    readiness_calls: list[str] = []
     session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
     progress_calls: list[object] = []
 
     async def _on_progress(*args, **kwargs):
         progress_calls.append((args, kwargs))
 
-    class _FakeCompiledGraph:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v1"):
-            captured["payload"] = payload
-            captured["config"] = config
-            captured["context"] = context
-            captured["version"] = version
-            return {"messages": [], "route_kind": "direct_reply", "final_output": "ok"}
+    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
+        captured["state"] = state
+        captured["runtime"] = runtime
+        captured["entry"] = entry
+        captured["resume_decision"] = resume_decision
+        return {"messages": [], "route_kind": "direct_reply", "final_output": "ok", "verified_task_ids": []}
 
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: readiness_calls.append("ready"))
-    )
-    runner._compiled_graph = _FakeCompiledGraph()
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_run_step_loop", _fake_run_step_loop)
 
     output = await runner.run_turn(
         user_input=SimpleNamespace(content="hello", metadata={}),
@@ -1301,36 +1227,32 @@ async def test_create_agent_runner_passes_thread_id_and_context_with_minimal_ini
     )
 
     assert output == "ok"
-    assert readiness_calls == ["ready"]
     assert session._last_route_kind == "direct_reply"
-    assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
-    assert getattr(captured["context"], "session_key") == "web:shared"
-    assert getattr(captured["context"], "loop") is runner._loop
-    assert getattr(captured["context"], "session") is session
-    assert getattr(captured["context"], "on_progress") is _on_progress
-    assert captured["payload"] == initial_persistent_state(
-        user_input={"content": "hello", "metadata": {}}
-    )
+    assert captured["entry"] == "prepare_turn"
+    runtime_context = getattr(captured["runtime"], "context")
+    assert runtime_context.session_key == "web:shared"
+    assert runtime_context.loop is runner._loop
+    assert runtime_context.session is session
+    assert runtime_context.on_progress is _on_progress
+    assert captured["state"] == initial_persistent_state(user_input={"content": "hello", "metadata": {}})
+    assert captured["resume_decision"] is None
     assert progress_calls == []
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_raises_structured_interrupt() -> None:
-    readiness_calls: list[str] = []
+async def test_create_agent_runner_raises_structured_interrupt(monkeypatch) -> None:
     session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
 
-    class _InterruptingAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return _FakeGraphOutput(
-                value={"approval_request": {"kind": "frontdoor_tool_approval"}},
-                interrupts=(SimpleNamespace(id="interrupt-1", value={"kind": "frontdoor_tool_approval"}),),
-            )
+    def _raise_interrupt(*, state, runtime, entry, resume_decision=None):
+        _ = runtime
+        raise CeoFrontdoorInterrupted(
+            interrupts=[SimpleNamespace(interrupt_id="interrupt-1", value={"kind": "frontdoor_tool_approval"})],
+            values={"approval_request": {"kind": "frontdoor_tool_approval"}},
+            resume_state={"approval_request": {"kind": "frontdoor_tool_approval"}, "next_step": "review_tool_calls"},
+        )
 
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: readiness_calls.append("ready"))
-    )
-    runner._agent = _InterruptingAgent()
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_run_step_loop", _raise_interrupt)
 
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
         await runner.run_turn(
@@ -1339,34 +1261,35 @@ async def test_create_agent_runner_raises_structured_interrupt() -> None:
             on_progress=None,
         )
 
-    assert readiness_calls == ["ready"]
     assert session._last_route_kind == "direct_reply"
     assert exc_info.value.values == {"approval_request": {"kind": "frontdoor_tool_approval"}}
     assert [item.interrupt_id for item in exc_info.value.interrupts] == ["interrupt-1"]
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_resume_uses_command_resume() -> None:
+async def test_create_agent_runner_resume_uses_command_resume(monkeypatch) -> None:
     captured: dict[str, object] = {}
-    readiness_calls: list[str] = []
-    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _last_route_kind="task_dispatch",
+        paused_execution_context_snapshot=lambda: {
+            "graph_state": {"version": 2, "state": {"approval_request": {"kind": "frontdoor_tool_approval"}}}
+        },
+    )
     progress_calls: list[object] = []
 
     async def _on_progress(*args, **kwargs):
         progress_calls.append((args, kwargs))
 
-    class _ResumeAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            captured["context"] = context
-            captured["version"] = version
-            captured["payload"] = payload
-            captured["config"] = config
-            return {"messages": [], "route_kind": "self_execute", "final_output": "approved"}
+    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
+        captured["state"] = state
+        captured["runtime"] = runtime
+        captured["entry"] = entry
+        captured["resume_decision"] = resume_decision
+        return {"messages": [], "route_kind": "self_execute", "final_output": "approved", "verified_task_ids": []}
 
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: readiness_calls.append("ready"))
-    )
-    runner._agent = _ResumeAgent()
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_run_step_loop", _fake_run_step_loop)
 
     result = await runner.resume_turn(
         session=session,
@@ -1375,35 +1298,38 @@ async def test_create_agent_runner_resume_uses_command_resume() -> None:
     )
 
     assert result == "approved"
-    assert readiness_calls == ["ready"]
-    assert isinstance(captured["payload"], Command)
-    assert getattr(captured["payload"], "resume", None) == {"decisions": [{"type": "approve"}]}
-    assert captured["config"] == {"configurable": {"thread_id": "web:shared"}}
-    assert getattr(captured["context"], "session_key") == "web:shared"
-    assert getattr(captured["context"], "loop") is runner._loop
-    assert getattr(captured["context"], "session") is session
-    assert getattr(captured["context"], "on_progress") is _on_progress
+    assert captured["entry"] == "review_tool_calls"
+    assert captured["resume_decision"] == {"decisions": [{"type": "approve"}]}
+    assert captured["state"] == {"approval_request": {"kind": "frontdoor_tool_approval"}}
+    runtime_context = getattr(captured["runtime"], "context")
+    assert runtime_context.session_key == "web:shared"
+    assert runtime_context.loop is runner._loop
+    assert runtime_context.session is session
+    assert runtime_context.on_progress is _on_progress
     assert session._last_route_kind == "self_execute"
     assert progress_calls == []
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
-    readiness_calls: list[str] = []
-    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
-
-    class _InterruptingResumeAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return _FakeGraphOutput(
-                value={"approval_request": {"kind": "frontdoor_tool_approval"}, "final_output": "ignored"},
-                interrupts=(SimpleNamespace(id="interrupt-2", value={"kind": "frontdoor_tool_approval"}),),
-            )
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: readiness_calls.append("ready"))
+async def test_create_agent_runner_resume_raises_structured_interrupt(monkeypatch) -> None:
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _last_route_kind="task_dispatch",
+        paused_execution_context_snapshot=lambda: {
+            "graph_state": {"version": 2, "state": {"approval_request": {"kind": "frontdoor_tool_approval"}}}
+        },
     )
-    runner._agent = _InterruptingResumeAgent()
+
+    async def _raise_interrupt(*, state, runtime, entry, resume_decision=None):
+        _ = state, runtime, entry
+        raise CeoFrontdoorInterrupted(
+            interrupts=[SimpleNamespace(interrupt_id="interrupt-2", value={"kind": "frontdoor_tool_approval"})],
+            values={"approval_request": {"kind": "frontdoor_tool_approval"}, "final_output": "ignored"},
+            resume_state={},
+        )
+
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_run_step_loop", _raise_interrupt)
 
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
         await runner.resume_turn(
@@ -1412,7 +1338,6 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
             on_progress=None,
         )
 
-    assert readiness_calls == ["ready"]
     assert session._last_route_kind == "task_dispatch"
     assert exc_info.value.values == {
         "approval_request": {"kind": "frontdoor_tool_approval"},
@@ -1422,7 +1347,7 @@ async def test_create_agent_runner_resume_raises_structured_interrupt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compression_to_session() -> None:
+async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compression_to_session(monkeypatch) -> None:
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         _last_route_kind="task_dispatch",
@@ -1431,27 +1356,24 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
         _frontdoor_hydrated_tool_names=[],
     )
 
-    class _FakeAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return {
-                "messages": [],
-                "route_kind": "self_execute",
-                "final_output": "ok",
-                "verified_task_ids": ["task:demo-123"],
-                "hydrated_tool_names": ["filesystem_write"],
-                "frontdoor_stage_state": {
-                    "active_stage_id": "frontdoor-stage-1",
-                    "transition_required": False,
-                    "stages": [{"stage_id": "frontdoor-stage-1", "rounds": []}],
-                },
-                "compression_state": {"status": "", "text": "", "source": ""},
-            }
+    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
+        _ = state, runtime, entry, resume_decision
+        return {
+            "messages": [],
+            "route_kind": "self_execute",
+            "final_output": "ok",
+            "verified_task_ids": ["task:demo-123"],
+            "hydrated_tool_names": ["filesystem_write"],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [{"stage_id": "frontdoor-stage-1", "rounds": []}],
+            },
+            "compression_state": {"status": "", "text": "", "source": ""},
+        }
 
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
-    )
-    runner._agent = _FakeAgent()
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_run_step_loop", _fake_run_step_loop)
 
     output = await runner.run_turn(
         user_input=SimpleNamespace(content="hello", metadata={}),
@@ -1469,36 +1391,36 @@ async def test_create_agent_runner_run_turn_wires_frontdoor_stage_and_compressio
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compression_to_session() -> None:
+async def test_create_agent_runner_resume_turn_wires_frontdoor_stage_and_compression_to_session(monkeypatch) -> None:
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         _last_route_kind="task_dispatch",
         _frontdoor_stage_state={},
         _compression_state={},
         _frontdoor_hydrated_tool_names=[],
+        paused_execution_context_snapshot=lambda: {
+            "graph_state": {"version": 2, "state": {"approval_request": {"kind": "frontdoor_tool_approval"}}}
+        },
     )
 
-    class _FakeAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return {
-                "messages": [],
-                "route_kind": "direct_reply",
-                "final_output": "approved",
-                "verified_task_ids": [],
-                "hydrated_tool_names": ["filesystem_write"],
-                "frontdoor_stage_state": {
-                    "active_stage_id": "",
-                    "transition_required": True,
-                    "stages": [{"stage_id": "frontdoor-stage-1", "status": "completed", "rounds": []}],
-                },
-                "compression_state": {"status": "idle", "text": "", "source": ""},
-            }
+    async def _fake_run_step_loop(*, state, runtime, entry, resume_decision=None):
+        _ = state, runtime, entry, resume_decision
+        return {
+            "messages": [],
+            "route_kind": "direct_reply",
+            "final_output": "approved",
+            "verified_task_ids": [],
+            "hydrated_tool_names": ["filesystem_write"],
+            "frontdoor_stage_state": {
+                "active_stage_id": "",
+                "transition_required": True,
+                "stages": [{"stage_id": "frontdoor-stage-1", "status": "completed", "rounds": []}],
+            },
+            "compression_state": {"status": "idle", "text": "", "source": ""},
+        }
 
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
-    )
-    runner._agent = _FakeAgent()
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    monkeypatch.setattr(runner, "_run_step_loop", _fake_run_step_loop)
 
     output = await runner.resume_turn(
         session=session,
@@ -8108,43 +8030,25 @@ async def test_create_agent_prompt_middleware_accepts_legacy_dict_tool_contract_
     assert response.model_response.result == [AIMessage(content="ok")]
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_preserves_full_tool_call_payloads_when_approval_request_is_subset() -> None:
-    class _InterruptingAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return _FakeGraphOutput(
-                value={
-                    "approval_request": {
-                        "kind": "frontdoor_tool_approval",
-                        "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
-                    },
-                },
-                interrupts=(
-                    SimpleNamespace(
-                        id="interrupt-1",
-                        value={
-                            "kind": "frontdoor_tool_approval",
-                            "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
-                            "tool_call_payloads": [
-                                {"name": "create_async_task", "arguments": {"task": "demo"}},
-                                {"name": "memory_write", "arguments": {"content": "persist this"}},
-                            ],
-                        },
-                    ),
-                ),
-            )
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
-    )
-    runner._agent = _InterruptingAgent()
+def test_create_agent_runner_preserves_full_tool_call_payloads_when_approval_request_is_subset() -> None:
+    payload = {
+        "kind": "frontdoor_tool_approval",
+        "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+        "tool_call_payloads": [
+            {"name": "create_async_task", "arguments": {"task": "demo"}},
+            {"name": "memory_write", "arguments": {"content": "persist this"}},
+        ],
+    }
 
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
-        await runner.run_turn(
-            user_input=SimpleNamespace(content="create a task", metadata={}),
-            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
-            on_progress=None,
+        ceo_runtime_ops.raise_frontdoor_approval_interrupt(
+            state={
+                "approval_request": {
+                    "kind": "frontdoor_tool_approval",
+                    "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+                },
+            },
+            payload=payload,
         )
 
     assert exc_info.value.values["tool_call_payloads"] == [
@@ -8153,45 +8057,22 @@ async def test_create_agent_runner_preserves_full_tool_call_payloads_when_approv
     ]
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_keeps_pending_interrupt_contract_coherent() -> None:
-    class _InterruptingAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return _FakeGraphOutput(
-                value={
-                    "prompt_cache_key": "cache-key",
-                    "prompt_cache_diagnostics": {
-                        "stable_prompt_signature": "sig-1",
-                        "tool_signature_count": 1,
-                    },
-                },
-                interrupts=(
-                    SimpleNamespace(
-                        id="interrupt-1",
-                        value={
-                            "kind": "frontdoor_tool_approval",
-                            "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
-                        },
-                    ),
-                ),
-            )
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
-    )
-    runner._agent = _InterruptingAgent()
-
-    session = SimpleNamespace(state=SimpleNamespace(session_key="web:shared"), _last_route_kind="task_dispatch")
-
+def test_create_agent_runner_keeps_pending_interrupt_contract_coherent() -> None:
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
-        await runner.run_turn(
-            user_input=SimpleNamespace(content="create a task", metadata={}),
-            session=session,
-            on_progress=None,
+        ceo_runtime_ops.raise_frontdoor_approval_interrupt(
+            state={
+                "prompt_cache_key": "cache-key",
+                "prompt_cache_diagnostics": {
+                    "stable_prompt_signature": "sig-1",
+                    "tool_signature_count": 1,
+                },
+            },
+            payload={
+                "kind": "frontdoor_tool_approval",
+                "tool_calls": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
+            },
         )
 
-    assert session._last_route_kind == "direct_reply"
     assert exc_info.value.values == {
         "approval_request": {
             "kind": "frontdoor_tool_approval",
@@ -8206,42 +8087,22 @@ async def test_create_agent_runner_keeps_pending_interrupt_contract_coherent() -
     }
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_preserves_full_tool_call_payload_batch_from_interrupt_state() -> None:
+def test_create_agent_runner_preserves_full_tool_call_payload_batch_from_interrupt_state() -> None:
     subset_payloads = [{"id": "call-1", "name": "exec", "arguments": {"command": "safe subset"}}]
     full_payloads = subset_payloads + [
         {"id": "call-2", "name": "create_async_task", "arguments": {"task": "risky full batch"}}
     ]
 
-    class _InterruptingAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return _FakeGraphOutput(
-                value={"prompt_cache_key": "cache-key"},
-                interrupts=(
-                    SimpleNamespace(
-                        id="interrupt-1",
-                        value={
-                            "approval_request": {
-                                "kind": "frontdoor_tool_approval",
-                                "tool_calls": subset_payloads,
-                            },
-                            "tool_call_payloads": full_payloads,
-                        },
-                    ),
-                ),
-            )
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
-    )
-    runner._agent = _InterruptingAgent()
-
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
-        await runner.run_turn(
-            user_input=SimpleNamespace(content="create a task", metadata={}),
-            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
-            on_progress=None,
+        ceo_runtime_ops.raise_frontdoor_approval_interrupt(
+            state={"prompt_cache_key": "cache-key"},
+            payload={
+                "approval_request": {
+                    "kind": "frontdoor_tool_approval",
+                    "tool_calls": subset_payloads,
+                },
+                "tool_call_payloads": full_payloads,
+            },
         )
 
     assert exc_info.value.values == {
@@ -8254,31 +8115,15 @@ async def test_create_agent_runner_preserves_full_tool_call_payload_batch_from_i
     }
 
 
-@pytest.mark.asyncio
-async def test_create_agent_runner_sanitizes_interrupt_payloads_before_raising() -> None:
-    class _InterruptingAgent:
-        async def ainvoke(self, payload, config=None, *, context=None, version="v2"):
-            _ = payload, config, context, version
-            return _FakeGraphOutput(
-                value={"approval_request": {"details": _NonPrimitive()}, "items": {_NonPrimitive()}},
-                interrupts=(
-                    SimpleNamespace(
-                        id="interrupt-1",
-                        value={"kind": "frontdoor_tool_approval", "payload": _NonPrimitive(), "extra": {_NonPrimitive()}},
-                    ),
-                ),
-            )
-
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
-        loop=SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
-    )
-    runner._agent = _InterruptingAgent()
-
+def test_create_agent_runner_sanitizes_interrupt_payloads_before_raising() -> None:
     with pytest.raises(CeoFrontdoorInterrupted) as exc_info:
-        await runner.run_turn(
-            user_input=SimpleNamespace(content="create a task", metadata={}),
-            session=SimpleNamespace(state=SimpleNamespace(session_key="web:shared")),
-            on_progress=None,
+        ceo_runtime_ops.raise_frontdoor_approval_interrupt(
+            state={"approval_request": {"details": _NonPrimitive()}, "items": {_NonPrimitive()}},
+            payload={
+                "kind": "frontdoor_tool_approval",
+                "payload": _NonPrimitive(),
+                "extra": {_NonPrimitive()},
+            },
         )
 
     assert exc_info.value.values == {

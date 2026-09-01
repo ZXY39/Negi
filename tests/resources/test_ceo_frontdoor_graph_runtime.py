@@ -38,7 +38,8 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_interrupt(payload):
+    def _fake_interrupt(*, state, payload):
+        _ = state
         captured["payload"] = payload
         return {
             "type": "submit_batch_review",
@@ -48,7 +49,7 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
             ],
         }
 
-    monkeypatch.setattr(ceo_runtime_ops, "interrupt", _fake_interrupt)
+    monkeypatch.setattr(ceo_runtime_ops, "raise_frontdoor_approval_interrupt", _fake_interrupt)
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     runtime = SimpleNamespace(context=SimpleNamespace(session=None))
@@ -146,7 +147,8 @@ def test_graph_review_tool_calls_interrupt_payload_includes_runtime_contract_and
 
 
 def test_graph_review_tool_calls_rejects_partial_batch_submit(monkeypatch) -> None:
-    def _fake_interrupt(_payload):
+    def _fake_interrupt(*, state, payload):
+        _ = state, payload
         return {
             "type": "submit_batch_review",
             "batch_id": "batch:123",
@@ -155,7 +157,7 @@ def test_graph_review_tool_calls_rejects_partial_batch_submit(monkeypatch) -> No
             ],
         }
 
-    monkeypatch.setattr(ceo_runtime_ops, "interrupt", _fake_interrupt)
+    monkeypatch.setattr(ceo_runtime_ops, "raise_frontdoor_approval_interrupt", _fake_interrupt)
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     runtime = SimpleNamespace(context=SimpleNamespace(session=None))
