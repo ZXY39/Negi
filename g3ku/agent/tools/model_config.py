@@ -211,10 +211,9 @@ class ModelConfigTool(Tool):
             from g3ku.shells.web import refresh_web_agent_runtime, is_no_ceo_model_configured_error
             # Model routing changes do not alter the memory_runtime resource
             # fingerprint, so the memory runtime sync stays fingerprint-gated
-            # (force_memory_sync defaults to False). Forcing it would close the
-            # active SQLite checkpointer mid-turn and fail the in-flight
-            # graph's final checkpoint write ("closed database"). Only actions
-            # that rewrite memory-affecting settings stored outside the
+            # (force_memory_sync defaults to False). Forcing it would reset the
+            # memory runtime mid-turn and disrupt the in-flight turn. Only
+            # actions that rewrite memory-affecting settings stored outside the
             # fingerprint tree (migrate_legacy) opt into the forced reset.
             await refresh_web_agent_runtime(
                 force=True, reason="model_config_tool", force_memory_sync=force_memory_sync

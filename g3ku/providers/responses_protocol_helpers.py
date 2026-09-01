@@ -100,7 +100,7 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
 def _sanitize_tool_call_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drop incomplete tool-call turns that would break Responses API replay.
 
-    LangGraph checkpoints can occasionally retain an assistant tool call without the
+    Interrupted or failed turns can occasionally retain an assistant tool call without the
     matching tool output when a prior run was interrupted or failed mid-turn. The
     Responses API rejects such history. Preserve assistant text, but strip dangling
     tool calls so subsequent turns can continue.

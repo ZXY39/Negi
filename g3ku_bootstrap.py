@@ -25,7 +25,7 @@ MIN_PYTHON = (3, 11)
 MIN_CHINA_BRIDGE_NODE = (20, 0, 0)
 WINDOWS_NODE_LTS_PACKAGE_ID = "OpenJS.NodeJS.LTS"
 RUNTIME_IMPORT_PROBES = (
-    "langgraph.checkpoint.sqlite.aio",
+    "langchain_core.messages",
     "aiosqlite",
 )
 

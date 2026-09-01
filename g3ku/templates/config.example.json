@@ -2,7 +2,6 @@
   "agents": {
     "defaults": {
       "workspace": ".",
-      "runtime": "langgraph",
       "maxTokens": 8192,
       "temperature": 0.1,
       "maxToolIterations": 40,

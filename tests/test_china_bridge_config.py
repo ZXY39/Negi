@@ -258,7 +258,7 @@ def test_load_config_removes_deprecated_langgraph_ceo_frontdoor_flag(tmp_path, m
 
     cfg = load_config()
 
-    assert cfg.agents.defaults.runtime == "langgraph"
+    assert not hasattr(cfg.agents.defaults, "runtime")
     saved = json.loads(config_path.read_text(encoding="utf-8"))
     assert "ceoFrontdoorImplementation" not in saved.get("agents", {})
 
@@ -743,7 +743,24 @@ def test_deleted_compat_modules_cannot_be_imported():
         "g3ku.runtime.tool_bridge",
         "g3ku.integrations.langchain_runtime",
         "g3ku.agent.langgraph_memory",
+        "g3ku.runtime.frontdoor.checkpoint_inspection",
+        "g3ku.runtime.frontdoor.ceo_agent_middleware",
     ):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(module_name)
+
+
+def test_langgraph_is_not_imported_in_source_tree():
+    root = Path(__file__).resolve().parents[1]
+    offenders: list[str] = []
+    for src_dir in ("g3ku", "main"):
+        for path in (root / src_dir).rglob("*.py"):
+            if path.name.endswith(".pyi"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("import langgraph", "from langgraph")):
+                    offenders.append(f"{path.relative_to(root)}: {stripped}")
+    assert offenders == []
 

@@ -22,14 +22,6 @@ def make_agent_loop(
     session_manager=None,
 ):
     """Create the configured agent runtime without CLI-specific side effects."""
-    runtime = (config.agents.defaults.runtime or "langgraph").lower()
-    if runtime != "langgraph":
-        raise ValueError(
-            "Original field: agents.defaults.runtime\n"
-            f"Current value: {runtime!r}\n"
-            "New supported value: 'langgraph' only."
-        )
-
     from g3ku.agent.loop import AgentLoop
 
     try:

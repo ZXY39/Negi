@@ -9,13 +9,6 @@ from langchain_core.messages import SystemMessage as CoreSystemMessage
 from g3ku.core.messages import UserInputMessage
 
 from ._ceo_runtime_ops import CeoFrontDoorRuntimeOps, _NO_RESUME, raise_frontdoor_approval_interrupt
-from .ceo_agent_middleware import (
-    CeoApprovalMiddleware,
-    CeoModelOutputMiddleware,
-    CeoPromptAssemblyMiddleware,
-    CeoToolExposureMiddleware,
-    CeoTurnLifecycleMiddleware,
-)
 from .state_models import (
     CeoRuntime,
     CeoRuntimeContext,
@@ -747,17 +740,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             runtime=runtime,
         )
         return update
-
-    def _middleware(self) -> list[Any]:
-        # Retained only for compatibility tests around prompt assembly and cache diagnostics.
-        # The production CEO/frontdoor path runs on the self-built step loop.
-        return [
-            CeoTurnLifecycleMiddleware(runner=self),
-            CeoToolExposureMiddleware(runner=self),
-            CeoPromptAssemblyMiddleware(runner=self),
-            CeoApprovalMiddleware(runner=self),
-            CeoModelOutputMiddleware(runner=self),
-        ]
 
     async def _run_step_loop(
         self,

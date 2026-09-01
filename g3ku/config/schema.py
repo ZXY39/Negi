@@ -151,40 +151,12 @@ class AgentDefaults(Base):
     workspace: str = "."
     model: str = ""
     provider: str = "auto"  # Deprecated; provider selection is derived from managed models.
-    runtime: Literal["langgraph"] = "langgraph"  # Single runtime mode (classic removed)
     max_tokens: int = 8192
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
     reasoning_effort: str | None = None  # low / medium / high ? enables LLM thinking mode
     middlewares: list[AgentMiddlewareConfig] = Field(default_factory=list)
-
-    @field_validator("runtime", mode="before")
-    @classmethod
-    def _validate_runtime(cls, value: Any) -> str:
-        runtime = str(value or "langgraph").strip().lower()
-        if runtime == "classic":
-            raise ValueError(
-                "Unsupported config after 1.0 migration.\n"
-                "Original field: agents.defaults.runtime = 'classic'\n"
-                "New behavior: g3ku only supports LangGraph runtime.\n"
-                "Example fix:\n"
-                "  {\n"
-                "    \"agents\": {\n"
-                "      \"defaults\": {\n"
-                "        \"model\": \"openai:gpt-4.1\"\n"
-                "      }\n"
-                "    }\n"
-                "  }"
-            )
-        if runtime != "langgraph":
-            raise ValueError(
-                "Invalid agents.defaults.runtime.\n"
-                f"Original field value: {value!r}\n"
-                "New supported value: 'langgraph' (single runtime mode).\n"
-                "Example fix: set agents.defaults.runtime to 'langgraph' or remove the field."
-            )
-        return "langgraph"
 
 
 class RoleIterationConfig(Base):
@@ -579,20 +551,6 @@ class WebConfig(Base):
     port: int = 18790
 
 
-class MemoryCheckpointerConfig(Base):
-    """LangGraph checkpointer configuration."""
-
-    backend: Literal["sqlite", "memory"] = "sqlite"
-    path: str = "memory/checkpoints.sqlite3"
-    # Capacity governance: keep the bounded checkpoint cache from growing the
-    # file without bound. See operations-and-maintenance "SQLite checkpointer
-    # capacity governance".
-    max_checkpoints_per_thread: int = Field(default=200, ge=1)
-    trim_interval_seconds: float = Field(default=300.0, ge=0.0)
-    vacuum_min_file_size_bytes: int = Field(default=512 * 1024 * 1024, ge=0)
-    vacuum_interval_seconds: float = Field(default=21600.0, ge=0.0)
-
-
 class MemoryIsolationConfig(Base):
     """Namespace isolation controls."""
 
@@ -692,7 +650,6 @@ class MemoryToolsConfig(Base):
     enabled: bool = True
     arch_version: Literal["v1", "v2"] = "v2"
     features: MemoryFeaturesConfig = Field(default_factory=MemoryFeaturesConfig)
-    checkpointer: MemoryCheckpointerConfig = Field(default_factory=MemoryCheckpointerConfig)
     isolation: MemoryIsolationConfig = Field(default_factory=MemoryIsolationConfig)
     guard: MemoryGuardConfig = Field(default_factory=MemoryGuardConfig)
     commit: MemoryCommitConfig = Field(default_factory=MemoryCommitConfig)

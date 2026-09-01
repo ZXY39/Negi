@@ -35,7 +35,6 @@ _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",
     "cursor",
-    "checkpointer",
     "aiosqlite",
     "programmingerror",
     "no active connection",

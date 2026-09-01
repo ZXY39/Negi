@@ -300,7 +300,7 @@ def _make_agent_loop(
     cron_service=None,
     session_manager=None,
 ):
-    """Create the configured agent runtime (LangGraph-only)."""
+    """Create the configured agent runtime."""
     _memory_startup_self_check(config)
     try:
         return _runtime_make_agent_loop(
@@ -845,13 +845,11 @@ def status():
         console.print(f"主Agent Model: {config.resolve_role_model_key('ceo')}")
         console.print(f"Execution Model: {config.resolve_role_model_key('execution')}")
         console.print(f"Inspection Model: {config.resolve_role_model_key('inspection')}")
-        console.print(f"Runtime: {config.agents.defaults.runtime}")
 
         mem_cfg = _load_memory_runtime_settings(config)
         if mem_cfg is None:
             console.print("Memory Runtime: [yellow]missing tools/memory_runtime/resource.yaml[/yellow]")
         else:
-            cp_path = resolve_path_in_workspace(mem_cfg.checkpointer.path, config.workspace_path)
             memory_file = resolve_path_in_workspace(mem_cfg.document.memory_file, config.workspace_path)
             notes_dir = resolve_path_in_workspace(mem_cfg.document.notes_dir, config.workspace_path)
             queue_file = resolve_path_in_workspace(mem_cfg.queue.queue_file, config.workspace_path)
@@ -861,7 +859,6 @@ def status():
             console.print(f"Memory Notes Dir: {notes_dir} {_status_mark(notes_dir.exists())}")
             console.print(f"Memory Queue: {queue_file} {_status_mark(queue_file.exists())}")
             console.print(f"Memory Ops Log: {ops_file} {_status_mark(ops_file.exists())}")
-            console.print(f"Memory Checkpointer: {mem_cfg.checkpointer.backend} {cp_path}")
 
         # Check API keys from registry
         for spec in PROVIDERS:

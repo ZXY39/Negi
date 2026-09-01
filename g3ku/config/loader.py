@@ -442,7 +442,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         "agents": {
             "defaults": {
                 "workspace": cfg.agents.defaults.workspace,
-                "runtime": cfg.agents.defaults.runtime,
                 "maxTokens": cfg.agents.defaults.max_tokens,
                 "temperature": cfg.agents.defaults.temperature,
                 "maxToolIterations": cfg.agents.defaults.max_tool_iterations,

@@ -49,13 +49,6 @@ settings:
     query_planner: true
     commit_pipeline: true
     observability: true
-  checkpointer:
-    backend: sqlite
-    path: memory/checkpoints.sqlite3
-    max_checkpoints_per_thread: 200
-    trim_interval_seconds: 300
-    vacuum_min_file_size_bytes: 536870912
-    vacuum_interval_seconds: 21600
   isolation:
     mode: global
     namespace_template:

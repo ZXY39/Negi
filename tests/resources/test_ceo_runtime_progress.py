@@ -27,7 +27,6 @@ from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.runtime import web_ceo_sessions
 from g3ku.runtime.api import ceo_sessions, websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
-from g3ku.runtime.frontdoor import ceo_agent_middleware
 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder

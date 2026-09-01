@@ -20,10 +20,10 @@ def refresh_loop_runtime_config(
     forced to reset+reinitialize. By default (``False``) the memory runtime is
     only reset when its resource fingerprint actually changed (see
     ``RuntimeBootstrapBridge._sync_memory_runtime``), so routine config/model
-    refreshes do not close the active SQLite checkpointer out from under an
-    in-flight turn. Only callers that change memory-affecting settings stored
-    outside the ``tools/memory_runtime`` fingerprint tree (e.g. the admin
-    embedding/rerank binding endpoints) should pass ``True``.
+    refreshes do not reset it out from under an in-flight turn. Only callers
+    that change memory-affecting settings stored outside the
+    ``tools/memory_runtime`` fingerprint tree (e.g. the admin embedding/rerank
+    binding endpoints) should pass ``True``.
     """
     if force:
         security = get_bootstrap_security_service(

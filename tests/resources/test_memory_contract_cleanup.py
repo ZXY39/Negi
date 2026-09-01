@@ -64,7 +64,6 @@ def test_status_reports_current_memory_runtime_contract_without_legacy_store_fie
             enabled=True,
             document=SimpleNamespace(memory_file="memory/MEMORY.md", notes_dir="memory/notes"),
             queue=SimpleNamespace(queue_file="memory/queue.jsonl", ops_file="memory/ops.jsonl"),
-            checkpointer=SimpleNamespace(backend="sqlite", path="memory/checkpoints.sqlite3"),
         ),
     )
     monkeypatch.setattr("g3ku.providers.registry.PROVIDERS", [])
@@ -78,7 +77,6 @@ def test_status_reports_current_memory_runtime_contract_without_legacy_store_fie
     assert "Memory Notes Dir:" in output
     assert "Memory Queue:" in output
     assert "Memory Ops Log:" in output
-    assert "Memory Checkpointer:" in output
     assert "Memory Mode:" not in output
     assert "Memory Store(SQLite):" not in output
     assert "Memory Store(Qdrant):" not in output
