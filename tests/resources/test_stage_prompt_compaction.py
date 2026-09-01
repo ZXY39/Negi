@@ -468,3 +468,73 @@ def test_in_place_compaction_renders_legacy_compression_stage_blocks() -> None:
     # 遗留压缩阶段无窗口痕迹，块落在重写区开头
     assert contents[0].startswith(STAGE_EXTERNALIZED_PREFIX)
     assert "output-11" in contents  # 最近 3 保留
+
+def test_in_place_compaction_keeps_internal_events_when_no_structural_change() -> None:
+    # 缓存中性：本次压缩没有任何阶段结构变化时，内部事件束一律保留，
+    # 不允许为清理历史定时任务凭空打断 provider 前缀缓存。
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：abc"},
+        {"role": "system", "content": "[CRON INTERNAL EVENT]\n{}"},
+        {"role": "user", "content": "This is a background heartbeat. stay calm"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    stage_state = {"active_stage_id": "", "transition_required": False, "stages": []}
+
+    result = compact_stage_prompt_messages_in_place(messages, stage_state=stage_state)
+
+    contents = [str(item.get("content") or "") for item in result["rewritten"]]
+    assert result["removed_message_count"] == 0
+    assert result["stage_compaction_applied"] is False
+    assert any("[CRON INTERNAL EVENT]" in content for content in contents)
+    assert any("This is a background heartbeat." in content for content in contents)
+
+
+def test_in_place_compaction_removes_internal_events_only_after_structural_change_point() -> None:
+    # 缓存中性：内部事件束只顺路清理"不早于本次压缩既有最早结构变化点"的条目；
+    # 结构变化点之前的内部事件保留到后续压缩，避免把前缀断裂点提前。
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "你好"},
+    ]
+    messages.append({"role": "system", "content": "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：pair-a"})
+    messages.append({"role": "system", "content": "[CRON INTERNAL EVENT] pair-a"})
+    messages.extend(_stage_window(1))
+    messages.append({"role": "system", "content": "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：pair-b"})
+    messages.append({"role": "system", "content": "[CRON INTERNAL EVENT] pair-b"})
+    messages.extend(_stage_window(2))
+    stage_state = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [_stage_record(1, rounds=[_round(1, ["call-work-1"])]), _stage_record(2, rounds=[_round(2, ["call-work-2"])])],
+    }
+
+    gated = compact_stage_prompt_messages_in_place(messages, stage_state=stage_state, keep_latest_completed_stages=1)
+    baseline = compact_stage_prompt_messages_in_place(
+        messages, stage_state=stage_state, keep_latest_completed_stages=1, internal_event_markers=()
+    )
+
+    gated_contents = [str(item.get("content") or "") for item in gated["rewritten"]]
+    baseline_contents = [str(item.get("content") or "") for item in baseline["rewritten"]]
+    # 结构变化点之前的 pair-a 保留；之后的 pair-b 顺路清理
+    assert any("pair-a" in content for content in gated_contents)
+    assert all("pair-b" not in content for content in gated_contents)
+    assert "output-1" not in gated_contents  # 过期阶段仍被压缩
+    assert "output-2" in gated_contents  # 保留阶段不动
+
+    # 缓存中性：与无标记基线相比，首次分叉不早于基线自身的结构变化区域，
+    # 即 gated 输出在基线首个结构变化点之前与基线逐条相同。
+    common_length = min(len(baseline_contents), len(gated_contents))
+    first_diff = next(
+        (index for index in range(common_length) if baseline_contents[index] != gated_contents[index]),
+        common_length,
+    )
+    structural_onset = next(
+        index for index, content in enumerate(baseline_contents) if content.startswith(STAGE_COMPACT_PREFIX)
+    )
+    # gated 只比基线多删了 pair-b：分叉点不早于基线自身的压缩块回插位置
+    assert first_diff >= structural_onset
+    assert len(gated_contents) == len(baseline_contents) - 2
+

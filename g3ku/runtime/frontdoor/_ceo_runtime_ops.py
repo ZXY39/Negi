@@ -1074,11 +1074,55 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         except Exception:
             return None
 
+    @staticmethod
+    def _frontdoor_active_stage_goal(state: dict[str, Any] | None) -> str:
+        """取当前活动阶段目标，供 content_open 图片叠加层锚定当前任务。
+
+        仅当阶段状态里存在真正的活动阶段（status=active 或 active_stage_id 命中）
+        时返回其目标；否则返回空串，叠加层退回通用文案，避免锚到无关历史阶段。
+        """
+        stage_state = state.get("frontdoor_stage_state") if isinstance(state, dict) else None
+        if not isinstance(stage_state, dict):
+            return ""
+        stages = list(stage_state.get("stages") or [])
+        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
+        fallback_goal = ""
+        for stage in stages:
+            if not isinstance(stage, dict):
+                continue
+            stage_goal = str(stage.get("stage_goal") or "").strip()
+            if not stage_goal:
+                continue
+            stage_id = str(stage.get("stage_id") or "").strip()
+            if active_stage_id and stage_id == active_stage_id:
+                return stage_goal
+            if str(stage.get("status") or "").strip().lower() == "active":
+                fallback_goal = stage_goal
+        return fallback_goal
+
+    def _content_open_image_overlay_context_text(self, *, active_stage_goal: str = "") -> str:
+        """叠加层文案：带多模态图片的末尾用户消息只允许追加在请求尾部。
+
+        有活动阶段目标时附上目标锚点并提醒继续完成，避免长会话里的历史内部
+        事件与图片指令竞争注意力；无活动阶段时保持原有通用文案。
+        """
+        goal = str(active_stage_goal or "").strip()
+        if not goal:
+            return self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT
+        if len(goal) > 300:
+            goal = goal[:300].rstrip() + "…"
+        return (
+            f"{self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT}\n"
+            f"当前阶段目标：{goal}\n"
+            "请继续完成该目标。这些图片服务于当前任务，不要切换到历史对话或历史定时任务。"
+        )
+
     def _content_open_image_overlay_message_blocks(
         self,
         payloads: list[dict[str, Any]] | None,
         *,
         model_refs: list[str] | None,
+        active_stage_goal: str = "",
     ) -> list[dict[str, Any]]:
         if not self._ceo_image_multimodal_enabled_for_model_refs(model_refs):
             raise FrontdoorCompressionRuntimeError(
@@ -1086,7 +1130,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 message="非多模态模型无法打开图片",
                 recoverable=True,
             )
-        blocks: list[dict[str, Any]] = [{"type": "text", "text": self._CONTENT_OPEN_IMAGE_CONTEXT_TEXT}]
+        overlay_text = self._content_open_image_overlay_context_text(active_stage_goal=active_stage_goal)
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": overlay_text}]
         seen_paths: set[str] = set()
         for raw in list(payloads or []):
             payload = self._content_open_image_overlay_payload(raw)
@@ -1138,9 +1183,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_messages: list[dict[str, Any]] | None,
         payloads: list[dict[str, Any]] | None,
         model_refs: list[str] | None,
+        active_stage_goal: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         records = [dict(item) for item in list(request_messages or []) if isinstance(item, dict)]
-        blocks = self._content_open_image_overlay_message_blocks(payloads, model_refs=model_refs)
+        blocks = self._content_open_image_overlay_message_blocks(
+            payloads,
+            model_refs=model_refs,
+            active_stage_goal=active_stage_goal,
+        )
         if not blocks:
             durable = strip_multimodal_blocks_from_message_records(records)
             return records, durable
@@ -1386,6 +1436,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 request_messages=request_messages,
                 payloads=pending_content_open_image_payloads,
                 model_refs=list(state_for_request.get("model_refs") or []),
+                active_stage_goal=self._frontdoor_active_stage_goal(state_for_request),
             )
         model_info = self._resolve_frontdoor_send_model_context_window(
             model_refs=list(state_for_request.get("model_refs") or []),

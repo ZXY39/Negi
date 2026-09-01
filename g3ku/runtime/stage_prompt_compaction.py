@@ -9,11 +9,14 @@ STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
 STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
 STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
 
-# 内部事件束（心跳/定时）不是用户对话，压缩时随过期内容一并移除
+# 内部事件束（心跳/定时）不是用户对话，压缩时随过期内容一并移除。
+# 定时任务种子包含中文包装与 [CRON INTERNAL EVENT] 事件体两类 system 消息。
 DEFAULT_INTERNAL_EVENT_MARKERS: tuple[str, ...] = (
     "This is a background heartbeat.",
     "## EVENT BUNDLE",
     "# Heartbeat Rules",
+    "[CRON INTERNAL EVENT]",
+    "你接收到了之前你定时的任务",
 )
 
 
@@ -308,8 +311,9 @@ def compact_stage_prompt_messages_in_place(
     normalized_stage_tool = str(stage_tool_name or "").strip() or "submit_next_stage"
     markers = tuple(str(item or "") for item in list(internal_event_markers or ()) if str(item or ""))
 
-    # 0) 剥离既有阶段块并记忆其位置（清洗流坐标），随后换算到 remainder 坐标。
+    # 0) 剥离既有阶段块并记忆其位置与内容（清洗流坐标），随后换算到 remainder 坐标。
     block_positions: dict[int, int] = {}
+    block_contents: dict[int, str] = {}
     cleaned: list[dict[str, Any]] = []
     for message in list(messages or []):
         if not isinstance(message, dict):
@@ -318,6 +322,7 @@ def compact_stage_prompt_messages_in_place(
             payload_index = _stage_block_stage_index(message)
             if payload_index is not None and payload_index not in block_positions:
                 block_positions[payload_index] = len(cleaned)
+                block_contents[payload_index] = str(message.get("content") or "")
             continue
         cleaned.append(dict(message))
     prefix: list[dict[str, Any]] = []
@@ -488,9 +493,8 @@ def compact_stage_prompt_messages_in_place(
             # 这里不单独按归属判定，避免打破既有配对。
             continue
         elif role in ("user", "system"):
-            content = str(message.get("content") or "")
-            if markers and any(marker in content for marker in markers):
-                remove_flags[index] = True
+            # 内部事件束的移除在结构变化点确定后按缓存中性规则统一判定。
+            continue
 
     # 被移除 assistant 声明的 tool 消息成对移除；submit 成功响应同理。
     removed_declared_call_ids: set[str] = set()
@@ -524,16 +528,43 @@ def compact_stage_prompt_messages_in_place(
     # 4) 块回插：按当前 stage_state 重新渲染，位置 = 记忆位置 → 首次移除位置 → 区域开头。
     blocks = completed_stage_blocks(stage_state, skip_stage_ids=retained_ids)
     anchors: list[tuple[int, int, dict[str, Any]]] = []
+    structural_change_points: list[int] = []
+    rendered_block_stage_indexes: set[int] = set()
     for block in blocks:
         stage_index = _stage_block_stage_index(block) or 0
+        rendered_block_stage_indexes.add(stage_index)
         if stage_index in remembered_positions:
             anchor = remembered_positions[stage_index]
+            if str(block.get("content") or "") != block_contents.get(stage_index, ""):
+                structural_change_points.append(anchor)
         elif stage_index in first_removed_by_stage:
             anchor = first_removed_by_stage[stage_index]
+            structural_change_points.append(anchor)
         else:
             anchor = 0
+            structural_change_points.append(anchor)
         anchors.append((anchor, stage_index, dict(block)))
     anchors.sort(key=lambda item: (item[0], item[1]))
+
+    # 内部事件束（心跳/定时种子）按缓存中性规则移除：只清理不早于本次压缩
+    # 既有最早结构变化点的条目；本次没有任何结构变化时一律保留，避免为清理
+    # 历史内部事件额外打断 provider 前缀缓存。
+    structural_change_points.extend(index for index, flagged in enumerate(remove_flags) if flagged)
+    structural_change_points.extend(
+        position
+        for stage_index, position in remembered_positions.items()
+        if stage_index not in rendered_block_stage_indexes
+    )
+    if markers and structural_change_points:
+        earliest_structural_change = min(structural_change_points)
+        for index, message in enumerate(remainder):
+            if index < earliest_structural_change:
+                continue
+            if _message_role(message) not in ("user", "system"):
+                continue
+            content = str(message.get("content") or "")
+            if any(marker in content for marker in markers):
+                remove_flags[index] = True
 
     rewritten: list[dict[str, Any]] = []
     anchor_pointer = 0

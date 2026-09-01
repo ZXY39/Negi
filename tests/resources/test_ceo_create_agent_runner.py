@@ -5100,6 +5100,101 @@ def test_frontdoor_send_preflight_snapshot_adds_content_open_image_overlay_only_
     assert snapshot["durable_request_messages"][-1]["content"] == "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
 
 
+def test_frontdoor_send_preflight_snapshot_content_open_image_overlay_anchors_active_stage_goal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_live_runtime_model(monkeypatch, image_multimodal_enabled=True)
+    loop = SimpleNamespace(
+        app_config=SimpleNamespace(
+            get_managed_model=lambda key: SimpleNamespace(image_multimodal_enabled=(key == "ceo_primary"))
+        ),
+    )
+    runner = ceo_runner.CeoFrontDoorRunner(loop=loop)
+
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs["state"].get("messages") or []),
+            prompt_cache_key="cache-key",
+            diagnostics={},
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_id": "responses",
+            "provider_model": "responses:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 128000,
+        },
+        raising=False,
+    )
+
+    image_path = tmp_path / "opened.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\nsmall")
+    state = {
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "Please inspect the reopened image"},
+        ],
+        "model_refs": ["ceo_primary"],
+        "frontdoor_stage_state": {
+            "active_stage_id": "frontdoor-stage-80",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-79",
+                    "stage_index": 79,
+                    "status": "completed",
+                    "stage_goal": "旧阶段目标",
+                },
+                {
+                    "stage_id": "frontdoor-stage-80",
+                    "stage_index": 80,
+                    "status": "active",
+                    "stage_goal": "拉取用户两张图片的高清原图",
+                },
+            ],
+        },
+        "pending_content_open_image_payloads": [
+            {
+                "ok": True,
+                "operation": "open",
+                "content_kind": "image",
+                "mime_type": "image/png",
+                "summary": "图片已通过 content_open 打开，视觉内容将在下一轮请求中附带。",
+                "multimodal_open_pending": True,
+                "runtime_image_target": {"path": str(image_path), "mime_type": "image/png", "source_ref": ""},
+            }
+        ],
+    }
+
+    snapshot = runner._frontdoor_send_preflight_snapshot(
+        state=state,
+        runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
+        langchain_tools=[],
+    )
+
+    live_blocks = [
+        block
+        for block in list(snapshot["request_messages"][-1]["content"] or [])
+        if isinstance(block, dict)
+    ]
+    overlay_text = str(live_blocks[0].get("text") or "")
+    assert overlay_text.startswith("图片已通过 content_open 打开，视觉内容已附带在本轮上下文中")
+    assert "当前阶段目标：拉取用户两张图片的高清原图" in overlay_text
+    assert "请继续完成该目标" in overlay_text
+    assert "不要切换到历史对话或历史定时任务" in overlay_text
+    assert "旧阶段目标" not in overlay_text
+    assert any(block.get("type") == "image_url" for block in live_blocks)
+    # durable 记录同样携带锚点文本（多模态块已剥离）
+    assert "当前阶段目标：拉取用户两张图片的高清原图" in str(snapshot["durable_request_messages"][-1]["content"])
+
+
 def test_frontdoor_send_preflight_snapshot_rejects_content_open_image_overlay_without_multimodal_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
