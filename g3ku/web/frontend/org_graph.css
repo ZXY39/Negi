@@ -6871,7 +6871,26 @@ textarea {
     border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
     background: color-mix(in srgb, var(--bg-panel) 90%, var(--bg-app) 10%);
     transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease;
-    container-type: inline-size;
+}
+
+.model-available-item .model-available-main,
+.model-chain-slide .model-chain-main {
+    min-width: 0;
+}
+
+.model-available-item .resource-list-title,
+.model-available-item .resource-list-subtitle,
+.model-chain-slide .resource-list-title,
+.model-chain-slide .resource-list-subtitle {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.model-available-item .resource-list-subtitle,
+.model-chain-slide .resource-list-subtitle {
+    margin-bottom: 0;
 }
 
 .model-available-item[draggable="true"] {
@@ -6899,17 +6918,6 @@ textarea {
 
 .model-role-shortcut:disabled {
     opacity: 0.55;
-}
-
-@container (max-width: 320px) {
-    .model-available-item .llm-binding-card-head {
-        flex-direction: column;
-        align-items: flex-start;
-    }
-
-    .model-available-item .llm-capability-badge {
-        align-self: flex-start;
-    }
 }
 
 .detail-backdrop,
