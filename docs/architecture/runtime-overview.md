@@ -31,7 +31,7 @@
 新维护者最应该先看的运行时文件：
 
 - `g3ku/runtime/bootstrap_factory.py`
-  运行时工厂。说明项目只支持 `langgraph` runtime，并在这里把 provider、middleware、`AgentLoop` 装起来。
+  运行时工厂。在这里把 provider、middleware、`AgentLoop` 装起来。
 
 - `g3ku/agent/loop.py`
   是 `AgentRuntimeEngine` 的兼容包装层，本身逻辑不多，但定义了真正运行时类型 `AgentLoop`。
@@ -41,8 +41,7 @@
   - `ToolRegistry`
   - `ToolExecutionManager`
   - session 取消令牌
-  - memory/checkpointer/store
-  - SQLite checkpointer maintenance for short-term thread history. Treat it as a bounded per-thread cache rather than an append-forever log: CEO session deletion purges that session key from the checkpointer (as a background task after the delete response), and the engine opportunistically trims older checkpoints per `(thread_id, checkpoint_ns)` while preserving only the newest retained rows. VACUUM is operator-triggered only — see `operations-and-maintenance.md`「SQLite Checkpointer Capacity Governance」.
+  - memory/commit service
   - bootstrap bridge 初始化默认工具和多 agent 运行时
 
 - `g3ku/runtime/manager.py`
@@ -132,7 +131,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 - `g3ku/runtime/prompts/ceo_frontdoor.md` 承载 CEO frontdoor 的稳定协议（角色规则、任务/工具通用约束、stage-first 高优先级协议）；稳定 system prompt 只保留最小的 capability exposure revision 锚点，不把可见 tool/skill 名单写进稳定前缀。
 - `g3ku/runtime/frontdoor/prompt_builder.py` 负责把稳定协议与少量环境提示装成 base prompt；`g3ku/runtime/frontdoor/message_builder.py` 按本轮会话状态动态注入 retrieved context、memory hint 与当前轮运行时工具合同所需的数据。
-- CEO/frontdoor 的生产执行面是显式 `StateGraph`，入口到收尾固定经过 `prepare_turn -> call_model -> normalize_model_output -> review_tool_calls -> execute_tools -> finalize`。`call_model` 和 `execute_tools` 共用同一份 frontdoor runtime tool bundle；`submit_next_stage` 这类运行时注入的 stage protocol tool 必须同时对模型“可见”且在 `execute_tools` 里可真实执行，执行环节不得从 `state.tool_names` 重建第二套工具表。阶段门控与 mixed-batch 语义详见 `tool-and-skill-system.md`「四个概念必须分清」。
+- CEO/frontdoor 的生产执行面是自研步骤循环，入口到收尾固定经过 `prepare_turn -> call_model -> normalize_model_output -> review_tool_calls -> execute_tools -> finalize`。`call_model` 和 `execute_tools` 共用同一份 frontdoor runtime tool bundle；`submit_next_stage` 这类运行时注入的 stage protocol tool 必须同时对模型“可见”且在 `execute_tools` 里可真实执行，执行环节不得从 `state.tool_names` 重建第二套工具表。阶段门控与 mixed-batch 语义详见 `tool-and-skill-system.md`「四个概念必须分清」。
 - 可见 `call_model` 轮次有专用的流式 assistant 文本 lane，`RuntimeAgentSession` 是其合并边界：流式块追加进 `latest_message`，`inflight_turn_snapshot().assistant_text` 保持最新，并以节流轻量事件代替整份 `state_snapshot` 重建；该 lane 只承载文本，工具进度 / stage trace / canonical context 仍走各自的低频事件/快照通道。可见发送的硬回退边界：首个可见流式文本块出现前允许 provider retry / API-key rotation / model-chain fallback，首个可见块之后同一发送必须停止透明回退——一个可见气泡由多个 provider/model attempt 拼接属于 runtime bug。内部不可见发送（如 `token_compression` helper）不得复用该可见回调路径。
 - 内部运行时错误后的 async-dispatch 恢复遵守同一可见性规则：若 `create_async_task` 已成功且当前轮已有用户可见 assistant 文案，恢复必须保留该文案；通用回退文案仅适用于没有任何可见文本幸存的窄场景。
 - 只要当前没有“有效阶段”（`active_stage_id` 为空，或当前阶段已 `transition_required=true`），agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 收紧到只剩 `submit_next_stage`；这些只影响模型决策边界，不同步收紧 provider-facing `tools` schemas——前门继续发送当前路径上 RBAC-visible concrete tools 对应的 `provider_tool_names` bundle，仅在 membership 真正变化时刷新并保持已持久化顺序稳定，`token_compression` 所在 send 沿用压缩前已持久化的 bundle。阶段门控、候选/修复车道与 provider 工具面详见 `tool-and-skill-system.md`「四个概念必须分清」与「CEO Provider Tool Surface」。
@@ -156,7 +155,7 @@ CEO/frontdoor 路径上，`frontdoor_stage_state.stages[].rounds[].tools` 是“
 - 更老的 round 只有 `tool_call_ids` 时，只按精确 `tool_call_id` 回填。
 - 仅按 `tool_name` 匹配是回归风险：会把后面同名的工具结果偷进更早的 round。若发现更晚的 `exec` 出现在更早的 round，先检查存储的 round 是否缺 `tools`、持久化的 `tool_call_ids` 是否稳定且唯一。
 
-前门 tool promotion 与阶段工具显示是两条平行链路：执行循环直接基于 `raw_result` 处理 `load_tool_context` 的成功返回（不从 trailing `ToolMessage` / `result_text` 反推 hydration），`_frontdoor_stage_state_after_tool_cycle()` 只负责 round 记账与 `round.tools` 落盘；成功 payload 附带的 `tool_context_fingerprint` 只服务运行时 freshness / duplicate-read 判定，不属于 provider-facing schema 或 durable business state。`g3ku/runtime/frontdoor/ceo_agent_middleware.py` 只保留兼容/测试价值，线上行为排查优先看显式图节点与 checkpoint state。
+前门 tool promotion 与阶段工具显示是两条平行链路：执行循环直接基于 `raw_result` 处理 `load_tool_context` 的成功返回（不从 trailing `ToolMessage` / `result_text` 反推 hydration），`_frontdoor_stage_state_after_tool_cycle()` 只负责 round 记账与 `round.tools` 落盘；成功 payload 附带的 `tool_context_fingerprint` 只服务运行时 freshness / duplicate-read 判定，不属于 provider-facing schema 或 durable business state。前门 promotion 的唯一生产路径是步骤循环的 `execute_tools` 节点。
 
 维护上，动态 skill/tool 提示块里的说明不能覆盖 `ceo_frontdoor.md` 的 stage-first 协议。权威顺序是：无活动阶段时必须先经 `submit_next_stage` 进入新阶段（可以单独一轮，也可以是以 `submit_next_stage` 起手、紧跟普通工具的 mixed batch）；活动阶段存在后，动态暴露里的 `load_skill_context` / `load_tool_context` 提示才进入可执行顺序。排查“先调 `load_skill_context` 却撞上 no active stage”时，先检查稳定协议与 `stage_messages.py` 状态 overlay 是否一致，再检查 `prompt_builder.py` / `message_builder.py` 的动态提示是否与主协议竞争。`candidate_tools` / `candidate_skills` 两类候选的不对称语义详见 `tool-and-skill-system.md`「四个概念必须分清」。
 
@@ -226,6 +225,8 @@ chat 调用的时间边界只有一种：**单次（单轮）provider 请求的�
 - latest message / pending interrupts
 
 主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。frontdoor continuity 的写盘与恢复覆盖所有 frontdoor 会话命名空间（`web:`、`china:`、`cron:`），渠道会话的基线同样跨进程重启存活；恢复顺序详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。
+
+审批中断的恢复通过持久化的 `graph_state` 重建：中断时 `_pause_for_frontdoor_interrupt` 把**预览前**的完整图状态以 `{"version": 2, "state": ...}` 存入 paused execution context 的 `graph_state` 字段；恢复时 `resume_turn` 读回该快照、校验版本后从 `review_tool_calls` 节点以 resume 决定重入（等价于在中断点重放）。存「预览前」而非「预览后」状态的原因：阶段预览对 `_record_frontdoor_stage_round` 非幂等——用预览后状态重建会二次记账（round 重复、阶段预算提前耗尽）。无标记 / 缺失 / 损坏的快照显式报错 `frontdoor_interrupt_resume_snapshot_unavailable` 且不清除 paused 快照，不回退成新 turn；跨进程重启后的恢复依赖该落盘快照。
 
 ### 任务侧
 
@@ -343,17 +344,6 @@ chat 调用的时间边界只有一种：**单次（单轮）provider 请求的�
 
 队列卡住、重复写入、调试顺序、CLI 与 reset 等 operator 工作流详见 `operations-and-maintenance.md`「Memory Queue Workflow」。
 
-## Memory Runtime Reset Guard
-
-bootstrap bridge 的 `_reset_memory_runtime(...)` 会重置 commit service、memory manager 与 SQLite checkpointer。其中 checkpointer 是进程共享句柄：在途回合编译出的图仍持有旧实例引用，若此时被关闭，该回合最终 `aput_writes` 会报 `Cannot operate on a closed database`。因此：
-
-- 存在活跃任务会话（`loop._active_tasks` 非空）且 checkpointer 存活时，重置**保留** checkpointer 及其 context manager 不关闭（`_checkpointer/_checkpointer_cm/_checkpointer_enabled/_checkpointer_backend/_checkpointer_path` 五字段作为整体保留，不允许中间态），只清理其余记忆资源，并置 `_checkpointer_reset_deferred = True`。
-- `init_memory_runtime(...)` 检测到存活 checkpointer 时跳过 checkpointer 重建，避免 orphan 在途引用。
-- `_sync_memory_runtime(...)` 入口处先做延迟补做：延迟标志置位且活跃会话已清空时，调 `_complete_deferred_checkpointer_reset(...)` 关闭保留句柄并强制走一次完整重置。这一步必须在指纹门控之前——延迟重置已经前移了存储指纹，若只靠门控，保留的旧 checkpointer 永远不会按新设置重建。
-- 失活连接的自愈仍由 engine 的 `_ensure_checkpointer_ready(...)` 懒重建兜底。
-
-排障「回合落库报 closed database」：先确认触发重置的来源（`reason=...`）发生在回合进行中，再看是否走了保留/延迟路径（日志 `Deferring checkpointer reset while active sessions exist` / `Completing deferred checkpointer reset`）。`force_memory_sync` 语义见 `config-and-models.md`「配置热刷新」。
-
 ## Internal Turn Contract Notes
 
 Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详见 `heartbeat-system.md`「Continuation Contract」与「Cron Reminder Contract」。本文只记运行时层不变量：
@@ -376,13 +366,13 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 
 `frontdoor_canonical_context` 是 CEO/frontdoor 唯一的跨回合阶段真相源：
 
-- 它是 durable 的跨回合阶段/历史视图；turn finalization 把当前轮阶段账本并入该结构。`frontdoor_stage_state` 与 `compression_state` 是运行时工作状态，不需要在每个新用户 / heartbeat / cron 轮次的 prompt 组装前清空；graph-local 状态为空时，`prepare_turn` 可以复用 session-owned 请求体与这些快照重建下一个 provider 请求窗口。
+- 它是 durable 的跨回合阶段/历史视图；turn finalization 把当前轮阶段账本并入该结构。`frontdoor_stage_state` 与 `compression_state` 是运行时工作状态，不需要在每个新用户 / heartbeat / cron 轮次的 prompt 组装前清空；当前轮本地状态为空时，`prepare_turn` 可以复用 session-owned 请求体与这些快照重建下一个 provider 请求窗口。
 - session/runtime 同步不得把 request-local 投影写回 `frontdoor_canonical_context`：只有 turn finalization 允许向 durable canonical 链追加 completed-stage 数据；`frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生出的一切只是当前请求的可见 workset 数据。
 - 近场 stage workset 从 `frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生，不从 transcript `execution_trace_summary` 或平铺 `tool_events` 重建。round-level 工具记录同时保存归一化原始 `arguments`；小输出内联在 `output_text`，大输出外置为 `output_ref` + `output_preview_text`，prompt 渲染器不把 artifact 正文读回内联。
 - 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
 - UI 面向的 turn payload 暴露当前轮的 `canonical_context` 切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 
-第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## 长期记忆` 快照（当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线优先于任何 graph-local checkpoint 式阶段重放投影：两者同时存在时必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
+第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## 长期记忆` 快照（当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线是连续性权威来源：必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
 
 ## Runtime Contract Lane
 

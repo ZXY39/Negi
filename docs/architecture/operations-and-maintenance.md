@@ -74,8 +74,8 @@
 
 当前 `g3ku status` 的记忆区块应按 queued Markdown runtime 理解：
 
-- 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`、`Memory Checkpointer`
-- `Memory Mode`、`Memory Store(SQLite)`、`Memory Store(Qdrant)`、`pending_facts.jsonl`、`audit.jsonl` 不作为当前长期记忆健康指标
+- 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`
+- `Memory Mode`、`Memory Store(SQLite)`、`Memory Store(Qdrant)`、`pending_facts.jsonl`、`audit.jsonl`、`Memory Checkpointer` 不作为当前长期记忆健康指标
 
 ## 3. 关键状态文件与目录
 
@@ -502,33 +502,3 @@ Operator expectations:
 
 If tool/skill retrieval does not return after restart, first inspect resource runtime initialization and then confirm that the memory runtime reaches a healthy catalog-bridge state.
 
-## SQLite Checkpointer Capacity Governance
-
-`memory/checkpoints.sqlite3` is a bounded per-thread checkpoint cache, not an append-forever log. Two mechanisms keep it from growing without bound:
-
-- **Row trim**: each `(thread_id, checkpoint_ns)` keeps only the newest `max_checkpoints_per_thread` checkpoints; older rows are deleted. Because each checkpoint is a cumulative full graph snapshot, this knob is the biggest capacity lever — lowering it (e.g. 200 → 50) shrinks steady-state size far more than any VACUUM tuning.
-- **VACUUM**: row deletes only move pages to the SQLite freelist; the file does not shrink until a `VACUUM` rebuilds it. VACUUM is operator-triggered, never scheduled by the runtime. `POST /api/admin/checkpoints/maintain` runs `reclaim_checkpointer_space(force=True)` under the checkpointer lock to trim and rebuild the file; in-flight checkpoint writes serialize behind the VACUUM on the shared connection — they wait, they do not fail. Keeping VACUUM off the request path matters because a multi-GB rebuild under the checkpointer lock blocks CEO session deletion, which shares that lock.
-
-Governance parameters live in `tools/memory_runtime/resource.yaml` under `settings.checkpointer`:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `max_checkpoints_per_thread` | `200` | checkpoints retained per thread |
-| `trim_interval_seconds` | `300` | min seconds between opportunistic trims |
-| `vacuum_min_file_size_bytes` | `536870912` (512 MiB) | size gate for the background auto-vacuum scheduler (the runtime does not invoke it) |
-| `vacuum_interval_seconds` | `21600` (6 h) | interval gate for the background auto-vacuum scheduler (the runtime does not invoke it) |
-
-Editing `resource.yaml` changes the memory-runtime fingerprint, so the runtime rebuilds the memory runtime after sessions drain (see `runtime-overview.md`「Memory Runtime Reset Guard」).
-
-Manual reclaim, to shrink an already-large file now:
-
-1. Check status and headroom: `GET /api/admin/checkpoints/status`. Note `file_size_bytes` and `reclaimable_estimate_bytes` (`freelist_count × page_size`), and confirm free disk is at least the live data size.
-2. Trigger reclaim: `curl -X POST http://127.0.0.1:18790/api/admin/checkpoints/maintain` with a client timeout of at least 120 s. It trims and VACUUMs under the lock and returns `file_size_before` / `file_size_after`.
-
-Offline fallback when the runtime is stopped: `sqlite3 memory/checkpoints.sqlite3 "VACUUM;"`.
-
-Troubleshooting:
-
-- File large but `freelist_count` small → live data is genuinely large; lower `max_checkpoints_per_thread` rather than expecting VACUUM to help.
-- File large and `freelist_count` large but not shrinking → auto vacuum does not run; use `POST /api/admin/checkpoints/maintain` to reclaim freed pages.
-- Maintain reports `vacuumed=false` with an operational error (lock contention or low disk) → check disk headroom and retry the endpoint.

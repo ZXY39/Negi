@@ -41,7 +41,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `china-channels.md` (channel inbound) or `web-and-admin.md` (web upload/reopen)
-- Turn checkpoint write fails with `Cannot operate on a closed database`, or a config refresh disrupts an in-flight turn → `runtime-overview.md`「Memory Runtime Reset Guard」+ `config-and-models.md`「配置热刷新」
+- A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
 - QQ/China channel emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `china-channels.md`
 - Node error pause is not delivered to the source session -> `heartbeat-system.md`「Task Node Error Delivery」

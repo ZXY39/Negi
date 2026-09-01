@@ -174,7 +174,7 @@ canonical 状态与 LRU：
 
 promotion 与前门状态：
 
-- 工具 promotion 的权威来源是执行循环里的 `raw_result.ok / raw_result.hydration_targets`，不从尾部 `ToolMessage` / `result_text` 反推。生产前门的唯一 promotion 入口是显式 frontdoor `StateGraph` 的 `execute_tools` 节点（`_graph_execute_tools()`），它必须复用与模型暴露阶段相同的 runtime-visible tool bundle（含运行时注入的 `submit_next_stage`）；执行环节只按 `state.tool_names` 重建工具映射，会重新制造“模型能看到 `submit_next_stage`，执行时报 `tool not available`”的分裂。
+- 工具 promotion 的权威来源是执行循环里的 `raw_result.ok / raw_result.hydration_targets`，不从尾部 `ToolMessage` / `result_text` 反推。生产前门的唯一 promotion 入口是自研 frontdoor 步骤循环的 `execute_tools` 节点（`_graph_execute_tools()`），它必须复用与模型暴露阶段相同的 runtime-visible tool bundle（含运行时注入的 `submit_next_stage`）；执行环节只按 `state.tool_names` 重建工具映射，会重新制造“模型能看到 `submit_next_stage`，执行时报 `tool not available`”的分裂。
 - frontdoor 会把成功 `load_tool_context` 的 concrete tool 写进自己的持久状态，并在同一用户 turn 的后续模型轮次里直接并入 callable tool 集合；frontdoor approval interrupt、session inflight snapshot、paused execution context 都会携带这份 hydrated 状态。排查“load 成功但下一轮又看不见工具”时，不能只看 candidate tool 提示块，还要看 frontdoor 当前保存的 hydrated tool state。
 
 参数错误与状态分类：
@@ -224,7 +224,7 @@ frontdoor 边界：
 
 - frontdoor 的 callable tool 集合不只来自 fixed builtin，还会并入当前 turn 内已 hydration 的 concrete tools；`candidate_tool_names` 必须排除已进入 hydrated state 的工具。一个工具同时出现在 candidate 列表和 callable tool schemas 里，通常表示状态推进漏了。
 - 排查“`load_tool_context` 成功后下一轮仍只会 `exec` / 再次 load”：优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只看 toolskill 内容。模型反复对同一 callable / hydrated / fixed-builtin 工具再次 load 时，先检查消息历史里是否还保留同一 resolved `tool_id` 且 fingerprint 未变化的未压缩结果——那是预期中的 duplicate direct-load 软拦截，不是 registry 丢失。
-- 线上 frontdoor 表现与测试 graph helper 不一致时，先确认 runner 是否真的走显式 graph checkpoint；生产只有这一条 promotion 路径。
+- 线上 frontdoor 表现与测试 helper 不一致时，先确认 runner 是否真的走自研步骤循环；生产只有这一条 promotion 路径。
 
 节点边界：
 
@@ -238,7 +238,7 @@ CEO/frontdoor 合同载体：
 - `turn overlay` / `repair overlay` 属于 dynamic appendix 一侧的当前轮临时内容；请求体中它们位于最新 user 回合之前，不能回写已有 stable/request user 消息。
 - `dynamic_appendix_messages` 的持久化形态只保留当前 `frontdoor_runtime_tool_contract`；retrieved context 这类需要在同一 turn 后续模型轮次保留的内容，留在 `messages` / stage state / canonical context 的重建链路里，不作为第二份 appendix 尾插。每个 provider-bound request 在动态区域只携带一份最新 contract：每轮重建先剥掉携带历史里的旧 contract 与 turn-only note，再将当前 authoritative contract 插入最新 user 消息之前；turn 结束写回 durable transcript 时全部剥离。同一 turn 内，最新摘要块就是权威合同。
 - 模型面向的运行时合同是以 `## Runtime Tool Contract` 开头的 assistant 摘要块，用紧凑文本向模型解释 callable / hydrated / candidate / stage 状态；provider 原生 callable schema 仍走 provider `tools[]`。合同识别有一条硬不变量：运行时注入的合同消息从不携带 `tool_calls`，因此任何携带 `tool_calls` 的 assistant 消息都是模型回合本身——即使其文本回显了合同抬头或合同 JSON，也不得判为合同消息而剥离，否则该回合只剩孤儿工具结果，会触发节点孤儿子工具结果熔断。execution / acceptance 节点使用同样的摘要式合同车道：节点摘要只以 names-only 暴露 `hydrated_executor_names`，详细 provider-call schema 留在节点 `provider_tool_names` 与 provider `tools[]`。摘要块还可携带：`attachment_reopen_targets`（runtime-owned 的上传 reopen 元数据，覆盖当前轮与 transcript 历史上传，是模型可见引导，不是浏览器/UI 表面；创建 detached 任务需要 reopen 上传文件/图片时，模型应把精确目标字符串抄进 `create_async_task.file_targets`，运行时不自动注入任务记录）；`repair_required_tools` / `repair_required_skills`（agent-facing-only 的修复车道，让模型看到“先修复再使用/查看正文”的资源，而不误读成普通能力）。摘要必须明确两条不对称语义：`candidate_tools` 是 candidate executor 摘要，通常仍需 `load_tool_context(...)` 后等待下一轮 hydration/promotion；`candidate_skills` 是 loadable skill 摘要，列出的 `skill_id` 应直接理解为 `load_skill_context(skill_id="...")` 的正文入口。
-- CEO/frontdoor 还把下一轮 body baseline 持久化为 session-owned 的 `frontdoor_request_body_messages`：body-only，写回 session state 时剥掉动态 `frontdoor_runtime_tool_contract` 消息，让下一轮重建一份新的权威尾部合同。fresh visible CEO/frontdoor turn 通过直接 continuation 路径消费这份 baseline，而不是回灌普通 checkpoint-history selector；在记录任何显式 shrink 原因之前，fresh visible turn 却从 transcript/stage replay 重建，就是 frontdoor continuity bug。direct-reply turn finalization 必须保住这份权威 baseline，并在 session sync 前追加最终 assistant 回复。baseline 变短只在 `token_compression` 与 `stage_compaction` 两种理由下合法（记录在配套的 `frontdoor_history_shrink_reason`）；没有这两个理由的变短按运行时上下文丢失处理，不是正常合同重建。
+- CEO/frontdoor 还把下一轮 body baseline 持久化为 session-owned 的 `frontdoor_request_body_messages`：body-only，写回 session state 时剥掉动态 `frontdoor_runtime_tool_contract` 消息，让下一轮重建一份新的权威尾部合同。fresh visible CEO/frontdoor turn 通过直接 continuation 路径消费这份 baseline；在记录任何显式 shrink 原因之前，fresh visible turn 却从 transcript/stage replay 重建，就是 frontdoor continuity bug。direct-reply turn finalization 必须保住这份权威 baseline，并在 session sync 前追加最终 assistant 回复。baseline 变短只在 `token_compression` 与 `stage_compaction` 两种理由下合法（记录在配套的 `frontdoor_history_shrink_reason`）；没有这两个理由的变短按运行时上下文丢失处理，不是正常合同重建。
 - approval interrupt 与 pause/recovery payload 携带这些 runtime-owned frontdoor 字段：`frontdoor_stage_state`、`compression_state`、`hydrated_tool_names`、`tool_call_payloads`、`frontdoor_selection_debug`；恢复后丢失按“frontdoor canonical runtime contract / runtime state 损坏”排查。
 
 排查顺序：

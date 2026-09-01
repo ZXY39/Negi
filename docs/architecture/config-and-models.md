@@ -109,7 +109,7 @@
 
 - `force_memory_sync` 默认 `False`：记忆运行时同步走 `memory_runtime` 资源指纹门控，指纹未变就不重置。模型路由、CEO 链调整、回合中刷新（`provider_retry_invalidation`、`_resolve_ceo_model_refs`）都属此类。
 - 只有真正改写指纹树之外的记忆相关设置时才显式传 `True`：`run_llm_migration`、`model_config.migrate_legacy`，以及 `update_llm_config` 命中的是绑定引用的记录时。
-- 原因：强制重置会关闭进程共享的 SQLite checkpointer；若在途回合仍持有它，最终 checkpoint 写入会报 `Cannot operate on a closed database`。即便有活跃会话守卫（见 `runtime-overview.md`「Memory Runtime Reset Guard」），也不应对纯模型变更强制重置。
+- 原因：强制重置会在回合进行中重置 memory manager 与 commit service，干扰在途会话的记忆读写；因此纯模型路由/链调整不应强制重置。
 
 还要额外记住一个运行时边界——模型链变更何时作用于在途回合：
 

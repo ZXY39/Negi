@@ -133,7 +133,7 @@
 
 - 每条 `inbound_message` 的 `_run_turn(...)` 在**所有路径**上恰好发出一个终止帧（`turn_complete` 或 `turn_error`）。
 - `asyncio.CancelledError` 是 `BaseException`，会穿过 `except Exception`（例如 Web 端暂停、任务被取消）；传输层单独捕获它，先发 `turn_complete` 再 re-raise。
-- `turn_error` 帧的 `error` 字段是面向渠道用户的固定友好文案（`TURN_FAILED_FRIENDLY_TEXT`），原始异常文本放在 `detail` 字段，仅供排障、宿主不展示。渠道用户不会看到诸如 `Cannot operate on a closed database` 这类原始报错。
+- `turn_error` 帧的 `error` 字段是面向渠道用户的固定友好文案（`TURN_FAILED_FRIENDLY_TEXT`），原始异常文本放在 `detail` 字段，仅供排障、宿主不展示。渠道用户不会看到诸如 provider 原始报错或堆栈这类底层文本。
 - 背景：宿主按 `event_id` 关联每回合的 pending Promise，每会话串行派发队列依赖 pending settle。终止帧缺失 → pending 永不 settle → 该会话后续消息永久排队。历史上真实卡死过：Web 端暂停 QQ 会话后，QQ 再发消息永久无响应。
 - 排障「某渠道会话卡死不再响应」时，先确认对应回合的 Python 侧是否发出了终止帧。
 
