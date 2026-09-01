@@ -220,7 +220,19 @@ def _render_stage_summary(stage_summary: dict[str, Any] | None) -> str:
     transition_required = bool(payload.get('transition_required'))
     active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
     if not active_stage:
-        return f'stage_summary: active_stage_id={active_stage_id}; transition_required={transition_required}'
+        # 用一句人话把"无活动阶段"讲清：这是回合开始时的正常状态，未列出的工具是
+        # 临时禁用而非删除，先 submit_next_stage 开阶段即可使用。避免模型把
+        # callable_tools 仅剩 submit_next_stage 误读成"阶段被重置/工具丢失"。
+        guard = (
+            'current stage budget is exhausted; call `submit_next_stage` before calling other tools'
+            if transition_required
+            else 'no active stage — normal at the start of every turn; tools other than '
+            '`submit_next_stage` are temporarily disabled, not removed — call `submit_next_stage` first to use them'
+        )
+        return (
+            f'stage_summary: active_stage_id={active_stage_id}; '
+            f'transition_required={transition_required}; {guard}'
+        )
     parts = [
         f'active_stage_id={active_stage_id}',
         f'transition_required={transition_required}',
@@ -363,8 +375,10 @@ class FrontdoorToolContract:
 
     def to_message(self) -> dict[str, Any]:
         payload = self.to_message_payload()
+        # system 角色：该契约是运行时元数据，不是对话内容；用 assistant 会让模型把它
+        # 当成"自己上一轮说过/发给用户的消息"，进而在事后复盘时改写时间线。
         return {
-            'role': 'assistant',
+            'role': 'system',
             'content': _render_frontdoor_contract_summary(payload),
             FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY: payload,
         }
@@ -467,7 +481,9 @@ def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
         return True
     if _frontdoor_message_declares_tool_calls(message):
         return False
-    if str((message or {}).get('role') or '').strip().lower() != 'assistant':
+    # 注入的契约消息经 sanitize 后只保留 role/content，payload 键被剥离，需靠抬头识别。
+    # 契约现在以 system 角色注入；模型回显的契约残留仍是 assistant 文本，两类都识别。
+    if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system'}:
         return False
     content = str((message or {}).get('content') or '').strip()
     return content.startswith(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING)

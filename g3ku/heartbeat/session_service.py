@@ -1169,6 +1169,7 @@ class WebSessionHeartbeatService:
             "heartbeat_internal": True,
             "heartbeat_reason": heartbeat_reason,
             "heartbeat_task_ids": [str((event.payload or {}).get("task_id") or "").strip() for event in events],
+            "heartbeat_node_ids": [str((event.payload or {}).get("node_id") or "").strip() for event in events],
             "heartbeat_prompt_lane": heartbeat_lane.scope,
             "heartbeat_retrieval_query": heartbeat_lane.retrieval_query,
             "heartbeat_stable_rules_text": stable_rules_text,

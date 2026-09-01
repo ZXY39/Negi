@@ -133,6 +133,12 @@ _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'user-facing answer, or use the structured tool-calling interface when a tool is required.'
 )
 
+# 落库类工具全局白名单：免活动阶段即可调用。避免"用户口头给一条长期指令 → 模型
+# 想写记忆却先在 memory_write 上被 no active stage 拦下 → 模型不再重试而永久丢失"。
+FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES = frozenset({"memory_write", "memory_delete", "memory_note"})
+# 节点暂停事件心跳自动补开阶段的预算。
+FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET = 10
+
 
 @dataclass(slots=True)
 class VisibleToolBundle:
@@ -4026,6 +4032,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
         preamble_text: str = "",
+        system_generated: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
@@ -4081,7 +4088,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "stage_id": f"frontdoor-stage-{next_stage_index}",
             "stage_index": next_stage_index,
             "stage_kind": "normal",
-            "system_generated": False,
+            "system_generated": bool(system_generated),
             "mode": "自主执行",
             "status": "active",
             "stage_goal": normalized_goal,
@@ -4253,6 +4260,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         ordinary_results: list[dict[str, Any]] = []
         source = "cron" if bool(state.get("cron_internal")) else "heartbeat" if bool(state.get("heartbeat_internal")) else "user"
         cycle_narration_text = str(state.get("analysis_text") or "").strip()
+        node_error_context = self._frontdoor_node_error_heartbeat_context(state)
         stage_created_this_cycle = False
         for payload, result in zip(list(tool_call_payloads or []), list(tool_results or []), strict=False):
             tool_name = str(payload.get("name") or "").strip()
@@ -4278,6 +4286,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             ordinary_calls.append(dict(payload))
             ordinary_results.append(dict(result))
+        # 节点暂停事件心跳：本轮没有显式 submit 且无活动阶段时，自动补开一个
+        # system_generated 阶段（预算 10），让实质性工具落进一个可追溯的阶段。
+        # 预算耗尽后 transition_required 置真，仍需 submit_next_stage 才能继续。
+        if (
+            not stage_created_this_cycle
+            and node_error_context is not None
+            and ordinary_calls
+            and not str(stage_state.get("active_stage_id") or "").strip()
+        ):
+            stage_state, _ = self._frontdoor_auto_open_node_error_stage(
+                stage_state,
+                context=node_error_context,
+            )
+            stage_created_this_cycle = True
         updated_state = self._record_frontdoor_stage_round(
             stage_state,
             tool_call_payloads=ordinary_calls,
@@ -4325,14 +4347,78 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         }
 
     @classmethod
-    def _frontdoor_stage_gate_error(cls, *, tool_name: str, stage_state: dict[str, Any]) -> str:
+    def _frontdoor_stage_gate_error(
+        cls,
+        *,
+        tool_name: str,
+        stage_state: dict[str, Any],
+        allow_stageless: bool = False,
+    ) -> str:
         snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        has_active_stage = bool(str(snapshot.get("active_stage_id") or "").strip())
+        transition_required = bool(snapshot.get("transition_required"))
+        if allow_stageless and not has_active_stage and not transition_required:
+            # 节点暂停事件心跳：无活动阶段时放行本轮首个实质性工具调用，阶段由
+            # _frontdoor_stage_state_after_tool_cycle 自动补开，避免"必撞一次闸"。
+            return ""
         return stage_gate_error_for_tool(
             tool_name,
-            has_active_stage=bool(str(snapshot.get("active_stage_id") or "").strip()),
-            transition_required=bool(snapshot.get("transition_required")),
-            extra_allowed_tools=cls._CONTROL_TOOL_NAMES,
+            has_active_stage=has_active_stage,
+            transition_required=transition_required,
+            extra_allowed_tools={*cls._CONTROL_TOOL_NAMES, *FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES},
             stage_tool_name=STAGE_TOOL_NAME,
+        )
+
+    @classmethod
+    def _frontdoor_node_error_heartbeat_context(cls, state: CeoGraphState) -> dict[str, Any] | None:
+        """节点暂停事件心跳的上下文；非该事件返回 None。
+
+        心跳轮里节点 `task_node_error` 事件要求模型用 manage_task_nodes 处置，
+        但无活动阶段时这些工具会被闸门拦下。这里提取 task/node 信息，供闸门放行
+        与自动补开阶段（标题体现"任务 ID xxx 中的节点出现自动暂停"）使用。
+        """
+        if not isinstance(state, dict):
+            return None
+        metadata = _user_input_metadata(state.get("user_input"))
+        heartbeat_internal = bool(state.get("heartbeat_internal")) or bool(metadata.get("heartbeat_internal"))
+        if not heartbeat_internal:
+            return None
+        if str(metadata.get("heartbeat_reason") or "").strip() != "task_node_error":
+            return None
+        task_ids = [
+            str(item or "").strip()
+            for item in list(metadata.get("heartbeat_task_ids") or [])
+            if str(item or "").strip()
+        ]
+        node_ids = [
+            str(item or "").strip()
+            for item in list(metadata.get("heartbeat_node_ids") or [])
+            if str(item or "").strip()
+        ]
+        return {"task_id": task_ids[0] if task_ids else "", "node_id": node_ids[0] if node_ids else ""}
+
+    @staticmethod
+    def _frontdoor_node_error_stage_goal(context: dict[str, Any]) -> str:
+        task_id = str((context or {}).get("task_id") or "").strip()
+        if task_id:
+            return f"任务 ID {task_id} 中的节点出现自动暂停，检查原因并处理"
+        return "任务中的节点出现自动暂停，检查原因并处理"
+
+    @classmethod
+    def _frontdoor_auto_open_node_error_stage(
+        cls,
+        stage_state: dict[str, Any],
+        *,
+        context: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return cls._submit_frontdoor_next_stage_state(
+            stage_state,
+            stage_goal=cls._frontdoor_node_error_stage_goal(context),
+            tool_round_budget=FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET,
+            completed_stage_summary="",
+            final=False,
+            preamble_text="",
+            system_generated=True,
         )
 
     @classmethod
@@ -4585,6 +4671,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         runtime_context = execution_bundle.runtime_context
         on_progress = execution_bundle.on_progress
         mutable_stage_state = execution_bundle.mutable_stage_state
+        node_error_context = self._frontdoor_node_error_heartbeat_context(state)
 
         async def _tool_executor(
             tool_name: str,
@@ -4600,7 +4687,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "finished_at": "",
                     "elapsed_seconds": None,
                 }
-            gate_error = self._frontdoor_stage_gate_error(tool_name=tool_name, stage_state=mutable_stage_state)
+            gate_error = self._frontdoor_stage_gate_error(
+                tool_name=tool_name,
+                stage_state=mutable_stage_state,
+                allow_stageless=bool(node_error_context),
+            )
             if gate_error:
                 return {
                     "result_text": f"Error: {gate_error}",
@@ -6397,6 +6488,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         visible_tools = execution_bundle.visible_tools
         mutable_stage_state = execution_bundle.mutable_stage_state
         base_stage_state = execution_bundle.base_stage_state
+        node_error_context = self._frontdoor_node_error_heartbeat_context(state)
         semaphore = asyncio.Semaphore(
             self._parallel_slot_count(
                 state.get("max_parallel_tool_calls"),
@@ -6441,7 +6533,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         async def _run_single(payload: dict[str, Any]) -> dict[str, Any]:
             tool_name = str(payload.get("name") or "")
-            gate_error = self._frontdoor_stage_gate_error(tool_name=tool_name, stage_state=mutable_stage_state)
+            gate_error = self._frontdoor_stage_gate_error(
+                tool_name=tool_name,
+                stage_state=mutable_stage_state,
+                allow_stageless=bool(node_error_context),
+            )
             if gate_error:
                 return await _error_result(payload, gate_error)
             duplicate_load_error = await self._frontdoor_load_tool_context_duplicate_error(

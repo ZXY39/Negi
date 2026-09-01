@@ -491,19 +491,62 @@ def test_in_place_compaction_keeps_internal_events_when_no_structural_change() -
     assert any("This is a background heartbeat." in content for content in contents)
 
 
-def test_in_place_compaction_removes_internal_events_only_after_structural_change_point() -> None:
-    # 缓存中性：内部事件束只顺路清理"不早于本次压缩既有最早结构变化点"的条目；
-    # 结构变化点之前的内部事件保留到后续压缩，避免把前缀断裂点提前。
+def test_in_place_compaction_keeps_event_bodies_and_removes_rule_text_after_change_point() -> None:
+    # 内部事件束拆两类：事件体（心跳事件束/定时种子）是因果载荷，压缩后必须保留；
+    # 规则文本（每次心跳重复注入的框架规则）才随过期内容顺路清理。
     messages: list[dict[str, object]] = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "你好"},
     ]
-    messages.append({"role": "system", "content": "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：pair-a"})
-    messages.append({"role": "system", "content": "[CRON INTERNAL EVENT] pair-a"})
+    # 结构变化点之前：规则与事件体都保留
+    messages.append({"role": "system", "content": "This is a background heartbeat.\n# Heartbeat Rules\n.rule-a."})
+    messages.append({"role": "user", "content": "## EVENT BUNDLE\n- Task paused (.event-a.)"})
+    messages.append({"role": "system", "content": "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：cron-a"})
+    messages.append({"role": "system", "content": "[CRON INTERNAL EVENT] cron-a"})
     messages.extend(_stage_window(1))
-    messages.append({"role": "system", "content": "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：pair-b"})
-    messages.append({"role": "system", "content": "[CRON INTERNAL EVENT] pair-b"})
+    # 结构变化点之后：规则文本顺路清理，事件体保留
+    messages.append({"role": "system", "content": "This is a background heartbeat.\n# Heartbeat Rules\n.rule-b."})
+    messages.append({"role": "user", "content": "## EVENT BUNDLE\n- Task paused (.event-b.)"})
+    messages.append({"role": "system", "content": "你接收到了之前你定时的任务，如下：\n当前定时任务 ID：cron-b"})
+    messages.append({"role": "system", "content": "[CRON INTERNAL EVENT] cron-b"})
+    messages.extend(_stage_window(2))
+    stage_state = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            _stage_record(1, rounds=[_round(1, ["call-work-1"])]),
+            _stage_record(2, rounds=[_round(2, ["call-work-2"])]),
+        ],
+    }
+
+    result = compact_stage_prompt_messages_in_place(messages, stage_state=stage_state, keep_latest_completed_stages=1)
+    contents = [str(item.get("content") or "") for item in result["rewritten"]]
+
+    # 规则文本：变化点前保留、之后清理
+    assert any(".rule-a." in content for content in contents)
+    assert all(".rule-b." not in content for content in contents)
+    # 事件体（心跳事件束 + 定时种子）：前后都保留，保证后续回合能够追溯因果
+    assert any(".event-a." in content for content in contents)
+    assert any(".event-b." in content for content in contents)
+    assert any("cron-a" in content for content in contents)
+    assert any("cron-b" in content for content in contents)
+    # 过期阶段仍被压缩，保留阶段不动
+    assert "output-1" not in contents
+    assert "output-2" in contents
+
+
+def test_in_place_compaction_removes_rule_text_only_after_structural_change_point() -> None:
+    # 缓存中性：内部规则文本只顺路清理"不早于本次压缩既有最早结构变化点"的条目；
+    # 结构变化点之前的规则保留，避免把前缀断裂点提前。
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "你好"},
+    ]
+    messages.append({"role": "system", "content": "This is a background heartbeat.\n# Heartbeat Rules\npair-a"})
+    messages.extend(_stage_window(1))
+    messages.append({"role": "system", "content": "This is a background heartbeat.\n# Heartbeat Rules\npair-b"})
     messages.extend(_stage_window(2))
     stage_state = {
         "active_stage_id": "",
@@ -513,7 +556,7 @@ def test_in_place_compaction_removes_internal_events_only_after_structural_chang
 
     gated = compact_stage_prompt_messages_in_place(messages, stage_state=stage_state, keep_latest_completed_stages=1)
     baseline = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=1, internal_event_markers=()
+        messages, stage_state=stage_state, keep_latest_completed_stages=1, internal_rule_markers=()
     )
 
     gated_contents = [str(item.get("content") or "") for item in gated["rewritten"]]
@@ -536,5 +579,5 @@ def test_in_place_compaction_removes_internal_events_only_after_structural_chang
     )
     # gated 只比基线多删了 pair-b：分叉点不早于基线自身的压缩块回插位置
     assert first_diff >= structural_onset
-    assert len(gated_contents) == len(baseline_contents) - 2
+    assert len(gated_contents) == len(baseline_contents) - 1
 

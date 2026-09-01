@@ -9,14 +9,17 @@ STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
 STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
 STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
 
-# 内部事件束（心跳/定时）不是用户对话，压缩时随过期内容一并移除。
-# 定时任务种子包含中文包装与 [CRON INTERNAL EVENT] 事件体两类 system 消息。
-DEFAULT_INTERNAL_EVENT_MARKERS: tuple[str, ...] = (
+# 内部事件束（心跳/定时）按是否承载因果拆成两类处理：
+# - 事件体（因果载荷）保留：后续回合需要它才能追溯"这一轮为什么做这些动作"，
+#   因此压缩时不再删除——否则心跳/定时通过开阶段处理问题后，下一轮模型会失去
+#   触发上下文，把孤立的工具流水误读成"无事发生"或"被拦截"。被保留的事件体标记：
+#   "## EVENT BUNDLE"（心跳事件束）、"[CRON INTERNAL EVENT]" 与
+#   "你接收到了之前你定时的任务"（定时任务种子）。
+# - 稳定规则文本（重复框架规则）随过期内容一并移除：每次心跳都注入相同的规则，
+#   压缩时顺路清理，避免在历史中无限堆积。
+DEFAULT_INTERNAL_RULE_MARKERS: tuple[str, ...] = (
     "This is a background heartbeat.",
-    "## EVENT BUNDLE",
     "# Heartbeat Rules",
-    "[CRON INTERNAL EVENT]",
-    "你接收到了之前你定时的任务",
 )
 
 
@@ -299,7 +302,7 @@ def compact_stage_prompt_messages_in_place(
     stage_tool_name: str = "submit_next_stage",
     preserve_leading_system: bool = True,
     preserve_leading_user: bool = True,
-    internal_event_markers: tuple[str, ...] = DEFAULT_INTERNAL_EVENT_MARKERS,
+    internal_rule_markers: tuple[str, ...] = DEFAULT_INTERNAL_RULE_MARKERS,
 ) -> dict[str, Any]:
     """按阶段归属原位压缩：只移除过期阶段的工具肉身，对话与保留阶段原位不动。
 
@@ -309,7 +312,7 @@ def compact_stage_prompt_messages_in_place(
     对同一输入重复执行结果收敛（块剥离后按记忆位置回插）。
     """
     normalized_stage_tool = str(stage_tool_name or "").strip() or "submit_next_stage"
-    markers = tuple(str(item or "") for item in list(internal_event_markers or ()) if str(item or ""))
+    markers = tuple(str(item or "") for item in list(internal_rule_markers or ()) if str(item or ""))
 
     # 0) 剥离既有阶段块并记忆其位置与内容（清洗流坐标），随后换算到 remainder 坐标。
     block_positions: dict[int, int] = {}
@@ -665,7 +668,7 @@ def decompose_stage_prompt_messages(
 
 
 __all__ = [
-    "DEFAULT_INTERNAL_EVENT_MARKERS",
+    "DEFAULT_INTERNAL_RULE_MARKERS",
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",
     "STAGE_RAW_PREFIX",

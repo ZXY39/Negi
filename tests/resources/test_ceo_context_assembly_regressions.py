@@ -1250,7 +1250,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     contract_message = contract_messages[0]
     contract_text = str(contract_message.get("content") or "")
 
-    assert contract_message["role"] == "assistant"
+    assert contract_message["role"] == "system"
     assert contract_text.startswith("## Runtime Tool Contract")
     assert '"message_type"' not in contract_text
     assert '"callable_tool_names"' not in contract_text
@@ -1298,7 +1298,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
     assert len(contract_messages) == 1
     contract_text = str(contract_messages[0]["content"] or "")
 
-    assert contract_messages[0]["role"] == "assistant"
+    assert contract_messages[0]["role"] == "system"
     assert contract_text.startswith("## Runtime Tool Contract")
     assert "exec_runtime_policy:" in contract_text
     assert "mode=full_access" in contract_text
@@ -1350,7 +1350,7 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
 
     assert len(contract_messages) == 1
     contract_text = str(contract_messages[0]["content"] or "")
-    assert contract_messages[0]["role"] == "assistant"
+    assert contract_messages[0]["role"] == "system"
     assert contract_text.startswith("## Runtime Tool Contract")
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
     assert "candidate_tools: none" in contract_text
@@ -1428,7 +1428,7 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     updated = upsert_frontdoor_tool_contract_message([legacy_message], contract)
     assert len(updated) == 1
     assert is_frontdoor_tool_contract_message(updated[0])
-    assert updated[0]["role"] == "assistant"
+    assert updated[0]["role"] == "system"
     assert isinstance(updated[0]["content"], str)
     assert str(updated[0]["content"] or "").startswith("## Runtime Tool Contract")
     assert '"message_type"' not in str(updated[0]["content"] or "")

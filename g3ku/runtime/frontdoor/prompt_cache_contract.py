@@ -68,9 +68,10 @@ def _with_dynamic_appendix_at_tail(
     ]
     # The carried body must never retain a stale contract or a stale turn-only
     # note.  The dynamic appendix is inserted immediately before the latest
-    # user message when one exists.  A contract is an assistant message, so
-    # placing it after the latest tool result makes some providers/models treat
-    # the contract summary as the assistant's next reply and echo it verbatim.
+    # user message when one exists.  The contract is runtime metadata injected
+    # as a system message; placing it after the latest tool result formerly
+    # made some providers/models treat it as the assistant's next reply and
+    # echo it verbatim.
     stripped_request_messages = [
         dict(item)
         for item in normalized_request_messages

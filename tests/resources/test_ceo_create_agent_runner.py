@@ -2117,7 +2117,7 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
     assert len(prepared["dynamic_appendix_messages"]) == 1
     contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
     assert is_frontdoor_tool_contract_message(contract_message)
-    assert contract_message["role"] == "assistant"
+    assert contract_message["role"] == "system"
     assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
 
 
@@ -7260,3 +7260,73 @@ def test_create_agent_runner_sanitizes_interrupt_payloads_before_raising() -> No
         "payload": "non-primitive",
         "extra": ["non-primitive"],
     }
+
+
+def _node_error_heartbeat_state() -> dict:
+    return {
+        "session_key": "qq:default",
+        "heartbeat_internal": True,
+        "user_input": {
+            "content": "## EVENT BUNDLE\n- Task ... node paused after an error",
+            "metadata": {
+                "heartbeat_internal": True,
+                "heartbeat_reason": "task_node_error",
+                "heartbeat_task_ids": ["task:26e64d1dc8b3"],
+                "heartbeat_node_ids": ["node:cbbde9623fb4"],
+            },
+        },
+        "frontdoor_stage_state": {"active_stage_id": "", "transition_required": False, "stages": []},
+    }
+
+
+def test_frontdoor_node_error_heartbeat_context_detection() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    context = runner._frontdoor_node_error_heartbeat_context(_node_error_heartbeat_state())
+    assert context == {"task_id": "task:26e64d1dc8b3", "node_id": "node:cbbde9623fb4"}
+
+    terminal = _node_error_heartbeat_state()
+    terminal["user_input"]["metadata"]["heartbeat_reason"] = "task_terminal"
+    assert runner._frontdoor_node_error_heartbeat_context(terminal) is None
+
+    non_heartbeat = {"session_key": "x", "user_input": {"metadata": {}}}
+    assert runner._frontdoor_node_error_heartbeat_context(non_heartbeat) is None
+
+
+def test_frontdoor_stage_gate_whitelists_memory_tools_and_node_error_stageless() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+    stage_state = {"active_stage_id": "", "transition_required": False, "stages": []}
+
+    # memory 三个工具全局白名单：无活动阶段也能调
+    for name in ("memory_write", "memory_delete", "memory_note"):
+        assert runner._frontdoor_stage_gate_error(tool_name=name, stage_state=stage_state) == ""
+    # 非白名单工具仍被拦
+    assert runner._frontdoor_stage_gate_error(tool_name="manage_task_nodes", stage_state=stage_state) != ""
+    # 节点暂停事件心跳 allow_stageless：无活动阶段放行
+    assert (
+        runner._frontdoor_stage_gate_error(
+            tool_name="manage_task_nodes", stage_state=stage_state, allow_stageless=True
+        )
+        == ""
+    )
+
+
+def test_frontdoor_auto_opens_stage_for_node_error_heartbeat() -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
+
+    result = runner._frontdoor_stage_state_after_tool_cycle(
+        _node_error_heartbeat_state(),
+        tool_call_payloads=[
+            {"id": "call-1", "name": "manage_task_nodes", "arguments": {"action": "resume", "task_id": "task:26e64d1dc8b3"}}
+        ],
+        tool_results=[
+            {"tool_name": "manage_task_nodes", "status": "success", "result_text": '{"ok": true}'}
+        ],
+    )
+
+    assert result["active_stage_id"] == "frontdoor-stage-1"
+    stage = result["stages"][-1]
+    assert stage["system_generated"] is True
+    assert stage["tool_round_budget"] == 10
+    assert "任务 ID task:26e64d1dc8b3" in stage["stage_goal"]
+    assert stage["rounds"][0]["tool_names"] == ["manage_task_nodes"]
