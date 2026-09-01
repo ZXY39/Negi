@@ -6843,6 +6843,7 @@ textarea {
 .model-shared-list {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+    grid-auto-rows: min-content;
     gap: var(--space-4);
     min-height: 180px;
     align-content: start;
