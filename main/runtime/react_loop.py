@@ -620,6 +620,10 @@ class ReActToolLoop:
                             single_request_timeout_seconds=self._resolved_model_response_timeout_seconds(
                                 model_refs=current_model_refs,
                             ),
+                            on_model_retry_status=self._model_retry_status_callback(
+                                task_id=task.task_id,
+                                node_id=node.node_id,
+                            ),
                         )
                         # The chat backend now enforces the per-single-request
                         # response limit itself and retries retryable chain
@@ -5848,6 +5852,26 @@ class ReActToolLoop:
             },
             publish_snapshot=True,
         )
+
+    def _model_retry_status_callback(self, *, task_id: str, node_id: str) -> Any:
+        async def callback(status: dict[str, Any]) -> None:
+            payload = dict(status or {})
+            next_status = (
+                payload
+                if str(payload.get('state') or '').strip() == 'retrying'
+                else None
+            )
+            self._log_service.update_frame(
+                task_id,
+                node_id,
+                lambda frame: {
+                    **dict(frame or {}),
+                    'model_retry_status': next_status,
+                },
+                publish_snapshot=True,
+            )
+
+        return callback
 
     async def _await_with_model_marker(self, *, task_id: str, node_id: str, marker: str, awaitable: Any) -> Any:
         started_at = now_iso()

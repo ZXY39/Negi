@@ -88,11 +88,13 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, syncCeoCompressionToast, handleCeoError, syncCeoPrimaryButton };`,
+        this.__testExports = { S, U, syncCeoCompressionToast, syncCeoModelRetryToast, setCeoSessionSnapshotCache, handleCeoError, syncCeoPrimaryButton };`,
         context
     );
     context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
     context.__testExports.U.ceoCompressionToastText = new StubHTMLElement();
+    context.__testExports.U.ceoModelRetryToast = new StubHTMLElement();
+    context.__testExports.U.ceoModelRetryToastText = new StubHTMLElement();
     context.__testExports.U.ceoCompressionActions = new StubHTMLElement();
     context.__testExports.U.ceoCompressionPause = new StubHTMLButtonElement();
     context.__testExports.U.ceoInput = new StubHTMLTextAreaElement();
@@ -130,6 +132,45 @@ test("compression toast keeps dedicated compression pause controls hidden while 
     assert.equal(U.ceoCompressionToast.hidden, false);
     assert.equal(U.ceoCompressionActions.hidden, true);
     assert.equal(U.ceoCompressionPause.disabled, true);
+});
+
+test("model retry toast shows retry count and provider error from live inflight state", () => {
+    const { S, U, setCeoSessionSnapshotCache, syncCeoModelRetryToast } = loadApp();
+    S.activeSessionId = "web:test";
+    setCeoSessionSnapshotCache("web:test", {
+        inflight_turn: {
+            status: "running",
+            turn_id: "turn:retry",
+            model_retry_status: {
+                state: "retrying",
+                retry_count: 4,
+                error_message: "Error code: 429 - Server is busy",
+            },
+        },
+    });
+
+    syncCeoModelRetryToast();
+
+    assert.equal(U.ceoModelRetryToast.hidden, false);
+    assert.match(U.ceoModelRetryToastText.textContent, /第 4 次重试/);
+    assert.match(U.ceoModelRetryToastText.textContent, /Error code: 429/);
+});
+
+test("model retry toast hides when live inflight retry state clears", () => {
+    const { S, U, setCeoSessionSnapshotCache, syncCeoModelRetryToast } = loadApp();
+    S.activeSessionId = "web:test";
+    setCeoSessionSnapshotCache("web:test", {
+        inflight_turn: {
+            status: "running",
+            turn_id: "turn:retry",
+            model_retry_status: null,
+        },
+    });
+
+    syncCeoModelRetryToast();
+
+    assert.equal(U.ceoModelRetryToast.hidden, true);
+    assert.equal(U.ceoModelRetryToastText.textContent, "");
 });
 
 test("primary button stays in pause state while compression is running", () => {

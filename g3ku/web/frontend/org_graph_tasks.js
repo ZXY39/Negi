@@ -1459,6 +1459,16 @@ function handleTaskEvent(payload) {
         S.frontier = frames;
         S.taskRuntimeSummary = runtimeSummary || null;
         S.liveFrameMap = indexTaskLiveFrames(frames);
+        const selectedNodeId = String(S.selectedNodeId || "").trim();
+        if (selectedNodeId && typeof renderTaskNodeModelRetryToast === "function") {
+            const matchingFrames = frames.filter((item) => (
+                String(item?.node_id || "").trim() === selectedNodeId
+            ));
+            const selectedFrame = matchingFrames[matchingFrames.length - 1] || null;
+            renderTaskNodeModelRetryToast({
+                model_retry_status: selectedFrame?.model_retry_status || null,
+            });
+        }
         S.taskSummary = {
             ...(S.taskSummary || {}),
             active_node_count: hasTreeContext
@@ -1568,6 +1578,9 @@ function handleTaskEvent(payload) {
         S.taskSummary = { ...(S.taskSummary || {}), ...payload.data.task };
         renderTaskTokenStats();
         const selectedNodeId = String(S.selectedNodeId || "").trim();
+        if (selectedNodeId && typeof renderTaskNodeModelRetryToast === "function") {
+            renderTaskNodeModelRetryToast(null);
+        }
         if (selectedNodeId) {
             const currentViewState = captureTaskDetailViewState();
             stashTaskDetailViewState({ nodeId: selectedNodeId, viewState: currentViewState });
@@ -1792,8 +1805,6 @@ function initTasksWs() {
         }, 1000);
     };
 }
-
-
 
 
 

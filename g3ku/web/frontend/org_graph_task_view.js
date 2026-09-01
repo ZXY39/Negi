@@ -2541,6 +2541,59 @@ function renderTaskNodeDetailStatus(node) {
     U.adStatus.dataset.paused = effectivePaused ? "true" : "false";
 }
 
+function normalizeTaskNodeModelRetryStatus(value = null) {
+    if (!value || typeof value !== "object") return null;
+    const state = String(value?.state || "").trim().toLowerCase();
+    if (state !== "retrying") return null;
+    const rawCount = Number.parseInt(String(value?.retry_count ?? ""), 10);
+    const retryCount = Number.isFinite(rawCount) && rawCount >= 0 ? rawCount : 0;
+    const next = {
+        state: "retrying",
+        retry_count: retryCount,
+        error_message: String(value?.error_message || "").trim(),
+    };
+    const rawDelay = Number(value?.delay_seconds);
+    if (Number.isFinite(rawDelay) && rawDelay >= 0) next.delay_seconds = rawDelay;
+    const modelRefs = (Array.isArray(value?.model_refs) ? value.model_refs : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    if (modelRefs.length) next.model_refs = modelRefs;
+    return next;
+}
+
+function taskNodeModelRetryToastText(status = null) {
+    const normalized = normalizeTaskNodeModelRetryStatus(status);
+    if (!normalized) return "";
+    const count = Math.max(0, Number(normalized.retry_count || 0));
+    const countText = count > 0 ? `第 ${count} 次重试` : "自动重试";
+    const errorText = String(normalized.error_message || "").trim();
+    const text = [countText, errorText].filter(Boolean).join(" · ");
+    const maxChars = typeof MODEL_RETRY_TOAST_MAX_TEXT_CHARS === "number"
+        ? MODEL_RETRY_TOAST_MAX_TEXT_CHARS
+        : 260;
+    const chars = Array.from(text);
+    return chars.length <= maxChars
+        ? text
+        : `${chars.slice(0, maxChars - 3).join("")}...`;
+}
+
+function renderTaskNodeModelRetryToast(nodeOrStatus = null) {
+    const toastEl = U.taskNodeModelRetryToast;
+    const textEl = U.taskNodeModelRetryToastText;
+    if (!toastEl || !textEl) return;
+    const rawStatus = nodeOrStatus && typeof nodeOrStatus === "object"
+        ? (nodeOrStatus.model_retry_status ?? nodeOrStatus)
+        : null;
+    const status = normalizeTaskNodeModelRetryStatus(rawStatus);
+    const visible = !!status;
+    const text = taskNodeModelRetryToastText(status);
+    textEl.textContent = text;
+    toastEl.title = text;
+    toastEl.hidden = !visible;
+    if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
+    toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
 function showTaskNodeLoadingState(node) {
     S.currentNodeDetail = { ...node };
     U.detail.style.display = "flex";
@@ -2548,6 +2601,7 @@ function showTaskNodeLoadingState(node) {
     setTaskSelectionEmptyVisible(false);
     if (U.adRole) U.adRole.hidden = true;
     renderTaskNodeDetailStatus(node);
+    renderTaskNodeModelRetryToast(null);
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node?.roundSummary || "");
     if (U.adFlow) U.adFlow.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
     if (U.adMessages) U.adMessages.innerHTML = '<div class="empty-state task-trace-empty">Loading node details...</div>';
@@ -2741,10 +2795,12 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     if (renderToken !== S.taskDetailRenderToken) return;
     if (String(S.selectedNodeId || "").trim() !== nodeId) return;
     const liveFrameMap = liveFramesByNodeId();
+    const liveFrame = liveFrameMap.get(nodeId) || null;
     const mergedNode = {
         ...node,
         ...(detail || {}),
-        executionTrace: buildNodeExecutionTrace(node, detail || {}, liveFrameMap.get(nodeId) || null),
+        executionTrace: buildNodeExecutionTrace(node, detail || {}, liveFrame),
+        model_retry_status: liveFrame?.model_retry_status || null,
     };
     S.currentNodeDetail = mergedNode;
     U.detail.style.display = "flex";
@@ -2753,6 +2809,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     if (U.adRole) U.adRole.hidden = true;
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(node.roundSummary || "当前节点无派生轮次");
     renderTaskNodeDetailStatus(mergedNode);
+    renderTaskNodeModelRetryToast(mergedNode);
     if (U.adRoundSummary) U.adRoundSummary.textContent = String(mergedNode.roundSummary || "");
     const traceChanged = !!renderExecutionTrace(mergedNode, { viewState });
     const messagesChanged = !!renderMessageList(mergedNode, { viewState });
@@ -2783,6 +2840,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
 
 function hideAgent() {
     if (U.detail) U.detail.style.display = "none";
+    renderTaskNodeModelRetryToast(null);
     setTaskDetailOpen(false);
 }
 

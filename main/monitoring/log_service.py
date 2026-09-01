@@ -4037,6 +4037,9 @@ class TaskLogService:
                 'phase': str(next_frame.get('phase') or ''),
                 'await_marker': str(next_frame.get('await_marker') or ''),
                 'await_started_at': str(next_frame.get('await_started_at') or ''),
+                'model_retry_status': self._sanitize_model_retry_status(
+                    next_frame.get('model_retry_status')
+                ),
                 'stage_mode': str(next_frame.get('stage_mode') or ''),
                 'stage_status': str(next_frame.get('stage_status') or ''),
                 'stage_goal': str(next_frame.get('stage_goal') or ''),
@@ -4229,6 +4232,9 @@ class TaskLogService:
             'phase': str(record.phase or ''),
             'await_marker': str(payload.get('await_marker') or ''),
             'await_started_at': str(payload.get('await_started_at') or ''),
+            'model_retry_status': self._sanitize_model_retry_status(
+                payload.get('model_retry_status')
+            ),
             'stage_mode': str(payload.get('stage_mode') or ''),
             'stage_status': str(payload.get('stage_status') or ''),
             'stage_goal': str(payload.get('stage_goal') or ''),
@@ -4834,6 +4840,49 @@ class TaskLogService:
         }
 
     @staticmethod
+    def _sanitize_model_retry_status(payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        if str(payload.get('state') or '').strip() != 'retrying':
+            return None
+        retry_count_raw = payload.get('retry_count')
+        try:
+            retry_count = max(0, int(retry_count_raw or 0))
+        except (TypeError, ValueError):
+            retry_count = 0
+        normalized = {
+            'state': 'retrying',
+            'retry_count': retry_count,
+        }
+        chain_round_raw = payload.get('chain_round')
+        try:
+            chain_round = max(0, int(chain_round_raw or 0))
+        except (TypeError, ValueError):
+            chain_round = 0
+        if chain_round:
+            normalized['chain_round'] = chain_round
+        error_message = _single_line_text(
+            payload.get('error_message'),
+            max_chars=320,
+        )
+        if error_message:
+            normalized['error_message'] = error_message
+        model_refs = [
+            str(item or '').strip()[:80]
+            for item in list(payload.get('model_refs') or [])
+            if str(item or '').strip()
+        ][:8]
+        if model_refs:
+            normalized['model_refs'] = model_refs
+        try:
+            delay_seconds = max(0.0, float(payload.get('delay_seconds') or 0.0))
+        except (TypeError, ValueError):
+            delay_seconds = 0.0
+        if delay_seconds > 0:
+            normalized['delay_seconds'] = delay_seconds
+        return normalized
+
+    @staticmethod
     def _sanitize_runtime_frame(frame: dict[str, Any]) -> dict[str, Any]:
         payload = dict(frame or {})
         return {
@@ -4843,6 +4892,9 @@ class TaskLogService:
             'phase': str(payload.get('phase') or ''),
             'await_marker': str(payload.get('await_marker') or ''),
             'await_started_at': str(payload.get('await_started_at') or ''),
+            'model_retry_status': TaskLogService._sanitize_model_retry_status(
+                payload.get('model_retry_status')
+            ),
             'stage_mode': str(payload.get('stage_mode') or ''),
             'stage_status': str(payload.get('stage_status') or ''),
             'stage_goal': str(payload.get('stage_goal') or ''),
@@ -4972,6 +5024,9 @@ class TaskLogService:
             'phase': str(payload.get('phase') or ''),
             'await_marker': str(payload.get('await_marker') or ''),
             'await_started_at': str(payload.get('await_started_at') or ''),
+            'model_retry_status': TaskLogService._sanitize_model_retry_status(
+                payload.get('model_retry_status')
+            ),
             'stage_mode': str(payload.get('stage_mode') or ''),
             'stage_status': str(payload.get('stage_status') or ''),
             'stage_goal': str(payload.get('stage_goal') or ''),

@@ -109,6 +109,7 @@ class G3kuChatModelAdapter(BaseChatModel):
         parallel_tool_calls = kwargs.get("parallel_tool_calls")
         prompt_cache_key = kwargs.get("prompt_cache_key")
         on_text_delta = kwargs.get("on_text_delta")
+        on_model_retry_status = kwargs.get("on_model_retry_status")
         raw_temperature = kwargs.get("temperature", self.default_temperature)
         raw_max_tokens = kwargs.get("max_tokens", self.default_max_tokens)
         reasoning_effort = kwargs.get("reasoning_effort", self.default_reasoning_effort)
@@ -137,6 +138,10 @@ class G3kuChatModelAdapter(BaseChatModel):
             chat_kwargs["reasoning_effort"] = str(reasoning_effort)
         if on_text_delta is not None and _callable_accepts_keyword(signature, "on_text_delta"):
             chat_kwargs["on_text_delta"] = on_text_delta
+        if on_model_retry_status is not None and _callable_accepts_keyword(
+            signature, "on_model_retry_status"
+        ):
+            chat_kwargs["on_model_retry_status"] = on_model_retry_status
 
         response = await chat(**chat_kwargs)
 

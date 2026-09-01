@@ -4002,6 +4002,10 @@ textarea {
         animation: none !important;
         transition: none !important;
     }
+
+    .model-retry-toast-dot {
+        animation: none !important;
+    }
 }
 
 @keyframes ceo-context-load-tag-reduced {
@@ -4057,6 +4061,82 @@ textarea {
 
 .ceo-compression-toast-text {
     white-space: nowrap;
+}
+
+.model-retry-toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: fit-content;
+    max-width: min(760px, calc(100% - 32px));
+    padding: 9px 12px;
+    border: 1px solid color-mix(in srgb, #f59e0b 42%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, #f59e0b 9%, var(--bg-panel));
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    line-height: 1.45;
+    pointer-events: auto;
+    opacity: 1;
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.model-retry-toast[hidden] {
+    display: none !important;
+}
+
+.model-retry-toast-dot {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 auto;
+    margin-top: 3px;
+    border-radius: 999px;
+    background: #f59e0b;
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.28);
+    animation: model-retry-toast-pulse 1.4s ease-in-out infinite;
+}
+
+.model-retry-toast-copy {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    column-gap: 1ch;
+}
+
+.model-retry-toast-label {
+    flex: 0 0 auto;
+    color: #b45309;
+    font-weight: 700;
+}
+
+.model-retry-toast-text {
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: min(520px, 64vw);
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.ceo-model-retry-toast {
+    flex: 0 0 auto;
+    margin: 12px clamp(16px, 2.4vw, 32px) 0;
+}
+
+.task-node-model-retry-toast {
+    flex: 0 0 auto;
+    margin-top: 0;
+}
+
+@keyframes model-retry-toast-pulse {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.28);
+    }
+    50% {
+        box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.08);
+    }
 }
 
 @keyframes ceo-compression-pulse {

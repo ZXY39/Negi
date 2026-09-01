@@ -4961,6 +4961,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         parallel_tool_calls: bool | None,
         prompt_cache_key: str,
         on_text_delta: Any = None,
+        on_model_retry_status: Any = None,
     ) -> AIMessage:
         chat_model = G3kuChatModelAdapter(
             chat_backend=self._resolve_chat_backend(),
@@ -4972,6 +4973,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             parallel_tool_calls=parallel_tool_calls,
             prompt_cache_key=prompt_cache_key,
             on_text_delta=on_text_delta,
+            on_model_retry_status=on_model_retry_status,
         )
 
     async def _graph_prepare_turn(
@@ -5679,6 +5681,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         state_for_request = self._rotate_frontdoor_model_refs_if_stale(state_for_request)
         runtime_session = getattr(getattr(runtime, "context", None), "session", None)
         assistant_text_delta_handler = None
+        model_retry_status_handler = None
         if runtime_session is not None:
             callback = getattr(runtime_session, "_handle_assistant_text_delta", None)
             if callable(callback):
@@ -5686,6 +5689,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             begin_segment = getattr(runtime_session, "_begin_assistant_text_segment", None)
             if callable(begin_segment):
                 begin_segment()
+            async def _handle_frontdoor_model_retry_status(status: dict[str, Any]) -> None:
+                setattr(
+                    runtime_session,
+                    "_frontdoor_model_retry_status",
+                    (
+                        copy.deepcopy(dict(status))
+                        if isinstance(status, dict)
+                        and str(status.get("state") or "").strip() == "retrying"
+                        else None
+                    ),
+                )
+                emit_snapshot = getattr(runtime_session, "_emit_state_snapshot", None)
+                if callable(emit_snapshot):
+                    await emit_snapshot()
+
+            model_retry_status_handler = _handle_frontdoor_model_retry_status
         normalized_provider_tool_names = self._frontdoor_provider_visible_tool_names(
             list(state_for_request.get("provider_tool_names") or state_for_request.get("tool_names") or [])
         )
@@ -5955,6 +5974,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
                         prompt_cache_key=prompt_cache_key,
                         on_text_delta=assistant_text_delta_handler,
+                        on_model_retry_status=model_retry_status_handler,
                     )
                 except Exception as exc:
                     if not isinstance(exc, ModelProviderExhaustedError) and PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):

@@ -286,6 +286,48 @@ async def test_config_chat_backend_retries_full_model_chain_on_retryable_exhaust
 
 
 @pytest.mark.asyncio
+async def test_config_chat_backend_publishes_model_retry_status_and_clears_it(monkeypatch) -> None:
+    calls: list[str] = []
+    events: list[dict[str, object]] = []
+    providers = {
+        "primary": _AlwaysRetryableChainProvider("primary", calls),
+        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=2),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429", "502"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    async def record_status(status: dict[str, object]) -> None:
+        events.append(status)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary", "secondary"],
+        on_model_retry_status=record_status,
+    )
+
+    assert response.content == "ok"
+    assert events[0]["state"] == "retrying"
+    assert events[0]["retry_count"] == 1
+    assert "HTTP 502: upstream request failed" in str(events[0]["error_message"])
+    assert events[-1] == {"state": "cleared"}
+
+
+@pytest.mark.asyncio
 async def test_fallback_provider_retries_full_model_chain_on_retryable_exhaustion(monkeypatch) -> None:
     calls: list[str] = []
     providers = {

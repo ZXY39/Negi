@@ -118,6 +118,7 @@ class RuntimeAgentSession:
         self._frontdoor_history_shrink_reason: str = ""
         self._frontdoor_pending_shrink_reason: str = ""
         self._frontdoor_token_preflight_diagnostics: dict[str, Any] = {}
+        self._frontdoor_model_retry_status: dict[str, Any] | None = None
         # 本轮是否真实发生过内联 token 压缩（任一请求 applied 即置位，轮首清零）。
         # 只表达“当轮压缩事件”，与跨轮残留的 _frontdoor_history_shrink_reason 不同。
         self._frontdoor_token_compression_applied_turn: bool = False
@@ -487,6 +488,7 @@ class RuntimeAgentSession:
         self._frontdoor_provider_tool_schema_names = self._normalized_name_list(
             payload.get("provider_tool_schema_names")
         )
+        self._frontdoor_model_retry_status = None
         self._frontdoor_restore_source = str(source or "none").strip() or "none"
         self._frontdoor_baseline_sync_decision = str(
             payload.get("frontdoor_baseline_sync_decision") or ""
@@ -2089,6 +2091,12 @@ class RuntimeAgentSession:
         )
         if frontdoor_token_preflight_diagnostics:
             snapshot["frontdoor_token_preflight_diagnostics"] = frontdoor_token_preflight_diagnostics
+        model_retry_status = getattr(self, "_frontdoor_model_retry_status", None)
+        if (
+            isinstance(model_retry_status, dict)
+            and str(model_retry_status.get("state") or "").strip() == "retrying"
+        ):
+            snapshot["model_retry_status"] = copy.deepcopy(model_retry_status)
         frontdoor_selection_debug = getattr(self, "_frontdoor_selection_debug", None)
         if isinstance(frontdoor_selection_debug, dict) and frontdoor_selection_debug:
             snapshot["frontdoor_selection_debug"] = copy.deepcopy(frontdoor_selection_debug)
@@ -2134,6 +2142,7 @@ class RuntimeAgentSession:
             and "frontdoor_request_body_messages" not in snapshot
             and "frontdoor_history_shrink_reason" not in snapshot
             and "frontdoor_token_preflight_diagnostics" not in snapshot
+            and "model_retry_status" not in snapshot
             and "frontdoor_selection_debug" not in snapshot
             and "actual_request_path" not in snapshot
             and "prompt_cache_key_hash" not in snapshot
@@ -2871,6 +2880,7 @@ class RuntimeAgentSession:
                 self._frontdoor_actual_request_hash = ""
                 self._frontdoor_actual_request_message_count = 0
                 self._frontdoor_actual_tool_schema_hash = ""
+                self._frontdoor_model_retry_status = None
                 self._frontdoor_token_compression_applied_turn = False
             self._state.is_running = True
             self._state.paused = False
@@ -3329,6 +3339,7 @@ class RuntimeAgentSession:
         self._state.queued_follow_up_messages.append(UserInputMessage(content=content))
 
     async def pause(self, *, manual: bool = False) -> None:
+        self._frontdoor_model_retry_status = None
         if self._background_tool_targets:
             manager = getattr(self._loop, "tool_execution_manager", None)
             if manager is not None and hasattr(manager, "stop_execution"):
@@ -3420,6 +3431,7 @@ class RuntimeAgentSession:
             self._state.is_running = True
             self._state.paused = False
             self._state.status = "running"
+            self._frontdoor_model_retry_status = None
             self._state.latest_message = ""
             self._reset_assistant_stream_state()
             self._state.last_error = None

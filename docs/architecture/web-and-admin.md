@@ -142,6 +142,14 @@ This is intentional. The composer button means "pause only when the user has not
 - `snapshot.ceo.messages` must also avoid replaying running-turn `pending` user transcript rows as ordinary history bubbles. During a live running turn, authoritative current-turn user placement comes from `inflight_turn.user_messages`, not from flat transcript replay.
 - When a running follow-up is actually consumed into the next model send of the same visible conversation lane, the runtime also archives the pre-follow-up assistant execution bubble into visible UI history before the consumed user bubble is restored. That archive is UI-visible but prompt-hidden, so refresh/reconnect can preserve the same visual ordering without polluting later prompt history.
 
+### Model Retry Visibility UI Contract
+
+- `ConfigChatBackend` publishes live-only `model_retry_status` before each retryable model-chain backoff and clears it when that backoff exits. The status contains `state=retrying`, the 1-based `retry_count`, the chain round, the model refs, a bounded `error_message`, and the backoff delay; backend and frontend independently cap the error text so provider diagnostics cannot become oversized websocket/UI payloads.
+- For CEO sessions, the current running `inflight_turn.model_retry_status` reaches the browser through the existing `snapshot.ceo` / `ceo.turn.patch` lanes. The browser shows a small warning toast above the conversation feed while `state=retrying`, with text in the shape `模型自动重试中 · 第 N 次重试 · <error>`; the toast disappears when the backend snapshot clears the field or the session switches to a non-running turn.
+- For task nodes, the runtime frame exposes the same field through `task.live.patch`. Node detail reads the selected frame and shows the same toast below its header. Live patches update the toast while the detail drawer is open, and opening the drawer during a retry restores it from the current frame.
+- The status is transient observability state, not transcript history. It is not appended to persisted CEO messages, does not backfill historical node output, and is cleared on success, terminal failure, pause, discard, or config-refresh-based turn rebuild. A failed websocket delivery is covered by the next low-frequency snapshot/patch or by reopening the session/node while the runtime is still retrying.
+- If the chat is stuck but no retry toast appears, check that the actual failing boundary is the retryable `ConfigChatBackend` path rather than an outer idle/preflight/tool wait, then inspect the `on_model_retry_status` callback, `inflight_turn.model_retry_status`, and the node runtime frame field in that order.
+
 ### 2.2. Regulatory Approval Flow
 
 - Web CEO has a second blocking composer lane besides ordinary running turns: a pending `frontdoor_tool_approval_batch`.

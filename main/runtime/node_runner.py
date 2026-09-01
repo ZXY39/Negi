@@ -2202,6 +2202,10 @@ class NodeRunner:
             # Responses-style gateways expect the flat function selector shape here.
             tool_choice=tool_choice,
             parallel_tool_calls=False,
+            on_model_retry_status=self._react_loop._model_retry_status_callback(
+                task_id=task.task_id,
+                node_id=node.node_id,
+            ),
         )
         normalized_tool_calls = self._distribution_response_tool_calls(response)
         epoch_payload = self._distribution_append_debug_trace(

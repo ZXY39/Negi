@@ -203,6 +203,7 @@ chat 调用的时间边界只有一种：**单次（单轮）provider 请求的�
 重试边界（`main/runtime/chat_backend.py` 与 `g3ku/providers/fallback.py` 共用同一套语义）：
 
 - `retry_on` 关键词命中的错误（默认含网络类与 429/限流类）触发整链重试，**不限轮数**；轮与轮之间走封顶指数退避并带抖动（起点约 1s、封顶 60s），抖动用于打散并发节点的重试节奏，避免同步撞同一个限流窗口。
+- 进入整链退避前，`ConfigChatBackend` 通过可选 `on_model_retry_status` 回调发布 live-only 状态：`state=retrying`、1-based `retry_count`、当前链轮、模型链、截断后的 `error_message` 与退避秒数；重试成功、配置回合重建或异常退出时发布 `state=cleared`。回调异常不得打断真实 provider 重试，原始终端错误仍走既有失败链。
 - 重试循环在每个链轮边界对比 runtime config revision：revision 变化时抛出带 `config_revision_changed` 标记的可重试耗尽错误（`ModelProviderExhaustedError`），由上层重启回合/重建链，而不是继续用旧链空转。任务运行时侧见 `config-and-models.md`「模型链变更何时作用于在途回合」。
 - 关键词未命中的错误仍走有限路径：同轮内换 key、回退链上下一个模型；都不可用时抛出耗尽错误。
 - 已经出现可见流式文本的发送不做透明重试/回退（一个可见气泡不得由多个 provider/model attempt 拼接）。
@@ -211,7 +212,7 @@ chat 调用的时间边界只有一种：**单次（单轮）provider 请求的�
 
 - “首 token”在本项目语义里是“首个 chunk 到达”，不是“首个文本 token”
 - `request_timeout_seconds` 对上述 provider 表示“首 chunk / idle chunk 超时阈值”，不是“整次请求必须在 N 秒内完成”
-- 节点因限流长时间停在模型等待（`await_marker=model.chat.await_response`）可能是退避重试在正常推进，先看日志里的 `Retryable model-chain failure (round …)` 再判断是否卡死
+- 节点因限流长时间停在模型等待（`await_marker=model.chat.await_response`）可能是退避重试在正常推进，先看日志里的 `Retryable model-chain failure (round …)`，再看会话/节点重试 toast 是否处于 `retrying` 并携带 provider 错误。toast 只表达“正在退避重试”，不改变无限重试的边界；重试结束时状态必须清理。UI 合同见 `web-and-admin.md`「Model Retry Visibility UI Contract」
 
 ## 6. 运行时里的状态与持久化
 

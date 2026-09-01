@@ -120,10 +120,12 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderNodeContextPlaceholder, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderNodeContextPlaceholder, renderTaskNodeModelRetryToast, U };`,
         context
     );
     context.__testExports.U.artifactContent = artifactContent;
+    context.__testExports.U.taskNodeModelRetryToast = new StubHTMLElement();
+    context.__testExports.U.taskNodeModelRetryToastText = new StubHTMLElement();
     return { ...context.__testExports, artifactContent };
 }
 
@@ -133,4 +135,29 @@ test("renderNodeContextPlaceholder decodes escaped display text for node context
     renderNodeContextPlaceholder('line1\\nline2\\t\\"quoted\\"\\\\path');
 
     assert.equal(artifactContent.textContent, 'line1\nline2\t"quoted"\\path');
+});
+
+test("task node retry toast renders live frame retry count and error", () => {
+    const { renderTaskNodeModelRetryToast, U } = loadApp();
+
+    renderTaskNodeModelRetryToast({
+        model_retry_status: {
+            state: "retrying",
+            retry_count: 8,
+            error_message: "Error code: 502 - upstream request failed",
+        },
+    });
+
+    assert.equal(U.taskNodeModelRetryToast.hidden, false);
+    assert.match(U.taskNodeModelRetryToastText.textContent, /第 8 次重试/);
+    assert.match(U.taskNodeModelRetryToastText.textContent, /Error code: 502/);
+});
+
+test("task node retry toast hides when live frame status is cleared", () => {
+    const { renderTaskNodeModelRetryToast, U } = loadApp();
+
+    renderTaskNodeModelRetryToast({ model_retry_status: null });
+
+    assert.equal(U.taskNodeModelRetryToast.hidden, true);
+    assert.equal(U.taskNodeModelRetryToastText.textContent, "");
 });

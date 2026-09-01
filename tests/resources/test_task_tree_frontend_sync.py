@@ -4425,6 +4425,22 @@ def test_ceo_composer_html_includes_local_compression_toast() -> None:
     assert "上下文压缩中" in html
 
 
+def test_model_retry_toasts_are_wired_for_ceo_and_task_node_views() -> None:
+    html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    task_view_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_task_view.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    assert 'id="ceo-model-retry-toast"' in html
+    assert 'id="ceo-model-retry-toast-text"' in html
+    assert 'id="task-node-model-retry-toast"' in html
+    assert 'id="task-node-model-retry-toast-text"' in html
+    assert "function syncCeoModelRetryToast" in app_js
+    assert "model_retry_status" in app_js
+    assert "function renderTaskNodeModelRetryToast" in task_view_js
+    assert ".model-retry-toast" in css
+
+
 def test_ceo_execution_trace_reuses_stage_round_helpers() -> None:
     app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
 

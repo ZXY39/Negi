@@ -17,6 +17,7 @@ from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_pa
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
     current_runtime_config_revision,
+    exception_chain_display_text,
     exhausted_model_chain_error,
     model_retry_backoff_seconds,
     normalize_request_timeout_seconds,
@@ -40,6 +41,14 @@ from main.runtime.send_token_preflight import estimate_runtime_provider_request_
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.node_turn_controller import NodeTurnLease
 _MISSING = object()
+_MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT = 320
+
+
+def _model_retry_status_error_text(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= _MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT:
+        return text
+    return f"{text[:_MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT - 3].rstrip()}..."
 
 
 class ChatBackend(Protocol):
@@ -60,6 +69,7 @@ class ChatBackend(Protocol):
         on_text_delta: Any = None,
         model_refs_resolver: Any = None,
         single_request_timeout_seconds: float | None = None,
+        on_model_retry_status: Any = None,
     ) -> LLMResponse: ...
 
 
@@ -666,6 +676,7 @@ class ConfigChatBackend:
         on_text_delta: Any = None,
         model_refs_resolver: Any = None,
         single_request_timeout_seconds: float | None = None,
+        on_model_retry_status: Any = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
@@ -692,6 +703,21 @@ class ConfigChatBackend:
         start_revision = current_runtime_config_revision()
         chain_round_index = 0
         retryable_backoff_count = 0
+        retry_status_emitted = False
+
+        async def _emit_model_retry_status(status: dict[str, Any]) -> None:
+            nonlocal retry_status_emitted
+            if not callable(on_model_retry_status):
+                return
+            if str(status.get("state") or "").strip() == "retrying":
+                retry_status_emitted = True
+            try:
+                result = on_model_retry_status(dict(status))
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.debug("Model retry status callback failed")
+
         try:
             while True:
                 chain_round_index += 1
@@ -909,6 +935,22 @@ class ConfigChatBackend:
                         delay_seconds,
                         retry_full_chain_reason,
                     )
+                    await _emit_model_retry_status(
+                        {
+                            "state": "retrying",
+                            "retry_count": retryable_backoff_count,
+                            "chain_round": chain_round_index,
+                            "error_message": _model_retry_status_error_text(
+                                (
+                                    exception_chain_display_text(round_last_error)
+                                    if isinstance(round_last_error, Exception)
+                                    else retry_full_chain_reason
+                                )
+                            ),
+                            "model_refs": list(refs),
+                            "delay_seconds": float(delay_seconds or 0.0),
+                        }
+                    )
                     await asyncio.sleep(delay_seconds)
                     continue
                 break
@@ -921,6 +963,8 @@ class ConfigChatBackend:
             last_response.attempts = list(attempts)
             return sanitize_terminal_model_error(last_response)
         finally:
+            if retry_status_emitted:
+                await _emit_model_retry_status({"state": "cleared"})
             if held_turn_lease is not None and held_turn_lease.initial_model_permit is not None and model_concurrency_controller is not None:
                 model_concurrency_controller.release(held_turn_lease.initial_model_permit)
                 held_turn_lease.initial_model_permit = None

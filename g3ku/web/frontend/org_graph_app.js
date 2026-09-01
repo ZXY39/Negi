@@ -28,6 +28,7 @@ const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
 const CEO_COMPRESSION_TOAST_TEXT = "上下文压缩中";
+const MODEL_RETRY_TOAST_MAX_TEXT_CHARS = 260;
 const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
 const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
 const CEO_FOLLOW_UP_QUEUE_CACHE_KEY = "g3ku.ceo.follow-up-queues.v1";
@@ -354,6 +355,8 @@ const U = {
     ceoComposerUsageBrainTip: document.getElementById("ceo-context-usage-brain-tip"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
+    ceoModelRetryToast: document.getElementById("ceo-model-retry-toast"),
+    ceoModelRetryToastText: document.getElementById("ceo-model-retry-toast-text"),
     ceoSend: document.getElementById("ceo-send-btn"),
     viewCeo: document.getElementById("view-ceo"),
     viewTasks: document.getElementById("view-tasks-list"),
@@ -468,6 +471,8 @@ const U = {
     artifactHeading: document.getElementById("artifact-list")?.closest(".agent-detail-section")?.querySelector("h4"),
     adOutputSection: document.getElementById("ad-output")?.closest(".agent-detail-section"),
     adLogsSection: document.getElementById("ad-logs")?.closest(".agent-detail-section"),
+    taskNodeModelRetryToast: document.getElementById("task-node-model-retry-toast"),
+    taskNodeModelRetryToastText: document.getElementById("task-node-model-retry-toast-text"),
     nodeEmpty: document.getElementById("task-node-empty"),
     closeAgent: document.getElementById("close-agent-btn"),
     skillSearch: document.getElementById("skill-search-input"),
@@ -1891,6 +1896,31 @@ function normalizeCeoSnapshotCompression(compression = null) {
     return next;
 }
 
+function normalizeCeoModelRetryStatus(value = null) {
+    if (!value || typeof value !== "object") return null;
+    const state = String(value?.state || "").trim().toLowerCase();
+    if (state !== "retrying") return null;
+    const rawCount = Number.parseInt(String(value?.retry_count ?? ""), 10);
+    const retryCount = Number.isFinite(rawCount) && rawCount >= 0 ? rawCount : 0;
+    const rawRound = Number.parseInt(String(value?.chain_round ?? ""), 10);
+    const chainRound = Number.isFinite(rawRound) && rawRound > 0 ? rawRound : 0;
+    const rawDelay = Number(value?.delay_seconds);
+    const delaySeconds = Number.isFinite(rawDelay) && rawDelay >= 0 ? rawDelay : 0;
+    const next = {
+        state: "retrying",
+        retry_count: retryCount,
+        delay_seconds: delaySeconds,
+    };
+    if (chainRound) next.chain_round = chainRound;
+    const errorMessage = String(value?.error_message || "").trim();
+    if (errorMessage) next.error_message = errorMessage;
+    const modelRefs = (Array.isArray(value?.model_refs) ? value.model_refs : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    if (modelRefs.length) next.model_refs = modelRefs;
+    return next;
+}
+
 function normalizeCeoSnapshotMessage(message = {}) {
     if (!message || typeof message !== "object") return null;
     const role = String(message?.role || "").trim().toLowerCase();
@@ -1974,12 +2004,14 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
     const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context);
     const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context_delta);
     const compression = normalizeCeoSnapshotCompression(snapshot?.compression);
+    const modelRetryStatus = normalizeCeoModelRetryStatus(snapshot?.model_retry_status);
     const errorMessage = String(snapshot?.last_error?.message || "").trim();
     const runtimeUsageDiagnostics = normalizeCeoRuntimeUsageDiagnostics(snapshot?.frontdoor_token_preflight_diagnostics);
     const actualRequestMessageCount = Number(snapshot?.actual_request_message_count ?? snapshot?.actualRequestMessageCount);
     if (canonicalContext) next.canonical_context = canonicalContext;
     if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
     if (compression) next.compression = compression;
+    if (modelRetryStatus) next.model_retry_status = modelRetryStatus;
     if (errorMessage) next.last_error = { message: errorMessage };
     if (runtimeUsageDiagnostics) next.frontdoor_token_preflight_diagnostics = runtimeUsageDiagnostics;
     const usage = normalizeCeoTurnUsage(snapshot?.usage);
@@ -1993,6 +2025,7 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
         !ceoInflightTurnHasVisibleAssistantState(next)
         && !next.user_message
         && !next.compression
+        && !next.model_retry_status
         && !next.frontdoor_token_preflight_diagnostics
     ) return null;
     return next;
@@ -2145,6 +2178,7 @@ function setCeoSessionSnapshotCache(sessionId, entry = {}) {
     });
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
+    syncCeoModelRetryToast();
     syncCeoComposerUsageOutline();
     if (!ceoRunningInflightTurnForSession(key) && !hasActiveCeoComposerUsageEstimate(key)) {
         scheduleCeoComposerUsageRefresh();
@@ -2176,6 +2210,7 @@ function clearCeoSessionSnapshotCache(sessionId) {
     S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
     schedulePersistCeoSessionSnapshotCache();
     syncCeoCompressionToast();
+    syncCeoModelRetryToast();
     syncCeoComposerUsageOutline();
     if (!hasActiveCeoComposerUsageEstimate(key)) scheduleCeoComposerUsageRefresh();
     return true;
@@ -2198,6 +2233,42 @@ function syncCeoCompressionToast() {
     const compression = activeCeoSessionCompressionState();
     const visible = !!compression;
     textEl.textContent = visible ? CEO_COMPRESSION_TOAST_TEXT : "";
+    toastEl.hidden = !visible;
+    if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
+    toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
+}
+
+function activeCeoSessionModelRetryStatus() {
+    const cacheEntry = getCeoSessionSnapshotCache(activeSessionId());
+    const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
+    const inflightStatus = String(inflightTurn?.status || "").trim().toLowerCase();
+    if (inflightStatus && !["running", "in_progress", "active"].includes(inflightStatus)) return null;
+    return normalizeCeoModelRetryStatus(inflightTurn?.model_retry_status);
+}
+
+function modelRetryToastText(status = null, label = "") {
+    const normalized = normalizeCeoModelRetryStatus(status);
+    if (!normalized) return "";
+    label = String(label || "").trim();
+    const count = Math.max(0, Number(normalized.retry_count || 0));
+    const countText = count > 0 ? `第 ${count} 次重试` : "自动重试";
+    const errorText = String(normalized.error_message || "").trim();
+    const text = [label, countText, errorText].filter(Boolean).join(" · ");
+    const chars = Array.from(text);
+    return chars.length <= MODEL_RETRY_TOAST_MAX_TEXT_CHARS
+        ? text
+        : `${chars.slice(0, MODEL_RETRY_TOAST_MAX_TEXT_CHARS - 3).join("")}...`;
+}
+
+function syncCeoModelRetryToast() {
+    const toastEl = U.ceoModelRetryToast;
+    const textEl = U.ceoModelRetryToastText;
+    if (!toastEl || !textEl) return;
+    const status = activeCeoSessionModelRetryStatus();
+    const visible = !!status;
+    const text = modelRetryToastText(status);
+    textEl.textContent = text;
+    toastEl.title = text;
     toastEl.hidden = !visible;
     if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
     toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
