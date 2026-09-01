@@ -12,7 +12,7 @@ DEFAULT_RETAIN_RAW_COMPLETED_STAGES = 3
 TRANSCRIPT_PROJECTION_MODE = "stage_window"
 DEFAULT_TRANSCRIPT_MAX_OUTPUT_TEXT_CHARS = 2000
 DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_CHARS = 2000
-DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_TEXT_CHARS = 500
+DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_TEXT_CHARS = 4000
 DEFAULT_TRANSCRIPT_MAX_ROUND_TEXT_CHARS = 4000
 
 
@@ -464,6 +464,107 @@ def project_canonical_context_for_transcript(
     return projected
 
 
+def _source_stage_by_identity(canonical_context: Any) -> dict[str, dict[str, Any]]:
+    return {
+        canonical_stage_identity(stage, index): stage
+        for index, stage in enumerate(list((canonical_context or {}).get("stages") or []))
+        if isinstance(stage, dict)
+    }
+
+
+def _round_bodies_by_identity(
+    canonical_context: Any,
+) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, dict[str, Any]]]:
+    scoped: dict[tuple[str, str], dict[str, Any]] = {}
+    unscoped: dict[str, dict[str, Any]] = {}
+    for index, stage in enumerate(list((canonical_context or {}).get("stages") or [])):
+        if not isinstance(stage, dict):
+            continue
+        stage_id = canonical_stage_identity(stage, index)
+        for round_index, round_payload in enumerate(list(stage.get("rounds") or [])):
+            if not isinstance(round_payload, dict):
+                continue
+            identity = canonical_round_identity(round_payload, round_index)
+            scoped[(stage_id, identity)] = round_payload
+            unscoped.setdefault(identity, round_payload)
+    return scoped, unscoped
+
+
+def project_canonical_context_for_ui_payload(canonical_context: Any) -> dict[str, Any]:
+    """Project a canonical workset for Web UI payloads without losing live bodies.
+
+    The transcript projection strips rounds outside the raw stage window and caps
+    oversized tool bodies. UI payloads keep the same stage view so delta baselines
+    are comparable, but the retained raw stages keep their unprojected rounds so
+    tool cards still show the full narration, arguments, and output bodies live.
+    """
+    projected = project_canonical_context_for_transcript(canonical_context)
+    if not list(projected.get("stages") or []):
+        return {}
+    source_by_identity = _source_stage_by_identity(canonical_context)
+    for stage in list(projected.get("stages") or []):
+        if _as_str(stage.get("representation")) != RAW_REPRESENTATION:
+            continue
+        source = source_by_identity.get(
+            canonical_stage_identity(stage, int(stage.get("stage_index") or 0))
+        )
+        if source is not None:
+            stage["rounds"] = copy.deepcopy(list(source.get("rounds") or []))
+    return projected
+
+
+def ui_canonical_context_delta(previous_context: Any, current_context: Any) -> dict[str, Any]:
+    """UI delta over two canonical contexts that may use different projections.
+
+    Persisted transcript records are projected, while live frontdoor stage state
+    is not. Comparing them directly would treat `compact -> raw` and `rounds=[] ->
+    rounds=[...]` as changes for every historical stage. Compare both sides in the
+    transcript projection first, then reattach the unprojected round bodies of the
+    stages the delta keeps so the rendered rail is complete for this turn only.
+    """
+    previous_view = project_canonical_context_for_transcript(previous_context)
+    current_view = project_canonical_context_for_transcript(current_context)
+    previous_by_identity = {
+        canonical_stage_identity(stage, index): stage
+        for index, stage in enumerate(list((previous_view or {}).get("stages") or []))
+        if isinstance(stage, dict)
+    }
+    for index, stage in enumerate(list((current_view or {}).get("stages") or [])):
+        if not isinstance(stage, dict):
+            continue
+        previous_stage = previous_by_identity.get(canonical_stage_identity(stage, index))
+        if previous_stage is None:
+            continue
+        previous_representation = _as_str(previous_stage.get("representation"))
+        if previous_representation != RAW_REPRESENTATION:
+            # A stage the baseline renders as compact must not re-expand just
+            # because the latest-stage window moved after a new turn.
+            stage["representation"] = previous_representation
+            stage["rounds"] = []
+        elif _as_str(stage.get("representation")) != RAW_REPRESENTATION:
+            # The window also moves in the other direction: a stage that the
+            # baseline kept raw would otherwise be stripped from this view and
+            # reappear as a delta. Restore the established raw baseline.
+            stage["representation"] = RAW_REPRESENTATION
+            stage["rounds"] = copy.deepcopy(list(previous_stage.get("rounds") or []))
+    delta = canonical_context_delta(previous_view, current_view)
+    if not list(delta.get("stages") or []):
+        return {}
+    scoped_bodies, unscoped_bodies = _round_bodies_by_identity(current_context)
+    for stage in list(delta.get("stages") or []):
+        stage_id = canonical_stage_identity(stage, int(stage.get("stage_index") or 0))
+        rebuilt: list[dict[str, Any]] = []
+        for round_index, round_payload in enumerate(list(stage.get("rounds") or [])):
+            if not isinstance(round_payload, dict):
+                rebuilt.append(round_payload)
+                continue
+            identity = canonical_round_identity(round_payload, round_index)
+            live_round = scoped_bodies.get((stage_id, identity)) or unscoped_bodies.get(identity)
+            rebuilt.append(copy.deepcopy(live_round) if live_round is not None else round_payload)
+        stage["rounds"] = rebuilt
+    return delta
+
+
 def merge_turn_stage_state_into_canonical_context(
     canonical_context: Any,
     turn_stage_state: Any,
@@ -601,7 +702,9 @@ __all__ = [
     "default_frontdoor_canonical_context",
     "merge_turn_stage_state_into_canonical_context",
     "normalize_frontdoor_canonical_context",
+    "project_canonical_context_for_ui_payload",
     "project_canonical_context_for_transcript",
     "rebase_turn_stage_state_against_context",
     "TRANSCRIPT_PROJECTION_MODE",
+    "ui_canonical_context_delta",
 ]

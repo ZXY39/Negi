@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from g3ku.runtime.frontdoor.canonical_context import (
+    canonical_context_delta,
     merge_turn_stage_state_into_canonical_context,
     normalize_frontdoor_canonical_context,
+    project_canonical_context_for_ui_payload,
     project_canonical_context_for_transcript,
+    ui_canonical_context_delta,
 )
 
 
@@ -159,7 +162,142 @@ def test_transcript_projection_caps_oversized_tool_arguments() -> None:
     tool = projected["stages"][0]["rounds"][0]["tools"][0]
 
     assert tool["arguments"] == {}
-    assert len(str(tool["arguments_text"])) <= 500
+    assert len(str(tool["arguments_text"])) <= 4000
+
+
+def test_ui_delta_ignores_projection_representation_flips() -> None:
+    rounds = [
+        {
+            "round_index": 1,
+            "text": f"same round {index}",
+            "tools": [_tool(f"read-{index}", output_text="same output")],
+        }
+        for index in range(1, 6)
+    ]
+    persisted = normalize_frontdoor_canonical_context(
+        {
+            "stages": [
+                _stage(f"frontdoor-stage-{index}", index, rounds=[rounds[index - 1]])
+                for index in range(1, 6)
+            ]
+        }
+    )
+    persisted_projected = project_canonical_context_for_transcript(persisted)
+    live = {
+        "active_stage_id": "",
+        "stages": [
+            _stage(
+                f"frontdoor-stage-{index}",
+                index,
+                representation="raw",
+                rounds=[rounds[index - 1]],
+            )
+            for index in range(1, 6)
+        ],
+    }
+
+    raw_delta = canonical_context_delta(persisted_projected, live)
+    ui_delta = ui_canonical_context_delta(persisted_projected, live)
+
+    assert len(raw_delta.get("stages") or []) >= 2
+    assert ui_delta == {}
+
+
+def test_ui_delta_keeps_only_new_stages_and_backfills_live_bodies() -> None:
+    old_rounds = [
+        {
+            "round_index": 1,
+            "text": f"old round {index}",
+            "tools": [
+                _tool(
+                    f"old-{index}",
+                    output_text="x" * 3000 if index >= 4 else "old output",
+                    arguments_text="q" * 6000 if index == 5 else "arg",
+                )
+            ],
+        }
+        for index in range(1, 6)
+    ]
+    new_round = {
+        "round_index": 1,
+        "text": "y" * 6000,
+        "tools": [
+            _tool(
+                "new",
+                output_text="z" * 3000,
+                arguments_text="q" * 6000,
+            )
+        ],
+    }
+    persisted_stages = [
+        _stage(f"frontdoor-stage-{index}", index, rounds=[old_rounds[index - 1]])
+        for index in range(1, 6)
+    ]
+    persisted_projected = project_canonical_context_for_transcript(
+        {
+            "stages": [dict(stage) for stage in persisted_stages]
+        }
+    )
+    live = {
+        "active_stage_id": "",
+        "stages": [
+            _stage(
+                f"frontdoor-stage-{index}",
+                index,
+                representation="raw",
+                rounds=[old_rounds[index - 1]],
+            )
+            for index in range(1, 6)
+        ]
+        + [_stage("frontdoor-stage-6", 6, representation="raw", rounds=[new_round])],
+    }
+
+    ui_delta = ui_canonical_context_delta(persisted_projected, live)
+    delta_stages = list(ui_delta.get("stages") or [])
+
+    assert [stage["stage_id"] for stage in delta_stages] == ["frontdoor-stage-6"]
+    rendered_round = delta_stages[0]["rounds"][0]
+    rendered_tool = rendered_round["tools"][0]
+    assert rendered_round["text"] == "y" * 6000
+    assert rendered_tool["output_text"] == "z" * 3000
+    assert rendered_tool["arguments_text"] == "q" * 6000
+
+
+def test_ui_payload_projection_keeps_window_bodies_bounded() -> None:
+    context = {
+        "stages": [
+            _stage("frontdoor-stage-1", 1, rounds=[{"round_index": 1, "tools": [_tool("old")]}]),
+            _stage("frontdoor-stage-2", 2, rounds=[{"round_index": 1, "tools": [_tool("old-2")]}]),
+            _stage("frontdoor-stage-3", 3, rounds=[{"round_index": 1, "tools": [_tool("old-3")]}]),
+            _stage(
+                "frontdoor-stage-4",
+                4,
+                rounds=[
+                    {
+                        "round_index": 1,
+                        "tools": [_tool("kept", output_text="x" * 3000)],
+                    }
+                ],
+            ),
+            _stage(
+                "frontdoor-stage-5",
+                5,
+                rounds=[
+                    {
+                        "round_index": 1,
+                        "tools": [_tool("kept-5", output_text="x" * 3000)],
+                    }
+                ],
+            ),
+        ]
+    }
+
+    projected = project_canonical_context_for_ui_payload(context)
+
+    assert projected["stages"][0]["representation"] == "compact"
+    assert projected["stages"][0]["rounds"] == []
+    assert projected["stages"][-1]["representation"] == "raw"
+    assert projected["stages"][-1]["rounds"][0]["tools"][0]["output_text"] == "x" * 3000
 
 
 def test_transcript_projection_returns_empty_for_missing_stage_state() -> None:

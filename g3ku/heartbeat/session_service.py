@@ -15,7 +15,7 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
-from g3ku.runtime.frontdoor.canonical_context import canonical_context_delta
+from g3ku.runtime.frontdoor.canonical_context import ui_canonical_context_delta
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
@@ -1435,6 +1435,6 @@ class WebSessionHeartbeatService:
         )
         if not current_canonical_context:
             return final_payload
-        canonical_delta = canonical_context_delta(previous_canonical_context, current_canonical_context)
+        canonical_delta = ui_canonical_context_delta(previous_canonical_context, current_canonical_context)
         final_payload.update(final_reply_canonical_merge(current_canonical_context, canonical_delta))
         return final_payload

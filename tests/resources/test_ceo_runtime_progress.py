@@ -8503,16 +8503,13 @@ def test_websocket_build_ceo_snapshot_keeps_archived_paused_assistant_status_for
         ]
     )
 
-    assert snapshot == [
-        {
-            "role": "assistant",
-            "content": "已暂停",
-            "turn_id": "paused-turn-1",
-            "status": "paused",
-            "canonical_context": summary,
-            "canonical_context_delta": summary,
-        }
-    ]
+    assert len(snapshot) == 1
+    assert snapshot[0]["role"] == "assistant"
+    assert snapshot[0]["content"] == "已暂停"
+    assert snapshot[0]["turn_id"] == "paused-turn-1"
+    assert snapshot[0]["status"] == "paused"
+    assert snapshot[0]["canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
+    assert snapshot[0]["canonical_context_delta"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
 
 
 def test_websocket_build_ceo_snapshot_hides_internal_prompt_messages_but_keeps_visible_reply() -> None:

@@ -372,9 +372,10 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 - session/runtime 同步不得把 request-local 投影写回 `frontdoor_canonical_context`：只有 turn finalization 允许向 durable canonical 链追加 completed-stage 数据；`frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生出的一切只是当前请求的可见 workset 数据。
 - 近场 stage workset 从 `frontdoor_canonical_context + 当前 frontdoor_stage_state` 派生，不从 transcript `execution_trace_summary` 或平铺 `tool_events` 重建。round-level 工具记录同时保存归一化原始 `arguments`；小输出内联在 `output_text`，大输出外置为 `output_ref` + `output_preview_text`，prompt 渲染器不把 artifact 正文读回内联。
 - canonical 归一化以 `stage_id` 和完成阶段内容身份做 last-write collapse：同一逻辑阶段被 rebase 后再次并入时保留最新副本，不重复追加整个携带 workset。排查 sidecar 膨胀时，记录数应与 distinct stage 身份数一致；持续增长说明合并边界回归。
-- `project_canonical_context_for_transcript()` 只用于 assistant 转录记录：保留当前 canonical 表示窗口（最近 3 个完成普通阶段与活动阶段为 raw，更早阶段为 compact），并截短 raw round 内超大工具正文与入参。provider prompt 与 UI live snapshot 不读取这份转录投影，仍以 durable canonical context 和当前 stage state 为权威。
+- `project_canonical_context_for_transcript()` 只用于 assistant 转录记录：保留当前 canonical 表示窗口（最近 3 个完成普通阶段与活动阶段为 raw，更早阶段为 compact），并截短 raw round 内超大工具正文与入参（`output_text` > 2000 置空、结构化 `arguments` > 2000 置 `{}`、`arguments_text` 与 `round.text` 各限 4000）。provider prompt 仍以 durable canonical context 和当前 stage state 为权威，不读这份转录投影。
+- Web UI 载荷使用同一投影视图，而不是把未投影的 live workset 直接下发：`project_canonical_context_for_ui_payload()` 保留 raw 窗口阶段未投影的 round 正文；`ui_canonical_context_delta()` 先把前后两侧都按转录投影对齐，再让已存在阶段沿用基线表示（compact 不因新增阶段造成窗口移动而重新展开），因此新回合 delta 只携带新阶段与真实变化，并把 delta 保留阶段的正文回填为实时未投影值。UI 最新气泡重新出现全部历史阶段的回归通常是 UI delta 退回原始 `canonical_context_delta`。
 - 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
-- UI 面向的 turn payload 暴露当前轮的 `canonical_context` 切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
+- UI 面向的 turn payload 暴露当前轮的 `canonical_context` 投影切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 
 第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## 长期记忆` 快照（当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线是连续性权威来源：必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
 

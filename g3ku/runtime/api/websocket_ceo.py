@@ -55,11 +55,12 @@ from main.api.websocket_utils import (
 from main.protocol import build_envelope
 
 from g3ku.runtime.frontdoor.canonical_context import (
-    canonical_context_delta as _canonical_context_delta,
     canonical_round_identity as _canonical_round_identity,
     canonical_stage_identity as _canonical_stage_identity,
     canonical_tool_identity as _canonical_tool_identity,
     canonical_value_fingerprint as _canonical_value_fingerprint,
+    project_canonical_context_for_ui_payload as _project_canonical_context_for_ui_payload,
+    ui_canonical_context_delta as _ui_canonical_context_delta,
 )
 
 router = APIRouter()
@@ -642,9 +643,10 @@ def _build_ceo_snapshot(
         if attachments:
             item['attachments'] = attachments
         if canonical_context:
-            item['canonical_context'] = canonical_context
-            item['canonical_context_delta'] = _canonical_context_delta(previous_assistant_context, canonical_context)
-            previous_assistant_context = canonical_context
+            projected_canonical_context = _project_canonical_context_for_ui_payload(canonical_context)
+            item['canonical_context'] = projected_canonical_context or canonical_context
+            item['canonical_context_delta'] = _ui_canonical_context_delta(previous_assistant_context, canonical_context)
+            previous_assistant_context = projected_canonical_context or canonical_context
         if compression:
             item['compression'] = compression
         if role == 'assistant' and turn_id:
@@ -712,11 +714,14 @@ def _with_canonical_context_delta(payload: dict[str, Any] | None, previous_conte
     if not canonical_context:
         next_payload.pop("canonical_context_delta", None)
         return next_payload
-    delta = _canonical_context_delta(previous_context, canonical_context)
+    delta = _ui_canonical_context_delta(previous_context, canonical_context)
     if delta:
         next_payload["canonical_context_delta"] = delta
     else:
         next_payload.pop("canonical_context_delta", None)
+    projected_canonical_context = _project_canonical_context_for_ui_payload(canonical_context)
+    if projected_canonical_context:
+        next_payload["canonical_context"] = projected_canonical_context
     return next_payload
 
 
@@ -756,7 +761,7 @@ def _resolve_final_canonical_context_delta(
         session=session,
         persisted_session=persisted_session,
     )
-    return _canonical_context_delta(
+    return _ui_canonical_context_delta(
         _latest_persisted_assistant_canonical_context(persisted_session),
         canonical_context,
     )

@@ -12,7 +12,10 @@ from typing import Any, Callable
 from loguru import logger
 from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
 from g3ku.config.loader import get_config_path, load_config
-from g3ku.runtime.frontdoor.canonical_context import canonical_context_tool_items
+from g3ku.runtime.frontdoor.canonical_context import (
+    canonical_context_tool_items,
+    project_canonical_context_for_ui_payload,
+)
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
@@ -614,7 +617,9 @@ def final_reply_canonical_merge(canonical_context: Any, canonical_context_delta:
     payload: dict[str, Any] = {}
     canonical = canonical_context if isinstance(canonical_context, dict) else {}
     if canonical:
-        payload["canonical_context"] = dict(canonical)
+        projected_canonical = project_canonical_context_for_ui_payload(canonical)
+        if projected_canonical:
+            payload["canonical_context"] = projected_canonical
     payload["canonical_context_delta"] = dict(delta)
     return payload
 
