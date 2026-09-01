@@ -7,9 +7,7 @@ import pytest
 from langchain.agents.middleware import ModelRequest, ModelResponse
 from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.types import Command
 
 from g3ku.agent.tools.base import Tool
@@ -487,32 +485,6 @@ async def test_create_agent_runner_prompt_keeps_history_uncompacted_after_legacy
     ]
 
 
-def test_build_ceo_agent_compiles_state_graph_with_persistence(monkeypatch) -> None:
-    def _unexpected_create_agent(*args, **kwargs):
-        _ = args, kwargs
-        raise AssertionError("create_agent should not be used by the CEO frontdoor runner")
-
-    monkeypatch.setattr(create_agent_impl, "create_agent", _unexpected_create_agent, raising=False)
-
-    loop = SimpleNamespace(
-        _checkpointer=InMemorySaver(),
-        _store=object(),
-    )
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
-    compiled = runner._get_agent()
-
-    assert compiled is runner._compiled_graph
-    assert compiled.checkpointer is loop._checkpointer
-    assert compiled.store is loop._store
-    assert compiled.name == "ceo_frontdoor"
-    assert sorted(compiled.builder.nodes.keys()) == [
-        "call_model",
-        "execute_tools",
-        "finalize",
-        "normalize_model_output",
-        "prepare_turn",
-        "review_tool_calls",
-    ]
 
 
 def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(monkeypatch) -> None:

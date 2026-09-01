@@ -67,8 +67,6 @@ async def test_close_mcp_closes_main_task_service_only():
     engine.background_pool = None
     engine.main_task_service = _AsyncCloseSpy()
     engine.memory_manager = None
-    engine._checkpointer = None
-    engine._checkpointer_cm = None
 
     await AgentRuntimeEngine.close_mcp(engine)
 
@@ -189,13 +187,6 @@ def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
         memory_manager=None,
         commit_service=None,
         _memory_runtime_settings=None,
-        _store=None,
-        _store_enabled=False,
-        _checkpointer_enabled=False,
-        _checkpointer_backend='disabled',
-        _checkpointer_path=None,
-        _checkpointer=None,
-        _checkpointer_cm=None,
     )
 
     try:
@@ -212,76 +203,3 @@ def test_sync_internal_tool_runtimes_reads_memory_runtime_manifest(tmp_path):
         manager.close()
 
 
-def _governance_loop(tmp_path):
-    return SimpleNamespace(
-        workspace=tmp_path,
-        resource_manager=None,
-        _internal_tool_settings_fingerprints={},
-        _memory_manager_cls=None,
-        memory_manager=None,
-        commit_service=None,
-        _memory_runtime_settings=SimpleNamespace(enabled=True),
-        _checkpointer_enabled=False,
-        _checkpointer_backend='disabled',
-        _checkpointer_path=None,
-        _checkpointer=None,
-        _checkpointer_cm=None,
-        main_task_service=None,
-    )
-
-
-def test_init_memory_runtime_wires_checkpointer_governance_fields(tmp_path):
-    loop = _governance_loop(tmp_path)
-    cp_cfg = SimpleNamespace(
-        backend='memory',
-        max_checkpoints_per_thread=50,
-        trim_interval_seconds=120.0,
-        vacuum_min_file_size_bytes=1024,
-        vacuum_interval_seconds=600.0,
-    )
-    RuntimeBootstrapBridge(loop).init_memory_runtime(
-        SimpleNamespace(enabled=True, checkpointer=cp_cfg)
-    )
-    assert loop._checkpointer_max_checkpoints_per_thread == 50
-    assert loop._checkpointer_trim_interval_seconds == 120.0
-    assert loop._checkpointer_vacuum_min_file_size_bytes == 1024
-    assert loop._checkpointer_vacuum_interval_seconds == 600.0
-
-
-def test_init_memory_runtime_defaults_for_legacy_checkpointer_config(tmp_path):
-    loop = _governance_loop(tmp_path)
-    # Legacy/test configs may lack the governance attributes; the engine must
-    # fall back to defaults instead of raising.
-    RuntimeBootstrapBridge(loop).init_memory_runtime(
-        SimpleNamespace(enabled=True, checkpointer=SimpleNamespace(backend='memory'))
-    )
-    assert loop._checkpointer_max_checkpoints_per_thread == 200
-    assert loop._checkpointer_trim_interval_seconds == 300.0
-    assert loop._checkpointer_vacuum_min_file_size_bytes == 512 * 1024 * 1024
-    assert loop._checkpointer_vacuum_interval_seconds == 21600.0
-
-
-def test_reset_memory_runtime_invalidates_frontdoor_cached_bindings() -> None:
-    invalidations: list[str] = []
-
-    class _Runner:
-        def invalidate_runtime_bindings(self) -> None:
-            invalidations.append("invalidated")
-
-    loop = SimpleNamespace(
-        commit_service=None,
-        memory_manager=None,
-        multi_agent_runner=_Runner(),
-        _memory_runtime_settings=object(),
-        _store=object(),
-        _store_enabled=True,
-        _checkpointer_enabled=True,
-        _checkpointer_backend='sqlite',
-        _checkpointer_path='checkpoints.sqlite3',
-        _checkpointer=object(),
-        _checkpointer_cm=object(),
-    )
-
-    RuntimeBootstrapBridge(loop)._reset_memory_runtime()
-
-    assert invalidations == ["invalidated"]

@@ -2246,10 +2246,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     def __init__(self, *, loop) -> None:
         super().__init__(loop=loop)
-        self._compiled_graph = None
-
-    def _get_compiled_graph(self):
-        return self._compiled_graph if self._compiled_graph is not None else self._get_agent()
 
     def _build_tool_runtime_context(
         self,

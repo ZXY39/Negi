@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from typing import Annotated, Any, Callable
+from typing import Any, Callable
 
 
-
-from langgraph.graph.message import add_messages
 
 from typing_extensions import TypedDict
 
@@ -30,7 +28,7 @@ class CeoPersistentState(TypedDict, total=False):
 
     query_text: str
 
-    messages: Annotated[list[Any], add_messages]
+    messages: list[Any]
 
     stable_messages: list[dict[str, Any]]
 

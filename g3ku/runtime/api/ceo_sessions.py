@@ -7,10 +7,6 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
 from loguru import logger
 
-from g3ku.runtime.frontdoor.checkpoint_inspection import (
-    get_frontdoor_checkpoint,
-    get_frontdoor_checkpoint_history,
-)
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_TASK_DEFAULTS_SCOPE_KEY,
     SESSION_TASK_DEFAULTS_SCOPE_SESSION,
@@ -355,18 +351,6 @@ def _aggregate_session_delete_payloads(items: list[dict]) -> dict:
     }
 
 
-async def _purge_checkpointer_thread_background(purge_fn, session_key: str) -> None:
-    try:
-        await purge_fn(session_key)
-    except Exception as exc:
-        logger.warning(
-            "Failed to purge SQLite checkpointer thread during CEO session delete "
-            "(session_key={}): {}",
-            session_key,
-            exc,
-        )
-
-
 async def _delete_single_ceo_session(
     agent,
     session_manager,
@@ -409,16 +393,6 @@ async def _delete_single_ceo_session(
     cancel = getattr(agent, "cancel_session_tasks", None)
     if callable(cancel):
         await cancel(session_key)
-    purge_checkpointer_thread = getattr(agent, "purge_checkpointer_thread", None)
-    if callable(purge_checkpointer_thread):
-        if background_tasks is None:
-            await _purge_checkpointer_thread_background(purge_checkpointer_thread, session_key)
-        else:
-            background_tasks.add_task(
-                _purge_checkpointer_thread_background,
-                purge_checkpointer_thread,
-                session_key,
-            )
     return {
         "session_id": session_key,
         "deleted": not is_channel_session,
@@ -443,48 +417,6 @@ def _task_defaults_response(session) -> dict:
         "main_runtime": depth_limits,
         "scope": scope,
     }
-
-
-@router.get("/ceo/sessions/{session_id}/checkpoint")
-async def get_ceo_session_checkpoint(
-    session_id: str,
-    checkpoint_id: str | None = Query(None),
-):
-    agent, session_manager, _runtime_manager, _state_store = _sessions()
-    if agent is None:
-        raise HTTPException(status_code=503, detail="no_model_configured")
-    session = _assert_known_session(session_manager, session_id)
-    item = get_frontdoor_checkpoint(
-        agent,
-        session_id=session.key,
-        checkpoint_id=checkpoint_id,
-    )
-    if isawaitable(item):
-        item = await item
-    if item is None:
-        raise HTTPException(status_code=404, detail="checkpoint_not_found")
-    return {"ok": True, "session_id": session.key, "item": item}
-
-
-@router.get("/ceo/sessions/{session_id}/checkpoint-history")
-async def get_ceo_session_checkpoint_history(
-    session_id: str,
-    limit: int = Query(20, ge=1, le=100),
-    before_checkpoint_id: str | None = Query(None),
-):
-    agent, session_manager, _runtime_manager, _state_store = _sessions()
-    if agent is None:
-        raise HTTPException(status_code=503, detail="no_model_configured")
-    session = _assert_known_session(session_manager, session_id)
-    items = get_frontdoor_checkpoint_history(
-        agent,
-        session_id=session.key,
-        limit=limit,
-        before_checkpoint_id=before_checkpoint_id,
-    )
-    if isawaitable(items):
-        items = await items
-    return {"ok": True, "session_id": session.key, "items": items}
 
 
 @router.get("/ceo/sessions/{session_id}/pending-interrupts")

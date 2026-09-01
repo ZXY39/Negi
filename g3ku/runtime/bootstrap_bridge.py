@@ -15,7 +15,6 @@ from g3ku.resources.tool_settings import (
     validate_tool_settings,
 )
 from g3ku.runtime.frontdoor import CeoFrontDoorRunner
-from g3ku.utils.helpers import ensure_dir, resolve_path_in_workspace
 from main.runtime.chat_backend import ConfigChatBackend
 from main.service.runtime_service import MainRuntimeService
 
@@ -177,18 +176,6 @@ class RuntimeBootstrapBridge:
             return []
         return sorted(str(key or '').strip() for key in active_tasks.keys() if str(key or '').strip())
 
-    def _checkpointer_diagnostics(self) -> tuple[str, str]:
-        checkpointer = getattr(self._loop, '_checkpointer', None)
-        if checkpointer is None:
-            return '', 'unknown'
-        is_active = getattr(self._loop, '_sqlite_checkpointer_is_active', None)
-        if callable(is_active):
-            try:
-                return str(id(checkpointer)), str(bool(is_active(checkpointer)))
-            except Exception:
-                return str(id(checkpointer)), 'error'
-        return str(id(checkpointer)), 'unknown'
-
     def _sync_memory_runtime(self, *, force: bool = False, reason: str = 'runtime') -> bool:
         manager = getattr(self._loop, 'resource_manager', None)
         descriptor = manager.get_tool_descriptor('memory_runtime') if manager is not None else None
@@ -196,14 +183,6 @@ class RuntimeBootstrapBridge:
         if not isinstance(fingerprints, dict):
             fingerprints = {}
             self._loop._internal_tool_settings_fingerprints = fingerprints
-
-        # Complete a checkpointer reset that was deferred while task sessions
-        # were active. This must run before the fingerprint gate: the deferred
-        # reset already advanced the stored fingerprint, so the gate alone
-        # would never rebuild the retained (stale) checkpointer.
-        if getattr(self._loop, '_checkpointer_reset_deferred', False) and not self._active_task_session_keys():
-            self._complete_deferred_checkpointer_reset(reason=reason)
-            force = True
 
         if descriptor is None:
             had_runtime = bool(getattr(self._loop, '_memory_runtime_settings', None) or self._loop.memory_manager is not None)
@@ -229,36 +208,15 @@ class RuntimeBootstrapBridge:
 
     def _reset_memory_runtime(self, *, reason: str = 'runtime') -> None:
         active_task_sessions = self._active_task_session_keys()
-        checkpointer_id, checkpointer_active = self._checkpointer_diagnostics()
-        preserve_checkpointer = bool(active_task_sessions) and getattr(self._loop, '_checkpointer', None) is not None
-        if preserve_checkpointer:
-            logger.warning(
-                'Deferring checkpointer reset while active sessions exist '
-                '(reason={}, active_task_sessions={}, checkpointer_id={}, checkpointer_active={}); '
-                'the checkpointer stays open so the in-flight turn can finish its checkpoint writes',
-                reason,
-                ','.join(active_task_sessions),
-                checkpointer_id,
-                checkpointer_active,
-            )
-        elif active_task_sessions:
+        if active_task_sessions:
             logger.warning(
                 'Resetting memory runtime while active sessions exist '
-                '(reason={}, active_task_sessions={}, checkpointer_id={}, checkpointer_active={})',
+                '(reason={}, active_task_sessions={})',
                 reason,
                 ','.join(active_task_sessions),
-                checkpointer_id,
-                checkpointer_active,
             )
         else:
-            logger.info(
-                'Resetting memory runtime '
-                '(reason={}, active_task_sessions={}, checkpointer_id={}, checkpointer_active={})',
-                reason,
-                '',
-                checkpointer_id,
-                checkpointer_active,
-            )
+            logger.info('Resetting memory runtime (reason={})', reason)
         commit_service = getattr(self._loop, 'commit_service', None)
         if commit_service is not None:
             self._close_value(commit_service)
@@ -269,54 +227,7 @@ class RuntimeBootstrapBridge:
             self._close_value(memory_manager)
         self._loop.memory_manager = None
 
-        if preserve_checkpointer:
-            # Keep the checkpointer (and its context manager) alive: the
-            # in-flight turn still holds a reference and would crash with
-            # "Cannot operate on a closed database" otherwise. The deferred
-            # close+rebuild happens on the next sync once sessions drain.
-            self._loop._checkpointer_reset_deferred = True
-        else:
-            checkpointer = getattr(self._loop, '_checkpointer', None)
-            if checkpointer is not None:
-                self._close_value(checkpointer)
-            checkpointer_cm = getattr(self._loop, '_checkpointer_cm', None)
-            if checkpointer_cm is not None and hasattr(checkpointer_cm, '__aexit__'):
-                self._close_async(checkpointer_cm.__aexit__(None, None, None))
-            self._loop._checkpointer_enabled = False
-            self._loop._checkpointer_backend = 'disabled'
-            self._loop._checkpointer_path = None
-            self._loop._checkpointer = None
-            self._loop._checkpointer_cm = None
-            self._loop._checkpointer_reset_deferred = False
-
         self._loop._memory_runtime_settings = None
-
-        runner = getattr(self._loop, 'multi_agent_runner', None)
-        invalidate = getattr(runner, 'invalidate_runtime_bindings', None)
-        if callable(invalidate):
-            invalidate()
-
-    def _complete_deferred_checkpointer_reset(self, *, reason: str = 'runtime') -> None:
-        checkpointer = getattr(self._loop, '_checkpointer', None)
-        checkpointer_id, checkpointer_active = self._checkpointer_diagnostics()
-        logger.info(
-            'Completing deferred checkpointer reset now that sessions drained '
-            '(reason={}, checkpointer_id={}, checkpointer_active={})',
-            reason,
-            checkpointer_id,
-            checkpointer_active,
-        )
-        if checkpointer is not None:
-            self._close_value(checkpointer)
-        checkpointer_cm = getattr(self._loop, '_checkpointer_cm', None)
-        if checkpointer_cm is not None and hasattr(checkpointer_cm, '__aexit__'):
-            self._close_async(checkpointer_cm.__aexit__(None, None, None))
-        self._loop._checkpointer_enabled = False
-        self._loop._checkpointer_backend = 'disabled'
-        self._loop._checkpointer_path = None
-        self._loop._checkpointer = None
-        self._loop._checkpointer_cm = None
-        self._loop._checkpointer_reset_deferred = False
 
     def _close_value(self, value) -> None:
         close = getattr(value, 'close', None)
@@ -360,67 +271,4 @@ class RuntimeBootstrapBridge:
         except Exception as exc:
             logger.warning('Memory runtime init failed: {}', exc)
             self._loop.memory_manager = None
-
-        if getattr(self._loop, '_checkpointer', None) is not None:
-            # A checkpointer is still alive (retained by a deferred reset while
-            # task sessions were active). Re-initializing here would orphan the
-            # in-flight reference; leave it untouched. A dead connection is
-            # self-healed lazily by the engine's _ensure_checkpointer_ready.
-            logger.debug(
-                'init_memory_runtime keeps the live checkpointer (deferred reset pending)'
-            )
-            return
-
-        try:
-            cp_cfg = cfg.checkpointer
-            backend = str(cp_cfg.backend or 'sqlite').lower()
-            self._loop._checkpointer_backend = backend
-            # Capacity governance knobs (getattr so legacy/test configs without
-            # these attributes fall back to engine defaults).
-            self._loop._checkpointer_max_checkpoints_per_thread = int(
-                getattr(cp_cfg, 'max_checkpoints_per_thread', 200) or 200
-            )
-            self._loop._checkpointer_trim_interval_seconds = float(
-                getattr(cp_cfg, 'trim_interval_seconds', 300.0) or 0.0
-            )
-            self._loop._checkpointer_vacuum_min_file_size_bytes = int(
-                getattr(cp_cfg, 'vacuum_min_file_size_bytes', 512 * 1024 * 1024) or 0
-            )
-            self._loop._checkpointer_vacuum_interval_seconds = float(
-                getattr(cp_cfg, 'vacuum_interval_seconds', 21600.0) or 0.0
-            )
-            if backend == 'memory':
-                from langgraph.checkpoint.memory import InMemorySaver
-
-                self._loop._checkpointer = InMemorySaver()
-                self._loop._checkpointer_enabled = True
-                self._loop._checkpointer_path = None
-            elif backend == 'sqlite':
-                try:
-                    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
-                    cp_path = resolve_path_in_workspace(cp_cfg.path, self._loop.workspace)
-                    ensure_dir(cp_path.parent)
-                    self._loop._checkpointer_path = cp_path
-                    self._loop._checkpointer_cm = None
-                    self._loop._checkpointer = None
-                    self._loop._checkpointer_enabled = True
-                    _ = AsyncSqliteSaver
-                except Exception:
-                    logger.warning(
-                        'SQLite async checkpointer unavailable; fallback to session-file history '
-                        '(install langgraph-checkpoint-sqlite and aiosqlite to enable persistent thread checkpoints)'
-                    )
-                    self._loop._checkpointer = None
-                    self._loop._checkpointer_cm = None
-                    self._loop._checkpointer_path = None
-                    self._loop._checkpointer_backend = 'disabled'
-                    self._loop._checkpointer_enabled = False
-        except Exception as exc:
-            logger.warning('Checkpointer init failed, disable short-term persistence: {}', exc)
-            self._loop._checkpointer = None
-            self._loop._checkpointer_cm = None
-            self._loop._checkpointer_path = None
-            self._loop._checkpointer_backend = 'disabled'
-            self._loop._checkpointer_enabled = False
 

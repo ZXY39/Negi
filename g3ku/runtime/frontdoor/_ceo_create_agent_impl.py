@@ -5,7 +5,6 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, convert_to_messages
 from langchain_core.messages import SystemMessage as CoreSystemMessage
-from langgraph.graph import END, START, StateGraph
 
 from g3ku.core.messages import UserInputMessage
 
@@ -18,7 +17,6 @@ from .ceo_agent_middleware import (
     CeoTurnLifecycleMiddleware,
 )
 from .state_models import (
-    CeoPersistentState,
     CeoRuntime,
     CeoRuntimeContext,
     initial_persistent_state,
@@ -34,7 +32,6 @@ from .tool_contract import (
 class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
     def __init__(self, *, loop: Any) -> None:
         super().__init__(loop=loop)
-        self._agent = None
 
     def build_prompt_context(self, *, state, runtime, tools) -> dict[str, str]:
         _ = runtime, tools
@@ -753,7 +750,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
 
     def _middleware(self) -> list[Any]:
         # Retained only for compatibility tests around prompt assembly and cache diagnostics.
-        # The production CEO/frontdoor path now runs exclusively on the explicit StateGraph.
+        # The production CEO/frontdoor path runs on the self-built step loop.
         return [
             CeoTurnLifecycleMiddleware(runner=self),
             CeoToolExposureMiddleware(runner=self),
@@ -761,63 +758,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             CeoApprovalMiddleware(runner=self),
             CeoModelOutputMiddleware(runner=self),
         ]
-
-    def _build_compiled_graph(self):
-        builder = StateGraph(CeoPersistentState, context_schema=CeoRuntimeContext)
-        builder.add_node("prepare_turn", self._node_prepare_turn)
-        builder.add_node("call_model", self._node_call_model)
-        builder.add_node("normalize_model_output", self._node_normalize_model_output)
-        builder.add_node("review_tool_calls", self._node_review_tool_calls)
-        builder.add_node("execute_tools", self._node_execute_tools)
-        builder.add_node("finalize", self._node_finalize_turn)
-        builder.add_edge(START, "prepare_turn")
-        builder.add_edge("prepare_turn", "call_model")
-        builder.add_edge("call_model", "normalize_model_output")
-        builder.add_conditional_edges(
-            "normalize_model_output",
-            self._graph_next_step,
-            {
-                "call_model": "call_model",
-                "review_tool_calls": "review_tool_calls",
-                "execute_tools": "execute_tools",
-                "finalize": "finalize",
-            },
-        )
-        builder.add_conditional_edges(
-            "review_tool_calls",
-            self._graph_next_step,
-            {
-                "call_model": "call_model",
-                "review_tool_calls": "review_tool_calls",
-                "execute_tools": "execute_tools",
-                "finalize": "finalize",
-            },
-        )
-        builder.add_conditional_edges(
-            "execute_tools",
-            self._graph_next_step,
-            {
-                "call_model": "call_model",
-                "review_tool_calls": "review_tool_calls",
-                "execute_tools": "execute_tools",
-                "finalize": "finalize",
-            },
-        )
-        builder.add_edge("finalize", END)
-        return builder.compile(
-            checkpointer=getattr(self._loop, "_checkpointer", None),
-            store=getattr(self._loop, "_store", None),
-            name="ceo_frontdoor",
-        )
-
-    def _get_agent(self):
-        if self._compiled_graph is not None:
-            return self._compiled_graph
-        if self._agent is not None:
-            return self._agent
-        if self._compiled_graph is None:
-            self._compiled_graph = self._build_compiled_graph()
-        return self._compiled_graph
 
     async def _run_step_loop(
         self,

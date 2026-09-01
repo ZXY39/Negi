@@ -7,9 +7,6 @@ class CeoFrontDoorRunner:
     def __init__(self, *, loop) -> None:
         self._impl = CreateAgentCeoFrontDoorRunner(loop=loop)
 
-    def _get_compiled_graph(self):
-        return self._impl._get_compiled_graph()
-
     def __getattr__(self, name: str):
         return getattr(self._impl, name)
 

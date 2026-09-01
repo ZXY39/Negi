@@ -6,9 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
-from langgraph.types import Command
 
 
 from g3ku.agent.tools.base import Tool
@@ -17,7 +14,6 @@ from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.api import websocket_ceo
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
-from g3ku.runtime.frontdoor import checkpoint_inspection
 from g3ku.runtime.frontdoor import prompt_cache_contract
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime import web_ceo_sessions
@@ -421,56 +417,6 @@ def test_inflight_snapshot_uses_current_turn_canonical_context_not_durable_histo
     assert snapshot_with_stage["canonical_context"]["stages"][0]["stage_id"] == "frontdoor-stage-1"
 
 
-class _CompiledGraphRecorder:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    async def ainvoke(self, input, config=None, *, context=None, **kwargs):
-        self.calls.append(
-            {
-                "input": input,
-                "config": config,
-                "context": context,
-                "kwargs": kwargs,
-            }
-        )
-        return {"final_output": "ok", "route_kind": "tool_result"}
-
-
-class _FakeGraphOutput:
-    def __init__(self, *, value: dict[str, object], interrupts=()) -> None:
-        self.value = dict(value or {})
-        self.interrupts = tuple(interrupts)
-
-
-class _InterruptingCompiledGraph:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    async def ainvoke(self, input, config=None, *, context=None, version="v1", **kwargs):
-        self.calls.append(
-            {
-                "input": input,
-                "config": config,
-                "context": context,
-                "version": version,
-                "kwargs": kwargs,
-            }
-        )
-        if isinstance(input, Command):
-            return _FakeGraphOutput(
-                value={"final_output": "approved reply", "route_kind": "direct_reply"},
-                interrupts=(),
-            )
-        return _FakeGraphOutput(
-            value={
-                "route_kind": "direct_reply",
-                "tool_call_payloads": [{"name": "create_async_task", "arguments": {"task": "demo"}}],
-            },
-            interrupts=(SimpleNamespace(id="interrupt-1", value={"kind": "frontdoor_tool_approval"}),),
-        )
-
-
 class _ExecTool(Tool):
     @property
     def name(self) -> str:
@@ -770,20 +716,6 @@ def test_ceo_frontdoor_approval_request_uses_dynamic_governance_risk_map() -> No
     }
 
 
-def test_ceo_frontdoor_get_compiled_graph_uses_explicit_state_graph_with_checkpointer_and_store(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    loop = SimpleNamespace(_checkpointer=InMemorySaver(), _store=object())
-    runner = CeoFrontDoorRunner(loop=loop)
-
-    result = runner._get_compiled_graph()
-
-    assert result is runner._compiled_graph
-    assert result.checkpointer is loop._checkpointer
-    assert result.store is loop._store
-    assert result.name == "ceo_frontdoor"
-    assert result.builder.state_schema is CeoPersistentState
-    assert result.builder.context_schema is CeoRuntimeContext
 
 
 @pytest.mark.asyncio
@@ -2494,106 +2426,4 @@ async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_self_exe
     assert stage["finished_at"]
 
 
-@pytest.mark.asyncio
-async def test_checkpoint_inspection_uses_runner_graph_surface(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    class _Graph:
-        async def aget_state(self, config, subgraphs=False):
-            captured["config"] = config
-            captured["subgraphs"] = subgraphs
-            return SimpleNamespace(
-                config=config,
-                parent_config={},
-                values={},
-                next=(),
-                metadata={},
-                created_at="",
-                tasks=(),
-            )
-
-    class _Runner:
-        def __init__(self, *, loop) -> None:
-            _ = loop
-
-        def _get_compiled_graph(self):
-            return _Graph()
-
-    monkeypatch.setattr(checkpoint_inspection, "CeoFrontDoorRunner", _Runner, raising=False)
-
-    result = await checkpoint_inspection.get_frontdoor_checkpoint(
-        SimpleNamespace(_ensure_checkpointer_ready=lambda: None),
-        session_id="web:shared",
-        checkpoint_id="checkpoint-1",
-        subgraphs=True,
-    )
-
-    assert captured["config"] == {
-        "configurable": {"thread_id": "web:shared", "checkpoint_id": "checkpoint-1"}
-    }
-    assert captured["subgraphs"] is True
-    assert result == {
-        "thread_id": "web:shared",
-        "checkpoint_id": "checkpoint-1",
-        "checkpoint_ns": "",
-        "parent_checkpoint_id": "",
-        "values": {},
-        "next": [],
-        "metadata": {},
-        "created_at": "",
-        "tasks": [],
-        "has_interrupts": False,
-    }
-
-
-@pytest.mark.asyncio
-async def test_checkpoint_inspection_supports_wrapper_selected_create_agent_runner(monkeypatch) -> None:
-    captured: dict[str, object] = {}
-
-    class _CreateAgentGraph:
-        async def aget_state(self, config, subgraphs=False):
-            captured["config"] = config
-            captured["subgraphs"] = subgraphs
-            return SimpleNamespace(
-                config=config,
-                parent_config={},
-                values={"agent_runtime": "create_agent"},
-                next=(),
-                metadata={},
-                created_at="",
-                tasks=(),
-            )
-
-    graph = _CreateAgentGraph()
-
-    monkeypatch.setattr(
-        "g3ku.runtime.frontdoor._ceo_create_agent_impl.CreateAgentCeoFrontDoorRunner._get_agent",
-        lambda self: graph,
-    )
-
-    loop = SimpleNamespace(_ensure_checkpointer_ready=lambda: None)
-
-    result = await checkpoint_inspection.get_frontdoor_checkpoint(
-        loop,
-        session_id="web:shared",
-        checkpoint_id="checkpoint-1",
-        subgraphs=True,
-    )
-
-    assert captured["config"] == {
-        "configurable": {"thread_id": "web:shared", "checkpoint_id": "checkpoint-1"}
-    }
-    assert captured["subgraphs"] is True
-    assert result == {
-        "thread_id": "web:shared",
-        "checkpoint_id": "checkpoint-1",
-        "checkpoint_ns": "",
-        "parent_checkpoint_id": "",
-        "values": {"agent_runtime": "create_agent"},
-        "next": [],
-        "metadata": {},
-        "created_at": "",
-        "tasks": [],
-        "has_interrupts": False,
-    }
 
