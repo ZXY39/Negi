@@ -215,8 +215,8 @@ class RuntimeTarget(StrictModel):
 
 
 class ModelBindingDraft(StrictModel):
-    key: str
-    config_id: str
+    key: str = ""
+    config_id: str = ""
     enabled: bool = True
     description: str = ""
     retry_on: list[str] = Field(default_factory=lambda: list(DEFAULT_RETRY_ON_KEYWORDS))

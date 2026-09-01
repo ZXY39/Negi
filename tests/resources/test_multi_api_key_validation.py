@@ -100,27 +100,12 @@ def test_binding_api_key_limits_reject_all_zero_arrays() -> None:
         )
 
 
-def test_create_binding_rejects_duplicate_model_key_before_creating_config_record(monkeypatch, tmp_path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True, exist_ok=True)
-    facade = LLMConfigFacade(workspace)
+def test_ensure_unique_binding_key_deduplicates_colliding_preferred_keys() -> None:
+    existing = {"primary", "primary-2"}
     config = SimpleNamespace(
-        models=SimpleNamespace(catalog=[]),
-        get_managed_model=lambda key: SimpleNamespace(key=key) if key == "primary" else None,
+        get_managed_model=lambda key: SimpleNamespace(key=key) if key in existing else None,
     )
 
-    def _unexpected_create_config_record(payload):
-        raise AssertionError(f"create_config_record should not be called for duplicate keys: {payload!r}")
-
-    monkeypatch.setattr(facade, "create_config_record", _unexpected_create_config_record)
-
-    with pytest.raises(ValueError, match="Model key already exists: primary"):
-        facade.create_binding(
-            config,
-            draft_payload={"provider_id": "openai"},
-            binding_payload={
-                "key": "primary",
-                "config_id": "",
-                "enabled": True,
-            },
-        )
+    assert LLMConfigFacade._ensure_unique_binding_key(config, "primary") == "primary-3"
+    assert LLMConfigFacade._ensure_unique_binding_key(config, "fresh") == "fresh"
+    assert LLMConfigFacade._ensure_unique_binding_key(config, "") != ""

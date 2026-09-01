@@ -285,7 +285,7 @@ def _run_detail_save(binding_key: str, initial_model: str, new_model: str, bindi
     return _run_node_script(script)
 
 
-def test_handle_detail_save_renames_binding_key_when_key_matches_old_model() -> None:
+def test_handle_detail_save_updates_model_without_renaming_binding_key() -> None:
     result = _run_detail_save(
         binding_key="minimax/minimax-m3:free",
         initial_model="minimax/minimax-m3:free",
@@ -294,8 +294,8 @@ def test_handle_detail_save_renames_binding_key_when_key_matches_old_model() -> 
     )
 
     assert result["updateConfigDefaultModel"] == "z-ai/glm-5.2:free"
-    assert result["renameCalls"] == [["minimax/minimax-m3:free", "z-ai/glm-5.2:free"]]
-    assert result["updateBindingKey"] == "z-ai/glm-5.2:free"
+    assert result["renameCalls"] == []
+    assert result["updateBindingKey"] == "minimax/minimax-m3:free"
 
 
 def test_handle_detail_save_keeps_custom_key_when_it_differs_from_model() -> None:

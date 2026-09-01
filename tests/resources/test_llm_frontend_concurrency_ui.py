@@ -419,7 +419,7 @@ def test_llm_frontend_uses_binding_name_wording_in_create_form() -> None:
     assert "模型ID / Provider / 模型" in html
 
 
-def test_binding_draft_payload_requires_model_key_with_readable_message() -> None:
+def test_binding_draft_payload_does_not_require_model_key() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -493,17 +493,19 @@ def test_binding_draft_payload_requires_model_key_with_readable_message() -> Non
         vm.runInThisContext(code);
 
         let message = "";
+        let payload = null;
         try {
-          window.__llmTestHooks.bindingDraftPayload({ requireModelKey: true });
+          payload = window.__llmTestHooks.bindingDraftPayload();
         } catch (error) {
           message = error.message || String(error);
         }
 
-        console.log(JSON.stringify({ message }));
+        console.log(JSON.stringify({ message, hasRetryOn: Array.isArray(payload && payload.retryOn) }));
         """
     )
 
-    assert result["message"] == "模型ID不能为空"
+    assert result["message"] == ""
+    assert result["hasRetryOn"] is True
 
 
 def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
@@ -622,7 +624,7 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     )
 
     create_html = str(result["createHtml"])
-    assert "模型ID *" in create_html
+    assert "llm-model-key-input" not in create_html
     assert "协议" in create_html
     assert "请求地址 *" in create_html
     assert "Apikey *" in create_html

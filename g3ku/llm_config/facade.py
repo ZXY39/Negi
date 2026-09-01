@@ -205,10 +205,6 @@ class LLMConfigFacade:
         binding = ModelBindingDraft.model_validate(binding_payload)
         from g3ku.config.schema import ManagedModelConfig
 
-        existing = config.get_managed_model(binding.key)
-        if existing is not None:
-            raise ValueError(f"Model key already exists: {binding.key}")
-
         config_id = str(binding_payload.get("config_id") or "").strip()
         if config_id:
             self.repository.get(config_id)
@@ -217,6 +213,15 @@ class LLMConfigFacade:
             item = self.create_config_record(draft.model_dump(mode="python"))
             config_id = str(item.get("config_id") or "").strip()
         record = self._hydrate_record_secrets(self.repository.get(config_id))
+
+        binding.key = self._ensure_unique_binding_key(
+            config,
+            preferred=str(binding.key or "").strip() or str(record.default_model or "").strip(),
+        )
+        existing = config.get_managed_model(binding.key)
+        if existing is not None:
+            raise ValueError(f"Model key already exists: {binding.key}")
+
         binding.single_api_key_max_concurrency = self._validate_binding_api_key_limits(
             api_key=str(record.auth.get("api_key", "") or ""),
             value=binding.single_api_key_max_concurrency,
@@ -236,6 +241,18 @@ class LLMConfigFacade:
             )
         )
         return self.get_binding(config, binding.key)
+
+    @staticmethod
+    def _ensure_unique_binding_key(config: Any, preferred: str) -> str:
+        base = str(preferred or "").strip()
+        if not base:
+            base = uuid4().hex
+        key = base
+        counter = 2
+        while config.get_managed_model(key) is not None:
+            key = f"{base}-{counter}"
+            counter += 1
+        return key
 
     def update_binding(self, config: Any, *, model_key: str, draft_payload: dict[str, Any]) -> dict[str, Any]:
         binding = config.get_managed_model(model_key)
@@ -346,6 +363,7 @@ class LLMConfigFacade:
             "key": binding.key,
             "llm_config_id": record.config_id,
             "provider_model": self._provider_model_from_record(record),
+            "default_model": record.default_model,
             "api_key": MASKED_SECRET_VALUE if api_key else "",
             "api_base": record.base_url,
             "extra_headers": record.headers,

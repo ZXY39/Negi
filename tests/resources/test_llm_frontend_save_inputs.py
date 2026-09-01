@@ -22,7 +22,7 @@ def _run_node_script(script: str) -> dict[str, object]:
     return json.loads(completed.stdout.strip())
 
 
-def test_handle_create_save_uses_current_dom_json_and_model_key() -> None:
+def test_handle_create_save_uses_current_dom_json_and_defers_binding_key() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -164,7 +164,7 @@ def test_handle_create_save_uses_current_dom_json_and_model_key() -> None:
         """
     )
 
-    assert result["createPayload"]["binding"]["key"] == "demo_key"
+    assert result["createPayload"]["binding"]["key"] == ""
     assert result["createPayload"]["draft"]["api_key"] == "live-key"
     assert result["createPayload"]["draft"]["default_model"] == "live-model"
     assert result["createPayload"]["draft"]["parameters"]["temperature"] == 0.2

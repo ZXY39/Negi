@@ -86,6 +86,10 @@
     return "模型ID";
   }
 
+  function bindingTitle(item) {
+    return trim((item && (item.default_model || item.key)) || "");
+  }
+
   function bindingNameRequiredMessage() {
     return `${bindingNameLabel()}不能为空`;
   }
@@ -646,9 +650,8 @@
     return editor;
   }
 
-  function bindingDraftPayload({ requireModelKey = false } = {}) {
+  function bindingDraftPayload() {
     const editor = reconcileBindingContextWindowTokens();
-    const modelKey = trim(editor?.modelKey);
     const retryOn = Array.isArray(editor?.retryOn) ? editor.retryOn.map((item) => trim(item)).filter(Boolean) : [];
     const retryCount = Number.parseInt(String(editor?.retryCount ?? 0), 10);
     const draft = parseDraftJson(editor?.jsonText || "", editor?.providerId || "");
@@ -657,7 +660,6 @@
       draft.api_key || ""
     );
     const contextWindowTokens = Number.parseInt(String(editor?.contextWindowTokens ?? "").trim(), 10);
-    if (requireModelKey && !modelKey) throw new Error(bindingNameRequiredMessage());
     if (!Number.isInteger(retryCount) || retryCount < 0) {
       throw new Error("重试次数必须是不小于 0 的整数");
     }
@@ -670,7 +672,6 @@
     draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
     draft.parameters.context_window_tokens = contextWindowTokens;
     return {
-      modelKey,
       retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
       retryCount,
       singleApiKeyMaxConcurrency,
@@ -881,10 +882,6 @@
             <div class="llm-section">
               <div class="llm-form-grid llm-form-grid--binding-header">
                 <label class="resource-field">
-                  <span class="resource-field-label">模型ID *</span>
-                  <input id="llm-model-key-input" class="resource-search" type="text" value="${escv(state.editor.modelKey)}" placeholder="例如：ceo_primary">
-                </label>
-                <label class="resource-field">
                   <span class="resource-field-label">协议</span>
                   <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
                 </label>
@@ -907,7 +904,7 @@
         <article class="model-detail-card model-config-shell">
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
-              <h2>${escv(binding?.key || state.editor.bindingKey)}</h2>
+              <h2>${escv(bindingTitle(binding) || state.editor.bindingKey)}</h2>
               <p class="subtitle">可同时编辑当前模型的 JSON 配置与降级重试策略。</p>
             </div>
             <div class="detail-modal-actions">
@@ -950,8 +947,8 @@
     const query = trim(S.modelCatalog.search || "").toLowerCase();
     const items = [...llmState().bindings]
       .filter((item) => String(item.capability || "chat") === "chat")
-      .filter((item) => !query || [item.key, item.provider_model, item.description].join("\n").toLowerCase().includes(query))
-      .sort((a, b) => String(a.key || "").localeCompare(String(b.key || "")));
+      .filter((item) => !query || [item.key, item.provider_model, item.default_model, item.api_base, item.description].join("\n").toLowerCase().includes(query))
+      .sort((a, b) => String(bindingTitle(a) || a.key || "").localeCompare(String(bindingTitle(b) || b.key || "")));
 
     if (!items.length) {
       U.llmBindingsList.innerHTML = `<div class="empty-state compact">${query ? "没有匹配的模型。" : "还没有保存的模型。"}</div>`;
@@ -959,20 +956,13 @@
     }
 
     U.llmBindingsList.innerHTML = items.map((item) => {
-      const scopes = MODEL_SCOPES.filter((scope) => (llmState().routes?.[scope.key] || []).includes(item.key)).map((scope) => scope.key);
       const canDrag = S.modelCatalog.roleEditing;
-      const description = trim(item.description);
       return `
         <article class="llm-binding-card model-available-item${trim(item.key) === trim(llmState().editor.bindingKey) ? " is-selected" : ""}" data-model-available-key="${escv(item.key)}" data-model-open="${escv(item.key)}"${canDrag ? ' draggable="true"' : ""}>
-          <div class="llm-binding-card-head">
-            <button type="button" class="model-available-main" data-model-open="${escv(item.key)}">
-              <span class="resource-list-title">${escv(item.key)}</span>
-              <span class="resource-list-subtitle">${escv(item.provider_model)}</span>
-            </button>
-            <span class="llm-capability-badge chat">Chat</span>
-          </div>
-          ${description ? `<div class="llm-binding-meta">${escv(description)}</div>` : ""}
-          <div class="model-inline-meta">${item.enabled === false ? '<span class="policy-chip neutral">Disabled</span>' : '<span class="policy-chip risk-low">Enabled</span>'}${scopes.length ? scopes.map((scope) => `<span class="policy-chip neutral">${escv(SCOPE_LABELS[scope] || scope)}</span>`).join("") : '<span class="policy-chip neutral">未进入角色链</span>'}</div>
+          <button type="button" class="model-available-main" data-model-open="${escv(item.key)}">
+            <span class="resource-list-title">${escv(bindingTitle(item))}</span>
+            <span class="resource-list-subtitle">${escv(item.api_base || "")}</span>
+          </button>
         </article>`;
     }).join("");
   }
@@ -991,7 +981,7 @@
             <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
               const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
               const key = trim(item?.key || ref);
-              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(key)}</span><span class="resource-list-subtitle">${escv(item?.provider_model || ref)}</span><span class="model-inline-meta">${index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ''}</span></button>${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button>` : ''}</article>`;
+              return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.provider_model || ref)}</span><span class="model-inline-meta">${index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ''}</span></button>${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button>` : ''}</article>`;
             }).join("") : `<div class="empty-state compact">${editing ? '把左侧模型拖到这里，编排当前角色链。' : '点击“编辑模型链”后再调整角色链。'}</div>`}</div>
           </div>
         </section>`;
@@ -1174,20 +1164,11 @@
     draft.default_model = value;
     setBindingJsonEditorValue(JSON.stringify(draft, null, 2));
     syncDefaultModelInputValue(value);
-    let filledModelKey = false;
-    if (editor.mode === "create") {
-      const modelKeyInput = document.getElementById("llm-model-key-input");
-      if (modelKeyInput && !trim(modelKeyInput.value)) {
-        modelKeyInput.value = value;
-        editor.modelKey = value;
-        filledModelKey = true;
-      }
-    }
     editor.modelList = null;
     renderModelListPanel();
     showToast({
       title: "已填入模型",
-      text: filledModelKey ? `已将 ${value} 填入模型ID与 JSON 配置。` : `已将模型ID设置为 ${value}。`,
+      text: `已将模型ID设置为 ${value}。`,
       kind: "success",
       durationMs: 2600,
     });
@@ -1289,12 +1270,9 @@
   async function handleCreateSave() {
     const state = llmState();
     reconcileBindingContextWindowTokens();
-    const bindingDraft = bindingDraftPayload({ requireModelKey: true });
-    const modelKey = bindingDraft.modelKey;
+    const bindingDraft = bindingDraftPayload();
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
-    if (!modelKey) throw new Error(bindingNameRequiredMessage());
-    state.editor.modelKey = modelKey;
     state.editor.providerId = providerId;
     state.editor.jsonText = jsonText;
     const draft = bindingDraft.draft;
@@ -1324,7 +1302,7 @@
       });
       const saveResult = await ApiClient.createLlmBinding({
         binding: {
-          key: modelKey,
+          key: "",
           config_id: "",
           enabled: true,
           retry_on: [...bindingDraft.retryOn],
@@ -1353,19 +1331,6 @@
     state.editor.jsonText = jsonText;
     const draft = bindingDraft.draft;
     const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "");
-    let previousDefaultModel = "";
-    try {
-      previousDefaultModel = trim(parseDraftJson(state.editor.initialJsonText || "", state.editor.providerId || "")?.default_model || "");
-    } catch (_error) {
-      previousDefaultModel = "";
-    }
-    const nextDefaultModel = trim(draft?.default_model || "");
-    const renameKey = (
-      nextDefaultModel &&
-      previousDefaultModel &&
-      nextDefaultModel !== previousDefaultModel &&
-      trim(binding.key) === previousDefaultModel
-    ) ? nextDefaultModel : "";
     const bindingPatch = {};
     if (JSON.stringify(bindingDraft.retryOn) !== JSON.stringify(binding.retry_on || [])) bindingPatch.retry_on = bindingDraft.retryOn;
     if (bindingDraft.retryCount !== Number.parseInt(String(binding.retry_count ?? 0), 10)) bindingPatch.retry_count = bindingDraft.retryCount;
@@ -1391,16 +1356,6 @@
         const configSaveResult = await ApiClient.updateLlmConfig(state.editor.configId, draft);
         runtimeRefresh = configSaveResult?.runtimeRefresh || runtimeRefresh;
       }
-      if (renameKey) {
-        showToast({
-          title: "Saving",
-          text: `同步模型配置名：${renameKey}`,
-          kind: "success",
-          persistent: true,
-        });
-        const renameResult = await ApiClient.renameLlmBinding(state.editor.bindingKey, renameKey);
-        runtimeRefresh = renameResult?.runtimeRefresh || runtimeRefresh;
-      }
       if (Object.keys(bindingPatch).length) {
         showToast({
           title: "Saving",
@@ -1408,7 +1363,7 @@
           kind: "success",
           persistent: true,
         });
-        const bindingSaveResult = await ApiClient.updateLlmBinding(renameKey || state.editor.bindingKey, bindingPatch);
+        const bindingSaveResult = await ApiClient.updateLlmBinding(state.editor.bindingKey, bindingPatch);
         runtimeRefresh = bindingSaveResult?.runtimeRefresh || runtimeRefresh;
       }
       if (!configChanged && !Object.keys(bindingPatch).length) {
