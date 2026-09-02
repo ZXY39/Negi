@@ -8,6 +8,8 @@ import pytest
 
 from g3ku.heartbeat.node_error_scanner import NodeErrorScanner
 from main.errors import NodePausedError
+from main.monitoring.query_service import TaskQueryService
+from main.monitoring.models import TaskProjectionNodeRecord
 from main.models import NodeFinalResult, NodeRecord, SpawnChildSpec, TaskRecord, TokenUsageSummary
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.task_actor_service import TaskNodeDispatcher
@@ -173,6 +175,66 @@ async def test_node_error_becomes_error_pause_and_keeps_node_non_terminal(tmp_pa
         assert service.store.get_task_node_pause(record.root_node_id) is not None
     finally:
         await service.close()
+
+
+def _paused_node_record(task_id: str, node_id: str) -> NodeRecord:
+    node = _node_record(task_id, node_id)
+    node.status = "in_progress"
+    node.is_paused = True
+    node.pause_requested = True
+    node.pause_reason = "error"
+    return node
+
+
+def test_projection_record_carries_top_level_pause_fields(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    node = _paused_node_record("task:pause-render", "node:pause-render")
+    projection = service.log_service._task_projection_node_record(node)
+    assert projection.is_paused is True
+    assert projection.pause_reason == "error"
+
+
+def test_tree_text_label_renders_paused_status() -> None:
+    node = _paused_node_record("task:pause-render", "node:pause-render")
+    projection = TaskProjectionNodeRecord(
+        node_id=node.node_id,
+        task_id=node.task_id,
+        status=node.status,
+        is_paused=node.is_paused,
+        pause_reason=node.pause_reason,
+        payload={},
+    )
+    label = TaskQueryService._tree_text_label(projection, {})
+    assert "paused(error)" in label
+    assert "in_progress" not in label
+
+
+def test_tree_text_label_falls_back_to_payload_pause_flag() -> None:
+    # 历史投影未即时刷新时，顶层 is_paused 仍为 False，但 payload 已带暂停信息。
+    projection = TaskProjectionNodeRecord(
+        node_id="node:stale",
+        task_id="task:stale",
+        status="in_progress",
+        is_paused=False,
+        pause_reason="",
+        payload={"is_paused": True, "pause_reason": "error"},
+    )
+    label = TaskQueryService._tree_text_label(projection, {})
+    assert "paused(error)" in label
+
+
+def test_tree_text_label_keeps_status_when_not_paused() -> None:
+    projection = TaskProjectionNodeRecord(
+        node_id="node:ok",
+        task_id="task:ok",
+        status="success",
+        is_paused=False,
+        pause_reason="",
+        payload={},
+    )
+    label = TaskQueryService._tree_text_label(projection, {})
+    assert ",success," in label
+    assert "paused" not in label
 
 
 @pytest.mark.asyncio

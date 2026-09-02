@@ -3543,6 +3543,8 @@ class TaskLogService:
             depth=int(node.depth or 0),
             node_kind=str(node.node_kind or 'execution'),
             status=node.status,
+            is_paused=bool(node.is_paused),
+            pause_reason=str(node.pause_reason or ''),
             title=node.goal or node.node_id,
             updated_at=str(node.updated_at or ''),
             default_round_id=default_round_id,

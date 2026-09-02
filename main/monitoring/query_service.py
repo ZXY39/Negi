@@ -1640,10 +1640,21 @@ class TaskQueryService:
             return '检验中'
         return '无阶段目标'
 
+    @staticmethod
+    def _tree_pause_display(node: Any) -> str:
+        # 顶层字段优先，payload 兜底：兼容尚未重投影的历史节点，
+        # 与 _snapshot_node_from_projection 的读取口径保持一致。
+        payload = dict(getattr(node, 'payload', {}) or {}) if isinstance(getattr(node, 'payload', None), dict) else {}
+        is_paused = bool(getattr(node, 'is_paused', False) or payload.get('is_paused'))
+        if not is_paused:
+            return str(getattr(node, 'status', '') or '').strip()
+        pause_reason = str(getattr(node, 'pause_reason', '') or payload.get('pause_reason') or '').strip()
+        return f'paused({pause_reason})' if pause_reason else 'paused'
+
     @classmethod
     def _tree_text_label(cls, node: Any, stage_goals: dict[str, str]) -> str:
         node_id = str(getattr(node, 'node_id', '') or '').strip()
-        status = str(getattr(node, 'status', '') or '').strip()
+        status = cls._tree_pause_display(node)
         stage_goal = cls._tree_display_stage_goal(node, stage_goals)
         if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() == 'acceptance':
             parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip() or '?'
