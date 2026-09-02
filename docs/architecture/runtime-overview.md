@@ -433,6 +433,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - 内联同轮 LLM 重写，在 provider 发送前立即执行：保留稳定 system 前缀、最新运行时工具契约尾与最近的 body-history 尾部，只把更早的 body-history 区间重写为一个 `G3KU_TOKEN_COMPACT_V2` 标记块。
 - 触发阈值绑定运行时所选模型的 `context_window_tokens`：估算请求 `<= 80%` 模型窗口时直接发送；介于 `80%` 与 `100%` 之间时尝试一次内联压缩；已超过 `100%` 时先失败，因为连压缩尝试本身都无法安全装进当前模型窗口。
 - 对 CEO/frontdoor 与节点运行时，`token_compression` 都不是 provider bundle 提升边界：压缩发送沿用已持久化的 `provider_tool_names`，任何 provider-bundle 刷新落在压缩后的第一个普通 turn。
+- 尾部收敛保证：保留的最近 body-history 尾部（固定 4 条）是压缩后请求体的不可压缩下限。重建前先把尾部中超过字符上限（16000）的工具结果消息硬截断为「截断头部 + 检索指引」，保证压缩后估算必然收敛到窗口以内。若不做截断，一条超大尾部工具结果（例如 `content_open` 对单行巨型 artifact 的打开结果）本身就能让压缩后估算持续超窗——压缩检查必然抛错、回合必然失败，而该消息又始终落在保留尾部，形成每轮压缩、每轮失败的无限循环。
 
 ### `stage_compaction`
 

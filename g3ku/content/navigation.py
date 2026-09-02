@@ -19,6 +19,13 @@ _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
 _MAX_WRAPPER_DEPTH = 8
+# content_open 的单行窗口上限（字符数）。行数上限由 MAX_OPEN_LINES 控制，但
+# "单体一行" 的 artifact（例如外置的单行 JSON 大文件）会让打开任意一行都
+# 内联整行内容；没有字符上限时，一个 1.75MB 的单行文件会被整块带入上下文，
+# 直接把请求体撑爆模型窗口且 LLM 压缩也救不回来（见压缩尾部保留逻辑）。
+# 与 INLINE_OPEN_RESULT_CHAR_LIMIT 对齐：真实节选超过该值的打开结果必须走
+# content_search，而不是被整段内联。
+OPEN_EXCERPT_CHAR_LIMIT = 16000
 # Internal runtime tools that are intentionally always inlined even when their
 # payloads are large. Keep this list explicit here instead of manifest-driven
 # so these delivery exceptions stay auditable and tightly scoped.
@@ -331,7 +338,13 @@ def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
         return False
     if normalized == "tool_result:content_open":
         excerpt = str(payload.get("excerpt") or "").strip()
-        return bool(excerpt) and payload.get("start_line") not in {None, ""} and payload.get("end_line") not in {None, ""}
+        if not excerpt or payload.get("start_line") in {None, ""} or payload.get("end_line") in {None, ""}:
+            return False
+        # content_open 的节选只限行数不限字符数，单行巨型 artifact 会原样带出
+        # 整行内容；这里必须与其它 inline 路径共用同一字符/行数闸门，否则
+        # 超大打开结果会以 inline_small 形态进入状态与持久基线（`_excerpt`
+        # 的 OPEN_EXCERPT_CHAR_LIMIT 是最后防线，这里是投递策略的第一道闸门）。
+        return _inline_tool_payload_fits_limits(payload)
     if normalized == "tool_result:content_search":
         return _should_keep_inline_search_tool_result(payload)
     if normalized == "tool_result:spawn_child_nodes":
@@ -879,6 +892,20 @@ class ContentNavigationService:
         start = max(1, int(start_line or 1))
         finish = max(start, int(end_line or start))
         excerpt = "\n".join(lines[start - 1 : finish]).strip()
+        truncated = False
+        total_chars = len(excerpt)
+        shown_chars = total_chars
+        if total_chars > OPEN_EXCERPT_CHAR_LIMIT:
+            truncated = True
+            notice = (
+                "\n\n[内容已截断]：本次打开的区间过大"
+                f"（{start_line}-{min(finish, len(lines))} 行区间共 {total_chars} 字符），"
+                "仅展示头部内容。请改用 content_search 按关键字检索 "
+                f"ref={handle.ref}，或使用更小的 start_line/end_line 区间分段打开。"
+            )
+            head_limit = max(OPEN_EXCERPT_CHAR_LIMIT - len(notice), OPEN_EXCERPT_CHAR_LIMIT // 2)
+            shown_chars = min(head_limit, total_chars)
+            excerpt = excerpt[:shown_chars].rstrip() + notice
         return {
             "ok": True,
             "ref": handle.ref,
@@ -890,6 +917,9 @@ class ContentNavigationService:
             "start_line": start,
             "end_line": min(finish, len(lines)),
             "excerpt": excerpt,
+            "truncated": truncated,
+            "excerpt_total_chars": total_chars,
+            "excerpt_shown_chars": shown_chars,
         }
 
     def _read_text_for_content_display(self, file_path: Path) -> tuple[str, str]:

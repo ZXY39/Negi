@@ -48,6 +48,11 @@ _TASK_TERMINAL_OUTPUT_INLINE_LIMIT = TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
 _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT = 5
 _TASK_TERMINAL_INVALID_OUTPUT_LABEL = "<empty>"
 _HANDLED_TERMINAL_DEDUPE_KEYS_MAX = 16
+# task_node_error 事件没有用户可见的终态（节点仍停在 pause 状态），失败回合会
+# 被唤醒队列无限重投；这里为同一会话的连续失败加一个有界上限，达到后事件出队
+# 并落一条可见说明，而不是永远静默重试。上限保持小值，正常偶发失败（例如
+# provider 瞬时故障）远够重试到；只有"每轮必挂"的死循环会被终止。
+_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES = 3
 
 
 @lru_cache(maxsize=1)
@@ -114,6 +119,7 @@ class WebSessionHeartbeatService:
         self._prompt_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_terminal_rejection_reasons: dict[str, str] = {}
         self._node_error_scanner = None
+        self._task_node_error_failure_streaks: dict[str, int] = {}
 
     async def start(self) -> None:
         if self._started:
@@ -526,6 +532,7 @@ class WebSessionHeartbeatService:
             self._ack_task_stall_events(removed)
         self._events.clear_session(key)
         self._wake.clear_session(key)
+        self._task_node_error_failure_streaks.pop(key, None)
         task = self._prompt_tasks.pop(key, None)
         if task is not None:
             task.cancel()
@@ -640,6 +647,36 @@ class WebSessionHeartbeatService:
                 "你可以让我重新整理结果，或在任务面板查看/续跑该任务。"
             )
         return "后台任务已完成或已到终态，但系统在整理该结果时连续失败。你可以让我重新整理结果，或在任务面板查看该任务。"
+
+    @staticmethod
+    def _task_node_error_events(events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
+        return [
+            event
+            for event in list(events or [])
+            if str(event.reason or "").strip().lower() == "task_node_error"
+        ]
+
+    @staticmethod
+    def _task_node_error_give_up_text(events: list[SessionHeartbeatEvent]) -> str:
+        task_ids: list[str] = []
+        node_ids: list[str] = []
+        for event in list(events or []):
+            if str(event.reason or "").strip().lower() != "task_node_error":
+                continue
+            payload = dict(event.payload or {})
+            task_id = str(payload.get("task_id") or "").strip()
+            node_id = str(payload.get("node_id") or "").strip()
+            if task_id and task_id not in task_ids:
+                task_ids.append(task_id)
+            if node_id and node_id not in node_ids:
+                node_ids.append(node_id)
+        joined_tasks = "、".join(task_id for task_id in task_ids if task_id) or "未知任务"
+        joined_nodes = "、".join(node_id for node_id in node_ids if node_id) or "未知节点"
+        return (
+            f"后台任务节点出错自动暂停后，我连续尝试了 {_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES} 次都没能完成处理，"
+            f"为避免反复打扰，暂不再自动重试。任务：{joined_tasks}；节点：{joined_nodes}。"
+            "你可以直接回复让我继续处理，或在任务面板对该节点执行 resume/fail 操作。"
+        )
 
     def _build_prompt(
         self,
@@ -1279,11 +1316,59 @@ class WebSessionHeartbeatService:
         except Exception:
             logger.exception("heartbeat session run failed for {}", key)
             self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
-            return 10.0
+            node_error_events = self._task_node_error_events(events)
+            if not node_error_events:
+                return 10.0
+            # task_node_error 事件在回合失败时不会出队，唤醒队列会无限重投；
+            # 连续失败达到上限后出队并落一条可见说明，把重试从无限变成有界。
+            streak = int(self._task_node_error_failure_streaks.get(key, 0)) + 1
+            self._task_node_error_failure_streaks[key] = streak
+            if streak < _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES:
+                return 10.0
+            self._task_node_error_failure_streaks.pop(key, None)
+            node_error_event_ids = {event.event_id for event in node_error_events}
+            popped = self._events.pop_many(key, event_ids=node_error_event_ids)
+            self._ack_task_terminal_events(popped)
+            self._ack_task_stall_events(popped)
+            give_up_text = self._task_node_error_give_up_text(node_error_events)
+            previous_canonical_context = latest_assistant_message_canonical_context(
+                persisted_session,
+                exclude_turn_id=heartbeat_turn_id,
+            )
+            reply_already_persisted = self._persist_assistant_reply(
+                key,
+                text=give_up_text,
+                task_ids=[str((event.payload or {}).get("task_id") or "").strip() for event in node_error_events],
+                reason="task_node_error_give_up",
+                turn_id=heartbeat_turn_id,
+            )
+            if not reply_already_persisted:
+                self._publish_ceo(
+                    key,
+                    "ceo.reply.final",
+                    self._build_heartbeat_final_payload(
+                        key,
+                        text=give_up_text,
+                        turn_id=heartbeat_turn_id,
+                        previous_canonical_context=previous_canonical_context,
+                    ),
+                )
+            await self._notify_reply(key, give_up_text)
+            logger.warning(
+                "heartbeat node-error give up after {} consecutive failures for {} ({})",
+                streak,
+                key,
+                ", ".join(sorted(str(event.dedupe_key or "") for event in node_error_events)),
+            )
+            remaining_events = self._events.peek_ready(key)
+            return 10.0 if remaining_events else None
         finally:
             unsubscribe()
 
         output = str(getattr(result, "output", "") or "").strip()
+        # 回合成功完成即清零 node-error 连续失败计数（任何一次成功都重新获得
+        # 完整的重试预算，只有"每轮必挂"的连续失败才会触发放弃路径）。
+        self._task_node_error_failure_streaks.pop(key, None)
         task_terminal_events = self._task_terminal_events(events)
         repair_attempt = 0
         repair_failed = False

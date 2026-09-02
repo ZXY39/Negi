@@ -712,6 +712,44 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     _TOKEN_COMPRESSION_TRIGGER_RATIO = 0.80
     _TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO = 0.95
     _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
+    # LLM token 压缩会无条件保留最近 N 条 body 消息（recent_tail）。若某条尾部
+    # 消息本身是超大工具结果（例如 content_open 带出单行巨型 artifact），压缩后
+    # 的估算依然超窗，压缩检查必然抛错、回合必然失败，且基线永远带着这条消息，
+    # 形成"每轮都压缩、每轮都失败"的死循环。这里把尾部消息内容硬性截断到
+    # 该上限，保证压缩重建后的请求体有界、压缩总能收敛。
+    _FRONTDOOR_COMPACTION_TAIL_CONTENT_CHAR_LIMIT = 16_000
+
+    @classmethod
+    def _bound_frontdoor_compaction_tail_messages(
+        cls,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """把压缩保留的尾部工具结果截断到字符上限，确保压缩结果必然收敛。"""
+        bounded: list[dict[str, Any]] = []
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                bounded.append(item)
+                continue
+            if str(item.get("role") or "").strip().lower() != "tool":
+                bounded.append(dict(item))
+                continue
+            content = item.get("content")
+            text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            if len(text) <= cls._FRONTDOOR_COMPACTION_TAIL_CONTENT_CHAR_LIMIT:
+                bounded.append(dict(item))
+                continue
+            updated = dict(item)
+            updated["content"] = (
+                text[: cls._FRONTDOOR_COMPACTION_TAIL_CONTENT_CHAR_LIMIT].rstrip()
+                + (
+                    "\n\n[内容已截断]：该工具结果共 "
+                    f"{len(text)} 字符，超出压缩保留上限"
+                    f"（{cls._FRONTDOOR_COMPACTION_TAIL_CONTENT_CHAR_LIMIT} 字符）。"
+                    "原文仍存储在对应 artifact 中，请按上文其 ref 用 content_open/content_search 检索。"
+                )
+            )
+            bounded.append(updated)
+        return bounded
 
     def _frontdoor_runtime_config(self) -> Any:
         try:
@@ -1671,6 +1709,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
         older_history_messages = [dict(item) for item in normalized_body[:-recent_tail_count]]
         recent_tail = [dict(item) for item in normalized_body[-recent_tail_count:]]
+        # 尾部消息是压缩后请求体的最小不可压缩部分；超大工具结果必须先截断，
+        # 否则压缩结果不收敛：压缩检查（final_request_tokens > 窗口）必然失败。
+        recent_tail = self._bound_frontdoor_compaction_tail_messages(recent_tail)
         session = getattr(getattr(runtime, "context", None), "session", None)
         generation_id: int | None = None
         begin_generation = getattr(session, "_begin_frontdoor_compression_generation", None)
