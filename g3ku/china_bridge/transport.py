@@ -461,12 +461,13 @@ class ChinaBridgeTransport:
             await self._emit(build_turn_complete_frame(event_id=envelope.event_id))
             raise
         except Exception as exc:
-            # Channel users see a fixed friendly message; the raw exception is
-            # preserved in the frame's ``detail`` for troubleshooting only.
+            # Channel users see the complete error text so a failed turn explains
+            # itself instead of collapsing into a bare "Error:". The detail is
+            # preserved separately for operators.
             await self._emit(
                 build_turn_error_frame(
                     event_id=envelope.event_id,
-                    error=TURN_FAILED_FRIENDLY_TEXT,
+                    error=str(exc).strip() or TURN_FAILED_FRIENDLY_TEXT,
                     detail=str(exc),
                 )
             )

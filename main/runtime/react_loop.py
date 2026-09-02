@@ -1191,7 +1191,10 @@ class ReActToolLoop:
                 continue
 
             if str(response.finish_reason or '').strip().lower() == 'error':
-                error_text = str(getattr(response, 'error_text', None) or response.content or 'model response failed').strip() or 'model response failed'
+                raw_error = str(getattr(response, 'error_text', None) or response.content or '').strip()
+                if not raw_error or raw_error.lower() in {'error', 'error:', 'none'}:
+                    raw_error = ''
+                error_text = raw_error or 'model response failed without error detail'
                 raise RuntimeError(error_text)
 
             if xml_pseudo_call is not None:

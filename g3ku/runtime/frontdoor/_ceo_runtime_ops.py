@@ -6370,6 +6370,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 'tool_contract_echo_attempt_count': echo_attempt_count,
                 'next_step': 'finalize',
             }
+        if str(response_view.finish_reason or "").strip().lower() == "error":
+            error_detail = str(
+                getattr(response_view, "error_text", None)
+                or response_view.content
+                or "model response failed"
+            ).strip()
+            error_detail = error_detail if error_detail.lower() not in {"error", "error:"} else "model response failed"
+            if error_detail == PUBLIC_PROVIDER_FAILURE_MESSAGE:
+                raise ModelProviderExhaustedError(raw_message=error_detail, message=error_detail)
+            raise RuntimeError(error_detail)
+
         if text.strip():
             text = strip_frontdoor_tool_contract_echo(text)
             if not text:
@@ -6404,9 +6415,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
                 "next_step": "finalize",
             }
-
-        if str(response_view.finish_reason or "").strip().lower() == "error":
-            raise RuntimeError(str(response_view.error_text or response_view.content or "model response failed"))
 
         if stage_protocol_message and not str(state.get("repair_overlay_text") or "").strip():
             return {

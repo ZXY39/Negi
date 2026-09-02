@@ -6,6 +6,7 @@ from typing import Any
 
 import json_repair
 from openai import AsyncOpenAI
+from openai import APIError as OpenAISDKAPIError
 
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
 from g3ku.json_schema_utils import normalize_openai_tool_definitions
@@ -16,6 +17,42 @@ from g3ku.providers.streaming_timeouts import (
     resolve_streaming_timeout_seconds,
     should_fallback_to_non_streaming_from_error,
 )
+
+
+def _error_text_for(exc: BaseException, *, fallback: str = "unknown provider error") -> str:
+    """Render a provider exception into non-empty, self-describing text.
+
+    ``str(exc)`` is empty for several common provider failures (bare
+    :class:`TimeoutError` / :class:`asyncio.TimeoutError`, some inherited
+    exceptions that never set a message). Formatting those with
+    ``f"Error: {e}"`` produced a reply that was literally ``Error:`` with no
+    actionable detail, which then propagated into node pause remarks and the
+    user-visible session output. Always include the exception type and any
+    non-empty members of the cause chain so the message can never be empty.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = str(type(current).__name__ or "").strip() or "Exception"
+        message = str(current or "").strip()
+        if isinstance(current, OpenAISDKAPIError):
+            # The OpenAI SDK keeps structured detail on the exception object that
+            # is not reflected in str(): prefer request code/body when present.
+            code = str(getattr(current, "code", "") or "").strip()
+            body = str(getattr(current, "body", "") or "").strip()
+            status = str(getattr(current, "status_code", "") or "").strip()
+            structured = " ".join(
+                token for token in (f"code={code}", f"status={status}", f"body={body}") if token.split("=", 1)[-1]
+            )
+            message = (message + (" " + structured if structured else "")).strip()
+        detail = f"{name}: {message}" if message else name
+        parts.append(detail)
+        current = current.__cause__ or current.__context__
+    if not parts:
+        parts.append(str(fallback or "unknown provider error"))
+    return " | ".join(dict.fromkeys(parts))
 
 
 class OpenAIChatProvider(LLMProvider):
@@ -112,7 +149,8 @@ class OpenAIChatProvider(LLMProvider):
             non_stream_timeout_seconds = resolve_non_streaming_timeout_seconds(request_timeout_seconds)
             return self._parse(await self._client.chat.completions.create(**{**kwargs, "timeout": float(non_stream_timeout_seconds)}))
         except Exception as e:
-            return LLMResponse(content=f"Error: {e}", finish_reason="error")
+            error_text = _error_text_for(e)
+            return LLMResponse(content=error_text, error_text=error_text, finish_reason="error")
 
     def _parse(self, response: Any) -> LLMResponse:
         choice = response.choices[0]

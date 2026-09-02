@@ -2778,6 +2778,11 @@ class RuntimeAgentSession:
                 continue
         return Path.cwd() / ".g3ku" / "errors"
 
+    @staticmethod
+    def _turn_failed_reply(error_message: str) -> str:
+        detail = str(error_message or "").strip() or TURN_FAILED_FRIENDLY_TEXT
+        return f"这一轮处理失败：{detail}"
+
     def _persist_runtime_error_file(
         self,
         exc: Exception,
@@ -3029,14 +3034,14 @@ class RuntimeAgentSession:
                     recoverable=True,
                 )
             self._state.last_error = error
-            # Users see a fixed friendly message; the raw exception text stays
-            # in the error file, the transcript metadata, the "error" event and
-            # StructuredError (Web ops views render those), but is never shown
-            # to channel users verbatim.
+            # Users see the complete error text so a failed turn explains itself
+            # instead of collapsing into a bare "Error:" or a generic message.
+            # The raw exception text also stays in the error file, the transcript
+            # metadata and the "error" event for operators.
             if isinstance(exc, MemoryError):
                 error_reply = "运行时内存不足，未能完成当前轮次"
             else:
-                error_reply = TURN_FAILED_FRIENDLY_TEXT
+                error_reply = self._turn_failed_reply(error_message)
             self._state.latest_message = error_reply
             self._persist_runtime_error_file(
                 exc,

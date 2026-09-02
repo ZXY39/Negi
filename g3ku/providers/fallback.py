@@ -221,11 +221,26 @@ def response_requires_fallback(response: LLMResponse) -> bool:
     return should_fallback_model_error(error_source)
 
 
+def _is_bare_error_prefix(text: str) -> bool:
+    normalized = str(text or "").strip()
+    return normalized.lower() in {"error", "error:", "none"}
+
+
 def sanitize_terminal_model_error(response: LLMResponse) -> LLMResponse:
     # Keep the provider's original error text so failures surface unwrapped;
     # only backfill the public message when there is no error detail at all.
-    if response_requires_fallback(response) and not str(response.error_text or response.content or "").strip():
-        response.error_text = PUBLIC_PROVIDER_FAILURE_MESSAGE
+    error_detail = str(response.error_text or response.content or "").strip()
+    if _is_bare_error_prefix(error_detail):
+        error_detail = ""
+
+    if response_requires_fallback(response) and not error_detail:
+        public = PUBLIC_PROVIDER_FAILURE_MESSAGE
+        # Preserve the caller-visible detail so a node pause / session error that
+        # surfaces through an error response carries complete, non-empty text.
+        if response.error_text is not None and str(response.error_text or "").strip():
+            response.error_text = f"{str(response.error_text or '').strip()} - {public}"
+        else:
+            response.error_text = public
     return response
 
 

@@ -272,7 +272,7 @@ def test_build_deliver_frame_returns_none_for_internal_only_text():
 
 
 @pytest.mark.asyncio
-async def test_transport_turn_error_frame_hides_raw_exception():
+async def test_transport_turn_error_frame_surfaces_complete_error_text():
     bridge = _ScriptedRuntimeBridge(
         prompt_side_effect=RuntimeError("Cannot operate on a closed database")
     )
@@ -284,10 +284,11 @@ async def test_transport_turn_error_frame_hides_raw_exception():
     error_frames = [frame for frame in frames if frame["type"] == "turn_error"]
     assert len(error_frames) == 1
     frame = error_frames[0]
-    # The user-visible error must be the friendly text, not the raw exception.
-    assert "closed database" not in str(frame["error"])
-    assert frame["error"] == transport_module.TURN_FAILED_FRIENDLY_TEXT
-    # The raw exception is preserved for troubleshooting in ``detail``.
+    # The user-visible error carries the complete exception text so a failed
+    # turn explains itself instead of collapsing into an opaque friendly message.
+    assert "closed database" in str(frame["error"])
+    assert "Cannot operate on a closed database" in str(frame["error"])
+    # The raw exception is also preserved for troubleshooting in ``detail``.
     assert "Cannot operate on a closed database" in str(frame["detail"])
 
 
