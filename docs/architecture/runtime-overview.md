@@ -442,6 +442,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - 幂等：同一输入重写两次收敛为同一输出；归属保留阶段的残留旧块去重丢弃。
 - 可以缩短活动历史窗口或 stage workset，仍是下一轮基线的合法收缩理由。
 - 不是 provider schema 刷新边界：若某次发送的收缩原因是 `stage_compaction` 而 `provider_tool_names` 变了，按 provider-bundle 刷新路径 bug 排查。
+- 压缩块的前缀标记与 JSON 字段语义（`G3KU_TOKEN_COMPACT_V2` / `G3KU_STAGE_COMPACT_V1` / `G3KU_STAGE_EXTERNALIZED_V1` / `G3KU_STAGE_RAW_V1`）详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」「压缩块的格式与字段语义」。
 
 ### Removed Semantic Summary Path
 

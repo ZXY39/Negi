@@ -202,6 +202,17 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - manual pause 与压缩的两条边界：压缩进行中暂停会丢弃迟到的压缩结果，下一可见轮从当前权威 baseline 重新走 prepare → estimate → 可选压缩 → send；若 turn 在最终 preflight 即将进入 `token_compression` 时暂停，下一 fresh turn 可从 pending shrink marker、或经上一 actual-request history 关联的后续内部 `token_compression` artifact 恢复 `frontdoor_history_shrink_reason=token_compression`——这是“压缩刚开始就暂停”的合法竞态解决路径，不是任意裁剪。
 - 完整压缩合同详见 `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」。
 
+### 4.5 压缩块的格式与字段语义
+
+两种压缩路径在 transcript 与 request artifact 里都落为**带前缀的单条 assistant 消息**：首行前缀标记，其后 `\n` 分隔的 JSON 元数据（`ensure_ascii=False, sort_keys=True` 序列化）；识别只需前缀匹配，不必解析 JSON。看到哪个前缀即判定归属哪条路径：
+
+- `[G3KU_TOKEN_COMPACT_V2]` — 内联 LLM 全局压缩。第二行 JSON 为 `{"kind":"frontdoor_token_compaction_llm","history_message_count":N}`，空行后接中文压缩摘要正文：模型直接继续阅读的自然语言会话内容，不是结构化数据，也不是 JSON。
+- `[G3KU_STAGE_COMPACT_V1]` — `stage_compaction` 生成的普通完成阶段块（工具肉身已剪掉）。元数据字段：`stage_index` / `stage_kind` / `system_generated` / `mode` / `status` / `stage_goal` / `completed_stage_summary` / `key_refs` / `tool_round_budget` / `tool_rounds_used`。不携带 `rounds` / `tools` 是有损设计的预期，不是数据缺失。
+- `[G3KU_STAGE_EXTERNALIZED_V1]` — 归档压缩阶段（`stage_kind="compression"`）块，比普通完成块多 `archive_ref` / `archive_stage_index_start` / `archive_stage_index_end`，同样无 round 数据。运行时不新产生归档阶段，持久化状态中出现即历史遗留数据。
+- `[G3KU_STAGE_RAW_V1]` — 保留阶段（最近 3 个完成普通阶段 + 活动阶段）的完整原始装载：`stage_id` / `preamble_text` / `created_at` / `finished_at` / `key_refs` / `rounds`，round 内含 `tools`（`tool_call_id` / `arguments` / `arguments_text` / `output_text` / `output_ref` / 时间戳等）。这是压缩后仍携带工具正文的唯一块类型。
+
+另有一套与消息块平行、作用于前端 canonical context 的表示系统：`representation: raw | compact | externalized`。`compact` / `externalized` 表示去掉 `rounds`；`raw` 保留 rounds 但按字数上限裁剪（`output_text ≤ 2000`、`arguments ≤ 2000`、`arguments_text ≤ 4000`、round `text ≤ 4000` 字符）。transcript 里看到 `"representation": "compact"` 但对等阶段又有完整 rounds，属旧版遗留对齐行为，不是重复数据。
+
 ## 5. 排查流程
 
 ### 5.1 先画时间线
