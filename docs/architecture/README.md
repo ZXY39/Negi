@@ -61,7 +61,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 3. Pointers name topics, never section numbers.
 4. Present tense only. No "now / no longer / previously / 现在 / 不再 / 曾经" — that is changelog language.
 5. Superseded text is deleted outright, never left as "obsolete notes".
-6. Word budgets: `runtime-overview` 9,000 / `web-and-admin` 8,500 / `tool-and-skill-system` 5,000 / `context-and-cache-troubleshooting` 4,000 / `operations-and-maintenance` 3,000 / `heartbeat-system` 2,600 / `config-and-models` 2,000 / `china-channels` 800. Over budget → condense before adding.
+6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 65 KB / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 51 KB / `operations-and-maintenance` 24 KB / `china-channels` 20 KB / `heartbeat-system` 19 KB / `config-and-models` 17 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
 
 ## Topic Ownership
 
