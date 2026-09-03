@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from loguru import logger
@@ -960,6 +961,11 @@ class ConfigChatBackend:
                             ),
                             "model_refs": list(refs),
                             "delay_seconds": float(delay_seconds or 0.0),
+                            # 绝对时刻（本地带偏移），供前端 toast 显示"最新重试时间/下次重试时间"。
+                            "last_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                            "next_retry_at": (
+                                datetime.now().astimezone() + timedelta(seconds=float(delay_seconds or 0.0))
+                            ).isoformat(timespec="seconds"),
                         }
                     )
                     await asyncio.sleep(delay_seconds)

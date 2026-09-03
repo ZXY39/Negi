@@ -2600,6 +2600,10 @@ function normalizeTaskNodeModelRetryStatus(value = null) {
         .map((item) => String(item || "").trim())
         .filter(Boolean);
     if (modelRefs.length) next.model_refs = modelRefs;
+    const lastRetryAt = String(value?.last_retry_at || "").trim();
+    if (lastRetryAt) next.last_retry_at = lastRetryAt;
+    const nextRetryAt = String(value?.next_retry_at || "").trim();
+    if (nextRetryAt) next.next_retry_at = nextRetryAt;
     return next;
 }
 
@@ -2608,8 +2612,15 @@ function taskNodeModelRetryToastText(status = null) {
     if (!normalized) return "";
     const count = Math.max(0, Number(normalized.retry_count || 0));
     const countText = count > 0 ? `第 ${count} 次重试` : "自动重试";
+    const parts = [countText];
+    // 时间戳后端已按本地带偏移下发，这里只取 HH:MM:SS 钟点显示。
+    const lastClock = (String(normalized.last_retry_at || "").match(/T(\d{2}:\d{2}:\d{2})/) || [])[1] || "";
+    if (lastClock) parts.push(`最新 ${lastClock}`);
+    const nextClock = (String(normalized.next_retry_at || "").match(/T(\d{2}:\d{2}:\d{2})/) || [])[1] || "";
+    if (nextClock) parts.push(`下次 ${nextClock}`);
     const errorText = String(normalized.error_message || "").trim();
-    const text = [countText, errorText].filter(Boolean).join(" · ");
+    if (errorText) parts.push(errorText);
+    const text = parts.filter(Boolean).join(" · ");
     const maxChars = typeof MODEL_RETRY_TOAST_MAX_TEXT_CHARS === "number"
         ? MODEL_RETRY_TOAST_MAX_TEXT_CHARS
         : 260;

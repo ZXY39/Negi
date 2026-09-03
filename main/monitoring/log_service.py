@@ -4885,6 +4885,11 @@ class TaskLogService:
             delay_seconds = 0.0
         if delay_seconds > 0:
             normalized['delay_seconds'] = delay_seconds
+        # 绝对重试时刻（本地带偏移 ISO），供前端 toast 显示"最新/下次重试时间"。
+        for time_key in ('last_retry_at', 'next_retry_at'):
+            time_text = _single_line_text(payload.get(time_key), max_chars=40)
+            if time_text:
+                normalized[time_key] = time_text
         return normalized
 
     @staticmethod

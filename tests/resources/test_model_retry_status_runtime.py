@@ -29,6 +29,8 @@ def _model_retry_payload(*, retry_count: int = 3) -> dict[str, object]:
         "error_message": "Error code: 429 - Server is busy",
         "model_refs": ["primary"],
         "delay_seconds": 1.2,
+        "last_retry_at": "2026-09-03T14:53:07+08:00",
+        "next_retry_at": "2026-09-03T14:55:07+08:00",
     }
 
 
@@ -51,6 +53,9 @@ async def test_runtime_session_exposes_live_model_retry_status() -> None:
     assert snapshot["model_retry_status"]["state"] == "retrying"
     assert snapshot["model_retry_status"]["retry_count"] == 3
     assert snapshot["model_retry_status"]["error_message"].startswith("Error code: 429")
+    # CEO 快照深拷贝整体透传，绝对重试时刻不被裁剪
+    assert snapshot["model_retry_status"]["last_retry_at"] == "2026-09-03T14:53:07+08:00"
+    assert snapshot["model_retry_status"]["next_retry_at"] == "2026-09-03T14:55:07+08:00"
 
 
 def test_task_runtime_frame_sanitizes_model_retry_status_for_websocket() -> None:
@@ -67,6 +72,9 @@ def test_task_runtime_frame_sanitizes_model_retry_status_for_websocket() -> None
     assert public_frame["model_retry_status"]["error_message"].startswith(
         "Error code: 429 - Server is busy"
     )
+    # task-node frame 净化器是白名单：绝对重试时刻必须被显式放行，否则到不了前端 toast
+    assert public_frame["model_retry_status"]["last_retry_at"] == "2026-09-03T14:53:07+08:00"
+    assert public_frame["model_retry_status"]["next_retry_at"] == "2026-09-03T14:55:07+08:00"
     assert TaskLogService._public_runtime_frame(
         {"node_id": "node:1", "model_retry_status": {"state": "cleared"}}
     )["model_retry_status"] is None

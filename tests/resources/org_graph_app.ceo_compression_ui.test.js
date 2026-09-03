@@ -156,6 +156,31 @@ test("model retry toast shows retry count and provider error from live inflight 
     assert.match(U.ceoModelRetryToastText.textContent, /Error code: 429/);
 });
 
+test("model retry toast shows last and next retry clock times", () => {
+    const { S, U, setCeoSessionSnapshotCache, syncCeoModelRetryToast } = loadApp();
+    S.activeSessionId = "web:test";
+    setCeoSessionSnapshotCache("web:test", {
+        inflight_turn: {
+            status: "running",
+            turn_id: "turn:retry",
+            model_retry_status: {
+                state: "retrying",
+                retry_count: 2,
+                error_message: "Error code: 429 - Server is busy",
+                last_retry_at: "2026-09-03T14:53:07+08:00",
+                next_retry_at: "2026-09-03T14:55:07+08:00",
+            },
+        },
+    });
+
+    syncCeoModelRetryToast();
+
+    const text = U.ceoModelRetryToastText.textContent;
+    assert.match(text, /第 2 次重试/);
+    assert.match(text, /最新 14:53:07/);
+    assert.match(text, /下次 14:55:07/);
+});
+
 test("model retry toast hides when live inflight retry state clears", () => {
     const { S, U, setCeoSessionSnapshotCache, syncCeoModelRetryToast } = loadApp();
     S.activeSessionId = "web:test";

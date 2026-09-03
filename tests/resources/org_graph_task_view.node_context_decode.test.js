@@ -153,6 +153,25 @@ test("task node retry toast renders live frame retry count and error", () => {
     assert.match(U.taskNodeModelRetryToastText.textContent, /Error code: 502/);
 });
 
+test("task node retry toast shows last and next retry clock times", () => {
+    const { renderTaskNodeModelRetryToast, U } = loadApp();
+
+    renderTaskNodeModelRetryToast({
+        model_retry_status: {
+            state: "retrying",
+            retry_count: 3,
+            error_message: "Error code: 502 - upstream request failed",
+            last_retry_at: "2026-09-03T14:53:07+08:00",
+            next_retry_at: "2026-09-03T14:56:07+08:00",
+        },
+    });
+
+    const text = U.taskNodeModelRetryToastText.textContent;
+    assert.match(text, /第 3 次重试/);
+    assert.match(text, /最新 14:53:07/);
+    assert.match(text, /下次 14:56:07/);
+});
+
 test("task node retry toast hides when live frame status is cleared", () => {
     const { renderTaskNodeModelRetryToast, U } = loadApp();
 
