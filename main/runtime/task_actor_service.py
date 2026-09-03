@@ -923,7 +923,7 @@ class TaskActorService:
                 remaining_work=[],
                 blocking_reason='missing root node',
             )
-        if str(final_acceptance.status or '').strip().lower() in {'waiting_acceptance', 'waiting_execution_retry'}:
+        if str(final_acceptance.status or '').strip().lower() in {'waiting_acceptance', 'waiting_execution_retry', 'waiting_block_verification'}:
             return self._result_from_node(root)
 
         existing_acceptance_node_id = str(final_acceptance.node_id or '').strip()

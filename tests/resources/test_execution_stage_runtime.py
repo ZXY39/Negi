@@ -1750,13 +1750,13 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
                 content='',
                 tool_calls=[
                     _final_result_call(
-                        status='failed',
-                        delivery_status='blocked',
+                        status='success',
+                        delivery_status='final',
                         summary='stop',
                         answer='',
-                        evidence=[],
+                        evidence=[{'kind': 'file', 'path': 'E:\\Program\\G3KU', 'note': 'listed'}],
                         remaining_work=[],
-                        blocking_reason='stop',
+                        blocking_reason='',
                     )
                 ],
                 finish_reason='tool_calls',
@@ -3179,6 +3179,26 @@ async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_pa
                     finish_reason='tool_calls',
                     usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
                 )
+            if self._turn == 6:
+                # blocked 核验节点：裁决阻塞成立，放行执行节点的主动失败
+                text = self._messages_text(kwargs)
+                assert 'failed+blocked' in text
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        _final_result_call(
+                            status='success',
+                            delivery_status='final',
+                            summary='阻塞成立：重复调用软拒后主动停止属于合理终止',
+                            answer='',
+                            evidence=[{'kind': 'artifact', 'note': 'verified duplicate-call soft reject'}],
+                            remaining_work=[],
+                            blocking_reason='',
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
             raise AssertionError(f'unexpected extra turn: {self._turn}')
 
     service = MainRuntimeService(
@@ -3226,6 +3246,8 @@ async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_pa
         assert task.status == 'failed'
         assert 'repeated tool call detected: exec' not in str(task.failure_reason or '')
         assert 'intentional stop after duplicate tool warning' in str(task.failure_reason or '')
+        # failed+blocked 经过阻塞核验放行，失败记录带核验标记
+        assert '[blocked核验]' in str(task.failure_reason or '')
     finally:
         await service.close()
 
@@ -3661,6 +3683,26 @@ async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path)
                     finish_reason='tool_calls',
                     usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
                 )
+            if self._turn == 7:
+                # blocked 核验节点：裁决阻塞成立，放行执行节点的主动失败
+                text = self._messages_text(kwargs)
+                assert 'failed+blocked' in text
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        _final_result_call(
+                            status='success',
+                            delivery_status='final',
+                            summary='阻塞成立：签名计数验证完成后的主动停止属于合理终止',
+                            answer='',
+                            evidence=[{'kind': 'artifact', 'note': 'verified per-signature counts'}],
+                            remaining_work=[],
+                            blocking_reason='',
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
             raise AssertionError(f'unexpected extra turn: {self._turn}')
 
     service = MainRuntimeService(
@@ -3708,5 +3750,7 @@ async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path)
         assert task.status == 'failed'
         assert 'intentional stop' in str(task.failure_reason or '')
         assert 'read-only repair guidance' not in str(task.failure_reason or '')
+        # failed+blocked 经过阻塞核验放行，失败记录带核验标记
+        assert '[blocked核验]' in str(task.failure_reason or '')
     finally:
         await service.close()

@@ -43,6 +43,7 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+    ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
 )
@@ -1068,7 +1069,10 @@ class TaskQueryService:
         if str(getattr(record, 'parent_node_id', '') or '').strip():
             if node_kind in {'execution', 'acceptance'} and status in {'success', 'failed'}:
                 parent_visible = False
-            elif node_kind == 'execution' and handshake_state == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
+            elif node_kind == 'execution' and handshake_state in {
+                ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+                ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
+            }:
                 parent_visible = False
         acceptance_display_phase = self._acceptance_display_phase(
             task=task,
@@ -1119,6 +1123,8 @@ class TaskQueryService:
             handshake_state = str(accepted_handshake.get('state') or '').strip()
             if handshake_state == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
                 return 'checking'
+            if handshake_state == ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION:
+                return 'checking'
             if handshake_state == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY:
                 return 'waiting_retry'
             if handshake_state == ACCEPTANCE_STATE_ACCEPTED:
@@ -1133,7 +1139,7 @@ class TaskQueryService:
                 final_status = str(final_acceptance.status or '').strip().lower()
                 if final_status in {'pending', ''}:
                     return 'inactive'
-                if final_status in {'running', ACCEPTANCE_STATE_WAITING_ACCEPTANCE}:
+                if final_status in {'running', ACCEPTANCE_STATE_WAITING_ACCEPTANCE, ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION}:
                     return 'checking'
                 if final_status == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY:
                     return 'waiting_retry'

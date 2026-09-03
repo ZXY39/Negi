@@ -5236,11 +5236,14 @@ class ReActToolLoop:
                 '验收节点不要使用 delivery_status="partial"。'
                 '如果你是在拒绝交付，返回 failed+final。'
                 '如果因为证据缺失、artifact 不可读或上下文不足而无法完成验收，返回 failed+blocked。'
+                '任何 failed 结论都不允许用于占位或敷衍；在阻塞核验模式下，"阻塞成立"的 success 裁决必须附带实际核验过的证据。'
             )
         return (
             '执行节点不要使用 delivery_status="partial"。'
             '如果任务实际上还没有完成，继续通过工具调用或阶段切换推进，而不是继续输出结果 JSON。'
             '只有在当前权限、环境和工具条件下确实被阻塞时，才返回 failed+blocked。'
+            'failed+blocked 会被验收节点独立核验，不成立的阻塞声明会被打回；'
+            '禁止用 failed 结果占位或逃避继续执行——只要预算未用尽且存在可行下一步，就必须继续推进。'
         )
 
     @staticmethod
@@ -5326,12 +5329,15 @@ class ReActToolLoop:
         if normalized_kind == 'acceptance':
             return (
                 f'Acceptance nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
-                'Use failed+final for a normal rejection, and failed+blocked only when verification is genuinely blocked.'
+                'Use failed+final for a normal rejection, and failed+blocked only when verification is genuinely blocked. '
+                'Never use a failed verdict as a placeholder; in blocked-verification mode a "blockage justified" success verdict must cite evidence you actually checked.'
             )
         return (
             f'Execution nodes must end through `{FINAL_RESULT_TOOL_NAME}`. '
             'Use success+final on completion, and use failed+blocked only when the node is genuinely blocked. '
-            'If work remains, continue with tools or `submit_next_stage` instead of finalizing.'
+            'If work remains, continue with tools or `submit_next_stage` instead of finalizing. '
+            'A failed+blocked claim is independently verified by an acceptance node and rejected claims are sent back; '
+            'never use a failed result as a placeholder or to escape remaining work while budget and a viable next step exist.'
         )
 
     @staticmethod
