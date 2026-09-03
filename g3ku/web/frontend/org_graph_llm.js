@@ -1,6 +1,6 @@
 (() => {
   const DEFAULT_RETRY_ON = ["network", "429"];
-  const DEFAULT_MAX_OUTPUT_TOKENS = 131072;
+  const DEFAULT_MAX_OUTPUT_TOKENS = 65536;
   const DEFAULT_REASONING_EFFORT = "medium";
   const REASONING_EFFORT_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"];
   const REASONING_EFFORT_LABELS = {

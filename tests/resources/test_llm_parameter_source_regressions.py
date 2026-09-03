@@ -1243,7 +1243,7 @@ def test_record_invalid_final_submission_error_log_captures_raw_truncation_info(
             tool_calls=[],
             finish_reason='stop',
             usage={'output_tokens': 120},
-            provider_request_body={'model': 'm', 'max_tokens': 131072},
+            provider_request_body={'model': 'm', 'max_tokens': 65536},
         ),
         response_tool_calls=[],
     )

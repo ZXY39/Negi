@@ -273,8 +273,8 @@ Runtime gating of image uploads by this flag: 详见 `web-and-admin.md`「Image 
 
 Per-model generation parameters (`max_tokens`, `temperature`, `reasoning_effort`) are resolved from the llm-config record's `parameters` and applied to every provider request.
 
-- `max_tokens` always resolves to an explicit value: the per-model `parameters.max_tokens` wins; when the record has none, the runtime falls back to the global default `DEFAULT_MAX_OUTPUT_TOKENS = 131072`. Requests therefore always carry an explicit output cap instead of inheriting the provider-side default (which can silently truncate long generations).
-- The engine-global `agents.defaults.maxTokens` (default `131072`) is the CEO-loop fallback; main-runtime nodes resolve per model through `_resolve_model_request_parameters` first.
+- `max_tokens` always resolves to an explicit value: the per-model `parameters.max_tokens` wins; when the record has none, the runtime falls back to the global default `DEFAULT_MAX_OUTPUT_TOKENS = 65536`. Requests therefore always carry an explicit output cap instead of inheriting the provider-side default (which can silently truncate long generations).
+- The engine-global `agents.defaults.maxTokens` (default `65536`) is the CEO-loop fallback; main-runtime nodes resolve per model through `_resolve_model_request_parameters` first.
 - `reasoning_effort` uses six managed levels: `none` (deep thinking disabled), `low`, `medium` (default), `high`, `xhigh`, `max`. Per-model `parameters.reasoning_effort` wins over the engine default.
 - `none` is a stored value but is never sent to the provider: every provider-facing layer (`chat_backend`, fallback chain, chat adapters, openai/responses providers) omits the `reasoning_effort` field when the resolved level is `none`.
 - The model config page stores both fields on the provider record (`parameters.max_tokens` / `parameters.reasoning_effort`), like `context_window_tokens`; the page contract lives in `web-and-admin.md`「Model Config Page And Admin Contract」.

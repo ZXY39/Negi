@@ -41,7 +41,7 @@ DEFAULT_NODE_DISPATCH_CONCURRENCY = {
     "inspection": 4,
 }
 
-DEFAULT_MAX_OUTPUT_TOKENS = 131072
+DEFAULT_MAX_OUTPUT_TOKENS = 65536
 VALID_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 DEFAULT_REASONING_EFFORT = "medium"
 

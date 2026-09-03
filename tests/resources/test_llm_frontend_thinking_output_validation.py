@@ -24,8 +24,8 @@ _BASE_EDITOR = {
     "initialContextWindowTokens": "30000",
     "reasoningEffort": "medium",
     "initialReasoningEffort": "medium",
-    "maxOutputTokens": "131072",
-    "initialMaxOutputTokens": "131072",
+    "maxOutputTokens": "65536",
+    "initialMaxOutputTokens": "65536",
     "validation": None,
     "probe": None,
     "memory": {"loading": False, "error": "", "embedding": {}, "rerank": {}},
@@ -56,7 +56,7 @@ def _run_node_script(editor_overrides: dict, input_overrides: dict | None = None
         "llm-binding-single-api-key-max-concurrency": {"value": ""},
         "llm-binding-context-window-tokens": {"value": "30000"},
         "llm-binding-reasoning-effort": {"value": "medium"},
-        "llm-binding-max-output-tokens": {"value": "131072"},
+        "llm-binding-max-output-tokens": {"value": "65536"},
     }
     inputs.update(input_overrides or {})
     editor = {**_BASE_EDITOR, **editor_overrides}
@@ -140,7 +140,7 @@ def test_binding_draft_payload_defaults_write_thinking_and_output_parameters() -
     assert result["message"] == ""
     parameters = result["payload"]["draft"]["parameters"]
     assert parameters["reasoning_effort"] == "medium"
-    assert parameters["max_tokens"] == 131072
+    assert parameters["max_tokens"] == 65536
     assert parameters["context_window_tokens"] == 30000
 
 
@@ -158,7 +158,7 @@ def test_binding_draft_payload_rejects_invalid_max_output_tokens() -> None:
         {"maxOutputTokens": "0"},
         {"llm-binding-max-output-tokens": {"value": "0"}},
     )
-    assert "131072" in result["html"]
+    assert "65536" in result["html"]
     assert "最大输出TOKEN" in str(result["message"])
 
 
@@ -285,14 +285,14 @@ def test_json_editor_missing_new_params_falls_back_to_defaults() -> None:
     result = _run_persistent_inputs_script({"context_window_tokens": 100000})
     assert result["message"] == ""
     assert result["reasoning"] == "medium"
-    assert result["maxTokens"] == "131072"
+    assert result["maxTokens"] == "65536"
 
 
 def test_opening_draft_normalization_injects_new_parameters() -> None:
     result = _run_persistent_inputs_script({"context_window_tokens": 100000})
     normalized = result["normalized"]
     assert normalized["parameters"]["reasoning_effort"] == "medium"
-    assert normalized["parameters"]["max_tokens"] == 131072
+    assert normalized["parameters"]["max_tokens"] == 65536
 
 
 def test_opening_draft_normalization_preserves_valid_values() -> None:
@@ -310,4 +310,4 @@ def test_opening_draft_normalization_repairs_invalid_values() -> None:
     )
     normalized = result["normalized"]
     assert normalized["parameters"]["reasoning_effort"] == "medium"
-    assert normalized["parameters"]["max_tokens"] == 131072
+    assert normalized["parameters"]["max_tokens"] == 65536
