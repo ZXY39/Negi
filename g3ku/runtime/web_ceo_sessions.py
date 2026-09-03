@@ -254,6 +254,11 @@ def is_prompt_visible_message(message: Any) -> bool:
     metadata = message_metadata(message)
     if metadata.get('history_visible') is False:
         return False
+    # 失败回合的内部提示词被翻成 discarded（见 session_agent._TRANSCRIPT_STATE_DISCARDED
+    # 与 _discard_internal_prompt_messages），不再进入可重放上下文。此处用字面量避免与
+    # session_agent 形成循环导入；键名/取值与之保持一致。
+    if str(metadata.get('_transcript_state') or '').strip().lower() == 'discarded':
+        return False
     return metadata.get('prompt_visible') is not False
 
 
@@ -486,12 +491,69 @@ def transcript_messages(session: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _message_content_text(value: Any) -> str:
+    if isinstance(value, dict):
+        content = value.get("content")
+    else:
+        content = getattr(value, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(str(block.get("text") or block.get("content") or ""))
+            else:
+                parts.append(str(block or ""))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _internal_prompt_kind(value: Any) -> str:
+    return str(message_metadata(value).get("internal_prompt_kind") or "").strip()
+
+
+def fold_internal_prompt_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """折叠重复的内部提示词消息（心跳/cron 的规则 system + 事件束 user）。
+
+    内部提示词每一轮都重新注入，历史副本对模型没有任何增量信息：同一事件的事件束
+    逐字节相同、规则文本也相同。实测单个失败会话里这类残骸可占请求上下文 ~39%
+    （10 份心跳规则 + 10 份事件束，去重后各只有 2~3 个不同版本）。
+
+    规则：同 ``(internal_prompt_kind, content)`` 的副本只保留**最后一份**，其余丢弃；
+    非内部提示词消息（普通 user/assistant/tool）原样保留、相对顺序不变。同一事件的
+    事件束渲染结果一致 → content 一致 → 天然按事件折叠；不同事件（节点/错误文本不同）
+    content 不同 → 各自保留最后一份。失败回合的内部提示词已在上游被翻成 discarded
+    并经 ``is_prompt_visible_message`` 排除，本函数只处理仍可见的成功回合残骸。
+    """
+    items = list(messages or [])
+    last_index: dict[tuple[str, str], int] = {}
+    for index, message in enumerate(items):
+        kind = _internal_prompt_kind(message)
+        if not kind:
+            continue
+        last_index[(kind, _message_content_text(message))] = index
+    if not last_index:
+        return items
+    drop: set[int] = set()
+    for index, message in enumerate(items):
+        kind = _internal_prompt_kind(message)
+        if not kind:
+            continue
+        if last_index.get((kind, _message_content_text(message))) != index:
+            drop.add(index)
+    if not drop:
+        return items
+    return [message for index, message in enumerate(items) if index not in drop]
+
+
 def prompt_history_messages(session: Any) -> list[dict[str, Any]]:
-    return [
+    visible = [
         item
         for item in list(getattr(session, 'messages', []) or [])
         if is_prompt_visible_message(item)
     ]
+    return fold_internal_prompt_history(visible)
 
 
 def extract_live_raw_tail_context(

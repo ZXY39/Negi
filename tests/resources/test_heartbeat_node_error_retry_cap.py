@@ -7,12 +7,13 @@ from types import SimpleNamespace
 from g3ku.heartbeat.session_service import (
     WebSessionHeartbeatService,
     _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES,
+    _NODE_ERROR_BACKOFF_BASE_SECONDS,
+    _NODE_ERROR_BACKOFF_CAP_SECONDS,
 )
 
 
 class _BoomPromptSession:
-    """Runtime session whose prompt() always fails, modeled after the
-    frontdoor_context_window_exceeded loop that broke china:qqbot:default:dm."""
+    """Runtime session whose prompt() always fails（模拟 provider 配额死掉、模型无响应）。"""
 
     def __init__(self) -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)
@@ -24,6 +25,21 @@ class _BoomPromptSession:
     async def prompt(self, user_input, persist_transcript: bool = True):
         self.prompt_calls += 1
         raise RuntimeError("boom")
+
+
+class _OkPromptSession:
+    """Runtime session whose prompt() succeeds（模型成功响应）。"""
+
+    def __init__(self) -> None:
+        self.state = SimpleNamespace(status="idle", is_running=False)
+        self.prompt_calls = 0
+
+    def subscribe(self, relay):
+        return lambda: None
+
+    async def prompt(self, user_input, persist_transcript: bool = True):
+        self.prompt_calls += 1
+        return SimpleNamespace(output="HEARTBEAT_OK")
 
 
 class _FakePersistedSession:
@@ -58,14 +74,60 @@ class _FakeSessionManager:
 
 
 class _FakeRuntimeManager:
-    def __init__(self, session: _BoomPromptSession) -> None:
+    def __init__(self, session) -> None:
         self._session = session
 
-    def get_or_create(self, **kwargs) -> _BoomPromptSession:
+    def get_or_create(self, **kwargs):
         return self._session
 
 
-def _build_service(tmp_path: Path) -> tuple[WebSessionHeartbeatService, _BoomPromptSession, _FakePersistedSession, list[str]]:
+class _FakeRetryStore:
+    """内存模拟 heartbeat_node_retry_state 表（按 node_id 持久计数）。"""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict] = {}
+
+    def get_heartbeat_node_retry_state(self, node_id: str):
+        row = self.rows.get(str(node_id or "").strip())
+        return dict(row) if row is not None else None
+
+    def record_heartbeat_node_failure(self, node_id, *, task_id="", session_id="", next_eligible_at="", escalated=False) -> int:
+        clean = str(node_id or "").strip()
+        if not clean:
+            return 0
+        existing = self.rows.get(clean) or {}
+        count = int(existing.get("consecutive_failures") or 0) + 1
+        self.rows[clean] = {
+            "node_id": clean,
+            "task_id": str(task_id or "").strip() or str(existing.get("task_id") or "").strip(),
+            "session_id": str(session_id or "").strip() or str(existing.get("session_id") or "").strip(),
+            "consecutive_failures": count,
+            "first_failure_at": str(existing.get("first_failure_at") or "2026-09-03T14:51:59+08:00"),
+            "last_attempt_at": "2026-09-03T14:52:00+08:00",
+            "next_eligible_at": str(next_eligible_at or "").strip(),
+            "escalated": 1 if (escalated or int(existing.get("escalated") or 0)) else 0,
+            "updated_at": "2026-09-03T14:52:00+08:00",
+        }
+        return count
+
+    def reset_heartbeat_node_retry_state(self, node_id: str) -> None:
+        self.rows.pop(str(node_id or "").strip(), None)
+
+
+def _node_error_item(node_id="node:85b3119ce0ac", task_id="task:26e64d1dc8b3", pause_row_id=34):
+    return {
+        "task_id": task_id,
+        "node_id": node_id,
+        "pause_row_id": pause_row_id,
+        "task_title": "日报任务",
+        "node_title": "日报节点",
+        "pause_reason": "error",
+        "error_text": "RuntimeError: Error:",
+        "dedupe_key": f"node-error:{task_id}:{node_id}:{pause_row_id}",
+    }
+
+
+def _build_service(tmp_path: Path, *, store=None):
     key = "china:qqbot:default:dm"
     prompts = _BoomPromptSession()
     persisted = _FakePersistedSession()
@@ -80,84 +142,134 @@ def _build_service(tmp_path: Path) -> tuple[WebSessionHeartbeatService, _BoomPro
         workspace=tmp_path,
         agent=SimpleNamespace(),
         runtime_manager=_FakeRuntimeManager(prompts),
-        main_task_service=SimpleNamespace(registry=None, store=None),
+        main_task_service=SimpleNamespace(registry=None, store=store),
         session_manager=_FakeSessionManager(persisted, exists_path),
         reply_notifier=_notify,
     )
     service._started = True
-    service.enqueue_task_node_error_payload(
-        key,
-        [
-            {
-                "task_id": "task:26e64d1dc8b3",
-                "node_id": "node:85b3119ce0ac",
-                "pause_row_id": 34,
-                "task_title": "日报任务",
-                "node_title": "日报节点",
-                "pause_reason": "error",
-                "error_text": "RuntimeError: Error:",
-                "dedupe_key": "node-error:task:26e64d1dc8b3:node:85b3119ce0ac:34",
-            }
-        ],
-    )
-    return service, prompts, persisted, notifier_texts
+    return service, prompts, persisted, notifier_texts, key
 
 
-def test_node_error_heartbeat_stops_after_consecutive_failures(tmp_path: Path) -> None:
-    service, prompts, persisted, notifier_texts = _build_service(tmp_path)
-    key = "china:qqbot:default:dm"
+def _backoff_sequence(n: int) -> list[float]:
+    return [
+        min(_NODE_ERROR_BACKOFF_CAP_SECONDS, _NODE_ERROR_BACKOFF_BASE_SECONDS * (2.0 ** (i - 1)))
+        for i in range(1, n + 1)
+    ]
 
-    returns = [asyncio.run(service._run_session(key)) for _ in range(_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES)]
 
-    # 前 N-1 次失败返回 10 秒继续重试；第 N 次放弃并出队，唤醒循环终止（None）。
-    assert returns == [10.0] * (_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES - 1) + [None]
-    assert prompts.prompt_calls == _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
-    # 事件已出队，不再重投。
-    assert service._events.peek_ready(key) == []
-    # 连续失败计数已清零（下次新事件重新获得完整预算）。
-    assert service._task_node_error_failure_streaks.get(key) is None
-    # 用户收到一条可见的放弃说明，而非静默空转。
+def test_persisted_count_backs_off_and_escalates_at_cap(tmp_path: Path) -> None:
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=store)
+    service.enqueue_task_node_error_payload(key, [_node_error_item()])
+
+    cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+    returns = [asyncio.run(service._run_session(key)) for _ in range(cap)]
+
+    # 退避 1→2→4→5→5 分钟，事件不出队（持续按退避重投，不再"放弃即停"）。
+    assert returns == _backoff_sequence(cap)
+    assert prompts.prompt_calls == cap
+    assert service._events.peek_ready(key) != []
+    # 持久计数累积到上限、未在 give-up 时清零。
+    assert store.rows["node:85b3119ce0ac"]["consecutive_failures"] == cap
+    assert store.rows["node:85b3119ce0ac"]["escalated"] == 1
+    # 刚跨入上限时落一条请用户裁决的可见说明（升级文案，非旧"避免反复打扰"）。
     assert len(notifier_texts) == 1
-    assert "不再自动重试" in notifier_texts[0]
+    assert f"连续 {cap} 次无法启动" in notifier_texts[0]
+    assert "是否判为失败让任务继续进行" in notifier_texts[0]
     assert "task:26e64d1dc8b3" in notifier_texts[0]
-    # 说明以 heartbeat 来源持久化进转录。
     assistant_messages = [m for m in persisted.messages if m.get("role") == "assistant"]
     assert len(assistant_messages) == 1
-    assert assistant_messages[0]["metadata"]["reason"] == "task_node_error_give_up"
+    assert assistant_messages[0]["metadata"]["reason"] == "task_node_error_escalation"
 
 
-def test_node_error_streak_resets_on_success(tmp_path: Path) -> None:
-    service, prompts, persisted, notifier_texts = _build_service(tmp_path)
-    key = "china:qqbot:default:dm"
+def test_escalation_emitted_once_not_every_failure(tmp_path: Path) -> None:
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=store)
+    service.enqueue_task_node_error_payload(key, [_node_error_item()])
 
-    assert asyncio.run(service._run_session(key)) == 10.0
-    assert asyncio.run(service._run_session(key)) == 10.0
-    assert service._task_node_error_failure_streaks.get(key) == 2
+    cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+    for _ in range(cap + 2):  # 跨过上限后再失败两次
+        asyncio.run(service._run_session(key))
 
-    # 任意一次成功回合（换一个不抛错的 prompt 会话）都应清零计数。
-    class _OkPromptSession:
-        def __init__(self) -> None:
-            self.state = SimpleNamespace(status="idle", is_running=False)
+    # 计数继续累积（6、7），但升级说明只在跨入上限那次落一次，不每轮刷屏。
+    assert store.rows["node:85b3119ce0ac"]["consecutive_failures"] == cap + 2
+    assert len(notifier_texts) == 1
+    # 退避封顶 5 分钟。
+    assert service._events.peek_ready(key) != []
 
-        def subscribe(self, relay):
-            return lambda: None
 
-        async def prompt(self, user_input, persist_transcript: bool = True):
-            return SimpleNamespace(output="HEARTBEAT_OK")
+def test_repause_same_node_does_not_reopen_budget(tmp_path: Path) -> None:
+    """节点重新暂停（新 pause_row_id、同 node_id）不重开预算——计数按 node 持久累积。"""
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=store)
+    service.enqueue_task_node_error_payload(key, [_node_error_item(pause_row_id=34)])
 
-    prompts.state = SimpleNamespace(status="idle", is_running=False)
-    service._runtime_manager = _FakeRuntimeManager(_OkPromptSession())
-    service._started = True
-    service.enqueue_task_node_error_payload(
-        key,
-        [
-            {
-                "task_id": "task:26e64d1dc8b3",
-                "node_id": "node:85b3119ce0ac",
-                "pause_row_id": 35,
-                "dedupe_key": "node-error:task:26e64d1dc8b3:node:85b3119ce0ac:35",
-            }
-        ],
-    )
+    cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+    for _ in range(cap):
+        asyncio.run(service._run_session(key))
+    assert store.rows["node:85b3119ce0ac"]["consecutive_failures"] == cap
+
+    # 模拟节点被 resume 后再次失败：新的 pause 行（不同 pause_row_id），同 node_id。
+    service.enqueue_task_node_error_payload(key, [_node_error_item(pause_row_id=99)])
     asyncio.run(service._run_session(key))
-    assert service._task_node_error_failure_streaks.get(key) is None
+    # 计数从持久值继续（cap+1），而非重开为 1。
+    assert store.rows["node:85b3119ce0ac"]["consecutive_failures"] == cap + 1
+
+
+def test_successful_turn_resets_persisted_count(tmp_path: Path) -> None:
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=store)
+    service.enqueue_task_node_error_payload(key, [_node_error_item()])
+
+    asyncio.run(service._run_session(key))  # 失败 1
+    asyncio.run(service._run_session(key))  # 失败 2
+    assert store.rows["node:85b3119ce0ac"]["consecutive_failures"] == 2
+
+    # 模型成功响应（换一个不抛错的 prompt 会话）→ 清零该 node 的持久计数。
+    service._runtime_manager = _FakeRuntimeManager(_OkPromptSession())
+    asyncio.run(service._run_session(key))
+    assert store.get_heartbeat_node_retry_state("node:85b3119ce0ac") is None
+
+
+def test_per_node_count_isolation(tmp_path: Path) -> None:
+    """计数按 node 独立：递增/清零只影响对应 node，不串到别的 node（取代旧的按 session 单计数）。"""
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=store)
+
+    def ev(node_id, pause_row_id=1):
+        return SimpleNamespace(
+            reason="task_node_error",
+            payload={"node_id": node_id, "task_id": "task:x"},
+            event_id=f"{node_id}:{pause_row_id}",
+            dedupe_key=f"node-error:task:x:{node_id}:{pause_row_id}",
+        )
+
+    node_a, node_b = "node:aaaaaaaa", "node:bbbbbbbb"
+    service._record_node_error_failures([ev(node_a)], key)
+    service._record_node_error_failures([ev(node_a)], key)
+    assert store.rows[node_a]["consecutive_failures"] == 2
+    service._record_node_error_failures([ev(node_b)], key)
+    assert store.rows[node_b]["consecutive_failures"] == 1
+    assert store.rows[node_a]["consecutive_failures"] == 2  # A 不受 B 影响
+
+    # 同一批里同一 node 的多个事件只递增一次。
+    service._record_node_error_failures([ev(node_a, 1), ev(node_a, 2)], key)
+    assert store.rows[node_a]["consecutive_failures"] == 3
+
+    # 清零只作用于本批事件涉及的 node。
+    service._reset_node_error_retry_state([ev(node_b)], key)
+    assert store.get_heartbeat_node_retry_state(node_b) is None
+    assert store.rows[node_a]["consecutive_failures"] == 3  # A 保留
+
+
+def test_in_memory_fallback_when_store_unavailable(tmp_path: Path) -> None:
+    """store 不可用时退回内存计数保底，仍按退避重投、达上限升级。"""
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=None)
+    service.enqueue_task_node_error_payload(key, [_node_error_item()])
+
+    cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+    returns = [asyncio.run(service._run_session(key)) for _ in range(cap)]
+    assert returns == _backoff_sequence(cap)
+    assert service._task_node_error_failure_streaks.get(key) == cap
+    assert len(notifier_texts) == 1
+    assert "是否判为失败让任务继续进行" in notifier_texts[0]

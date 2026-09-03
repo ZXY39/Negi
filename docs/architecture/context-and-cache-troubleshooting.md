@@ -148,7 +148,7 @@ Memory guard 维护要点：
 Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_heartbeat` 通道，而是把隐藏 internal prompt 消息追加到普通 turn 共用的 session-owned `frontdoor_request_body_messages` / actual-request scaffold 上。
 
 - 坑：把 heartbeat shrink/缓存差异解释成“现在是另一条 prompt 通道”；或把内部 heartbeat artifact 直接提升为新的 durable baseline。
-- 不变量：heartbeat/cron 请求变短必须由 `token_compression` 或 `stage_compaction` 解释；隐藏的 heartbeat 规则与 event-bundle 消息是 durable prompt history，应出现在 actual-request artifact、completed continuity sidecar 与 prompt assembly 中（UI 以 `ui_visible=false` 隐藏）。若候选 body 以 heartbeat 文本为主、明显劣于现有 baseline 且无合法 shrink reason，视为被拦截的 baseline 覆盖，内部请求只作 forensics-only 证据。
+- 不变量：heartbeat/cron 请求变短必须由 `token_compression` 或 `stage_compaction` 解释；隐藏的 heartbeat 规则与 event-bundle 消息是 durable prompt history，应出现在 actual-request artifact、completed continuity sidecar 与 prompt assembly 中（UI 以 `ui_visible=false` 隐藏）——其中失败回合的内部提示词被标 `discarded` 排除、重复的按内容折叠，详见「heartbeat / cron 上下文残骸」。若候选 body 以 heartbeat 文本为主、明显劣于现有 baseline 且无合法 shrink reason，视为被拦截的 baseline 覆盖，内部请求只作 forensics-only 证据。
 - 冷启动边界：内部事件消息只有在存在真实续跑基线时才并入续跑种子；无基线的内部轮（重启后首轮、全新会话首轮）必须走新建组装路径注入内部消息，基础系统提示保持首位。绝不能让仅有的内部事件消息冒充"完整旧请求体"触发续跑分支——续跑分支假定种子自带基础系统提示，会把基础提示静默丢掉，表现为内部轮模型行为失范、看不到人设/规则。
 - 症状：把上一真实请求与新的 heartbeat/cron 请求作 append-only 续接比较时出现大面积前缀断裂——通常说明 baseline 恢复、tool-schema seeding 或压缩发生了变化，而不是 runtime 切到了单独通道。
 
@@ -157,6 +157,13 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 坑：手动暂停终止的回合把用户消息以 `_transcript_state=paused` 写进转录；暂停回合不会再走回合完成路径，缺少退役路径时条目一直卡在 paused。对账在每个回合 prepare 阶段把它补到种子尾部——紧邻当前用户消息、中间没有任何助手回复——轮末回写后嵌进基线；`token_compression` 把它改写掉，下一轮对账又重新补到新请求尾部。同一条问题以“从未被回答的用户提问”形态在请求尾部反复出现，诱导模型重复处理早已回答过的问题。
 - 不变量：残留 paused 条目随下一个用户可见回合正常完成被对账退役一次；运行时错误路径不退役（出错回合的请求体未必完成基线回写，提前退役会让对账停止补发、用户消息从模型上下文永久消失）。退役与对账的完整生命周期见「Baseline 合同与恢复顺序」。
 - 症状：连续多轮 actual request artifact 里同一条历史用户消息反复出现在请求体尾部，紧邻当前轮用户消息且前后都没有助手回复；模型重复处理或批量补答早已回答过的历史问题，甚至把多条这样的消息合并成一条虚构的用户请求。
+
+### 3.12 heartbeat / cron 上下文残骸
+
+- 坑：内部提示词（心跳规则 system + event-bundle user）在模型调用前就以 `completed` 落盘；回合失败时事件不出队、被反复重投，于是每轮请求体多堆一份相同规则+bundle。一个配额耗尽的心跳会话可累积到 10 份规则（去重后 2）+ 10 份 bundle（去重后 3），占请求上下文约 39%，且其中可能含早已 success 的节点的过期暂停通知。
+- 不变量：失败回合的内部提示词在错误路径按 turn id + `internal_prompt_kind` 翻成 `_transcript_state=discarded`，`is_prompt_visible_message` 将 `discarded` 排除出 prompt assembly（jsonl 行保留供审计）。仍可见的内部提示词在 `prompt_history_messages` → `fold_internal_prompt_history` 里按 `(internal_prompt_kind, content)` 只保留最后一份。两者都在构建 provider 上下文时生效，不改写 append-only 的 jsonl。当前轮自己的 bundle 由 user_input 注入、不受折叠影响；折叠用 keep-last 保证最新事件仍落在请求体末尾。
+- 取证：在 actual-request JSON 的 `request_messages` 里统计 `role=system 且 content 以 "This is a background heartbeat" 开头` 与 `role=user 且 content 以 "[SESSION EVENTS]" 开头` 的副本数与去重后唯一数；健康状态是规则 1 份、每种 distinct 事件 bundle 各 1 份。`provider_request_body` 为空时以 `request_messages` 为准。
+- 症状：同一份 event bundle / heartbeat 规则在一个请求体里出现多份；token 估算逐轮近似线性上涨而对话无实质推进；模型对同一暂停节点反复反应，或被过期通知误导去处理已完成的节点。
 
 ## 4. Prompt Cache Family 与 Actual Request
 

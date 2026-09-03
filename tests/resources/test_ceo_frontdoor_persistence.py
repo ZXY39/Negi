@@ -2477,3 +2477,77 @@ def test_persist_frontdoor_request_survives_pruning_failure(
     assert Path(record["path"]).exists()
 
 
+def _internal_prompt_message(role: str, content: str, kind: str, *, state: str = "completed") -> dict:
+    return {
+        "role": role,
+        "content": content,
+        "metadata": {
+            "internal_prompt_kind": kind,
+            "prompt_visible": True,
+            "ui_visible": False,
+            "source": "heartbeat",
+            "_transcript_state": state,
+        },
+    }
+
+
+def test_fold_internal_prompt_history_collapses_duplicates_keeping_last() -> None:
+    rule = "This is a background heartbeat. # Heartbeat Rules"
+    bundle_a = "[SESSION EVENTS] node:aaaa error A"
+    bundle_b = "[SESSION EVENTS] node:bbbb error B"
+    messages: list[dict] = []
+    for _ in range(4):
+        messages.append(_internal_prompt_message("system", rule, "heartbeat_rule"))
+        messages.append(_internal_prompt_message("user", bundle_a, "heartbeat_event_bundle"))
+    messages.append({"role": "assistant", "content": "我恢复了节点", "metadata": {}})
+    for _ in range(5):
+        messages.append(_internal_prompt_message("system", rule, "heartbeat_rule"))
+        messages.append(_internal_prompt_message("user", bundle_b, "heartbeat_event_bundle"))
+
+    folded = web_ceo_sessions.fold_internal_prompt_history(messages)
+
+    kinds = [m["metadata"].get("internal_prompt_kind") for m in folded if m.get("metadata")]
+    # 9 份相同规则折叠为 1；两种不同事件束各保留最后一份；助手消息原样保留
+    assert kinds.count("heartbeat_rule") == 1
+    assert kinds.count("heartbeat_event_bundle") == 2
+    assert sum(1 for m in folded if m["role"] == "assistant") == 1
+    # keep-last：最新事件（bundle_b）位于末尾，当前轮提示词不被前移
+    assert folded[-1]["content"] == bundle_b
+    # 非内部消息相对顺序不变（assistant 仍在 bundle_a 之后、bundle_b 之前）
+    contents = [m["content"] for m in folded]
+    assert contents.index(bundle_a) < contents.index("我恢复了节点") < contents.index(bundle_b)
+
+
+def test_is_prompt_visible_message_excludes_discarded_state() -> None:
+    discarded = _internal_prompt_message("user", "[SESSION EVENTS] stale", "heartbeat_event_bundle", state="discarded")
+    completed = _internal_prompt_message("user", "[SESSION EVENTS] live", "heartbeat_event_bundle", state="completed")
+    assert web_ceo_sessions.is_prompt_visible_message(discarded) is False
+    assert web_ceo_sessions.is_prompt_visible_message(completed) is True
+
+
+def test_prompt_history_messages_drops_discarded_and_folds_internal_prompts() -> None:
+    rule = "This is a background heartbeat. # Heartbeat Rules"
+    live_bundle = "[SESSION EVENTS] node:live error"
+    stale_bundle = "[SESSION EVENTS] node:stale error"
+    session = SimpleNamespace(messages=[
+        # 失败回合：规则 + 事件束被翻成 discarded，应整体排除
+        _internal_prompt_message("system", rule, "heartbeat_rule", state="discarded"),
+        _internal_prompt_message("user", stale_bundle, "heartbeat_event_bundle", state="discarded"),
+        # 成功回合：规则 + 事件束 completed，应保留并折叠
+        _internal_prompt_message("system", rule, "heartbeat_rule"),
+        _internal_prompt_message("user", live_bundle, "heartbeat_event_bundle"),
+        {"role": "assistant", "content": "处理完成", "metadata": {}},
+        # 又一次成功回合：相同规则/事件束，折叠后只留最后一份
+        _internal_prompt_message("system", rule, "heartbeat_rule"),
+        _internal_prompt_message("user", live_bundle, "heartbeat_event_bundle"),
+    ])
+
+    history = web_ceo_sessions.prompt_history_messages(session)
+
+    contents = [m["content"] for m in history]
+    assert stale_bundle not in contents  # discarded 被排除
+    assert contents.count(rule) == 1  # 规则折叠为 1
+    assert contents.count(live_bundle) == 1  # 同一事件束折叠为 1
+    assert "处理完成" in contents  # 助手消息保留
+
+

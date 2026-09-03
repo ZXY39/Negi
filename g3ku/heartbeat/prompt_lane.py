@@ -44,6 +44,30 @@ def _int_value(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def format_local_timestamp(value: Any) -> str:
+    """把 ISO 时间戳渲染为本地带偏移格式，供提示词展示。
+
+    stall 等内部时间戳在上游被规范化为 UTC（`task_stall_notifier._parse_iso`
+    强制 ``astimezone(timezone.utc)``），而会话其余时间戳是本地偏移；两者混用会让
+    模型对"已经等了多久 / 下次何时可重试"算错（实测 bundle 里出现 ``+00:00`` 而
+    会话其他时间是 ``+08:00``）。这里统一转成本地带偏移格式再注入提示词。
+
+    解析失败、空值或 naive（无 tzinfo）时间戳一律原样返回，绝不臆造偏移。
+    """
+    text = _non_empty_text(value)
+    if not text or text.lower() == "unknown":
+        return text or "unknown"
+    from datetime import datetime
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        return text
+    return parsed.astimezone().isoformat(timespec="seconds")
+
+
 def _tool_background_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list[str]:
     tool_name = _non_empty_text(event.get("tool_name")) or "tool"
     execution_id = _non_empty_text(event.get("execution_id"))
@@ -99,7 +123,7 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
     brief_text = _non_empty_text(event.get("brief_text")) or "No task summary."
     latest_node_summary = _non_empty_text(event.get("latest_node_summary")) or "No latest node summary."
     runtime_excerpt = _non_empty_text(event.get("runtime_summary_excerpt")) or "No runtime summary."
-    last_visible_output_at = _non_empty_text(event.get("last_visible_output_at")) or "unknown"
+    last_visible_output_at = format_local_timestamp(event.get("last_visible_output_at"))
     _append_retrieval_parts(
         retrieval_parts,
         "task_stall",

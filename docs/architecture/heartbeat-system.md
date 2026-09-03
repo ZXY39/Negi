@@ -31,7 +31,8 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 
 ## Persistence And UI Boundary
 
-- Hidden heartbeat/cron rule + event-bundle messages are durable prompt history. They should participate in later prompt assembly, request artifacts, completed continuity sidecars, and compression just like any other prompt-visible message.
+- Hidden heartbeat/cron rule + event-bundle messages are durable prompt history. They participate in later prompt assembly, request artifacts, completed continuity sidecars, and compression just like any other prompt-visible message.
+- A failed internal turn's rule + event-bundle messages are flipped to `_transcript_state=discarded` (matched by turn id + `internal_prompt_kind`) and excluded from replay; the jsonl rows are kept for audit. Duplicate still-visible internal prompts are folded at context-build time. Both keep a quota-dead or chatty heartbeat from stacking duplicate rules/bundles into every later request body — mechanism and forensics in `context-and-cache-troubleshooting.md`「heartbeat / cron 上下文残骸」.
 - Transcript views, session preview text, message counts, and `snapshot.ceo.messages` hide internal prompt messages by filtering `ui_visible=false` — never by assuming internal turns are transcript-hidden.
 - Heartbeat/cron assistant replies, tool calls, tool results, and stage/compression traces remain ordinary visible turn output unless the turn ends with the silent `HEARTBEAT_OK` ACK path.
 - Manual pause during a running heartbeat/cron turn goes through the ordinary `client.pause_turn` path; the backend treats that internal turn as the current active turn, not a side lane.
@@ -79,7 +80,10 @@ Cron job delivery is claim-before-dispatch, which defines the restart/recovery g
 - It groups rows by source session and enqueues `task_node_error` items with task/node identity, error text, reason, remark, and dedupe key `node-error:{task_id}:{node_id}:{pause_row_id}`.
 - It marks a row `delivered` only after enqueue accepts the payload. Failed enqueue retries on the next scan; delivered rows are not resent after restart.
 - `prompt_lane` renders the event as a decision to use `manage_task_nodes` for resume, keep-paused-with-remark, fail, or related-node pause. Tool validation belongs to the tool contract; delivery belongs here.
-- A heartbeat turn that fails before finishing does not pop its events, so the wake queue re-delivers them. For `task_node_error` events failures are bounded per session: after 3 consecutive failed turns the events are dequeued and a visible give-up reply is persisted + notified (the node stays paused for the user or a later turn); any successful turn resets the streak. Debugging "node error heartbeats retry forever": the scanner enqueues each pause row only once — suspect queue/streak interaction.
+- A heartbeat turn that fails before finishing does not pop its events, so the wake queue re-delivers them. `task_node_error` failures are bounded by a **per-node persisted counter** (`heartbeat_node_retry_state` table, keyed by `node_id`; survives restart and node re-pause). Re-delivery backs off 1→2→4→5→5 minutes (the run returns the backoff as its wake delay). The counter is reset only when a turn for that node gets a successful model response — give-up does **not** reset it, so a re-paused node continues from its persisted count instead of reopening a fresh budget.
+- After 5 consecutive failures the node enters escalation: events stay queued and keep retrying at the 5-minute cap, a visible "these nodes failed 5 times — fail them to let the task continue?" reply is emitted once when the cap is crossed (this is the model-unavailable fallback, since the escalation directive injected into later deliveries only reaches the user once the model can respond), and the node stays paused for the user or a later turn to decide.
+- Non-`task_node_error` failures (stall / tool_background / task_terminal) are bounded too: a per-`(session, reasons)` counter with the same backoff dequeues the batch after the cap, replacing the old unbounded fixed-interval re-delivery.
+- Debugging "node error heartbeats retry forever": the scanner enqueues each pause row only once — suspect the per-node counter / backoff interaction, not the scanner.
 
 ## What Heartbeat Does Not Own
 

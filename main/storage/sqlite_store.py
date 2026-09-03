@@ -156,6 +156,19 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS heartbeat_node_retry_state (
+                node_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                first_failure_at TEXT NOT NULL DEFAULT '',
+                last_attempt_at TEXT NOT NULL DEFAULT '',
+                next_eligible_at TEXT NOT NULL DEFAULT '',
+                escalated INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS task_error_logs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -786,6 +799,69 @@ class SQLiteTaskStore:
             )
             for row in rows
         ]
+
+    def get_heartbeat_node_retry_state(self, node_id: str) -> dict[str, Any] | None:
+        """读取某节点的心跳重试状态（连续失败计数 / 退避 / 升级标记）。"""
+        clean_node = str(node_id or '').strip()
+        if not clean_node:
+            return None
+        row = self._fetchone(
+            'SELECT node_id, task_id, session_id, consecutive_failures, first_failure_at, '
+            'last_attempt_at, next_eligible_at, escalated, updated_at '
+            'FROM heartbeat_node_retry_state WHERE node_id = ?',
+            (clean_node,),
+        )
+        return dict(row) if row is not None else None
+
+    def record_heartbeat_node_failure(
+        self,
+        node_id: str,
+        *,
+        task_id: str = '',
+        session_id: str = '',
+        next_eligible_at: str = '',
+        escalated: bool = False,
+    ) -> int:
+        """递增节点连续失败计数并写入下次可重试时间；返回递增后的计数。
+
+        与旧的内存 streak 不同：**give-up 不清零**——计数按 node 持久累积，只有
+        `reset_heartbeat_node_retry_state`（模型成功响应）才清零。这样节点重新暂停
+        （同 node_id，pause 行 upsert）不会重开预算。
+        """
+        clean_node = str(node_id or '').strip()
+        if not clean_node:
+            return 0
+        now = datetime.now().astimezone().isoformat(timespec='microseconds')
+        existing = self.get_heartbeat_node_retry_state(clean_node) or {}
+        count = int(existing.get('consecutive_failures') or 0) + 1
+        first_failure_at = str(existing.get('first_failure_at') or '').strip() or now
+        self._upsert(
+            'heartbeat_node_retry_state',
+            [
+                'node_id', 'task_id', 'session_id', 'consecutive_failures',
+                'first_failure_at', 'last_attempt_at', 'next_eligible_at', 'escalated', 'updated_at',
+            ],
+            [
+                clean_node,
+                str(task_id or '').strip() or str(existing.get('task_id') or '').strip(),
+                str(session_id or '').strip() or str(existing.get('session_id') or '').strip(),
+                count,
+                first_failure_at,
+                now,
+                str(next_eligible_at or '').strip() or str(existing.get('next_eligible_at') or '').strip(),
+                1 if (escalated or int(existing.get('escalated') or 0)) else 0,
+                now,
+            ],
+            'node_id',
+        )
+        return count
+
+    def reset_heartbeat_node_retry_state(self, node_id: str) -> None:
+        """模型成功响应该节点事件后清零计数（删除状态行，下次从 0 起算）。"""
+        clean_node = str(node_id or '').strip()
+        if not clean_node:
+            return
+        self._execute_write('DELETE FROM heartbeat_node_retry_state WHERE node_id = ?', (clean_node,))
 
     def upsert_task_runtime_meta(self, *, task_id: str, updated_at: str, payload: dict[str, object]) -> None:
         payload_json = json.dumps(payload)

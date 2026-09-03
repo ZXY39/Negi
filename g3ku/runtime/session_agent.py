@@ -36,6 +36,16 @@ _TRANSCRIPT_STATE_KEY = "_transcript_state"
 _TRANSCRIPT_STATE_PENDING = "pending"
 _TRANSCRIPT_STATE_PAUSED = "paused"
 _TRANSCRIPT_STATE_COMPLETED = "completed"
+# 回合失败时把本轮已落盘的内部提示词（心跳/cron 的规则 system + 事件束 user）翻成
+# discarded，使其退出后续可重放上下文。这些消息在模型调用前就写盘（见
+# _persist_internal_prompt_messages），失败回合若不回收会在每一轮请求体里反复堆积
+# （实测单会话累积到占上下文 38.8%）。原始 jsonl 行保留，仅改 metadata 状态。
+_TRANSCRIPT_STATE_DISCARDED = "discarded"
+# _internal_prompt_message_metadata 写入的内部提示词种类；翻转 discarded 时按此匹配，
+# 避免误伤同 turn 的助手错误行（其 metadata 无 internal_prompt_kind）。
+_INTERNAL_PROMPT_KINDS = frozenset(
+    {"heartbeat_rule", "heartbeat_event_bundle", "cron_rule", "cron_event_bundle"}
+)
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 _ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS = 0.075
 
@@ -1216,6 +1226,51 @@ class RuntimeAgentSession:
             logger.debug(
                 "Completed {} lingering paused transcript user message(s) for {}",
                 flipped,
+                self._state.session_key,
+            )
+        return flipped
+
+    def _discard_internal_prompt_messages(self, persisted_session: Any, turn_id: str) -> int:
+        """把指定 turn 的内部提示词消息（心跳/cron 规则 system + 事件束 user）翻成 discarded。
+
+        这些消息在模型调用前就由 `_persist_internal_prompt_messages` 以 completed 落盘；
+        回合失败时若不回收，会在之后每一轮请求体里反复堆积。翻成 discarded 后
+        `is_prompt_visible_message` 会将其排除出可重放上下文（jsonl 原始行保留以备审计）。
+
+        只匹配带 `internal_prompt_kind` 的内部提示词行，避免误伤同 turn 的助手错误行。
+        """
+        resolved_turn_id = str(turn_id or "").strip()
+        if not resolved_turn_id:
+            return 0
+        messages = getattr(persisted_session, "messages", None)
+        if not isinstance(messages, list):
+            return 0
+        flipped = 0
+        for index, raw in enumerate(list(messages)):
+            if not isinstance(raw, dict):
+                continue
+            metadata = raw.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip() != resolved_turn_id:
+                continue
+            if str(metadata.get("internal_prompt_kind") or "").strip() not in _INTERNAL_PROMPT_KINDS:
+                continue
+            if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() == _TRANSCRIPT_STATE_DISCARDED:
+                continue
+            updated = dict(raw)
+            updated_metadata = dict(metadata)
+            updated_metadata[_TRANSCRIPT_STATE_KEY] = _TRANSCRIPT_STATE_DISCARDED
+            updated["metadata"] = updated_metadata
+            messages[index] = updated
+            flipped += 1
+        if flipped:
+            if hasattr(persisted_session, "updated_at"):
+                persisted_session.updated_at = datetime.now()
+            logger.debug(
+                "Discarded {} internal prompt transcript message(s) for failed turn {} ({})",
+                flipped,
+                resolved_turn_id,
                 self._state.session_key,
             )
         return flipped
@@ -3059,7 +3114,7 @@ class RuntimeAgentSession:
                 }
                 if cron_internal:
                     assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
-                await self._persist_turn_transcript(
+                persisted_session = await self._persist_turn_transcript(
                     user_input=user_input,
                     user_text=user_text,
                     assistant_text=error_reply,
@@ -3068,6 +3123,15 @@ class RuntimeAgentSession:
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                     assistant_metadata=assistant_metadata,
                 )
+                # 失败回合：回收本轮已落盘的内部提示词（心跳/cron 规则 system + 事件束
+                # user），翻成 discarded 使其退出后续可重放上下文，避免反复堆积。助手错误
+                # 行不带 internal_prompt_kind，不会被误伤；jsonl 原始行保留以备审计。
+                if persisted_session is not None and internal_source is not None:
+                    self._discard_internal_prompt_messages(
+                        persisted_session,
+                        self._current_turn_id(user_input),
+                    )
+                    self._loop.sessions.save(persisted_session)
             await self._emit(
                 "error",
                 code=error.code,

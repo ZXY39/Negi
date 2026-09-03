@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -12,7 +12,7 @@ from loguru import logger
 from g3ku.china_bridge.session_keys import normalize_account_id, parse_china_session_key
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
-from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane, format_local_timestamp
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.frontdoor.canonical_context import ui_canonical_context_delta
@@ -48,11 +48,14 @@ _TASK_TERMINAL_OUTPUT_INLINE_LIMIT = TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
 _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT = 5
 _TASK_TERMINAL_INVALID_OUTPUT_LABEL = "<empty>"
 _HANDLED_TERMINAL_DEDUPE_KEYS_MAX = 16
-# task_node_error 事件没有用户可见的终态（节点仍停在 pause 状态），失败回合会
-# 被唤醒队列无限重投；这里为同一会话的连续失败加一个有界上限，达到后事件出队
-# 并落一条可见说明，而不是永远静默重试。上限保持小值，正常偶发失败（例如
-# provider 瞬时故障）远够重试到；只有"每轮必挂"的死循环会被终止。
-_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES = 3
+# task_node_error 事件没有用户可见的终态（节点仍停在 pause 状态），失败回合会被唤醒
+# 队列重投。计数改为**按 node 持久化**（heartbeat_node_retry_state 表，跨进程重启、跨
+# 节点重新暂停累积；只有模型成功响应才清零），连续失败达到上限后进入"升级"：仍按退避
+# 重投，但提示词强制模型向用户报告，由用户决定是否判失败让任务继续。退避从 1 分钟起
+# 翻倍、封顶 5 分钟（< stall 首桶 20 分钟，不会制造新的 stall 循环）。
+_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES = 5
+_NODE_ERROR_BACKOFF_BASE_SECONDS = 60.0
+_NODE_ERROR_BACKOFF_CAP_SECONDS = 300.0
 
 
 @lru_cache(maxsize=1)
@@ -120,6 +123,10 @@ class WebSessionHeartbeatService:
         self._task_terminal_rejection_reasons: dict[str, str] = {}
         self._node_error_scanner = None
         self._task_node_error_failure_streaks: dict[str, int] = {}
+        # 非 node_error 事件失败的内存计数保底（键为 (session_key, reasons)）。node_error
+        # 路径已改为按 node 持久计数（heartbeat_node_retry_state 表），本字典仅用于
+        # stall/tool_background/task_terminal 等无 node 维度事件的有界退避（计划 2.2）。
+        self._non_node_error_failure_streaks: dict[tuple[str, tuple[str, ...]], int] = {}
 
     async def start(self) -> None:
         if self._started:
@@ -678,6 +685,186 @@ class WebSessionHeartbeatService:
             "你可以直接回复让我继续处理，或在任务面板对该节点执行 resume/fail 操作。"
         )
 
+    @staticmethod
+    def _task_node_error_escalation_text(events: list[SessionHeartbeatEvent]) -> str:
+        """连续失败达到上限后向用户报告、请其裁决的文案（取代旧的"避免反复打扰"放弃文案）。"""
+        task_ids: list[str] = []
+        node_lines: list[str] = []
+        seen_nodes: set[str] = set()
+        for event in list(events or []):
+            if str(event.reason or "").strip().lower() != "task_node_error":
+                continue
+            payload = dict(event.payload or {})
+            task_id = str(payload.get("task_id") or "").strip()
+            node_id = str(payload.get("node_id") or "").strip()
+            if task_id and task_id not in task_ids:
+                task_ids.append(task_id)
+            if node_id and node_id not in seen_nodes:
+                seen_nodes.add(node_id)
+                node_title = str(payload.get("node_title") or "").strip() or node_id
+                node_lines.append(f"  - {node_id}：{node_title}")
+        joined_tasks = "、".join(task_ids) or "未知任务"
+        nodes_block = "\n".join(node_lines) or "  - 未知节点"
+        return (
+            f"这些节点已经连续 {_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES} 次无法启动，"
+            f"是否判为失败让任务继续进行？任务：{joined_tasks}。这些节点的任务分别为：\n{nodes_block}\n"
+            "你可以回复让我继续重试、或判失败让父流程继续，也可在任务面板对节点执行 resume/fail。"
+        )
+
+    def _heartbeat_node_retry_store(self) -> Any:
+        return getattr(self._main_task_service, "store", None)
+
+    @staticmethod
+    def _node_error_backoff_seconds(consecutive_failures: int) -> float:
+        """退避：1→2→4→5→5 分钟（翻倍封顶 5 分钟）。"""
+        count = max(1, int(consecutive_failures or 1))
+        delay = _NODE_ERROR_BACKOFF_BASE_SECONDS * (2.0 ** (count - 1))
+        return min(_NODE_ERROR_BACKOFF_CAP_SECONDS, delay)
+
+    def _record_node_error_failures(self, events: list[SessionHeartbeatEvent], session_key: str) -> tuple[int, float, bool]:
+        """按 node 持久递增连续失败计数，返回 (本批最大计数, 应退避秒数, 是否刚跨入升级)。
+
+        store 不可用时退回内存计数保底（不阻断重投）。计数**不因 give-up 清零**，只有
+        `_reset_node_error_retry_state`（模型成功响应）才清零。"刚跨入升级"仅在本次递增
+        使某节点从 <上限 跨到 >=上限 时为真，用于让运行时通知只落一次、不每轮刷屏。
+        """
+        node_error_events = self._task_node_error_events(events)
+        store = self._heartbeat_node_retry_store()
+        record = getattr(store, "record_heartbeat_node_failure", None)
+        get_state = getattr(store, "get_heartbeat_node_retry_state", None)
+        cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+        if not callable(record):
+            streak = int(self._task_node_error_failure_streaks.get(session_key, 0)) + 1
+            self._task_node_error_failure_streaks[session_key] = streak
+            return streak, self._node_error_backoff_seconds(streak), streak == cap
+        max_count = 0
+        max_delay = _NODE_ERROR_BACKOFF_BASE_SECONDS
+        just_escalated = False
+        seen_nodes: set[str] = set()
+        for event in node_error_events:
+            payload = dict(event.payload or {})
+            node_id = str(payload.get("node_id") or "").strip()
+            task_id = str(payload.get("task_id") or "").strip()
+            if not node_id or node_id in seen_nodes:
+                # 同一批里同一 node 可能有多个事件（重新暂停时旧事件尚未出队），
+                # 每个 node 每轮只递增一次，避免重复计数。
+                continue
+            seen_nodes.add(node_id)
+            # 先读现有计数，算出递增后的计数与退避，再单次写入（record 内部会 +1，
+            # 故这里预读的 existing 仅用于计算 next_eligible_at / escalated / 跨入判定）。
+            existing_count = 0
+            if callable(get_state):
+                try:
+                    existing = get_state(node_id) or {}
+                    existing_count = int(existing.get("consecutive_failures") or 0)
+                except Exception:
+                    existing_count = 0
+            new_count = existing_count + 1
+            delay = self._node_error_backoff_seconds(new_count)
+            next_eligible_at = (datetime.now().astimezone() + timedelta(seconds=delay)).isoformat(timespec="seconds")
+            try:
+                count = int(record(
+                    node_id,
+                    task_id=task_id,
+                    session_id=session_key,
+                    next_eligible_at=next_eligible_at,
+                    escalated=new_count >= cap,
+                ) or 0)
+            except Exception:
+                logger.debug("record_heartbeat_node_failure failed for {}", node_id)
+                count = new_count
+            if existing_count < cap <= new_count:
+                just_escalated = True
+            max_count = max(max_count, count or new_count)
+            max_delay = max(max_delay, delay)
+        if max_count == 0:
+            # 事件里没有可用 node_id，退回内存计数保底
+            streak = int(self._task_node_error_failure_streaks.get(session_key, 0)) + 1
+            self._task_node_error_failure_streaks[session_key] = streak
+            return streak, self._node_error_backoff_seconds(streak), streak == cap
+        self._task_node_error_failure_streaks.pop(session_key, None)
+        return max_count, max_delay, just_escalated
+
+    def _reset_node_error_retry_state(self, events: list[SessionHeartbeatEvent], session_key: str) -> None:
+        """模型成功响应该批事件后，按 node 粒度清零持久计数（不影响其他节点）。"""
+        self._task_node_error_failure_streaks.pop(session_key, None)
+        store = self._heartbeat_node_retry_store()
+        reset = getattr(store, "reset_heartbeat_node_retry_state", None)
+        if not callable(reset):
+            return
+        for event in self._task_node_error_events(events):
+            node_id = str((event.payload or {}).get("node_id") or "").strip()
+            if not node_id:
+                continue
+            try:
+                reset(node_id)
+            except Exception:
+                logger.debug("reset_heartbeat_node_retry_state failed for {}", node_id)
+
+    async def _emit_node_error_escalation(
+        self,
+        key: str,
+        node_error_events: list[SessionHeartbeatEvent],
+        persisted_session: Any,
+        heartbeat_turn_id: str,
+    ) -> None:
+        """连续失败达到上限时，落一条请用户裁决的可见说明（只在刚跨入升级时调用一次）。
+
+        这是"模型不可用"时的兜底通知——升级提示词（prompt_lane）要等模型能响应才生效，
+        而本条由运行时直接发出，配额死掉时也能让用户看到节点卡住、需要裁决。
+        """
+        escalation_text = self._task_node_error_escalation_text(node_error_events)
+        previous_canonical_context = latest_assistant_message_canonical_context(
+            persisted_session,
+            exclude_turn_id=heartbeat_turn_id,
+        )
+        reply_already_persisted = self._persist_assistant_reply(
+            key,
+            text=escalation_text,
+            task_ids=[str((event.payload or {}).get("task_id") or "").strip() for event in node_error_events],
+            reason="task_node_error_escalation",
+            turn_id=heartbeat_turn_id,
+        )
+        if not reply_already_persisted:
+            self._publish_ceo(
+                key,
+                "ceo.reply.final",
+                self._build_heartbeat_final_payload(
+                    key,
+                    text=escalation_text,
+                    turn_id=heartbeat_turn_id,
+                    previous_canonical_context=previous_canonical_context,
+                ),
+            )
+        await self._notify_reply(key, escalation_text)
+
+    def _handle_non_node_error_failure(self, key: str, events: list[SessionHeartbeatEvent]) -> float | None:
+        """非 node_error 事件（stall/tool_background/task_terminal）失败时的有界退避（计划 2.2）。
+
+        旧实现是固定 `return 10.0` 无限重投。这里改为按 (session, reasons) 计数 + 退避
+        1→5min，连续达到上限后出队本批事件、停止重投，避免无 node_error 时的无限循环。
+        """
+        reasons = tuple(sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events}))
+        streak_key = (key, reasons)
+        streak = int(self._non_node_error_failure_streaks.get(streak_key, 0)) + 1
+        self._non_node_error_failure_streaks[streak_key] = streak
+        cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+        if streak < cap:
+            return self._node_error_backoff_seconds(streak)
+        self._non_node_error_failure_streaks.pop(streak_key, None)
+        event_ids = {event.event_id for event in events}
+        popped = self._events.pop_many(key, event_ids=event_ids)
+        self._ack_task_terminal_events(popped)
+        self._ack_task_stall_events(popped)
+        logger.warning(
+            "heartbeat non-node-error give up after {} consecutive failures for {} ({})",
+            streak,
+            key,
+            ", ".join(reasons),
+        )
+        remaining_events = self._events.peek_ready(key)
+        return self._node_error_backoff_seconds(1) if remaining_events else None
+
     def _build_prompt(
         self,
         events: list[SessionHeartbeatEvent],
@@ -778,7 +965,7 @@ class WebSessionHeartbeatService:
                 brief_text = str(payload.get("brief_text") or "").strip() or "No task summary."
                 latest_node_summary = str(payload.get("latest_node_summary") or "").strip() or "No latest node summary."
                 runtime_excerpt = str(payload.get("runtime_summary_excerpt") or "").strip() or "No runtime summary."
-                last_visible_output_at = str(payload.get("last_visible_output_at") or "").strip() or "unknown"
+                last_visible_output_at = format_local_timestamp(payload.get("last_visible_output_at"))
                 if stall_reason == TASK_STALL_REASON_USER_PAUSED:
                     lines.append(f"- Task {title} ({task_id}) was paused by the user")
                     lines.append("  Reason: user_paused")
@@ -1318,57 +1505,40 @@ class WebSessionHeartbeatService:
             self._publish_ceo(key, "ceo.turn.discard", {"source": "heartbeat"})
             node_error_events = self._task_node_error_events(events)
             if not node_error_events:
-                return 10.0
-            # task_node_error 事件在回合失败时不会出队，唤醒队列会无限重投；
-            # 连续失败达到上限后出队并落一条可见说明，把重试从无限变成有界。
-            streak = int(self._task_node_error_failure_streaks.get(key, 0)) + 1
-            self._task_node_error_failure_streaks[key] = streak
-            if streak < _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES:
-                return 10.0
-            self._task_node_error_failure_streaks.pop(key, None)
-            node_error_event_ids = {event.event_id for event in node_error_events}
-            popped = self._events.pop_many(key, event_ids=node_error_event_ids)
-            self._ack_task_terminal_events(popped)
-            self._ack_task_stall_events(popped)
-            give_up_text = self._task_node_error_give_up_text(node_error_events)
-            previous_canonical_context = latest_assistant_message_canonical_context(
-                persisted_session,
-                exclude_turn_id=heartbeat_turn_id,
-            )
-            reply_already_persisted = self._persist_assistant_reply(
-                key,
-                text=give_up_text,
-                task_ids=[str((event.payload or {}).get("task_id") or "").strip() for event in node_error_events],
-                reason="task_node_error_give_up",
-                turn_id=heartbeat_turn_id,
-            )
-            if not reply_already_persisted:
-                self._publish_ceo(
+                # 非 node_error 事件失败：有界退避（计划 2.2），不再固定 10s 无限重投。
+                return self._handle_non_node_error_failure(key, events)
+            # task_node_error 事件失败时不出队；改为按 node 持久计数 + 退避 1→5min 控制重投
+            # 节奏。计数 give-up 不清零，只有模型成功响应才清零（见下方成功路径）。达到上限
+            # 进入升级：刚跨入时落一条请用户裁决的可见说明，事件仍保留按退避重投，后续投递
+            # 会带升级提示词强制模型向用户报告（prompt_lane）。
+            count, delay, just_escalated = self._record_node_error_failures(node_error_events, key)
+            if just_escalated:
+                await self._emit_node_error_escalation(
                     key,
-                    "ceo.reply.final",
-                    self._build_heartbeat_final_payload(
-                        key,
-                        text=give_up_text,
-                        turn_id=heartbeat_turn_id,
-                        previous_canonical_context=previous_canonical_context,
-                    ),
+                    node_error_events,
+                    persisted_session,
+                    heartbeat_turn_id,
                 )
-            await self._notify_reply(key, give_up_text)
             logger.warning(
-                "heartbeat node-error give up after {} consecutive failures for {} ({})",
-                streak,
+                "heartbeat node-error retry: {} consecutive failure(s) for {} ({}), backoff {:.0f}s{}",
+                count,
                 key,
                 ", ".join(sorted(str(event.dedupe_key or "") for event in node_error_events)),
+                delay,
+                " [escalated]" if count >= _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES else "",
             )
-            remaining_events = self._events.peek_ready(key)
-            return 10.0 if remaining_events else None
+            return delay
         finally:
             unsubscribe()
 
         output = str(getattr(result, "output", "") or "").strip()
-        # 回合成功完成即清零 node-error 连续失败计数（任何一次成功都重新获得
-        # 完整的重试预算，只有"每轮必挂"的连续失败才会触发放弃路径）。
-        self._task_node_error_failure_streaks.pop(key, None)
+        # 模型成功响应本批事件 → 按 node 粒度清零持久连续失败计数（不是按 session 全清，
+        # 避免别的节点的成功抹掉本节点的累计失败）。同时清非 node_error 内存计数。
+        self._reset_node_error_retry_state(events, key)
+        self._non_node_error_failure_streaks.pop(
+            (key, tuple(sorted({str(event.reason or "").strip().lower() or "heartbeat" for event in events}))),
+            None,
+        )
         task_terminal_events = self._task_terminal_events(events)
         repair_attempt = 0
         repair_failed = False
