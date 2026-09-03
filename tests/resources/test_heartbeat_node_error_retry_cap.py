@@ -273,3 +273,48 @@ def test_in_memory_fallback_when_store_unavailable(tmp_path: Path) -> None:
     assert service._task_node_error_failure_streaks.get(key) == cap
     assert len(notifier_texts) == 1
     assert "是否判为失败让任务继续进行" in notifier_texts[0]
+
+
+def test_enrich_event_payload_adds_retry_state_and_previous_errors(tmp_path: Path) -> None:
+    """2.4：事件束注入按 node 的重试状态 + 历史错误（去重、newest first、≤3 条）。"""
+    store = _FakeRetryStore()
+    store.list_task_node_error_logs = lambda task_id, node_id: [
+        SimpleNamespace(error_text="old error A", created_at="2026-09-03T14:50:00+08:00"),
+        SimpleNamespace(error_text="old error A", created_at="2026-09-03T14:50:30+08:00"),  # 重复文本
+        SimpleNamespace(error_text="old error B", created_at="2026-09-03T14:51:00+08:00"),
+    ]
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=store)
+    cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+    for _ in range(cap):
+        store.record_heartbeat_node_failure("node:n", task_id="task:t", session_id=key)
+
+    ev = SimpleNamespace(
+        reason="task_node_error",
+        payload={"task_id": "task:t", "node_id": "node:n", "node_title": "N", "error_text": "boom"},
+        event_id="e1",
+        dedupe_key="node-error:task:t:node:n:1",
+    )
+    payload = service._enrich_event_payload_for_lane(ev)
+
+    assert payload["event_reason"] == "task_node_error"
+    assert payload["retry_attempt"] == cap
+    assert payload["retry_cap"] == cap
+    assert payload["retry_escalated"] is True
+    # 历史错误去重 + newest first（list_task_node_error_logs 返回 seq ASC，注入时 reversed）
+    assert [p["text"] for p in payload["previous_errors"]] == ["old error B", "old error A"]
+
+
+def test_enrich_event_payload_passthrough_for_non_node_error(tmp_path: Path) -> None:
+    """非 task_node_error 事件不富化，原样透传 payload + event_reason。"""
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(tmp_path, store=store)
+    ev = SimpleNamespace(
+        reason="task_stall",
+        payload={"task_id": "task:t", "stalled_minutes": 20},
+        event_id="e2",
+        dedupe_key="task-stall:t",
+    )
+    payload = service._enrich_event_payload_for_lane(ev)
+    assert payload["event_reason"] == "task_stall"
+    assert "retry_attempt" not in payload
+    assert payload["stalled_minutes"] == 20

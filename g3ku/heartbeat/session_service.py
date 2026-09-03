@@ -664,28 +664,6 @@ class WebSessionHeartbeatService:
         ]
 
     @staticmethod
-    def _task_node_error_give_up_text(events: list[SessionHeartbeatEvent]) -> str:
-        task_ids: list[str] = []
-        node_ids: list[str] = []
-        for event in list(events or []):
-            if str(event.reason or "").strip().lower() != "task_node_error":
-                continue
-            payload = dict(event.payload or {})
-            task_id = str(payload.get("task_id") or "").strip()
-            node_id = str(payload.get("node_id") or "").strip()
-            if task_id and task_id not in task_ids:
-                task_ids.append(task_id)
-            if node_id and node_id not in node_ids:
-                node_ids.append(node_id)
-        joined_tasks = "、".join(task_id for task_id in task_ids if task_id) or "未知任务"
-        joined_nodes = "、".join(node_id for node_id in node_ids if node_id) or "未知节点"
-        return (
-            f"后台任务节点出错自动暂停后，我连续尝试了 {_TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES} 次都没能完成处理，"
-            f"为避免反复打扰，暂不再自动重试。任务：{joined_tasks}；节点：{joined_nodes}。"
-            "你可以直接回复让我继续处理，或在任务面板对该节点执行 resume/fail 操作。"
-        )
-
-    @staticmethod
     def _task_node_error_escalation_text(events: list[SessionHeartbeatEvent]) -> str:
         """连续失败达到上限后向用户报告、请其裁决的文案（取代旧的"避免反复打扰"放弃文案）。"""
         task_ids: list[str] = []
@@ -800,6 +778,62 @@ class WebSessionHeartbeatService:
                 reset(node_id)
             except Exception:
                 logger.debug("reset_heartbeat_node_retry_state failed for {}", node_id)
+
+    def _enrich_event_payload_for_lane(self, event: SessionHeartbeatEvent) -> dict[str, Any]:
+        """给事件 payload 附上重试状态，供 prompt_lane 渲染进事件束（计划 2.4）。
+
+        对 task_node_error 事件，从 heartbeat_node_retry_state 读连续失败计数/时间戳，从
+        task_error_logs（复用 d87ba2eb 的 list_task_node_error_logs）读历史错误，让模型知道
+        "这是第几次、上次何时、下次何时可重试、之前报过什么"，而不是每轮都以为是第一次。
+        store 不可用或读取失败时静默跳过富化（事件束退回原始渲染，不阻断投递）。
+        """
+        payload = {**dict(event.payload or {}), "event_reason": str(event.reason or "").strip()}
+        if str(event.reason or "").strip().lower() != "task_node_error":
+            return payload
+        node_id = str(payload.get("node_id") or "").strip()
+        task_id = str(payload.get("task_id") or "").strip()
+        if not node_id:
+            return payload
+        store = self._heartbeat_node_retry_store()
+        cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+        state: dict[str, Any] = {}
+        get_state = getattr(store, "get_heartbeat_node_retry_state", None)
+        if callable(get_state):
+            try:
+                state = dict(get_state(node_id) or {})
+            except Exception:
+                state = {}
+        attempt = int(state.get("consecutive_failures") or 0)
+        payload["retry_attempt"] = attempt
+        payload["retry_cap"] = cap
+        payload["retry_last_attempt_at"] = format_local_timestamp(state.get("last_attempt_at"))
+        payload["retry_next_eligible_at"] = format_local_timestamp(state.get("next_eligible_at"))
+        payload["retry_escalated"] = bool(attempt >= cap or int(state.get("escalated") or 0))
+        list_logs = getattr(store, "list_task_node_error_logs", None)
+        if callable(list_logs) and task_id:
+            try:
+                logs = list(list_logs(task_id, node_id) or [])
+            except Exception:
+                logs = []
+            previous: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for record in reversed(logs):
+                text = str(getattr(record, "error_text", "") or "").strip()
+                if not text:
+                    continue
+                dedupe = text[:120]
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                previous.append({
+                    "at": format_local_timestamp(getattr(record, "created_at", "")),
+                    "text": text[:300],
+                })
+                if len(previous) >= 3:
+                    break
+            if previous:
+                payload["previous_errors"] = previous
+        return payload
 
     async def _emit_node_error_escalation(
         self,
@@ -1374,13 +1408,7 @@ class WebSessionHeartbeatService:
         heartbeat_lane = build_heartbeat_prompt_lane(
             provider_model="",
             stable_rules_text=stable_rules_text,
-            events=[
-                {
-                    **dict(event.payload or {}),
-                    "event_reason": str(event.reason or "").strip(),
-                }
-                for event in events
-            ],
+            events=[self._enrich_event_payload_for_lane(event) for event in events],
         )
         # 事件束只包含 [SESSION EVENTS] 段；稳定规则由 heartbeat_stable_rules_text
         # 作为独立 system 消息注入，二者不合并，避免同一回合把规则重复喂给模型。

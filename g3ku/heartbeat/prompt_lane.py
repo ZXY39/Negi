@@ -185,10 +185,44 @@ def _task_node_error_lines(event: dict[str, Any], retrieval_parts: list[str], *,
         f'  Node: {node_title} ({node_id})',
         f'  Pause reason: {pause_reason}',
         f'  Error: {error_text}',
-        '  Use manage_task_nodes to resume, keep_paused with a reason, fail, or pause related nodes as appropriate.',
     ]
     if len(error_text) > output_inline_limit:
         lines[3] = f'  Error excerpt: {error_text[:output_inline_limit].rstrip()}...'
+    # 重试状态：让模型知道这是第几次失败、上次/下次时间，而不是误以为每次都是第一次。
+    # 数据由 session_service 从 heartbeat_node_retry_state 表 + task_error_logs 注入。
+    failed = _int_value(event.get('retry_attempt'), 0)
+    cap = _int_value(event.get('retry_cap'), 0)
+    escalated = bool(event.get('retry_escalated'))
+    if failed >= 1:
+        state_bits = [f'consecutive_failures={failed}' + (f'/{cap}' if cap else '')]
+        last_at = _non_empty_text(event.get('retry_last_attempt_at'))
+        next_at = _non_empty_text(event.get('retry_next_eligible_at'))
+        if last_at and last_at != 'unknown':
+            state_bits.append(f'last_attempt_at={last_at}')
+        if next_at and next_at != 'unknown':
+            state_bits.append(f'next_eligible_at={next_at}')
+        lines.append(f'  Retry state: {" | ".join(state_bits)}')
+        previous_errors = [item for item in list(event.get('previous_errors') or []) if isinstance(item, dict)]
+        if previous_errors:
+            lines.append('  Previous errors (newest first, deduped):')
+            for item in previous_errors:
+                text = _non_empty_text(item.get('text'))
+                if not text:
+                    continue
+                at = _non_empty_text(item.get('at'))
+                prefix = f'[{at}] ' if at and at != 'unknown' else ''
+                lines.append(f'    - {prefix}{text}')
+    if escalated:
+        # 连续失败达上限：强制模型向用户报告并请其裁决，而不是继续静默重试。
+        times = cap or failed
+        lines.append(
+            f'  ESCALATION: 该节点已连续 {times} 次无法启动、自动恢复失败。'
+            '你**必须**现在向用户报告并请求裁决，不要继续静默重试。建议措辞：'
+            f'"这些节点已经连续 {times} 次无法启动，是否判为失败让任务继续进行？这些节点的任务分别为……"。'
+            '在用户决定前用 manage_task_nodes 的 keep_paused 保持暂停，并在 remark 写明等待用户裁决。'
+        )
+    else:
+        lines.append('  Use manage_task_nodes to resume, keep_paused with a reason, fail, or pause related nodes as appropriate.')
     return lines
 
 
