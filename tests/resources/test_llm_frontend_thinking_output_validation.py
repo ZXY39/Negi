@@ -178,3 +178,136 @@ def test_thinking_output_fields_render_six_levels() -> None:
     assert 'id="llm-binding-max-output-tokens"' in html
     for level in ("none", "low", "medium", "high", "xhigh", "max"):
         assert f'value="{level}"' in html
+
+def _run_persistent_inputs_script(json_parameters: dict, extra_hooks: str = "") -> dict:
+    """Drive handleBindingJsonEditorInput against mutable input stubs."""
+    script = f"""
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.window.addEventListener = () => {{}};
+        const inputs = {{}};
+        const makeInput = (value) => ({{ value: String(value ?? "") }});
+        [
+          "llm-model-key-input", "llm-provider-select", "llm-json-editor",
+          "llm-binding-retry-on", "llm-binding-retry-count",
+          "llm-binding-single-api-key-max-concurrency",
+          "llm-binding-context-window-tokens",
+          "llm-binding-reasoning-effort", "llm-binding-max-output-tokens",
+          "llm-binding-base-url", "llm-binding-api-key", "llm-binding-default-model",
+          "llm-binding-image-multimodal-enabled",
+        ].forEach((id) => {{ inputs[id] = makeInput(""); }});
+        inputs["llm-json-editor"].value = JSON.stringify({{
+          provider_id: "demo", capability: "chat", auth_mode: "api_key",
+          api_key: "k", default_model: "m",
+          parameters: {json.dumps(json_parameters)},
+          extra_headers: {{}}, extra_options: {{}},
+        }});
+        inputs["llm-provider-select"].value = "demo";
+        global.document = {{
+          getElementById: (id) => inputs[id] || null,
+          querySelector: () => null,
+          addEventListener: () => {{}},
+        }};
+        global.S = {{
+          modelCatalog: {{}},
+          llmCenter: {{
+            loading: false, saving: false, error: "",
+            templates: [], templateMap: {{}}, templateDetailMap: {{}},
+            bindings: [], bindingMap: {{}}, routes: {{}},
+            roleIterations: {{}}, roleConcurrency: {{}},
+            editor: {json.dumps(_BASE_EDITOR)},
+            eventsBound: false,
+          }},
+        }};
+        global.U = {{}};
+        global.ApiClient = {{}};
+        global.showToast = () => {{}};
+        global.esc = (value) => String(value ?? "");
+        global.EMPTY_MODEL_ROLES = () => ({{ ceo: [], execution: [], inspection: [] }});
+        global.DEFAULT_ROLE_ITERATIONS = () => ({{ ceo: null, execution: null, inspection: null }});
+        global.DEFAULT_ROLE_CONCURRENCY = () => ({{ ceo: null, execution: null, inspection: null }});
+        global.DEFAULT_MODEL_DEFAULTS = () => ({{ ceo: "", execution: "", inspection: "" }});
+        global.normalizeAllModelRoles = (value) => value;
+        global.normalizeRoleIterations = (value) => value;
+        global.normalizeRoleConcurrency = (value) => value;
+        global.cloneModelRoles = (value) => value;
+        global.cloneRoleIterations = (value) => value;
+        global.cloneRoleConcurrency = (value) => value;
+        global.syncModelRoleDraftState = () => {{}};
+        global.hint = () => {{}};
+        global.setDrawerOpen = () => {{}};
+        global.icons = () => {{}};
+        global.enhanceResourceSelects = () => {{}};
+        global.syncResourceSelectUI = () => {{}};
+        let code = fs.readFileSync("g3ku/web/frontend/org_graph_llm.js", "utf8");
+        vm.runInThisContext(code);
+
+        const hooks = window.__llmTestHooks;
+        let message = "";
+        try {{
+          hooks.handleBindingJsonEditorInput();
+        }} catch (error) {{
+          message = error.message || String(error);
+        }}
+        console.log(JSON.stringify({{
+          message,
+          reasoning: inputs["llm-binding-reasoning-effort"].value,
+          maxTokens: inputs["llm-binding-max-output-tokens"].value,
+          normalized: hooks.withThinkingOutputParameterDefaults({{
+            provider_id: "demo",
+            parameters: {json.dumps(json_parameters)},
+          }}),
+        }}));
+        """
+    completed = subprocess.run(
+        ["node", "-"],
+        input=textwrap.dedent(script),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+        cwd=REPO_ROOT,
+    )
+    return json.loads(completed.stdout.strip())
+
+
+def test_json_editor_edits_sync_form_reasoning_and_max_tokens() -> None:
+    result = _run_persistent_inputs_script(
+        {"context_window_tokens": 100000, "reasoning_effort": "high", "max_tokens": 20000}
+    )
+    assert result["message"] == ""
+    assert result["reasoning"] == "high"
+    assert result["maxTokens"] == "20000"
+
+
+def test_json_editor_missing_new_params_falls_back_to_defaults() -> None:
+    result = _run_persistent_inputs_script({"context_window_tokens": 100000})
+    assert result["message"] == ""
+    assert result["reasoning"] == "medium"
+    assert result["maxTokens"] == "131072"
+
+
+def test_opening_draft_normalization_injects_new_parameters() -> None:
+    result = _run_persistent_inputs_script({"context_window_tokens": 100000})
+    normalized = result["normalized"]
+    assert normalized["parameters"]["reasoning_effort"] == "medium"
+    assert normalized["parameters"]["max_tokens"] == 131072
+
+
+def test_opening_draft_normalization_preserves_valid_values() -> None:
+    result = _run_persistent_inputs_script(
+        {"context_window_tokens": 100000, "reasoning_effort": "max", "max_tokens": 65536}
+    )
+    normalized = result["normalized"]
+    assert normalized["parameters"]["reasoning_effort"] == "max"
+    assert normalized["parameters"]["max_tokens"] == 65536
+
+
+def test_opening_draft_normalization_repairs_invalid_values() -> None:
+    result = _run_persistent_inputs_script(
+        {"context_window_tokens": 100000, "reasoning_effort": "yolo", "max_tokens": 0}
+    )
+    normalized = result["normalized"]
+    assert normalized["parameters"]["reasoning_effort"] == "medium"
+    assert normalized["parameters"]["max_tokens"] == 131072

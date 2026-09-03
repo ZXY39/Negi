@@ -350,7 +350,7 @@
     const preferred = state.templates.find((item) => trim(item.provider_id) === "openai") || state.templates[0];
     const provider = preferred?.provider_id || "";
     if (provider) await ensureTemplate(provider);
-    const draft = provider ? buildDraftFromTemplate(provider) : {
+    const rawDraft = provider ? buildDraftFromTemplate(provider) : {
       provider_id: "",
       capability: "chat",
       auth_mode: "api_key",
@@ -362,6 +362,7 @@
       extra_headers: {},
       extra_options: {},
     };
+    const draft = withThinkingOutputParameterDefaults(rawDraft);
     state.editor = {
       ...emptyEditorState(),
       open: true,
@@ -378,6 +379,14 @@
       initialContextWindowTokens: "",
       imageMultimodalEnabled: false,
       initialImageMultimodalEnabled: false,
+      reasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
+      initialReasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
+      maxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        : String(DEFAULT_MAX_OUTPUT_TOKENS),
+      initialMaxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        : String(DEFAULT_MAX_OUTPUT_TOKENS),
     };
     renderAll();
   }
@@ -386,7 +395,7 @@
     const binding = llmState().bindingMap[trim(modelKey)] || null;
     if (!binding) return;
     const record = await ApiClient.getLlmConfig(binding.config_id || binding.llm_config_id, { includeSecrets: true });
-    const draft = draftFromConfig(record);
+    const draft = withThinkingOutputParameterDefaults(draftFromConfig(record));
     const jsonText = JSON.stringify(draft, null, 2);
     llmState().editor = {
       ...emptyEditorState(),
@@ -534,6 +543,19 @@
     }
   }
 
+  function withThinkingOutputParameterDefaults(draft) {
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) return draft;
+    const next = { ...draft };
+    next.parameters = next.parameters && typeof next.parameters === "object" && !Array.isArray(next.parameters) ? next.parameters : {};
+    next.parameters.reasoning_effort = validReasoningEffortValue(next.parameters.reasoning_effort) || DEFAULT_REASONING_EFFORT;
+    if (Number.isInteger(validMaxOutputTokensValue(next.parameters.max_tokens))) {
+      next.parameters.max_tokens = validMaxOutputTokensValue(next.parameters.max_tokens);
+    } else {
+      next.parameters.max_tokens = DEFAULT_MAX_OUTPUT_TOKENS;
+    }
+    return next;
+  }
+
   function syncParameterIntoJsonEditor(names, value) {
     const editor = llmState().editor;
     if (!editor) return false;
@@ -559,7 +581,12 @@
     const normalized = validReasoningEffortValue(value) || DEFAULT_REASONING_EFFORT;
     editor.reasoningEffort = normalized;
     const input = document.getElementById("llm-binding-reasoning-effort");
-    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    if (input) {
+      if (String(input.value || "") !== normalized) {
+        input.value = normalized;
+        if (typeof syncResourceSelectUI === "function") syncResourceSelectUI(input);
+      }
+    }
     return true;
   }
 
@@ -730,9 +757,9 @@
       const resolved = validContextWindowTokensValue(draft?.parameters?.context_window_tokens);
       if (Number.isInteger(resolved)) syncContextWindowTokensInputValue(resolved);
       const resolvedReasoning = validReasoningEffortValue(draft?.parameters?.reasoning_effort);
-      if (resolvedReasoning) syncReasoningEffortInputValue(resolvedReasoning);
+      syncReasoningEffortInputValue(resolvedReasoning || DEFAULT_REASONING_EFFORT);
       const resolvedMaxTokens = validMaxOutputTokensValue(draft?.parameters?.max_tokens);
-      if (Number.isInteger(resolvedMaxTokens)) syncMaxOutputTokensInputValue(resolvedMaxTokens);
+      syncMaxOutputTokensInputValue(Number.isInteger(resolvedMaxTokens) ? resolvedMaxTokens : DEFAULT_MAX_OUTPUT_TOKENS);
     }
   }
 
@@ -1233,7 +1260,12 @@
       if (trim(state.editor.defaultModel)) draft.default_model = trim(state.editor.defaultModel);
     }
     draft.provider_id = providerId;
+    draft = withThinkingOutputParameterDefaults(draft);
     state.editor.jsonText = JSON.stringify(draft, null, 2);
+    state.editor.reasoningEffort = validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT;
+    state.editor.maxOutputTokens = Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+      ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+      : String(DEFAULT_MAX_OUTPUT_TOKENS);
     state.editor.validation = null;
     state.editor.probe = null;
     renderAll();
@@ -1727,6 +1759,8 @@
     bindingNameLabel,
     bindingNameRequiredMessage,
     normalizeBindingNameText,
+    withThinkingOutputParameterDefaults,
+    handleBindingJsonEditorInput,
   };
   window.handleModelRoleEditorAction = async function handleModelRoleEditorAction() {
     if (!S.modelCatalog.roleEditing) {
