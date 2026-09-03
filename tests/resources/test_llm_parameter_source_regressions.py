@@ -11,6 +11,7 @@ from langchain_core.messages.utils import convert_to_messages
 import main.runtime.chat_backend as chat_backend_module
 import g3ku.providers.fallback as fallback_module
 from g3ku.providers.fallback import DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+from g3ku.config.schema import DEFAULT_MAX_OUTPUT_TOKENS
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.llm_config.enums import AuthMode, Capability, ProtocolAdapter
@@ -319,7 +320,7 @@ async def test_config_chat_backend_uses_config_center_model_parameters_when_not_
 
 
 @pytest.mark.asyncio
-async def test_config_chat_backend_omits_optional_model_parameters_when_unset(monkeypatch) -> None:
+async def test_config_chat_backend_applies_default_max_tokens_when_unset(monkeypatch) -> None:
     captured: list[dict[str, object]] = []
 
     class _RecorderProvider:
@@ -348,10 +349,45 @@ async def test_config_chat_backend_omits_optional_model_parameters_when_unset(mo
         model_refs=["primary"],
     )
 
-    assert "max_tokens" not in captured[0]
+    assert captured[0]["max_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
     assert "temperature" not in captured[0]
-    assert "reasoning_effort" not in captured[0]
+    assert captured[0]["reasoning_effort"] == "medium"
     assert captured[0]["request_timeout_seconds"] == DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_normalizes_reasoning_effort_levels(monkeypatch) -> None:
+    captured: list[dict[str, object]] = []
+
+    class _RecorderProvider:
+        async def chat(self, **kwargs):
+            captured.append(dict(kwargs))
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    monkeypatch.setattr(
+        chat_backend_module,
+        "build_provider_from_model_key",
+        lambda config, ref, api_key_index=None: ProviderTarget(
+            provider_ref=str(ref),
+            provider_id="openai",
+            model_id="custom-model",
+            provider=_RecorderProvider(),
+            model_parameters={"reasoning_effort": "none", "max_tokens": 8192},
+            retry_on=[],
+            retry_count=0,
+            api_key_count=0,
+        ),
+    )
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary"],
+    )
+
+    assert captured[0]["max_tokens"] == 8192
+    assert "reasoning_effort" not in captured[0]
 
 
 @pytest.mark.asyncio
@@ -1148,3 +1184,69 @@ def test_resolve_send_model_context_window_info_preserves_resolution_error_detai
     assert info.model_key == "primary"
     assert info.context_window_tokens == 0
     assert "bad binding" in info.resolution_error
+
+
+class _ErrorLogCapturingLogService(_FakeLogService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.error_logs: list[dict] = []
+
+    def append_task_error_log(self, task_id, node_id, *, error_text, node_title=''):
+        self.error_logs.append({
+            'task_id': task_id,
+            'node_id': node_id,
+            'error_text': error_text,
+            'node_title': node_title,
+        })
+
+
+class _FullUsageResponse:
+    content = ''
+    tool_calls = []
+    finish_reason = 'length'
+    usage = {'output_tokens': 8192}
+    provider_request_body = {'model': 'deepseek-v4-flash', 'max_tokens': 8192}
+
+
+def test_record_invalid_final_submission_error_log_captures_raw_truncation_info() -> None:
+    log_service = _ErrorLogCapturingLogService()
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+    loop._record_invalid_final_submission_error_log(
+        task_id='task:t1',
+        node_id='node:n1',
+        node_title='verify file',
+        count=2,
+        reason='final result must be submitted via submit_final_result',
+        response=_FullUsageResponse(),
+        response_tool_calls=[],
+    )
+
+    assert len(log_service.error_logs) == 1
+    entry = log_service.error_logs[0]
+    assert entry['node_id'] == 'node:n1'
+    assert '第2次' in entry['error_text']
+    assert 'response_tool_call_count=0' in entry['error_text']
+    assert 'output_tokens=8192' in entry['error_text']
+    assert 'finish_reason=length' in entry['error_text']
+    assert 'provider_model=deepseek-v4-flash' in entry['error_text']
+    assert 'sent_max_tokens=8192' in entry['error_text']
+    assert '疑似触及输出token上限被截断' in entry['error_text']
+
+    loop._record_invalid_final_submission_error_log(
+        task_id='task:t1',
+        node_id='node:n1',
+        node_title='verify file',
+        count=3,
+        reason='final result must be submitted via submit_final_result',
+        response=SimpleNamespace(
+            content='',
+            tool_calls=[],
+            finish_reason='stop',
+            usage={'output_tokens': 120},
+            provider_request_body={'model': 'm', 'max_tokens': 131072},
+        ),
+        response_tool_calls=[],
+    )
+    assert len(log_service.error_logs) == 2
+    assert '疑似触及输出token上限被截断' not in log_service.error_logs[1]['error_text']
+    assert 'output_tokens=120' in log_service.error_logs[1]['error_text']

@@ -2172,6 +2172,9 @@ class TaskLogService:
     def list_task_error_logs(self, task_id: str) -> list[TaskErrorLogRecord]:
         return self._store.list_task_error_logs(task_id)
 
+    def list_task_node_error_logs(self, task_id: str, node_id: str) -> list[TaskErrorLogRecord]:
+        return self._store.list_task_node_error_logs(task_id, node_id)
+
     def set_node_pause_state(
         self,
         task_id: str,

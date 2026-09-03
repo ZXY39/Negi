@@ -463,6 +463,8 @@ const U = {
     adSpawnReviews: document.getElementById("ad-spawn-reviews"),
     adOutput: document.getElementById("ad-output"),
     adAcceptance: document.getElementById("ad-check"),
+    adErrorHistory: document.getElementById("ad-error-history"),
+    adErrorHistoryRefresh: document.getElementById("ad-error-history-refresh"),
     adFlowHeading: document.getElementById("ad-input")?.closest(".agent-detail-section")?.querySelector("h4"),
     adMessagesHeading: document.getElementById("ad-messages")?.closest(".agent-detail-section")?.querySelector("h4"),
     adSpawnReviewsHeading: document.getElementById("ad-spawn-reviews")?.closest(".agent-detail-section")?.querySelector("h4"),
@@ -11027,6 +11029,13 @@ function bind() {
     U.taskErrorLogClose?.addEventListener("click", () => setTaskErrorLogOpen(false));
     U.taskErrorLogBackdrop?.addEventListener("click", () => setTaskErrorLogOpen(false));
     U.closeAgent?.addEventListener("click", () => clearAgentSelection());
+    U.adErrorHistoryRefresh?.addEventListener("click", () => {
+        const nodeId = String(S.selectedNodeId || "").trim();
+        const taskId = String(S.currentTaskId || "").trim();
+        if (!taskId || !nodeId) return;
+        if (S.taskNodeErrorHistories) delete S.taskNodeErrorHistories[`${taskId}:${nodeId}`];
+        void renderNodeErrorHistory({ node_id: nodeId }, { force: true });
+    });
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
     [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetSkillPagination));
     U.skillPageSize?.addEventListener("change", (e) => setSkillPageSize(e.target.value));

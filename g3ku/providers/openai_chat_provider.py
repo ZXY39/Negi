@@ -100,8 +100,8 @@ class OpenAIChatProvider(LLMProvider):
             kwargs["temperature"] = float(temperature)
         if self.extra_headers:
             kwargs["extra_headers"] = dict(self.extra_headers)
-        if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
+        if reasoning_effort and str(reasoning_effort).strip().lower() != "none":
+            kwargs["reasoning_effort"] = str(reasoning_effort).strip()
         if tools:
             kwargs.update(
                 tools=normalize_openai_tool_definitions(tools),

@@ -6536,6 +6536,20 @@ class MainRuntimeService:
             'items': [item.model_dump(mode='json') for item in items],
         }
 
+    def get_task_node_error_log_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return None
+        normalized_node_id = str(node_id or '').strip()
+        items = self.log_service.list_task_node_error_logs(normalized_task_id, normalized_node_id)
+        return {
+            'ok': True,
+            'task_id': normalized_task_id,
+            'node_id': normalized_node_id,
+            'items': [item.model_dump(mode='json') for item in items],
+        }
+
     def get_task_detail_payload(
         self,
         task_id: str,

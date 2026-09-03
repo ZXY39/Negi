@@ -10360,6 +10360,42 @@ textarea {
     font: 0.82rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
+.node-error-history {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: var(--space-2);
+    background: var(--bg-app);
+    border-radius: var(--radius-md);
+}
+
+.node-error-item {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg-app) 64%, var(--bg-panel));
+}
+
+.node-error-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+}
+
+.node-error-text {
+    margin: 0;
+    max-height: 200px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--status-failed-text);
+    font: 0.82rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
 .task-tree-node-locate {
     animation: task-tree-node-locate 900ms ease-in-out 1;
 }

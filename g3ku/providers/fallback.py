@@ -9,7 +9,12 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.config.schema import Config
+from g3ku.config.schema import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_REASONING_EFFORT,
+    Config,
+    normalize_reasoning_effort,
+)
 from g3ku.prompt_trace import render_model_chain_trace
 from g3ku.providers.base import LLMProvider, LLMResponse
 from g3ku.utils.api_keys import APIKeyConfigurationError, iter_api_key_retry_slots
@@ -416,12 +421,15 @@ class FallbackProvider(LLMProvider):
                     target_parameters["temperature"] = getattr(base_target, "default_temperature", None)
                 if not str(target_parameters.get("reasoning_effort") or "").strip() and getattr(base_target, "default_reasoning_effort", None) is not None:
                     target_parameters["reasoning_effort"] = getattr(base_target, "default_reasoning_effort", None)
+                # Per-model parameters from the llm-config record win over the
+                # engine-global defaults; when neither is configured the global
+                # output default applies so requests always carry an explicit cap.
                 effective_max_tokens = (
-                    max(1, int(max_tokens))
-                    if max_tokens is not None
-                    else max(1, int(target_parameters["max_tokens"]))
+                    max(1, int(target_parameters["max_tokens"]))
                     if target_parameters.get("max_tokens") is not None
-                    else None
+                    else max(1, int(max_tokens))
+                    if max_tokens is not None
+                    else max(1, int(DEFAULT_MAX_OUTPUT_TOKENS))
                 )
                 effective_temperature = (
                     float(temperature)
@@ -430,11 +438,16 @@ class FallbackProvider(LLMProvider):
                     if target_parameters.get("temperature") is not None
                     else None
                 )
+                configured_reasoning = str(target_parameters.get("reasoning_effort") or "").strip()
                 effective_reasoning = (
-                    str(reasoning_effort).strip()
+                    normalize_reasoning_effort(configured_reasoning)
+                    if configured_reasoning
+                    else normalize_reasoning_effort(reasoning_effort)
                     if reasoning_effort is not None and str(reasoning_effort).strip()
-                    else str(target_parameters.get("reasoning_effort") or "").strip() or None
+                    else normalize_reasoning_effort(DEFAULT_REASONING_EFFORT)
                 )
+                if str(effective_reasoning or "").strip().lower() == "none":
+                    effective_reasoning = None
                 retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
                 move_to_next_model = False
 

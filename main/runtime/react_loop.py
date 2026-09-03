@@ -936,6 +936,15 @@ class ReActToolLoop:
                         f'{FINAL_RESULT_TOOL_NAME} must be the only tool call in its turn',
                     ]
                     last_invalid_final_submission_reason = '; '.join(last_contract_violations)
+                    self._record_invalid_final_submission_error_log(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        node_title=node.goal,
+                        count=invalid_final_submission_count,
+                        reason=last_invalid_final_submission_reason,
+                        response=response,
+                        response_tool_calls=response_tool_calls,
+                    )
                     if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
                         return self._invalid_final_submission_failure(
                             reason=last_invalid_final_submission_reason,
@@ -1307,6 +1316,15 @@ class ReActToolLoop:
                 count=invalid_final_submission_count,
                 reason=last_invalid_final_submission_reason,
                 violations=last_contract_violations,
+            )
+            self._record_invalid_final_submission_error_log(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                node_title=node.goal,
+                count=invalid_final_submission_count,
+                reason=last_invalid_final_submission_reason,
+                response=response,
+                response_tool_calls=response_tool_calls,
             )
             if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
                 return self._invalid_final_submission_failure(
@@ -1779,6 +1797,65 @@ class ReActToolLoop:
             },
             publish_snapshot=True,
         )
+
+    def _record_invalid_final_submission_error_log(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_title: str,
+        count: int,
+        reason: str,
+        response: Any,
+        response_tool_calls: list[Any],
+    ) -> None:
+        """Persist an invalid final-submission event into the node error history.
+
+        Kept raw (response tool calls, output tokens, finish reason and the
+        actually-sent provider caps) so operators can verify truncation or
+        no-tool-call failures from the node detail panel without reopening
+        request artifacts.
+        """
+        try:
+            usage = dict(getattr(response, 'usage', {}) or {})
+            request_body = dict(getattr(response, 'provider_request_body', {}) or {})
+            output_tokens = int(usage.get('output_tokens') or 0)
+            sent_max_tokens = request_body.get('max_tokens')
+            provider_model = str(request_body.get('model') or '').strip()
+            finish_reason = str(getattr(response, 'finish_reason', '') or '').strip()
+            tool_names = ';'.join(
+                str(getattr(call, 'name', '') or '').strip()
+                for call in list(response_tool_calls or [])
+                if str(getattr(call, 'name', '') or '').strip()
+            ) or 'none'
+            parts = [
+                f'Invalid final result submission detected (第{int(count or 0)}次): '
+                f'{str(reason or "").strip() or "reply did not submit a valid final result"}',
+                f'response_tool_call_count={len(list(response_tool_calls or []))}',
+                f'tool_names={tool_names}',
+                f'output_tokens={output_tokens}',
+                f'finish_reason={finish_reason}',
+            ]
+            if provider_model:
+                parts.append(f'provider_model={provider_model}')
+            if sent_max_tokens is not None:
+                try:
+                    limit = max(0, int(sent_max_tokens))
+                except (TypeError, ValueError):
+                    limit = 0
+                if limit > 0:
+                    parts.append(f'sent_max_tokens={limit}')
+                    if output_tokens >= limit:
+                        parts.append('疑似触及输出token上限被截断')
+            self._log_service.append_task_error_log(
+                task_id,
+                node_id,
+                error_text=' | '.join(parts),
+                node_title=node_title,
+            )
+        except Exception:
+            # Error-history persistence must never break the ReAct loop.
+            pass
 
     @staticmethod
     def _recover_waiting_children_tool_calls(*, node) -> list[Any]:

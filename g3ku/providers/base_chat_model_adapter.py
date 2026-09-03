@@ -134,8 +134,8 @@ class G3kuChatModelAdapter(BaseChatModel):
             chat_kwargs["temperature"] = float(raw_temperature)
         if raw_max_tokens is not None:
             chat_kwargs["max_tokens"] = int(raw_max_tokens)
-        if reasoning_effort is not None:
-            chat_kwargs["reasoning_effort"] = str(reasoning_effort)
+        if reasoning_effort is not None and str(reasoning_effort).strip().lower() != "none":
+            chat_kwargs["reasoning_effort"] = str(reasoning_effort).strip()
         if on_text_delta is not None and _callable_accepts_keyword(signature, "on_text_delta"):
             chat_kwargs["on_text_delta"] = on_text_delta
         if on_model_retry_status is not None and _callable_accepts_keyword(

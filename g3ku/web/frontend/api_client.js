@@ -504,6 +504,12 @@ class ApiClient {
         });
     }
 
+    static async getTaskNodeErrorLog(taskId, nodeId) {
+        return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/error-log`, {
+            requestKey: `tasks:node-error-log:${taskId}:${nodeId}`,
+        });
+    }
+
     static async getTaskNodeLatestContext(taskId, nodeId) {
         return this._request("GET", `/api/tasks/${taskId}/nodes/${nodeId}/latest-context`, {
             requestKey: `tasks:node-context:${taskId}:${nodeId}`,

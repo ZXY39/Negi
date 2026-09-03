@@ -45,6 +45,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
 - QQ/China channel emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `china-channels.md`
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
+- 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"

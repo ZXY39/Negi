@@ -182,7 +182,7 @@ class ResponsesProvider(LLMProvider):
             body["max_output_tokens"] = max(1, int(max_tokens))
         if temperature is not None:
             body["temperature"] = float(temperature)
-        if reasoning_effort:
+        if reasoning_effort and str(reasoning_effort).strip().lower() != "none":
             body["reasoning"] = {"effort": str(reasoning_effort).strip()}
 
         if tools:

@@ -1975,6 +1975,48 @@ function renderAcceptanceResult(text) {
     return changed;
 }
 
+function paintTaskNodeErrorHistory(items) {
+    if (!U.adErrorHistory) return false;
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) {
+        U.adErrorHistory.innerHTML = '<div class="empty-state">暂无历史错误。</div>';
+        return false;
+    }
+    U.adErrorHistory.innerHTML = rows.map((item) => `
+        <article class="node-error-item">
+            <div class="node-error-meta"><time>${esc(item.created_at || "")}</time>${item.node_title ? `<span>${esc(item.node_title)}</span>` : ""}</div>
+            <pre class="node-error-text">${esc(item.error_text || "")}</pre>
+        </article>`).join("");
+    return true;
+}
+
+async function renderNodeErrorHistory(node, { force = false } = {}) {
+    if (!U.adErrorHistory) return false;
+    const nodeId = String(node?.node_id || "").trim();
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!nodeId || !taskId) {
+        U.adErrorHistory.innerHTML = '<div class="empty-state">请先选择节点。</div>';
+        return false;
+    }
+    if (!S.taskNodeErrorHistories) S.taskNodeErrorHistories = {};
+    const cacheKey = `${taskId}:${nodeId}`;
+    if (!force && cacheKey in S.taskNodeErrorHistories) {
+        return paintTaskNodeErrorHistory(S.taskNodeErrorHistories[cacheKey]);
+    }
+    U.adErrorHistory.innerHTML = '<div class="empty-state">正在加载历史错误...</div>';
+    try {
+        const payload = await ApiClient.getTaskNodeErrorLog(taskId, nodeId);
+        if (String(S.currentTaskId || "").trim() !== taskId || String(S.selectedNodeId || "").trim() !== nodeId) return false;
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        S.taskNodeErrorHistories[cacheKey] = items;
+        return paintTaskNodeErrorHistory(items);
+    } catch (error) {
+        if (isAbortLike(error)) return false;
+        U.adErrorHistory.innerHTML = `<div class="empty-state error">${esc(error?.message || "历史错误加载失败")}</div>`;
+        return true;
+    }
+}
+
 function formatRoundLabel(label, roundIndex) {
     const normalizedLabel = String(label || "").trim();
     const normalizedIndex = treeNormalizeInt(roundIndex, 0);
@@ -2816,6 +2858,7 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
     const spawnReviewChanged = !!renderSpawnReviewTrace(mergedNode, { viewState });
     const outputChanged = !!renderFinalOutput(mergedNode.executionTrace?.final_output || "");
     const acceptanceChanged = !!renderAcceptanceResult(mergedNode.executionTrace?.acceptance_result || "");
+    void renderNodeErrorHistory(mergedNode);
     U.feedTitle.textContent = formatNodeDetailHeading(mergedNode);
     U.feedTitle.title = formatNodeDetailHeading(mergedNode, { compact: false });
     setTaskDetailOpen(true);

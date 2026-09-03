@@ -648,6 +648,17 @@
                             </div>
 
                             <div class="agent-detail-section">
+                                <div class="agent-detail-section-header">
+                                    <h4><i data-lucide="alert-triangle"></i> 历史错误记录</h4>
+                                    <button id="ad-error-history-refresh" class="toolbar-btn ghost small" type="button">刷新</button>
+                                </div>
+                                <div id="ad-error-history" class="node-error-history"
+                                    style="max-height: 280px; overflow-y: auto;">
+                                    <div class="empty-state">暂无历史错误。</div>
+                                </div>
+                            </div>
+
+                            <div class="agent-detail-section">
                                 <h4><i data-lucide="activity"></i> 日志</h4>
                                 <div id="ad-logs"
                                     style="max-height: 250px; overflow-y: auto; background: var(--bg-app); border-radius: var(--radius-md); padding: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2);">

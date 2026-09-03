@@ -41,6 +41,22 @@ DEFAULT_NODE_DISPATCH_CONCURRENCY = {
     "inspection": 4,
 }
 
+DEFAULT_MAX_OUTPUT_TOKENS = 131072
+VALID_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+DEFAULT_REASONING_EFFORT = "medium"
+
+
+def normalize_reasoning_effort(value: Any) -> str:
+    """Normalize a reasoning_effort value to one of the six managed levels.
+
+    ``none`` means deep thinking is explicitly disabled. Missing/empty values
+    fall back to the default level so existing configs keep working.
+    """
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return DEFAULT_REASONING_EFFORT
+    return raw
+
 
 def normalize_role_scope(value: str) -> str:
     raw = str(value or "").strip().lower().replace("-", "_")
@@ -151,12 +167,27 @@ class AgentDefaults(Base):
     workspace: str = "."
     model: str = ""
     provider: str = "auto"  # Deprecated; provider selection is derived from managed models.
-    max_tokens: int = 8192
+    max_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
-    reasoning_effort: str | None = None  # low / medium / high ? enables LLM thinking mode
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT  # none / low / medium / high / xhigh / max; none disables deep thinking
     middlewares: list[AgentMiddlewareConfig] = Field(default_factory=list)
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: Any) -> str:
+        return normalize_reasoning_effort(value)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _validate_reasoning_effort(cls, value: Any) -> str:
+        normalized = str(normalize_reasoning_effort(value)).strip().lower()
+        if normalized not in VALID_REASONING_EFFORTS:
+            raise ValueError(
+                f"agents.defaults.reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}"
+            )
+        return normalized
 
 
 class RoleIterationConfig(Base):
@@ -262,7 +293,7 @@ class ManagedModelConfig(Base):
     enabled: bool = True
     max_tokens: int | None = None
     temperature: float | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT  # none / low / medium / high / xhigh / max; none disables deep thinking
     retry_on: list[str] = Field(default_factory=lambda: list(DEFAULT_RETRY_ON_KEYWORDS))
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
@@ -323,6 +354,21 @@ class ManagedModelConfig(Base):
         if resolved <= 25_000:
             raise ValueError("models.catalog[].context_window_tokens must be > 25000")
         return resolved
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_catalog_reasoning_effort(cls, value: Any) -> str:
+        return normalize_reasoning_effort(value)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _validate_catalog_reasoning_effort(cls, value: Any) -> str:
+        normalized = str(normalize_reasoning_effort(value)).strip().lower()
+        if normalized not in VALID_REASONING_EFFORTS:
+            raise ValueError(
+                f"models.catalog[].reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}"
+            )
+        return normalized
 
     @field_validator("single_api_key_max_concurrency", mode="before")
     @classmethod

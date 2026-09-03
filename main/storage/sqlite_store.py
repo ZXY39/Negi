@@ -770,6 +770,23 @@ class SQLiteTaskStore:
         )
         return [TaskErrorLogRecord(seq=int(row['seq'] or 0), task_id=str(row['task_id'] or ''), node_id=str(row['node_id'] or ''), node_title=str(row['node_title'] or ''), error_text=str(row['error_text'] or ''), created_at=str(row['created_at'] or '')) for row in rows]
 
+    def list_task_node_error_logs(self, task_id: str, node_id: str) -> list[TaskErrorLogRecord]:
+        rows = self._fetchall(
+            'SELECT seq, task_id, node_id, node_title, error_text, created_at FROM task_error_logs WHERE task_id = ? AND node_id = ? ORDER BY seq ASC',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        return [
+            TaskErrorLogRecord(
+                seq=int(row['seq'] or 0),
+                task_id=str(row['task_id'] or ''),
+                node_id=str(row['node_id'] or ''),
+                node_title=str(row['node_title'] or ''),
+                error_text=str(row['error_text'] or ''),
+                created_at=str(row['created_at'] or ''),
+            )
+            for row in rows
+        ]
+
     def upsert_task_runtime_meta(self, *, task_id: str, updated_at: str, payload: dict[str, object]) -> None:
         payload_json = json.dumps(payload)
         self._upsert(

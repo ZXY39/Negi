@@ -9,7 +9,12 @@ from typing import Any, Protocol
 
 from loguru import logger
 
-from g3ku.config.schema import Config
+from g3ku.config.schema import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_REASONING_EFFORT,
+    Config,
+    normalize_reasoning_effort,
+)
 from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.prompt_trace import render_model_chain_trace
 from g3ku.providers.provider_factory import build_provider_from_model_key
@@ -555,17 +560,23 @@ def _resolve_model_request_parameters(
         resolved['max_tokens'] = max(1, int(max_tokens))
     elif configured.get('max_tokens') is not None:
         resolved['max_tokens'] = max(1, int(configured['max_tokens']))
+    else:
+        resolved['max_tokens'] = max(1, int(DEFAULT_MAX_OUTPUT_TOKENS))
     if temperature is not None:
         resolved['temperature'] = float(temperature)
     elif configured.get('temperature') is not None:
         resolved['temperature'] = float(configured['temperature'])
-    explicit_reasoning = str(reasoning_effort or '').strip()
+    explicit_reasoning = normalize_reasoning_effort(reasoning_effort) if str(reasoning_effort or '').strip() else ''
     if explicit_reasoning:
         resolved['reasoning_effort'] = explicit_reasoning
     else:
         configured_reasoning = str(configured.get('reasoning_effort') or '').strip()
         if configured_reasoning:
-            resolved['reasoning_effort'] = configured_reasoning
+            resolved['reasoning_effort'] = normalize_reasoning_effort(configured_reasoning)
+        else:
+            resolved['reasoning_effort'] = DEFAULT_REASONING_EFFORT
+    if str(resolved.get('reasoning_effort') or '').strip().lower() == 'none':
+        resolved.pop('reasoning_effort', None)
     return resolved
 
 

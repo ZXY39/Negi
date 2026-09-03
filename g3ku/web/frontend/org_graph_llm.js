@@ -1,5 +1,16 @@
 (() => {
   const DEFAULT_RETRY_ON = ["network", "429"];
+  const DEFAULT_MAX_OUTPUT_TOKENS = 131072;
+  const DEFAULT_REASONING_EFFORT = "medium";
+  const REASONING_EFFORT_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"];
+  const REASONING_EFFORT_LABELS = {
+    none: "关闭深度思考",
+    low: "low（浅层思考）",
+    medium: "medium（默认）",
+    high: "high（深度思考）",
+    xhigh: "xhigh（更深思考）",
+    max: "max（最强思考）",
+  };
   const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };
 
 
@@ -23,6 +34,10 @@
       initialContextWindowTokens: "",
       imageMultimodalEnabled: false,
       initialImageMultimodalEnabled: false,
+      reasoningEffort: DEFAULT_REASONING_EFFORT,
+      initialReasoningEffort: DEFAULT_REASONING_EFFORT,
+      maxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
+      initialMaxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
       validation: null,
       probe: null,
       modelList: null,
@@ -396,6 +411,14 @@
       initialContextWindowTokens: trim(binding.context_window_tokens),
       imageMultimodalEnabled: Boolean(binding.image_multimodal_enabled),
       initialImageMultimodalEnabled: Boolean(binding.image_multimodal_enabled),
+      reasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
+      initialReasoningEffort: validReasoningEffortValue(draft?.parameters?.reasoning_effort) || DEFAULT_REASONING_EFFORT,
+      maxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        : String(DEFAULT_MAX_OUTPUT_TOKENS),
+      initialMaxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
+        : String(DEFAULT_MAX_OUTPUT_TOKENS),
     };
     renderAll();
   }
@@ -438,6 +461,8 @@
     const singleApiKeyMaxConcurrencyInput = document.getElementById("llm-binding-single-api-key-max-concurrency");
     const contextWindowTokensInput = document.getElementById("llm-binding-context-window-tokens");
     const imageMultimodalEnabledInput = document.getElementById("llm-binding-image-multimodal-enabled");
+    const reasoningEffortInput = document.getElementById("llm-binding-reasoning-effort");
+    const maxOutputTokensInput = document.getElementById("llm-binding-max-output-tokens");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
     if (providerSelect) editor.providerId = trim(providerSelect.value || editor.providerId);
     if (baseUrlInput) editor.baseUrl = String(baseUrlInput.value ?? editor.baseUrl ?? "");
@@ -454,6 +479,8 @@
     }
     if (contextWindowTokensInput) editor.contextWindowTokens = trim(contextWindowTokensInput.value || "");
     if (imageMultimodalEnabledInput) editor.imageMultimodalEnabled = Boolean(imageMultimodalEnabledInput.checked);
+    if (reasoningEffortInput) editor.reasoningEffort = trim(reasoningEffortInput.value || "");
+    if (maxOutputTokensInput) editor.maxOutputTokens = trim(maxOutputTokensInput.value || "");
     return editor;
   }
 
@@ -474,6 +501,77 @@
     } catch (_error) {
       return null;
     }
+  }
+
+  function validReasoningEffortValue(raw) {
+    const value = trim(raw).toLowerCase();
+    return REASONING_EFFORT_LEVELS.includes(value) ? value : null;
+  }
+
+  function validMaxOutputTokensValue(raw) {
+    if (raw === null || raw === undefined) return null;
+    const text = String(raw).trim();
+    if (!text) return null;
+    const parsed = Number.parseInt(text, 10);
+    return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+  }
+
+  function reasoningEffortFromDraftText(raw, providerId) {
+    try {
+      const draft = parseDraftJson(raw, providerId);
+      return validReasoningEffortValue(draft?.parameters?.reasoning_effort);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function maxOutputTokensFromDraftText(raw, providerId) {
+    try {
+      const draft = parseDraftJson(raw, providerId);
+      return validMaxOutputTokensValue(draft?.parameters?.max_tokens);
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function syncParameterIntoJsonEditor(names, value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const providerId = trim(document.getElementById("llm-provider-select")?.value || editor.providerId);
+    const currentText = String(document.getElementById("llm-json-editor")?.value || editor.jsonText || "");
+    let draft;
+    try {
+      draft = parseDraftJson(currentText, providerId);
+    } catch (_error) {
+      return false;
+    }
+    draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
+    const key = names[0];
+    if (String(draft.parameters[key] == null ? "" : draft.parameters[key]) === String(value == null ? "" : value)) return false;
+    draft.parameters[key] = value;
+    setBindingJsonEditorValue(JSON.stringify(draft, null, 2));
+    return true;
+  }
+
+  function syncReasoningEffortInputValue(value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const normalized = validReasoningEffortValue(value) || DEFAULT_REASONING_EFFORT;
+    editor.reasoningEffort = normalized;
+    const input = document.getElementById("llm-binding-reasoning-effort");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return true;
+  }
+
+  function syncMaxOutputTokensInputValue(value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const parsed = validMaxOutputTokensValue(value);
+    const normalized = Number.isInteger(parsed) ? String(parsed) : String(DEFAULT_MAX_OUTPUT_TOKENS);
+    editor.maxOutputTokens = normalized;
+    const input = document.getElementById("llm-binding-max-output-tokens");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return true;
   }
 
   function setBindingJsonEditorValue(nextText) {
@@ -596,6 +694,24 @@
     if (Number.isInteger(resolved)) syncContextWindowTokensIntoJsonEditor(resolved);
   }
 
+  function handleBindingReasoningInput() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const input = document.getElementById("llm-binding-reasoning-effort");
+    const resolved = validReasoningEffortValue(input?.value) || DEFAULT_REASONING_EFFORT;
+    editor.reasoningEffort = resolved;
+    syncParameterIntoJsonEditor(["reasoning_effort"], resolved);
+  }
+
+  function handleBindingMaxOutputTokensInput() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const input = document.getElementById("llm-binding-max-output-tokens");
+    editor.maxOutputTokens = trim(input?.value || "");
+    const resolved = validMaxOutputTokensValue(editor.maxOutputTokens);
+    if (Number.isInteger(resolved)) syncParameterIntoJsonEditor(["max_tokens"], resolved);
+  }
+
   function handleBindingJsonEditorInput() {
     const editor = llmState().editor;
     if (!editor) return;
@@ -613,6 +729,10 @@
       syncDefaultModelInputValue(String(draft.default_model ?? ""));
       const resolved = validContextWindowTokensValue(draft?.parameters?.context_window_tokens);
       if (Number.isInteger(resolved)) syncContextWindowTokensInputValue(resolved);
+      const resolvedReasoning = validReasoningEffortValue(draft?.parameters?.reasoning_effort);
+      if (resolvedReasoning) syncReasoningEffortInputValue(resolvedReasoning);
+      const resolvedMaxTokens = validMaxOutputTokensValue(draft?.parameters?.max_tokens);
+      if (Number.isInteger(resolvedMaxTokens)) syncMaxOutputTokensInputValue(resolvedMaxTokens);
     }
   }
 
@@ -669,8 +789,27 @@
     if (singleApiKeyMaxConcurrency !== null && (!Number.isInteger(singleApiKeyMaxConcurrency) || singleApiKeyMaxConcurrency < 1)) {
       throw new Error("single_api_key_max_concurrency must be >= 1");
     }
+    const reasoningRaw = trim(editor?.reasoningEffort);
+    let reasoningEffort = DEFAULT_REASONING_EFFORT;
+    if (reasoningRaw) {
+      reasoningEffort = validReasoningEffortValue(reasoningRaw);
+      if (!reasoningEffort) {
+        throw new Error(`深度思考档位必须是 ${REASONING_EFFORT_LEVELS.join(" / ")} 之一`);
+      }
+    }
+    const maxOutputRaw = trim(editor?.maxOutputTokens);
+    let maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+    if (maxOutputRaw) {
+      const parsedMax = Number.parseInt(maxOutputRaw, 10);
+      if (!Number.isInteger(parsedMax) || parsedMax < 1) {
+        throw new Error("最大输出TOKEN必须是不小于 1 的整数");
+      }
+      maxOutputTokens = parsedMax;
+    }
     draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
     draft.parameters.context_window_tokens = contextWindowTokens;
+    draft.parameters.reasoning_effort = reasoningEffort;
+    draft.parameters.max_tokens = maxOutputTokens;
     return {
       retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
       retryCount,
@@ -721,7 +860,8 @@
           </label>
           ${renderConcurrencyField(editor)}
         </div>
-        ${renderContextWindowField(editor)}`;
+        ${renderContextWindowField(editor)}
+        ${renderThinkingOutputFields(editor)}`;
     }
     return `
       <div class="llm-form-grid llm-form-grid--binding-detail-policy">
@@ -751,6 +891,34 @@
           <span class="resource-field-label">最大上下文TOKEN *</span>
           <input id="llm-binding-context-window-tokens" class="resource-search" type="number" min="25001" step="1" inputmode="numeric" value="${escv(String(editor.contextWindowTokens || ""))}" placeholder="必须大于 25000">
         </label>`;
+  }
+
+  function renderReasoningField(editor) {
+    const value = validReasoningEffortValue(editor?.reasoningEffort) || DEFAULT_REASONING_EFFORT;
+    return `
+        <label class="resource-field">
+          <span class="resource-field-label">深度思考（Reasoning Effort）</span>
+          <select id="llm-binding-reasoning-effort" class="resource-search resource-select" data-resource-select-label="Reasoning effort">
+            ${REASONING_EFFORT_LEVELS.map((level) => `<option value="${escv(level)}"${level === value ? " selected" : ""}>${escv(REASONING_EFFORT_LABELS[level] || level)}</option>`).join("")}
+          </select>
+        </label>`;
+  }
+
+  function renderMaxOutputTokensField(editor) {
+    const value = trim(editor?.maxOutputTokens) ? editor.maxOutputTokens : String(DEFAULT_MAX_OUTPUT_TOKENS);
+    return `
+        <label class="resource-field">
+          <span class="resource-field-label">最大输出TOKEN *</span>
+          <input id="llm-binding-max-output-tokens" class="resource-search" type="number" min="1" step="1" inputmode="numeric" value="${escv(value)}" placeholder="${DEFAULT_MAX_OUTPUT_TOKENS}">
+        </label>`;
+  }
+
+  function renderThinkingOutputFields(editor) {
+    return `
+      <div class="llm-form-grid llm-form-grid--thinking-output">
+        ${renderReasoningField(editor)}
+        ${renderMaxOutputTokensField(editor)}
+      </div>`;
   }
 
   function renderConnectionFields() {
@@ -916,6 +1084,7 @@
             <div class="llm-section">
               ${renderConnectionFields()}
               ${renderBindingPolicyFields()}
+              ${renderThinkingOutputFields(state.editor)}
               ${renderJsonDetails()}
               ${renderStatus()}
               <div class="llm-inline-actions">
@@ -1480,11 +1649,16 @@
     U.llmEditorBackdrop?.addEventListener("click", closeEditor);
     U.llmEditorShell?.addEventListener("change", (event) => {
       if (event.target?.id === "llm-provider-select") void handleProviderChange();
+      if (event.target?.id === "llm-binding-reasoning-effort") handleBindingReasoningInput();
     });
     U.llmEditorShell?.addEventListener("input", (event) => {
       const targetId = event.target?.id;
       if (targetId === "llm-binding-context-window-tokens") {
         handleBindingContextWindowInput();
+        return;
+      }
+      if (targetId === "llm-binding-max-output-tokens") {
+        handleBindingMaxOutputTokensInput();
         return;
       }
       if (targetId === "llm-json-editor") {

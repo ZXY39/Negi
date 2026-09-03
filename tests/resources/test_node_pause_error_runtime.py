@@ -152,6 +152,43 @@ def test_sqlite_pause_and_error_logs_are_crud_and_task_scoped(tmp_path: Path) ->
         store.close()
 
 
+def test_sqlite_node_error_logs_filter_by_node(tmp_path: Path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    try:
+        task_id = "task:node-error-filter"
+        node_a = "node:error-a"
+        node_b = "node:error-b"
+        store.upsert_task(_task_record(task_id, node_a))
+        store.upsert_node(_node_record(task_id, node_a))
+        store.upsert_node(_node_record(task_id, node_b))
+        store.append_task_error_log(
+            task_id=task_id,
+            node_id=node_a,
+            node_title="error-a",
+            error_text="provider unavailable a",
+            created_at="2026-03-29T00:00:01+08:00",
+        )
+        store.append_task_error_log(
+            task_id=task_id,
+            node_id=node_b,
+            node_title="error-b",
+            error_text="provider unavailable b",
+            created_at="2026-03-29T00:00:02+08:00",
+        )
+
+        assert len(store.list_task_error_logs(task_id)) == 2
+        node_logs = store.list_task_node_error_logs(task_id, node_a)
+        assert len(node_logs) == 1
+        assert node_logs[0].node_id == node_a
+        assert node_logs[0].error_text == "provider unavailable a"
+        assert store.list_task_node_error_logs(task_id, "node:missing") == []
+
+        store.delete_task(task_id)
+        assert store.list_task_node_error_logs(task_id, node_a) == []
+    finally:
+        store.close()
+
+
 @pytest.mark.asyncio
 async def test_node_error_becomes_error_pause_and_keeps_node_non_terminal(tmp_path: Path) -> None:
     service = _make_service(tmp_path)
@@ -173,6 +210,42 @@ async def test_node_error_becomes_error_pause_and_keeps_node_non_terminal(tmp_pa
         assert node.pause_reason == "error"
         assert service.log_service.list_task_error_logs(record.task_id)[0].error_text == "RuntimeError: provider unavailable"
         assert service.store.get_task_node_pause(record.root_node_id) is not None
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_task_node_error_log_payload_is_scoped_to_node(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("node error payload", session_id="web:shared")
+        task_id = record.task_id
+        service.log_service.append_task_error_log(
+            task_id,
+            record.root_node_id,
+            error_text="first boom",
+            node_title="payload node",
+        )
+        service.log_service.append_task_error_log(
+            task_id,
+            "node:other",
+            error_text="other boom",
+            node_title="other node",
+        )
+
+        payload = service.get_task_node_error_log_payload(task_id, record.root_node_id)
+        assert payload is not None
+        assert payload["ok"] is True
+        assert payload["node_id"] == record.root_node_id
+        assert len(payload["items"]) == 1
+        assert payload["items"][0]["error_text"] == "first boom"
+
+        other_payload = service.get_task_node_error_log_payload(task_id, "node:other")
+        assert other_payload is not None
+        assert len(other_payload["items"]) == 1
+        assert other_payload["items"][0]["error_text"] == "other boom"
+
+        assert service.get_task_node_error_log_payload("task:missing", record.root_node_id) is None
     finally:
         await service.close()
 

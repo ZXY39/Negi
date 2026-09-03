@@ -68,6 +68,7 @@ The top-level `模型配置` page manages `llm-config` provider records and mode
 - The model list left rail renders each binding as a compact card showing only the model name (`default_model`) and the request address (`base_url`); the per-model `Chat`, `Enabled`, and role-chain-membership chips are not rendered. Editing a binding and changing `default_model` updates the stored record, so the displayed name follows the model; the binding key stays a stable identity and is not renamed.
 - `测试最大并发数` is folded behind a `⋯` button next to the per-key concurrency input and requires an explicit confirmation dialog before running because the escalating probe can trigger provider rate limits.
 - Per-role `最大轮数` / `最大并发数` limits live in a collapsible strip on the `模型配置` page header instead of inside the role chain cards, and the strip renders only while `编辑模型链` edit mode is active. Each limit group expands to one numeric input per role; `-1` means unlimited and is persisted as `null`, while the memory Agent `最大并发数` is fixed at 1 and renders as a non-editable pill.
+- The model editor carries a `思考与输出` field group in both create and detail modes: a `深度思考（Reasoning Effort）` six-level select (`none` 关闭深度思考 / `low` / `medium` 默认 / `high` / `xhigh` / `max`) and a `最大输出TOKEN` numeric input (default `131072`, minimum 1). Both fields two-way sync with the JSON draft's `parameters.reasoning_effort` and `parameters.max_tokens`, exactly like `最大上下文TOKEN`; the select stores `none` literally to disable deep thinking, and saving goes through the existing record draft save path (`POST /api/llm/bindings` on create, `PUT /api/llm/configs/{id}`-style update on edit), so no dedicated endpoint is involved. Runtime defaults and provider-side behavior: 详见 `config-and-models.md`「Model Request Parameter Defaults」.
 
 ### Backend Responsibilities
 
@@ -303,6 +304,12 @@ The backend contract behind that UI behavior is:
 - When a node has an active or waiting child, the browser uses the shared centered confirmation modal rather than a native browser dialog. It explains that pausing the parent does not stop children automatically and exposes an unchecked `同时暂停所有子节点（包括检验节点）` option. Confirming sends the existing node-pause request with `cascade` equal to that checkbox; cancelling closes the modal without sending a request.
 - During task-level pause, the tree displays every non-terminal node as `任务暂停` via frontend projection; node pause fields remain unchanged, and recovery reveals any pre-existing node pause.
 - The `错误日志` drawer reads `GET /api/tasks/{task_id}/error-log`, shows time, node, and error text, and treats the node id as a navigation target. Clicking it expands ancestors when possible, centers the tree node, and applies a one-shot highlight. Pause/resume changes arrive through the task-node patch/snapshot path, not by reconstructing state from raw storage tables.
+
+### Node Detail Error History
+
+- The node detail drawer embeds a `历史错误记录` section between `验收` and `日志`. It reads `GET /api/tasks/{task_id}/nodes/{node_id}/error-log` and lists that node's raw records (time, node title, full error text) newest-sequence first; an empty node shows `暂无历史错误`, and a header `刷新` button refetches.
+- History rows are the same `task_error_logs` records as the task-level `错误日志` drawer, filtered by node. They are durable history, not live-only state: they persist while the task exists and are deleted with the task.
+- The runtime appends a record for every invalid final-result submission while the node is still running (not only when the node dies): the entry carries the raw facts — submission count, `response_tool_call_count`, tool names, `output_tokens`, `finish_reason`, the provider model and `sent_max_tokens`, plus a `疑似触及输出token上限被截断` marker when `output_tokens` reached the sent cap. Operators open a failed node and read these entries to confirm truncation/no-tool-call failures without reopening request artifacts.
 
 ### Task Message Distribution UI Contract
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from g3ku.config.schema import normalize_reasoning_effort
 from g3ku.llm_config.models import (
     GenericRuntimeConfig,
     ModelBindingDraft,
@@ -47,7 +48,7 @@ def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, An
             pass
     raw_reasoning = str(payload.get("reasoning_effort") or "").strip()
     if raw_reasoning:
-        result["reasoning_effort"] = raw_reasoning
+        result["reasoning_effort"] = normalize_reasoning_effort(raw_reasoning)
     raw_context_window_tokens = payload.get("context_window_tokens")
     if raw_context_window_tokens not in (None, ""):
         try:
