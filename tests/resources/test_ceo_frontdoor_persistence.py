@@ -2551,3 +2551,34 @@ def test_prompt_history_messages_drops_discarded_and_folds_internal_prompts() ->
     assert "处理完成" in contents  # 助手消息保留
 
 
+def test_fold_recognizes_baseline_messages_without_metadata() -> None:
+    """续跑基线只存 {role, content}（无 metadata），折叠须按内容标记识别内部提示词。
+
+    这是 warm 路径堆积的修复点：基线每个请求都从 request_messages 提交（含失败回合），
+    provider 长期不可用、同一事件每轮重投时，若不在基线折叠则 bundle 线性堆积。
+    """
+    rule = "This is a background heartbeat. Do not explain internal mechanics.\n# Heartbeat Rules"
+    bundle = "[SESSION EVENTS]\n## EVENT BUNDLE\n- Task X (task:t) has a node paused after an error"
+    msgs: list[dict] = []
+    for _ in range(5):
+        msgs.append({"role": "system", "content": rule})
+        msgs.append({"role": "user", "content": bundle})
+    msgs.append({"role": "assistant", "content": "处理完成"})
+
+    folded = web_ceo_sessions.fold_internal_prompt_history(msgs)
+    assert sum(1 for m in folded if m["role"] == "system") == 1  # 5 份相同规则 → 1
+    assert sum(1 for m in folded if m["role"] == "user") == 1  # 5 份相同事件束 → 1
+    assert sum(1 for m in folded if m["role"] == "assistant") == 1  # 助手消息保留
+
+
+def test_fold_does_not_collapse_ordinary_user_messages() -> None:
+    """普通用户消息（不以内部前缀开头）即使内容相同也不折叠，避免误删真实对话。"""
+    normal = [
+        {"role": "user", "content": "请帮我查一下这个文件"},
+        {"role": "assistant", "content": "好的"},
+        {"role": "user", "content": "请帮我查一下这个文件"},  # 与上面相同但非内部提示词
+    ]
+    folded = web_ceo_sessions.fold_internal_prompt_history(normal)
+    assert len(folded) == 3  # 原样保留，不折叠
+
+

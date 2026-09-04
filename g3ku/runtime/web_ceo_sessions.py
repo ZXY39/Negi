@@ -510,7 +510,19 @@ def _message_content_text(value: Any) -> str:
 
 
 def _internal_prompt_kind(value: Any) -> str:
-    return str(message_metadata(value).get("internal_prompt_kind") or "").strip()
+    kind = str(message_metadata(value).get("internal_prompt_kind") or "").strip()
+    if kind:
+        return kind
+    # 续跑基线（frontdoor_request_body_messages）只存 {role, content}、剥掉了 metadata，
+    # 故按内容前缀识别内部提示词，使折叠对 warm 基线路径也生效。前缀标记与
+    # _ceo_runtime_ops._frontdoor_internal_only_message_count 一致；用 startswith 精确匹配，
+    # 普通用户消息几乎不可能以这些运行时前缀开头，误判风险极低。
+    text = _message_content_text(value).lstrip()
+    if text.startswith("This is a background heartbeat") or text.startswith("# Heartbeat Rules"):
+        return "heartbeat_rule"
+    if text.startswith("[SESSION EVENTS]"):
+        return "heartbeat_event_bundle"
+    return ""
 
 
 def fold_internal_prompt_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

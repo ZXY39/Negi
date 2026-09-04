@@ -86,6 +86,7 @@ from main.runtime.tool_call_repair import (
 )
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
+    fold_internal_prompt_history,
     is_prompt_visible_message,
     persist_frontdoor_actual_request,
     strip_multimodal_blocks_from_message_records,
@@ -822,11 +823,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         # 不变量：durable 基线永不含 frontdoor 运行时工具契约块。
         # 若混入（旧版本遗留/回归），直接丢弃，避免污染跨回合基线。
-        return [
+        durable = [
             item
             for item in durable
             if not cls._is_frontdoor_tool_contract_record(item)
         ]
+        # 折叠重复的内部提示词（心跳规则/事件束）。续跑基线每个请求都从 request_messages
+        # 提交（含失败回合，见 _persist_frontdoor_actual_request），且基线只存 {role,content}
+        # 无 metadata；warm 路径不经 prompt_history_messages，故 1.2 的折叠够不到这里。在基线
+        # chokepoint 按内容标记折叠，避免 provider 长期不可用、同一事件每轮重投时 bundle 线性堆积。
+        return fold_internal_prompt_history(durable)
 
     @classmethod
     def _trim_frontdoor_seed_to_stage_window(
