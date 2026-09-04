@@ -19,13 +19,21 @@ _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
 _MAX_WRAPPER_DEPTH = 8
-# content_open 的单行窗口上限（字符数）。行数上限由 MAX_OPEN_LINES 控制，但
-# "单体一行" 的 artifact（例如外置的单行 JSON 大文件）会让打开任意一行都
-# 内联整行内容；没有字符上限时，一个 1.75MB 的单行文件会被整块带入上下文，
-# 直接把请求体撑爆模型窗口且 LLM 压缩也救不回来（见压缩尾部保留逻辑）。
-# 与 INLINE_OPEN_RESULT_CHAR_LIMIT 对齐：真实节选超过该值的打开结果必须走
-# content_search，而不是被整段内联。
+# content_open 行模式（默认 / start_line/end_line / around_line/window）的单次
+# 打开"正文"上限（字符数，只计正文内容，不含元数据）。行对齐取整：只回显完整行，
+# 绝不在行中途截断；"单体一行" 的巨型 artifact（外置单行 JSON 等）走单行兜底，
+# 按字符截断并提示改用 start_char/end_char 或 exec 定向提取。
 OPEN_EXCERPT_CHAR_LIMIT = 16000
+# content_open 字符模式（显式 start_char/end_char）的单次打开正文上限。提高上限
+# 是为了让单行/大块内容用更少调用分页读完；仍远低于整文件，避免撑爆上下文窗口。
+# 注意：对中文内容 128000 字符约合 6.4 万~8.5 万 token，成本较高，谨慎用满。
+CHAR_MODE_OPEN_CHAR_LIMIT = 128000
+# 截断提示语预留字符数：_excerpt/_char_excerpt 把正文压到 (上限 - 该预留) 以内，
+# 追加提示后整体仍不超过对应上限。
+_OPEN_NOTICE_RESERVE = 400
+# content_search 单条命中 preview 的字符上限：单行巨型文件命中时，preview 若不限
+# 长会膨胀成整行并把结果撑过内联闸门；超限则截断并以省略号标记。
+SEARCH_PREVIEW_CHAR_LIMIT = 2000
 # Internal runtime tools that are intentionally always inlined even when their
 # payloads are large. Keep this list explicit here instead of manifest-driven
 # so these delivery exceptions stay auditable and tightly scoped.
@@ -96,7 +104,10 @@ def _search_refine_payload(*, query: str, cap: int, ref: str, handle: ContentHan
         'resolved_ref': handle.resolved_ref or handle.ref,
         'wrapper_ref': handle.wrapper_ref,
         'wrapper_depth': handle.wrapper_depth,
-        'handle': handle.to_dict(),
+        'source_kind': handle.source_kind,
+        'display_name': handle.display_name,
+        'line_count': handle.line_count,
+        'char_count': handle.char_count,
         'query': query,
         'scope_type': scope_type,
         'hits': [],
@@ -338,13 +349,15 @@ def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
         return False
     if normalized == "tool_result:content_open":
         excerpt = str(payload.get("excerpt") or "").strip()
-        if not excerpt or payload.get("start_line") in {None, ""} or payload.get("end_line") in {None, ""}:
+        has_line_range = payload.get("start_line") not in {None, ""} and payload.get("end_line") not in {None, ""}
+        has_char_range = payload.get("start_char") not in {None, ""} and payload.get("end_char") not in {None, ""}
+        if not excerpt or not (has_line_range or has_char_range):
             return False
-        # content_open 的节选只限行数不限字符数，单行巨型 artifact 会原样带出
-        # 整行内容；这里必须与其它 inline 路径共用同一字符/行数闸门，否则
-        # 超大打开结果会以 inline_small 形态进入状态与持久基线（`_excerpt`
-        # 的 OPEN_EXCERPT_CHAR_LIMIT 是最后防线，这里是投递策略的第一道闸门）。
-        return _inline_tool_payload_fits_limits(payload)
+        # content_open 节选按"正文内容"计字符，元数据不计入：_excerpt/_char_excerpt
+        # 已把正文截断到当次模式上限（行模式 16000 / 字符模式 128000），这里只需确认
+        # 正文未超最大上限即可内联。若沿用旧逻辑量"节选+元数据"的序列化总长，接近
+        # 上限的节选会因元数据开销被误外部化，触发打开→外部化→指回原 ref 的死循环。
+        return len(excerpt) <= CHAR_MODE_OPEN_CHAR_LIMIT
     if normalized == "tool_result:content_search":
         return _should_keep_inline_search_tool_result(payload)
     if normalized == "tool_result:spawn_child_nodes":
@@ -353,6 +366,11 @@ def _should_keep_inline_tool_result(value: Any, *, source_kind: str) -> bool:
         return False
     excerpt = str(payload.get("excerpt") or "").strip()
     if excerpt and payload.get("start_line") not in {None, ""} and payload.get("end_line") not in {None, ""}:
+        if normalized == "tool_result:content":
+            # 多动作 content 工具的 open 结果：与 content_open 一样按正文计字符（元
+            # 数据不计入），但保留既有行数闸门——超过 MAX_OPEN_LINES 的多行结果仍需
+            # 外部化（该契约由回归测试锁定）。
+            return len(excerpt) <= CHAR_MODE_OPEN_CHAR_LIMIT and _line_count(excerpt) <= MAX_OPEN_LINES
         return _inline_tool_payload_fits_limits(payload) and _line_count(excerpt) <= MAX_OPEN_LINES
     return _should_keep_inline_search_tool_result(payload)
 
@@ -656,6 +674,12 @@ class ContentNavigationService:
     def tail(self, *, ref: str | None = None, path: str | None = None, lines: int = DEFAULT_OPEN_LINES, view: str = "canonical") -> dict[str, Any]:
         text, handle = self._resolve(ref=ref, path=path, view=view)
         all_lines = text.splitlines()
+        # 单行（或空）内容：行寻址取不到"尾部"，改用字符寻址回显末尾一段，
+        # 而不是像旧逻辑那样退化成回显头部。
+        if len(all_lines) <= 1:
+            total = len(text)
+            start_char = max(1, total - OPEN_EXCERPT_CHAR_LIMIT + 1)
+            return self._char_excerpt(ref=ref, path=path, start_char=start_char, end_char=total, view=view)
         size = max(1, min(int(lines or DEFAULT_OPEN_LINES), MAX_OPEN_LINES))
         start_line = max(1, len(all_lines) - size + 1)
         return self._excerpt(ref=ref, path=path, start_line=start_line, end_line=len(all_lines), view=view)
@@ -670,9 +694,24 @@ class ContentNavigationService:
         end_line: int | None = None,
         around_line: int | None = None,
         window: int | None = None,
+        start_char: int | None = None,
+        end_char: int | None = None,
     ) -> dict[str, Any]:
+        has_char_selector = start_char is not None or end_char is not None
         has_range_selector = start_line is not None or end_line is not None
         has_around_selector = around_line is not None or window is not None
+        if has_char_selector and (has_range_selector or has_around_selector):
+            raise ValueError("choose either start_char/end_char or line selectors (start_line/end_line or around_line/window), not both")
+        if has_char_selector:
+            if start_char is not None and int(start_char) < 1:
+                raise ValueError("start_char must be >= 1")
+            if end_char is not None and int(end_char) < 1:
+                raise ValueError("end_char must be >= 1")
+            sc = int(start_char or 1)
+            ec = int(end_char) if end_char is not None else sc + CHAR_MODE_OPEN_CHAR_LIMIT - 1
+            if ec < sc:
+                raise ValueError("end_char must be >= start_char")
+            return self._char_excerpt(ref=ref, path=path, start_char=sc, end_char=ec, view=view)
         if has_range_selector and has_around_selector:
             raise ValueError("choose either start_line/end_line or around_line/window, not both")
         if start_line is not None and int(start_line) < 1:
@@ -690,11 +729,16 @@ class ContentNavigationService:
             half = max(1, span // 2)
             start_line = max(1, int(around_line) - half)
             end_line = max(start_line, int(around_line) + half)
-        start = max(1, int(start_line or 1))
-        finish = max(start, int(end_line or (start + DEFAULT_OPEN_LINES - 1)))
-        if (finish - start + 1) > MAX_OPEN_LINES:
-            finish = start + MAX_OPEN_LINES - 1
-        return self._excerpt(ref=ref, path=path, start_line=start, end_line=finish, view=view)
+            return self._excerpt(ref=ref, path=path, start_line=start_line, end_line=end_line, view=view)
+        if has_range_selector:
+            start = max(1, int(start_line or 1))
+            finish = max(start, int(end_line or start))
+            if (finish - start + 1) > MAX_OPEN_LINES:
+                finish = start + MAX_OPEN_LINES - 1
+            return self._excerpt(ref=ref, path=path, start_line=start, end_line=finish, view=view)
+        # 默认（未传任何 line/char 参数）：从第 1 行起按字符上限行对齐取整，不再
+        # 固定 80 行；小文件可一次读全，密集文件停在最后一个不超限的整行。
+        return self._excerpt(ref=ref, path=path, start_line=1, end_line=None, view=view)
 
     @staticmethod
     def is_image_mime_type(mime_type: str | None) -> bool:
@@ -861,10 +905,13 @@ class ContentNavigationService:
                 return _search_refine_payload(query=needle, cap=max_hits, ref=handle.ref, handle=handle)
             start = max(0, index - before_count)
             end = min(len(lines), index + after_count + 1)
+            preview = "\n".join(lines[start:end]).strip()
+            if len(preview) > SEARCH_PREVIEW_CHAR_LIMIT:
+                preview = preview[:SEARCH_PREVIEW_CHAR_LIMIT].rstrip() + "…"
             results.append(
                 {
                     "line": index + 1,
-                    "preview": "\n".join(lines[start:end]).strip(),
+                    "preview": preview,
                 }
             )
         return {
@@ -874,7 +921,10 @@ class ContentNavigationService:
             "resolved_ref": handle.resolved_ref or handle.ref,
             "wrapper_ref": handle.wrapper_ref,
             "wrapper_depth": handle.wrapper_depth,
-            "handle": handle.to_dict(),
+            "source_kind": handle.source_kind,
+            "display_name": handle.display_name,
+            "line_count": handle.line_count,
+            "char_count": handle.char_count,
             "query": needle,
             "hits": results,
             "count": len(results),
@@ -886,41 +936,162 @@ class ContentNavigationService:
             "suggestions": [],
         }
 
-    def _excerpt(self, *, ref: str | None = None, path: str | None = None, start_line: int, end_line: int, view: str = "canonical") -> dict[str, Any]:
+    def _excerpt(self, *, ref: str | None = None, path: str | None = None, start_line: int, end_line: int | None = None, view: str = "canonical", char_cap: int | None = None) -> dict[str, Any]:
         text, handle = self._resolve(ref=ref, path=path, view=view)
         lines = text.splitlines()
-        start = max(1, int(start_line or 1))
-        finish = max(start, int(end_line or start))
-        excerpt = "\n".join(lines[start - 1 : finish]).strip()
-        truncated = False
-        total_chars = len(excerpt)
-        shown_chars = total_chars
-        if total_chars > OPEN_EXCERPT_CHAR_LIMIT:
-            truncated = True
-            notice = (
-                "\n\n[内容已截断]：本次打开的区间过大"
-                f"（{start_line}-{min(finish, len(lines))} 行区间共 {total_chars} 字符），"
-                "仅展示头部内容。请改用 content_search 按关键字检索 "
-                f"ref={handle.ref}，或使用更小的 start_line/end_line 区间分段打开。"
+        cap = int(char_cap or OPEN_EXCERPT_CHAR_LIMIT)
+        return self._build_line_excerpt_payload(handle=handle, lines=lines, start=int(start_line or 1), end_line=end_line, cap=cap)
+
+    def _build_line_excerpt_payload(self, *, handle: ContentHandle, lines: list[str], start: int, end_line: int | None, cap: int) -> dict[str, Any]:
+        """行对齐取整：只回显完整行，绝不在行中途截断；首行即超限时走单行字符兜底。"""
+        total_lines = len(lines)
+        start = max(1, min(start, total_lines)) if total_lines else 1
+        finish = total_lines if end_line is None else max(start, min(int(end_line), total_lines))
+        if total_lines == 0 or finish < start:
+            return self._open_payload(
+                handle=handle, start_line=start, end_line=start, excerpt="", truncated=False,
+                shown_chars=0, shown_lines=0, total_range_chars=0, remaining_chars=handle.char_count,
+                remaining_lines=total_lines,
             )
-            head_limit = max(OPEN_EXCERPT_CHAR_LIMIT - len(notice), OPEN_EXCERPT_CHAR_LIMIT // 2)
-            shown_chars = min(head_limit, total_chars)
-            excerpt = excerpt[:shown_chars].rstrip() + notice
-        return {
+        range_lines = lines[start - 1 : finish]
+        total_range_chars = len("\n".join(range_lines))
+        body_cap = max(cap - _OPEN_NOTICE_RESERVE, cap // 2)
+        first = range_lines[0]
+        # 单行巨型 / 首行超限兜底：对这一行按字符截断，提示改用 start_char 或 exec。
+        if len(first) > body_cap:
+            shown_chars = min(body_cap, len(first))
+            remaining_chars = max(len(first) - shown_chars, 0)
+            notice = self._open_truncation_notice(
+                mode="single_line", shown_chars=shown_chars, shown_lines=1,
+                remaining_chars=remaining_chars, remaining_lines=0, next_char=shown_chars + 1,
+            )
+            excerpt = first[:shown_chars].rstrip() + notice
+            return self._open_payload(
+                handle=handle, start_line=start, end_line=start, excerpt=excerpt, truncated=True,
+                shown_chars=shown_chars, shown_lines=1, total_range_chars=total_range_chars,
+                remaining_chars=remaining_chars, remaining_lines=0,
+            )
+        # 行对齐累加整行，直到再加一行会超出正文上限。
+        selected: list[str] = []
+        char_total = 0
+        actual_end = start - 1
+        for offset, line in enumerate(range_lines):
+            add = len(line) + (1 if selected else 0)
+            if selected and char_total + add > body_cap:
+                break
+            selected.append(line)
+            char_total += add
+            actual_end = start + offset
+        truncated = actual_end < finish
+        body = "\n".join(selected)
+        shown_lines = len(selected)
+        remaining_lines = finish - actual_end
+        remaining_chars = max(total_range_chars - char_total, 0)
+        excerpt = body
+        if truncated:
+            excerpt = body + self._open_truncation_notice(
+                mode="line", shown_chars=char_total, shown_lines=shown_lines,
+                remaining_chars=remaining_chars, remaining_lines=remaining_lines, next_line=actual_end + 1,
+            )
+        return self._open_payload(
+            handle=handle, start_line=start, end_line=actual_end, excerpt=excerpt, truncated=truncated,
+            shown_chars=char_total, shown_lines=shown_lines, total_range_chars=total_range_chars,
+            remaining_chars=remaining_chars if truncated else 0,
+            remaining_lines=remaining_lines if truncated else 0,
+        )
+
+    def _char_excerpt(self, *, ref: str | None = None, path: str | None = None, start_char: int, end_char: int, view: str = "canonical") -> dict[str, Any]:
+        """字符寻址：绕过 splitlines 直接按字符切片，供单行/大块内容分页。"""
+        text, handle = self._resolve(ref=ref, path=path, view=view)
+        total_chars = len(text)
+        sc = max(1, min(int(start_char or 1), max(total_chars, 1)))
+        ec = max(sc, int(end_char or sc))
+        cap = CHAR_MODE_OPEN_CHAR_LIMIT
+        body_cap = max(cap - _OPEN_NOTICE_RESERVE, cap // 2)
+        requested = text[sc - 1 : ec]
+        start_line = text.count("\n", 0, sc - 1) + 1
+        if len(requested) > body_cap:
+            shown_content = requested[:body_cap]
+            shown_chars = len(shown_content)
+            end_line = start_line + shown_content.count("\n")
+            next_char = sc + shown_chars
+            remaining_chars = max(total_chars - (sc - 1 + shown_chars), 0)
+            notice = self._open_truncation_notice(
+                mode="char", shown_chars=shown_chars, shown_lines=shown_content.count("\n") + 1,
+                remaining_chars=remaining_chars, remaining_lines=0, next_char=next_char,
+            )
+            excerpt = shown_content.rstrip() + notice
+            return self._open_payload(
+                handle=handle, start_line=start_line, end_line=end_line, excerpt=excerpt, truncated=True,
+                shown_chars=shown_chars, shown_lines=shown_content.count("\n") + 1,
+                total_range_chars=len(requested), remaining_chars=remaining_chars, remaining_lines=0,
+                start_char=sc, end_char=sc + shown_chars - 1,
+            )
+        shown_content = requested
+        shown_chars = len(shown_content)
+        end_line = start_line + shown_content.count("\n")
+        return self._open_payload(
+            handle=handle, start_line=start_line, end_line=end_line, excerpt=shown_content, truncated=False,
+            shown_chars=shown_chars, shown_lines=shown_content.count("\n") + 1 if shown_chars else 0,
+            total_range_chars=len(requested), remaining_chars=0, remaining_lines=0,
+            start_char=sc, end_char=ec,
+        )
+
+    @staticmethod
+    def _open_truncation_notice(*, mode: str, shown_chars: int, shown_lines: int, remaining_chars: int, remaining_lines: int, next_line: int | None = None, next_char: int | None = None) -> str:
+        if mode == "single_line":
+            return (
+                "\n\n[内容已截断] 本次仅显示前 "
+                f"{shown_chars} 字符（单行超长内容，行参数无效），剩余 {remaining_chars} 字符未显示。"
+                f"请改用 start_char/end_char 按字符分页（如 start_char={next_char}）；"
+                "若是 MB 级单行文件，建议用 exec 定向提取（jq/grep/python），逐段分页不现实。"
+            )
+        if mode == "char":
+            return (
+                "\n\n[内容已截断] 本次仅显示前 "
+                f"{shown_chars} 字符 / {shown_lines} 行，剩余 {remaining_chars} 字符未显示。"
+                f"继续查看：设置 start_char={next_char} 起继续按字符分页。"
+            )
+        return (
+            "\n\n[内容已截断] 本次仅显示前 "
+            f"{shown_chars} 字符 / {shown_lines} 行，剩余 {remaining_chars} 字符 / {remaining_lines} 行未显示。"
+            f"继续查看：多行内容用 start_line={next_line}（或更小区间）；需精确字符定位用 start_char/end_char。"
+        )
+
+    @staticmethod
+    def _open_payload(*, handle: ContentHandle, start_line: int, end_line: int, excerpt: str, truncated: bool, shown_chars: int, shown_lines: int, total_range_chars: int, remaining_chars: int, remaining_lines: int, start_char: int | None = None, end_char: int | None = None) -> dict[str, Any]:
+        """精简 open/head/tail 结果：去掉嵌套 handle/预览/内部字段，保留顶层 ref 家族。
+
+        顶层 ref 家族（ref/requested_ref/resolved_ref/wrapper_ref/wrapper_depth）被外部化
+        溯源、落库索引、只读去重等多处消费，必须保留；source_kind 提到顶层供
+        react_loop `_is_ephemeral_tool_result` 读取；line_count/char_count 供模型分页规划。
+        元数据不计入内容字符上限（内联闸门只量 excerpt）。
+        """
+        payload: dict[str, Any] = {
             "ok": True,
             "ref": handle.ref,
             "requested_ref": handle.requested_ref,
             "resolved_ref": handle.resolved_ref or handle.ref,
             "wrapper_ref": handle.wrapper_ref,
             "wrapper_depth": handle.wrapper_depth,
-            "handle": handle.to_dict(),
-            "start_line": start,
-            "end_line": min(finish, len(lines)),
+            "source_kind": handle.source_kind,
+            "display_name": handle.display_name,
+            "line_count": handle.line_count,
+            "char_count": handle.char_count,
+            "start_line": start_line,
+            "end_line": end_line,
             "excerpt": excerpt,
             "truncated": truncated,
-            "excerpt_total_chars": total_chars,
             "excerpt_shown_chars": shown_chars,
+            "excerpt_total_chars": total_range_chars,
+            "excerpt_remaining_chars": remaining_chars,
+            "excerpt_remaining_lines": remaining_lines,
         }
+        if start_char is not None:
+            payload["start_char"] = start_char
+        if end_char is not None:
+            payload["end_char"] = end_char
+        return payload
 
     def _read_text_for_content_display(self, file_path: Path) -> tuple[str, str]:
         """Read file text for content display without crashing on binary files.

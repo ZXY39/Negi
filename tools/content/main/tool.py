@@ -136,6 +136,8 @@ class ContentTool:
         around_line: int | None = None,
         window: int | None = None,
         lines: int | None = None,
+        start_char: int | None = None,
+        end_char: int | None = None,
     ) -> dict[str, Any]:
         if operation == "describe":
             return self._content_store.describe(ref=ref, path=path, view=str(view or "canonical"))
@@ -158,6 +160,8 @@ class ContentTool:
                 end_line=int(end_line) if end_line is not None else None,
                 around_line=int(around_line) if around_line is not None else None,
                 window=int(window) if window is not None else None,
+                start_char=int(start_char) if start_char is not None else None,
+                end_char=int(end_char) if end_char is not None else None,
             )
         if operation == "head":
             return self._content_store.head(ref=ref, path=path, view=str(view or "canonical"), lines=int(lines or 80))
@@ -183,6 +187,8 @@ class ContentTool:
         around_line: int | None = None,
         window: int | None = None,
         lines: int | None = None,
+        start_char: int | None = None,
+        end_char: int | None = None,
     ) -> dict[str, Any]:
         try:
             if operation == 'open':
@@ -213,6 +219,8 @@ class ContentTool:
                             around_line=around_line,
                             window=window,
                             lines=lines,
+                            start_char=start_char,
+                            end_char=end_char,
                         )
                 elif target == "path":
                     payload = self._execute_operation(
@@ -228,6 +236,8 @@ class ContentTool:
                         around_line=around_line,
                         window=window,
                         lines=lines,
+                        start_char=start_char,
+                        end_char=end_char,
                     )
                 else:
                     raise ValueError(f"unsupported content target: {target}")
@@ -320,6 +330,8 @@ class ContentTool:
         around_line: int | None = None,
         window: int | None = None,
         lines: int | None = None,
+        start_char: int | None = None,
+        end_char: int | None = None,
         __g3ku_runtime: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
@@ -347,6 +359,8 @@ class ContentTool:
                     around_line=around_line,
                     window=window,
                     lines=lines,
+                    start_char=start_char,
+                    end_char=end_char,
                 )
                 path_result = self._attempt_single_target_operation(
                     operation=operation,
@@ -363,6 +377,8 @@ class ContentTool:
                     around_line=around_line,
                     window=window,
                     lines=lines,
+                    start_char=start_char,
+                    end_char=end_char,
                 )
                 return json.dumps(
                     self._combine_target_results(
@@ -391,6 +407,8 @@ class ContentTool:
                         around_line=around_line,
                         window=window,
                         lines=lines,
+                        start_char=start_char,
+                        end_char=end_char,
                     ),
                     ensure_ascii=False,
                 )
@@ -411,6 +429,8 @@ class ContentTool:
                         around_line=around_line,
                         window=window,
                         lines=lines,
+                        start_char=start_char,
+                        end_char=end_char,
                     ),
                     ensure_ascii=False,
                 )
@@ -432,6 +452,8 @@ class ContentTool:
                     around_line=around_line,
                     window=window,
                     lines=lines,
+                    start_char=start_char,
+                    end_char=end_char,
                 ),
                 ensure_ascii=False,
             )
