@@ -165,6 +165,13 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 取证：在 actual-request JSON 的 `request_messages` 里统计 `role=system 且 content 以 "This is a background heartbeat" 开头` 与 `role=user 且 content 以 "[SESSION EVENTS]" 开头` 的副本数与去重后唯一数；健康状态是规则 1 份、每种 distinct 事件 bundle 各 1 份。`provider_request_body` 为空时以 `request_messages` 为准。
 - 症状：同一份 event bundle / heartbeat 规则在一个请求体里出现多份；token 估算逐轮近似线性上涨而对话无实质推进；模型对同一暂停节点反复反应，或被过期通知误导去处理已完成的节点。
 
+### 3.13 节点 400 不一定是 payload 畸形——先比 `actual_request_hash`
+
+- 坑：节点报 `400 - Failed to build prompt: Can only get item pairs from a mapping`（或其它 provider 侧 400）时，容易直接断定"我们发的 payload 形状不合法"并去改消息构造/加发送前校验。但 provider 网关在限速/配额风暴期间会降级、返回与 payload 无关的瞬时 400。
+- 判别：节点请求 artifact（`.g3ku/main-runtime/artifacts/task_<id>/artifact_*.json`）带 `actual_request_hash`。取失败那次与同节点之后成功那次对比——**若 hash 完全相同（payload 逐字节一致）却一次 400、一次成功，则是 provider 侧瞬时错误，不是 payload bug**，不要去改消息构造。实测某节点 call15/call16（400）与 call17（成功）`actual_request_hash` 同为 `5d70e9a396337067`，且两次 400 正落在 429 配额风暴时段内。
+- 推论：瞬时 400 被当成终态节点错误（`pause_reason=error`）会喂给心跳重投循环。让瞬时 provider 错误（含网关降级期的伪 400）走重试而非终态，属于错误分类/熔断范畴，不在取证层解决。
+- 注意：`provider_request_body` 在这些 artifact 里为空 `{}`，落盘的是内部 `request_messages`（非 wire payload）；内部消息带 `_node_runtime_tool_contract_payload`、tool 消息带 `started_at/finished_at/elapsed_seconds/ephemeral` 等非标准字段，`_sanitize_empty_content` 原样透传给 provider——同 hash 既失败又成功证明 provider 平时容忍它们，不要据此臆断是这些字段致错。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。

@@ -5,13 +5,40 @@ import re
 from pathlib import Path
 
 
+# CJK 字符按 ~1 字符/token（实测 sensenova/deepseek 对中文近似 1 字/token；取 1.0 略偏
+# 高估，对压缩闸门是安全方向——宁可早压不可晚压），其余按 ~4 字符/token。中文密集文本
+# 若统一按 4 字符/token 会严重低估（实测某会话低报 46%），导致压缩闸门晚触发、安全边界打折。
+_CJK_TOKEN_CHARS = 1.0
+_OTHER_TOKEN_CHARS = 4.0
+
+
+def _count_cjk(text: str) -> int:
+    count = 0
+    for ch in text:
+        code = ord(ch)
+        if (
+            0x3040 <= code <= 0x30FF        # 日文假名
+            or 0x3400 <= code <= 0x4DBF     # CJK 扩展 A
+            or 0x4E00 <= code <= 0x9FFF     # CJK 基本汉字
+            or 0xAC00 <= code <= 0xD7AF     # 谚文音节
+            or 0xF900 <= code <= 0xFAFF     # CJK 兼容表意
+            or 0xFF00 <= code <= 0xFFEF     # 全角形式
+            or 0x20000 <= code <= 0x2FA1F   # CJK 扩展 B-F + 兼容补充
+        ):
+            count += 1
+    return count
+
+
 def estimate_tokens(text: str) -> int:
     compact = ' '.join(str(text or '').split())
     if not compact:
         return 0
-    by_chars = max(1, len(compact) // 4)
-    by_words = max(1, int(len(compact.split()) * 1.3))
-    return max(by_chars, by_words)
+    cjk = _count_cjk(compact)
+    other = len(compact) - cjk
+    # 按文字系统分别折算；纯 ASCII 时 by_script == 旧的 len//4，行为不变（无回归）。
+    by_script = int(cjk / _CJK_TOKEN_CHARS + other / _OTHER_TOKEN_CHARS)
+    by_words = int(len(compact.split()) * 1.3)
+    return max(1, by_script, by_words)
 
 
 def truncate_by_tokens(text: str, max_tokens: int) -> str:
@@ -20,7 +47,13 @@ def truncate_by_tokens(text: str, max_tokens: int) -> str:
         return ''
     if max_tokens <= 0:
         return ''
-    budget_chars = max(32, max_tokens * 4)
+    estimated = estimate_tokens(value)
+    if estimated <= max_tokens:
+        return value
+    # 用与 estimate_tokens 一致的 CJK 感知比例反推可保留字符数，避免对中文截断不足
+    # （旧实现固定 max_tokens*4 字符，对中文等于放行 ~2.7× 预算）。纯 ASCII 时与旧值一致。
+    ratio = max_tokens / max(1, estimated)
+    budget_chars = max(32, int(len(value) * ratio))
     if len(value) <= budget_chars:
         return value
     return value[: max(0, budget_chars - 3)].rstrip() + '...'
