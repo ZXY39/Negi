@@ -2582,3 +2582,81 @@ def test_fold_does_not_collapse_ordinary_user_messages() -> None:
     assert len(folded) == 3  # 原样保留，不折叠
 
 
+def _warm_loop_bundle_messages(messages):
+    return [
+        m for m in messages
+        if m.get("role") == "user" and str(m.get("content") or "").lstrip().startswith("[SESSION EVENTS]")
+    ]
+
+
+def _warm_loop_rule_messages(messages):
+    return [
+        m for m in messages
+        if m.get("role") == "system" and str(m.get("content") or "").lstrip().startswith("This is a background heartbeat")
+    ]
+
+
+def test_warm_path_baseline_bundle_count_stays_bounded_across_failed_heartbeats() -> None:
+    """集成：模拟 provider 永久不可用、同一节点事件连续 10 轮重投（每轮模型调用失败）。
+
+    warm 路径的累积循环：每轮请求体 = 上一轮续跑基线（checkpoint）+ 本轮注入（heartbeat
+    规则 system + 事件束 user），随后 _persist_frontdoor_actual_request 在**每个请求**
+    （含失败回合）把请求体经 _durable_frontdoor_request_body_messages 提交回基线。
+    折叠按内容标记识别（基线无 metadata），同一事件的 bundle 不应随轮数增长。
+    """
+    helpers = ceo_runtime_ops.CeoFrontDoorRuntimeOps
+    rule = "This is a background heartbeat.\n# Heartbeat Rules"
+    bundle = (
+        "[SESSION EVENTS]\n## EVENT BUNDLE\n"
+        "- Task 日报 (task:26e64d1dc8b3) has a node paused after an error\n"
+        "  Node: node:85b3119ce0ac\n  Error: RateLimitError: 429"
+    )
+
+    baseline: list[dict] = []
+    for round_index in range(10):
+        request_body = list(baseline) + [
+            {"role": "system", "content": rule},
+            {"role": "user", "content": bundle},
+        ]
+        # 模型实际看到的请求体：事件束/规则有界（首轮 1，之后"基线折叠副本 + 当前注入"= 2，不再增长）
+        assert len(_warm_loop_bundle_messages(request_body)) <= 2, (
+            f"第 {round_index + 1} 轮请求体事件束数应 ≤2，实际 {len(_warm_loop_bundle_messages(request_body))}"
+        )
+        assert len(_warm_loop_rule_messages(request_body)) <= 2
+        # 提交回基线（真实函数，chokepoint 折叠）
+        baseline = helpers._durable_frontdoor_request_body_messages(request_body)
+        assert len(_warm_loop_bundle_messages(baseline)) == 1, (
+            f"第 {round_index + 1} 轮基线事件束数应 =1，实际 {len(_warm_loop_bundle_messages(baseline))}"
+        )
+    # 10 轮失败后基线仍只有 1 份事件束，而非逐轮堆积
+    assert len(_warm_loop_bundle_messages(baseline)) == 1
+
+
+def test_warm_path_baseline_keeps_distinct_events_but_collapses_redispatches() -> None:
+    """不同事件（内容不同）各自保留最后一份；同一事件重复重投折叠到 1 份，不混叠。"""
+    helpers = ceo_runtime_ops.CeoFrontDoorRuntimeOps
+    rule = "This is a background heartbeat."
+    bundle_a = "[SESSION EVENTS]\n## EVENT BUNDLE\n- node A error: 429 quota"
+    bundle_b = "[SESSION EVENTS]\n## EVENT BUNDLE\n- node B error: 400 bad request"
+
+    baseline: list[dict] = []
+    # 事件 A 连续重投 3 次（同一内容）→ 折叠到 1
+    for _ in range(3):
+        request_body = list(baseline) + [{"role": "system", "content": rule}, {"role": "user", "content": bundle_a}]
+        baseline = helpers._durable_frontdoor_request_body_messages(request_body)
+    assert len(_warm_loop_bundle_messages(baseline)) == 1
+
+    # 事件 B 出现 → 基线保留两个不同事件
+    baseline = helpers._durable_frontdoor_request_body_messages(
+        list(baseline) + [{"role": "user", "content": bundle_b}]
+    )
+    contents = [str(m.get("content")) for m in _warm_loop_bundle_messages(baseline)]
+    assert contents.count(bundle_a) == 1 and contents.count(bundle_b) == 1 and len(contents) == 2
+
+    # 事件 B 再次重投 → 仍不增长
+    baseline = helpers._durable_frontdoor_request_body_messages(
+        list(baseline) + [{"role": "user", "content": bundle_b}]
+    )
+    assert len(_warm_loop_bundle_messages(baseline)) == 2
+
+
