@@ -19,6 +19,14 @@ If both `ref` and `path` are provided, the tool attempts both targets and return
 
 If the excerpt hits the cap, the result sets `truncated: true` and appends a notice reporting how many chars/lines were shown vs. remain and how to continue (`start_line=…`, `start_char=…`, or exec). Follow that notice.
 
+## Character offset unit (1-based code point, not byte)
+
+`start_char` / `end_char` are **1-based Unicode code-point** offsets into the text (each Python `str` character = 1). They are NOT byte offsets and NOT 0-based.
+
+- 0-based code-point offset `O` → `start_char = O + 1`
+- A byte offset (e.g. from `grep -b`) equals the code-point offset only for ASCII; with UTF-8 non-ASCII (CJK, emoji), one character is multiple bytes, so byte offsets do not map directly — convert to code points first.
+- For ordinary multi-line source code, prefer line addressing (`start_line`/`end_line`) — `grep -n` gives line numbers directly. Character addressing is a fallback for single-line or oversized content where line ranges cannot paginate.
+
 ## Single-line / oversized content
 
 For a target that is one very long line (minified JSON, single-line logs, base64), line params are useless. Use `start_char`/`end_char` to paginate by characters (e.g. `start_char=1&end_char=128000`, then continue from the returned `end_char`). For **MB-scale single-line files**, prefer `exec` targeted extraction (`jq`/`grep`/python) instead of paginating — you almost never need the raw MB, just a field or aggregate.

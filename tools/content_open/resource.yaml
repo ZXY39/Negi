@@ -41,11 +41,11 @@ parameters:
     start_char:
       type: integer
       minimum: 1
-      description: Optional 1-based start character offset (character addressing). Mutually exclusive with start_line/end_line/around_line/window. Use for single-line or oversized content where line ranges cannot paginate.
+      description: 1-based Unicode code-point start offset (not byte, not 0-based). Mutually exclusive with start_line/end_line/around_line/window. Use for single-line or oversized content where line ranges cannot paginate; prefer line addressing for ordinary multi-line source code.
     end_char:
       type: integer
       minimum: 1
-      description: Optional end character offset (inclusive). With start_char selects a character window; the per-call char cap applies. Must be >= start_char.
+      description: 1-based Unicode code-point end offset (inclusive). With start_char selects a character window; the per-call char cap applies. Must be >= start_char.
   required: []
 governance:
   family: content_navigation

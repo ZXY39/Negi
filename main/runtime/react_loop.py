@@ -1105,6 +1105,12 @@ class ReActToolLoop:
                     results=results,
                     runtime_context=runtime_context,
                 )
+                self._auto_hydrate_content_open_on_exec_truncation(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    results=results,
+                    runtime_context=runtime_context,
+                )
                 assistant_message = {
                     'role': 'assistant',
                     'content': self._externalize_message_content(
@@ -2606,6 +2612,65 @@ class ReActToolLoop:
                 return None
             return dict(parsed) if isinstance(parsed, dict) else None
         return None
+
+    def _auto_hydrate_content_open_on_exec_truncation(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        results: list[dict[str, Any]],
+        runtime_context: dict[str, Any],
+    ) -> int:
+        """exec 结果被截断时自动水合 content_open，并在该结果里注入提醒。
+
+        背景：exec 是执行/CEO 节点里立即可用的 fixed builtin，但长输出只返 head/tail
+        preview；content_open 能按行/字符精确读本地文件，却是需 hydration 的候选工具。
+        这里在 exec 截断时代替模型水合 content_open（复用现有水合核心，构造合成为
+        load_tool_context 的调用通过其闸门），下一轮即可调，并在本轮 exec 结果里告知
+        模型。返回本次注入提醒的次数（幂等：同一结果只注入一次）。
+        """
+        promoter = getattr(self, '_tool_context_hydration_promoter', None)
+        if not callable(promoter):
+            return 0
+        reminded_count = 0
+        for result in list(results or []):
+            if not isinstance(result, dict):
+                continue
+            tool_message = dict(result.get('tool_message') or {}) if isinstance(result.get('tool_message'), dict) else {}
+            live_state = dict(result.get('live_state') or {}) if isinstance(result.get('live_state'), dict) else {}
+            tool_name = str(tool_message.get('name') or live_state.get('tool_name') or '').strip()
+            if tool_name != 'exec':
+                continue
+            payload = self._tool_context_hydration_payload(result.get('raw_result'))
+            if not isinstance(payload, dict):
+                continue
+            if not (bool(payload.get('stdout_truncated')) or bool(payload.get('stderr_truncated'))):
+                continue
+            raw_content = str(tool_message.get('content') or '')
+            if '已自动加载 content_open' in raw_content:
+                continue  # 已在注入过提醒，避免重复
+            promoter(
+                task_id=str(task_id or '').strip(),
+                node_id=str(node_id or '').strip(),
+                tool_call=SimpleNamespace(
+                    name='load_tool_context',
+                    arguments={'tool_id': 'content_open'},
+                ),
+                raw_result={'ok': True, 'tool_id': 'content_open'},
+                runtime_context=dict(runtime_context or {}),
+            )
+            reminder = (
+                "\n\n⚠️ exec 输出已截断（仅返回 head/tail 预览，中间内容未显示）。"
+                "已自动加载 content_open 工具，下一轮可直接调用它按区间精确读取、避免截断：\n"
+                "  content_open(path=<绝对路径>, start_line=<起>, end_line=<止>)   # 多行源码（grep -n 给行号）\n"
+                "  content_open(path=<绝对路径>, start_char=<起>, end_char=<止>)  # 单行/需字符定位\n"
+                "字符偏移为 1-based Unicode code point（非字节偏移）；多行源码优先用 start_line，"
+                "start_char 仅用于单行/超长内容。"
+            )
+            tool_message['content'] = f"{raw_content}{reminder}"
+            result['tool_message'] = tool_message
+            reminded_count += 1
+        return reminded_count
 
     @classmethod
     def model_visible_always_callable_tool_names(

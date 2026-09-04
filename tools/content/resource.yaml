@@ -80,11 +80,11 @@ parameters:
     start_char:
       type: integer
       minimum: 1
-      description: 1-based start character offset for action=open (character addressing). Mutually exclusive with start_line/end_line/around_line/window. Use for single-line or oversized content where line ranges cannot paginate.
+      description: 1-based Unicode code-point start offset for action=open (not byte, not 0-based). Mutually exclusive with start_line/end_line/around_line/window. Use for single-line or oversized content where line ranges cannot paginate.
     end_char:
       type: integer
       minimum: 1
-      description: End character offset (inclusive) for action=open. With start_char selects a character window; the per-call char cap applies. Must be >= start_char.
+      description: 1-based Unicode code-point end offset (inclusive) for action=open. With start_char selects a character window; the per-call char cap applies. Must be >= start_char.
     lines:
       type: integer
       description: Number of lines for action=head or action=tail.

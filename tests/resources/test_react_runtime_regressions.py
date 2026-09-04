@@ -7436,3 +7436,56 @@ async def test_node_second_tool_round_request_carries_no_stale_contract_or_note(
     non_tail = second_request[:-1]
     assert _contract_count(non_tail) == 0
     assert _note_count(non_tail) == 0
+
+
+def test_auto_hydrate_content_open_on_exec_truncation() -> None:
+    loop = ReActToolLoop.__new__(ReActToolLoop)
+    promotions: list[dict[str, object]] = []
+
+    def _promoter(**kwargs: object) -> None:
+        promotions.append(dict(kwargs))
+
+    loop._tool_context_hydration_promoter = _promoter
+
+    results = [
+        {
+            "raw_result": json.dumps({"status": "ok", "stdout_truncated": True, "stderr_truncated": False}),
+            "tool_message": {"name": "exec", "tool_call_id": "c1", "content": "<EXEC_TRUNC>"},
+            "live_state": {"tool_name": "exec"},
+        },
+        {
+            "raw_result": json.dumps({"status": "ok", "stdout_truncated": False}),
+            "tool_message": {"name": "exec", "tool_call_id": "c2", "content": "<EXEC_OK>"},
+            "live_state": {"tool_name": "exec"},
+        },
+        {
+            "raw_result": json.dumps({"ok": True, "excerpt": "x"}),
+            "tool_message": {"name": "content_open", "tool_call_id": "c3", "content": "<OPEN>"},
+            "live_state": {"tool_name": "content_open"},
+        },
+    ]
+
+    reminded = loop._auto_hydrate_content_open_on_exec_truncation(
+        task_id="t1", node_id="n1", results=results, runtime_context={}
+    )
+
+    assert reminded == 1
+    assert len(promotions) == 1
+    call = promotions[0]
+    tool_call = call["tool_call"]
+    assert getattr(tool_call, "name") == "load_tool_context"
+    assert getattr(tool_call, "arguments") == {"tool_id": "content_open"}
+    assert call["raw_result"] == {"ok": True, "tool_id": "content_open"}
+    # 只在截断的 exec 结果里注入提醒，且保留原有内容前缀。
+    assert results[0]["tool_message"]["content"].startswith("<EXEC_TRUNC>")
+    assert "已自动加载 content_open" in results[0]["tool_message"]["content"]
+    # 非截断 exec 与其它工具不被改动。
+    assert results[1]["tool_message"]["content"] == "<EXEC_OK>"
+    assert results[2]["tool_message"]["content"] == "<OPEN>"
+
+    # 幂等：同一结果再次处理不再重复水合/注入。
+    reminded_again = loop._auto_hydrate_content_open_on_exec_truncation(
+        task_id="t1", node_id="n1", results=results, runtime_context={}
+    )
+    assert reminded_again == 0
+    assert len(promotions) == 1
