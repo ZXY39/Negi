@@ -41,6 +41,14 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     error_text: str | None = None
+    # 结构化 provider 错误信号（finish_reason="error" 时填充）。error_text 已含完整原文
+    # 供展示；这三个字段供上层**程序化分支**（而非 substring 匹配文本）：
+    #   error_code   provider 错误码（如 insufficient_quota / 8 / 400）
+    #   error_status HTTP 状态（如 429 / 400）
+    #   error_kind   异常类别（如 RateLimitError / BadRequestError）
+    error_code: str | None = None
+    error_status: int | None = None
+    error_kind: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
     attempts: list[LLMModelAttempt] = field(default_factory=list)
     reasoning_content: str | None = None

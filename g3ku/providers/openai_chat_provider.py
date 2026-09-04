@@ -55,6 +55,38 @@ def _error_text_for(exc: BaseException, *, fallback: str = "unknown provider err
     return " | ".join(dict.fromkeys(parts))
 
 
+def _structured_error_fields(exc: BaseException) -> dict[str, Any]:
+    """从异常因果链提取 provider 错误的结构化字段（code/status/kind）。
+
+    与 `_error_text_for` 并行：后者把 code/status/body 渲染进**文本**供展示，本函数把它们
+    作为**结构化字段**返回，供上层程序化分支（区分 insufficient_quota / rpm / 400 等），
+    而不必 substring 匹配 provider 特定文案。沿因果链取第一个 OpenAI SDK 错误。
+    """
+    code: str | None = None
+    status: int | None = None
+    kind: str | None = None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OpenAISDKAPIError):
+            if code is None:
+                raw_code = str(getattr(current, "code", "") or "").strip()
+                code = raw_code or None
+            if status is None:
+                raw_status = getattr(current, "status_code", None)
+                try:
+                    status = int(raw_status) if raw_status is not None and str(raw_status).strip() else None
+                except (TypeError, ValueError):
+                    status = None
+            if kind is None:
+                kind = type(current).__name__ or None
+            if code is not None and status is not None and kind is not None:
+                break
+        current = current.__cause__ or current.__context__
+    return {"error_code": code, "error_status": status, "error_kind": kind}
+
+
 class OpenAIChatProvider(LLMProvider):
 
     def __init__(
@@ -150,7 +182,12 @@ class OpenAIChatProvider(LLMProvider):
             return self._parse(await self._client.chat.completions.create(**{**kwargs, "timeout": float(non_stream_timeout_seconds)}))
         except Exception as e:
             error_text = _error_text_for(e)
-            return LLMResponse(content=error_text, error_text=error_text, finish_reason="error")
+            return LLMResponse(
+                content=error_text,
+                error_text=error_text,
+                finish_reason="error",
+                **_structured_error_fields(e),
+            )
 
     def _parse(self, response: Any) -> LLMResponse:
         choice = response.choices[0]

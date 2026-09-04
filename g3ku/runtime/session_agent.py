@@ -3077,10 +3077,18 @@ class RuntimeAgentSession:
             if isinstance(exc, StructuredError):
                 error = exc
             elif all(hasattr(exc, key) for key in ("code", "message", "recoverable")):
+                error_details: dict[str, Any] = {}
+                exc_status = getattr(exc, "status", None)
+                if exc_status is not None:
+                    error_details["error_status"] = exc_status
+                exc_kind = str(getattr(exc, "kind", "") or "").strip()
+                if exc_kind:
+                    error_details["error_kind"] = exc_kind
                 error = StructuredError(
                     code=str(getattr(exc, "code", "") or "legacy_session_error"),
                     message=str(getattr(exc, "message", "") or error_message),
                     recoverable=bool(getattr(exc, "recoverable", True)),
+                    details=error_details,
                 )
             else:
                 error = StructuredError(
@@ -3112,6 +3120,11 @@ class RuntimeAgentSession:
                     "error_message": error.message,
                     "recoverable": error.recoverable,
                 }
+                # 透传结构化 provider 错误信号（HTTP 状态 / 异常类别），供运维与下游分支。
+                for detail_key in ("error_status", "error_kind"):
+                    detail_value = (error.details or {}).get(detail_key)
+                    if detail_value not in (None, ""):
+                        assistant_metadata[detail_key] = detail_value
                 if cron_internal:
                     assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
                 persisted_session = await self._persist_turn_transcript(

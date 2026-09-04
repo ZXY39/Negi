@@ -31,7 +31,7 @@ from g3ku.json_schema_utils import (
 )
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
-from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError
+from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError, ModelProviderResponseError
 from g3ku.providers.responses_protocol_helpers import (
     _convert_messages as _preview_responses_messages,
     _convert_tools as _preview_responses_tools,
@@ -6379,7 +6379,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             error_detail = error_detail if error_detail.lower() not in {"error", "error:"} else "model response failed"
             if error_detail == PUBLIC_PROVIDER_FAILURE_MESSAGE:
                 raise ModelProviderExhaustedError(raw_message=error_detail, message=error_detail)
-            raise RuntimeError(error_detail)
+            # 抛结构化异常而非裸 RuntimeError：携带 provider 的 code/status/kind，使上层
+            # 分类器拿到真实 error_code（如 insufficient_quota）而不是 legacy_session_error，
+            # 完整错误原文保留在 message。仍是 RuntimeError 子类，兼容既有 except。
+            raise ModelProviderResponseError(
+                message=error_detail,
+                raw_message=error_detail,
+                code=str(getattr(response_view, "error_code", "") or ""),
+                status=getattr(response_view, "error_status", None),
+                kind=str(getattr(response_view, "error_kind", "") or ""),
+            )
 
         if text.strip():
             text = strip_frontdoor_tool_contract_echo(text)

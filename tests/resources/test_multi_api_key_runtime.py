@@ -114,13 +114,13 @@ class _TimeoutAwareSuccessProvider:
         return LLMResponse(content="ok", finish_reason="stop")
 
 
-def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: list[int] | None = None) -> ProviderTarget:
+def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: list[int] | None = None, retry_on: list[str] | None = None) -> ProviderTarget:
     return ProviderTarget(
         provider_ref="primary",
         provider_id="custom",
         model_id="custom-model",
         provider=provider,
-        retry_on=["network", "429", "502"],
+        retry_on=["network", "429", "502"] if retry_on is None else list(retry_on),
         retry_count=retry_count,
         api_key_count=api_key_count,
         api_key_indexes=list(range(api_key_count)) if api_key_indexes is None else api_key_indexes,
@@ -128,7 +128,10 @@ def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: 
 
 
 @pytest.mark.asyncio
-async def test_fallback_provider_rotates_full_key_round_before_consuming_retry(monkeypatch) -> None:
+async def test_fallback_provider_rotates_keys_on_non_retryable_error(monkeypatch) -> None:
+    # 新契约：轮换由"非可重试且非请求形状错误"触发。这里 retry_on 只含 network，故 502
+    # 不可重试 → 轮换整轮 key（key0 恒失败、key1 第 2 次成功），轮换在切模型/整链重试之前。
+    # （可重试错误不再轮换、改走整链重试，见 test_should_rotate_predicate_*。）
     calls: list[int] = []
     providers = {
         0: _AlwaysRetryableProvider(0, calls),
@@ -138,7 +141,7 @@ async def test_fallback_provider_rotates_full_key_round_before_consuming_retry(m
     def _builder(config, model_key, *, api_key_index=None):
         _ = config, model_key
         key_index = int(api_key_index or 0)
-        return _target(provider=providers[key_index], retry_count=1, api_key_count=2)
+        return _target(provider=providers[key_index], retry_count=1, api_key_count=2, retry_on=["network"])
 
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
 
@@ -151,6 +154,36 @@ async def test_fallback_provider_rotates_full_key_round_before_consuming_retry(m
 
     assert response.content == "ok"
     assert calls == [0, 1, 0, 1]
+
+
+def test_should_rotate_predicate_retryable_request_shape_and_internal() -> None:
+    """轮换谓词新契约：retryOn 命中(可重试)/请求形状(400)/内部错误 都不换；其余换。"""
+    rotate = fallback_module.should_rotate_api_key_error
+    retry_on = ["network", "429", "502"]
+    # 可重试（命中 retryOn）→ 不换 key，走整链重试
+    assert rotate("RateLimitError: Error code: 429 - too many requests", retry_on=retry_on) is False
+    assert rotate("HTTP 502: upstream request failed", retry_on=retry_on) is False
+    # 请求形状错误（400/bad request）→ 不换（换 key 修不了畸形 payload）
+    assert rotate("HTTP 400: bad request", retry_on=retry_on) is False
+    assert rotate(RuntimeError("BadRequestError: 400 invalid_request_error"), retry_on=retry_on) is False
+    # 内部运行时错误 → 不换
+    assert rotate("sqlite database is locked", retry_on=retry_on) is False
+    # 非可重试、非请求形状、非内部（如 401 坏 key、503）→ 换 key
+    assert rotate("HTTP 401: unauthorized", retry_on=retry_on) is True
+    assert rotate("HTTP 503: service unavailable", retry_on=retry_on) is True
+    # retryOn 显式置空 → 无可重试关键字 → 非请求形状错误一律换 key
+    assert rotate("HTTP 502: upstream request failed", retry_on=[]) is True
+    assert rotate("HTTP 400: bad request", retry_on=[]) is False  # 请求形状豁免与 retryOn 无关
+
+
+def test_response_requires_rotation_uses_structured_error_status() -> None:
+    """响应路径用结构化 error_status 判请求形状错误（error_text 字符串拿不到 status）。"""
+    bad_request = LLMResponse(content="err", error_text="provider rejected", finish_reason="error", error_status=400)
+    assert fallback_module.response_requires_api_key_rotation(bad_request, retry_on=["network", "429"]) is False
+    server_error = LLMResponse(content="err", error_text="upstream 503", finish_reason="error", error_status=503)
+    assert fallback_module.response_requires_api_key_rotation(server_error, retry_on=["network", "429"]) is True
+    retryable = LLMResponse(content="err", error_text="429 too many requests", finish_reason="error", error_status=429)
+    assert fallback_module.response_requires_api_key_rotation(retryable, retry_on=["network", "429"]) is False
 
 
 @pytest.mark.asyncio
@@ -359,6 +392,40 @@ async def test_fallback_provider_retries_full_model_chain_on_retryable_exhaustio
 
     assert response.content == "ok"
     assert calls == ["primary", "secondary", "primary", "secondary"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_chain_retry_stops_at_backoff_budget_cap(monkeypatch) -> None:
+    # 整链可重试退避有累计上限：超过即停止重试并冒泡 exhausted，而非无限重试。
+    # 把上限与单次退避压到极小，使 cap 在几轮内触发（避免真实 20 分钟 sleep）。
+    calls: list[str] = []
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=_AlwaysRetryableChainProvider(str(model_key), calls),
+            retry_on=["network", "429", "502"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.02)
+    monkeypatch.setattr(fallback_module, "MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS", 0.05)
+
+    provider = fallback_module.FallbackProvider(
+        config=SimpleNamespace(),
+        model_chain=["primary"],
+        default_model_ref="primary",
+    )
+    # 退避累计 0.02 → 0.04，第三轮 0.04+0.02 > 0.05 触发 cap → break → 冒泡 exhausted。
+    # 没有 cap 时这里会无限重试（测试挂起）。
+    with pytest.raises(fallback_module.ModelProviderExhaustedError):
+        await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
+    assert calls.count("primary") <= 4  # 有界，而非无限
 
 
 @pytest.mark.asyncio

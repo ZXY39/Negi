@@ -161,7 +161,7 @@ class ModelManager:
                 "config_id": "",
                 "enabled": bool(enabled),
                 "description": str(description or "").strip(),
-                "retry_on": split_retry_keywords(retry_on) or list(DEFAULT_RETRY_ON_KEYWORDS),
+                "retry_on": list(DEFAULT_RETRY_ON_KEYWORDS) if retry_on is None else split_retry_keywords(retry_on),
                 "retry_count": 0 if retry_count is None else int(retry_count),
                 "single_api_key_max_concurrency": normalize_single_api_key_max_concurrency(single_api_key_max_concurrency),
                 "image_multimodal_enabled": bool(image_multimodal_enabled),
@@ -222,7 +222,8 @@ class ModelManager:
         if patch:
             self.facade.update_binding(self.config, model_key=key, draft_payload=patch)
         if retry_on is not _UNSET and retry_on is not None:
-            item.retry_on = split_retry_keywords(retry_on) or list(DEFAULT_RETRY_ON_KEYWORDS)
+            # 显式提供（含 [] / ""）即尊重其值；空列表表示关闭关键字重试，不再回填默认。
+            item.retry_on = split_retry_keywords(retry_on)
         if retry_count is not _UNSET:
             item.retry_count = int(retry_count)
         if single_api_key_max_concurrency is not _UNSET:

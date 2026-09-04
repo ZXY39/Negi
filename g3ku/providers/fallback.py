@@ -31,11 +31,16 @@ PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting t
 # "attempt timeout x attempts x chain rounds" total-budget semantics; retryable
 # chain retries are now unbounded in count and paced by backoff instead.
 DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 600.0
-# Retryable model-chain failures retry indefinitely with capped exponential
-# backoff plus jitter so concurrent nodes do not stampede the same rate window.
+# Retryable model-chain failures retry with capped exponential backoff plus
+# jitter so concurrent nodes do not stampede the same rate window. The retry is
+# bounded by a cumulative backoff budget (below), not by count.
 RETRY_BACKOFF_BASE_SECONDS = 1.0
 RETRY_BACKOFF_CAP_SECONDS = 60.0
 RETRY_BACKOFF_JITTER_RATIO = 0.25
+# 整链可重试退避的累计上限：一个 turn 在"退避等待"上最多累计花这么多秒，超过即中止整链
+# 重试并按耗尽处理。**只计退避等待，不含请求本身耗时**（请求耗时另由
+# DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS 单次约束）。默认 20 分钟，可调。
+MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS = 1200.0
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",
@@ -44,17 +49,6 @@ _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "programmingerror",
     "no active connection",
     "cannot operate on a closed database",
-)
-_AUTH_ERROR_TOKENS = (
-    "401",
-    "403",
-    "unauthorized",
-    "forbidden",
-    "authentication failed",
-    "auth failed",
-    "invalid api key",
-    "incorrect api key",
-    "bad api key",
 )
 
 
@@ -76,6 +70,36 @@ class ModelProviderExhaustedError(RuntimeError):
         # revision changed mid-retry, so callers should rebuild/restart with
         # the refreshed model chain instead of counting a normal retry attempt.
         self.config_revision_changed = bool(config_revision_changed)
+
+
+class ModelProviderResponseError(RuntimeError):
+    """provider 返回 finish_reason="error" 的终态响应时抛出，携带结构化错误信号。
+
+    继承 RuntimeError 以兼容既有 `except RuntimeError`。带 `.code` / `.message` /
+    `.recoverable` 三个属性，使 session_agent 的错误分类器（`all(hasattr(exc, k) for k
+    in ("code","message","recoverable"))`）能取到真实 provider code（如
+    `insufficient_quota`），而不是退化成 `legacy_session_error`。`.status` / `.kind`
+    供需要 HTTP 状态或异常类别的下游使用。完整错误原文保留在 message/raw_message。
+    """
+
+    def __init__(
+        self,
+        *,
+        message: str = "",
+        code: str = "",
+        status: int | None = None,
+        kind: str = "",
+        recoverable: bool = True,
+        raw_message: str = "",
+    ) -> None:
+        resolved_message = str(message or "").strip() or str(raw_message or "").strip() or PUBLIC_PROVIDER_FAILURE_MESSAGE
+        super().__init__(resolved_message)
+        self.message = resolved_message
+        self.code = str(code or "").strip() or "model_provider_error"
+        self.status = status
+        self.kind = str(kind or "").strip()
+        self.recoverable = bool(recoverable)
+        self.raw_message = str(raw_message or "").strip() or resolved_message
 
 
 class ModelAttemptTimeoutError(TimeoutError):
@@ -177,7 +201,8 @@ def is_internal_runtime_model_error(error: Exception | str) -> bool:
 
 
 def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
-    keywords = split_retry_keywords(retry_on or DEFAULT_RETRY_ON_KEYWORDS)
+    # retry_on=None（未设置）用默认关键字；retry_on=[]（显式置空）→ 无关键字 → 不可重试。
+    keywords = split_retry_keywords(DEFAULT_RETRY_ON_KEYWORDS if retry_on is None else retry_on)
     if not keywords:
         return False
 
@@ -188,15 +213,57 @@ def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None 
     return any(token in text for token in expand_retry_keywords(keywords))
 
 
-def is_auth_model_error(error: Exception | str) -> bool:
-    text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "").lower()
-    if is_internal_runtime_model_error(text):
-        return False
-    return any(token in text for token in _AUTH_ERROR_TOKENS)
+# 请求体/参数形状错误的 HTTP 状态：换一把 key 修不了畸形 payload，不轮换、快速失败。
+_REQUEST_SHAPE_STATUS_CODES = frozenset({400, 422})
+# 结构化 status 取不到时（如纯文本 RuntimeError）的窄文本信号——只认标准的请求形状措辞，
+# 不做模糊数字匹配（避免误伤 "400 tokens" 之类）。
+_REQUEST_SHAPE_TEXT_TOKENS = ("bad request", "badrequesterror", "invalid_request_error", "invalid request")
+
+
+def _error_status_code(error: Any) -> int | None:
+    """从 LLMResponse / 结构化异常 / SDK 异常里提取 HTTP 状态码，取不到返回 None。"""
+    for attr in ("error_status", "status_code", "status"):
+        raw = getattr(error, attr, None)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def is_request_shape_error(error: Exception | str | Any) -> bool:
+    """是否为请求体/参数形状错误（400/422 类）：这类错误换 key 无用，应快速失败不轮换。
+
+    优先用结构化 HTTP 状态（3.1 起 LLMResponse.error_status / SDK status_code 可得）；
+    退化到窄文本信号（标准 bad-request 措辞），不做模糊数字匹配。
+    """
+    if _error_status_code(error) in _REQUEST_SHAPE_STATUS_CODES:
+        return True
+    text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "")
+    text = text.lower()
+    return any(token in text for token in _REQUEST_SHAPE_TEXT_TOKENS)
 
 
 def should_rotate_api_key_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
-    return is_auth_model_error(error) or is_retryable_model_error(error, retry_on=retry_on)
+    """换 key 判据：内部运行时错误不换；请求体形状错误（400/422）不换；retryOn 命中
+    （判定可重试）不换、走重试路径；其余（未命中且非请求形状错误）才换 key（换完再切模型）。
+
+    去掉旧的 auth 关键字判据——它易误判，且坏 key（401/403）在默认 retryOn 不含这些码时
+    本就走"未命中 → 换 key"路径，无需单独的 auth 分支。请求形状错误（400/bad request）
+    单独豁免：换一把 key 修不了畸形 payload，只会在每把 key 上重发同一坏请求（保留旧的
+    bad-request 快速失败智慧）。轮换是最便宜的自愈，位于切模型与整链重试之前。注意：把
+    401 之类配进 retryOn 会让坏 key 只重试不换 key（配置脚枪，详见 config-and-models.md）。
+    """
+    text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "")
+    if is_internal_runtime_model_error(text):
+        return False
+    if is_request_shape_error(error):
+        return False
+    return not is_retryable_model_error(error, retry_on=retry_on)
 
 
 def should_fallback_model_error(error: Exception | str) -> bool:
@@ -214,6 +281,9 @@ def response_requires_retry(response: LLMResponse, retry_on: list[str] | None = 
 
 def response_requires_api_key_rotation(response: LLMResponse, retry_on: list[str] | None = None) -> bool:
     if str(response.finish_reason or "").lower() != "error":
+        return False
+    # 用 response 的结构化 error_status 判请求形状错误（下面的 error_source 字符串拿不到 status）。
+    if is_request_shape_error(response):
         return False
     error_source = str(response.error_text or response.content or "")
     return should_rotate_api_key_error(error_source, retry_on=retry_on)
@@ -381,6 +451,8 @@ class FallbackProvider(LLMProvider):
         start_revision = current_runtime_config_revision()
         chain_round_index = 0
         retryable_backoff_count = 0
+        # 整链可重试退避的累计秒数（只计 sleep 等待，不含请求耗时），用于 20 分钟上限。
+        cumulative_backoff_seconds = 0.0
         while True:
             chain_round_index += 1
             round_last_error: Exception | None = None
@@ -598,12 +670,28 @@ class FallbackProvider(LLMProvider):
                     raise retryable_chain_config_changed_error() from round_last_error
                 retryable_backoff_count += 1
                 delay_seconds = model_retry_backoff_seconds(retryable_backoff_count)
+                # 整链退避累计上限：超过则停止重试，跳出 while 落到终态处理（返回 last_response
+                # 或 raise last_error），把"无限整链重试"降级为有界。只计退避等待，不含请求耗时。
+                if cumulative_backoff_seconds + delay_seconds > MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS:
+                    logger.warning(
+                        "Retryable model-chain backoff budget exhausted ({:.0f}s + {:.0f}s > {:.0f}s cap); "
+                        "stopping chain retry: {}",
+                        cumulative_backoff_seconds,
+                        delay_seconds,
+                        MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS,
+                        retry_full_chain_reason,
+                    )
+                    break
+                cumulative_backoff_seconds += delay_seconds
                 logger.warning(
                     "Retryable model-chain failure (round {}); retrying full chain in {:.1f}s: {}",
                     chain_round_index,
                     delay_seconds,
                     retry_full_chain_reason,
                 )
+                # 整链重试也是重试事件，与 key/轮次重试一样发彩色 RETRY trace 保持可观测性
+                # （可重试错误不再走 key 轮换分支，其重试可观测性由这里承担）。
+                _log_model_chain_retry(model_ref=",".join(chain), reason=retry_full_chain_reason)
                 await asyncio.sleep(delay_seconds)
                 continue
             break

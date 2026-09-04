@@ -19,8 +19,13 @@ def test_schema_normalizes_comma_separated_retry_on() -> None:
     target = ModelFallbackTarget.model_validate({"model_key": "demo", "retry_on": "Network, 429 , 502"})
     assert target.retry_on == ["network", "429", "502"]
 
-    defaulted = ModelFallbackTarget.model_validate({"model_key": "demo", "retry_on": []})
-    assert defaulted.retry_on == list(DEFAULT_RETRY_ON_KEYWORDS)
+    # 显式置空被尊重（关闭关键字重试），不再强制回填默认。
+    emptied = ModelFallbackTarget.model_validate({"model_key": "demo", "retry_on": []})
+    assert emptied.retry_on == []
+
+    # 仅在省略字段时才用默认关键字（default_factory）。
+    omitted = ModelFallbackTarget.model_validate({"model_key": "demo"})
+    assert omitted.retry_on == list(DEFAULT_RETRY_ON_KEYWORDS)
 
 
 def test_split_retry_keywords_accepts_comma_separated_string() -> None:

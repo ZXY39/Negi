@@ -22,6 +22,7 @@ from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
+    MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS,
     current_runtime_config_revision,
     exception_chain_display_text,
     exhausted_model_chain_error,
@@ -715,6 +716,8 @@ class ConfigChatBackend:
         start_revision = current_runtime_config_revision()
         chain_round_index = 0
         retryable_backoff_count = 0
+        # 整链可重试退避的累计秒数（只计 sleep 等待，不含请求耗时），用于 20 分钟上限。
+        cumulative_backoff_seconds = 0.0
         retry_status_emitted = False
 
         async def _emit_model_retry_status(status: dict[str, Any]) -> None:
@@ -941,6 +944,20 @@ class ConfigChatBackend:
                         raise retryable_chain_config_changed_error() from round_last_error
                     retryable_backoff_count += 1
                     delay_seconds = model_retry_backoff_seconds(retryable_backoff_count)
+                    # 整链退避累计上限：超过则停止重试，跳出 while 落到终态处理（raise
+                    # exhausted / 返回 last_response），把"无限整链重试"降级为有界。只计
+                    # 退避等待，不含请求耗时（请求耗时由 DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS 约束）。
+                    if cumulative_backoff_seconds + delay_seconds > MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS:
+                        logger.warning(
+                            "Retryable model-chain backoff budget exhausted ({:.0f}s + {:.0f}s > {:.0f}s cap); "
+                            "stopping chain retry: {}",
+                            cumulative_backoff_seconds,
+                            delay_seconds,
+                            MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS,
+                            retry_full_chain_reason,
+                        )
+                        break
+                    cumulative_backoff_seconds += delay_seconds
                     logger.warning(
                         "Retryable model-chain failure (round {}); retrying full chain in {:.1f}s: {}",
                         chain_round_index,

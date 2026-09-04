@@ -264,8 +264,12 @@ class ModelFallbackTarget(Base):
     @field_validator("retry_on", mode="before")
     @classmethod
     def _normalize_retry_on(cls, value: Any) -> list[str]:
-        clean = split_retry_keywords(value)
-        return clean or list(DEFAULT_RETRY_ON_KEYWORDS)
+        # 区分"未设置"(None → 用默认关键字) 与"显式置空"([] / "" → 尊重为空，关闭关键字
+        # 重试)。字段 default_factory 已保证省略时用默认；本 validator 只在显式提供时运行，
+        # 故 None 视作未设置回退默认，其余按实际值（含空）规范化。
+        if value is None:
+            return list(DEFAULT_RETRY_ON_KEYWORDS)
+        return split_retry_keywords(value)
 
     @field_validator("retry_count", mode="before")
     @classmethod
@@ -331,8 +335,12 @@ class ManagedModelConfig(Base):
     @field_validator("retry_on", mode="before")
     @classmethod
     def _normalize_retry_on(cls, value: Any) -> list[str]:
-        clean = split_retry_keywords(value)
-        return clean or list(DEFAULT_RETRY_ON_KEYWORDS)
+        # 区分"未设置"(None → 用默认关键字) 与"显式置空"([] / "" → 尊重为空，关闭关键字
+        # 重试)。字段 default_factory 已保证省略时用默认；本 validator 只在显式提供时运行，
+        # 故 None 视作未设置回退默认，其余按实际值（含空）规范化。
+        if value is None:
+            return list(DEFAULT_RETRY_ON_KEYWORDS)
+        return split_retry_keywords(value)
 
     @field_validator("retry_count", mode="before")
     @classmethod
