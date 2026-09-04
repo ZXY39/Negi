@@ -787,9 +787,11 @@ def test_parse_legacy_change_preview_empty_and_markerless_inputs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_processed_page_backfills_legacy_rows_and_preserves_new_rows(tmp_path: Path) -> None:
+async def test_list_processed_page_backfills_legacy_rows_and_preserves_new_rows(tmp_path: Path, monkeypatch) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
+    # 固定时钟，避免保留期清理按墙上时间淘汰写死的示例批次
+    monkeypatch.setattr(module.MemoryManager, "_now_iso", staticmethod(lambda: "2026-08-30T12:00:00+08:00"))
 
     try:
         legacy_row = {

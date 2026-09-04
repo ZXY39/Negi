@@ -70,7 +70,17 @@ async def test_agent_browser_run_command_decodes_legacy_codepage_output(monkeypa
     async def _fake_create_subprocess_exec(*args, **kwargs):
         return _StubProcess()
 
-    async def _fake_communicate_process(self, *, process, stdin, timeout_seconds, cancel_token):
+    async def _fake_communicate_process(
+        self,
+        *,
+        process,
+        stdin,
+        timeout_seconds,
+        cancel_token,
+        runtime_context,
+        observation_command,
+        observation_args,
+    ):
         return (b'', '站点经验\n'.encode('gbk'))
 
     monkeypatch.setattr(module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
@@ -86,6 +96,7 @@ async def test_agent_browser_run_command_decodes_legacy_codepage_output(monkeypa
         stdin=None,
         timeout_seconds=5,
         cancel_token=None,
+        runtime_context=None,
     )
 
     assert result['ok'] is False

@@ -104,9 +104,10 @@ def test_memory_page_full_detail_preview_uses_centered_grouped_modal_and_scrolla
 def test_memory_page_detail_group_titles_use_utf8_chinese_labels() -> None:
     app_js = _source("g3ku/web/frontend/org_graph_app.js")
 
+    # 86b2a9d0 起已处理详情将原 基础信息/模型与用量 合并为单个 基础信息 分组
     assert "基础信息" in app_js
-    assert "模型与用量" in app_js
     assert "运行信息" in app_js
+    assert "模型与用量" not in app_js
 
 
 def test_memory_page_note_preview_admin_api_and_client_contract(monkeypatch: pytest.MonkeyPatch) -> None:

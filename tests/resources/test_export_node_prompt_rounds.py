@@ -52,7 +52,8 @@ def test_export_node_prompt_rounds_script_exports_two_consecutive_requests(tmp_p
     round2_contracts = _dynamic_contract_messages(list(round2.get("messages") or []))
 
     assert len(round1_contracts) == 1
-    assert len(round2_contracts) == 2
+    # 历史回合的动态契约消息会被运行时剥离，第二轮请求只携带本轮新契约
+    assert len(round2_contracts) == 1
 
     assert round1_payload["message_type"] == "node_runtime_tool_contract"
     assert round1_payload["candidate_tools"] == [
@@ -79,10 +80,11 @@ def test_export_node_prompt_rounds_script_exports_two_consecutive_requests(tmp_p
         }
     ]
 
-    assert summary["rounds"][0]["dynamic_contract_message_indexes"] == [3]
-    assert summary["rounds"][1]["dynamic_contract_message_indexes"] == [3, 7]
-    assert summary["rounds"][1]["last_message_role"] == "assistant"
-    assert summary["rounds"][1]["dynamic_contract_message_count"] == 2
+    assert summary["rounds"][0]["dynamic_contract_message_indexes"] == [2]
+    assert summary["rounds"][1]["dynamic_contract_message_indexes"] == [4]
+    # 契约之后还会追加本回合阶段提示（user 角色），因此最后一条消息是 user
+    assert summary["rounds"][1]["last_message_role"] == "user"
+    assert summary["rounds"][1]["dynamic_contract_message_count"] == 1
 
     round1_model_messages = json.loads((output_dir / "round1.model_messages.json").read_text(encoding="utf-8"))
     round2_model_messages = json.loads((output_dir / "round2.model_messages.json").read_text(encoding="utf-8"))

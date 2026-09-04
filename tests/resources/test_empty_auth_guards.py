@@ -557,7 +557,9 @@ async def test_responses_provider_allows_total_stream_time_above_timeout_when_ch
 
         async def aiter_lines(self):
             for line in self._lines:
-                await asyncio.sleep(0.03)
+                # 逐行间隔远小于空闲超时即可；间隔留足余量，避免 Windows 事件循环
+                # 计时粒度（约 15ms）把 30ms 间隔抖动到 50ms 超时之上造成误报
+                await asyncio.sleep(0.005)
                 yield line
 
     class _FakeStream:
@@ -586,10 +588,11 @@ async def test_responses_provider_allows_total_stream_time_above_timeout_when_ch
     monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
 
     provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
+    # 总时长（12 行 × 实际约 16ms ≈ 190ms）仍超过超时阈值，但每行间隔远小于空闲预算
     response = await provider.chat(
         messages=[{"role": "user", "content": "ping"}],
         model="demo",
-        request_timeout_seconds=0.05,
+        request_timeout_seconds=0.1,
     )
 
     assert response.content == "OK"
