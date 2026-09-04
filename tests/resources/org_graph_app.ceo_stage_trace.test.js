@@ -676,59 +676,31 @@ test("ceo snapshot patch preserves a manually expanded interaction flow", () => 
     assert.equal(turn.flowEl.open, true);
 });
 
-test("ceo snapshot tool normalization preserves distinct tool_call_id values for same-name events", () => {
-    const { normalizeCeoSnapshotToolEvents } = loadApp();
-
-    const events = normalizeCeoSnapshotToolEvents([
-        {
-            tool_name: "filesystem",
-            status: "running",
-            text: "alpha",
-            tool_call_id: "filesystem:1",
-            source: "user",
-        },
-        {
-            tool_name: "filesystem",
-            status: "running",
-            text: "beta",
-            tool_call_id: "filesystem:2",
-            source: "user",
-        },
-    ]);
-
-    assert.deepEqual(Array.from(events, (item) => item.tool_call_id), ["filesystem:1", "filesystem:2"]);
-});
-
 test("ceo tool rows stay distinct for same-name events with different tool_call_id values", () => {
-    const { renderCeoToolEventsIntoTurn } = loadApp();
+    const { applyCeoToolEventToTurn } = loadApp();
     const turn = makeTurn({ text: "" });
 
-    const rendered = renderCeoToolEventsIntoTurn(turn, [
-        {
-            tool_name: "filesystem",
-            status: "running",
-            text: "{\"path\": \"alpha\"}",
-            tool_call_id: "filesystem:1",
-            source: "user",
-        },
-        {
-            tool_name: "filesystem",
-            status: "running",
-            text: "{\"path\": \"beta\"}",
-            tool_call_id: "filesystem:2",
-            source: "user",
-        },
-    ], { source: "user" });
+    const first = applyCeoToolEventToTurn(turn, {
+        tool_name: "filesystem",
+        status: "running",
+        text: "{\"path\": \"alpha\"}",
+        tool_call_id: "filesystem:1",
+        source: "user",
+    });
+    const second = applyCeoToolEventToTurn(turn, {
+        tool_name: "filesystem",
+        status: "running",
+        text: "{\"path\": \"beta\"}",
+        tool_call_id: "filesystem:2",
+        source: "user",
+    });
 
-    assert.equal(rendered, 2);
+    assert.ok(first);
+    assert.ok(second);
     assert.equal(turn.listEl.children.length, 2);
     assert.deepEqual(
         Array.from(turn.listEl.children, (item) => item.dataset.toolCallId),
         ["filesystem:1", "filesystem:2"]
-    );
-    assert.deepEqual(
-        Array.from(turn.listEl.children, (item) => item.dataset.detailText),
-        ['{"path": "alpha"}', '{"path": "beta"}']
     );
 });
 

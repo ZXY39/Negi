@@ -2865,9 +2865,17 @@ async def test_submit_next_stage_only_loop_fails_after_five_turns(tmp_path: Path
         task = service.store.get_task(record.task_id)
         assert task is not None
         assert backend.turn == 6
-        assert task.status == 'failed'
-        assert 'Invalid stage progression detected 5 consecutive times' in str(task.failure_reason or '')
-        assert 'no substantive progress yet' in str(task.failure_reason or '')
+        # 阶段护栏触发后按新语义进入可恢复的错误暂停：任务不终态，根节点暂停并落错误日志
+        assert task.status == 'in_progress'
+        paused = service.get_node(record.root_node_id)
+        assert paused is not None
+        assert paused.is_paused is True
+        assert paused.pause_reason == 'error'
+        logs = service.log_service.list_task_error_logs(record.task_id)
+        assert logs
+        assert 'Invalid stage progression detected 5 consecutive times' in str(logs[0].error_text or '')
+        assert 'no substantive progress yet' in str(logs[0].error_text or '')
+
     finally:
         await service.close()
 
@@ -3388,11 +3396,19 @@ async def test_current_task_progress_after_spawn_fails_after_three_ignored_repai
         await service.wait_for_task(record.task_id)
         task = service.store.get_task(record.task_id)
         assert task is not None
-        assert task.status == 'failed'
-        assert 'repeated tool call detected: task_progress' not in str(task.failure_reason or '')
-        assert 'read-only repair guidance' in str(task.failure_reason or '')
-        assert 'task_progress' in str(task.failure_reason or '')
-        assert 'artifact:artifact:test-spawn' in str(task.failure_reason or '')
+        # 只读重复护栏按新语义进入可恢复的错误暂停：任务不终态，根节点暂停并落错误日志
+        assert task.status == 'in_progress'
+        paused = service.get_node(record.root_node_id)
+        assert paused is not None
+        assert paused.is_paused is True
+        assert paused.pause_reason == 'error'
+        logs = service.log_service.list_task_error_logs(record.task_id)
+        assert logs
+        error_text = str(logs[0].error_text or '')
+        assert 'repeated tool call detected: task_progress' not in error_text
+        assert 'read-only repair guidance' in error_text
+        assert 'task_progress' in error_text
+        assert 'artifact:artifact:test-spawn' in error_text
 
         detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
         assert detail is not None
@@ -3566,11 +3582,18 @@ async def test_repeated_content_open_fails_after_three_ignored_repair_guidances(
         await service.wait_for_task(record.task_id)
         task = service.store.get_task(record.task_id)
         assert task is not None
-        assert task.status == 'failed'
-        assert 'repeated tool call detected: content' not in str(task.failure_reason or '')
-        assert 'read-only repair guidance' in str(task.failure_reason or '')
-        assert 'content' in str(task.failure_reason or '')
-        assert r'D:\repo\cli.tsx' in str(task.failure_reason or '')
+        assert task.status == 'in_progress'
+        paused = service.get_node(record.root_node_id)
+        assert paused is not None
+        assert paused.is_paused is True
+        assert paused.pause_reason == 'error'
+        logs = service.log_service.list_task_error_logs(record.task_id)
+        assert logs
+        error_text = str(logs[0].error_text or '')
+        assert 'repeated tool call detected: content' not in error_text
+        assert 'read-only repair guidance' in error_text
+        assert 'content' in error_text
+        assert r'D:\repo\cli.tsx' in error_text
     finally:
         await service.close()
 

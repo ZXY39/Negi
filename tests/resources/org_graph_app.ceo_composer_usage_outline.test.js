@@ -4,9 +4,10 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
-const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
-const APP_CSS = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
-const APP_HTML = fs.readFileSync("g3ku/web/frontend/org_graph.html", "utf8");
+// Windows 上经 autocrlf 检出为 CRLF；断言按 LF 匹配，读入后统一归一化行尾。
+const APP_CODE = fs.readFileSync(APP_PATH, "utf8").replace(/\r\n/g, "\n");
+const APP_CSS = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8").replace(/\r\n/g, "\n");
+const APP_HTML = fs.readFileSync("g3ku/web/frontend/org_graph.html", "utf8").replace(/\r\n/g, "\n");
 
 class StubElement {}
 class StubHTMLElement extends StubElement {
@@ -177,14 +178,15 @@ test("composer usage brain maps ratio into progressive icon fill", () => {
     U.ceoComposerUsageBrain = new StubHTMLElement();
     U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    U.ceoComposerUsageBrainTip = new StubHTMLElement();
 
     syncCeoComposerUsageOutline();
 
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-active"), true);
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
     assert.equal(U.ceoComposerUsageBrain.dataset.usageState, "active");
-    assert.equal(U.ceoComposerUsageBrain.title, "openai:gpt-5.2 · 8000/32000 TOKEN");
     assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "openai:gpt-5.2 · 8000/32000 TOKEN");
+    assert.equal(U.ceoComposerUsageBrainTip.textContent, "openai:gpt-5.2 · 8000/32000 TOKEN");
     assert.match(String(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"] || ""), /^hsl\(/);
     assert.equal(U.ceoComposerUsageBrainBase.style.height, "75%");
     assert.equal(U.ceoComposerUsageBrainFill.style.height, "25%");
@@ -249,8 +251,7 @@ test("brain stays empty when no exact next-request estimate is available", () =>
 
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-active"), false);
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
-    assert.equal(U.ceoComposerUsageBrain.title, "");
-    assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "");
+    assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "等待 Leader 上下文预估");
 });
 
 test("active turn stays empty before runtime next-request snapshot arrives", () => {
@@ -266,8 +267,7 @@ test("active turn stays empty before runtime next-request snapshot arrives", () 
 
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-active"), false);
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
-    assert.equal(U.ceoComposerUsageBrain.title, "");
-    assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "");
+    assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "等待 Leader 上下文预估");
     assert.equal(U.ceoComposerUsageBrainBase.style.height, "100%");
     assert.equal(U.ceoComposerUsageBrainFill.style.height, "0%");
 });
@@ -285,7 +285,7 @@ test("running state transition does not show fallback outline before runtime est
 
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-active"), false);
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
-    assert.equal(U.ceoComposerUsageBrain.title, "");
+    assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "等待 Leader 上下文预估");
 });
 
 test("estimate mode renders a dedicated brain control instead of textarea outline css", () => {
@@ -660,9 +660,8 @@ test("active turn prefers runtime next-request snapshot over stale composer esti
 
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-active"), true);
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
-    assert.match(U.ceoComposerUsageBrain.title, /openai:gpt-5\.4/);
-    assert.match(U.ceoComposerUsageBrain.title, /21000\/64000 TOKEN/);
-    assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], U.ceoComposerUsageBrain.title);
+    assert.match(U.ceoComposerUsageBrain.attributes["aria-label"], /openai:gpt-5\.4/);
+    assert.match(U.ceoComposerUsageBrain.attributes["aria-label"], /21000\/64000 TOKEN/);
     assert.equal(U.ceoComposerUsageBrain.dataset.usageState, "active");
     const runtimeEstimate = activeCeoRuntimeUsageEstimate("web:test");
     assert.equal(runtimeEstimate.estimate_source, "usage_plus_delta");

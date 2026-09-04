@@ -88,6 +88,7 @@ function loadApp() {
         },
         cancelAnimationFrame: () => {},
         WebSocket: function WebSocket() {},
+        ApiClient: { getActiveSessionId: () => "web:test" },
         addEventListener() {},
         removeEventListener() {},
     };

@@ -6242,7 +6242,7 @@ async def test_react_loop_recovers_raw_final_result_json_after_protocol_repair()
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
     result = await loop.run(
         task=SimpleNamespace(task_id='task-raw-final-json'),
-        node=SimpleNamespace(node_id='node-raw-final-json', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-raw-final-json', depth=0, node_kind='execution', goal='demo'),
         messages=[
             {'role': 'system', 'content': 'system'},
             {'role': 'user', 'content': '{"task_id":"task-raw-final-json","goal":"demo"}'},
