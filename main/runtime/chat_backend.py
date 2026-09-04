@@ -719,6 +719,16 @@ class ConfigChatBackend:
         # 整链可重试退避的累计秒数（只计 sleep 等待，不含请求耗时），用于 20 分钟上限。
         cumulative_backoff_seconds = 0.0
         retry_status_emitted = False
+        # provider 实际请求次数（含 key 轮换/跨模型 fallback/整链重试的每一发请求）。
+        # 与 retryable_backoff_count（只数整链退避轮次）不同：前端重试 toast 的 retry_count
+        # 改用它，避免轮换/单模型轮次的真实请求被少计、低于实际打到 provider 的次数。
+        provider_request_count = 0
+        # 上一发请求的模型 ref：用于区分"同模型重发（key 轮换）"与"跨模型 fallback"。
+        # 只在同模型重发与整链退避时发 toast；跨模型 fallback 属链路正常工作，只计数不发。
+        last_request_model_ref = ""
+        # 整链退避重试已发过 status 后，抑制新轮第一发请求在咽喉点的重复发射
+        # （退避那次已带"下次重试时间"，再发一发 delay=0 会把它盖掉）。
+        suppress_next_request_retry_emission = False
 
         async def _emit_model_retry_status(status: dict[str, Any]) -> None:
             nonlocal retry_status_emitted
@@ -846,6 +856,34 @@ class ConfigChatBackend:
                             if on_text_delta is not None and bool(getattr(target.provider, 'supports_streaming', False)):
                                 provider_kwargs['on_text_delta'] = _provider_text_delta_callback
                             outer_attempt_timeout_seconds = None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds
+                            # 咽喉点统计真实请求次数：除第一发外的每次请求都是一次重试。
+                            # 同模型重发（key 轮换）在此发 retrying status；跨模型 fallback 只计数
+                            # 不发（属链路正常工作）；整链退避已在退避分支发过、此处按 suppress 跳过。
+                            current_model_ref = str(ref or '').strip()
+                            if provider_request_count >= 1:
+                                if suppress_next_request_retry_emission:
+                                    suppress_next_request_retry_emission = False
+                                elif current_model_ref == last_request_model_ref:
+                                    await _emit_model_retry_status(
+                                        {
+                                            "state": "retrying",
+                                            "retry_count": provider_request_count,
+                                            "chain_round": chain_round_index,
+                                            "error_message": _model_retry_status_error_text(
+                                                (
+                                                    exception_chain_display_text(round_last_error)
+                                                    if isinstance(round_last_error, Exception)
+                                                    else ""
+                                                )
+                                            ),
+                                            "model_refs": list(refs),
+                                            "delay_seconds": 0.0,
+                                            "last_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                            "next_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                        }
+                                    )
+                            provider_request_count += 1
+                            last_request_model_ref = current_model_ref
                             response = await wait_for_model_attempt(
                                 target.provider.chat(
                                     **provider_kwargs,
@@ -964,10 +1002,13 @@ class ConfigChatBackend:
                         delay_seconds,
                         retry_full_chain_reason,
                     )
+                    # retry_count 用 provider 实际请求次数（含本轮轮换/跨模型），不再只是整链
+                    # 退避轮次，避免少报；并 suppress 新轮第一发在咽喉点的重复发射。
+                    suppress_next_request_retry_emission = True
                     await _emit_model_retry_status(
                         {
                             "state": "retrying",
-                            "retry_count": retryable_backoff_count,
+                            "retry_count": provider_request_count,
                             "chain_round": chain_round_index,
                             "error_message": _model_retry_status_error_text(
                                 (

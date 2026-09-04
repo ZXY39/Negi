@@ -210,6 +210,41 @@ async def test_config_chat_backend_rotates_on_auth_error(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_chat_backend_emits_retry_status_on_key_rotation(monkeypatch) -> None:
+    calls: list[int] = []
+    events: list[dict[str, object]] = []
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, model_key
+        key_index = int(api_key_index or 0)
+        provider = _AuthThenSuccessProvider(key_index, calls, succeed=key_index == 1)
+        return _target(provider=provider, retry_count=0, api_key_count=2)
+
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    async def record_status(status: dict[str, object]) -> None:
+        events.append(status)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary"],
+        on_model_retry_status=record_status,
+    )
+
+    assert response.content == "ok"
+    assert calls == [0, 1]
+    retrying_events = [event for event in events if event.get("state") == "retrying"]
+    # key0 的 401 非可重试 → 同模型轮换 key1。咽喉点对这次同模型重发发 retrying，
+    # retry_count=1 = 轮换前已打出的 1 发真实请求；此前轮换完全不计、也不发。
+    assert len(retrying_events) == 1
+    assert retrying_events[0]["retry_count"] == 1
+    assert "HTTP 401" in str(retrying_events[0]["error_message"])
+    assert events[-1] == {"state": "cleared"}
+
+
+@pytest.mark.asyncio
 async def test_config_chat_backend_does_not_rotate_on_bad_request(monkeypatch) -> None:
     calls: list[int] = []
 
@@ -354,9 +389,13 @@ async def test_config_chat_backend_publishes_model_retry_status_and_clears_it(mo
     )
 
     assert response.content == "ok"
-    assert events[0]["state"] == "retrying"
-    assert events[0]["retry_count"] == 1
-    assert "HTTP 502: upstream request failed" in str(events[0]["error_message"])
+    retrying_events = [event for event in events if event.get("state") == "retrying"]
+    # 整链重试只发一次；跨模型 fallback 属链路正常工作，只计入次数、不单独发 toast。
+    assert len(retrying_events) == 1
+    # retry_count 改为 provider 实际请求次数：第 1 轮 primary+secondary 共 2 发请求，
+    # 故整链重试前显示 2（旧实现只有整链退避计数 1，少报了真实的第 2 发）。
+    assert retrying_events[0]["retry_count"] == 2
+    assert "HTTP 502: upstream request failed" in str(retrying_events[0]["error_message"])
     assert events[-1] == {"state": "cleared"}
 
 
