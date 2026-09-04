@@ -2422,7 +2422,7 @@ async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_self_exe
     assert stage_state["transition_required"] is False
     stage = stage_state["stages"][0]
     assert stage["status"] == "completed"
-    assert stage["completed_stage_summary"] == "The file has been written and verified."
+    assert stage["completed_stage_summary"] == ceo_runtime_ops.STAGE_TURN_END_SUMMARY_POINTER
     assert stage["finished_at"]
 
 

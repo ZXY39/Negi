@@ -68,6 +68,10 @@ from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
+    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
+    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
+    STAGE_TURN_END_SUMMARY_POINTER,
+    STAGELESS_FREE_PASS_REMINDER,
     response_tool_calls_count_against_stage_budget,
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
@@ -2422,7 +2426,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return normalized
         if self._frontdoor_has_valid_stage(state):
             return normalized
-        return [STAGE_TOOL_NAME]
+        # 新协议:无有效阶段时不再把 callable 收窄到只剩 sns —— 普通工具可调,
+        # 但必须与 sns 同批提交;单独调用普通工具会被宽限执行一次,再次违规才硬拦。
+        # 阶段规则仍在执行期由 stage_gate_error_for_tool / free-pass 判定兜底。
+        if STAGE_TOOL_NAME not in normalized:
+            return [STAGE_TOOL_NAME, *normalized]
+        return normalized
 
     def _frontdoor_runtime_visible_tool_names_for_state(
         self,
@@ -2591,6 +2600,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "active_stage_id": "",
             "transition_required": False,
             "stages": [],
+            "pending_orphan_rounds": [],
         }
 
     @staticmethod
@@ -4012,10 +4022,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         transition_required = bool(raw.get("transition_required"))
         if not active_stage_id:
             transition_required = False
+        pending_orphan_rounds = [
+            dict(item)
+            for item in list(raw.get("pending_orphan_rounds") or [])
+            if isinstance(item, dict)
+        ]
         return {
             "active_stage_id": active_stage_id,
             "transition_required": transition_required,
             "stages": normalized_stages,
+            "pending_orphan_rounds": pending_orphan_rounds,
         }
 
     @classmethod
@@ -4131,8 +4147,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             stages.append(current)
 
         next_stage_index = max((int(stage.get("stage_index") or 0) for stage in stages), default=0) + 1
+        next_stage_id = f"frontdoor-stage-{next_stage_index}"
+        pending_orphan_rounds = [
+            dict(item)
+            for item in list(normalized_state.get("pending_orphan_rounds") or [])
+            if isinstance(item, dict)
+        ]
+        grafted_rounds: list[dict[str, Any]] = []
+        for orphan_index, round_item in enumerate(pending_orphan_rounds, start=1):
+            grafted = dict(round_item)
+            grafted["round_id"] = f"{next_stage_id}:round-{orphan_index}"
+            grafted["round_index"] = orphan_index
+            grafted["orphan_grafted"] = True
+            grafted_rounds.append(grafted)
+        grafted_used = sum(
+            1 for round_item in grafted_rounds if bool(round_item.get("budget_counted"))
+        )
         next_stage = {
-            "stage_id": f"frontdoor-stage-{next_stage_index}",
+            "stage_id": next_stage_id,
             "stage_index": next_stage_index,
             "stage_kind": "normal",
             "system_generated": bool(system_generated),
@@ -4144,15 +4176,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "final_stage": bool(final),
             "key_refs": [],
             "tool_round_budget": normalized_budget,
-            "tool_rounds_used": 0,
+            "tool_rounds_used": min(normalized_budget, grafted_used),
             "created_at": now,
             "finished_at": "",
-            "rounds": [],
+            "rounds": grafted_rounds,
         }
         next_state = {
-            "active_stage_id": str(next_stage.get("stage_id") or ""),
+            "active_stage_id": next_stage_id,
             "transition_required": False,
             "stages": [*stages, next_stage],
+            "pending_orphan_rounds": [],
         }
         return next_state, next_stage
 
@@ -4235,6 +4268,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 and int(latest_active.get("tool_rounds_used") or 0) >= int(latest_active.get("tool_round_budget") or 0)
             ),
             "stages": stages,
+            "pending_orphan_rounds": [
+                dict(item)
+                for item in list(normalized_state.get("pending_orphan_rounds") or [])
+                if isinstance(item, dict)
+            ],
         }
 
     def _merged_frontdoor_canonical_context(
@@ -4347,16 +4385,154 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 context=node_error_context,
             )
             stage_created_this_cycle = True
+        round_entries = [
+            self._frontdoor_round_tool_entry(payload=payload, result=result, source=source)
+            for payload, result in zip(list(ordinary_calls or []), list(ordinary_results or []), strict=False)
+        ]
+        free_pass_kind = ""
+        for result in ordinary_results:
+            kind = str(result.get("free_pass_kind") or "").strip()
+            if kind:
+                free_pass_kind = kind
+                break
+        # 宽限执行的工具按归属记账：无阶段 → 待入账孤儿轮；预算耗尽 → 本阶段溢出轮。
+        if free_pass_kind == "stageless" and ordinary_calls and not str(stage_state.get("active_stage_id") or "").strip():
+            return self._record_frontdoor_orphan_rounds(
+                stage_state,
+                tool_call_payloads=ordinary_calls,
+                tools=round_entries,
+                text=cycle_narration_text,
+            )
+        if free_pass_kind == "exhausted" and ordinary_calls:
+            return self._record_frontdoor_overflow_round(
+                stage_state,
+                tool_call_payloads=ordinary_calls,
+                tools=round_entries,
+                text=cycle_narration_text,
+            )
         updated_state = self._record_frontdoor_stage_round(
             stage_state,
             tool_call_payloads=ordinary_calls,
-            tools=[
-                self._frontdoor_round_tool_entry(payload=payload, result=result, source=source)
-                for payload, result in zip(list(ordinary_calls or []), list(ordinary_results or []), strict=False)
-            ],
+            tools=round_entries,
             text="" if stage_created_this_cycle else cycle_narration_text,
         )
         return updated_state
+
+    @classmethod
+    def _record_frontdoor_orphan_rounds(
+        cls,
+        stage_state: dict[str, Any],
+        *,
+        tool_call_payloads: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        text: str = "",
+    ) -> dict[str, Any]:
+        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        visible_calls = [
+            dict(item)
+            for item in list(tool_call_payloads or [])
+            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() != STAGE_TOOL_NAME
+        ]
+        if not visible_calls:
+            return normalized_state
+        counts_budget = response_tool_calls_count_against_stage_budget(
+            visible_calls,
+            extra_non_budget_tools=CeoFrontDoorSupport._CONTROL_TOOL_NAMES,
+        )
+        pending = [
+            dict(item)
+            for item in list(normalized_state.get("pending_orphan_rounds") or [])
+            if isinstance(item, dict)
+        ]
+        round_index = len(pending) + 1
+        pending.append(
+            {
+                "round_id": f"orphan-round-{round_index}",
+                "round_index": round_index,
+                "created_at": now_iso(),
+                "text": str(text or "").strip(),
+                "tool_names": [
+                    str(item.get("name") or "").strip()
+                    for item in visible_calls
+                    if str(item.get("name") or "").strip()
+                ],
+                "tool_call_ids": [
+                    str(item.get("id") or "").strip()
+                    for item in visible_calls
+                    if str(item.get("id") or "").strip()
+                ],
+                "budget_counted": counts_budget,
+                "orphan": True,
+                "tools": [dict(item) for item in list(tools or []) if isinstance(item, dict)],
+            }
+        )
+        return {
+            "active_stage_id": str(normalized_state.get("active_stage_id") or "").strip(),
+            "transition_required": bool(normalized_state.get("transition_required")),
+            "stages": list(normalized_state.get("stages") or []),
+            "pending_orphan_rounds": pending,
+        }
+
+    @classmethod
+    def _record_frontdoor_overflow_round(
+        cls,
+        stage_state: dict[str, Any],
+        *,
+        tool_call_payloads: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        text: str = "",
+    ) -> dict[str, Any]:
+        normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
+        visible_calls = [
+            dict(item)
+            for item in list(tool_call_payloads or [])
+            if str(item.get("name") or "").strip() and str(item.get("name") or "").strip() != STAGE_TOOL_NAME
+        ]
+        if not visible_calls or not active_stage_id:
+            return normalized_state
+        stages: list[dict[str, Any]] = []
+        for stage in list(normalized_state.get("stages") or []):
+            current = dict(stage)
+            if (
+                str(current.get("stage_id") or "").strip() == active_stage_id
+                and str(current.get("status") or "").strip().lower() == "active"
+            ):
+                rounds = [dict(item) for item in list(current.get("rounds") or []) if isinstance(item, dict)]
+                round_index = len(rounds) + 1
+                rounds.append(
+                    {
+                        "round_id": f"{active_stage_id}:round-{round_index}",
+                        "round_index": round_index,
+                        "created_at": now_iso(),
+                        "text": str(text or "").strip(),
+                        "tool_names": [
+                            str(item.get("name") or "").strip()
+                            for item in visible_calls
+                            if str(item.get("name") or "").strip()
+                        ],
+                        "tool_call_ids": [
+                            str(item.get("id") or "").strip()
+                            for item in visible_calls
+                            if str(item.get("id") or "").strip()
+                        ],
+                        "budget_counted": False,
+                        "overflow": True,
+                        "tools": [dict(item) for item in list(tools or []) if isinstance(item, dict)],
+                    }
+                )
+                current["rounds"] = rounds
+            stages.append(current)
+        return {
+            "active_stage_id": active_stage_id,
+            "transition_required": bool(normalized_state.get("transition_required")),
+            "stages": stages,
+            "pending_orphan_rounds": [
+                dict(item)
+                for item in list(normalized_state.get("pending_orphan_rounds") or [])
+                if isinstance(item, dict)
+            ],
+        }
 
     @classmethod
     def _complete_active_frontdoor_stage_state(
@@ -4391,6 +4567,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "active_stage_id": "" if completed_any else active_stage_id,
             "transition_required": False if completed_any else bool(normalized_state.get("transition_required")),
             "stages": stages,
+            "pending_orphan_rounds": [
+                dict(item)
+                for item in list(normalized_state.get("pending_orphan_rounds") or [])
+                if isinstance(item, dict)
+            ],
         }
 
     @classmethod
@@ -4415,6 +4596,85 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             extra_allowed_tools={*cls._CONTROL_TOOL_NAMES, *FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES},
             stage_tool_name=STAGE_TOOL_NAME,
         )
+
+    @classmethod
+    def _frontdoor_stage_free_pass_kind(cls, stage_state: dict[str, Any] | None) -> str:
+        """撞闸普通工具是否获得本轮宽限执行，及记账归属。
+
+        返回 "stageless"(无活动阶段、宽限未用尽)、"exhausted"(预算耗尽、宽限未用尽)，
+        或 ""(宽限已用尽，应硬拦)。节点暂停事件心跳的 allow_stageless 放行优先于本判定
+        (在 _frontdoor_stage_gate_error 已返回空串，不会走到这里)。
+        """
+        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state or {}})
+        has_active_stage = bool(str(snapshot.get("active_stage_id") or "").strip())
+        transition_required = bool(snapshot.get("transition_required"))
+        if not has_active_stage:
+            pending = [
+                dict(item)
+                for item in list(snapshot.get("pending_orphan_rounds") or [])
+                if isinstance(item, dict)
+            ]
+            # 宽限消耗判定只看 budget_counted 轮;loader-only 轮(budget_counted=false)不消耗宽限。
+            if any(bool(round_item.get("budget_counted")) for round_item in pending):
+                return ""
+            return "stageless"
+        if transition_required:
+            active_stage = next(
+                (
+                    dict(stage)
+                    for stage in list(snapshot.get("stages") or [])
+                    if str(stage.get("stage_id") or "").strip() == str(snapshot.get("active_stage_id") or "").strip()
+                    and str(stage.get("status") or "").strip().lower() == "active"
+                ),
+                None,
+            )
+            if active_stage is not None and any(
+                bool(round_item.get("overflow"))
+                for round_item in list(active_stage.get("rounds") or [])
+                if isinstance(round_item, dict)
+            ):
+                return ""
+            return "exhausted"
+        return ""
+
+    @classmethod
+    def _frontdoor_predicted_exhaustion_reminder(
+        cls,
+        stage_state: dict[str, Any] | None,
+        *,
+        ordinary_payloads: list[dict[str, Any]],
+    ) -> str:
+        """在合法轮即将打满预算时,给本轮结果附上"下轮必须同批 sns"的预告提醒。
+
+        仅当本轮不含 sns、且预算计数的普通调用会把 used 推到预算上限时触发;
+        含 sns 的同批无需预告(模型已主动开下一阶段)。
+        """
+        if not ordinary_payloads:
+            return ""
+        if not response_tool_calls_count_against_stage_budget(
+            ordinary_payloads,
+            extra_non_budget_tools=cls._CONTROL_TOOL_NAMES,
+        ):
+            return ""
+        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state or {}})
+        if not str(snapshot.get("active_stage_id") or "").strip() or bool(snapshot.get("transition_required")):
+            return ""
+        active_stage = next(
+            (
+                dict(stage)
+                for stage in list(snapshot.get("stages") or [])
+                if str(stage.get("stage_id") or "").strip() == str(snapshot.get("active_stage_id") or "").strip()
+                and str(stage.get("status") or "").strip().lower() == "active"
+            ),
+            None,
+        )
+        if active_stage is None or bool(active_stage.get("final_stage")):
+            return ""
+        budget = int(active_stage.get("tool_round_budget") or 0)
+        used = int(active_stage.get("tool_rounds_used") or 0)
+        if budget <= 0 or used + 1 < budget:
+            return ""
+        return STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE.format(used=used, budget=budget)
 
     @classmethod
     def _frontdoor_node_error_heartbeat_context(cls, state: CeoGraphState) -> dict[str, Any] | None:
@@ -4467,6 +4727,43 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             preamble_text="",
             system_generated=True,
         )
+
+    @classmethod
+    def _frontdoor_absorb_orphan_rounds(cls, stage_state: dict[str, Any]) -> dict[str, Any]:
+        """轮末收尾前,把待入账孤儿轮收纳进一个 system_generated 阶段。
+
+        只处理"无活动阶段且本轮直接输出文本、不再调用 sns"的边界情况:
+        复用 _submit_frontdoor_next_stage_state 的嫁接逻辑,把孤儿轮作为该自动阶段的
+        rounds(标记 orphan_grafted),阶段保持 kind="normal"(阶段压缩只认 normal),
+        system_generated=True 以区分来源;随后由轮末 output 收尾以指针摘要关闭它。
+        有活动阶段时孤儿轮留给下一次 sns 嫁接,这里不动。
+        """
+        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        pending = [
+            dict(item)
+            for item in list(snapshot.get("pending_orphan_rounds") or [])
+            if isinstance(item, dict)
+        ]
+        if not pending or str(snapshot.get("active_stage_id") or "").strip():
+            return snapshot
+        first_round_text = str(pending[0].get("text") or "").strip()
+        stage_goal = (
+            f"自动补记无阶段工具调用：{first_round_text[:60]}"
+            if first_round_text
+            else "自动补记：无阶段期间执行的工具调用"
+        )
+        budget = min(max(STAGE_TOOL_ROUND_BUDGET_MIN, len(pending)), STAGE_TOOL_ROUND_BUDGET_MAX)
+        absorbed, _ = cls._submit_frontdoor_next_stage_state(
+            snapshot,
+            stage_goal=stage_goal,
+            tool_round_budget=budget,
+            completed_stage_summary="",
+            key_refs=[],
+            final=False,
+            preamble_text=first_round_text,
+            system_generated=True,
+        )
+        return absorbed
 
     @classmethod
     def _frontdoor_default_overlay_text(cls, state: CeoGraphState) -> str:
@@ -6602,8 +6899,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 stage_state=mutable_stage_state,
                 allow_stageless=bool(node_error_context),
             )
+            free_pass_kind = ""
             if gate_error:
-                return await _error_result(payload, gate_error)
+                free_pass_kind = self._frontdoor_stage_free_pass_kind(mutable_stage_state)
+                if not free_pass_kind:
+                    return await _error_result(payload, gate_error)
             duplicate_load_error = await self._frontdoor_load_tool_context_duplicate_error(
                 payload=payload,
                 state=dict(state or {}),
@@ -6633,6 +6933,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
             result_text = str(result_payload.get("result_text") or "")
             status = str(result_payload.get("status") or self._tool_status(result_text))
+            if status == "success":
+                if free_pass_kind:
+                    reminder = (
+                        STAGELESS_FREE_PASS_REMINDER
+                        if free_pass_kind == "stageless"
+                        else STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER
+                    )
+                    result_text = f"{result_text}\n\n{reminder}".strip()
+                elif predicted_exhaustion_reminder:
+                    result_text = f"{result_text}\n\n{predicted_exhaustion_reminder}".strip()
             await self._emit_progress(
                 on_progress,
                 result_text,
@@ -6649,6 +6959,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "status": status,
                 "raw_result": result_payload.get("raw_result"),
                 "result_text": result_text,
+                "free_pass_kind": free_pass_kind,
                 "tool_message": self._tool_result_message(
                     tool_call_id=str(payload.get("id") or ""),
                     tool_name=tool_name or "tool",
@@ -6674,9 +6985,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for index, payload in indexed_payloads
             if str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
         ]
+        predicted_exhaustion_reminder = self._frontdoor_predicted_exhaustion_reminder(
+            mutable_stage_state,
+            ordinary_payloads=[payload for _, payload in ordinary_items],
+        )
         ordered_results: dict[int, dict[str, Any]] = {}
         stage_failed = False
-        for index, payload in stage_items:
+        for position, (index, payload) in enumerate(stage_items):
+            if position > 0:
+                ordered_results[index] = await _error_result(
+                    payload,
+                    f"{STAGE_TOOL_NAME} can be called at most once per batch; the extra call was ignored",
+                )
+                stage_failed = True
+                continue
             result = await _run_single(payload)
             ordered_results[index] = result
             if str(result.get("status") or "").strip().lower() == "error":
@@ -6857,6 +7179,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         frontdoor_history_shrink_reason = str(state.get("frontdoor_history_shrink_reason") or "").strip()
         finalized_stage_state = self._frontdoor_stage_state_snapshot(state)
+        finalized_stage_state = self._frontdoor_absorb_orphan_rounds(finalized_stage_state)
         is_internal_turn = bool(state.get("heartbeat_internal")) or bool(state.get("cron_internal"))
         # 内部回合的真实可见回复必须像普通回合一样进基线，才能被下一轮上下文看见；
         # 只排除静默 ACK（空输出或 HEARTBEAT_OK），与 session_agent 转录持久化的判据一致。
@@ -6873,8 +7196,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
             result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
             finalized_stage_state = self._complete_active_frontdoor_stage_state(
-                state.get("frontdoor_stage_state"),
-                completed_stage_summary=output,
+                finalized_stage_state,
+                completed_stage_summary=STAGE_TURN_END_SUMMARY_POINTER,
             )
             result["frontdoor_stage_state"] = finalized_stage_state
             result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
@@ -6884,8 +7207,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return result
         if output:
             finalized_stage_state = self._complete_active_frontdoor_stage_state(
-                state.get("frontdoor_stage_state"),
-                completed_stage_summary=output,
+                finalized_stage_state,
+                completed_stage_summary=STAGE_TURN_END_SUMMARY_POINTER,
             )
         result["frontdoor_stage_state"] = finalized_stage_state
         result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(

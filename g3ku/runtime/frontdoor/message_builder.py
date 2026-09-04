@@ -357,14 +357,14 @@ class CeoMessageBuilder:
             lines = [
                 '## 本轮可见技能摘要',
                 '- 当前语义排序不可用，因此下面按完整可见技能集给出摘要。',
-                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
                 '- 如需读取某个 skill 的完整正文，仍然只能在当前已经存在活动阶段后调用 `load_skill_context`。',
             ]
         else:
             lines = [
                 '## 本轮最相关的技能',
                 '- 这些摘要来自当前轮稳定的可见能力曝光。',
-                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
                 '- 如需读取某个 skill 的完整正文，仍然只能在当前已经存在活动阶段后调用 `load_skill_context`。',
             ]
         for item in list(selected_skills or []):
@@ -404,7 +404,7 @@ class CeoMessageBuilder:
             lines = [
                 '## 本轮候选工具',
                 '- 当前语义排序不可用，因此下面列出完整的可见具体工具集合。',
-                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
                 '- 在当前已经存在活动阶段后，任意当前 RBAC 可见且已 surfaced 的具体工具名都可以调用 `load_tool_context(tool_id="...")` 读取 toolskill / 参数说明。',
                 '- 如果该工具当前只出现在 `candidate_tools` 中，读取后仍需等待下一轮 hydration 后才可直接调用。',
                 '- 对已 callable、已 hydrated 或 fixed builtin 的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`。',
@@ -413,7 +413,7 @@ class CeoMessageBuilder:
             lines = [
                 '## 本轮候选工具',
                 '- 下面是本轮候选具体工具。',
-                '- 如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- 如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
                 '- 在当前已经存在活动阶段后，任意当前 RBAC 可见且已 surfaced 的具体工具名都可以调用 `load_tool_context(tool_id="...")` 读取 toolskill / 参数说明。',
                 '- 如果该工具当前只出现在 `candidate_tools` 中，读取后仍需等待下一轮 hydration 后才可直接调用。',
                 '- 对已 callable、已 hydrated 或 fixed builtin 的工具，如果上下文里已经有同版本且未压缩的 toolskill，不要重复调用 `load_tool_context`。',

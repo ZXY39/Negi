@@ -61,6 +61,9 @@ def _normalize_round(round_item: Any) -> dict[str, Any]:
         "created_at": str(current.get("created_at") or "").strip(),
         "text": str(current.get("text") or "").strip(),
         "budget_counted": bool(current.get("budget_counted")),
+        "overflow": bool(current.get("overflow")),
+        "orphan": bool(current.get("orphan")),
+        "orphan_grafted": bool(current.get("orphan_grafted")),
         "tool_names": [
             str(item or "").strip()
             for item in list(current.get("tool_names") or [])

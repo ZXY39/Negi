@@ -27,6 +27,7 @@ from g3ku.runtime.frontdoor.canonical_context import (
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.cancellation import ToolCancellationToken
+from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
 _LEGACY_CONTROL_TOOL_NAMES = {"wait_tool_execution", "stop_tool_execution"}
@@ -968,6 +969,11 @@ class RuntimeAgentSession:
             "active_stage_id": "" if completed_any else active_stage_id,
             "transition_required": False if completed_any else bool(normalized_state.get("transition_required")),
             "stages": stages,
+            "pending_orphan_rounds": [
+                dict(item)
+                for item in list(normalized_state.get("pending_orphan_rounds") or [])
+                if isinstance(item, dict)
+            ],
         }
 
     def _recover_dispatched_async_runtime_error(
@@ -1010,7 +1016,9 @@ class RuntimeAgentSession:
             if not isinstance(raw_stage, dict):
                 continue
             summary = str(raw_stage.get("completed_stage_summary") or "").strip()
-            if summary and summary not in summaries:
+            if not summary or summary == STAGE_TURN_END_SUMMARY_POINTER:
+                continue
+            if summary not in summaries:
                 summaries.append(summary)
         return summaries
 
@@ -3009,7 +3017,7 @@ class RuntimeAgentSession:
                 )
                 self._frontdoor_stage_state = self._complete_active_frontdoor_stage_state(
                     self._frontdoor_stage_state,
-                    completed_stage_summary=output,
+                    completed_stage_summary=STAGE_TURN_END_SUMMARY_POINTER,
                 )
                 assistant = AssistantMessage(content=output, timestamp=self._now())
                 self._state.messages.append(assistant)

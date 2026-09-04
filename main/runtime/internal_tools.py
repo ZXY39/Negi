@@ -35,7 +35,12 @@ class SubmitNextStageTool(Tool):
 
     @property
     def description(self) -> str:
-        return 'Create or switch to the next stage for the current node. You must create a stage before ordinary work, and again when the current stage budget is exhausted.'
+        return (
+            'Create or switch to the next stage. Open a stage before ordinary work, and again '
+            'when the current stage budget is exhausted. When there is no active stage and you need '
+            'to use tools, submit this together with those tools in the same batch — it runs first, '
+            'then the tools are booked on the first round of the new stage.'
+        )
 
     @property
     def model_description(self) -> str:

@@ -2226,7 +2226,7 @@ def test_submit_next_stage_tool_schema_budget_range_is_one_to_fifteen() -> None:
     tool = SubmitNextStageTool(_submit)
 
     assert tool.parameters['properties']['tool_round_budget']['minimum'] == 1
-    assert tool.parameters['properties']['tool_round_budget']['maximum'] == 15
+    assert tool.parameters['properties']['tool_round_budget']['maximum'] == 20
     assert 'completed_stage_summary' in tool.parameters['properties']
     assert 'key_refs' in tool.parameters['properties']
     assert tool.parameters['properties']['key_refs']['items']['required'] == ['ref', 'note']
@@ -2305,12 +2305,12 @@ async def test_submit_next_stage_rejects_budget_above_fifteen(tmp_path: Path):
     )
     try:
         record = await _create_web_task(service)
-        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 15'):
+        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 20'):
             service.log_service.submit_next_stage(
                 record.task_id,
                 record.root_node_id,
                 stage_goal='预算校验；优先派生：无；自行完成：拒绝超出上限的阶段预算',
-                tool_round_budget=16,
+                tool_round_budget=21,
             )
     finally:
         await service.close()
@@ -2328,7 +2328,7 @@ async def test_submit_next_stage_rejects_budget_below_one(tmp_path: Path):
     )
     try:
         record = await _create_web_task(service)
-        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 15'):
+        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 20'):
             service.log_service.submit_next_stage(
                 record.task_id,
                 record.root_node_id,

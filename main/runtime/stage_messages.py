@@ -74,8 +74,10 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
     if not isinstance(active, dict):
         return (
             '当前没有有效的 CEO 阶段。'
-            f'如果本轮需要使用任何工具，你现在必须先调用 `submit_next_stage`，并传入简洁的 `stage_goal` 和 '
-            f'{STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`。'
+            '如果本轮需要使用任何工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交'
+            f'（传入简洁的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`）：'
+            '`submit_next_stage` 会先执行，随后目标工具落入新阶段的第一轮并计入其预算。'
+            '单独调用普通工具只会获得一次宽限执行，再次违规将被拦截。'
             '如果本轮不需要使用工具，可以直接回复。'
         )
     used = int(active.get('tool_rounds_used') or 0)
@@ -97,7 +99,8 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
         return (
             f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
             f'阶段目标：{goal}。'
-            '如需继续使用工具，必须先总结本阶段进展，并调用 `submit_next_stage` 创建下一阶段。'
+            '如需继续使用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段；'
+            '同批里的普通工具将作为新阶段的第一轮调用并计入其预算。'
         )
     return (
         f'当前 CEO 阶段目标：{goal}。'
@@ -129,8 +132,8 @@ def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> s
     return (
         f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
         f'阶段目标：{goal}。'
-        '先不要直接结束。请先总结本阶段已完成的进展，并调用 `submit_next_stage` 创建下一阶段；'
-        '之后再继续工作，或从新阶段交付最终回复。'
+        '先不要直接结束。请先调用 `submit_next_stage` 开启下一阶段（可与下一步要用到的工具同批提交），'
+        '之后在新阶段继续工作，或从新阶段交付最终回复。'
     )
 
 

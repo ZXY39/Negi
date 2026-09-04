@@ -219,20 +219,29 @@ def _render_stage_summary(stage_summary: dict[str, Any] | None) -> str:
     active_stage_id = str(payload.get('active_stage_id') or '').strip() or 'none'
     transition_required = bool(payload.get('transition_required'))
     active_stage = dict(payload.get('active_stage') or {}) if isinstance(payload.get('active_stage'), dict) else {}
+    pending = [dict(item) for item in list(payload.get('pending_orphan_rounds') or []) if isinstance(item, dict)]
+    pending_counted = sum(1 for round_item in pending if bool(round_item.get('budget_counted')))
     if not active_stage:
-        # 用一句人话把"无活动阶段"讲清：这是回合开始时的正常状态，未列出的工具是
-        # 临时禁用而非删除，先 submit_next_stage 开阶段即可使用。避免模型把
-        # callable_tools 仅剩 submit_next_stage 误读成"阶段被重置/工具丢失"。
         guard = (
-            'current stage budget is exhausted; call `submit_next_stage` before calling other tools'
+            'current stage budget is exhausted; submit `submit_next_stage` together with the tools '
+            'you want to call in the next round, otherwise the call will be blocked'
             if transition_required
-            else 'no active stage — normal at the start of every turn; tools other than '
-            '`submit_next_stage` are temporarily disabled, not removed — call `submit_next_stage` first to use them'
+            else 'no active stage — normal at the start of every turn; when you need tools, submit '
+            '`submit_next_stage` together with them in the same batch (submit_next_stage runs first, '
+            'then the tools are booked on the first round of the new stage); calling ordinary tools '
+            'alone gets one grace execution, then is blocked'
         )
-        return (
+        rendered = (
             f'stage_summary: active_stage_id={active_stage_id}; '
             f'transition_required={transition_required}; {guard}'
         )
+        if pending:
+            rendered += (
+                f' {len(pending)} grace round(s) are still unbooked (of which {pending_counted} will consume budget); '
+                'they will be merged into the new stage you open with the next `submit_next_stage`: cover them in '
+                f'stage_goal / completed_stage_summary and set tool_round_budget to at least {len(pending)} + the rounds you still need.'
+            )
+        return rendered
     parts = [
         f'active_stage_id={active_stage_id}',
         f'transition_required={transition_required}',
@@ -319,10 +328,14 @@ def _active_stage_summary(frontdoor_stage_state: dict[str, Any] | None) -> dict[
         ),
         None,
     )
+    pending_orphan_rounds = [
+        dict(item) for item in list(payload.get('pending_orphan_rounds') or []) if isinstance(item, dict)
+    ]
     return {
         'active_stage_id': active_stage_id,
         'transition_required': bool(payload.get('transition_required')),
         'active_stage': _active_stage_prompt_view(active_stage),
+        'pending_orphan_rounds': pending_orphan_rounds,
     }
 
 

@@ -34,6 +34,7 @@ from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, CeoPend
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
+from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -4766,7 +4767,7 @@ async def test_runtime_agent_session_recovers_dispatched_async_task_after_intern
     assert summary["active_stage_id"] == ""
     stage = summary["stages"][0]
     assert stage["status"] == "completed"
-    assert stage["completed_stage_summary"] == result.output
+    assert stage["completed_stage_summary"] == STAGE_TURN_END_SUMMARY_POINTER
     assert stage["finished_at"]
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)

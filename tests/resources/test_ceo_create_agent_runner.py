@@ -1747,7 +1747,7 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
             "visible_skill_ids": [],
         },
         "selected_skills": [],
-        "callable_tool_names": ["submit_next_stage"],
+        "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
         "candidate_tool_names": [],
         "hydrated_tool_names": ["filesystem_write"],
     }

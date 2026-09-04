@@ -21,6 +21,7 @@ def default_frontdoor_canonical_context() -> dict[str, Any]:
         "active_stage_id": "",
         "transition_required": False,
         "stages": [],
+        "pending_orphan_rounds": [],
     }
 
 
@@ -76,6 +77,9 @@ def _normalize_round(round_item: Any) -> dict[str, Any]:
         "created_at": _as_str(current.get("created_at")),
         "text": _as_str(current.get("text")),
         "budget_counted": bool(current.get("budget_counted")),
+        "overflow": bool(current.get("overflow")),
+        "orphan": bool(current.get("orphan")),
+        "orphan_grafted": bool(current.get("orphan_grafted")),
         "tool_names": [
             _as_str(item)
             for item in list(current.get("tool_names") or [])
@@ -217,10 +221,16 @@ def normalize_frontdoor_canonical_context(raw: Any) -> dict[str, Any]:
     ):
         active_stage_id = ""
     transition_required = bool(source.get("transition_required")) if active_stage_id else False
+    pending_orphan_rounds = [
+        _normalize_round(item)
+        for item in list(source.get("pending_orphan_rounds") or [])
+        if isinstance(item, dict)
+    ]
     return {
         "active_stage_id": active_stage_id,
         "transition_required": transition_required,
         "stages": stages,
+        "pending_orphan_rounds": pending_orphan_rounds,
     }
 
 

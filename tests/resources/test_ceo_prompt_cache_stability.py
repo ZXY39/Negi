@@ -497,6 +497,7 @@ def test_frontdoor_tool_contract_stage_summary_omits_round_counters_and_trace_fi
             "stage_kind": "normal",
             "final_stage": False,
         },
+        "pending_orphan_rounds": [],
     }
 
 

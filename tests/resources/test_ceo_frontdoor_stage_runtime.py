@@ -264,6 +264,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
                 "archive_stage_index_end": 0,
             }
         ],
+        "pending_orphan_rounds": [],
     }
     assert executed == []
 

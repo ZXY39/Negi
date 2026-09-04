@@ -85,7 +85,7 @@ class CeoPromptBuilder:
             [
                 '## 本轮可见技能',
                 '- 只有以下 `skill_id` 在本轮可见，不要假设其他 skill 可用。',
-                '- “可见”不等于“本轮一开始就应该读取正文”；如果当前还没有活动阶段且你需要使用工具，第一步必须先调用 `submit_next_stage`。',
+                '- “可见”不等于“本轮一开始就应该读取正文”；如果当前还没有活动阶段且你需要使用工具，必须把 `submit_next_stage` 与目标工具同批提交（`submit_next_stage` 先执行，工具记入新阶段首轮）。',
                 '- 仅当当前已经存在活动阶段且你确实需要完整工作流正文时，才可对下列 `skill_id` 调用 `load_skill_context(skill_id="<skill_id>")`。',
                 '- candidate skill 不走 hydration；不要把候选 skill 误当成需要安装或等待下一轮才可读取正文的工具。',
                 *lines,
