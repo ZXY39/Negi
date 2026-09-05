@@ -378,7 +378,11 @@ class NodeRuntimeToolContract:
     def to_message(self) -> dict[str, Any]:
         payload = self.to_message_payload()
         return {
-            'role': 'assistant',
+            # system 角色：该契约是运行时元数据、不是对话内容。用 assistant 会
+            # 让模型把它当成"自己上一轮说过/发给用户的消息"，进而在续写位置把它
+            # 整段复读回下一条回复（回显事故 task:e580ebc3dc55）。对齐前门
+            # FrontdoorToolContract 的 system 角色契约（见 tool_contract.py）。
+            'role': 'system',
             'content': _render_node_dynamic_contract_summary(payload),
             NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY: payload,
         }
@@ -389,9 +393,45 @@ def is_node_dynamic_contract_message(message: dict[str, Any]) -> bool:
         return True
     if _message_declares_tool_calls(message):
         return False
-    if str((message or {}).get('role') or '').strip().lower() != 'assistant':
+    # 注入的契约已经以 system 角色落地；存量 frame / seed 重建里仍可能有
+    # assistant 角色的旧契约残留，模型回显的契约也是 assistant 文本，两类都识别。
+    if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system'}:
         return False
     return str((message or {}).get('content') or '').strip().startswith(NODE_DYNAMIC_CONTRACT_HEADING)
+
+
+def _node_dynamic_contract_heading_index(text: str) -> int:
+    """Return the start of a rendered node contract embedded in ``text``.
+
+    The heading alone is not enough to classify ordinary prose that merely
+    mentions the contract. Requiring the canonical kind marker in the nearby
+    suffix keeps this helper focused on the provider-facing contract summary
+    that the runtime injects.
+    """
+    normalized = str(text or '')
+    heading_index = normalized.find(NODE_DYNAMIC_CONTRACT_HEADING)
+    if heading_index < 0:
+        return -1
+    suffix = normalized[heading_index : heading_index + 512]
+    if f'kind: {NODE_DYNAMIC_CONTRACT_KIND}' not in suffix:
+        return -1
+    return heading_index
+
+
+def is_node_dynamic_contract_echo_text(text: Any) -> bool:
+    """Whether model text is a standalone injected node-contract echo.
+
+    Mirrors ``is_frontdoor_tool_contract_echo_text`` for the node lane: a
+    reply that starts with the contract heading and carries the canonical kind
+    marker is treated as an echo, so ``react_loop`` can repair it instead of
+    auto-wrapping it into a ``success + final`` result.
+    """
+    normalized = str(text or '').strip()
+    if not normalized:
+        return False
+    if normalized.startswith(NODE_DYNAMIC_CONTRACT_HEADING):
+        return _node_dynamic_contract_heading_index(normalized) == 0
+    return is_node_dynamic_contract_message({'role': 'assistant', 'content': normalized})
 
 
 def upsert_node_dynamic_contract_message(
@@ -436,6 +476,7 @@ __all__ = [
     'NodeRuntimeToolContract',
     'extract_node_dynamic_contract_payload',
     'inject_node_dynamic_contract_message',
+    'is_node_dynamic_contract_echo_text',
     'is_node_dynamic_contract_message',
     'strip_node_dynamic_contract_messages',
     'upsert_node_dynamic_contract_message',

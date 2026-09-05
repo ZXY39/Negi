@@ -4,9 +4,11 @@ import json
 
 from main.runtime.node_prompt_contract import (
     NODE_DYNAMIC_CONTRACT_KIND,
+    NODE_DYNAMIC_CONTRACT_HEADING,
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
+    is_node_dynamic_contract_echo_text,
     is_node_dynamic_contract_message,
     strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
@@ -47,7 +49,7 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
     updated = upsert_node_dynamic_contract_message(base_messages, contract)
 
     assert len(updated) == 3
-    assert updated[-1]["role"] == "assistant"
+    assert updated[-1]["role"] == "system"
     assert updated[-1]["content"].startswith("## Runtime Tool Contract")
     assert '"message_type"' not in updated[-1]["content"]
     payload = contract.to_message_payload()
@@ -100,7 +102,7 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     assert "model_visible_tool_selection_trace" not in payload
     assert "node_id" not in payload
     assert "node_kind" not in payload
-    assert message["role"] == "assistant"
+    assert message["role"] == "system"
     assert message["content"].startswith("## Runtime Tool Contract")
     assert '"message_type"' not in message["content"]
     assert "callable_tools: `exec`" in message["content"]
@@ -210,7 +212,7 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
         contract,
     )
 
-    assert [item["role"] for item in injected] == ["system", "user", "assistant", "assistant"]
+    assert [item["role"] for item in injected] == ["system", "user", "assistant", "system"]
     assert injected[-1]["content"].startswith("## Runtime Tool Contract")
     assert '"message_type"' not in injected[-1]["content"]
     payload = extract_node_dynamic_contract_payload(injected)
@@ -265,10 +267,44 @@ def test_model_echo_of_contract_heading_with_tool_calls_is_not_a_contract_messag
     assert is_node_dynamic_contract_message(json_echo_turn) is False
     assert extract_node_dynamic_contract_payload([json_echo_turn]) is None
 
-    # 真正的注入契约（无 tool_calls）仍按原规则识别与剥离。
+    # 真正的注入契约（无 tool_calls）仍按原规则识别与剥离；system 与 assistant
+    # 两种角色都识别（旧 frame / seed 重建里仍可能有 assistant 残留）。
     real_contract = {
         "role": "assistant",
         "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
     }
     assert is_node_dynamic_contract_message(real_contract) is True
     assert strip_node_dynamic_contract_messages([real_contract]) == []
+
+    system_contract = {
+        "role": "system",
+        "content": "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `submit_next_stage`",
+    }
+    assert is_node_dynamic_contract_message(system_contract) is True
+    assert strip_node_dynamic_contract_messages([system_contract]) == []
+
+
+def test_is_node_dynamic_contract_echo_text() -> None:
+    # standalone 回显：以契约抬头开头 + 附近携带 kind 标记 → 判定为回显。
+    assert (
+        is_node_dynamic_contract_echo_text(
+            "## Runtime Tool Contract\nkind: node_runtime_tool_contract\ncallable_tools: `exec`"
+        )
+        is True
+    )
+    # 只写了抬头、后接普通正文（无 kind 标记）→ 不是回显，避免误伤报告里
+    # 引用契约抬头的合法内容。
+    assert is_node_dynamic_contract_echo_text("## Runtime Tool Contract\nordinary prose") is False
+    # 正文中段提到契约（抬头不在开头）→ 不是 standalone 回显。
+    assert (
+        is_node_dynamic_contract_echo_text(
+            "已完成探索。\n\n## Runtime Tool Contract\nkind: node_runtime_tool_contract"
+        )
+        is False
+    )
+    # 空文本与非契约文本 → 不是回显。
+    assert is_node_dynamic_contract_echo_text("") is False
+    assert is_node_dynamic_contract_echo_text("继续执行当前阶段目标。") is False
+    # 以 system 角色注入的契约消息本身不算"模型回显"（它是运行时注入的元数据）。
+    # 该语义由 is_node_dynamic_contract_message 承担，回显检测只面向模型文本。
+    assert is_node_dynamic_contract_echo_text(NODE_DYNAMIC_CONTRACT_HEADING + "\nkind: " + NODE_DYNAMIC_CONTRACT_KIND) is True

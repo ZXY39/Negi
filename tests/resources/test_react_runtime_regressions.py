@@ -3228,8 +3228,69 @@ async def test_contract_echo_with_stage_tool_call_keeps_pairing_and_tail_order()
     assert str(second_request[-1].get("role") or "") == "user"
     assert str(second_request[-1].get("content") or "").startswith("System note for this turn only:")
     contract_message = second_request[-2]
-    assert str(contract_message.get("role") or "") == "assistant"
+    assert str(contract_message.get("role") or "") == "system"
     assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
+
+
+@pytest.mark.asyncio
+async def test_standalone_contract_echo_repairs_once_then_pauses() -> None:
+    # 回归 task:e580ebc3dc55：模型把请求末尾注入的 node_runtime_tool_contract
+    # 原文复读成整条回复（零工具调用）。修复前该纯文本经 auto-wrap 被包装成
+    # success+final，把契约当成任务交付送进验收；修复后首次回显注入修复提示
+    # 重试，再次回显按协议违规收口为可恢复的 error pause，绝不升格为成功。
+    echo_content = (
+        "## Runtime Tool Contract\n"
+        "kind: node_runtime_tool_contract\n"
+        "callable_tools: `submit_next_stage`, `submit_final_result`, `exec`\n"
+        "hydrated_tools: `exec`\n"
+        "candidate_tools:\n"
+        "- `filesystem_write`\n"
+    )
+
+    requests: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            requests.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            return LLMResponse(
+                content=echo_content,
+                tool_calls=[],
+                finish_reason="stop",
+                usage={"input_tokens": 2000, "output_tokens": 200},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=5)
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-contract-echo-standalone"),
+        node=SimpleNamespace(node_id="node-contract-echo", depth=0, node_kind="execution", goal="demo"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-contract-echo-standalone","goal":"demo"}'},
+        ],
+        tools={
+            "submit_final_result": _submit_final_result_tool(),
+        },
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-contract-echo-standalone", "node_id": "node-contract-echo"},
+        max_iterations=5,
+    )
+
+    assert result.status == "failed"
+    assert result.delivery_status == "blocked"
+    assert result.failure_disposition == "pause"
+    assert "runtime tool contract echo guard triggered" in result.summary
+
+    # 首次回显只注入一次修复提示重试，第二次才收口。
+    assert len(requests) == 2
+    second_request = requests[1]
+    repair_hits = [
+        message
+        for message in second_request
+        if str(message.get("content") or "").startswith("System note for this turn only:")
+        and "Runtime Tool Contract" in str(message.get("content") or "")
+    ]
+    assert len(repair_hits) == 1
 
 
 @pytest.mark.asyncio
@@ -4498,7 +4559,7 @@ def test_node_dynamic_contract_injection_keeps_request_only_message_after_bootst
         contract,
     )
 
-    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "assistant"]
+    assert [item["role"] for item in injected[:4]] == ["system", "user", "assistant", "system"]
     payload = extract_node_dynamic_contract_payload(injected)
     assert payload is not None
     assert payload["execution_stage"] == {

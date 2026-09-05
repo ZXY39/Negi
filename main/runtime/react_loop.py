@@ -51,6 +51,7 @@ from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
+    is_node_dynamic_contract_echo_text,
     is_node_dynamic_contract_message,
     strip_node_dynamic_contract_messages,
     upsert_node_dynamic_contract_message,
@@ -107,12 +108,18 @@ _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
 _STAGE_ONLY_TRANSITION_LIMIT = 5
+_NODE_CONTRACT_ECHO_REPAIR_LIMIT = 2
 _PROVIDER_RETRY_LIMIT = 3
 _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS = 120.0
 _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
 _NODE_TOKEN_COMPACT_MARKER = "[G3KU_TOKEN_COMPACT_V2]"
 _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT = 12
 _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
+_NODE_CONTRACT_ECHO_REPAIR_MESSAGE = (
+    '上一次回复把运行时注入的 `## Runtime Tool Contract` 契约原文复述了一遍。'
+    '不要输出、总结或引用这份契约；继续服务当前阶段目标，'
+    '或通过结构化工具调用（例如 `submit_final_result`）提交最终结果。'
+)
 _RESULT_REQUIRED_KEYS = (
     'status',
     'delivery_status',
@@ -202,6 +209,7 @@ class ReActToolLoop:
         xml_repair_excerpt = ''
         xml_repair_tool_names: list[str] = []
         xml_repair_last_issue = ''
+        contract_echo_attempt_count = 0
         read_only_repeat_violation_counts: dict[str, int] = {}
         persisted_frame = self._runtime_frame(task.task_id, node.node_id)
         if isinstance(persisted_frame, dict):
@@ -832,6 +840,7 @@ class ReActToolLoop:
                     xml_repair_excerpt = ''
                     xml_repair_tool_names = []
                     xml_repair_last_issue = ''
+                contract_echo_attempt_count = 0
                 final_result_turn = self._is_final_result_turn(response_tool_calls)
                 final_result_mixed_turn = self._contains_tool_name(
                     response_tool_calls,
@@ -1220,6 +1229,24 @@ class ReActToolLoop:
                     raw_error = ''
                 error_text = raw_error or 'model response failed without error detail'
                 raise RuntimeError(error_text)
+
+            # 契约回显守卫：模型偶发把请求末尾注入的 node_runtime_tool_contract
+            # 原文复读成整条回复（零工具调用，事故 task:e580ebc3dc55）。首次注入
+            # 修复提示重试；再次回显按协议违规收口为可恢复的 error pause，绝不
+            # 走下面的 auto-wrap 把契约升格成 success+final 的任务交付。
+            if is_node_dynamic_contract_echo_text(response.content):
+                contract_echo_attempt_count += 1
+                if contract_echo_attempt_count >= _NODE_CONTRACT_ECHO_REPAIR_LIMIT:
+                    self._record_contract_echo_error_log(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        node_title=node.goal,
+                        count=contract_echo_attempt_count,
+                        response=response,
+                    )
+                    return self._contract_echo_failure(count=contract_echo_attempt_count)
+                repair_overlay_text = _NODE_CONTRACT_ECHO_REPAIR_MESSAGE
+                continue
 
             if xml_pseudo_call is not None:
                 xml_repair_attempt_count += 1
@@ -1862,6 +1889,41 @@ class ReActToolLoop:
                     parts.append(f'sent_max_tokens={limit}')
                     if output_tokens >= limit:
                         parts.append('疑似触及输出token上限被截断')
+            self._log_service.append_task_error_log(
+                task_id,
+                node_id,
+                error_text=' | '.join(parts),
+                node_title=node_title,
+            )
+        except Exception:
+            # Error-history persistence must never break the ReAct loop.
+            pass
+
+    def _record_contract_echo_error_log(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_title: str,
+        count: int,
+        response: Any,
+    ) -> None:
+        """Persist a runtime-contract echo event into the node error history.
+
+        Kept small and raw (output tokens, finish reason) so operators can
+        confirm from the node detail panel that the model verbatim-echoed the
+        injected contract instead of working, without reopening artifacts.
+        """
+        try:
+            usage = dict(getattr(response, 'usage', {}) or {})
+            output_tokens = int(usage.get('output_tokens') or 0)
+            finish_reason = str(getattr(response, 'finish_reason', '') or '').strip()
+            parts = [
+                f'Runtime tool contract echo detected (第{int(count or 0)}次): '
+                'node repeated the injected contract verbatim instead of continuing work',
+                f'output_tokens={output_tokens}',
+                f'finish_reason={finish_reason}',
+            ]
             self._log_service.append_task_error_log(
                 task_id,
                 node_id,
@@ -3911,6 +3973,22 @@ class ReActToolLoop:
                 count=count,
                 tool_names=tool_names,
                 content_excerpt=content_excerpt,
+            ),
+            failure_disposition='pause',
+        )
+
+    @classmethod
+    def _contract_echo_failure(cls, *, count: int) -> NodeFinalResult:
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='runtime tool contract echo guard triggered',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                f'Node repeated the runtime tool contract verbatim {int(count or 0)} times '
+                f'instead of continuing the task or submitting a final result.'
             ),
             failure_disposition='pause',
         )
