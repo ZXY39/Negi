@@ -181,6 +181,37 @@ def rewrite_assistant_media_content(session_id: str, content: Any) -> Any:
     return _PLACEHOLDER_RE.sub(lambda m: placeholders[int(m.group(1))], text)
 
 
+def rewrite_media_links_signed(content: Any) -> Any:
+    """Rewrite local file references into signed viewer URLs only.
+
+    External-facing variant of ``rewrite_assistant_media_content``: no
+    thumbnail staging, no local paths left behind — every resolvable local
+    image/link href becomes the HMAC-signed original viewer URL, which the
+    caller can fetch without extra authentication.
+    """
+    if not isinstance(content, str) or not content.strip():
+        return content
+
+    def replace_image(match: re.Match[str]) -> str:
+        alt, target = match.group(1), match.group(2)
+        raw_src = _TITLE_RE.sub("", target).strip()
+        source = _resolve_local_source(raw_src)
+        if source is None or not source.is_file():
+            return match.group(0)
+        return f"![{alt}]({original_view_url(source)})"
+
+    def replace_link(match: re.Match[str]) -> str:
+        label, target = match.group(1), match.group(2)
+        raw_src = _TITLE_RE.sub("", target).strip()
+        source = _resolve_local_source(raw_src)
+        if source is None or not source.is_file():
+            return match.group(0)
+        return f"[{label}]({original_view_url(source)})"
+
+    text = _MD_IMAGE_RE.sub(replace_image, content)
+    return _MD_LINK_RE.sub(replace_link, text)
+
+
 @router.get("/ceo/media/original")
 async def get_ceo_media_original(token: str = Query(...)):
     path = verify_original_token(token)

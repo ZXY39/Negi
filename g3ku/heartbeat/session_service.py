@@ -82,6 +82,12 @@ def _derive_session_channel_chat(key: str) -> tuple[str, str]:
     resolution falls back to scanning session messages for the real target.
     """
     raw_key = str(key or "").strip()
+    if raw_key.startswith("ext:"):
+        # External bridge sessions: keep the full session key as chat_id so
+        # outbound routing can resolve it through the external session
+        # registry (a first-colon split would produce an unresolvable
+        # "{bridge}:{hash}" fragment).
+        return "ext", raw_key
     if raw_key.startswith("china:"):
         parsed = parse_china_session_key(raw_key)
         if parsed is not None:

@@ -16,7 +16,14 @@ from g3ku.agent.loop import AgentLoop
 from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
 from g3ku.china_bridge import CHINA_CHANNELS, ChinaBridgeSupervisor, ChinaBridgeTransport
-from g3ku.runtime.session_keys import build_chat_id, parse_china_session_key
+from g3ku.runtime.external_events import get_session_event_hub
+from g3ku.runtime.external_sessions import EXTERNAL_OUTBOUND_CHANNEL, get_external_session_registry
+from g3ku.runtime.session_keys import (
+    EXTERNAL_SESSION_KEY_PREFIX,
+    build_chat_id,
+    parse_china_session_key,
+    sanitize_channel_outbound_text,
+)
 from g3ku.config.loader import get_data_dir
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.cron.runtime_dispatch import dispatch_cron_job
@@ -281,11 +288,13 @@ async def _cancel_background_task(task: asyncio.Task | None) -> None:
 
 
 async def _stop_china_bridge_runtime() -> None:
-    global _global_china_supervisor, _global_china_outbound_task, _global_china_start_task
+    global _global_china_supervisor, _global_china_start_task
     await _cancel_background_task(_global_china_start_task)
     _global_china_start_task = None
-    await _cancel_background_task(_global_china_outbound_task)
-    _global_china_outbound_task = None
+    # The outbound drain intentionally survives bridge stop/restart: it also
+    # serves external bridge sessions, and China messages hitting a missing
+    # transport are dropped with a throttled warning instead of retry storms.
+    # Only shutdown_web_runtime cancels it.
     if _global_china_supervisor is not None:
         await _global_china_supervisor.stop()
         _global_china_supervisor = None
@@ -458,6 +467,24 @@ def _resolve_china_heartbeat_route(
     return None
 
 
+async def _notify_external_channel_reply(session_id: str, text: str) -> None:
+    """Publish a heartbeat/cron/task-terminal reply for an external bridge
+    session onto the outbound bus; the shared drain resolves the session via
+    the external registry and routes it to the session event hub as
+    ``outbound.created``."""
+    bus = _global_bus
+    if bus is None:
+        return
+    await bus.publish_outbound(
+        OutboundMessage(
+            channel=EXTERNAL_OUTBOUND_CHANNEL,
+            chat_id=session_id,
+            content=text,
+            metadata={'source': 'heartbeat', 'session_key': session_id},
+        )
+    )
+
+
 async def _notify_heartbeat_channel_reply(
     session_id: str,
     text: str,
@@ -467,7 +494,12 @@ async def _notify_heartbeat_channel_reply(
 ) -> None:
     key = str(session_id or '').strip()
     payload = str(text or '').strip()
-    if not key.startswith('china:') or not payload:
+    if not payload:
+        return
+    if key.startswith(EXTERNAL_SESSION_KEY_PREFIX):
+        await _notify_external_channel_reply(key, payload)
+        return
+    if not key.startswith('china:'):
         return
     bus = _global_bus
     if bus is None:
@@ -537,14 +569,27 @@ def _get_china_transport(agent: AgentLoop | None = None) -> ChinaBridgeTransport
 _CHINA_OUTBOUND_RETRY_LOG_INTERVAL_S = 30.0
 
 
-def _start_china_outbound_drain(bus: MessageBus, transport: ChinaBridgeTransport) -> asyncio.Task:
+def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
     """Create the outbound drain task and return it.
 
     The drain is the only bridge between the in-process outbound bus and the
-    China host, so it must never die silently: a crashed drain strands every
-    later message (e.g. cron reminders) in the queue forever with no log.
+    channel consumers (China host transport and external bridge event hubs),
+    so it must never die silently: a crashed drain strands every later
+    message (e.g. cron reminders) in the queue forever with no log. Its
+    lifecycle is independent of the China bridge enable switch so external
+    outbound keeps flowing while the legacy subsystem is disabled.
 
-    Failure handling:
+    Routing:
+    - ``channel == "ext"``: resolve ``chat_id`` (a session key or a
+      registered external_key) through the external session registry and
+      publish ``outbound.created`` on that session's event hub. Unknown
+      targets are dropped with a warning; internal-only (post-sanitize
+      empty) text is acked silently, mirroring the transport contract.
+    - ``channel in CHINA_CHANNELS``: hand to the China transport. When the
+      transport is absent (bridge disabled) the message is dropped with a
+      throttled warning instead of retrying forever.
+
+    Failure handling (China send path):
     - ``RuntimeError`` from the send path (control WebSocket not connected
       yet, or dropped mid-reconnect) is transient: keep the message and retry
       with a backoff instead of losing it.
@@ -552,6 +597,31 @@ def _start_china_outbound_drain(bus: MessageBus, transport: ChinaBridgeTransport
       that message, then keep draining.
     - ``CancelledError`` still terminates the task (shutdown/restart path).
     """
+
+    async def _route_external_outbound(pending: OutboundMessage) -> None:
+        sanitized = sanitize_channel_outbound_text(str(getattr(pending, "content", "") or ""))
+        if not sanitized:
+            return
+        entry = get_external_session_registry().find_by_any_key(getattr(pending, "chat_id", None))
+        if entry is None:
+            logger.warning(
+                "external outbound drain dropped message: unknown target chat_id={}",
+                getattr(pending, "chat_id", "?"),
+            )
+            return
+        payload: dict[str, Any] = {
+            "text": sanitized,
+            "external_key": entry.external_key,
+            "session_key": entry.session_key,
+        }
+        reply_to = str(getattr(pending, "reply_to", "") or "").strip()
+        if reply_to:
+            payload["reply_to"] = reply_to
+        dedupe_key = str((getattr(pending, "metadata", None) or {}).get("dedupe_key") or "").strip()
+        if dedupe_key:
+            payload["dedupe_key"] = dedupe_key
+        get_session_event_hub(entry.session_key).publish("outbound.created", **payload)
+        logger.debug("external outbound drained: session={}", entry.session_key)
 
     async def _drain_outbound() -> None:
         pending: OutboundMessage | None = None
@@ -563,16 +633,32 @@ def _start_china_outbound_drain(bus: MessageBus, transport: ChinaBridgeTransport
                         pending = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                     except asyncio.TimeoutError:
                         continue
+                if pending.channel == EXTERNAL_OUTBOUND_CHANNEL:
+                    await _route_external_outbound(pending)
+                    pending = None
+                    continue
                 if pending.channel not in CHINA_CHANNELS:
-                    # Non-China outbound must never reach this drain; if it
-                    # does the publisher almost certainly resolved the wrong
-                    # channel (e.g. poisoned session meta). Surface it
+                    # Non-China/non-ext outbound must never reach this drain;
+                    # if it does the publisher almost certainly resolved the
+                    # wrong channel (e.g. poisoned session meta). Surface it
                     # instead of dropping silently.
                     logger.warning(
                         "china outbound drain skipped non-china message channel={} chat_id={}",
                         pending.channel,
                         pending.chat_id,
                     )
+                    pending = None
+                    continue
+                transport = _global_china_transport
+                if transport is None:
+                    now = asyncio.get_running_loop().time()
+                    if now - last_retry_log >= _CHINA_OUTBOUND_RETRY_LOG_INTERVAL_S:
+                        logger.warning(
+                            "china outbound drain dropped message (china bridge transport unavailable) channel={} chat_id={}",
+                            pending.channel,
+                            pending.chat_id,
+                        )
+                        last_retry_log = now
                     pending = None
                     continue
                 await transport.send_outbound(pending)
@@ -610,7 +696,7 @@ async def _start_china_bridge_services_now(runtime_agent: AgentLoop, config) -> 
     if bus is None:
         return
     transport = _get_china_transport(runtime_agent)
-    global _global_china_supervisor, _global_china_outbound_task
+    global _global_china_supervisor
     if _global_china_supervisor is None:
         _global_china_supervisor = ChinaBridgeSupervisor(
             app_config=config,
@@ -618,8 +704,16 @@ async def _start_china_bridge_services_now(runtime_agent: AgentLoop, config) -> 
             transport=transport,
         )
     await _global_china_supervisor.start()
+
+
+def _ensure_outbound_drain_running() -> None:
+    """Start the shared outbound drain once the bus exists. Independent of
+    the China bridge enable switch (external outbound must keep flowing)."""
+    global _global_china_outbound_task
+    if _global_bus is None:
+        return
     if _global_china_outbound_task is None or _global_china_outbound_task.done():
-        _global_china_outbound_task = _start_china_outbound_drain(bus, transport)
+        _global_china_outbound_task = _start_outbound_drain(_global_bus)
 
 
 async def _await_current_web_process_then_start_china_bridge(runtime_agent: AgentLoop, config, web_port: int) -> None:
@@ -708,6 +802,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
         cron_service = getattr(runtime_agent, "cron_service", None)
         if cron_service is not None and _should_start_web_cron(runtime_agent) and not _cron_runtime_ready(runtime_agent):
             await cron_service.start()
+        _ensure_outbound_drain_running()
         await _ensure_china_bridge_services(runtime_agent)
 
 
