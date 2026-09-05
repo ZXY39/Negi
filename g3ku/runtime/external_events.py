@@ -1,0 +1,205 @@
+"""Per-session event hub for the External Agent API.
+
+One hub per external session: a bounded replay buffer (monotonic ``seq``) plus
+live fan-out to SSE subscribers. Producers are the turn executor
+(``g3ku.runtime.api.external_turns``), the outbound bus drain branch, and the
+heartbeat reply notifier. Consumers are ``GET /api/v1/sessions/{id}/events``
+streams.
+
+Event shape: ``{type, seq, ts, turn_id?, ...payload}``. The AgentEvent →
+external event mapping lives in ``make_session_event_relay`` and mirrors the
+legacy China transport semantics (progress lines via ``cli_event_text``,
+authoritative final text on ``message_end``).
+
+Lives outside ``g3ku/runtime/api`` on purpose: ``g3ku/shells/web.py``
+publishes outbound events here, and importing the ``g3ku.runtime.api``
+package would re-enter the web shell through ``ceo_sessions`` (circular
+import). The ``ceo_media`` rewrite is imported lazily for the same reason.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from collections import deque
+from datetime import datetime
+from typing import Any, Awaitable, Callable
+
+from g3ku.config.live_runtime import get_runtime_config
+from g3ku.core.events import AgentEvent
+from g3ku.runtime.bridge import cli_event_text
+from g3ku.runtime.session_keys import sanitize_channel_outbound_text
+
+DEFAULT_EVENT_BUFFER_SIZE = 512
+SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat()
+
+
+def build_external_event(
+    event_type: str,
+    *,
+    seq: int,
+    turn_id: str | None = None,
+    **payload: Any,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {"type": str(event_type), "seq": int(seq), "ts": _now_iso()}
+    if turn_id:
+        event["turn_id"] = str(turn_id)
+    event.update(payload)
+    return event
+
+
+class SessionEventHub:
+    """Bounded replay buffer + live fan-out for one session's events."""
+
+    def __init__(self, session_key: str, buffer_size: int):
+        self.session_key = str(session_key)
+        self._buffer: deque[dict[str, Any]] = deque(maxlen=max(16, int(buffer_size or DEFAULT_EVENT_BUFFER_SIZE)))
+        self._seq = 0
+        self._subscribers: set[asyncio.Queue] = set()
+        self._lock = threading.Lock()
+
+    def publish(self, event_type: str, *, turn_id: str | None = None, **payload: Any) -> dict[str, Any]:
+        with self._lock:
+            self._seq += 1
+            event = build_external_event(event_type, seq=self._seq, turn_id=turn_id, **payload)
+            self._buffer.append(event)
+            subscribers = list(self._subscribers)
+        for queue in subscribers:
+            queue.put_nowait(event)
+        return event
+
+    def replay(self, last_seq: int = 0) -> list[dict[str, Any]]:
+        threshold = int(last_seq or 0)
+        with self._lock:
+            return [event for event in self._buffer if int(event.get("seq") or 0) > threshold]
+
+    @property
+    def last_seq(self) -> int:
+        with self._lock:
+            return self._seq
+
+    def subscribe(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        with self._lock:
+            self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        with self._lock:
+            self._subscribers.discard(queue)
+
+
+_HUBS: dict[str, SessionEventHub] = {}
+_HUBS_LOCK = threading.RLock()
+
+
+def _configured_buffer_size() -> int:
+    try:
+        config = get_runtime_config(force=False)[0]
+        value = getattr(getattr(config, "external_api", None), "event_buffer_size", DEFAULT_EVENT_BUFFER_SIZE)
+        return int(value or DEFAULT_EVENT_BUFFER_SIZE)
+    except Exception:
+        return DEFAULT_EVENT_BUFFER_SIZE
+
+
+def get_session_event_hub(session_key: str) -> SessionEventHub:
+    raw = str(session_key or "").strip()
+    with _HUBS_LOCK:
+        hub = _HUBS.get(raw)
+        if hub is None:
+            hub = SessionEventHub(raw, _configured_buffer_size())
+            _HUBS[raw] = hub
+        return hub
+
+
+def reset_session_event_hubs() -> None:
+    """Test hook: drop all in-memory hubs."""
+    with _HUBS_LOCK:
+        _HUBS.clear()
+
+
+def _rewrite_media_signed(text: str) -> str:
+    # Lazy import: ceo_media lives in g3ku.runtime.api, which must not be
+    # imported at module load time here (see module docstring).
+    from g3ku.runtime.api.ceo_media import rewrite_media_links_signed
+
+    rewritten = rewrite_media_links_signed(text)
+    return rewritten if isinstance(rewritten, str) else text
+
+
+def _turn_usage(session: Any, turn_id: str) -> dict[str, Any] | None:
+    usage_map = getattr(session, "_frontdoor_turn_usage", None)
+    if not isinstance(usage_map, dict) or not turn_id:
+        return None
+    usage = usage_map.get(turn_id)
+    return dict(usage) if isinstance(usage, dict) else None
+
+
+def make_session_event_relay(
+    session_key: str,
+    *,
+    turn_id: str,
+    session: Any | None = None,
+) -> Callable[[AgentEvent], Awaitable[None]]:
+    """Build an AgentEvent listener mapping runtime events to external hub events.
+
+    Mapping (see docs/architecture/external-agent-api.md):
+    - ``assistant_stream_delta`` → ``reply.delta`` (latest-segment authoritative text)
+    - ``message_delta`` (progress/analysis) and tool start/error → ``progress``
+    - ``message_end`` → ``reply.final`` (sanitized, media rewritten to signed URLs)
+    Turn terminal events (``turn.completed`` / ``turn.failed``) are emitted by
+    the executor, never by this relay.
+    """
+    hub = get_session_event_hub(session_key)
+
+    async def relay(event: AgentEvent) -> None:
+        try:
+            event_type = str(getattr(event, "type", "") or "")
+            payload = dict(getattr(event, "payload", {}) or {})
+            if event_type == "assistant_stream_delta":
+                text = str(payload.get("text") or "")
+                if not text:
+                    return
+                hub.publish(
+                    "reply.delta",
+                    turn_id=str(payload.get("turn_id") or turn_id),
+                    text=text,
+                    source=str(payload.get("source") or "user"),
+                )
+                return
+            if event_type == "message_end":
+                if payload.get("heartbeat_internal"):
+                    return
+                text = sanitize_channel_outbound_text(str(payload.get("text") or ""))
+                if not text:
+                    return
+                text = _rewrite_media_signed(text)
+                end_turn_id = str(payload.get("turn_id") or turn_id)
+                final_payload: dict[str, Any] = {
+                    "text": text,
+                    "source": str(payload.get("source") or "user"),
+                }
+                usage = _turn_usage(session, end_turn_id)
+                if usage:
+                    final_payload["usage"] = usage
+                hub.publish("reply.final", turn_id=end_turn_id, **final_payload)
+                return
+            kind, text = cli_event_text(event)
+            text = str(text or "").strip()
+            if not text:
+                return
+            if kind == "tool":
+                hub.publish("progress", turn_id=turn_id, kind="tool", text=f"🔧 {text}")
+            elif kind == "tool_error":
+                hub.publish("progress", turn_id=turn_id, kind="tool_error", text=f"⚠️ {text}")
+            elif kind in {"progress", "analysis"}:
+                hub.publish("progress", turn_id=turn_id, kind="milestone", text=text)
+        except Exception:
+            # Relays run on the session event dispatch path: never block, never raise.
+            return
+
+    return relay
