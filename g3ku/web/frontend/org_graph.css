@@ -10311,6 +10311,30 @@ textarea {
     color: var(--text-secondary);
 }
 
+.task-trace-stage-summary {
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    border-left: 2px solid color-mix(in srgb, var(--brand-primary) 45%, transparent);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    background: color-mix(in srgb, var(--bg-msg-sys) 60%, transparent);
+}
+
+.task-trace-stage-summary-label {
+    margin-bottom: 4px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    letter-spacing: 0.02em;
+    opacity: 0.8;
+}
+
+.task-trace-stage-summary-text {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 
 .task-detail-error-log-btn {
     display: inline-flex;

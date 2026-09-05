@@ -1064,6 +1064,7 @@ function normalizeSummaryExecutionTrace(summary) {
                 round_id: String(round?.round_id || ""),
                 round_index: toInt(round?.round_index, roundIndex + 1),
                 created_at: String(round?.created_at || ""),
+                text: String(round?.text || "").trim(),
                 budget_counted: !!round?.budget_counted,
                 tools,
             };
@@ -1074,6 +1075,8 @@ function normalizeSummaryExecutionTrace(summary) {
             mode: String(stage?.mode || "执行摘要").trim() || "执行摘要",
             status: String(stage?.status || (String(stage?.finished_at || "").trim() ? "完成" : "进行中")).trim() || "进行中",
             stage_goal: String(stage?.stage_goal || "").trim(),
+            preamble_text: String(stage?.preamble_text || "").trim(),
+            completed_stage_summary: String(stage?.completed_stage_summary || "").trim(),
             stage_total_steps: toInt(stage?.tool_round_budget, 0),
             tool_rounds_used: toInt(stage?.tool_rounds_used, rounds.length || (fallbackTools.length ? 1 : 0)),
             created_at: String(stage?.created_at || ""),
@@ -1181,6 +1184,7 @@ function normalizeExecutionStageTrace(stage, index = 0) {
         status: String(stage?.status || "进行中").trim() || "进行中",
         stage_goal: String(stage?.stage_goal || "").trim(),
         preamble_text: String(stage?.preamble_text || "").trim(),
+        completed_stage_summary: String(stage?.completed_stage_summary || "").trim(),
         stage_total_steps: normalizeInt(stage?.tool_round_budget ?? stage?.stage_total_steps, 0),
         tool_rounds_used: normalizeInt(stage?.tool_rounds_used, 0),
         created_at: String(stage?.created_at || ""),
@@ -1426,12 +1430,24 @@ function renderExecutionStageRoundBlock(stage, round, index) {
     `;
 }
 
+function renderExecutionStageSummary(stage) {
+    const summaryText = String(stage?.completed_stage_summary || "").trim();
+    if (!summaryText) return "";
+    return `
+        <div class="task-trace-stage-summary">
+            <div class="task-trace-stage-summary-label">阶段总结</div>
+            <div class="task-trace-stage-summary-text">${esc(summaryText)}</div>
+        </div>
+    `;
+}
+
 function renderExecutionStageRounds(stage) {
     const rounds = Array.isArray(stage?.rounds) ? stage.rounds : [];
+    const summaryHtml = renderExecutionStageSummary(stage);
     if (!rounds.length) {
-        return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次");
+        return renderTraceField("阶段轮次", "", "当前阶段暂无工具轮次") + summaryHtml;
     }
-    return rounds.map((round, index) => renderExecutionStageRoundBlock(stage, round, index)).join("");
+    return rounds.map((round, index) => renderExecutionStageRoundBlock(stage, round, index)).join("") + summaryHtml;
 }
 
 function displayTaskStageStatus(status) {

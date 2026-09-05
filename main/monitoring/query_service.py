@@ -750,6 +750,7 @@ class TaskQueryService:
                         'round_id': str(round_item.get('round_id') or ''),
                         'round_index': int(round_item.get('round_index') or 0),
                         'created_at': str(round_item.get('created_at') or ''),
+                        'text': str(round_item.get('text') or ''),
                         'budget_counted': bool(round_item.get('budget_counted')),
                         'tools': compact_tools,
                     }
@@ -761,6 +762,7 @@ class TaskQueryService:
                     'mode': str(stage.get('mode') or ''),
                     'status': str(stage.get('status') or ''),
                     'stage_goal': str(stage.get('stage_goal') or ''),
+                    'completed_stage_summary': str(stage.get('completed_stage_summary') or ''),
                     'tool_round_budget': int(stage.get('tool_round_budget') or 0),
                     'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
                     'created_at': str(stage.get('created_at') or ''),
@@ -822,6 +824,7 @@ class TaskQueryService:
                         'round_id': str(round_item.get('round_id') or ''),
                         'round_index': int(round_item.get('round_index') or 0),
                         'created_at': str(round_item.get('created_at') or ''),
+                        'text': str(round_item.get('text') or ''),
                         'budget_counted': bool(round_item.get('budget_counted')),
                         'tools': compact_tools,
                     }
@@ -847,6 +850,7 @@ class TaskQueryService:
                     'mode': str(stage.get('mode') or ''),
                     'status': str(stage.get('status') or ''),
                     'stage_goal': str(stage.get('stage_goal') or ''),
+                    'completed_stage_summary': str(stage.get('completed_stage_summary') or ''),
                     'tool_round_budget': int(stage.get('tool_round_budget') or 0),
                     'tool_rounds_used': tool_rounds_used,
                     'created_at': str(stage.get('created_at') or ''),

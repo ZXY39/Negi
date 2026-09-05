@@ -68,6 +68,7 @@ from main.runtime import chat_backend as runtime_chat_backend
 from main.runtime import send_token_preflight as runtime_send_token_preflight
 from main.runtime.stage_budget import (
     DEFAULT_NON_BUDGET_STAGE_TOOLS,
+    DEFAULT_STAGE_GATE_BYPASS_TOOLS,
     FINAL_RESULT_TOOL_NAME,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
@@ -1055,6 +1056,7 @@ class ReActToolLoop:
                         node.node_id,
                         tool_calls=tool_calls,
                         created_at=created_at or now_iso(),
+                        text=str(getattr(response, 'content', '') or ''),
                     )
                 assistant_tool_calls = [
                     {
@@ -1101,6 +1103,7 @@ class ReActToolLoop:
                     response_tool_calls=response_tool_calls,
                     tools=current_tools,
                     allowed_content_refs=allowed_content_refs,
+                    round_text=str(getattr(response, 'content', '') or ''),
                     runtime_context={
                         **runtime_context,
                         'stage_turn_granted': bool(
@@ -1540,6 +1543,7 @@ class ReActToolLoop:
                     'stage_turn_granted': True,
                 },
                 prior_overflow_signatures=self._overflowed_search_signatures(message_history),
+                round_text=str(assistant_content or ''),
             )
             record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
             if callable(record_tool_results):
@@ -1736,6 +1740,7 @@ class ReActToolLoop:
                 'stage_turn_granted': True,
             },
             prior_overflow_signatures=self._overflowed_search_signatures(message_history),
+            round_text=str(assistant_content or ''),
         )
         record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
         if callable(record_tool_results):
@@ -2826,6 +2831,7 @@ class ReActToolLoop:
         runtime_context: dict[str, Any],
         prior_overflow_signatures: set[str] | None = None,
         max_parallel_tool_calls: int | None | object = _UNSET,
+        round_text: str = '',
     ) -> list[dict[str, Any]]:
         exclusive_turn_tool = next(
             (
@@ -2991,6 +2997,7 @@ class ReActToolLoop:
                     for call in list(ordinary_calls or [])
                 ],
                 created_at=created_at or now_iso(),
+                text=round_text,
             )
             if round_payload is None:
                 return None
@@ -3250,6 +3257,7 @@ class ReActToolLoop:
                         ],
                         kind=free_pass_kind,
                         created_at=now_iso(),
+                        text=round_text,
                     )
         return [ordered_results[index] for index, _call in indexed_calls if index in ordered_results]
 

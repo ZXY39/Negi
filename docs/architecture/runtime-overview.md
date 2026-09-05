@@ -264,6 +264,7 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 - 对节点运行时，`before_model` 当轮真正下发给模型的 schema 选择结果是权威工具来源；runtime frame、restore/recovery 和 runtime messages artifact 都从这份结果派生。`node_runtime_tool_contract` 是模型可见合同，但 runtime frame 才是 `candidate_skill_ids` / `candidate_skill_items` 的 canonical 恢复来源。
 - 排查“节点为什么说没有 candidate skills”时，同时看 `contract_visible_skill_ids`（输入层可见性）与 `candidate_skill_ids`（selector 最终候选）；输入层为空时继续看 `skill_visibility_diagnostics`（registry 存在性 / role / policy effect）。首轮 `candidate_skill_ids=[]` 而 fresh contract 本应非空时，优先判断是否仍停留在 `initialize_task()` 的 bootstrap 空 frame。
 - CEO/frontdoor 采用同样的分层思想：稳定会话前缀不承担当前轮 callable/candidate tool 状态，当前轮工具合同放在 dynamic appendix 并随 turn state 刷新，overlay 保持 append-only。prompt cache key 未变但命中下跌时，先检查是否有 overlay 被拼回已有 user 消息。
+- 主运行时阶段账本同样携带展示文本：`record_execution_stage_round` / `record_execution_stage_free_pass_round` 把该轮工具调用同批响应里的模型叙述记入 round `text`（按 `_STAGE_ROUND_TEXT_CHAR_LIMIT` 截断），`submit_next_stage` 把 `completed_stage_summary` 记入完成的阶段。两者经 `main/monitoring/execution_trace.py` 与两个 summary 装配器（`log_service` / `query_service`）进入 Web 节点详情 payload（full 与 summary 两级都保留），与 frontdoor 展示字段同属只服务 Web 时间线的展示数据（frontdoor 侧规则见本文「CEO Frontdoor Round Tool Ownership」），不得喂给 prompt 组装或转录权威链；渲染合同见 `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」。
 
 ## Node-Level Pause and Recovery
 

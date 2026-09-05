@@ -5789,6 +5789,55 @@ def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace
     assert summary["stages"][0]["tool_calls"][0]["tool_name"] == "filesystem"
 
 
+def test_node_detail_trace_carries_round_narration_text_and_completed_stage_summary(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    service.log_service.submit_next_stage(
+        record.task_id,
+        record.root_node_id,
+        stage_goal="inspect repository structure",
+        tool_round_budget=6,
+    )
+    service.log_service.record_execution_stage_round(
+        record.task_id,
+        record.root_node_id,
+        tool_calls=[{"id": "call:1", "name": "filesystem", "arguments": {"action": "list"}}],
+        created_at=now_iso(),
+        text="文件较长，我分页读取完整内容。",
+    )
+    service.log_service.submit_next_stage(
+        record.task_id,
+        record.root_node_id,
+        stage_goal="produce exploration report",
+        tool_round_budget=4,
+        completed_stage_summary="任务书已完整读取，按任务包创建三个并行异步任务。",
+    )
+    service.log_service.sync_node_read_model(record.task_id, record.root_node_id, externalize_execution_trace=True)
+
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level="full")
+
+    assert payload is not None
+    trace = payload["item"]["execution_trace"]
+    assert trace["stages"][0]["rounds"][0]["text"] == "文件较长，我分页读取完整内容。"
+    assert trace["stages"][0]["completed_stage_summary"] == "任务书已完整读取，按任务包创建三个并行异步任务。"
+
+    summary_payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert summary_payload is not None
+    summary = summary_payload["item"]["execution_trace_summary"]
+    assert summary["stages"][0]["rounds"][0]["text"] == "文件较长，我分页读取完整内容。"
+    assert summary["stages"][0]["completed_stage_summary"] == "任务书已完整读取，按任务包创建三个并行异步任务。"
+
+
 def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inline_text(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

@@ -125,6 +125,8 @@ class ExecutionStageRound(Model):
     round_id: str = ''
     round_index: int = 0
     created_at: str = ''
+    # 模型在本轮工具调用同批响应里的中途叙述文本,供 Web 阶段时间线展示
+    text: str = ''
     tool_call_ids: list[str] = Field(default_factory=list)
     tool_names: list[str] = Field(default_factory=list)
     budget_counted: bool = False

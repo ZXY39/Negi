@@ -4447,3 +4447,63 @@ def test_ceo_execution_trace_reuses_stage_round_helpers() -> None:
     assert "function renderCeoStageTraceIntoTurn" in app_js
     assert "normalizeExecutionStageTrace(" in app_js
     assert "renderExecutionStageRounds(" in app_js
+
+
+def test_stage_body_renders_round_narration_text_and_stage_summary() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        global.esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        global.readableText = (value, options = {}) => String(value ?? "").trim() || String(options.emptyText || "");
+        global.formatCompactTime = (value) => String(value || "");
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const summary = normalizeSummaryExecutionTrace({
+          stages: [
+            {
+              stage_id: "stage:1",
+              stage_goal: "read task book",
+              completed_stage_summary: "task book fully read; three async tasks created.",
+              rounds: [
+                {
+                  round_id: "round:1",
+                  round_index: 1,
+                  created_at: "2026-09-05T19:34:58",
+                  text: "file is long, reading it in pages.",
+                  tools: [{ tool_name: "content_open", status: "success" }],
+                },
+              ],
+            },
+          ],
+        });
+        const stage = summary.stages[0];
+        const html = renderExecutionStageRounds(stage);
+        console.log(JSON.stringify({
+          roundTextCarried: stage.rounds[0].text,
+          summaryCarried: stage.completed_stage_summary,
+          hasRoundTextBlock: html.includes("task-trace-round-text"),
+          hasRoundText: html.includes("file is long, reading it in pages."),
+          hasSummaryBlock: html.includes("task-trace-stage-summary"),
+          hasSummaryLabel: html.includes("阶段总结"),
+          hasSummaryText: html.includes("task book fully read; three async tasks created."),
+        }));
+        """
+    )
+
+    assert result["roundTextCarried"] == "file is long, reading it in pages."
+    assert result["summaryCarried"] == "task book fully read; three async tasks created."
+    assert result["hasRoundTextBlock"] is True
+    assert result["hasRoundText"] is True
+    assert result["hasSummaryBlock"] is True
+    assert result["hasSummaryLabel"] is True
+    assert result["hasSummaryText"] is True

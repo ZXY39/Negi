@@ -154,6 +154,7 @@ def build_execution_trace(
                         'round_id': str(round_item.round_id or ''),
                         'round_index': int(round_item.round_index or 0),
                         'created_at': str(round_item.created_at or ''),
+                        'text': str(round_item.text or ''),
                         'budget_counted': bool(round_item.budget_counted),
                         'tools': round_tools,
                     }

@@ -111,6 +111,7 @@ _LATEST_SPAWN_STAGE_KEY_REF_NOTE = '最近一次 spawn_child_nodes 返回结果'
 
 _STAGE_GOAL_CHAR_LIMIT = 240
 _STAGE_SUMMARY_CHAR_LIMIT = 800
+_STAGE_ROUND_TEXT_CHAR_LIMIT = 800
 _STAGE_KEY_REF_LIMIT = 4
 
 
@@ -2596,6 +2597,7 @@ class TaskLogService:
         *,
         tool_calls: list[dict[str, Any]],
         created_at: str,
+        text: str = '',
     ) -> dict[str, Any] | None:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
@@ -2621,6 +2623,7 @@ class TaskLogService:
                 round_id=new_stage_round_id(),
                 round_index=len(list(active.rounds or [])) + 1,
                 created_at=str(created_at or now_iso()),
+                text=self._clip_stage_text(text, limit=_STAGE_ROUND_TEXT_CHAR_LIMIT),
                 tool_call_ids=[str(item.get('id') or '').strip() for item in visible_calls if str(item.get('id') or '').strip()],
                 tool_names=tool_names,
                 budget_counted=counts_budget,
@@ -2797,6 +2800,7 @@ class TaskLogService:
         tool_calls: list[dict[str, Any]],
         kind: str,
         created_at: str,
+        text: str = '',
     ) -> dict[str, Any] | None:
         """宽限执行轮次记账:kind=='stageless' 记入 pending_orphan_rounds;'exhausted' 记 overflow 轮。"""
         with self._task_lock(task_id):
@@ -2818,6 +2822,7 @@ class TaskLogService:
             )
             normalized_kind = str(kind or '').strip()
             call_ids = [str(item.get('id') or '').strip() for item in visible_calls if str(item.get('id') or '').strip()]
+            normalized_text = self._clip_stage_text(text, limit=_STAGE_ROUND_TEXT_CHAR_LIMIT)
             if normalized_kind == 'exhausted':
                 active = self._active_execution_stage(state)
                 if active is None or not bool(state.transition_required):
@@ -2826,6 +2831,7 @@ class TaskLogService:
                     round_id=new_stage_round_id(),
                     round_index=len(list(active.rounds or [])) + 1,
                     created_at=str(created_at or now_iso()),
+                    text=normalized_text,
                     tool_call_ids=call_ids,
                     tool_names=tool_names,
                     budget_counted=False,
@@ -2853,6 +2859,7 @@ class TaskLogService:
                 round_id=new_stage_round_id(),
                 round_index=len(list(state.pending_orphan_rounds or [])) + 1,
                 created_at=str(created_at or now_iso()),
+                text=normalized_text,
                 tool_call_ids=call_ids,
                 tool_names=tool_names,
                 budget_counted=counts_budget,
@@ -3894,6 +3901,7 @@ class TaskLogService:
                         'round_id': str(round_item.get('round_id') or ''),
                         'round_index': int(round_item.get('round_index') or 0),
                         'created_at': str(round_item.get('created_at') or ''),
+                        'text': str(round_item.get('text') or ''),
                         'budget_counted': bool(round_item.get('budget_counted')),
                         'tools': compact_tools,
                     }
@@ -3905,6 +3913,7 @@ class TaskLogService:
                     'mode': str(stage.get('mode') or ''),
                     'status': str(stage.get('status') or ''),
                     'stage_goal': str(stage.get('stage_goal') or ''),
+                    'completed_stage_summary': str(stage.get('completed_stage_summary') or ''),
                     'tool_round_budget': int(stage.get('tool_round_budget') or 0),
                     'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
                     'created_at': str(stage.get('created_at') or ''),
