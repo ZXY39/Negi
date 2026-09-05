@@ -5,6 +5,8 @@ from typing import Any
 
 from main.service.task_terminal_callback import TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
 
+from g3ku.core.timefmt import render_local_time
+
 
 @dataclass(slots=True)
 class HeartbeatPromptLane:
@@ -262,8 +264,13 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
     lines = [
         f"- Task {title} ({task_id}) completed",
         f"  Status: {status}",
-        f"  Summary: {summary}",
     ]
+    # finished_at 一直在 payload 里但从未渲染：heartbeat 可能在任务完成后很久才唤醒，
+    # 缺了它模型会把"几小时前完成"误报成"刚完成"。
+    finished_at = format_local_timestamp(event.get("finished_at"))
+    if finished_at and finished_at != "unknown":
+        lines.append(f"  Finished at: {finished_at}")
+    lines.append(f"  Summary: {summary}")
     if terminal_node_id:
         lines.append(f"  Result node: {terminal_node_kind} {terminal_node_id}")
     if terminal_reason:
@@ -292,7 +299,9 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
 
 
 def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: int) -> tuple[str, str]:
-    lines = ["[SESSION EVENTS]", "## EVENT BUNDLE"]
+    # 唤醒时刻锚点：模型上下文里没有其他"现在几点"来源，事件里又可能引用几小时前
+    # 的时间（如 finished_at），头部给出本次唤醒的本地时间供模型直接对照。
+    lines = ["[SESSION EVENTS]", "## EVENT BUNDLE", f"当前时间（本次唤醒时刻）：{render_local_time()}"]
     retrieval_parts: list[str] = []
     for raw_event in list(events or []):
         event = dict(raw_event or {})

@@ -12,6 +12,12 @@ from loguru import logger
 
 from g3ku.agent.markdown_memory import parse_memory_document
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.core.timefmt import (
+    MESSAGE_ARRIVAL_TIME_MARKER,
+    render_arrival_stamp,
+    render_local_time,
+    strip_arrival_time_stamp,
+)
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.runtime.context.semantic_scope import semantic_catalog_rankings
 from g3ku.runtime.context.summarizer import score_query
@@ -36,6 +42,7 @@ from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_RE
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
 from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract, upsert_frontdoor_tool_contract_message
 from g3ku.runtime.web_ceo_sessions import (
+    is_internal_ceo_user_message,
     is_prompt_visible_message,
     is_history_visible_message,
     message_metadata,
@@ -504,6 +511,35 @@ class CeoMessageBuilder:
             value = getattr(message, key, None)
             if value not in (None, '', [], {}):
                 entry[key] = value
+        return CeoMessageBuilder._decorate_user_arrival_time(message, entry)
+
+    @staticmethod
+    def _decorate_user_arrival_time(message: Any, entry: dict[str, Any]) -> dict[str, Any]:
+        """投影时给普通用户消息追加送达时间戳（持久化内容保持原文不动）。
+
+        模型上下文原本没有任何"现在几点"的信息：system prompt 不含时间，转录的
+        timestamp 字段也不进请求体，实测发生过模型凭上下文残片编造当前时间的事故
+        （会话记录 21:41 却声称"现在 19:43"）。这里把每条用户消息**记录里已有的**
+        timestamp 渲染成带时区偏移的可读时间追加到投影副本末尾——用记录固定值而非
+        now()，保证跨回合字节稳定，不打断 provider 前缀缓存。
+
+        heartbeat/cron 内部注入消息各自携带时间锚点（事件束头部唤醒时刻、cron
+        送达时间字段），不重复装饰；已含标记的内容（如上一轮请求体基线回放的
+        投影副本）跳过，保证幂等。
+        """
+        if entry.get('role') != 'user':
+            return entry
+        content = entry.get('content')
+        if not isinstance(content, str) or not content.strip():
+            return entry
+        if MESSAGE_ARRIVAL_TIME_MARKER in content:
+            return entry
+        if is_internal_ceo_user_message(message):
+            return entry
+        timestamp = message.get('timestamp') if isinstance(message, dict) else getattr(message, 'timestamp', None)
+        stamp = render_arrival_stamp(timestamp)
+        if stamp:
+            entry['content'] = content + stamp
         return entry
 
     def _transcript_history(self, persisted_session: Any | None) -> list[dict[str, Any]]:
@@ -579,13 +615,14 @@ class CeoMessageBuilder:
         return self._cron_prompt_equal(last.get('content'), query_text)
 
     def _cron_prompt_equal(self, content: Any, query_text: str) -> bool:
-        """比较当前用户内容时忽略 cron 隐藏契约。
+        """比较当前用户内容时忽略 cron 隐藏契约与投影追加的送达时间戳。
 
         历史/转录里旧消息可能带宿主追加的隐藏契约，而新消息已剥除；直接
         全等比较会判失败，导致 frontdoor 没把当前用户置于末位（答非所问）。
+        投影层给用户消息追加的 [消息送达时间] 装饰同理必须剥离后再比。
         """
-        left = strip_cron_hidden_prompt(self._content_text(content)).strip()
-        right = strip_cron_hidden_prompt(str(query_text or '')).strip()
+        left = strip_arrival_time_stamp(strip_cron_hidden_prompt(self._content_text(content)).strip())
+        right = strip_arrival_time_stamp(strip_cron_hidden_prompt(str(query_text or '')).strip())
         return left == right
 
     def _render_retrieved_context(self, bundle: RetrievedContextBundle) -> str:
@@ -1665,6 +1702,20 @@ class CeoMessageBuilder:
             "current_user_in_history": current_user_in_history,
         }
 
+    @staticmethod
+    def _current_user_content_with_arrival_time(user_content: Any) -> Any:
+        """当前回合用户消息不在历史里、直接追加进请求时，用 now() 盖送达时间戳。
+
+        常规路径下用户消息先持久化再投影（装饰来自记录 timestamp，跨回合字节稳定）；
+        这里只覆盖"记录尚不存在"的兜底路径，下一回合起装饰会自动切换为记录时间。
+        非字符串内容（多模态块）原样返回。
+        """
+        if not isinstance(user_content, str):
+            return user_content
+        if not user_content.strip() or MESSAGE_ARRIVAL_TIME_MARKER in user_content:
+            return user_content
+        return f"{user_content}\n\n{MESSAGE_ARRIVAL_TIME_MARKER} {render_local_time()}"
+
     def _inject_turn_context(
         self,
         *,
@@ -1684,7 +1735,12 @@ class CeoMessageBuilder:
         stable_messages.extend(history_messages)
         has_user_content = bool(self._content_text(user_content).strip())
         if not current_user_in_history and has_user_content:
-            stable_messages.append({"role": "user", "content": user_content})
+            stable_messages.append(
+                {
+                    "role": "user",
+                    "content": self._current_user_content_with_arrival_time(user_content),
+                }
+            )
         dynamic_appendix_messages = [
             {"role": "assistant", "content": part}
             for part in turn_overlay_parts
@@ -1742,7 +1798,12 @@ class CeoMessageBuilder:
         # 而不是把工具契约/overlay 当“上一条发言”回显。
         model_messages = [*live_messages, *dynamic_appendix_messages]
         if not current_user_in_history and has_user_content:
-            model_messages.append({"role": "user", "content": user_content})
+            model_messages.append(
+                {
+                    "role": "user",
+                    "content": self._current_user_content_with_arrival_time(user_content),
+                }
+            )
         return model_messages, stable_messages, dynamic_appendix_messages, turn_overlay_text, current_user_in_history
 
     def _build_direct_request_body_continuation_result(

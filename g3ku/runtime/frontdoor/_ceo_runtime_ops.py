@@ -23,6 +23,7 @@ from langchain_core.tools import BaseTool, StructuredTool
 from g3ku.agent.tools.base import Tool
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
+from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
 from g3ku.json_schema_utils import (
     attach_raw_parameters_schema,
     build_args_schema_model,
@@ -885,13 +886,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if not records or not transcript:
             return records
+        # 种子里的用户消息可能带投影追加的送达时间戳装饰，转录原文没有；
+        # 去重比较前统一剥离，补发时用记录 timestamp 重新装饰，保持
+        # "请求体里的用户消息都带时间锚点"的不变量。
         known_user_texts = {
-            cls._content_text(record.get("content")).strip()
+            strip_arrival_time_stamp(cls._content_text(record.get("content")).strip())
             for record in records
             if str(record.get("role") or "").strip().lower() == "user"
         }
         known_user_texts.discard("")
-        current_text = cls._content_text(current_turn_user_content).strip()
+        current_text = strip_arrival_time_stamp(cls._content_text(current_turn_user_content).strip())
         if current_text:
             known_user_texts.add(current_text)
         for message in transcript:
@@ -904,11 +908,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 continue
             if not is_prompt_visible_message(message):
                 continue
-            text = cls._content_text(message.get("content")).strip()
+            text = strip_arrival_time_stamp(cls._content_text(message.get("content")).strip())
             if not text or text in known_user_texts:
                 continue
             known_user_texts.add(text)
-            records.append({"role": "user", "content": text})
+            stamp = render_arrival_stamp(message.get("timestamp"))
+            records.append({"role": "user", "content": f"{text}{stamp}" if stamp else text})
         return records
 
     def _quarantine_frontdoor_shrink(

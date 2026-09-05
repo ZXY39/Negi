@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -54,6 +55,9 @@ async def dispatch_cron_job(
             "cron_reminder_text": str(getattr(payload, "message", "") or ""),
             "cron_scheduled_run_at_ms": getattr(getattr(job, "state", None), "next_run_at_ms", None),
             "cron_last_delivered_at_ms": getattr(getattr(job, "state", None), "last_delivered_at_ms", None),
+            # 本次投递的真实时刻（单一事实来源）：live 种子与转录持久化共用同一
+            # metadata，保证两处渲染出的送达时间文本完全一致。
+            "cron_delivered_at_ms": int(time.time() * 1000),
         },
     )
     result = await runtime_bridge.prompt(

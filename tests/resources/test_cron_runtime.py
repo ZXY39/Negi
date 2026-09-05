@@ -498,6 +498,9 @@ async def test_dispatch_cron_job_resumes_original_session_when_it_exists(tmp_pat
     message = bridge.calls[0]["message"]
     assert isinstance(message, UserInputMessage)
     assert message.content == "hello"
+    delivered_at_ms = message.metadata.pop("cron_delivered_at_ms")
+    assert isinstance(delivered_at_ms, int)
+    assert abs(delivered_at_ms - time.time() * 1000) < 60_000
     assert message.metadata == {
         "cron_internal": True,
         "cron_job_id": "job-1",
@@ -539,6 +542,9 @@ async def test_dispatch_cron_job_falls_back_to_cron_thread_when_session_missing(
     message = bridge.calls[0]["message"]
     assert isinstance(message, UserInputMessage)
     assert message.content == "hello"
+    delivered_at_ms = message.metadata.pop("cron_delivered_at_ms")
+    assert isinstance(delivered_at_ms, int)
+    assert abs(delivered_at_ms - time.time() * 1000) < 60_000
     assert message.metadata == {
         "cron_internal": True,
         "cron_job_id": "job-42",

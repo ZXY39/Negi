@@ -8,6 +8,7 @@ import pytest
 from langchain_core.messages import convert_to_messages
 
 import g3ku.runtime.frontdoor.message_builder as message_builder_module
+from g3ku.core.timefmt import strip_arrival_time_stamp
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
@@ -1156,7 +1157,7 @@ async def test_message_builder_moves_turn_specific_context_into_overlay_for_stab
     assert "## 本轮最相关的技能" not in rendered_messages
     assert "## 本轮可见技能" not in rendered_messages
     assert "## 长期记忆写入提示" not in rendered_messages
-    assert contents[-3:] == [
+    assert [strip_arrival_time_stamp(item) for item in contents[-3:]] == [
         "prior question",
         "prior answer",
         "from now on default to the focused browser workflow",
@@ -1202,9 +1203,10 @@ async def test_message_builder_exposes_dynamic_appendix_messages_for_prompt_cach
 
     assert stable_messages[0]["role"] == "system"
     assert "## 已检索上下文" not in str(stable_messages[0]["content"] or "")
-    assert "prior question" in stable_contents
-    assert "prior answer" in stable_contents
-    assert "from now on default to the focused browser workflow" in stable_contents
+    plain_stable_contents = [strip_arrival_time_stamp(item) for item in stable_contents]
+    assert "prior question" in plain_stable_contents
+    assert "prior answer" in plain_stable_contents
+    assert "from now on default to the focused browser workflow" in plain_stable_contents
     assert any(
         "## 长期记忆写入提示" in str(item.get("content") or "")
         for item in dynamic_appendix_messages
@@ -1878,8 +1880,9 @@ async def test_message_builder_includes_retrieval_and_full_transcript_without_du
     assert "## 本轮候选工具" not in "\n\n".join(contents)
     assert "## 本轮最相关的技能" not in "\n\n".join(contents)
     assert "frontdoor_runtime_tool_contract" in contents[1]
-    assert contents.count("follow up question") == 1
-    assert contents[-1] == "follow up question"
+    plain_contents = [strip_arrival_time_stamp(item) for item in contents]
+    assert plain_contents.count("follow up question") == 1
+    assert plain_contents[-1] == "follow up question"
     assert result.trace["current_user_in_transcript"] is True
     rendered = "\n\n".join(contents)
     assert "Task Continuity" not in rendered
@@ -1971,9 +1974,10 @@ async def test_message_builder_keeps_batched_user_messages_in_transcript_history
     )
 
     contents = [str(item.get("content") or "") for item in result.model_messages]
-    assert contents.count("first batched follow-up") == 1
-    assert contents.count("second batched follow-up") == 1
-    assert contents[-2:] == ["first batched follow-up", "second batched follow-up"]
+    plain_contents = [strip_arrival_time_stamp(item) for item in contents]
+    assert plain_contents.count("first batched follow-up") == 1
+    assert plain_contents.count("second batched follow-up") == 1
+    assert plain_contents[-2:] == ["first batched follow-up", "second batched follow-up"]
     assert result.trace["current_user_in_transcript"] is True
 
 
@@ -2001,11 +2005,12 @@ async def test_message_builder_falls_back_to_transcript_when_checkpoint_history_
     )
 
     contents = [str(item.get("content") or "") for item in result.model_messages]
+    plain_contents = [strip_arrival_time_stamp(item) for item in contents]
     assert "OLD SYSTEM" not in contents
-    assert "prior question" in contents
-    assert "prior answer" in contents
-    assert contents.count("next question") == 1
-    assert contents[-1] == "next question"
+    assert "prior question" in plain_contents
+    assert "prior answer" in plain_contents
+    assert plain_contents.count("next question") == 1
+    assert plain_contents[-1] == "next question"
     assert result.trace["history_source"] == "transcript"
 
 
@@ -2031,8 +2036,9 @@ async def test_message_builder_keeps_repeated_user_text_after_completed_turn() -
     )
 
     contents = [str(item.get("content") or "") for item in result.model_messages]
-    assert contents.count("repeat this") == 2
-    assert contents[-2:] == ["done", "repeat this"]
+    plain_contents = [strip_arrival_time_stamp(item) for item in contents]
+    assert plain_contents.count("repeat this") == 2
+    assert plain_contents[-2:] == ["done", "repeat this"]
     assert result.trace["current_user_in_history"] is False
 
 
@@ -2070,8 +2076,9 @@ async def test_message_builder_does_not_dedupe_same_text_when_turn_ids_mismatch(
 
     contents = [str(item.get("content") or "") for item in result.model_messages]
     assert "OLD SYSTEM" not in contents
-    assert contents.count("repeat this") == 2
-    assert contents[-2:] == ["done", "repeat this"]
+    plain_contents = [strip_arrival_time_stamp(item) for item in contents]
+    assert plain_contents.count("repeat this") == 2
+    assert plain_contents[-2:] == ["done", "repeat this"]
     assert result.trace["current_user_in_checkpoint"] is False
     assert result.trace["history_source"] == "transcript"
 
@@ -2106,7 +2113,10 @@ async def test_message_builder_keeps_empty_memory_overlay_when_snapshot_reader_i
         "retrieved_context_in_model_messages": False,
     }
     assert str(result.turn_overlay_text or "") == ""
-    assert result.model_messages[-3:] == [
+    assert [
+        {**item, "content": strip_arrival_time_stamp(str(item.get("content") or ""))}
+        for item in result.model_messages[-3:]
+    ] == [
         {"role": "user", "content": "prior user"},
         {"role": "assistant", "content": "prior answer"},
         {"role": "user", "content": "remembered preference"},
@@ -3069,7 +3079,7 @@ async def test_message_builder_history_visibility_checkpoint_round_trip_keeps_hi
     assert "checkpoint question" in contents
     assert "checkpoint answer" in contents
     assert "Background task task:demo-checkpoint finished successfully." not in contents
-    assert contents[-1] == "follow up question"
+    assert strip_arrival_time_stamp(contents[-1]) == "follow up question"
     assert result.trace["history_source"] == "checkpoint"
     assert result.trace["checkpoint_message_count"] == 2
 
@@ -3574,9 +3584,10 @@ async def test_builder_fresh_path_without_internal_seed_keeps_base_prompt() -> N
     stable = list(result.stable_messages)
     assert str(stable[0].get("role") or "") == "system"
     assert str(stable[0].get("content") or "").startswith("BASE PROMPT")
-    # 当前用户消息被追加
+    # 当前用户消息被追加（投影会附加送达时间戳装饰，比较前剥离）
     assert any(
-        str(item.get("role") or "") == "user" and str(item.get("content") or "") == "你好"
+        str(item.get("role") or "") == "user"
+        and strip_arrival_time_stamp(str(item.get("content") or "")) == "你好"
         for item in stable
     )
 

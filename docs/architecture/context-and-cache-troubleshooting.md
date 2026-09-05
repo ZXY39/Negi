@@ -173,6 +173,12 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 推论：瞬时 400 被当成终态节点错误（`pause_reason=error`）会喂给心跳重投循环。让瞬时 provider 错误（含网关降级期的伪 400）走重试而非终态，属于错误分类/熔断范畴，不在取证层解决。
 - 注意：`provider_request_body` 在这些 artifact 里为空 `{}`，落盘的是内部 `request_messages`（非 wire payload）；内部消息带 `_node_runtime_tool_contract_payload`、tool 消息带 `started_at/finished_at/elapsed_seconds/ephemeral` 等非标准字段，`_sanitize_empty_content` 原样透传给 provider——同 hash 既失败又成功证明 provider 平时容忍它们，不要据此臆断是这些字段致错。
 
+### 3.14 用户消息时间装饰破坏前缀稳定或相等性去重
+
+- 坑：用户消息投影副本会追加 `[消息送达时间]` 装饰行（合同见 `runtime-overview.md`「用户消息时间锚点」）。两类回归路径：(1) 把装饰改成用 now() 每次请求重渲染——历史消息文本逐请求漂移，provider 前缀缓存从第一条被装饰的历史消息起整体断裂，表现为缓存命中率骤降而消息数没变；(2) 新增"按用户消息文本去重/匹配"的逻辑时没有剥离装饰——已装饰的投影/种子文本与转录原文永不相等，同一条消息被判为新消息重复注入（症状同 3.11 的重复补种）。
+- 不变量：装饰文本只派生自记录自带的 `timestamp`（固定值，跨请求字节一致）；所有跨"投影副本 vs 原文"的内容相等性比较先过 `strip_arrival_time_stamp`（`g3ku/core/timefmt.py`）；持久化转录、RAG ingest、web UI 永远只见原文，装饰只存在于请求投影层。
+- 症状：缓存命中率下降且 stable prefix hash 逐轮变化，但请求消息数与阶段结构无变化；或同一条用户消息在请求体里出现原文与带时间行两个版本。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。

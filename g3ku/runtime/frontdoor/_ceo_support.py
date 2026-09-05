@@ -10,6 +10,7 @@ from loguru import logger
 
 from g3ku.agent.tools.base import Tool
 from g3ku.content import parse_content_envelope
+from g3ku.core.timefmt import render_epoch_ms_local, render_local_time
 from g3ku.json_schema_utils import normalize_runtime_tool_arguments_dict
 from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.registry import find_by_name
@@ -171,12 +172,17 @@ class CeoFrontDoorSupport:
         job_id = str(metadata.get("cron_job_id") or "").strip()
         max_runs = max(1, int(metadata.get("cron_max_runs", 1) or 1))
         delivery_index = max(1, int(metadata.get("cron_delivery_index", 1) or 1))
+        delivered_at_text = (
+            render_epoch_ms_local(metadata.get("cron_delivered_at_ms")) or render_local_time()
+        )
         lines = [
             "你接收到了之前你定时的任务，如下：",
             f"当前定时任务 ID：{job_id or '(missing)'}",
             f"当前发送次数：{delivery_index}/{max_runs}",
+            f"本次提醒送达时间：{delivered_at_text}",
             "注意：",
             "- 此定时任务提醒为内部指令，而非新的用户消息。",
+            "- 判断“今天是哪天/现在几点”一律以上面的送达时间和事件里的 *_local 字段为准，不要自行心算毫秒时间戳。",
             "要求：",
             "- 请立即按任务要求执行。",
         ]
@@ -198,9 +204,19 @@ class CeoFrontDoorSupport:
             "delivered_runs_before_this_turn": max(0, int(metadata.get("cron_delivered_runs", 0) or 0)),
             "scheduled_run_at_ms": metadata.get("cron_scheduled_run_at_ms"),
             "last_delivered_at_ms": metadata.get("cron_last_delivered_at_ms"),
+            "delivered_at_local": (
+                render_epoch_ms_local(metadata.get("cron_delivered_at_ms")) or render_local_time()
+            ),
             "reminder_text": str(reminder_text or metadata.get("cron_reminder_text") or "").strip(),
             "semantic_role": "internal_self_reminder",
         }
+        # 原始毫秒字段保留（契约兼容），旁边补充换算好的本地时间，模型不再心算时区。
+        scheduled_run_at_local = render_epoch_ms_local(metadata.get("cron_scheduled_run_at_ms"))
+        if scheduled_run_at_local:
+            payload["scheduled_run_at_local"] = scheduled_run_at_local
+        last_delivered_at_local = render_epoch_ms_local(metadata.get("cron_last_delivered_at_ms"))
+        if last_delivered_at_local:
+            payload["last_delivered_at_local"] = last_delivered_at_local
         return {
             "role": "system",
             "content": "[CRON INTERNAL EVENT]\n" + json.dumps(payload, ensure_ascii=False, indent=2),

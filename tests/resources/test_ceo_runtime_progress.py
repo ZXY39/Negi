@@ -7637,6 +7637,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
                     "cron_delivery_index": 1,
                     "cron_delivered_runs": 0,
                     "cron_reminder_text": "Create a detached task for the scheduled work.",
+                    "cron_delivered_at_ms": 1_777_000_000_000,
                 },
             },
         },
@@ -7663,6 +7664,25 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
     assert state_update["frontdoor_selection_debug"]["hydrated_tool_names"] == ["filesystem_write"]
+    from g3ku.core.timefmt import render_epoch_ms_local
+
+    delivered_at_text = render_epoch_ms_local(1_777_000_000_000)
+    expected_cron_event_content = "[CRON INTERNAL EVENT]\n" + json.dumps(
+        {
+            "message_type": "cron_internal_event",
+            "cron_job_id": "job-77",
+            "delivery_index": 1,
+            "max_runs": 2,
+            "delivered_runs_before_this_turn": 0,
+            "scheduled_run_at_ms": None,
+            "last_delivered_at_ms": None,
+            "delivered_at_local": delivered_at_text,
+            "reminder_text": "Create a detached task for the scheduled work.",
+            "semantic_role": "internal_self_reminder",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
     assert state_update["frontdoor_request_body_messages"] == [
         *existing_baseline,
         {
@@ -7672,8 +7692,10 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
                     "你接收到了之前你定时的任务，如下：",
                     "当前定时任务 ID：job-77",
                     "当前发送次数：1/2",
+                    f"本次提醒送达时间：{delivered_at_text}",
                     "注意：",
                     "- 此定时任务提醒为内部指令，而非新的用户消息。",
+                    "- 判断“今天是哪天/现在几点”一律以上面的送达时间和事件里的 *_local 字段为准，不要自行心算毫秒时间戳。",
                     "要求：",
                     "- 请立即按任务要求执行。",
                 ]
@@ -7688,7 +7710,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         },
         {
             "role": "system",
-            "content": "[CRON INTERNAL EVENT]\n{\n  \"message_type\": \"cron_internal_event\",\n  \"cron_job_id\": \"job-77\",\n  \"delivery_index\": 1,\n  \"max_runs\": 2,\n  \"delivered_runs_before_this_turn\": 0,\n  \"scheduled_run_at_ms\": null,\n  \"last_delivered_at_ms\": null,\n  \"reminder_text\": \"Create a detached task for the scheduled work.\",\n  \"semantic_role\": \"internal_self_reminder\"\n}",
+            "content": expected_cron_event_content,
             "metadata": {
                 "source": "cron",
                 "prompt_visible": True,
