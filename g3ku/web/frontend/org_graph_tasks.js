@@ -1044,6 +1044,7 @@ function resetTaskView() {
     S.treePan.baseScale = 1;
     S.treePan.moved = false;
     S.treePan.suppressClickNodeId = null;
+    S.treeFitOnNextRender = false;
     U.tree.innerHTML = '<div class="empty-state">Waiting for task tree...</div>';
     if (U.taskTreeResetRounds) {
         U.taskTreeResetRounds.hidden = true;
@@ -1363,6 +1364,7 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         S.currentTaskId = taskId;
         switchView("task-details");
         resetTaskView();
+        S.treeFitOnNextRender = true;
     }
     const payload = await ApiClient.getTask(taskId, true);
     applyTaskPayload(payload);

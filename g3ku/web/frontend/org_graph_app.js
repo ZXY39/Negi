@@ -245,6 +245,7 @@ const S = {
         moved: false,
         suppressClickNodeId: null,
     },
+    treeFitOnNextRender: false,
     selectedNodeId: null,
     skills: [],
     selectedSkill: null,
@@ -343,6 +344,7 @@ const U = {
     renameSessionCancel: document.getElementById("rename-session-cancel"),
     renameSessionAccept: document.getElementById("rename-session-accept"),
     ceoFeed: document.getElementById("ceo-chat-feed"),
+    ceoScrollToLatestBtn: document.getElementById("ceo-scroll-to-latest-btn"),
     ceoInput: document.getElementById("ceo-input"),
     ceoAttach: document.getElementById("ceo-attach-btn"),
     ceoFileInput: document.getElementById("ceo-file-input"),
@@ -3973,11 +3975,22 @@ function removePendingCeoUpload(index) {
     renderPendingCeoUploads();
 }
 
+function ceoFeedNearBottom(threshold = 64) {
+    if (!U.ceoFeed) return true;
+    return U.ceoFeed.scrollHeight - U.ceoFeed.scrollTop - U.ceoFeed.clientHeight <= threshold;
+}
+
+function updateCeoScrollToLatestButton() {
+    if (!U.ceoScrollToLatestBtn) return;
+    U.ceoScrollToLatestBtn.hidden = ceoFeedNearBottom();
+}
+
 function scrollCeoFeedToBottom() {
     if (!U.ceoFeed) return;
     const applyBottom = () => {
         if (!U.ceoFeed) return;
         U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
+        updateCeoScrollToLatestButton();
     };
     applyBottom();
     window.requestAnimationFrame(applyBottom);
@@ -4017,6 +4030,7 @@ function withCeoFeedBatch(mutator, { scrollMode = "preserve" } = {}) {
     } else {
         const maxTop = Math.max(0, U.ceoFeed.scrollHeight - U.ceoFeed.clientHeight);
         U.ceoFeed.scrollTop = Math.max(0, Math.min(prevTop, maxTop));
+        updateCeoScrollToLatestButton();
     }
     return result;
 }
@@ -4032,6 +4046,7 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     } else {
         const maxTop = Math.max(0, U.ceoFeed.scrollHeight - U.ceoFeed.clientHeight);
         U.ceoFeed.scrollTop = Math.max(0, Math.min(prevTop, maxTop));
+        updateCeoScrollToLatestButton();
     }
     return result;
 }
@@ -10601,6 +10616,9 @@ function toggleTheme() {
 function bind() {
     U.theme?.addEventListener("click", toggleTheme);
     U.projectExit?.addEventListener("click", () => void requestProjectExit());
+    U.ceoFeed?.addEventListener("scroll", updateCeoScrollToLatestButton, { passive: true });
+    U.ceoScrollToLatestBtn?.addEventListener("click", () => scrollCeoFeedToBottom());
+    updateCeoScrollToLatestButton();
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
     U.backToTasks?.addEventListener("click", () => switchView("tasks"));
     U.memoryRefresh?.addEventListener("click", () => void loadMemoryView({ force: true }));

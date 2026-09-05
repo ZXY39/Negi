@@ -349,6 +349,16 @@ async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
         if (String(S.currentTaskId || "").trim() !== normalizedTaskId) return null;
         applyTaskTreeSnapshotPayload(payload || {});
         renderTree();
+        if (S.treeFitOnNextRender) {
+            S.treeFitOnNextRender = false;
+            fitTaskTreeToView();
+            window.requestAnimationFrame(() => fitTaskTreeToView());
+            if (document.fonts?.ready?.then) {
+                document.fonts.ready
+                    .then(() => window.requestAnimationFrame(() => fitTaskTreeToView()))
+                    .catch(() => {});
+            }
+        }
         return payload || null;
     } catch (error) {
         if (!isAbortLike(error) && U.tree) {
@@ -2199,6 +2209,53 @@ async function handleTreeNodePauseAction(node, event) {
     } catch (error) {
         showToast({ title: "节点操作失败", text: error?.message || "操作未完成", kind: "error" });
     }
+}
+
+function fitTaskTreeToView({ marginPx = 40 } = {}) {
+    if (!U.tree) return false;
+    const wrapper = U.tree.querySelector(".execution-tree");
+    if (!wrapper) return false;
+    // 内容容器可能是块级元素,宽度默认为容器宽度;必须测量树的真实内容盒
+    const content = wrapper.firstElementChild instanceof Element ? wrapper.firstElementChild : wrapper;
+    const state = S.treePan;
+    if (!state.scale || state.scale <= 0) return false;
+    const viewport = U.tree.getBoundingClientRect();
+    if (!viewport.width || !viewport.height) return false;
+    const wrapRect = wrapper.getBoundingClientRect();
+    const contentRect = content.getBoundingClientRect();
+    if (!contentRect.width || !contentRect.height) return false;
+    // 布局位置在变换下是不变量。变换只缩放内容在包装器内的偏移,
+    // 包装器自身的布局偏移不参与缩放,须分开计算:
+    // W = 包装器相对视口的布局偏移;C = 内容相对包装器的布局偏移。
+    const W = (wrapRect.left - viewport.left - state.offsetX) / state.scale;
+    const T = (wrapRect.top - viewport.top - state.offsetY) / state.scale;
+    const C = (contentRect.left - wrapRect.left) / state.scale;
+    const D = (contentRect.top - wrapRect.top) / state.scale;
+    const treeW = contentRect.width / state.scale;
+    const treeH = contentRect.height / state.scale;
+    const availW = viewport.width - marginPx * 2;
+    const availH = viewport.height - marginPx * 2;
+    if (availW <= 0 || availH <= 0 || treeW <= 0 || treeH <= 0) return false;
+    const nextScale = clamp(
+        Math.min(availW / treeW, availH / treeH, 1),
+        TREE_SCALE_MIN,
+        TREE_SCALE_MAX,
+    );
+    const nextOffsetX = viewport.width / 2 - W - nextScale * (C + treeW / 2);
+    const nextOffsetY = viewport.height / 2 - T - nextScale * (D + treeH / 2);
+    if (
+        Math.abs(nextScale - state.scale) < 0.001
+        && Math.abs(nextOffsetX - state.offsetX) < 0.5
+        && Math.abs(nextOffsetY - state.offsetY) < 0.5
+    ) return true;
+    state.scale = nextScale;
+    state.baseScale = nextScale;
+    state.offsetX = nextOffsetX;
+    state.offsetY = nextOffsetY;
+    state.baseOffsetX = nextOffsetX;
+    state.baseOffsetY = nextOffsetY;
+    wrapper.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px) scale(${state.scale})`;
+    return true;
 }
 
 function renderTree() {

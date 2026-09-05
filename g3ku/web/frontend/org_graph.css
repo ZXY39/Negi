@@ -3578,6 +3578,44 @@ textarea {
     z-index: 2;
 }
 
+.ceo-scroll-to-latest-btn {
+    position: absolute;
+    left: 0;
+    right: 0;
+    margin: 0 auto;
+    bottom: calc(100% + 10px);
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 10px 28px -12px color-mix(in srgb, var(--brand-primary) 30%, transparent), var(--shadow-sm);
+    backdrop-filter: blur(10px);
+    z-index: 3;
+    cursor: pointer;
+    padding: 0;
+    transition: transform 0.18s ease, box-shadow 0.18s ease, color 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+}
+
+.ceo-scroll-to-latest-btn:hover {
+    color: var(--brand-primary);
+    transform: translateY(-2px);
+    border-color: color-mix(in srgb, var(--brand-primary) 32%, var(--border-color));
+    box-shadow: 0 14px 32px -12px color-mix(in srgb, var(--brand-primary) 44%, transparent), var(--shadow-md);
+}
+
+.ceo-scroll-to-latest-btn:active {
+    transform: translateY(0);
+}
+
+.ceo-scroll-to-latest-btn[hidden] {
+    display: none;
+}
+
 .ceo-composer {
     min-width: 0;
     display: flex;
