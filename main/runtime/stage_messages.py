@@ -12,6 +12,10 @@ from main.runtime.stage_budget import (
 )
 
 _STAGE_BUDGET_NODE_KINDS = {'execution', 'acceptance'}
+# 整回合内 CEO 纯文本收尾最多被打回的次数（仅 B 类：阶段刚创建且无实质工具轮）。
+# 预算耗尽不再打回文本收尾：旧 A/B 双拦截在 budget=1 下构成无出口死循环
+# （2026-09-05 会话 22124b26b86b 事故：4 次回复全被丢弃、4 个阶段、10 次 LLM 调用、0 送达）。
+STAGE_REPLY_BOUNCE_LIMIT = 1
 _NON_SUBSTANTIVE_PROGRESS_TOOL_NAMES = {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES}
 _PUBLIC_CONTEXT_LOADER_STAGE_TOOL_NAMES = tuple(
     name for name in sorted(CONTEXT_LOADER_STAGE_TOOL_NAMES) if not str(name or '').endswith('_v2')
@@ -102,6 +106,7 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
             f'阶段目标：{goal}。'
             '如需继续使用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段；'
             '同批里的普通工具将作为新阶段的第一轮调用并计入其预算。'
+            '若无需继续调用工具，可直接输出文本回复收尾，系统会自动关闭当前阶段。'
         )
     return (
         f'当前 CEO 阶段目标：{goal}。'
@@ -111,20 +116,40 @@ def build_ceo_stage_overlay(stage_gate: dict[str, Any] | None) -> str | None:
     )
 
 
+def build_ceo_stage_reply_bounce_message(stage_gate: dict[str, Any] | None) -> str:
+    """CEO 纯文本收尾打回文本（B 类）：仅「阶段刚创建且尚无实质工具轮」时非空。
+
+    预算耗尽（transition_required）与无活动阶段一律返回 ''：耗尽只约束继续调用工具，
+    不阻止文本收尾——旧的耗尽打回与无工具轮打回互为出口封堵，在 budget=1 时构成
+    无解死循环（会话 22124b26b86b）。打回由 `STAGE_REPLY_BOUNCE_LIMIT` 限次。
+    """
+    gate = dict(stage_gate or {})
+    active = gate.get('active_stage') if isinstance(gate.get('active_stage'), dict) else None
+    if not isinstance(active, dict):
+        return ''
+    if bool(gate.get('transition_required')):
+        return ''
+    if _stage_has_substantive_progress(active):
+        return ''
+    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    return (
+        '当前 CEO 阶段已创建，但还没有任何真实工具执行结果。'
+        f'阶段目标：{goal}。'
+        '不要只输出口头说明，也不要再次调用 `submit_next_stage`。'
+        '请立即调用一个服务于当前阶段目标的普通工具；'
+        '至少产生一个真实工具回合后，再继续总结或结束。'
+        '如果本轮确实不需要调用任何工具、就是要直接交付最终回复，'
+        '再次直接输出回复文本即可，系统会放行并自动关闭当前阶段。'
+    )
+
+
 def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> str:
     gate = dict(stage_gate or {})
     active = gate.get('active_stage') if isinstance(gate.get('active_stage'), dict) else None
     if not isinstance(active, dict):
         return ''
     if not bool(gate.get('transition_required')) and not _stage_has_substantive_progress(active):
-        goal = str(active.get('stage_goal') or '').strip() or '（空）'
-        return (
-            '当前 CEO 阶段已创建，但还没有任何真实工具执行结果。'
-            f'阶段目标：{goal}。'
-            '不要只输出口头说明，也不要再次调用 `submit_next_stage`。'
-            '请立即调用一个服务于当前阶段目标的普通工具；'
-            '至少产生一个真实工具回合后，再继续总结或结束。'
-        )
+        return build_ceo_stage_reply_bounce_message(gate)
     if not bool(gate.get('transition_required')):
         return ''
     used = int(active.get('tool_rounds_used') or 0)
@@ -133,8 +158,8 @@ def build_ceo_stage_result_block_message(stage_gate: dict[str, Any] | None) -> s
     return (
         f'当前 CEO 阶段工具轮次预算已耗尽：{used}/{budget}。'
         f'阶段目标：{goal}。'
-        '先不要直接结束。请先调用 `submit_next_stage` 开启下一阶段（可与下一步要用到的工具同批提交），'
-        '之后在新阶段继续工作，或从新阶段交付最终回复。'
+        '如需继续调用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段；'
+        '如果不再需要调用工具，可以直接输出给用户的最终回复收尾，系统会自动关闭当前阶段。'
     )
 
 

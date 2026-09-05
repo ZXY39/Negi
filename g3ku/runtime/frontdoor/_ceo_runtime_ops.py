@@ -79,7 +79,9 @@ from main.runtime.stage_budget import (
     visible_tools_for_stage_iteration,
 )
 from main.runtime.stage_messages import (
+    STAGE_REPLY_BOUNCE_LIMIT,
     build_ceo_stage_overlay,
+    build_ceo_stage_reply_bounce_message,
     build_ceo_stage_result_block_message,
     is_turn_only_system_note_message,
     strip_turn_only_system_note_messages,
@@ -5999,6 +6001,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "xml_repair_tool_names": [],
             "xml_repair_last_issue": "",
             "tool_contract_echo_attempt_count": 0,
+            "stage_reply_bounce_count": 0,
             "empty_response_retry_count": 0,
             "heartbeat_internal": heartbeat_internal,
             "cron_internal": cron_internal,
@@ -6520,9 +6523,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         used_tools = list(state.get("used_tools") or [])
         xml_repair_attempt_count = int(state.get("xml_repair_attempt_count", 0) or 0)
         stage_gate = self._frontdoor_stage_gate(state)
-        stage_protocol_message = ""
+        # 只有「阶段刚创建且尚无实质工具轮」才允许打回纯文本收尾，且整回合限次
+        # （stage_reply_bounce_count）；预算耗尽不再打回，文本收尾直接 finalize，
+        # 由 _graph_finalize_turn 以指针摘要关闭活动阶段。
+        stage_reply_bounce_message = ""
         if not bool(state.get("heartbeat_internal")) and not bool(state.get("cron_internal")):
-            stage_protocol_message = build_ceo_stage_result_block_message(stage_gate)
+            stage_reply_bounce_message = build_ceo_stage_reply_bounce_message(stage_gate)
+        stage_reply_bounce_count = int(state.get("stage_reply_bounce_count", 0) or 0)
 
         if not response_tool_calls and visible_tool_names:
             xml_extraction = extract_tool_calls_from_xml_pseudo_content(
@@ -6705,12 +6712,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     'next_step': 'finalize',
                 }
         if text.strip():
-            if stage_protocol_message and not str(state.get("repair_overlay_text") or "").strip():
+            if stage_reply_bounce_message and stage_reply_bounce_count < STAGE_REPLY_BOUNCE_LIMIT:
                 return {
-                    "repair_overlay_text": (
-                        stage_protocol_message
-                        or build_ceo_stage_overlay(stage_gate)
-                    ),
+                    "repair_overlay_text": stage_reply_bounce_message,
+                    "stage_reply_bounce_count": stage_reply_bounce_count + 1,
                     "final_output": "",
                     "next_step": "call_model",
                 }
@@ -6724,12 +6729,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "next_step": "finalize",
             }
 
-        if stage_protocol_message and not str(state.get("repair_overlay_text") or "").strip():
+        if stage_reply_bounce_message and stage_reply_bounce_count < STAGE_REPLY_BOUNCE_LIMIT:
             return {
-                "repair_overlay_text": (
-                    stage_protocol_message
-                    or build_ceo_stage_overlay(stage_gate)
-                ),
+                "repair_overlay_text": stage_reply_bounce_message,
+                "stage_reply_bounce_count": stage_reply_bounce_count + 1,
                 "final_output": "",
                 "next_step": "call_model",
             }
@@ -7080,6 +7083,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             default=str(state.get("route_kind") or "direct_reply"),
             verified_task_ids=verified_task_ids,
         )
+        # 与 legacy 路径（_ceo_create_agent_impl.py）对齐：派发验证成功后给模型
+        # "可直接自然回复"的一次性尾注（经 _apply_turn_overlay 注入下一次请求，
+        # call_model 返回时自动清空），避免模型误以为还需要继续开阶段干活。
+        dispatch_reply_overlay_text: str | None = None
+        if verified_task_ids and route_kind == "task_dispatch":
+            if len(verified_task_ids) == 1:
+                dispatch_reply_overlay_text = (
+                    f"Dispatch result is already available. Reply naturally based on the verified task id {verified_task_ids[0]}."
+                )
+            else:
+                dispatch_reply_overlay_text = (
+                    "Dispatch result is already available. Reply naturally based on the verified task ids "
+                    + ", ".join(verified_task_ids)
+                    + "."
+                )
         substantive_tool_names = [
             str(payload.get("name") or "").strip()
             for payload in original_tool_call_payloads
@@ -7102,6 +7120,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "pending_content_open_image_payloads": pending_content_open_image_payloads,
             "next_step": "call_model",
         }
+        if dispatch_reply_overlay_text:
+            result["repair_overlay_text"] = dispatch_reply_overlay_text
         result.update(updated_tool_contract_state)
         result["candidate_skill_ids"] = [
             str(item or "").strip()

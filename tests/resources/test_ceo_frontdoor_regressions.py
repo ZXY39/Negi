@@ -19,6 +19,7 @@ from g3ku.runtime.frontdoor._ceo_runtime_ops import _build_args_schema
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
+from main.runtime.stage_messages import build_ceo_stage_reply_bounce_message
 
 
 class _IngestRecorder:
@@ -1092,7 +1093,8 @@ def test_build_prompt_context_no_longer_uses_summary_text_overlay() -> None:
 
     overlay = str(result["system_overlay"])
     assert "当前 CEO 阶段工具轮次预算已耗尽：1/1。" in overlay
-    assert "先不要直接结束。请先调用 `submit_next_stage` 开启下一阶段" in overlay
+    assert "如果不再需要调用工具，可以直接输出给用户的最终回复收尾" in overlay
+    assert "先不要直接结束" not in overlay
     assert "Use the existing CEO layered context rules." not in overlay
     assert "## CEO Durable Summary" not in overlay
 
@@ -1141,7 +1143,7 @@ def test_build_prompt_context_keeps_dispatch_overlay_and_exhausted_stage_instruc
 
 
 @pytest.mark.asyncio
-async def test_graph_normalize_model_output_rejects_plain_text_when_transition_required() -> None:
+async def test_graph_normalize_model_output_finalizes_plain_text_when_transition_required() -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
     result = await runner._graph_normalize_model_output(
@@ -1175,10 +1177,228 @@ async def test_graph_normalize_model_output_rejects_plain_text_when_transition_r
         runtime=SimpleNamespace(),
     )
 
-    assert result["next_step"] == "call_model"
-    assert "submit_next_stage" in str(result["repair_overlay_text"])
-    assert "先不要直接结束。" in str(result["repair_overlay_text"])
-    assert str(result.get("final_output") or "") == ""
+    # 预算耗尽只约束继续调用工具，不再拦截纯文本收尾：
+    # 旧行为（打回并要求先开新阶段）与「新阶段无工具轮不许回复」互锁，
+    # 在 budget=1 时构成无出口死循环（会话 22124b26b86b）。
+    assert result["next_step"] == "finalize"
+    assert result["final_output"] == "我在。请直接告诉我你现在要我做什么。"
+    assert not str(result.get("repair_overlay_text") or "")
+
+
+def test_build_ceo_stage_reply_bounce_message_only_for_fresh_stage_without_progress() -> None:
+    def _gate(*, rounds: list[dict[str, object]], transition_required: bool, used: int = 0) -> dict[str, object]:
+        return {
+            "enabled": True,
+            "has_active_stage": True,
+            "transition_required": transition_required,
+            "active_stage": {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "向用户交付派发确认",
+                "tool_round_budget": 1,
+                "tool_rounds_used": used,
+                "status": "active",
+                "mode": "自主执行",
+                "rounds": rounds,
+            },
+        }
+
+    # 无活动阶段：不打回（无阶段文本收尾本就合法）。
+    assert build_ceo_stage_reply_bounce_message({"active_stage": None, "transition_required": False}) == ""
+    # 预算耗尽：绝不打回——旧 A 类拦截是死循环的一半（会话 22124b26b86b）。
+    assert build_ceo_stage_reply_bounce_message(_gate(rounds=[], transition_required=True, used=1)) == ""
+    # 已有实质工具轮：不打回。
+    substantive = _gate(
+        rounds=[{"round_index": 1, "tool_names": ["create_async_task"], "budget_counted": True}],
+        transition_required=False,
+        used=1,
+    )
+    assert build_ceo_stage_reply_bounce_message(substantive) == ""
+    # 阶段刚创建、零工具轮：打回一次，文本必须带逃生句。
+    fresh = _gate(rounds=[], transition_required=False)
+    message = build_ceo_stage_reply_bounce_message(fresh)
+    assert "还没有任何真实工具执行结果" in message
+    assert "向用户交付派发确认" in message
+    assert "再次直接输出回复文本即可" in message
+    # 仅含 sns/控制类轮次不算实质进展，同样打回。
+    sns_only = _gate(
+        rounds=[{"round_index": 1, "tool_names": ["submit_next_stage"], "budget_counted": False}],
+        transition_required=False,
+    )
+    assert "还没有任何真实工具执行结果" in build_ceo_stage_reply_bounce_message(sns_only)
+
+
+@pytest.mark.asyncio
+async def test_graph_normalize_model_output_bounces_plain_text_once_for_stage_without_progress() -> None:
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    def _state(**overrides) -> dict[str, object]:
+        state = {
+            "response_payload": {
+                "content": "调研任务已派发，结果出来我再推给你。",
+                "tool_calls": [],
+                "finish_reason": "stop",
+            },
+            "route_kind": "direct_reply",
+            "used_tools": [],
+            "frontdoor_stage_state": {
+                "active_stage_id": "frontdoor-stage-1",
+                "transition_required": False,
+                "stages": [
+                    {
+                        "stage_id": "frontdoor-stage-1",
+                        "stage_index": 1,
+                        "stage_goal": "向用户交付派发确认",
+                        "tool_round_budget": 1,
+                        "tool_rounds_used": 0,
+                        "status": "active",
+                        "mode": "自主执行",
+                        "completed_stage_summary": "",
+                        "key_refs": [],
+                        "rounds": [],
+                    }
+                ],
+            },
+        }
+        state.update(overrides)
+        return state
+
+    first = await runner._graph_normalize_model_output(_state(), runtime=SimpleNamespace())
+    assert first["next_step"] == "call_model"
+    assert str(first.get("final_output") or "") == ""
+    assert int(first.get("stage_reply_bounce_count") or 0) == 1
+    assert "还没有任何真实工具执行结果" in str(first["repair_overlay_text"])
+    assert "再次直接输出回复文本即可" in str(first["repair_overlay_text"])
+
+    # 整回合上限一次：计数已达上限时，即使阶段仍无工具轮也必须放行收尾。
+    second = await runner._graph_normalize_model_output(
+        _state(stage_reply_bounce_count=1),
+        runtime=SimpleNamespace(),
+    )
+    assert second["next_step"] == "finalize"
+    assert second["final_output"] == "调研任务已派发，结果出来我再推给你。"
+    assert not str(second.get("repair_overlay_text") or "")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_turn_finalizes_plain_reply_without_stage_ping_pong(monkeypatch, tmp_path) -> None:
+    # 复刻会话 22124b26b86b 事故：sns(budget=1)+create_async_task 同批派发后，
+    # 旧 A/B 双拦截把模型的纯文本收尾无限打回（4 阶段 / 10 次调用 / 0 送达，
+    # 最终靠用户手动暂停结束）。修复后必须 2 次调用内交付回复。
+    async def _noop_ready() -> None:
+        return None
+
+    async def _noop_task_startup() -> None:
+        return None
+
+    class _DispatchTaskTool(Tool):
+        @property
+        def name(self) -> str:
+            return "create_async_task"
+
+        @property
+        def description(self) -> str:
+            return "dispatch async task"
+
+        @property
+        def parameters(self) -> dict[str, object]:
+            return {
+                "type": "object",
+                "properties": {"task": {"type": "string"}},
+                "required": [],
+            }
+
+        async def execute(self, **kwargs) -> str:
+            _ = kwargs
+            return "创建任务成功task:demo-123"
+
+    reply_text = "调研任务已派发（task:demo-123），结果出来我再推给你。"
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content="我来派发调研任务。",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-stage-1",
+                        name="submit_next_stage",
+                        arguments={
+                            "stage_goal": "派发 IM 接入项目调研异步任务",
+                            "tool_round_budget": 1,
+                        },
+                    ),
+                    ToolCallRequest(
+                        id="call-task-1",
+                        name="create_async_task",
+                        arguments={"task": "调研 IM 接入项目"},
+                    ),
+                ],
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(content=reply_text, finish_reason="stop"),
+        ]
+    )
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=SimpleNamespace(
+            startup=_noop_task_startup,
+            get_task=lambda task_id: {"task_id": task_id},
+        ),
+        tools=_FakeToolRegistry([_DispatchTaskTool()]),
+        max_iterations=8,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["create_async_task"]}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return _assembly_result(tool_names=["create_async_task"])
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(
+        user_input=SimpleNamespace(content="找一下 IM 接入项目"),
+        session=session,
+    )
+
+    # 阶段1 一轮后耗尽，但纯文本收尾直接放行：恰好 2 次模型调用、回复送达。
+    assert output == reply_text
+    assert len(backend.calls) == 2
+    # graph 路径与 legacy 对齐：派发验证成功后注入一次性“可直接自然回复”尾注。
+    tail_message = list(backend.calls[1].get("messages") or [])[-1]
+    tail_content = str(tail_message.get("content") or "")
+    assert "Dispatch result is already available" in tail_content
+    assert "task:demo-123" in tail_content
 
 
 @pytest.mark.asyncio
