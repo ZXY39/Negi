@@ -23,9 +23,11 @@ from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_pa
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
     MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS,
+    RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS,
     current_runtime_config_revision,
     exception_chain_display_text,
     exhausted_model_chain_error,
+    is_retryable_model_error,
     model_retry_backoff_seconds,
     normalize_request_timeout_seconds,
     normalized_retry_count,
@@ -903,6 +905,16 @@ class ConfigChatBackend:
                                 continue
                             if rotate_key and not slot.is_last_round:
                                 continue
+                            if (
+                                should_fallback_model_error(exc)
+                                and is_retryable_model_error(exc, retry_on=target.retry_on)
+                                and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
+                            ):
+                                # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
+                                # 不在轮内跨模型消费下游模型。
+                                retry_full_chain = True
+                                retry_full_chain_reason = exception_chain_display_text(exc)
+                                break
                             if should_fallback_model_error(exc) and index < len(refs) - 1:
                                 _log_model_chain_fallback(
                                     messages=messages,
@@ -953,6 +965,16 @@ class ConfigChatBackend:
                                 continue
                             if not slot.is_last_round:
                                 continue
+                        if (
+                            fallback_response
+                            and retryable_response
+                            and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
+                        ):
+                            # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
+                            # 不在轮内跨模型消费下游模型。
+                            retry_full_chain = True
+                            retry_full_chain_reason = response.error_text or response.content or response.finish_reason
+                            break
                         if fallback_response and index < len(refs) - 1:
                             _log_model_chain_fallback(
                                 messages=messages,

@@ -41,6 +41,13 @@ RETRY_BACKOFF_JITTER_RATIO = 0.25
 # 重试并按耗尽处理。**只计退避等待，不含请求本身耗时**（请求耗时另由
 # DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS 单次约束）。默认 20 分钟，可调。
 MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS = 1200.0
+# 可重试错误的链首独占退避窗口（轮数）：退避轮次未超过该值时，任何链位上的
+# retry_on 命中错误都直接转整链退避重试（从链首重启），不在轮内跨模型消费下游
+# 模型——限流/瞬时网络故障等一等就能恢复，零等待降级到弱回退模型既浪费主模型
+# 恢复窗口，又可能拿到劣质响应。超过该窗口后恢复"轮内消费下游模型"语义（链尾
+# 失败始终整链退避重试），避免持续故障的链首无限阻塞 fallback。退避序列
+# 1,2,4,8,16,32s 使默认 6 轮约覆盖一个典型分钟级限流窗口。
+RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS = 6
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",
@@ -215,9 +222,6 @@ def is_retryable_model_error(error: Exception | str, retry_on: list[str] | None 
 
 # 请求体/参数形状错误的 HTTP 状态：换一把 key 修不了畸形 payload，不轮换、快速失败。
 _REQUEST_SHAPE_STATUS_CODES = frozenset({400, 422})
-# 结构化 status 取不到时（如纯文本 RuntimeError）的窄文本信号——只认标准的请求形状措辞，
-# 不做模糊数字匹配（避免误伤 "400 tokens" 之类）。
-_REQUEST_SHAPE_TEXT_TOKENS = ("bad request", "badrequesterror", "invalid_request_error", "invalid request")
 
 
 def _error_status_code(error: Any) -> int | None:
@@ -238,14 +242,15 @@ def _error_status_code(error: Any) -> int | None:
 def is_request_shape_error(error: Exception | str | Any) -> bool:
     """是否为请求体/参数形状错误（400/422 类）：这类错误换 key 无用，应快速失败不轮换。
 
-    优先用结构化 HTTP 状态（3.1 起 LLMResponse.error_status / SDK status_code 可得）；
-    退化到窄文本信号（标准 bad-request 措辞），不做模糊数字匹配。
+    只信任结构化 HTTP 状态（LLMResponse.error_status / SDK 异常 status_code）：
+    status 可得且为 400/422 → 形状错误；status 可得但为其他值（429 限流、401 坏
+    key、503 等）→ 不是形状错误；status 不可得 → 一律不按形状错误处理，交给正常
+    轮换/退避/降级判定。
+    文本关键字不作为判定依据：bad request / invalid_request_error 等是
+    OpenAI 兼容网关的通用错误 type 字段，不是 400 专属标识（如 sensenova 网关把
+    429 限流标成 invalid_request_error），文本匹配会把可重试错误误判成形状错误。
     """
-    if _error_status_code(error) in _REQUEST_SHAPE_STATUS_CODES:
-        return True
-    text = exception_chain_text(error) if isinstance(error, Exception) else str(error or "")
-    text = text.lower()
-    return any(token in text for token in _REQUEST_SHAPE_TEXT_TOKENS)
+    return _error_status_code(error) in _REQUEST_SHAPE_STATUS_CODES
 
 
 def should_rotate_api_key_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
@@ -586,6 +591,16 @@ class FallbackProvider(LLMProvider):
                             )
                             _log_model_chain_retry(model_ref=model_key, reason=exc)
                             continue
+                        if (
+                            should_fallback_model_error(exc)
+                            and is_retryable_model_error(exc, retry_on=target.retry_on)
+                            and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
+                        ):
+                            # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
+                            # 不在轮内跨模型消费下游模型。
+                            retry_full_chain = True
+                            retry_full_chain_reason = exception_chain_display_text(exc)
+                            break
                         if should_fallback_model_error(exc) and model_key != chain[-1]:
                             logger.warning(
                                 "Model fallback triggered for {} after {} retry rounds: {}",
@@ -639,6 +654,16 @@ class FallbackProvider(LLMProvider):
                                 reason=response.error_text or response.content or response.finish_reason,
                             )
                             continue
+                    if (
+                        fallback_response
+                        and retryable_response
+                        and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
+                    ):
+                        # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
+                        # 不在轮内跨模型消费下游模型。
+                        retry_full_chain = True
+                        retry_full_chain_reason = response.error_text or response.content or response.finish_reason
+                        break
                     if fallback_response and model_key != chain[-1]:
                         logger.warning(
                             "Model fallback triggered for {} after {} retry rounds: {}",

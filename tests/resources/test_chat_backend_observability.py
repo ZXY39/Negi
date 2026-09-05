@@ -14,7 +14,9 @@ from g3ku.providers.provider_factory import ProviderTarget
 class _AlwaysFailProvider:
     async def chat(self, **kwargs):
         _ = kwargs
-        raise RuntimeError('HTTP 502: Upstream request failed')
+        # 503 不在 retry_on=['502'] 关键字内 → 非可重试 → 走跨模型降级车道
+        # （可重试错误改走整链退避重试，不再产生 FALLBACK 事件）。
+        raise RuntimeError('HTTP 503: Upstream request failed')
 
 
 class _RetryThenSuccessProvider:

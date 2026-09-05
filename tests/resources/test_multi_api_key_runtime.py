@@ -60,7 +60,8 @@ class _BadRequestProvider:
     async def chat(self, **kwargs):
         _ = kwargs
         self.calls.append(self.key_index)
-        raise RuntimeError("HTTP 400: bad request")
+        # 形状错误判定只认结构化 status：模拟 SDK BadRequestError（status_code=400）。
+        raise _StatusError("HTTP 400: bad request", 400)
 
 
 class _AlwaysRetryableChainProvider:
@@ -114,6 +115,14 @@ class _TimeoutAwareSuccessProvider:
         return LLMResponse(content="ok", finish_reason="stop")
 
 
+class _StatusError(RuntimeError):
+    """携带结构化 HTTP 状态的异常，模拟 OpenAI SDK 异常（.status_code 可得）。"""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: list[int] | None = None, retry_on: list[str] | None = None) -> ProviderTarget:
     return ProviderTarget(
         provider_ref="primary",
@@ -157,23 +166,52 @@ async def test_fallback_provider_rotates_keys_on_non_retryable_error(monkeypatch
 
 
 def test_should_rotate_predicate_retryable_request_shape_and_internal() -> None:
-    """轮换谓词新契约：retryOn 命中(可重试)/请求形状(400)/内部错误 都不换；其余换。"""
+    """轮换谓词契约：retryOn 命中(可重试)/请求形状(结构化 400/422)/内部错误 都不换；其余换。"""
     rotate = fallback_module.should_rotate_api_key_error
     retry_on = ["network", "429", "502"]
     # 可重试（命中 retryOn）→ 不换 key，走整链重试
     assert rotate("RateLimitError: Error code: 429 - too many requests", retry_on=retry_on) is False
     assert rotate("HTTP 502: upstream request failed", retry_on=retry_on) is False
-    # 请求形状错误（400/bad request）→ 不换（换 key 修不了畸形 payload）
-    assert rotate("HTTP 400: bad request", retry_on=retry_on) is False
-    assert rotate(RuntimeError("BadRequestError: 400 invalid_request_error"), retry_on=retry_on) is False
+    # 请求形状错误只认结构化 status：status_code 400/422 → 不换（换 key 修不了畸形 payload）
+    assert rotate(_StatusError("provider rejected payload", 400), retry_on=retry_on) is False
+    assert rotate(_StatusError("unprocessable payload", 422), retry_on=retry_on) is False
+    # 结构化 status 可得且非 400/422 → 不再落文本匹配：网关标成
+    # invalid_request_error 的 429 限流不会被误判成形状错误（仍因命中
+    # retryOn 而不轮换，但判定理由是可重试而非形状错误）。
+    assert rotate(
+        _StatusError("RateLimitError: {'type': 'invalid_request_error'} code=429001 status=429", 429),
+        retry_on=retry_on,
+    ) is False
+    # 无结构化 status 的文本错误一律不按形状错误处理（文本兜底已移除）
+    assert rotate("HTTP 400: bad request", retry_on=retry_on) is True
+    assert rotate(RuntimeError("BadRequestError: 400 invalid_request_error"), retry_on=retry_on) is True
     # 内部运行时错误 → 不换
     assert rotate("sqlite database is locked", retry_on=retry_on) is False
     # 非可重试、非请求形状、非内部（如 401 坏 key、503）→ 换 key
     assert rotate("HTTP 401: unauthorized", retry_on=retry_on) is True
     assert rotate("HTTP 503: service unavailable", retry_on=retry_on) is True
-    # retryOn 显式置空 → 无可重试关键字 → 非请求形状错误一律换 key
+    # retryOn 显式置空 → 无可重试关键字 → 非形状错误一律换 key
     assert rotate("HTTP 502: upstream request failed", retry_on=[]) is True
-    assert rotate("HTTP 400: bad request", retry_on=[]) is False  # 请求形状豁免与 retryOn 无关
+    # 结构化形状豁免与 retryOn 无关
+    assert rotate(_StatusError("provider rejected payload", 400), retry_on=[]) is False
+
+
+def test_is_request_shape_error_structured_status_only() -> None:
+    """形状错误判定只信任结构化 HTTP 状态，文本关键字兜底已移除。"""
+    shape = fallback_module.is_request_shape_error
+    # 结构化 status 可得：只有 400/422 是形状错误
+    assert shape(_StatusError("bad payload", 400)) is True
+    assert shape(_StatusError("unprocessable", 422)) is True
+    assert shape(_StatusError("{'type': 'invalid_request_error'} tpm exhausted", 429)) is False
+    assert shape(_StatusError("unauthorized", 401)) is False
+    assert shape(_StatusError("upstream error", 503)) is False
+    # 无结构化 status → 一律非形状错误（即使文本带 bad request / invalid_request_error）
+    assert shape("HTTP 400: bad request") is False
+    assert shape(RuntimeError("BadRequestError: 400 invalid_request_error")) is False
+    # 响应路径用 LLMResponse.error_status
+    assert shape(LLMResponse(content="err", finish_reason="error", error_status=400)) is True
+    assert shape(LLMResponse(content="err", finish_reason="error", error_status=422)) is True
+    assert shape(LLMResponse(content="err", finish_reason="error", error_status=429)) is False
 
 
 def test_response_requires_rotation_uses_structured_error_status() -> None:
@@ -184,6 +222,15 @@ def test_response_requires_rotation_uses_structured_error_status() -> None:
     assert fallback_module.response_requires_api_key_rotation(server_error, retry_on=["network", "429"]) is True
     retryable = LLMResponse(content="err", error_text="429 too many requests", finish_reason="error", error_status=429)
     assert fallback_module.response_requires_api_key_rotation(retryable, retry_on=["network", "429"]) is False
+    # 网关把 429 限流标成 invalid_request_error 也不得误判为形状错误：
+    # 结构化 error_status=429 权威，不因文本关键字改变分类。
+    poisoned = LLMResponse(
+        content="err",
+        error_text="{'type': 'invalid_request_error'} 429 rate limit",
+        finish_reason="error",
+        error_status=429,
+    )
+    assert fallback_module.response_requires_api_key_rotation(poisoned, retry_on=["network", "429"]) is False
 
 
 @pytest.mark.asyncio
@@ -320,11 +367,14 @@ async def test_config_chat_backend_rejects_when_all_api_keys_disabled(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_config_chat_backend_retries_full_model_chain_on_retryable_exhaustion(monkeypatch) -> None:
+async def test_config_chat_backend_retries_retryable_error_without_consuming_fallback(monkeypatch) -> None:
+    # 新契约（回归 task:e580ebc3dc55）：retry_on 命中的错误在独占退避窗口内直接转
+    # 整链退避重试，不在轮内跨模型消费下游模型——旧实现零等待降级到弱回退模型，
+    # 把决定性请求交给了劣质响应。链首恢复后即由链首交付，全程不触碰 secondary。
     calls: list[str] = []
     providers = {
-        "primary": _AlwaysRetryableChainProvider("primary", calls),
-        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=2),
+        "primary": _RetryableChainThenSuccessProvider("primary", calls, succeed_on_call=3),
+        "secondary": _AlwaysRetryableChainProvider("secondary", calls),
     }
 
     def _builder(config, model_key, *, api_key_index=None):
@@ -350,7 +400,9 @@ async def test_config_chat_backend_retries_full_model_chain_on_retryable_exhaust
     )
 
     assert response.content == "ok"
-    assert calls == ["primary", "secondary", "primary", "secondary"]
+    # 前两轮 502 命中 retry_on → 整链退避重试（从链首重启）；第 3 轮链首恢复。
+    assert calls == ["primary", "primary", "primary"]
+    assert calls.count("secondary") == 0
 
 
 @pytest.mark.asyncio
@@ -358,8 +410,8 @@ async def test_config_chat_backend_publishes_model_retry_status_and_clears_it(mo
     calls: list[str] = []
     events: list[dict[str, object]] = []
     providers = {
-        "primary": _AlwaysRetryableChainProvider("primary", calls),
-        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=2),
+        "primary": _RetryableChainThenSuccessProvider("primary", calls, succeed_on_call=2),
+        "secondary": _AlwaysRetryableChainProvider("secondary", calls),
     }
 
     def _builder(config, model_key, *, api_key_index=None):
@@ -389,22 +441,23 @@ async def test_config_chat_backend_publishes_model_retry_status_and_clears_it(mo
     )
 
     assert response.content == "ok"
+    assert calls == ["primary", "primary"]
     retrying_events = [event for event in events if event.get("state") == "retrying"]
-    # 整链重试只发一次；跨模型 fallback 属链路正常工作，只计入次数、不单独发 toast。
+    # 链首可重试错误转整链退避重试时发一次 retrying；retry_count 是 provider 实际
+    # 请求次数（退避前已打出 1 发）。
     assert len(retrying_events) == 1
-    # retry_count 改为 provider 实际请求次数：第 1 轮 primary+secondary 共 2 发请求，
-    # 故整链重试前显示 2（旧实现只有整链退避计数 1，少报了真实的第 2 发）。
-    assert retrying_events[0]["retry_count"] == 2
+    assert retrying_events[0]["retry_count"] == 1
     assert "HTTP 502: upstream request failed" in str(retrying_events[0]["error_message"])
     assert events[-1] == {"state": "cleared"}
 
 
 @pytest.mark.asyncio
-async def test_fallback_provider_retries_full_model_chain_on_retryable_exhaustion(monkeypatch) -> None:
+async def test_fallback_provider_retries_retryable_error_without_consuming_fallback(monkeypatch) -> None:
+    # 前门 FallbackProvider 同一契约：链首可重试错误直接整链退避重试，不跨模型消费下游。
     calls: list[str] = []
     providers = {
-        "primary": _AlwaysRetryableChainProvider("primary", calls),
-        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=2),
+        "primary": _RetryableChainThenSuccessProvider("primary", calls, succeed_on_call=2),
+        "secondary": _AlwaysRetryableChainProvider("secondary", calls),
     }
 
     def _builder(config, model_key, *, api_key_index=None):
@@ -430,7 +483,8 @@ async def test_fallback_provider_retries_full_model_chain_on_retryable_exhaustio
     response = await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
 
     assert response.content == "ok"
-    assert calls == ["primary", "secondary", "primary", "secondary"]
+    assert calls == ["primary", "primary"]
+    assert calls.count("secondary") == 0
 
 
 @pytest.mark.asyncio
@@ -469,11 +523,11 @@ async def test_fallback_provider_chain_retry_stops_at_backoff_budget_cap(monkeyp
 
 @pytest.mark.asyncio
 async def test_config_chat_backend_retries_retryable_exhaustion_without_round_limit(monkeypatch) -> None:
+    # 独占窗口耗尽后恢复"轮内消费下游模型"语义，整链重试不受轮数上限约束：
+    # secondary 在第 12 次调用才成功，远超历史 10 轮上限。
     calls: list[str] = []
     providers = {
         "primary": _AlwaysRetryableChainProvider("primary", calls),
-        # Succeeds on its 12th call: round 12 is beyond the historical
-        # 10-round cap, proving retryable retries are now unbounded.
         "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=12),
     }
 
@@ -490,6 +544,8 @@ async def test_config_chat_backend_retries_retryable_exhaustion_without_round_li
         )
 
     monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    # 压小独占窗口：前 2 轮链首独占退避重试，之后允许轮内消费 secondary。
+    monkeypatch.setattr(chat_backend_module, "RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS", 2)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -500,7 +556,8 @@ async def test_config_chat_backend_retries_retryable_exhaustion_without_round_li
     )
 
     assert response.content == "ok"
-    assert calls.count("primary") == 12
+    # 2 轮独占重试 + 之后每轮各消费一次，直到 secondary 第 12 次调用成功。
+    assert calls.count("primary") == 2 + 12
     assert calls.count("secondary") == 12
     assert calls[-1] == "secondary"
 
@@ -644,6 +701,8 @@ async def test_config_chat_backend_refreshes_model_chain_between_retry_rounds(mo
         return ["primary"] if len(resolver_calls) <= 1 else ["primary", "secondary"]
 
     monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    # 独占窗口压到 1 轮：第 2 轮起允许轮内消费新加入的 secondary。
+    monkeypatch.setattr(chat_backend_module, "RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS", 1)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -675,7 +734,10 @@ async def test_config_chat_backend_falls_back_after_attempt_timeout(monkeypatch)
             provider_id="custom",
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
-            retry_on=["network", "429", "502"],
+            # timeout 命中 network 预设关键字时走整链退避重试（见
+            # test_config_chat_backend_retries_retryable_timeout_without_fallback）；
+            # 这里用不含超时语义的关键字，验证不可重试超时仍跨模型降级。
+            retry_on=["502"],
             retry_count=0,
             api_key_count=1,
         )
@@ -714,7 +776,8 @@ async def test_fallback_provider_falls_back_after_attempt_timeout(monkeypatch) -
             provider_id="custom",
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
-            retry_on=["network", "429", "502"],
+            # 同上：不含超时语义的关键字，验证不可重试超时的跨模型降级。
+            retry_on=["502"],
             retry_count=0,
             api_key_count=1,
         )
@@ -737,3 +800,227 @@ async def test_fallback_provider_falls_back_after_attempt_timeout(monkeypatch) -
     assert calls == ["primary", "secondary"]
     assert primary_timeouts == [0.01]
     assert secondary_timeouts == [0.01]
+
+
+class _HangOnceThenSuccessProvider:
+    """首次调用挂起（制造超时），之后正常返回。"""
+
+    def __init__(self, model_key: str, calls: list[str]) -> None:
+        self.model_key = model_key
+        self.calls = calls
+        self.call_count = 0
+
+    async def chat(self, **kwargs):
+        self.calls.append(self.model_key)
+        self.call_count += 1
+        if self.call_count == 1:
+            await asyncio.Event().wait()
+        return LLMResponse(content="ok", finish_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_retries_retryable_timeout_without_fallback(monkeypatch) -> None:
+    # timeout 命中 network 预设关键字：链首超时转整链退避重试，不跨模型消费下游。
+    calls: list[str] = []
+    providers = {
+        "primary": _HangOnceThenSuccessProvider("primary", calls),
+        "secondary": _TimeoutAwareSuccessProvider("secondary", calls, []),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    backend._model_attempt_timeout_seconds = 0.01
+
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary", "secondary"],
+    )
+
+    assert response.content == "ok"
+    assert calls == ["primary", "primary"]
+    assert calls.count("secondary") == 0
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_retries_gateway_429_with_invalid_request_error_marker(monkeypatch) -> None:
+    # 回归 task:e580ebc3dc55（异常路径）：网关把 429 限流标成
+    # 'type': 'invalid_request_error'，不得误判为请求形状错误而改变分类；
+    # 链首命中 retry_on → 整链退避重试而非零等待降级到弱回退模型。
+    calls: list[str] = []
+
+    class _RateLimitOnceThenSuccess:
+        def __init__(self, model_key: str) -> None:
+            self.model_key = model_key
+            self.call_count = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            calls.append(self.model_key)
+            self.call_count += 1
+            if self.call_count == 1:
+                raise _StatusError(
+                    "RateLimitError: Error code: 429 - {'error': {'message': 'rpm exhausted', "
+                    "'type': 'invalid_request_error', 'code': '429001'}} code=429001 status=429",
+                    429,
+                )
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    providers = {
+        "primary": _RateLimitOnceThenSuccess("primary"),
+        "secondary": _AlwaysRetryableChainProvider("secondary", calls),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary", "secondary"],
+    )
+
+    assert response.content == "ok"
+    assert calls == ["primary", "primary"]
+    assert calls.count("secondary") == 0
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_retries_retryable_error_response_at_chain_head(monkeypatch) -> None:
+    # 回归 task:e580ebc3dc55（响应路径）：OpenAI 系 provider 把 SDK 异常转成
+    # finish_reason=error + error_status=429 的响应。链首可重试错误响应转整链
+    # 退避重试，secondary 全程不被消费。
+    calls: list[str] = []
+
+    class _RateLimitResponseOnceThenSuccess:
+        def __init__(self, model_key: str) -> None:
+            self.model_key = model_key
+            self.call_count = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            calls.append(self.model_key)
+            self.call_count += 1
+            if self.call_count == 1:
+                return LLMResponse(
+                    content="RateLimitError: Error code: 429 - {'error': {'message': 'rpm exhausted', "
+                    "'type': 'invalid_request_error', 'code': '429001'}} code=429001 status=429",
+                    error_text="RateLimitError: Error code: 429 - {'error': {'message': 'rpm exhausted', "
+                    "'type': 'invalid_request_error', 'code': '429001'}} code=429001 status=429",
+                    finish_reason="error",
+                    error_status=429,
+                )
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    providers = {
+        "primary": _RateLimitResponseOnceThenSuccess("primary"),
+        "secondary": _AlwaysRetryableChainProvider("secondary", calls),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary", "secondary"],
+    )
+
+    assert response.content == "ok"
+    assert calls == ["primary", "primary"]
+    assert calls.count("secondary") == 0
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_retries_retryable_error_response_at_chain_head(monkeypatch) -> None:
+    # 前门 FallbackProvider 响应路径同一契约。
+    calls: list[str] = []
+
+    class _RateLimitResponseOnceThenSuccess:
+        def __init__(self, model_key: str) -> None:
+            self.model_key = model_key
+            self.call_count = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            calls.append(self.model_key)
+            self.call_count += 1
+            if self.call_count == 1:
+                return LLMResponse(
+                    content="429 too many requests",
+                    error_text="429 too many requests",
+                    finish_reason="error",
+                    error_status=429,
+                )
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    providers = {
+        "primary": _RateLimitResponseOnceThenSuccess("primary"),
+        "secondary": _AlwaysRetryableChainProvider("secondary", calls),
+    }
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=providers[str(model_key)],
+            retry_on=["network", "429"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
+
+    provider = fallback_module.FallbackProvider(
+        config=SimpleNamespace(),
+        model_chain=["primary", "secondary"],
+        default_model_ref="primary",
+    )
+    response = await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
+
+    assert response.content == "ok"
+    assert calls == ["primary", "primary"]
+    assert calls.count("secondary") == 0
