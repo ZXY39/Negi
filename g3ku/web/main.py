@@ -16,6 +16,7 @@ from g3ku.deployment.runtime_startup import auto_unlock_from_env
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import ensure_web_runtime_services, shutdown_web_runtime
 from g3ku.runtime.api import router as runtime_router
+from g3ku.runtime.api.external_v1 import router as external_v1_router
 from g3ku.web.launcher import run_default_web_entrypoint
 from g3ku.web.frontend_assets import ensure_frontend_vendor_assets, frontend_assets_available
 from g3ku.web.server_control import request_server_shutdown, set_server_instance
@@ -138,6 +139,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title='G3ku Web GUI', lifespan=lifespan)
 app.include_router(main_router, prefix='/api')
 app.include_router(runtime_router, prefix='/api')
+app.include_router(external_v1_router, prefix='/api/v1')
 
 
 @app.middleware("http")
