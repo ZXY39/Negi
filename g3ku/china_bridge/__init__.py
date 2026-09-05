@@ -15,7 +15,8 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     if name in {"build_chat_id", "build_session_key"}:
-        return getattr(import_module("g3ku.china_bridge.session_keys"), name)
+        # Canonical home moved to g3ku.runtime.session_keys (rebuild Step 1).
+        return getattr(import_module("g3ku.runtime.session_keys"), name)
     if name in {"CHINA_CHANNELS", "ChinaBridgeTransport"}:
         return getattr(import_module("g3ku.china_bridge.transport"), name)
     if name == "ChinaBridgeClient":

@@ -70,7 +70,7 @@ TURN_FAILED_FRIENDLY_TEXT = (
 # internal (cron/heartbeat) turn then rebuilt the prompt with no base system
 # prompt. Continuity must apply to every frontdoor session regardless of the
 # channel it arrived on.
-_FRONTDOOR_CONTINUITY_SESSION_KEY_PREFIXES = ("web:", "china:", "cron:")
+_FRONTDOOR_CONTINUITY_SESSION_KEY_PREFIXES = ("web:", "china:", "cron:", "ext:")
 
 
 def _frontdoor_continuity_session_key(session_key: str) -> bool:

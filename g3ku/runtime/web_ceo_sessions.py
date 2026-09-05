@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
-from g3ku.china_bridge.session_keys import build_session_key, parse_china_session_key
+from g3ku.runtime.session_keys import build_session_key, is_channel_session_key, parse_china_session_key
 from g3ku.config.loader import get_config_path, load_config
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
@@ -1540,7 +1540,7 @@ def build_session_summary(
 
 
 def ceo_session_family(session_id: str) -> str:
-    return "channel" if str(session_id or "").strip().startswith("china:") else "local"
+    return "channel" if is_channel_session_key(session_id) else "local"
 
 
 def build_local_ceo_session_item(

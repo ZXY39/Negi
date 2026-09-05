@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
 from loguru import logger
 
+from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_TASK_DEFAULTS_SCOPE_KEY,
     SESSION_TASK_DEFAULTS_SCOPE_SESSION,
@@ -154,7 +155,7 @@ def _list_session_items(session_manager, runtime_manager, *, active_session_id: 
 
 
 def _is_channel_session_id(session_id: str) -> bool:
-    return str(session_id or "").strip().startswith("china:")
+    return is_channel_session_key(session_id)
 
 
 def _raise_channel_session_readonly() -> None:

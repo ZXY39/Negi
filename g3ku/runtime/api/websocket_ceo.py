@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
+from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
@@ -148,7 +149,7 @@ def _pending_tool_approval_interrupts(
 
 
 def _is_channel_session_id(session_id: str) -> bool:
-    return str(session_id or '').strip().startswith('china:')
+    return is_channel_session_key(session_id)
 
 
 def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, state_store) -> None:

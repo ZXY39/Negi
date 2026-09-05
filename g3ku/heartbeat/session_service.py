@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.china_bridge.session_keys import normalize_account_id, parse_china_session_key
+from g3ku.runtime.session_keys import normalize_account_id, parse_china_session_key
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane, format_local_timestamp

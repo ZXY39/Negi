@@ -5,7 +5,12 @@ from datetime import datetime
 from typing import Any
 
 from g3ku.china_bridge.models import ChinaAttachment, ChinaInboundEnvelope
-from g3ku.runtime.frontdoor.tool_contract import strip_frontdoor_tool_contract_echo
+# Canonical implementation moved to g3ku.runtime.session_keys (channel
+# communication rebuild, Step 1); re-exported here for existing imports.
+from g3ku.runtime.session_keys import (  # noqa: F401
+    SESSION_EVENTS_MARKER,
+    sanitize_channel_outbound_text,
+)
 
 
 def now_iso() -> str:
@@ -14,24 +19,6 @@ def now_iso() -> str:
 
 def dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False)
-
-
-SESSION_EVENTS_MARKER = "[SESSION EVENTS]"
-
-
-def sanitize_channel_outbound_text(text: str) -> str:
-    """Remove internal-only artifacts from channel-bound reply text.
-
-    Models occasionally echo internal context blocks verbatim. This truncates
-    everything from a ``[SESSION EVENTS]`` marker onward. The result is
-    stripped; an empty result means the whole message was internal-only and
-    must not be delivered.
-    """
-    cleaned = strip_frontdoor_tool_contract_echo(text)
-    marker_index = cleaned.find(SESSION_EVENTS_MARKER)
-    if marker_index >= 0:
-        cleaned = cleaned[:marker_index]
-    return cleaned.strip()
 
 
 def build_auth_frame(token: str) -> dict[str, Any]:

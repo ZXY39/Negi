@@ -16,7 +16,7 @@ from g3ku.agent.loop import AgentLoop
 from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
 from g3ku.china_bridge import CHINA_CHANNELS, ChinaBridgeSupervisor, ChinaBridgeTransport
-from g3ku.china_bridge.session_keys import build_chat_id, parse_china_session_key
+from g3ku.runtime.session_keys import build_chat_id, parse_china_session_key
 from g3ku.config.loader import get_data_dir
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.cron.runtime_dispatch import dispatch_cron_job

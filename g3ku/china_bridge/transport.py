@@ -15,7 +15,7 @@ from g3ku.china_bridge.protocol import (
     normalize_inbound_frame,
     sanitize_channel_outbound_text,
 )
-from g3ku.china_bridge.session_keys import (
+from g3ku.runtime.session_keys import (
     build_memory_chat_id,
     build_runtime_chat_id,
     build_session_key,
