@@ -1241,8 +1241,40 @@ async def test_create_async_task_tool_returns_duplicate_rejection_text():
 
     assert '任务未创建' in result
     assert 'task:existing-1' in result
-    assert '高度重复' in result
+    assert '完全相同' in result
+    assert 'task_append_notice' in result
+    assert '请先向用户确认是否暂停并删除旧任务' in result
     assert captured['precheck']['session_id'] == 'web:ceo-demo'
+
+
+@pytest.mark.asyncio
+async def test_create_async_task_tool_duplicate_rejection_lists_all_matched_ids():
+    class _StubService:
+        async def precheck_async_task_creation(self, **kwargs):
+            _ = kwargs
+            return {
+                'decision': 'reject_duplicate',
+                'matched_task_id': 'task:existing-1',
+                'matched_task_ids': ['task:existing-1', 'task:existing-2'],
+                'reason': 'core_requirement exact match',
+                'decision_source': 'rule',
+            }
+
+        async def create_task(self, *args, **kwargs):
+            raise AssertionError('create_task should not run for duplicate rejection')
+
+    tool = _load_live_create_async_task_tool(_StubService())._handler
+    result = await tool.execute(
+        '整理重点客户流失信号',
+        core_requirement='整理重点客户流失信号',
+        execution_policy={'mode': 'focus'},
+        __g3ku_runtime={'session_key': 'web:ceo-demo'},
+    )
+
+    assert '任务未创建' in result
+    assert 'task:existing-1' in result
+    assert 'task:existing-2' in result
+    assert '完全相同' in result
 
 
 @pytest.mark.asyncio
@@ -1279,7 +1311,7 @@ async def test_create_async_task_tool_rechecks_exact_duplicate_before_create():
 
     assert '任务未创建' in result
     assert 'task:existing-guarded' in result
-    assert '高度重复' in result
+    assert '完全相同' in result
 
 
 @pytest.mark.asyncio

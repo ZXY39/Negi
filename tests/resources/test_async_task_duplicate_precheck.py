@@ -59,7 +59,100 @@ async def test_precheck_rejects_exact_core_requirement_duplicate(tmp_path: Path)
 
         assert decision["decision"] == "reject_duplicate"
         assert decision["matched_task_id"] == first.task_id
+        assert decision["matched_task_ids"] == [first.task_id]
         assert decision["decision_source"] == "rule"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_precheck_reports_all_matched_duplicate_task_ids(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        first = await service.create_task(
+            "整理本周用户投诉并给出处理建议",
+            session_id="web:ceo-demo",
+            metadata={
+                "core_requirement": "整理本周用户投诉并给出处理建议",
+                "execution_policy": {"mode": "focus"},
+            },
+        )
+        second = await service.create_task(
+            "整理本周用户投诉并给出处理建议",
+            session_id="web:ceo-demo",
+            metadata={
+                "core_requirement": "整理本周用户投诉并给出处理建议",
+                "execution_policy": {"mode": "focus"},
+            },
+        )
+
+        decision = await service.precheck_async_task_creation(
+            session_id="web:ceo-demo",
+            task_text="整理本周用户投诉并给出处理建议",
+            core_requirement="整理本周用户投诉并给出处理建议",
+            execution_policy={"mode": "focus"},
+            requires_final_acceptance=False,
+            final_acceptance_prompt="",
+        )
+
+        assert decision["decision"] == "reject_duplicate"
+        assert set(decision["matched_task_ids"]) == {first.task_id, second.task_id}
+        assert decision["matched_task_id"] == decision["matched_task_ids"][0]
+        assert decision["reason"] == "core_requirement exact match"
+        assert decision["decision_source"] == "rule"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_precheck_skips_llm_review_when_disabled_in_config(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        app_config=SimpleNamespace(
+            main_runtime=SimpleNamespace(
+                duplicate_precheck=SimpleNamespace(llm_review_enabled=False),
+            )
+        ),
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        await service.create_task(
+            "整理北美客户续费流失原因",
+            session_id="web:ceo-demo",
+            metadata={
+                "core_requirement": "整理北美客户续费流失原因",
+                "execution_policy": {"mode": "focus"},
+            },
+        )
+
+        decision = await service.precheck_async_task_creation(
+            session_id="web:ceo-demo",
+            task_text="设计续费流失挽回实验方案",
+            core_requirement="设计续费流失挽回实验方案",
+            execution_policy={"mode": "focus"},
+            requires_final_acceptance=False,
+            final_acceptance_prompt="",
+        )
+
+        assert decision["decision"] == "approve_new"
+        assert decision["matched_task_id"] == ""
+        assert decision["decision_source"] == "rule"
+        assert "llm review disabled" in decision["reason"]
     finally:
         await service.close()
 

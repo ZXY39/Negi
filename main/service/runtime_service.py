@@ -308,6 +308,8 @@ class MainRuntimeService:
         resolved_files_base_dir = Path(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
         resolved_artifact_dir = Path(artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'))
         event_history_settings = self._event_history_settings(app_config)
+        duplicate_precheck_settings = self._duplicate_precheck_settings(app_config)
+        self._duplicate_precheck_llm_review_enabled = bool(duplicate_precheck_settings.get('llm_review_enabled', True))
         configured_event_history_dir = str(event_history_settings.get('dir') or '').strip()
         resolved_event_history_dir = Path(
             configured_event_history_dir or (resolved_store_path.parent / 'event-history')
@@ -2430,24 +2432,33 @@ class MainRuntimeService:
         _ = execution_policy, requires_final_acceptance, final_acceptance_prompt
         candidate_target = self._normalize_async_task_target_text(core_requirement or task_text)
         candidate_keywords = self._async_task_keyword_fingerprint(core_requirement or task_text)
+        matched_task_ids: list[str] = []
+        match_kinds: list[str] = []
         for item in self._async_task_precheck_pool(session_id):
+            task_id = str(item.get('task_id') or '').strip()
+            if not task_id or task_id in matched_task_ids:
+                continue
             if candidate_target and candidate_target == str(item.get('target_text') or '').strip():
-                return {
-                    'decision': 'reject_duplicate',
-                    'matched_task_id': str(item.get('task_id') or '').strip(),
-                    'reason': 'core_requirement exact match',
-                    'decision_source': 'rule',
-                }
+                matched_task_ids.append(task_id)
+                if 'core_requirement exact match' not in match_kinds:
+                    match_kinds.append('core_requirement exact match')
+                continue
             if candidate_keywords and candidate_keywords == tuple(item.get('keyword_fingerprint') or ()):
-                return {
-                    'decision': 'reject_duplicate',
-                    'matched_task_id': str(item.get('task_id') or '').strip(),
-                    'reason': 'keyword fingerprint exact match',
-                    'decision_source': 'rule',
-                }
+                matched_task_ids.append(task_id)
+                if 'keyword fingerprint exact match' not in match_kinds:
+                    match_kinds.append('keyword fingerprint exact match')
+        if matched_task_ids:
+            return {
+                'decision': 'reject_duplicate',
+                'matched_task_id': matched_task_ids[0],
+                'matched_task_ids': matched_task_ids,
+                'reason': '; '.join(match_kinds),
+                'decision_source': 'rule',
+            }
         return {
             'decision': 'approve_new',
             'matched_task_id': '',
+            'matched_task_ids': [],
             'reason': 'rule precheck found no exact duplicate',
             'decision_source': 'rule',
         }
@@ -2586,6 +2597,14 @@ class MainRuntimeService:
             return rule_decision
         if not self._async_task_precheck_pool(normalized_session_id):
             return rule_decision
+        if not self._duplicate_precheck_llm_review_enabled:
+            return {
+                'decision': 'approve_new',
+                'matched_task_id': '',
+                'matched_task_ids': [],
+                'reason': 'llm review disabled; rule precheck only',
+                'decision_source': 'rule',
+            }
         try:
             llm_decision = await self._execute_async_task_duplicate_precheck_review(
                 session_id=normalized_session_id,
@@ -3880,6 +3899,14 @@ class MainRuntimeService:
                 int(getattr(history, 'live_patch_persist_window_ms', 1000) or 1000),
             ),
             'archive_encoding': str(getattr(history, 'archive_encoding', 'gzip') or 'gzip').strip().lower() or 'gzip',
+        }
+
+    @staticmethod
+    def _duplicate_precheck_settings(config: Any | None) -> dict[str, Any]:
+        main_runtime = getattr(config, 'main_runtime', None) if config is not None else None
+        precheck = getattr(main_runtime, 'duplicate_precheck', None) if main_runtime is not None else None
+        return {
+            'llm_review_enabled': bool(getattr(precheck, 'llm_review_enabled', True)) if precheck is not None else True,
         }
 
     @staticmethod

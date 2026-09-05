@@ -6312,7 +6312,7 @@ async def test_create_agent_postprocess_duplicate_rejection_with_old_task_id_doe
                     "role": "tool",
                     "tool_call_id": "call-1",
                     "name": "create_async_task",
-                    "content": "任务未创建：与进行中任务 task:demo-123 高度重复。原因：core_requirement exact match",
+                    "content": "任务未创建：与进行中任务 task:demo-123 完全相同（命中：core_requirement exact match）。\n- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。",
                 },
             ],
             "used_tools": [],
@@ -6334,6 +6334,18 @@ def test_parse_create_async_task_result_recognizes_task_append_notice_guidance()
     assert parsed["created"] is False
     assert parsed["created_task_ids"] == []
     assert parsed["rejection_kind"] == "append_notice"
+
+
+def test_parse_create_async_task_result_classifies_duplicate_message_with_notice_guidance() -> None:
+    parsed = ceo_runtime_ops.CeoFrontDoorRuntimeOps._parse_create_async_task_result(
+        "任务未创建：与进行中任务 task:demo-123 完全相同（命中：core_requirement exact match）。\n"
+        "- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n"
+        "- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。"
+    )
+
+    assert parsed["created"] is False
+    assert parsed["created_task_ids"] == []
+    assert parsed["rejection_kind"] == "duplicate"
 
 
 @pytest.mark.asyncio
@@ -6407,7 +6419,7 @@ async def test_create_agent_graph_execute_tools_does_not_mark_duplicate_rejectio
         _ = tool, tool_name, arguments, runtime_context, on_progress, tool_call_id
         return (
             None,
-            "任务未创建：与进行中任务 task:demo-123 高度重复。原因：core_requirement exact match",
+            "任务未创建：与进行中任务 task:demo-123 完全相同（命中：core_requirement exact match）。\n- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。",
             "success",
             "2026-04-18T23:00:00",
             "2026-04-18T23:00:01",

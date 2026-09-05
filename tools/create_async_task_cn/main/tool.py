@@ -38,6 +38,33 @@ def _runtime_task_default_max_depth(runtime: dict[str, Any] | None) -> int | Non
         return None
 
 
+def _collect_matched_task_ids(precheck: dict[str, Any]) -> list[str]:
+    raw_ids = precheck.get('matched_task_ids')
+    if isinstance(raw_ids, (list, tuple)):
+        ids: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_ids:
+            task_id = str(raw or '').strip()
+            if task_id and task_id not in seen:
+                seen.add(task_id)
+                ids.append(task_id)
+        if ids:
+            return ids
+    single = str(precheck.get('matched_task_id') or '').strip()
+    return [single] if single else []
+
+
+def _duplicate_rejection_text(precheck: dict[str, Any]) -> str:
+    matched_ids = _collect_matched_task_ids(precheck)
+    reason = str(precheck.get('reason') or '').strip()
+    ids_text = '、'.join(matched_ids) if matched_ids else '(unknown)'
+    return (
+        f'任务未创建：与进行中任务 {ids_text} 完全相同（命中：{reason or "unknown"}）。\n'
+        '- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n'
+        '- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。'
+    )
+
+
 class _CreateAsyncTaskHandler(Tool):
     def __init__(self, service) -> None:
         self._service = service
@@ -107,7 +134,7 @@ class _CreateAsyncTaskHandler(Tool):
         matched_task_id = str(precheck.get('matched_task_id') or '').strip()
         reason = str(precheck.get('reason') or '').strip()
         if decision == 'reject_duplicate':
-            return f'任务未创建：与进行中任务 {matched_task_id} 高度重复。原因：{reason}'
+            return _duplicate_rejection_text(precheck)
         if decision == 'reject_use_append_notice':
             return (
                 f'任务未创建：现有任务 {matched_task_id} 需要追加通知而不是新建。'
@@ -127,7 +154,7 @@ class _CreateAsyncTaskHandler(Tool):
             guard_task_id = str((create_guard or {}).get('matched_task_id') or '').strip()
             guard_reason = str((create_guard or {}).get('reason') or '').strip()
             if guard_decision == 'reject_duplicate':
-                return f'任务未创建：与进行中任务 {guard_task_id} 高度重复。原因：{guard_reason}'
+                return _duplicate_rejection_text(dict(create_guard or {}))
             if guard_decision == 'reject_use_append_notice':
                 return (
                     f'任务未创建：现有任务 {guard_task_id} 需要追加通知而不是新建。'

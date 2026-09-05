@@ -5324,8 +5324,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "rejection_kind": "",
             }
         if text.startswith("任务未创建："):
+            # The duplicate-rejection text also mentions task_append_notice as
+            # guidance, so only the dedicated append-notice phrasing (which
+            # starts with "现有任务") counts as the append-notice decision.
             rejection_kind = "duplicate"
-            if "task_append_notice" in text or "追加通知" in text:
+            if text.startswith("任务未创建：现有任务") and ("task_append_notice" in text or "追加通知" in text):
                 rejection_kind = "append_notice"
             return {
                 "created": False,

@@ -751,6 +751,7 @@ class MainRuntimeConfig(Base):
     hard_max_depth: int = 4
     event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
     node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
+    duplicate_precheck: "MainRuntimeDuplicatePrecheckConfig" = Field(default_factory=lambda: MainRuntimeDuplicatePrecheckConfig())
 
 
 class MainRuntimeEventHistoryConfig(Base):
@@ -775,6 +776,16 @@ class MainRuntimeEventHistoryConfig(Base):
         if normalized not in {"gzip", "plain"}:
             return "gzip"
         return normalized
+
+
+class MainRuntimeDuplicatePrecheckConfig(Base):
+    """Duplicate-detection gate for create_async_task.
+
+    `llm_review_enabled` toggles the semantic review pass; the deterministic
+    rule layer (normalized target text + keyword fingerprint) always runs.
+    """
+
+    llm_review_enabled: bool = True
 
 
 class NodeDispatchConcurrencyConfig(Base):
