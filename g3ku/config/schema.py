@@ -1,5 +1,6 @@
 ﻿"""Configuration schema using Pydantic."""
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -802,6 +803,42 @@ class NodeDispatchConcurrencyConfig(Base):
         return int(value)
 
 
+class ExternalApiTokenConfig(Base):
+    """One external bridge credential entry. The mapping key is the bridge id."""
+
+    token: str = ""
+    label: str = ""
+    enabled: bool = True
+
+
+def _normalize_external_token_id(value: Any) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", str(value or "").strip().lower()).strip("-")
+    return normalized or "bridge"
+
+
+class ExternalApiConfig(Base):
+    """External Agent API (headless channel-bridge surface, `/api/v1`).
+
+    Disabled by default: operators opt in and provision one token per bridge
+    application. Token secrets live in the bootstrap secret overlay, mirroring
+    the chinaBridge controlToken handling.
+    """
+
+    enabled: bool = False
+    event_buffer_size: int = 512
+    tokens: dict[str, ExternalApiTokenConfig] = Field(default_factory=dict)
+
+    @field_validator("tokens", mode="before")
+    @classmethod
+    def _normalize_token_ids(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized: dict[str, Any] = {}
+        for raw_key, entry in value.items():
+            normalized[_normalize_external_token_id(raw_key)] = entry
+        return normalized
+
+
 class ChinaBridgeConfig(Base):
     enabled: bool = True
     bind_host: str = "0.0.0.0"
@@ -829,6 +866,7 @@ class Config(BaseSettings):
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)
     china_bridge: ChinaBridgeConfig = Field(default_factory=ChinaBridgeConfig)
+    external_api: ExternalApiConfig = Field(default_factory=ExternalApiConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":

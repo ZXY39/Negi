@@ -143,6 +143,17 @@ def extract_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
                     if _secret_value_present(value):
                         out[f"{SCONFIG}.chinaBridge.channels.{channel_name}.{field_name}"] = deepcopy(value)
 
+    external_api = payload.get("externalApi")
+    if isinstance(external_api, dict):
+        tokens = external_api.get("tokens")
+        if isinstance(tokens, dict):
+            for token_id, token_payload in tokens.items():
+                if not isinstance(token_payload, dict):
+                    continue
+                value = token_payload.get("token")
+                if _secret_value_present(value):
+                    out[f"{SCONFIG}.externalApi.tokens.{token_id}.token"] = str(value)
+
     return out
 
 
@@ -177,6 +188,14 @@ def strip_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
                         channel_payload[field_name] = ""
                 if "accounts" in channel_payload:
                     channel_payload["accounts"] = {}
+
+    external_api = payload.get("externalApi")
+    if isinstance(external_api, dict):
+        tokens = external_api.get("tokens")
+        if isinstance(tokens, dict):
+            for token_payload in tokens.values():
+                if isinstance(token_payload, dict):
+                    token_payload["token"] = ""
     return payload
 
 

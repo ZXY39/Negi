@@ -185,5 +185,10 @@
         "accounts": {}
       }
     }
+  },
+  "externalApi": {
+    "enabled": false,
+    "eventBufferSize": 512,
+    "tokens": {}
   }
 }

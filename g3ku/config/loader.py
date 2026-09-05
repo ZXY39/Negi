@@ -525,6 +525,18 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "sendToolHints": cfg.china_bridge.send_tool_hints,
             "channels": channel_payloads,
         },
+        "externalApi": {
+            "enabled": cfg.external_api.enabled,
+            "eventBufferSize": cfg.external_api.event_buffer_size,
+            "tokens": {
+                str(token_id): {
+                    "token": entry.token,
+                    "label": entry.label,
+                    "enabled": entry.enabled,
+                }
+                for token_id, entry in (cfg.external_api.tokens or {}).items()
+            },
+        },
     }
 
 
@@ -547,6 +559,7 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("providers",),
         ("mainRuntime",),
         ("chinaBridge",),
+        ("externalApi",),
     }
     missing = [
         ".".join(path)
