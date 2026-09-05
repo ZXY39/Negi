@@ -172,6 +172,22 @@ test("task node retry toast shows last and next retry clock times", () => {
     assert.match(text, /下次 14:56:07/);
 });
 
+test("task node retry toast keeps full error text for click-to-expand", () => {
+    const { renderTaskNodeModelRetryToast, U } = loadApp();
+    const longError = `Error code: 429 - ${"rpm exhausted ".repeat(40)}`;
+
+    renderTaskNodeModelRetryToast({
+        model_retry_status: {
+            state: "retrying",
+            retry_count: 4,
+            error_message: longError,
+        },
+    });
+
+    const text = U.taskNodeModelRetryToastText.textContent;
+    assert.equal(text, `第 4 次重试 · ${longError.trim()}`);
+});
+
 test("task node retry toast hides when live frame status is cleared", () => {
     const { renderTaskNodeModelRetryToast, U } = loadApp();
 

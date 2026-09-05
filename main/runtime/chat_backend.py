@@ -47,7 +47,8 @@ from main.runtime.send_token_preflight import estimate_runtime_provider_request_
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.node_turn_controller import NodeTurnLease
 _MISSING = object()
-_MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT = 320
+# 前端折叠态只做视觉截断、点击展开需要全文，因此这里仅做防超大 payload 的宽上限。
+_MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT = 4096
 
 
 def _model_retry_status_error_text(value: Any) -> str:

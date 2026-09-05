@@ -28,7 +28,6 @@ const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
 const CEO_COMPRESSION_TOAST_TEXT = "上下文压缩中";
-const MODEL_RETRY_TOAST_MAX_TEXT_CHARS = 260;
 const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
 const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
 const CEO_FOLLOW_UP_QUEUE_CACHE_KEY = "g3ku.ceo.follow-up-queues.v1";
@@ -2318,11 +2317,38 @@ function modelRetryToastText(status = null, label = "") {
     if (nextClock) parts.push(`下次 ${nextClock}`);
     const errorText = String(normalized.error_message || "").trim();
     if (errorText) parts.push(errorText);
-    const text = parts.filter(Boolean).join(" · ");
-    const chars = Array.from(text);
-    return chars.length <= MODEL_RETRY_TOAST_MAX_TEXT_CHARS
-        ? text
-        : `${chars.slice(0, MODEL_RETRY_TOAST_MAX_TEXT_CHARS - 3).join("")}...`;
+    return parts.filter(Boolean).join(" · ");
+}
+
+// 错误全文进 DOM，折叠态由 CSS line-clamp 截断；点击/回车展开靠 is-expanded 切换。
+function refreshModelRetryToastClamp(toastEl, textEl) {
+    if (!toastEl || !textEl) return;
+    if (toastEl.hidden) {
+        toastEl.classList.remove("is-expanded", "is-clamped");
+        toastEl.removeAttribute("tabindex");
+        toastEl.removeAttribute("title");
+        return;
+    }
+    if (toastEl.classList.contains("is-expanded")) {
+        toastEl.setAttribute("tabindex", "0");
+        toastEl.title = "点击收起";
+        return;
+    }
+    const clamped = (textEl.scrollHeight || 0) > (textEl.clientHeight || 0) + 1;
+    toastEl.classList.toggle("is-clamped", clamped);
+    if (clamped) {
+        toastEl.setAttribute("tabindex", "0");
+        toastEl.title = "点击展开完整错误信息";
+    } else {
+        toastEl.removeAttribute("tabindex");
+        toastEl.removeAttribute("title");
+    }
+}
+
+function toggleModelRetryToastExpanded(toastEl) {
+    if (!toastEl || !toastEl.classList.contains("is-clamped")) return;
+    const expanded = toastEl.classList.toggle("is-expanded");
+    toastEl.title = expanded ? "点击收起" : "点击展开完整错误信息";
 }
 
 function syncCeoModelRetryToast() {
@@ -2333,10 +2359,10 @@ function syncCeoModelRetryToast() {
     const visible = !!status;
     const text = modelRetryToastText(status);
     textEl.textContent = text;
-    toastEl.title = text;
     toastEl.hidden = !visible;
     if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
     toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
+    refreshModelRetryToastClamp(toastEl, textEl);
 }
 
 function appendCeoSessionSnapshotMessage(messages = [], message = null) {
@@ -10670,8 +10696,25 @@ function toggleTheme() {
     }
 }
 
+function bindModelRetryToastExpansion() {
+    document.addEventListener("click", (event) => {
+        if (!(event.target instanceof Element)) return;
+        const retryToast = event.target.closest(".model-retry-toast");
+        if (retryToast) toggleModelRetryToastExpanded(retryToast);
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        if (!(event.target instanceof Element)) return;
+        const retryToast = event.target.closest(".model-retry-toast");
+        if (!retryToast) return;
+        event.preventDefault();
+        toggleModelRetryToastExpanded(retryToast);
+    });
+}
+
 function bind() {
     U.theme?.addEventListener("click", toggleTheme);
+    bindModelRetryToastExpansion();
     U.projectExit?.addEventListener("click", () => void requestProjectExit());
     U.ceoFeed?.addEventListener("scroll", updateCeoScrollToLatestButton, { passive: true });
     U.ceoScrollToLatestBtn?.addEventListener("click", () => scrollCeoFeedToBottom());

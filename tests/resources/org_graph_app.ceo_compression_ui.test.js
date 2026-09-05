@@ -27,6 +27,9 @@ class StubHTMLElement extends StubElement {
     setAttribute(name, value) {
         this.attributes[name] = String(value);
     }
+    removeAttribute(name) {
+        delete this.attributes[name];
+    }
 }
 class StubHTMLButtonElement extends StubHTMLElement {}
 class StubHTMLInputElement extends StubHTMLElement {}

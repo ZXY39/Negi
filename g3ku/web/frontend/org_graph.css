@@ -4105,11 +4105,11 @@ textarea {
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    width: fit-content;
-    max-width: min(760px, calc(100% - 32px));
+    align-self: stretch;
+    max-width: 100%;
     padding: 9px 12px;
     border: 1px solid color-mix(in srgb, #f59e0b 42%, transparent);
-    border-radius: 8px;
+    border-radius: 14px;
     background: color-mix(in srgb, #f59e0b 9%, var(--bg-panel));
     color: var(--text-primary);
     font-size: 0.78rem;
@@ -4121,6 +4121,22 @@ textarea {
 
 .model-retry-toast[hidden] {
     display: none !important;
+}
+
+.model-retry-toast.is-clamped {
+    cursor: pointer;
+}
+
+.model-retry-toast.is-clamped::after {
+    content: "展开 ▾";
+    flex: 0 0 auto;
+    margin-top: 3px;
+    color: #b45309;
+    font-weight: 700;
+}
+
+.model-retry-toast.is-clamped.is-expanded::after {
+    content: "收起 ▴";
 }
 
 .model-retry-toast-dot {
@@ -4136,6 +4152,7 @@ textarea {
 
 .model-retry-toast-copy {
     min-width: 0;
+    flex: 1 1 auto;
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
@@ -4150,16 +4167,26 @@ textarea {
 
 .model-retry-toast-text {
     min-width: 0;
-    flex: 0 1 auto;
-    max-width: min(520px, 64vw);
+    flex: 1 1 auto;
     color: var(--text-secondary);
     overflow-wrap: anywhere;
     word-break: break-word;
+    white-space: pre-wrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
+
+.model-retry-toast.is-expanded .model-retry-toast-text {
+    display: block;
+    -webkit-line-clamp: none;
+    overflow: visible;
 }
 
 .ceo-model-retry-toast {
     flex: 0 0 auto;
-    margin: 12px clamp(16px, 2.4vw, 32px) 0;
+    margin: 12px clamp(28px, 6vw, 80px) 0 clamp(16px, 2.4vw, 32px);
 }
 
 .task-node-model-retry-toast {

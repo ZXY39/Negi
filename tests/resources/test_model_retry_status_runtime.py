@@ -5,6 +5,7 @@ import pytest
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from main.monitoring.log_service import TaskLogService
+from main.runtime.chat_backend import _model_retry_status_error_text
 from main.runtime.react_loop import ReActToolLoop
 
 
@@ -78,6 +79,28 @@ def test_task_runtime_frame_sanitizes_model_retry_status_for_websocket() -> None
     assert TaskLogService._public_runtime_frame(
         {"node_id": "node:1", "model_retry_status": {"state": "cleared"}}
     )["model_retry_status"] is None
+
+
+def test_model_retry_error_text_keeps_full_diagnostics_for_click_to_expand() -> None:
+    long_error = "Error code: 429 - " + "rpm exhausted body " * 60
+
+    text = _model_retry_status_error_text(long_error)
+
+    assert text == " ".join(long_error.split())
+    assert not text.endswith("...")
+
+
+def test_task_frame_sanitizer_keeps_full_error_for_click_to_expand() -> None:
+    payload = _model_retry_payload()
+    payload["error_message"] = "Error code: 429 - " + "rpm exhausted body " * 60
+
+    public_frame = TaskLogService._public_runtime_frame(
+        {"node_id": "node:1", "model_retry_status": payload}
+    )
+
+    assert public_frame["model_retry_status"]["error_message"] == " ".join(
+        str(payload["error_message"]).split()
+    )
 
 
 @pytest.mark.asyncio

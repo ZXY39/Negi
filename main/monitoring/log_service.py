@@ -5042,9 +5042,10 @@ class TaskLogService:
             chain_round = 0
         if chain_round:
             normalized['chain_round'] = chain_round
+        # 不能比 chat_backend._MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT 截得更短，否则前端展开拿到残文。
         error_message = _single_line_text(
             payload.get('error_message'),
-            max_chars=320,
+            max_chars=4096,
         )
         if error_message:
             normalized['error_message'] = error_message

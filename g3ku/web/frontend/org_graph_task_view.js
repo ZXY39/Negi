@@ -2677,14 +2677,7 @@ function taskNodeModelRetryToastText(status = null) {
     if (nextClock) parts.push(`下次 ${nextClock}`);
     const errorText = String(normalized.error_message || "").trim();
     if (errorText) parts.push(errorText);
-    const text = parts.filter(Boolean).join(" · ");
-    const maxChars = typeof MODEL_RETRY_TOAST_MAX_TEXT_CHARS === "number"
-        ? MODEL_RETRY_TOAST_MAX_TEXT_CHARS
-        : 260;
-    const chars = Array.from(text);
-    return chars.length <= maxChars
-        ? text
-        : `${chars.slice(0, maxChars - 3).join("")}...`;
+    return parts.filter(Boolean).join(" · ");
 }
 
 function renderTaskNodeModelRetryToast(nodeOrStatus = null) {
@@ -2698,10 +2691,10 @@ function renderTaskNodeModelRetryToast(nodeOrStatus = null) {
     const visible = !!status;
     const text = taskNodeModelRetryToastText(status);
     textEl.textContent = text;
-    toastEl.title = text;
     toastEl.hidden = !visible;
     if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
     toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
+    refreshModelRetryToastClamp(toastEl, textEl);
 }
 
 function showTaskNodeLoadingState(node) {
