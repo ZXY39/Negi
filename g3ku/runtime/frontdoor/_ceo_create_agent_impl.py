@@ -669,6 +669,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state={**dict(state or {}), **dict(prepared or {}), "messages": messages},
             runtime=runtime,
         )
+        await self._emit_frontdoor_stage_sync_event(runtime=runtime)
         return update
 
     async def _node_call_model(self, state, runtime) -> dict[str, Any]:
@@ -700,11 +701,13 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 },
                 runtime=runtime,
             )
+            await self._emit_frontdoor_stage_sync_event(runtime=runtime)
         elif next_step in {"call_model", "finalize"}:
             self._sync_runtime_session_frontdoor_state(
                 state={**current_state, **dict(normalized or {})},
                 runtime=runtime,
             )
+            await self._emit_frontdoor_stage_sync_event(runtime=runtime)
         return normalized
 
     def _node_review_tool_calls(self, state, runtime, resume_decision: Any = _NO_RESUME) -> dict[str, Any]:
@@ -726,6 +729,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state={**dict(state or {}), **dict(executed or {}), "messages": messages},
             runtime=runtime,
         )
+        await self._emit_frontdoor_stage_sync_event(runtime=runtime)
         return update
 
     async def _node_finalize_turn(self, state, runtime) -> dict[str, Any]:
@@ -739,6 +743,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             state={**dict(state or {}), **dict(finalized or {}), "messages": messages},
             runtime=runtime,
         )
+        await self._emit_frontdoor_stage_sync_event(runtime=runtime)
         return update
 
     async def _run_step_loop(

@@ -1874,6 +1874,56 @@ function resolvePreferredCeoTraceContext(deltaContext = null, fullContext = null
         || null;
 }
 
+function mergeCeoStageSummaryDelta(baseSummary = null, deltaContext = null) {
+    const mergedStages = [];
+    const stageIndexById = new Map();
+    const accumulateStage = (stage) => {
+        const stageId = String(stage?.stage_id ?? stage?.stage_index ?? "");
+        if (stageId) {
+            const existingIndex = stageIndexById.get(stageId);
+            if (existingIndex !== undefined) {
+                const existing = mergedStages[existingIndex];
+                const baseRounds = Array.isArray(existing?.rounds) ? [...existing.rounds] : [];
+                const roundIndexById = new Map(
+                    baseRounds.map((round, roundIndex) => [String(round?.round_id ?? round?.round_index ?? roundIndex), roundIndex])
+                );
+                (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round, roundIndex) => {
+                    const roundId = String(round?.round_id ?? round?.round_index ?? roundIndex);
+                    const existingRoundIndex = roundIndexById.get(roundId);
+                    if (existingRoundIndex === undefined) {
+                        roundIndexById.set(roundId, baseRounds.length);
+                        baseRounds.push(round);
+                    } else {
+                        baseRounds[existingRoundIndex] = round;
+                    }
+                });
+                // delta 的轮次只包含"新增/变更";轮次保持基线位置,追加新轮,
+                // 阶段头以 delta 为准(后端 delta 轮次为空时代表头变更,保留原轮次)
+                mergedStages[existingIndex] = { ...stage, rounds: baseRounds };
+                return;
+            }
+            stageIndexById.set(stageId, mergedStages.length);
+        }
+        mergedStages.push(stage);
+    };
+    const normalize = (value) => {
+        const summary = normalizeCeoSnapshotCanonicalContext(value);
+        return Array.isArray(summary?.stages) ? summary.stages : [];
+    };
+    normalize(baseSummary).forEach(accumulateStage);
+    normalize(deltaContext).forEach(accumulateStage);
+    if (!mergedStages.length) return null;
+    return { stages: mergedStages };
+}
+
+function mergeCeoLiveTraceContext(deltaContext = null, previousSummary = null) {
+    if (filterCeoInteractionFlowSummary(deltaContext)?.stages?.length) {
+        return mergeCeoStageSummaryDelta(previousSummary, deltaContext);
+    }
+    // 无新增量:保留本轮已渲染的轨道;从未渲染过则返回空,由渲染层维持占位状态
+    return normalizeCeoSnapshotCanonicalContext(previousSummary) || null;
+}
+
 function resolveFinalCeoTraceContext(meta = {}) {
     if (meta?.canonical_context_delta) {
         return normalizeCeoSnapshotCanonicalContext(meta.canonical_context_delta) || null;
@@ -4391,9 +4441,15 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     const summary = filterCeoInteractionFlowSummary(canonicalContext);
     if (!summary?.stages?.length) {
-        resetCeoToolFlow(turn);
-        updateCeoTurnMeta(turn, "等待工具开始...");
-        renderCeoLiveStreamTextIntoTurn(turn);
+        // 无新增量(如阶段刚提交但轮次尚未进入增量)时保留已渲染的时间线,
+        // 避免清空正在显示的新阶段/工具步骤;只有从未有内容时才显示占位
+        const hasExistingTrace = !!turn?.lastExecutionTraceSummary
+            || (turn?.listEl instanceof HTMLElement && turn.listEl.children.length > 0);
+        if (!hasExistingTrace) {
+            resetCeoToolFlow(turn);
+            updateCeoTurnMeta(turn, "等待工具开始...");
+            renderCeoLiveStreamTextIntoTurn(turn);
+        }
         return 0;
     }
     if (typeof renderTraceStep !== "function"
@@ -4478,11 +4534,10 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     if (turnId) turn.turnId = turnId;
     // live inflight 只渲染本轮 delta（或本轮已渲染的 summary），不回退 full，
     // 避免新 turn 继承上一轮阶段；跨 turn 时 lastExecutionTraceSummary 已在上面被清空；
-    // preserved 保留 full 回退
+    // preserved 保留 full 回退。delta 与已渲染轨道做增量合并,保证阶段累计可见
     const preferredCanonicalContext = cacheField === "inflight_turn"
-        ? resolvePreferredCeoTraceContext(
+        ? mergeCeoLiveTraceContext(
             snapshot?.canonical_context_delta || null,
-            null,
             turn?.lastExecutionTraceSummary || null
         )
         : resolvePreferredCeoTraceContext(
@@ -4500,9 +4555,11 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         }
         const stageRoundCount = renderCeoStageTraceIntoTurn(turn, preferredCanonicalContext);
         if (!stageRoundCount) {
+            const timelineActive = !!turn?.lastExecutionTraceSummary
+                || (turn?.listEl instanceof HTMLElement && turn.listEl.children.length > 0);
             if (status === "paused") updateCeoTurnMeta(turn, "已暂停");
             else if (status === "error") updateCeoTurnMeta(turn, "运行出错");
-            else updateCeoTurnMeta(turn, "等待工具开始...");
+            else if (!timelineActive) updateCeoTurnMeta(turn, "等待工具开始...");
         }
         if (stageRoundCount) {
             turn.flowEl.hidden = false;

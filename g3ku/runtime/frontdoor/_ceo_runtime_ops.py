@@ -3027,6 +3027,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return True
         return False
 
+    async def _emit_frontdoor_stage_sync_event(self, *, runtime: CeoRuntime) -> None:
+        """Notify CEO websocket subscribers that the session's frontdoor stage
+        state was just refreshed, so they can push a live ceo.turn.patch.
+
+        Stage/canonical context on the session object only updates at graph-node
+        boundaries; without this event the web UI learns about a newly started
+        stage only on the next tool event, and with an empty delta it wipes the
+        timeline instead.
+        """
+        session = getattr(getattr(runtime, "context", None), "session", None)
+        emit = getattr(session, "_emit", None)
+        if not callable(emit):
+            return
+        try:
+            await emit("frontdoor_stage_synced")
+        except Exception:
+            logger.opt(exception=True).warning("Failed to emit frontdoor_stage_synced event")
+
     def _sync_runtime_session_frontdoor_state(
         self,
         *,

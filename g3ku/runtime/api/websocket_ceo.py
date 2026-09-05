@@ -1218,6 +1218,11 @@ async def ceo_websocket(websocket: WebSocket):
                 is_running=False,
             )
             return
+        if event.type == 'frontdoor_stage_synced':
+            # 图节点边界同步后主动推送一次 live turn patch:阶段/轮次状态刚刷新,
+            # 若等到下一工具事件才推,新开阶段的 delta 会为空导致前端清空时间线
+            await _push_turn_patch()
+            return
         if not _should_forward_tool_event(session_id=session_id, event=event):
             return
         serialized = _serialize_tool_event(event)

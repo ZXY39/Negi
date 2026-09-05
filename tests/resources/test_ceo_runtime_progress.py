@@ -5878,6 +5878,97 @@ def test_ceo_websocket_turn_patch_carries_live_execution_trace_summary(tmp_path:
     assert final_payload["data"]["turn_id"] == "turn-user-live"
 
 
+def test_ceo_websocket_frontdoor_stage_synced_pushes_live_turn_patch(tmp_path: Path, monkeypatch) -> None:
+    """frontdoor_stage_synced(图节点同步后发射)必须主动推送一次 ceo.turn.patch,
+    让新开阶段的 canonical 增量在没有后续工具事件时也能立刻到达前端。"""
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+
+    class _StageSyncSession:
+        def __init__(self) -> None:
+            self.state = SimpleNamespace(status="idle", is_running=False)
+            self._listeners = set()
+
+        def subscribe(self, listener):
+            self._listeners.add(listener)
+            return lambda: self._listeners.discard(listener)
+
+        def state_dict(self) -> dict[str, object]:
+            return {"status": self.state.status, "is_running": self.state.is_running}
+
+        def inflight_turn_snapshot(self):
+            return {
+                "status": "running",
+                "turn_id": "turn-stage-sync-live",
+                "source": "user",
+                "user_message": {"content": "继续"},
+                "assistant_text": "已进入第二阶段",
+                "canonical_context": {
+                    "active_stage_id": "frontdoor-stage-2",
+                    "transition_required": False,
+                    "stages": [
+                        {
+                            "stage_id": "frontdoor-stage-2",
+                            "stage_index": 2,
+                            "stage_kind": "normal",
+                            "system_generated": False,
+                            "status": "active",
+                            "stage_goal": "第二阶段：分析",
+                            "tool_round_budget": 6,
+                            "tool_rounds_used": 0,
+                            "completed_stage_summary": "",
+                            "key_refs": [],
+                            "rounds": [],
+                        }
+                    ],
+                },
+            }
+
+        async def prompt(self, user_message) -> SimpleNamespace:
+            _ = user_message
+            self.state.status = "running"
+            self.state.is_running = True
+            event = AgentEvent(type="frontdoor_stage_synced", timestamp="2026-09-05T12:00:00", payload={})
+            for listener in list(self._listeners):
+                result = listener(event)
+                if hasattr(result, "__await__"):
+                    await result
+            return SimpleNamespace(output="ok")
+
+    session_id = "web:ceo-stage-sync"
+    session_manager = SessionManager(tmp_path)
+    live_session = _StageSyncSession()
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        _recv_until(ws, lambda payload: payload.get("type") == "ceo.sessions.snapshot")
+
+        ws.send_json({"type": "client.user_message", "text": "go"})
+
+        patch_payload, _seen = _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.turn.patch"
+            and isinstance(payload.get("data", {}).get("inflight_turn"), dict),
+        )
+
+    inflight_turn = patch_payload["data"]["inflight_turn"]
+    assert inflight_turn["turn_id"] == "turn-stage-sync-live"
+    stage = inflight_turn["canonical_context"]["stages"][0]
+    assert stage["stage_id"] == "frontdoor-stage-2"
+    delta = inflight_turn.get("canonical_context_delta") or {}
+    assert [item.get("stage_id") for item in list(delta.get("stages") or [])] == ["frontdoor-stage-2"]
+
+
 def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
