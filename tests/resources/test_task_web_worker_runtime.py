@@ -4225,7 +4225,7 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
 
 
 @pytest.mark.asyncio
-async def test_execution_node_build_messages_locks_callable_tools_to_submit_next_stage_without_active_stage(tmp_path: Path):
+async def test_execution_node_build_messages_exposes_full_callable_tools_without_active_stage(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -4276,7 +4276,7 @@ async def test_execution_node_build_messages_locks_callable_tools_to_submit_next
         assert str(messages[-1]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
-        assert payload["callable_tool_names"] == ["submit_next_stage"]
+        assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
         assert "model_visible_tool_selection_trace" not in payload
     finally:
         await service.close()
@@ -9026,7 +9026,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
 
 
 @pytest.mark.asyncio
-async def test_provider_tool_bundle_never_bypasses_stage_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_provider_tool_bundle_preserves_full_tool_set_under_stage_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         store_path=tmp_path / "runtime.sqlite3",
@@ -9091,13 +9091,13 @@ async def test_provider_tool_bundle_never_bypasses_stage_lock(tmp_path: Path, mo
             runtime_context={},
         )
 
-        assert list(selected_tools.keys()) == ["submit_next_stage"]
-        assert selection_payload["tool_names"] == ["submit_next_stage"]
+        assert list(selected_tools.keys()) == ["submit_next_stage", "web_fetch"]
+        assert selection_payload["tool_names"] == ["submit_next_stage", "web_fetch"]
         assert selection_payload["provider_tool_names"] == [
             "submit_next_stage",
             "web_fetch",
         ]
-        assert selection_payload["trace"]["stage_locked_to_submit_next_stage"] is True
+        assert selection_payload["trace"]["stage_locked_to_submit_next_stage"] is False
     finally:
         await service.close()
 

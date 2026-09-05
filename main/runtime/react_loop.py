@@ -71,7 +71,12 @@ from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
+    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
+    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
+    STAGELESS_FREE_PASS_REMINDER,
     callable_tool_names_for_stage_iteration,
+    response_tool_calls_count_against_stage_budget,
+    stage_free_pass_kind,
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
 )
@@ -1093,6 +1098,10 @@ class ReActToolLoop:
                             stage_gate.get('enabled')
                             and stage_gate.get('has_active_stage')
                             and not stage_gate.get('transition_required')
+                        ),
+                        'stage_exhaustion_predicted_reminder': self._execution_stage_exhaustion_predicted_reminder(
+                            stage_gate=stage_gate,
+                            tool_calls=response_tool_calls,
                         ),
                     },
                     prior_overflow_signatures=self._overflowed_search_signatures(message_history),
@@ -2833,8 +2842,14 @@ class ReActToolLoop:
             if str(item or '').strip()
         ]
 
-        def _call_runtime_context(call: Any, *, stage_turn_granted: bool | None = None) -> dict[str, Any]:
+        def _call_runtime_context(
+            call: Any,
+            *,
+            stage_turn_granted: bool | None = None,
+            stage_free_pass_kind: str = '',
+        ) -> dict[str, Any]:
             granted = bool(runtime_context.get('stage_turn_granted')) if stage_turn_granted is None else bool(stage_turn_granted)
+            free_pass_kind = str(stage_free_pass_kind or '').strip()
             image_multimodal_enabled = self._image_multimodal_enabled_for_model_refs(current_model_refs)
             return {
                 **runtime_context,
@@ -2850,6 +2865,7 @@ class ReActToolLoop:
                 'enforce_content_ref_allowlist': str(runtime_context.get('node_kind') or '').strip().lower() == 'acceptance',
                 'prior_overflow_signatures': sorted(prior_overflow_signatures or set()),
                 'stage_turn_granted': granted,
+                'stage_free_pass_kind': free_pass_kind,
                 'image_multimodal_enabled': image_multimodal_enabled,
             }
 
@@ -2941,7 +2957,13 @@ class ReActToolLoop:
             )
             return round_payload
 
-        async def _run_call(index: int, call: Any, *, stage_turn_granted: bool | None = None) -> dict[str, Any]:
+        async def _run_call(
+            index: int,
+            call: Any,
+            *,
+            stage_turn_granted: bool | None = None,
+            stage_free_pass_kind: str = '',
+        ) -> dict[str, Any]:
             async with semaphore:
                 self._check_pause_or_cancel(task.task_id, str(runtime_context.get('node_id') or '').strip())
                 started_at = now_iso()
@@ -2972,6 +2994,7 @@ class ReActToolLoop:
                         runtime_context=_call_runtime_context(
                             call,
                             stage_turn_granted=stage_turn_granted,
+                            stage_free_pass_kind=stage_free_pass_kind,
                         ),
                     )
                     promoter = getattr(self, '_tool_context_hydration_promoter', None)
@@ -3006,6 +3029,21 @@ class ReActToolLoop:
                             arguments=dict(getattr(call, 'arguments', {}) or {}),
                         ),
                     )
+                    if (
+                        stage_free_pass_kind
+                        and str(getattr(call, 'name', '') or '').strip() not in DEFAULT_STAGE_GATE_BYPASS_TOOLS
+                        and not is_error_like_tool_result(raw_result)
+                    ):
+                        reminder = (
+                            STAGELESS_FREE_PASS_REMINDER
+                            if stage_free_pass_kind == 'stageless'
+                            else STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER
+                        )
+                        tool_content = f'{tool_content}\n\n{reminder}'.strip()
+                    elif not stage_free_pass_kind:
+                        predicted = str(runtime_context.get('stage_exhaustion_predicted_reminder') or '').strip()
+                        if predicted and not is_error_like_tool_result(raw_result):
+                            tool_content = f'{tool_content}\n\n{predicted}'.strip()
                 except TaskPausedError:
                     raise
                 except asyncio.CancelledError:
@@ -3069,9 +3107,45 @@ class ReActToolLoop:
             for index, call in indexed_calls
             if str(getattr(call, 'name', '') or '').strip() != STAGE_TOOL_NAME
         ]
+        # 宽限执行判定:仅当本批不含 submit_next_stage、且主循环未按"已记账轮"授予 stage_turn_granted、
+        # 且本批至少有一个真正会被闸门拦截的普通工具(非 spawn/final/control 等永久豁免)时,才做一次宽限。
+        free_pass_kind = ''
+        if ordinary_items and not stage_items and not bool(runtime_context.get('stage_turn_granted')):
+            current_gate = self._execution_stage_gate(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                node_kind=node.node_kind,
+            )
+            if bool(current_gate.get('enabled')):
+                gated = any(
+                    bool(
+                        stage_gate_error_for_tool(
+                            str(getattr(call, 'name', '') or '').strip(),
+                            has_active_stage=bool(current_gate.get('has_active_stage')),
+                            transition_required=bool(current_gate.get('transition_required')),
+                            stage_tool_name=STAGE_TOOL_NAME,
+                        )
+                    )
+                    for _, call in ordinary_items
+                )
+                if gated:
+                    free_pass_kind = stage_free_pass_kind(
+                        has_active_stage=bool(current_gate.get('has_active_stage')),
+                        transition_required=bool(current_gate.get('transition_required')),
+                        active_stage_rounds=list((current_gate.get('active_stage') or {}).get('rounds') or []),
+                        pending_orphan_rounds=list(current_gate.get('pending_orphan_rounds') or []),
+                    )
         ordered_results: dict[int, dict[str, Any]] = {}
         stage_failed = False
-        for index, call in stage_items:
+        for position, (index, call) in enumerate(stage_items):
+            if position > 0:
+                ordered_results[index] = _blocked_call_result(
+                    index,
+                    call,
+                    error_content=f'Error: {STAGE_TOOL_NAME} can be called at most once per batch; the extra call was ignored',
+                )
+                stage_failed = True
+                continue
             result = await _run_call(index, call, stage_turn_granted=False)
             ordered_results[index] = result
             if str(dict(result.get('live_state') or {}).get('status') or '').strip().lower() == 'error':
@@ -3093,12 +3167,28 @@ class ReActToolLoop:
                             index,
                             call,
                             stage_turn_granted=True if stage_items else None,
+                            stage_free_pass_kind=free_pass_kind,
                         )
                         for index, call in ordinary_items
                     ]
                 )
                 for (index, _call), result in zip(ordinary_items, ordinary_results, strict=False):
                     ordered_results[index] = result
+                if free_pass_kind:
+                    self._log_service.record_execution_stage_free_pass_round(
+                        task.task_id,
+                        node.node_id,
+                        tool_calls=[
+                            {
+                                'id': str(call.id or '').strip(),
+                                'name': str(call.name or '').strip(),
+                                'arguments': self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                            }
+                            for _, call in ordinary_items
+                        ],
+                        kind=free_pass_kind,
+                        created_at=now_iso(),
+                    )
         return [ordered_results[index] for index, _call in indexed_calls if index in ordered_results]
 
     @classmethod
@@ -3364,6 +3454,8 @@ class ReActToolLoop:
         active_stage = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
         if bool(runtime_context.get('stage_turn_granted')):
             return ''
+        if str(runtime_context.get('stage_free_pass_kind') or '').strip():
+            return ''
         if normalized_tool_name == _STAGE_SPAWN_TOOL_NAME and bool(stage_gate.get('transition_required')):
             return f'current stage budget is exhausted; call {STAGE_TOOL_NAME} before using other tools'
         return stage_gate_error_for_tool(
@@ -3372,6 +3464,35 @@ class ReActToolLoop:
             transition_required=bool(stage_gate.get('transition_required')),
             stage_tool_name=STAGE_TOOL_NAME,
         )
+
+    def _execution_stage_exhaustion_predicted_reminder(
+        self,
+        *,
+        stage_gate: dict[str, Any],
+        tool_calls: list[Any],
+    ) -> str:
+        """在合法轮即将打满预算时,给本轮普通工具结果附上"下轮必须同批 sns"的预告提醒。"""
+        if not bool(stage_gate.get('enabled')):
+            return ''
+        if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
+            return ''
+        active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
+        budget = int(active.get('tool_round_budget') or 0)
+        used = int(active.get('tool_rounds_used') or 0)
+        if budget <= 0 or used + 1 < budget:
+            return ''
+        payload = [
+            {
+                'name': str(getattr(call, 'name', '') or '').strip(),
+                'id': str(getattr(call, 'id', '') or '').strip(),
+            }
+            for call in list(tool_calls or [])
+            if str(getattr(call, 'name', '') or '').strip()
+            and str(getattr(call, 'name', '') or '').strip() != STAGE_TOOL_NAME
+        ]
+        if not response_tool_calls_count_against_stage_budget(payload):
+            return ''
+        return STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE.format(used=used, budget=budget)
 
     @classmethod
     def _overflowed_search_signatures(cls, messages: list[dict[str, Any]]) -> set[str]:

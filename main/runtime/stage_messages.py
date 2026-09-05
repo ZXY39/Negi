@@ -47,7 +47,8 @@ def _execution_stage_budget_accounting_note(active: dict[str, Any]) -> str:
     note = (
         ' 预算记账由系统决定，不要按工具名猜：'
         f'不会计入本阶段 `tool_rounds_used` 的工具只有 {non_budget_tools}。'
-        ' 这不代表预算耗尽后这些工具都一定还能继续调用；是否允许调用仍以阶段门控和系统错误提示为准。'
+        ' 是否允许调用仍以阶段门控和系统返回为准：撞闸的普通工具首次会宽限执行一次'
+        '（结果照常返回并附宽限提醒；无阶段时记待入账轮、预算耗尽时记溢出轮），宽限用尽后才被硬拦。'
         ' 历史 round 是否扣预算，只看 `rounds[*].budget_counted`，其中 `budget_counted` 是权威字段；'
         '`tool_rounds_used` 只统计 `budget_counted=true` 的 round。'
     )
@@ -145,16 +146,29 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         return None
     active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else None
     if not isinstance(active, dict):
+        pending_note = ''
+        pending = list(stage_gate.get('pending_orphan_rounds') or []) if isinstance(stage_gate, dict) else []
+        if pending:
+            pending_counted = sum(1 for item in pending if bool(item.get('budget_counted')))
+            pending_note = (
+                f' 你已有 {len(pending)} 轮宽限调用待入账（其中 {pending_counted} 轮会消耗预算），'
+                '下一次 `submit_next_stage` 会把它们并入新阶段并消耗其预算，请在 stage_goal / completed_stage_summary'
+                f' 中涵盖它们，并把 tool_round_budget 设为不小于 {len(pending)} + 后续所需轮数。'
+            )
         if normalized_kind == 'acceptance':
             return (
-                '当前没有活动阶段。你必须先调用 `submit_next_stage` 创建第一个验收阶段，'
-                f'填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`，'
-                '并在 `stage_goal` 中说明本阶段要重点核验哪些证据、结论和 skills。'
+                '当前没有活动阶段。若需使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交'
+                f'（填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`）：'
+                'submit_next_stage 先执行、目标工具随后记入新阶段第一轮并计入其预算。'
+                '单独调用普通工具只会获得一次宽限执行，再次违规将被拦截。'
+                f'{pending_note}'
             )
         return (
-            '当前没有活动阶段。你必须先调用 `submit_next_stage` 创建第一个阶段，'
-            f'填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`，'
-            '并在 `stage_goal` 中说明哪些工作优先派生子节点、哪些工作由当前节点自行完成。'
+            '当前没有活动阶段。若需使用工具，必须把 `submit_next_stage` 与目标工具在同一条消息里一起提交'
+            f'（填写清晰的 `stage_goal` 和 {STAGE_TOOL_ROUND_BUDGET_MIN} 到 {STAGE_TOOL_ROUND_BUDGET_MAX} 的 `tool_round_budget`）：'
+            'submit_next_stage 先执行、目标工具随后记入新阶段第一轮并计入其预算。'
+            '单独调用普通工具只会获得一次宽限执行，再次违规将被拦截。'
+            f'{pending_note}'
         )
     used = int(active.get('tool_rounds_used') or 0)
     budget = int(active.get('tool_round_budget') or 0)
@@ -173,19 +187,18 @@ def build_execution_stage_overlay(*, node_kind: str, stage_gate: dict[str, Any])
         if normalized_kind == 'acceptance':
             return (
                 f'当前验收阶段已达到工具轮次预算 {used}/{budget}，阶段目标是：{goal}。'
-                '你现在必须先总结本阶段已经核验的证据、结论和仍未确认的点，'
-                '再调用 `submit_next_stage` 创建下一验收阶段；'
-                f'创建下一阶段时要结合已检查结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
-                f'如果上一阶段仍未收敛，应根据剩余核验工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}；'
-                '在此之前不能继续使用普通工具，也不能直接输出最终验收结论。'
+                '如需继续使用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一验收阶段'
+                f'（同批普通工具将作为新阶段第一轮调用）；创建下一阶段时要结合已检查结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
+                f'如果上一阶段仍未收敛，应根据剩余核验工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}。'
+                '单独调用普通工具只会获得一次宽限执行（记为本阶段溢出轮），再次违规将被拦截。'
                 f'{_execution_stage_budget_accounting_note(active)}'
             )
         return (
             f'当前阶段【{mode}】已达到工具轮次预算 {used}/{budget}，阶段目标是：{goal}。'
-            '你现在必须先总结当前阶段并调用 `submit_next_stage` 创建下一阶段；'
-            f'创建下一阶段时要结合总目标和已完成阶段结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
-            f'如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}；'
-            '在此之前不能继续使用普通工具，也不能继续派生子节点。'
+            '如需继续使用工具，必须把 `submit_next_stage` 与目标工具同批提交，开启下一阶段'
+            f'（同批普通工具将作为新阶段第一轮调用）；创建下一阶段时要结合总目标和已完成阶段结果，不能机械重复上一阶段预算 {previous_budget or budget}；'
+            f'如果上一阶段仍未收敛，应根据剩余工作适当放大预算，但不能超过 {STAGE_TOOL_ROUND_BUDGET_MAX}。'
+            '单独调用普通工具只会获得一次宽限执行（记为本阶段溢出轮），再次违规将被拦截。'
             f'{_execution_stage_budget_accounting_note(active)}'
         )
     if normalized_kind == 'acceptance':
@@ -219,22 +232,22 @@ def build_execution_stage_result_block_message(*, node_kind: str, stage_gate: di
     if not bool(stage_gate.get('has_active_stage')):
         if normalized_kind == 'acceptance':
             return (
-                '当前验收节点还没有创建第一个阶段。请先调用 `submit_next_stage` 创建验收阶段，'
-                '再继续验证或输出验收结论，不要直接结束节点。'
+                '当前验收节点还没有创建第一个阶段。若需使用工具，请把 `submit_next_stage` 与目标工具同批提交'
+                '创建验收阶段，再继续验证或输出验收结论，不要直接结束节点。'
             )
         return (
-            '当前节点还没有创建第一个阶段。请先调用 `submit_next_stage` 创建阶段，'
-            '再继续推进，不要直接结束节点。'
+            '当前节点还没有创建第一个阶段。若需使用工具，请把 `submit_next_stage` 与目标工具同批提交'
+            '创建阶段，再继续推进，不要直接结束节点。'
         )
     if bool(stage_gate.get('transition_required')):
         if normalized_kind == 'acceptance':
             return (
-                '当前验收阶段预算已经耗尽。请先总结本阶段已核验内容并调用 `submit_next_stage` 创建下一阶段，'
-                '之后再继续验证或输出验收结论。'
+                '当前验收阶段预算已经耗尽。若需继续使用工具，请把 `submit_next_stage` 与目标工具同批提交'
+                '创建下一阶段，再继续验证或输出验收结论。'
             )
         return (
-            '当前阶段预算已经耗尽。请先总结当前阶段并调用 `submit_next_stage` 创建下一阶段，'
-            '之后再继续推进或交付结果。'
+            '当前阶段预算已经耗尽。若需继续使用工具，请把 `submit_next_stage` 与目标工具同批提交'
+            '创建下一阶段，再继续推进或交付结果。'
         )
     return ''
 

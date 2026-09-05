@@ -2397,6 +2397,9 @@ class TaskLogService:
                 'transition_required': bool(state.transition_required),
                 'active_stage': active.model_dump(mode='json') if active is not None else None,
                 'completed_stages': completed_stages,
+                'pending_orphan_rounds': [
+                    item.model_dump(mode='json') for item in list(state.pending_orphan_rounds or [])
+                ],
             }
 
     def execution_stage_prompt_payload(self, task_id: str, node_id: str) -> dict[str, Any]:
@@ -2542,6 +2545,19 @@ class TaskLogService:
                     )
                 stages.append(current)
             next_stage_index = max((int(stage.stage_index or 0) for stage in stages), default=0) + 1
+            pending_orphan_rounds = [item.model_copy() for item in list(state.pending_orphan_rounds or [])]
+            grafted_rounds: list[ExecutionStageRound] = []
+            for orphan_index, round_item in enumerate(pending_orphan_rounds, start=1):
+                grafted_rounds.append(
+                    round_item.model_copy(
+                        update={
+                            'round_id': new_stage_round_id(),
+                            'round_index': orphan_index,
+                            'orphan_grafted': True,
+                        }
+                    )
+                )
+            grafted_used = sum(1 for round_item in grafted_rounds if bool(round_item.budget_counted))
             next_stage = ExecutionStageRecord(
                 stage_id=new_stage_id(),
                 stage_index=next_stage_index,
@@ -2557,15 +2573,16 @@ class TaskLogService:
                 archive_stage_index_start=0,
                 archive_stage_index_end=0,
                 tool_round_budget=normalized_budget,
-                tool_rounds_used=0,
+                tool_rounds_used=min(normalized_budget, grafted_used),
                 created_at=now,
                 finished_at='',
-                rounds=[],
+                rounds=grafted_rounds,
             )
             next_state = ExecutionStageState(
                 active_stage_id=next_stage.stage_id,
                 transition_required=False,
                 stages=[*stages, next_stage],
+                pending_orphan_rounds=[],
             )
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
@@ -2631,6 +2648,7 @@ class TaskLogService:
                     and int(latest_active.tool_rounds_used or 0) >= int(latest_active.tool_round_budget or 0)
                 ),
                 stages=stages,
+                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
             )
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
@@ -2657,6 +2675,7 @@ class TaskLogService:
                 active_stage_id=str(state.active_stage_id or '').strip(),
                 transition_required=bool(state.transition_required),
                 stages=stages,
+                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
             )
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
@@ -2671,8 +2690,15 @@ class TaskLogService:
             if task is None or node is None:
                 return None
             state = self._execution_stage_state(node)
+            had_pending = bool(list(state.pending_orphan_rounds or []))
+            state = self._absorb_execution_orphan_rounds(state)
             active = self._active_execution_stage(state)
             if active is None:
+                if had_pending:
+                    # 仅有孤儿轮、无活动阶段:吸收为一个已完成收纳阶段并落盘
+                    self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=state)
+                    self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=state)
+                    self.refresh_task_view(task_id, mark_unread=True)
                 return None
             final_status = _EXECUTION_STAGE_STATUS_COMPLETED if str(status or '').strip().lower() == 'success' else _EXECUTION_STAGE_STATUS_FAILED
             now = now_iso()
@@ -2686,12 +2712,162 @@ class TaskLogService:
                 active_stage_id='',
                 transition_required=False,
                 stages=stages,
+                pending_orphan_rounds=list(state.pending_orphan_rounds or []),
             )
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)
             current = next((item for item in stages if str(item.stage_id or '').strip() == str(active.stage_id or '').strip()), None)
             return current.model_dump(mode='json') if current is not None else None
+
+    @staticmethod
+    def _absorb_execution_orphan_rounds(state: ExecutionStageState) -> ExecutionStageState:
+        """把待入账孤儿轮收纳进一个 completed 阶段(无活动阶段),或嫁接进活动阶段(防御)。
+
+        有活动阶段时孤儿轮嫁接进其 rounds 末尾并标 orphan_grafted(不改变 used/budget);无活动阶段时
+        自动补开一个 system_generated、stage_kind="normal" 的 completed 收纳阶段(保证可被阶段压缩回收)。
+        无待入账孤儿轮时原样返回 state。
+        """
+        pending = [item.model_copy() for item in list(state.pending_orphan_rounds or [])]
+        if not pending:
+            return state
+        active = TaskLogService._active_execution_stage(state)
+        if active is not None:
+            grafted = [
+                item.model_copy(
+                    update={
+                        'round_id': new_stage_round_id(),
+                        'round_index': len(list(active.rounds or [])) + index,
+                        'orphan_grafted': True,
+                    }
+                )
+                for index, item in enumerate(pending, start=1)
+            ]
+            stages: list[ExecutionStageRecord] = []
+            for stage in list(state.stages or []):
+                if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
+                    stages.append(stage.model_copy(update={'rounds': [*list(stage.rounds or []), *grafted]}))
+                else:
+                    stages.append(stage)
+            return ExecutionStageState(
+                active_stage_id=str(state.active_stage_id or '').strip(),
+                transition_required=bool(state.transition_required),
+                stages=stages,
+                pending_orphan_rounds=[],
+            )
+        node_now = now_iso()
+        next_stage_index = max((int(stage.stage_index or 0) for stage in list(state.stages or [])), default=0) + 1
+        grafted = [
+            item.model_copy(update={'round_id': new_stage_round_id(), 'round_index': index, 'orphan_grafted': True})
+            for index, item in enumerate(pending, start=1)
+        ]
+        used = sum(1 for item in grafted if bool(item.budget_counted))
+        absorbing = ExecutionStageRecord(
+            stage_id=new_stage_id(),
+            stage_index=next_stage_index,
+            stage_kind=_EXECUTION_STAGE_KIND_NORMAL,
+            system_generated=True,
+            mode=_EXECUTION_STAGE_MODE_SELF,
+            status=_EXECUTION_STAGE_STATUS_COMPLETED,
+            stage_goal=f'自动补记:无阶段期间执行的工具调用({len(grafted)} 轮)',
+            completed_stage_summary='',
+            final_stage=False,
+            key_refs=[],
+            archive_ref='',
+            archive_stage_index_start=0,
+            archive_stage_index_end=0,
+            tool_round_budget=max(STAGE_TOOL_ROUND_BUDGET_MIN, min(len(grafted), STAGE_TOOL_ROUND_BUDGET_MAX)),
+            tool_rounds_used=used,
+            created_at=node_now,
+            finished_at=node_now,
+            rounds=grafted,
+        )
+        return ExecutionStageState(
+            active_stage_id='',
+            transition_required=False,
+            stages=[*list(state.stages or []), absorbing],
+            pending_orphan_rounds=[],
+        )
+
+    def record_execution_stage_free_pass_round(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        tool_calls: list[dict[str, Any]],
+        kind: str,
+        created_at: str,
+    ) -> dict[str, Any] | None:
+        """宽限执行轮次记账:kind=='stageless' 记入 pending_orphan_rounds;'exhausted' 记 overflow 轮。"""
+        with self._task_lock(task_id):
+            task = self._require_task(task_id)
+            node = self._store.get_node(node_id)
+            if node is None:
+                return None
+            state = self._execution_stage_state(node)
+            visible_calls = [
+                item for item in list(tool_calls or [])
+                if str(item.get('name') or '').strip() and str(item.get('name') or '').strip() != _EXECUTION_STAGE_TOOL_NAME
+            ]
+            if not visible_calls:
+                return None
+            tool_names = [str(item.get('name') or '').strip() for item in visible_calls if str(item.get('name') or '').strip()]
+            counts_budget = response_tool_calls_count_against_stage_budget(
+                visible_calls,
+                extra_non_budget_tools=_NON_BUDGET_EXECUTION_TOOLS,
+            )
+            normalized_kind = str(kind or '').strip()
+            call_ids = [str(item.get('id') or '').strip() for item in visible_calls if str(item.get('id') or '').strip()]
+            if normalized_kind == 'exhausted':
+                active = self._active_execution_stage(state)
+                if active is None or not bool(state.transition_required):
+                    return None
+                overflow_round = ExecutionStageRound(
+                    round_id=new_stage_round_id(),
+                    round_index=len(list(active.rounds or [])) + 1,
+                    created_at=str(created_at or now_iso()),
+                    tool_call_ids=call_ids,
+                    tool_names=tool_names,
+                    budget_counted=False,
+                    overflow=True,
+                )
+                stages: list[ExecutionStageRecord] = []
+                for stage in list(state.stages or []):
+                    current = stage
+                    if str(stage.stage_id or '').strip() == str(active.stage_id or '').strip():
+                        current = stage.model_copy(update={'rounds': [*list(stage.rounds or []), overflow_round]})
+                    stages.append(current)
+                next_state = ExecutionStageState(
+                    active_stage_id=str(state.active_stage_id or '').strip(),
+                    transition_required=True,
+                    stages=stages,
+                    pending_orphan_rounds=list(state.pending_orphan_rounds or []),
+                )
+                self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+                self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+                self.refresh_task_view(task_id, mark_unread=True)
+                return overflow_round.model_dump(mode='json')
+            if bool(state.active_stage_id):
+                return None
+            orphan_round = ExecutionStageRound(
+                round_id=new_stage_round_id(),
+                round_index=len(list(state.pending_orphan_rounds or [])) + 1,
+                created_at=str(created_at or now_iso()),
+                tool_call_ids=call_ids,
+                tool_names=tool_names,
+                budget_counted=counts_budget,
+                orphan=True,
+            )
+            next_state = ExecutionStageState(
+                active_stage_id=str(state.active_stage_id or '').strip(),
+                transition_required=bool(state.transition_required),
+                stages=list(state.stages or []),
+                pending_orphan_rounds=[*list(state.pending_orphan_rounds or []), orphan_round],
+            )
+            self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
+            self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
+            self.refresh_task_view(task_id, mark_unread=True)
+            return orphan_round.model_dump(mode='json')
 
     def update_node_metadata(self, node_id: str, metadata_mutator: Callable[[dict[str, Any]], dict[str, Any]]) -> NodeRecord | None:
         record = self._store.get_node(node_id)

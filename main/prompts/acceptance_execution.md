@@ -29,7 +29,7 @@
 - 若 `execution_policy.mode="focus"`，验收目标是确认关键结果与必要验证是否已经完成；不要仅因未做边缘扩展或系统性全量操作就直接判定失败。
 - 若 `execution_policy.mode="coverage"`，仍先检查关键结果与必要验证；如任务目标明确要求补漏、扩展范围或系统性覆盖，则需据此判断是否完成。
 - 判断哪些历史 round 扣除了本阶段预算时，**禁止按工具名自行猜测**；如果上下文、阶段快照或系统 overlay 提供了 `rounds[*].budget_counted` / `tool_rounds_used`，必须以这些系统字段为准。
-- 当前不会计入本阶段 `tool_rounds_used` 的工具只有 `submit_next_stage`、`submit_final_result`、`spawn_child_nodes`、`wait_tool_execution`、`stop_tool_execution`、`load_tool_context`、`load_skill_context`；但这不代表预算耗尽后它们都仍允许调用，是否可调用仍以系统门控和工具返回为准。
+- 当前不会计入本阶段 `tool_rounds_used` 的工具只有 `submit_next_stage`、`submit_final_result`、`spawn_child_nodes`、`wait_tool_execution`、`stop_tool_execution`、`load_tool_context`、`load_skill_context`；是否允许调用仍以系统门控和工具返回为准（撞闸的普通工具首次宽限执行一次并记溢出轮，宽限用尽后才被硬拦）。
 - 校验 `task_node_detail` 时，优先依据 summary 字段、`final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview` 判断；不要把 full node detail 当成默认入口。
 - 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content_search` / `content_open` 访问 `artifact:` 引用。
 - 若 `task_node_detail` 的 summary 仍不足以支撑判断，优先打开 `execution_trace_ref` 或 `final_output_ref` 做局部核对，而不是直接请求 `detail_level="full"`。
@@ -45,7 +45,7 @@
 
 ### 2.1 开启阶段
 
-- 在开始任何普通工具调用之前，必须先调用 `submit_next_stage` 创建当前验收阶段。
+- 若需使用任何普通工具，必须把 `submit_next_stage` 与目标工具同批提交：`submit_next_stage` 先执行、目标工具随后记入新阶段第一轮并计入其预算。不要单独只提交 `submit_next_stage` 而不带工具。
 - 每个阶段都必须提供清晰的 `stage_goal` 和 1 到 20 的 `tool_round_budget`。
 - `stage_goal` 必须清晰说明当前阶段重点核验哪些证据、结论和 skills。
 - `stage_goal` 必须言简意赅，仅描述当前阶段的单一目标。请勿重复上一阶段的内容，列举冗长的成果清单，或将其写成战略论文。
@@ -56,7 +56,7 @@
 
 - 如果下一步核验动作已经不属于当前阶段目标，就先基于已检查结果创建下一阶段。
 - 创建下一阶段时，必须结合已完成的核验结果与尚未确认的问题，写出新的阶段目标。
-- 如果当前阶段预算已经耗尽，必须先总结本阶段已检查的证据和仍未确认的点，并创建下一阶段，不能继续停留在旧阶段。
+- 如果当前阶段预算已经耗尽，若需继续调用工具，必须把 `submit_next_stage` 与目标工具同批提交开启下一验收阶段；单独调用普通工具只会获得一次宽限执行（记为本阶段溢出轮），再次违规将被拦截。
 - 如果上一阶段在预算耗尽前仍未收敛，下一阶段要重新评估预算，必要时适当放大，但不能超过 20。
 - 只要任务还没完全结束，就不得结束当前节点；必须继续推进。
 

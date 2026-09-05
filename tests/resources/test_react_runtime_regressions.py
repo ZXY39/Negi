@@ -782,15 +782,25 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
             requests.append(dict(kwargs))
             frame = react_log_service.read_runtime_frame('task-first-turn-schemas', 'node-first-turn-schemas')
             assert frame.get('phase') == 'before_model'
-            assert frame.get('callable_tool_names') == ['submit_next_stage']
-            assert frame.get('model_visible_tool_names') == ['submit_next_stage']
+            assert frame.get('callable_tool_names') == [
+                'submit_next_stage',
+                'submit_final_result',
+                'spawn_child_nodes',
+                'stop_tool_execution',
+            ]
+            assert frame.get('model_visible_tool_names') == [
+                'submit_next_stage',
+                'submit_final_result',
+                'spawn_child_nodes',
+                'stop_tool_execution',
+            ]
             assert frame.get('model_visible_tool_selection_trace', {}).get('full_callable_tool_names') == [
                 'submit_next_stage',
                 'submit_final_result',
                 'spawn_child_nodes',
                 'stop_tool_execution',
             ]
-            assert frame.get('model_visible_tool_selection_trace', {}).get('stage_locked_to_submit_next_stage') is True
+            assert frame.get('model_visible_tool_selection_trace', {}).get('stage_locked_to_submit_next_stage') is False
             return LLMResponse(
                 content='',
                 tool_calls=[
@@ -1340,13 +1350,17 @@ def test_execution_selector_preserves_prior_model_visible_tool_order_across_turn
         },
     )
 
-    assert selection['tool_names'] == ['submit_next_stage']
+    assert selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+    ]
     assert selection['trace']['full_callable_tool_names'] == [
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
-    assert selection['trace']['stage_locked_to_submit_next_stage'] is True
+    assert selection['trace']['stage_locked_to_submit_next_stage'] is False
 
 
 def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() -> None:
@@ -1412,16 +1426,20 @@ def test_execution_selector_appends_missing_tools_after_prior_stable_prefix() ->
         },
     )
 
-    assert selection['tool_names'] == ['submit_next_stage']
+    assert selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+    ]
     assert selection['trace']['full_callable_tool_names'] == [
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
-    assert selection['trace']['stage_locked_to_submit_next_stage'] is True
+    assert selection['trace']['stage_locked_to_submit_next_stage'] is False
 
 
-def test_execution_selector_locks_callable_tools_to_submit_next_stage_when_transition_required() -> None:
+def test_execution_selector_keeps_full_callable_tools_when_transition_required() -> None:
     visible_tools = {
         'filesystem': _ModelSchemaRecordingTool(
             name='filesystem',
@@ -1477,13 +1495,17 @@ def test_execution_selector_locks_callable_tools_to_submit_next_stage_when_trans
         },
     )
 
-    assert selection['tool_names'] == ['submit_next_stage']
+    assert selection['tool_names'] == [
+        'submit_next_stage',
+        'submit_final_result',
+        'spawn_child_nodes',
+    ]
     assert selection['trace']['full_callable_tool_names'] == [
         'submit_next_stage',
         'submit_final_result',
         'spawn_child_nodes',
     ]
-    assert selection['trace']['stage_locked_to_submit_next_stage'] is True
+    assert selection['trace']['stage_locked_to_submit_next_stage'] is False
 
 
 @pytest.mark.parametrize('loader_tool_name', ['load_tool_context', 'load_tool_context_v2'])
@@ -3043,6 +3065,7 @@ async def test_execute_tool_calls_allows_submit_next_stage_and_passes_runtime_co
             "allowed_content_refs": [],
             "enforce_content_ref_allowlist": False,
             "prior_overflow_signatures": [],
+            "stage_free_pass_kind": "",
             "image_multimodal_enabled": False,
         }
     ]
@@ -5159,7 +5182,7 @@ async def test_enrich_node_messages_includes_exec_runtime_policy_in_dynamic_cont
 
 
 @pytest.mark.asyncio
-async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_without_valid_stage(
+async def test_enrich_node_messages_exposes_full_callable_tools_without_valid_stage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _fake_build_node_context_selection(**kwargs):
@@ -5225,7 +5248,7 @@ async def test_enrich_node_messages_locks_callable_tools_to_submit_next_stage_wi
     dynamic_payload = extract_node_dynamic_contract_payload(enriched)
     assert dynamic_payload is not None
     assert dynamic_payload["message_type"] == "node_runtime_tool_contract"
-    assert dynamic_payload["callable_tool_names"] == ["submit_next_stage"]
+    assert dynamic_payload["callable_tool_names"] == ["submit_next_stage", "load_tool_context", "filesystem_write"]
     assert dynamic_payload["candidate_tools"] == [
         {
             "tool_id": "content",

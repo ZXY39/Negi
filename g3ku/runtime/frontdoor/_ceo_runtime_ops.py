@@ -73,6 +73,7 @@ from main.runtime.stage_budget import (
     STAGE_TURN_END_SUMMARY_POINTER,
     STAGELESS_FREE_PASS_REMINDER,
     response_tool_calls_count_against_stage_budget,
+    stage_free_pass_kind,
     stage_gate_error_for_tool,
     visible_tools_for_stage_iteration,
 )
@@ -4608,34 +4609,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state or {}})
         has_active_stage = bool(str(snapshot.get("active_stage_id") or "").strip())
         transition_required = bool(snapshot.get("transition_required"))
-        if not has_active_stage:
-            pending = [
-                dict(item)
-                for item in list(snapshot.get("pending_orphan_rounds") or [])
-                if isinstance(item, dict)
-            ]
-            # 宽限消耗判定只看 budget_counted 轮;loader-only 轮(budget_counted=false)不消耗宽限。
-            if any(bool(round_item.get("budget_counted")) for round_item in pending):
-                return ""
-            return "stageless"
-        if transition_required:
-            active_stage = next(
-                (
-                    dict(stage)
-                    for stage in list(snapshot.get("stages") or [])
-                    if str(stage.get("stage_id") or "").strip() == str(snapshot.get("active_stage_id") or "").strip()
-                    and str(stage.get("status") or "").strip().lower() == "active"
-                ),
-                None,
-            )
-            if active_stage is not None and any(
-                bool(round_item.get("overflow"))
-                for round_item in list(active_stage.get("rounds") or [])
-                if isinstance(round_item, dict)
-            ):
-                return ""
-            return "exhausted"
-        return ""
+        active_stage = next(
+            (
+                dict(stage)
+                for stage in list(snapshot.get("stages") or [])
+                if str(stage.get("stage_id") or "").strip() == str(snapshot.get("active_stage_id") or "").strip()
+                and str(stage.get("status") or "").strip().lower() == "active"
+            ),
+            None,
+        )
+        return stage_free_pass_kind(
+            has_active_stage=has_active_stage,
+            transition_required=transition_required,
+            active_stage_rounds=list(active_stage.get("rounds") or []) if active_stage is not None else [],
+            pending_orphan_rounds=list(snapshot.get("pending_orphan_rounds") or []),
+        )
 
     @classmethod
     def _frontdoor_predicted_exhaustion_reminder(
@@ -5017,6 +5005,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         mutable_stage_state = execution_bundle.mutable_stage_state
         node_error_context = self._frontdoor_node_error_heartbeat_context(state)
 
+        # 注意:此 LangChain 执行器只用于 schema/preflight(bind_tools 只取 schema,从不触发 arun),
+        # 生产真实执行与 free-pass 宽限的唯一入口是 _graph_execute_tools._run_single。这里保持硬拦,
+        # 不做"宽限执行但无法记账"的不一致语义。
         async def _tool_executor(
             tool_name: str,
             arguments: dict[str, Any],

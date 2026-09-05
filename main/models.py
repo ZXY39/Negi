@@ -128,6 +128,13 @@ class ExecutionStageRound(Model):
     tool_call_ids: list[str] = Field(default_factory=list)
     tool_names: list[str] = Field(default_factory=list)
     budget_counted: bool = False
+    # 宽限执行记账标记(与 CEO/frontdoor 侧语义一致):
+    # orphan       — 无活动阶段时撞闸宽限执行的轮次,暂存于 pending_orphan_rounds
+    # overflow     — 预算耗尽时宽限执行的轮次,attach 回耗尽阶段自身(不占预算)
+    # orphan_grafted — 前两者的孤儿轮被下一次 submit_next_stage 嫁接进新阶段后打此标记
+    orphan: bool = False
+    overflow: bool = False
+    orphan_grafted: bool = False
 
 
 class ExecutionStageKeyRef(Model):
@@ -160,6 +167,8 @@ class ExecutionStageState(Model):
     active_stage_id: str = ''
     transition_required: bool = False
     stages: list[ExecutionStageRecord] = Field(default_factory=list)
+    # 无活动阶段时宽限执行产生的待入账孤儿轮,下一次 submit_next_stage 嫁接进新阶段后清空
+    pending_orphan_rounds: list[ExecutionStageRound] = Field(default_factory=list)
 
 
 class SpawnChildSpec(Model):
@@ -411,10 +420,19 @@ def normalize_execution_stage_metadata(value: Any) -> ExecutionStageState:
         )
     if active_stage_id and not any(stage.stage_id == active_stage_id for stage in stages):
         active_stage_id = ''
+    pending_orphan_rounds: list[ExecutionStageRound] = []
+    for item in list(payload.get('pending_orphan_rounds') or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            pending_orphan_rounds.append(ExecutionStageRound.model_validate(item))
+        except Exception:
+            continue
     return ExecutionStageState(
         active_stage_id=active_stage_id,
         transition_required=transition_required,
         stages=stages,
+        pending_orphan_rounds=pending_orphan_rounds,
     )
 
 

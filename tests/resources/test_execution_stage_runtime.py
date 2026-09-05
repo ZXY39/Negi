@@ -1135,7 +1135,7 @@ def test_stage_visibility_keeps_all_tools_visible_before_stage_and_after_budget(
     assert set(exhausted_stage) == {STAGE_TOOL_NAME, 'ordinary_tool'}
 
 
-def test_callable_tool_names_for_stage_iteration_only_exposes_submit_next_stage_without_valid_stage() -> None:
+def test_callable_tool_names_for_stage_iteration_keeps_full_list_without_valid_stage() -> None:
     tool_names = [STAGE_TOOL_NAME, 'submit_final_result', 'load_tool_context', 'filesystem_write']
 
     before_stage = callable_tool_names_for_stage_iteration(
@@ -1154,9 +1154,17 @@ def test_callable_tool_names_for_stage_iteration_only_exposes_submit_next_stage_
         transition_required=False,
     )
 
-    assert before_stage == [STAGE_TOOL_NAME]
-    assert exhausted_stage == [STAGE_TOOL_NAME]
+    # 新协议:阶段状态不再收窄 callable;submit_next_stage 置首,其余工具保持可见
+    assert before_stage == tool_names
+    assert exhausted_stage == tool_names
     assert active_stage == tool_names
+
+    # sns 不在输入列表时会被前置
+    assert callable_tool_names_for_stage_iteration(
+        ['filesystem_write', 'load_tool_context'],
+        has_active_stage=False,
+        transition_required=False,
+    ) == [STAGE_TOOL_NAME, 'filesystem_write', 'load_tool_context']
 
 
 def test_spawn_child_nodes_tool_requires_execution_policy_for_each_child() -> None:
@@ -1841,6 +1849,121 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
         assert stages[0]['key_refs'] == [{'ref': 'artifact:artifact:stage-one', 'note': 'stage one note'}]
         assert stages[1]['completed_stage_summary'] == ''
         assert stages[1]['key_refs'] == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_free_pass_stageless_records_orphan_and_grafts_on_next_stage(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.record_execution_stage_free_pass_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:o1', 'name': 'filesystem', 'arguments': {'path': 'x'}}],
+            kind='stageless',
+            created_at=now_iso(),
+        )
+        snap = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
+        assert snap['has_active_stage'] is False
+        assert len(snap['pending_orphan_rounds']) == 1
+        assert snap['pending_orphan_rounds'][0]['orphan'] is True
+        assert snap['pending_orphan_rounds'][0]['budget_counted'] is True
+
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='嫁接待入账孤儿轮',
+            tool_round_budget=5,
+        )
+        snap = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
+        assert snap['has_active_stage'] is True
+        assert snap['pending_orphan_rounds'] == []
+        assert len(snap['active_stage']['rounds']) == 1
+        assert snap['active_stage']['rounds'][0]['orphan_grafted'] is True
+        assert snap['active_stage']['tool_rounds_used'] == 1
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_free_pass_exhausted_attaches_overflow_round(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='work',
+            tool_round_budget=1,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'c1', 'name': 'filesystem', 'arguments': {}}],
+            created_at=now_iso(),
+        )
+        service.log_service.record_execution_stage_free_pass_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'c2', 'name': 'filesystem', 'arguments': {}}],
+            kind='exhausted',
+            created_at=now_iso(),
+        )
+        snap = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
+        active = snap['active_stage']
+        assert snap['transition_required'] is True
+        assert len(active['rounds']) == 2
+        assert active['rounds'][-1]['overflow'] is True
+        assert active['rounds'][-1]['budget_counted'] is False
+        assert active['tool_rounds_used'] == 1  # 封顶不超预算
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_finalize_execution_stage_absorbs_pending_orphans(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.record_execution_stage_free_pass_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:o1', 'name': 'filesystem', 'arguments': {'path': 'x'}}],
+            kind='stageless',
+            created_at=now_iso(),
+        )
+        service.log_service.finalize_execution_stage(record.task_id, record.root_node_id, status='failed')
+        snap = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
+        assert snap['has_active_stage'] is False
+        assert snap['pending_orphan_rounds'] == []
+        completed = snap['completed_stages']
+        assert len(completed) == 1
+        assert completed[0]['system_generated'] is True
+        assert completed[0]['stage_kind'] == 'normal'
+        assert int(completed[0]['tool_round_budget']) > 0
     finally:
         await service.close()
 

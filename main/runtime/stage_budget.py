@@ -94,6 +94,32 @@ def response_tool_calls_count_against_stage_budget(
     )
 
 
+def stage_free_pass_kind(
+    *,
+    has_active_stage: bool,
+    transition_required: bool,
+    active_stage_rounds: Iterable[dict[str, Any]] | None = None,
+    pending_orphan_rounds: Iterable[dict[str, Any]] | None = None,
+) -> str:
+    """撞闸普通工具是否获得本轮宽限执行,及记账归属(CEO/frontdoor 与节点共用)。
+
+    返回 "stageless"(无活动阶段、宽限未用尽)、"exhausted"(预算耗尽、宽限未用尽),或
+    ""(宽限已用尽,应硬拦)。宽限的"一次性"由记账状态判定:无阶段场景看待入账孤儿轮里是否已有
+    budget_counted 轮;耗尽场景看活动阶段是否已有 overflow 轮。宽限轮由执行方在轮后记账。
+    """
+    if not has_active_stage:
+        pending = [dict(item) for item in list(pending_orphan_rounds or []) if isinstance(item, dict)]
+        if any(bool(item.get("budget_counted")) for item in pending):
+            return ""
+        return "stageless"
+    if transition_required:
+        rounds = [dict(item) for item in list(active_stage_rounds or []) if isinstance(item, dict)]
+        if any(bool(item.get("overflow")) for item in rounds):
+            return ""
+        return "exhausted"
+    return ""
+
+
 def callable_tool_names_for_stage_iteration(
     tool_names: list[str] | None,
     *,
@@ -109,9 +135,13 @@ def callable_tool_names_for_stage_iteration(
             continue
         seen.add(normalized)
         ordered.append(normalized)
+    # 新协议:不再把 callable 收窄到只剩 submit_next_stage —— 普通工具可调,但必须与 submit_next_stage
+    # 同批提交;单独调用仅获一次宽限执行,再次违规才被硬拦。无有效阶段时把 submit_next_stage 前置(列表
+    # 已含它则保持原序);有有效阶段时与历史行为一致,直接返回原列表。阶段规则由执行期兜底。
     if not has_active_stage or transition_required:
         normalized_stage_tool_name = str(stage_tool_name or "").strip() or STAGE_TOOL_NAME
-        return [normalized_stage_tool_name]
+        if normalized_stage_tool_name not in seen:
+            return [normalized_stage_tool_name, *ordered]
     return ordered
 
 
