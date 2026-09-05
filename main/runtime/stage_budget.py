@@ -10,15 +10,24 @@ SPAWN_CHILD_NODES_TOOL_NAME = "spawn_child_nodes"
 STAGE_TOOL_ROUND_BUDGET_MIN = 1
 STAGE_TOOL_ROUND_BUDGET_MAX = 20
 CONTROL_STAGE_TOOL_NAMES = frozenset({"wait_tool_execution", "stop_tool_execution"})
-DEFAULT_STAGE_GATE_BYPASS_TOOLS = frozenset(
-    {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME, SPAWN_CHILD_NODES_TOOL_NAME, *CONTROL_STAGE_TOOL_NAMES}
-)
 CONTEXT_LOADER_STAGE_TOOL_NAMES = frozenset(
     {
         "load_tool_context",
         "load_tool_context_v2",
         "load_skill_context",
         "load_skill_context_v2",
+    }
+)
+# 闸门豁免与记账豁免保持一致:上下文加载器是曝光层恒定可调的 fixed builtin(CEO 与节点的
+# callable 名单始终包含它们,且不计入阶段预算),不应被阶段闸门拦截,也不应触发/消耗
+# stageless/exhausted 的一次性宽限名额。
+DEFAULT_STAGE_GATE_BYPASS_TOOLS = frozenset(
+    {
+        STAGE_TOOL_NAME,
+        FINAL_RESULT_TOOL_NAME,
+        SPAWN_CHILD_NODES_TOOL_NAME,
+        *CONTROL_STAGE_TOOL_NAMES,
+        *CONTEXT_LOADER_STAGE_TOOL_NAMES,
     }
 )
 DEFAULT_NON_BUDGET_STAGE_TOOLS = frozenset(

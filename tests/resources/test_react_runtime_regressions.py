@@ -35,6 +35,7 @@ from main.runtime.node_prompt_contract import (
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
 from main.runtime.react_loop import ReActToolLoop
+from main.runtime.stage_budget import STAGELESS_FREE_PASS_REMINDER
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
 from main.service.runtime_service import MainRuntimeService
 from main.storage.artifact_store import TaskArtifactStore
@@ -1282,6 +1283,137 @@ def test_execution_stage_gate_allows_spawn_child_nodes_without_active_stage() ->
     )
 
     assert error == ''
+
+
+@pytest.mark.parametrize(
+    "loader_tool_name",
+    ["load_tool_context", "load_tool_context_v2", "load_skill_context", "load_skill_context_v2"],
+)
+def test_execution_stage_gate_allows_context_loaders_without_active_stage(loader_tool_name: str) -> None:
+    log_service = _FakeLogService()
+    log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+        'pending_orphan_rounds': [],
+    }
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+
+    error = loop._execution_tool_gate_error(
+        tool_name=loader_tool_name,
+        runtime_context={
+            'task_id': 'task-loader-gate',
+            'node_id': 'node-loader-gate',
+            'node_kind': 'acceptance',
+        },
+    )
+
+    assert error == ''
+
+
+class _FreePassStubTool(Tool):
+    def __init__(self, name: str, result: object) -> None:
+        self._name = name
+        self._result = result
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return f'{self._name} stub tool'
+
+    @property
+    def parameters(self) -> dict[str, object]:
+        return {'type': 'object', 'properties': {}, 'required': []}
+
+    async def execute(self, **kwargs):
+        _ = kwargs
+        return self._result
+
+
+def _stageless_free_pass_log_service(free_pass_rounds: list[dict[str, object]]) -> _FakeLogService:
+    log_service = _FakeLogService()
+    log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+        'pending_orphan_rounds': [],
+    }
+
+    def _record_free_pass_round(task_id, node_id, **kwargs):
+        free_pass_rounds.append({'task_id': str(task_id), 'node_id': str(node_id), **kwargs})
+
+    log_service.record_execution_stage_free_pass_round = _record_free_pass_round
+    return log_service
+
+
+@pytest.mark.asyncio
+async def test_stageless_free_pass_round_appends_reminder_without_crashing() -> None:
+    """回归:无活动阶段时普通工具宽限执行,结果追加提醒而非 NameError 兜底错误文本。"""
+    free_pass_rounds: list[dict[str, object]] = []
+    loop = ReActToolLoop(
+        chat_backend=SimpleNamespace(),
+        log_service=_stageless_free_pass_log_service(free_pass_rounds),
+        max_iterations=2,
+    )
+    task = SimpleNamespace(task_id='task-free-pass')
+    node = SimpleNamespace(node_id='node-free-pass', depth=0, node_kind='acceptance')
+    tools = {'exec': _FreePassStubTool('exec', '{"ok": true, "stdout": "done"}')}
+
+    results = await loop._execute_tool_calls(
+        task=task,
+        node=node,
+        response_tool_calls=[ToolCallRequest(id='call-free-pass-exec', name='exec', arguments={})],
+        tools=tools,
+        allowed_content_refs=[],
+        runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
+    )
+
+    assert len(results) == 1
+    content = str(results[0]['tool_message']['content'])
+    assert 'Error executing' not in content
+    assert STAGELESS_FREE_PASS_REMINDER in content
+    assert len(free_pass_rounds) == 1
+    assert free_pass_rounds[0]['kind'] == 'stageless'
+
+
+@pytest.mark.asyncio
+async def test_stageless_loader_only_round_executes_without_free_pass() -> None:
+    """回归:无活动阶段时纯 load_tool_context 轮不撞闸、不消耗宽限、结果不加提醒。"""
+    free_pass_rounds: list[dict[str, object]] = []
+    loop = ReActToolLoop(
+        chat_backend=SimpleNamespace(),
+        log_service=_stageless_free_pass_log_service(free_pass_rounds),
+        max_iterations=2,
+    )
+    task = SimpleNamespace(task_id='task-loader-stageless')
+    node = SimpleNamespace(node_id='node-loader-stageless', depth=0, node_kind='acceptance')
+    tools = {
+        'load_tool_context': _FreePassStubTool(
+            'load_tool_context', {'ok': True, 'tool_id': 'content_open'}
+        )
+    }
+
+    results = await loop._execute_tool_calls(
+        task=task,
+        node=node,
+        response_tool_calls=[
+            ToolCallRequest(id='call-loader-open', name='load_tool_context', arguments={'tool_id': 'content_open'}),
+            ToolCallRequest(id='call-loader-search', name='load_tool_context', arguments={'tool_id': 'content_search'}),
+        ],
+        tools=tools,
+        allowed_content_refs=[],
+        runtime_context={'task_id': task.task_id, 'node_id': node.node_id, 'actor_role': 'execution'},
+    )
+
+    assert len(results) == 2
+    for result in results:
+        content = str(result['tool_message']['content'])
+        assert 'Error executing' not in content
+        assert STAGELESS_FREE_PASS_REMINDER not in content
+    assert free_pass_rounds == []
 
 
 def test_execution_selector_preserves_prior_model_visible_tool_order_across_turns() -> None:
