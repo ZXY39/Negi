@@ -63,6 +63,10 @@
 
 定义 Node 宿主、控制端口、自动启动、中国渠道配置。
 
+### `external_api`
+
+定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled}`）、`eventBufferSize`。token 密文走 bootstrap secret overlay（与 controlToken 同机制）。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
+
 ## 3. 配置加载时做了什么
 
 `load_config()` 不是简单读 JSON，它会做很多迁移和约束检查：

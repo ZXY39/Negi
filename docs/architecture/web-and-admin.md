@@ -14,6 +14,17 @@ When debugging behavior, first identify which side owns the state transition:
 - If the issue is display text, interaction wiring, or DOM updates, start in `g3ku/web/frontend/*`.
 - If the issue is data shape, status lifecycle, or permissions, start in API/runtime services.
 
+## External Agent API Assembly
+
+The channel-agnostic headless surface for third-party bridges is mounted alongside the web/admin routers:
+
+- `g3ku/web/main.py` mounts `g3ku/runtime/api/external_v1.py` at `/api/v1`; the global bootstrap-lock middleware (423) applies to it like every `/api/*` route. Bearer auth and bridge isolation are owned by `require_external_api` (`g3ku/runtime/api/external_auth.py`).
+- Turn execution reuses `SessionRuntimeBridge` (same semantic base as `/ws/ceo`); per-session SSE streams come from `g3ku/runtime/external_events.py` hubs.
+- The shared outbound drain started by `ensure_web_runtime_services` routes `channel == "ext"` messages to external session event hubs (heartbeat/cron/task-terminal proactive push), independent of the China bridge enable switch.
+- The web CEO catalog treats `ext:` sessions like `china:` sessions (grouped, read-only) via `is_channel_session_key`.
+
+Full contract (endpoints, turn terminal invariant, event mapping, outbound routing): 详见 `external-agent-api.md`.
+
 ## Local Startup And Launcher Contract
 
 - `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` are thin CLI passthrough wrappers around `g3ku_bootstrap.py`; with no arguments they default to `web`. `start-g3ku.*` remains the explicit double-click entry with its own managed-process handling.

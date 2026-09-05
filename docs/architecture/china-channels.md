@@ -28,7 +28,7 @@
   控制 WebSocket 客户端。
 
 - `g3ku/china_bridge/session_keys.py`
-  China 会话 key 规则。
+  China 会话 key 规则的过渡 re-export shim；规范实现位于核心模块 `g3ku/runtime/session_keys.py`（含 `ext:` 外部桥命名空间与 `is_channel_session_key` 判定，详见 `external-agent-api.md`「会话注册表与 key 命名空间」）。
 
 - `g3ku/china_bridge/protocol.py`
   Python/Node 共识的 frame 协议。
@@ -173,11 +173,12 @@ Python 输出到渠道时，主要走：
 4. 转成 `deliver_message` frame
 5. Node host 调对应平台 sender 发送
 
-outbound drain（`g3ku/shells/web.py` 的 `_drain_outbound`）是总线出站队列的唯一消费者，维护契约：
+出站总线是单队列，共享 drain（`g3ku/shells/web.py` 的 `_start_outbound_drain` / `_drain_outbound`）是唯一消费者，双路由：`channel == "ext"` 交外部桥事件 hub（契约见 `external-agent-api.md`「出站路由（主动推送）」）；China 渠道交 `ChinaBridgeTransport.send_outbound(...)`，维护契约：
 
+- drain 生命周期与 China bridge 开关解耦：`ensure_web_runtime_services` 拉起，bridge 停止/重启不取消；China transport 缺失时 China 消息节流告警丢弃（不无限重试）。
 - 发送失败绝不能杀死任务：控制 WS 未连通等临时错误（`RuntimeError`）保留消息、每秒重试；其他异常只丢弃该条消息并记 error 日志。历史根因正是该任务只捕两种异常、静默死亡且无重启，导致定时提醒永久滞留队列。
 - `send_outbound(...)` 在 sender 未初始化时抛错而非静默返回，保证消息进入重试而不是无声丢失。
-- 非 China 渠道（`channel not in CHINA_CHANNELS`）的消息不应到达 drain；若到达说明发布方解析出了错误渠道，会记 warning 并丢弃，不再静默。
+- 既非 China 也非 ext 的消息不应到达 drain；若到达说明发布方解析出了错误渠道，会记 warning 并丢弃，不再静默。
 - 发布/投递各有一条日志（`cron outbound published` / `china outbound drained`）；「队列有消息但渠道没收到」时先看这两条，再看是否出现 `skipped non-china message`。
 
 发布方的 `channel` 必须来自任务/会话的正确渠道，而不是从 session key 粗略拆分。历史上 heartbeat 回合曾用 `key.split(":", 1)` 把 `china:qqbot:default:dm` 拆成 `channel="china"`，并用它覆写运行时会话元数据，导致后续回以 `channel="china"` 发布、被 drain 静默丢弃。现在：`_derive_session_channel_chat` 对 `china:*` 键走 china session-key 解析；`SessionRuntimeManager` 的会话元数据「首次注册生效」，后来者不得覆写所属传输层登记的权威 `(channel, chat_id)`。

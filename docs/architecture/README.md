@@ -12,6 +12,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 6. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
 7. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
 8. `china-channels.md` when the change touches channel runtime or the Python/Node bridge
+9. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, or outbound routing to bridges
 
 ## Topic Guide
 
@@ -31,6 +32,8 @@ Start here when you are new to the repository or when a change crosses subsystem
   Use for config source-of-truth rules and role-to-model resolution.
 - `china-channels.md`
   Use for session key rules and the channel bridge boundary.
+- `external-agent-api.md`
+  Use for the channel-agnostic headless API consumed by third-party bridges: auth, external session registry, turn terminal invariant, SSE event mapping, and ext outbound routing.
 
 ## Debugging Entry Points
 
@@ -44,6 +47,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
 - QQ/China channel emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `china-channels.md`
+- 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
@@ -81,4 +85,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Websocket/UI contracts, composer/media rendering, image upload gating, model config admin draft contract, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |
 | China channel registry, session key rules, Python/Node bridge, canonical channel id list | `china-channels.md` |
+| External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing | `external-agent-api.md` |
 | Startup/deploy/troubleshooting order, memory CLI, Docker compose | `operations-and-maintenance.md` |
