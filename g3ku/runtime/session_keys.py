@@ -195,16 +195,18 @@ def normalize_bridge_id(value: str | None) -> str:
     return normalized or "bridge"
 
 
-def build_external_session_key(*, bridge_id: str, external_key: str) -> str:
+def build_external_session_key(*, bridge_id: str, external_key: str, digest_length: int = 16) -> str:
     """Build the stable runtime session key for an external bridge session.
 
     The key embeds only a hash of the bridge-supplied ``external_key`` so it
     stays filename-safe regardless of the platform's identifier shape; the
     authoritative mapping between ``external_key`` and this key is owned by
-    the external session registry.
+    the external session registry. ``digest_length`` exists purely as a
+    collision-escape hatch for the registry.
     """
     bridge = normalize_bridge_id(bridge_id)
-    digest = hashlib.sha1(str(external_key or "").encode("utf-8")).hexdigest()[:16]
+    bounded = max(8, min(40, int(digest_length or 16)))
+    digest = hashlib.sha1(str(external_key or "").encode("utf-8")).hexdigest()[:bounded]
     return f"{EXTERNAL_SESSION_KEY_PREFIX}{bridge}:{digest}"
 
 
