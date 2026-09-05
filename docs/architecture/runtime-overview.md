@@ -241,6 +241,12 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 - artifacts
 - 事件历史
 - 治理状态
+- 任务临时目录 `temp/tasks/task_<id>`（每个任务的 scratch 空间，路径在任务创建时写入任务 runtime meta）
+
+任务临时目录的根由 `MainRuntimeService._workspace_root()` 派生，解析链为：构造参数 `workspace_root` > `resource_manager.workspace` > 进程 cwd。它既决定 `temp/tasks/` 的位置，也影响 `exec`/`filesystem` 类工具默认的 `task_temp_dir` 工作目录。需要掌握的两条维护约束：
+
+- 任何不提供 workspace 的调用方（尤其是测试和一次性脚本）都会把任务目录落在进程 cwd 的 `temp/tasks/` 下。测试通过构造参数 `workspace_root=tmp_path` 显式隔离，`tests/conftest.py` 的 autouse fixture 再把 cwd 回退替换为 per-test 临时目录作为兜底，双层保证测试运行不会向真实仓库写入 `task_*` 目录。
+- 测试任务的记录只存在于 pytest 的临时数据库里，其遗留目录不会被任何生产清理路径回收；这类孤儿目录用 `scripts/cleanup_orphan_task_temp_dirs.py` 处理，见 `operations-and-maintenance.md`「关键状态文件与目录」。
 
 主要由以下模块协同：
 

@@ -498,6 +498,7 @@ def test_frontdoor_final_stage_does_not_require_transition_when_budget_is_exhaus
 async def test_completed_frontdoor_stages_are_not_externalized_into_archives(tmp_path: Path, monkeypatch) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

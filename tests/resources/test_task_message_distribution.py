@@ -178,6 +178,7 @@ def build_service(tmp_path: Path) -> MainRuntimeService:
 def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=chat_backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

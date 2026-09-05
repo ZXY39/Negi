@@ -385,6 +385,7 @@ EXPECTED_FILE_TARGETS = [
 def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=chat_backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -623,6 +624,7 @@ def _set_pending_notice_state(
 def test_internal_task_terminal_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -676,6 +678,7 @@ def test_internal_task_terminal_callback_normalizes_caller_supplied_dedupe_key(t
     """Probe/retry variants of the dedupe key must not re-deliver the same task result."""
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -788,6 +791,7 @@ def test_enrich_task_terminal_payload_dedupe_key_idempotent() -> None:
 def test_internal_task_terminal_callback_rejects_already_accepted_pending_outbox(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -845,6 +849,7 @@ def test_internal_task_terminal_callback_rejects_already_accepted_pending_outbox
 def test_internal_task_terminal_callback_records_heartbeat_rejection_reason(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -891,6 +896,7 @@ def test_internal_task_terminal_callback_records_heartbeat_rejection_reason(tmp_
 def test_internal_task_stall_callback_persists_pending_outbox_and_dedupes(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -947,6 +953,7 @@ def test_internal_task_stall_callback_normalizes_caller_supplied_dedupe_key(tmp_
     """Probe/retry variants of the stall dedupe key must not re-trigger notifications."""
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1033,6 +1040,7 @@ def test_normalize_task_stall_payload_overrides_custom_dedupe_key() -> None:
 def test_internal_task_event_callback_forwards_live_patch(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1077,6 +1085,7 @@ def test_internal_task_event_callback_forwards_live_patch(tmp_path: Path, monkey
 def test_internal_task_event_batch_callback_forwards_summary_patches(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1136,6 +1145,7 @@ def test_internal_task_event_batch_callback_forwards_summary_patches(tmp_path: P
 def test_task_list_websocket_streams_token_patch_events(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1176,6 +1186,7 @@ def test_task_list_websocket_streams_token_patch_events(tmp_path: Path, monkeypa
 async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1227,6 +1238,7 @@ async def test_ensure_web_runtime_services_replays_pending_task_terminal_outbox(
 async def test_ensure_web_runtime_services_replays_pending_task_stall_outbox(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1281,6 +1293,7 @@ async def test_ensure_web_runtime_services_replays_pending_task_stall_outbox(tmp
 async def test_ensure_web_runtime_services_starts_managed_worker(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1316,6 +1329,7 @@ async def test_ensure_web_runtime_services_starts_managed_worker(tmp_path: Path,
 def test_worker_task_terminal_listener_persists_outbox_and_schedules_delivery(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1357,6 +1371,7 @@ def test_worker_task_terminal_listener_persists_outbox_and_schedules_delivery(tm
 def test_worker_task_stall_emit_persists_outbox_and_schedules_delivery(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1390,6 +1405,7 @@ def test_worker_task_stall_emit_persists_outbox_and_schedules_delivery(tmp_path:
 def test_worker_task_status_persists_outbox_and_schedules_delivery(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1421,6 +1437,7 @@ def test_worker_task_status_persists_outbox_and_schedules_delivery(tmp_path: Pat
 def test_worker_task_status_outbox_keeps_latest_payload(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1459,6 +1476,7 @@ def test_worker_task_status_outbox_keeps_latest_payload(tmp_path: Path):
 def test_worker_task_summary_persists_outbox_and_schedules_delivery(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1497,6 +1515,7 @@ def test_worker_task_summary_persists_outbox_and_schedules_delivery(tmp_path: Pa
 def test_worker_task_summary_outbox_keeps_latest_payload(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1551,6 +1570,7 @@ def test_worker_task_summary_outbox_keeps_latest_payload(tmp_path: Path):
 async def test_worker_task_summary_outbox_retries_and_marks_delivered(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1616,6 +1636,7 @@ async def test_worker_task_summary_outbox_falls_back_to_file_callback_config_whe
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1680,6 +1701,7 @@ async def test_worker_task_summary_outbox_falls_back_to_file_callback_config_whe
 async def test_worker_task_summary_batch_delivery_groups_multiple_items(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1743,6 +1765,7 @@ async def test_worker_task_terminal_outbox_falls_back_to_file_callback_config_wh
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1811,6 +1834,7 @@ async def test_worker_task_terminal_outbox_falls_back_to_file_callback_config_wh
 async def test_worker_task_status_outbox_retries_and_marks_delivered(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1863,6 +1887,7 @@ async def test_worker_task_status_outbox_retries_and_marks_delivered(tmp_path: P
 async def test_worker_startup_replays_pending_worker_status_outbox(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1905,6 +1930,7 @@ async def test_worker_startup_replays_pending_worker_status_outbox(tmp_path: Pat
 async def test_worker_startup_replays_pending_task_summary_outbox(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -1943,6 +1969,7 @@ async def test_worker_startup_replays_pending_task_summary_outbox(tmp_path: Path
 async def test_worker_startup_publishes_heartbeat_before_read_model_rebuild(tmp_path: Path, monkeypatch):
     seed_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-seed",
         artifact_dir=tmp_path / "artifacts",
@@ -1951,6 +1978,7 @@ async def test_worker_startup_publishes_heartbeat_before_read_model_rebuild(tmp_
     )
     worker_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-worker",
         artifact_dir=tmp_path / "artifacts",
@@ -1987,6 +2015,7 @@ async def test_worker_startup_publishes_heartbeat_before_read_model_rebuild(tmp_
 def test_web_mode_create_task_enqueues_command_without_running(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2014,6 +2043,7 @@ def test_web_mode_create_task_enqueues_command_without_running(tmp_path: Path):
 def test_global_tasks_websocket_reads_sqlite_events(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2047,6 +2077,7 @@ def test_global_tasks_websocket_reads_sqlite_events(tmp_path: Path, monkeypatch)
 def test_global_tasks_websocket_pushes_worker_status_recovery(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2080,6 +2111,7 @@ def test_global_tasks_websocket_pushes_worker_status_recovery(tmp_path: Path, mo
 def test_tasks_rest_includes_worker_stale_after_seconds(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2110,6 +2142,7 @@ def test_tasks_rest_includes_worker_stale_after_seconds(tmp_path: Path, monkeypa
 def test_task_worker_status_rest_endpoint_returns_worker_metadata(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2136,6 +2169,7 @@ def test_worker_status_payload_surfaces_tool_pressure_diagnostics(tmp_path: Path
     sample_at = now_iso()
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2206,6 +2240,7 @@ def test_worker_status_payload_preserves_easing_state_and_zero_target_limit(tmp_
     sample_at = now_iso()
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2246,6 +2281,7 @@ def test_adaptive_tool_budget_settings_default_safe_window_is_three() -> None:
 def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2267,6 +2303,7 @@ def test_web_mode_worker_online_uses_relaxed_stale_window(tmp_path: Path):
 def test_web_mode_worker_online_extends_stale_window_for_active_tasks(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2288,6 +2325,7 @@ def test_web_mode_worker_online_extends_stale_window_for_active_tasks(tmp_path: 
 def test_web_mode_worker_online_treats_stopped_status_as_offline(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2303,6 +2341,7 @@ def test_web_mode_worker_online_treats_stopped_status_as_offline(tmp_path: Path)
 def test_web_mode_worker_state_reports_offline_without_worker_status(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2317,6 +2356,7 @@ def test_web_mode_worker_state_reports_offline_without_worker_status(tmp_path: P
 def test_web_mode_worker_state_reports_starting_for_recent_managed_worker(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2357,6 +2397,7 @@ def test_task_control_routes_surface_specific_worker_state_errors(
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2377,6 +2418,7 @@ def test_task_control_routes_surface_specific_worker_state_errors(
 def test_global_tasks_websocket_does_not_replay_historical_patches_after_hello(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2414,6 +2456,7 @@ def test_global_tasks_websocket_does_not_replay_historical_patches_after_hello(t
 def test_task_detail_websocket_streams_runtime_updates(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2450,6 +2493,7 @@ def test_task_detail_websocket_streams_runtime_updates(tmp_path: Path, monkeypat
 def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_snapshot(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2490,6 +2534,7 @@ def test_task_detail_websocket_does_not_replay_historical_runtime_updates_after_
 def test_task_live_patch_history_persists_latest_payload_after_window(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2532,6 +2577,7 @@ def test_task_live_patch_history_persists_latest_payload_after_window(tmp_path: 
 def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2637,6 +2683,7 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
 def test_task_detail_payload_includes_all_model_calls_for_token_window(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2684,6 +2731,7 @@ def test_task_detail_payload_includes_all_model_calls_for_token_window(tmp_path:
 def test_task_tree_snapshot_payload_contains_root_and_child_nodes(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2723,6 +2771,7 @@ def test_task_tree_snapshot_payload_contains_root_and_child_nodes(tmp_path: Path
 def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2785,6 +2834,7 @@ def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> Non
 def test_task_model_call_event_persists_dedicated_actual_request_artifact(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2869,6 +2919,7 @@ def test_task_model_call_actual_request_artifact_degrades_after_memory_error(
 ) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2955,6 +3006,7 @@ def test_task_model_call_actual_request_artifact_degrades_after_memory_error(
 def test_node_actual_request_artifact_persists_effective_input_tokens(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3015,6 +3067,7 @@ def test_node_actual_request_artifact_persists_effective_input_tokens(tmp_path: 
 def test_node_observed_input_truth_is_not_cleared_by_later_output_without_usage(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3086,6 +3139,7 @@ def test_node_actual_request_artifact_falls_back_to_preflight_truth_when_usage_h
 ) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3160,6 +3214,7 @@ def test_node_actual_request_artifact_falls_back_to_preflight_truth_when_usage_h
 def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3194,6 +3249,7 @@ def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path:
 def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3242,6 +3298,7 @@ def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_pat
 def test_tool_result_batch_tolerates_non_mapping_tool_arguments(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3290,6 +3347,7 @@ def test_tool_result_batch_tolerates_non_mapping_tool_arguments(tmp_path: Path):
 def test_refresh_task_view_skips_upsert_when_semantically_unchanged(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3320,6 +3378,7 @@ def test_refresh_task_view_skips_upsert_when_semantically_unchanged(tmp_path: Pa
 def test_task_snapshot_preserves_auxiliary_acceptance_children(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3363,6 +3422,7 @@ def test_task_snapshot_preserves_auxiliary_acceptance_children(tmp_path: Path):
 def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3418,6 +3478,7 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
 def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3464,6 +3525,7 @@ def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint
 def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3501,6 +3563,7 @@ def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path):
 def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3544,6 +3607,7 @@ def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path)
 def test_task_node_patch_includes_failure_reason_when_failed_without_final_output(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3585,6 +3649,7 @@ def test_task_node_patch_includes_failure_reason_when_failed_without_final_outpu
 def test_task_node_patch_persists_when_only_failure_summary_changes(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3629,6 +3694,7 @@ def test_task_node_patch_persists_when_only_failure_summary_changes(tmp_path: Pa
 def test_child_status_updates_do_not_emit_parent_structure_patch(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3672,6 +3738,7 @@ def test_child_status_updates_do_not_emit_parent_structure_patch(tmp_path: Path)
 def test_metadata_only_spawn_update_does_not_rewrite_task_node_detail(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3725,6 +3792,7 @@ def test_metadata_only_spawn_update_does_not_rewrite_task_node_detail(tmp_path: 
 def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3780,6 +3848,7 @@ def test_failed_acceptance_node_preserves_execution_child_status(tmp_path: Path)
 def test_failed_node_ids_follow_projection_tree_for_failed_acceptance(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3830,6 +3899,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
     task_prompt = "甯垜鍐欎竴鐗堝彂甯冨叕鍛婂垵绋?"
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3912,6 +3982,7 @@ async def test_execution_policy_focus_propagates_to_task_payload_child_and_accep
 async def test_execution_policy_coverage_is_provided_via_payload_without_prompt_notice(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3949,6 +4020,7 @@ async def test_execution_policy_coverage_is_provided_via_payload_without_prompt_
 async def test_spawn_children_allows_execution_policy_mode_divergence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4022,6 +4094,7 @@ async def test_spawn_children_allows_execution_policy_mode_divergence(tmp_path: 
 async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4101,6 +4174,7 @@ async def test_spawn_children_only_surfaces_failure_info_for_failed_children(tmp
 async def test_spawn_children_materializes_batch_children_before_pipeline_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4169,6 +4243,7 @@ async def test_spawn_children_materializes_batch_children_before_pipeline_comple
 async def test_execution_node_build_messages_appends_dynamic_tool_contract_after_hydration(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4228,6 +4303,7 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
 async def test_execution_node_build_messages_exposes_full_callable_tools_without_active_stage(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4286,6 +4362,7 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
 async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_after_hydration(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4353,6 +4430,7 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
 async def test_restore_node_context_selection_prefers_frame_contract_over_stale_bootstrap_payload(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4412,6 +4490,7 @@ async def test_restore_node_context_selection_prefers_frame_contract_over_stale_
 async def test_restore_node_context_selection_keeps_candidate_tools_in_selected_tool_names(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4488,6 +4567,7 @@ async def test_restore_node_context_selection_keeps_candidate_tools_in_selected_
 async def test_restore_node_context_selection_raises_when_frame_missing_canonical_contract_fields(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4538,6 +4618,7 @@ async def test_restore_node_context_selection_raises_when_frame_missing_canonica
 async def test_spawn_children_parent_metadata_keeps_lightweight_entries_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4598,6 +4679,7 @@ async def test_spawn_children_parent_metadata_keeps_lightweight_entries_only(tmp
 async def test_spawn_children_parent_frame_does_not_inline_partial_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4654,6 +4736,7 @@ async def test_spawn_children_parent_frame_does_not_inline_partial_results(tmp_p
 async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4725,6 +4808,7 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
 async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_exceptions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4766,6 +4850,7 @@ async def test_spawn_children_surfaces_runtime_failure_info_for_pipeline_excepti
 async def test_spawn_children_isolates_cancelled_child_without_failing_whole_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4827,6 +4912,7 @@ async def test_spawn_children_isolates_cancelled_child_without_failing_whole_rou
 async def test_spawn_children_empty_runtime_exception_includes_exception_class_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4865,6 +4951,7 @@ async def test_spawn_children_empty_runtime_exception_includes_exception_class_n
 async def test_pending_notice_wait_for_children_blocks_new_spawn_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -4940,6 +5027,7 @@ async def test_waiting_children_recovery_replays_original_spawn_round_despite_pe
 ) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5025,6 +5113,7 @@ async def test_pending_notice_wait_for_children_allows_same_round_recovery_call(
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5110,6 +5199,7 @@ async def test_pending_notice_wait_for_children_allows_same_round_recovery_call(
 async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_terminal_success_nodes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5263,6 +5353,7 @@ async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_termi
 async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subtree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5358,6 +5449,7 @@ async def test_failed_branch_respawn_creates_new_round_and_keeps_old_failed_subt
 async def test_duplicate_successful_spawn_reuses_completed_operation_without_new_round(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5430,6 +5522,7 @@ async def test_duplicate_successful_spawn_reuses_completed_operation_without_new
 def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5475,6 +5568,7 @@ def test_node_detail_returns_matching_artifacts_for_node(tmp_path: Path):
 def test_rest_node_detail_reports_real_artifact_metadata_for_summary_and_full(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5523,6 +5617,7 @@ def test_rest_node_detail_reports_real_artifact_metadata_for_summary_and_full(tm
 def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5544,6 +5639,7 @@ def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_p
 async def test_worker_startup_reuses_existing_execution_trace_refs_without_reexternalizing(tmp_path: Path, monkeypatch):
     seed_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-seed",
         artifact_dir=tmp_path / "artifacts",
@@ -5552,6 +5648,7 @@ async def test_worker_startup_reuses_existing_execution_trace_refs_without_reext
     )
     worker_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-worker",
         artifact_dir=tmp_path / "artifacts",
@@ -5589,6 +5686,7 @@ async def test_worker_startup_reuses_existing_execution_trace_refs_without_reext
 def test_get_node_detail_payload_rebuilds_missing_execution_trace_ref_on_demand(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5627,6 +5725,7 @@ def test_get_node_detail_payload_rebuilds_missing_execution_trace_ref_on_demand(
 def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace_summary_with_rounds(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5693,6 +5792,7 @@ def test_get_node_detail_payload_summary_mode_rebuilds_flattened_execution_trace
 def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inline_text(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5750,6 +5850,7 @@ def test_get_node_detail_payload_summary_mode_uses_previews_instead_of_full_inli
 def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5810,6 +5911,7 @@ def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path)
     raw_output = "short raw result"
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5852,6 +5954,7 @@ def test_node_detail_summary_mode_keeps_tool_output_only_in_refs(tmp_path: Path)
 def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5906,6 +6009,7 @@ def test_node_detail_resolves_full_final_and_acceptance_text_from_refs(tmp_path:
 def test_node_latest_context_uses_singleton_runtime_frame_artifact_and_freezes_on_remove(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -5977,6 +6081,7 @@ def test_node_latest_context_uses_singleton_runtime_frame_artifact_and_freezes_o
 def test_await_with_runtime_marker_does_not_recreate_removed_frame(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -6022,6 +6127,7 @@ def test_await_with_runtime_marker_does_not_recreate_removed_frame(tmp_path: Pat
 def test_latest_context_prefers_dedicated_actual_request_ref_over_messages_ref(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -6125,6 +6231,7 @@ def test_latest_context_prefers_dedicated_actual_request_ref_over_messages_ref(t
 def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -6174,6 +6281,7 @@ def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
 def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -6466,6 +6574,7 @@ def test_runtime_messages_artifact_accumulates_per_round_callable_snapshots(tmp_
 def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -6527,6 +6636,7 @@ def test_node_detail_and_latest_context_repair_legacy_mojibake(tmp_path: Path):
 def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -6570,6 +6680,7 @@ def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Pa
 def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_business_unpassed(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -7874,6 +7985,7 @@ def test_normalize_final_acceptance_metadata_preserves_handshake_statuses(
 async def test_main_runtime_service_does_not_expose_removed_retry_or_continuation_methods(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -7895,6 +8007,7 @@ async def test_main_runtime_service_does_not_expose_removed_retry_or_continuatio
 async def test_task_list_projection_omits_legacy_continuation_fields(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -7931,6 +8044,7 @@ async def test_task_list_projection_omits_legacy_continuation_fields(tmp_path: P
 async def test_runtime_frame_persists_model_visible_tool_selection_fields(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -8098,6 +8212,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
 
     seed_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -8196,6 +8311,7 @@ async def test_run_node_after_restart_reuses_persisted_actual_request_prefix_for
     backend = _CapturedRequestFinalResultChatBackend()
     restarted = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -8258,6 +8374,7 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
 
     seed_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -8371,6 +8488,7 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
     backend = _CapturedRequestFinalResultChatBackend()
     restarted = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -8619,6 +8737,7 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
 
     seed_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -8744,6 +8863,7 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
 
     restarted = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -8776,6 +8896,7 @@ async def test_model_visible_tool_selection_refreshes_provider_tool_bundle_from_
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -8930,6 +9051,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9029,6 +9151,7 @@ async def test_model_visible_tool_selection_preserves_prior_provider_order_when_
 async def test_provider_tool_bundle_preserves_full_tool_set_under_stage_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9105,6 +9228,7 @@ async def test_provider_tool_bundle_preserves_full_tool_set_under_stage_gate(tmp
 def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_artifact(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9184,6 +9308,7 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
 def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9219,6 +9344,7 @@ def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
 def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9273,6 +9399,7 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
 def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9316,6 +9443,7 @@ def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_pa
 def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9366,6 +9494,7 @@ def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tm
 def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9400,6 +9529,7 @@ def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_pat
 def test_exec_output_ref_is_persisted_and_full_detail_hydrates_tool_output(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9550,6 +9680,7 @@ def test_execution_trace_summary_does_not_inline_hydrated_full_text_when_output_
 def test_view_progress_nodes_are_compact_summaries(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9584,6 +9715,7 @@ def test_view_progress_nodes_are_compact_summaries(tmp_path: Path):
 def test_task_progress_and_tree_root_title_use_core_requirement(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9627,6 +9759,7 @@ def test_task_progress_and_tree_root_title_use_core_requirement(tmp_path: Path):
 async def test_worker_commands_call_pause_and_cancel_handlers(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9661,6 +9794,7 @@ async def test_request_worker_runtime_refresh_waits_for_worker_ack(tmp_path: Pat
 
     worker_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-worker",
         artifact_dir=tmp_path / "artifacts-worker",
@@ -9669,6 +9803,7 @@ async def test_request_worker_runtime_refresh_waits_for_worker_ack(tmp_path: Pat
     )
     web_service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-web",
         artifact_dir=tmp_path / "artifacts-web",
@@ -9703,6 +9838,7 @@ async def test_request_worker_runtime_refresh_waits_for_worker_ack(tmp_path: Pat
 async def test_worker_startup_rejects_second_logical_worker(tmp_path: Path):
     first = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-first",
         artifact_dir=tmp_path / "artifacts-first",
@@ -9711,6 +9847,7 @@ async def test_worker_startup_rejects_second_logical_worker(tmp_path: Path):
     )
     second = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-second",
         artifact_dir=tmp_path / "artifacts-second",
@@ -9731,6 +9868,7 @@ async def test_worker_startup_rejects_second_logical_worker(tmp_path: Path):
 async def test_worker_startup_takes_over_stale_lease(tmp_path: Path):
     stale_owner = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-stale",
         artifact_dir=tmp_path / "artifacts-stale",
@@ -9739,6 +9877,7 @@ async def test_worker_startup_takes_over_stale_lease(tmp_path: Path):
     )
     recovered = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks-recovered",
         artifact_dir=tmp_path / "artifacts-recovered",
@@ -9772,6 +9911,7 @@ async def test_worker_startup_takes_over_stale_lease(tmp_path: Path):
 async def test_pause_task_cancels_active_background_run_without_marking_failed(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9866,6 +10006,7 @@ async def test_pause_during_model_call_keeps_task_resumable_and_resume_finishes_
     backend = _PauseableChatBackend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -9955,6 +10096,7 @@ async def test_resume_task_exposes_runtime_await_marker_while_context_preparer_b
     backend = _PauseableChatBackend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -10012,6 +10154,7 @@ async def test_runtime_frame_exposes_await_marker_while_waiting_for_node_turn(tm
     backend = _DummyChatBackend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -10073,6 +10216,7 @@ async def test_runtime_frame_exposes_await_marker_while_waiting_for_model_respon
     backend = _BlockingChatBackend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -10097,6 +10241,7 @@ async def test_runtime_frame_exposes_await_marker_while_waiting_for_model_respon
 async def test_pause_requested_after_valid_result_flushes_node_output_before_task_pauses(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -10152,6 +10297,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -10229,6 +10375,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
 
     restarted = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=store_path,
         files_base_dir=tasks_dir,
         artifact_dir=artifacts_dir,
@@ -10305,6 +10452,7 @@ async def test_startup_recovery_preserves_success_nodes_and_reuses_them_for_spaw
 async def test_resume_waiting_children_turn_replays_incomplete_spawn_operation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -10793,6 +10941,7 @@ async def test_materialized_spawn_recovery_without_review_metadata_resumes_round
 async def test_distribution_barrier_preempts_waiting_children_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -10930,6 +11079,7 @@ async def test_resume_ready_pending_notice_preempts_waiting_children_recovery(
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11067,6 +11217,7 @@ async def test_resume_react_state_keeps_restored_frame_when_pending_notice_waits
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11175,6 +11326,7 @@ async def test_resume_ready_pending_notice_wait_for_children_allows_waiting_chil
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11322,6 +11474,7 @@ async def test_wait_for_children_recovery_does_not_continue_into_same_turn_model
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11456,6 +11609,7 @@ async def test_resume_ready_wait_for_children_without_pending_notice_clears_dist
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11564,6 +11718,7 @@ async def test_completed_distribution_with_delayed_child_mailbox_is_node_pending
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11636,6 +11791,7 @@ async def test_resume_react_state_injects_pending_notice_once_active_round_is_go
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11720,6 +11876,7 @@ async def test_consuming_last_pending_notice_clears_pending_notice_state(
 ):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11781,6 +11938,7 @@ async def test_consuming_last_pending_notice_clears_pending_notice_state(
 async def test_resume_ready_pending_notice_preempts_pending_tool_turn(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11870,6 +12028,7 @@ async def test_resume_ready_pending_notice_preempts_pending_tool_turn(tmp_path: 
 async def test_resume_pending_tool_turn_uses_recovery_check_for_verified_done_write(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11937,6 +12096,7 @@ async def test_resume_pending_tool_turn_uses_recovery_check_for_verified_done_wr
 async def test_resume_pending_tool_turn_marks_exec_round_for_model_decide_when_side_effect_uncertain(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -11996,6 +12156,7 @@ async def test_resume_pending_tool_turn_marks_exec_round_for_model_decide_when_s
 def test_terminal_task_clears_runtime_frames_and_rejects_late_runtime_updates(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12068,6 +12229,7 @@ def test_terminal_task_clears_runtime_frames_and_rejects_late_runtime_updates(tm
 def test_terminal_event_emits_once_even_if_late_node_updates_arrive(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12122,6 +12284,7 @@ def test_terminal_event_emits_once_even_if_late_node_updates_arrive(tmp_path: Pa
 async def test_run_node_short_circuits_when_task_is_already_terminal(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12174,6 +12337,7 @@ async def test_spawn_children_prefilters_specs_and_preserves_result_order(tmp_pa
     )
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12250,6 +12414,7 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
     )
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12330,6 +12495,7 @@ async def test_spawn_review_request_includes_consumed_distribution_notices(tmp_p
     )
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12441,6 +12607,7 @@ async def test_spawn_review_does_not_use_node_send_preflight(tmp_path: Path, mon
     )
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12508,6 +12675,7 @@ async def test_spawn_review_retries_invalid_output_and_defaults_to_block_on_exce
     )
     service = MainRuntimeService(
         chat_backend=retry_backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12560,6 +12728,7 @@ async def test_spawn_review_retries_invalid_output_and_defaults_to_block_on_exce
     exception_backend = _SpawnReviewExceptionChatBackend(message="inspection chain unavailable")
     exception_service = MainRuntimeService(
         chat_backend=exception_backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime-2.sqlite3",
         files_base_dir=tmp_path / "tasks-2",
         artifact_dir=tmp_path / "artifacts-2",
@@ -12615,6 +12784,7 @@ async def test_task_snapshot_includes_governance_and_node_detail_includes_spawn_
     )
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12694,6 +12864,7 @@ async def test_tree_snapshot_excludes_fully_blocked_spawn_rounds_but_node_detail
     )
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -12743,6 +12914,7 @@ async def test_node_detail_includes_latest_direct_child_results(tmp_path: Path, 
     )
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

@@ -67,6 +67,7 @@ async def seed_runtime(
 ) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=workspace,
         store_path=workspace / "runtime.sqlite3",
         files_base_dir=workspace / "tasks",
         artifact_dir=workspace / "artifacts",

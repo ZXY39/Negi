@@ -3327,6 +3327,7 @@ async def test_task_retrospective_skill_is_discovered_and_visible_only_to_ceo(tm
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -3368,6 +3369,7 @@ async def test_execution_node_messages_include_visible_skill_inventory(tmp_path:
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',

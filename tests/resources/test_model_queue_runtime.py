@@ -157,6 +157,7 @@ async def test_node_turn_controller_holds_frozen_task_requests_in_separate_fifo_
 def test_worker_status_payload_exposes_tool_and_node_queue_metrics(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

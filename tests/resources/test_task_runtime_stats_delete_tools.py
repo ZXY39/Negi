@@ -59,6 +59,7 @@ def _set_task_status(service: MainRuntimeService, task_id: str, status: str) -> 
 async def test_task_stats_tool_list_filters_by_date_keyword_and_reports_disk_usage(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -122,6 +123,7 @@ async def test_task_stats_tool_list_filters_by_date_keyword_and_reports_disk_usa
 async def test_task_stats_tool_id_mode_preserves_input_order_and_reports_not_found(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -151,6 +153,7 @@ async def test_task_stats_tool_id_mode_preserves_input_order_and_reports_not_fou
 async def test_task_delete_tool_preview_and_confirm_deletes_full_task_disk_footprint(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -201,6 +204,7 @@ async def test_task_delete_tool_preview_and_confirm_deletes_full_task_disk_footp
 async def test_terminal_task_auto_cleans_empty_task_temp_dir(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -225,6 +229,7 @@ async def test_terminal_task_auto_cleans_empty_task_temp_dir(tmp_path: Path):
 async def test_terminal_task_keeps_nonempty_task_temp_dir(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -248,6 +253,7 @@ async def test_terminal_task_keeps_nonempty_task_temp_dir(tmp_path: Path):
 async def test_delete_task_records_for_session_deletes_full_disk_footprint_for_in_progress_tasks(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -283,6 +289,7 @@ async def test_delete_task_records_for_session_deletes_full_disk_footprint_for_i
 async def test_task_delete_tool_rejects_token_mismatch(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',

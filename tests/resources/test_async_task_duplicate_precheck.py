@@ -30,6 +30,7 @@ async def _noop_enqueue_task(_task_id: str) -> None:
 async def test_precheck_rejects_exact_core_requirement_duplicate(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -69,6 +70,7 @@ async def test_precheck_rejects_exact_core_requirement_duplicate(tmp_path: Path)
 async def test_precheck_reports_all_matched_duplicate_task_ids(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -117,6 +119,7 @@ async def test_precheck_reports_all_matched_duplicate_task_ids(tmp_path: Path):
 async def test_precheck_skips_llm_review_when_disabled_in_config(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         app_config=SimpleNamespace(
             main_runtime=SimpleNamespace(
                 duplicate_precheck=SimpleNamespace(llm_review_enabled=False),
@@ -161,6 +164,7 @@ async def test_precheck_skips_llm_review_when_disabled_in_config(tmp_path: Path)
 async def test_precheck_includes_paused_tasks_in_duplicate_pool(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -200,6 +204,7 @@ async def test_precheck_includes_paused_tasks_in_duplicate_pool(tmp_path: Path):
 async def test_precheck_allows_new_task_when_session_has_no_unfinished_tasks(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -229,6 +234,7 @@ async def test_precheck_allows_new_task_when_session_has_no_unfinished_tasks(tmp
 async def test_precheck_uses_llm_to_allow_distinct_new_task(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_ReviewBackend(SimpleNamespace(tool_calls=[], content="")),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -281,6 +287,7 @@ async def test_precheck_uses_llm_to_allow_distinct_new_task(tmp_path: Path):
 async def test_precheck_uses_llm_to_reject_fuzzy_duplicate(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_ReviewBackend(SimpleNamespace(tool_calls=[], content="")),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -334,6 +341,7 @@ async def test_precheck_uses_llm_to_reject_fuzzy_duplicate(tmp_path: Path):
 async def test_precheck_returns_append_notice_decision_when_old_task_needs_new_constraints(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_ReviewBackend(SimpleNamespace(tool_calls=[], content="")),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -391,6 +399,7 @@ async def test_precheck_falls_back_to_approve_when_llm_review_is_unavailable(tmp
 
     service = MainRuntimeService(
         chat_backend=_BrokenBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

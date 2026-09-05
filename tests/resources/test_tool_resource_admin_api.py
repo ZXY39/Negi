@@ -308,6 +308,7 @@ async def test_main_runtime_service_reads_toolskill_from_primary_executor(tmp_pa
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -342,6 +343,7 @@ async def test_load_tool_context_prefers_requested_executor_toolskill_over_famil
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -412,6 +414,7 @@ async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_age
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -512,6 +515,7 @@ async def test_load_tool_context_marks_result_delivery_contract_violation_as_rep
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -552,6 +556,7 @@ async def test_admin_endpoints_expose_external_tool_fields(tmp_path: Path):
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -1421,6 +1426,7 @@ def test_create_async_task_contract_no_longer_accepts_continuation_fields() -> N
 async def test_main_runtime_service_falls_back_core_requirement_to_task_prompt(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2018,6 +2024,7 @@ async def test_ceo_session_delete_removes_session_owned_frontdoor_stage_archives
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2945,6 +2952,7 @@ async def test_ceo_session_delete_with_task_record_cleanup_deletes_task_disk_foo
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -4701,6 +4709,7 @@ async def test_admin_skill_delete_endpoint_removes_files_and_syncs_catalog(tmp_p
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -4738,6 +4747,7 @@ async def test_admin_skill_delete_endpoint_rejects_running_task_usage(tmp_path: 
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -4788,6 +4798,7 @@ async def test_admin_tool_delete_endpoint_removes_install_dir_and_syncs_catalog(
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -4826,6 +4837,7 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -4894,6 +4906,7 @@ async def test_admin_endpoints_expose_builtin_agent_browser_fields(tmp_path: Pat
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -4938,6 +4951,7 @@ async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path:
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -4982,6 +4996,7 @@ async def test_runtime_service_can_search_visible_tool_and_skill_candidates(tmp_
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5041,6 +5056,7 @@ async def test_load_skill_context_v2_returns_full_skill_body_by_default(tmp_path
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5102,6 +5118,7 @@ exposure:
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5139,6 +5156,7 @@ async def test_load_tool_context_v2_returns_full_tool_body_by_default(tmp_path: 
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5186,6 +5204,7 @@ async def test_message_tool_family_is_not_discovered_after_hard_delete(tmp_path:
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5445,6 +5464,7 @@ async def test_main_runtime_service_governance_mode_round_trip(tmp_path: Path):
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=runtime_store,
         files_base_dir=files_base_dir,
         artifact_dir=artifact_dir,
@@ -5464,6 +5484,7 @@ async def test_main_runtime_service_governance_mode_round_trip(tmp_path: Path):
 
     restarted = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=runtime_store,
         files_base_dir=files_base_dir,
         artifact_dir=artifact_dir,
@@ -5491,6 +5512,7 @@ async def test_main_runtime_service_frontdoor_reviewable_tool_risk_map_uses_gove
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5600,6 +5622,7 @@ async def test_tool_resources_mark_core_families_and_merge_memory_runtime(tmp_pa
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5734,6 +5757,7 @@ async def test_startup_reconciles_core_tool_family_visibility_and_enablement(tmp
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5778,6 +5802,7 @@ async def test_startup_backfills_legacy_empty_roles_for_implicit_tool_governance
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5860,6 +5885,7 @@ async def test_ensure_runtime_config_current_keeps_dynamic_task_tools_visible(tm
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=workspace,
         app_config=config,
         resource_manager=manager,
         store_path=workspace / '.g3ku' / 'main-runtime' / 'runtime.sqlite3',
@@ -5927,6 +5953,7 @@ async def test_core_tool_admin_endpoints_block_disable_and_delete_but_allow_role
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -5970,6 +5997,7 @@ async def test_tool_policy_empty_roles_persist_across_reload_for_exec_runtime(tm
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -6029,6 +6057,7 @@ async def test_exec_execution_mode_persists_across_reload_and_is_exposed_in_tool
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
@@ -6072,6 +6101,7 @@ async def test_load_tool_context_includes_exec_runtime_policy(tmp_path: Path):
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         resource_manager=manager,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',

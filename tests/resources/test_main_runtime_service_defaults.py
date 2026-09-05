@@ -17,6 +17,7 @@ class _DummyChatBackend:
 def test_main_runtime_service_normalizes_default_iteration_sentinels(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -36,6 +37,7 @@ def test_main_runtime_service_initializes_role_tool_concurrency_from_config(tmp_
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         app_config=config,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
@@ -57,6 +59,7 @@ def test_main_runtime_service_refresh_updates_role_tool_concurrency(monkeypatch,
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         app_config=initial,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
@@ -93,6 +96,7 @@ def test_main_runtime_service_refresh_reloads_security_overlay_before_config_ref
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         app_config=initial,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
@@ -123,6 +127,7 @@ def test_main_runtime_service_defaults_event_history_to_store_sibling_with_confi
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         app_config=config,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
@@ -139,6 +144,7 @@ def test_main_runtime_service_honors_explicit_event_history_dir_from_config(tmp_
 
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         app_config=config,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",

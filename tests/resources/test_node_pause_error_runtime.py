@@ -65,6 +65,7 @@ def _node_record(task_id: str, node_id: str) -> NodeRecord:
 def _make_service(tmp_path: Path) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

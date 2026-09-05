@@ -287,6 +287,7 @@ def _tool_result_payload(
 async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -372,6 +373,7 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
 async def test_execution_stage_runtime_appends_loader_guidance_for_parameter_like_execute_errors(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -441,6 +443,7 @@ async def test_execution_stage_runtime_appends_loader_guidance_for_parameter_lik
 async def test_acceptance_stage_blocks_other_tools_before_stage_and_after_budget(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1080,6 +1083,7 @@ async def test_prepare_node_context_selection_ignores_persisted_frame_when_live_
 async def test_create_task_assigns_distinct_task_temp_dirs_and_injects_runtime_environment(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1192,6 +1196,7 @@ def test_spawn_child_nodes_tool_requires_execution_policy_for_each_child() -> No
 async def test_stage_round_counts_once_and_spawn_promotes_stage_mode_in_trace(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1248,6 +1253,7 @@ async def test_stage_round_counts_once_and_spawn_promotes_stage_mode_in_trace(tm
 async def test_execution_trace_uses_tool_result_records_for_completed_stage_steps(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1338,6 +1344,7 @@ async def test_execution_trace_uses_tool_result_records_for_completed_stage_step
 async def test_persisted_tool_result_output_ref_stays_canonical_while_execution_trace_preserves_wrapper_ref(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1418,6 +1425,7 @@ async def test_persisted_tool_result_output_ref_stays_canonical_while_execution_
 async def test_inline_content_json_tool_results_preserve_structured_refs(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1499,6 +1507,7 @@ async def test_inline_content_json_tool_results_preserve_structured_refs(tmp_pat
 async def test_ref_based_content_reads_now_consume_stage_budget(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1550,6 +1559,7 @@ async def test_ref_based_content_reads_now_consume_stage_budget(tmp_path: Path):
 async def test_mixed_ref_reads_and_regular_tools_still_consume_stage_budget(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1611,6 +1621,7 @@ async def test_mixed_ref_reads_and_regular_tools_still_consume_stage_budget(tmp_
 async def test_loader_tools_do_not_consume_stage_budget(tmp_path: Path, tool_names: list[str]):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1661,6 +1672,7 @@ async def test_loader_tools_do_not_consume_stage_budget(tmp_path: Path, tool_nam
 async def test_final_budgeted_round_is_allowed_and_next_turn_is_blocked(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1773,6 +1785,7 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1810,6 +1823,7 @@ async def test_react_loop_uses_stable_prompt_cache_key_despite_dynamic_stage_ove
 async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1857,6 +1871,7 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
 async def test_free_pass_stageless_records_orphan_and_grafts_on_next_stage(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1898,6 +1913,7 @@ async def test_free_pass_stageless_records_orphan_and_grafts_on_next_stage(tmp_p
 async def test_free_pass_exhausted_attaches_overflow_round(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1940,6 +1956,7 @@ async def test_free_pass_exhausted_attaches_overflow_round(tmp_path: Path):
 async def test_finalize_execution_stage_absorbs_pending_orphans(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -1972,6 +1989,7 @@ async def test_finalize_execution_stage_absorbs_pending_orphans(tmp_path: Path):
 async def test_react_loop_counts_meaningful_tool_results_from_tool_result_store(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2013,6 +2031,7 @@ async def test_react_loop_counts_meaningful_tool_results_from_tool_result_store(
 async def test_submit_next_stage_rejects_zero_progress_stage_switch(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2051,6 +2070,7 @@ async def test_submit_next_stage_rejects_zero_progress_stage_switch(tmp_path: Pa
 async def test_submit_next_stage_allows_switch_after_spawn_only_progress(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2096,6 +2116,7 @@ async def test_submit_next_stage_allows_switch_after_spawn_only_progress(tmp_pat
 async def test_submit_next_stage_appends_latest_spawn_result_ref_to_completed_stage_key_refs(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2231,6 +2252,7 @@ def test_execution_stage_overlay_exposes_budget_accounting_rules_and_latest_roun
 async def test_execution_stage_still_requires_transition_when_budget_is_exhausted_even_with_final_flag(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2266,6 +2288,7 @@ async def test_execution_stage_still_requires_transition_when_budget_is_exhauste
 async def test_execution_stage_allows_spawn_child_nodes_even_with_final_flag(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2305,6 +2328,7 @@ async def test_execution_stage_allows_spawn_child_nodes_even_with_final_flag(tmp
 async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2420,6 +2444,7 @@ def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() 
 async def test_submit_next_stage_rejects_budget_above_fifteen(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2443,6 +2468,7 @@ async def test_submit_next_stage_rejects_budget_above_fifteen(tmp_path: Path):
 async def test_submit_next_stage_rejects_budget_below_one(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2466,6 +2492,7 @@ async def test_submit_next_stage_rejects_budget_below_one(tmp_path: Path):
 async def test_submit_next_stage_ignores_completed_recap_without_active_stage(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2498,6 +2525,7 @@ async def test_submit_next_stage_ignores_completed_recap_without_active_stage(tm
 async def test_completed_stages_are_not_externalized_into_archives(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2570,6 +2598,7 @@ async def test_execution_node_can_finish_via_submit_final_result_tool(tmp_path: 
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2610,6 +2639,7 @@ async def test_execution_node_can_finish_via_xml_direct_final_result(tmp_path: P
     backend = _Backend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2676,6 +2706,7 @@ async def test_execution_node_rejects_failed_final_then_accepts_blocked(tmp_path
     backend = _Backend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2730,6 +2761,7 @@ async def test_old_text_json_no_longer_finishes_node(tmp_path: Path):
     backend = _Backend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2787,6 +2819,7 @@ async def test_missing_initial_stage_can_auto_recover_after_protocol_repair(tmp_
     backend = _Backend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2838,6 +2871,7 @@ async def test_invalid_submit_final_result_fails_after_five_attempts(tmp_path: P
     backend = _Backend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -2928,6 +2962,7 @@ async def test_model_request_attempt_timeout_falls_back_within_chain(tmp_path: P
 
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -2976,6 +3011,7 @@ async def test_submit_next_stage_only_loop_fails_after_five_turns(tmp_path: Path
     backend = _Backend()
     service = MainRuntimeService(
         chat_backend=backend,
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -3041,6 +3077,7 @@ async def test_acceptance_node_supports_allowed_final_result_combinations(
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / f'{status}-{delivery_status}.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -3113,6 +3150,7 @@ async def test_submit_next_stage_does_not_trip_repeated_action_breaker(tmp_path:
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -3182,6 +3220,7 @@ async def test_submit_next_stage_can_share_turn_with_ordinary_tools_and_counts_n
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -3334,6 +3373,7 @@ async def test_repeated_exec_call_is_soft_rejected_without_engine_failure(tmp_pa
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -3476,6 +3516,7 @@ async def test_current_task_progress_after_spawn_fails_after_three_ignored_repai
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -3665,6 +3706,7 @@ async def test_repeated_content_open_fails_after_three_ignored_repair_guidances(
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',
@@ -3853,6 +3895,7 @@ async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path)
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / 'runtime.sqlite3',
         files_base_dir=tmp_path / 'tasks',
         artifact_dir=tmp_path / 'artifacts',

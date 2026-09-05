@@ -824,6 +824,7 @@ async def test_execution_first_turn_does_not_emit_all_visible_tool_schemas(tmp_p
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -938,6 +939,7 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
 
     service = MainRuntimeService(
         chat_backend=_Backend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

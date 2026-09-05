@@ -98,6 +98,7 @@ def test_task_stall_bucket_schedule_starts_at_twenty_minutes() -> None:
 async def test_task_stall_notifier_emits_and_resets_after_visible_output(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -158,6 +159,7 @@ async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_
     live_session = _FakeHeartbeatSession()
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -209,6 +211,7 @@ async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_pa
     live_session = _FakeHeartbeatSession()
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -249,6 +252,7 @@ async def test_task_stall_heartbeat_discards_stale_event_after_new_output(tmp_pa
 async def test_web_mode_build_task_stall_payload_skips_when_worker_offline(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -281,6 +285,7 @@ async def test_web_mode_build_task_stall_payload_skips_when_worker_offline(tmp_p
 async def test_task_stall_reason_classification_distinguishes_pause_worker_and_real_stall(tmp_path: Path) -> None:
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",
@@ -319,6 +324,7 @@ async def test_web_session_heartbeat_drops_task_stall_outbox_when_worker_offline
     live_session = _FakeHeartbeatSession()
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
         store_path=tmp_path / "runtime.sqlite3",
         files_base_dir=tmp_path / "tasks",
         artifact_dir=tmp_path / "artifacts",

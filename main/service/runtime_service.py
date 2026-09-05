@@ -276,6 +276,7 @@ class MainRuntimeService:
         files_base_dir: Path | str | None = None,
         artifact_dir: Path | str | None = None,
         governance_store_path: Path | str | None = None,
+        workspace_root: Path | str | None = None,
         resource_manager=None,
         tool_provider: Callable[[NodeRecord], dict[str, Tool]] | None = None,
         execution_model_refs: list[str] | None = None,
@@ -290,6 +291,11 @@ class MainRuntimeService:
     ) -> None:
         self._chat_backend = chat_backend
         self._app_config = app_config
+        # 任务临时目录（temp/tasks）默认跟随工作区根目录；测试/嵌入式脚本可显式传入
+        # workspace_root 将其隔离到独立目录，避免把临时目录泄漏到进程 cwd。
+        self._workspace_root_override = (
+            Path(workspace_root).expanduser().resolve(strict=False) if workspace_root is not None else None
+        )
         resolved_max_iterations = self._normalize_optional_limit(max_iterations, default=16)
         resolved_execution_max_iterations = self._normalize_optional_limit(
             execution_max_iterations,
@@ -5767,6 +5773,8 @@ class MainRuntimeService:
         return item
 
     def _workspace_root(self) -> Path:
+        if self._workspace_root_override is not None:
+            return self._workspace_root_override
         manager = getattr(self, '_resource_manager', None)
         workspace = getattr(manager, 'workspace', None)
         return Path(workspace).resolve(strict=False) if workspace is not None else Path.cwd().resolve()
