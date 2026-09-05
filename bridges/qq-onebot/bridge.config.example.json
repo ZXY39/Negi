@@ -1,0 +1,19 @@
+{
+  "onebot": {
+    "ws_url": "ws://127.0.0.1:3001",
+    "http_url": "http://127.0.0.1:3000"
+  },
+  "g3ku": {
+    "base_url": "http://127.0.0.1:18790",
+    "token": "填入 externalApi.tokens 中本桥的 token"
+  },
+  "behavior": {
+    "group_require_at": true,
+    "final_only": false,
+    "progress_min_interval_seconds": 5.0,
+    "progress_max_lines_per_message": 3,
+    "max_message_length": 4000,
+    "bot_user_id": 0,
+    "reconnect_backoff_seconds": 3.0
+  }
+}
