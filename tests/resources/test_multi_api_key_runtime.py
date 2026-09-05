@@ -138,13 +138,12 @@ def _target(*, provider, retry_count: int, api_key_count: int, api_key_indexes: 
 
 @pytest.mark.asyncio
 async def test_fallback_provider_rotates_keys_on_non_retryable_error(monkeypatch) -> None:
-    # 新契约：轮换由"非可重试且非请求形状错误"触发。这里 retry_on 只含 network，故 502
-    # 不可重试 → 轮换整轮 key（key0 恒失败、key1 第 2 次成功），轮换在切模型/整链重试之前。
-    # （可重试错误不再轮换、改走整链重试，见 test_should_rotate_predicate_*。）
+    # 新契约：非可重试错误（未命中 retry_on）每个 key 各试一次（单趟轮换）后切下一
+    # 模型，不再按 retry_count 重复整轮——retry_count 专属可重试错误的退避轮预算。
     calls: list[int] = []
     providers = {
         0: _AlwaysRetryableProvider(0, calls),
-        1: _RetryThenSuccessProvider(1, calls, succeed_on_call=2),
+        1: _RetryThenSuccessProvider(1, calls, succeed_on_call=1),
     }
 
     def _builder(config, model_key, *, api_key_index=None):
@@ -162,7 +161,7 @@ async def test_fallback_provider_rotates_keys_on_non_retryable_error(monkeypatch
     response = await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
 
     assert response.content == "ok"
-    assert calls == [0, 1, 0, 1]
+    assert calls == [0, 1]
 
 
 def test_should_rotate_predicate_retryable_request_shape_and_internal() -> None:
@@ -488,9 +487,9 @@ async def test_fallback_provider_retries_retryable_error_without_consuming_fallb
 
 
 @pytest.mark.asyncio
-async def test_fallback_provider_chain_retry_stops_at_backoff_budget_cap(monkeypatch) -> None:
-    # 整链可重试退避有累计上限：超过即停止重试并冒泡 exhausted，而非无限重试。
-    # 把上限与单次退避压到极小，使 cap 在几轮内触发（避免真实 20 分钟 sleep）。
+async def test_fallback_provider_chain_retry_stops_at_round_budget(monkeypatch) -> None:
+    # 可重试退避以逐模型轮数预算为唯一权威上限：retry_count=3 → 单 key 模型恰好
+    # 3 次尝试后冒泡 exhausted，而非无限重试（时间上限已移除，次数即预算）。
     calls: list[str] = []
 
     def _builder(config, model_key, *, api_key_index=None):
@@ -501,35 +500,35 @@ async def test_fallback_provider_chain_retry_stops_at_backoff_budget_cap(monkeyp
             model_id=f"{model_key}-model",
             provider=_AlwaysRetryableChainProvider(str(model_key), calls),
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=3,
             api_key_count=1,
         )
 
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
-    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.02)
-    monkeypatch.setattr(fallback_module, "MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS", 0.05)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
 
     provider = fallback_module.FallbackProvider(
         config=SimpleNamespace(),
         model_chain=["primary"],
         default_model_ref="primary",
     )
-    # 退避累计 0.02 → 0.04，第三轮 0.04+0.02 > 0.05 触发 cap → break → 冒泡 exhausted。
-    # 没有 cap 时这里会无限重试（测试挂起）。
-    with pytest.raises(fallback_module.ModelProviderExhaustedError):
+    with pytest.raises(fallback_module.ModelProviderExhaustedError) as exc_info:
         await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
-    assert calls.count("primary") <= 4  # 有界，而非无限
+    assert exc_info.value.retryable is True
+    assert calls.count("primary") == 3  # 有界：恰好轮数预算次
 
 
 @pytest.mark.asyncio
-async def test_config_chat_backend_retries_retryable_exhaustion_without_round_limit(monkeypatch) -> None:
-    # 独占窗口耗尽后恢复"轮内消费下游模型"语义，整链重试不受轮数上限约束：
-    # secondary 在第 12 次调用才成功，远超历史 10 轮上限。
+async def test_config_chat_backend_honors_per_model_retry_round_budgets(monkeypatch) -> None:
+    # 每个模型有独立的退避重试轮预算（绑定 retry_count）：primary 预算 2 轮耗尽后
+    # 前进到 secondary；secondary 预算 15 轮，第 12 轮成功——远超历史 10 轮上限，
+    # 证明轮预算完全由逐模型配置驱动。
     calls: list[str] = []
     providers = {
         "primary": _AlwaysRetryableChainProvider("primary", calls),
         "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=12),
     }
+    budgets = {"primary": 2, "secondary": 15}
 
     def _builder(config, model_key, *, api_key_index=None):
         _ = config, api_key_index
@@ -539,13 +538,11 @@ async def test_config_chat_backend_retries_retryable_exhaustion_without_round_li
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            retry_count=budgets[str(model_key)],
             api_key_count=1,
         )
 
     monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
-    # 压小独占窗口：前 2 轮链首独占退避重试，之后允许轮内消费 secondary。
-    monkeypatch.setattr(chat_backend_module, "RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS", 2)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -556,8 +553,7 @@ async def test_config_chat_backend_retries_retryable_exhaustion_without_round_li
     )
 
     assert response.content == "ok"
-    # 2 轮独占重试 + 之后每轮各消费一次，直到 secondary 第 12 次调用成功。
-    assert calls.count("primary") == 2 + 12
+    assert calls.count("primary") == 2
     assert calls.count("secondary") == 12
     assert calls[-1] == "secondary"
 
@@ -688,7 +684,8 @@ async def test_config_chat_backend_refreshes_model_chain_between_retry_rounds(mo
             model_id=f"{model_key}-model",
             provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
-            retry_count=0,
+            # primary 轮预算 1：耗尽后在模型前进边界触发链刷新。
+            retry_count=1,
             api_key_count=1,
         )
 
@@ -696,13 +693,11 @@ async def test_config_chat_backend_refreshes_model_chain_between_retry_rounds(mo
 
     def _resolver():
         resolver_calls.append(1)
-        # Round 1 keeps the original single-model chain; from round 2 onward
-        # the freshly added fallback model becomes visible.
+        # 首次解析仍是单模型链；primary 预算耗尽后的模型前进边界上，
+        # 新加入的 fallback 模型变得可见。
         return ["primary"] if len(resolver_calls) <= 1 else ["primary", "secondary"]
 
     monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
-    # 独占窗口压到 1 轮：第 2 轮起允许轮内消费新加入的 secondary。
-    monkeypatch.setattr(chat_backend_module, "RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS", 1)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
@@ -714,7 +709,7 @@ async def test_config_chat_backend_refreshes_model_chain_between_retry_rounds(mo
     )
 
     assert response.content == "ok"
-    assert calls == ["primary", "primary", "secondary"]
+    assert calls == ["primary", "secondary"]
 
 
 @pytest.mark.asyncio
@@ -1024,3 +1019,98 @@ async def test_fallback_provider_retries_retryable_error_response_at_chain_head(
     assert response.content == "ok"
     assert calls == ["primary", "primary"]
     assert calls.count("secondary") == 0
+
+
+class _Persistent429Provider:
+    """持续抛出网关型 429（含 invalid_request_error 标记）的 provider。"""
+
+    def __init__(self, model_key: str, key_index: int, calls: list[tuple[str, int]]) -> None:
+        self.model_key = model_key
+        self.key_index = key_index
+        self.calls = calls
+
+    async def chat(self, **kwargs):
+        _ = kwargs
+        self.calls.append((self.model_key, self.key_index))
+        raise RuntimeError(
+            "RateLimitError: Error code: 429 - {'error': {'message': 'rpm exhausted', "
+            "'type': 'invalid_request_error', 'code': '429001'}} code=429001 status=429"
+        )
+
+
+@pytest.mark.asyncio
+async def test_fallback_provider_exhausts_full_key_round_budget_then_raises(monkeypatch) -> None:
+    # 验收情景：链 = A(key1,key2) → B(key1,key3)，重试次数=10，所有 key 持续命中
+    # 重试关键词且始终未恢复。一轮 = 完整轮过一个模型的所有 key；每模型 10 轮，
+    # 共 4 个 key 槽位 × 10 轮 = 40 次请求后报错停止；每次重试保留动态退避间隔
+    # （测试里 patch 为 0 加速）。同一 key 出现在多个模型配置中互不影响——预算按
+    # (模型, key) 槽位独立计。
+    calls: list[tuple[str, int]] = []
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config
+        key_index = int(api_key_index or 0)
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=_Persistent429Provider(str(model_key), key_index, calls),
+            retry_on=["network", "429"],
+            retry_count=10,
+            api_key_count=2,
+            api_key_indexes=[0, 1],
+        )
+
+    monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
+    monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+
+    provider = fallback_module.FallbackProvider(
+        config=SimpleNamespace(),
+        model_chain=["A", "B"],
+        default_model_ref="A",
+    )
+    with pytest.raises(fallback_module.ModelProviderExhaustedError) as exc_info:
+        await provider.chat(messages=[{"role": "user", "content": "demo"}], model=None)
+
+    assert exc_info.value.retryable is True
+    assert len(calls) == 40
+    assert calls.count(("A", 0)) == 10
+    assert calls.count(("A", 1)) == 10
+    assert calls.count(("B", 0)) == 10
+    assert calls.count(("B", 1)) == 10
+    # 顺序：A 的预算全部耗尽后才轮到 B
+    assert [model for model, _ in calls[:20]] == ["A"] * 20
+    assert [model for model, _ in calls[20:]] == ["B"] * 20
+
+
+@pytest.mark.asyncio
+async def test_config_chat_backend_default_retry_budget_when_retry_count_zero(monkeypatch) -> None:
+    # retry_count=0/未设置 → 使用默认轮预算 DEFAULT_RETRYABLE_MODEL_ROUNDS(10)：
+    # 单 key 模型持续可重试失败时恰好 10 次尝试后冒泡 exhausted。
+    calls: list[str] = []
+
+    def _builder(config, model_key, *, api_key_index=None):
+        _ = config, api_key_index
+        return ProviderTarget(
+            provider_ref=str(model_key),
+            provider_id="custom",
+            model_id=f"{model_key}-model",
+            provider=_AlwaysRetryableChainProvider(str(model_key), calls),
+            retry_on=["network", "429", "502"],
+            retry_count=0,
+            api_key_count=1,
+        )
+
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
+
+    backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    with pytest.raises(fallback_module.ModelProviderExhaustedError) as exc_info:
+        await backend.chat(
+            messages=[{"role": "user", "content": "demo"}],
+            tools=None,
+            model_refs=["primary"],
+        )
+
+    assert exc_info.value.retryable is True
+    assert calls.count("primary") == fallback_module.DEFAULT_RETRYABLE_MODEL_ROUNDS == 10

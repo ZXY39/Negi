@@ -7153,15 +7153,15 @@ function renderModelDetail() {
                                 <input class="resource-search" name="reasoningEffort" value="${esc(current?.reasoning_effort || "")}" placeholder="留空则不下发">
                             </label>
                             <label class="resource-field">
-                                <span class="resource-field-label">Retry On</span>
-                                <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
+                                <span class="resource-field-label">自动重试错误关键词(空格间隔)</span>
+                                <input class="resource-search" name="retryOn" value="${esc((current?.retry_on || []).join(" "))}" placeholder="如 network 429 502（可自定义关键词，空格间隔）">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">重试次数</span>
-                                <input class="resource-search spinless-number-input" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0">
+                                <input class="resource-search spinless-number-input" type="number" min="0" step="1" name="retryCount" value="${esc(String(current?.retry_count ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 使用默认 10 轮。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
                             </label>
                         </div>
-                        <p class="subtitle">配置多个 API Key 时，重试次数按完整轮过所有 key 计算。</p>
+                        <p class="subtitle">重试次数 = 命中自动重试关键词时该模型的最大重试轮数（一轮完整轮过所有 Key，轮间动态退避）；0 表示默认 10 轮，预算耗尽后切换下一模型，全链耗尽报错停止。</p>
                     </section>
                     <section class="resource-section">
                         <h3>额外请求头</h3>
@@ -7703,7 +7703,7 @@ async function handleModelRoleEditorAction() {
 }
 
 function parseModelRetryOn(raw) {
-    return String(raw || "").split(/[\n,]/).map((item) => item.trim()).filter(Boolean);
+    return String(raw || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
 }
 
 function parseModelHeaders(raw) {

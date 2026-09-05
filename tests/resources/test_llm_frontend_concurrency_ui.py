@@ -186,6 +186,7 @@ def test_binding_notes_title_includes_three_required_notes() -> None:
 
         console.log(JSON.stringify({
           title: window.__llmTestHooks.bindingNotesTitle(),
+          retryOn: window.__llmTestHooks.parseBindingRetryOn("network 429, 502\\n503  overloaded "),
         }));
         """
     )
@@ -194,6 +195,11 @@ def test_binding_notes_title_includes_three_required_notes() -> None:
     assert "填写 0" in title
     assert "重试次数" in title
     assert "缓存命中率下降" in title
+    # 重试次数新语义：命中关键词的退避重试轮预算，0 = 默认 10 轮。
+    assert "默认 10 轮" in title
+    assert "每个 Key 只试一次" in title
+    # 关键词输入空格间隔（逗号/换行兼容）。
+    assert list(result["retryOn"]) == ["network", "429", "502", "503", "overloaded"]
 
 
 def test_api_client_maps_duplicate_binding_name_error_code_to_clear_message() -> None:
@@ -630,6 +636,8 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     assert "Apikey *" in create_html
     assert "获取模型列表" in create_html
     assert "自动重试错误关键词" in create_html
+    assert "自动重试错误关键词(空格间隔)" in create_html
+    assert "空格间隔" in create_html
     assert "llm-binding-base-url" in create_html
     assert "llm-binding-api-key" in create_html
     assert "llm-fetch-btn" in create_html

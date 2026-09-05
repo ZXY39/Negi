@@ -4,7 +4,8 @@ retry_on entries are free-form keywords matched as lowercase substrings of the
 provider error text. Two preset aliases are kept for backward compatibility:
 ``network`` and ``429`` expand to curated token lists. Any other entry is used
 as a literal keyword. Entries may be supplied as a list or as a
-comma/newline-separated string.
+space/comma/newline-separated string; keywords are single whitespace-free
+tokens (the model config page collects them space-separated).
 """
 
 from __future__ import annotations
@@ -37,15 +38,16 @@ RETRYABLE_ERROR_PRESETS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_RETRY_KEYWORD_SPLIT_RE = re.compile(r"[\r\n,]+")
+_RETRY_KEYWORD_SPLIT_RE = re.compile(r"[\s,]+")
 
 
 def split_retry_keywords(value: Any) -> list[str]:
     """Normalize retry_on input into a flat, lowercased, de-duplicated keyword list.
 
-    Accepts ``None``, strings (comma/newline separated), and list/tuple inputs
-    whose string entries may themselves contain commas. Unsupported types and
-    empty fragments are dropped.
+    Accepts ``None``, strings (space/comma/newline separated), and list/tuple
+    inputs whose string entries may themselves contain separators. Unsupported
+    types and empty fragments are dropped. Keywords are single tokens; phrases
+    containing whitespace are split into separate keywords.
     """
     if value is None:
         return []

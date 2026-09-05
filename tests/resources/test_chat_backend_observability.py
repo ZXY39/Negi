@@ -118,7 +118,8 @@ async def test_fallback_provider_logs_colored_retry_events(monkeypatch) -> None:
             model_id='gpt-primary',
             provider=provider,
             retry_on=['502'],
-            retry_count=1,
+            # 可重试轮预算 2：第 1 轮 502 失败 → 退避重试（RETRY 事件）→ 第 2 轮成功。
+            retry_count=2,
         ),
     )
 

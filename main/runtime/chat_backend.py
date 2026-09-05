@@ -22,23 +22,20 @@ from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
-    MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS,
-    RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS,
+    DEFAULT_RETRYABLE_MODEL_ROUNDS,
     current_runtime_config_revision,
     exception_chain_display_text,
     exhausted_model_chain_error,
+    is_request_shape_error,
     is_retryable_model_error,
     model_retry_backoff_seconds,
     normalize_request_timeout_seconds,
     normalized_retry_count,
-    response_requires_api_key_rotation,
     response_requires_retry,
     response_requires_fallback,
     retryable_chain_config_changed_error,
     sanitize_terminal_model_error,
-    should_rotate_api_key_error,
     should_fallback_model_error,
-    should_retry_model_chain_error,
     wait_for_model_attempt,
 )
 from g3ku.runtime.stage_prompt_compaction import (
@@ -716,21 +713,19 @@ class ConfigChatBackend:
         attempts: list[LLMModelAttempt] = []
         held_turn_lease = node_turn_lease
         start_revision = current_runtime_config_revision()
-        chain_round_index = 0
-        retryable_backoff_count = 0
-        # 整链可重试退避的累计秒数（只计 sleep 等待，不含请求耗时），用于 20 分钟上限。
-        cumulative_backoff_seconds = 0.0
         retry_status_emitted = False
-        # provider 实际请求次数（含 key 轮换/跨模型 fallback/整链重试的每一发请求）。
-        # 与 retryable_backoff_count（只数整链退避轮次）不同：前端重试 toast 的 retry_count
-        # 改用它，避免轮换/单模型轮次的真实请求被少计、低于实际打到 provider 的次数。
+        # provider 实际请求次数（含 key 轮换/跨模型 fallback/可重试退避的每一发请求）。
+        # 前端重试 toast 的 retry_count 用它，避免轮换/单模型轮次的真实请求被少计、
+        # 低于实际打到 provider 的次数。
         provider_request_count = 0
-        # 上一发请求的模型 ref：用于区分"同模型重发（key 轮换）"与"跨模型 fallback"。
-        # 只在同模型重发与整链退避时发 toast；跨模型 fallback 属链路正常工作，只计数不发。
+        # 上一发请求的模型 ref：用于区分"同模型重发（轮换/可重试轮转）"与"跨模型 fallback"。
+        # 只在同模型重发与退避重试时发 toast；跨模型 fallback 属链路正常工作，只计数不发。
         last_request_model_ref = ""
-        # 整链退避重试已发过 status 后，抑制新轮第一发请求在咽喉点的重复发射
+        # 退避重试已发过 status 后，抑制同模型下一发请求在咽喉点的重复发射
         # （退避那次已带"下次重试时间"，再发一发 delay=0 会把它盖掉）。
         suppress_next_request_retry_emission = False
+        # 已耗尽预算/已试过的模型 ref：模型前进边界的链刷新后据此跳过，不回头重试。
+        tried_model_refs: set[str] = set()
 
         async def _emit_model_retry_status(status: dict[str, Any]) -> None:
             nonlocal retry_status_emitted
@@ -746,70 +741,79 @@ class ConfigChatBackend:
                 logger.debug("Model retry status callback failed")
 
         try:
+            # 发送前先做一次活解析（与旧首轮行为一致）：拿到调用前刚发生的链变更。
+            fresh_refs = _resolved_model_refs()
+            if fresh_refs and fresh_refs != refs:
+                logger.info(
+                    "Model chain refreshed before first model: {} -> {}",
+                    ", ".join(refs),
+                    ", ".join(fresh_refs),
+                )
+                refs = fresh_refs
+            model_index = 0
             while True:
-                chain_round_index += 1
-                fresh_refs = _resolved_model_refs()
-                if fresh_refs and fresh_refs != refs:
-                    logger.info(
-                        "Model chain refreshed at chain-round boundary (round {}): {} -> {}",
-                        chain_round_index,
-                        ", ".join(refs),
-                        ", ".join(fresh_refs),
-                    )
-                    refs = fresh_refs
-                round_last_error: Exception | None = None
-                retry_full_chain = False
-                retry_full_chain_reason = ""
-                for index, ref in enumerate(refs):
-                    try:
-                        base_target = build_provider_from_model_key(self._config, ref)
-                    except Exception as exc:
-                        last_error = round_last_error = exc
-                        if should_fallback_model_error(exc) and index < len(refs) - 1:
-                            _log_model_chain_fallback(
-                                messages=messages,
-                                model_ref=ref,
-                                next_model_ref=refs[index + 1],
-                                reason=exc,
-                            )
-                            continue
-                        if should_fallback_model_error(exc):
-                            profile = self._config.get_model_runtime_profile(ref)
-                            exhausted = exhausted_model_chain_error(
-                                exc,
-                                retry_on=list(profile.retry_on) if profile is not None else None,
-                            )
-                            if should_retry_model_chain_error(exhausted):
-                                retry_full_chain = True
-                                retry_full_chain_reason = exhausted.raw_message or str(exhausted)
-                                break
-                            raise exhausted from exc
-                        raise
-                    configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
-                    if configured_api_key_indexes is None:
-                        api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
-                    else:
-                        api_key_indexes = [int(item) for item in configured_api_key_indexes]
-                    if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
-                        raise RuntimeError(f"All configured API keys are disabled for model {ref}")
-                    retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
-                    move_to_next_model = False
-                    preview_payload = build_send_provider_request_preview(
-                        config=self._config,
-                        messages=messages,
-                        tools=tools,
-                        model_refs=[ref],
-                        tool_choice=tool_choice,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        reasoning_effort=reasoning_effort,
-                        parallel_tool_calls=parallel_tool_calls,
-                        prompt_cache_key=prompt_cache_key,
-                    )
-                    request_messages = sanitize_provider_messages(preview_payload.get("messages"))
-                    request_tools = list(preview_payload.get("tools") or []) or None
-                    stable_prompt_cache_key = str(preview_payload.get("prompt_cache_key") or "").strip()
-                    for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count, key_indexes=api_key_indexes):
+                while model_index < len(refs) and refs[model_index] in tried_model_refs:
+                    model_index += 1
+                if model_index >= len(refs):
+                    break
+                ref = refs[model_index]
+                tried_model_refs.add(ref)
+                try:
+                    base_target = build_provider_from_model_key(self._config, ref)
+                except Exception as exc:
+                    last_error = exc
+                    if should_fallback_model_error(exc) and model_index < len(refs) - 1:
+                        _log_model_chain_fallback(
+                            messages=messages,
+                            model_ref=ref,
+                            next_model_ref=refs[model_index + 1],
+                            reason=exc,
+                        )
+                        model_index += 1
+                        continue
+                    if should_fallback_model_error(exc):
+                        profile = self._config.get_model_runtime_profile(ref)
+                        raise exhausted_model_chain_error(
+                            exc,
+                            retry_on=list(profile.retry_on) if profile is not None else None,
+                        ) from exc
+                    raise
+                configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
+                if configured_api_key_indexes is None:
+                    api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
+                else:
+                    api_key_indexes = [int(item) for item in configured_api_key_indexes]
+                if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
+                    raise RuntimeError(f"All configured API keys are disabled for model {ref}")
+                # 本模型的可重试轮数预算：绑定 retry_count 即配置页「重试次数」，
+                # 0/未设置用默认 DEFAULT_RETRYABLE_MODEL_ROUNDS。一轮 = 完整轮过该模型所有 key。
+                budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+                model_retry_on = list(getattr(base_target, "retry_on", []) or [])
+                preview_payload = build_send_provider_request_preview(
+                    config=self._config,
+                    messages=messages,
+                    tools=tools,
+                    model_refs=[ref],
+                    tool_choice=tool_choice,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    parallel_tool_calls=parallel_tool_calls,
+                    prompt_cache_key=prompt_cache_key,
+                )
+                request_messages = sanitize_provider_messages(preview_payload.get("messages"))
+                request_tools = list(preview_payload.get("tools") or []) or None
+                stable_prompt_cache_key = str(preview_payload.get("prompt_cache_key") or "").strip()
+                rounds_used = 0
+                model_last_error: Exception | None = None
+                model_last_response: LLMResponse | None = None
+                model_last_failure_reason: Any = None
+                advance_to_next_model = False
+                while True:  # 本模型轮循环：一轮 = 完整轮过该模型所有 key
+                    round_retryable_failed = False
+                    # 单轮 = 每个 key 各试一次（retry_count=0 → 单趟 key 遍历）；
+                    # 可重试错误的重跑由外层轮预算驱动，不走 slot 轮次。
+                    for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=0, key_indexes=api_key_indexes):
                         target = base_target
                         request_message_count, request_message_chars = _message_stats(request_messages)
                         permit_lease: ModelKeyPermitLease | None = None
@@ -859,8 +863,9 @@ class ConfigChatBackend:
                                 provider_kwargs['on_text_delta'] = _provider_text_delta_callback
                             outer_attempt_timeout_seconds = None if bool(getattr(target.provider, 'manages_request_timeout_internally', False)) else attempt_timeout_seconds
                             # 咽喉点统计真实请求次数：除第一发外的每次请求都是一次重试。
-                            # 同模型重发（key 轮换）在此发 retrying status；跨模型 fallback 只计数
-                            # 不发（属链路正常工作）；整链退避已在退避分支发过、此处按 suppress 跳过。
+                            # 同模型重发（轮换/可重试轮转）在此发 retrying status；跨模型
+                            # fallback 只计数不发（属链路正常工作）；退避重试已在退避分支
+                            # 发过、此处按 suppress 跳过。
                             current_model_ref = str(ref or '').strip()
                             if provider_request_count >= 1:
                                 if suppress_next_request_retry_emission:
@@ -870,13 +875,9 @@ class ConfigChatBackend:
                                         {
                                             "state": "retrying",
                                             "retry_count": provider_request_count,
-                                            "chain_round": chain_round_index,
+                                            "chain_round": rounds_used + 1,
                                             "error_message": _model_retry_status_error_text(
-                                                (
-                                                    exception_chain_display_text(round_last_error)
-                                                    if isinstance(round_last_error, Exception)
-                                                    else ""
-                                                )
+                                                str(model_last_failure_reason or "")
                                             ),
                                             "model_refs": list(refs),
                                             "delay_seconds": 0.0,
@@ -897,41 +898,22 @@ class ConfigChatBackend:
                                 key_index=selected_api_key_index,
                             )
                         except Exception as exc:
-                            last_error = round_last_error = exc
+                            last_error = model_last_error = exc
+                            model_last_response = None
+                            model_last_failure_reason = exception_chain_display_text(exc)
                             if attempt_visible_text_streamed:
                                 raise
-                            rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
-                            if rotate_key and not slot.is_last_key:
-                                continue
-                            if rotate_key and not slot.is_last_round:
-                                continue
-                            if (
-                                should_fallback_model_error(exc)
-                                and is_retryable_model_error(exc, retry_on=target.retry_on)
-                                and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
-                            ):
-                                # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
-                                # 不在轮内跨模型消费下游模型。
-                                retry_full_chain = True
-                                retry_full_chain_reason = exception_chain_display_text(exc)
+                            if is_request_shape_error(exc):
+                                # 请求形状错误（结构化 400/422）：换 key 修不了畸形
+                                # payload，直接切下一模型，不消耗重试轮。
+                                advance_to_next_model = True
                                 break
-                            if should_fallback_model_error(exc) and index < len(refs) - 1:
-                                _log_model_chain_fallback(
-                                    messages=messages,
-                                    model_ref=ref,
-                                    next_model_ref=refs[index + 1],
-                                    reason=exc,
-                                )
-                                move_to_next_model = True
-                                break
-                            if should_fallback_model_error(exc):
-                                exhausted = exhausted_model_chain_error(exc, retry_on=target.retry_on)
-                                if should_retry_model_chain_error(exhausted):
-                                    retry_full_chain = True
-                                    retry_full_chain_reason = exhausted.raw_message or str(exhausted)
-                                    break
-                                raise exhausted from exc
-                            raise
+                            if not should_fallback_model_error(exc):
+                                raise  # 内部运行时错误 / API key 配置错误直接上抛
+                            if is_retryable_model_error(exc, retry_on=target.retry_on):
+                                round_retryable_failed = True
+                                continue  # 轮内继续轮过该模型下一个 key
+                            continue  # 非可重试：每个 key 各试一次，轮完切下一模型
                         finally:
                             if permit_lease is not None and model_concurrency_controller is not None:
                                 model_concurrency_controller.release(permit_lease)
@@ -955,102 +937,92 @@ class ConfigChatBackend:
                             getattr(response, 'visible_text_streamed', False) or attempt_visible_text_streamed
                         )
                         last_response = response
-                        rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
                         retryable_response = response_requires_retry(response, retry_on=target.retry_on)
                         fallback_response = response_requires_fallback(response)
-                        if response.visible_text_streamed and (rotate_key_response or retryable_response or fallback_response):
-                            return response
-                        if rotate_key_response:
-                            if not slot.is_last_key:
-                                continue
-                            if not slot.is_last_round:
-                                continue
-                        if (
-                            fallback_response
-                            and retryable_response
-                            and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
-                        ):
-                            # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
-                            # 不在轮内跨模型消费下游模型。
-                            retry_full_chain = True
-                            retry_full_chain_reason = response.error_text or response.content or response.finish_reason
+                        if not fallback_response:
+                            return response  # 成功终态（或内部错误响应按原样返回）
+                        if response.visible_text_streamed:
+                            return response  # 已出现可见流式文本：不做透明重试/回退
+                        model_last_response = response
+                        model_last_error = None
+                        model_last_failure_reason = str(response.error_text or response.content or response.finish_reason or "")
+                        if is_request_shape_error(response):
+                            advance_to_next_model = True
                             break
-                        if fallback_response and index < len(refs) - 1:
-                            _log_model_chain_fallback(
-                                messages=messages,
-                                model_ref=ref,
-                                next_model_ref=refs[index + 1],
-                                reason=response.error_text or response.content or response.finish_reason,
-                            )
-                            move_to_next_model = True
-                            break
-                        if fallback_response:
-                            last_response = sanitize_terminal_model_error(response)
-                            if retryable_response:
-                                retry_full_chain = True
-                                retry_full_chain_reason = response.error_text or response.content or response.finish_reason
-                                break
-                            return last_response
-                        return response
-                    if retry_full_chain:
+                        if retryable_response:
+                            round_retryable_failed = True
+                        continue  # 轮内继续轮过该模型下一个 key
+                    if advance_to_next_model:
                         break
-                    if move_to_next_model:
-                        continue
-                if not retry_full_chain and round_last_error is not None and should_retry_model_chain_error(round_last_error):
-                    retry_full_chain = True
-                    retry_full_chain_reason = getattr(round_last_error, "raw_message", "") or str(round_last_error)
-                if retry_full_chain:
-                    if current_runtime_config_revision() != start_revision:
-                        raise retryable_chain_config_changed_error() from round_last_error
-                    retryable_backoff_count += 1
-                    delay_seconds = model_retry_backoff_seconds(retryable_backoff_count)
-                    # 整链退避累计上限：超过则停止重试，跳出 while 落到终态处理（raise
-                    # exhausted / 返回 last_response），把"无限整链重试"降级为有界。只计
-                    # 退避等待，不含请求耗时（请求耗时由 DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS 约束）。
-                    if cumulative_backoff_seconds + delay_seconds > MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS:
+                    rounds_used += 1
+                    if round_retryable_failed and rounds_used < budget_rounds:
+                        if current_runtime_config_revision() != start_revision:
+                            raise retryable_chain_config_changed_error() from model_last_error
+                        delay_seconds = model_retry_backoff_seconds(rounds_used)
                         logger.warning(
-                            "Retryable model-chain backoff budget exhausted ({:.0f}s + {:.0f}s > {:.0f}s cap); "
-                            "stopping chain retry: {}",
-                            cumulative_backoff_seconds,
+                            "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
+                            ref,
+                            rounds_used,
+                            budget_rounds,
                             delay_seconds,
-                            MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS,
-                            retry_full_chain_reason,
+                            model_last_failure_reason,
                         )
-                        break
-                    cumulative_backoff_seconds += delay_seconds
-                    logger.warning(
-                        "Retryable model-chain failure (round {}); retrying full chain in {:.1f}s: {}",
-                        chain_round_index,
-                        delay_seconds,
-                        retry_full_chain_reason,
+                        # retry_count 用 provider 实际请求次数（含轮换/跨模型），避免少报；
+                        # 并 suppress 新一轮第一发在咽喉点的重复发射。
+                        suppress_next_request_retry_emission = True
+                        await _emit_model_retry_status(
+                            {
+                                "state": "retrying",
+                                "retry_count": provider_request_count,
+                                "chain_round": rounds_used,
+                                "error_message": _model_retry_status_error_text(str(model_last_failure_reason or "")),
+                                "model_refs": list(refs),
+                                "delay_seconds": float(delay_seconds or 0.0),
+                                # 绝对时刻（本地带偏移），供前端 toast 显示"最新重试时间/下次重试时间"。
+                                "last_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                "next_retry_at": (
+                                    datetime.now().astimezone() + timedelta(seconds=float(delay_seconds or 0.0))
+                                ).isoformat(timespec="seconds"),
+                            }
+                        )
+                        await asyncio.sleep(delay_seconds)
+                        continue  # 同模型重跑一轮
+                    break  # 预算耗尽或本轮无可重试失败 → 本模型耗尽
+                # 本模型耗尽：在模型前进边界活刷新链（运行中新增的 fallback 模型
+                # 在此可见），跳过已试模型后决定前进还是落终态。
+                model_index += 1
+                fresh_refs = _resolved_model_refs()
+                if fresh_refs and fresh_refs != refs:
+                    logger.info(
+                        "Model chain refreshed at model boundary: {} -> {}",
+                        ", ".join(refs),
+                        ", ".join(fresh_refs),
                     )
-                    # retry_count 用 provider 实际请求次数（含本轮轮换/跨模型），不再只是整链
-                    # 退避轮次，避免少报；并 suppress 新轮第一发在咽喉点的重复发射。
-                    suppress_next_request_retry_emission = True
-                    await _emit_model_retry_status(
-                        {
-                            "state": "retrying",
-                            "retry_count": provider_request_count,
-                            "chain_round": chain_round_index,
-                            "error_message": _model_retry_status_error_text(
-                                (
-                                    exception_chain_display_text(round_last_error)
-                                    if isinstance(round_last_error, Exception)
-                                    else retry_full_chain_reason
-                                )
-                            ),
-                            "model_refs": list(refs),
-                            "delay_seconds": float(delay_seconds or 0.0),
-                            # 绝对时刻（本地带偏移），供前端 toast 显示"最新重试时间/下次重试时间"。
-                            "last_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                            "next_retry_at": (
-                                datetime.now().astimezone() + timedelta(seconds=float(delay_seconds or 0.0))
-                            ).isoformat(timespec="seconds"),
-                        }
+                    refs = fresh_refs
+                    model_index = 0
+                while model_index < len(refs) and refs[model_index] in tried_model_refs:
+                    model_index += 1
+                if model_index < len(refs):
+                    _log_model_chain_fallback(
+                        messages=messages,
+                        model_ref=ref,
+                        next_model_ref=refs[model_index],
+                        reason=(
+                            model_last_failure_reason
+                            if model_last_failure_reason is not None
+                            else (model_last_error or "")
+                        ),
                     )
-                    await asyncio.sleep(delay_seconds)
                     continue
-                break
+                # 全链（含刷新新增模型）都已耗尽：落终态。
+                if model_last_error is not None:
+                    if should_fallback_model_error(model_last_error):
+                        raise exhausted_model_chain_error(model_last_error, retry_on=model_retry_on) from model_last_error
+                    raise model_last_error
+                if model_last_response is not None:
+                    model_last_response.attempts = list(attempts)
+                    return sanitize_terminal_model_error(model_last_response)
+                raise RuntimeError('chat backend returned no response')
             if last_error is not None:
                 if should_fallback_model_error(last_error):
                     raise exhausted_model_chain_error(last_error) from last_error

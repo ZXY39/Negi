@@ -42,6 +42,15 @@ def test_split_retry_keywords_handles_newlines_and_none() -> None:
     assert split_retry_keywords(123) == []
 
 
+def test_split_retry_keywords_accepts_space_separated_string() -> None:
+    # 配置页「自动重试错误关键词(空格间隔)」：空格是一等分隔符，逗号/换行兼容保留。
+    assert split_retry_keywords("network 429 502") == ["network", "429", "502"]
+    assert split_retry_keywords("  network   429\t502 ") == ["network", "429", "502"]
+    assert split_retry_keywords("network 429, 502\n503") == ["network", "429", "502", "503"]
+    # 关键词是单 token：含空白的短语按空格拆开。
+    assert split_retry_keywords("rate limit") == ["rate", "limit"]
+
+
 def test_expand_retry_keywords_presets_and_literals() -> None:
     tokens = expand_retry_keywords(["network", "429", "datainspectionfailed"])
     assert "timed out" in tokens

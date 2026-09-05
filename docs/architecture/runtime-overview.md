@@ -196,7 +196,7 @@ heartbeat / cron 的维护语义分两条通道：UI 展示通道上前端继续
 
 ### 5.1 Chat provider 超时与重试边界（维护者必须掌握）
 
-chat 调用有两类时间边界：**单次（单轮）provider 请求的响应时间上限，默认 10 分钟**（`DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS`）；以及**整链可重试退避的累计上限，默认 20 分钟**（`MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS`，只计退避等待秒数、不含请求本身耗时）。整链重试不限轮数，但累计退避一旦超过该上限即停止重试、按链耗尽冒泡错误——这把过去的"无限整链重试"降级为有界。外层仍不应给整个 chat 调用套 `wait_for` 总预算（请求耗时不计入退避上限，二者是不同维度）。
+chat 调用有两类边界：**单次（单轮）provider 请求的响应时间上限，默认 10 分钟**（`DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS`）；以及**可重试错误的逐模型轮数预算**——每个模型绑定「重试次数」（`retry_count`，0/未设置用默认 `DEFAULT_RETRYABLE_MODEL_ROUNDS=10`），预算耗尽才前进到链上下一个模型，全链模型预算耗尽即按链耗尽冒泡错误。次数预算是唯一权威上限，不存在无限重试循环；外层仍不应给整个 chat 调用套 `wait_for` 总预算（请求耗时与退避等待是不同维度）。
 
 两类 provider 对单次上限的执行方式不同：
 
@@ -205,10 +205,10 @@ chat 调用有两类时间边界：**单次（单轮）provider 请求的响应�
 
 重试边界（`main/runtime/chat_backend.py` 与 `g3ku/providers/fallback.py` 共用同一套语义）：
 
-- `retry_on` 关键词命中的错误（默认含网络类与 429/限流类）触发整链重试，**不限轮数**；轮与轮之间走封顶指数退避并带抖动（起点约 1s、封顶 60s），抖动用于打散并发节点的重试节奏，避免同步撞同一个限流窗口。**关键词命中在链上任意位置生效**：独占退避窗口内（`RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS`，默认 6 轮，退避序列约覆盖一个典型分钟级限流窗口），可重试错误直接转整链退避重试（从链首重启），不在轮内跨模型消费下游模型——等链首恢复优先于降级到弱回退模型；窗口耗尽后恢复「轮内消费下游模型」语义（链尾失败始终整链退避重试），避免持续故障的链首无限阻塞 fallback。**退避累计超过 `MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS`（默认 20 分钟，只计等待秒数）即中止整链重试**并按耗尽冒泡。`retry_on` 是真开关：未设置时用默认关键字，**显式置空 `[]` 则无关键字、任何错误都不触发整链重试**（详见 `config-and-models.md`）。
-- 重试可见性：`ConfigChatBackend` 通过可选 `on_model_retry_status` 回调发布 live-only 状态。发射点是两类真实重试——**整链退避前**与**同模型重发（key 轮换）前**；跨模型 fallback 属链路正常工作，只计入次数、不单独发射。负载为 `state=retrying`、`retry_count`（= **provider 实际已发出的请求次数**，含轮换与跨模型，故恒等于即将发生的这次重试的序号，与真实请求数一致）、当前链轮、模型链、截断后的 `error_message`、退避秒数（轮换发射为 0），以及最新/下次重试的绝对时刻 `last_retry_at`/`next_retry_at`（本地带偏移）；重试成功、配置回合重建或异常退出时发布 `state=cleared`。回调异常不得打断真实 provider 重试，原始终端错误仍走既有失败链。
-- 重试循环在每个链轮边界对比 runtime config revision：revision 变化时抛出带 `config_revision_changed` 标记的可重试耗尽错误（`ModelProviderExhaustedError`），由上层重启回合/重建链，而不是继续用旧链空转。任务运行时侧见 `config-and-models.md`「模型链变更何时作用于在途回合」。
-- 换 key（轮换）判据（`should_rotate_api_key_error`）：**内部运行时错误不换、请求体形状错误不换、`retry_on` 命中（判定可重试）不换**（改走整链重试）；其余错误（未命中且非请求形状，如 401 坏 key、503）才换 key，同轮换完再回退链上下一个模型，都不可用时抛耗尽错误。形状错误只按结构化 HTTP 状态判定（`LLMResponse.error_status` / SDK 异常 `status_code`）：status 可得时只有 400/422 算形状错误（换一把 key 修不了畸形 payload），其他状态（429 限流、401 等）与 status 不可得的错误一律不按形状错误处理——错误正文里的网关 type 字段（如 `invalid_request_error`）不是 400 专属标识，文本匹配会把 429 限流误判成形状错误。配置脚枪：把 401 之类配进 `retry_on` 会让坏 key 只重试不换 key（详见 `config-and-models.md`）。
+- `retry_on` 关键词命中的错误（默认含网络类与 429/限流类）走**本模型退避重试轮**：一轮 = 完整轮过该模型所有 key（轮内某 key 命中可重试错误继续轮下一个 key），一轮结束仍有可重试失败才消耗一个轮预算并退避；轮间走封顶指数退避并带抖动（起点约 1s、封顶 60s），抖动用于打散并发节点的重试节奏，避免同步撞同一个限流窗口。模型轮预算（绑定 `retry_count`，0/未设置用默认 10 轮）耗尽后才跨模型前进，链尾模型预算耗尽即抛带可重试标记的耗尽错误——次数预算是唯一上限，总请求次数 = Σ(每模型轮预算 × 该模型 key 数)。**可重试错误绝不零等待直接消费下游模型**：等主模型恢复优先于降级到弱回退模型，避免限流窗口内把关键请求交给弱模型拿到劣质响应。`retry_on` 是真开关：未设置时用默认关键字，**显式置空 `[]` 则无关键字、任何错误都不触发退避重试**（详见 `config-and-models.md`）。
+- 重试可见性：`ConfigChatBackend` 通过可选 `on_model_retry_status` 回调发布 live-only 状态。发射点是两类真实重试——**退避重试前**与**同模型重发（换 key）前**；跨模型 fallback 属链路正常工作，只计入次数、不单独发射。负载为 `state=retrying`、`retry_count`（= **provider 实际已发出的请求次数**，含轮换与跨模型，故恒等于即将发生的这次重试的序号，与真实请求数一致）、当前模型轮次、模型链、截断后的 `error_message`、退避秒数（同模型重发发射为 0），以及最新/下次重试的绝对时刻 `last_retry_at`/`next_retry_at`（本地带偏移）；重试成功、配置回合重建或异常退出时发布 `state=cleared`。回调异常不得打断真实 provider 重试，原始终端错误仍走既有失败链。
+- 重试循环在每个退避边界对比 runtime config revision：revision 变化时抛出带 `config_revision_changed` 标记的可重试耗尽错误（`ModelProviderExhaustedError`），由上层重启回合/重建链，而不是继续用旧链空转。模型前进边界通过 `model_refs_resolver` 活解析模型链：运行中新加入的 fallback 模型在下一个模型边界可见，已试过的模型不回头重试。任务运行时侧见 `config-and-models.md`「模型链变更何时作用于在途回合」。
+- 换 key（轮换）判据（`should_rotate_api_key_error`）：**内部运行时错误不换、请求体形状错误不换、`retry_on` 命中（判定可重试）不换**（改走本模型退避重试轮）；其余错误（未命中且非请求形状，如 401 坏 key、503）才换 key：**每个 key 各试一次（单趟轮换，「重试次数」不参与），轮完即前进到链上下一个模型**，都不可用时抛耗尽错误。请求形状错误跳过其余 key 直接前进下一模型。形状错误只按结构化 HTTP 状态判定（`LLMResponse.error_status` / SDK 异常 `status_code`）：status 可得时只有 400/422 算形状错误（换一把 key 修不了畸形 payload），其他状态（429 限流、401 等）与 status 不可得的错误一律不按形状错误处理——错误正文里的网关 type 字段（如 `invalid_request_error`）不是 400 专属标识，文本匹配会把 429 限流误判成形状错误。配置脚枪：把 401 之类配进 `retry_on` 会让坏 key 只重试不换 key（详见 `config-and-models.md`）。
 - provider 终态错误（`finish_reason="error"`）由 frontdoor normalize 抛 `ModelProviderResponseError`（继承 `RuntimeError`，兼容既有 `except RuntimeError`），携带结构化 `code`/`status`/`kind`——来自 `LLMResponse.error_code`/`error_status`/`error_kind`，由 provider 从 SDK 异常提取。`session_agent` 错误分类器据此把真实 provider code（如 `insufficient_quota`）写进 `StructuredError.code` 与转录 metadata（含 `error_status`/`error_kind`），而非退化成 `legacy_session_error`，使上层能按 code/status **程序化分支**而不必 substring 匹配文案。完整错误原文（含 `code=/status=/body=`）始终保留在 message 里并透传到用户气泡、`.g3ku/errors/*.log` 与节点 pause remark，**不脱敏**。
 - 已经出现可见流式文本的发送不做透明重试/回退（一个可见气泡不得由多个 provider/model attempt 拼接）。
 
@@ -216,7 +216,7 @@ chat 调用有两类时间边界：**单次（单轮）provider 请求的响应�
 
 - “首 token”在本项目语义里是“首个 chunk 到达”，不是“首个文本 token”
 - `request_timeout_seconds` 对上述 provider 表示“首 chunk / idle chunk 超时阈值”，不是“整次请求必须在 N 秒内完成”
-- 节点因限流长时间停在模型等待（`await_marker=model.chat.await_response`）可能是退避重试在正常推进，先看日志里的 `Retryable model-chain failure (round …)`，再看会话/节点重试 toast 是否处于 `retrying` 并携带 provider 错误与最新/下次重试时刻。toast 表达"正在重试（整链退避或同模型轮换）"，其 `retry_count` 是 provider 实际请求次数；整链重试受 `MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS`（默认 20 分钟）退避累计上限约束，超过即中止并按耗尽冒泡（日志 `Retryable model-chain backoff budget exhausted`），不是无限重试。重试结束或中止时状态必须清理。UI 合同见 `web-and-admin.md`「Model Retry Visibility UI Contract」
+- 节点因限流长时间停在模型等待（`await_marker=model.chat.await_response`）可能是退避重试在正常推进，先看日志里的 `Retryable model failure for <model_ref> (round N/预算)`，再看会话/节点重试 toast 是否处于 `retrying` 并携带 provider 错误与最新/下次重试时刻。toast 表达"正在重试（模型退避轮或同模型换 key 重发）"，其 `retry_count` 是 provider 实际请求次数；每个模型的重试受其轮数预算约束（绑定 `retry_count`，默认 10 轮），预算耗尽即前进下一模型、全链耗尽按 exhausted 冒泡，不是无限重试。重试结束或中止时状态必须清理。UI 合同见 `web-and-admin.md`「Model Retry Visibility UI Contract」
 
 ## 6. 运行时里的状态与持久化
 

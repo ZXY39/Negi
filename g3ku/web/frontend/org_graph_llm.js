@@ -187,8 +187,9 @@
   function bindingNotesTitle() {
     return [
       "最大并发数填写 0 时，对应的 API Key 不会投入使用。",
-      "多个 API Key 时，“重试次数”表示完整轮过所有 key 的次数，不是单次请求重试次数。",
-      "“api_key” 支持用逗号或换行填写多个 key，例如 key1,key2，注意可能会导致缓存命中率下降。多个 key 会按并发数上限轮换；设置多个 key 时，“重试次数”以完整轮过所有 key 为一次。",
+      "“重试次数”是命中自动重试关键词时的最大重试轮数：一轮 = 完整轮过该模型所有 Key，轮间按指数退避加抖动；填 0 使用默认 10 轮。预算耗尽后切换链上下一个模型，全链耗尽报错停止。",
+      "未命中关键词的错误（如坏 Key、503）每个 Key 只试一次即切换下一模型；请求体形状错误（400/422）不重试不换 Key。",
+      "“api_key” 支持用逗号或换行填写多个 key，例如 key1,key2，注意可能会导致缓存命中率下降。多个 key 会按并发数上限轮换。",
     ].join("\n");
   }
 
@@ -451,7 +452,7 @@
 
   function parseBindingRetryOn(raw) {
     return String(raw || "")
-      .split(/[\n,]/)
+      .split(/[\s,]+/)
       .map((item) => trim(item))
       .filter(Boolean);
   }
@@ -878,12 +879,12 @@
       return `
         <div class="llm-form-grid">
           <label class="resource-field">
-            <span class="resource-field-label">自动重试错误关键词</span>
-            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
+            <span class="resource-field-label">自动重试错误关键词(空格间隔)</span>
+            <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(" "))}" placeholder="如 network 429 502（可自定义关键词，空格间隔）">
           </label>
           <label class="resource-field">
             <span class="resource-field-label">重试次数</span>
-            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
+            <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 使用默认 10 轮。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
           </label>
           ${renderConcurrencyField(editor)}
         </div>
@@ -893,12 +894,12 @@
     return `
       <div class="llm-form-grid llm-form-grid--binding-detail-policy">
         <label class="resource-field">
-          <span class="resource-field-label">自动重试错误关键词</span>
-          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(", "))}" placeholder="如 network, 429, 502（可自定义关键词，逗号分隔）">
+          <span class="resource-field-label">自动重试错误关键词(空格间隔)</span>
+          <input id="llm-binding-retry-on" class="resource-search" type="text" value="${escv((editor.retryOn || DEFAULT_RETRY_ON).join(" "))}" placeholder="如 network 429 502（可自定义关键词，空格间隔）">
         </label>
         <label class="resource-field">
           <span class="resource-field-label">重试次数</span>
-          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0">
+          <input id="llm-binding-retry-count" class="resource-search" type="number" min="0" step="1" inputmode="numeric" value="${escv(String(editor.retryCount ?? 0))}" placeholder="0" title="命中自动重试关键词时的最大重试轮数（一轮 = 完整轮过该模型所有 Key），轮间按指数退避加抖动；填 0 使用默认 10 轮。未命中关键词的错误每个 Key 只试一次即切换下一模型。">
         </label>
         ${renderConcurrencyField(editor)}
       </div>`;
@@ -1755,6 +1756,7 @@
     expandSingleApiKeyMaxConcurrencyForEditor,
     parseSingleApiKeyMaxConcurrencyInput,
     validateSingleApiKeyMaxConcurrencyInput,
+    parseBindingRetryOn,
     bindingNotesTitle,
     bindingNameLabel,
     bindingNameRequiredMessage,

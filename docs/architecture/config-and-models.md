@@ -283,13 +283,13 @@ If a provider reply looks truncated (for example a response ending at exactly th
 
 ## Model Retry And Key Rotation Config
 
-每个模型绑定有 `retry_on`（关键词列表）与 `retry_count`（同模型重试轮数）。重试/轮换/退避上限的**行为契约**见 `runtime-overview.md`「Chat provider 超时与重试边界」；这里只讲配置语义。
+每个模型绑定有 `retry_on`（关键词列表）与 `retry_count`（可重试错误的退避重试轮预算）。重试/轮换/退避的**行为契约**见 `runtime-overview.md`「Chat provider 超时与重试边界」；这里只讲配置语义。
 
-- `retry_on` 是**真开关**，区分"未设置"与"显式置空"：省略该字段 → 用默认关键字 `["network","429"]`；显式设为 `[]`/`""` → 无关键字 → 任何错误都不触发整链重试。schema validator（`_normalize_retry_on`）与 `model_manager` 都按此区分，不再把显式空值回填成默认。
-- 关键词命中的错误走整链退避重试（受 20 分钟退避累计上限约束），且命中即**不换 key**；命中在链上任意位置生效，独占退避窗口内不跨模型消费下游模型（窗口与降级语义见 `runtime-overview.md`「Chat provider 超时与重试边界」）。
+- `retry_on` 是**真开关**，区分"未设置"与"显式置空"：省略该字段 → 用默认关键字 `["network","429"]`；显式设为 `[]`/`""` → 无关键字 → 任何错误都不触发退避重试。schema validator（`_normalize_retry_on`）与 `model_manager` 都按此区分，不再把显式空值回填成默认。输入按空格/逗号/换行等价分隔解析（配置页以「自动重试错误关键词(空格间隔)」收集）；关键词是单 token，含空白的短语会被拆开。
+- 关键词命中的错误走**该模型的退避重试轮**：一轮 = 完整轮过该模型所有 key，轮间指数退避加抖动；命中即**不换 key**、也不零等待消费下游模型。轮预算耗尽才前进到链上下一个模型，全链耗尽报错停止（详见 `runtime-overview.md`「Chat provider 超时与重试边界」）。
 - 请求体形状错误只按结构化 HTTP 状态判定（400/422），无文本关键字兜底；status 不可得的错误一律走正常轮换/降级判定。
-- 换 key（轮换）只在错误**未命中 `retry_on`、且非请求体形状错误、且非内部运行时错误**时才发生。**配置脚枪**：把 `401`/`403`/`invalid api key` 之类配进 `retry_on`，会让坏 key 被当成"可重试"从而只重试不换 key——坏 key 应靠"未命中 → 换 key"自愈，不要配进 `retry_on`。
-- `retry_count` 是该模型同轮内的重试轮数，与 `api_key_count` 一起构成 key×轮 的尝试预算；它和轮换共用同一判据，故只对**会触发轮换**的错误（未命中 `retry_on` 且非 400/内部）生效，可重试错误改走整链退避重试。
+- 换 key（轮换）只在错误**未命中 `retry_on`、且非请求体形状错误、且非内部运行时错误**时才发生，且为单趟：每个 key 各试一次即前进到链上下一个模型。**配置脚枪**：把 `401`/`403`/`invalid api key` 之类配进 `retry_on`，会让坏 key 被当成"可重试"从而只重试不换 key——坏 key 应靠"未命中 → 换 key"自愈，不要配进 `retry_on`。
+- `retry_count`（配置页「重试次数」）是该模型可重试错误的最大退避重试轮数：0/未设置用内置默认 `DEFAULT_RETRYABLE_MODEL_ROUNDS=10`；非可重试错误的轮换恒为单趟、不受该值影响。同一个 key 配置在多个模型上互不影响——轮预算按（模型, key）槽位独立计，总请求上限 = Σ(每模型轮预算 × 该模型 key 数)。
 
 ## Frontdoor Context Window Contract
 

@@ -60,15 +60,21 @@ class ModelConfigTool(Tool):
                     "items": {"type": "string"},
                     "description": (
                         "Custom retry keywords matched as lowercase substrings of the provider "
-                        "error text; a hit triggers automatic retry. Accepts a list or a "
-                        "comma-separated string, e.g. 'network, 429, 502'. Preset aliases "
-                        "'network' and '429' expand to curated token lists; defaults to "
-                        "'network, 429' when omitted."
+                        "error text; a hit triggers automatic backoff retry on the same model. "
+                        "Accepts a list or a space/comma-separated string, e.g. 'network 429 502'. "
+                        "Preset aliases 'network' and '429' expand to curated token lists; "
+                        "defaults to 'network 429' when omitted."
                     ),
                 },
                 "retry_count": {
                     "type": "integer",
-                    "description": "Retryable failures to allow on the same model before fallback.",
+                    "description": (
+                        "Max retryable-error rounds for this model before falling back to the "
+                        "next model (one round = one pass over all of the model's API keys, "
+                        "with exponential backoff + jitter between rounds). 0/omitted uses the "
+                        "built-in default of 10 rounds. Non-retryable errors try each key once "
+                        "then move to the next model."
+                    ),
                 },
                 "description": {"type": "string", "description": "Optional human-readable description."},
                 "scopes": {

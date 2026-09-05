@@ -31,23 +31,18 @@ PUBLIC_PROVIDER_FAILURE_MESSAGE = "Model provider call failed after exhausting t
 # "attempt timeout x attempts x chain rounds" total-budget semantics; retryable
 # chain retries are now unbounded in count and paced by backoff instead.
 DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 600.0
-# Retryable model-chain failures retry with capped exponential backoff plus
-# jitter so concurrent nodes do not stampede the same rate window. The retry is
-# bounded by a cumulative backoff budget (below), not by count.
+# Retryable failures retry with capped exponential backoff plus jitter so
+# concurrent nodes do not stampede the same rate window. The retry is bounded
+# by the per-model round budget (below), not by a cumulative time cap.
 RETRY_BACKOFF_BASE_SECONDS = 1.0
 RETRY_BACKOFF_CAP_SECONDS = 60.0
 RETRY_BACKOFF_JITTER_RATIO = 0.25
-# 整链可重试退避的累计上限：一个 turn 在"退避等待"上最多累计花这么多秒，超过即中止整链
-# 重试并按耗尽处理。**只计退避等待，不含请求本身耗时**（请求耗时另由
-# DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS 单次约束）。默认 20 分钟，可调。
-MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS = 1200.0
-# 可重试错误的链首独占退避窗口（轮数）：退避轮次未超过该值时，任何链位上的
-# retry_on 命中错误都直接转整链退避重试（从链首重启），不在轮内跨模型消费下游
-# 模型——限流/瞬时网络故障等一等就能恢复，零等待降级到弱回退模型既浪费主模型
-# 恢复窗口，又可能拿到劣质响应。超过该窗口后恢复"轮内消费下游模型"语义（链尾
-# 失败始终整链退避重试），避免持续故障的链首无限阻塞 fallback。退避序列
-# 1,2,4,8,16,32s 使默认 6 轮约覆盖一个典型分钟级限流窗口。
-RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS = 6
+# 可重试错误（retry_on 命中）的每模型退避重试轮数预算：模型绑定 retry_count 为
+# 0/未设置时使用该默认值。一轮 = 完整轮过该模型所有 key；轮间走封顶指数退避加
+# 抖动。模型预算耗尽才前进到链上下一个模型，全链模型预算耗尽即报错停止——次数
+# 预算是唯一权威上限（请求耗时另由 DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+# 单次约束），不存在无限重试循环。
+DEFAULT_RETRYABLE_MODEL_ROUNDS = 10
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",
@@ -454,81 +449,80 @@ class FallbackProvider(LLMProvider):
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
         start_revision = current_runtime_config_revision()
-        chain_round_index = 0
-        retryable_backoff_count = 0
-        # 整链可重试退避的累计秒数（只计 sleep 等待，不含请求耗时），用于 20 分钟上限。
-        cumulative_backoff_seconds = 0.0
-        while True:
-            chain_round_index += 1
-            round_last_error: Exception | None = None
-            retry_full_chain = False
-            retry_full_chain_reason = ""
-            for model_key in chain:
-                try:
-                    base_target = build_provider_from_model_key(self._config, model_key)
-                except Exception as exc:
-                    last_error = round_last_error = exc
-                    if len(chain) > 1:
-                        logger.warning("Model target init failed for {}: {}", model_key, exc)
-                        continue
-                    if should_fallback_model_error(exc):
-                        profile = self._config.get_model_runtime_profile(model_key)
-                        exhausted = exhausted_model_chain_error(
-                            exc,
-                            retry_on=list(profile.retry_on) if profile is not None else None,
-                        )
-                        if should_retry_model_chain_error(exhausted):
-                            retry_full_chain = True
-                            retry_full_chain_reason = exhausted.raw_message or str(exhausted)
-                            break
-                        raise exhausted from exc
-                    raise
-                configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
-                if configured_api_key_indexes is None:
-                    api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
-                else:
-                    api_key_indexes = [int(item) for item in configured_api_key_indexes]
-                if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
-                    raise APIKeyConfigurationError(f"All configured API keys are disabled for model {model_key}")
+        model_index = 0
+        while model_index < len(chain):
+            model_key = chain[model_index]
+            try:
+                base_target = build_provider_from_model_key(self._config, model_key)
+            except Exception as exc:
+                last_error = exc
+                if should_fallback_model_error(exc) and model_index < len(chain) - 1:
+                    logger.warning("Model target init failed for {}: {}", model_key, exc)
+                    model_index += 1
+                    continue
+                if should_fallback_model_error(exc):
+                    profile = self._config.get_model_runtime_profile(model_key)
+                    raise exhausted_model_chain_error(
+                        exc,
+                        retry_on=list(profile.retry_on) if profile is not None else None,
+                    ) from exc
+                raise
+            configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
+            if configured_api_key_indexes is None:
+                api_key_indexes = list(range(max(1, int(getattr(base_target, "api_key_count", 0) or 0))))
+            else:
+                api_key_indexes = [int(item) for item in configured_api_key_indexes]
+            if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
+                raise APIKeyConfigurationError(f"All configured API keys are disabled for model {model_key}")
 
-                target_parameters = dict(getattr(base_target, "model_parameters", {}) or {})
-                if target_parameters.get("max_tokens") is None and getattr(base_target, "max_tokens_limit", None) is not None:
-                    target_parameters["max_tokens"] = getattr(base_target, "max_tokens_limit", None)
-                if target_parameters.get("temperature") is None and getattr(base_target, "default_temperature", None) is not None:
-                    target_parameters["temperature"] = getattr(base_target, "default_temperature", None)
-                if not str(target_parameters.get("reasoning_effort") or "").strip() and getattr(base_target, "default_reasoning_effort", None) is not None:
-                    target_parameters["reasoning_effort"] = getattr(base_target, "default_reasoning_effort", None)
-                # Per-model parameters from the llm-config record win over the
-                # engine-global defaults; when neither is configured the global
-                # output default applies so requests always carry an explicit cap.
-                effective_max_tokens = (
-                    max(1, int(target_parameters["max_tokens"]))
-                    if target_parameters.get("max_tokens") is not None
-                    else max(1, int(max_tokens))
-                    if max_tokens is not None
-                    else max(1, int(DEFAULT_MAX_OUTPUT_TOKENS))
-                )
-                effective_temperature = (
-                    float(temperature)
-                    if temperature is not None
-                    else float(target_parameters["temperature"])
-                    if target_parameters.get("temperature") is not None
-                    else None
-                )
-                configured_reasoning = str(target_parameters.get("reasoning_effort") or "").strip()
-                effective_reasoning = (
-                    normalize_reasoning_effort(configured_reasoning)
-                    if configured_reasoning
-                    else normalize_reasoning_effort(reasoning_effort)
-                    if reasoning_effort is not None and str(reasoning_effort).strip()
-                    else normalize_reasoning_effort(DEFAULT_REASONING_EFFORT)
-                )
-                if str(effective_reasoning or "").strip().lower() == "none":
-                    effective_reasoning = None
-                retry_count = normalized_retry_count(getattr(base_target, "retry_count", 0))
-                move_to_next_model = False
+            target_parameters = dict(getattr(base_target, "model_parameters", {}) or {})
+            if target_parameters.get("max_tokens") is None and getattr(base_target, "max_tokens_limit", None) is not None:
+                target_parameters["max_tokens"] = getattr(base_target, "max_tokens_limit", None)
+            if target_parameters.get("temperature") is None and getattr(base_target, "default_temperature", None) is not None:
+                target_parameters["temperature"] = getattr(base_target, "default_temperature", None)
+            if not str(target_parameters.get("reasoning_effort") or "").strip() and getattr(base_target, "default_reasoning_effort", None) is not None:
+                target_parameters["reasoning_effort"] = getattr(base_target, "default_reasoning_effort", None)
+            # Per-model parameters from the llm-config record win over the
+            # engine-global defaults; when neither is configured the global
+            # output default applies so requests always carry an explicit cap.
+            effective_max_tokens = (
+                max(1, int(target_parameters["max_tokens"]))
+                if target_parameters.get("max_tokens") is not None
+                else max(1, int(max_tokens))
+                if max_tokens is not None
+                else max(1, int(DEFAULT_MAX_OUTPUT_TOKENS))
+            )
+            effective_temperature = (
+                float(temperature)
+                if temperature is not None
+                else float(target_parameters["temperature"])
+                if target_parameters.get("temperature") is not None
+                else None
+            )
+            configured_reasoning = str(target_parameters.get("reasoning_effort") or "").strip()
+            effective_reasoning = (
+                normalize_reasoning_effort(configured_reasoning)
+                if configured_reasoning
+                else normalize_reasoning_effort(reasoning_effort)
+                if reasoning_effort is not None and str(reasoning_effort).strip()
+                else normalize_reasoning_effort(DEFAULT_REASONING_EFFORT)
+            )
+            if str(effective_reasoning or "").strip().lower() == "none":
+                effective_reasoning = None
 
-                for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=retry_count, key_indexes=api_key_indexes):
+            # 本模型的可重试轮数预算：绑定 retry_count 即配置页「重试次数」，
+            # 0/未设置用默认 DEFAULT_RETRYABLE_MODEL_ROUNDS。一轮 = 完整轮过该模型所有 key。
+            budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+            model_retry_on = list(getattr(base_target, "retry_on", []) or [])
+            rounds_used = 0
+            model_last_error: Exception | None = None
+            model_last_response: LLMResponse | None = None
+            model_last_failure_reason: Any = None
+            advance_to_next_model = False
+            while True:  # 本模型的轮循环
+                round_retryable_failed = False
+                # 单轮 = 每个 key 各试一次（retry_count=0 → 单趟 key 遍历）。
+                for slot in iter_api_key_retry_slots(api_key_count=getattr(base_target, "api_key_count", 0), retry_count=0, key_indexes=api_key_indexes):
                     target = base_target
                     selected_key_index = int(slot.key_index)
                     try:
@@ -565,161 +559,80 @@ class FallbackProvider(LLMProvider):
                             key_index=selected_key_index,
                         )
                     except Exception as exc:
-                        last_error = round_last_error = exc
-                        rotate_key = should_rotate_api_key_error(exc, retry_on=target.retry_on)
-                        if rotate_key and not slot.is_last_key:
-                            logger.warning(
-                                "Model key rotation triggered for {} (round {}/{}, key {}/{}): {}",
-                                model_key,
-                                slot.round_index + 1,
-                                slot.round_count,
-                                slot.key_position + 1,
-                                slot.key_count,
-                                exc,
-                            )
-                            _log_model_chain_retry(model_ref=model_key, reason=exc)
-                            continue
-                        if rotate_key and not slot.is_last_round:
-                            logger.warning(
-                                "Model retry triggered for {} (round {}/{}, key {}/{}): {}",
-                                model_key,
-                                slot.round_index + 1,
-                                slot.round_count,
-                                slot.key_position + 1,
-                                slot.key_count,
-                                exc,
-                            )
-                            _log_model_chain_retry(model_ref=model_key, reason=exc)
-                            continue
-                        if (
-                            should_fallback_model_error(exc)
-                            and is_retryable_model_error(exc, retry_on=target.retry_on)
-                            and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
-                        ):
-                            # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
-                            # 不在轮内跨模型消费下游模型。
-                            retry_full_chain = True
-                            retry_full_chain_reason = exception_chain_display_text(exc)
+                        last_error = model_last_error = exc
+                        model_last_response = None
+                        if is_request_shape_error(exc):
+                            # 请求形状错误（结构化 400/422）：换 key 修不了畸形
+                            # payload，直接切下一模型，不消耗重试轮。
+                            advance_to_next_model = True
+                            model_last_failure_reason = exception_chain_display_text(exc)
                             break
-                        if should_fallback_model_error(exc) and model_key != chain[-1]:
-                            logger.warning(
-                                "Model fallback triggered for {} after {} retry rounds: {}",
-                                model_key,
-                                retry_count,
-                                exc,
-                            )
-                            move_to_next_model = True
-                            break
-                        if should_fallback_model_error(exc):
-                            exhausted = exhausted_model_chain_error(exc, retry_on=target.retry_on)
-                            if should_retry_model_chain_error(exhausted):
-                                retry_full_chain = True
-                                retry_full_chain_reason = exhausted.raw_message or str(exhausted)
-                                break
-                            raise exhausted from exc
-                        raise
-
-                    rotate_key_response = response_requires_api_key_rotation(response, retry_on=target.retry_on)
+                        if not should_fallback_model_error(exc):
+                            raise  # 内部运行时错误 / API key 配置错误直接上抛
+                        if is_retryable_model_error(exc, retry_on=target.retry_on):
+                            round_retryable_failed = True
+                            model_last_failure_reason = exception_chain_display_text(exc)
+                            continue  # 轮内继续轮过该模型下一个 key
+                        logger.warning(
+                            "Model key rotation for {} (key {}/{}): {}",
+                            model_key,
+                            slot.key_position + 1,
+                            slot.key_count,
+                            exc,
+                        )
+                        model_last_failure_reason = exception_chain_display_text(exc)
+                        continue  # 非可重试：每个 key 各试一次，轮完切下一模型
                     retryable_response = response_requires_retry(response, retry_on=target.retry_on)
                     fallback_response = response_requires_fallback(response)
-                    if rotate_key_response:
-                        last_response = response
-                        if not slot.is_last_key:
-                            logger.warning(
-                                "Model key rotation triggered for {} (round {}/{}, key {}/{}): {}",
-                                model_key,
-                                slot.round_index + 1,
-                                slot.round_count,
-                                slot.key_position + 1,
-                                slot.key_count,
-                                response.content or response.finish_reason,
-                            )
-                            _log_model_chain_retry(
-                                model_ref=model_key,
-                                reason=response.error_text or response.content or response.finish_reason,
-                            )
-                            continue
-                        if not slot.is_last_round:
-                            logger.warning(
-                                "Model retry triggered for {} (round {}/{}, key {}/{}): {}",
-                                model_key,
-                                slot.round_index + 1,
-                                slot.round_count,
-                                slot.key_position + 1,
-                                slot.key_count,
-                                response.content or response.finish_reason,
-                            )
-                            _log_model_chain_retry(
-                                model_ref=model_key,
-                                reason=response.error_text or response.content or response.finish_reason,
-                            )
-                            continue
-                    if (
-                        fallback_response
-                        and retryable_response
-                        and retryable_backoff_count < RETRYABLE_EXCLUSIVE_BACKOFF_ROUNDS
-                    ):
-                        # retry_on 命中（独占窗口内、任意链位）：转整链退避重试，
-                        # 不在轮内跨模型消费下游模型。
-                        retry_full_chain = True
-                        retry_full_chain_reason = response.error_text or response.content or response.finish_reason
+                    if not fallback_response:
+                        return response  # 成功终态（或内部错误响应按原样返回）
+                    last_response = model_last_response = response
+                    model_last_error = None
+                    model_last_failure_reason = str(response.error_text or response.content or response.finish_reason or "")
+                    if is_request_shape_error(response):
+                        advance_to_next_model = True
                         break
-                    if fallback_response and model_key != chain[-1]:
-                        logger.warning(
-                            "Model fallback triggered for {} after {} retry rounds: {}",
-                            model_key,
-                            retry_count,
-                            response.content or response.finish_reason,
-                        )
-                        move_to_next_model = True
-                        break
-                    if fallback_response:
-                        last_response = sanitize_terminal_model_error(response)
-                        if retryable_response:
-                            retry_full_chain = True
-                            retry_full_chain_reason = response.error_text or response.content or response.finish_reason
-                            break
-                        return last_response
-                    return response
-
-                if retry_full_chain:
+                    if retryable_response:
+                        round_retryable_failed = True
+                    continue  # 轮内继续轮过该模型下一个 key
+                if advance_to_next_model:
                     break
-                if move_to_next_model:
-                    continue
-
-            if not retry_full_chain and round_last_error is not None and should_retry_model_chain_error(round_last_error):
-                retry_full_chain = True
-                retry_full_chain_reason = getattr(round_last_error, "raw_message", "") or str(round_last_error)
-            if retry_full_chain:
-                if current_runtime_config_revision() != start_revision:
-                    raise retryable_chain_config_changed_error() from round_last_error
-                retryable_backoff_count += 1
-                delay_seconds = model_retry_backoff_seconds(retryable_backoff_count)
-                # 整链退避累计上限：超过则停止重试，跳出 while 落到终态处理（返回 last_response
-                # 或 raise last_error），把"无限整链重试"降级为有界。只计退避等待，不含请求耗时。
-                if cumulative_backoff_seconds + delay_seconds > MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS:
+                rounds_used += 1
+                if round_retryable_failed and rounds_used < budget_rounds:
+                    if current_runtime_config_revision() != start_revision:
+                        raise retryable_chain_config_changed_error() from model_last_error
+                    delay_seconds = model_retry_backoff_seconds(rounds_used)
+                    reason_text = str(model_last_failure_reason or "")
                     logger.warning(
-                        "Retryable model-chain backoff budget exhausted ({:.0f}s + {:.0f}s > {:.0f}s cap); "
-                        "stopping chain retry: {}",
-                        cumulative_backoff_seconds,
+                        "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
+                        model_key,
+                        rounds_used,
+                        budget_rounds,
                         delay_seconds,
-                        MAX_RETRYABLE_CHAIN_BACKOFF_SECONDS,
-                        retry_full_chain_reason,
+                        reason_text,
                     )
-                    break
-                cumulative_backoff_seconds += delay_seconds
+                    # 可重试退避重试发彩色 RETRY trace 保持可观测性。
+                    _log_model_chain_retry(model_ref=model_key, reason=reason_text)
+                    await asyncio.sleep(delay_seconds)
+                    continue  # 同模型重跑一轮
+                break  # 预算耗尽或本轮无可重试失败 → 本模型耗尽
+
+            # 本模型耗尽：非链尾前进到下一模型，链尾落终态。
+            if model_index < len(chain) - 1:
                 logger.warning(
-                    "Retryable model-chain failure (round {}); retrying full chain in {:.1f}s: {}",
-                    chain_round_index,
-                    delay_seconds,
-                    retry_full_chain_reason,
+                    "Model fallback triggered for {}: {}",
+                    model_key,
+                    model_last_failure_reason if model_last_failure_reason is not None else (model_last_error or ""),
                 )
-                # 整链重试也是重试事件，与 key/轮次重试一样发彩色 RETRY trace 保持可观测性
-                # （可重试错误不再走 key 轮换分支，其重试可观测性由这里承担）。
-                _log_model_chain_retry(model_ref=",".join(chain), reason=retry_full_chain_reason)
-                await asyncio.sleep(delay_seconds)
+                model_index += 1
                 continue
-            break
+            if model_last_error is not None:
+                if should_fallback_model_error(model_last_error):
+                    raise exhausted_model_chain_error(model_last_error, retry_on=model_retry_on) from model_last_error
+                raise model_last_error
+            if model_last_response is not None:
+                return sanitize_terminal_model_error(model_last_response)
+            return LLMResponse(content="Error: no model candidate available", finish_reason="error")
 
         if last_response is not None:
             return sanitize_terminal_model_error(last_response)
