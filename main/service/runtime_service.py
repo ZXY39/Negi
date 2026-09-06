@@ -411,7 +411,6 @@ class MainRuntimeService:
         self.node_turn_controller = NodeTurnController(
             model_concurrency_controller=self.model_key_concurrency_controller,
             gate_supplier=self._node_turn_gate_allowed,
-            freeze_supplier=self._node_turn_task_frozen,
         ) if execution_runtime_enabled and self.model_key_concurrency_controller is not None else None
         if self.model_key_concurrency_controller is not None and self.node_turn_controller is not None:
             self.model_key_concurrency_controller.configure(
@@ -450,8 +449,6 @@ class MainRuntimeService:
             workspace_root_getter=lambda: self._workspace_root(),
         )
         self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
-        self.node_runner.governance_child_created_observer = self._on_governance_child_created
-        self.node_runner.governance_spawn_refusal_supplier = self._governance_spawn_refusal_message
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         self.task_actor_service = TaskActorService(
             store=self.store,
@@ -530,7 +527,6 @@ class MainRuntimeService:
         self._task_worker_status_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_summary_delivery_task: asyncio.Task[Any] | None = None
         self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
-        self._governance_review_tasks: dict[str, asyncio.Task[Any]] = {}
         self._callback_client: httpx.AsyncClient | None = None
         self._pending_task_summaries: dict[str, dict[str, Any]] = {}
         self._task_summary_flush_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -2375,7 +2371,7 @@ class MainRuntimeService:
             )
             self.runtime_debug_recorder.record(section='runtime_service.publish_live_snapshot', elapsed_ms=(time.perf_counter() - started_mono) * 1000.0, started_at=started_at)
             return
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.governance.patch', 'task.model.call', 'task.terminal'}:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'}:
             detail_payload = build_envelope(
                 channel='task',
                 session_id=task.session_id,
@@ -2407,7 +2403,7 @@ class MainRuntimeService:
         session_id = str(normalized.get('session_id') or 'web:shared').strip() or 'web:shared'
         task_id = self.normalize_task_id(str(normalized.get('task_id') or '').strip()) if normalized.get('task_id') else ''
         data = dict(normalized.get('data') or {})
-        if event_type in {'task.node.patch', 'task.live.patch', 'task.governance.patch', 'task.model.call', 'task.terminal'} and task_id:
+        if event_type in {'task.node.patch', 'task.live.patch', 'task.model.call', 'task.terminal'} and task_id:
             payload = build_envelope(
                 channel='task',
                 session_id=session_id,
@@ -3334,9 +3330,6 @@ class MainRuntimeService:
             return TASK_STALL_REASON_CANCEL_REQUESTED
         if bool(current_runtime_state.get('cancel_requested')):
             return TASK_STALL_REASON_CANCEL_REQUESTED
-        governance = dict((self.log_service.read_task_runtime_meta(task.task_id) or {}).get('governance') or {})
-        if bool(governance.get('review_inflight')) or bool(governance.get('frozen')):
-            return TASK_STALL_REASON_NOT_IN_PROGRESS
         if self.execution_mode == 'web':
             if not self.is_worker_online():
                 return TASK_STALL_REASON_WORKER_UNAVAILABLE
@@ -4351,7 +4344,6 @@ class MainRuntimeService:
         if self.node_turn_controller is not None:
             self.node_turn_controller.configure(
                 gate_supplier=self._node_turn_gate_allowed,
-                freeze_supplier=self._node_turn_task_frozen,
             )
         if self.tool_pressure_monitor is not None:
             self.tool_pressure_monitor.configure(
@@ -8299,12 +8291,6 @@ class MainRuntimeService:
         if callback_tasks:
             await asyncio.gather(*callback_tasks, return_exceptions=True)
         self._task_event_dispatch_tasks.clear()
-        governance_review_tasks = [task for task in self._governance_review_tasks.values() if task is not None and not task.done()]
-        for task in governance_review_tasks:
-            task.cancel()
-        if governance_review_tasks:
-            await asyncio.gather(*governance_review_tasks, return_exceptions=True)
-        self._governance_review_tasks.clear()
         callback_client = self._callback_client
         self._callback_client = None
         if callback_client is not None:
@@ -8399,501 +8385,12 @@ class MainRuntimeService:
             return budget_state != 'critical' and machine_state != 'critical'
         return True
 
-    def _node_turn_task_frozen(self, task_id: str) -> bool:
-        meta = self.log_service.read_task_runtime_meta(str(task_id or '').strip()) or {}
-        governance = dict(meta.get('governance') or {}) if isinstance(meta.get('governance'), dict) else {}
-        return bool(governance.get('frozen'))
 
-    def _task_governance_state(self, task_id: str) -> dict[str, Any]:
-        total_nodes = max(1, int((self._task_tree_stats(task_id) or {}).get('total_nodes') or 0))
-        meta = self.log_service.read_task_runtime_meta(task_id) or {}
-        governance = dict(meta.get('governance') or {}) if isinstance(meta.get('governance'), dict) else {}
-        governance.setdefault('enabled', True)
-        governance.setdefault('frozen', False)
-        governance.setdefault('review_inflight', False)
-        governance['depth_baseline'] = max(1, int(governance.get('depth_baseline') or 1))
-        governance['node_count_baseline'] = max(1, int(governance.get('node_count_baseline') or total_nodes))
-        governance.setdefault('hard_limited_depth', None)
-        governance['latest_limit_reason'] = str(governance.get('latest_limit_reason') or '').strip()
-        governance.setdefault('supervision_disabled_after_limit', False)
-        governance['history'] = [
-            dict(item)
-            for item in list(governance.get('history') or [])
-            if isinstance(item, dict)
-        ]
-        return governance
 
-    def _governance_execution_nodes(self, task_id: str) -> list[NodeRecord]:
-        nodes = [
-            node
-            for node in list(self.store.list_nodes(task_id) or [])
-            if str(getattr(node, 'node_kind', '') or '').strip().lower() == 'execution'
-        ]
-        nodes.sort(
-            key=lambda item: (
-                int(getattr(item, 'depth', 0) or 0),
-                str(getattr(item, 'created_at', '') or ''),
-                str(getattr(item, 'node_id', '') or ''),
-            )
-        )
-        return nodes
 
-    @staticmethod
-    def _governance_execution_tree_text(*, root_node_id: str, nodes_by_id: dict[str, Any]) -> str:
-        normalized_root_node_id = str(root_node_id or '').strip()
-        if not normalized_root_node_id or normalized_root_node_id not in nodes_by_id:
-            return '(empty execution tree)'
-        lines: list[str] = []
 
-        def _walk(node_id: str, prefix: str = '', *, is_root: bool = False) -> None:
-            node = dict(nodes_by_id.get(node_id) or {})
-            if not node:
-                return
-            label = f'({node_id},{str(node.get("status") or "").strip()},{str(node.get("goal") or "").strip()})'
-            lines.append(label if is_root else f'{prefix}|-{label}')
-            child_prefix = '' if is_root else f'{prefix}  '
-            for child_id in list(node.get('child_node_ids') or []):
-                _walk(str(child_id or '').strip(), child_prefix, is_root=False)
 
-        _walk(normalized_root_node_id, is_root=True)
-        return '\n'.join(lines)
 
-    def _build_governance_execution_snapshot(
-        self,
-        *,
-        task: TaskRecord,
-        trigger_reason: str,
-        trigger_snapshot: dict[str, int],
-    ) -> dict[str, Any]:
-        execution_nodes = self._governance_execution_nodes(task.task_id)
-        node_map = {
-            str(node.node_id or '').strip(): node
-            for node in execution_nodes
-            if str(getattr(node, 'node_id', '') or '').strip()
-        }
-        children_by_parent: dict[str, list[str]] = {}
-        for node in execution_nodes:
-            parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip()
-            node_id = str(getattr(node, 'node_id', '') or '').strip()
-            if not parent_node_id or not node_id or parent_node_id not in node_map:
-                continue
-            children_by_parent.setdefault(parent_node_id, []).append(node_id)
-        for child_ids in children_by_parent.values():
-            child_ids.sort(
-                key=lambda node_id: (
-                    int(getattr(node_map.get(node_id), 'depth', 0) or 0),
-                    str(getattr(node_map.get(node_id), 'created_at', '') or ''),
-                    str(node_id or ''),
-                )
-            )
-        execution_leaf_ids = [
-            node_id
-            for node_id in node_map
-            if not list(children_by_parent.get(node_id) or [])
-        ]
-        root = self.get_node(task.root_node_id)
-        snapshot_nodes: dict[str, Any] = {}
-        for node in execution_nodes:
-            node_id = str(node.node_id or '').strip()
-            if not node_id:
-                continue
-            snapshot_nodes[node_id] = {
-                'node_id': node_id,
-                'parent_node_id': str(node.parent_node_id or '').strip() or None,
-                'depth': int(node.depth or 0),
-                'status': str(node.status or '').strip(),
-                'goal': str(node.goal or ''),
-                'prompt': str(node.prompt or ''),
-                'child_node_ids': list(children_by_parent.get(node_id) or []),
-                'is_leaf': node_id in execution_leaf_ids,
-                'created_at': str(node.created_at or ''),
-                'updated_at': str(node.updated_at or ''),
-            }
-        return {
-            'task_id': task.task_id,
-            'trigger_reason': str(trigger_reason or '').strip(),
-            'trigger_snapshot': {
-                'max_depth': int(trigger_snapshot.get('max_depth') or 0),
-                'total_nodes': int(trigger_snapshot.get('total_nodes') or 0),
-            },
-            'user_request': str(task.user_request or ''),
-            'core_requirement': str((task.metadata or {}).get('core_requirement') or ''),
-            'root_execution_goal': str(getattr(root, 'goal', '') or ''),
-            'root_execution_prompt': str(getattr(root, 'prompt', '') or ''),
-            'execution_leaf_ids': list(execution_leaf_ids),
-            'execution_tree': {
-                'root_node_id': str(task.root_node_id or '').strip(),
-                'nodes_by_id': snapshot_nodes,
-            },
-            'execution_tree_text': self._governance_execution_tree_text(
-                root_node_id=str(task.root_node_id or '').strip(),
-                nodes_by_id=snapshot_nodes,
-            ),
-        }
-
-    def _task_tree_stats(self, task_id: str) -> dict[str, int]:
-        nodes = self._governance_execution_nodes(task_id)
-        max_depth = 0
-        for node in nodes:
-            try:
-                max_depth = max(max_depth, int(getattr(node, 'depth', 0) or 0))
-            except Exception:
-                continue
-        return {
-            'max_depth': max_depth,
-            'total_nodes': len(nodes),
-        }
-
-    def _governance_trigger_reason(self, task_id: str) -> tuple[str, dict[str, int]] | tuple[str, None]:
-        governance = self._task_governance_state(task_id)
-        if not bool(governance.get('enabled', True)):
-            return '', None
-        if bool(governance.get('frozen')) or bool(governance.get('review_inflight')) or bool(governance.get('supervision_disabled_after_limit')):
-            return '', None
-        stats = self._task_tree_stats(task_id)
-        reasons: list[str] = []
-        if int(stats['max_depth']) >= int(governance.get('depth_baseline') or 1) + 1:
-            reasons.append('depth_plus_one')
-        if int(stats['total_nodes']) >= 8 and int(stats['total_nodes']) >= int(governance.get('node_count_baseline') or 1) * 2:
-            reasons.append('node_count_doubled')
-        return ('+'.join(reasons), stats) if reasons else ('', None)
-
-    def _governance_frontier_summary(self, task_id: str) -> list[str]:
-        payload = self.get_task_detail_payload(task_id, mark_read=False) or {}
-        frontier = [dict(item) for item in list(payload.get('frontier') or []) if isinstance(item, dict)]
-        lines: list[str] = []
-        for item in frontier[:8]:
-            node_id = str(item.get('node_id') or '').strip()
-            stage_goal = str(item.get('stage_goal') or '').strip()
-            phase = str(item.get('phase') or '').strip()
-            if not any([node_id, stage_goal, phase]):
-                continue
-            lines.append(' | '.join(part for part in [node_id, stage_goal, phase] if part))
-        return lines
-
-    def _on_governance_child_created(self, *, task_id: str, child_node: NodeRecord) -> None:
-        if str(getattr(child_node, 'node_kind', '') or '').strip().lower() != 'execution':
-            return
-        trigger_reason, stats = self._governance_trigger_reason(task_id)
-        if not trigger_reason or stats is None:
-            return
-        governance = self._task_governance_state(task_id)
-        governance['frozen'] = True
-        governance['review_inflight'] = True
-        self.log_service.update_task_governance(task_id, governance)
-        if self.node_turn_controller is not None:
-            self.node_turn_controller.poke()
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        current = self._governance_review_tasks.get(task_id)
-        if current is not None and not current.done():
-            return
-        review_task = loop.create_task(
-            self._run_task_governance_review(
-                task_id=task_id,
-                trigger_reason=trigger_reason,
-                trigger_snapshot=dict(stats),
-            ),
-            name=f'task-governance-review:{task_id}',
-        )
-        self._governance_review_tasks[task_id] = review_task
-        review_task.add_done_callback(lambda done_task, target_task_id=task_id: self._clear_governance_review_task(target_task_id, done_task))
-
-    def _clear_governance_review_task(self, task_id: str, done_task: asyncio.Task[Any]) -> None:
-        current = self._governance_review_tasks.get(task_id)
-        if current is done_task:
-            self._governance_review_tasks.pop(task_id, None)
-
-    def _governance_spawn_refusal_message(self, *, task_id: str, parent_node_id: str, specs: list[Any]) -> str:
-        _ = specs
-        governance = self._task_governance_state(task_id)
-        hard_limit = governance.get('hard_limited_depth')
-        if hard_limit in {None, ''}:
-            return ''
-        parent = self.get_node(parent_node_id)
-        if parent is None:
-            return ''
-        next_depth = int(getattr(parent, 'depth', 0) or 0) + 1
-        if next_depth <= int(hard_limit or 0):
-            return ''
-        reason = str(governance.get('latest_limit_reason') or '').strip()
-        if not reason:
-            for item in reversed(list(governance.get('history') or [])):
-                if str(item.get('decision') or '').strip() == 'cap_current_depth':
-                    reason = str(item.get('decision_reason') or '').strip()
-                    if reason:
-                        break
-        if not reason:
-            reason = '监管已限制当前任务树继续扩深。'
-        return f'派生被拦截，接下来不允许再派生任何子节点，请自行执行!拦截原因：{reason}'
-
-    async def _run_task_governance_review(self, *, task_id: str, trigger_reason: str, trigger_snapshot: dict[str, int]) -> None:
-        task = self.get_task(task_id)
-        if task is None:
-            return
-        governance = self._task_governance_state(task_id)
-        try:
-            decision = await self._execute_task_governance_review(
-                task=task,
-                trigger_reason=trigger_reason,
-                trigger_snapshot=trigger_snapshot,
-            )
-        except Exception as exc:
-            decision = {
-                'decision': 'cap_current_depth',
-                'reason': f'{type(exc).__name__}: {exc}',
-                'evidence': [],
-                'error_text': f'{type(exc).__name__}: {exc}',
-            }
-        live_stats = self._task_tree_stats(task_id)
-        history_item = {
-            'triggered_at': now_iso(),
-            'trigger_reason': str(trigger_reason or '').strip(),
-            'trigger_snapshot': dict(trigger_snapshot or {}),
-            'decision': str(decision.get('decision') or 'cap_current_depth').strip(),
-            'decision_reason': str(decision.get('reason') or '').strip(),
-            'decision_evidence': [str(item).strip() for item in list(decision.get('evidence') or []) if str(item).strip()],
-            'limited_depth': None,
-            'error_text': str(decision.get('error_text') or '').strip(),
-            'review_artifact_ref': str(decision.get('review_artifact_ref') or '').strip(),
-        }
-        governance = self._task_governance_state(task_id)
-        governance['frozen'] = False
-        governance['review_inflight'] = False
-        if history_item['decision'] == 'allow':
-            governance['depth_baseline'] = max(1, int(live_stats.get('max_depth') or trigger_snapshot.get('max_depth') or 1))
-            governance['node_count_baseline'] = max(1, int(live_stats.get('total_nodes') or trigger_snapshot.get('total_nodes') or 1))
-        else:
-            limited_depth = max(0, int(live_stats.get('max_depth') or trigger_snapshot.get('max_depth') or 0))
-            self.log_service.update_task_max_depth(task_id, limited_depth)
-            governance['hard_limited_depth'] = limited_depth
-            governance['latest_limit_reason'] = history_item['decision_reason']
-            governance['supervision_disabled_after_limit'] = True
-            history_item['limited_depth'] = limited_depth
-        governance['history'] = [*list(governance.get('history') or []), history_item]
-        self.log_service.update_task_governance(task_id, governance)
-        if self.node_turn_controller is not None:
-            self.node_turn_controller.poke()
-
-    def _governance_review_request_payload(
-        self,
-        *,
-        task: TaskRecord,
-        trigger_reason: str,
-        trigger_snapshot: dict[str, int],
-    ) -> dict[str, Any]:
-        return self._build_governance_execution_snapshot(
-            task=task,
-            trigger_reason=trigger_reason,
-            trigger_snapshot=trigger_snapshot,
-        )
-
-    def _persist_governance_review_artifact(
-        self,
-        *,
-        task: TaskRecord,
-        trigger_reason: str,
-        trigger_snapshot: dict[str, int],
-        system_prompt: str,
-        request_payload: dict[str, Any],
-        response_payload: dict[str, Any],
-        parsed_result: dict[str, Any],
-        error_text: str,
-    ) -> str:
-        title = f'task-governance-review:{task.root_node_id}:{str(trigger_reason or "").strip() or "review"}'
-        payload = {
-            'task_id': task.task_id,
-            'root_node_id': str(task.root_node_id or '').strip(),
-            'created_at': now_iso(),
-            'trigger_reason': str(trigger_reason or '').strip(),
-            'trigger_snapshot': {
-                'max_depth': int((trigger_snapshot or {}).get('max_depth') or 0),
-                'total_nodes': int((trigger_snapshot or {}).get('total_nodes') or 0),
-            },
-            'request_system_prompt': str(system_prompt or ''),
-            'request_payload': dict(request_payload or {}),
-            'response_payload': dict(response_payload or {}),
-            'parsed_result': dict(parsed_result or {}),
-            'error_text': str(error_text or '').strip(),
-        }
-        try:
-            artifact = self.artifact_store.create_json_artifact(
-                task_id=task.task_id,
-                node_id=str(task.root_node_id or '').strip() or None,
-                kind='task_governance_review',
-                title=title,
-                payload=payload,
-                extension='.json',
-                mime_type='application/json',
-                preview_text=title,
-            )
-            return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
-        except Exception:
-            return ''
-
-    @staticmethod
-    def _governance_review_response_payload(response: Any) -> dict[str, Any]:
-        tool_calls_payload: list[dict[str, Any]] = []
-        for call in list(getattr(response, 'tool_calls', []) or []):
-            if isinstance(call, dict):
-                tool_calls_payload.append(
-                    {
-                        'id': str(call.get('id') or '').strip(),
-                        'name': str(call.get('name') or '').strip(),
-                        'arguments': call.get('arguments'),
-                    }
-                )
-                continue
-            tool_calls_payload.append(
-                {
-                    'id': str(getattr(call, 'id', '') or '').strip(),
-                    'name': str(getattr(call, 'name', '') or '').strip(),
-                    'arguments': getattr(call, 'arguments', None),
-                }
-            )
-        raw_usage = getattr(response, 'usage', {}) or {}
-        usage_payload = dict(raw_usage) if isinstance(raw_usage, dict) else {}
-        return {
-            'content': str(getattr(response, 'content', '') or ''),
-            'finish_reason': str(getattr(response, 'finish_reason', '') or ''),
-            'tool_calls': tool_calls_payload,
-            'usage': usage_payload,
-        }
-
-    async def _execute_task_governance_review(self, *, task: TaskRecord, trigger_reason: str, trigger_snapshot: dict[str, int]) -> dict[str, Any]:
-        model_refs = list(self.node_runner._acceptance_model_refs or self.node_runner._execution_model_refs)
-        if not model_refs:
-            return {
-                'decision': 'cap_current_depth',
-                'reason': 'RuntimeError: task governance inspection model chain is empty',
-                'evidence': [],
-                'error_text': '[RuntimeError: task governance inspection model chain is empty + 默认限深]',
-            }
-        backend = self._chat_backend
-        if backend is None or not callable(getattr(backend, 'chat', None)):
-            return {
-                'decision': 'cap_current_depth',
-                'reason': 'RuntimeError: task governance model chain is unavailable',
-                'evidence': [],
-                'error_text': '[RuntimeError: task governance model chain is unavailable + 默认限深]',
-            }
-        system_prompt = load_prompt('task_governance_review.md').strip()
-        request_payload = self._governance_review_request_payload(
-            task=task,
-            trigger_reason=trigger_reason,
-            trigger_snapshot=trigger_snapshot,
-        )
-        while True:
-            try:
-                response = await backend.chat(
-                    messages=[
-                        {'role': 'system', 'content': system_prompt},
-                        {'role': 'user', 'content': json.dumps(request_payload, ensure_ascii=False, indent=2)},
-                    ],
-                    tools=[{
-                        'type': 'function',
-                        'function': {
-                            'name': 'review_task_governance',
-                            'description': 'Review whether the task tree should be allowed to continue expanding depth.',
-                            'parameters': {
-                                'type': 'object',
-                                'properties': {
-                                    'decision': {'type': 'string', 'enum': ['allow', 'cap_current_depth']},
-                                    'reason': {'type': 'string'},
-                                },
-                                'required': ['decision', 'reason'],
-                                'additionalProperties': False,
-                            },
-                        },
-                    }],
-                    model_refs=model_refs,
-                )
-            except Exception as exc:
-                artifact_ref = self._persist_governance_review_artifact(
-                    task=task,
-                    trigger_reason=trigger_reason,
-                    trigger_snapshot=trigger_snapshot,
-                    system_prompt=system_prompt,
-                    request_payload=request_payload,
-                    response_payload={},
-                    parsed_result={},
-                    error_text=f'{type(exc).__name__}: {exc}',
-                )
-                return {
-                    'decision': 'cap_current_depth',
-                    'reason': f'{type(exc).__name__}: {exc}',
-                    'evidence': [],
-                    'error_text': f'[{type(exc).__name__}: {exc} + 默认限深]',
-                    'review_artifact_ref': artifact_ref,
-                }
-            parsed = self._parse_task_governance_review_response(response)
-            artifact_ref = self._persist_governance_review_artifact(
-                task=task,
-                trigger_reason=trigger_reason,
-                trigger_snapshot=trigger_snapshot,
-                system_prompt=system_prompt,
-                request_payload=request_payload,
-                response_payload=self._governance_review_response_payload(response),
-                parsed_result=parsed or {},
-                error_text='' if parsed is not None else 'governance_review_unparsed_response',
-            )
-            if parsed is not None:
-                return {
-                    **parsed,
-                    'review_artifact_ref': artifact_ref,
-                }
-            await asyncio.sleep(0.1)
-
-    @staticmethod
-    def _parse_task_governance_review_response(response: Any) -> dict[str, Any] | None:
-        tool_calls = list(getattr(response, 'tool_calls', []) or [])
-        for call in tool_calls:
-            name = ''
-            arguments: Any = None
-            if isinstance(call, dict):
-                name = str(call.get('name') or '').strip()
-                arguments = call.get('arguments')
-            else:
-                name = str(getattr(call, 'name', '') or '').strip()
-                arguments = getattr(call, 'arguments', None)
-            if name != 'review_task_governance':
-                continue
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except Exception:
-                    return None
-            if not isinstance(arguments, dict):
-                return None
-            decision = str(arguments.get('decision') or '').strip()
-            if decision not in {'allow', 'cap_current_depth'}:
-                return None
-            return {
-                'decision': decision,
-                'reason': str(arguments.get('reason') or '').strip(),
-                'evidence': [],
-                'error_text': '',
-            }
-        content = str(getattr(response, 'content', '') or '').strip()
-        if not content:
-            return None
-        try:
-            payload = json.loads(content)
-        except Exception:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        decision = str(payload.get('decision') or '').strip()
-        if decision not in {'allow', 'cap_current_depth'}:
-            return None
-        return {
-            'decision': decision,
-            'reason': str(payload.get('reason') or '').strip(),
-            'evidence': [],
-            'error_text': '',
-        }
 
     def _resolve_model_limit_payload(self, model_ref: str) -> dict[str, Any]:
         config = self._app_config

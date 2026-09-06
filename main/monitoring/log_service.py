@@ -3183,23 +3183,6 @@ class TaskLogService:
             )
             return self.read_task_runtime_meta(task.task_id) or current
 
-    def update_task_governance(self, task_id: str, governance: dict[str, Any], *, publish_patch: bool = True) -> dict[str, Any]:
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            current = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
-            current['governance'] = self._sanitize_governance_state(governance)
-            current['updated_at'] = now_iso()
-            self._store.upsert_task_runtime_meta(
-                task_id=task.task_id,
-                updated_at=str(current.get('updated_at') or now_iso()),
-                payload=current,
-            )
-            sanitized = self.read_task_runtime_meta(task.task_id) or current
-            if publish_patch:
-                self._publish_task_governance_patch_locked(task=task, governance=dict(sanitized.get('governance') or {}))
-                self._publish_task_live_patch_locked(task=task)
-            return sanitized
-
     def capture_retry_resume_snapshot(self, task_id: str, node_id: str, *, failure_reason: str = '') -> dict[str, Any] | None:
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)
@@ -3257,25 +3240,36 @@ class TaskLogService:
             )
             return self.read_task_runtime_meta(task.task_id) or current
 
-    def update_task_max_depth(self, task_id: str, max_depth: int) -> TaskRecord | None:
-        with self._task_lock(task_id):
-            task = self._require_task(task_id)
-            next_depth = max(0, int(max_depth or 0))
-            if int(task.max_depth or 0) == next_depth:
-                return task
-            updated = self._store.update_task(
-                task.task_id,
-                lambda record: record.model_copy(
-                    update={
-                        'max_depth': next_depth,
-                        'updated_at': now_iso(),
-                        'is_unread': True,
-                    }
-                ),
+    def record_node_attempt_token_usage(self, task_id: str, node_id: str, usage_attempts) -> NodeRecord | None:
+        attempts = list(usage_attempts or [])
+        if not attempts:
+            return None
+        delta_usage, delta_usage_by_model = build_token_usage_from_attempts(attempts, tracked=True)
+        if int(getattr(delta_usage, 'call_count', 0) or 0) <= 0:
+            return None
+
+        def _mutate(record: NodeRecord) -> NodeRecord:
+            if not bool(getattr(record.token_usage, 'tracked', False)):
+                return record
+            return record.model_copy(
+                update={
+                    'token_usage': merge_token_usage_records([record.token_usage, delta_usage], tracked=True),
+                    'token_usage_by_model': merge_token_usage_by_model(
+                        [*list(record.token_usage_by_model or []), *delta_usage_by_model],
+                        tracked=True,
+                    ),
+                    'updated_at': now_iso(),
+                }
             )
-            if updated is None:
+
+        with self._task_lock(task_id):
+            task = self._store.get_task(task_id)
+            if task is None:
                 return None
-            self._publish_task_summary_patch_locked(task=updated, previous_task=task)
+            updated = self._store.update_node(node_id, _mutate)
+            if updated is not None:
+                self._sync_node_read_models_locked(updated)
+                self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
     def read_task_runtime_meta(self, task_id: str) -> dict[str, Any] | None:
@@ -4686,14 +4680,6 @@ class TaskLogService:
         }
         self._buffer_task_live_patch_locked(task=task, payload=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
-
-    def _publish_task_governance_patch_locked(self, *, task: TaskRecord, governance: dict[str, Any]) -> None:
-        payload = {
-            'task_id': task.task_id,
-            'governance': self._sanitize_governance_state(governance),
-            'history': list((governance or {}).get('history') or []),
-        }
-        self._dispatch_live_event_locked(task=task, event_type='task.governance.patch', data=payload)
 
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:
         payload = {'task': self._task_summary_payload(task)}

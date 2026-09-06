@@ -205,113 +205,6 @@ function applyTaskTreeSubtreePayload(payload = {}) {
     S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(S.treeSelectedRoundByNodeId);
 }
 
-function normalizeTaskGovernance(value = {}) {
-    const current = value && typeof value === "object" ? value : {};
-    return {
-        enabled: !!current.enabled,
-        frozen: !!current.frozen,
-        review_inflight: !!current.review_inflight,
-        depth_baseline: treeNormalizeInt(current.depth_baseline, 1),
-        node_count_baseline: treeNormalizeInt(current.node_count_baseline, 1),
-        hard_limited_depth: current.hard_limited_depth == null || String(current.hard_limited_depth).trim() === ""
-            ? null
-            : treeNormalizeInt(current.hard_limited_depth, 0),
-        latest_limit_reason: String(current.latest_limit_reason || "").trim(),
-        supervision_disabled_after_limit: !!current.supervision_disabled_after_limit,
-        history: (Array.isArray(current.history) ? current.history : []).map((item) => ({
-            triggered_at: String(item?.triggered_at || "").trim(),
-            trigger_reason: String(item?.trigger_reason || "").trim(),
-            trigger_snapshot: {
-                max_depth: treeNormalizeInt(item?.trigger_snapshot?.max_depth, 0),
-                total_nodes: treeNormalizeInt(item?.trigger_snapshot?.total_nodes, 0),
-            },
-            decision: String(item?.decision || "").trim(),
-            decision_reason: String(item?.decision_reason || "").trim(),
-            decision_evidence: (Array.isArray(item?.decision_evidence) ? item.decision_evidence : [])
-                .map((line) => String(line || "").trim())
-                .filter(Boolean),
-            limited_depth: item?.limited_depth == null || String(item?.limited_depth).trim() === ""
-                ? null
-                : treeNormalizeInt(item?.limited_depth, 0),
-            error_text: String(item?.error_text || "").trim(),
-        })),
-    };
-}
-
-function mergeTaskGovernance(nextValue = {}, previousValue = {}) {
-    const next = normalizeTaskGovernance(nextValue);
-    const previous = normalizeTaskGovernance(previousValue);
-    if (!next.enabled && previous.enabled) return previous;
-    const nextHistory = Array.isArray(next.history) ? next.history : [];
-    const previousHistory = Array.isArray(previous.history) ? previous.history : [];
-    const looksLikeEmptyFallback = !next.frozen
-        && !next.review_inflight
-        && !next.latest_limit_reason
-        && next.hard_limited_depth == null
-        && !next.supervision_disabled_after_limit
-        && nextHistory.length === 0;
-    if (looksLikeEmptyFallback && previousHistory.length) {
-        return {
-            ...next,
-            enabled: previous.enabled,
-            history: previousHistory,
-            latest_limit_reason: previous.latest_limit_reason,
-            hard_limited_depth: previous.hard_limited_depth,
-            supervision_disabled_after_limit: previous.supervision_disabled_after_limit,
-            depth_baseline: Math.max(next.depth_baseline, previous.depth_baseline),
-            node_count_baseline: Math.max(next.node_count_baseline, previous.node_count_baseline),
-        };
-    }
-    if (previousHistory.length > nextHistory.length && !next.review_inflight && !next.frozen) {
-        return {
-            ...next,
-            history: previousHistory,
-            latest_limit_reason: next.latest_limit_reason || previous.latest_limit_reason,
-            hard_limited_depth: next.hard_limited_depth == null ? previous.hard_limited_depth : next.hard_limited_depth,
-            supervision_disabled_after_limit: next.supervision_disabled_after_limit || previous.supervision_disabled_after_limit,
-        };
-    }
-    return next;
-}
-
-function renderTaskGovernancePanel() {
-    if (!U.taskGovernancePanel) return;
-    const governance = normalizeTaskGovernance(S.taskGovernance || {});
-    const history = Array.isArray(governance.history) ? governance.history : [];
-    U.taskGovernancePanel.hidden = !governance.enabled;
-    if (U.taskGovernancePanel.hidden) return;
-    if (U.taskGovernanceSummary) U.taskGovernanceSummary.textContent = "监管记录";
-    if (U.taskGovernanceCount) U.taskGovernanceCount.textContent = `${history.length}次`;
-    U.taskGovernancePanel.classList.toggle("is-breathing", !!(governance.frozen || governance.review_inflight));
-    U.taskGovernancePanel.classList.toggle("is-expanded", !!S.taskGovernanceExpanded);
-    const expanded = !!S.taskGovernanceExpanded;
-    if (U.taskGovernanceToggle) U.taskGovernanceToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
-    if (U.taskGovernanceStatus) U.taskGovernanceStatus.textContent = "";
-    if (U.taskGovernanceDecision) U.taskGovernanceDecision.textContent = "";
-    if (U.taskGovernanceHistory) {
-        U.taskGovernanceHistory.hidden = !expanded;
-        U.taskGovernanceHistory.classList.toggle("is-expanded", expanded);
-        U.taskGovernanceHistory.innerHTML = history.length
-            ? history.slice().reverse().map((item) => `
-                <div class="task-governance-entry">
-                    <div class="task-governance-entry-head">
-                        <span>${esc(item.triggered_at || "未记录时间")}</span>
-                        <span>${esc(item.decision || "unknown")}</span>
-                    </div>
-                    <div class="task-governance-entry-body">
-                        <div class="task-governance-line">触发: ${esc(item.trigger_reason || "unknown")}</div>
-                        <div class="task-governance-line">快照: depth=${esc(String(item.trigger_snapshot?.max_depth ?? 0))}, nodes=${esc(String(item.trigger_snapshot?.total_nodes ?? 0))}</div>
-                        <div class="task-governance-line">理由: ${esc(item.decision_reason || "无")}</div>
-                        <div class="task-governance-line">证据: ${esc((Array.isArray(item.decision_evidence) ? item.decision_evidence : []).join(" | ") || "无")}</div>
-                        ${item.limited_depth == null ? "" : `<div class="task-governance-line">限制深度: ${esc(String(item.limited_depth))}</div>`}
-                        ${item.error_text ? `<div class="task-governance-line">${esc(item.error_text)}</div>` : ""}
-                    </div>
-                </div>
-            `).join("")
-            : '<div class="empty-state task-trace-empty">当前任务暂无监管记录。</div>';
-    }
-}
-
 function markTaskTreeParentDirty(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId) return false;
@@ -3021,11 +2914,6 @@ function applyTaskPayload(payload) {
     S.currentTask = payload.task;
     S.taskSummary = payload.summary || null;
     S.taskRuntimeSummary = payload.runtime_summary || null;
-    S.taskGovernance = mergeTaskGovernance(
-        payload.governance || payload.runtime_summary?.governance || {},
-        taskChanged ? {} : (S.taskGovernance || {}),
-    );
-    if (taskChanged) S.taskGovernanceExpanded = false;
     S.rootNode = rootNode;
     S.frontier = frontier;
     S.recentModelCalls = recentModelCalls;
@@ -3040,7 +2928,6 @@ function applyTaskPayload(payload) {
     resetTaskTreeSnapshotState();
     S.treeSelectedRoundByNodeId = {};
     renderTaskDetailHeader({ resetPromptDisclosure: taskChanged });
-    renderTaskGovernancePanel();
     if (U.taskTokenButton) U.taskTokenButton.disabled = !S.currentTask;
     renderTaskTokenStats();
     syncTaskTreeHeaderState(null);

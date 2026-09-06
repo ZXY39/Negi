@@ -1669,15 +1669,6 @@ function handleTaskEvent(payload) {
             }
             if (typeof scheduleRenderedTreeNodeStatusRefresh === "function") scheduleRenderedTreeNodeStatusRefresh();
         }
-        if (runtimeSummary?.governance) {
-            S.taskGovernance = mergeTaskGovernance(runtimeSummary.governance, S.taskGovernance || {});
-            renderTaskGovernancePanel();
-        }
-        return;
-    }
-    if (payload.type === "task.governance.patch") {
-        S.taskGovernance = mergeTaskGovernance(payload.data?.governance || {}, S.taskGovernance || {});
-        renderTaskGovernancePanel();
         return;
     }
     if (payload.type === "task.node.patch") {

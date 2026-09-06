@@ -132,8 +132,6 @@ const S = {
     tasks: [],
     currentTask: null,
     taskSummary: null,
-    taskGovernance: null,
-    taskGovernanceExpanded: false,
     rootNode: null,
     frontier: [],
     recentModelCalls: [],
@@ -436,11 +434,6 @@ const U = {
     taskErrorLogSummary: document.getElementById("task-error-log-summary"),
     taskErrorLogContent: document.getElementById("task-error-log-content"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
-    taskGovernancePanel: document.getElementById("task-governance-panel"),
-    taskGovernanceToggle: document.getElementById("task-governance-toggle"),
-    taskGovernanceSummary: document.getElementById("task-governance-summary"),
-    taskGovernanceCount: document.getElementById("task-governance-count"),
-    taskGovernanceHistory: document.getElementById("task-governance-history"),
     tree: document.getElementById("org-tree-container"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
@@ -6298,13 +6291,6 @@ function configureTaskDetailSections() {
     renderMessageHeading(0);
     renderSpawnReviewHeading(0);
     renderArtifactHeading(0);
-    if (U.taskGovernanceToggle && U.taskGovernanceToggle.dataset.bound !== "true") {
-        U.taskGovernanceToggle.dataset.bound = "true";
-        U.taskGovernanceToggle.addEventListener("click", () => {
-            S.taskGovernanceExpanded = !S.taskGovernanceExpanded;
-            if (typeof renderTaskGovernancePanel === "function") renderTaskGovernancePanel();
-        });
-    }
     if (U.adOutputHeading) U.adOutputHeading.innerHTML = '<i data-lucide="arrow-up-from-line"></i> 最终输出';
     if (U.adOutput) U.adOutput.classList.add("task-trace-output");
     if (U.adAcceptanceHeading) U.adAcceptanceHeading.innerHTML = '<i data-lucide="shield-check"></i> 验收结果';

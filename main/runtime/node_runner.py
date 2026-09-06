@@ -149,8 +149,6 @@ class NodeRunner:
         self._workspace_root_getter = workspace_root_getter
         self.nested_node_executor = None
         self.cancel_node_subtree_executor = None
-        self.governance_child_created_observer = None
-        self.governance_spawn_refusal_supplier = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
         self.distribution_delivery_callback = None
 
@@ -273,22 +271,6 @@ class NodeRunner:
             node_output_summary='',
             node_output_ref='',
             failure_info=self._runtime_spawn_failure_info(error_text),
-        )
-
-    @staticmethod
-    def _governance_refusal_result(goal: str, reason_text: str, *, brief: bool = False) -> SpawnChildResult:
-        text = (
-            '同上：本轮监管统一拦截，请自行执行。'
-            if brief
-            else str(reason_text or '派生已被拦截').strip() or '派生已被拦截'
-        )
-        return SpawnChildResult(
-            goal=goal,
-            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
-            node_output=text,
-            node_output_summary=text,
-            node_output_ref='',
-            failure_info=None,
         )
 
     @staticmethod
@@ -3154,25 +3136,6 @@ class NodeRunner:
         parent = self._store.get_node(parent_node_id)
         if task is None or parent is None:
             raise ValueError('parent task or node missing')
-        refusal_supplier = self.governance_spawn_refusal_supplier
-        if callable(refusal_supplier):
-            try:
-                refusal_text = str(
-                    refusal_supplier(task_id=task_id, parent_node_id=parent_node_id, specs=list(specs or [])) or ''
-                ).strip()
-            except Exception:
-                refusal_text = ''
-            if refusal_text:
-                results: list[SpawnChildResult] = []
-                for index, spec in enumerate(list(specs or [])):
-                    results.append(
-                        self._governance_refusal_result(
-                            spec.goal,
-                            refusal_text,
-                            brief=index > 0,
-                        )
-                    )
-                return results
         if not parent.can_spawn_children:
             raise ValueError('spawn_child_nodes is not available for this node')
         self._log_service.mark_execution_stage_contains_spawn(task.task_id, parent.node_id)
@@ -3409,6 +3372,7 @@ class NodeRunner:
                 reason='RuntimeError: spawn review inspection model chain is empty',
             )
         invalid_response_count = 0
+        usage_attempts: list[Any] = []
         while True:
             request_messages = (
                 [
@@ -3432,8 +3396,10 @@ class NodeRunner:
                     specs=specs,
                     reason=describe_exception(exc),
                 )
+            usage_attempts.extend(list(response.attempts or []))
             parsed = self._parse_spawn_review_response(response, spec_count=len(specs))
             if parsed is not None:
+                self._record_spawn_review_token_usage(task=task, parent=parent, usage_attempts=usage_attempts)
                 return {
                     'reviewed_at': _now(),
                     'requested_specs': [self._spawn_review_requested_spec_payload(index=index, spec=spec) for index, spec in enumerate(specs)],
@@ -3441,6 +3407,15 @@ class NodeRunner:
                 }
             invalid_response_count += 1
             await asyncio.sleep(_SPAWN_REVIEW_RETRY_DELAY_SECONDS)
+
+    def _record_spawn_review_token_usage(self, *, task, parent: NodeRecord, usage_attempts: list[Any]) -> None:
+        attempt_list = list(usage_attempts or [])
+        if not attempt_list:
+            return
+        try:
+            self._log_service.record_node_attempt_token_usage(task.task_id, parent.node_id, attempt_list)
+        except Exception:
+            pass
 
     @staticmethod
     def _spawn_review_tool_schema() -> dict[str, Any]:
@@ -3522,6 +3497,9 @@ class NodeRunner:
             'root_prompt': str(getattr(root, 'prompt', '') or ''),
             'consumed_distribution_notices': self._spawn_review_consumed_distribution_notices(parent=parent),
             'path_tree_text': self._spawn_review_path_tree_text(task_id=task.task_id, parent=parent),
+            'path_nodes': self._spawn_review_path_nodes(task_id=task.task_id, parent=parent),
+            'parent_stages': self._spawn_review_parent_stages(task_id=task.task_id, parent=parent),
+            'tree_summary': self._spawn_review_tree_summary(task_id=task.task_id, parent=parent),
             'spawn_request': {
                 'call_id': str(cache_key or ''),
                 'requested_specs': [
@@ -3555,6 +3533,108 @@ class NodeRunner:
             stage_goal = self._spawn_review_stage_goal(task_id=task_id, node=node)
             lines.append(f'{"  " * depth}- ({node.node_id},{node.status},{stage_goal})')
         return '\n'.join(lines) if lines else '(empty path)'
+
+    def _spawn_review_path_nodes(self, *, task_id: str, parent: NodeRecord) -> list[dict[str, Any]]:
+        path_nodes: list[NodeRecord] = []
+        seen: set[str] = set()
+        current: NodeRecord | None = parent
+        while current is not None:
+            node_id = str(current.node_id or '').strip()
+            if not node_id or node_id in seen:
+                break
+            seen.add(node_id)
+            path_nodes.append(current)
+            parent_id = str(current.parent_node_id or '').strip()
+            current = self._store.get_node(parent_id) if parent_id else None
+        path_nodes.reverse()
+        return [
+            {
+                'node_id': str(node.node_id or ''),
+                'depth': int(node.depth or 0),
+                'status': str(node.status or ''),
+                'goal': self._trim_diagnostic_text(node.goal, max_chars=400),
+                'prompt': self._trim_diagnostic_text(node.prompt, max_chars=1600),
+                'stage_goal': self._spawn_review_stage_goal(task_id=task_id, node=node),
+            }
+            for node in path_nodes
+        ]
+
+    def _spawn_review_parent_stages(self, *, task_id: str, parent: NodeRecord) -> dict[str, Any]:
+        try:
+            snapshot = self._log_service.execution_stage_gate_snapshot(task_id, parent.node_id)
+        except Exception:
+            snapshot = None
+        if not isinstance(snapshot, dict):
+            return {}
+        return {
+            'has_active_stage': bool(snapshot.get('has_active_stage')),
+            'transition_required': bool(snapshot.get('transition_required')),
+            'active_stage': self._spawn_review_compact_stage(snapshot.get('active_stage')),
+            'completed_stages': [
+                self._spawn_review_compact_stage(item)
+                for item in list(snapshot.get('completed_stages') or [])
+                if isinstance(item, dict)
+            ],
+        }
+
+    @staticmethod
+    def _spawn_review_compact_stage(value: Any) -> dict[str, Any] | None:
+        stage = dict(value) if isinstance(value, dict) else None
+        if not stage:
+            return None
+        return {
+            'stage_index': int(stage.get('stage_index') or 0),
+            'stage_kind': str(stage.get('stage_kind') or ''),
+            'mode': str(stage.get('mode') or ''),
+            'status': str(stage.get('status') or ''),
+            'stage_goal': str(stage.get('stage_goal') or ''),
+            'tool_round_budget': int(stage.get('tool_round_budget') or 0),
+            'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
+        }
+
+    def _spawn_review_tree_summary(self, *, task_id: str, parent: NodeRecord) -> dict[str, Any]:
+        list_nodes = getattr(self._store, 'list_nodes', None)
+        try:
+            nodes = list(list_nodes(task_id) or []) if callable(list_nodes) else []
+        except Exception:
+            nodes = []
+        path_ids: set[str] = set()
+        current: NodeRecord | None = parent
+        while current is not None:
+            node_id = str(current.node_id or '').strip()
+            if node_id:
+                path_ids.add(node_id)
+            parent_id = str(current.parent_node_id or '').strip()
+            current = self._store.get_node(parent_id) if parent_id else None
+        others = [
+            node
+            for node in nodes
+            if str(getattr(node, 'node_id', '') or '').strip() not in path_ids
+        ]
+        others.sort(
+            key=lambda item: (
+                int(getattr(item, 'depth', 0) or 0),
+                str(getattr(item, 'created_at', '') or ''),
+                str(getattr(item, 'node_id', '') or ''),
+            )
+        )
+        lines: list[str] = []
+        for node in others[:10]:
+            stage_goal = self._spawn_review_stage_goal(task_id=task_id, node=node)
+            lines.append(
+                '{} {}- ({},{},{},{})'.format(
+                    '  ' * int(getattr(node, 'depth', 0) or 0),
+                    int(getattr(node, 'depth', 0) or 0),
+                    getattr(node, 'node_id', ''),
+                    getattr(node, 'status', ''),
+                    self._trim_diagnostic_text(getattr(node, 'goal', ''), max_chars=80),
+                    self._trim_diagnostic_text(stage_goal, max_chars=60),
+                )
+            )
+        return {
+            'execution_node_count': len(nodes),
+            'visible_other_branch_lines': lines,
+        }
 
     def _spawn_review_stage_goal(self, *, task_id: str, node: NodeRecord) -> str:
         frame = self._log_service.read_runtime_frame(task_id, node.node_id) or {}
@@ -5451,11 +5531,6 @@ class NodeRunner:
             metadata=metadata,
         )
         created = self._log_service.create_node(task.task_id, child)
-        if callable(self.governance_child_created_observer):
-            try:
-                self.governance_child_created_observer(task_id=task.task_id, child_node=created)
-            except Exception:
-                pass
         return created
 
     def create_acceptance_node(
