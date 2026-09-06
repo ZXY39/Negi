@@ -23,7 +23,8 @@
 维护上要记住：
 
 - 这两个脚本是普通用户首选入口
-- 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程
+- 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程，但**先请求优雅退出**：脚本向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
+- 强制回退路径（强杀）对应的是异常中断：下次启动任务走恢复清洗，任务卡片会以 toast 提示「本任务遇到异常停止」；toast 可点击关闭（UI 合同见 `web-and-admin.md`「Task Recovery Notice UI Contract」）
 - 它们最终仍然是调用 `g3ku` bootstrap，再进入 `g3ku web`
 - 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `g3ku worker`
 - `g3ku.cmd` / `g3ku.ps1` / `g3ku.sh` 是 CLI 透传包装；无参调用默认启动 `web`。任何入口的 web 启动都会在终端报告结果：成功横幅带 URL，失败横幅带子进程退出码和 `.g3ku/logs/console.log` 指引
@@ -89,6 +90,8 @@
 
 - `.g3ku/main-runtime/`
   任务运行时 SQLite、artifacts、event history
+
+  其中 SQLite（`runtime.sqlite3` 或配置指定的 store 路径）里除任务/节点/帧等表外还有 `shutdown_pause_registry` 台账表：记录上次优雅关闭时被暂停的会话与任务，重启自动恢复后逐行删除。排查“重启后任务没有自动恢复”先查这张表（语义见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
 
   通过 `g3ku web` 启动并启用 auto worker 时，这里还应重点关注两份日志：
 
@@ -208,6 +211,14 @@ Provider retry troubleshooting note:
 ### 残留节点自愈
 
 任务终态仅由根节点 + 最终验收推导，终态流转本身不强制收尾残留节点（见 `runtime-overview.md`「Node-Level Pause and Recovery」）。真正“不会再被驱动”的残留节点由 worker 启动自愈清理：启动引导对每个终态任务调用 `log_service.sweep_residual_nodes`，把仍 `in_progress` 的节点置为 `failed`，`failure_reason` 带 `task_terminal_cleanup` 前缀并附产物定位（`execution_trace_ref` / `result_payload_ref`），只改状态、不删转录/产物，并发布 node patch 事件。因此终端里“重启后残留节点自动落终态”是预期行为，不是数据丢失；进行中任务不参与清扫。
+
+### 重启后任务未自动恢复 / 出现“异常停止”toast
+
+先分清这次退出是优雅暂停还是异常中断：
+
+- 优雅路径（重启脚本先调 `/api/bootstrap/exit`、或 Ctrl+C 让信号处理器收尾）：所有运行中的任务与会话被暂停并写 `shutdown_pause_registry` 台账，启动时自动恢复、不出现“异常停止”提示。若此时任务仍停在 paused：查台账行与任务 id 是否一致、`task_commands` 是否有未消费的 `pause_task` 残余、worker 是否拿到 lease 完成 startup（详见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
+- 异常路径（进程被强杀、worker 单进程被单独杀死）：任务恢复清洗照常执行，`metadata.recovery_notice` 写「本任务遇到异常停止…」，UI 以可关闭 toast 呈现（`web-and-admin.md`「Task Recovery Notice UI Contract」）。这是预期行为，点击关闭即可。
+- 会话侧的自动恢复走 heartbeat `shutdown_resume` 内部轮（`heartbeat-system.md`「Shutdown Resume Wake」）：会话尾气泡会再现一条由系统恢复产生的回复；若没有出现，查启动日志里 `resume_shutdown_paused_sessions` / `auto-resumed` 与 heartbeat 事件投递日志。
 
 ### 缓存命中下降或上下文疑似丢失
 

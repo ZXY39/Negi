@@ -210,6 +210,31 @@ class WebSessionHeartbeatService:
             self._wake.request(session_id, delay_s=0.25)
         return True
 
+    def enqueue_shutdown_resume(self, session_id: str) -> bool:
+        """Wake a session that was paused by a graceful project shutdown.
+
+        The paused user request is reconciled back into the request seed by the
+        frontdoor continuation path, and this internal turn instructs the model
+        to finish the interrupted work and produce a user-visible reply.
+        Startup consumes the durable shutdown-pause ledger row after enqueuing.
+        """
+        key = str(session_id or "").strip()
+        if not key:
+            return False
+        event = self._events.enqueue(
+            session_id=key,
+            source="main_runtime",
+            reason="shutdown_resume",
+            dedupe_key=f"shutdown-resume:{key}",
+            payload={"session_id": key, "event_reason": "shutdown_resume"},
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started:
+            self._wake.request(key, delay_s=0.25)
+        return True
+
     def enqueue_task_stall_payload(self, payload: dict[str, Any] | None) -> bool:
         normalized_payload = normalize_task_stall_payload(payload)
         session_id = str(normalized_payload.get("session_id") or "").strip()
@@ -632,11 +657,6 @@ class WebSessionHeartbeatService:
             return False
 
     @staticmethod
-    def _task_terminal_output_requires_repair(output: Any) -> bool:
-        text = str(output or "").strip()
-        return not text or text == HEARTBEAT_OK
-
-    @staticmethod
     def _task_terminal_invalid_output_label(output: Any) -> str:
         text = str(output or "").strip()
         return text if text else _TASK_TERMINAL_INVALID_OUTPUT_LABEL
@@ -915,6 +935,7 @@ class WebSessionHeartbeatService:
         has_tool_background = any(str(event.reason or "").strip().lower() == "tool_background" for event in events)
         has_task_stall = any(str(event.reason or "").strip().lower() == "task_stall" for event in events)
         has_task_terminal = bool(self._task_terminal_events(events))
+        has_shutdown_resume = bool(self._shutdown_resume_events(events))
         lines = [
             "This is a background heartbeat. Do not explain internal mechanics.",
         ]
@@ -940,6 +961,27 @@ class WebSessionHeartbeatService:
                     ]
                 )
                 lines.extend(self._task_terminal_repair_status_lines(events))
+        elif has_shutdown_resume:
+            lines.extend(
+                [
+                    "For shutdown_resume events, you must not reply with HEARTBEAT_OK or empty text.",
+                    "This session was paused by a project restart while the user's request was still being handled.",
+                    "The user's paused request is present in the conversation context above.",
+                    "Continue completing that request directly, using tools as needed, then output the final text to show the user.",
+                    "If the paused request has already been satisfied, briefly report the current status to the user instead.",
+                ]
+            )
+            if repair_attempt > 0:
+                lines.extend(
+                    [
+                        f"Repair attempt: {int(repair_attempt)}.",
+                        (
+                            "Your previous output was invalid for shutdown_resume because it was "
+                            f"{self._task_terminal_invalid_output_label(invalid_output)}."
+                        ),
+                        f"Do not reply with {HEARTBEAT_OK} or empty text in this repair turn.",
+                    ]
+                )
         else:
             lines.extend(
                 [
@@ -995,6 +1037,10 @@ class WebSessionHeartbeatService:
                 lines.append(f"- Background tool {tool_name} ({execution_id}) reached a terminal state")
                 lines.append(f"  Status: {status}")
                 lines.append(f"  Summary: {summary}")
+                continue
+            if reason == "shutdown_resume":
+                lines.append("- Session resumed automatically after the project process restarted")
+                lines.append("  Complete the user's previously interrupted request now.")
                 continue
             if reason == "task_stall":
                 task_id = str(payload.get("task_id") or "").strip()
@@ -1066,6 +1112,34 @@ class WebSessionHeartbeatService:
             if terminal_failure_reason and terminal_failure_reason != summary:
                 lines.append(f"  Result failure reason: {terminal_failure_reason}")
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _shutdown_resume_events(events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
+        return [
+            event
+            for event in list(events or [])
+            if str(event.reason or "").strip().lower() == "shutdown_resume"
+        ]
+
+    @classmethod
+    def _events_require_visible_reply(cls, events: list[SessionHeartbeatEvent]) -> bool:
+        """Task-terminal and shutdown-resume events must always produce a real
+        user-visible reply; other heartbeat events may be acked silently."""
+        return bool(cls._task_terminal_events(events) or cls._shutdown_resume_events(events))
+
+    @staticmethod
+    def _visible_reply_requires_repair(output: Any) -> bool:
+        text = str(output or "").strip()
+        return not text or text == HEARTBEAT_OK
+
+    @staticmethod
+    def _fixed_visible_reply_error_text(events: list[SessionHeartbeatEvent]) -> str:
+        if WebSessionHeartbeatService._shutdown_resume_events(events):
+            return (
+                "本次项目重启后系统已自动恢复上次暂停的工作，但整理回复时连续失败。"
+                "你可以继续发送指令让我接着处理，或在会话里重新描述需求。"
+            )
+        return WebSessionHeartbeatService._task_terminal_fixed_error_text(events)
 
     @staticmethod
     def _task_terminal_events(events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
@@ -1574,12 +1648,13 @@ class WebSessionHeartbeatService:
             None,
         )
         task_terminal_events = self._task_terminal_events(events)
+        require_visible_reply = self._events_require_visible_reply(events)
         repair_attempt = 0
         repair_failed = False
-        while task_terminal_events and self._task_terminal_output_requires_repair(output):
+        while require_visible_reply and self._visible_reply_requires_repair(output):
             repair_attempt += 1
             if repair_attempt > _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT:
-                output = self._task_terminal_fixed_error_text(events)
+                output = self._fixed_visible_reply_error_text(events)
                 break
             repair_input = self._build_heartbeat_user_input(
                 events,
@@ -1622,7 +1697,7 @@ class WebSessionHeartbeatService:
             self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
-        if (not output or output == HEARTBEAT_OK) and not task_terminal_events:
+        if (not output or output == HEARTBEAT_OK) and not require_visible_reply:
             preserved_source, preserved_turn_id = self._clear_preserved_inflight_turn(key, session)
             if preserved_source:
                 discard_payload = {"source": preserved_source}

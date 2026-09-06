@@ -84,6 +84,16 @@ Cron job delivery is claim-before-dispatch, which defines the restart/recovery g
 - Non-`task_node_error` failures (stall / tool_background / task_terminal) are bounded too: a per-`(session, reasons)` counter with the same backoff dequeues the batch after the cap, replacing the old unbounded fixed-interval re-delivery.
 - Debugging "node error heartbeats retry forever": the scanner enqueues each pause row only once — suspect the per-node counter / backoff interaction, not the scanner.
 
+## Shutdown Resume Wake
+
+Graceful project shutdown pauses every running session; at the next startup the web runtime wakes each recorded session through the heartbeat lane with a `shutdown_resume` event. The pause/resume lifecycle contract lives in `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」; this section owns the wake lane.
+
+- The event payload is minimal (`session_id` + `event_reason`); the interrupted user request is not re-embedded. It reaches the model through the frontdoor continuation path's paused-turn seed reconciliation, so the wake prompt only instructs the model to continue the work already present in context.
+- Prompt contract: `shutdown_resume` joins `task_terminal` in the must-not-be-`HEARTBEAT_OK` family. The model must continue the paused request and end with a user-visible reply; a silent `HEARTBEAT_OK` / empty output enters the same repair loop as task-terminal, and exhaustion produces a fixed visible fallback text.
+- Durability: the wake is enqueued from the durable shutdown-pause ledger rows consumed by the web startup path after enqueue. A crash between ledger read and enqueue re-wakes on the next startup — the in-memory dedupe key (`shutdown-resume:<session_key>`) only suppresses duplicates within one queue lifetime.
+- Busy sessions are deferred by the ordinary wake-queue busy check; repeated failures follow the generic non-node-error bounded backoff (see 「Task Node Error Delivery」).
+- The final reply is persisted and published through the ordinary heartbeat visible-reply path (`ceo.reply.final`, channel notifier included), so the user sees the continued work without sending a new message.
+
 ## What Heartbeat Does Not Own
 
 The CEO inline tool reminder lane is not a heartbeat turn.

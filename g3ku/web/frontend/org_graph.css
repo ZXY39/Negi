@@ -1090,26 +1090,6 @@ textarea {
     overscroll-behavior: contain;
 }
 
-.task-tree-recovery-bubble {
-    position: sticky;
-    top: var(--space-3);
-    z-index: 4;
-    width: fit-content;
-    max-width: min(720px, calc(100% - var(--space-6)));
-    margin: 0 auto var(--space-3);
-    padding: 10px 14px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--warning) 44%, var(--border-color));
-    background: color-mix(in srgb, var(--warning) 16%, var(--bg-app));
-    box-shadow: 0 12px 32px color-mix(in srgb, var(--warning) 16%, transparent);
-    color: color-mix(in srgb, var(--warning) 88%, var(--text-primary));
-    font-size: 0.84rem;
-    font-weight: 700;
-    line-height: 1.35;
-    text-align: center;
-    pointer-events: none;
-}
-
 .task-tree-distribution-bubble {
     position: sticky;
     top: var(--space-3);

@@ -2087,15 +2087,6 @@ function syncExecutionTreeSelection(previousNodeId, nextNodeId) {
     }
 }
 
-function buildTaskTreeRecoveryBubble(text) {
-    const bubble = document.createElement("div");
-    bubble.className = "task-tree-recovery-bubble";
-    bubble.setAttribute("role", "status");
-    bubble.setAttribute("aria-live", "polite");
-    bubble.textContent = String(text || "").trim();
-    return bubble;
-}
-
 function taskDistributionPendingNoticeNodeIds(distribution = null) {
     if (!distribution || typeof distribution !== "object") return [];
     return (Array.isArray(distribution.pending_notice_node_ids) ? distribution.pending_notice_node_ids : [])
@@ -2274,15 +2265,71 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
     return true;
 }
 
+function currentTaskRecoveryNotice() {
+    return String(S.currentTask?.metadata?.recovery_notice || "").trim();
+}
+
+function appToastTextEl() {
+    return document.getElementById("app-toast-text");
+}
+
+function recoveryNoticeToastCurrentlyShown(notice) {
+    // The global toast is a singleton: other notifications may overwrite it.
+    // Treat the recovery notice as on-screen only while the toast actually
+    // displays this text, so an overwrite re-arms the notice on a later
+    // render instead of silently losing it.
+    const toast = document.getElementById("app-toast");
+    if (!toast || !toast.classList.contains("is-open")) return false;
+    const textEl = appToastTextEl();
+    return !!textEl && String(textEl.textContent || "").trim() === notice;
+}
+
+function ensureTaskRecoveryNoticeToastBound() {
+    // One-time binding: clicking anywhere on the toast dismisses the recovery
+    // notice for the task that produced it. The built-in close button keeps
+    // working through its own handler; the bubbling click below also runs.
+    if (S.taskRecoveryNoticeToastBound) return;
+    S.taskRecoveryNoticeToastBound = true;
+    const toast = document.getElementById("app-toast");
+    if (!toast) return;
+    toast.addEventListener("click", () => {
+        const active = S.taskRecoveryNoticeActive;
+        const textEl = appToastTextEl();
+        const isOurToast = !!active && !!textEl && String(textEl.textContent || "").trim() === active.text;
+        if (isOurToast) {
+            S.taskRecoveryNoticeDismissed = S.taskRecoveryNoticeDismissed || {};
+            S.taskRecoveryNoticeDismissed[active.taskId] = true;
+        }
+        S.taskRecoveryNoticeActive = null;
+        if (typeof closeToast === "function") closeToast();
+    });
+}
+
+function maybeShowTaskRecoveryNoticeToast() {
+    // "本任务遇到异常停止..." renders as a dismissible toast instead of a
+    // sticky in-tree bubble. Shown once per task until the user closes it;
+    // re-armed if another toast overwrote it before dismissal.
+    const notice = currentTaskRecoveryNotice();
+    const taskId = String(S.currentTask?.task_id || "").trim();
+    if (!notice || !taskId) return;
+    S.taskRecoveryNoticeDismissed = S.taskRecoveryNoticeDismissed || {};
+    if (S.taskRecoveryNoticeDismissed[taskId]) return;
+    if (recoveryNoticeToastCurrentlyShown(notice)) return;
+    ensureTaskRecoveryNoticeToastBound();
+    S.taskRecoveryNoticeActive = { taskId, text: notice };
+    if (typeof showToast === "function") {
+        showToast({ title: "任务自动恢复", text: notice, kind: "warn", persistent: true });
+    }
+}
+
 function renderTree() {
     if (!String(S.treeRootNodeId || "").trim()) return;
-    const recoveryNotice = String(S.currentTask?.metadata?.recovery_notice || "").trim();
+    maybeShowTaskRecoveryNoticeToast();
     const distributionState = activeTaskDistributionState();
     S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
     syncTaskTreeHeaderState(S.treeView);
     if (!S.treeView) {
         U.tree.innerHTML = "";
-        if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
         if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
         const emptyState = document.createElement("div");
         emptyState.className = "empty-state";
@@ -2430,7 +2477,6 @@ function renderTree() {
     wrapper.style.transformOrigin = "0 0";
     wrapper.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
     U.tree.innerHTML = "";
-    if (recoveryNotice) U.tree.appendChild(buildTaskTreeRecoveryBubble(recoveryNotice));
     if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
     U.tree.appendChild(wrapper);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();

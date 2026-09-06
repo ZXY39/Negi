@@ -280,6 +280,29 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 - A child pause leaves its dispatcher future pending so the parent pipeline waits without treating the child as a failed result. The root pause propagates to `TaskActorService`, which leaves the task runnable state paused. Failing a paused child resolves the original future with a failed result so the parent can apply its ordinary failure handling.
 - Resume clears the node pause state and restarts the same dispatcher entry. `NodeRunner._resume_react_state` restores the persisted `task_runtime_frames` frame, allowing the node to continue from its prior runtime context instead of starting a fresh node turn. Distribution barriers treat paused nodes as part of the in-progress frontier and do not wait on a paused child as if it were an unresolved safe-boundary drain.
 
+## Graceful Shutdown Pause and Startup Auto-Resume
+
+进程以任何形式被关闭（重跑启动脚本、Ctrl+C / SIGTERM、`POST /api/bootstrap/exit`）时，web runtime 在收尾前先“暂停一切正在运行的工作”；下一次启动时这些工作自动恢复，且不产生「本任务遇到异常停止」提示。这是进程级生命周期合同，独立于上面的节点级暂停。
+
+- 会话：对每个正在运行的会话执行 manual pause（等价于 UI 暂停按钮）：本轮上下文按暂停语义归档（`_transcript_state=paused` 的 user 行、暂停 archive 气泡、completed continuity sidecar），会话收为 `completed` + `user_pause`。
+- 任务：web 模式走 `force_pause_task_durably`（worker 离线/starting 也生效：先直接落 `pause_requested=true / is_paused=true`，再 best-effort 下发 `pause_task` 命令让活着的 actor 在下一个安全边界停）；embedded / worker 模式走普通 `pause_task`（request_pause + scheduler cancel 等 actor 停）。
+- 台账：每条被暂停的工作写一行 `shutdown_pause_registry`（主运行时 SQLite 表，key 形如 `task:<task_id>` / `session:<session_key>`，会话行带 channel/chat_id）。**用户/agent 手动暂停的工作不写台账**——只有 shutdown 路径亲自暂停的才写。
+- 每次 shutdown 都会尝试一遍（信号、atexit、`/bootstrap/exit`、lifespan 收尾都会经过 `shutdown_web_runtime`）；已经暂停的工作跳过，因此多次收尾幂等。
+
+启动自动恢复分两条轨道：
+
+- 任务轨道（worker / embedded 进程的 `MainRuntimeService.startup()` 扫库）：任务仍 `in_progress` + paused，且台账里有该任务 → `resume_task`（清暂停 + 重新入队），不触发「异常停止」恢复清洗、不写 `metadata.recovery_notice`；paused 但无台账行的任务保持暂停（用户暂停跨重启存活）；`in_progress` 未暂停的任务仍走 `_recover_interrupted_task`（异常中断清洗 + 恢复提示）。台账行消费后即删；引用已不存在任务的残留行在 startup 时退役。
+- 会话轨道（web runtime `ensure_web_runtime_services` 收尾，heartbeat 启动之后）：按台账逐个重建 runtime session（恢复 frontdoor baseline），再经心跳内部轮 `shutdown_resume` 事件唤醒；被暂停的用户请求通过暂停回合种子对账回到模型上下文，模型继续执行并产出用户可见回复。lane 合同归 `heartbeat-system.md`「Shutdown Resume Wake」。会话文件已不存在的台账行直接退役。
+- 恢复提示：`metadata.recovery_notice`（「本任务遇到异常停止…」）只在**非优雅中断**（进程被强杀、帧/事务被截断）的恢复清洗时写入；优雅暂停 + 自动恢复不产生该提示。UI 渲染合同见 `web-and-admin.md`「Task Recovery Notice UI Contract」。
+
+维护者须知：
+
+- “重启后任务自动继续”依赖台账与共享 SQLite（WAL），不依赖内存：web 进程写台账、worker 进程消费，二者交接的媒介是 store。
+- 关闭托管 worker 之前，web 会先释放该 worker 的 `task_worker` lease 行（`keep_worker` 关闭且确实存在托管进程时）——否则新 worker 在 lease TTL（20 秒）内启动会撞 `worker_lease_unavailable`。
+- 若重启后任务仍停在 paused 且不自动恢复：先查台账行是否与任务 id 一致、`task_commands` 是否有未消费的 `pause_task` 残余、worker 是否真正拿到 lease 完成 startup。
+- 若“优雅重启”后仍出现异常停止 toast：说明该任务的暂停早于本次 shutdown（例如早已被暂停、退出前又被手动 resume），或退出路径没有经过 web runtime 收尾（如单独强杀 worker 进程）。
+- 启动脚本的优雅退出协议（先调 `/api/bootstrap/exit` 再强制清理）归 `operations-and-maintenance.md`「基本启动方式」。
+
 ## Prompt Cache Family And Actual Request
 
 基线合同摘要（完整取证与排查归缓存排查文档）：

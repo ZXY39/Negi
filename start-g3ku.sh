@@ -85,10 +85,31 @@ get_managed_pids() {
   '
 }
 
+try_graceful_exit() {
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  curl -sS -m 20 -X POST \
+    -H 'Content-Type: application/json' \
+    -d '{"pause_running_work":true}' \
+    "http://$BIND_HOST:$PORT/api/bootstrap/exit" >/dev/null 2>&1
+}
+
 stop_managed_processes() {
   pids="$(get_managed_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
   [ -n "$pids" ] || return 0
   echo "[g3ku] Restarting existing g3ku web/worker processes..."
+  if try_graceful_exit; then
+    echo "[g3ku] Graceful exit requested; waiting for the runtime to pause all work and stop..."
+    i=0
+    while [ "$i" -lt 80 ]; do
+      pids="$(get_managed_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+      [ -z "$pids" ] && return 0
+      i=$((i + 1))
+      sleep 0.5
+    done
+  fi
+  echo "[g3ku] Force-stopping remaining g3ku processes..."
   for pid in $pids; do
     kill "$pid" 2>/dev/null || true
   done

@@ -36,7 +36,12 @@ from g3ku.runtime import SessionRuntimeManager
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.security import get_bootstrap_security_service
 from g3ku.web.launcher import run_web_server_entrypoint
-from g3ku.web.worker_control import ensure_managed_task_worker, shutdown_managed_task_worker
+from g3ku.web.worker_control import (
+    ensure_managed_task_worker,
+    keep_worker_enabled,
+    managed_worker_pid,
+    shutdown_managed_task_worker,
+)
 from main.protocol import now_iso
 from main.service.task_terminal_callback import TASK_TERMINAL_CALLBACK_URL_ENV
 
@@ -747,6 +752,135 @@ async def _ensure_china_bridge_services(agent: AgentLoop | None = None) -> None:
         )
 
 
+async def pause_running_work_for_shutdown(
+    agent: AgentLoop | None = None,
+    runtime_manager: SessionRuntimeManager | None = None,
+) -> dict[str, int]:
+    """Pause every running session and in-progress task before a process exit.
+
+    Manual pause archives each in-flight turn durably; task pause takes effect
+    at the next safe boundary and is persisted immediately. Both kinds are
+    recorded in the shutdown-pause ledger so the next startup can resume them
+    silently instead of treating them as abnormal stops. User/agent-initiated
+    pauses are deliberately not recorded and therefore never auto-resumed.
+    """
+    runtime_agent = agent if agent is not None else _global_agent
+    current_manager = runtime_manager if runtime_manager is not None else _global_runtime_manager
+    service = getattr(runtime_agent, "main_task_service", None) if runtime_agent is not None else None
+    if service is not None:
+        try:
+            startup = getattr(service, "startup", None)
+            if callable(startup):
+                await startup()
+        except Exception:
+            logger.debug("main task service startup skipped during shutdown pause")
+    store = getattr(service, "store", None) if service is not None else None
+
+    paused_sessions = 0
+    if current_manager is not None:
+        for session_key in list(current_manager.list_sessions()):
+            session = current_manager.get(session_key)
+            if not SessionRuntimeBridge.session_is_running(session):
+                continue
+            try:
+                await session.pause(manual=True)
+            except Exception:
+                logger.debug("session pause skipped during shutdown for {}", session_key)
+                continue
+            if store is not None and callable(getattr(store, "record_shutdown_pause_entry", None)):
+                channel, chat_id = current_manager.session_meta(session_key) or ("", "")
+                try:
+                    store.record_shutdown_pause_entry(
+                        kind="session",
+                        ref_id=session_key,
+                        channel=channel,
+                        chat_id=chat_id,
+                    )
+                except Exception:
+                    logger.debug("shutdown pause ledger write skipped for session {}", session_key)
+            paused_sessions += 1
+
+    paused_tasks = 0
+    if service is not None:
+        for task in list(getattr(service.store, "list_tasks", lambda: [])() or []):
+            status = str(getattr(task, "status", "") or "").strip().lower()
+            if status != "in_progress" or bool(getattr(task, "is_paused", False)):
+                continue
+            task_id = str(getattr(task, "task_id", "") or "").strip()
+            try:
+                pause_impl = getattr(service, "force_pause_task_durably", None)
+                if callable(pause_impl):
+                    await pause_impl(task_id)
+                else:
+                    await service.pause_task(task_id)
+            except Exception:
+                logger.debug("task pause skipped during shutdown for {}", task_id)
+                continue
+            if store is not None and callable(getattr(store, "record_shutdown_pause_entry", None)):
+                try:
+                    store.record_shutdown_pause_entry(kind="task", ref_id=task_id)
+                except Exception:
+                    logger.debug("shutdown pause ledger write skipped for task {}", task_id)
+            paused_tasks += 1
+
+    return {"paused_sessions": paused_sessions, "paused_tasks": paused_tasks}
+
+
+async def resume_shutdown_paused_sessions(
+    agent: AgentLoop | None = None,
+    runtime_manager: SessionRuntimeManager | None = None,
+    heartbeat: Any | None = None,
+) -> int:
+    """Auto-resume sessions that were paused by the previous graceful shutdown.
+
+    Runs once after the heartbeat service is up: each ledger row wakes its
+    session through the heartbeat internal-turn lane so the paused user
+    request is reconciled back into the request seed and the model continues
+    the interrupted work. Rows whose session no longer exists are retired.
+    """
+    runtime_agent = agent if agent is not None else _global_agent
+    current_manager = runtime_manager if runtime_manager is not None else _global_runtime_manager
+    heartbeat_service = heartbeat if heartbeat is not None else _global_web_heartbeat
+    if runtime_agent is None or current_manager is None or heartbeat_service is None:
+        return 0
+    service = getattr(runtime_agent, "main_task_service", None)
+    store = getattr(service, "store", None) if service is not None else None
+    if store is None:
+        return 0
+    list_entries = getattr(store, "list_shutdown_pause_entries", None)
+    consume = getattr(store, "mark_shutdown_pause_entry_consumed", None)
+    enqueue = getattr(heartbeat_service, "enqueue_shutdown_resume", None)
+    if not callable(list_entries) or not callable(consume) or not callable(enqueue):
+        return 0
+    session_manager = getattr(runtime_agent, "sessions", None)
+    resumed = 0
+    for entry in list_entries(kind="session"):
+        session_key = str(entry.get("ref_id") or "").strip()
+        if not session_key:
+            consume(kind="session", ref_id=session_key)
+            continue
+        exists = False
+        if session_manager is not None and callable(getattr(session_manager, "get_path", None)):
+            try:
+                exists = bool(getattr(session_manager, "get_path")(session_key).exists())
+            except Exception:
+                exists = False
+        if not exists:
+            consume(kind="session", ref_id=session_key)
+            continue
+        # Recreate the runtime session so its frontdoor continuity baseline is
+        # restored before the wake turn runs.
+        channel = str(entry.get("channel") or "").strip() or "web"
+        chat_id = str(entry.get("chat_id") or "").strip() or session_key
+        current_manager.get_or_create(session_key=session_key, channel=channel, chat_id=chat_id)
+        if enqueue(session_key):
+            resumed += 1
+        consume(kind="session", ref_id=session_key)
+    if resumed:
+        logger.info("auto-resumed {} session(s) paused by shutdown", resumed)
+    return resumed
+
+
 def get_web_heartbeat_service(agent: AgentLoop | None = None):
     runtime_agent = agent or get_agent()
     runtime_manager = get_runtime_manager(runtime_agent)
@@ -804,6 +938,10 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             await cron_service.start()
         _ensure_outbound_drain_running()
         await _ensure_china_bridge_services(runtime_agent)
+        try:
+            await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
+        except Exception:
+            logger.debug("shutdown-paused session resume skipped during startup")
 
 
 async def shutdown_web_runtime() -> None:
@@ -829,6 +967,20 @@ async def shutdown_web_runtime() -> None:
 
     if agent is None:
         return
+
+    # Freeze all running work first (durably, with a startup-resume ledger row)
+    # so no matter how this process exit was triggered, tasks and sessions
+    # restart cleanly instead of being reported as abnormal stops.
+    try:
+        paused = await pause_running_work_for_shutdown(agent, runtime_manager)
+        if paused.get("paused_sessions") or paused.get("paused_tasks"):
+            logger.info(
+                "graceful shutdown paused {} session(s) and {} task(s)",
+                paused.get("paused_sessions", 0),
+                paused.get("paused_tasks", 0),
+            )
+    except Exception:
+        logger.debug("shutdown pause-all skipped during shutdown")
 
     if cron_service is not None:
         try:
@@ -889,6 +1041,15 @@ async def shutdown_web_runtime() -> None:
         except Exception:
             logger.debug('main task service close skipped during shutdown')
 
+    if main_task_service is not None and not keep_worker_enabled() and managed_worker_pid() is not None:
+        # The managed worker is about to be killed without running its own
+        # close(); drop its lease now so an immediate restart does not collide
+        # with the stale-lease window (lease rows outlive the worker by TTL).
+        try:
+            main_task_service.release_task_worker_lease_durably()
+        except Exception:
+            logger.debug('task worker lease release skipped during shutdown')
+
     try:
         await shutdown_managed_task_worker()
     except Exception:
@@ -920,7 +1081,9 @@ __all__ = [
     'get_runtime_manager',
     'get_web_heartbeat_service',
     'no_ceo_model_configured_payload',
+    'pause_running_work_for_shutdown',
     'refresh_web_agent_runtime',
+    'resume_shutdown_paused_sessions',
     'run_web_shell',
     'shutdown_web_runtime',
 ]

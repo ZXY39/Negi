@@ -17,7 +17,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 ## Topic Guide
 
 - `runtime-overview.md`
-  Use for session lifecycle, frontdoor/runtime flow, tool execution flow, and cross-module runtime behavior.
+  Use for session lifecycle, frontdoor/runtime flow, tool execution flow, cross-module runtime behavior, and graceful shutdown pause / startup auto-resume.
 - `operations-and-maintenance.md`
   Use for startup workflows, troubleshooting order, high-risk change types, memory queue/reset workflows, and Docker deployment.
 - `context-and-cache-troubleshooting.md`
@@ -27,7 +27,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `web-and-admin.md`
   Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
 - `heartbeat-system.md`
-  Use for heartbeat turns, task-terminal/stall wakeups, and the boundary between heartbeat and the CEO inline tool reminder sidecar.
+  Use for heartbeat turns, task-terminal/stall wakeups, shutdown-resume session wakes, and the boundary between heartbeat and the CEO inline tool reminder sidecar.
 - `config-and-models.md`
   Use for config source-of-truth rules and role-to-model resolution.
 - `china-channels.md`
@@ -51,6 +51,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
+- 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
+- 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息 → `context-and-cache-troubleshooting.md`「残留 paused 转录条目」

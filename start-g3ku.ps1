@@ -54,12 +54,42 @@ function Get-G3kuManagedPythonProcesses {
     }
 }
 
+function Request-G3kuGracefulExit {
+    param([int]$Port = 18790)
+    try {
+        $body = '{"pause_running_work":true}'
+        $null = Invoke-RestMethod `
+            -Uri "http://127.0.0.1:$Port/api/bootstrap/exit" `
+            -Method Post `
+            -ContentType "application/json" `
+            -Body $body `
+            -TimeoutSec 20 `
+            -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Stop-G3kuManagedPythonProcesses {
+    param([int]$Port = 18790)
     $processes = @(Get-G3kuManagedPythonProcesses)
     if (-not $processes) {
         return 0
     }
     Write-Host "[g3ku] Restarting existing g3ku web/worker processes..." -ForegroundColor Yellow
+    if (Request-G3kuGracefulExit -Port $Port) {
+        Write-Host "[g3ku] Graceful exit requested; waiting for the runtime to pause all work and stop..." -ForegroundColor Yellow
+        $deadline = (Get-Date).AddSeconds(40)
+        while ((Get-Date) -lt $deadline) {
+            $remaining = @(Get-G3kuManagedPythonProcesses)
+            if (-not $remaining) {
+                return $processes.Count
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    Write-Host "[g3ku] Force-stopping remaining g3ku processes..." -ForegroundColor Yellow
     foreach ($process in $processes) {
         try {
             Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
@@ -91,7 +121,7 @@ function Assert-StartPreconditions {
     }
 }
 
-[void](Stop-G3kuManagedPythonProcesses)
+[void](Stop-G3kuManagedPythonProcesses -Port $Port)
 Assert-StartPreconditions
 
 $webArgs = @("web", "--host", $BindHost, "--port", "$Port")

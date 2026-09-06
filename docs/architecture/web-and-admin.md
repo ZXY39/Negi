@@ -331,6 +331,13 @@ The backend contract behind that UI behavior is:
 - Node detail receives a backend-owned message list (its own section before `派生记录`) rather than a pseudo execution stage, and the frontend must not reconstruct entries from raw mailbox tables or prompt tail blocks. Distribution results are backend-owned and show both delivered targets (with the propagated message) and skipped targets (with the recorded reason).
 - Tree snapshots expose two visibility contracts that must not be collapsed: `parent_visible` / handshake fields are the distribution-oriented recipient projection, while browser rendering follows the browser-tree visibility fields. Execution nodes stay visible in every status; acceptance nodes stay hidden until activation. Force-showing all nodes while distribution is active is not proof that they were all valid recipients.
 
+### Task Recovery Notice UI Contract
+
+- 「本任务遇到异常停止，已回退到稳定步骤继续。」（`task.metadata.recovery_notice`）以全局 toast 呈现，不再是任务树内的内联气泡：打开对应任务或该任务数据刷新时弹出一次，`kind=warn`、persistent（不自动消失），标题「任务自动恢复」。
+- 用户可以点击关闭：点击 toast 任意位置（含右上角关闭按钮）即关闭，并把该任务记入本次页面会话的 dismissed 集合——同一任务不再重复弹出；切换到其他带提示的任务仍会弹出自己的提示。
+- 若 toast 在用户关闭前被其他提示覆盖，下一次任务树渲染会重新弹出该提示（显示状态按“当前显示的提示文本”去重，而不是按“曾经显示过”）。
+- 提示是否出现由后端元数据决定：只有非优雅中断后的恢复清洗写 `recovery_notice`；优雅暂停 + 自动恢复不产生该提示。生命周期语义见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」。
+
 ### Task Depth Default Contract
 
 - The task-hall "global task tree depth" control is a global main-runtime default, backed by `PUT /api/main-runtime/settings`.

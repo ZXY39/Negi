@@ -129,6 +129,16 @@ async def _pause_running_work() -> dict[str, int]:
     service = getattr(agent, "main_task_service", None)
     if service is not None:
         await service.startup()
+    store = getattr(service, "store", None)
+    record_entry = getattr(store, "record_shutdown_pause_entry", None)
+
+    def _record(kind: str, ref_id: str, *, channel: str = "", chat_id: str = "") -> None:
+        if not callable(record_entry):
+            return
+        try:
+            record_entry(kind=kind, ref_id=ref_id, channel=channel, chat_id=chat_id)
+        except Exception:
+            logger.debug("shutdown pause ledger write skipped for {} {}", kind, ref_id)
 
     paused_sessions = 0
     for session_id in list(runtime_manager.list_sessions()):
@@ -141,6 +151,16 @@ async def _pause_running_work() -> dict[str, int]:
             session = runtime_manager.get(session_id) if hasattr(runtime_manager, "get") else None
             if session is not None and hasattr(session, "pause"):
                 await session.pause(manual=True)
+        session_meta = getattr(runtime_manager, "session_meta", None)
+        channel, chat_id = "", ""
+        if callable(session_meta):
+            try:
+                resolved = session_meta(session_id)
+                if isinstance(resolved, tuple) and len(resolved) == 2:
+                    channel, chat_id = str(resolved[0] or ""), str(resolved[1] or "")
+            except Exception:
+                channel, chat_id = "", ""
+        _record("session", session_id, channel=channel, chat_id=chat_id)
         paused_sessions += 1
 
     paused_tasks = 0
@@ -149,7 +169,12 @@ async def _pause_running_work() -> dict[str, int]:
             status = str(getattr(task, "status", "") or "").strip().lower()
             if status != "in_progress" or bool(getattr(task, "is_paused", False)):
                 continue
-            await service.pause_task(task.task_id)
+            pause_impl = getattr(service, "force_pause_task_durably", None)
+            if callable(pause_impl):
+                await pause_impl(str(getattr(task, "task_id", "") or ""))
+            else:
+                await service.pause_task(task.task_id)
+            _record("task", str(getattr(task, "task_id", "") or ""))
             paused_tasks += 1
 
     for _ in range(20):

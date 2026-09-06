@@ -423,6 +423,16 @@ class SQLiteTaskStore:
                 payload_json TEXT NOT NULL
             )
             ''',
+            '''
+            CREATE TABLE IF NOT EXISTS shutdown_pause_registry (
+                entry_key TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                ref_id TEXT NOT NULL,
+                channel TEXT NOT NULL DEFAULT '',
+                chat_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_task_id ON task_node_pauses(task_id)',
@@ -1463,6 +1473,74 @@ class SQLiteTaskStore:
             'DELETE FROM worker_leases WHERE role = ? AND worker_id = ?',
             (normalized_role, normalized_worker_id),
         )
+
+    def record_shutdown_pause_entry(
+        self,
+        *,
+        kind: str,
+        ref_id: str,
+        channel: str = '',
+        chat_id: str = '',
+        created_at: str | None = None,
+    ) -> str:
+        """Upsert a graceful-shutdown pause ledger row (kind=task|session).
+
+        The row tells the next startup which paused work was frozen by a clean
+        process exit (as opposed to a user action or a crash), so it can be
+        resumed automatically instead of being left paused or treated as an
+        abnormal interruption.
+        """
+        normalized_kind = str(kind or '').strip().lower()
+        normalized_ref = str(ref_id or '').strip()
+        if normalized_kind not in {'task', 'session'} or not normalized_ref:
+            raise ValueError('invalid_shutdown_pause_entry')
+        entry_key = f'{normalized_kind}:{normalized_ref}'
+        stamped_at = str(created_at or '').strip() or datetime.now().astimezone().isoformat(timespec='seconds')
+        self._upsert(
+            'shutdown_pause_registry',
+            ['entry_key', 'kind', 'ref_id', 'channel', 'chat_id', 'created_at'],
+            [
+                entry_key,
+                normalized_kind,
+                normalized_ref,
+                str(channel or '').strip(),
+                str(chat_id or '').strip(),
+                stamped_at,
+            ],
+            'entry_key',
+        )
+        return entry_key
+
+    def list_shutdown_pause_entries(self, kind: str | None = None) -> list[dict[str, Any]]:
+        normalized_kind = str(kind or '').strip().lower()
+        if normalized_kind:
+            rows = self._fetchall(
+                'SELECT entry_key, kind, ref_id, channel, chat_id, created_at '
+                'FROM shutdown_pause_registry WHERE kind = ? ORDER BY created_at ASC, entry_key ASC',
+                (normalized_kind,),
+            )
+        else:
+            rows = self._fetchall(
+                'SELECT entry_key, kind, ref_id, channel, chat_id, created_at '
+                'FROM shutdown_pause_registry ORDER BY created_at ASC, entry_key ASC'
+            )
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _shutdown_pause_entry_key(kind: str, ref_id: str) -> str:
+        return f"{str(kind or '').strip().lower()}:{str(ref_id or '').strip()}"
+
+    def mark_shutdown_pause_entry_consumed(self, *, kind: str, ref_id: str) -> bool:
+        entry_key = self._shutdown_pause_entry_key(kind, ref_id)
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                'DELETE FROM shutdown_pause_registry WHERE entry_key = ?',
+                (entry_key,),
+            )
+            return bool(cursor.rowcount)
+
+        return bool(self._run_write(operation))
 
     def put_task_terminal_outbox(
         self,

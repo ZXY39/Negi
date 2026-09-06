@@ -567,6 +567,11 @@ class MainRuntimeService:
         self.policy_engine.sync_default_role_policies()
         self._record_resource_tree_state()
         if self.execution_mode in {'embedded', 'worker'}:
+            shutdown_paused_task_ids = {
+                str(item.get('ref_id') or ''): str(item.get('entry_key') or '')
+                for item in self.store.list_shutdown_pause_entries(kind='task')
+                if str(item.get('ref_id') or '').strip()
+            }
             for task in self.store.list_tasks():
                 self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
                 if str(task.status or '').strip().lower() != 'in_progress':
@@ -574,11 +579,29 @@ class MainRuntimeService:
                     # nodes. This only flips bookkeeping status and never deletes
                     # transcripts/artifacts; see log_service._sweep_residual_nodes_locked.
                     self.log_service.sweep_residual_nodes(task.task_id)
+                    # A terminal/deleted task cannot be resumed; retire its
+                    # shutdown-pause ledger row so it does not linger and get
+                    # reconciled against a later task id reuse.
+                    self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=task.task_id)
                     continue
                 if bool(task.is_paused) or bool(task.pause_requested):
+                    if task.task_id not in shutdown_paused_task_ids:
+                        # A user/agent-initiated pause must survive restarts.
+                        continue
+                    # Cleanly paused by a graceful process exit: resume silently
+                    # (no abnormal-stop recovery notice) and run again.
+                    await self.resume_task(task.task_id)
+                    self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=task.task_id)
                     continue
                 self._recover_interrupted_task(task.task_id)
                 await self.global_scheduler.enqueue_task(task.task_id)
+            # Retire ledger rows that reference tasks which no longer exist, so
+            # the registry cannot grow stale or collide with reused task ids.
+            known_task_ids = {str(task.task_id or '').strip() for task in self.store.list_tasks() if str(task.task_id or '').strip()}
+            for item in self.store.list_shutdown_pause_entries(kind='task'):
+                ref_id = str(item.get('ref_id') or '').strip()
+                if ref_id and ref_id not in known_task_ids:
+                    self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=ref_id)
             self.task_stall_notifier.bootstrap_running_tasks()
         if self.execution_mode == 'worker':
             if self.tool_pressure_monitor is not None:
@@ -1434,6 +1457,48 @@ class MainRuntimeService:
                 )
         return self.get_task(task_id)
 
+    async def force_pause_task_durably(self, task_id: str) -> TaskRecord | None:
+        """Pause a task durably even when the worker is offline or starting.
+
+        Used by graceful-shutdown paths: the pause must be persisted no matter
+        what the worker state is, so the next startup can resume it silently
+        instead of reporting an abnormal stop. When the ordinary pause
+        requires a live worker, the durable flags are written directly and the
+        worker command is still enqueued best-effort so a running actor stops
+        at its next safe boundary.
+        """
+        task_id = self.normalize_task_id(task_id)
+        if self.execution_mode in {'embedded', 'worker'}:
+            return await self.pause_task(task_id)
+        self.log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+        task = self.get_task(task_id)
+        if task is not None:
+            try:
+                self._enqueue_task_command(
+                    command_type='pause_task',
+                    task_id=task.task_id,
+                    session_id=task.session_id,
+                    payload={'task_id': task.task_id},
+                )
+            except Exception:
+                logger.debug("worker pause command enqueue skipped for {}", task_id)
+        return self.get_task(task_id)
+
+    def release_task_worker_lease_durably(self) -> bool:
+        """Delete the task-worker lease row before the worker process is
+        stopped, so a fast restart (within the lease TTL) does not collide
+        with the stale lease and refuse to start. Only the web process that
+        owns the managed worker calls this during graceful shutdown."""
+        row = self.store.get_worker_lease(_WORKER_LEASE_ROLE)
+        if row is None:
+            return False
+        worker_id = str(row.get('worker_id') or '').strip()
+        if not worker_id:
+            return False
+        self.store.release_worker_lease(role=_WORKER_LEASE_ROLE, worker_id=worker_id)
+        logger.info("task worker lease released during graceful shutdown (worker_id={})", worker_id)
+        return True
+
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
@@ -1488,6 +1553,9 @@ class MainRuntimeService:
         self.file_store.delete_task_files(task_id)
         shutil.rmtree(self._task_temp_dir(task_id, create=False), ignore_errors=True)
         self.store.delete_task(task_id)
+        # A deleted task must not be resurrected by the shutdown-pause ledger
+        # on a later startup; retire its row together with the task.
+        self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=task_id)
         shutil.rmtree(self._task_event_history_dir(task_id), ignore_errors=True)
         self._publish_task_deleted_event(session_id=task.session_id, task_id=task.task_id)
         await self.registry.forget_task(task.session_id, task_id)
