@@ -216,7 +216,7 @@ Provider retry troubleshooting note:
 
 先分清这次退出是优雅暂停还是异常中断：
 
-- 优雅路径（重启脚本先调 `/api/bootstrap/exit`、或 Ctrl+C 让信号处理器收尾）：所有运行中的任务与会话被暂停并写 `shutdown_pause_registry` 台账，启动时自动恢复、不出现“异常停止”提示。若此时任务仍停在 paused：查台账行与任务 id 是否一致、`task_commands` 是否有未消费的 `pause_task` 残余、worker 是否拿到 lease 完成 startup（详见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
+- 优雅路径（重启脚本先调 `/api/bootstrap/exit`、或 Ctrl+C 让信号处理器收尾）：所有运行中的任务与会话被暂停并写 `shutdown_pause_registry` 台账，启动时自动恢复、不出现“异常停止”提示。退出前还有一次 ≤10 秒的排水等待（轮询 `pause_task` 命令直到 worker 真正停完 actor），停完才关闭托管 worker。若此时任务仍停在 paused：查台账行与任务 id 是否一致、`task_commands` 是否有未消费的 `pause_task` 残余、worker 是否拿到 lease 完成 startup（详见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
 - 异常路径（进程被强杀、worker 单进程被单独杀死）：任务恢复清洗照常执行，`metadata.recovery_notice` 写「本任务遇到异常停止…」，UI 以可关闭 toast 呈现（`web-and-admin.md`「Task Recovery Notice UI Contract」）。这是预期行为，点击关闭即可。
 - 会话侧的自动恢复走 heartbeat `shutdown_resume` 内部轮（`heartbeat-system.md`「Shutdown Resume Wake」）：会话尾气泡会再现一条由系统恢复产生的回复；若没有出现，查启动日志里 `resume_shutdown_paused_sessions` / `auto-resumed` 与 heartbeat 事件投递日志。
 

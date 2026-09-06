@@ -752,6 +752,63 @@ async def _ensure_china_bridge_services(agent: AgentLoop | None = None) -> None:
         )
 
 
+_SHUTDOWN_PAUSE_DRAIN_TIMEOUT_S = 10.0
+_SHUTDOWN_PAUSE_DRAIN_POLL_S = 0.1
+
+
+async def wait_shutdown_pause_commands_drained(
+    service: Any,
+    *,
+    task_ids: set[str],
+    timeout_s: float = _SHUTDOWN_PAUSE_DRAIN_TIMEOUT_S,
+) -> bool:
+    """Wait until the worker has really applied the shutdown pause commands.
+
+    Durable pause flags are written by the web process synchronously, but the
+    worker's actor keeps running until it processes the `pause_task` command
+    (which awaits the actor unwinding). Poll the shared command table so
+    shutdown does not declare victory — or kill the worker — while a model
+    call or long tool is still executing in the background.
+    """
+    normalized_ids = {str(item or '').strip() for item in list(task_ids or []) if str(item or '').strip()}
+    store = getattr(service, 'store', None)
+    list_unfinished = getattr(store, 'list_unfinished_task_commands', None)
+    if not normalized_ids or not callable(list_unfinished):
+        return True
+    worker_state = getattr(service, 'worker_state', None)
+    deadline = asyncio.get_running_loop().time() + max(0.0, float(timeout_s or 0.0))
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            unfinished = [
+                item
+                for item in list_unfinished()
+                if str(item.get('command_type') or '').strip() == 'pause_task'
+                and str(item.get('task_id') or '').strip() in normalized_ids
+            ]
+        except Exception:
+            return True
+        if not unfinished:
+            return True
+        if callable(worker_state):
+            try:
+                state = str(worker_state() or '').strip().lower()
+            except Exception:
+                state = ''
+            if state in {'stopped', 'offline', 'dead'}:
+                # No live worker will drain these commands; the durable flags
+                # plus the shutdown ledger already cover the restart.
+                return True
+            # 'online' / 'starting' / 'stale' keep waiting: a stale row may
+            # still belong to a live but busy worker.
+        await asyncio.sleep(_SHUTDOWN_PAUSE_DRAIN_POLL_S)
+    logger.warning(
+        "shutdown pause drain timed out after {:.1f}s; {} pause commander(s) still unfinished",
+        float(timeout_s or 0.0),
+        len(normalized_ids),
+    )
+    return False
+
+
 async def pause_running_work_for_shutdown(
     agent: AgentLoop | None = None,
     runtime_manager: SessionRuntimeManager | None = None,
@@ -801,6 +858,7 @@ async def pause_running_work_for_shutdown(
             paused_sessions += 1
 
     paused_tasks = 0
+    paused_task_ids: set[str] = set()
     if service is not None:
         for task in list(getattr(service.store, "list_tasks", lambda: [])() or []):
             status = str(getattr(task, "status", "") or "").strip().lower()
@@ -816,12 +874,17 @@ async def pause_running_work_for_shutdown(
             except Exception:
                 logger.debug("task pause skipped during shutdown for {}", task_id)
                 continue
+            paused_task_ids.add(task_id)
             if store is not None and callable(getattr(store, "record_shutdown_pause_entry", None)):
                 try:
                     store.record_shutdown_pause_entry(kind="task", ref_id=task_id)
                 except Exception:
                     logger.debug("shutdown pause ledger write skipped for task {}", task_id)
             paused_tasks += 1
+        if paused_task_ids:
+            # The durable flags are set; wait for the worker to truly stop the
+            # running actors (pause commands finished) before the process exits.
+            await wait_shutdown_pause_commands_drained(service, task_ids=paused_task_ids)
 
     return {"paused_sessions": paused_sessions, "paused_tasks": paused_tasks}
 
@@ -1086,4 +1149,5 @@ __all__ = [
     'resume_shutdown_paused_sessions',
     'run_web_shell',
     'shutdown_web_runtime',
+    'wait_shutdown_pause_commands_drained',
 ]

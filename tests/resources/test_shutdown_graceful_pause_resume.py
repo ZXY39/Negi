@@ -318,6 +318,100 @@ async def test_pause_running_work_for_shutdown_no_agent_is_noop() -> None:
     assert result == {"paused_sessions": 0, "paused_tasks": 0}
 
 
+@pytest.mark.asyncio
+async def test_wait_shutdown_pause_commands_drained_waits_until_worker_finishes() -> None:
+    polls: list[list[dict[str, str]]] = [
+        [{"command_type": "pause_task", "task_id": "task:1"}],
+        [{"command_type": "pause_task", "task_id": "task:1"}],
+        [],
+    ]
+    state = {"index": 0}
+
+    class _Store:
+        def list_unfinished_task_commands(self, **kwargs):
+            item = polls[state["index"]]
+            state["index"] += 1
+            return list(item)
+
+    class _Service:
+        store = _Store()
+
+        def worker_state(self) -> str:
+            return "online"
+
+    drained = await web_shell.wait_shutdown_pause_commands_drained(
+        _Service(),
+        task_ids={"task:1"},
+        timeout_s=2.0,
+    )
+    assert drained is True
+    assert state["index"] == 3
+
+
+@pytest.mark.asyncio
+async def test_wait_shutdown_pause_commands_drained_gives_up_when_worker_offline() -> None:
+    state = {"polls": 0}
+
+    class _Store:
+        def list_unfinished_task_commands(self, **kwargs):
+            state["polls"] += 1
+            return [{"command_type": "pause_task", "task_id": "task:1"}]
+
+    class _Service:
+        store = _Store()
+
+        def worker_state(self) -> str:
+            return "offline"
+
+    drained = await web_shell.wait_shutdown_pause_commands_drained(
+        _Service(),
+        task_ids={"task:1"},
+        timeout_s=1.0,
+    )
+    assert drained is True
+    assert state["polls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_shutdown_pause_commands_drained_times_out_on_stuck_worker() -> None:
+    class _Store:
+        def list_unfinished_task_commands(self, **kwargs):
+            return [{"command_type": "pause_task", "task_id": "task:1"}]
+
+    class _Service:
+        store = _Store()
+
+        def worker_state(self) -> str:
+            return "online"
+
+    drained = await web_shell.wait_shutdown_pause_commands_drained(
+        _Service(),
+        task_ids={"task:1"},
+        timeout_s=0.3,
+    )
+    assert drained is False
+
+
+@pytest.mark.asyncio
+async def test_wait_shutdown_pause_commands_drained_ignores_other_command_types() -> None:
+    class _Store:
+        def list_unfinished_task_commands(self, **kwargs):
+            return [{"command_type": "resume_task", "task_id": "task:1"}]
+
+    class _Service:
+        store = _Store()
+
+        def worker_state(self) -> str:
+            return "online"
+
+    drained = await web_shell.wait_shutdown_pause_commands_drained(
+        _Service(),
+        task_ids={"task:1"},
+        timeout_s=0.3,
+    )
+    assert drained is True
+
+
 # ---------------------------------------------------------------------------
 # web-side startup session resume
 # ---------------------------------------------------------------------------

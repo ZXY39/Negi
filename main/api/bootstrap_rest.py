@@ -15,6 +15,7 @@ from g3ku.shells.web import (
     get_runtime_manager,
     shutdown_web_runtime,
 )
+from g3ku.shells.web import wait_shutdown_pause_commands_drained
 from g3ku.web.server_control import request_server_shutdown
 
 router = APIRouter()
@@ -164,6 +165,7 @@ async def _pause_running_work() -> dict[str, int]:
         paused_sessions += 1
 
     paused_tasks = 0
+    paused_task_ids: set[str] = set()
     if service is not None:
         for task in list(service.store.list_tasks()):
             status = str(getattr(task, "status", "") or "").strip().lower()
@@ -174,6 +176,7 @@ async def _pause_running_work() -> dict[str, int]:
                 await pause_impl(str(getattr(task, "task_id", "") or ""))
             else:
                 await service.pause_task(task.task_id)
+            paused_task_ids.add(str(getattr(task, "task_id", "") or ""))
             _record("task", str(getattr(task, "task_id", "") or ""))
             paused_tasks += 1
 
@@ -184,6 +187,12 @@ async def _pause_running_work() -> dict[str, int]:
             break
     else:
         raise TimeoutError("running work did not pause before exit")
+
+    if service is not None and paused_task_ids:
+        # Durable pause flags are set; wait for the worker to actually stop
+        # the running task actors (pause commands finished) before exiting,
+        # so "paused" never hides work still executing in the background.
+        await wait_shutdown_pause_commands_drained(service, task_ids=paused_task_ids)
 
     return {"paused_sessions": paused_sessions, "paused_tasks": paused_tasks}
 

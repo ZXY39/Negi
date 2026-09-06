@@ -285,7 +285,9 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 进程以任何形式被关闭（重跑启动脚本、Ctrl+C / SIGTERM、`POST /api/bootstrap/exit`）时，web runtime 在收尾前先“暂停一切正在运行的工作”；下一次启动时这些工作自动恢复，且不产生「本任务遇到异常停止」提示。这是进程级生命周期合同，独立于上面的节点级暂停。
 
 - 会话：对每个正在运行的会话执行 manual pause（等价于 UI 暂停按钮）：本轮上下文按暂停语义归档（`_transcript_state=paused` 的 user 行、暂停 archive 气泡、completed continuity sidecar），会话收为 `completed` + `user_pause`。
-- 任务：web 模式走 `force_pause_task_durably`（worker 离线/starting 也生效：先直接落 `pause_requested=true / is_paused=true`，再 best-effort 下发 `pause_task` 命令让活着的 actor 在下一个安全边界停）；embedded / worker 模式走普通 `pause_task`（request_pause + scheduler cancel 等 actor 停）。
+- 任务：web 模式走 `force_pause_task_durably`（worker 离线/starting 也生效：先直接落 `pause_requested=true / is_paused=true`，再下发 `pause_task` 命令让活着的 actor 在下一个安全边界停）；embedded / worker 模式走普通 `pause_task`（request_pause + scheduler cancel 等 actor 停）。
+- **真实暂停保证（排水等待）**：落盘标志只是账本，不代表 actor 已停。shutdown 路径在把全部 `pause_task` 命令入队后轮询 `task_commands`（上限约 10 秒），直到这批命令全部 `completed`——命令 finished 意味着 worker 侧 `cancel_task` 已 await 完 actor 收尾（CancelledError → 持久化暂停 → dispatcher close）。wait 期间 worker 状态为 `offline/stopped` 时提前放弃（没有活的消费方，落盘标志 + 台账已保证重启正确）；超时只告警、不阻断退出。同一保证下才轮到关闭托管 worker。会话侧 manual pause 本身 await 了已注册 turn 任务的收尾（`cancel_session_tasks` gather），返回即该会话的模型/工具执行已停止。
+- 语义边界：普通 UI 手动暂停仍是“落盘标志先行、安全边界后生效”的异步设计——UI 立即显示 paused 不等同于 actor 已停，两者之间有秒级的命令处理窗口；只有 shutdown 排水等待提供“全部真实暂停后才退出”的保证。
 - 台账：每条被暂停的工作写一行 `shutdown_pause_registry`（主运行时 SQLite 表，key 形如 `task:<task_id>` / `session:<session_key>`，会话行带 channel/chat_id）。**用户/agent 手动暂停的工作不写台账**——只有 shutdown 路径亲自暂停的才写。
 - 每次 shutdown 都会尝试一遍（信号、atexit、`/bootstrap/exit`、lifespan 收尾都会经过 `shutdown_web_runtime`）；已经暂停的工作跳过，因此多次收尾幂等。
 

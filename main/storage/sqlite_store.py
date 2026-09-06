@@ -1186,6 +1186,35 @@ class SQLiteTaskStore:
         )
         return self._task_command_row(row) if row else None
 
+    def list_unfinished_task_commands(
+        self,
+        *,
+        command_type: str | None = None,
+        task_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Commands the worker has not applied yet (pending or claimed).
+
+        Graceful-shutdown pause paths poll this so the web process can prove
+        the worker actually stopped each task actor (the pause command is
+        only finished after the actor unwinds) before killing the worker.
+        """
+        conditions = ["status IN ('pending', 'claimed')"]
+        params: list[str] = []
+        normalized_type = str(command_type or '').strip()
+        if normalized_type:
+            conditions.append('command_type = ?')
+            params.append(normalized_type)
+        normalized_task_id = str(task_id or '').strip()
+        if normalized_task_id:
+            conditions.append('task_id = ?')
+            params.append(normalized_task_id)
+        rows = self._fetchall(
+            f"SELECT command_id, task_id, session_id, command_type, status, claimed_at "
+            f"FROM task_commands WHERE {' AND '.join(conditions)} ORDER BY created_at ASC",
+            tuple(params),
+        )
+        return [dict(row) for row in rows]
+
     def finish_task_command(
         self,
         command_id: str,
