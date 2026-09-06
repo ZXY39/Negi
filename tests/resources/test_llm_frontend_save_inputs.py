@@ -1152,3 +1152,159 @@ def test_handle_detail_save_respects_json_context_window_tokens_when_json_change
     )
 
     assert result["updateConfigPayload"]["parameters"]["context_window_tokens"] == 36555
+
+
+def test_handle_detail_save_multiple_api_keys_sends_concurrency_list() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+
+        global.window = global;
+        global.window.addEventListener = () => {};
+        const jsonText = JSON.stringify({
+          provider_id: "demo-provider",
+          capability: "chat",
+          auth_mode: "api_key",
+          api_key: "key-1,key-2",
+          default_model: "demo-model",
+          parameters: { temperature: 0.4 },
+          extra_headers: {},
+          extra_options: {},
+        });
+        const elements = {
+          "llm-json-editor": { value: jsonText },
+          "llm-binding-retry-on": { value: "network,429,5xx" },
+          "llm-binding-retry-count": { value: "0" },
+          "llm-binding-single-api-key-max-concurrency": { value: "7,7" },
+          "llm-binding-context-window-tokens": { value: "32000" },
+          "llm-binding-image-multimodal-enabled": { checked: false },
+          "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
+          "llm-editor-backdrop": { addEventListener: () => {} },
+          "llm-memory-settings-btn": { addEventListener: () => {} },
+          "llm-config-create-btn": { addEventListener: () => {} },
+          "model-roles-cancel-btn": {},
+        };
+        global.document = {
+          getElementById: (id) => elements[id] || null,
+          querySelector: () => ({}),
+          addEventListener: () => {},
+        };
+        global.S = {
+          modelCatalog: { roleEditing: false },
+          llmCenter: {
+            loading: false,
+            saving: false,
+            error: "",
+            templates: [{ provider_id: "demo-provider", display_name: "Demo", capability: "chat" }],
+            templateMap: { "demo-provider": { provider_id: "demo-provider", display_name: "Demo", capability: "chat" } },
+            templateDetailMap: {},
+            bindings: [{
+              key: "demo_key",
+              capability: "chat",
+              config_id: "cfg-1",
+              llm_config_id: "cfg-1",
+              retry_on: ["network", "429", "5xx"],
+              retry_count: 0,
+              single_api_key_max_concurrency: null,
+              context_window_tokens: 32000,
+              image_multimodal_enabled: false,
+            }],
+            bindingMap: {
+              demo_key: {
+                key: "demo_key",
+                capability: "chat",
+                config_id: "cfg-1",
+                llm_config_id: "cfg-1",
+                retry_on: ["network", "429", "5xx"],
+                retry_count: 0,
+                single_api_key_max_concurrency: null,
+                context_window_tokens: 32000,
+                image_multimodal_enabled: false,
+              },
+            },
+            routes: { ceo: [], execution: [], inspection: [], memory: [] },
+            roleIterations: { ceo: null, execution: null, inspection: null },
+            roleConcurrency: { ceo: null, execution: null, inspection: null },
+            editor: {
+              open: true,
+              mode: "detail",
+              bindingKey: "demo_key",
+              configId: "cfg-1",
+              modelKey: "demo_key",
+              providerId: "demo-provider",
+              jsonText,
+              initialJsonText: jsonText,
+              retryOn: ["network", "429", "5xx"],
+              retryCount: 0,
+              singleApiKeyMaxConcurrency: "7,7",
+              imageMultimodalEnabled: false,
+              initialImageMultimodalEnabled: false,
+              validation: null,
+              probe: null,
+              memory: {
+                loading: false,
+                error: "",
+                embedding: {},
+                rerank: {},
+              },
+            },
+            eventsBound: false,
+          },
+        };
+        global.U = {};
+        let updateBindingPayload = null;
+        global.ApiClient = {
+          validateLlmDraft: async () => ({ valid: true }),
+          probeLlmDraft: async () => ({ success: true, message: "ok" }),
+          updateLlmConfig: async (_configId, payload) => ({ item: payload, runtimeRefresh: null }),
+          updateLlmBinding: async (_modelKey, payload) => {
+            updateBindingPayload = payload;
+            return { item: payload, runtimeRefresh: null };
+          },
+          getLlmTemplates: async () => [],
+          listLlmBindings: async () => ({
+            items: [],
+            routes: { ceo: [], execution: [], inspection: [], memory: [] },
+            roleIterations: { ceo: null, execution: null, inspection: null },
+            roleConcurrency: { ceo: null, execution: null, inspection: null },
+          }),
+        };
+        global.showToast = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.MODEL_SCOPES = [];
+        global.EMPTY_MODEL_ROLES = () => ({ ceo: [], execution: [], inspection: [], memory: [] });
+        global.DEFAULT_ROLE_ITERATIONS = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection: null });
+        global.DEFAULT_MODEL_DEFAULTS = () => ({ ceo: "", execution: "", inspection: "" });
+        global.normalizeAllModelRoles = (value) => value;
+        global.normalizeRoleIterations = (value) => value;
+        global.normalizeRoleConcurrency = (value) => value;
+        global.cloneModelRoles = (value) => value;
+        global.cloneRoleIterations = (value) => value;
+        global.cloneRoleConcurrency = (value) => value;
+        global.syncModelRoleDraftState = () => {};
+        global.hint = () => {};
+        global.setDrawerOpen = () => {};
+        global.icons = () => {};
+        global.enhanceResourceSelects = () => {};
+        let code = fs.readFileSync("g3ku/web/frontend/org_graph_llm.js", "utf8");
+        code = code.replace(
+          "window.__llmTestHooks = {",
+          "window.__llmTestHooks = {\\n    handleDetailSave,"
+        );
+        vm.runInThisContext(code);
+
+        (async () => {
+          await window.__llmTestHooks.handleDetailSave();
+          console.log(JSON.stringify({ updateBindingPayload }));
+        })().catch((error) => {
+          console.log(JSON.stringify({ error: error.message || String(error), updateBindingPayload }));
+          process.exit(1);
+        });
+        """
+    )
+
+    assert "error" not in result
+    assert result["updateBindingPayload"]["single_api_key_max_concurrency"] == [7, 7]

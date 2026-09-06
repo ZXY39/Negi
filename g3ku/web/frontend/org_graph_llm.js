@@ -814,7 +814,11 @@
     if (!Number.isInteger(contextWindowTokens) || contextWindowTokens <= 25000) {
       throw new Error("最大上下文TOKEN必须是大于 25000 的整数");
     }
-    if (singleApiKeyMaxConcurrency !== null && (!Number.isInteger(singleApiKeyMaxConcurrency) || singleApiKeyMaxConcurrency < 1)) {
+    if (
+      singleApiKeyMaxConcurrency !== null &&
+      !Array.isArray(singleApiKeyMaxConcurrency) &&
+      (!Number.isInteger(singleApiKeyMaxConcurrency) || singleApiKeyMaxConcurrency < 1)
+    ) {
       throw new Error("single_api_key_max_concurrency must be >= 1");
     }
     const reasoningRaw = trim(editor?.reasoningEffort);
