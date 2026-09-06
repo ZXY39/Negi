@@ -222,8 +222,11 @@ class SecretOverlayStore:
         try:
             decrypted = _fernet_from_key(master_key).decrypt(path.read_bytes())
             payload = json.loads(decrypted.decode("utf-8"))
-        except Exception:
-            return {}
+        except Exception as exc:
+            # A present-but-undecryptable overlay means the caller holds the
+            # wrong master key. Raising (instead of degrading to {}) is what
+            # stops a later persist from destroying data this key cannot read.
+            raise ValueError("secret_overlay_decrypt_failed") from exc
         return payload if isinstance(payload, dict) else {}
 
     def save(self, *, master_key: str, payload: dict[str, Any]) -> None:
@@ -263,6 +266,7 @@ class BootstrapSecurityService:
         self._overlay_store = SecretOverlayStore(self.workspace)
         self._active_master_key: str | None = None
         self._overlay_cache: dict[str, Any] = {}
+        self._overlay_unverified: bool = False
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -397,6 +401,7 @@ class BootstrapSecurityService:
         with self._lock:
             self._active_master_key = None
             self._overlay_cache = {}
+            self._overlay_unverified = False
             return self.status()
 
     def legacy_detected(self) -> bool:
@@ -407,14 +412,28 @@ class BootstrapSecurityService:
         with self._lock:
             return self._migrate_legacy_state(dry_run=True)
 
-    def _activate(self, *, master_key: str) -> None:
+    def _activate(self, *, master_key: str, replace_overlay: bool = False) -> None:
         self._active_master_key = master_key
-        self._overlay_cache = self._overlay_store.load(master_key=master_key)
-        self._persist_active_overlay()
+        try:
+            self._overlay_cache = self._overlay_store.load(master_key=master_key)
+        except ValueError:
+            # Present overlay that this master key cannot decrypt: the caller
+            # holds the wrong key. Stay usable in read-none mode but never
+            # persist — persisting here would destroy data owned by another
+            # key (this exact path wiped a real workspace's apikey overlay).
+            self._overlay_cache = {}
+            self._overlay_unverified = True
+            return
+        self._overlay_unverified = False
+        self._persist_active_overlay(replace_overlay=replace_overlay)
 
-    def _persist_active_overlay(self) -> None:
+    def _persist_active_overlay(self, *, replace_overlay: bool = False) -> None:
         if self._active_master_key is None:
             raise ValueError("project is locked")
+        if self._overlay_unverified and not replace_overlay:
+            raise ValueError(
+                "secret overlay is undecryptable with the current master key; refusing to overwrite"
+            )
         self._overlay_store.save(master_key=self._active_master_key, payload=self._overlay_cache)
 
     def _create_single_envelope(self, *, password: str, master_key: str | None = None) -> dict[str, Any]:

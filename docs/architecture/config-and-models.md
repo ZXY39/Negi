@@ -191,6 +191,7 @@ G3KU 的模型系统分两层：
 
 - 如果你看到某个 config record 没有明文 api key，不代表配置丢了
 - 排查模型鉴权问题时，不能只看 JSON 文件
+- 覆盖层防护：激活用的 master key 无法解密已存在的覆盖层时，服务进入只读空视图，任何持久化都会被拒绝——错误密钥只能「读不到」，不能「写掉」别人的数据（tests/test_security_overlay_guard.py 锁定该契约）
 
 ## 9. China bridge 配置
 
