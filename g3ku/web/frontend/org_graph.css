@@ -5755,7 +5755,10 @@ textarea {
 .app-toast-viewport {
     position: fixed;
     top: calc(env(safe-area-inset-top, 0px) + 20px);
-    left: 0;
+    /* Center over the main content area, not the full window: the 160px
+       sidebar (.sidebar width) would otherwise make the toast look
+       left-shifted relative to what the user is looking at. */
+    left: 160px;
     right: 0;
     display: flex;
     justify-content: center;
@@ -5763,6 +5766,14 @@ textarea {
     padding: 0 24px;
     z-index: 1400;
     pointer-events: none;
+}
+
+/* Narrow layout stacks the sidebar above content, so the toast returns to
+   full-window centering. Declared after the base rule so it wins. */
+@media (max-width: 480px) {
+    .app-toast-viewport {
+        left: 0;
+    }
 }
 
 .app-toast {
@@ -5829,36 +5840,6 @@ textarea {
 .app-toast-text {
     color: var(--text-secondary);
     font-size: 0.875rem;
-}
-
-.app-toast-progress {
-    width: 100%;
-    height: 4px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-hover) 84%, transparent);
-    overflow: hidden;
-}
-
-.app-toast-progress-bar {
-    display: block;
-    width: 100%;
-    height: 100%;
-    border-radius: inherit;
-    background-color: var(--brand-primary);
-    transform-origin: left center;
-    transform: scaleX(1);
-}
-
-.app-toast-progress-bar.is-indeterminate {
-    width: 38%;
-    transform: translateX(-120%);
-    animation: toast-progress-indeterminate 1.1s ease-in-out infinite;
-}
-
-@keyframes toast-progress-indeterminate {
-    0% { transform: translateX(-120%); }
-    55% { transform: translateX(85%); }
-    100% { transform: translateX(260%); }
 }
 
 .app-toast-close {
@@ -7513,6 +7494,90 @@ textarea {
 
 @media (prefers-reduced-motion: reduce) {
     .pc-metric-value.is-increasing {
+        animation: none;
+    }
+}
+
+/* 任务卡片内的同步暂停提示：暂停中 (x/x) + spinner + 恢复运行 → 暂停成功 */
+.pc-pause-hint {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border-color));
+    background: color-mix(in srgb, var(--warning) 10%, var(--bg-app));
+    font-size: 0.78rem;
+    line-height: 1.3;
+}
+
+.pc-pause-hint-spinner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--warning);
+    flex-shrink: 0;
+}
+
+.pc-pause-hint-spinner svg {
+    width: 14px;
+    height: 14px;
+    animation: interaction-step-icon-spin 0.9s linear infinite;
+}
+
+.pc-pause-hint-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--success);
+    flex-shrink: 0;
+}
+
+.pc-pause-hint-icon svg {
+    width: 14px;
+    height: 14px;
+}
+
+.pc-pause-hint-text {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+    color: color-mix(in srgb, var(--warning) 82%, var(--text-primary));
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.pc-pause-hint-resume {
+    flex-shrink: 0;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--success) 45%, var(--border-color));
+    background: color-mix(in srgb, var(--success) 14%, var(--bg-panel));
+    color: color-mix(in srgb, var(--success) 85%, var(--text-primary));
+    font-size: 0.74rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.pc-pause-hint-resume:hover {
+    background: color-mix(in srgb, var(--success) 24%, var(--bg-panel));
+    border-color: color-mix(in srgb, var(--success) 65%, var(--border-color));
+}
+
+.pc-pause-hint.is-done {
+    border-color: color-mix(in srgb, var(--success) 45%, var(--border-color));
+    background: color-mix(in srgb, var(--success) 10%, var(--bg-app));
+}
+
+.pc-pause-hint.is-done .pc-pause-hint-text {
+    color: color-mix(in srgb, var(--success) 85%, var(--text-primary));
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pc-pause-hint-spinner svg {
         animation: none;
     }
 }

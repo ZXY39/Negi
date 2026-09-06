@@ -7,6 +7,7 @@ import pytest
 
 from g3ku.heartbeat.session_service import WebSessionHeartbeatService
 from main.models import NodeRecord, TaskRecord, TokenUsageSummary
+from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 
@@ -241,6 +242,120 @@ def test_release_task_worker_lease_durably_removes_stale_lease_row(tmp_path: Pat
     assert service.release_task_worker_lease_durably() is True
     assert service.store.get_worker_lease("task_worker") is None
     assert service.release_task_worker_lease_durably() is False
+    service.close()
+
+
+# ---------------------------------------------------------------------------
+# synchronous UI pause: pause-state drain payload
+# ---------------------------------------------------------------------------
+
+def _make_web_service_with_paused_task(tmp_path: Path) -> MainRuntimeService:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    _seed_task(service, "task:ui-pause", "node:ui-root", is_paused=True)
+    frames = [
+        service.log_service._default_frame(node_id="node:ui-root", depth=0, node_kind="execution", phase="before_model"),
+        service.log_service._default_frame(node_id="node:ui-child", depth=1, node_kind="execution", phase="waiting_tool_results"),
+    ]
+    service.log_service.replace_runtime_frames(
+        "task:ui-pause",
+        frames=frames,
+        active_node_ids=["node:ui-root"],
+        runnable_node_ids=["node:ui-child"],
+        waiting_node_ids=[],
+        publish_snapshot=False,
+    )
+    return service
+
+
+def _mark_worker_online(service: MainRuntimeService) -> None:
+    service.store.upsert_worker_status(
+        worker_id="worker:live",
+        role="task_worker",
+        status="running",
+        updated_at=now_iso(),
+        payload={"execution_mode": "worker"},
+    )
+
+
+def _enqueue_pause_command(service: MainRuntimeService, *, command_id: str = "cmd:pause-1") -> None:
+    service.store.enqueue_task_command(
+        command_id=command_id,
+        task_id="task:ui-pause",
+        session_id="web:shared",
+        command_type="pause_task",
+        created_at=now_iso(),
+        payload={"task_id": "task:ui-pause"},
+    )
+
+
+def test_pause_state_reports_draining_while_worker_command_unfinished(tmp_path: Path) -> None:
+    service = _make_web_service_with_paused_task(tmp_path)
+    _mark_worker_online(service)
+    _enqueue_pause_command(service)
+
+    payload = service.get_task_pause_state_payload("task:ui-pause")
+
+    assert payload is not None
+    assert payload["draining"] is True
+    assert payload["is_paused"] is True
+    assert payload["internal_total"] == 2
+    assert payload["internal_stopped"] == 0
+    service.close()
+
+
+def test_pause_state_flips_to_stopped_when_command_finishes(tmp_path: Path) -> None:
+    service = _make_web_service_with_paused_task(tmp_path)
+    _mark_worker_online(service)
+    _enqueue_pause_command(service)
+    service.store.finish_task_command("cmd:pause-1", finished_at=now_iso(), success=True)
+
+    payload = service.get_task_pause_state_payload("task:ui-pause")
+
+    assert payload is not None
+    assert payload["draining"] is False
+    assert payload["internal_total"] == 2
+    assert payload["internal_stopped"] == 2
+    service.close()
+
+
+def test_pause_state_not_draining_when_worker_offline(tmp_path: Path) -> None:
+    service = _make_web_service_with_paused_task(tmp_path)
+    _enqueue_pause_command(service)
+
+    payload = service.get_task_pause_state_payload("task:ui-pause")
+
+    assert payload is not None
+    assert payload["worker_state"] == "offline"
+    assert payload["draining"] is False
+    assert payload["internal_stopped"] == payload["internal_total"]
+    service.close()
+
+
+def test_pause_state_requires_paused_flags(tmp_path: Path) -> None:
+    service = _make_web_service_with_paused_task(tmp_path)
+    _mark_worker_online(service)
+    _enqueue_pause_command(service)
+    # Resume clears the flags: the pending command must no longer render as draining.
+    service.log_service.set_pause_state("task:ui-pause", pause_requested=False, is_paused=False)
+
+    payload = service.get_task_pause_state_payload("task:ui-pause")
+
+    assert payload is not None
+    assert payload["draining"] is False
+    service.close()
+
+
+def test_pause_state_unknown_task_returns_none(tmp_path: Path) -> None:
+    service = _make_web_service_with_paused_task(tmp_path)
+    assert service.get_task_pause_state_payload("task:missing") is None
     service.close()
 
 

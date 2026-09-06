@@ -541,6 +541,14 @@ class ApiClient {
         return data.task || null;
     }
 
+    static async getTaskPauseState(taskId) {
+        const data = await this._request("GET", `/api/tasks/${taskId}/pause-state`, {
+            requestKey: `tasks:pause-state:${taskId}`,
+            timeoutMs: 5000,
+        });
+        return data.item || null;
+    }
+
 
     static async cancelTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/cancel`);

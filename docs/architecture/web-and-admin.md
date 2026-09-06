@@ -317,6 +317,7 @@ The backend contract behind that UI behavior is:
 - When a node has an active or waiting child, the browser uses the shared centered confirmation modal (not a native dialog), explaining that pausing the parent does not stop children and exposing an unchecked `同时暂停所有子节点（包括检验节点）` option; confirming sends the node-pause request with `cascade` equal to that checkbox, cancelling sends nothing.
 - During task-level pause, the tree displays every non-terminal node as `任务暂停` via frontend projection; node pause fields remain unchanged, and recovery reveals any pre-existing node pause.
 - The `错误日志` drawer reads `GET /api/tasks/{task_id}/error-log`, shows time, node, and error text, and treats the node id as a navigation target. Clicking it expands ancestors when possible, centers the tree node, and applies a one-shot highlight. Pause/resume changes arrive through the task-node patch/snapshot path, not by reconstructing state from raw storage tables.
+- Task pause is a synchronous experience with an in-card hint: after a single-card or batch `pause` request succeeds, that task's card renders a small hint box (not a page-top toast) showing `暂停中 (stopped/total)` with a spinning icon and a `恢复运行` button while the backend reports draining, and switching to `暂停成功` (auto-hidden after ~2.5s) once draining ends; the page-top success toast is suppressed for pause actions because the hint owns that feedback. Truth comes from `GET /api/tasks/{task_id}/pause-state` (`internal_total` / `internal_stopped` / `draining`), polled every 400ms with a ~30s cap: `draining` is true only while that task's `pause_task` command is still unfinished and a live worker exists, so `暂停成功` means the worker actors truly stopped rather than only the durable flags being set. Count updates patch the hint text in place; phase changes re-render the grid through the card render signature. The `恢复运行` button runs the ordinary resume path — worker command FIFO guarantees the resume lands after any still-pending pause command.
 
 ### Node Detail Error History
 
@@ -334,6 +335,7 @@ The backend contract behind that UI behavior is:
 ### Task Recovery Notice UI Contract
 
 - 「本任务遇到异常停止，已回退到稳定步骤继续。」（`task.metadata.recovery_notice`）以全局 toast 呈现，不再是任务树内的内联气泡：打开对应任务或该任务数据刷新时弹出一次，`kind=warn`、persistent（不自动消失），标题「任务自动恢复」。
+- 全局 toast 的外观合同（所有 toast 共用）：文案下方不再渲染进度条（persistent 与非 persistent 一视同仁）；toast 视口在桌面布局下以主内容区为居中基准（`left` 偏移等于侧栏宽度 160px），窄屏（≤480px，侧栏改为顶部堆叠）回落到整窗居中；垂直位置（顶部 20px + safe-area）不变。
 - 用户可以点击关闭：点击 toast 任意位置（含右上角关闭按钮）即关闭，并把该任务记入本次页面会话的 dismissed 集合——同一任务不再重复弹出；切换到其他带提示的任务仍会弹出自己的提示。
 - 若 toast 在用户关闭前被其他提示覆盖，下一次任务树渲染会重新弹出该提示（显示状态按“当前显示的提示文本”去重，而不是按“曾经显示过”）。
 - 提示是否出现由后端元数据决定：只有非优雅中断后的恢复清洗写 `recovery_notice`；优雅暂停 + 自动恢复不产生该提示。生命周期语义见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」。

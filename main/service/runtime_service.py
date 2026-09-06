@@ -1499,6 +1499,58 @@ class MainRuntimeService:
         logger.info("task worker lease released during graceful shutdown (worker_id={})", worker_id)
         return True
 
+    def get_task_pause_state_payload(self, task_id: str) -> dict[str, Any] | None:
+        """Pause-drain visibility for the task-card synchronous pause hint.
+
+        `draining` is true only while this task's `pause_task` command is
+        still unfinished AND a live worker (online/starting) can process it —
+        i.e. actors may still be running even though the durable paused flags
+        are already set. A stale/offline worker never drains, so the durable
+        flags are the truth there. `internal_total` counts non-terminal
+        runtime frames (active ∪ runnable ∪ waiting); frame rows persist for
+        resume, so `internal_stopped` mirrors the total once draining ends.
+        """
+        task_id = self.normalize_task_id(task_id)
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        runtime_state = self.log_service.read_runtime_state(task_id) or {}
+        internal_ids: set[str] = set()
+        for key in ('active_node_ids', 'runnable_node_ids', 'waiting_node_ids'):
+            for item in list(runtime_state.get(key) or []):
+                node_id = str(item or '').strip()
+                if node_id:
+                    internal_ids.add(node_id)
+        internal_total = len(internal_ids)
+        worker_state = self.worker_state()
+        draining = False
+        status = str(task.status or '').strip().lower()
+        if (
+            status == 'in_progress'
+            and (bool(task.is_paused) or bool(task.pause_requested))
+            and self.execution_mode == 'web'
+            and worker_state in {_WORKER_STATE_ONLINE, _WORKER_STATE_STARTING}
+        ):
+            try:
+                unfinished = [
+                    item
+                    for item in self.store.list_unfinished_task_commands(command_type='pause_task')
+                    if str(item.get('task_id') or '').strip() == task_id
+                ]
+            except Exception:
+                unfinished = []
+            draining = bool(unfinished)
+        return {
+            'task_id': task_id,
+            'status': str(task.status or ''),
+            'is_paused': bool(task.is_paused),
+            'pause_requested': bool(task.pause_requested),
+            'draining': draining,
+            'internal_total': internal_total,
+            'internal_stopped': 0 if draining else internal_total,
+            'worker_state': str(worker_state or ''),
+        }
+
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
         if self.execution_mode in {'embedded', 'worker'}:

@@ -521,6 +521,146 @@ async function copyTaskId(taskId) {
 }
 
 
+// 任务卡片同步暂停提示：点击暂停后卡片内显示「暂停中 (x/x)」+ spinner + 恢复运行，
+// 轮询 /api/tasks/{id}/pause-state 直到 worker 真实停完（draining=false）才显示
+// 「暂停成功」。draining 的判定是 pause_task 命令是否已被 worker 消费完成——命令
+// 完成意味着 actor 已经停止，不只是落盘标志先行。
+const TASK_PAUSE_HINT_POLL_MS = 400;
+const TASK_PAUSE_HINT_POLL_TIMEOUT_MS = 30000;
+const TASK_PAUSE_HINT_DONE_HIDE_MS = 2500;
+
+function taskPauseHintState(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return null;
+    S.taskPauseHints = S.taskPauseHints || {};
+    return S.taskPauseHints[key] || null;
+}
+
+function taskPauseHintDrainText(hint) {
+    if (!hint || hint.phase !== "draining") return "";
+    if (!Number.isFinite(hint.total)) return "暂停中...";
+    return `暂停中 (${Number(hint.stopped || 0)}/${Number(hint.total || 0)})`;
+}
+
+function taskPauseHintMarkup(taskId) {
+    const hint = taskPauseHintState(taskId);
+    if (!hint) return "";
+    const key = String(taskId || "");
+    if (hint.phase === "paused") {
+        return `
+            <div class="pc-pause-hint is-done" data-task-pause-hint="${esc(key)}" role="status" aria-live="polite">
+                <span class="pc-pause-hint-icon" aria-hidden="true"><i data-lucide="circle-check"></i></span>
+                <span class="pc-pause-hint-text">暂停成功</span>
+            </div>`;
+    }
+    return `
+        <div class="pc-pause-hint" data-task-pause-hint="${esc(key)}" role="status" aria-live="polite">
+            <span class="pc-pause-hint-spinner" aria-hidden="true"><i data-lucide="loader-circle"></i></span>
+            <span class="pc-pause-hint-text">${esc(taskPauseHintDrainText(hint))}</span>
+            <button class="pc-pause-hint-resume" type="button" data-task-pause-resume="${esc(key)}">恢复运行</button>
+        </div>`;
+}
+
+function stopTaskPauseHintPolling(taskId) {
+    const hint = taskPauseHintState(taskId);
+    if (!hint) return;
+    if (hint.pollTimer) {
+        window.clearTimeout(hint.pollTimer);
+        hint.pollTimer = null;
+    }
+}
+
+function clearTaskPauseHint(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    const hint = taskPauseHintState(key);
+    if (hint) {
+        stopTaskPauseHintPolling(key);
+        if (hint.hideTimer) {
+            window.clearTimeout(hint.hideTimer);
+            hint.hideTimer = null;
+        }
+    }
+    S.taskPauseHints = S.taskPauseHints || {};
+    delete S.taskPauseHints[key];
+}
+
+function updateTaskPauseHintElement(taskId) {
+    // 轮询期间只做定点文本更新，避免每 400ms 全量重建卡片网格。
+    const key = String(taskId || "").trim();
+    const hint = taskPauseHintState(key);
+    if (!hint || hint.phase !== "draining") return;
+    const card = U.taskGrid?.querySelector?.(`.project-card[data-task-id="${CSS.escape(key)}"]`);
+    const textEl = card?.querySelector?.("[data-task-pause-hint] .pc-pause-hint-text");
+    if (textEl) textEl.textContent = taskPauseHintDrainText(hint);
+}
+
+function finishTaskPauseHint(taskId) {
+    const key = String(taskId || "").trim();
+    const hint = taskPauseHintState(key);
+    if (!hint) return;
+    stopTaskPauseHintPolling(key);
+    hint.phase = "paused";
+    if (Number.isFinite(hint.total)) hint.stopped = hint.total;
+    renderTasksIfVisible();
+    hint.hideTimer = window.setTimeout(() => {
+        clearTaskPauseHint(key);
+        renderTasksIfVisible();
+    }, TASK_PAUSE_HINT_DONE_HIDE_MS);
+}
+
+async function pollTaskPauseState(taskId) {
+    const key = String(taskId || "").trim();
+    const hint = taskPauseHintState(key);
+    if (!hint || hint.phase !== "draining") return;
+    let payload = null;
+    try {
+        payload = await ApiClient.getTaskPauseState(key);
+    } catch (error) {
+        payload = null;
+    }
+    const current = taskPauseHintState(key);
+    if (!current || current.phase !== "draining") return;
+    if (payload) {
+        current.total = Number(payload.internal_total || 0);
+        current.stopped = Number(payload.internal_stopped || 0);
+        if (!payload.draining && !payload.is_paused && !payload.pause_requested) {
+            // 任务已被别处恢复（或暂停未生效）：撤掉提示。
+            clearTaskPauseHint(key);
+            renderTasksIfVisible();
+            return;
+        }
+        if (!payload.draining) {
+            finishTaskPauseHint(key);
+            return;
+        }
+    }
+    if (Date.now() - Number(current.startedAt || 0) > TASK_PAUSE_HINT_POLL_TIMEOUT_MS) {
+        // 落盘暂停标志早已生效；worker 卡住时不再无限等待。
+        finishTaskPauseHint(key);
+        return;
+    }
+    updateTaskPauseHintElement(key);
+    current.pollTimer = window.setTimeout(() => { void pollTaskPauseState(key); }, TASK_PAUSE_HINT_POLL_MS);
+}
+
+function beginTaskPauseHint(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    clearTaskPauseHint(key);
+    S.taskPauseHints = S.taskPauseHints || {};
+    S.taskPauseHints[key] = {
+        phase: "draining",
+        total: null,
+        stopped: 0,
+        startedAt: Date.now(),
+        pollTimer: null,
+        hideTimer: null,
+    };
+    renderTasksIfVisible();
+    void pollTaskPauseState(key);
+}
+
 function taskGridRenderSignature(meta) {
     const visibleItems = Array.isArray(meta?.items) ? meta.items : [];
     return JSON.stringify({
@@ -544,6 +684,7 @@ function taskGridRenderSignature(meta) {
                 statusKey: taskStatusKey(task),
                 statusLabel: taskStatusLabel(task),
                 createdAt: taskCreatedAtText(task),
+                pauseHintPhase: String(taskPauseHintState(taskId)?.phase || ""),
                 tokenUsage: tokenUsage.tracked
                     ? [tokenUsage.input_tokens, tokenUsage.output_tokens, tokenUsage.cache_hit_tokens]
                     : [null, null, null],
@@ -649,6 +790,7 @@ function renderTasks() {
             <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
             <div class="pc-metrics">${metricsMarkup}</div>
+            ${taskPauseHintMarkup(taskId)}
         `;
         const toggle = el.querySelector(".project-select-toggle");
         const checkbox = el.querySelector(".project-select-checkbox");
@@ -674,6 +816,14 @@ function renderTasks() {
             e.stopPropagation();
             closeTaskCardMenus();
             await runTaskAction(taskId, btn.dataset.taskCardAction, { returnFocus: menuTrigger || btn });
+        }));
+        el.querySelectorAll("[data-task-pause-resume]").forEach((btn) => btn.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            // 暂停排水期间点击恢复：立即撤提示并恢复任务（后端命令 FIFO 保证
+            // resume 排在未处理的 pause 之后生效）。
+            clearTaskPauseHint(taskId);
+            renderTasksIfVisible();
+            await performTaskAction(taskId, "resume");
         }));
         el.addEventListener("click", () => {
             if (S.multiSelectMode) {
@@ -861,8 +1011,15 @@ async function performTaskAction(taskId, action) {
     renderTasksIfVisible();
     try {
         const result = await requestTaskAction(taskId, action);
-        const successText = taskId;
-        showToast({ title: taskActionSuccessTitle(action), text: successText, kind: "success" });
+        if (action === "pause") {
+            // 同步暂停：卡片内提示跟踪 worker 真实排水进度，直到 actor 停完
+            // 才显示「暂停成功」；不再用页面顶部 toast 提前宣告成功。
+            beginTaskPauseHint(taskId);
+        } else {
+            if (action === "resume") clearTaskPauseHint(taskId);
+            const successText = taskId;
+            showToast({ title: taskActionSuccessTitle(action), text: successText, kind: "success" });
+        }
         await loadTasks();
         if (action === "delete") {
             handleDeletedTasks([taskId]);
@@ -965,6 +1122,14 @@ async function performTaskBatchAction(action, eligible) {
             await loadTaskDetail(S.currentTaskId, { preserveView: true, reopenSocket: false });
             await loadTaskArtifacts();
         }
+        if (action === "pause") {
+            // 与单卡暂停一致：每个成功请求暂停的任务在卡片内跟踪真实排水，
+            // 成功后由提示框显示「暂停成功」，这里不再提前弹顶部 toast。
+            succeeded.forEach((taskId) => beginTaskPauseHint(taskId));
+        }
+        if (action === "resume") {
+            succeeded.forEach((taskId) => clearTaskPauseHint(taskId));
+        }
         if (failed.length && !succeeded.length) {
             if (failed.some((item) => Number(item?.error?.status || 0) === 503)) {
                 void refreshTaskWorkerStatus({ render: S.view === "tasks" });
@@ -987,11 +1152,14 @@ async function performTaskBatchAction(action, eligible) {
         const successText = action === "delete"
             ? `已删除 ${succeeded.length} 个任务`
             : `${succeeded.length} 个任务已${taskActionText(action)}`;
-        showToast({
-            title: taskActionSuccessTitle(action),
-            text: successText,
-            kind: "success",
-        });
+        if (action !== "pause") {
+            // 批量暂停的成功反馈由各卡片内的「暂停中→暂停成功」提示承担。
+            showToast({
+                title: taskActionSuccessTitle(action),
+                text: successText,
+                kind: "success",
+            });
+        }
         if (failed.some((item) => Number(item?.error?.status || 0) === 503)) {
             void refreshTaskWorkerStatus({ render: S.view === "tasks" });
         }

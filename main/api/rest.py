@@ -219,6 +219,23 @@ async def resume_task(task_id: str):
     return {'ok': True, 'task': record.model_dump(mode='json')}
 
 
+@router.get('/tasks/{task_id}/pause-state')
+async def get_task_pause_state(task_id: str):
+    """Pause-drain state for the synchronous task-card pause hint.
+
+    `draining=true` means the worker has not finished stopping this task's
+    actors yet even though the durable paused flags are set; the card keeps
+    showing 暂停中 until draining flips to false.
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    payload = service.get_task_pause_state_payload(service.normalize_task_id(task_id))
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, 'item': payload}
+
+
 @router.post('/tasks/{task_id}/cancel')
 async def cancel_task(task_id: str):
     task_id = _ensure_task_route_id(task_id)

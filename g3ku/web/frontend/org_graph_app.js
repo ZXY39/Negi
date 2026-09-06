@@ -516,8 +516,6 @@ const U = {
     toast: document.getElementById("app-toast"),
     toastTitle: document.getElementById("app-toast-title"),
     toastText: document.getElementById("app-toast-text"),
-    toastProgress: document.getElementById("app-toast-progress"),
-    toastProgressBar: document.getElementById("app-toast-progress-bar"),
     toastClose: document.getElementById("app-toast-close"),
     confirmBackdrop: document.getElementById("confirm-backdrop"),
     confirmTitle: document.getElementById("confirm-title"),
@@ -6168,15 +6166,10 @@ function closeToast() {
     U.toast.hidden = true;
     U.toast.className = "app-toast";
     if (U.toastClose) U.toastClose.hidden = false;
-    if (U.toastProgressBar) {
-        U.toastProgressBar.className = "app-toast-progress-bar";
-        U.toastProgressBar.style.transition = "none";
-        U.toastProgressBar.style.transform = "scaleX(1)";
-    }
 }
 
 function showToast({ title = "操作成功", text = "修改已生效", kind = "success", durationMs = 3000, persistent = false } = {}) {
-    if (!U.toast || !U.toastTitle || !U.toastText || !U.toastProgress || !U.toastProgressBar || !U.toastClose) return;
+    if (!U.toast || !U.toastTitle || !U.toastText || !U.toastClose) return;
     clearToastTimers();
     const sticky = persistent || durationMs <= 0;
     U.toastTitle.textContent = title;
@@ -6184,19 +6177,7 @@ function showToast({ title = "操作成功", text = "修改已生效", kind = "s
     U.toast.hidden = false;
     U.toast.setAttribute("role", kind === "error" ? "alert" : "status");
     U.toastClose.hidden = false;
-    U.toastProgress.hidden = false;
-    U.toastProgressBar.className = "app-toast-progress-bar";
-    U.toastProgressBar.style.transition = "none";
-    U.toastProgressBar.style.transform = "scaleX(1)";
-    if (sticky) {
-        U.toastProgressBar.classList.add("is-indeterminate");
-    } else {
-        window.requestAnimationFrame(() => {
-            window.requestAnimationFrame(() => {
-                U.toastProgressBar.style.transition = `transform ${durationMs}ms linear`;
-                U.toastProgressBar.style.transform = "scaleX(0)";
-            });
-        });
+    if (!sticky) {
         S.toastState.timeoutId = window.setTimeout(closeToast, durationMs);
     }
     U.toast.className = `app-toast is-open is-${kind}`;
