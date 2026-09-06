@@ -742,8 +742,8 @@ function renderTasks() {
         const tokenUsage = taskTokenDisplayUsage(task);
         const previousMetrics = S.taskMetricSnapshot?.[taskId] || null;
         const metricItems = [
-            { key: "input_tokens", label: "输入Token", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
-            { key: "output_tokens", label: "输出Token", value: tokenUsage.tracked ? tokenUsage.output_tokens : null },
+            { key: "input_tokens", label: "总输入", value: tokenUsage.tracked ? tokenUsage.input_tokens : null },
+            { key: "output_tokens", label: "总输出", value: tokenUsage.tracked ? tokenUsage.output_tokens : null },
             { key: "cache_hit_tokens", label: "缓存命中", value: tokenUsage.tracked ? tokenUsage.cache_hit_tokens : null },
         ];
         nextTaskMetricSnapshot[taskId] = tokenUsage.tracked ? {

@@ -8985,8 +8985,8 @@ function taskTokenSummaryLine(usage) {
     if (!data.tracked) return "历史任务未统计";
     if (!data.call_count) return "尚未发生模型调用";
     const parts = [
-        `输入Token ${formatTokenCount(data.input_tokens)}`,
-        `输出Token ${formatTokenCount(data.output_tokens)}`,
+        `总输入 ${formatTokenCount(data.input_tokens)}`,
+        `总输出 ${formatTokenCount(data.output_tokens)}`,
         `缓存命中 ${formatTokenCount(data.cache_hit_tokens)}`,
     ];
     if (data.is_partial) parts.push("部分缺失");
