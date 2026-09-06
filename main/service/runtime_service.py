@@ -830,7 +830,7 @@ class MainRuntimeService:
                     result_payload = await self._apply_fail_node_command(
                         task_id,
                         node_ids=list(payload.get('node_ids') or []),
-                        reason=str(payload.get('reason') or ''),
+                        reason=str(payload.get('reason') or payload.get('remark') or ''),
                         force=True,
                     )
                 success = True
@@ -1408,13 +1408,20 @@ class MainRuntimeService:
                 self.log_service.register_node_pause(normalized_task_id, node_id, pause_reason=row.pause_reason, remark=str(remark or ''), delivered=bool(row.delivered))
             applied = {'items': [{'node_id': node_id, 'result': 'kept_paused', 'remark': str(remark or '')} for node_id in valid_ids]}
         results.extend(list(applied.get('items') or []))
-        if self.execution_mode == 'web' and valid_ids:
+        # keep_paused is applied leader-locally and has no worker command type;
+        # enqueuing one here previously fell through to fail_node and terminated
+        # the node that was meant to stay paused.
+        if self.execution_mode == 'web' and valid_ids and action != 'keep_paused':
             command_type = 'pause_node' if action == 'pause' else ('resume_node' if action == 'resume' else 'fail_node')
             self._enqueue_task_command(
                 command_type=command_type,
                 task_id=normalized_task_id,
                 session_id=task.session_id,
-                payload={'node_ids': valid_ids, 'reason': 'agent' if action == 'pause' else '', 'remark': str(remark or '')},
+                payload={
+                    'node_ids': valid_ids,
+                    'reason': 'agent' if action == 'pause' else (str(remark or '') if action == 'fail' else ''),
+                    'remark': str(remark or ''),
+                },
             )
         return {'ok': True, 'task_id': normalized_task_id, 'action': action, 'items': results}
 

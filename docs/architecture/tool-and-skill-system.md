@@ -206,6 +206,7 @@ promotion 与前门状态：
 
 - `action` 取 `resume`、`keep_paused`、`fail`、`pause`。`keep_paused` 必须提供非空 `remark`；该备注写入节点暂停登记，供后续 heartbeat 决策使用。
 - `resume` 清除暂停并让运行中的 dispatcher 从持久化 runtime frame 续跑；`fail` 将暂停节点置为终态并释放父节点等待；`pause` 以 `pause_reason=agent` 登记 agent 发起的暂停。
+- web 模式下只有 `resume` / `fail` / `pause` 会入队 worker 命令（`resume_node` / `fail_node` / `pause_node`，worker 无 `keep_paused` 命令类型）；`keep_paused` 是 leader 本地操作，不产生任何 worker 命令。`fail` 的备注随命令下发并作为失败原因兜底；命令派发细节见 `runtime-overview.md`「Node-Level Pause and Recovery」。
 - 工具层只负责参数与结果契约，节点暂停的安全边界、future 等待和恢复语义归 `runtime-overview.md`「Node-Level Pause and Recovery」；错误暂停事件的投递归 `heartbeat-system.md`「Task Node Error Delivery」。不要通过普通 task 工具或直接改 SQLite 表替代此入口。
 
 ## 4. 一条从上下文到 callable tools 的链路

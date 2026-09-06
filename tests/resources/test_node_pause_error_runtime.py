@@ -571,6 +571,82 @@ async def test_control_nodes_support_cascade_actions_and_keep_paused_remark(tmp_
 
 
 @pytest.mark.asyncio
+async def test_control_nodes_keep_paused_in_web_mode_enqueues_no_fail_command(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("keep paused web", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        await service.pause_node(record.task_id, root.node_id, reason="manual")
+
+        before = service.store.list_unfinished_task_commands(task_id=record.task_id)
+        kept = await service.control_nodes(record.task_id, [root.node_id], "keep_paused", remark="等待用户决策")
+        after = service.store.list_unfinished_task_commands(task_id=record.task_id)
+        assert kept["items"][0]["result"] == "kept_paused"
+        assert len(after) == len(before)
+        assert all(command["command_type"] != "fail_node" for command in after)
+        latest = service.get_node(root.node_id)
+        assert latest is not None and latest.status == "in_progress" and latest.pause_requested is True
+        pause_row = service.store.get_task_node_pause(root.node_id)
+        assert pause_row is not None and pause_row.remark == "等待用户决策"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_fail_node_command_falls_back_to_remark_reason(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("worker fail fallback", session_id="web:shared")
+        node = service.get_node(record.root_node_id)
+        assert node is not None
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            node.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="error",
+            remark="provider unavailable",
+        )
+        # The web leader enqueues fail_node with remark but an empty reason; the
+        # worker must fall back to the remark instead of stamping the generic
+        # "failed by operator" default.
+        await service._process_worker_command(
+            {
+                "command_id": "command:keep-paused-regression",
+                "command_type": "fail_node",
+                "task_id": record.task_id,
+                "payload": {"node_ids": [node.node_id], "reason": "", "remark": "401 认证失败不可自动恢复"},
+            }
+        )
+        latest = service.get_node(node.node_id)
+        assert latest is not None and latest.status == "failed"
+        assert latest.failure_reason == "401 认证失败不可自动恢复"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_fail_in_web_mode_enqueues_remark_as_reason(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("fail web payload", session_id="web:shared")
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        await service.pause_node(record.task_id, root.node_id, reason="manual")
+        await service.control_nodes(record.task_id, [root.node_id], "fail", remark="认证类错误不可自动恢复")
+        commands = service.store.list_unfinished_task_commands(command_type="fail_node", task_id=record.task_id)
+        assert len(commands) == 1
+        row = service.store.get_task_command(commands[0]["command_id"])
+        assert row is not None
+        payload = row["payload"]
+        assert payload.get("reason") == "认证类错误不可自动恢复"
+        assert payload.get("remark") == "认证类错误不可自动恢复"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_node_error_scanner_delivers_once_and_only_marks_successful_enqueue(tmp_path: Path) -> None:
     service = _make_service(tmp_path)
     try:
