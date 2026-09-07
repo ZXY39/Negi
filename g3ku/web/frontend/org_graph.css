@@ -10062,6 +10062,11 @@ textarea {
     word-break: break-word;
 }
 
+/* 跟进消息打断标记:归档半截回合里被补充消息拦腰打断的那个阶段标题用警示色提示 */
+.ceo-stage-interrupted .interaction-step-title {
+    color: var(--warning);
+}
+
 .task-trace-round-text {
     padding: var(--space-2) var(--space-4);
     border: 1px solid var(--border-strong);

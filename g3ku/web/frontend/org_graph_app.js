@@ -2370,12 +2370,16 @@ function ceoSnapshotHasEquivalentUserMessage(messages = [], candidate = null) {
     if (!normalizedCandidate || normalizedCandidate.role !== "user") return false;
     const candidateTurnId = normalizeCeoTurnId(normalizedCandidate.turn_id || "");
     const candidateAttachments = normalizeUploadList(normalizedCandidate.attachments);
+    const candidateContent = String(normalizedCandidate.content || "");
     return trimCeoSessionSnapshotMessages(messages).some((item) => {
         if (String(item?.role || "").trim().toLowerCase() !== "user") return false;
         const itemTurnId = normalizeCeoTurnId(item?.turn_id || "");
-        if (candidateTurnId) return itemTurnId === candidateTurnId;
+        // 同一轮可以存在多条不同内容的 user 消息(中途补充被消费后)。只有
+        // turn_id(若双方都有)、内容、附件三者全部一致才视为"已存在",避免把内容
+        // 不同的补充消息误判成重复而跳过气泡渲染(表现为"消息凭空消失")。
+        if ((candidateTurnId || itemTurnId) && itemTurnId !== candidateTurnId) return false;
         const sameAttachments = JSON.stringify(normalizeUploadList(item?.attachments)) === JSON.stringify(candidateAttachments);
-        return String(item?.content || "") === String(normalizedCandidate.content || "") && sameAttachments;
+        return String(item?.content || "") === candidateContent && sameAttachments;
     });
 }
 
@@ -2442,7 +2446,7 @@ function dedupeInflightUserMessageAgainstMessages(messages = [], inflightTurn = 
     return ceoNeedsAssistantTurn(deduped) ? deduped : null;
 }
 
-function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId(), representedMessages = [], { scrollMode = "preserve" } = {}) {
+function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId(), representedMessages = [], { scrollMode = "preserve", insertBefore = null } = {}) {
     const key = String(sessionId || "").trim();
     if (!key) return [];
     const normalizedRepresented = normalizeCeoSnapshotUserMessages(representedMessages);
@@ -2459,6 +2463,18 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
             scrollMode,
             sessionId: key,
         });
+        // 补充消息应落在当前 live 回合之前,而不是 append 到流式输出之后;
+        // 与 finalize 增量路径的 insertBefore 语义保持一致。
+        if (U && U.ceoFeed && insertBefore && typeof U.ceoFeed.insertBefore === "function") {
+            const el = U.ceoFeed.lastElementChild || (Array.from(U.ceoFeed.children || []).slice(-1)[0] || null);
+            if (el && el !== insertBefore) {
+                try {
+                    U.ceoFeed.insertBefore(el, insertBefore);
+                } catch (error) {
+                    void error;
+                }
+            }
+        }
     });
     const promotedIds = new Set(promoted.map((item) => String(item?.id || "").trim()).filter(Boolean));
     setCeoQueuedFollowUps(key, current.filter((item) => !promotedIds.has(String(item?.id || "").trim())));
@@ -4441,7 +4457,7 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
     return events.length;
 }
 
-function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
+function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interruptedStageMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     const summary = filterCeoInteractionFlowSummary(canonicalContext);
     if (!summary?.stages?.length) {
@@ -4468,14 +4484,16 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null) {
     turn.el?.classList?.add?.("ceo-timeline");
     turn.listEl.classList?.add?.("task-trace-list");
     turn.listEl.innerHTML = summary.stages.map((stage, index) => {
+        const isInterrupted = interruptedStageMarker && index === summary.stages.length - 1;
         const preamble = String(stage?.preamble_text || "").trim();
         const preambleHtml = preamble ? `<div class="ceo-stage-preamble">${esc(preamble)}</div>` : "";
         return renderTraceStep({
             traceKey: `ceo:stage:${stage.stage_id || stage.stage_index || index}`,
-            title: formatExecutionStageTitle(stage),
+            title: `${formatExecutionStageTitle(stage)}${isInterrupted ? " · 收到补充，续跑见下" : ""}`,
             status: stageTraceStatus(stage),
             statusLabel: displayTaskStageStatus(stage.status),
             open: false,
+            extraClass: isInterrupted ? "ceo-stage-interrupted" : "",
             bodyHtml: preambleHtml + renderExecutionStageRounds(stage),
         });
     }).join("");
@@ -4594,7 +4612,7 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
             promoteRepresentedRuntimeSentCeoFollowUps(
                 targetSessionId,
                 normalizeCeoSnapshotUserMessages(inflightTurn?.user_messages, inflightTurn?.user_message),
-                { scrollMode: "preserve" }
+                { scrollMode: "preserve", insertBefore: turn?.el || null }
             );
         }
     }
@@ -4747,6 +4765,9 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         : (normalizeCeoSnapshotCanonicalContext(item.canonical_context) || null);
     const content = String(item?.content || "");
     const status = String(item?.status || "").trim().toLowerCase();
+    // follow-up 归档半截回合(后端 archive turn_id = `{原 turn_id}:followup:{随机}`)：
+    // 其最后一个阶段在收到补充消息时被拦腰打断,需要打上打断标记。
+    const isFollowUpArchive = String(item?.turn_id || "").includes(":followup:");
     if (status !== "paused" && !canonicalContext) {
         addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
         return;
@@ -4763,7 +4784,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
         renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
-        renderCeoStageTraceIntoTurn(turn, canonicalContext);
+        renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
         setCeoTurnUsage(turn, item?.usage);

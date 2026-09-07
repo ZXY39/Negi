@@ -361,3 +361,33 @@ test("内容签名相同的快照重复推送跳过重建,签名不同才重建"
     assert.equal(api.S.ceoFeedRenderSignature, api.buildCeoRenderSignature(changed, null, null));
     assert.deepEqual(api.S.ceoFeedRenderedMessageKeys.map(String), ["m:-:user:0", "m:t0:assistant:0"]);
 });
+
+test("final 带同 turn_id 不同内容的 follow-up 不得被去重吞掉(消息不得凭空消失)", () => {
+    const api = setup();
+    // 原始消息 q1 与 follow-up 共用 turn_id=t1 但内容不同 —— 旧逻辑按 turn_id 短路
+    // 会误判 follow-up 已存在而跳过渲染,表现为"补充消息凭空消失"。
+    const m1 = { role: "user", content: "q1", turn_id: "t1" };
+    const m2 = { role: "assistant", content: "a1", turn_id: "t0" };
+    api.S.ceoSnapshotCache["s1"] = {
+        session_id: "s1",
+        messages: [m1, m2],
+        inflight_turn: { source: "user", status: "running", turn_id: "t2" },
+    };
+    api.S.ceoFeedRenderedMessageKeys = ["m:t1:user:0", "m:t0:assistant:0"];
+    const turn = makeFinalizeTurn({ turnId: "t2" });
+    api.S.ceoPendingTurns = [turn];
+    const msgEl1 = makeMessageEl("m:t1:user:0");
+    const msgEl2 = makeMessageEl("m:t0:assistant:0");
+    turn.el._feed = null;
+    api.U.ceoFeed = new FeedStub({ children: [msgEl1, msgEl2, turn.el], scrollHeight: 400, clientHeight: 300 });
+
+    api.finalizeCeoTurn("done", {
+        source: "user",
+        turn_id: "t2",
+        user_messages: [{ role: "user", content: "补充内容", turn_id: "t1" }],
+    });
+
+    const userMessages = api.S.ceoSnapshotCache["s1"].messages.filter((item) => item.role === "user");
+    assert.equal(userMessages.length, 2, "同 turn_id 不同内容的 follow-up 必须保留为独立 user 消息");
+    assert.ok(userMessages.some((item) => item.content === "补充内容"), "follow-up 内容必须出现在消息列表里");
+});

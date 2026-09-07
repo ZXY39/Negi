@@ -151,6 +151,7 @@ This is intentional. The composer button means "pause only when the user has not
 - CEO/frontdoor consumes queued follow-ups at the safe boundary right before the next `call_model` send of the same visible turn. The runtime appends them as independent `user` messages to the current request body instead of concatenating them into one synthetic supplement string.
 - If the current visible turn finishes before another `call_model` round happens, the backend immediately starts the next fresh user turn from the queued follow-ups after the current turn closes.
 - Each queued item still remains its own user message in transcript persistence; batching only changes which next LLM request sees that group first.
+- A single visible turn can hold multiple distinct user messages once follow-ups are consumed. The browser treats two user messages as equivalent only when their turn id (when present on both), content, and attachments all match; matching on turn id alone drops a distinct follow-up and leaves the user's supplement invisible.
 - Once a queued follow-up has been handed off to the backend, it should still remain in the composer-side queue lane until runtime snapshot/final-reply data can prove that the follow-up has been consumed into a visible turn.
 - Browser rendering must not create a provisional transcript bubble merely because a follow-up was accepted by the backend queue. Queue acceptance and visible conversation placement are intentionally different stages.
 - `ceo.reply.final` may include `user_messages` for the just-finished visible turn. This is the authoritative current-turn user batch and exists specifically so the frontend can decide whether runtime-sent follow-ups belonged to that same reply or to a later chained turn.
@@ -158,6 +159,8 @@ This is intentional. The composer button means "pause only when the user has not
 - If a runtime-sent follow-up does not appear in the just-finished turn's `user_messages`, the browser should keep it in the queue lane until a later fresh user turn or transcript snapshot represents it authoritatively.
 - `snapshot.ceo.messages` must also avoid replaying running-turn `pending` user transcript rows as ordinary history bubbles. During a live running turn, authoritative current-turn user placement comes from `inflight_turn.user_messages`, not from flat transcript replay.
 - When a running follow-up is actually consumed into the next model send of the same visible conversation lane, the runtime also archives the pre-follow-up assistant execution bubble into visible UI history before the consumed user bubble is restored. That archive is UI-visible but prompt-hidden, so refresh/reconnect can preserve the same visual ordering without polluting later prompt history.
+- The archive turn id carries a `:followup:` segment. When the browser renders an archived turn with that segment, it marks the last stage in that archive as the interrupted stage (interruption marker in the stage title), because a follow-up consumed mid-flight splits that stage between the archive (rounds already done) and the continuation turn (remaining rounds).
+- A consumed follow-up's user bubble is inserted immediately before the current live turn element, not appended to the end of the feed, so it reads in chronological order between the archive and the continuation.
 
 ### Model Retry Visibility UI Contract
 
