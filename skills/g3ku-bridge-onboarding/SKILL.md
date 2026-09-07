@@ -7,6 +7,13 @@ description: Universal reference for onboarding any external channel bridge to G
 
 适用：用户要求把任意 IM / 渠道 / 自动化桥接入 g3ku（"对接渠道"、"让桥连上 g3ku"、"新建一个渠道桥"、"桥连不上"）。本 skill 是平台无关的对接总纲；权威契约见 `docs/architecture/external-agent-api.md`，参考实现见 `bridges/qq-onebot/`（独立包、零 g3ku import）。
 
+## 参考文档（权威正文，动手前先读）
+
+- `references/integration-manual.md` —— 接入手册：接口参考 + curl 样例 + 事件流 + 错误码 + 验收排障。
+- `references/building-a-bridge.md` —— 适配层编写指南：通用变换规则 + qq-onebot 结构地图 + 最小骨架 + 验收清单。
+
+本文只做触发级速览，字段名/端点/状态码一律以这两份为准。
+
 ## 0. 架构边界（三条铁律）
 
 - g3ku 核心只暴露 External Agent API `/api/v1`（Bearer token 鉴权）；核心不出现任何平台特定代码——换一个 IM 平台就要改的代码不属于核心。
