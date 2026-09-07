@@ -296,6 +296,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 for item in list(state.get("attachment_reopen_targets") or [])
                 if isinstance(item, dict)
             ],
+            session_temp_dir=self._ceo_session_temp_dir(state.get("session_key")),
         )
         return upsert_frontdoor_tool_contract_message(normalized_dynamic_messages, frontdoor_tool_contract)
 

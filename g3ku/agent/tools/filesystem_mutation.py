@@ -389,7 +389,9 @@ class FilesystemTool:
         lowered_parts = {part.lower() for part in path.parts}
         if lowered_parts.intersection({'node_modules', 'site-packages', '.venv', 'venv', '__pycache__', 'dist', 'build'}):
             return True
-        lowered_name = path.name.lower()
+        # 点前缀命名（如 `.tmp_xxx.txt`、`.temp.log`）与无前缀的 `tmp_*`/`temp_*`
+        # 同属临时产物，统一剥掉前导点后再做前缀判定，避免 `.tmp_*` 躲过启发式。
+        lowered_name = path.name.lower().lstrip('.')
         return lowered_name.startswith(('tmp.', 'tmp_', 'tmp-', 'temp.', 'temp_', 'temp-'))
 
     @staticmethod

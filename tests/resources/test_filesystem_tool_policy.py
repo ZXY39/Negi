@@ -117,3 +117,30 @@ async def test_filesystem_blocks_temp_like_write_outside_task_temp_dir(tmp_path:
     assert result.startswith('Error:')
     assert str(task_temp_dir) in result
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_blocks_dot_prefixed_tmp_named_write_at_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 回归：`.tmp_skills_job.txt` 这类点前缀命名此前躲过 managed-artifact 启发式，
+    # 被直接写到工作区根目录。剥掉前导点后应识别为临时产物并拦截到 temp_root。
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setattr(FilesystemTool, '_system_temp_roots', staticmethod(lambda: [tmp_path / 'system-temp']))
+    tool = FilesystemTool(workspace=workspace)
+    target = workspace / '.tmp_skills_job.txt'
+
+    result = await tool.write(path=str(target), content='leaked', runtime={})
+
+    assert result.startswith('Error:')
+    assert str(workspace / 'temp') in result
+    assert not target.exists()
+
+
+def test_looks_like_managed_artifact_covers_dot_prefixed_names(tmp_path: Path) -> None:
+    assert FilesystemTool._looks_like_managed_artifact(Path('.tmp_skills_job.txt')) is True
+    assert FilesystemTool._looks_like_managed_artifact(Path('.temp_cache.json')) is True
+    assert FilesystemTool._looks_like_managed_artifact(Path('tmp_patch.py')) is True
+    # 普通业务文件不应误判
+    assert FilesystemTool._looks_like_managed_artifact(Path('attempt_counter.py')) is False
+    assert FilesystemTool._looks_like_managed_artifact(Path('temperature_sensor.md')) is False
+    assert FilesystemTool._looks_like_managed_artifact(Path('report.md')) is False

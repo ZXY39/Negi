@@ -115,6 +115,7 @@ from .state_models import (
     CeoRuntime,
     CeoRuntimeContext,
 )
+from .session_temp_dir import ceo_session_temp_dir
 from .tool_contract import (
     build_frontdoor_tool_contract,
     is_frontdoor_tool_contract_echo_text,
@@ -2313,6 +2314,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     def __init__(self, *, loop) -> None:
         super().__init__(loop=loop)
 
+    def _ceo_session_temp_dir(self, session_key: Any) -> str:
+        """会话级临时目录 `<workspace>/temp/ceo/<safe_session_key>`。
+
+        注入为工具 runtime 的 `task_temp_dir`：exec 未显式传 working_dir 时以它
+        为默认 cwd，filesystem/exec 的路径策略也以它为临时内容的规范落点，
+        避免临时文件散落到工作区根目录。目录惰性创建（exec/filesystem 写入时 mkdir）。
+        """
+        return ceo_session_temp_dir(getattr(self._loop, "workspace", None), session_key)
+
     def _build_tool_runtime_context(
         self,
         *,
@@ -2361,6 +2371,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_snapshot_supplier": getattr(session, "inflight_turn_snapshot", None),
             "runtime_session": session,
             "temp_dir": str(getattr(self._loop, "temp_dir", "") or ""),
+            "task_temp_dir": self._ceo_session_temp_dir(session.state.session_key),
             "loop": self._loop,
             "task_defaults": self._session_task_defaults(runtime_session),
             "project_python": str(project_environment.get("project_python") or ""),
@@ -5843,6 +5854,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     else None
                 ),
                 attachment_reopen_targets=list(attachment_reopen_targets),
+                session_temp_dir=self._ceo_session_temp_dir(getattr(getattr(session, "state", None), "session_key", "")),
             ),
         )
         prompt_scope = "ceo_frontdoor"

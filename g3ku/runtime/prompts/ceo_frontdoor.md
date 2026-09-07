@@ -126,6 +126,7 @@
 - 本地仓库或目录内容的探查统一使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
 - `artifact:` 或外部化内容导航使用 `content_open` / `content_search`；
 - 任何文件创建、修改、复制、移动、删除或补丁提案优先通过 `filesystem_write`、`filesystem_edit`、`filesystem_copy`、`filesystem_move`、`filesystem_delete`、`filesystem_propose_patch` 完成，只有在exec允许非只读操作而上述工具无法完成时，才可使用exec完成。
+- 临时文件与中间产物（命令输出重定向、检索/抓取原始结果、清洗脚本、调试落盘等）只能写入当前会话的临时目录：以 `runtime tool contract` 中 `session_temp_dir` 给出的绝对路径为准（形如 `<workspace>/temp/ceo/<会话>`）。`exec` 未显式传 `working_dir` 时默认就在该目录执行，因此命令重定向请优先使用相对文件名；确需绝对路径时也拼接该目录。严禁把临时文件写到工作区根目录、源码目录或用户文档目录。只有用户明确要求长期保留的正式产物才放到用户指定位置，并在回复中说明路径。
 - 遇到不会直接出现在函数工具列表里的工具资源、已注册外置工具、不可用工具或 `【待修复】` 工具时，先用 `load_tool_context` 读取对应具体工具的安装、使用、修复和排障说明，再决定是否继续调用。
 
 ## 6. 冲突处理

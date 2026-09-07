@@ -297,8 +297,19 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         *_render_repair_required_skill_section(repair_required_skills),
         _render_stage_summary(payload.get('stage_summary')),
         _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
+        *_render_session_temp_dir(payload.get('session_temp_dir')),
     ]
     return '\n'.join(lines)
+
+
+def _render_session_temp_dir(session_temp_dir: Any) -> list[str]:
+    text = str(session_temp_dir or '').strip()
+    if not text:
+        return []
+    return [
+        f'session_temp_dir: {text}',
+        'session_temp_dir_help: Write transient/intermediate files (command output redirects, raw search/fetch dumps, cleanup scripts) into session_temp_dir only; never place temporary files in the workspace root or source directories.',
+    ]
 
 
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -356,6 +367,7 @@ class FrontdoorToolContract:
     repair_required_skill_items: list[dict[str, str]] | None = None
     exec_runtime_policy: dict[str, Any] | None = None
     attachment_reopen_targets: list[dict[str, str]] | None = None
+    session_temp_dir: str | None = None
 
     def to_message_payload(self) -> dict[str, Any]:
         payload = {
@@ -374,6 +386,7 @@ class FrontdoorToolContract:
                 if isinstance(self.exec_runtime_policy, dict)
                 else None
             ),
+            'session_temp_dir': str(self.session_temp_dir or '').strip() or None,
         }
         attachment_reopen_targets = _normalized_attachment_reopen_targets(self.attachment_reopen_targets)
         if attachment_reopen_targets:
@@ -463,6 +476,7 @@ def build_frontdoor_tool_contract(
     contract_revision: str | None = None,
     exec_runtime_policy: dict[str, Any] | None = None,
     attachment_reopen_targets: list[dict[str, str]] | None = None,
+    session_temp_dir: str | None = None,
 ) -> FrontdoorToolContract:
     callable_names = _normalized_name_list(callable_tool_names)
     candidate_names = [
@@ -486,6 +500,7 @@ def build_frontdoor_tool_contract(
         repair_required_skill_items=_normalized_repair_required_skill_items(repair_required_skill_items),
         exec_runtime_policy=dict(exec_runtime_policy) if isinstance(exec_runtime_policy, dict) else None,
         attachment_reopen_targets=_normalized_attachment_reopen_targets(attachment_reopen_targets),
+        session_temp_dir=str(session_temp_dir or '').strip() or None,
     )
 
 
