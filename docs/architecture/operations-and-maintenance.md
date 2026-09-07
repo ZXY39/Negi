@@ -49,7 +49,6 @@
 - Web UI
 - main task runtime
 - heartbeat
-- China bridge 自动拉起
 
 ### Worker
 
@@ -69,7 +68,6 @@
 3. 运行一次 `g3ku agent -m "test"`
 4. 先用 `.\start-g3ku.ps1`（Windows）或 `./start-g3ku.sh`（Linux / macOS）启动项目
 5. 确认 Web API、任务面板、模型配置页能正常返回
-6. 如项目启用中国渠道，再跑 `g3ku china-bridge doctor`
 
 如果你要拆开验证启动链路，或排查“是脚本包装层问题还是 Web/runtime 本身问题”，再回退到手动运行 `g3ku web` / `g3ku worker`。
 
@@ -100,9 +98,6 @@
   - `.g3ku/main-runtime/managed-worker.log`
     自动拉起的后台 task worker 日志
 
-- `.g3ku/china-bridge/`
-  China bridge 状态与日志
-
 - `.g3ku/web-ceo-continuity/`
   completed Web CEO session continuity sidecars。重启后继续 completed session、manual pause terminal stop、以及异常中断后的最新 authoritative frontdoor baseline 恢复都先看这里。
 
@@ -114,6 +109,9 @@
 
 - `temp/tasks/`
   任务临时目录，每个任务一个 `task_<id>` 子目录；根目录解析与隔离规则见 `runtime-overview.md`「任务侧」。孤儿目录（`runtime.sqlite3` 的 tasks 表中已无对应任务却残留的 `task_*` 目录）用 `scripts/cleanup_orphan_task_temp_dirs.py` 清理：默认 dry-run 只报数；`--apply` 删除空孤儿；非空孤儿要么 `--apply --move-non-empty` 移入 `temp/tasks_orphan_backup/`（可逆），要么 `--apply --purge-non-empty` 直接删除（不可逆）。清理脚本保留在库任务目录，以数据库为准，与运行中的任务互不影响。
+
+- `temp/ceo/`
+  CEO/frontdoor 会话级临时目录，每个会话一个 `<safe_session_key>` 子目录（如 `web_ceo-xxxx`）。作为 CEO 会话工具 runtime 的 `task_temp_dir`：`exec` 缺省 cwd 与临时文件规范落点，避免临时产物散落到工作区根目录。解析与惰性创建规则见 `runtime-overview.md`「任务侧」。
 
 ## 4. 测试结构
 
@@ -128,7 +126,6 @@
 - tool registry 与 hydration
 - web runtime
 - heartbeat prompt lane
-- China bridge
 - memory runtime
 
 新增运行时测试时，`MainRuntimeService` 构造要显式传 `workspace_root=tmp_path`，把任务临时目录隔离进 pytest 临时目录；`tests/conftest.py` 的 autouse fixture 对漏传的用例兜底替换 cwd 回退。判断测试是否泄漏了真实工作区的快速办法：跑完测试后 `.venv/Scripts/python.exe scripts/cleanup_orphan_task_temp_dirs.py` 只看空孤儿数量是否增长。
@@ -265,13 +262,12 @@ Provider retry troubleshooting note:
 - 当前系统约定是：显式 runtime refresh 会同时重载已解锁进程里的 bootstrap security overlay 缓存；如果 refresh 没跑到，老进程可能继续拿旧 secret 快照
 - 如果 refresh 已完成但行为仍不对，再考虑 worker 进程是否需要重启，或是否存在多个旧 worker / 旧 Web 进程残留
 
-### 中国渠道异常
+### 外部渠道桥接异常
 
-先看：
+内置渠道子系统已移除，IM 渠道由独立桥接进程经 External Agent API 接入。先看：
 
-- `g3ku/china_bridge/supervisor.py`
-- `g3ku/china_bridge/transport.py`
-- `subsystems/china_channels_host/src/`
+- `docs/architecture/external-agent-api.md`「常见排障入口」
+- 桥接应用自身的日志与配置（如 `bridges/qq-onebot/README.md`）
 
 ## 6. 维护时的高风险修改类型
 
@@ -310,17 +306,6 @@ Provider retry troubleshooting note:
 
 - provider-facing tool bundle 的刷新时机、排序与压缩边界约定详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」；bundle 变化会直接影响 prompt cache 前缀稳定性，改动后应验证缓存表现。
 
-### 修改 China bridge 协议边界
-
-涉及文件：
-
-- `g3ku/china_bridge/*`
-- `subsystems/china_channels_host/src/*`
-
-风险：
-
-- Python 和 Node 两侧都要同步验证。
-
 ## 7. 维护建议
 
 ### 先判断问题属于哪条主线
@@ -332,7 +317,7 @@ Provider retry troubleshooting note:
 - heartbeat
 - Web/API
 - 配置/模型
-- China bridge
+- 外部桥接（/api/v1）
 
 ### 优先从集成点往下看
 
@@ -378,13 +363,13 @@ Provider retry troubleshooting note:
 - `g3ku/agent/skills.py`
 - `ResourceManager` 相关逻辑
 
-### 加新 China channel
+### 接入新的外部渠道
 
 先看：
 
-- `subsystems/china_channels_host/channel_registry.json`
-- Node vendor/native host 结构
-- Python channel registry 与 bridge 配置
+- `docs/architecture/external-agent-api.md`（API 契约）
+- `bridges/qq-onebot/`（参考桥实现）
+- 新桥接作为独立进程/仓库开发，G3KU 本体零改动
 
 ## 9. 最小验证清单
 

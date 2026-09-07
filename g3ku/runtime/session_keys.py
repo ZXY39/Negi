@@ -13,8 +13,9 @@ sanitization. Migrated out of ``g3ku/china_bridge`` during the channel
 communication rebuild (Step 1): the ``china:*`` key format is byte-for-byte
 identical to the legacy implementation because persisted transcripts
 (``sessions/china_*.jsonl``), continuity sidecars, and paused snapshots are
-all indexed by it. ``g3ku/china_bridge/session_keys.py`` survives only as a
-re-export shim until the china_channels subsystem is removed (rebuild Step 4).
+all indexed by it. The China channel subsystem was removed in rebuild Steps
+4/5; ``china:*`` keys remain canonical so pre-existing transcripts stay
+readable archives.
 
 The ``ext:*`` namespace serves external bridge applications that consume the
 External Agent API: ``ext:{bridge_id}:{hash}`` where the hash is derived from

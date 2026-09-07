@@ -59,13 +59,9 @@
 
 定义任务运行时存储与调度参数。其中 `main_runtime.duplicate_precheck.llm_review_enabled`（默认 `true`）控制 `create_async_task` 重复预检的第二层语义审查：关闭后只保留确定性精确匹配层，模糊重复与 `reject_use_append_notice` 识别随之消失，预检对放行结果 fail-open。字段契约与拒绝语义详见 `tool-and-skill-system.md`「fixed builtin tools」。
 
-### `china_bridge`
-
-定义 Node 宿主、控制端口、自动启动、中国渠道配置。
-
 ### `external_api`
 
-定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled}`）、`eventBufferSize`。token 密文走 bootstrap secret overlay（与 controlToken 同机制）。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
+定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled}`）、`eventBufferSize`。token 密文走 bootstrap secret overlay 三件套（保存时剥离进覆盖层、落盘配置只留占位、解锁时回填）。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
 
 ## 3. 配置加载时做了什么
 
@@ -193,19 +189,13 @@ G3KU 的模型系统分两层：
 - 排查模型鉴权问题时，不能只看 JSON 文件
 - 覆盖层防护：激活用的 master key 无法解密已存在的覆盖层时，服务进入只读空视图，任何持久化都会被拒绝——错误密钥只能「读不到」，不能「写掉」别人的数据（tests/test_security_overlay_guard.py 锁定该契约）
 
-## 9. China bridge 配置
+## 9. 已退役的 channels / chinaBridge 段
 
-中国渠道统一走：
+内置中国渠道子系统已整体拆除，渠道接入改由 External Agent API 承担（详见 `external-agent-api.md`）：
 
-- `chinaBridge.channels.<channel-id>`
-
-而不是历史上的 `channels.*`。
-
-loader 会显式拒绝 legacy `channels.*` 配置，这一点在迁移和排障时很重要。
-
-支持的 canonical ids 详见 `china-channels.md`「支持的 canonical channel ids」。
-
-单个渠道的行为字段挂在对应渠道记录下、由 Node 宿主消费，例如 `chinaBridge.channels.qqbot.progressMode`（过程里程碑消息，`off` / `milestones`）与 `replyFinalOnly`。注意宿主侧合并账号配置（`mergeQQBotAccountConfig`）不走 zod parse 的默认值补全路径，这类字段的默认值需要在消费代码里用 `??` 兜底。
+- 顶层 legacy `channels.*` 段会被 `load_config` 显式拒绝（提示改走外部桥接）。
+- `chinaBridge` 段走迁移型退役：`_migrate_removed_china_bridge_config` 在加载时 pop 该段并置 `changed`，首次加载即裁剪落盘；`_migrate_config` 末尾的兜底 pop 同时化解 secret overlay 孤儿条目（`config.chinaBridge.*`）在 apply 阶段的回灌——解锁态保存后孤儿被永久剪除。两条契约由 `tests/test_china_bridge_removal_migration.py` 锁定。
+- 存量配置带旧段不会启动失败，也不需要手工编辑。
 
 ## 10. 常见排障入口
 
@@ -223,13 +213,6 @@ loader 会显式拒绝 legacy `channels.*` 配置，这一点在迁移和排障�
 - `models.roles.ceo`
 - `models.catalog`
 - `g3ku/llm_config/facade.py`
-
-### China bridge 配置改了但宿主行为没更新
-
-先看：
-
-- `build_runtime_config_payload(...)`
-- `g3ku/shells/web.py` 中的 refresh / sync china bridge 逻辑
 
 ## 11. 维护高风险点
 

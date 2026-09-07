@@ -20,8 +20,8 @@ The channel-agnostic headless surface for third-party bridges is mounted alongsi
 
 - `g3ku/web/main.py` mounts `g3ku/runtime/api/external_v1.py` at `/api/v1`; the global bootstrap-lock middleware (423) applies to it like every `/api/*` route. Bearer auth and bridge isolation are owned by `require_external_api` (`g3ku/runtime/api/external_auth.py`).
 - Turn execution reuses `SessionRuntimeBridge` (same semantic base as `/ws/ceo`); per-session SSE streams come from `g3ku/runtime/external_events.py` hubs.
-- The shared outbound drain started by `ensure_web_runtime_services` routes `channel == "ext"` messages to external session event hubs (heartbeat/cron/task-terminal proactive push), independent of the China bridge enable switch.
-- The web CEO catalog treats `ext:` sessions like `china:` sessions (grouped, read-only) via `is_channel_session_key`.
+- The shared outbound drain started by `ensure_web_runtime_services` routes `channel == "ext"` messages to external session event hubs (heartbeat/cron/task-terminal proactive push). Any other channel has no consumer and is skipped with a warning.
+- The web CEO catalog treats `ext:` sessions like legacy `china:` sessions (grouped, read-only) via `is_channel_session_key`; pre-existing `china:*` transcripts remain visible as read-only archives after the China channel subsystem removal.
 
 Full contract (endpoints, turn terminal invariant, event mapping, outbound routing): 详见 `external-agent-api.md`.
 
@@ -386,13 +386,13 @@ Do not treat `ceoSessionBusy` as equivalent to "all session-list mutations must 
 - In the CEO session UI, deleting a local session and deleting a channel session are intentionally different operations.
 - Deleting a local session removes the session record itself. Deleting a channel session is a clear operation: the channel/account entry remains available, but the next reopened conversation must start from empty session context.
 - In the batch-delete contract, mixed local and channel selections are allowed in one request. Result rows therefore distinguish `deleted=true` local removals from `cleared=true` channel clears even though the refreshed catalog still arrives as one post-mutation snapshot.
-- Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that `china:*` session key, invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, completed continuity sidecars, uploads, and frontdoor stage-archive artifacts.
-- For DM channel rows, the catalog entry may still remain visible after clear because it is synthesized from enabled channel-account configuration rather than from transcript persistence alone.
+- Backend clear handling for channel sessions must remove the persisted `SessionManager` transcript for that channel session key (`ext:*`, or a legacy `china:*` archive), invalidate any in-memory cached session object, and clear the same side artifacts that local-session deletion clears for that session id, including inflight snapshots, paused execution context, completed continuity sidecars, uploads, and frontdoor stage-archive artifacts.
+- The registry entry for an external session survives clear (get-or-create stays idempotent); only the conversation context is wiped.
 
 If an operator reports “the channel conversation was deleted but old context came back,” inspect these layers in order:
 
 1. `DELETE /api/ceo/sessions/{session_id}` response payload for `cleared=true`
-2. persisted `sessions/china_*.jsonl` transcript files and in-memory `SessionManager` cache
+2. persisted channel transcript files (`sessions/ext_*.jsonl`, legacy `sessions/china_*.jsonl`) and in-memory `SessionManager` cache
 3. inflight / paused CEO session artifacts
 4. frontend snapshot cache only after the backend-owned state is confirmed cleared
 
@@ -492,7 +492,7 @@ Do not assume the browser has a second hidden RBAC source. For surfaced tool fam
 The web/admin stack has an explicit container-safe startup mode.
 
 - `g3ku web --no-worker` is the container-safe web entrypoint.
-- In this mode, the web process still owns FastAPI routes, websocket session/runtime integration, heartbeat startup, cron startup, and China bridge supervision.
+- In this mode, the web process still owns FastAPI routes, websocket session/runtime integration, heartbeat startup, and cron startup.
 - Detached task execution is expected to come from a separate `g3ku worker` process or container rather than from the web-managed local child worker path.
 
 `/api/bootstrap/status` is also the preferred healthcheck-friendly read endpoint for the web container:

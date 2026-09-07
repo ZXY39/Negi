@@ -741,8 +741,9 @@ class ExternalApiConfig(Base):
     """External Agent API (headless channel-bridge surface, `/api/v1`).
 
     Disabled by default: operators opt in and provision one token per bridge
-    application. Token secrets live in the bootstrap secret overlay, mirroring
-    the chinaBridge controlToken handling.
+    application. Token secrets live in the bootstrap secret overlay
+    (extracted on save, stripped from the on-disk payload, re-applied on
+    unlock).
     """
 
     enabled: bool = False

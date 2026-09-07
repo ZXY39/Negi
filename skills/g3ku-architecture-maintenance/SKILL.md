@@ -30,7 +30,7 @@ You should update docs when changes affect any of these:
 - Tool registry, skill loading, candidate pools, hydration, or callable tool rules
 - Config structure, config path, model binding, runtime refresh behavior
 - Web/API/backend integration
-- China bridge or Python/Node interaction
+- External channel bridge integration (/api/v1) or external session registry
 - Startup, shutdown, deployment, troubleshooting, or operator workflow
 
 You usually do not need updates for:
@@ -153,22 +153,22 @@ Focus on:
 - Role-to-model resolution
 - Where secrets really live
 
-### `docs/architecture/china-channels.md`
+### `docs/architecture/external-agent-api.md`
 
 Update when touching:
 
-- `g3ku/china_bridge/`
-- `subsystems/china_channels_host/`
-- Channel registry
-- Session key rules
-- Python/Node bridge protocol or startup flow
+- `g3ku/runtime/api/external_v1.py` / `external_auth.py` / `external_turns.py`
+- `g3ku/runtime/external_sessions.py` / `g3ku/runtime/external_events.py`
+- External session registry or `ext:` session keys
+- Outbound drain `ext` routing or `outbound.created` events
+- `externalApi` config tokens
 
 Focus on:
 
-- Boundary between Python and Node
-- Inbound/outbound flow
-- Session key format
-- Current maintenance risks and registry truth sources
+- Endpoint and auth contract (Bearer token per bridge_id)
+- Turn terminal invariant (exactly one terminal event per turn)
+- Event mapping and SSE replay (`Last-Event-ID`)
+- Outbound routing and bridge isolation
 
 ### `docs/architecture/operations-and-maintenance.md`
 

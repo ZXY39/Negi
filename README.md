@@ -41,11 +41,8 @@
 - Python `3.11` 或更高版本
 - Windows PowerShell、Linux 或 macOS
 - 现代浏览器，用于访问 Web 界面
-- 如果你要启用通信渠道，再额外准备：
-  - Node.js `>=20`
-  - `pnpm` 或 `npm`
 
-如果你只是先体验本地 Web 或 CLI，对话主流程只需要 Python 环境即可；只有在启用通信配置时，才需要 Node.js 相关依赖。
+对话主流程只需要 Python 环境；接入外部聊天渠道（QQ/飞书等）不需要在 G3KU 内安装任何额外依赖，而是由独立的桥接进程通过 External Agent API 完成，见「4. 通信配置（可选）」。
 
 ### 环境配置步骤
 
@@ -251,62 +248,49 @@ Linux / macOS:
 
 ## 4. 通信配置（可选）
 
-如果你希望不只在 Web 或本地 CLI 使用 G3KU，而是接入外部聊天渠道实现跨平台通信，可以使用前端的“通信配置”页面。
+如果你希望不只在 Web 或本地 CLI 使用 G3KU，而是接入外部聊天渠道实现跨平台通信，使用 **External Agent API**（`/api/v1`）+ 独立桥接进程的模式。
+
+### 架构一览
+
+G3KU 本体不再内置任何 IM 渠道协议，只暴露一套渠道无关的 headless agent API；平台协议（QQ/飞书/企微等）全部由独立的桥接应用承担：
+
+```
+IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ G3KU External Agent API（/api/v1）
+```
 
 ### 可以做什么
 
-通信配置的作用是让 G3KU 接入不同平台，把平台消息送入统一 Agent Runtime，再把回复发回对应平台。
-
-目前项目里支持的 canonical channel ids 包括：
-
-- `qqbot`
-- `dingtalk`
-- `wecom`
-- `wecom-app`
-- `wecom-kf`
-- `wechat-mp`
-- `feishu-china`
-
-对应到普通用户理解，可以看成支持这些方向的接入能力：
-
-- QQ Bot
-- 钉钉
-- 企业微信
-- 企业微信应用
-- 企业微信客服
-- 微信公众号
-- 飞书
+- 外部桥接把平台消息推进 G3KU 会话，订阅流式事件（增量/里程碑/最终回复），把回复发回平台；
+- heartbeat 提醒、cron 定时、任务终态等主动推送经 `outbound.created` 事件送达桥接；
+- 每个桥接一个 `bridge_id` + token，会话命名空间互相隔离，可多桥并发。
 
 ### 配置方式
 
-1. 进入前端“通信配置”页面。
-2. 在左侧选择你要接入的通信方式。
-3. 右侧会显示该渠道的状态、启用开关和 JSON 配置区。
-4. 可以先点击“加载模板”，再按渠道要求填写配置。
-5. 保存后启用该通信方式。
+1. 在 `.g3ku/config.json` 启用外部 API 并发放 token：
 
-前端会按渠道模板帮助你填写基础 JSON，例如不同平台要求的：
+   ```json
+   {
+     "externalApi": {
+       "enabled": true,
+       "tokens": {
+         "my-bridge": { "token": "<随机长串>", "label": "我的桥", "enabled": true }
+       }
+     }
+   }
+   ```
 
-- `clientId`
-- `clientSecret`
-- `token`
-- `encodingAESKey`
-- `appId`
-- `appSecret`
-- `webhookPath`
+   token 明文保存时会自动剥离进加密覆盖层（与模型密钥同一机制）。
+2. 启动你的桥接应用，指向 G3KU 的 Web 地址并携带该 token（`Authorization: Bearer <token>`）。
+3. 仓库自带参考实现：`bridges/qq-onebot/`（QQ / OneBot 11，如 NapCat），配置与运行方式见其 `README.md`。
 
-具体字段会随着渠道类型不同而不同。
+### 了解更多
 
-### 启用通信前需要注意什么
-
-- 需要安装 Node.js `>=20`
-- 需要准备 `pnpm` 或 `npm`
-- 使用默认启动脚本或 Web 界面启动时，Web runtime 会管理 China bridge 的启停
-- 如果你启用了渠道，但没有准备好 Node 环境或对应渠道参数，桥接不会正常工作
+- API 契约（端点、回合终态不变量、事件映射、出站路由）：`docs/architecture/external-agent-api.md`
+- 历史存量：旧版内置渠道（china channels 子系统）已移除；存量 `china:*` 会话转录在 Web 目录中保持只读可见。
 
 对普通用户来说，可以把它理解成：
 
-**通信配置就是把 G3KU 从“本地可用”扩展到“能在外部平台和你聊天”。**
+**通信配置就是把 G3KU 从“本地可用”扩展到“能在外部平台和你聊天”——由外部桥接完成，G3KU 本体保持纯 Python 单进程。**
 
 ## 5. 功能介绍
 
@@ -373,8 +357,8 @@ Linux / macOS:
   Web、管理页、前后端边界
 - `docs/architecture/config-and-models.md`
   配置入口、模型系统、运行时刷新
-- `docs/architecture/china-channels.md`
-  通信桥接与 Python / Node 边界
+- `docs/architecture/external-agent-api.md`
+  外部桥接接入契约（/api/v1）
 - `docs/architecture/operations-and-maintenance.md`
   运维、排障和启动建议
 - `docs/analysis/2026-04-21-g3ku-six-pillars-user-introduction.md`
@@ -464,19 +448,13 @@ g3ku worker
 g3ku status
 ```
 
-- 通信子系统排障：
-
-```bash
-g3ku china-bridge doctor
-```
-
 ### 对开发者的简单理解
 
 从工程结构上看：
 
-- `g3ku/` 是主应用代码，包含 CLI、Web、运行时、配置和桥接
+- `g3ku/` 是主应用代码，包含 CLI、Web、运行时、配置与外部桥接 API
 - `main/` 是异步任务和节点执行主线
-- `subsystems/china_channels_host/` 是通信桥接用的 Node 宿主
+- `bridges/` 是独立的外部渠道桥接应用（如 `bridges/qq-onebot`），经 `/api/v1` 与本体通信
 - `memory/` 是长期记忆相关数据目录
 
 也就是说，G3KU 不只是一个前端页面加一个聊天后端，而是一整套可以长期运行、可扩展、可运维的 Agent 基础设施。
@@ -497,7 +475,7 @@ docker compose up --build
 ### 服务分工
 
 - `compose.yaml` 会启动两个核心服务：`web` 和 `worker`
-- `web` 负责 Web 界面、API、heartbeat、cron，以及 China bridge supervisor
+- `web` 负责 Web 界面、API、heartbeat、cron，以及外部桥接 API（/api/v1）
 - `worker` 只负责 detached task worker，也就是后台异步任务执行
 
 这种拆分方式的重点不是把功能切碎，而是让 Web 入口和后台任务执行各自独立运行，同时共享同一份项目状态与资源目录。
@@ -530,8 +508,6 @@ G3KU 在设计和迭代过程中，参考了部分优秀开源项目的工程实
 
 - [OpenClaw](https://github.com/openclaw/openclaw.git)
   为 G3KU 的整体项目开发方向和 Agent 工程化实践产生了启发。
-- [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china.git)
-  `subsystems/china_channels_host` 中的中国渠道运行时整合了该项目的上游运行时代码，并在 G3KU 中通过桥接与包装层接入。
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent.git)
   为 G3KU 的自主维护记忆、长期记忆沉淀与持续协作能力提供了灵感。
 - [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent.git)
@@ -539,7 +515,7 @@ G3KU 在设计和迭代过程中，参考了部分优秀开源项目的工程实
 - [OpenViking](https://github.com/volcengine/OpenViking.git)
   为 G3KU 的分层渐进式加载、能力暴露控制与上下文组织方式提供了灵感。
 
-说明：G3KU 为结合自身目标、运行时设计与使用场景的独立项目；其中 `subsystems/china_channels_host` 包含已整合并适配的 `openclaw-china` 上游运行时代码。第三方来源与许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 [subsystems/china_channels_host/UPSTREAM.md](subsystems/china_channels_host/UPSTREAM.md)。
+说明：G3KU 为结合自身目标、运行时设计与使用场景的独立项目。历史版本曾整合 `openclaw-china`（MIT）上游运行时代码，已随内置渠道子系统一并移除。
 
 ## 8. 许可证
 

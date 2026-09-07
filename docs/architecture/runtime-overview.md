@@ -48,7 +48,7 @@
   `SessionRuntimeManager`。按 `session_key` 复用 `RuntimeAgentSession`，是所有入口共享的 session 路由器。
 
 - `g3ku/runtime/bridge.py`
-  `SessionRuntimeBridge`。给 Web、CLI、China bridge、cron、External Agent API（`/api/v1`，外部桥接应用）提供统一的 prompt / prompt_batch / continue / cancel / pause API。pause 带运行状态前置检查（空闲会话返回 0，避免空闲暂停产生多余转录归档）；China bridge 的 QQ 渠道用它实现端内「暂停」命令与运行中消息注入（详见 `china-channels.md`「QQ 渠道增强」）；外部桥接面的回合契约详见 `external-agent-api.md`「回合契约」。
+  `SessionRuntimeBridge`。给 Web、CLI、cron、External Agent API（`/api/v1`，外部桥接应用）提供统一的 prompt / prompt_batch / continue / cancel / pause API。pause 带运行状态前置检查（空闲会话返回 0，避免空闲暂停产生多余转录归档）；外部桥接用它实现控制命令（暂停/取消）与运行中消息注入，回合契约详见 `external-agent-api.md`「回合契约」。
 
 - `g3ku/runtime/session_agent.py`
   单次 turn 的核心执行器，也是最复杂、最值得精读的文件之一。
@@ -230,7 +230,7 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 - frontdoor completed continuity sidecar（`frontdoor_request_body_messages` 基线、actual-request trace、阶段/规范化/压缩状态）
 - latest message / pending interrupts
 
-主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。frontdoor continuity 的写盘与恢复覆盖所有 frontdoor 会话命名空间（`web:`、`china:`、`cron:`），渠道会话的基线同样跨进程重启存活；恢复顺序详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。
+主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。frontdoor continuity 的写盘与恢复覆盖所有 frontdoor 会话命名空间（`web:`、`china:`、`cron:`、`ext:`），渠道会话（含存量 `china:*` 归档）的基线同样跨进程重启存活；恢复顺序详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。
 
 审批中断的恢复通过持久化的 `graph_state` 重建：中断时 `_pause_for_frontdoor_interrupt` 把**预览前**的完整图状态以 `{"version": 2, "state": ...}` 存入 paused execution context 的 `graph_state` 字段；恢复时 `resume_turn` 读回该快照、校验版本后从 `review_tool_calls` 节点以 resume 决定重入（等价于在中断点重放）。存「预览前」而非「预览后」状态的原因：阶段预览对 `_record_frontdoor_stage_round` 非幂等——用预览后状态重建会二次记账（round 重复、阶段预算提前耗尽）。无标记 / 缺失 / 损坏的快照显式报错 `frontdoor_interrupt_resume_snapshot_unavailable` 且不清除 paused 快照，不回退成新 turn；跨进程重启后的恢复依赖该落盘快照。
 
@@ -247,6 +247,8 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 
 - 任何不提供 workspace 的调用方（尤其是测试和一次性脚本）都会把任务目录落在进程 cwd 的 `temp/tasks/` 下。测试通过构造参数 `workspace_root=tmp_path` 显式隔离，`tests/conftest.py` 的 autouse fixture 再把 cwd 回退替换为 per-test 临时目录作为兜底，双层保证测试运行不会向真实仓库写入 `task_*` 目录。
 - 测试任务的记录只存在于 pytest 的临时数据库里，其遗留目录不会被任何生产清理路径回收；这类孤儿目录用 `scripts/cleanup_orphan_task_temp_dirs.py` 处理，见 `operations-and-maintenance.md`「关键状态文件与目录」。
+
+CEO/frontdoor 会话没有 `task_id`，其工具 runtime 注入的 `task_temp_dir` 解析为会话级目录 `temp/ceo/<safe_session_key>`（`session_key` 里的 `:` 等不安全字符按 `sessions/` 落盘同一口径规范化，如 `web:ceo-xxxx` → `web_ceo-xxxx`；无会话键时回退 `temp/ceo/shared`）。它与任务级 `temp/tasks/` 共用同一套下游约束：`exec` 未显式传 `working_dir` 时以它作默认 cwd，`exec`/`filesystem` 的路径策略以它作临时内容规范落点，目录惰性创建（exec 用作 cwd 或 filesystem 写入时才 mkdir）。该目录同时以 `session_temp_dir:` 行暴露进 frontdoor 运行时工具合同，让模型知道临时文件的绝对落点，避免经 `exec` 重定向散落到工作区根目录；合同渲染与临时文件落盘规则详见 `tool-and-skill-system.md`「四个概念必须分清」。
 
 主要由以下模块协同：
 

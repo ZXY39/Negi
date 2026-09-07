@@ -11,8 +11,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 5. `web-and-admin.md`
 6. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
 7. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
-8. `china-channels.md` when the change touches channel runtime or the Python/Node bridge
-9. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, or outbound routing to bridges
+8. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, or outbound routing to bridges
 
 ## Topic Guide
 
@@ -30,8 +29,6 @@ Start here when you are new to the repository or when a change crosses subsystem
   Use for heartbeat turns, task-terminal/stall wakeups, shutdown-resume session wakes, and the boundary between heartbeat and the CEO inline tool reminder sidecar.
 - `config-and-models.md`
   Use for config source-of-truth rules and role-to-model resolution.
-- `china-channels.md`
-  Use for session key rules and the channel bridge boundary.
 - `external-agent-api.md`
   Use for the channel-agnostic headless API consumed by third-party bridges: auth, external session registry, turn terminal invariant, SSE event mapping, and ext outbound routing.
 
@@ -44,10 +41,10 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
-- Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `china-channels.md` (channel inbound) or `web-and-admin.md` (web upload/reopen)
+- Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `web-and-admin.md` (web upload/reopen) or `external-agent-api.md` (bridge inbound attachments)
 - A config refresh disrupts an in-flight turn → `config-and-models.md`「配置热刷新」
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
-- QQ/China channel emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `china-channels.md`
+- Channel/bridge reply emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `external-agent-api.md` (outbound sanitize contract)
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
@@ -63,6 +60,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 入站到首个 provider 请求发出耗时异常 → `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」
 - 会话/节点疑似卡在 provider 退避重试，但界面没有重试次数与错误信息 → `runtime-overview.md`「Chat provider 超时与重试边界」+ `web-and-admin.md`「Model Retry Visibility UI Contract」
 - `temp/tasks/` 出现大量无主 `task_*` 目录（目录数远超任务数）→ `operations-and-maintenance.md`「关键状态文件与目录」+ `runtime-overview.md`「任务侧」
+- 临时文件散落在工作区根目录（`.tmp_*` / `tmp_*`、命令重定向落盘）→ `runtime-overview.md`「任务侧」+ `tool-and-skill-system.md`「四个概念必须分清」
 
 ## Maintenance Rules
 
@@ -73,7 +71,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 3. Pointers name topics, never section numbers.
 4. Present tense only. No "now / no longer / previously / 现在 / 不再 / 曾经" — that is changelog language.
 5. Superseded text is deleted outright, never left as "obsolete notes".
-6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 65 KB / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 51 KB / `operations-and-maintenance` 24 KB / `china-channels` 20 KB / `heartbeat-system` 19 KB / `config-and-models` 17 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
+6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 65 KB / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 51 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 19 KB / `config-and-models` 17 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
 
 ## Topic Ownership
 
@@ -87,6 +85,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, model config admin draft contract, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |
-| China channel registry, session key rules, Python/Node bridge, canonical channel id list | `china-channels.md` |
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing | `external-agent-api.md` |
 | Startup/deploy/troubleshooting order, memory CLI, Docker compose | `operations-and-maintenance.md` |
