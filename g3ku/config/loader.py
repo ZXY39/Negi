@@ -411,6 +411,7 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
             "retryOn": list(item.retry_on or []),
             "retryCount": int(getattr(item, "retry_count", 0) or 0),
             "description": item.description,
+            "name": str(getattr(item, "name", "") or ""),
             "imageMultimodalEnabled": bool(getattr(item, "image_multimodal_enabled", False)),
         }
         if getattr(item, "context_window_tokens", None) is not None:
