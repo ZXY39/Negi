@@ -818,6 +818,89 @@ from g3ku.shells.resource_cli import build_resource_app
 resource_app = build_resource_app(console)
 app.add_typer(resource_app, name="resource")
 
+# ============================================================================
+# External Agent API diagnostics (read-only)
+# ============================================================================
+
+external_app = typer.Typer(help="External Agent API read-only diagnostics")
+app.add_typer(external_app, name="external")
+
+
+def _mask_token_for_cli(token: str) -> str:
+    raw = str(token or "")
+    if not raw:
+        return ""
+    if len(raw) < 12:
+        return "•" * len(raw)
+    return f"{raw[:4]}…{raw[-4:]}"
+
+
+@external_app.command("status")
+def external_status():
+    """Show External Agent API switch and per-bridge token overview (masked)."""
+    from g3ku.config.loader import load_config
+
+    cfg = load_config()
+    external_api = getattr(cfg, "external_api", None)
+    enabled = bool(getattr(external_api, "enabled", False))
+    tokens = dict(getattr(external_api, "tokens", None) or {})
+
+    state = "[green]enabled[/green]" if enabled else "[red]disabled[/red]"
+    console.print(f"External Agent API (/api/v1): {state}")
+    if not tokens:
+        console.print("No bridge tokens issued. Issue one from the web 外部接入 panel.")
+        return
+
+    table = Table(title="Bridge Tokens")
+    table.add_column("bridge_id", style="cyan")
+    table.add_column("label")
+    table.add_column("status")
+    table.add_column("token (masked)")
+    for bridge_id in sorted(tokens):
+        entry = tokens[bridge_id]
+        masked = _mask_token_for_cli(str(getattr(entry, "token", "") or ""))
+        table.add_row(
+            str(bridge_id),
+            str(getattr(entry, "label", "") or ""),
+            "[green]enabled[/green]" if bool(getattr(entry, "enabled", True)) else "[dim]disabled[/dim]",
+            masked or "（locked：仅覆盖层可见）",
+        )
+    console.print(table)
+    console.print("[dim]token 明文在加密覆盖层；锁定时进程内只有占位值。签发/吊销请到 web 外部接入面板。[/dim]")
+
+
+@external_app.command("sessions")
+def external_sessions(
+    bridge_id: str | None = typer.Option(None, "--bridge", "-b", help="Only show sessions of this bridge_id"),
+):
+    """List external bridge sessions from the registry (external_key ↔ session_key)."""
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry
+
+    registry = ExternalSessionRegistry()
+    entries = registry.list_entries()
+    if bridge_id:
+        entries = registry.list_bridge_sessions(bridge_id)
+    if not entries:
+        console.print("No external bridge sessions registered.")
+        return
+
+    table = Table(title="External Bridge Sessions")
+    table.add_column("bridge_id", style="cyan")
+    table.add_column("external_key")
+    table.add_column("session_key")
+    table.add_column("title")
+    table.add_column("created_at")
+    for entry in sorted(entries, key=lambda item: (item.bridge_id, item.created_at)):
+        table.add_row(
+            entry.bridge_id,
+            entry.external_key,
+            entry.session_key,
+            entry.title or "",
+            entry.created_at or "",
+        )
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()
 

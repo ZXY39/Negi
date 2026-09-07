@@ -182,6 +182,10 @@ class ExternalSessionRegistry:
         with self._lock:
             return [entry for entry in self._entries.values() if entry.bridge_id == bridge]
 
+    def list_entries(self) -> list[ExternalSessionEntry]:
+        with self._lock:
+            return list(self._entries.values())
+
     def update_title(self, session_key: str, title: str) -> bool:
         raw = str(session_key or "").strip()
         with self._lock:
