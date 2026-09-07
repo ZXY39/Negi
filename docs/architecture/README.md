@@ -50,6 +50,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
+- 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"

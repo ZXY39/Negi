@@ -496,6 +496,8 @@ The web/admin stack has an explicit container-safe startup mode.
 - In this mode, the web process still owns FastAPI routes, websocket session/runtime integration, heartbeat startup, and cron startup.
 - Detached task execution is expected to come from a separate `g3ku worker` process or container rather than from the web-managed local child worker path.
 
+The default local (non-`--no-worker`) path runs a web-managed task worker with auto-restart supervision; its lease/heartbeat/stale semantics and troubleshooting are owned by `operations-and-maintenance.md`「托管 worker 看门狗」.
+
 `/api/bootstrap/status` is also the preferred healthcheck-friendly read endpoint for the web container:
 
 - it is available even when the project is still locked
