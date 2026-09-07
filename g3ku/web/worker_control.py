@@ -217,6 +217,122 @@ async def shutdown_managed_task_worker() -> None:
     logger.info("Stopped managed task worker pid={}", pid)
 
 
+_WATCHDOG_POLL_SECONDS = 5.0
+_WATCHDOG_BACKOFF_SECONDS = (5.0, 10.0, 20.0, 30.0, 60.0)
+_TASK_WORKER_LEASE_ROLE = "task_worker"
+
+
+def _pid_alive(pid: int | None) -> bool | None:
+    """Best-effort process liveness probe.
+
+    Returns True (alive), False (dead) or None (unknown). Callers treat None as
+    "do not take destructive action", keeping the watchdog conservative when no
+    reliable OS probe is available.
+    """
+    normalized_pid = int(pid or 0)
+    if normalized_pid <= 0:
+        return False
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+    if psutil is not None:
+        try:
+            return bool(psutil.pid_exists(normalized_pid))
+        except Exception:
+            return None
+    if os.name == "nt":
+        return None
+    try:
+        os.kill(normalized_pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return None
+
+
+def _settle_worker_lease_for_restart(service: Any) -> bool:
+    """Decide whether the watchdog may spawn a managed worker now.
+
+    Returns False while a *live* process still holds the task-worker lease
+    (for example a separately-launched worker) — spawning then would only
+    churn, and could race into double execution. When the holder pid is
+    confirmed dead, the stale lease row is removed for that specific worker id
+    so the fresh worker does not have to wait out the lease TTL. Unknown
+    liveness leaves the lease untouched: the fresh worker's own acquisition
+    remains the single arbiter.
+    """
+    if service is None:
+        return True
+    store = getattr(service, "store", None)
+    get_lease = getattr(store, "get_worker_lease", None)
+    if not callable(get_lease):
+        return True
+    try:
+        lease = get_lease(_TASK_WORKER_LEASE_ROLE)
+    except Exception:
+        return True
+    if not lease:
+        return True
+    worker_id = str(lease.get("worker_id") or "").strip()
+    holder_pid = int(lease.get("holder_pid") or 0)
+    alive = _pid_alive(holder_pid)
+    if alive is True:
+        logger.info(
+            "managed task worker watchdog: live lease holder pid={} worker_id={}; skip respawn",
+            holder_pid,
+            worker_id,
+        )
+        return False
+    if alive is False and worker_id:
+        release_lease = getattr(store, "release_worker_lease", None)
+        if callable(release_lease):
+            try:
+                release_lease(role=_TASK_WORKER_LEASE_ROLE, worker_id=worker_id)
+                logger.info(
+                    "managed task worker watchdog: released stale lease of dead holder worker_id={}",
+                    worker_id,
+                )
+            except Exception as exc:
+                logger.warning("managed task worker watchdog: stale lease release failed: {}", exc)
+    return True
+
+
+async def run_managed_task_worker_watchdog(service: Any | None = None) -> None:
+    """Supervise the managed task worker and restart it when it dies.
+
+    The trigger is the managed *process* being gone, never a merely stale
+    heartbeat, so a stalled-but-alive worker is not mistaken for dead. The
+    watchdog refuses to fight a live lease holder, and backs off exponentially
+    to bound restart churn on persistent startup failures.
+    """
+    backoff_index = 0
+    while True:
+        delay = _WATCHDOG_POLL_SECONDS
+        try:
+            if not auto_worker_enabled():
+                return
+            if managed_worker_pid() is not None:
+                backoff_index = 0
+            elif not _settle_worker_lease_for_restart(service):
+                backoff_index = 0
+            elif start_managed_task_worker():
+                if service is not None:
+                    await wait_for_task_worker_online(service, timeout_s=2.0)
+                backoff_index = 0
+            else:
+                backoff_index = min(backoff_index + 1, len(_WATCHDOG_BACKOFF_SECONDS) - 1)
+                delay = _WATCHDOG_BACKOFF_SECONDS[backoff_index]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("managed task worker watchdog tick failed: {}", exc)
+            backoff_index = min(backoff_index + 1, len(_WATCHDOG_BACKOFF_SECONDS) - 1)
+            delay = _WATCHDOG_BACKOFF_SECONDS[backoff_index]
+        await asyncio.sleep(delay)
+
+
 __all__ = [
     "WEB_AUTO_WORKER_ENV",
     "WEB_KEEP_WORKER_ENV",
@@ -225,6 +341,7 @@ __all__ = [
     "keep_worker_enabled",
     "managed_worker_pid",
     "managed_worker_snapshot",
+    "run_managed_task_worker_watchdog",
     "shutdown_managed_task_worker",
     "start_managed_task_worker",
     "wait_for_task_worker_online",

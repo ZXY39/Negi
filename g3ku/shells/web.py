@@ -33,9 +33,11 @@ from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.security import get_bootstrap_security_service
 from g3ku.web.launcher import run_web_server_entrypoint
 from g3ku.web.worker_control import (
+    auto_worker_enabled,
     ensure_managed_task_worker,
     keep_worker_enabled,
     managed_worker_pid,
+    run_managed_task_worker_watchdog,
     shutdown_managed_task_worker,
 )
 from main.protocol import now_iso
@@ -46,6 +48,7 @@ _global_bus: Optional[MessageBus] = None
 _global_runtime_manager: Optional[SessionRuntimeManager] = None
 _global_web_heartbeat = None
 _global_outbound_drain_task: Optional[asyncio.Task] = None
+_global_task_worker_watchdog_task: Optional[asyncio.Task] = None
 _global_runtime_services_lock: Optional[asyncio.Lock] = None
 
 _NO_CEO_MODEL_CONFIGURED_MESSAGE = "No model configured for role 'ceo'."
@@ -421,6 +424,23 @@ def _ensure_outbound_drain_running() -> None:
         _global_outbound_drain_task = _start_outbound_drain(_global_bus)
 
 
+def _ensure_task_worker_watchdog_running(service: Any = None) -> None:
+    """Start the managed task worker watchdog once (idempotent).
+
+    The watchdog restarts the managed worker when it dies, so a transient
+    startup failure (e.g. a not-yet-expired lease) no longer leaves the task
+    hall permanently "stale".
+    """
+    global _global_task_worker_watchdog_task
+    if not auto_worker_enabled():
+        return
+    if _global_task_worker_watchdog_task is None or _global_task_worker_watchdog_task.done():
+        _global_task_worker_watchdog_task = asyncio.create_task(
+            run_managed_task_worker_watchdog(service),
+            name="task-worker-watchdog",
+        )
+
+
 _SHUTDOWN_PAUSE_DRAIN_TIMEOUT_S = 10.0
 _SHUTDOWN_PAUSE_DRAIN_POLL_S = 0.1
 
@@ -657,6 +677,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             await main_task_service.startup()
             # Avoid blocking unlock on worker warmup; the UI can surface worker readiness separately.
             await ensure_managed_task_worker(main_task_service, wait_timeout_s=1.0)
+            _ensure_task_worker_watchdog_running(main_task_service)
         heartbeat = await start_web_session_heartbeat(
             runtime_agent,
             get_runtime_manager(runtime_agent),
@@ -677,19 +698,21 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
 
 async def shutdown_web_runtime() -> None:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
-    global _global_outbound_drain_task
+    global _global_outbound_drain_task, _global_task_worker_watchdog_task
 
     agent = _global_agent
     runtime_manager = _global_runtime_manager
     heartbeat = _global_web_heartbeat
     cron_service = getattr(agent, "cron_service", None) if agent is not None else None
     outbound_drain_task = _global_outbound_drain_task
+    task_worker_watchdog_task = _global_task_worker_watchdog_task
 
     _global_agent = None
     _global_bus = None
     _global_runtime_manager = None
     _global_web_heartbeat = None
     _global_outbound_drain_task = None
+    _global_task_worker_watchdog_task = None
 
     if agent is None:
         return
@@ -721,6 +744,7 @@ async def shutdown_web_runtime() -> None:
             logger.debug('web heartbeat stop skipped during shutdown')
 
     await _cancel_background_task(outbound_drain_task)
+    await _cancel_background_task(task_worker_watchdog_task)
 
     session_keys: set[str] = set()
     if runtime_manager is not None:
