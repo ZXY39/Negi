@@ -118,12 +118,16 @@ async def test_service_enabled_without_secret_reports_not_configured(workspace: 
 
 
 @pytest.mark.asyncio
-async def test_service_provisions_token_and_bridge_errors_without_botpy(workspace: Path) -> None:
+async def test_service_provisions_token_and_bridge_errors_without_botpy(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(workspace, enabled=True, app_id="123", app_secret="")
     security = get_bootstrap_security_service(workspace)
     security.setup_initial_realm(password="owner-password")
     # The appSecret arrives via the overlay (like the real save path), never inline.
     security.set_overlay_values({"config.qqBot.appSecret": "sekrit"})
+    # Simulate an environment without qq-botpy: the bridge must report it, not crash.
+    import sys
+
+    monkeypatch.setitem(sys.modules, "botpy", None)
 
     service = QqOfficialService()
     await service.sync_from_config()

@@ -6,10 +6,14 @@ done through the generic External Agent API over loopback (see
 ``g3ku/qq_official/client.py``); this file only wires botpy events to that
 client and QQ message posting back out.
 
-Real-device seam: the botpy event model field names and the exact
-``api.post_*`` signatures are written to the official README's shape but must
-be confirmed against a live AppID/AppSecret. All the logic reachable without a
-QQ account (mapping, client, service, provisioning) is unit-tested elsewhere.
+Real-device seam: the botpy SDK surface is verified against ``qq-botpy==1.2.1`` —
+``on_<event>`` handler dispatch, message field names (``group_openid``,
+``author.user_openid``, ``guild_id``/``channel_id``/``id``/``content``), and
+``post_message`` / ``post_group_message`` / ``post_c2c_message`` / ``post_dms``
+signatures. The remaining unknown is live QQ gateway behavior (credential
+validation, intents/event subscription), which needs a real AppID/AppSecret.
+All logic reachable without a QQ account (mapping, client, service,
+provisioning) is unit-tested elsewhere.
 """
 
 from __future__ import annotations
@@ -80,7 +84,7 @@ async def run_qq_official_bridge(
         elif kind == "guild":
             await bridge_api.post_message(channel_id=target["channel_id"], content=text)
         elif kind == "guilddm":
-            await bridge_api.post_dm(guild_id=target["guild_id"], msg_id="", content=text)
+            await bridge_api.post_dms(guild_id=target["guild_id"], content=text)
         else:
             logger.warning("qq-official cannot deliver to target external_key={}", external_key)
 
@@ -128,7 +132,7 @@ async def run_qq_official_bridge(
 
         async def on_direct_message_create(self, message):
             await on_incoming(
-                external_key_for_guild_dm(getattr(message, "guild_id", ""), getattr(message, "author", {}).get("id", "")),
+                external_key_for_guild_dm(getattr(message, "guild_id", ""), getattr(getattr(message, "author", None), "id", "")),
                 _content_of(message),
                 getattr(message, "id", ""),
             )
