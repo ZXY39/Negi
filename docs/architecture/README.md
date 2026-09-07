@@ -40,6 +40,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Reminder UI or `ceo.tool.reminder` timeout-stop failures → `heartbeat-system.md` (+ `web-and-admin.md` for UI rendering)
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
+- 追加通知后任务停在 paused、任务树出现红色「消息分发失败」横幅、epoch state=failed → `runtime-overview.md`「frontdoor 与任务运行时的关系」+ `operations-and-maintenance.md`「task_append_notice / task message distribution 维护要点」
 - 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`

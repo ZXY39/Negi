@@ -129,8 +129,9 @@ class TaskDistributionState(Model):
     pending_notice_node_ids: list[str] = Field(default_factory=list)
     queued_epoch_count: int = 0
     pending_mailbox_count: int = 0
+    error_text: str = ''
 
-    @field_validator('active_epoch_id', 'state', 'mode', mode='before')
+    @field_validator('active_epoch_id', 'state', 'mode', 'error_text', mode='before')
     @classmethod
     def _normalize_text_fields(cls, value: Any) -> str:
         return normalize_optional_text(value)

@@ -970,6 +970,13 @@ textarea {
     pointer-events: none;
 }
 
+.task-tree-distribution-bubble--failed {
+    border-color: color-mix(in srgb, #ef4444 52%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 14%, var(--bg-app));
+    box-shadow: 0 12px 32px rgba(239, 68, 68, 0.14);
+    color: color-mix(in srgb, #b91c1c 88%, var(--text-primary));
+}
+
 .tree-container.is-panning {
     cursor: grabbing;
     user-select: none;

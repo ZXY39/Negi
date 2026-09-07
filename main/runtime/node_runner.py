@@ -99,6 +99,8 @@ _DISTRIBUTION_ACTION_VALUES = {
     DISTRIBUTION_ACTION_TERMINATE,
 }
 _DISTRIBUTION_TERMINATE_REASON_PREFIX = 'terminated by parent distribution decision'
+_DISTRIBUTION_DECISION_MAX_ATTEMPTS = 3
+_DISTRIBUTION_DECISION_REPAIR_PREFIX = '上一轮消息分发决策无效'
 
 
 _UNSET = object()
@@ -2256,6 +2258,19 @@ class NodeRunner:
         return DISTRIBUTION_ACTION_SKIP
 
     @staticmethod
+    def _distribution_decision_repair_message(*, repair_round: int, blocking_reason: str) -> str:
+        reason = str(blocking_reason or '').strip() or 'decision_invalid'
+        return (
+            f'{_DISTRIBUTION_DECISION_REPAIR_PREFIX}（{reason}），'
+            f'当前为第 {max(1, int(repair_round))} 次修复尝试。'
+            '分发回合必须以一次 `submit_message_distribution` 工具调用结束：'
+            '对 live_children 清单中的每一个子节点提交恰好一条 children 决策，'
+            'target_node_id 必须原样取自清单且全部覆盖，不能遗漏或重复；'
+            'action=distribute 时 message 必须非空，action=skip/terminate 时 reason 必须非空。'
+            '不要输出解释性普通文本，不要调用其他工具，现在重新提交完整决策。'
+        )
+
+    @staticmethod
     def _validate_distribution_child_decisions(
         *,
         submitted_children: list[Any],
@@ -2634,49 +2649,83 @@ class NodeRunner:
                 remaining_work=[],
                 blocking_reason=str(preflight_failure_reason or '').strip(),
             )
-        response = await self._react_loop._chat_with_optional_extensions(
-            messages=prompt_messages,
-            tools=distribution_tools,
-            model_refs=model_refs,
-            # Responses-style gateways expect the flat function selector shape here.
-            tool_choice=tool_choice,
-            parallel_tool_calls=False,
-            on_model_retry_status=self._react_loop._model_retry_status_callback(
-                task_id=task.task_id,
-                node_id=node.node_id,
-            ),
-        )
-        normalized_tool_calls = self._distribution_response_tool_calls(response)
-        epoch_payload = self._distribution_append_debug_trace(
-            epoch_payload,
-            event='control_turn_response',
-            tool_call_names=[
-                str(item.get('name') or '').strip()
-                for item in normalized_tool_calls
-                if str(item.get('name') or '').strip()
-            ],
-            tool_call_ids=[
-                str(item.get('id') or '').strip()
-                for item in normalized_tool_calls
-                if str(item.get('id') or '').strip()
-            ],
-        )
-        arguments = self._distribution_response_arguments(response)
-        submitted = await decision_tool.execute(
-            children=list(arguments.get('children') or []),
-            notes=str(arguments.get('notes') or ''),
-        )
-        submitted_children = [item for item in list(submitted.get('children') or []) if isinstance(item, dict)]
-        validation_error = self._validate_distribution_child_decisions(
-            submitted_children=submitted_children,
-            live_child_node_ids=recipient_node_ids,
-        )
-        if validation_error:
+        attempt_messages = list(prompt_messages)
+        submitted: dict[str, Any] = {}
+        submitted_children: list[dict[str, Any]] = []
+        validation_error = ''
+        for attempt in range(1, _DISTRIBUTION_DECISION_MAX_ATTEMPTS + 1):
+            response = await self._react_loop._chat_with_optional_extensions(
+                messages=attempt_messages,
+                tools=distribution_tools,
+                model_refs=model_refs,
+                # Responses-style gateways expect the flat function selector shape here.
+                tool_choice=tool_choice,
+                parallel_tool_calls=False,
+                on_model_retry_status=self._react_loop._model_retry_status_callback(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                ),
+            )
+            normalized_tool_calls = self._distribution_response_tool_calls(response)
+            epoch_payload = self._distribution_append_debug_trace(
+                epoch_payload,
+                event='control_turn_response',
+                attempt=attempt,
+                tool_call_names=[
+                    str(item.get('name') or '').strip()
+                    for item in normalized_tool_calls
+                    if str(item.get('name') or '').strip()
+                ],
+                tool_call_ids=[
+                    str(item.get('id') or '').strip()
+                    for item in normalized_tool_calls
+                    if str(item.get('id') or '').strip()
+                ],
+            )
+            arguments = self._distribution_response_arguments(response)
+            submitted = await decision_tool.execute(
+                children=list(arguments.get('children') or []),
+                notes=str(arguments.get('notes') or ''),
+            )
+            submitted_children = [item for item in list(submitted.get('children') or []) if isinstance(item, dict)]
+            validation_error = self._validate_distribution_child_decisions(
+                submitted_children=submitted_children,
+                live_child_node_ids=recipient_node_ids,
+            )
+            if not validation_error:
+                break
             epoch_payload = self._distribution_append_debug_trace(
                 epoch_payload,
                 event='control_turn_validation_failed',
+                attempt=attempt,
                 blocking_reason=str(validation_error or '').strip(),
             )
+            if attempt >= _DISTRIBUTION_DECISION_MAX_ATTEMPTS:
+                break
+            attempt_messages = [
+                *attempt_messages,
+                {
+                    'role': 'user',
+                    'content': self._distribution_decision_repair_message(
+                        repair_round=attempt,
+                        blocking_reason=str(validation_error or '').strip(),
+                    ),
+                },
+            ]
+            epoch_payload = self._distribution_append_debug_trace(
+                epoch_payload,
+                event='control_turn_retry',
+                attempt=attempt + 1,
+                blocking_reason=str(validation_error or '').strip(),
+            )
+            self._store.upsert_task_message_distribution_epoch(
+                epoch.model_copy(
+                    update={
+                        'payload': epoch_payload,
+                    }
+                )
+            )
+        if validation_error:
             self._store.upsert_task_message_distribution_epoch(
                 epoch.model_copy(
                     update={
