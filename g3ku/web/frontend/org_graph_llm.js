@@ -1261,7 +1261,6 @@
     } finally {
       state.loading = false;
       renderAll();
-      if (typeof syncCeoActiveConfigLabel === "function") syncCeoActiveConfigLabel();
     }
   }
 
@@ -1593,6 +1592,20 @@
     if (bindingDraft.imageMultimodalEnabled !== Boolean(binding.image_multimodal_enabled)) {
       bindingPatch.image_multimodal_enabled = bindingDraft.imageMultimodalEnabled;
     }
+    const nameInput = document.getElementById("llm-edit-name-input");
+    if (nameInput) {
+      const nameValue = trim(nameInput.value || "");
+      const originalDisplay = String(nameInput.dataset.originalValue || "").trim();
+      if (nameValue !== originalDisplay) {
+        const duplicatedName = state.bindings.find((item) =>
+          String(item.key || "").trim() !== String(binding.key || "").trim()
+          && trim(item.name || "")
+          && trim(item.name).toLowerCase() === nameValue.toLowerCase()
+        );
+        if (duplicatedName) throw new Error(`配置名称已存在：${nameValue}`);
+        bindingPatch.name = nameValue;
+      }
+    }
     state.saving = true;
     renderAll();
     try {
@@ -1774,10 +1787,21 @@
       if (noteToggle) {
         const popover = noteToggle.closest(".llm-note-wrap")?.querySelector("[data-llm-note-popover]");
         if (popover) {
-          const nextHidden = !popover.hidden;
+          const willOpen = popover.hidden;
           closeLlmNotePopovers();
-          popover.hidden = nextHidden;
-          popover.setAttribute("aria-hidden", nextHidden ? "true" : "false");
+          if (willOpen) {
+            if (popover.parentElement !== document.body) document.body.appendChild(popover);
+            popover.hidden = false;
+            const buttonRect = noteToggle.getBoundingClientRect();
+            const popRect = popover.getBoundingClientRect();
+            let top = buttonRect.top - popRect.height - 10;
+            if (top < 8) top = buttonRect.bottom + 10;
+            let left = buttonRect.right - popRect.width;
+            left = Math.max(8, Math.min(left, window.innerWidth - popRect.width - 8));
+            popover.style.top = `${top}px`;
+            popover.style.left = `${left}px`;
+            popover.setAttribute("aria-hidden", "false");
+          }
         }
         return;
       }
@@ -1790,7 +1814,6 @@
       if (!action) return;
       if (action === "close") { closeEditor(); return; }
       if (action === "edit-name") { enterModelNameEditMode(); return; }
-      if (action === "name-save") { void commitModelNameEdit().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "name-cancel") { cancelModelNameEdit(); return; }
       if (action === "toggle-concurrency-test") {
         const field = event.target.closest(".resource-field");
@@ -1807,7 +1830,7 @@
       if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
     });
     document.addEventListener("click", (event) => {
-      if (event.target.closest(".llm-note-wrap")) return;
+      if (event.target.closest(".llm-note-wrap") || event.target.closest("[data-llm-note-popover]")) return;
       closeLlmNotePopovers();
     });
     document.addEventListener("keydown", (event) => {
@@ -1846,51 +1869,13 @@
     input.focus();
     input.select();
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        input.blur();
-        void commitModelNameEdit();
-      } else if (event.key === "Escape") {
+      if (event.key === "Escape") {
         event.preventDefault();
         cancelModelNameEdit();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
       }
     });
-    input.addEventListener("blur", () => {
-      if (document.getElementById("llm-edit-name-input") === input) {
-        void commitModelNameEdit();
-      }
-    });
-  }
-
-  async function commitModelNameEdit() {
-    const state = llmState();
-    const binding = currentBinding();
-    const input = document.getElementById("llm-edit-name-input");
-    if (!binding) { cancelModelNameEdit(); return; }
-    if (!input) return;
-    const value = trim(input.value || "");
-    const originalDisplay = String(input.dataset.originalValue || "").trim();
-    if (value === originalDisplay) { cancelModelNameEdit(); return; }
-    const duplicated = state.bindings.find((item) =>
-      String(item.key || "").trim() !== String(binding.key || "").trim()
-      && trim(item.name || "")
-      && trim(item.name).toLowerCase() === value.toLowerCase()
-    );
-    if (duplicated) {
-      state.error = `配置名称已存在：${value}`;
-      showToast({ title: "保存失败", text: state.error, kind: "error" });
-      renderAll();
-      return;
-    }
-    try {
-      const result = await ApiClient.updateLlmBinding(binding.key, { name: value });
-      await waitForRuntimeRefreshAndUpdateToast(result?.runtimeRefresh);
-      await loadAll();
-    } catch (error) {
-      state.error = error.message || "配置名称保存失败";
-      showToast({ title: "保存失败", text: state.error, kind: "error" });
-      renderAll();
-    }
   }
 
   function cancelModelNameEdit() {

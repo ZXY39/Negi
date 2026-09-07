@@ -10416,31 +10416,6 @@ textarea {
 
 /* ---- 配置名称相关 UI ---- */
 
-.ceo-active-config-name {
-    max-width: 170px;
-    height: var(--ceo-input-leading-size);
-    padding: 0 14px;
-    border-radius: 20px;
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-    background: color-mix(in srgb, var(--bg-app) 82%, var(--bg-panel) 18%);
-    box-shadow: var(--shadow-sm);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    line-height: 1;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    vertical-align: middle;
-    cursor: default;
-    user-select: none;
-}
-.ceo-active-config-name[hidden] {
-    display: none;
-}
-
 .llm-create-name-field {
     display: flex;
     width: min(420px, 100%);
@@ -10462,14 +10437,6 @@ textarea {
 }
 .llm-edit-name-btn {
     flex: 0 0 auto;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    border-radius: 6px;
-}
-.llm-edit-name-btn svg {
-    width: 13px;
-    height: 13px;
 }
 .llm-edit-name-input {
     width: min(320px, 56vw);
@@ -10482,30 +10449,22 @@ textarea {
     align-items: center;
 }
 .llm-note-popover {
-    position: absolute;
-    bottom: calc(100% + 10px);
-    right: 0;
+    position: fixed;
     width: min(360px, 76vw);
+    max-height: 70vh;
+    overflow: auto;
     padding: 12px 14px;
     border-radius: 12px;
     border: 1px solid var(--border-color);
     background: var(--bg-panel);
     box-shadow: var(--shadow-md);
-    z-index: 80;
+    z-index: 1000;
     font-size: 12px;
     line-height: 1.6;
     color: var(--text-primary);
 }
 .llm-note-popover[hidden] {
     display: none;
-}
-.llm-note-popover::after {
-    content: "";
-    position: absolute;
-    top: 100%;
-    right: 12px;
-    border: 6px solid transparent;
-    border-top-color: var(--border-color);
 }
 .llm-note-popover-title {
     font-weight: 600;
