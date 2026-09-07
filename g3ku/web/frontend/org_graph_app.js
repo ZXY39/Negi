@@ -94,6 +94,8 @@ const S = {
     ceoSelectedSessionIds: new Set(),
     ceoScrollToLatestOnSnapshot: false,
     ceoFeedRenderSessionId: "",
+    ceoFeedRenderSignature: "",
+    ceoFeedRenderedMessageKeys: [],
     ceoSnapshotCache: {},
     ceoReplyDeltaBuffers: {},
     ceoReplyDeltaFrameId: 0,
@@ -4945,6 +4947,105 @@ function restoreCeoFeedScroll(viewState = null) {
     });
 }
 
+function buildCeoMessageKeyList(messages = []) {
+    // 与 renderCeoSnapshot 的消息打 key 规则完全一致:m:{turn_id|-}:{role}:{出现次序}。
+    const counters = {};
+    return (Array.isArray(messages) ? messages : []).map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const role = String(item.role || "").trim().toLowerCase();
+        const base = String(item.turn_id || "-").trim() || "-";
+        const counterKey = `${base}:${role}`;
+        const occ = Number(counters[counterKey] || 0);
+        counters[counterKey] = occ + 1;
+        return `m:${base}:${role}:${occ}`;
+    });
+}
+
+function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTurn = null) {
+    // 快照/重建的内容签名:相同签名 = 同一渲染输入,重建可以安全跳过。
+    // 签名覆盖完整渲染面(messages 内容 + live turn 关键字段),漏字段会导致陈旧渲染。
+    const projectMessage = (item) => {
+        if (!item || typeof item !== "object") return null;
+        return [
+            String(item.role || "").trim().toLowerCase(),
+            String(item.turn_id || "").trim(),
+            String(item.status || "").trim().toLowerCase(),
+            item.canonical_context ? 1 : 0,
+            item.canonical_context_delta ? 1 : 0,
+            String(item.content || ""),
+        ];
+    };
+    const projectTurn = (snapshot) => {
+        if (!snapshot || typeof snapshot !== "object") return null;
+        const retryStatus = snapshot.model_retry_status && typeof snapshot.model_retry_status === "object"
+            ? snapshot.model_retry_status
+            : null;
+        return [
+            String(snapshot.source || "").trim().toLowerCase(),
+            String(snapshot.turn_id || "").trim(),
+            String(snapshot.status || "").trim().toLowerCase(),
+            String(snapshot.assistant_text || "").slice(0, 20000),
+            retryStatus ? Number(retryStatus.retry_count || 0) : -1,
+            retryStatus ? String(retryStatus.state || "") : "",
+            snapshot.usage && typeof snapshot.usage === "object" ? JSON.stringify(snapshot.usage) : "",
+        ];
+    };
+    try {
+        return JSON.stringify({
+            messages: (Array.isArray(messages) ? messages : []).map(projectMessage),
+            inflight: projectTurn(inflightTurn),
+            preserved: projectTurn(preservedTurn),
+        });
+    } catch (error) {
+        void error;
+        return "";
+    }
+}
+
+function ceoFeedMatchesIncrementalFinalize(messageKeys = [], turn = null) {
+    // 增量 finalize 的前置契约:DOM 与记录的消息 key 完全一致,且最后一个
+    // 子元素就是待收尾的回合元素。任何分歧(promote 过 follow-up、手动发送、
+    // 多回合并存)都回退全量重建,保留旧路径的权威对齐语义。
+    if (!U || !U.ceoFeed || !turn || !turn.el) return false;
+    const children = Array.from(U.ceoFeed.children || []);
+    if (!children.length || children[children.length - 1] !== turn.el) return false;
+    if (children.length !== messageKeys.length + 1) return false;
+    for (let index = 0; index < messageKeys.length; index += 1) {
+        if (ceoFeedElementDataKey(children[index]) !== messageKeys[index]) return false;
+    }
+    return true;
+}
+
+function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normalizedTurnId = "", finalUserMessages = [], finalTraceContext = null, finalCanonicalContext = null, text = "", meta = null } = {}) {
+    // finalize 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在此处构建。
+    const entry = getCeoSessionSnapshotCache(sessionId);
+    const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
+    const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
+    const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
+    const inflightMatchesSource = !inflightTurn
+        || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
+        || !String(inflightTurn?.source || "").trim()
+        || ceoTurnSourceMatches(normalizedSource, inflightSource);
+    const persistedCanonicalContext = finalTraceContext
+        ? (finalCanonicalContext || finalTraceContext)
+        : null;
+    const userMessagesToAppend = finalUserMessages.length
+        ? finalUserMessages
+        : (inflightMatchesSource
+            ? normalizeCeoSnapshotUserMessages(inflightTurn?.user_messages, inflightTurn?.user_message)
+            : []);
+    let messages = trimCeoSessionSnapshotMessages(entry?.messages);
+    messages = appendMissingCeoUserMessages(messages, userMessagesToAppend);
+    messages = appendCeoSessionSnapshotMessage(messages, {
+        role: "assistant",
+        content: String(text || "").trim() || "Done.",
+        canonical_context: persistedCanonicalContext,
+        canonical_context_delta: finalTraceContext,
+        ...(finalUserMessages.length ? { usage: meta?.usage || null } : {}),
+    });
+    return { messages, inflight_turn: inflightMatchesSource ? null : inflightTurn };
+}
+
 function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "", preservedTurn = null } = {}) {
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
@@ -4954,6 +5055,22 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
         && ceoAssistantTurnAlreadyPersisted(preservedTurn?.turn_id || "", { messages, sessionId: targetSessionId })
     ) ? null : preservedTurn;
     const normalizedInflightTurn = dedupeInflightUserMessageAgainstMessages(messages, inflightTurn);
+    const renderSignature = buildCeoRenderSignature(
+        messages,
+        normalizedInflightTurn,
+        normalizedPreservedTurn
+    );
+    // 同一会话收到与当前渲染完全相同的快照(重连引导重复推送等)时跳过整页重建,
+    // 滚动与展开位置零抖动。初次加载(scrollToLatest)与跨会话渲染不跳过。
+    if (
+        !shouldScrollToLatest
+        && renderSignature
+        && String(S.ceoFeedRenderSessionId || "") === targetSessionId
+        && S.ceoFeedRenderSignature === renderSignature
+    ) {
+        S.ceoScrollToLatestOnSnapshot = false;
+        return;
+    }
     // 重建前捕获用户视觉状态(展开项/锚点);跨会话时内部自动跳过。
     const viewState = captureCeoFeedViewState(targetSessionId);
     hideCeoContextLoadNotice();
@@ -5023,6 +5140,8 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
             });
         }
         S.ceoFeedRenderSessionId = targetSessionId;
+        S.ceoFeedRenderSignature = renderSignature;
+        S.ceoFeedRenderedMessageKeys = buildCeoMessageKeyList(messages);
     }, {
         scrollMode: shouldScrollToLatest ? "bottom" : "preserve",
     });
@@ -6184,147 +6303,156 @@ function finalizeCeoTurn(text, meta = {}) {
     const finalTraceContext = resolveFinalCeoTraceContext(meta || {})
         || turn?.lastExecutionTraceSummary
         || null;
-    if (finalUserMessages.length) {
-        const updatedEntry = patchCeoSessionSnapshotCache(sessionId, (entry) => {
-            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-            const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
-            const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
-            const inflightMatchesSource = !inflightTurn
-                || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
-                || !String(inflightTurn?.source || "").trim()
-                || ceoTurnSourceMatches(normalizedSource, inflightSource);
-            const persistedCanonicalContext = finalTraceContext
-                ? (finalCanonicalContext || finalTraceContext)
-                : null;
-            let messages = trimCeoSessionSnapshotMessages(entry?.messages);
-            messages = appendMissingCeoUserMessages(messages, finalUserMessages);
-            messages = appendCeoSessionSnapshotMessage(messages, {
-                role: "assistant",
-                content: String(text || "").trim() || "Done.",
-                canonical_context: persistedCanonicalContext,
-                canonical_context_delta: finalTraceContext,
-                usage: meta?.usage || null,
-            });
-            return {
-                ...(entry || {}),
-                messages,
-                inflight_turn: inflightMatchesSource ? null : inflightTurn,
-            };
-        });
-        const renderEntry = updatedEntry || getCeoSessionSnapshotCache(sessionId);
-        if (renderEntry) {
-            renderCeoSnapshot(renderEntry.messages || [], renderEntry.inflight_turn || null, {
-                sessionId,
-                preservedTurn: renderEntry.preserved_turn || null,
-            });
-        } else {
+    // 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在处构建,
+    // 渲染层再决定走增量更新还是全量快照重建。cache 写入与旧行为保持一致
+    // (finalUserMessages 分支额外带 usage;其余分支不含)。
+    const finalPayload = buildFinalizedCeoTurnPayload(sessionId, {
+        normalizedSource,
+        normalizedTurnId,
+        finalUserMessages,
+        finalTraceContext,
+        finalCanonicalContext,
+        text,
+        meta,
+    });
+    const updatedEntry = patchCeoSessionSnapshotCache(sessionId, (entry) => ({
+        ...(entry || {}),
+        messages: finalPayload.messages,
+        inflight_turn: finalPayload.inflight_turn,
+    }));
+    const renderEntry = updatedEntry || getCeoSessionSnapshotCache(sessionId);
+    const renderedKeys = Array.isArray(S.ceoFeedRenderedMessageKeys) ? S.ceoFeedRenderedMessageKeys : [];
+    const nextKeys = buildCeoMessageKeyList(finalPayload.messages || []);
+    // 无 user_messages 的收尾保持原位语义:回合元素就地 finalize(或 addMsg 兜底),
+    // 不做全量重建;增量路径只用于 final 带 user_messages 的场景。
+    if (!finalUserMessages.length) {
+        if (!turn?.textEl || !turn?.flowEl) {
             addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+            discardPendingCeoTurns({
+                force: normalizedSource === "heartbeat",
+                source: normalizedSource,
+                turnId: normalizedTurnId,
+            });
+            maybeDispatchQueuedCeoFollowUps();
+            return;
         }
-        consumeRepresentedRuntimeSentCeoFollowUps(sessionId, finalUserMessages);
-        maybeDispatchQueuedCeoFollowUps();
-        return;
-    }
-    if (!turn?.textEl || !turn.flowEl) {
-        addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+        mutateCeoFeed(() => {
+            clearCeoToolReminder(turn, { force: true });
+            turn.finalized = true;
+            turn.liveStreamText = "";
+            renderCeoLiveStreamTextIntoTurn(turn);
+            turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
+            turn.textEl.classList.remove("pending");
+            turn.textEl.classList.add("markdown-content");
+            if (finalTraceContext) {
+                renderCeoStageTraceIntoTurn(turn, finalTraceContext);
+            }
+            if (turn.steps > 0) {
+                const hasRunningStep = hasRunningCeoToolStep(turn);
+                turn.flowEl.hidden = false;
+                turn.flowEl.open = true;
+                updateCeoTurnMeta(
+                    turn,
+                    turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
+                );
+            } else {
+                turn.flowEl.hidden = true;
+            }
+            setCeoTurnUsage(turn, meta?.usage);
+            setCeoTurnUsageCollapsed(turn, true);
+            icons();
+        }, { scrollMode: "preserve" });
         discardPendingCeoTurns({
             force: normalizedSource === "heartbeat",
             source: normalizedSource,
             turnId: normalizedTurnId,
         });
-        patchCeoSessionSnapshotCache(sessionId, (entry) => {
-            const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-            const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
-            const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
-            const inflightMatchesSource = !inflightTurn
-                || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
-                || !inflightSource
-                || ceoTurnSourceMatches(normalizedSource, inflightSource);
-            const persistedCanonicalContext = finalTraceContext
-                ? (finalCanonicalContext || finalTraceContext)
-                : null;
-            const messages = appendCeoSessionSnapshotMessage(
-                appendMissingCeoUserMessages(entry?.messages, normalizeCeoSnapshotUserMessages(
-                    inflightTurn?.user_messages,
-                    inflightTurn?.user_message
-                )),
-                {
-                role: "assistant",
-                content: String(text || "").trim() || "Done.",
-                canonical_context: persistedCanonicalContext,
-                canonical_context_delta: finalTraceContext,
-                usage: meta?.usage || null,
-                }
-            );
-            return {
-                ...(entry || {}),
-                messages,
-                inflight_turn: inflightMatchesSource ? null : inflightTurn,
-            };
-        });
         maybeDispatchQueuedCeoFollowUps();
         return;
     }
-    mutateCeoFeed(() => {
-        clearCeoToolReminder(turn, { force: true });
-        turn.finalized = true;
-        turn.liveStreamText = "";
-        renderCeoLiveStreamTextIntoTurn(turn);
-        turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
-        turn.textEl.classList.remove("pending");
-        turn.textEl.classList.add("markdown-content");
-        if (finalTraceContext) {
-            renderCeoStageTraceIntoTurn(turn, finalTraceContext);
-        }
-        if (turn.steps > 0) {
-            const hasRunningStep = hasRunningCeoToolStep(turn);
-            turn.flowEl.hidden = false;
-            turn.flowEl.open = true;
-            updateCeoTurnMeta(
-                turn,
-                turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
-            );
-        } else {
-            turn.flowEl.hidden = true;
-        }
-        setCeoTurnUsage(turn, meta?.usage);
-        setCeoTurnUsageCollapsed(turn, true);
-        icons();
-    }, { scrollMode: "preserve" });
-    discardPendingCeoTurns({
-        force: normalizedSource === "heartbeat",
-        source: normalizedSource,
-        turnId: normalizedTurnId,
-    });
-    patchCeoSessionSnapshotCache(sessionId, (entry) => {
-        const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
-        const inflightTurnId = normalizeCeoTurnId(inflightTurn?.turn_id);
-        const persistedCanonicalContext = finalTraceContext
-            ? (finalCanonicalContext || finalTraceContext)
-            : null;
-        let messages = trimCeoSessionSnapshotMessages(entry?.messages);
-        const inflightSource = normalizeCeoTurnSource(inflightTurn?.source || "user");
-        const inflightMatchesSource = !inflightTurn
-            || (normalizedTurnId && inflightTurnId && inflightTurnId !== normalizedTurnId ? false : true)
-            || !String(inflightTurn?.source || "").trim()
-            || ceoTurnSourceMatches(normalizedSource, inflightSource);
-        if (inflightMatchesSource) {
-            messages = appendMissingCeoUserMessages(
-                messages,
-                normalizeCeoSnapshotUserMessages(inflightTurn?.user_messages, inflightTurn?.user_message)
-            );
-        }
-        messages = appendCeoSessionSnapshotMessage(messages, {
-            role: "assistant",
-            content: String(text || "").trim() || "Done.",
-            canonical_context: persistedCanonicalContext,
-            canonical_context_delta: finalTraceContext,
+    const headMatches = nextKeys.length >= renderedKeys.length
+        && nextKeys.slice(0, renderedKeys.length).every((key, index) => key === renderedKeys[index]);
+    // 增量更新只在 DOM 与记录完全对齐且最后一个子元素就是本回合时启用;
+    // 任何偏差(promote 过补充消息、手动发送、多回合并存)都回退全量重建,
+    // 保留旧路径的权威对齐语义。
+    const canIncremental = !!(turn?.textEl && turn?.flowEl)
+        && headMatches
+        && ceoFeedMatchesIncrementalFinalize(renderedKeys, turn);
+    if (canIncremental) {
+        const addedMessages = (finalPayload.messages || []).slice(renderedKeys.length, Math.max(renderedKeys.length, nextKeys.length - 1));
+        const addedKeys = nextKeys.slice(renderedKeys.length, nextKeys.length - 1);
+        mutateCeoFeed(() => {
+            addedMessages.forEach((message, index) => {
+                addMsg(String(message?.content || ""), "user", {
+                    attachments: normalizeUploadList(message?.attachments),
+                    scrollMode: "preserve",
+                    sessionId,
+                });
+                // addMsg 不返回元素;同一同步批次内它一定是 feed 的最后一个子节点,
+                // 取出来补稳定 key 并移到回合元素之前。
+                const feedChildren = U.ceoFeed && U.ceoFeed.children ? Array.from(U.ceoFeed.children) : [];
+                const el = (U.ceoFeed && U.ceoFeed.lastElementChild) || feedChildren[feedChildren.length - 1] || null;
+                if (!el) return;
+                if (typeof el.setAttribute === "function") {
+                    el.setAttribute("data-ceo-key", addedKeys[index] || "");
+                }
+                if (U.ceoFeed && turn.el && typeof U.ceoFeed.insertBefore === "function") {
+                    try {
+                        U.ceoFeed.insertBefore(el, turn.el);
+                    } catch (error) {
+                        void error;
+                    }
+                }
+            });
+            clearCeoToolReminder(turn, { force: true });
+            turn.finalized = true;
+            turn.liveStreamText = "";
+            renderCeoLiveStreamTextIntoTurn(turn);
+            turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
+            turn.textEl.classList.remove("pending");
+            turn.textEl.classList.add("markdown-content");
+            if (finalTraceContext) {
+                renderCeoStageTraceIntoTurn(turn, finalTraceContext);
+            }
+            if (turn.steps > 0) {
+                const hasRunningStep = hasRunningCeoToolStep(turn);
+                turn.flowEl.hidden = false;
+                turn.flowEl.open = true;
+                updateCeoTurnMeta(
+                    turn,
+                    turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
+                );
+            } else {
+                turn.flowEl.hidden = true;
+            }
+            setCeoTurnUsage(turn, meta?.usage);
+            setCeoTurnUsageCollapsed(turn, true);
+            icons();
+        }, { scrollMode: "preserve" });
+        discardPendingCeoTurns({
+            force: normalizedSource === "heartbeat",
+            source: normalizedSource,
+            turnId: normalizedTurnId,
         });
-        return {
-            ...(entry || {}),
-            messages,
-            inflight_turn: inflightMatchesSource ? null : inflightTurn,
-        };
-    });
+        S.ceoFeedRenderedMessageKeys = nextKeys;
+        S.ceoFeedRenderSignature = buildCeoRenderSignature(
+            finalPayload.messages || [],
+            finalPayload.inflight_turn || null,
+            (renderEntry && renderEntry.preserved_turn) || null
+        );
+        consumeRepresentedRuntimeSentCeoFollowUps(sessionId, finalUserMessages);
+        maybeDispatchQueuedCeoFollowUps();
+        return;
+    }
+    if (renderEntry) {
+        renderCeoSnapshot(renderEntry.messages || [], renderEntry.inflight_turn || null, {
+            sessionId,
+            preservedTurn: renderEntry.preserved_turn || null,
+        });
+    } else {
+        addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+    }
+    consumeRepresentedRuntimeSentCeoFollowUps(sessionId, finalUserMessages);
     maybeDispatchQueuedCeoFollowUps();
 }
 
