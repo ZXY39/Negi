@@ -713,6 +713,7 @@ class TaskLogService:
             'pending_notice_node_ids': pending_notice_node_ids,
             'queued_epoch_count': queued_epoch_count,
             'pending_mailbox_count': pending_mailbox_count,
+            'error_text': normalize_optional_text(current.get('error_text')),
         }
 
     def initialize_task(self, task: TaskRecord, root: NodeRecord) -> tuple[TaskRecord, NodeRecord]:

@@ -714,6 +714,63 @@ class TaskActorService:
     def _queue_root_distribution_notices(self, *, epoch, created_at: str) -> None:
         self._node_runner._queue_pending_root_distribution_notices(epoch=epoch, created_at=created_at)
 
+    def _fail_distribution_epoch(
+        self,
+        task_id: str,
+        *,
+        epoch_id: str,
+        failed_node_id: str,
+        failure_reason: str,
+    ) -> bool:
+        epoch = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
+        if epoch is None:
+            return True
+        failed_at = now_iso()
+        error_text = (str(failure_reason or '').strip() or 'distribution turn failed')[:500]
+        payload = dict(epoch.payload or {})
+        payload['frontier_node_ids'] = []
+        payload['next_frontier_node_ids'] = []
+        payload['failure_node_id'] = str(failed_node_id or '').strip()
+        failed_epoch = self._store.upsert_task_message_distribution_epoch(
+            epoch.model_copy(
+                update={
+                    'state': 'failed',
+                    'completed_at': failed_at,
+                    'error_text': error_text,
+                    'payload': payload,
+                }
+            )
+        )
+        # Message durability: the queued root messages were never distributed, so keep
+        # them as root pending notices; an explicit resume still merges them instead of
+        # silently dropping the appended requirement.
+        self._queue_root_distribution_notices(epoch=failed_epoch, created_at=failed_at)
+        queued_epoch_count = sum(
+            1
+            for item in list(self._store.list_active_task_message_distribution_epochs(task_id) or [])
+            if str(item.state or '').strip() == 'queued'
+        )
+        self._log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                'active_epoch_id': epoch_id,
+                'state': 'failed',
+                'mode': '',
+                'frontier_node_ids': [],
+                'blocked_node_ids': [],
+                'pending_notice_node_ids': list(
+                    self._node_runner.nodes_with_pending_distribution_notices(task_id=task_id)
+                ),
+                'queued_epoch_count': queued_epoch_count,
+                'pending_mailbox_count': self._node_runner.pending_distribution_mailbox_count(task_id=task_id),
+                'error_text': error_text,
+            },
+        )
+        # Deliberately no clear_pause / _resume_distribution_if_needed here: the task
+        # stays paused until an operator or the CEO explicitly resumes it or appends a
+        # new notice (which queues a fresh epoch and re-runs distribution).
+        return True
+
     async def _run_distribution_epoch(self, task_id: str) -> bool | None:
         task = self._store.get_task(task_id)
         if task is None:
@@ -796,8 +853,24 @@ class TaskActorService:
             self._log_service.update_task_runtime_meta(task_id, distribution=distribution)
         if not frontier:
             return True
+        frontier_failure_reason = ''
+        frontier_failure_node_id = ''
         for node_id in frontier:
-            await self._execute_node(task_id, node_id)
+            frontier_result = await self._execute_node(task_id, node_id)
+            if str(getattr(frontier_result, 'status', '') or '').strip().lower() == 'failed':
+                frontier_failure_reason = (
+                    str(getattr(frontier_result, 'blocking_reason', '') or '').strip()
+                    or 'distribution turn failed'
+                )
+                frontier_failure_node_id = node_id
+                break
+        if frontier_failure_reason:
+            return self._fail_distribution_epoch(
+                task_id,
+                epoch_id=epoch_id,
+                failed_node_id=frontier_failure_node_id,
+                failure_reason=frontier_failure_reason,
+            )
         refreshed_epoch = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
         if refreshed_epoch is None:
             return True

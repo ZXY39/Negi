@@ -2008,6 +2008,9 @@ function activeTaskDistributionState() {
             if (pendingNoticeAlreadyVisible) return null;
             return { ...distribution, ui_mode: "pending_notice" };
         }
+        if (state === "failed") {
+            return { ...distribution, ui_mode: "distribution_failed" };
+        }
         if (mode === "task_wide_barrier") {
             if (
                 activeEpochId
@@ -2033,11 +2036,22 @@ function activeTaskDistributionState() {
 
 function buildTaskTreeDistributionBubble(text = "") {
     const distributionState = activeTaskDistributionState();
-    const fallbackText = distributionState?.ui_mode === "pending_notice"
-        ? "接收到新消息，等待节点处理"
-        : "接收到新消息，分发中";
+    const failedMode = distributionState?.ui_mode === "distribution_failed";
+    const failureText = String(distributionState?.error_text || "").trim();
+    let fallbackText;
+    if (distributionState?.ui_mode === "pending_notice") {
+        fallbackText = "接收到新消息，等待节点处理";
+    } else if (failedMode) {
+        fallbackText = failureText
+            ? `消息分发失败（${failureText.slice(0, 120)}），任务保持暂停；可重新追加通知重试，或手动恢复任务`
+            : "消息分发失败，任务保持暂停；可重新追加通知重试，或手动恢复任务";
+    } else {
+        fallbackText = "接收到新消息，分发中";
+    }
     const bubble = document.createElement("div");
-    bubble.className = "task-tree-distribution-bubble";
+    bubble.className = failedMode
+        ? "task-tree-distribution-bubble task-tree-distribution-bubble--failed"
+        : "task-tree-distribution-bubble";
     bubble.setAttribute("role", "status");
     bubble.setAttribute("aria-live", "polite");
     bubble.textContent = String(text || "").trim() || fallbackText;

@@ -1556,6 +1556,7 @@ class MainRuntimeService:
 
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
+        self._reset_failed_distribution_state_on_resume(task_id)
         if self.execution_mode in {'embedded', 'worker'}:
             task = self.get_task(task_id)
             if task is None:
@@ -1575,6 +1576,21 @@ class MainRuntimeService:
                 payload={'task_id': task.task_id},
             )
         return self.get_task(task_id)
+
+    def _reset_failed_distribution_state_on_resume(self, task_id: str) -> None:
+        # An explicit resume is the operator's choice to accept the degraded path: the
+        # undistributed root messages stay queued as pending notices, so downgrade the
+        # visible failure banner to the ordinary pending-notice state. The epoch row
+        # keeps state='failed' + error_text as the durable forensic record.
+        runtime_meta = self.log_service.read_task_runtime_meta(task_id) or {}
+        distribution = dict(runtime_meta.get('distribution') or {})
+        if str(distribution.get('state') or '').strip() != 'failed':
+            return
+        distribution['active_epoch_id'] = ''
+        distribution['state'] = 'resume_ready'
+        distribution['mode'] = ''
+        distribution['error_text'] = ''
+        self.log_service.update_task_runtime_meta(task_id, distribution=distribution)
 
     @staticmethod
     def _runtime_session_context(session_id: str) -> dict[str, str]:
@@ -2871,6 +2887,27 @@ class MainRuntimeService:
         )
         if active is None:
             active = next((epoch for epoch in epochs if str(epoch.state or '').strip() == 'queued'), None)
+        if active is None:
+            # Surface a still-unresolved distribution failure: the latest epoch failed and
+            # the task is still paused waiting for operator/CEO intervention. A newer epoch
+            # (retry via append notice) or a resume supersedes this signal.
+            all_epochs = list(self.store.list_active_task_message_distribution_epochs(task_id) or [])
+            latest_epoch = all_epochs[-1] if all_epochs else None
+            if latest_epoch is not None and str(latest_epoch.state or '').strip() == 'failed':
+                latest_task = self.get_task(task_id)
+                if latest_task is not None and (bool(latest_task.pause_requested) or bool(latest_task.is_paused)):
+                    failed_root_node_id = str(latest_epoch.root_node_id or '').strip()
+                    return {
+                        'active_epoch_id': str(latest_epoch.epoch_id or '').strip(),
+                        'state': 'failed',
+                        'mode': '',
+                        'frontier_node_ids': [],
+                        'blocked_node_ids': [],
+                        'pending_notice_node_ids': [failed_root_node_id] if failed_root_node_id else [],
+                        'queued_epoch_count': 0,
+                        'pending_mailbox_count': 0,
+                        'error_text': str(latest_epoch.error_text or '').strip(),
+                    }
         queued_epoch_count = sum(
             1
             for epoch in epochs
@@ -2921,6 +2958,7 @@ class MainRuntimeService:
             'pending_notice_node_ids': pending_notice_node_ids,
             'queued_epoch_count': queued_epoch_count,
             'pending_mailbox_count': pending_mailbox_count,
+            'error_text': '',
         }
 
     def _queue_distribution_epoch(self, *, task_id: str, root_node_id: str, root_message: str) -> dict[str, Any]:
