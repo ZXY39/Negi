@@ -10335,3 +10335,112 @@ textarea {
     left: 2px;
     font-weight: 700;
 }
+
+/* ---------- External Agent API panel ---------- */
+.external-api-shell {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-4);
+}
+
+.external-master-card {
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: var(--radius-md);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.external-master-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.external-master-hint {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.86rem;
+    line-height: 1.6;
+}
+
+.external-toolbar {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.external-token-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.external-token-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.external-token-main {
+    min-width: 0;
+}
+
+.external-token-main code {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.85em;
+}
+
+.external-token-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.external-token-enabled {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 0.86rem;
+}
+
+.external-token-once {
+    border: 1px solid color-mix(in srgb, var(--accent-color, #4f7cff) 55%, transparent);
+    border-radius: var(--radius-md);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: color-mix(in srgb, var(--accent-color, #4f7cff) 7%, transparent);
+}
+
+.external-token-once h3 {
+    margin: 0;
+    font-size: 0.98rem;
+}
+
+.external-token-once p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.86rem;
+    line-height: 1.6;
+}
+
+.external-token-once textarea {
+    width: 100%;
+    resize: vertical;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.85rem;
+}
+
+.external-token-once-actions {
+    display: flex;
+    justify-content: flex-end;
+}

@@ -354,6 +354,7 @@ const U = {
     viewTools: document.getElementById("view-tools"),
     viewMemory: document.getElementById("view-memory"),
     viewModels: document.getElementById("view-models"),
+    viewExternal: document.getElementById("view-external"),
     viewTaskDetails: document.getElementById("view-task-details"),
     memoryAdminActions: document.getElementById("memory-admin-actions"),
     memoryRefresh: document.getElementById("memory-refresh-btn"),
@@ -10645,7 +10646,7 @@ function renderMemoryProcessedCard(item) {
 
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     S.view = navView;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
@@ -10692,6 +10693,7 @@ function switchView(view) {
         else void loadMemoryView({ quiet: true });
     }
     if (view === "models") void loadModels();
+    if (view === "external") void loadExternalApiView();
 }
 
 function toggleTheme() {
@@ -11288,6 +11290,7 @@ function init() {
     renderSkillActions();
     renderToolActions();
     void loadModels();
+    if (typeof initExternalApiView === "function") initExternalApiView();
     void loadTasks();
     void restoreTaskDetailSession();
     S.ceoScrollToLatestOnSnapshot = true;

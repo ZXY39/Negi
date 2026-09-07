@@ -81,6 +81,10 @@
                 <i data-lucide="cpu"></i>
                 <span>模型配置</span>
             </button>
+            <button class="nav-item" data-view="external" type="button">
+                <i data-lucide="plug"></i>
+                <span>外部接入</span>
+            </button>
 
             <div class="sidebar-spacer"></div>
 
@@ -505,6 +509,39 @@
                     <div id="llm-editor-shell" class="resource-detail-shell"></div>
                 </section>
             </section>
+            <section id="view-external" class="view-section" style="display: none;">
+                <header class="content-header resource-header compact-resource-header">
+                    <div class="resource-header-title">
+                        <h1>外部接入</h1>
+                    </div>
+                    <div class="resource-header-actions">
+                        <button id="external-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                    </div>
+                </header>
+                <div class="external-api-shell">
+                    <div class="external-master-card">
+                        <label class="external-master-toggle">
+                            <input id="external-api-enabled-toggle" type="checkbox">
+                            <span>启用 External Agent API（/api/v1）</span>
+                        </label>
+                        <p class="external-master-hint">
+                            关闭时所有外部桥接访问将被拒绝（403）。外部渠道由独立桥接进程接入，token 密文保存在加密覆盖层，配置文件不落明文。
+                        </p>
+                    </div>
+                    <div class="external-toolbar">
+                        <button id="external-token-create-btn" class="toolbar-btn" type="button">签发桥接 token</button>
+                    </div>
+                    <div id="external-token-once" class="external-token-once" hidden>
+                        <h3>token 已生成——仅显示这一次</h3>
+                        <p>请把 <code id="external-token-once-id"></code> 的 token 交给对应桥接应用（Authorization: Bearer）。关闭后页面只显示掩码。</p>
+                        <textarea id="external-token-once-text" rows="3" readonly></textarea>
+                        <div class="external-token-once-actions">
+                            <button id="external-token-once-close" class="toolbar-btn" type="button">我已保存，关闭</button>
+                        </div>
+                    </div>
+                    <div id="external-token-list" class="resource-list external-token-list"></div>
+                </div>
+            </section>
             <section id="view-task-details" class="view-section" style="display: none;">
                 <header class="content-header project-header task-detail-header">
                     <button class="icon-btn back-btn task-detail-back-btn" id="back-to-tasks" type="button"
@@ -732,6 +769,7 @@
     <script src="org_graph_resources.js"></script>
     <script src="org_graph_ceo_governance.js"></script>
     <script src="org_graph_llm.js"></script>
+    <script src="org_graph_external.js"></script>
     <script>
         if (window.lucide && typeof window.lucide.createIcons === "function") {
             window.lucide.createIcons();

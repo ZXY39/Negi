@@ -14,6 +14,7 @@
 - token 密文走 bootstrap secret overlay 三件套（保存时剥离、落盘只留占位、解锁时回填）；配置文件落盘时 `tokens[].token` 剥离进覆盖层。
 - 请求带 `Authorization: Bearer <token>`；`require_external_api` 依赖（`g3ku/runtime/api/external_auth.py`）做常量时间比较，匹配启用的条目即注入 `bridge_id`。enabled=false → 403 `external_api_disabled`；token 缺失/错误 → 401。项目锁定仍由全局 423 中间件兜底。
 - 每个桥只能看见/操作自己 `bridge_id` 名下的会话（越权访问一律 404）。
+- 管理面：Web「外部接入」页（`g3ku/web/frontend/org_graph_external.js`）背后是 `main/api/admin_rest.py` 的 `/api/external-api/settings`（GET/PUT，总开关与缓冲大小）与 `/api/external-api/tokens`（POST 签发 / PATCH 改 label·enabled·`regenerate` / DELETE）。明文 token 只在签发/重新生成的响应里返回一次，其余读取只回掩码；保存走统一的 `save_config` + overlay 剥离链路。契约由 `tests/resources/test_external_api_admin_tokens.py` 锁定。
 
 ## 3. 会话注册表与 key 命名空间
 

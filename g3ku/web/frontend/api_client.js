@@ -230,6 +230,10 @@ class ApiClient {
         return this._request("PUT", path, { params, body });
     }
 
+    static patch(path, body = {}, params = {}) {
+        return this._request("PATCH", path, { params, body });
+    }
+
     static delete(path, options = {}) {
         const normalized = options && typeof options === "object" && !Array.isArray(options)
             ? (Object.prototype.hasOwnProperty.call(options, "params")
@@ -1044,6 +1048,25 @@ class ApiClient {
         return this.post("/api/resources/reload", {}, { session_id: this.getActiveSessionId() });
     }
 
+    static async getExternalApiSettings() {
+        return this.get("/api/external-api/settings");
+    }
+
+    static async updateExternalApiSettings(payload) {
+        return this.put("/api/external-api/settings", payload || {});
+    }
+
+    static async createExternalApiToken(payload) {
+        return this.post("/api/external-api/tokens", payload || {});
+    }
+
+    static async updateExternalApiToken(bridgeId, payload) {
+        return this.patch(`/api/external-api/tokens/${encodeURIComponent(bridgeId)}`, payload || {});
+    }
+
+    static async deleteExternalApiToken(bridgeId) {
+        return this.delete(`/api/external-api/tokens/${encodeURIComponent(bridgeId)}`);
+    }
 }
 
 window.ApiClient = ApiClient;

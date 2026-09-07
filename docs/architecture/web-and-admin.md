@@ -22,6 +22,7 @@ The channel-agnostic headless surface for third-party bridges is mounted alongsi
 - Turn execution reuses `SessionRuntimeBridge` (same semantic base as `/ws/ceo`); per-session SSE streams come from `g3ku/runtime/external_events.py` hubs.
 - The shared outbound drain started by `ensure_web_runtime_services` routes `channel == "ext"` messages to external session event hubs (heartbeat/cron/task-terminal proactive push). Any other channel has no consumer and is skipped with a warning.
 - The web CEO catalog treats `ext:` sessions like legacy `china:` sessions (grouped, read-only) via `is_channel_session_key`; pre-existing `china:*` transcripts remain visible as read-only archives after the China channel subsystem removal.
+- The web UI「外部接入」page (nav `data-view="external"`, `g3ku/web/frontend/org_graph_external.js`) manages `externalApi.enabled` and bridge tokens through `admin_rest` `/api/external-api/*` endpoints; token plaintext is revealed exactly once at issue/regenerate time.
 
 Full contract (endpoints, turn terminal invariant, event mapping, outbound routing): 详见 `external-agent-api.md`.
 

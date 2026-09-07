@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import re
+import secrets
 import shutil
 from contextlib import contextmanager
 from inspect import isawaitable
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.model_manager import _UNSET, VALID_SCOPES, ModelManager
-from g3ku.config.schema import Config
+from g3ku.config.schema import Config, ExternalApiTokenConfig, _normalize_external_token_id
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
@@ -1003,6 +1004,118 @@ async def update_main_runtime_settings(payload: dict | None = Body(default=None)
         save_config(cfg)
         await _refresh_runtime('admin_main_runtime_update')
     return {'ok': True, **_main_runtime_settings_payload(cfg)}
+
+
+def _mask_external_api_token(token: str) -> str:
+    raw = str(token or '')
+    if not raw:
+        return ''
+    if len(raw) < 12:
+        return '•' * len(raw)
+    return f'{raw[:4]}…{raw[-4:]}'
+
+
+def _external_api_payload(cfg: Config) -> dict[str, Any]:
+    external_api = cfg.external_api
+    items: list[dict[str, Any]] = []
+    for bridge_id, entry in dict(getattr(external_api, 'tokens', None) or {}).items():
+        token = str(getattr(entry, 'token', '') or '')
+        items.append(
+            {
+                'bridge_id': str(bridge_id),
+                'label': str(getattr(entry, 'label', '') or ''),
+                'enabled': bool(getattr(entry, 'enabled', True)),
+                'has_token': bool(token),
+                'token_masked': _mask_external_api_token(token),
+            }
+        )
+    items.sort(key=lambda item: item['bridge_id'])
+    return {
+        'enabled': bool(getattr(external_api, 'enabled', False)),
+        'event_buffer_size': int(getattr(external_api, 'event_buffer_size', 0) or 0),
+        'items': items,
+    }
+
+
+@router.get('/external-api/settings')
+async def get_external_api_settings():
+    cfg = load_config()
+    return {'ok': True, **_external_api_payload(cfg)}
+
+
+@router.put('/external-api/settings')
+async def update_external_api_settings(payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    cfg = load_config()
+    if 'enabled' in body:
+        cfg.external_api.enabled = bool(body.get('enabled'))
+    if 'eventBufferSize' in body or 'event_buffer_size' in body:
+        raw = body.get('eventBufferSize', body.get('event_buffer_size'))
+        try:
+            cfg.external_api.event_buffer_size = max(1, int(raw))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail={'code': 'invalid_event_buffer_size'})
+    save_config(cfg)
+    await _refresh_runtime_after_save('admin_external_api_settings_update')
+    return {'ok': True, **_external_api_payload(cfg)}
+
+
+@router.post('/external-api/tokens')
+async def create_external_api_token(payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    raw_bridge_id = str(body.get('bridge_id') or body.get('bridgeId') or '').strip()
+    if not raw_bridge_id:
+        raise HTTPException(status_code=400, detail={'code': 'bridge_id_required', 'message': '需要桥接标识（bridge_id）'})
+    bridge_id = _normalize_external_token_id(raw_bridge_id)
+    token = str(body.get('token') or '').strip() or secrets.token_urlsafe(32)
+    cfg = load_config()
+    if bridge_id in (cfg.external_api.tokens or {}):
+        raise HTTPException(status_code=409, detail={'code': 'bridge_id_exists', 'message': f'桥接标识 {bridge_id} 已存在'})
+    cfg.external_api.tokens[bridge_id] = ExternalApiTokenConfig(
+        token=token,
+        label=str(body.get('label') or '').strip(),
+        enabled=True,
+    )
+    save_config(cfg)
+    await _refresh_runtime_after_save('admin_external_api_token_create')
+    # The plaintext token is returned exactly once; later reads only expose a mask.
+    return {'ok': True, 'bridge_id': bridge_id, 'token': token, **_external_api_payload(cfg)}
+
+
+@router.patch('/external-api/tokens/{bridge_id}')
+async def update_external_api_token(bridge_id: str, payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    cfg = load_config()
+    key = _normalize_external_token_id(bridge_id)
+    entry = (cfg.external_api.tokens or {}).get(key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail={'code': 'external_token_not_found'})
+    if 'label' in body:
+        entry.label = str(body.get('label') or '').strip()
+    if 'enabled' in body:
+        entry.enabled = bool(body.get('enabled'))
+    revealed = None
+    if bool(body.get('regenerate')):
+        revealed = secrets.token_urlsafe(32)
+        entry.token = revealed
+    save_config(cfg)
+    await _refresh_runtime_after_save('admin_external_api_token_update')
+    response = {'ok': True, 'bridge_id': key, **_external_api_payload(cfg)}
+    if revealed is not None:
+        response['token'] = revealed
+    return response
+
+
+@router.delete('/external-api/tokens/{bridge_id}')
+async def delete_external_api_token(bridge_id: str):
+    cfg = load_config()
+    key = _normalize_external_token_id(bridge_id)
+    if key not in (cfg.external_api.tokens or {}):
+        raise HTTPException(status_code=404, detail={'code': 'external_token_not_found'})
+    del cfg.external_api.tokens[key]
+    save_config(cfg)
+    await _refresh_runtime_after_save('admin_external_api_token_delete')
+    return {'ok': True, **_external_api_payload(cfg)}
 
 
 @router.get('/models')
