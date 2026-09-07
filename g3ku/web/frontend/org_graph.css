@@ -8695,6 +8695,14 @@ textarea {
     opacity: 0.8;
 }
 
+.memory-change-text .memory-change-hl {
+    background: rgba(245, 158, 11, 0.22);
+    color: var(--text-primary);
+    border-radius: 3px;
+    padding: 0 1px;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35);
+}
+
 .memory-change-reconstructed-hint {
     margin: 0 0 10px;
     padding: 8px 12px;

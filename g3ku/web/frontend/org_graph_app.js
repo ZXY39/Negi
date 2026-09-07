@@ -9268,6 +9268,98 @@ function memoryProcessedStructuredChanges(item) {
     return Array.isArray(item?.changes) ? item.changes : [];
 }
 
+/* --- 记忆变更 diff 高亮：对"修改后"内容定位变化点 --- */
+const MEMORY_CHANGE_DIFF_MAX_TOKENS = 1000;
+
+function tokenizeMemoryChangeText(text) {
+    const tokens = [];
+    const pattern = /ref:note_[a-z0-9_]+|\s+|[a-zA-Z0-9_]+|[^\s]/g;
+    let match = null;
+    while ((match = pattern.exec(String(text || ""))) !== null) tokens.push(match[0]);
+    return tokens;
+}
+
+function memoryChangeDiffOps(originalTokens, modifiedTokens) {
+    const m = originalTokens.length;
+    const n = modifiedTokens.length;
+    if (!m || !n) return null;
+    if (m > MEMORY_CHANGE_DIFF_MAX_TOKENS || n > MEMORY_CHANGE_DIFF_MAX_TOKENS) return null;
+    const width = n + 1;
+    const table = new Uint32Array((m + 1) * width);
+    for (let i = m - 1; i >= 0; i--) {
+        const row = i * width;
+        const nextRow = row + width;
+        for (let j = n - 1; j >= 0; j--) {
+            if (originalTokens[i] === modifiedTokens[j]) {
+                table[row + j] = table[nextRow + j + 1] + 1;
+            } else {
+                table[row + j] = table[nextRow + j] >= table[row + j + 1]
+                    ? table[nextRow + j]
+                    : table[row + j + 1];
+            }
+        }
+    }
+    const ops = [];
+    let i = 0;
+    let j = 0;
+    while (i < m && j < n) {
+        if (originalTokens[i] === modifiedTokens[j]) {
+            ops.push({ kind: "same", token: originalTokens[i] });
+            i++;
+            j++;
+        } else if (table[(i + 1) * width + j] >= table[i * width + j + 1]) {
+            ops.push({ kind: "del", token: originalTokens[i] });
+            i++;
+        } else {
+            ops.push({ kind: "add", token: modifiedTokens[j] });
+            j++;
+        }
+    }
+    while (i < m) {
+        ops.push({ kind: "del", token: originalTokens[i] });
+        i++;
+    }
+    while (j < n) {
+        ops.push({ kind: "add", token: modifiedTokens[j] });
+        j++;
+    }
+    return ops;
+}
+
+function memoryChangeDiffSegments(originalText, modifiedText) {
+    const originalTokens = tokenizeMemoryChangeText(originalText);
+    const modifiedTokens = tokenizeMemoryChangeText(modifiedText);
+    if (!originalTokens.length || !modifiedTokens.length) return null;
+    const ops = memoryChangeDiffOps(originalTokens, modifiedTokens);
+    if (!ops) return null;
+    const segments = [];
+    let current = null;
+    for (const op of ops) {
+        if (op.kind === "del") continue;
+        const changed = op.kind === "add";
+        if (!current || current.changed !== changed) {
+            current = { changed, text: "" };
+            segments.push(current);
+        }
+        current.text += op.token;
+    }
+    return segments;
+}
+
+function renderMemoryDiffHighlighted(originalText, modifiedText) {
+    if (!String(originalText || "").trim() || !String(modifiedText || "").trim()) return "";
+    const segments = memoryChangeDiffSegments(originalText, modifiedText);
+    if (!segments || !segments.some((segment) => segment.changed)) return "";
+    return segments.map((segment) => {
+        if (!segment.changed) return renderMemoryTextWithNoteRefs(segment.text);
+        const leading = (String(segment.text).match(/^\s+/) || [""])[0];
+        const trailing = (String(segment.text).match(/\s+$/) || [""])[0];
+        const core = segment.text.slice(leading.length, segment.text.length - trailing.length);
+        const coreHtml = core ? renderMemoryTextWithNoteRefs(core) : "";
+        return coreHtml ? `${esc(leading)}<mark class="memory-change-hl">${coreHtml}</mark>${esc(trailing)}` : "";
+    }).join("");
+}
+
 function memoryChangeTypeLabel(type) {
     const normalized = String(type || "").trim().toLowerCase();
     if (normalized === "add") return "新增";
@@ -9291,8 +9383,11 @@ function renderMemoryChangeBlock(change) {
         const originalHtml = originalMissing && !original.trim()
             ? `<div class="memory-change-text memory-change-missing">历史批次未保留原文</div>`
             : `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(original) || "-"}</div>`;
+        const highlightedModified = renderMemoryDiffHighlighted(original, content);
         const modifiedHtml = content.trim()
-            ? `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(content)}</div>`
+            ? (highlightedModified
+                ? `<div class="memory-change-text">${highlightedModified}</div>`
+                : `<div class="memory-change-text">${renderMemoryTextWithNoteRefs(content)}</div>`)
             : `<div class="memory-change-text memory-change-missing">历史批次未保留修改后内容</div>`;
         bodyHtml = `
             <div class="memory-change-compare">
