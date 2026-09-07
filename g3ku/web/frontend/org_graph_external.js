@@ -110,6 +110,7 @@ async function loadExternalApiView({ quiet = false } = {}) {
     } catch (error) {
         if (!quiet) showToast({ title: "加载外部接入配置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
     }
+    void loadQqBotView();
 }
 
 function _showExternalTokenOnce(bridgeId, token) {
@@ -316,4 +317,112 @@ function initExternalApiView() {
             if (button.dataset.action === "delete") void deleteExternalToken(bridgeId);
         });
     }
+
+    initQqBotView();
+}
+
+// ---- 官方 QQ 机器人面板 ----
+const QQ_BOT_STATE = { loaded: false, busy: false, enabled: false, app_id: "", has_secret: false, service: null };
+
+function _qqBotServiceLabel(state) {
+    const s = String(state || "stopped").toLowerCase();
+    const map = {
+        connected: "已连接",
+        connecting: "连接中…",
+        error: "错误",
+        enabled_off: "未启用",
+        not_configured: "未配置",
+        stopped: "已停止",
+    };
+    return map[s] || s;
+}
+
+function _renderQqBotStatus() {
+    const el = document.getElementById("qq-bot-status-text");
+    if (!el) return;
+    const svc = QQ_BOT_STATE.service || {};
+    const state = String(svc.state || "stopped").toLowerCase();
+    const detail = String(svc.detail || "").trim();
+    let text = `状态：${_qqBotServiceLabel(state)}`;
+    if (!QQ_BOT_STATE.enabled) {
+        text = "状态：未启用";
+    } else {
+        if (detail) text += `（${detail}）`;
+        else if (!QQ_BOT_STATE.has_secret) text += " · 尚未保存 AppSecret";
+    }
+    el.textContent = text;
+    el.className = "qq-bot-status" + (state === "connected" ? " is-ok" : state === "error" ? " is-error" : "");
+}
+
+async function loadQqBotView() {
+    if (QQ_BOT_STATE.busy) return;
+    try {
+        const payload = await ApiClient.getQqBotSettings();
+        QQ_BOT_STATE.enabled = !!payload.enabled;
+        QQ_BOT_STATE.app_id = payload.app_id || "";
+        QQ_BOT_STATE.has_secret = !!payload.has_secret;
+        QQ_BOT_STATE.service = payload.service || null;
+        QQ_BOT_STATE.loaded = true;
+        _setExternalSwitch(document.getElementById("qq-bot-enabled-toggle"), QQ_BOT_STATE.enabled, QQ_BOT_STATE.enabled ? "已启用" : "已停用");
+        const appIdInput = document.getElementById("qq-bot-appid-input");
+        if (appIdInput) appIdInput.value = QQ_BOT_STATE.app_id;
+        _renderQqBotStatus();
+    } catch (error) {
+        showToast({ title: "加载 QQ 机器人配置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+    }
+}
+
+async function saveQqBotSettings(event) {
+    if (event) event.preventDefault();
+    if (QQ_BOT_STATE.busy) return;
+    const appIdInput = document.getElementById("qq-bot-appid-input");
+    const secretInput = document.getElementById("qq-bot-secret-input");
+    const body = {
+        enabled: QQ_BOT_STATE.enabled,
+        app_id: String(appIdInput ? appIdInput.value : "").trim(),
+    };
+    const secret = String(secretInput ? secretInput.value : "").trim();
+    if (secret) body.app_secret = secret;
+    QQ_BOT_STATE.busy = true;
+    const saveBtn = document.getElementById("qq-bot-save-btn");
+    if (saveBtn) saveBtn.disabled = true;
+    try {
+        const payload = await ApiClient.updateQqBotSettings(body);
+        QQ_BOT_STATE.enabled = !!payload.enabled;
+        QQ_BOT_STATE.app_id = payload.app_id || "";
+        QQ_BOT_STATE.has_secret = !!payload.has_secret;
+        QQ_BOT_STATE.service = payload.service || null;
+        if (secretInput) secretInput.value = "";
+        showToast({ title: "已保存", text: "QQ 机器人配置已保存，正在按需连接。", kind: "success" });
+        _renderQqBotStatus();
+    } catch (error) {
+        showToast({ title: "保存失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+    } finally {
+        QQ_BOT_STATE.busy = false;
+        if (saveBtn) saveBtn.disabled = false;
+    }
+}
+
+async function toggleQqBotEnabled(enabled) {
+    if (QQ_BOT_STATE.busy) return;
+    QQ_BOT_STATE.busy = true;
+    try {
+        const payload = await ApiClient.updateQqBotSettings({ enabled });
+        QQ_BOT_STATE.enabled = !!payload.enabled;
+        QQ_BOT_STATE.service = payload.service || null;
+        _setExternalSwitch(document.getElementById("qq-bot-enabled-toggle"), QQ_BOT_STATE.enabled, QQ_BOT_STATE.enabled ? "已启用" : "已停用");
+        _renderQqBotStatus();
+    } catch (error) {
+        showToast({ title: "更新失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
+        await loadQqBotView();
+    } finally {
+        QQ_BOT_STATE.busy = false;
+    }
+}
+
+function initQqBotView() {
+    const toggle = document.getElementById("qq-bot-enabled-toggle");
+    if (toggle) toggle.addEventListener("click", () => void toggleQqBotEnabled(toggle.getAttribute("aria-pressed") !== "true"));
+    const form = document.getElementById("qq-bot-settings-form");
+    if (form) form.addEventListener("submit", (event) => void saveQqBotSettings(event));
 }

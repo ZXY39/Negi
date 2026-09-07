@@ -1128,6 +1128,58 @@ async def delete_external_api_token(bridge_id: str):
     return {'ok': True, **_external_api_payload(cfg)}
 
 
+def _qq_bot_payload(cfg: Config) -> dict[str, Any]:
+    q = cfg.qq_bot
+    secret = str(getattr(q, 'app_secret', '') or '')
+    return {
+        'enabled': bool(getattr(q, 'enabled', False)),
+        'app_id': str(getattr(q, 'app_id', '') or ''),
+        'app_secret_masked': _mask_external_api_token(secret),
+        'has_secret': bool(secret),
+        'sandbox': bool(getattr(q, 'sandbox', False)),
+    }
+
+
+def _qq_bot_service_state() -> dict[str, Any]:
+    from g3ku.shells.web import qq_official_service_status
+
+    try:
+        return qq_official_service_status()
+    except Exception:
+        return {'state': 'stopped', 'detail': ''}
+
+
+@router.get('/qq-bot/settings')
+async def get_qq_bot_settings():
+    cfg = load_config()
+    return {'ok': True, **_qq_bot_payload(cfg), 'service': _qq_bot_service_state()}
+
+
+@router.put('/qq-bot/settings')
+async def update_qq_bot_settings(payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    cfg = load_config()
+    q = cfg.qq_bot
+    if 'enabled' in body:
+        q.enabled = bool(body.get('enabled'))
+    if 'appId' in body or 'app_id' in body:
+        q.app_id = str(body.get('appId', body.get('app_id')) or '').strip()
+    if 'sandbox' in body:
+        q.sandbox = bool(body.get('sandbox'))
+    if 'appSecret' in body or 'app_secret' in body:
+        raw_secret = str(body.get('appSecret', body.get('app_secret')) or '').strip()
+        if raw_secret:
+            q.app_secret = raw_secret
+    save_config(cfg)
+    await _refresh_runtime_after_save('admin_qq_bot_settings_update')
+    return {'ok': True, **_qq_bot_payload(cfg), 'service': _qq_bot_service_state()}
+
+
+@router.get('/qq-bot/status')
+async def get_qq_bot_status():
+    return {'ok': True, 'service': _qq_bot_service_state()}
+
+
 @router.get('/models')
 async def list_models():
     manager = ModelManager.load()

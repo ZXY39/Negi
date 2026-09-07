@@ -1067,6 +1067,14 @@ class ApiClient {
     static async deleteExternalApiToken(bridgeId) {
         return this.delete(`/api/external-api/tokens/${encodeURIComponent(bridgeId)}`);
     }
+
+    static async getQqBotSettings() {
+        return this.get("/api/qq-bot/settings");
+    }
+
+    static async updateQqBotSettings(payload) {
+        return this.put("/api/qq-bot/settings", payload || {});
+    }
 }
 
 window.ApiClient = ApiClient;
