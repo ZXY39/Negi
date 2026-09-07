@@ -53,6 +53,9 @@ dev = [
     "pytest-asyncio>=1.3.0,<2.0.0",
     "ruff>=0.1.0",
 ]
+qqbot = [
+    "qq-botpy>=1.1.5",
+]
 
 [project.scripts]
 g3ku-agent = "g3ku.cli.commands:app"

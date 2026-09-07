@@ -49,6 +49,7 @@ _global_runtime_manager: Optional[SessionRuntimeManager] = None
 _global_web_heartbeat = None
 _global_outbound_drain_task: Optional[asyncio.Task] = None
 _global_task_worker_watchdog_task: Optional[asyncio.Task] = None
+_global_qq_official_service = None
 _global_runtime_services_lock: Optional[asyncio.Lock] = None
 
 _NO_CEO_MODEL_CONFIGURED_MESSAGE = "No model configured for role 'ceo'."
@@ -279,7 +280,33 @@ async def refresh_web_agent_runtime(
         reason=reason,
         force_memory_sync=force_memory_sync,
     )
+    await _sync_qq_official_service()
     return changed
+
+
+def qq_official_service_status() -> dict:
+    """Coarse status of the in-process QQ official bridge (for admin REST)."""
+    service = _global_qq_official_service
+    if service is None:
+        return {"state": "stopped", "detail": ""}
+    return service.status()
+
+
+async def _sync_qq_official_service() -> None:
+    """Reconcile the QQ official bridge with the current ``qqBot`` config.
+
+    Lazy import: the adapter (and only the adapter) may pull in ``qq-botpy``,
+    and only when a start actually happens inside ``sync_from_config``.
+    """
+    global _global_qq_official_service
+    from g3ku.qq_official.service import QqOfficialService
+
+    if _global_qq_official_service is None:
+        _global_qq_official_service = QqOfficialService()
+    try:
+        await _global_qq_official_service.sync_from_config()
+    except Exception:
+        logger.exception("qq-official service sync skipped on error")
 
 
 def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager:
@@ -694,11 +721,12 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
         except Exception:
             logger.debug("shutdown-paused session resume skipped during startup")
+        await _sync_qq_official_service()
 
 
 async def shutdown_web_runtime() -> None:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
-    global _global_outbound_drain_task, _global_task_worker_watchdog_task
+    global _global_outbound_drain_task, _global_task_worker_watchdog_task, _global_qq_official_service
 
     agent = _global_agent
     runtime_manager = _global_runtime_manager
@@ -706,6 +734,7 @@ async def shutdown_web_runtime() -> None:
     cron_service = getattr(agent, "cron_service", None) if agent is not None else None
     outbound_drain_task = _global_outbound_drain_task
     task_worker_watchdog_task = _global_task_worker_watchdog_task
+    qq_official_service = _global_qq_official_service
 
     _global_agent = None
     _global_bus = None
@@ -713,6 +742,7 @@ async def shutdown_web_runtime() -> None:
     _global_web_heartbeat = None
     _global_outbound_drain_task = None
     _global_task_worker_watchdog_task = None
+    _global_qq_official_service = None
 
     if agent is None:
         return
@@ -745,6 +775,8 @@ async def shutdown_web_runtime() -> None:
 
     await _cancel_background_task(outbound_drain_task)
     await _cancel_background_task(task_worker_watchdog_task)
+    if qq_official_service is not None:
+        await qq_official_service.stop()
 
     session_keys: set[str] = set()
     if runtime_manager is not None:
