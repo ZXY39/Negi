@@ -1,0 +1,26 @@
+schema_version: 1
+kind: skill
+name: g3ku-bridge-onboarding
+description: 外部渠道桥接对接万能参考。当用户要求把任意 IM / 渠道 / 自动化桥接入 g3ku（对接渠道、让桥连上 g3ku、新建渠道桥、桥连不上排障）时使用。覆盖架构边界三铁律、token 交付纪律、External Agent API 协议速览、新平台桥构建清单、连通验收与排障入口。
+trigger:
+  keywords:
+    - 对接渠道
+    - 渠道桥接
+    - 外部接入
+    - 外部桥接
+    - bridge onboarding
+    - External Agent API
+    - /api/v1
+    - 桥连不上
+    - 新建渠道桥
+    - g3ku external
+  always: false
+requires:
+  tools: []
+  bins: []
+  env: []
+content:
+  main: SKILL.md
+exposure:
+  agent: true
+  main_runtime: true
