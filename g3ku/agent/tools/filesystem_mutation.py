@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from g3ku.resources.tool_settings import FilesystemToolSettings, runtime_tool_settings
+from g3ku.runtime.project_environment import apply_project_environment
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 
 _METADATA_START = '### G3KU_PATCH_METADATA ###'
@@ -1244,13 +1245,21 @@ class FilesystemTool:
 
     async def _run_validation_command(self, *, command: str, cwd: str, timeout_seconds: int) -> dict[str, Any]:
         try:
+            env = enrich_subprocess_env_for_text(
+                apply_project_environment(
+                    os.environ.copy(),
+                    shell_family='powershell' if os.name == 'nt' else None,
+                    workspace_root=str(self._workspace or cwd),
+                    process_cwd=cwd,
+                )
+            )
             if os.name == 'nt':
                 process = await asyncio.create_subprocess_exec(
                     *self._windows_shell_argv(command),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
-                    env=enrich_subprocess_env_for_text(os.environ.copy()),
+                    env=env,
                 )
             else:
                 process = await asyncio.create_subprocess_shell(
@@ -1258,7 +1267,7 @@ class FilesystemTool:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
-                    env=os.environ.copy(),
+                    env=env,
                 )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
