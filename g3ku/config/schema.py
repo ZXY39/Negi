@@ -303,6 +303,7 @@ class ManagedModelConfig(Base):
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None
     description: str = ""
+    name: str = ""
     context_window_tokens: int | None = None
     image_multimodal_enabled: bool = False
 

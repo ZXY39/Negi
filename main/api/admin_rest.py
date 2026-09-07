@@ -1752,6 +1752,7 @@ async def create_model(payload: dict = Body(...)):
             retry_on=split_retry_keywords(payload.get('retry_on')) or None,
             retry_count=raw_retry_count,
             description=str(payload.get('description') or ''),
+            name=str(payload.get('name') or '').strip(),
             context_window_tokens=(
                 payload.get('context_window_tokens')
                 if 'context_window_tokens' in payload
@@ -1823,6 +1824,7 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             ),
             retry_count=raw_retry_count if ('retry_count' in body or 'retryCount' in body) else _UNSET,
             description=_pick('description'),
+            name=_pick('name'),
             context_window_tokens=_pick('context_window_tokens', 'contextWindowTokens'),
             image_multimodal_enabled=_pick('image_multimodal_enabled', 'imageMultimodalEnabled'),
         )

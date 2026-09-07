@@ -136,6 +136,7 @@ class ModelManager:
         retry_count: int | None = None,
         single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None,
         description: str = "",
+        name: str = "",
         context_window_tokens: int,
         image_multimodal_enabled: bool = False,
     ) -> dict[str, Any]:
@@ -161,6 +162,7 @@ class ModelManager:
                 "config_id": "",
                 "enabled": bool(enabled),
                 "description": str(description or "").strip(),
+                "name": str(name or "").strip(),
                 "retry_on": list(DEFAULT_RETRY_ON_KEYWORDS) if retry_on is None else split_retry_keywords(retry_on),
                 "retry_count": 0 if retry_count is None else int(retry_count),
                 "single_api_key_max_concurrency": normalize_single_api_key_max_concurrency(single_api_key_max_concurrency),
@@ -188,6 +190,7 @@ class ModelManager:
         retry_count: int | None | object = _UNSET,
         single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency | object = _UNSET,
         description: str | None | object = _UNSET,
+        name: str | None | object = _UNSET,
         context_window_tokens: int | None | object = _UNSET,
         image_multimodal_enabled: bool | object = _UNSET,
     ) -> dict[str, Any]:
@@ -230,6 +233,12 @@ class ModelManager:
             item.single_api_key_max_concurrency = normalize_single_api_key_max_concurrency(single_api_key_max_concurrency)
         if description is not _UNSET:
             item.description = str(description).strip()
+        if name is not _UNSET:
+            item.name = self.facade._validate_binding_name_unique(
+                self.config,
+                name,
+                exclude_key=key,
+            )
         if image_multimodal_enabled is not _UNSET:
             item.image_multimodal_enabled = bool(image_multimodal_enabled)
         self._revalidate()

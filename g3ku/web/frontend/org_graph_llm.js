@@ -102,7 +102,7 @@
   }
 
   function bindingTitle(item) {
-    return trim((item && (item.default_model || item.key)) || "");
+    return trim((item && (item.name || item.default_model || item.key)) || "");
   }
 
   function bindingNameRequiredMessage() {
@@ -186,11 +186,11 @@
 
   function bindingNotesTitle() {
     return [
-      "最大并发数填写 0 时，对应的 API Key 不会投入使用。",
-      "“重试次数”是命中自动重试关键词时的最大重试轮数：一轮 = 完整轮过该模型所有 Key，轮间按指数退避加抖动；填 0 使用默认 10 轮。预算耗尽后切换链上下一个模型，全链耗尽报错停止。",
-      "未命中关键词的错误（如坏 Key、503）每个 Key 只试一次即切换下一模型；请求体形状错误（400/422）不重试不换 Key。",
-      "“api_key” 支持用逗号或换行填写多个 key，例如 key1,key2，注意可能会导致缓存命中率下降。多个 key 会按并发数上限轮换。",
-    ].join("\n");
+      "每个配置只使用一个 API Key（单 key 模式）；需要额外容量或容灾回退时，请添加多个配置并组成模型链，链上的配置会按顺序自动回退。",
+      "“重试次数”是命中自动重试关键词时的最大重试轮数：一轮 = 完整轮过该配置，轮间按指数退避加抖动；填 0 使用默认 10 轮。预算耗尽后切换链上下一个配置，全链耗尽报错停止。",
+      "未命中关键词的错误（如坏 Key、503）每个配置只试一次即切换链上下一个配置；请求体形状错误（400/422）不重试不换配置。",
+      "配置名称用于界面展示与区分，需唯一；名称会同步到 Token 统计与会话页面的配置显示。",
+    ];
   }
 
   function singleApiKeyMaxConcurrencyEquals(left, right) {
@@ -198,7 +198,13 @@
   }
 
   function renderBindingNoteAction() {
-    return `<button type="button" class="icon-btn llm-note-btn" title="${escv(bindingNotesTitle())}" aria-label="配置备注"><i data-lucide="info"></i></button>`;
+    return `<div class="llm-note-wrap">
+        <button type="button" class="icon-btn llm-note-btn" data-llm-note-toggle aria-label="配置说明" title="配置说明"><i data-lucide="info"></i></button>
+        <div class="llm-note-popover" data-llm-note-popover role="tooltip" aria-hidden="true" hidden>
+          <div class="llm-note-popover-title">配置说明</div>
+          <ul class="llm-note-popover-list">${bindingNotesTitle().map((item) => `<li>${escv(item)}</li>`).join("")}</ul>
+        </div>
+      </div>`;
   }
 
   function setPath(target, path, value) {
@@ -255,10 +261,10 @@
     if (state.loading) return hint("正在加载模型配置...");
     if (state.saving) return hint("正在保存模型配置...");
     if (state.error) return hint(`模型配置出错：${state.error}`, true);
-    if (!state.bindings.length) return hint("还没有保存的模型。点击“添加模型”开始添加。", false);
+    if (!state.bindings.length) return hint("还没有保存的配置。点击“添加配置”开始添加。", false);
     if (S.modelCatalog.roleEditing && S.modelCatalog.rolesDirty) return hint("模型链已修改，点击“保存模型链”提交。", false);
     if (S.modelCatalog.roleEditing) return hint("拖拽左侧模型到右侧角色列，完成后点击“保存模型链”。", false);
-    return hint("点击左侧模型可以查看对应 JSON 配置；点击“添加模型”可添加新模型。", false);
+    return hint("点击左侧配置可查看对应 JSON 配置；点击“添加配置”可新建配置。", false);
   }
 
   async function ensureTemplate(providerId) {
@@ -368,6 +374,7 @@
       ...emptyEditorState(),
       open: true,
       mode: "create",
+      createName: "",
       providerId: provider,
       baseUrl: String(draft.base_url || ""),
       apiKey: String(draft.api_key || ""),
@@ -1049,7 +1056,7 @@
     const filterText = trim(modelList.filter || "").toLowerCase();
     const filtered = items.filter((item) => !filterText || String(item).toLowerCase().includes(filterText));
     const countHost = panel.querySelector("#llm-model-list-count");
-    if (countHost) countHost.textContent = `${filtered.length} / ${items.length} 个模型`;
+    if (countHost) countHost.textContent = `${filtered.length} / ${items.length} 个配置`;
     itemsHost.innerHTML = filtered.length
       ? filtered.map((item) => `<button type="button" class="llm-model-list-item" data-llm-model-item="${escv(item)}" title="点击将该模型填入配置">${escv(item)}</button>`).join("")
       : '<p class="llm-muted">没有匹配的模型。</p>';
@@ -1070,8 +1077,10 @@
         <article class="model-detail-card model-config-shell">
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
-              <h2>添加模型</h2>
-              <p class="subtitle">选择协议，填写请求地址与 Apikey 后可获取模型列表、测试连接。</p>
+              <label class="resource-field llm-create-name-field">
+                <input id="llm-create-name-input" class="resource-search llm-create-name-input" type="text" maxlength="40" placeholder="请输入配置名称" autocomplete="off" />
+              </label>
+              <p class="subtitle">配置名称需唯一，用于 Token 统计与会话界面的展示；下方填写连接信息后可测试连接并创建。</p>
             </div>
             <div class="detail-modal-actions">
               ${renderBindingNoteAction()}
@@ -1093,7 +1102,7 @@
               ${renderStatus()}
               <div class="llm-inline-actions">
                 <button type="button" class="toolbar-btn ghost" data-llm-action="test-create">测试连接</button>
-                <button type="button" class="toolbar-btn success" data-llm-action="save-create">添加模型</button>
+                <button type="button" class="toolbar-btn success" data-llm-action="save-create">添加配置</button>
               </div>
             </div>
           </div>
@@ -1104,8 +1113,11 @@
         <article class="model-detail-card model-config-shell">
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
-              <h2>${escv(bindingTitle(binding) || state.editor.bindingKey)}</h2>
-              <p class="subtitle">可同时编辑当前模型的 JSON 配置与降级重试策略。</p>
+              <div class="llm-edit-name-row">
+                <h2 id="llm-edit-name-display">${escv(bindingTitle(binding) || state.editor.bindingKey)}</h2>
+                <button type="button" class="icon-btn llm-edit-name-btn" data-llm-action="edit-name" title="编辑配置名称" aria-label="编辑配置名称"><i data-lucide="pencil"></i></button>
+              </div>
+              <p class="subtitle">可同时编辑当前配置的 JSON 配置与降级重试策略。</p>
             </div>
             <div class="detail-modal-actions">
               ${renderBindingNoteAction()}
@@ -1122,7 +1134,7 @@
               <div class="llm-inline-actions">
                 <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail">测试连接</button>
                 <button type="button" class="toolbar-btn success" data-llm-action="save-detail">保存修改</button>
-                <button type="button" class="toolbar-btn danger" data-llm-action="delete-detail">删除模型</button>
+                <button type="button" class="toolbar-btn danger" data-llm-action="delete-detail">删除配置</button>
               </div>
             </div>
           </div>
@@ -1130,6 +1142,15 @@
     }
 
     U.llmEditorShell.innerHTML = normalizeBindingNameText(U.llmEditorShell.innerHTML);
+    if (state.editor.mode === "create") {
+      const createNameInput = document.getElementById("llm-create-name-input");
+      if (createNameInput) {
+        createNameInput.value = state.editor.createName || "";
+        createNameInput.addEventListener("input", (event) => {
+          state.editor.createName = trim(event.target.value || "");
+        });
+      }
+    }
     const jsonDetails = document.getElementById("llm-json-details");
     if (jsonDetails) {
       const validationFailed = !!state.editor.validation && state.editor.validation.valid === false;
@@ -1152,7 +1173,7 @@
       .sort((a, b) => String(bindingTitle(a) || a.key || "").localeCompare(String(bindingTitle(b) || b.key || "")));
 
     if (!items.length) {
-      U.llmBindingsList.innerHTML = `<div class="empty-state compact">${query ? "没有匹配的模型。" : "还没有保存的模型。"}</div>`;
+      U.llmBindingsList.innerHTML = `<div class="empty-state compact">${query ? "没有匹配的配置。" : "还没有保存的配置。"}</div>`;
       return;
     }
 
@@ -1240,6 +1261,7 @@
     } finally {
       state.loading = false;
       renderAll();
+      if (typeof syncCeoActiveConfigLabel === "function") syncCeoActiveConfigLabel();
     }
   }
 
@@ -1476,7 +1498,25 @@
   async function handleCreateSave() {
     const state = llmState();
     reconcileBindingContextWindowTokens();
+    const configName = trim(document.getElementById("llm-create-name-input")?.value || "");
+    state.editor.createName = configName;
+    if (!configName) {
+      renderAll();
+      throw new Error("请输入配置名称");
+    }
+    const duplicated = state.bindings.find((item) => trim(item.name || "") && trim(item.name).toLowerCase() === configName.toLowerCase());
+    if (duplicated) {
+      state.error = `配置名称已存在：${configName}`;
+      renderAll();
+      throw new Error(state.error);
+    }
     const bindingDraft = bindingDraftPayload();
+    if (apiKeyCountFromValue(String(bindingDraft.draft?.api_key || "").trim()) > 1) {
+      const message = "每个配置只允许一个 API Key（单 key 模式）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。";
+      state.error = message;
+      renderAll();
+      throw new Error(message);
+    }
     const providerId = trim(document.getElementById("llm-provider-select")?.value || state.editor.providerId);
     const jsonText = document.getElementById("llm-json-editor")?.value || state.editor.jsonText;
     state.editor.providerId = providerId;
@@ -1502,7 +1542,7 @@
       }
       showToast({
         title: "正在保存",
-        text: "连接检测通过，正在添加模型...",
+        text: "连接检测通过，正在添加配置...",
         kind: "success",
         persistent: true,
       });
@@ -1511,6 +1551,7 @@
           key: "",
           config_id: "",
           enabled: true,
+          name: configName,
           retry_on: [...bindingDraft.retryOn],
           retry_count: bindingDraft.retryCount,
           single_api_key_max_concurrency: bindingDraft.singleApiKeyMaxConcurrency,
@@ -1537,6 +1578,12 @@
     state.editor.jsonText = jsonText;
     const draft = bindingDraft.draft;
     const configChanged = trim(jsonText) !== trim(state.editor.initialJsonText || "");
+    if (configChanged && apiKeyCountFromValue(String(draft.api_key || "").trim()) > 1) {
+      const message = "每个配置只允许一个 API Key（单 key 模式）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。";
+      state.error = message;
+      renderAll();
+      throw new Error(message);
+    }
     const bindingPatch = {};
     if (JSON.stringify(bindingDraft.retryOn) !== JSON.stringify(binding.retry_on || [])) bindingPatch.retry_on = bindingDraft.retryOn;
     if (bindingDraft.retryCount !== Number.parseInt(String(binding.retry_count ?? 0), 10)) bindingPatch.retry_count = bindingDraft.retryCount;
@@ -1723,6 +1770,17 @@
       }
     });
     U.llmEditorShell?.addEventListener("click", (event) => {
+      const noteToggle = event.target.closest("[data-llm-note-toggle]");
+      if (noteToggle) {
+        const popover = noteToggle.closest(".llm-note-wrap")?.querySelector("[data-llm-note-popover]");
+        if (popover) {
+          const nextHidden = !popover.hidden;
+          closeLlmNotePopovers();
+          popover.hidden = nextHidden;
+          popover.setAttribute("aria-hidden", nextHidden ? "true" : "false");
+        }
+        return;
+      }
       const modelItem = event.target.closest("[data-llm-model-item]");
       if (modelItem) {
         applyModelListItem(modelItem.dataset.llmModelItem);
@@ -1731,6 +1789,9 @@
       const action = event.target.closest("[data-llm-action]")?.dataset.llmAction;
       if (!action) return;
       if (action === "close") { closeEditor(); return; }
+      if (action === "edit-name") { enterModelNameEditMode(); return; }
+      if (action === "name-save") { void commitModelNameEdit().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
+      if (action === "name-cancel") { cancelModelNameEdit(); return; }
       if (action === "toggle-concurrency-test") {
         const field = event.target.closest(".resource-field");
         const row = field?.querySelector(".llm-concurrency-test-row");
@@ -1745,7 +1806,92 @@
       if (action === "save-detail") { void handleDetailSave().catch((error) => { llmState().error = error.message || "保存失败"; showToast({ title: "保存失败", text: llmState().error, kind: "error" }); renderAll(); }); return; }
       if (action === "delete-detail") { void handleDelete().catch((error) => { llmState().error = error.message || "删除失败"; showToast({ title: "删除失败", text: llmState().error, kind: "error" }); renderAll(); }); }
     });
+    document.addEventListener("click", (event) => {
+      if (event.target.closest(".llm-note-wrap")) return;
+      closeLlmNotePopovers();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeLlmNotePopovers();
+        const nameEdit = document.getElementById("llm-edit-name-input");
+        if (nameEdit) cancelModelNameEdit();
+      }
+    });
     llmState().eventsBound = true;
+  }
+
+  function closeLlmNotePopovers() {
+    document.querySelectorAll("[data-llm-note-popover]:not([hidden])").forEach((popover) => {
+      popover.hidden = true;
+      popover.setAttribute("aria-hidden", "true");
+    });
+  }
+
+  function enterModelNameEditMode() {
+    const state = llmState();
+    const binding = currentBinding();
+    const display = document.getElementById("llm-edit-name-display");
+    if (!binding || !display) return;
+    const input = document.createElement("input");
+    input.id = "llm-edit-name-input";
+    input.className = "resource-search llm-edit-name-input";
+    input.type = "text";
+    input.maxLength = 40;
+    input.autocomplete = "off";
+    input.value = trim(binding.name || "");
+    input.placeholder = String(bindingTitle(binding) || state.editor.bindingKey || "");
+    display.replaceWith(input);
+    input.focus();
+    input.select();
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+        void commitModelNameEdit();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancelModelNameEdit();
+      }
+    });
+    input.addEventListener("blur", () => {
+      if (document.getElementById("llm-edit-name-input") === input) {
+        void commitModelNameEdit();
+      }
+    });
+  }
+
+  async function commitModelNameEdit() {
+    const state = llmState();
+    const binding = currentBinding();
+    const input = document.getElementById("llm-edit-name-input");
+    if (!binding) { cancelModelNameEdit(); return; }
+    if (!input) return;
+    const value = trim(input.value || "");
+    if (value === trim(binding.name || "")) { cancelModelNameEdit(); return; }
+    const duplicated = state.bindings.find((item) =>
+      String(item.key || "").trim() !== String(binding.key || "").trim()
+      && trim(item.name || "")
+      && trim(item.name).toLowerCase() === value.toLowerCase()
+    );
+    if (duplicated) {
+      state.error = `配置名称已存在：${value}`;
+      showToast({ title: "保存失败", text: state.error, kind: "error" });
+      renderAll();
+      return;
+    }
+    try {
+      const result = await ApiClient.updateLlmBinding(binding.key, { name: value });
+      await waitForRuntimeRefreshAndUpdateToast(result?.runtimeRefresh);
+      await loadAll();
+    } catch (error) {
+      state.error = error.message || "配置名称保存失败";
+      showToast({ title: "保存失败", text: state.error, kind: "error" });
+      renderAll();
+    }
+  }
+
+  function cancelModelNameEdit() {
+    renderAll();
   }
 
   window.renderModelList = renderBindings;

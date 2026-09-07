@@ -1400,11 +1400,15 @@ function renderTaskTokenStats() {
             const badges = [];
             if (item.is_partial) badges.push('<span class="task-token-badge warn">部分缺失</span>');
             if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">完整</span>');
+            const configEntry = String(item.model_key || "").trim()
+                ? (Array.isArray(S.modelCatalog?.catalog) ? S.modelCatalog.catalog : []).find((entry) => String(entry.key || "").trim() === String(item.model_key || "").trim())
+                : null;
+            const configTitle = trim(configEntry?.name || "") || item.model_key || "未命名配置";
             return `
                 <div class="task-token-model-item">
                     <div class="task-token-model-head">
                         <div>
-                            <h3>${esc(item.model_key || "未命名模型")}</h3>
+                            <h3>${esc(configTitle)}</h3>
                             <p>${esc(subtitleParts.join(" · ") || "模型标识未提供")}</p>
                         </div>
                         <div class="task-token-model-badges">${badges.join("")}</div>

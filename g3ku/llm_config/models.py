@@ -219,6 +219,7 @@ class ModelBindingDraft(StrictModel):
     config_id: str = ""
     enabled: bool = True
     description: str = ""
+    name: str = ""
     retry_on: list[str] = Field(default_factory=lambda: list(DEFAULT_RETRY_ON_KEYWORDS))
     retry_count: int = Field(default=0, ge=0)
     single_api_key_max_concurrency: SingleAPIKeyMaxConcurrency = None

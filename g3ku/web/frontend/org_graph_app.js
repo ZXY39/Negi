@@ -1449,7 +1449,26 @@ function scheduleSyncCeoComposerUsageOutline() {
     window.requestAnimationFrame(() => syncCeoComposerUsageOutline());
 }
 
+function syncCeoActiveConfigLabel() {
+    const label = document.getElementById("ceo-active-config-name");
+    if (!label) return;
+    const primaryKey = String((S.modelCatalog?.defaults || {}).ceo || "").trim();
+    const catalog = Array.isArray(S.modelCatalog?.catalog) ? S.modelCatalog.catalog : [];
+    const item = primaryKey ? catalog.find((entry) => String(entry.key || "").trim() === primaryKey) : null;
+    if (!primaryKey || !item) {
+        label.hidden = true;
+        label.textContent = "";
+        label.removeAttribute?.("title");
+        return;
+    }
+    const labelText = trim(item.name || primaryKey);
+    label.textContent = labelText;
+    label.setAttribute("title", item.name ? `${item.name} · ${primaryKey}` : primaryKey);
+    label.hidden = false;
+}
+
 function syncCeoComposerUsageOutline() {
+    syncCeoActiveConfigLabel();
     const shell = U.ceoComposerUsageBrain;
     const base = U.ceoComposerUsageBrainBase;
     const fill = U.ceoComposerUsageBrainFill;
@@ -6968,7 +6987,7 @@ function renderModelHint() {
     if (S.modelCatalog.loading) return hint("正在加载模型配置...");
     if (S.modelCatalog.saving) return hint("正在保存...");
     if (S.modelCatalog.error) return hint(`模型配置错误：${S.modelCatalog.error}`, true);
-    if (!S.modelCatalog.catalog.length) return hint("当前还没有模型，请先添加模型。", false);
+    if (!S.modelCatalog.catalog.length) return hint("当前还没有配置，请先添加配置。", false);
     if (S.modelCatalog.roleEditing && S.modelCatalog.rolesDirty) return hint("正在修改模型链，请点击“保存”应用修改。", false);
     if (S.modelCatalog.roleEditing) return hint("已进入模型链编辑模式，可拖动、移除或加入模型后再点击“保存”。", false);
     return hint("点击“修改模型链”后再调整角色链；点击模型可打开配置弹窗。", false);
@@ -7040,7 +7059,7 @@ function renderModelList() {
     if (!catalog.length) {
         const emptyText = S.modelCatalog.search
             ? "没有匹配的模型，请调整搜索条件。"
-            : "暂无可用模型，请先添加模型。";
+            : "暂无可用配置，请先添加配置。";
         U.modelList.innerHTML = `<div class="empty-state compact">${emptyText}</div>`;
         return;
     }
@@ -7085,7 +7104,7 @@ function renderModelDetail() {
         <article class="model-detail-card model-config-shell">
             <div class="detail-modal-header model-config-header">
                 <div class="detail-modal-title">
-                    <h2 id="model-detail-title">${isCreate ? "添加模型" : "模型配置"}</h2>
+                    <h2 id="model-detail-title">${isCreate ? "添加配置" : "配置详情"}</h2>
                     <p class="subtitle">${esc(isCreate ? "填写必填项后写入 .g3ku/config.json" : `${current.key} · ${current.provider_model}`)}</p>
                 </div>
                 <div class="detail-modal-actions">
@@ -7109,14 +7128,14 @@ function renderModelDetail() {
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">API Key *</span>
-                                <input class="resource-search" name="apiKey" value="${esc(current?.api_key || "")}" placeholder="sk-... or sk-1,sk-2">
+                                <input class="resource-search" name="apiKey" value="${esc(current?.api_key || "")}" placeholder="sk-...">
                             </label>
                             <label class="resource-field">
                                 <span class="resource-field-label">Base URL ${isCreate ? "*" : ""}</span>
                                 <input class="resource-search" name="apiBase" value="${esc(current?.api_base || "")}" placeholder="https://api.example.com/v1">
                             </label>
                         </div>
-                        <p class="subtitle">API Key 支持用逗号或换行填写多把 key，例如 key1,key2。多个 key 会按顺序轮换。</p>
+                        <p class="subtitle">每个配置只使用一个 API Key（单 key）；需要多个模型或容灾回退时，请添加多个配置并组成模型链。</p>
                         <div class="model-form-status-area" style="margin-top: var(--space-4);">
                             ${enabled
             ? `<button type="button" class="toolbar-btn danger" data-model-control="disable" data-key="${esc(current?.key || "")}">禁用模型</button>`

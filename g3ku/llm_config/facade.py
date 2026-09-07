@@ -223,6 +223,8 @@ class LLMConfigFacade:
         if existing is not None:
             raise ValueError(f"Model key already exists: {binding.key}")
 
+        binding.name = self._validate_binding_name_unique(config, binding.name)
+
         binding.single_api_key_max_concurrency = self._validate_binding_api_key_limits(
             api_key=str(record.auth.get("api_key", "") or ""),
             value=binding.single_api_key_max_concurrency,
@@ -234,6 +236,7 @@ class LLMConfigFacade:
                 llm_config_id=config_id,
                 enabled=binding.enabled,
                 description=binding.description,
+                name=binding.name,
                 retry_on=binding.retry_on,
                 retry_count=binding.retry_count,
                 single_api_key_max_concurrency=binding.single_api_key_max_concurrency,
@@ -268,6 +271,12 @@ class LLMConfigFacade:
             binding.enabled = bool(draft_payload.get("enabled"))
         if "description" in draft_payload:
             binding.description = str(draft_payload.get("description") or "").strip()
+        if "name" in draft_payload:
+            binding.name = self._validate_binding_name_unique(
+                config,
+                draft_payload.get("name"),
+                exclude_key=model_key,
+            )
         if "retry_on" in draft_payload:
             binding.retry_on = split_retry_keywords(draft_payload.get("retry_on")) or list(DEFAULT_RETRY_ON_KEYWORDS)
         if "retry_count" in draft_payload:
@@ -358,6 +367,20 @@ class LLMConfigFacade:
             single_api_key_max_concurrency=getattr(binding, "single_api_key_max_concurrency", None),
         )
 
+    @staticmethod
+    def _validate_binding_name_unique(config: Any, raw_name: Any, *, exclude_key: str = "") -> str:
+        clean = str(raw_name or "").strip()
+        if not clean:
+            return ""
+        lowered = clean.lower()
+        for binding in list(getattr(config.models, "catalog", []) or []):
+            if str(getattr(binding, "key", "") or "") == exclude_key:
+                continue
+            other = str(getattr(binding, "name", "") or "").strip().lower()
+            if other == lowered:
+                raise ValueError(f"配置名称已存在：{clean}")
+        return clean
+
     def _binding_payload(self, binding: Any, record: NormalizedProviderConfig) -> dict[str, Any]:
         api_key = str(record.auth.get("api_key", "") or "")
         return {
@@ -376,6 +399,7 @@ class LLMConfigFacade:
             "retry_count": int(getattr(binding, "retry_count", 0) or 0),
             "single_api_key_max_concurrency": getattr(binding, "single_api_key_max_concurrency", None),
             "description": binding.description,
+            "name": str(getattr(binding, "name", "") or "").strip(),
             "context_window_tokens": record.parameters.get("context_window_tokens"),
             "image_multimodal_enabled": bool(getattr(binding, "image_multimodal_enabled", False)),
             "capability": record.capability.value,
