@@ -761,6 +761,22 @@ class ExternalApiConfig(Base):
         return normalized
 
 
+class QqBotConfig(Base):
+    """First-party official QQ bot (tencent-connect/botpy) bridge.
+
+    Opt-in: operators paste the QQ open-platform AppID + AppSecret and flip
+    ``enabled``. The ``app_secret`` lives in the bootstrap secret overlay
+    (extracted on save, stripped from disk, re-applied on unlock); the adapter
+    runs in-process and talks to the local ``/api/v1`` like any external
+    bridge (bridge_id ``qq-official``).
+    """
+
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+    sandbox: bool = False
+
+
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -772,6 +788,7 @@ class Config(BaseSettings):
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)
     external_api: ExternalApiConfig = Field(default_factory=ExternalApiConfig)
+    qq_bot: QqBotConfig = Field(default_factory=QqBotConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":

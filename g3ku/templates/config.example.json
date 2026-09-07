@@ -142,5 +142,11 @@
     "enabled": false,
     "eventBufferSize": 512,
     "tokens": {}
+  },
+  "qqBot": {
+    "enabled": false,
+    "appId": "",
+    "appSecret": "",
+    "sandbox": false
   }
 }

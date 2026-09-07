@@ -138,6 +138,12 @@ def extract_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
                 if _secret_value_present(value):
                     out[f"{SCONFIG}.externalApi.tokens.{token_id}.token"] = str(value)
 
+    qq_bot = payload.get("qqBot")
+    if isinstance(qq_bot, dict):
+        app_secret = qq_bot.get("appSecret")
+        if _secret_value_present(app_secret):
+            out[f"{SCONFIG}.qqBot.appSecret"] = str(app_secret)
+
     return out
 
 
@@ -164,6 +170,10 @@ def strip_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
             for token_payload in tokens.values():
                 if isinstance(token_payload, dict):
                     token_payload["token"] = ""
+
+    qq_bot = payload.get("qqBot")
+    if isinstance(qq_bot, dict):
+        qq_bot["appSecret"] = ""
     return payload
 
 
