@@ -11,7 +11,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 5. `web-and-admin.md`
 6. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
 7. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
-8. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, or outbound routing to bridges
+8. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
 
 ## Topic Guide
 
@@ -30,7 +30,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `config-and-models.md`
   Use for config source-of-truth rules and role-to-model resolution.
 - `external-agent-api.md`
-  Use for the channel-agnostic headless API consumed by third-party bridges: auth, external session registry, turn terminal invariant, SSE event mapping, and ext outbound routing.
+  Use for the channel-agnostic headless API consumed by third-party bridges and the built-in official QQ adapter: auth, external session registry, turn terminal invariant, SSE event mapping, and ext outbound routing.
 
 ## Debugging Entry Points
 
@@ -46,6 +46,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Same task result pushed to the channel multiple times → `heartbeat-system.md`「Task Terminal Repair Contract」
 - Channel/bridge reply emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `external-agent-api.md` (outbound sanitize contract)
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
+- 官方 QQ 机器人面板报错、不连接或收不到消息 → `external-agent-api.md`「内置官方 QQ 适配器」+「常见排障入口」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
@@ -86,5 +87,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, model config admin draft contract, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |
-| External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing | `external-agent-api.md` |
+| External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Startup/deploy/troubleshooting order, memory CLI, Docker compose | `operations-and-maintenance.md` |

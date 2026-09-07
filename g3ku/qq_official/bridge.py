@@ -10,10 +10,15 @@ Real-device seam: the botpy SDK surface is verified against ``qq-botpy==1.2.1`` 
 ``on_<event>`` handler dispatch, message field names (``group_openid``,
 ``author.user_openid``, ``guild_id``/``channel_id``/``id``/``content``), and
 ``post_message`` / ``post_group_message`` / ``post_c2c_message`` / ``post_dms``
-signatures. The remaining unknown is live QQ gateway behavior (credential
+signatures. IMPORTANT: ``Client.run()`` is a blocking entry point
+(``loop.run_until_complete``) that raises ``RuntimeError: This event loop is
+already running`` inside the web runtime's live loop — this bridge therefore
+uses the async entry (``async with client: await client.start(...)``), sharing
+the uvicorn loop so handlers can drive the loopback ``/api/v1`` client
+directly. The remaining unknown is live QQ gateway behavior (credential
 validation, intents/event subscription), which needs a real AppID/AppSecret.
 All logic reachable without a QQ account (mapping, client, service,
-provisioning) is unit-tested elsewhere.
+provisioning, bridge wiring) is unit-tested elsewhere.
 """
 
 from __future__ import annotations
@@ -39,6 +44,36 @@ from g3ku.qq_official.messages import (
 
 StateCallback = Callable[[str, str], None]
 
+_BOTPY_TASK_PREFIX = "[botpy]"
+_BOTPY_CORO_QUALNAMES = {
+    "ConnectionSession._runner",
+    "BotWebSocket.ws_connect",
+    "BotWebSocket._send_heart",
+    "Client._run_event",
+}
+
+
+def _is_botpy_task(task: asyncio.Task) -> bool:
+    """True for tasks botpy spawned on the shared loop.
+
+    botpy creates its runner/heartbeat/websocket receive loops with
+    ``ensure_future`` / ``create_task`` and never cancels them: on a bridge
+    stop they would keep the QQ websocket alive. Detection: the ``[botpy]``
+    task-name prefix (event handler tasks), the known botpy coroutine
+    qualnames, or a coroutine defined inside the ``botpy`` package.
+    """
+    if task is asyncio.current_task():
+        return False
+    if str(task.get_name() or "").startswith(_BOTPY_TASK_PREFIX):
+        return True
+    coro = task.get_coro()
+    if str(getattr(coro, "__qualname__", "") or "") in _BOTPY_CORO_QUALNAMES:
+        return True
+    filename = str(getattr(getattr(coro, "cr_code", None), "co_filename", "") or "")
+    if not filename:
+        return False
+    return "botpy" in {part.lower() for part in filename.replace("\\", "/").split("/")}
+
 
 async def run_qq_official_bridge(
     *,
@@ -54,6 +89,12 @@ async def run_qq_official_bridge(
         import botpy
     except Exception as exc:  # noqa: BLE001
         on_state("error", f"botpy 未安装（pip install qq-botpy）: {exc}")
+        return
+
+    try:
+        intents = botpy.Intents(public_guild_messages=True, direct_message=True, public_messages=True)
+    except TypeError as exc:
+        on_state("error", f"botpy Intents 与当前 qq-botpy 版本不兼容: {exc}")
         return
 
     client = ExternalApiClient(base_url=base_url, token=token)
@@ -145,21 +186,29 @@ async def run_qq_official_bridge(
         author = getattr(message, "author", None) or {}
         return str(getattr(author, "user_openid", "") or getattr(author, "id", "") or "").strip()
 
-    try:
-        intents = botpy.Intents(public_guild_messages=True, direct_message=True, public_messages=True)
-    except TypeError:
-        intents = None
-
     bridge_api: Any = None
 
     try:
-        bridge_client = QqOfficialClient(intents=intents) if intents is not None else QqOfficialClient()
+        bridge_client = QqOfficialClient(intents=intents, is_sandbox=sandbox, ext_handlers=False)
         bridge_api = getattr(bridge_client, "api", None)
         on_state("connecting", "waiting for QQ gateway")
-        await bridge_client.run(appid=app_id, secret=app_secret)  # blocks until stopped
+        # NOTE: botpy's ``Client.run()`` is blocking (``run_until_complete`` on the
+        # loop captured at construction) and raises "This event loop is already
+        # running" when awaited inside the web runtime's live loop. The async
+        # entry below keeps botpy on the same loop as uvicorn.
+        async with bridge_client:
+            await bridge_client.start(appid=app_id, secret=app_secret)
     finally:
         for pump in list(pumps):
             pump.cancel()
-        if pumps:
-            await asyncio.gather(*pumps, return_exceptions=True)
+        # botpy's websocket/heartbeat/runner tasks survive the cancellation of
+        # ``start()`` (its ``asyncio.wait`` does not cancel its children, and the
+        # ws rides a dedicated aiohttp session that ``Client.close()`` cannot
+        # reach) — reap them here so a stop/restart really drops the connection.
+        leftovers = [task for task in asyncio.all_tasks(asyncio.get_running_loop()) if _is_botpy_task(task)]
+        for task in leftovers:
+            task.cancel()
+        pending = list(pumps) + leftovers
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await client.close()
