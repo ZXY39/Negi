@@ -180,6 +180,56 @@ def test_build_ceo_session_catalog_lists_legacy_channel_sessions_readonly(monkey
         assert item["can_delete"] is False
 
 
+def test_build_ceo_session_catalog_lists_external_bridge_sessions_readonly(monkeypatch, tmp_path: Path) -> None:
+    """Live ``ext:*`` bridge sessions surface in the channel catalog as
+    read-only groups keyed by bridge, titled from the registry mapping."""
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+
+    monkeypatch.setattr(
+        "g3ku.runtime.web_ceo_sessions.load_config",
+        lambda: SimpleNamespace(workspace_path=str(tmp_path)),
+    )
+    reset_external_session_registry()
+    registry = ExternalSessionRegistry(tmp_path)
+    entry, _ = registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:user-1")
+
+    class _Session:
+        def __init__(self, key: str, content: str) -> None:
+            self.key = key
+            self.messages = [{"role": "assistant", "content": content}]
+            self.metadata = {}
+            self.created_at = datetime(2026, 3, 21, 10, 0, 0)
+            self.updated_at = datetime(2026, 3, 21, 10, 5, 0)
+
+    class _Store:
+        def __init__(self) -> None:
+            self._sessions = {
+                "web:shared": _Session("web:shared", "local reply"),
+                entry.session_key: _Session(entry.session_key, "bridge reply"),
+            }
+
+        def list_sessions(self):
+            return [{"key": key} for key in self._sessions]
+
+        def get_or_create(self, key: str):
+            return self._sessions[key]
+
+        def save(self, _session) -> None:
+            return None
+
+    catalog = build_ceo_session_catalog(_Store(), active_session_id=entry.session_key)
+    assert catalog["active_session_family"] == "channel"
+    ext_groups = [group for group in catalog["channel_groups"] if group["channel_id"] == "ext:qq"]
+    assert len(ext_groups) == 1
+    assert ext_groups[0]["label"].startswith("外部桥接")
+    item = ext_groups[0]["items"][0]
+    assert item["session_id"] == entry.session_key
+    assert item["is_readonly"] is True
+    assert item["can_delete"] is False
+    assert item["session_origin"] == "external"
+    assert "qq:dm:user-1" in item["title"]
+
+
 def test_runtime_agent_session_serializes_prompt_and_keeps_live_targets(monkeypatch) -> None:
     async def _noop_refresh(**_kwargs):
         return None

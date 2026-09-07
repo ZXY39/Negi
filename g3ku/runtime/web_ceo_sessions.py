@@ -12,6 +12,7 @@ from typing import Any, Callable
 from loguru import logger
 from g3ku.runtime.session_keys import build_session_key, is_channel_session_key, parse_china_session_key
 from g3ku.config.loader import get_config_path, load_config
+from g3ku.runtime.external_sessions import ExternalSessionRegistry
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
     project_canonical_context_for_ui_payload,
@@ -1541,8 +1542,21 @@ def _channel_session_kind(parsed) -> str:
     return "thread" if parsed.thread_id else parsed.chat_type
 
 
+def _external_bridge_label(bridge_id: str) -> str:
+    try:
+        config = load_config()
+        tokens = dict(getattr(getattr(config, "external_api", None), "tokens", None) or {})
+        label = str(getattr(tokens.get(str(bridge_id or "").strip()), "label", "") or "").strip()
+    except Exception:
+        label = ""
+    return label or str(bridge_id or "bridge").strip() or "bridge"
+
+
 def _channel_label(channel_id: str) -> str:
-    return CHINA_CHANNEL_LABELS.get(str(channel_id or "").strip(), str(channel_id or "渠道").strip() or "渠道")
+    raw = str(channel_id or "").strip()
+    if raw.startswith("ext:"):
+        return f"外部桥接 · {_external_bridge_label(raw[len('ext:'):])}"
+    return CHINA_CHANNEL_LABELS.get(raw, raw or "渠道")
 
 
 def _channel_title(parsed) -> str:
@@ -1754,6 +1768,77 @@ def list_channel_ceo_sessions(
         ),
         reverse=True,
     )
+    return rows + _list_external_channel_rows(
+        session_manager,
+        active_session_id=active_session_id,
+        is_running_resolver=is_running_resolver,
+    )
+
+
+def _list_external_channel_rows(
+    session_manager: Any,
+    *,
+    active_session_id: str,
+    is_running_resolver: Callable[[str], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Read-only catalog rows for live ``ext:*`` external bridge sessions.
+
+    The authoritative external_key/title mapping comes from the external
+    session registry when readable; otherwise the key digest stands in.
+    """
+    rows: list[dict[str, Any]] = []
+    try:
+        registry: ExternalSessionRegistry | None = ExternalSessionRegistry(workspace_path())
+    except Exception:
+        registry = None
+    for item in session_manager.list_sessions():
+        key = str(item.get("key") or "").strip()
+        if not key.startswith("ext:"):
+            continue
+        parts = key.split(":")
+        if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+            continue
+        bridge_id = parts[1].strip()
+        entry = registry.get_by_session_key(key) if registry is not None else None
+        external_key = str(getattr(entry, "external_key", "") or "").strip()
+        entry_title = str(getattr(entry, "title", "") or "").strip()
+        label = _external_bridge_label(bridge_id)
+        if entry_title:
+            title = f"{label} · {entry_title}"
+        elif external_key:
+            title = f"{label} · {external_key}"
+        else:
+            title = f"{label} · {parts[2].strip()[:8]}"
+        session = session_manager.get_or_create(key)
+        visible_messages = transcript_messages(session)
+        rows.append(
+            {
+                "session_id": key,
+                "title": title,
+                "preview_text": _channel_preview_text(session),
+                "message_count": len(visible_messages),
+                "created_at": _session_created_at(session),
+                "updated_at": _session_updated_at(session),
+                "last_llm_output_at": _session_last_assistant_at(session),
+                "is_active": key == str(active_session_id or "").strip(),
+                "is_running": bool(callable(is_running_resolver) and is_running_resolver(key)),
+                "session_family": "channel",
+                "session_origin": "external",
+                "is_readonly": True,
+                "can_rename": False,
+                "can_delete": False,
+                "channel_id": f"ext:{bridge_id}",
+                "account_id": bridge_id,
+                "chat_type": "dm",
+                "peer_id": external_key or None,
+                "thread_id": None,
+                "is_virtual": False,
+            }
+        )
+    rows.sort(
+        key=lambda item: str(item.get("last_llm_output_at") or item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
     return rows
 
 
@@ -1787,7 +1872,9 @@ def build_ceo_session_catalog(
             }
             grouped[channel_id] = bucket
         bucket["items"].append(item)
-    channel_groups = [grouped[key] for key in [spec["channel_id"] for spec in CHINA_SESSION_CHANNEL_SPECS] if key in grouped]
+    ordered_channel_ids = [spec["channel_id"] for spec in CHINA_SESSION_CHANNEL_SPECS]
+    channel_groups = [grouped[key] for key in ordered_channel_ids if key in grouped]
+    channel_groups.extend(grouped[key] for key in sorted(grouped) if key not in ordered_channel_ids)
     channel_ids = {str(item.get("session_id") or "") for item in channel_items}
     active_family = "channel" if str(active_session_id or "") in channel_ids else "local"
     return {
