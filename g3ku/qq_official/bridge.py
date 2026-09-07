@@ -159,4 +159,3 @@ async def run_qq_official_bridge(
         if pumps:
             await asyncio.gather(*pumps, return_exceptions=True)
         await client.close()
-        on_state("stopped", "")

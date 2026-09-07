@@ -92,7 +92,6 @@ class QqOfficialService:
                 on_state=self._set,
             )
         except asyncio.CancelledError:
-            self._set("stopped")
             raise
         except Exception as exc:  # noqa: BLE001 - the service must survive bridge crashes
             logger.exception("qq-official bridge crashed")
@@ -107,7 +106,6 @@ class QqOfficialService:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-        self._set("stopped")
 
     def _ensure_qq_official_token(self) -> str:
         cfg = load_config()

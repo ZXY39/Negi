@@ -531,6 +531,12 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 for token_id, entry in (cfg.external_api.tokens or {}).items()
             },
         },
+        "qqBot": {
+            "enabled": cfg.qq_bot.enabled,
+            "appId": cfg.qq_bot.app_id,
+            "appSecret": cfg.qq_bot.app_secret,
+            "sandbox": cfg.qq_bot.sandbox,
+        },
     }
 
 
@@ -547,6 +553,7 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("providers",),
         ("mainRuntime",),
         ("externalApi",),
+        ("qqBot",),
     }
     missing = [
         ".".join(path)
