@@ -21,7 +21,6 @@ from rich.table import Table
 from rich.text import Text
 
 from g3ku import __logo__, __version__
-from g3ku.china_bridge.registry import china_channel_attr, china_channel_ids
 from g3ku.config.schema import Config
 from g3ku.resources.tool_settings import MemoryRuntimeSettings, load_tool_settings_from_manifest
 from g3ku.runtime.bootstrap_factory import make_agent_loop as _runtime_make_agent_loop
@@ -259,7 +258,7 @@ def onboard(
     console.print("  2. Chat: [cyan]g3ku agent -m \"Hello!\"[/cyan]")
     if project:
         console.print("  3. Keep [cyan].g3ku/[/cyan], [cyan]memory/[/cyan], and [cyan]sessions/[/cyan] local; they contain private runtime state")
-    console.print("\n[dim]Need QQ / 钉钉 / 企微 / 飞书接入？使用 `g3ku china-bridge doctor` 检查子系统状态。[/dim]")
+    console.print("\n[dim]需要接入 IM 渠道？参考 External Agent API（docs/architecture/external-agent-api.md）与 bridges/qq-onebot 示例桥。[/dim]")
 
 def _make_provider(config: Config, *, scope: str = "ceo"):
     """Create the configured BaseChatModel for a runtime scope."""
@@ -390,75 +389,6 @@ def agent(
         print_agent_response=_print_agent_response,
     )
 
-
-china_bridge_app = typer.Typer(help="Manage the China communication subsystem")
-app.add_typer(china_bridge_app, name="china-bridge")
-
-
-def _china_bridge_status_path(config: Config) -> Path:
-    return config.workspace_path / str(config.china_bridge.state_dir or ".g3ku/china-bridge") / "status.json"
-
-
-@china_bridge_app.command("status")
-def china_bridge_status():
-    """Show china bridge status from the runtime status file."""
-    from g3ku.config.loader import load_config
-
-    config = load_config()
-    path = _china_bridge_status_path(config)
-    if not path.exists():
-        console.print(f"[yellow]No china bridge status file at {path}[/yellow]")
-        raise typer.Exit(1)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    console.print_json(json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-@china_bridge_app.command("doctor")
-def china_bridge_doctor():
-    """Run basic local diagnostics for the china bridge subsystem."""
-    from g3ku.config.loader import load_config
-
-    config = load_config()
-    dist_entry = config.workspace_path / "subsystems" / "china_channels_host" / "dist" / "index.js"
-    status_path = _china_bridge_status_path(config)
-    table = Table(title="China Bridge Doctor")
-    table.add_column("Check")
-    table.add_column("Status")
-    table.add_column("Value")
-    node_path = shutil.which(config.china_bridge.node_bin)
-    table.add_row("enabled", "ok" if config.china_bridge.enabled else "warn", str(config.china_bridge.enabled))
-    table.add_row("node", "ok" if node_path else "error", node_path or "not found")
-    table.add_row("dist", "ok" if dist_entry.exists() else "error", str(dist_entry))
-    table.add_row("status", "ok" if status_path.exists() else "warn", str(status_path))
-    table.add_row("public_port", "ok", str(config.china_bridge.public_port))
-    table.add_row("control_port", "ok", str(config.china_bridge.control_port))
-    for channel_id in china_channel_ids():
-        payload = getattr(config.china_bridge.channels, china_channel_attr(channel_id))
-        table.add_row(f"channel:{channel_id}", "ok" if payload.enabled else "warn", str(payload.enabled))
-    console.print(table)
-
-
-@china_bridge_app.command("restart")
-def china_bridge_restart():
-    """Terminate the running node host by PID so the web runtime can restart it."""
-    from g3ku.config.loader import load_config
-
-    config = load_config()
-    path = _china_bridge_status_path(config)
-    if not path.exists():
-        console.print(f"[red]No china bridge status file at {path}[/red]")
-        raise typer.Exit(1)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    pid = int(payload.get("pid") or 0)
-    if pid <= 0:
-        console.print("[red]china bridge host PID not available[/red]")
-        raise typer.Exit(1)
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except Exception as exc:
-        console.print(f"[red]failed to signal china bridge pid {pid}: {exc}[/red]")
-        raise typer.Exit(1) from exc
-    console.print(f"[green]OK[/green] sent SIGTERM to china bridge pid {pid}")
 
 def _middleware_ref(cfg, idx: int) -> str:
     """Human-readable middleware reference for CLI output."""

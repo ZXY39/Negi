@@ -1044,22 +1044,6 @@ class ApiClient {
         return this.post("/api/resources/reload", {}, { session_id: this.getActiveSessionId() });
     }
 
-    static async getChinaChannels() {
-        return this.get("/api/china-bridge/channels");
-    }
-
-    static async getChinaChannel(channelId) {
-        const data = await this.get(`/api/china-bridge/channels/${encodeURIComponent(channelId)}`);
-        return data.item || null;
-    }
-
-    static async updateChinaChannel(channelId, payload) {
-        return this.put(`/api/china-bridge/channels/${encodeURIComponent(channelId)}`, payload || {});
-    }
-
-    static async testChinaChannel(channelId, payload = {}) {
-        return this.post(`/api/china-bridge/channels/${encodeURIComponent(channelId)}/test`, payload || {});
-    }
 }
 
 window.ApiClient = ApiClient;

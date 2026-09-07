@@ -309,15 +309,6 @@ const S = {
     memoryLastAlertText: "",
     memoryLastBlockedText: "",
     memoryPollIntervalId: null,
-    communications: [],
-    communicationBridge: null,
-    selectedCommunication: null,
-    communicationBusy: false,
-    communicationDirty: false,
-    communicationDraftEnabled: false,
-    communicationDraftText: "",
-    communicationBaselineEnabled: false,
-    communicationBaselineText: "",
 };
 
 const U = {
@@ -363,7 +354,6 @@ const U = {
     viewTools: document.getElementById("view-tools"),
     viewMemory: document.getElementById("view-memory"),
     viewModels: document.getElementById("view-models"),
-    viewCommunications: document.getElementById("view-communications"),
     viewTaskDetails: document.getElementById("view-task-details"),
     memoryAdminActions: document.getElementById("memory-admin-actions"),
     memoryRefresh: document.getElementById("memory-refresh-btn"),
@@ -499,13 +489,6 @@ const U = {
     toolDrawer: document.querySelector(".tool-detail-panel"),
     toolRefresh: document.getElementById("tool-refresh-btn"),
     toolSave: document.getElementById("tool-save-btn"),
-    communicationList: document.getElementById("communication-list"),
-    communicationBridgeSummary: document.getElementById("communication-bridge-summary"),
-    communicationEmpty: document.getElementById("communication-detail-empty"),
-    communicationDetail: document.getElementById("communication-detail-content"),
-    communicationBackdrop: document.getElementById("communication-detail-backdrop"),
-    communicationDrawer: document.querySelector(".communication-detail-panel"),
-    communicationRefresh: document.getElementById("communication-refresh-btn"),
     toast: document.getElementById("app-toast"),
     toastTitle: document.getElementById("app-toast-title"),
     toastText: document.getElementById("app-toast-text"),
@@ -6206,11 +6189,6 @@ function setToolDirty(next = true) {
     renderToolActions();
 }
 
-function setCommunicationDirty(next = true) {
-    S.communicationDirty = !!next;
-    renderCommunicationActions();
-}
-
 function openConfirm({ title, text, confirmLabel = "确认", confirmKind = "danger", onConfirm, onClose = null, returnFocus = null, checkbox = null }) {
     S.confirmState = {
         onConfirm,
@@ -9113,25 +9091,6 @@ function renderToolActions() {
     syncDetailSaveButton("tool");
 }
 
-function renderCommunicationActions() {
-    syncActionButton(U.communicationRefresh, {
-        idleLabel: "刷新",
-        busyLabel: "刷新中...",
-        busy: S.communicationBusy,
-        disabled: S.communicationBusy,
-    });
-    const saveButton = U.communicationDetail?.querySelector("#communication-save-btn");
-    const hint = U.communicationDetail?.querySelector(".resource-draft-hint");
-    if (saveButton) {
-        saveButton.textContent = S.communicationBusy ? "保存中..." : "保存";
-        saveButton.disabled = !!S.communicationBusy || !S.communicationDirty;
-    }
-    if (hint) {
-        hint.classList.toggle("is-dirty", S.communicationDirty);
-        hint.textContent = S.communicationDirty ? "配置变更已暂存，点击保存后才会写入配置文件并执行连接测试。" : "";
-        hint.hidden = !S.communicationDirty;
-    }
-}
 
 function clearSkillSelection() {
     if (S.skillAutosaveTimerId) {
@@ -10684,19 +10643,9 @@ function renderMemoryProcessedCard(item) {
     `;
 }
 
-function clearCommunicationSelection() {
-    S.selectedCommunication = null;
-    S.communicationDirty = false;
-    S.communicationDraftEnabled = false;
-    S.communicationDraftText = "";
-    S.communicationBaselineEnabled = false;
-    S.communicationBaselineText = "";
-    renderCommunications();
-    renderCommunicationDetail();
-}
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, communications: U.viewCommunications, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     S.view = navView;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
@@ -10743,7 +10692,6 @@ function switchView(view) {
         else void loadMemoryView({ quiet: true });
     }
     if (view === "models") void loadModels();
-    if (view === "communications") void loadCommunications();
 }
 
 function toggleTheme() {
@@ -11240,11 +11188,9 @@ function bind() {
     U.toolPageNext?.addEventListener("click", () => setToolPage(S.toolPage + 1));
     U.toolRefresh?.addEventListener("click", () => void refreshTools());
     U.toolSave?.addEventListener("click", () => void saveTool());
-    U.communicationRefresh?.addEventListener("click", () => void refreshCommunications());
     U.modelBackdrop?.addEventListener("click", clearModelSelection);
     U.skillBackdrop?.addEventListener("click", clearSkillSelection);
     U.toolBackdrop?.addEventListener("click", clearToolSelection);
-    U.communicationBackdrop?.addEventListener("click", clearCommunicationSelection);
     U.toastClose?.addEventListener("click", closeToast);
     U.confirmBackdrop?.addEventListener("click", (e) => {
         if (e.target === U.confirmBackdrop) closeConfirm();
@@ -11292,7 +11238,6 @@ function bind() {
         }
         if (S.selectedSkill) clearSkillSelection();
         if (S.selectedTool) clearToolSelection();
-        if (S.selectedCommunication) clearCommunicationSelection();
     });
     renderPendingCeoUploads();
     syncCeoInputHeight();
@@ -11342,7 +11287,6 @@ function init() {
     void loadTaskDefaults();
     renderSkillActions();
     renderToolActions();
-    renderCommunicationActions();
     void loadModels();
     void loadTasks();
     void restoreTaskDetailSession();

@@ -12,7 +12,7 @@ def test_model_config_role_routes_use_four_parallel_columns_without_header_copy(
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
 
     model_start = html.index('<section id="view-models"')
-    model_end = html.index('<section id="view-communications"', model_start)
+    model_end = html.index('<section id="view-task-details"', model_start)
     model_html = html[model_start:model_end]
 
     assert "<h3>Role Routes</h3>" not in model_html

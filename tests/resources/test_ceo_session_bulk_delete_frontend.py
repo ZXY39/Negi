@@ -55,9 +55,6 @@ def test_ceo_session_bulk_delete_css_contract() -> None:
     compact_select_override_index = css.rfind(".compact-resource-header-actions > .resource-select-shell .resource-select-trigger {")
     assert compact_search_override_index > generic_search_index
     assert compact_select_override_index > generic_search_index
-    assert re.search(r"\.communication-compact-header\s*\{[^}]*padding-top:\s*var\(--space-4\);", css, flags=re.MULTILINE)
-    assert re.search(r"\.communication-compact-header\s*\{[^}]*padding-bottom:\s*var\(--space-4\);", css, flags=re.MULTILINE)
-    assert not re.search(r"\.communication-compact-header\s*\{[^}]*height:\s*42px;", css, flags=re.MULTILINE)
 
 
 def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
@@ -114,8 +111,7 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert '(isCoreTool && agentVisible && role === "ceo")' not in resources_js
     assert '当前 action 对所有角色禁用。' in resources_js
 
-    communication_section = re.search(r'<section id="view-communications".*?</section>', html, flags=re.DOTALL)
-    assert communication_section is not None
-    communication_html = communication_section.group(0)
-    assert 'communication-compact-header' in communication_html
-    assert communication_html.index('<h1>通信配置</h1>') < communication_html.index('id="communication-refresh-btn"')
+    # The China channel subsystem and its "通信配置" panel have been removed;
+    # the web UI exposes external channel access via the External Agent API.
+    assert '<section id="view-communications"' not in html
+    assert 'data-view="communications"' not in html
