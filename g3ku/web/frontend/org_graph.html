@@ -519,27 +519,71 @@
                     </div>
                 </header>
                 <div class="external-api-shell">
-                    <div class="external-master-card">
-                        <label class="external-master-toggle">
-                            <input id="external-api-enabled-toggle" type="checkbox">
-                            <span>启用 External Agent API（/api/v1）</span>
-                        </label>
-                        <p class="external-master-hint">
-                            关闭时所有外部桥接访问将被拒绝（403）。外部渠道由独立桥接进程接入，token 密文保存在加密覆盖层，配置文件不落明文。
-                        </p>
-                    </div>
-                    <div class="external-toolbar">
-                        <button id="external-token-create-btn" class="toolbar-btn" type="button">签发桥接 token</button>
-                    </div>
-                    <div id="external-token-once" class="external-token-once" hidden>
-                        <h3>token 已生成——仅显示这一次</h3>
-                        <p>请把 <code id="external-token-once-id"></code> 的 token 交给对应桥接应用（Authorization: Bearer）。关闭后页面只显示掩码。</p>
-                        <textarea id="external-token-once-text" rows="3" readonly></textarea>
-                        <div class="external-token-once-actions">
-                            <button id="external-token-once-close" class="toolbar-btn" type="button">我已保存，关闭</button>
+                    <section class="resource-detail-panel external-master-panel">
+                        <div class="panel-header">
+                            <div>
+                                <h3>External Agent API（/api/v1）</h3>
+                                <p class="subtitle external-panel-subtitle">外部渠道由独立桥接进程接入，关闭时所有外部访问将被拒绝（403）。</p>
+                            </div>
+                            <button id="external-api-enabled-toggle" class="tool-governance-switch" type="button"
+                                aria-pressed="false" aria-label="启用 External Agent API">
+                                <span class="tool-governance-switch-track" aria-hidden="true">
+                                    <span class="tool-governance-switch-thumb"></span>
+                                </span>
+                                <span id="external-api-enabled-label" class="tool-governance-switch-label">已停用</span>
+                            </button>
                         </div>
-                    </div>
-                    <div id="external-token-list" class="resource-list external-token-list"></div>
+                        <p class="external-security-hint">token 密文保存在加密覆盖层，配置文件不落明文；明文仅在签发 / 重新生成时显示一次。</p>
+                    </section>
+                    <section class="resource-detail-panel external-tokens-panel">
+                        <div class="panel-header">
+                            <div>
+                                <h3>桥接 token</h3>
+                                <p class="subtitle external-panel-subtitle">为每个外部桥接应用签发独立 token，请求以 Authorization: Bearer 携带。</p>
+                            </div>
+                            <div class="panel-header-actions">
+                                <button id="external-token-create-btn" class="toolbar-btn success" type="button"
+                                    aria-expanded="false">签发桥接 token</button>
+                            </div>
+                        </div>
+                        <form id="external-token-form" class="external-token-form" hidden novalidate>
+                            <div class="llm-form-grid">
+                                <label class="resource-field">
+                                    <span class="resource-field-label">桥接标识（bridge_id）*</span>
+                                    <input id="external-token-bridge-input" class="resource-search" type="text"
+                                        placeholder="如 napcat-home（小写字母 / 数字 / - / _）" autocomplete="off">
+                                </label>
+                                <label class="resource-field">
+                                    <span class="resource-field-label">备注名（可选）</span>
+                                    <input id="external-token-label-input" class="resource-search" type="text"
+                                        placeholder="如：家里 NapCat 桥">
+                                </label>
+                                <label class="resource-field">
+                                    <span class="resource-field-label">自定义 token（可选）</span>
+                                    <input id="external-token-custom-input" class="resource-search" type="text"
+                                        placeholder="留空则自动生成；与已有 token 重复将被拒绝" autocomplete="off"
+                                        spellcheck="false">
+                                </label>
+                            </div>
+                            <div class="external-token-form-actions">
+                                <button id="external-token-form-cancel" class="toolbar-btn ghost" type="button">取消</button>
+                                <button id="external-token-form-submit" class="toolbar-btn success" type="submit">签发</button>
+                            </div>
+                        </form>
+                        <div id="external-token-once" class="external-token-once" hidden>
+                            <div class="external-token-once-head">
+                                <h3>token 已生成——仅显示这一次</h3>
+                                <button id="external-token-once-close" class="toolbar-btn ghost small" type="button">关闭</button>
+                            </div>
+                            <p>请将 <code id="external-token-once-id"></code> 的 token 交给对应桥接应用（Authorization: Bearer）。关闭后页面只显示掩码。</p>
+                            <div class="external-token-once-row">
+                                <input id="external-token-once-text" class="resource-search external-token-once-text"
+                                    type="text" readonly>
+                                <button id="external-token-once-copy" class="toolbar-btn ghost" type="button">复制</button>
+                            </div>
+                        </div>
+                        <div id="external-token-list" class="external-token-list"></div>
+                    </section>
                 </div>
             </section>
             <section id="view-task-details" class="view-section" style="display: none;">

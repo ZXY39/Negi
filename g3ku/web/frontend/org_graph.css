@@ -10341,53 +10341,125 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-    padding: var(--space-4);
+    padding: 0 var(--space-4) var(--space-4);
+    min-height: 0;
+    overflow-y: auto;
 }
 
-.external-master-card {
-    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+.external-master-panel .panel-header {
+    align-items: center;
+}
+
+.external-panel-subtitle {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    line-height: 1.6;
+}
+
+.external-security-hint {
+    margin: 0;
+    padding: 10px var(--space-5) var(--space-4);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.6;
+}
+
+.external-token-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-5);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 42%, transparent);
+}
+
+.external-token-form[hidden] {
+    display: none;
+}
+
+.external-token-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+}
+
+.external-token-once {
+    margin: var(--space-4) var(--space-5) 0;
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 55%, transparent);
     border-radius: var(--radius-md);
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    background: color-mix(in srgb, var(--brand-primary) 7%, transparent);
 }
 
-.external-master-toggle {
+.external-token-once-head {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 8px;
-    font-weight: 600;
-    cursor: pointer;
 }
 
-.external-master-hint {
+.external-token-once h3 {
+    margin: 0;
+    font-size: 0.95rem;
+}
+
+.external-token-once p {
     margin: 0;
     color: var(--text-secondary);
-    font-size: 0.86rem;
+    font-size: 0.84rem;
     line-height: 1.6;
 }
 
-.external-toolbar {
+.external-token-once code {
+    font-family: var(--font-mono, monospace);
+}
+
+.external-token-once-row {
     display: flex;
-    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+}
+
+.external-token-once-text {
+    flex: 1 1 auto;
+    font-family: var(--font-mono, monospace);
 }
 
 .external-token-list {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: var(--space-3);
+    padding: var(--space-4) var(--space-5) var(--space-5);
+}
+
+.external-token-list .resource-empty {
+    height: auto;
+    padding: var(--space-5) var(--space-4);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.86rem;
 }
 
 .external-token-item {
     display: flex;
+    flex-direction: row;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    height: auto;
+    cursor: default;
 }
 
 .external-token-main {
     min-width: 0;
+}
+
+.external-token-main .resource-list-subtitle {
+    margin-bottom: 0;
 }
 
 .external-token-main code {
@@ -10400,47 +10472,4 @@ textarea {
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
-}
-
-.external-token-enabled {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    cursor: pointer;
-    color: var(--text-secondary);
-    font-size: 0.86rem;
-}
-
-.external-token-once {
-    border: 1px solid color-mix(in srgb, var(--accent-color, #4f7cff) 55%, transparent);
-    border-radius: var(--radius-md);
-    padding: 14px 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    background: color-mix(in srgb, var(--accent-color, #4f7cff) 7%, transparent);
-}
-
-.external-token-once h3 {
-    margin: 0;
-    font-size: 0.98rem;
-}
-
-.external-token-once p {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 0.86rem;
-    line-height: 1.6;
-}
-
-.external-token-once textarea {
-    width: 100%;
-    resize: vertical;
-    font-family: var(--font-mono, monospace);
-    font-size: 0.85rem;
-}
-
-.external-token-once-actions {
-    display: flex;
-    justify-content: flex-end;
 }

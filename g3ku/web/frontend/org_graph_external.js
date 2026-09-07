@@ -13,7 +13,7 @@ function _externalListEl() {
     return document.getElementById("external-token-list");
 }
 
-function _externalMasterToggle() {
+function _externalMasterSwitch() {
     return document.getElementById("external-api-enabled-toggle");
 }
 
@@ -21,12 +21,40 @@ function _externalOnceCard() {
     return document.getElementById("external-token-once");
 }
 
+function _externalFormEl() {
+    return document.getElementById("external-token-form");
+}
+
+function _setExternalSwitch(button, pressed, label) {
+    if (!button) return;
+    button.setAttribute("aria-pressed", pressed ? "true" : "false");
+    if (label) {
+        const text = button.querySelector(".tool-governance-switch-label");
+        if (text) text.textContent = label;
+    }
+}
+
 function _externalBusy(next) {
     EXTERNAL_API_VIEW_STATE.busy = !!next;
-    const createBtn = document.getElementById("external-token-create-btn");
-    if (createBtn) createBtn.disabled = EXTERNAL_API_VIEW_STATE.busy;
-    const master = _externalMasterToggle();
-    if (master) master.disabled = EXTERNAL_API_VIEW_STATE.busy;
+    const busy = EXTERNAL_API_VIEW_STATE.busy;
+    for (const id of [
+        "external-refresh-btn",
+        "external-token-create-btn",
+        "external-token-form-submit",
+        "external-token-form-cancel",
+        "external-token-once-copy",
+    ]) {
+        const el = document.getElementById(id);
+        if (el) el.disabled = busy;
+    }
+    const master = _externalMasterSwitch();
+    if (master) master.disabled = busy;
+    const listEl = _externalListEl();
+    if (listEl) {
+        for (const control of listEl.querySelectorAll("button[data-bridge]")) {
+            control.disabled = busy;
+        }
+    }
 }
 
 function _applyExternalPayload(payload) {
@@ -45,7 +73,7 @@ function renderExternalTokenList() {
         return;
     }
     if (!items.length) {
-        listEl.innerHTML = '<div class="resource-empty">还没有桥接 token。点击「签发桥接 token」为外部桥接应用创建一个。</div>';
+        listEl.innerHTML = '<div class="resource-empty">还没有桥接 token。点击右上角「签发桥接 token」为外部桥接应用创建第一个。</div>';
         return;
     }
     listEl.innerHTML = "";
@@ -55,17 +83,18 @@ function renderExternalTokenList() {
         row.innerHTML = `
             <div class="external-token-main">
                 <div class="resource-list-title">${esc(item.bridge_id)}</div>
-                <div class="resource-list-subtitle">
-                    ${item.label ? esc(item.label) + " · " : ""}token：<code>${esc(item.token_masked || "（未设置）")}</code>
-                </div>
+                <div class="resource-list-subtitle">${item.label ? esc(item.label) + " · " : ""}token：<code>${esc(item.token_masked || "（未设置）")}</code></div>
             </div>
             <div class="external-token-actions">
-                <label class="external-token-enabled">
-                    <input type="checkbox" data-bridge="${esc(item.bridge_id)}" ${item.enabled ? "checked" : ""}>
-                    <span>${item.enabled ? "已启用" : "已停用"}</span>
-                </label>
-                <button class="toolbar-btn ghost" data-action="regenerate" data-bridge="${esc(item.bridge_id)}" type="button">重新生成</button>
-                <button class="toolbar-btn ghost danger" data-action="delete" data-bridge="${esc(item.bridge_id)}" type="button">删除</button>
+                <button class="tool-governance-switch external-row-switch" type="button"
+                    data-bridge="${esc(item.bridge_id)}"
+                    aria-pressed="${item.enabled ? "true" : "false"}"
+                    aria-label="切换 ${esc(item.bridge_id)} 启用状态">
+                    <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
+                    <span class="tool-governance-switch-label">${item.enabled ? "已启用" : "已停用"}</span>
+                </button>
+                <button class="toolbar-btn ghost small" data-action="regenerate" data-bridge="${esc(item.bridge_id)}" type="button">重新生成</button>
+                <button class="toolbar-btn ghost danger small" data-action="delete" data-bridge="${esc(item.bridge_id)}" type="button">删除</button>
             </div>`;
         listEl.appendChild(row);
     }
@@ -76,8 +105,7 @@ async function loadExternalApiView({ quiet = false } = {}) {
     try {
         const payload = await ApiClient.getExternalApiSettings();
         _applyExternalPayload(payload);
-        const master = _externalMasterToggle();
-        if (master) master.checked = EXTERNAL_API_VIEW_STATE.enabled;
+        _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已停用");
         renderExternalTokenList();
     } catch (error) {
         if (!quiet) showToast({ title: "加载外部接入配置失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
@@ -90,22 +118,75 @@ function _showExternalTokenOnce(bridgeId, token) {
     document.getElementById("external-token-once-id").textContent = bridgeId;
     document.getElementById("external-token-once-text").value = token;
     card.hidden = false;
+    card.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
-async function createExternalToken() {
-    const bridgeId = window.prompt("桥接标识（bridge_id，小写字母/数字/-/_）：");
-    if (bridgeId === null) return;
-    const normalized = String(bridgeId).trim();
-    if (!normalized) {
-        showToast({ title: "需要桥接标识", text: "bridge_id 不能为空。", kind: "error" });
+function _closeExternalTokenOnce() {
+    const card = _externalOnceCard();
+    if (card) card.hidden = true;
+    const text = document.getElementById("external-token-once-text");
+    if (text) text.value = "";
+}
+
+async function _copyExternalTokenOnce() {
+    const input = document.getElementById("external-token-once-text");
+    if (!input || !input.value) return;
+    const value = input.value;
+    try {
+        await navigator.clipboard.writeText(value);
+        showToast({ title: "已复制", text: "token 已复制到剪贴板。", kind: "success" });
+    } catch (error) {
+        input.focus();
+        input.select();
+        let ok = false;
+        try {
+            ok = document.execCommand("copy");
+        } catch (fallbackError) {
+            ok = false;
+        }
+        if (ok) {
+            showToast({ title: "已复制", text: "token 已复制到剪贴板。", kind: "success" });
+        } else {
+            showToast({ title: "复制失败", text: "请手动选中 token 后复制。", kind: "error" });
+        }
+    }
+}
+
+function _setExternalFormOpen(open) {
+    const form = _externalFormEl();
+    const createBtn = document.getElementById("external-token-create-btn");
+    if (form) form.hidden = !open;
+    if (createBtn) createBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+        const first = document.getElementById("external-token-bridge-input");
+        if (first) first.focus();
+    }
+}
+
+async function createExternalToken(event) {
+    if (event) event.preventDefault();
+    if (EXTERNAL_API_VIEW_STATE.busy) return;
+    const bridgeInput = document.getElementById("external-token-bridge-input");
+    const labelInput = document.getElementById("external-token-label-input");
+    const customInput = document.getElementById("external-token-custom-input");
+    const bridgeId = String(bridgeInput ? bridgeInput.value : "").trim();
+    if (!bridgeId) {
+        showToast({ title: "需要桥接标识", text: "请填写 bridge_id，例如 napcat-home。", kind: "error" });
+        if (bridgeInput) bridgeInput.focus();
         return;
     }
-    const label = window.prompt("备注名（可选，例如：家里 NapCat 桥）：") || "";
+    const body = { bridge_id: bridgeId, label: String(labelInput ? labelInput.value : "").trim() };
+    const customToken = String(customInput ? customInput.value : "").trim();
+    if (customToken) body.token = customToken;
     _externalBusy(true);
     try {
-        const payload = await ApiClient.createExternalApiToken({ bridge_id: normalized, label: String(label).trim() });
+        const payload = await ApiClient.createExternalApiToken(body);
         _applyExternalPayload(payload);
         renderExternalTokenList();
+        _setExternalFormOpen(false);
+        if (bridgeInput) bridgeInput.value = "";
+        if (labelInput) labelInput.value = "";
+        if (customInput) customInput.value = "";
         _showExternalTokenOnce(payload.bridge_id, payload.token);
     } catch (error) {
         showToast({ title: "签发失败", text: ApiClient.friendlyErrorMessage(error), kind: "error" });
@@ -167,8 +248,7 @@ async function toggleExternalApiEnabled(enabled) {
     try {
         const payload = await ApiClient.updateExternalApiSettings({ enabled });
         _applyExternalPayload(payload);
-        const master = _externalMasterToggle();
-        if (master) master.checked = EXTERNAL_API_VIEW_STATE.enabled;
+        _setExternalSwitch(_externalMasterSwitch(), EXTERNAL_API_VIEW_STATE.enabled, EXTERNAL_API_VIEW_STATE.enabled ? "已启用" : "已停用");
         renderExternalTokenList();
         showToast({
             title: enabled ? "External Agent API 已启用" : "External Agent API 已停用",
@@ -187,31 +267,48 @@ function initExternalApiView() {
     const refreshBtn = document.getElementById("external-refresh-btn");
     if (refreshBtn) refreshBtn.addEventListener("click", () => void loadExternalApiView());
 
-    const master = _externalMasterToggle();
-    if (master) master.addEventListener("change", (event) => void toggleExternalApiEnabled(!!event.target.checked));
-
-    const createBtn = document.getElementById("external-token-create-btn");
-    if (createBtn) createBtn.addEventListener("click", () => void createExternalToken());
-
-    const onceClose = document.getElementById("external-token-once-close");
-    if (onceClose) {
-        onceClose.addEventListener("click", () => {
-            const card = _externalOnceCard();
-            if (card) card.hidden = true;
-            const text = document.getElementById("external-token-once-text");
-            if (text) text.value = "";
+    const master = _externalMasterSwitch();
+    if (master) {
+        master.addEventListener("click", () => {
+            void toggleExternalApiEnabled(master.getAttribute("aria-pressed") !== "true");
         });
     }
 
+    const createBtn = document.getElementById("external-token-create-btn");
+    if (createBtn) {
+        createBtn.addEventListener("click", () => {
+            const form = _externalFormEl();
+            _setExternalFormOpen(!!form && form.hidden);
+        });
+    }
+
+    const form = _externalFormEl();
+    if (form) form.addEventListener("submit", (event) => void createExternalToken(event));
+
+    const formCancel = document.getElementById("external-token-form-cancel");
+    if (formCancel) {
+        formCancel.addEventListener("click", () => {
+            _setExternalFormOpen(false);
+        });
+    }
+
+    const onceClose = document.getElementById("external-token-once-close");
+    if (onceClose) onceClose.addEventListener("click", _closeExternalTokenOnce);
+
+    const onceCopy = document.getElementById("external-token-once-copy");
+    if (onceCopy) onceCopy.addEventListener("click", () => void _copyExternalTokenOnce());
+
     const listEl = _externalListEl();
     if (listEl) {
-        listEl.addEventListener("change", (event) => {
-            const target = event.target;
-            if (target && target.matches('input[type="checkbox"][data-bridge]')) {
-                void toggleExternalTokenEnabled(target.dataset.bridge, !!target.checked);
-            }
-        });
         listEl.addEventListener("click", (event) => {
+            const switchBtn = event.target.closest("button.external-row-switch[data-bridge]");
+            if (switchBtn) {
+                void toggleExternalTokenEnabled(
+                    switchBtn.dataset.bridge,
+                    switchBtn.getAttribute("aria-pressed") !== "true"
+                );
+                return;
+            }
             const button = event.target.closest("button[data-action][data-bridge]");
             if (!button) return;
             const bridgeId = button.dataset.bridge;

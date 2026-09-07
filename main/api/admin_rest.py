@@ -1067,10 +1067,20 @@ async def create_external_api_token(payload: dict | None = Body(default=None)):
     if not raw_bridge_id:
         raise HTTPException(status_code=400, detail={'code': 'bridge_id_required', 'message': '需要桥接标识（bridge_id）'})
     bridge_id = _normalize_external_token_id(raw_bridge_id)
-    token = str(body.get('token') or '').strip() or secrets.token_urlsafe(32)
     cfg = load_config()
-    if bridge_id in (cfg.external_api.tokens or {}):
+    tokens = cfg.external_api.tokens or {}
+    if bridge_id in tokens:
         raise HTTPException(status_code=409, detail={'code': 'bridge_id_exists', 'message': f'桥接标识 {bridge_id} 已存在'})
+    custom_token = str(body.get('token') or '').strip()
+    if custom_token:
+        if any(str(entry.token or '') == custom_token for entry in tokens.values()):
+            raise HTTPException(status_code=409, detail={'code': 'token_exists', 'message': '该 token 已被其他桥接使用，请更换'})
+        token = custom_token
+    else:
+        existing_tokens = {str(entry.token or '') for entry in tokens.values()}
+        token = secrets.token_urlsafe(32)
+        while token in existing_tokens:
+            token = secrets.token_urlsafe(32)
     cfg.external_api.tokens[bridge_id] = ExternalApiTokenConfig(
         token=token,
         label=str(body.get('label') or '').strip(),

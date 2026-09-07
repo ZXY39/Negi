@@ -162,3 +162,26 @@ def test_external_api_token_create_requires_bridge_id_and_rejects_duplicates(cli
 def test_external_api_token_update_and_delete_require_existing_bridge(client: TestClient) -> None:
     assert client.patch("/api/external-api/tokens/ghost", json={"enabled": False}).status_code == 404
     assert client.delete("/api/external-api/tokens/ghost").status_code == 404
+
+
+def test_external_api_token_create_accepts_custom_token_and_dedupes_values(client: TestClient) -> None:
+    custom = "my-custom-bridge-token-123"
+    created = client.post("/api/external-api/tokens", json={"bridge_id": "napcat", "token": custom})
+    assert created.status_code == 200
+    assert created.json()["token"] == custom
+
+    listing = client.get("/api/external-api/settings").json()
+    item = listing["items"][0]
+    assert item["has_token"] is True
+    # The one-time reveal contract holds for custom tokens too.
+    assert custom not in json.dumps(listing, ensure_ascii=False)
+    assert item["token_masked"].startswith("my-c")
+
+    duplicate = client.post("/api/external-api/tokens", json={"bridge_id": "other", "token": custom})
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["code"] == "token_exists"
+
+    # Auto-generation stays the default when no token is supplied.
+    auto = client.post("/api/external-api/tokens", json={"bridge_id": "auto"})
+    assert auto.status_code == 200
+    assert auto.json()["token"] not in ("", custom)
