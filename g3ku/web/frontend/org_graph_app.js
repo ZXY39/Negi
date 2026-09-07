@@ -93,6 +93,7 @@ const S = {
     ceoBulkMode: false,
     ceoSelectedSessionIds: new Set(),
     ceoScrollToLatestOnSnapshot: false,
+    ceoFeedRenderSessionId: "",
     ceoSnapshotCache: {},
     ceoReplyDeltaBuffers: {},
     ceoReplyDeltaFrameId: 0,
@@ -4532,7 +4533,13 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         turn.lastExecutionTraceSummary = null;
         turn.liveStreamText = "";
     }
-    if (turnId) turn.turnId = turnId;
+    if (turnId) {
+        turn.turnId = turnId;
+        // 视图状态保持依赖回合元素的稳定 key(reconnect/快照重渲染时锚定与展开态还原)。
+        if (turn.el && typeof turn.el.setAttribute === "function") {
+            turn.el.setAttribute("data-ceo-key", `turn:${normalizeCeoTurnId(turnId)}`);
+        }
+    }
     // live inflight 只渲染本轮 delta（或本轮已渲染的 summary），不回退 full，
     // 避免新 turn 继承上一轮阶段；跨 turn 时 lastExecutionTraceSummary 已在上面被清空；
     // preserved 保留 full 回退。delta 与已渲染轨道做增量合并,保证阶段累计可见
@@ -4747,6 +4754,10 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
         return;
     }
+    const historyTurnId = normalizeCeoTurnId(item?.turn_id || "");
+    if (historyTurnId && turn.el && typeof turn.el.setAttribute === "function") {
+        turn.el.setAttribute("data-ceo-key", `turn:${historyTurnId}`);
+    }
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
         renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
@@ -4764,6 +4775,176 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     finalizeCeoTurn(content, { source: "history" });
 }
 
+// ---- CEO 会话视图状态保持 -----------------------------------------------------
+// 整页重建(renderCeoSnapshot → resetCeoFeed)会丢三样东西:展开的阶段/轮次工具/全部历史、
+// 以及滚动锚点。重建前从 DOM 捕获、重建后按稳定 key 还原,key 失效时回退为像素 clamp。
+// 身份 key:消息/回合元素上的 data-ceo-key;未打 key 的元素用"从底部计数"的位置兜底。
+// 阶段 step 用 data-trace-key,但 stage_index 兜底会在不同回合间撞车,所以按回合身份分域。
+
+function ceoFeedElementDataKey(el = null) {
+    return (el && el.dataset && typeof el.dataset.ceoKey === "string") ? String(el.dataset.ceoKey || "") : "";
+}
+
+function ceoFeedTurnIdentity(turnEl = null, endIndex = 0) {
+    const dataKey = ceoFeedElementDataKey(turnEl);
+    return dataKey ? `k:${dataKey}` : `e:${endIndex}`;
+}
+
+function ceoFeedNearScrollTop(feed, scrollTop) {
+    // 找出当前滚动位置所锚定的第一个子元素:内容顶+高度压过 scrollTop 即命中。
+    const children = Array.from((feed && feed.children) || []);
+    if (!children.length || typeof feed.getBoundingClientRect !== "function") return null;
+    const feedRect = feed.getBoundingClientRect();
+    for (let index = 0; index < children.length; index += 1) {
+        const child = children[index];
+        if (!child || typeof child.getBoundingClientRect !== "function") continue;
+        const rect = child.getBoundingClientRect();
+        const contentTop = rect.top - feedRect.top + (feed.scrollTop || 0);
+        const height = Math.max(1, Number(rect.height || 1));
+        if (contentTop + height > scrollTop) {
+            const dataKey = ceoFeedElementDataKey(child);
+            return dataKey
+                ? { key: dataKey, offsetInElement: Math.max(0, scrollTop - contentTop) }
+                : { endIndex: children.length - 1 - index, offsetInElement: Math.max(0, scrollTop - contentTop) };
+        }
+    }
+    return null;
+}
+
+function captureCeoFeedViewState(sessionId = "") {
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    // 跨会话保护:feed 当前渲染的会话与 target 不一致时(切换会话的瞬间)不捕获,避免把
+    // 上一个会话的展开态/锚点套到新会话上。
+    if (String(S.ceoFeedRenderSessionId || "") !== key) return null;
+    if (!U || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return null;
+    const feed = U.ceoFeed;
+    const state = {
+        sessionId: key,
+        atBottom: ceoFeedNearBottom(),
+        prevTop: Math.max(0, Number(feed.scrollTop || 0)),
+        turnFlows: {},
+        steps: {},
+        roundTools: {},
+        anchor: null,
+    };
+    state.anchor = ceoFeedNearScrollTop(feed, state.prevTop);
+    const turns = Array.from(feed.querySelectorAll(".ceo-turn-message") || []);
+    turns.forEach((turnEl, index) => {
+        if (!turnEl) return;
+        const identity = ceoFeedTurnIdentity(turnEl, turns.length - 1 - index);
+        const flowEl = turnEl.querySelector(".interaction-flow");
+        const toggleEl = turnEl.querySelector(".interaction-flow-toggle");
+        state.turnFlows[identity] = {
+            flowOpen: !!(flowEl && flowEl.open),
+            historyExpanded: !!(toggleEl && typeof toggleEl.getAttribute === "function" && toggleEl.getAttribute("aria-expanded") === "true"),
+        };
+        Array.from(turnEl.querySelectorAll(".task-trace-step") || []).forEach((stepEl) => {
+            if (!stepEl?.dataset || typeof stepEl.dataset.traceKey !== "string") return;
+            const traceKey = String(stepEl.dataset.traceKey || "").trim();
+            if (traceKey) state.steps[`${identity}::${traceKey}`] = !!stepEl.open;
+        });
+        // activeToolKey 按回合内 DOM 顺序分域,规避 roundKey 为空时跨轮次 tool key 撞车。
+        Array.from(turnEl.querySelectorAll(".task-trace-round-tools") || []).forEach((host, hostIndex) => {
+            if (!(host instanceof HTMLElement)) {
+                const attr = host && typeof host.getAttribute === "function" ? host.getAttribute("data-active-tool-key") : "";
+                const active = String(attr || "").trim();
+                if (active) state.roundTools[`${identity}::${hostIndex}`] = active;
+                return;
+            }
+            const active = String(host.dataset?.activeToolKey || host.getAttribute?.("data-active-tool-key") || "").trim();
+            if (active) state.roundTools[`${identity}::${hostIndex}`] = active;
+        });
+    });
+    return state;
+}
+
+function applyCeoFeedViewState(viewState = null) {
+    if (!viewState || typeof viewState !== "object") return;
+    if (!U || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return;
+    if (String(viewState.sessionId || "").trim() !== String(activeSessionId() || "").trim()) return;
+    const feed = U.ceoFeed;
+    const turns = Array.from(feed.querySelectorAll(".ceo-turn-message") || []);
+    turns.forEach((turnEl, index) => {
+        if (!turnEl) return;
+        const identity = ceoFeedTurnIdentity(turnEl, turns.length - 1 - index);
+        const flowState = viewState.turnFlows && viewState.turnFlows[identity];
+        if (flowState) {
+            const flowEl = turnEl.querySelector(".interaction-flow");
+            if (flowEl && typeof flowState.flowOpen === "boolean") flowEl.open = flowState.flowOpen;
+            if (flowState.historyExpanded) {
+                const footerEl = turnEl.querySelector(".interaction-flow-footer");
+                if (footerEl && "hidden" in footerEl) footerEl.hidden = false;
+                const toggleEl = turnEl.querySelector(".interaction-flow-toggle");
+                if (toggleEl) {
+                    if ("textContent" in toggleEl) toggleEl.textContent = "收起旧进度";
+                    if (typeof toggleEl.setAttribute === "function") toggleEl.setAttribute("aria-expanded", "true");
+                }
+                Array.from(turnEl.querySelectorAll(".interaction-step") || []).forEach((item) => {
+                    if (item && "hidden" in item) item.hidden = false;
+                    if (item?.classList && typeof item.classList.remove === "function") item.classList.remove("is-collapsed-history");
+                });
+            }
+        }
+        Array.from(turnEl.querySelectorAll(".task-trace-step") || []).forEach((stepEl) => {
+            if (!stepEl?.dataset || typeof stepEl.dataset.traceKey !== "string") return;
+            const traceKey = String(stepEl.dataset.traceKey || "").trim();
+            const captured = traceKey && viewState.steps ? viewState.steps[`${identity}::${traceKey}`] : undefined;
+            if (typeof captured === "boolean") stepEl.open = captured;
+        });
+        Array.from(turnEl.querySelectorAll(".task-trace-round-tools") || []).forEach((host, hostIndex) => {
+            if (!(host instanceof HTMLElement)) return;
+            const toolKey = viewState.roundTools ? viewState.roundTools[`${identity}::${hostIndex}`] : "";
+            if (toolKey && typeof setTraceRoundActiveTool === "function") setTraceRoundActiveTool(host, toolKey);
+        });
+    });
+    // 直接赋 open 属性不触发 toggle 事件,补一次懒加载副作用,与任务详情视图还原行为一致。
+    Array.from(feed.querySelectorAll(".task-trace-step") || []).forEach((stepEl) => {
+        if (stepEl?.open && typeof hydrateTraceOutputBlocks === "function") hydrateTraceOutputBlocks(stepEl);
+    });
+    restoreCeoFeedScroll(viewState);
+}
+
+function ceoFeedAnchoredScrollTop(feed, anchor = null) {
+    if (!anchor || !feed || typeof feed.getBoundingClientRect !== "function") return null;
+    const children = Array.from(feed.children || []);
+    let el = null;
+    if (anchor.key) el = children.find((child) => ceoFeedElementDataKey(child) === anchor.key) || null;
+    if (!el && Number.isInteger(anchor.endIndex)) {
+        el = children[children.length - 1 - anchor.endIndex] || null;
+    }
+    if (!el || typeof el.getBoundingClientRect !== "function") return null;
+    const elRect = el.getBoundingClientRect();
+    const feedRect = feed.getBoundingClientRect();
+    // 元素内容顶坐标 = rect.top - feedRect.top + scrollTop;还原时按当前 rect 重新计算,
+    // 上方内容高度变化不会把锚点漂走。
+    return Math.max(0, elRect.top - feedRect.top + (feed.scrollTop || 0) + (anchor.offsetInElement || 0));
+}
+
+function restoreCeoFeedScroll(viewState = null) {
+    if (!viewState || !U || !U.ceoFeed) return;
+    if (viewState.atBottom) {
+        scrollCeoFeedToBottom();
+        return;
+    }
+    const applyAnchored = () => {
+        if (!U || !U.ceoFeed) return;
+        const feed = U.ceoFeed;
+        const maxTop = Math.max(0, (feed.scrollHeight || 0) - (feed.clientHeight || 0));
+        const anchored = ceoFeedAnchoredScrollTop(feed, viewState.anchor);
+        const nextTop = Number.isFinite(anchored) ? anchored : Number(viewState.prevTop || 0);
+        feed.scrollTop = Math.max(0, Math.min(nextTop, maxTop));
+        updateCeoScrollToLatestButton();
+    };
+    applyAnchored();
+    // 异步资源(图片/输出块)稍后撑开高度会改变几何,双重 rAF 再校正两次,与任务详情视图一致。
+    const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => fn();
+    raf(() => {
+        applyAnchored();
+        raf(applyAnchored);
+    });
+}
+
 function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "", preservedTurn = null } = {}) {
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
@@ -4773,7 +4954,25 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
         && ceoAssistantTurnAlreadyPersisted(preservedTurn?.turn_id || "", { messages, sessionId: targetSessionId })
     ) ? null : preservedTurn;
     const normalizedInflightTurn = dedupeInflightUserMessageAgainstMessages(messages, inflightTurn);
+    // 重建前捕获用户视觉状态(展开项/锚点);跨会话时内部自动跳过。
+    const viewState = captureCeoFeedViewState(targetSessionId);
     hideCeoContextLoadNotice();
+    const messageKeyCounters = {};
+    const tagLastFeedChildKey = (item = null, role = "") => {
+        if (!U || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return;
+        const children = Array.from(U.ceoFeed.children || []);
+        const child = U.ceoFeed.lastElementChild || children[children.length - 1] || null;
+        if (!child || typeof child.setAttribute !== "function") return;
+        const base = String(item && item.turn_id ? item.turn_id : "-").trim() || "-";
+        const counterKey = `${base}:${role}`;
+        const occ = Number(messageKeyCounters[counterKey] || 0);
+        messageKeyCounters[counterKey] = occ + 1;
+        // key 在 (turn_id, role) 内按出现次序消歧,同批 user 消息/重复 turn_id 不会互相覆盖。
+        child.setAttribute("data-ceo-key", `m:${base}:${role}:${occ}`);
+        if (child.dataset && typeof child.dataset.ceoKey !== "string") {
+            try { child.dataset.ceoKey = `m:${base}:${role}:${occ}`; } catch (error) { void error; }
+        }
+    };
     withCeoFeedBatch(() => {
         resetCeoFeed();
         messages.forEach((item) => {
@@ -4787,14 +4986,17 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
                     scrollMode: "preserve",
                     sessionId: targetSessionId,
                 });
+                tagLastFeedChildKey(item, "user");
                 return;
             }
             if (role === "assistant") {
                 renderPersistedCeoAssistantTurn(item);
+                tagLastFeedChildKey(item, "assistant");
                 return;
             }
             if (role === "system" && content.trim()) {
                 addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+                tagLastFeedChildKey(item, "system");
             }
         });
         restoreCeoInflightTurn(
@@ -4820,9 +5022,12 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
                 preserved_turn: normalizedPreservedTurn,
             });
         }
+        S.ceoFeedRenderSessionId = targetSessionId;
     }, {
         scrollMode: shouldScrollToLatest ? "bottom" : "preserve",
     });
+    // 批次内的像素 clamp 之后再按捕获状态精校(锚定滚动/展开项)。
+    applyCeoFeedViewState(viewState);
 }
 
 function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
@@ -7859,6 +8064,7 @@ function resetCeoComposerForSessionChange(previousSessionId, nextSessionId) {
 
 function resetCeoSessionState({ scrollToLatest = false } = {}) {
     resetCeoFeed();
+    S.ceoFeedRenderSessionId = "";
     S.ceoPendingTurns = [];
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
