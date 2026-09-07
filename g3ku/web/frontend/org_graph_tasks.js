@@ -1403,7 +1403,7 @@ function renderTaskTokenStats() {
             const configEntry = String(item.model_key || "").trim()
                 ? (Array.isArray(S.modelCatalog?.catalog) ? S.modelCatalog.catalog : []).find((entry) => String(entry.key || "").trim() === String(item.model_key || "").trim())
                 : null;
-            const configTitle = trim(configEntry?.name || "") || item.model_key || "未命名配置";
+            const configTitle = String(configEntry?.name || "").trim() || item.model_key || "未命名配置";
             return `
                 <div class="task-token-model-item">
                     <div class="task-token-model-head">

@@ -1450,21 +1450,25 @@ function scheduleSyncCeoComposerUsageOutline() {
 }
 
 function syncCeoActiveConfigLabel() {
-    const label = document.getElementById("ceo-active-config-name");
-    if (!label) return;
-    const primaryKey = String((S.modelCatalog?.defaults || {}).ceo || "").trim();
-    const catalog = Array.isArray(S.modelCatalog?.catalog) ? S.modelCatalog.catalog : [];
-    const item = primaryKey ? catalog.find((entry) => String(entry.key || "").trim() === primaryKey) : null;
-    if (!primaryKey || !item) {
-        label.hidden = true;
-        label.textContent = "";
-        label.removeAttribute?.("title");
-        return;
+    try {
+        const label = document.getElementById("ceo-active-config-name");
+        if (!label) return;
+        const primaryKey = String((S.modelCatalog?.defaults || {}).ceo || "").trim();
+        const catalog = Array.isArray(S.modelCatalog?.catalog) ? S.modelCatalog.catalog : [];
+        const item = primaryKey ? catalog.find((entry) => String(entry.key || "").trim() === primaryKey) : null;
+        if (!primaryKey || !item) {
+            label.hidden = true;
+            label.textContent = "";
+            label.removeAttribute?.("title");
+            return;
+        }
+        const labelText = String(item.name || primaryKey || "").trim() || primaryKey;
+        label.textContent = labelText;
+        label.setAttribute("title", item.name ? `${item.name} · ${primaryKey}` : primaryKey);
+        label.hidden = false;
+    } catch (_error) {
+        // 展示性标签，任何异常都不应影响会话主流程
     }
-    const labelText = trim(item.name || primaryKey);
-    label.textContent = labelText;
-    label.setAttribute("title", item.name ? `${item.name} · ${primaryKey}` : primaryKey);
-    label.hidden = false;
 }
 
 function syncCeoComposerUsageOutline() {

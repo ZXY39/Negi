@@ -1832,14 +1832,16 @@
     const binding = currentBinding();
     const display = document.getElementById("llm-edit-name-display");
     if (!binding || !display) return;
+    const currentDisplay = String(bindingTitle(binding) || state.editor.bindingKey || "").trim();
     const input = document.createElement("input");
     input.id = "llm-edit-name-input";
     input.className = "resource-search llm-edit-name-input";
     input.type = "text";
     input.maxLength = 40;
     input.autocomplete = "off";
-    input.value = trim(binding.name || "");
-    input.placeholder = String(bindingTitle(binding) || state.editor.bindingKey || "");
+    input.value = currentDisplay;
+    input.dataset.originalValue = currentDisplay;
+    input.placeholder = currentDisplay;
     display.replaceWith(input);
     input.focus();
     input.select();
@@ -1867,7 +1869,8 @@
     if (!binding) { cancelModelNameEdit(); return; }
     if (!input) return;
     const value = trim(input.value || "");
-    if (value === trim(binding.name || "")) { cancelModelNameEdit(); return; }
+    const originalDisplay = String(input.dataset.originalValue || "").trim();
+    if (value === originalDisplay) { cancelModelNameEdit(); return; }
     const duplicated = state.bindings.find((item) =>
       String(item.key || "").trim() !== String(binding.key || "").trim()
       && trim(item.name || "")
