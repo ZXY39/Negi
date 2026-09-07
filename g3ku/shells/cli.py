@@ -72,12 +72,6 @@ def run_agent_shell(
         kind, text = cli_event_text(event)
         if not text:
             return
-        ch = agent_loop.channels_config
-        is_tool_hint = kind == "tool_plan"
-        if ch and is_tool_hint and not ch.send_tool_hints:
-            return
-        if ch and not is_tool_hint and kind not in {"control", "tool_error"} and not ch.send_progress:
-            return
         prefix = (
             "deep"
             if kind == "deep_progress"

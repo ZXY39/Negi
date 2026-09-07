@@ -41,7 +41,6 @@ class AgentRuntimeEngine:
         app_config: Any | None = None,
         cron_service=None,
         session_manager=None,
-        channels_config=None,
         memory_manager_cls=None,
         session_manager_cls=None,
         chat_model_factory=None,
@@ -62,7 +61,6 @@ class AgentRuntimeEngine:
         self.multi_agent_config = multi_agent_config
         self.app_config = app_config
         self.cron_service = cron_service
-        self.channels_config = channels_config
         self.debug_mode = bool(debug_mode)
         self.debug_trace = bool(debug_mode)
         raw_prompt_trace = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()

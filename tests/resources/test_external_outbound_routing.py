@@ -30,7 +30,6 @@ def env(monkeypatch, tmp_path):
     reset_session_event_hubs()
     registry = ExternalSessionRegistry(tmp_path)
     monkeypatch.setattr(web_shell, "get_external_session_registry", lambda: registry)
-    monkeypatch.setattr(web_shell, "_global_china_transport", None)
     bus = MessageBus()
     monkeypatch.setattr(web_shell, "_global_bus", bus)
     yield registry, bus
@@ -77,8 +76,10 @@ async def test_heartbeat_ext_reply_ignores_empty_text(env):
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_china_keys_keep_china_path(env, monkeypatch):
-    """china: keys must still resolve through the China route, not the ext hub."""
+async def test_heartbeat_china_keys_are_skipped_after_subsystem_removal(env, monkeypatch):
+    """Legacy china: keys keep their transcripts but lost their delivery path
+    when the China channel subsystem was removed: the notifier must skip
+    silently instead of publishing outbound or touching the ext hub."""
     registry, bus = env
     published: list[OutboundMessage] = []
 
@@ -86,15 +87,9 @@ async def test_heartbeat_china_keys_keep_china_path(env, monkeypatch):
         published.append(msg)
 
     monkeypatch.setattr(bus, "publish_outbound", capture)
-    # A china group key with no runtime/meta context resolves via the
-    # parsed-key fallback (merged-DM keys carry no peer and stay unrouted —
-    # pre-existing behavior) and publishes onto the bus with the channel
-    # intact, never into the ext hub.
     await _notify_heartbeat_channel_reply("china:qqbot:default:group:9", "渠道回复")
-    assert len(published) == 1
-    assert published[0].channel == "qqbot"
-    assert published[0].chat_id == "default:group:9"
-    assert published[0].content == "渠道回复"
+    assert published == []
+    assert bus.outbound.empty()
 
 
 def test_derive_session_channel_chat_ext_branch():

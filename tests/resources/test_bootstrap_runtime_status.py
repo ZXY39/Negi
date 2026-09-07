@@ -253,7 +253,6 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
     monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _ensure_worker)
     monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
     monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
-    monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _noop)
 
     class _Agent:
         main_task_service = service
@@ -263,50 +262,6 @@ async def test_ensure_web_runtime_services_limits_worker_wait(monkeypatch):
     assert waits == [1.0]
     assert service._started is True
     assert heartbeat._started is True
-
-
-@pytest.mark.asyncio
-async def test_refresh_web_agent_runtime_restarts_china_bridge_when_config_changes(monkeypatch):
-    class _BridgeConfig:
-        def __init__(self, token: str) -> None:
-            self.enabled = True
-            self.auto_start = True
-            self.control_token = token
-
-        def model_dump(self, **_kwargs):
-            return {
-                'enabled': self.enabled,
-                'autoStart': self.auto_start,
-                'controlToken': self.control_token,
-            }
-
-    loop = SimpleNamespace(app_config=SimpleNamespace(china_bridge=_BridgeConfig('next')))
-    started_with: list[str] = []
-    stop_calls: list[str] = []
-
-    class _Supervisor:
-        def __init__(self) -> None:
-            self._app_config = SimpleNamespace(china_bridge=_BridgeConfig('current'))
-
-        async def stop(self) -> None:
-            stop_calls.append('stopped')
-
-    async def _start_china(_agent, config) -> None:
-        started_with.append(config.china_bridge.control_token)
-
-    monkeypatch.setattr(web_shell, 'get_agent', lambda: loop)
-    monkeypatch.setattr(web_shell, 'refresh_loop_runtime_config', lambda _loop, **_kwargs: True)
-    monkeypatch.setattr(web_shell, '_ensure_china_bridge_services', _noop)
-    monkeypatch.setattr(web_shell, '_global_china_supervisor', _Supervisor())
-    monkeypatch.setattr(web_shell, '_global_china_outbound_task', None)
-    monkeypatch.setattr(web_shell, '_global_china_start_task', None)
-    monkeypatch.setattr(web_shell, '_start_china_bridge_services_now', _start_china)
-
-    changed = await web_shell.refresh_web_agent_runtime(force=True, reason='test')
-
-    assert changed is True
-    assert stop_calls == ['stopped']
-    assert started_with == ['next']
 
 
 def test_bootstrap_exit_stops_runtime_before_requesting_server_shutdown(monkeypatch):
@@ -506,48 +461,21 @@ def test_bootstrap_bridge_uses_canonical_ceo_runner():
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_reply_notifier_publishes_china_channel_outbound(tmp_path):
+async def test_heartbeat_reply_notifier_skips_legacy_china_sessions(tmp_path):
+    """Legacy ``china:`` sessions keep their transcripts, but the channel
+    subsystem is gone: proactive replies must be skipped silently without
+    publishing outbound or raising."""
     bus = MessageBus()
     session_manager = SessionManager(tmp_path)
     session_id = "china:qqbot:default:dm"
-    session = session_manager.get_or_create(session_id)
-    session.add_message(
-        "user",
-        "hello",
-        metadata={
-            "_china_account_id": "default",
-            "_china_peer_kind": "user",
-            "_china_peer_id": "user-42",
-            "_china_event_id": "evt-42",
-            "message_id": "msg-42",
-        },
-    )
-    session_manager.save(session)
-
-    agent = SimpleNamespace(sessions=session_manager)
-    runtime_manager = SimpleNamespace(session_meta=lambda key: ("qqbot", "default:dm:user-42") if key == session_id else None)
+    session_manager.get_or_create(session_id)
 
     monkeypatch = pytest.MonkeyPatch()
     try:
         monkeypatch.setattr(web_shell, "_global_bus", bus)
-
-        await web_shell._notify_heartbeat_channel_reply(
-            session_id,
-            "async task finished",
-            agent=agent,
-            runtime_manager=runtime_manager,
-        )
-
-        outbound = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
+        await web_shell._notify_heartbeat_channel_reply(session_id, "reminder text")
+        await asyncio.sleep(0.05)
     finally:
         monkeypatch.undo()
 
-    assert outbound.channel == "qqbot"
-    assert outbound.chat_id == "default:dm:user-42"
-    assert outbound.content == "async task finished"
-    assert outbound.reply_to == "msg-42"
-    assert outbound.metadata["source"] == "heartbeat"
-    assert outbound.metadata["session_key"] == session_id
-    assert outbound.metadata["_china_account_id"] == "default"
-    assert outbound.metadata["_china_peer_kind"] == "user"
-    assert outbound.metadata["_china_peer_id"] == "user-42"
+    assert bus.outbound.empty()

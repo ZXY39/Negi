@@ -54,7 +54,6 @@ def make_agent_loop(
         resource_config=config.resources,
         cron_service=cron_service,
         session_manager=session_manager,
-        channels_config=config.china_bridge,
         debug_mode=debug_mode,
         middlewares=middlewares,
     )

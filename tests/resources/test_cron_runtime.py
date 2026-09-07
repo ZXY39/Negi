@@ -991,15 +991,11 @@ async def test_ensure_web_runtime_services_starts_cron_once_for_owner(monkeypatc
         await heartbeat.start()
         return heartbeat
 
-    async def _skip_china(_agent=None) -> None:
-        return None
-
     monkeypatch.setattr(web_shell, "_global_runtime_services_lock", None)
     monkeypatch.setattr(web_shell, "_global_web_heartbeat", None)
     monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _ensure_worker)
     monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
     monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
-    monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _skip_china)
     monkeypatch.setattr(web_shell, "_should_start_web_cron", lambda _agent=None: True)
 
     agent = SimpleNamespace(main_task_service=service, cron_service=cron_service)
@@ -1024,9 +1020,6 @@ async def test_ensure_web_runtime_services_skips_cron_when_not_owner(monkeypatch
         await heartbeat.start()
         return heartbeat
 
-    async def _skip_china(_agent=None) -> None:
-        return None
-
     async def _ensure_worker(_service, *, wait_timeout_s: float = 5.0):
         _ = _service, wait_timeout_s
         return False
@@ -1036,7 +1029,6 @@ async def test_ensure_web_runtime_services_skips_cron_when_not_owner(monkeypatch
     monkeypatch.setattr(web_shell, "ensure_managed_task_worker", _ensure_worker)
     monkeypatch.setattr(web_shell, "get_runtime_manager", lambda _agent=None: object())
     monkeypatch.setattr(web_shell, "start_web_session_heartbeat", _start_heartbeat)
-    monkeypatch.setattr(web_shell, "_ensure_china_bridge_services", _skip_china)
     monkeypatch.setattr(web_shell, "_should_start_web_cron", lambda _agent=None: False)
 
     agent = SimpleNamespace(main_task_service=service, cron_service=cron_service)
@@ -1072,10 +1064,7 @@ async def test_shutdown_web_runtime_stops_cron(monkeypatch) -> None:
     monkeypatch.setattr(web_shell, "_global_bus", object())
     monkeypatch.setattr(web_shell, "_global_runtime_manager", None)
     monkeypatch.setattr(web_shell, "_global_web_heartbeat", heartbeat)
-    monkeypatch.setattr(web_shell, "_global_china_transport", None)
-    monkeypatch.setattr(web_shell, "_global_china_supervisor", None)
-    monkeypatch.setattr(web_shell, "_global_china_outbound_task", None)
-    monkeypatch.setattr(web_shell, "_global_china_start_task", None)
+    monkeypatch.setattr(web_shell, "_global_outbound_drain_task", None)
 
     await web_shell.shutdown_web_runtime()
 
@@ -1110,7 +1099,6 @@ def test_get_agent_injects_web_cron_service(monkeypatch, tmp_path: Path) -> None
         workspace_path=tmp_path,
         web=SimpleNamespace(port=18790),
         resources=SimpleNamespace(),
-        china_bridge=SimpleNamespace(),
         agents=SimpleNamespace(
             defaults=SimpleNamespace(
                 temperature=0.1,

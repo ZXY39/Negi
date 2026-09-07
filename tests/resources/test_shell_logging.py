@@ -39,8 +39,6 @@ class _FakeRuntimeManager:
 
 
 class _FakeAgentLoop:
-    channels_config = None
-
     async def close_mcp(self) -> None:
         return None
 
