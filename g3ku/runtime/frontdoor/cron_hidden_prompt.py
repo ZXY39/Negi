@@ -1,6 +1,6 @@
 """Node 宿主 cron 隐藏契约的 Python 镜像与剥离工具。
 
-Node 宿主（subsystems/china_channels_host/src/shared/cron/index.ts）曾在入站
+Node 宿主（subsystems/china_channels_host，已随渠道子系统删除）曾在入站
 消息命中定时意图时，把 ``CRON_HIDDEN_PROMPT`` 整块追加到 ``CommandBody``，导致该
 契约被引擎当作**用户消息内容**持久化并显示在会话里（影响美观、污染上下文、且
 破坏 frontdoor「当前用户精确匹配」，造成答非所问）。

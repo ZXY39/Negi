@@ -67,17 +67,7 @@ def _mock_ceo_catalog_config(monkeypatch) -> None:
     monkeypatch.setattr(
         web_ceo_sessions,
         "load_config",
-        lambda: SimpleNamespace(
-            china_bridge=SimpleNamespace(
-                channels=SimpleNamespace(
-                    qqbot=SimpleNamespace(enabled=False, accounts={}),
-                    dingtalk=SimpleNamespace(enabled=False, accounts={}),
-                    wecom=SimpleNamespace(enabled=False, accounts={}),
-                    wecom_app=SimpleNamespace(enabled=False, accounts={}),
-                    feishu_china=SimpleNamespace(enabled=False, accounts={}),
-                )
-            )
-        ),
+        lambda: SimpleNamespace(),
     )
 
 
@@ -3456,30 +3446,6 @@ def _write_runtime_config(workspace: Path) -> None:
             'toolSecrets': {},
             'resources': {'enabled': True, 'skillsDir': 'skills', 'toolsDir': 'tools', 'manifestName': 'resource.yaml', 'reload': {'enabled': True, 'pollIntervalMs': 1000, 'debounceMs': 400, 'lazyReloadOnAccess': True, 'keepLastGoodVersion': True}, 'locks': {'lockDir': '.g3ku/resource-locks', 'logicalDeleteGuard': True, 'windowsFsLock': True}, 'statePath': '.g3ku/resources.state.json'},
             'mainRuntime': {'enabled': True, 'storePath': '.g3ku/main-runtime/runtime.sqlite3', 'filesBaseDir': '.g3ku/main-runtime/tasks', 'artifactDir': '.g3ku/main-runtime/artifacts', 'governanceStorePath': '.g3ku/main-runtime/governance.sqlite3', 'defaultMaxDepth': 1, 'hardMaxDepth': 4, 'nodeDispatchConcurrency': {'execution': 8, 'inspection': 4}},
-            'chinaBridge': {
-                'enabled': False,
-                'bindHost': '0.0.0.0',
-                'publicPort': 18889,
-                'controlHost': '127.0.0.1',
-                'controlPort': 18989,
-                'controlToken': '',
-                'autoStart': True,
-                'nodeBin': 'node',
-                'npmClient': 'pnpm',
-                'stateDir': '.g3ku/china-bridge',
-                'logLevel': 'info',
-                'sendProgress': True,
-                'sendToolHints': False,
-                'channels': {
-                    'qqbot': {'enabled': False, 'accounts': {}},
-                    'dingtalk': {'enabled': False, 'accounts': {}},
-                    'wecom': {'enabled': False, 'accounts': {}},
-                    'wecom-app': {'enabled': False, 'accounts': {}},
-                    'wecom-kf': {'enabled': False, 'accounts': {}},
-                    'wechat-mp': {'enabled': False, 'accounts': {}},
-                    'feishu-china': {'enabled': False, 'accounts': {}},
-                },
-            },
         }),
         encoding='utf-8',
     )

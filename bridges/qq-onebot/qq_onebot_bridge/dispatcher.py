@@ -1,10 +1,11 @@
 """Dispatch logic: OneBot 11 events -> g3ku turns, g3ku events -> QQ messages.
 
-Behavior parity with the legacy China transport QQ semantics
-(``g3ku/china_bridge/transport.py`` + docs/architecture/china-channels.md
-"QQ 渠道增强"), with the key responsibility transfer of the rebuild: g3ku
-emits full-volume progress events and this bridge owns throttling, message
-splitting, trigger rules, and control-command recognition.
+Behavior parity with the legacy China transport QQ semantics (the subsystem
+has since been removed; the live contracts are docs/architecture/
+external-agent-api.md plus this bridge's README), with the key
+responsibility transfer of the rebuild: g3ku emits full-volume progress
+events and this bridge owns throttling, message splitting, trigger rules,
+and control-command recognition.
 """
 
 from __future__ import annotations

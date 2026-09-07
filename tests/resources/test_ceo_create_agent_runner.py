@@ -2832,7 +2832,7 @@ def test_runtime_agent_session_keeps_completed_continuity_restore_without_trace_
     assert restored._frontdoor_completed_continuity_bridge_pending is False
 
 
-def _china_loop() -> SimpleNamespace:
+def _stub_loop() -> SimpleNamespace:
     return SimpleNamespace(model="demo", reasoning_effort=None, multi_agent_runner=None, sessions=SimpleNamespace())
 
 
@@ -2840,7 +2840,8 @@ def test_channel_session_completed_continuity_write_and_restore_roundtrip(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    # 渠道会话（china:*）的 completed-continuity 写盘/恢复回环：重启后基线不丢。
+    # 存量渠道会话（china:*，子系统已删除后的只读归档）的 completed-continuity
+    # 写盘/恢复回环：重启后基线不丢。
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     session_key = "china:qqbot:default:dm"
     baseline = [
@@ -2864,7 +2865,7 @@ def test_channel_session_completed_continuity_write_and_restore_roundtrip(
     }
 
     writer = RuntimeAgentSession(
-        _china_loop(),
+        _stub_loop(),
         session_key=session_key,
         channel="qqbot",
         chat_id="default:dm",
@@ -2879,7 +2880,7 @@ def test_channel_session_completed_continuity_write_and_restore_roundtrip(
     assert snapshot_path.exists()
 
     restored = RuntimeAgentSession(
-        _china_loop(),
+        _stub_loop(),
         session_key=session_key,
         channel="qqbot",
         chat_id="default:dm",
@@ -2902,11 +2903,11 @@ def test_cron_session_continuity_is_persisted_and_restored(
         {"role": "system", "content": "BASE SYSTEM PROMPT"},
         {"role": "user", "content": "cron run"},
     ]
-    writer = RuntimeAgentSession(_china_loop(), session_key=session_key, channel="cron", chat_id="job-123")
+    writer = RuntimeAgentSession(_stub_loop(), session_key=session_key, channel="cron", chat_id="job-123")
     writer._frontdoor_request_body_messages = list(baseline)
     writer._sync_completed_continuity_snapshot(source_reason="finalize")
 
-    restored = RuntimeAgentSession(_china_loop(), session_key=session_key, channel="cron", chat_id="job-123")
+    restored = RuntimeAgentSession(_stub_loop(), session_key=session_key, channel="cron", chat_id="job-123")
     assert restored._frontdoor_request_body_messages == baseline
     assert restored._frontdoor_restore_source == "completed_continuity"
 
@@ -2918,7 +2919,7 @@ def test_non_frontdoor_session_namespace_skips_continuity(
     # 非 frontdoor 命名空间（如 task:/memory:）不参与连续性生命周期。
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
     session_key = "task:some-task"
-    writer = RuntimeAgentSession(_china_loop(), session_key=session_key, channel="task", chat_id="some-task")
+    writer = RuntimeAgentSession(_stub_loop(), session_key=session_key, channel="task", chat_id="some-task")
     writer._frontdoor_request_body_messages = [
         {"role": "system", "content": "BASE SYSTEM PROMPT"},
         {"role": "user", "content": "task turn"},

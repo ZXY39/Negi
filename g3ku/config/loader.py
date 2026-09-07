@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from g3ku.china_bridge.registry import china_channel_attr, china_channel_ids, china_channel_spec
 from g3ku.config.schema import Config, DEFAULT_ROLE_MAX_CONCURRENCY, DEFAULT_ROLE_MAX_ITERATIONS
 from g3ku.llm_config.migration import migrate_raw_config_if_needed
 from g3ku.security.bootstrap import (
@@ -213,11 +212,25 @@ def _ensure_no_removed_channel_config(raw_data: dict[str, Any]) -> None:
     legacy_keys = sorted(str(key) for key in channels.keys())
     raise ValueError(
         "Legacy channels config has been removed. "
-        "Move China platform settings under chinaBridge.channels using canonical ids "
-        "{qqbot,dingtalk,wecom,wecom-app,wecom-kf,wechat-mp,feishu-china}, "
-        "move sendProgress/sendToolHints to chinaBridge.sendProgress/chinaBridge.sendToolHints, "
-        f"and remove channels.* from {get_config_path()}. Found: {', '.join(legacy_keys)}"
+        "Built-in IM channels were replaced by the External Agent API "
+        "(docs/architecture/external-agent-api.md) with standalone bridge processes; "
+        f"remove channels.* from {get_config_path()}. Found: {', '.join(legacy_keys)}"
     )
+
+
+def _migrate_removed_china_bridge_config(raw_data: dict[str, Any]) -> bool:
+    """Strip the retired ``chinaBridge`` section from legacy configs.
+
+    The China channel subsystem was removed; the root config schema forbids
+    extra fields, so the section must be pruned before validation. Returning
+    ``True`` lets ``load_config`` re-save the pruned config once.
+    """
+    changed = False
+    for key in ("chinaBridge", "china_bridge"):
+        if key in raw_data:
+            raw_data.pop(key)
+            changed = True
+    return changed
 
 
 def _migrate_legacy_gateway_config(raw_data: dict[str, Any]) -> bool:
@@ -434,10 +447,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         provider_name: _provider_payload(cfg, provider_name)
         for provider_name in _referenced_provider_names(cfg)
     }
-    channel_payloads = {
-        channel_id: getattr(cfg.china_bridge.channels, china_channel_attr(channel_id)).model_dump(by_alias=True, exclude_none=True)
-        for channel_id in china_channel_ids()
-    }
 
     return {
         "agents": {
@@ -510,22 +519,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "inspection": cfg.get_node_dispatch_concurrency("inspection"),
             },
         },
-        "chinaBridge": {
-            "enabled": cfg.china_bridge.enabled,
-            "bindHost": cfg.china_bridge.bind_host,
-            "publicPort": cfg.china_bridge.public_port,
-            "controlHost": cfg.china_bridge.control_host,
-            "controlPort": cfg.china_bridge.control_port,
-            "controlToken": cfg.china_bridge.control_token,
-            "autoStart": cfg.china_bridge.auto_start,
-            "nodeBin": cfg.china_bridge.node_bin,
-            "npmClient": cfg.china_bridge.npm_client,
-            "stateDir": cfg.china_bridge.state_dir,
-            "logLevel": cfg.china_bridge.log_level,
-            "sendProgress": cfg.china_bridge.send_progress,
-            "sendToolHints": cfg.china_bridge.send_tool_hints,
-            "channels": channel_payloads,
-        },
         "externalApi": {
             "enabled": cfg.external_api.enabled,
             "eventBufferSize": cfg.external_api.event_buffer_size,
@@ -541,12 +534,6 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     }
 
 
-def build_runtime_config_payload(cfg: Config) -> dict[str, object]:
-    """Build the full runtime config payload, including resolved secret overlays."""
-
-    return deepcopy(_runtime_config_payload(cfg))
-
-
 def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> None:
     middlewares = ((raw_data.get("agents") or {}).get("defaults") or {}).get("middlewares")
     if middlewares is not None:
@@ -559,7 +546,6 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
     exempt_prefixes = {
         ("providers",),
         ("mainRuntime",),
-        ("chinaBridge",),
         ("externalApi",),
     }
     missing = [
@@ -707,6 +693,7 @@ def load_config(config_path: Path | None = None) -> Config:
     _ensure_no_removed_tools_config(raw_data)
     _ensure_no_removed_channel_config(raw_data)
     _ensure_no_removed_gateway_config(raw_data)
+    changed = _migrate_removed_china_bridge_config(raw_data) or changed
     migrated_llm, llm_changed = migrate_raw_config_if_needed(deepcopy(raw_data), workspace=Path.cwd())
     if llm_changed:
         raw_data = migrated_llm
@@ -783,28 +770,9 @@ def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
         data["main_runtime"] = main_runtime
     data.pop("mainRuntime", None)
 
-    china_bridge = data.get("chinaBridge")
-    if isinstance(china_bridge, dict) and "china_bridge" not in data:
-        data["china_bridge"] = china_bridge
-    elif "china_bridge" not in data:
-        data["china_bridge"] = {}
+    # The China channel subsystem has been removed; drop any leftover section.
+    # This also neutralizes orphan overlay entries that re-inject the section
+    # during apply (they are pruned permanently on the next unlocked save).
     data.pop("chinaBridge", None)
-
-    if isinstance(data.get("china_bridge"), dict):
-        bridge = data["china_bridge"]
-        channels = bridge.get("channels")
-        if isinstance(channels, dict):
-            legacy_pairs = (
-                ("wecomApp", "wecom-app"),
-                ("wecom_app", "wecom-app"),
-                ("wecomKf", "wecom-kf"),
-                ("wecom_kf", "wecom-kf"),
-                ("wechatMp", "wechat-mp"),
-                ("wechat_mp", "wechat-mp"),
-                ("feishuChina", "feishu-china"),
-                ("feishu_china", "feishu-china"),
-            )
-            for old_key, new_key in legacy_pairs:
-                if new_key not in channels and isinstance(channels.get(old_key), dict):
-                    channels[new_key] = channels[old_key]
+    data.pop("china_bridge", None)
     return data

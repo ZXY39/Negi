@@ -60,57 +60,7 @@ _CEO_CONFIG_CACHE: dict[str, Any] = {
     'token': None,
     'workspace_path': None,
     'depth_limits': None,
-    'enabled_channel_accounts': None,
 }
-
-
-def _channel_accounts_from_config(cfg: Any) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
-    channels_cfg = getattr(getattr(cfg, "china_bridge", None), "channels", None)
-    if channels_cfg is None:
-        return rows
-    for spec in CHINA_SESSION_CHANNEL_SPECS:
-        channel_cfg = getattr(channels_cfg, spec["attr"], None)
-        payload = _top_level_channel_payload(channel_cfg)
-        if not bool(payload.get("enabled")):
-            continue
-        accounts = payload.get("accounts") if isinstance(payload.get("accounts"), dict) else {}
-        seen_accounts: set[str] = set()
-        if _has_base_channel_account(channel_cfg):
-            rows.append(
-                {
-                    "channel_id": spec["channel_id"],
-                    "label": spec["label"],
-                    "account_id": "default",
-                }
-            )
-            seen_accounts.add("default")
-        for account_id, account_payload in sorted(accounts.items()):
-            if not isinstance(account_payload, dict):
-                continue
-            normalized_account_id = str(account_id or "").strip() or "default"
-            if normalized_account_id in seen_accounts:
-                continue
-            if account_payload.get("enabled") is False:
-                continue
-            rows.append(
-                {
-                    "channel_id": spec["channel_id"],
-                    "label": spec["label"],
-                    "account_id": normalized_account_id,
-                }
-            )
-            seen_accounts.add(normalized_account_id)
-        if not rows or rows[-1]["channel_id"] != spec["channel_id"]:
-            if not accounts:
-                rows.append(
-                    {
-                        "channel_id": spec["channel_id"],
-                        "label": spec["label"],
-                        "account_id": "default",
-                    }
-                )
-    return rows
 
 
 def _ceo_config_snapshot() -> dict[str, Any]:
@@ -125,36 +75,30 @@ def _ceo_config_snapshot() -> dict[str, Any]:
             return {
                 'workspace_path': _CEO_CONFIG_CACHE.get('workspace_path'),
                 'depth_limits': dict(_CEO_CONFIG_CACHE.get('depth_limits') or {}),
-                'enabled_channel_accounts': list(_CEO_CONFIG_CACHE.get('enabled_channel_accounts') or []),
             }
     try:
         cfg = load_config()
         workspace = Path(getattr(cfg, 'workspace_path', Path.cwd())).resolve()
         default_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "default_max_depth", DEFAULT_TASK_MAX_DEPTH) or DEFAULT_TASK_MAX_DEPTH)
         hard_max_depth = int(getattr(getattr(cfg, "main_runtime", None), "hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH)
-        enabled_channel_accounts = _channel_accounts_from_config(cfg)
     except Exception:
         workspace = Path.cwd().resolve()
         default_max_depth = DEFAULT_TASK_MAX_DEPTH
         hard_max_depth = DEFAULT_TASK_HARD_MAX_DEPTH
-        enabled_channel_accounts = []
     snapshot = {
         'workspace_path': workspace,
         'depth_limits': {
             'default_max_depth': max(0, default_max_depth),
             'hard_max_depth': max(max(0, default_max_depth), hard_max_depth),
         },
-        'enabled_channel_accounts': enabled_channel_accounts,
     }
     with _CEO_CONFIG_CACHE_LOCK:
         _CEO_CONFIG_CACHE['token'] = token
         _CEO_CONFIG_CACHE['workspace_path'] = snapshot['workspace_path']
         _CEO_CONFIG_CACHE['depth_limits'] = dict(snapshot['depth_limits'])
-        _CEO_CONFIG_CACHE['enabled_channel_accounts'] = list(snapshot['enabled_channel_accounts'])
     return {
         'workspace_path': snapshot['workspace_path'],
         'depth_limits': dict(snapshot['depth_limits']),
-        'enabled_channel_accounts': list(snapshot['enabled_channel_accounts']),
     }
 
 
@@ -1661,27 +1605,6 @@ def _canonical_china_session_id(parsed) -> str:
     )
 
 
-def _top_level_channel_payload(channel_cfg: Any) -> dict[str, Any]:
-    if channel_cfg is None:
-        return {}
-    if hasattr(channel_cfg, "model_dump"):
-        data = channel_cfg.model_dump(by_alias=True, exclude_none=True)
-        return data if isinstance(data, dict) else {}
-    if isinstance(channel_cfg, dict):
-        return dict(channel_cfg)
-    return {}
-
-
-def _has_base_channel_account(channel_cfg: Any) -> bool:
-    payload = _top_level_channel_payload(channel_cfg)
-    ignore = {"enabled", "name", "defaultAccount", "default_account", "accounts"}
-    return any(key not in ignore and _non_empty(value) for key, value in payload.items())
-
-
-def _iter_enabled_channel_accounts() -> list[dict[str, str]]:
-    return list(_ceo_config_snapshot().get('enabled_channel_accounts') or [])
-
-
 def _channel_session_summary_from_entry(
     *,
     session_id: str,
@@ -1774,24 +1697,9 @@ def list_channel_ceo_sessions(
 ) -> list[dict[str, Any]]:
     summaries: dict[str, dict[str, Any]] = {}
 
-    for account in _iter_enabled_channel_accounts():
-        session_id = f"china:{account['channel_id']}:{account['account_id']}:dm"
-        parsed = parse_china_session_key(session_id)
-        if parsed is None:
-            continue
-        summaries[session_id] = _channel_session_summary_from_entry(
-            session_id=session_id,
-            parsed=parsed,
-            is_active=session_id == active_session_id,
-            is_running=bool(callable(is_running_resolver) and is_running_resolver(session_id)),
-            preview_text="等待该渠道的私聊消息",
-            message_count=0,
-            created_at="",
-            updated_at="",
-            last_llm_output_at="",
-            is_virtual=True,
-        )
-
+    # The China channel subsystem has been removed; only pre-existing
+    # ``china:*`` transcripts are listed (read-only archive), there are no
+    # config-driven virtual placeholders anymore.
     for item in session_manager.list_sessions():
         key = str(item.get("key") or "").strip()
         if not key.startswith("china:"):
@@ -2040,13 +1948,6 @@ def _channel_session_exists(session_manager: Any, session_id: str) -> bool:
         parsed = None
     if parsed is None:
         return False
-    if parsed.chat_type == 'dm':
-        for account in _iter_enabled_channel_accounts():
-            if (
-                str(account.get('channel_id') or '').strip() == str(parsed.channel or '').strip()
-                and str(account.get('account_id') or '').strip() == str(parsed.account_id or '').strip()
-            ):
-                return True
     for item in session_manager.list_sessions():
         key = str(item.get("key") or "").strip()
         if not key.startswith("china:"):

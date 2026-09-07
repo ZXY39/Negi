@@ -73,86 +73,6 @@ class Base(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class ChinaCompatConfig(Base):
-    """Compat config for extracted china channels; allow upstream fields to pass through."""
-
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, extra="allow")
-
-    enabled: bool = False
-    name: str | None = None
-    default_account: str | None = None
-    accounts: dict[str, dict[str, Any]] = Field(default_factory=dict)
-
-
-class QQBotCompatConfig(ChinaCompatConfig):
-    app_id: str | int | None = None
-    client_secret: str | None = None
-    token: str | None = None
-    webhook_path: str | None = None
-    mode: str | None = None
-
-
-class WecomCompatConfig(ChinaCompatConfig):
-    bot_id: str | None = None
-    secret: str | None = None
-    token: str | None = None
-    encoding_aes_key: str | None = None
-    receive_id: str | None = None
-    webhook_path: str | None = None
-    mode: str | None = None
-
-
-class WecomAppCompatConfig(ChinaCompatConfig):
-    corp_id: str | None = None
-    corp_secret: str | None = None
-    agent_id: int | None = None
-    token: str | None = None
-    encoding_aes_key: str | None = None
-    webhook_path: str | None = None
-    mode: str | None = None
-
-
-class FeishuChinaCompatConfig(ChinaCompatConfig):
-    app_id: str | None = None
-    app_secret: str | None = None
-    token: str | None = None
-    webhook_path: str | None = None
-    mode: str | None = None
-
-
-class WecomKfCompatConfig(ChinaCompatConfig):
-    corp_id: str | None = None
-    corp_secret: str | None = None
-    token: str | None = None
-    encoding_aes_key: str | None = None
-    open_kf_id: str | None = None
-    webhook_path: str | None = None
-    mode: str | None = None
-
-
-class WechatMpCompatConfig(ChinaCompatConfig):
-    app_id: str | None = None
-    app_secret: str | None = None
-    token: str | None = None
-    encoding_aes_key: str | None = None
-    webhook_path: str | None = None
-    mode: str | None = None
-
-
-class ChinaBridgeChannelsConfig(Base):
-    """China channel configs hosted by the internal Node communication subsystem."""
-
-    qqbot: QQBotCompatConfig = Field(default_factory=QQBotCompatConfig)
-    dingtalk: ChinaCompatConfig = Field(default_factory=ChinaCompatConfig)
-    wecom: WecomCompatConfig = Field(default_factory=WecomCompatConfig)
-    wecom_app: WecomAppCompatConfig = Field(default_factory=WecomAppCompatConfig, alias="wecom-app")
-    wecom_kf: WecomKfCompatConfig = Field(default_factory=WecomKfCompatConfig, alias="wecom-kf")
-    wechat_mp: WechatMpCompatConfig = Field(default_factory=WechatMpCompatConfig, alias="wechat-mp")
-    feishu_china: FeishuChinaCompatConfig = Field(default_factory=FeishuChinaCompatConfig, alias="feishu-china")
-
-
-
-
 class AgentMiddlewareConfig(Base):
     """Config entry for runtime middleware hooks."""
 
@@ -840,22 +760,6 @@ class ExternalApiConfig(Base):
         return normalized
 
 
-class ChinaBridgeConfig(Base):
-    enabled: bool = True
-    bind_host: str = "0.0.0.0"
-    public_port: int = 18889
-    control_host: str = "127.0.0.1"
-    control_port: int = 18989
-    control_token: str = ""
-    auto_start: bool = True
-    node_bin: str = "node"
-    npm_client: str = "pnpm"
-    state_dir: str = ".g3ku/china-bridge"
-    log_level: str = "info"
-    send_progress: bool = True
-    send_tool_hints: bool = False
-    channels: ChinaBridgeChannelsConfig = Field(default_factory=ChinaBridgeChannelsConfig)
-
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -866,7 +770,6 @@ class Config(BaseSettings):
     tool_secrets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     resources: ResourceRuntimeConfig = Field(default_factory=ResourceRuntimeConfig)
     main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)
-    china_bridge: ChinaBridgeConfig = Field(default_factory=ChinaBridgeConfig)
     external_api: ExternalApiConfig = Field(default_factory=ExternalApiConfig)
 
     @model_validator(mode="after")

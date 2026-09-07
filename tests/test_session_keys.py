@@ -1,3 +1,11 @@
+"""Tests for the canonical session-key module (g3ku/runtime/session_keys.py).
+
+Migrated from the removed ``g3ku/china_bridge`` shim tests when the China
+channel subsystem was deleted. The ``china:`` key namespace stays canonical:
+pre-existing channel transcripts remain readable archives, and external
+bridges use the derived ``ext:`` namespace.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,11 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from g3ku.china_bridge.session_keys import (
+from g3ku.runtime.session_keys import (
     build_memory_chat_id,
     build_runtime_chat_id,
     build_session_key,
     parse_china_session_key,
+    sanitize_channel_outbound_text,
 )
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.runtime.web_ceo_sessions import build_ceo_session_catalog
@@ -108,21 +117,31 @@ def test_parse_china_session_key_supports_new_and_legacy_dm_shapes() -> None:
     assert group.merged_dm is False
 
 
-def test_build_ceo_session_catalog_includes_local_and_channel_groups(monkeypatch, tmp_path: Path) -> None:
+def test_sanitize_channel_outbound_text_truncates_session_events_marker():
+    text = "Visible reply.\n[SESSION EVENTS]\n## EVENT BUNDLE\ninternal stuff"
+    assert sanitize_channel_outbound_text(text) == "Visible reply."
+
+
+def test_sanitize_channel_outbound_text_internal_only_returns_empty():
+    assert sanitize_channel_outbound_text("[SESSION EVENTS]\ninternal") == ""
+
+
+def test_sanitize_channel_outbound_text_removes_runtime_tool_contract_echo():
+    contract = (
+        "## Runtime Tool Contract\n"
+        "kind: frontdoor_runtime_tool_contract\n"
+        "callable_tools: `exec`"
+    )
+    assert sanitize_channel_outbound_text(contract) == ""
+    assert sanitize_channel_outbound_text("Visible answer\n\n" + contract) == "Visible answer"
+
+
+def test_build_ceo_session_catalog_lists_legacy_channel_sessions_readonly(monkeypatch, tmp_path: Path) -> None:
+    """After the subsystem removal the catalog groups pre-existing china:*
+    transcripts purely from session storage (no config-driven placeholders)."""
     monkeypatch.setattr(
         "g3ku.runtime.web_ceo_sessions.load_config",
-        lambda: SimpleNamespace(
-            workspace_path=str(tmp_path),
-            china_bridge=SimpleNamespace(
-                channels=SimpleNamespace(
-                    qqbot={"enabled": True, "accounts": {}, "appId": "qq-app", "clientSecret": "qq-secret"},
-                    dingtalk={"enabled": False, "accounts": {}},
-                    wecom={"enabled": False, "accounts": {}},
-                    wecom_app={"enabled": False, "accounts": {}},
-                    feishu_china={"enabled": False, "accounts": {}},
-                )
-            ),
-        ),
+        lambda: SimpleNamespace(workspace_path=str(tmp_path)),
     )
 
     class _Session:
@@ -156,6 +175,9 @@ def test_build_ceo_session_catalog_includes_local_and_channel_groups(monkeypatch
     channel_items = catalog["channel_groups"][0]["items"]
     assert any(item["session_id"] == "china:qqbot:default:dm" for item in channel_items)
     assert any(item["session_id"] == "china:qqbot:default:group:group-1" for item in channel_items)
+    for item in channel_items:
+        assert item["is_readonly"] is True
+        assert item["can_delete"] is False
 
 
 def test_runtime_agent_session_serializes_prompt_and_keeps_live_targets(monkeypatch) -> None:

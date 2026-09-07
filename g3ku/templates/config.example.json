@@ -138,54 +138,6 @@
       "inspection": 4
     }
   },
-  "chinaBridge": {
-    "enabled": true,
-    "bindHost": "0.0.0.0",
-    "publicPort": 18889,
-    "controlHost": "127.0.0.1",
-    "controlPort": 18989,
-    "controlToken": "",
-    "autoStart": true,
-    "nodeBin": "node",
-    "npmClient": "pnpm",
-    "stateDir": ".g3ku/china-bridge",
-    "logLevel": "info",
-    "sendProgress": true,
-    "sendToolHints": true,
-    "channels": {
-      "qqbot": {
-        "enabled": false,
-        "accounts": {}
-      },
-      "dingtalk": {
-        "enabled": false,
-        "accounts": {},
-        "clientId": "",
-        "clientSecret": "",
-        "allowFrom": []
-      },
-      "wecom": {
-        "enabled": false,
-        "accounts": {}
-      },
-      "wecom-app": {
-        "enabled": false,
-        "accounts": {}
-      },
-      "wecom-kf": {
-        "enabled": false,
-        "accounts": {}
-      },
-      "wechat-mp": {
-        "enabled": false,
-        "accounts": {}
-      },
-      "feishu-china": {
-        "enabled": false,
-        "accounts": {}
-      }
-    }
-  },
   "externalApi": {
     "enabled": false,
     "eventBufferSize": 512,

@@ -2,12 +2,12 @@
 
 Each bridge application is provisioned one token entry under
 ``externalApi.tokens.<bridge_id>`` (``g3ku/config/schema.py``). Token secrets
-are stored in the bootstrap secret overlay the same way as
-``chinaBridge.controlToken``, so the in-memory config exposed here already
-carries resolved values. Project-level locking is enforced upstream by the
-global bootstrap lock middleware (423 for every ``/api/*`` route while the
-project is locked); this dependency only covers the API-enable gate and the
-per-bridge credential check.
+are stored in the bootstrap secret overlay (extracted on save, stripped from
+the on-disk payload, re-applied on unlock), so the in-memory config exposed
+here already carries resolved values. Project-level locking is enforced
+upstream by the global bootstrap lock middleware (423 for every ``/api/*``
+route while the project is locked); this dependency only covers the
+API-enable gate and the per-bridge credential check.
 """
 
 from __future__ import annotations

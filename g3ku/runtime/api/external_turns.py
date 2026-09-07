@@ -1,9 +1,9 @@
 """Turn executor for the External Agent API.
 
-Generalized from the legacy China bridge turn runner
-(``g3ku/china_bridge/transport.py::_run_turn``) with all platform-specific
-branches removed: turns execute through ``SessionRuntimeBridge`` and report to
-the per-session event hub. Carried over verbatim in spirit:
+Generalized from the (since removed) China bridge turn runner with all
+platform-specific branches dropped: turns execute through
+``SessionRuntimeBridge`` and report to the per-session event hub. Carried
+over verbatim in spirit:
 
 - Terminal invariant: every turn emits exactly one ``turn.completed`` or
   ``turn.failed`` event on every path, including cancellation

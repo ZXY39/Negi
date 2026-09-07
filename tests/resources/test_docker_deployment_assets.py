@@ -23,7 +23,10 @@ def test_dockerfile_seeds_mutable_resources_and_uses_uv() -> None:
     script = Path("docker/web-entrypoint.sh").read_text(encoding="utf-8")
 
     assert "uv sync --frozen" in text
-    assert "pnpm install --frozen-lockfile" in text
+    # The China channel subsystem (Node host) was removed: the image must no
+    # longer carry a Node toolchain or pre-build the channels host.
+    assert "nodesource" not in text
+    assert "pnpm" not in text
     assert "/opt/g3ku-seed/skills" in text
     assert "/opt/g3ku-seed/tools" in text
     assert "--no-worker" in script

@@ -13,7 +13,6 @@ from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from g3ku.china_bridge.registry import china_channel_secret_fields
 
 
 MASTER_KEY_VERSION = 2
@@ -128,21 +127,6 @@ def extract_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
             if _secret_value_present(tool_payload):
                 out[f"{SCONFIG}.toolSecrets.{tool_name}"] = deepcopy(tool_payload)
 
-    china_bridge = payload.get("chinaBridge")
-    if isinstance(china_bridge, dict):
-        control_token = china_bridge.get("controlToken")
-        if _secret_value_present(control_token):
-            out[f"{SCONFIG}.chinaBridge.controlToken"] = str(control_token)
-        channels = china_bridge.get("channels")
-        if isinstance(channels, dict):
-            for channel_name, channel_payload in channels.items():
-                if not isinstance(channel_payload, dict):
-                    continue
-                for field_name in china_channel_secret_fields(str(channel_name or "")):
-                    value = channel_payload.get(field_name)
-                    if _secret_value_present(value):
-                        out[f"{SCONFIG}.chinaBridge.channels.{channel_name}.{field_name}"] = deepcopy(value)
-
     external_api = payload.get("externalApi")
     if isinstance(external_api, dict):
         tokens = external_api.get("tokens")
@@ -172,22 +156,6 @@ def strip_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(tool_secrets, dict):
         for tool_name in list(tool_secrets.keys()):
             tool_secrets[tool_name] = {}
-
-    china_bridge = payload.get("chinaBridge")
-    if isinstance(china_bridge, dict):
-        china_bridge["controlToken"] = ""
-        channels = china_bridge.get("channels")
-        if isinstance(channels, dict):
-            for channel_name, channel_payload in channels.items():
-                if not isinstance(channel_payload, dict):
-                    continue
-                for field_name in china_channel_secret_fields(str(channel_name or "")):
-                    if field_name == "accounts":
-                        continue
-                    if field_name in channel_payload:
-                        channel_payload[field_name] = ""
-                if "accounts" in channel_payload:
-                    channel_payload["accounts"] = {}
 
     external_api = payload.get("externalApi")
     if isinstance(external_api, dict):

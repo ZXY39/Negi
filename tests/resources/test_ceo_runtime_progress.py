@@ -546,17 +546,7 @@ def _mock_workspace(monkeypatch, workspace: Path) -> None:
     monkeypatch.setattr(
         web_ceo_sessions,
         "load_config",
-        lambda: SimpleNamespace(
-            china_bridge=SimpleNamespace(
-                channels=SimpleNamespace(
-                    qqbot=SimpleNamespace(enabled=False, accounts={}),
-                    dingtalk=SimpleNamespace(enabled=False, accounts={}),
-                    wecom=SimpleNamespace(enabled=False, accounts={}),
-                    wecom_app=SimpleNamespace(enabled=False, accounts={}),
-                    feishu_china=SimpleNamespace(enabled=False, accounts={}),
-                )
-            )
-        ),
+        lambda: SimpleNamespace(workspace_path=str(workspace)),
     )
 
 

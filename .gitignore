@@ -38,11 +38,9 @@ tests/*
 tests/resources/__pycache__/
 tests/resources/**/*.pyc
 !tests/test_memory_runtime_sharing.py
-!tests/test_china_bridge_config.py
-!tests/test_china_bridge_session_keys.py
-!tests/test_china_bridge_transport.py
+!tests/test_session_keys.py
+!tests/test_china_bridge_removal_migration.py
 !tests/test_web_outbound_drain.py
-!tests/test_channel_manager_china_bridge.py
 !tests/test_paused_turn_transcript_lifecycle.py
 !tests/test_security_overlay_guard.py
 
@@ -58,6 +56,9 @@ externaltools/
 *.jsonl
 *.log
 *.tmp
+# agent 临时产物命名（.tmp_xxx / tmp_xxx，任意后缀），历史会话曾误留在仓库根目录
+.tmp_*
+tmp_*
 .DS_Store
 Thumbs.db
 
