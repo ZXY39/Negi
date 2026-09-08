@@ -48,6 +48,14 @@ function loadTasksModule({ requestTaskAction } = {}) {
         handleDeletedTasks(taskIds = []) {
             context.__deletedTaskIds = [...taskIds];
         },
+        __pauseHintTaskIds: [],
+        __clearedPauseHintTaskIds: [],
+        beginTaskPauseHint(taskId) {
+            context.__pauseHintTaskIds.push(taskId);
+        },
+        clearTaskPauseHint(taskId) {
+            context.__clearedPauseHintTaskIds.push(taskId);
+        },
     };
     context.window = context;
     vm.createContext(context);
@@ -83,7 +91,7 @@ test("performTaskBatchAction shows a readable delete success toast", async () =>
     assert.equal(context.__toasts.at(-1)?.kind, "success");
 });
 
-test("performTaskBatchAction shows a readable pause success toast", async () => {
+test("performTaskBatchAction tracks pause success via per-card hints instead of a toast", async () => {
     const context = loadTasksModule();
 
     await context.performTaskBatchAction("pause", [
@@ -94,9 +102,9 @@ test("performTaskBatchAction shows a readable pause success toast", async () => 
     assert.equal(context.__loadTasksCalls, 1);
     assert.equal(context.__loadTaskDetailCalls, 0);
     assert.equal(context.__loadTaskArtifactsCalls, 0);
-    assert.equal(context.__toasts.at(-1)?.title, "\u6682\u505c\u6210\u529f");
-    assert.equal(context.__toasts.at(-1)?.text, "2 \u4e2a\u4efb\u52a1\u5df2\u6682\u505c");
-    assert.equal(context.__toasts.at(-1)?.kind, "success");
+    // \u6279\u91cf\u6682\u505c\u4e0d\u518d\u5f39\u9876\u90e8\u6210\u529f toast\uff1a\u6210\u529f\u53cd\u9988\u7531\u5404\u5361\u7247\u300c\u6682\u505c\u4e2d\u2192\u6682\u505c\u6210\u529f\u300d\u63d0\u793a\u627f\u62c5\u3002
+    assert.equal(context.__toasts.length, 0);
+    assert.deepEqual(context.__pauseHintTaskIds, ["task:1", "task:2"]);
 });
 
 test("performTaskBatchAction sends one bulk delete request for all eligible tasks", async () => {
