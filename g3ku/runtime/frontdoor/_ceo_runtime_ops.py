@@ -1156,11 +1156,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         merged_blocks: list[Any] = []
         for item in sibling_inputs:
             item_metadata = dict(getattr(item, "metadata", None) or {})
-            expanded = self._expand_web_ceo_uploads_for_current_request_content(
-                content=self._model_content(getattr(item, "content", "")),
-                metadata=item_metadata,
-                model_refs=model_refs,
-            )
+            sibling_content = self._model_content(getattr(item, "content", ""))
+            try:
+                expanded = self._expand_web_ceo_uploads_for_current_request_content(
+                    content=sibling_content,
+                    metadata=item_metadata,
+                    model_refs=model_refs,
+                )
+            except FrontdoorCompressionRuntimeError:
+                # 较早输入的附件过期/缺失（临时目录回收、进程重启）不得拖垮
+                # 整批回合：该输入降级为原文并入（图片缺席）。当前回合输入在
+                # 调用点单独展开，保持严格失败语义。
+                expanded = sibling_content
             for block in self._request_content_block_list(expanded):
                 if block not in merged_blocks:
                     merged_blocks.append(block)

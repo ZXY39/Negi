@@ -8730,3 +8730,219 @@ def test_context_assembly_always_keeps_tool_execution_control_tools_visible() ->
     assert "wait_tool_execution" not in selected
     assert "create_async_task" in selected
     assert trace["reserved_internal_tool_names"] == ["stop_tool_execution"]
+
+
+def _prepare_turn_batch_harness(monkeypatch, tmp_path: Path, *, capture_builder: dict | None = None):
+    """Shared scaffolding for prompt_batch merge call-site tests: a real
+    ``CeoFrontDoorRunner`` with resolver/builder/contract seams faked, driving
+    the real ``_graph_prepare_turn``."""
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
+    from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+
+    async def _noop_ready() -> None:
+        return None
+
+    monkeypatch.setattr(ceo_runtime_ops, "current_project_environment", lambda workspace_root=None: {})
+
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools={},
+        max_iterations=8,
+        workspace=tmp_path,
+        temp_dir=str(tmp_path / "tmp"),
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": ["exec"]}
+
+    async def _build_for_ceo(**kwargs):
+        if capture_builder is not None:
+            capture_builder["builder_kwargs"] = kwargs
+        seed_messages = list(kwargs.get("request_body_seed_messages") or [])
+        user_content = kwargs.get("user_content")
+        return SimpleNamespace(
+            tool_names=["exec"],
+            model_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            stable_messages=[*seed_messages, {"role": "user", "content": user_content}],
+            dynamic_appendix_messages=[],
+            candidate_tool_names=[],
+            candidate_tool_items=[],
+            trace={
+                "selected_skills": [],
+                "semantic_frontdoor": {},
+                "tool_selection": {},
+                "capability_snapshot": {
+                    "visible_tool_ids": ["exec"],
+                    "visible_skill_ids": [],
+                },
+            },
+            cache_family_revision="frontdoor:v1",
+            turn_overlay_text="",
+        )
+
+    def _fake_build_frontdoor_prompt_contract(**kwargs):
+        return FrontdoorPromptContract(
+            request_messages=list(kwargs.get("stable_messages") or []),
+            prompt_cache_key="frontdoor-cache-key",
+            diagnostics={"stable_prompt_signature": "frontdoor-sig"},
+            stable_prefix_hash="stable-hash",
+            dynamic_appendix_hash="dynamic-hash",
+            stable_messages=list(kwargs.get("stable_messages") or []),
+            dynamic_appendix_messages=list(kwargs.get("dynamic_appendix_messages") or []),
+            diagnostic_dynamic_messages=[],
+            cache_family_revision="frontdoor:v1",
+        )
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
+    monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
+    return ceo_runtime_ops, loop, runner
+
+
+def _prepare_turn_batch_session(ceo_runtime_ops, loop, *, batch_inputs: list) -> SimpleNamespace:
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+        _frontdoor_request_body_messages=[],
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_stage_state={},
+        _frontdoor_canonical_context={"active_stage_id": "", "transition_required": False, "stages": []},
+        _compression_state={},
+        _semantic_context_state={},
+        _frontdoor_hydrated_tool_names=[],
+        _frontdoor_selection_debug={},
+        _active_user_batch_inputs=batch_inputs,
+    )
+    runtime = SimpleNamespace(
+        context=ceo_runtime_ops.CeoRuntimeContext(
+            loop=loop,
+            session=session,
+            session_key="web:shared",
+            on_progress=None,
+        )
+    )
+    return session, runtime
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_merges_prompt_batch_sibling_contents_into_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """C1 调用点接线：多输入批次经真实 `_graph_prepare_turn` 后，较早输入的
+    文本与图片块必须按顺序并入当前回合模型请求，末条输入排最后。"""
+    captured: dict[str, object] = {}
+    ceo_runtime_ops, loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path, capture_builder=captured)
+    monkeypatch.setattr(runner, "_ceo_image_multimodal_enabled_for_model_refs", lambda refs: True)
+
+    sibling_blocks = [
+        {"type": "text", "text": "较早的消息"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+    ]
+    sibling_input = UserInputMessage(
+        content=list(sibling_blocks),
+        metadata={"_transcript_turn_id": "turn-first"},
+    )
+    last_input = UserInputMessage(content="最后一条消息", metadata={"_transcript_turn_id": "turn-last"})
+    session, runtime = _prepare_turn_batch_session(
+        ceo_runtime_ops, loop, batch_inputs=[sibling_input, last_input]
+    )
+
+    await runner._graph_prepare_turn(
+        {"user_input": {"content": last_input.content, "metadata": dict(last_input.metadata)}},
+        runtime=runtime,
+    )
+
+    assert captured["builder_kwargs"]["user_content"] == [
+        {"type": "text", "text": "较早的消息"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+        {"type": "text", "text": "最后一条消息"},
+    ]
+    # 合并只发生在请求构建期：批次输入本体不被改写（转录各行仍按原文落盘）。
+    assert sibling_input.content == sibling_blocks
+    assert last_input.content == "最后一条消息"
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_keeps_single_input_batch_content_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """单输入批次（普通单条发送）走真实 prepare 路径时内容保持原样。"""
+    captured: dict[str, object] = {}
+    ceo_runtime_ops, loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path, capture_builder=captured)
+
+    only_input = UserInputMessage(content="单条消息", metadata={"_transcript_turn_id": "turn-only"})
+    session, runtime = _prepare_turn_batch_session(ceo_runtime_ops, loop, batch_inputs=[only_input])
+
+    await runner._graph_prepare_turn(
+        {"user_input": {"content": only_input.content, "metadata": dict(only_input.metadata)}},
+        runtime=runtime,
+    )
+
+    assert captured["builder_kwargs"]["user_content"] == "单条消息"
+
+
+@pytest.mark.asyncio
+async def test_ceo_frontdoor_prepare_turn_passes_last_input_turn_id_to_batch_merge(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """调用点契约：合并收到的 current_turn_id 是批次末条输入的转录 turn id，
+    session 是当前运行时会话。"""
+    from g3ku.runtime.frontdoor import _ceo_runtime_ops as ops_module
+
+    ceo_runtime_ops, loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path)
+    merge_calls: list[dict[str, object]] = []
+    original_merge = ops_module.CeoFrontDoorRuntimeOps._merge_prompt_batch_sibling_contents
+
+    def _capture_merge(self, *, session, current_turn_id, current_content, model_refs):
+        merge_calls.append(
+            {
+                "session": session,
+                "current_turn_id": current_turn_id,
+                "current_content": current_content,
+                "model_refs": model_refs,
+                "batch_inputs": list(getattr(session, "_active_user_batch_inputs", None) or []),
+            }
+        )
+        return original_merge(
+            self,
+            session=session,
+            current_turn_id=current_turn_id,
+            current_content=current_content,
+            model_refs=model_refs,
+        )
+
+    monkeypatch.setattr(ops_module.CeoFrontDoorRuntimeOps, "_merge_prompt_batch_sibling_contents", _capture_merge)
+
+    sibling_input = UserInputMessage(content="较早的消息", metadata={"_transcript_turn_id": "turn-first"})
+    last_input = UserInputMessage(content="最后一条消息", metadata={"_transcript_turn_id": "turn-last"})
+    session, runtime = _prepare_turn_batch_session(
+        ceo_runtime_ops, loop, batch_inputs=[sibling_input, last_input]
+    )
+
+    await runner._graph_prepare_turn(
+        {"user_input": {"content": last_input.content, "metadata": dict(last_input.metadata)}},
+        runtime=runtime,
+    )
+
+    assert len(merge_calls) == 1
+    call = merge_calls[0]
+    assert call["current_turn_id"] == "turn-last"
+    assert call["session"] is session
+    assert call["current_content"] == "最后一条消息"
+    assert call["model_refs"] == ["openai:gpt-4.1"]
+    assert call["batch_inputs"] == [sibling_input, last_input]

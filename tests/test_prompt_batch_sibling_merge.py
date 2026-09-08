@@ -177,3 +177,67 @@ def test_merge_keeps_external_image_blocks_from_siblings() -> None:
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,EXT"}},
         {"type": "text", "text": "第二张呢"},
     ]
+
+
+def test_merge_tolerates_missing_sibling_upload_image(tmp_path: Path) -> None:
+    """较早输入的上传临时文件过期/缺失时，合并降级为该输入原文并入，
+    不得把整批回合的请求构建拖失败（当前回合输入仍保持严格语义）。"""
+    ops = _ops(multimodal=True)
+    sibling = UserInputMessage(
+        content="看这张图",
+        metadata={
+            "_transcript_turn_id": "turn-a",
+            "web_ceo_raw_text": "看这张图",
+            "web_ceo_uploads": [
+                {
+                    "kind": "image",
+                    "name": "gone.png",
+                    "path": str(tmp_path / "missing.png"),
+                    "mime_type": "image/png",
+                }
+            ],
+        },
+    )
+    current = UserInputMessage(content="结论", metadata={"_transcript_turn_id": "turn-b"})
+    session = SimpleNamespace(_active_user_batch_inputs=[sibling, current])
+
+    merged = ops._merge_prompt_batch_sibling_contents(
+        session=session,
+        current_turn_id="turn-b",
+        current_content="结论",
+        model_refs=["managed:first"],
+    )
+
+    assert merged == [
+        {"type": "text", "text": "看这张图"},
+        {"type": "text", "text": "结论"},
+    ]
+
+
+def test_merge_tolerates_missing_upload_when_sibling_content_is_blocks() -> None:
+    """sibling 内容是块列表且元数据引用缺失附件时，同样降级为原文块并入。"""
+    ops = _ops(multimodal=True)
+    sibling_blocks = [
+        {"type": "text", "text": "带附件的消息"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,KEEP"}},
+    ]
+    sibling = UserInputMessage(
+        content=list(sibling_blocks),
+        metadata={
+            "_transcript_turn_id": "turn-a",
+            "web_ceo_uploads": [
+                {"kind": "image", "name": "gone.png", "path": "/nonexistent/gone.png", "mime_type": "image/png"}
+            ],
+        },
+    )
+    current = UserInputMessage(content="继续", metadata={"_transcript_turn_id": "turn-b"})
+    session = SimpleNamespace(_active_user_batch_inputs=[sibling, current])
+
+    merged = ops._merge_prompt_batch_sibling_contents(
+        session=session,
+        current_turn_id="turn-b",
+        current_content="继续",
+        model_refs=["managed:first"],
+    )
+
+    assert merged == [*sibling_blocks, {"type": "text", "text": "继续"}]
