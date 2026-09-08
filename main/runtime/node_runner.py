@@ -5601,12 +5601,25 @@ class NodeRunner:
             node=accepted_node,
             fallback_output='',
         )
+        notice_block = (
+            self._acceptance_notice_block(accepted_node=accepted_node)
+            if str(accepted_node.node_id or '').strip() == str(task.root_node_id or '').strip()
+            else ''
+        )
+        base_prompt = self._compose_acceptance_prompt(
+            acceptance_prompt=str(acceptance_prompt or ''),
+            node_output=str(child_handoff.get('summary') or ''),
+            node_output_ref=str(child_handoff.get('output_ref') or ''),
+            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
+            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
+        )
         prompt = self._compose_acceptance_prompt(
             acceptance_prompt=str(acceptance_prompt or ''),
             node_output=str(child_handoff.get('summary') or ''),
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
+            notice_block=notice_block,
         )
         base_metadata = {
             'accepted_node_id': accepted_node.node_id,
@@ -5615,7 +5628,7 @@ class NodeRunner:
             _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
                 parent_node_id=parent_node_id or accepted_node.node_id,
                 goal=goal,
-                prompt=prompt,
+                prompt=base_prompt,
                 accepted_node_id=accepted_node.node_id,
             ),
             'spawn_owner_parent_node_id': str(owner_parent_node_id or '').strip(),
@@ -5665,12 +5678,25 @@ class NodeRunner:
             node=accepted_node,
             fallback_output='',
         )
+        notice_block = (
+            self._acceptance_notice_block(accepted_node=accepted_node)
+            if str(accepted_node.node_id or '').strip() == str(task.root_node_id or '').strip()
+            else ''
+        )
+        base_prompt = self._compose_acceptance_prompt(
+            acceptance_prompt=acceptance_prompt,
+            node_output=str(child_handoff.get('summary') or ''),
+            node_output_ref=str(child_handoff.get('output_ref') or ''),
+            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
+            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
+        )
         prompt = self._compose_acceptance_prompt(
             acceptance_prompt=acceptance_prompt,
             node_output=str(child_handoff.get('summary') or ''),
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
+            notice_block=notice_block,
         )
         next_metadata = {
             **metadata,
@@ -5679,7 +5705,7 @@ class NodeRunner:
             _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
                 parent_node_id=str(node.parent_node_id or accepted_node.node_id).strip() or accepted_node.node_id,
                 goal=str(node.goal or ''),
-                prompt=prompt,
+                prompt=base_prompt,
                 accepted_node_id=accepted_node.node_id,
             ),
         }
@@ -5845,6 +5871,27 @@ class NodeRunner:
             node_ids.insert(0, root_node_id)
         return node_ids
 
+    def _acceptance_notice_block(self, *, accepted_node: NodeRecord) -> str:
+        # 汇总针对被检验执行节点（根节点）的追加通知：已消费归档 + 尚未消费的 pending。
+        # 同一逻辑通知会以不同 id（notif:xxx 与 root-notice:...）双写落盘，故按 message 文本去重。
+        metadata = dict(accepted_node.metadata or {}) if isinstance(getattr(accepted_node, 'metadata', None), dict) else {}
+        consumed = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY)).get('notice_records') or []
+        pending = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+        entries: list[str] = []
+        seen_texts: set[str] = set()
+        for item in [*list(consumed), *list(pending)]:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get('message') or '').strip()
+            if not text or text in seen_texts:
+                continue
+            seen_texts.add(text)
+            entries.append(f'- {text}')
+        if not entries:
+            return ''
+        title = '追加任务要求（追加通知，晚于上方验收标准；若两者冲突，以本段要求为准）'
+        return f'{title}\n' + '\n'.join(entries)
+
     def _compose_acceptance_prompt(
         self,
         *,
@@ -5853,6 +5900,7 @@ class NodeRunner:
         node_output_ref: str,
         result_payload_ref: str,
         evidence_summary: str,
+        notice_block: str = '',
     ) -> str:
         normalized_acceptance_prompt = str(acceptance_prompt or '').strip()
         prompt = (
@@ -5862,6 +5910,9 @@ class NodeRunner:
             f'子节点结果载荷 ref：{result_payload_ref or "(none)"}\n'
             f'子节点证据摘要：\n{evidence_summary or "(none)"}\n'
         )
+        normalized_notice_block = str(notice_block or '').strip()
+        if normalized_notice_block:
+            prompt += f'\n{normalized_notice_block}\n'
         return prompt
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:

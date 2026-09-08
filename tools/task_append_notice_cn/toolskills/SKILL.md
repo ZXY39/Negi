@@ -16,6 +16,7 @@ Append new requirements, constraints, or acceptance details to an existing unfin
 - Task ids are used directly.
 - Node ids resolve back to their owning unfinished task root before delivery.
 - The runtime persists the notice and enters task message distribution instead of creating a new task.
+- The notice is delivered to the root execution node; if the task has a root final acceptance node, the notice text is also folded into the acceptance node's prompt context when that context is (re)built, so the acceptance verdict accounts for appended requirements.
 
 ## Returns
 - Success text such as `已向任务 task:xxx 追加通知。`

@@ -39,7 +39,11 @@ from main.runtime.acceptance_handshake import (
 from main.monitoring.query_service import TaskQueryService
 from main.prompts import load_prompt
 from main.protocol import now_iso
-from main.runtime.append_notice_context import APPEND_NOTICE_CONTEXT_KEY
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    PENDING_APPEND_NOTICE_RECORDS_KEY,
+    record_pending_append_notice_records,
+)
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.runtime.pending_notice_state import (
@@ -7685,6 +7689,54 @@ async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp
         assert "root deliverable ready" in refreshed.prompt
         assert refreshed.input == refreshed.prompt
         assert "(empty)" not in refreshed.prompt
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_root_final_acceptance_prompt_includes_appended_notices(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "root acceptance notice merge",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+        acceptance = service.store.get_node(final_acceptance.node_id)
+        assert acceptance is not None
+        assert "追加任务要求" not in acceptance.prompt
+
+        # 模拟追加通知投递到根节点后写入的 pending 记录（与 _queue_pending_root_distribution_notices 一致）
+        def _mutate(metadata):
+            metadata[PENDING_APPEND_NOTICE_RECORDS_KEY] = record_pending_append_notice_records(
+                metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY),
+                records=[
+                    {
+                        "notification_id": "root-notice:epoch:1:1",
+                        "epoch_id": "epoch:1",
+                        "source_node_id": root.node_id,
+                        "message": "追加要求：修复还需覆盖 iOS Safari 场景",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            )
+            return metadata
+
+        service.log_service.update_node_metadata(root.node_id, _mutate)
+
+        refreshed = service.node_runner._refresh_acceptance_node_prompt(task=task, node=acceptance)
+
+        assert "追加任务要求" in refreshed.prompt
+        assert "追加要求：修复还需覆盖 iOS Safari 场景" in refreshed.prompt
+        assert "verify root output" in refreshed.prompt
+        assert refreshed.input == refreshed.prompt
     finally:
         await service.close()
 
