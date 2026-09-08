@@ -27,8 +27,10 @@ Use this mapping:
   `docs/architecture/web-and-admin.md`
 - Config loading, runtime refresh, model bindings, provider resolution:
   `docs/architecture/config-and-models.md`
-- China bridge, channel runtime, Python/Node boundary:
-  `docs/architecture/china-channels.md`
+- External bridge API (`/api/v1`), external sessions, outbound routing, built-in official QQ adapter:
+  `docs/architecture/external-agent-api.md`
+- OpenAI-compatible endpoint, MCP stdio gateway, agent-facing integrations:
+  `docs/architecture/agent-gateway.md`
 - Startup, operator workflow, troubleshooting, maintenance expectations:
   `docs/architecture/operations-and-maintenance.md`
 
@@ -47,7 +49,7 @@ If a change affects any of the following, you must use the project skill `g3ku-a
 - Candidate pool or hydration behavior
 - Config fields, config paths, or model binding behavior
 - API contracts or operator-visible workflows
-- China bridge or channel behavior
+- External bridge, channel, or agent gateway behavior
 - Troubleshooting guidance or startup flow
 
 The skill lives at:
@@ -98,15 +100,11 @@ If you are taking over this repository for the first time and need the shortest 
 2. Read `docs/architecture/runtime-overview.md`
 3. Read `docs/architecture/tool-and-skill-system.md`
 4. Read `docs/architecture/web-and-admin.md`
-5. If the task touches heartbeat, config/models, or China bridge, read those topic docs before opening source files
+5. If the task touches heartbeat, config/models, the external bridge API, or the agent gateway, read those topic docs before opening source files
 6. After the docs pass, inspect the concrete entrypoints:
    - `g3ku/cli/commands.py`
    - `g3ku/shells/web.py`
    - `g3ku/runtime/session_agent.py`
    - `main/service/runtime_service.py`
 
-If the task is broad or the affected area is still unclear after this pass, use the project onboarding skill:
-
-- `skills/g3ku-project-onboarding/SKILL.md`
-
-Use that skill to build a quick mental model before making changes.
+If the task is broad or the affected area is still unclear after this pass, re-read `docs/architecture/README.md` (Topic Guide + Debugging Entry Points) and follow the owning doc for the affected subsystem before making changes.

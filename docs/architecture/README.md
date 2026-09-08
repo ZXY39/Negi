@@ -12,6 +12,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 6. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
 7. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
 8. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
+9. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`g3ku mcp serve`)
 
 ## Topic Guide
 
@@ -31,6 +32,8 @@ Start here when you are new to the repository or when a change crosses subsystem
   Use for config source-of-truth rules and role-to-model resolution.
 - `external-agent-api.md`
   Use for the channel-agnostic headless API consumed by third-party bridges and the built-in official QQ adapter: auth, external session registry, turn terminal invariant, SSE event mapping, and ext outbound routing.
+- `agent-gateway.md`
+  Use for the out-of-the-box agent integration surfaces built on the External Agent API: the OpenAI-compatible chat endpoint (session mapping, wait/timeout and streaming semantics) and the MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity).
 
 ## Debugging Entry Points
 
@@ -47,6 +50,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Channel/bridge reply emits `## Runtime Tool Contract` or other internal contract text -> `runtime-overview.md` + `external-agent-api.md` (outbound sanitize contract)
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 官方 QQ 机器人面板报错、不连接或收不到消息 → `external-agent-api.md`「内置官方 QQ 适配器」+「常见排障入口」
+- OpenAI 兼容端点 401/403/423/503、回复总是 "still working"、流式文本与终稿不一致 → `agent-gateway.md`「常见排障入口」
+- MCP 工具全部 connection_failed、MCP 客户端协议解析错误（stdout 被污染）→ `agent-gateway.md`「常见排障入口」+「MCP stdio 网关契约」
 - 渠道会话短暂出现在本地 web 会话列表、刷新后激活会话被切回本地会话、渠道回合无法在网页暂停 → `web-and-admin.md`「CEO Session List Interaction Contract」+「Active-Turn Button Semantics」
 - 用户连续发送消息时助手只看到最后一条、或渠道消息收到重复回复 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
@@ -75,7 +80,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 3. Pointers name topics, never section numbers.
 4. Present tense only. No "now / no longer / previously / 现在 / 不再 / 曾经" — that is changelog language.
 5. Superseded text is deleted outright, never left as "obsolete notes".
-6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 65 KB / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 51 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 19 KB / `config-and-models` 17 KB / `external-agent-api` 11 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
+6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 65 KB / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 51 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 19 KB / `config-and-models` 17 KB / `external-agent-api` 11 KB / `agent-gateway` 10 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
 
 ## Topic Ownership
 
@@ -90,4 +95,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Websocket/UI contracts, composer/media rendering, image upload gating, model config admin draft contract, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
+| Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Startup/deploy/troubleshooting order, memory CLI, Docker compose | `operations-and-maintenance.md` |

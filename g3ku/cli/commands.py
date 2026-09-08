@@ -819,6 +819,15 @@ resource_app = build_resource_app(console)
 app.add_typer(resource_app, name="resource")
 
 # ============================================================================
+# MCP gateway (stdio proxy to the External Agent API)
+# ============================================================================
+
+from g3ku.shells.mcp_cli import build_mcp_app
+
+mcp_app = build_mcp_app(console)
+app.add_typer(mcp_app, name="mcp")
+
+# ============================================================================
 # External Agent API diagnostics (read-only)
 # ============================================================================
 

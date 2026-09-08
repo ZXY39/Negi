@@ -79,4 +79,6 @@ async for event in g3ku.stream_events(session_id, last_event_id=seen):
 
 ## 6. 如果那项目只认 OpenAI 后端怎么办
 
-若某项目**只把 agent 当 OpenAI 兼容后端**（AstrBot/LangBot 这类，`POST /chat/completions` 单向），它无法直连 `/api/v1`，需要在这层桥里加一个**传输翻译**：把 `chat/completions` 请求翻译成 g3ku 的会话+回合+SSE 终态。翻译仍写在桥侧，**不进入 g3ku 核心**，也不破坏本接口的项目无关性。
+g3ku 核心自带 OpenAI 兼容端点：`POST /api/v1/chat/completions` + `GET /api/v1/models`（同一套 `externalApi` Bearer 鉴权）。只把 agent 当 OpenAI 兼容后端的项目（AstrBot/LangBot 这类）直接把 `base_url` 指到 `http://{host}:{port}/api/v1`、`api_key` 填 bridge token 即可，不需要写桥。契约（会话映射、等待/超时、流式语义）见 `docs/architecture/agent-gateway.md`，接入样例见 `integration-manual.md`「开箱即用集成」。
+
+自写桥仍然是正确选择的场景：平台有自己的事件/推送模型（主动提醒、群事件、卡片交互）、需要分段/频控/触发词等平台侧逻辑，或需要双向长连接。仅"单向问答 + OpenAI 协议"不要写桥。

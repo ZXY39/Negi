@@ -5,6 +5,7 @@
 ## 1. 定位与边界
 
 - 消费方是第三方桥接应用（IM bot、自动化桥）；唯一内置例外是官方 QQ 适配器（见「内置官方 QQ 适配器」），它同样只经本契约消费。web CEO 面（`/api/*`、`/ws/ceo`）不受本面影响。
+- 本契约之上另有两个开箱即用的 agent 对接面（OpenAI 兼容端点 `POST /api/v1/chat/completions`、MCP stdio 网关 `g3ku mcp serve`），契约详见 `agent-gateway.md`。
 - 平台协议、消息分段、频控、触发词识别全部属于桥接层；g3ku 核心不出现随平台变化的代码。判别准则：换一个 IM 平台就要改的代码不属于核心。
 - 参考实现：`bridges/qq-onebot/`（独立包，零 g3ku import，行为对拍表见其 README）。
 

@@ -120,3 +120,40 @@ curl -N $BASE/sessions/$SESSION_ID/events -H "Authorization: Bearer $TOKEN" \
 - 提交成功但收不到回复：确认订阅的 SSE 会话与提交的是同一 `session_id`；事件是否被 `eventBufferSize` 淘汰。
 - 主动推送不到：发布侧（heartbeat 日志）→ drain（`ext outbound drained`/dropped）→ 桥的 `outbound.created` 消费。
 - 状态悬挂：查终态不变量是否被桥破坏。
+
+## 7. 开箱即用集成（不写桥）
+
+两种零开发对接面，契约见 `docs/architecture/agent-gateway.md`。前提与写桥相同：web 运行时在跑、`externalApi.enabled=true`、给对方签发一个 bridge token。
+
+### OpenAI 兼容端点
+
+只认 OpenAI 协议的客户端（AstrBot/LangBot/各语言 SDK）直接改 base_url：
+
+```bash
+curl -s http://127.0.0.1:18790/api/v1/chat/completions \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"model":"g3ku","messages":[{"role":"user","content":"你好"}],"user":"alice"}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:18790/api/v1", api_key="<bridge token>")
+resp = client.chat.completions.create(
+    model="g3ku",
+    messages=[{"role": "user", "content": "你好"}],
+    user="alice",                          # 会话键：同 user 共享持久记忆
+    extra_body={"wait_seconds": 900},      # 长任务加大等待；也支持 stream=True
+)
+print(resp.choices[0].message.content)
+```
+
+要点：只发新消息（客户端历史被忽略，g3ku 会话自持记忆）；长任务超时返回 200 + "still working"（不是错误，稍后同 user 追问或加大 wait_seconds）。
+
+### MCP 网关（Claude Code / Cursor 等）
+
+```bash
+g3ku mcp check --token <bridge token>          # 连通性自检
+claude mcp add g3ku -- g3ku mcp serve --token <bridge token>
+```
+
+等价 MCP JSON 配置：`{"command": "g3ku", "args": ["mcp", "serve", "--token", "<t>"]}`（token 也可走 env `G3KU_EXTERNAL_TOKEN`）。暴露六个工具：`g3ku_chat` / `g3ku_get_reply` / `g3ku_session_status` / `g3ku_pause` / `g3ku_cancel` / `g3ku_list_conversations`；每个 `conversation` 名对应一个持久 g3ku 会话。

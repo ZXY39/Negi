@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
@@ -32,6 +33,8 @@ from g3ku.runtime.session_keys import sanitize_channel_outbound_text
 
 DEFAULT_EVENT_BUFFER_SIZE = 512
 SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+# 等待终稿时 live 队列的单次 get 上限：每轮醒来重查 deadline / should_stop。
+_WAIT_POLL_SECONDS = 5.0
 
 
 def _now_iso() -> str:
@@ -203,3 +206,136 @@ def make_session_event_relay(
             return
 
     return relay
+
+
+@dataclass(slots=True)
+class ExternalReplyOutcome:
+    """Result of waiting for a session's next authoritative assistant reply.
+
+    kind:
+    - ``reply``     — final text captured (``text``/``turn_id``/``usage``)
+    - ``timeout``   — deadline or ``should_stop`` reached (``error`` marks which)
+    - ``failed``    — ``turn.failed`` observed (``error`` is the readable text)
+    - ``cancelled`` — turn ended paused/cancelled without a final reply
+    - ``no_reply``  — turn completed without any user-visible final reply
+    """
+
+    kind: str
+    text: str | None = None
+    turn_id: str | None = None
+    usage: dict[str, Any] | None = None
+    error: str | None = None
+    last_seq: int = 0
+
+
+async def wait_for_external_reply(
+    session_key: str,
+    *,
+    after_seq: int,
+    timeout: float,
+    want_turn_id: str | None = None,
+    queued: bool = False,
+    should_stop: Callable[[], Awaitable[bool]] | None = None,
+) -> ExternalReplyOutcome:
+    """In-process "submit → wait for the reply" primitive for gateway surfaces
+    (OpenAI-compatible endpoint; see docs/architecture/agent-gateway.md).
+
+    Race-free ordering contract: the CALLER captures ``after_seq =
+    hub.last_seq`` BEFORE ``ExternalTurnService.submit``; this helper
+    subscribes first, then drains ``replay(after_seq)`` before the live queue,
+    deduping the overlap with a seen-seq set (publish fans out outside the hub
+    lock, so arrival order is not guaranteed — matching is by type/turn_id and
+    selection by max seq, never by arrival).
+
+    ``queued=True`` (message joined a running turn's chain): the chain's own
+    final for the PREDECESSOR message arrives first, and drained follow-ups
+    publish additional ``reply.final`` events under the same turn_id before the
+    single terminal ``turn.completed``. The rule is therefore: collect finals,
+    stop at the first terminal, return the max-seq final.
+
+    Known bound: more than ``event_buffer_size`` events between the caller's
+    ``after_seq`` capture and the replay pass can evict the reply.
+    """
+    hub = get_session_event_hub(session_key)
+    queue = hub.subscribe()
+    threshold = int(after_seq or 0)
+    seen: set[int] = set()
+    finals: list[dict[str, Any]] = []
+    state = {"last_seq": threshold}
+
+    def _reply_outcome(event: dict[str, Any]) -> ExternalReplyOutcome:
+        usage = event.get("usage")
+        return ExternalReplyOutcome(
+            kind="reply",
+            text=str(event.get("text") or ""),
+            turn_id=str(event.get("turn_id") or "") or None,
+            usage=dict(usage) if isinstance(usage, dict) else None,
+            last_seq=state["last_seq"],
+        )
+
+    def _consider(event: dict[str, Any]) -> ExternalReplyOutcome | None:
+        seq = int(event.get("seq") or 0)
+        if seq <= threshold or seq in seen:
+            return None
+        seen.add(seq)
+        state["last_seq"] = max(state["last_seq"], seq)
+        event_type = str(event.get("type") or "")
+        event_turn_id = str(event.get("turn_id") or "")
+        if event_type == "reply.final":
+            if queued:
+                finals.append(dict(event))
+                return None
+            if want_turn_id is None or event_turn_id == str(want_turn_id):
+                return _reply_outcome(event)
+            return None
+        if event_type == "turn.completed":
+            if queued:
+                if finals:
+                    return _reply_outcome(max(finals, key=lambda item: int(item.get("seq") or 0)))
+                return ExternalReplyOutcome(
+                    kind="cancelled" if event.get("cancelled") else "no_reply",
+                    turn_id=event_turn_id or None,
+                    last_seq=state["last_seq"],
+                )
+            if want_turn_id is not None and event_turn_id != str(want_turn_id):
+                return None
+            return ExternalReplyOutcome(
+                kind="cancelled" if event.get("cancelled") else "no_reply",
+                turn_id=event_turn_id or None,
+                last_seq=state["last_seq"],
+            )
+        if event_type == "turn.failed":
+            if want_turn_id is not None and event_turn_id != str(want_turn_id):
+                return None
+            return ExternalReplyOutcome(
+                kind="failed",
+                error=str(event.get("error") or ""),
+                turn_id=event_turn_id or None,
+                last_seq=state["last_seq"],
+            )
+        return None
+
+    try:
+        for event in hub.replay(threshold):
+            outcome = _consider(event)
+            if outcome is not None:
+                return outcome
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return ExternalReplyOutcome(kind="timeout", last_seq=state["last_seq"])
+            if should_stop is not None and await should_stop():
+                return ExternalReplyOutcome(
+                    kind="timeout", error="client_disconnected", last_seq=state["last_seq"]
+                )
+            try:
+                event = await asyncio.wait_for(queue.get(), min(remaining, _WAIT_POLL_SECONDS))
+            except asyncio.TimeoutError:
+                continue
+            outcome = _consider(event)
+            if outcome is not None:
+                return outcome
+    finally:
+        hub.unsubscribe(queue)
