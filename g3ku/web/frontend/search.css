@@ -1513,27 +1513,6 @@ textarea {
     letter-spacing: 0.02em;
 }
 
-.ceo-session-unread {
-    flex-shrink: 0;
-    min-width: 22px;
-    height: 22px;
-    padding: 0 7px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: linear-gradient(135deg, #fb7185, #ef4444);
-    color: #fff;
-    font-size: 0.72rem;
-    font-weight: 700;
-    box-shadow: 0 10px 20px -14px rgba(239, 68, 68, 0.85);
-}
-
-.ceo-session-card.has-unread:not(.is-active) {
-    border-color: color-mix(in srgb, #fb7185 38%, var(--border-color));
-    box-shadow: 0 0 0 1px color-mix(in srgb, #fb7185 12%, transparent), var(--shadow-sm);
-}
-
 @keyframes ceo-session-breathe {
     0% {
         opacity: 0.52;

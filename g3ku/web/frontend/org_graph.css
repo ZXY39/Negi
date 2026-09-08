@@ -48,6 +48,11 @@
     --status-pending-text: #52525b;
     
     --ceo-session-running-ring: #0d9488;
+    /* CEO 会话 unread 角标:品牌青绿 #39c5bb(点名色;不等同 --brand-primary light=#0d9488 / dark=#2dd4bf)。
+       文字用深青:白字在 #39c5bb 上仅约 2.13:1,深青 #052e2b 约 6.9:1 达 WCAG AA。 */
+    --ceo-session-unread: #39c5bb;
+    --ceo-session-unread-text: #052e2b;
+    --ceo-session-unread-ring: var(--bg-panel);
     --tree-node-bg: rgba(255, 255, 255, 0.8);
     --tree-node-border: rgba(24, 24, 27, 0.1);
     --tree-node-shadow: 0 4px 6px -1px rgba(24, 24, 27, 0.05), 0 2px 4px -2px rgba(24, 24, 27, 0.02);
@@ -101,6 +106,9 @@
     --brand-primary-hover: #14b8a6;
     --brand-surface: rgba(20, 184, 166, 0.05);
     --ceo-session-running-ring: #2dd4bf;
+    --ceo-session-unread: #39c5bb; /* 暗色下 vs 面板 #18181b 约 8.3:1,醒目 */
+    --ceo-session-unread-text: #052e2b;
+    --ceo-session-unread-ring: var(--bg-panel); /* 暗色下自动解析为 #18181b */
 
     --tree-node-bg: rgba(24, 24, 27, 0.7);
     --tree-node-border: rgba(255, 255, 255, 0.1);
@@ -2015,14 +2023,16 @@ textarea {
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
-    padding: 4px 0;
+    /* 顶部 10px:unread 角标骑卡片上沿出界 6px + 描边环 2px,hover 上浮 1px 后仍有 1px 余量,首个卡片不被滚动容器裁切 */
+    padding: 10px 0;
     width: 100%;
     scrollbar-gutter: auto;
 }
 
 .ceo-shell.is-session-panel-expanded .ceo-session-list {
     align-items: stretch;
-    padding: 4px 14px 4px 4px;
+    /* 左 padding ≥6px:unread 角标骑卡片左上角出界 6px + 环 2px,list overflow-x:hidden 会裁掉出界部分;顶部 10px 防首卡角标/环裁切 */
+    padding: 10px 14px 4px 10px;
     scrollbar-gutter: stable;
 }
 
@@ -2171,12 +2181,13 @@ textarea {
 
 .ceo-session-panel[data-panel-state="collapsed"] .ceo-session-unread {
     position: absolute;
-    top: 2px;
-    right: 2px;
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    font-size: 0.66rem;
+    top: -6px;
+    /* 水平内侧偏移:collapsed list 左 padding=0,负 left 会被 overflow-x:hidden 裁切;垂直 -6px 走 overflow-y 滚动容器不裁 */
+    left: 2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    font-size: 0.6rem;
     z-index: 3;
 }
 
@@ -2301,8 +2312,10 @@ textarea {
 
 .ceo-session-unread {
     position: absolute;
-    top: -6px;
-    right: -6px;
+    /* 定位参照是 .ceo-session-main(position:relative),expanded 下它内缩卡片 padding(var(--space-3))+ border 1px;
+       calc(-space-3 - 7px) = 出界 6px,用变量而非硬编码以适配非 16px 根字号 */
+    top: calc(-1 * var(--space-3) - 7px);
+    left: calc(-1 * var(--space-3) - 7px);
     min-width: 22px;
     height: 22px;
     padding: 0 7px;
@@ -2310,29 +2323,30 @@ textarea {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, #fb7185, #ef4444);
-    color: #fff;
+    background: var(--ceo-session-unread);
+    color: var(--ceo-session-unread-text);
     font-size: 0.72rem;
     font-weight: 700;
-    box-shadow: 0 10px 20px -14px rgba(239, 68, 68, 0.85);
+    /* 第一层为 2px 面板色描边环:与同色系半透明呼吸环(is-running)区分;第二层为青色系投影 */
+    box-shadow: 0 0 0 2px var(--ceo-session-unread-ring), 0 10px 20px -14px rgba(6, 78, 74, 0.45);
 }
 
 .ceo-shell.is-session-panel-expanded .ceo-session-unread {
     position: absolute;
-    top: var(--space-3);
-    right: calc(var(--space-3) + 34px);
+    top: calc(-1 * var(--space-3) - 7px);
+    left: calc(-1 * var(--space-3) - 7px);
     align-self: auto;
     z-index: 2;
+}
+
+/* unread 角标骑卡片左上角:有角标的卡片 head 下移,避免首字被角标压住 */
+.ceo-session-card.has-unread .ceo-session-head {
+    padding-top: 10px;
 }
 
 .ceo-shell.is-session-panel-expanded .ceo-session-preview {
     -webkit-line-clamp: 4;
     line-clamp: 4;
-}
-
-.ceo-session-card.has-unread:not(.is-active) {
-    border-color: color-mix(in srgb, #fb7185 38%, var(--border-color));
-    box-shadow: 0 0 0 1px color-mix(in srgb, #fb7185 12%, transparent), var(--shadow-sm);
 }
 
 @keyframes ceo-session-breathe {
@@ -2435,6 +2449,12 @@ textarea {
 
 .ceo-session-card.is-bulk-mode .ceo-session-actions {
     display: none !important;
+}
+
+/* bulk 模式左上角要让给骑角 unread 角标:勾选框整体下移右移 6px 避让 */
+.ceo-session-card.is-bulk-mode .ceo-session-checkbox {
+    top: calc(var(--space-3) + 6px);
+    left: calc(var(--space-3) + 6px);
 }
 
 .ceo-session-menu {
@@ -4452,7 +4472,8 @@ textarea {
 
     .ceo-session-list {
         align-items: stretch;
-        padding: 4px 8px 4px 4px;
+        /* 左 padding ≥6px:防 unread 角标 left 出界 6px + 环 2px 被 list overflow-x:hidden 裁切;顶部 10px 防首卡角标/环裁切 */
+        padding: 10px 8px 4px 10px;
     }
 
     .ceo-session-group,
@@ -4493,9 +4514,18 @@ textarea {
         gap: 6px;
     }
 
-    .ceo-session-unread {
-        position: static;
-        align-self: start;
+    /* 窄屏下两种面板状态的卡片都是带 padding 的全宽布局,角标统一骑卡片左上角;
+       选择器特异性与 collapsed 规则持平且位置靠后,确保覆盖;并重置为标准尺寸(不用 collapsed rail 的 16px 小号) */
+    .ceo-session-panel[data-panel-state="collapsed"] .ceo-session-unread,
+    .ceo-session-panel[data-panel-state="expanded"] .ceo-session-unread {
+        position: absolute;
+        top: calc(-1 * var(--space-3) - 7px);
+        left: calc(-1 * var(--space-3) - 7px);
+        align-self: auto;
+        min-width: 22px;
+        height: 22px;
+        padding: 0 7px;
+        font-size: 0.72rem;
     }
 
     .ceo-session-actions {
