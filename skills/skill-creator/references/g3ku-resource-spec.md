@@ -111,3 +111,27 @@ toolskill:
   - 代码位于 `main/`
   - 无需额外安装
   - 更新方式是修改仓库内实现
+
+## `requires` 声明与可用性探测
+
+`requires.tools / bins / env`（skill 与 tool manifest 通用）不是描述性文字，而是可用性硬探测；资源刷新时运行时逐项校验：
+
+- `bins`：用 `shutil.which` 按**目标机实际可解析的命令名**探测；任一解析不到 → 资源 `available=false` + `missing required bins` 警告，进入待修复车道
+- `env`：探测 `os.environ`；任一缺失 → `available=false`
+- `tools`：与已注册工具名比对；任一缺失 → `available=false`
+
+声明规则：
+
+- 只写目标机上真实存在的命令：Windows 上通常是 `python` 而不是 `python3`；本机只有 Edge 时不要声明 `chrome`，浏览器能力改挂已注册工具（如 `web-access`）或写进 SKILL.md 外部依赖说明
+- 禁止照抄上游 README / pyproject 的依赖名，必须先实测再写
+- 可选的重运行时（Go、数据库服务等）不要轻易写进 `requires`——写入即探测，缺失会把整个资源判为待修复；确属必需才写，并在 SKILL.md 里同步给出安装方式
+
+## 创建后复核与修复（三态）
+
+skill 落盘后必须实测 `load_skill_context(skill_id="<skill_id>")`，按返回三态处置：
+
+- **A｜返回正文（`ok=true`）**：可加载，复核通过
+- **B｜返回修复指引**（`error="skill_repair_required"`，带 `warnings` / `errors` / `next_actions`，或合同摘要 `repair_required_skills` 列出了它）：已注册但不可用，处于待修复状态。按 warnings 修复——声明与本机不符就改 `resource.yaml` 的 `requires`（对照上一节声明规则）；真实缺依赖就用 `exec` 安装补齐（filesystem 编辑会自动触发资源刷新）。修复后必须重新 load 复核，直到返回 A，或确认剩余缺口属于需用户安装/决策的运行时
+- **C｜返回「当前运行时技能未包含 `<id>`」**：不在治理注册表。核查落盘是否成功、资源刷新是否生效、（经 `skill-installer` 安装时）`resource_refresh` / `catalog` 字段是否报错，补齐注册后再复核；不要把这个状态当作待修复或搁置
+
+无法自行解决的缺口，要在交付说明里精确列出：缺什么（具体 bin/env/tool 名）、影响哪个资源、已做过哪些修复动作；禁止笼统写“待复核”。tool 侧的对应规则（`【待修复】` 前缀 / `repair_required=true` / `load_tool_context` 修复车道）见 `main/prompts/shared_repair_required.md`。

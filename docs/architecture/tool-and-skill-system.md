@@ -155,7 +155,7 @@ exec 与 memory 工具家族：
 - 不走 hydration 状态机
 - 对 CEO/frontdoor，`frontdoor_runtime_tool_contract` 摘要会把 `candidate_skills` 明确标成“可通过 `load_skill_context` 读取正文”的候选，避免模型把它们误读成需要安装/水合的候选工具
 - repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引（`skill_repair_required` payload 携带 `warnings` / `errors` / `next_actions`），不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
-- 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）与 `tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）承载
+- 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）、`tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）与 `skills/skill-creator/references/g3ku-resource-spec.md`（创建后三态复核 + `requires` 探测声明规则）承载
 
 ### 3.4 hydrated tools
 

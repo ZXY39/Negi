@@ -126,7 +126,7 @@ tools/
 至少做这些中的一部分：
 
 - 资源发现验证
-- 加载并最小执行一次工具
+- 加载并最小执行一次工具；`load_tool_context(tool_id="<tool_id>")` 返回 `【待修复】` / `repair_required=true` 时，按 warnings（如 `missing required bins`）修复声明或补齐依赖后重新加载复核，规则见 `g3ku-resource-spec.md`「`requires` 声明与可用性探测」
 - 校验参数映射、权限读取和 `settings` 生效
 - 如果包装了上游仓库，确认实际运行的是仓库内固定版本，而不是不可控的全局版本
 

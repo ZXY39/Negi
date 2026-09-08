@@ -61,6 +61,7 @@
 - 先明确真实目标、触发条件、输入来源、输出格式、失败模式和验收标准。
 - 保持“简洁主文件 + 丰富 references”的双层结构，不要把所有长文档塞进主 `SKILL.md`。
 - 从现有仓库或 skill 迁移时，优先把关键参考资料镜像到本地 `references/`，不要只留下外链。
+- 资源落盘后必须实测加载：skill 走 `load_skill_context` 三态复核，tool 走 `load_tool_context`；遇到待修复先修复再交付，规则见 `references/g3ku-resource-spec.md`「创建后复核与修复（三态）」与「`requires` 声明与可用性探测」。
 - 不要留下 `TODO`、空函数、占位字段、`__pycache__` 或一次性导出产物。
 
 ## 参考路由
