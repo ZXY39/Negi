@@ -4083,10 +4083,51 @@ function scrollCeoFeedToBottom() {
 
 let ceoFeedBatchDepth = 0;
 
+// preserve 模式的滚动快照:贴底标志 + 上滚时的元素锚点 + 像素兜底。
+// 旧实现是纯像素 clamp(min(prevTop, maxTop)):直播重建导致内容高度变化(展开的
+// 阶段被折叠、新轮次撑高)时视口会跳变;锚点按「当前可见的 feed 子元素 + 元素内
+// 偏移」还原,高度增减都稳定。用户原本贴底时视为跟随最新内容(聊天 stick-to-bottom),
+// 不再被新产出的内容留在原地。
+function captureCeoFeedScrollSnapshot() {
+    if (!U || !U.ceoFeed) return null;
+    const feed = U.ceoFeed;
+    const prevTop = Math.max(0, Number(feed.scrollTop || 0));
+    const atBottom = ceoFeedNearBottom();
+    return {
+        prevTop,
+        atBottom,
+        anchor: atBottom ? null : ceoFeedNearScrollTop(feed, prevTop),
+    };
+}
+
+function restoreCeoFeedScrollSnapshot(snapshot = null) {
+    if (!U || !U.ceoFeed) return;
+    const feed = U.ceoFeed;
+    if (!snapshot) {
+        updateCeoScrollToLatestButton();
+        return;
+    }
+    if (snapshot.atBottom) {
+        // 直播跟随直接钉底,不走 scrollCeoFeedToBottom 的异步 re-pin:流式期间每次
+        // mutation 都会重新判定,而挂起的 rAF 会在用户上滚离开后把视口拽回底部。
+        feed.scrollTop = feed.scrollHeight;
+        updateCeoScrollToLatestButton();
+        return;
+    }
+    const maxTop = Math.max(0, (feed.scrollHeight || 0) - (feed.clientHeight || 0));
+    const anchored = ceoFeedAnchoredScrollTop(feed, snapshot.anchor);
+    const nextTop = Number.isFinite(anchored) ? anchored : Number(snapshot.prevTop || 0);
+    feed.scrollTop = Math.max(0, Math.min(nextTop, maxTop));
+    updateCeoScrollToLatestButton();
+}
+
 function withCeoFeedBatch(mutator, { scrollMode = "preserve" } = {}) {
     if (typeof mutator !== "function") return null;
     if (!U.ceoFeed) return mutator();
-    const prevTop = U.ceoFeed.scrollTop;
+    // 只有最外层帧捕获/还原滚动快照;嵌套帧对 mutator 透明(与旧 prevTop 语义一致)。
+    const snapshot = ceoFeedBatchDepth === 0 && scrollMode !== "bottom"
+        ? captureCeoFeedScrollSnapshot()
+        : null;
     ceoFeedBatchDepth += 1;
     let result = null;
     try {
@@ -4098,9 +4139,7 @@ function withCeoFeedBatch(mutator, { scrollMode = "preserve" } = {}) {
     if (scrollMode === "bottom") {
         scrollCeoFeedToBottom();
     } else {
-        const maxTop = Math.max(0, U.ceoFeed.scrollHeight - U.ceoFeed.clientHeight);
-        U.ceoFeed.scrollTop = Math.max(0, Math.min(prevTop, maxTop));
-        updateCeoScrollToLatestButton();
+        restoreCeoFeedScrollSnapshot(snapshot);
     }
     return result;
 }
@@ -4109,14 +4148,12 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     if (typeof mutator !== "function") return null;
     if (!U.ceoFeed) return mutator();
     if (ceoFeedBatchDepth > 0) return mutator();
-    const prevTop = U.ceoFeed.scrollTop;
+    const snapshot = scrollMode === "bottom" ? null : captureCeoFeedScrollSnapshot();
     const result = mutator();
     if (scrollMode === "bottom") {
         scrollCeoFeedToBottom();
     } else {
-        const maxTop = Math.max(0, U.ceoFeed.scrollHeight - U.ceoFeed.clientHeight);
-        U.ceoFeed.scrollTop = Math.max(0, Math.min(prevTop, maxTop));
-        updateCeoScrollToLatestButton();
+        restoreCeoFeedScrollSnapshot(snapshot);
     }
     return result;
 }
@@ -4457,6 +4494,60 @@ function renderCeoToolEventsIntoTurn(turn, toolEvents = [], { source = "" } = {}
     return events.length;
 }
 
+function ceoTurnTraceRoundHostKey(host = null, hostIndex = 0) {
+    // 轮次工具条还原键:按所属阶段的 traceKey 分域(round_index 跨阶段会重复);
+    // round 缺 data-round-key 时用回合内 DOM 顺序兜底(与 feed 级 capture 一致)。
+    const stepEl = host && typeof host.closest === "function" ? host.closest(".task-trace-step") : null;
+    const scope = String(stepEl?.dataset?.traceKey || "").trim();
+    const roundKey = String(host?.dataset?.roundKey
+        || (host && typeof host.getAttribute === "function" ? host.getAttribute("data-round-key") : "")
+        || "").trim();
+    return `${scope}::${roundKey || `idx:${hostIndex}`}`;
+}
+
+function captureCeoTurnTraceViewState(turn = null) {
+    // 直播重建(renderCeoStageTraceIntoTurn 整段 wipe listEl.innerHTML)前捕获回合内
+    // 展开态:Interaction Flow 开合、各阶段 <details> 开合(data-trace-key)、轮次工具
+    // 条选中(data-active-tool-key)。全是纯 DOM 态,重建即丢,必须在 resetCeoToolFlow
+    // 之前捕获。仅对已渲染过轨道的回合生效:换新 turnId 时 patchCeoInflightTurn 会先
+    // 清空 lastExecutionTraceSummary,此时不能沿用上一轮的展开态(stage id 跨轮会重复)。
+    if (!turn?.listEl || typeof turn.listEl.querySelectorAll !== "function") return null;
+    if (!turn.lastExecutionTraceSummary) return null;
+    const state = {
+        flowOpen: !!(turn.flowEl && turn.flowEl.open),
+        steps: {},
+        roundTools: {},
+    };
+    Array.from(turn.listEl.querySelectorAll(".task-trace-step") || []).forEach((stepEl) => {
+        const traceKey = String(stepEl?.dataset?.traceKey || "").trim();
+        if (traceKey) state.steps[traceKey] = !!stepEl.open;
+    });
+    Array.from(turn.listEl.querySelectorAll(".task-trace-round-tools") || []).forEach((host, hostIndex) => {
+        const active = String(host?.dataset?.activeToolKey
+            || (host && typeof host.getAttribute === "function" ? host.getAttribute("data-active-tool-key") : "")
+            || "").trim();
+        if (active) state.roundTools[ceoTurnTraceRoundHostKey(host, hostIndex)] = active;
+    });
+    return state;
+}
+
+function applyCeoTurnTraceViewState(turn = null, viewState = null) {
+    // 重建后按稳定键还原;直接赋 open 不触发 toggle 事件,阶段输出的懒加载副作用由
+    // 调用方随后的 hydrateTraceOutputBlocks 遍历 + setTraceRoundActiveTool 内部的面板
+    // hydration 补齐(与 applyCeoFeedViewState 行为一致)。
+    if (!viewState || !turn?.listEl || typeof turn.listEl.querySelectorAll !== "function") return;
+    if (turn.flowEl) turn.flowEl.open = !!viewState.flowOpen;
+    Array.from(turn.listEl.querySelectorAll(".task-trace-step") || []).forEach((stepEl) => {
+        const traceKey = String(stepEl?.dataset?.traceKey || "").trim();
+        if (traceKey && typeof viewState.steps?.[traceKey] === "boolean") stepEl.open = viewState.steps[traceKey];
+    });
+    Array.from(turn.listEl.querySelectorAll(".task-trace-round-tools") || []).forEach((host, hostIndex) => {
+        if (!(host instanceof HTMLElement)) return;
+        const toolKey = viewState.roundTools?.[ceoTurnTraceRoundHostKey(host, hostIndex)] || "";
+        if (toolKey && typeof setTraceRoundActiveTool === "function") setTraceRoundActiveTool(host, toolKey);
+    });
+}
+
 function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interruptedStageMarker = false } = {}) {
     if (!turn?.listEl || !turn?.flowEl) return 0;
     const summary = filterCeoInteractionFlowSummary(canonicalContext);
@@ -4480,6 +4571,8 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
         return 0;
     }
     syncCeoTurnLoadingOnlyState(turn, false);
+    // 整段重建会 wipe 掉回合内全部 DOM 态,先在 reset 之前捕获用户展开态快照。
+    const turnViewState = captureCeoTurnTraceViewState(turn);
     resetCeoToolFlow(turn);
     turn.el?.classList?.add?.("ceo-timeline");
     turn.listEl.classList?.add?.("task-trace-list");
@@ -4504,6 +4597,10 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
     turn.lastExecutionTraceSummary = summary;
     turn.flowEl.hidden = false;
     turn.flowEl.open = true;
+    // 有既有轨道时按重建前捕获的快照还原用户展开态(Flow 开合、阶段 details、
+    // 轮次工具条选中),覆盖上面的默认展开;必须发生在下方 [open] 懒加载遍历之前,
+    // 让用户此前展开的阶段重新水合输出块。
+    applyCeoTurnTraceViewState(turn, turnViewState);
     updateCeoTurnMeta(turn, `${stageCount} 个阶段 · ${roundCount} 轮工具`);
     if (typeof bindTraceOutputAutoLoad === "function") bindTraceOutputAutoLoad(turn.listEl);
     if (typeof hydrateTraceOutputBlocks === "function") {
@@ -6371,7 +6468,9 @@ function finalizeCeoTurn(text, meta = {}) {
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                turn.flowEl.open = true;
+                // 阶段轨道的展开态已由 renderCeoStageTraceIntoTurn 按用户选择还原,
+                // 收尾不再强制展开;仅无阶段轨道(纯工具事件回合)保留默认展开旧行为。
+                if (!finalTraceContext) turn.flowEl.open = true;
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
@@ -6438,7 +6537,9 @@ function finalizeCeoTurn(text, meta = {}) {
             if (turn.steps > 0) {
                 const hasRunningStep = hasRunningCeoToolStep(turn);
                 turn.flowEl.hidden = false;
-                turn.flowEl.open = true;
+                // 阶段轨道的展开态已由 renderCeoStageTraceIntoTurn 按用户选择还原,
+                // 收尾不再强制展开;仅无阶段轨道(纯工具事件回合)保留默认展开旧行为。
+                if (!finalTraceContext) turn.flowEl.open = true;
                 updateCeoTurnMeta(
                     turn,
                     turn.hasError ? "处理完成，但有异常" : (hasRunningStep ? "已返回当前判断，后台任务仍在运行" : "处理完成")
