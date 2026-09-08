@@ -90,6 +90,7 @@ const S = {
     ceoSessionUnread: {},
     ceoSessionMessageCounts: {},
     ceoSessionHydrated: false,
+    ceoSessionUnreadExempt: {},
     ceoBulkMode: false,
     ceoSelectedSessionIds: new Set(),
     ceoScrollToLatestOnSnapshot: false,
@@ -2864,6 +2865,38 @@ function markCeoSessionRead(sessionId, { messageCount = null } = {}) {
     }
 }
 
+/* 会话切换后的一次性 unread 豁免:
+   列表通道(ceo.sessions.patch/snapshot、REST)的 message_count 更新滞后于聊天通道渲染,
+   且切换瞬间 closeCeoWs 会丢掉在途 patch;切走之后迟到的计数补算会把用户已经看过的
+   旧消息误判为原会话的 unread。用户发起的切换(切换/新建会话)时为被离开的会话武装一条
+   窗口期豁免(多槽、互不覆盖):窗口期内其第一个正增量视为已读(只抬 baseline 不计 unread),
+   消费即失效;窗口过期自动作废,不误吞真新消息。 */
+const CEO_SESSION_UNREAD_EXEMPT_WINDOW_MS = 10000;
+
+function armCeoSessionUnreadExemption(previousActiveId) {
+    // 仅当页面已水合(存在真实的前序会话基线)才武装:冷启动时 activeSessionId() 会回退到
+    // ApiClient 的兜底 id "web:shared",不加此守卫的话每次加载都会为「用户从未看过的会话」误武装。
+    if (!S.ceoSessionHydrated) return;
+    const key = String(previousActiveId || "").trim();
+    if (!key) return;
+    S.ceoSessionUnreadExempt = {
+        ...(S.ceoSessionUnreadExempt || {}),
+        [key]: Date.now() + CEO_SESSION_UNREAD_EXEMPT_WINDOW_MS,
+    };
+}
+
+function clearCeoSessionUnreadExemption(sessionId) {
+    const exempt = S.ceoSessionUnreadExempt || {};
+    if (!sessionId) {
+        S.ceoSessionUnreadExempt = {};
+        return;
+    }
+    if (!Object.prototype.hasOwnProperty.call(exempt, sessionId)) return;
+    const next = { ...exempt };
+    delete next[sessionId];
+    S.ceoSessionUnreadExempt = next;
+}
+
 function syncCeoSessionUnreadState(sessions = [], activeId = activeSessionId()) {
     const previousCounts = S.ceoSessionMessageCounts && typeof S.ceoSessionMessageCounts === "object"
         ? S.ceoSessionMessageCounts
@@ -2874,6 +2907,12 @@ function syncCeoSessionUnreadState(sessions = [], activeId = activeSessionId()) 
     const nextCounts = {};
     const nextUnread = {};
     const hydrated = !!S.ceoSessionHydrated;
+
+    if (S.ceoSessionUnreadExempt && Object.keys(S.ceoSessionUnreadExempt).some((key) => S.ceoSessionUnreadExempt[key] <= Date.now())) {
+        const next = { ...S.ceoSessionUnreadExempt };
+        Object.keys(next).forEach((key) => { if (next[key] <= Date.now()) delete next[key]; });
+        S.ceoSessionUnreadExempt = next;
+    }
 
     (Array.isArray(sessions) ? sessions : []).forEach((item) => {
         const sessionId = String(item?.session_id || "").trim();
@@ -2895,6 +2934,12 @@ function syncCeoSessionUnreadState(sessions = [], activeId = activeSessionId()) 
         }
 
         if (messageCount > previousCount) {
+            if (Object.prototype.hasOwnProperty.call(S.ceoSessionUnreadExempt || {}, sessionId)) {
+                // 离开该会话后的第一个正增量 = 列表计数迟到补算(消息已在聊天区看过),视为已读
+                clearCeoSessionUnreadExemption(sessionId);
+                nextUnread[sessionId] = 0;
+                return;
+            }
             nextUnread[sessionId] = existingUnread + (messageCount - previousCount);
             return;
         }
@@ -8665,6 +8710,8 @@ function applyOptimisticCeoSessionSwitch(sessionId, session = null) {
         return { previousActiveId, switched: false, renderedFromCache: false };
     }
     closeCeoWs();
+    // closeCeoWs 会丢掉原会话在途的 sessions.patch;武装一次性豁免,防止切换后迟到的计数补算生成假 unread
+    armCeoSessionUnreadExemption(previousActiveId);
     S.activeSessionId = targetId;
     S.activeSessionFamily = String(
         session?.session_family
@@ -8749,6 +8796,8 @@ async function createNewCeoSession() {
     renderCeoSessions();
     syncCeoPrimaryButton();
     try {
+        // 新建会话等于离开当前会话:同样武装一条豁免,防止当前会话在离开瞬间被误判 unread
+        armCeoSessionUnreadExemption(activeSessionId());
         const payload = await ApiClient.createCeoSession({});
         const nextActiveId = applyCeoSessionsPayload(payload);
         closeCeoWs();
