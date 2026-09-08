@@ -62,15 +62,25 @@
 - `manifest_created`
 - `method`
 - `warnings`
+- `resource_refresh`
+- `catalog`
+
+其中 `resource_refresh.ok=false` 表示资源系统刷新失败，新 skill 不会进入治理注册表；`catalog.ok=false`（如 `memory_manager_unavailable`）表示记忆目录同步未完成，属于注册失败信号——它不阻断治理注册，但必须记入交付说明，并在后续轮次重试或上报，不允许当没看见。
 
 ## 安装后必须复核
 
 默认自动完成安装与 manifest 补齐后，**不要直接把结果视为已经完全可用**。后续必须立刻做两步检查：
 
-1. **检查 skill 是否处于待修复状态**
-   - 先确认该 skill 不在当前运行时合同的 `repair_required_skills` 中。
-   - 再尝试 `load_skill_context(skill_id="<skill_id>")`；如果返回的是修复指引、不可用提示，或资源本身带 warnings/errors，就说明它仍是待修复状态。
-   - 一旦发现待修复，不要继续把它当成正常 skill 使用；先修复，再重新检查。
+1. **实测 `load_skill_context(skill_id="<skill_id>")`，按返回三态判定并处置**
+
+   - **A｜返回正文（`ok=true`）**：可加载。继续第 2 步。
+   - **B｜返回修复指引**（`error="skill_repair_required"`，或合同摘要 `repair_required_skills` 列出了它，或返回带 `warnings` / `errors`）：skill **已注册但当前不可用，处于待修复状态**。按 warnings 定位原因并修复：
+     - `missing required bins`：`resource.yaml` 的 `requires.bins` 声明了本机解析不到的命令（运行时用 `shutil.which` 逐个探测）。把声明改成本机实际可解析的等价命令（如 Windows 上 `python3`→`python`；本机只有 Edge 时不要声明 `chrome`，浏览器能力改挂已注册工具），或用 `exec` 安装缺失依赖。**禁止照抄上游 README 的依赖名**。
+     - `missing required env` / `missing required tools`：补齐环境变量，或改挂本机已存在的工具。
+     - 修复（filesystem 编辑会自动触发资源刷新）后必须重新调用 `load_skill_context` 复核，直到返回 A，或确认剩余缺口属于需用户安装/决策的运行时（如 Go、数据库），此时在交付说明里逐项列明缺什么、影响哪个 skill。
+   - **C｜返回「当前运行时技能未包含 `<id>`」**：该 skill **不在治理注册表里**（运行时对快照滞后已做实时可见性回退，此错误只代表未注册）。依次核查：安装是否真的落盘、`resource_refresh.ok` 是否为 true、`catalog.ok` 是否为 false；补齐注册后再复核。**不允许把这个状态当成“稍后自然会可用”而搁置**。
+
+   一旦发现待修复（B），不要继续把它当成正常 skill 使用；先修复，再重新检查。
 
 2. **必须检验一遍 `resource.yaml` 是否合规**
    - 自动生成的 `resource.yaml` 只是“尽量补齐”，不是最终验收结果。
@@ -92,6 +102,7 @@
 
 - 只要发现不合规点，就要**立即修改**，不要把“先装上再说”当成完成。
 - 只有在“非待修复”且 `resource.yaml` 通过上述清单后，才能把安装结果视为可继续使用的本地 skill。
+- 复核后仍存在无法自行解决的缺口（需用户安装/决策的运行时、`catalog` 注册失败未恢复等）时，必须在交付说明里精确列出：缺什么（具体 bin/env/tool 名）、影响哪个 skill、已做过哪些修复动作；不要笼统写“待复核”或“稍后再确认”。
 
 ## 行为边界
 
@@ -118,6 +129,7 @@
 - 如果是下载失败，改用 `method="git"` 或安装 `git`
 - 如果上游结构不标准，先安装可行部分，再交给 `skill-creator` 做二次适配
 - 如果日志里出现 `WinError 5` 指向临时目录中的 `.git/objects/pack/*`，优先升级到当前修复版本后再重试
+- 安装成功后 `load_skill_context` 不可加载，**不属于安装失败，不要重装**；按「安装后必须复核」的三态（B：待修复→修声明/装依赖后复核；C：未注册→核查 resource_refresh/catalog 并补注册）处置
 
 ## 安装与更新
 

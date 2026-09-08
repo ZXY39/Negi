@@ -123,7 +123,7 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。各工具
 
 加载门控：
 
-- 精确 `tool_id` 加载对两类 concrete tool 开放：当前 canonical `candidate_tool_names` 中的，以及当前 `rbac_visible_tool_names` 中仍然 surfaced 的，都可以读取 toolskill / 参数说明。`load_tool_context(search_query=...)` 维持可见工具搜索路径，不是枚举所有 RBAC 可见工具的 API。`load_skill_context` 只允许命中当前 canonical skill candidate 集合。
+- 精确 `tool_id` 加载对两类 concrete tool 开放：当前 canonical `candidate_tool_names` 中的，以及当前 `rbac_visible_tool_names` 中仍然 surfaced 的，都可以读取 toolskill / 参数说明。`load_tool_context(search_query=...)` 维持可见工具搜索路径，不是枚举所有 RBAC 可见工具的 API。`load_skill_context` 以当前 canonical skill candidate 集合为主门禁；候选未命中时回退查询实时治理可见集（`list_contract_visible_skill_resources`），命中即放行到服务层加载——这条回退让任务运行中途新注册的 skill（如 `skill-installer` 在节点运行中装入的）对当前节点立即可判定，RBAC 与 repair-required 语义仍由 `load_skill_context_v2` 强制；两边都未命中才返回「当前运行时技能未包含」门禁错误，该错误因此只表示“未注册/不可见”，不表示快照滞后。
 - 只有普通 candidate tool load 会进入 hydration/promotion、占用 hydration LRU；对已经 callable、已经 hydrated、fixed builtin，或当前仅 RBAC 可见但不在 candidate 里的 direct-load lane，`load_tool_context` 都是 read-only toolskill 加载。
 - 例外：runtime 侧还有一条免模型的 hydration 触发——`exec` 结果发生输出截断（`stdout_truncated` / `stderr_truncated`）时，运行时自动把 `content_open` 水合到下一轮 callable，并在这条 exec 结果里注入提醒，让模型直接从"立即可用但截断的 exec"切换到"能按行/字符精确读本地文件的 content_open"，不必先手动 `load_tool_context`。若 `content_open` 不在当前 candidate 集合则静默跳过；同一结果只注入一次。
 - repair-required 资源从普通候选中剥离：工具进 `repair_required_tools`（不进入 agent-facing `candidate_tools` / `callable_tools` / `hydrated_tools`），skill 进 `repair_required_skills`（不进入 `candidate_skills`）；这两个列表只影响 agent-facing runtime contract，不等于 provider-facing `tools[]` 变化。
@@ -154,7 +154,8 @@ exec 与 memory 工具家族：
 - skill 加载是“当前轮立即消费正文”
 - 不走 hydration 状态机
 - 对 CEO/frontdoor，`frontdoor_runtime_tool_contract` 摘要会把 `candidate_skills` 明确标成“可通过 `load_skill_context` 读取正文”的候选，避免模型把它们误读成需要安装/水合的候选工具
-- repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引，不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
+- repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引（`skill_repair_required` payload 携带 `warnings` / `errors` / `next_actions`），不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
+- 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）与 `tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）承载
 
 ### 3.4 hydrated tools
 
