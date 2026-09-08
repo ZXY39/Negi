@@ -42,6 +42,7 @@ tests/resources/**/*.pyc
 !tests/test_china_bridge_removal_migration.py
 !tests/test_web_outbound_drain.py
 !tests/test_paused_turn_transcript_lifecycle.py
+!tests/test_prompt_batch_sibling_merge.py
 !tests/test_security_overlay_guard.py
 
 # Runtime and local state

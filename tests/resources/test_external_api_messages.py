@@ -362,3 +362,92 @@ async def test_oversized_attachment_rejected(harness, registry):
         )
 
     assert response.status_code == 413
+
+
+@pytest.mark.asyncio
+async def test_queued_message_idempotency_dedupes_resubmit(harness, registry):
+    """排队提交同样占幂等位：渠道消息在回合运行期间重试/重发不得反复入队，
+    否则用户收到多份重复回复。"""
+    session = _FakeSession(running=True)
+    app, _ = harness(session=session)
+    async with _client(app) as client:
+        created = (await client.post("/api/v1/sessions", json={"external_key": "qq:dm:q"})).json()
+        session_id = created["session_id"]
+
+        first = await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"text": "第一条"},
+            headers={"Idempotency-Key": "evt-q1"},
+        )
+        retry = await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"text": "第一条"},
+            headers={"Idempotency-Key": "evt-q1"},
+        )
+        second = await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"text": "第二条"},
+            headers={"Idempotency-Key": "evt-q2"},
+        )
+
+    assert first.json()["status"] == "queued"
+    assert retry.json()["status"] == "duplicate"
+    assert retry.json()["original_status"] == "queued"
+    assert retry.json()["turn_id"] is None
+    assert second.json()["status"] == "queued"
+    assert len(session.queued) == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_after_turn_record_eviction_reports_completed():
+    """终态回合记录被淘汰后，幂等表条目仍在：重复提交按“已完成”回报，
+    而不是放行第二次执行。"""
+    bridge = _FakeBridge(_FakeSession())
+    service = external_turns.ExternalTurnService(runtime_bridge=bridge, register_task=None)
+    entry = SimpleNamespace(session_key="ext:t:abc", bridge_id="t", external_key="qq:dm:e")
+    service._idempotency[(entry.session_key, "evt-gone")] = "evicted-turn-id"
+
+    result = await service.submit(entry=entry, user_message="重发", idempotency_key="evt-gone")
+
+    assert result == {"turn_id": None, "status": "duplicate", "original_status": "completed"}
+    assert bridge.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_terminal_turn_records_evicted_beyond_memory_limit():
+    """回合记录表有界：超限从最旧终态记录淘汰，运行中记录与新记录保留。"""
+    bridge = _FakeBridge(_FakeSession())
+    service = external_turns.ExternalTurnService(runtime_bridge=bridge, register_task=None)
+    entry = SimpleNamespace(session_key="ext:t:abc", bridge_id="t", external_key="qq:dm:e")
+
+    async def _noop_execute(record, user_message):
+        record.status = "completed"
+
+    service._execute_turn = _noop_execute
+
+    limit = external_turns.TURN_RECORD_MEMORY_LIMIT
+    for index in range(limit):
+        service._turns[f"old-{index}"] = external_turns.TurnRecord(
+            turn_id=f"old-{index}",
+            session_key=entry.session_key,
+            bridge_id="t",
+            external_key="qq:dm:e",
+            status="completed",
+            started_at="",
+        )
+    service._turns["running-1"] = external_turns.TurnRecord(
+        turn_id="running-1",
+        session_key=entry.session_key,
+        bridge_id="t",
+        external_key="qq:dm:e",
+        status="running",
+        started_at="",
+    )
+
+    result = await service.submit(entry=entry, user_message="新消息", idempotency_key="evt-new")
+
+    assert result["status"] == "started"
+    assert len(service._turns) <= limit
+    assert "running-1" in service._turns
+    assert result["turn_id"] in service._turns
+    assert "old-0" not in service._turns

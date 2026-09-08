@@ -540,7 +540,34 @@ function activeSessionItem() {
 }
 
 function isChannelSessionItem(item) {
-    return String(item?.session_family || "").trim() === "channel" || String(item?.session_origin || "").trim() === "china";
+    if (String(item?.session_family || "").trim() === "channel") return true;
+    const origin = String(item?.session_origin || "").trim();
+    if (origin === "china" || origin === "external") return true;
+    const sessionId = String(item?.session_id || "").trim();
+    return sessionId.startsWith("china:") || sessionId.startsWith("ext:");
+}
+
+function deriveCeoChannelId(item = {}) {
+    const explicit = String(item?.channel_id || "").trim();
+    if (explicit) return explicit;
+    const sessionId = String(item?.session_id || "").trim();
+    if (sessionId.startsWith("ext:")) {
+        const bridgeId = String(sessionId.split(":")[1] || "").trim();
+        return bridgeId ? `ext:${bridgeId}` : "";
+    }
+    if (sessionId.startsWith("china:")) {
+        return String(sessionId.split(":")[1] || "").trim();
+    }
+    return "";
+}
+
+function displayChannelGroupLabel(channelId) {
+    const raw = String(channelId || "").trim();
+    if (raw.startsWith("ext:")) {
+        const bridgeId = raw.slice(4).trim();
+        return `外部桥接 · ${bridgeId || "bridge"}`;
+    }
+    return displayChinaChannelLabel(raw);
 }
 
 function activeSessionIsReadonly() {
@@ -3682,9 +3709,18 @@ function syncCeoPrimaryButton() {
     syncCeoAttachButton();
     if (!U.ceoSend) return;
     if (activeSessionIsReadonly()) {
-        U.ceoSend.innerHTML = '<i data-lucide="eye"></i> 渠道会话只读';
-        U.ceoSend.disabled = true;
-        U.ceoSend.setAttribute("aria-label", "渠道会话只读");
+        if (S.ceoTurnActive) {
+            // 渠道会话禁止发送，但运行中的回合必须能暂停：只读早期返回
+            // 曾把唯一的暂停入口也禁掉，导致渠道回合无法在网页暂停。
+            const label = S.ceoPauseBusy ? "暂停中" : "暂停";
+            U.ceoSend.innerHTML = `<i data-lucide="pause"></i> ${label}`;
+            U.ceoSend.disabled = !!S.ceoPauseBusy;
+            U.ceoSend.setAttribute("aria-label", "暂停当前渠道会话回合");
+        } else {
+            U.ceoSend.innerHTML = '<i data-lucide="eye"></i> 渠道会话只读';
+            U.ceoSend.disabled = true;
+            U.ceoSend.setAttribute("aria-label", "渠道会话只读");
+        }
         icons();
         return;
     }
@@ -8574,7 +8610,7 @@ function applyCeoSessionPatch(payload = {}) {
     if (!sessionId) return;
     const previousActiveId = activeSessionId();
     if (isChannelSessionItem(item)) {
-        const targetChannelId = String(item.channel_id || "").trim();
+        const targetChannelId = deriveCeoChannelId(item);
         let found = false;
         S.ceoChannelGroups = normalizeCeoChannelGroups((S.ceoChannelGroups || []).map((group) => {
             const items = Array.isArray(group?.items) ? [...group.items] : [];
@@ -8591,7 +8627,7 @@ function applyCeoSessionPatch(payload = {}) {
         if (!found && targetChannelId) {
             S.ceoChannelGroups = normalizeCeoChannelGroups([
                 ...(S.ceoChannelGroups || []),
-                { channel_id: targetChannelId, label: displayChinaChannelLabel(targetChannelId), items: [item] },
+                { channel_id: targetChannelId, label: displayChannelGroupLabel(targetChannelId), items: [item] },
             ]);
         }
     } else {
@@ -8632,7 +8668,7 @@ function applyOptimisticCeoSessionSwitch(sessionId, session = null) {
     S.activeSessionId = targetId;
     S.activeSessionFamily = String(
         session?.session_family
-        || (isChannelSessionItem(session) || targetId.startsWith("china:") ? "channel" : "local")
+        || (isChannelSessionItem(session) || targetId.startsWith("china:") || targetId.startsWith("ext:") ? "channel" : "local")
     ).trim() || "local";
     S.ceoSessionTab = S.activeSessionFamily === "channel" ? "channel" : "local";
     ApiClient.setActiveSessionId(targetId);

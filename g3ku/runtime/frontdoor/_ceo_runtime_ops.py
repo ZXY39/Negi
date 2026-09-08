@@ -1105,6 +1105,73 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return content_blocks or merged_text
 
     @staticmethod
+    def _request_content_block_list(content: Any) -> list[Any]:
+        """Normalize user-message content into a block list (str -> one text
+        block) so batch sibling contents can be merged block-wise."""
+        if content is None:
+            return []
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content.strip() else []
+        if isinstance(content, list):
+            blocks: list[Any] = []
+            for item in content:
+                if isinstance(item, str):
+                    if item.strip():
+                        blocks.append({"type": "text", "text": item})
+                elif isinstance(item, dict):
+                    blocks.append(item)
+            return blocks
+        text = str(content or "")
+        return [{"type": "text", "text": text}] if text.strip() else []
+
+    def _merge_prompt_batch_sibling_contents(
+        self,
+        *,
+        session: Any,
+        current_turn_id: str,
+        current_content: Any,
+        model_refs: list[str] | None,
+    ) -> Any:
+        """把 prompt_batch 批次内其它输入的内容块并入当前回合请求。
+
+        prompt_batch 只以批次最后一条输入驱动回合，frontdoor 只能展开这一条
+        输入的内容：用户连续发送的消息被排队并合并成一个批次时，较早输入的
+        文本与图片会彻底缺席模型请求（助手只看到最后一条）。这里按时间顺序
+        把同批次其它输入的内容块（各自按其元数据展开）并入当前回合内容，
+        相同块去重。转录不受影响——合并只发生在请求构建期，完成回写时各行
+        仍按各自原文落盘。中途追加的 follow-up 消息在 prepare 之后才会进入
+        `_active_user_batch_inputs`（见 `_consume_session_follow_up_messages_before_call_model`），
+        不会与本合并重叠。"""
+        batch_inputs = list(getattr(session, "_active_user_batch_inputs", None) or [])
+        if len(batch_inputs) < 2 or not current_turn_id:
+            return current_content
+        sibling_inputs = [
+            item
+            for item in batch_inputs
+            if str(((getattr(item, "metadata", None) or {}).get("_transcript_turn_id")) or "").strip()
+            not in ("", current_turn_id)
+        ]
+        if not sibling_inputs:
+            return current_content
+        merged_blocks: list[Any] = []
+        for item in sibling_inputs:
+            item_metadata = dict(getattr(item, "metadata", None) or {})
+            expanded = self._expand_web_ceo_uploads_for_current_request_content(
+                content=self._model_content(getattr(item, "content", "")),
+                metadata=item_metadata,
+                model_refs=model_refs,
+            )
+            for block in self._request_content_block_list(expanded):
+                if block not in merged_blocks:
+                    merged_blocks.append(block)
+        if not merged_blocks:
+            return current_content
+        for block in self._request_content_block_list(current_content):
+            if block not in merged_blocks:
+                merged_blocks.append(block)
+        return merged_blocks
+
+    @staticmethod
     def _message_content_has_multimodal_blocks(value: Any) -> bool:
         if not isinstance(value, list):
             return False
@@ -5547,9 +5614,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if cron_internal
             else internal_event_bundle_text
             if heartbeat_internal and internal_event_bundle_text
-            else self._expand_web_ceo_uploads_for_current_request_content(
-                content=self._model_content(user_content),
-                metadata=metadata,
+            else self._merge_prompt_batch_sibling_contents(
+                session=session,
+                current_turn_id=str(metadata.get("_transcript_turn_id") or "").strip(),
+                current_content=self._expand_web_ceo_uploads_for_current_request_content(
+                    content=self._model_content(user_content),
+                    metadata=metadata,
+                    model_refs=model_refs,
+                ),
                 model_refs=model_refs,
             )
         )

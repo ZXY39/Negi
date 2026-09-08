@@ -297,3 +297,195 @@ def test_runtime_agent_session_serializes_prompt_and_keeps_live_targets(monkeypa
         ]
 
     asyncio.run(_run())
+
+
+class _RefreshSession:
+    def __init__(self, key: str, content: str = "reply") -> None:
+        self.key = key
+        self.messages = [{"role": "assistant", "content": content}]
+        self.metadata = {}
+        self.created_at = datetime(2026, 3, 21, 10, 0, 0)
+        self.updated_at = datetime(2026, 3, 21, 10, 5, 0)
+
+
+class _RefreshStore:
+    """Session-manager double for resolver/patch tests: registry-backed ext
+    lookup needs ``workspace``; listing needs ``list_sessions``."""
+
+    def __init__(self, workspace: Path, keys: list[str]) -> None:
+        self.workspace = workspace
+        self._sessions = {key: _RefreshSession(key) for key in keys}
+
+    def list_sessions(self):
+        return [{"key": key} for key in self._sessions]
+
+    def get_or_create(self, key: str):
+        return self._sessions[key]
+
+    def save(self, _session) -> None:
+        return None
+
+
+def test_resolve_active_ceo_session_id_keeps_external_channel_session(tmp_path: Path) -> None:
+    """刷新网页时激活的 ``ext:`` 渠道会话必须保住：解析器不能因为它不是
+    ``web:`` 键就回退到最近的本地会话并改写状态存储（P3 回归形态）。"""
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.web_ceo_sessions import WebCeoStateStore, resolve_active_ceo_session_id
+
+    reset_external_session_registry()
+    try:
+        registry = ExternalSessionRegistry(tmp_path)
+        entry, _ = registry.resolve_or_create(bridge_id="qq-official", external_key="qq:c2c:user-1")
+
+        # 本地存在更新的 web 会话：若 ext 键被误判无效，解析器会切到它。
+        store = _RefreshStore(tmp_path, ["web:newer-local"])
+        state_store = WebCeoStateStore(workspace=tmp_path)
+        state_store.set_active_session_id(entry.session_key)
+
+        resolved = resolve_active_ceo_session_id(store, state_store)
+
+        assert resolved == entry.session_key
+        assert state_store.get_active_session_id() == entry.session_key
+    finally:
+        reset_external_session_registry()
+
+
+def test_resolve_active_ceo_session_id_keeps_ext_session_with_transcript_only(tmp_path: Path) -> None:
+    """孤儿 ``ext:`` 转录（注册表无条目）同样是有效会话，刷新不得切走。"""
+    from g3ku.runtime.external_sessions import reset_external_session_registry
+    from g3ku.runtime.web_ceo_sessions import WebCeoStateStore, resolve_active_ceo_session_id
+
+    reset_external_session_registry()
+    try:
+        orphan_key = "ext:qq-official:orphan12"
+        store = _RefreshStore(tmp_path, ["web:newer-local", orphan_key])
+        state_store = WebCeoStateStore(workspace=tmp_path)
+        state_store.set_active_session_id(orphan_key)
+
+        resolved = resolve_active_ceo_session_id(store, state_store)
+
+        assert resolved == orphan_key
+        assert state_store.get_active_session_id() == orphan_key
+    finally:
+        reset_external_session_registry()
+
+
+def test_resolve_active_ceo_session_id_falls_back_for_unknown_ext_key(tmp_path: Path) -> None:
+    """不存在的 ``ext:`` 键（既无注册表条目也无转录）仍走原有回退。"""
+    from g3ku.runtime.external_sessions import reset_external_session_registry
+    from g3ku.runtime.web_ceo_sessions import WebCeoStateStore, resolve_active_ceo_session_id
+
+    reset_external_session_registry()
+    try:
+        store = _RefreshStore(tmp_path, ["web:only-local"])
+        state_store = WebCeoStateStore(workspace=tmp_path)
+        state_store.set_active_session_id("ext:ghost:deadbeef")
+
+        resolved = resolve_active_ceo_session_id(store, state_store)
+
+        assert resolved == "web:only-local"
+        assert state_store.get_active_session_id() == "web:only-local"
+    finally:
+        reset_external_session_registry()
+
+
+def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> None:
+    """补丁/快照构建器必须给渠道键返回渠道形状（P4 根因的契约侧）：
+    本地构建器对渠道键返回 None，通用兜底会把它标成普通 web 会话。"""
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.web_ceo_sessions import build_channel_ceo_session_item
+
+    reset_external_session_registry()
+    try:
+        registry = ExternalSessionRegistry(tmp_path)
+        entry, _ = registry.resolve_or_create(bridge_id="qq-official", external_key="qq:c2c:user-1")
+        china_key = "china:qqbot:default:dm:user-a"
+        store = _RefreshStore(tmp_path, [entry.session_key, china_key, "web:shared"])
+
+        ext_item = build_channel_ceo_session_item(
+            store, entry.session_key, active_session_id=entry.session_key, is_running=True
+        )
+        assert ext_item is not None
+        assert ext_item["session_family"] == "channel"
+        assert ext_item["session_origin"] == "external"
+        assert ext_item["channel_id"] == "ext:qq-official"
+        assert ext_item["is_readonly"] is True
+        assert ext_item["can_rename"] is False
+        assert ext_item["can_delete"] is False
+        assert ext_item["is_active"] is True
+        assert ext_item["is_running"] is True
+        assert "qq:c2c:user-1" in ext_item["title"]
+
+        china_item = build_channel_ceo_session_item(store, china_key, active_session_id="web:shared")
+        assert china_item is not None
+        assert china_item["session_family"] == "channel"
+        assert china_item["session_origin"] == "china"
+        assert china_item["channel_id"] == "qqbot"
+        assert china_item["is_readonly"] is True
+        assert china_item["is_active"] is False
+
+        assert build_channel_ceo_session_item(store, "web:shared", active_session_id="") is None
+    finally:
+        reset_external_session_registry()
+
+
+def test_publish_ceo_session_patch_emits_channel_shape_for_channel_keys(tmp_path: Path) -> None:
+    """``ceo.sessions.patch`` 对渠道键必须发渠道形状条目：本地形状条目会
+    被前端短暂插进本地 web 会话列表（P4）。"""
+    from g3ku.runtime.api.websocket_ceo import _publish_ceo_session_patch
+    from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
+    from g3ku.runtime.web_ceo_sessions import WebCeoStateStore
+
+    reset_external_session_registry()
+    try:
+        registry = ExternalSessionRegistry(tmp_path)
+        entry, _ = registry.resolve_or_create(bridge_id="qq-official", external_key="qq:c2c:user-1")
+        china_key = "china:qqbot:default:dm:user-a"
+        store = _RefreshStore(tmp_path, [entry.session_key, china_key])
+        state_store = WebCeoStateStore(workspace=tmp_path)
+        state_store.set_active_session_id(entry.session_key)
+
+        envelopes: list[dict] = []
+
+        class _Registry:
+            def next_ceo_seq(self, session_id: str) -> int:
+                return 1
+
+            def publish_global_ceo(self, envelope: dict) -> None:
+                envelopes.append(envelope)
+
+        agent = SimpleNamespace(main_task_service=SimpleNamespace(registry=_Registry()))
+        runtime_manager = SimpleNamespace(get=lambda session_id: None)
+
+        _publish_ceo_session_patch(
+            agent=agent,
+            transcript_store=store,
+            runtime_manager=runtime_manager,
+            state_store=state_store,
+            session_id=entry.session_key,
+        )
+        _publish_ceo_session_patch(
+            agent=agent,
+            transcript_store=store,
+            runtime_manager=runtime_manager,
+            state_store=state_store,
+            session_id=china_key,
+        )
+
+        assert [envelope["type"] for envelope in envelopes] == ["ceo.sessions.patch", "ceo.sessions.patch"]
+        ext_envelope, china_envelope = envelopes
+        ext_item = ext_envelope["data"]["item"]
+        assert ext_item["session_id"] == entry.session_key
+        assert ext_item["session_family"] == "channel"
+        assert ext_item["session_origin"] == "external"
+        assert ext_item["channel_id"] == "ext:qq-official"
+        assert ext_item["is_readonly"] is True
+        assert ext_envelope["data"]["active_session_family"] == "channel"
+
+        china_item = china_envelope["data"]["item"]
+        assert china_item["session_id"] == china_key
+        assert china_item["session_family"] == "channel"
+        assert china_item["session_origin"] == "china"
+        assert china_item["channel_id"] == "qqbot"
+    finally:
+        reset_external_session_registry()

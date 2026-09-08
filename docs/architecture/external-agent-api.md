@@ -29,9 +29,9 @@
 - `POST /sessions/{id}/messages` 异步提交：空闲 → 启动回合并返回 `{turn_id, status:"started"}`；运行中 → `queue_follow_up_batch` 排队并返回 `{status:"queued", receipt:"收到，将在当前任务中一并处理。"}`。
 - 执行走 `SessionRuntimeBridge.prompt/prompt_batch`（与 web/CLI/cron 同一语义基座）。
 - **终态不变量**：每回合在全部路径上恰好发一个 `turn.completed` 或 `turn.failed`；`asyncio.CancelledError` 单独捕获、先发终态再上抛（缺终态曾卡死旧宿主的按会话串行队列，此为硬契约）。`turn.failed.error` 是用户可读全文（空则回退友好文案），`detail` 供排障。
-- 排空兜底：prompt 返回后循环 `drain_queued_follow_up_messages` → `archive_follow_up_chain_transition` → `prompt_batch` 续跑，整条回合链对外只有一个终态。
+- 排空兜底：prompt 返回后循环 `drain_queued_follow_up_messages` → `archive_follow_up_chain_transition` → `prompt_batch` 续跑，整条回合链对外只有一个终态。`prompt_batch` 只以批次最后一条输入驱动回合，较早输入的内容块在请求构建期并入（合同见 `runtime-overview.md`「prompt_batch 批次回合内容合并」）。
 - 回合任务以 `register_task(None, task)` 注册：以真实 session key 注册会在暂停时被 `cancel_session_tasks` 的 gather 自聚集死锁。
-- `Idempotency-Key` 头去重：同会话同键重复提交返回原 `turn_id` + `status:"duplicate"`（进程内有界映射）。
+- `Idempotency-Key` 头去重（进程内有界映射）：同会话同键重复提交返回 `status:"duplicate"` + `original_status`——原回合记录仍在则回报其状态与 `turn_id`；排队条目回报 `queued`（无 `turn_id`）；记录已被淘汰的带 id 条目回报 `completed`。排队提交同样占幂等位：否则同一条渠道消息在回合运行期间重试/重发会反复入队，用户收到多份重复回复。回合记录表有界，超限从最旧终态记录淘汰、运行中记录永不淘汰；幂等条目不随记录淘汰失效。
 - 附件：`data_base64` 落盘 `.g3ku/external-uploads/<session>/`（单附件 ≤5MiB）；图片构造 `image_url` 块，能否进模型由模型绑定 `image_multimodal_enabled` 门控（与 web 上传同语义）。
 - 控制端点复用桥语义：`POST /turns/{turn_id}/pause`（running guard，空闲返回未暂停）、`POST /sessions/{id}/cancel`。
 - `DELETE /sessions/{id}` 是清除语义（对齐 web-and-admin.md「Channel Session Clear Contract」）：转录清空、内存失效、side artifacts 全清，注册表条目保留。
@@ -63,7 +63,7 @@
 - 配置段 `qqBot`：`enabled`、`appId`、`appSecret`、`sandbox`。`appSecret` 与 `externalApi.tokens[].token` 同走 overlay 三件套（保存剥离、落盘占位、解锁回填）。管理面：Web「外部接入」页的官方 QQ 机器人面板，对应 `main/api/admin_rest.py` 的 `/api/qq-bot/settings`（GET/PUT；appSecret 只写，PUT 空串表示保留原值）与 `/api/qq-bot/status`。
 - 生命周期：`QqOfficialService` 随 web 运行时 refresh 启停（`g3ku/shells/web.py`），状态机 `enabled_off / not_configured / connecting / connected / error`；启动时若 `externalApi.tokens.qq-official` 缺失则自动签发并 `save_config`。
 - 运行入口是硬约束：botpy 的阻塞入口 `Client.run()`（内部对构造时捕获的 loop 调 `run_until_complete`）在已运行的 web 事件循环上会抛 "This event loop is already running"；桥必须走异步入口 `async with client: await client.start(...)`，使 botpy 与 uvicorn 共享同一事件循环，事件回调（`on_*`）因此可直接驱动回环 `/api/v1` 客户端。
-- 消息流：入站 `on_*` 事件按 external_key 映射建会话（`qq:group:<group_openid>` / `qq:c2c:<user_openid>` / `qq:guild:<guild>:<channel>` / `qq:guilddm:<guild>:<author>`），经 `Idempotency-Key: qq-<消息id>` 提交回合；消息中的图片附件（botpy `message.attachments` 中 `content_type` 为 `image/*` 且带绝对 http(s) URL 的条目）由桥下载后作为 `data_base64` 附件经本契约转发（单附件 ≤5MiB、每条消息至多 4 张；下载失败或超限降级为仅文本提交，纯图片消息照常提交）；每会话一条 SSE pump 消费 `reply.final` 与 `outbound.created`（主动提醒消费分支，路由见「出站路由（主动推送）」），分别经 `post_message` / `post_group_message` / `post_c2c_message` / `post_dms` 投递。
+- 消息流：入站 `on_*` 事件按 external_key 映射建会话（`qq:group:<group_openid>` / `qq:c2c:<user_openid>` / `qq:guild:<guild>:<channel>` / `qq:guilddm:<guild>:<author>`），经 `Idempotency-Key: qq-<消息id>` 提交回合——缺消息 id 时不带幂等键提交，绝不回退 external_key：external_key 对同一用户恒定，回退会撞掉该用户首条消息的幂等位并永久丢弃消息。提交返回 `status:"queued"`（会话正忙、消息已排队）时，桥必须把回执投递给用户（响应 `receipt` 为空则用兜底文案），静默会让用户以为消息被吞而重复发送。消息中的图片附件（botpy `message.attachments` 中 `content_type` 为 `image/*` 且带绝对 http(s) URL 的条目）由桥下载后作为 `data_base64` 附件经本契约转发（单附件 ≤5MiB、每条消息至多 4 张；下载失败或超限降级为仅文本提交，纯图片消息照常提交）；每会话一条 SSE pump 消费 `reply.final` 与 `outbound.created`（主动提醒消费分支，路由见「出站路由（主动推送）」），分别经 `post_message` / `post_group_message` / `post_c2c_message` / `post_dms` 投递。
 - 主动提醒约束：只能推给已注册过会话的目标（该用户/群先与机器人产生过消息）；频率受 QQ 开放平台主动消息额度与回复时间窗规则约束。
 - `qq-botpy` 在核心依赖（pyproject `dependencies`）里，`pip install -e .` 即装；唯一 `import botpy` 的模块是 `bridge.py` 且为惰性导入，环境缺失时服务报 `error` 状态，不会拖垮 web 运行时。
 

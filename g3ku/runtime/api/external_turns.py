@@ -34,6 +34,10 @@ from g3ku.runtime.session_agent import TURN_FAILED_FRIENDLY_TEXT
 
 QUEUED_RECEIPT_TEXT = "收到，将在当前任务中一并处理。"
 IDEMPOTENCY_MEMORY_LIMIT = 256
+# 终态回合记录只保留这么多条供幂等回查；超限从最旧的终态记录开始淘汰。
+TURN_RECORD_MEMORY_LIMIT = 256
+# 幂等表里排队条目没有回合 id，用空串占位（条目存在即视为重复提交）。
+QUEUED_IDEMPOTENCY_SENTINEL = ""
 
 
 @dataclass(slots=True)
@@ -74,6 +78,25 @@ class ExternalTurnService:
                 return record.turn_id
         return None
 
+    def _remember_idempotency(self, session_key: str, idem: str, turn_id: str) -> None:
+        self._idempotency[(session_key, idem)] = turn_id
+        while len(self._idempotency) > IDEMPOTENCY_MEMORY_LIMIT:
+            self._idempotency.popitem(last=False)
+
+    def _evict_terminal_turn_records(self) -> None:
+        """回合记录只用于幂等回查与状态展示；终态记录超限后从最旧开始淘汰，
+        运行中的记录永不淘汰。淘汰不影响幂等判定——幂等表条目仍然存在，
+        只是回查不到记录时按提交时的形态（排队/已完成）回报。"""
+        if len(self._turns) <= TURN_RECORD_MEMORY_LIMIT:
+            return
+        for turn_id in list(self._turns.keys()):
+            if len(self._turns) <= TURN_RECORD_MEMORY_LIMIT:
+                break
+            record = self._turns.get(turn_id)
+            if record is None or record.status == "running":
+                continue
+            self._turns.pop(turn_id, None)
+
     # -- submission ---------------------------------------------------------
 
     async def submit(
@@ -87,15 +110,29 @@ class ExternalTurnService:
         idem = str(idempotency_key or "").strip() or None
         lock = self._submit_locks.setdefault(session_key, asyncio.Lock())
         async with lock:
-            if idem:
-                existing_turn_id = self._idempotency.get((session_key, idem))
-                if existing_turn_id and existing_turn_id in self._turns:
-                    record = self._turns[existing_turn_id]
-                    return {"turn_id": record.turn_id, "status": "duplicate", "original_status": record.status}
+            if idem and (session_key, idem) in self._idempotency:
+                existing_turn_id = str(self._idempotency[(session_key, idem)] or "").strip()
+                record = self._turns.get(existing_turn_id) if existing_turn_id else None
+                if record is not None:
+                    original_status = record.status
+                elif existing_turn_id:
+                    # 记录已被淘汰：能进幂等表的带 id 条目必然启动过回合。
+                    original_status = "completed"
+                else:
+                    original_status = "queued"
+                return {
+                    "turn_id": record.turn_id if record is not None else None,
+                    "status": "duplicate",
+                    "original_status": original_status,
+                }
 
             session = self._runtime_bridge.get_existing_session(session_key)
             if SessionRuntimeBridge.session_is_running(session) and session is not None:
                 await session.queue_follow_up_batch([user_message], persist_transcript=True)
+                if idem:
+                    # 排队提交同样要占住幂等位：否则同一条渠道消息在回合运行
+                    # 期间重试/重发会反复入队，用户看到多份重复回复。
+                    self._remember_idempotency(session_key, idem, QUEUED_IDEMPOTENCY_SENTINEL)
                 return {"turn_id": None, "status": "queued", "receipt": QUEUED_RECEIPT_TEXT}
 
             turn_id = uuid.uuid4().hex
@@ -109,10 +146,9 @@ class ExternalTurnService:
                 idempotency_key=idem,
             )
             self._turns[turn_id] = record
+            self._evict_terminal_turn_records()
             if idem:
-                self._idempotency[(session_key, idem)] = turn_id
-                while len(self._idempotency) > IDEMPOTENCY_MEMORY_LIMIT:
-                    self._idempotency.popitem(last=False)
+                self._remember_idempotency(session_key, idem, turn_id)
 
             task = asyncio.create_task(self._execute_turn(record, user_message))
             if callable(self._register_task):

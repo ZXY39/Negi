@@ -1775,6 +1775,121 @@ def list_channel_ceo_sessions(
     )
 
 
+def _external_channel_row(
+    session_manager: Any,
+    key: str,
+    *,
+    entry: ExternalSessionEntry | None,
+    active_session_id: str,
+    is_running: bool,
+) -> dict[str, Any] | None:
+    """Single catalog/patch row for an ``ext:`` session key (see
+    `_list_external_channel_rows` for the registry-driven listing)."""
+    parts = key.split(":")
+    if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+        return None
+    bridge_id = parts[1].strip()
+    external_key = str(getattr(entry, "external_key", "") or "").strip()
+    entry_title = str(getattr(entry, "title", "") or "").strip()
+    label = _external_bridge_label(bridge_id)
+    if entry_title:
+        title = f"{label} · {entry_title}"
+    elif external_key:
+        title = f"{label} · {external_key}"
+    else:
+        title = f"{label} · {parts[2].strip()[:8]}"
+    session = session_manager.get_or_create(key)
+    visible_messages = transcript_messages(session)
+    return {
+        "session_id": key,
+        "title": title,
+        "preview_text": _channel_preview_text(session),
+        "message_count": len(visible_messages),
+        "created_at": _session_created_at(session) or str(getattr(entry, "created_at", "") or ""),
+        "updated_at": _session_updated_at(session),
+        "last_llm_output_at": _session_last_assistant_at(session),
+        "is_active": key == str(active_session_id or "").strip(),
+        "is_running": bool(is_running),
+        "session_family": "channel",
+        "session_origin": "external",
+        "is_readonly": True,
+        "can_rename": False,
+        "can_delete": False,
+        "channel_id": f"ext:{bridge_id}",
+        "account_id": bridge_id,
+        "chat_type": "dm",
+        "peer_id": external_key or None,
+        "thread_id": None,
+        "is_virtual": False,
+    }
+
+
+def build_channel_ceo_session_item(
+    session_manager: Any,
+    session_id: str,
+    *,
+    active_session_id: str,
+    is_running: bool = False,
+) -> dict[str, Any] | None:
+    """Channel-shaped CEO session item for ``china:`` / ``ext:`` keys.
+
+    `build_local_ceo_session_item` returns None for channel keys and the
+    generic `build_session_summary` fallback labels the entry as a local web
+    session, which pushes channel sessions into the web session list when a
+    `ceo.sessions.patch` is published. Patch and snapshot publishers route
+    channel keys through this builder so the entry keeps the catalog's
+    channel shape (session_family / channel_id / readonly flags)."""
+    key = str(session_id or "").strip()
+    resolved_active = str(active_session_id or "").strip()
+    if key.startswith("ext:"):
+        entry = None
+        manager_workspace = getattr(session_manager, "workspace", None)
+        if manager_workspace is not None:
+            try:
+                registry = ExternalSessionRegistry(Path(manager_workspace))
+            except Exception:
+                registry = None
+            if registry is not None:
+                try:
+                    for candidate in registry.list_entries():
+                        if str(getattr(candidate, "session_key", "") or "").strip() == key:
+                            entry = candidate
+                            break
+                except Exception:
+                    entry = None
+        return _external_channel_row(
+            session_manager,
+            key,
+            entry=entry,
+            active_session_id=resolved_active,
+            is_running=bool(is_running),
+        )
+    if not key.startswith("china:"):
+        return None
+    try:
+        parsed = parse_china_session_key(key)
+    except Exception:
+        parsed = None
+    if parsed is None:
+        return None
+    try:
+        session = session_manager.get_or_create(key)
+    except Exception:
+        return None
+    return _channel_session_summary_from_entry(
+        session_id=key,
+        parsed=parsed,
+        is_active=key == resolved_active,
+        is_running=bool(is_running),
+        preview_text=_channel_preview_text(session),
+        message_count=len(transcript_messages(session)),
+        created_at=_session_created_at(session),
+        updated_at=_session_updated_at(session),
+        last_llm_output_at=_session_last_assistant_at(session),
+        is_virtual=False,
+    )
+
+
 def _list_external_channel_rows(
     session_manager: Any,
     *,
@@ -1814,46 +1929,16 @@ def _list_external_channel_rows(
             known.add(key)
     rows: list[dict[str, Any]] = []
     for key in session_keys:
-        parts = key.split(":")
-        if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
-            continue
-        bridge_id = parts[1].strip()
         entry = entries_by_key.get(key)
-        external_key = str(getattr(entry, "external_key", "") or "").strip()
-        entry_title = str(getattr(entry, "title", "") or "").strip()
-        label = _external_bridge_label(bridge_id)
-        if entry_title:
-            title = f"{label} · {entry_title}"
-        elif external_key:
-            title = f"{label} · {external_key}"
-        else:
-            title = f"{label} · {parts[2].strip()[:8]}"
-        session = session_manager.get_or_create(key)
-        visible_messages = transcript_messages(session)
-        rows.append(
-            {
-                "session_id": key,
-                "title": title,
-                "preview_text": _channel_preview_text(session),
-                "message_count": len(visible_messages),
-                "created_at": _session_created_at(session) or str(getattr(entry, "created_at", "") or ""),
-                "updated_at": _session_updated_at(session),
-                "last_llm_output_at": _session_last_assistant_at(session),
-                "is_active": key == str(active_session_id or "").strip(),
-                "is_running": bool(callable(is_running_resolver) and is_running_resolver(key)),
-                "session_family": "channel",
-                "session_origin": "external",
-                "is_readonly": True,
-                "can_rename": False,
-                "can_delete": False,
-                "channel_id": f"ext:{bridge_id}",
-                "account_id": bridge_id,
-                "chat_type": "dm",
-                "peer_id": external_key or None,
-                "thread_id": None,
-                "is_virtual": False,
-            }
+        row = _external_channel_row(
+            session_manager,
+            key,
+            entry=entry,
+            active_session_id=active_session_id,
+            is_running=bool(callable(is_running_resolver) and is_running_resolver(key)),
         )
+        if row is not None:
+            rows.append(row)
     rows.sort(
         key=lambda item: str(item.get("last_llm_output_at") or item.get("updated_at") or item.get("created_at") or ""),
         reverse=True,
@@ -2044,8 +2129,40 @@ def _recent_local_session_keys(session_manager: Any) -> list[str]:
     )
 
 
+def _external_channel_session_exists(session_manager: Any, session_id: str) -> bool:
+    """``ext:`` 会话在外部会话注册表或有转录即视为存在。
+
+    与目录行同源（见 `_list_external_channel_rows`）：注册表是权威来源，
+    转录扫描兜底孤儿会话。保证 `resolve_active_ceo_session_id` 不会把正在
+    查看的 ext 渠道会话误判为无效并切换回本地 web 会话。"""
+    target = str(session_id or "").strip()
+    parts = target.split(":")
+    if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+        return False
+    try:
+        for item in session_manager.list_sessions():
+            if str(item.get("key") or "").strip() == target:
+                return True
+    except Exception:
+        pass
+    manager_workspace = getattr(session_manager, "workspace", None)
+    if manager_workspace is None:
+        return False
+    try:
+        registry = ExternalSessionRegistry(Path(manager_workspace))
+    except Exception:
+        return False
+    try:
+        entries = registry.list_entries()
+    except Exception:
+        return False
+    return any(str(getattr(entry, "session_key", "") or "").strip() == target for entry in entries)
+
+
 def _channel_session_exists(session_manager: Any, session_id: str) -> bool:
     target = str(session_id or "").strip()
+    if target.startswith("ext:"):
+        return _external_channel_session_exists(session_manager, target)
     if not target.startswith("china:"):
         return False
     try:

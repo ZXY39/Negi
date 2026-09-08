@@ -65,6 +65,9 @@ _MAX_INBOUND_ATTACHMENT_BYTES = 5 * 1024 * 1024
 _MAX_INBOUND_IMAGE_ATTACHMENTS = 4
 _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
+# 服务端排队回执兜底文案（正常取 /api/v1 响应里的 receipt）。
+_QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
+
 
 def _is_botpy_task(task: asyncio.Task) -> bool:
     """True for tasks botpy spawned on the shared loop.
@@ -217,12 +220,24 @@ async def run_qq_official_bridge(
             sessions[external_key] = session_id
             _spawn_pump(session_id, external_key)
         idem = idempotency_key_for(event_id)
-        await client.send_message(
+        # 绝不回退到 external_key 当幂等键：external_key 对同一用户恒定，
+        # 缺事件 id 的消息会用它撞掉该用户第一条消息的幂等位并被永久丢弃。
+        # 没有幂等键时提交不带键的请求，服务端按新消息处理。
+        response = await client.send_message(
             session_id,
             text,
-            idempotency_key=idem if idem else external_key,
+            idempotency_key=idem or None,
             attachments=attachment_payloads or None,
         )
+        payload = response if isinstance(response, dict) else {}
+        if str(payload.get("status") or "").strip() == "queued":
+            # 会话正忙、消息已排队：回执必须送达用户，否则用户看不到任何反馈，
+            # 会以为消息被吞掉而重复发送。
+            receipt = str(payload.get("receipt") or "").strip() or _QUEUED_RECEIPT_FALLBACK_TEXT
+            try:
+                await deliver(external_key, receipt)
+            except Exception:  # noqa: BLE001 - 回执失败不影响消息本身
+                logger.warning("qq-official failed to deliver queued receipt to {}", external_key)
 
     async def deliver(external_key: str, text: str) -> None:
         kind, target = parse_external_key(external_key)

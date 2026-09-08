@@ -266,9 +266,13 @@ def _image_attachment(url: str = "https://cdn.example/img.png", **overrides) -> 
     return SimpleNamespace(**fields)
 
 
-async def _start_bridge(monkeypatch: pytest.MonkeyPatch, media_transport: httpx.MockTransport):
+async def _start_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    media_transport: httpx.MockTransport,
+    client_cls: type[FakeExternalApiClient] = FakeExternalApiClient,
+):
     _install_fake_botpy(monkeypatch)
-    monkeypatch.setattr(bridge_module, "ExternalApiClient", FakeExternalApiClient)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", client_cls)
     monkeypatch.setattr(
         bridge_module,
         "_create_media_client",
@@ -419,6 +423,68 @@ async def test_bridge_caps_forwarded_attachment_count(monkeypatch: pytest.Monkey
         ext = FakeExternalApiClient.instances[-1]
         await _wait_until(lambda: ext.sent)
         assert len(ext.sent[0][3]) == bridge_module._MAX_INBOUND_IMAGE_ATTACHMENTS
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_sends_no_idempotency_key_when_event_id_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """缺事件 id 时不得回退 external_key 当幂等键：external_key 对同一用户
+    恒定，会撞掉该用户第一条消息的幂等位并永久丢弃后续消息（P2 根因之一）。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        message = _c2c_message("补发的消息", [], message_id="")
+        await client.on_c2c_message_create(message)
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        session_id, text, idem, attachments = ext.sent[0]
+        assert (session_id, text, attachments) == ("ext:qq-official:qq:c2c:u9", "补发的消息", [])
+        assert not idem  # 无键提交，服务端按新消息处理
+        assert idem != "qq:c2c:u9"
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+class _QueuedFakeExternalApiClient(FakeExternalApiClient):
+    """Every submission reports the session busy so the bridge must surface the
+    queued receipt to the QQ user instead of staying silent."""
+
+    async def send_message(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        idempotency_key: str = "",
+        attachments: list | None = None,
+    ) -> dict:
+        self.sent.append((session_id, text, idempotency_key, list(attachments or [])))
+        if text == "有回执":
+            return {"ok": True, "status": "queued", "receipt": "自定义排队回执", "turn_id": None}
+        return {"ok": True, "status": "queued", "turn_id": None}
+
+
+@pytest.mark.asyncio
+async def test_bridge_delivers_queued_receipt_to_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """会话正忙、消息已排队时必须把回执送达用户：静默会让用户以为消息被吞
+    而重复发送（P2）。响应缺 receipt 时用兜底文案。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, client_cls=_QueuedFakeExternalApiClient)
+    try:
+        await client.on_c2c_message_create(_c2c_message("有回执", [], message_id="q1"))
+        await client.on_c2c_message_create(_c2c_message("无回执", [], message_id="q2"))
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u9", "content": "自定义排队回执", "msg_type": 0}),
+            (
+                "post_c2c_message",
+                {"openid": "u9", "content": bridge_module._QUEUED_RECEIPT_FALLBACK_TEXT, "msg_type": 0},
+            ),
+        ]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

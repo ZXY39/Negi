@@ -20,6 +20,7 @@ from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     build_ceo_session_catalog,
+    build_channel_ceo_session_item,
     build_local_ceo_session_item,
     build_session_summary,
     ceo_session_family,
@@ -196,19 +197,33 @@ def _publish_ceo_session_patch(
     if not key:
         return
     active_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
-    item = build_local_ceo_session_item(
-        transcript_store,
-        key,
-        active_session_id=active_session_id,
-        is_running=_session_is_running(runtime_manager, key) if is_running is None else bool(is_running),
-    )
-    if item is None:
-        session = transcript_store.get_or_create(key)
-        item = build_session_summary(
-            session,
-            is_active=key == active_session_id,
-            is_running=_session_is_running(runtime_manager, key) if is_running is None else bool(is_running),
+    resolved_is_running = _session_is_running(runtime_manager, key) if is_running is None else bool(is_running)
+    if _is_channel_session_id(key):
+        # 渠道会话必须走渠道形状构建器：本地构建器返回 None 后会回退到
+        # `build_session_summary`，把渠道会话标成普通 web 会话推进全局补丁，
+        # 前端会把它短暂插进本地会话列表。
+        item = build_channel_ceo_session_item(
+            transcript_store,
+            key,
+            active_session_id=active_session_id,
+            is_running=resolved_is_running,
         )
+        if item is None:
+            return
+    else:
+        item = build_local_ceo_session_item(
+            transcript_store,
+            key,
+            active_session_id=active_session_id,
+            is_running=resolved_is_running,
+        )
+        if item is None:
+            session = transcript_store.get_or_create(key)
+            item = build_session_summary(
+                session,
+                is_active=key == active_session_id,
+                is_running=resolved_is_running,
+            )
     if preview_text is not None:
         item['preview_text'] = str(preview_text or '').strip()
     if message_count is not None:
