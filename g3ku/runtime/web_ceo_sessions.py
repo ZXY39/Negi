@@ -1783,23 +1783,42 @@ def _list_external_channel_rows(
 ) -> list[dict[str, Any]]:
     """Read-only catalog rows for live ``ext:*`` external bridge sessions.
 
-    The authoritative external_key/title mapping comes from the external
-    session registry when readable; otherwise the key digest stands in.
+    Registry-driven: the external session registry is the source of truth, so
+    a session appears in the CEO catalog as soon as the bridge registers it —
+    before the first turn persists a transcript file. The registry is resolved
+    from the session manager's own workspace so catalog and transcripts stay
+    on the same root; managers without a workspace (test doubles) fall back
+    to a transcript-file scan. Orphan ``ext:*`` transcript files without a
+    registry entry are still listed, with the key digest standing in for the
+    external_key/title.
     """
-    rows: list[dict[str, Any]] = []
-    try:
-        registry: ExternalSessionRegistry | None = ExternalSessionRegistry(workspace_path())
-    except Exception:
-        registry = None
+    manager_workspace = getattr(session_manager, "workspace", None)
+    registry: ExternalSessionRegistry | None = None
+    if manager_workspace is not None:
+        try:
+            registry = ExternalSessionRegistry(Path(manager_workspace))
+        except Exception:
+            registry = None
+    entries_by_key: dict[str, ExternalSessionEntry] = {}
+    if registry is not None:
+        for entry in registry.list_entries():
+            session_key = str(getattr(entry, "session_key", "") or "").strip()
+            if session_key:
+                entries_by_key[session_key] = entry
+    session_keys = list(entries_by_key.keys())
+    known = set(session_keys)
     for item in session_manager.list_sessions():
         key = str(item.get("key") or "").strip()
-        if not key.startswith("ext:"):
-            continue
+        if key.startswith("ext:") and key not in known:
+            session_keys.append(key)
+            known.add(key)
+    rows: list[dict[str, Any]] = []
+    for key in session_keys:
         parts = key.split(":")
         if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
             continue
         bridge_id = parts[1].strip()
-        entry = registry.get_by_session_key(key) if registry is not None else None
+        entry = entries_by_key.get(key)
         external_key = str(getattr(entry, "external_key", "") or "").strip()
         entry_title = str(getattr(entry, "title", "") or "").strip()
         label = _external_bridge_label(bridge_id)
@@ -1817,7 +1836,7 @@ def _list_external_channel_rows(
                 "title": title,
                 "preview_text": _channel_preview_text(session),
                 "message_count": len(visible_messages),
-                "created_at": _session_created_at(session),
+                "created_at": _session_created_at(session) or str(getattr(entry, "created_at", "") or ""),
                 "updated_at": _session_updated_at(session),
                 "last_llm_output_at": _session_last_assistant_at(session),
                 "is_active": key == str(active_session_id or "").strip(),

@@ -422,6 +422,10 @@ def _task_defaults_response(session) -> dict:
 
 @router.get("/ceo/sessions/{session_id}/pending-interrupts")
 async def get_ceo_session_pending_interrupts(session_id: str):
+    if _is_channel_session_id(session_id):
+        # Channel sessions are read-only archive views: no composer and no tool
+        # approval ever run there, so the interrupt set is empty by construction.
+        return {"ok": True, "session_id": session_id, "items": []}
     _agent, session_manager, runtime_manager, _state_store = _sessions()
     session = _assert_known_session(session_manager, session_id)
     runtime_session = _runtime_session(runtime_manager, session.key)

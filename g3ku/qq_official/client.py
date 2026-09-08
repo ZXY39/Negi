@@ -46,10 +46,14 @@ class ExternalApiClient:
         text: str,
         *,
         idempotency_key: str,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"text": text}
+        if attachments:
+            payload["attachments"] = list(attachments)
         response = await self._client.post(
             f"/sessions/{session_id}/messages",
-            json={"text": text},
+            json=payload,
             headers=self._headers({"Idempotency-Key": idempotency_key}),
         )
         response.raise_for_status()

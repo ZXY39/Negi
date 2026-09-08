@@ -20,7 +20,7 @@
 
 - `ExternalSessionRegistry`（`g3ku/runtime/external_sessions.py`）维护 `(bridge_id, external_key) ↔ session_key` 双向映射，原子持久化在 `.g3ku/external-sessions/registry.json`。
 - session key 形态 `ext:{bridge_id}:{sha1(external_key)[:16]}`（文件名安全；键里不含外部标识原文，真相只在注册表）。`build_external_session_key` 的 digest 长度参数只是注册表碰撞逃生口。
-- `POST /sessions` 按 `external_key` 幂等 get-or-create；转录复用共享 `SessionManager`（`sessions/ext_*.jsonl`），无独立持久化机制。
+- `POST /sessions` 按 `external_key` 幂等 get-or-create；转录复用共享 `SessionManager`（`sessions/ext_*.jsonl`），无独立持久化机制。首次创建成功与 `PATCH` 改名成功后，以尽力而为方式向 web CEO 端推送一次全局 `ceo.sessions.snapshot`（web 运行时未就绪时静默跳过，不影响接口返回）——浏览器只在页面加载时拉取 REST 会话列表，新渠道会话的实时可见性依赖该推送。
 - `ext:` 前缀在 `session_agent.py` 的 frontdoor 连续性前缀表中；web 侧对 `ext:` 会话与 legacy `china:` 归档同语义（目录分组、只读拒绝），判定收口在 `g3ku/runtime/session_keys.py::is_channel_session_key`。
 - 会话 key 编解码的规范实现位于核心模块 `g3ku/runtime/session_keys.py`（`china:*` 格式与历史转录字节级一致，存量转录保持可读）。
 
@@ -63,7 +63,7 @@
 - 配置段 `qqBot`：`enabled`、`appId`、`appSecret`、`sandbox`。`appSecret` 与 `externalApi.tokens[].token` 同走 overlay 三件套（保存剥离、落盘占位、解锁回填）。管理面：Web「外部接入」页的官方 QQ 机器人面板，对应 `main/api/admin_rest.py` 的 `/api/qq-bot/settings`（GET/PUT；appSecret 只写，PUT 空串表示保留原值）与 `/api/qq-bot/status`。
 - 生命周期：`QqOfficialService` 随 web 运行时 refresh 启停（`g3ku/shells/web.py`），状态机 `enabled_off / not_configured / connecting / connected / error`；启动时若 `externalApi.tokens.qq-official` 缺失则自动签发并 `save_config`。
 - 运行入口是硬约束：botpy 的阻塞入口 `Client.run()`（内部对构造时捕获的 loop 调 `run_until_complete`）在已运行的 web 事件循环上会抛 "This event loop is already running"；桥必须走异步入口 `async with client: await client.start(...)`，使 botpy 与 uvicorn 共享同一事件循环，事件回调（`on_*`）因此可直接驱动回环 `/api/v1` 客户端。
-- 消息流：入站 `on_*` 事件按 external_key 映射建会话（`qq:group:<group_openid>` / `qq:c2c:<user_openid>` / `qq:guild:<guild>:<channel>` / `qq:guilddm:<guild>:<author>`），经 `Idempotency-Key: qq-<消息id>` 提交回合；每会话一条 SSE pump 消费 `reply.final` 与 `outbound.created`（主动提醒消费分支，路由见「出站路由（主动推送）」），分别经 `post_message` / `post_group_message` / `post_c2c_message` / `post_dms` 投递。
+- 消息流：入站 `on_*` 事件按 external_key 映射建会话（`qq:group:<group_openid>` / `qq:c2c:<user_openid>` / `qq:guild:<guild>:<channel>` / `qq:guilddm:<guild>:<author>`），经 `Idempotency-Key: qq-<消息id>` 提交回合；消息中的图片附件（botpy `message.attachments` 中 `content_type` 为 `image/*` 且带绝对 http(s) URL 的条目）由桥下载后作为 `data_base64` 附件经本契约转发（单附件 ≤5MiB、每条消息至多 4 张；下载失败或超限降级为仅文本提交，纯图片消息照常提交）；每会话一条 SSE pump 消费 `reply.final` 与 `outbound.created`（主动提醒消费分支，路由见「出站路由（主动推送）」），分别经 `post_message` / `post_group_message` / `post_c2c_message` / `post_dms` 投递。
 - 主动提醒约束：只能推给已注册过会话的目标（该用户/群先与机器人产生过消息）；频率受 QQ 开放平台主动消息额度与回复时间窗规则约束。
 - `qq-botpy` 在核心依赖（pyproject `dependencies`）里，`pip install -e .` 即装；唯一 `import botpy` 的模块是 `bridge.py` 且为惰性导入，环境缺失时服务报 `error` 状态，不会拖垮 web 运行时。
 

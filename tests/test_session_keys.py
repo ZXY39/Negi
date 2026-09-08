@@ -203,6 +203,9 @@ def test_build_ceo_session_catalog_lists_external_bridge_sessions_readonly(monke
 
     class _Store:
         def __init__(self) -> None:
+            # The catalog resolves the external registry from the session
+            # manager's own workspace (mirrors the real SessionManager).
+            self.workspace = tmp_path
             self._sessions = {
                 "web:shared": _Session("web:shared", "local reply"),
                 entry.session_key: _Session(entry.session_key, "bridge reply"),

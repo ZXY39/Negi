@@ -260,6 +260,17 @@ def get_agent() -> AgentLoop:
     return _global_agent
 
 
+def peek_global_agent() -> Optional[AgentLoop]:
+    """Return the live global agent WITHOUT constructing it.
+
+    ``get_agent()`` lazily builds the agent (and its cron/heartbeat wiring) on
+    first call; hooks that only want to observe an already-running web runtime
+    — e.g. best-effort catalog fan-out, which must stay a no-op before the
+    runtime is up and in unit tests without a runtime — use this instead.
+    """
+    return _global_agent
+
+
 async def _cancel_background_task(task: asyncio.Task | None) -> None:
     if task is None:
         return

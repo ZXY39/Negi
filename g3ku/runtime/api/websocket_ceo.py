@@ -1237,15 +1237,11 @@ async def ceo_websocket(websocket: WebSocket):
     stream_task = asyncio.create_task(sender(stream_queue))
     try:
         await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='hello', data={'session_id': session_id}))
-        await _safe_send(
-            build_envelope(
-                channel='ceo',
-                session_id=session_id,
-                type='snapshot.ceo',
-                data={'messages': persisted_messages, **turn_payload},
-            )
-        )
-        await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.state', data={'state': session.state_dict()}))
+        # Session catalog goes out BEFORE the transcript snapshot: the snapshot
+        # can be tens of megabytes on long channel sessions (canonical-context
+        # payloads), and the list must never be queued behind it — otherwise the
+        # sidebar stays stale until the whole transcript drains (or the socket
+        # drops mid-transfer). Frontend envelope handling is order-independent.
         initial_catalog = build_ceo_session_catalog(
             transcript_store,
             active_session_id=resolve_active_ceo_session_id(transcript_store, state_store),
@@ -1262,6 +1258,15 @@ async def ceo_websocket(websocket: WebSocket):
                     'active_session_id': initial_catalog.get('active_session_id') or session_id,
                     'active_session_family': initial_catalog.get('active_session_family') or ceo_session_family(initial_catalog.get('active_session_id') or session_id),
                 },
+            )
+        )
+        await _safe_send(build_envelope(channel='ceo', session_id=session_id, type='ceo.state', data={'state': session.state_dict()}))
+        await _safe_send(
+            build_envelope(
+                channel='ceo',
+                session_id=session_id,
+                type='snapshot.ceo',
+                data={'messages': persisted_messages, **turn_payload},
             )
         )
         while True:

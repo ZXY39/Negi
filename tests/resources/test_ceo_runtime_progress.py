@@ -4941,8 +4941,9 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.sessions.snapshot"
         assert ws.receive_json()["type"] == "ceo.state"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
 
         ws.send_json({"type": "client.user_message", "text": "Install the skill"})
 
@@ -5047,8 +5048,9 @@ def test_ceo_websocket_forwards_reply_delta_without_turn_patch_spam(tmp_path: Pa
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.sessions.snapshot"
         assert ws.receive_json()["type"] == "ceo.state"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
 
         ws.send_json({"type": "client.user_message", "text": "Stream the answer"})
 
@@ -5143,8 +5145,9 @@ def test_ceo_websocket_final_reply_includes_current_turn_user_messages(tmp_path:
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.sessions.snapshot"
         assert ws.receive_json()["type"] == "ceo.state"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
 
         ws.send_json({"type": "client.user_message", "text": "Original request"})
 
@@ -5223,8 +5226,9 @@ def test_ceo_websocket_forwards_cron_heartbeat_ok_as_internal_ack(tmp_path: Path
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.sessions.snapshot"
         assert ws.receive_json()["type"] == "ceo.state"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
 
         ws.send_json({"type": "client.user_message", "text": "run cron turn"})
 
@@ -5979,8 +5983,9 @@ def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Pa
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.sessions.snapshot"
         assert ws.receive_json()["type"] == "ceo.state"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
 
         ws.send_json({"type": "client.user_message", "text": "Open bilibili"})
 
@@ -6018,8 +6023,9 @@ def test_ceo_websocket_memory_error_emits_non_empty_error_message(tmp_path: Path
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert ws.receive_json()["type"] == "snapshot.ceo"
+        assert ws.receive_json()["type"] == "ceo.sessions.snapshot"
         assert ws.receive_json()["type"] == "ceo.state"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
 
         ws.send_json({"type": "client.user_message", "text": "Open bilibili"})
 
@@ -6263,18 +6269,18 @@ def test_ceo_websocket_unknown_local_session_falls_back_to_existing_active_sessi
     client = TestClient(_build_app())
     with client.websocket_connect(f"/api/ws/ceo?session_id={missing_session_id}") as ws:
         hello = ws.receive_json()
-        snapshot = ws.receive_json()
-        state = ws.receive_json()
         sessions_snapshot = ws.receive_json()
+        state = ws.receive_json()
+        snapshot = ws.receive_json()
 
     assert hello["type"] == "hello"
     assert hello["session_id"] == active_session_id
-    assert snapshot["type"] == "snapshot.ceo"
-    assert snapshot["session_id"] == active_session_id
-    assert state["type"] == "ceo.state"
-    assert state["session_id"] == active_session_id
     assert sessions_snapshot["type"] == "ceo.sessions.snapshot"
     assert sessions_snapshot["data"]["active_session_id"] == active_session_id
+    assert state["type"] == "ceo.state"
+    assert state["session_id"] == active_session_id
+    assert snapshot["type"] == "snapshot.ceo"
+    assert snapshot["session_id"] == active_session_id
     assert [message["role"] for message in snapshot["data"]["messages"]] == ["user", "assistant"]
     assert snapshot["data"]["messages"][0]["content"] == "Keep the original context"
     assert snapshot["data"]["messages"][1]["content"] == "Still here"

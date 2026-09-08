@@ -145,11 +145,14 @@ async def test_service_provisions_token_and_bridge_errors_without_botpy(workspac
 
 @pytest.mark.asyncio
 async def test_client_sessions_messages_and_events() -> None:
+    captured: dict[str, dict] = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if request.method == "POST" and url.endswith("/sessions"):
             return httpx.Response(200, json={"ok": True, "session_id": "ext:qq-official:abc123"})
         if request.method == "POST" and url.endswith("/messages"):
+            captured["messages"] = json.loads(request.content)
             return httpx.Response(200, json={"ok": True, "turn_id": "t1", "status": "started"})
         if request.method == "GET" and url.endswith("/events"):
             body = (
@@ -166,6 +169,11 @@ async def test_client_sessions_messages_and_events() -> None:
 
     sent = await client.send_message(session_id, "hello", idempotency_key="qq-1")
     assert sent["turn_id"] == "t1"
+    assert captured["messages"] == {"text": "hello"}
+
+    attachment = {"kind": "image", "name": "a.png", "mime_type": "image/png", "data_base64": "aGk="}
+    await client.send_message(session_id, "看", idempotency_key="qq-2", attachments=[attachment])
+    assert captured["messages"] == {"text": "看", "attachments": [attachment]}
 
     events = [event async for event in client.stream_events(session_id, last_seq=0)]
     assert [event["type"] for event in events] == ["reply.final", "outbound.created"]

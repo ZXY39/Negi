@@ -29,8 +29,10 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from loguru import logger
 
 from g3ku.core.messages import UserInputMessage
+from g3ku.runtime.api.ceo_sessions import _publish_ceo_sessions_snapshot
 from g3ku.runtime.api.external_auth import ExternalApiPrincipal, require_external_api
 from g3ku.runtime.external_events import (
     SSE_HEARTBEAT_INTERVAL_SECONDS,
@@ -44,10 +46,12 @@ from g3ku.runtime.external_sessions import (
 from g3ku.runtime.session_keys import sanitize_channel_outbound_text
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
+    WebCeoStateStore,
     clear_web_ceo_session_artifacts,
     workspace_path,
 )
 from g3ku.session.manager import SessionManager
+from g3ku.shells.web import get_runtime_manager, peek_global_agent
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
 router = APIRouter()
@@ -71,6 +75,30 @@ def _session_manager() -> SessionManager:
     return SessionManager(workspace_path())
 
 
+def _publish_ceo_catalog_best_effort() -> None:
+    """Push a fresh CEO session catalog to connected web clients.
+
+    External sessions appear in the web CEO sidebar through the catalog; the
+    browser only refetches the REST list on page load, so live visibility of a
+    newly created/renamed ``ext:*`` session depends on this global publish.
+    Best-effort by contract: it must never fail the /api/v1 call. It only
+    observes the running web runtime (``peek_global_agent`` never constructs
+    the agent); with no live runtime there is no browser to notify.
+    """
+    try:
+        agent = peek_global_agent()
+        if agent is None:
+            return
+        session_manager = getattr(agent, "sessions", None)
+        if session_manager is None:
+            return
+        runtime_manager = get_runtime_manager(agent)
+        state_store = WebCeoStateStore(workspace_path())
+        _publish_ceo_sessions_snapshot(agent, session_manager, runtime_manager, state_store)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        logger.debug("external api ceo catalog publish skipped: {}", exc)
+
+
 # -- sessions ---------------------------------------------------------------
 
 
@@ -86,6 +114,8 @@ async def create_external_session(
     entry, created = _registry().resolve_or_create(
         bridge_id=principal.bridge_id, external_key=external_key, title=title
     )
+    if created:
+        _publish_ceo_catalog_best_effort()
     return {
         "ok": True,
         "session_id": entry.session_key,
@@ -134,6 +164,7 @@ async def rename_external_session(
     if not title:
         raise HTTPException(status_code=400, detail="title_required")
     _registry().update_title(entry.session_key, title)
+    _publish_ceo_catalog_best_effort()
     return {"ok": True, "session_id": entry.session_key, "title": title}
 
 
