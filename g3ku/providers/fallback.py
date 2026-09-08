@@ -345,6 +345,37 @@ def should_retry_model_chain_error(error: Exception | str, retry_on: list[str] |
     return is_retryable_model_error(error, retry_on=retry_on)
 
 
+def normalize_forced_function_tool_choice(tool_choice: Any, *, protocol: str) -> Any:
+    """Normalize a forced single-function ``tool_choice`` selector to the gateway's form.
+
+    The two OpenAI-style protocols disagree on the shape of a function selector:
+
+    - Chat Completions requires ``{"type": "function", "function": {"name": X}}``.
+    - The ``/responses`` API requires the flat ``{"type": "function", "name": X}``.
+
+    Callers emit one of these two shapes. This helper rewrites the dict only when the
+    shape disagrees with ``protocol`` (``"chat"`` or ``"responses"``); string policies
+    (``"auto"`` / ``"none"`` / ``"required"``), non-function dicts, and already-correct
+    shapes pass through unchanged. Idempotent by construction.
+    """
+    if not isinstance(tool_choice, dict) or str(tool_choice.get("type") or "").strip() != "function":
+        return tool_choice
+    fn = tool_choice.get("function")
+    if isinstance(fn, dict):
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            name = str(tool_choice.get("name") or "").strip()
+    else:
+        name = str(tool_choice.get("name") or "").strip()
+    if not name:
+        return tool_choice
+    if protocol == "chat":
+        return {"type": "function", "function": {"name": name}}
+    if protocol == "responses":
+        return {"type": "function", "name": name}
+    return tool_choice
+
+
 def normalized_retry_count(value: int | None) -> int:
     try:
         return max(0, int(value or 0))

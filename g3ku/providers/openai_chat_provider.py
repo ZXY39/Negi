@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from openai import APIError as OpenAISDKAPIError
 
 from g3ku.providers.base import LLMProvider, LLMResponse, ToolCallRequest, normalize_usage_payload
+from g3ku.providers.fallback import normalize_forced_function_tool_choice
 from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.providers.streaming_timeouts import (
     StreamingDiagnostics,
@@ -122,6 +123,10 @@ class OpenAIChatProvider(LLMProvider):
                    request_timeout_seconds: float | None = None,
                    on_text_delta: Any = None) -> LLMResponse:
         del prompt_cache_key
+        # Chat Completions rejects the flat /responses-style function selector
+        # {"type":"function","name":X}; rewrite it to the nested form this protocol
+        # requires before building the request body.
+        tool_choice = normalize_forced_function_tool_choice(tool_choice, protocol="chat")
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
             "messages": self._sanitize_empty_content(messages),

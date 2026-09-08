@@ -7,16 +7,20 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.providers.base import LLMResponse, ToolCallRequest
+from g3ku.providers.fallback import normalize_forced_function_tool_choice
+from g3ku.heartbeat.prompt_lane import _task_distribution_error_lines
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, NODE_FIXED_BUILTIN_TOOL_NAMES
 from main.models import NodeFinalResult, NodeRecord, SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification, TokenUsageSummary
 from main.protocol import now_iso
+from main.runtime.node_runner import _DISTRIBUTION_DECISION_MAX_ATTEMPTS
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
     RESUME_MODE_WAIT_FOR_CHILDREN,
 )
 from main.service.runtime_service import MainRuntimeService
+from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 from main.storage.sqlite_store import SQLiteTaskStore
 
 
@@ -944,7 +948,7 @@ async def test_distribution_turn_requires_explicit_decision_for_each_live_child(
         backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = branch_a.node_id
         # the control turn now repairs invalid decisions: queue the same invalid
         # response for every attempt so retries are exhausted deterministically
-        backend._responses.extend([backend._responses[0]] * 2)
+        backend._responses.extend([backend._responses[0]] * (_DISTRIBUTION_DECISION_MAX_ATTEMPTS - 1))
 
         task = service.get_task(record.task_id)
         assert task is not None
@@ -954,7 +958,7 @@ async def test_distribution_turn_requires_explicit_decision_for_each_live_child(
         refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
         assert result.status == "failed"
         assert result.blocking_reason == "distribution_decision_missing_child_decisions"
-        assert len(backend.calls) == 3
+        assert len(backend.calls) == _DISTRIBUTION_DECISION_MAX_ATTEMPTS
         repair_messages = [
             message
             for message in backend.calls[1]["messages"]
@@ -970,7 +974,7 @@ async def test_distribution_turn_requires_explicit_decision_for_each_live_child(
             for item in list(refreshed_epoch.payload.get("debug_trace") or [])
             if item.get("event") == "control_turn_retry"
         ]
-        assert len(retry_events) == 2
+        assert len(retry_events) == _DISTRIBUTION_DECISION_MAX_ATTEMPTS - 1
     finally:
         await service.close()
 
@@ -1050,7 +1054,7 @@ async def test_distribution_turn_repairs_invalid_decision_on_retry(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_distribution_epoch_failure_keeps_task_paused_and_queues_root_notice(tmp_path: Path) -> None:
     empty_response = SimpleNamespace(tool_calls=[], content="")
-    backend = _QueuedChatBackend([empty_response, empty_response, empty_response])
+    backend = _QueuedChatBackend([empty_response] * _DISTRIBUTION_DECISION_MAX_ATTEMPTS)
     service = _build_service_with_backend(tmp_path, chat_backend=backend)
     try:
         record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
@@ -1098,7 +1102,7 @@ async def test_distribution_epoch_failure_keeps_task_paused_and_queues_root_noti
 @pytest.mark.asyncio
 async def test_resume_after_failed_distribution_downgrades_to_resume_ready(tmp_path: Path) -> None:
     empty_response = SimpleNamespace(tool_calls=[], content="")
-    backend = _QueuedChatBackend([empty_response, empty_response, empty_response])
+    backend = _QueuedChatBackend([empty_response] * _DISTRIBUTION_DECISION_MAX_ATTEMPTS)
     service = _build_service_with_backend(tmp_path, chat_backend=backend)
     try:
         record, root, _branch_a, _branch_b = await seed_live_root_with_two_running_children(service)
@@ -1370,7 +1374,7 @@ async def test_distribution_turn_terminate_requires_reason(tmp_path: Path) -> No
             )
         ],
     )
-    backend = _QueuedChatBackend([response, response, response])
+    backend = _QueuedChatBackend([response] * _DISTRIBUTION_DECISION_MAX_ATTEMPTS)
     service = _build_service_with_backend(tmp_path, chat_backend=backend)
     try:
         record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
@@ -1426,7 +1430,7 @@ async def test_distribution_turn_rejects_invalid_action(tmp_path: Path) -> None:
             )
         ],
     )
-    backend = _QueuedChatBackend([response, response, response])
+    backend = _QueuedChatBackend([response] * _DISTRIBUTION_DECISION_MAX_ATTEMPTS)
     service = _build_service_with_backend(tmp_path, chat_backend=backend)
     try:
         record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
@@ -3839,5 +3843,92 @@ async def test_new_compression_stage_rolls_append_notices_into_compressed_tail_b
         assert notice_index < compression_index
         assert "必须按董事会模板输出" in contents[notice_index]
         assert "必须补充风险分层" in contents[notice_index]
+    finally:
+        await service.close()
+
+
+def test_forced_function_tool_choice_normalization() -> None:
+    flat = {"type": "function", "name": "submit_message_distribution"}
+    nested = {"type": "function", "function": {"name": "submit_message_distribution"}}
+
+    # Chat Completions requires the nested object form.
+    assert normalize_forced_function_tool_choice(flat, protocol="chat") == nested
+    assert normalize_forced_function_tool_choice(nested, protocol="chat") == nested
+    # /responses requires the flat form.
+    assert normalize_forced_function_tool_choice(nested, protocol="responses") == flat
+    assert normalize_forced_function_tool_choice(flat, protocol="responses") == flat
+    # String policies and non-function dicts pass through.
+    assert normalize_forced_function_tool_choice("auto", protocol="chat") == "auto"
+    assert normalize_forced_function_tool_choice({"type": "none"}, protocol="chat") == {"type": "none"}
+
+
+def test_task_distribution_error_payload_normalization() -> None:
+    payload = normalize_task_distribution_error_payload(
+        {
+            "task_id": "task:demo",
+            "epoch_id": "epoch:001",
+            "session_id": "ext:qq:channel-id",
+            "title": "audit",
+            "error_text": "distribution_decision_missing_child_decisions",
+        }
+    )
+    assert payload["dedupe_key"] == "task-distribution-error:task:demo:epoch:001"
+    assert payload["session_id"] == "ext:qq:channel-id"
+    assert payload["error_text"] == "distribution_decision_missing_child_decisions"
+    # caller-supplied dedupe keys are ignored and recomputed server-side
+    spoofed = normalize_task_distribution_error_payload(
+        {"task_id": "task:demo", "epoch_id": "epoch:001", "dedupe_key": "evil"}
+    )
+    assert spoofed["dedupe_key"] == "task-distribution-error:task:demo:epoch:001"
+    assert normalize_task_distribution_error_payload({"task_id": ""}) == {}
+
+
+def test_task_distribution_error_prompt_lane_renders_reminder() -> None:
+    lines = _task_distribution_error_lines(
+        {
+            "task_id": "task:demo",
+            "title": "audit",
+            "error_text": "distribution_decision_missing_child_decisions",
+        },
+        [],
+        output_inline_limit=4000,
+    )
+    joined = "\n".join(lines)
+    assert "audit" in joined
+    assert "distribution_decision_missing_child_decisions" in joined
+    assert "如果多次出现，则不要再分发，通知用户现状任务已暂停" in joined
+
+
+@pytest.mark.asyncio
+async def test_distribution_failure_marks_paused_and_invokes_notifier(tmp_path: Path) -> None:
+    empty_response = SimpleNamespace(tool_calls=[], content="")
+    backend = _QueuedChatBackend([empty_response] * _DISTRIBUTION_DECISION_MAX_ATTEMPTS)
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    notified = []
+    service.task_actor_service.distribution_failure_notifier = lambda task_id, epoch_id, error_text: (
+        notified.append((task_id, epoch_id, error_text))
+    )
+    try:
+        record, root, _branch_a, _branch_b = await seed_live_root_with_two_running_children(service)
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="new global constraint",
+            frontier_node_ids=[root.node_id],
+        )
+
+        await service.task_actor_service.run_task(record.task_id)
+
+        latest = service.get_task(record.task_id)
+        assert latest is not None
+        assert latest.pause_requested is True
+        assert latest.is_paused is True
+        assert notified == [
+            (
+                record.task_id,
+                epoch.epoch_id,
+                "distribution_decision_missing_child_decisions",
+            )
+        ]
     finally:
         await service.close()

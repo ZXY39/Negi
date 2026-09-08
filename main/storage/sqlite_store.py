@@ -396,6 +396,21 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS task_distribution_error_outbox (
+                dedupe_key TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                delivery_state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                last_attempt_at TEXT NOT NULL,
+                last_error TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS task_worker_status_outbox (
                 worker_id TEXT PRIMARY KEY,
                 delivery_state TEXT NOT NULL,
@@ -454,6 +469,7 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_model_calls_task_id_seq ON task_model_calls(task_id, seq)',
             'CREATE INDEX IF NOT EXISTS idx_task_terminal_outbox_state_created_at ON task_terminal_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_stall_outbox_state_created_at ON task_stall_outbox(delivery_state, created_at)',
+            'CREATE INDEX IF NOT EXISTS idx_task_distribution_error_outbox_state_created_at ON task_distribution_error_outbox(delivery_state, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_worker_status_outbox_state_updated_at ON task_worker_status_outbox(delivery_state, updated_at)',
             'CREATE INDEX IF NOT EXISTS idx_task_summary_outbox_state_updated_at ON task_summary_outbox(delivery_state, updated_at)',
         ]
@@ -692,6 +708,7 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_commands WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_terminal_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_stall_outbox WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_distribution_error_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_summary_outbox WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_node_notifications WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_message_distribution_epochs WHERE task_id = ?', (task_id,))
@@ -1759,6 +1776,82 @@ class SQLiteTaskStore:
             ('delivered', delivered_at, delivered_at, '', key),
         )
 
+    def put_task_distribution_error_outbox(
+        self,
+        *,
+        dedupe_key: str,
+        task_id: str,
+        session_id: str,
+        created_at: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            raise ValueError('dedupe_key_required')
+        def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            row = conn.execute(
+                'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                'FROM task_distribution_error_outbox WHERE dedupe_key = ?',
+                (key,),
+            ).fetchone()
+            if row is None:
+                payload_json = json.dumps(payload, ensure_ascii=False)
+                conn.execute(
+                    'INSERT INTO task_distribution_error_outbox (dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (key, task_id, session_id, 'pending', created_at, created_at, '', 0, '', '', payload_json),
+                )
+                row = conn.execute(
+                    'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+                    'FROM task_distribution_error_outbox WHERE dedupe_key = ?',
+                    (key,),
+                ).fetchone()
+            return self._task_distribution_error_outbox_row(row)
+        return self._run_write(operation)
+
+    def get_task_distribution_error_outbox(self, dedupe_key: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'FROM task_distribution_error_outbox WHERE dedupe_key = ?',
+            (str(dedupe_key or '').strip(),),
+        )
+        return self._task_distribution_error_outbox_row(row) if row else None
+
+    def list_pending_task_distribution_error_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
+        rows = self._fetchall(
+            'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, payload_json '
+            'FROM task_distribution_error_outbox WHERE delivery_state != ? ORDER BY created_at ASC LIMIT ?',
+            ('delivered', max(1, int(limit or 200))),
+        )
+        return [self._task_distribution_error_outbox_row(row) for row in rows]
+
+    def mark_task_distribution_error_outbox_attempt(self, dedupe_key: str, *, attempted_at: str, error_text: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+        def operation(conn: sqlite3.Connection) -> None:
+            row = conn.execute('SELECT attempts, delivery_state FROM task_distribution_error_outbox WHERE dedupe_key = ?', (key,)).fetchone()
+            if row is None:
+                return
+            delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
+            if delivery_state == 'delivered':
+                return
+            attempts = int(row['attempts'] or 0) + 1
+            conn.execute(
+                'UPDATE task_distribution_error_outbox SET delivery_state = ?, updated_at = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE dedupe_key = ?',
+                ('pending', attempted_at, attempts, attempted_at, str(error_text or ''), key),
+            )
+        self._run_write(operation)
+
+    def mark_task_distribution_error_outbox_delivered(self, dedupe_key: str, *, delivered_at: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if not key:
+            return
+        self._execute_write(
+            'UPDATE task_distribution_error_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ? WHERE dedupe_key = ?',
+            ('delivered', delivered_at, delivered_at, '', key),
+        )
+
     def put_task_worker_status_outbox(
         self,
         *,
@@ -2489,6 +2582,25 @@ class SQLiteTaskStore:
 
     @staticmethod
     def _task_stall_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return {}
+        payload = json.loads(row['payload_json'])
+        return {
+            'dedupe_key': row['dedupe_key'],
+            'task_id': row['task_id'],
+            'session_id': row['session_id'],
+            'delivery_state': row['delivery_state'],
+            'created_at': row['created_at'],
+            'updated_at': row['updated_at'],
+            'delivered_at': row['delivered_at'],
+            'attempts': int(row['attempts'] or 0),
+            'last_attempt_at': row['last_attempt_at'],
+            'last_error': row['last_error'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+
+    @staticmethod
+    def _task_distribution_error_outbox_row(row: sqlite3.Row | None) -> dict[str, object]:
         if row is None:
             return {}
         payload = json.loads(row['payload_json'])

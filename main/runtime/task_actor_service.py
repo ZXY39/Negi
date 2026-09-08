@@ -5,6 +5,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from loguru import logger
+
 from main.errors import NodePausedError, TaskPausedError, describe_exception
 from main.models import NodeFinalResult, normalize_final_acceptance_metadata, normalize_result_payload
 from main.protocol import now_iso
@@ -384,6 +386,7 @@ class TaskActorService:
             ),
         }
         self.distribution_resume_callback = None
+        self.distribution_failure_notifier = None
         self._node_runner.nested_node_executor = self._execute_nested_node
         self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
 
@@ -394,6 +397,21 @@ class TaskActorService:
         result = resume_callback(task_id)
         if asyncio.iscoroutine(result):
             await result
+
+    def _notify_distribution_failure(self, *, task_id: str, epoch_id: str, error_text: str) -> None:
+        notifier = self.distribution_failure_notifier
+        if not callable(notifier):
+            return
+        try:
+            result = notifier(
+                task_id=str(task_id or '').strip(),
+                epoch_id=str(epoch_id or '').strip(),
+                error_text=str(error_text or '').strip(),
+            )
+            if asyncio.iscoroutine(result):
+                asyncio.get_running_loop().create_task(result)
+        except Exception:
+            logger.debug("distribution failure notifier callback failed for {}")
 
     async def _resume_pending_notice_nodes(self, task_id: str) -> bool:
         distribution = self._distribution_runtime_state(task_id)
@@ -766,9 +784,18 @@ class TaskActorService:
                 'error_text': error_text,
             },
         )
+        # The task is now stuck in a failed distribution: mark it paused at the
+        # task level so the task hall shows 「任务暂停」 instead of a running task.
+        # Resume (operator or CEO) clears this via set_pause_state(False, False).
+        self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
         # Deliberately no clear_pause / _resume_distribution_if_needed here: the task
         # stays paused until an operator or the CEO explicitly resumes it or appends a
         # new notice (which queues a fresh epoch and re-runs distribution).
+        self._notify_distribution_failure(
+            task_id=task_id,
+            epoch_id=epoch_id,
+            error_text=error_text,
+        )
         return True
 
     async def _run_distribution_epoch(self, task_id: str) -> bool | None:

@@ -99,7 +99,7 @@ _DISTRIBUTION_ACTION_VALUES = {
     DISTRIBUTION_ACTION_TERMINATE,
 }
 _DISTRIBUTION_TERMINATE_REASON_PREFIX = 'terminated by parent distribution decision'
-_DISTRIBUTION_DECISION_MAX_ATTEMPTS = 3
+_DISTRIBUTION_DECISION_MAX_ATTEMPTS = 5
 _DISTRIBUTION_DECISION_REPAIR_PREFIX = '上一轮消息分发决策无效'
 
 
@@ -2658,7 +2658,8 @@ class NodeRunner:
                 messages=attempt_messages,
                 tools=distribution_tools,
                 model_refs=model_refs,
-                # Responses-style gateways expect the flat function selector shape here.
+                # The flat function selector is normalized per gateway protocol at the
+                # provider boundary (Chat → nested object form, /responses → flat form).
                 tool_choice=tool_choice,
                 parallel_tool_calls=False,
                 on_model_retry_status=self._react_loop._model_retry_status_callback(

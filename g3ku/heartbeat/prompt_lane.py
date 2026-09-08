@@ -298,6 +298,21 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
     return lines
 
 
+def _task_distribution_error_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
+    task_id = _non_empty_text(event.get('task_id'))
+    task_title = _non_empty_text(event.get('title') or task_id) or 'task'
+    error_text = _non_empty_text(event.get('error_text')) or 'message distribution failed'
+    _append_retrieval_parts(retrieval_parts, 'task_distribution_error', task_title, task_id, error_text[:output_inline_limit])
+    lines = [
+        f'- Task {task_title} ({task_id}) 的消息分发失败（epoch state=failed），任务已暂停',
+        f'  Error: {error_text}',
+        '  提醒：如果多次出现，则不要再分发，通知用户现状任务已暂停。',
+    ]
+    if len(error_text) > output_inline_limit:
+        lines[1] = f'  Error excerpt: {error_text[:output_inline_limit].rstrip()}...'
+    return lines
+
+
 def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: int) -> tuple[str, str]:
     # 唤醒时刻锚点：模型上下文里没有其他"现在几点"来源，事件里又可能引用几小时前
     # 的时间（如 finished_at），头部给出本次唤醒的本地时间供模型直接对照。
@@ -317,6 +332,9 @@ def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: 
             continue
         if reason == "task_node_error":
             lines.extend(_task_node_error_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
+            continue
+        if reason == "task_distribution_error":
+            lines.extend(_task_distribution_error_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
             continue
         lines.extend(
             _task_terminal_lines(

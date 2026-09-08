@@ -132,6 +132,12 @@ from main.service.task_stall_callback import (
     resolve_task_stall_callback_token,
     resolve_task_stall_callback_url,
 )
+from main.service.task_distribution_error_callback import (
+    TASK_DISTRIBUTION_ERROR_CALLBACK_PATH,
+    normalize_task_distribution_error_payload,
+    resolve_task_distribution_error_callback_token,
+    resolve_task_distribution_error_callback_url,
+)
 from main.service.task_stall_notifier import (
     TaskStallNotifier,
     stall_bucket_minutes,
@@ -470,6 +476,13 @@ class MainRuntimeService:
                 )
             )
         )
+        self.task_actor_service.distribution_failure_notifier = (
+            lambda task_id, epoch_id, error_text: self.emit_task_distribution_error(
+                task_id=task_id,
+                epoch_id=epoch_id,
+                error_text=error_text,
+            )
+        )
         self.tool_pressure_monitor = WorkerPressureMonitor(
             controller=self.adaptive_tool_budget_controller,
             store=self.store,
@@ -524,6 +537,7 @@ class MainRuntimeService:
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._task_distribution_error_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_worker_status_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_summary_delivery_task: asyncio.Task[Any] | None = None
         self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
@@ -607,6 +621,7 @@ class MainRuntimeService:
             self._schedule_pending_task_worker_status_callbacks()
             self._schedule_pending_task_terminal_callbacks()
             self._schedule_pending_task_stall_callbacks()
+            self._schedule_pending_task_distribution_error_callbacks()
 
     def _start_worker_loops(self) -> None:
         if self._command_poller_task is None or self._command_poller_task.done():
@@ -2133,6 +2148,10 @@ class MainRuntimeService:
             target_path = TASK_STALL_CALLBACK_PATH
             primary_url = resolve_task_stall_callback_url(workspace=workspace)
             primary_token = resolve_task_stall_callback_token(workspace=workspace)
+        elif normalized_kind == 'distribution_error':
+            target_path = TASK_DISTRIBUTION_ERROR_CALLBACK_PATH
+            primary_url = resolve_task_distribution_error_callback_url(workspace=workspace)
+            primary_token = resolve_task_distribution_error_callback_token(workspace=workspace)
         else:
             return []
 
@@ -3348,6 +3367,27 @@ class MainRuntimeService:
             return False
         return bool(heartbeat.enqueue_task_stall_payload(normalized))
 
+    def emit_task_distribution_error(self, *, task_id: str, epoch_id: str, error_text: str) -> bool:
+        task = self.get_task(task_id)
+        payload = {
+            "task_id": task_id,
+            "session_id": self._task_origin_session_id(task),
+            "title": str(getattr(task, "title", "") or task_id).strip() or task_id,
+            "epoch_id": epoch_id,
+            "error_text": error_text,
+        }
+        normalized = normalize_task_distribution_error_payload(payload)
+        if not normalized:
+            return False
+        if self.execution_mode == 'worker':
+            self._enqueue_task_distribution_error_callback(normalized)
+            return True
+        loop = getattr(self, '_runtime_loop', None)
+        heartbeat = getattr(loop, 'web_session_heartbeat', None) if loop is not None else None
+        if heartbeat is None or not hasattr(heartbeat, 'enqueue_task_distribution_error_payload'):
+            return False
+        return bool(heartbeat.enqueue_task_distribution_error_payload(normalized))
+
     def classify_task_stall_reason(
         self,
         task_id: str,
@@ -3933,6 +3973,105 @@ class MainRuntimeService:
                         continue
                 break
             self.store.mark_task_stall_outbox_attempt(
+                dedupe_key,
+                attempted_at=now_iso(),
+                error_text=error_text,
+            )
+
+    def _enqueue_task_distribution_error_callback(self, payload: dict[str, Any]) -> None:
+        if self.execution_mode != 'worker':
+            return
+        normalized = normalize_task_distribution_error_payload(payload)
+        if not normalized:
+            return
+        dedupe_key = str(normalized.get('dedupe_key') or '').strip()
+        if not dedupe_key:
+            return
+        try:
+            self.store.put_task_distribution_error_outbox(
+                dedupe_key=dedupe_key,
+                task_id=str(normalized.get('task_id') or '').strip(),
+                session_id=str(normalized.get('session_id') or '').strip() or 'web:shared',
+                created_at=now_iso(),
+                payload=normalized,
+            )
+        except Exception:
+            logger.exception('failed to persist task distribution error outbox for {}', dedupe_key)
+            return
+        self._schedule_task_distribution_error_delivery(dedupe_key)
+
+    def _schedule_pending_task_distribution_error_callbacks(self) -> None:
+        if self.execution_mode != 'worker':
+            return
+        for entry in self.store.list_pending_task_distribution_error_outbox(limit=500):
+            dedupe_key = str(entry.get('dedupe_key') or '').strip()
+            if dedupe_key:
+                self._schedule_task_distribution_error_delivery(dedupe_key)
+
+    def _schedule_task_distribution_error_delivery(self, dedupe_key: str) -> None:
+        key = str(dedupe_key or '').strip()
+        if self.execution_mode != 'worker' or not key:
+            return
+        current = self._task_distribution_error_delivery_tasks.get(key)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._deliver_task_distribution_error_outbox(key), name=f'main-runtime-task-distribution-error:{key}')
+        self._task_distribution_error_delivery_tasks[key] = task
+        task.add_done_callback(lambda done_task, stored_key=key: self._clear_task_distribution_error_delivery_task(stored_key, done_task))
+
+    def _clear_task_distribution_error_delivery_task(self, dedupe_key: str, done_task: asyncio.Task[Any]) -> None:
+        current = self._task_distribution_error_delivery_tasks.get(dedupe_key)
+        if current is done_task:
+            self._task_distribution_error_delivery_tasks.pop(dedupe_key, None)
+
+    async def _deliver_task_distribution_error_outbox(self, dedupe_key: str) -> None:
+        retry_delays = [0.0, 0.5, 2.0, 5.0]
+        for delay_seconds in retry_delays:
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+            entry = self.store.get_task_distribution_error_outbox(dedupe_key)
+            if not entry:
+                return
+            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+                return
+            payload = dict(entry.get('payload') or {})
+            workspace = Path.cwd()
+            callback_targets = self._internal_callback_targets(workspace=workspace, callback_kind='distribution_error')
+            if not callback_targets:
+                self.store.mark_task_distribution_error_outbox_attempt(
+                    dedupe_key,
+                    attempted_at=now_iso(),
+                    error_text='task_distribution_error_callback_url_unavailable',
+                )
+                return
+            error_text = 'task_distribution_error_callback_failed'
+            for index, (callback_url, callback_token) in enumerate(callback_targets):
+                headers = self._callback_headers(token=callback_token)
+                try:
+                    response = await self._post_internal_callback(
+                        callback_url,
+                        payload=payload,
+                        headers=headers,
+                        timeout=2.0,
+                    )
+                    if 200 <= int(response.status_code or 0) < 300:
+                        self.store.mark_task_distribution_error_outbox_delivered(dedupe_key, delivered_at=now_iso())
+                        return
+                    error_text = f'task_distribution_error_callback_http_{int(response.status_code or 0)}'
+                    if int(response.status_code or 0) in {401, 403, 404} and index + 1 < len(callback_targets):
+                        continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    error_text = str(exc or 'task_distribution_error_callback_failed').strip() or 'task_distribution_error_callback_failed'
+                    if index + 1 < len(callback_targets):
+                        continue
+                break
+            self.store.mark_task_distribution_error_outbox_attempt(
                 dedupe_key,
                 attempted_at=now_iso(),
                 error_text=error_text,
@@ -8303,6 +8442,12 @@ class MainRuntimeService:
         if stall_delivery_tasks:
             await asyncio.gather(*stall_delivery_tasks, return_exceptions=True)
         self._task_stall_delivery_tasks.clear()
+        distribution_error_delivery_tasks = [task for task in self._task_distribution_error_delivery_tasks.values() if task is not None and not task.done()]
+        for task in distribution_error_delivery_tasks:
+            task.cancel()
+        if distribution_error_delivery_tasks:
+            await asyncio.gather(*distribution_error_delivery_tasks, return_exceptions=True)
+        self._task_distribution_error_delivery_tasks.clear()
         worker_status_delivery_tasks = [task for task in self._task_worker_status_delivery_tasks.values() if task is not None and not task.done()]
         for task in worker_status_delivery_tasks:
             task.cancel()

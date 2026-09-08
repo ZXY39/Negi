@@ -33,6 +33,7 @@ from main.service.task_stall_callback import (
     normalize_task_stall_payload,
     normalize_task_stall_reason,
 )
+from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 from main.service.task_stall_notifier import stalled_minutes_since, stall_bucket_minutes
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT,
@@ -261,6 +262,27 @@ class WebSessionHeartbeatService:
             session_id=session_id,
             source="main_runtime",
             reason="task_stall",
+            dedupe_key=dedupe_key,
+            payload=dict(normalized_payload),
+            delay_seconds=0.0,
+        )
+        if event is None:
+            return False
+        if self._started:
+            self._wake.request(session_id, delay_s=0.25)
+        return True
+
+    def enqueue_task_distribution_error_payload(self, payload: dict[str, Any] | None) -> bool:
+        normalized_payload = normalize_task_distribution_error_payload(payload)
+        session_id = str(normalized_payload.get("session_id") or "").strip()
+        task_id = str(normalized_payload.get("task_id") or "").strip()
+        dedupe_key = str(normalized_payload.get("dedupe_key") or "").strip()
+        if not session_id or not task_id or not dedupe_key:
+            return False
+        event = self._events.enqueue(
+            session_id=session_id,
+            source="main_runtime",
+            reason="task_distribution_error",
             dedupe_key=dedupe_key,
             payload=dict(normalized_payload),
             delay_seconds=0.0,

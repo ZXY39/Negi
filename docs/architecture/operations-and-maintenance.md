@@ -157,7 +157,7 @@
 Maintenance note for `task_append_notice` / task message distribution:
 
 - If a task appears stuck in `barrier_requested`, `barrier_draining`, or `distributing`, do not blame the model first.
-- 分发 epoch 处于 `failed`（任务树红色横幅、`runtime_meta.distribution.error_text` 非空）表示控制回合的修复重试耗尽或发送 preflight 失败，任务按契约保持暂停、消息未向子节点投放。先读该 epoch 的 `payload.debug_trace` 逐轮取证（每轮 attempt 都有 `control_turn_response` / `control_turn_validation_failed` / `control_turn_retry` 记录），再二选一介入：恢复任务（降级为根节点按 pending-notice 语义延迟消费）或重新追加通知（创建新 epoch 重新走完整分发）。
+- 分发 epoch 处于 `failed`（任务树红色横幅、`runtime_meta.distribution.error_text` 非空）表示控制回合的修复重试（最多 5 次）耗尽或发送 preflight 失败；此时任务被置为 paused（任务大厅显示「任务暂停」）、消息未向子节点投放，并向源会话投递一次 `task_distribution_error` 心跳（详见 `heartbeat-system.md`「Task Distribution Error Delivery」）。先读该 epoch 的 `payload.debug_trace` 逐轮取证（每轮 attempt 都有 `control_turn_response` / `control_turn_validation_failed` / `control_turn_retry` 记录），再二选一介入：恢复任务（降级为根节点按 pending-notice 语义延迟消费）或重新追加通知（创建新 epoch 重新走完整分发）。
 - barrier/epoch/spawn/acceptance 的契约字段与完整排查路径详见 `runtime-overview.md`「frontdoor 与任务运行时的关系」。
 
 如果任务已经创建，但表现为“响应明显变慢”“长时间停在 `model.chat.await_response`”或“前端只看到 task-event 在刷”，优先同时对照：

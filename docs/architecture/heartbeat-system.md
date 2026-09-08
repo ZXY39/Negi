@@ -84,6 +84,13 @@ Cron job delivery is claim-before-dispatch, which defines the restart/recovery g
 - Non-`task_node_error` failures (stall / tool_background / task_terminal) are bounded too: a per-`(session, reasons)` counter with the same backoff dequeues the batch after the cap, replacing the old unbounded fixed-interval re-delivery.
 - Debugging "node error heartbeats retry forever": the scanner enqueues each pause row only once — suspect the per-node counter / backoff interaction, not the scanner.
 
+## Task Distribution Error Delivery
+
+- A message-distribution epoch that reaches terminal `failed` (decision-validation retries exhausted or send preflight failed) marks the task paused and delivers one `task_distribution_error` heartbeat event to the task's origin session. It is task-level, not node-level: there is no per-node retry state and no `manage_task_nodes` escalation — the reminder is to stop re-distributing and tell the user the task is paused.
+- Delivery mirrors the stall outbox: the worker writes a durable `task_distribution_error_outbox` row and POSTs `/api/internal/task-distribution-error`; the web-hosted mode enqueues the heartbeat directly. The web endpoint normalizes the payload with the server-recomputed dedupe key `task-distribution-error:{task_id}:{epoch_id}` before `enqueue_task_distribution_error_payload`, so at most one notification is emitted per failed epoch and a caller-supplied dedupe key cannot bypass it.
+- `prompt_lane` renders the event as a task-level line naming the `blocking_reason` plus the reminder 「如果多次出现，则不要再分发，通知用户现状任务已暂停」.
+- Distribution-failure delivery shares the generic non-`task_node_error` bounded backoff (same bucket as stall / tool_background / task_terminal), since a failed heartbeat turn leaves the event queued for re-delivery.
+
 ## Shutdown Resume Wake
 
 Graceful project shutdown pauses every running session; at the next startup the web runtime wakes each recorded session through the heartbeat lane with a `shutdown_resume` event. The pause/resume lifecycle contract lives in `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」; this section owns the wake lane.

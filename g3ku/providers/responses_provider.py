@@ -11,6 +11,7 @@ import httpx
 from loguru import logger
 
 from g3ku.providers.base import LLMProvider, LLMResponse
+from g3ku.providers.fallback import normalize_forced_function_tool_choice
 from g3ku.providers.responses_protocol_helpers import (
     _convert_messages,
     _convert_tools,
@@ -142,6 +143,10 @@ class ResponsesProvider(LLMProvider):
         on_text_delta: Any = None,
     ) -> LLMResponse:
         model = model or self.default_model
+        # The /responses API rejects the Chat-Completions nested selector
+        # {"type":"function","function":{"name":X}}; rewrite it to the flat form
+        # this protocol requires before building the request body.
+        tool_choice = normalize_forced_function_tool_choice(tool_choice, protocol="responses")
         system_prompt, input_items = _convert_messages(messages)
         api_key = str(self.api_key or "").strip()
         if not api_key:
