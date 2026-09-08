@@ -1,7 +1,7 @@
 schema_version: 1
 kind: tool
 name: cron
-description: "Schedule internal reminders for future agent turns. Actions: `add`, `list`, `remove`. Repeating reminders stop after `max_runs` successful deliveries and default to one-shot when omitted."
+description: "Schedule internal reminders for future agent turns. Actions: `add`, `list`, `remove`. A job is bound to the session that creates it and, when it fires, only wakes (resumes) that same session — it cannot target another session. Repeating reminders stop after `max_runs` successful deliveries and default to one-shot when omitted."
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
