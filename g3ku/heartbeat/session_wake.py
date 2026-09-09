@@ -3,8 +3,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
+from loguru import logger
+
 
 WakeHandler = Callable[[str], Awaitable[float | None]]
+
+# handler 泄漏未捕获异常时的重试间隔。wake 循环不能被单次异常杀死：任务死亡后
+# 该会话排队的事件全部无人再处理，且只留一条延迟到 GC 才出现的
+# "Task exception was never retrieved"，排障时几乎不可见。
+_HANDLER_FAILURE_RETRY_DELAY_SECONDS = 60.0
 
 
 class SessionHeartbeatWakeQueue:
@@ -45,7 +52,13 @@ class SessionHeartbeatWakeQueue:
         while not self._closed:
             if delay > 0:
                 await asyncio.sleep(delay)
-            next_delay = await self._handler(session_id)
+            try:
+                next_delay = await self._handler(session_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("heartbeat wake handler failed for {}", session_id)
+                next_delay = _HANDLER_FAILURE_RETRY_DELAY_SECONDS
             pending_delay = self._pending.pop(session_id, None)
             if pending_delay is not None:
                 if next_delay is None:

@@ -900,13 +900,21 @@ class WebSessionHeartbeatService:
             persisted_session,
             exclude_turn_id=heartbeat_turn_id,
         )
-        reply_already_persisted = self._persist_assistant_reply(
-            key,
-            text=escalation_text,
-            task_ids=[str((event.payload or {}).get("task_id") or "").strip() for event in node_error_events],
-            reason="task_node_error_escalation",
-            turn_id=heartbeat_turn_id,
-        )
+        # 落盘失败（如磁盘满 Errno 28）不得阻断升级通知：消息此刻已 append 进内存
+        # session（下一次成功 save 会连带写出），而渠道推送与 CEO final 都是内存
+        # 链路，与这次写盘无关。该异常曾直接穿透 wake 任务把它杀死，导致磁盘满
+        # 期间升级消息静默丢失、渠道端永远收不到裁决请求。
+        reply_already_persisted = False
+        try:
+            reply_already_persisted = self._persist_assistant_reply(
+                key,
+                text=escalation_text,
+                task_ids=[str((event.payload or {}).get("task_id") or "").strip() for event in node_error_events],
+                reason="task_node_error_escalation",
+                turn_id=heartbeat_turn_id,
+            )
+        except Exception:
+            logger.exception("heartbeat escalation reply persist failed for {}; notifying anyway", key)
         if not reply_already_persisted:
             self._publish_ceo(
                 key,
@@ -1552,7 +1560,12 @@ class WebSessionHeartbeatService:
         normalized_metadata = normalize_ceo_metadata(getattr(persisted_session, "metadata", None), session_key=key)
         if normalized_metadata != getattr(persisted_session, "metadata", None):
             persisted_session.metadata = normalized_metadata
-            self._session_manager.save(persisted_session)
+            try:
+                self._session_manager.save(persisted_session)
+            except Exception:
+                # 元数据规范化是尽力而为的前置落盘：失败（如磁盘满 Errno 28）不得
+                # 中止本轮心跳——规范化结果已在内存 session 上，随下一次成功 save 写出。
+                logger.exception("heartbeat metadata normalize save failed for {}; continuing", key)
 
         memory_scope = dict(normalized_metadata.get("memory_scope") or {})
         channel, chat_id = _derive_session_channel_chat(key)
@@ -1764,17 +1777,23 @@ class WebSessionHeartbeatService:
             str(getattr(event, "dedupe_key", "") or "").strip()
             for event in self._task_terminal_events(events)
         ]
-        reply_already_persisted = self._persist_assistant_reply(
-            key,
-            text=output,
-            task_ids=task_ids,
-            reason=heartbeat_reason,
-            task_results=task_results,
-            turn_id=heartbeat_turn_id,
-            handled_terminal_dedupe_keys=[
-                dedupe_key for dedupe_key in handled_terminal_keys if dedupe_key
-            ],
-        )
+        # 与升级路径同一契约：回复落盘失败不阻断通知与事件出队。模型已成功产出，
+        # 重跑整轮既贵又会产生重复回复；消息留在内存 session 里等下一次成功 save。
+        reply_already_persisted = False
+        try:
+            reply_already_persisted = self._persist_assistant_reply(
+                key,
+                text=output,
+                task_ids=task_ids,
+                reason=heartbeat_reason,
+                task_results=task_results,
+                turn_id=heartbeat_turn_id,
+                handled_terminal_dedupe_keys=[
+                    dedupe_key for dedupe_key in handled_terminal_keys if dedupe_key
+                ],
+            )
+        except Exception:
+            logger.exception("heartbeat reply persist failed for {}; notifying anyway", key)
         if not reply_already_persisted:
             final_payload = self._build_heartbeat_final_payload(
                 key,
@@ -1801,8 +1820,10 @@ class WebSessionHeartbeatService:
             maybe = notifier(str(session_id or "").strip(), payload)
             if hasattr(maybe, "__await__"):
                 await maybe
-        except Exception:
-            logger.debug("heartbeat reply notify skipped for {}", session_id)
+        except Exception as exc:
+            # 通知失败意味着渠道端收不到这条回复：必须留下可 grep 的告警，
+            # debug 级会让这类丢失在排障时完全不可见。
+            logger.warning("heartbeat reply notify failed for {}: {}", session_id, exc)
 
     def _build_heartbeat_final_payload(
         self,

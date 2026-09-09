@@ -42,6 +42,22 @@ class _OkPromptSession:
         return SimpleNamespace(output="HEARTBEAT_OK")
 
 
+class _VisibleReplyPromptSession:
+    """Runtime session whose prompt() returns a user-visible reply（非 HEARTBEAT_OK）。"""
+
+    def __init__(self, output: str = "给用户看的结论") -> None:
+        self.state = SimpleNamespace(status="idle", is_running=False)
+        self.prompt_calls = 0
+        self._output = output
+
+    def subscribe(self, relay):
+        return lambda: None
+
+    async def prompt(self, user_input, persist_transcript: bool = True):
+        self.prompt_calls += 1
+        return SimpleNamespace(output=self._output)
+
+
 class _FakePersistedSession:
     def __init__(self) -> None:
         self.metadata: dict = {}
@@ -58,9 +74,10 @@ class _FakePersistedSession:
 
 
 class _FakeSessionManager:
-    def __init__(self, session: _FakePersistedSession, exists_path: Path) -> None:
+    def __init__(self, session: _FakePersistedSession, exists_path: Path, save_error: Exception | None = None) -> None:
         self._session = session
         self._exists_path = exists_path
+        self._save_error = save_error
         self.saves = 0
 
     def get_path(self, session_id: str) -> Path:
@@ -71,6 +88,8 @@ class _FakeSessionManager:
 
     def save(self, session) -> None:
         self.saves += 1
+        if self._save_error is not None:
+            raise self._save_error
 
 
 class _FakeRuntimeManager:
@@ -127,7 +146,7 @@ def _node_error_item(node_id="node:85b3119ce0ac", task_id="task:26e64d1dc8b3", p
     }
 
 
-def _build_service(tmp_path: Path, *, store=None):
+def _build_service(tmp_path: Path, *, store=None, save_error: Exception | None = None):
     key = "china:qqbot:default:dm"
     prompts = _BoomPromptSession()
     persisted = _FakePersistedSession()
@@ -143,7 +162,7 @@ def _build_service(tmp_path: Path, *, store=None):
         agent=SimpleNamespace(),
         runtime_manager=_FakeRuntimeManager(prompts),
         main_task_service=SimpleNamespace(registry=None, store=store),
-        session_manager=_FakeSessionManager(persisted, exists_path),
+        session_manager=_FakeSessionManager(persisted, exists_path, save_error=save_error),
         reply_notifier=_notify,
     )
     service._started = True
@@ -318,3 +337,44 @@ def test_enrich_event_payload_passthrough_for_non_node_error(tmp_path: Path) -> 
     assert payload["event_reason"] == "task_stall"
     assert "retry_attempt" not in payload
     assert payload["stalled_minutes"] == 20
+
+
+def test_escalation_notifies_even_when_reply_persist_fails(tmp_path: Path) -> None:
+    """回归（磁盘满事故）：升级消息落盘抛 Errno 28 时不得阻断渠道通知，也不得把
+    _run_session 的异常泄漏出去杀死 wake 任务——否则用户永远收不到裁决请求，
+    且此后该会话的心跳事件全部无人处理。"""
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(
+        tmp_path, store=store, save_error=OSError(28, "No space left on device")
+    )
+    service.enqueue_task_node_error_payload(key, [_node_error_item()])
+
+    cap = _TASK_NODE_ERROR_MAX_CONSECUTIVE_FAILURES
+    returns = [asyncio.run(service._run_session(key)) for _ in range(cap)]
+
+    # 异常不再穿透：每一轮都正常返回退避值。
+    assert returns == _backoff_sequence(cap)
+    # 消息仍 append 进内存 session（下一次成功 save 会连带写出）。
+    assistant_messages = [m for m in persisted.messages if m.get("role") == "assistant"]
+    assert len(assistant_messages) == 1
+    assert assistant_messages[0]["metadata"]["reason"] == "task_node_error_escalation"
+    # 渠道通知照发。
+    assert len(notifier_texts) == 1
+    assert "是否判为失败让任务继续进行" in notifier_texts[0]
+
+
+def test_visible_reply_notifies_even_when_persist_fails(tmp_path: Path) -> None:
+    """成功路径同一契约：模型已产出可见回复时，落盘失败照常通知、事件照常出队
+    （重跑整轮只会产生重复回复且更贵）。"""
+    store = _FakeRetryStore()
+    service, prompts, persisted, notifier_texts, key = _build_service(
+        tmp_path, store=store, save_error=OSError(28, "No space left on device")
+    )
+    service.enqueue_task_node_error_payload(key, [_node_error_item()])
+    service._runtime_manager = _FakeRuntimeManager(_VisibleReplyPromptSession("节点已处理，结论如下"))
+
+    result = asyncio.run(service._run_session(key))
+
+    assert notifier_texts == ["节点已处理，结论如下"]
+    assert service._events.peek_ready(key) == []
+    assert result is None
