@@ -42,7 +42,11 @@ from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
-from g3ku.runtime.stage_prompt_compaction import compact_stage_prompt_messages_in_place
+from g3ku.runtime.stage_prompt_compaction import (
+    compact_stage_prompt_messages_in_place,
+    is_stage_block_echo_text,
+    strip_stage_block_echo,
+)
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
@@ -141,6 +145,12 @@ _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE = (
     'The previous response repeated the internal Runtime Tool Contract. '
     'Do not output, summarize, or quote that contract. Return only the '
     'user-facing answer, or use the structured tool-calling interface when a tool is required.'
+)
+_STAGE_BLOCK_ECHO_REPAIR_MESSAGE = (
+    'The previous response repeated an internal stage-compaction block '
+    '([G3KU_STAGE_*]). Do not output, summarize, or quote those blocks. '
+    'To open, advance, or close a stage call the `submit_next_stage` tool. '
+    'Otherwise reply to the user in natural language.'
 )
 
 # 落库类工具全局白名单：免活动阶段即可调用。避免"用户口头给一条长期指令 → 模型
@@ -6113,6 +6123,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "xml_repair_tool_names": [],
             "xml_repair_last_issue": "",
             "tool_contract_echo_attempt_count": 0,
+            "stage_block_echo_attempt_count": 0,
             "stage_reply_bounce_count": 0,
             "empty_response_retry_count": 0,
             "heartbeat_internal": heartbeat_internal,
@@ -6686,6 +6697,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "xml_repair_tool_names": [],
                 "xml_repair_last_issue": "",
                 "tool_contract_echo_attempt_count": 0,
+                "stage_block_echo_attempt_count": 0,
                 "next_step": "review_tool_calls",
             }
 
@@ -6788,6 +6800,32 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 'tool_contract_echo_attempt_count': echo_attempt_count,
                 'next_step': 'finalize',
             }
+        if not response_tool_calls and is_stage_block_echo_text(text):
+            stage_echo_attempt_count = int(state.get('stage_block_echo_attempt_count', 0) or 0) + 1
+            if stage_echo_attempt_count == 1:
+                return {
+                    'repair_overlay_text': _STAGE_BLOCK_ECHO_REPAIR_MESSAGE,
+                    'stage_block_echo_attempt_count': stage_echo_attempt_count,
+                    'final_output': '',
+                    'next_step': 'call_model',
+                }
+            # Never promote a repeated internal stage-compaction block to
+            # final output, and never persist or deliver the raw block text.
+            # The normal empty-response explanation is user-facing and
+            # contains no stage-protocol material.
+            return {
+                'final_output': self._empty_response_explanation(
+                    used_tools=used_tools,
+                    verified_task_ids=list(state.get('verified_task_ids') or []),
+                ),
+                'route_kind': self._route_kind_for_turn(
+                    used_tools=used_tools,
+                    default=current_route_kind,
+                    verified_task_ids=list(state.get('verified_task_ids') or []),
+                ),
+                'stage_block_echo_attempt_count': stage_echo_attempt_count,
+                'next_step': 'finalize',
+            }
         if str(response_view.finish_reason or "").strip().lower() == "error":
             error_detail = str(
                 getattr(response_view, "error_text", None)
@@ -6810,6 +6848,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
         if text.strip():
             text = strip_frontdoor_tool_contract_echo(text)
+            text = strip_stage_block_echo(text)
             if not text:
                 return {
                     'final_output': self._empty_response_explanation(

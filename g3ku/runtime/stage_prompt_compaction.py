@@ -60,6 +60,52 @@ def is_stage_context_message(message: dict[str, Any]) -> bool:
     )
 
 
+def _stage_block_prefix_index(text: str) -> int:
+    """Return the earliest position where a stage-block prefix begins, or -1."""
+    normalized = str(text or "")
+    positions = [
+        index
+        for prefix in (STAGE_COMPACT_PREFIX, STAGE_EXTERNALIZED_PREFIX, STAGE_RAW_PREFIX)
+        if (index := normalized.find(prefix)) >= 0
+    ]
+    return min(positions) if positions else -1
+
+
+def is_stage_block_echo_text(text: Any) -> bool:
+    """Whether the text is a standalone stage-compaction-block echo.
+
+    Stage blocks are runtime-injected context markers; a model must never
+    emit them as its own reply. Judged on the text prefix alone — unlike
+    :func:`is_stage_context_message`, which is scoped to assistant messages —
+    because the frontdoor guard runs on the raw model text before any message
+    shaping.
+    """
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    return (
+        normalized.startswith(STAGE_COMPACT_PREFIX)
+        or normalized.startswith(STAGE_EXTERNALIZED_PREFIX)
+        or normalized.startswith(STAGE_RAW_PREFIX)
+    )
+
+
+def strip_stage_block_echo(text: Any) -> str:
+    """Remove a stage-compaction-block echo from user-facing text.
+
+    A standalone block echo becomes empty. If a model puts a visible answer
+    before an echoed block fragment, preserve the answer and remove only the
+    internal suffix (symmetric to the frontdoor tool-contract echo stripper).
+    """
+    normalized = str(text or "")
+    if is_stage_block_echo_text(normalized):
+        return ""
+    index = _stage_block_prefix_index(normalized)
+    if index >= 0:
+        return normalized[:index].strip()
+    return normalized.strip()
+
+
 def stage_prompt_prefix(
     messages: list[dict[str, Any]],
     *,
@@ -676,9 +722,11 @@ __all__ = [
     "completed_stage_blocks",
     "current_stage_active_window",
     "decompose_stage_prompt_messages",
+    "is_stage_block_echo_text",
     "is_stage_context_message",
     "prepare_stage_prompt_messages",
     "repair_split_stage_tool_boundaries",
     "retained_completed_stage_ids",
     "stage_prompt_prefix",
+    "strip_stage_block_echo",
 ]

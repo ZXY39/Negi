@@ -136,6 +136,15 @@ def test_sanitize_channel_outbound_text_removes_runtime_tool_contract_echo():
     assert sanitize_channel_outbound_text("Visible answer\n\n" + contract) == "Visible answer"
 
 
+def test_sanitize_channel_outbound_text_removes_stage_block_echo():
+    compact_block = '[G3KU_STAGE_COMPACT_V1]\n{"stage_index": 48, "status": "completed"}'
+    externalized_block = '[G3KU_STAGE_EXTERNALIZED_V1]\n{"stage_index": 48}'
+    raw_block = '[G3KU_STAGE_RAW_V1]\n{"stage_index": 48}'
+    for block in (compact_block, externalized_block, raw_block):
+        assert sanitize_channel_outbound_text(block) == ""
+        assert sanitize_channel_outbound_text("Visible answer\n\n" + block) == "Visible answer"
+
+
 def test_build_ceo_session_catalog_lists_legacy_channel_sessions_readonly(monkeypatch, tmp_path: Path) -> None:
     """After the subsystem removal the catalog groups pre-existing china:*
     transcripts purely from session storage (no config-driven placeholders)."""

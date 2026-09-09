@@ -81,6 +81,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     tool_contract_echo_attempt_count: int
 
+    stage_block_echo_attempt_count: int
+
     stage_reply_bounce_count: int
 
     empty_response_retry_count: int

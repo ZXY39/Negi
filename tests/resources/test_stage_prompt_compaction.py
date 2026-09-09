@@ -5,8 +5,11 @@ import json
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_COMPACT_PREFIX,
     STAGE_EXTERNALIZED_PREFIX,
+    STAGE_RAW_PREFIX,
     compact_stage_prompt_messages_in_place,
+    is_stage_block_echo_text,
     prepare_stage_prompt_messages,
+    strip_stage_block_echo,
 )
 
 
@@ -580,4 +583,32 @@ def test_in_place_compaction_removes_rule_text_only_after_structural_change_poin
     # gated 只比基线多删了 pair-b：分叉点不早于基线自身的压缩块回插位置
     assert first_diff >= structural_onset
     assert len(gated_contents) == len(baseline_contents) - 1
+
+
+_STAGE_ECHO_PREFIX_PAYLOADS = [
+    (STAGE_COMPACT_PREFIX, '{"stage_index": 48, "status": "completed"}'),
+    (STAGE_EXTERNALIZED_PREFIX, '{"stage_index": 48, "stage_kind": "compression"}'),
+    (STAGE_RAW_PREFIX, '{"stage_index": 48}'),
+]
+
+
+def test_is_stage_block_echo_text_matches_all_three_prefixes() -> None:
+    for prefix, payload in _STAGE_ECHO_PREFIX_PAYLOADS:
+        block = f"{prefix}\n{payload}"
+        assert is_stage_block_echo_text(block) is True
+        # 前后空白不影响判定
+        assert is_stage_block_echo_text(f"  \n{block}\n") is True
+    # 正常回复与内部提及（非块首）不算回显
+    assert is_stage_block_echo_text("") is False
+    assert is_stage_block_echo_text("这是给用户的可见回复。") is False
+    assert is_stage_block_echo_text(f"可见回复，引用过 {STAGE_COMPACT_PREFIX} 标记。") is False
+
+
+def test_strip_stage_block_echo_removes_standalone_and_tail_blocks() -> None:
+    for prefix, payload in _STAGE_ECHO_PREFIX_PAYLOADS:
+        block = f"{prefix}\n{payload}"
+        assert strip_stage_block_echo(block) == ""
+        assert strip_stage_block_echo(f"可见答案。\n\n{block}") == "可见答案。"
+    # 无块的文本原样保留
+    assert strip_stage_block_echo("可见答案。") == "可见答案。"
 

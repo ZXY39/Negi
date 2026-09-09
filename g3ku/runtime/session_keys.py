@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 
 from g3ku.runtime.frontdoor.tool_contract import strip_frontdoor_tool_contract_echo
+from g3ku.runtime.stage_prompt_compaction import strip_stage_block_echo
 
 """Channel-agnostic session key rules.
 
@@ -218,11 +219,13 @@ def sanitize_channel_outbound_text(text: str) -> str:
     """Remove internal-only artifacts from channel-bound reply text.
 
     Models occasionally echo internal context blocks verbatim. This truncates
-    everything from a ``[SESSION EVENTS]`` marker onward. The result is
-    stripped; an empty result means the whole message was internal-only and
-    must not be delivered.
+    everything from a ``[SESSION EVENTS]`` marker onward and strips runtime
+    tool-contract / stage-compaction block echoes. The result is stripped; an
+    empty result means the whole message was internal-only and must not be
+    delivered.
     """
     cleaned = strip_frontdoor_tool_contract_echo(text)
+    cleaned = strip_stage_block_echo(cleaned)
     marker_index = cleaned.find(SESSION_EVENTS_MARKER)
     if marker_index >= 0:
         cleaned = cleaned[:marker_index]

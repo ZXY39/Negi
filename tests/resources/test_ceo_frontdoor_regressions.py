@@ -1280,6 +1280,103 @@ async def test_graph_normalize_model_output_bounces_plain_text_once_for_stage_wi
     assert not str(second.get("repair_overlay_text") or "")
 
 
+_STAGE_ECHO_PREFIX_CASES = [
+    ("[G3KU_STAGE_COMPACT_V1]", "compact"),
+    ("[G3KU_STAGE_EXTERNALIZED_V1]", "externalized"),
+    ("[G3KU_STAGE_RAW_V1]", "raw"),
+]
+
+
+def _stage_echo_block(prefix: str, *, payload: dict[str, object] | None = None) -> str:
+    block_payload = {
+        "stage_index": 48,
+        "stage_kind": "normal",
+        "status": "completed",
+        "completed_stage_summary": "完成了阶段分析",
+        **(payload or {}),
+    }
+    return f"{prefix}\n{json.dumps(block_payload, ensure_ascii=False)}"
+
+
+def _stage_echo_state(content: str, **overrides) -> dict[str, object]:
+    state = {
+        "response_payload": {
+            "content": content,
+            "tool_calls": [],
+            "finish_reason": "stop",
+        },
+        "route_kind": "direct_reply",
+        "used_tools": [],
+    }
+    state.update(overrides)
+    return state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("prefix", "_kind"), _STAGE_ECHO_PREFIX_CASES)
+async def test_graph_normalize_model_output_repairs_standalone_stage_block_echo_once(prefix: str, _kind: str) -> None:
+    # 事故：上下文含有大量阶段压缩块的会话里，模型把伪造的阶段块 JSON 当作
+    # 整条最终文本回复输出，运行时按纯文本收尾把它投递给了 QQ 用户。
+    # 修复：standalone 阶段块回显绝不作为最终回复，第一次转向私有修复提示重问。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    block = _stage_echo_block(prefix)
+
+    first = await runner._graph_normalize_model_output(
+        _stage_echo_state(block),
+        runtime=SimpleNamespace(),
+    )
+
+    assert first["next_step"] == "call_model"
+    assert str(first.get("final_output") or "") == ""
+    assert int(first.get("stage_block_echo_attempt_count") or 0) == 1
+    repair_text = str(first.get("repair_overlay_text") or "")
+    assert "submit_next_stage" in repair_text
+    assert prefix not in repair_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("prefix", "_kind"), _STAGE_ECHO_PREFIX_CASES)
+async def test_graph_normalize_model_output_falls_back_on_repeated_stage_block_echo(prefix: str, _kind: str) -> None:
+    # 重复回显不再无限打回：整回合一次修复提示后转为用户友好回退文本收尾，
+    # 回退文本与转录/投递都不含阶段协议原文。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    block = _stage_echo_block(prefix)
+
+    repeated = await runner._graph_normalize_model_output(
+        _stage_echo_state(block, stage_block_echo_attempt_count=1),
+        runtime=SimpleNamespace(),
+    )
+
+    assert repeated["next_step"] == "finalize"
+    fallback = str(repeated.get("final_output") or "")
+    assert fallback  # 用户友好回退存在
+    assert prefix not in fallback
+    assert "[G3KU_STAGE" not in fallback
+    assert "stage_index" not in fallback
+    assert not str(repeated.get("repair_overlay_text") or "")
+    assert int(repeated.get("stage_block_echo_attempt_count") or 0) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("prefix", "_kind"), _STAGE_ECHO_PREFIX_CASES)
+async def test_graph_normalize_model_output_strips_trailing_stage_block_echo(prefix: str, _kind: str) -> None:
+    # 可见答案尾部附带阶段块片段时，只剥除片段、保留可见答案（对称于 tool
+    # contract echo 尾段剥除），块原文不进入 final_output。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    block = _stage_echo_block(prefix)
+    content = f"这是给用户的可见结论。\n\n{block}"
+
+    result = await runner._graph_normalize_model_output(
+        _stage_echo_state(content, used_tools=["task_progress"]),
+        runtime=SimpleNamespace(),
+    )
+
+    assert result["next_step"] == "finalize"
+    assert result["final_output"] == "这是给用户的可见结论。"
+    assert prefix not in str(result.get("final_output") or "")
+    assert "stage_index" not in str(result.get("final_output") or "")
+
+
 @pytest.mark.asyncio
 async def test_dispatch_turn_finalizes_plain_reply_without_stage_ping_pong(monkeypatch, tmp_path) -> None:
     # 复刻会话 22124b26b86b 事故：sns(budget=1)+create_async_task 同批派发后，
