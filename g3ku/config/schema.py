@@ -703,6 +703,16 @@ class MainRuntimeDiskGuardConfig(Base):
     archive_enabled: bool = True
     archive_sweep_batch: int = 4
     archive_sweep_interval_seconds: float = 15.0
+    # 解压宽限期（分钟）：解压后该窗口内不被压缩渐进重新归档；0=关闭。
+    decompress_grace_minutes: float = 60.0
+
+    @field_validator("decompress_grace_minutes", mode="before")
+    @classmethod
+    def _normalize_decompress_grace_minutes(cls, value: Any) -> float:
+        try:
+            return min(max(0.0, float(value)), 7 * 24 * 60)
+        except (TypeError, ValueError):
+            return 60.0
     # P3：终态任务大行裁剪（0=关闭）与删除渐进。
     detail_retention_days: int = 14
     purge_enabled: bool = True

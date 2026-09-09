@@ -4335,6 +4335,7 @@ class MainRuntimeService:
             archive_enabled=bool(getattr(guard, 'archive_enabled', defaults.archive_enabled)),
             archive_sweep_batch=max(1, int(getattr(guard, 'archive_sweep_batch', defaults.archive_sweep_batch) or 1)),
             archive_sweep_interval_seconds=max(1.0, float(getattr(guard, 'archive_sweep_interval_seconds', defaults.archive_sweep_interval_seconds) or 1.0)),
+            decompress_grace_minutes=min(max(0.0, float(getattr(guard, 'decompress_grace_minutes', defaults.decompress_grace_minutes) or 0.0)), 7 * 24 * 60),
             detail_retention_days=max(0, int(getattr(guard, 'detail_retention_days', defaults.detail_retention_days) or 0)),
             purge_enabled=bool(getattr(guard, 'purge_enabled', defaults.purge_enabled)),
         )
@@ -6718,6 +6719,9 @@ class MainRuntimeService:
             next_metadata = dict(fresh.metadata or {})
             for key in ('archived_at', 'archived_bytes', 'archive_compressed_bytes', 'archive_reason'):
                 next_metadata.pop(key, None)
+            # 解压宽限：记录解压时刻，窗口内该任务不被压缩渐进重新归档
+            # （用户查看/排查保护期，见 _query_archive_candidates 的 grace 判定）。
+            next_metadata['decompressed_at'] = now_iso()
             self.store.upsert_task(fresh.model_copy(update={'metadata': next_metadata}))
             self._reconcile_task_disk_usage(task_id)
             self._publish_task_archive_state_changed(task_id)
@@ -6974,13 +6978,15 @@ class MainRuntimeService:
         return True
 
     def _query_archive_candidates(self, *, batch: int) -> list[str]:
-        """候选 = 终态或已暂停任务，未归档、未 pinned、未 purged；score = size × age 加权。"""
+        """候选 = 终态或已暂停任务，未归档、未 pinned、未 purged、不在解压宽限期内；
+        score = size × age 加权。"""
         try:
             tasks = self.store.list_tasks()
             usages = self.store.get_task_disk_usages()
         except Exception:
             return []
         now_dt = datetime.now(timezone.utc)
+        grace_minutes = float(disk_policies().decompress_grace_minutes)
         scored: list[tuple[float, str]] = []
         for task in tasks or []:
             task_id = str(getattr(task, 'task_id', '') or '').strip()
@@ -6989,6 +6995,15 @@ class MainRuntimeService:
             metadata = dict(getattr(task, 'metadata', None) or {})
             if metadata.get('archived_at') or metadata.get('pinned') or metadata.get('purged_at'):
                 continue
+            # 解压宽限：刚解压的任务在窗口内豁免重新归档（手动/自动解压均记
+            # decompressed_at）；窗口过后磁盘压力照常生效。
+            decompressed_at = str(metadata.get('decompressed_at') or '').strip()
+            if decompressed_at and grace_minutes > 0.0:
+                decompressed_dt = self._parse_task_timestamp(decompressed_at)
+                if decompressed_dt is not None:
+                    decompressed_age_minutes = (now_dt - decompressed_dt).total_seconds() / 60.0
+                    if decompressed_age_minutes < grace_minutes:
+                        continue
             status = str(getattr(task, 'status', '') or '').strip().lower()
             paused = bool(getattr(task, 'is_paused', False) or getattr(task, 'pause_requested', False))
             if status not in {'success', 'failed'} and not paused:

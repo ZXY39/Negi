@@ -110,6 +110,9 @@ class DiskPolicies:
     archive_enabled: bool = True
     archive_sweep_batch: int = 4
     archive_sweep_interval_seconds: float = 15.0
+    # 解压宽限：解压后该窗口内不再被压缩渐进重新归档（用户查看/排查保护期）；
+    # 0 = 关闭宽限（解压后立即可被重新压缩）。
+    decompress_grace_minutes: float = 60.0
     # P3：终态任务大行裁剪与删除渐进。
     detail_retention_days: int = 14  # 0 = 关闭裁剪
     purge_enabled: bool = True
@@ -155,6 +158,7 @@ def _policies_from_env() -> DiskPolicies:
         archive_enabled=_env_flag('G3KU_DISK_ARCHIVE_ENABLED', True),
         archive_sweep_batch=_env_int('G3KU_DISK_ARCHIVE_SWEEP_BATCH', 4),
         archive_sweep_interval_seconds=_env_float('G3KU_DISK_ARCHIVE_SWEEP_INTERVAL_SECONDS', 15.0),
+        decompress_grace_minutes=_env_float('G3KU_DISK_DECOMPRESS_GRACE_MINUTES', 60.0),
         detail_retention_days=_env_int('G3KU_DISK_DETAIL_RETENTION_DAYS', 14),
         purge_enabled=_env_flag('G3KU_DISK_PURGE_ENABLED', True),
     )

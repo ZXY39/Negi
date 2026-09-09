@@ -299,9 +299,58 @@ async def test_archive_one_task_updates_metadata_and_usage(tmp_path, monkeypatch
         assert dec['result'] == 'decompressed'
         task = store.get_task('task:t1')
         assert not task.metadata.get('archived_at')
+        # 解压宽限：成功解压写 decompressed_at（窗口内不被压缩渐进重新归档）
+        assert task.metadata.get('decompressed_at')
         assert (dirs['artifacts'] / 'a.md').exists()
         # _ensure_task_decompressed 幂等
         assert await harness._ensure_task_decompressed('task:t1') is True
+    finally:
+        store.close()
+
+
+def test_decompress_grace_blocks_rearchive(tmp_path, policies_guard):
+    configure_disk_policies(DiskPolicies())  # 默认宽限 60 分钟
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    try:
+        now = datetime.now(timezone.utc)
+        fresh = (now - timedelta(minutes=5)).isoformat(timespec='seconds')
+        expired = (now - timedelta(hours=3)).isoformat(timespec='seconds')
+        store.upsert_task(_task_record('task:grace', metadata={'decompressed_at': fresh}))
+        store.upsert_task(_task_record('task:expired', metadata={'decompressed_at': expired}))
+        store.upsert_task(_task_record('task:plain'))
+        for tid in ('task:grace', 'task:expired', 'task:plain'):
+            store.upsert_task_disk_usage(tid, 1000)
+        harness = _bind_service_harness(store, None, {})
+        candidates = harness._query_archive_candidates(batch=10)
+        assert 'task:grace' not in candidates       # 宽限期内豁免
+        assert 'task:expired' in candidates         # 宽限过期，磁盘压力照常
+        assert 'task:plain' in candidates
+        # 宽限关闭 → 解压后立即可被重新压缩
+        configure_disk_policies(DiskPolicies(decompress_grace_minutes=0))
+        candidates = harness._query_archive_candidates(batch=10)
+        assert 'task:grace' in candidates
+    finally:
+        store.close()
+
+
+async def test_manual_compress_ignores_grace(tmp_path, monkeypatch, policies_guard):
+    configure_disk_policies(DiskPolicies())
+    monkeypatch.setattr(
+        runtime_service_module, 'disk_waterline_snapshot',
+        lambda paths: (100 * GB, 1000 * GB),
+    )
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    try:
+        # 宽限期只挡自动压缩渐进；用户手动压缩不受限
+        store.upsert_task(_task_record(
+            'task:t1',
+            metadata={'decompressed_at': datetime.now(timezone.utc).isoformat(timespec='seconds')},
+        ))
+        dirs = _make_task_dirs(tmp_path)
+        archiver = TaskArchiver(archive_dir=tmp_path / 'task-archives')
+        harness = _bind_service_harness(store, archiver, {'task:t1': dirs})
+        result = await harness._archive_one_task('task:t1', reason='manual')
+        assert result['result'] == 'archived'
     finally:
         store.close()
 
