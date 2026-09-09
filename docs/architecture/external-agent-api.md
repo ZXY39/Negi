@@ -54,9 +54,19 @@
 ## 6. 出站路由（主动推送）
 
 - 会话键为 `ext:` 的 heartbeat/cron/task-terminal 回复：`_notify_heartbeat_channel_reply` 的 ext 分支发布 `OutboundMessage(channel="ext", chat_id=<ext session key>)`；`_derive_session_channel_chat` 对 ext 键保留完整会话键为 chat_id。cron 零改动（payload `channel="ext"`、`to=<session key>` 即达）。
-- 共享出站 drain（`g3ku/shells/web.py::_start_outbound_drain`）只路由 `ext`：注册表 `find_by_any_key`（接受会话键或 external_key）→ 该会话 hub 发 `outbound.created`；其他 channel 无消费方，告警跳过。
+- 共享出站 drain（`g3ku/shells/web.py::_start_outbound_drain`）只路由 `ext`：注册表 `find_by_any_key`（接受会话键或 external_key）→ **持久 outbox 登记**（见下）→ 该会话 hub 发 `outbound.created`（事件携带 `outbox_id`）；其他 channel 无消费方，告警跳过。日志 `external outbound published to hub` 只代表事件已进内存 hub，**不代表已送达渠道**；送达以桥侧回执日志为准（QQ 适配器为 `qq-official delivered ...`）。
 - drain 生命周期：`ensure_web_runtime_services` 拉起，仅进程关闭时取消。
 - 未知目标告警丢弃；清洗后为空的纯内部文本静默 ack（不触发重试）。
+
+### 持久 outbox（`.g3ku/external-outbox/outbox.jsonl`）
+
+bus/hub 全是内存态：桥 pump 断连或进程重启窗口里滞留的主动推送会随内存清空蒸发。`g3ku/runtime/external_outbox.py` 是这条链路的持久账本，投递语义 **at-least-once**：
+
+- 账本为 append-only jsonl：`{"kind":"msg",...}` 登记记录 + `{"kind":"ack","id":...}` 销账 tombstone。登记失败（如磁盘满）降级为仅内存投递并记 error，绝不阻断 hub 发布。
+- drain 在发布 hub 前登记每条出站；桥在渠道 API 确认送达后调 `POST /sessions/{id}/outbox/{outbox_id}/ack` 销账（会话作用域防越权、幂等）。ack 丢失的代价是下次重启后重复投递一次。
+- 启动重放：`ensure_web_runtime_services` 在 drain 拉起后把 24h 时效内未 ack 的条目带原 `outbox_id` 重新注入总线（drain 复用该 id，不重复登记），过期条目标记 `expired`，随后压实账本。
+- `GET /outbox/pending` 返回本 bridge 名下会话的 pending 清单（只带路由身份 `outbox_id/session_id/external_key/ts`，不带正文——正文经 SSE 重放投递），供桥启动时预热 pump。
+- 账本只覆盖走出站总线的主动推送（`outbound.created`）；普通回合的 `reply.final` 仍只依赖 hub 环形缓冲（断线超过 `eventBufferSize` 即被逐出），其可达性由桥侧 pump 的重连契约兜底。
 
 ## 7. 内置官方 QQ 适配器（qq-official）
 
@@ -66,12 +76,15 @@
 - 运行入口是硬约束：botpy 的阻塞入口 `Client.run()`（内部对构造时捕获的 loop 调 `run_until_complete`）在已运行的 web 事件循环上会抛 "This event loop is already running"；桥必须走异步入口 `async with client: await client.start(...)`，使 botpy 与 uvicorn 共享同一事件循环，事件回调（`on_*`）因此可直接驱动回环 `/api/v1` 客户端。
 - 消息流：入站 `on_*` 事件按 external_key 映射建会话（`qq:group:<group_openid>` / `qq:c2c:<user_openid>` / `qq:guild:<guild>:<channel>` / `qq:guilddm:<guild>:<author>`），经 `Idempotency-Key: qq-<消息id>` 提交回合——缺消息 id 时不带幂等键提交，绝不回退 external_key：external_key 对同一用户恒定，回退会撞掉该用户首条消息的幂等位并永久丢弃消息。提交返回 `status:"queued"`（会话正忙、消息已排队）时，桥必须把回执投递给用户（响应 `receipt` 为空则用兜底文案），静默会让用户以为消息被吞而重复发送。消息中的图片附件（botpy `message.attachments` 中 `content_type` 为 `image/*` 且带绝对 http(s) URL 的条目）由桥下载后作为 `data_base64` 附件经本契约转发（单附件 ≤5MiB、每条消息至多 4 张；下载失败或超限降级为仅文本提交，纯图片消息照常提交）；每会话一条 SSE pump 消费 `reply.final` 与 `outbound.created`（主动提醒消费分支，路由见「出站路由（主动推送）」），分别经 `post_message` / `post_group_message` / `post_c2c_message` / `post_dms` 投递。
 - 主动提醒约束：只能推给已注册过会话的目标（该用户/群先与机器人产生过消息）；频率受 QQ 开放平台主动消息额度与回复时间窗规则约束。
+- 每会话 SSE pump 的存活契约（`bridge.py::_pump`）：流异常**或干净结束**（服务端重启/空闲关闭）都按 1s→60s 指数退避自动重连。重连与入站幂等重建是硬契约：pump 一旦终结且无人重建，该会话出站事件滞留内存 hub 无人消费，形成「入站正常、出站黑洞」的僵尸态。投递成功才推进 `seqs`：失败靠服务端 `Last-Event-ID` 重放自动重试（节奏随重连退避），同一事件连续失败 5 次判为毒消息，记 error 后跳过、不阻塞后续事件。
+- pump 建立时机：首条入站消息、每次入站的幂等存活校验（`_spawn_pump` 按 session 记录任务，已死则重建）、以及桥启动时按 `GET /outbox/pending` 的预热（进程重启后 sessions 映射清空，只等入站消息会让启动重放的滞留推送没有消费者）。
+- 投递确认：`deliver` 校验 botpy 回执——botpy 的 http 层对请求超时只记 WARNING 就静默返回 `None`，无回执一律视为投递失败抛出并走 pump 重试；成功投递记 INFO 回执日志 `qq-official delivered ...`（含平台消息 id），排查「发没发出去」以该行为准。`outbound.created` 投递确认后经 `POST /sessions/{id}/outbox/{outbox_id}/ack` 销账（见「持久 outbox」）。
 - `qq-botpy` 在核心依赖（pyproject `dependencies`）里，`pip install -e .` 即装；唯一 `import botpy` 的模块是 `bridge.py` 且为惰性导入，环境缺失时服务报 `error` 状态，不会拖垮 web 运行时。
 
 ## 8. 常见排障入口
 
 - 桥拿到 403 `external_api_disabled`：配置 `externalApi.enabled` 与 tokens；401：token 不匹配或条目被禁用。
 - 消息提交成功但桥收不到回复：确认桥订阅的 SSE 会话与消息提交的会话一致（同一 `session_id`）；看事件缓冲是否被 `eventBufferSize` 淘汰（长断线超过缓冲窗口）。
-- 主动推送不到达：沿「出站路由（主动推送）」链路查——发布侧（`source=heartbeat` 日志）→ drain 分支（`external outbound drained` / dropped 告警）→ 桥的 `outbound.created` 消费。
+- 主动推送不到达：沿「出站路由（主动推送）」链路查——发布侧（`source=heartbeat` 日志）→ drain（`external outbound published to hub`，含 outbox_id）→ 桥侧回执（`qq-official delivered ...`）。有 published 无 delivered 说明事件没有消费者：查 pump 重连日志（`qq-official event pump error ... reconnecting` / `event stream ended ... reconnecting`）与 `GET /outbox/pending` 滞留清单；滞留消息在重启后由 outbox 重放 + pump 预热补投。会话转录/Web UI 里看得到回复而渠道端收不到时，优先怀疑本链路——转录落盘与渠道投递是两条独立链路。
 - 终态缺失导致桥状态悬挂：属实现缺陷，对照「回合契约」终态不变量检查执行器改动。
 - QQ 机器人面板报错/不连接：先看 `/api/qq-bot/status` 的 detail——AppID/AppSecret 错误表现为登录失败，intents 未开通表现为网关拒绝；出现 "This event loop is already running" 说明桥被改回了阻塞 `Client.run()` 入口。

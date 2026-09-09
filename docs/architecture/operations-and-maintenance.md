@@ -101,6 +101,9 @@
 - `.g3ku/web-ceo-continuity/`
   completed Web CEO session continuity sidecars。重启后继续 completed session、manual pause terminal stop、以及异常中断后的最新 authoritative frontdoor baseline 恢复都先看这里。
 
+- `.g3ku/external-outbox/`
+  外部渠道主动推送的持久账本（append-only jsonl，msg 记录 + ack tombstone）。排查「渠道端收不到主动推送」先看这里有无 pending 滞留；契约与重放语义详见 `external-agent-api.md`「持久 outbox」。
+
 - `memory/`
   记忆目录；排障入口详见本文档「Memory Queue Workflow」章节。
 
