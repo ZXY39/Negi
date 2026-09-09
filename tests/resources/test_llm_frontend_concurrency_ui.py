@@ -192,12 +192,14 @@ def test_binding_notes_title_includes_three_required_notes() -> None:
     )
 
     title = str(result["title"])
-    assert "填写 0" in title
+    assert "单 key 模式" in title
     assert "重试次数" in title
-    assert "缓存命中率下降" in title
+    assert "模型链" in title
     # 重试次数新语义：命中关键词的退避重试轮预算，0 = 默认 10 轮。
-    assert "默认 10 轮" in title
-    assert "每个 Key 只试一次" in title
+    assert "填 0 使用默认 10 轮" in title
+    assert "每个配置只试一次" in title
+    # 配置名称说明：用于界面展示与区分，需唯一。
+    assert "配置名称" in title
     # 关键词输入空格间隔（逗号/换行兼容）。
     assert list(result["retryOn"]) == ["network", "429", "502", "503", "overloaded"]
 
@@ -645,7 +647,8 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     assert "测试最大并发数" in create_html
     assert "<details" in create_html
     assert "llm-json-editor" in create_html
-    assert "添加模型" in create_html
+    assert "llm-create-name-input" in create_html
+    assert "添加配置" in create_html
     assert "测试连接" in create_html
 
     detail_html = str(result["detailHtml"])

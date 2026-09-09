@@ -138,8 +138,9 @@ class _RecordingLogService:
         *,
         tool_calls: list[dict[str, Any]],
         created_at: str,
+        text: str = '',
     ) -> dict[str, Any]:
-        _ = task_id, node_id
+        _ = task_id, node_id, text
         self._round_counter += 1
         return {
             "round_id": f"round-{self._round_counter}",

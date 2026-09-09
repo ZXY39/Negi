@@ -50,6 +50,7 @@ def test_handle_create_save_uses_current_dom_json_and_defers_binding_key() -> No
           "llm-binding-single-api-key-max-concurrency": { value: "" },
           "llm-binding-context-window-tokens": { value: "30001" },
           "llm-binding-image-multimodal-enabled": { checked: true },
+          "llm-create-name-input": { value: "demo-config", addEventListener: () => {} },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-backdrop": { addEventListener: () => {} },
@@ -165,6 +166,7 @@ def test_handle_create_save_uses_current_dom_json_and_defers_binding_key() -> No
     )
 
     assert result["createPayload"]["binding"]["key"] == ""
+    assert result["createPayload"]["binding"]["name"] == "demo-config"
     assert result["createPayload"]["draft"]["api_key"] == "live-key"
     assert result["createPayload"]["draft"]["default_model"] == "live-model"
     assert result["createPayload"]["draft"]["parameters"]["temperature"] == 0.2
@@ -204,6 +206,7 @@ def test_handle_create_save_closes_editor_before_runtime_refresh_polling() -> No
           "llm-binding-single-api-key-max-concurrency": { value: "" },
           "llm-binding-context-window-tokens": { value: "30001" },
           "llm-binding-image-multimodal-enabled": { checked: false },
+          "llm-create-name-input": { value: "demo-config", addEventListener: () => {} },
           "llm-bindings-list": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-shell": { innerHTML: "", addEventListener: () => {} },
           "llm-editor-backdrop": { addEventListener: () => {} },
@@ -1168,7 +1171,9 @@ def test_handle_detail_save_multiple_api_keys_sends_concurrency_list() -> None:
           auth_mode: "api_key",
           api_key: "key-1,key-2",
           default_model: "demo-model",
-          parameters: { temperature: 0.4 },
+          // JSON 与并发数输入保持一致，避免上下文窗口 reconcile 改写编辑器文本；
+          // 单 key 约束只拦截 JSON 配置变更，存量多 key 配置仍可单独保存并发数列表。
+          parameters: { temperature: 0.4, context_window_tokens: 32000 },
           extra_headers: {},
           extra_options: {},
         });
