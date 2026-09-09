@@ -61,6 +61,22 @@ class ExternalApiClient:
         response.raise_for_status()
         return response.json()
 
+    async def list_pending_outbox(self) -> list[dict[str, Any]]:
+        """Pending durable pushes for this bridge (startup pump warm-up list)."""
+        response = await self._client.get("/outbox/pending", headers=self._headers())
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("items") if isinstance(payload, dict) else None
+        return [item for item in list(items or []) if isinstance(item, dict)]
+
+    async def ack_outbox(self, session_id: str, outbox_id: str) -> None:
+        """Mark a durable outbox entry delivered after the channel API confirms."""
+        response = await self._client.post(
+            f"/sessions/{session_id}/outbox/{outbox_id}/ack",
+            headers=self._headers(),
+        )
+        response.raise_for_status()
+
     async def stream_events(self, session_id: str, *, last_seq: int = 0) -> AsyncIterator[dict[str, Any]]:
         headers = self._headers({"Accept": "text/event-stream"})
         if last_seq > 0:

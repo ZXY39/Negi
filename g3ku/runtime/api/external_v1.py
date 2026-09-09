@@ -15,6 +15,8 @@ bootstrap lock middleware returns 423 while the project is locked):
 - ``POST   /turns/{turn_id}/pause``        pause the turn's session
 - ``POST   /sessions/{session_id}/cancel`` cancel session tasks
 - ``GET    /sessions/{session_id}/events`` SSE event stream (replay via Last-Event-ID)
+- ``GET    /outbox/pending``               pending durable pushes for this bridge (pump warm-up)
+- ``POST   /sessions/{session_id}/outbox/{outbox_id}/ack`` mark a durable push delivered
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from g3ku.runtime.external_events import (
     get_session_event_hub,
 )
 from g3ku.runtime.api.external_turns import get_external_turn_service
+from g3ku.runtime.external_outbox import ack_outbound_message, load_pending_outbound
 from g3ku.runtime.external_sessions import (
     ExternalSessionEntry,
     get_external_session_registry,
@@ -414,6 +417,53 @@ async def cancel_external_session(
         raise HTTPException(status_code=503, detail="runtime_unavailable")
     cancelled = await service.cancel_session(entry.session_key)
     return {"ok": True, "cancelled": int(cancelled), "session_id": entry.session_key}
+
+
+# -- outbox (durable proactive push ledger) ---------------------------------
+
+
+@router.get("/outbox/pending")
+async def list_pending_outbox_entries(
+    principal: ExternalApiPrincipal = Depends(require_external_api),
+):
+    """Pending durable pushes owned by this bridge (pump warm-up list).
+
+    进程重启后桥的 sessions 映射清空、pump 只等下一条入站消息才建；桥在启动时
+    用本列表为有滞留推送的会话预热 pump。消息正文经各会话 SSE 流的重放投递，
+    本端点只返回路由身份，不返回文本。
+    """
+    own_session_keys = {
+        entry.session_key
+        for entry in _registry().list_bridge_sessions(principal.bridge_id)
+        if entry is not None
+    }
+    items = [
+        {
+            "outbox_id": str(record.get("id") or ""),
+            "session_id": str(record.get("session_key") or ""),
+            "external_key": str(record.get("external_key") or ""),
+            "ts": str(record.get("ts") or ""),
+        }
+        for record in load_pending_outbound()
+        if str(record.get("session_key") or "") in own_session_keys
+    ]
+    return {"ok": True, "items": items}
+
+
+@router.post("/sessions/{session_id}/outbox/{outbox_id}/ack")
+async def ack_outbox_entry(
+    session_id: str,
+    outbox_id: str,
+    principal: ExternalApiPrincipal = Depends(require_external_api),
+):
+    """Mark one durable outbox entry delivered (idempotent, session-scoped).
+
+    桥在渠道 API 确认送达后调用；ack 落在 append-only 账本上，启动重放只投
+    未 ack 的条目。跨会话的 outbox_id 一律拒绝（``acked=false``）。
+    """
+    entry = _own_entry(session_id, principal)
+    acked = ack_outbound_message(outbox_id, session_key=entry.session_key)
+    return {"ok": True, "acked": bool(acked), "outbox_id": str(outbox_id or "")}
 
 
 # -- events (SSE) -----------------------------------------------------------

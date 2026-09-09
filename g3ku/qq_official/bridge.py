@@ -307,8 +307,10 @@ async def run_qq_official_bridge(
                         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                         continue
                     target_key = external_key
+                    outbox_id = ""
                     if event_type == OUTBOUND_EVENT:
                         target_key = str(event.get("external_key") or external_key)
+                        outbox_id = str(event.get("outbox_id") or "").strip()
                     try:
                         await deliver(target_key, text)
                     except asyncio.CancelledError:
@@ -338,6 +340,16 @@ async def run_qq_official_bridge(
                     seqs[session_id] = seq
                     failed_seq, failed_attempts = 0, 0
                     backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                    if outbox_id:
+                        try:
+                            await client.ack_outbox(session_id, outbox_id)
+                        except Exception as exc:  # noqa: BLE001 - ack 失败不影响本条已送达
+                            # 代价是下次重启后本条可能重复投递一次（at-least-once）。
+                            logger.warning(
+                                "qq-official outbox ack failed for {} ({}); may redeliver after restart",
+                                outbox_id,
+                                exc,
+                            )
                 # SSE 流干净结束（服务端重启/空闲关闭）：同样必须重连续拉。
                 logger.warning(
                     "qq-official event stream ended for session {}; reconnecting",
@@ -362,6 +374,30 @@ async def run_qq_official_bridge(
         pump_tasks[session_id] = task
         pumps.add(task)
         task.add_done_callback(pumps.discard)
+
+    async def _warm_up_pending_pumps() -> None:
+        """按持久 outbox 的 pending 清单预热 pump。
+
+        进程重启后 sessions 映射清空，pump 只等下一条入站消息才建；在那之前
+        服务端启动重放进 hub 的滞留推送（心跳升级、cron 提醒）没有消费者。
+        这里为每个有 pending 推送的会话先建 pump，让 SSE 重放把账补齐。
+        """
+        try:
+            pending = await client.list_pending_outbox()
+        except Exception as exc:  # noqa: BLE001 - 预热失败不阻断桥启动
+            logger.warning("qq-official pending outbox warm-up skipped: {}", exc)
+            return
+        warmed = 0
+        for item in pending:
+            pending_session = str(item.get("session_id") or "").strip()
+            pending_key = str(item.get("external_key") or "").strip()
+            if not pending_session or not pending_key:
+                continue
+            sessions.setdefault(pending_key, pending_session)
+            _spawn_pump(pending_session, pending_key)
+            warmed += 1
+        if warmed:
+            logger.info("qq-official warmed {} pump(s) from pending outbox entries", warmed)
 
     class QqOfficialClient(botpy.Client):
         async def on_ready(self):
@@ -412,6 +448,7 @@ async def run_qq_official_bridge(
     try:
         bridge_client = QqOfficialClient(intents=intents, is_sandbox=sandbox, ext_handlers=False)
         bridge_api = getattr(bridge_client, "api", None)
+        await _warm_up_pending_pumps()
         on_state("connecting", "waiting for QQ gateway")
         # NOTE: botpy's ``Client.run()`` is blocking (``run_until_complete`` on the
         # loop captured at construction) and raises "This event loop is already

@@ -15,6 +15,12 @@ from g3ku.agent.loop import AgentLoop
 from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
 from g3ku.runtime.external_events import get_session_event_hub
+from g3ku.runtime.external_outbox import (
+    compact_outbox,
+    expire_stale_pending,
+    load_pending_outbound,
+    record_outbound_message,
+)
 from g3ku.runtime.external_sessions import EXTERNAL_OUTBOUND_CHANNEL, get_external_session_registry
 from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
@@ -406,21 +412,40 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
                 getattr(pending, "chat_id", "?"),
             )
             return
+        metadata = getattr(pending, "metadata", None) or {}
+        reply_to = str(getattr(pending, "reply_to", "") or "").strip()
+        dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+        # 持久 outbox 登记（先于 hub 发布）：桥 pump 断连或进程重启窗口里滞留的
+        # 主动推送靠它在启动重放时找回。重放消息自带 outbox_id，直接复用不重复
+        # 登记；登记失败（磁盘满）降级为仅内存投递，不阻断发布。
+        outbox_id = str(metadata.get("outbox_id") or "").strip()
+        if not outbox_id:
+            outbox_id = record_outbound_message(
+                session_key=entry.session_key,
+                external_key=entry.external_key,
+                text=sanitized,
+                reply_to=reply_to,
+                dedupe_key=dedupe_key,
+            )
         payload: dict[str, Any] = {
             "text": sanitized,
             "external_key": entry.external_key,
             "session_key": entry.session_key,
         }
-        reply_to = str(getattr(pending, "reply_to", "") or "").strip()
         if reply_to:
             payload["reply_to"] = reply_to
-        dedupe_key = str((getattr(pending, "metadata", None) or {}).get("dedupe_key") or "").strip()
         if dedupe_key:
             payload["dedupe_key"] = dedupe_key
+        if outbox_id:
+            payload["outbox_id"] = outbox_id
         get_session_event_hub(entry.session_key).publish("outbound.created", **payload)
         # 语义要精确：这一行只代表"事件已发布到该会话的内存 hub"，不代表已送达
         # 渠道——真正送达以桥侧 "qq-official delivered ..." 回执日志为准。
-        logger.info("external outbound published to hub: session={}", entry.session_key)
+        logger.info(
+            "external outbound published to hub: session={} outbox_id={}",
+            entry.session_key,
+            outbox_id or "-",
+        )
 
     async def _drain_outbound() -> None:
         pending: OutboundMessage | None = None
@@ -462,6 +487,48 @@ def _ensure_outbound_drain_running() -> None:
         return
     if _global_outbound_drain_task is None or _global_outbound_drain_task.done():
         _global_outbound_drain_task = _start_outbound_drain(_global_bus)
+
+
+async def _replay_pending_external_outbox() -> None:
+    """Replay the durable external outbox at startup.
+
+    bus/hub 都是纯内存：桥 pump 断连或进程重启窗口里滞留的主动推送（心跳升级、
+    cron 提醒、任务终态）随内存清空而蒸发。drain 在发布 hub 前已把每条消息登记
+    进 ``.g3ku/external-outbox/``（见 ``g3ku/runtime/external_outbox.py``）；
+    这里把时效窗口内未 ack 的条目带原 outbox_id 重新注入出站总线（drain 复用
+    该 id，不会重复登记），过期条目标记 expired，然后压实账本。桥侧启动时按
+    ``GET /outbox/pending`` 预热这些会话的 pump，消息经 SSE 重放完成投递后由
+    桥 ack 销账（at-least-once：ack 丢失会在下次重启后重复投递一次）。
+    """
+    bus = _global_bus
+    if bus is None:
+        return
+    try:
+        expired = expire_stale_pending()
+        pending = load_pending_outbound()
+        for record in pending:
+            await bus.publish_outbound(
+                OutboundMessage(
+                    channel=EXTERNAL_OUTBOUND_CHANNEL,
+                    chat_id=str(record.get("session_key") or ""),
+                    content=str(record.get("text") or ""),
+                    reply_to=str(record.get("reply_to") or "") or None,
+                    metadata={
+                        "source": "outbox_replay",
+                        "outbox_id": str(record.get("id") or ""),
+                        "dedupe_key": str(record.get("dedupe_key") or ""),
+                    },
+                )
+            )
+        compact_outbox()
+        if pending or expired:
+            logger.warning(
+                "external outbox replay: republished {} pending message(s), expired {}",
+                len(pending),
+                expired,
+            )
+    except Exception:
+        logger.exception("external outbox replay skipped on error")
 
 
 def _ensure_task_worker_watchdog_running(service: Any = None) -> None:
@@ -730,6 +797,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
         if cron_service is not None and _should_start_web_cron(runtime_agent) and not _cron_runtime_ready(runtime_agent):
             await cron_service.start()
         _ensure_outbound_drain_running()
+        await _replay_pending_external_outbox()
         try:
             await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
         except Exception:

@@ -15,6 +15,7 @@ import pytest
 from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
 from g3ku.heartbeat.session_service import _derive_session_channel_chat
+from g3ku.runtime import external_outbox
 from g3ku.runtime.external_events import get_session_event_hub, reset_session_event_hubs
 from g3ku.runtime.external_sessions import (
     ExternalSessionRegistry,
@@ -32,7 +33,10 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(web_shell, "get_external_session_registry", lambda: registry)
     bus = MessageBus()
     monkeypatch.setattr(web_shell, "_global_bus", bus)
+    # drain 会把 ext 出站登记进持久 outbox：测试重定向到 tmp，不污染真实工作区。
+    external_outbox.configure_external_outbox_root(tmp_path)
     yield registry, bus
+    external_outbox.configure_external_outbox_root(None)
     reset_external_session_registry()
     reset_session_event_hubs()
 

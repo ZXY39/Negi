@@ -85,6 +85,8 @@ class FakeExternalApiClient:
         self.ensured: list[str] = []
         self.sent: list[tuple[str, str, str, list]] = []
         self.events: asyncio.Queue = asyncio.Queue()
+        self.acked: list[tuple[str, str]] = []
+        self.pending_outbox: list[dict] = []
         self.closed = False
         FakeExternalApiClient.instances.append(self)
 
@@ -102,6 +104,12 @@ class FakeExternalApiClient:
     ) -> dict:
         self.sent.append((session_id, text, idempotency_key, list(attachments or [])))
         return {"ok": True, "turn_id": "t1"}
+
+    async def list_pending_outbox(self) -> list[dict]:
+        return list(self.pending_outbox)
+
+    async def ack_outbox(self, session_id: str, outbox_id: str) -> None:
+        self.acked.append((session_id, outbox_id))
 
     async def stream_events(self, session_id: str, last_seq: int = 0):
         while True:
@@ -676,6 +684,84 @@ async def test_deliver_treats_empty_api_response_as_failure(monkeypatch: pytest.
         # 第一次无回执 → 判失败 → 重连重放 → 第二次带回执成功。
         assert attempts["n"] == 2
         assert delivered == [("post_c2c_message", {"openid": "u9", "content": "回执缺失", "msg_type": 0})]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_acks_outbox_after_confirmed_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """outbound.created 携带 outbox_id 时：投递确认后必须 ack 销账，
+    否则下次启动重放会重复投递。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="a1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "带账本的推送",
+                "external_key": "qq:c2c:u9",
+                "outbox_id": "obx-test-1",
+            }
+        )
+        await _wait_until(lambda: client.api.calls and ext.acked)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u9", "content": "带账本的推送", "msg_type": 0})
+        ]
+        assert ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-test-1")]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+class _WarmUpStreamClient(FakeExternalApiClient):
+    """构造时即携带 pending outbox 清单（模拟服务端重启前滞留的主动推送），
+    订阅即重放对应的 outbound 事件（模拟启动重放已进 hub）。"""
+
+    def __init__(self, base_url: str, token: str, transport=None) -> None:
+        super().__init__(base_url, token, transport)
+        self.pending_outbox = [
+            {
+                "outbox_id": "obx-warm-1",
+                "session_id": "ext:qq-official:qq:c2c:u5",
+                "external_key": "qq:c2c:u5",
+                "ts": "2026-09-09T02:35:38.990625",
+            }
+        ]
+
+    async def stream_events(self, session_id: str, last_seq: int = 0):
+        if session_id == "ext:qq-official:qq:c2c:u5" and last_seq == 0:
+            yield {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "重启滞留的提醒",
+                "external_key": "qq:c2c:u5",
+                "outbox_id": "obx-warm-1",
+            }
+        while True:
+            yield await self.events.get()
+
+
+@pytest.mark.asyncio
+async def test_bridge_warms_pumps_from_pending_outbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """进程重启后 sessions 映射清空、pump 只等入站消息才建：桥启动时必须按
+    GET /outbox/pending 清单预热 pump，否则重启前滞留的主动推送无人消费。
+    本测试全程不触发任何 on_incoming。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, client_cls=_WarmUpStreamClient)
+    try:
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: client.api.calls)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u5", "content": "重启滞留的提醒", "msg_type": 0})
+        ]
+        await _wait_until(lambda: ext.acked)
+        assert ext.acked == [("ext:qq-official:qq:c2c:u5", "obx-warm-1")]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
