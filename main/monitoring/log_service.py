@@ -4625,6 +4625,9 @@ class TaskLogService:
             'is_unread': bool(payload.get('is_unread')),
             'is_paused': bool(payload.get('is_paused')),
             'max_depth': int(payload.get('max_depth') or 0),
+            'pinned': bool(payload.get('pinned')),
+            'archived': bool(payload.get('archived')),
+            'purged': bool(payload.get('purged')),
             'token_usage': {
                 'input_tokens': int(((payload.get('token_usage') or {}).get('input_tokens') or 0)),
                 'output_tokens': int(((payload.get('token_usage') or {}).get('output_tokens') or 0)),
@@ -5030,6 +5033,11 @@ class TaskLogService:
             'updated_at': task.updated_at,
             'max_depth': int(task.max_depth or 0),
             'token_usage': task.token_usage.model_dump(mode='json'),
+            # 磁盘治理（P2）：低频状态字段，进 payload 与 fingerprint（翻转必须触发推送）；
+            # disk_usage_bytes 属每小时对账值，只在 GET /tasks 列表下发、不进指纹防扰动。
+            'pinned': bool(metadata.get('pinned')),
+            'archived': bool(metadata.get('archived_at')),
+            'purged': bool(metadata.get('purged_at')),
         }
 
     def _runtime_summary_payload(self, task_id: str, *, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:

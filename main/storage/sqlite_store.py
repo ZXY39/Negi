@@ -72,6 +72,13 @@ class SQLiteTaskStore:
         }
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # 磁盘治理（P3）：新库启用增量页回收。必须在任何事务写入之前设置
+        # （库文件一旦初始化，改 auto_vacuum 需要 VACUUM 才生效；存量库为 no-op，
+        # 迁移由 scripts/compact_task_database.py 在停机窗口执行）。
+        try:
+            self._conn.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        except sqlite3.Error:
+            pass
         with self._conn:
             self._conn.execute('PRAGMA journal_mode=WAL')
         self._setup()
@@ -150,6 +157,13 @@ class SQLiteTaskStore:
                 task_id TEXT PRIMARY KEY,
                 total_bytes INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT ''
+            )
+            ''',
+            '''
+            CREATE TABLE IF NOT EXISTS maintenance_runs (
+                maintenance_key TEXT PRIMARY KEY,
+                last_run_at TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT ''
             )
             ''',
             '''
@@ -772,6 +786,126 @@ class SQLiteTaskStore:
             return usage
         wanted = {str(item or '').strip() for item in task_ids if str(item or '').strip()}
         return {key: value for key, value in usage.items() if key in wanted}
+
+    # ------------------------------------------------------------------
+    # 磁盘治理（P3）：终态任务大行裁剪与维护窗口记账。
+    # 裁剪口径按任务（终态且 finished_at/updated_at 早于 cutoff），一次裁掉该任务
+    # 在五张大行表里的全部行；error_logs、tasks/nodes 结构、task_events 与
+    # event-history gz 归档永久保留（审计与回顾的唯一来源）。
+    # ------------------------------------------------------------------
+
+    _DETAIL_PRUNE_TABLES = (
+        'task_model_calls',
+        'task_runtime_frames',
+        'task_node_tool_results',
+        'task_node_rounds',
+        'task_node_details',
+    )
+
+    _PRUNABLE_TASK_SUBQUERY = (
+        "SELECT task_id FROM tasks WHERE status IN ('success','failed') "
+        "AND COALESCE(NULLIF(json_extract(payload_json, '$.finished_at'), ''), updated_at) < ?"
+    )
+
+    def count_prunable_rows(self, before_iso: str) -> dict[str, int]:
+        cutoff = str(before_iso or '')
+        counts: dict[str, int] = {}
+        for table in self._DETAIL_PRUNE_TABLES:
+            try:
+                row = self._fetchone(
+                    f'SELECT COUNT(*) AS n FROM {table} WHERE task_id IN ({self._PRUNABLE_TASK_SUBQUERY})',
+                    (cutoff,),
+                )
+                counts[table] = int(row['n'] or 0) if row else 0
+            except sqlite3.Error:
+                counts[table] = 0
+        return counts
+
+    def prune_task_detail_rows(self, before_iso: str, *, batch: int = 200) -> dict[str, Any]:
+        """裁掉早于 cutoff 的终态任务在五张大行表里的行；返回 {task_count, deleted}。"""
+        cutoff = str(before_iso or '')
+        limit = max(1, int(batch or 200))
+
+        def operation(conn: sqlite3.Connection) -> dict[str, Any]:
+            rows = conn.execute(
+                f'{self._PRUNABLE_TASK_SUBQUERY} ORDER BY updated_at ASC LIMIT ?',
+                (cutoff, limit),
+            ).fetchall()
+            ids = [str(row['task_id']) for row in rows if str(row['task_id'] or '').strip()]
+            if not ids:
+                return {'task_count': 0, 'deleted': {}}
+            marks = ','.join('?' * len(ids))
+            deleted: dict[str, int] = {}
+            for table in self._DETAIL_PRUNE_TABLES:
+                cursor = conn.execute(
+                    f'DELETE FROM {table} WHERE task_id IN ({marks})',
+                    tuple(ids),
+                )
+                deleted[table] = int(cursor.rowcount or 0)
+            return {'task_count': len(ids), 'deleted': deleted}
+
+        result = self._run_write(operation)
+        # 事务外做被动 checkpoint（事务内不允许），把 WAL 页尽量还给主库。
+        try:
+            self._conn.execute('PRAGMA wal_checkpoint(PASSIVE)')
+        except sqlite3.Error:
+            pass
+        return dict(result or {'task_count': 0, 'deleted': {}})
+
+    def claim_maintenance_run(self, key: str, *, min_interval_seconds: float, detail: str = '') -> bool:
+        """维护窗口跨进程防重：距上次不足 min_interval_seconds 返回 False。"""
+        normalized_key = str(key or '').strip()
+        if not normalized_key:
+            return False
+        now_text = datetime.now().astimezone().isoformat(timespec='seconds')
+        interval = max(0.0, float(min_interval_seconds or 0.0))
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            row = conn.execute(
+                'SELECT last_run_at FROM maintenance_runs WHERE maintenance_key = ?',
+                (normalized_key,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    'INSERT INTO maintenance_runs (maintenance_key, last_run_at, detail) VALUES (?, ?, ?)',
+                    (normalized_key, now_text, str(detail or '')),
+                )
+                return True
+            last_text = str(row['last_run_at'] or '').strip()
+            if last_text and interval > 0.0:
+                try:
+                    last_dt = datetime.fromisoformat(last_text)
+                    now_dt = datetime.fromisoformat(now_text)
+                    if (now_dt - last_dt).total_seconds() < interval:
+                        return False
+                except ValueError:
+                    pass
+            conn.execute(
+                'UPDATE maintenance_runs SET last_run_at = ?, detail = ? WHERE maintenance_key = ?',
+                (now_text, str(detail or ''), normalized_key),
+            )
+            return True
+
+        return bool(self._run_write(operation))
+
+    def list_archived_tasks(self) -> list[dict[str, Any]]:
+        """P3 删除渐进候选：metadata.archived_at 非空的任务（含 pinned/purged 标记，过滤在调用方）。"""
+        rows = self._fetchall(
+            "SELECT task_id, "
+            "json_extract(payload_json, '$.metadata.archived_at') AS archived_at, "
+            "COALESCE(json_extract(payload_json, '$.metadata.pinned'), 0) AS pinned, "
+            "json_extract(payload_json, '$.metadata.purged_at') AS purged_at "
+            "FROM tasks WHERE json_extract(payload_json, '$.metadata.archived_at') IS NOT NULL",
+        )
+        return [
+            {
+                'task_id': str(row['task_id'] or ''),
+                'archived_at': str(row['archived_at'] or ''),
+                'pinned': bool(row['pinned']),
+                'purged_at': str(row['purged_at'] or ''),
+            }
+            for row in rows
+        ]
 
     def delete_task(self, task_id: str) -> None:
         def operation(conn: sqlite3.Connection) -> None:

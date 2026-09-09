@@ -288,6 +288,9 @@ class TaskQueryService:
                 max_depth=int(item.max_depth or 0),
                 token_usage=item.token_usage,
                 disk_usage_bytes=int(disk_usages.get(item.task_id, 0) or 0),
+                pinned=bool((item.metadata or {}).get('pinned')),
+                archived=bool((item.metadata or {}).get('archived_at')),
+                purged=bool((item.metadata or {}).get('purged_at')),
             )
             for item in tasks
         ]

@@ -553,6 +553,25 @@ class ApiClient {
         return data.item || null;
     }
 
+    // 磁盘治理（P2）：书签固定 / 压缩归档 / 解压。
+    static async pinTask(taskId, pinned, options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options) ? { ...options } : {};
+        const data = await this._request("POST", `/api/tasks/${taskId}/pin`, { ...normalized, body: { pinned: !!pinned } });
+        return data?.task || null;
+    }
+
+    static async compressTask(taskId, options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options) ? { ...options } : {};
+        const data = await this._request("POST", `/api/tasks/${taskId}/compress`, normalized);
+        return data?.result || {};
+    }
+
+    static async decompressTask(taskId, options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options) ? { ...options } : {};
+        const data = await this._request("POST", `/api/tasks/${taskId}/decompress`, normalized);
+        return data?.result || {};
+    }
+
 
     static async cancelTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/cancel`);

@@ -699,6 +699,37 @@ class MainRuntimeDiskGuardConfig(Base):
     emergency_streak_samples: int = 3
     emergency_recovery_samples: int = 5
     alert_on_disk_emergency: bool = True
+    # P2：任务压缩归档（压缩渐进 + 手动 compress/decompress）。
+    archive_enabled: bool = True
+    archive_sweep_batch: int = 4
+    archive_sweep_interval_seconds: float = 15.0
+    # P3：终态任务大行裁剪（0=关闭）与删除渐进。
+    detail_retention_days: int = 14
+    purge_enabled: bool = True
+
+    @field_validator("detail_retention_days", mode="before")
+    @classmethod
+    def _normalize_detail_retention_days(cls, value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 14
+
+    @field_validator("archive_sweep_batch", mode="before")
+    @classmethod
+    def _normalize_archive_sweep_batch(cls, value: Any) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 4
+
+    @field_validator("archive_sweep_interval_seconds", mode="before")
+    @classmethod
+    def _normalize_archive_sweep_interval_seconds(cls, value: Any) -> float:
+        try:
+            return max(1.0, float(value))
+        except (TypeError, ValueError):
+            return 15.0
 
     @field_validator("cleanup_min_bytes", mode="before")
     @classmethod

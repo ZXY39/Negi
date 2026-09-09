@@ -106,6 +106,13 @@ class DiskPolicies:
     emergency_streak_samples: int = 3
     emergency_recovery_samples: int = 5
     alert_on_disk_emergency: bool = True
+    # P2：任务压缩归档。
+    archive_enabled: bool = True
+    archive_sweep_batch: int = 4
+    archive_sweep_interval_seconds: float = 15.0
+    # P3：终态任务大行裁剪与删除渐进。
+    detail_retention_days: int = 14  # 0 = 关闭裁剪
+    purge_enabled: bool = True
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -145,6 +152,11 @@ def _policies_from_env() -> DiskPolicies:
         emergency_streak_samples=_env_int('G3KU_DISK_EMERGENCY_STREAK_SAMPLES', 3),
         emergency_recovery_samples=_env_int('G3KU_DISK_EMERGENCY_RECOVERY_SAMPLES', 5),
         alert_on_disk_emergency=_env_flag('G3KU_DISK_ALERT_ON_EMERGENCY', True),
+        archive_enabled=_env_flag('G3KU_DISK_ARCHIVE_ENABLED', True),
+        archive_sweep_batch=_env_int('G3KU_DISK_ARCHIVE_SWEEP_BATCH', 4),
+        archive_sweep_interval_seconds=_env_float('G3KU_DISK_ARCHIVE_SWEEP_INTERVAL_SECONDS', 15.0),
+        detail_retention_days=_env_int('G3KU_DISK_DETAIL_RETENTION_DAYS', 14),
+        purge_enabled=_env_flag('G3KU_DISK_PURGE_ENABLED', True),
     )
 
 

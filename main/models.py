@@ -310,6 +310,14 @@ class TaskRecord(Model):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    def is_purged(self) -> bool:
+        """磁盘治理（P3）墓碑判定唯一入口：归档 zip 已被删除渐进回收。
+
+        purged 不进 TaskStatus Literal（避免全链路状态校验/调度分支被波及），
+        以 metadata.purged_at 承载；tasks 行、节点结构、summary、error_logs 仍在。
+        """
+        return bool((self.metadata or {}).get('purged_at'))
+
 
 class NodeRecord(Model):
     node_id: str
