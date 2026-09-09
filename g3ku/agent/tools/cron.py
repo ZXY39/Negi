@@ -102,12 +102,13 @@ class CronTool(Tool):
         runtime_context = kwargs.get("__g3ku_runtime") if isinstance(kwargs.get("__g3ku_runtime"), dict) else {}
         if bool(runtime_context.get("cron_internal")):
             current_job_id = str(runtime_context.get("cron_job_id") or "").strip()
-            if action != "remove":
-                return "Error: cron-internal runs may only remove the current job when the stop condition is met"
-            if not current_job_id:
-                return "Error: cron-internal remove is unavailable because the current job_id is missing"
-            if str(job_id or "").strip() != current_job_id:
-                return f"Error: cron-internal runs may only remove the current job_id '{current_job_id}'"
+            if action == "remove":
+                # 定时任务触发的回合里允许继续 add / list，但 remove 只允许
+                # 删除当前正在触发的任务本身，防止误删其它任务。
+                if not current_job_id:
+                    return "Error: cron-internal remove is unavailable because the current job_id is missing"
+                if str(job_id or "").strip() != current_job_id:
+                    return f"Error: cron-internal runs may only remove the current job_id '{current_job_id}'"
         if action == "add":
             return self._add_job(
                 message,

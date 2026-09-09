@@ -195,11 +195,18 @@ promotion 与前门状态：
 - 兜底闸门的三处豁免：① 上下文加载型工具（`load_tool_context` / `load_tool_context_v2` / `load_skill_context` / `load_skill_context_v2`）在共享豁免集合内（`stage_budget.py` 的 `DEFAULT_STAGE_GATE_BYPASS_TOOLS`，节点与 CEO/frontdoor 同效），无论有无活动阶段都可调用——加载器是曝光层恒定可调的 fixed builtin、不计入阶段预算，且工具合同要求普通工具先 load 后调，把加载器挡在闸门后会造成起手轮必然撞闸、白白消耗一次性宽限；② 落库类工具 `memory_write` / `memory_delete` / `memory_note` 是 CEO/frontdoor 全局白名单（`FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES`），无活动阶段也可调用——保证"用户口头给一条长期指令 → 写记忆"不会被 `no active stage` 拦下后一次性放弃、永久丢失；③ 节点暂停（`task_node_error`）心跳轮 `allow_stageless` 放行首个实质性工具，阶段由 `_frontdoor_stage_state_after_tool_cycle` 自动补开（`system_generated`，预算 10，标题=「任务 ID xxx 中的节点出现自动暂停，检查原因并处理」），预算耗尽后 `transition_required` 置真、回到普通闸门。这三处豁免只改执行门控，不改变节点快照 / CEO 合同的 callable 列表，也不改 provider `tools[]` 前缀稳定性。
 - 这组收紧不改变 candidate 语义：`candidate_tool_names` / `candidate_skill_ids` 仍表达 RBAC 可见集合的候选集，只是无有效阶段时这些候选不同时出现在 agent-facing callable contract 里。
 - 内部轮次继承：当前 session 已有权威 frontdoor baseline 与前序 contract state 时，`heartbeat_internal` / `cron_internal` 不被收紧、也不重跑 candidate/hydration/skill selection，而是直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态；从 agent 视角看，它们就是在上一轮 frontdoor contract 上追加隐藏内部提示后的普通 CEO/frontdoor 轮次，可以直接输出，也可以立即开始阶段并调用已继承的普通工具。尚无权威 baseline 时，内部轮次回退到普通 exposure assembly。`cron_internal` 的其余特例只有两点：reminder 正文是隐藏的结构化 `system` 事件块；cron 任务的停止与删除由 scheduler 侧的 `payload.max_runs` / `state.delivered_runs` 计数器负责。
-- 当前 `cron` 工具合同是“结构化提醒”：`message` = 给未来 agent 的提醒动作；`max_runs` = 成功送达上限，省略默认 1；`at` = 只接受创建时仍在未来的单次触发时间，真正执行 `add_job()` 时该时间已过则拒绝创建，并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；`stop_condition` 是兼容字段，不参与运行时停止判断。`cron` 的使用规范（提醒写成内部指令、调度三选一、投递目标由运行时从当前会话上下文自动推导、模型不传 `delivery.*` / `sessionTarget` / `payload.*`）放在 cron 工具的 toolskill 里，按需 `load_tool_context("cron")` 加载；模型对 cron 用法理解过时时，改 toolskill 而不是改注入逻辑。排查“为什么没有自动停止”先看 cron store 的 `payload.max_runs` / `state.delivered_runs`；排查“cron 到点了但没创建/查询任务、只重复谈 cron 自己”，先检查 frontdoor tool exposure 是否被错误缩成 `cron`，而不是先怀疑 scheduler 没触发。
 - `submit_next_stage` 的阶段预算在 execution / acceptance / CEO-frontdoor 三条路径统一为 `1-20`，允许在预算未耗尽前提前切到下一阶段；预算是“本阶段声明的上限窗口”，不是“必须烧满的最小轮数”。
 - `load_tool_context` / `load_skill_context` 属于上下文加载型工具调用：写入 round 历史，但不增加当前阶段的 `tool_rounds_used`；节点与 CEO/frontdoor 记账同一规则，预算结论只看 `rounds[*].budget_counted` 与聚合后的 `tool_rounds_used`，不按 transcript 里的 loader 调用次数自行推断。CEO UI 上，成功 loader 调用在输入框上方显示短暂的 live-only notice（尽量带 `tool_id` / `skill_id`），不作为长期保留的工具步骤；loader 失败时仍优先检查原始 round/tool 数据与 runtime snapshot。
 - 前门要区分两份工具集合：`tool_names` 保存阶段内可恢复的完整 callable pool；“当前轮合同暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮模型可见函数列表；无有效阶段时 `submit_next_stage` 的置首只影响 agent-facing 合同，provider `tools[]` 始终不同步收紧。
 - `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names` 是受保护运行时状态：工具合同刷新不能覆盖、清空或重置这些字段。
+
+### 3.5 `cron` 工具合同
+
+`cron` 工具是“结构化提醒”：`message` = 给未来 agent 的提醒动作；`max_runs` = 成功送达上限，省略默认 1；`at` = 只接受创建时仍在未来的单次触发时间，真正执行 `add_job()` 时该时间已过则拒绝创建，并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；`stop_condition` 是兼容字段，不参与运行时停止判断。
+
+- 定时任务触发的回合（`cron_internal`）里，`cron` 工具照常可用 `add` / `list`（新任务仍只绑定创建它的当前会话），只有 `remove` 被限制为只能删除当前正在触发的任务自身——改传其它 `job_id`、或运行上下文缺失 `cron_job_id` 时一律拒绝，防止提醒回合误拆其它任务。
+- 使用规范（提醒写成内部指令、调度三选一、投递目标由运行时从当前会话上下文自动推导、模型不传 `delivery.*` / `sessionTarget` / `payload.*`）放在 cron 工具的 toolskill 里，按需 `load_tool_context("cron")` 加载；模型对 cron 用法理解过时时，改 toolskill 而不是改注入逻辑。
+- 排查“为什么没有自动停止”先看 cron store 的 `payload.max_runs` / `state.delivered_runs`（到达上限由 scheduler 删除，提醒回合内手工 `remove` 只是辅助出口）；排查“cron 到点了但没创建/查询任务、只重复谈 cron 自己”，先检查 frontdoor tool exposure 是否被错误缩成 `cron`，而不是先怀疑 scheduler 没触发。
 
 ### `manage_task_nodes` 节点控制工具
 

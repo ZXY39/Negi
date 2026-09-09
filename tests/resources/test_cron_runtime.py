@@ -449,7 +449,7 @@ def test_resolve_timezone_reports_missing_tzdata_helpfully(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cron_tool_limits_cron_internal_runs_to_self_removal() -> None:
+async def test_cron_tool_cron_internal_rounds_allow_add_and_list_but_restrict_remove_to_self() -> None:
     service = _CronToolService()
     tool = CronTool(service)
     tool.set_context("web", "shared")
@@ -459,6 +459,19 @@ async def test_cron_tool_limits_cron_internal_runs_to_self_removal() -> None:
         message="hello",
         every_seconds=60,
         __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
+    )
+    list_result = await tool.execute(
+        action="list",
+        __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
+    )
+    missing_job_id_remove_result = await tool.execute(
+        action="remove",
+        __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
+    )
+    missing_runtime_job_id_remove_result = await tool.execute(
+        action="remove",
+        job_id="job-1",
+        __g3ku_runtime={"cron_internal": True},
     )
     wrong_remove_result = await tool.execute(
         action="remove",
@@ -471,10 +484,15 @@ async def test_cron_tool_limits_cron_internal_runs_to_self_removal() -> None:
         __g3ku_runtime={"cron_internal": True, "cron_job_id": "job-1"},
     )
 
-    assert "only remove the current job" in add_result
+    assert add_result == "Created job 'job' (id: job-1)"
+    assert len(service.add_calls) == 1
+    assert service.add_calls[0]["schedule"].kind == "every"
+    assert service.add_calls[0]["message"] == "hello"
+    assert list_result == "No scheduled jobs."
+    assert "only remove the current job_id 'job-1'" in missing_job_id_remove_result
+    assert "current job_id is missing" in missing_runtime_job_id_remove_result
     assert "only remove the current job_id 'job-1'" in wrong_remove_result
     assert remove_result == "Removed job job-1"
-    assert service.add_calls == []
     assert service.removed == ["job-1"]
 
 
