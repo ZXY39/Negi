@@ -68,6 +68,17 @@ _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 # 服务端排队回执兜底文案（正常取 /api/v1 响应里的 receipt）。
 _QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
 
+# pump 重连退避。SSE 流断开（服务端事件循环阻塞超过读超时、网络抖动、进程重启）
+# 后必须自动重连：pump 一旦终结且不再重建，该会话的所有主动推送（心跳升级、
+# cron 提醒、任务终态）都会永久滞留在服务端事件缓冲里，形成"能收不能发"的
+# 僵尸渠道。旧实现只打一条日志就结束任务，注释承诺的 reconnect loop 并不存在。
+_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS = 1.0
+_PUMP_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
+# 同一条事件连续投递失败达到上限后跳过：投递失败不推进 seq，重连后服务端按
+# last_seq 重放本条自动重试；但毒消息（如目标永久 4xx）不能把 pump 卡死在
+# 同一条上，达到上限记 error 后放弃并继续消费后续事件。
+_PUMP_DELIVER_MAX_ATTEMPTS = 5
+
 
 def _is_botpy_task(task: asyncio.Task) -> bool:
     """True for tasks botpy spawned on the shared loop.
@@ -204,6 +215,7 @@ async def run_qq_official_bridge(
     sessions: dict[str, str] = {}
     seqs: dict[str, int] = {}
     pumps: set[asyncio.Task] = set()
+    pump_tasks: dict[str, asyncio.Task] = {}
 
     async def on_incoming(
         external_key: str,
@@ -218,7 +230,9 @@ async def run_qq_official_bridge(
         if session_id is None:
             session_id = await client.ensure_session(external_key)
             sessions[external_key] = session_id
-            _spawn_pump(session_id, external_key)
+        # 每次入站都幂等校验 pump 存活：pump 意外终结（如 shutdown 竞态取消）时
+        # 靠下一条用户消息自愈，而不是让该会话的出站永久无人消费。
+        _spawn_pump(session_id, external_key)
         idem = idempotency_key_for(event_id)
         # 绝不回退到 external_key 当幂等键：external_key 对同一用户恒定，
         # 缺事件 id 的消息会用它撞掉该用户第一条消息的幂等位并被永久丢弃。
@@ -253,27 +267,81 @@ async def run_qq_official_bridge(
             logger.warning("qq-official cannot deliver to target external_key={}", external_key)
 
     async def _pump(session_id: str, external_key: str) -> None:
-        seen = seqs.get(session_id, 0)
-        try:
-            async for event in client.stream_events(session_id, last_seq=seen):
-                seqs[session_id] = int(event.get("seq") or seen)
-                event_type = str(event.get("type") or "")
-                if not is_deliverable_event(event_type):
-                    continue
-                text = str(event.get("text") or "").strip()
-                if not text:
-                    continue
-                target_key = external_key
-                if event_type == OUTBOUND_EVENT:
-                    target_key = str(event.get("external_key") or external_key)
-                await deliver(target_key, text)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - reconnect loop keeps the pump alive
-            logger.exception("qq-official event pump error for session {}", session_id)
+        """Per-session SSE consumer with a real reconnect loop.
+
+        投递语义：只有 deliver 成功（或事件被判定不可投递/毒消息达到重试上限）
+        才推进 ``seqs``；失败时跳出重连，服务端按 last_seq 重放，本条自动重试，
+        重试节奏随重连退避（1s→60s 封顶）递增。SSE 干净结束（服务端重启）同样
+        重连，绝不静默终结任务。
+        """
+        backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+        failed_seq = 0
+        failed_attempts = 0
+        while True:
+            seen = seqs.get(session_id, 0)
+            try:
+                async for event in client.stream_events(session_id, last_seq=seen):
+                    seq = int(event.get("seq") or seen)
+                    event_type = str(event.get("type") or "")
+                    text = str(event.get("text") or "").strip()
+                    if not is_deliverable_event(event_type) or not text:
+                        seqs[session_id] = seq
+                        backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                        continue
+                    target_key = external_key
+                    if event_type == OUTBOUND_EVENT:
+                        target_key = str(event.get("external_key") or external_key)
+                    try:
+                        await deliver(target_key, text)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001 - retry via reconnect replay
+                        failed_attempts = failed_attempts + 1 if seq == failed_seq else 1
+                        failed_seq = seq
+                        logger.exception(
+                            "qq-official deliver failed for session {} seq {} (attempt {}/{})",
+                            session_id,
+                            seq,
+                            failed_attempts,
+                            _PUMP_DELIVER_MAX_ATTEMPTS,
+                        )
+                        if failed_attempts >= _PUMP_DELIVER_MAX_ATTEMPTS:
+                            logger.error(
+                                "qq-official dropping undeliverable event seq {} for session {} after {} attempts",
+                                seq,
+                                session_id,
+                                failed_attempts,
+                            )
+                            seqs[session_id] = seq
+                            failed_seq, failed_attempts = 0, 0
+                            backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                            continue
+                        raise
+                    seqs[session_id] = seq
+                    failed_seq, failed_attempts = 0, 0
+                    backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                # SSE 流干净结束（服务端重启/空闲关闭）：同样必须重连续拉。
+                logger.warning(
+                    "qq-official event stream ended for session {}; reconnecting",
+                    session_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - reconnect loop keeps the pump alive
+                logger.exception(
+                    "qq-official event pump error for session {}; reconnecting in {:.0f}s",
+                    session_id,
+                    backoff,
+                )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, _PUMP_RECONNECT_MAX_BACKOFF_SECONDS)
 
     def _spawn_pump(session_id: str, external_key: str) -> None:
+        existing = pump_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            return
         task = asyncio.create_task(_pump(session_id, external_key), name=f"qq-official-pump:{session_id}")
+        pump_tasks[session_id] = task
         pumps.add(task)
         task.add_done_callback(pumps.discard)
 

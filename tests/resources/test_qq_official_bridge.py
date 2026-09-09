@@ -489,3 +489,128 @@ async def test_bridge_delivers_queued_receipt_to_user(monkeypatch: pytest.Monkey
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+class _FlakyStreamClient(FakeExternalApiClient):
+    """第一条 SSE 流立即抛 ReadTimeout（模拟 pump 被 30s 读超时杀死的事故现场），
+    后续流恢复正常。"""
+
+    def __init__(self, base_url: str, token: str, transport=None) -> None:
+        super().__init__(base_url, token, transport)
+        self.stream_calls = 0
+
+    async def stream_events(self, session_id: str, last_seq: int = 0):
+        self.stream_calls += 1
+        if self.stream_calls == 1:
+            raise httpx.ReadTimeout("simulated keep-alive read timeout")
+        while True:
+            yield await self.events.get()
+
+
+@pytest.mark.asyncio
+async def test_pump_reconnects_after_stream_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回归（磁盘满事故断点②）：pump 因 SSE ReadTimeout 挂掉后必须自动重连。
+    旧实现只打一条日志就终结任务，且 sessions 映射仍在，此后该会话所有主动
+    推送（心跳升级、cron 提醒）永久滞留服务端事件缓冲，形成"能收不能发"。"""
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, client_cls=_FlakyStreamClient)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="r1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.stream_calls >= 2)
+        await ext.events.put(
+            {"type": "outbound.created", "seq": 7, "text": "重连补投", "external_key": "qq:c2c:u9"}
+        )
+        await _wait_until(lambda: client.api.calls)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u9", "content": "重连补投", "msg_type": 0})
+        ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+class _ReplayStreamClient(FakeExternalApiClient):
+    """模拟服务端 SSE 重放语义：每次流调用重放 feed 中 seq 大于 last_seq 的全部
+    事件，然后挂起等待新事件。"""
+
+    def __init__(self, base_url: str, token: str, transport=None) -> None:
+        super().__init__(base_url, token, transport)
+        self.feed: list[dict] = []
+
+    async def stream_events(self, session_id: str, last_seq: int = 0):
+        while True:
+            for event in list(self.feed):
+                seq = int(event.get("seq") or 0)
+                if seq > last_seq:
+                    yield event
+                    last_seq = seq
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_pump_retries_failed_delivery_then_drops_poison(monkeypatch: pytest.MonkeyPatch) -> None:
+    """投递失败不推进 seq：重连后服务端重放本条自动重试；连续失败达到上限的
+    毒消息记 error 后跳过，后续事件继续消费（不再像旧实现那样整个 pump 死亡）。"""
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr(bridge_module, "_PUMP_DELIVER_MAX_ATTEMPTS", 2)
+
+    attempts: dict[str, int] = {}
+    delivered: list[tuple[str, dict]] = []
+
+    async def _flaky_post_c2c(**kwargs):
+        content = str(kwargs.get("content") or "")
+        attempts[content] = attempts.get(content, 0) + 1
+        if content == "poison":
+            raise RuntimeError("simulated QQ API rejection")
+        delivered.append(("post_c2c_message", kwargs))
+        return {"id": "mid-1"}
+
+    flaky_api = FakeBotApi()
+    flaky_api.post_c2c_message = _flaky_post_c2c
+
+    class _FlakyApiClient(FakeClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.api = flaky_api
+
+    fake_botpy = types.ModuleType("botpy")
+    fake_botpy.Client = _FlakyApiClient
+    fake_botpy.Intents = FakeIntents
+    monkeypatch.setitem(sys.modules, "botpy", fake_botpy)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", _ReplayStreamClient)
+    media = _media_transport({})
+    monkeypatch.setattr(
+        bridge_module, "_create_media_client", lambda: httpx.AsyncClient(transport=media)
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-replay",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="p1"))
+        ext = FakeExternalApiClient.instances[-1]
+        ext.feed.append({"type": "outbound.created", "seq": 1, "text": "poison", "external_key": "qq:c2c:u9"})
+        await _wait_until(lambda: attempts.get("poison", 0) >= 2)
+        ext.feed.append({"type": "outbound.created", "seq": 2, "text": "正常补投", "external_key": "qq:c2c:u9"})
+        await _wait_until(lambda: delivered)
+        # 毒消息达到上限即放弃，不再无限重试；后续消息正常投递。
+        assert attempts["poison"] == 2
+        assert delivered == [
+            ("post_c2c_message", {"openid": "u9", "content": "正常补投", "msg_type": 0})
+        ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
