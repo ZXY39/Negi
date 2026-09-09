@@ -28,6 +28,7 @@ def normalize_append_notice_context(payload: Any) -> dict[str, Any]:
                 'received_at': str(item.get('received_at') or '').strip(),
                 'consumed_at': str(item.get('consumed_at') or '').strip(),
                 'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
+                'superseded_at': str(item.get('superseded_at') or '').strip(),
             }
         )
     compression_segments: list[dict[str, Any]] = []
@@ -175,8 +176,49 @@ def record_consumed_notifications(
                 ).strip(),
                 'consumed_at': str(item.get('consumed_at') or consumed_at or '').strip(),
                 'compression_stage_id': '',
+                'superseded_at': str(item.get('superseded_at') or '').strip(),
             }
         )
+    return normalized
+
+
+def supersede_append_notice_records(
+    context: Any,
+    *,
+    notification_ids: list[str] | None = None,
+    source_node_id: str = '',
+    superseded_at: str,
+) -> dict[str, Any]:
+    """Mark matching notice records as superseded so they stop resurfacing.
+
+    A superseded record stays in the context for forensics but is excluded from
+    the raw notice tail window and from compression-segment rollups: its
+    directive was already answered (e.g. a block-verification cycle resolved,
+    or a newer handoff message from the same source replaced it).
+    """
+    normalized = normalize_append_notice_context(context)
+    normalized_at = str(superseded_at or '').strip()
+    if not normalized_at:
+        return normalized
+    wanted_ids = {
+        str(item or '').strip()
+        for item in list(notification_ids or [])
+        if str(item or '').strip()
+    }
+    normalized_source = str(source_node_id or '').strip()
+    if not wanted_ids and not normalized_source:
+        return normalized
+    next_records: list[dict[str, Any]] = []
+    for item in list(normalized.get('notice_records') or []):
+        payload = dict(item or {})
+        if not str(payload.get('superseded_at') or '').strip():
+            matched = str(payload.get('notification_id') or '').strip() in wanted_ids
+            if not matched and normalized_source:
+                matched = str(payload.get('source_node_id') or '').strip() == normalized_source
+            if matched:
+                payload['superseded_at'] = normalized_at
+        next_records.append(payload)
+    normalized['notice_records'] = next_records
     return normalized
 
 
@@ -196,6 +238,7 @@ def roll_append_notice_context_for_compression_stage(
         item
         for item in list(normalized.get('notice_records') or [])
         if not str(item.get('compression_stage_id') or '').strip()
+        and not str(item.get('superseded_at') or '').strip()
         and str(item.get('message') or '').strip()
     ]
     if not uncovered:
@@ -262,6 +305,7 @@ def build_append_notice_tail_messages(
         }
         for item in list(normalized.get('notice_records') or [])
         if not str(item.get('compression_stage_id') or '').strip()
+        and not str(item.get('superseded_at') or '').strip()
         and str(item.get('message') or '').strip()
         and str(item.get('message') or '').strip() not in visible_texts
     ]
@@ -291,4 +335,5 @@ __all__ = [
     'record_pending_append_notice_records',
     'record_consumed_notifications',
     'roll_append_notice_context_for_compression_stage',
+    'supersede_append_notice_records',
 ]

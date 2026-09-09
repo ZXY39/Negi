@@ -40,6 +40,7 @@ from main.runtime.append_notice_context import (
     normalize_pending_append_notice_records,
     record_pending_append_notice_records,
     record_consumed_notifications,
+    supersede_append_notice_records,
 )
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.runtime.acceptance_handshake import (
@@ -981,6 +982,37 @@ class NodeRunner:
 
         self._log_service.update_node_metadata(node_id, _mutate)
 
+    def _supersede_consumed_notices_from_source(self, *, node_id: str, source_node_id: str) -> None:
+        """作废目标节点上下文中来自指定来源的已消费通知记录。
+
+        通知消息本身保留在历史与通知台账中（追加式消息不被覆盖）；这里只把
+        append_notice_context 里的记录标记为 superseded，使已处理的激活指令
+        （阻塞核验激活、打回续验通知等）不再被通知尾窗或压缩段重新注入，
+        避免过期指令误导后续轮次。
+        """
+        normalized_node_id = str(node_id or '').strip()
+        normalized_source = str(source_node_id or '').strip()
+        if not normalized_node_id or not normalized_source:
+            return
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            context = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY))
+            records = list(context.get('notice_records') or [])
+            if not any(
+                not str(item.get('superseded_at') or '').strip()
+                and str(item.get('source_node_id') or '').strip() == normalized_source
+                for item in records
+            ):
+                return metadata
+            metadata[APPEND_NOTICE_CONTEXT_KEY] = supersede_append_notice_records(
+                context,
+                source_node_id=normalized_source,
+                superseded_at=now_iso(),
+            )
+            return metadata
+
+        self._log_service.update_node_metadata(normalized_node_id, _mutate)
+
     def _consume_inflight_notice_ids(
         self,
         *,
@@ -1541,6 +1573,12 @@ class NodeRunner:
             result_ref=result_ref,
             result_summary=str(result.summary or '').strip(),
         )
+        # 新一轮交付到达前，作废验收节点上下文中来自本执行节点的旧交接通知，
+        # 保证通知尾窗里只保留最新一次"请继续核验"的指令。
+        self._supersede_consumed_notices_from_source(
+            node_id=str(acceptance.node_id or ''),
+            source_node_id=str(node.node_id or ''),
+        )
         self._persist_node_notification_direct(
             task_id=task.task_id,
             epoch_id='',
@@ -1688,6 +1726,13 @@ class NodeRunner:
                     message=repair_message,
                 )
                 continue
+            # 本轮阻塞核验已裁决（放行/打回/额度耗尽均走到这里）：作废该执行节点
+            # 此前发给验收节点的阻塞核验激活与修复指令，防止已处理的指令继续出现在
+            # 验收节点的通知尾窗里，把后续正常验收轮次误导回"只鉴定阻塞"模式。
+            self._supersede_consumed_notices_from_source(
+                node_id=str(acceptance.node_id or ''),
+                source_node_id=node_id,
+            )
             if decision == 'unverifiable':
                 return self._allow_blocked_failure(
                     task_id=task_id,
@@ -4813,6 +4858,28 @@ class NodeRunner:
                         runtime_error_text='',
                     )
                     return result
+                # 打回后的重提交到达：先作废验收节点上下文中来自本执行节点的旧
+                # 交接通知，再以显式消息把新交付交给验收节点续验（对齐根节点最终
+                # 验收的续接语义），避免续验轮次只靠静默刷新的 prompt 而丢失
+                # "上一轮拒了什么、这一轮该验什么"的上下文。
+                self._supersede_consumed_notices_from_source(
+                    node_id=str(acceptance.node_id or ''),
+                    source_node_id=str(child.node_id or ''),
+                )
+                self._persist_node_notification_direct(
+                    task_id=task.task_id,
+                    epoch_id='',
+                    source_node_id=str(child.node_id or ''),
+                    target_node_id=str(acceptance.node_id or ''),
+                    message=(
+                        '被检验执行节点已在打回后重新提交，请保留当前验收上下文，继续核验新的交付，'
+                        '不要重新检验已被取代的旧结果载荷。\n'
+                        f'上一轮验收反馈：{str(acceptance_result.answer or "").strip()}\n'
+                        f'新的子节点输出摘要：{child_summary}\n'
+                        f'新的子节点输出 ref：{child_ref}\n'
+                        f'新的子节点结果载荷 ref：{str(child_handoff.get("result_payload_ref") or "")}'
+                    ),
+                )
             check_result = str(acceptance_result.summary or acceptance_result.output or acceptance.failure_reason or '').strip() or SKIPPED_CHECK_RESULT
             self._log_service.update_node_check_result(task.task_id, child.node_id, check_result)
             result = SpawnChildResult(
@@ -6166,8 +6233,16 @@ class NodeRunner:
         payload = result.payload_dict()
 
         def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            previous = metadata.get('result_payload')
             metadata['result_schema_version'] = RESULT_SCHEMA_VERSION
             metadata['result_payload'] = payload
+            if not isinstance(previous, dict) or previous != payload:
+                # 打回重做后的重提交会覆写结果载荷：载荷内容变化时必须清空已外部化的
+                # 载荷 ref 与摘要，让 ensure_node_result_payload_externalized 针对最新
+                # 载荷重新外部化，否则验收/握手读取方会永远拿到首次提交载荷的过期
+                # ref（事故复盘：验收节点据此复核已被取代的阻塞占位载荷）。
+                metadata.pop('result_payload_ref', None)
+                metadata.pop('result_payload_summary', None)
             return metadata
 
         self._log_service.update_node_metadata(node_id, _mutate)

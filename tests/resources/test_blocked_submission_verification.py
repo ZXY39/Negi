@@ -12,6 +12,13 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
 )
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    build_append_notice_tail_messages,
+    normalize_append_notice_context,
+    roll_append_notice_context_for_compression_stage,
+    supersede_append_notice_records,
+)
 from main.runtime.node_runner import (
     _BLOCKED_VERIFICATION_LOG_KEY,
     _BLOCKED_VERIFICATION_ONLY_KEY,
@@ -20,6 +27,7 @@ from main.runtime.node_runner import (
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.stage_budget import STAGE_TOOL_ROUND_BUDGET_MIN
 from main.service.runtime_service import MainRuntimeService
+from main.storage.artifact_store import read_artifact_text
 from main.types import KIND_ACCEPTANCE, STATUS_FAILED, STATUS_SUCCESS
 
 
@@ -654,3 +662,178 @@ def test_prompts_and_repair_guidance_cover_blocked_verification() -> None:
     assert "placeholder" in execution_guidance
     acceptance_guidance = ReActToolLoop._result_repair_guidance(node_kind="acceptance")
     assert "placeholder" in acceptance_guidance
+
+
+# --- 回归：打回重做后验收方必须拿到最新一次提交的结果（事故 task:dd9549f2b24e / node:30c5d7bee9b7） ---
+
+
+def test_supersede_helpers_stop_stale_notice_tail_replay() -> None:
+    context = {
+        "notice_records": [
+            {
+                "notification_id": "notif:aa",
+                "epoch_id": "",
+                "source_node_id": "node:exec",
+                "message": "执行节点提交了 failed+blocked，请核验该阻塞声明是否成立",
+                "received_at": "t1",
+                "consumed_at": "t2",
+                "compression_stage_id": "",
+            }
+        ],
+        "compression_segments": [],
+    }
+    # 未作废前：通知尾窗会重放该指令
+    tail = build_append_notice_tail_messages(context)
+    assert len(tail) == 1
+    assert "failed+blocked" in str(tail[0].get("content") or "")
+
+    superseded = supersede_append_notice_records(
+        context,
+        source_node_id="node:exec",
+        superseded_at="t3",
+    )
+    records = superseded.get("notice_records") or []
+    assert records and records[0]["superseded_at"] == "t3"
+    # 作废后：尾窗不再重放，压缩段归档也不会把指令捞回来
+    assert build_append_notice_tail_messages(superseded) == []
+    rolled = roll_append_notice_context_for_compression_stage(
+        superseded,
+        compression_stage_id="stage:x",
+        created_at="t4",
+    )
+    assert rolled.get("compression_segments") == []
+    # 通知记录本身保留（历史不被覆盖），仅被标记为已取代
+    assert (rolled.get("notice_records") or [])[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_kickback_resubmission_reexternalizes_latest_payload(tmp_path: Path) -> None:
+    """阻塞打回重做后，结果载荷 ref 必须指向最新提交；第一次的阻塞载荷不得继续霸占 ref。"""
+    service = _make_service(tmp_path)
+    try:
+        record = await _create_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        child = _create_execution_child(service, task=task, parent=root)
+        _install_fake_verifier(service, [
+            _verdict("failed", summary="阻塞不成立", blocking_reason="预算未用尽，请完成后重新提交"),
+        ])
+
+        resubmit_result = NodeFinalResult(
+            status="success",
+            delivery_status="final",
+            summary="二次提交已完成",
+            answer="二次提交已完成",
+            evidence=[{"kind": "file", "path": "temp/tasks/child_c.md", "note": "已落盘"}],
+            remaining_work=[],
+            blocking_reason="",
+        )
+        rerun_calls: list[tuple[str, str]] = []
+
+        async def fake_rerun(task_id: str, node_id: str) -> NodeFinalResult:
+            rerun_calls.append((task_id, node_id))
+            # 模拟真实重跑：经 _mark_finished 落盘载荷并外部化
+            service.node_runner._mark_finished(task_id, node_id, resubmit_result)
+            latest = service.get_node(node_id)
+            assert latest is not None
+            return service.node_runner._result_from_record(latest)
+
+        service.node_runner.run_node = fake_rerun  # type: ignore[method-assign]
+
+        result = await service.node_runner._maybe_gate_blocked_submission(
+            task=task,
+            node=service.get_node(child.node_id),
+            result=_blocked_result(),
+        )
+
+        assert result is not None
+        assert result.status == STATUS_SUCCESS
+        assert len(rerun_calls) == 1
+
+        latest = service.get_node(child.node_id)
+        assert latest is not None
+        metadata = dict(latest.metadata or {})
+        new_ref = str(metadata.get("result_payload_ref") or "")
+        assert new_ref, "重提交的结果载荷必须被重新外部化"
+
+        payload_artifacts = [
+            item
+            for item in service.store.list_artifacts(record.task_id)
+            if str(getattr(item, "kind", "") or "") == "node_result_payload"
+            and str(getattr(item, "node_id", "") or "") == child.node_id
+        ]
+        assert len(payload_artifacts) == 2, "阻塞载荷与重提交载荷应各有一个外部化 artifact"
+
+        ref_text = read_artifact_text(service.get_artifact(new_ref))
+        assert "二次提交已完成" in ref_text
+        assert "占位" not in ref_text
+        inline_payload = metadata.get("result_payload") or {}
+        assert inline_payload.get("status") == STATUS_SUCCESS
+        assert str(inline_payload.get("summary") or "") == "二次提交已完成"
+
+        handoff = service.node_runner._child_handoff_payload(
+            task_id=record.task_id,
+            node=latest,
+            fallback_output="",
+        )
+        assert handoff.get("result_payload_ref") == new_ref
+        assert "已落盘" in str(handoff.get("evidence_summary") or "")
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_gate_resolution_supersedes_activation_notice_tail(tmp_path: Path) -> None:
+    """阻塞核验裁决后，激活通知不得继续出现在验收节点的通知尾窗里。"""
+    service = _make_service(tmp_path)
+    try:
+        record = await _create_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        child = _create_execution_child(service, task=task, parent=root)
+
+        async def consuming_verifier(task_id: str, node_id: str) -> NodeFinalResult:
+            # 模拟真实消费路径：通知落为 consumed 并进入 append_notice_context
+            notices = list(service.store.list_task_node_notifications(task_id, node_id) or [])
+            assert notices, "阻塞核验激活通知必须先送达验收节点"
+            service.node_runner._consume_node_notifications(
+                task_id=task_id,
+                node_id=node_id,
+                notification_ids=[str(item.notification_id or "") for item in notices],
+            )
+            service.node_runner._record_consumed_notice_context(
+                node_id=node_id,
+                notifications=[item.model_dump(mode="json") for item in notices],
+            )
+            service.log_service.update_node_status(
+                task_id,
+                node_id,
+                status=STATUS_FAILED,
+                final_output="",
+                failure_reason="阻塞不成立",
+            )
+            return _verdict("failed", summary="阻塞不成立", blocking_reason="请继续完成后重新提交")
+
+        service.node_runner._run_nested_node = consuming_verifier  # type: ignore[method-assign]
+        _install_fake_rerun(
+            service,
+            NodeFinalResult(status="success", delivery_status="final", summary="done", answer="done"),
+        )
+
+        result = await service.node_runner._maybe_gate_blocked_submission(
+            task=task,
+            node=service.get_node(child.node_id),
+            result=_blocked_result(),
+        )
+        assert result is not None
+
+        verifiers = _acceptance_children(service, child.node_id)
+        assert len(verifiers) == 1
+        verifier_metadata = dict(service.get_node(verifiers[0].node_id).metadata or {})
+        context = verifier_metadata.get(APPEND_NOTICE_CONTEXT_KEY)
+        records = normalize_append_notice_context(context).get("notice_records") or []
+        assert records, "激活通知应已消费并记录在验收节点上下文中"
+        assert all(str(item.get("superseded_at") or "").strip() for item in records)
+        assert build_append_notice_tail_messages(context) == []
+    finally:
+        await service.close()

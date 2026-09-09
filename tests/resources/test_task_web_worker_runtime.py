@@ -7657,6 +7657,153 @@ async def test_run_child_pipeline_reruns_reactivated_acceptance_without_duplicat
 
 
 @pytest.mark.asyncio
+async def test_run_child_pipeline_sends_continuation_notice_with_fresh_payload_ref(tmp_path: Path) -> None:
+    """打回重做后，验收节点必须收到携带最新载荷 ref 的续验消息，而不是只靠静默刷新的 prompt。"""
+    service = _build_service(tmp_path)
+    task = None
+    try:
+        record = await service.create_task("child acceptance continuation", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="announce child",
+            prompt="draft announcement",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify announcement",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key="round-continuation",
+            cached_payload=cached_payload,
+        )
+        dispatcher = service.task_actor_service._create_dispatcher(task.task_id)
+        service.task_actor_service._dispatchers[task.task_id] = dispatcher
+
+        call_counts = {"execution": 0, "acceptance": 0}
+
+        async def _mock_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+            target = service.store.get_node(node_id)
+            assert target is not None
+            if target.node_kind == "execution":
+                call_counts["execution"] += 1
+                output = f"draft attempt {call_counts['execution']}"
+                result = NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=output,
+                    answer=output,
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                )
+                # 模拟真实提交：落盘结果载荷并外部化
+                service.node_runner._mark_finished(task_id, node_id, result)
+                return result
+            if target.node_kind == "acceptance":
+                call_counts["acceptance"] += 1
+                if call_counts["acceptance"] == 1:
+                    feedback = "reject once"
+                    service.log_service.update_node_status(
+                        task_id,
+                        node_id,
+                        status="failed",
+                        final_output=feedback,
+                        failure_reason=feedback,
+                    )
+                    return NodeFinalResult(
+                        status="failed",
+                        delivery_status="final",
+                        summary=feedback,
+                        answer=feedback,
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason=feedback,
+                    )
+                service.log_service.update_node_status(
+                    task_id,
+                    node_id,
+                    status="success",
+                    final_output="accepted",
+                    failure_reason="",
+                )
+                return NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="accepted",
+                    answer="accepted",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                )
+            raise AssertionError(f"unexpected node kind: {target.node_kind}")
+
+        service.node_runner.run_node = _mock_run_node  # type: ignore[method-assign]
+
+        result = await service.node_runner._run_child_pipeline(
+            task=task,
+            parent=root,
+            spec=spec,
+            cache_key="round-continuation",
+            cached_payload=cached_payload,
+            index=0,
+        )
+
+        assert result.check_result == "accepted"
+        assert call_counts == {"execution": 2, "acceptance": 2}
+
+        latest_root = service.store.get_node(root.node_id)
+        assert latest_root is not None
+        latest_entry = latest_root.metadata["spawn_operations"]["round-continuation"]["entries"][0]
+        child_id = str(latest_entry["child_node_id"])
+        acceptance_id = str(latest_entry["acceptance_node_id"])
+        child = service.store.get_node(child_id)
+        assert child is not None
+
+        # 两次提交各自外部化一个结果载荷，且节点 ref 指向最新一次
+        payload_artifacts = [
+            item
+            for item in service.store.list_artifacts(task.task_id)
+            if str(getattr(item, "kind", "") or "") == "node_result_payload"
+            and str(getattr(item, "node_id", "") or "") == child_id
+        ]
+        assert len(payload_artifacts) == 2
+        latest_ref = str((child.metadata or {}).get("result_payload_ref") or "")
+        artifact_ids = {str(item.artifact_id or "") for item in payload_artifacts}
+        assert latest_ref in artifact_ids
+        stale_ids = artifact_ids - {latest_ref}
+        assert len(stale_ids) == 1
+        stale_ref = next(iter(stale_ids))
+
+        # 验收节点收到续验消息：携带上一轮反馈与最新的输出/载荷 ref
+        notices = service.store.list_task_node_notifications(task.task_id, acceptance_id)
+        continuation = [item for item in notices if "重新提交" in str(item.message or "")]
+        assert len(continuation) == 1
+        message = str(continuation[0].message or "")
+        assert "被检验执行节点已在打回后重新提交" in message
+        assert "上一轮验收反馈：reject once" in message
+        assert f"新的子节点结果载荷 ref：{latest_ref}" in message
+        assert stale_ref not in message
+    finally:
+        dispatcher = service.task_actor_service._dispatchers.pop(task.task_id, None) if task is not None else None
+        if dispatcher is not None:
+            await dispatcher.close()
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
@@ -12650,6 +12797,7 @@ async def test_spawn_review_request_includes_consumed_distribution_notices(tmp_p
                 "received_at": "2026-04-24T20:54:00+08:00",
                 "consumed_at": "2026-04-24T20:54:32+08:00",
                 "compression_stage_id": "",
+                "superseded_at": "",
             }
         ]
     finally:

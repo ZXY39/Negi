@@ -802,8 +802,12 @@ class MainRuntimeService:
         cleaned.pop('spawn_operations', None)
         cleaned.pop('execution_stages', None)
         if clear_result_payload:
+            # 载荷正文清空时外部化 ref/摘要必须同步清空，否则恢复后的节点会残留
+            # 指向旧载荷 artifact 的 ref，重提交时短路再外部化并误导验收读取方。
             cleaned.pop('result_schema_version', None)
             cleaned.pop('result_payload', None)
+            cleaned.pop('result_payload_ref', None)
+            cleaned.pop('result_payload_summary', None)
         return cleaned
 
     @staticmethod
