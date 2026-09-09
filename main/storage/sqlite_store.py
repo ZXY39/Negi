@@ -31,6 +31,7 @@ from main.monitoring.models import (
     TaskProjectionRuntimeFrameRecord,
     TaskProjectionToolResultRecord,
 )
+from main.storage.disk_guard import classify_write_error, has_emergency_disk_budget, is_disk_full_error
 
 T = TypeVar('T', bound=BaseModel)
 R = TypeVar('R')
@@ -61,6 +62,7 @@ class SQLiteTaskStore:
         self._debug_recorder = debug_recorder
         self._writer_queue: queue.Queue[tuple[Callable[[sqlite3.Connection], Any] | None, threading.Event | None, dict[str, Any] | None]] = queue.Queue()
         self._writer_thread: threading.Thread | None = None
+        self._writer_failure_counts: dict[str, int] = {'disk_full': 0, 'error': 0}
         self._metrics_lock = threading.RLock()
         self._runtime_metrics: dict[str, float] = {
             'sqlite_write_wait_ms': 0.0,
@@ -507,6 +509,9 @@ class SQLiteTaskStore:
                     outcome['value'] = value
             except Exception as exc:
                 finished_mono = time.perf_counter()
+                with self._metrics_lock:
+                    key = 'disk_full' if is_disk_full_error(exc) else 'error'
+                    self._writer_failure_counts[key] = self._writer_failure_counts.get(key, 0) + 1
                 if outcome is not None:
                     outcome['error'] = exc
             finally:
@@ -545,7 +550,9 @@ class SQLiteTaskStore:
                 pass
         error = outcome.get('error')
         if error is not None:
-            raise error
+            # 磁盘治理（P0）：SQLITE_FULL/ENOSPC 统一分类为 DiskFullError 后上抛，
+            # 由调用点决定降级；write_guard 关闭时 classify 原样返回（回滚开关）。
+            raise classify_write_error(error)
         return outcome.get('value')  # type: ignore[return-value]
 
     def _execute_write(self, sql: str, params: tuple[object, ...] = ()) -> None:
@@ -560,8 +567,16 @@ class SQLiteTaskStore:
     def runtime_metrics_snapshot(self) -> dict[str, float]:
         with self._metrics_lock:
             snapshot = dict(self._runtime_metrics)
+            failure_counts = dict(self._writer_failure_counts)
         snapshot['writer_queue_depth'] = float(self.writer_queue_depth())
+        snapshot['write_failure_disk_full'] = float(failure_counts.get('disk_full', 0))
+        snapshot['write_failure_other'] = float(failure_counts.get('error', 0))
         return snapshot
+
+    def write_failure_counts(self) -> dict[str, int]:
+        """写者线程失败计数（disk_full=SQLITE_FULL/ENOSPC，error=其它）。P1 水位监控复用。"""
+        with self._metrics_lock:
+            return dict(self._writer_failure_counts)
 
     def upsert_task(self, record: TaskRecord) -> TaskRecord:
         self._upsert(
@@ -692,6 +707,23 @@ class SQLiteTaskStore:
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
         rows = self._fetchall('SELECT payload_json FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, artifact_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskArtifactRecord) for row in rows]
+
+    def delete_artifacts_by_ids(self, artifact_ids: list[str]) -> int:
+        """按 id 批量删除 artifact 行（文件删除由调用方完成）。幂等；500/批防 SQL 变量上限。"""
+        ids = sorted({str(item or '').strip() for item in (artifact_ids or []) if str(item or '').strip()})
+        if not ids:
+            return 0
+
+        def operation(conn: sqlite3.Connection) -> int:
+            deleted = 0
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                marks = ','.join('?' * len(batch))
+                cursor = conn.execute(f'DELETE FROM artifacts WHERE artifact_id IN ({marks})', tuple(batch))
+                deleted += int(cursor.rowcount or 0)
+            return deleted
+
+        return int(self._run_write(operation) or 0)
 
     def delete_task(self, task_id: str) -> None:
         def operation(conn: sqlite3.Connection) -> None:
@@ -922,13 +954,18 @@ class SQLiteTaskStore:
             event_type=event_type,
             payload=payload,
         )
+        # 磁盘治理（P0）应急写预算：剩余空间低于紧急线时跳过外置归档落盘，
+        # DB 行仍存 slim payload（payload_archive_path=''，读端 _read_task_event_archive 已兼容）。
+        externalize_archive = should_externalize
+        if should_externalize and not has_emergency_disk_budget((self._event_history_dir, self.path)):
+            externalize_archive = False
         stored_payload = self._task_event_storage_payload(
             task_id=task_id,
             event_type=event_type,
             payload=payload,
         ) if should_externalize else payload
         stored_payload_json = json.dumps(stored_payload, ensure_ascii=False)
-        archive_encoding = self._event_history_archive_encoding if should_externalize else ''
+        archive_encoding = self._event_history_archive_encoding if externalize_archive else ''
 
         def operation(conn: sqlite3.Connection) -> int:
             if should_externalize:
@@ -954,7 +991,7 @@ class SQLiteTaskStore:
                 ),
             )
             seq = int(cursor.lastrowid or 0)
-            if should_externalize and seq > 0:
+            if externalize_archive and seq > 0:
                 archive_path = self._write_task_event_archive(task_id=task_id, seq=seq, payload_json=payload_json)
                 conn.execute(
                     'UPDATE task_events SET payload_archive_path = ? WHERE seq = ?',

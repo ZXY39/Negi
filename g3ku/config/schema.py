@@ -672,8 +672,50 @@ class MainRuntimeConfig(Base):
     default_max_depth: int = 1
     hard_max_depth: int = 4
     event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
+    disk_guard: "MainRuntimeDiskGuardConfig" = Field(default_factory=lambda: MainRuntimeDiskGuardConfig())
     node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
     duplicate_precheck: "MainRuntimeDuplicatePrecheckConfig" = Field(default_factory=lambda: MainRuntimeDuplicatePrecheckConfig())
+
+
+class MainRuntimeDiskGuardConfig(Base):
+    """磁盘治理（P0 止血包）：ENOSPC 写保护、artifact gzip、终态清理。
+
+    - `write_guard_enabled=False` 回滚到事故前行为（写异常原样上抛、不做预检）。
+    - `artifact_gzip_threshold_bytes<=0` 关闭 artifact 压缩（纯明文落盘）。
+    - `terminal_cleanup_enabled=False` 完整停用终态中间产物清理。
+    紧急线 = max(emergency_min_bytes, 盘总量 * emergency_min_ratio)。
+    """
+
+    write_guard_enabled: bool = True
+    emergency_min_bytes: int = 300 * 1024 * 1024
+    emergency_min_ratio: float = 0.01
+    usage_ttl_seconds: float = 5.0
+    artifact_gzip_threshold_bytes: int = 1024 * 1024
+    terminal_cleanup_enabled: bool = True
+
+    @field_validator("emergency_min_bytes", mode="before")
+    @classmethod
+    def _normalize_emergency_min_bytes(cls, value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 300 * 1024 * 1024
+
+    @field_validator("emergency_min_ratio", mode="before")
+    @classmethod
+    def _normalize_emergency_min_ratio(cls, value: Any) -> float:
+        try:
+            return min(max(0.0, float(value)), 0.5)
+        except (TypeError, ValueError):
+            return 0.01
+
+    @field_validator("artifact_gzip_threshold_bytes", mode="before")
+    @classmethod
+    def _normalize_artifact_gzip_threshold_bytes(cls, value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 1024 * 1024
 
 
 class MainRuntimeEventHistoryConfig(Base):

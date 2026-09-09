@@ -823,7 +823,13 @@ class ContentNavigationService:
         mime_type = str(getattr(artifact, "mime_type", "") or "").strip() or self._guess_path_mime_type(artifact_path)
         requested_ref = _requested_ref or normalized_ref
         if resolved_view == "canonical" and not self.is_image_mime_type(mime_type):
-            text = artifact_path.read_text(encoding="utf-8") if artifact_path.exists() else ""
+            # 磁盘治理（P0）：gzip artifact 走统一读端解压；延迟导入避免 g3ku↔main 模块级循环。
+            if artifact_path.suffix == ".gz" or str(getattr(artifact, "content_encoding", "") or "").strip().lower() == "gzip":
+                from main.storage.artifact_store import read_artifact_text
+
+                text = read_artifact_text(artifact)
+            else:
+                text = artifact_path.read_text(encoding="utf-8") if artifact_path.exists() else ""
             next_ref = self._next_wrapper_ref_from_value(text)
             if next_ref:
                 if next_ref == normalized_ref:
@@ -1203,7 +1209,14 @@ class ContentNavigationService:
         if artifact is None or not getattr(artifact, "path", None):
             raise FileNotFoundError(_artifact_not_found_message(artifact_id))
         artifact_path = Path(str(artifact.path))
-        text = self._read_text_for_content_display(artifact_path)[0] if artifact_path.exists() else ""
+        # 磁盘治理（P0）：gzip artifact 必须解压读取，否则会显示为 "[二进制文件]"；
+        # 延迟导入避免 g3ku↔main 模块级循环。plain 路径保持原行为（含二进制占位符）。
+        if artifact_path.suffix == ".gz" or str(getattr(artifact, "content_encoding", "") or "").strip().lower() == "gzip":
+            from main.storage.artifact_store import read_artifact_text
+
+            text = read_artifact_text(artifact)
+        else:
+            text = self._read_text_for_content_display(artifact_path)[0] if artifact_path.exists() else ""
         handle = self._build_handle(
             ref=normalized_ref,
             artifact_id=artifact_id,

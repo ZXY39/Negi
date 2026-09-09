@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import traceback
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,7 @@ from main.runtime.internal_tools import (
     SubmitNextStageTool,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
+from main.storage.disk_guard import is_disk_full_error
 from main.runtime.pending_notice_state import (
     clear_pending_notice_state,
     PENDING_NOTICE_STATE_KEY,
@@ -153,6 +155,8 @@ class NodeRunner:
         self.cancel_node_subtree_executor = None
         self._spawn_operation_locks: dict[str, asyncio.Lock] = {}
         self.distribution_delivery_callback = None
+        # 磁盘治理（P0）：磁盘满时未能落盘的节点错误文本，仅内存诊断用（有界）。
+        self._unpersisted_error_logs: deque[tuple[str, str, str]] = deque(maxlen=64)
 
     @staticmethod
     def _normalized_status(value: Any) -> str:
@@ -588,7 +592,11 @@ class NodeRunner:
             raise
         except NodePausedError:
             self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
-            self._mark_node_paused(task_id, node.node_id)
+            # 磁盘治理（P0）：pause 记录是表现层写入，磁盘满时不得阻断 NodePausedError 传播。
+            try:
+                self._mark_node_paused(task_id, node.node_id)
+            except Exception:
+                pass
             raise
         except asyncio.CancelledError:
             latest_task = self._store.get_task(task_id)
@@ -600,7 +608,10 @@ class NodeRunner:
                 raise TaskPausedError(task_id)
             if self._node_pause_requested(task_id, node.node_id):
                 self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
-                self._mark_node_paused(task_id, node.node_id)
+                try:
+                    self._mark_node_paused(task_id, node.node_id)
+                except Exception:
+                    pass
                 raise NodePausedError(task_id, node.node_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
@@ -611,8 +622,16 @@ class NodeRunner:
             if latest_task is not None and (bool(getattr(latest_task, 'cancel_requested', False)) or terminal_reason):
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason or 'canceled')
             text = describe_exception(exc)
-            self._log_service.append_task_error_log(task_id, node.node_id, error_text=text, node_title=node.goal)
-            self._mark_node_paused(task_id, node.node_id, reason='error', remark=text)
+            # 磁盘治理（P0）：error_log 与 pause 记录各自独立降级——2026-09-09 事故中
+            # 这两行在磁盘满时二次写盘再炸，导致 31 个节点连锁 error-pause。
+            # 记录失败绝不阻断 NodePausedError 的控制流（先例：react_loop "Error-history
+            # persistence must never break the ReAct loop"）。
+            self._persist_error_and_pause_best_effort(
+                task_id=task_id,
+                node_id=node.node_id,
+                text=text,
+                node_goal=str(getattr(node, 'goal', '') or ''),
+            )
             raise NodePausedError(task_id, node.node_id) from exc
         finally:
             if self._context_finalizer is not None:
@@ -6080,6 +6099,37 @@ class NodeRunner:
         if node is None or str(getattr(node, 'task_id', '') or '').strip() != str(task_id or '').strip():
             return False
         return bool(getattr(node, 'pause_requested', False)) or bool(getattr(node, 'is_paused', False))
+
+    def _persist_error_and_pause_best_effort(self, *, task_id: str, node_id: str, text: str, node_goal: str) -> None:
+        """尽力落盘节点错误记录与暂停状态；任何一步失败都不外抛。
+
+        顺序决策：先 error_log（携带完整异常文本、单行小写、磁盘满时成功率更高），
+        后 pause 记录（控制流不依赖它——NodePausedError 照抛，task_actor_service
+        进入 control-only 返回，不会重跑节点）。两者都失败时文本进内存有界队列
+        并留一条 warning 日志，不静默。
+        """
+        error_log_persisted = False
+        try:
+            self._log_service.append_task_error_log(task_id, node_id, error_text=text, node_title=node_goal)
+            error_log_persisted = True
+        except Exception as exc:
+            if is_disk_full_error(exc):
+                self._unpersisted_error_logs.append((task_id, node_id, text))
+                logger.warning(
+                    'disk full: node error log not persisted (kept in memory buffer) task={} node={}',
+                    task_id,
+                    node_id,
+                )
+        try:
+            self._mark_node_paused(task_id, node_id, reason='error', remark=text)
+        except Exception as exc:
+            if is_disk_full_error(exc):
+                logger.warning(
+                    'disk full: node pause record not persisted task={} node={} error_log_persisted={}',
+                    task_id,
+                    node_id,
+                    error_log_persisted,
+                )
 
     def _mark_node_paused(self, task_id: str, node_id: str, *, reason: str = '', remark: str = '') -> NodeRecord | None:
         node = self._store.get_node(node_id)

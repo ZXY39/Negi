@@ -70,13 +70,19 @@ Memory guard 维护要点：
 - 若 artifact 带 `artifact_persistence_mode=memory_guard_degraded` 或 `memory_guard_minimal`：它仍能证明这次 send 发生过，但 `provider_request_body` 可能故意为空，`request_messages` 可能是剥离后的取证摘要（大请求内容可能移入 `request_messages_summary` / `provider_request_body_summary`）。
 - 此时不要仅凭 `provider_request_body.input` 缺失就断言“provider 从未看到图像”；应视为“artifact 写入成功，但原始 transport payload 为避免 turn 级 `MemoryError` 被省略”，再与相邻 artifact、usage、transcript 时间线互相印证。
 
+Disk guard 维护要点（写保护契约本体见 `runtime-overview.md`「磁盘写保护与治理」）：
+
+- 节点侧 actual-request 写入前还有一道应急写预算：磁盘剩余低于紧急线时跳过 full/degraded payload，只写 minimal 形态（preview 标 `disk-emergency minimal`、降级 reason `disk_emergency_minimal`）。它同样能证明 send 发生过，但消息内容是剥离到极致的摘要；与 memory guard 降级的区分只看 `artifact_persistence_mode` / preview 标记。
+- actual-request 及其他 artifact 超过大小阈值即以 `.gz` gzip 形态落盘（记录 `content_encoding='gzip'`、`size_bytes` 为原始字节数）。取证读取一律走 `artifact_store.read_artifact_text`（或手工 gunzip）；对 `.gz` 直接 `read_text` 得到乱码/解码错误不是“artifact 损坏”的证据。
+- 排查窗口内 artifact 完全缺失时，先查 `write_failure_disk_full` 计数与 worker 日志的 SQLITE_FULL 行再下结论：磁盘满会让可降级写被预算跳过、关键写抛 `DiskFullError`，缺失属于“落盘被治理策略放弃”，不是“send 未发生”。
+
 ### 2.3 计费行与 actual request JSON 可能并不总是一一对应
 
 已踩坑：同一时间窗里 usage/billing 出现了 `/responses` 调用，但对应窗口没有落地 `frontdoor-request-*.json`；你以为某个 persisted request 对应某条计费记录，实际那条记录可能来自另一条隐藏/漏落盘请求。
 
 维护要点：
 
-- 区分 “artifact 缺失” 和 “artifact 被 memory guard 降级”：只要文件存在且带 `artifact_persistence_mode!=full`，它仍能证明这次 send 发生过，只是不能再逐字节证明完整的原始多模态 payload。
+- 区分 “artifact 缺失” 和 “artifact 被 memory/disk guard 降级”：只要文件存在且带 `artifact_persistence_mode!=full`（或 preview 带 `disk-emergency minimal`），它仍能证明这次 send 发生过，只是不能再逐字节证明完整的原始多模态 payload。
 - manual pause、pause 后新 turn、internal/hidden round 这些窗口，必须先确认 artifact 是否完整。
 - 每次怀疑缓存异常时，先检查 artifact 时间线是否完整；如果 artifact 不全，先修 artifact，再改上下文策略，再信任何 cache 结论。
 

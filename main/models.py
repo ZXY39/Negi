@@ -227,6 +227,11 @@ class TaskArtifactRecord(Model):
     mime_type: str = 'text/markdown'
     preview_text: str = ''
     created_at: str
+    # 磁盘治理（P0）：落盘内容的原始字节数与存储编码。
+    # artifacts 表整条 payload_json 序列化，新增带默认值字段对旧行零迁移兼容。
+    size_bytes: int = 0
+    content_encoding: str = 'plain'  # 'plain' | 'gzip'
+    content_hash: str = ''
 
 
 class TaskMessageDistributionEpoch(Model):

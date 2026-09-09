@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import shutil
@@ -8,6 +9,33 @@ from pathlib import Path
 from main.ids import new_artifact_id
 from main.models import TaskArtifactRecord
 from main.protocol import now_iso
+from main.storage.disk_guard import classify_write_error, disk_policies
+
+
+def read_artifact_text(record: TaskArtifactRecord | None) -> str:
+    """统一 artifact 读端：按 content_encoding/.gz 后缀解压；缺失或读失败返回 ''。
+
+    rest.py / navigation.py / runtime_service.apply_patch_artifact 均须走本函数，
+    否则 gzip artifact 会在读端显示为 "[二进制文件]" 或乱码。
+    """
+    if record is None:
+        return ''
+    raw_path = str(getattr(record, 'path', '') or '').strip()
+    if not raw_path:
+        return ''
+    path = Path(raw_path)
+    if not path.exists() or not path.is_file():
+        return ''
+    encoding = str(getattr(record, 'content_encoding', '') or '').strip().lower()
+    if not encoding:
+        encoding = 'gzip' if path.suffix == '.gz' else 'plain'
+    try:
+        if encoding == 'gzip':
+            with gzip.open(path, 'rt', encoding='utf-8') as handle:
+                return handle.read()
+        return path.read_text(encoding='utf-8')
+    except Exception:
+        return ''
 
 
 class TaskArtifactStore:
@@ -16,6 +44,37 @@ class TaskArtifactStore:
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         self._store = store
         self._content_index: dict[tuple[str, str], TaskArtifactRecord] = {}
+
+    def _write_artifact_content(self, *, base_path: Path, text: str) -> tuple[Path, int, str]:
+        """写入 artifact 内容；超阈值转 gzip（tmp + 原子 replace）。
+
+        返回 (最终路径, 原始字节数, 'plain'|'gzip')。ENOSPC 不重试，
+        直接抛分类后的 DiskFullError——写失败绝不返回指向不存在文件的记录。
+        """
+        payload_bytes = text.encode('utf-8')
+        size = len(payload_bytes)
+        threshold = int(disk_policies().artifact_gzip_threshold_bytes)
+        path = base_path
+        encoding = 'plain'
+        if threshold > 0 and size > threshold:
+            path = base_path.with_name(base_path.name + '.gz')
+            encoding = 'gzip'
+        tmp = path.with_name(path.name + '.tmp')
+        try:
+            if encoding == 'gzip':
+                with gzip.open(tmp, 'wt', encoding='utf-8', compresslevel=6) as handle:
+                    handle.write(text)
+            else:
+                tmp.write_text(text, encoding='utf-8')
+            tmp.replace(path)
+        except OSError as exc:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            raise classify_write_error(exc) from exc
+        return path, size, encoding
 
     def create_text_artifact(
         self,
@@ -34,17 +93,20 @@ class TaskArtifactStore:
             self._content_index[(task_id, content_hash)] = existing
             return existing
         artifact_id, path = self._allocate_artifact_path(task_id=task_id, extension=extension)
-        path.write_text(content, encoding='utf-8')
+        final_path, size_bytes, content_encoding = self._write_artifact_content(base_path=path, text=content)
         record = TaskArtifactRecord(
             artifact_id=artifact_id,
             task_id=task_id,
             node_id=node_id,
             kind=kind,
             title=title,
-            path=str(path),
+            path=str(final_path),
             mime_type=mime_type,
             preview_text=content[:400],
             created_at=now_iso(),
+            size_bytes=size_bytes,
+            content_encoding=content_encoding,
+            content_hash=content_hash,
         )
         persisted = self._store.upsert_artifact(record)
         self._content_index[(task_id, content_hash)] = persisted
@@ -64,18 +126,20 @@ class TaskArtifactStore:
         preview_text: str = '',
     ) -> TaskArtifactRecord:
         artifact_id, path = self._allocate_artifact_path(task_id=task_id, extension=extension)
-        with path.open('w', encoding='utf-8') as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
+        text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        final_path, size_bytes, content_encoding = self._write_artifact_content(base_path=path, text=text)
         record = TaskArtifactRecord(
             artifact_id=artifact_id,
             task_id=task_id,
             node_id=node_id,
             kind=kind,
             title=title,
-            path=str(path),
+            path=str(final_path),
             mime_type=mime_type,
             preview_text=str(preview_text or title or '')[:400],
             created_at=now_iso(),
+            size_bytes=size_bytes,
+            content_encoding=content_encoding,
         )
         persisted = self._store.upsert_artifact(record)
         self._emit_artifact_added_event(task_id=task_id, record=persisted)
@@ -117,21 +181,34 @@ class TaskArtifactStore:
         if not path.suffix and extension:
             safe_artifact_id = existing.artifact_id.replace(':', '_').replace('/', '_').replace('\\', '_')
             path = path.parent / f'{safe_artifact_id}{extension}'
-        path.write_text(content, encoding='utf-8')
+        # 旧路径若是历史 .gz 而新内容低于阈值（或反之），先按新内容重算目标基路径：
+        # 以去后缀的原始名为基准，避免 .gz 反复叠加。
+        base_path = path
+        if base_path.suffix == '.gz':
+            base_path = base_path.with_name(base_path.name[: -len('.gz')])
+        final_path, size_bytes, content_encoding = self._write_artifact_content(base_path=base_path, text=content)
+        if final_path != path and path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        content_hash = hashlib.sha256(str(content or '').encode('utf-8')).hexdigest()
         updated = existing.model_copy(
             update={
                 'node_id': normalized_node_id,
                 'kind': normalized_kind,
                 'title': title,
-                'path': str(path),
+                'path': str(final_path),
                 'mime_type': mime_type,
                 'preview_text': content[:400],
                 'created_at': now_iso(),
+                'size_bytes': size_bytes,
+                'content_encoding': content_encoding,
+                'content_hash': content_hash,
             }
         )
         persisted = self._store.upsert_artifact(updated)
         self._drop_content_index_entries(existing.artifact_id)
-        content_hash = hashlib.sha256(str(content or '').encode('utf-8')).hexdigest()
         self._content_index[(normalized_task_id, content_hash)] = persisted
         return persisted
 
@@ -197,7 +274,6 @@ class TaskArtifactStore:
                 self._content_index[(task_id, content_hash)] = artifact
                 return artifact
         return None
-
     def _find_singleton_text_artifact(
         self,
         *,
@@ -230,12 +306,22 @@ class TaskArtifactStore:
     def _artifact_matches_content(artifact: TaskArtifactRecord, *, content: str, content_hash: str) -> bool:
         if not artifact.path:
             return False
+        # 快路径：新记录携带 content_hash，直接比对，免回读文件（gz 无需解压）。
+        recorded_hash = str(getattr(artifact, 'content_hash', '') or '').strip()
+        if recorded_hash:
+            if recorded_hash != content_hash:
+                return False
+            path = Path(artifact.path)
+            return path.exists() and path.is_file()
+        # 旧行兜底（content_hash 为空）：按统一读端解压回读比对。
         path = Path(artifact.path)
         if not path.exists() or not path.is_file():
             return False
         try:
-            existing = path.read_text(encoding='utf-8')
+            existing = read_artifact_text(artifact)
         except Exception:
+            return False
+        if not existing:
             return False
         if hashlib.sha256(existing.encode('utf-8')).hexdigest() != content_hash:
             return False

@@ -496,20 +496,31 @@ class TaskActorService:
                             return
         except NodePausedError as exc:
             control_only_return = True
-            self._log_service.set_node_pause_state(
-                task_id,
-                exc.node_id or str(getattr(root_node, 'node_id', '') or ''),
-                pause_requested=True,
-                is_paused=True,
-            )
+            # 磁盘治理（P0）：pause 状态落库是表现层写入，磁盘满时失败只丢展示，
+            # 不得让二次写盘异常穿透 run_task（2026-09-09 连锁暂停事故路径）。
+            try:
+                self._log_service.set_node_pause_state(
+                    task_id,
+                    exc.node_id or str(getattr(root_node, 'node_id', '') or ''),
+                    pause_requested=True,
+                    is_paused=True,
+                )
+            except Exception:
+                pass
             return
         except TaskPausedError:
-            self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+            try:
+                self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+            except Exception:
+                pass
             return
         except asyncio.CancelledError:
             latest = self._store.get_task(task_id)
             if latest is not None and bool(latest.pause_requested) and not bool(latest.cancel_requested):
-                self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+                try:
+                    self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+                except Exception:
+                    pass
                 return
             result = NodeFinalResult(
                 status='failed',

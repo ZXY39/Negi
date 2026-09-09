@@ -315,7 +315,10 @@ async def get_artifact(
     content = ''
     excerpt = None
     if full:
-        content = Path(artifact.path).read_text(encoding='utf-8') if artifact.path and Path(artifact.path).exists() else ''
+        # 磁盘治理（P0）：统一读端，兼容 gzip artifact；延迟导入保持 rest 模块轻量。
+        from main.storage.artifact_store import read_artifact_text
+
+        content = read_artifact_text(artifact)
     else:
         excerpt = service.open_content(
             ref=ref,

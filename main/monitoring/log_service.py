@@ -55,6 +55,7 @@ from main.monitoring.models import (
 from main.monitoring.task_event_writer import TaskEventWriter
 from main.monitoring.task_projector import TaskProjector
 from main.protocol import build_envelope, now_iso
+from main.storage.disk_guard import has_emergency_disk_budget
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     normalize_append_notice_context,
@@ -160,6 +161,10 @@ class TaskLogService:
         self._live_patch_history_timers: dict[str, threading.Timer] = {}
         self._last_live_patch_boundary_key: dict[str, tuple[Any, ...]] = {}
         self._last_node_patch_persist_fingerprints: dict[tuple[str, str], str] = {}
+        # 磁盘治理（P0）：事件写失败计数与 live patch 有界重试状态。
+        self._event_write_failures = 0
+        self._live_patch_retry_counts: dict[str, int] = {}
+        self._live_patch_dropped_events = 0
 
     def add_live_snapshot_publisher(self, publisher: Callable[[TaskRecord, dict[str, Any], bool], None]) -> None:
         if callable(publisher):
@@ -199,12 +204,18 @@ class TaskLogService:
         event_type: str,
         data: dict[str, Any],
     ) -> int:
-        return self._event_writer.append_task_event(
-            task_id=task_id,
-            session_id=session_id,
-            event_type=event_type,
-            data=data,
-        )
+        # 磁盘治理（P0）：历史事件属可降级写，磁盘满等失败不外抛（返回 0），
+        # 调用方（artifact 事件、清理事件等）不因簿记写失败被阻断。
+        try:
+            return int(self._event_writer.append_task_event(
+                task_id=task_id,
+                session_id=session_id,
+                event_type=event_type,
+                data=data,
+            ) or 0)
+        except Exception:
+            self._event_write_failures += 1
+            return 0
 
     def flush_live_patch_history(self, task_id: str) -> None:
         normalized_task_id = str(task_id or '').strip()
@@ -224,8 +235,29 @@ class TaskLogService:
         payload = entry.get('payload')
         if not isinstance(task, TaskRecord) or not isinstance(payload, dict):
             return
-        self._append_task_event(task=task, event_type='task.live.patch', data=payload)
-        self._last_live_patch_boundary_key[normalized_task_id] = self._live_patch_boundary_key(task=task, payload=payload)
+        persisted = self._append_task_event(task=task, event_type='task.live.patch', data=payload)
+        if persisted:
+            self._live_patch_retry_counts.pop(normalized_task_id, None)
+            self._last_live_patch_boundary_key[normalized_task_id] = self._live_patch_boundary_key(task=task, payload=payload)
+            return
+        # 磁盘治理（P0）：写失败（磁盘满等）→ entry 重新入队 + 重挂 2s timer，
+        # 有界重试 3 次后丢弃计数。timer 线程与状态更新路径都不能因此死亡。
+        retries = int(self._live_patch_retry_counts.get(normalized_task_id, 0))
+        if retries >= 3:
+            self._live_patch_dropped_events += 1
+            self._live_patch_retry_counts.pop(normalized_task_id, None)
+            return
+        self._live_patch_retry_counts[normalized_task_id] = retries + 1
+        with self._live_patch_history_guard:
+            self._pending_live_patch_history.setdefault(normalized_task_id, entry)
+            if self._live_patch_history_timers.get(normalized_task_id) is None:
+                retry_timer = threading.Timer(
+                    2.0,
+                    lambda target_task_id=normalized_task_id: self.flush_live_patch_history(target_task_id),
+                )
+                retry_timer.daemon = True
+                self._live_patch_history_timers[normalized_task_id] = retry_timer
+                retry_timer.start()
 
     def _task_lock(self, task_id: str) -> threading.RLock:
         key = str(task_id or '').strip()
@@ -1960,7 +1992,12 @@ class TaskLogService:
         artifact_store = getattr(content_store, '_artifact_store', None) if content_store is not None else None
         create_json_artifact = getattr(artifact_store, 'create_json_artifact', None) if artifact_store is not None else None
         display_name = f'node-actual-request:{node_id}:{call_index}'
-        if callable(create_json_artifact):
+        # 磁盘治理（P0）应急写预算：剩余空间低于紧急线时跳过 full/degraded 大 payload，
+        # 只尝试 minimal（数百字节）；minimal 也失败则返回 ''。
+        has_budget = has_emergency_disk_budget(
+            (getattr(artifact_store, '_artifact_dir', None) or Path('.'),),
+        )
+        if callable(create_json_artifact) and has_budget:
             try:
                 artifact = create_json_artifact(
                     task_id=task_id,
@@ -1973,7 +2010,7 @@ class TaskLogService:
                     preview_text=display_name,
                 )
                 return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
-            except MemoryError:
+            except (MemoryError, OSError):
                 degraded_payload = self._degraded_actual_request_artifact_payload(
                     payload_with_mode,
                     reason='memory_error',
@@ -1990,7 +2027,7 @@ class TaskLogService:
                         preview_text=f'{display_name} (degraded)',
                     )
                     return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
-                except MemoryError:
+                except (MemoryError, OSError):
                     minimal_payload = self._minimal_actual_request_artifact_payload(
                         payload_with_mode,
                         reason='memory_error_minimal',
@@ -2007,8 +2044,27 @@ class TaskLogService:
                             preview_text=f'{display_name} (minimal)',
                         )
                         return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
-                    except MemoryError:
+                    except (MemoryError, OSError):
                         return ''
+        if callable(create_json_artifact) and not has_budget:
+            minimal_payload = self._minimal_actual_request_artifact_payload(
+                payload_with_mode,
+                reason='disk_emergency_minimal',
+            )
+            try:
+                artifact = create_json_artifact(
+                    task_id=task_id,
+                    node_id=node_id,
+                    kind='task_actual_request',
+                    title=display_name,
+                    payload=minimal_payload,
+                    extension='.json',
+                    mime_type='application/json',
+                    preview_text=f'{display_name} (disk-emergency minimal)',
+                )
+                return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
+            except (MemoryError, OSError):
+                return ''
         try:
             serialized = json.dumps(payload_with_mode, ensure_ascii=False, indent=2, default=str)
             _summary, ref = self._summarize_content(
@@ -2020,7 +2076,7 @@ class TaskLogService:
                 force=True,
             )
             return str(ref or '').strip()
-        except MemoryError:
+        except (MemoryError, OSError):
             return ''
 
     @staticmethod
@@ -3857,6 +3913,11 @@ class TaskLogService:
         store = self._content_store
         if store is None:
             return ''
+        # 磁盘治理（P0）应急写预算：低于紧急线时跳过 trace 全量落盘，
+        # 返回 '' 让调用方回退摘要（slim）路径。
+        artifact_store = getattr(store, '_artifact_store', None)
+        if not has_emergency_disk_budget((getattr(artifact_store, '_artifact_dir', None) or Path('.'),)):
+            return ''
         runtime = {'task_id': node.task_id, 'node_id': node.node_id}
         try:
             envelope = store.maybe_externalize_text(
@@ -4934,13 +4995,21 @@ class TaskLogService:
             raise ValueError(f'task not found: {task_id}')
         return task
 
-    def _append_task_event(self, *, task: TaskRecord, event_type: str, data: dict[str, Any]) -> None:
-        self._event_writer.append_task_event(
-            task_id=task.task_id,
-            session_id=task.session_id,
-            event_type=event_type,
-            data=data,
-        )
+    def _append_task_event(self, *, task: TaskRecord, event_type: str, data: dict[str, Any]) -> bool:
+        # 磁盘治理（P0）：历史事件最坏可丢弃——写失败（磁盘满 Errno 28/SQLITE_FULL）
+        # 不得穿透进状态更新路径（先例：_notify_task_terminal 的 except Exception: continue）。
+        # 返回是否落库成功，供 flush_live_patch_history 做有界重试。
+        try:
+            self._event_writer.append_task_event(
+                task_id=task.task_id,
+                session_id=task.session_id,
+                event_type=event_type,
+                data=data,
+            )
+            return True
+        except Exception:
+            self._event_write_failures += 1
+            return False
 
     @staticmethod
     def _task_summary_payload(task: TaskRecord) -> dict[str, Any]:

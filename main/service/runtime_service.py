@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -153,7 +154,8 @@ from main.service.task_terminal_callback import (
     resolve_task_terminal_callback_url,
 )
 from main.service.worker_heartbeat_service_v2 import WorkerHeartbeatServiceV2
-from main.storage.artifact_store import TaskArtifactStore
+from main.storage.artifact_store import TaskArtifactStore, read_artifact_text
+from main.storage.disk_guard import DiskPolicies, configure_disk_policies, disk_policies
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _UNSET = object()
@@ -320,6 +322,8 @@ class MainRuntimeService:
         resolved_files_base_dir = Path(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
         resolved_artifact_dir = Path(artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'))
         event_history_settings = self._event_history_settings(app_config)
+        # 磁盘治理（P0）：从 config.main_runtime.disk_guard 注入进程级策略单例。
+        configure_disk_policies(self._disk_guard_policies(app_config))
         duplicate_precheck_settings = self._duplicate_precheck_settings(app_config)
         self._duplicate_precheck_llm_review_enabled = bool(duplicate_precheck_settings.get('llm_review_enabled', True))
         configured_event_history_dir = str(event_history_settings.get('dir') or '').strip()
@@ -362,6 +366,10 @@ class MainRuntimeService:
         self.task_stall_notifier = TaskStallNotifier(service=self)
         self.log_service.add_task_visible_output_listener(self.task_stall_notifier.reset_visible_output)
         self.log_service.add_task_terminal_listener(self._cleanup_terminal_task_temp_dir_if_empty)
+        # 磁盘治理（P0）：终态即清中间产物（temp/tasks 草稿 + 中间 artifact）。
+        self._terminal_cleanup_inflight: set[str] = set()
+        self._terminal_cleanup_inflight_guard = threading.Lock()
+        self.log_service.add_task_terminal_listener(self._cleanup_terminal_task_intermediates)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
         self.query_service = TaskQueryServiceV2(store=self.store, file_store=self.file_store, log_service=self.log_service, debug_recorder=self.runtime_debug_recorder)
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
@@ -4205,6 +4213,23 @@ class MainRuntimeService:
         }
 
     @staticmethod
+    def _disk_guard_policies(config: Any | None) -> DiskPolicies:
+        """磁盘治理（P0）：从 config.main_runtime.disk_guard 构造策略；缺节时用默认值。"""
+        main_runtime = getattr(config, 'main_runtime', None) if config is not None else None
+        guard = getattr(main_runtime, 'disk_guard', None) if main_runtime is not None else None
+        defaults = DiskPolicies()
+        if guard is None:
+            return defaults
+        return DiskPolicies(
+            write_guard_enabled=bool(getattr(guard, 'write_guard_enabled', defaults.write_guard_enabled)),
+            emergency_min_bytes=max(0, int(getattr(guard, 'emergency_min_bytes', defaults.emergency_min_bytes) or 0)),
+            emergency_min_ratio=min(max(0.0, float(getattr(guard, 'emergency_min_ratio', defaults.emergency_min_ratio) or 0.0)), 0.5),
+            usage_ttl_seconds=max(0.0, float(getattr(guard, 'usage_ttl_seconds', defaults.usage_ttl_seconds) or 0.0)),
+            artifact_gzip_threshold_bytes=int(getattr(guard, 'artifact_gzip_threshold_bytes', defaults.artifact_gzip_threshold_bytes) or 0),
+            terminal_cleanup_enabled=bool(getattr(guard, 'terminal_cleanup_enabled', defaults.terminal_cleanup_enabled)),
+        )
+
+    @staticmethod
     def _duplicate_precheck_settings(config: Any | None) -> dict[str, Any]:
         main_runtime = getattr(config, 'main_runtime', None) if config is not None else None
         precheck = getattr(main_runtime, 'duplicate_precheck', None) if main_runtime is not None else None
@@ -6142,6 +6167,144 @@ class MainRuntimeService:
         except Exception:
             return
 
+    # ------------------------------------------------------------------
+    # 磁盘治理（P0-3）：任务终态即清中间产物。
+    # 保留清单（唯一权威）：kind=='patch'、kind=='final_output'、
+    # task.final_output_ref 指向的 artifact、标题含 report/summary；
+    # error_logs 表、节点 blocking_reason、event-history/*.json.gz 一律不动
+    # （事件归档是终态后审计回放的唯一来源；用户删任务时有既有 rmtree 通道）。
+    # ------------------------------------------------------------------
+
+    _TERMINAL_CLEANUP_KEEP_TITLE_TOKENS = ('report', 'summary')
+
+    def _cleanup_terminal_task_intermediates(self, task: TaskRecord) -> None:
+        """终态监听器：同步部分只做判定 + in-flight 去重 + 甩后台 daemon 线程。
+
+        监听器同步运行在任务状态更新路径（log_service._notify_task_terminal），
+        清理重活绝不能阻塞 refresh_task_view。
+        """
+        try:
+            if not disk_policies().terminal_cleanup_enabled:
+                return
+            task_id = str(getattr(task, 'task_id', '') or '').strip()
+            status = str(getattr(task, 'status', '') or '').strip().lower()
+            if not task_id or status not in {'success', 'failed'}:
+                return
+            with self._terminal_cleanup_inflight_guard:
+                if task_id in self._terminal_cleanup_inflight:
+                    return
+                self._terminal_cleanup_inflight.add(task_id)
+        except Exception:
+            return
+        worker = threading.Thread(
+            target=self._run_terminal_intermediate_cleanup_safely,
+            args=(task_id,),
+            name=f'task-intermediate-cleanup:{task_id}',
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_terminal_intermediate_cleanup_safely(self, task_id: str) -> None:
+        try:
+            self._run_terminal_intermediate_cleanup(task_id)
+        except Exception:
+            return
+        finally:
+            try:
+                with self._terminal_cleanup_inflight_guard:
+                    self._terminal_cleanup_inflight.discard(task_id)
+            except Exception:
+                pass
+
+    def _terminal_artifact_keep_policy(self, task: TaskRecord | None, record: TaskArtifactRecord) -> bool:
+        """纯判定：该 artifact 是否属于终态后必须保留的核心内容。"""
+        kind = str(getattr(record, 'kind', '') or '').strip()
+        if kind in {'patch', 'final_output'}:
+            return True
+        final_ref = str(getattr(task, 'final_output_ref', '') or '').strip() if task is not None else ''
+        if final_ref:
+            ref_id = final_ref.split(':', 1)[1] if ':' in final_ref else final_ref
+            if ref_id and str(getattr(record, 'artifact_id', '') or '').strip() == ref_id.strip():
+                return True
+        title = str(getattr(record, 'title', '') or '').strip().lower()
+        return any(token in title for token in self._TERMINAL_CLEANUP_KEEP_TITLE_TOKENS)
+
+    def _run_terminal_intermediate_cleanup(self, task_id: str) -> None:
+        task = self.get_task(task_id)
+        removed_files = 0
+        removed_bytes = 0
+        # a) 任务临时目录硬删（temp/tasks/<id>；先例：delete_task 的 ignore_errors rmtree）
+        try:
+            temp_dir = self._effective_task_temp_dir(task_id)
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        # b) 中间 artifact：删文件 + 删 DB 行（线程内重读列表，规避入队后的竞态）
+        delete_ids: list[str] = []
+        try:
+            artifacts = self.list_artifacts(task_id)
+        except Exception:
+            artifacts = []
+        for artifact in artifacts:
+            if self._terminal_artifact_keep_policy(task, artifact):
+                continue
+            artifact_id = str(getattr(artifact, 'artifact_id', '') or '').strip()
+            if artifact_id:
+                delete_ids.append(artifact_id)
+            raw_path = str(getattr(artifact, 'path', '') or '').strip()
+            if not raw_path:
+                continue
+            try:
+                path = Path(raw_path)
+                if path.is_file():
+                    removed_bytes += int(path.stat().st_size)
+                    path.unlink()
+                    removed_files += 1
+            except OSError:
+                pass
+        if delete_ids:
+            try:
+                self.store.delete_artifacts_by_ids(delete_ids)
+            except Exception:
+                pass
+            # 同步清 artifact_store 内存去重索引，防止陈旧命中
+            try:
+                deleted_set = set(delete_ids)
+                content_index = getattr(self.artifact_store, '_content_index', None)
+                if isinstance(content_index, dict):
+                    stale_keys = [
+                        key for key, value in list(content_index.items())
+                        if str(getattr(value, 'artifact_id', '') or '').strip() in deleted_set
+                    ]
+                    for key in stale_keys:
+                        content_index.pop(key, None)
+            except Exception:
+                pass
+        # c) event-history/*.json.gz 不动（见上方权威清单注释）
+        # d) 清理量可观测
+        if removed_files or delete_ids:
+            logger.info(
+                'disk governance: task {} intermediates cleaned files={} bytes~{} rows={}',
+                task_id,
+                removed_files,
+                removed_bytes,
+                len(delete_ids),
+            )
+            try:
+                self.log_service.append_task_event(
+                    task_id=task_id,
+                    session_id=str(getattr(task, 'session_id', '') or 'web:shared'),
+                    event_type='task.intermediates.cleaned',
+                    data={
+                        'removed_files': removed_files,
+                        'removed_bytes_approx': removed_bytes,
+                        'removed_rows': len(delete_ids),
+                    },
+                )
+            except Exception:
+                pass
+
     def _resource_base_dir(self, kind: ResourceKind) -> Path:
         manager = getattr(self, '_resource_manager', None)
         registry = getattr(manager, '_registry', None)
@@ -7207,8 +7370,8 @@ class MainRuntimeService:
             raise ValueError('artifact is not a patch artifact')
         from g3ku.agent.tools.propose_patch import parse_patch_artifact
 
-        patch_path = Path(artifact.path)
-        content = patch_path.read_text(encoding='utf-8')
+        # 磁盘治理（P0）：统一读端，兼容 gzip artifact（patch 通常远低于压缩阈值，防阈值调低）。
+        content = read_artifact_text(artifact)
         metadata, _diff_text = parse_patch_artifact(content)
         target_path = Path(str(metadata.get('path') or ''))
         old_text = base64.b64decode(str(metadata.get('old_text_b64') or '')).decode('utf-8')

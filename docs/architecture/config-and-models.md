@@ -59,6 +59,8 @@
 
 定义任务运行时存储与调度参数。其中 `main_runtime.duplicate_precheck.llm_review_enabled`（默认 `true`）控制 `create_async_task` 重复预检的第二层语义审查：关闭后只保留确定性精确匹配层，模糊重复与 `reject_use_append_notice` 识别随之消失，预检对放行结果 fail-open。字段契约与拒绝语义详见 `tool-and-skill-system.md`「fixed builtin tools」。
 
+`main_runtime.disk_guard` 子节控制磁盘写保护与治理（行为契约见 `runtime-overview.md`「磁盘写保护与治理」）：`write_guard_enabled`（默认 `true`；关闭后写异常恢复原样上抛、不做应急预算预检）、`emergency_min_bytes`（默认 300MB）与 `emergency_min_ratio`（默认 0.01，紧急线取两者较大值）、`usage_ttl_seconds`（水位探测缓存 TTL，默认 5s）、`artifact_gzip_threshold_bytes`（默认 1MiB；`<=0` 关闭 artifact gzip 压缩）、`terminal_cleanup_enabled`（默认 `true`；关闭后任务终态不再自动清理中间产物）。`G3KU_*` 同名环境变量仅作测试与应急覆盖，配置源真值以本子节为准。
+
 ### `external_api`
 
 定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled}`）、`eventBufferSize`。token 密文走 bootstrap secret overlay 三件套（保存时剥离进覆盖层、落盘配置只留占位、解锁时回填）。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
