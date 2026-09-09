@@ -908,12 +908,12 @@ function renderTasks() {
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
         el.dataset.taskId = taskId;
         el.innerHTML = `
+            ${task.archived ? `<span class="pc-corner-badge pc-corner-badge--archived" title="已压缩归档：打开或恢复时自动解压（解压前预检磁盘空间）" aria-label="已压缩归档"><i data-lucide="archive"></i></span>` : ""}
             <div class="pc-topbar">
                 <div class="pc-topbar-left">
                     <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
                     <div class="pc-topbar-meta">
                         <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
-                        ${task.archived ? `<span class="pc-task-id-chip pc-archived-chip" title="已压缩归档：打开或恢复时自动解压（解压前预检磁盘空间）"><span class="pc-task-id-label">已压缩</span></span>` : ""}
                         ${task.purged ? `<span class="pc-task-id-chip pc-purged-chip" title="归档已被删除渐进回收（墓碑态）：任务结构、摘要与错误日志仍可查看，中间产物不可恢复"><span class="pc-task-id-label">已清理</span></span>` : ""}
                         <span class="pc-task-id-chip">
                             <span class="pc-task-id-label">Task</span>

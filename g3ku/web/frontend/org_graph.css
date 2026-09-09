@@ -7006,12 +7006,40 @@ textarea {
     gap: var(--space-4);
     min-width: 0;
     overflow: visible;
+    position: relative;
 }
 
 .project-card:hover {
     transform: translateY(-4px);
     box-shadow: var(--shadow-md);
     border-color: var(--brand-primary);
+}
+
+/* 磁盘治理（P2）：归档状态角标——卡片左上角外侧的圆形图标
+   （原顶栏内「已压缩」chip 在窄卡片里会被挤成竖排，移到角落外）。 */
+.pc-corner-badge {
+    position: absolute;
+    top: -10px;
+    left: -10px;
+    z-index: 3;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+    background-color: var(--bg-panel);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+}
+
+.pc-corner-badge svg {
+    width: 14px;
+    height: 14px;
+}
+
+.pc-corner-badge--archived {
+    color: var(--brand-primary);
 }
 
 .pc-topbar {
