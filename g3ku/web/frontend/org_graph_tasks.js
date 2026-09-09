@@ -465,6 +465,11 @@ function renderTaskPerformanceBar() {
         ? `${diskUsagePercent.toFixed(1)}%`
         : "--";
     const diskStateKey = diskEmergency ? "critical" : diskCleanup ? "throttled" : "normal";
+    // 磁盘治理（P2）：压缩渐进进度可观测（来自 worker_status 的 disk_archive_sweep）。
+    const sweep = metrics?.disk_archive_sweep && typeof metrics.disk_archive_sweep === "object" ? metrics.disk_archive_sweep : {};
+    const sweepSuffix = !!sweep.running
+        ? ` · 自动归档中${Number(sweep.archived_count) > 0 ? `（已压 ${Number(sweep.archived_count)}）` : ""}`
+        : "";
     const diskStateSuffix = diskEmergency ? " · 紧急" : diskCleanup ? " · 清理线" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
     const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
@@ -482,7 +487,7 @@ function renderTaskPerformanceBar() {
         </div>
         <div class="task-performance-item task-performance-item--state" data-state="${esc(diskStateKey)}">
             <span class="task-performance-label">磁盘剩余</span>
-            <strong class="task-performance-value">${esc(`${diskFreeText}（已用 ${diskUsageText}）${diskStateSuffix}`)}</strong>
+            <strong class="task-performance-value">${esc(`${diskFreeText}（已用 ${diskUsageText}）${diskStateSuffix}${sweepSuffix}`)}</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">工具队列</span>

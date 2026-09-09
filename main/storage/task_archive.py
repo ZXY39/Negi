@@ -273,6 +273,35 @@ class TaskArchiver:
                 self._remove_tree_files(path)
         return 'completed'
 
+    def cleanup_stale_work_files(self, *, max_age_seconds: float = 600.0) -> dict[str, int]:
+        """清理闪退残留：.tmp-*.zip（压缩写一半）与 .extract-*（解压 staging）。
+
+        只删超过 max_age_seconds 的，避免误删在途工作文件。
+        """
+        removed_tmp = 0
+        removed_extract = 0
+        cutoff = time.time() - max(0.0, float(max_age_seconds))
+        try:
+            entries = list(self._archive_dir.iterdir())
+        except OSError:
+            return {'tmp_zips': 0, 'extract_dirs': 0}
+        for entry in entries:
+            try:
+                name = entry.name
+                if not name.startswith('.tmp-') and not name.startswith('.extract-'):
+                    continue
+                if entry.stat().st_mtime >= cutoff:
+                    continue
+                if entry.is_file() and name.endswith('.zip'):
+                    entry.unlink(missing_ok=True)
+                    removed_tmp += 1
+                elif entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                    removed_extract += 1
+            except OSError:
+                continue
+        return {'tmp_zips': removed_tmp, 'extract_dirs': removed_extract}
+
     # ------------------------------------------------------------------
     # 归档成员读取（read_artifact_text 回退用）
     # ------------------------------------------------------------------

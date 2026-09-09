@@ -324,3 +324,106 @@ async def test_archive_one_task_insufficient_space(tmp_path, monkeypatch, polici
         assert (dirs['artifacts'] / 'a.md').exists()
     finally:
         store.close()
+
+
+# --- 闪退自愈与进度状态 ---
+
+
+def test_cleanup_stale_work_files(tmp_path, policies_guard):
+    import os
+    import time as _time
+
+    configure_disk_policies(DiskPolicies())
+    archiver = TaskArchiver(archive_dir=tmp_path / 'task-archives')
+    archive_dir = tmp_path / 'task-archives'
+    stale_zip = archive_dir / '.tmp-999-task_x.zip'
+    fresh_zip = archive_dir / '.tmp-1000-task_y.zip'
+    stale_extract = archive_dir / '.extract-task_z-999'
+    fresh_extract = archive_dir / '.extract-task_w-1000'
+    stale_zip.write_bytes(b'partial')
+    fresh_zip.write_bytes(b'partial')
+    stale_extract.mkdir()
+    (stale_extract / 'f.txt').write_text('x', encoding='utf-8')
+    fresh_extract.mkdir()
+    (fresh_extract / 'f.txt').write_text('x', encoding='utf-8')
+    old_ts = _time.time() - 3600
+    os.utime(stale_zip, (old_ts, old_ts))
+    os.utime(stale_extract, (old_ts, old_ts))
+    result = archiver.cleanup_stale_work_files(max_age_seconds=600)
+    assert result == {'tmp_zips': 1, 'extract_dirs': 1}
+    assert not stale_zip.exists()
+    assert not stale_extract.exists()
+    assert fresh_zip.exists() and fresh_extract.exists()  # 在途文件不动
+
+
+async def test_repair_interrupted_archives(tmp_path, policies_guard):
+    configure_disk_policies(DiskPolicies())
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    try:
+        # 场景 A：闪退在"源删到一半"——zip 有效、源有残留、元数据缺失
+        store.upsert_task(_task_record('task:t1'))
+        dirs = _make_task_dirs(tmp_path)
+        archiver = TaskArchiver(archive_dir=tmp_path / 'task-archives')
+        harness = _bind_service_harness(store, archiver, {'task:t1': dirs})
+        harness._repair_interrupted_archives = MethodType(
+            runtime_service_module.MainRuntimeService._repair_interrupted_archives, harness,
+        )
+        result = await harness._archive_one_task('task:t1', reason='disk_cleanup')
+        assert result['result'] == 'archived'
+        # 模拟闪退：清掉元数据里的归档标记，并恢复一个残留源文件
+        task = store.get_task('task:t1')
+        clean_meta = {k: v for k, v in (task.metadata or {}).items() if not k.startswith('archive') and k != 'archived_at'}
+        store.upsert_task(task.model_copy(update={'metadata': clean_meta}))
+        dirs['artifacts'].mkdir(parents=True, exist_ok=True)
+        (dirs['artifacts'] / 'a.md').write_text('artifact content ' * 100, encoding='utf-8')
+        await harness._repair_interrupted_archives()
+        repaired = store.get_task('task:t1')
+        assert repaired.metadata.get('archived_at')
+        assert repaired.metadata.get('archive_reason') == 'crash_recovery'
+        assert int(repaired.metadata.get('archived_bytes') or 0) > 0
+        assert not (dirs['artifacts'] / 'a.md').exists()  # 残留源被补删
+        # 场景 B：损坏的 zip → 回滚删除，不写元数据
+        bad_zip = archiver.archive_path_for('task:t2')
+        bad_zip.write_bytes(b'corrupted zip')
+        store.upsert_task(_task_record('task:t2'))
+        await harness._repair_interrupted_archives()
+        assert not bad_zip.exists()
+        assert not (store.get_task('task:t2').metadata or {}).get('archived_at')
+    finally:
+        store.close()
+
+
+async def test_decompress_missing_zip_tombstones(tmp_path, policies_guard):
+    configure_disk_policies(DiskPolicies())
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    try:
+        # 元数据标已归档但 zip 不存在（删除渐进后崩溃/手工删）→ 转墓碑
+        store.upsert_task(_task_record(
+            'task:t1', metadata={'archived_at': '2026-09-01T00:00:00+00:00', 'archived_bytes': 100},
+        ))
+        archiver = TaskArchiver(archive_dir=tmp_path / 'task-archives')
+        harness = _bind_service_harness(store, archiver, {})
+        result = await harness._decompress_one_task('task:t1')
+        assert result['result'] == 'purged'
+        task = store.get_task('task:t1')
+        assert task.is_purged()
+        assert task.metadata.get('purge_reason') == 'archive_missing'
+        assert not task.metadata.get('archived_at')
+    finally:
+        store.close()
+
+
+def test_archive_sweep_snapshot_shape():
+    harness = SimpleNamespace(
+        _archive_sweep_running=True,
+        _disk_archive_sweep_state={
+            'running': True, 'current_task': 'task:x',
+            'archived_count': 3, 'purged_count': 0, 'last_finished_at': '',
+        },
+    )
+    snap = MethodType(
+        runtime_service_module.MainRuntimeService._disk_archive_sweep_snapshot, harness,
+    )()
+    assert snap['running'] is True
+    assert snap['current_task'] == 'task:x'
+    assert snap['archived_count'] == 3

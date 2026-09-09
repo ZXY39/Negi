@@ -360,6 +360,14 @@ class MainRuntimeService:
         set_task_archiver(self.task_archiver)
         self._decompress_inflight: set[str] = set()
         self._archive_sweep_running = False
+        # 磁盘治理（P2）：压缩渐进进度状态（经 worker_status 下发，供前端/运维观测）。
+        self._disk_archive_sweep_state: dict[str, Any] = {
+            'running': False,
+            'current_task': '',
+            'archived_count': 0,
+            'purged_count': 0,
+            'last_finished_at': '',
+        }
         self._task_disk_cleanup_task: asyncio.Task[Any] | None = None
         self.content_store = ContentNavigationService(
             workspace=Path.cwd(),
@@ -6688,6 +6696,16 @@ class MainRuntimeService:
             return {'result': 'purged'}
         if not metadata.get('archived_at') and not self.task_archiver.has_archive(task_id):
             return {'result': 'not_archived'}
+        if metadata.get('archived_at') and not self.task_archiver.has_archive(task_id):
+            # 闪退窗口自愈：元数据标记已归档但 zip 已不存在（删除渐进后崩溃、
+            # 或归档被手工删除）——内容不可恢复，转墓碑而不是静默清标记。
+            metadata['purged_at'] = now_iso()
+            metadata['purge_reason'] = 'archive_missing'
+            metadata.pop('archived_at', None)
+            self.store.upsert_task(task.model_copy(update={'metadata': metadata}))
+            self._publish_task_archive_state_changed(task_id)
+            logger.warning('disk governance: archive zip missing for task {}, tombstoned', task_id)
+            return {'result': 'purged'}
         if task_id in self._decompress_inflight:
             return {'result': 'in_flight'}
         self._decompress_inflight.add(task_id)
@@ -6738,10 +6756,22 @@ class MainRuntimeService:
         return self.get_task(task_id)
 
     async def _disk_cleanup_sweep_loop(self) -> None:
-        """清理线巡检（embedded/worker，60s）：低于清理线或被 P1 信号置位时跑压缩渐进。"""
+        """清理线巡检（embedded/worker，60s）：低于清理线或被 P1 信号置位时跑压缩渐进。
+        每拍顺带做崩溃自愈：清闪退残留工作文件、修复"压缩到一半进程死掉"的任务。"""
         while True:
             try:
                 await asyncio.sleep(60.0)
+                try:
+                    stale = await asyncio.to_thread(self.task_archiver.cleanup_stale_work_files)
+                    if any(stale.values()):
+                        logger.info(
+                            'disk governance: cleaned stale work files tmp_zips={} extract_dirs={}',
+                            stale.get('tmp_zips', 0),
+                            stale.get('extract_dirs', 0),
+                        )
+                    await self._repair_interrupted_archives()
+                except Exception:
+                    pass
                 if not disk_policies().archive_enabled:
                     self._disk_cleanup_requested = False
                     continue
@@ -6752,6 +6782,62 @@ class MainRuntimeService:
                 raise
             except Exception:
                 continue
+
+    async def _repair_interrupted_archives(self) -> None:
+        """崩溃自愈：存在归档 zip 但缺 `archived_at` 元数据的任务。
+
+        覆盖两种闪退窗口：a) zip 已写完、源删到一半 → recover_interrupted 补删源；
+        b) 源已删空、元数据没落库 → 补写元数据（从清单取字节数）。
+        反向窗口（有元数据无 zip）在 _decompress_one_task 转墓碑处理。
+        """
+        try:
+            tasks = await asyncio.to_thread(self.store.list_tasks)
+        except Exception:
+            return
+        for task in tasks or []:
+            task_id = str(getattr(task, 'task_id', '') or '').strip()
+            if not task_id:
+                continue
+            metadata = dict(getattr(task, 'metadata', None) or {})
+            if metadata.get('archived_at') or metadata.get('purged_at'):
+                continue
+            try:
+                has_zip = await asyncio.to_thread(self.task_archiver.has_archive, task_id)
+            except Exception:
+                has_zip = False
+            if not has_zip:
+                continue
+            dirs = self._task_archive_dirs(task_id)
+            try:
+                state = await asyncio.to_thread(self.task_archiver.recover_interrupted, task_id, dirs)
+            except Exception:
+                continue
+            if state == 'rolled_back':
+                continue
+            manifest = None
+            try:
+                manifest = await asyncio.to_thread(self.task_archiver.read_manifest, task_id)
+            except Exception:
+                manifest = None
+            metadata['archived_at'] = now_iso()
+            metadata['archive_reason'] = 'crash_recovery'
+            if isinstance(manifest, dict):
+                metadata['archived_bytes'] = int(manifest.get('uncompressed_bytes') or 0)
+                try:
+                    archive_path = self.task_archiver.archive_path_for(task_id)
+                    metadata['archive_compressed_bytes'] = int(archive_path.stat().st_size)
+                except OSError:
+                    pass
+            fresh = self.get_task(task_id) or task
+            self.store.upsert_task(fresh.model_copy(update={'metadata': metadata}))
+            if isinstance(manifest, dict):
+                try:
+                    archive_path = self.task_archiver.archive_path_for(task_id)
+                    self.store.upsert_task_disk_usage(task_id, int(archive_path.stat().st_size))
+                except OSError:
+                    pass
+            self._publish_task_archive_state_changed(task_id)
+            logger.info('disk governance: repaired interrupted archive for task {} (state={})', task_id, state)
 
     def _disk_waterline(self) -> tuple[int, int] | None:
         return disk_waterline_snapshot([str(self._workspace_root())])
@@ -6776,6 +6862,8 @@ class MainRuntimeService:
         if self._archive_sweep_running:
             return 0
         self._archive_sweep_running = True
+        self._disk_archive_sweep_state['running'] = True
+        self._disk_archive_sweep_state['archived_count'] = 0
         archived = 0
         try:
             policies = disk_policies()
@@ -6788,9 +6876,11 @@ class MainRuntimeService:
                     candidates_exhausted = True
                     break
                 for candidate_task_id in candidates:
+                    self._disk_archive_sweep_state['current_task'] = candidate_task_id
                     result = await self._archive_one_task(candidate_task_id, reason='disk_cleanup')
                     if str(result.get('result') or '') == 'archived':
                         archived += 1
+                        self._disk_archive_sweep_state['archived_count'] = archived
                     await asyncio.sleep(max(1.0, float(policies.archive_sweep_interval_seconds)))
                     if self._disk_emergency_due():
                         break
@@ -6801,9 +6891,13 @@ class MainRuntimeService:
                 and self._disk_cleanup_due()
                 and not self._disk_emergency_due()
             ):
-                await self._purge_oldest_archives_sweep()
+                purged = await self._purge_oldest_archives_sweep()
+                self._disk_archive_sweep_state['purged_count'] = int(purged)
         finally:
             self._archive_sweep_running = False
+            self._disk_archive_sweep_state['running'] = False
+            self._disk_archive_sweep_state['current_task'] = ''
+            self._disk_archive_sweep_state['last_finished_at'] = now_iso()
             if not self._disk_cleanup_due():
                 self._disk_cleanup_requested = False
         if archived:
@@ -6839,6 +6933,11 @@ class MainRuntimeService:
         if purged:
             logger.info('disk governance: purge sweep deleted {} archived task zip(s) (tombstones kept)', purged)
         return purged
+
+    def _disk_archive_sweep_snapshot(self) -> dict[str, Any]:
+        state = dict(self._disk_archive_sweep_state or {})
+        state['running'] = bool(self._archive_sweep_running)
+        return state
 
     async def _purge_one_archive(self, task_id: str) -> bool:
         task = self.get_task(task_id)
@@ -9439,6 +9538,7 @@ class MainRuntimeService:
             'disk_emergency_active': bool(merged.get('disk_emergency_active')),
             'disk_emergency_since': str(merged.get('disk_emergency_since') or ''),
             'disk_cleanup_active': bool(merged.get('disk_cleanup_active')),
+            'disk_archive_sweep': self._disk_archive_sweep_snapshot(),
             'sqlite_write_wait_ms': float(merged.get('sqlite_write_wait_ms') or 0.0),
             'sqlite_query_latency_ms': float(merged.get('sqlite_query_latency_ms') or 0.0),
             'pressure_sample_at': sample_at,
