@@ -887,6 +887,132 @@ textarea {
     box-shadow: 0 18px 36px -24px color-mix(in srgb, var(--brand-primary) 44%, transparent);
 }
 
+/* 任务树悬浮搜索框（左上角）：按节点 ID 或 goal 关键词定位节点 */
+.task-tree-search {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 6;
+    width: min(320px, calc(100% - 200px));
+    min-width: 220px;
+}
+
+.task-tree-search-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.task-tree-search-icon {
+    position: absolute;
+    left: 13px;
+    width: 16px;
+    height: 16px;
+    color: var(--text-muted);
+    pointer-events: none;
+}
+
+.task-tree-search-input {
+    width: 100%;
+    height: 40px;
+    padding: 0 30px 0 36px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
+    color: var(--text-primary);
+    font-size: 0.86rem;
+    box-shadow: 0 16px 32px -24px color-mix(in srgb, var(--brand-primary) 36%, transparent);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.task-tree-search-input::placeholder {
+    color: var(--text-muted);
+}
+
+.task-tree-search-input:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
+    box-shadow: 0 18px 36px -24px color-mix(in srgb, var(--brand-primary) 44%, transparent);
+}
+
+.task-tree-search-results {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: max(100%, 340px);
+    max-width: min(480px, calc(100vw - 48px));
+    max-height: min(320px, 46vh);
+    overflow-y: auto;
+    padding: 6px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+    box-shadow: var(--shadow-lg);
+}
+
+.task-tree-search-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-primary);
+    text-align: left;
+    cursor: pointer;
+}
+
+.task-tree-search-item:hover,
+.task-tree-search-item.is-active {
+    background: color-mix(in srgb, var(--brand-primary) 12%, var(--bg-app));
+    border-color: color-mix(in srgb, var(--brand-primary) 28%, transparent);
+}
+
+.task-tree-search-item-goal {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.task-tree-search-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.task-tree-search-item-id {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.task-tree-search-item-status {
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    font-size: 0.68rem;
+}
+
+.task-tree-search-empty {
+    padding: 10px 12px;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    text-align: center;
+}
+
 .panel {
     min-height: 0;
     display: flex;
@@ -10317,12 +10443,12 @@ textarea {
 }
 
 .task-tree-node-locate {
-    animation: task-tree-node-locate 900ms ease-in-out 1;
+    animation: task-tree-node-locate 1200ms ease-in-out 1;
 }
 
 @keyframes task-tree-node-locate {
     0%, 100% { box-shadow: var(--tree-node-shadow); }
-    25%, 65% { box-shadow: 0 0 0 5px color-mix(in srgb, #f59e0b 68%, transparent), var(--shadow-lg); }
+    20%, 70% { box-shadow: 0 0 0 5px color-mix(in srgb, #39c5bb 72%, transparent), var(--shadow-lg); }
 }
 
 /* ---- 配置名称相关 UI ---- */

@@ -12,6 +12,8 @@ const DEFAULT_ROLE_CONCURRENCY = () => ({ ceo: null, execution: null, inspection
 const TREE_SCALE_MIN = 0.12;
 const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
+// 搜索定位节点时统一放大到的固定缩放值，保证节点文字清晰可读
+const TREE_FOCUS_SCALE = 1.2;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
 const TASK_MODEL_CALLS_PAGE_SIZE = 100;
 const TASK_DEPTH_PRESET_VALUES = Object.freeze([0, 1, 2, 3, 4, 5]);
@@ -429,6 +431,9 @@ const U = {
     taskErrorLogSummary: document.getElementById("task-error-log-summary"),
     taskErrorLogContent: document.getElementById("task-error-log-content"),
     taskTreeResetRounds: document.getElementById("task-tree-reset-rounds-btn"),
+    taskTreeSearch: document.getElementById("task-tree-search"),
+    taskTreeSearchInput: document.getElementById("task-tree-search-input"),
+    taskTreeSearchResults: document.getElementById("task-tree-search-results"),
     tree: document.getElementById("org-tree-container"),
     taskSelectionEmpty: document.getElementById("task-selection-empty-inline"),
     taskDetailBackdrop: document.getElementById("task-detail-backdrop"),
@@ -11825,6 +11830,7 @@ function init() {
     });
     window.addEventListener("resize", refreshTaskDetailScrollRegions);
     bindTreePan();
+    if (typeof bindTaskTreeSearch === "function") bindTaskTreeSearch();
     icons();
     renderTaskDepthControl();
     void loadTaskDefaults();

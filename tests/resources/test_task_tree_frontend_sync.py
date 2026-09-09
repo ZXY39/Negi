@@ -4451,3 +4451,91 @@ def test_stage_body_renders_round_narration_text_and_stage_summary() -> None:
     assert result["hasSummaryBlock"] is True
     assert result["hasSummaryLabel"] is True
     assert result["hasSummaryText"] is True
+
+
+def test_tree_node_search_matches_id_or_goal_and_ranks_exact_prefix_above_contains() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { treeNodesById: {} };
+        global.U = {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        S.treeNodesById = {
+          "node:a": { node_id: "node:a", title: "alpha" },
+          "alpha-child": { node_id: "alpha-child", title: "z" },
+          "node:b": { node_id: "node:b", title: "an Alpha goal" },
+          "x": { node_id: "x", title: "unrelated" },
+        };
+        console.log(JSON.stringify({
+          ranked: searchTaskTreeNodes("alpha").map((match) => match.nodeId),
+          caseInsensitiveId: searchTaskTreeNodes("NODE:B").map((match) => match.nodeId),
+          blankQuery: searchTaskTreeNodes("   "),
+          noHit: searchTaskTreeNodes("不存在的关键词"),
+          limited: searchTaskTreeNodes("alpha", { limit: 2 }).length,
+        }));
+        """
+    )
+
+    assert result["ranked"] == ["node:a", "alpha-child", "node:b"]
+    assert result["caseInsensitiveId"] == ["node:b"]
+    assert result["blankQuery"] == []
+    assert result["noHit"] == []
+    assert result["limited"] == 2
+
+
+def test_tree_node_search_result_rows_carry_goal_node_id_and_status() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = { treeNodesById: {} };
+        global.U = {};
+        global.esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+        const created = [];
+        global.document = {
+          createElement: (tag) => {
+            const element = {
+              tagName: String(tag).toUpperCase(),
+              className: "",
+              dataset: {},
+              innerHTML: "",
+              type: "",
+              listeners: {},
+              setAttribute() {},
+              addEventListener(type, handler) { this.listeners[type] = handler; },
+            };
+            created.push(element);
+            return element;
+          },
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const match = {
+          node: { node_id: "node:目标", title: "整理<周报>", status: "in_progress" },
+          nodeId: "node:目标",
+          title: "整理<周报>",
+          score: 3,
+        };
+        const item = createTaskTreeSearchItem(match);
+        const click = item.listeners.click;
+        console.log(JSON.stringify({
+          goalShown: item.innerHTML.includes("整理&lt;周报&gt;"),
+          nodeIdShown: item.innerHTML.includes("node:目标"),
+          statusShown: item.innerHTML.includes('data-status="in_progress"'),
+          hasClickHandler: typeof click === "function",
+          mousedownPrevented: typeof item.listeners.mousedown === "function",
+        }));
+        """
+    )
+
+    assert result["goalShown"] is True
+    assert result["nodeIdShown"] is True
+    assert result["statusShown"] is True
+    assert result["hasClickHandler"] is True
+    assert result["mousedownPrevented"] is True

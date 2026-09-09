@@ -179,6 +179,7 @@ function applyTaskTreeSnapshotPayload(payload = {}) {
     S.treeView = null;
     S.treeLargeMode = false;
     S.treeSelectedRoundByNodeId = pruneTreeRoundSelections({});
+    refreshTaskTreeSearchResultsIfVisible();
 }
 
 function applyTaskTreeSubtreePayload(payload = {}) {
@@ -203,6 +204,7 @@ function applyTaskTreeSubtreePayload(payload = {}) {
     }
     S.treeView = null;
     S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(S.treeSelectedRoundByNodeId);
+    refreshTaskTreeSearchResultsIfVisible();
 }
 
 function markTaskTreeParentDirty(nodeId) {
@@ -2171,6 +2173,257 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
     wrapper.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px) scale(${state.scale})`;
     return true;
 }
+
+function substringMatchScore(textLower, needleLower) {
+    if (!textLower || !needleLower) return -1;
+    if (textLower === needleLower) return 3;
+    if (textLower.startsWith(needleLower)) return 2;
+    if (textLower.includes(needleLower)) return 1;
+    return -1;
+}
+
+// 在当前任务树快照中按节点 ID 或 goal 关键词搜索，返回按匹配度排序的候选节点
+function searchTaskTreeNodes(query, { limit = 30 } = {}) {
+    const needle = String(query ?? "").trim().toLowerCase();
+    if (!needle) return [];
+    const nodesById = S.treeNodesById && typeof S.treeNodesById === "object" ? S.treeNodesById : {};
+    const matches = [];
+    Object.values(nodesById).forEach((node) => {
+        if (!node || typeof node !== "object") return;
+        const nodeId = String(node.node_id || "").trim();
+        if (!nodeId) return;
+        const title = String(node.title || "").trim();
+        const idScore = substringMatchScore(nodeId.toLowerCase(), needle);
+        const titleScore = substringMatchScore(title.toLowerCase(), needle);
+        if (idScore < 0 && titleScore < 0) return;
+        matches.push({ node, nodeId, title, score: Math.max(idScore, titleScore) });
+    });
+    matches.sort((a, b) => (b.score - a.score) || (a.title.length - b.title.length) || a.nodeId.localeCompare(b.nodeId));
+    return matches.slice(0, Math.max(1, Number(limit) || 30));
+}
+
+// 将已渲染的节点居中到树视口正中，并做一次性高亮；节点不在树中时返回 false
+function centerTaskTreeNodeInView(targetId) {
+    const normalizedTargetId = String(targetId || "").trim();
+    if (!normalizedTargetId || !U.tree) return false;
+    const button = U.tree.querySelector(executionTreeNodeSelector(normalizedTargetId));
+    if (!(button instanceof HTMLElement)) return false;
+    U.tree.scrollTop = 0;
+    const containerRect = U.tree.getBoundingClientRect();
+    const nodeRect = button.getBoundingClientRect();
+    S.treePan.offsetX += (containerRect.left + containerRect.width / 2) - (nodeRect.left + nodeRect.width / 2);
+    S.treePan.offsetY += (containerRect.top + containerRect.height / 2) - (nodeRect.top + nodeRect.height / 2);
+    S.treePan.baseOffsetX = S.treePan.offsetX;
+    S.treePan.baseOffsetY = S.treePan.offsetY;
+    const canvas = U.tree.querySelector(".execution-tree");
+    if (canvas) canvas.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
+    button.classList.remove("task-tree-node-locate");
+    void button.offsetWidth;
+    button.classList.add("task-tree-node-locate");
+    window.setTimeout(() => button.classList.remove("task-tree-node-locate"), 1200);
+    return true;
+}
+
+// 从目标节点向上找最近的、当前已在树中渲染的祖先节点 ID（目标本身已确认不可见时使用）
+function nearestVisibleTreeNodeId(nodeId) {
+    let currentId = String(nodeId || "").trim();
+    const seen = new Set();
+    while (currentId && !seen.has(currentId)) {
+        seen.add(currentId);
+        const node = treeSnapshotNode(currentId) || S.taskNodeDetails?.[currentId] || null;
+        const parentId = String(node?.parent_node_id || "").trim();
+        if (!parentId) return "";
+        if (U.tree?.querySelector(executionTreeNodeSelector(parentId)) instanceof HTMLElement) return parentId;
+        currentId = parentId;
+    }
+    return "";
+}
+
+// 展开目标节点的所有祖先后定位该节点；给定 scale 时先固定缩放再居中。
+// 祖先按目标所在轮次拉取子树（缺省会拉最新轮次，可能把旧轮节点移出快照）。
+// 返回 Promise<{ located, reason?, fallbackNodeId? }>：
+// - located=true 表示目标节点已居中；
+// - located=false 且带 fallbackNodeId 表示目标当前不可见，已居中其最近可见祖先。
+async function locateTaskTreeNode(targetId, { scale = null } = {}) {
+    const normalizedTargetId = String(targetId || "").trim();
+    if (!normalizedTargetId) return { located: false, reason: "missing" };
+    const target = treeSnapshotNode(normalizedTargetId) || S.taskNodeDetails?.[normalizedTargetId] || null;
+    if (!target) return { located: false, reason: "missing" };
+    const path = [];
+    let current = target;
+    while (current) {
+        const currentId = String(current?.node_id || "").trim();
+        if (!currentId || path.includes(currentId)) break;
+        path.push(currentId);
+        const parentId = String(current?.parent_node_id || "").trim();
+        current = parentId ? (treeSnapshotNode(parentId) || S.taskNodeDetails?.[parentId] || null) : null;
+    }
+    for (const parentId of path.slice(1).reverse()) {
+        const parent = treeSnapshotNode(parentId);
+        const childId = path[path.indexOf(parentId) - 1];
+        const round = (Array.isArray(parent?.rounds) ? parent.rounds : []).find((item) => Array.isArray(item?.child_ids) && item.child_ids.includes(childId));
+        if (round?.round_id) S.treeSelectedRoundByNodeId[parentId] = round.round_id;
+        if (typeof ensureTaskTreeSubtree === "function") {
+            await ensureTaskTreeSubtree(parentId, { roundId: round?.round_id || "", force: true }).catch(() => null);
+        }
+    }
+    if (scale !== null && scale !== undefined) {
+        const nextScale = clamp(Number(scale) || 1, TREE_SCALE_MIN, TREE_SCALE_MAX);
+        S.treePan.scale = nextScale;
+        S.treePan.baseScale = nextScale;
+    }
+    renderTree();
+    return new Promise((resolve) => {
+        window.requestAnimationFrame(() => {
+            if (centerTaskTreeNodeInView(normalizedTargetId)) {
+                resolve({ located: true, nodeId: normalizedTargetId });
+                return;
+            }
+            const fallbackNodeId = nearestVisibleTreeNodeId(normalizedTargetId);
+            if (fallbackNodeId && centerTaskTreeNodeInView(fallbackNodeId)) {
+                resolve({ located: false, reason: "hidden", fallbackNodeId });
+                return;
+            }
+            resolve({ located: false, reason: "hidden" });
+        });
+    });
+}
+
+function createTaskTreeSearchItem(match) {
+    const { node, nodeId, title } = match;
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "task-tree-search-item";
+    item.dataset.nodeId = nodeId;
+    item.setAttribute("role", "option");
+    const status = String(node?.status || "").trim();
+    const goal = title || nodeId;
+    const statusBadge = status
+        ? `<span class="status-badge task-tree-search-item-status" data-status="${esc(status)}">${esc(status)}</span>`
+        : "";
+    item.innerHTML = `<span class="task-tree-search-item-goal">${esc(goal)}</span>
+        <span class="task-tree-search-item-meta"><span class="task-tree-search-item-id">${esc(nodeId)}</span>${statusBadge}</span>`;
+    // preventDefault 保持输入框焦点，点击结果后搜索框内容不被重置
+    item.addEventListener("mousedown", (event) => event.preventDefault());
+    item.addEventListener("click", () => { void jumpTaskTreeSearchToNode(nodeId); });
+    return item;
+}
+
+function renderTaskTreeSearchResults() {
+    const input = U.taskTreeSearchInput;
+    const results = U.taskTreeSearchResults;
+    if (!input || !results) return;
+    const trimmed = String(input.value || "").trim();
+    const previousActiveIndex = Number(results.dataset.activeIndex || -1);
+    results.innerHTML = "";
+    if (!trimmed) {
+        results.hidden = true;
+        results.dataset.activeIndex = "-1";
+        return;
+    }
+    const matches = searchTaskTreeNodes(trimmed);
+    if (!matches.length) {
+        const empty = document.createElement("div");
+        empty.className = "task-tree-search-empty";
+        empty.textContent = "未找到匹配的节点";
+        results.appendChild(empty);
+        results.dataset.activeIndex = "-1";
+    } else {
+        matches.forEach((match) => results.appendChild(createTaskTreeSearchItem(match)));
+        results.dataset.activeIndex = String(
+            previousActiveIndex >= 0 && previousActiveIndex < matches.length ? previousActiveIndex : -1,
+        );
+    }
+    results.hidden = false;
+}
+
+function setTaskTreeSearchActiveIndex(index) {
+    const results = U.taskTreeSearchResults;
+    if (!results) return;
+    const items = Array.from(results.querySelectorAll(".task-tree-search-item"));
+    if (!items.length) {
+        results.dataset.activeIndex = "-1";
+        return;
+    }
+    const nextIndex = (index + items.length) % items.length;
+    results.dataset.activeIndex = String(nextIndex);
+    items.forEach((item, itemIndex) => item.classList.toggle("is-active", itemIndex === nextIndex));
+    items[nextIndex]?.scrollIntoView({ block: "nearest" });
+}
+
+async function jumpTaskTreeSearchToNode(nodeId) {
+    const normalizedNodeId = String(nodeId || "").trim();
+    if (!normalizedNodeId) return;
+    // 定位不清空搜索框与结果列表，方便在候选节点间连续跳转
+    const result = await locateTaskTreeNode(normalizedNodeId, { scale: TREE_FOCUS_SCALE });
+    if (typeof showToast !== "function") return;
+    if (result?.located) return;
+    if (result?.fallbackNodeId) {
+        const fallback = treeSnapshotNode(result.fallbackNodeId) || S.taskNodeDetails?.[result.fallbackNodeId] || null;
+        const fallbackTitle = truncateNodeTitle(String(fallback?.title || result.fallbackNodeId).trim() || result.fallbackNodeId, 24);
+        showToast({
+            title: "目标节点当前未显示",
+            text: `已改为定位到其父节点「${fallbackTitle}」`,
+            kind: "warn",
+        });
+        return;
+    }
+    showToast({ title: "无法定位节点", text: "该节点当前未在任务树中显示", kind: "warn" });
+}
+
+function refreshTaskTreeSearchResultsIfVisible() {
+    const results = U.taskTreeSearchResults;
+    const input = U.taskTreeSearchInput;
+    if (!results || !input || results.hidden) return;
+    renderTaskTreeSearchResults();
+}
+
+function bindTaskTreeSearch() {
+    const input = U.taskTreeSearchInput;
+    const results = U.taskTreeSearchResults;
+    if (!input || !results || input.dataset.searchBound === "true") return;
+    input.dataset.searchBound = "true";
+    input.addEventListener("input", renderTaskTreeSearchResults);
+    input.addEventListener("focus", () => {
+        if (String(input.value || "").trim()) renderTaskTreeSearchResults();
+    });
+    input.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            if (results.hidden) return;
+            event.preventDefault();
+            const current = Number(results.dataset.activeIndex || -1);
+            setTaskTreeSearchActiveIndex(event.key === "ArrowDown" ? current + 1 : current - 1);
+            return;
+        }
+        if (event.key === "Enter") {
+            if (results.hidden) return;
+            event.preventDefault();
+            const items = Array.from(results.querySelectorAll(".task-tree-search-item"));
+            if (!items.length) return;
+            const activeIndex = Number(results.dataset.activeIndex || -1);
+            const target = items[activeIndex] || items[0];
+            target.click();
+            return;
+        }
+        if (event.key === "Escape") {
+            // 阻止 type="search" 的原生清空行为：仅收起下拉，保留已输入内容
+            event.preventDefault();
+            if (!results.hidden) {
+                results.hidden = true;
+                results.dataset.activeIndex = "-1";
+            }
+        }
+    });
+    document.addEventListener("mousedown", (event) => {
+        const targetEl = event.target instanceof Element ? event.target : null;
+        if (targetEl?.closest("#task-tree-search")) return;
+        if (!results.hidden) {
+            results.hidden = true;
+            results.dataset.activeIndex = "-1";
+        }
+    });
+}
+
 
 function currentTaskRecoveryNotice() {
     return String(S.currentTask?.metadata?.recovery_notice || "").trim();

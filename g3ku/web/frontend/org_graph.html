@@ -648,6 +648,16 @@
 
                 <div class="project-dashboard">
                     <div class="org-tree-panel panel">
+                        <div class="task-tree-search" id="task-tree-search" role="search" aria-label="任务树节点搜索">
+                            <div class="task-tree-search-box">
+                                <i data-lucide="search" class="task-tree-search-icon" aria-hidden="true"></i>
+                                <input id="task-tree-search-input" class="task-tree-search-input" type="search"
+                                    placeholder="搜索节点 ID 或关键词" autocomplete="off" spellcheck="false"
+                                    aria-label="搜索任务树节点" aria-controls="task-tree-search-results">
+                            </div>
+                            <div id="task-tree-search-results" class="task-tree-search-results" role="listbox"
+                                aria-label="节点搜索结果" hidden></div>
+                        </div>
                         <div class="task-tree-floating-tools" aria-live="polite">
                             <button id="task-tree-reset-rounds-btn"
                                 class="toolbar-btn ghost small task-tree-floating-reset" type="button" hidden

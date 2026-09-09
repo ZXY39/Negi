@@ -1524,42 +1524,9 @@ async function openTaskErrorLog() {
 }
 
 async function focusErrorLogNode(nodeId) {
-    const targetId = String(nodeId || "").trim();
-    if (!targetId) return;
-    const target = treeSnapshotNode(targetId) || S.taskNodeDetails?.[targetId] || null;
-    const path = [];
-    let current = target;
-    while (current) {
-        const currentId = String(current?.node_id || "").trim();
-        if (!currentId || path.includes(currentId)) break;
-        path.push(currentId);
-        const parentId = String(current?.parent_node_id || "").trim();
-        current = parentId ? (treeSnapshotNode(parentId) || S.taskNodeDetails?.[parentId] || null) : null;
-    }
-    for (const parentId of path.slice(1).reverse()) {
-        const parent = treeSnapshotNode(parentId);
-        const childId = path[path.indexOf(parentId) - 1];
-        const round = (Array.isArray(parent?.rounds) ? parent.rounds : []).find((item) => Array.isArray(item?.child_ids) && item.child_ids.includes(childId));
-        if (round?.round_id) S.treeSelectedRoundByNodeId[parentId] = round.round_id;
-        if (typeof ensureTaskTreeSubtree === "function") await ensureTaskTreeSubtree(parentId, { force: true }).catch(() => null);
-    }
-    renderTree();
-    window.requestAnimationFrame(() => {
-        const button = U.tree?.querySelector(`.execution-tree-node[data-id="${CSS.escape(targetId)}"]`);
-        if (!(button instanceof HTMLElement)) return;
-        const containerRect = U.tree.getBoundingClientRect();
-        const nodeRect = button.getBoundingClientRect();
-        S.treePan.offsetX += (containerRect.left + containerRect.width / 2) - (nodeRect.left + nodeRect.width / 2);
-        S.treePan.offsetY += (containerRect.top + containerRect.height / 2) - (nodeRect.top + nodeRect.height / 2);
-        S.treePan.baseOffsetX = S.treePan.offsetX;
-        S.treePan.baseOffsetY = S.treePan.offsetY;
-        const canvas = U.tree.querySelector(".execution-tree");
-        if (canvas) canvas.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
-        button.classList.remove("task-tree-node-locate");
-        void button.offsetWidth;
-        button.classList.add("task-tree-node-locate");
-        window.setTimeout(() => button.classList.remove("task-tree-node-locate"), 900);
-    });
+    // 复用任务树搜索的定位管线：展开祖先节点、居中并一次性高亮；
+    // 不传 scale 表示保持当前缩放，与错误日志跳转的历史行为一致。
+    await locateTaskTreeNode(nodeId);
 }
 
 function setTaskTokenStatsOpen(open) {
