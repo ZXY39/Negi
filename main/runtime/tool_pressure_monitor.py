@@ -4,7 +4,14 @@ import asyncio
 import threading
 import time
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
+
+from main.storage.disk_guard import (
+    cleanup_threshold_bytes,
+    disk_policies,
+    disk_waterline_snapshot,
+    emergency_threshold_bytes,
+)
 
 try:  # pragma: no cover - optional dependency in local dev before reinstall
     import psutil
@@ -89,10 +96,23 @@ class WorkerPressureMonitor:
         max_tool_wait_ms: float = 30000.0,
         local_recovery_enabled: bool = True,
         system_metrics_sampler: Callable[[], dict[str, Any]] | None = None,
+        disk_watermark_paths: Sequence[str] | None = None,
     ) -> None:
         self._controller = controller
         self._store = store
         self._system_metrics_sampler = system_metrics_sampler
+        # 磁盘治理（P1）：水位探测路径（工作区/存储目录，通常同盘）与紧急态状态。
+        # 紧急态是 monitor 侧独立布尔镜像（controller 侧另有硬闸字段）——不进
+        # pressure_state 白名单，避免被 dwell/starvation 逃逸阀与 idle reset 冲掉。
+        self._disk_watermark_paths: tuple[str, ...] = tuple(str(p) for p in (disk_watermark_paths or ()) if str(p or '').strip())
+        self._disk_emergency_active = False
+        self._disk_emergency_since = ''
+        self._disk_cleanup_active = False
+        self._disk_emergency_streak = 0
+        self._disk_recovery_streak = 0
+        self._disk_emergency_enter_hook: Callable[[], None] | None = None
+        self._disk_emergency_exit_hook: Callable[[], None] | None = None
+        self._disk_cleanup_hook: Callable[[], None] | None = None
         self._lock = threading.RLock()
         self._sample_seconds = max(0.1, float(sample_seconds or 1.0))
         self._recover_window_seconds = max(0.1, float(recover_window_seconds or 1.0))
@@ -150,6 +170,12 @@ class WorkerPressureMonitor:
             'machine_pressure_disk_busy_available': False,
             'machine_pressure_disk_read_bytes_per_sec': 0.0,
             'machine_pressure_disk_write_bytes_per_sec': 0.0,
+            'machine_disk_free_bytes': -1,
+            'machine_disk_total_bytes': -1,
+            'machine_disk_usage_percent': 0.0,
+            'disk_emergency_active': False,
+            'disk_emergency_since': '',
+            'disk_cleanup_active': False,
             'tool_pressure_event_loop_lag_ms': 0.0,
             'tool_pressure_writer_queue_depth': 0,
             'tool_pressure_process_cpu_ratio': 0.0,
@@ -162,6 +188,31 @@ class WorkerPressureMonitor:
             'tool_pressure_sample_at': '',
             'tool_pressure_self_heal_reason': '',
         }
+
+    def set_disk_emergency_hooks(
+        self,
+        *,
+        enter: Callable[[], None] | None = None,
+        exit_: Callable[[], None] | None = None,
+        cleanup: Callable[[], None] | None = None,
+    ) -> None:
+        """注入磁盘紧急态边沿回调（线程安全、必须立即返回——在 1s 采样线程内调用）。
+
+        enter：跌破紧急线（连续 N 样本确认）——runtime_service 用它调度全任务自动暂停+告警；
+        exit_：回到紧急线之上（连续 N 样本确认）——只清告警，任务保持 paused；
+        cleanup：跌破清理线边沿——P2 压缩渐进的触发信号。
+        """
+        with self._lock:
+            if enter is not None:
+                self._disk_emergency_enter_hook = enter
+            if exit_ is not None:
+                self._disk_emergency_exit_hook = exit_
+            if cleanup is not None:
+                self._disk_cleanup_hook = cleanup
+
+    def set_disk_watermark_paths(self, paths: Sequence[str]) -> None:
+        with self._lock:
+            self._disk_watermark_paths = tuple(str(p) for p in (paths or ()) if str(p or '').strip())
 
     def configure(
         self,
@@ -265,6 +316,8 @@ class WorkerPressureMonitor:
         process_cpu_ratio: float,
         now_mono: float | None = None,
         now_iso: str | None = None,
+        machine_disk_free_bytes: int | None = None,
+        machine_disk_total_bytes: int | None = None,
     ) -> dict[str, Any]:
         current_mono = float(now_mono if now_mono is not None else time.perf_counter())
         timestamp = str(now_iso or _now_iso()).strip() or _now_iso()
@@ -329,6 +382,11 @@ class WorkerPressureMonitor:
         elif machine_safe:
             machine_state = 'normal'
         local_state = 'critical' if local_critical else ('degraded' if local_degraded else ('normal' if local_safe else 'elevated'))
+        pending_disk_hooks: list[Callable[[], None]] = []
+        disk_free = int(machine_disk_free_bytes) if machine_disk_free_bytes is not None and int(machine_disk_free_bytes) >= 0 else -1
+        disk_total = int(machine_disk_total_bytes) if machine_disk_total_bytes is not None and int(machine_disk_total_bytes) > 0 else -1
+        disk_watermark_available = disk_free >= 0 and disk_total > 0
+        disk_usage_percent = round((disk_total - disk_free) / disk_total * 100.0, 3) if disk_watermark_available else 0.0
         with self._lock:
             self._sample_mono = current_mono
             self._snapshot = {
@@ -339,6 +397,9 @@ class WorkerPressureMonitor:
                 'machine_pressure_disk_busy_available': bool(disk_busy_available),
                 'machine_pressure_disk_read_bytes_per_sec': round(max(0.0, float(disk_read_bytes_per_sec or 0.0)), 3),
                 'machine_pressure_disk_write_bytes_per_sec': round(max(0.0, float(disk_write_bytes_per_sec or 0.0)), 3),
+                'machine_disk_free_bytes': disk_free,
+                'machine_disk_total_bytes': disk_total,
+                'machine_disk_usage_percent': disk_usage_percent,
                 'tool_pressure_event_loop_lag_ms': round(max(0.0, float(event_loop_lag_ms or 0.0)), 3),
                 'tool_pressure_writer_queue_depth': int(max(0, int(writer_queue_depth or 0))),
                 'tool_pressure_process_cpu_ratio': round(max(0.0, float(process_cpu_ratio or 0.0)), 4),
@@ -349,6 +410,52 @@ class WorkerPressureMonitor:
                 'pressure_sample_at': timestamp,
                 'tool_pressure_sample_at': timestamp,
             }
+            # 磁盘治理（P1）：水位决策（防抖：进入 N 连续样本、恢复 M 连续样本）。
+            # 边沿触发 controller 硬闸与钩子；钩子只收集、出锁后调用（不阻塞采样）。
+            if disk_watermark_available:
+                policies = disk_policies()
+                emg_now = disk_free < emergency_threshold_bytes(disk_total, policies=policies)
+                cln_now = disk_free < cleanup_threshold_bytes(disk_total, policies=policies)
+                if emg_now:
+                    self._disk_emergency_streak += 1
+                    self._disk_recovery_streak = 0
+                else:
+                    self._disk_emergency_streak = 0
+                if not self._disk_emergency_active and self._disk_emergency_streak >= max(1, int(policies.emergency_streak_samples)):
+                    self._disk_emergency_active = True
+                    self._disk_emergency_since = timestamp
+                    try:
+                        self._controller.set_disk_emergency(True, at=timestamp)
+                    except Exception:
+                        pass
+                    if self._disk_emergency_enter_hook is not None:
+                        pending_disk_hooks.append(self._disk_emergency_enter_hook)
+                elif self._disk_emergency_active and not emg_now:
+                    self._disk_recovery_streak += 1
+                    if self._disk_recovery_streak >= max(1, int(policies.emergency_recovery_samples)):
+                        self._disk_emergency_active = False
+                        self._disk_emergency_since = ''
+                        self._disk_recovery_streak = 0
+                        try:
+                            self._controller.set_disk_emergency(False, at=timestamp)
+                        except Exception:
+                            pass
+                        if self._disk_emergency_exit_hook is not None:
+                            pending_disk_hooks.append(self._disk_emergency_exit_hook)
+                if not self._disk_emergency_active:
+                    if cln_now and not self._disk_cleanup_active:
+                        self._disk_cleanup_active = True
+                        try:
+                            self._controller.throttle(at=timestamp)
+                        except Exception:
+                            pass
+                        if self._disk_cleanup_hook is not None:
+                            pending_disk_hooks.append(self._disk_cleanup_hook)
+                    elif not cln_now and self._disk_cleanup_active:
+                        self._disk_cleanup_active = False
+            self._snapshot['disk_emergency_active'] = bool(self._disk_emergency_active)
+            self._snapshot['disk_emergency_since'] = self._disk_emergency_since
+            self._snapshot['disk_cleanup_active'] = bool(self._disk_cleanup_active)
             if machine_state in {'warn', 'critical'}:
                 self._consecutive_machine_warn += 1
                 self._consecutive_machine_safe = 0
@@ -407,51 +514,60 @@ class WorkerPressureMonitor:
             forced_ease = (not should_critical) and (dwell_forced or starvation_forced)
             heal_reason = ''
 
-            if should_critical:
-                self._controller.critical(at=timestamp)
-                self._last_recovery_step_at = current_mono
-                if self._restricted_since_mono <= 0.0:
-                    self._restricted_since_mono = current_mono
-            elif forced_ease:
-                heal_reason = 'dwell_timeout' if dwell_forced else 'starvation'
-                if waiting_count > 0:
-                    # One concrete recovery step (+1 target slot, drains oldest waiter)
-                    # regardless of machine_safe. step_easing (not begin_easing) because
-                    # begin_easing neither raises the limit nor drains waiters.
-                    self._controller.step_easing(at=timestamp)
+            # 磁盘紧急硬闸激活期间冻结整条压力决策链：critical()/step_easing()/
+            # set_budget_state('normal') 都不得把 target_limit 从 0 抬起（否则
+            # dwell/starvation 逃逸阀每 30-60s 会反杀紧急态，放出新工具调用）。
+            if not self._disk_emergency_active:
+                if should_critical:
+                    self._controller.critical(at=timestamp)
                     self._last_recovery_step_at = current_mono
-                elif current_state != 'normal':
-                    self._controller.set_budget_state('normal', at=timestamp)
-                    self._last_recovery_step_at = 0.0
-                self._restricted_since_mono = 0.0
-                # Hysteresis: require a fresh warn streak before re-throttling so the
-                # forced step is not immediately undone on the next sample.
-                self._consecutive_machine_warn = 0
-            elif should_throttle:
-                self._controller.throttle(at=timestamp)
-                self._last_recovery_step_at = current_mono
-                if self._restricted_since_mono <= 0.0:
-                    self._restricted_since_mono = current_mono
-            elif should_ease:
-                if local_recovery_ready and not machine_recovery:
-                    heal_reason = 'local_recovery'
-                if waiting_count > 0:
-                    if current_state != 'easing':
-                        self._controller.begin_easing(at=timestamp)
-                        self._last_recovery_step_at = current_mono
-                    elif current_mono - self._last_recovery_step_at >= self._recover_window_seconds:
+                    if self._restricted_since_mono <= 0.0:
+                        self._restricted_since_mono = current_mono
+                elif forced_ease:
+                    heal_reason = 'dwell_timeout' if dwell_forced else 'starvation'
+                    if waiting_count > 0:
+                        # One concrete recovery step (+1 target slot, drains oldest waiter)
+                        # regardless of machine_safe. step_easing (not begin_easing) because
+                        # begin_easing neither raises the limit nor drains waiters.
                         self._controller.step_easing(at=timestamp)
                         self._last_recovery_step_at = current_mono
-                elif current_state != 'normal':
+                    elif current_state != 'normal':
+                        self._controller.set_budget_state('normal', at=timestamp)
+                        self._last_recovery_step_at = 0.0
+                    self._restricted_since_mono = 0.0
+                    # Hysteresis: require a fresh warn streak before re-throttling so the
+                    # forced step is not immediately undone on the next sample.
+                    self._consecutive_machine_warn = 0
+                elif should_throttle:
+                    self._controller.throttle(at=timestamp)
+                    self._last_recovery_step_at = current_mono
+                    if self._restricted_since_mono <= 0.0:
+                        self._restricted_since_mono = current_mono
+                elif should_ease:
+                    if local_recovery_ready and not machine_recovery:
+                        heal_reason = 'local_recovery'
+                    if waiting_count > 0:
+                        if current_state != 'easing':
+                            self._controller.begin_easing(at=timestamp)
+                            self._last_recovery_step_at = current_mono
+                        elif current_mono - self._last_recovery_step_at >= self._recover_window_seconds:
+                            self._controller.step_easing(at=timestamp)
+                            self._last_recovery_step_at = current_mono
+                    elif current_state != 'normal':
+                        self._controller.set_budget_state('normal', at=timestamp)
+                        self._last_recovery_step_at = 0.0
+                    self._restricted_since_mono = 0.0
+                elif current_state == 'easing' and waiting_count <= 0:
                     self._controller.set_budget_state('normal', at=timestamp)
                     self._last_recovery_step_at = 0.0
-                self._restricted_since_mono = 0.0
-            elif current_state == 'easing' and waiting_count <= 0:
-                self._controller.set_budget_state('normal', at=timestamp)
-                self._last_recovery_step_at = 0.0
             self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
             self._snapshot['tool_pressure_self_heal_reason'] = heal_reason
             self._last_waiting_count = waiting_count
+        for hook in pending_disk_hooks:
+            try:
+                hook()
+            except Exception:
+                pass
         return self.snapshot()
 
     def start(self) -> None:
@@ -489,6 +605,7 @@ class WorkerPressureMonitor:
             event_loop_lag_ms = lag_sampler.sample(current_wall) if lag_sampler is not None else 0.0
             runtime_metrics = self._runtime_metrics_snapshot()
             machine = self._sample_machine_metrics(current_wall)
+            machine.update(self._disk_waterline_fields())
             try:
                 self.observe_sample(
                     machine_cpu_percent=float(machine.get('cpu_percent') or 0.0),
@@ -504,11 +621,28 @@ class WorkerPressureMonitor:
                     sqlite_query_latency_ms=float(runtime_metrics.get('sqlite_query_latency_ms') or 0.0),
                     process_cpu_ratio=(cpu_delta / wall_delta),
                     now_mono=current_wall,
+                    machine_disk_free_bytes=machine.get('disk_free_bytes'),
+                    machine_disk_total_bytes=machine.get('disk_total_bytes'),
                 )
             except Exception:
                 time.sleep(min(1.0, self._sample_seconds))
             last_wall = current_wall
             last_cpu = current_cpu
+
+    def _disk_waterline_fields(self) -> dict[str, Any]:
+        """磁盘剩余空间采样（disk_guard 带 TTL 缓存，不逐 tick statfs）。"""
+        with self._lock:
+            paths = tuple(self._disk_watermark_paths)
+        if not paths:
+            return {'disk_free_bytes': None, 'disk_total_bytes': None}
+        try:
+            snapshot = disk_waterline_snapshot(paths)
+        except Exception:
+            return {'disk_free_bytes': None, 'disk_total_bytes': None}
+        if snapshot is None:
+            return {'disk_free_bytes': None, 'disk_total_bytes': None}
+        free, total = snapshot
+        return {'disk_free_bytes': int(free), 'disk_total_bytes': int(total)}
 
     def _runtime_metrics_snapshot(self) -> dict[str, Any]:
         snapshot_getter = getattr(self._store, 'runtime_metrics_snapshot', None)

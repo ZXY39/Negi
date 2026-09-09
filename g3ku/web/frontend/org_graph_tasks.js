@@ -436,6 +436,14 @@ function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
     return { key: "normal", label: "正常" };
 }
 
+function formatTaskDiskFreeBytes(metrics) {
+    const free = Number(metrics?.machine_disk_free_bytes);
+    if (!Number.isFinite(free) || free < 0) return "--";
+    if (free >= 1024 ** 3) return `${(free / 1024 ** 3).toFixed(1)}G`;
+    if (free >= 1024 ** 2) return `${(free / 1024 ** 2).toFixed(0)}M`;
+    return `${(free / 1024).toFixed(0)}K`;
+}
+
 function renderTaskPerformanceBar() {
     if (!U.taskPerformanceBar) return;
     const metrics = taskWorkerStatusMetrics();
@@ -445,6 +453,16 @@ function renderTaskPerformanceBar() {
     const diskText = metrics?.machine_pressure_disk_busy_available === false
         ? "--"
         : formatTaskWorkerPercent(metrics?.machine_pressure_disk_busy_percent);
+    // 磁盘治理（P1）：剩余空间水位 + 紧急/清理态着色。
+    const diskEmergency = !!metrics?.disk_emergency_active;
+    const diskCleanup = !!metrics?.disk_cleanup_active;
+    const diskFreeText = formatTaskDiskFreeBytes(metrics);
+    const diskUsagePercent = Number(metrics?.machine_disk_usage_percent);
+    const diskUsageText = Number.isFinite(diskUsagePercent) && Number(metrics?.machine_disk_free_bytes) >= 0
+        ? `${diskUsagePercent.toFixed(1)}%`
+        : "--";
+    const diskStateKey = diskEmergency ? "critical" : diskCleanup ? "throttled" : "normal";
+    const diskStateSuffix = diskEmergency ? " · 紧急" : diskCleanup ? " · 清理线" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
     const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
     const nodeRunningText = queueMetricCount(metrics?.node_queue_running_count);
@@ -458,6 +476,10 @@ function renderTaskPerformanceBar() {
         <div class="task-performance-item">
             <span class="task-performance-label">CPU/内存/磁盘</span>
             <strong class="task-performance-value">${esc(`${cpuText} / ${memoryText} / ${diskText}`)}</strong>
+        </div>
+        <div class="task-performance-item task-performance-item--state" data-state="${esc(diskStateKey)}">
+            <span class="task-performance-label">磁盘剩余</span>
+            <strong class="task-performance-value">${esc(`${diskFreeText}（已用 ${diskUsageText}）${diskStateSuffix}`)}</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">工具队列</span>
@@ -721,6 +743,16 @@ function renderTasks() {
         warning.style.gridColumn = "1/-1";
         warning.textContent = workerNotice;
         U.taskGrid.appendChild(warning);
+    }
+    // 磁盘治理（P1）：紧急态全局横幅（数据来自 worker-status 快照，1s 轮询刷新）。
+    const diskMetrics = taskWorkerStatusMetrics();
+    if (diskMetrics?.disk_emergency_active) {
+        const diskWarning = document.createElement("div");
+        diskWarning.className = "empty-state error";
+        diskWarning.style.gridColumn = "1/-1";
+        const sinceText = String(diskMetrics?.disk_emergency_since || "").trim();
+        diskWarning.textContent = `🚨 磁盘空间不足：运行中任务已自动暂停，新工具调用进入排队等待。请清理磁盘，空间恢复后手动恢复任务。${sinceText ? `（紧急态自 ${sinceText} 起）` : ""}`;
+        U.taskGrid.appendChild(diskWarning);
     }
     if (!meta.total) {
         if (workerNotice) {

@@ -146,6 +146,13 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS task_disk_usage (
+                task_id TEXT PRIMARY KEY,
+                total_bytes INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS task_node_pauses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -725,6 +732,47 @@ class SQLiteTaskStore:
 
         return int(self._run_write(operation) or 0)
 
+    def bump_task_disk_usage(self, task_id: str, delta_bytes: int) -> None:
+        """磁盘治理（P1）增量记账：artifact/事件归档落盘时累加字节数（下限 0）。"""
+        normalized_task_id = str(task_id or '').strip()
+        delta = int(delta_bytes or 0)
+        if not normalized_task_id or delta == 0:
+            return
+        updated_at = datetime.now().astimezone().isoformat(timespec='seconds')
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                'INSERT INTO task_disk_usage (task_id, total_bytes, updated_at) VALUES (?, MAX(0, ?), ?) '
+                'ON CONFLICT(task_id) DO UPDATE SET total_bytes = MAX(0, total_bytes + ?), updated_at = ?',
+                (normalized_task_id, delta, updated_at, delta, updated_at),
+            )
+
+        self._run_write(operation)
+
+    def upsert_task_disk_usage(self, task_id: str, total_bytes: int) -> None:
+        """磁盘治理（P1）对账：以目录实测绝对值覆盖增量记账（每小时 + 终态各一次）。"""
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return
+        updated_at = datetime.now().astimezone().isoformat(timespec='seconds')
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                'INSERT INTO task_disk_usage (task_id, total_bytes, updated_at) VALUES (?, MAX(0, ?), ?) '
+                'ON CONFLICT(task_id) DO UPDATE SET total_bytes = MAX(0, excluded.total_bytes), updated_at = excluded.updated_at',
+                (normalized_task_id, int(total_bytes or 0), updated_at),
+            )
+
+        self._run_write(operation)
+
+    def get_task_disk_usages(self, task_ids: list[str] | None = None) -> dict[str, int]:
+        rows = self._fetchall('SELECT task_id, total_bytes FROM task_disk_usage')
+        usage = {str(row['task_id']): int(row['total_bytes'] or 0) for row in rows}
+        if task_ids is None:
+            return usage
+        wanted = {str(item or '').strip() for item in task_ids if str(item or '').strip()}
+        return {key: value for key, value in usage.items() if key in wanted}
+
     def delete_task(self, task_id: str) -> None:
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute('DELETE FROM task_projection_meta WHERE task_id = ?', (task_id,))
@@ -997,6 +1045,20 @@ class SQLiteTaskStore:
                     'UPDATE task_events SET payload_archive_path = ? WHERE seq = ?',
                     (archive_path, seq),
                 )
+                # 磁盘治理（P1）增量记账：归档字节数计入任务磁盘占用。
+                # 直接用同一事务的 conn——在 writer 线程内嵌套 _run_write 会自死锁。
+                if str(task_id or '').strip():
+                    try:
+                        archive_file = self._event_history_dir / Path(str(archive_path))
+                        archive_bytes = int(archive_file.stat().st_size) if archive_file.exists() else 0
+                    except OSError:
+                        archive_bytes = 0
+                    if archive_bytes > 0:
+                        conn.execute(
+                            'INSERT INTO task_disk_usage (task_id, total_bytes, updated_at) VALUES (?, ?, ?) '
+                            'ON CONFLICT(task_id) DO UPDATE SET total_bytes = MAX(0, total_bytes + ?), updated_at = ?',
+                            (str(task_id), archive_bytes, created_at, archive_bytes, created_at),
+                        )
             return seq
         return self._run_write(operation)
 

@@ -3046,6 +3046,14 @@ class ReActToolLoop:
                         tool_name=str(call.name or 'tool'),
                         tool_call_id=str(call.id or ''),
                     )
+                    # 磁盘治理（P1）竞态封口：磁盘紧急态下 acquire 可能长时间排队，
+                    # 返回瞬间任务暂停若已生效，这里复查一次，防止已暂停任务泄漏
+                    # 执行一个工具；复查失败必须归还刚拿到的槽，避免计数泄漏。
+                    try:
+                        self._check_pause_or_cancel(task.task_id, node.node_id)
+                    except BaseException:
+                        controller.release_tool_slot(slot_lease)
+                        raise
                 self._update_tool_live_state(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -3674,6 +3682,10 @@ class ReActToolLoop:
             raise RuntimeError('canceled')
         if bool(task.pause_requested):
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
+            # 磁盘治理（P1）防死锁：唤醒该任务在预算队列中排队等待的工具调用
+            # （disk_emergency 期间 target_limit=0 会无限排队），waiter 收到
+            # TaskPausedError 后沿既有 pause 流转冒泡，模型不会看到工具级错误。
+            self._abort_queued_tool_waits(task_id, TaskPausedError(task_id))
             raise TaskPausedError(task_id)
         normalized_node_id = str(node_id or '').strip()
         if normalized_node_id:
@@ -3690,6 +3702,17 @@ class ReActToolLoop:
                     delivered=bool(getattr(existing, 'delivered', False)) if existing is not None else False,
                 )
                 raise NodePausedError(task_id, normalized_node_id)
+
+    def _abort_queued_tool_waits(self, task_id: str, exc: BaseException) -> None:
+        """磁盘治理（P1）：任务暂停生效时中止其在预算队列中排队的工具调用。"""
+        controller = getattr(self, '_adaptive_tool_budget_controller', None)
+        abort = getattr(controller, 'abort_task_waiters', None)
+        if not callable(abort):
+            return
+        try:
+            abort(task_id, exc)
+        except Exception:
+            pass
 
     @staticmethod
     def _coerce_final_result_payload(raw_payload: dict[str, Any]) -> NodeFinalResult | None:

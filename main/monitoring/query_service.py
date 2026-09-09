@@ -266,6 +266,10 @@ class TaskQueryService:
             tasks = [item for item in tasks if item.status == 'failed']
         elif scope == 4:
             tasks = [item for item in tasks if bool(item.is_unread)]
+        try:
+            disk_usages = self._store.get_task_disk_usages([item.task_id for item in tasks])
+        except Exception:
+            disk_usages = {}
         return [
             TaskListItem(
                 task_id=item.task_id,
@@ -283,6 +287,7 @@ class TaskQueryService:
                 updated_at=item.updated_at,
                 max_depth=int(item.max_depth or 0),
                 token_usage=item.token_usage,
+                disk_usage_bytes=int(disk_usages.get(item.task_id, 0) or 0),
             )
             for item in tasks
         ]

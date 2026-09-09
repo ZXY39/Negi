@@ -70,6 +70,7 @@ from main.governance.tool_context import (
     build_tool_toolskill_payload,
     resolve_primary_executor_name,
 )
+from main.errors import TaskPausedError
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -525,7 +526,20 @@ class MainRuntimeService:
             max_pressure_dwell_seconds=float(adaptive_budget_settings['max_pressure_dwell_seconds']),
             max_tool_wait_ms=float(adaptive_budget_settings['max_tool_wait_ms']),
             local_recovery_enabled=bool(adaptive_budget_settings['local_recovery_enabled']),
+            disk_watermark_paths=[
+                str(self._workspace_root()),
+                str(resolved_store_path.parent),
+                str(resolved_artifact_dir),
+            ],
         ) if self.adaptive_tool_budget_controller is not None else None
+        if self.tool_pressure_monitor is not None:
+            # 磁盘治理（P1）：紧急态边沿钩子（monitor 采样线程内调用，必须立即返回；
+            # 内部经 call_soon_threadsafe 调度回事件循环）。
+            self.tool_pressure_monitor.set_disk_emergency_hooks(
+                enter=lambda: self._schedule_loop_task(self._auto_pause_all_due_to_disk_emergency),
+                exit_=lambda: self._schedule_loop_task(self._disk_emergency_released),
+                cleanup=lambda: self._schedule_loop_task(self._disk_cleanup_signal),
+            )
         self.node_runner._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         self.worker_heartbeat_service = WorkerHeartbeatServiceV2(
             store=self.store,
@@ -543,6 +557,11 @@ class MainRuntimeService:
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
+        # 磁盘治理（P1）：对账循环、紧急态自动暂停互斥与边沿状态。
+        self._task_disk_reconcile_task: asyncio.Task[Any] | None = None
+        self._disk_emergency_pause_lock = asyncio.Lock()
+        self._disk_cleanup_requested = False
+        self._disk_emergency_alerted = False
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_distribution_error_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -621,6 +640,13 @@ class MainRuntimeService:
                 if ref_id and ref_id not in known_task_ids:
                     self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=ref_id)
             self.task_stall_notifier.bootstrap_running_tasks()
+        if self.execution_mode in {'embedded', 'worker'}:
+            # 磁盘治理（P1）：任务大小对账循环（每小时增量纠偏 + 终态即时对账）。
+            if self._task_disk_reconcile_task is None or self._task_disk_reconcile_task.done():
+                self._task_disk_reconcile_task = asyncio.create_task(
+                    self._task_disk_reconcile_loop(),
+                    name=f'main-runtime-disk-reconcile:{self.worker_id or self.execution_mode}',
+                )
         if self.execution_mode == 'worker':
             if self.tool_pressure_monitor is not None:
                 self.tool_pressure_monitor.start()
@@ -1481,6 +1507,8 @@ class MainRuntimeService:
                     session_id=task.session_id,
                     payload={'task_id': task.task_id},
                 )
+        # 磁盘治理（P1）防死锁：暂停生效后唤醒该任务在预算队列中排队的工具调用。
+        self._abort_queued_waits(task_id)
         return self.get_task(task_id)
 
     async def force_pause_task_durably(self, task_id: str) -> TaskRecord | None:
@@ -4227,6 +4255,12 @@ class MainRuntimeService:
             usage_ttl_seconds=max(0.0, float(getattr(guard, 'usage_ttl_seconds', defaults.usage_ttl_seconds) or 0.0)),
             artifact_gzip_threshold_bytes=int(getattr(guard, 'artifact_gzip_threshold_bytes', defaults.artifact_gzip_threshold_bytes) or 0),
             terminal_cleanup_enabled=bool(getattr(guard, 'terminal_cleanup_enabled', defaults.terminal_cleanup_enabled)),
+            cleanup_min_bytes=max(0, int(getattr(guard, 'cleanup_min_bytes', defaults.cleanup_min_bytes) or 0)),
+            cleanup_min_ratio=min(max(0.0, float(getattr(guard, 'cleanup_min_ratio', defaults.cleanup_min_ratio) or 0.0)), 0.5),
+            auto_pause_enabled=bool(getattr(guard, 'auto_pause_enabled', defaults.auto_pause_enabled)),
+            emergency_streak_samples=max(1, int(getattr(guard, 'emergency_streak_samples', defaults.emergency_streak_samples) or 1)),
+            emergency_recovery_samples=max(1, int(getattr(guard, 'emergency_recovery_samples', defaults.emergency_recovery_samples) or 1)),
+            alert_on_disk_emergency=bool(getattr(guard, 'alert_on_disk_emergency', defaults.alert_on_disk_emergency)),
         )
 
     @staticmethod
@@ -6304,6 +6338,127 @@ class MainRuntimeService:
                 )
             except Exception:
                 pass
+        # e) 磁盘治理（P1）：终态即时对账（清理后的目录实测值覆盖增量记账）。
+        # best-effort——对账失败不得影响清理主流程。
+        try:
+            self._reconcile_task_disk_usage(task_id)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 磁盘治理（P1）：紧急态钩子 / 自动暂停 / 任务大小对账。
+    # 紧急线 = max(emergency_min_bytes, total*emergency_min_ratio)，跌破后：
+    # 新工具调用在预算队列排队（controller target_limit=0，不拒绝）、运行中任务
+    # 被自动持久暂停（排队 waiter 以 TaskPausedError 唤醒，防死锁）、告警进
+    # worker_status（前端横幅/性能条）与全局事件流。空间恢复后解除硬闸，
+    # 任务保持 paused 等手动 resume。
+    # ------------------------------------------------------------------
+
+    def _schedule_loop_task(self, coro_factory: Callable[[], Any]) -> None:
+        """线程安全：从任意线程（monitor 采样线程）把协程调度回运行时事件循环。"""
+        loop = getattr(self, '_runtime_loop', None)
+        if loop is None:
+            return
+        try:
+            if loop.is_closed():
+                return
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(coro_factory()))
+        except RuntimeError:
+            return
+
+    async def _auto_pause_all_due_to_disk_emergency(self) -> None:
+        policies = disk_policies()
+        async with self._disk_emergency_pause_lock:
+            paused_ids: list[str] = []
+            if policies.auto_pause_enabled:
+                try:
+                    tasks = await asyncio.to_thread(self.store.list_tasks)
+                except Exception:
+                    tasks = []
+                for task in tasks or []:
+                    if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+                        continue
+                    task_id = str(getattr(task, 'task_id', '') or '').strip()
+                    if not task_id:
+                        continue
+                    try:
+                        await self.force_pause_task_durably(task_id)
+                        self._abort_queued_waits(task_id)
+                        paused_ids.append(task_id)
+                    except Exception:
+                        continue
+            await self._emit_disk_emergency_alert(active=True, paused_task_ids=paused_ids)
+
+    async def _disk_emergency_released(self) -> None:
+        await self._emit_disk_emergency_alert(active=False, paused_task_ids=[])
+
+    async def _disk_cleanup_signal(self) -> None:
+        # P2 压缩渐进的触发信号占位：置位后由 sweep 消费（P1 只透传状态）。
+        self._disk_cleanup_requested = True
+
+    def _abort_queued_waits(self, task_id: str) -> None:
+        """任务暂停生效后，唤醒其在预算队列中排队的工具调用（防死锁）。"""
+        controller = getattr(self, 'adaptive_tool_budget_controller', None)
+        abort = getattr(controller, 'abort_task_waiters', None)
+        if not callable(abort):
+            return
+        try:
+            abort(task_id, TaskPausedError(task_id))
+        except Exception:
+            pass
+
+    async def _emit_disk_emergency_alert(self, *, active: bool, paused_task_ids: list[str]) -> None:
+        if active and self._disk_emergency_alerted:
+            return
+        self._disk_emergency_alerted = bool(active)
+        if active:
+            logger.warning(
+                'disk emergency: free space below emergency line; auto-paused {} task(s): {}',
+                len(paused_task_ids),
+                ','.join(paused_task_ids[:10]) or '-',
+            )
+        else:
+            logger.info('disk emergency released; paused tasks await manual resume')
+        try:
+            self.log_service.append_task_event(
+                task_id=None,
+                session_id='web:shared',
+                event_type='runtime.disk_emergency',
+                data={
+                    'active': bool(active),
+                    'paused_task_ids': list(paused_task_ids),
+                    'worker_id': self.worker_id or '',
+                },
+            )
+        except Exception:
+            pass
+
+    async def _task_disk_reconcile_loop(self) -> None:
+        """每小时对进行中任务做目录实测对账（终态任务在终态清理时对账一次；
+        已终态的历史任务目录不再变化，不进小时级全扫——禁止高频 rglob 全量遍历）。"""
+        while True:
+            try:
+                await asyncio.sleep(3600.0)
+                tasks = await asyncio.to_thread(self.store.list_tasks)
+                for task in tasks or []:
+                    if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+                        continue
+                    task_id = str(getattr(task, 'task_id', '') or '').strip()
+                    if not task_id:
+                        continue
+                    await asyncio.to_thread(self._reconcile_task_disk_usage, task_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+    def _reconcile_task_disk_usage(self, task_id: str) -> None:
+        normalized_task_id = self.normalize_task_id(task_id)
+        try:
+            total = self._task_disk_usage_bytes(normalized_task_id)
+            self.store.upsert_task_disk_usage(normalized_task_id, int(total))
+        except Exception:
+            return
 
     def _resource_base_dir(self, kind: ResourceKind) -> Path:
         manager = getattr(self, '_resource_manager', None)
@@ -8585,12 +8740,12 @@ class MainRuntimeService:
         return payload.text
 
     async def close(self) -> None:
-        for task in [self._command_poller_task, self._worker_heartbeat_task]:
+        for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task]:
             if task is not None and not task.done():
                 task.cancel()
-        if self._command_poller_task is not None or self._worker_heartbeat_task is not None:
+        if self._command_poller_task is not None or self._worker_heartbeat_task is not None or self._task_disk_reconcile_task is not None:
             await asyncio.gather(
-                *(task for task in [self._command_poller_task, self._worker_heartbeat_task] if task is not None),
+                *(task for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task] if task is not None),
                 return_exceptions=True,
             )
         delivery_tasks = [task for task in self._task_terminal_delivery_tasks.values() if task is not None and not task.done()]
@@ -8833,6 +8988,13 @@ class MainRuntimeService:
             'machine_pressure_disk_busy_available': bool(merged.get('machine_pressure_disk_busy_available')),
             'machine_pressure_disk_read_bytes_per_sec': float(merged.get('machine_pressure_disk_read_bytes_per_sec') or 0.0),
             'machine_pressure_disk_write_bytes_per_sec': float(merged.get('machine_pressure_disk_write_bytes_per_sec') or 0.0),
+            # 磁盘治理（P1）：剩余空间水位与紧急/清理态（前端性能条与横幅消费）。
+            'machine_disk_free_bytes': int(merged.get('machine_disk_free_bytes') if merged.get('machine_disk_free_bytes') is not None else -1),
+            'machine_disk_total_bytes': int(merged.get('machine_disk_total_bytes') if merged.get('machine_disk_total_bytes') is not None else -1),
+            'machine_disk_usage_percent': float(merged.get('machine_disk_usage_percent') or 0.0),
+            'disk_emergency_active': bool(merged.get('disk_emergency_active')),
+            'disk_emergency_since': str(merged.get('disk_emergency_since') or ''),
+            'disk_cleanup_active': bool(merged.get('disk_cleanup_active')),
             'sqlite_write_wait_ms': float(merged.get('sqlite_write_wait_ms') or 0.0),
             'sqlite_query_latency_ms': float(merged.get('sqlite_query_latency_ms') or 0.0),
             'pressure_sample_at': sample_at,

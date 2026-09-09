@@ -283,7 +283,17 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - **artifact 大小治理**：`TaskArtifactRecord` 携带 `size_bytes` / `content_encoding`（`plain`|`gzip`）/ `content_hash`（均带默认值，payload_json 序列化零迁移）。内容超过 `artifact_gzip_threshold_bytes`（默认 1 MiB）即在同目录以 `.gz` 后缀 gzip+tmp+原子改名落盘（与 event-history 归档同范式）。文本去重走 `content_hash` 快路径不回读文件；无 hash 的旧行回读解压兜底比对。**读取一律走 `artifact_store.read_artifact_text`**（rest 的 artifact full 读取、navigation 的 canonical 与 `_resolve` 分支、`apply_patch_artifact` 四个接入点）——绕过它直接 `read_text` 会把 gzip artifact 显示成 "[二进制文件]" 或乱码。artifact 写失败抛分类后的 `DiskFullError`，绝不返回指向不存在文件的记录（读端 `.exists()` 兜底会把这种记录伪装成空内容）。
 - **终态即清中间产物**：任务迁移到 `success`/`failed` 时，终态监听器 `_cleanup_terminal_task_intermediates` 同步只做判定与 in-flight 去重，重活甩 daemon 后台线程：硬删 `temp/tasks/<id>` 草稿目录，并按保留清单删中间 artifact 的文件与 DB 行。保留清单（唯一权威）：`kind=='patch'`、`kind=='final_output'`、`task.final_output_ref` 指向的 artifact、标题含 `report`/`summary`；其余（`task_actual_request` / `task_runtime_messages` / `task_execution_trace` / `node_output` / `tool_result*` 等）全部删除。`task_error_logs` 表、节点 `blocking_reason`、`event-history/*.json.gz` 一律不动——事件归档是终态后审计回放的唯一来源，彻底删除只走用户删任务的 `delete_task` 既有链路。清理量记 loguru 日志并发 best-effort `task.intermediates.cleaned` 事件；读端对已删 artifact 由 `.exists()` / `read_artifact_text` 兜底，不炸。
 
-维护者常见误读：把 `DiskFullError` 当新异常类型去 catch——它继承 `OSError`，既有 `except OSError` 分支自动覆盖；把终态清理当"数据丢失"——被删的只是中间产物，保留清单与 error_logs / event-history 保证可回顾性；在磁盘满排障时只看 `.g3ku/errors/`——磁盘满期间错误日志本身可能是 0 字节空文件，权威信号是 `write_failure_counts` 与 worker 日志里的 SQLITE_FULL 行。
+水位监控与紧急态（P1）在同一契约下运转：
+
+- **采样**：`WorkerPressureMonitor` 每拍（1s）经 disk_guard 的 TTL 缓存读工作区/存储盘的 `(free, total)`，随 snapshot 以 `machine_disk_free_bytes / machine_disk_usage_percent / disk_emergency_active / disk_cleanup_active` 下发到 `worker_status_payload`；前端任务大厅性能条渲染「磁盘剩余」列（紧急=critical 着色、清理线=throttled 着色），紧急态另渲染全局横幅。
+- **两条水位线**：紧急线 `max(emergency_min_bytes, total×emergency_min_ratio)`、清理线 `max(cleanup_min_bytes, total×cleanup_min_ratio)`，判定带防抖（进入需连续 `emergency_streak_samples` 拍、解除需连续 `emergency_recovery_samples` 拍）。
+- **紧急态硬闸的语义是"排队等待"而非拒绝**：controller 的 `set_disk_emergency(True)` 把 `target_limit` 置 0，新工具调用在预算队列等待（模型不会收到工具级错误）；`disk_emergency` 是独立于 `pressure_state` 的布尔硬闸——压力决策链（critical/throttle/ease）与 dwell/starvation 逃逸阀在紧急态整体冻结，`_reset_idle_locked` 三处调用点带守卫，任何路径都不得把 limit 从 0 抬起。
+- **紧急态自动暂停防死锁**：进入紧急态的边沿钩子（monitor 采样线程 → `call_soon_threadsafe` 回事件循环）对全部 `in_progress` 任务执行 `force_pause_task_durably`，随后 `controller.abort_task_waiters(task_id, TaskPausedError)` 唤醒该任务排队中的 acquire future——异常沿既有 pause 流转冒泡（acquire 在 `_run_call` 的工具 try 块之外，不会被误包装成工具级错误）。竞态封口：acquire 成功返回后补一次 `_check_pause_or_cancel`（失败归还槽）；`_check_pause_or_cancel` 的 pause 分支与 `pause_task` 成功路径同样调用 abort。web/worker 双进程各自检测、各自 pause，`force_pause_task_durably` 幂等，DB 是唯一真源。
+- **解除紧急态不自动恢复任务**：空间回到紧急线之上只清硬闸与告警，被暂停的任务保持 `paused` 等手动 resume（避免水位反复抖动造成任务震荡）。
+- **清理线边沿**：`controller.throttle()` 强收紧并发 + 置 `disk_cleanup_active` 信号（历史任务清理渐进的触发位）。
+- **任务大小增量记账**：`task_disk_usage(task_id, total_bytes, updated_at)` 小表；artifact 落盘与 live.patch 事件归档在写入点 bump 字节数（事件归档在 writer 线程同事务内直写，嵌套 `_run_write` 会自死锁），singleton 覆盖写按新旧 size 差值记账。对账 loop（embedded/worker 模式，每小时）只对 `in_progress` 任务跑目录实测 `_task_disk_usage_bytes` 覆盖增量值，终态任务在终态清理时对账一次——已终态任务目录不再变化，不进小时级扫描（禁止高频全量遍历）。列表端 `TaskListItem.disk_usage_bytes` 从该表批量读取，展示延迟 ≤1h。
+
+维护者常见误读：把 `DiskFullError` 当新异常类型去 catch——它继承 `OSError`，既有 `except OSError` 分支自动覆盖；把终态清理当"数据丢失"——被删的只是中间产物，保留清单与 error_logs / event-history 保证可回顾性；在磁盘满排障时只看 `.g3ku/errors/`——磁盘满期间错误日志本身可能是 0 字节空文件，权威信号是 `write_failure_counts` 与 worker 日志里的 SQLITE_FULL 行；把紧急态下"工具不动了"当卡死——那是 target_limit=0 的排队等待，任务随即被自动暂停，恢复磁盘空间后手动 resume。
 
 ## Node-Level Pause and Recovery
 

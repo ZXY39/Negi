@@ -692,6 +692,37 @@ class MainRuntimeDiskGuardConfig(Base):
     usage_ttl_seconds: float = 5.0
     artifact_gzip_threshold_bytes: int = 1024 * 1024
     terminal_cleanup_enabled: bool = True
+    # P1：清理线（历史任务压缩渐进 + 强收紧）与紧急态行为。
+    cleanup_min_bytes: int = 1024 * 1024 * 1024
+    cleanup_min_ratio: float = 0.05
+    auto_pause_enabled: bool = True
+    emergency_streak_samples: int = 3
+    emergency_recovery_samples: int = 5
+    alert_on_disk_emergency: bool = True
+
+    @field_validator("cleanup_min_bytes", mode="before")
+    @classmethod
+    def _normalize_cleanup_min_bytes(cls, value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 1024 * 1024 * 1024
+
+    @field_validator("cleanup_min_ratio", mode="before")
+    @classmethod
+    def _normalize_cleanup_min_ratio(cls, value: Any) -> float:
+        try:
+            return min(max(0.0, float(value)), 0.5)
+        except (TypeError, ValueError):
+            return 0.05
+
+    @field_validator("emergency_streak_samples", "emergency_recovery_samples", mode="before")
+    @classmethod
+    def _normalize_streak_samples(cls, value: Any) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 3
 
     @field_validator("emergency_min_bytes", mode="before")
     @classmethod

@@ -56,6 +56,12 @@ class AdaptiveToolBudgetController:
         self._last_transition_at = ''
         self._throttled_since = ''
         self._critical_since = ''
+        self._normal_limit = max(1, int(normal_limit))
+        # 磁盘治理（P1）：紧急态是独立于 pressure_state 的硬闸——不进状态白名单、
+        # 不被 _reset_idle_locked 冲掉、不被压力恢复链抬起。进入时 target_limit=0
+        # （新工具调用排队等待而非拒绝），退出时按当前 pressure_state 恢复。
+        self._disk_emergency_active = False
+        self._disk_emergency_since = ''
 
     def configure(
         self,
@@ -68,7 +74,8 @@ class AdaptiveToolBudgetController:
     ) -> None:
         ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
         with self._lock:
-            if self._running_tools_count <= 0 and not self._waiting_queue:
+            self._normal_limit = max(1, int(normal_limit or 1))
+            if self._running_tools_count <= 0 and not self._waiting_queue and not self._disk_emergency_active:
                 self._reset_idle_locked()
             ready = self._drain_waiters_locked()
         self._resolve_waiters(ready)
@@ -139,10 +146,67 @@ class AdaptiveToolBudgetController:
         with self._lock:
             if self._running_tools_count > 0:
                 self._running_tools_count -= 1
-            if self._running_tools_count <= 0 and not self._waiting_queue:
+            if self._running_tools_count <= 0 and not self._waiting_queue and not self._disk_emergency_active:
                 self._reset_idle_locked()
             ready = self._drain_waiters_locked()
         self._resolve_waiters(ready)
+
+    def set_disk_emergency(self, active: bool, *, at: str | None = None) -> None:
+        """磁盘紧急硬闸：进入 → target_limit=0（新工具调用排队等待，不拒绝）；
+        退出 → 按当前 pressure_state 恢复 limit 并 drain 等待队列。"""
+        timestamp = str(at or _now_iso()).strip() or _now_iso()
+        ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
+        with self._lock:
+            if active and not self._disk_emergency_active:
+                self._disk_emergency_active = True
+                self._disk_emergency_since = timestamp
+                self._target_running_tools_limit = 0
+                self._last_transition_at = timestamp
+            elif not active and self._disk_emergency_active:
+                self._disk_emergency_active = False
+                self._disk_emergency_since = ''
+                self._last_transition_at = timestamp
+                if self._pressure_state == 'critical':
+                    self._target_running_tools_limit = 1
+                elif self._pressure_state == 'throttled':
+                    self._target_running_tools_limit = max(int(self._running_tools_count), 1)
+                else:
+                    self._target_running_tools_limit = max(int(self._normal_limit), 1)
+                if self._running_tools_count <= 0 and not self._waiting_queue:
+                    self._reset_idle_locked()
+                ready = self._drain_waiters_locked()
+            else:
+                return
+        self._resolve_waiters(ready)
+
+    def abort_task_waiters(self, task_id: str, exc: BaseException) -> int:
+        """把指定任务在排队中的工具调用以异常唤醒（防死锁）。
+
+        磁盘紧急态下任务被自动暂停时调用：等待中的 acquire future 收到
+        TaskPausedError 后沿既有 pause 流转冒泡，模型不会看到工具级错误。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return 0
+        targets: list[asyncio.Future[ToolSlotLease]] = []
+        with self._lock:
+            kept: deque[_QueuedToolRequest] = deque()
+            for item in self._waiting_queue:
+                if str(item.task_id) == normalized_task_id and not item.future.done():
+                    targets.append(item.future)
+                    continue
+                kept.append(item)
+            self._waiting_queue = kept
+        for future in targets:
+            try:
+                loop = future.get_loop()
+            except Exception:
+                loop = None
+            if loop is not None:
+                loop.call_soon_threadsafe(_set_future_exception_if_pending, future, exc)
+            else:
+                _set_future_exception_if_pending(future, exc)
+        return len(targets)
 
     def throttle(self, *, at: str | None = None) -> None:
         with self._lock:
@@ -170,6 +234,9 @@ class AdaptiveToolBudgetController:
                     next_limit = max(int(self._target_running_tools_limit), 1)
             else:
                 next_limit = max(0, int(target_limit))
+            if self._disk_emergency_active:
+                # 紧急硬闸期间任何压力状态迁移都不得抬起 limit（防御性钳制）。
+                next_limit = 0
             self._target_running_tools_limit = next_limit
             self._last_transition_at = timestamp
             if normalized_state in {'throttled', 'critical'} and not self._throttled_since:
@@ -181,7 +248,12 @@ class AdaptiveToolBudgetController:
                 self._critical_since = ''
             elif normalized_state == 'throttled':
                 self._critical_since = ''
-            if self._running_tools_count <= 0 and not self._waiting_queue and normalized_state == 'normal':
+            if (
+                self._running_tools_count <= 0
+                and not self._waiting_queue
+                and normalized_state == 'normal'
+                and not self._disk_emergency_active
+            ):
                 self._reset_idle_locked()
             ready = self._drain_waiters_locked()
         self._resolve_waiters(ready)
@@ -233,6 +305,8 @@ class AdaptiveToolBudgetController:
                 'worker_execution_running_count': int(self._running_tools_count),
                 'worker_execution_waiting_count': int(len(self._waiting_queue)),
                 'worker_execution_oldest_wait_ms': round(oldest_wait_ms, 3),
+                'disk_emergency_active': bool(self._disk_emergency_active),
+                'disk_emergency_since': self._disk_emergency_since,
             }
 
     def _reset_idle_locked(self) -> None:
@@ -300,3 +374,8 @@ class AdaptiveToolBudgetController:
 def _set_future_result_if_pending(future: asyncio.Future[ToolSlotLease], lease: ToolSlotLease) -> None:
     if not future.done():
         future.set_result(lease)
+
+
+def _set_future_exception_if_pending(future: asyncio.Future[ToolSlotLease], exc: BaseException) -> None:
+    if not future.done():
+        future.set_exception(exc)

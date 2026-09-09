@@ -110,6 +110,7 @@ class TaskArtifactStore:
         )
         persisted = self._store.upsert_artifact(record)
         self._content_index[(task_id, content_hash)] = persisted
+        self._note_disk_written(task_id, size_bytes)
         self._emit_artifact_added_event(task_id=task_id, record=persisted)
         return persisted
 
@@ -142,6 +143,7 @@ class TaskArtifactStore:
             content_encoding=content_encoding,
         )
         persisted = self._store.upsert_artifact(record)
+        self._note_disk_written(task_id, size_bytes)
         self._emit_artifact_added_event(task_id=task_id, record=persisted)
         return persisted
 
@@ -210,7 +212,23 @@ class TaskArtifactStore:
         persisted = self._store.upsert_artifact(updated)
         self._drop_content_index_entries(existing.artifact_id)
         self._content_index[(normalized_task_id, content_hash)] = persisted
+        # singleton 覆盖写：按新旧 size 差值记账（旧行无 size_bytes 时按全量计）。
+        previous_size = int(getattr(existing, 'size_bytes', 0) or 0)
+        self._note_disk_written(normalized_task_id, size_bytes - previous_size)
         return persisted
+
+    def _note_disk_written(self, task_id: str, delta_bytes: int) -> None:
+        """磁盘治理（P1）增量记账：失败静默（对账 loop 会以目录实测值纠偏）。"""
+        delta = int(delta_bytes or 0)
+        if not delta:
+            return
+        bump = getattr(self._store, 'bump_task_disk_usage', None)
+        if not callable(bump):
+            return
+        try:
+            bump(task_id, delta)
+        except Exception:
+            pass
 
     def _allocate_artifact_path(self, *, task_id: str, extension: str) -> tuple[str, Path]:
         artifact_id = new_artifact_id()

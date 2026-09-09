@@ -32,9 +32,12 @@ __all__ = [
     'DiskFullError',
     'DiskPolicies',
     'classify_write_error',
+    'cleanup_threshold_bytes',
     'configure_disk_policies',
     'disk_policies',
+    'disk_waterline_snapshot',
     'emergency_free_bytes_min',
+    'emergency_threshold_bytes',
     'has_emergency_disk_budget',
     'invalidate_disk_usage_cache',
     'is_disk_full_error',
@@ -95,6 +98,14 @@ class DiskPolicies:
     usage_ttl_seconds: float = 5.0
     artifact_gzip_threshold_bytes: int = 1024 * 1024
     terminal_cleanup_enabled: bool = True
+    # P1：清理线（历史任务压缩渐进 + 强收紧触发水位）。
+    cleanup_min_bytes: int = 1024 * 1024 * 1024
+    cleanup_min_ratio: float = 0.05
+    # P1：紧急态行为开关与防抖样本数（1s 采样 tick 计）。
+    auto_pause_enabled: bool = True
+    emergency_streak_samples: int = 3
+    emergency_recovery_samples: int = 5
+    alert_on_disk_emergency: bool = True
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -128,6 +139,12 @@ def _policies_from_env() -> DiskPolicies:
         usage_ttl_seconds=_env_float('G3KU_DISK_USAGE_TTL_SECONDS', 5.0),
         artifact_gzip_threshold_bytes=_env_int('G3KU_ARTIFACT_GZIP_THRESHOLD_BYTES', 1024 * 1024),
         terminal_cleanup_enabled=_env_flag('G3KU_TERMINAL_CLEANUP_ENABLED', True),
+        cleanup_min_bytes=_env_int('G3KU_DISK_CLEANUP_MIN_BYTES', 1024 * 1024 * 1024),
+        cleanup_min_ratio=_env_float('G3KU_DISK_CLEANUP_MIN_RATIO', 0.05),
+        auto_pause_enabled=_env_flag('G3KU_DISK_AUTO_PAUSE_ENABLED', True),
+        emergency_streak_samples=_env_int('G3KU_DISK_EMERGENCY_STREAK_SAMPLES', 3),
+        emergency_recovery_samples=_env_int('G3KU_DISK_EMERGENCY_RECOVERY_SAMPLES', 5),
+        alert_on_disk_emergency=_env_flag('G3KU_DISK_ALERT_ON_EMERGENCY', True),
     )
 
 
@@ -196,6 +213,21 @@ def _disk_usage_for_anchor(anchor: Path, ttl_seconds: float) -> tuple[int, int] 
 
 def emergency_free_bytes_min(paths: Iterable[Path | str], *, policies: DiskPolicies | None = None) -> int | None:
     """多路径取各盘剩余字节的最小值；全部探测失败返回 None（调用方保守放行）。"""
+    snapshot = disk_waterline_snapshot(paths, policies=policies)
+    if snapshot is None:
+        return None
+    return snapshot[0]
+
+
+def disk_waterline_snapshot(
+    paths: Iterable[Path | str],
+    *,
+    policies: DiskPolicies | None = None,
+) -> tuple[int, int] | None:
+    """返回 (free, total)：取剩余空间最小的盘的 free 与该盘的 total；全部探测失败返回 None。
+
+    带 TTL 缓存（policies.usage_ttl_seconds），供 1s 级压力监控采样复用，不逐次 statfs。
+    """
     resolved = policies or disk_policies()
     anchors: list[Path] = []
     seen: set[str] = set()
@@ -210,15 +242,29 @@ def emergency_free_bytes_min(paths: Iterable[Path | str], *, policies: DiskPolic
         anchors.append(anchor)
     if not anchors:
         return None
-    free_values: list[int] = []
+    entries: list[tuple[int, int]] = []
     for anchor in anchors:
         usage = _disk_usage_for_anchor(anchor, resolved.usage_ttl_seconds)
         if usage is None:
             continue
-        free_values.append(usage[1])
-    if not free_values:
+        total, free = usage
+        entries.append((free, total))
+    if not entries:
         return None
-    return min(free_values)
+    free, total = min(entries, key=lambda item: item[0])
+    return free, total
+
+
+def emergency_threshold_bytes(total_bytes: int, *, policies: DiskPolicies | None = None) -> int:
+    """紧急线 = max(emergency_min_bytes, total * emergency_min_ratio)。"""
+    resolved = policies or disk_policies()
+    return max(int(resolved.emergency_min_bytes), int(max(0, int(total_bytes)) * float(resolved.emergency_min_ratio)))
+
+
+def cleanup_threshold_bytes(total_bytes: int, *, policies: DiskPolicies | None = None) -> int:
+    """清理线 = max(cleanup_min_bytes, total * cleanup_min_ratio)。"""
+    resolved = policies or disk_policies()
+    return max(int(resolved.cleanup_min_bytes), int(max(0, int(total_bytes)) * float(resolved.cleanup_min_ratio)))
 
 
 def has_emergency_disk_budget(paths: Sequence[Path | str], *, policies: DiskPolicies | None = None) -> bool:
@@ -230,21 +276,8 @@ def has_emergency_disk_budget(paths: Sequence[Path | str], *, policies: DiskPoli
     resolved = policies or disk_policies()
     if not resolved.write_guard_enabled:
         return True
-    free = emergency_free_bytes_min(paths, policies=resolved)
-    if free is None:
+    snapshot = disk_waterline_snapshot(paths, policies=resolved)
+    if snapshot is None:
         return True
-    threshold_bytes = max(int(resolved.emergency_min_bytes), 0)
-    threshold_ratio = float(resolved.emergency_min_ratio)
-    threshold = threshold_bytes
-    if threshold_ratio > 0:
-        totals: list[int] = []
-        for raw in paths or ():
-            anchor = _resolve_anchor(Path(str(raw or '.')))
-            if anchor is None:
-                continue
-            usage = _disk_usage_for_anchor(anchor, resolved.usage_ttl_seconds)
-            if usage is not None:
-                totals.append(usage[0])
-        if totals:
-            threshold = max(threshold_bytes, int(max(totals) * threshold_ratio))
-    return free >= threshold
+    free, total = snapshot
+    return free >= emergency_threshold_bytes(total, policies=resolved)

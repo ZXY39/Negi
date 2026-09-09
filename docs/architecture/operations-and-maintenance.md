@@ -292,7 +292,7 @@ Provider retry troubleshooting note:
 
 1. 先看 worker 状态快照的 `write_failure_disk_full` 计数与 `managed-worker.log` 里的 SQLITE_FULL 行——磁盘满期间错误日志本身可能写不出来，`.g3ku/errors/` 不是唯一证据源（计数契约见 `runtime-overview.md`「磁盘写保护与治理」）。
 2. 定位空间大户：`.g3ku/main-runtime/artifacts/`（历史任务产物）、`runtime.sqlite3`、`memory/`、`temp/tasks/`、`.tmp/`。目录统计命令要给足超时——磁盘近满时全量遍历极慢，短超时得到的数字不完整。
-3. 运行时自动行为无需干预：可降级写按应急预算自动跳过、error pause 记录失败不连锁、终态任务的中间产物自动清理。
+3. 运行时自动行为无需干预：可降级写按应急预算自动跳过、error pause 记录失败不连锁、终态任务的中间产物自动清理；磁盘剩余跌破紧急线（max(300MB, 1%)）时运行中任务被自动暂停（新工具调用排队等待、不报错），任务大厅出现红色横幅与「磁盘剩余·紧急」水位，空间恢复后紧急态自动解除、**被暂停的任务需手动 resume**。
 4. 需要人工的只有两类：回收历史存量（旧任务归档、无写入者的死库文件），以及调整 `main_runtime.disk_guard` 配置（字段契约见 `config-and-models.md`「main_runtime」）。
 5. 磁盘接近满时不要对大 sqlite 库执行 VACUUM——它需要约一倍库大小的临时空间，会立刻打穿剩余水位。
 
