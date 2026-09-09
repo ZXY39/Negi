@@ -34,9 +34,25 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return normalize_responses_tool_definitions(tools)
 
 
+def _system_message_text(content: Any) -> str:
+    """Extract plain text from a system message's content for ordered merging."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            text = block.get("text", block.get("content", ""))
+            if isinstance(text, str) and text:
+                parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
 def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
     messages = _sanitize_tool_call_history(messages)
-    system_prompt = ""
+    system_parts: list[str] = []
     input_items: list[dict[str, Any]] = []
 
     for idx, msg in enumerate(messages):
@@ -44,7 +60,15 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
         content = msg.get("content")
 
         if role == "system":
-            system_prompt = content if isinstance(content, str) else ""
+            # 按序合并全部 system 内容，而不是后写覆盖前者。历史中可以合法出现
+            # 多条 system 消息：基础系统提示、mid-history 的运行时工具契约、
+            # [G3KU_STAGE_*] 阶段压缩块（system 角色）。旧的 `system_prompt = content`
+            # 赋值只保留最后一条，会把这些内容全部抽出原位、互相覆盖，并顶掉
+            # 基础系统提示，摧毁原位压缩设计（openai_chat_provider 可透传
+            # mid-history system，本协议路径必须同样不丢失、不覆盖）。
+            system_text = _system_message_text(content)
+            if str(system_text or "").strip():
+                system_parts.append(system_text)
             continue
 
         if role == "user":
@@ -94,7 +118,7 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             )
             continue
 
-    return system_prompt, input_items
+    return "\n\n".join(system_parts), input_items
 
 
 def _sanitize_tool_call_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
