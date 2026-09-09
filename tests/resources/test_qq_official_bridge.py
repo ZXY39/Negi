@@ -26,17 +26,23 @@ class FakeBotApi:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
 
+    # 真实 botpy 成功时返回响应 JSON、超时静默返回 None；fake 默认按成功返回
+    # 回执 dict（deliver() 会把 None 判为投递失败）。
     async def post_message(self, **kwargs):
         self.calls.append(("post_message", kwargs))
+        return {"id": "fake-message-id"}
 
     async def post_group_message(self, **kwargs):
         self.calls.append(("post_group_message", kwargs))
+        return {"id": "fake-message-id"}
 
     async def post_c2c_message(self, **kwargs):
         self.calls.append(("post_c2c_message", kwargs))
+        return {"id": "fake-message-id"}
 
     async def post_dms(self, **kwargs):
         self.calls.append(("post_dms", kwargs))
+        return {"id": "fake-message-id"}
 
 
 class FakeClient:
@@ -610,6 +616,66 @@ async def test_pump_retries_failed_delivery_then_drops_poison(monkeypatch: pytes
         assert delivered == [
             ("post_c2c_message", {"openid": "u9", "content": "正常补投", "msg_type": 0})
         ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_deliver_treats_empty_api_response_as_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """botpy http 层对请求超时静默返回 None：deliver 必须把无回执视为失败抛出、
+    交给 pump 按服务端重放重试，而不是像旧实现那样记一次假成功。"""
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+
+    attempts = {"n": 0}
+    delivered: list[tuple[str, dict]] = []
+
+    async def _timeout_once_post_c2c(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return None  # botpy 超时：无任何回执
+        delivered.append(("post_c2c_message", kwargs))
+        return {"id": "m-1"}
+
+    api = FakeBotApi()
+    api.post_c2c_message = _timeout_once_post_c2c
+
+    class _ApiFakeClient(FakeClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.api = api
+
+    fake_botpy = types.ModuleType("botpy")
+    fake_botpy.Client = _ApiFakeClient
+    fake_botpy.Intents = FakeIntents
+    monkeypatch.setitem(sys.modules, "botpy", fake_botpy)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", _ReplayStreamClient)
+    media = _media_transport({})
+    monkeypatch.setattr(
+        bridge_module, "_create_media_client", lambda: httpx.AsyncClient(transport=media)
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-unconfirmed",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="u1"))
+        ext = FakeExternalApiClient.instances[-1]
+        ext.feed.append({"type": "outbound.created", "seq": 1, "text": "回执缺失", "external_key": "qq:c2c:u9"})
+        await _wait_until(lambda: delivered)
+        # 第一次无回执 → 判失败 → 重连重放 → 第二次带回执成功。
+        assert attempts["n"] == 2
+        assert delivered == [("post_c2c_message", {"openid": "u9", "content": "回执缺失", "msg_type": 0})]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

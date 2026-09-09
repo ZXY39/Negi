@@ -418,7 +418,9 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
         if dedupe_key:
             payload["dedupe_key"] = dedupe_key
         get_session_event_hub(entry.session_key).publish("outbound.created", **payload)
-        logger.debug("external outbound drained: session={}", entry.session_key)
+        # 语义要精确：这一行只代表"事件已发布到该会话的内存 hub"，不代表已送达
+        # 渠道——真正送达以桥侧 "qq-official delivered ..." 回执日志为准。
+        logger.info("external outbound published to hub: session={}", entry.session_key)
 
     async def _drain_outbound() -> None:
         pending: OutboundMessage | None = None

@@ -256,15 +256,33 @@ async def run_qq_official_bridge(
     async def deliver(external_key: str, text: str) -> None:
         kind, target = parse_external_key(external_key)
         if kind == "group":
-            await bridge_api.post_group_message(group_openid=target["group_openid"], content=text, msg_type=0)
+            result = await bridge_api.post_group_message(group_openid=target["group_openid"], content=text, msg_type=0)
         elif kind == "c2c":
-            await bridge_api.post_c2c_message(openid=target["user_openid"], content=text, msg_type=0)
+            result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=text, msg_type=0)
         elif kind == "guild":
-            await bridge_api.post_message(channel_id=target["channel_id"], content=text)
+            result = await bridge_api.post_message(channel_id=target["channel_id"], content=text)
         elif kind == "guilddm":
-            await bridge_api.post_dms(guild_id=target["guild_id"], content=text)
+            result = await bridge_api.post_dms(guild_id=target["guild_id"], content=text)
         else:
             logger.warning("qq-official cannot deliver to target external_key={}", external_key)
+            return
+        # botpy 的 http 层对请求超时只打一条 WARNING 就返回 None（吞掉
+        # asyncio.TimeoutError）：无回执必须视为投递失败抛出，交给 pump 按
+        # 重放重试，而不是记一次假成功。
+        if result is None:
+            raise RuntimeError(
+                f"qq-official delivery unconfirmed (empty API response) for target {external_key}"
+            )
+        message_id = ""
+        if isinstance(result, dict):
+            message_id = str(result.get("id") or result.get("message_id") or "").strip()
+        # 送达回执：排查"发没发出去"时以这行为准（published to hub 不代表送达）。
+        logger.info(
+            "qq-official delivered {} message to {} (id={})",
+            kind,
+            external_key,
+            message_id or "-",
+        )
 
     async def _pump(session_id: str, external_key: str) -> None:
         """Per-session SSE consumer with a real reconnect loop.
