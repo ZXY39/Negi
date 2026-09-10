@@ -557,11 +557,14 @@ class CronService:
             try:
                 if not callable(self.on_job):
                     raise RuntimeError("cron job handler is not configured")
+                # 先解析看门狗预算再建 dispatch 任务：live config 首次读取可能
+                # 同步耗时几十 ms，放在任务创建与 await 之间会把「handler 已完
+                # 成但结果未被消费」的取消竞态窗口拉大到毫秒级。
+                timeout_s = self._resolve_dispatch_timeout_s()
+                grace_s = self._resolve_dispatch_cancel_grace_s()
                 dispatch_task = asyncio.create_task(
                     self.on_job(job), name=f"cron-dispatch:{job.id}"
                 )
-                timeout_s = self._resolve_dispatch_timeout_s()
-                grace_s = self._resolve_dispatch_cancel_grace_s()
                 done, _pending = await asyncio.wait(
                     {dispatch_task},
                     timeout=timeout_s if timeout_s > 0 else None,
@@ -611,15 +614,34 @@ class CronService:
                 logger.error("Cron: job '{}' failed: {}", job.name, e)
         except asyncio.CancelledError:
             # _dispatch_claimed itself was cancelled (service stop / shutdown).
-            # Cancel the inner dispatch too — asyncio.wait does not propagate
-            # cancellation to the tasks it watches — then let the finally block
-            # persist the interrupted finalize before propagating.
-            outcome = "interrupted"
-            error_text = (
-                "dispatch interrupted by cancellation (service stop or timer teardown)"
-            )
-            if dispatch_task is not None and not dispatch_task.done():
-                dispatch_task.cancel()
+            # 取消可能恰好落在「handler 任务已完成、wait 结果尚未被消费」的窗
+            # 口：已完成的投递必须按真实结果记账（ delivered / error ），不能被
+            # 误记为 interrupted——否则一次成功送达会被 at-most-once 抑制掉后
+            # 续调度。inner 任务未完成时才取消它并记 interrupted；asyncio.wait
+            # 不会把取消传播给它监视的任务，必须显式 cancel。
+            if dispatch_task is not None and dispatch_task.done():
+                if dispatch_task.cancelled():
+                    outcome = "interrupted"
+                    error_text = (
+                        "dispatch cancelled before completion "
+                        "(session cancel/pause or runtime shutdown)"
+                    )
+                else:
+                    exc = dispatch_task.exception()
+                    if exc is None:
+                        delivered = True
+                        outcome = "ok"
+                    else:
+                        outcome = "error"
+                        error_text = str(exc) or exc.__class__.__name__
+                        logger.error("Cron: job '{}' failed: {}", job.name, exc)
+            else:
+                outcome = "interrupted"
+                error_text = (
+                    "dispatch interrupted by cancellation (service stop or timer teardown)"
+                )
+                if dispatch_task is not None:
+                    dispatch_task.cancel()
             raise
         finally:
             self._finalize_dispatched_job(

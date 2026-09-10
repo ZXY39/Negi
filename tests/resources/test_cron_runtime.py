@@ -766,7 +766,9 @@ async def test_cron_service_start_catches_up_overdue_at_job_once(tmp_path: Path)
     service = CronService(store_path, on_job=_on_job)
 
     await service.start()
-    await asyncio.sleep(0.05)
+    await _wait_until(
+        lambda: fired == ["job-at"] and service.list_jobs(include_disabled=True) == []
+    )
     service.stop()
 
     jobs = service.list_jobs(include_disabled=True)
@@ -809,7 +811,9 @@ async def test_cron_service_start_catches_up_only_latest_recurring_run(tmp_path:
     service = CronService(store_path, on_job=_on_job)
 
     await service.start()
-    await asyncio.sleep(0.05)
+    await _wait_until(
+        lambda: fired == ["job-every"] and service.list_jobs(include_disabled=True) == []
+    )
     service.stop()
 
     jobs = service.list_jobs(include_disabled=True)
@@ -1169,6 +1173,20 @@ def test_get_agent_injects_web_cron_service(monkeypatch, tmp_path: Path) -> None
 def _store_state_by_id(store_path: Path) -> dict[str, dict]:
     raw = json.loads(store_path.read_text(encoding="utf-8"))
     return {str(j["id"]): j for j in raw["jobs"]}
+
+
+async def _wait_until(
+    predicate, *, timeout: float = 3.0, interval: float = 0.01
+) -> None:
+    """有界条件等待：dispatch 是独立任务，固定短 sleep 会被首次 live-config
+    解析等一次性开销打穿，收敛断言必须等条件而不是等时长。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(interval)
+    raise AssertionError(f"condition not met within {timeout}s")
 
 
 @pytest.mark.asyncio
