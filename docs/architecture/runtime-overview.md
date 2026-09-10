@@ -432,7 +432,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 
 ## Repeated Tool Call Guard Notes
 
-执行阶段重复工具调用的软拒绝、修复消息、升级语义与只读检索分支契约详见 `tool-and-skill-system.md`「Duplicate Tool Call Guard」。
+执行阶段重复工具调用的同轮执行前去重（reused 合同）、跨轮软拒绝、修复消息、升级语义与只读检索分支契约详见 `tool-and-skill-system.md`「Duplicate Tool Call Guard」。
 
 ## Resource Generation Checks For Semantic Catalog Freshness
 

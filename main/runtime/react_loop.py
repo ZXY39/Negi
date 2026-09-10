@@ -2974,6 +2974,57 @@ class ReActToolLoop:
                 },
             }
 
+        def _duplicate_reuse_result(index: int, call: Any, *, first_result: dict[str, Any]) -> dict[str, Any]:
+            # 同轮重复调用未执行:结果沿用 _dedupe_tool_messages 的 reused 合同(status/same_as/
+            # ref/summary),模型侧无需学习新形状;reason 字段标注来源为同轮去重。
+            first_message = dict(first_result.get('tool_message') or {})
+            first_content = first_message.get('content')
+            content = json.dumps(
+                {
+                    'status': 'reused',
+                    'same_as': str(first_message.get('tool_call_id') or ''),
+                    'reason': 'duplicate_tool_call_in_same_turn',
+                    'ref': self._best_tool_ref(first_content),
+                    'summary': self._tool_summary(first_content),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            self._update_tool_live_state(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                tool_call_id=call.id,
+                status='reused',
+                started_at='',
+                finished_at='',
+                elapsed_seconds=None,
+                result_content=content,
+                ephemeral=False,
+            )
+            return {
+                'index': index,
+                'raw_result': None,
+                'live_state': {
+                    'tool_call_id': str(call.id or ''),
+                    'tool_name': str(call.name or 'tool'),
+                    'status': 'reused',
+                    'started_at': '',
+                    'finished_at': '',
+                    'elapsed_seconds': None,
+                    'ephemeral': False,
+                },
+                'tool_message': {
+                    'role': 'tool',
+                    'tool_call_id': call.id,
+                    'name': call.name,
+                    'content': content,
+                    'started_at': '',
+                    'finished_at': '',
+                    'elapsed_seconds': None,
+                    'ephemeral': False,
+                },
+            }
+
         def _record_mixed_stage_round(ordinary_calls: list[Any]) -> dict[str, Any] | None:
             if not ordinary_calls:
                 return None
@@ -3184,6 +3235,28 @@ class ReActToolLoop:
             for index, call in indexed_calls
             if str(getattr(call, 'name', '') or '').strip() != STAGE_TOOL_NAME
         ]
+        # 同轮同签名去重:同一条回复里出现多个规范化后完全相同的普通调用时,只执行第一个,
+        # 其余复用首个结果(标记 reused)。签名规则与 RepeatedActionCircuitBreaker 一致,
+        # 豁免工具镜像跨轮 breaker(control/stage/final 不参与)。去重发生在执行前,防止
+        # 非幂等工具(如 spawn_child_nodes)因同轮双发产生重复副作用;跨轮连续重复仍由
+        # 主循环 breaker 先行软拒绝(连续 3 个相同签名整轮不执行),本去重不影响该路径。
+        same_turn_duplicate_items: list[tuple[int, Any, int]] = []
+        seen_ordinary_signatures: dict[str, int] = {}
+        unique_ordinary_items: list[tuple[int, Any]] = []
+        for index, call in ordinary_items:
+            tool_name = str(getattr(call, 'name', '') or '').strip()
+            if tool_name in self._CONTROL_TOOL_NAMES or tool_name in {STAGE_TOOL_NAME, FINAL_RESULT_TOOL_NAME}:
+                unique_ordinary_items.append((index, call))
+                continue
+            normalized_arguments = self._normalize_tool_call_arguments(getattr(call, 'arguments', {}))
+            signature = f'{tool_name}:{json.dumps(normalized_arguments, ensure_ascii=False, sort_keys=True)}'
+            first_index = seen_ordinary_signatures.get(signature)
+            if first_index is None:
+                seen_ordinary_signatures[signature] = index
+                unique_ordinary_items.append((index, call))
+            else:
+                same_turn_duplicate_items.append((index, call, first_index))
+        ordinary_items = unique_ordinary_items
         # 宽限执行判定:仅当本批不含 submit_next_stage、且主循环未按"已记账轮"授予 stage_turn_granted、
         # 且本批至少有一个真正会被闸门拦截的普通工具(非 spawn/final/control 等永久豁免)时,才做一次宽限。
         free_pass_kind = ''
@@ -3267,6 +3340,21 @@ class ReActToolLoop:
                         created_at=now_iso(),
                         text=round_text,
                     )
+        for dup_index, dup_call, first_index in same_turn_duplicate_items:
+            first_result = ordered_results.get(first_index)
+            if first_result is None:
+                continue
+            first_live = dict(first_result.get('live_state') or {})
+            if str(first_live.get('status') or '').strip().lower() == 'error':
+                # 首个调用被阶段闸门拦截或执行出错:重复调用同样返回该错误,不标 reused。
+                first_content = str(dict(first_result.get('tool_message') or {}).get('content') or '')
+                ordered_results[dup_index] = _blocked_call_result(
+                    dup_index,
+                    dup_call,
+                    error_content=first_content or 'Error: tool call blocked',
+                )
+                continue
+            ordered_results[dup_index] = _duplicate_reuse_result(dup_index, dup_call, first_result=first_result)
         return [ordered_results[index] for index, _call in indexed_calls if index in ordered_results]
 
     @classmethod

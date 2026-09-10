@@ -3954,3 +3954,163 @@ async def test_read_only_repeat_counts_are_tracked_per_signature(tmp_path: Path)
         assert '[blocked核验]' in str(task.failure_reason or '')
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_same_turn_duplicate_tool_calls_execute_once_and_reuse_first_result(tmp_path: Path):
+    class _CountingTool(Tool):
+        def __init__(self, name: str) -> None:
+            self._name = name
+            self.execute_count = 0
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        @property
+        def description(self) -> str:
+            return f'{self._name} tool'
+
+        @property
+        def parameters(self) -> dict:
+            return {'type': 'object', 'properties': {}}
+
+        async def execute(self, **kwargs):
+            self.execute_count += 1
+            command = str(kwargs.get('command') or '')
+            return json.dumps(
+                {'status': 'success', 'exit_code': 0, 'head_preview': f'probe output for: {command}'},
+                ensure_ascii=False,
+            )
+
+    class _Backend:
+        def __init__(self) -> None:
+            self._turn = 0
+
+        @staticmethod
+        def _messages_text(kwargs: dict[str, object]) -> str:
+            messages = list(kwargs.get('messages') or [])
+            parts: list[str] = []
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                content = item.get('content')
+                if isinstance(content, str) and content.strip():
+                    parts.append(content)
+            return '\n'.join(parts)
+
+        async def chat(self, **kwargs):
+            self._turn += 1
+            if self._turn == 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:stage',
+                            name='submit_next_stage',
+                            arguments={
+                                'stage_goal': '验证同轮内完全相同的工具调用只执行一次，其余复用首个结果',
+                                'tool_round_budget': 6,
+                            },
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 2:
+                # 同轮两个完全相同的 exec（不足连续 3 个，不触发跨轮 breaker 软拒绝），
+                # 外加一个参数不同的 exec 验证非重复调用照常执行。
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:exec:dup:1',
+                            name='exec',
+                            arguments={
+                                'command': "Write-Output 'same-turn dedup probe A'",
+                                'working_dir': r'D:\NewProjects\G3KU',
+                            },
+                        ),
+                        ToolCallRequest(
+                            id='call:exec:dup:2',
+                            name='exec',
+                            arguments={
+                                'command': "Write-Output 'same-turn dedup probe A'",
+                                'working_dir': r'D:\NewProjects\G3KU',
+                            },
+                        ),
+                        ToolCallRequest(
+                            id='call:exec:other',
+                            name='exec',
+                            arguments={
+                                'command': "Write-Output 'same-turn dedup probe B'",
+                                'working_dir': r'D:\NewProjects\G3KU',
+                            },
+                        ),
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            if self._turn == 3:
+                text = self._messages_text(kwargs)
+                assert '"status": "reused"' in text
+                assert 'duplicate_tool_call_in_same_turn' in text
+                assert 'call:exec:dup:1' in text
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        _final_result_call(
+                            status='success',
+                            delivery_status='final',
+                            summary='同轮相同调用已去重：首个执行一次，其余标记 reused',
+                            answer='',
+                            evidence=[{'kind': 'artifact', 'note': 'verified same-turn duplicate dedup'}],
+                            remaining_work=[],
+                            blocking_reason='',
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 10, 'output_tokens': 5, 'cache_hit_tokens': 0},
+                )
+            raise AssertionError(f'unexpected extra turn: {self._turn}')
+
+    exec_tool = _CountingTool('exec')
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+    )
+
+    def _build_tools(task, node):
+        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary='', key_refs=None):
+            return await service.node_runner._submit_next_stage(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                stage_goal=stage_goal,
+                tool_round_budget=tool_round_budget,
+                completed_stage_summary=completed_stage_summary,
+                key_refs=list(key_refs or []),
+            )
+
+        return {
+            'submit_next_stage': SubmitNextStageTool(_submit_stage),
+            'submit_final_result': SubmitFinalResultTool(service.node_runner._submit_final_result, node_kind=node.node_kind),
+            'exec': exec_tool,
+        }
+
+    service.node_runner._build_tools = _build_tools
+    try:
+        record = await service.create_task('same-turn duplicate tool call dedup', session_id='web:shared')
+        await service.wait_for_task(record.task_id)
+        task = service.store.get_task(record.task_id)
+        assert task is not None
+        assert task.status == 'success'
+        # 两个相同 exec 只执行一次 + 不同参数的 exec 照常执行 = 共 2 次
+        assert exec_tool.execute_count == 2
+    finally:
+        await service.close()
