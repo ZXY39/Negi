@@ -4471,11 +4471,11 @@ def test_tree_node_search_matches_id_or_goal_and_ranks_exact_prefix_above_contai
           "x": { node_id: "x", title: "unrelated" },
         };
         console.log(JSON.stringify({
-          ranked: searchTaskTreeNodes("alpha").map((match) => match.nodeId),
-          caseInsensitiveId: searchTaskTreeNodes("NODE:B").map((match) => match.nodeId),
-          blankQuery: searchTaskTreeNodes("   "),
-          noHit: searchTaskTreeNodes("不存在的关键词"),
-          limited: searchTaskTreeNodes("alpha", { limit: 2 }).length,
+          ranked: searchTaskNodes("alpha").map((match) => match.nodeId),
+          caseInsensitiveId: searchTaskNodes("NODE:B").map((match) => match.nodeId),
+          blankQuery: searchTaskNodes("   "),
+          noHit: searchTaskNodes("不存在的关键词"),
+          limited: searchTaskNodes("alpha", { limit: 2 }).length,
         }));
         """
     )
