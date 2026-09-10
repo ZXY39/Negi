@@ -4959,6 +4959,64 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
 
 
+def test_ceo_websocket_silent_message_end_forwards_placeholder_final(tmp_path: Path, monkeypatch) -> None:
+    _mock_workspace(monkeypatch, tmp_path)
+
+    async def _ensure_services(_agent) -> None:
+        return None
+
+    monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
+    session_id = "web:ceo-live-silent"
+
+    class _FakeSilentSession(_FakeLiveSession):
+        async def prompt(self, user_message) -> SimpleNamespace:
+            _ = user_message
+            self.state.status = "running"
+            self.state.is_running = True
+            await self._emit("state_snapshot", state=self.state_dict())
+            await self._emit(
+                "message_end",
+                role="assistant",
+                text="",
+                silent_reply=True,
+                source="user",
+                turn_id="turn-silent",
+            )
+            self.state.status = "completed"
+            self.state.is_running = False
+            await self._emit("state_snapshot", state=self.state_dict())
+            return SimpleNamespace(output="", is_silent_reply=True)
+
+    live_session = _FakeSilentSession()
+    agent = SimpleNamespace(
+        sessions=SessionManager(tmp_path),
+        main_task_service=_TaskService(),
+    )
+    monkeypatch.setattr(websocket_ceo, "get_agent", lambda: agent)
+    monkeypatch.setattr(websocket_ceo, "get_runtime_manager", lambda _agent=None: _RuntimeManager(live_session))
+
+    client = TestClient(_build_app())
+    with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert ws.receive_json()["type"] == "ceo.sessions.snapshot"
+        assert ws.receive_json()["type"] == "ceo.state"
+        assert ws.receive_json()["type"] == "snapshot.ceo"
+
+        ws.send_json({"type": "client.user_message", "text": "stay silent"})
+
+        messages = []
+        for _ in range(8):
+            payload = ws.receive_json()
+            messages.append(payload)
+            if payload.get("type") == "ceo.reply.final":
+                break
+
+    final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
+    assert len(final_events) == 1
+    assert final_events[0]["data"]["text"] == "信息已静默"
+    assert final_events[0]["data"]["silent_reply"] is True
+
+
 def test_ceo_websocket_forwards_reply_delta_without_turn_patch_spam(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 

@@ -19,7 +19,7 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import AssistantMessage, UserInputMessage
 from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
-from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN, is_silent_reply_token
+from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN, SILENT_REPLY_VISIBLE_TEXT, is_silent_reply_token
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
     default_frontdoor_canonical_context,
@@ -2419,7 +2419,6 @@ class RuntimeAgentSession:
                     # 基线回写，提前退役会让暂停消息从模型上下文永久消失。
                     self._complete_lingering_paused_user_messages(persisted_session)
             assistant_payload: dict[str, Any] = {}
-            silent_reply = bool((assistant_metadata or {}).get("silent_reply"))
             canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
             if canonical_context:
@@ -2447,7 +2446,7 @@ class RuntimeAgentSession:
                 update_ceo_session_after_turn(
                     persisted_session,
                     user_text="" if internal_source is not None else user_text,
-                    assistant_text="" if silent_reply else assistant_text,
+                    assistant_text=assistant_text,
                     route_kind=str(route_kind or ""),
                 )
             self._loop.sessions.save(persisted_session)
@@ -3090,7 +3089,6 @@ class RuntimeAgentSession:
                         "reason": "async_dispatch_runtime_recovered",
                     }
                     if silent_reply:
-                        assistant_metadata["ui_visible"] = False
                         assistant_metadata["silent_reply"] = True
                     if cron_internal:
                         assistant_metadata["source"] = "cron"
@@ -3100,7 +3098,7 @@ class RuntimeAgentSession:
                     await self._persist_turn_transcript(
                         user_input=user_input,
                         user_text=user_text,
-                        assistant_text=output,
+                        assistant_text=SILENT_REPLY_VISIBLE_TEXT if silent_reply else output,
                         interaction_flow=interaction_flow,
                         internal_source=internal_source,
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
@@ -3251,17 +3249,14 @@ class RuntimeAgentSession:
                     if cron_internal:
                         assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
                 elif silent_reply:
-                    # 静默回合：保留一条隐藏 assistant 消息以维持上下文角色交替，
-                    # 但 ui_visible=False，不出现在 UI/预览/计数，也不投递给渠道。
-                    assistant_metadata = {
-                        "prompt_visible": True,
-                        "ui_visible": False,
-                        "silent_reply": True,
-                    }
+                    # 静默回合：落一条可见的"信息已静默" assistant 占位（Web 前端展示、
+                    # 维持角色交替），带 silent_reply 标记；RunResult.output 仍为空，
+                    # 渠道不投递，外部 relay 也跳过。
+                    assistant_metadata = {"silent_reply": True}
                 persisted_session = await self._persist_turn_transcript(
                     user_input=user_input,
                     user_text=user_text,
-                    assistant_text=output,
+                    assistant_text=SILENT_REPLY_VISIBLE_TEXT if silent_reply else output,
                     interaction_flow=interaction_flow,
                     internal_source=internal_source,
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),

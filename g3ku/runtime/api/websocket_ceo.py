@@ -16,7 +16,7 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
 from g3ku.runtime.session_keys import is_channel_session_key
-from g3ku.runtime.reply_tokens import is_silent_reply_token
+from g3ku.runtime.reply_tokens import SILENT_REPLY_VISIBLE_TEXT, is_silent_reply_token
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
@@ -1170,6 +1170,31 @@ async def ceo_websocket(websocket: WebSocket):
             return
         if event.type == 'message_end':
             payload = dict(event.payload or {})
+            if bool(payload.get('silent_reply')):
+                # 静默回合：仍需向 Web 前端发一个 final 事件收尾流式气泡（否则气泡
+                # 卡在 streaming），前端据此渲染"信息已静默"；外部渠道由 external
+                # relay 单独跳过，不会投递到 QQ。
+                silent_source = str(payload.get('source') or 'user').strip().lower() or 'user'
+                silent_turn_id = str(payload.get('turn_id') or '').strip()
+                await _push_stream_event(
+                    'ceo.reply.final',
+                    {
+                        'text': SILENT_REPLY_VISIBLE_TEXT,
+                        'silent_reply': True,
+                        'source': silent_source,
+                        'turn_id': silent_turn_id,
+                    },
+                )
+                _publish_ceo_session_patch(
+                    agent=agent,
+                    transcript_store=transcript_store,
+                    runtime_manager=runtime_manager,
+                    state_store=state_store,
+                    session_id=session_id,
+                    preview_text=SILENT_REPLY_VISIBLE_TEXT,
+                    is_running=False,
+                )
+                return
             if not _should_forward_message_end(payload):
                 return
             text = str(payload.get('text') or '').strip()
