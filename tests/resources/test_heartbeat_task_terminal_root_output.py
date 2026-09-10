@@ -290,3 +290,73 @@ async def test_web_session_heartbeat_includes_root_output_when_acceptance_failed
     assert "Result output: Acceptance node full output" in prompt_text
     assert "Execution output: Root node full output" in prompt_text
     assert "Execution output ref: artifact:artifact:root-output" in prompt_text
+
+
+def test_silent_reply_token_exact_match_only() -> None:
+    from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN, is_silent_reply_token
+
+    assert SILENT_REPLY_TOKEN == "[G3KU_SILENT]"
+    assert is_silent_reply_token("[G3KU_SILENT]")
+    assert is_silent_reply_token("  [G3KU_SILENT]\n")
+    assert not is_silent_reply_token("")
+    assert not is_silent_reply_token("[G3KU_SILENT] 附言")
+    assert not is_silent_reply_token("请保持[G3KU_SILENT]")
+
+
+async def test_task_terminal_silent_reply_token_acks_without_visible_reply(tmp_path) -> None:
+    """模型对 task_terminal 输出 [G3KU_SILENT]（runtime 归一化为 output=''+is_silent_reply）时，
+    走静默 ACK：不投递 ceo.reply.final、不触发修复循环、不落兜底文案。"""
+    session_id = "web:ceo-heartbeat-task-terminal-silent-reply"
+    session_manager = SessionManager(tmp_path)
+    persisted = session_manager.get_or_create(session_id)
+    session_manager.save(persisted)
+
+    class _SilentReplySession(_FakeHeartbeatSession):
+        async def prompt(self, user_message, persist_transcript: bool = False) -> SimpleNamespace:
+            self.persist_transcript_flags.append(bool(persist_transcript))
+            self.prompts.append(user_message)
+            if self._outputs:
+                self._outputs.pop(0)
+            return SimpleNamespace(output="", is_silent_reply=True)
+
+    live_session = _SilentReplySession(outputs=["[G3KU_SILENT]"])
+    task_service = _TaskService()
+    task_id = "task:demo-silent-reply"
+    task_service.tasks[task_id] = SimpleNamespace(
+        task_id=task_id,
+        root_node_id="node:root",
+        metadata={},
+        final_output="silent deliverable",
+        final_output_ref="",
+        failure_reason="",
+    )
+    service = WebSessionHeartbeatService(
+        workspace=tmp_path,
+        agent=SimpleNamespace(tool_execution_manager=None),
+        runtime_manager=_RuntimeManager(live_session),
+        main_task_service=task_service,
+        session_manager=session_manager,
+    )
+    accepted = service.enqueue_task_terminal_payload(
+        {
+            "task_id": task_id,
+            "session_id": session_id,
+            "title": "demo silent reply task",
+            "status": "success",
+            "brief_text": "done silently",
+            "failure_reason": "",
+            "finished_at": "2026-03-27T01:35:32+08:00",
+            "dedupe_key": "task-terminal:task:demo-silent-reply:success:2026-03-27T01:35:32+08:00",
+        }
+    )
+    assert accepted is True
+    service._started = True
+
+    next_delay = await service._run_session(session_id)
+
+    assert next_delay is None
+    published_types = [env.get("type") for _, env in task_service.registry.published]
+    assert "ceo.reply.final" not in published_types
+    assert "ceo.internal.ack" in published_types
+    # 静默 token 不走修复循环（只发生首次那一次 prompt）
+    assert len(live_session.prompts) == 1

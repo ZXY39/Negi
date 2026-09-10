@@ -19,6 +19,7 @@ from g3ku.core.events import AgentEvent
 from g3ku.core.messages import AssistantMessage, UserInputMessage
 from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
+from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN, is_silent_reply_token
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
     default_frontdoor_canonical_context,
@@ -2418,6 +2419,7 @@ class RuntimeAgentSession:
                     # 基线回写，提前退役会让暂停消息从模型上下文永久消失。
                     self._complete_lingering_paused_user_messages(persisted_session)
             assistant_payload: dict[str, Any] = {}
+            silent_reply = bool((assistant_metadata or {}).get("silent_reply"))
             canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
             if canonical_context:
@@ -2445,7 +2447,7 @@ class RuntimeAgentSession:
                 update_ceo_session_after_turn(
                     persisted_session,
                     user_text="" if internal_source is not None else user_text,
-                    assistant_text=assistant_text,
+                    assistant_text="" if silent_reply else assistant_text,
                     route_kind=str(route_kind or ""),
                 )
             self._loop.sessions.save(persisted_session)
@@ -3215,11 +3217,12 @@ class RuntimeAgentSession:
             raise
         else:
             tail_profiler = _TurnTailProfiler(session_key=self._state.session_key)
-            assistant = AssistantMessage(content=output, timestamp=self._now())
+            silent_reply = is_silent_reply_token(output)
+            assistant = AssistantMessage(content="" if silent_reply else output, timestamp=self._now())
             self._state.messages.append(assistant)
             self._cancel_assistant_stream_flush_task()
             self._assistant_stream_pending_text = ""
-            self._state.latest_message = output
+            self._state.latest_message = "" if silent_reply else output
             self._state.is_running = False
             self._state.status = "completed"
             self._state.pending_tool_calls.clear()
@@ -3229,7 +3232,8 @@ class RuntimeAgentSession:
                 logger.info(render_output_trace(output))
             persisted_session = None
             should_persist_transcript_reply = persist_transcript and not (
-                internal_source is not None and str(output or "").strip() in {"", "HEARTBEAT_OK"}
+                (internal_source is not None and str(output or "").strip() in {"", "HEARTBEAT_OK"})
+                or (silent_reply and internal_source is not None)
             )
             if should_persist_transcript_reply:
                 assistant_metadata = None
@@ -3241,6 +3245,14 @@ class RuntimeAgentSession:
                     }
                     if cron_internal:
                         assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
+                elif silent_reply:
+                    # 静默回合：保留一条隐藏 assistant 消息以维持上下文角色交替，
+                    # 但 ui_visible=False，不出现在 UI/预览/计数，也不投递给渠道。
+                    assistant_metadata = {
+                        "prompt_visible": True,
+                        "ui_visible": False,
+                        "silent_reply": True,
+                    }
                 persisted_session = await self._persist_turn_transcript(
                     user_input=user_input,
                     user_text=user_text,
@@ -3252,7 +3264,7 @@ class RuntimeAgentSession:
                     complete_lingering_paused_turns=True,
                 )
                 tail_profiler.mark("persist_transcript")
-                if getattr(self._loop, "memory_manager", None) is not None:
+                if not silent_reply and getattr(self._loop, "memory_manager", None) is not None:
                     # Memory review mirrors the user-visible surface: internal
                     # heartbeat/cron turns only expose the assistant reply and the
                     # visible stage rail, never the hidden event-bundle prompt.
@@ -3304,7 +3316,8 @@ class RuntimeAgentSession:
             await self._emit(
                 "message_end",
                 role="assistant",
-                text=output,
+                text="" if silent_reply else output,
+                silent_reply=silent_reply,
                 heartbeat_internal=heartbeat_internal,
                 heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                 source=internal_source or "user",
@@ -3318,7 +3331,7 @@ class RuntimeAgentSession:
             await self._emit_state_snapshot()
             tail_profiler.mark("emit_terminal_events")
             tail_profiler.warn_if_slow()
-            return RunResult(output=output, events=list(self._event_log))
+            return RunResult(output="" if silent_reply else output, is_silent_reply=silent_reply, events=list(self._event_log))
         finally:
             if self._active_cancel_token is cancel_token:
                 self._active_cancel_token = None

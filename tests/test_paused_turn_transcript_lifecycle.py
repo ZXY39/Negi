@@ -168,3 +168,35 @@ def test_reconcile_stops_reinjecting_paused_message_after_completion():
         current_turn_user_content="glm-5.3-flash性能怎么样",
     )
     assert healed == seed_template, "修复后 paused 条目退役，种子不再被追加幻影消息"
+
+
+def test_persist_turn_transcript_silent_reply_hides_assistant_message():
+    import asyncio
+
+    session = _FakePersistedSession([])
+    agent = _build_agent(session)
+    user_input = UserInputMessage(content="静默测试", metadata={})
+    agent._active_user_batch_inputs = [user_input]
+    agent._active_batch_id = None
+    agent._active_turn_id = None
+    agent._last_verified_task_ids = []
+
+    asyncio.run(
+        agent._persist_turn_transcript(
+            user_input=user_input,
+            user_text="静默测试",
+            assistant_text="[G3KU_SILENT]",
+            interaction_flow=[],
+            internal_source=None,
+            route_kind="dm",
+            assistant_metadata={"prompt_visible": True, "ui_visible": False, "silent_reply": True},
+            complete_lingering_paused_turns=True,
+        )
+    )
+
+    assistant_records = [m for m in session.messages if m.get("role") == "assistant"]
+    assert assistant_records, "静默回合应持久化一条隐藏 assistant 消息以维持角色交替"
+    last = assistant_records[-1]
+    assert last["metadata"]["ui_visible"] is False
+    assert last["metadata"]["silent_reply"] is True
+    assert last["metadata"]["prompt_visible"] is True

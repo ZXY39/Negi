@@ -16,6 +16,7 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
 from g3ku.runtime.session_keys import is_channel_session_key
+from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
@@ -840,6 +841,8 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
         return False
     text = str(data.get("text") or "").strip()
     if not text:
+        return False
+    if bool(data.get("silent_reply")) or is_silent_reply_token(text):
         return False
     if bool(data.get("heartbeat_internal")) and text != _HEARTBEAT_OK:
         return True

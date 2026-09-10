@@ -24,6 +24,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
+from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.json_schema_utils import (
     attach_raw_parameters_schema,
     build_args_schema_model,
@@ -7334,11 +7335,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     async def _graph_finalize_turn(self, state: CeoGraphState) -> dict[str, Any]:
         output = str(state.get("final_output") or "").strip()
-        if not output and not bool(state.get("heartbeat_internal")):
+        silent_reply = is_silent_reply_token(output)
+        if not output and not silent_reply and not bool(state.get("heartbeat_internal")):
             output = self._empty_reply_fallback(str(state.get("query_text") or ""))
         route_kind = str(state.get("route_kind") or "direct_reply")
         result = {
-            "final_output": output,
+            "final_output": "" if silent_reply else output,
             "route_kind": route_kind,
         }
         messages = list(state.get("messages") or [])
@@ -7363,7 +7365,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 内部回合的真实可见回复必须像普通回合一样进基线，才能被下一轮上下文看见；
         # 只排除静默 ACK（空输出或 HEARTBEAT_OK），与 session_agent 转录持久化的判据一致。
         is_silent_internal_ack = is_internal_turn and str(output or "").strip() in {"", "HEARTBEAT_OK"}
-        should_append_visible_output = bool(output) and not is_silent_internal_ack
+        should_append_visible_output = bool(output) and not is_silent_internal_ack and not silent_reply
         if should_append_visible_output:
             messages.append({"role": "assistant", "content": output})
             authoritative_request_body_messages = [

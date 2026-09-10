@@ -16,6 +16,7 @@ from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane, format_local
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.frontdoor.canonical_context import ui_canonical_context_delta
+from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
@@ -973,6 +974,11 @@ class WebSessionHeartbeatService:
             lines.extend(
                 [
                     f"For task_terminal events, you must not reply with {HEARTBEAT_OK} or empty text.",
+                    (
+                        f"If you conclude nothing needs to be shown to the user, output exactly "
+                        f"{SILENT_REPLY_TOKEN} on its own line to stay silent; the runtime swallows it "
+                        f"and delivers no reply."
+                    ),
                     "You must finish this turn by doing one of the following:",
                     "1. Output only the final text to show the user.",
                     "2. Call tools to inspect or organize the result, then output the final text to show the user.",
@@ -995,6 +1001,11 @@ class WebSessionHeartbeatService:
             lines.extend(
                 [
                     "For shutdown_resume events, you must not reply with HEARTBEAT_OK or empty text.",
+                    (
+                        f"If you conclude nothing needs to be shown to the user, output exactly "
+                        f"{SILENT_REPLY_TOKEN} on its own line to stay silent; the runtime swallows it "
+                        f"and delivers no reply."
+                    ),
                     "This session was paused by a project restart while the user's request was still being handled.",
                     "The user's paused request is present in the conversation context above.",
                     "Continue completing that request directly, using tools as needed, then output the final text to show the user.",
@@ -1675,6 +1686,7 @@ class WebSessionHeartbeatService:
             unsubscribe()
 
         output = str(getattr(result, "output", "") or "").strip()
+        silent_reply = bool(getattr(result, "is_silent_reply", False))
         # 模型成功响应本批事件 → 按 node 粒度清零持久连续失败计数（不是按 session 全清，
         # 避免别的节点的成功抹掉本节点的累计失败）。同时清非 node_error 内存计数。
         self._reset_node_error_retry_state(events, key)
@@ -1686,7 +1698,7 @@ class WebSessionHeartbeatService:
         require_visible_reply = self._events_require_visible_reply(events)
         repair_attempt = 0
         repair_failed = False
-        while require_visible_reply and self._visible_reply_requires_repair(output):
+        while require_visible_reply and not silent_reply and self._visible_reply_requires_repair(output):
             repair_attempt += 1
             if repair_attempt > _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT:
                 output = self._fixed_visible_reply_error_text(events)
@@ -1710,6 +1722,7 @@ class WebSessionHeartbeatService:
             finally:
                 unsubscribe()
             output = str(getattr(result, "output", "") or "").strip()
+            silent_reply = bool(getattr(result, "is_silent_reply", False))
         if repair_failed:
             return 10.0
         event_reasons = {str(event.reason or "").strip().lower() for event in events}
@@ -1732,7 +1745,7 @@ class WebSessionHeartbeatService:
             self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
-        if (not output or output == HEARTBEAT_OK) and not require_visible_reply:
+        if silent_reply or ((not output or output == HEARTBEAT_OK) and not require_visible_reply):
             preserved_source, preserved_turn_id = self._clear_preserved_inflight_turn(key, session)
             if preserved_source:
                 discard_payload = {"source": preserved_source}

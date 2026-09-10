@@ -106,3 +106,4 @@ class ToolExecutionResult:
 class RunResult:
     output: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
+    is_silent_reply: bool = False
