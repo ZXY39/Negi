@@ -891,6 +891,25 @@ class QqBotConfig(Base):
     sandbox: bool = False
 
 
+class CronConfig(Base):
+    """Cron scheduler dispatch robustness tunables.
+
+    ``dispatch_timeout_seconds`` is the delivery-level watchdog budget: a job
+    dispatch that has not returned within it gets its live await chain dumped
+    to the log, is cancelled, and the run is finalized as ``timeout`` so one
+    wedged session turn can never pin the scheduler. The default is
+    deliberately larger than the longest reasonable agent turn (provider
+    attempt timeout 10 min + retry rounds); ``<= 0`` disables the watchdog
+    (unbounded await, legacy behavior).
+    ``dispatch_cancel_grace_seconds`` bounds how long the watchdog waits for
+    the cancelled dispatch to unwind before abandoning it detached (the job
+    stays in-flight until the task really ends).
+    """
+
+    dispatch_timeout_seconds: float = 1800.0
+    dispatch_cancel_grace_seconds: float = 10.0
+
+
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -903,6 +922,7 @@ class Config(BaseSettings):
     main_runtime: MainRuntimeConfig = Field(default_factory=MainRuntimeConfig)
     external_api: ExternalApiConfig = Field(default_factory=ExternalApiConfig)
     qq_bot: QqBotConfig = Field(default_factory=QqBotConfig)
+    cron: CronConfig = Field(default_factory=CronConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":

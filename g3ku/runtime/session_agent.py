@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import re
+import time
 import uuid
 from collections import deque
 from dataclasses import asdict
@@ -55,6 +56,55 @@ def _project_transcript_canonical_context(canonical_context: Any) -> dict[str, A
     if not isinstance(canonical_context, dict) or not canonical_context:
         return {}
     return project_canonical_context_for_transcript(canonical_context)
+
+
+# 回合 finalize 尾部（转录落盘 → 记忆复核簿记 → 终态 emit）的慢阈值。正常情况
+# 这一段全是本地 I/O 与队列推送，远低于 1 秒；超过阈值说明某个 await 异常。
+# 2026-09 的 cron 派发挂起事故里挂起点只能靠外部看门狗 dump await 链定位，
+# 这里补上「慢但最终返回了」场景的分阶段证据。
+_TURN_TAIL_SLOW_WARN_SECONDS = 30.0
+
+
+class _TurnTailProfiler:
+    """Stage timer for the post-model finalize tail of a completed turn.
+
+    Each ``mark`` closes one named stage; ``warn_if_slow`` logs a per-stage
+    breakdown when the whole tail exceeds the threshold. A stage that never
+    completes (a wedged await) is what the cron dispatch watchdog and the
+    bridge slow-prompt watchdog dump live stacks for — this profiler covers
+    the complementary "slow but eventually returned" case, so maintainers can
+    tell transcript persistence, memory-review bookkeeping and the terminal
+    emit chain apart without guessing.
+    """
+
+    def __init__(self, *, session_key: str, threshold_s: float = _TURN_TAIL_SLOW_WARN_SECONDS) -> None:
+        self._session_key = str(session_key or "")
+        self._threshold_s = float(threshold_s)
+        self._started = time.monotonic()
+        self._last = self._started
+        self._stages: list[tuple[str, float]] = []
+
+    def mark(self, stage: str) -> None:
+        now = time.monotonic()
+        self._stages.append((stage, now - self._last))
+        self._last = now
+
+    def warn_if_slow(self) -> None:
+        total = time.monotonic() - self._started
+        if total < self._threshold_s:
+            return
+        breakdown = (
+            " | ".join(f"{name}={seconds:.1f}s" for name, seconds in self._stages)
+            or "<no stage completed>"
+        )
+        logger.warning(
+            "turn finalize tail slow for session {}: total={:.1f}s (threshold {:.0f}s) | {}",
+            self._session_key,
+            total,
+            self._threshold_s,
+            breakdown,
+        )
+
 
 # User-facing message shown when a turn fails. The raw exception text is kept
 # for operators (error file / transcript metadata / "error" event) but never
@@ -3164,6 +3214,7 @@ class RuntimeAgentSession:
             await self._emit_state_snapshot()
             raise
         else:
+            tail_profiler = _TurnTailProfiler(session_key=self._state.session_key)
             assistant = AssistantMessage(content=output, timestamp=self._now())
             self._state.messages.append(assistant)
             self._cancel_assistant_stream_flush_task()
@@ -3200,6 +3251,7 @@ class RuntimeAgentSession:
                     assistant_metadata=assistant_metadata,
                     complete_lingering_paused_turns=True,
                 )
+                tail_profiler.mark("persist_transcript")
                 if getattr(self._loop, "memory_manager", None) is not None:
                     # Memory review mirrors the user-visible surface: internal
                     # heartbeat/cron turns only expose the assistant reply and the
@@ -3228,6 +3280,7 @@ class RuntimeAgentSession:
                             kind="persistence_warning",
                             text="Memory review enqueue failed; turn history is still available in session transcript.",
                         )
+                    tail_profiler.mark("record_turn_for_review")
                 if getattr(self._loop, "memory_manager", None) is not None:
                     # 只在本轮真实发生内联 token 压缩时冲刷复核窗口。
                     # _frontdoor_history_shrink_reason 是“baseline 为何比上一轮短”的
@@ -3247,6 +3300,7 @@ class RuntimeAgentSession:
                                 kind="persistence_warning",
                                 text="Memory compression flush failed; turn history is still available in session transcript.",
                             )
+                        tail_profiler.mark("memory_review_flush")
             await self._emit(
                 "message_end",
                 role="assistant",
@@ -3256,11 +3310,14 @@ class RuntimeAgentSession:
                 source=internal_source or "user",
                 turn_id=self._current_turn_id(user_input),
             )
+            tail_profiler.mark("emit_message_end")
             if internal_source is None:
                 self.clear_paused_execution_context()
             await self._emit("turn_end", session_key=self._state.session_key, status="completed")
             await self._emit("agent_end", session_key=self._state.session_key, status="completed")
             await self._emit_state_snapshot()
+            tail_profiler.mark("emit_terminal_events")
+            tail_profiler.warn_if_slow()
             return RunResult(output=output, events=list(self._event_log))
         finally:
             if self._active_cancel_token is cancel_token:

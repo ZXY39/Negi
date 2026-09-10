@@ -152,7 +152,10 @@
 
 如果问题是“一次性 cron / 定时提醒为什么没有真正创建或没有后续触发”，还要先区分两类情况：
 
-- job 已成功落进 `.g3ku/cron/jobs.json`，但后续没有被消费：再继续查 scheduler / Web 主进程 / session dispatch
+- job 已成功落进 `.g3ku/cron/jobs.json`，但后续没有被消费：再继续查 scheduler / Web 主进程 / session dispatch。按 state 与日志分诊：
+  - `lastStatus` 是调度器自己写的分诊码：`running` 只应短暂存在（dispatch 进行中；进程活着时任何退出路径都会收尾，残留 `running` 说明进程在 claim 与 finalize 之间死掉，重启后会自愈为 `interrupted`）；`timeout` = 投递看门狗杀掉了挂起的 dispatch（同一条 ERROR 日志里带挂起任务的 await 链 dump，`dispatch watchdog timeout` 可 grep，这是定位“回合完成后 session.prompt 不返回”类挂起的第一手证据）；`interrupted` = 取消/停机收尾；`error` = handler 异常（`lastError` 带原文）。一次性 `at` job 的 `timeout`/`interrupted` 会按 at-most-once 抑制（禁用而非重发），契约详见 `heartbeat-system.md`「Cron Reminder Contract」
+  - 到点没触发且无看门狗日志：grep `still in flight; skipping this tick`（同一 job 上一次 dispatch 仍未了结，后续 tick 主动跳过）与 `timer task died unexpectedly`（定时器任务意外死亡，调度器会延迟自愈重臂；这条出现说明 tick 路径本身炸了，看同段异常栈）
+  - 回合慢但没挂死：`session prompt still awaiting`（bridge 慢回合看门狗，同样带 await 链）与 `turn finalize tail slow`（finalize 尾部分阶段耗时）用于区分“真的在干活”与“楔死”
 - `cron add` 本身在创建阶段就失败，有两种已知拒绝：
   - 尤其是 `at` 单次提醒，如果真正执行 `add_job()` 时目标时间已经过去，服务会直接拒绝创建并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；这时应优先排查前门/tool 调用延迟、重试、参数错误，而不是先怀疑 scheduler 没触发
   - 同一 session 在同一个 `at` 时间点已存在启用的一次性提醒时，重复注册会被拒绝并提示 `同一会话在 <time> 已存在一次性提醒 (id: …)`（按 `(session_key, at_ms)` 结构化匹配，不看 message 文案）。这是有意的防双触发约束而非 bug：如需改期，先 `remove` 旧 job 再重新创建，或改用其他时间；不要为了绕过它去禁用或删改冲突检查

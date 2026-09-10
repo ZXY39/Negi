@@ -537,6 +537,10 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "appSecret": cfg.qq_bot.app_secret,
             "sandbox": cfg.qq_bot.sandbox,
         },
+        "cron": {
+            "dispatchTimeoutSeconds": cfg.cron.dispatch_timeout_seconds,
+            "dispatchCancelGraceSeconds": cfg.cron.dispatch_cancel_grace_seconds,
+        },
     }
 
 
@@ -554,6 +558,7 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("mainRuntime",),
         ("externalApi",),
         ("qqBot",),
+        ("cron",),
     }
     missing = [
         ".".join(path)

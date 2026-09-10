@@ -148,5 +148,9 @@
     "appId": "",
     "appSecret": "",
     "sandbox": false
+  },
+  "cron": {
+    "dispatchTimeoutSeconds": 1800,
+    "dispatchCancelGraceSeconds": 10
   }
 }

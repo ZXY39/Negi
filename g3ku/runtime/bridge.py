@@ -1,13 +1,17 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Iterable
 
+from loguru import logger
+
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.results import RunResult
+from g3ku.core.task_diagnostics import format_task_await_chain
 from g3ku.runtime.manager import SessionRuntimeManager
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from main.protocol import now_iso
@@ -17,6 +21,56 @@ TaskRegistrar = Callable[[str, asyncio.Task[Any]], None]
 
 # Metadata key recorded when the runtime starts handling an inbound turn.
 TURN_INBOUND_RECEIVED_AT_KEY = "turn_inbound_received_at"
+
+# 慢回合看门狗：bridge.prompt 系列超过该阈值仍未返回时打 WARNING 并 dump
+# 会话回合任务的活体 await 链（定位挂起 await 的第一手证据；2026-09 的 cron
+# 派发挂起事故因缺少该埋点无法定位）。<=0 关闭。可用环境变量
+# G3KU_SLOW_PROMPT_WATCHDOG_SECONDS 覆盖。
+DEFAULT_SLOW_PROMPT_WATCHDOG_SECONDS = 900.0
+
+
+def _slow_prompt_watchdog_seconds() -> float:
+    raw = str(os.environ.get("G3KU_SLOW_PROMPT_WATCHDOG_SECONDS", "") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            logger.warning(
+                "Invalid G3KU_SLOW_PROMPT_WATCHDOG_SECONDS={!r}; using default {:.0f}s",
+                raw,
+                DEFAULT_SLOW_PROMPT_WATCHDOG_SECONDS,
+            )
+    return DEFAULT_SLOW_PROMPT_WATCHDOG_SECONDS
+
+
+async def _watch_slow_prompt(task: "asyncio.Task[Any]", *, label: str) -> None:
+    """One-shot watchdog: warn with the live await chain when a prompt is slow.
+
+    Fire-and-forget helper cancelled by the bridge as soon as the prompt task
+    resolves; the dump is taken WHILE the task is still suspended, which is
+    the only moment the stuck frame is observable from a log.
+    """
+    threshold = _slow_prompt_watchdog_seconds()
+    if threshold <= 0:
+        return
+    await asyncio.sleep(threshold)
+    if task.done():
+        return
+    logger.warning(
+        "session prompt still awaiting after {:.0f}s ({}); current await chain:\n{}",
+        threshold,
+        label,
+        format_task_await_chain(task),
+    )
+
+
+def _start_slow_prompt_watchdog(
+    task: "asyncio.Task[Any]", *, label: str
+) -> "asyncio.Task[Any]":
+    return asyncio.create_task(
+        _watch_slow_prompt(task, label=label),
+        name="bridge-slow-prompt-watchdog",
+    )
 
 
 @dataclass(slots=True)
@@ -94,12 +148,16 @@ class SessionRuntimeBridge:
                 live_context=live_context,
             )
         )
+        watchdog = _start_slow_prompt_watchdog(
+            task, label=f"bridge.prompt session_key={session_key}"
+        )
         if register_task is not None:
             active_session_key = getattr(getattr(session, "state", None), "session_key", None) or str(session_key or "").strip()
             register_task(active_session_key, task)
         try:
             return await task
         finally:
+            watchdog.cancel()
             self._unsubscribe_all(unsubscribers)
 
     async def continue_(
@@ -125,12 +183,16 @@ class SessionRuntimeBridge:
             memory_chat_id=runtime_memory_chat_id or runtime_chat_id or chat_id,
         )
         task = asyncio.create_task(session.continue_(live_context=live_context))
+        watchdog = _start_slow_prompt_watchdog(
+            task, label=f"bridge.continue_ session_key={session_key}"
+        )
         if register_task is not None:
             active_session_key = getattr(getattr(session, "state", None), "session_key", None) or str(session_key or "").strip()
             register_task(active_session_key, task)
         try:
             return await task
         finally:
+            watchdog.cancel()
             self._unsubscribe_all(unsubscribers)
 
     async def prompt_batch(
@@ -164,12 +226,16 @@ class SessionRuntimeBridge:
                 live_context=live_context,
             )
         )
+        watchdog = _start_slow_prompt_watchdog(
+            task, label=f"bridge.prompt_batch session_key={session_key}"
+        )
         if register_task is not None:
             active_session_key = getattr(getattr(session, "state", None), "session_key", None) or str(session_key or "").strip()
             register_task(active_session_key, task)
         try:
             return await task
         finally:
+            watchdog.cancel()
             self._unsubscribe_all(unsubscribers)
 
     async def cancel(self, session_key: str, *, reason: str = "user_cancelled") -> int:

@@ -62,6 +62,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
+- cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息 → `context-and-cache-troubleshooting.md`「残留 paused 转录条目」

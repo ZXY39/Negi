@@ -65,6 +65,10 @@
 
 定义 External Agent API（`/api/v1`）的启用与桥接凭据：`enabled`（默认关）、`tokens`（bridge_id → `{token, label, enabled}`）、`eventBufferSize`。token 密文走 bootstrap secret overlay 三件套（保存时剥离进覆盖层、落盘配置只留占位、解锁时回填）。字段语义与鉴权契约详见 `external-agent-api.md`「启用与鉴权」。
 
+### `cron`
+
+定义 cron 调度器的投递看门狗预算：`dispatchTimeoutSeconds`（默认 1800，单次 job dispatch 的等待上限，超时会 dump 挂起任务的 await 链、取消 dispatch 并把该次运行收尾为 `timeout`；`<=0` 关闭看门狗回到无限等待）与 `dispatchCancelGraceSeconds`（默认 10，取消后等待任务展开的宽限，超时视为抗取消任务并脱离调度器放弃）。默认预算刻意大于最长合理回合（provider 单次尝试上限 + 退避重试轮），只兜底真正楔死的 dispatch。该节属于加载器「显式字段校验」的豁免前缀：存量 `config.json` 不写 `cron` 节也能启动，取值回落到 schema 默认。行为契约详见 `heartbeat-system.md`「Cron Reminder Contract」。
+
 ## 3. 配置加载时做了什么
 
 `load_config()` 不是简单读 JSON，它会做很多迁移和约束检查：

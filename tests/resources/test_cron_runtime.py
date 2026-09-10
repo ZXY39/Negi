@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfoNotFoundError
 
 import pytest
+from loguru import logger
 
 import g3ku.shells.web as web_shell
 from g3ku.agent.tools.cron import CronTool
@@ -16,9 +17,14 @@ from g3ku.bus.events import OutboundMessage
 import g3ku.cron.timezones as cron_timezones
 from g3ku.config.loader import get_data_dir
 from g3ku.core.messages import UserInputMessage
+from g3ku.core.task_diagnostics import format_task_await_chain
 from g3ku.cron.runtime_dispatch import dispatch_cron_job, resolve_cron_session_key
 from g3ku.cron.service import CronService
 from g3ku.cron.types import CronJob, CronJobState, CronPayload, CronSchedule
+from g3ku.services.cron import (
+    DEFAULT_DISPATCH_CANCEL_GRACE_SECONDS,
+    DEFAULT_DISPATCH_TIMEOUT_SECONDS,
+)
 from g3ku.session.manager import SessionManager
 
 
@@ -1148,3 +1154,557 @@ def test_get_agent_injects_web_cron_service(monkeypatch, tmp_path: Path) -> None
     assert agent is web_shell._global_agent
     assert isinstance(captured["cron_service"], CronService)
     assert captured["cron_service"].store_path == get_data_dir() / "cron" / "jobs.json"
+
+
+# =============================================================================
+# 调度器抗挂起回归（2026-09 生产停摆事故）：
+# 一次 dispatch 挂起（session.prompt 在回合 finalize 后不返回）曾把整个定时器
+# 任务钉死——jobs.json 永久停在 Phase-1 claim（lastStatus="running"）、所有 job
+# 停摆、零日志，直到 remove_job 取消卡死的 timer task 才复活。以下测试锁定新
+# 合同：独立 dispatch 任务 + 投递级看门狗 + 任意退出路径都落盘收尾 + 定时器永
+# 不静默死亡。
+# =============================================================================
+
+
+def _store_state_by_id(store_path: Path) -> dict[str, dict]:
+    raw = json.loads(store_path.read_text(encoding="utf-8"))
+    return {str(j["id"]): j for j in raw["jobs"]}
+
+
+@pytest.mark.asyncio
+async def test_cron_watchdog_timeout_finalizes_store_and_other_jobs_keep_running(
+    tmp_path: Path,
+) -> None:
+    """A wedged dispatch must not pin the tick: the watchdog cancels it, the
+    claim is finalized as "timeout" with the schedule advanced, an unrelated
+    due job still completes in the same tick, and the timer stays armed."""
+    store_path = tmp_path / "jobs.json"
+    hang_entered = asyncio.Event()
+    hang_cancelled = asyncio.Event()
+    ok_calls: list[str] = []
+
+    async def _on_job(job: CronJob) -> str | None:
+        if job.name == "hang":
+            hang_entered.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                hang_cancelled.set()
+                raise
+            return "never"
+        ok_calls.append(job.id)
+        return "ok"
+
+    service = CronService(
+        store_path,
+        on_job=_on_job,
+        dispatch_timeout_s=0.05,
+        dispatch_cancel_grace_s=0.5,
+    )
+    job_hang = service.add_job(
+        name="hang",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="h",
+        max_runs=10,
+    )
+    job_ok = service.add_job(
+        name="ok",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="o",
+        max_runs=10,
+    )
+    now_ms = int(time.time() * 1000)
+    job_hang.state.next_run_at_ms = now_ms - 1
+    job_ok.state.next_run_at_ms = now_ms - 1
+    service._running = True
+
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="WARNING")
+    try:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await service._on_timer()
+        elapsed = loop.time() - started
+        # 旧实现会在这里 await 挂死的 dispatch（30s+）；新实现立即返回。
+        assert elapsed < 1.0
+
+        await asyncio.wait_for(hang_entered.wait(), timeout=2)
+        await asyncio.sleep(0.01)
+        # 无关 job 不受牵连，同一 tick 内正常完成
+        assert ok_calls == [job_ok.id]
+
+        await asyncio.wait_for(hang_cancelled.wait(), timeout=2)
+        await asyncio.sleep(0.05)
+        # 调度器仍然存活：finalize 已重新武装定时器（stop 会清空，先取证）
+        timer_alive = service._timer_task is not None and not service._timer_task.done()
+        hang_released = job_hang.id not in service._in_flight
+    finally:
+        logger.remove(sink_id)
+        service.stop()
+
+    jobs = _store_state_by_id(store_path)
+    hang_state = jobs[job_hang.id]["state"]
+    assert hang_state["lastStatus"] == "timeout"
+    assert "watchdog timeout" in str(hang_state["lastError"])
+    assert hang_state["deliveredRuns"] == 0
+    # 周期任务的调度必须推进，而不是冻结在 claim 时刻
+    assert hang_state["nextRunAtMs"] is not None
+    assert int(hang_state["nextRunAtMs"]) > now_ms
+    ok_state = jobs[job_ok.id]["state"]
+    assert ok_state["lastStatus"] == "ok"
+    assert ok_state["deliveredRuns"] == 1
+    # store 里绝不允许残留 running
+    assert all(j["state"]["lastStatus"] != "running" for j in jobs.values())
+    # 看门狗必须留下可 grep 的取证日志（含挂起任务的 await 链）
+    text = "\n".join(str(item) for item in messages)
+    assert "dispatch watchdog timeout" in text
+    assert "await chain" in text
+    assert "_on_job" in text
+    assert timer_alive
+    assert hang_released
+
+
+@pytest.mark.asyncio
+async def test_cron_watchdog_abandons_cancel_resistant_dispatch(tmp_path: Path) -> None:
+    """A dispatch that ignores cancellation is finalized as timeout (with an
+    "abandoned" marker), stays in-flight so later ticks cannot stack a second
+    dispatch on the wedged session, and is released when it finally ends."""
+    store_path = tmp_path / "jobs.json"
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def _resist(job: CronJob) -> str | None:
+        calls.append(job.id)
+        entered.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            # 抗取消：吞掉第一次取消，直到测试放行才真正退出
+            await release.wait()
+            raise
+        return "never"
+
+    service = CronService(
+        store_path,
+        on_job=_resist,
+        dispatch_timeout_s=0.05,
+        dispatch_cancel_grace_s=0.05,
+    )
+    job = service.add_job(
+        name="resist",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="r",
+        max_runs=10,
+    )
+    job.state.next_run_at_ms = int(time.time() * 1000) - 1
+    service._running = True
+
+    try:
+        await service._on_timer()
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        # 看门狗 0.05s 触发 + 0.05s 宽限 → 0.3s 内必然已放弃并收尾
+        await asyncio.sleep(0.3)
+
+        state = _store_state_by_id(store_path)[job.id]["state"]
+        assert state["lastStatus"] == "timeout"
+        assert "abandoned" in str(state["lastError"])
+        # 僵尸任务存活期间 job 保持 in-flight
+        assert job.id in service._in_flight
+
+        # 后续 tick 不得在同一 job 上叠加第二次 dispatch
+        job.state.next_run_at_ms = int(time.time() * 1000) - 1
+        await service._on_timer()
+        await asyncio.sleep(0.05)
+        assert calls == [job.id]
+    finally:
+        # 先 stop（置 _running=False，阻止释放回调再武装 0 延迟 tick），再放行僵尸任务
+        service.stop()
+        release.set()
+        await asyncio.sleep(0.05)
+
+    assert job.id not in service._in_flight
+    assert calls == [job.id]
+
+
+@pytest.mark.asyncio
+async def test_cron_dispatch_cancellation_persists_interrupted(tmp_path: Path) -> None:
+    """Cancelling a claimed dispatch (CancelledError is a BaseException that
+    used to slip past `except Exception` straight into a bare in-flight
+    discard) must still persist an identifiable finalize and cancel the inner
+    handler task."""
+    store_path = tmp_path / "jobs.json"
+    entered = asyncio.Event()
+    inner_cancelled = asyncio.Event()
+
+    async def _slow(job: CronJob) -> str | None:
+        entered.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            inner_cancelled.set()
+            raise
+        return "ok"
+
+    service = CronService(store_path, on_job=_slow, dispatch_timeout_s=30)
+    job = service.add_job(
+        name="slow",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="s",
+        max_runs=10,
+    )
+
+    task = asyncio.create_task(service._execute_job(job))
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(inner_cancelled.wait(), timeout=2)
+    await asyncio.sleep(0.01)
+
+    state = _store_state_by_id(store_path)[job.id]["state"]
+    assert state["lastStatus"] == "interrupted"
+    assert str(state["lastError"]).strip() != ""
+    assert state["deliveredRuns"] == 0
+    assert int(state["nextRunAtMs"]) > int(time.time() * 1000)
+    assert job.id not in service._in_flight
+
+
+@pytest.mark.asyncio
+async def test_cron_stop_cancels_inflight_dispatch_and_persists_interrupted(
+    tmp_path: Path,
+) -> None:
+    """Service stop must cancel independent dispatch tasks spawned by the
+    timer, and their finalize must persist "interrupted" on the way out."""
+    store_path = tmp_path / "jobs.json"
+    entered = asyncio.Event()
+
+    async def _hang(job: CronJob) -> str | None:
+        entered.set()
+        await asyncio.sleep(30)
+        return "never"
+
+    service = CronService(store_path, on_job=_hang, dispatch_timeout_s=60)
+    job = service.add_job(
+        name="hang",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="h",
+        max_runs=10,
+    )
+    job.state.next_run_at_ms = int(time.time() * 1000) - 1
+    service._running = True
+
+    await service._on_timer()
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    assert len(service._dispatch_tasks) == 1
+
+    service.stop()
+    await asyncio.sleep(0.05)
+
+    state = _store_state_by_id(store_path)[job.id]["state"]
+    assert state["lastStatus"] == "interrupted"
+    assert int(state["nextRunAtMs"]) > int(time.time() * 1000)
+    assert job.id not in service._in_flight
+    assert all(task.cancelled() or task.done() for task in service._dispatch_tasks)
+
+
+@pytest.mark.asyncio
+async def test_cron_watchdog_suppresses_one_shot_at_job(tmp_path: Path) -> None:
+    """At-most-once also applies to watchdog kills: an unfinished one-shot
+    dispatch may already have reached the downstream handler, so the job is
+    suppressed (next_run cleared + disabled) instead of retried."""
+    store_path = tmp_path / "jobs.json"
+
+    async def _hang(job: CronJob) -> str | None:
+        await asyncio.sleep(30)
+        return "never"
+
+    service = CronService(
+        store_path,
+        on_job=_hang,
+        dispatch_timeout_s=0.05,
+        dispatch_cancel_grace_s=0.2,
+    )
+    job = service.add_job(
+        name="once",
+        schedule=CronSchedule(kind="at", at_ms=int(time.time() * 1000) + 3_600_000),
+        message="m",
+        deliver=True,
+        channel="web",
+        to="shared",
+    )
+    job.state.next_run_at_ms = int(time.time() * 1000) - 1
+
+    await service._execute_job(job)
+
+    entry = _store_state_by_id(store_path)[job.id]
+    assert entry["state"]["lastStatus"] == "timeout"
+    assert entry["state"]["nextRunAtMs"] is None
+    assert entry["state"]["deliveredRuns"] == 0
+    assert entry["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_cron_finalize_reattaches_after_external_store_reload(tmp_path: Path) -> None:
+    """外部进程（如 CLI）在派发期间改写 jobs.json 会触发本进程 store 重载，
+    原 job 对象脱钩；finalize 必须写回当前 store 里的同 id 副本，否则收尾
+    状态只落在临时对象上，磁盘永久停在 running。"""
+    store_path = tmp_path / "jobs.json"
+    service_ref: dict[str, CronService] = {}
+
+    async def _on_job(job: CronJob) -> str | None:
+        raw = json.loads(store_path.read_text(encoding="utf-8"))
+        raw["jobs"][0]["name"] = "renamed-externally"
+        store_path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        # _load_store 侦测外部 mtime 变化 → 重载，store 内 job 对象被替换
+        service_ref["service"].list_jobs()
+        return "ok"
+
+    service = CronService(store_path, on_job=_on_job)
+    service_ref["service"] = service
+    job = service.add_job(
+        name="demo",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="m",
+        max_runs=5,
+    )
+
+    await service._execute_job(job)
+
+    entry = _store_state_by_id(store_path)[job.id]
+    assert entry["name"] == "renamed-externally"
+    assert entry["state"]["lastStatus"] == "ok"
+    assert entry["state"]["deliveredRuns"] == 1
+    # 脱钩的旧对象不再承载权威状态
+    assert job.state.delivered_runs == 0
+
+
+def test_cron_dispatch_timeout_resolves_from_live_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Constructor arg wins; otherwise the live runtime config `cron` section
+    is consulted; a broken/missing config falls back to module defaults."""
+    import g3ku.config.live_runtime as live_runtime
+
+    fake_config = SimpleNamespace(
+        cron=SimpleNamespace(
+            dispatch_timeout_seconds=42.0,
+            dispatch_cancel_grace_seconds=1.5,
+        )
+    )
+    monkeypatch.setattr(
+        live_runtime, "get_runtime_config", lambda force=False: (fake_config, "rev", False)
+    )
+
+    service = CronService(tmp_path / "jobs.json")
+    assert service._resolve_dispatch_timeout_s() == 42.0
+    assert service._resolve_dispatch_cancel_grace_s() == 1.5
+
+    explicit = CronService(
+        tmp_path / "jobs.json", dispatch_timeout_s=7.0, dispatch_cancel_grace_s=2.0
+    )
+    assert explicit._resolve_dispatch_timeout_s() == 7.0
+    assert explicit._resolve_dispatch_cancel_grace_s() == 2.0
+
+    def _boom(force: bool = False):
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(live_runtime, "get_runtime_config", _boom)
+    fallback = CronService(tmp_path / "jobs.json")
+    assert fallback._resolve_dispatch_timeout_s() == DEFAULT_DISPATCH_TIMEOUT_SECONDS
+    assert fallback._resolve_dispatch_cancel_grace_s() == DEFAULT_DISPATCH_CANCEL_GRACE_SECONDS
+    assert DEFAULT_DISPATCH_TIMEOUT_SECONDS > 0
+
+
+@pytest.mark.asyncio
+async def test_cron_timer_task_death_triggers_self_heal_rearm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scheduler heartbeat must never die silently: an unexpected tick
+    task exception logs an error and re-arms after a short heal delay. A
+    cancelled tick (normal re-arm churn) must not trigger the heal."""
+    store_path = tmp_path / "jobs.json"
+
+    async def _ok(job: CronJob) -> str | None:
+        return "ok"
+
+    service = CronService(store_path, on_job=_ok)
+    service.add_job(
+        name="j",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="m",
+    )
+    service._running = True
+    service._load_store()
+    service._arm_timer()
+    original = service._timer_task
+    assert original is not None
+    monkeypatch.setattr("g3ku.services.cron._TIMER_SELF_HEAL_DELAY_SECONDS", 0.01)
+
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="ERROR")
+    try:
+        class _CancelledTick:
+            def cancelled(self) -> bool:
+                return True
+
+            def exception(self):  # pragma: no cover - must not be called
+                raise AssertionError("cancelled ticks must not be inspected")
+
+        service._on_timer_task_done(_CancelledTick())
+        assert service._heal_task is None
+
+        class _DeadTick:
+            def cancelled(self) -> bool:
+                return False
+
+            def exception(self):
+                return OSError("tick body exploded past its finally")
+
+        service._on_timer_task_done(_DeadTick())
+        await asyncio.sleep(0.1)
+        # stop() 会清空 _timer_task，先取证自愈结果
+        healed = service._timer_task
+        heal_spawned = service._heal_task is not None
+    finally:
+        logger.remove(sink_id)
+        service.stop()
+
+    assert healed is not None
+    assert healed is not original
+    assert original.done()
+    assert heal_spawned
+    text = "\n".join(str(item) for item in messages)
+    assert "timer task died unexpectedly" in text
+
+
+@pytest.mark.asyncio
+async def test_bridge_slow_prompt_watchdog_dumps_await_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bridge.prompt's watchdog must warn with the LIVE await chain of the
+    still-suspended session task — the forensic evidence that was missing in
+    the 2026-09 incident."""
+    from g3ku.runtime import bridge as bridge_mod
+
+    monkeypatch.setenv("G3KU_SLOW_PROMPT_WATCHDOG_SECONDS", "0.05")
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="WARNING")
+    victim: asyncio.Task | None = None
+    watchdog: asyncio.Task | None = None
+    try:
+        async def _hang_forever() -> None:
+            await asyncio.sleep(30)
+
+        victim = asyncio.create_task(_hang_forever())
+        watchdog = bridge_mod._start_slow_prompt_watchdog(
+            victim, label="bridge.prompt session_key=ext:test:1"
+        )
+        await asyncio.sleep(0.2)
+    finally:
+        logger.remove(sink_id)
+        for task in (victim, watchdog):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(victim, watchdog, return_exceptions=True)
+
+    text = "\n".join(str(item) for item in messages)
+    assert "session prompt still awaiting" in text
+    assert "bridge.prompt session_key=ext:test:1" in text
+    assert "_hang_forever" in text  # 挂起帧出现在 dump 里
+
+
+def test_bridge_slow_prompt_watchdog_disabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("G3KU_SLOW_PROMPT_WATCHDOG_SECONDS", "0")
+    from g3ku.runtime import bridge as bridge_mod
+
+    assert bridge_mod._slow_prompt_watchdog_seconds() == 0.0
+    monkeypatch.setenv("G3KU_SLOW_PROMPT_WATCHDOG_SECONDS", "not-a-number")
+    assert bridge_mod._slow_prompt_watchdog_seconds() == bridge_mod.DEFAULT_SLOW_PROMPT_WATCHDOG_SECONDS
+
+
+def test_turn_tail_profiler_warns_with_stage_breakdown() -> None:
+    """The finalize-tail profiler names the slow stage (transcript / memory
+    review / terminal emits) so a slow-but-completed tail is attributable."""
+    from g3ku.runtime.session_agent import _TurnTailProfiler
+
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="WARNING")
+    try:
+        profiler = _TurnTailProfiler(session_key="web:test", threshold_s=0.0)
+        profiler.mark("persist_transcript")
+        profiler.mark("record_turn_for_review")
+        profiler.mark("emit_message_end")
+        profiler.warn_if_slow()
+
+        quiet = _TurnTailProfiler(session_key="web:test", threshold_s=60.0)
+        quiet.mark("persist_transcript")
+        quiet.warn_if_slow()
+    finally:
+        logger.remove(sink_id)
+
+    text = "\n".join(str(item) for item in messages)
+    assert "turn finalize tail slow for session web:test" in text
+    assert "persist_transcript=" in text
+    assert "record_turn_for_review=" in text
+    assert "emit_message_end=" in text
+    # 未超阈值时不得告警（只出现一条 warning）
+    assert text.count("turn finalize tail slow") == 1
+
+
+@pytest.mark.asyncio
+async def test_format_task_await_chain_renders_stuck_frames() -> None:
+    entered = asyncio.Event()
+
+    async def _inner() -> None:
+        await asyncio.sleep(30)
+
+    async def _outer() -> None:
+        entered.set()
+        await _inner()
+
+    task = asyncio.create_task(_outer())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await asyncio.sleep(0)
+        chain = format_task_await_chain(task)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert "_outer" in chain
+    assert "_inner" in chain
+    assert "task=" in chain
+
+
+@pytest.mark.asyncio
+async def test_format_task_await_chain_crosses_awaited_task_boundary() -> None:
+    """bridge.prompt awaits the session-prompt task it created; ``await
+    some_task`` parks on an opaque FutureIter, so the walker must cross via
+    the suspended frame's locals to reach the truly stuck frame."""
+    session_started = asyncio.Event()
+    inner_ref: list[asyncio.Task] = []
+
+    async def _session_prompt() -> None:
+        session_started.set()
+        await asyncio.sleep(30)
+
+    async def _bridge_prompt() -> None:
+        task = asyncio.create_task(_session_prompt(), name="session-prompt")
+        inner_ref.append(task)
+        await task
+
+    outer = asyncio.create_task(_bridge_prompt(), name="bridge-prompt")
+    try:
+        await asyncio.wait_for(session_started.wait(), timeout=2)
+        await asyncio.sleep(0)
+        chain = format_task_await_chain(outer)
+    finally:
+        outer.cancel()
+        for task in inner_ref:
+            task.cancel()
+        await asyncio.gather(outer, *inner_ref, return_exceptions=True)
+
+    assert "_bridge_prompt" in chain
+    assert "session-prompt" in chain  # 跨界进入了被 await 的任务
+    assert "_session_prompt" in chain  # 最深挂起帧可见

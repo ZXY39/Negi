@@ -48,7 +48,7 @@
   `SessionRuntimeManager`。按 `session_key` 复用 `RuntimeAgentSession`，是所有入口共享的 session 路由器。
 
 - `g3ku/runtime/bridge.py`
-  `SessionRuntimeBridge`。给 Web、CLI、cron、External Agent API（`/api/v1`，外部桥接应用）提供统一的 prompt / prompt_batch / continue / cancel / pause API。pause 带运行状态前置检查（空闲会话返回 0，避免空闲暂停产生多余转录归档）；外部桥接用它实现控制命令（暂停/取消）与运行中消息注入，回合契约详见 `external-agent-api.md`「回合契约」。
+  `SessionRuntimeBridge`。给 Web、CLI、cron、External Agent API（`/api/v1`，外部桥接应用）提供统一的 prompt / prompt_batch / continue / cancel / pause API。pause 带运行状态前置检查（空闲会话返回 0，避免空闲暂停产生多余转录归档）；外部桥接用它实现控制命令（暂停/取消）与运行中消息注入，回合契约详见 `external-agent-api.md`「回合契约」。每个 prompt 系列调用带慢回合看门狗：超过 `G3KU_SLOW_PROMPT_WATCHDOG_SECONDS`（默认 900s，`<=0` 关闭）仍未返回就打 WARNING 并 dump 会话任务的活体 await 链（挂起回合的取证入口，合同详见 `heartbeat-system.md`「Cron Reminder Contract」的 hang forensics 条目）。
 
 - `g3ku/runtime/session_agent.py`
   单次 turn 的核心执行器，也是最复杂、最值得精读的文件之一。
