@@ -482,7 +482,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - 侧车道优先复用最近一份已持久化的 CEO actual-request artifact 作为 provider-facing scaffold，与主轮共享同一段可缓存前缀；artifact 因内存守卫降级（`artifact_persistence_mode=memory_guard_degraded` / `memory_guard_minimal`）时，退回 `CeoMessageBuilder.build_for_ceo(..., ephemeral_tail_messages=...)` 重建。
 - 侧车道停止决策以普通工具失败形式回到主轮（`reason_code=sidecar_timeout_stop`，per-tool 子取消令牌），与用户主动暂停/取消是两条不同路径。
 
-提醒窗口、观测感知决策、`STOP` / `CONTINUE` 语义、失败兜底与 timeout-stop 错误合同详见 `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」。
+自定排程巡检（首档 120s、模型自定下次间隔）、观测感知决策、`STOP` / `CONTINUE <seconds>` 语义、失败兜底、统一工具 timeout 硬上限与 timeout-stop 错误合同详见 `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」。
 
 ## Node Provider Request Scaffold
 

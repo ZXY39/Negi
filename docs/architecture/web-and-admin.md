@@ -535,7 +535,7 @@ The browser handles a dedicated live-only ACK event for silent internal turns.
 
 The CEO browser/runtime integration has a second live-only status lane for long-running direct tools: `ceo.tool.reminder`. It is intentionally different from both ordinary tool interaction steps and heartbeat turns.
 
-- Backend reminder events are emitted only as websocket live events; the payload carries `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, and an optional `terminal`.
+- Backend reminder events are emitted only as websocket live events; the payload carries `turn_id`, `execution_id`, `tool_name`, `elapsed_seconds`, `reminder_count`, `decision`, `label`, `source="reminder"`, `next_check_in_seconds` (the self-scheduled interval until the next patrol), and an optional `terminal`.
 - The frontend must not create a new assistant bubble and must not append a new interaction step for reminder events. The CEO frontend does not render `label` as a visible reminder block under the pending turn; these events stay live-only bookkeeping signals while the authoritative tool outcome arrives through the ordinary tool/error/final-reply path.
 
 ### Persistence Rules
@@ -544,6 +544,6 @@ The CEO browser/runtime integration has a second live-only status lane for long-
 - Refresh/reconnect should not restore an old reminder from cached snapshot state.
 - Any ephemeral reminder state is cleared when the tool finishes, the turn finalizes, the turn is discarded, or a `terminal=true` reminder event arrives.
 
-See `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」 for the reminder decision and timeout semantics (`decision=continue` / `stop` / `unavailable`, observation-aware sidecar review, the `timeout_seconds` skip rule, and tool-call-scoped timeout-stop).
+See `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」 for the self-scheduled patrol and decision semantics (`decision=continue` / `stop` / `unavailable`, observation-aware sidecar review, tool-call-scoped timeout-stop); the universal tool timeout deadline the patrol runs within is owned by `tool-and-skill-system.md`「统一工具 Timeout 合同」.
 
 Operators should treat `ceo.tool.reminder` as a live runtime signal, not durable conversation UI; the authoritative end state still arrives through the normal CEO tool/error/final-reply events.

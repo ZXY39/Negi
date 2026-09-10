@@ -184,6 +184,15 @@ promotion 与前门状态：
 - 工具参数校验错误在 `ToolRegistry`、CEO/frontdoor 直接工具执行、节点 `ReActToolLoop` 之间共享同一维护契约：`validate_params(...)` 返回错误、`validate_params(...)` 自身崩溃，或工具执行抛出 `ValueError` / `TypeError` 时，返回的错误文本保留原始错误，并追加指回 `load_tool_context(tool_id="<tool_name>")` 的修复提示。权限错误、路径策略错误、超时停止、watchdog 停止、pause/cancel 信号与普通 `RuntimeError` 保持原语义，不误标为参数错误。
 - 任何顶层为 `{"ok": false, ...}` 的结构化工具结果，在三条路径上都按 error-lane 工具结果处理；这条规则有意比参数引导规则更宽，让以 JSON payload 编码失败的内嵌工具也进入错误车道。
 
+统一工具 Timeout 合同：
+
+- 每次工具调用都有最大运行时长保底：显式传入的 `timeout` 参数（秒，**无上限**）优先，否则用全局默认（`agents.tool_default_timeout_seconds`，默认 600，热更新生效；`G3KU_TOOL_DEFAULT_TIMEOUT_SECONDS` 环境变量是应急覆盖）。`timeout` 经 `Tool.to_model_schema()` 统一注入所有工具的模型可见 schema；内部协议工具（`submit_next_stage` / `submit_final_result` / `spawn_child_nodes` / `submit_message_distribution` / `wait_tool_execution` / `stop_tool_execution` / `task_append_notice`）与内部入队工具（`memory_write` / `memory_delete` / `memory_note`）标记豁免、不向模型暴露该参数，但机械保底仍然适用。
+- 执行分工按 `self_enforced_timeout` 标志二分：**自持工具**（持有子进程/网络会话、需要结构化收尾的 `exec`、`agent_browser`、`web_fetch`）自己消费统一解析后的有效值并负责收尾——`exec` 走进程树终止（Windows `taskkill /T /F`、POSIX 进程组 `killpg`，仅对进程组组长杀组，绝不误杀宿主进程组）+ 管道排空 + 部分输出抢救；`agent_browser` 保留浏览器子进程终止与会话清理；`web_fetch` 把统一值喂给 `httpx.Timeout`（连接段内部另留 10s 小分段）。外层强制层对自持工具让位，但 pause/cancel 轮询与 CEO 侧车道巡检照旧。**其余所有工具**由外层在 deadline 硬停（取消令牌级联 + 任务硬取消，无宽限），覆盖三条执行路径（节点 `ReActToolLoop`、CEO/frontdoor 直接执行、`ToolRegistry`），包括此前完全不设防的验收（inspection）节点。
+- 工具级独立超时配置已并入本合同：`ExecToolSettings.timeout`、`AgentBrowserToolSettings.default_timeout_seconds`、`web_fetch` 的 `timeout_ms`/`timeout_seconds` 均已移除；`skill-installer` 的下载/git 超时与 filesystem 校验子进程超时属于内部操作性超时，不在本合同内。
+- 超时被停止的工具结果必须带延长指引：统一文案 `Error executing {tool}: timed out after {N}s ... 请在下一次调用时显式传入更大的 "timeout" 参数`，由外层与自持工具共用同一构造器保证口径一致；该文案按 error-lane 处理，但**不**附加 `load_tool_context` 参数修复指引（超时不是参数错误）。
+- CEO 侧车道与本合同的关系：侧车道巡检只能在硬上限之内排程、不能延长它；巡检语义归 `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」。detached `ToolExecutionManager` 条目同样携带本次调用的上限，`wait_tool_execution` 续等窗口到点即终态化并返回超时结果，不轮询死条目。
+- 已知边界（改完仍存在）：同步阻塞型工具的超时只能在下一个 await 点生效；模型可传任意大 `timeout`（无上限是合同的一部分），串行化调度下的队头阻塞由 pause/cancel 兜底。
+
 阶段门控与 callable 收紧：
 
 - CEO/frontdoor 的 stage gate 由 `execute_tools` 真正执行：普通工具在无活动阶段或预算耗尽时不可自由调用。模型把 `submit_next_stage` 与目标工具在同一条消息里一起提交时，先执行 `submit_next_stage`，再把同批普通工具当作新阶段的第一批调用，并在该新阶段上记账预算。若模型未同批提交 `submit_next_stage` 就单独调用普通工具，撞闸的普通工具获得一次「宽限执行」：工具照常执行、结果照常返回，但结果尾部附阶段闸门提醒（`STAGELESS_FREE_PASS_REMINDER` / `STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER`）；宽限用尽后（已有待入账计预算轮，或耗尽阶段已有溢出轮）仍单独调用普通工具，才收到 `no active stage` / `current stage budget is exhausted` gate error。
