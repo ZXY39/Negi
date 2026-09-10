@@ -28,6 +28,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     compact_stage_prompt_messages_in_place,
     completed_stage_blocks,
     current_stage_active_window,
+    keep_stage_blocks_off_continuation_tail,
     stage_prompt_prefix,
 )
 from g3ku.runtime.tool_visibility import (
@@ -2124,9 +2125,14 @@ class CeoMessageBuilder:
             trimmed_raw_history = [*lead_prefix, *raw_active_window]
             stage_workset_history = [*list(completed_blocks), *list(retained_raw_stage_blocks)]
             stage_compaction_applied = bool(completed_blocks)
+        # 不变量守卫：块不占续写位。当前用户回合已在历史里时，workset 块/回插块
+        # 不得落在其后方——落在最后一条 user 之后的阶段块整体前移到该 user 之前
+        # （见 keep_stage_blocks_off_continuation_tail），请求末位保持用户回合。
+        staged_stage_history = keep_stage_blocks_off_continuation_tail(
+            [*list(trimmed_raw_history), *list(stage_workset_history)]
+        )
         history_zone_source = [
-            *list(trimmed_raw_history),
-            *list(stage_workset_history),
+            *list(staged_stage_history),
             *self._hidden_internal_summary_messages(
                 persisted_session=persisted_session,
                 checkpoint_messages=checkpoint_messages,
@@ -2135,8 +2141,7 @@ class CeoMessageBuilder:
         ]
         pre_request_messages = [
             {"role": "system", "content": str(context_sources["system_prompt"] or "")},
-            *trimmed_raw_history,
-            *stage_workset_history,
+            *staged_stage_history,
             *internal_seed_records,
         ]
         if not current_user_in_history:
@@ -2151,8 +2156,7 @@ class CeoMessageBuilder:
         }
         frontdoor_history_shrink_reason = "stage_compaction" if stage_compaction_applied else ""
         staged_history_for_injection = [
-            *trimmed_raw_history,
-            *stage_workset_history,
+            *staged_stage_history,
             *internal_seed_records,
         ]
         history_state['history_messages'] = staged_history_for_injection

@@ -50,7 +50,14 @@ def _normalize_key_ref(item: Any) -> dict[str, Any] | None:
 
 
 def is_stage_context_message(message: dict[str, Any]) -> bool:
-    if _message_role(message) != "assistant":
+    # 注入的阶段块已经以 system 角色落地（压缩元数据、非对话内容，避免模型把块
+    # 当成"自己上一轮说的话"而在续写位置仿造/回显）；存量 durable baseline /
+    # continuity sidecar / 续跑 seed / actual-request scaffold 里仍可能有
+    # assistant 角色的旧块，模型回显的块残留也是 assistant 文本，两类都识别
+    # （对齐 is_node_dynamic_contract_message 的双角色做法）。旧块在下一次
+    # 压缩渲染回插时自然收敛为 system 角色，过渡期不得因识别不到旧块而
+    # 造成块重复或丢失。
+    if _message_role(message) not in {"assistant", "system"}:
         return False
     content = str((message or {}).get("content") or "")
     return (
@@ -75,10 +82,9 @@ def is_stage_block_echo_text(text: Any) -> bool:
     """Whether the text is a standalone stage-compaction-block echo.
 
     Stage blocks are runtime-injected context markers; a model must never
-    emit them as its own reply. Judged on the text prefix alone — unlike
-    :func:`is_stage_context_message`, which is scoped to assistant messages —
-    because the frontdoor guard runs on the raw model text before any message
-    shaping.
+    emit them as its own reply. Judged on the text prefix alone — regardless
+    of message role — because the frontdoor guard runs on the raw model text
+    before any message shaping.
     """
     normalized = str(text or "").strip()
     if not normalized:
@@ -124,6 +130,35 @@ def stage_prompt_prefix(
     if preserve_leading_user and remainder and _message_role(remainder[0]) == "user":
         prefix.append(remainder.pop(0))
     return prefix, remainder
+
+
+def keep_stage_blocks_off_continuation_tail(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """不变量守卫：阶段块不得出现在最后一条 user 消息之后（占据模型续写位）。
+
+    请求末位保持当前 user 回合（或其后的合法 assistant/tool 序列）。当前用户
+    回合已在历史里、而压缩块/workset 块落尾时，模型会在块之后续写，把整块
+    JSON 当成"自己上一轮说的话"仿造/回显（事故 ext:qq-official:f8a8001865631301
+    的请求形态）。这里把落在最后一条 user 之后的阶段块整体前移到该 user 之前
+    （保持块间相对顺序），对齐运行时工具契约"插到最新 user 之前"的既有规则。
+    无 user 消息或无越界块时原样返回（不做任何重排，保持前缀缓存中性）。
+    """
+    items = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+    last_user_index = next(
+        (
+            index
+            for index in range(len(items) - 1, -1, -1)
+            if _message_role(items[index]) == "user"
+        ),
+        None,
+    )
+    if last_user_index is None:
+        return items
+    tail = items[last_user_index:]
+    trailing_blocks = [item for item in tail if is_stage_context_message(item)]
+    if not trailing_blocks:
+        return items
+    kept_tail = [item for item in tail if not is_stage_context_message(item)]
+    return [*items[:last_user_index], *trailing_blocks, *kept_tail]
 
 
 def retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[str]:
@@ -173,7 +208,13 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
             }
             externalized.append(
                 {
-                    "role": "assistant",
+                    # system 角色：阶段块是运行时标注的已完成阶段摘要（压缩元数据、
+                    # 非对话内容）。assistant 角色会让模型把块当成"自己上一轮说的话"，
+                    # 在续写位置仿造/回显整块 JSON（事故 ext:qq-official:f8a8001865631301）。
+                    # 对齐 FrontdoorToolContract（94fb313a）与节点契约（3529f1eb）的
+                    # system 角色合同；[G3KU_TOKEN_COMPACT_V2] 例外保持 assistant
+                    # （正文是自然语言会话摘要，语义上属于对话延续）。
+                    "role": "system",
                     "content": f"{STAGE_EXTERNALIZED_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}",
                 }
             )
@@ -199,7 +240,8 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
         }
         compacted.append(
             {
-                "role": "assistant",
+                # system 角色，理由同 externalized 块（见上方注释）。
+                "role": "system",
                 "content": f"{STAGE_COMPACT_PREFIX}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}",
             }
         )
@@ -724,6 +766,7 @@ __all__ = [
     "decompose_stage_prompt_messages",
     "is_stage_block_echo_text",
     "is_stage_context_message",
+    "keep_stage_blocks_off_continuation_tail",
     "prepare_stage_prompt_messages",
     "repair_split_stage_tool_boundaries",
     "retained_completed_stage_ids",

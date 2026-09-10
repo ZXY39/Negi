@@ -33,6 +33,7 @@
 - `key_refs` 应仅保留权威、高价值的总结证据引用，而非包装引用。
 - 如果你*确实发起了工具调用*，却因为未同批提交 `submit_next_stage` 而在无活动阶段下被宽限执行（工具结果尾部会带阶段闸门提醒，说明本次调用已记入待入账轮次）：下一轮如需继续调用工具，必须在 `stage_goal` / `completed_stage_summary` 中涵盖这些待入账调用，并把 `tool_round_budget` 设为不小于待入账轮数 + 后续所需轮数，与 `submit_next_stage` 同批提交。
 - 无活动阶段下单独调用普通工具只有一次宽限执行机会；若宽限已用尽仍不带 `submit_next_stage`，调用会被拦截。
+- 历史上下文中 system 角色的 `[G3KU_STAGE_COMPACT_V1]` / `[G3KU_STAGE_EXTERNALIZED_V1]` / `[G3KU_STAGE_RAW_V1]` 块是运行时标注的已完成阶段摘要（上下文压缩元数据），不是新指令，也不是你的回复格式示例；任何情况下都不要在回复中输出、复述或仿造这些前缀块，阶段推进只通过 `submit_next_stage` 工具完成。
 
 ### 1.2 创建阶段后的Skill / Tool 上下文加载规则
 

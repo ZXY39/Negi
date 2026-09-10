@@ -127,7 +127,7 @@ G3KU 并不是所有问题都在 CEO 单次对话内完成。frontdoor 的职责
 
 对于异步任务的回传：任务终态通过 task terminal callback / heartbeat 回到原 CEO 会话；heartbeat 的修复/回退语义与 `terminal_output` / `root_output` 双车道详见 `heartbeat-system.md`「Task Terminal Repair Contract」。
 
-当前 frontdoor 的上下文组织以阶段工作集为近场上下文：最近 3 个完成普通阶段与当前 active 阶段保留完整原始窗口（含工具调用），更早的完成普通阶段按阶段归属原位移除工具调用并以 compact 块回插原位，阶段之外的用户可见对话原位保留（表示规则见本文「Runtime Contract Lane」）。归档压缩阶段（`stage_kind="compression"`）是历史遗留表示数据：继续规范化与渲染为外置块，运行时不产生新的归档。全局语义摘要层不参与 prompt assembly；长会话的远场连续性由权威请求体基线、canonical context 链与压缩合同承担，收缩边界详见本文「Frontdoor Context Compression (Current Contract)」。
+当前 frontdoor 的上下文组织以阶段工作集为近场上下文：最近 3 个完成普通阶段与当前 active 阶段保留完整原始窗口（含工具调用），更早的完成普通阶段按阶段归属原位移除工具调用并以 compact 块回插原位，阶段之外的用户可见对话原位保留（表示规则见本文「Runtime Contract Lane」）。阶段块（`[G3KU_STAGE_COMPACT_V1]` / `[G3KU_STAGE_EXTERNALIZED_V1]` / `[G3KU_STAGE_RAW_V1]`）以 system 角色落地：运行时标注的已完成阶段摘要属压缩元数据、非对话内容，assistant 角色会诱导模型把块当成"自己上一轮说的话"而在续写位置仿造/回显（角色合同与迁移期双角色识别见 `context-and-cache-troubleshooting.md`「压缩块的格式与字段语义」）。归档压缩阶段（`stage_kind="compression"`）是历史遗留表示数据：继续规范化与渲染为外置块，运行时不产生新的归档。全局语义摘要层不参与 prompt assembly；长会话的远场连续性由权威请求体基线、canonical context 链与压缩合同承担，收缩边界详见本文「Frontdoor Context Compression (Current Contract)」。
 
 前门提示词分成“静态协议层”和“动态注入层”两部分理解：
 
@@ -462,6 +462,7 @@ Canonical 阶段状态按以下表示规则收敛（这是 canonical 链唯一�
 - 最近 3 个完成的普通阶段保持 `raw`；该规则与当时是否存在活动阶段无关，纯对话回合（无活动阶段）同样适用。
 - 更早的完成普通阶段变为 `compact`。
 - canonical 链只有 `raw` 与 `compact` 两级表示：历史数据中已存在的归档压缩阶段（`stage_kind="compression"`，外置表示）继续规范化与渲染，运行时不把完成阶段合并成新的归档阶段；长会话的阶段体积由 `compact` 块承载，总体积兜底归 `token_compression`。
+- 这些表示渲染为 `[G3KU_STAGE_*]` 消息块时以 system 角色落地（识别端接受 assistant/system 双角色以兼容存量旧块；角色合同本体见 `context-and-cache-troubleshooting.md`「压缩块的格式与字段语义」）。
 
 另有两条运行时边界：
 
@@ -511,7 +512,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 
 ### `stage_compaction`
 
-- 修剪的唯一真相源是 `stage_prompt_compaction.compact_stage_prompt_messages_in_place()`：最近 3 个完成普通阶段与活动阶段保留完整窗口；过期完成阶段的工具调用消息（`assistant+tool_calls` 与其配对 `tool` 响应）成对移除，对应 compact 块回插在该阶段首条被移除消息的位置（既有块按记忆位置回插）；阶段之外的用户可见对话原位保留；内部事件束（心跳规则/事件束、定时任务中文包装与 `[CRON INTERNAL EVENT]` 事件体）按缓存中性规则移除：只清理不早于本次压缩既有最早结构变化点的条目，本次压缩没有任何结构变化时一律保留，避免为清理历史内部事件额外打断 provider 前缀缓存。
+- 修剪的唯一真相源是 `stage_prompt_compaction.compact_stage_prompt_messages_in_place()`：最近 3 个完成普通阶段与活动阶段保留完整窗口；过期完成阶段的工具调用消息（`assistant+tool_calls` 与其配对 `tool` 响应）成对移除，对应 compact 块回插在该阶段首条被移除消息的位置（既有块按记忆位置回插；块以 system 角色渲染，识别端接受 assistant/system 双角色，存量旧 assistant 块在下一次压缩渲染回插时自然收敛，过渡期不重复、不丢块）；阶段之外的用户可见对话原位保留；内部事件束（心跳规则/事件束、定时任务中文包装与 `[CRON INTERNAL EVENT]` 事件体）按缓存中性规则移除：只清理不早于本次压缩既有最早结构变化点的条目，本次压缩没有任何结构变化时一律保留，避免为清理历史内部事件额外打断 provider 前缀缓存。
 - 原位放置是缓存硬约束：压缩块不整体收拢到上下文头部；除治愈遗留布局的一次性收敛外，每次压缩的前缀失效面从最早被压缩阶段的位置开始。
 - 该规则与是否存在活动阶段无关；无活动阶段的纯对话回合同样压缩过期阶段并保留最近 3 个。
 - 幂等：同一输入重写两次收敛为同一输出；归属保留阶段的残留旧块去重丢弃。

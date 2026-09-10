@@ -389,7 +389,9 @@ def _stage_context_digest(messages: list[dict]) -> str:
     found = False
     digest = hashlib.sha256()
     for message in list(messages or []):
-        if str(message.get('role') or '').strip().lower() != 'assistant':
+        # 阶段块已对齐为 system 角色；存量 baseline / sidecar / seed / scaffold 里
+        # 仍有 assistant 角色的旧块，迁移期双角色都参与摘要，保证 cache key 稳定。
+        if str(message.get('role') or '').strip().lower() not in {'assistant', 'system'}:
             continue
         content = str(message.get('content') or '')
         if not (

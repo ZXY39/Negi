@@ -8,6 +8,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     STAGE_RAW_PREFIX,
     compact_stage_prompt_messages_in_place,
     is_stage_block_echo_text,
+    keep_stage_blocks_off_continuation_tail,
     prepare_stage_prompt_messages,
     strip_stage_block_echo,
 )
@@ -183,6 +184,13 @@ def test_prepare_stage_prompt_messages_keeps_latest_three_completed_windows_and_
         if content.startswith(STAGE_COMPACT_PREFIX)
     ]
     assert len(compact_blocks) == 1
+    # 阶段块以 system 角色落地（压缩元数据、非对话内容）
+    compact_messages = [
+        item
+        for item in prepared
+        if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)
+    ]
+    assert [str(item.get("role")) for item in compact_messages] == ["system"]
     compact_payload = json.loads(compact_blocks[0].split("\n", 1)[1])
     assert compact_payload["stage_index"] == 1
     assert compact_payload["completed_stage_summary"] == "finished stage one"
@@ -253,6 +261,13 @@ def test_prepare_stage_prompt_messages_externalizes_compression_stages() -> None
         if content.startswith(STAGE_EXTERNALIZED_PREFIX)
     ]
     assert len(externalized_blocks) == 1
+    # 外置归档块同样以 system 角色落地
+    externalized_messages = [
+        item
+        for item in prepared
+        if str(item.get("content") or "").startswith(STAGE_EXTERNALIZED_PREFIX)
+    ]
+    assert [str(item.get("role")) for item in externalized_messages] == ["system"]
     payload = json.loads(externalized_blocks[0].split("\n", 1)[1])
     assert payload["archive_ref"] == "artifact:artifact:stage-archive-1"
     assert payload["archive_stage_index_start"] == 1
@@ -431,6 +446,144 @@ def test_in_place_compaction_is_idempotent_and_dedupes_stale_blocks() -> None:
     block_count = sum(1 for content in cleaned_contents if content.startswith(STAGE_COMPACT_PREFIX))
     assert block_count == 2  # 阶段 5 的残留块被去重，仅阶段 1/2 的块存在
     assert "output-5" in cleaned_contents
+
+
+def test_stage_blocks_render_with_system_role() -> None:
+    # 角色对齐（事故 ext:qq-official:f8a8001865631301）：阶段块是运行时标注的
+    # 已完成阶段摘要（压缩元数据、非对话内容），必须以 system 角色落地；
+    # assistant 角色会向模型示范"你的回复长这样"，诱导其在续写位置仿造/回显
+    # 整块 JSON。[G3KU_TOKEN_COMPACT_V2] 例外保持 assistant（自然语言会话摘要，
+    # 渲染在 _ceo_runtime_ops，不在本模块）。
+    stage_state = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-compression-1-10",
+                "stage_index": 10,
+                "stage_kind": "compression",
+                "system_generated": True,
+                "status": "completed",
+                "stage_goal": "Archive completed stage history 1-10",
+                "completed_stage_summary": "archived",
+                "archive_ref": "artifact:artifact:legacy-archive",
+                "archive_stage_index_start": 1,
+                "archive_stage_index_end": 10,
+                "tool_round_budget": 0,
+                "tool_rounds_used": 0,
+            },
+            *[
+                _stage_record(index, rounds=[_round(index, [f"call-work-{index}"])])
+                for index in range(11, 16)
+            ],
+        ],
+    }
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hi"},
+    ]
+    for index in range(11, 16):
+        messages.extend(_stage_window(index))
+
+    result = compact_stage_prompt_messages_in_place(
+        messages, stage_state=stage_state, keep_latest_completed_stages=3
+    )
+
+    blocks = [
+        item
+        for item in result["rewritten"]
+        if str(item.get("content") or "").startswith(
+            (STAGE_COMPACT_PREFIX, STAGE_EXTERNALIZED_PREFIX, STAGE_RAW_PREFIX)
+        )
+    ]
+    assert blocks
+    assert all(str(item.get("role") or "") == "system" for item in blocks)
+    rendered_prefixes = {str(item.get("content") or "").split("\n", 1)[0] for item in blocks}
+    assert STAGE_COMPACT_PREFIX in rendered_prefixes
+    assert STAGE_EXTERNALIZED_PREFIX in rendered_prefixes
+
+
+def test_in_place_compaction_accepts_mixed_legacy_assistant_and_system_blocks() -> None:
+    # 迁移期双角色识别：存量 durable baseline / continuity sidecar / 续跑 seed /
+    # actual-request scaffold 里可能仍有 assistant 角色旧块，与新渲染的 system 块
+    # 混存。压缩必须两类都剥离并去重回插——不得因识别不到旧块而重复或丢失，
+    # 且重复执行收敛（幂等），旧块随下一次渲染自然收敛为 system 角色。
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hi"},
+    ]
+    for index in range(1, 6):
+        messages.extend(_stage_window(index))
+    stage_state = _five_completed_stage_state()
+
+    first = compact_stage_prompt_messages_in_place(
+        messages, stage_state=stage_state, keep_latest_completed_stages=3
+    )
+    first_output = [*first["prefix"], *first["rewritten"]]
+    stage_one_block = next(
+        item
+        for item in first_output
+        if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)
+        and int(json.loads(str(item.get("content")).split("\n", 1)[1])["stage_index"]) == 1
+    )
+    assert str(stage_one_block.get("role")) == "system"
+
+    # 模拟存量旧块：同内容、assistant 角色，混入历史另一位置
+    legacy_block = {"role": "assistant", "content": stage_one_block["content"]}
+    mixed = list(first_output)
+    mixed.insert(2, legacy_block)
+
+    second = compact_stage_prompt_messages_in_place(
+        mixed, stage_state=stage_state, keep_latest_completed_stages=3
+    )
+    second_output = [*second["prefix"], *second["rewritten"]]
+    # 旧块被剥离并去重：收敛回与无旧块时完全相同的布局
+    assert second_output == first_output
+    assert sum(
+        1 for item in second_output if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)
+    ) == 2
+
+    third = compact_stage_prompt_messages_in_place(
+        second_output, stage_state=stage_state, keep_latest_completed_stages=3
+    )
+    assert [*third["prefix"], *third["rewritten"]] == second_output
+
+
+def test_keep_stage_blocks_off_continuation_tail_moves_trailing_blocks_before_last_user() -> None:
+    # 块不占续写位：落在最后一条 user 之后的阶段块（新 system 块与存量旧
+    # assistant 块都算）整体前移到该 user 之前，保持块间相对顺序。
+    block = {"role": "system", "content": f'{STAGE_COMPACT_PREFIX}\n{{"stage_index":1}}'}
+    legacy_block = {"role": "assistant", "content": f'{STAGE_RAW_PREFIX}\n{{"stage_index":2}}'}
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "bootstrap"},
+        {"role": "user", "content": "current turn"},
+        block,
+        legacy_block,
+    ]
+
+    guarded = keep_stage_blocks_off_continuation_tail(messages)
+
+    assert [str(item.get("content") or "") for item in guarded] == [
+        "system",
+        "bootstrap",
+        block["content"],
+        legacy_block["content"],
+        "current turn",
+    ]
+
+    # 无越界块时原样返回（缓存中性：不做任何重排）
+    already_ok = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "bootstrap"},
+        block,
+        {"role": "user", "content": "current turn"},
+    ]
+    assert keep_stage_blocks_off_continuation_tail(already_ok) == already_ok
+
+    # 无 user 消息时原样返回（后续组装会补当前用户回合到末位）
+    assert keep_stage_blocks_off_continuation_tail([block]) == [block]
+    assert keep_stage_blocks_off_continuation_tail([]) == []
 
 
 def test_in_place_compaction_renders_legacy_compression_stage_blocks() -> None:

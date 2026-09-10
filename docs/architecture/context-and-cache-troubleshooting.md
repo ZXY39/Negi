@@ -64,6 +64,8 @@ CEO/frontdoor 的 provider-facing request 以 `.g3ku/web-ceo-requests/<session>/
 
 常见情况：`request_messages` 看起来公共前缀很长，但 `provider_request_body.input` 的第一个分叉点更早——说明高层 projection 没问题，真正的问题出在 adapter 最终 payload。
 
+Responses 协议（`/responses` 路径）对 system 消息是**按序合并**语义：协议只有一个 `instructions` 字段，adapter（`responses_protocol_helpers._convert_messages`）把历史中全部 system 消息——基础系统提示、mid-history 运行时工具契约、`[G3KU_STAGE_*]` 阶段块——按历史顺序合并进 `instructions`（`\n\n` 分隔），并在 `input` 头部额外插入一份 `[SYSTEM]…[END SYSTEM]` user 项兜底。取证时不要在 `provider_request_body.input` 的原位找阶段块或契约块——它们不在 `input` 里；要核对 `instructions` 是否按序包含全部 system 内容（丢失或互相覆盖属 adapter bug）。原位压缩设计（块落回被压缩阶段原位置）只在 Chat Completions 协议路径成立：`openai_chat` 透传 mid-history system 消息，阶段块以 system 角色保留在原位。
+
 Memory guard 维护要点：
 
 - frontdoor 与节点的 actual-request 持久化都带 memory guard：正常路径完整保留 `request_messages`、`tool_schemas` / `actual_tool_schemas` 与 adapter-final `provider_request_body`；节点侧正常路径直接写专用 JSON，只有该写入本身命中 `MemoryError` 才降级。
@@ -231,7 +233,9 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 
 ### 4.5 压缩块的格式与字段语义
 
-两种压缩路径在 transcript 与 request artifact 里都落为**带前缀的单条 assistant 消息**：首行前缀标记，其后 `\n` 分隔的 JSON 元数据（`ensure_ascii=False, sort_keys=True` 序列化）；识别只需前缀匹配，不必解析 JSON。看到哪个前缀即判定归属哪条路径：
+两种压缩路径在 transcript 与 request artifact 里都落为**带前缀的单条消息**：首行前缀标记，其后 `\n` 分隔的 JSON 元数据（`ensure_ascii=False, sort_keys=True` 序列化）；识别只需前缀匹配，不必解析 JSON。看到哪个前缀即判定归属哪条路径。
+
+角色合同：三个 `[G3KU_STAGE_*]` 阶段块是 **system 角色**——运行时标注的已完成阶段摘要属于压缩元数据、不是对话内容，用 assistant 角色会让模型把块当成"自己上一轮说过的话"，进而在续写位置仿造/回显整块 JSON（伪造块被当作最终回复投递给用户即此类事故）；`[G3KU_TOKEN_COMPACT_V2]` 保持 **assistant 角色**——其正文是模型直接继续阅读的自然语言会话摘要，语义上属于对话延续。阶段块识别（`is_stage_context_message`）接受 assistant/system 双角色：存量 durable baseline、continuity sidecar、续跑 seed 与 actual-request scaffold 里可能仍带 assistant 角色的旧块，双角色识别保证过渡期压缩不重复、不丢块；旧块在下一次压缩渲染回插时自然收敛为 system 角色。
 
 - `[G3KU_TOKEN_COMPACT_V2]` — 内联 LLM 全局压缩。第二行 JSON 为 `{"kind":"frontdoor_token_compaction_llm","history_message_count":N}`，空行后接中文压缩摘要正文：模型直接继续阅读的自然语言会话内容，不是结构化数据，也不是 JSON。
 - `[G3KU_STAGE_COMPACT_V1]` — `stage_compaction` 生成的普通完成阶段块（工具肉身已剪掉）。元数据字段：`stage_index` / `stage_kind` / `system_generated` / `mode` / `status` / `stage_goal` / `completed_stage_summary` / `key_refs` / `tool_round_budget` / `tool_rounds_used`。不携带 `rounds` / `tools` 是有损设计的预期，不是数据缺失。

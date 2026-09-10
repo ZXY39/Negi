@@ -2392,11 +2392,22 @@ def test_prompt_cache_key_changes_when_stage_context_blocks_change() -> None:
         'role': 'assistant',
         'content': '[G3KU_STAGE_COMPACT_V1]\n{"stage_index":1,"completed_stage_summary":"beta"}',
     }
+    # 阶段块角色对齐 system 后，摘要必须同样识别 system 角色块（双角色识别），
+    # 否则迁移期新块不参与 stage_context_digest，cache key 失去块内容敏感性。
+    compact_a_system = {**compact_a, 'role': 'system'}
+    compact_b_system = {**compact_b, 'role': 'system'}
 
     first = build_stable_prompt_cache_key([*base_messages, compact_a], None, 'model-a')
     second = build_stable_prompt_cache_key([*base_messages, compact_b], None, 'model-a')
+    first_system = build_stable_prompt_cache_key([*base_messages, compact_a_system], None, 'model-a')
+    second_system = build_stable_prompt_cache_key([*base_messages, compact_b_system], None, 'model-a')
 
     assert first != second
+    assert first_system != second_system
+    # 摘要只吃块内容不吃角色：同一块 assistant→system 角色迁移不制造 caller-side
+    # family churn（provider 侧前缀失效是角色切换的一次性成本，属另一层）。
+    assert first == first_system
+    assert second == second_system
 
 
 def test_prompt_cache_key_ignores_tool_schema_changes_when_messages_match() -> None:

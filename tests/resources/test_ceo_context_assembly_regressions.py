@@ -2453,6 +2453,108 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
         "content": "raw",
     }
     assert any(content.startswith("[G3KU_STAGE_COMPACT_V1]") for content in stable_contents)
+    # raw 块以 system 角色落地（压缩元数据、非对话内容）
+    raw_block_messages = [
+        item
+        for item in result.stable_messages
+        if str(item.get("content") or "").startswith("[G3KU_STAGE_RAW_V1]")
+    ]
+    assert raw_block_messages
+    assert all(str(item.get("role") or "") == "system" for item in raw_block_messages)
+
+
+def _completed_stage_with_round(index: int) -> dict[str, object]:
+    return {
+        "stage_id": f"frontdoor-stage-{index}",
+        "stage_index": index,
+        "stage_kind": "normal",
+        "system_generated": False,
+        "mode": "自主执行",
+        "status": "completed",
+        "stage_goal": f"goal {index}",
+        "completed_stage_summary": f"finished {index}",
+        "key_refs": [],
+        "tool_round_budget": 2,
+        "tool_rounds_used": 1,
+        "rounds": [
+            {
+                "round_id": f"frontdoor-stage-{index}:round-1",
+                "round_index": 1,
+                "tool_names": ["exec"],
+                "tool_call_ids": [f"call-{index}"],
+                "budget_counted": True,
+                "tools": [
+                    {
+                        "tool_call_id": f"call-{index}",
+                        "tool_name": "exec",
+                        "arguments": {},
+                        "arguments_text": "exec {}",
+                        "output_text": f"output-{index}",
+                        "output_preview_text": "",
+                        "output_ref": "",
+                        "status": "success",
+                        "started_at": "",
+                        "finished_at": "",
+                        "timestamp": "",
+                        "elapsed_seconds": 1.0,
+                        "kind": "tool_result",
+                        "source": "user",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_message_builder_keeps_stage_blocks_off_request_tail_when_current_user_in_history() -> None:
+    # 不变量：块不占续写位——请求末位保持当前 user 回合。workset 拼装路径下
+    # 当前用户回合已在历史里时，阶段块不得落在其后（否则模型在块之后续写，
+    # 把整块 JSON 当成"自己上一轮说的话"仿造/回显，事故
+    # ext:qq-official:f8a8001865631301 的请求形态）；越界块整体前移到最后一条
+    # user 之前，且全部以 system 角色落地。
+    prompt_builder = _SplitPromptBuilder()
+    memory_manager = _MemoryManager(response="")
+    builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
+
+    checkpoint_messages = [
+        {"role": "user", "content": "bootstrap request"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    result = await builder.build_for_ceo(
+        session=_session(),
+        query_text="continue",
+        exposure={"skills": [], "tool_families": [], "tool_names": []},
+        persisted_session=None,
+        checkpoint_messages=checkpoint_messages,
+        user_content="continue",
+        frontdoor_stage_state={
+            "active_stage_id": "",
+            "transition_required": False,
+            "stages": [_completed_stage_with_round(index) for index in range(1, 5)],
+        },
+    )
+
+    stable = result.stable_messages
+    block_prefixes = ("[G3KU_STAGE_COMPACT_V1]", "[G3KU_STAGE_EXTERNALIZED_V1]", "[G3KU_STAGE_RAW_V1]")
+    block_indexes = [
+        index
+        for index, item in enumerate(stable)
+        if str(item.get("content") or "").startswith(block_prefixes)
+    ]
+    assert block_indexes  # 4 个完成阶段：1 个 compact 块 + 3 个 raw 块被渲染
+    last_user_index = max(
+        index
+        for index, item in enumerate(stable)
+        if str(item.get("role") or "").strip().lower() == "user"
+    )
+    # 末位是当前用户回合（允许送达时间装饰），块全部位于其前
+    assert last_user_index == len(stable) - 1
+    assert strip_arrival_time_stamp(str(stable[-1].get("content") or "")).strip() == "continue"
+    assert max(block_indexes) < last_user_index
+    # 块以 system 角色落地
+    assert all(str(stable[index].get("role") or "") == "system" for index in block_indexes)
 
 
 @pytest.mark.asyncio
