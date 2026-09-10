@@ -734,8 +734,11 @@ class MainRuntimeService:
         runnable_node_ids = [str(item) for item in list(runtime_state.get('runnable_node_ids') or []) if str(item or '').strip()]
         waiting_node_ids = [str(item) for item in list(runtime_state.get('waiting_node_ids') or []) if str(item or '').strip()]
         if not frames:
+            # 恢复语义:制造出的帧只表示「可运行、待调度」,不得标记 active——
+            # 真正的执行资格由随后的调度/执行轮次授予。否则 task_progress
+            # 会把恢复后尚未获得执行的任务直接渲染成「运行中」。
             frames = [self.log_service._default_frame(node_id=root.node_id, depth=root.depth, node_kind=root.node_kind, phase='before_model')]
-            active_node_ids = [root.node_id]
+            active_node_ids = []
             runnable_node_ids = [root.node_id]
             waiting_node_ids = []
         self.log_service.replace_runtime_frames(

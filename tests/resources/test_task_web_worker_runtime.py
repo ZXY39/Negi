@@ -9552,7 +9552,7 @@ def test_live_tree_payload_keeps_acceptance_node_kind(tmp_path: Path):
     assert payload["nodes_by_id"][acceptance.node_id]["node_kind"] == "acceptance"
 
 
-def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: Path):
+def test_view_progress_text_contains_status_activity_and_tree(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -9605,6 +9605,11 @@ def test_view_progress_text_contains_only_status_and_stage_goal_tree(tmp_path: P
     assert acceptance.node_id in text
     assert "Latest node output" not in text
     assert "Active parallel work:" not in text
+    # 文本真化契约:活动时间/调度计数进头部;未获调度证据的验收节点显示等待态。
+    assert "最近活动:" in text
+    assert "调度:" in text
+    assert "待检验" in text
+    assert "检验中" not in text
 
 
 def test_view_progress_tree_text_shows_acceptance_stage_goal_when_present(tmp_path: Path):
@@ -9699,7 +9704,8 @@ def test_view_progress_tree_text_prefers_live_stage_goal_over_historical_goal(tm
     progress = service.query_service.view_progress(record.task_id, mark_read=False)
 
     assert progress is not None
-    assert progress.tree_text == f"({root.node_id},in_progress,鏈€鏂伴樁娈电洰鏍?)"
+    # 活跃帧带活性标注:该根节点此刻确实在运行,文本如实标注「运行中」。
+    assert progress.tree_text == f"({root.node_id},in_progress,鏈€鏂伴樁娈电洰鏍?,运行中)"
 
 
 def test_running_node_output_does_not_pollute_final_output_in_projection(tmp_path: Path):

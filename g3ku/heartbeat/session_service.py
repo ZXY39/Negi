@@ -1043,6 +1043,8 @@ class WebSessionHeartbeatService:
             lines.extend(
                 [
                     "For task_stall events, first inspect the task with task_progress(task_id).",
+                    "In task_progress output, 'in_progress' only means non-terminal, not actively running;",
+                    "only lines with a fresh 运行中/检验中 marker plus a recent 最近活动 time count as executing.",
                     "If the task appears stuck and must be stopped, you may call stop_tool_execution with the task_id.",
                     "After any stop decision, explain the likely cause and the next follow-up action.",
                 ]

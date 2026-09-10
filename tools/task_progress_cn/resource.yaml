@@ -2,14 +2,26 @@ schema_version: 1
 kind: tool
 display_name: "查看任务进度工具"
 name: task_progress
-description: View task status and stage-aware progress text.
+description: >-
+  View task status and stage-aware progress text. Judging rules for the returned status text:
+  'in_progress' only means the task/node has NOT reached a terminal state — it does NOT mean
+  execution is happening right now. A node (including acceptance nodes) counts as currently
+  running only when its line carries a fresh activity marker (运行中 / 检验中) together with a
+  recent 最近活动 time; 排队待运行 / 等待中 / 无活跃调度 mean the node is not executing yet;
+  待检验 means an acceptance node is waiting and is NOT verifying; 疑似中断 means the frame
+  shows no recent updates. Never tell users a node is actively running or verifying without
+  such activity evidence — report the status and last-activity age honestly instead.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local task runtime tool. Handler and governance live with the resource so discovery can refresh without a host restart.
+  summary: >-
+    Resource-local task runtime tool. Handler and governance live with the resource so discovery
+    can refresh without a host restart. Truthful activity semantics: in_progress means non-terminal,
+    not executing; only fresh active frames render as 运行中/检验中, stale frames render as 疑似中断,
+    and undispatched acceptance nodes render as 待检验.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:

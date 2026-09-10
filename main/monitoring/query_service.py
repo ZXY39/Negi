@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from main.models import (
     ModelTokenUsageRecord,
@@ -50,6 +50,11 @@ from main.runtime.acceptance_handshake import (
 
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
+
+# task_progress 文本真化:活跃帧超过该时长未更新时不再渲染为「运行中」,
+# 避免把「从未清理的陈旧帧 / 恢复后未获执行资格的任务」表述成真实执行。
+# 阈值取停滞提醒首档(20 分钟)的一半,给正常长工具执行留足余量。
+_STALE_FRAME_MINUTES = 10.0
 
 
 class TaskQueryService:
@@ -311,6 +316,8 @@ class TaskQueryService:
         )
         latest_node = self._latest_projection_node(task_id)
         live_state = self._projection_live_state(task_id)
+        activity_by_node = self._node_activity_labels(task_id)
+        final_acceptance_label = self._final_acceptance_display_label(task)
         tree_text = self._render_projection_tree_text(
             task.task_id,
             root_node_id=str(task.root_node_id or '').strip(),
@@ -318,6 +325,8 @@ class TaskQueryService:
             rounds_by_parent=rounds_by_parent,
             direct_children=direct_children,
             live_state=live_state,
+            activity_by_node=activity_by_node,
+            final_acceptance_label=final_acceptance_label,
         )
         latest_node = self._with_display_fallback_for_latest_node(
             task_id,
@@ -326,6 +335,14 @@ class TaskQueryService:
         )
         model_calls = self._recent_model_calls(task_id)
         text = f'Task status: {task.status}'
+        header_lines = self._task_progress_activity_lines(
+            task,
+            live_state=live_state,
+            final_acceptance_label=final_acceptance_label,
+            fallback_activity_at=self._latest_node_activity_at(runtime_nodes),
+        )
+        if header_lines:
+            text = f'{text}\n' + '\n'.join(header_lines)
         if tree_text:
             text = f'{text}\n{tree_text}'
         return TaskProgressResult(
@@ -1414,6 +1431,140 @@ class TaskQueryService:
             'inspection': max(0, int(counters.get('inspection') or 0)),
         }
 
+    @staticmethod
+    def _parse_iso_utc(value: Any) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _elapsed_minutes(cls, iso_value: Any, *, now: datetime | None = None) -> float | None:
+        started = cls._parse_iso_utc(iso_value)
+        if started is None:
+            return None
+        current = now or datetime.now(timezone.utc)
+        return max(0.0, (current - started).total_seconds() / 60.0)
+
+    @classmethod
+    def _elapsed_display(cls, iso_value: Any, *, now: datetime | None = None) -> str:
+        minutes = cls._elapsed_minutes(iso_value, now=now)
+        if minutes is None:
+            return ''
+        if minutes < 1:
+            return '刚刚'
+        if minutes < 60:
+            return f'{int(minutes)} 分钟前'
+        if minutes < 60 * 24:
+            return f'{int(minutes // 60)} 小时 {int(minutes % 60)} 分钟前'
+        return f'{int(minutes // (60 * 24))} 天前'
+
+    def _node_activity_labels(self, task_id: str, *, now: datetime | None = None) -> dict[str, str]:
+        """node_id -> 活性标注(只读推算,不写任何状态)。
+
+        「运行中」只授予新鲜的 active 帧;陈旧 active 帧降级为「疑似中断」,
+        避免把没有真实执行活动的节点表述成正在运行。"""
+        labels: dict[str, str] = {}
+        for record in list(self._store.list_task_runtime_frames(task_id) or []):
+            node_id = str(record.node_id or '').strip()
+            if not node_id:
+                continue
+            age_minutes = self._elapsed_minutes(record.updated_at, now=now)
+            if bool(record.active):
+                if age_minutes is not None and age_minutes >= _STALE_FRAME_MINUTES:
+                    labels[node_id] = f'疑似中断(活跃帧{int(age_minutes)}分钟未更新)'
+                else:
+                    labels[node_id] = '运行中'
+            elif bool(record.runnable):
+                labels[node_id] = '排队待运行'
+            elif bool(record.waiting):
+                labels[node_id] = '等待中'
+            else:
+                labels[node_id] = '无活跃调度'
+        return labels
+
+    @classmethod
+    def _latest_node_activity_at(cls, nodes: Iterable[Any]) -> str:
+        best_at = ''
+        best_dt: datetime | None = None
+        for node in list(nodes or []):
+            raw = str(getattr(node, 'updated_at', '') or '').strip()
+            dt = cls._parse_iso_utc(raw)
+            if dt is None:
+                continue
+            if best_dt is None or dt > best_dt:
+                best_dt = dt
+                best_at = raw
+        return best_at
+
+    @staticmethod
+    def _final_acceptance_display_label(task: Any) -> str:
+        try:
+            metadata = dict(getattr(task, 'metadata', None) or {}) if isinstance(getattr(task, 'metadata', None), dict) else {}
+            final_acceptance = normalize_final_acceptance_metadata(metadata.get('final_acceptance'))
+            if not bool(getattr(final_acceptance, 'required', False)):
+                return ''
+            label_by_status = {
+                ACCEPTANCE_STATE_WAITING_ACCEPTANCE: '等待验收',
+                ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY: '等待执行节点重试',
+                ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION: '等待冻结核验',
+                'running': '验收运行中',
+                'passed': '验收通过',
+                'failed': '验收失败',
+                ACCEPTANCE_STATE_ACCEPTED: '验收已接收',
+                ACCEPTANCE_STATE_REJECTED_TERMINAL: '验收终态驳回',
+                ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE: '验收因执行失败取消',
+            }
+            status = str(getattr(final_acceptance, 'status', '') or '').strip().lower()
+            if not status or status == 'pending':
+                return '验收待定'
+            return label_by_status.get(status, f'验收 {status}')
+        except Exception:
+            return ''
+
+    def _task_progress_activity_lines(
+        self,
+        task: Any,
+        *,
+        live_state: TaskLiveState | None,
+        final_acceptance_label: str,
+        fallback_activity_at: str = '',
+    ) -> list[str]:
+        if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
+            return []
+        runtime_meta = self._log_service.read_task_runtime_meta(str(task.task_id or '')) or {}
+        # 注意:不能回退到 task.updated_at——mark_task_read 等账本动作会刷新它,
+        # 会把「刚查看过」误当「有真实执行活动」。优先级:
+        # 停滞追踪的可见输出时间 > 最新节点更新 > 创建时间。
+        last_visible = str(runtime_meta.get('last_visible_output_at') or fallback_activity_at or '').strip()
+        if not last_visible:
+            last_visible = str(getattr(task, 'created_at', '') or '').strip()
+        lines: list[str] = []
+        parts: list[str] = []
+        activity_text = self._elapsed_display(last_visible)
+        if activity_text:
+            parts.append(f'最近活动: {activity_text}')
+        if live_state is not None:
+            parts.append(
+                '调度: execution(运行{}/排队{}) inspection(运行{}/排队{})'.format(
+                    int(getattr(live_state.dispatch_running, 'execution', 0) or 0),
+                    int(getattr(live_state.dispatch_queued, 'execution', 0) or 0),
+                    int(getattr(live_state.dispatch_running, 'inspection', 0) or 0),
+                    int(getattr(live_state.dispatch_queued, 'inspection', 0) or 0),
+                )
+            )
+        if parts:
+            lines.append(' | '.join(parts))
+        if final_acceptance_label:
+            lines.append(f'验收: {final_acceptance_label}')
+        return lines
+
     def _latest_projection_node(self, task_id: str) -> LatestTaskNodeOutput | None:
         details = self._store.list_task_node_details(task_id)
         if not details:
@@ -1574,12 +1725,15 @@ class TaskQueryService:
         rounds_by_parent: dict[str, list[Any]],
         direct_children: dict[str, list[str]],
         live_state: TaskLiveState | None = None,
+        activity_by_node: dict[str, str] | None = None,
+        final_acceptance_label: str = '',
     ) -> str:
         normalized_root_node_id = str(root_node_id or '').strip()
         if not normalized_root_node_id or normalized_root_node_id not in node_map:
             return '(empty tree)'
         lines: list[str] = []
         stage_goals = self._node_stage_goal_map(task_id, live_state=live_state)
+        activities = dict(activity_by_node or {})
 
         def _walk(node_id: str, prefix: str = '', *, is_root: bool = False, seen: set[str]) -> None:
             normalized_node_id = str(node_id or '').strip()
@@ -1589,7 +1743,12 @@ class TaskQueryService:
             if record is None:
                 return
             seen.add(normalized_node_id)
-            label = self._tree_text_label(record, stage_goals)
+            label = self._tree_text_label(
+                record,
+                stage_goals,
+                activity_label=activities.get(normalized_node_id, ''),
+                final_acceptance_label=final_acceptance_label,
+            )
             lines.append(label if is_root else f'{prefix}|-{label}')
             child_prefix = '' if is_root else f'{prefix}  '
             for child_id in self._projection_visible_child_ids(
@@ -1649,13 +1808,30 @@ class TaskQueryService:
         return max(scored, key=lambda item: (item[0], item[1]))[2]
 
     @staticmethod
-    def _tree_display_stage_goal(node: Any, stage_goals: dict[str, str]) -> str:
+    def _tree_display_stage_goal(
+        node: Any,
+        stage_goals: dict[str, str],
+        *,
+        activity_label: str = '',
+        final_acceptance_label: str = '',
+    ) -> str:
         stage_goal = str(stage_goals.get(str(node.node_id or '').strip()) or '').strip()
         if stage_goal:
             return stage_goal
-        if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() == 'acceptance':
+        if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() != 'acceptance':
+            return '无阶段目标'
+        # 验收节点只有存在新鲜运行证据(活跃帧)时才能表述为「检验中」;
+        # 否则如实显示等待态或已有检验结果——禁止把从未被真正派发的
+        # 验收节点渲染成「检验中」。
+        if activity_label == '运行中':
             return '检验中'
-        return '无阶段目标'
+        check_result = str(getattr(node, 'check_result', '') or '').strip()
+        if check_result:
+            preview = TaskQueryService._preview_text(check_result, max_chars=60)
+            return f'检验结果:{preview}'
+        if final_acceptance_label:
+            return final_acceptance_label
+        return '待检验'
 
     @staticmethod
     def _tree_pause_display(node: Any) -> str:
@@ -1669,14 +1845,30 @@ class TaskQueryService:
         return f'paused({pause_reason})' if pause_reason else 'paused'
 
     @classmethod
-    def _tree_text_label(cls, node: Any, stage_goals: dict[str, str]) -> str:
+    def _tree_text_label(
+        cls,
+        node: Any,
+        stage_goals: dict[str, str],
+        *,
+        activity_label: str = '',
+        final_acceptance_label: str = '',
+    ) -> str:
         node_id = str(getattr(node, 'node_id', '') or '').strip()
         status = cls._tree_pause_display(node)
-        stage_goal = cls._tree_display_stage_goal(node, stage_goals)
+        stage_goal = cls._tree_display_stage_goal(
+            node,
+            stage_goals,
+            activity_label=activity_label,
+            final_acceptance_label=final_acceptance_label,
+        )
         if str(getattr(node, 'node_kind', 'execution') or 'execution').strip().lower() == 'acceptance':
             parent_node_id = str(getattr(node, 'parent_node_id', '') or '').strip() or '?'
-            return f'([验收上层父节点:{parent_node_id}] {node_id},{status},{stage_goal})'
-        return f'({node_id},{status},{stage_goal})'
+            label = f'([验收上层父节点:{parent_node_id}] {node_id},{status},{stage_goal}'
+        else:
+            label = f'({node_id},{status},{stage_goal}'
+        if activity_label:
+            label = f'{label},{activity_label}'
+        return f'{label})'
 
     def _latest_node(self, nodes: list[NodeRecord]) -> LatestTaskNodeOutput | None:
         if not nodes:
