@@ -31,7 +31,6 @@ settings:
   install_root: externaltools/agent_browser
   browser_root: externaltools/agent_browser/browsers
   temp_root: temp/agent_browser
-  default_timeout_seconds: 300
   auto_session: true
   default_session_name: g3ku-agent-browser
   profile_root: .g3ku/tool-data/agent_browser/profiles
@@ -65,9 +64,6 @@ parameters:
     stdin:
       type: string
       description: Optional stdin text passed to the CLI process.
-    timeout_seconds:
-      type: integer
-      description: Optional per-command timeout override in seconds.
   required: []
 governance:
   family: agent_browser

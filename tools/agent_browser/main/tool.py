@@ -12,10 +12,15 @@ from typing import Any
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.tool_settings import AgentBrowserToolSettings, runtime_tool_settings
 from g3ku.runtime.cancellation import ToolCancellationRequested
+from g3ku.runtime.tool_watchdog import coerce_timeout_argument, resolve_tool_watchdog_config
 from g3ku.utils.subprocess_text import decode_subprocess_output
 
 
 class AgentBrowserTool(Tool):
+    # 持有浏览器子进程与会话状态，超时需要结构化收尾（杀进程 + 清理会话），
+    # 由工具自身消费统一 timeout 值；外层强制层对其让位。
+    self_enforced_timeout = True
+
     def __init__(self, *, workspace: Path, settings: AgentBrowserToolSettings, toolskill_path: Path | None = None) -> None:
         self._workspace = Path(workspace).resolve()
         self._settings = settings
@@ -62,10 +67,6 @@ class AgentBrowserTool(Tool):
                     'type': 'string',
                     'description': 'Optional stdin text passed to the process.',
                 },
-                'timeout_seconds': {
-                    'type': 'integer',
-                    'description': 'Optional timeout override in seconds.',
-                },
             },
             'required': [],
         }
@@ -89,7 +90,7 @@ class AgentBrowserTool(Tool):
         profile: str | None = None,
         session_name: str | None = None,
         stdin: str | None = None,
-        timeout_seconds: int | None = None,
+        timeout: float | None = None,
         __g3ku_runtime: dict[str, Any] | None = None,
         **_: Any,
     ) -> str:
@@ -113,7 +114,10 @@ class AgentBrowserTool(Tool):
             env = self._build_process_env()
             final_args = self._inject_global_flags(argv=argv, session=None, profile=profile, session_name=session_name)
             active_session = self._session_from_args(final_args)
-            effective_timeout = max(1, int(timeout_seconds or self._settings.default_timeout_seconds or 300))
+            resolved_timeout = coerce_timeout_argument(timeout)
+            if resolved_timeout is None:
+                resolved_timeout = resolve_tool_watchdog_config(runtime).default_timeout_seconds
+            effective_timeout = max(1, int(resolved_timeout))
 
             first_result = await self._run_command(
                 command_prefix=command_prefix,
@@ -681,7 +685,8 @@ class AgentBrowserTool(Tool):
             cwd=cwd,
             env=env,
             stdin=None,
-            timeout_seconds=max(1, int(self._settings.default_timeout_seconds or 300)),
+            # 内部操作性超时（关闭会话），不属于工具最大运行时长合同。
+            timeout_seconds=30,
             cancel_token=cancel_token,
             runtime_context=runtime_context,
         )

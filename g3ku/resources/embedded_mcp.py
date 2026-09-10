@@ -61,6 +61,25 @@ def _normalize_parameters(schema: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _with_universal_timeout_property(schema: dict[str, Any]) -> dict[str, Any]:
+    properties = dict(schema.get("properties") or {})
+    if "timeout" in properties:
+        return schema
+    return {
+        **schema,
+        "properties": {
+            **properties,
+            "timeout": {
+                "type": "number",
+                "description": (
+                    "Optional maximum execution time in seconds for this call. "
+                    "When omitted, the runtime default (600s) applies."
+                ),
+            },
+        },
+    }
+
+
 def _build_signature(schema: dict[str, Any]) -> inspect.Signature:
     props = dict(schema.get("properties") or {})
     required = set(schema.get("required") or [])
@@ -121,6 +140,10 @@ class EmbeddedMCPTool(Tool):
         self._descriptor = descriptor
         self._handler = handler
         self._parameters = _normalize_parameters(descriptor.parameters)
+        if bool(getattr(handler, "self_enforced_timeout", False)):
+            # 自持工具消费统一 timeout 参数：FastMCP 按注册 schema 校验入参，
+            # 必须把统一参数并入，否则 call_tool 会在进工具前把它拒掉。
+            self._parameters = _with_universal_timeout_property(self._parameters)
         self._server = FastMCP(name=f"g3ku-{descriptor.name}")
         self._server.add_tool(
             self._build_tool_callable(),
@@ -164,6 +187,14 @@ class EmbeddedMCPTool(Tool):
         if hasattr(self._handler, "set_context"):
             return self._handler.set_context(*args, **kwargs)
         return None
+
+    @property
+    def self_enforced_timeout(self) -> bool:  # type: ignore[override]
+        return bool(getattr(self._handler, "self_enforced_timeout", False))
+
+    @property
+    def hide_universal_timeout_parameter(self) -> bool:  # type: ignore[override]
+        return bool(getattr(self._handler, "hide_universal_timeout_parameter", False))
 
     def close(self) -> Any:
         if hasattr(self._handler, "close"):

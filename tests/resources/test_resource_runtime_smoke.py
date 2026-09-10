@@ -1492,7 +1492,6 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
     manifest = workspace / 'tools' / 'exec' / 'resource.yaml'
     manifest.write_text(
         manifest.read_text(encoding='utf-8')
-        .replace('timeout: 60', 'timeout: 7')
         .replace("path_append: ''", "path_append: 'D:/bin'")
         .replace('restrict_to_workspace: false', 'restrict_to_workspace: true'),
         encoding='utf-8',
@@ -1504,7 +1503,9 @@ async def test_exec_tool_reads_manifest_settings(tmp_path: Path):
         tool = manager.get_tool('exec')
         assert tool is not None
         handler = tool._handler
-        assert handler.timeout == 7
+        # exec 的工具级超时配置已并入统一工具 timeout 合同（调用参数 >
+        # 全局默认），构造期不再携带工具级默认值。
+        assert handler.timeout is None
         assert handler.working_dir is None
         assert handler.workspace_root == str(workspace)
         assert handler.path_append == 'D:/bin'
@@ -3613,7 +3614,7 @@ async def test_agent_browser_timeout_triggers_session_cleanup(tmp_path: Path):
                 'https://example.com',
             ],
             'cwd': str(workspace),
-            'timeout_seconds': 300,
+            'timeout_seconds': 600,  # 统一 timeout 全局默认值
             'cancel_token': None,
             'runtime_context': {},
         }
@@ -3702,7 +3703,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
                 'https://example.com',
             ],
             'cwd': str(workspace),
-            'timeout_seconds': 300,
+            'timeout_seconds': 600,  # 统一 timeout 全局默认值
             'cancel_token': None,
             'runtime_context': {},
         },
@@ -3717,7 +3718,7 @@ async def test_agent_browser_failed_daemon_warning_retries_once_after_cleanup(tm
                 'https://example.com',
             ],
             'cwd': str(workspace),
-            'timeout_seconds': 300,
+            'timeout_seconds': 600,  # 统一 timeout 全局默认值
             'cancel_token': None,
             'runtime_context': {},
         },

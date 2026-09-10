@@ -420,6 +420,15 @@ def test_tool_model_visible_schema_falls_back_to_runtime_schema_when_unset() -> 
                 "type": "object",
                 "properties": {
                     "task": {"type": "string", "description": "task"},
+                    # 统一 timeout 合同：模型可见 schema 统一追加可选超时参数。
+                    "timeout": {
+                        "type": "number",
+                        "description": (
+                            "Optional maximum execution time in seconds for this call. "
+                            "When omitted, the runtime default (600s) applies and the call is stopped at that limit. "
+                            "Pass an explicit larger value for legitimately long-running work; there is no upper cap."
+                        ),
+                    },
                 },
                 "required": ["task"],
             },
@@ -653,7 +662,22 @@ def test_tool_model_visible_schema_falls_back_to_authoritative_schema() -> None:
         tool.to_schema()["function"]["parameters"]["properties"]["value"]["description"]
         == "Full contract description."
     )
-    assert tool.to_model_schema() == tool.to_schema()
+    # 统一 timeout 合同：模型可见 schema 在验证合同之上统一追加可选 timeout 参数，
+    # 其余部分与权威验证合同保持一致。
+    model_schema = tool.to_model_schema()
+    model_properties = dict(model_schema["function"]["parameters"]["properties"])
+    assert "timeout" in model_properties
+    stripped_schema = {
+        "type": model_schema["type"],
+        "function": {
+            **model_schema["function"],
+            "parameters": {
+                **model_schema["function"]["parameters"],
+                "properties": {k: v for k, v in model_properties.items() if k != "timeout"},
+            },
+        },
+    }
+    assert stripped_schema == tool.to_schema()
 
 
 def test_tool_model_visible_schema_uses_override_without_changing_validation_contract() -> None:

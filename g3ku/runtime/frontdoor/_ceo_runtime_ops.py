@@ -2407,6 +2407,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         """
         return ceo_session_temp_dir(getattr(self._loop, "workspace", None), session_key)
 
+    def _ceo_tool_watchdog_runtime_config(self) -> dict[str, Any]:
+        """CEO 侧统一工具 timeout 全局默认值入口（读主运行时配置，缺省走内置默认）。"""
+        main_service = getattr(self._loop, "main_task_service", None)
+        config = getattr(main_service, "_app_config", None)
+        agents = getattr(config, "agents", None) if config is not None else None
+        try:
+            value = float(getattr(agents, "tool_default_timeout_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            return {}
+        return {"default_timeout_seconds": value} if value >= 1 else {}
+
     def _build_tool_runtime_context(
         self,
         *,
@@ -2430,6 +2441,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "on_progress": runtime.context.on_progress,
             "emit_lifecycle": True,
             "actor_role": "ceo",
+            "tool_watchdog": self._ceo_tool_watchdog_runtime_config(),
             "session_key": session.state.session_key,
             "turn_id": turn_id,
             "model_refs": list(state.get("model_refs") or self._resolve_ceo_model_refs() or []),

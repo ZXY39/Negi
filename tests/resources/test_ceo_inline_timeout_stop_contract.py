@@ -87,6 +87,7 @@ class _RuntimeAwareSuccessTool(Tool):
     def __init__(self, name: str = "agent_browser") -> None:
         self._name = name
         self.runtime_payloads: list[dict[str, object]] = []
+        self.execute_kwargs: list[dict[str, object]] = []
 
     @property
     def name(self) -> str:
@@ -101,8 +102,8 @@ class _RuntimeAwareSuccessTool(Tool):
         return {"type": "object", "properties": {}, "required": []}
 
     async def execute(self, __g3ku_runtime=None, **kwargs: object) -> object:
-        _ = kwargs
         self.runtime_payloads.append(dict(__g3ku_runtime or {}))
+        self.execute_kwargs.append(dict(kwargs))
         return "ok"
 
 
@@ -135,7 +136,10 @@ async def test_ceo_support_standardizes_sidecar_timeout_stop_error_text() -> Non
 
 
 @pytest.mark.asyncio
-async def test_ceo_support_skips_watchdog_for_timeout_bearing_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ceo_support_self_enforced_tools_keep_sidecar_but_skip_outer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """新统一 timeout 合同：自持工具保留 watchdog（侧车道巡检仍在），
+    但外层不叠加硬 deadline（hard_timeout_seconds=None），且工具收到统一
+    解析后的 timeout 值（显式传参 > 全局默认，无上限）。"""
     inline_registry = _RecordingInlineRegistry()
     parent_token = ToolCancellationToken(session_key="web:test")
     loop = SimpleNamespace(
@@ -147,17 +151,28 @@ async def test_ceo_support_skips_watchdog_for_timeout_bearing_arguments(monkeypa
     )
     support = ceo_support_module.CeoFrontDoorSupport(loop=loop)
     tool = _RuntimeAwareSuccessTool(name="agent_browser")
+    tool.self_enforced_timeout = True
+    captured: dict[str, object] = {}
 
-    async def _unexpected_run_tool_with_watchdog(*args, **kwargs):
-        _ = args, kwargs
-        raise AssertionError("watchdog should be bypassed when tool arguments already declare a timeout budget")
+    async def _fake_run_tool_with_watchdog(awaitable, **kwargs):
+        captured["hard_timeout_seconds"] = kwargs.get("hard_timeout_seconds")
+        captured["inline_registry"] = kwargs.get("inline_registry")
+        value = await awaitable
+        return ToolWatchdogRunResult(
+            completed=True,
+            value=value,
+            elapsed_seconds=0.0,
+            poll_count=0,
+            snapshot=None,
+            execution_id="",
+        )
 
-    monkeypatch.setattr(ceo_support_module, "run_tool_with_watchdog", _unexpected_run_tool_with_watchdog)
+    monkeypatch.setattr(ceo_support_module, "run_tool_with_watchdog", _fake_run_tool_with_watchdog)
 
     result, rendered, status, _started_at, _finished_at, _elapsed_seconds = await support._execute_tool_call_with_raw_result(
         tool=tool,
         tool_name="agent_browser",
-        arguments={"timeout_seconds": 60},
+        arguments={"timeout": 1800},
         runtime_context={
             "actor_role": "ceo",
             "session_key": "web:test",
@@ -170,8 +185,11 @@ async def test_ceo_support_skips_watchdog_for_timeout_bearing_arguments(monkeypa
     assert result == "ok"
     assert rendered == "ok"
     assert status == "success"
-    assert inline_registry.register_calls == []
-    assert tool.runtime_payloads[0] == {}
+    # 侧车道路线仍然接入（watchdog 收到 inline registry），只是没有外层硬超时。
+    assert captured["inline_registry"] is inline_registry
+    assert captured["hard_timeout_seconds"] is None
+    # 自持工具收到统一解析后的有效时长（显式传参生效、无上限）。
+    assert tool.execute_kwargs[0].get("timeout") == 1800.0
     assert parent_token.is_cancelled() is False
 
 

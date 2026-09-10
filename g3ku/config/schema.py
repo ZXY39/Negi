@@ -498,6 +498,14 @@ class AgentsConfig(Base):
     role_concurrency: RoleConcurrencyConfig = Field(default_factory=RoleConcurrencyConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     node_parallelism: NodeParallelismConfig = Field(default_factory=NodeParallelismConfig)
+    # 统一工具调用最大运行时长默认值（秒）：所有工具的全局保底上限，
+    # 模型可在单次调用显式传更大的 timeout 参数覆盖；无上限约束。
+    tool_default_timeout_seconds: float = 600.0
+
+    @field_validator("tool_default_timeout_seconds")
+    @classmethod
+    def _clamp_tool_default_timeout(cls, value: float) -> float:
+        return max(1.0, float(value or 600.0))
 
 
 class ProviderConfig(Base):

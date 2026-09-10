@@ -487,6 +487,7 @@ class MainRuntimeService:
         )
         self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
+        self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.task_actor_service = TaskActorService(
             store=self.store,
             log_service=self.log_service,
@@ -4281,6 +4282,16 @@ class MainRuntimeService:
         return True, max_parallel_tool_calls, max_parallel_child_pipelines
 
     @staticmethod
+    def _tool_default_timeout_seconds(config: Any | None) -> float | None:
+        """统一工具 timeout 全局默认值（秒）；未配置返回 None（执行层用内置默认）。"""
+        agents = getattr(config, 'agents', None) if config is not None else None
+        try:
+            value = float(getattr(agents, 'tool_default_timeout_seconds', 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return max(1.0, value) if value >= 1 else None
+
+    @staticmethod
     def _node_dispatch_concurrency_settings(config: Any | None) -> dict[str, int]:
         if config is not None and hasattr(config, 'get_node_dispatch_concurrency'):
             try:
@@ -4630,6 +4641,7 @@ class MainRuntimeService:
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
         self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
         self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
+        self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(config)
         self.task_actor_service.configure_node_dispatch_limits(
             execution=None,
             inspection=None,
@@ -9981,6 +9993,8 @@ class TaskNodeDetailTool(Tool):
 
 
 class TaskAppendNoticeTool(Tool):
+    hide_universal_timeout_parameter = True
+
     def __init__(self, service: MainRuntimeService):
         self._service = service
 

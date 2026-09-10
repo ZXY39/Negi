@@ -11,6 +11,8 @@ from typing import Any
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.project_environment import apply_project_environment, resolve_project_environment
+from g3ku.runtime.tool_watchdog import coerce_timeout_argument, resolve_tool_watchdog_config
+from g3ku.utils.process_tree import kill_process_tree
 from g3ku.utils.subprocess_text import decode_subprocess_output, enrich_subprocess_env_for_text
 from main.governance.exec_tool_policy import (
     EXEC_TOOL_FAMILY_ID,
@@ -61,9 +63,13 @@ class _BoundedStreamCapture:
 class ExecTool(Tool):
     """Tool to execute shell commands."""
 
+    # exec 持有子进程并需要结构化收尾（杀进程树、排空管道、抢救部分输出），
+    # 由工具自身消费统一 timeout 值；外层强制层对其让位。
+    self_enforced_timeout = True
+
     def __init__(
         self,
-        timeout: int = 60,
+        timeout: float | None = None,
         working_dir: str | None = None,
         workspace_root: str | None = None,
         temp_root: str | None = None,
@@ -135,6 +141,7 @@ class ExecTool(Tool):
     
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
+        effective_timeout = self._resolve_effective_timeout(kwargs.pop("timeout", None), runtime=runtime)
         cwd = self._resolve_cwd(working_dir, runtime=runtime)
         execution_mode = self._resolve_execution_mode()
         if execution_mode != EXECUTION_MODE_FULL_ACCESS:
@@ -185,22 +192,23 @@ class ExecTool(Tool):
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=env,
+                    start_new_session=True,
                 )
 
             try:
                 stdout_capture, stderr_capture = await self._collect_process_output(
                     process,
-                    timeout=self.timeout,
+                    timeout=effective_timeout,
                 )
             except asyncio.CancelledError:
-                process.kill()
+                kill_process_tree(process)
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
                     pass
                 raise
             except asyncio.TimeoutError:
-                process.kill()
+                kill_process_tree(process)
                 # Wait for the process to fully terminate so pipes are
                 # drained and file descriptors are released.
                 try:
@@ -208,13 +216,17 @@ class ExecTool(Tool):
                 except asyncio.TimeoutError:
                     pass
                 stdout_capture, stderr_capture = await self._collect_terminated_process_output(process)
+                timeout_message = (
+                    f"Command timed out after {effective_timeout:.0f} seconds. "
+                    "如需更长运行时间，请在下一次调用时显式传入更大的 \"timeout\" 参数（单位：秒）。"
+                )
                 return self._build_payload(
                     status="error",
                     exit_code=None,
                     stdout_capture=stdout_capture,
                     stderr_capture=stderr_capture,
-                    stderr_text=f"Command timed out after {self.timeout} seconds",
-                    error=f"Command timed out after {self.timeout} seconds",
+                    stderr_text=timeout_message,
+                    error=timeout_message,
                 )
 
             return self._build_payload(
@@ -305,6 +317,17 @@ class ExecTool(Tool):
         stdout_task.cancel()
         stderr_task.cancel()
         return await asyncio.gather(stdout_task, stderr_task)
+
+    def _resolve_effective_timeout(self, requested_timeout: Any, *, runtime: dict[str, Any] | None = None) -> float:
+        """统一 timeout 合同：显式传参 > 构造期遗留缺省 > 运行时全局默认（600s）。"""
+        explicit = coerce_timeout_argument(requested_timeout)
+        if explicit is not None:
+            return explicit
+        if self.timeout is not None:
+            legacy = coerce_timeout_argument(self.timeout)
+            if legacy is not None:
+                return legacy
+        return resolve_tool_watchdog_config(runtime or {}).default_timeout_seconds
 
     def _resolve_execution_mode(self) -> str:
         service = getattr(self, "main_task_service", None)

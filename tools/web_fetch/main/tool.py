@@ -17,7 +17,6 @@ import httpx
 
 
 _CACHE_TTL_SECONDS = 300
-_DEFAULT_TIMEOUT_SECONDS = 12.0
 _MAX_REDIRECTS = 5
 _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_TEXT_CHARS = 20_000
@@ -118,6 +117,10 @@ class _ArticleParser(HTMLParser):
 
 
 class WebFetchTool:
+    # 网络会话收尾（httpx 层超时语义）由工具自身消费统一 timeout 值；
+    # 外层强制层对其让位。
+    self_enforced_timeout = True
+
     def __init__(self, workspace: str | Path) -> None:
         workspace_path = Path(workspace)
         self.workspace = workspace_path
@@ -132,16 +135,13 @@ class WebFetchTool:
         extract_main_content: bool = True,
         include_raw_html: bool = False,
         use_cache: bool = True,
-        timeout_ms: int = int(_DEFAULT_TIMEOUT_SECONDS * 1000),
-        timeout_seconds: float | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         normalized_url = _normalize_url(url)
         _assert_url_is_safe(normalized_url)
         max_chars = max(500, min(int(max_chars), _MAX_TEXT_CHARS))
-        if timeout_seconds is None:
-            effective_timeout_seconds = max(1.0, min(float(timeout_ms) / 1000.0, 30.0))
-        else:
-            effective_timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
+        # 统一 timeout 合同：调用参数（已由执行层解析为显式值或全局默认）。
+        effective_timeout_seconds = max(1.0, float(timeout or 600.0))
 
         cache_key = _cache_key(normalized_url, max_chars, extract_main_content, include_raw_html)
         if use_cache:
@@ -171,7 +171,7 @@ class WebFetchTool:
         include_raw_html: bool,
         timeout_seconds: float,
     ) -> dict[str, Any]:
-        timeout = httpx.Timeout(timeout_seconds)
+        timeout = httpx.Timeout(timeout_seconds, connect=10.0)
         limits = httpx.Limits(max_connections=5, max_keepalive_connections=2)
         headers = {
             "User-Agent": "G3KU-WebFetch/0.1 (+https://local.invalid)",

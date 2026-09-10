@@ -55,6 +55,14 @@ class ManifestBackedTool(Tool):
             return _normalize_manifest_schema(configured)
         return self.parameters
 
+    @property
+    def self_enforced_timeout(self) -> bool:
+        return bool(getattr(self._handler, "self_enforced_timeout", False))
+
+    @property
+    def hide_universal_timeout_parameter(self) -> bool:
+        return bool(getattr(self._handler, "hide_universal_timeout_parameter", False))
+
     def set_context(self, *args: Any, **kwargs: Any) -> Any:
         if hasattr(self._handler, "set_context"):
             return self._handler.set_context(*args, **kwargs)

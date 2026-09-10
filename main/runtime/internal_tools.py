@@ -23,6 +23,8 @@ def build_detail_level_schema(*, description: str) -> dict[str, Any]:
 
 
 class SubmitNextStageTool(Tool):
+    hide_universal_timeout_parameter = True
+
     def __init__(
         self,
         submit_callback: Callable[[str, int, str, list[dict[str, Any]], bool], Awaitable[dict[str, Any]]],
@@ -173,6 +175,8 @@ class SubmitNextStageTool(Tool):
 
 
 class SpawnChildNodesTool(Tool):
+    hide_universal_timeout_parameter = True
+
     def __init__(
         self,
         spawn_callback: Callable[[list[SpawnChildSpec], str | None], Awaitable[list[SpawnChildResult]]],
@@ -288,6 +292,8 @@ class SpawnChildNodesTool(Tool):
 
 
 class SubmitMessageDistributionTool(Tool):
+    hide_universal_timeout_parameter = True
+
     def __init__(
         self,
         submit_callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]],
@@ -344,6 +350,8 @@ class SubmitMessageDistributionTool(Tool):
 
 
 class SubmitFinalResultTool(Tool):
+    hide_universal_timeout_parameter = True
+
     def __init__(
         self,
         submit_callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],

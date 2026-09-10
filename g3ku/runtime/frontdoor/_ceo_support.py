@@ -27,8 +27,9 @@ from g3ku.runtime.tool_error_guidance import (
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_watchdog,
+    resolve_effective_tool_timeout,
+    run_tool_with_hard_timeout,
     run_tool_with_watchdog,
-    tool_arguments_request_timeout_budget,
 )
 from g3ku.runtime.web_ceo_sessions import SESSION_TASK_DEFAULTS_SCOPE_SESSION, ceo_session_task_defaults_scope
 from main.protocol import now_iso
@@ -675,6 +676,15 @@ class CeoFrontDoorSupport:
         if self._accepts_runtime_context(tool):
             execute_kwargs["__g3ku_runtime"] = per_call_runtime
 
+        # 统一 timeout 合同：显式传参 > 全局默认（无上限）。自持工具消费统一值
+        # 并自行结构化收尾；其余工具由外层（watchdog 硬 deadline 或薄包装）执行。
+        self_enforced = bool(getattr(tool, "self_enforced_timeout", False))
+        effective_timeout = resolve_effective_tool_timeout(normalized_arguments, per_call_runtime)
+        if self_enforced:
+            execute_kwargs["timeout"] = effective_timeout
+        else:
+            execute_kwargs.pop("timeout", None)
+
         def _set_inline_execution_id(execution_id: str) -> None:
             nonlocal inline_execution_id
             inline_execution_id = str(execution_id or "").strip()
@@ -688,10 +698,7 @@ class CeoFrontDoorSupport:
 
         token = self._loop.tools.push_runtime_context(per_call_runtime)
         try:
-            use_watchdog = (
-                actor_role_allows_watchdog(per_call_runtime)
-                and not tool_arguments_request_timeout_budget(normalized_arguments)
-            )
+            use_watchdog = actor_role_allows_watchdog(per_call_runtime)
             if use_watchdog:
                 inline_registry = getattr(self._loop, "inline_tool_execution_registry", None)
                 outcome = await run_tool_with_watchdog(
@@ -707,10 +714,18 @@ class CeoFrontDoorSupport:
                         target=lambda execution_id: _set_inline_execution_id(execution_id),
                     ),
                     on_poll=None,
+                    hard_timeout_seconds=None if self_enforced else effective_timeout,
                 )
                 result = outcome.value
-            else:
+            elif self_enforced:
                 result = await _invoke()
+            else:
+                result = await run_tool_with_hard_timeout(
+                    _invoke(),
+                    tool_name=tool_name,
+                    timeout_seconds=effective_timeout,
+                    cancel_token=per_call_cancel_token,
+                )
         except asyncio.CancelledError:
             timeout_stop_error = self._inline_timeout_stop_error_text(
                 tool_name=tool_name,

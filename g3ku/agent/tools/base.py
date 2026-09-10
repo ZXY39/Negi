@@ -14,7 +14,23 @@ class Tool(ABC):
     `parameters` is the authoritative validation contract for execution.
     `model_parameters` is a separate model-visible callable schema surface
     and must not be treated as the runtime validation contract.
+
+    Universal timeout contract:
+    - Every tool call is bounded by a maximum execution time: an explicit
+      `timeout` argument (seconds) wins, otherwise the global default
+      (see `g3ku.runtime.tool_watchdog.DEFAULT_TOOL_TIMEOUT_SECONDS`).
+    - Tools that own subprocesses/network sessions and need structured
+      shutdown set `self_enforced_timeout = True`: they consume the
+      effective timeout value themselves (passed as the `timeout` kwarg)
+      and the outer enforcement layer defers to them.
+    - Internal protocol tools that finish instantly set
+      `hide_universal_timeout_parameter = True` so the model-visible schema
+      does not advertise a timeout parameter for them; the outer bound
+      still applies as a mechanical backstop.
     """
+
+    self_enforced_timeout: bool = False
+    hide_universal_timeout_parameter: bool = False
 
     _TYPE_MAP = {
         "string": str,
@@ -165,6 +181,28 @@ class Tool(ABC):
             "function": {
                 "name": self.name,
                 "description": self.model_description,
-                "parameters": self.model_parameters,
+                "parameters": self._model_parameters_with_universal_timeout(),
             },
         }
+
+    def _model_parameters_with_universal_timeout(self) -> dict[str, Any]:
+        """向模型可见 schema 统一注入可选 `timeout` 参数（内部协议工具除外）。"""
+        schema = self.model_parameters or {}
+        if self.hide_universal_timeout_parameter or not isinstance(schema, dict):
+            return schema
+        properties = schema.get("properties")
+        if not isinstance(properties, dict) or "timeout" in properties:
+            return schema
+        injected = dict(schema)
+        injected["properties"] = {
+            **properties,
+            "timeout": {
+                "type": "number",
+                "description": (
+                    "Optional maximum execution time in seconds for this call. "
+                    "When omitted, the runtime default (600s) applies and the call is stopped at that limit. "
+                    "Pass an explicit larger value for legitimately long-running work; there is no upper cap."
+                ),
+            },
+        }
+        return injected

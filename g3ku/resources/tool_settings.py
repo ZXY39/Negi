@@ -13,7 +13,8 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class ExecToolSettings(Base):
-    timeout: int = 60
+    # exec 的运行时长上限已并入统一工具 timeout 合同（调用参数 > 全局默认），
+    # 不再保留工具级独立超时配置。
     path_append: str = ""
     restrict_to_workspace: bool = False
     enable_safety_guard: bool = False
@@ -57,7 +58,6 @@ class AgentBrowserToolSettings(Base):
     install_root: str = 'externaltools/agent_browser'
     browser_root: str = 'externaltools/agent_browser/playwright-browsers'
     temp_root: str = 'temp/agent_browser'
-    default_timeout_seconds: int = 300
     auto_session: bool = True
     default_session_name: str = 'g3ku-agent-browser'
     profile_root: str = '.g3ku/tool-data/agent_browser/profiles'

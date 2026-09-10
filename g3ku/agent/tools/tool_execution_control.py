@@ -7,6 +7,8 @@ from g3ku.agent.tools.base import Tool
 
 
 class _ToolExecutionControlTool(Tool):
+    hide_universal_timeout_parameter = True
+
     def __init__(
         self,
         manager_getter: Callable[[], Any],

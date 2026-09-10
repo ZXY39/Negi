@@ -35,6 +35,8 @@ from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_detached_watchdog,
     actor_role_allows_watchdog,
+    resolve_effective_tool_timeout,
+    run_tool_with_hard_timeout,
     run_tool_with_watchdog,
 )
 from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
@@ -3523,9 +3525,24 @@ class ReActToolLoop:
         runtime_param_name = self._runtime_context_parameter_name(tool)
         if runtime_param_name is not None:
             execute_kwargs[runtime_param_name] = runtime_context
+        # 统一 timeout 合同：显式传参 > 全局默认（无上限）。自持工具（持有子进程/
+        # 网络会话，需要结构化收尾）自己消费该值；其余工具由外层硬执行。
+        self_enforced = bool(getattr(tool, 'self_enforced_timeout', False))
+        effective_timeout = resolve_effective_tool_timeout(arguments, runtime_context)
+        if self_enforced:
+            execute_kwargs['timeout'] = effective_timeout
+        else:
+            execute_kwargs.pop('timeout', None)
         try:
             if not actor_role_allows_watchdog(runtime_context):
-                return await tool.execute(**execute_kwargs)
+                if self_enforced:
+                    return await tool.execute(**execute_kwargs)
+                return await run_tool_with_hard_timeout(
+                    tool.execute(**execute_kwargs),
+                    tool_name=tool_name,
+                    timeout_seconds=effective_timeout,
+                    cancel_token=runtime_context.get('cancel_token'),
+                )
             outcome = await run_tool_with_watchdog(
                 tool.execute(**execute_kwargs),
                 tool_name=tool_name,
@@ -3538,6 +3555,7 @@ class ReActToolLoop:
                     else None
                 ),
                 on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
+                hard_timeout_seconds=None if self_enforced else effective_timeout,
             )
             return outcome.value
         except Exception as exc:

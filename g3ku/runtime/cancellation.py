@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Any
 
+from g3ku.utils.process_tree import kill_process_tree_pid
+
 
 class ToolCancellationRequested(RuntimeError):
     """Raised when a tool should stop because the session was paused or cancelled."""
@@ -99,7 +101,9 @@ class ToolCancellationToken:
         for process in snapshot:
             try:
                 if process.poll() is None:
-                    process.kill()
+                    # 整树终止：只杀直接子进程会留下存活的孙进程树（Windows 尤甚）。
+                    if not kill_process_tree_pid(getattr(process, "pid", None)):
+                        process.kill()
             except Exception:
                 pass
             finally:

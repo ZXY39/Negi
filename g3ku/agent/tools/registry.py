@@ -23,6 +23,8 @@ from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_detached_watchdog,
     actor_role_allows_watchdog,
+    resolve_effective_tool_timeout,
+    run_tool_with_hard_timeout,
     run_tool_with_watchdog,
 )
 
@@ -274,6 +276,16 @@ class ToolRegistry:
         if runtime_context and runtime_param_name is not None:
             execute_kwargs[runtime_param_name] = runtime_context
 
+        # 统一 timeout 合同：自持工具消费统一值并自行收尾；控制类嵌套等待工具
+        # 不套外层时限；其余工具由外层硬执行保底。
+        self_enforced = bool(getattr(tool, "self_enforced_timeout", False))
+        is_control_tool = tool_name in _CONTROL_TOOL_NAMES
+        effective_timeout = resolve_effective_tool_timeout(params, runtime_context)
+        if self_enforced:
+            execute_kwargs["timeout"] = effective_timeout
+        else:
+            execute_kwargs.pop("timeout", None)
+
         async def _invoke() -> Any:
             resource_manager = self._resolve_resource_manager(runtime_context)
             if resource_manager is not None and resource_manager.get_tool_descriptor(tool_name) is not None:
@@ -287,7 +299,14 @@ class ToolRegistry:
             runtime_context=runtime_context,
             execution_manager=execution_manager,
         ):
-            return await _invoke()
+            if is_control_tool or self_enforced:
+                return await _invoke()
+            return await run_tool_with_hard_timeout(
+                _invoke(),
+                tool_name=tool_name,
+                timeout_seconds=effective_timeout,
+                cancel_token=runtime_context.get("cancel_token") if runtime_context else None,
+            )
 
         outcome = await run_tool_with_watchdog(
             _invoke(),
@@ -300,6 +319,7 @@ class ToolRegistry:
                 if runtime_context.get("on_progress")
                 else None
             ),
+            hard_timeout_seconds=None if (self_enforced or is_control_tool) else effective_timeout,
         )
         return outcome.value
 

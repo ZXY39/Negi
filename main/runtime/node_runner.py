@@ -147,6 +147,8 @@ class NodeRunner:
             default=self._execution_max_concurrency,
         )
         self._parallel_child_pipelines_enabled = True
+        # 统一工具 timeout 全局默认值（秒），由 runtime_service 从配置注入/热更新。
+        self._tool_default_timeout_seconds: float | None = None
         self._adaptive_tool_budget_controller = getattr(react_loop, '_adaptive_tool_budget_controller', None)
         self._context_enricher = context_enricher
         self._context_preparer = context_preparer
@@ -3100,6 +3102,7 @@ class NodeRunner:
             'project_python_hint': str(project_environment.get('project_python_hint') or ''),
             'task_temp_dir': task_temp_dir,
             'temp_dir': task_temp_dir,
+            'tool_watchdog': self._tool_watchdog_runtime_config(),
             'distribution_state': self._distribution_runtime_state(task.task_id),
             'tool_snapshot_supplier': (
                 (lambda current_task_id=task.task_id: self._tool_snapshot_supplier(current_task_id))
@@ -3107,6 +3110,15 @@ class NodeRunner:
                 else None
             ),
         }
+
+    def _tool_watchdog_runtime_config(self) -> dict[str, Any]:
+        """节点运行时工具合同里的统一 timeout 全局默认值入口。"""
+        value = getattr(self, '_tool_default_timeout_seconds', None)
+        try:
+            parsed = float(value) if value is not None else 0.0
+        except (TypeError, ValueError):
+            return {}
+        return {'default_timeout_seconds': parsed} if parsed >= 1 else {}
 
     def _workspace_root(self) -> Path:
         getter = self._workspace_root_getter

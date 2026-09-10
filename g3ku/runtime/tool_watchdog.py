@@ -3,9 +3,28 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+
+
+def _env_default_tool_timeout_seconds() -> float:
+    raw = str(os.environ.get("G3KU_TOOL_DEFAULT_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return 600.0
+    try:
+        parsed = float(raw)
+    except ValueError:
+        return 600.0
+    return max(1.0, parsed)
+
+
+# 全局工具调用硬上限默认值（秒）：所有工具的最大运行时长保底，显式传入的
+# timeout 参数优先；无上限约束（调用方可传任意更大的值）。
+DEFAULT_TOOL_TIMEOUT_SECONDS: float = _env_default_tool_timeout_seconds()
+MIN_TOOL_TIMEOUT_SECONDS: float = 1.0
+TOOL_TIMEOUT_ARGUMENT_NAME = "timeout"
 
 
 @dataclass(slots=True)
@@ -16,6 +35,7 @@ class ToolWatchdogConfig:
     stop_grace_seconds: float = 2.0
     text_char_limit: int = 280
     list_limit: int = 3
+    default_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 
 
 @dataclass(slots=True)
@@ -26,6 +46,7 @@ class ToolWatchdogRunResult:
     poll_count: int
     snapshot: dict[str, Any] | None = None
     execution_id: str = ""
+    timed_out: bool = False
 
 
 @dataclass(slots=True)
@@ -42,6 +63,7 @@ class DetachedToolExecution:
     terminal_notifier: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
     terminal_notified: bool = False
     handoff_count: int = 1
+    timeout_seconds: float | None = None
 
 
 DEFAULT_WAIT_WINDOWS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0, 600.0)
@@ -64,6 +86,7 @@ class ToolExecutionManager:
         started_at: float,
         session_key: str = "",
         terminal_notifier: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        timeout_seconds: float | None = None,
     ) -> DetachedToolExecution:
         async with self._lock:
             for entry in self._executions.values():
@@ -83,6 +106,7 @@ class ToolExecutionManager:
                 session_key=str(session_key or "").strip(),
                 terminal_notifier=terminal_notifier if callable(terminal_notifier) else None,
                 handoff_count=1,
+                timeout_seconds=float(timeout_seconds) if timeout_seconds else None,
             )
             self._executions[execution_id] = entry
             task.add_done_callback(
@@ -122,6 +146,8 @@ class ToolExecutionManager:
                 text_char_limit=text_char_limit,
                 list_limit=list_limit,
                 on_poll=on_poll,
+                hard_timeout_seconds=entry.timeout_seconds,
+                cancel_token=entry.cancel_token,
             )
         except asyncio.CancelledError:
             await self._remove_execution(entry.execution_id)
@@ -139,6 +165,18 @@ class ToolExecutionManager:
                 "tool_name": entry.tool_name,
                 "message": "后台工具执行失败。",
                 "error": str(exc),
+            }
+        if result.timed_out:
+            await self._remove_execution(entry.execution_id)
+            return {
+                "status": "timeout",
+                "execution_id": entry.execution_id,
+                "tool_name": entry.tool_name,
+                "message": build_tool_timeout_error_text(
+                    tool_name=entry.tool_name,
+                    timeout_seconds=entry.timeout_seconds or effective_wait_seconds,
+                ),
+                "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
             }
         if result.completed:
             await self._remove_execution(entry.execution_id)
@@ -287,9 +325,11 @@ def tool_arguments_request_timeout_budget(arguments: dict[str, Any] | None) -> b
 def actor_role_allows_watchdog(runtime_context: Any) -> bool:
     role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
     # CEO and execution/acceptance nodes all benefit from watchdog polling so long
-    # tools remain interruptible. Whether the poll loop is allowed to detach into a
-    # background handoff is a separate decision.
-    return role in {"ceo", "execution", "acceptance"}
+    # tools remain interruptible. Acceptance nodes carry the node-side actor role
+    # "inspection", so it must stay in this allow set for them to be covered.
+    # Whether the poll loop is allowed to detach into a background handoff is a
+    # separate decision.
+    return role in {"ceo", "execution", "acceptance", "inspection"}
 
 
 def actor_role_allows_detached_watchdog(runtime_context: Any) -> bool:
@@ -309,6 +349,7 @@ def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
     stop_grace = payload.get("stop_grace_seconds", payload.get("cancel_grace_seconds", 2.0))
     text_char_limit = payload.get("text_char_limit", 280)
     list_limit = payload.get("list_limit", 3)
+    default_timeout = payload.get("default_timeout_seconds", DEFAULT_TOOL_TIMEOUT_SECONDS)
     return ToolWatchdogConfig(
         enabled=bool(enabled),
         poll_interval_seconds=max(0.2, float(poll_interval or 5.0)),
@@ -316,6 +357,53 @@ def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
         stop_grace_seconds=max(0.0, float(stop_grace or 0.0)),
         text_char_limit=max(80, int(text_char_limit or 280)),
         list_limit=max(1, int(list_limit or 3)),
+        default_timeout_seconds=max(MIN_TOOL_TIMEOUT_SECONDS, float(default_timeout or DEFAULT_TOOL_TIMEOUT_SECONDS)),
+    )
+
+
+def coerce_timeout_argument(value: Any) -> float | None:
+    """把调用方传入的 timeout 参数归一成秒数；无效/缺省返回 None（交给全局默认）。"""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):  # NaN/inf 防御
+        return None
+    if parsed < MIN_TOOL_TIMEOUT_SECONDS:
+        return MIN_TOOL_TIMEOUT_SECONDS
+    return parsed
+
+
+def resolve_effective_tool_timeout(arguments: dict[str, Any] | None, runtime_context: Any) -> float:
+    """统一解析一次工具调用的最大运行时长：显式传参 > 全局默认（无上限）。"""
+    explicit = coerce_timeout_argument(
+        (arguments or {}).get(TOOL_TIMEOUT_ARGUMENT_NAME) if isinstance(arguments, dict) else None
+    )
+    if explicit is not None:
+        return explicit
+    return resolve_tool_watchdog_config(runtime_context).default_timeout_seconds
+
+
+def build_tool_timeout_error_text(*, tool_name: str, timeout_seconds: float) -> str:
+    """工具超时被停止后返回给模型的统一错误文案（含如何延长的指引）。"""
+    normalized_tool_name = str(tool_name or "tool").strip() or "tool"
+    seconds = max(0.0, float(timeout_seconds or 0.0))
+    return (
+        f"Error executing {normalized_tool_name}: timed out after {seconds:.0f}s. "
+        f"该工具调用因超出 {seconds:.0f}s 运行时长上限被停止。"
+        f"如果它确实需要更长时间，请在下一次调用时显式传入更大的 \"timeout\" 参数（单位：秒）。"
     )
 
 
@@ -632,6 +720,7 @@ async def run_tool_with_watchdog(
     on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     inline_registry: Any | None = None,
     on_inline_registered: Callable[[Any], Awaitable[None] | None] | None = None,
+    hard_timeout_seconds: float | None = None,
 ) -> ToolWatchdogRunResult:
     config = resolve_tool_watchdog_config(runtime_context)
     if not config.enabled:
@@ -667,6 +756,12 @@ async def run_tool_with_watchdog(
                 cancel_token=cancel_token,
                 started_at=started_at,
                 runtime_session=runtime_session,
+                # 自持工具的硬上限在工具内部，取统一解析值供巡检判定参考。
+                timeout_seconds=(
+                    hard_timeout_seconds
+                    if hard_timeout_seconds
+                    else resolve_effective_tool_timeout(arguments, runtime_context)
+                ),
             )
             if on_inline_registered is not None:
                 await _maybe_await(on_inline_registered(inline_entry))
@@ -681,7 +776,22 @@ async def run_tool_with_watchdog(
                 text_char_limit=config.text_char_limit,
                 list_limit=config.list_limit,
                 on_poll=on_poll,
+                hard_timeout_seconds=hard_timeout_seconds,
+                cancel_token=cancel_token,
             )
+            if result.timed_out:
+                return ToolWatchdogRunResult(
+                    completed=True,
+                    value=build_tool_timeout_error_text(
+                        tool_name=tool_name,
+                        timeout_seconds=hard_timeout_seconds or config.default_timeout_seconds,
+                    ),
+                    elapsed_seconds=result.elapsed_seconds,
+                    poll_count=result.poll_count,
+                    snapshot=result.snapshot,
+                    execution_id="",
+                    timed_out=True,
+                )
             return ToolWatchdogRunResult(
                 completed=True,
                 value=result.value,
@@ -701,7 +811,22 @@ async def run_tool_with_watchdog(
             text_char_limit=config.text_char_limit,
             list_limit=config.list_limit,
             on_poll=on_poll,
+            hard_timeout_seconds=hard_timeout_seconds,
+            cancel_token=cancel_token,
         )
+        if wait_result.timed_out:
+            return ToolWatchdogRunResult(
+                completed=True,
+                value=build_tool_timeout_error_text(
+                    tool_name=tool_name,
+                    timeout_seconds=hard_timeout_seconds or config.default_timeout_seconds,
+                ),
+                elapsed_seconds=wait_result.elapsed_seconds,
+                poll_count=wait_result.poll_count,
+                snapshot=wait_result.snapshot,
+                execution_id="",
+                timed_out=True,
+            )
         if wait_result.completed:
             return ToolWatchdogRunResult(
                 completed=True,
@@ -721,6 +846,7 @@ async def run_tool_with_watchdog(
             started_at=started_at,
             session_key=session_key,
             terminal_notifier=terminal_notifier,
+            timeout_seconds=hard_timeout_seconds,
         )
         payload = _build_handoff_payload(
             tool_name=tool_name,
@@ -751,6 +877,36 @@ async def run_tool_with_watchdog(
         raise
 
 
+async def _enforce_hard_timeout(*, task: asyncio.Task[Any], cancel_token: Any | None, tool_name: str) -> None:
+    """到点后无条件终止工具任务：先走取消令牌级联（杀已注册进程），再硬取消协程。"""
+    await request_tool_cancellation(
+        task,
+        cancel_token=cancel_token,
+        reason=f"tool_timeout:{tool_name}",
+        grace_seconds=0.0,
+    )
+
+
+async def run_tool_with_hard_timeout(
+    awaitable: Awaitable[Any],
+    *,
+    tool_name: str,
+    timeout_seconds: float,
+    cancel_token: Any | None = None,
+) -> Any:
+    """不走 watchdog 轮询的薄包装：到点硬超时并返回统一超时错误文案。"""
+    execution_task = asyncio.create_task(awaitable, name=f"tool-hard-timeout:{tool_name}")
+    try:
+        return await asyncio.wait_for(asyncio.shield(execution_task), timeout=max(0.1, float(timeout_seconds)))
+    except asyncio.TimeoutError:
+        await _enforce_hard_timeout(task=execution_task, cancel_token=cancel_token, tool_name=tool_name)
+        return build_tool_timeout_error_text(tool_name=tool_name, timeout_seconds=timeout_seconds)
+    except BaseException:
+        if not execution_task.done():
+            execution_task.cancel()
+        raise
+
+
 async def _wait_for_task_window(
     *,
     task: asyncio.Task[Any],
@@ -762,11 +918,28 @@ async def _wait_for_task_window(
     text_char_limit: int,
     list_limit: int,
     on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    hard_timeout_seconds: float | None = None,
+    cancel_token: Any | None = None,
 ) -> ToolWatchdogRunResult:
     poll_count = 0
     last_snapshot: dict[str, Any] | None = None
     deadline = time.monotonic() + max(0.1, float(handoff_after_seconds))
+    hard_deadline = (
+        float(started_at) + max(MIN_TOOL_TIMEOUT_SECONDS, float(hard_timeout_seconds))
+        if hard_timeout_seconds
+        else None
+    )
     while True:
+        if hard_deadline is not None and time.monotonic() >= hard_deadline:
+            await _enforce_hard_timeout(task=task, cancel_token=cancel_token, tool_name=tool_name)
+            return ToolWatchdogRunResult(
+                completed=True,
+                value=None,
+                elapsed_seconds=max(0.0, time.monotonic() - started_at),
+                poll_count=poll_count,
+                snapshot=last_snapshot,
+                timed_out=True,
+            )
         remaining_to_handoff = deadline - time.monotonic()
         if remaining_to_handoff <= 0:
             snapshot = summarize_runtime_snapshot(
@@ -784,6 +957,8 @@ async def _wait_for_task_window(
             )
 
         wait_timeout = min(max(0.05, float(poll_interval_seconds)), remaining_to_handoff)
+        if hard_deadline is not None:
+            wait_timeout = min(wait_timeout, max(0.05, hard_deadline - time.monotonic()))
         try:
             value = await asyncio.wait_for(asyncio.shield(task), timeout=wait_timeout)
             elapsed = max(0.0, time.monotonic() - started_at)
