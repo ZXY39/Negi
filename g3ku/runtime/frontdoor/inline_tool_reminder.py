@@ -18,7 +18,32 @@ from main.protocol import build_envelope, now_iso
 from main.runtime.chat_backend import build_prompt_cache_diagnostics
 
 
-DEFAULT_INLINE_REMINDER_WINDOWS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0, 600.0)
+# 首档巡检窗口（秒）：在此之前侧车道完全静默，不产生任何提醒判定。
+DEFAULT_FIRST_CHECK_SECONDS: float = 120.0
+# 模型自定的下一次巡检间隔钳制范围（秒）：防 0 值忙循环与超大值变相永不巡检。
+MIN_NEXT_CHECK_SECONDS: float = 30.0
+MAX_NEXT_CHECK_SECONDS: float = 600.0
+
+
+def clamp_next_check_seconds(value: Any) -> float | None:
+    """把模型给出的下次巡检间隔归一并钳制到合法范围；无效返回 None（沿用上一轮间隔）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        return None
+    return max(MIN_NEXT_CHECK_SECONDS, min(MAX_NEXT_CHECK_SECONDS, parsed))
 
 
 @dataclass(slots=True)
@@ -49,6 +74,10 @@ class CeoReminderDecision:
     decision: str
     label: str
     model_decision_excerpt: str = ""
+    # 模型自定的下一次巡检间隔（秒）；None 表示沿用上一轮间隔。
+    next_check_seconds: float | None = None
+    # 判定来源：model（LLM 判定）/ deterministic_skip（确定性观察跳过）/ unavailable。
+    source: str = "model"
 
 
 @dataclass(slots=True)
@@ -108,11 +137,20 @@ class InlineToolExecutionRecord:
     arguments: dict[str, Any] | None = None
     runtime_session: Any | None = None
     reminder_count: int = 0
-    next_window_index: int = 0
     state: str = "running"
     stop_decision_metadata: InlineToolStopDecisionMetadata | None = None
     reminder_task: asyncio.Task[Any] | None = None
     reminder_visible: bool = False
+    # 自定排程巡检：下一次巡检的 monotonic 时刻与上一轮使用的间隔；
+    # 确定性跳过轮与判定失败轮沿用上一轮间隔，不产生模型调用。
+    next_check_at: float = 0.0
+    last_check_interval_seconds: float = DEFAULT_FIRST_CHECK_SECONDS
+    # 判定上下文统计：放行次数按来源分列，距上次放行的时长用于进展速率判断。
+    llm_continue_count: int = 0
+    skip_continue_count: int = 0
+    last_continue_at: float = 0.0
+    # 本次调用的最大运行时长（统一 timeout 合同）；侧车道只在其内排程。
+    timeout_seconds: float | None = None
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -176,12 +214,16 @@ def build_timeout_stop_error_text(
 
 
 class InlineToolExecutionRegistry:
-    def __init__(self, *, reminder_windows_seconds: tuple[float, ...] = DEFAULT_INLINE_REMINDER_WINDOWS_SECONDS) -> None:
+    def __init__(self, *, first_check_seconds: float = DEFAULT_FIRST_CHECK_SECONDS) -> None:
         self._counter = 0
         self._lock = asyncio.Lock()
         self._executions: dict[str, InlineToolExecutionRecord] = {}
         self._reminder_service: CeoToolReminderService | None = None
-        self._reminder_windows_seconds = tuple(float(item) for item in reminder_windows_seconds if float(item) > 0)
+        self._first_check_seconds = max(1.0, float(first_check_seconds or DEFAULT_FIRST_CHECK_SECONDS))
+
+    @property
+    def first_check_seconds(self) -> float:
+        return self._first_check_seconds
 
     def attach_reminder_service(self, service: "CeoToolReminderService") -> None:
         self._reminder_service = service
@@ -199,12 +241,14 @@ class InlineToolExecutionRegistry:
         cancel_token: Any | None,
         started_at: float,
         runtime_session: Any | None,
+        timeout_seconds: float | None = None,
     ) -> InlineToolExecutionRecord:
         async with self._lock:
             for current in self._executions.values():
                 if current.task is task:
                     return current
             self._counter += 1
+            normalized_started_at = float(started_at)
             record = InlineToolExecutionRecord(
                 execution_id=f"inline-tool-exec:{self._counter}",
                 session_key=str(session_key or "").strip(),
@@ -215,8 +259,12 @@ class InlineToolExecutionRegistry:
                 task=task,
                 snapshot_supplier=snapshot_supplier if callable(snapshot_supplier) else None,
                 cancel_token=cancel_token,
-                started_at=float(started_at),
+                started_at=normalized_started_at,
                 runtime_session=runtime_session,
+                next_check_at=normalized_started_at + self._first_check_seconds,
+                last_check_interval_seconds=self._first_check_seconds,
+                last_continue_at=normalized_started_at,
+                timeout_seconds=float(timeout_seconds) if timeout_seconds else None,
             )
             self._executions[record.execution_id] = record
         task.add_done_callback(lambda _task, key=record.execution_id: self._schedule_terminal_cleanup(key))
@@ -328,14 +376,6 @@ class InlineToolExecutionRegistry:
         if self._reminder_service is not None:
             await self._reminder_service.execution_finished(record)
 
-    def next_window_seconds(self, reminder_index: int) -> float:
-        windows = self._reminder_windows_seconds or DEFAULT_INLINE_REMINDER_WINDOWS_SECONDS
-        index = max(0, int(reminder_index or 0))
-        if index < len(windows):
-            return float(windows[index])
-        last_window = float(windows[-1])
-        return last_window * float(index - len(windows) + 2)
-
 
 class CeoToolReminderService:
     def __init__(
@@ -343,12 +383,10 @@ class CeoToolReminderService:
         *,
         loop: Any,
         registry: InlineToolExecutionRegistry,
-        reminder_windows_seconds: tuple[float, ...] = DEFAULT_INLINE_REMINDER_WINDOWS_SECONDS,
     ) -> None:
         self._loop = loop
         self._registry = registry
         self._registry.attach_reminder_service(self)
-        self._reminder_windows_seconds = tuple(float(item) for item in reminder_windows_seconds if float(item) > 0)
         self._prompt_builder = CeoPromptBuilder(loop=loop)
         self._builder = CeoMessageBuilder(loop=loop, prompt_builder=self._prompt_builder)
         self._support = None
@@ -390,10 +428,18 @@ class CeoToolReminderService:
         return [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
 
     @staticmethod
-    def _parse_text_decision(value: Any) -> str:
+    def _parse_text_decision(value: Any) -> tuple[str, float | None]:
+        """解析判定回复：返回 (decision, next_check_seconds)。
+
+        支持三种形态：
+        - JSON：{"decision": "stop|continue", "next_check_seconds": N}
+        - 单行令牌：`STOP` 或 `CONTINUE <seconds>`（如 `CONTINUE 300`）
+        - 首词匹配兜底
+        无效的秒数归一为 None（由调用方沿用上一轮间隔）。
+        """
         raw = str(CeoToolReminderService._content_text(value) or "").strip()
         if not raw:
-            return ""
+            return "", None
         compact = raw.strip()
         if compact.startswith("{"):
             try:
@@ -403,22 +449,29 @@ class CeoToolReminderService:
             if isinstance(parsed, dict):
                 decision = str(parsed.get("decision") or "").strip().lower()
                 if decision in {"stop", "continue"}:
-                    return decision
+                    next_seconds = clamp_next_check_seconds(parsed.get("next_check_seconds"))
+                    return decision, next_seconds
         for line in compact.splitlines():
-            token = re.sub(r"[^A-Z_]+", "", str(line or "").strip().upper())
+            stripped_line = str(line or "").strip()
+            if not stripped_line:
+                continue
+            token = re.sub(r"[^A-Z_]+", "", stripped_line.upper())
             if token == "STOP":
-                return "stop"
-            if token == "CONTINUE":
-                return "continue"
+                return "stop", None
+            upper_line = stripped_line.upper()
+            if upper_line.startswith("CONTINUE"):
+                number_match = re.search(r"(\d+(?:\.\d+)?)", stripped_line[len("CONTINUE"):])
+                next_seconds = clamp_next_check_seconds(number_match.group(1)) if number_match else None
+                return "continue", next_seconds
         match = re.match(r"^\s*([A-Za-z_]+)", compact)
         if not match:
-            return ""
+            return "", None
         token = re.sub(r"[^A-Z_]+", "", match.group(1).upper())
         if token == "STOP":
-            return "stop"
+            return "stop", None
         if token == "CONTINUE":
-            return "continue"
-        return ""
+            return "continue", None
+        return "", None
 
     async def _decide_from_actual_request_scaffold(
         self,
@@ -493,7 +546,7 @@ class CeoToolReminderService:
             parent_request_id=str(actual_request_record.get("request_id") or "").strip(),
         )
         decision_excerpt = self._content_text(getattr(response, "content", "")).strip()
-        parsed_decision = self._parse_text_decision(decision_excerpt)
+        parsed_decision, parsed_next_seconds = self._parse_text_decision(decision_excerpt)
         elapsed_seconds = max(0.0, time.monotonic() - record.started_at)
         if parsed_decision == "stop":
             return CeoReminderDecision(
@@ -514,6 +567,7 @@ class CeoToolReminderService:
                     reminder_count=record.reminder_count,
                 ),
                 model_decision_excerpt=decision_excerpt,
+                next_check_seconds=parsed_next_seconds,
             )
         return None
 
@@ -538,9 +592,8 @@ class CeoToolReminderService:
             record = await self._registry.get(execution_id)
             if record is None or record.state != "running":
                 return
-            target_seconds = self._registry.next_window_seconds(record.next_window_index)
-            elapsed = max(0.0, time.monotonic() - record.started_at)
-            delay_seconds = max(0.0, target_seconds - elapsed)
+            # 自定排程：下一次巡检时刻由上一轮判定给出（首档为注册时的配置值）。
+            delay_seconds = max(0.0, record.next_check_at - time.monotonic())
             try:
                 await asyncio.sleep(delay_seconds)
             except asyncio.CancelledError:
@@ -549,7 +602,6 @@ class CeoToolReminderService:
             if record is None or record.state != "running":
                 return
             record.reminder_count += 1
-            record.next_window_index += 1
             elapsed_seconds = round(max(0.0, time.monotonic() - record.started_at), 1)
             try:
                 decision = await self._decide(record=record)
@@ -561,6 +613,7 @@ class CeoToolReminderService:
                         elapsed_seconds=elapsed_seconds,
                         reminder_count=record.reminder_count,
                     ),
+                    source="unavailable",
                 )
             if decision.decision == "stop":
                 try:
@@ -572,7 +625,7 @@ class CeoToolReminderService:
                             decision_source="sidecar_reminder",
                             elapsed_seconds_at_stop=elapsed_seconds,
                             reminder_count=record.reminder_count,
-                            window_seconds=target_seconds,
+                            window_seconds=record.last_check_interval_seconds,
                             model_decision_excerpt=decision.model_decision_excerpt,
                         ),
                     )
@@ -603,7 +656,21 @@ class CeoToolReminderService:
                         elapsed_seconds=elapsed_seconds,
                         reminder_count=record.reminder_count,
                     ),
+                    source="unavailable",
                 )
+            # 排下一轮巡检：模型给了间隔就用（钳制后），否则沿用上一轮间隔——
+            # 确定性跳过轮与判定失败轮因此零模型调用地延续节奏。
+            next_interval = clamp_next_check_seconds(decision.next_check_seconds)
+            if next_interval is None:
+                next_interval = record.last_check_interval_seconds or self._registry.first_check_seconds
+            record.last_check_interval_seconds = next_interval
+            record.next_check_at = time.monotonic() + next_interval
+            if str(decision.decision or "continue").strip() == "continue":
+                if decision.source == "deterministic_skip":
+                    record.skip_continue_count += 1
+                elif decision.source == "model":
+                    record.llm_continue_count += 1
+                record.last_continue_at = time.monotonic()
             record.reminder_visible = True
             self._publish(
                 session_id=record.session_key,
@@ -617,6 +684,7 @@ class CeoToolReminderService:
                     "decision": str(decision.decision or "continue").strip() or "continue",
                     "label": str(decision.label or "").strip(),
                     "source": "reminder",
+                    "next_check_in_seconds": round(float(next_interval), 1),
                 },
             )
 
@@ -633,6 +701,7 @@ class CeoToolReminderService:
                     elapsed_seconds=elapsed_seconds,
                     reminder_count=record.reminder_count,
                 ),
+                source="unavailable",
             )
         deterministic_decision = self._deterministic_observation_decision(
             record=record,
@@ -641,20 +710,29 @@ class CeoToolReminderService:
         )
         if deterministic_decision is not None:
             return deterministic_decision
+        since_last_continue = max(0.0, time.monotonic() - record.last_continue_at)
+        timeout_note = (
+            f" The call's maximum runtime is {record.timeout_seconds:.0f}s."
+            if record.timeout_seconds
+            else ""
+        )
         reminder_messages: list[dict[str, Any]] = [
             {
                 "role": "assistant",
                 "content": (
-                    f"The running tool `{record.tool_name}` has been executing for {elapsed_seconds:.0f}s. "
-                    f"You have already been reminded {record.reminder_count} time(s)."
+                    f"The running tool `{record.tool_name}` has been executing for {elapsed_seconds:.0f}s.{timeout_note} "
+                    f"Reminders so far: {record.reminder_count}; you chose to keep waiting {record.llm_continue_count} time(s), "
+                    f"automatic observation skips kept waiting {record.skip_continue_count} time(s); "
+                    f"{since_last_continue:.0f}s have passed since the last keep-waiting decision."
                 ),
             },
             {
                 "role": "user",
                 "content": (
                     "This is a live-only reminder. Decide only whether to keep waiting or stop the running tool call. "
-                    "Reply with exactly one uppercase word: STOP or CONTINUE. Do not start any new tool chain. "
-                    "Do not call any tools."
+                    "Reply with exactly one line: `STOP`, or `CONTINUE <seconds>` where <seconds> is when to check "
+                    "the tool again (between 30 and 600). Example: `CONTINUE 300` means re-check in 300 seconds. "
+                    "Do not start any new tool chain. Do not call any tools."
                 ),
             },
         ]
@@ -801,6 +879,7 @@ class CeoToolReminderService:
                     "A concrete tool error is already visible, so the sidecar will keep waiting and preserve the tool's native failure."
                 ),
                 model_decision_excerpt="deterministic_continue_hard_error",
+                source="deterministic_skip",
             )
         if (
             bool(observation.get("positive_progress"))
@@ -814,6 +893,7 @@ class CeoToolReminderService:
                     "Positive progress is already visible, so the sidecar will continue waiting."
                 ),
                 model_decision_excerpt="deterministic_continue_positive_progress",
+                source="deterministic_skip",
             )
         return None
 
