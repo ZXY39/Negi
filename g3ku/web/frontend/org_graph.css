@@ -10443,12 +10443,24 @@ textarea {
 }
 
 .task-tree-node-locate {
+    z-index: 3;
     animation: task-tree-node-locate 1200ms ease-in-out 1;
 }
 
+/* 定位命中节点的一次性放大脉冲：放大 → 保持 → 回落，期间带 #39c5bb 光圈 */
 @keyframes task-tree-node-locate {
-    0%, 100% { box-shadow: var(--tree-node-shadow); }
-    20%, 70% { box-shadow: 0 0 0 5px color-mix(in srgb, #39c5bb 72%, transparent), var(--shadow-lg); }
+    0% {
+        transform: scale(1);
+        box-shadow: var(--tree-node-shadow);
+    }
+    18%, 55% {
+        transform: scale(1.18);
+        box-shadow: 0 0 0 5px color-mix(in srgb, #39c5bb 72%, transparent), var(--shadow-lg);
+    }
+    100% {
+        transform: scale(1);
+        box-shadow: var(--tree-node-shadow);
+    }
 }
 
 /* ---- 配置名称相关 UI ---- */

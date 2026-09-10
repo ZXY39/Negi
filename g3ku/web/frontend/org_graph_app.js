@@ -14,6 +14,8 @@ const TREE_SCALE_MAX = 3.5;
 const TREE_SCALE_FACTOR = 1.12;
 // 搜索定位节点时统一放大到的固定缩放值，保证节点文字清晰可读
 const TREE_FOCUS_SCALE = 1.2;
+// 定位命中节点的放大脉冲动画时长，与 .task-tree-node-locate 的 CSS 动画保持一致
+const TREE_LOCATE_HIGHLIGHT_MS = 1200;
 const RESOURCE_PAGE_SIZES = [20, 50, 100];
 const TASK_MODEL_CALLS_PAGE_SIZE = 100;
 const TASK_DEPTH_PRESET_VALUES = Object.freeze([0, 1, 2, 3, 4, 5]);
@@ -249,6 +251,7 @@ const S = {
         suppressClickNodeId: null,
     },
     treeFitOnNextRender: false,
+    treeLocateHighlight: null,
     selectedNodeId: null,
     skills: [],
     selectedSkill: null,

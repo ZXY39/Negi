@@ -161,6 +161,7 @@ function resetTaskTreeSnapshotState({ clearDirty = true } = {}) {
     S.treeBranchSyncTokenById = {};
     S.treeBranchSyncInFlightById = {};
     S.treeBranchSyncQueuedById = {};
+    S.treeLocateHighlight = null;
     if (clearDirty) S.treeDirtyParentsById = {};
 }
 
@@ -2183,7 +2184,7 @@ function substringMatchScore(textLower, needleLower) {
 }
 
 // 在当前任务树快照中按节点 ID 或 goal 关键词搜索，返回按匹配度排序的候选节点
-function searchTaskTreeNodes(query, { limit = 30 } = {}) {
+function searchTaskNodes(query, { limit = 30 } = {}) {
     const needle = String(query ?? "").trim().toLowerCase();
     if (!needle) return [];
     const nodesById = S.treeNodesById && typeof S.treeNodesById === "object" ? S.treeNodesById : {};
@@ -2202,8 +2203,8 @@ function searchTaskTreeNodes(query, { limit = 30 } = {}) {
     return matches.slice(0, Math.max(1, Number(limit) || 30));
 }
 
-// 将已渲染的节点居中到树视口正中，并做一次性高亮；节点不在树中时返回 false
-function centerTaskTreeNodeInView(targetId) {
+// 将已渲染的节点居中到树视口正中，并触发一次性放大脉冲动画；节点不在树中时返回 false
+function centerTaskNodeInView(targetId) {
     const normalizedTargetId = String(targetId || "").trim();
     if (!normalizedTargetId || !U.tree) return false;
     const button = U.tree.querySelector(executionTreeNodeSelector(normalizedTargetId));
@@ -2217,11 +2218,45 @@ function centerTaskTreeNodeInView(targetId) {
     S.treePan.baseOffsetY = S.treePan.offsetY;
     const canvas = U.tree.querySelector(".execution-tree");
     if (canvas) canvas.style.transform = `translate(${Math.round(S.treePan.offsetX)}px, ${Math.round(S.treePan.offsetY)}px) scale(${S.treePan.scale})`;
+    // 运行中的任务会频繁整树重渲染，记录高亮窗口期，重渲染后补挂动画 class
+    const until = Date.now() + TREE_LOCATE_HIGHLIGHT_MS;
+    S.treeLocateHighlight = { nodeId: normalizedTargetId, until };
+    applyTaskTreeLocateHighlight(button);
+    window.setTimeout(() => {
+        const current = S.treeLocateHighlight;
+        if (!current || current.nodeId !== normalizedTargetId || Number(current.until) !== until) return;
+        S.treeLocateHighlight = null;
+        const stale = U.tree?.querySelector(executionTreeNodeSelector(normalizedTargetId));
+        if (stale instanceof HTMLElement) {
+            stale.classList.remove("task-tree-node-locate");
+            stale.style.animationDelay = "";
+        }
+    }, TREE_LOCATE_HIGHLIGHT_MS + 80);
+    return true;
+}
+
+function applyTaskTreeLocateHighlight(button) {
+    if (!(button instanceof HTMLElement)) return;
+    button.style.animationDelay = "";
     button.classList.remove("task-tree-node-locate");
     void button.offsetWidth;
     button.classList.add("task-tree-node-locate");
-    window.setTimeout(() => button.classList.remove("task-tree-node-locate"), 1200);
-    return true;
+}
+
+// renderTree 重建 DOM 后，若仍处在上次定位的高亮窗口期内，为新节点元素补挂放大动画；
+// 用负 animation-delay 让动画从当前相位继续，避免频繁重渲染时动画反复从头播放
+function maybeReapplyTaskTreeLocateHighlight() {
+    const pending = S.treeLocateHighlight;
+    if (!pending?.nodeId) return;
+    const remaining = Number(pending.until || 0) - Date.now();
+    if (remaining <= 0) {
+        S.treeLocateHighlight = null;
+        return;
+    }
+    const button = U.tree?.querySelector(executionTreeNodeSelector(pending.nodeId));
+    if (!(button instanceof HTMLElement) || button.classList.contains("task-tree-node-locate")) return;
+    button.style.animationDelay = `-${TREE_LOCATE_HIGHLIGHT_MS - remaining}ms`;
+    button.classList.add("task-tree-node-locate");
 }
 
 // 从目标节点向上找最近的、当前已在树中渲染的祖先节点 ID（目标本身已确认不可见时使用）
@@ -2244,7 +2279,7 @@ function nearestVisibleTreeNodeId(nodeId) {
 // 返回 Promise<{ located, reason?, fallbackNodeId? }>：
 // - located=true 表示目标节点已居中；
 // - located=false 且带 fallbackNodeId 表示目标当前不可见，已居中其最近可见祖先。
-async function locateTaskTreeNode(targetId, { scale = null } = {}) {
+async function locateTaskNode(targetId, { scale = null } = {}) {
     const normalizedTargetId = String(targetId || "").trim();
     if (!normalizedTargetId) return { located: false, reason: "missing" };
     const target = treeSnapshotNode(normalizedTargetId) || S.taskNodeDetails?.[normalizedTargetId] || null;
@@ -2275,12 +2310,12 @@ async function locateTaskTreeNode(targetId, { scale = null } = {}) {
     renderTree();
     return new Promise((resolve) => {
         window.requestAnimationFrame(() => {
-            if (centerTaskTreeNodeInView(normalizedTargetId)) {
+            if (centerTaskNodeInView(normalizedTargetId)) {
                 resolve({ located: true, nodeId: normalizedTargetId });
                 return;
             }
             const fallbackNodeId = nearestVisibleTreeNodeId(normalizedTargetId);
-            if (fallbackNodeId && centerTaskTreeNodeInView(fallbackNodeId)) {
+            if (fallbackNodeId && centerTaskNodeInView(fallbackNodeId)) {
                 resolve({ located: false, reason: "hidden", fallbackNodeId });
                 return;
             }
@@ -2321,7 +2356,7 @@ function renderTaskTreeSearchResults() {
         results.dataset.activeIndex = "-1";
         return;
     }
-    const matches = searchTaskTreeNodes(trimmed);
+    const matches = searchTaskNodes(trimmed);
     if (!matches.length) {
         const empty = document.createElement("div");
         empty.className = "task-tree-search-empty";
@@ -2355,7 +2390,7 @@ async function jumpTaskTreeSearchToNode(nodeId) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId) return;
     // 定位不清空搜索框与结果列表，方便在候选节点间连续跳转
-    const result = await locateTaskTreeNode(normalizedNodeId, { scale: TREE_FOCUS_SCALE });
+    const result = await locateTaskNode(normalizedNodeId, { scale: TREE_FOCUS_SCALE });
     if (typeof showToast !== "function") return;
     if (result?.located) return;
     if (result?.fallbackNodeId) {
@@ -2640,6 +2675,7 @@ function renderTree() {
     if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
     U.tree.appendChild(wrapper);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
+    maybeReapplyTaskTreeLocateHighlight();
     if (S.selectedNodeId) {
         const selected = findTreeNode(S.treeView, S.selectedNodeId);
         if (selected) {

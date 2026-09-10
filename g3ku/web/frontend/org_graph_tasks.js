@@ -1430,6 +1430,7 @@ function resetTaskView() {
     S.treePan.baseScale = 1;
     S.treePan.moved = false;
     S.treePan.suppressClickNodeId = null;
+    S.treeLocateHighlight = null;
     S.treeFitOnNextRender = false;
     U.tree.innerHTML = '<div class="empty-state">Waiting for task tree...</div>';
     if (U.taskTreeResetRounds) {
@@ -1526,7 +1527,7 @@ async function openTaskErrorLog() {
 async function focusErrorLogNode(nodeId) {
     // 复用任务树搜索的定位管线：展开祖先节点、居中并一次性高亮；
     // 不传 scale 表示保持当前缩放，与错误日志跳转的历史行为一致。
-    await locateTaskTreeNode(nodeId);
+    await locateTaskNode(nodeId);
 }
 
 function setTaskTokenStatsOpen(open) {
