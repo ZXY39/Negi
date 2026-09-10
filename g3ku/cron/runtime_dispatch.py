@@ -10,6 +10,7 @@ from loguru import logger
 from g3ku.bus.events import OutboundMessage
 from g3ku.core.messages import UserInputMessage
 from g3ku.cron.types import CronJob
+from g3ku.runtime.reply_tokens import is_silent_reply_token
 
 
 def resolve_cron_session_key(job: CronJob, *, session_manager: Any | None = None) -> str:
@@ -69,7 +70,7 @@ async def dispatch_cron_job(
     )
     output = str(getattr(result, "output", "") or "")
     deliver = bool(getattr(payload, "deliver", False))
-    if deliver and output.strip() and publish_outbound is not None and chat_id and chat_id != "direct":
+    if deliver and output.strip() and not is_silent_reply_token(output) and publish_outbound is not None and chat_id and chat_id != "direct":
         try:
             outbound = OutboundMessage(
                 channel=channel,

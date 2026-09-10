@@ -13,6 +13,7 @@ from g3ku.bus.queue import MessageBus
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.bridge import SessionRuntimeBridge
 from g3ku.runtime.channel_events import make_channel_event_listener
+from g3ku.runtime.reply_tokens import is_silent_reply_token
 
 
 class ChannelSessionTransport:
@@ -81,7 +82,7 @@ class ChannelSessionTransport:
                 listeners=[event_listener],
                 register_task=self._register_task if callable(self._register_task) else None,
             )
-            if result.output:
+            if result.output and not is_silent_reply_token(result.output):
                 await self.bus.publish_outbound(
                     OutboundMessage(
                         channel=msg.channel,

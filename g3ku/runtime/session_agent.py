@@ -3081,6 +3081,7 @@ class RuntimeAgentSession:
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
                 self._last_verified_task_ids = list(task_ids)
+                silent_reply = is_silent_reply_token(output)
                 if getattr(self._loop, "prompt_trace", False):
                     logger.info(render_output_trace(output))
                 if persist_transcript:
@@ -3088,6 +3089,9 @@ class RuntimeAgentSession:
                         "task_ids": task_ids,
                         "reason": "async_dispatch_runtime_recovered",
                     }
+                    if silent_reply:
+                        assistant_metadata["ui_visible"] = False
+                        assistant_metadata["silent_reply"] = True
                     if cron_internal:
                         assistant_metadata["source"] = "cron"
                         assistant_metadata["cron_job_id"] = str(
@@ -3105,7 +3109,8 @@ class RuntimeAgentSession:
                 await self._emit(
                     "message_end",
                     role="assistant",
-                    text=output,
+                    text="" if silent_reply else output,
+                    silent_reply=silent_reply,
                     heartbeat_internal=heartbeat_internal,
                     heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                     source=internal_source or "user",
@@ -3116,7 +3121,7 @@ class RuntimeAgentSession:
                 await self._emit("turn_end", session_key=self._state.session_key, status="completed")
                 await self._emit("agent_end", session_key=self._state.session_key, status="completed")
                 await self._emit_state_snapshot()
-                return RunResult(output=output, events=list(self._event_log))
+                return RunResult(output="" if silent_reply else output, is_silent_reply=silent_reply, events=list(self._event_log))
             logger.opt(exception=exc).error(
                 "Runtime agent turn failed "
                 "(session_key={}, route_kind={}, internal_source={})",
@@ -3616,16 +3621,18 @@ class RuntimeAgentSession:
             self._state.status = "completed"
             self._cancel_assistant_stream_flush_task()
             self._assistant_stream_pending_text = ""
-            self._state.latest_message = str(output or "")
+            silent_reply = is_silent_reply_token(output)
+            self._state.latest_message = "" if silent_reply else str(output or "")
             await self._emit(
                 "message_end",
                 role="assistant",
-                text=str(output or ""),
+                text="" if silent_reply else str(output or ""),
+                silent_reply=silent_reply,
                 source="user",
                 turn_id=self._current_turn_id(),
             )
             await self._emit_state_snapshot()
-            return RunResult(output=str(output or ""), events=list(self._event_log))
+            return RunResult(output="" if silent_reply else str(output or ""), is_silent_reply=silent_reply, events=list(self._event_log))
 
     async def cancel(self, *, reason: str = "user_cancelled") -> None:
         await self._emit_safe_stop_notice("cancel")
