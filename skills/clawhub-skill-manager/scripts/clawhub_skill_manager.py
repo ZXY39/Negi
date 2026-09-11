@@ -605,12 +605,28 @@ def stage_archive_download(url: str, *, temp_root: Path) -> Path:
     return archive_path
 
 
+def _reject_unsafe_members(zf: zipfile.ZipFile, staging_dir: Path) -> None:
+    staging_root = os.path.realpath(str(staging_dir))
+    offending: list[str] = []
+    for info in zf.infolist():
+        target = os.path.realpath(os.path.join(staging_root, info.filename))
+        if target == staging_root or target.startswith(staging_root + os.sep):
+            continue
+        offending.append(info.filename)
+    if offending:
+        raise ValueError(
+            'Archive contains member paths escaping the staging directory (zip slip): '
+            + ', '.join(repr(name) for name in offending)
+        )
+
+
 def unpack_archive(archive_path: Path, staging_dir: Path) -> Path:
     ensure_dir(staging_dir)
     with zipfile.ZipFile(archive_path) as zf:
         names = [name for name in zf.namelist() if not name.endswith('/')]
         if not names:
             raise ClawHubSkillError('Downloaded archive is empty.')
+        _reject_unsafe_members(zf, staging_dir)
         zf.extractall(staging_dir)
     root_name = extract_archive_root(names)
     if root_name:
