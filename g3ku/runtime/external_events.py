@@ -143,6 +143,15 @@ def _turn_usage(session: Any, turn_id: str) -> dict[str, Any] | None:
     return dict(usage) if isinstance(usage, dict) else None
 
 
+def _resolve_turn_usage(session: Any, payload_turn_id: str, record_turn_id: str) -> dict[str, Any] | None:
+    """usage 记录按会话内部 transcript turn id 建键，而对外事件统一携带
+    record turn id；先按 payload 的 transcript id 查，回退 record id。"""
+    usage = _turn_usage(session, payload_turn_id)
+    if usage is None:
+        usage = _turn_usage(session, record_turn_id)
+    return usage
+
+
 def make_session_event_relay(
     session_key: str,
     *,
@@ -168,9 +177,13 @@ def make_session_event_relay(
                 text = str(payload.get("text") or "")
                 if not text:
                     return
+                # 对外事件一律携带 record turn_id（与 turn.started/completed 及
+                # 等待方的 want_turn_id 同一命名空间）；会话内部事件携带的
+                # transcript turn id 是另一套命名空间，直接透出会让等待方按
+                # record id 匹配时永远收不到回复。
                 hub.publish(
                     "reply.delta",
-                    turn_id=str(payload.get("turn_id") or turn_id),
+                    turn_id=turn_id,
                     text=text,
                     source=str(payload.get("source") or "user"),
                 )
@@ -182,15 +195,14 @@ def make_session_event_relay(
                 if not text or is_silent_reply_token(text):
                     return
                 text = _rewrite_media_signed(text)
-                end_turn_id = str(payload.get("turn_id") or turn_id)
                 final_payload: dict[str, Any] = {
                     "text": text,
                     "source": str(payload.get("source") or "user"),
                 }
-                usage = _turn_usage(session, end_turn_id)
+                usage = _resolve_turn_usage(session, str(payload.get("turn_id") or ""), turn_id)
                 if usage:
                     final_payload["usage"] = usage
-                hub.publish("reply.final", turn_id=end_turn_id, **final_payload)
+                hub.publish("reply.final", turn_id=turn_id, **final_payload)
                 return
             kind, text = cli_event_text(event)
             text = str(text or "").strip()
@@ -227,6 +239,22 @@ class ExternalReplyOutcome:
     usage: dict[str, Any] | None = None
     error: str | None = None
     last_seq: int = 0
+
+
+def _drain_queue_for_outcome(
+    queue: asyncio.Queue,
+    consider: Callable[[dict[str, Any]], ExternalReplyOutcome | None],
+) -> ExternalReplyOutcome | None:
+    """超时前最后时刻排空 live 队列：publish 的扇出不在 hub 锁内，终态事件
+    可能恰好赶在 deadline 判定前入队；漏掉它会把已到手的回复误报为超时。"""
+    while True:
+        try:
+            event = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+        outcome = consider(event)
+        if outcome is not None:
+            return outcome
 
 
 async def wait_for_external_reply(
@@ -326,6 +354,9 @@ async def wait_for_external_reply(
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                drained = _drain_queue_for_outcome(queue, _consider)
+                if drained is not None:
+                    return drained
                 return ExternalReplyOutcome(kind="timeout", last_seq=state["last_seq"])
             if should_stop is not None and await should_stop():
                 return ExternalReplyOutcome(
