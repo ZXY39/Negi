@@ -76,6 +76,14 @@ externaltools/
 - `exposure`
 - `toolskill.enabled`
 
+按需声明：
+
+- `timeout_policy` —— 工具在统一 timeout 合同下的行为（三个键都是布尔，缺省视为 false）：
+  - `exempt_universal: true`：完全不套外层最大超时（全局默认 600s）。仅限运行时长天然无界的长时编排工具（例如一次调用内要跑完整个子任务流水线）。豁免只豁免超时、不豁免取消：必须完整实现强取消。
+  - `self_enforced: true`：handler 自己消费统一注入的 `timeout` 入参并负责结构化收尾（终止进程树、关闭会话、抢救部分输出）。声明后 handler 必须真的实现收尾，否则该工具处于无任何时限状态。
+  - `hide_parameter: true`：模型 schema 不注入 `timeout` 参数，机械保底仍适用。用于瞬时完成的内部协议类工具。
+  - 清单声明与 handler 类属性是 OR 语义：清单只能追加这些 opt-in 行为，不能撤销代码级已声明的合同；handler 已在代码里设置标志的，清单不必重复声明。
+
 额外规则：
 
 - `tool_type=internal`
@@ -139,6 +147,7 @@ externaltools/
 - 任何外部命令、HTTP 请求、轮询等待都必须有明确超时与失败返回，不能无限 `Working...`。
 - 对于超过几秒的任务，优先补充阶段性进度反馈，让用户和前端知道卡在哪个阶段。
 - 如果一个工具天然是重任务，应把重活移到后台执行，再返回可轮询结果或明确进度，而不是长时间阻塞当前请求。
+- 如果一次工具调用天然就是长时编排（要等多个子任务 / 子流水线跑完，无法后台化），在 `resource.yaml` 声明 `timeout_policy.exempt_universal: true`，避免被统一 600s 保底中途打断；豁免只豁免超时、不豁免取消，强取消仍必须完整实现。
 
 ## 强取消
 
@@ -202,6 +211,7 @@ externaltools/
 - 外置工具的下载 / 缓存 / 解压中转目录在 `temp/<tool_id>/`
 - 工具执行路径不会阻塞事件循环；长耗时步骤已异步化或移到后台线程 / 子进程
 - 网络、子进程和等待逻辑已设置明确超时，不会把整个项目卡住
+- 长时编排类工具已在 `resource.yaml` 声明 `timeout_policy.exempt_universal`；自持收尾类已声明 `self_enforced` 且 handler 确实消费 `timeout` 入参
 - 工具已接入强取消：支持 cancellation token、子进程显式 terminate / kill、长任务阶段性检查取消状态
 - 用户暂停 / 取消时会收到“正在安全停止...”之类的中间反馈
 

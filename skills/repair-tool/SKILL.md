@@ -33,6 +33,7 @@
   - 必要时 `main/tool.py`
 - 不要把第三方工具装进 `tools/`。
 - 不要把下载、缓存、解压产物写到 `tmp/`、系统临时目录、桌面、下载目录或用户主目录。
+- 工具反复被统一超时打断（`Error executing <tool>: timed out after 600s ...`）时，先判断它是否属于运行时长天然无界的长时编排：是则在 `resource.yaml` 补 `timeout_policy.exempt_universal: true`（豁免只豁免超时、不豁免取消，强取消必须完整）；只是单次调用偏慢的，让调用方显式传更大的 `timeout` 参数。不要为个案放大全局默认 `agents.tool_default_timeout_seconds`。
 
 ## 故障分类
 

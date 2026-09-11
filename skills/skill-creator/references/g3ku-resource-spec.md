@@ -86,6 +86,10 @@ exposure:
   main_runtime: true
 toolskill:
   enabled: true
+timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省全 false）
+  exempt_universal: false  # true = 不套外层最大超时，仅限长时编排类工具
+  self_enforced: false     # true = handler 自行消费 timeout 入参并结构化收尾
+  hide_parameter: false    # true = 模型 schema 不注入 timeout 参数（保底仍适用）
 ```
 
 规则：
@@ -97,6 +101,7 @@ toolskill:
 - `external` 必须写 `install_dir`
 - `external.install_dir` 必须在 `tools/` 之外
 - `external` 禁止写 `source.vendor_dir`
+- `timeout_policy` 可选；与 handler 类属性是 OR 语义（清单只能追加豁免/自持/隐藏，不能撤销代码级合同）。`exempt_universal` 只给运行时长天然无界的长时编排工具，且要求强取消实现完整。合同细节见 `docs/architecture/tool-and-skill-system.md`「统一工具 Timeout 合同」
 
 ## Toolskill 规则
 

@@ -7,7 +7,7 @@
 ## 目标
 
 - 升级判断来自 `source` 和 `current_version`，不是来自印象。
-- 更新后，代码 / 安装结果、`resource.yaml`、`toolskills/` 三者必须同步。
+- 更新后，代码 / 安装结果、`resource.yaml`、`toolskills/` 三者必须同步；运行时长特征变化时（新增长时编排步骤、改为自持子进程收尾等），同步增删 `resource.yaml -> timeout_policy` 声明。
 - `external` 工具更新的是工作区根目录 `externaltools/<tool_id>/` 里的真实安装，不得偷偷改回 vendored 模式。
 - 外置工具更新过程中的下载、缓存、解压、备份中转文件统一放在工作区根目录 `temp/<tool_id>/`。
 
