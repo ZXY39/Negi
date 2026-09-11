@@ -730,6 +730,31 @@ class ReActToolLoop:
                             restart_with_refreshed_runtime = True
                             break
                         empty_response_retry_count += 1
+                        if empty_response_retry_count >= _PROVIDER_RETRY_LIMIT:
+                            self._log_service.update_frame(
+                                task.task_id,
+                                node.node_id,
+                                lambda frame: {
+                                    **frame,
+                                    'last_error': (
+                                        'Model returned an empty response with no text and no tool calls. '
+                                        f'Automatic retries exhausted after {empty_response_retry_count} attempts.'
+                                    ),
+                                },
+                                publish_snapshot=True,
+                            )
+                            return NodeFinalResult(
+                                status='failed',
+                                delivery_status='blocked',
+                                summary='empty model response retry limit reached',
+                                answer='',
+                                evidence=[],
+                                remaining_work=[],
+                                blocking_reason=(
+                                    'Model returned consecutive empty responses with no text and no tool calls. '
+                                    f'Automatic retries exhausted after {empty_response_retry_count} attempts.'
+                                ),
+                            )
                         delay_seconds = self._empty_response_retry_delay_seconds(empty_response_retry_count)
                         self._log_service.update_frame(
                             task.task_id,

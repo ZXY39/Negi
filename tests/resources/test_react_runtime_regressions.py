@@ -7731,3 +7731,99 @@ def test_auto_hydrate_content_open_on_exec_truncation() -> None:
     )
     assert reminded_again == 0
     assert len(promotions) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_model_responses_stop_at_retry_limit(tmp_path, monkeypatch) -> None:
+    """连续空响应必须在重试上限处终止并返回 blocked 失败。
+
+    空响应重试发生在内层 while True 中，绕过外层 attempts/max_iterations
+    预算：无上限时节点卡死并持续消耗 provider 调用。修复后复用
+    _PROVIDER_RETRY_LIMIT 作为上限。
+    """
+    from main.runtime.react_loop import _PROVIDER_RETRY_LIMIT
+
+    monkeypatch.setattr(
+        ReActToolLoop,
+        '_empty_response_retry_delay_seconds',
+        staticmethod(lambda attempt_count: 0.0),
+    )
+
+    chat_calls: list[dict[str, object]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            chat_calls.append(dict(kwargs))
+            return LLMResponse(
+                content='',
+                tool_calls=[],
+                finish_reason='stop',
+                usage={'input_tokens': 1, 'output_tokens': 0},
+            )
+
+    react_log_service = _FakeLogService()
+    react_log_service.execution_stage_gate_snapshot = lambda task_id, node_id: {
+        'has_active_stage': False,
+        'transition_required': False,
+        'active_stage': None,
+    }
+
+    service = MainRuntimeService(
+        chat_backend=_Backend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_model_refs=['fake'],
+        acceptance_model_refs=['fake'],
+    )
+    service._react_loop._log_service = react_log_service
+    # 隔离配置热刷新重启动路径：该路径依赖真实配置状态，与本用例的空响应
+    # 预算主题无关，显式关闭以保证计数确定性。
+    service._react_loop._runtime_config_refresh_for_retry_invalidation = None
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'demo'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='demo',
+            goal='demo',
+            node_kind='execution',
+        ),
+    )
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: []
+
+    result = await asyncio.wait_for(
+        service._react_loop.run(
+            task=SimpleNamespace(task_id='task-empty-cap'),
+            node=SimpleNamespace(node_id='node-empty-cap', depth=0, node_kind='execution'),
+            messages=[
+                {'role': 'system', 'content': 'system'},
+                {'role': 'user', 'content': '{"task_id":"task-empty-cap","goal":"demo"}'},
+            ],
+            tools={
+                'stop_tool_execution': _StageProtocolNoopTool('stop_tool_execution'),
+                'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+                'submit_final_result': _submit_final_result_tool(),
+                'spawn_child_nodes': _StageProtocolNoopTool('spawn_child_nodes'),
+            },
+            model_refs=['fake'],
+            runtime_context={
+                'task_id': 'task-empty-cap',
+                'node_id': 'node-empty-cap',
+                'session_key': 'web:shared',
+                'actor_role': 'execution',
+            },
+            max_iterations=8,
+        ),
+        timeout=30,
+    )
+
+    assert result.status == 'failed'
+    assert result.delivery_status == 'blocked'
+    assert 'empty responses' in str(result.blocking_reason)
+    assert len(chat_calls) == _PROVIDER_RETRY_LIMIT, "达到上限后不得继续调用 provider"
