@@ -1504,7 +1504,7 @@ class NodeRunner:
         acceptance_node_id: str,
         result_ref: str,
         result_summary: str,
-        rejection_count: int = 0,
+        rejection_count: int | None = None,
     ) -> None:
         execution = self._store.get_node(execution_node_id)
         current = normalize_acceptance_handshake(
