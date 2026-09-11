@@ -25,6 +25,13 @@ from g3ku.runtime.cancellation import ToolCancellationRequested
 _DEFAULT_REF = "main"
 _GITHUB_HOST = "github.com"
 _SAFE_SKILL_ID = re.compile(r"[^0-9A-Za-z._-]+")
+_TOKEN_ALLOWED_HOSTS = {
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "raw.githubusercontent.com",
+    "objects.githubusercontent.com",
+}
 
 
 class InstallError(Exception):
@@ -61,17 +68,39 @@ def _validate_repo_path(path: str) -> str:
     return "/".join(parts)
 
 
+def _host_allows_token(url: str) -> bool:
+    hostname = urllib.parse.urlparse(str(url)).hostname
+    return hostname is not None and hostname.lower() in _TOKEN_ALLOWED_HOSTS
+
+
+class _TokenScopedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follows HTTP redirects without leaking Authorization to hosts outside the GitHub allowlist."""
+
+    _SENSITIVE_HEADERS = frozenset({"authorization"})
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _host_allows_token(newurl):
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+        rebuilt = urllib.request.Request(newurl)
+        for key, value in req.header_items():
+            if key.lower() in self._SENSITIVE_HEADERS:
+                continue
+            rebuilt.add_header(key, value)
+        return rebuilt
+
+
 def _request(url: str, *, timeout: int, cancel_token: Any | None = None) -> bytes:
     headers = {
         "User-Agent": "g3ku-skill-installer/1.0",
         "Accept": "application/octet-stream, application/zip, text/plain;q=0.9, */*;q=0.1",
     }
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
+    if token and _host_allows_token(url):
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
+    opener = urllib.request.build_opener(_TokenScopedRedirectHandler())
     try:
-        with urllib.request.urlopen(request, timeout=max(1, int(timeout or 30))) as response:
+        with opener.open(request, timeout=max(1, int(timeout or 30))) as response:
             chunks: list[bytes] = []
             while True:
                 if cancel_token is not None and hasattr(cancel_token, "raise_if_cancelled"):
