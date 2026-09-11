@@ -186,6 +186,9 @@ _TASK_SUMMARY_BATCH_MAX_ITEMS = 128
 _TASK_SUMMARY_BATCH_MAX_BYTES = 64 * 1024
 _TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
 _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
+# 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
+# 调用方可在暂停生效后重试；避免无限等待离线/卡死的排空。
+_DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS = 10.0
 _WORKER_STATE_STARTING = 'starting'
 _WORKER_STATE_ONLINE = 'online'
 _WORKER_STATE_STALE = 'stale'
@@ -1603,6 +1606,50 @@ class MainRuntimeService:
         logger.info("task worker lease released during graceful shutdown (worker_id={})", worker_id)
         return True
 
+    def _task_pause_drain_active(self, task_id: str, task: TaskRecord | None = None) -> bool:
+        """任务是否处于「暂停排空」中：暂停标志已置位，但 worker 尚未消费
+        完 pause_task 命令，actor 可能仍在运行并写任务文件。
+
+        worker 离线/失效时永不排空——持久暂停标志即权威。前端暂停提示
+        （draining）与删除前等待共用该判定，两处条件必须同源。
+        """
+        if self.execution_mode != 'web':
+            return False
+        record = task if task is not None else self.get_task(task_id)
+        if record is None:
+            return False
+        status = str(getattr(record, 'status', '') or '').strip().lower()
+        if status != 'in_progress':
+            return False
+        if not (bool(getattr(record, 'is_paused', False)) or bool(getattr(record, 'pause_requested', False))):
+            return False
+        if self.worker_state() not in {_WORKER_STATE_ONLINE, _WORKER_STATE_STARTING}:
+            return False
+        try:
+            unfinished = [
+                item
+                for item in self.store.list_unfinished_task_commands(command_type='pause_task')
+                if str(item.get('task_id') or '').strip() == task_id
+            ]
+        except Exception:
+            unfinished = []
+        return bool(unfinished)
+
+    async def _await_task_pause_drain(
+        self,
+        task_id: str,
+        *,
+        timeout_seconds: float = 10.0,
+        poll_interval_seconds: float = 0.2,
+    ) -> bool:
+        """轮询等待暂停排空结束；到期仍在排空则返回 False。"""
+        deadline = time.monotonic() + max(0.5, float(timeout_seconds))
+        while self._task_pause_drain_active(task_id):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(max(0.05, float(poll_interval_seconds)))
+        return True
+
     def get_task_pause_state_payload(self, task_id: str) -> dict[str, Any] | None:
         """Pause-drain visibility for the task-card synchronous pause hint.
 
@@ -1627,23 +1674,7 @@ class MainRuntimeService:
                     internal_ids.add(node_id)
         internal_total = len(internal_ids)
         worker_state = self.worker_state()
-        draining = False
-        status = str(task.status or '').strip().lower()
-        if (
-            status == 'in_progress'
-            and (bool(task.is_paused) or bool(task.pause_requested))
-            and self.execution_mode == 'web'
-            and worker_state in {_WORKER_STATE_ONLINE, _WORKER_STATE_STARTING}
-        ):
-            try:
-                unfinished = [
-                    item
-                    for item in self.store.list_unfinished_task_commands(command_type='pause_task')
-                    if str(item.get('task_id') or '').strip() == task_id
-                ]
-            except Exception:
-                unfinished = []
-            draining = bool(unfinished)
+        draining = self._task_pause_drain_active(task_id, task=task)
         return {
             'task_id': task_id,
             'status': str(task.status or ''),
@@ -1743,6 +1774,11 @@ class MainRuntimeService:
             except asyncio.TimeoutError as exc:
                 raise ValueError('task_still_stopping') from exc
         if self.global_scheduler.is_active(task_id) or self.global_scheduler.is_queued(task_id):
+            raise ValueError('task_still_stopping')
+        # web 模式暂停排空：暂停标志置位不代表 worker actor 已停止，必须等
+        # pause_task 命令被消费完再删文件，否则边写边删产生半写残留；到期
+        # 未排空统一按「仍在停止」拒绝，调用方可在暂停生效后重试。
+        if not await self._await_task_pause_drain(task_id, timeout_seconds=_DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS):
             raise ValueError('task_still_stopping')
         artifacts = self.list_artifacts(task_id)
         self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
