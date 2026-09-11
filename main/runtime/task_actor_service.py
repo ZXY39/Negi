@@ -470,7 +470,7 @@ class TaskActorService:
                 )
             else:
                 distribution = self._distribution_runtime_state(task_id)
-                if str(distribution.get('state') or '').strip() in {'pause_requested', 'barrier_requested', 'paused', 'distributing'}:
+                if str(distribution.get('state') or '').strip() in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining', 'distributing'}:
                     distribution_result = await self._run_distribution_epoch(task_id)
                     if distribution_result is not None:
                         control_only_return = True
