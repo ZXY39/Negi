@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
@@ -24,6 +25,32 @@ from g3ku.providers.streaming_timeouts import (
     StreamingDiagnostics,
     resolve_streaming_timeout_seconds,
 )
+
+
+_TLS_VERIFY_DISABLED_VALUES = frozenset({"off", "false", "0", "no"})
+
+_tls_verify_warning_logged = False
+
+
+def _tls_verify_enabled() -> bool:
+    """Whether TLS certificate verification is enabled for provider requests.
+
+    Defaults to True. Set ``G3KU_PROVIDER_TLS_VERIFY`` to off/false/0/no
+    (case-insensitive, surrounding whitespace ignored) to disable; when
+    disabled a security warning is logged at most once per process.
+    """
+    global _tls_verify_warning_logged
+    value = os.environ.get("G3KU_PROVIDER_TLS_VERIFY", "").strip().lower()
+    if value not in _TLS_VERIFY_DISABLED_VALUES:
+        return True
+    if not _tls_verify_warning_logged:
+        _tls_verify_warning_logged = True
+        logger.warning(
+            "TLS certificate verification is DISABLED for the Responses provider "
+            "(G3KU_PROVIDER_TLS_VERIFY override); API keys and conversation content "
+            "can be intercepted by a network attacker"
+        )
+    return False
 
 
 class _SSEDiagnosticsResponseProxy:
@@ -209,7 +236,7 @@ class ResponsesProvider(LLMProvider):
         try:
             stream_timeout_seconds = resolve_streaming_timeout_seconds(request_timeout_seconds)
             client_timeout = stream_timeout_seconds
-            async with httpx.AsyncClient(timeout=client_timeout, verify=False) as client:
+            async with httpx.AsyncClient(timeout=client_timeout, verify=_tls_verify_enabled()) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as response:
                     if response.status_code != 200:
                         text = await response.aread()
