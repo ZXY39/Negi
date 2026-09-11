@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from importlib.resources import files as resource_files
 import json
+import os
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -745,9 +746,22 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         security.set_overlay_values(clear_updates)
     data = strip_config_secret_entries(data)
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # 原子写：先写同目录临时文件再 os.replace，避免进程崩溃/断电留下半截
+    # JSON 配置（临时文件必须与目标同目录，保证 replace 在同一文件系统上）。
+    temp_path = path.with_name(f"{path.name}.{uuid4().hex[:12]}.tmp")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    except BaseException:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
