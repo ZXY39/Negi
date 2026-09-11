@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 
 def _env_default_tool_timeout_seconds() -> float:
@@ -907,6 +910,36 @@ async def run_tool_with_hard_timeout(
         raise
 
 
+async def _safe_summarized_snapshot(
+    *,
+    snapshot_supplier: Callable[[], Any] | None,
+    tool_name: str,
+    text_char_limit: int,
+    list_limit: int,
+    fallback: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """快照采集是只读观测旁路：采集失败降级为旧快照，绝不向上传播。
+
+    快照异常若穿透到 run_tool_with_watchdog 的 except BaseException 分支，
+    会触发 request_tool_cancellation 误杀仍在执行的长时工具。此处捕获采集
+    异常并回退最近一次有效快照，仅记录告警；取消类异常不在此拦截范围内。
+    """
+    try:
+        payload = await _maybe_await_callable(snapshot_supplier)
+    except Exception:
+        logger.warning(
+            "tool watchdog snapshot supplier failed; keeping previous snapshot (tool=%s)",
+            tool_name,
+            exc_info=True,
+        )
+        return fallback
+    return summarize_runtime_snapshot(
+        payload,
+        text_char_limit=text_char_limit,
+        list_limit=list_limit,
+    )
+
+
 async def _wait_for_task_window(
     *,
     task: asyncio.Task[Any],
@@ -942,10 +975,12 @@ async def _wait_for_task_window(
             )
         remaining_to_handoff = deadline - time.monotonic()
         if remaining_to_handoff <= 0:
-            snapshot = summarize_runtime_snapshot(
-                await _maybe_await_callable(snapshot_supplier),
+            snapshot = await _safe_summarized_snapshot(
+                snapshot_supplier=snapshot_supplier,
+                tool_name=tool_name,
                 text_char_limit=text_char_limit,
                 list_limit=list_limit,
+                fallback=last_snapshot,
             )
             elapsed = max(0.0, time.monotonic() - started_at)
             return ToolWatchdogRunResult(
@@ -971,10 +1006,12 @@ async def _wait_for_task_window(
             )
         except asyncio.TimeoutError:
             poll_count += 1
-            last_snapshot = summarize_runtime_snapshot(
-                await _maybe_await_callable(snapshot_supplier),
+            last_snapshot = await _safe_summarized_snapshot(
+                snapshot_supplier=snapshot_supplier,
+                tool_name=tool_name,
                 text_char_limit=text_char_limit,
                 list_limit=list_limit,
+                fallback=last_snapshot,
             )
             if on_poll is not None:
                 elapsed = max(0.0, time.monotonic() - started_at)
