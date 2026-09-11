@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any
+
+from main.storage.fs_utils import remove_tree
 
 
 class TaskFileStore:
@@ -47,4 +48,4 @@ class TaskFileStore:
         return target.read_text(encoding='utf-8')
 
     def delete_task_files(self, task_id: str) -> None:
-        shutil.rmtree(self.base_dir / self._safe_task_dir_name(task_id), ignore_errors=True)
+        remove_tree(self.base_dir / self._safe_task_dir_name(task_id))

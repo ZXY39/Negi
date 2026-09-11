@@ -724,10 +724,21 @@ class MainRuntimeDiskGuardConfig(Base):
     # P3：终态任务大行裁剪（0=关闭）与删除渐进。
     detail_retention_days: int = 14
     purge_enabled: bool = True
+    # P3+：event-history 外置归档保留天数（0=关闭）：超期终态任务
+    # （pinned/archived_at 豁免）的归档文件被清理，DB 行保留 slim 预览降级查询。
+    event_history_retention_days: int = 14
 
     @field_validator("detail_retention_days", mode="before")
     @classmethod
     def _normalize_detail_retention_days(cls, value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 14
+
+    @field_validator("event_history_retention_days", mode="before")
+    @classmethod
+    def _normalize_event_history_retention_days(cls, value: Any) -> int:
         try:
             return max(0, int(value))
         except (TypeError, ValueError):

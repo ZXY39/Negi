@@ -32,6 +32,7 @@ from main.monitoring.models import (
     TaskProjectionToolResultRecord,
 )
 from main.storage.disk_guard import classify_write_error, has_emergency_disk_budget, is_disk_full_error
+from main.storage.fs_utils import remove_tree
 
 T = TypeVar('T', bound=BaseModel)
 R = TypeVar('R')
@@ -790,8 +791,10 @@ class SQLiteTaskStore:
     # ------------------------------------------------------------------
     # 磁盘治理（P3）：终态任务大行裁剪与维护窗口记账。
     # 裁剪口径按任务（终态且 finished_at/updated_at 早于 cutoff），一次裁掉该任务
-    # 在五张大行表里的全部行；error_logs、tasks/nodes 结构、task_events 与
-    # event-history gz 归档永久保留（审计与回顾的唯一来源）。
+    # 在五张大行表里的全部行；error_logs、tasks/nodes 结构、task_events 行永久保留。
+    # event-history 外置归档按 event_history_retention_days 保留期批量清理
+    # （prune_event_history_archives：DB 行保留 slim 预览降级查询，
+    # pinned/archived_at 任务豁免）。
     # ------------------------------------------------------------------
 
     _DETAIL_PRUNE_TABLES = (
@@ -851,6 +854,111 @@ class SQLiteTaskStore:
         except sqlite3.Error:
             pass
         return dict(result or {'task_count': 0, 'deleted': {}})
+
+    def prune_event_history_archives(
+        self,
+        before_iso: str,
+        *,
+        batch: int = 50,
+        orphan_grace_seconds: float = 7 * 24 * 3600.0,
+    ) -> dict[str, Any]:
+        """P3+：按保留期清理超期终态任务的 event-history 外置归档。
+
+        只删外置归档文件并把 DB 行引用置空（payload_archive_path/encoding=''，
+        保留 payload_is_external 与 slim payload——与应急水位降级写字段的口径
+        一致），读端 list_task_events 在引用/文件缺失时自动降级 slim 预览。
+        pinned / archived_at 任务豁免（解压回看链路需要水合归档文件）。
+        先删文件、后清引用：中断后下一轮按"目录已不在但引用仍在"幂等补收。
+        附带清扫孤儿目录（tasks 表已无对应行且超过宽限期），宽限期保护
+        刚创建尚未落库的新任务目录。返回 {task_count, deleted_dirs,
+        deleted_bytes, orphan_dirs, cleared_refs}。
+        """
+        cutoff = str(before_iso or '')
+        limit = max(1, int(batch or 50))
+        rows = self._fetchall(
+            f'{self._PRUNABLE_TASK_SUBQUERY} '
+            "AND COALESCE(json_extract(payload_json, '$.metadata.pinned'), 0) != 1 "
+            "AND COALESCE(json_extract(payload_json, '$.metadata.archived_at'), '') = '' "
+            'AND EXISTS (SELECT 1 FROM task_events te WHERE te.task_id = tasks.task_id '
+            "AND te.payload_archive_path <> '') "
+            'ORDER BY updated_at ASC LIMIT ?',
+            (cutoff, limit),
+        )
+        pruned_task_ids: list[str] = []
+        deleted_dirs = 0
+        deleted_bytes = 0
+        cleared_refs = 0
+        for row in rows or []:
+            task_id = str(row['task_id'] or '').strip()
+            if not task_id:
+                continue
+            # 选中后才被 pin/归档的竞态窗口：删目录前重读复检。
+            record = self.get_task(task_id)
+            if record is None:
+                continue
+            metadata = getattr(record, 'metadata', None) or {}
+            if metadata.get('pinned') or str(metadata.get('archived_at') or '').strip():
+                continue
+            archive_dir = self._event_history_dir / self._safe_path_component(task_id)
+            if archive_dir.exists():
+                try:
+                    dir_bytes = sum(int(item.stat().st_size) for item in archive_dir.rglob('*') if item.is_file())
+                except OSError:
+                    dir_bytes = 0
+                if not remove_tree(archive_dir):
+                    continue  # 删除不完整：引用保持指向剩余文件，下一轮重试
+                deleted_dirs += 1
+                deleted_bytes += dir_bytes
+            cleared_refs += int(self._clear_event_archive_refs(task_id) or 0)
+            pruned_task_ids.append(task_id)
+        return {
+            'task_count': len(pruned_task_ids),
+            'task_ids': pruned_task_ids,
+            'deleted_dirs': deleted_dirs,
+            'deleted_bytes': deleted_bytes,
+            'orphan_dirs': self._sweep_orphan_event_history_dirs(grace_seconds=orphan_grace_seconds),
+            'cleared_refs': cleared_refs,
+        }
+
+    def _clear_event_archive_refs(self, task_id: str) -> int:
+        """把该任务全部外置归档引用置空（DB 行与 slim payload 保留）。"""
+
+        def operation(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute(
+                "UPDATE task_events SET payload_archive_path = '', payload_archive_encoding = '' "
+                "WHERE task_id = ? AND payload_archive_path <> ''",
+                (str(task_id),),
+            )
+            return int(cursor.rowcount or 0)
+
+        return int(self._run_write(operation) or 0)
+
+    def _sweep_orphan_event_history_dirs(self, *, grace_seconds: float) -> int:
+        """清扫 tasks 表已无对应行的 event-history 目录（删除链路失败残留）。
+
+        mtime 早于宽限期才删，保护刚创建尚未落库的新任务目录；global 桶不删。
+        """
+        if not self._event_history_dir.exists():
+            return 0
+        known = {self._safe_path_component(str(row['task_id'] or '')) for row in (self._fetchall('SELECT task_id FROM tasks') or [])}
+        known.add('global')
+        now = time.time()
+        removed = 0
+        try:
+            entries = list(self._event_history_dir.iterdir())
+        except OSError:
+            return 0
+        for entry in entries:
+            if not entry.is_dir() or entry.name in known:
+                continue
+            try:
+                if now - entry.stat().st_mtime < max(0.0, float(grace_seconds)):
+                    continue
+            except OSError:
+                continue
+            if remove_tree(entry):
+                removed += 1
+        return removed
 
     def claim_maintenance_run(self, key: str, *, min_interval_seconds: float, detail: str = '') -> bool:
         """维护窗口跨进程防重：距上次不足 min_interval_seconds 返回 False。"""

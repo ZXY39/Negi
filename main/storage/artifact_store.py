@@ -3,13 +3,13 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import shutil
 from pathlib import Path
 
 from main.ids import new_artifact_id
 from main.models import TaskArtifactRecord
 from main.protocol import now_iso
 from main.storage.disk_guard import classify_write_error, disk_policies
+from main.storage.fs_utils import remove_tree
 
 # P2：进程级任务归档器（runtime_service 构造时注入），供归档任务的读端回退。
 _task_archiver = None
@@ -296,10 +296,10 @@ class TaskArtifactStore:
                 try:
                     path.unlink()
                 except IsADirectoryError:
-                    shutil.rmtree(path, ignore_errors=True)
+                    remove_tree(path)
                 except FileNotFoundError:
                     pass
-        shutil.rmtree(self._task_dir(task_id), ignore_errors=True)
+        remove_tree(self._task_dir(task_id))
         self._content_index = {
             key: value
             for key, value in self._content_index.items()

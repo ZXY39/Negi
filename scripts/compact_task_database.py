@@ -4,8 +4,9 @@
 1. 终态任务大行裁剪：对早于保留期（默认 14 天）的 success/failed 任务，删除
    task_model_calls / task_runtime_frames / task_node_tool_results /
    task_node_rounds / task_node_details 五张大行表的任务行。
-   永久保留：tasks/nodes 结构、task_error_logs、task_events 行与
-   event-history gz 归档（审计与回顾的唯一来源）。
+   永久保留：tasks/nodes 结构、task_error_logs、task_events 行；
+   event-history 外置归档由运行时按 event_history_retention_days（默认
+   14 天，pinned/archived_at 任务豁免）在小时级维护循环中批量清理。
 2. auto_vacuum 迁移 + 空间收缩：新库由运行时建库即 INCREMENTAL；存量库
    （auto_vacuum=0）在 --vacuum-full 时执行 VACUUM 迁移，已是 INCREMENTAL
    的库执行 incremental_vacuum 归还 freelist 页。
