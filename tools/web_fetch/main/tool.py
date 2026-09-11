@@ -211,10 +211,10 @@ class WebFetchTool:
                 "final_url": final_url,
                 "status_code": response.status_code,
                 "content_type": content_type,
-                "title": parsed_title,
-                "description": parsed_description,
+                "title": _wrap_untrusted(parsed_title),
+                "description": _wrap_untrusted(parsed_description),
                 "text": body_preview,
-                "links": links,
+                "links": [dict(link, text=_wrap_untrusted(link["text"])) for link in links],
                 "raw_html": raw_html,
                 "security": {
                     "untrusted_content_wrapped": True,
@@ -317,9 +317,12 @@ def _normalize_whitespace_per_line(text: str) -> str:
 
 
 def _wrap_untrusted(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
     return (
         "UNTRUSTED_EXTERNAL_CONTENT_BEGIN\n"
-        + text.strip()
+        + stripped
         + "\nUNTRUSTED_EXTERNAL_CONTENT_END"
     )
 
