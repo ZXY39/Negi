@@ -277,9 +277,11 @@ class ToolRegistry:
             execute_kwargs[runtime_param_name] = runtime_context
 
         # 统一 timeout 合同：自持工具消费统一值并自行收尾；控制类嵌套等待工具
-        # 不套外层时限；其余工具由外层硬执行保底。
+        # 与显式豁免工具（exempt_universal_timeout）不套外层时限；其余工具由
+        # 外层硬执行保底。
         self_enforced = bool(getattr(tool, "self_enforced_timeout", False))
-        is_control_tool = tool_name in _CONTROL_TOOL_NAMES
+        timeout_exempt = bool(getattr(tool, "exempt_universal_timeout", False))
+        is_control_tool = tool_name in _CONTROL_TOOL_NAMES or timeout_exempt
         effective_timeout = resolve_effective_tool_timeout(params, runtime_context)
         if self_enforced:
             execute_kwargs["timeout"] = effective_timeout

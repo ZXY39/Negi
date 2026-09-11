@@ -27,10 +27,18 @@ class Tool(ABC):
       `hide_universal_timeout_parameter = True` so the model-visible schema
       does not advertise a timeout parameter for them; the outer bound
       still applies as a mechanical backstop.
+    - Long-running orchestration/control tools whose execution time is
+      unbounded by design (e.g. `spawn_child_nodes` runs whole child
+      pipelines; `wait_tool_execution` has its own wait windows) set
+      `exempt_universal_timeout = True`: no outer timeout is applied at
+      all and no timeout parameter is advertised. They remain cancelable
+      through the task-level cancellation chain (cancel_token / pause /
+      stop), which is the only legitimate way to interrupt them.
     """
 
     self_enforced_timeout: bool = False
     hide_universal_timeout_parameter: bool = False
+    exempt_universal_timeout: bool = False
 
     _TYPE_MAP = {
         "string": str,
@@ -186,9 +194,13 @@ class Tool(ABC):
         }
 
     def _model_parameters_with_universal_timeout(self) -> dict[str, Any]:
-        """向模型可见 schema 统一注入可选 `timeout` 参数（内部协议工具除外）。"""
+        """向模型可见 schema 统一注入可选 `timeout` 参数（内部协议工具与豁免工具除外）。"""
         schema = self.model_parameters or {}
-        if self.hide_universal_timeout_parameter or not isinstance(schema, dict):
+        if (
+            self.hide_universal_timeout_parameter
+            or self.exempt_universal_timeout
+            or not isinstance(schema, dict)
+        ):
             return schema
         properties = schema.get("properties")
         if not isinstance(properties, dict) or "timeout" in properties:

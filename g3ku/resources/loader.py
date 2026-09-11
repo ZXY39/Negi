@@ -63,6 +63,10 @@ class ManifestBackedTool(Tool):
     def hide_universal_timeout_parameter(self) -> bool:
         return bool(getattr(self._handler, "hide_universal_timeout_parameter", False))
 
+    @property
+    def exempt_universal_timeout(self) -> bool:
+        return bool(getattr(self._handler, "exempt_universal_timeout", False))
+
     def set_context(self, *args: Any, **kwargs: Any) -> Any:
         if hasattr(self._handler, "set_context"):
             return self._handler.set_context(*args, **kwargs)

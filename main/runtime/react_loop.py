@@ -3526,8 +3526,11 @@ class ReActToolLoop:
         if runtime_param_name is not None:
             execute_kwargs[runtime_param_name] = runtime_context
         # 统一 timeout 合同：显式传参 > 全局默认（无上限）。自持工具（持有子进程/
-        # 网络会话，需要结构化收尾）自己消费该值；其余工具由外层硬执行。
+        # 网络会话，需要结构化收尾）自己消费该值；豁免工具（如 spawn_child_nodes、
+        # wait/stop_tool_execution）不套任何外层时限，仅可经任务级取消链中断；
+        # 其余工具由外层硬执行。
         self_enforced = bool(getattr(tool, 'self_enforced_timeout', False))
+        timeout_exempt = bool(getattr(tool, 'exempt_universal_timeout', False))
         effective_timeout = resolve_effective_tool_timeout(arguments, runtime_context)
         if self_enforced:
             execute_kwargs['timeout'] = effective_timeout
@@ -3535,7 +3538,7 @@ class ReActToolLoop:
             execute_kwargs.pop('timeout', None)
         try:
             if not actor_role_allows_watchdog(runtime_context):
-                if self_enforced:
+                if self_enforced or timeout_exempt:
                     return await tool.execute(**execute_kwargs)
                 return await run_tool_with_hard_timeout(
                     tool.execute(**execute_kwargs),
@@ -3555,7 +3558,8 @@ class ReActToolLoop:
                     else None
                 ),
                 on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
-                hard_timeout_seconds=None if self_enforced else effective_timeout,
+                hard_timeout_seconds=None if (self_enforced or timeout_exempt) else effective_timeout,
+                universal_timeout_exempt=timeout_exempt,
             )
             return outcome.value
         except Exception as exc:

@@ -8,6 +8,10 @@ from g3ku.agent.tools.base import Tool
 
 class _ToolExecutionControlTool(Tool):
     hide_universal_timeout_parameter = True
+    # wait/stop 自带受控等待窗口（wait_seconds 上限 600s），外层再套统一硬超时
+    # 会与内层窗口赛跑并把等待中途掐断（还会顺带丢失 detached 执行的登记），
+    # 因此整族豁免外层机械超时。
+    exempt_universal_timeout = True
 
     def __init__(
         self,

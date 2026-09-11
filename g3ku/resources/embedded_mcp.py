@@ -196,6 +196,10 @@ class EmbeddedMCPTool(Tool):
     def hide_universal_timeout_parameter(self) -> bool:  # type: ignore[override]
         return bool(getattr(self._handler, "hide_universal_timeout_parameter", False))
 
+    @property
+    def exempt_universal_timeout(self) -> bool:  # type: ignore[override]
+        return bool(getattr(self._handler, "exempt_universal_timeout", False))
+
     def close(self) -> Any:
         if hasattr(self._handler, "close"):
             return self._handler.close()

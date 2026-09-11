@@ -176,6 +176,9 @@ class SubmitNextStageTool(Tool):
 
 class SpawnChildNodesTool(Tool):
     hide_universal_timeout_parameter = True
+    # 派生子节点工具在一次调用内跑完整个子节点流水线（含嵌套派生与验收节点），
+    # 运行时长天然无界，不得套任何外层机械超时；中断只能走任务级取消链。
+    exempt_universal_timeout = True
 
     def __init__(
         self,

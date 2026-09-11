@@ -724,6 +724,7 @@ async def run_tool_with_watchdog(
     inline_registry: Any | None = None,
     on_inline_registered: Callable[[Any], Awaitable[None] | None] | None = None,
     hard_timeout_seconds: float | None = None,
+    universal_timeout_exempt: bool = False,
 ) -> ToolWatchdogRunResult:
     config = resolve_tool_watchdog_config(runtime_context)
     if not config.enabled:
@@ -759,11 +760,17 @@ async def run_tool_with_watchdog(
                 cancel_token=cancel_token,
                 started_at=started_at,
                 runtime_session=runtime_session,
-                # 自持工具的硬上限在工具内部，取统一解析值供巡检判定参考。
+                # 自持工具的硬上限在工具内部，取统一解析值供巡检判定参考；
+                # 豁免工具（exempt_universal_timeout）没有任何外层时限，
+                # 登记为 None，避免提醒侧车道向模型宣称不存在的运行上限。
                 timeout_seconds=(
-                    hard_timeout_seconds
-                    if hard_timeout_seconds
-                    else resolve_effective_tool_timeout(arguments, runtime_context)
+                    None
+                    if universal_timeout_exempt
+                    else (
+                        hard_timeout_seconds
+                        if hard_timeout_seconds
+                        else resolve_effective_tool_timeout(arguments, runtime_context)
+                    )
                 ),
             )
             if on_inline_registered is not None:

@@ -677,8 +677,11 @@ class CeoFrontDoorSupport:
             execute_kwargs["__g3ku_runtime"] = per_call_runtime
 
         # 统一 timeout 合同：显式传参 > 全局默认（无上限）。自持工具消费统一值
-        # 并自行结构化收尾；其余工具由外层（watchdog 硬 deadline 或薄包装）执行。
+        # 并自行结构化收尾；豁免工具（exempt_universal_timeout，如
+        # wait/stop_tool_execution）不套外层时限；其余工具由外层（watchdog 硬
+        # deadline 或薄包装）执行。
         self_enforced = bool(getattr(tool, "self_enforced_timeout", False))
+        timeout_exempt = bool(getattr(tool, "exempt_universal_timeout", False))
         effective_timeout = resolve_effective_tool_timeout(normalized_arguments, per_call_runtime)
         if self_enforced:
             execute_kwargs["timeout"] = effective_timeout
@@ -714,10 +717,11 @@ class CeoFrontDoorSupport:
                         target=lambda execution_id: _set_inline_execution_id(execution_id),
                     ),
                     on_poll=None,
-                    hard_timeout_seconds=None if self_enforced else effective_timeout,
+                    hard_timeout_seconds=None if (self_enforced or timeout_exempt) else effective_timeout,
+                    universal_timeout_exempt=timeout_exempt,
                 )
                 result = outcome.value
-            elif self_enforced:
+            elif self_enforced or timeout_exempt:
                 result = await _invoke()
             else:
                 result = await run_tool_with_hard_timeout(

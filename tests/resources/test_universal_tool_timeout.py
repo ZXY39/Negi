@@ -1,8 +1,9 @@
-"""统一工具 timeout 合同的核心机制测试：解析、硬执行、侧车道自定排程。"""
+"""统一工具 timeout 合同的核心机制测试：解析、硬执行、侧车道自定排程、豁免合同。"""
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -189,3 +190,136 @@ async def test_registry_initial_schedule_uses_first_check_window() -> None:
 
 def test_default_first_check_is_120_seconds() -> None:
     assert DEFAULT_FIRST_CHECK_SECONDS == 120.0
+
+
+# ---------------------------------------------------------------------------
+# 豁免合同（exempt_universal_timeout）：长时编排/控制类工具不得套外层机械超时
+# ---------------------------------------------------------------------------
+
+
+def _spawn_tool():
+    from main.runtime.internal_tools import SpawnChildNodesTool
+
+    async def _noop(specs, call_id=None):
+        _ = specs, call_id
+        return []
+
+    return SpawnChildNodesTool(_noop)
+
+
+def _control_tools():
+    from g3ku.agent.tools.tool_execution_control import (
+        StopToolExecutionTool,
+        WaitToolExecutionTool,
+    )
+
+    return [
+        WaitToolExecutionTool(lambda: None),
+        StopToolExecutionTool(lambda: None),
+    ]
+
+
+def test_long_running_orchestration_and_control_tools_are_exempt() -> None:
+    """spawn_child_nodes 与 wait/stop_tool_execution 必须整体豁免外层机械超时；
+    瞬时协议工具保留 backstop（豁免=False），自持工具走 self_enforced 语义。"""
+    spawn = _spawn_tool()
+    assert spawn.exempt_universal_timeout is True
+    for tool in _control_tools():
+        assert tool.exempt_universal_timeout is True
+
+    from main.runtime.internal_tools import (
+        SubmitFinalResultTool,
+        SubmitMessageDistributionTool,
+        SubmitNextStageTool,
+    )
+
+    async def _noop(payload):
+        return dict(payload or {})
+
+    instant_protocol_tools = [
+        SubmitNextStageTool(_noop),
+        SubmitFinalResultTool(_noop, node_kind="execution"),
+        SubmitMessageDistributionTool(_noop),
+    ]
+    for tool in instant_protocol_tools:
+        # 瞬时协议工具：隐藏 timeout 参数，但保留机械保底（不豁免）。
+        assert tool.hide_universal_timeout_parameter is True
+        assert tool.exempt_universal_timeout is False
+
+    from g3ku.agent.tools.memory_note import MemoryNoteTool  # noqa: F401  仅作导入冒烟
+
+    from g3ku.agent.tools.base import Tool
+
+    assert Tool.exempt_universal_timeout is False
+
+
+def test_exempt_tools_do_not_advertise_timeout_parameter() -> None:
+    spawn = _spawn_tool()
+    properties = spawn.to_model_schema()["function"]["parameters"].get("properties", {})
+    assert "timeout" not in properties
+
+
+class _KwargsRecordingInlineRegistry:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def register_execution(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return SimpleNamespace(execution_id="inline-tool-exec:1")
+
+    async def discard_execution(self, execution_id: str) -> None:
+        _ = execution_id
+
+
+@pytest.mark.asyncio
+async def test_watchdog_exempt_registration_records_no_timeout_budget() -> None:
+    """豁免工具在 inline 登记时 timeout_seconds=None：提醒侧车道不得向模型
+    宣称一个并不存在的运行上限；对照：非豁免自持语义仍登记统一解析值。"""
+
+    async def _quick() -> str:
+        return "done"
+
+    exempt_registry = _KwargsRecordingInlineRegistry()
+    outcome = await run_tool_with_watchdog(
+        _quick(),
+        tool_name="wait_tool_execution",
+        arguments={},
+        runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.2}},
+        inline_registry=exempt_registry,
+        hard_timeout_seconds=None,
+        universal_timeout_exempt=True,
+    )
+    assert outcome.value == "done"
+    assert exempt_registry.calls[0]["timeout_seconds"] is None
+
+    self_enforced_registry = _KwargsRecordingInlineRegistry()
+    outcome = await run_tool_with_watchdog(
+        _quick(),
+        tool_name="exec",
+        arguments={},
+        runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.2}},
+        inline_registry=self_enforced_registry,
+        hard_timeout_seconds=None,
+    )
+    assert outcome.value == "done"
+    assert self_enforced_registry.calls[0]["timeout_seconds"] == DEFAULT_TOOL_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_watchdog_exempt_tool_has_no_hard_deadline() -> None:
+    """豁免工具传入 hard_timeout_seconds=None 时外层永不超时（可被取消链中断）。"""
+
+    async def _slow() -> str:
+        await asyncio.sleep(0.5)
+        return "finished"
+
+    outcome = await run_tool_with_watchdog(
+        _slow(),
+        tool_name="spawn_child_nodes",
+        arguments={},
+        runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.1}},
+        hard_timeout_seconds=None,
+        universal_timeout_exempt=True,
+    )
+    assert outcome.timed_out is False
+    assert outcome.value == "finished"
