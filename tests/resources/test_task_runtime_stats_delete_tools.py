@@ -273,6 +273,17 @@ async def test_delete_task_records_for_session_deletes_full_disk_footprint_for_i
         _write_text(task_temp_dir / 'temp.txt', 'C')
         _write_text(event_dir / '1.json', 'D')
 
+        async def _ack_pause_drain(task_id, **kwargs):
+            # 测试环境无真实 worker：模拟 worker 立即消费完暂停命令，
+            # 满足删除前排空等待的生产语义（守卫本身由 drain 专项用例覆盖）。
+            for item in service.store.list_unfinished_task_commands(command_type='pause_task'):
+                service.store.finish_task_command(
+                    str(item.get('command_id') or ''), finished_at=now_iso(), success=True
+                )
+            return True
+
+        service._await_task_pause_drain = _ack_pause_drain
+
         deleted = await service.delete_task_records_for_session('web:ceo-delete-target')
 
         assert deleted == 1

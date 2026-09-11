@@ -3014,6 +3014,17 @@ async def test_ceo_session_delete_with_task_record_cleanup_deletes_task_disk_foo
     ceo_sessions.WebCeoStateStore(tmp_path).set_active_session_id(current.key)
     client = TestClient(app)
 
+    async def _ack_pause_drain(task_id, **kwargs):
+        # 测试环境无真实 worker：模拟 worker 立即消费完暂停命令，
+        # 满足删除前排空等待的生产语义（守卫本身由 drain 专项用例覆盖）。
+        for item in service.store.list_unfinished_task_commands(command_type='pause_task'):
+            service.store.finish_task_command(
+                str(item.get('command_id') or ''), finished_at=now_iso(), success=True
+            )
+        return True
+
+    service._await_task_pause_drain = _ack_pause_drain
+
     try:
         response = client.request(
             'DELETE',
