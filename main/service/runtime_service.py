@@ -56,6 +56,7 @@ from main.governance import (
     list_effective_tool_names,
 )
 from main.governance.action_mapper import get_governance_tool_id
+from main.governance.exec_approvals import ExecApprovalService
 from main.governance.exec_tool_policy import (
     EXEC_TOOL_EXECUTOR_NAME,
     EXEC_TOOL_FAMILY_ID,
@@ -413,6 +414,8 @@ class MainRuntimeService:
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
         self.query_service = TaskQueryServiceV2(store=self.store, file_store=self.file_store, log_service=self.log_service, debug_recorder=self.runtime_debug_recorder)
         self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
+        # exec 命令白名单与操作者审批（worker 等待、web 裁决，经 governance sqlite 跨进程）。
+        self.exec_approvals = ExecApprovalService(self.governance_store)
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
         self.policy_engine = MainRuntimePolicyEngine(store=self.governance_store, resource_registry=self.resource_registry)
         self._external_tool_provider = tool_provider or (lambda _node: {})

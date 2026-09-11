@@ -67,8 +67,19 @@ async def test_exec_tool_runs_pwd_on_windows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exec_tool_safety_guard_disabled_by_default() -> None:
+async def test_exec_tool_safety_guard_enabled_by_default() -> None:
+    # 默认开启破坏性命令黑名单：命中且无审批服务时直接拒绝（保持旧错误文本）。
     tool = ExecTool()
+    payload = json.loads(await tool.execute(command='echo shutdown', __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'error'
+    assert payload['exit_code'] is None
+    assert 'dangerous pattern detected' in payload['error'].lower()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_safety_guard_can_be_explicitly_disabled() -> None:
+    tool = ExecTool(enable_safety_guard=False)
     payload = json.loads(await tool.execute(command='echo shutdown', __g3ku_runtime={'session_key': 'web:shared'}))
 
     assert payload['status'] == 'success'

@@ -30,7 +30,7 @@ permissions:
 settings:
   path_append: ''
   restrict_to_workspace: false
-  enable_safety_guard: false
+  enable_safety_guard: true
   execution_mode: governed
 parameters:
   type: object

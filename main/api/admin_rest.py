@@ -1711,6 +1711,85 @@ async def update_governance_mode(payload: dict = Body(...)):
         return {'ok': True, 'item': dict(service.update_governance_mode(enabled=bool(payload.get('enabled'))) or {})}
 
 
+def _exec_approvals_or_503():
+    service = _service()
+    approvals = getattr(service, 'exec_approvals', None)
+    if approvals is None:
+        raise HTTPException(status_code=503, detail='exec_approvals_unavailable')
+    return approvals
+
+
+@router.get('/resources/tools/exec-command-whitelist')
+async def get_exec_command_whitelist():
+    approvals = _exec_approvals_or_503()
+    return {
+        'ok': True,
+        'items': approvals.list_whitelist(),
+        'approval_wait_seconds': approvals.get_approval_wait_seconds(),
+    }
+
+
+@router.post('/resources/tools/exec-command-whitelist')
+async def add_exec_command_whitelist_entry(payload: dict = Body(...)):
+    approvals = _exec_approvals_or_503()
+    try:
+        entry = approvals.add_whitelist_entry(
+            pattern=str(payload.get('pattern') or ''),
+            scope=str(payload.get('scope') or 'all'),
+            created_by=str(payload.get('created_by') or 'operator'),
+            reason=str(payload.get('reason') or ''),
+            source_command=str(payload.get('source_command') or ''),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {'ok': True, 'item': entry}
+
+
+@router.post('/resources/tools/exec-command-whitelist/delete')
+async def remove_exec_command_whitelist_entry(payload: dict = Body(...)):
+    approvals = _exec_approvals_or_503()
+    removed = approvals.remove_whitelist_entry(
+        pattern=str(payload.get('pattern') or ''),
+        scope=str(payload.get('scope') or 'all'),
+    )
+    return {'ok': True, 'removed': bool(removed)}
+
+
+@router.put('/resources/tools/exec-approval-wait')
+async def update_exec_approval_wait(payload: dict = Body(...)):
+    approvals = _exec_approvals_or_503()
+    try:
+        seconds = float(payload.get('seconds'))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail='seconds_required') from exc
+    return {'ok': True, 'approval_wait_seconds': approvals.set_approval_wait_seconds(seconds)}
+
+
+@router.get('/resources/tools/exec-approvals')
+async def list_exec_approvals(status: str = Query('pending'), limit: int = Query(50)):
+    approvals = _exec_approvals_or_503()
+    normalized_status = str(status or '').strip() or None
+    return {'ok': True, 'items': approvals.list_approvals(status=normalized_status, limit=max(1, min(200, int(limit or 50))))}
+
+
+@router.post('/resources/tools/exec-approvals/{approval_id}/decision')
+async def decide_exec_approval(approval_id: str, payload: dict = Body(...)):
+    approvals = _exec_approvals_or_503()
+    try:
+        result = approvals.resolve(
+            approval_id,
+            decision=str(payload.get('decision') or ''),
+            decided_by=str(payload.get('decided_by') or 'operator'),
+            scope=str(payload.get('scope') or 'all'),
+            reason=str(payload.get('reason') or ''),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='approval_not_found') from exc
+    return {'ok': True, 'item': result}
+
+
 @router.get('/resources/tools/{tool_id}')
 async def get_tool(tool_id: str):
     with _resource_service() as service:

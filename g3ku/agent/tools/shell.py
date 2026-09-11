@@ -77,7 +77,7 @@ class ExecTool(Tool):
         deny_patterns: list[str] | None = None,
         allow_patterns: list[str] | None = None,
         restrict_to_workspace: bool = False,
-        enable_safety_guard: bool = False,
+        enable_safety_guard: bool = True,
         path_append: str = "",
         execution_mode_default: str = "governed",
         content_store: Any = None,
@@ -93,9 +93,12 @@ class ExecTool(Tool):
             r"\bdel\s+/[fq]\b",              # del /f, del /q
             r"\brmdir\s+/s\b",               # rmdir /s
             r"(?:^|[;&|]\s*)format\b",       # format (as standalone command only)
+            r"\bformat-volume\b",            # PowerShell format-volume
+            r"\bclear-disk\b",               # PowerShell clear-disk
             r"\b(mkfs|diskpart)\b",          # disk operations
             r"\bdd\s+if=",                   # dd
             r">\s*/dev/sd",                  # write to disk
+            r"\bshred\b",                    # secure erase
             r"\b(shutdown|reboot|poweroff)\b",  # system power
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
         ]
@@ -145,15 +148,7 @@ class ExecTool(Tool):
         cwd = self._resolve_cwd(working_dir, runtime=runtime)
         execution_mode = self._resolve_execution_mode()
         if execution_mode != EXECUTION_MODE_FULL_ACCESS:
-            readonly_error = self._enforce_read_only_command(command)
-            if readonly_error:
-                return self._build_payload(
-                    status="error",
-                    exit_code=None,
-                    stdout_text="",
-                    stderr_text=readonly_error,
-                    error=readonly_error,
-                )
+            # 路径监禁层：temp/系统路径策略与工作区边界，永不被白名单或审批豁免。
             policy_error = self._enforce_command_path_policy(command, cwd, runtime=runtime)
             if policy_error:
                 return self._build_payload(
@@ -163,15 +158,30 @@ class ExecTool(Tool):
                     stderr_text=policy_error,
                     error=policy_error,
                 )
-            guard_error = self._guard_command(command, cwd)
-            if guard_error:
+            workspace_error = self._guard_workspace_paths(command, cwd)
+            if workspace_error:
                 return self._build_payload(
                     status="error",
                     exit_code=None,
                     stdout_text="",
-                    stderr_text=guard_error,
-                    error=guard_error,
+                    stderr_text=workspace_error,
+                    error=workspace_error,
                 )
+            # 命令形态层：只读约束 + deny 黑名单。命中后先查白名单，再等
+            # 操作者审批（超时自动拒绝），都不可得才返回错误。
+            form_error = self._enforce_read_only_command(command) or self._guard_deny_patterns(command)
+            if form_error:
+                allowed, blocked_text = await self._resolve_form_guard_block(
+                    command, cwd, form_error, runtime=runtime
+                )
+                if not allowed:
+                    return self._build_payload(
+                        status="error",
+                        exit_code=None,
+                        stdout_text="",
+                        stderr_text=blocked_text,
+                        error=blocked_text,
+                    )
 
         resource_state = self._capture_resource_tree_state()
         env = self._build_subprocess_env(runtime=runtime, cwd=cwd)
@@ -479,31 +489,33 @@ class ExecTool(Tool):
 
         return None
 
-    def _guard_command(self, command: str, cwd: str) -> str | None:
-        """Best-effort safety guard for potentially destructive commands."""
-        cmd = command.strip()
-        lower = cmd.lower()
+    def _guard_workspace_paths(self, command: str, cwd: str) -> str | None:
+        """工作区路径监禁：永不被白名单/审批豁免（放行只豁免命令形态层）。"""
+        if not self.restrict_to_workspace:
+            return None
+        cmd = str(command or "").strip()
+        if "..\\" in cmd or "../" in cmd:
+            return "Error: Command blocked by safety guard (path traversal detected)"
 
-        if self.restrict_to_workspace:
-            if "..\\" in cmd or "../" in cmd:
-                return "Error: Command blocked by safety guard (path traversal detected)"
+        workspace_root = self._workspace_root()
+        cwd_path = Path(cwd).expanduser().resolve()
+        if not self._is_within_workspace(cwd_path, workspace_root):
+            return "Error: Command blocked by safety guard (working_dir outside workspace)"
 
-            workspace_root = self._workspace_root()
-            cwd_path = Path(cwd).expanduser().resolve()
-            if not self._is_within_workspace(cwd_path, workspace_root):
-                return "Error: Command blocked by safety guard (working_dir outside workspace)"
+        for raw in self._extract_absolute_paths(cmd):
+            try:
+                p = Path(raw.strip()).expanduser().resolve()
+            except Exception:
+                continue
+            if p.is_absolute() and not self._is_within_workspace(p, workspace_root):
+                return "Error: Command blocked by safety guard (path outside workspace)"
+        return None
 
-            for raw in self._extract_absolute_paths(cmd):
-                try:
-                    p = Path(raw.strip()).expanduser().resolve()
-                except Exception:
-                    continue
-                if p.is_absolute() and not self._is_within_workspace(p, workspace_root):
-                    return "Error: Command blocked by safety guard (path outside workspace)"
-
+    def _guard_deny_patterns(self, command: str) -> str | None:
+        """破坏性命令黑名单：可被白名单豁免或操作者审批放行。"""
         if not self.enable_safety_guard:
             return None
-
+        lower = str(command or "").strip().lower()
         for pattern in self.deny_patterns:
             if re.search(pattern, lower):
                 return "Error: Command blocked by safety guard (dangerous pattern detected)"
@@ -511,8 +523,109 @@ class ExecTool(Tool):
         if self.allow_patterns:
             if not any(re.search(p, lower) for p in self.allow_patterns):
                 return "Error: Command blocked by safety guard (not in allowlist)"
-
         return None
+
+    def _guard_command(self, command: str, cwd: str) -> str | None:
+        """Best-effort safety guard for potentially destructive commands.
+
+        兼容入口（旧调用方/测试缝隙）：路径监禁 + deny 黑名单两层合判。
+        execute() 主链路已改为分层调用，以便白名单/审批只豁免形态层。
+        """
+        return self._guard_workspace_paths(command, cwd) or self._guard_deny_patterns(command)
+
+    def _exec_approvals_service(self) -> Any | None:
+        service = getattr(self, "main_task_service", None)
+        return getattr(service, "exec_approvals", None)
+
+    def _matched_deny_pattern(self, command: str) -> str:
+        lower = str(command or "").strip().lower()
+        for pattern in self.deny_patterns:
+            try:
+                if re.search(pattern, lower):
+                    return str(pattern)
+            except re.error:
+                continue
+        return ""
+
+    async def _resolve_form_guard_block(
+        self,
+        command: str,
+        cwd: str,
+        guard_error: str,
+        *,
+        runtime: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        """命令形态层命中后的处理：白名单豁免 → 操作者审批等待 → 拒绝引导。
+
+        审批经 governance sqlite 持久化（worker 等待、web 裁决，跨进程轮询）；
+        到期未决自动拒绝；近窗连续未获批达阈值即快拒（防审批轰炸）。审批
+        服务不可用时保持旧行为：直接返回原始错误文本。
+        """
+        runtime = runtime or {}
+        approvals = self._exec_approvals_service()
+        if approvals is None:
+            return False, guard_error
+        actor_role = str(runtime.get("actor_role") or "execution").strip().lower() or "execution"
+        try:
+            entry = approvals.command_allowed(command, actor_role=actor_role)
+        except Exception:
+            entry = None
+        if entry is not None:
+            return True, ""
+        task_id = str(runtime.get("task_id") or "").strip()
+        session_key = str(runtime.get("session_key") or "").strip()
+        lane = "task" if task_id else ("ceo" if actor_role == "ceo" else "session")
+        try:
+            request = approvals.request_approval(
+                command=command,
+                guard_reason=f"{guard_error} | deny_pattern={self._matched_deny_pattern(command)}",
+                actor_role=actor_role,
+                lane=lane,
+                context_id=task_id or session_key,
+                cwd=str(cwd or ""),
+            )
+        except Exception:
+            request = None
+        if request is None:
+            return False, self._guard_blocked_text(guard_error, approvals_available=True, outcome="fast_rejected")
+        try:
+            decision = await approvals.wait_for_decision(
+                str(request.get("approval_id") or ""),
+                timeout_seconds=float(request.get("wait_seconds") or 120.0),
+                cancel_token=runtime.get("cancel_token"),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            decision = "error"
+        if decision in {"approved_once", "approved_whitelist"}:
+            return True, ""
+        return False, self._guard_blocked_text(guard_error, approvals_available=True, outcome=str(decision))
+
+    @staticmethod
+    def _guard_blocked_text(guard_error: str, *, approvals_available: bool, outcome: str = "") -> str:
+        if not approvals_available:
+            return guard_error
+        lines = [guard_error]
+        if outcome == "fast_rejected":
+            lines.append(
+                "该命令近期已连续多次审批超时/被拒，本次不再发起等待，直接拒绝。"
+                "如属正当需求，请让操作者在工具管理页把命令模式加入白名单。"
+            )
+        elif outcome == "denied":
+            lines.append("操作者已拒绝执行该命令。")
+        elif outcome in {"expired", "error"}:
+            lines.append(
+                "等待操作者审批超时，已自动拒绝。可重新提交；操作者在工具管理页"
+                "把命令模式加入白名单后无需重复审批。"
+            )
+        elif outcome == "cancelled":
+            lines.append("审批等待被取消（任务暂停/取消）。")
+        lines.append(
+            "提示：文件删除/修改优先使用 filesystem_delete / filesystem_write / "
+            "filesystem_edit 等专用工具，而非 shell。"
+        )
+        return "\n".join(lines)
 
     def _build_subprocess_env(self, *, runtime: dict[str, Any], cwd: str) -> dict[str, str]:
         env = os.environ.copy()

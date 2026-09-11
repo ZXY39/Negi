@@ -72,6 +72,26 @@ class GovernanceStore:
                 updated_at TEXT NOT NULL
             )
             ''',
+            '''
+            CREATE TABLE IF NOT EXISTS exec_command_approvals (
+                approval_id TEXT PRIMARY KEY,
+                command_norm TEXT NOT NULL,
+                command_text TEXT NOT NULL,
+                cwd TEXT NOT NULL DEFAULT '',
+                guard_reason TEXT NOT NULL DEFAULT '',
+                actor_role TEXT NOT NULL DEFAULT '',
+                lane TEXT NOT NULL DEFAULT '',
+                context_id TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                decision_scope TEXT NOT NULL DEFAULT '',
+                decided_by TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                decided_at TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL DEFAULT ''
+            )
+            ''',
+            'CREATE INDEX IF NOT EXISTS idx_exec_approvals_status ON exec_command_approvals(status, created_at)',
+            'CREATE INDEX IF NOT EXISTS idx_exec_approvals_command ON exec_command_approvals(command_norm, status)',
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -172,6 +192,96 @@ class GovernanceStore:
 
     def set_bool_meta(self, key: str, value: bool) -> None:
         self.set_meta(key, 'true' if bool(value) else 'false')
+
+    # -- exec command approvals ------------------------------------------------
+
+    def create_exec_approval(self, record: dict[str, object]) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                'INSERT INTO exec_command_approvals (approval_id, command_norm, command_text, cwd, guard_reason, '
+                'actor_role, lane, context_id, status, decision_scope, decided_by, created_at, decided_at, expires_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    str(record.get('approval_id') or ''),
+                    str(record.get('command_norm') or ''),
+                    str(record.get('command_text') or ''),
+                    str(record.get('cwd') or ''),
+                    str(record.get('guard_reason') or ''),
+                    str(record.get('actor_role') or ''),
+                    str(record.get('lane') or ''),
+                    str(record.get('context_id') or ''),
+                    str(record.get('status') or 'pending'),
+                    str(record.get('decision_scope') or ''),
+                    str(record.get('decided_by') or ''),
+                    str(record.get('created_at') or now_iso()),
+                    str(record.get('decided_at') or ''),
+                    str(record.get('expires_at') or ''),
+                ),
+            )
+
+    def get_exec_approval(self, approval_id: str) -> dict[str, object] | None:
+        row = self._fetchone(
+            'SELECT * FROM exec_command_approvals WHERE approval_id = ?', (str(approval_id or ''),)
+        )
+        return dict(row) if row else None
+
+    def list_exec_approvals(self, *, status: str | None = None, limit: int = 50) -> list[dict[str, object]]:
+        sql = 'SELECT * FROM exec_command_approvals'
+        params: list[object] = []
+        normalized_status = str(status or '').strip()
+        if normalized_status:
+            sql += ' WHERE status = ?'
+            params.append(normalized_status)
+        sql += ' ORDER BY created_at DESC LIMIT ?'
+        params.append(max(1, int(limit or 50)))
+        return [dict(row) for row in self._fetchall(sql, tuple(params))]
+
+    def decide_exec_approval(
+        self,
+        approval_id: str,
+        *,
+        status: str,
+        decided_by: str = '',
+        decision_scope: str = '',
+    ) -> bool:
+        """Decide a pending approval exactly once; returns False if it was
+        already decided/expired (UPDATE guarded by status='pending')."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE exec_command_approvals SET status = ?, decided_by = ?, decision_scope = ?, decided_at = ? "
+                "WHERE approval_id = ? AND status = 'pending'",
+                (str(status), str(decided_by or ''), str(decision_scope or ''), now_iso(), str(approval_id or '')),
+            )
+            return int(getattr(cursor, 'rowcount', 0) or 0) == 1
+
+    def expire_stale_exec_approvals(self, cutoff_iso: str) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE exec_command_approvals SET status = 'expired', decided_by = 'system', decided_at = ? "
+                "WHERE status = 'pending' AND created_at < ?",
+                (now_iso(), str(cutoff_iso or '')),
+            )
+            return int(getattr(cursor, 'rowcount', 0) or 0)
+
+    def count_recent_exec_approval_outcomes(
+        self, command_norm: str, *, since_iso: str, statuses: tuple[str, ...]
+    ) -> int:
+        placeholders = ', '.join('?' for _ in statuses)
+        row = self._fetchone(
+            f'SELECT COUNT(*) AS n FROM exec_command_approvals '
+            f'WHERE command_norm = ? AND status IN ({placeholders}) AND created_at >= ?',
+            (str(command_norm or ''), *statuses, str(since_iso or '')),
+        )
+        return int((row['n'] if row else 0) or 0)
+
+    def prune_exec_approvals(self, *, keep_recent: int = 200) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                'DELETE FROM exec_command_approvals WHERE approval_id NOT IN '
+                '(SELECT approval_id FROM exec_command_approvals ORDER BY created_at DESC LIMIT ?)',
+                (max(10, int(keep_recent or 200)),),
+            )
+            return int(getattr(cursor, 'rowcount', 0) or 0)
 
     def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
         with self._lock:

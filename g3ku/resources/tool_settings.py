@@ -17,7 +17,8 @@ class ExecToolSettings(Base):
     # 不再保留工具级独立超时配置。
     path_append: str = ""
     restrict_to_workspace: bool = False
-    enable_safety_guard: bool = False
+    # 破坏性命令黑名单默认开启；命中后走白名单豁免/操作者审批（exec_approvals）。
+    enable_safety_guard: bool = True
     execution_mode: str = "governed"
 
 
