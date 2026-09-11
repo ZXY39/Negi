@@ -15,6 +15,7 @@ from g3ku.resources.models import ToolResourceDescriptor
 from g3ku.resources.tool_settings import (
     raw_tool_secrets_from_config,
     raw_tool_settings_from_descriptor,
+    resolve_universal_timeout_flag,
 )
 
 
@@ -57,15 +58,30 @@ class ManifestBackedTool(Tool):
 
     @property
     def self_enforced_timeout(self) -> bool:
-        return bool(getattr(self._handler, "self_enforced_timeout", False))
+        return resolve_universal_timeout_flag(
+            self._handler,
+            self._descriptor.metadata,
+            handler_attr="self_enforced_timeout",
+            policy_key="self_enforced",
+        )
 
     @property
     def hide_universal_timeout_parameter(self) -> bool:
-        return bool(getattr(self._handler, "hide_universal_timeout_parameter", False))
+        return resolve_universal_timeout_flag(
+            self._handler,
+            self._descriptor.metadata,
+            handler_attr="hide_universal_timeout_parameter",
+            policy_key="hide_parameter",
+        )
 
     @property
     def exempt_universal_timeout(self) -> bool:
-        return bool(getattr(self._handler, "exempt_universal_timeout", False))
+        return resolve_universal_timeout_flag(
+            self._handler,
+            self._descriptor.metadata,
+            handler_attr="exempt_universal_timeout",
+            policy_key="exempt_universal",
+        )
 
     def set_context(self, *args: Any, **kwargs: Any) -> Any:
         if hasattr(self._handler, "set_context"):

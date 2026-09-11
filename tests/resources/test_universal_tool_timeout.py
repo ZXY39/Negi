@@ -323,3 +323,119 @@ async def test_watchdog_exempt_tool_has_no_hard_deadline() -> None:
     )
     assert outcome.timed_out is False
     assert outcome.value == "finished"
+
+
+# ---------------------------------------------------------------------------
+# 清单声明式 timeout 策略：resource.yaml 顶层 timeout_policy 块（OR 语义，
+# 只能追加 opt-in 特殊行为，不能撤销 handler 代码级合同）
+# ---------------------------------------------------------------------------
+
+
+def _manifest_descriptor(metadata: dict | None):
+    from pathlib import Path
+
+    from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
+
+    return ToolResourceDescriptor(
+        kind=ResourceKind.TOOL,
+        name="manifest_policy_fake",
+        description="manifest tool",
+        root=Path.cwd(),
+        manifest_path=Path.cwd() / "resource.yaml",
+        fingerprint="fake",
+        parameters={
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": [],
+        },
+        metadata=dict(metadata or {}),
+    )
+
+
+class _PlainManifestHandler:
+    async def execute(self, **kwargs):
+        return "ok"
+
+
+class _SelfEnforcedManifestHandler:
+    self_enforced_timeout = True
+
+    async def execute(self, **kwargs):
+        return "ok"
+
+
+def test_manifest_policy_flags_resolve_on_manifest_backed_tool() -> None:
+    from g3ku.resources.loader import ManifestBackedTool
+
+    tool = ManifestBackedTool(
+        _manifest_descriptor(
+            {"timeout_policy": {"exempt_universal": True, "hide_parameter": True}}
+        ),
+        _PlainManifestHandler(),
+    )
+    assert tool.exempt_universal_timeout is True
+    assert tool.hide_universal_timeout_parameter is True
+    assert tool.self_enforced_timeout is False
+    # 豁免/隐藏后模型 schema 不注入 timeout 参数
+    assert "timeout" not in tool.to_model_schema()["function"]["parameters"]["properties"]
+
+    plain = ManifestBackedTool(_manifest_descriptor(None), _PlainManifestHandler())
+    assert plain.exempt_universal_timeout is False
+    assert plain.hide_universal_timeout_parameter is False
+    assert plain.self_enforced_timeout is False
+    # 默认合同：注入 timeout 参数
+    assert "timeout" in plain.to_model_schema()["function"]["parameters"]["properties"]
+
+
+def test_manifest_policy_is_additive_and_cannot_revoke_handler_contract() -> None:
+    from g3ku.resources.loader import ManifestBackedTool
+
+    # handler 代码级 self_enforced=True，清单写 false 也撤销不掉（OR 语义）
+    tool = ManifestBackedTool(
+        _manifest_descriptor({"timeout_policy": {"self_enforced": False}}),
+        _SelfEnforcedManifestHandler(),
+    )
+    assert tool.self_enforced_timeout is True
+    # 清单可追加声明 self_enforced
+    declared = ManifestBackedTool(
+        _manifest_descriptor({"timeout_policy": {"self_enforced": True}}),
+        _PlainManifestHandler(),
+    )
+    assert declared.self_enforced_timeout is True
+
+
+def test_manifest_policy_malformed_payload_is_ignored() -> None:
+    from g3ku.resources.loader import ManifestBackedTool
+
+    for bad in ("yes", 42, ["exempt_universal"], None):
+        tool = ManifestBackedTool(
+            _manifest_descriptor({"timeout_policy": bad}),
+            _PlainManifestHandler(),
+        )
+        assert tool.exempt_universal_timeout is False
+        assert tool.self_enforced_timeout is False
+        assert tool.hide_universal_timeout_parameter is False
+
+
+def test_manifest_policy_flags_resolve_on_embedded_mcp_tool() -> None:
+    from g3ku.resources.embedded_mcp import EmbeddedMCPTool
+
+    self_enforced = EmbeddedMCPTool(
+        _manifest_descriptor({"timeout_policy": {"self_enforced": True}}),
+        _PlainManifestHandler(),
+    )
+    assert self_enforced.self_enforced_timeout is True
+    # 自持工具的统一 timeout 参数并入 FastMCP 注册 schema，避免入参校验拒掉
+    assert "timeout" in self_enforced.parameters.get("properties", {})
+
+    exempt = EmbeddedMCPTool(
+        _manifest_descriptor({"timeout_policy": {"exempt_universal": True}}),
+        _PlainManifestHandler(),
+    )
+    assert exempt.exempt_universal_timeout is True
+    assert "timeout" not in exempt.to_model_schema()["function"]["parameters"]["properties"]
+
+    plain = EmbeddedMCPTool(_manifest_descriptor(None), _PlainManifestHandler())
+    assert plain.exempt_universal_timeout is False
+    assert plain.self_enforced_timeout is False
+    assert "timeout" not in plain.parameters.get("properties", {})

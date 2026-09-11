@@ -70,6 +70,31 @@ def raw_tool_settings_from_metadata(metadata: dict[str, Any] | None) -> dict[str
     return dict(payload or {}) if isinstance(payload, dict) else {}
 
 
+def raw_timeout_policy_from_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """resource.yaml 顶层 `timeout_policy` 声明块（清单声明式 timeout 策略）。"""
+    payload = (metadata or {}).get("timeout_policy") if isinstance(metadata, dict) else None
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def resolve_universal_timeout_flag(
+    handler: Any,
+    metadata: dict[str, Any] | None,
+    *,
+    handler_attr: str,
+    policy_key: str,
+) -> bool:
+    """统一 timeout 标志解析：handler 类属性或清单 timeout_policy 任一为真即 True。
+
+    OR 语义有方向性：清单只能追加豁免/自持/隐藏这类 opt-in 特殊行为，不能
+    撤销 handler 已在代码层声明的合同（内置工具不受清单误配影响）。清单声明
+    `self_enforced: true` 要求 handler 自行消费 `timeout` 入参并结构化收尾，
+    否则该工具将处于无任何时限的状态。
+    """
+    if bool(getattr(handler, handler_attr, False)):
+        return True
+    return bool(raw_timeout_policy_from_metadata(metadata).get(policy_key, False))
+
+
 def raw_tool_settings_from_descriptor(descriptor: ToolResourceDescriptor | None) -> dict[str, Any]:
     return raw_tool_settings_from_metadata(getattr(descriptor, "metadata", None))
 

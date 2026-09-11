@@ -11,6 +11,7 @@ import mcp.server.fastmcp.server as fastmcp_server
 
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.models import ToolResourceDescriptor
+from g3ku.resources.tool_settings import resolve_universal_timeout_flag
 
 _RUNTIME_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "g3ku_embedded_mcp_runtime",
@@ -140,9 +141,10 @@ class EmbeddedMCPTool(Tool):
         self._descriptor = descriptor
         self._handler = handler
         self._parameters = _normalize_parameters(descriptor.parameters)
-        if bool(getattr(handler, "self_enforced_timeout", False)):
+        if self.self_enforced_timeout:
             # 自持工具消费统一 timeout 参数：FastMCP 按注册 schema 校验入参，
             # 必须把统一参数并入，否则 call_tool 会在进工具前把它拒掉。
+            # 标志可能来自 handler 类属性，也可能来自清单 timeout_policy 声明。
             self._parameters = _with_universal_timeout_property(self._parameters)
         self._server = FastMCP(name=f"g3ku-{descriptor.name}")
         self._server.add_tool(
@@ -190,15 +192,30 @@ class EmbeddedMCPTool(Tool):
 
     @property
     def self_enforced_timeout(self) -> bool:  # type: ignore[override]
-        return bool(getattr(self._handler, "self_enforced_timeout", False))
+        return resolve_universal_timeout_flag(
+            self._handler,
+            self._descriptor.metadata,
+            handler_attr="self_enforced_timeout",
+            policy_key="self_enforced",
+        )
 
     @property
     def hide_universal_timeout_parameter(self) -> bool:  # type: ignore[override]
-        return bool(getattr(self._handler, "hide_universal_timeout_parameter", False))
+        return resolve_universal_timeout_flag(
+            self._handler,
+            self._descriptor.metadata,
+            handler_attr="hide_universal_timeout_parameter",
+            policy_key="hide_parameter",
+        )
 
     @property
     def exempt_universal_timeout(self) -> bool:  # type: ignore[override]
-        return bool(getattr(self._handler, "exempt_universal_timeout", False))
+        return resolve_universal_timeout_flag(
+            self._handler,
+            self._descriptor.metadata,
+            handler_attr="exempt_universal_timeout",
+            policy_key="exempt_universal",
+        )
 
     def close(self) -> Any:
         if hasattr(self._handler, "close"):
