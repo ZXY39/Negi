@@ -41,6 +41,20 @@ function ensureCeoGovernanceState() {
     if (!U.ceoApprovalArgsSubtitle) U.ceoApprovalArgsSubtitle = document.getElementById("ceo-approval-args-subtitle");
     if (!U.ceoApprovalArgsBody) U.ceoApprovalArgsBody = document.getElementById("ceo-approval-args-body");
     if (!U.ceoApprovalArgsClose) U.ceoApprovalArgsClose = document.getElementById("ceo-approval-args-close");
+    if (!U.execWhitelistButton) U.execWhitelistButton = document.getElementById("exec-whitelist-btn");
+    if (!U.execWhitelistBadge) U.execWhitelistBadge = document.getElementById("exec-whitelist-badge");
+    if (!U.execWhitelistBackdrop) U.execWhitelistBackdrop = document.getElementById("exec-whitelist-backdrop");
+    if (!U.execWhitelistDialog) U.execWhitelistDialog = document.getElementById("exec-whitelist-dialog");
+    if (!U.execApprovalList) U.execApprovalList = document.getElementById("exec-approval-list");
+    if (!U.execWhitelistList) U.execWhitelistList = document.getElementById("exec-whitelist-list");
+    if (!U.execApprovalRefreshBtn) U.execApprovalRefreshBtn = document.getElementById("exec-approval-refresh-btn");
+    if (!U.execWhitelistCloseBtn) U.execWhitelistCloseBtn = document.getElementById("exec-whitelist-close-btn");
+    if (!U.execWhitelistAddForm) U.execWhitelistAddForm = document.getElementById("exec-whitelist-add-form");
+    if (!U.execWhitelistPatternInput) U.execWhitelistPatternInput = document.getElementById("exec-whitelist-pattern-input");
+    if (!U.execWhitelistScopeInput) U.execWhitelistScopeInput = document.getElementById("exec-whitelist-scope-input");
+    if (!U.execWhitelistReasonInput) U.execWhitelistReasonInput = document.getElementById("exec-whitelist-reason-input");
+    if (!U.execApprovalWaitForm) U.execApprovalWaitForm = document.getElementById("exec-approval-wait-form");
+    if (!U.execApprovalWaitInput) U.execApprovalWaitInput = document.getElementById("exec-approval-wait-input");
 }
 
 function governanceModeState() {
@@ -751,7 +765,450 @@ function bindCeoApprovalUi() {
     }
 }
 
+const EXEC_WHITELIST_POLL_INTERVAL_MS = 10000;
+const EXEC_APPROVAL_REFRESH_INTERVAL_MS = 5000;
+const EXEC_WHITELIST_MAX_PENDING_LIMIT = 50;
+const EXEC_WHITELIST_SCOPE_LABELS = { all: "全部角色", ceo: "仅CEO会话", tasks: "仅任务节点" };
+const EXEC_WHITELIST_DECISIONS = ["approve_once", "approve_whitelist", "deny"];
+
+function ensureExecWhitelistState() {
+    if (!S.execWhitelist || typeof S.execWhitelist !== "object") {
+        S.execWhitelist = {
+            loading: false,
+            deciding: false,
+            opened: false,
+            approvalWaitSeconds: 120,
+            pollIntervalId: null,
+            refreshIntervalId: null,
+        };
+    }
+    return S.execWhitelist;
+}
+
+function execWhitelistScopeLabel(scope = "") {
+    const key = String(scope || "").trim().toLowerCase();
+    return EXEC_WHITELIST_SCOPE_LABELS[key] || EXEC_WHITELIST_SCOPE_LABELS.all;
+}
+
+function renderExecWhitelistBadge(count = 0) {
+    const badge = U.execWhitelistBadge;
+    if (!badge) return;
+    const pending = Math.max(0, Number(count) || 0);
+    badge.textContent = pending > 99 ? "99+" : String(pending);
+    badge.hidden = pending <= 0;
+}
+
+async function loadExecPendingCount({ quiet = true } = {}) {
+    ensureExecWhitelistState();
+    if (typeof ApiClient?.listExecApprovals !== "function") return;
+    try {
+        const data = await ApiClient.listExecApprovals({ status: "pending", limit: EXEC_WHITELIST_MAX_PENDING_LIMIT });
+        renderExecWhitelistBadge(Array.isArray(data.items) ? data.items.length : 0);
+    } catch (error) {
+        if (!quiet) {
+            showToast({
+                title: "待审批数量获取失败",
+                text: error?.message || "无法读取待审批数量。",
+                kind: "error",
+                durationMs: 2600,
+            });
+        }
+    }
+}
+
+function stopExecPendingPolling() {
+    const state = ensureExecWhitelistState();
+    if (state.pollIntervalId) {
+        window.clearInterval(state.pollIntervalId);
+        state.pollIntervalId = null;
+    }
+}
+
+function startExecPendingPolling() {
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    if (state.pollIntervalId) return;
+    if (typeof window.setInterval !== "function") return;
+    void loadExecPendingCount({ quiet: true });
+    state.pollIntervalId = window.setInterval(() => {
+        void loadExecPendingCount({ quiet: true });
+    }, EXEC_WHITELIST_POLL_INTERVAL_MS);
+}
+
+function syncExecWhitelistPolling() {
+    if (S.view === "tools") startExecPendingPolling();
+    else stopExecPendingPolling();
+}
+
+function renderExecApprovalWaitValue() {
+    const state = ensureExecWhitelistState();
+    const input = U.execApprovalWaitInput;
+    if (!input) return;
+    const clamped = Math.max(5, Math.min(3600, Math.round(Number(state.approvalWaitSeconds) || 120)));
+    state.approvalWaitSeconds = clamped;
+    input.value = String(clamped);
+}
+
+function renderExecWhitelistEmptyLists() {
+    if (U.execApprovalList) U.execApprovalList.innerHTML = "";
+    if (U.execWhitelistList) U.execWhitelistList.innerHTML = "";
+}
+
+function renderExecApprovalList(items) {
+    const host = U.execApprovalList;
+    if (!host) return;
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) {
+        host.innerHTML = '<div class="empty-state">当前没有待审批的 exec 命令。</div>';
+        return;
+    }
+    host.innerHTML = list.map((item, index) => {
+        const source = item && typeof item === "object" ? item : {};
+        const approvalId = String(source.approval_id || `pending-${index + 1}`).trim();
+        const commandText = String(source.command_text || "").trim() || "-";
+        const actorRole = String(source.actor_role || "").trim() || "-";
+        const lane = String(source.lane || "").trim() || "-";
+        const contextId = String(source.context_id || "").trim() || "-";
+        const guardReason = String(source.guard_reason || "").trim() || "-";
+        const createdAt = String(source.created_at || "").trim() || "-";
+        return `
+            <div class="exec-approval-item" data-approval-id="${esc(approvalId)}">
+                <div class="exec-approval-main">
+                    <div class="code-block exec-approval-command">${esc(commandText)}</div>
+                    <div class="resource-list-meta">
+                        <span class="meta-tag" title="发起角色">${esc(actorRole)}</span>
+                        <span class="meta-tag" title="通道">${esc(lane)}</span>
+                        <span class="meta-tag" title="上下文">${esc(contextId)}</span>
+                        <span class="meta-tag" title="创建时间">${esc(createdAt)}</span>
+                    </div>
+                    <p class="exec-approval-reason">触发原因：${esc(guardReason)}</p>
+                </div>
+                <div class="exec-approval-actions">
+                    <button type="button" class="toolbar-btn success small" data-exec-approval-decision="approve_once">放行一次</button>
+                    <span class="exec-approval-whitelist-group">
+                        <select class="resource-select exec-approval-scope-select" aria-label="加白名单适用范围">
+                            <option value="all">全部角色</option>
+                            <option value="ceo">仅CEO会话</option>
+                            <option value="tasks">仅任务节点</option>
+                        </select>
+                        <button type="button" class="toolbar-btn ghost small" data-exec-approval-decision="approve_whitelist">放行并加白名单</button>
+                    </span>
+                    <button type="button" class="toolbar-btn danger small" data-exec-approval-decision="deny">拒绝</button>
+                </div>
+            </div>
+        `;
+    }).join("");
+}
+
+function renderExecWhitelistList(items) {
+    const host = U.execWhitelistList;
+    if (!host) return;
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) {
+        host.innerHTML = '<div class="empty-state">白名单为空，可以添加常用 exec 命令以直接放行。</div>';
+        return;
+    }
+    host.innerHTML = list.map((item, index) => {
+        const source = item && typeof item === "object" ? item : {};
+        const pattern = String(source.pattern || "").trim();
+        const scope = String(source.scope || "all").trim() || "all";
+        const reason = String(source.reason || "").trim();
+        const createdBy = String(source.created_by || "").trim();
+        const createdAt = String(source.created_at || "").trim();
+        const sourceCommand = String(source.source_command || "").trim();
+        const metaParts = [
+            `<span class="meta-tag">${esc(execWhitelistScopeLabel(scope))}</span>`,
+            ...(reason ? [`<span class="meta-tag" title="${esc(reason)}">${esc(reason.length > 40 ? `${reason.slice(0, 37)}...` : reason)}</span>`] : []),
+            ...(createdAt ? [`<span class="meta-tag" title="创建时间">${esc(createdAt)}</span>`] : []),
+            ...(createdBy ? [`<span class="meta-tag" title="创建者">${esc(createdBy)}</span>`] : []),
+        ];
+        return `
+            <div class="exec-whitelist-item">
+                <div class="exec-whitelist-main">
+                    <code class="exec-whitelist-pattern">${esc(pattern || `entry-${index + 1}`)}</code>
+                    <div class="resource-list-meta">${metaParts.join("")}</div>
+                    ${sourceCommand ? `<p class="exec-approval-reason">来源命令：${esc(sourceCommand)}</p>` : ""}
+                </div>
+                <button type="button" class="toolbar-btn danger small"
+                    data-exec-whitelist-delete="${esc(pattern)}" data-exec-whitelist-delete-scope="${esc(scope)}">删除</button>
+            </div>
+        `;
+    }).join("");
+}
+
+function renderExecWhitelistLoading() {
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    if (U.execApprovalRefreshBtn) {
+        U.execApprovalRefreshBtn.textContent = state.loading ? "刷新中..." : "刷新";
+        U.execApprovalRefreshBtn.disabled = state.loading;
+    }
+}
+
+async function loadExecWhitelistData({ quiet = true } = {}) {
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    state.loading = true;
+    renderExecWhitelistLoading();
+    try {
+        const whitelistData = await ApiClient.getExecCommandWhitelist();
+        const approvalsData = await ApiClient.listExecApprovals({ status: "pending", limit: EXEC_WHITELIST_MAX_PENDING_LIMIT });
+        state.approvalWaitSeconds = Math.max(5, Number(whitelistData?.approval_wait_seconds) || 120);
+        renderExecWhitelistList(Array.isArray(whitelistData?.items) ? whitelistData.items : []);
+        renderExecApprovalList(Array.isArray(approvalsData?.items) ? approvalsData.items : []);
+        renderExecApprovalWaitValue();
+        renderExecWhitelistBadge(Array.isArray(approvalsData?.items) ? approvalsData.items.length : 0);
+    } catch (error) {
+        renderExecWhitelistEmptyLists();
+        if (U.execApprovalList) {
+            U.execApprovalList.innerHTML = `<div class="empty-state error">加载失败：${esc(error?.message || "未知错误")}</div>`;
+        }
+        if (!quiet) {
+            showToast({
+                title: "白名单加载失败",
+                text: error?.message || "无法读取白名单或待审批列表。",
+                kind: "error",
+                durationMs: 2800,
+            });
+        }
+    } finally {
+        state.loading = false;
+        renderExecWhitelistLoading();
+    }
+}
+
+function execWhitelistAddErrorText(error) {
+    const code = String(error?.code || "").trim().toLowerCase();
+    if (code) {
+        switch (code) {
+            case "pattern_too_broad":
+                return "命令模式过宽：请使用更精确的模式（例如带完整子命令）。";
+            case "pattern_already_exists":
+                return "该命令模式已存在于白名单中。";
+            case "scope_invalid":
+                return "适用范围无效：请选择全部角色、仅CEO会话或仅任务节点。";
+            case "pattern_required":
+                return "请填写命令模式。";
+            default:
+                break;
+        }
+    }
+    if (Number(error?.status) === 400) return "添加失败：请检查命令模式与适用范围。";
+    return error?.message || "添加失败。";
+}
+
+async function addExecWhitelistEntryFromForm(event) {
+    event?.preventDefault?.();
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    if (state.deciding) return;
+    const pattern = String(U.execWhitelistPatternInput?.value || "").trim();
+    const scope = String(U.execWhitelistScopeInput?.value || "all").trim() || "all";
+    const reason = String(U.execWhitelistReasonInput?.value || "").trim();
+    state.deciding = true;
+    try {
+        await ApiClient.addExecCommandWhitelistEntry({ pattern, scope, reason });
+        if (U.execWhitelistPatternInput) U.execWhitelistPatternInput.value = "";
+        if (U.execWhitelistReasonInput) U.execWhitelistReasonInput.value = "";
+        showToast({
+            title: "白名单已添加",
+            text: `命令模式 ${pattern} 已加入白名单。`,
+            kind: "success",
+            durationMs: 2200,
+        });
+        await loadExecWhitelistData({ quiet: true });
+    } catch (error) {
+        showToast({
+            title: "添加失败",
+            text: execWhitelistAddErrorText(error),
+            kind: "error",
+            durationMs: 3200,
+        });
+    } finally {
+        state.deciding = false;
+    }
+}
+
+async function removeExecWhitelistEntry(pattern, scope = "all") {
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    if (state.deciding) return;
+    state.deciding = true;
+    try {
+        const removed = await ApiClient.removeExecCommandWhitelistEntry({ pattern, scope });
+        showToast({
+            title: "白名单已更新",
+            text: removed ? "已移除该命令模式。" : "该命令模式已不在白名单中。",
+            kind: "success",
+            durationMs: 2200,
+        });
+        await loadExecWhitelistData({ quiet: true });
+    } catch (error) {
+        showToast({
+            title: "删除失败",
+            text: error?.message || "无法移除该命令模式。",
+            kind: "error",
+            durationMs: 2800,
+        });
+    } finally {
+        state.deciding = false;
+    }
+}
+
+async function decideExecApproval(approvalId, decision, scope = "all") {
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    const normalizedDecision = EXEC_WHITELIST_DECISIONS.includes(String(decision || "").trim()) ? String(decision).trim() : "";
+    if (!approvalId || !normalizedDecision || state.deciding) return;
+    state.deciding = true;
+    try {
+        const payload = { decision: normalizedDecision };
+        if (normalizedDecision === "approve_whitelist") payload.scope = String(scope || "all").trim() || "all";
+        const item = await ApiClient.decideExecApproval(approvalId, payload);
+        const status = String(item?.status || "").trim();
+        const duplicate = status === "duplicate" || !!item?.duplicate;
+        const title = duplicate ? "消息已处理" : "审批已处理";
+        const text = status === "denied"
+            ? "该命令已被拒绝。"
+            : duplicate
+                ? "该请求已被处理，请以最新列表为准。"
+                : normalizedDecision === "deny"
+                    ? "该命令已被拒绝。"
+                    : "已放行该命令。";
+        showToast({ title, text, kind: "success", durationMs: 2400 });
+        await loadExecWhitelistData({ quiet: true });
+        void loadExecPendingCount({ quiet: true });
+    } catch (error) {
+        showToast({
+            title: "审批处理失败",
+            text: error?.message || "无法处理该审批请求。",
+            kind: "error",
+            durationMs: 2800,
+        });
+    } finally {
+        state.deciding = false;
+    }
+}
+
+async function saveExecApprovalWaitFromForm(event) {
+    event?.preventDefault?.();
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    if (state.deciding) return;
+    const raw = String(U.execApprovalWaitInput?.value || "").trim();
+    const seconds = Math.max(5, Math.min(3600, Math.round(Number(raw) || 120)));
+    state.deciding = true;
+    try {
+        const saved = await ApiClient.updateExecApprovalWait(seconds);
+        const next = Math.max(5, Math.min(3600, Math.round(Number(saved) || seconds)));
+        state.approvalWaitSeconds = next;
+        renderExecApprovalWaitValue();
+        showToast({
+            title: "设置已保存",
+            text: next === seconds
+                ? `审批等待时间已更新为 ${next} 秒。`
+                : `审批等待时间已按 5-3600 自动钳制为 ${next} 秒。`,
+            kind: "success",
+            durationMs: 2400,
+        });
+    } catch (error) {
+        showToast({
+            title: "保存失败",
+            text: error?.message || "无法保存审批等待时间。",
+            kind: "error",
+            durationMs: 2800,
+        });
+    } finally {
+        state.deciding = false;
+    }
+}
+
+function openExecWhitelistDialog() {
+    ensureCeoGovernanceState();
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    if (state.refreshIntervalId) window.clearInterval(state.refreshIntervalId);
+    state.opened = true;
+    state.refreshIntervalId = typeof window.setInterval === "function"
+        ? window.setInterval(() => {
+            void loadExecWhitelistData({ quiet: true });
+        }, EXEC_APPROVAL_REFRESH_INTERVAL_MS)
+        : null;
+    if (U.execWhitelistBackdrop) {
+        U.execWhitelistBackdrop.hidden = false;
+        U.execWhitelistBackdrop.classList.add("is-open");
+    }
+    void loadExecWhitelistData({ quiet: true });
+    window.requestAnimationFrame(() => U.execWhitelistCloseBtn?.focus?.());
+}
+
+function closeExecWhitelistDialog() {
+    ensureExecWhitelistState();
+    const state = S.execWhitelist;
+    state.opened = false;
+    if (state.refreshIntervalId) {
+        window.clearInterval(state.refreshIntervalId);
+        state.refreshIntervalId = null;
+    }
+    if (U.execWhitelistBackdrop) {
+        U.execWhitelistBackdrop.hidden = true;
+        U.execWhitelistBackdrop.classList.remove("is-open");
+    }
+}
+
+function bindExecWhitelistUi() {
+    ensureCeoGovernanceState();
+    if (U.execWhitelistButton && !U.execWhitelistButton.dataset.bound) {
+        U.execWhitelistButton.dataset.bound = "true";
+        U.execWhitelistButton.addEventListener("click", () => openExecWhitelistDialog());
+    }
+    if (U.execWhitelistBackdrop && !U.execWhitelistBackdrop.dataset.bound) {
+        U.execWhitelistBackdrop.dataset.bound = "true";
+        U.execWhitelistBackdrop.addEventListener("click", (event) => {
+            if (event.target === U.execWhitelistBackdrop) closeExecWhitelistDialog();
+        });
+    }
+    if (U.execApprovalRefreshBtn && !U.execApprovalRefreshBtn.dataset.bound) {
+        U.execApprovalRefreshBtn.dataset.bound = "true";
+        U.execApprovalRefreshBtn.addEventListener("click", () => void loadExecWhitelistData({ quiet: false }));
+    }
+    if (U.execWhitelistDialog && !U.execWhitelistDialog.dataset.bound) {
+        U.execWhitelistDialog.dataset.bound = "true";
+        U.execWhitelistDialog.addEventListener("click", (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (!target) return;
+            const closeButton = target.closest("[data-modal-close]");
+            if (closeButton) {
+                closeExecWhitelistDialog();
+                return;
+            }
+            const decisionButton = target.closest("[data-exec-approval-decision]");
+            if (decisionButton) {
+                const row = decisionButton.closest("[data-approval-id]");
+                const approvalId = String(row?.getAttribute("data-approval-id") || "").trim();
+                const scopeSelect = row?.querySelector(".exec-approval-scope-select");
+                const scope = String(scopeSelect?.value || "all").trim() || "all";
+                void decideExecApproval(approvalId, decisionButton.getAttribute("data-exec-approval-decision") || "", scope);
+                return;
+            }
+            const deleteButton = target.closest("[data-exec-whitelist-delete]");
+            if (deleteButton) {
+                const pattern = String(deleteButton.getAttribute("data-exec-whitelist-delete") || "").trim();
+                const scope = String(deleteButton.getAttribute("data-exec-whitelist-delete-scope") || "all").trim() || "all";
+                if (pattern) void removeExecWhitelistEntry(pattern, scope);
+            }
+        });
+        U.execWhitelistDialog.addEventListener("submit", (event) => {
+            const form = event.target;
+            if (!form || typeof form.id !== "string") return;
+            if (form.id === "exec-whitelist-add-form") void addExecWhitelistEntryFromForm(event);
+            else if (form.id === "exec-approval-wait-form") void saveExecApprovalWaitFromForm(event);
+        });
+    }
+}
+
 bindToolGovernanceUi();
+bindExecWhitelistUi();
 bindCeoApprovalUi();
 renderToolGovernanceMode();
 renderCeoApprovalFlow();
@@ -765,6 +1222,7 @@ if (typeof syncCeoApprovalFromSnapshotEntry === "function") {
 }
 if (S.view === "tools") {
     void loadToolGovernanceMode({ quiet: true });
+    startExecPendingPolling();
 }
 
 const __baseCanMutateCeoSessions = canMutateCeoSessions;
@@ -774,7 +1232,9 @@ canMutateCeoSessions = function wrappedCanMutateCeoSessions(...args) {
 
 const __baseSwitchView = switchView;
 switchView = function approvalNonBlockingSwitchView(view, ...args) {
-    return __baseSwitchView.call(this, view, ...args);
+    const result = __baseSwitchView.call(this, view, ...args);
+    syncExecWhitelistPolling();
+    return result;
 };
 
 const __baseCanCreateCeoSessions = canCreateCeoSessions;

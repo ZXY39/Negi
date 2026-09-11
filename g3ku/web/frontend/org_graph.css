@@ -10690,3 +10690,164 @@ textarea {
 .qq-bot-status.is-error {
     color: var(--status-failed-text, #fca5a1);
 }
+
+/* exec 命令白名单与审批对话框（exec 守卫白名单豁免 + 操作者审批配套 UI） */
+.exec-whitelist-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--danger-color, #ef4444);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.exec-whitelist-badge[hidden] {
+    display: none;
+}
+
+.exec-whitelist-dialog {
+    width: min(820px, calc(100vw - 48px));
+    max-height: min(760px, calc(100vh - 48px));
+    gap: 14px;
+}
+
+.exec-whitelist-dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.exec-whitelist-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.exec-whitelist-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.exec-whitelist-section-head h3 {
+    margin: 0;
+    font-size: 0.98rem;
+    color: var(--text-primary);
+}
+
+.exec-whitelist-hint {
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-align: right;
+}
+
+.exec-whitelist-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.exec-whitelist-list .empty-state {
+    min-height: 72px;
+    margin: 0;
+    font-size: 0.88rem;
+}
+
+.exec-approval-item,
+.exec-whitelist-item {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-surface-inner) 60%, transparent);
+}
+
+.exec-approval-main,
+.exec-whitelist-main {
+    min-width: 0;
+}
+
+.exec-approval-command {
+    margin: 0 0 8px;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.86rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.exec-approval-reason {
+    margin: 8px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+.exec-approval-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.exec-approval-whitelist-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.exec-approval-scope-select {
+    min-height: 34px;
+    height: 34px;
+    padding-left: 10px;
+    padding-right: 36px;
+    font-size: 0.84rem;
+}
+
+.exec-whitelist-pattern {
+    display: block;
+    margin-bottom: 6px;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.exec-whitelist-add-form {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(150px, 1fr) minmax(0, 2fr) auto;
+    gap: 12px;
+    align-items: end;
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 60%, transparent);
+}
+
+.exec-approval-wait-form {
+    grid-template-columns: minmax(200px, 320px) auto;
+}
+
+@media (max-width: 720px) {
+    .exec-whitelist-add-form,
+    .exec-approval-wait-form {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+    }
+}

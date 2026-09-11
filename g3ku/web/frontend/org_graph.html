@@ -373,6 +373,11 @@
                                 <span id="tool-governance-switch-label" class="tool-governance-switch-label">关闭</span>
                             </button>
                         </div>
+                        <button id="exec-whitelist-btn" class="toolbar-btn ghost" type="button"
+                            title="管理 exec 命令白名单与待审批请求">
+                            <span class="exec-whitelist-btn-label">命令白名单</span>
+                            <span id="exec-whitelist-badge" class="exec-whitelist-badge" hidden>0</span>
+                        </button>
                         <select id="tool-risk-filter" class="resource-select">
                             <option value="all">全部</option>
                             <option value="low">低风险</option>
@@ -842,6 +847,70 @@
                         <button id="confirm-accept" class="toolbar-btn danger" type="button">确认</button>
                     </div>
                 </div>
+            </div>
+
+            <div id="exec-whitelist-backdrop" class="confirm-backdrop" hidden>
+                <section id="exec-whitelist-dialog" class="confirm-dialog exec-whitelist-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="exec-whitelist-dialog-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="exec-whitelist-dialog-title">exec 命令白名单与审批</h2>
+                    </div>
+                    <div class="exec-whitelist-dialog-body">
+                        <section class="exec-whitelist-section">
+                            <div class="exec-whitelist-section-head">
+                                <h3>待审批</h3>
+                                <button id="exec-approval-refresh-btn" class="toolbar-btn ghost small" type="button">刷新</button>
+                            </div>
+                            <div id="exec-approval-list" class="exec-whitelist-list" aria-live="polite"></div>
+                        </section>
+                        <section class="exec-whitelist-section">
+                            <div class="exec-whitelist-section-head">
+                                <h3>白名单</h3>
+                                <span class="exec-whitelist-hint">匹配成功且无需审批的 exec 命令模式</span>
+                            </div>
+                            <div id="exec-whitelist-list" class="exec-whitelist-list" aria-live="polite"></div>
+                            <form id="exec-whitelist-add-form" class="exec-whitelist-add-form" novalidate>
+                                <label class="resource-field">
+                                    <span class="resource-field-label">命令模式</span>
+                                    <input id="exec-whitelist-pattern-input" class="resource-search" type="text"
+                                        placeholder="如 git status 或 git pull *" autocomplete="off">
+                                </label>
+                                <label class="resource-field">
+                                    <span class="resource-field-label">适用范围</span>
+                                    <select id="exec-whitelist-scope-input" class="resource-select">
+                                        <option value="all">全部角色</option>
+                                        <option value="ceo">仅CEO会话</option>
+                                        <option value="tasks">仅任务节点</option>
+                                    </select>
+                                </label>
+                                <label class="resource-field">
+                                    <span class="resource-field-label">原因</span>
+                                    <input id="exec-whitelist-reason-input" class="resource-search" type="text"
+                                        placeholder="说明加入白名单的原因" autocomplete="off">
+                                </label>
+                                <button type="submit" class="toolbar-btn success">添加</button>
+                            </form>
+                        </section>
+                        <section class="exec-whitelist-section">
+                            <div class="exec-whitelist-section-head">
+                                <h3>审批等待设置</h3>
+                                <span class="exec-whitelist-hint">超过等待时间后审批请求自动失效，取值范围 5-3600，自动钳制</span>
+                            </div>
+                            <form id="exec-approval-wait-form" class="exec-whitelist-add-form exec-approval-wait-form" novalidate>
+                                <label class="resource-field">
+                                    <span class="resource-field-label">审批等待秒数</span>
+                                    <input id="exec-approval-wait-input" class="resource-search" type="number"
+                                        min="5" max="3600" step="1" inputmode="numeric" value="120">
+                                </label>
+                                <button type="submit" class="toolbar-btn success">保存</button>
+                            </form>
+                        </section>
+                    </div>
+                    <div class="confirm-actions">
+                        <button id="exec-whitelist-close-btn" class="toolbar-btn ghost" type="button"
+                            data-modal-close>关闭</button>
+                    </div>
+                </section>
             </div>
         </main>
     </div>
