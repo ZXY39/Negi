@@ -62,6 +62,14 @@ Use it to determine:
 - Which docs must be updated
 - Whether `docs/architecture/README.md` must also be updated
 
+## Code Quality Workflow
+
+Before committing code changes:
+
+- Run lint: `python -m ruff check .` (or `scripts/lint.sh` / `scripts/lint.ps1`).
+- Run the pytest tests relevant to the change, at minimum the smoke subset (`python -m pytest tests/resources/test_resource_runtime_smoke.py -q`) plus related tests.
+- Add new tests directly under `tests/`, which is tracked by default.
+
 ## Completion Requirements
 
 Do not consider a task complete until you have done all of the following:

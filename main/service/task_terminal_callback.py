@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from main.models import normalize_failure_class, normalize_final_acceptance_metadata
 
@@ -12,6 +13,44 @@ TASK_TERMINAL_CALLBACK_PATH = '/api/internal/task-terminal'
 TASK_TERMINAL_CALLBACK_URL_ENV = 'G3KU_INTERNAL_CALLBACK_URL'
 TASK_TERMINAL_CALLBACK_TOKEN_ENV = 'G3KU_INTERNAL_CALLBACK_TOKEN'
 TASK_TERMINAL_CALLBACK_FILE = Path('.g3ku') / 'internal-callback.json'
+
+# Outbound http:// callback URLs are restricted to loopback/compose hosts plus
+# any host appended via this env var (comma separated, case-insensitive).
+TASK_TERMINAL_CALLBACK_HTTP_ALLOWED_HOSTS_ENV = 'G3KU_CALLBACK_HTTP_ALLOWED_HOSTS'
+_CALLBACK_HTTP_LOOPBACK_HOSTS = frozenset({'localhost', '127.0.0.1', '::1', 'web'})
+
+
+def is_allowed_callback_url(url: str) -> tuple[bool, str]:
+    """Validate an outbound task/event callback URL (allow + reason).
+
+    https:// to any host is allowed; http:// is allowed only for loopback and
+    compose hosts ({localhost, 127.0.0.1, [::1], web}) plus hosts from env
+    G3KU_CALLBACK_HTTP_ALLOWED_HOSTS (comma separated, appended). Any other
+    scheme is rejected. Never logs or returns the token.
+    """
+    text = str(url or '').strip()
+    if not text:
+        return False, 'empty url'
+    try:
+        parsed = urlparse(text)
+        scheme = str(parsed.scheme or '').strip().lower()
+        host = parsed.hostname
+    except ValueError:
+        return False, 'invalid url'
+    if scheme == 'https':
+        return True, 'allowed: https any host'
+    if scheme != 'http':
+        return False, f'unsupported scheme: {scheme or "(none)"}'
+    if not host:
+        return False, 'missing host'
+    allowed_hosts = set(_CALLBACK_HTTP_LOOPBACK_HOSTS)
+    for extra in str(os.getenv(TASK_TERMINAL_CALLBACK_HTTP_ALLOWED_HOSTS_ENV, '') or '').split(','):
+        normalized = str(extra or '').strip().lower().strip('[]').strip()
+        if normalized:
+            allowed_hosts.add(normalized)
+    if str(host).lower() not in allowed_hosts:
+        return False, f'http host not allowed: {host}'
+    return True, 'allowed: http loopback or compose host'
 
 # Externalized terminal outputs are re-inlined into the terminal event when
 # they fit the same budget a content_open result would inline, so the heartbeat

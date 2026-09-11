@@ -131,7 +131,7 @@
 - heartbeat prompt lane
 - memory runtime
 
-新增运行时测试时，`MainRuntimeService` 构造要显式传 `workspace_root=tmp_path`，把任务临时目录隔离进 pytest 临时目录；`tests/conftest.py` 的 autouse fixture 对漏传的用例兜底替换 cwd 回退。判断测试是否泄漏了真实工作区的快速办法：跑完测试后 `.venv/Scripts/python.exe scripts/cleanup_orphan_task_temp_dirs.py` 只看空孤儿数量是否增长。
+新增运行时测试时，`MainRuntimeService` 构造要显式传 `workspace_root=tmp_path`，把任务临时目录隔离进 pytest 临时目录；`tests/resources/conftest.py` 的 autouse fixture 对漏传的用例兜底替换 cwd 回退。判断测试是否泄漏了真实工作区的快速办法：跑完测试后 `.venv/Scripts/python.exe scripts/cleanup_orphan_task_temp_dirs.py` 只看空孤儿数量是否增长。
 
 ## 5. 推荐的排障顺序
 
@@ -404,7 +404,13 @@ Provider retry troubleshooting note:
 
 ## 9. 最小验证清单
 
-做完较大改动后，建议至少人工验证：
+做完较大改动后，先做自动化前置检查：
+
+- `python -m ruff check .`（或 `scripts/lint.sh` / `scripts/lint.ps1`）
+- `python -m pytest --collect-only -q`
+- `python -m pytest tests/resources/test_resource_runtime_smoke.py -q`（冒烟子集）
+
+自动化通过后，再至少人工验证下面的清单：
 
 1. CLI 同步会话可用
 2. Web 页面可打开
@@ -412,8 +418,6 @@ Provider retry troubleshooting note:
 4. 至少一个异步任务可创建并完成
 5. task detail / node detail API 正常
 6. 若改动涉及工具系统，验证候选工具与 callable 工具行为
-7. 若改动涉及 China bridge，跑 `g3ku china-bridge doctor`
-
 ## Memory Queue Workflow
 
 For the queued Markdown memory runtime, the first operator checks should be:

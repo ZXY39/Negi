@@ -372,6 +372,14 @@ IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ G3KU E
 2. 再看 `docs/architecture/README.md`
 3. 然后按任务涉及范围继续读对应架构文档
 
+### 开发工作流
+
+- lint：`scripts/lint.sh`（Linux / macOS）或 `scripts/lint.ps1`（Windows），也可以直接 `python -m ruff check .`（规则见 `pyproject.toml` 的 ruff 配置）
+- pre-commit：仓库自带 `.pre-commit-config.yaml`，执行 `pre-commit install` 后提交阶段自动运行 lint 类检查
+- 冒烟测试：`python -m pytest tests/resources/test_resource_runtime_smoke.py -q`
+- 全量测试：`python -m pytest`（默认发现 `tests/`，见 `pyproject.toml` 的 pytest 配置）
+- 提交前要求：lint 通过，且与本次改动相关的测试通过
+
 ### 其他专业启动方式
 
 除了默认的一键启动脚本，这个项目也支持几种更偏开发、验证和排障的手动启动路径。
