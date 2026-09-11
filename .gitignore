@@ -28,22 +28,9 @@ node_modules/
 __pycache__/
 poetry.lock
 .pytest_cache/
+.ruff_cache/
 .superpowers
 botpy.log
-tests/
-!tests/
-tests/*
-!tests/resources/
-!tests/resources/**
-tests/resources/__pycache__/
-tests/resources/**/*.pyc
-!tests/test_memory_runtime_sharing.py
-!tests/test_session_keys.py
-!tests/test_china_bridge_removal_migration.py
-!tests/test_web_outbound_drain.py
-!tests/test_paused_turn_transcript_lifecycle.py
-!tests/test_prompt_batch_sibling_merge.py
-!tests/test_security_overlay_guard.py
 
 # Runtime and local state
 .g3ku/
