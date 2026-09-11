@@ -252,7 +252,7 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 
 任务临时目录的根由 `MainRuntimeService._workspace_root()` 派生，解析链为：构造参数 `workspace_root` > `resource_manager.workspace` > 进程 cwd。它既决定 `temp/tasks/` 的位置，也影响 `exec`/`filesystem` 类工具默认的 `task_temp_dir` 工作目录。需要掌握的两条维护约束：
 
-- 任何不提供 workspace 的调用方（尤其是测试和一次性脚本）都会把任务目录落在进程 cwd 的 `temp/tasks/` 下。测试通过构造参数 `workspace_root=tmp_path` 显式隔离，`tests/conftest.py` 的 autouse fixture 再把 cwd 回退替换为 per-test 临时目录作为兜底，双层保证测试运行不会向真实仓库写入 `task_*` 目录。
+- 任何不提供 workspace 的调用方（尤其是测试和一次性脚本）都会把任务目录落在进程 cwd 的 `temp/tasks/` 下。测试通过构造参数 `workspace_root=tmp_path` 显式隔离，`tests/resources/conftest.py` 的 autouse fixture 再把 cwd 回退替换为 per-test 临时目录作为兜底，双层保证测试运行不会向真实仓库写入 `task_*` 目录。
 - 测试任务的记录只存在于 pytest 的临时数据库里，其遗留目录不会被任何生产清理路径回收；这类孤儿目录用 `scripts/cleanup_orphan_task_temp_dirs.py` 处理，见 `operations-and-maintenance.md`「关键状态文件与目录」。
 
 CEO/frontdoor 会话没有 `task_id`，其工具 runtime 注入的 `task_temp_dir` 解析为会话级目录 `temp/ceo/<safe_session_key>`（`session_key` 里的 `:` 等不安全字符按 `sessions/` 落盘同一口径规范化，如 `web:ceo-xxxx` → `web_ceo-xxxx`；无会话键时回退 `temp/ceo/shared`）。它与任务级 `temp/tasks/` 共用同一套下游约束：`exec` 未显式传 `working_dir` 时以它作默认 cwd，`exec`/`filesystem` 的路径策略以它作临时内容规范落点，目录惰性创建（exec 用作 cwd 或 filesystem 写入时才 mkdir）。该目录同时以 `session_temp_dir:` 行暴露进 frontdoor 运行时工具合同，让模型知道临时文件的绝对落点，避免经 `exec` 重定向散落到工作区根目录；合同渲染与临时文件落盘规则详见 `tool-and-skill-system.md`「四个概念必须分清」。
