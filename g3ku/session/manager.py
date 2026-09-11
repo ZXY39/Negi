@@ -2,6 +2,7 @@
 
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -331,10 +332,25 @@ class SessionManager:
             self._cache[session.key] = session
             return
 
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(self._metadata_line(session), ensure_ascii=False) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        # 全量重写走原子替换：先写同目录临时文件再 os.replace，进程崩溃/
+        # 断电不会留下截断的会话历史。临时文件必须与目标同目录，保证
+        # replace 在同一文件系统上；无跟踪状态的实例（如管理台 standalone
+        # 回退）每次保存都走该路径，原子替换同时消除多实例交错写风险。
+        temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex[:12]}.tmp")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(self._metadata_line(session), ensure_ascii=False) + "\n")
+                for msg in session.messages:
+                    f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, path)
+        except BaseException:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
         if isinstance(messages, _TrackingList):
             messages.structural_edit = False
