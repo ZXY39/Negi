@@ -108,11 +108,39 @@ def _ensure_venv() -> None:
     _run([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=PROJECT_ROOT)
 
 
+def _python_has_module(python: Path, module: str) -> bool:
+    completed = subprocess.run(
+        [str(python), "-c", f"import {module!s}"],
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _uv_executable() -> str | None:
+    resolved = shutil.which("uv")
+    return str(resolved) if resolved else None
+
+
 def _ensure_project_installed() -> None:
     if _marker_matches_current() and _venv_has_runtime_deps():
         return
-    _run([str(VENV_PYTHON), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], cwd=PROJECT_ROOT)
-    _run([str(VENV_PYTHON), "-m", "pip", "install", "-e", "."], cwd=PROJECT_ROOT)
+    # uv 托管的 checkout 走锁文件同步：uv 创建的 venv 不带 pip，且任何
+    # uv sync 都会把非锁定包（包括 pip）从 venv 裁剪掉，pip 路径在此类
+    # 环境必然失败——必须优先探测 uv。
+    uv = _uv_executable()
+    if uv is not None and (PROJECT_ROOT / "uv.lock").exists():
+        _run([uv, "sync", "--frozen"], cwd=PROJECT_ROOT)
+    elif _python_has_module(VENV_PYTHON, "pip"):
+        _run([str(VENV_PYTHON), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], cwd=PROJECT_ROOT)
+        _run([str(VENV_PYTHON), "-m", "pip", "install", "-e", "."], cwd=PROJECT_ROOT)
+    else:
+        raise SystemExit(
+            f"[g3ku] No usable package installer: uv is not on PATH and {VENV_DIR} has no pip. "
+            "Install uv (https://docs.astral.sh/uv/) or recreate the virtualenv with pip, then retry."
+        )
     BOOTSTRAP_MARKER.write_text(_pyproject_fingerprint() + "\n", encoding="utf-8")
 
 

@@ -69,6 +69,10 @@ cd G3KU-Agent
 Windows PowerShell:
 
 ```powershell
+# 首选：uv 按锁文件同步（仓库已用 uv.lock 锁定依赖）
+uv sync --frozen --extra dev
+
+# 或手动 pip 环境（bootstrap 检测到 pip 时同样支持）
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -78,6 +82,10 @@ pip install -e ".[dev]"
 Linux / macOS:
 
 ```bash
+# 首选：uv 按锁文件同步
+uv sync --frozen --extra dev
+
+# 或手动 pip 环境
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
