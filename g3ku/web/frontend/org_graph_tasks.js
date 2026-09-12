@@ -558,6 +558,10 @@ async function copyTaskId(taskId) {
 const TASK_PAUSE_HINT_POLL_MS = 400;
 const TASK_PAUSE_HINT_POLL_TIMEOUT_MS = 30000;
 const TASK_PAUSE_HINT_DONE_HIDE_MS = 2500;
+// 任务详情 WS 断线重连：与任务列表 WS 同策略（1s 后重建）。详情 WS 只挂
+// onmessage 时，任何一次断线（服务重启/网络抖动/休眠）都会让树视图永久冻结
+// 在最后一帧快照上（2026-09-12 分发期间"树卡死"事故的直接成因）。
+const TASK_DETAIL_WS_RECONNECT_MS = 1000;
 
 function taskPauseHintState(taskId) {
     const key = String(taskId || "").trim();
@@ -1387,11 +1391,70 @@ async function performTaskBatchAction(action, eligible) {
     }
 }
 
-function resetTaskView() {
-    if (S.taskWs) {
-        S.taskWs.close();
-        S.taskWs = null;
+function taskDetailViewVisible() {
+    return !!U.viewTaskDetails?.classList.contains("active");
+}
+
+// 主动关闭详情 WS 时必须先摘掉 onclose，否则关闭动作本身会触发重连。
+function closeTaskDetailWs() {
+    if (S.taskWsReconnectTimer) {
+        window.clearTimeout(S.taskWsReconnectTimer);
+        S.taskWsReconnectTimer = null;
     }
+    const socket = S.taskWs;
+    S.taskWs = null;
+    if (!socket) return;
+    socket.onclose = null;
+    socket.onopen = null;
+    socket.onmessage = null;
+    try {
+        socket.close();
+    } catch (error) {
+        void error;
+    }
+}
+
+// 打开任务详情 WS；断线后只要仍在查看该任务就按 1s 间隔重连（对齐任务列表
+// WS 的 onclose 重连策略）。重连成功后用 preserveView + reopenSocket:false
+// 重拉任务详情与整树快照对齐状态：断线窗口内错过的 live 事件无法重放补齐。
+function openTaskDetailWs(taskId, { isReconnect = false } = {}) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    closeTaskDetailWs();
+    const socket = new WebSocket(ApiClient.getTaskWsUrl(key));
+    S.taskWs = socket;
+    socket.onmessage = (ev) => handleTaskEvent(JSON.parse(ev.data));
+    socket.onopen = () => {
+        if (S.taskWs !== socket || !isReconnect) return;
+        if (String(S.currentTaskId || "").trim() !== key) return;
+        void reconcileTaskDetailAfterWsReconnect(key);
+    };
+    socket.onclose = () => {
+        if (S.taskWs !== socket) return;
+        S.taskWs = null;
+        if (String(S.currentTaskId || "").trim() !== key) return;
+        if (!taskDetailViewVisible()) return;
+        if (S.taskWsReconnectTimer) return;
+        S.taskWsReconnectTimer = window.setTimeout(() => {
+            S.taskWsReconnectTimer = null;
+            if (S.taskWs) return;
+            if (String(S.currentTaskId || "").trim() !== key) return;
+            if (!taskDetailViewVisible()) return;
+            openTaskDetailWs(key, { isReconnect: true });
+        }, TASK_DETAIL_WS_RECONNECT_MS);
+    };
+}
+
+async function reconcileTaskDetailAfterWsReconnect(taskId) {
+    const preservedRoundSelections = { ...(S.treeSelectedRoundByNodeId || {}) };
+    await loadTaskDetail(taskId, { preserveView: true, reopenSocket: false });
+    if (String(S.currentTaskId || "").trim() !== String(taskId || "").trim()) return;
+    S.treeSelectedRoundByNodeId = normalizeTreeRoundSelections(preservedRoundSelections);
+    if (String(S.treeRootNodeId || "").trim()) renderTree();
+}
+
+function resetTaskView() {
+    closeTaskDetailWs();
     clearTaskDetailSession();
     S.currentTask = null;
     S.taskSummary = null;
@@ -1727,12 +1790,7 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
     const payload = await ApiClient.getTask(taskId, true);
     applyTaskPayload(payload);
     if (reopenSocket) {
-        if (S.taskWs) {
-            S.taskWs.close();
-            S.taskWs = null;
-        }
-        S.taskWs = new WebSocket(ApiClient.getTaskWsUrl(taskId));
-        S.taskWs.onmessage = (ev) => handleTaskEvent(JSON.parse(ev.data));
+        openTaskDetailWs(taskId);
     }
     await loadTaskTreeSnapshot(taskId);
     return payload;

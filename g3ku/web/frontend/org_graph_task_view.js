@@ -152,6 +152,11 @@ function resetTaskTreeSnapshotState({ clearDirty = true } = {}) {
     Object.values(S.treeBranchSyncTokenById || {}).forEach((token) => {
         if (token) window.clearTimeout(token);
     });
+    if (S.treeSnapshotSelfHealToken) {
+        window.clearTimeout(S.treeSnapshotSelfHealToken);
+        S.treeSnapshotSelfHealToken = null;
+    }
+    S.treeSnapshotSelfHealAttempts = 0;
     S.treeRootNodeId = "";
     S.treeNodesById = {};
     S.treeSnapshotVersion = "";
@@ -179,18 +184,49 @@ function applyTaskTreeSnapshotPayload(payload = {}) {
     S.treeSnapshotVersion = String(payload?.snapshot_version || "").trim();
     S.treeView = null;
     S.treeLargeMode = false;
+    // 全量快照落位即视为一次成功对齐，重置自愈重试预算。
+    S.treeSnapshotSelfHealAttempts = 0;
     S.treeSelectedRoundByNodeId = pruneTreeRoundSelections({});
     refreshTaskTreeSearchResultsIfVisible();
+}
+
+// 渲染时发现根节点已不在快照缓存中（增量合并把树搞成了残缺态）：展示空态的
+// 同时去抖触发一次整表快照重载自愈。限 2 次，避免后端真返回无根快照时无限循环。
+function scheduleTaskTreeSnapshotSelfHeal() {
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!taskId) return;
+    if (S.treeSnapshotSelfHealToken) return;
+    if (Number(S.treeSnapshotSelfHealAttempts || 0) >= 2) return;
+    S.treeSnapshotSelfHealAttempts = Number(S.treeSnapshotSelfHealAttempts || 0) + 1;
+    S.treeSnapshotSelfHealToken = window.setTimeout(() => {
+        S.treeSnapshotSelfHealToken = null;
+        if (String(S.currentTaskId || "").trim() !== taskId) return;
+        if (treeSnapshotNode(String(S.treeRootNodeId || "").trim())) return;
+        void loadTaskTreeSnapshot(taskId);
+    }, 500);
 }
 
 function applyTaskTreeSubtreePayload(payload = {}) {
     const subtreeRootId = String(payload?.root_node_id || "").trim();
     if (!subtreeRootId) return;
+    const sourceNodes = payload?.nodes_by_id && typeof payload.nodes_by_id === "object" ? payload.nodes_by_id : {};
+    // 自愈防线：子树响应必须包含它自己的根节点。本次合并是"先删旧子树再整体
+    // 重建"，若响应缺失子树根（退化/半态响应），合并会把该根从缓存中删掉——
+    // 当子树根恰好是整树根节点时，树会整体消失而搜索仍能命中旧缓存
+    // （2026-09-12 分发期间"节点树消失"事故的破坏路径）。丢弃该响应并回退
+    // 整表快照重载。
+    const hasSubtreeRoot = Object.entries(sourceNodes).some(([nodeId, node]) => (
+        String(nodeId || node?.node_id || "").trim() === subtreeRootId
+    ));
+    if (!hasSubtreeRoot) {
+        const taskId = String(S.currentTaskId || "").trim();
+        if (taskId) void loadTaskTreeSnapshot(taskId);
+        return;
+    }
     const nextNodesById = { ...(S.treeNodesById || {}) };
     collectSnapshotSubtreeIds(subtreeRootId, nextNodesById).forEach((nodeId) => {
         delete nextNodesById[nodeId];
     });
-    const sourceNodes = payload?.nodes_by_id && typeof payload.nodes_by_id === "object" ? payload.nodes_by_id : {};
     Object.entries(sourceNodes).forEach(([nodeId, node]) => {
         const normalizedNodeId = String(nodeId || node?.node_id || "").trim();
         if (!normalizedNodeId) return;
@@ -2524,6 +2560,8 @@ function renderTree() {
     S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
     syncTaskTreeHeaderState(S.treeView);
     if (!S.treeView) {
+        // 根节点缺失通常是增量合并损坏了缓存：空态之外再触发一次整表自愈重载。
+        scheduleTaskTreeSnapshotSelfHeal();
         U.tree.innerHTML = "";
         if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
         const emptyState = document.createElement("div");

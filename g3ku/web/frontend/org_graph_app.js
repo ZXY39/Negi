@@ -135,6 +135,7 @@ const S = {
         requestToken: 0,
     },
     taskWs: null,
+    taskWsReconnectTimer: null,
     tasksWs: null,
     currentTaskId: null,
     tasks: [],
@@ -158,6 +159,8 @@ const S = {
     treeBranchSyncInFlightById: {},
     treeBranchSyncQueuedById: {},
     treeBranchSyncTokenById: {},
+    treeSnapshotSelfHealToken: null,
+    treeSnapshotSelfHealAttempts: 0,
     treeLargeMode: false,
     taskDetailViewStates: {},
     pendingTaskDetailRestore: null,
@@ -11209,10 +11212,8 @@ function switchView(view) {
         stashTaskDetailViewState();
         setTaskTokenStatsOpen(false);
         clearAgentSelection({ rerender: false });
-        if (S.taskWs) {
-            S.taskWs.close();
-            S.taskWs = null;
-        }
+        // 离开详情视图属于主动关闭，必须摘掉 onclose 防止触发重连。
+        closeTaskDetailWs();
         scheduleTaskDetailSessionPersist();
     }
     if (view === "tasks") {
