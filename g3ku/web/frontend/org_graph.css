@@ -3530,6 +3530,113 @@ textarea {
     margin: 0;
 }
 
+/* 消息分发结果列表：用语义标签 + 图标替代旧的 [delivered]/[consumed] 原始状态文本。
+   状态配色走各状态强调变量：待处理=琥珀、已消费=运行中靛蓝、已并入上下文=成功绿、未下发=中性灰。 */
+.notice-delivery-list {
+    display: grid;
+    gap: var(--space-2);
+}
+
+.notice-delivery-item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
+}
+
+.notice-delivery-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 1.5rem;
+    height: 1.5rem;
+    margin-top: 0.05rem;
+    border-radius: var(--radius-full);
+    background: var(--delivery-accent-bg, var(--status-pending-bg));
+    color: var(--delivery-accent-text, var(--status-pending-text));
+}
+
+.notice-delivery-icon svg {
+    width: 0.9rem;
+    height: 0.9rem;
+}
+
+.notice-delivery-main {
+    display: grid;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+}
+
+.notice-delivery-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+}
+
+.notice-delivery-target {
+    font-size: 0.84rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-all;
+}
+
+.notice-delivery-node-id {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    word-break: break-all;
+}
+
+.notice-delivery-status {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.05rem 0.5rem;
+    border-radius: var(--radius-full);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+    background: var(--delivery-accent-bg, var(--status-pending-bg));
+    color: var(--delivery-accent-text, var(--status-pending-text));
+}
+
+.notice-delivery-detail {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.notice-delivery-item--delivered {
+    --delivery-accent-bg: rgba(217, 119, 6, 0.12);
+    --delivery-accent-text: #b45309;
+}
+
+.notice-delivery-item--consumed {
+    --delivery-accent-bg: var(--status-running-bg);
+    --delivery-accent-text: var(--status-running-text);
+}
+
+.notice-delivery-item--merged {
+    --delivery-accent-bg: var(--status-success-bg);
+    --delivery-accent-text: var(--status-success-text);
+}
+
+.notice-delivery-item--skipped {
+    --delivery-accent-bg: var(--status-pending-bg);
+    --delivery-accent-text: var(--status-pending-text);
+}
+
+[data-theme="dark"] .notice-delivery-item--delivered {
+    --delivery-accent-bg: rgba(245, 158, 11, 0.15);
+    --delivery-accent-text: #fbbf24;
+}
+
 .message .project-card {
     margin-top: var(--space-3);
     background-color: var(--bg-panel);

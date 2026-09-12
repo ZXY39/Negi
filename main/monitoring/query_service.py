@@ -118,6 +118,10 @@ class TaskQueryService:
                     'reason': '',
                     'decision': 'distributed',
                     'status': str(item.status or '').strip(),
+                    # 供前端推导分发三态（已分发·待处理/已消费/已并入上下文），
+                    # 前端不再直接展示原始账本状态文本。
+                    'consumed_at': str(item.consumed_at or '').strip(),
+                    'merged_at': str(item.merged_at or '').strip(),
                     'received_at': str(item.delivered_at or item.created_at or '').strip(),
                 }
             )
@@ -147,6 +151,8 @@ class TaskQueryService:
                             'reason': str(skipped.get('reason') or '').strip(),
                             'decision': 'skipped',
                             'status': '',
+                            'consumed_at': '',
+                            'merged_at': '',
                             'received_at': '',
                         }
                     )

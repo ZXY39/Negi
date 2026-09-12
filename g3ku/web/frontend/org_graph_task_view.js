@@ -1641,27 +1641,67 @@ function formatMessageListTitle(entry, index) {
     return `${formattedTime} · ${status.label}`;
 }
 
-function summarizeMessageDeliveries(deliveries = []) {
-    const lines = (Array.isArray(deliveries) ? deliveries : [])
-        .map((item) => {
-            const targetTitle = String(item?.target_title || item?.target_node_id || "").trim() || "未命名节点";
-            const targetNodeId = String(item?.target_node_id || "").trim();
-            const message = String(item?.message || "").trim();
-            const reason = String(item?.reason || "").trim();
-            const decision = String(item?.decision || "").trim();
-            const status = String(item?.status || "").trim();
-            const parts = [decision === "skipped" ? "不分发" : "分发", targetTitle];
-            if (targetNodeId) parts.push(`(${targetNodeId})`);
-            if (decision === "skipped") {
-                if (reason) parts.push(`: ${reason}`);
-            } else {
-                if (message) parts.push(`: ${message}`);
-                if (status) parts.push(` [${status}]`);
-            }
-            return parts.join("");
-        })
-        .filter(Boolean);
-    return lines.join("\n");
+// 分发结果三态映射：不再向前端暴露原始账本状态文本（delivered/consumed），
+// 统一成语义标签 + lucide 图标；判定源是后端账本（status + merged_at），前端不做推断。
+function messageDeliveryStatusDescriptor(delivery = {}) {
+    const decision = String(delivery?.decision || "").trim().toLowerCase();
+    if (decision === "skipped") {
+        return { key: "skipped", label: "未下发", icon: "circle-slash" };
+    }
+    const status = String(delivery?.status || "").trim().toLowerCase();
+    const mergedAt = String(delivery?.merged_at || "").trim();
+    if (status === "delivered") {
+        return { key: "delivered", label: "已分发·待处理", icon: "inbox" };
+    }
+    if (status === "consumed") {
+        if (mergedAt) {
+            return { key: "merged", label: "已并入上下文", icon: "merge" };
+        }
+        return { key: "consumed", label: "已消费", icon: "circle-check" };
+    }
+    return { key: status || "unknown", label: status || "已接收", icon: "circle" };
+}
+
+function renderMessageDeliveriesField(deliveries = []) {
+    const items = Array.isArray(deliveries) ? deliveries : [];
+    const labelHtml = `<div class="task-trace-label">${esc("分发情况")}</div>`;
+    if (!items.length) {
+        return `
+        <div class="task-trace-field">
+            ${labelHtml}
+            <div class="code-block task-trace-code">${esc("无")}</div>
+        </div>
+    `;
+    }
+    const rows = items.map((item) => {
+        const descriptor = messageDeliveryStatusDescriptor(item);
+        const skipped = String(item?.decision || "").trim().toLowerCase() === "skipped";
+        const targetTitle = String(item?.target_title || item?.target_node_id || "").trim() || "未命名节点";
+        const targetNodeId = String(item?.target_node_id || "").trim();
+        const showNodeId = targetNodeId && targetNodeId !== targetTitle;
+        const detail = skipped
+            ? (String(item?.reason || "").trim() || "暂无跳过原因")
+            : (String(item?.message || "").trim() || "暂无消息内容");
+        return `
+            <div class="notice-delivery-item notice-delivery-item--${esc(descriptor.key)}">
+                <span class="notice-delivery-icon" aria-hidden="true"><i data-lucide="${esc(descriptor.icon)}"></i></span>
+                <span class="notice-delivery-main">
+                    <span class="notice-delivery-head">
+                        <span class="notice-delivery-target">${esc(targetTitle)}</span>
+                        ${showNodeId ? `<span class="notice-delivery-node-id">${esc(targetNodeId)}</span>` : ""}
+                        <span class="notice-delivery-status">${esc(descriptor.label)}</span>
+                    </span>
+                    <span class="notice-delivery-detail">${esc(detail)}</span>
+                </span>
+            </div>
+        `;
+    }).join("");
+    return `
+        <div class="task-trace-field">
+            ${labelHtml}
+            <div class="notice-delivery-list">${rows}</div>
+        </div>
+    `;
 }
 
 function buildNodeMessageListSteps(node = {}) {
@@ -1680,7 +1720,7 @@ function buildNodeMessageListSteps(node = {}) {
                 entry?.consumed_at ? renderTraceField("消费时间", entry?.consumed_at, "") : "",
                 entry?.merged_at ? renderTraceField("并入上下文时间", entry?.merged_at, "") : "",
                 renderTraceField("消息内容", entry?.message, "暂无消息内容"),
-                renderTraceField("分发情况", summarizeMessageDeliveries(entry?.deliveries), "无"),
+                renderMessageDeliveriesField(entry?.deliveries),
             ].join(""),
         };
     });

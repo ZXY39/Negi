@@ -76,6 +76,59 @@ def test_message_list_status_descriptor_three_states() -> None:
     assert result["unknown"]["label"] == "weird"
 
 
+def test_message_delivery_status_descriptor_semantic_labels() -> None:
+    result = _run_node_script(
+        _COMMON_PRELUDE
+        + """
+        console.log(JSON.stringify({
+          delivered: messageDeliveryStatusDescriptor({ decision: "distributed", status: "delivered" }),
+          consumed: messageDeliveryStatusDescriptor({ decision: "distributed", status: "consumed" }),
+          merged: messageDeliveryStatusDescriptor({ decision: "distributed", status: "consumed", merged_at: "2026-09-12T10:00:00+08:00" }),
+          skipped: messageDeliveryStatusDescriptor({ decision: "skipped", status: "" }),
+          unknown: messageDeliveryStatusDescriptor({ decision: "distributed", status: "weird" }),
+          empty: messageDeliveryStatusDescriptor({}),
+        }));
+        """
+    )
+    assert result["delivered"] == {"key": "delivered", "label": "已分发·待处理", "icon": "inbox"}
+    assert result["consumed"] == {"key": "consumed", "label": "已消费", "icon": "circle-check"}
+    assert result["merged"] == {"key": "merged", "label": "已并入上下文", "icon": "merge"}
+    assert result["skipped"] == {"key": "skipped", "label": "未下发", "icon": "circle-slash"}
+    assert result["unknown"]["label"] == "weird"
+    assert result["empty"]["label"] == "已接收"
+
+
+def test_render_message_deliveries_field_replaces_raw_status_tokens() -> None:
+    result = _run_node_script(
+        _COMMON_PRELUDE
+        + """
+        global.esc = (value) => String(value ?? "");
+        const html = renderMessageDeliveriesField([
+          { decision: "distributed", status: "delivered", target_title: "分支A", target_node_id: "node:a", message: "补充证据" },
+          { decision: "distributed", status: "consumed", target_title: "分支B", target_node_id: "node:b", message: "同步口径" },
+          { decision: "distributed", status: "consumed", merged_at: "2026-09-12T10:00:00+08:00", target_title: "分支C", target_node_id: "node:c", message: "并入演示" },
+          { decision: "skipped", status: "", target_title: "分支D", target_node_id: "node:d", reason: "不受影响" },
+        ]);
+        const empty = renderMessageDeliveriesField([]);
+        console.log(JSON.stringify({ html, empty }));
+        """
+    )
+    html = result["html"]
+    assert "已分发·待处理" in html
+    assert "已消费" in html
+    assert "已并入上下文" in html
+    assert "未下发" in html
+    assert "不受影响" in html
+    # 旧实现会把账本原始状态文本直接拼成 [delivered]/[consumed]，必须不再出现。
+    assert "[delivered]" not in html
+    assert "[consumed]" not in html
+    assert 'data-lucide="inbox"' in html
+    assert 'data-lucide="circle-check"' in html
+    assert 'data-lucide="merge"' in html
+    assert 'data-lucide="circle-slash"' in html
+    assert "无" in result["empty"]
+
+
 def test_active_distribution_state_accepts_subtree_barrier_and_legacy_mode() -> None:
     result = _run_node_script(
         _COMMON_PRELUDE

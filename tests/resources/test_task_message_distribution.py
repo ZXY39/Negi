@@ -1989,10 +1989,16 @@ async def test_distribution_turn_uses_runtime_child_snapshot_and_persists_decisi
         assert detail.message_list[0]["status"] == "consumed"
         assert detail.message_list[0]["deliveries"][0]["target_node_id"] == branch_a.node_id
         assert detail.message_list[0]["deliveries"][0]["decision"] == "distributed"
+        assert detail.message_list[0]["deliveries"][0]["status"] == "delivered"
+        # 前端三态推导依赖这两个字段；子节点尚未消费/并入，均为空。
+        assert detail.message_list[0]["deliveries"][0]["consumed_at"] == ""
+        assert detail.message_list[0]["deliveries"][0]["merged_at"] == ""
         assert detail.message_list[0]["deliveries"][1]["target_node_id"] == branch_b.node_id
         assert detail.message_list[0]["deliveries"][1]["decision"] == "skipped"
         assert detail.message_list[0]["deliveries"][1]["reason"] == "branch b can continue unchanged"
         assert detail.message_list[0]["deliveries"][1]["status"] == ""
+        assert detail.message_list[0]["deliveries"][1]["consumed_at"] == ""
+        assert detail.message_list[0]["deliveries"][1]["merged_at"] == ""
         assert detail.message_list[0]["deliveries"][1]["message"] == ""
         assert detail.message_list[0]["deliveries"][1]["received_at"] == ""
         assert detail.message_list[0]["deliveries"][1]["notification_id"] == ""
