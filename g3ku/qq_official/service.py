@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import time
 from typing import Any
 
 from loguru import logger
@@ -18,6 +19,13 @@ from loguru import logger
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.schema import ExternalApiTokenConfig, QqBotConfig
 from g3ku.qq_official.messages import QQ_BRIDGE_ID
+
+# bridge 意外崩溃（如 botpy 登录瞬时失败抛 Robot(None) 的 AttributeError）后的
+# 自动重连退避，节奏对齐 bridge.py 的 pump 重连（1s→60s 封顶）。崩溃前健康运行
+# 超过阈值则把退避重置回起始值，避免长期健康后的一次崩溃被永久放大。
+_BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS = 1.0
+_BRIDGE_RETRY_MAX_BACKOFF_SECONDS = 60.0
+_BRIDGE_RETRY_HEALTHY_RUN_SECONDS = 60.0
 
 
 class QqOfficialService:
@@ -82,20 +90,29 @@ class QqOfficialService:
     async def _run(self, q: QqBotConfig, token: str) -> None:
         from g3ku.qq_official.bridge import run_qq_official_bridge
 
-        try:
-            await run_qq_official_bridge(
-                app_id=str(q.app_id or "").strip(),
-                app_secret=str(q.app_secret or "").strip(),
-                sandbox=bool(q.sandbox),
-                token=token,
-                base_url=self._base_url,
-                on_state=self._set,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - the service must survive bridge crashes
-            logger.exception("qq-official bridge crashed")
-            self._set("error", str(exc))
+        backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
+        while True:
+            started = time.monotonic()
+            try:
+                await run_qq_official_bridge(
+                    app_id=str(q.app_id or "").strip(),
+                    app_secret=str(q.app_secret or "").strip(),
+                    sandbox=bool(q.sandbox),
+                    token=token,
+                    base_url=self._base_url,
+                    on_state=self._set,
+                )
+                # bridge 干净返回是它自己报过的环境类终态（如 botpy 缺失），不重试。
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the service must survive bridge crashes
+                if time.monotonic() - started >= _BRIDGE_RETRY_HEALTHY_RUN_SECONDS:
+                    backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
+                logger.exception("qq-official bridge crashed; retrying in {:.0f}s", backoff)
+                self._set("error", f"{exc}（将在 {backoff:.0f}s 后重试）")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, _BRIDGE_RETRY_MAX_BACKOFF_SECONDS)
 
     async def stop(self) -> None:
         task = self._task
