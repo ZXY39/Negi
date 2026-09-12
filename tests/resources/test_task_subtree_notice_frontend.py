@@ -251,3 +251,81 @@ def test_notice_composer_submit_posts_and_refreshes() -> None:
     assert result["agentRefresh"] == [{"node": "node:exec", "options": {"preserveViewState": True, "forceRefresh": True}}]
     assert result["inputValueCleared"] is True
     assert result["busyCleared"] is True
+
+
+def test_distribution_bubble_text_says_new_message_distributing() -> None:
+    result = _run_node_script(
+        _COMMON_PRELUDE
+        + """
+        global.document = {
+          createElement: () => ({
+            className: "",
+            attrs: {},
+            setAttribute(name, value) { this.attrs[name] = value; },
+            textContent: "",
+          }),
+        };
+        S.taskRuntimeSummary = { distribution: {
+          mode: "subtree_barrier", state: "distributing", active_epoch_id: "epoch:1",
+          target_node_ids: ["node:t"], frontier_node_ids: ["node:t"],
+          blocked_node_ids: ["node:t"], pending_notice_node_ids: [],
+          queued_epoch_count: 0, pending_mailbox_count: 0,
+        } };
+        const bubble = buildTaskTreeDistributionBubble();
+        console.log(JSON.stringify({ text: bubble.textContent, className: bubble.className }));
+        """
+    )
+    assert result["text"] == "新消息分发中"
+    assert result["className"] == "task-tree-distribution-bubble"
+
+
+def test_distribution_affected_node_ids_only_cover_frozen_subtrees() -> None:
+    result = _run_node_script(
+        _COMMON_PRELUDE
+        + """
+        S.treeNodesById = {
+          "node:root": { node_id: "node:root", rounds: [{ round_id: "r1", child_ids: ["node:mid"] }], auxiliary_child_ids: [] },
+          "node:mid": { node_id: "node:mid", rounds: [{ round_id: "r1", child_ids: ["node:t"] }], auxiliary_child_ids: [] },
+          "node:t": { node_id: "node:t", rounds: [{ round_id: "r1", child_ids: ["node:c1", "node:c2"] }], auxiliary_child_ids: [] },
+          "node:c1": { node_id: "node:c1", rounds: [], auxiliary_child_ids: [] },
+          "node:c2": { node_id: "node:c2", rounds: [], auxiliary_child_ids: [] },
+          "node:side": { node_id: "node:side", rounds: [], auxiliary_child_ids: [] },
+        };
+        const base = {
+          mode: "subtree_barrier", active_epoch_id: "epoch:1",
+          target_node_ids: ["node:t"], frontier_node_ids: ["node:t"],
+          blocked_node_ids: ["node:t"], pending_notice_node_ids: [],
+          queued_epoch_count: 0, pending_mailbox_count: 0,
+        };
+        S.taskRuntimeSummary = { distribution: { ...base, state: "distributing" } };
+        const active = Array.from(distributionAffectedNodeIds()).sort();
+        S.taskRuntimeSummary = { distribution: { ...base, state: "failed", error_text: "boom" } };
+        const failed = Array.from(distributionAffectedNodeIds()).sort();
+        S.taskRuntimeSummary = { distribution: { ...base, state: "", mode: "", active_epoch_id: "", blocked_node_ids: [] } };
+        const inactive = Array.from(distributionAffectedNodeIds()).sort();
+        console.log(JSON.stringify({ active, failed, inactive }));
+        """
+    )
+    # 只有目标子树（t 及其子孙）算受影响；祖先与旁支不受影响。
+    assert result["active"] == ["node:c1", "node:c2", "node:t"]
+    # 分发失败时子树仍冻结，受影响集合保持（失败杠杆）。
+    assert result["failed"] == ["node:c1", "node:c2", "node:t"]
+    assert result["inactive"] == []
+
+
+def test_distribution_tree_line_css_scoped_to_affected_edges() -> None:
+    css = (REPO_ROOT / "g3ku" / "web" / "frontend" / "org_graph.css").read_text(encoding="utf-8")
+    js = (REPO_ROOT / "g3ku" / "web" / "frontend" / "org_graph_task_view.js").read_text(encoding="utf-8")
+    # 旧实现：分发期间全局覆写四个连线变量，整棵树变黄——必须已移除。
+    assert ".execution-tree.execution-tree--distribution-active {" not in css
+    # 新实现：分发色只作用于受影响节点之间的连线。
+    assert "--tree-line-distribution" in css
+    assert ".execution-tree-list.execution-tree-list--distribution-affected" in css
+    assert ".execution-tree-item.execution-tree-item--distribution-affected" in css
+    # 渲染端：子列表仅在父节点受影响时获得染色资格；节点按自身受影响打标。
+    assert "execution-tree-list--distribution-affected" in js
+    assert "execution-tree-item--distribution-affected" in js
+    assert "distributionAffectedNodeIds" in js
+    # 状态气泡文案改为"新消息分发中"。
+    assert "新消息分发中" in js
+    assert "接收到新消息，分发中" not in js

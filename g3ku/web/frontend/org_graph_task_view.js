@@ -2334,6 +2334,26 @@ function activeTaskDistributionState() {
     return null;
 }
 
+// 分发/分发失败期间被冻结（受影响）的节点集合：以 blocked 快照与目标节点
+// 为种子，沿当前快照展开各自整棵子树。连线仅在这些节点之间染成分发色；
+// epoch 完成（通知被消费/处理）后 distribution UI 退出，集合不再生效。
+function distributionAffectedNodeIds(distributionState = activeTaskDistributionState()) {
+    const affected = new Set();
+    if (!distributionState || typeof distributionState !== "object") return affected;
+    const uiMode = String(distributionState.ui_mode || "").trim();
+    if (uiMode !== "distribution" && uiMode !== "distribution_failed") return affected;
+    const seeds = [
+        ...(Array.isArray(distributionState.blocked_node_ids) ? distributionState.blocked_node_ids : []),
+        ...(Array.isArray(distributionState.target_node_ids) ? distributionState.target_node_ids : []),
+    ];
+    seeds.forEach((rawNodeId) => {
+        const seedNodeId = String(rawNodeId || "").trim();
+        if (!seedNodeId) return;
+        collectSnapshotSubtreeIds(seedNodeId).forEach((subtreeNodeId) => affected.add(subtreeNodeId));
+    });
+    return affected;
+}
+
 function buildTaskTreeDistributionBubble(text = "") {
     const distributionState = activeTaskDistributionState();
     const failedMode = distributionState?.ui_mode === "distribution_failed";
@@ -2346,7 +2366,7 @@ function buildTaskTreeDistributionBubble(text = "") {
             ? `消息分发失败（${failureText.slice(0, 120)}），任务保持暂停；可重新追加通知重试，或手动恢复任务`
             : "消息分发失败，任务保持暂停；可重新追加通知重试，或手动恢复任务";
     } else {
-        fallbackText = "接收到新消息，分发中";
+        fallbackText = "新消息分发中";
     }
     const bubble = document.createElement("div");
     bubble.className = failedMode
@@ -2855,9 +2875,12 @@ function renderTree() {
     if (layoutDensity.mode === "dense") {
         wrapper.classList.add("execution-tree--dense");
     }
-    if (distributionState?.ui_mode === "distribution") {
+    if (distributionState?.ui_mode === "distribution" || distributionState?.ui_mode === "distribution_failed") {
         wrapper.classList.add("execution-tree--distribution-active");
     }
+    // 受影响（被冻结子树）节点集合：仅用于连线按子树范围染色，
+    // 分发完成/通知消费后该集合随 distribution UI 退出而失效。
+    const distributionAffectedIds = distributionAffectedNodeIds(distributionState);
     const rootList = document.createElement("ul");
     rootList.className = "execution-tree-list";
     const handleTreeNodeClick = (node, event) => {
@@ -2922,9 +2945,11 @@ function renderTree() {
         const visibleChildren = Array.isArray(node.children) ? node.children : [];
         const hasSwitchableSubtrees = roundOptions.length > 1;
         const showStaticSubtreeHint = !hasSwitchableSubtrees && visibleChildren.length > 0;
+        const nodeAffected = distributionAffectedIds.has(String(node.node_id || "").trim());
         const item = document.createElement("li");
         item.className = "execution-tree-item";
         item.dataset.status = nodeStatus;
+        if (nodeAffected) item.classList.add("execution-tree-item--distribution-affected");
         const stack = document.createElement("div");
         stack.className = "execution-tree-node-stack";
         if (inspectionNodes.length) stack.classList.add("has-inspection");
@@ -2964,6 +2989,9 @@ function renderTree() {
             const branch = document.createElement("ul");
             branch.className = "execution-tree-list";
             branch.dataset.parentStatus = nodeStatus;
+            // 父节点受影响时，其子列表（父→子连线段）才允许染分发色；
+            // 子树根节点与未受影响父节点之间的边界连线保持原状态色。
+            if (nodeAffected) branch.classList.add("execution-tree-list--distribution-affected");
             visibleChildren.forEach((child) => branch.appendChild(walk(child)));
             item.appendChild(branch);
         }

@@ -1120,6 +1120,8 @@ textarea {
     --tree-line-running: color-mix(in srgb, var(--status-running-text) 84%, white 16%);
     --tree-line-success: color-mix(in srgb, var(--status-success-text) 82%, white 18%);
     --tree-line-failed: color-mix(in srgb, var(--status-failed-text) 84%, white 16%);
+    /* 定向通知分发期间"受影响连线"专用色（仅作用于被冻结子树内部连线）。 */
+    --tree-line-distribution: color-mix(in srgb, #f59e0b 72%, white 28%);
     --tree-level-gap: clamp(2.25rem, 3.5vw, 3rem);
     --tree-sibling-gap-x: var(--space-3);
     --tree-node-min-width: 220px;
@@ -1155,13 +1157,6 @@ textarea {
     --tree-node-max-width: 236px;
     --tree-node-padding-y: 0.625rem;
     --tree-node-padding-x: 0.75rem;
-}
-
-.execution-tree.execution-tree--distribution-active {
-    --tree-line: color-mix(in srgb, #f59e0b 72%, white 28%);
-    --tree-line-running: color-mix(in srgb, #f59e0b 72%, white 28%);
-    --tree-line-success: color-mix(in srgb, #f59e0b 72%, white 28%);
-    --tree-line-failed: color-mix(in srgb, #f59e0b 72%, white 28%);
 }
 
 .execution-tree-list {
@@ -1282,6 +1277,20 @@ textarea {
 .execution-tree-list[data-parent-status="failed"],
 .execution-tree-list[data-parent-status="error"] {
     --tree-branch-color: var(--tree-line-failed);
+}
+
+/* 定向通知分发不再全局改色：只把"受影响节点之间"的连线标记为分发色。
+   .execution-tree-list--distribution-affected 表示该子列表的父节点被冻结
+   （父→子垂线段可染黄）；.execution-tree-item--distribution-affected 表示
+   节点自身在冻结子树内。两者同时成立才覆盖该条连线的分支色，子树根节点
+   与其（未受影响的）父节点之间的边界连线因此保持原状态色。通知被消费、
+   epoch 完成后 distribution UI 退出，类名随重渲染移除，连线自动恢复。 */
+.execution-tree.execution-tree--distribution-active .execution-tree-list.execution-tree-list--distribution-affected {
+    --tree-branch-color: var(--tree-line-distribution);
+}
+
+.execution-tree.execution-tree--distribution-active .execution-tree-list.execution-tree-list--distribution-affected > .execution-tree-item.execution-tree-item--distribution-affected {
+    --tree-branch-color: var(--tree-line-distribution);
 }
 
 .execution-tree-node {
