@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextvars
 import inspect
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -12,6 +13,8 @@ import mcp.server.fastmcp.server as fastmcp_server
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.models import ToolResourceDescriptor
 from g3ku.resources.tool_settings import resolve_universal_timeout_flag
+
+logger = logging.getLogger(__name__)
 
 _RUNTIME_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "g3ku_embedded_mcp_runtime",
@@ -103,6 +106,45 @@ def _accepts_runtime_context(target: Any) -> bool:
     return _runtime_context_parameter_name(target) is not None
 
 
+def _handler_dispatch_target(handler: Any) -> Any:
+    """Resolve the callable that EmbeddedMCPTool._invoke will actually dispatch to.
+
+    Mirrors the dispatch order in ``_build_tool_callable``: Tool.execute first,
+    then any ``execute`` attribute, then the handler itself (``__call__``).
+    """
+    if isinstance(handler, Tool):
+        return handler.execute
+    if hasattr(handler, "execute"):
+        return handler.execute
+    if callable(handler):
+        return handler
+    return None
+
+
+def _handler_parameter_info(handler: Any) -> tuple[frozenset[str], bool] | None:
+    """Return (accepted keyword names, has **kwargs) for the handler dispatch target.
+
+    None means the signature could not be resolved; callers must then pass
+    arguments through unfiltered.
+    """
+    target = _handler_dispatch_target(handler)
+    if target is None:
+        return None
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return None
+    names = frozenset(
+        name
+        for name, parameter in signature.parameters.items()
+        if parameter.kind in (parameter.POSITIONAL_OR_KEYWORD, parameter.KEYWORD_ONLY)
+    )
+    has_var_keyword = any(
+        parameter.kind is parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+    )
+    return names, has_var_keyword
+
+
 def _runtime_context_parameter_name(target: Any) -> str | None:
     candidate = target.execute if hasattr(target, "execute") else target
     if not callable(candidate):
@@ -146,12 +188,59 @@ class EmbeddedMCPTool(Tool):
             # 必须把统一参数并入，否则 call_tool 会在进工具前把它拒掉。
             # 标志可能来自 handler 类属性，也可能来自清单 timeout_policy 声明。
             self._parameters = _with_universal_timeout_property(self._parameters)
+        # schema/实现漂移防线：注册 schema 声明的参数未必被 handler 真实签名接受
+        # （历史事故：resource.yaml 残留 timeout_ms，实现已改为 timeout，FastMCP
+        # 按 schema 默认值给每次调用强注 timeout_ms，导致所有调用无差别报错）。
+        # 构建期交叉校验告警 + 执行期过滤未接受参数，双保险。
+        self._handler_param_info = _handler_parameter_info(handler)
+        self._drift_warned_keys: set[str] = set()
+        self._warn_schema_handler_drift()
         self._server = FastMCP(name=f"g3ku-{descriptor.name}")
         self._server.add_tool(
             self._build_tool_callable(),
             name=descriptor.name,
             description=descriptor.description or descriptor.name,
         )
+
+    def _warn_schema_handler_drift(self) -> None:
+        info = self._handler_param_info
+        if info is None:
+            return
+        names, has_var_keyword = info
+        if has_var_keyword:
+            return
+        declared = set((self._parameters or {}).get("properties") or {})
+        drifted = sorted(declared - names)
+        if drifted:
+            logger.warning(
+                "embedded tool %s: registration schema declares parameters %s that the handler "
+                "signature does not accept (accepted: %s); such arguments will be dropped at "
+                "execution time. Fix resource.yaml or the handler to remove the drift.",
+                self.name,
+                drifted,
+                sorted(names),
+            )
+
+    def _filter_handler_arguments(self, payload: dict[str, Any]) -> dict[str, Any]:
+        info = self._handler_param_info
+        if info is None:
+            return payload
+        names, has_var_keyword = info
+        if has_var_keyword:
+            return payload
+        dropped = sorted(key for key in payload if key not in names)
+        if not dropped:
+            return payload
+        warn_key = ",".join(dropped)
+        if warn_key not in self._drift_warned_keys:
+            self._drift_warned_keys.add(warn_key)
+            logger.warning(
+                "embedded tool %s: dropping arguments %s not accepted by the handler signature "
+                "(schema/implementation drift); see resource.yaml and the tool handler.",
+                self.name,
+                dropped,
+            )
+        return {key: value for key, value in payload.items() if key in names}
 
     @property
     def name(self) -> str:
@@ -235,7 +324,7 @@ class EmbeddedMCPTool(Tool):
 
     def _build_tool_callable(self):
         async def _invoke(**kwargs: Any) -> Any:
-            payload = dict(kwargs)
+            payload = self._filter_handler_arguments(dict(kwargs))
             runtime_context = _RUNTIME_CONTEXT.get() or {}
             runtime_param = _runtime_context_parameter_name(self._handler)
             if runtime_context and runtime_param:

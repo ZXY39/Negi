@@ -29,11 +29,12 @@
 ## 输入参数
 
 - `url`：必填，http/https URL。
-- `max_chars`：正文最大返回长度，默认 12000。
-- `extract_main_content`：默认 `true`，优先返回提取后的可读正文。
-- `include_raw_html`：默认 `false`，如需排查正文提取失败可打开。
-- `use_cache`：默认 `true`，开启短 TTL 缓存。
-- `timeout_seconds`：默认 12 秒。
+- `max_chars`：正文最大返回长度，默认 6000，取值范围 500–20000（实现层强制夹取）。
+- `timeout`：统一 timeout 合同参数（单位秒），由运行时自动注入模型可见 schema；缺省时使用全局默认（600s）并在该上限硬停，显式传入则优先且无上限。
+
+> 历史参数 `timeout_ms` / `timeout_seconds` 已随统一 timeout 合同退役（见 `docs/architecture/tool-and-skill-system.md`「统一 timeout 合同」），不再出现在注册 schema 中，不要传入。
+>
+> `extract_main_content` / `include_raw_html` / `use_cache` 不再作为可调用参数暴露；工具按内部默认行为执行：启用可读正文提取、不返回原始 HTML、成功结果写入 5 分钟 TTL 缓存（仅缓存成功结果，错误不缓存）。
 
 ## 输出重点
 

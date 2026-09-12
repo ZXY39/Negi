@@ -66,12 +66,10 @@ parameters:
       maximum: 20000
       default: 6000
       description: Maximum characters of readable text to keep.
-    timeout_ms:
-      type: integer
-      minimum: 1000
-      maximum: 30000
-      default: 10000
-      description: Network timeout in milliseconds.
+    # 注意：不要在此声明 timeout。web_fetch 是自持超时工具（self_enforced_timeout），
+    # 统一 timeout 合同的 `timeout`（秒）参数由运行时注入模型可见 schema，
+    # 并由执行层解析后显式传入；旧 `timeout_ms`/`timeout_seconds` 已退役（见
+    # docs/architecture/tool-and-skill-system.md 统一 timeout 合同）。
 returns:
   type: object
   properties:
