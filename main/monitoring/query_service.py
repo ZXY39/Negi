@@ -77,16 +77,24 @@ class TaskQueryService:
             text=f'Tasks: {total} total, {in_progress} in progress, {failed} failed, {unread} unread',
         )
 
-    def _node_pending_notice_count(self, *, task_id: str, node_id: str) -> int:
-        node = self._store.get_node(node_id)
-        metadata = dict(node.metadata or {}) if node is not None and isinstance(node.metadata, dict) else {}
-        pending_root_count = len(normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)))
+    def _node_pending_notice_count(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        pending_root_count: int | None = None,
+    ) -> int:
+        if pending_root_count is None:
+            # 旧投影行没有 pending_append_notice_count，退回读运行时节点元数据。
+            node = self._store.get_node(node_id)
+            metadata = dict(node.metadata or {}) if node is not None and isinstance(node.metadata, dict) else {}
+            pending_root_count = len(normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)))
         pending_child_count = sum(
             1
             for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
             if str(item.status or '').strip() == 'delivered'
         )
-        return pending_root_count + pending_child_count
+        return int(pending_root_count or 0) + pending_child_count
 
     def _message_distribution_deliveries(
         self,
@@ -1094,6 +1102,7 @@ class TaskQueryService:
         node_map: dict[str, Any],
         rounds_by_parent: dict[str, list[Any]],
         direct_children: dict[str, list[str]],
+        pending_root_counts: dict[str, int | None] | None = None,
     ) -> TaskTreeSnapshotNode:
         node_id = str(getattr(record, 'node_id', '') or '').strip()
         parent_rounds = list(rounds_by_parent.get(node_id, []))
@@ -1118,18 +1127,25 @@ class TaskQueryService:
             if self._projection_round_visible_in_snapshot(round_record)
         ]
         payload = dict(getattr(record, 'payload', {}) or {})
-        runtime_node = self._store.get_node(node_id)
-        metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
         node_kind = str(getattr(record, 'node_kind', '') or 'execution').strip() or 'execution'
         status = str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress'
-        is_paused = bool(getattr(runtime_node, 'is_paused', False) or payload.get('is_paused'))
-        pause_reason = str(getattr(runtime_node, 'pause_reason', '') or payload.get('pause_reason') or '').strip()
+        # 窄读路径：暂停/握手状态均落在投影列（写入时同步），快照构建不再为每个
+        # 节点全量读 nodes.payload（单节点 payload 可达数 MB，逐节点读是大任务
+        # tree-snapshot 超时的根因之一）。运行时节点只保留两处兜底：
+        # 1) acceptance 节点的展示相位需要其 accepted 节点的元数据；
+        # 2) 旧投影行缺 acceptance_handshake_state 时从运行时元数据补握手状态。
+        is_paused = bool(getattr(record, 'is_paused', False) or payload.get('is_paused'))
+        pause_reason = str(getattr(record, 'pause_reason', '') or payload.get('pause_reason') or '').strip()
         pause_row = self._store.get_task_node_pause(node_id)
         pause_remark = str(getattr(pause_row, 'remark', '') or payload.get('pause_remark') or '').strip()
         handshake_state = str(payload.get('acceptance_handshake_state') or '').strip()
-        if not handshake_state:
-            acceptance_handshake = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
-            handshake_state = str(acceptance_handshake.get('state') or '').strip()
+        runtime_node: NodeRecord | None = None
+        if node_kind == 'acceptance' or not handshake_state:
+            runtime_node = self._store.get_node(node_id)
+            metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
+            if not handshake_state:
+                acceptance_handshake = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
+                handshake_state = str(acceptance_handshake.get('state') or '').strip()
         parent_visible = True
         if str(getattr(record, 'parent_node_id', '') or '').strip():
             if node_kind in {'execution', 'acceptance'} and status in {'success', 'failed'}:
@@ -1161,7 +1177,15 @@ class TaskQueryService:
             default_round_id=self._projection_default_round_id(record, snapshot_rounds),
             rounds=snapshot_rounds,
             auxiliary_child_ids=auxiliary_child_ids,
-            pending_notice_count=self._node_pending_notice_count(task_id=str(getattr(record, 'task_id', '') or '').strip(), node_id=node_id),
+            pending_notice_count=self._node_pending_notice_count(
+                task_id=str(getattr(record, 'task_id', '') or '').strip(),
+                node_id=node_id,
+                pending_root_count=(
+                    (pending_root_counts or {}).get(node_id)
+                    if payload.get('pending_append_notice_count') is None
+                    else payload.get('pending_append_notice_count')
+                ),
+            ),
             parent_visible=parent_visible,
             tree_visible=tree_visible,
             acceptance_handshake_state=handshake_state,
@@ -1287,6 +1311,30 @@ class TaskQueryService:
                 next_after_node_id = str(chunk_ids[-1])
         else:
             included_ids = set(node_map.keys())
+        # pending_notice_count 的元数据部分来自投影（pending_append_notice_count，
+        # 写入时同步）。旧投影行还没有该字段：批量补读一次运行时节点元数据，
+        # 避免逐节点 get_node（单节点 payload 可达数 MB，是大任务 tree-snapshot
+        # 超时的根因之一）；新投影行不需要任何 nodes 表读取。
+        missing_pending_ids = [
+            node_id
+            for node_id in sorted(included_ids)
+            if node_id in node_map
+            and not isinstance(dict(getattr(node_map[node_id], 'payload', {}) or {}).get('pending_append_notice_count'), int)
+        ]
+        pending_root_counts: dict[str, int | None] = {}
+        if missing_pending_ids:
+            runtime_by_id: dict[str, NodeRecord] = {}
+            for node in list(self._store.list_nodes(task_id) or []):
+                normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
+                if normalized_node_id and normalized_node_id in missing_pending_ids:
+                    runtime_by_id[normalized_node_id] = node
+            for node_id in missing_pending_ids:
+                runtime_node = runtime_by_id.get(node_id)
+                if runtime_node is None:
+                    pending_root_counts[node_id] = None
+                    continue
+                metadata = dict(runtime_node.metadata or {}) if isinstance(runtime_node.metadata, dict) else {}
+                pending_root_counts[node_id] = len(normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)))
         # 只物化本响应包含的节点。旧实现先物化整树再过滤，每个节点都带多次额外
         # 存储查询，是大树 tree-snapshot 超时的根因之一。
         snapshot_nodes = {
@@ -1296,6 +1344,7 @@ class TaskQueryService:
                 node_map=node_map,
                 rounds_by_parent=rounds_by_parent,
                 direct_children=direct_children,
+                pending_root_counts=pending_root_counts,
             )
             for node_id in included_ids
             if node_id in node_map
@@ -1364,9 +1413,8 @@ class TaskQueryService:
 
     def _projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:
         aggregates: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for record in list(self._store.list_task_node_details(task_id) or []):
-            payload = dict(record.payload or {})
-            for item in list(payload.get('token_usage_by_model') or []):
+        for usage_items in list(self._store.list_task_node_token_usage_payloads(task_id) or []):
+            for item in usage_items:
                 if not isinstance(item, dict):
                     continue
                 model_usage = ModelTokenUsageRecord.model_validate(item)

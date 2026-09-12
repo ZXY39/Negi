@@ -17,10 +17,10 @@ from pydantic import BaseModel
 from main.models import (
     NodeRecord,
     TaskArtifactRecord,
+    TaskErrorLogRecord,
     TaskMessageDistributionEpoch,
     TaskNodeNotification,
     TaskNodePauseRecord,
-    TaskErrorLogRecord,
     TaskRecord,
 )
 from main.monitoring.models import (
@@ -31,7 +31,11 @@ from main.monitoring.models import (
     TaskProjectionRuntimeFrameRecord,
     TaskProjectionToolResultRecord,
 )
-from main.storage.disk_guard import classify_write_error, has_emergency_disk_budget, is_disk_full_error
+from main.storage.disk_guard import (
+    classify_write_error,
+    has_emergency_disk_budget,
+    is_disk_full_error,
+)
 from main.storage.fs_utils import remove_tree
 
 T = TypeVar('T', bound=BaseModel)
@@ -2597,6 +2601,47 @@ class SQLiteTaskStore:
     def list_task_node_details(self, task_id: str) -> list[TaskProjectionNodeDetailRecord]:
         rows = self._fetchall('SELECT payload_json FROM task_node_details WHERE task_id = ? ORDER BY node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionNodeDetailRecord) for row in rows]
+
+    def list_task_node_token_usage_payloads(self, task_id: str) -> list[list[dict[str, Any]]]:
+        """按节点取 token_usage_by_model 列表（token 聚合专用窄读路径）。
+
+        task_node_details 的大字段（input/output/check_result/final_output 等文本列）
+        单行可达数 MB，整行读是大任务 getTask 冷缓存变慢的根因之一；json_extract 只
+        读 payload_json 里的目标数组。json1 不可用时回退到只读 payload_json 列。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        usage_lists: list[list[dict[str, Any]]] = []
+
+        def _append(raw: Any) -> None:
+            parsed = raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    return
+            if isinstance(parsed, list):
+                usage_lists.append([item for item in parsed if isinstance(item, dict)])
+
+        try:
+            rows = self._fetchall(
+                "SELECT json_extract(payload_json, '$.token_usage_by_model') AS token_usage_by_model "
+                'FROM task_node_details WHERE task_id = ?',
+                (normalized_task_id,),
+            )
+            for row in rows:
+                _append(row['token_usage_by_model'])
+        except sqlite3.OperationalError:
+            rows = self._fetchall(
+                'SELECT payload_json FROM task_node_details WHERE task_id = ?',
+                (normalized_task_id,),
+            )
+            for row in rows:
+                try:
+                    payload = json.loads(str(row['payload_json'] or '{}'))
+                except json.JSONDecodeError:
+                    continue
+                _append(payload.get('token_usage_by_model'))
+        return usage_lists
 
     def replace_task_runtime_frames(self, task_id: str, records: list[TaskProjectionRuntimeFrameRecord]) -> None:
         def operation(conn: sqlite3.Connection) -> None:

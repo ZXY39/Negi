@@ -9,7 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from g3ku.content import ContentNavigationService, artifact_ref_from_id, content_summary_and_ref, parse_content_envelope
+from g3ku.content import (
+    ContentNavigationService,
+    artifact_ref_from_id,
+    content_summary_and_ref,
+    parse_content_envelope,
+)
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
@@ -20,18 +25,47 @@ from main.models import (
     ExecutionStageRecord,
     ExecutionStageRound,
     ExecutionStageState,
-    NodeToolFileChange,
     NodeOutputEntry,
     NodeRecord,
-    TaskRecord,
+    NodeToolFileChange,
     TaskErrorLogRecord,
     TaskNodePauseRecord,
-    normalize_failure_class,
-    normalize_optional_text,
+    TaskRecord,
     normalize_execution_stage_metadata,
+    normalize_failure_class,
     normalize_final_acceptance_metadata,
+    normalize_optional_text,
     normalize_string_list,
     normalize_tool_file_changes,
+)
+from main.monitoring.execution_trace import build_execution_trace
+from main.monitoring.file_store import TaskFileStore
+from main.monitoring.models import (
+    TaskProjectionNodeDetailRecord,
+    TaskProjectionNodeRecord,
+    TaskProjectionRoundRecord,
+    TaskProjectionRuntimeFrameRecord,
+    TaskProjectionToolResultRecord,
+)
+from main.monitoring.task_event_writer import TaskEventWriter
+from main.monitoring.task_projector import TaskProjector
+from main.protocol import build_envelope, now_iso
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    normalize_acceptance_handshake,
+)
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    PENDING_APPEND_NOTICE_RECORDS_KEY,
+    normalize_append_notice_context,
+    normalize_pending_append_notice_records,
+    roll_append_notice_context_for_compression_stage,
+)
+from main.runtime.chat_backend import build_actual_request_diagnostics
+from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
+from main.runtime.send_token_preflight import (
+    build_runtime_estimated_input_truth,
+    build_runtime_observed_input_truth,
 )
 from main.runtime.stage_budget import (
     CONTEXT_LOADER_STAGE_TOOL_NAMES,
@@ -43,35 +77,12 @@ from main.runtime.stage_budget import (
     response_tool_calls_count_against_stage_budget,
     tool_call_counts_against_stage_budget,
 )
-from main.monitoring.file_store import TaskFileStore
-from main.monitoring.execution_trace import build_execution_trace
-from main.monitoring.models import (
-    TaskProjectionNodeDetailRecord,
-    TaskProjectionNodeRecord,
-    TaskProjectionRoundRecord,
-    TaskProjectionRuntimeFrameRecord,
-    TaskProjectionToolResultRecord,
-)
-from main.monitoring.task_event_writer import TaskEventWriter
-from main.monitoring.task_projector import TaskProjector
-from main.protocol import build_envelope, now_iso
 from main.storage.disk_guard import has_emergency_disk_budget
-from main.runtime.append_notice_context import (
-    APPEND_NOTICE_CONTEXT_KEY,
-    normalize_append_notice_context,
-    roll_append_notice_context_for_compression_stage,
+from main.token_usage import (
+    build_token_usage_from_attempts,
+    merge_token_usage_by_model,
+    merge_token_usage_records,
 )
-from main.runtime.chat_backend import build_actual_request_diagnostics
-from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
-from main.runtime.send_token_preflight import (
-    build_runtime_estimated_input_truth,
-    build_runtime_observed_input_truth,
-)
-from main.runtime.acceptance_handshake import (
-    ACCEPTANCE_HANDSHAKE_KEY,
-    normalize_acceptance_handshake,
-)
-from main.token_usage import aggregate_node_token_usage, build_token_usage_from_attempts, merge_token_usage_by_model, merge_token_usage_records
 
 
 def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
@@ -3774,6 +3785,7 @@ class TaskLogService:
         children_fingerprint = self._task_projection_node_children_fingerprint(node, rounds=rounds)
         acceptance_handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         acceptance_handshake_state = str(acceptance_handshake.get('state') or '').strip()
+        pending_records = normalize_pending_append_notice_records((node.metadata or {}).get(PENDING_APPEND_NOTICE_RECORDS_KEY))
         return TaskProjectionNodeRecord(
             node_id=node.node_id,
             task_id=node.task_id,
@@ -3807,6 +3819,10 @@ class TaskLogService:
                 'round_options_count': len(rounds),
                 'children_fingerprint': children_fingerprint,
                 'acceptance_handshake_state': acceptance_handshake_state,
+                # 树快照窄读路径：pending_notice_count 的元数据部分直接落在投影里，
+                # 快照构建不必为每个节点全量读 nodes.payload（大 payload IO 是大树
+                # tree-snapshot 超时的根因之一）。
+                'pending_append_notice_count': len(pending_records),
             },
         )
 
