@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "追加任务通知"
 name: task_append_notice
-description: Append a notice to an existing unfinished task in the current session.
+description: Append a notice to an existing unfinished task in the current session; pass node_ids to target specific nodes and freeze only their subtrees during distribution.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -26,12 +26,12 @@ parameters:
       type: array
       items:
         type: string
-      description: Target unfinished task ids in the current session.
+      description: Target unfinished task ids in the current session; the notice targets each task's root node.
     node_ids:
       type: array
       items:
         type: string
-      description: Optional live-tree node ids that resolve back to unfinished tasks in the current session.
+      description: Optional targeted-notice node ids; each live execution node becomes a distribution target and only its subtree is frozen while the notice is distributed downward. Nested targets merge into the topmost ancestor. Terminal and acceptance nodes are rejected.
     message:
       type: string
       minLength: 1

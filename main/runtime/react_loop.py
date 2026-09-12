@@ -41,7 +41,7 @@ from g3ku.runtime.tool_watchdog import (
 )
 from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
 from main.governance.tool_context import apply_runtime_tool_context_projection
-from main.errors import NodePausedError, TaskPausedError, describe_exception
+from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
 from main.runtime.append_notice_context import (
@@ -64,6 +64,7 @@ from main.runtime.pending_notice_state import (
     normalize_pending_notice_state,
 )
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
+from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES, resolve_subtree_hold_epoch_id
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError
 from g3ku.config.live_runtime import get_runtime_config
 from main.runtime import chat_backend as runtime_chat_backend
@@ -1658,7 +1659,9 @@ class ReActToolLoop:
     @staticmethod
     def _distribution_priority_blocks_recovery(*, runtime_context: dict[str, Any], node) -> bool:
         distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        if str(distribution.get('mode') or '').strip() != 'task_wide_barrier':
+        # 兼容旧持久化 meta：task_wide_barrier 是 subtree_barrier 的历史名称
+        # （根目标定向即原全局模式），两者语义一致。
+        if str(distribution.get('mode') or '').strip() not in {'subtree_barrier', 'task_wide_barrier'}:
             return False
         normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
         if not normalized_node_id:
@@ -1686,8 +1689,7 @@ class ReActToolLoop:
     @staticmethod
     def _wait_for_children_recovery_only(*, runtime_context: dict[str, Any], node) -> bool:
         distribution = dict((runtime_context or {}).get('distribution_state') or {})
-        blocked_states = {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining', 'distributing'}
-        if str(distribution.get('state') or '').strip() in blocked_states:
+        if str(distribution.get('state') or '').strip() in DISTRIBUTION_ACTIVE_STATES:
             return False
         metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
         pending_notice_state = normalize_pending_notice_state(metadata.get(PENDING_NOTICE_STATE_KEY))
@@ -3837,6 +3839,25 @@ class ReActToolLoop:
                     delivered=bool(getattr(existing, 'delivered', False)) if existing is not None else False,
                 )
                 raise NodePausedError(task_id, normalized_node_id)
+            # 子树分发屏障：每个安全检查点重读 runtime meta（不用 runtime_context
+            # 快照——通知可能在节点运行中途追加），命中即抛 hold 让节点在安全
+            # 相位停摆。人工节点暂停在上方优先，任务暂停/取消更优先。
+            # 防御式读取：log_service 缺 read_task_runtime_meta（离线回放等
+            # 场景）或读取失败时视为无分发，绝不阻断 ReAct 主循环。
+            distribution_meta: Any = None
+            meta_getter = getattr(self._log_service, 'read_task_runtime_meta', None)
+            if callable(meta_getter):
+                try:
+                    distribution_meta = dict(meta_getter(task_id) or {}).get('distribution')
+                except Exception:
+                    distribution_meta = None
+            hold_epoch_id = resolve_subtree_hold_epoch_id(
+                distribution=distribution_meta if isinstance(distribution_meta, dict) else None,
+                get_node=self._log_service._store.get_node,
+                node_id=normalized_node_id,
+            )
+            if hold_epoch_id:
+                raise DistributionHoldError(task_id, normalized_node_id, hold_epoch_id)
 
     def _abort_queued_tool_waits(self, task_id: str, exc: BaseException) -> None:
         """磁盘治理（P1）：任务暂停生效时中止其在预算队列中排队的工具调用。"""

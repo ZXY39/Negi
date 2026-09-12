@@ -544,6 +544,14 @@ class ApiClient {
         });
     }
 
+    // 定向通知：对以该节点为根的子树追加用户通知（子树屏障分发）。
+    static async appendTaskNodeNotice(taskId, nodeId, message) {
+        return this._request("POST", `/api/tasks/${taskId}/nodes/${nodeId}/notice`, {
+            body: { message: String(message || "") },
+            timeoutMs: 30000,
+        });
+    }
+
     static async pauseTask(taskId) {
         const data = await this.post(`/api/tasks/${taskId}/pause`);
         return data.task || null;

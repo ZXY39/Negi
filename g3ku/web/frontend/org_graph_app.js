@@ -467,6 +467,9 @@ const U = {
     adRoundSummary: document.getElementById("ad-round-summary"),
     adFlow: document.getElementById("ad-input"),
     adMessages: document.getElementById("ad-messages"),
+    adNoticeComposer: document.getElementById("ad-notice-composer"),
+    adNoticeInput: document.getElementById("ad-notice-input"),
+    adNoticeSend: document.getElementById("ad-notice-send"),
     adSpawnReviews: document.getElementById("ad-spawn-reviews"),
     adOutput: document.getElementById("ad-output"),
     adAcceptance: document.getElementById("ad-check"),
@@ -11733,6 +11736,14 @@ function bind() {
         if (!taskId || !nodeId) return;
         if (S.taskNodeErrorHistories) delete S.taskNodeErrorHistories[`${taskId}:${nodeId}`];
         void renderNodeErrorHistory({ node_id: nodeId }, { force: true });
+    });
+    // 消息列表标题右侧的定向通知输入框（效果 = task_append_notice 定向通知）。
+    U.adNoticeSend?.addEventListener("click", () => { void submitNodeNoticeComposer(); });
+    U.adNoticeInput?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.isComposing) {
+            event.preventDefault();
+            void submitNodeNoticeComposer();
+        }
     });
     U.taskDetailBackdrop?.addEventListener("click", () => clearAgentSelection());
     [U.skillSearch, U.skillRisk, U.skillStatus].forEach((el) => el?.addEventListener(el.tagName === "INPUT" ? "input" : "change", resetSkillPagination));

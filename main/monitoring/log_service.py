@@ -725,6 +725,7 @@ class TaskLogService:
     @staticmethod
     def _sanitize_distribution_state(payload: Any) -> dict[str, Any]:
         current = dict(payload or {}) if isinstance(payload, dict) else {}
+        target_node_ids = normalize_string_list(current.get('target_node_ids'))
         frontier_node_ids = normalize_string_list(current.get('frontier_node_ids'))
         blocked_node_ids = normalize_string_list(current.get('blocked_node_ids'))
         pending_notice_node_ids = normalize_string_list(current.get('pending_notice_node_ids'))
@@ -740,6 +741,7 @@ class TaskLogService:
             'active_epoch_id': normalize_optional_text(current.get('active_epoch_id')),
             'state': normalize_optional_text(current.get('state')),
             'mode': normalize_optional_text(current.get('mode')),
+            'target_node_ids': target_node_ids,
             'frontier_node_ids': frontier_node_ids,
             'blocked_node_ids': blocked_node_ids,
             'pending_notice_node_ids': pending_notice_node_ids,

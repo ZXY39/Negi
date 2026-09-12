@@ -164,10 +164,13 @@ class TaskQueryService:
         metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
         append_notice_context = normalize_append_notice_context(metadata.get(APPEND_NOTICE_CONTEXT_KEY))
         pending_root_records = normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY))
+        # 消息三态数据源：delivered=待处理；consumed 且 merged_at 为空=已消费
+        # （控制/决策回合处理过、内容尚未并入）；consumed 且已 merged 的行也
+        # 保留（正常情况下会被同名归档记录 replace 成 merged 展示）。
         pending_child_notifications = [
             item.model_dump(mode='json')
             for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-            if str(item.status or '').strip() == 'delivered'
+            if str(item.status or '').strip() in {'delivered', 'consumed'}
         ]
         node_titles = {
             str(item.node_id or '').strip(): str(item.title or item.node_id or '').strip()
@@ -189,14 +192,19 @@ class TaskQueryService:
             epoch_id = str(item.get('epoch_id') or '').strip()
             source_node_id = str(item.get('source_node_id') or '').strip()
             received_at = str(item.get('received_at') or item.get('consumed_at') or '').strip()
+            merged_at = str(item.get('merged_at') or '').strip()
+            consumed_at = str(item.get('consumed_at') or '').strip()
             entry = {
                 'notification_id': str(item.get('notification_id') or '').strip(),
                 'epoch_id': epoch_id,
                 'source_node_id': source_node_id,
                 'message': str(item.get('message') or '').strip(),
                 'received_at': received_at,
-                'consumed_at': str(item.get('consumed_at') or '').strip(),
-                'status': 'consumed',
+                'consumed_at': consumed_at,
+                'merged_at': merged_at or consumed_at,
+                # 归档只发生在内容真正并入上下文时 ⇒ 归档记录一律「已并入上下文」；
+                # 旧数据没有 merged_at 字段，用 consumed_at 兜底（免迁移）。
+                'status': 'merged' if (merged_at or consumed_at) else 'consumed',
                 'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
                 'deliveries': self._message_distribution_deliveries(
                     task_id=task_id,
@@ -210,14 +218,17 @@ class TaskQueryService:
         for item in list(pending_root_records or []):
             if not isinstance(item, dict) or not str(item.get('message') or '').strip():
                 continue
+            processed_at = str(item.get('processed_at') or '').strip()
             entry = {
                 'notification_id': str(item.get('notification_id') or '').strip(),
                 'epoch_id': str(item.get('epoch_id') or '').strip(),
                 'source_node_id': str(item.get('source_node_id') or '').strip(),
                 'message': str(item.get('message') or '').strip(),
                 'received_at': str(item.get('created_at') or '').strip(),
-                'consumed_at': '',
-                'status': 'pending',
+                'consumed_at': processed_at,
+                'merged_at': '',
+                # 控制/决策回合处理过（processed_at 有值）→ 已消费；否则待处理。
+                'status': 'consumed' if processed_at else 'pending',
                 'compression_stage_id': '',
                 'deliveries': self._message_distribution_deliveries(
                     task_id=task_id,
@@ -233,14 +244,22 @@ class TaskQueryService:
                 continue
             epoch_id = str(item.get('epoch_id') or '').strip()
             source_node_id = str(item.get('source_node_id') or '').strip()
+            ledger_status = str(item.get('status') or '').strip()
+            ledger_merged_at = str(item.get('merged_at') or '').strip()
+            if ledger_status == 'consumed':
+                display_status = 'merged' if ledger_merged_at else 'consumed'
+            else:
+                display_status = 'pending'
             entry = {
                 'notification_id': str(item.get('notification_id') or '').strip(),
                 'epoch_id': epoch_id,
                 'source_node_id': source_node_id,
                 'message': str(item.get('message') or '').strip(),
                 'received_at': str(item.get('delivered_at') or item.get('created_at') or '').strip(),
-                'consumed_at': '',
-                'status': 'pending',
+                'consumed_at': str(item.get('consumed_at') or '').strip(),
+                'merged_at': ledger_merged_at,
+                # delivered=待处理；consumed 未 merged=已消费；consumed+merged=已并入上下文。
+                'status': display_status,
                 'compression_stage_id': '',
                 'deliveries': self._message_distribution_deliveries(
                     task_id=task_id,
@@ -520,7 +539,9 @@ class TaskQueryService:
                 'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
             }
             for item in list(message_list or [])
-            if str(item.get('status') or '').strip() == 'consumed'
+            # consumed=回合已处理待并入；merged=已并入上下文。两者都已进入
+            # append_notice_context 语义域（消费侧读取），一并纳入。
+            if str(item.get('status') or '').strip() in {'consumed', 'merged'}
             and str(item.get('message') or '').strip()
         ]
         detail = TaskNodeDetail(
@@ -1275,7 +1296,9 @@ class TaskQueryService:
         }
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
         distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
-        if distribution.mode == 'task_wide_barrier':
+        # subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧持久化
+        # meta 的历史名称（根目标定向即原全局模式），两者同样标记 barrier_blocked。
+        if distribution.mode in {'subtree_barrier', 'task_wide_barrier'}:
             for node_id in set(distribution.blocked_node_ids or []):
                 current = snapshot_nodes.get(str(node_id or '').strip())
                 if current is None:

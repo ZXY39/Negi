@@ -721,7 +721,14 @@
                             </div>
 
                             <div class="agent-detail-section">
-                                <h4><i data-lucide="inbox"></i> 消息列表</h4>
+                                <div class="agent-detail-section-header">
+                                    <h4><i data-lucide="inbox"></i> 消息列表</h4>
+                                    <div class="ad-notice-composer" id="ad-notice-composer">
+                                        <input id="ad-notice-input" type="text" maxlength="4000"
+                                            placeholder="向该节点子树追加定向通知…" aria-label="向该节点子树追加定向通知" />
+                                        <button id="ad-notice-send" class="toolbar-btn ghost small" type="button">发送</button>
+                                    </div>
+                                </div>
                                 <div class="code-block" id="ad-messages">-</div>
                             </div>
 

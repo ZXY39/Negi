@@ -178,6 +178,31 @@ async def resume_task_node(task_id: str, node_id: str):
     return {'ok': True, 'node': node.model_dump(mode='json')}
 
 
+@router.post('/tasks/{task_id}/nodes/{node_id}/notice')
+async def append_task_node_notice(task_id: str, node_id: str, payload: dict | None = Body(default=None)):
+    """网页端定向通知：对以该节点为根的子树追加用户通知。
+
+    与 task_append_notice 工具同一条服务路径（子树屏障分发），但不做会话
+    归属校验——任务详情 UI 是操作员面，可作用于任何未完成任务。
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    message = str((payload or {}).get('message') or '').strip()
+    try:
+        result_text = await service.append_notice_to_targets(
+            task_ids=None,
+            node_ids=[node_id],
+            message=message,
+            session_id='',
+            require_session_ownership=False,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
+    return {'ok': True, 'task_id': service.normalize_task_id(task_id), 'node_id': node_id, 'result': result_text}
+
+
 @router.get('/tasks/{task_id}/error-log')
 async def get_task_error_log(task_id: str):
     task_id = _ensure_task_route_id(task_id)

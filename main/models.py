@@ -262,6 +262,9 @@ class TaskNodeNotification(Model):
     created_at: str
     delivered_at: str = ''
     consumed_at: str = ''
+    # 消息三态：consumed_at=控制/决策回合处理过；merged_at=内容真正并入模型上下文。
+    # consumed 而未 merged 显示「已消费」，merged 后显示「已并入上下文」。
+    merged_at: str = ''
     payload: dict[str, Any] = Field(default_factory=dict)
 
 

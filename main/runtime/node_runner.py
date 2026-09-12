@@ -16,7 +16,7 @@ from loguru import logger
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.memory_scope import normalize_memory_scope
 from g3ku.runtime.project_environment import current_project_environment
-from main.errors import NodePausedError, TaskPausedError, describe_exception
+from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
 from main.ids import new_command_id, new_node_id
 from main.models import (
     NodeFinalResult,
@@ -61,6 +61,7 @@ from main.runtime.internal_tools import (
     SubmitFinalResultTool,
     SubmitMessageDistributionTool,
     SubmitNextStageTool,
+    SubmitNoticeInspectionDecisionTool,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
 from main.storage.disk_guard import is_disk_full_error
@@ -72,6 +73,7 @@ from main.runtime.pending_notice_state import (
     normalize_pending_notice_state,
     set_pending_notice_state,
 )
+from main.runtime.subtree_hold import INSPECTION_RESUME_MARKER, NOTICE_INTERRUPT_REASON, resolve_subtree_hold_epoch_id
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -104,6 +106,18 @@ _DISTRIBUTION_ACTION_VALUES = {
 _DISTRIBUTION_TERMINATE_REASON_PREFIX = 'terminated by parent distribution decision'
 _DISTRIBUTION_DECISION_MAX_ATTEMPTS = 5
 _DISTRIBUTION_DECISION_REPAIR_PREFIX = '上一轮消息分发决策无效'
+
+
+def _notification_awaits_injection(item: Any) -> bool:
+    """消息三态判定：内容尚未真正并入模型上下文的通知。
+
+    delivered = 待处理；consumed 且 merged_at 为空 = 已被控制/决策回合处理、
+    等待恢复路径并入（显示「已消费」）；两者都需要被恢复/在途刷新路径看到。
+    """
+    status = str(getattr(item, 'status', '') or '').strip()
+    if status == 'delivered':
+        return True
+    return status == 'consumed' and not str(getattr(item, 'merged_at', '') or '').strip()
 
 
 _UNSET = object()
@@ -421,6 +435,11 @@ class NodeRunner:
             raise NodePausedError(task_id, node.node_id)
         if self._distribution_mode_active(task_id=task_id, node_id=node.node_id):
             return await self._run_distribution_node(task=task, node=node)
+        # 子树分发屏障 hold：必须在分发 frontier 分支之后（frontier 节点走控制
+        # 回合而非冻结）、在人工节点暂停之后（操作员暂停优先，延迟分发目标）。
+        hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=node.node_id)
+        if hold_epoch_id:
+            raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
         if self._pause_requested(task_id):
             self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
             raise TaskPausedError(task_id)
@@ -576,6 +595,11 @@ class NodeRunner:
                 self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
                 self._mark_node_paused(task_id, node.node_id)
                 raise NodePausedError(task_id, node.node_id)
+            hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=node.node_id)
+            if hold_epoch_id:
+                # 节点在屏障生效期间跑完了本轮：不落终态，冻结等待释放后恢复。
+                self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
+                raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
             terminal_reason = self._task_terminal_reason(task_id, task=task)
             if terminal_reason:
                 return self._mark_failed(task_id, node.node_id, reason=terminal_reason)
@@ -600,6 +624,12 @@ class NodeRunner:
                 self._mark_node_paused(task_id, node.node_id)
             except Exception:
                 pass
+            raise
+        except DistributionHoldError:
+            # 子树屏障冻结：只刷新最新有效结果、保留 frame 供恢复；绝不落
+            # 暂停/失败标志（那不是操作员暂停），也绝不能落入下方通用
+            # Exception 陷阱（会被转成 error-pause 污染节点状态）。
+            self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
             raise
         except asyncio.CancelledError:
             latest_task = self._store.get_task(task_id)
@@ -719,10 +749,12 @@ class NodeRunner:
         }
 
     def _pending_node_notifications(self, *, task_id: str, node_id: str) -> list[Any]:
+        # 三态：delivered（待处理）与 consumed-未merged（控制/决策回合已处理、
+        # 内容等待恢复路径真正并入）都算"待并入"，恢复与在途刷新都要能看到。
         return [
             item
             for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-            if str(item.status or '').strip() == 'delivered'
+            if _notification_awaits_injection(item)
         ]
 
     def _notifications_by_ids(self, *, task_id: str, node_id: str, notification_ids: list[str]) -> list[dict[str, Any]]:
@@ -958,14 +990,43 @@ class NodeRunner:
         ids = {str(item or '').strip() for item in list(notification_ids or []) if str(item or '').strip()}
         if not ids:
             return
+        merged_at = now_iso()
         for notification in list(self._store.list_task_node_notifications(task_id, node_id) or []):
             if str(notification.notification_id or '').strip() not in ids:
+                continue
+            # 该路径对应"内容真正并入模型上下文"（在途刷新/恢复注入后的消费），
+            # consumed_at 保留控制回合首次处理时间（若有），merged_at 落在并入时刻。
+            self._store.upsert_task_node_notification(
+                notification.model_copy(
+                    update={
+                        'status': 'consumed',
+                        'consumed_at': str(notification.consumed_at or '').strip() or merged_at,
+                        'merged_at': merged_at,
+                    }
+                )
+            )
+
+    def _mark_incoming_distribution_notifications_processed(self, *, task_id: str, node_id: str, epoch_id: str) -> None:
+        """控制/决策回合已"看过"本节点收到的分发通知：标记已消费但未并入。
+
+        消息列表据此显示「已消费」；真正并入发生在恢复路径（等子节点回合
+        结束后的 notice-resume），届时 _consume_node_notifications 补 merged_at。
+        """
+        normalized_epoch_id = str(epoch_id or '').strip()
+        processed_at = now_iso()
+        for notification in list(self._store.list_task_node_notifications(task_id, node_id) or []):
+            if str(notification.status or '').strip() != 'delivered':
+                continue
+            if normalized_epoch_id and str(notification.epoch_id or '').strip() != normalized_epoch_id:
+                continue
+            if not str(notification.message or '').strip():
                 continue
             self._store.upsert_task_node_notification(
                 notification.model_copy(
                     update={
                         'status': 'consumed',
-                        'consumed_at': now_iso(),
+                        'consumed_at': processed_at,
+                        'merged_at': '',
                     }
                 )
             )
@@ -979,6 +1040,7 @@ class NodeRunner:
                 context,
                 notifications=list(notifications or []),
                 consumed_at=consumed_at,
+                merged_at=consumed_at,
             )
             return metadata
 
@@ -1059,7 +1121,9 @@ class NodeRunner:
     def _refresh_resume_ready_distribution_state(self, *, task_id: str) -> None:
         distribution = self._distribution_runtime_state(task_id)
         state = str(distribution.get('state') or '').strip()
-        if state in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining', 'distributing'}:
+        # 'failed' 也跳过：失败态只能由显式 resume 降级（resume_ready），
+        # 否则子树 hold 与红色横幅会被一次普通的通知消费悄悄解除。
+        if state in {'pause_requested', 'barrier_requested', 'paused', 'barrier_draining', 'distributing', 'failed'}:
             return
         for raw_node_id in list(distribution.get('pending_notice_node_ids') or []):
             node_id = str(raw_node_id or '').strip()
@@ -1072,11 +1136,13 @@ class NodeRunner:
                 'active_epoch_id': '',
                 'state': '',
                 'mode': '',
+                'target_node_ids': [],
                 'frontier_node_ids': [],
                 'blocked_node_ids': [],
                 'pending_notice_node_ids': list(pending_notice_node_ids),
                 'queued_epoch_count': 0,
                 'pending_mailbox_count': self.pending_distribution_mailbox_count(task_id=task_id),
+                'error_text': '',
             },
         )
 
@@ -1243,6 +1309,38 @@ class NodeRunner:
         if updated is not None:
             self._log_service.sync_node_read_model(task_id, node_id)
         return updated
+
+    def _interrupt_acceptance_for_notice_retry(
+        self,
+        *,
+        task,
+        execution: NodeRecord | None,
+        acceptance: NodeRecord,
+        handshake: dict[str, Any],
+    ) -> None:
+        """定向通知打断验收后的执行节点恢复（拒绝预算不变、无交接消息）。"""
+        if execution is None:
+            return
+        self._update_execution_acceptance_handshake(
+            node_id=execution.node_id,
+            state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
+            acceptance_node_id=acceptance.node_id,
+            rejection_count=int(handshake.get('rejection_count') or 0),
+            max_rejections=int(handshake.get('max_rejections') or 3),
+            latest_execution_result_ref=str(handshake.get('latest_execution_result_ref') or '').strip(),
+            latest_execution_result_summary=str(handshake.get('latest_execution_result_summary') or '').strip(),
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary='',
+        )
+        self._reactivate_node_for_retry(task_id=task.task_id, node_id=execution.node_id)
+        if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
+            self._set_task_final_acceptance_state(
+                task_id=task.task_id,
+                acceptance_node_id=acceptance.node_id,
+                status=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
+                final_execution_output='',
+            )
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
 
     def _persist_rejection_feedback_and_keep_acceptance_live(
         self,
@@ -1460,6 +1558,26 @@ class NodeRunner:
             )
 
         next_rejection_count = int(handshake.get('rejection_count') or 0) + 1
+        if str(result.blocking_reason or '').strip() == NOTICE_INTERRUPT_REASON:
+            # 定向通知打断验收（决策回合 resume_execution 的合成结果）：
+            # 不消耗拒绝预算、不发验收→执行交接消息（用户通知本身就是给
+            # 执行节点的消息）。验收节点的作废与 frame 丢弃由驱动器在解析
+            # future 前完成；这里只把执行节点恢复为等待重试并交还管线循环。
+            self._interrupt_acceptance_for_notice_retry(
+                task=task,
+                execution=execution,
+                acceptance=acceptance,
+                handshake=handshake,
+            )
+            return NodeFinalResult(
+                status=STATUS_SUCCESS,
+                delivery_status='partial',
+                summary='acceptance interrupted by user notice; waiting for execution re-run',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+            )
         if next_rejection_count < int(handshake.get('max_rejections') or 3):
             feedback_text = self._acceptance_feedback_text(result)
             self._persist_rejection_feedback_and_keep_acceptance_live(
@@ -2037,7 +2155,7 @@ class NodeRunner:
         if self._pending_root_notice_records(node=node):
             return
         if any(
-            str(item.status or '').strip() == 'delivered'
+            _notification_awaits_injection(item)
             for item in list(self._store.list_task_node_notifications(node.task_id, node_id) or [])
         ):
             return
@@ -2109,7 +2227,7 @@ class NodeRunner:
             count += sum(
                 1
                 for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-                if str(item.status or '').strip() == 'delivered'
+                if _notification_awaits_injection(item)
             )
         return count
 
@@ -2125,7 +2243,7 @@ class NodeRunner:
                 continue
             has_pending_root = bool(self._pending_root_notice_records(node=node))
             has_pending_child = any(
-                str(item.status or '').strip() == 'delivered'
+                _notification_awaits_injection(item)
                 for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
             )
             if not has_pending_root and not has_pending_child:
@@ -2192,21 +2310,30 @@ class NodeRunner:
             return {}
         return dict(runtime_meta.get('distribution') or {})
 
+    def _subtree_hold_epoch_id(self, *, task_id: str, node_id: str) -> str:
+        """节点当前是否被子树分发屏障冻结；返回 epoch id 或空串。"""
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return ''
+        return resolve_subtree_hold_epoch_id(
+            distribution=self._distribution_runtime_state(task_id),
+            get_node=self._store.get_node,
+            node_id=normalized_node_id,
+        )
+
     def _distribution_mode_active(self, *, task_id: str, node_id: str) -> bool:
-        task = self._store.get_task(task_id)
-        if task is None:
-            return False
         distribution = self._distribution_runtime_state(task_id)
         state = str(distribution.get('state') or '').strip()
-        if state not in {'pause_requested', 'paused', 'distributing'}:
+        # 仅 distributing 态允许进入控制回合：驱动器总是先把 frontier 写入
+        # meta 再执行回合；drain 期间（barrier_requested/barrier_draining）
+        # 目标节点必须走 hold 而不是提前分发。
+        if state != 'distributing':
             return False
         frontier_node_ids = [
             str(item or '').strip()
             for item in list(distribution.get('frontier_node_ids') or [])
             if str(item or '').strip()
         ]
-        if state in {'pause_requested', 'paused'} and not frontier_node_ids:
-            frontier_node_ids = [str(task.root_node_id or '').strip()]
         return str(node_id or '').strip() in frontier_node_ids
 
     def _active_distribution_epoch(self, task_id: str) -> tuple[str, dict[str, Any], Any] | None:
@@ -2390,8 +2517,28 @@ class NodeRunner:
             queued_root_messages = [str(epoch.root_message or '').strip()]
         return '\n\n'.join(item for item in queued_root_messages if item)
 
+    @staticmethod
+    def _epoch_target_node_ids(epoch) -> list[str]:
+        """epoch 的定向目标集合；旧数据（无 target_node_ids）回退任务根。"""
+        payload = dict(epoch.payload or {}) if epoch is not None and isinstance(getattr(epoch, 'payload', None), dict) else {}
+        targets = [
+            str(item or '').strip()
+            for item in list(payload.get('target_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if not targets:
+            root_id = str(getattr(epoch, 'root_node_id', '') or '').strip()
+            if root_id:
+                targets = [root_id]
+        return targets
+
+    def _node_is_epoch_target(self, *, node: NodeRecord, epoch) -> bool:
+        return str(getattr(node, 'node_id', '') or '').strip() in set(self._epoch_target_node_ids(epoch))
+
     def _distribution_node_message(self, *, task_id: str, node: NodeRecord, epoch) -> str:
-        if str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip():
+        # 定向目标自己的消息来自 epoch 的 queued_root_messages（本地保留语义，
+        # 与旧全局模式的根一致）；级联接收者的消息来自本 epoch 的信箱投递。
+        if self._node_is_epoch_target(node=node, epoch=epoch):
             return self._distribution_root_message(epoch=epoch)
         messages = [
             str(item.message or '').strip()
@@ -2429,6 +2576,20 @@ class NodeRunner:
         return payloads
 
     def _root_distribution_notice_records(self, *, epoch, created_at: str | None = None) -> list[dict[str, Any]]:
+        return self._target_distribution_notice_records(
+            epoch=epoch,
+            node_id=str(getattr(epoch, 'root_node_id', '') or '').strip(),
+            created_at=created_at,
+        )
+
+    def _target_distribution_notice_records(
+        self,
+        *,
+        epoch,
+        node_id: str,
+        created_at: str | None = None,
+        processed_at: str = '',
+    ) -> list[dict[str, Any]]:
         payload = dict(epoch.payload or {})
         queued_root_messages = [
             str(item or '').strip()
@@ -2438,57 +2599,90 @@ class NodeRunner:
         if not queued_root_messages:
             queued_root_messages = [str(epoch.root_message or '').strip()]
         epoch_id = str(epoch.epoch_id or '').strip()
+        normalized_node_id = str(node_id or '').strip()
         root_node_id = str(epoch.root_node_id or '').strip()
         normalized_created_at = str(created_at or now_iso()).strip()
         records: list[dict[str, Any]] = []
         for index, message in enumerate(queued_root_messages, start=1):
             if not message:
                 continue
+            # 根目标沿用 root-notice: 前缀（兼容既有数据与消费路径），
+            # 非根目标使用 target-notice:{epoch}:{node}:{index}。
+            if normalized_node_id == root_node_id or not normalized_node_id:
+                notification_id = f'root-notice:{epoch_id}:{index}'
+            else:
+                notification_id = f'target-notice:{epoch_id}:{normalized_node_id}:{index}'
             records.append(
                 {
-                    'notification_id': f'root-notice:{epoch_id}:{index}',
+                    'notification_id': notification_id,
                     'epoch_id': epoch_id,
-                    'source_node_id': root_node_id,
+                    'source_node_id': normalized_node_id or root_node_id,
                     'message': message,
                     'created_at': normalized_created_at,
                     'order_index': index,
+                    'processed_at': str(processed_at or '').strip(),
                 }
             )
         return records
 
-    def _queue_pending_root_distribution_notices(self, *, epoch, created_at: str | None = None) -> None:
-        root_node_id = str(epoch.root_node_id or '').strip()
-        if not root_node_id:
-            return
+    def queue_pending_target_distribution_notices(
+        self,
+        *,
+        epoch,
+        node_ids: list[str] | None = None,
+        created_at: str | None = None,
+        processed: bool = False,
+    ) -> None:
+        """把 epoch 消息落为各目标节点自己的 pending notice 记录。
+
+        processed=True 表示控制/决策回合已经"看过"这些消息（显示已消费），
+        内容真正并入发生在之后的恢复/在途路径。
+        """
+        targets = [
+            str(item or '').strip()
+            for item in list(node_ids or [])
+            if str(item or '').strip()
+        ] or self._epoch_target_node_ids(epoch)
         normalized_created_at = str(created_at or now_iso()).strip()
-        records = self._root_distribution_notice_records(epoch=epoch, created_at=normalized_created_at)
-        if not records:
-            return
-        root_node = self._store.get_node(root_node_id)
-        resume_mode = RESUME_MODE_ORDINARY
-        holding_round_id = ''
-        if root_node is not None:
-            resume_mode, holding_round_id = self._pending_notice_resume_target(node=root_node)
-
-        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
-            updated = record_pending_append_notice_records(
-                metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY),
-                records=records,
+        processed_at = normalized_created_at if processed else ''
+        for target_id in targets:
+            records = self._target_distribution_notice_records(
+                epoch=epoch,
+                node_id=target_id,
+                created_at=normalized_created_at,
+                processed_at=processed_at,
             )
-            if updated:
-                metadata[PENDING_APPEND_NOTICE_RECORDS_KEY] = updated
-            else:
-                metadata.pop(PENDING_APPEND_NOTICE_RECORDS_KEY, None)
-            return metadata
+            if not records:
+                continue
+            target_node = self._store.get_node(target_id)
+            if target_node is None:
+                continue
+            resume_mode = RESUME_MODE_ORDINARY
+            holding_round_id = ''
+            resume_mode, holding_round_id = self._pending_notice_resume_target(node=target_node)
 
-        self._log_service.update_node_metadata(root_node_id, _mutate)
-        self._update_pending_notice_state(
-            node_id=root_node_id,
-            resume_mode=resume_mode,
-            epoch_id=str(epoch.epoch_id or '').strip(),
-            holding_round_id=holding_round_id,
-            updated_at=normalized_created_at,
-        )
+            def _mutate(metadata: dict[str, Any], _records: list[dict[str, Any]] = records) -> dict[str, Any]:
+                updated = record_pending_append_notice_records(
+                    metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY),
+                    records=_records,
+                )
+                if updated:
+                    metadata[PENDING_APPEND_NOTICE_RECORDS_KEY] = updated
+                else:
+                    metadata.pop(PENDING_APPEND_NOTICE_RECORDS_KEY, None)
+                return metadata
+
+            self._log_service.update_node_metadata(target_id, _mutate)
+            self._update_pending_notice_state(
+                node_id=target_id,
+                resume_mode=resume_mode,
+                epoch_id=str(epoch.epoch_id or '').strip(),
+                holding_round_id=holding_round_id,
+                updated_at=normalized_created_at,
+            )
+
+    def _queue_pending_root_distribution_notices(self, *, epoch, created_at: str | None = None) -> None:
+        self.queue_pending_target_distribution_notices(epoch=epoch, created_at=created_at)
 
     def stamp_distribution_target_pending_notice_state(
         self,
@@ -2869,14 +3063,25 @@ class NodeRunner:
             },
             publish_snapshot=True,
         )
-        if str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip():
-            self._queue_pending_root_distribution_notices(epoch=epoch)
+        if self._node_is_epoch_target(node=node, epoch=epoch):
+            # 目标节点自己的通知：控制回合已处理过，记录后显示「已消费」；
+            # 内容真正并入发生在子树释放后的恢复路径（届时补 merged_at）。
+            self.queue_pending_target_distribution_notices(
+                epoch=epoch,
+                node_ids=[str(node.node_id or '').strip()],
+                processed=True,
+            )
+        self._mark_incoming_distribution_notifications_processed(
+            task_id=task.task_id,
+            node_id=node.node_id,
+            epoch_id=epoch_id,
+        )
         decision_records = list(epoch_payload.get('decision_records') or [])
         decision_records.append(
             {
                 'source_node_id': str(node.node_id or '').strip(),
                 'notes': str(submitted.get('notes') or '').strip(),
-                'local_notice_kept': str(node.node_id or '').strip() == str(epoch.root_node_id or '').strip(),
+                'local_notice_kept': self._node_is_epoch_target(node=node, epoch=epoch),
                 'delivered_child_ids': list(delivered_child_ids),
                 'skipped_child_decisions': list(skipped_child_decisions),
                 'terminated_child_decisions': list(terminated_child_decisions),
@@ -2919,6 +3124,11 @@ class NodeRunner:
                 'active_epoch_id': epoch_id,
                 'state': str(distribution.get('state') or 'distributing') or 'distributing',
                 'mode': str(distribution.get('mode') or '').strip(),
+                'target_node_ids': [
+                    str(item or '').strip()
+                    for item in list(distribution.get('target_node_ids') or [])
+                    if str(item or '').strip()
+                ],
                 'frontier_node_ids': [
                     str(item or '').strip()
                     for item in list(distribution.get('frontier_node_ids') or [])
@@ -2941,6 +3151,260 @@ class NodeRunner:
         return NodeFinalResult(
             status='success',
             summary=f'distribution turn completed for {node.node_id}',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason='',
+        )
+
+    async def run_notice_inspection_decision(self, *, task, node: NodeRecord) -> NodeFinalResult:
+        """被验收检验中的目标节点收到定向通知时的决策回合（Q2）。
+
+        模型二选一：
+        - resume_execution：需要更改最终输出 → 返回带 INSPECTION_RESUME_MARKER
+          的结果，由波次驱动器执行打断验收/作废/恢复序列；
+        - continue_acceptance：不需要 → 验收继续，验收节点当场收到
+          「被检验节点收到了通知（转述+原文）」的信箱告知。
+        """
+        active_epoch = self._active_distribution_epoch(task.task_id)
+        if active_epoch is None:
+            return NodeFinalResult(status='success', summary='distribution epoch missing')
+        epoch_id, _distribution, epoch = active_epoch
+        epoch_payload = dict(epoch.payload or {})
+        already_distributed = {
+            str(item or '').strip()
+            for item in list(epoch_payload.get('distributed_node_ids') or [])
+            if str(item or '').strip()
+        }
+        if str(node.node_id or '').strip() in already_distributed:
+            return NodeFinalResult(status='success', summary=f'inspection decision already completed for {node.node_id}')
+        incoming_message = self._distribution_node_message(task_id=task.task_id, node=node, epoch=epoch)
+        metadata = dict(node.metadata or {}) if isinstance(node.metadata, dict) else {}
+        handshake = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
+        acceptance_node_id = str(handshake.get('acceptance_node_id') or '').strip()
+        acceptance_node = self._store.get_node(acceptance_node_id) if acceptance_node_id else None
+        prompt_messages = [
+            {'role': 'system', 'content': load_prompt('node_notice_inspection_decision.md').strip()},
+            {
+                'role': 'user',
+                'content': json.dumps(
+                    {
+                        'task_id': task.task_id,
+                        'node_id': node.node_id,
+                        'goal': str(node.goal or ''),
+                        'submitted_output_summary': ' '.join(str(node.final_output or '').split())[:600],
+                        'check_result_summary': ' '.join(str(node.check_result or '').split())[:300],
+                        'incoming_message': incoming_message,
+                        'acceptance': {
+                            'node_id': acceptance_node_id,
+                            'status': str(getattr(acceptance_node, 'status', '') or '').strip(),
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            },
+        ]
+        decision_tool = SubmitNoticeInspectionDecisionTool(lambda payload: payload)
+        decision_tools = self._distribution_provider_tools(decision_tool)
+        tool_choice = {
+            'type': 'function',
+            'name': decision_tool.name,
+        }
+        model_refs = self._model_refs_for(node)
+        (
+            prompt_messages,
+            token_preflight_diagnostics,
+            history_shrink_reason,
+            preflight_failure_reason,
+        ) = self._react_loop.run_node_send_preflight_for_control_turn(
+            task_id=str(task.task_id),
+            node_id=str(node.node_id),
+            model_refs=list(model_refs or []),
+            request_messages=prompt_messages,
+            tool_schemas=decision_tools,
+            prompt_cache_key='',
+            tool_choice=tool_choice,
+            parallel_tool_calls=False,
+        )
+        self._log_service.update_frame(
+            task.task_id,
+            node.node_id,
+            lambda frame: {
+                **dict(frame or {}),
+                'node_id': node.node_id,
+                'depth': int(node.depth or 0),
+                'node_kind': node.node_kind,
+                'phase': 'notice_inspection_decision',
+                'token_preflight_diagnostics': dict(token_preflight_diagnostics or {}),
+                'history_shrink_reason': str(history_shrink_reason or '').strip(),
+                'last_error': str(preflight_failure_reason or '').strip(),
+            },
+            publish_snapshot=True,
+        )
+        epoch_payload = self._distribution_append_debug_trace(
+            epoch_payload,
+            event='inspection_decision_preflight',
+            source_node_id=str(node.node_id or '').strip(),
+            acceptance_node_id=acceptance_node_id,
+            token_preflight_diagnostics=dict(token_preflight_diagnostics or {}),
+            failure_reason=str(preflight_failure_reason or '').strip(),
+        )
+        if str(preflight_failure_reason or '').strip():
+            self._store.upsert_task_message_distribution_epoch(
+                epoch.model_copy(update={'payload': epoch_payload})
+            )
+            return NodeFinalResult(
+                status='failed',
+                delivery_status='blocked',
+                summary='node send token preflight failed',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason=str(preflight_failure_reason or '').strip(),
+            )
+        attempt_messages = list(prompt_messages)
+        submitted: dict[str, Any] = {}
+        validation_error = ''
+        for attempt in range(1, _DISTRIBUTION_DECISION_MAX_ATTEMPTS + 1):
+            response = await self._react_loop._chat_with_optional_extensions(
+                messages=attempt_messages,
+                tools=decision_tools,
+                model_refs=model_refs,
+                tool_choice=tool_choice,
+                parallel_tool_calls=False,
+                on_model_retry_status=self._react_loop._model_retry_status_callback(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                ),
+            )
+            arguments = self._distribution_response_arguments(response)
+            submitted = await decision_tool.execute(
+                action=str(arguments.get('action') or ''),
+                reason=str(arguments.get('reason') or ''),
+                notes=str(arguments.get('notes') or ''),
+            )
+            action = str(submitted.get('action') or '').strip().lower()
+            reason = str(submitted.get('reason') or '').strip()
+            if action not in {'resume_execution', 'continue_acceptance'}:
+                validation_error = 'inspection_decision_invalid_action'
+            elif not reason:
+                validation_error = 'inspection_decision_missing_reason'
+            else:
+                validation_error = ''
+            epoch_payload = self._distribution_append_debug_trace(
+                epoch_payload,
+                event='inspection_decision_response',
+                attempt=attempt,
+                action=action,
+                blocking_reason=validation_error,
+            )
+            if not validation_error:
+                break
+            if attempt >= _DISTRIBUTION_DECISION_MAX_ATTEMPTS:
+                break
+            attempt_messages = [
+                *attempt_messages,
+                {
+                    'role': 'user',
+                    'content': (
+                        f'{_DISTRIBUTION_DECISION_REPAIR_PREFIX}（{validation_error}）'
+                        '请重新提交 submit_notice_inspection_decision：action 必须是 '
+                        'resume_execution 或 continue_acceptance，且 reason 非空。'
+                    ),
+                },
+            ]
+            self._store.upsert_task_message_distribution_epoch(
+                epoch.model_copy(update={'payload': epoch_payload})
+            )
+        if validation_error:
+            self._store.upsert_task_message_distribution_epoch(
+                epoch.model_copy(update={'payload': epoch_payload})
+            )
+            return NodeFinalResult(
+                status='failed',
+                delivery_status='blocked',
+                summary='notice inspection decision invalid',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason=validation_error,
+            )
+        action = str(submitted.get('action') or '').strip().lower()
+        decision_records = list(epoch_payload.get('decision_records') or [])
+        decision_records.append(
+            {
+                'source_node_id': str(node.node_id or '').strip(),
+                'turn': 'inspection_decision',
+                'action': action,
+                'reason': str(submitted.get('reason') or '').strip(),
+                'notes': str(submitted.get('notes') or '').strip(),
+                'acceptance_node_id': acceptance_node_id,
+                'local_notice_kept': self._node_is_epoch_target(node=node, epoch=epoch),
+                'created_at': now_iso(),
+            }
+        )
+        distributed_node_ids = [
+            str(item or '').strip()
+            for item in list(epoch_payload.get('distributed_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        if node.node_id not in distributed_node_ids:
+            distributed_node_ids.append(node.node_id)
+        epoch_payload['decision_records'] = decision_records
+        epoch_payload['distributed_node_ids'] = distributed_node_ids
+        self._store.upsert_task_message_distribution_epoch(
+            epoch.model_copy(update={'state': 'distributing', 'payload': epoch_payload})
+        )
+        if action == 'continue_acceptance':
+            # 验收继续：验收节点收到「被检验节点收到了通知」的告知（转述+原文）。
+            if (
+                acceptance_node is not None
+                and str(getattr(acceptance_node, 'status', '') or '').strip().lower() not in {'success', 'failed'}
+            ):
+                node_title = ' '.join(str(node.goal or node.node_id).split())[:60] or str(node.node_id)
+                self._persist_node_notification_direct(
+                    task_id=task.task_id,
+                    epoch_id=epoch_id,
+                    source_node_id=str(node.node_id or '').strip(),
+                    target_node_id=acceptance_node_id,
+                    message=(
+                        f'【正在检验的节点接收了用户通知】被检验节点「{node_title}」（{node.node_id}）'
+                        f'收到了用户追加的通知，验收判定时请纳入参考。通知内容如下：\n{incoming_message}'
+                    ),
+                )
+            # 目标自己的通知：决策回合已消费但不再并入其上下文（产出维持原样），
+            # 显示「已消费」；若日后节点因验收拒绝重跑，恢复路径仍会并入。
+            if self._node_is_epoch_target(node=node, epoch=epoch):
+                self.queue_pending_target_distribution_notices(
+                    epoch=epoch,
+                    node_ids=[str(node.node_id or '').strip()],
+                    processed=True,
+                )
+            self._mark_incoming_distribution_notifications_processed(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                epoch_id=epoch_id,
+            )
+            return NodeFinalResult(
+                status='success',
+                summary=f'inspection continues for {node.node_id}',
+                answer='',
+                evidence=[],
+                remaining_work=[],
+                blocking_reason='',
+            )
+        # resume_execution：自己的通知保持待处理（打断后随恢复路径并入上下文），
+        # 打断验收的副作用由波次驱动器按标记执行。
+        if self._node_is_epoch_target(node=node, epoch=epoch):
+            self.queue_pending_target_distribution_notices(
+                epoch=epoch,
+                node_ids=[str(node.node_id or '').strip()],
+            )
+        return NodeFinalResult(
+            status='success',
+            delivery_status=INSPECTION_RESUME_MARKER,
+            summary=f'acceptance interrupt requested for {node.node_id}',
             answer='',
             evidence=[],
             remaining_work=[],

@@ -374,6 +374,73 @@ class SubmitMessageDistributionTool(Tool):
         return dict(result or {}) if isinstance(result, dict) else payload
 
 
+class SubmitNoticeInspectionDecisionTool(Tool):
+    """被验收检验中的节点收到定向通知时的决策工具。
+
+    resume_execution：通知要求更改最终输出 → 程序打断验收节点，目标节点
+    带通知恢复执行；continue_acceptance：无需更改 → 验收继续，验收节点
+    会收到「被检验节点收到了通知（含原文）」的告知。
+    """
+
+    hide_universal_timeout_parameter = True
+
+    def __init__(
+        self,
+        submit_callback: Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]],
+    ) -> None:
+        self._submit_callback = submit_callback
+
+    @property
+    def name(self) -> str:
+        return 'submit_notice_inspection_decision'
+
+    @property
+    def description(self) -> str:
+        return 'Submit the inspection decision for a notice received while this node is under acceptance inspection.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'action': {
+                    'type': 'string',
+                    'enum': ['resume_execution', 'continue_acceptance'],
+                    'description': (
+                        'resume_execution: the notice requires changing the final output; interrupt the '
+                        'running acceptance inspection and re-run this node with the notice merged. '
+                        'continue_acceptance: the notice does not require changing the final output; let '
+                        'the acceptance inspection continue (the inspector will be informed of the notice).'
+                    ),
+                },
+                'reason': {
+                    'type': 'string',
+                    'description': 'Why the notice does or does not require changing the final output.',
+                },
+                'notes': {'type': 'string'},
+            },
+            'required': ['action', 'reason'],
+        }
+
+    async def execute(
+        self,
+        action: str,
+        reason: str = '',
+        notes: str = '',
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        _ = kwargs
+        payload = {
+            'action': str(action or '').strip(),
+            'reason': str(reason or '').strip(),
+            'notes': str(notes or '').strip(),
+        }
+        result = self._submit_callback(payload)
+        if isinstance(result, Awaitable):
+            return await result
+        return dict(result or {}) if isinstance(result, dict) else payload
+
+
 class SubmitFinalResultTool(Tool):
     hide_universal_timeout_parameter = True
 

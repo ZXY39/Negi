@@ -130,6 +130,8 @@ class TaskDistributionState(Model):
     active_epoch_id: str = ''
     state: str = ''
     mode: str = ''
+    # 定向通知目标（子树屏障的 scope 根）；根目标即原全局模式。
+    target_node_ids: list[str] = Field(default_factory=list)
     frontier_node_ids: list[str] = Field(default_factory=list)
     blocked_node_ids: list[str] = Field(default_factory=list)
     pending_notice_node_ids: list[str] = Field(default_factory=list)

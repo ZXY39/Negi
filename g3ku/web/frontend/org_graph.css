@@ -9090,6 +9090,39 @@ textarea {
     margin-bottom: var(--space-2);
 }
 
+/* 节点详情「消息列表」标题右侧的定向通知输入框 */
+.ad-notice-composer {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1;
+    min-width: 0;
+    max-width: 420px;
+}
+
+.ad-notice-composer input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-app);
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    line-height: 1.5;
+}
+
+.ad-notice-composer input:focus {
+    outline: none;
+    border-color: #39c5bb;
+}
+
+.ad-notice-composer input:disabled,
+.ad-notice-composer button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
 .artifact-list {
     display: flex;
     flex-direction: column;

@@ -1624,6 +1624,11 @@ function messageListStatusDescriptor(status) {
         return { key: "warning", label: "待处理" };
     }
     if (normalized === "consumed") {
+        // 消息三态之二：控制/决策回合已处理过该消息（显示已消费），
+        // 内容可能稍后才随恢复路径真正并入上下文。
+        return { key: "info", label: "已消费" };
+    }
+    if (normalized === "merged") {
         return { key: "info", label: "已并入上下文" };
     }
     return { key: "info", label: normalized || "已接收" };
@@ -1672,6 +1677,8 @@ function buildNodeMessageListSteps(node = {}) {
             bodyHtml: [
                 renderTraceField("状态", status.label, "已接收"),
                 renderTraceField("接收时间", entry?.received_at || entry?.consumed_at, "暂无时间"),
+                entry?.consumed_at ? renderTraceField("消费时间", entry?.consumed_at, "") : "",
+                entry?.merged_at ? renderTraceField("并入上下文时间", entry?.merged_at, "") : "",
                 renderTraceField("消息内容", entry?.message, "暂无消息内容"),
                 renderTraceField("分发情况", summarizeMessageDeliveries(entry?.deliveries), "无"),
             ].join(""),
@@ -1787,6 +1794,7 @@ function renderMessageList(node, { viewState = null } = {}) {
         traceList.dataset.renderNodeId = renderNodeId;
     }
     renderMessageHeading(stepDescriptors.length);
+    syncNoticeComposerState();
     if (shouldReplace) {
         const restoreScroll = () => {
             const currentTraceList = U.adMessages?.querySelector(".task-trace-list");
@@ -1800,6 +1808,70 @@ function renderMessageList(node, { viewState = null } = {}) {
         });
     }
     return shouldReplace;
+}
+
+// 消息列表标题右侧的定向通知输入框：可用状态跟随当前选中节点
+//（验收节点/终态节点/已结束任务不可作为定向目标，与后端校验一致）。
+function syncNoticeComposerState() {
+    const composer = U.adNoticeComposer;
+    const input = U.adNoticeInput;
+    const send = U.adNoticeSend;
+    if (!composer || !input || !send) return;
+    const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
+    const node = nodeId ? (treeSnapshotNode(nodeId) || S.taskNodeDetails?.[nodeId] || null) : null;
+    const kind = String(node?.node_kind || node?.kind || "execution").trim().toLowerCase();
+    const status = String(node?.status || node?.state || "").trim().toLowerCase();
+    const taskStatus = String(S.currentTask?.status || "").trim().toLowerCase();
+    const nodeTerminal = status === "success" || status === "failed";
+    const taskDone = taskStatus === "success" || taskStatus === "failed";
+    const isAcceptance = isAcceptanceNodeKind(kind);
+    const usable = !!nodeId && !!node && !isAcceptance && !nodeTerminal && !taskDone;
+    composer.hidden = !nodeId;
+    input.disabled = !usable;
+    if (String(send.dataset.busy || "") === "true") {
+        send.disabled = true;
+    } else {
+        send.disabled = !usable;
+    }
+    input.placeholder = !nodeId
+        ? "选择节点后可追加定向通知…"
+        : isAcceptance
+            ? "验收节点不能作为通知目标"
+            : nodeTerminal
+                ? "终态节点不接收通知"
+                : taskDone
+                    ? "任务已结束"
+                    : "向该节点子树追加定向通知…";
+}
+
+async function submitNodeNoticeComposer() {
+    const input = U.adNoticeInput;
+    const send = U.adNoticeSend;
+    if (!input || !send || input.disabled || send.disabled) return;
+    const message = String(input.value || "").trim();
+    const nodeId = String(S.selectedNodeId || S.currentNodeDetail?.node_id || "").trim();
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!message || !nodeId || !taskId) return;
+    send.disabled = true;
+    send.dataset.busy = "true";
+    try {
+        await ApiClient.appendTaskNodeNotice(taskId, nodeId, message);
+        input.value = "";
+        showToast({
+            title: "定向通知已提交",
+            text: `已对节点 ${nodeId} 的子树发起消息分发`,
+            kind: "success",
+        });
+        await loadTaskTreeSnapshot(taskId);
+        renderTree();
+        const selected = findTreeNode(S.treeView, nodeId);
+        if (selected) void showAgent(selected, { preserveViewState: true, forceRefresh: true });
+    } catch (error) {
+        showToast({ title: "定向通知提交失败", text: error?.message || "提交未完成", kind: "error" });
+    } finally {
+        send.dataset.busy = "";
+        syncNoticeComposerState();
+    }
 }
 
 function renderSpawnReviewTrace(node, { viewState = null } = {}) {
@@ -2197,7 +2269,9 @@ function activeTaskDistributionState() {
         if (state === "failed") {
             return { ...distribution, ui_mode: "distribution_failed" };
         }
-        if (mode === "task_wide_barrier") {
+        // subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧
+        // 持久化 meta 的历史名称（根目标定向即原全局模式），同样进入分发 UI。
+        if (mode === "subtree_barrier" || mode === "task_wide_barrier") {
             if (
                 activeEpochId
                 || state === "barrier_requested"
@@ -3158,6 +3232,7 @@ function showTaskNodeLoadingState(node) {
     renderFlowHeading(0);
     renderMessageHeading(0);
     renderSpawnReviewHeading(0);
+    syncNoticeComposerState();
     renderFinalOutput("Loading node output...");
     renderAcceptanceResult("Loading acceptance result...");
     if (U.nodeContextDisclosure) U.nodeContextDisclosure.open = false;

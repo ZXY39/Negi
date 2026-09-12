@@ -12804,6 +12804,7 @@ async def test_spawn_review_request_includes_consumed_distribution_notices(tmp_p
                 "message": "requirement changed to male characters top 20",
                 "received_at": "2026-04-24T20:54:00+08:00",
                 "consumed_at": "2026-04-24T20:54:32+08:00",
+                "merged_at": "",
                 "compression_stage_id": "",
                 "superseded_at": "",
             }

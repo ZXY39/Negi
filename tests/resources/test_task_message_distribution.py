@@ -179,7 +179,7 @@ def build_service(tmp_path: Path) -> MainRuntimeService:
     return _build_service(tmp_path)
 
 
-def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeService:
+def _build_service_with_backend(tmp_path: Path, *, chat_backend, auto_driver: bool = False) -> MainRuntimeService:
     service = MainRuntimeService(
         chat_backend=chat_backend,
         workspace_root=tmp_path,
@@ -192,11 +192,15 @@ def _build_service_with_backend(tmp_path: Path, *, chat_backend) -> MainRuntimeS
     service.global_scheduler.enqueue_task = _noop_async
     service.global_scheduler.cancel_task = _noop_async
     service.global_scheduler.wait = _noop_async
+    if not auto_driver:
+        # 子树分发驱动器默认关闭：断言中间态的用例手动驱动
+        # _run_distribution_epoch 波次，避免后台任务与断言竞态。
+        service.task_actor_service.ensure_scoped_epoch_driver = lambda task_id: None
     return service
 
 
 @pytest.mark.asyncio
-async def test_task_append_notice_requests_pause_then_creates_distribution_epoch(tmp_path: Path) -> None:
+async def test_task_append_notice_creates_subtree_epoch_without_task_pause(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
         record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
@@ -217,18 +221,21 @@ async def test_task_append_notice_requests_pause_then_creates_distribution_epoch
         assert result.startswith(f"已向任务 {record.task_id} 追加通知")
         assert "创建任务成功" not in result
         assert task is not None
-        assert task.pause_requested is True
-        assert task.is_paused is True
+        # 子树屏障不再暂停任务：冻结由 hold 谓词在执行检查点强制。
+        assert task.pause_requested is False
+        assert task.is_paused is False
         assert len(epochs) == 1
         assert epochs[0].state == "pause_requested"
         assert epochs[0].root_node_id == record.root_node_id
         assert epochs[0].payload.get("barrier_root_node_id") == record.root_node_id
         assert epochs[0].payload.get("barrier_node_ids") == [record.root_node_id]
+        assert epochs[0].payload.get("target_node_ids") == [record.root_node_id]
         assert epochs[0].root_message == "新增董事会验收格式"
         assert distribution == {
             "active_epoch_id": epochs[0].epoch_id,
             "state": "barrier_requested",
-            "mode": "task_wide_barrier",
+            "mode": "subtree_barrier",
+            "target_node_ids": [record.root_node_id],
             "frontier_node_ids": [],
             "blocked_node_ids": [record.root_node_id],
             "pending_notice_node_ids": [record.root_node_id],
@@ -293,7 +300,10 @@ async def test_node_detail_exposes_consumed_append_notice_messages(tmp_path: Pat
                 "message": "改成男性角色Top20",
                 "received_at": "2026-04-19T15:26:11+08:00",
                 "consumed_at": "2026-04-19T15:26:11+08:00",
-                "status": "consumed",
+                # 归档记录 = 内容已真正并入上下文（三态之三）；旧数据没有
+                # merged_at 字段，用 consumed_at 兜底。
+                "merged_at": "2026-04-19T15:26:11+08:00",
+                "status": "merged",
                 "compression_stage_id": "",
                 "deliveries": [],
             }
@@ -623,6 +633,9 @@ async def test_force_delete_during_distribution_cancels_epoch_and_stops_further_
             )
         )
 
+        # 子树分发不再暂停任务；删除守卫（仅 paused/terminal 可删）要求
+        # 操作者先显式暂停——与任务大厅的删除入口约束一致。
+        await service.pause_task(record.task_id)
         deleted = await service.delete_task(record.task_id)
 
         assert deleted is not None
@@ -651,6 +664,24 @@ class _QueuedChatBackend:
         if not self._responses:
             raise AssertionError(f"unexpected chat call: {kwargs!r}")
         return self._responses.pop(0)
+
+
+async def _drive_distribution_to_terminal(
+    service: MainRuntimeService,
+    task_id: str,
+    *,
+    max_waves: int = 8,
+) -> str:
+    """直接驱动分发波次到终态（替代旧的 run_task 同步驱动契约）。
+
+    生产路径由单飞驱动器循环调用同一波次函数；测试里同步驱动避免竞态。
+    """
+    outcome = "idle"
+    for _ in range(max_waves):
+        outcome = await service.task_actor_service._run_distribution_epoch(task_id)
+        if outcome in {"completed", "failed", "idle", "deferred"}:
+            return outcome
+    return outcome
 
 
 async def _seed_distributing_epoch(
@@ -1065,7 +1096,7 @@ async def test_distribution_epoch_failure_keeps_task_paused_and_queues_root_noti
             frontier_node_ids=[root.node_id],
         )
 
-        await service.task_actor_service.run_task(record.task_id)
+        await _drive_distribution_to_terminal(service, record.task_id)
 
         refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
         latest_task = service.get_task(record.task_id)
@@ -1112,7 +1143,8 @@ async def test_resume_after_failed_distribution_downgrades_to_resume_ready(tmp_p
             message="new global constraint",
             frontier_node_ids=[root.node_id],
         )
-        await service.task_actor_service.run_task(record.task_id)
+        outcome = await _drive_distribution_to_terminal(service, record.task_id)
+        assert outcome == "failed"
 
         resumed = await service.resume_task(record.task_id)
 
@@ -1571,7 +1603,9 @@ async def test_distribution_turn_runs_through_task_dispatcher_and_persists_child
         backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = first_child.node_id
         backend._responses[0].tool_calls[0]["arguments"]["children"][1]["target_node_id"] = second_child.node_id
 
-        await service.task_actor_service.run_task(record.task_id)
+        # 单波驱动：本波只跑 root 的控制回合，子节点进入 next frontier。
+        outcome = await service.task_actor_service._run_distribution_epoch(record.task_id)
+        assert outcome == "advanced"
 
         first_notifications = service.store.list_task_node_notifications(record.task_id, first_child.node_id)
         second_notifications = service.store.list_task_node_notifications(record.task_id, second_child.node_id)
@@ -1673,7 +1707,7 @@ async def test_distribution_turn_requeues_task_when_next_frontier_exists(tmp_pat
         backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = first_child.node_id
         backend._responses[0].tool_calls[0]["arguments"]["children"][1]["target_node_id"] = second_child.node_id
 
-        await service.task_actor_service.run_task(record.task_id)
+        await _drive_distribution_to_terminal(service, record.task_id)
 
         assert resumed_task_ids == [record.task_id]
     finally:
@@ -1708,16 +1742,22 @@ async def test_distribution_leaf_node_does_not_spawn_further_distribution_turns(
             frontier_node_ids=[record.root_node_id],
         )
 
-        await service.task_actor_service.run_task(record.task_id)
+        await _drive_distribution_to_terminal(service, record.task_id)
 
         runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
         distribution = dict(runtime_meta.get("distribution") or {})
         refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
 
-        assert len(backend.calls) == 1
+        # 叶子目标没有存活子节点可决策：直接并入分支，不再消耗模型回合。
+        assert len(backend.calls) == 0
         assert distribution["frontier_node_ids"] == []
         assert refreshed_epoch is not None
+        assert refreshed_epoch.state == "completed"
         assert refreshed_epoch.payload.get("distributed_node_ids") == [record.root_node_id]
+        # 通知以本地待处理记录落盘，等待恢复路径并入。
+        root_node = service.store.get_node(record.root_node_id)
+        pending_records = list((root_node.metadata or {}).get("pending_append_notice_records") or [])
+        assert [item["message"] for item in pending_records] == ["新增董事会验收格式"]
     finally:
         await service.close()
 
@@ -1945,7 +1985,8 @@ async def test_distribution_turn_uses_runtime_child_snapshot_and_persists_decisi
 
         detail = service.query_service.get_node_detail(record.task_id, root.node_id, detail_level="full")
         assert detail is not None
-        assert detail.message_list[0]["status"] == "pending"
+        # 控制回合已处理该通知（挂起等子节点回合结束再并入）：显示「已消费」。
+        assert detail.message_list[0]["status"] == "consumed"
         assert detail.message_list[0]["deliveries"][0]["target_node_id"] == branch_a.node_id
         assert detail.message_list[0]["deliveries"][0]["decision"] == "distributed"
         assert detail.message_list[0]["deliveries"][1]["target_node_id"] == branch_b.node_id
@@ -2446,7 +2487,7 @@ async def test_distribution_epoch_completes_and_task_resumes_ordinary_execution(
             frontier_node_ids=[record.root_node_id],
         )
 
-        await service.task_actor_service.run_task(record.task_id)
+        await _drive_distribution_to_terminal(service, record.task_id)
 
         updated_task = service.get_task(record.task_id)
         updated_root = service.store.get_node(record.root_node_id)
@@ -2499,7 +2540,7 @@ async def test_distribution_epoch_keeps_node_level_pending_notice_after_global_d
             frontier_node_ids=[record.root_node_id],
         )
 
-        await service.task_actor_service.run_task(record.task_id)
+        await _drive_distribution_to_terminal(service, record.task_id)
 
         updated_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
         updated_root = service.store.get_node(record.root_node_id)
@@ -2590,7 +2631,7 @@ async def test_root_distribution_message_is_consumed_into_append_notice_context_
             frontier_node_ids=[record.root_node_id],
         )
 
-        await service.task_actor_service.run_task(record.task_id)
+        await _drive_distribution_to_terminal(service, record.task_id)
 
         updated_root = service.store.get_node(record.root_node_id)
         pending_root_notices = list((updated_root.metadata or {}).get("pending_append_notice_records") or [])
@@ -2661,7 +2702,9 @@ async def test_root_distribution_message_is_consumed_into_append_notice_context_
                 "message": "改成男性角色Top20并停止女性候选收集",
                 "received_at": pending_root_notices[0]["created_at"],
                 "consumed_at": detail.message_list[0]["consumed_at"],
-                "status": "consumed",
+                # 归档=内容已真正并入上下文（三态之三）。
+                "merged_at": detail.message_list[0]["merged_at"],
+                "status": "merged",
                 "compression_stage_id": "",
                 "deliveries": [],
             }
@@ -3917,7 +3960,7 @@ async def test_distribution_failure_marks_paused_and_invokes_notifier(tmp_path: 
             frontier_node_ids=[root.node_id],
         )
 
-        await service.task_actor_service.run_task(record.task_id)
+        await _drive_distribution_to_terminal(service, record.task_id)
 
         latest = service.get_task(record.task_id)
         assert latest is not None

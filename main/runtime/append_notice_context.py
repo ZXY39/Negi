@@ -27,6 +27,7 @@ def normalize_append_notice_context(payload: Any) -> dict[str, Any]:
                 'message': str(item.get('message') or '').strip(),
                 'received_at': str(item.get('received_at') or '').strip(),
                 'consumed_at': str(item.get('consumed_at') or '').strip(),
+                'merged_at': str(item.get('merged_at') or '').strip(),
                 'compression_stage_id': str(item.get('compression_stage_id') or '').strip(),
                 'superseded_at': str(item.get('superseded_at') or '').strip(),
             }
@@ -78,6 +79,8 @@ def normalize_pending_append_notice_records(payload: Any) -> list[dict[str, Any]
                 'message': str(item.get('message') or '').strip(),
                 'created_at': str(item.get('created_at') or '').strip(),
                 'order_index': max(0, int(item.get('order_index') or 0)),
+                # 控制/决策回合已处理（显示「已消费」），内容等待恢复路径并入。
+                'processed_at': str(item.get('processed_at') or '').strip(),
             }
         )
     records.sort(
@@ -115,6 +118,7 @@ def record_pending_append_notice_records(
                 'message': str(item.get('message') or '').strip(),
                 'created_at': str(item.get('created_at') or '').strip(),
                 'order_index': max(0, int(item.get('order_index') or 0)),
+                'processed_at': str(item.get('processed_at') or '').strip(),
             }
         )
     normalized.sort(
@@ -151,9 +155,11 @@ def record_consumed_notifications(
     *,
     notifications: list[dict[str, Any]],
     consumed_at: str,
+    merged_at: str = '',
 ) -> dict[str, Any]:
     normalized = normalize_append_notice_context(context)
     existing_ids = {str(item.get('notification_id') or '').strip() for item in list(normalized.get('notice_records') or [])}
+    normalized_merged_at = str(merged_at or '').strip()
     for item in list(notifications or []):
         if not isinstance(item, dict):
             continue
@@ -175,6 +181,8 @@ def record_consumed_notifications(
                     or ''
                 ).strip(),
                 'consumed_at': str(item.get('consumed_at') or consumed_at or '').strip(),
+                # 三态：merged_at 为空 = 已消费（内容稍后并入或不再并入）。
+                'merged_at': str(item.get('merged_at') or normalized_merged_at or '').strip(),
                 'compression_stage_id': '',
                 'superseded_at': str(item.get('superseded_at') or '').strip(),
             }
