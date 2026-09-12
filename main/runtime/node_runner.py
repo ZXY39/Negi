@@ -4048,24 +4048,6 @@ class NodeRunner:
     def _spawn_review_blocked_text(*, reason: str, suggestion: str) -> str:
         normalized_reason = str(reason or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
         normalized_suggestion = str(suggestion or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION
-        return f'拦截原因：{normalized_reason}\n操作建议：{normalized_suggestion}'
-
-    @classmethod
-    def _spawn_review_blocked_result(cls, spec: SpawnChildSpec, *, reason: str, suggestion: str) -> SpawnChildResult:
-        output_text = cls._spawn_review_blocked_text(reason=reason, suggestion=suggestion)
-        return SpawnChildResult(
-            goal=spec.goal,
-            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
-            node_output=output_text,
-            node_output_summary=output_text,
-            node_output_ref='',
-            failure_info=None,
-        )
-
-    @staticmethod
-    def _spawn_review_blocked_text(*, reason: str, suggestion: str) -> str:
-        normalized_reason = str(reason or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
-        normalized_suggestion = str(suggestion or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION
         return f'派生已被拦截。原因：{normalized_reason}。建议：{normalized_suggestion}'
 
     @staticmethod
@@ -4084,6 +4066,7 @@ class NodeRunner:
             node_output_summary=summary_text,
             node_output_ref='',
             failure_info=None,
+            review_blocked=True,
         )
 
     @classmethod
@@ -4097,6 +4080,7 @@ class NodeRunner:
             node_output_summary=summary_text,
             node_output_ref='',
             failure_info=None,
+            review_blocked=True,
         )
 
     @staticmethod

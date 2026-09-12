@@ -198,6 +198,9 @@ class SpawnChildResult(Model):
     node_output_summary: str = ''
     node_output_ref: str = ''
     failure_info: SpawnChildFailureInfo | None = None
+    # spawn review 拦截的机器可读标记：True 表示该分支未创建、未执行，
+    # 父节点必须按 node_output 中的 reason/suggestion 处置，不得视为已完成分支。
+    review_blocked: bool = False
 
 
 class TokenUsageSummary(Model):

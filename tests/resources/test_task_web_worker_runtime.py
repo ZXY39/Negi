@@ -12605,6 +12605,8 @@ async def test_spawn_children_prefilters_specs_and_preserves_result_order(tmp_pa
         assert [item.goal for item in results] == ["blocked branch", "allowed branch"]
         assert results[0].failure_info is None
         assert results[0].check_result == "派生已被拦截"
+        assert results[0].review_blocked is True
+        assert results[1].review_blocked is False
         assert "拆分过细" in results[0].node_output
         assert "请由父节点直接执行" in results[0].node_output
         assert results[0].node_output_summary == "派生拦截：拆分过细，偏离当前父节点目标"
@@ -13111,6 +13113,7 @@ async def test_tree_snapshot_excludes_fully_blocked_spawn_rounds_but_node_detail
         node_payload = service.get_node_detail_payload(record.task_id, root.node_id, detail_level="summary")
 
         assert [item.check_result for item in results] == ["派生已被拦截", "派生已被拦截"]
+        assert [item.review_blocked for item in results] == [True, True]
         assert subtree is not None
         assert node_payload is not None
         subtree_root = subtree["nodes_by_id"][root.node_id]

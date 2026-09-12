@@ -192,11 +192,22 @@ class SpawnChildNodesTool(Tool):
 
     @property
     def description(self) -> str:
-        return 'Create child nodes and run them with runtime-controlled concurrency.'
+        return (
+            'Create child nodes and run them with runtime-controlled concurrency. '
+            'All children in one call start concurrently with no ordering guarantee, and the call '
+            'returns only after every child pipeline is terminal. A child that consumes other '
+            "children's outputs (e.g. an acceptance/verification node for its siblings) must NOT "
+            'share the batch: spawn it in a later call after the depended-on batch returns, or use '
+            'requires_acceptance for per-child acceptance.'
+        )
 
     @property
     def model_description(self) -> str:
-        return 'Create child nodes for delegated work.'
+        return (
+            'Create child nodes for delegated work. One call = one concurrent batch (no ordering); '
+            'never put a node that consumes its siblings’ outputs (e.g. acceptance) in the same '
+            'batch — spawn it in a later batch, or use requires_acceptance for single-child acceptance.'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -225,7 +236,9 @@ class SpawnChildNodesTool(Tool):
                     'type': 'boolean',
                     'description': (
                         'Whether this child should get a follow-up acceptance node. Use true only when the child scope is broad, costly to get wrong, '
-                        'or needs a consistency pass before the parent can trust it.'
+                        'or needs a consistency pass before the parent can trust it. The acceptance node is activated only after this child pipeline '
+                        'is terminal — this is the correct way to gate acceptance for a single child; do not spawn a sibling acceptance node in the '
+                        'same batch for it.'
                     ),
                 },
                 'acceptance_prompt': {
@@ -240,6 +253,11 @@ class SpawnChildNodesTool(Tool):
             'properties': {
                 'children': {
                     'type': 'array',
+                    'description': (
+                        'One batch of children started concurrently (no ordering guarantee); the call returns after all of them are terminal. '
+                        'Put only mutually independent, ready branches in one batch. A child that depends on other children’s outputs '
+                        '(e.g. an acceptance/verification/aggregation node for its siblings) must be spawned in a separate later batch.'
+                    ),
                     'items': child_schema,
                     'minItems': 1,
                 },
@@ -267,6 +285,10 @@ class SpawnChildNodesTool(Tool):
             'properties': {
                 'children': {
                     'type': 'array',
+                    'description': (
+                        'One concurrent batch (no ordering). Independent ready branches only; a child that consumes '
+                        'its siblings’ outputs (e.g. acceptance) must go in a separate later batch.'
+                    ),
                     'items': child_schema,
                 },
             },
