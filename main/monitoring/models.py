@@ -69,6 +69,12 @@ class TaskTreeSnapshot(Model):
     generated_at: str = ''
     snapshot_version: str = ''
     nodes_by_id: dict[str, TaskTreeSnapshotNode] = Field(default_factory=dict)
+    # 分块加载（大树打开超时治理）：truncated=true 表示本响应只是整树稳定排序下的一个
+    # 前缀分块，next_after_node_id 是续传游标（下一批从它之后开始）。total_node_count
+    # 是整树节点总数（按稳定排序计），供前端「加载中(x/xx)」进度展示。
+    truncated: bool = False
+    total_node_count: int | None = None
+    next_after_node_id: str = ''
 
 
 class LatestTaskNodeOutput(Model):

@@ -14,13 +14,6 @@ from main.models import (
     normalize_tool_file_changes,
 )
 from main.monitoring.execution_trace import build_execution_trace
-from main.token_usage import aggregate_node_token_usage
-from main.runtime.append_notice_context import (
-    APPEND_NOTICE_CONTEXT_KEY,
-    PENDING_APPEND_NOTICE_RECORDS_KEY,
-    normalize_append_notice_context,
-    normalize_pending_append_notice_records,
-)
 from main.monitoring.models import (
     LatestTaskNodeOutput,
     TaskDistributionState,
@@ -47,7 +40,13 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
     normalize_acceptance_handshake,
 )
-
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    PENDING_APPEND_NOTICE_RECORDS_KEY,
+    normalize_append_notice_context,
+    normalize_pending_append_notice_records,
+)
+from main.token_usage import aggregate_node_token_usage
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 
@@ -608,11 +607,22 @@ class TaskQueryService:
                 detail.execution_trace['acceptance_result'] = acceptance_result_full
         return detail
 
-    def get_tree_snapshot(self, task_id: str) -> TaskTreeSnapshot | None:
+    def get_tree_snapshot(
+        self,
+        task_id: str,
+        *,
+        max_nodes: int | None = None,
+        after_node_id: str = '',
+    ) -> TaskTreeSnapshot | None:
         task = self._store.get_task(task_id)
         if task is None:
             return None
-        return self._build_tree_snapshot(task_id=task.task_id, root_node_id=task.root_node_id)
+        return self._build_tree_snapshot(
+            task_id=task.task_id,
+            root_node_id=task.root_node_id,
+            max_nodes=max_nodes,
+            after_node_id=after_node_id,
+        )
 
     def get_tree_subtree(
         self,
@@ -1191,30 +1201,19 @@ class TaskQueryService:
         root_node_id: str,
         scope_root_id: str = '',
         root_round_id: str = '',
+        max_nodes: int | None = None,
+        after_node_id: str = '',
     ) -> TaskTreeSnapshot:
         task = self._store.get_task(task_id)
         node_map, rounds_by_parent, direct_children = self._projection_maps(task_id)
-        snapshot_nodes = {
-            node_id: self._snapshot_node_from_projection(
-                record,
-                task=task,
-                node_map=node_map,
-                rounds_by_parent=rounds_by_parent,
-                direct_children=direct_children,
-            )
-            for node_id, record in node_map.items()
-        }
-        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
-        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
-        if distribution.mode == 'task_wide_barrier':
-            for node_id in set(distribution.blocked_node_ids or []):
-                current = snapshot_nodes.get(str(node_id or '').strip())
-                if current is None:
-                    continue
-                snapshot_nodes[current.node_id] = current.model_copy(update={'distribution_status': 'barrier_blocked'})
+        effective_max_nodes = max(1, int(max_nodes)) if max_nodes is not None else None
         included_ids: set[str]
+        next_after_node_id = ''
+        truncated = False
+        total_node_count: int | None = None
         normalized_scope_root_id = str(scope_root_id or '').strip()
         if normalized_scope_root_id:
+            # 子树范围（懒加载分支修正）：沿用 BFS 可见子节点语义，不分块。
             included_ids = set()
             queue: list[tuple[str, str]] = [(normalized_scope_root_id, str(root_round_id or '').strip())]
             while queue:
@@ -1233,11 +1232,58 @@ class TaskQueryService:
                 ):
                     if child_id not in included_ids:
                         queue.append((child_id, ''))
+        elif effective_max_nodes is not None:
+            # 整树分块：全部节点按稳定排序（sort_key, node_id）切片，游标续传。
+            # 相比按可见性 BFS 分块，排序切片保证各块的并集与"无分块全量快照"
+            # 完全一致（含仅经非默认轮次可见的节点），且各块之间无重复。
+            ordered_ids = sorted(
+                node_map.keys(),
+                key=lambda node_id: (
+                    str(getattr(node_map[node_id], 'sort_key', '') or ''),
+                    str(node_id),
+                ),
+            )
+            total_node_count = len(ordered_ids)
+            start_index = 0
+            normalized_after = str(after_node_id or '').strip()
+            if normalized_after:
+                try:
+                    start_index = ordered_ids.index(normalized_after) + 1
+                except ValueError:
+                    # 游标节点已不存在（任务树中途收缩）：从头重发，合并按 id 幂等，
+                    # 不会丢节点。
+                    start_index = 0
+            chunk_ids = ordered_ids[start_index:start_index + effective_max_nodes]
+            included_ids = set(chunk_ids)
+            truncated = start_index + len(chunk_ids) < len(ordered_ids)
+            if truncated and chunk_ids:
+                next_after_node_id = str(chunk_ids[-1])
         else:
-            included_ids = set(snapshot_nodes.keys())
+            included_ids = set(node_map.keys())
+        # 只物化本响应包含的节点。旧实现先物化整树再过滤，每个节点都带多次额外
+        # 存储查询，是大树 tree-snapshot 超时的根因之一。
+        snapshot_nodes = {
+            node_id: self._snapshot_node_from_projection(
+                node_map[node_id],
+                task=task,
+                node_map=node_map,
+                rounds_by_parent=rounds_by_parent,
+                direct_children=direct_children,
+            )
+            for node_id in included_ids
+            if node_id in node_map
+        }
+        runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
+        distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
+        if distribution.mode == 'task_wide_barrier':
+            for node_id in set(distribution.blocked_node_ids or []):
+                current = snapshot_nodes.get(str(node_id or '').strip())
+                if current is None:
+                    continue
+                snapshot_nodes[current.node_id] = current.model_copy(update={'distribution_status': 'barrier_blocked'})
         projection_meta = self._store.get_task_projection_meta(task_id)
         snapshot_version = str(getattr(projection_meta, 'version', '') or '').strip() or str(
-            max(0, len(snapshot_nodes))
+            max(0, len(node_map))
         )
         return TaskTreeSnapshot(
             task_id=task_id,
@@ -1245,6 +1291,9 @@ class TaskQueryService:
             generated_at=datetime.now().astimezone().isoformat(timespec='seconds'),
             snapshot_version=snapshot_version,
             nodes_by_id={node_id: snapshot_nodes[node_id] for node_id in included_ids if node_id in snapshot_nodes},
+            truncated=truncated,
+            total_node_count=total_node_count,
+            next_after_node_id=next_after_node_id,
         )
 
     def _record_debug(self, section: str, *, started_at: str, started_mono: float) -> None:

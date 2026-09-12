@@ -47,6 +47,7 @@ from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from g3ku.security import get_bootstrap_security_service
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
 from g3ku.web.worker_control import managed_worker_snapshot
+from main.errors import TaskPausedError
 from main.governance import (
     GovernanceStore,
     MainRuntimePolicyEngine,
@@ -66,25 +67,19 @@ from main.governance.exec_tool_policy import (
 )
 from main.governance.roles import normalize_public_allowed_roles
 from main.governance.tool_context import (
-    apply_runtime_tool_context_projection,
     build_tool_context_fingerprint,
     build_tool_toolskill_payload,
     resolve_primary_executor_name,
 )
-from main.errors import TaskPausedError
 from main.ids import new_command_id, new_node_id, new_task_id, new_worker_id
 from main.models import (
-    FAILURE_CLASS_BUSINESS_UNPASSED,
-    FAILURE_CLASS_ENGINE,
-    FAILURE_CLASS_NON_RETRYABLE_BLOCKED,
     NodeRecord,
+    TaskArtifactRecord,
     TaskMessageDistributionEpoch,
     TaskNodeNotification,
-    TaskArtifactRecord,
     TaskRecord,
     TokenUsageSummary,
     normalize_execution_policy_metadata,
-    normalize_failure_class,
     normalize_final_acceptance_metadata,
 )
 from main.monitoring.file_store import TaskFileStore
@@ -98,23 +93,29 @@ from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.runtime.execution_trace_compaction import compact_tool_step_for_summary
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
+from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
     inject_node_dynamic_contract_message,
 )
-from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.node_runner import NodeRunner
 from main.runtime.node_turn_controller import NodeTurnController
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.stage_budget import STAGE_TOOL_NAME, callable_tool_names_for_stage_iteration
 from main.runtime.task_actor_service import TaskActorService
 from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
+from main.service.event_registry import TaskEventRegistry
 from main.service.task_append_notice_contract import (
     TASK_APPEND_NOTICE_DESCRIPTION,
     build_task_append_notice_parameters,
 )
-from main.service.event_registry import TaskEventRegistry
+from main.service.task_distribution_error_callback import (
+    TASK_DISTRIBUTION_ERROR_CALLBACK_PATH,
+    normalize_task_distribution_error_payload,
+    resolve_task_distribution_error_callback_token,
+    resolve_task_distribution_error_callback_url,
+)
 from main.service.task_event_callback import (
     TASK_EVENT_BATCH_CALLBACK_PATH,
     TASK_EVENT_CALLBACK_PATH,
@@ -134,12 +135,6 @@ from main.service.task_stall_callback import (
     normalize_task_stall_payload,
     resolve_task_stall_callback_token,
     resolve_task_stall_callback_url,
-)
-from main.service.task_distribution_error_callback import (
-    TASK_DISTRIBUTION_ERROR_CALLBACK_PATH,
-    normalize_task_distribution_error_payload,
-    resolve_task_distribution_error_callback_token,
-    resolve_task_distribution_error_callback_url,
 )
 from main.service.task_stall_notifier import (
     TaskStallNotifier,
@@ -1420,7 +1415,7 @@ class MainRuntimeService:
             raise ValueError('invalid_pause_reason')
         if self.execution_mode == 'web':
             self._assert_worker_available()
-        result = await self._apply_pause_node_command(
+        await self._apply_pause_node_command(
             normalized_task_id,
             node_ids=[normalized_node_id],
             cascade=bool(cascade),
@@ -7912,9 +7907,19 @@ class MainRuntimeService:
             return None
         return payload
 
-    def get_task_tree_snapshot_payload(self, task_id: str) -> dict[str, Any] | None:
+    def get_task_tree_snapshot_payload(
+        self,
+        task_id: str,
+        *,
+        max_nodes: int | None = None,
+        after_node_id: str = '',
+    ) -> dict[str, Any] | None:
         normalized_task_id = self.normalize_task_id(task_id)
-        snapshot = self.query_service.get_tree_snapshot(normalized_task_id)
+        snapshot = self.query_service.get_tree_snapshot(
+            normalized_task_id,
+            max_nodes=max_nodes,
+            after_node_id=after_node_id,
+        )
         if snapshot is None:
             return None
         return {'ok': True, **snapshot.model_dump(mode='json')}

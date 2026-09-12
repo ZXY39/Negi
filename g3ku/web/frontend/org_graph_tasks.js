@@ -1787,7 +1787,17 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         resetTaskView();
         S.treeFitOnNextRender = true;
     }
-    const payload = await ApiClient.getTask(taskId, true);
+    // 大任务详情请求可能较慢：超过阈值仍未进入树加载阶段时显示进度 toast。
+    scheduleTaskTreeLoadToast(taskId);
+    let payload;
+    try {
+        payload = await ApiClient.getTask(taskId, true);
+    } catch (error) {
+        // 详情失败后进度提示没有继续存在的意义：清掉延迟 toast（含已显示的），
+        // 由外层 openTask / restoreTaskDetailSession 展示错误信息。
+        cancelTaskTreeLoadToast(taskId);
+        throw error;
+    }
     applyTaskPayload(payload);
     if (reopenSocket) {
         openTaskDetailWs(taskId);
@@ -1846,6 +1856,7 @@ async function openTask(taskId) {
         await loadTaskArtifacts();
         scheduleTaskDetailSessionPersist();
     } catch (e) {
+        cancelTaskTreeLoadToast(String(taskId || ""));
         U.tree.innerHTML = `<div class="empty-state error">Failed to open task: ${esc(e.message)}</div>`;
         showToast({ title: "Task open failed", text: e.message || "Unknown error", kind: "error" });
     }

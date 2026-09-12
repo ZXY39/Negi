@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from g3ku.content import artifact_ref_from_id
@@ -72,12 +70,25 @@ async def get_task(
 
 
 @router.get('/tasks/{task_id}/tree-snapshot')
-async def get_task_tree_snapshot(task_id: str):
+async def get_task_tree_snapshot(
+    task_id: str,
+    max_nodes: int | None = Query(None),
+    after_node_id: str | None = Query(None),
+):
+    """整树快照；max_nodes 分块（按稳定排序切片）供大树打开的分块加载。
+
+    响应带 truncated / total_node_count / next_after_node_id：前端以
+    `after_node_id=next_after_node_id` 续传，直至 truncated=false。
+    """
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_task_tree_snapshot_payload(task_id)
+    payload = service.get_task_tree_snapshot_payload(
+        task_id,
+        max_nodes=max_nodes,
+        after_node_id=str(after_node_id or '').strip(),
+    )
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return payload

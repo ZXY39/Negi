@@ -170,23 +170,40 @@ function resetTaskTreeSnapshotState({ clearDirty = true } = {}) {
     if (clearDirty) S.treeDirtyParentsById = {};
 }
 
-function applyTaskTreeSnapshotPayload(payload = {}) {
+// 分块快照合并：首块重置树缓存（语义同整表快照落位），后续块按 id 增量并入。
+// 只增不改删：父节点的 rounds/auxiliary 子 id 列表在服务端本就按整树计算，
+// 所以块内缺失的子节点只是还没到，不是没有。
+function applyTaskTreeSnapshotChunkPayload(payload = {}, { isFirstChunk = false } = {}) {
     const rootNodeId = String(payload?.root_node_id || "").trim();
     const sourceNodes = payload?.nodes_by_id && typeof payload.nodes_by_id === "object" ? payload.nodes_by_id : {};
-    const nextNodesById = {};
+    const nextNodesById = isFirstChunk ? {} : { ...(S.treeNodesById || {}) };
     Object.entries(sourceNodes).forEach(([nodeId, node]) => {
         const normalizedNodeId = String(nodeId || node?.node_id || "").trim();
         if (!normalizedNodeId) return;
-        nextNodesById[normalizedNodeId] = normalizeTaskTreeSnapshotNode(node);
+        nextNodesById[normalizedNodeId] = normalizeTaskTreeSnapshotNode(node, nextNodesById[normalizedNodeId] || null);
     });
-    S.treeRootNodeId = rootNodeId;
+    if (isFirstChunk) {
+        S.treeRootNodeId = rootNodeId;
+        S.treeSnapshotSelfHealAttempts = 0;
+        S.treeSelectedRoundByNodeId = pruneTreeRoundSelections({});
+        S.treeLargeMode = false;
+    } else if (!String(S.treeRootNodeId || "").trim() && rootNodeId) {
+        S.treeRootNodeId = rootNodeId;
+    }
     S.treeNodesById = nextNodesById;
-    S.treeSnapshotVersion = String(payload?.snapshot_version || "").trim();
+    if (String(payload?.snapshot_version || "").trim()) {
+        S.treeSnapshotVersion = String(payload.snapshot_version || "").trim();
+    }
     S.treeView = null;
-    S.treeLargeMode = false;
-    // 全量快照落位即视为一次成功对齐，重置自愈重试预算。
-    S.treeSnapshotSelfHealAttempts = 0;
-    S.treeSelectedRoundByNodeId = pruneTreeRoundSelections({});
+    if (!isFirstChunk) {
+        S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(S.treeSelectedRoundByNodeId);
+    }
+}
+
+function applyTaskTreeSnapshotPayload(payload = {}) {
+    // 整表快照落位 = 分块合并的首块语义；分块加载路径走
+    // applyTaskTreeSnapshotChunkPayload + loadTaskTreeSnapshot。
+    applyTaskTreeSnapshotChunkPayload(payload, { isFirstChunk: true });
     refreshTaskTreeSearchResultsIfVisible();
 }
 
@@ -272,14 +289,133 @@ function resolveTaskTreeBranchRoundId(nodeId) {
     return snapshotNodeSelectedRoundId(node, S.treeSelectedRoundByNodeId);
 }
 
+// 大树打开超时治理：tree-snapshot 按稳定排序分块加载。每块至多 250 个节点，
+// 上限 400 块（10 万节点）纯属防御，正常任务远达不到。
+const TASK_TREE_CHUNK_NODES = 250;
+const TASK_TREE_MAX_CHUNKS = 400;
+// 打开任务 400ms 内没走到树渲染阶段才弹加载 toast：避免小任务打开时 toast 一闪而过。
+const TASK_TREE_LOAD_TOAST_DELAY_MS = 400;
+
+function cancelTaskTreeLoadToast(taskId = "") {
+    const key = String(taskId || "").trim();
+    const ownsToast = !!key && String(S.treeLoadToastTaskId || "").trim() === key;
+    const ownsTimer = !!key && String(S.treeLoadToastTimerTaskId || "").trim() === key;
+    if (!key || ownsToast || ownsTimer) {
+        if (S.treeLoadToastTimer) {
+            window.clearTimeout(S.treeLoadToastTimer);
+            S.treeLoadToastTimer = null;
+        }
+        S.treeLoadToastTimerTaskId = "";
+        S.treeLoadToastTaskId = "";
+    }
+    if (ownsToast && typeof closeToast === "function"
+        && U.toast
+        && (String(U.toastText?.textContent || "").trim().startsWith("加载中 (")
+            || String(U.toastTitle?.textContent || "").trim() === "正在打开任务")) {
+        closeToast();
+    }
+}
+
+function beginTaskTreeLoadToast(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key || typeof showToast !== "function") return;
+    if (S.treeLoadToastTimer) {
+        window.clearTimeout(S.treeLoadToastTimer);
+        S.treeLoadToastTimer = null;
+        S.treeLoadToastTimerTaskId = "";
+    }
+    S.treeLoadToastTaskId = key;
+    showToast({ title: "正在打开任务", text: "加载中 (0/…)", kind: "info", persistent: true });
+}
+
+// 打开任务时的延迟提示：只负责"详情请求仍在途"的空窗期显示，
+// 后续进度数字由 loadTaskTreeSnapshot 的 updateTaskTreeLoadToast 接管。
+function scheduleTaskTreeLoadToast(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key || typeof showToast !== "function") return;
+    if (S.treeLoadToastTimer) window.clearTimeout(S.treeLoadToastTimer);
+    S.treeLoadToastTaskId = "";
+    // 上一个任务遗留的加载 toast 失去归属：先关掉，避免切任务后残留在屏幕上。
+    if (typeof closeToast === "function"
+        && U.toast
+        && (String(U.toastText?.textContent || "").trim().startsWith("加载中 (")
+            || String(U.toastTitle?.textContent || "").trim() === "正在打开任务")) {
+        closeToast();
+    }
+    S.treeLoadToastTimerTaskId = key;
+    S.treeLoadToastTimer = window.setTimeout(() => {
+        S.treeLoadToastTimer = null;
+        S.treeLoadToastTimerTaskId = "";
+        if (String(S.currentTaskId || "").trim() !== key) return;
+        beginTaskTreeLoadToast(key);
+    }, TASK_TREE_LOAD_TOAST_DELAY_MS);
+}
+
+function updateTaskTreeLoadToast(taskId, loadedCount, totalCount) {
+    const key = String(taskId || "").trim();
+    if (!key || typeof showToast !== "function") return;
+    if (S.treeLoadToastTimer) {
+        window.clearTimeout(S.treeLoadToastTimer);
+        S.treeLoadToastTimer = null;
+        S.treeLoadToastTimerTaskId = "";
+    }
+    const totalText = Number.isFinite(totalCount) && Number(totalCount) > 0 ? String(totalCount) : "…";
+    if (String(S.treeLoadToastTaskId || "").trim() !== key) {
+        // 还没到显示阈值：只有确认是分块大任务（超过一块）才立即弹出，
+        // 避免小任务打开时 toast 一闪而过。
+        const showNow = Number(totalCount || 0) > TASK_TREE_CHUNK_NODES || Number(loadedCount || 0) > TASK_TREE_CHUNK_NODES;
+        if (!showNow) return;
+        S.treeLoadToastTaskId = key;
+    }
+    showToast({ title: "正在打开任务", text: `加载中 (${loadedCount}/${totalText})`, kind: "info", persistent: true });
+}
+
 async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
     const normalizedTaskId = String(taskId || "").trim();
     if (!normalizedTaskId) return null;
     if (U.tree) U.tree.innerHTML = '<div class="empty-state">Loading task tree...</div>';
+    // 分块加载门闩：加载期间 renderTree 直接返回，等全部块落位再渲染整树。
+    // loadToken 用于丢弃被重连/重开覆盖的旧加载循环（块合并按 id 幂等，但渲染
+    // 与状态收尾只能由最新一次加载执行）。
+    S.treeBulkLoadingTaskId = normalizedTaskId;
+    S.treeBulkLoadToken = Number(S.treeBulkLoadToken || 0) + 1;
+    const loadToken = S.treeBulkLoadToken;
+    scheduleTaskTreeLoadToast(normalizedTaskId);
+    let totalNodeCount = null;
+    let chunkIndex = 0;
+    let cursor = "";
+    let truncated = true;
     try {
-        const payload = await ApiClient.getTaskTreeSnapshot(normalizedTaskId);
-        if (String(S.currentTaskId || "").trim() !== normalizedTaskId) return null;
-        applyTaskTreeSnapshotPayload(payload || {});
+        while (chunkIndex < TASK_TREE_MAX_CHUNKS) {
+            const payload = await ApiClient.getTaskTreeSnapshot(normalizedTaskId, {
+                maxNodes: TASK_TREE_CHUNK_NODES,
+                afterNodeId: cursor,
+            });
+            if (String(S.currentTaskId || "").trim() !== normalizedTaskId
+                || Number(S.treeBulkLoadToken || 0) !== Number(loadToken || 0)) return null;
+            applyTaskTreeSnapshotChunkPayload(payload || {}, { isFirstChunk: chunkIndex === 0 });
+            chunkIndex += 1;
+            if (Number.isFinite(Number(payload?.total_node_count)) && Number(payload?.total_node_count) > 0) {
+                totalNodeCount = Math.max(1, Number(payload.total_node_count) || 1);
+            }
+            updateTaskTreeLoadToast(normalizedTaskId, Object.keys(S.treeNodesById || {}).length, totalNodeCount);
+            truncated = !!payload?.truncated;
+            if (!truncated) break;
+            cursor = String(payload?.next_after_node_id || "").trim();
+            if (!cursor) break; // 防御：声明未加载完却无续传游标，避免死循环
+        }
+        if (String(S.currentTaskId || "").trim() !== normalizedTaskId
+            || Number(S.treeBulkLoadToken || 0) !== Number(loadToken || 0)) return null;
+        S.treeBulkLoadingTaskId = "";
+        S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(S.treeSelectedRoundByNodeId);
+        if (truncated) {
+            // 触及防御上限：展示已加载部分，并明确提示不完整。
+            cancelTaskTreeLoadToast(normalizedTaskId);
+            showToast({ title: "任务树加载不完整", text: `节点过多，仅加载了 ${Object.keys(S.treeNodesById || {}).length} 个节点`, kind: "warn" });
+        } else {
+            cancelTaskTreeLoadToast(normalizedTaskId);
+        }
+        refreshTaskTreeSearchResultsIfVisible();
         renderTree();
         if (S.treeFitOnNextRender) {
             S.treeFitOnNextRender = false;
@@ -291,10 +427,18 @@ async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
                     .catch(() => {});
             }
         }
-        return payload || null;
+        return chunkIndex > 0 ? { nodes_by_id: S.treeNodesById } : null;
     } catch (error) {
+        if (String(S.currentTaskId || "").trim() === normalizedTaskId
+            && Number(S.treeBulkLoadToken || 0) === Number(loadToken || 0)) {
+            S.treeBulkLoadingTaskId = "";
+            cancelTaskTreeLoadToast(normalizedTaskId);
+        }
         if (!isAbortLike(error) && U.tree) {
             U.tree.innerHTML = `<div class="empty-state error">Task tree unavailable: ${esc(error.message || "Unknown error")}</div>`;
+        }
+        if (!isAbortLike(error) && typeof showToast === "function") {
+            showToast({ title: "任务树加载失败", text: error.message || "Unknown error", kind: "error" });
         }
         return null;
     }
@@ -354,6 +498,9 @@ async function syncTaskTreeDirtyBranch(nodeId) {
 function scheduleTaskTreeBranchSync(nodeId, { delayMs = 120 } = {}) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId || !S.currentTaskId || !String(S.treeRootNodeId || "").trim()) return;
+    // 初始分块加载期间跳过懒加载分支修正：等整树块全部落位后由后续 live 事件补同步。
+    if (String(S.treeBulkLoadingTaskId || "").trim()
+        && String(S.treeBulkLoadingTaskId || "").trim() === String(S.currentTaskId || "").trim()) return;
     markTaskTreeParentDirty(normalizedNodeId);
     if (Object.keys(S.treeBranchSyncInFlightById || {}).some((key) => key.startsWith(`${normalizedNodeId}::`))) {
         S.treeBranchSyncQueuedById = { ...(S.treeBranchSyncQueuedById || {}), [normalizedNodeId]: true };
@@ -2555,6 +2702,9 @@ function maybeShowTaskRecoveryNoticeToast() {
 
 function renderTree() {
     if (!String(S.treeRootNodeId || "").trim()) return;
+    // 大任务初始分块加载期间不渲染残缺树，全部块落位后由 loadTaskTreeSnapshot 渲染。
+    if (String(S.treeBulkLoadingTaskId || "").trim()
+        && String(S.treeBulkLoadingTaskId || "").trim() === String(S.currentTaskId || "").trim()) return;
     maybeShowTaskRecoveryNoticeToast();
     const distributionState = activeTaskDistributionState();
     S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);

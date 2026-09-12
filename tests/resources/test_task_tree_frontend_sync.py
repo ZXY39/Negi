@@ -4539,3 +4539,196 @@ def test_tree_node_search_result_rows_carry_goal_node_id_and_status() -> None:
     assert result["statusShown"] is True
     assert result["hasClickHandler"] is True
     assert result["mousedownPrevented"] is True
+
+
+def test_task_tree_snapshot_chunked_load_merges_all_chunks_and_renders_once() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        const toastCalls = [];
+        const closeCalls = [];
+        global.showToast = (payload) => { toastCalls.push(payload); };
+        global.closeToast = () => { closeCalls.push(true); };
+        global.isAbortLike = () => false;
+        global.refreshTaskTreeSearchResultsIfVisible = () => {};
+        let renderCount = 0;
+        let chunkCount = 0;
+        global.S = {
+          currentTaskId: "task:test",
+          treeRootNodeId: "",
+          treeNodesById: {},
+          treeSnapshotVersion: "",
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: {},
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          treeBulkLoadingTaskId: "",
+          treeBulkLoadToken: 0,
+          treeLoadToastTaskId: "",
+          treeLoadToastTimer: null,
+          treeLoadToastTimerTaskId: "",
+          taskNodeDetails: {},
+          liveFrameMap: {},
+        };
+        global.U = { tree: { innerHTML: "" } };
+        global.ApiClient = {
+          getTaskTreeSnapshot: async (taskId, { afterNodeId = "" } = {}) => {
+            chunkCount += 1;
+            if (!afterNodeId) {
+              return {
+                task_id: "task:test",
+                root_node_id: "root",
+                snapshot_version: "7",
+                truncated: true,
+                total_node_count: 5,
+                next_after_node_id: "b",
+                nodes_by_id: {
+                  root: { node_id: "root", title: "root", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+                  a: { node_id: "a", parent_node_id: "root", title: "a", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+                  b: { node_id: "b", parent_node_id: "root", title: "b", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+                },
+              };
+            }
+            return {
+              task_id: "task:test",
+              root_node_id: "root",
+              snapshot_version: "7",
+              truncated: false,
+              total_node_count: 5,
+              next_after_node_id: "",
+              nodes_by_id: {
+                c: { node_id: "c", parent_node_id: "a", title: "c", status: "success", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+                d: { node_id: "d", parent_node_id: "b", title: "d", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+              },
+            };
+          },
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        global.renderTree = () => { renderCount += 1; };
+        (async () => {
+          await loadTaskTreeSnapshot("task:test");
+          console.log(JSON.stringify({
+            renderCount,
+            chunkCount,
+            nodeCount: Object.keys(S.treeNodesById).length,
+            rootId: S.treeRootNodeId,
+            hasC: !!S.treeNodesById.c,
+            hasD: !!S.treeNodesById.d,
+            bulkFlag: S.treeBulkLoadingTaskId,
+            toastCalls: toastCalls.length,
+            closeCalls: closeCalls.length,
+          }));
+        })();
+        """
+    )
+
+    assert result["chunkCount"] == 2
+    assert result["nodeCount"] == 5
+    assert result["rootId"] == "root"
+    assert result["hasC"] is True
+    assert result["hasD"] is True
+    # 全部块落位后才渲染一次；渲染后门闩清空。
+    assert result["renderCount"] == 1
+    assert result["bulkFlag"] == ""
+    # 小树不弹加载 toast（无闪烁），也不调用关闭。
+    assert result["toastCalls"] == 0
+    assert result["closeCalls"] == 0
+
+
+def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        const toastCalls = [];
+        const closeCalls = [];
+        global.showToast = (payload) => {
+          toastCalls.push({ ...payload });
+          if (global.U.toastText) global.U.toastText.textContent = String(payload.text || "");
+          if (global.U.toastTitle) global.U.toastTitle.textContent = String(payload.title || "");
+        };
+        global.closeToast = () => { closeCalls.push(true); };
+        global.isAbortLike = () => false;
+        global.refreshTaskTreeSearchResultsIfVisible = () => {};
+        global.S = {
+          currentTaskId: "task:test",
+          treeRootNodeId: "",
+          treeNodesById: {},
+          treeSnapshotVersion: "",
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: {},
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          treeBulkLoadingTaskId: "",
+          treeBulkLoadToken: 0,
+          treeLoadToastTaskId: "",
+          treeLoadToastTimer: null,
+          treeLoadToastTimerTaskId: "",
+          taskNodeDetails: {},
+          liveFrameMap: {},
+        };
+        global.U = { tree: { innerHTML: "" }, toast: {}, toastTitle: {}, toastText: {}, toastClose: {} };
+        const chunkNodes = [
+          { n1: "root", n2: "a1" },
+          { n3: "a2", n4: "a3" },
+          { n5: "a4" },
+        ];
+        let chunkIndex = 0;
+        global.ApiClient = {
+          getTaskTreeSnapshot: async (taskId) => {
+            const nodes = chunkNodes[Math.min(chunkIndex, chunkNodes.length - 1)];
+            const resultPayload = {
+              task_id: "task:test",
+              root_node_id: "root",
+              snapshot_version: "9",
+              truncated: chunkIndex < 2,
+              total_node_count: 600,
+              next_after_node_id: chunkIndex < 2 ? "cursor-" + chunkIndex : "",
+              nodes_by_id: Object.fromEntries(
+                Object.entries(nodes).map(([key, nodeId]) => [
+                  nodeId,
+                  { node_id: nodeId, parent_node_id: "root", title: key, status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+                ])
+              ),
+            };
+            chunkIndex += 1;
+            return resultPayload;
+          },
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        global.renderTree = () => {};
+        (async () => {
+          await loadTaskTreeSnapshot("task:test");
+          const progressTexts = toastCalls.map((call) => String(call.text || ""));
+          console.log(JSON.stringify({
+            nodeCount: Object.keys(S.treeNodesById).length,
+            toastCount: toastCalls.length,
+            firstText: progressTexts[0] || "",
+            lastText: progressTexts[progressTexts.length - 1] || "",
+            allProgress: progressTexts.every((text) => text.startsWith("加载中 (")),
+            closeCalls: closeCalls.length,
+            bulkFlag: S.treeBulkLoadingTaskId,
+          }));
+        })();
+        """
+    )
+
+    assert result["nodeCount"] == 5
+    # 大任务（总数超过单块上限）在首块返回后就显示进度 toast。
+    assert result["toastCount"] >= 1
+    assert result["allProgress"] is True
+    assert result["firstText"] == "加载中 (2/600)"
+    assert result["lastText"] == "加载中 (5/600)"
+    assert result["closeCalls"] == 1
+    assert result["bulkFlag"] == ""

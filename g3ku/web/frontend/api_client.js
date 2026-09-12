@@ -471,9 +471,12 @@ class ApiClient {
     }
 
     static async getTask(taskId, markRead = false) {
+        // 大任务详情负载与节点数正相关（token 明细、调用记录、根节点详情等），
+        // 10s 默认超时在大树上会误报 "Failed to open task: Request timeout"。
         return this._request("GET", `/api/tasks/${taskId}`, {
             params: { mark_read: markRead },
             requestKey: `tasks:detail:${taskId}`,
+            timeoutMs: 120000,
         });
     }
 
@@ -520,9 +523,15 @@ class ApiClient {
         });
     }
 
-    static async getTaskTreeSnapshot(taskId) {
+    static async getTaskTreeSnapshot(taskId, { maxNodes = null, afterNodeId = "" } = {}) {
         return this._request("GET", `/api/tasks/${taskId}/tree-snapshot`, {
-            requestKey: `tasks:tree-snapshot:${taskId}`,
+            params: {
+                max_nodes: maxNodes !== null && maxNodes !== undefined ? Math.max(1, Number(maxNodes) || 1) : undefined,
+                after_node_id: afterNodeId || undefined,
+            },
+            // 游标进入 requestKey：不同分块的请求互不打断，重试相同分块时仍可去重。
+            requestKey: `tasks:tree-snapshot:${taskId}:${String(afterNodeId || "")}`,
+            timeoutMs: 30000,
         });
     }
 

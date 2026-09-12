@@ -351,6 +351,14 @@ The backend contract behind that UI behavior is:
   - When `renderTree` finds `S.treeRootNodeId` missing from the cache, it renders the empty state and schedules a debounced full-snapshot reload, capped at two attempts; a successful full-snapshot apply resets that budget.
 - If an operator reports "the task tree is frozen although the task is running", check the tab's task-detail websocket first: a tree stuck on a stale snapshot means the detail WS dropped without a working reconnect. Confirm the reconnect loop in the browser console before debugging the runtime side.
 
+### Task Tree Chunked Load Contract
+
+- `GET /api/tasks/{task_id}/tree-snapshot` serves one bounded chunk per request when `max_nodes` is set: nodes are sliced in a stable order (`sort_key, node_id`), so consecutive chunks never overlap, and the response carries `truncated`, `total_node_count`, and `next_after_node_id`. The browser continues with `after_node_id=next_after_node_id` until `truncated=false`. Without pagination params the endpoint keeps the historical whole-snapshot payload; the per-node subtree endpoint is unchanged.
+- `_build_tree_snapshot` materializes only the current chunk's nodes (`_projection_maps` still walks the full node/round tables once per request). Materializing every node — each carrying several extra store lookups — is what made whole-tree builds exceed the browser's 10s default timeout on large trees; chunking keeps each request bounded.
+- The browser treats the chunk pipeline as the task-open bootstrap: `loadTaskTreeSnapshot` resets the tree cache on the first chunk, merges later chunks by node id, and gates `renderTree` via `S.treeBulkLoadingTaskId` so no partial tree renders mid-load. While loading it shows a persistent toast `加载中 (loaded/total)`; the toast is delayed ~400ms so small-tree opens do not flash it, and closes when the last chunk lands. Once all chunks merge, the loader renders the tree once and keeps the existing fit-to-view behavior. A mid-load failure shows the inline tree error plus an error toast.
+- A per-load token (`S.treeBulkLoadToken`) invalidates an older chunk loop when a reconnect or reopen starts a newer load for the same task; chunk merges are idempotent by node id. A vanished cursor node restarts the slice from the head — the id-based merge skips nothing.
+- `ApiClient.getTask` uses a 120s client timeout instead of the 10s default: the payload scales with task size and the 10s bound surfaced as `Failed to open task: Request timeout` on large trees.
+
 ### Node Detail Error History
 
 - The node detail drawer embeds a `历史错误记录` section between `验收` and `日志`. It reads `GET /api/tasks/{task_id}/nodes/{node_id}/error-log` and lists that node's raw records (time, node title, full error text) newest-sequence first; an empty node shows `暂无历史错误`, and a header `刷新` button refetches.
