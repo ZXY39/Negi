@@ -75,6 +75,7 @@ Memory guard 维护要点：
 Disk guard 维护要点（写保护契约本体见 `runtime-overview.md`「磁盘写保护与治理」）：
 
 - 节点侧 actual-request 写入前还有一道应急写预算：磁盘剩余低于紧急线时跳过 full/degraded payload，只写 minimal 形态（preview 标 `disk-emergency minimal`、降级 reason `disk_emergency_minimal`）。它同样能证明 send 发生过，但消息内容是剥离到极致的摘要；与 memory guard 降级的区分只看 `artifact_persistence_mode` / preview 标记。
+- **actual-request 每 (task, node) 只保留最新一份**：新快照创建后即删同节点旧快照（文件+DB 行）。取证时拿到的永远是该节点最近一次真实请求体；更早轮次的请求序列不留存，需要历史对比时只能靠 `task_model_calls` 行的 usage/计数元数据。
 - actual-request 及其他 artifact 超过大小阈值即以 `.gz` gzip 形态落盘（记录 `content_encoding='gzip'`、`size_bytes` 为原始字节数）。取证读取一律走 `artifact_store.read_artifact_text`（或手工 gunzip）；对 `.gz` 直接 `read_text` 得到乱码/解码错误不是“artifact 损坏”的证据。
 - 排查窗口内 artifact 完全缺失时，先查 `write_failure_disk_full` 计数与 worker 日志的 SQLITE_FULL 行再下结论：磁盘满会让可降级写被预算跳过、关键写抛 `DiskFullError`，缺失属于“落盘被治理策略放弃”，不是“send 未发生”。
 
