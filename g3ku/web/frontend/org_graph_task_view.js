@@ -295,6 +295,9 @@ const TASK_TREE_CHUNK_NODES = 250;
 const TASK_TREE_MAX_CHUNKS = 400;
 // 打开任务 400ms 内没走到树渲染阶段才弹加载 toast：避免小任务打开时 toast 一闪而过。
 const TASK_TREE_LOAD_TOAST_DELAY_MS = 400;
+// 全部块落位后，已显示数字的 toast 保留一小段可见窗口再关闭：showToast 后立刻
+// closeToast 没有中间绘制帧，用户永远看不到最后一段数字。
+const TASK_TREE_LOAD_TOAST_DONE_MS = 800;
 
 function cancelTaskTreeLoadToast(taskId = "") {
     const key = String(taskId || "").trim();
@@ -333,6 +336,13 @@ function beginTaskTreeLoadToast(taskId) {
 function scheduleTaskTreeLoadToast(taskId) {
     const key = String(taskId || "").trim();
     if (!key || typeof showToast !== "function") return;
+    if (String(S.treeLoadToastTaskId || "").trim() === key
+        || String(S.treeLoadToastTimerTaskId || "").trim() === key) {
+        // 同一任务：toast 已在显示（或弹出定时器已排定）。保持所有权不重置，
+        // 否则 updateTaskTreeLoadToast 会因「总数未超单块」的防闪烁闸门不再更新
+        // 已显示的数字，进度从此停在 0。
+        return;
+    }
     if (S.treeLoadToastTimer) window.clearTimeout(S.treeLoadToastTimer);
     S.treeLoadToastTaskId = "";
     // 上一个任务遗留的加载 toast 失去归属：先关掉，避免切任务后残留在屏幕上。
@@ -368,6 +378,36 @@ function updateTaskTreeLoadToast(taskId, loadedCount, totalCount) {
         S.treeLoadToastTaskId = key;
     }
     showToast({ title: "正在打开任务", text: `加载中 (${loadedCount}/${totalText})`, kind: "info", persistent: true });
+}
+
+function finishTaskTreeLoadToast(taskId = "") {
+    const key = String(taskId || "").trim();
+    const owns = !!key && String(S.treeLoadToastTaskId || "").trim() === key;
+    if (S.treeLoadToastTimer) {
+        window.clearTimeout(S.treeLoadToastTimer);
+        S.treeLoadToastTimer = null;
+        S.treeLoadToastTimerTaskId = "";
+    }
+    if (!owns) {
+        // 没有显示任何加载 toast（快速打开）：只清状态，屏幕上没有可关的东西。
+        S.treeLoadToastTaskId = "";
+        return;
+    }
+    // 已显示的 toast 保留 TASK_TREE_LOAD_TOAST_DONE_MS 的收尾窗口再关闭，
+    // 保证最后一段进度数字有绘制帧、用户看得见。
+    S.treeLoadToastTimerTaskId = key;
+    S.treeLoadToastTimer = window.setTimeout(() => {
+        S.treeLoadToastTimer = null;
+        S.treeLoadToastTimerTaskId = "";
+        if (String(S.treeLoadToastTaskId || "").trim() !== key) return;
+        S.treeLoadToastTaskId = "";
+        if (typeof closeToast === "function"
+            && U.toast
+            && (String(U.toastText?.textContent || "").trim().startsWith("加载中 (")
+                || String(U.toastTitle?.textContent || "").trim() === "正在打开任务")) {
+            closeToast();
+        }
+    }, TASK_TREE_LOAD_TOAST_DONE_MS);
 }
 
 async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
@@ -413,7 +453,7 @@ async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
             cancelTaskTreeLoadToast(normalizedTaskId);
             showToast({ title: "任务树加载不完整", text: `节点过多，仅加载了 ${Object.keys(S.treeNodesById || {}).length} 个节点`, kind: "warn" });
         } else {
-            cancelTaskTreeLoadToast(normalizedTaskId);
+            finishTaskTreeLoadToast(normalizedTaskId);
         }
         refreshTaskTreeSearchResultsIfVisible();
         renderTree();

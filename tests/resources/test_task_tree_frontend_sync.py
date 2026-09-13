@@ -4919,6 +4919,8 @@ def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -
         global.renderTree = () => {};
         (async () => {
           await loadTaskTreeSnapshot("task:test");
+          const closeRightAfterLoad = closeCalls.length;
+          await new Promise((resolve) => { setTimeout(resolve, 1000); });
           const progressTexts = toastCalls.map((call) => String(call.text || ""));
           console.log(JSON.stringify({
             nodeCount: Object.keys(S.treeNodesById).length,
@@ -4926,6 +4928,7 @@ def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -
             firstText: progressTexts[0] || "",
             lastText: progressTexts[progressTexts.length - 1] || "",
             allProgress: progressTexts.every((text) => text.startsWith("加载中 (")),
+            closeRightAfterLoad,
             closeCalls: closeCalls.length,
             bulkFlag: S.treeBulkLoadingTaskId,
           }));
@@ -4939,5 +4942,90 @@ def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -
     assert result["allProgress"] is True
     assert result["firstText"] == "加载中 (2/600)"
     assert result["lastText"] == "加载中 (5/600)"
+    # 最后一段数字保留可见窗口，不做同帧关闭；800ms 收尾窗口结束后才关闭。
+    assert result["closeRightAfterLoad"] == 0
+    assert result["closeCalls"] == 1
+    assert result["bulkFlag"] == ""
+
+
+def test_task_tree_load_toast_updates_numbers_for_single_chunk_when_visible() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        const toastCalls = [];
+        const closeCalls = [];
+        global.showToast = (payload) => {
+          toastCalls.push({ ...payload });
+          if (global.U.toastText) global.U.toastText.textContent = String(payload.text || "");
+          if (global.U.toastTitle) global.U.toastTitle.textContent = String(payload.title || "");
+        };
+        global.closeToast = () => { closeCalls.push(true); };
+        global.isAbortLike = () => false;
+        global.refreshTaskTreeSearchResultsIfVisible = () => {};
+        global.S = {
+          currentTaskId: "task:test",
+          treeRootNodeId: "",
+          treeNodesById: {},
+          treeSnapshotVersion: "",
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: {},
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          treeBulkLoadingTaskId: "",
+          treeBulkLoadToken: 0,
+          // 模拟详情阶段较慢：400ms 定时器已弹出 加载中 (0/…)，toast 已在显示。
+          treeLoadToastTaskId: "task:test",
+          treeLoadToastTimer: null,
+          treeLoadToastTimerTaskId: "",
+          taskNodeDetails: {},
+          liveFrameMap: {},
+        };
+        global.U = { tree: { innerHTML: "" }, toast: {}, toastTitle: { textContent: "正在打开任务" }, toastText: { textContent: "加载中 (0/…)" }, toastClose: {} };
+        global.ApiClient = {
+          getTaskTreeSnapshot: async (taskId) => ({
+            task_id: "task:test",
+            root_node_id: "root",
+            snapshot_version: "10",
+            truncated: false,
+            total_node_count: 3,
+            next_after_node_id: "",
+            nodes_by_id: {
+              root: { node_id: "root", title: "root", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+              a: { node_id: "a", parent_node_id: "root", title: "a", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+              b: { node_id: "b", parent_node_id: "root", title: "b", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+            },
+          }),
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        global.renderTree = () => {};
+        (async () => {
+          await loadTaskTreeSnapshot("task:test");
+          const progressTexts = toastCalls.map((call) => String(call.text || ""));
+          const closeRightAfterLoad = closeCalls.length;
+          await new Promise((resolve) => { setTimeout(resolve, 1000); });
+          console.log(JSON.stringify({
+            nodeCount: Object.keys(S.treeNodesById).length,
+            toastCount: toastCalls.length,
+            texts: progressTexts,
+            closeRightAfterLoad,
+            closeCalls: closeCalls.length,
+            bulkFlag: S.treeBulkLoadingTaskId,
+          }));
+        })();
+        """
+    )
+
+    assert result["nodeCount"] == 3
+    # 单块小树：toast 已显示时数字也必须更新，不能因防闪烁闸门停在 0。
+    assert result["toastCount"] == 1
+    assert result["texts"] == ["加载中 (3/3)"]
+    # 收尾窗口内不关闭，窗口结束后关闭一次。
+    assert result["closeRightAfterLoad"] == 0
     assert result["closeCalls"] == 1
     assert result["bulkFlag"] == ""
