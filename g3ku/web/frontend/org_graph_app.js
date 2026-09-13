@@ -4693,6 +4693,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
         });
     }).join("");
     if (typeof bindTraceRoundToolStrips === "function") bindTraceRoundToolStrips(turn.listEl);
+    if (typeof bindTraceFieldCopyActions === "function") bindTraceFieldCopyActions(turn.listEl);
     const stageCount = summary.stages.length;
     const roundCount = summary.stages.reduce((sum, stage) => sum + (Array.isArray(stage?.rounds) ? stage.rounds.length : 0), 0);
     turn.steps = roundCount || stageCount;
@@ -6204,11 +6205,15 @@ function syncCeoToolStepOutput(item) {
     const previewEl = item.querySelector(".interaction-step-preview");
     const detailEl = item.querySelector(".interaction-step-detail");
     const disclosureEl = item.querySelector(".interaction-step-disclosure");
+    const copyEl = item.querySelector(".interaction-step-copy");
     const detailText = normalizeInteractionDetailText(item.dataset.detailText || "");
     const previewText = buildInteractionPreviewText(detailText) || detailText;
     const collapsible = isInteractionDetailCollapsible(detailText);
     const expanded = collapsible && item.dataset.outputExpanded === "true";
     if (!collapsible) item.dataset.outputExpanded = "false";
+    if (copyEl instanceof HTMLButtonElement) {
+        copyEl.hidden = !detailText;
+    }
     if (previewEl instanceof HTMLElement) {
         previewEl.textContent = previewText;
         previewEl.hidden = expanded || !previewText;
@@ -6242,6 +6247,32 @@ function toggleCeoToolStepOutput(item) {
     if (item.dataset.outputExpanded === "true") {
         void ensureCeoToolStepFullOutput(item);
     }
+}
+
+async function copyCeoToolStepOutput(item) {
+    // 会话工具步骤的复制入口:优先取已展开/水合过的完整结果,
+    // 带 outputRef 且未水合时先拉取全量输出,保证复制的是完整内容。
+    if (!(item instanceof HTMLElement)) return;
+    const button = item.querySelector(".interaction-step-copy");
+    let text = normalizeInteractionDetailText(item.dataset.detailText || "");
+    if (item.dataset.outputRef) {
+        if (typeof ensureCeoToolStepFullOutput === "function") {
+            text = await ensureCeoToolStepFullOutput(item);
+        }
+    }
+    text = String(text || "").trim();
+    if (!text) {
+        if (typeof flashTraceCopyButton === "function" && button instanceof HTMLButtonElement) flashTraceCopyButton(button, false);
+        showToast({ title: "没有可复制的内容", text: "该工具步骤暂无输出内容。", kind: "error" });
+        return;
+    }
+    const copied = await copyTextToClipboard(text);
+    if (typeof flashTraceCopyButton === "function" && button instanceof HTMLButtonElement) flashTraceCopyButton(button, !!copied);
+    showToast({
+        title: copied ? "已复制" : "复制失败",
+        text: copied ? "工具结果已复制到剪贴板。" : "请手动选中文本后复制。",
+        kind: copied ? "success" : "error",
+    });
 }
 
 function trimCeoToolSteps(turn) {
@@ -6425,6 +6456,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
                 <span class="interaction-step-lead">
                     <span class="interaction-step-icon" data-icon-name="loader-circle"><i data-lucide="loader-circle"></i></span>
                     <span class="interaction-step-title"></span>
+                    <button type="button" class="interaction-step-copy" hidden aria-label="复制工具结果" title="复制工具结果"><i data-lucide="copy"></i></button>
                 </span>
                 <span class="interaction-step-side">
                     <time class="interaction-step-started" hidden></time>
@@ -6443,6 +6475,11 @@ function applyCeoToolEventToTurn(turn, event = {}) {
             mutateCeoFeed(() => {
                 toggleCeoToolStepOutput(item);
             }, { scrollMode: "preserve" });
+        });
+        item.querySelector(".interaction-step-copy")?.addEventListener("click", (interactionEvent) => {
+            interactionEvent.preventDefault();
+            interactionEvent.stopPropagation();
+            void copyCeoToolStepOutput(item);
         });
         turn.listEl.appendChild(item);
     }

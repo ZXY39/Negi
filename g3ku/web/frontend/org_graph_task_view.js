@@ -1460,13 +1460,13 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
         <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
             <div class="task-trace-round-panel-title">${esc(toolName)}</div>
             ${[
-                renderTraceField("参数", step?.arguments_text, "无参数"),
+                renderTraceField("参数", step?.arguments_text, "无参数", { copyable: true }),
                 renderTraceOutputField(
                     "工具输出",
                     step?.output_text,
                     step?.output_ref,
                     String(step?.status || "") === "running" ? "等待工具输出..." : "暂无工具输出",
-                    { decodeEscapes: true },
+                    { decodeEscapes: true, copyable: true },
                 ),
                 recoveryFields,
             ].join("")}
@@ -1645,13 +1645,13 @@ function buildExecutionTraceSteps(trace, node) {
             status: step.status || "info",
             open: false,
             bodyHtml: [
-                renderTraceField("Arguments", step.arguments_text, "No arguments"),
+                renderTraceField("Arguments", step.arguments_text, "No arguments", { copyable: true }),
                 renderTraceOutputField(
                     "Output",
                     step.output_text,
                     step.output_ref,
                     step.status === "running" ? "Waiting for tool output..." : "No tool output",
-                    { decodeEscapes: true },
+                    { decodeEscapes: true, copyable: true },
                 ),
             ].join(""),
         })),
@@ -2041,8 +2041,8 @@ function renderExecutionTrace(node) {
             status: step.status || "info",
             open: false,
             bodyHtml: [
-                renderTraceField("参数", step.arguments_text, "无参数"),
-                renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出..." : "暂无工具输出"),
+                renderTraceField("参数", step.arguments_text, "无参数", { copyable: true }),
+                renderTraceField("工具输出", step.output_text, step.status === "running" ? "等待工具输出..." : "暂无工具输出", { copyable: true }),
             ].join(""),
         })),
         renderTraceStep({
@@ -2084,25 +2084,39 @@ function traceStatusLabel(status) {
     }[String(status || "")] || "信息");
 }
 
-function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false } = {}) {
-    const text = readableText(value, { decodeEscapes, emptyText });
+function renderTraceLabelRow(label, { copyable = false } = {}) {
+    // 字段标题行:需要时在标题旁挂一个复制按钮,点击复制下方代码块内容。
+    const copyTitle = `复制 ${String(label || "").trim()}`.trim();
+    const copyMarkup = copyable
+        ? `<button type="button" class="task-trace-copy" aria-label="${esc(copyTitle)}" title="${esc(copyTitle)}"><i data-lucide="copy"></i></button>`
+        : "";
     return `
-        <div class="task-trace-field">
-            <div class="task-trace-label">${esc(label)}</div>
-            <div class="code-block task-trace-code">${esc(text)}</div>
+        <div class="task-trace-label-row">
+            <span class="task-trace-label">${esc(label)}</span>
+            ${copyMarkup}
         </div>
     `;
 }
 
-function renderTraceOutputField(label, value, outputRef = "", emptyText = "暂无内容", { decodeEscapes = false } = {}) {
+function renderTraceField(label, value, emptyText = "暂无内容", { decodeEscapes = false, copyable = false } = {}) {
+    const text = readableText(value, { decodeEscapes, emptyText });
+    return `
+        <div class="task-trace-field">
+            ${renderTraceLabelRow(label, { copyable })}
+            <div class="code-block task-trace-code" data-empty-text="${esc(String(emptyText || ""))}">${esc(text)}</div>
+        </div>
+    `;
+}
+
+function renderTraceOutputField(label, value, outputRef = "", emptyText = "暂无内容", { decodeEscapes = false, copyable = false } = {}) {
     const text = readableText(value, { decodeEscapes, emptyText });
     const normalizedRef = String(outputRef || "").trim();
     const refAttrs = normalizedRef
         ? ` data-output-ref="${esc(normalizedRef)}" data-empty-text="${esc(String(emptyText || ""))}"`
-        : "";
+        : ` data-empty-text="${esc(String(emptyText || ""))}"`;
     return `
         <div class="task-trace-field">
-            <div class="task-trace-label">${esc(label)}</div>
+            ${renderTraceLabelRow(label, { copyable })}
             <div class="code-block task-trace-code task-trace-output-value"${refAttrs}>${esc(text)}</div>
         </div>
     `;
@@ -2120,6 +2134,81 @@ function hydrateTraceOutputBlocks(root) {
     outputBlocks.forEach((block) => {
         if (!(block instanceof HTMLElement)) return;
         void ensureTraceOutputCodeBlockContent(block);
+    });
+}
+
+const traceCopyFlashTimers = new WeakMap();
+
+function setTraceCopyButtonIcon(button, iconName) {
+    if (!(button instanceof HTMLButtonElement)) return;
+    button.innerHTML = `<i data-lucide="${esc(iconName)}"></i>`;
+    if (typeof icons === "function") icons(true);
+}
+
+function flashTraceCopyButton(button, succeeded = true) {
+    // 复制结果反馈:短暂换成 check/x 图标,1.4s 后恢复 copy 图标。
+    if (!(button instanceof HTMLButtonElement)) return;
+    const previousTimer = traceCopyFlashTimers.get(button);
+    if (previousTimer) window.clearTimeout(previousTimer);
+    setTraceCopyButtonIcon(button, succeeded ? "check" : "x");
+    button.classList.toggle("is-copied", !!succeeded);
+    button.classList.toggle("is-copy-failed", !succeeded);
+    traceCopyFlashTimers.set(button, window.setTimeout(() => {
+        traceCopyFlashTimers.delete(button);
+        if (!(button instanceof HTMLButtonElement)) return;
+        setTraceCopyButtonIcon(button, "copy");
+        button.classList.remove("is-copied", "is-copy-failed");
+    }, 1400));
+}
+
+async function resolveTraceFieldCopyText(code) {
+    if (!(code instanceof HTMLElement)) return "";
+    // 懒加载输出块:未水合时先拉取完整内容,保证复制出来的是全量结果而非预览片段。
+    if (code.dataset.outputRef && code.dataset.outputHydrated !== "true"
+        && typeof ensureTraceOutputCodeBlockContent === "function") {
+        return String(await ensureTraceOutputCodeBlockContent(code) || "");
+    }
+    return String(code.textContent || "");
+}
+
+async function copyTraceFieldValue(button, label) {
+    const field = button instanceof HTMLElement ? button.closest(".task-trace-field") : null;
+    const code = field instanceof HTMLElement ? field.querySelector(".task-trace-code") : null;
+    const fieldLabel = String(label || "").trim() || "内容";
+    const emptyText = String(code?.dataset?.emptyText || "").trim();
+    let text = String(await resolveTraceFieldCopyText(code) || "").trim();
+    if (!text || (emptyText && text === emptyText)) text = "";
+    if (!text) {
+        flashTraceCopyButton(button, false);
+        if (typeof showToast === "function") {
+            showToast({ title: "没有可复制的内容", text: `${fieldLabel}当前为空。`, kind: "error" });
+        }
+        return;
+    }
+    const copied = typeof copyTextToClipboard === "function" && await copyTextToClipboard(text);
+    flashTraceCopyButton(button, !!copied);
+    if (typeof showToast === "function") {
+        showToast({
+            title: copied ? "已复制" : "复制失败",
+            text: copied ? `${fieldLabel}已复制到剪贴板。` : "请手动选中文本后复制。",
+            kind: copied ? "success" : "error",
+        });
+    }
+}
+
+function bindTraceFieldCopyActions(traceList) {
+    // 与 bindTraceRoundToolStrips 一样按轨道根元素做一次委托绑定:
+    // 内容重建(innerHTML 替换)不会丢失监听,通过 dataset 标记防重复绑定。
+    if (!(traceList instanceof HTMLElement) || traceList.dataset.traceCopyBindings === "true") return;
+    traceList.dataset.traceCopyBindings = "true";
+    traceList.addEventListener("click", (event) => {
+        const button = event.target instanceof Element ? event.target.closest(".task-trace-copy") : null;
+        if (!(button instanceof HTMLButtonElement) || !traceList.contains(button)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const field = button.closest(".task-trace-field");
+        const label = String(field?.querySelector?.(".task-trace-label")?.textContent || "").trim() || "内容";
+        void copyTraceFieldValue(button, label);
     });
 }
 
@@ -2198,6 +2287,7 @@ function renderExecutionTrace(node, { viewState = null } = {}) {
     });
     bindTraceRoundToolStrips(traceList);
     bindTraceOutputAutoLoad(traceList);
+    bindTraceFieldCopyActions(traceList);
     traceItems.filter((item) => item instanceof HTMLElement && item.open).forEach((item) => hydrateTraceOutputBlocks(item));
     refreshTaskDetailScrollRegions();
     if (effectiveViewState && shouldReplace) {

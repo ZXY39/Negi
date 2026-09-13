@@ -3250,6 +3250,10 @@ textarea {
 
 .interaction-step-detail {
     margin-top: 2px;
+    /* 会话流工具输出展开后同样封顶,避免长输出把聊天流刷满。 */
+    max-height: 260px;
+    overflow: auto;
+    overscroll-behavior: contain;
 }
 
 .interaction-step-disclosure {
@@ -3512,16 +3516,85 @@ textarea {
     gap: var(--space-2);
 }
 
+.task-trace-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    min-width: 0;
+}
+
 .task-trace-label {
     font-size: 0.74rem;
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     color: var(--text-muted);
+    min-width: 0;
+}
+
+.task-trace-copy,
+.interaction-step-copy {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.task-trace-copy:hover,
+.interaction-step-copy:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-app));
+}
+
+.task-trace-copy:focus-visible,
+.interaction-step-copy:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
+    outline-offset: 2px;
+}
+
+.task-trace-copy.is-copied,
+.interaction-step-copy.is-copied {
+    color: var(--status-success-text);
+    border-color: color-mix(in srgb, var(--status-success-text) 32%, transparent);
+    background: color-mix(in srgb, var(--status-success-bg) 88%, transparent);
+}
+
+.task-trace-copy.is-copy-failed,
+.interaction-step-copy.is-copy-failed {
+    color: var(--status-failed-text);
+    border-color: color-mix(in srgb, var(--status-failed-text) 32%, transparent);
+    background: color-mix(in srgb, var(--status-failed-bg) 88%, transparent);
+}
+
+.task-trace-copy svg,
+.interaction-step-copy svg {
+    width: 13px;
+    height: 13px;
+}
+
+.task-trace-copy[hidden],
+.interaction-step-copy[hidden] {
+    display: none !important;
 }
 
 .task-trace-code {
     min-height: 56px;
+    /* 工具输入/输出内容很多时不再把详情页刷满:
+       超过固定高度后在内部滚动,由全局细滚动条承载。 */
+    max-height: 260px;
+    overflow: auto;
+    overscroll-behavior: contain;
     font-size: 0.85rem;
     background: color-mix(in srgb, var(--bg-panel) 62%, var(--bg-app));
 }
