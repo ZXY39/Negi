@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -35,7 +35,12 @@ from main.service.task_stall_callback import (
     normalize_task_stall_reason,
 )
 from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
-from main.service.task_stall_notifier import stalled_minutes_since, stall_bucket_minutes
+from main.service.task_stall_notifier import (
+    effective_silence_start,
+    running_tool_deadline,
+    stall_bucket_minutes,
+    stalled_minutes_since,
+)
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT,
     build_task_terminal_payload,
@@ -527,13 +532,22 @@ class WebSessionHeartbeatService:
                 if bool(runtime_state.get("cancel_requested")):
                     discarded_event_ids.add(latest.event_id)
                     continue
+            # 运行中工具仍在其统一超时截止时间内时，静默是预期行为（节点按要求等待
+            # 工具完成），任务并非失速；此时入队的失速事件已过期，直接丢弃，避免误报。
+            tool_deadline = running_tool_deadline(runtime_state)
+            if tool_deadline is not None and tool_deadline > datetime.now(timezone.utc):
+                discarded_event_ids.add(latest.event_id)
+                continue
             last_visible_output_at = str(
                 runtime_state.get("last_visible_output_at")
                 or (latest.payload or {}).get("last_visible_output_at")
                 or getattr(task, "created_at", "")
                 or ""
             ).strip()
-            current_bucket = stall_bucket_minutes(last_visible_output_at)
+            # 与失速判定同一静默锚点：运行中工具截止时间晚于最近可见输出时以截止时间计。
+            silence_start = effective_silence_start(runtime_state, last_visible_output_at)
+            baseline_iso = silence_start.isoformat() if silence_start is not None else last_visible_output_at
+            current_bucket = stall_bucket_minutes(baseline_iso)
             payload_bucket = int((latest.payload or {}).get("bucket_minutes") or 0)
             if current_bucket <= 0 or current_bucket < payload_bucket:
                 discarded_event_ids.add(latest.event_id)
@@ -551,7 +565,7 @@ class WebSessionHeartbeatService:
                     "session_id": str((latest.payload or {}).get("session_id") or origin_session_id).strip() or "web:shared",
                     "title": str((latest.payload or {}).get("title") or getattr(task, "title", "") or task_id).strip() or task_id,
                     "reason": current_reason,
-                    "stalled_minutes": stalled_minutes_since(last_visible_output_at),
+                    "stalled_minutes": stalled_minutes_since(baseline_iso),
                     "bucket_minutes": current_bucket,
                     "last_visible_output_at": last_visible_output_at,
                     "brief_text": str((latest.payload or {}).get("brief_text") or getattr(task, "brief_text", "") or "").strip(),

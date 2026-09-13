@@ -3142,6 +3142,12 @@ class ReActToolLoop:
                     started_at=started_at,
                     finished_at='',
                     elapsed_seconds=None,
+                    timeout_seconds=self._stall_deadline_timeout_seconds(
+                        tools=tools,
+                        tool_name=str(call.name or 'tool'),
+                        arguments=self._normalize_tool_call_arguments(getattr(call, 'arguments', {})),
+                        runtime_context=runtime_context,
+                    ),
                 )
                 try:
                     raw_result = await self._execute_tool_raw(
@@ -3455,6 +3461,7 @@ class ReActToolLoop:
         elapsed_seconds: float | None,
         result_content: str | None = None,
         ephemeral: bool | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         def _mutate(frame: dict[str, Any]) -> dict[str, Any]:
             next_calls: list[dict[str, Any]] = []
@@ -3471,6 +3478,8 @@ class ReActToolLoop:
                             'elapsed_seconds': elapsed_seconds,
                         }
                     )
+                    if timeout_seconds is not None:
+                        payload['timeout_seconds'] = timeout_seconds
                     if result_content is not None:
                         payload['result_content'] = result_content
                     if ephemeral is not None:
@@ -3485,6 +3494,8 @@ class ReActToolLoop:
                     'finished_at': finished_at,
                     'elapsed_seconds': elapsed_seconds,
                 }
+                if timeout_seconds is not None:
+                    payload['timeout_seconds'] = timeout_seconds
                 if result_content is not None:
                     payload['result_content'] = result_content
                 if ephemeral is not None:
@@ -3495,6 +3506,30 @@ class ReActToolLoop:
             return frame
 
         self._log_service.update_frame(task_id, node_id, _mutate, publish_snapshot=True)
+
+    @staticmethod
+    def _stall_deadline_timeout_seconds(
+        *,
+        tools: dict[str, Tool],
+        tool_name: str,
+        arguments: dict[str, Any],
+        runtime_context: dict[str, Any],
+    ) -> float | None:
+        """统一 timeout 合同下本次调用的保底截止时长（秒）。
+
+        显式 ``timeout`` 参数优先，否则取全局默认（见「统一工具 Timeout 合同」）。
+        豁免工具（``exempt_universal_timeout``，如 spawn_child_nodes / wait_tool_execution）
+        没有外层时限，返回 None，表示无法用它推导出失速判定截止时间。
+        """
+        tool = (tools or {}).get(str(tool_name or '').strip())
+        if tool is None:
+            return None
+        if bool(getattr(tool, 'exempt_universal_timeout', False)):
+            return None
+        try:
+            return float(resolve_effective_tool_timeout(arguments, runtime_context))
+        except Exception:
+            return None
 
     @staticmethod
     def _live_tool_entry(call: Any) -> dict[str, Any]:

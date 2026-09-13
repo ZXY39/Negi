@@ -99,6 +99,14 @@ Cron job delivery is claim-before-dispatch with a bounded, self-finalizing dispa
 - `prompt_lane` renders the event as a task-level line naming the `blocking_reason` plus the reminder 「如果多次出现，则不要再分发，通知用户现状任务已暂停」.
 - Distribution-failure delivery shares the generic non-`task_node_error` bounded backoff (same bucket as stall / tool_background / task_terminal), since a failed heartbeat turn leaves the event queued for re-delivery.
 
+## Task Stall Detection
+
+- The task stall notifier (in the process that runs the task) watches in-progress web tasks for prolonged silence. Visible output — recorded node output, node status change, or check result — resets the silence clock via `last_visible_output_at`. With no output, it escalates in 10-minute buckets starting at 20 minutes and emits a `task_stall` heartbeat event per new bucket.
+- Delivery mirrors the distribution-error outbox: worker mode writes a durable `task_stall_outbox` row and POSTs `/api/internal/task-stall`; the web-hosted mode enqueues the heartbeat directly. The canonical dedupe key `task-stall:{task_id}:{bucket}:{last_visible_output_at}` is recomputed server-side so at most one notice lands per (task, bucket, silence-anchor).
+- Silence while a node tool call runs within its universal timeout is expected work, not a stall. When a node tool call starts executing, the loop records the effective universal timeout on the frame's tool live state (`timeout_seconds`); exempt tools (`exempt_universal_timeout`, e.g. `spawn_child_nodes` / `wait_tool_execution`) record nothing because they have no outer bound. The silence baseline is anchored to the latest running tool's deadline (`started_at + timeout_seconds`), and buckets are measured from that anchor: a stall is emitted only if silence persists a full bucket window after the deadline, i.e. the tool neither completed nor was killed by its own timeout. The timeout value follows `tool-and-skill-system.md`「统一工具 Timeout 合同」(explicit `timeout` argument, else the global default).
+- The web heartbeat refresh path (`_refresh_task_stall_events`) re-validates a queued `task_stall` event before delivery and discards it while a running tool is still within its deadline, so an event enqueued just before a long tool started is not delivered as a false stall.
+- Debugging "false stall heartbeat while a long tool (e.g. `exec` with a large `timeout`) legitimately runs": confirm the running tool call's frame live state carries a positive `timeout_seconds`. Exempt tools and non-node tool paths do not record it, so they keep the plain silence-clock behavior.
+
 ## Shutdown Resume Wake
 
 Graceful project shutdown pauses every running session; at the next startup the web runtime wakes each recorded session through the heartbeat lane with a `shutdown_resume` event. The pause/resume lifecycle contract lives in `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」; this section owns the wake lane.

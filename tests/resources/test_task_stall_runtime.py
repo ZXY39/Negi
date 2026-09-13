@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +18,13 @@ from main.service.task_stall_callback import (
     TASK_STALL_REASON_WORKER_UNAVAILABLE,
     build_task_stall_dedupe_key,
 )
-from main.service.task_stall_notifier import _next_bucket_minutes, stall_bucket_minutes
+from main.service.task_stall_notifier import (
+    TaskStallNotifier,
+    _next_bucket_minutes,
+    effective_silence_start,
+    running_tool_deadline,
+    stall_bucket_minutes,
+)
 
 
 class _DummyChatBackend:
@@ -385,3 +391,211 @@ async def test_web_session_heartbeat_drops_task_stall_outbox_when_worker_offline
         assert entry["delivery_state"] == "delivered"
     finally:
         await service.close()
+
+
+def _runtime_state_with_tool(tool_call: dict[str, object]) -> dict[str, object]:
+    return {"frames": [{"node_id": "node:a", "tool_calls": [tool_call]}]}
+
+
+def test_running_tool_deadline_uses_started_at_plus_timeout() -> None:
+    state = _runtime_state_with_tool(
+        {
+            "tool_call_id": "call_1",
+            "tool_name": "exec",
+            "status": "running",
+            "started_at": "2026-03-24T00:00:00+00:00",
+            "timeout_seconds": 1800.0,
+        }
+    )
+    assert running_tool_deadline(state) == datetime.fromisoformat("2026-03-24T00:30:00+00:00")
+
+
+def test_running_tool_deadline_ignores_finished_exempt_and_invalid() -> None:
+    # 已完成（非 running）的工具不再约束失速判定。
+    assert (
+        running_tool_deadline(
+            _runtime_state_with_tool(
+                {
+                    "status": "success",
+                    "started_at": "2026-03-24T00:00:00+00:00",
+                    "timeout_seconds": 1800.0,
+                }
+            )
+        )
+        is None
+    )
+    # 豁免工具没有记录 timeout_seconds，不产生截止时间。
+    assert (
+        running_tool_deadline(
+            _runtime_state_with_tool({"status": "running", "started_at": "2026-03-24T00:00:00+00:00"})
+        )
+        is None
+    )
+    # 缺少 started_at 的 running 工具无法推导截止时间。
+    assert (
+        running_tool_deadline(_runtime_state_with_tool({"status": "running", "timeout_seconds": 600.0}))
+        is None
+    )
+    # 空状态。
+    assert running_tool_deadline({"frames": []}) is None
+    assert running_tool_deadline(None) is None
+
+
+def test_running_tool_deadline_takes_latest_of_multiple_running_tools() -> None:
+    state = {
+        "frames": [
+            {
+                "node_id": "node:a",
+                "tool_calls": [
+                    {"status": "running", "started_at": "2026-03-24T00:00:00+00:00", "timeout_seconds": 600.0},
+                    {"status": "running", "started_at": "2026-03-24T00:05:00+00:00", "timeout_seconds": 3600.0},
+                ],
+            }
+        ]
+    }
+    # 第二个调用：00:05 + 60min = 01:05，晚于第一个的 00:10。
+    assert running_tool_deadline(state) == datetime.fromisoformat("2026-03-24T01:05:00+00:00")
+
+
+def test_effective_silence_start_prefers_running_tool_deadline() -> None:
+    state = _runtime_state_with_tool(
+        {
+            "status": "running",
+            "started_at": "2026-03-24T00:00:00+00:00",
+            "timeout_seconds": 1800.0,
+        }
+    )
+    # 最近可见输出早于工具截止时间：以截止时间作为静默起点。
+    assert effective_silence_start(state, "2026-03-24T00:00:00+00:00") == datetime.fromisoformat(
+        "2026-03-24T00:30:00+00:00"
+    )
+    # 最近可见输出晚于工具截止时间：保留可见输出时间。
+    assert effective_silence_start(state, "2026-03-24T01:00:00+00:00") == datetime.fromisoformat(
+        "2026-03-24T01:00:00+00:00"
+    )
+    # 无运行中工具：保留可见输出时间。
+    assert effective_silence_start({"frames": []}, "2026-03-24T00:00:00+00:00") == datetime.fromisoformat(
+        "2026-03-24T00:00:00+00:00"
+    )
+
+
+def test_running_tool_within_deadline_does_not_reach_stall_bucket() -> None:
+    # 复刻事故场景：节点按要求长时间运行一个带 30 分钟超时的工具（如 exec 内睡眠等待），
+    # 在工具截止时间之前静默 25 分钟，不应落入任何失速桶。
+    tool_started = "2026-03-24T00:00:00+00:00"
+    state = _runtime_state_with_tool(
+        {"status": "running", "started_at": tool_started, "timeout_seconds": 1800.0}
+    )
+    silence_start = effective_silence_start(state, tool_started)
+    assert silence_start is not None
+    # 截止时间为 00:30；在 00:25（静默 25 分钟）时，相对静默起点仍为负/零 → 无桶。
+    at_25min = datetime.fromisoformat("2026-03-24T00:25:00+00:00")
+    assert stall_bucket_minutes(silence_start.isoformat(), now=at_25min) == 0
+    assert int(max(0.0, (at_25min - silence_start).total_seconds()) // 60) == 0
+    # 截止时间过后 20 分钟（00:50）才进入首个失速桶。
+    at_50min = datetime.fromisoformat("2026-03-24T00:50:00+00:00")
+    assert stall_bucket_minutes(silence_start.isoformat(), now=at_50min) == 20
+
+
+class _FakeStallLogService:
+    def __init__(self, state_getter):
+        self._state_getter = state_getter
+
+    def read_runtime_state(self, task_id: str):
+        return self._state_getter()
+
+    def read_task_runtime_meta(self, task_id: str):
+        state = self._state_getter() or {}
+        return {
+            "last_visible_output_at": state.get("last_visible_output_at"),
+            "last_stall_notice_bucket_minutes": state.get("last_stall_notice_bucket_minutes", 0),
+        }
+
+    def update_task_runtime_meta(self, task_id: str, **kwargs):
+        state = self._state_getter()
+        if isinstance(state, dict):
+            state.update(kwargs)
+
+
+class _FakeStallService:
+    def __init__(self, state_getter):
+        self.log_service = _FakeStallLogService(state_getter)
+        self.emitted: list[dict[str, object]] = []
+        self.task = SimpleNamespace(
+            task_id="task:fake",
+            status="in_progress",
+            is_paused=False,
+            pause_requested=False,
+            cancel_requested=False,
+            created_at="2026-03-24T00:00:00+00:00",
+        )
+
+    def get_task(self, task_id: str):
+        return self.task
+
+    def _task_origin_session_id(self, task):
+        return "web:fake"
+
+    def is_task_stall_actionable(self, task_id: str, runtime_state=None) -> bool:
+        return True
+
+    def build_task_stall_payload(self, task_id: str, *, bucket_minutes, last_visible_output_at=None):
+        return {
+            "task_id": task_id,
+            "bucket_minutes": bucket_minutes,
+            "last_visible_output_at": last_visible_output_at,
+        }
+
+    def emit_task_stall(self, payload) -> bool:
+        self.emitted.append(dict(payload or {}))
+        return True
+
+    def _stall_now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+@pytest.mark.asyncio
+async def test_notifier_suppresses_then_emits_around_tool_deadline() -> None:
+    now = datetime.now(timezone.utc)
+    holder: dict[str, object] = {
+        "state": {
+            # 最近可见输出就在当下，且有一个截止时间仍在未来的运行中工具。
+            "last_visible_output_at": now.isoformat(),
+            "last_stall_notice_bucket_minutes": 0,
+            "frames": [
+                {
+                    "node_id": "node:a",
+                    "tool_calls": [
+                        {"status": "running", "started_at": now.isoformat(), "timeout_seconds": 3600.0}
+                    ],
+                }
+            ],
+        }
+    }
+    service = _FakeStallService(lambda: holder["state"])
+    notifier = TaskStallNotifier(service=service)
+    try:
+        # 工具仍在截止时间内：不产生失速心跳。
+        await notifier._emit_if_still_due("task:fake")
+        assert service.emitted == []
+
+        # 切到「截止时间已过但工具仍 running、且持续无可见输出」的状态：应判定失速。
+        past = now - timedelta(minutes=60)
+        holder["state"] = {
+            "last_visible_output_at": past.isoformat(),
+            "last_stall_notice_bucket_minutes": 0,
+            "frames": [
+                {
+                    "node_id": "node:a",
+                    "tool_calls": [
+                        {"status": "running", "started_at": past.isoformat(), "timeout_seconds": 1800.0}
+                    ],
+                }
+            ],
+        }
+        await notifier._emit_if_still_due("task:fake")
+        assert service.emitted, "expected a stall emission after the tool deadline passed"
+        # 静默起点被锚定到工具截止时间（60 分钟前 + 30 分钟 = 30 分钟前）→ 30 分钟桶。
+        assert service.emitted[0]["bucket_minutes"] == 30
+    finally:
+        await notifier.close()

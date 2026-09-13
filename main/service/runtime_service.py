@@ -139,6 +139,7 @@ from main.service.task_stall_callback import (
 )
 from main.service.task_stall_notifier import (
     TaskStallNotifier,
+    effective_silence_start,
     stall_bucket_minutes,
     stalled_minutes_since,
 )
@@ -3755,12 +3756,16 @@ class MainRuntimeService:
             return {}
         visible_at = str(last_visible_output_at or runtime_state.get('last_visible_output_at') or task.created_at or '').strip()
         minute_seconds = float(getattr(self.task_stall_notifier, 'minute_seconds', 60.0) or 60.0)
-        current_bucket = stall_bucket_minutes(visible_at, minute_seconds=minute_seconds)
+        # 静默锚点与失速判定保持一致：运行中工具的统一超时截止时间晚于最近可见输出时，
+        # 以截止时间计失速时长，工具正常运行期间不计入（详见 heartbeat-system.md「Task Stall Detection」）。
+        silence_start = effective_silence_start(runtime_state, visible_at)
+        baseline_iso = silence_start.isoformat() if silence_start is not None else visible_at
+        current_bucket = stall_bucket_minutes(baseline_iso, minute_seconds=minute_seconds)
         if current_bucket <= 0:
             return {}
         active_bucket = max(current_bucket, max(0, int(bucket_minutes or 0)))
         stalled_minutes = max(
-            stalled_minutes_since(visible_at, minute_seconds=minute_seconds),
+            stalled_minutes_since(baseline_iso, minute_seconds=minute_seconds),
             active_bucket,
         )
         detail = self.get_task_detail_payload(task.task_id, mark_read=False) or {}

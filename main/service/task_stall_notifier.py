@@ -22,6 +22,26 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _elapsed_minutes(
+    started_at: datetime,
+    *,
+    now: datetime | None = None,
+    minute_seconds: float = 60.0,
+) -> int:
+    current = now if now is not None else _now_utc()
+    unit_seconds = max(0.001, float(minute_seconds or 60.0))
+    elapsed_seconds = max(0.0, (current - started_at).total_seconds())
+    return int(elapsed_seconds // unit_seconds)
+
+
+def _bucket_from_elapsed_minutes(elapsed_minutes: int) -> int:
+    if elapsed_minutes < 20:
+        return 0
+    if elapsed_minutes < 30:
+        return 20
+    return int(elapsed_minutes // 10) * 10
+
+
 def stall_bucket_minutes(
     last_visible_output_at: str,
     *,
@@ -29,17 +49,11 @@ def stall_bucket_minutes(
     minute_seconds: float = 60.0,
 ) -> int:
     started_at = _parse_iso(last_visible_output_at)
-    current = now if now is not None else _now_utc()
     if started_at is None:
         return 0
-    elapsed_seconds = max(0.0, (current - started_at).total_seconds())
-    unit_seconds = max(0.001, float(minute_seconds or 60.0))
-    elapsed_minutes = int(elapsed_seconds // unit_seconds)
-    if elapsed_minutes < 20:
-        return 0
-    if elapsed_minutes < 30:
-        return 20
-    return int(elapsed_minutes // 10) * 10
+    return _bucket_from_elapsed_minutes(
+        _elapsed_minutes(started_at, now=now, minute_seconds=minute_seconds)
+    )
 
 
 def stalled_minutes_since(
@@ -49,11 +63,69 @@ def stalled_minutes_since(
     minute_seconds: float = 60.0,
 ) -> int:
     started_at = _parse_iso(last_visible_output_at)
-    current = now if now is not None else _now_utc()
     if started_at is None:
         return 0
-    unit_seconds = max(0.001, float(minute_seconds or 60.0))
-    return max(0, int((current - started_at).total_seconds() // unit_seconds))
+    return max(0, _elapsed_minutes(started_at, now=now, minute_seconds=minute_seconds))
+
+
+def _coerce_positive_seconds(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):  # NaN/inf 防御
+        return None
+    return parsed if parsed > 0 else None
+
+
+def running_tool_deadline(runtime_state: Any) -> datetime | None:
+    """返回当前仍在运行的节点工具调用里最晚的「本次调用截止时间」。
+
+    截止时间 = ``started_at + timeout_seconds``，其中 ``timeout_seconds`` 是统一
+    工具 Timeout 合同为这次调用解析出的保底运行时长（显式 ``timeout`` 参数优先，
+    否则全局默认，见 tool-and-skill-system.md「统一工具 Timeout 合同」）。
+
+    只统计 ``status`` 为 ``running`` 且记录了正 ``timeout_seconds`` 的调用；豁免
+    工具（无外层时限）不记录 ``timeout_seconds``，因此不参与，保持原有失速行为。
+    无此类调用时返回 ``None``。
+    """
+    frames: list[Any] = []
+    if isinstance(runtime_state, dict):
+        frames = list(runtime_state.get("frames") or [])
+    latest: datetime | None = None
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        for call in list(frame.get("tool_calls") or []):
+            if not isinstance(call, dict):
+                continue
+            if str(call.get("status") or "").strip().lower() != "running":
+                continue
+            timeout_seconds = _coerce_positive_seconds(call.get("timeout_seconds"))
+            if timeout_seconds is None:
+                continue
+            started_at = _parse_iso(call.get("started_at"))
+            if started_at is None:
+                continue
+            deadline = started_at + timedelta(seconds=timeout_seconds)
+            if latest is None or deadline > latest:
+                latest = deadline
+    return latest
+
+
+def effective_silence_start(runtime_state: Any, last_visible_output_at: str) -> datetime | None:
+    """失速判定的有效「静默起点」。
+
+    若有正在运行且带已知截止时间的工具调用，则其截止时间晚于最近可见输出时，
+    用截止时间作为静默起点：工具运行期间以及截止时间之后，运行时先强制终止工具、
+    再由模型回合产出可见输出，静默是预期行为，不应计入失速；只有截止时间过后
+    仍持续静默，才算真正的失速候选。
+    """
+    base = _parse_iso(last_visible_output_at)
+    deadline = running_tool_deadline(runtime_state)
+    if deadline is not None and (base is None or deadline > base):
+        return deadline
+    return base
 
 
 def _next_bucket_minutes(last_bucket_minutes: int) -> int:
@@ -176,7 +248,7 @@ class TaskStallNotifier:
             return
         last_bucket_minutes = max(0, int(runtime_state.get("last_stall_notice_bucket_minutes") or 0))
         next_bucket_minutes = _next_bucket_minutes(last_bucket_minutes)
-        base_time = _parse_iso(last_visible_output_at)
+        base_time = effective_silence_start(runtime_state, last_visible_output_at)
         if base_time is None:
             return
         due_at = base_time + timedelta(seconds=(next_bucket_minutes * self.minute_seconds))
@@ -223,9 +295,13 @@ class TaskStallNotifier:
             return
         last_visible_output_at = str(runtime_state.get("last_visible_output_at") or task.created_at or "").strip()
         last_bucket_minutes = max(0, int(runtime_state.get("last_stall_notice_bucket_minutes") or 0))
-        current_bucket_minutes = stall_bucket_minutes(
-            last_visible_output_at,
-            minute_seconds=self.minute_seconds,
+        silence_start = effective_silence_start(runtime_state, last_visible_output_at)
+        current_bucket_minutes = (
+            _bucket_from_elapsed_minutes(
+                _elapsed_minutes(silence_start, minute_seconds=self.minute_seconds)
+            )
+            if silence_start is not None
+            else 0
         )
         if current_bucket_minutes <= last_bucket_minutes:
             self._schedule(task_id)
