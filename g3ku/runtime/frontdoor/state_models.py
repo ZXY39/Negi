@@ -93,6 +93,8 @@ class CeoPersistentState(TypedDict, total=False):
 
     final_output: str
 
+    silent_reply: bool
+
     error_message: str
 
     model_refs: list[str]

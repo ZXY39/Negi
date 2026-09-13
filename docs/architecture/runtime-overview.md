@@ -104,7 +104,7 @@
 
 ### 3.3 静默回复（`[G3KU_SILENT]`）
 
-任意一轮（用户轮、heartbeat、cron）的最终回复若为单独的 `[G3KU_SILENT]`（整串精确匹配，去除首尾空白），runtime 在 `_prompt_locked` 的 finalize 处把它识别为静默：不把可见回复投递到渠道（`RunResult.output=""`，channel transport 与 cron dispatch 的空输出守卫自然不投；`message_end` 文本置空并带 `silent_reply` 标记，外部 relay 跳过）、回落一条**可见**的 assistant 占位消息「信息已静默」到 transcript（维持角色交替，Web 前端无论流式还是刷新都显示该占位）、不回填请求体基线、不进 memory 复核。回合生命周期照常走完（`turn_end` / `agent_end` / `state_snapshot`、状态 `completed`），本回合中已发布的阶段与工具调用仍照常可见。Web 前端的流式收尾靠 `ceo.reply.final`：静默回合也照发一条 `ceo.reply.final`（text=「信息已静默」、`silent_reply=true`），前端 `finalizeCeoTurn` 把它当普通 final 就地结束流式气泡并显示占位，避免卡在 streaming、也避免刷新后回到 `Done.` 兜底。
+任意一轮（用户轮、heartbeat、cron）的最终回复若为单独的 `[G3KU_SILENT]`（整串精确匹配，去除首尾空白），runtime 把它识别为静默并以 `_prompt_locked` 的 finalize 为归一化点：识别分两层——frontdoor `_graph_finalize_turn` 依据 token 判定静默、用于把该回复排除出请求体基线回填，但**必须**把 `final_output` 原文（连同 `silent_reply` 标记）经 `run_turn` 原样回传，由 `_prompt_locked` 再做一次精确匹配归一化；若 finalize 层吞掉 token，`_prompt_locked` 只会看到空输出，`task_terminal` 心跳修复循环会把合法静默误判为"无效空回复"并一路撞到"连续失败"兜底文案。归一化后：不把可见回复投递到渠道（`RunResult.output=""`，channel transport 与 cron dispatch 的空输出守卫自然不投；`message_end` 文本置空并带 `silent_reply` 标记，外部 relay 跳过）、回落一条**可见**的 assistant 占位消息「信息已静默」到 transcript（维持角色交替，Web 前端无论流式还是刷新都显示该占位）、不回填请求体基线、不进 memory 复核。回合生命周期照常走完（`turn_end` / `agent_end` / `state_snapshot`、状态 `completed`），本回合中已发布的阶段与工具调用仍照常可见。Web 前端的流式收尾靠 `ceo.reply.final`：静默回合也照发一条 `ceo.reply.final`（text=「信息已静默」、`silent_reply=true`），前端 `finalizeCeoTurn` 把它当普通 final 就地结束流式气泡并显示占位，避免卡在 streaming、也避免刷新后回到 `Done.` 兜底。
 
 `HEARTBEAT_OK` 仍是内部轮（heartbeat/cron）专属的 live-only ACK；`[G3KU_SILENT]` 是更宽的静默信号——任何来源都可用，包括 `task_terminal` / `shutdown_resume` 这类本不允许静默的事件（见 `heartbeat-system.md`「Task Terminal Repair Contract」）。
 

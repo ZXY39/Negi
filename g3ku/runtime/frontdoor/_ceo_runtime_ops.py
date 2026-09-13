@@ -7339,8 +7339,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not output and not silent_reply and not bool(state.get("heartbeat_internal")):
             output = self._empty_reply_fallback(str(state.get("query_text") or ""))
         route_kind = str(state.get("route_kind") or "direct_reply")
+        # 静默回合不再在此处把 final_output 清零：清零会吞掉 is_silent_reply 信号，
+        # session_agent 侧无法把 [G3KU_SILENT] 归一化为 output='' + is_silent_reply=True，
+        # 心跳修复循环会把合法静默误判为"无效空回复"，连续撞上限后发出误导性的
+        # "连续失败"兜底文案（任务结果本来正常）。改为保留原文并把 silent_reply 显式
+        # 写回 state，由 session_agent 的精确匹配识别完成归一化；基线回填与阶段收尾
+        # 统一按 visible_output 判断，确保 token 本身不进历史/基线。
+        visible_output = "" if silent_reply else output
         result = {
-            "final_output": "" if silent_reply else output,
+            "final_output": output,
+            "silent_reply": silent_reply,
             "route_kind": route_kind,
         }
         messages = list(state.get("messages") or [])
@@ -7365,14 +7373,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 内部回合的真实可见回复必须像普通回合一样进基线，才能被下一轮上下文看见；
         # 只排除静默 ACK（空输出或 HEARTBEAT_OK），与 session_agent 转录持久化的判据一致。
         is_silent_internal_ack = is_internal_turn and str(output or "").strip() in {"", "HEARTBEAT_OK"}
-        should_append_visible_output = bool(output) and not is_silent_internal_ack and not silent_reply
+        should_append_visible_output = bool(visible_output) and not is_silent_internal_ack
         if should_append_visible_output:
-            messages.append({"role": "assistant", "content": output})
+            messages.append({"role": "assistant", "content": visible_output})
             authoritative_request_body_messages = [
                 *list(authoritative_request_body_messages),
-                {"role": "assistant", "content": output},
+                {"role": "assistant", "content": visible_output},
             ]
-        if output and route_kind == "direct_reply":
+        if visible_output and route_kind == "direct_reply":
             result["messages"] = list(messages)
             result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
             result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
@@ -7386,7 +7394,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 frontdoor_stage_state=finalized_stage_state,
             )
             return result
-        if output:
+        if visible_output:
             finalized_stage_state = self._complete_active_frontdoor_stage_state(
                 finalized_stage_state,
                 completed_stage_summary=STAGE_TURN_END_SUMMARY_POINTER,

@@ -655,6 +655,46 @@ async def test_finalize_turn_does_not_append_empty_heartbeat_output_to_baseline(
 
 
 @pytest.mark.asyncio
+async def test_finalize_turn_preserves_silent_reply_token_for_run_turn_contract() -> None:
+    # 回归：[G3KU_SILENT] 必须在 finalize 层保留原文并把 silent_reply 写回 state，
+    # 供 run_turn 透传给 session_agent 归一化为 output='' + is_silent_reply=True。
+    # 此前此处把 final_output 清零，吞掉了静默信号，心跳修复循环把合法静默误判为
+    # "无效空回复"，连续撞上限后向用户发出误导性的"连续失败"兜底文案。
+    runner = CeoFrontDoorRunner(loop=_loop_with_session("web:shared"))
+    state = {
+        "query_text": "continue",
+        "route_kind": "direct_reply",
+        "final_output": "[G3KU_SILENT]",
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "This is a background heartbeat. Do not explain internal mechanics."},
+        ],
+        "frontdoor_request_body_messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "older user"},
+            {"role": "assistant", "content": "older answer"},
+        ],
+        "frontdoor_history_shrink_reason": "",
+        "frontdoor_stage_state": {},
+        "frontdoor_canonical_context": {"active_stage_id": "", "transition_required": False, "stages": []},
+        "heartbeat_internal": True,
+    }
+
+    finalized = await runner._graph_finalize_turn(state)
+
+    assert finalized["final_output"] == "[G3KU_SILENT]"
+    assert finalized["silent_reply"] is True
+    # token 本身不进基线/历史
+    assert finalized["frontdoor_request_body_messages"] == [
+        *state["frontdoor_request_body_messages"],
+    ]
+    assert all(
+        str(message.get("content") or "") != "[G3KU_SILENT]"
+        for message in list(finalized.get("messages") or [])
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_turn_quarantines_unexpected_context_shrink_without_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

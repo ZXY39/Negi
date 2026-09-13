@@ -505,6 +505,73 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
 
 
 @pytest.mark.asyncio
+async def test_ceo_frontdoor_runner_returns_silent_reply_token_through_finalize(
+    monkeypatch, tmp_path
+) -> None:
+    # 回归：模型以 [G3KU_SILENT] 收尾时，run_turn 必须原样把它返回给 session_agent
+    # （由后者归一化为 RunResult(output='', is_silent_reply=True)）。此前 finalize 层
+    # 把 final_output 清零，session_agent 拿不到信号，心跳修复循环把合法静默误判为
+    # "无效空回复"并发出"连续失败"兜底文案。
+    async def _noop_ready() -> None:
+        return None
+
+    backend = _BackendRecorder([LLMResponse(content="[G3KU_SILENT]", finish_reason="stop")])
+    loop = SimpleNamespace(
+        _ensure_checkpointer_ready=_noop_ready,
+        sessions=SessionManager(tmp_path),
+        _checkpointer=None,
+        _store=None,
+        main_task_service=None,
+        tools=_FakeToolRegistry([]),
+        max_iterations=8,
+        resource_manager=None,
+        tool_execution_manager=None,
+    )
+    runner = CeoFrontDoorRunner(loop=loop)
+
+    async def _resolve_for_actor(*, actor_role: str, session_id: str):
+        _ = actor_role, session_id
+        return {"skills": [], "tool_families": [], "tool_names": []}
+
+    async def _build_for_ceo(**kwargs):
+        _ = kwargs
+        return _assembly_result(tool_names=[])
+
+    monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
+    monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
+    monkeypatch.setattr(runner, "_resolve_chat_backend", lambda: backend)
+    monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
+    monkeypatch.setattr(runner, "_refresh_runtime_config_for_retry_invalidation", lambda: False)
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "openai_codex:gpt-test",
+            "provider_model": "openai_codex:gpt-test",
+            "context_window_tokens": 128000,
+        },
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _memory_channel="web",
+        _memory_chat_id="shared",
+        _channel="web",
+        _chat_id="shared",
+        _active_cancel_token=None,
+        inflight_turn_snapshot=lambda: None,
+    )
+
+    output = await runner.run_turn(
+        user_input=SimpleNamespace(content="", metadata={"heartbeat_internal": True}),
+        session=session,
+    )
+
+    assert output == "[G3KU_SILENT]"
+    assert len(backend.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_ceo_frontdoor_runner_does_not_duplicate_current_user_when_builder_already_includes_it(monkeypatch, tmp_path) -> None:
     async def _noop_ready() -> None:
         return None
