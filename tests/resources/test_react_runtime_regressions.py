@@ -6119,6 +6119,36 @@ def test_execution_result_contract_violation_message_keeps_workflow_open() -> No
     assert 'do not force another premature final submission' in message
 
 
+def test_execution_repair_prompts_lead_with_continue_and_ban_success_placeholder() -> None:
+    """事故 task:61fdc3580cdd：弱模型在修复提示引导下提交 summary="placeholder" 的
+    success+final，被握手当作真实交付送进验收。
+
+    契约：修复/违规提示必须把「未完成就继续用工具」放在 schema 模板之前，
+    并显式禁止 success 占位提交；node_execution.md 有对称反占位条款与
+    success 结束前自检。
+    """
+    from main.prompts import load_prompt
+
+    protocol = ReActToolLoop._result_protocol_message(node_kind='execution')
+    violation = ReActToolLoop._result_contract_violation_message(
+        ['summary must not be empty'],
+        node_kind='execution',
+    )
+    guidance = ReActToolLoop._result_repair_guidance(node_kind='execution')
+
+    for message in (protocol, violation):
+        # 继续执行的指令必须在「收尾模板」之前，避免把照抄字段的出口先递给弱模型。
+        assert message.index('If the task is not complete yet') < message.index('If you are ending the node now')
+        assert 'placeholder' in message
+
+    assert 'success+final submission goes straight to acceptance' in guidance
+    assert 'never use it as a placeholder' in guidance
+
+    prompt = load_prompt('node_execution.md')
+    assert '同样禁止把 `success + final` 用于占位' in prompt
+    assert '如果我要返回 `success`' in prompt
+
+
 def test_acceptance_result_contract_violation_message_uses_final_or_blocked_only() -> None:
     message = ReActToolLoop._result_contract_violation_message(
         ['summary must not be empty'],

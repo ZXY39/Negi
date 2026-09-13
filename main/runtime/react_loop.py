@@ -5670,69 +5670,6 @@ class ReActToolLoop:
         return False
 
     @staticmethod
-    def _result_protocol_message(*, node_kind: str = 'execution') -> str:
-        guidance = ReActToolLoop._result_repair_guidance(node_kind=node_kind)
-        normalized_kind = str(node_kind or '').strip().lower()
-        if normalized_kind == 'acceptance':
-            return (
-                f'你上一条回复不符合结果 JSON 协议 v{RESULT_SCHEMA_VERSION}。'
-                '请只回复一个 JSON 对象，并且只使用以下键：'
-                '{"status":"success|failed","delivery_status":"final|partial|blocked","summary":"...",'
-                '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-                '"remaining_work":["..."],"blocking_reason":"..."}。'
-                '不要使用 Markdown。'
-                f'{guidance}'
-            )
-        return (
-            f'你上一条回复不符合结果 JSON 协议 v{RESULT_SCHEMA_VERSION}。'
-            '如果你现在要结束当前节点，只回复一个 JSON 对象，并且只使用以下键：'
-            '{"status":"success|failed","delivery_status":"final|partial|blocked","summary":"...",'
-            '"answer":"...","evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
-            '"remaining_work":["..."],"blocking_reason":"..."}。'
-            '如果任务实际上还没有完成，不要输出 prose 或提前结束的结果 JSON，而是继续使用工具调用、阶段切换或子节点动作推进。'
-            '当你真正返回最终 JSON 时，也不要使用 Markdown。'
-            f'{guidance}'
-        )
-
-    @staticmethod
-    def _result_contract_violation_message(violations: list[str], *, node_kind: str = 'execution') -> str:
-        bullet_text = '; '.join(str(item or '').strip() for item in violations if str(item or '').strip()) or '结果协议违规'
-        guidance = ReActToolLoop._result_repair_guidance(node_kind=node_kind)
-        normalized_kind = str(node_kind or '').strip().lower()
-        if normalized_kind == 'acceptance':
-            return (
-                f'你上一条回复虽然能解析成 JSON，但违反了结果协议 v{RESULT_SCHEMA_VERSION}：{bullet_text}。'
-                '请修复所有违规项，并只回复一个 JSON 对象。'
-                '除非交付物已经完整满足要求，否则不要声称 success。'
-                f'{guidance}'
-            )
-        return (
-            f'你上一条回复虽然能解析成 JSON，但违反了结果协议 v{RESULT_SCHEMA_VERSION}：{bullet_text}。'
-            '如果你现在要结束当前节点，请修复所有违规项，并只回复一个 JSON 对象。'
-            '如果任务实际上还没有完成，不要强行再输出一个提前结束的结果 JSON，而是继续使用工具调用、阶段切换或子节点动作推进。'
-            '除非交付物已经完整满足要求，否则不要声称 success。'
-            f'{guidance}'
-        )
-
-    @staticmethod
-    def _result_repair_guidance(*, node_kind: str) -> str:
-        normalized_kind = str(node_kind or '').strip().lower()
-        if normalized_kind == 'acceptance':
-            return (
-                '验收节点不要使用 delivery_status="partial"。'
-                '如果你是在拒绝交付，返回 failed+final。'
-                '如果因为证据缺失、artifact 不可读或上下文不足而无法完成验收，返回 failed+blocked。'
-                '任何 failed 结论都不允许用于占位或敷衍；在阻塞核验模式下，"阻塞成立"的 success 裁决必须附带实际核验过的证据。'
-            )
-        return (
-            '执行节点不要使用 delivery_status="partial"。'
-            '如果任务实际上还没有完成，继续通过工具调用或阶段切换推进，而不是继续输出结果 JSON。'
-            '只有在当前权限、环境和工具条件下确实被阻塞时，才返回 failed+blocked。'
-            'failed+blocked 会被验收节点独立核验，不成立的阻塞声明会被打回；'
-            '禁止用 failed 结果占位或逃避继续执行——只要预算未用尽且存在可行下一步，就必须继续推进。'
-        )
-
-    @staticmethod
     def _extract_json_object_candidates(content: str) -> list[str]:
         text = str(content or '')
         candidates: list[str] = []
@@ -5781,11 +5718,12 @@ class ReActToolLoop:
             )
         return (
             f'Your previous reply did not submit a valid final result for result contract v{RESULT_SCHEMA_VERSION}. '
-            f'If you are ending the node now, call `{FINAL_RESULT_TOOL_NAME}` with exactly these fields: '
+            'If the task is not complete yet — deliverables not actually produced and verified — continue with tools or `submit_next_stage` instead of forcing a premature final submission. '
+            f'If you are ending the node now because the work is truly finished, call `{FINAL_RESULT_TOOL_NAME}` with exactly these fields: '
             '{"status":"success|failed","delivery_status":"final|blocked","summary":"...","answer":"...",'
             '"evidence":[{"kind":"file|artifact|url","path":"","ref":"","start_line":1,"end_line":1,"note":"..."}],'
             '"remaining_work":["..."],"blocking_reason":"..."}. '
-            'If the task is not complete yet, continue with tools or `submit_next_stage` instead of forcing a premature final submission. '
+            'Never fill these fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a success+final submission goes straight to acceptance. '
             'Do not reply with prose, Markdown, or a raw JSON object. '
             f'{guidance}'
         )
@@ -5804,8 +5742,9 @@ class ReActToolLoop:
             )
         return (
             f'Your last `{FINAL_RESULT_TOOL_NAME}` payload violated result contract v{RESULT_SCHEMA_VERSION}: {bullet_text}. '
-            f'If you are ending the node now, fix the payload and call `{FINAL_RESULT_TOOL_NAME}` again. '
-            'If the task is not complete yet, do not force another premature final submission. Continue with tools or `submit_next_stage`. '
+            'If the task is not complete yet, continue with tools or `submit_next_stage`; do not force another premature final submission. '
+            f'If you are ending the node now because the work is truly finished, fix the payload and call `{FINAL_RESULT_TOOL_NAME}` again. '
+            'Never fill the fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a success+final submission goes straight to acceptance. '
             f'{guidance}'
         )
 
@@ -5823,7 +5762,9 @@ class ReActToolLoop:
             'Use success+final on completion, and use failed+blocked only when the node is genuinely blocked. '
             'If work remains, continue with tools or `submit_next_stage` instead of finalizing. '
             'A failed+blocked claim is independently verified by an acceptance node and rejected claims are sent back; '
-            'never use a failed result as a placeholder or to escape remaining work while budget and a viable next step exist.'
+            'never use a failed result as a placeholder or to escape remaining work while budget and a viable next step exist. '
+            'A success+final submission goes straight to acceptance as well: never use it as a placeholder — '
+            'if the deliverables are not actually produced and verifiable, keep working with tools instead of submitting success.'
         )
 
     @staticmethod
