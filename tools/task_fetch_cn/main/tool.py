@@ -8,7 +8,9 @@ import yaml
 from g3ku.agent.tools.base import Tool
 
 
-TASK_TYPE_PARAM = '\u4efb\u52a1\u7c7b\u578b'
+TASK_TYPE_PARAM = '任务类型'
+SCOPE_PARAM = '查询范围'
+SCOPE_GLOBAL = '全局'
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
 
 
@@ -39,7 +41,10 @@ class _TaskListHandler(Tool):
         runtime = _runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
         task_type = int(kwargs.get(TASK_TYPE_PARAM))
-        return self._service.get_tasks(str(runtime.get('session_key') or 'web:shared'), task_type)
+        # 查询范围：全局=None（跨会话全量），缺省=当前会话
+        scope = str(kwargs.get(SCOPE_PARAM) or '').strip()
+        session_key = None if scope == SCOPE_GLOBAL else str(runtime.get('session_key') or 'web:shared')
+        return self._service.get_tasks(session_key, task_type)
 
 
 def build(runtime):

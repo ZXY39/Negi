@@ -2,14 +2,14 @@
 kind: tool
 display_name: "任务汇总工具"
 name: task_summary
-description: Summarize total, in-progress, and failed task counts.
+description: Summarize total, in-progress (with paused breakdown), and failed task counts for the current session; pass 查询范围=全局 to count tasks across all sessions.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local task runtime tool. Handler and governance live with the resource so discovery can refresh without a host restart.
+  summary: Resource-local task runtime tool with 查询范围 scope parameter (session default / global). Handler and governance live with the resource so discovery can refresh without a host restart.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
@@ -21,7 +21,11 @@ permissions:
   filesystem: []
 parameters:
   type: object
-  properties: {}
+  properties:
+    查询范围:
+      type: string
+      enum: ["本会话", "全局"]
+      description: "本会话 (default) = only tasks created in the current session; 全局 = tasks across all sessions."
 governance:
   family: task_runtime
   display_name: Task Runtime

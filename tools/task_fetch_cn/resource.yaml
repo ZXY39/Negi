@@ -2,14 +2,14 @@ schema_version: 1
 kind: tool
 display_name: "获取任务"
 name: task_list
-description: List task ids for a requested task category.
+description: List task ids for a requested task category within the current session; pass 查询范围=全局 to list across all sessions (global rows carry status and session labels).
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local task runtime tool. Handler and governance live with the resource so discovery can refresh without a host restart.
+  summary: Resource-local task runtime tool with 查询范围 scope parameter (session default / global). Handler and governance live with the resource so discovery can refresh without a host restart.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:
@@ -26,6 +26,10 @@ parameters:
       type: integer
       enum: [1, 2, 3, 4]
       description: "1=all tasks, 2=in progress, 3=failed, 4=unread."
+    查询范围:
+      type: string
+      enum: ["本会话", "全局"]
+      description: "本会话 (default) = only tasks of the current session; 全局 = tasks across all sessions."
   required: [任务类型]
 governance:
   family: task_runtime

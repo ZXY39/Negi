@@ -9577,14 +9577,27 @@ class MainRuntimeService:
         # receive an extra retrieved-memory block here.
         return enriched
 
-    def summary(self, session_id: str) -> str:
-        return self.query_service.summary(str(session_id or 'web:shared').strip() or 'web:shared').text
+    def summary(self, session_id: str | None) -> str:
+        # session_id 传 None/'' = 全局口径（跨会话），由工具层按「查询范围」参数决定。
+        normalized = str(session_id or '').strip()
+        return self.query_service.summary(normalized or None).text
 
-    def get_tasks(self, session_id: str, task_type: int) -> str:
-        items = self.query_service.get_tasks(str(session_id or 'web:shared').strip() or 'web:shared', task_type)
+    def get_tasks(self, session_id: str | None, task_type: int) -> str:
+        normalized = str(session_id or '').strip()
+        items = self.query_service.get_tasks(normalized or None, task_type)
         if not items:
             return '无匹配任务。'
-        return '\n'.join(f'- {item.task_id}：{item.brief}' for item in items)
+        if normalized:
+            return '\n'.join(f'- {item.task_id}：{item.brief}' for item in items)
+        # 全局口径：逐行附状态与会话归属；in_progress 且 paused 的任务并没有真在跑，
+        # 标记出来避免模型把暂停僵尸当成运行中任务转述。
+        lines: list[str] = []
+        for item in items:
+            state = str(item.status or '')
+            if state == 'in_progress' and bool(item.is_paused):
+                state = 'in_progress/paused'
+            lines.append(f'- {item.task_id} [{state}] ({item.session_id})：{item.brief}')
+        return '\n'.join(lines)
 
     def failed_node_ids(self, task_id: str) -> str:
         task_id = self.normalize_task_id(task_id)
@@ -9899,6 +9912,16 @@ def _tool_runtime_payload(runtime: dict[str, Any] | None, kwargs: dict[str, Any]
 
 _TASK_KEYWORDS_PARAM = '\u4efb\u52a1\u5173\u952e\u8bcd'
 _TASK_ID_LIST_PARAM = '\u4efb\u52a1id\u5217\u8868'
+_TASK_SCOPE_PARAM = '查询范围'
+_TASK_SCOPE_GLOBAL = '全局'
+
+
+def _tool_session_scope(runtime: dict[str, Any], kwargs: dict[str, Any]) -> str | None:
+    """按「查询范围」参数解析会话口径：全局=None（跨会话全量），缺省=当前会话。"""
+    scope = str(kwargs.get(_TASK_SCOPE_PARAM) or '').strip()
+    if scope == _TASK_SCOPE_GLOBAL:
+        return None
+    return str(runtime.get('session_key') or 'web:shared')
 
 
 class TaskSummaryTool(Tool):
@@ -9911,16 +9934,25 @@ class TaskSummaryTool(Tool):
 
     @property
     def description(self) -> str:
-        return '返回总任务、进行中任务、失败任务数量。'
+        return '返回总任务、进行中（含其中暂停数）、失败任务数量；默认统计当前会话，查询范围=全局时统计所有会话。'
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {'type': 'object', 'properties': {}}
+        return {
+            'type': 'object',
+            'properties': {
+                _TASK_SCOPE_PARAM: {
+                    'type': 'string',
+                    'enum': ['本会话', '全局'],
+                    'description': '本会话（默认）=只统计当前会话创建的任务；全局=统计所有会话的任务。',
+                },
+            },
+        }
 
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
-        return self._service.summary(str(runtime.get('session_key') or 'web:shared'))
+        return self._service.summary(_tool_session_scope(runtime, kwargs))
 
 
 class GetTasksTool(Tool):
@@ -9933,7 +9965,7 @@ class GetTasksTool(Tool):
 
     @property
     def description(self) -> str:
-        return '按任务类型返回任务 id 列表和简要描述。'
+        return '按任务类型返回任务 id 列表和简要描述；默认当前会话，查询范围=全局时跨会话（全局结果逐行附状态与会话归属）。'
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -9941,6 +9973,11 @@ class GetTasksTool(Tool):
             'type': 'object',
             'properties': {
                 '任务类型': {'type': 'integer', 'enum': [1, 2, 3, 4], 'description': '1=所有任务，2=进行中任务，3=失败任务，4=未读任务。'},
+                _TASK_SCOPE_PARAM: {
+                    'type': 'string',
+                    'enum': ['本会话', '全局'],
+                    'description': '本会话（默认）=只列当前会话的任务；全局=列所有会话的任务。',
+                },
             },
             'required': ['任务类型'],
         }
@@ -9949,7 +9986,7 @@ class GetTasksTool(Tool):
         runtime = _tool_runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
         task_type = int(kwargs.get('任务类型'))
-        return self._service.get_tasks(str(runtime.get('session_key') or 'web:shared'), task_type)
+        return self._service.get_tasks(_tool_session_scope(runtime, kwargs), task_type)
 
 
 class TaskStatsTool(Tool):

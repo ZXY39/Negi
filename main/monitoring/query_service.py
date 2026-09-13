@@ -64,17 +64,22 @@ class TaskQueryService:
         self._debug_recorder = debug_recorder
 
     def summary(self, session_id: str | None = None) -> TaskSummaryResult:
-        tasks = self._store.list_tasks(session_id)
+        # session_id 为空 = 全局口径（跨会话全量任务）；非空 = 该会话口径。
+        normalized_session = str(session_id or '').strip()
+        tasks = self._store.list_tasks(normalized_session or None)
         total = len(tasks)
         in_progress = sum(1 for item in tasks if item.status == 'in_progress')
+        # in_progress 且 paused 的任务并没有真在跑，单独报出避免口径误读
+        paused = sum(1 for item in tasks if item.status == 'in_progress' and bool(item.is_paused))
         failed = sum(1 for item in tasks if item.status == 'failed')
         unread = sum(1 for item in tasks if bool(item.is_unread))
+        scope_label = f'session {normalized_session}' if normalized_session else 'global'
         return TaskSummaryResult(
             total_tasks=total,
             in_progress_tasks=in_progress,
             failed_tasks=failed,
             unread_tasks=unread,
-            text=f'Tasks: {total} total, {in_progress} in progress, {failed} failed, {unread} unread',
+            text=f'Tasks[{scope_label}]: {total} total, {in_progress} in progress ({paused} paused), {failed} failed, {unread} unread',
         )
 
     def _node_pending_notice_count(

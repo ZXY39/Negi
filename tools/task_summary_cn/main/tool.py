@@ -8,6 +8,8 @@ import yaml
 from g3ku.agent.tools.base import Tool
 
 
+SCOPE_PARAM = '查询范围'
+SCOPE_GLOBAL = '全局'
 _MANIFEST = yaml.safe_load((Path(__file__).resolve().parents[1] / 'resource.yaml').read_text(encoding='utf-8'))
 
 
@@ -37,7 +39,10 @@ class _TaskSummaryHandler(Tool):
     async def execute(self, __g3ku_runtime: dict[str, Any] | None = None, **kwargs: Any) -> str:
         runtime = _runtime_payload(__g3ku_runtime, kwargs)
         await self._service.startup()
-        return self._service.summary(str(runtime.get('session_key') or 'web:shared'))
+        # 查询范围：全局=None（跨会话全量），缺省=当前会话
+        scope = str(kwargs.get(SCOPE_PARAM) or '').strip()
+        session_key = None if scope == SCOPE_GLOBAL else str(runtime.get('session_key') or 'web:shared')
+        return self._service.summary(session_key)
 
 
 def build(runtime):
