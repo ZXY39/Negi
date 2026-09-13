@@ -489,9 +489,15 @@ async def test_task_actor_service_terminalizes_root_after_pending_notice_accepta
 
 
 @pytest.mark.asyncio
-async def test_task_actor_service_terminalizes_root_after_pending_notice_acceptance_failure(
+async def test_task_actor_service_kicks_back_execution_on_first_pending_notice_acceptance_rejection(
     tmp_path: Path,
 ) -> None:
+    """首次验收拒绝必须打回执行节点，而不是直接终态。
+
+    旧缺陷：notice-resume 跑完验收后结果被丢弃，任务经
+    _terminal_result_after_notice_resume 捷径终态，拒收预算从未消费
+    （生产 5 例 business_unpassed 全部 rejection_count=0）。
+    """
     service = _make_service(tmp_path)
     record = await service.create_task(
         "root pending acceptance reject",
@@ -539,6 +545,9 @@ async def test_task_actor_service_terminalizes_root_after_pending_notice_accepta
             "pending_mailbox_count": 1,
         },
     )
+
+    scheduled: list[str] = []
+    service.task_actor_service.distribution_resume_callback = lambda task_id: scheduled.append(str(task_id))
 
     call_order: list[str] = []
 
@@ -589,13 +598,367 @@ async def test_task_actor_service_terminalizes_root_after_pending_notice_accepta
     assert latest_root is not None
     assert latest_acceptance is not None
     assert call_order == [acceptance.node_id]
+    # 打回：验收节点复活续验、执行节点复活重跑，任务保持 in_progress。
+    assert latest_acceptance.status == "in_progress"
+    assert latest_root.status == "in_progress"
+    assert latest_root.check_result == "reject once"
+    handshake = dict((latest_root.metadata or {}).get("acceptance_handshake") or {})
+    assert handshake["state"] == "waiting_execution_retry"
+    assert handshake["rejection_count"] == 1
+    assert handshake["latest_rejection_feedback_summary"] == "reject once"
+    assert latest_task.status == "in_progress"
+    assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "waiting_execution_retry"
+    # 拒绝反馈通知已投递给执行节点，且任务被重新入队驱动下一轮。
+    feedback_notices = list(service.store.list_task_node_notifications(record.task_id, root.node_id) or [])
+    assert [str(getattr(item, "message", "") or "") for item in feedback_notices] == ["reject once"]
+    assert record.task_id in scheduled
+    # 分发态刷新后根节点进入待恢复清单：下一轮 run_task 会恢复执行节点重跑。
+    refreshed = service.log_service.read_task_runtime_meta(record.task_id) or {}
+    assert str(root.node_id) in [
+        str(item or '').strip()
+        for item in list((dict(refreshed).get('distribution') or {}).get('pending_notice_node_ids') or [])
+    ]
+
+
+@pytest.mark.asyncio
+async def test_task_actor_service_terminalizes_root_after_acceptance_rejection_budget_exhausted(
+    tmp_path: Path,
+) -> None:
+    """拒收预算耗尽后才允许终态：success + business_unpassed。"""
+    service = _make_service(tmp_path)
+    record = await service.create_task(
+        "root pending acceptance budget exhausted",
+        session_id="web:shared",
+        metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+    )
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+    acceptance = service.store.get_node(final_acceptance.node_id)
+
+    assert acceptance is not None
+
+    root_result = NodeFinalResult(
+        status="success",
+        delivery_status="final",
+        summary="draft ready",
+        answer="draft ready",
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="",
+    )
+    service.node_runner._persist_result_payload(task.task_id, root.node_id, root_result)
+    service.node_runner._set_execution_waiting_acceptance_state(
+        task_id=task.task_id,
+        execution_node_id=root.node_id,
+        acceptance_node_id=acceptance.node_id,
+        result_ref="artifact:root",
+        result_summary="draft ready",
+        rejection_count=2,
+    )
+    service.log_service.update_task_runtime_meta(
+        task.task_id,
+        distribution={
+            "active_epoch_id": "",
+            "state": "",
+            "mode": "",
+            "frontier_node_ids": [],
+            "blocked_node_ids": [],
+            "pending_notice_node_ids": [acceptance.node_id],
+            "queued_epoch_count": 0,
+            "pending_mailbox_count": 1,
+        },
+    )
+
+    call_order: list[str] = []
+
+    async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        call_order.append(node_id)
+        target = service.get_node(node_id)
+        assert target is not None
+        assert target.node_kind == "acceptance"
+        service.log_service.update_node_status(
+            task_id,
+            node_id,
+            status="failed",
+            final_output="reject thrice",
+            failure_reason="reject thrice",
+        )
+        service.log_service.update_task_runtime_meta(
+            task_id,
+            distribution={
+                "active_epoch_id": "",
+                "state": "",
+                "mode": "",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": [],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+        return NodeFinalResult(
+            status="failed",
+            delivery_status="final",
+            summary="reject thrice",
+            answer="reject thrice",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="reject thrice",
+        )
+
+    service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
+
+    await service.task_actor_service.run_task(record.task_id)
+
+    latest_task = service.get_task(record.task_id)
+    latest_root = service.get_node(root.node_id)
+    latest_acceptance = service.store.get_node(acceptance.node_id)
+
+    assert latest_task is not None
+    assert latest_root is not None
+    assert latest_acceptance is not None
+    assert call_order == [acceptance.node_id]
     assert latest_acceptance.status == "failed"
     assert latest_root.status == "success"
     assert latest_root.final_output == "draft ready"
-    assert latest_root.check_result == "reject once"
-    assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == "rejected_terminal"
+    assert latest_root.check_result == "reject thrice"
+    handshake = dict((latest_root.metadata or {}).get("acceptance_handshake") or {})
+    assert handshake["state"] == "rejected_terminal"
+    assert handshake["rejection_count"] == 3
     assert latest_task.status == "success"
-    assert latest_task.failure_reason == "reject once"
+    assert latest_task.failure_reason == "reject thrice"
     assert latest_task.metadata.get("failure_class") == "business_unpassed"
     assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
     assert list(service.store.list_task_runtime_frames(record.task_id) or []) == []
+
+
+@pytest.mark.asyncio
+async def test_task_actor_service_skips_premature_final_acceptance_and_runs_root(
+    tmp_path: Path,
+) -> None:
+    """门控回归（事故 task:eb6dda95055b）：执行节点尚未提交时，
+    notice-resume 不得抢跑最终验收，应落回根执行节点继续干活。"""
+    service = _make_service(tmp_path)
+    record = await service.create_task(
+        "root premature acceptance gate",
+        session_id="web:shared",
+        metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+    )
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+    acceptance = service.store.get_node(final_acceptance.node_id)
+
+    assert acceptance is not None
+
+    # 故意不设置 execution waiting_acceptance 状态：握手仍为 idle，
+    # 表示执行节点尚未提交任何待验结果（重启后恢复即此形态）。
+    service.log_service.update_task_runtime_meta(
+        task.task_id,
+        distribution={
+            "active_epoch_id": "",
+            "state": "",
+            "mode": "",
+            "frontier_node_ids": [],
+            "blocked_node_ids": [],
+            "pending_notice_node_ids": [acceptance.node_id],
+            "queued_epoch_count": 0,
+            "pending_mailbox_count": 1,
+        },
+    )
+
+    call_order: list[str] = []
+
+    async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        call_order.append(node_id)
+        target = service.get_node(node_id)
+        assert target is not None
+        # 门控生效时只会执行根执行节点，绝不应是验收节点。
+        assert target.node_kind == "execution"
+        return NodeFinalResult(
+            status="success",
+            delivery_status="partial",
+            summary="still working",
+            answer="still working",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="",
+        )
+
+    service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
+
+    await service.task_actor_service.run_task(record.task_id)
+
+    latest_task = service.get_task(record.task_id)
+    latest_root = service.get_node(root.node_id)
+    latest_acceptance = service.store.get_node(acceptance.node_id)
+
+    assert latest_task is not None
+    assert latest_root is not None
+    assert latest_acceptance is not None
+    # 验收节点被门控拦下，根执行节点被恢复继续执行。
+    assert call_order == [root.node_id]
+    assert latest_acceptance.status not in {"success", "failed"}
+    assert latest_task.status == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_task_actor_service_rejection_loop_completes_across_run_task_rounds(
+    tmp_path: Path,
+) -> None:
+    """端到端打回闭环：拒绝→执行节点带反馈重跑→重新提交→验收续验通过。"""
+    service = _make_service(tmp_path)
+    record = await service.create_task(
+        "root rejection loop e2e",
+        session_id="web:shared",
+        metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+    )
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+
+    assert task is not None
+    assert root is not None
+
+    final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
+    acceptance = service.store.get_node(final_acceptance.node_id)
+
+    assert acceptance is not None
+
+    first_draft = NodeFinalResult(
+        status="success",
+        delivery_status="final",
+        summary="draft v1",
+        answer="draft v1",
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="",
+    )
+    service.node_runner._persist_result_payload(task.task_id, root.node_id, first_draft)
+    service.node_runner._set_execution_waiting_acceptance_state(
+        task_id=task.task_id,
+        execution_node_id=root.node_id,
+        acceptance_node_id=acceptance.node_id,
+        result_ref="artifact:root",
+        result_summary="draft v1",
+    )
+
+    def _set_pending(node_ids: list[str]) -> None:
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": "",
+                "state": "",
+                "mode": "",
+                "frontier_node_ids": [],
+                "blocked_node_ids": [],
+                "pending_notice_node_ids": list(node_ids),
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": len(node_ids),
+            },
+        )
+
+    _set_pending([acceptance.node_id])
+    service.task_actor_service.distribution_resume_callback = lambda task_id: None
+
+    round_no = {"value": 0}
+
+    async def fake_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+        target = service.get_node(node_id)
+        assert target is not None
+        if target.node_kind == "acceptance":
+            round_no["value"] += 1
+            if round_no["value"] == 1:
+                service.log_service.update_node_status(
+                    task_id, node_id, status="failed",
+                    final_output="missing section B", failure_reason="missing section B",
+                )
+                _set_pending([])
+                return NodeFinalResult(
+                    status="failed", delivery_status="final",
+                    summary="missing section B", answer="missing section B",
+                    evidence=[], remaining_work=[], blocking_reason="missing section B",
+                )
+            service.log_service.update_node_status(
+                task_id, node_id, status="success", final_output="accepted v2",
+            )
+            _set_pending([])
+            return NodeFinalResult(
+                status="success", delivery_status="final",
+                summary="accepted v2", answer="accepted v2",
+                evidence=[], remaining_work=[], blocking_reason="",
+            )
+        # 执行节点：消费拒绝反馈后重新提交新版本交付（模拟真实重跑）。
+        assert "missing section B" in "\n".join(
+            str(getattr(item, "message", "") or "")
+            for item in list(service.store.list_task_node_notifications(record.task_id, root.node_id) or [])
+        )
+        redelivery = NodeFinalResult(
+            status="success", delivery_status="final",
+            summary="draft v2", answer="draft v2",
+            evidence=[], remaining_work=[], blocking_reason="",
+        )
+        service.node_runner._persist_result_payload(task_id, root.node_id, redelivery)
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:root-v2",
+            result_summary="draft v2",
+        )
+        service.node_runner._persist_node_notification_direct(
+            task_id=task_id,
+            epoch_id="",
+            source_node_id=root.node_id,
+            target_node_id=acceptance.node_id,
+            message="新的被检验节点输出如下，请继续在当前验收上下文中核验：draft v2",
+        )
+        _set_pending([acceptance.node_id])
+        return NodeFinalResult(
+            status="success", delivery_status="partial",
+            summary="waiting for acceptance", answer="draft v2",
+            evidence=[], remaining_work=[], blocking_reason="",
+        )
+
+    service.node_runner.run_node = fake_run_node  # type: ignore[method-assign]
+
+    # 第 1 轮：验收拒绝 → 打回，任务保持 in_progress。
+    await service.task_actor_service.run_task(record.task_id)
+    mid_task = service.get_task(record.task_id)
+    mid_root = service.get_node(root.node_id)
+    assert mid_task is not None and mid_root is not None
+    assert mid_task.status == "in_progress"
+    mid_handshake = dict((mid_root.metadata or {}).get("acceptance_handshake") or {})
+    assert mid_handshake["state"] == "waiting_execution_retry"
+    assert mid_handshake["rejection_count"] == 1
+
+    # 第 2 轮：根执行节点被恢复，带反馈重跑并重新提交 → 等待验收。
+    await service.task_actor_service.run_task(record.task_id)
+    resubmit_task = service.get_task(record.task_id)
+    resubmit_root = service.get_node(root.node_id)
+    assert resubmit_task is not None and resubmit_root is not None
+    assert resubmit_task.status == "in_progress"
+    resubmit_handshake = dict((resubmit_root.metadata or {}).get("acceptance_handshake") or {})
+    assert resubmit_handshake["state"] == "waiting_acceptance"
+    # 预算跨重提交保留：打回计数不被清零。
+    assert resubmit_handshake["rejection_count"] == 1
+
+    # 第 3 轮：验收续验通过 → 任务终态 success。
+    await service.task_actor_service.run_task(record.task_id)
+    final_task = service.get_task(record.task_id)
+    final_root = service.get_node(root.node_id)
+    assert final_task is not None and final_root is not None
+    assert final_task.status == "success"
+    assert final_root.status == "success"
+    assert final_root.final_output == "draft v2"
+    final_handshake = dict((final_root.metadata or {}).get("acceptance_handshake") or {})
+    assert final_handshake["state"] == "accepted"
+    assert normalize_final_acceptance_metadata((final_task.metadata or {}).get("final_acceptance")).status == "passed"

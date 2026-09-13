@@ -22,6 +22,7 @@ from main.runtime.acceptance_handshake import (
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.runtime.pending_notice_state import RESUME_MODE_WAIT_FOR_CHILDREN
 from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES, INSPECTION_RESUME_MARKER, NOTICE_INTERRUPT_REASON
+from main.types import KIND_ACCEPTANCE
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
     'execution': 8,
@@ -486,12 +487,99 @@ class TaskActorService:
         ]
         if not pending_node_ids:
             return False
+        resumed_any = False
+        skipped_premature_acceptance = False
         for node_id in pending_node_ids:
-            await self._execute_node(task_id, node_id)
+            if self._final_acceptance_awaiting_execution_submission(task_id, node_id):
+                # 门控：被检验执行节点尚未提交结果（握手未进入等待验收）时，
+                # 不得由 notice-resume 抢跑最终验收——否则会对仍在执行的节点
+                # 判出「交付物缺失」，绕过拒收预算把任务提前终态
+                # （事故复盘：task:eb6dda95055b 重启后验收抢跑，零打回终结）。
+                skipped_premature_acceptance = True
+                continue
+            result = await self._execute_node(task_id, node_id)
+            resumed_any = True
+            await self._settle_final_acceptance_notice_result(task_id, node_id, result)
+        if not resumed_any:
+            # 只剩过早的最终验收节点：返回 False，让 run_task 落回根节点正常
+            # 执行路径（执行节点先干活，提交后握手自然放行验收）。
+            return False
+        if skipped_premature_acceptance:
+            # 其他节点消费了通知但最终验收仍过早：补一次入队，避免
+            # control_only_return 后无人再驱动根节点继续执行。
+            await self._enqueue_acceptance_followup_if_needed(task_id)
         refreshed = self._distribution_runtime_state(task_id)
         if any(str(item or '').strip() for item in list(refreshed.get('pending_notice_node_ids') or [])):
             await self._resume_distribution_if_needed(task_id)
         return True
+
+    def _is_root_final_acceptance_node(self, *, task, node) -> bool:
+        if task is None or node is None:
+            return False
+        if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
+            return False
+        final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get('final_acceptance'))
+        if not bool(final_acceptance.required):
+            return False
+        node_id = str(getattr(node, 'node_id', '') or '').strip()
+        if str(final_acceptance.node_id or '').strip() == node_id:
+            return True
+        metadata = getattr(node, 'metadata', None)
+        return bool(dict(metadata or {}).get('final_acceptance')) if isinstance(metadata, dict) else False
+
+    def _final_acceptance_awaiting_execution_submission(self, task_id: str, node_id: str) -> bool:
+        """最终验收抢跑门控：是根最终验收节点且执行节点尚未提交待验时返回 True。
+
+        仅当握手处于 waiting_acceptance / waiting_block_verification（执行节点
+        已提交结果、正等待验收或阻塞核验）时放行；idle（从未提交）、
+        waiting_execution_retry（应先跑执行节点）及各类终态一律拦截。
+        """
+        task = self._store.get_task(task_id)
+        node = self._store.get_node(node_id)
+        if not self._is_root_final_acceptance_node(task=task, node=node):
+            return False
+        execution = self._node_runner._accepted_execution_node(task_id=task_id, acceptance=node)
+        if execution is None:
+            return True
+        if str(getattr(execution, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
+            return False
+        handshake = normalize_acceptance_handshake(
+            (getattr(execution, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+        )
+        return str(handshake.get('state') or '').strip() not in {
+            ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+            ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
+        }
+
+    async def _settle_final_acceptance_notice_result(
+        self,
+        task_id: str,
+        node_id: str,
+        result: NodeFinalResult | None,
+    ) -> None:
+        """把 notice-resume 跑完的最终验收结果接入拒收预算循环。
+
+        历史上该结果被直接丢弃，任务生死由 _terminal_result_after_notice_resume
+        读取投影状态决定，拒收预算（max_rejections）从未被消费。现在统一经
+        _handle_acceptance_node_result 路由（对齐子节点管线的打回语义）：
+        - 验收通过 → 正常进入终态；
+        - 拒绝且预算未尽 → 打回：执行节点带反馈复活，补入队下轮重跑；
+        - 预算耗尽 → 落终局拒绝态，交由 _terminal_result_after_notice_resume 终态。
+        """
+        if result is None:
+            return
+        task = self._store.get_task(task_id)
+        node = self._store.get_node(node_id)
+        if not self._is_root_final_acceptance_node(task=task, node=node):
+            return
+        acceptance = node
+        handled = self._node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=result)
+        if str(handled.delivery_status or '').strip() != 'partial':
+            return
+        # 打回（或通知中断）：执行节点回到 waiting_execution_retry 并持有拒绝
+        # 反馈通知；刷新分发态使根节点进入待恢复清单，并显式补入队驱动重跑。
+        self._node_runner._refresh_resume_ready_distribution_state(task_id=task_id)
+        await self._enqueue_acceptance_followup_if_needed(task_id)
 
     def configure_node_dispatch_limits(self, *, execution: int | None, inspection: int | None) -> None:
         self._node_dispatch_limits = {
@@ -1749,6 +1837,17 @@ class TaskActorService:
         check_result = str(getattr(root, 'check_result', '') or '').strip()
 
         if acceptance_status in {'passed', 'failed'}:
+            if acceptance_status == 'failed':
+                # 拒收预算守卫：验收失败只有在打回预算耗尽时才允许在此终态。
+                # 合法耗尽由 _finalize_acceptance_failure 写入 rejected_terminal
+                # 且 rejection_count>=max_rejections；若计数未达上限（例如验收
+                # 抢跑/结果未被预算循环路由），交还控制权让驱动层复活执行节点，
+                # 而不是把「未打回的失败」折叠成 success 终态。
+                root_handshake = normalize_acceptance_handshake(
+                    (getattr(root, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
+                )
+                if int(root_handshake.get('rejection_count') or 0) < int(root_handshake.get('max_rejections') or 3):
+                    return None
             self._reconcile_root_acceptance_handshake_after_notice_resume(
                 root=root,
                 acceptance_node_id=acceptance_node_id,

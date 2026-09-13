@@ -1483,6 +1483,14 @@ class TaskLogService:
         accepted_node: NodeRecord | None,
         status: str,
     ) -> None:
+        normalized_status = str(status or '').strip().lower()
+        if normalized_status == 'failed':
+            # 任务级「验收失败」是终局裁决，仅由拒收预算路径写入
+            # （_finalize_acceptance_failure → _set_task_final_acceptance_state）。
+            # 节点级 failed 在此只同步展示层（check_result），否则抢跑/未经
+            # 预算循环路由的验收失败会借 _terminal_result_after_notice_resume
+            # 把任务捷径终态，跳过打回（事故复盘：task:eb6dda95055b）。
+            return
         task = self._store.get_task(task_id)
         if task is None:
             return

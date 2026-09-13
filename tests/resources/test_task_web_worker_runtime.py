@@ -6756,12 +6756,29 @@ def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_busin
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},
     )
-    service.log_service.update_node_status(
-        record.task_id,
-        acceptance.node_id,
-        status="failed",
-        final_output="final acceptance failed",
-        failure_reason="final acceptance failed",
+    # 任务级「验收失败」终局由拒收预算路径写入（节点级 raw failed 只同步
+    # 展示层）：把预算预置到仅剩一次，再经 _handle_acceptance_node_result
+    # 走完最后一次拒绝 → _finalize_acceptance_failure。
+    service.node_runner._set_execution_waiting_acceptance_state(
+        task_id=record.task_id,
+        execution_node_id=root.node_id,
+        acceptance_node_id=acceptance.node_id,
+        result_ref="artifact:root",
+        result_summary="root deliverable",
+        rejection_count=2,
+    )
+    service.node_runner._handle_acceptance_node_result(
+        task=task,
+        acceptance=acceptance,
+        result=NodeFinalResult(
+            status="failed",
+            delivery_status="final",
+            summary="final acceptance failed",
+            answer="final acceptance failed",
+            evidence=[],
+            remaining_work=[],
+            blocking_reason="final acceptance failed",
+        ),
     )
 
     latest_task = service.get_task(record.task_id)
