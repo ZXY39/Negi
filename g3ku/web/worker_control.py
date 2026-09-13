@@ -95,6 +95,32 @@ def _managed_worker_log_path() -> Path:
     return Path.cwd() / _MANAGED_WORKER_LOG_RELATIVE_PATH
 
 
+_MANAGED_WORKER_LOG_MAX_BYTES = 50 * 1024 * 1024       # 对齐 g3ku_bootstrap console.log rotation="50 MB"
+_MANAGED_WORKER_LOG_RETENTION_SECONDS = 7 * 24 * 3600  # 对齐 retention="7 days"
+
+
+def _rotate_managed_worker_log_if_needed(log_path: Path) -> None:
+    """best-effort 轮转：>50MB rename 为时间戳代，并清理 7 天以上的旧代。
+
+    只在启动 worker（open("a")）前调用——Windows 上子进程持有句柄时 rename
+    抛 OSError，降级为 debug 后继续追加；绝不因轮转失败阻止 worker 启动。
+    """
+    try:
+        if log_path.is_file() and log_path.stat().st_size > _MANAGED_WORKER_LOG_MAX_BYTES:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            log_path.rename(log_path.with_name(f"{log_path.name}.{stamp}"))
+            logger.info("Managed worker log rotated to {}", f"{log_path.name}.{stamp}")
+    except OSError as exc:
+        logger.debug("Managed worker log rotation skipped: {}", exc)
+    try:
+        cutoff = time.time() - _MANAGED_WORKER_LOG_RETENTION_SECONDS
+        for old in log_path.parent.glob(f"{log_path.name}.*"):
+            if old.is_file() and old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def start_managed_task_worker() -> bool:
     global _MANAGED_WORKER_PROCESS, _MANAGED_WORKER_STARTED_AT_MONOTONIC, _MANAGED_WORKER_STARTED_AT
 
@@ -124,6 +150,7 @@ def start_managed_task_worker() -> bool:
         popen_kwargs["env"].pop(WEB_KEEP_WORKER_ENV, None)
         log_path = _managed_worker_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_managed_worker_log_if_needed(log_path)
         log_handle = log_path.open("a", encoding="utf-8")
         popen_kwargs["stdout"] = log_handle
         popen_kwargs["stderr"] = subprocess.STDOUT
