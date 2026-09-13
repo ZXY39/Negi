@@ -14,7 +14,7 @@
    （静默残留正是磁盘累积写满事故的根因之一）。
 
 所有"必须可靠回收物理目录"的路径（终态清理、delete_task、任务文件/artifact
-目录删除）应统一走本函数；task_archive 等只删自写文件的链路除外。
+目录删除）应统一走本函数。
 """
 
 from __future__ import annotations

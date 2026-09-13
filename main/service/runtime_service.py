@@ -153,7 +153,7 @@ from main.service.task_terminal_callback import (
     resolve_task_terminal_callback_url,
 )
 from main.service.worker_heartbeat_service_v2 import WorkerHeartbeatServiceV2
-from main.storage.artifact_store import TaskArtifactStore, read_artifact_text, set_task_archiver
+from main.storage.artifact_store import TaskArtifactStore, read_artifact_text
 from main.storage.disk_guard import (
     DiskPolicies,
     cleanup_threshold_bytes,
@@ -161,10 +161,10 @@ from main.storage.disk_guard import (
     disk_policies,
     disk_waterline_snapshot,
     emergency_threshold_bytes,
+    has_emergency_disk_budget,
 )
 from main.storage.fs_utils import remove_tree
 from main.storage.sqlite_store import SQLiteTaskStore
-from main.storage.task_archive import TaskArchiver
 
 _UNSET = object()
 GOVERNANCE_MODE_META_KEY = 'ceo_frontdoor_regulatory_mode_enabled'
@@ -369,19 +369,8 @@ class MainRuntimeService:
         )
         self.file_store = TaskFileStore(resolved_files_base_dir)
         self.artifact_store = TaskArtifactStore(artifact_dir=resolved_artifact_dir, store=self.store)
-        # 磁盘治理（P2）：任务级 zip 归档器（.g3ku/main-runtime/task-archives/）。
-        self.task_archiver = TaskArchiver(archive_dir=resolved_store_path.parent / 'task-archives')
-        set_task_archiver(self.task_archiver)
-        self._decompress_inflight: set[str] = set()
-        self._archive_sweep_running = False
-        # 磁盘治理（P2）：压缩渐进进度状态（经 worker_status 下发，供前端/运维观测）。
-        self._disk_archive_sweep_state: dict[str, Any] = {
-            'running': False,
-            'current_task': '',
-            'archived_count': 0,
-            'purged_count': 0,
-            'last_finished_at': '',
-        }
+        # 任务删除/purge 前产出导出的持久目录（永久保留，不参与磁盘治理）。
+        self._deliverables_dir = resolved_store_path.parent / 'deliverables'
         self._task_disk_cleanup_task: asyncio.Task[Any] | None = None
         self.content_store = ContentNavigationService(
             workspace=Path.cwd(),
@@ -948,20 +937,6 @@ class MainRuntimeService:
                     'worker_id': str(self.worker_id or 'worker'),
                     'worker_pid': int(os.getpid()),
                 }
-                success = True
-            elif command_type == 'compress_task':
-                # 磁盘治理（P2）：web 进程转发的压缩请求在 worker 侧执行。
-                result_payload = await self._archive_one_task(
-                    task_id,
-                    reason=str(payload.get('reason') or 'manual'),
-                )
-                success = str(result_payload.get('result') or '') in {'archived', 'already_archived'}
-            elif command_type == 'decompress_task':
-                result_payload = await self._decompress_one_task(task_id)
-                success = str(result_payload.get('result') or '') in {'decompressed', 'not_archived'}
-            elif command_type == 'start_archive_sweep':
-                archived = await self._archive_progressive_sweep()
-                result_payload = {'archived': int(archived)}
                 success = True
             else:
                 error_text = f'unsupported_command:{command_type}'
@@ -1705,24 +1680,7 @@ class MainRuntimeService:
             'internal_total': internal_total,
             'internal_stopped': 0 if draining else internal_total,
             'worker_state': str(worker_state or ''),
-            # 磁盘治理（P2）：解压中状态（前端 pause-hint 第三态文案消费）。
-            'decompressing': self._is_task_decompressing(task_id),
         }
-
-    def _is_task_decompressing(self, task_id: str) -> bool:
-        if task_id in self._decompress_inflight:
-            return True
-        if self.execution_mode != 'web':
-            return False
-        try:
-            unfinished = [
-                item
-                for item in self.store.list_unfinished_task_commands(command_type='decompress_task')
-                if str(item.get('task_id') or '').strip() == task_id
-            ]
-        except Exception:
-            unfinished = []
-        return bool(unfinished)
 
     async def resume_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)
@@ -1731,13 +1689,6 @@ class MainRuntimeService:
             task = self.get_task(task_id)
             if task is None:
                 return None
-            # 磁盘治理（P3）：墓碑任务（归档已删除）不可恢复。
-            if task.is_purged():
-                raise ValueError('task_purged')
-            # 磁盘治理（P2）：已压缩任务恢复前自动解压（解压预检不足则拒绝，
-            # 任务保持 paused；web 模式经 resume_task 命令在 worker 侧走同一路径）。
-            if not await self._ensure_task_decompressed(task_id):
-                raise ValueError('pending_decompress')
             self.task_actor_service.clear_pause(task_id)
             await self.global_scheduler.enqueue_task(task_id)
         else:
@@ -1805,29 +1756,7 @@ class MainRuntimeService:
         # 未排空统一按「仍在停止」拒绝，调用方可在暂停生效后重试。
         if not await self._await_task_pause_drain(task_id, timeout_seconds=_DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS):
             raise ValueError('task_still_stopping')
-        artifacts = self.list_artifacts(task_id)
-        self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
-        self.file_store.delete_task_files(task_id)
-        # temp 目录双路径兜底：优先 runtime_meta 记录的实际目录（必须在下一行
-        # store.delete_task 删掉 meta 行之前读取），确定性路径兜底 meta 缺失的
-        # 情形；remove_tree 处理 git 克隆等只读文件并对残留显式告警。
-        for temp_path in dict.fromkeys((
-            self._effective_task_temp_dir(task_id),
-            self._task_temp_dir(task_id, create=False),
-        )):
-            remove_tree(temp_path)
-        self.store.delete_task(task_id)
-        # A deleted task must not be resurrected by the shutdown-pause ledger
-        # on a later startup; retire its row together with the task.
-        self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=task_id)
-        remove_tree(self._task_event_history_dir(task_id))
-        # 磁盘治理（P2）：硬删链路同时回收任务归档 zip，否则已删任务的归档永久泄漏。
-        try:
-            self.task_archiver.delete_archive(task_id)
-        except Exception:
-            pass
-        self._publish_task_deleted_event(session_id=task.session_id, task_id=task.task_id)
-        await self.registry.forget_task(task.session_id, task_id)
+        await self._wipe_task_data(task, reason='user_delete')
         return task
 
     async def bulk_delete_tasks(self, task_ids: list[str] | None) -> dict[str, Any]:
@@ -4060,6 +3989,14 @@ class MainRuntimeService:
         key = self.normalize_task_id(str(task_id or '').strip())
         if self.execution_mode != 'worker' or not key:
             return
+        # 删除台账守卫：已删任务的迟到 debounce flush 直接短路，
+        # 避免 _last_summary_payloads 等内存态被重新污染。
+        try:
+            if self.store.is_task_deleted(key):
+                self._pending_task_summaries.pop(key, None)
+                return
+        except Exception:
+            pass
         pending_entry = self._pending_task_summaries.pop(key, None)
         normalized = normalize_task_event_payload(payload) if payload is not None else dict(
             (pending_entry or {}).get('payload') or {}
@@ -4618,10 +4555,6 @@ class MainRuntimeService:
             emergency_streak_samples=max(1, int(getattr(guard, 'emergency_streak_samples', defaults.emergency_streak_samples) or 1)),
             emergency_recovery_samples=max(1, int(getattr(guard, 'emergency_recovery_samples', defaults.emergency_recovery_samples) or 1)),
             alert_on_disk_emergency=bool(getattr(guard, 'alert_on_disk_emergency', defaults.alert_on_disk_emergency)),
-            archive_enabled=bool(getattr(guard, 'archive_enabled', defaults.archive_enabled)),
-            archive_sweep_batch=max(1, int(getattr(guard, 'archive_sweep_batch', defaults.archive_sweep_batch) or 1)),
-            archive_sweep_interval_seconds=max(1.0, float(getattr(guard, 'archive_sweep_interval_seconds', defaults.archive_sweep_interval_seconds) or 1.0)),
-            decompress_grace_minutes=min(max(0.0, float(getattr(guard, 'decompress_grace_minutes', defaults.decompress_grace_minutes) or 0.0)), 7 * 24 * 60),
             detail_retention_days=max(0, int(getattr(guard, 'detail_retention_days', defaults.detail_retention_days) or 0)),
             purge_enabled=bool(getattr(guard, 'purge_enabled', defaults.purge_enabled)),
         )
@@ -6815,6 +6748,7 @@ class MainRuntimeService:
                         continue
                     await asyncio.to_thread(self._reconcile_task_disk_usage, task_id)
                 await self._run_detail_retention_if_due()
+                await self._run_delete_ledger_sweep_if_due()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -6863,274 +6797,297 @@ class MainRuntimeService:
             return
 
     # ------------------------------------------------------------------
-    # 磁盘治理（P2）：任务级 zip 归档、压缩渐进、pin。
-    # 归档布局/提交点协议/解压预检契约见 main/storage/task_archive.py 模块注释；
-    # 候选排序 = size×age 加权（大且老的先压）；pinned 豁免压缩与删除；
-    # 压缩/解压在 embedded/worker 进程直接执行，web 模式经 worker 命令转发。
+    # 磁盘治理（P2'）：任务删除全量清除 + 全删渐进。
+    # 治理阶梯：终态清理(P0) → 明细裁剪(P3, detail_retention_days) → 全删渐进。
+    # zip 归档/压缩渐进/pin/墓碑已整体移除（历史回放需求由单份最新快照 +
+    # 离散事件 slim 行 + DB 明细承担）。_wipe_task_data 为用户删除与全删
+    # 渐进共用的清除核心，步骤顺序（S0-S7）是契约。
     # ------------------------------------------------------------------
 
-    def _task_archive_dirs(self, task_id: str) -> dict[str, Path]:
-        return {
-            'artifacts': self._task_artifact_dir(task_id),
-            'event-history': self._task_event_history_dir(task_id),
-            'files': self._task_file_dir_path(task_id),
-            'temp': self._effective_task_temp_dir(task_id),
-        }
+    # 全删宽限（小时，模块常量）：终态未满该窗口的任务不进全删渐进候选，
+    # 防止磁盘紧张时刚跑完的任务被立即不可逆删除（产出虽已导出，仍留回看窗口）。
+    _FULL_DELETE_GRACE_HOURS = 24.0
+    # 删除台账守卫窗口（天，模块常量）：过期前做最终幂等补偿再删台账行，
+    # 台账自身不允许成为新的"无条件永久保留"。
+    _LEDGER_RETENTION_DAYS = 7
 
-    async def compress_task(self, task_id: str, *, reason: str = 'manual') -> dict[str, Any]:
-        task_id = self.normalize_task_id(task_id)
-        if not disk_policies().archive_enabled:
-            raise ValueError('archive_disabled')
-        if self.execution_mode == 'web':
-            self._assert_worker_available()
-            task = self.get_task(task_id)
-            if task is None:
-                return {'result': 'not_found'}
-            self._enqueue_task_command(
-                command_type='compress_task',
-                task_id=task.task_id,
-                session_id=task.session_id,
-                payload={'task_id': task.task_id, 'reason': str(reason or 'manual')},
-            )
-            return {'result': 'enqueued'}
-        return await self._archive_one_task(task_id, reason=reason)
+    async def _wipe_task_data(self, task: TaskRecord, *, reason: str) -> dict[str, Any]:
+        """任务删除全量清除核心（用户删除 / 全删渐进 / 墓碑清扫共用）。
 
-    async def _archive_one_task(self, task_id: str, *, reason: str) -> dict[str, Any]:
-        task = self.get_task(task_id)
-        if task is None:
-            return {'result': 'not_found'}
-        metadata = dict(task.metadata or {})
-        if metadata.get('archived_at'):
-            return {'result': 'already_archived'}
-        if metadata.get('pinned'):
-            return {'result': 'pinned_skipped'}
-        if metadata.get('purged_at'):
-            return {'result': 'purged_skipped'}
-        status = str(getattr(task, 'status', '') or '').strip().lower()
-        paused = bool(getattr(task, 'is_paused', False) or getattr(task, 'pause_requested', False))
-        if status not in {'success', 'failed'} and not paused:
-            return {'result': 'active_skipped'}
-        dirs = self._task_archive_dirs(task_id)
-        # 压缩前预检：zip 写入瞬时占位——free 必须高于 紧急线 + 源大小×0.35
-        # （JSON/文本压缩比保守估计；已压缩内容占比高时实际更小）。
+        步骤顺序是契约：
+        S0 路径快照（_effective_task_temp_dir 读 runtime_meta，必须在删 DB 前取）
+        S1 导出产出（失败 warning 不阻断；此时未写台账未删任何东西，可安全中止）
+        S2 写台账（迟到写守卫自此刻生效；崩溃后凭 wiped=0 由 sweep 补偿）
+        S3 删文件（artifacts/files/event-history/temp 双路径，逐项容错）
+        S4 删 DB 行（23 张任务作用域表）+ shutdown-pause 台账退役
+        S5 governance 审批行（跨库无原子性，失败由 sweep 补偿重放）
+        S6 台账 wiped=1 + task.deleted 推送 + 会话级审计事件
+        S7 内存缓存清理（summary 字典 / inflight 集合 / log_service / registry）
+        """
+        task_id = str(task.task_id or '').strip()
+        stats: dict[str, Any] = {'task_id': task_id, 'reason': str(reason or ''), 'deliverables_exported': 0}
+        # S0：temp 双路径必须在 store.delete_task 删掉 runtime_meta 行之前读取。
+        temp_paths = list(dict.fromkeys((
+            self._effective_task_temp_dir(task_id),
+            self._task_temp_dir(task_id, create=False),
+        )))
+        # S1：导出产出（报告等，判据=终态保留清单）。
         try:
-            source_bytes = self._task_disk_usage_bytes(task_id)
+            export = self._export_task_deliverables(task, reason=reason)
+            stats['deliverables_exported'] = int(export.get('exported') or 0)
+            stats['deliverables_dir'] = str(export.get('dir') or '')
         except Exception:
-            source_bytes = 0
-        snapshot = disk_waterline_snapshot([str(path) for path in dirs.values()])
-        if snapshot is not None:
-            free, total = snapshot
-            if free < emergency_threshold_bytes(total) + int(source_bytes * 0.35):
-                return {'result': 'insufficient_space'}
-        result = await asyncio.to_thread(self.task_archiver.archive, task_id, dirs)
-        if result is None:
-            return {'result': 'skipped'}
-        metadata['archived_at'] = now_iso()
-        metadata['archived_bytes'] = int(result.uncompressed_bytes)
-        metadata['archive_compressed_bytes'] = int(result.compressed_bytes)
-        metadata['archive_reason'] = str(reason or 'manual')
-        self.store.upsert_task(task.model_copy(update={'metadata': metadata}))
-        self.store.upsert_task_disk_usage(task_id, int(result.compressed_bytes))
-        self._publish_task_archive_state_changed(task_id)
-        logger.info(
-            'disk governance: task {} archived ({} files, {} -> {} bytes, reason={})',
-            task_id,
-            result.file_count,
-            result.uncompressed_bytes,
-            result.compressed_bytes,
-            reason,
-        )
+            logger.warning('task wipe: deliverables export failed for {}', task_id, exc_info=True)
+        # S2：写台账。
         try:
+            await asyncio.to_thread(
+                self.store.record_task_delete,
+                task_id,
+                reason=str(reason or ''),
+                deliverables_exported=int(stats.get('deliverables_exported') or 0),
+            )
+        except Exception:
+            logger.warning('task wipe: ledger record failed for {}', task_id, exc_info=True)
+        # S3：删文件。
+        await asyncio.to_thread(self._wipe_task_files, task_id, temp_paths)
+        # S4：删 DB 行 + shutdown-pause 台账退役（防止重启后凭旧台账复活暂停态）。
+        await asyncio.to_thread(self.store.delete_task, task_id)
+        try:
+            await asyncio.to_thread(self.store.mark_shutdown_pause_entry_consumed, kind='task', ref_id=task_id)
+        except Exception:
+            pass
+        # S5：governance 审批行（含命令明文）。
+        stats['governance_rows'] = await asyncio.to_thread(self._wipe_governance_rows, task_id)
+        # S6：完成标记 + 事件。
+        try:
+            await asyncio.to_thread(self.store.mark_task_delete_wiped, task_id)
+        except Exception:
+            pass
+        self._publish_task_deleted_event(session_id=task.session_id, task_id=task_id)
+        try:
+            # 会话级审计事件（task_id=None 绕开台账守卫；先例：disk_emergency 事件）。
             self.log_service.append_task_event(
-                task_id=task_id,
-                session_id=str(getattr(task, 'session_id', '') or 'web:shared'),
-                event_type='task.archived',
+                task_id=None,
+                session_id=str(task.session_id or 'web:shared'),
+                event_type='runtime.task_wiped',
                 data={
-                    'uncompressed_bytes': int(result.uncompressed_bytes),
-                    'compressed_bytes': int(result.compressed_bytes),
-                    'file_count': int(result.file_count),
-                    'reason': str(reason or 'manual'),
+                    'task_id': task_id,
+                    'reason': str(reason or ''),
+                    'deliverables_exported': int(stats.get('deliverables_exported') or 0),
                 },
             )
         except Exception:
             pass
-        return {
-            'result': 'archived',
-            'uncompressed_bytes': int(result.uncompressed_bytes),
-            'compressed_bytes': int(result.compressed_bytes),
-            'file_count': int(result.file_count),
-        }
-
-    async def decompress_task(self, task_id: str) -> dict[str, Any]:
-        task_id = self.normalize_task_id(task_id)
-        if self.execution_mode == 'web':
-            self._assert_worker_available()
-            task = self.get_task(task_id)
-            if task is None:
-                return {'result': 'not_found'}
-            self._enqueue_task_command(
-                command_type='decompress_task',
-                task_id=task.task_id,
-                session_id=task.session_id,
-                payload={'task_id': task.task_id},
-            )
-            return {'result': 'enqueued'}
-        return await self._decompress_one_task(task_id)
-
-    async def _decompress_one_task(self, task_id: str) -> dict[str, Any]:
-        task = self.get_task(task_id)
-        if task is None:
-            return {'result': 'not_found'}
-        metadata = dict(task.metadata or {})
-        if metadata.get('purged_at'):
-            return {'result': 'purged'}
-        if not metadata.get('archived_at') and not self.task_archiver.has_archive(task_id):
-            return {'result': 'not_archived'}
-        if metadata.get('archived_at') and not self.task_archiver.has_archive(task_id):
-            # 闪退窗口自愈：元数据标记已归档但 zip 已不存在（删除渐进后崩溃、
-            # 或归档被手工删除）——内容不可恢复，转墓碑而不是静默清标记。
-            metadata['purged_at'] = now_iso()
-            metadata['purge_reason'] = 'archive_missing'
-            metadata.pop('archived_at', None)
-            self.store.upsert_task(task.model_copy(update={'metadata': metadata}))
-            self._publish_task_archive_state_changed(task_id)
-            logger.warning('disk governance: archive zip missing for task {}, tombstoned', task_id)
-            return {'result': 'purged'}
-        if task_id in self._decompress_inflight:
-            return {'result': 'in_flight'}
-        self._decompress_inflight.add(task_id)
+        logger.info(
+            'task wipe: {} fully deleted (reason={}, deliverables_exported={}, governance_rows={})',
+            task_id,
+            reason,
+            int(stats.get('deliverables_exported') or 0),
+            int(stats.get('governance_rows') or 0),
+        )
+        # S7：内存缓存。
+        self._discard_task_memory_caches(task_id)
         try:
-            dirs = self._task_archive_dirs(task_id)
-            ok = await asyncio.to_thread(self.task_archiver.decompress, task_id, dirs)
-            if not ok:
-                return {'result': 'insufficient_space'}
-            fresh = self.get_task(task_id) or task
-            next_metadata = dict(fresh.metadata or {})
-            for key in ('archived_at', 'archived_bytes', 'archive_compressed_bytes', 'archive_reason'):
-                next_metadata.pop(key, None)
-            # 解压宽限：记录解压时刻，窗口内该任务不被压缩渐进重新归档
-            # （用户查看/排查保护期，见 _query_archive_candidates 的 grace 判定）。
-            next_metadata['decompressed_at'] = now_iso()
-            self.store.upsert_task(fresh.model_copy(update={'metadata': next_metadata}))
-            self._reconcile_task_disk_usage(task_id)
-            self._publish_task_archive_state_changed(task_id)
-            logger.info('disk governance: task {} decompressed', task_id)
-            return {'result': 'decompressed'}
-        finally:
-            self._decompress_inflight.discard(task_id)
+            await self.registry.forget_task(task.session_id, task_id)
+        except Exception:
+            pass
+        return stats
 
-    async def _ensure_task_decompressed(self, task_id: str) -> bool:
-        task = self.get_task(task_id)
-        if task is None:
-            return True
-        metadata = dict(task.metadata or {})
-        if not metadata.get('archived_at') and not self.task_archiver.has_archive(task_id):
-            return True
-        result = await self._decompress_one_task(task_id)
-        return str(result.get('result') or '') in {'decompressed', 'not_archived'}
+    def _wipe_task_files(self, task_id: str, temp_paths: list[Path]) -> None:
+        """S3 文件级删除：artifacts / files / event-history / temp 双路径，逐项容错。
 
-    def _publish_task_archive_state_changed(self, task_id: str) -> None:
-        refresh = getattr(self.log_service, 'refresh_task_view', None)
-        if callable(refresh):
+        单点失败不中止——残留由台账 sweep 的 _compensate_wipe 幂等补收。
+        """
+        try:
+            artifacts = self.list_artifacts(task_id)
+            self.artifact_store.delete_artifacts_for_task(task_id, artifacts=artifacts)
+        except Exception:
+            logger.warning('task wipe: artifact delete failed for {}', task_id, exc_info=True)
+        try:
+            self.file_store.delete_task_files(task_id)
+        except Exception:
+            pass
+        try:
+            remove_tree(self._task_event_history_dir(task_id))
+        except Exception:
+            pass
+        for temp_path in temp_paths:
             try:
-                refresh(task_id)
+                remove_tree(temp_path)
             except Exception:
                 pass
 
-    def set_task_pin(self, task_id: str, pinned: bool) -> TaskRecord | None:
-        task_id = self.normalize_task_id(task_id)
-        task = self.get_task(task_id)
-        if task is None:
-            return None
-        metadata = dict(task.metadata or {})
-        metadata['pinned'] = bool(pinned)
-        self.store.upsert_task(task.model_copy(update={'metadata': metadata}))
-        self._publish_task_archive_state_changed(task_id)
-        return self.get_task(task_id)
-
-    async def _disk_cleanup_sweep_loop(self) -> None:
-        """清理线巡检（embedded/worker，60s）：低于清理线或被 P1 信号置位时跑压缩渐进。
-        每拍顺带做崩溃自愈：清闪退残留工作文件、修复"压缩到一半进程死掉"的任务。"""
-        while True:
-            try:
-                await asyncio.sleep(60.0)
-                try:
-                    stale = await asyncio.to_thread(self.task_archiver.cleanup_stale_work_files)
-                    if any(stale.values()):
-                        logger.info(
-                            'disk governance: cleaned stale work files tmp_zips={} extract_dirs={}',
-                            stale.get('tmp_zips', 0),
-                            stale.get('extract_dirs', 0),
-                        )
-                    await self._repair_interrupted_archives()
-                except Exception:
-                    pass
-                if not disk_policies().archive_enabled:
-                    self._disk_cleanup_requested = False
-                    continue
-                if not self._disk_cleanup_due():
-                    continue
-                await self._archive_progressive_sweep()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                continue
-
-    async def _repair_interrupted_archives(self) -> None:
-        """崩溃自愈：存在归档 zip 但缺 `archived_at` 元数据的任务。
-
-        覆盖两种闪退窗口：a) zip 已写完、源删到一半 → recover_interrupted 补删源；
-        b) 源已删空、元数据没落库 → 补写元数据（从清单取字节数）。
-        反向窗口（有元数据无 zip）在 _decompress_one_task 转墓碑处理。
-        """
+    def _wipe_governance_rows(self, task_id: str) -> int:
         try:
-            tasks = await asyncio.to_thread(self.store.list_tasks)
+            return int(self.governance_store.delete_exec_approvals_for_context(task_id) or 0)
         except Exception:
+            logger.warning('task wipe: governance cleanup failed for {}', task_id, exc_info=True)
+            return 0
+
+    def _discard_task_memory_caches(self, task_id: str) -> None:
+        """S7：清掉以 task_id 为键的进程内缓存（各进程清自己的）。"""
+        normalized = str(task_id or '').strip()
+        if not normalized:
             return
-        for task in tasks or []:
-            task_id = str(getattr(task, 'task_id', '') or '').strip()
-            if not task_id:
-                continue
-            metadata = dict(getattr(task, 'metadata', None) or {})
-            if metadata.get('archived_at') or metadata.get('purged_at'):
-                continue
+        self._pending_task_summaries.pop(normalized, None)
+        self._last_summary_payloads.pop(normalized, None)
+        flush_task = self._task_summary_flush_tasks.pop(normalized, None)
+        if flush_task is not None:
             try:
-                has_zip = await asyncio.to_thread(self.task_archiver.has_archive, task_id)
+                flush_task.cancel()
             except Exception:
-                has_zip = False
-            if not has_zip:
-                continue
-            dirs = self._task_archive_dirs(task_id)
+                pass
+        try:
+            with self._terminal_cleanup_inflight_guard:
+                self._terminal_cleanup_inflight.discard(normalized)
+        except Exception:
+            pass
+        try:
+            self.log_service.discard_task_caches(normalized)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 产出导出：删除/purge 前把终态保留清单命中的 artifact 复制到
+    # .g3ku/main-runtime/deliverables/<safe_task_id>/（永久保留，不参与磁盘治理）。
+    # ------------------------------------------------------------------
+
+    def _export_task_deliverables(self, task: TaskRecord, *, reason: str) -> dict[str, Any]:
+        """导出产出（best-effort）：任何失败只 warning，不阻断删除。
+
+        - 判据复用 _terminal_artifact_keep_policy（kind∈{patch,final_output}、
+          final_output_ref 指向、标题含 report/summary）；
+        - 文本经 read_artifact_text 统一读端（gzip 自动解压）明文落盘；
+          非 UTF-8 走原样字节（state=raw）；取不到内容记 state=missing；
+        - 无 kept 或全部 missing 不留目录（避免空壳堆积）。
+        """
+        task_id = str(task.task_id or '').strip()
+        result: dict[str, Any] = {'exported': 0, 'missing': 0, 'dir': ''}
+        if not task_id:
+            return result
+        try:
+            artifacts = self.list_artifacts(task_id)
+        except Exception:
+            artifacts = []
+        kept = [item for item in artifacts or [] if self._terminal_artifact_keep_policy(task, item)]
+        if not kept:
+            return result
+        if not has_emergency_disk_budget((self._deliverables_dir, self.store.path)):
+            logger.warning('task wipe: deliverables export skipped (no disk budget) for {}', task_id)
+            return result
+        safe_name = task_id.replace(':', '_').replace('/', '_').replace('\\', '_')
+        target_dir = self._deliverables_dir / safe_name
+        files_meta: list[dict[str, Any]] = []
+        exported = 0
+        missing = 0
+        for artifact in kept:
+            artifact_id = str(getattr(artifact, 'artifact_id', '') or '').strip()
+            title = str(getattr(artifact, 'title', '') or '').strip() or artifact_id
+            kind = str(getattr(artifact, 'kind', '') or '').strip()
+            source_path = str(getattr(artifact, 'path', '') or '').strip()
+            encoding = str(getattr(artifact, 'content_encoding', '') or '').strip() or 'plain'
+            content_bytes = b''
+            state = 'missing'
+            exported_name = ''
             try:
-                state = await asyncio.to_thread(self.task_archiver.recover_interrupted, task_id, dirs)
+                text = read_artifact_text(artifact)
             except Exception:
-                continue
-            if state == 'rolled_back':
-                continue
-            manifest = None
-            try:
-                manifest = await asyncio.to_thread(self.task_archiver.read_manifest, task_id)
-            except Exception:
-                manifest = None
-            metadata['archived_at'] = now_iso()
-            metadata['archive_reason'] = 'crash_recovery'
-            if isinstance(manifest, dict):
-                metadata['archived_bytes'] = int(manifest.get('uncompressed_bytes') or 0)
+                text = ''
+            if text:
+                state = 'ok'
+                content_bytes = text.encode('utf-8')
+            else:
+                raw = self._deliverable_raw_bytes(source_path)
+                if raw is not None:
+                    state = 'raw'
+                    content_bytes = raw
+            if state != 'missing':
+                exported_name = self._deliverable_file_name(
+                    title=title, artifact_id=artifact_id, source_path=source_path, binary=(state == 'raw'),
+                )
                 try:
-                    archive_path = self.task_archiver.archive_path_for(task_id)
-                    metadata['archive_compressed_bytes'] = int(archive_path.stat().st_size)
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    # 覆盖式导出：补偿重放幂等。
+                    (target_dir / exported_name).write_bytes(content_bytes)
+                    exported += 1
                 except OSError:
-                    pass
-            fresh = self.get_task(task_id) or task
-            self.store.upsert_task(fresh.model_copy(update={'metadata': metadata}))
-            if isinstance(manifest, dict):
-                try:
-                    archive_path = self.task_archiver.archive_path_for(task_id)
-                    self.store.upsert_task_disk_usage(task_id, int(archive_path.stat().st_size))
-                except OSError:
-                    pass
-            self._publish_task_archive_state_changed(task_id)
-            logger.info('disk governance: repaired interrupted archive for task {} (state={})', task_id, state)
+                    state = 'missing'
+                    exported_name = ''
+                    content_bytes = b''
+            if state == 'missing':
+                missing += 1
+            files_meta.append({
+                'artifact_id': artifact_id,
+                'kind': kind,
+                'title': title,
+                'exported_name': exported_name,
+                'source_path': source_path,
+                'source_encoding': encoding,
+                'bytes': len(content_bytes),
+                'state': state,
+            })
+        if not exported:
+            if target_dir.exists():
+                remove_tree(target_dir)
+            result['missing'] = missing
+            if missing:
+                logger.warning('task wipe: all {} deliverables missing for {}', missing, task_id)
+            return result
+        manifest = {
+            'schema_version': 1,
+            'task_id': task_id,
+            'session_id': str(task.session_id or ''),
+            'title': str(task.title or ''),
+            'status': str(task.status or ''),
+            'reason': str(reason or ''),
+            'exported_at': now_iso(),
+            'files': files_meta,
+            'counts': {'kept': len(kept), 'exported': exported, 'missing': missing},
+        }
+        try:
+            (target_dir / 'manifest.json').write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8',
+            )
+        except OSError:
+            pass
+        result.update({'exported': exported, 'missing': missing, 'dir': str(target_dir)})
+        return result
+
+    @staticmethod
+    def _deliverable_raw_bytes(source_path: str) -> bytes | None:
+        """非 UTF-8 产出：按源文件原样字节导出（gzip 存储的自动解压）。"""
+        raw_path = str(source_path or '').strip()
+        if not raw_path:
+            return None
+        try:
+            path = Path(raw_path)
+            if not path.is_file():
+                return None
+            data = path.read_bytes()
+            if data[:2] == b'\x1f\x8b':
+                import gzip as _gzip
+                data = _gzip.decompress(data)
+            return data
+        except Exception:
+            return None
+
+    @staticmethod
+    def _deliverable_file_name(*, title: str, artifact_id: str, source_path: str, binary: bool = False) -> str:
+        """导出文件名：<标题 slug(≤60)>__<artifact_id 末 8 位><ext>（id 后缀天然去重）。"""
+        suffix = Path(source_path).suffix.lower() if source_path else ''
+        if suffix == '.gz':
+            suffix = Path(Path(source_path).stem).suffix.lower()
+        if not suffix:
+            suffix = '.bin' if binary else '.md'
+        slug_source = str(title or '').strip() or str(artifact_id or 'deliverable')
+        slug = ''.join(ch if (ch.isalnum() or ch in '-_.') else '_' for ch in slug_source)[:60].strip('_.') or 'deliverable'
+        tail = ''.join(ch for ch in str(artifact_id or '') if ch.isalnum())[-8:] or '00000000'
+        return f'{slug}__{tail}{suffix}'
+
+    # ------------------------------------------------------------------
+    # 全删渐进：低于清理线时按 size×age 加权把最老终态任务全量清除（先导产出）。
+    # 紧急线以下绝不执行；每批复检水位；批次上限沿用旧删除渐进的 batch=2。
+    # ------------------------------------------------------------------
 
     def _disk_waterline(self) -> tuple[int, int] | None:
         return disk_waterline_snapshot([str(self._workspace_root())])
@@ -7151,161 +7108,210 @@ class MainRuntimeService:
         free, total = snapshot
         return free < emergency_threshold_bytes(total)
 
-    async def _archive_progressive_sweep(self) -> int:
-        if self._archive_sweep_running:
-            return 0
-        self._archive_sweep_running = True
-        self._disk_archive_sweep_state['running'] = True
-        self._disk_archive_sweep_state['archived_count'] = 0
-        archived = 0
-        try:
-            policies = disk_policies()
-            candidates_exhausted = False
-            for _round in range(10):
-                if not self._disk_cleanup_due() or self._disk_emergency_due():
-                    break
-                candidates = self._query_archive_candidates(batch=int(policies.archive_sweep_batch))
-                if not candidates:
-                    candidates_exhausted = True
-                    break
-                for candidate_task_id in candidates:
-                    self._disk_archive_sweep_state['current_task'] = candidate_task_id
-                    result = await self._archive_one_task(candidate_task_id, reason='disk_cleanup')
-                    if str(result.get('result') or '') == 'archived':
-                        archived += 1
-                        self._disk_archive_sweep_state['archived_count'] = archived
-                    await asyncio.sleep(max(1.0, float(policies.archive_sweep_interval_seconds)))
-                    if self._disk_emergency_due():
-                        break
-            # P3 删除渐进：压缩候选耗尽仍低于清理线 → 删最老归档（留墓碑）。
-            if (
-                candidates_exhausted
-                and disk_policies().purge_enabled
-                and self._disk_cleanup_due()
-                and not self._disk_emergency_due()
-            ):
-                purged = await self._purge_oldest_archives_sweep()
-                self._disk_archive_sweep_state['purged_count'] = int(purged)
-        finally:
-            self._archive_sweep_running = False
-            self._disk_archive_sweep_state['running'] = False
-            self._disk_archive_sweep_state['current_task'] = ''
-            self._disk_archive_sweep_state['last_finished_at'] = now_iso()
-            if not self._disk_cleanup_due():
-                self._disk_cleanup_requested = False
-        if archived:
-            logger.info('disk governance: archive sweep compressed {} task(s)', archived)
-        return archived
+    async def _disk_cleanup_sweep_loop(self) -> None:
+        """清理线巡检（embedded/worker，60s）：低于清理线或被 P1 信号置位时跑全删渐进。"""
+        while True:
+            try:
+                await asyncio.sleep(60.0)
+                if not disk_policies().purge_enabled:
+                    self._disk_cleanup_requested = False
+                    continue
+                if not self._disk_cleanup_due():
+                    continue
+                await self._wipe_progressive_sweep()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
 
-    async def _purge_oldest_archives_sweep(self, *, batch: int = 2) -> int:
-        """删除渐进：按 archived_at 升序删最老的归档 zip（pinned/purged 跳过），
-        每批复检水位；墓碑 = tasks 行/节点结构/summary/error_logs 保留 + metadata.purged_at。
-        紧急线以下绝不执行。"""
-        purged = 0
+    async def _wipe_progressive_sweep(self, *, batch: int = 2) -> int:
+        """全删渐进主体：候选=终态且超出宽限窗口的任务，size×age 加权降序。"""
+        wiped = 0
         for _round in range(5):
             if not self._disk_cleanup_due() or self._disk_emergency_due():
                 break
             try:
-                entries = await asyncio.to_thread(self.store.list_archived_tasks)
+                candidates = await asyncio.to_thread(self._query_wipe_candidates, batch)
             except Exception:
                 break
-            candidates = sorted(
-                (
-                    entry for entry in entries or []
-                    if not entry.get('pinned') and not entry.get('purged_at') and entry.get('task_id')
-                ),
-                key=lambda entry: str(entry.get('archived_at') or ''),
-            )[:max(1, int(batch))]
             if not candidates:
                 break
-            for entry in candidates:
-                if await self._purge_one_archive(str(entry['task_id'])):
-                    purged += 1
+            progressed = False
+            for task_id in candidates:
                 if self._disk_emergency_due():
                     break
-        if purged:
-            logger.info('disk governance: purge sweep deleted {} archived task zip(s) (tombstones kept)', purged)
-        return purged
+                task = self.get_task(task_id)
+                if task is None:
+                    continue
+                await self._wipe_task_data(task, reason='disk_pressure')
+                wiped += 1
+                progressed = True
+            if not progressed:
+                break
+        if wiped:
+            logger.info('disk governance: wipe sweep fully deleted {} terminal task(s) (deliverables exported)', wiped)
+        return wiped
 
-    def _disk_archive_sweep_snapshot(self) -> dict[str, Any]:
-        state = dict(self._disk_archive_sweep_state or {})
-        state['running'] = bool(self._archive_sweep_running)
-        return state
+    def _query_wipe_candidates(self, batch: int) -> list[str]:
+        """候选评分：size =（DB 明细字节 + 目录记账），weight = size × max(1, age_days)。
 
-    async def _purge_one_archive(self, task_id: str) -> bool:
-        task = self.get_task(task_id)
-        if task is None or task.is_purged():
-            return False
-        metadata = dict(task.metadata or {})
-        if metadata.get('pinned') or not metadata.get('archived_at'):
-            return False
-        deleted = await asyncio.to_thread(self.task_archiver.delete_archive, task_id)
-        if not deleted:
-            return False
-        # 确认四目录已空（压缩提交点后本就删空；异常残留则补删）
-        for path in self._task_archive_dirs(task_id).values():
-            try:
-                if Path(path).exists() and not any(Path(path).rglob('*')):
-                    Path(path).rmdir()
-            except OSError:
-                pass
-        metadata['purged_at'] = now_iso()
-        metadata['purge_reason'] = 'disk_cleanup'
-        metadata.pop('archived_at', None)
-        self.store.upsert_task(task.model_copy(update={'metadata': metadata}))
-        self.store.upsert_task_disk_usage(task_id, 0)
-        self._publish_task_archive_state_changed(task_id)
-        try:
-            self.log_service.append_task_event(
-                task_id=task_id,
-                session_id=str(getattr(task, 'session_id', '') or 'web:shared'),
-                event_type='task.purged',
-                data={'purge_reason': 'disk_cleanup'},
-            )
-        except Exception:
-            pass
-        return True
-
-    def _query_archive_candidates(self, *, batch: int) -> list[str]:
-        """候选 = 终态或已暂停任务，未归档、未 pinned、未 purged、不在解压宽限期内；
-        score = size × age 加权。"""
-        try:
-            tasks = self.store.list_tasks()
-            usages = self.store.get_task_disk_usages()
-        except Exception:
+        先按 age 取最老 50 个终态任务算 size（sum_task_detail_bytes 候选集有界），
+        再按加权分排序取前 batch。台账内任务与宽限窗口内的任务不进候选。
+        """
+        policies = disk_policies()
+        if not policies.purge_enabled:
             return []
         now_dt = datetime.now(timezone.utc)
-        grace_minutes = float(disk_policies().decompress_grace_minutes)
-        scored: list[tuple[float, str]] = []
-        for task in tasks or []:
+        grace_cutoff = now_dt - timedelta(hours=self._FULL_DELETE_GRACE_HOURS)
+        try:
+            deleted_ids = {
+                str(row.get('task_id') or '')
+                for row in self.store.list_task_delete_ledger_rows(limit=10_000)
+            }
+        except Exception:
+            deleted_ids = set()
+        try:
+            disk_usages = self.store.get_task_disk_usages(None) or {}
+        except Exception:
+            disk_usages = {}
+        pool: list[tuple[str, float]] = []
+        for task in self.store.list_tasks() or []:
+            if str(getattr(task, 'status', '') or '').strip().lower() not in {'success', 'failed'}:
+                continue
             task_id = str(getattr(task, 'task_id', '') or '').strip()
-            if not task_id:
+            if not task_id or task_id in deleted_ids:
                 continue
-            metadata = dict(getattr(task, 'metadata', None) or {})
-            if metadata.get('archived_at') or metadata.get('pinned') or metadata.get('purged_at'):
-                continue
-            # 解压宽限：刚解压的任务在窗口内豁免重新归档（手动/自动解压均记
-            # decompressed_at）；窗口过后磁盘压力照常生效。
-            decompressed_at = str(metadata.get('decompressed_at') or '').strip()
-            if decompressed_at and grace_minutes > 0.0:
-                decompressed_dt = self._parse_task_timestamp(decompressed_at)
-                if decompressed_dt is not None:
-                    decompressed_age_minutes = (now_dt - decompressed_dt).total_seconds() / 60.0
-                    if decompressed_age_minutes < grace_minutes:
-                        continue
-            status = str(getattr(task, 'status', '') or '').strip().lower()
-            paused = bool(getattr(task, 'is_paused', False) or getattr(task, 'pause_requested', False))
-            if status not in {'success', 'failed'} and not paused:
-                continue
-            size = float(int(usages.get(task_id, 0) or 0))
-            anchor = str(getattr(task, 'finished_at', '') or getattr(task, 'updated_at', '') or '').strip()
+            anchor = str(getattr(task, 'finished_at', '') or '').strip() or str(getattr(task, 'updated_at', '') or '')
             finished = self._parse_task_timestamp(anchor) if anchor else None
-            age_minutes = 0.0
-            if finished is not None:
-                age_minutes = max(0.0, (now_dt - finished).total_seconds() / 60.0)
+            if finished is not None and finished > grace_cutoff:
+                continue  # 全删宽限：刚终态的任务不动
+            age_minutes = 0.0 if finished is None else max(0.0, (now_dt - finished).total_seconds() / 60.0)
+            pool.append((task_id, age_minutes))
+        if not pool:
+            return []
+        pool.sort(key=lambda item: item[1], reverse=True)
+        pool = pool[:50]
+        try:
+            detail_bytes = self.store.sum_task_detail_bytes([item[0] for item in pool])
+        except Exception:
+            detail_bytes = {}
+        scored: list[tuple[float, str]] = []
+        for task_id, age_minutes in pool:
+            size = float(int(detail_bytes.get(task_id) or 0) + int(disk_usages.get(task_id) or 0)) + 1.0
             scored.append((size * max(1.0, age_minutes / 1440.0), task_id))
         scored.sort(key=lambda item: item[0], reverse=True)
         return [task_id for _score, task_id in scored[:max(1, int(batch))]]
+
+    # ------------------------------------------------------------------
+    # 删除台账 sweep：遗留墓碑清扫 → wiped=0 补偿 → 台账过期 → 孤儿目录清扫。
+    # ------------------------------------------------------------------
+
+    async def _run_delete_ledger_sweep_if_due(self) -> None:
+        """小时级维护循环挂载点（跨进程卡权 + 紧急态跳过，模式对齐明细裁剪）。"""
+        if self._disk_emergency_due():
+            return  # 补偿删除也是 IO/写放大源，紧急态不跑
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self._LEDGER_RETENTION_DAYS)).isoformat(timespec='seconds')
+        try:
+            claimed = await asyncio.to_thread(
+                self.store.claim_maintenance_run,
+                'delete_ledger_sweep',
+                min_interval_seconds=23 * 3600.0,
+                detail=f'cutoff={cutoff}',
+            )
+        except Exception:
+            return
+        if not claimed:
+            return
+        tombstones = 0
+        compensated = 0
+        expired = 0
+        # 1) 遗留 purged 墓碑（旧删除渐进产物）：zip 已不在、无产出可导，直接全删。
+        try:
+            tasks = await asyncio.to_thread(self.store.list_tasks)
+        except Exception:
+            tasks = []
+        legacy = [
+            task for task in tasks or []
+            if str((dict(getattr(task, 'metadata', None) or {}).get('purged_at') or '')).strip()
+        ][:50]
+        for task in legacy:
+            try:
+                await self._wipe_task_data(task, reason='legacy_tombstone_sweep')
+                tombstones += 1
+            except Exception:
+                continue
+        # 2) wiped=0 补偿：台账写入后中断的删除，幂等重放文件/DB/governance 清除。
+        try:
+            pending_rows = await asyncio.to_thread(self.store.list_task_delete_ledger_rows, wiped=0, limit=200)
+        except Exception:
+            pending_rows = []
+        for row in pending_rows:
+            try:
+                if await asyncio.to_thread(self._compensate_wipe, str(row.get('task_id') or '')):
+                    compensated += 1
+            except Exception:
+                continue
+        # 3) 台账过期：撤守卫前做最终补偿，再删台账行。
+        try:
+            expired_rows = await asyncio.to_thread(self.store.list_task_delete_ledger_rows, older_than_iso=cutoff, limit=200)
+        except Exception:
+            expired_rows = []
+        for row in expired_rows:
+            task_id = str(row.get('task_id') or '')
+            if not task_id:
+                continue
+            try:
+                await asyncio.to_thread(self._compensate_wipe, task_id)
+                await asyncio.to_thread(self.store.delete_task_delete_ledger_row, task_id)
+                expired += 1
+            except Exception:
+                continue
+        # 4) 孤儿 event-history 目录清扫（删除链路失败残留；7 天宽限保护新任务）。
+        orphan_dirs = 0
+        try:
+            orphan_dirs = int(await asyncio.to_thread(
+                self.store._sweep_orphan_event_history_dirs, grace_seconds=7 * 24 * 3600.0,
+            ) or 0)
+        except Exception:
+            orphan_dirs = 0
+        if tombstones or compensated or expired or orphan_dirs:
+            logger.info(
+                'disk governance: delete ledger sweep tombstones={} compensated={} expired={} orphan_dirs={}',
+                tombstones,
+                compensated,
+                expired,
+                orphan_dirs,
+            )
+
+    def _compensate_wipe(self, task_id: str) -> bool:
+        """仅凭 task_id 幂等重放 wipe 的文件/DB/governance 子集（不导出、不发 task.deleted）。"""
+        normalized = str(task_id or '').strip()
+        if not normalized:
+            return False
+        task = self.get_task(normalized)
+        if task is not None:
+            temp_paths = list(dict.fromkeys((
+                self._effective_task_temp_dir(normalized),
+                self._task_temp_dir(normalized, create=False),
+            )))
+        else:
+            # runtime_meta 已删：回退确定性路径。
+            temp_paths = [self._task_temp_dir(normalized, create=False)]
+        self._wipe_task_files(normalized, temp_paths)
+        try:
+            self.store.delete_task(normalized)
+        except Exception:
+            return False
+        try:
+            self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=normalized)
+        except Exception:
+            pass
+        self._wipe_governance_rows(normalized)
+        try:
+            self.store.mark_task_delete_wiped(normalized)
+        except Exception:
+            pass
+        return True
 
     def _resource_base_dir(self, kind: ResourceKind) -> Path:
         manager = getattr(self, '_resource_manager', None)
@@ -9852,7 +9858,6 @@ class MainRuntimeService:
             'disk_emergency_active': bool(merged.get('disk_emergency_active')),
             'disk_emergency_since': str(merged.get('disk_emergency_since') or ''),
             'disk_cleanup_active': bool(merged.get('disk_cleanup_active')),
-            'disk_archive_sweep': self._disk_archive_sweep_snapshot(),
             'sqlite_write_wait_ms': float(merged.get('sqlite_write_wait_ms') or 0.0),
             'sqlite_query_latency_ms': float(merged.get('sqlite_query_latency_ms') or 0.0),
             'pressure_sample_at': sample_at,

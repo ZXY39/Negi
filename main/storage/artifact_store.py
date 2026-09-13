@@ -11,22 +11,12 @@ from main.protocol import now_iso
 from main.storage.disk_guard import classify_write_error, disk_policies
 from main.storage.fs_utils import remove_tree
 
-# P2：进程级任务归档器（runtime_service 构造时注入），供归档任务的读端回退。
-_task_archiver = None
-
-
-def set_task_archiver(archiver) -> None:
-    """P2：注入进程级任务归档器，read_artifact_text 在源文件缺失时回退读归档成员。"""
-    global _task_archiver
-    _task_archiver = archiver
-
 
 def read_artifact_text(record: TaskArtifactRecord | None) -> str:
     """统一 artifact 读端：按 content_encoding/.gz 后缀解压；缺失或读失败返回 ''。
 
     rest.py / navigation.py / runtime_service.apply_patch_artifact 均须走本函数，
     否则 gzip artifact 会在读端显示为 "[二进制文件]" 或乱码。
-    源文件缺失且任务已压缩归档时，从 zip 成员回退读取（P2）。
     """
     if record is None:
         return ''
@@ -38,24 +28,7 @@ def read_artifact_text(record: TaskArtifactRecord | None) -> str:
     if not encoding:
         encoding = 'gzip' if path.suffix == '.gz' else 'plain'
     if not path.exists() or not path.is_file():
-        archiver = _task_archiver
-        if archiver is None:
-            return ''
-        try:
-            data = archiver.zip_member_bytes(
-                str(getattr(record, 'task_id', '') or ''),
-                f'artifacts/{path.name}',
-            )
-        except Exception:
-            return ''
-        if data is None:
-            return ''
-        try:
-            if encoding == 'gzip':
-                data = gzip.decompress(data)
-            return data.decode('utf-8')
-        except Exception:
-            return ''
+        return ''
     try:
         if encoding == 'gzip':
             with gzip.open(path, 'rt', encoding='utf-8') as handle:

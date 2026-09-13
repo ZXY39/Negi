@@ -187,11 +187,6 @@ class TaskListItem(Model):
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     # 磁盘治理（P1）：任务磁盘占用（增量记账 + 每小时/终态对账，展示允许 ≤1h 延迟）。
     disk_usage_bytes: int = 0
-    # 磁盘治理（P2）：书签固定与压缩归档状态（来自 TaskRecord.metadata）。
-    pinned: bool = False
-    archived: bool = False
-    # 磁盘治理（P3）：归档 zip 已被删除渐进回收（墓碑态，行与摘要仍在）。
-    purged: bool = False
 
 
 class TaskRuntimeSummary(Model):

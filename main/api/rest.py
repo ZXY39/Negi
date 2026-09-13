@@ -255,52 +255,6 @@ async def resume_task(task_id: str):
     return {'ok': True, 'task': record.model_dump(mode='json')}
 
 
-@router.post('/tasks/{task_id}/pin')
-async def pin_task(task_id: str, payload: dict = Body(default_factory=dict)):
-    """磁盘治理（P2）：书签固定/取消固定。pinned 任务豁免压缩与删除渐进。
-
-    web 直写 DB（tasks.payload_json metadata），不经 worker 命令。
-    """
-    task_id = _ensure_task_route_id(task_id)
-    service = _service()
-    await service.startup()
-    pinned = bool((payload or {}).get('pinned', True))
-    record = service.set_task_pin(service.normalize_task_id(task_id), pinned)
-    if record is None:
-        raise HTTPException(status_code=404, detail='task_not_found')
-    return {'ok': True, 'task': record.model_dump(mode='json')}
-
-
-@router.post('/tasks/{task_id}/compress')
-async def compress_task(task_id: str):
-    """磁盘治理（P2）：手动压缩任务归档（web 模式经 worker 命令转发）。"""
-    task_id = _ensure_task_route_id(task_id)
-    service = _service()
-    await service.startup()
-    task_id = service.normalize_task_id(task_id)
-    try:
-        result = await service.compress_task(task_id, reason='manual')
-    except ValueError as exc:
-        detail = str(exc)
-        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
-    return {'ok': True, 'result': result}
-
-
-@router.post('/tasks/{task_id}/decompress')
-async def decompress_task(task_id: str):
-    """磁盘治理（P2）：解压任务归档；空间不足返回 result=insufficient_space。"""
-    task_id = _ensure_task_route_id(task_id)
-    service = _service()
-    await service.startup()
-    task_id = service.normalize_task_id(task_id)
-    try:
-        result = await service.decompress_task(task_id)
-    except ValueError as exc:
-        detail = str(exc)
-        raise HTTPException(status_code=_task_control_error_status(detail), detail=detail) from exc
-    return {'ok': True, 'result': result}
-
-
 @router.get('/tasks/{task_id}/pause-state')
 async def get_task_pause_state(task_id: str):
     """Pause-drain state for the synchronous task-card pause hint.

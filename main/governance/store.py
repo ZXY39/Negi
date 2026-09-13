@@ -92,6 +92,7 @@ class GovernanceStore:
             ''',
             'CREATE INDEX IF NOT EXISTS idx_exec_approvals_status ON exec_command_approvals(status, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_exec_approvals_command ON exec_command_approvals(command_norm, status)',
+            'CREATE INDEX IF NOT EXISTS idx_exec_approvals_context ON exec_command_approvals(context_id)',
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -280,6 +281,22 @@ class GovernanceStore:
                 'DELETE FROM exec_command_approvals WHERE approval_id NOT IN '
                 '(SELECT approval_id FROM exec_command_approvals ORDER BY created_at DESC LIMIT ?)',
                 (max(10, int(keep_recent or 200)),),
+            )
+            return int(getattr(cursor, 'rowcount', 0) or 0)
+
+    def delete_exec_approvals_for_context(self, context_id: str) -> int:
+        """任务删除全量清除：按 context_id（=task_id）删审批行（含命令明文）。
+
+        task_id 带 `task:` 前缀，与 session_key（`web:…` 等）命名空间不冲突，
+        精确等值匹配不会误删会话通道的审批记录。
+        """
+        normalized = str(context_id or '').strip()
+        if not normalized:
+            return 0
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                'DELETE FROM exec_command_approvals WHERE context_id = ?',
+                (normalized,),
             )
             return int(getattr(cursor, 'rowcount', 0) or 0)
 

@@ -244,9 +244,6 @@ function taskCardPatchEligible(previousTask, nextTask) {
     return String(previousTask.status || "") === String(nextTask.status || "")
         && !!previousTask.is_paused === !!nextTask.is_paused
         && !!previousTask.is_unread === !!nextTask.is_unread
-        && !!previousTask.pinned === !!nextTask.pinned
-        && !!previousTask.archived === !!nextTask.archived
-        && !!previousTask.purged === !!nextTask.purged
         && taskFailureClass(previousTask) === taskFailureClass(nextTask)
         && taskFinalAcceptanceStatus(previousTask) === taskFinalAcceptanceStatus(nextTask)
         && taskRetryCount(previousTask) === taskRetryCount(nextTask)
@@ -465,11 +462,6 @@ function renderTaskPerformanceBar() {
         ? `${diskUsagePercent.toFixed(1)}%`
         : "--";
     const diskStateKey = diskEmergency ? "critical" : diskCleanup ? "throttled" : "normal";
-    // 磁盘治理（P2）：压缩渐进进度可观测（来自 worker_status 的 disk_archive_sweep）。
-    const sweep = metrics?.disk_archive_sweep && typeof metrics.disk_archive_sweep === "object" ? metrics.disk_archive_sweep : {};
-    const sweepSuffix = !!sweep.running
-        ? ` · 自动归档中${Number(sweep.archived_count) > 0 ? `（已压 ${Number(sweep.archived_count)}）` : ""}`
-        : "";
     const diskStateSuffix = diskEmergency ? " · 紧急" : diskCleanup ? " · 清理线" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
     const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
@@ -487,7 +479,7 @@ function renderTaskPerformanceBar() {
         </div>
         <div class="task-performance-item task-performance-item--state" data-state="${esc(diskStateKey)}">
             <span class="task-performance-label">磁盘剩余</span>
-            <strong class="task-performance-value">${esc(`${diskFreeText}（已用 ${diskUsageText}）${diskStateSuffix}${sweepSuffix}`)}</strong>
+            <strong class="task-performance-value">${esc(`${diskFreeText}（已用 ${diskUsageText}）${diskStateSuffix}`)}</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">工具队列</span>
@@ -587,21 +579,6 @@ function taskPauseHintMarkup(taskId) {
                 <span class="pc-pause-hint-text">暂停成功</span>
             </div>`;
     }
-    // 磁盘治理（P2）：归档任务解压提示（第三/第四态，复用 pause-hint 管线）。
-    if (hint.phase === "decompressed") {
-        return `
-            <div class="pc-pause-hint is-done" data-task-pause-hint="${esc(key)}" role="status" aria-live="polite">
-                <span class="pc-pause-hint-icon" aria-hidden="true"><i data-lucide="circle-check"></i></span>
-                <span class="pc-pause-hint-text">解压完成</span>
-            </div>`;
-    }
-    if (hint.phase === "decompressing") {
-        return `
-            <div class="pc-pause-hint" data-task-pause-hint="${esc(key)}" role="status" aria-live="polite">
-                <span class="pc-pause-hint-spinner" aria-hidden="true"><i data-lucide="loader-circle"></i></span>
-                <span class="pc-pause-hint-text">已压缩，正在解压…</span>
-            </div>`;
-    }
     return `
         <div class="pc-pause-hint" data-task-pause-hint="${esc(key)}" role="status" aria-live="polite">
             <span class="pc-pause-hint-spinner" aria-hidden="true"><i data-lucide="loader-circle"></i></span>
@@ -656,94 +633,6 @@ function finishTaskPauseHint(taskId) {
         clearTaskPauseHint(key);
         renderTasksIfVisible();
     }, TASK_PAUSE_HINT_DONE_HIDE_MS);
-}
-
-// 磁盘治理（P2）：归档任务的解压提示管线（复用 taskPauseHints 状态位）。
-
-function beginTaskDecompressHint(taskId) {
-    const key = String(taskId || "").trim();
-    if (!key) return;
-    stopTaskPauseHintPolling(key);
-    const existing = taskPauseHintState(key);
-    if (existing?.hideTimer) {
-        window.clearTimeout(existing.hideTimer);
-        existing.hideTimer = null;
-    }
-    S.taskPauseHints = S.taskPauseHints || {};
-    S.taskPauseHints[key] = {
-        phase: "decompressing",
-        total: null,
-        stopped: 0,
-        startedAt: Date.now(),
-        pollTimer: null,
-        hideTimer: null,
-    };
-    renderTasksIfVisible();
-    void pollTaskDecompressState(key);
-}
-
-async function pollTaskDecompressState(taskId) {
-    const key = String(taskId || "").trim();
-    const hint = taskPauseHintState(key);
-    if (!hint || hint.phase !== "decompressing") return;
-    if (Date.now() - Number(hint.startedAt || 0) > 120000) {
-        clearTaskPauseHint(key);
-        renderTasksIfVisible();
-        return;
-    }
-    try {
-        await loadTasks();
-    } catch (e) {
-        // 轮询失败忽略，下一拍重试
-    }
-    const task = S.tasksById?.[key];
-    if (!task || !task.archived) {
-        hint.phase = "decompressed";
-        renderTasksIfVisible();
-        hint.hideTimer = window.setTimeout(() => {
-            clearTaskPauseHint(key);
-            renderTasksIfVisible();
-        }, TASK_PAUSE_HINT_DONE_HIDE_MS);
-        return;
-    }
-    hint.pollTimer = window.setTimeout(() => { void pollTaskDecompressState(key); }, 1000);
-}
-
-async function waitForTaskArchivedFlag(taskId, expected, timeoutMs = 120000) {
-    const key = String(taskId || "").trim();
-    const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 120000);
-    while (Date.now() < deadline) {
-        const task = S.tasksById?.[key];
-        if (!task || !!task.archived === !!expected) return true;
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        try {
-            await loadTasks();
-        } catch (e) {
-            // 忽略轮询失败
-        }
-    }
-    return false;
-}
-
-function showTaskArchiveResultToast(action, taskId, result) {
-    const outcome = String(result?.result || "").trim();
-    const titleMap = {
-        archived: "压缩完成",
-        already_archived: "已是归档状态",
-        decompressed: "解压完成",
-        not_archived: "任务未压缩",
-        enqueued: "已提交，等待 worker 执行",
-        insufficient_space: "磁盘空间不足",
-        pinned_skipped: "任务已固定，跳过压缩",
-        purged_skipped: "任务已被清理",
-        active_skipped: "任务运行中，不可压缩",
-        skipped: "已跳过（锁占用或无内容）",
-        in_flight: "正在解压中",
-        not_found: "任务不存在",
-        purged: "归档已被清理，无法解压",
-    };
-    const title = titleMap[outcome] || taskActionSuccessTitle(action);
-    showToast({ title, text: String(taskId || ""), kind: outcome === "insufficient_space" ? "warn" : "success" });
 }
 
 async function pollTaskPauseState(taskId) {
@@ -822,9 +711,6 @@ function taskGridRenderSignature(meta) {
                 statusLabel: taskStatusLabel(task),
                 createdAt: taskCreatedAtText(task),
                 pauseHintPhase: String(taskPauseHintState(taskId)?.phase || ""),
-                pinned: !!task?.pinned,
-                archived: !!task?.archived,
-                purged: !!task?.purged,
                 tokenUsage: tokenUsage.tracked
                     ? [tokenUsage.input_tokens, tokenUsage.output_tokens, tokenUsage.cache_hit_tokens]
                     : [null, null, null],
@@ -912,22 +798,17 @@ function renderTasks() {
         el.className = `project-card${selected ? " is-selected" : ""}${S.multiSelectMode ? " is-multi-mode" : ""}`;
         el.dataset.taskId = taskId;
         el.innerHTML = `
-            ${task.archived ? `<span class="pc-corner-badge pc-corner-badge--archived" title="已压缩归档：打开或恢复时自动解压（解压前预检磁盘空间）" aria-label="已压缩归档"><i data-lucide="archive"></i></span>` : ""}
             <div class="pc-topbar">
                 <div class="pc-topbar-left">
                     <label class="project-select-toggle${S.multiSelectMode ? " is-visible" : ""}"><input type="checkbox" class="project-select-checkbox" ${selected ? "checked" : ""} ${S.taskBusy ? "disabled" : ""}><span>Select</span></label>
                     <div class="pc-topbar-meta">
                         <span class="status-badge" data-status="${esc(statusKey)}" data-task-status>${esc(taskStatusLabel(task))}</span>
-                        ${task.purged ? `<span class="pc-task-id-chip pc-purged-chip" title="归档已被删除渐进回收（墓碑态）：任务结构、摘要与错误日志仍可查看，中间产物不可恢复"><span class="pc-task-id-label">已清理</span></span>` : ""}
                         <span class="pc-task-id-chip">
                             <span class="pc-task-id-label">Task</span>
                             <span class="pc-task-id-value">${esc(taskId)}</span>
                         </span>
                         <button class="icon-btn pc-copy-btn" type="button" title="复制任务 ID" aria-label="复制任务 ID">
                             <i data-lucide="copy"></i>
-                        </button>
-                        <button class="icon-btn pc-pin-btn${task.pinned ? " is-pinned" : ""}" type="button" data-task-pin="${esc(taskId)}" title="${task.pinned ? "取消固定（允许自动清理）" : "固定任务（豁免自动压缩/删除）"}" aria-label="固定任务" aria-pressed="${task.pinned ? "true" : "false"}">
-                            <i data-lucide="${task.pinned ? "bookmark-check" : "bookmark"}"></i>
                         </button>
                     </div>
                 </div>
@@ -959,21 +840,6 @@ function renderTasks() {
         el.querySelector(".pc-copy-btn")?.addEventListener("click", async (e) => {
             e.stopPropagation();
             await copyTaskId(taskId);
-        });
-        el.querySelector("[data-task-pin]")?.addEventListener("click", async (e) => {
-            e.stopPropagation();
-            const nextPinned = !task.pinned;
-            try {
-                await ApiClient.pinTask(taskId, nextPinned);
-                showToast({
-                    title: nextPinned ? "任务已固定" : "已取消固定",
-                    text: nextPinned ? `${taskId} 不会被自动压缩/清理` : taskId,
-                    kind: "success",
-                });
-                await loadTasks();
-            } catch (err) {
-                showToast({ title: "固定操作失败", text: String(err?.message || err || ""), kind: "error" });
-            }
         });
         const menuTrigger = el.querySelector("[data-task-menu-toggle]");
         menuTrigger?.addEventListener("click", (e) => {
@@ -1065,28 +931,13 @@ function updateTaskToolbar() {
 function taskActionTone(action) {
     if (action === "pause") return "warn";
     if (action === "delete") return "danger";
-    if (action === "compress") return "warn";
-    if (action === "pin") return "";
     return "success";
-}
-
-function canCompressTask(task) {
-    if (!task || task.archived || task.pinned || task.purged) return false;
-    const status = String(task.status || "").trim().toLowerCase();
-    return ["success", "failed"].includes(status) || !!task.is_paused || !!task.pause_requested;
-}
-
-function canDecompressTask(task) {
-    return !!task && !!task.archived && !task.purged;
 }
 
 function taskCardActions(task) {
     const actions = [];
     if (taskWorkerControlsAvailable() && canPause(task)) actions.push("pause");
     if (taskWorkerControlsAvailable() && canResume(task)) actions.push("resume");
-    if (!task?.purged) actions.push("pin");
-    if (taskWorkerControlsAvailable() && canCompressTask(task)) actions.push("compress");
-    if (taskWorkerControlsAvailable() && canDecompressTask(task)) actions.push("decompress");
     if (canDelete(task)) actions.push("delete");
     return actions.map((action) => ({ action, label: taskActionText(action, task), tone: taskActionTone(action) }));
 }
@@ -1098,21 +949,16 @@ function primaryTaskAction(task) {
 }
 
 function taskActionText(action, task = null) {
-    if (action === "pin") return task?.pinned ? "\u53d6\u6d88\u56fa\u5b9a" : "\u56fa\u5b9a";
-    return ({ pause: "\u6682\u505c", resume: "\u5f00\u59cb", delete: "\u5220\u9664", compress: "\u538b\u7f29\u5f52\u6863", decompress: "\u89e3\u538b" }[action] || "\u64cd\u4f5c");
+    return ({ pause: "\u6682\u505c", resume: "\u5f00\u59cb", delete: "\u5220\u9664" }[action] || "\u64cd\u4f5c");
 }
 
 function taskActionSuccessTitle(action) {
     if (action === "delete") return "删除成功";
-    if (action === "compress") return "压缩完成";
-    if (action === "decompress") return "解压完成";
     return `${taskActionText(action)}成功`;
 }
 
 function taskActionFailureTitle(action) {
     if (action === "delete") return "删除失败";
-    if (action === "compress") return "压缩失败";
-    if (action === "decompress") return "解压失败";
     return `${taskActionText(action)}失败`;
 }
 
@@ -1123,26 +969,16 @@ function taskActionErrorText(action, error) {
         if (message.includes("task_not_deletable") || message.includes("task_not_paused")) return "仅已暂停或已完成的任务可删除";
         if (message.includes("task_not_found")) return "任务不存在或已被删除";
     }
-    if (action === "resume" && message.includes("pending_decompress")) {
-        return "磁盘空间不足，解压预检未通过：任务保持暂停，请先清理磁盘";
-    }
-    if (message.includes("task_purged")) {
-        return "任务归档已被清理（墓碑态），无法恢复";
-    }
-    if ((action === "compress" || action === "decompress") && message.includes("archive_disabled")) {
-        return "归档功能已停用（main_runtime.disk_guard.archive_enabled=false）";
-    }
     return message || "Unknown error";
 }
 
 function taskActionRequiresWorker(action) {
-    return ["pause", "resume", "compress", "decompress"].includes(String(action || "").trim().toLowerCase());
+    return ["pause", "resume"].includes(String(action || "").trim().toLowerCase());
 }
 
 function taskActionRequestOptions(action, options = {}) {
     const normalized = options && typeof options === "object" && !Array.isArray(options) ? { ...options } : {};
     if (action === "delete" && !Number.isFinite(normalized.timeoutMs)) normalized.timeoutMs = 30000;
-    if ((action === "compress" || action === "decompress") && !Number.isFinite(normalized.timeoutMs)) normalized.timeoutMs = 120000;
     return normalized;
 }
 
@@ -1183,9 +1019,6 @@ async function requestTaskAction(taskId, action, options = {}) {
     if (action === "pause") return ApiClient.pauseTask(taskId, requestOptions);
     if (action === "resume") return ApiClient.resumeTask(taskId, requestOptions);
     if (action === "delete") return ApiClient.deleteTask(taskId, requestOptions);
-    if (action === "pin") return ApiClient.pinTask(taskId, !(S.tasksById?.[String(taskId)]?.pinned), requestOptions);
-    if (action === "compress") return ApiClient.compressTask(taskId, requestOptions);
-    if (action === "decompress") return ApiClient.decompressTask(taskId, requestOptions);
     throw new Error(`Unsupported task action: ${action}`);
 }
 
@@ -1194,7 +1027,7 @@ async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
     if (action === "delete") {
         openConfirm({
             title: "删除任务",
-            text: "删除后将移除任务记录、树快照和工件文件，且无法恢复。",
+            text: "删除后将移除任务记录、节点信息与全部过程数据，且无法恢复；报告类产出会自动导出到 deliverables 目录保留。",
             confirmLabel: "删除",
             confirmKind: "danger",
             returnFocus,
@@ -1220,24 +1053,9 @@ async function performTaskAction(taskId, action) {
             // 同步暂停：卡片内提示跟踪 worker 真实排水进度，直到 actor 停完
             // 才显示「暂停成功」；不再用页面顶部 toast 提前宣告成功。
             beginTaskPauseHint(taskId);
-        } else if (action === "compress" || action === "decompress") {
-            // 磁盘治理（P2）：归档操作结果按 result code 精确提示；
-            // 解压跟一张「正在解压」卡片提示直到 archived 翻回 false。
-            showTaskArchiveResultToast(action, taskId, result);
-            if (action === "decompress" && String(result?.result || "") !== "insufficient_space") {
-                beginTaskDecompressHint(taskId);
-                await waitForTaskArchivedFlag(taskId, false);
-            }
         } else {
             if (action === "resume") {
-                const resumeItem = S.tasksById?.[String(taskId)];
-                if (resumeItem?.archived) {
-                    // 已压缩任务恢复：worker 先自动解压再续跑（解压预检不足会
-                    // 保持 paused 并报 pending_decompress）。
-                    beginTaskDecompressHint(taskId);
-                } else {
-                    clearTaskPauseHint(taskId);
-                }
+                clearTaskPauseHint(taskId);
             }
             const successText = taskId;
             showToast({ title: taskActionSuccessTitle(action), text: successText, kind: "success" });
@@ -1274,7 +1092,7 @@ async function runTaskBatchAction(action, { returnFocus = null } = {}) {
     if (action === "delete") {
         openConfirm({
             title: "删除任务",
-            text: "删除后将移除任务记录、树快照和工件文件，且无法恢复。",
+            text: "删除后将移除任务记录、节点信息与全部过程数据，且无法恢复；报告类产出会自动导出到 deliverables 目录保留。",
             confirmLabel: "删除",
             confirmKind: "danger",
             returnFocus,
@@ -1832,26 +1650,6 @@ async function restoreTaskDetailSession() {
 
 async function openTask(taskId) {
     try {
-        // 磁盘治理（P2）：已压缩任务先询问解压（解压前后端预检磁盘剩余空间）。
-        const listItem = S.tasksById?.[String(taskId || "")];
-        if (listItem?.archived) {
-            const { confirmed } = await requestInlineConfirm({
-                title: "任务已压缩",
-                text: "该任务已压缩归档，需解压后才能加载完整内容（解压前会预检磁盘剩余空间，空间不足将拒绝解压）。是否解压？",
-                confirmLabel: "解压并打开",
-                confirmKind: "primary",
-            });
-            if (!confirmed) return;
-            beginTaskDecompressHint(taskId);
-            const res = await ApiClient.decompressTask(taskId, { timeoutMs: 120000 });
-            if (String(res?.result || "") === "insufficient_space") {
-                clearTaskPauseHint(String(taskId || ""));
-                renderTasksIfVisible();
-                showToast({ title: "磁盘空间不足", text: "解压预检未通过，请先清理磁盘空间", kind: "warn" });
-                return;
-            }
-            await waitForTaskArchivedFlag(taskId, false);
-        }
         await loadTaskDetail(taskId);
         await loadTaskArtifacts();
         scheduleTaskDetailSessionPersist();

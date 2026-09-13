@@ -573,8 +573,8 @@ def test_task_status_helpers_treat_unpassed_as_non_failed_without_continue_actio
     assert result["unpassedLabel"] == "未通过"
     assert result["unpassedInFailedBucket"] is False
     assert result["primaryAction"] is None
-    # 磁盘治理（P2）：终态任务动作集含 固定/压缩归档（pin 恒在、compress 对未归档终态任务开放）。
-    assert result["actions"] == ["pin", "compress", "delete"]
+    # zip 归档/pin 机制已移除：终态任务卡片动作仅剩删除。
+    assert result["actions"] == ["delete"]
 
 
 def test_task_selection_menu_exposes_completed_and_unpassed_buckets() -> None:
@@ -696,8 +696,8 @@ def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
     assert result["recreatedStatus"] == "failed"
     assert result["recreatedLabel"] == "Failed"
     assert result["recreatedSummary"] == ""
-    # 磁盘治理（P2）：终态任务动作集含 固定/压缩归档。
-    assert result["recreatedActions"] == ["pin", "compress", "delete"]
+    # zip 归档/pin 机制已移除：终态任务卡片动作仅剩删除。
+    assert result["recreatedActions"] == ["delete"]
     assert result["recreatedPrimary"] is None
     assert result["recreatedDetailLabel"] == "失败"
     assert result["retriedStatus"] == "in_progress"

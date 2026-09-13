@@ -204,6 +204,27 @@ class TaskLogService:
         for task_id in pending_task_ids:
             self.flush_live_patch_history(task_id)
 
+    def discard_task_caches(self, task_id: str) -> None:
+        """任务全量清除（wipe S7）：清掉以 task_id 为键的进程内缓存，防陈旧命中/泄漏。"""
+        normalized = str(task_id or '').strip()
+        if not normalized:
+            return
+        with self._live_patch_history_guard:
+            self._pending_live_patch_history.pop(normalized, None)
+            timer = self._live_patch_history_timers.pop(normalized, None)
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+        try:
+            for key in [key for key in self._last_node_patch_persist_fingerprints if str(key[0]) == normalized]:
+                self._last_node_patch_persist_fingerprints.pop(key, None)
+        except Exception:
+            pass
+        with self._task_locks_guard:
+            self._task_locks.pop(normalized, None)
+
     def append_task_event(
         self,
         *,
@@ -4675,9 +4696,6 @@ class TaskLogService:
             'is_unread': bool(payload.get('is_unread')),
             'is_paused': bool(payload.get('is_paused')),
             'max_depth': int(payload.get('max_depth') or 0),
-            'pinned': bool(payload.get('pinned')),
-            'archived': bool(payload.get('archived')),
-            'purged': bool(payload.get('purged')),
             'token_usage': {
                 'input_tokens': int(((payload.get('token_usage') or {}).get('input_tokens') or 0)),
                 'output_tokens': int(((payload.get('token_usage') or {}).get('output_tokens') or 0)),
@@ -5083,11 +5101,6 @@ class TaskLogService:
             'updated_at': task.updated_at,
             'max_depth': int(task.max_depth or 0),
             'token_usage': task.token_usage.model_dump(mode='json'),
-            # 磁盘治理（P2）：低频状态字段，进 payload 与 fingerprint（翻转必须触发推送）；
-            # disk_usage_bytes 属每小时对账值，只在 GET /tasks 列表下发、不进指纹防扰动。
-            'pinned': bool(metadata.get('pinned')),
-            'archived': bool(metadata.get('archived_at')),
-            'purged': bool(metadata.get('purged_at')),
         }
 
     def _runtime_summary_payload(self, task_id: str, *, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:

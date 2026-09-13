@@ -700,29 +700,16 @@ class MainRuntimeDiskGuardConfig(Base):
     usage_ttl_seconds: float = 5.0
     artifact_gzip_threshold_bytes: int = 1024 * 1024
     terminal_cleanup_enabled: bool = True
-    # P1：清理线（历史任务压缩渐进 + 强收紧）与紧急态行为。
+    # P1：清理线（全删渐进 + 强收紧）与紧急态行为。
     cleanup_min_bytes: int = 1024 * 1024 * 1024
     cleanup_min_ratio: float = 0.05
     auto_pause_enabled: bool = True
     emergency_streak_samples: int = 3
     emergency_recovery_samples: int = 5
     alert_on_disk_emergency: bool = True
-    # P2：任务压缩归档（压缩渐进 + 手动 compress/decompress）。
-    archive_enabled: bool = True
-    archive_sweep_batch: int = 4
-    archive_sweep_interval_seconds: float = 15.0
-    # 解压宽限期（分钟）：解压后该窗口内不被压缩渐进重新归档；0=关闭。
-    decompress_grace_minutes: float = 60.0
-
-    @field_validator("decompress_grace_minutes", mode="before")
-    @classmethod
-    def _normalize_decompress_grace_minutes(cls, value: Any) -> float:
-        try:
-            return min(max(0.0, float(value)), 7 * 24 * 60)
-        except (TypeError, ValueError):
-            return 60.0
-    # P3：终态任务大行裁剪（0=关闭）与删除渐进。
-    detail_retention_days: int = 14
+    # P3：终态任务大行裁剪（0=关闭）与全删渐进（低于清理线时先导产出再彻底删
+    # 最老终态任务；zip 归档/压缩渐进/pin/墓碑机制已整体移除）。
+    detail_retention_days: int = 7
     purge_enabled: bool = True
 
     @field_validator("detail_retention_days", mode="before")
@@ -731,23 +718,7 @@ class MainRuntimeDiskGuardConfig(Base):
         try:
             return max(0, int(value))
         except (TypeError, ValueError):
-            return 14
-
-    @field_validator("archive_sweep_batch", mode="before")
-    @classmethod
-    def _normalize_archive_sweep_batch(cls, value: Any) -> int:
-        try:
-            return max(1, int(value))
-        except (TypeError, ValueError):
-            return 4
-
-    @field_validator("archive_sweep_interval_seconds", mode="before")
-    @classmethod
-    def _normalize_archive_sweep_interval_seconds(cls, value: Any) -> float:
-        try:
-            return max(1.0, float(value))
-        except (TypeError, ValueError):
-            return 15.0
+            return 7
 
     @field_validator("cleanup_min_bytes", mode="before")
     @classmethod

@@ -171,6 +171,15 @@ class SQLiteTaskStore:
             )
             ''',
             '''
+            CREATE TABLE IF NOT EXISTS task_delete_ledger (
+                task_id TEXT PRIMARY KEY,
+                reason TEXT NOT NULL DEFAULT '',
+                deleted_at TEXT NOT NULL,
+                deliverables_exported INTEGER NOT NULL DEFAULT 0,
+                wiped INTEGER NOT NULL DEFAULT 0
+            )
+            ''',
+            '''
             CREATE TABLE IF NOT EXISTS task_node_pauses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -920,24 +929,116 @@ class SQLiteTaskStore:
 
         return bool(self._run_write(operation))
 
-    def list_archived_tasks(self) -> list[dict[str, Any]]:
-        """P3 删除渐进候选：metadata.archived_at 非空的任务（含 pinned/purged 标记，过滤在调用方）。"""
+    # ------------------------------------------------------------------
+    # 删除台账：先记账后删除。守卫迟到写复活（事件/摘要 outbox/快照覆盖写），
+    # 崩溃后凭 wiped=0 由 sweep 幂等补偿；台账行自身按保留期过期删除，
+    # 不允许成为新的"无条件永久保留"。
+    # ------------------------------------------------------------------
+
+    def record_task_delete(self, task_id: str, *, reason: str, deliverables_exported: int = 0) -> None:
+        normalized = str(task_id or '').strip()
+        if not normalized:
+            return
+        now_text = datetime.now().astimezone().isoformat(timespec='seconds')
+
+        def operation(conn: sqlite3.Connection) -> None:
+            # 冲突时保留原 deleted_at：过期时钟不被补偿重放重置。
+            conn.execute(
+                'INSERT INTO task_delete_ledger (task_id, reason, deleted_at, deliverables_exported, wiped) '
+                'VALUES (?, ?, ?, ?, 0) '
+                'ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason, '
+                'deliverables_exported=MAX(task_delete_ledger.deliverables_exported, excluded.deliverables_exported), '
+                'wiped=0',
+                (normalized, str(reason or ''), now_text, max(0, int(deliverables_exported or 0))),
+            )
+        self._run_write(operation)
+
+    def mark_task_delete_wiped(self, task_id: str) -> None:
+        normalized = str(task_id or '').strip()
+        if not normalized:
+            return
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                'UPDATE task_delete_ledger SET wiped = 1 WHERE task_id = ?',
+                (normalized,),
+            )
+        self._run_write(operation)
+
+    def is_task_deleted(self, task_id: str) -> bool:
+        normalized = str(task_id or '').strip()
+        if not normalized:
+            return False
+        return self._fetchone(
+            'SELECT 1 AS hit FROM task_delete_ledger WHERE task_id = ?', (normalized,),
+        ) is not None
+
+    def list_task_delete_ledger_rows(
+        self,
+        *,
+        wiped: int | None = None,
+        older_than_iso: str = '',
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        predicates = ['1 = 1']
+        params: list[object] = []
+        if wiped is not None:
+            predicates.append('wiped = ?')
+            params.append(1 if wiped else 0)
+        if str(older_than_iso or '').strip():
+            predicates.append("deleted_at <> '' AND deleted_at < ?")
+            params.append(str(older_than_iso).strip())
+        params.append(max(1, int(limit or 200)))
         rows = self._fetchall(
-            "SELECT task_id, "
-            "json_extract(payload_json, '$.metadata.archived_at') AS archived_at, "
-            "COALESCE(json_extract(payload_json, '$.metadata.pinned'), 0) AS pinned, "
-            "json_extract(payload_json, '$.metadata.purged_at') AS purged_at "
-            "FROM tasks WHERE json_extract(payload_json, '$.metadata.archived_at') IS NOT NULL",
+            'SELECT task_id, reason, deleted_at, deliverables_exported, wiped FROM task_delete_ledger '
+            f'WHERE {" AND ".join(predicates)} ORDER BY deleted_at ASC LIMIT ?',
+            tuple(params),
         )
         return [
             {
                 'task_id': str(row['task_id'] or ''),
-                'archived_at': str(row['archived_at'] or ''),
-                'pinned': bool(row['pinned']),
-                'purged_at': str(row['purged_at'] or ''),
+                'reason': str(row['reason'] or ''),
+                'deleted_at': str(row['deleted_at'] or ''),
+                'deliverables_exported': int(row['deliverables_exported'] or 0),
+                'wiped': int(row['wiped'] or 0),
             }
-            for row in rows
+            for row in rows or []
         ]
+
+    def delete_task_delete_ledger_row(self, task_id: str) -> None:
+        normalized = str(task_id or '').strip()
+        if not normalized:
+            return
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute('DELETE FROM task_delete_ledger WHERE task_id = ?', (normalized,))
+        self._run_write(operation)
+
+    def sum_task_detail_bytes(self, task_ids: list[str]) -> dict[str, int]:
+        """按任务汇总五张明细大行表的 payload 字节数。
+
+        全删渐进 size×age 排序的 size 输入；调用方候选集有界（≤50），
+        五表均有 task_id 索引，代价可控。
+        """
+        ids = [str(item or '').strip() for item in task_ids or [] if str(item or '').strip()]
+        if not ids:
+            return {}
+        totals: dict[str, int] = {item: 0 for item in ids}
+        marks = ','.join('?' * len(ids))
+        for table in self._DETAIL_PRUNE_TABLES:
+            try:
+                rows = self._fetchall(
+                    f'SELECT task_id, SUM(LENGTH(payload_json)) AS total FROM {table} '
+                    f'WHERE task_id IN ({marks}) GROUP BY task_id',
+                    tuple(ids),
+                )
+            except sqlite3.Error:
+                continue
+            for row in rows or []:
+                key = str(row['task_id'] or '')
+                if key in totals:
+                    totals[key] += int(row['total'] or 0)
+        return totals
 
     def delete_task(self, task_id: str) -> None:
         def operation(conn: sqlite3.Connection) -> None:
@@ -960,6 +1061,8 @@ class SQLiteTaskStore:
             conn.execute('DELETE FROM task_message_distribution_epochs WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM task_events WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM artifacts WHERE task_id = ?', (task_id,))
+            conn.execute('DELETE FROM task_disk_usage WHERE task_id = ?', (task_id,))
+            conn.execute("DELETE FROM heartbeat_node_retry_state WHERE task_id = ?", (task_id,))
             conn.execute('DELETE FROM nodes WHERE task_id = ?', (task_id,))
             conn.execute('DELETE FROM tasks WHERE task_id = ?', (task_id,))
         self._run_write(operation)
@@ -1167,8 +1270,16 @@ class SQLiteTaskStore:
         # payload_is_external/payload_archive_path/payload_archive_encoding/
         # payload_hash 为废弃列（保留 schema 规避删列风险），恒写默认值。
         payload_json = json.dumps(payload, ensure_ascii=False)
+        normalized_task_id = str(task_id or '').strip()
 
         def operation(conn: sqlite3.Connection) -> int:
+            # 删除台账守卫：已删任务的迟到事件写直接拦下，防 task_events 行复活。
+            if normalized_task_id:
+                deleted = conn.execute(
+                    'SELECT 1 FROM task_delete_ledger WHERE task_id = ?', (normalized_task_id,),
+                ).fetchone()
+                if deleted is not None:
+                    return 0
             cursor = conn.execute(
                 'INSERT INTO task_events (task_id, session_id, event_type, created_at, payload_json, payload_is_external, payload_archive_path, payload_archive_encoding, payload_hash) '
                 'VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)',
@@ -1237,6 +1348,9 @@ class SQLiteTaskStore:
         normalized_task_id = str(task_id or '').strip()
         payload = str(payload_json or '')
         if not normalized_task_id or not payload or not self._event_history_enabled:
+            return False
+        # 删除台账守卫：已删任务的迟到快照 flush 不复活 event-history 目录。
+        if self.is_task_deleted(normalized_task_id):
             return False
         if not has_emergency_disk_budget((self._event_history_dir, self.path)):
             return False
@@ -2108,6 +2222,12 @@ class SQLiteTaskStore:
         payload_json = json.dumps(payload, ensure_ascii=False)
 
         def operation(conn: sqlite3.Connection) -> dict[str, object]:
+            # 删除台账守卫：已删任务的迟到摘要 flush 不复活 outbox 行。
+            deleted = conn.execute(
+                'SELECT 1 FROM task_delete_ledger WHERE task_id = ?', (key,),
+            ).fetchone()
+            if deleted is not None:
+                return {'task_id': key, 'skipped': 'task_deleted'}
             row = conn.execute(
                 'SELECT task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, version, payload_json '
                 'FROM task_summary_outbox WHERE task_id = ?',
