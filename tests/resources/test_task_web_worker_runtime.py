@@ -2532,13 +2532,24 @@ def test_task_live_patch_history_persists_latest_payload_after_window(tmp_path: 
 
     time.sleep(1.3)
 
+    # 单份快照契约：live.patch 不再写 task_events 行，最新 payload 覆盖写 latest.json.gz
     live_events = [
         item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
         if item.get("event_type") == "task.live.patch"
     ]
+    assert live_events == []
 
-    assert 1 <= len(live_events) <= 2
-    assert live_events[-1]["payload"]["frame"]["stage_goal"] == "stage-19"
+    import gzip
+
+    snapshot_path = (
+        service.store._event_history_dir
+        / service.store._safe_path_component(record.task_id)
+        / "latest.json.gz"
+    )
+    assert snapshot_path.exists()
+    with gzip.open(snapshot_path, "rt", encoding="utf-8") as handle:
+        snapshot = json.loads(handle.read())
+    assert snapshot["frame"]["stage_goal"] == "stage-19"
 
 
 def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: Path, monkeypatch):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import sqlite3
 import threading
@@ -155,57 +156,50 @@ def test_sqlite_task_store_task_summary_outbox_keeps_latest_payload(tmp_path: Pa
         store.close()
 
 
-def test_sqlite_task_store_externalizes_live_patch_payload_and_hydrates_on_read(tmp_path: Path) -> None:
+def test_sqlite_task_store_live_patch_single_snapshot_overwrite(tmp_path: Path) -> None:
+    """live.patch 单份快照：覆盖写 latest.json.gz，不写 task_events 行。"""
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     try:
-        seq = store.append_task_event(
-            task_id="task:demo",
-            session_id="web:shared",
-            event_type="task.live.patch",
-            created_at="2026-03-29T00:00:00+08:00",
-            payload={
-                "task_id": "task:demo",
-                "runtime_summary": {
-                    "active_node_ids": ["node:root"],
-                    "runnable_node_ids": ["node:root"],
-                    "waiting_node_ids": [],
-                    "frames": [],
-                },
-                "frame": {
-                    "node_id": "node:root",
-                    "phase": "before_model",
-                    "stage_goal": "demo stage goal",
-                    "tool_calls": [],
-                    "child_pipelines": [],
-                },
-                "removed_node_id": "",
+        payload = {
+            "task_id": "task:demo",
+            "runtime_summary": {
+                "active_node_ids": ["node:root"],
+                "runnable_node_ids": ["node:root"],
+                "waiting_node_ids": [],
+                "frames": [],
             },
-        )
+            "frame": {"node_id": "node:root", "phase": "before_model", "tool_calls": []},
+            "removed_node_id": "",
+        }
+        assert store.write_task_live_snapshot("task:demo", json.dumps(payload, ensure_ascii=False))
+        snapshot_path = store._event_history_dir / "task_demo" / "latest.json.gz"
+        assert snapshot_path.exists()
 
-        row = store._fetchone(
-            "SELECT payload_is_external, payload_archive_path, payload_json FROM task_events WHERE seq = ?",
-            (seq,),
-        )
-        assert row is not None
-        assert int(row["payload_is_external"] or 0) == 1
-        archive_rel = str(row["payload_archive_path"] or "").strip()
-        assert archive_rel
-        assert (store._event_history_dir / archive_rel).exists()
+        # 覆盖写：第二次写后仍只有一个文件，内容为最新 payload
+        payload["frame"]["phase"] = "after_model"
+        assert store.write_task_live_snapshot("task:demo", json.dumps(payload, ensure_ascii=False))
+        files = [item.name for item in (store._event_history_dir / "task_demo").iterdir() if item.is_file()]
+        assert files == ["latest.json.gz"]
+        with gzip.open(snapshot_path, "rt", encoding="utf-8") as handle:
+            stored = json.loads(handle.read())
+        assert stored["frame"]["phase"] == "after_model"
 
-        stored_preview = json.loads(row["payload_json"])
-        assert stored_preview["payload_externalized"] is True
-        assert stored_preview["runtime_summary_preview"]["active_node_count"] == 1
-        assert "runtime_summary" not in stored_preview
+        # 不产生 task_events 行
+        assert store.list_task_events(task_id="task:demo", limit=10) == []
 
-        hydrated = store.list_task_events(task_id="task:demo", limit=10)
-        assert hydrated[-1]["payload"]["runtime_summary"]["active_node_ids"] == ["node:root"]
-        assert hydrated[-1]["payload"]["frame"]["stage_goal"] == "demo stage goal"
-
-        preview_only = store.list_task_events(task_id="task:demo", limit=10, hydrate_external=False)
-        assert preview_only[-1]["payload"]["payload_externalized"] is True
-        assert "runtime_summary" not in preview_only[-1]["payload"]
+        # 空 task_id / 空 payload / 关闭开关均拒绝写
+        assert not store.write_task_live_snapshot("", "{}")
+        assert not store.write_task_live_snapshot("task:demo", "")
     finally:
         store.close()
+
+    (tmp_path / "disabled").mkdir()
+    disabled = SQLiteTaskStore(tmp_path / "disabled" / "runtime.sqlite3", event_history_enabled=False)
+    try:
+        assert not disabled.write_task_live_snapshot("task:demo", json.dumps({"frame": {}}))
+        assert not (disabled._event_history_dir / "task_demo").exists()
+    finally:
+        disabled.close()
 
 
 def test_sqlite_task_store_logs_sqlite_errorcode_and_name_for_read_queries(

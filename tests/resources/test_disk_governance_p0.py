@@ -1,7 +1,7 @@
 """P0 磁盘治理止血包单测。
 
 覆盖：DiskFullError 分类、_run_write 包装与失败计数、artifact 超限 gzip 往返、
-阈值边界、去重快路径、终态清理保留清单与后台清理体、live patch flush 有界重试、
+阈值边界、去重快路径、终态清理保留清单与后台清理体、live patch 单份快照 flush、
 node_runner 错误记录写保护、应急写预算预检、旧 payload_json 行兼容。
 """
 
@@ -275,7 +275,7 @@ def test_terminal_cleanup_keep_policy_and_run(tmp_path, policies_guard):
         store.close()
 
 
-# 7. live patch flush 有界重试
+# 7. live patch 单份快照 flush（覆盖写自愈，无重试）
 
 
 def _make_log_service_harness(writer):
@@ -283,61 +283,52 @@ def _make_log_service_harness(writer):
 
     service = TaskLogService.__new__(TaskLogService)
     service._event_writer = writer
+    service._store = writer
     service._live_patch_history_guard = threading.Lock()
     service._pending_live_patch_history = {}
     service._live_patch_history_timers = {}
-    service._last_live_patch_boundary_key = {}
     service._event_write_failures = 0
-    service._live_patch_retry_counts = {}
-    service._live_patch_dropped_events = 0
     return service
 
 
-def test_flush_live_patch_retries_then_succeeds():
-    calls = {'n': 0}
+def test_flush_live_patch_writes_single_snapshot():
+    calls: list[tuple] = []
 
-    class _Writer:
+    class _Store:
         def append_task_event(self, **_kwargs):
-            calls['n'] += 1
-            if calls['n'] == 1:
-                raise OSError(errno.ENOSPC, 'No space left on device')
+            calls.append(('event',))
             return 7
 
-    service = _make_log_service_harness(_Writer())
-    task = _task_record(status='in_progress')
-    payload = {'runtime_summary': {}, 'frame': {}}
+        def write_task_live_snapshot(self, task_id, payload_json):
+            calls.append(('snapshot', task_id, payload_json))
+            return True
+
+    service = _make_log_service_harness(_Store())
     with service._live_patch_history_guard:
-        service._pending_live_patch_history['task:t1'] = {'task': task, 'payload': payload}
-    service.flush_live_patch_history('task:t1')  # 第一次：写失败 → 重挂
-    assert service._event_write_failures == 1
-    assert service._live_patch_retry_counts.get('task:t1') == 1
-    retry_timer = service._live_patch_history_timers.pop('task:t1', None)
-    if retry_timer is not None:
-        retry_timer.cancel()
+        service._pending_live_patch_history['task:t1'] = {'payload': {'frame': {'node_id': 'n1'}}}
+    service.flush_live_patch_history('task:t1')
+    assert [item[0] for item in calls] == ['snapshot']  # 不再写 task_events 行
+    assert calls[0][1] == 'task:t1'
+    assert 'n1' in calls[0][2]
     with service._live_patch_history_guard:
-        assert 'task:t1' in service._pending_live_patch_history  # entry 已重新入队
-    service.flush_live_patch_history('task:t1')  # 第二次：成功
-    assert calls['n'] == 2
-    assert 'task:t1' not in service._live_patch_retry_counts
-    assert service._live_patch_dropped_events == 0
+        assert 'task:t1' not in service._pending_live_patch_history
+        assert not service._live_patch_history_timers
+    assert service._event_write_failures == 0
 
 
-def test_flush_live_patch_drops_after_three_retries():
-    class _AlwaysFailWriter:
-        def append_task_event(self, **_kwargs):
+def test_flush_live_patch_failure_is_self_healing():
+    class _FailingStore:
+        def write_task_live_snapshot(self, task_id, payload_json):
             raise OSError(errno.ENOSPC, 'No space left on device')
 
-    service = _make_log_service_harness(_AlwaysFailWriter())
-    task = _task_record(status='in_progress')
+    service = _make_log_service_harness(_FailingStore())
     with service._live_patch_history_guard:
-        service._pending_live_patch_history['task:t1'] = {'task': task, 'payload': {'frame': {}}}
-    for _round in range(4):
-        service.flush_live_patch_history('task:t1')
-        timer = service._live_patch_history_timers.pop('task:t1', None)
-        if timer is not None:
-            timer.cancel()
-    assert service._live_patch_dropped_events == 1
-    assert 'task:t1' not in service._live_patch_retry_counts
+        service._pending_live_patch_history['task:t1'] = {'payload': {'frame': {}}}
+    service.flush_live_patch_history('task:t1')  # 失败 → 不重入队不重挂，等下一个补丁覆盖
+    assert service._event_write_failures == 1
+    with service._live_patch_history_guard:
+        assert 'task:t1' not in service._pending_live_patch_history
+        assert not service._live_patch_history_timers
 
 
 # 8. node_runner 错误记录写保护

@@ -115,9 +115,6 @@ class DiskPolicies:
     decompress_grace_minutes: float = 60.0
     # P3：终态任务大行裁剪与删除渐进。
     detail_retention_days: int = 14  # 0 = 关闭裁剪
-    # P3+：event-history 外置归档保留期。超期终态任务（pinned/archived_at 豁免）
-    # 的归档文件被清理，DB 行保留 slim 预览供降级查询；0 = 关闭清理。
-    event_history_retention_days: int = 14  # 0 = 关闭清理
     purge_enabled: bool = True
 
 
@@ -163,7 +160,6 @@ def _policies_from_env() -> DiskPolicies:
         archive_sweep_interval_seconds=_env_float('G3KU_DISK_ARCHIVE_SWEEP_INTERVAL_SECONDS', 15.0),
         decompress_grace_minutes=_env_float('G3KU_DISK_DECOMPRESS_GRACE_MINUTES', 60.0),
         detail_retention_days=_env_int('G3KU_DISK_DETAIL_RETENTION_DAYS', 14),
-        event_history_retention_days=_env_int('G3KU_DISK_EVENT_HISTORY_RETENTION_DAYS', 14),
         purge_enabled=_env_flag('G3KU_DISK_PURGE_ENABLED', True),
     )
 

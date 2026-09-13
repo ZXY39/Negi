@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -285,17 +286,19 @@ def test_artifact_creation_bumps_task_disk_usage(tmp_path, policies_guard):
         store.close()
 
 
-def test_event_archive_bumps_task_disk_usage(tmp_path, policies_guard):
+def test_live_snapshot_bumps_task_disk_usage(tmp_path, policies_guard):
     configure_disk_policies(DiskPolicies())
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3', event_history_enabled=True)
     try:
-        seq = store.append_task_event(
-            task_id='task:t1', session_id='web:shared', event_type='task.live.patch',
-            created_at='2026-09-09T00:00:00+08:00', payload={'big': 'z' * 5000},
-        )
-        assert seq > 0
-        usage = store.get_task_disk_usages(['task:t1'])
-        assert usage.get('task:t1', 0) > 0  # gz 归档字节已入账
+        assert store.write_task_live_snapshot('task:t1', json.dumps({'big': 'z' * 5000}))
+        first = store.get_task_disk_usages(['task:t1']).get('task:t1', 0)
+        assert first > 0  # latest.json.gz 字节已入账
+        # 覆盖写按差值修正记账（更小的快照 → 记账下降）
+        assert store.write_task_live_snapshot('task:t1', json.dumps({'big': 'z' * 100}))
+        second = store.get_task_disk_usages(['task:t1']).get('task:t1', 0)
+        assert 0 < second < first
+        # 不再写 task_events 行
+        assert store.list_task_events(task_id='task:t1', limit=10) == []
     finally:
         store.close()
 

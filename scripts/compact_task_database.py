@@ -5,8 +5,8 @@
    task_model_calls / task_runtime_frames / task_node_tool_results /
    task_node_rounds / task_node_details 五张大行表的任务行。
    永久保留：tasks/nodes 结构、task_error_logs、task_events 行；
-   event-history 外置归档由运行时按 event_history_retention_days（默认
-   14 天，pinned/archived_at 任务豁免）在小时级维护循环中批量清理。
+   event-history 只存 live.patch 单份最新快照（latest.json.gz，覆盖写），
+   无保留期清理链路，随任务删除/全删渐进一并回收。
 2. auto_vacuum 迁移 + 空间收缩：新库由运行时建库即 INCREMENTAL；存量库
    （auto_vacuum=0）在 --vacuum-full 时执行 VACUUM 迁移，已是 INCREMENTAL
    的库执行 incremental_vacuum 归还 freelist 页。

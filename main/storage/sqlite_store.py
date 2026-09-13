@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import gzip
-import hashlib
 import json
 import queue
 import sqlite3
@@ -796,9 +795,8 @@ class SQLiteTaskStore:
     # 磁盘治理（P3）：终态任务大行裁剪与维护窗口记账。
     # 裁剪口径按任务（终态且 finished_at/updated_at 早于 cutoff），一次裁掉该任务
     # 在五张大行表里的全部行；error_logs、tasks/nodes 结构、task_events 行永久保留。
-    # event-history 外置归档按 event_history_retention_days 保留期批量清理
-    # （prune_event_history_archives：DB 行保留 slim 预览降级查询，
-    # pinned/archived_at 任务豁免）。
+    # event-history 只存 live.patch 单份最新快照（write_task_live_snapshot），
+    # 无保留期清理链路；孤儿目录由 _sweep_orphan_event_history_dirs 清扫。
     # ------------------------------------------------------------------
 
     _DETAIL_PRUNE_TABLES = (
@@ -858,84 +856,6 @@ class SQLiteTaskStore:
         except sqlite3.Error:
             pass
         return dict(result or {'task_count': 0, 'deleted': {}})
-
-    def prune_event_history_archives(
-        self,
-        before_iso: str,
-        *,
-        batch: int = 50,
-        orphan_grace_seconds: float = 7 * 24 * 3600.0,
-    ) -> dict[str, Any]:
-        """P3+：按保留期清理超期终态任务的 event-history 外置归档。
-
-        只删外置归档文件并把 DB 行引用置空（payload_archive_path/encoding=''，
-        保留 payload_is_external 与 slim payload——与应急水位降级写字段的口径
-        一致），读端 list_task_events 在引用/文件缺失时自动降级 slim 预览。
-        pinned / archived_at 任务豁免（解压回看链路需要水合归档文件）。
-        先删文件、后清引用：中断后下一轮按"目录已不在但引用仍在"幂等补收。
-        附带清扫孤儿目录（tasks 表已无对应行且超过宽限期），宽限期保护
-        刚创建尚未落库的新任务目录。返回 {task_count, deleted_dirs,
-        deleted_bytes, orphan_dirs, cleared_refs}。
-        """
-        cutoff = str(before_iso or '')
-        limit = max(1, int(batch or 50))
-        rows = self._fetchall(
-            f'{self._PRUNABLE_TASK_SUBQUERY} '
-            "AND COALESCE(json_extract(payload_json, '$.metadata.pinned'), 0) != 1 "
-            "AND COALESCE(json_extract(payload_json, '$.metadata.archived_at'), '') = '' "
-            'AND EXISTS (SELECT 1 FROM task_events te WHERE te.task_id = tasks.task_id '
-            "AND te.payload_archive_path <> '') "
-            'ORDER BY updated_at ASC LIMIT ?',
-            (cutoff, limit),
-        )
-        pruned_task_ids: list[str] = []
-        deleted_dirs = 0
-        deleted_bytes = 0
-        cleared_refs = 0
-        for row in rows or []:
-            task_id = str(row['task_id'] or '').strip()
-            if not task_id:
-                continue
-            # 选中后才被 pin/归档的竞态窗口：删目录前重读复检。
-            record = self.get_task(task_id)
-            if record is None:
-                continue
-            metadata = getattr(record, 'metadata', None) or {}
-            if metadata.get('pinned') or str(metadata.get('archived_at') or '').strip():
-                continue
-            archive_dir = self._event_history_dir / self._safe_path_component(task_id)
-            if archive_dir.exists():
-                try:
-                    dir_bytes = sum(int(item.stat().st_size) for item in archive_dir.rglob('*') if item.is_file())
-                except OSError:
-                    dir_bytes = 0
-                if not remove_tree(archive_dir):
-                    continue  # 删除不完整：引用保持指向剩余文件，下一轮重试
-                deleted_dirs += 1
-                deleted_bytes += dir_bytes
-            cleared_refs += int(self._clear_event_archive_refs(task_id) or 0)
-            pruned_task_ids.append(task_id)
-        return {
-            'task_count': len(pruned_task_ids),
-            'task_ids': pruned_task_ids,
-            'deleted_dirs': deleted_dirs,
-            'deleted_bytes': deleted_bytes,
-            'orphan_dirs': self._sweep_orphan_event_history_dirs(grace_seconds=orphan_grace_seconds),
-            'cleared_refs': cleared_refs,
-        }
-
-    def _clear_event_archive_refs(self, task_id: str) -> int:
-        """把该任务全部外置归档引用置空（DB 行与 slim payload 保留）。"""
-
-        def operation(conn: sqlite3.Connection) -> int:
-            cursor = conn.execute(
-                "UPDATE task_events SET payload_archive_path = '', payload_archive_encoding = '' "
-                "WHERE task_id = ? AND payload_archive_path <> ''",
-                (str(task_id),),
-            )
-            return int(cursor.rowcount or 0)
-
-        return int(self._run_write(operation) or 0)
 
     def _sweep_orphan_event_history_dirs(self, *, grace_seconds: float) -> int:
         """清扫 tasks 表已无对应行的 event-history 目录（删除链路失败残留）。
@@ -1241,71 +1161,29 @@ class SQLiteTaskStore:
         created_at: str,
         payload: dict[str, object],
     ) -> int:
+        # 单份快照瘦身：task.live.patch 不再走本方法（由 write_task_live_snapshot
+        # 覆盖写单文件，且不写 DB 行）；本方法只承载离散事件（node.patch/
+        # model.call/terminal 等），payload 全量入行。
+        # payload_is_external/payload_archive_path/payload_archive_encoding/
+        # payload_hash 为废弃列（保留 schema 规避删列风险），恒写默认值。
         payload_json = json.dumps(payload, ensure_ascii=False)
-        payload_hash = hashlib.sha256(payload_json.encode('utf-8')).hexdigest()
-        should_externalize = self._should_externalize_task_event(
-            task_id=task_id,
-            event_type=event_type,
-            payload=payload,
-        )
-        # 磁盘治理（P0）应急写预算：剩余空间低于紧急线时跳过外置归档落盘，
-        # DB 行仍存 slim payload（payload_archive_path=''，读端 _read_task_event_archive 已兼容）。
-        externalize_archive = should_externalize
-        if should_externalize and not has_emergency_disk_budget((self._event_history_dir, self.path)):
-            externalize_archive = False
-        stored_payload = self._task_event_storage_payload(
-            task_id=task_id,
-            event_type=event_type,
-            payload=payload,
-        ) if should_externalize else payload
-        stored_payload_json = json.dumps(stored_payload, ensure_ascii=False)
-        archive_encoding = self._event_history_archive_encoding if externalize_archive else ''
 
         def operation(conn: sqlite3.Connection) -> int:
-            if should_externalize:
-                previous = conn.execute(
-                    'SELECT seq, payload_hash FROM task_events WHERE task_id = ? AND event_type = ? ORDER BY seq DESC LIMIT 1',
-                    (task_id, event_type),
-                ).fetchone()
-                if previous is not None and str(previous['payload_hash'] or '') == payload_hash:
-                    return int(previous['seq'] or 0)
             cursor = conn.execute(
                 'INSERT INTO task_events (task_id, session_id, event_type, created_at, payload_json, payload_is_external, payload_archive_path, payload_archive_encoding, payload_hash) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)',
                 (
                     task_id,
                     session_id,
                     event_type,
                     created_at,
-                    stored_payload_json,
-                    1 if should_externalize else 0,
+                    payload_json,
                     '',
-                    archive_encoding,
-                    payload_hash,
+                    '',
+                    '',
                 ),
             )
-            seq = int(cursor.lastrowid or 0)
-            if externalize_archive and seq > 0:
-                archive_path = self._write_task_event_archive(task_id=task_id, seq=seq, payload_json=payload_json)
-                conn.execute(
-                    'UPDATE task_events SET payload_archive_path = ? WHERE seq = ?',
-                    (archive_path, seq),
-                )
-                # 磁盘治理（P1）增量记账：归档字节数计入任务磁盘占用。
-                # 直接用同一事务的 conn——在 writer 线程内嵌套 _run_write 会自死锁。
-                if str(task_id or '').strip():
-                    try:
-                        archive_file = self._event_history_dir / Path(str(archive_path))
-                        archive_bytes = int(archive_file.stat().st_size) if archive_file.exists() else 0
-                    except OSError:
-                        archive_bytes = 0
-                    if archive_bytes > 0:
-                        conn.execute(
-                            'INSERT INTO task_disk_usage (task_id, total_bytes, updated_at) VALUES (?, ?, ?) '
-                            'ON CONFLICT(task_id) DO UPDATE SET total_bytes = MAX(0, total_bytes + ?), updated_at = ?',
-                            (str(task_id), archive_bytes, created_at, archive_bytes, created_at),
-                        )
-            return seq
+            return int(cursor.lastrowid or 0)
         return self._run_write(operation)
 
     def list_task_events(
@@ -1315,7 +1193,6 @@ class SQLiteTaskStore:
         task_id: str | None = None,
         session_id: str | None = None,
         limit: int = 200,
-        hydrate_external: bool = True,
     ) -> list[dict[str, object]]:
         predicates = ['seq > ?']
         params: list[object] = [max(0, int(after_seq or 0))]
@@ -1327,20 +1204,13 @@ class SQLiteTaskStore:
             params.append(str(session_id or ''))
         params.append(max(1, int(limit or 200)))
         sql = (
-            'SELECT seq, task_id, session_id, event_type, created_at, payload_json, payload_is_external, payload_archive_path, payload_archive_encoding, payload_hash '
+            'SELECT seq, task_id, session_id, event_type, created_at, payload_json '
             f'FROM task_events WHERE {" AND ".join(predicates)} ORDER BY seq ASC LIMIT ?'
         )
         rows = self._fetchall(sql, tuple(params))
         events: list[dict[str, object]] = []
         for row in rows:
             payload = json.loads(row['payload_json'])
-            if bool(row['payload_is_external']) and bool(hydrate_external):
-                hydrated = self._read_task_event_archive(
-                    path=str(row['payload_archive_path'] or '').strip(),
-                    encoding=str(row['payload_archive_encoding'] or '').strip(),
-                )
-                if isinstance(hydrated, dict):
-                    payload = hydrated
             events.append(
                 {
                     'seq': int(row['seq']),
@@ -1353,116 +1223,61 @@ class SQLiteTaskStore:
             )
         return events
 
-    def _should_externalize_task_event(
-        self,
-        *,
-        task_id: str | None,
-        event_type: str,
-        payload: dict[str, object],
-    ) -> bool:
-        _ = payload
-        if not self._event_history_enabled:
+    def write_task_live_snapshot(self, task_id: str, payload_json: str) -> bool:
+        """live.patch 单份最新快照：覆盖写 event-history/<task>/latest.json.gz。
+
+        取代旧的"逐事件外置归档 + slim DB 行"双存储（历史全量快照序列无生产
+        读者，单任务曾实测堆积 4.1 GiB / 3.8 万文件）。契约：
+        - 覆盖写自愈：本次失败不重试，等下一个补丁覆盖即可（窗口聚合在
+          log_service 侧）；
+        - tmp + replace 原子写，读者永远看到完整快照；
+        - 磁盘记账按新旧文件字节差增量修正；
+        - 应急写预算不足（低于紧急线）时跳过，与 P0 降级口径一致。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        payload = str(payload_json or '')
+        if not normalized_task_id or not payload or not self._event_history_enabled:
             return False
-        return bool(str(task_id or '').strip()) and str(event_type or '').strip() == 'task.live.patch'
-
-    @staticmethod
-    def _task_event_storage_payload(
-        *,
-        task_id: str | None,
-        event_type: str,
-        payload: dict[str, object],
-    ) -> dict[str, object]:
-        if str(event_type or '').strip() != 'task.live.patch':
-            return dict(payload or {})
-        runtime_summary = dict(payload.get('runtime_summary') or {}) if isinstance(payload.get('runtime_summary'), dict) else {}
-        frame = dict(payload.get('frame') or {}) if isinstance(payload.get('frame'), dict) else {}
-        active_node_ids = [str(item) for item in list(runtime_summary.get('active_node_ids') or []) if str(item or '').strip()]
-        runnable_node_ids = [str(item) for item in list(runtime_summary.get('runnable_node_ids') or []) if str(item or '').strip()]
-        waiting_node_ids = [str(item) for item in list(runtime_summary.get('waiting_node_ids') or []) if str(item or '').strip()]
-        return {
-            'task_id': str(payload.get('task_id') or task_id or '').strip(),
-            'runtime_summary_preview': {
-                'active_node_count': len(active_node_ids),
-                'runnable_node_count': len(runnable_node_ids),
-                'waiting_node_count': len(waiting_node_ids),
-                'active_node_ids_preview': active_node_ids[:5],
-                'runnable_node_ids_preview': runnable_node_ids[:5],
-                'waiting_node_ids_preview': waiting_node_ids[:5],
-            },
-            'frame_preview': {
-                'node_id': str(frame.get('node_id') or '').strip(),
-                'phase': str(frame.get('phase') or '').strip(),
-                'stage_goal': SQLiteTaskStore._clip_text(frame.get('stage_goal')),
-                'tool_call_count': len(list(frame.get('tool_calls') or [])),
-                'child_pipeline_count': len(list(frame.get('child_pipelines') or [])),
-            },
-            'removed_node_id': str(payload.get('removed_node_id') or '').strip(),
-            'payload_externalized': True,
-        }
-
-    def _write_task_event_archive(self, *, task_id: str | None, seq: int, payload_json: str) -> str:
-        task_component = self._safe_path_component(task_id or 'global')
+        if not has_emergency_disk_budget((self._event_history_dir, self.path)):
+            return False
         suffix = '.json.gz' if self._event_history_archive_encoding == 'gzip' else '.json'
-        relative_path = Path(task_component) / f'{int(seq)}{suffix}'
-        archive_path = self._event_history_dir / relative_path
-        temp_path = archive_path.with_name(f'{archive_path.name}.tmp')
-        last_error: OSError | None = None
-        for _attempt in range(3):
-            try:
-                self._event_history_dir.mkdir(parents=True, exist_ok=True)
-                archive_path.parent.mkdir(parents=True, exist_ok=True)
-                if self._event_history_archive_encoding == 'gzip':
-                    with gzip.open(temp_path, 'wt', encoding='utf-8') as handle:
-                        handle.write(payload_json)
-                else:
-                    temp_path.write_text(payload_json, encoding='utf-8')
-                temp_path.replace(archive_path)
-                break
-            except (FileNotFoundError, PermissionError, NotADirectoryError) as exc:
-                last_error = exc
-                time.sleep(0.01)
-                continue
-            finally:
-                if temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                    except FileNotFoundError:
-                        pass
-        else:
-            if last_error is not None:
-                raise last_error
-        return relative_path.as_posix()
-
-    def _read_task_event_archive(self, *, path: str, encoding: str) -> dict[str, object] | None:
-        relative_path = Path(str(path or '').strip())
-        if not str(relative_path).strip():
-            return None
-        archive_path = self._event_history_dir / relative_path
-        if not archive_path.exists():
-            return None
-        normalized_encoding = str(encoding or '').strip().lower() or self._event_history_archive_encoding
+        target_path = self._event_history_dir / self._safe_path_component(normalized_task_id) / f'latest{suffix}'
+        temp_path = target_path.with_name(f'latest{suffix}.tmp')
         try:
-            if normalized_encoding == 'gzip':
-                with gzip.open(archive_path, 'rt', encoding='utf-8') as handle:
-                    payload = json.loads(handle.read())
+            previous_bytes = int(target_path.stat().st_size) if target_path.exists() else 0
+        except OSError:
+            previous_bytes = 0
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            if self._event_history_archive_encoding == 'gzip':
+                with gzip.open(temp_path, 'wt', encoding='utf-8') as handle:
+                    handle.write(payload)
             else:
-                payload = json.loads(archive_path.read_text(encoding='utf-8'))
-        except Exception:
-            return None
-        return payload if isinstance(payload, dict) else None
+                temp_path.write_text(payload, encoding='utf-8')
+            temp_path.replace(target_path)
+        except OSError:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        try:
+            current_bytes = int(target_path.stat().st_size)
+        except OSError:
+            current_bytes = 0
+        delta = current_bytes - previous_bytes
+        if delta:
+            try:
+                self.bump_task_disk_usage(normalized_task_id, delta)
+            except Exception:
+                pass
+        return True
 
     @staticmethod
     def _safe_path_component(value: str) -> str:
         text = str(value or '').strip() or 'global'
         safe = ''.join(ch if ch.isalnum() or ch in {'-', '_', '.'} else '_' for ch in text)
         return safe or 'global'
-
-    @staticmethod
-    def _clip_text(value: Any, *, limit: int = 240) -> str:
-        text = ' '.join(str(value or '').split())
-        if len(text) <= limit:
-            return text
-        return f'{text[: max(0, limit - 3)].rstrip()}...'
 
     def latest_task_event_seq(
         self,

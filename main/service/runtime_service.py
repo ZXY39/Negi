@@ -4623,7 +4623,6 @@ class MainRuntimeService:
             archive_sweep_interval_seconds=max(1.0, float(getattr(guard, 'archive_sweep_interval_seconds', defaults.archive_sweep_interval_seconds) or 1.0)),
             decompress_grace_minutes=min(max(0.0, float(getattr(guard, 'decompress_grace_minutes', defaults.decompress_grace_minutes) or 0.0)), 7 * 24 * 60),
             detail_retention_days=max(0, int(getattr(guard, 'detail_retention_days', defaults.detail_retention_days) or 0)),
-            event_history_retention_days=max(0, int(getattr(guard, 'event_history_retention_days', defaults.event_history_retention_days) or 0)),
             purge_enabled=bool(getattr(guard, 'purge_enabled', defaults.purge_enabled)),
         )
 
@@ -6571,9 +6570,9 @@ class MainRuntimeService:
     # 保留清单（唯一权威）：kind=='patch'、kind=='final_output'、
     # task.final_output_ref 指向的 artifact、标题含 report/summary；
     # error_logs 表、节点 blocking_reason、task_events 行一律不动。
-    # event-history/*.json.gz 终态不即时删，按 event_history_retention_days
-    # 保留期由 _run_event_history_retention_if_due 批量清理（DB 行保留 slim
-    # 预览降级查询）；用户删任务时仍走 delete_task 全删链路。
+    # event-history 只存 live.patch 单份最新快照（latest.json.gz，覆盖写，
+    # 见 store.write_task_live_snapshot），无保留期清理链路；孤儿目录由
+    # 台账 sweep 清扫；用户删任务时仍走 delete_task 全删链路。
     # ------------------------------------------------------------------
 
     _TERMINAL_CLEANUP_KEEP_TITLE_TOKENS = ('report', 'summary')
@@ -6816,7 +6815,6 @@ class MainRuntimeService:
                         continue
                     await asyncio.to_thread(self._reconcile_task_disk_usage, task_id)
                 await self._run_detail_retention_if_due()
-                await self._run_event_history_retention_if_due()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -6855,55 +6853,6 @@ class MainRuntimeService:
                 deleted_total,
                 cutoff,
             )
-
-    async def _run_event_history_retention_if_due(self) -> None:
-        """P3+：event-history 外置归档保留期清理（跨进程卡权 + 紧急水位跳过）。
-
-        只删超期终态任务（pinned/archived_at 豁免）的外置归档文件并把 DB 行
-        引用置空；task_events 行与 slim 预览保留（读端 list_task_events 已能
-        降级）。清理后按目录实测对账各任务磁盘记账。
-        """
-        policies = disk_policies()
-        retention_days = int(policies.event_history_retention_days)
-        if retention_days <= 0:
-            return
-        if self._disk_emergency_due():
-            return  # 清理自身是删除 IO/写放大源，紧急态不跑
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat(timespec='seconds')
-        try:
-            claimed = await asyncio.to_thread(
-                self.store.claim_maintenance_run,
-                'event_history_prune',
-                min_interval_seconds=23 * 3600.0,
-                detail=f'cutoff={cutoff}',
-            )
-        except Exception:
-            return
-        if not claimed:
-            return
-        try:
-            result = await asyncio.to_thread(self.store.prune_event_history_archives, cutoff)
-        except Exception:
-            logger.warning('disk governance: event-history retention prune failed', exc_info=True)
-            return
-        task_count = int(result.get('task_count') or 0)
-        orphan_dirs = int(result.get('orphan_dirs') or 0)
-        if task_count or orphan_dirs:
-            logger.info(
-                'disk governance: event-history retention pruned tasks={} dirs={} bytes~{} orphan_dirs={} cleared_refs={} (cutoff={})',
-                task_count,
-                int(result.get('deleted_dirs') or 0),
-                int(result.get('deleted_bytes') or 0),
-                orphan_dirs,
-                int(result.get('cleared_refs') or 0),
-                cutoff,
-            )
-        # 记账对账：清理后的目录实测值覆盖增量 task_disk_usage（best-effort）。
-        for pruned_task_id in result.get('task_ids') or []:
-            try:
-                await asyncio.to_thread(self._reconcile_task_disk_usage, str(pruned_task_id))
-            except Exception:
-                continue
 
     def _reconcile_task_disk_usage(self, task_id: str) -> None:
         normalized_task_id = self.normalize_task_id(task_id)

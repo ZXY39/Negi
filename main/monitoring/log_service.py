@@ -170,12 +170,9 @@ class TaskLogService:
         self._live_patch_history_guard = threading.Lock()
         self._pending_live_patch_history: dict[str, dict[str, Any]] = {}
         self._live_patch_history_timers: dict[str, threading.Timer] = {}
-        self._last_live_patch_boundary_key: dict[str, tuple[Any, ...]] = {}
         self._last_node_patch_persist_fingerprints: dict[tuple[str, str], str] = {}
-        # 磁盘治理（P0）：事件写失败计数与 live patch 有界重试状态。
+        # 磁盘治理（P0）：事件写失败计数。
         self._event_write_failures = 0
-        self._live_patch_retry_counts: dict[str, int] = {}
-        self._live_patch_dropped_events = 0
 
     def add_live_snapshot_publisher(self, publisher: Callable[[TaskRecord, dict[str, Any], bool], None]) -> None:
         if callable(publisher):
@@ -229,6 +226,12 @@ class TaskLogService:
             return 0
 
     def flush_live_patch_history(self, task_id: str) -> None:
+        """把缓冲的最新 live.patch payload 覆盖写为单份快照（latest.json.gz）。
+
+        单份快照契约：覆盖写自愈——失败不重试、不重入队，等下一个补丁覆盖即可；
+        不再写 task_events DB 行（历史全量快照序列无生产读者，曾实测单任务
+        堆积 4.1 GiB / 3.8 万文件）。任何写失败不得穿透进状态更新路径。
+        """
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return
@@ -242,33 +245,16 @@ class TaskLogService:
                 pass
         if not isinstance(entry, dict):
             return
-        task = entry.get('task')
         payload = entry.get('payload')
-        if not isinstance(task, TaskRecord) or not isinstance(payload, dict):
+        if not isinstance(payload, dict):
             return
-        persisted = self._append_task_event(task=task, event_type='task.live.patch', data=payload)
-        if persisted:
-            self._live_patch_retry_counts.pop(normalized_task_id, None)
-            self._last_live_patch_boundary_key[normalized_task_id] = self._live_patch_boundary_key(task=task, payload=payload)
-            return
-        # 磁盘治理（P0）：写失败（磁盘满等）→ entry 重新入队 + 重挂 2s timer，
-        # 有界重试 3 次后丢弃计数。timer 线程与状态更新路径都不能因此死亡。
-        retries = int(self._live_patch_retry_counts.get(normalized_task_id, 0))
-        if retries >= 3:
-            self._live_patch_dropped_events += 1
-            self._live_patch_retry_counts.pop(normalized_task_id, None)
-            return
-        self._live_patch_retry_counts[normalized_task_id] = retries + 1
-        with self._live_patch_history_guard:
-            self._pending_live_patch_history.setdefault(normalized_task_id, entry)
-            if self._live_patch_history_timers.get(normalized_task_id) is None:
-                retry_timer = threading.Timer(
-                    2.0,
-                    lambda target_task_id=normalized_task_id: self.flush_live_patch_history(target_task_id),
-                )
-                retry_timer.daemon = True
-                self._live_patch_history_timers[normalized_task_id] = retry_timer
-                retry_timer.start()
+        try:
+            self._store.write_task_live_snapshot(
+                normalized_task_id,
+                json.dumps(payload, ensure_ascii=False),
+            )
+        except Exception:
+            self._event_write_failures += 1
 
     def _task_lock(self, task_id: str) -> threading.RLock:
         key = str(task_id or '').strip()
@@ -280,59 +266,36 @@ class TaskLogService:
             return lock
 
     def _buffer_task_live_patch_locked(self, *, task: TaskRecord, payload: dict[str, Any]) -> None:
+        # 单份快照契约：event_history 关闭时 live.patch 完全不落盘（SSE 推送不受影响）。
+        # 窗口聚合只缓冲最新 payload（覆盖式），不再深拷贝 TaskRecord。
         if not self._event_history_enabled:
-            self._append_task_event(task=task, event_type='task.live.patch', data=payload)
             return
         task_id = str(task.task_id or '').strip()
         if not task_id:
             return
-        boundary_key = self._live_patch_boundary_key(task=task, payload=payload)
         immediate = (
             self._live_patch_persist_window_ms <= 0
             or bool(task.is_paused)
             or bool(task.pause_requested)
             or self._is_terminal_status(task.status)
-            or boundary_key != self._last_live_patch_boundary_key.get(task_id)
-            or str(payload.get('removed_node_id') or '').strip()
         )
-        if immediate:
-            self.flush_live_patch_history(task_id)
-            self._append_task_event(task=task, event_type='task.live.patch', data=payload)
-            self._last_live_patch_boundary_key[task_id] = boundary_key
-            return
         with self._live_patch_history_guard:
-            self._pending_live_patch_history[task_id] = {
-                'task': task.model_copy(deep=True),
-                'payload': copy.deepcopy(payload),
-            }
-            timer = self._live_patch_history_timers.get(task_id)
-            if timer is not None:
-                return
-            timer = threading.Timer(
-                max(0.001, float(self._live_patch_persist_window_ms) / 1000.0),
-                lambda target_task_id=task_id: self.flush_live_patch_history(target_task_id),
-            )
-            timer.daemon = True
-            self._live_patch_history_timers[task_id] = timer
-            timer.start()
-
-    @staticmethod
-    def _live_patch_boundary_key(*, task: TaskRecord, payload: dict[str, Any]) -> tuple[Any, ...]:
-        runtime_summary = dict(payload.get('runtime_summary') or {}) if isinstance(payload.get('runtime_summary'), dict) else {}
-        frame = dict(payload.get('frame') or {}) if isinstance(payload.get('frame'), dict) else {}
-        active_ids = tuple(str(item or '').strip() for item in list(runtime_summary.get('active_node_ids') or []) if str(item or '').strip())
-        runnable_ids = tuple(str(item or '').strip() for item in list(runtime_summary.get('runnable_node_ids') or []) if str(item or '').strip())
-        waiting_ids = tuple(str(item or '').strip() for item in list(runtime_summary.get('waiting_node_ids') or []) if str(item or '').strip())
-        return (
-            active_ids,
-            runnable_ids,
-            waiting_ids,
-            str(frame.get('phase') or '').strip(),
-            str(frame.get('node_id') or '').strip(),
-            bool(task.is_paused),
-            bool(task.pause_requested),
-            str(task.status or '').strip().lower(),
-        )
+            self._pending_live_patch_history[task_id] = {'payload': copy.deepcopy(payload)}
+            if not immediate:
+                timer = self._live_patch_history_timers.get(task_id)
+                if timer is not None:
+                    return
+                timer = threading.Timer(
+                    max(0.001, float(self._live_patch_persist_window_ms) / 1000.0),
+                    lambda target_task_id=task_id: self.flush_live_patch_history(target_task_id),
+                )
+                timer.daemon = True
+                self._live_patch_history_timers[task_id] = timer
+        if immediate:
+            # 终态/暂停必须落盘最终状态：立即冲刷（flush 内部自行取消 timer）。
+            self.flush_live_patch_history(task_id)
+            return
+        timer.start()
 
     @staticmethod
     def _node_patch_persist_fingerprint(payload: dict[str, Any]) -> str:
@@ -2022,7 +1985,7 @@ class TaskLogService:
                     mime_type='application/json',
                     preview_text=display_name,
                 )
-                return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
+                return self._actual_request_artifact_ref(task_id=task_id, node_id=node_id, artifact=artifact)
             except (MemoryError, OSError):
                 degraded_payload = self._degraded_actual_request_artifact_payload(
                     payload_with_mode,
@@ -2039,7 +2002,7 @@ class TaskLogService:
                         mime_type='application/json',
                         preview_text=f'{display_name} (degraded)',
                     )
-                    return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
+                    return self._actual_request_artifact_ref(task_id=task_id, node_id=node_id, artifact=artifact)
                 except (MemoryError, OSError):
                     minimal_payload = self._minimal_actual_request_artifact_payload(
                         payload_with_mode,
@@ -2056,7 +2019,7 @@ class TaskLogService:
                             mime_type='application/json',
                             preview_text=f'{display_name} (minimal)',
                         )
-                        return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
+                        return self._actual_request_artifact_ref(task_id=task_id, node_id=node_id, artifact=artifact)
                     except (MemoryError, OSError):
                         return ''
         if callable(create_json_artifact) and not has_budget:
@@ -2075,7 +2038,7 @@ class TaskLogService:
                     mime_type='application/json',
                     preview_text=f'{display_name} (disk-emergency minimal)',
                 )
-                return artifact_ref_from_id(getattr(artifact, 'artifact_id', '')) if artifact is not None else ''
+                return self._actual_request_artifact_ref(task_id=task_id, node_id=node_id, artifact=artifact)
             except (MemoryError, OSError):
                 return ''
         try:
@@ -2088,9 +2051,78 @@ class TaskLogService:
                 source_kind='task_actual_request',
                 force=True,
             )
-            return str(ref or '').strip()
+            resolved_ref = str(ref or '').strip()
+            keep_id = resolved_ref.split(':', 1)[1] if ':' in resolved_ref else resolved_ref
+            self._prune_stale_actual_request_artifacts(task_id=task_id, node_id=node_id, keep_artifact_id=keep_id)
+            return resolved_ref
         except (MemoryError, OSError):
             return ''
+
+    def _actual_request_artifact_ref(self, *, task_id: str, node_id: str, artifact: Any) -> str:
+        """创建成功后收敛引用：同 (task, node) 只保留最新一份 actual-request。"""
+        if artifact is None:
+            return ''
+        artifact_id = str(getattr(artifact, 'artifact_id', '') or '').strip()
+        if not artifact_id:
+            return ''
+        self._prune_stale_actual_request_artifacts(task_id=task_id, node_id=node_id, keep_artifact_id=artifact_id)
+        return artifact_ref_from_id(artifact_id)
+
+    def _prune_stale_actual_request_artifacts(self, *, task_id: str, node_id: str, keep_artifact_id: str) -> None:
+        """actual-request 每节点只留最新一份：删除同 (task, node) 更旧的请求快照
+        （文件 + DB 行 + artifact_store 内存索引，模式对齐 _run_terminal_intermediate_cleanup）。
+
+        历史请求序列无回放价值（排障只看最新一轮）；逐调用累积会让大任务运行中
+        膨胀到数千份。任何失败静默跳过，不阻断模型调用主链路。
+        """
+        content_store = self._content_store
+        artifact_store = getattr(content_store, '_artifact_store', None) if content_store is not None else None
+        if artifact_store is None:
+            return
+        keep_id = str(keep_artifact_id or '').strip()
+        normalized_node_id = str(node_id or '').strip()
+        try:
+            stale = [
+                item for item in artifact_store.list_artifacts(task_id)
+                if str(getattr(item, 'kind', '') or '').strip() == 'task_actual_request'
+                and str(getattr(item, 'node_id', '') or '').strip() == normalized_node_id
+                and str(getattr(item, 'artifact_id', '') or '').strip() != keep_id
+            ]
+        except Exception:
+            return
+        if not stale:
+            return
+        delete_ids: list[str] = []
+        for item in stale:
+            artifact_id = str(getattr(item, 'artifact_id', '') or '').strip()
+            if artifact_id:
+                delete_ids.append(artifact_id)
+            raw_path = str(getattr(item, 'path', '') or '').strip()
+            if not raw_path:
+                continue
+            try:
+                path = Path(raw_path)
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
+        if not delete_ids:
+            return
+        try:
+            self._store.delete_artifacts_by_ids(delete_ids)
+        except Exception:
+            pass
+        try:
+            content_index = getattr(artifact_store, '_content_index', None)
+            if isinstance(content_index, dict):
+                deleted = set(delete_ids)
+                for key in [
+                    key for key, value in list(content_index.items())
+                    if str(getattr(value, 'artifact_id', '') or '').strip() in deleted
+                ]:
+                    content_index.pop(key, None)
+        except Exception:
+            pass
 
     @staticmethod
     def _model_call_payload(
@@ -5019,7 +5051,7 @@ class TaskLogService:
     def _append_task_event(self, *, task: TaskRecord, event_type: str, data: dict[str, Any]) -> bool:
         # 磁盘治理（P0）：历史事件最坏可丢弃——写失败（磁盘满 Errno 28/SQLITE_FULL）
         # 不得穿透进状态更新路径（先例：_notify_task_terminal 的 except Exception: continue）。
-        # 返回是否落库成功，供 flush_live_patch_history 做有界重试。
+        # 返回是否落库成功，供调用方降级处理。
         try:
             self._event_writer.append_task_event(
                 task_id=task.task_id,
