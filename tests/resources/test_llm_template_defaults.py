@@ -81,3 +81,38 @@ def test_normalize_draft_strips_common_endpoint_suffixes(suffix: str):
     assert errors == []
     assert normalized is not None
     assert normalized.base_url == "https://api.openai.com/v1"
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "level"),
+    [
+        (provider_id, level)
+        for provider_id in ("openai", "responses")
+        for level in ("none", "low", "medium", "high", "xhigh", "max")
+    ],
+)
+def test_normalize_draft_accepts_all_six_reasoning_effort_levels(provider_id: str, level: str):
+    registry = TemplateRegistry()
+    base = _draft_from_template(provider_id)
+    draft = base.model_copy(
+        update={"parameters": {**base.parameters, "reasoning_effort": level}}
+    )
+
+    normalized, errors = normalize_draft(draft, registry)
+
+    assert errors == []
+    assert normalized is not None
+    assert normalized.parameters["reasoning_effort"] == level
+
+
+def test_normalize_draft_rejects_unknown_reasoning_effort_level():
+    registry = TemplateRegistry()
+    base = _draft_from_template("openai")
+    draft = base.model_copy(
+        update={"parameters": {**base.parameters, "reasoning_effort": "ultra"}}
+    )
+
+    normalized, errors = normalize_draft(draft, registry)
+
+    assert normalized is None
+    assert any(error.field == "reasoning_effort" and error.code == "invalid_choice" for error in errors)

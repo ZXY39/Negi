@@ -176,7 +176,14 @@ def build_openai_compatible_template(
                 required=False,
                 advanced=True,
                 default=None,
-                options=[option("low"), option("medium"), option("high")],
+                options=[
+                    option("none"),
+                    option("low"),
+                    option("medium"),
+                    option("high"),
+                    option("xhigh"),
+                    option("max"),
+                ],
             ),
             field(
                 key="auth_header",
