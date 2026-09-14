@@ -2437,6 +2437,19 @@ class RuntimeAgentSession:
             turn_id = self._current_turn_id(user_input)
             if turn_id:
                 assistant_payload["turn_id"] = turn_id
+                # 轮次 token 用量随 transcript 持久化：frontdoor 请求工件会被修剪，
+                # transcript 级 usage 才是历史气泡悬停展示的稳定数据源。
+                turn_usage = (getattr(self, "_frontdoor_turn_usage", None) or {}).get(turn_id)
+                if isinstance(turn_usage, dict) and any(
+                    int(turn_usage.get(field) or 0)
+                    for field in ("input_tokens", "output_tokens", "cache_hit_tokens")
+                ):
+                    assistant_payload["usage"] = {
+                        "input_tokens": int(turn_usage.get("input_tokens") or 0),
+                        "output_tokens": int(turn_usage.get("output_tokens") or 0),
+                        "cache_hit_tokens": int(turn_usage.get("cache_hit_tokens") or 0),
+                        "call_count": int(turn_usage.get("call_count") or 0),
+                    }
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
             persisted_session.add_message("assistant", assistant_text, **assistant_payload)

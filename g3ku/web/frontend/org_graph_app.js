@@ -2087,6 +2087,9 @@ function normalizeCeoSnapshotInflight(snapshot = null) {
             next.user_message = { content: String(lastUserMessage.content || "") };
             const attachments = cloneCeoSnapshotAttachments(lastUserMessage.attachments);
             if (attachments.length) next.user_message.attachments = attachments;
+            // 发送时间随 inflight 缓存存活,收尾/会话切换后用户气泡悬停仍可显示。
+            const userTimestamp = String(lastUserMessage.timestamp || "").trim();
+            if (userTimestamp) next.user_message.timestamp = userTimestamp;
         }
     }
     const canonicalContext = normalizeCeoSnapshotCanonicalContext(snapshot?.canonical_context);
@@ -2412,6 +2415,9 @@ function appendCeoSessionSnapshotMessage(messages = [], message = null) {
     ) {
         if (nextMessage.canonical_context) previous.canonical_context = nextMessage.canonical_context;
         if (nextMessage.canonical_context_delta) previous.canonical_context_delta = nextMessage.canonical_context_delta;
+        // 悬停元数据同样参与合并:重复 finalize/快照回写时新值覆盖旧值,不丢失。
+        if (nextMessage.usage) previous.usage = nextMessage.usage;
+        if (nextMessage.timestamp) previous.timestamp = nextMessage.timestamp;
         return trimCeoSessionSnapshotMessages(next);
     }
     next.push(nextMessage);
@@ -2511,10 +2517,13 @@ function promoteRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
     ));
     if (!promoted.length) return [];
     promoted.forEach((item) => {
+        // 发送时间优先取服务端快照消息的 timestamp,回退本地记录的 runtime_sent_at。
+        const matched = normalizedRepresented.find((message) => ceoSnapshotMessageMatchesQueuedFollowUp(message, item));
         addCeoUserMessage(item.text, {
             attachments: item.uploads,
             scrollMode,
             sessionId: key,
+            timestamp: String(matched?.timestamp || item?.runtime_sent_at || ""),
         });
         // 补充消息应落在当前 live 回合之前,而不是 append 到流式输出之后;
         // 与 finalize 增量路径的 insertBefore 语义保持一致。
@@ -3699,8 +3708,8 @@ function renderStructuredChatAttachments(items = [], { sessionId = activeSession
     `;
 }
 
-function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId() } = {}) {
-    addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId });
+function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "" } = {}) {
+    addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp });
 }
 
 function syncCeoInputHeight() {
@@ -4000,10 +4009,12 @@ function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom
             size: item.size,
         })),
     }));
+    const sentAt = new Date().toISOString();
     addCeoUserMessage(normalizedText, {
         attachments: normalizedUploads,
         scrollMode,
         sessionId: activeSessionId(),
+        timestamp: sentAt,
     });
     const turn = createPendingCeoTurn("user", { scrollMode });
     if (turn) S.ceoPendingTurns.push(turn);
@@ -4017,6 +4028,7 @@ function sendImmediateCeoMessage({ text = "", uploads = [], scrollMode = "bottom
             user_message: {
                 content: normalizedText,
                 attachments: normalizedUploads,
+                timestamp: sentAt,
             },
         },
     });
@@ -4055,11 +4067,13 @@ function sendImmediateCeoMessageBatch(entries = [], { scrollMode = "bottom" } = 
             })),
         })),
     }));
+    const batchSentAt = new Date().toISOString();
     normalizedEntries.forEach((entry) => {
         addCeoUserMessage(entry.text, {
             attachments: entry.uploads,
             scrollMode,
             sessionId: activeSessionId(),
+            timestamp: batchSentAt,
         });
     });
     const turn = createPendingCeoTurn("user", { scrollMode });
@@ -4075,6 +4089,7 @@ function sendImmediateCeoMessageBatch(entries = [], { scrollMode = "bottom" } = 
             user_message: {
                 content: lastEntry.text,
                 attachments: lastEntry.uploads,
+                timestamp: batchSentAt,
             },
         },
     });
@@ -4267,18 +4282,25 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     return result;
 }
 
-function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId() } = {}) {
+function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null } = {}) {
     mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
         const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
         const content = markdown ? renderMarkdown(text) : esc(text);
         const attachmentMarkup = renderStructuredChatAttachments(attachments, { sessionId });
-        if (role === "user" && attachmentMarkup) {
+        // 悬停元信息行(发送/完成时间 + token 用量):仅在调用方提供数据时渲染,
+        // 显隐由 CSS 的 .msg-meta 悬停规则控制。有 meta 时用 message-stack 纵向
+        // 包裹,保证元信息落在气泡下方而不是 flex 行内并排。
+        const metaText = buildCeoMessageMetaText({ role, timestamp, usage });
+        const metaMarkup = metaText ? `<div class="msg-meta">${esc(metaText)}</div>` : "";
+        if (role === "user" && (attachmentMarkup || metaMarkup)) {
             const textBubble = hasRenderableText(text)
                 ? `<div class="${contentClass}">${content}</div>`
                 : "";
-            el.innerHTML = `<div class="message-stack">${textBubble}${attachmentMarkup}</div>`;
+            el.innerHTML = `<div class="message-stack">${textBubble}${attachmentMarkup}${metaMarkup}</div>`;
+        } else if (metaMarkup) {
+            el.innerHTML = `<div class="message-stack"><div class="${contentClass}">${content}${attachmentMarkup}</div>${metaMarkup}</div>`;
         } else {
             el.innerHTML = `<div class="${contentClass}">${content}${attachmentMarkup}</div>`;
         }
@@ -4759,6 +4781,10 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     if (turnId && turn.turnId && turnId !== turn.turnId) {
         turn.lastExecutionTraceSummary = null;
         turn.liveStreamText = "";
+        // 跨 turn 复用同一回合对象时清空 sticky 元数据,避免上一轮的
+        // token 用量/完成时间泄漏到新轮次的悬停信息里。
+        turn.usage = null;
+        turn.completedAt = "";
     }
     if (turnId) {
         turn.turnId = turnId;
@@ -4839,6 +4865,7 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
                 attachments,
                 scrollMode: "preserve",
                 sessionId,
+                timestamp: String(userMessage.timestamp || ""),
             });
         });
     } else {
@@ -4862,6 +4889,7 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
             attachments,
             scrollMode: "preserve",
             sessionId,
+            timestamp: String(userMessage.timestamp || ""),
         });
     }
     patchCeoInflightTurn(snapshot, { sessionId, cacheField });
@@ -4975,13 +5003,16 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     // follow-up 归档半截回合(后端 archive turn_id = `{原 turn_id}:followup:{随机}`)：
     // 其最后一个阶段在收到补充消息时被拦腰打断,需要打上打断标记。
     const isFollowUpArchive = String(item?.turn_id || "").includes(":followup:");
+    const historyTimestamp = String(item?.timestamp || "").trim();
+    const historyUsage = item?.usage || null;
     if (status !== "paused" && !canonicalContext) {
-        addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+        // 无轨道兜底气泡同样携带悬停元信息(完成时间 + token 用量)。
+        addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
         return;
     }
     const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
     if (!turn) {
-        addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+        addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
         return;
     }
     const historyTurnId = normalizeCeoTurnId(item?.turn_id || "");
@@ -4994,7 +5025,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
-        setCeoTurnUsage(turn, item?.usage);
+        setCeoTurnUsage(turn, historyUsage, { completedAt: historyTimestamp });
         setCeoTurnUsageCollapsed(turn, true);
         icons();
     }, { scrollMode: "preserve" });
@@ -5002,7 +5033,9 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         finalizePausedCeoTurn(content || "已暂停", { source: "history" });
         return;
     }
-    finalizeCeoTurn(content, { source: "history" });
+    // meta 带上 usage/timestamp:随后的 finalizeCeoTurn 写缓存与 usage 行时
+    // 用历史值而非当前时间,保证刷新后完成时间稳定。
+    finalizeCeoTurn(content, { source: "history", usage: historyUsage, timestamp: historyTimestamp });
 }
 
 // ---- CEO 会话视图状态保持 -----------------------------------------------------
@@ -5201,6 +5234,10 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             item.canonical_context ? 1 : 0,
             item.canonical_context_delta ? 1 : 0,
             String(item.content || ""),
+            // usage/timestamp 参与签名:缓存先行渲染(可能缺元数据)后到达的
+            // 服务端权威快照必须触发重建,否则悬停元信息永远停留在缺失状态。
+            item.usage && typeof item.usage === "object" ? JSON.stringify(item.usage) : "",
+            String(item.timestamp || ""),
         ];
     };
     const projectTurn = (snapshot) => {
@@ -5244,7 +5281,7 @@ function ceoFeedMatchesIncrementalFinalize(messageKeys = [], turn = null) {
     return true;
 }
 
-function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normalizedTurnId = "", finalUserMessages = [], finalTraceContext = null, finalCanonicalContext = null, text = "", meta = null } = {}) {
+function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normalizedTurnId = "", finalUserMessages = [], finalTraceContext = null, finalCanonicalContext = null, text = "", meta = null, completedAt = "" } = {}) {
     // finalize 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在此处构建。
     const entry = getCeoSessionSnapshotCache(sessionId);
     const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
@@ -5264,12 +5301,16 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
             : []);
     let messages = trimCeoSessionSnapshotMessages(entry?.messages);
     messages = appendMissingCeoUserMessages(messages, userMessagesToAppend);
+    // usage/timestamp 无条件写入缓存:会话切换/刷新后从缓存渲染时,
+    // 悬停元信息(token 用量 + 完成时间)不再依赖服务端快照补齐。
+    const completedTimestamp = String(completedAt || "").trim();
     messages = appendCeoSessionSnapshotMessage(messages, {
         role: "assistant",
         content: String(text || "").trim() || "Done.",
         canonical_context: persistedCanonicalContext,
         canonical_context_delta: finalTraceContext,
-        ...(finalUserMessages.length ? { usage: meta?.usage || null } : {}),
+        usage: meta?.usage || null,
+        ...(completedTimestamp ? { timestamp: completedTimestamp } : {}),
     });
     return { messages, inflight_turn: inflightMatchesSource ? null : inflightTurn };
 }
@@ -5330,6 +5371,7 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
                     attachments,
                     scrollMode: "preserve",
                     sessionId: targetSessionId,
+                    timestamp: String(item?.timestamp || ""),
                 });
                 tagLastFeedChildKey(item, "user");
                 return;
@@ -5417,6 +5459,9 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             historyExpanded: false,
             lastExecutionTraceSummary: null,
             liveStreamText: "",
+            // 悬停元数据(sticky):token 用量与完成时间,由 setCeoTurnUsage 维护。
+            usage: null,
+            completedAt: "",
             contextLoadNoticeKeys: new Set(),
             turnId: "",
             reminderExecutionId: "",
@@ -5627,22 +5672,55 @@ function normalizeCeoTurnUsage(usage = null) {
     return { input_tokens: input, output_tokens: output, cache_hit_tokens: cache, call_count: calls };
 }
 
-function setCeoTurnUsage(turn, usage = null) {
-    if (!turn?.usageEl) return;
+function setCeoTurnUsage(turn, usage = null, { completedAt = "" } = {}) {
+    if (!turn) return;
+    // 元数据记忆在 turn 对象上（sticky）：历史渲染与 finalize 复用同一 turn 时，
+    // 后续调用即使不带 usage 也能回填，避免历史回合的 usage 行被收尾流程清空。
     const normalized = normalizeCeoTurnUsage(usage);
-    if (!normalized) {
+    if (normalized) turn.usage = normalized;
+    const nextCompletedAt = String(completedAt || "").trim();
+    if (nextCompletedAt) turn.completedAt = nextCompletedAt;
+    if (!turn.usageEl) return;
+    const parts = [];
+    const currentUsage = normalizeCeoTurnUsage(turn.usage);
+    if (currentUsage) {
+        parts.push(
+            `输入 ${formatCeoTokenCount(currentUsage.input_tokens)}`,
+            `缓存命中 ${formatCeoTokenCount(currentUsage.cache_hit_tokens)}`,
+            `输出 ${formatCeoTokenCount(currentUsage.output_tokens)}`
+        );
+    }
+    const completedText = formatCompactTime(turn.completedAt);
+    if (completedText) parts.push(`完成于 ${completedText}`);
+    if (!parts.length) {
         turn.usageEl.textContent = "";
         turn.usageEl.hidden = true;
         turn.usageEl.setAttribute?.("aria-hidden", "true");
         return;
     }
-    turn.usageEl.textContent = [
-        `输入 ${formatCeoTokenCount(normalized.input_tokens)}`,
-        `缓存命中 ${formatCeoTokenCount(normalized.cache_hit_tokens)}`,
-        `输出 ${formatCeoTokenCount(normalized.output_tokens)}`,
-    ].join(" · ");
+    turn.usageEl.textContent = parts.join(" · ");
     turn.usageEl.hidden = false;
     turn.usageEl.removeAttribute?.("aria-hidden");
+}
+
+// 普通消息气泡(用户/无轨道助手兜底)的悬停元信息文本:时间必带角色语义,
+// usage 仅在数据可用时附加(用户消息只有发送时间)。
+function buildCeoMessageMetaText({ role = "", timestamp = "", usage = null } = {}) {
+    const parts = [];
+    const timeText = formatCompactTime(timestamp);
+    if (timeText) {
+        const isUser = String(role || "").trim().toLowerCase() === "user";
+        parts.push(`${isUser ? "发送于" : "完成于"} ${timeText}`);
+    }
+    const normalizedUsage = normalizeCeoTurnUsage(usage);
+    if (normalizedUsage) {
+        parts.push(
+            `输入 ${formatCeoTokenCount(normalizedUsage.input_tokens)}`,
+            `缓存命中 ${formatCeoTokenCount(normalizedUsage.cache_hit_tokens)}`,
+            `输出 ${formatCeoTokenCount(normalizedUsage.output_tokens)}`
+        );
+    }
+    return parts.join(" · ");
 }
 
 function setCeoTurnUsageCollapsed(turn, collapsed = true) {
@@ -6568,8 +6646,9 @@ function finalizeCeoTurn(text, meta = {}) {
         || turn?.lastExecutionTraceSummary
         || null;
     // 三个旧分支的缓存写入统一为一次计算:消息列表与 inflight 清空只在处构建,
-    // 渲染层再决定走增量更新还是全量快照重建。cache 写入与旧行为保持一致
-    // (finalUserMessages 分支额外带 usage;其余分支不含)。
+    // 渲染层再决定走增量更新还是全量快照重建。完成时间:历史回合用消息自带
+    // timestamp,live 回合用收尾时刻的本地时间。
+    const completedAt = String(meta?.timestamp || "").trim() || new Date().toISOString();
     const finalPayload = buildFinalizedCeoTurnPayload(sessionId, {
         normalizedSource,
         normalizedTurnId,
@@ -6578,6 +6657,7 @@ function finalizeCeoTurn(text, meta = {}) {
         finalCanonicalContext,
         text,
         meta,
+        completedAt,
     });
     const updatedEntry = patchCeoSessionSnapshotCache(sessionId, (entry) => ({
         ...(entry || {}),
@@ -6624,7 +6704,7 @@ function finalizeCeoTurn(text, meta = {}) {
             } else {
                 turn.flowEl.hidden = true;
             }
-            setCeoTurnUsage(turn, meta?.usage);
+            setCeoTurnUsage(turn, meta?.usage || turn.usage || null, { completedAt: turn.completedAt || completedAt });
             setCeoTurnUsageCollapsed(turn, true);
             icons();
         }, { scrollMode: "preserve" });
@@ -6653,6 +6733,7 @@ function finalizeCeoTurn(text, meta = {}) {
                     attachments: normalizeUploadList(message?.attachments),
                     scrollMode: "preserve",
                     sessionId,
+                    timestamp: String(message?.timestamp || ""),
                 });
                 // addMsg 不返回元素;同一同步批次内它一定是 feed 的最后一个子节点,
                 // 取出来补稳定 key 并移到回合元素之前。
@@ -6693,7 +6774,7 @@ function finalizeCeoTurn(text, meta = {}) {
             } else {
                 turn.flowEl.hidden = true;
             }
-            setCeoTurnUsage(turn, meta?.usage);
+            setCeoTurnUsage(turn, meta?.usage || turn.usage || null, { completedAt: turn.completedAt || completedAt });
             setCeoTurnUsageCollapsed(turn, true);
             icons();
         }, { scrollMode: "preserve" });

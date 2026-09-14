@@ -137,6 +137,85 @@ def test_ceo_snapshot_includes_message_local_canonical_context_delta() -> None:
     assert [stage["stage_id"] for stage in delta_stages] == ["frontdoor-stage-2"]
 
 
+def test_ceo_snapshot_prefers_transcript_usage_over_artifact_aggregation(monkeypatch) -> None:
+    """transcript 级 usage(收尾时持久化)优先于可被修剪的请求工件聚合。"""
+    monkeypatch.setattr(
+        websocket_ceo,
+        "read_session_turn_token_usage",
+        lambda session_id: {
+            "t1": {"input_tokens": 1, "output_tokens": 1, "cache_hit_tokens": 1, "call_count": 1},
+        },
+    )
+
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "assistant",
+                "content": "reply",
+                "turn_id": "t1",
+                "usage": {
+                    "input_tokens": 1200,
+                    "output_tokens": 340,
+                    "cache_hit_tokens": 800,
+                    "call_count": 2,
+                },
+            }
+        ],
+        session_id="web:test",
+    )
+
+    assert snapshot[0]["usage"] == {
+        "input_tokens": 1200,
+        "output_tokens": 340,
+        "cache_hit_tokens": 800,
+        "call_count": 2,
+    }
+
+
+def test_ceo_snapshot_falls_back_to_artifact_usage_for_legacy_transcripts(monkeypatch) -> None:
+    """旧 transcript 无消息级 usage 时回退工件聚合,保持历史行为。"""
+    monkeypatch.setattr(
+        websocket_ceo,
+        "read_session_turn_token_usage",
+        lambda session_id: {
+            "t1": {"input_tokens": 90, "output_tokens": 10, "cache_hit_tokens": 5, "call_count": 3},
+        },
+    )
+
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [{"role": "assistant", "content": "reply", "turn_id": "t1"}],
+        session_id="web:test",
+    )
+
+    assert snapshot[0]["usage"]["input_tokens"] == 90
+    assert snapshot[0]["usage"]["call_count"] == 3
+
+
+def test_ceo_snapshot_ignores_empty_or_invalid_transcript_usage(monkeypatch) -> None:
+    monkeypatch.setattr(websocket_ceo, "read_session_turn_token_usage", lambda session_id: {})
+
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {
+                "role": "assistant",
+                "content": "zero usage",
+                "turn_id": "t1",
+                "usage": {"input_tokens": 0, "output_tokens": 0, "cache_hit_tokens": 0, "call_count": 0},
+            },
+            {
+                "role": "assistant",
+                "content": "invalid usage",
+                "turn_id": "t2",
+                "usage": {"input_tokens": "not-a-number"},
+            },
+        ],
+        session_id="web:test",
+    )
+
+    assert "usage" not in snapshot[0]
+    assert "usage" not in snapshot[1]
+
+
 def test_ceo_live_turn_payload_includes_inflight_canonical_context_delta() -> None:
     persisted_session = SimpleNamespace(
         messages=[

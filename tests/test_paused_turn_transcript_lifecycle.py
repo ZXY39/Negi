@@ -201,3 +201,85 @@ def test_persist_turn_transcript_silent_reply_marks_visible_placeholder():
     last = assistant_records[-1]
     assert last["content"] == SILENT_REPLY_VISIBLE_TEXT
     assert last["metadata"]["silent_reply"] is True
+
+
+def test_persist_turn_transcript_attaches_frontdoor_turn_usage():
+    """轮次 token 用量随 transcript 持久化：请求工件被修剪/重启后，
+    历史气泡悬停的 usage 仍有稳定数据源。"""
+    session = _FakePersistedSession([])
+    agent = _build_agent(session)
+    user_input = UserInputMessage(content="问题", metadata={"_transcript_turn_id": "turn-usage"})
+    agent._active_user_batch_inputs = [user_input]
+    agent._active_batch_id = None
+    agent._active_turn_id = "turn-usage"
+    agent._last_verified_task_ids = []
+    agent._frontdoor_turn_usage = {
+        "turn-usage": {
+            "input_tokens": 1200,
+            "output_tokens": 340,
+            "cache_hit_tokens": 800,
+            "call_count": 2,
+        },
+        "other-turn": {
+            "input_tokens": 999,
+            "output_tokens": 999,
+            "cache_hit_tokens": 999,
+            "call_count": 9,
+        },
+    }
+
+    import asyncio
+
+    asyncio.run(
+        agent._persist_turn_transcript(
+            user_input=user_input,
+            user_text="问题",
+            assistant_text="回答",
+            interaction_flow=[],
+            internal_source=None,
+            route_kind="dm",
+        )
+    )
+
+    assistant = [m for m in session.messages if m["role"] == "assistant"][-1]
+    assert assistant["turn_id"] == "turn-usage"
+    assert assistant["usage"] == {
+        "input_tokens": 1200,
+        "output_tokens": 340,
+        "cache_hit_tokens": 800,
+        "call_count": 2,
+    }
+
+
+def test_persist_turn_transcript_skips_empty_turn_usage():
+    session = _FakePersistedSession([])
+    agent = _build_agent(session)
+    user_input = UserInputMessage(content="问题", metadata={"_transcript_turn_id": "turn-zero"})
+    agent._active_user_batch_inputs = [user_input]
+    agent._active_batch_id = None
+    agent._active_turn_id = "turn-zero"
+    agent._last_verified_task_ids = []
+    agent._frontdoor_turn_usage = {
+        "turn-zero": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_hit_tokens": 0,
+            "call_count": 0,
+        },
+    }
+
+    import asyncio
+
+    asyncio.run(
+        agent._persist_turn_transcript(
+            user_input=user_input,
+            user_text="问题",
+            assistant_text="回答",
+            interaction_flow=[],
+            internal_source=None,
+            route_kind="dm",
+        )
+    )
+
+    assistant = [m for m in session.messages if m["role"] == "assistant"][-1]
+    assert "usage" not in assistant

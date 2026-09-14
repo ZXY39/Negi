@@ -590,6 +590,24 @@ def _snapshot_message_transcript_state(message: dict[str, Any] | None) -> str:
     return str(metadata.get("_transcript_state") or "").strip().lower()
 
 
+def _transcript_message_token_usage(value: Any) -> dict[str, int] | None:
+    """校验 transcript 消息级持久化的轮次 token 用量（收尾时随 transcript 写入）。"""
+    if not isinstance(value, dict):
+        return None
+    try:
+        usage = {
+            "input_tokens": int(value.get("input_tokens") or 0),
+            "output_tokens": int(value.get("output_tokens") or 0),
+            "cache_hit_tokens": int(value.get("cache_hit_tokens") or 0),
+            "call_count": int(value.get("call_count") or 0),
+        }
+    except (TypeError, ValueError):
+        return None
+    if not any(usage[field] for field in ("input_tokens", "output_tokens", "cache_hit_tokens")):
+        return None
+    return usage
+
+
 def _rewrite_turn_snapshot_media(
     session_id: str, snapshot: dict[str, Any] | None
 ) -> dict[str, Any] | None:
@@ -666,8 +684,11 @@ def _build_ceo_snapshot(
             previous_assistant_context = projected_canonical_context or canonical_context
         if compression:
             item['compression'] = compression
-        if role == 'assistant' and turn_id:
-            turn_usage = usage_by_turn.get(turn_id)
+        if role == 'assistant':
+            # transcript 级 usage 优先（收尾时持久化，不随请求工件修剪丢失），
+            # 旧 transcript 无该字段时回退按 turn_id 聚合的工件用量。
+            transcript_usage = _transcript_message_token_usage(raw.get('usage'))
+            turn_usage = transcript_usage or (usage_by_turn.get(turn_id) if turn_id else None)
             if turn_usage:
                 item['usage'] = turn_usage
         items.append(item)

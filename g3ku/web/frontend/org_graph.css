@@ -2824,6 +2824,27 @@ textarea {
     transform: translateY(0);
 }
 
+/* 普通消息气泡(用户/无轨道助手兜底)的悬停元信息行:发送/完成时间 + token 用量。
+   与 .ceo-turn-usage 的悬停显隐模式保持一致:占位常驻、opacity 淡入。 */
+.msg-meta {
+    font-size: 0.76rem;
+    line-height: 1.4;
+    color: var(--text-muted);
+    letter-spacing: 0.01em;
+    user-select: text;
+    opacity: 0;
+    transform: translateY(2px);
+    pointer-events: none;
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.message:hover .msg-meta,
+.message:focus-within .msg-meta {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
 .assistant-loading-indicator {
     width: 28px;
     height: 28px;
