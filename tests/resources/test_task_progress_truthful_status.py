@@ -173,6 +173,43 @@ def test_progress_stale_active_frame_shows_suspected_interruption(tmp_path: Path
     assert "待检验" in text
 
 
+def test_progress_waiting_node_line_locates_running_and_stalled_nodes(tmp_path: Path):
+    service = _build_service(tmp_path)
+    record = asyncio.run(_create_web_task(service))
+    task = service.get_task(record.task_id)
+    root = service.get_node(record.root_node_id)
+    assert task is not None and root is not None
+
+    # 任务刚创建:根节点帧无新鲜 active → 等待行定位到最后活动的根节点。
+    text = service.view_progress(record.task_id, mark_read=False)
+    assert f"任务当前正在等待节点输出: ({root.node_id})" in text
+
+    # 新鲜 active 帧:等待行列出的正是真正在运行的节点。
+    service.log_service.replace_runtime_frames(
+        record.task_id,
+        frames=[
+            service.log_service._default_frame(
+                node_id=root.node_id,
+                depth=int(root.depth or 0),
+                node_kind="execution",
+                phase="in_model_round",
+            )
+        ],
+        active_node_ids=[root.node_id],
+    )
+    text = service.view_progress(record.task_id, mark_read=False)
+    assert f"任务当前正在等待节点输出: ({root.node_id})" in text
+
+    # 帧老化(疑似中断)后:等待行改为定位最后活动的节点,仍是该节点。
+    current = service.store.get_task_runtime_frame(record.task_id, root.node_id)
+    assert current is not None
+    service.store.upsert_task_runtime_frame(
+        current.model_copy(update={"updated_at": _stale_iso(minutes=11.0)})
+    )
+    text = service.view_progress(record.task_id, mark_read=False)
+    assert f"任务当前正在等待节点输出: ({root.node_id})" in text
+
+
 def test_progress_header_shows_final_acceptance_waiting_state(tmp_path: Path):
     service = _build_service(tmp_path)
     record = asyncio.run(_create_web_task(service))

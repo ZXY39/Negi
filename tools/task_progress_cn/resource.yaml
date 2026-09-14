@@ -10,7 +10,10 @@ description: >-
   recent 最近活动 time; 排队待运行 / 等待中 / 无活跃调度 mean the node is not executing yet;
   待检验 means an acceptance node is waiting and is NOT verifying; 疑似中断 means the frame
   shows no recent updates. Never tell users a node is actively running or verifying without
-  such activity evidence — report the status and last-activity age honestly instead.
+  such activity evidence — report the status and last-activity age honestly instead. For
+  in_progress tasks the header also carries a 任务当前正在等待节点输出 line: it lists the nodes
+  with fresh active frames (truly executing right now), or — when no frame is fresh — the most
+  recently updated frame node, which is the primary suspect when a task appears stuck.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -21,7 +24,9 @@ current_version:
     Resource-local task runtime tool. Handler and governance live with the resource so discovery
     can refresh without a host restart. Truthful activity semantics: in_progress means non-terminal,
     not executing; only fresh active frames render as 运行中/检验中, stale frames render as 疑似中断,
-    and undispatched acceptance nodes render as 待检验.
+    and undispatched acceptance nodes render as 待检验. in_progress headers now lead with a
+    任务当前正在等待节点输出 line listing fresh-active nodes, or the most recently updated frame
+    node when no frame is fresh — the stall-localization anchor.
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:

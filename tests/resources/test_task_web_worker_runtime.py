@@ -5592,6 +5592,172 @@ def test_rest_node_detail_reports_real_artifact_metadata_for_summary_and_full(tm
     assert full_payload["item"]["artifacts_preview"] == []
 
 
+def test_node_detail_summary_carries_latest_tool_calls_full(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+
+    # 一个已结束的调用:入参完整落盘,出参全文外置 ref。
+    inner = service.content_store.maybe_externalize_text(
+        "alpha\nneedle\nomega\n",
+        runtime={"task_id": record.task_id, "node_id": root.node_id},
+        display_name="inner",
+        source_kind="node_output",
+        force=True,
+    )
+    assert inner is not None
+    wrapped = json.dumps(inner.to_dict(), ensure_ascii=False)
+    service.log_service.append_node_output(
+        record.task_id,
+        root.node_id,
+        content="round done",
+        tool_calls=[
+            {"id": "call:content", "name": "content", "arguments": {"path": "/x", "query": "needle"}},
+            {"id": "call:running", "name": "shell", "arguments": {"command": "sleep 30"}},
+        ],
+    )
+    service.log_service.record_tool_result_batch(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        response_tool_calls=[ToolCallRequest(id="call:content", name="content", arguments={"path": "/x", "query": "needle"})],
+        results=[
+            {
+                "tool_message": {
+                    "tool_call_id": "call:content",
+                    "name": "content",
+                    "content": wrapped,
+                    "status": "success",
+                },
+                "live_state": {"tool_call_id": "call:content", "tool_name": "content", "status": "success"},
+            }
+        ],
+    )
+
+    # 一个正在运行的工具调用:出现在运行时帧的 tool_calls 里,还没有结果。
+    service.log_service.replace_runtime_frames(
+        record.task_id,
+        frames=[
+            {
+                **service.log_service._default_frame(
+                    node_id=root.node_id,
+                    depth=int(root.depth or 0),
+                    node_kind="execution",
+                    phase="in_model_round",
+                ),
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call:running",
+                        "tool_name": "shell",
+                        "status": "running",
+                        "started_at": now_iso(),
+                        "finished_at": "",
+                        "elapsed_seconds": 1.5,
+                    }
+                ],
+            }
+        ],
+        active_node_ids=[root.node_id],
+    )
+
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert payload is not None
+    assert payload["item"]["detail_level"] == "summary"
+    assert "execution_trace" not in payload["item"]
+    summary = payload["item"]["execution_trace_summary"]
+    batch = summary["latest_tool_calls_full"]
+    by_id = {item["tool_call_id"]: item for item in batch}
+    assert len(batch) <= 5
+
+    running = by_id.get("call:running")
+    assert running is not None
+    assert running["tool_name"] == "shell"
+    assert running["status"] == "running"
+    # 工具未结束 → 不出参,出参只在结束时提供。
+    assert running["output_full"] == ""
+
+    finished = by_id.get("call:content")
+    assert finished is not None
+    assert finished["status"] == "success"
+    assert '"path": "/x"' in finished["arguments_full"]
+    assert '"query": "needle"' in finished["arguments_full"]
+    # 出参全文从 ref 解析出来(非预览片段)。
+    assert finished["output_full"] == "alpha\nneedle\nomega"
+    assert finished["output_truncated"] is False
+    assert finished["output_ref"] == inner.ref
+
+
+def test_node_detail_summary_latest_tool_calls_full_truncates_oversized_output(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+
+    huge_body = "x" * 9000
+    inner = service.content_store.maybe_externalize_text(
+        huge_body,
+        runtime={"task_id": record.task_id, "node_id": root.node_id},
+        display_name="big",
+        source_kind="node_output",
+        force=True,
+    )
+    assert inner is not None
+    wrapped = json.dumps(inner.to_dict(), ensure_ascii=False)
+    service.log_service.append_node_output(
+        record.task_id,
+        root.node_id,
+        content="round done",
+        tool_calls=[{"id": "call:big", "name": "content", "arguments": {"path": "/big"}}],
+    )
+    service.log_service.record_tool_result_batch(
+        task_id=record.task_id,
+        node_id=root.node_id,
+        response_tool_calls=[ToolCallRequest(id="call:big", name="content", arguments={"path": "/big"})],
+        results=[
+            {
+                "tool_message": {
+                    "tool_call_id": "call:big",
+                    "name": "content",
+                    "content": wrapped,
+                    "status": "success",
+                },
+                "live_state": {"tool_call_id": "call:big", "tool_name": "content", "status": "success"},
+            }
+        ],
+    )
+
+    payload = service.get_node_detail_payload(record.task_id, record.root_node_id)
+
+    assert payload is not None
+    batch = payload["item"]["execution_trace_summary"]["latest_tool_calls_full"]
+    big = next(item for item in batch if item["tool_call_id"] == "call:big")
+    assert big["output_truncated"] is True
+    assert len(big["output_full"]) == 8000
+    assert big["output_full"].endswith("...")
+    # 截断后 ref 必须保留,供按需取回完整出参。
+    assert big["output_ref"] == inner.ref
+    assert "x" * 100 in service.log_service.resolve_content_ref(big["output_ref"])
+
+
 def test_get_node_detail_payload_uses_summary_mode_and_execution_trace_ref(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

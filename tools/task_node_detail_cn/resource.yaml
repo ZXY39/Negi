@@ -2,14 +2,23 @@ schema_version: 1
 kind: tool
 display_name: "查询节点详情"
 name: task_node_detail
-description: View task node detail and related artifacts.
+description: >-
+  View task node detail and related artifacts. Defaults to the `summary` detail level. In summary
+  mode the execution trace summary additionally carries `latest_tool_calls_full`: the last 5 tool
+  calls with full arguments, status (queued/running/success/error/warning/interrupted), and — only
+  for finished calls — the full output resolved from its ref (truncated at 8000 chars with
+  `output_truncated: true` and the ref preserved for on-demand retrieval).
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
   url: ''
   ref: ''
 current_version:
-  summary: Resource-local task runtime tool. Handler and governance live with the resource so discovery can refresh without a host restart.
+  summary: >-
+    Resource-local task runtime tool. Handler and governance live with the resource so discovery
+    can refresh without a host restart. Summary-level execution_trace_summary now carries
+    latest_tool_calls_full (last 5 tool calls with full arguments, status, and resolved full
+    output for finished calls, truncated at 8000 chars with ref preserved).
   compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
   source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
 requires:

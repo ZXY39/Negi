@@ -55,6 +55,12 @@ _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
 # 阈值取停滞提醒首档(20 分钟)的一半,给正常长工具执行留足余量。
 _STALE_FRAME_MINUTES = 10.0
 
+# node_detail summary 档附带的「最新一批」工具调用完整信息条数;
+# 与 Recent tool calls 摘要上限(5)保持一致,排查卡点看最后几步足够。
+_LATEST_TOOL_CALLS_FULL_LIMIT = 5
+# 完整出参的安全上限:超过后截断并置 output_truncated,ref 始终保留供按需再取。
+_TOOL_CALL_FULL_OUTPUT_MAX_CHARS = 8000
+
 
 class TaskQueryService:
     def __init__(self, *, store, file_store, log_service, debug_recorder=None):
@@ -540,6 +546,15 @@ class TaskQueryService:
             )
             if execution_trace:
                 execution_trace_summary = self._execution_trace_summary(execution_trace)
+        if normalized_detail_level == 'summary' and not execution_trace:
+            # 现成摘要已含 rounds 时此前不会解析完整轨迹;summary 档要附带
+            # 「最新一批」工具调用的完整入参/状态/出参,兜底解析一次
+            # (节点级低频诊断路径,成本可接受;只解析最后几步的出参,不全量水合)。
+            execution_trace = self._resolve_execution_trace(
+                detail_record=detail_record,
+                runtime_node=runtime_node,
+                payload=payload,
+            )
         message_list = self._node_message_list(
             task_id=task_id,
             node_id=node_id,
@@ -642,6 +657,17 @@ class TaskQueryService:
             if acceptance_result_full:
                 detail.check_result = acceptance_result_full
                 detail.execution_trace['acceptance_result'] = acceptance_result_full
+        if normalized_detail_level == 'summary':
+            latest_tool_calls_full = self._latest_tool_calls_full(
+                execution_trace,
+                limit=_LATEST_TOOL_CALLS_FULL_LIMIT,
+                max_output_chars=_TOOL_CALL_FULL_OUTPUT_MAX_CHARS,
+            )
+            if latest_tool_calls_full:
+                detail.execution_trace_summary = {
+                    **dict(detail.execution_trace_summary or {}),
+                    'latest_tool_calls_full': latest_tool_calls_full,
+                }
         return detail
 
     def get_tree_snapshot(
@@ -721,6 +747,65 @@ class TaskQueryService:
                 if resolved:
                     return resolved
         return str(text or '')
+
+    def _latest_tool_calls_full(
+        self,
+        execution_trace: dict[str, Any] | None,
+        *,
+        limit: int,
+        max_output_chars: int,
+    ) -> list[dict[str, Any]]:
+        """summary 档附带的「最新一批」工具调用完整信息。
+
+        取轨迹最后 limit 步(优先 tool_steps 扁平列表,其按时间序且已合并
+        live 状态与完整入参;兜底展平 stages→rounds→tools)。出参只在工具
+        结束后解析输出 ref 全文,超 max_output_chars 截断并置 output_truncated,
+        output_ref 始终保留供按需再取。
+        """
+        trace = dict(execution_trace or {}) if isinstance(execution_trace, dict) else {}
+        steps = [item for item in list(trace.get('tool_steps') or []) if isinstance(item, dict)]
+        if not steps:
+            for stage in list(trace.get('stages') or []):
+                if not isinstance(stage, dict):
+                    continue
+                for round_item in list(stage.get('rounds') or []):
+                    if not isinstance(round_item, dict):
+                        continue
+                    steps.extend(
+                        item for item in list(round_item.get('tools') or []) if isinstance(item, dict)
+                    )
+        normalized_limit = max(1, int(limit or _LATEST_TOOL_CALLS_FULL_LIMIT))
+        recent = [item for item in steps if isinstance(item, dict)][-normalized_limit:]
+        batch: list[dict[str, Any]] = []
+        for step in recent:
+            tool_call_id = str(step.get('tool_call_id') or '').strip()
+            status = str(step.get('status') or '').strip() or 'queued'
+            output_ref = str(step.get('output_ref') or '').strip()
+            output_full = ''
+            output_truncated = False
+            if status.lower() not in {'queued', 'running'}:
+                output_full = self._resolve_detail_text(
+                    str(step.get('output_text') or ''),
+                    output_ref,
+                ).strip()
+                if len(output_full) > max_output_chars:
+                    output_full = f'{output_full[: max_output_chars - 3].rstrip()}...'
+                    output_truncated = True
+            entry: dict[str, Any] = {
+                'tool_call_id': tool_call_id,
+                'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
+                'status': status,
+                'started_at': str(step.get('started_at') or '').strip(),
+                'finished_at': str(step.get('finished_at') or '').strip(),
+                'arguments_full': str(step.get('arguments_text') or ''),
+                'output_ref': output_ref,
+                'output_full': output_full,
+                'output_truncated': output_truncated,
+            }
+            if step.get('elapsed_seconds') is not None:
+                entry['elapsed_seconds'] = step.get('elapsed_seconds')
+            batch.append(entry)
+        return batch
 
     def _hydrate_execution_trace_output_texts(self, execution_trace: dict[str, Any] | None) -> dict[str, Any]:
         trace = dict(execution_trace or {}) if isinstance(execution_trace, dict) else {}
@@ -1617,6 +1702,43 @@ class TaskQueryService:
                 labels[node_id] = '无活跃调度'
         return labels
 
+    def _waiting_node_output_line(self, task_id: str, *, now: datetime | None = None) -> str:
+        """任务当前正在等待哪些节点产出(只读推算,不写任何状态)。
+
+        新鲜 active 帧 = 真正在执行的节点,把它们当作任务眼下等的人;
+        没有任何新鲜 active 帧时,取最新更新的帧节点作为「最后活动节点」——
+        正是疑似卡死时最想定位的目标。无帧则不输出该行(无可定位对象)。
+        """
+        store = self._store
+        if store is None or not callable(getattr(store, 'list_task_runtime_frames', None)):
+            return ''
+        frames = list(store.list_task_runtime_frames(task_id) or [])
+        if not frames:
+            return ''
+        fresh_active: list[tuple[str, str]] = []
+        latest_activity: tuple[str, str] = ('', '')
+        for record in frames:
+            node_id = str(record.node_id or '').strip()
+            if not node_id:
+                continue
+            updated_at = str(record.updated_at or '').strip()
+            if not latest_activity[1] or updated_at > latest_activity[1]:
+                latest_activity = (node_id, updated_at)
+            if bool(record.active):
+                age_minutes = self._elapsed_minutes(updated_at, now=now)
+                if age_minutes is None or age_minutes < _STALE_FRAME_MINUTES:
+                    fresh_active.append((node_id, updated_at))
+        if fresh_active:
+            fresh_active.sort(key=lambda item: item[1], reverse=True)
+            node_ids = [node_id for node_id, _unused in fresh_active]
+        elif latest_activity[0]:
+            node_ids = [latest_activity[0]]
+        else:
+            node_ids = []
+        if not node_ids:
+            return ''
+        return '任务当前正在等待节点输出: ({})'.format(', '.join(node_ids))
+
     @classmethod
     def _latest_node_activity_at(cls, nodes: Iterable[Any]) -> str:
         best_at = ''
@@ -1666,6 +1788,7 @@ class TaskQueryService:
     ) -> list[str]:
         if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
             return []
+        wait_line = self._waiting_node_output_line(str(task.task_id or ''))
         runtime_meta = self._log_service.read_task_runtime_meta(str(task.task_id or '')) or {}
         # 注意:不能回退到 task.updated_at——mark_task_read 等账本动作会刷新它,
         # 会把「刚查看过」误当「有真实执行活动」。优先级:
@@ -1673,7 +1796,7 @@ class TaskQueryService:
         last_visible = str(runtime_meta.get('last_visible_output_at') or fallback_activity_at or '').strip()
         if not last_visible:
             last_visible = str(getattr(task, 'created_at', '') or '').strip()
-        lines: list[str] = []
+        lines: list[str] = [wait_line] if wait_line else []
         parts: list[str] = []
         activity_text = self._elapsed_display(last_visible)
         if activity_text:
