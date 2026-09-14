@@ -191,6 +191,7 @@ const S = {
     taskErrorLogOpen: false,
     taskModelCallsPage: 1,
     taskModelCallsPageSize: TASK_MODEL_CALLS_PAGE_SIZE,
+    taskModelCallsQuery: "",
     taskArtifacts: [],
     selectedArtifactId: "",
     artifactContent: "",
@@ -9504,6 +9505,7 @@ function normalizeTaskModelCall(raw) {
     };
     return {
         call_index: toInt(source.call_index),
+        node_id: String(source.node_id || "").trim(),
         created_at: String(source.created_at || "").trim(),
         prepared_message_count: toInt(source.prepared_message_count),
         prepared_message_chars: toInt(source.prepared_message_chars),
@@ -9597,7 +9599,7 @@ function ensureTaskTokenUi() {
             <div class="detail-modal-header">
                 <div>
                     <h2 id="task-token-title">Token统计</h2>
-                    <p id="task-token-summary-text" class="subtitle">任务级 token 消耗会在这里实时刷新。</p>
+                    <p id="task-token-summary-text" class="subtitle">任务级 token 消耗统计；窗口打开期间不自动刷新，可点「刷新」手动更新。</p>
                 </div>
                 <button id="task-token-close-btn" class="toolbar-btn ghost" type="button" data-modal-close>关闭</button>
             </div>
@@ -11383,11 +11385,28 @@ function bind() {
     U.taskTokenClose?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenBackdrop?.addEventListener("click", () => setTaskTokenStatsOpen(false));
     U.taskTokenContent?.addEventListener("click", (e) => {
-        const control = e.target instanceof Element ? e.target.closest("[data-task-model-call-page]") : null;
-        if (!control) return;
-        const direction = String(control.dataset.taskModelCallPage || "").trim();
-        if (direction === "prev") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) - 1);
-        if (direction === "next") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) + 1);
+        const target = e.target instanceof Element ? e.target : null;
+        if (!target) return;
+        const control = target.closest("[data-task-model-call-page]");
+        if (control) {
+            const direction = String(control.dataset.taskModelCallPage || "").trim();
+            if (direction === "prev") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) - 1);
+            if (direction === "next") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) + 1);
+            return;
+        }
+        if (target.closest("[data-task-model-call-refresh]")) {
+            // 手动刷新：窗口打开期间唯一的数据更新入口（强制重建，保留搜索条件）。
+            renderTaskTokenStats({ force: true });
+        }
+    });
+    // 搜索输入走事件委托：只重建表格区域，输入框本身不销毁，焦点与内容不丢失。
+    // 搜索作用于全部记录（而非当前页），输入即筛选并回到第 1 页。
+    U.taskTokenContent?.addEventListener("input", (e) => {
+        const input = e.target instanceof Element ? e.target.closest("[data-task-model-call-search]") : null;
+        if (!input) return;
+        S.taskModelCallsQuery = input.value;
+        S.taskModelCallsPage = 1;
+        refreshTaskTokenCallTable();
     });
     U.nodeContextDisclosure?.addEventListener("toggle", () => void handleNodeContextDisclosureToggle());
     U.ceoSessionPanelToggle?.addEventListener("click", () => setCeoSessionPanelExpanded(!S.ceoSessionPanelExpanded));

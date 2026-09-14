@@ -737,6 +737,8 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
           },
           recentModelCalls: Array.from({ length: 135 }, (_, idx) => ({
             call_index: idx + 1,
+            node_id: `node:demo:${idx + 1}`,
+            created_at: new Date(Date.UTC(2026, 8, 14, 0, idx, 5)).toISOString(),
             prepared_message_count: idx + 2,
             prepared_message_chars: (idx + 1) * 100,
             response_tool_call_count: idx % 4,
@@ -754,6 +756,7 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
           })),
           taskModelCallsPage: 2,
           taskModelCallsPageSize: 100,
+          taskModelCallsQuery: "",
         };
         global.U = {
           taskTokenContent: { innerHTML: "" },
@@ -774,13 +777,15 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
         renderTaskTokenStats();
         const html = U.taskTokenContent.innerHTML;
         const tableBody = html.match(/<tbody>([\\s\\S]*?)<\\/tbody>/)?.[1] || "";
-        const firstColumnValues = Array.from(tableBody.matchAll(/<tr>\\s*<td>([\\d,]+)<\\/td>/g))
+        const callIndexValues = Array.from(tableBody.matchAll(/data-task-call-index>([\\d,]+)<\\/td>/g))
           .map((match) => Number(String(match[1] || "").replaceAll(",", "")));
 
         console.log(JSON.stringify({
           headingLocalized: html.includes("模型调用明细"),
           paginationLocalized: html.includes("第 2/2 页") && html.includes("显示 101-135 / 共 135 条"),
           columnsLocalized: [
+            "时间",
+            "节点ID",
             "调用序号",
             "预处理字符数",
             "消息数",
@@ -790,9 +795,15 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
             "工具调用数",
             "模型",
           ].every((label) => html.includes(label)),
-          rowCount: firstColumnValues.length,
-          firstCallIndex: firstColumnValues[0],
-          lastCallIndex: firstColumnValues[firstColumnValues.length - 1],
+          timeColumnRendered: /<td>\\d{1,2}:\\d{2}:\\d{2}<\\/td>/.test(tableBody)
+            || /<td>\\d{2}-\\d{2} \\d{1,2}:\\d{2}:\\d{2}<\\/td>/.test(tableBody),
+          nodeIdColumnRendered: tableBody.includes("node:demo:"),
+          searchBoxRendered: html.includes("data-task-model-call-search")
+            && html.includes("搜索节点 ID / 模型名称"),
+          refreshButtonRendered: html.includes("data-task-model-call-refresh"),
+          rowCount: callIndexValues.length,
+          firstCallIndex: callIndexValues[0],
+          lastCallIndex: callIndexValues[callIndexValues.length - 1],
         }));
         """
     )
@@ -800,9 +811,389 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
     assert result["headingLocalized"] is True
     assert result["paginationLocalized"] is True
     assert result["columnsLocalized"] is True
+    assert result["timeColumnRendered"] is True
+    assert result["nodeIdColumnRendered"] is True
+    assert result["searchBoxRendered"] is True
+    assert result["refreshButtonRendered"] is True
     assert result["rowCount"] == 35
     assert result["firstCallIndex"] == 35
     assert result["lastCallIndex"] == 1
+
+
+def test_render_task_token_stats_sorts_model_calls_by_time_desc() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 30,
+              output_tokens: 3,
+              cache_hit_tokens: 0,
+              call_count: 3,
+              calls_with_usage: 3,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+          },
+          taskSummary: { token_usage_by_model: [] },
+          // created_at 顺序与 call_index 顺序不一致：时间才是默认排序键。
+          recentModelCalls: [
+            {
+              call_index: 1,
+              node_id: "node:a",
+              created_at: "2026-09-13T10:00:05+08:00",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 0,
+              delta_usage: { tracked: true, input_tokens: 10, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+              delta_usage_by_model: [{ model_key: "m" }],
+            },
+            {
+              call_index: 2,
+              node_id: "node:b",
+              created_at: "2026-09-13T10:00:01+08:00",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 0,
+              delta_usage: { tracked: true, input_tokens: 10, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+              delta_usage_by_model: [{ model_key: "m" }],
+            },
+            {
+              call_index: 3,
+              node_id: "node:c",
+              created_at: "2026-09-13T10:00:03+08:00",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 0,
+              delta_usage: { tracked: true, input_tokens: 10, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+              delta_usage_by_model: [{ model_key: "m" }],
+            },
+          ],
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+          taskModelCallsQuery: "",
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        renderTaskTokenStats();
+        const html = U.taskTokenContent.innerHTML;
+        const tableBody = html.match(/<tbody>([\\s\\S]*?)<\\/tbody>/)?.[1] || "";
+        const callIndexValues = Array.from(tableBody.matchAll(/data-task-call-index>([\\d,]+)<\\/td>/g))
+          .map((match) => Number(String(match[1] || "").replaceAll(",", "")));
+
+        console.log(JSON.stringify({ callIndexValues }));
+        """
+    )
+
+    # 时间倒序：10:00:05(call 1) > 10:00:03(call 3) > 10:00:01(call 2)
+    assert result["callIndexValues"] == [1, 3, 2]
+
+
+def test_render_task_token_stats_search_filters_all_records_not_current_page() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        const makeCall = (idx) => ({
+          call_index: idx,
+          node_id: `node:alpha:${idx}`,
+          created_at: new Date(Date.UTC(2026, 8, 14, 0, 0, idx)).toISOString(),
+          prepared_message_count: 1,
+          prepared_message_chars: 10,
+          response_tool_call_count: 0,
+          delta_usage: { tracked: true, input_tokens: 10, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+          delta_usage_by_model: [{ model_key: idx === 5 ? "zebra-model" : `model-${idx}` }],
+        });
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 1350,
+              output_tokens: 135,
+              cache_hit_tokens: 0,
+              call_count: 135,
+              calls_with_usage: 135,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+          },
+          taskSummary: { token_usage_by_model: [] },
+          recentModelCalls: Array.from({ length: 135 }, (_, idx) => makeCall(idx + 1)),
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        renderTaskTokenStats();
+        const html = U.taskTokenContent.innerHTML;
+        const extractCallIndexes = (markup) => Array
+          .from(markup.matchAll(/data-task-call-index>([\\d,]+)<\\/td>/g))
+          .map((match) => Number(String(match[1] || "").replaceAll(",", "")));
+
+        // 未搜索：第 1 页 100 条，call 5 在第 2 页。
+        const withoutQuery = {
+          rowCount: extractCallIndexes(html).length,
+          summary: html.includes("共 135 条"),
+        };
+
+        // 按模型名搜索：命中记录（call 5）在未过滤列表的第 2 页，
+        // 搜索必须作用于全部记录而不是当前页。
+        S.taskModelCallsQuery = "zebra";
+        S.taskModelCallsPage = 1;
+        renderTaskTokenStats({ force: true });
+        const zebraHtml = U.taskTokenContent.innerHTML;
+        const byModel = {
+          indexes: extractCallIndexes(zebraHtml),
+          summary: zebraHtml.includes("共 1 条"),
+          searchValuePreserved: zebraHtml.includes('value="zebra"'),
+        };
+
+        // 按节点 ID 搜索：匹配 7、70-79 共 11 条。
+        S.taskModelCallsQuery = "node:alpha:7";
+        S.taskModelCallsPage = 1;
+        renderTaskTokenStats({ force: true });
+        const nodeHtml = U.taskTokenContent.innerHTML;
+        const byNode = {
+          indexes: extractCallIndexes(nodeHtml),
+          summary: nodeHtml.includes("共 11 条"),
+        };
+
+        // 无匹配时给出空态提示。
+        S.taskModelCallsQuery = "no-such-thing";
+        S.taskModelCallsPage = 1;
+        renderTaskTokenStats({ force: true });
+        const emptyHtml = U.taskTokenContent.innerHTML;
+
+        console.log(JSON.stringify({
+          withoutQuery,
+          byModel,
+          byNode,
+          emptyStateShown: emptyHtml.includes("未找到匹配的记录。"),
+        }));
+        """
+    )
+
+    assert result["withoutQuery"]["rowCount"] == 100
+    assert result["withoutQuery"]["summary"] is True
+    assert result["byModel"]["indexes"] == [5]
+    assert result["byModel"]["summary"] is True
+    assert result["byModel"]["searchValuePreserved"] is True
+    assert result["byNode"]["indexes"] == [79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 7]
+    assert result["byNode"]["summary"] is True
+    assert result["emptyStateShown"] is True
+
+
+def test_render_task_token_stats_freezes_auto_refresh_while_open() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 10,
+              output_tokens: 1,
+              cache_hit_tokens: 0,
+              call_count: 1,
+              calls_with_usage: 1,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+          },
+          taskSummary: { token_usage_by_model: [] },
+          recentModelCalls: [
+            {
+              call_index: 1,
+              node_id: "node:a",
+              created_at: "2026-09-13T10:00:00+08:00",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 0,
+              delta_usage: { tracked: true, input_tokens: 10, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+              delta_usage_by_model: [{ model_key: "m" }],
+            },
+          ],
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+          taskModelCallsQuery: "preserved-query",
+          taskTokenStatsOpen: true,
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "<sentinel>" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        // 窗口打开时，实时事件触发的非强制渲染不得重建表格（保留哨兵内容）。
+        renderTaskTokenStats();
+        const frozenHtml = U.taskTokenContent.innerHTML;
+
+        // 「刷新」按钮等强制渲染仍可更新，且保留搜索框内容。
+        renderTaskTokenStats({ force: true });
+        const forcedHtml = U.taskTokenContent.innerHTML;
+
+        console.log(JSON.stringify({
+          frozenHtml,
+          forcedRendered: forcedHtml.includes("模型调用明细"),
+          searchValuePreserved: forcedHtml.includes('value="preserved-query"'),
+        }));
+        """
+    )
+
+    assert result["frozenHtml"] == "<sentinel>"
+    assert result["forcedRendered"] is True
+    assert result["searchValuePreserved"] is True
+
+
+def test_refresh_task_token_call_table_rerenders_only_table_region() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        const makeCall = (idx) => ({
+          call_index: idx,
+          node_id: `node:${idx % 2 === 0 ? "even" : "odd"}:${idx}`,
+          created_at: new Date(Date.UTC(2026, 8, 14, 0, 0, idx)).toISOString(),
+          prepared_message_count: 1,
+          prepared_message_chars: 10,
+          response_tool_call_count: 0,
+          delta_usage: { tracked: true, input_tokens: 10, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+          delta_usage_by_model: [{ model_key: `model-${idx}` }],
+        });
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 50,
+              output_tokens: 5,
+              cache_hit_tokens: 0,
+              call_count: 5,
+              calls_with_usage: 5,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+          },
+          taskSummary: { token_usage_by_model: [] },
+          recentModelCalls: Array.from({ length: 5 }, (_, idx) => makeCall(idx + 1)),
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+          taskModelCallsQuery: "",
+        };
+        // 模拟真实容器：带 querySelector 的区域节点。
+        const region = { innerHTML: "" };
+        const shellMarker = '<div class="task-token-call-tools">search-box-stays</div>';
+        global.U = {
+          taskTokenContent: {
+            innerHTML: "",
+            querySelector: (selector) => (selector === "[data-task-model-call-region]" ? region : null),
+          },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        renderTaskTokenStats();
+        // 用哨兵标记容器级内容：表格区域增量刷新不得触碰它（搜索框/焦点不丢）。
+        U.taskTokenContent.innerHTML = shellMarker;
+
+        S.taskModelCallsQuery = "node:even";
+        S.taskModelCallsPage = 1;
+        refreshTaskTokenCallTable();
+
+        const indexes = Array.from(region.innerHTML.matchAll(/data-task-call-index>([\\d,]+)<\\/td>/g))
+          .map((match) => Number(String(match[1] || "").replaceAll(",", "")));
+
+        console.log(JSON.stringify({
+          containerUntouched: U.taskTokenContent.innerHTML === shellMarker,
+          regionIndexes: indexes,
+          regionSummary: region.innerHTML.includes("共 2 条"),
+        }));
+        """
+    )
+
+    assert result["containerUntouched"] is True
+    # node:even 匹配 call 2、4；时间倒序 → 4 在前。
+    assert result["regionIndexes"] == [4, 2]
+    assert result["regionSummary"] is True
 
 
 def test_render_tasks_uses_effective_input_tokens_for_task_card_metric() -> None:

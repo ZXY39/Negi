@@ -1283,6 +1283,7 @@ function resetTaskView() {
     S.frontier = [];
     S.recentModelCalls = [];
     S.taskModelCallsPage = 1;
+    S.taskModelCallsQuery = "";
     S.taskModelCallsPageSize = typeof TASK_MODEL_CALLS_PAGE_SIZE === "number" && TASK_MODEL_CALLS_PAGE_SIZE > 0
         ? TASK_MODEL_CALLS_PAGE_SIZE
         : 100;
@@ -1343,7 +1344,7 @@ function resetTaskView() {
     syncTaskTreeHeaderState(null);
     refreshTaskDetailScrollRegions();
     if (U.taskTokenButton) U.taskTokenButton.disabled = true;
-    if (U.taskTokenSummaryText) U.taskTokenSummaryText.textContent = "任务级 token 消耗会在这里实时刷新。";
+    if (U.taskTokenSummaryText) U.taskTokenSummaryText.textContent = "任务级 token 消耗统计；窗口打开期间不自动刷新，可点「刷新」手动更新。";
     if (U.taskTokenContent) U.taskTokenContent.innerHTML = '<div class="empty-state">请选择一个任务后查看 token 统计。</div>';
     setTaskTokenStatsOpen(false);
     setTaskSelectionEmptyVisible(false);
@@ -1416,11 +1417,15 @@ async function focusErrorLogNode(nodeId) {
 function setTaskTokenStatsOpen(open) {
     S.taskTokenStatsOpen = !!open;
     setDrawerOpen(U.taskTokenBackdrop, U.taskTokenDrawer, !!open);
-    if (open) renderTaskTokenStats();
+    if (open) renderTaskTokenStats({ force: true });
 }
 
-function renderTaskTokenStats() {
+function renderTaskTokenStats(options = {}) {
+    const force = !!(options && options.force);
     if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
+    // 窗口打开期间冻结自动刷新：实时事件不重建表格，避免打断滚动位置、
+    // 清空搜索框内容与筛选结果；手动更新走「刷新」按钮（force）。
+    if (!force && S.taskTokenStatsOpen) return;
     const summary = taskTokenDisplayUsage(S.currentTask, null);
     U.taskTokenSummaryText.textContent = taskTokenSummaryLine(summary);
     if (U.taskTokenButton) U.taskTokenButton.title = taskTokenSummaryLine(summary);
@@ -1439,10 +1444,11 @@ function renderTaskTokenStats() {
             return String(a.model_key || "").localeCompare(String(b.model_key || ""));
         })
         : [];
-    const recentModelCalls = Array.isArray(S.recentModelCalls)
-        ? S.recentModelCalls.map(normalizeTaskModelCall).sort((a, b) => Number(b.call_index || 0) - Number(a.call_index || 0))
-        : [];
-    const modelCallPageMeta = paginateTaskModelCalls(recentModelCalls);
+    const callViewState = taskModelCallViewState();
+    const recentModelCalls = callViewState.calls;
+    const filteredModelCalls = callViewState.filtered;
+    const modelCallPageMeta = callViewState.meta;
+    const modelCallQuery = callViewState.query;
     const partialNote = summary.is_partial
         ? '<span class="task-token-badge warn">部分模型未返回 usage</span>'
         : '<span class="task-token-badge success">统计完整</span>';
@@ -1498,53 +1504,19 @@ function renderTaskTokenStats() {
         ? `
             <div class="task-token-call-card">
                 <div class="task-token-call-head">
-                    <div>
+                    <div class="task-token-call-head-title">
                         <h3>模型调用明细</h3>
-                        <p>任务开始以来共 ${esc(formatTokenCount(modelCallPageMeta.total))} 次调用 · 每页 ${esc(formatTokenCount(modelCallPageMeta.pageSize))} 条</p>
+                        <p>任务开始以来共 ${esc(formatTokenCount(recentModelCalls.length))} 次调用 · 每页 ${esc(formatTokenCount(modelCallPageMeta.pageSize))} 条</p>
                     </div>
-                    <div class="task-token-call-page-info">${esc(taskModelCallPageSummary(modelCallPageMeta))}</div>
-                </div>
-                <div class="task-token-call-table-wrap">
-                    <table class="task-token-call-table">
-                        <thead>
-                            <tr>
-                                <th>调用序号</th>
-                                <th>预处理字符数</th>
-                                <th>消息数</th>
-                                <th>新增输入 Token</th>
-                                <th>新增缓存命中</th>
-                                <th>命中率</th>
-                                <th>工具调用数</th>
-                                <th>模型</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${modelCallPageMeta.items.map((item) => {
-                                const modelNames = item.delta_usage_by_model.length
-                                    ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
-                                    : "未提供";
-                                return `
-                                    <tr>
-                                        <td>${esc(formatTokenCount(item.call_index))}</td>
-                                        <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
-                                        <td>${esc(formatTokenCount(item.prepared_message_count))}</td>
-                                        <td>${esc(formatTokenCount(item.delta_usage.input_tokens))}</td>
-                                        <td>${esc(formatTokenCount(item.delta_usage.cache_hit_tokens))}</td>
-                                        <td>${esc((modelCallHitRate(item) * 100).toFixed(1))}%</td>
-                                        <td>${esc(formatTokenCount(item.response_tool_call_count))}</td>
-                                        <td>${esc(modelNames)}</td>
-                                    </tr>
-                                `;
-                            }).join("")}
-                        </tbody>
-                    </table>
-                </div>
-                <div class="task-token-call-footer">
-                    <div class="task-token-call-page-info">${esc(taskModelCallPageSummary(modelCallPageMeta))}</div>
-                    <div class="task-token-call-actions">
-                        <button class="toolbar-btn ghost" type="button" data-task-model-call-page="prev" ${modelCallPageMeta.currentPage <= 1 ? "disabled" : ""}>上一页</button>
-                        <button class="toolbar-btn ghost" type="button" data-task-model-call-page="next" ${modelCallPageMeta.currentPage >= modelCallPageMeta.totalPages ? "disabled" : ""}>下一页</button>
+                    <div class="task-token-call-tools">
+                        <input type="search" class="task-token-call-search" data-task-model-call-search
+                            placeholder="搜索节点 ID / 模型名称" aria-label="搜索模型调用明细"
+                            value="${esc(modelCallQuery)}">
+                        <button class="toolbar-btn ghost" type="button" data-task-model-call-refresh title="刷新模型调用明细">刷新</button>
                     </div>
+                </div>
+                <div class="task-token-call-table-region" data-task-model-call-region>
+                    ${renderTaskTokenCallTableMarkup(modelCallPageMeta, filteredModelCalls, modelCallQuery)}
                 </div>
             </div>
         `
@@ -1554,6 +1526,119 @@ function renderTaskTokenStats() {
         <div class="task-token-model-list">${rowsMarkup}</div>
         ${recentCallMarkup}
     `;
+}
+
+// 模型调用明细视图状态：默认按时间倒序（同一秒内按调用序号倒序），
+// 搜索在进入分页前作用于全部记录（而非当前页），匹配节点 ID 或模型名称。
+function taskModelCallTimeValue(call) {
+    const parsed = Date.parse(String(call?.created_at || "").trim());
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function taskModelCallMatchesQuery(call, query) {
+    const needle = String(query || "").trim().toLowerCase();
+    if (!needle) return true;
+    if (String(call?.node_id || "").toLowerCase().includes(needle)) return true;
+    return (Array.isArray(call?.delta_usage_by_model) ? call.delta_usage_by_model : []).some((row) =>
+        [row?.model_key, row?.provider_model, row?.provider_id]
+            .some((value) => String(value || "").toLowerCase().includes(needle)));
+}
+
+function formatModelCallTime(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "--";
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    const pad = (num) => String(num).padStart(2, "0");
+    const time = `${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
+    const now = new Date();
+    const sameDay = parsed.getFullYear() === now.getFullYear()
+        && parsed.getMonth() === now.getMonth()
+        && parsed.getDate() === now.getDate();
+    return sameDay ? time : `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${time}`;
+}
+
+function taskModelCallViewState() {
+    const calls = Array.isArray(S.recentModelCalls)
+        ? S.recentModelCalls.map(normalizeTaskModelCall)
+        : [];
+    calls.sort((a, b) => {
+        const timeDiff = taskModelCallTimeValue(b) - taskModelCallTimeValue(a);
+        if (timeDiff !== 0) return timeDiff;
+        return Number(b.call_index || 0) - Number(a.call_index || 0);
+    });
+    const query = String(S.taskModelCallsQuery || "").trim();
+    const filtered = query ? calls.filter((call) => taskModelCallMatchesQuery(call, query)) : calls.slice();
+    const meta = paginateTaskModelCalls(filtered);
+    return { calls, filtered, meta, query };
+}
+
+function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
+    if (!filteredCalls.length) {
+        const hasQuery = String(query || "").trim();
+        return `<div class="empty-state task-token-empty">${hasQuery ? "未找到匹配的记录。" : "暂无逐次调用明细。"}</div>`;
+    }
+    const rows = meta.items.map((item) => {
+        const modelNames = item.delta_usage_by_model.length
+            ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
+            : "未提供";
+        return `
+            <tr>
+                <td>${esc(formatModelCallTime(item.created_at))}</td>
+                <td class="task-token-call-node-id" title="${esc(item.node_id)}">${esc(item.node_id || "--")}</td>
+                <td data-task-call-index>${esc(formatTokenCount(item.call_index))}</td>
+                <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
+                <td>${esc(formatTokenCount(item.prepared_message_count))}</td>
+                <td>${esc(formatTokenCount(item.delta_usage.input_tokens))}</td>
+                <td>${esc(formatTokenCount(item.delta_usage.cache_hit_tokens))}</td>
+                <td>${esc((modelCallHitRate(item) * 100).toFixed(1))}%</td>
+                <td>${esc(formatTokenCount(item.response_tool_call_count))}</td>
+                <td>${esc(modelNames)}</td>
+            </tr>
+        `;
+    }).join("");
+    return `
+        <div class="task-token-call-table-wrap">
+            <table class="task-token-call-table">
+                <thead>
+                    <tr>
+                        <th>时间</th>
+                        <th>节点ID</th>
+                        <th>调用序号</th>
+                        <th>预处理字符数</th>
+                        <th>消息数</th>
+                        <th>新增输入 Token</th>
+                        <th>新增缓存命中</th>
+                        <th>命中率</th>
+                        <th>工具调用数</th>
+                        <th>模型</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+        </div>
+        <div class="task-token-call-footer">
+            <div class="task-token-call-page-info">${esc(taskModelCallPageSummary(meta))}</div>
+            <div class="task-token-call-actions">
+                <button class="toolbar-btn ghost" type="button" data-task-model-call-page="prev" ${meta.currentPage <= 1 ? "disabled" : ""}>上一页</button>
+                <button class="toolbar-btn ghost" type="button" data-task-model-call-page="next" ${meta.currentPage >= meta.totalPages ? "disabled" : ""}>下一页</button>
+            </div>
+        </div>
+    `;
+}
+
+// 只重建表格区域（保留搜索框焦点/内容与卡片头部），搜索与翻页共用。
+function refreshTaskTokenCallTable() {
+    if (!U.taskTokenContent) return;
+    const region = U.taskTokenContent.querySelector?.("[data-task-model-call-region]") || null;
+    if (!region) {
+        renderTaskTokenStats({ force: true });
+        return;
+    }
+    const callViewState = taskModelCallViewState();
+    region.innerHTML = renderTaskTokenCallTableMarkup(callViewState.meta, callViewState.filtered, callViewState.query);
 }
 
 function taskModelCallsPageSize() {
@@ -1596,7 +1681,7 @@ function taskModelCallPageSummary(meta) {
 function setTaskModelCallsPage(page) {
     const next = Number(page);
     S.taskModelCallsPage = Number.isFinite(next) ? Math.max(1, Math.floor(next)) : 1;
-    renderTaskTokenStats();
+    refreshTaskTokenCallTable();
 }
 
 async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = true } = {}) {

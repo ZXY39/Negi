@@ -3728,6 +3728,7 @@ function applyTaskPayload(payload) {
         ? TASK_MODEL_CALLS_PAGE_SIZE
         : 100;
     if (taskChanged) S.taskModelCallsPage = 1;
+    if (taskChanged) S.taskModelCallsQuery = "";
     S.liveFrameMap = indexTaskLiveFrames(frontier);
     if (rootNode && String(rootNode?.node_id || "").trim()) {
         S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [String(rootNode.node_id || "").trim()]: rootNode };

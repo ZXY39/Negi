@@ -1482,6 +1482,7 @@ class TaskQueryService:
             records.append(
                 TaskModelCallRecord(
                     call_index=int(payload.get('call_index') or 0),
+                    node_id=str(event.get('node_id') or payload.get('node_id') or '').strip(),
                     created_at=str(event.get('created_at') or ''),
                     prepared_message_count=int(payload.get('prepared_message_count') or 0),
                     prepared_message_chars=int(payload.get('prepared_message_chars') or 0),

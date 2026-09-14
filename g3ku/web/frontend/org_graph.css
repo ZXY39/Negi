@@ -9393,7 +9393,8 @@ textarea {
     left: 50%;
     right: auto;
     bottom: auto;
-    width: min(760px, calc(100vw - 32px));
+    /* 模型调用明细表格列较多（时间/节点ID/序号/…/模型），加宽窗口避免横向滚动遮挡列 */
+    width: min(1200px, calc(100vw - 32px));
     max-height: min(78vh, 820px);
     transform: translate(-50%, calc(-50% + 8px));
     z-index: 98;
@@ -9537,21 +9538,52 @@ textarea {
 
 .task-token-call-head {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
+    flex-wrap: wrap;
 }
 
-.task-token-call-head h3 {
+.task-token-call-head-title h3 {
     margin: 0;
     font-size: 0.98rem;
     color: var(--text-primary);
 }
 
-.task-token-call-head p {
+.task-token-call-head-title p {
     margin: 0;
     font-size: 0.82rem;
     color: var(--text-secondary);
+}
+
+/* 模型调用明细标题右侧：搜索框 + 刷新按钮 */
+.task-token-call-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.task-token-call-search {
+    width: min(260px, 60vw);
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+    border-radius: var(--radius-full);
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
+    color: var(--text-primary);
+    font-size: 0.84rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.task-token-call-search::placeholder {
+    color: var(--text-muted);
+}
+
+.task-token-call-search:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-color));
+    box-shadow: 0 10px 24px -18px color-mix(in srgb, var(--brand-primary) 44%, transparent);
 }
 
 .task-token-call-table-wrap {
@@ -9561,7 +9593,7 @@ textarea {
 .task-token-call-table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 760px;
+    min-width: 1020px;
 }
 
 .task-token-call-table th,
@@ -9577,6 +9609,13 @@ textarea {
 .task-token-call-table th {
     color: var(--text-primary);
     font-weight: 600;
+}
+
+/* 节点 ID 可能很长：单元格截断，完整 ID 走 title 提示 */
+.task-token-call-table td.task-token-call-node-id {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .task-token-call-table tbody tr:last-child td {
@@ -9629,6 +9668,17 @@ textarea {
     .task-token-call-head {
         flex-direction: column;
         align-items: flex-start;
+    }
+
+    .task-token-call-tools {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .task-token-call-search {
+        flex: 1;
+        width: auto;
+        min-width: 160px;
     }
 
     .task-token-call-footer {

@@ -2594,6 +2594,8 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
 
     assert payload is not None
     assert payload["recent_model_calls"][0]["call_index"] == 3
+    assert payload["recent_model_calls"][0]["node_id"] == record.root_node_id
+    assert payload["recent_model_calls"][0]["created_at"]
     assert "progress" not in payload
     assert "tree_root" not in payload
     assert payload["runtime_summary"]["dispatch_limits"] == {"execution": 0, "inspection": 0}
@@ -2704,6 +2706,7 @@ def test_task_detail_payload_includes_all_model_calls_for_token_window(tmp_path:
     assert len(payload["recent_model_calls"]) == 120
     assert payload["recent_model_calls"][0]["call_index"] == 1
     assert payload["recent_model_calls"][-1]["call_index"] == 120
+    assert all(item["node_id"] == record.root_node_id for item in payload["recent_model_calls"])
 
 
 def test_task_tree_snapshot_payload_contains_root_and_child_nodes(tmp_path: Path) -> None:

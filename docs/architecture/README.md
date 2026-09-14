@@ -62,6 +62,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
+- Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新，或模型调用明细按时间倒序/搜索跨全部记录的行为疑问 → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启 → `operations-and-maintenance.md`「托管 worker 看门狗」

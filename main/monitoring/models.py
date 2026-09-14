@@ -331,6 +331,7 @@ class TaskProjectionToolResultRecord(Model):
 
 class TaskModelCallRecord(Model):
     call_index: int = 0
+    node_id: str = ''
     created_at: str = ''
     prepared_message_count: int = 0
     prepared_message_chars: int = 0
