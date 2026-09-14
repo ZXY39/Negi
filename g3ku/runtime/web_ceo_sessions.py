@@ -11,14 +11,19 @@ from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
-from g3ku.runtime.session_keys import build_session_key, is_channel_session_key, parse_china_session_key
+
 from g3ku.config.loader import get_config_path, load_config
-from g3ku.runtime.external_sessions import ExternalSessionRegistry
+from g3ku.runtime.external_sessions import ExternalSessionEntry, ExternalSessionRegistry
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
     project_canonical_context_for_ui_payload,
 )
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
+from g3ku.runtime.session_keys import (
+    build_session_key,
+    is_channel_session_key,
+    parse_china_session_key,
+)
 from g3ku.utils.helpers import ensure_dir, safe_filename
 
 DEFAULT_CEO_SESSION_TITLE = "新会话"

@@ -14,21 +14,24 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
-from g3ku.prompt_trace import render_output_trace
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import AssistantMessage, UserInputMessage
 from g3ku.core.results import RunResult
 from g3ku.core.state import AgentState, StructuredError
-from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN, SILENT_REPLY_VISIBLE_TEXT, is_silent_reply_token
+from g3ku.prompt_trace import render_output_trace
+from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.canonical_context import (
+    TRANSCRIPT_PROJECTION_MODE,
     canonical_context_tool_items,
     default_frontdoor_canonical_context,
     normalize_frontdoor_canonical_context,
     project_canonical_context_for_transcript,
-    TRANSCRIPT_PROJECTION_MODE,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
-from g3ku.runtime.cancellation import ToolCancellationToken
+from g3ku.runtime.reply_tokens import (
+    SILENT_REPLY_VISIBLE_TEXT,
+    is_silent_reply_token,
+)
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}

@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from inspect import isawaitable
 from types import SimpleNamespace
 
-from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
-from loguru import logger
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
 
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
@@ -19,13 +17,11 @@ from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
     actual_request_dir_for_session,
     build_ceo_session_catalog,
-    ceo_session_task_defaults_scope,
     ceo_session_family,
-    clear_web_ceo_session_artifacts,
+    ceo_session_task_defaults_scope,
     create_web_ceo_session,
     delete_web_ceo_session_artifacts,
     ensure_ceo_session_metadata,
-    ensure_active_web_ceo_session,
     find_ceo_session_catalog_item,
     list_web_ceo_sessions,
     main_runtime_depth_limits,

@@ -10,21 +10,19 @@ import json
 import math
 import re
 import uuid
-
-from datetime import datetime
-from loguru import logger
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import AIMessage, convert_to_messages
 from langchain_core.tools import BaseTool, StructuredTool
+from loguru import logger
 
 from g3ku.agent.tools.base import Tool
 from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
-from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.json_schema_utils import (
     attach_raw_parameters_schema,
     build_args_schema_model,
@@ -33,49 +31,63 @@ from g3ku.json_schema_utils import (
 )
 from g3ku.providers.base import normalize_usage_payload
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
-from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError, ModelProviderResponseError
+from g3ku.providers.fallback import (
+    PUBLIC_PROVIDER_FAILURE_MESSAGE,
+    ModelProviderExhaustedError,
+    ModelProviderResponseError,
+)
 from g3ku.providers.responses_protocol_helpers import (
     _convert_messages as _preview_responses_messages,
+)
+from g3ku.providers.responses_protocol_helpers import (
     _convert_tools as _preview_responses_tools,
+)
+from g3ku.providers.responses_protocol_helpers import (
     _prompt_cache_key as _preview_prompt_cache_key,
 )
-from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.config_refresh import refresh_loop_runtime_config
-from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.context.summarizer import estimate_tokens
+from g3ku.runtime.frontdoor.token_preflight_compaction import (
+    FrontdoorTokenPreflightResult,
+)
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
+from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.stage_prompt_compaction import (
     compact_stage_prompt_messages_in_place,
     is_stage_block_echo_text,
     strip_stage_block_echo,
 )
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
-from g3ku.runtime.frontdoor.token_preflight_compaction import (
-    FrontdoorTokenPreflightResult,
+from g3ku.runtime.web_ceo_sessions import (
+    WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
+    fold_internal_prompt_history,
+    is_prompt_visible_message,
+    persist_frontdoor_actual_request,
+    strip_multimodal_blocks_from_message_records,
 )
 from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.models import normalize_execution_policy_metadata
-from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.protocol import now_iso
 from main.runtime.chat_backend import (
     build_actual_request_diagnostics,
     build_prompt_cache_diagnostics,
     resolve_send_model_context_window_info,
 )
+from main.runtime.internal_tools import SubmitNextStageTool
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
     build_runtime_observed_input_truth,
     build_runtime_send_token_preflight_snapshot,
     compute_runtime_send_token_preflight_thresholds,
-    should_trigger_runtime_token_compression,
 )
-from main.runtime.internal_tools import SubmitNextStageTool
 from main.runtime.stage_budget import (
+    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
+    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
-    STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
-    STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
     STAGE_TURN_END_SUMMARY_POINTER,
     STAGELESS_FREE_PASS_REMINDER,
     response_tool_calls_count_against_stage_budget,
@@ -97,13 +109,7 @@ from main.runtime.tool_call_repair import (
     extract_tool_calls_from_xml_pseudo_content,
     recover_tool_calls_from_json_payload,
 )
-from g3ku.runtime.web_ceo_sessions import (
-    WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
-    fold_internal_prompt_history,
-    is_prompt_visible_message,
-    persist_frontdoor_actual_request,
-    strip_multimodal_blocks_from_message_records,
-)
+from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 
 from ._ceo_support import CeoFrontDoorSupport
 from .canonical_context import (
@@ -113,14 +119,13 @@ from .canonical_context import (
 )
 from .message_builder import CeoMessageBuilder
 from .prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION, build_frontdoor_prompt_contract
+from .session_temp_dir import ceo_session_temp_dir
 from .state_models import (
     CeoFrontdoorInterrupted,
     CeoPendingInterrupt,
     CeoPersistentState,
     CeoRuntime,
-    CeoRuntimeContext,
 )
-from .session_temp_dir import ceo_session_temp_dir
 from .tool_contract import (
     build_frontdoor_tool_contract,
     is_frontdoor_tool_contract_echo_text,
@@ -7262,12 +7267,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     + ", ".join(verified_task_ids)
                     + "."
                 )
-        substantive_tool_names = [
-            str(payload.get("name") or "").strip()
-            for payload in original_tool_call_payloads
-            if str(payload.get("name") or "").strip()
-            and str(payload.get("name") or "").strip() not in self._CONTROL_TOOL_NAMES
-        ]
         result = {
             "messages": messages,
             "frontdoor_live_request_messages": list(messages),

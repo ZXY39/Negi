@@ -9,42 +9,54 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse
 
-from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
+from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
     build_ceo_session_catalog_cached,
     run_off_event_loop,
 )
-from g3ku.runtime.session_keys import is_channel_session_key
+from g3ku.runtime.frontdoor.canonical_context import (
+    project_canonical_context_for_ui_payload as _project_canonical_context_for_ui_payload,
+)
+from g3ku.runtime.frontdoor.canonical_context import (
+    ui_canonical_context_delta as _ui_canonical_context_delta,
+)
 from g3ku.runtime.reply_tokens import SILENT_REPLY_VISIBLE_TEXT, is_silent_reply_token
-from g3ku.security import get_bootstrap_security_service
+from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
+    WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     WebCeoStateStore,
     build_channel_ceo_session_item,
     build_local_ceo_session_item,
     build_session_summary,
     ceo_session_family,
     create_web_ceo_session,
-    ensure_active_web_ceo_session,
     ensure_ceo_session_metadata,
     final_reply_canonical_merge,
     find_ceo_session_catalog_item,
     is_internal_ceo_user_message,
-    list_web_ceo_sessions,
     read_inflight_turn_snapshot,
     read_session_turn_token_usage,
-    resolve_execution_snapshot,
     resolve_active_ceo_session_id,
+    resolve_execution_snapshot,
     transcript_messages,
-    WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     upload_dir_for_session,
     workspace_path,
 )
+from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import (
     ensure_web_runtime_services,
     get_agent,
@@ -60,15 +72,6 @@ from main.api.websocket_utils import (
     websocket_send_json,
 )
 from main.protocol import build_envelope
-
-from g3ku.runtime.frontdoor.canonical_context import (
-    canonical_round_identity as _canonical_round_identity,
-    canonical_stage_identity as _canonical_stage_identity,
-    canonical_tool_identity as _canonical_tool_identity,
-    canonical_value_fingerprint as _canonical_value_fingerprint,
-    project_canonical_context_for_ui_payload as _project_canonical_context_for_ui_payload,
-    ui_canonical_context_delta as _ui_canonical_context_delta,
-)
 
 router = APIRouter()
 _HEARTBEAT_OK = "HEARTBEAT_OK"
