@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 
 import pytest
 
@@ -435,3 +437,134 @@ def test_exec_tool_model_description_reflects_full_access_mode() -> None:
 
     assert 'without exec-side guardrails' in tool.model_description
     assert 'read-only' not in tool.model_description.lower()
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_bounds_post_exit_drain_and_kills_lingering_tree(monkeypatch, tmp_path) -> None:
+    """② 进程已退出但孙进程吊住输出管道：排空必须有界、到点杀树、返回部分输出 + 提示。"""
+
+    class _HangAfterFirstStream:
+        def __init__(self, first: bytes) -> None:
+            self._first = first
+            self._sent = False
+
+        async def read(self, _n: int = -1) -> bytes:
+            if not self._sent:
+                self._sent = True
+                return self._first
+            # 模拟孙进程持有管道写端、迟迟不到 EOF；被 cancel 时抛 CancelledError 由 _capture_stream 兜住。
+            await asyncio.sleep(3600)
+            return b''
+
+    class _StubProcess:
+        returncode = 0
+
+        def __init__(self) -> None:
+            self.stdout = _HangAfterFirstStream(b'partial-output\n')
+            self.stderr = _ChunkedStream([])
+
+        async def communicate(self):
+            raise MemoryError('communicate should not be used here')
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            return None
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StubProcess()
+
+    killed: list[object] = []
+    monkeypatch.setattr(shell_module, 'kill_process_tree', lambda proc: killed.append(proc))
+    monkeypatch.setattr(shell_module, '_POST_EXIT_DRAIN_GRACE_SECONDS', 0.1)
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    tool = ExecTool(workspace_root=str(tmp_path))
+    started = time.monotonic()
+    payload = json.loads(
+        await tool.execute(command='start-background-driver', __g3ku_runtime={'session_key': 'web:shared'})
+    )
+    elapsed = time.monotonic() - started
+
+    # 排空有界：不再无限吊住（grace 0.1s + 收尾开销）
+    assert elapsed < 3.0
+    # 到点杀掉残留进程树释放管道
+    assert killed, 'drain timeout must kill the lingering process tree'
+    # 已抢救的部分输出仍在
+    assert 'partial-output' in (payload.get('head_preview', '') + payload.get('tail_preview', ''))
+    # 反应式指引：告诉模型要常驻就 detach + 重定向到文件
+    notes = ' '.join(payload.get('notes') or [])
+    assert 'detach' in notes or '后台' in notes
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_appends_guidance_on_python_inline_syntax_error(monkeypatch, tmp_path) -> None:
+    """(b) `python -c` 引号/转义失败 → 工具结果就地追加「先落 .py 再跑」纠正指引。"""
+
+    class _StubProcess:
+        returncode = 1
+
+        def __init__(self) -> None:
+            self.stdout = _ChunkedStream([])
+            self.stderr = _ChunkedStream([b'  File "<string>", line 1\n    print(\nSyntaxError: invalid syntax\n'])
+
+        async def communicate(self):
+            raise MemoryError('communicate should not be used here')
+
+        async def wait(self):
+            return 1
+
+        def kill(self):
+            return None
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StubProcess()
+
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    tool = ExecTool(workspace_root=str(tmp_path))
+    payload = json.loads(
+        await tool.execute(command='python -c "print("', __g3ku_runtime={'session_key': 'web:shared'})
+    )
+
+    assert payload['status'] == 'error'
+    notes = ' '.join(payload.get('notes') or [])
+    assert 'filesystem_write' in notes or '.py' in notes
+
+
+@pytest.mark.asyncio
+async def test_exec_tool_no_python_guidance_when_not_inline_syntax(monkeypatch, tmp_path) -> None:
+    """非 `python -c`、或 stderr 无 SyntaxError 时不应误加纠正指引（防噪音）。"""
+
+    class _StubProcess:
+        returncode = 1
+
+        def __init__(self) -> None:
+            self.stdout = _ChunkedStream([])
+            self.stderr = _ChunkedStream([b'command not found\n'])
+
+        async def communicate(self):
+            raise MemoryError('communicate should not be used here')
+
+        async def wait(self):
+            return 1
+
+        def kill(self):
+            return None
+
+    async def _fake_create_subprocess_exec(*args, **kwargs):
+        return _StubProcess()
+
+    monkeypatch.setattr(shell_module.os, 'name', 'nt', raising=False)
+    monkeypatch.setattr(shell_module.asyncio, 'create_subprocess_exec', _fake_create_subprocess_exec)
+
+    tool = ExecTool(workspace_root=str(tmp_path))
+    payload = json.loads(
+        await tool.execute(command='git status', __g3ku_runtime={'session_key': 'web:shared'})
+    )
+
+    assert payload['status'] == 'error'
+    assert 'notes' not in payload or not any('filesystem_write' in n for n in payload.get('notes') or [])

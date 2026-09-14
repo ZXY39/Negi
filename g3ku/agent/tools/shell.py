@@ -24,6 +24,26 @@ from main.governance.exec_tool_policy import (
 
 _STREAM_READ_CHUNK_SIZE = 4096
 _STREAM_CAPTURE_BYTE_LIMIT = 64 * 1024
+# 进程退出后，输出管道尾部排空的宽限上限（秒）。正常命令在进程退出瞬间即到 EOF、
+# 排空立即完成；只有当孙进程继承了 stdout/stderr 写端、管道迟迟不到 EOF 时才会等到
+# 这个宽限，到点后杀进程树释放管道并返回已抢救的部分输出（带 drain_timed_out 标记）。
+# 与超时路径 _collect_terminated_process_output 的 5s 排空宽限保持一致。
+_POST_EXIT_DRAIN_GRACE_SECONDS = 5.0
+
+_DRAIN_TIMEOUT_NOTE = (
+    "命令主进程已退出，但其输出管道仍未关闭——有后台子/孙进程仍持有 stdout/stderr 写端。"
+    "已等待 5s 宽限后杀掉进程树释放管道，上面的输出可能被截断。"
+    "若要让进程在后台常驻（服务/抓取驱动/浏览器），请 detach：把它的输出重定向到文件"
+    "（Windows `Start-Process -RedirectStandardOutput log.txt`，POSIX `nohup cmd >log 2>&1 &`）"
+    "再轮询该文件，而不是让它继承 exec 的输出管道。"
+)
+
+_PYTHON_INLINE_SYNTAX_NOTE = (
+    "这看起来是内联 `python -c` 的引号/转义失败。对任何非平凡 Python，请改用 "
+    "filesystem_write 在任务级临时目录写一个 .py 文件，再用 exec 跑 `python <file>`，"
+    "不要把整段脚本塞进 `-c`：嵌套引号、花括号、三引号、中文/Markdown 片段、长 JSON "
+    "都极易把真正的 Python 错误混成 shell 解析错误。"
+)
 
 
 @dataclass
@@ -122,11 +142,13 @@ class ExecTool(Tool):
     def model_description(self) -> str:
         execution_mode = self._resolve_execution_mode()
         shell_hint = (
-            " The command already runs inside PowerShell on Windows (sh on POSIX): "
-            "write the command body directly and do NOT wrap it in another "
-            "`powershell -Command \"...\"` / `bash -c \"...\"` — redundant nesting "
-            "complicates quoting and can leave grandchild processes holding the "
-            "output pipes, which stalls the call."
+            " The command already runs inside PowerShell on Windows (sh on POSIX): write the body "
+            "directly, do NOT wrap it in another `powershell -Command`/`bash -c`. To leave a process "
+            "running in the background (server, crawl driver, browser), detach it — redirect its output "
+            "to a file (`Start-Process -RedirectStandardOutput log` / `nohup cmd >log 2>&1 &`) and poll "
+            "the file; a child left holding exec's output pipes is killed shortly after the call ends "
+            "and its output is truncated. For non-trivial Python, write a temp .py with filesystem_write "
+            "and run `python file.py`; avoid inline `python -c` with heavy quoting."
         )
         if execution_mode == EXECUTION_MODE_FULL_ACCESS:
             return "Execute shell commands without exec-side guardrails and return structured output." + shell_hint
@@ -213,7 +235,7 @@ class ExecTool(Tool):
                 )
 
             try:
-                stdout_capture, stderr_capture = await self._collect_process_output(
+                stdout_capture, stderr_capture, drain_timed_out = await self._collect_process_output(
                     process,
                     timeout=effective_timeout,
                 )
@@ -251,12 +273,18 @@ class ExecTool(Tool):
                     error=timeout_message,
                 )
 
+            extra_notes: list[str] = []
+            if drain_timed_out:
+                extra_notes.append(_DRAIN_TIMEOUT_NOTE)
+            if process.returncode != 0 and self._is_python_inline_syntax_failure(command, stderr_capture):
+                extra_notes.append(_PYTHON_INLINE_SYNTAX_NOTE)
             return self._build_payload(
                 status="success" if process.returncode == 0 else "error",
                 exit_code=process.returncode,
                 stdout_capture=stdout_capture,
                 stderr_capture=stderr_capture,
                 error="" if process.returncode == 0 else f"Exit code: {process.returncode}",
+                extra_notes=extra_notes,
             )
 
         except Exception as e:
@@ -275,12 +303,13 @@ class ExecTool(Tool):
         process: Any,
         *,
         timeout: float,
-    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture, bool]:
         if getattr(process, "stdout", None) is None and getattr(process, "stderr", None) is None:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             return (
                 _BoundedStreamCapture.from_bytes(stdout),
                 _BoundedStreamCapture.from_bytes(stderr),
+                False,
             )
         stdout_task = asyncio.create_task(self._capture_stream(process.stdout))
         stderr_task = asyncio.create_task(self._capture_stream(process.stderr))
@@ -289,14 +318,26 @@ class ExecTool(Tool):
         except BaseException:
             await self._cancel_capture_tasks(stdout_task, stderr_task)
             raise
-        return await self._await_capture_tasks(stdout_task, stderr_task)
+        # 进程已退出：给尾部排空设界，避免孙进程继承输出管道写端、管道迟迟不到 EOF
+        # 时无限吊住本次调用（timeout 只约束「等进程退出」那一段，约束不到这里）。
+        stdout_capture, stderr_capture, drain_timed_out = await self._await_capture_tasks(
+            stdout_task, stderr_task, timeout=_POST_EXIT_DRAIN_GRACE_SECONDS
+        )
+        if drain_timed_out:
+            # 排空到点仍未 EOF：杀掉残留进程树释放管道句柄，回收 fd/僵尸进程，
+            # 返回已抢救的部分输出（drain_timed_out 由调用方转成模型可见提示）。
+            kill_process_tree(process)
+        return stdout_capture, stderr_capture, drain_timed_out
 
     async def _collect_terminated_process_output(self, process: Any) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
         if getattr(process, "stdout", None) is None and getattr(process, "stderr", None) is None:
             return _BoundedStreamCapture(), _BoundedStreamCapture()
         stdout_task = asyncio.create_task(self._capture_stream(process.stdout))
         stderr_task = asyncio.create_task(self._capture_stream(process.stderr))
-        return await self._await_capture_tasks(stdout_task, stderr_task, timeout=5.0)
+        stdout_capture, stderr_capture, _drain_timed_out = await self._await_capture_tasks(
+            stdout_task, stderr_task, timeout=_POST_EXIT_DRAIN_GRACE_SECONDS
+        )
+        return stdout_capture, stderr_capture
 
     async def _capture_stream(self, stream: Any) -> _BoundedStreamCapture:
         capture = _BoundedStreamCapture()
@@ -318,18 +359,19 @@ class ExecTool(Tool):
         stderr_task: "asyncio.Task[_BoundedStreamCapture]",
         *,
         timeout: float | None = None,
-    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture]:
+    ) -> tuple[_BoundedStreamCapture, _BoundedStreamCapture, bool]:
         gather = asyncio.gather(stdout_task, stderr_task)
         try:
             if timeout is None:
                 stdout_capture, stderr_capture = await gather
             else:
                 stdout_capture, stderr_capture = await asyncio.wait_for(gather, timeout=timeout)
+            return stdout_capture, stderr_capture, False
         except asyncio.TimeoutError:
             stdout_task.cancel()
             stderr_task.cancel()
             stdout_capture, stderr_capture = await asyncio.gather(stdout_task, stderr_task)
-        return stdout_capture, stderr_capture
+            return stdout_capture, stderr_capture, True
 
     async def _cancel_capture_tasks(
         self,
@@ -873,6 +915,7 @@ class ExecTool(Tool):
         error: str = "",
         stdout_capture: _BoundedStreamCapture | None = None,
         stderr_capture: _BoundedStreamCapture | None = None,
+        extra_notes: list[str] | None = None,
     ) -> str:
         def _merge(primary: str, fallback: str) -> str:
             normalized_primary = str(primary or "").strip()
@@ -893,6 +936,12 @@ class ExecTool(Tool):
         if stderr_tail:
             combined_tail = f"{combined_tail}\nSTDERR:\n{stderr_tail}".strip()
 
+        # 反应式指引/告警：既进 tail_preview（模型一定会看工具结果），也单列 notes 字段。
+        notes = [str(note).strip() for note in (extra_notes or []) if str(note or "").strip()]
+        if notes:
+            notes_block = "\n".join(notes)
+            combined_tail = f"{combined_tail}\n{notes_block}".strip() if combined_tail else notes_block
+
         payload = {
             "status": status,
             "exit_code": exit_code,
@@ -903,9 +952,29 @@ class ExecTool(Tool):
             "stdout_captured_bytes": int(stdout_capture.total_bytes if stdout_capture is not None else len(stdout_text.encode('utf-8'))),
             "stderr_captured_bytes": int(stderr_capture.total_bytes if stderr_capture is not None else len(stderr_text.encode('utf-8'))),
         }
+        if notes:
+            payload["notes"] = notes
         if error:
             payload["error"] = error
         return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _is_python_inline_syntax_failure(command: str, stderr_capture: _BoundedStreamCapture | None) -> bool:
+        """识别内联 `python -c`/`py -c` 的引号/转义失败，给模型「先落 .py 再跑」的就地纠正。
+
+        仅作反应式提示（非正确性判定）：命中后在工具结果里追加 _PYTHON_INLINE_SYNTAX_NOTE。
+        误报代价极低（多一条指引），故用宽松启发式：命令里出现 python/py 且带独立 `-c`，
+        且 stderr 含 SyntaxError。
+        """
+        cmd = str(command or "")
+        if re.search(r"\b(?:python|python3|py)\b", cmd) is None:
+            return False
+        if re.search(r"\s-c\b", cmd) is None:
+            return False
+        stderr_text = ""
+        if stderr_capture is not None:
+            stderr_text = f"{stderr_capture.head_text()}\n{stderr_capture.tail_text()}"
+        return "syntaxerror" in stderr_text.lower()
 
     def _capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
         service = self.main_task_service
