@@ -1510,7 +1510,7 @@ function renderTaskTokenStats(options = {}) {
                     </div>
                     <div class="task-token-call-tools">
                         <input type="search" class="task-token-call-search" data-task-model-call-search
-                            placeholder="搜索节点 ID / 模型名称" aria-label="搜索模型调用明细"
+                            placeholder="搜索序号 / 节点 ID / 模型名称" aria-label="搜索模型调用明细"
                             value="${esc(modelCallQuery)}">
                         <button class="toolbar-btn ghost" type="button" data-task-model-call-refresh title="刷新模型调用明细">刷新</button>
                     </div>
@@ -1529,7 +1529,7 @@ function renderTaskTokenStats(options = {}) {
 }
 
 // 模型调用明细视图状态：默认按时间倒序（同一秒内按调用序号倒序），
-// 搜索在进入分页前作用于全部记录（而非当前页），匹配节点 ID 或模型名称。
+// 搜索在进入分页前作用于全部记录（而非当前页），匹配序号、节点 ID 或模型名称。
 function taskModelCallTimeValue(call) {
     const parsed = Date.parse(String(call?.created_at || "").trim());
     return Number.isFinite(parsed) ? parsed : 0;
@@ -1538,6 +1538,7 @@ function taskModelCallTimeValue(call) {
 function taskModelCallMatchesQuery(call, query) {
     const needle = String(query || "").trim().toLowerCase();
     if (!needle) return true;
+    if (String(call?.call_index ?? "").includes(needle)) return true;
     if (String(call?.node_id || "").toLowerCase().includes(needle)) return true;
     return (Array.isArray(call?.delta_usage_by_model) ? call.delta_usage_by_model : []).some((row) =>
         [row?.model_key, row?.provider_model, row?.provider_id]
@@ -1584,11 +1585,10 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
             : "未提供";
         return `
             <tr>
+                <td data-task-call-index>${esc(formatTokenCount(item.call_index))}</td>
                 <td>${esc(formatModelCallTime(item.created_at))}</td>
                 <td class="task-token-call-node-id" title="${esc(item.node_id)}">${esc(item.node_id || "--")}</td>
-                <td data-task-call-index>${esc(formatTokenCount(item.call_index))}</td>
                 <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
-                <td>${esc(formatTokenCount(item.prepared_message_count))}</td>
                 <td>${esc(formatTokenCount(item.delta_usage.input_tokens))}</td>
                 <td>${esc(formatTokenCount(item.delta_usage.cache_hit_tokens))}</td>
                 <td>${esc((modelCallHitRate(item) * 100).toFixed(1))}%</td>
@@ -1602,13 +1602,12 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
             <table class="task-token-call-table">
                 <thead>
                     <tr>
+                        <th>序号</th>
                         <th>时间</th>
                         <th>节点ID</th>
-                        <th>调用序号</th>
                         <th>预处理字符数</th>
-                        <th>消息数</th>
                         <th>新增输入 Token</th>
-                        <th>新增缓存命中</th>
+                        <th>缓存命中</th>
                         <th>命中率</th>
                         <th>工具调用数</th>
                         <th>模型</th>

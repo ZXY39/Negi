@@ -784,13 +784,12 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
           headingLocalized: html.includes("模型调用明细"),
           paginationLocalized: html.includes("第 2/2 页") && html.includes("显示 101-135 / 共 135 条"),
           columnsLocalized: [
+            "序号",
             "时间",
             "节点ID",
-            "调用序号",
             "预处理字符数",
-            "消息数",
             "新增输入 Token",
-            "新增缓存命中",
+            "缓存命中",
             "命中率",
             "工具调用数",
             "模型",
@@ -799,7 +798,7 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
             || /<td>\\d{2}-\\d{2} \\d{1,2}:\\d{2}:\\d{2}<\\/td>/.test(tableBody),
           nodeIdColumnRendered: tableBody.includes("node:demo:"),
           searchBoxRendered: html.includes("data-task-model-call-search")
-            && html.includes("搜索节点 ID / 模型名称"),
+            && html.includes("搜索序号 / 节点 ID / 模型名称"),
           refreshButtonRendered: html.includes("data-task-model-call-refresh"),
           rowCount: callIndexValues.length,
           firstCallIndex: callIndexValues[0],
@@ -1026,6 +1025,78 @@ def test_render_task_token_stats_search_filters_all_records_not_current_page() -
     assert result["byNode"]["indexes"] == [79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 7]
     assert result["byNode"]["summary"] is True
     assert result["emptyStateShown"] is True
+
+
+def test_render_task_token_stats_search_supports_call_index() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        // 节点 ID 与模型名均不含数字：纯数字查询只能命中序号。
+        const makeCall = (idx) => ({
+          call_index: idx,
+          node_id: "node:alpha",
+          created_at: new Date(Date.UTC(2026, 8, 14, 0, 0, idx)).toISOString(),
+          prepared_message_count: 1,
+          prepared_message_chars: 10,
+          response_tool_call_count: 0,
+          delta_usage: { tracked: true, input_tokens: 10, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+          delta_usage_by_model: [{ model_key: "alpha-model" }],
+        });
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 30,
+              output_tokens: 3,
+              cache_hit_tokens: 0,
+              call_count: 3,
+              calls_with_usage: 3,
+              calls_without_usage: 0,
+              is_partial: false,
+            },
+          },
+          taskSummary: { token_usage_by_model: [] },
+          recentModelCalls: [makeCall(1), makeCall(2), makeCall(12)],
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        S.taskModelCallsQuery = "2";
+        renderTaskTokenStats();
+        const html = U.taskTokenContent.innerHTML;
+        const indexes = Array.from(html.matchAll(/data-task-call-index>([\\d,]+)<\\/td>/g))
+          .map((match) => Number(String(match[1] || "").replaceAll(",", "")));
+
+        console.log(JSON.stringify({ indexes, summary: html.includes("共 2 条") }));
+        """
+    )
+
+    # "2" 按序号子串匹配 call 2 与 call 12（节点/模型均无数字，证明序号搜索生效）。
+    assert result["indexes"] == [12, 2]
+    assert result["summary"] is True
 
 
 def test_render_task_token_stats_freezes_auto_refresh_while_open() -> None:
