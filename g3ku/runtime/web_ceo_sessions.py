@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import re
 import shutil
@@ -27,7 +28,12 @@ WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
 WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
 WEB_CEO_CONTINUITY_ROOT = Path(".g3ku") / "web-ceo-continuity"
 WEB_CEO_REQUEST_ROOT = Path(".g3ku") / "web-ceo-requests"
+WEB_CEO_TURN_BOUNDARY_ROOT = Path(".g3ku") / "web-ceo-turn-boundaries"
 FRONTDOOR_REQUEST_ARTIFACT_KEEP = 300
+# Per-turn continuity boundary snapshots are the authoritative truncation source
+# for user message edit-resend / session fork. They carry the full request-body
+# baseline, so only the most recent few turns are kept (gzip-compressed).
+TURN_BOUNDARY_SNAPSHOT_KEEP = 3
 # Pruning has to read the restorable sidecars, so it runs once per this many
 # persisted requests instead of on every model round. The on-disk bound stays
 # keep + interval.
@@ -46,8 +52,8 @@ _RECENT_HISTORY_TOOL_TRACE_LIMIT = 2
 _RECENT_HISTORY_TOOL_TEXT_MAX_CHARS = 96
 _TASK_RESULT_OUTPUT_MAX_CHARS = 480
 _TASK_RESULT_REASON_MAX_CHARS = 180
-_CONTINUITY_ALLOWED_SHRINK_REASONS = {"", "token_compression", "stage_compaction"}
-_CONTINUITY_ALLOWED_SOURCE_REASONS = {"actual_request_sync", "finalize", "manual_stop"}
+_CONTINUITY_ALLOWED_SHRINK_REASONS = {"", "token_compression", "stage_compaction", "user_edit_truncation"}
+_CONTINUITY_ALLOWED_SOURCE_REASONS = {"actual_request_sync", "finalize", "manual_stop", "user_edit_truncation"}
 _CONTINUITY_ALLOWED_RESTORE_SOURCES = {
     "paused_snapshot",
     "inflight_snapshot",
@@ -1337,6 +1343,143 @@ def write_completed_continuity_snapshot(session_id: str, snapshot: dict[str, Any
     _atomic_write_json(path, payload)
 
 
+def turn_boundary_dir_for_session(session_id: str, *, create: bool = True) -> Path:
+    safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
+    directory = workspace_path() / WEB_CEO_TURN_BOUNDARY_ROOT / safe_session
+    return ensure_dir(directory) if create else directory
+
+
+def _turn_boundary_snapshot_paths(directory: Path, turn_id: str) -> list[Path]:
+    safe_turn = safe_filename(str(turn_id or "").strip()) or str(turn_id or "").strip()
+    if not safe_turn:
+        return []
+    return [directory / f"{safe_turn}.json.gz", directory / f"{safe_turn}.json"]
+
+
+def _atomic_write_json_gz(path: Path, payload: dict[str, Any]) -> None:
+    directory = ensure_dir(path.parent)
+    # Same short-temp-suffix contract as _atomic_write_json (Windows MAX_PATH).
+    temp_path = directory / f"{path.name}.{uuid.uuid4().hex[:12]}.tmp"
+    with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False)
+    temp_path.replace(path)
+
+
+def _prune_turn_boundary_snapshots(directory: Path, *, keep: int = TURN_BOUNDARY_SNAPSHOT_KEEP) -> None:
+    try:
+        paths = sorted(
+            list(directory.glob("*.json.gz")) + list(directory.glob("*.json")),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return
+    for stale in paths[max(1, int(keep or TURN_BOUNDARY_SNAPSHOT_KEEP)):]:
+        try:
+            stale.unlink()
+        except Exception:
+            continue
+
+
+def write_turn_boundary_snapshot(session_id: str, turn_id: str, snapshot: dict[str, Any] | None) -> None:
+    """Upsert 每轮连续性边界快照（编辑重发/Fork 的唯一截断数据源）。
+
+    同一 turn 多次写入互相覆盖，轮末 finalize 的写入自然成为该轮终态；
+    gzip 压缩落盘，只保留最近 ``TURN_BOUNDARY_SNAPSHOT_KEEP`` 轮。
+    """
+    key = str(session_id or "").strip()
+    normalized_turn = str(turn_id or "").strip()
+    if not key or not normalized_turn:
+        return
+    directory = turn_boundary_dir_for_session(key)
+    paths = _turn_boundary_snapshot_paths(directory, normalized_turn)
+    normalized = _normalized_completed_continuity_snapshot(snapshot)
+    if normalized is None:
+        for path in paths:
+            path.unlink(missing_ok=True)
+        return
+    payload = dict(normalized)
+    payload["session_id"] = key
+    payload["turn_id"] = normalized_turn
+    _atomic_write_json_gz(paths[0], payload)
+    # 收敛历史明文残留（如有），保证一个 turn 只有一份最新快照。
+    for legacy in paths[1:]:
+        legacy.unlink(missing_ok=True)
+    _prune_turn_boundary_snapshots(directory)
+
+
+def read_turn_boundary_snapshot(session_id: str, turn_id: str) -> dict[str, Any] | None:
+    key = str(session_id or "").strip()
+    normalized_turn = str(turn_id or "").strip()
+    if not key or not normalized_turn:
+        return None
+    directory = turn_boundary_dir_for_session(key, create=False)
+    if not directory.exists():
+        return None
+    payload: Any = None
+    gz_path, plain_path = _turn_boundary_snapshot_paths(directory, normalized_turn)
+    if gz_path.exists():
+        try:
+            with gzip.open(gz_path, "rt", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            payload = None
+    if payload is None and plain_path.exists():
+        try:
+            payload = json.loads(plain_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = None
+    if not isinstance(payload, dict):
+        return None
+    return _normalized_completed_continuity_snapshot(payload)
+
+
+def list_turn_boundary_snapshot_turn_ids(session_id: str) -> set[str]:
+    """返回当前保留边界快照的 turn_id 集合（≤ KEEP 份，读取成本可忽略）。"""
+    key = str(session_id or "").strip()
+    if not key:
+        return set()
+    directory = turn_boundary_dir_for_session(key, create=False)
+    if not directory.exists():
+        return set()
+    turn_ids: set[str] = set()
+    for path in list(directory.glob("*.json.gz")) + list(directory.glob("*.json")):
+        turn_id = ""
+        try:
+            if path.suffix == ".gz":
+                with gzip.open(path, "rt", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            else:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                turn_id = str(payload.get("turn_id") or "").strip()
+        except Exception:
+            turn_id = ""
+        if not turn_id:
+            turn_id = path.name.split(".json")[0]
+        if turn_id:
+            turn_ids.add(turn_id)
+    return turn_ids
+
+
+def clear_turn_boundary_snapshots(session_id: str, turn_ids: list[str] | None = None) -> None:
+    key = str(session_id or "").strip()
+    if not key:
+        return
+    directory = turn_boundary_dir_for_session(key, create=False)
+    if not directory.exists():
+        return
+    if turn_ids is None:
+        shutil.rmtree(directory, ignore_errors=True)
+        return
+    for turn_id in list(turn_ids or []):
+        for path in _turn_boundary_snapshot_paths(directory, str(turn_id or "").strip()):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                continue
+
+
 def clear_completed_continuity_snapshot(session_id: str) -> None:
     path = completed_continuity_snapshot_path_for_session(session_id, create=False)
     path.unlink(missing_ok=True)
@@ -2049,6 +2192,7 @@ def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None
     clear_paused_execution_context(session_id)
     clear_completed_continuity_snapshot(session_id)
     clear_actual_request_history(session_id)
+    clear_turn_boundary_snapshots(session_id)
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)

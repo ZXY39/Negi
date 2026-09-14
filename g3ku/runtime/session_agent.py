@@ -586,6 +586,79 @@ class RuntimeAgentSession:
         )
         return True
 
+    def apply_history_truncation_state(
+        self,
+        payload: dict[str, Any] | None,
+        *,
+        removed_turn_ids: list[str] | None = None,
+    ) -> None:
+        """把编辑重发/Fork 截断后的连续性状态应用到 live 会话对象（就地变更）。
+
+        调用方必须已持有 ``_turn_lock``。``payload`` 携带非空基线时走既有
+        continuity 恢复路径；空基线（截断到会话开头）显式重置全部 frontdoor
+        状态，让下一轮走无基线 cold 路径。无论哪个分支都清理轮级缓存，
+        保证被截断轮次的内存状态不会泄漏进下一轮。
+        """
+        restored = False
+        if isinstance(payload, dict) and payload:
+            restored = self._restore_frontdoor_state_from_payload(
+                payload,
+                source="completed_continuity",
+                allow_continuity_bridge=False,
+            )
+        if not restored:
+            self._frontdoor_request_body_messages = []
+            self._frontdoor_history_shrink_reason = str(
+                (payload or {}).get("frontdoor_history_shrink_reason") or ""
+            ).strip()
+            self._frontdoor_pending_shrink_reason = ""
+            self._frontdoor_token_preflight_diagnostics = {}
+            self._frontdoor_actual_request_path = ""
+            self._frontdoor_actual_request_history = []
+            self._frontdoor_stage_state = {}
+            self._frontdoor_canonical_context = default_frontdoor_canonical_context()
+            self._compression_state = {}
+            self._semantic_context_state = {}
+            self._frontdoor_model_retry_status = None
+            self._frontdoor_prompt_cache_key_hash = ""
+            self._frontdoor_actual_request_hash = ""
+            self._frontdoor_actual_request_message_count = 0
+            self._frontdoor_actual_tool_schema_hash = ""
+            self._frontdoor_restore_source = "none"
+            self._frontdoor_baseline_sync_decision = ""
+            self._frontdoor_token_compression_applied_turn = False
+        self._frontdoor_previous_actual_request_path = ""
+        self._frontdoor_previous_actual_request_history = []
+        self._frontdoor_completed_continuity_bridge_pending = False
+        self._frontdoor_selection_debug = {}
+        self._frontdoor_repair_required_tool_items = []
+        self._frontdoor_repair_required_skill_items = []
+        # 轮级缓存清理：被截断轮次的任何内存状态都不得残留。
+        removed = {
+            str(item or "").strip()
+            for item in list(removed_turn_ids or [])
+            if str(item or "").strip()
+        }
+        for turn_id in removed:
+            self._frontdoor_turn_usage.pop(turn_id, None)
+        try:
+            self._state.queued_follow_up_messages.clear()
+        except Exception:
+            pass
+        self._preserved_inflight_turn = None
+        self._follow_up_transition_snapshot = None
+        self.clear_paused_execution_context()
+        try:
+            self._state.messages.clear()
+        except Exception:
+            pass
+        self._active_turn_id = None
+        self._clear_user_batch_context()
+        self._last_verified_task_ids = []
+        self._assistant_stream_pending_text = ""
+        self._assistant_stream_last_emitted_text = ""
+        self._assistant_segment_open = False
+
     def _restore_frontdoor_state_from_latest_actual_request_artifact(self, session_key: str) -> bool:
         try:
             from g3ku.runtime.web_ceo_sessions import actual_request_dir_for_session
@@ -716,69 +789,80 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("Completed continuity sync unavailable for {}", session_key)
             return
+        payload: dict[str, Any] | None = None
         try:
             shrink_reason = str(getattr(self, "_frontdoor_history_shrink_reason", "") or "").strip()
             if not shrink_reason:
                 shrink_reason = str(getattr(self, "_frontdoor_pending_shrink_reason", "") or "").strip()
-            write_completed_continuity_snapshot(
-                session_key,
-                {
-                    "frontdoor_request_body_messages": [
-                        dict(item)
-                        for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
-                        if isinstance(item, dict)
-                    ],
-                    "frontdoor_history_shrink_reason": shrink_reason,
-                    "frontdoor_token_preflight_diagnostics": copy.deepcopy(
-                        getattr(self, "_frontdoor_token_preflight_diagnostics", None) or {}
-                    ),
-                    "frontdoor_actual_request_path": str(
-                        getattr(self, "_frontdoor_actual_request_path", "") or ""
-                    ).strip(),
-                    "frontdoor_actual_request_history": [
-                        dict(item)
-                        for item in list(getattr(self, "_frontdoor_actual_request_history", []) or [])
-                        if isinstance(item, dict)
-                    ],
-                    "frontdoor_stage_state": copy.deepcopy(
-                        getattr(self, "_frontdoor_stage_state", None) or {}
-                    ),
-                    "frontdoor_canonical_context": copy.deepcopy(
-                        getattr(self, "_frontdoor_canonical_context", None) or {}
-                    ),
-                    "compression_state": copy.deepcopy(getattr(self, "_compression_state", None) or {}),
-                    "semantic_context_state": copy.deepcopy(
-                        getattr(self, "_semantic_context_state", None) or {}
-                    ),
-                    "hydrated_tool_names": list(
-                        self._normalized_name_list(getattr(self, "_frontdoor_hydrated_tool_names", []))
-                    ),
-                    "capability_snapshot_exposure_revision": str(
-                        getattr(self, "_frontdoor_capability_snapshot_exposure_revision", "") or ""
-                    ).strip(),
-                    "visible_tool_ids": list(
-                        self._normalized_name_list(getattr(self, "_frontdoor_visible_tool_ids", []))
-                    ),
-                    "visible_skill_ids": list(
-                        self._normalized_name_list(getattr(self, "_frontdoor_visible_skill_ids", []))
-                    ),
-                    "provider_tool_schema_names": list(
-                        self._normalized_name_list(
-                            getattr(self, "_frontdoor_provider_tool_schema_names", [])
-                        )
-                    ),
-                    "frontdoor_restore_source": str(
-                        getattr(self, "_frontdoor_restore_source", "none") or "none"
-                    ).strip()
-                    or "none",
-                    "frontdoor_baseline_sync_decision": str(
-                        getattr(self, "_frontdoor_baseline_sync_decision", "") or ""
-                    ).strip(),
-                    "source_reason": str(source_reason or "").strip(),
-                },
-            )
+            payload = {
+                "frontdoor_request_body_messages": [
+                    dict(item)
+                    for item in list(getattr(self, "_frontdoor_request_body_messages", []) or [])
+                    if isinstance(item, dict)
+                ],
+                "frontdoor_history_shrink_reason": shrink_reason,
+                "frontdoor_token_preflight_diagnostics": copy.deepcopy(
+                    getattr(self, "_frontdoor_token_preflight_diagnostics", None) or {}
+                ),
+                "frontdoor_actual_request_path": str(
+                    getattr(self, "_frontdoor_actual_request_path", "") or ""
+                ).strip(),
+                "frontdoor_actual_request_history": [
+                    dict(item)
+                    for item in list(getattr(self, "_frontdoor_actual_request_history", []) or [])
+                    if isinstance(item, dict)
+                ],
+                "frontdoor_stage_state": copy.deepcopy(
+                    getattr(self, "_frontdoor_stage_state", None) or {}
+                ),
+                "frontdoor_canonical_context": copy.deepcopy(
+                    getattr(self, "_frontdoor_canonical_context", None) or {}
+                ),
+                "compression_state": copy.deepcopy(getattr(self, "_compression_state", None) or {}),
+                "semantic_context_state": copy.deepcopy(
+                    getattr(self, "_semantic_context_state", None) or {}
+                ),
+                "hydrated_tool_names": list(
+                    self._normalized_name_list(getattr(self, "_frontdoor_hydrated_tool_names", []))
+                ),
+                "capability_snapshot_exposure_revision": str(
+                    getattr(self, "_frontdoor_capability_snapshot_exposure_revision", "") or ""
+                ).strip(),
+                "visible_tool_ids": list(
+                    self._normalized_name_list(getattr(self, "_frontdoor_visible_tool_ids", []))
+                ),
+                "visible_skill_ids": list(
+                    self._normalized_name_list(getattr(self, "_frontdoor_visible_skill_ids", []))
+                ),
+                "provider_tool_schema_names": list(
+                    self._normalized_name_list(
+                        getattr(self, "_frontdoor_provider_tool_schema_names", [])
+                    )
+                ),
+                "frontdoor_restore_source": str(
+                    getattr(self, "_frontdoor_restore_source", "none") or "none"
+                ).strip()
+                or "none",
+                "frontdoor_baseline_sync_decision": str(
+                    getattr(self, "_frontdoor_baseline_sync_decision", "") or ""
+                ).strip(),
+                "source_reason": str(source_reason or "").strip(),
+            }
+            write_completed_continuity_snapshot(session_key, payload)
         except Exception:
             logger.debug("Skipped completed continuity sync for {}", session_key)
+            return
+        # 每轮边界快照：与 completed continuity sidecar 同一份载荷按当前 turn_id upsert。
+        # 同轮多次写互相覆盖，轮末 finalize 的写入即该轮终态；为编辑重发/Fork 提供
+        # "截止该轮"的精确截断数据源。best-effort：失败只影响截断资格，不影响回合。
+        try:
+            from g3ku.runtime.web_ceo_sessions import write_turn_boundary_snapshot
+
+            turn_id = str(getattr(self, "_active_turn_id", "") or "").strip()
+            if turn_id and isinstance(payload, dict) and payload:
+                write_turn_boundary_snapshot(session_key, turn_id, payload)
+        except Exception:
+            logger.debug("Skipped turn boundary snapshot for {}", session_key)
 
     def paused_execution_context_snapshot(self) -> dict[str, Any] | None:
         if self._paused_execution_context is not None:

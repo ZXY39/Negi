@@ -383,6 +383,23 @@ class ApiClient {
         return this._request("PATCH", `/api/ceo/sessions/${encodeURIComponent(sessionId)}`, { body: payload || {} });
     }
 
+    static async truncateCeoSession(sessionId, payload = {}) {
+        // 编辑重发第一步：截断转录并重建连续性状态。大会话的全量重写 +
+        // sidecar 重建可能超过默认 10s，与 bulk-delete 同档放宽到 30s。
+        return this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/truncate`, {
+            body: payload || {},
+            timeoutMs: 30000,
+        });
+    }
+
+    static async forkCeoSession(sessionId, payload = {}) {
+        // Fork 会话：复制前缀 + 附件文件 + 连续性 sidecar 到新会话。
+        return this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/fork`, {
+            body: payload || {},
+            timeoutMs: 30000,
+        });
+    }
+
     static async getMainRuntimeTaskDefaults() {
         return this.get("/api/main-runtime/settings");
     }

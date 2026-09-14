@@ -15,12 +15,16 @@ from fastapi.responses import FileResponse
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
+from g3ku.runtime.ceo_catalog_offload import (
+    build_ceo_session_catalog_async,
+    build_ceo_session_catalog_cached,
+    run_off_event_loop,
+)
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.reply_tokens import SILENT_REPLY_VISIBLE_TEXT, is_silent_reply_token
 from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.web_ceo_sessions import (
     WebCeoStateStore,
-    build_ceo_session_catalog,
     build_channel_ceo_session_item,
     build_local_ceo_session_item,
     build_session_summary,
@@ -159,7 +163,8 @@ def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, 
     if registry is None or transcript_store is None:
         return
     active_session_id = resolve_active_ceo_session_id(transcript_store, state_store)
-    catalog = build_ceo_session_catalog(
+    # 同步发布路径用带缓存的构建：TTL 命中免重建，未命中才就地构建一次。
+    catalog = build_ceo_session_catalog_cached(
         transcript_store,
         active_session_id=active_session_id,
         is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
@@ -619,11 +624,75 @@ def _rewrite_turn_snapshot_media(
     return snapshot
 
 
+def _session_fully_stable_for_history_edit(session: Any, turn_payload: dict[str, Any] | None) -> bool:
+    """编辑重发/Fork 按钮的防御型显示总开关。
+
+    任何进行中请求/回合的迹象（用户轮、heartbeat/cron 内部轮、排队 follow-up、
+    待审批中断、blocking tool）都要求整体隐藏按钮；端点侧另有 409 复验。
+    """
+    state = getattr(session, "state", None)
+    if bool(getattr(state, "is_running", False)):
+        return False
+    if str(getattr(state, "status", "") or "").strip().lower() == "running":
+        return False
+    if bool(getattr(state, "paused", False)):
+        return False
+    if list(getattr(state, "pending_interrupts", []) or []):
+        return False
+    if list(getattr(state, "queued_follow_up_messages", []) or []):
+        return False
+    blocking = getattr(session, "has_blocking_tool_execution", None)
+    if callable(blocking):
+        try:
+            if bool(blocking()):
+                return False
+        except Exception:
+            return False
+    payload = turn_payload if isinstance(turn_payload, dict) else {}
+    for lane in ("inflight_turn", "preserved_turn"):
+        lane_payload = payload.get(lane)
+        if isinstance(lane_payload, dict) and lane_payload:
+            return False
+    return True
+
+
+def _session_edit_fork_gates(
+    session: Any,
+    session_id: str,
+    messages: Any,
+    *,
+    turn_payload: dict[str, Any] | None,
+    is_channel_session: bool,
+    agent: Any,
+) -> dict[int, bool] | None:
+    """计算快照消息级 can_edit_fork 门槛（键 = 原始转录下标）。
+
+    返回 None 表示整个会话不满足防御型显示条件（渠道会话/非稳定态），
+    快照不下发任何按钮标志。
+    """
+    key = str(session_id or "").strip()
+    if is_channel_session or not key.startswith("web:"):
+        return None
+    if not _session_fully_stable_for_history_edit(session, turn_payload):
+        return None
+    from g3ku.runtime.web_ceo_history_edit import compute_edit_fork_gates, legacy_task_created_ats
+    from g3ku.runtime.web_ceo_sessions import list_turn_boundary_snapshot_turn_ids
+
+    raw_messages = list(messages or [])
+    return compute_edit_fork_gates(
+        raw_messages,
+        enabled=True,
+        task_created_ats=legacy_task_created_ats(agent, key, raw_messages),
+        available_boundary_turn_ids=list_turn_boundary_snapshot_turn_ids(key),
+    )
+
+
 def _build_ceo_snapshot(
     messages: list[dict[str, Any]] | None,
     *,
     inflight_turn: dict[str, Any] | None = None,
     session_id: str | None = None,
+    edit_fork_gates: dict[int, bool] | None = None,
 ) -> list[dict[str, Any]]:
     inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
@@ -631,7 +700,7 @@ def _build_ceo_snapshot(
     items: list[dict[str, Any]] = []
     previous_assistant_context: dict[str, Any] = {}
     usage_by_turn = read_session_turn_token_usage(session_id) if session_id else {}
-    for raw in list(messages or []):
+    for index, raw in enumerate(list(messages or [])):
         if not isinstance(raw, dict):
             continue
         metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
@@ -672,6 +741,13 @@ def _build_ceo_snapshot(
         turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
         if turn_id:
             item['turn_id'] = turn_id
+        if role == 'user' and edit_fork_gates and edit_fork_gates.get(index):
+            item['can_edit_fork'] = True
+        if role == 'assistant' and any(
+            str(task_id or '').startswith('task:')
+            for task_id in list(metadata.get('task_ids') or [])
+        ):
+            item['task_dispatched'] = True
         timestamp = raw.get('timestamp')
         if isinstance(timestamp, str) and timestamp.strip():
             item['timestamp'] = timestamp.strip()
@@ -932,7 +1008,9 @@ async def ceo_websocket(websocket: WebSocket):
         return
     state_store = WebCeoStateStore(workspace_path())
     requested_session_id = str(websocket.query_params.get('session_id') or '').strip()
-    initial_catalog = build_ceo_session_catalog(
+    # 目录构建要遍历全部会话转录（冷缓存时可达数十秒），必须卸载出事件
+    # 循环，否则一次 /ws/ceo 重连就会把任务大厅的列表/心跳请求全部挂起。
+    initial_catalog = await build_ceo_session_catalog_async(
         transcript_store,
         active_session_id=requested_session_id,
         is_running_resolver=lambda key: _session_is_running(runtime_manager, key),
@@ -964,16 +1042,22 @@ async def ceo_websocket(websocket: WebSocket):
         session_id = fallback_session_id
     session_path = transcript_store.get_path(session_id)
     is_channel_session = _is_channel_session_id(session_id)
-    if is_channel_session:
-        persisted_session = transcript_store.get_or_create(session_id) if session_path.exists() else None
-    else:
-        persisted_session = (
+
+    def _load_persisted_session():
+        # get_or_create 冷缓存时逐行解析整份转录（渠道会话可达数十 MB），
+        # 与目录构建一样必须在工作线程执行。
+        if is_channel_session:
+            return transcript_store.get_or_create(session_id) if session_path.exists() else None
+        persisted = (
             create_web_ceo_session(transcript_store, session_id=session_id)
             if not session_path.exists()
             else transcript_store.get_or_create(session_id)
         )
-        if ensure_ceo_session_metadata(persisted_session):
-            transcript_store.save(persisted_session)
+        if ensure_ceo_session_metadata(persisted):
+            transcript_store.save(persisted)
+        return persisted
+
+    persisted_session = await run_off_event_loop(_load_persisted_session)
     state_store.set_active_session_id(session_id)
     memory_scope = dict(((getattr(persisted_session, 'metadata', None) or {}).get('memory_scope') or {}))
     service = getattr(agent, 'main_task_service', None)
@@ -1007,11 +1091,26 @@ async def ceo_websocket(websocket: WebSocket):
         memory_chat_id=(str(memory_scope.get('chat_id') or 'shared') if not is_channel_session else None),
     )
     turn_payload = _build_live_turn_payload(session, session_id, persisted_session)
-    persisted_messages = _build_ceo_snapshot(
-        getattr(persisted_session, 'messages', []),
-        inflight_turn=turn_payload.get("inflight_turn") if isinstance(turn_payload, dict) else None,
-        session_id=session_id,
-    )
+    # 快照构建遍历整份转录消息做投影/重写，同样卸载出事件循环。
+    # 编辑/Fork 门槛在同一次卸载内计算（转录行走 + 边界快照目录列举 + 可选任务表兜底）。
+    def _compose_ceo_snapshot() -> list[dict[str, Any]]:
+        raw_messages = getattr(persisted_session, 'messages', [])
+        gates = _session_edit_fork_gates(
+            session,
+            session_id,
+            raw_messages,
+            turn_payload=turn_payload,
+            is_channel_session=is_channel_session,
+            agent=agent,
+        )
+        return _build_ceo_snapshot(
+            raw_messages,
+            inflight_turn=turn_payload.get("inflight_turn") if isinstance(turn_payload, dict) else None,
+            session_id=session_id,
+            edit_fork_gates=gates,
+        )
+
+    persisted_messages = await run_off_event_loop(_compose_ceo_snapshot)
     current_turn_task: asyncio.Task[Any] | None = None
     closed = asyncio.Event()
 
@@ -1306,7 +1405,7 @@ async def ceo_websocket(websocket: WebSocket):
         # payloads), and the list must never be queued behind it — otherwise the
         # sidebar stays stale until the whole transcript drains (or the socket
         # drops mid-transfer). Frontend envelope handling is order-independent.
-        initial_catalog = build_ceo_session_catalog(
+        initial_catalog = await build_ceo_session_catalog_async(
             transcript_store,
             active_session_id=resolve_active_ceo_session_id(transcript_store, state_store),
             is_running_resolver=lambda key: _session_is_running(runtime_manager, key),

@@ -2845,6 +2845,123 @@ textarea {
     pointer-events: auto;
 }
 
+/* 用户气泡下方的编辑重发/Fork 操作行:与 .msg-meta 相同的悬停显隐模式。
+   回合进行中(含心跳内部轮)由 feed 级 .ceo-turn-active 整体隐藏(防御型显示)。 */
+.msg-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    transform: translateY(2px);
+    pointer-events: none;
+    transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.message:hover .msg-actions,
+.message:focus-within .msg-actions {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.ceo-turn-active .msg-actions {
+    opacity: 0 !important;
+    transform: translateY(2px) !important;
+    pointer-events: none !important;
+}
+
+.msg-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--bg-app) 74%, var(--bg-panel) 26%);
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.msg-action-btn svg {
+    width: 13px;
+    height: 13px;
+}
+
+.msg-action-btn:hover,
+.msg-action-btn:focus-visible {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 42%, transparent);
+    background: color-mix(in srgb, var(--brand-primary) 8%, var(--bg-panel) 92%);
+}
+
+.msg-action-btn:focus-visible {
+    outline: 0;
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+}
+
+/* 编辑重发横幅:composer 上方的常驻警示条,视觉与 follow-up chip 同族。 */
+.ceo-edit-resend-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-inline-start: calc(var(--ceo-input-leading-width) + var(--ceo-input-row-gap));
+}
+
+.ceo-edit-resend-chip {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 16px;
+    border: 1px solid color-mix(in srgb, var(--status-warning-text, #d9a441) 42%, transparent);
+    border-radius: 22px;
+    background: color-mix(in srgb, var(--status-warning-bg, rgba(217, 164, 65, 0.12)) 55%, var(--bg-panel) 45%);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: 0.84rem;
+}
+
+.ceo-edit-resend-chip > svg {
+    flex: 0 0 auto;
+    width: 15px;
+    height: 15px;
+    color: var(--status-warning-text, #d9a441);
+}
+
+.ceo-edit-resend-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.ceo-edit-resend-cancel {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.8rem;
+}
+
+.ceo-edit-resend-cancel svg {
+    width: 13px;
+    height: 13px;
+}
+
+.ceo-edit-resend-cancel:hover,
+.ceo-edit-resend-cancel:focus-visible {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--border-color) 64%, transparent);
+}
+
 .assistant-loading-indicator {
     width: 28px;
     height: 28px;

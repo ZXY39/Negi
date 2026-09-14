@@ -729,7 +729,7 @@ def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any
 
 
 class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
-    _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "stage_compaction"})
+    _ALLOWED_FRONTDOOR_SHRINK_REASONS = frozenset({"", "token_compression", "stage_compaction", "user_edit_truncation"})
     _TOKEN_COMPRESSION_TRIGGER_RATIO = 0.80
     _TOKEN_COMPRESSION_ESTIMATE_SAFETY_RATIO = 0.95
     _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"

@@ -85,6 +85,9 @@ const S = {
     ceoPauseBusy: false,
     ceoUploads: [],
     ceoUploadBusy: false,
+    // 编辑重发模式:{sessionId, turnId, prevDraft} | null;Fork/编辑相关辅助状态。
+    ceoEditResend: null,
+    ceoWsOpenWaiters: [],
     ceoSessions: [],
     ceoLocalSessions: [],
     ceoChannelGroups: [],
@@ -361,6 +364,7 @@ const U = {
     ceoFileInput: document.getElementById("ceo-file-input"),
     ceoUploadList: document.getElementById("ceo-upload-list"),
     ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
+    ceoEditResendBanner: document.getElementById("ceo-edit-resend-banner"),
     ceoContextLoadNotice: document.getElementById("ceo-context-load-notice"),
     ceoComposerUsageBrain: document.getElementById("ceo-context-usage-brain"),
     ceoComposerUsageBrainBase: document.getElementById("ceo-context-usage-brain-base"),
@@ -1305,6 +1309,10 @@ function syncActiveCeoComposerDraft() {
 
 function restoreCeoComposerDraftForSession(sessionId) {
     const key = String(sessionId || "").trim();
+    // 切离编辑重发所在的会话时静默退出编辑模式(横幅随渲染消失)。
+    if (S.ceoEditResend && String(S.ceoEditResend.sessionId || "") !== key) {
+        exitCeoEditResendMode({ restoreDraft: false });
+    }
     const draft = key ? getCeoComposerDraft(key) : null;
     S.ceoUploadBusy = false;
     S.ceoUploads = normalizeUploadList(draft?.uploads);
@@ -2032,9 +2040,11 @@ function normalizeCeoSnapshotMessage(message = {}) {
         if (canonicalContext) next.canonical_context = canonicalContext;
         if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
         if (usage) next.usage = usage;
+        if (message?.task_dispatched === true) next.task_dispatched = true;
         if (!String(next.content || "").trim() && !canonicalContext && !canonicalContextDelta && status !== "paused") return null;
         return next;
     }
+    if (role === "user" && message?.can_edit_fork === true) next.can_edit_fork = true;
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
     if (role === "system" && !String(next.content || "").trim()) return null;
     return next;
@@ -3708,8 +3718,29 @@ function renderStructuredChatAttachments(items = [], { sessionId = activeSession
     `;
 }
 
-function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "" } = {}) {
-    addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp });
+function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", turnId = "", canEditFork = false } = {}) {
+    addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork });
+}
+
+function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, sessionId = "" } = {}) {
+    // 用户气泡下方的编辑重发/Fork 按钮行。渲染条件三重防御:
+    // 服务端 can_edit_fork 门槛(任务派发/run 首条/边界快照/稳定态) + web: 会话 + 非只读。
+    // 回合进行中由 feed 级 .ceo-turn-active class 整体隐藏(防御型显示)。
+    const key = String(turnId || "").trim();
+    if (!key || canEditFork !== true) return "";
+    if (!String(sessionId || "").trim().startsWith("web:")) return "";
+    if (typeof activeSessionIsReadonly === "function" && activeSessionIsReadonly()) return "";
+    const safeTurn = esc(key);
+    return `
+        <div class="msg-actions">
+            <button type="button" class="msg-action-btn" data-ceo-edit-resend="${safeTurn}" title="编辑重发：发送后该消息及其后所有内容将被清空" aria-label="编辑重发">
+                <i data-lucide="pencil"></i><span>编辑</span>
+            </button>
+            <button type="button" class="msg-action-btn" data-ceo-fork="${safeTurn}" title="Fork：把此消息之前的内容复制成新会话，此消息回填输入框" aria-label="Fork 会话">
+                <i data-lucide="git-fork"></i><span>Fork</span>
+            </button>
+        </div>
+    `;
 }
 
 function syncCeoInputHeight() {
@@ -3788,6 +3819,7 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
 }
 
 function syncCeoPrimaryButton() {
+    syncCeoFeedTurnActiveClass();
     syncCeoAttachButton();
     if (!U.ceoSend) return;
     if (activeSessionIsReadonly()) {
@@ -4169,6 +4201,306 @@ function removePendingCeoUpload(index) {
     renderPendingCeoUploads();
 }
 
+// ===== 用户消息编辑重发 / Fork 会话 =====
+// 按钮可见性由服务端 can_edit_fork 门槛驱动(任务派发严格判定 / user-run 首条 /
+// 边界快照可用 / 会话完全稳定);前端另有 .ceo-turn-active 防御性隐藏与点击守卫。
+
+function syncCeoFeedTurnActiveClass() {
+    // 防御型显示:任何回合进行中(含 heartbeat/cron 内部轮)整体隐藏编辑/Fork 按钮。
+    if (!U.ceoFeed || !U.ceoFeed.classList) return;
+    U.ceoFeed.classList.toggle("ceo-turn-active", !!S.ceoTurnActive);
+}
+
+function findCeoSnapshotMessageByTurnId(sessionId, turnId) {
+    const key = String(sessionId || "").trim();
+    const target = String(turnId || "").trim();
+    if (!key || !target) return null;
+    const entry = getCeoSessionSnapshotCache(key);
+    const messages = Array.isArray(entry?.messages) ? entry.messages : [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const item = messages[index];
+        if (!item || typeof item !== "object") continue;
+        if (String(item?.role || "").trim().toLowerCase() !== "user") continue;
+        if (String(item?.turn_id || "").trim() === target) return item;
+    }
+    return null;
+}
+
+function ceoHistoryEditBusyReason() {
+    if (S.ceoTurnActive) return "回合进行中（含心跳内部轮），请等待结束或先暂停。";
+    if (S.ceoSessionBusy || S.ceoSessionCatalogBusy) return "会话操作进行中，请稍后再试。";
+    if (S.ceoUploadBusy) return "附件仍在上传，请稍候再试。";
+    if (S.ceoPauseBusy) return "暂停请求进行中，请稍后再试。";
+    return "";
+}
+
+function editForkErrorText(error) {
+    const fallbackCode = typeof ApiClient !== "undefined" && ApiClient?.getErrorCode
+        ? ApiClient.getErrorCode(error?.data || error?.payload)
+        : "";
+    const code = String(error?.code || fallbackCode || "").trim();
+    const known = {
+        edit_fork_blocked_by_async_task: "该消息之前（或其回复轮中）已创建过异步任务，不能再编辑或 Fork。",
+        turn_not_run_first: "同批连续消息只支持在第一条上编辑/Fork。",
+        boundary_unavailable: "该消息的上下文边界快照已超出保留窗口（最近 3 轮），无法编辑/Fork。",
+        turn_not_editable: "该消息当前不支持编辑/Fork。",
+        turn_not_found: "消息不存在或已被清空，请刷新后重试。",
+        ceo_turn_in_progress: "回合进行中，请等待结束或先暂停后再操作。",
+        channel_session_readonly: "渠道会话只读，不支持编辑或 Fork。",
+        session_not_found: "会话不存在或已被删除。",
+        no_model_configured: "尚未配置模型，无法执行该操作。",
+    };
+    if (code && known[code]) return known[code];
+    return String(error?.message || "unknown error");
+}
+
+function renderCeoEditResendBanner() {
+    const banner = U.ceoEditResendBanner;
+    if (!banner) return;
+    const active = !!S.ceoEditResend;
+    banner.hidden = !active;
+    if (!active) {
+        banner.innerHTML = "";
+        return;
+    }
+    banner.innerHTML = `
+        <div class="ceo-edit-resend-chip">
+            <i data-lucide="pencil"></i>
+            <span class="ceo-edit-resend-text">正在编辑历史消息 · 发送后该消息及其后所有内容将被清空，并以新一轮重新执行</span>
+            <button type="button" class="ceo-edit-resend-cancel" data-ceo-edit-resend-cancel="1" aria-label="取消编辑">
+                <i data-lucide="x"></i><span>取消</span>
+            </button>
+        </div>
+    `;
+    icons();
+}
+
+function enterCeoEditResendMode(message = {}, turnId = "") {
+    const sessionId = activeSessionId();
+    const key = String(turnId || "").trim();
+    if (!sessionId || !key) return;
+    const prevDraft = captureCeoComposerDraftFromUi();
+    S.ceoEditResend = { sessionId, turnId: key, prevDraft };
+    if (U.ceoInput) U.ceoInput.value = String(message?.content || "");
+    S.ceoUploads = normalizeUploadList(message?.attachments);
+    renderPendingCeoUploads();
+    renderCeoEditResendBanner();
+    syncCeoInputHeight();
+    syncCeoPrimaryButton();
+    U.ceoInput?.focus();
+}
+
+function exitCeoEditResendMode({ restoreDraft = false } = {}) {
+    const state = S.ceoEditResend;
+    S.ceoEditResend = null;
+    if (restoreDraft && state) {
+        if (U.ceoInput) U.ceoInput.value = String(state.prevDraft?.text || "");
+        S.ceoUploads = normalizeUploadList(state.prevDraft?.uploads);
+        renderPendingCeoUploads();
+        syncCeoInputHeight();
+        syncCeoPrimaryButton();
+    }
+    renderCeoEditResendBanner();
+}
+
+function handleCeoEditResendClick(turnId) {
+    const key = String(turnId || "").trim();
+    if (!key) return;
+    const busyReason = ceoHistoryEditBusyReason();
+    if (busyReason) {
+        showToast({ title: "当前不可编辑", text: busyReason, kind: "warn" });
+        return;
+    }
+    if (activeSessionIsReadonly()) return;
+    const sessionId = activeSessionId();
+    const message = findCeoSnapshotMessageByTurnId(sessionId, key);
+    if (!message) {
+        showToast({ title: "无法编辑", text: "本地快照中未找到该消息，请刷新页面后重试。", kind: "warn" });
+        return;
+    }
+    if (message?.can_edit_fork !== true) {
+        // 陈旧快照兜底:服务端仍会复验,这里先行拦截给出可读提示。
+        showToast({
+            title: "无法编辑",
+            text: "该消息当前不可编辑重发（已创建异步任务、非批次首条，或已超出最近 3 轮的可编辑窗口）。",
+            kind: "warn",
+            durationMs: 4200,
+        });
+        return;
+    }
+    if (S.ceoEditResend) exitCeoEditResendMode({ restoreDraft: true });
+    enterCeoEditResendMode(message, key);
+}
+
+function whenCeoWsOpen(timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+        const socket = S.ceoWs;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            resolve();
+            return;
+        }
+        if (!socket || socket.readyState !== WebSocket.CONNECTING) {
+            reject(new Error("Connection is not ready"));
+            return;
+        }
+        if (!Array.isArray(S.ceoWsOpenWaiters)) S.ceoWsOpenWaiters = [];
+        let settled = false;
+        const entry = { timer: 0 };
+        entry.resolve = () => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(entry.timer);
+            resolve();
+        };
+        entry.reject = (reason) => {
+            if (settled) return;
+            settled = true;
+            window.clearTimeout(entry.timer);
+            reject(reason instanceof Error ? reason : new Error(String(reason || "ws_closed")));
+        };
+        entry.timer = window.setTimeout(
+            () => entry.reject(new Error("等待连接超时")),
+            Math.max(1000, Number(timeoutMs) || 10000),
+        );
+        S.ceoWsOpenWaiters.push(entry);
+    });
+}
+
+function settleCeoWsOpenWaiters(opened) {
+    if (!Array.isArray(S.ceoWsOpenWaiters) || !S.ceoWsOpenWaiters.length) return;
+    const waiters = S.ceoWsOpenWaiters.splice(0, S.ceoWsOpenWaiters.length);
+    for (const waiter of waiters) {
+        if (opened) waiter.resolve();
+        else waiter.reject(new Error("连接已关闭"));
+    }
+}
+
+async function submitCeoEditResend({ text = "", uploads = [] } = {}) {
+    const state = S.ceoEditResend;
+    if (!state) return false;
+    const sessionId = String(state.sessionId || "").trim();
+    if (!sessionId || sessionId !== activeSessionId()) {
+        showToast({ title: "无法编辑", text: "会话已切换，已退出编辑模式。", kind: "warn" });
+        exitCeoEditResendMode({ restoreDraft: false });
+        renderCeoEditResendBanner();
+        return false;
+    }
+    const normalizedText = String(text || "");
+    const normalizedUploads = normalizeUploadList(uploads);
+    if (!normalizedText.trim() && !normalizedUploads.length) return false;
+    const busyReason = ceoHistoryEditBusyReason();
+    if (busyReason) {
+        showToast({ title: "当前不可发送", text: busyReason, kind: "warn" });
+        return false;
+    }
+    S.ceoSessionBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    let truncated = false;
+    const restoreComposerPayload = () => {
+        if (U.ceoInput) U.ceoInput.value = normalizedText;
+        S.ceoUploads = normalizedUploads;
+        renderPendingCeoUploads();
+        syncCeoInputHeight();
+        syncCeoPrimaryButton();
+    };
+    try {
+        // 时序:关旧 WS → REST 截断 → 清本地轮状态 → 重连 → 等 open → 既有 WS 发送链。
+        closeCeoWs();
+        await ApiClient.truncateCeoSession(sessionId, { turn_id: String(state.turnId || "") });
+        truncated = true;
+        S.ceoQueuedFollowUps = { ...(S.ceoQueuedFollowUps || {}), [sessionId]: [] };
+        renderQueuedCeoFollowUps(sessionId);
+        clearCeoSessionSnapshotCache(sessionId);
+        exitCeoEditResendMode({ restoreDraft: false });
+        if (U.ceoInput) U.ceoInput.value = "";
+        S.ceoUploads = [];
+        clearCeoComposerDraft(sessionId);
+        syncCeoInputHeight();
+        renderPendingCeoUploads();
+        resetCeoSessionState({ scrollToLatest: true });
+        S.ceoSessionBusy = true;
+        initCeoWs();
+        await whenCeoWsOpen(10000);
+        const sent = sendImmediateCeoMessage({ text: normalizedText, uploads: normalizedUploads, scrollMode: "bottom" });
+        if (!sent) {
+            restoreComposerPayload();
+            showToast({
+                title: "已清空，请重新发送",
+                text: "历史已截断，但新消息发送失败；内容已回填输入框，请再次点击发送。",
+                kind: "warn",
+                durationMs: 6000,
+            });
+        }
+        return sent;
+    } catch (e) {
+        if (!truncated) {
+            showToast({ title: "编辑重发失败", text: editForkErrorText(e), kind: "error", durationMs: 5200 });
+            initCeoWs();
+            return false;
+        }
+        // 截断已生效但重连/发送失败:内容回填输入框,用户可手动重发。
+        restoreComposerPayload();
+        initCeoWs();
+        showToast({
+            title: "已清空，请重新发送",
+            text: "历史已截断，但新消息发送失败；内容已回填输入框，请再次点击发送。",
+            kind: "warn",
+            durationMs: 6000,
+        });
+        return false;
+    } finally {
+        S.ceoSessionBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
+}
+
+async function handleCeoForkClick(turnId) {
+    const key = String(turnId || "").trim();
+    if (!key) return;
+    const sessionId = activeSessionId();
+    if (!sessionId) return;
+    const busyReason = ceoHistoryEditBusyReason();
+    if (busyReason) {
+        showToast({ title: "当前不可 Fork", text: busyReason, kind: "warn" });
+        return;
+    }
+    if (typeof canCreateCeoSessions === "function" && !canCreateCeoSessions()) {
+        showToast({ title: "当前不可新建", text: "请先等待当前上传、暂停请求或会话切换操作完成后再 Fork。", kind: "warn" });
+        return;
+    }
+    S.ceoSessionCatalogBusy = true;
+    renderCeoSessions();
+    syncCeoPrimaryButton();
+    try {
+        armCeoSessionUnreadExemption(sessionId);
+        const payload = await ApiClient.forkCeoSession(sessionId, { turn_id: key });
+        const nextActiveId = applyCeoSessionsPayload(payload);
+        closeCeoWs();
+        resetCeoSessionState({ scrollToLatest: true });
+        const fork = payload?.fork && typeof payload.fork === "object" ? payload.fork : {};
+        const newId = String(fork.session_id || nextActiveId || "").trim();
+        if (newId) {
+            // 被点击消息回填输入框(不自动发送);applyCeoSessionsPayload 已切好草稿上下文。
+            setCeoComposerDraft(newId, {
+                text: String(fork.composer?.text || ""),
+                uploads: normalizeUploadList(fork.composer?.uploads),
+            });
+            restoreCeoComposerDraftForSession(newId);
+            S.ceoSessionBusy = true;
+            initCeoWs();
+        }
+        showToast({ title: "Fork 完成", text: "已复制到新会话，原消息已回填输入框（不会自动发送）。", kind: "success" });
+    } catch (e) {
+        showToast({ title: "Fork 失败", text: editForkErrorText(e), kind: "error", durationMs: 5200 });
+    } finally {
+        S.ceoSessionCatalogBusy = false;
+        renderCeoSessions();
+        syncCeoPrimaryButton();
+    }
+}
+
 function ceoFeedNearBottom(threshold = 64) {
     if (!U.ceoFeed) return true;
     return U.ceoFeed.scrollHeight - U.ceoFeed.scrollTop - U.ceoFeed.clientHeight <= threshold;
@@ -4282,7 +4614,7 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     return result;
 }
 
-function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null } = {}) {
+function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false } = {}) {
     mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
@@ -4294,11 +4626,14 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         // 包裹,保证元信息落在气泡下方而不是 flex 行内并排。
         const metaText = buildCeoMessageMetaText({ role, timestamp, usage });
         const metaMarkup = metaText ? `<div class="msg-meta">${esc(metaText)}</div>` : "";
-        if (role === "user" && (attachmentMarkup || metaMarkup)) {
+        const actionsMarkup = role === "user"
+            ? buildCeoUserMessageActionsMarkup({ turnId, canEditFork, sessionId })
+            : "";
+        if (role === "user" && (attachmentMarkup || metaMarkup || actionsMarkup)) {
             const textBubble = hasRenderableText(text)
                 ? `<div class="${contentClass}">${content}</div>`
                 : "";
-            el.innerHTML = `<div class="message-stack">${textBubble}${attachmentMarkup}${metaMarkup}</div>`;
+            el.innerHTML = `<div class="message-stack">${textBubble}${attachmentMarkup}${metaMarkup}${actionsMarkup}</div>`;
         } else if (metaMarkup) {
             el.innerHTML = `<div class="message-stack"><div class="${contentClass}">${content}${attachmentMarkup}</div>${metaMarkup}</div>`;
         } else {
@@ -5238,6 +5573,10 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             // 服务端权威快照必须触发重建,否则悬停元信息永远停留在缺失状态。
             item.usage && typeof item.usage === "object" ? JSON.stringify(item.usage) : "",
             String(item.timestamp || ""),
+            // 编辑/Fork 按钮标志参与签名:flag 迟到(缓存渲染无 flag、权威快照
+            // 有 flag,或任务派发后 flag 收回)必须触发重建。
+            item.can_edit_fork === true ? 1 : 0,
+            item.task_dispatched === true ? 1 : 0,
         ];
     };
     const projectTurn = (snapshot) => {
@@ -5372,6 +5711,8 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
                     scrollMode: "preserve",
                     sessionId: targetSessionId,
                     timestamp: String(item?.timestamp || ""),
+                    turnId: String(item?.turn_id || ""),
+                    canEditFork: item?.can_edit_fork === true,
                 });
                 tagLastFeedChildKey(item, "user");
                 return;
@@ -8554,6 +8895,7 @@ function closeCeoWs() {
     S.ceoWsToken += 1;
     const socket = S.ceoWs;
     S.ceoWs = null;
+    settleCeoWsOpenWaiters(false);
     if (!socket) return;
     socket.onclose = null;
     socket.close();
@@ -9340,6 +9682,11 @@ function initCeoWs() {
     const socket = new WebSocket(ApiClient.getCeoWsUrl(requestedSessionId));
     socket.sessionId = requestedSessionId;
     S.ceoWs = socket;
+    socket.onopen = () => {
+        if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
+        // 编辑重发的"截断→重连→发送"时序依赖 open 信号(whenCeoWsOpen)。
+        settleCeoWsOpenWaiters(true);
+    };
     S.ceoWs.onmessage = (ev) => {
         if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
         const payload = JSON.parse(ev.data);
@@ -9487,6 +9834,15 @@ function sendCeoMessage() {
     if (S.ceoUploadBusy) {
         addMsg("附件仍在上传，请稍候再发送。", "system");
         return;
+    }
+    if (S.ceoEditResend) {
+        // 编辑重发模式:走截断→重连→发送的专用时序,绝不进 follow-up 队列。
+        const editState = S.ceoEditResend;
+        if (String(editState.sessionId || "") === activeSessionId()) {
+            void submitCeoEditResend({ text, uploads });
+            return;
+        }
+        exitCeoEditResendMode({ restoreDraft: false });
     }
     try {
         if (S.ceoTurnActive) {
@@ -11567,6 +11923,27 @@ function bind() {
         const remove = e.target.closest("[data-follow-up-remove]");
         if (!remove) return;
         removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));
+    });
+    U.ceoFeed?.addEventListener("click", (e) => {
+        const editBtn = e.target.closest("[data-ceo-edit-resend]");
+        if (editBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            handleCeoEditResendClick(String(editBtn.dataset.ceoEditResend || ""));
+            return;
+        }
+        const forkBtn = e.target.closest("[data-ceo-fork]");
+        if (forkBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            void handleCeoForkClick(String(forkBtn.dataset.ceoFork || ""));
+        }
+    });
+    U.ceoEditResendBanner?.addEventListener("click", (e) => {
+        const cancel = e.target.closest("[data-ceo-edit-resend-cancel]");
+        if (!cancel) return;
+        exitCeoEditResendMode({ restoreDraft: true });
+        syncActiveCeoComposerDraft();
     });
     U.ceoInput?.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from inspect import isawaitable
 from types import SimpleNamespace
@@ -7,6 +8,10 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Query
 from loguru import logger
 
+from g3ku.runtime.ceo_catalog_offload import (
+    build_ceo_session_catalog_async,
+    store_ceo_catalog_cache,
+)
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_TASK_DEFAULTS_SCOPE_KEY,
@@ -460,7 +465,13 @@ async def resume_ceo_session_interrupt(session_id: str, payload: dict | None = B
 async def list_ceo_sessions():
     _agent, session_manager, runtime_manager, state_store = _sessions()
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
-    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    # 页面加载必打本接口：目录构建卸载出事件循环（专用线程 + 短 TTL 缓存），
+    # 避免冷缓存转录解析把任务大厅请求一起挂起。
+    catalog = await build_ceo_session_catalog_async(
+        session_manager,
+        active_session_id=active_session_id,
+        is_running_resolver=lambda session_id: _session_is_running(runtime_manager, session_id),
+    )
     return {
         "ok": True,
         "items": catalog.get("items") or [],
@@ -476,6 +487,8 @@ async def create_ceo_session(payload: dict | None = Body(default=None)):
     session = create_web_ceo_session(session_manager, title=str((payload or {}).get("title") or "").strip() or None)
     state_store.set_active_session_id(session.key)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=session.key)
+    # 写侧新目录写入缓存并提升代际：在途异步构建的过期结果不会覆盖它。
+    store_ceo_catalog_cache(session.key, catalog)
     item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == session.key), None)
     _publish_ceo_sessions_snapshot(
         agent,
@@ -495,6 +508,175 @@ async def create_ceo_session(payload: dict | None = Body(default=None)):
     }
 
 
+def _assert_edit_fork_runtime_idle(runtime_session) -> None:
+    """编辑重发/Fork 的运行态复验：任何进行中回合迹象一律 409。
+
+    与快照侧防御型显示总开关（websocket_ceo._session_fully_stable_for_history_edit）
+    同一语义；truncate 在拿锁前与锁内各调用一次（心跳可能先抢到锁）。
+    """
+    if runtime_session is None:
+        return
+    state = getattr(runtime_session, "state", None)
+    if bool(getattr(state, "is_running", False)):
+        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+    if str(getattr(state, "status", "") or "").strip().lower() == "running":
+        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+    if bool(getattr(state, "paused", False)):
+        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+    if list(getattr(state, "queued_follow_up_messages", []) or []):
+        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+    if list(getattr(state, "pending_interrupts", []) or []):
+        raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+    blocking = getattr(runtime_session, "has_blocking_tool_execution", None)
+    if callable(blocking):
+        try:
+            in_progress = bool(blocking())
+        except Exception:
+            in_progress = True
+        if in_progress:
+            raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
+
+
+@router.post("/ceo/sessions/{session_id}/truncate")
+async def truncate_ceo_session_history(session_id: str, payload: dict = Body(...)):
+    """编辑重发第一步：把会话截断到被点击用户消息（run 首条）之前并重建连续性状态。
+
+    只截断、不发送：前端在成功后关闭旧 WS 并重连，编辑后的消息经既有
+    ``client.user_message`` 通道发送（保持单一发送管道）。任务门槛、run 资格
+    与边界快照可用性由 ``web_ceo_history_edit`` 在锁内复验。
+    """
+    agent, session_manager, runtime_manager, state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    turn_id = str((payload or {}).get("turn_id") or "").strip()
+    if not turn_id:
+        raise HTTPException(status_code=400, detail="turn_id_required")
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _runtime_session(runtime_manager, session.key)
+    if runtime_session is None:
+        # 有可恢复 sidecar 时先实例化 live 对象：拿到 turn 锁再截断，
+        # 闭合"心跳在截断期间 get_or_create 并从旧 sidecar 恢复"的竞态窗口。
+        runtime_session = _recreate_runtime_session(runtime_manager, session)
+    _assert_edit_fork_runtime_idle(runtime_session)
+
+    from g3ku.runtime.web_ceo_history_edit import HistoryEditError, truncate_web_ceo_session_history
+
+    def _run_truncation() -> dict:
+        try:
+            return truncate_web_ceo_session_history(
+                session_manager=session_manager,
+                runtime_manager=runtime_manager,
+                agent=agent,
+                session_id=session.key,
+                turn_id=turn_id,
+            )
+        except HistoryEditError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+
+    turn_lock = getattr(runtime_session, "_turn_lock", None) if runtime_session is not None else None
+    if turn_lock is not None:
+        try:
+            await asyncio.wait_for(turn_lock.acquire(), timeout=5.0)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=409, detail="ceo_turn_in_progress") from exc
+        try:
+            _assert_edit_fork_runtime_idle(runtime_session)
+            result = await asyncio.to_thread(_run_truncation)
+        finally:
+            turn_lock.release()
+    else:
+        result = await asyncio.to_thread(_run_truncation)
+
+    active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    store_ceo_catalog_cache(active_session_id, catalog)
+    _publish_ceo_sessions_snapshot(
+        agent,
+        session_manager,
+        runtime_manager,
+        state_store,
+        catalog=catalog,
+        active_session_id=active_session_id,
+    )
+    return {
+        "ok": True,
+        "session_id": session.key,
+        "boundary_turn_id": result.get("boundary_turn_id"),
+        "removed_message_count": result.get("removed_message_count"),
+        "continuity_source": result.get("continuity_source"),
+        "items": catalog.get("items") or [],
+        "channel_groups": catalog.get("channel_groups") or [],
+        "active_session_id": active_session_id,
+        "active_session_family": catalog.get("active_session_family") or "local",
+    }
+
+
+@router.post("/ceo/sessions/{session_id}/fork")
+async def fork_ceo_session(session_id: str, payload: dict | None = Body(default=None)):
+    """Fork 会话：把被点击用户消息之前的前缀（含截断态连续性）复制成新会话。
+
+    源会话零变更（只读前缀 + 不可变边界快照），源轮运行中也可执行；
+    被点击消息的原文与复制后的附件作为 ``fork.composer`` 返回，由前端
+    预填到新会话输入框（不自动发送），并把激活会话切到新会话。
+    """
+    agent, session_manager, runtime_manager, state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    turn_id = str((payload or {}).get("turn_id") or "").strip()
+    if not turn_id:
+        raise HTTPException(status_code=400, detail="turn_id_required")
+    title = str((payload or {}).get("title") or "").strip() or None
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    session = _assert_known_session(session_manager, session_id)
+
+    from g3ku.runtime.web_ceo_history_edit import HistoryEditError, fork_web_ceo_session
+
+    def _run_fork() -> dict:
+        try:
+            return fork_web_ceo_session(
+                session_manager=session_manager,
+                agent=agent,
+                session_id=session.key,
+                turn_id=turn_id,
+                title=title,
+            )
+        except HistoryEditError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+
+    result = await asyncio.to_thread(_run_fork)
+    new_session_id = str(result.get("session_id") or "").strip()
+    state_store.set_active_session_id(new_session_id)
+    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=new_session_id)
+    store_ceo_catalog_cache(new_session_id, catalog)
+    item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == new_session_id), None)
+    _publish_ceo_sessions_snapshot(
+        agent,
+        session_manager,
+        runtime_manager,
+        state_store,
+        catalog=catalog,
+        active_session_id=new_session_id,
+    )
+    return {
+        "ok": True,
+        "item": item,
+        "items": catalog.get("items") or [],
+        "channel_groups": catalog.get("channel_groups") or [],
+        "active_session_id": new_session_id,
+        "active_session_family": catalog.get("active_session_family") or "local",
+        "fork": {
+            "session_id": new_session_id,
+            "source_session_id": result.get("source_session_id"),
+            "copied_message_count": result.get("copied_message_count"),
+            "continuity_source": result.get("continuity_source"),
+            "composer": result.get("composer") or {"text": "", "uploads": []},
+        },
+    }
+
+
 @router.patch("/ceo/sessions/{session_id}")
 async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     agent, session_manager, runtime_manager, state_store = _sessions()
@@ -510,6 +692,7 @@ async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     session_manager.save(session)
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    store_ceo_catalog_cache(active_session_id, catalog)
     item = next((entry for entry in list(catalog.get("items") or []) if entry["session_id"] == session.key), None)
     _publish_ceo_sessions_snapshot(
         agent,
@@ -603,6 +786,7 @@ async def activate_ceo_session(session_id: str):
         catalog = _build_catalog(session_manager, runtime_manager, active_session_id=target_id)
         item = find_ceo_session_catalog_item(catalog, target_id)
     state_store.set_active_session_id(target_id)
+    store_ceo_catalog_cache(target_id, catalog)
     _publish_ceo_sessions_snapshot(
         agent,
         session_manager,
@@ -685,6 +869,7 @@ async def delete_ceo_session(
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    store_ceo_catalog_cache(active_session_id, catalog)
     _publish_ceo_sessions_snapshot(
         agent,
         session_manager,
@@ -761,6 +946,7 @@ async def bulk_delete_ceo_sessions(
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)
     catalog = _build_catalog(session_manager, runtime_manager, active_session_id=active_session_id)
+    store_ceo_catalog_cache(active_session_id, catalog)
     _publish_ceo_sessions_snapshot(
         agent,
         session_manager,

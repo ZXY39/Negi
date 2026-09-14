@@ -236,6 +236,7 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 - paused execution context
 - inflight turn snapshot
 - frontdoor completed continuity sidecar（`frontdoor_request_body_messages` 基线、actual-request trace、阶段/规范化/压缩状态）
+- 每轮边界快照 `.g3ku/web-ceo-turn-boundaries/<session>/<turn_id>.json.gz`（与 continuity sidecar 同一份载荷按 `_active_turn_id` upsert，轮末 finalize 写入即该轮终态；gzip、每会话保留最近 3 轮）。它是用户消息编辑重发/Fork 的唯一截断数据源：截断到某轮之前 = 读取该轮 prev_turn 的边界快照整体替换 continuity 状态；快照缺失的轮次不可截断（不做启发式重建）。契约详情见 `web-and-admin.md`「Message Edit-Resend And Session Fork」
 - latest message / pending interrupts
 
 主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。frontdoor continuity 的写盘与恢复覆盖所有 frontdoor 会话命名空间（`web:`、`china:`、`cron:`、`ext:`），渠道会话（含存量 `china:*` 归档）的基线同样跨进程重启存活；恢复顺序详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。
@@ -460,7 +461,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 - 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
 - UI 面向的 turn payload 暴露当前轮的 `canonical_context` 投影切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 
-第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## 长期记忆` 快照（当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线是连续性权威来源：必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
+第二条连续性合同：`frontdoor_request_body_messages` 是下一轮 CEO/frontdoor 的 session-owned provider 请求体基线，刻意不含 `frontdoor_runtime_tool_contract` 消息（动态工具暴露每轮作为新的尾部合同重建），也不含 `## 长期记忆` 快照（当轮 overlay，只在当轮请求可见，落史会逐轮累积污染上下文），且只允许在 `token_compression` 与同轮 `stage_compaction` 两个信息损失边界收缩，或经操作员发起的 `user_edit_truncation` 在轮间整体替换（见本文「Frontdoor Context Compression (Current Contract)」）。fresh 可见轮次中该基线是连续性权威来源：必须从请求体基线继续，而不是从阶段重放重建新的主前缀。
 
 ## Runtime Contract Lane
 
@@ -478,7 +479,7 @@ Canonical 阶段状态按以下表示规则收敛（这是 canonical 链唯一�
 - prompt token trace 只有两个字段：`pre_request_prompt_tokens` 是内联 `token_compression` 之前的发送前估算（必须包含 stage workset）；`effective_prompt_tokens` 是 prompt 组装完成后最终真实发送请求的估算。
 - 节点侧 token 压缩只是针对当次请求的 live 重写：可以缩短 provider-bound `request_messages`，但不得改写持久阶段历史、frame `messages`，或从 `model_messages` 派生的稳定 prompt-cache family 输入。
 
-若下一轮基线以两个收缩边界之外的任何理由变短，按意外上下文损失排查；守卫自愈行为见本文「Frontdoor Context Compression (Current Contract)」。
+若下一轮基线以两个收缩边界与 `user_edit_truncation` 之外的任何理由变短，按意外上下文损失排查；守卫自愈行为见本文「Frontdoor Context Compression (Current Contract)」。`user_edit_truncation` 的替换发生在轮间（守卫比较的是"会话基线 vs 本轮新请求"，替换后新请求只会更长），不会触发 quarantine。
 
 token preflight 估算、触发阈值、`effective_input_tokens` 真相车道、压缩优先顺序与诊断字段详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」；图片上传与 `content_open` 的多模态展开、`5 MiB` 守卫与单次发送 overlay 规则详见 `web-and-admin.md`「Image Upload Gating」。
 
@@ -510,7 +511,7 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - `stage_compaction`
 - `token_compression`
 
-任何其他理由让下一轮请求基线变短，都应按回归排查。长上下文只由两项机制约束：近场 stage workset compaction（按阶段归属原位压缩过期完成阶段的工具调用，与执行阶段提示词逻辑共享），以及在最终请求接近所选模型窗口时改写旧 body history 的内联 `token_compression`。归档压缩阶段（`stage_kind="compression"` + `archive_ref`）是历史遗留表示数据：持久化状态中已存在的归档阶段继续规范化与渲染，运行时不产生新的归档阶段。
+此外存在一个性质不同的合法替换边界：`user_edit_truncation`（操作员发起的编辑重发/Fork 截断）。它不是轮内自动收缩，而是轮间对 continuity 状态的显式整体替换——以每轮边界快照为数据源回退到某个干净轮边界（或截断到会话开头时替换为空基线），同时重写转录并删除被截断轮的 actual-request artifact。除此之外，任何其他理由让下一轮请求基线变短，都应按回归排查。长上下文只由两项机制约束：近场 stage workset compaction（按阶段归属原位压缩过期完成阶段的工具调用，与执行阶段提示词逻辑共享），以及在最终请求接近所选模型窗口时改写旧 body history 的内联 `token_compression`。归档压缩阶段（`stage_kind="compression"` + `archive_ref`）是历史遗留表示数据：持久化状态中已存在的归档阶段继续规范化与渲染，运行时不产生新的归档阶段。
 
 ### `token_compression`
 
