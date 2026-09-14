@@ -62,6 +62,10 @@ class SQLiteTaskStore:
             self._event_history_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._read_lock = threading.RLock()
+        # 轻量读专用连接：高频小查询（worker-status / 任务列表）走独立连接，
+        # 避免与大负载读取（任务详情/树快照的 MB 级 payload）串行在同一条
+        # 读连接上互相阻塞（WAL 天然支持多读并发）。
+        self._light_read_lock = threading.RLock()
         self._closed = False
         self._debug_recorder = debug_recorder
         self._writer_queue: queue.Queue[tuple[Callable[[sqlite3.Connection], Any] | None, threading.Event | None, dict[str, Any] | None]] = queue.Queue()
@@ -87,6 +91,7 @@ class SQLiteTaskStore:
             self._conn.execute('PRAGMA journal_mode=WAL')
         self._setup()
         self._read_conn = self._open_read_conn()
+        self._light_read_conn = self._open_read_conn()
         self._writer_thread = threading.Thread(
             target=self._writer_loop,
             name=f'sqlite-task-store-writer:{self.path.name}',
@@ -106,6 +111,8 @@ class SQLiteTaskStore:
             writer_thread.join(timeout=5.0)
         with self._read_lock:
             self._read_conn.close()
+        with self._light_read_lock:
+            self._light_read_conn.close()
         with self._lock:
             self._conn.close()
 
@@ -120,6 +127,11 @@ class SQLiteTaskStore:
         with self._read_lock:
             try:
                 self._read_conn.rollback()
+            except sqlite3.Error:
+                pass
+        with self._light_read_lock:
+            try:
+                self._light_read_conn.rollback()
             except sqlite3.Error:
                 pass
 
@@ -654,7 +666,7 @@ class SQLiteTaskStore:
             sql += ' WHERE session_id = ?'
             params = (session_id,)
         sql += ' ORDER BY updated_at DESC'
-        rows = self._fetchall(sql, params)
+        rows = self._fetchall_light(sql, params)
         summaries: list[dict[str, Any]] = []
         for row in rows:
             raw_unread = row['is_unread']
@@ -836,7 +848,7 @@ class SQLiteTaskStore:
         self._run_write(operation)
 
     def get_task_disk_usages(self, task_ids: list[str] | None = None) -> dict[str, int]:
-        rows = self._fetchall('SELECT task_id, total_bytes FROM task_disk_usage')
+        rows = self._fetchall_light('SELECT task_id, total_bytes FROM task_disk_usage')
         usage = {str(row['task_id']): int(row['total_bytes'] or 0) for row in rows}
         if task_ids is None:
             return usage
@@ -2396,12 +2408,12 @@ class SQLiteTaskStore:
 
     def list_worker_status(self, *, role: str | None = None) -> list[dict[str, object]]:
         if role:
-            rows = self._fetchall(
+            rows = self._fetchall_light(
                 'SELECT worker_id, role, status, updated_at, payload_json FROM worker_status WHERE role = ? ORDER BY updated_at DESC',
                 (str(role or ''),),
             )
         else:
-            rows = self._fetchall(
+            rows = self._fetchall_light(
                 'SELECT worker_id, role, status, updated_at, payload_json FROM worker_status ORDER BY updated_at DESC'
             )
         items: list[dict[str, object]] = []
@@ -2861,43 +2873,71 @@ class SQLiteTaskStore:
         sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT({primary_key}) DO UPDATE SET {updates}"
         conn.execute(sql, values)
 
-    def _fetchone(self, sql: str, params: tuple[object, ...]) -> sqlite3.Row | None:
-        started_mono = time.perf_counter()
-        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
-        with self._read_lock:
-            try:
-                row = self._read_conn.execute(sql, params).fetchone()
-            except sqlite3.Error as exc:
-                self._log_sqlite_query_error(scope='read', sql=sql, exc=exc)
-                raise
-        elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
-        self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
-        recorder = self._debug_recorder
-        if recorder is not None and hasattr(recorder, 'record'):
-            try:
-                recorder.record(section='sqlite.query.fetchone', elapsed_ms=elapsed_ms, started_at=started_at)
-            except Exception:
-                pass
+    def _fetchone(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
+        row, _elapsed = self._fetch_one_on(self._read_conn, self._read_lock, sql, params, 'sqlite.query.fetchone')
+        return row
+
+    def _fetchone_light(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
+        row, _elapsed = self._fetch_one_on(self._light_read_conn, self._light_read_lock, sql, params, 'sqlite.query.fetchone.light')
         return row
 
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
+        rows, _elapsed = self._fetch_many_on(self._read_conn, self._read_lock, sql, params, 'sqlite.query.fetchall')
+        return rows
+
+    def _fetchall_light(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
+        rows, _elapsed = self._fetch_many_on(self._light_read_conn, self._light_read_lock, sql, params, 'sqlite.query.fetchall.light')
+        return rows
+
+    def _fetch_one_on(
+        self,
+        conn: sqlite3.Connection,
+        lock: threading.RLock,
+        sql: str,
+        params: tuple[object, ...],
+        section: str,
+    ) -> tuple[sqlite3.Row | None, float]:
         started_mono = time.perf_counter()
         started_at = datetime.now().astimezone().isoformat(timespec='seconds')
-        with self._read_lock:
+        with lock:
             try:
-                rows = list(self._read_conn.execute(sql, params).fetchall())
+                row = conn.execute(sql, params).fetchone()
             except sqlite3.Error as exc:
                 self._log_sqlite_query_error(scope='read', sql=sql, exc=exc)
                 raise
         elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
         self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
+        self._record_query_latency(section, elapsed_ms, started_at)
+        return row, elapsed_ms
+
+    def _fetch_many_on(
+        self,
+        conn: sqlite3.Connection,
+        lock: threading.RLock,
+        sql: str,
+        params: tuple[object, ...],
+        section: str,
+    ) -> tuple[list[sqlite3.Row], float]:
+        started_mono = time.perf_counter()
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        with lock:
+            try:
+                rows = list(conn.execute(sql, params).fetchall())
+            except sqlite3.Error as exc:
+                self._log_sqlite_query_error(scope='read', sql=sql, exc=exc)
+                raise
+        elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
+        self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
+        self._record_query_latency(section, elapsed_ms, started_at)
+        return rows, elapsed_ms
+
+    def _record_query_latency(self, section: str, elapsed_ms: float, started_at: str) -> None:
         recorder = self._debug_recorder
         if recorder is not None and hasattr(recorder, 'record'):
             try:
-                recorder.record(section='sqlite.query.fetchall', elapsed_ms=elapsed_ms, started_at=started_at)
+                recorder.record(section=section, elapsed_ms=elapsed_ms, started_at=started_at)
             except Exception:
                 pass
-        return rows
 
     @staticmethod
     def _sqlite_operation_name(sql: str) -> str:
