@@ -6,7 +6,8 @@ import os
 import asyncio
 import subprocess
 import sys
-from typing import Optional
+import time
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from loguru import logger
@@ -79,6 +80,10 @@ def _get_runtime_services_lock() -> asyncio.Lock:
     return _global_runtime_services_lock
 
 
+_PORT_OWNERSHIP_CACHE: dict[tuple[int, int], tuple[bool | None, float]] = {}
+_PORT_OWNERSHIP_RETRY_AFTER_S = 10.0
+
+
 def _listen_port_owners(port: int) -> set[int] | None:
     owners: set[int] = set()
     try:
@@ -146,10 +151,21 @@ def _listen_port_owners(port: int) -> set[int] | None:
 
 
 def _process_owns_listen_port(port: int, *, pid: int | None = None) -> bool | None:
+    # 端口归属探测要起 netstat/ss 子进程，在连接数多的机器上单次可达秒级。
+    # 该检查只用于判定"本进程是否应启动 web cron"，而本进程持有的监听套接字
+    # 在进程生命周期内不会易主，因此确认归属后永久缓存；未归属/探测失败则
+    # 按短 TTL 重试。杜绝每个内部事件回调都在事件循环上同步起子进程。
+    resolved_pid = int(pid or os.getpid())
+    key = (int(port), resolved_pid)
+    cached = _PORT_OWNERSHIP_CACHE.get(key)
+    if cached is not None:
+        owned, cached_at = cached
+        if owned is True or (time.monotonic() - cached_at) < _PORT_OWNERSHIP_RETRY_AFTER_S:
+            return owned
     owners = _listen_port_owners(port)
-    if owners is None:
-        return None
-    return int(pid or os.getpid()) in owners
+    owned = None if owners is None else (resolved_pid in owners)
+    _PORT_OWNERSHIP_CACHE[key] = (owned, time.monotonic())
+    return owned
 
 
 def debug_trace_enabled() -> bool:
@@ -189,16 +205,20 @@ def _cron_runtime_ready(agent: AgentLoop | None = None) -> bool:
     cron_service = getattr(runtime_agent, "cron_service", None) if runtime_agent is not None else None
     if cron_service is None:
         return True
+    status = getattr(cron_service, "status", None)
+    payload: dict[str, Any] = {}
+    if callable(status):
+        try:
+            payload = status() or {}
+        except Exception:
+            payload = {}
+    if bool(payload.get("enabled")):
+        # cron 已由本进程启动并在运行：归属探测（子进程级开销）不再必要。
+        # 先查状态再探测是本函数不被高频回调拖垮事件循环的关键顺序。
+        return True
     if not _should_start_web_cron(runtime_agent):
         return True
-    status = getattr(cron_service, "status", None)
-    if not callable(status):
-        return False
-    try:
-        payload = status() or {}
-    except Exception:
-        return False
-    return bool(payload.get("enabled"))
+    return False
 
 
 def _build_web_cron_service(agent_holder: dict[str, AgentLoop]) -> CronService:
@@ -794,7 +814,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
         if heartbeat is not None:
             _global_web_heartbeat = heartbeat
         cron_service = getattr(runtime_agent, "cron_service", None)
-        if cron_service is not None and _should_start_web_cron(runtime_agent) and not _cron_runtime_ready(runtime_agent):
+        if cron_service is not None and not _cron_runtime_ready(runtime_agent) and _should_start_web_cron(runtime_agent):
             await cron_service.start()
         _ensure_outbound_drain_running()
         await _replay_pending_external_outbox()
