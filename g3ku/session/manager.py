@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -162,6 +163,9 @@ class SessionManager:
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self._cache: dict[str, Session] = {}
         self._file_states: dict[str, dict[str, Any]] = {}
+        # 目录构建等工作线程也会走 get_or_create：加载路径加锁，避免同一
+        # 会话被并发加载成两个分叉对象（一个丢更新）。
+        self._load_lock = threading.RLock()
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -185,12 +189,15 @@ class SessionManager:
         if key in self._cache:
             return self._cache[key]
 
-        session = self._load(key)
-        if session is None:
-            session = Session(key=key)
-
-        self._cache[key] = session
-        return session
+        with self._load_lock:
+            # double-check：另一线程可能刚加载完同一会话。
+            if key in self._cache:
+                return self._cache[key]
+            session = self._load(key)
+            if session is None:
+                session = Session(key=key)
+            self._cache[key] = session
+            return session
 
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
