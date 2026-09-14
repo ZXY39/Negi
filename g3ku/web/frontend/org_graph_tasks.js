@@ -1210,7 +1210,9 @@ async function performTaskBatchAction(action, eligible) {
 }
 
 function taskDetailViewVisible() {
-    return !!U.viewTaskDetails?.classList.contains("active");
+    // U 或详情视图元素缺失（无真实 DOM 的测试环境）按可见处理。
+    if (typeof U === "undefined" || !U || !U.viewTaskDetails) return true;
+    return !!U.viewTaskDetails.classList.contains("active");
 }
 
 // 主动关闭详情 WS 时必须先摘掉 onclose，否则关闭动作本身会触发重连。
@@ -1266,7 +1268,7 @@ function openTaskDetailWs(taskId, { isReconnect = false } = {}) {
 async function reconcileTaskDetailAfterWsReconnect(taskId) {
     const preservedRoundSelections = { ...(S.treeSelectedRoundByNodeId || {}) };
     await loadTaskDetail(taskId, { preserveView: true, reopenSocket: false });
-    if (String(S.currentTaskId || "").trim() !== String(taskId || "").trim()) return;
+    if (String(S.currentTaskId || "").trim() !== String(taskId || "").trim() || !taskDetailViewVisible()) return;
     S.treeSelectedRoundByNodeId = normalizeTreeRoundSelections(preservedRoundSelections);
     if (String(S.treeRootNodeId || "").trim()) renderTree();
 }
@@ -1616,6 +1618,9 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         cancelTaskTreeLoadToast(taskId);
         throw error;
     }
+    // 已离开详情视图（加载途中点了返回）：不再应用详情、不重开详情 WS、
+    // 也不再启动树快照分块加载——否则尾巴会在大厅视图里继续重建整树。
+    if (String(S.currentTaskId || "").trim() !== String(taskId || "").trim() || !taskDetailViewVisible()) return null;
     applyTaskPayload(payload);
     if (reopenSocket) {
         openTaskDetailWs(taskId);

@@ -166,6 +166,9 @@ const S = {
     // loadTaskTreeSnapshot / renderTree）。
     treeBulkLoadingTaskId: "",
     treeBulkLoadToken: 0,
+    // 任务详情视图代次：离开详情视图时 +1，作废在途树请求的落地（见
+    // org_graph_task_view.js cancelTaskTreeLoading / ensureTaskTreeSubtree）。
+    treeDetailGeneration: 0,
     treeLoadToastTaskId: "",
     treeLoadToastTimer: null,
     treeLoadToastTimerTaskId: "",
@@ -2579,7 +2582,10 @@ function syncCeoApprovalFromSnapshotEntry(
 }
 
 function isTaskDetailsViewActive() {
-    return !!U.viewTaskDetails?.classList.contains("active");
+    // 详情视图元素缺失（无真实 DOM 的测试环境）按可见处理：任务树管线的
+    // "离开视图"守卫不能把元素缺失误判为未查看，否则无 DOM 环境语义全变。
+    if (!U.viewTaskDetails) return true;
+    return !!U.viewTaskDetails.classList.contains("active");
 }
 
 function taskDetailStateKey(taskId = S.currentTaskId, nodeId = S.selectedNodeId) {
@@ -11256,10 +11262,13 @@ function switchView(view) {
         el.style.display = active ? "" : "none";
     });
     if (view !== "task-details") {
+        // 离开详情视图属于主动关闭，必须摘掉 onclose 防止触发重连。
+        // 同时掐掉树加载尾巴：分块整树加载、分支重同步、快照自愈全部失效，
+        // 避免回到任务大厅后剩余的树请求与整树 DOM 重建继续阻塞主线程。
+        if (typeof cancelTaskTreeLoading === "function") cancelTaskTreeLoading();
         stashTaskDetailViewState();
         setTaskTokenStatsOpen(false);
         clearAgentSelection({ rerender: false });
-        // 离开详情视图属于主动关闭，必须摘掉 onclose 防止触发重连。
         closeTaskDetailWs();
         scheduleTaskDetailSessionPersist();
     }

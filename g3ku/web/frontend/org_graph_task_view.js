@@ -410,9 +410,45 @@ function finishTaskTreeLoadToast(taskId = "") {
     }, TASK_TREE_LOAD_TOAST_DONE_MS);
 }
 
+function clearTaskTreeBranchSyncTimers() {
+    const tokens = S.treeBranchSyncTokenById || {};
+    Object.values(tokens).forEach((timeoutId) => {
+        if (timeoutId) window.clearTimeout(timeoutId);
+    });
+    S.treeBranchSyncTokenById = {};
+    S.treeBranchSyncQueuedById = {};
+}
+
+// 详情视图是否仍在展示：isTaskDetailsViewActive 定义在 org_graph_app.js，
+// 独立 vm 测试环境不加载该文件，此时按"仍在展示"处理（不触发掐尾守卫）。
+function treeDetailViewActive() {
+    return typeof isTaskDetailsViewActive !== "function" || isTaskDetailsViewActive();
+}
+
+// 离开任务详情视图的"掐尾"：分块整树加载循环、懒加载分支重同步及其定时器、
+// 快照自愈定时器全部失效，在途树请求回来后不再应用快照/重建树 DOM（否则会在
+// 任务大厅视图里继续阻塞主线程）。返回大厅后重新打开任何任务都会完整重载，
+// 这里丢弃的只是纯浪费的尾巴，不损失任何可见状态。
+function cancelTaskTreeLoading() {
+    const taskId = String(S.currentTaskId || "").trim();
+    S.treeBulkLoadToken = Number(S.treeBulkLoadToken || 0) + 1;
+    S.treeDetailGeneration = Number(S.treeDetailGeneration || 0) + 1;
+    S.treeBulkLoadingTaskId = "";
+    if (taskId) cancelTaskTreeLoadToast(taskId);
+    if (S.treeSnapshotSelfHealToken) {
+        window.clearTimeout(S.treeSnapshotSelfHealToken);
+        S.treeSnapshotSelfHealToken = null;
+    }
+    clearTaskTreeBranchSyncTimers();
+    S.treeDirtyParentsById = {};
+}
+
 async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
     const normalizedTaskId = String(taskId || "").trim();
     if (!normalizedTaskId) return null;
+    // 已离开详情视图：不再启动整树加载（节点暂停/恢复、定向通知等操作的
+    // 回调续体会走到这里；此时不应在大厅里重启分块请求流）。
+    if (!treeDetailViewActive()) return null;
     if (U.tree) U.tree.innerHTML = '<div class="empty-state">Loading task tree...</div>';
     // 分块加载门闩：加载期间 renderTree 直接返回，等全部块落位再渲染整树。
     // loadToken 用于丢弃被重连/重开覆盖的旧加载循环（块合并按 id 幂等，但渲染
@@ -491,10 +527,12 @@ async function ensureTaskTreeSubtree(nodeId, { roundId = "", force = false } = {
     if (!taskId || !normalizedNodeId) return null;
     const requestKey = `${normalizedNodeId}::${normalizedRoundId || "default"}`;
     if (!force && S.treeBranchSyncInFlightById?.[requestKey]) return S.treeBranchSyncInFlightById[requestKey];
+    const generation = Number(S.treeDetailGeneration || 0);
     const request = (async () => {
         try {
             const payload = await ApiClient.getTaskNodeTreeSubtree(taskId, normalizedNodeId, { roundId: normalizedRoundId });
             if (String(S.currentTaskId || "").trim() !== taskId) return null;
+            if (Number(S.treeDetailGeneration || 0) !== generation) return null; // 已离开详情视图：丢弃。
             applyTaskTreeSubtreePayload(payload || {});
             clearTaskTreeParentDirty(normalizedNodeId);
             renderTree();
@@ -538,6 +576,8 @@ async function syncTaskTreeDirtyBranch(nodeId) {
 function scheduleTaskTreeBranchSync(nodeId, { delayMs = 120 } = {}) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId || !S.currentTaskId || !String(S.treeRootNodeId || "").trim()) return;
+    // 已离开详情视图：不再发起懒加载分支修正（返回大厅后重新打开任务会完整重载整树）。
+    if (!treeDetailViewActive()) return;
     // 初始分块加载期间跳过懒加载分支修正：等整树块全部落位后由后续 live 事件补同步。
     if (String(S.treeBulkLoadingTaskId || "").trim()
         && String(S.treeBulkLoadingTaskId || "").trim() === String(S.currentTaskId || "").trim()) return;
@@ -2966,6 +3006,9 @@ function maybeShowTaskRecoveryNoticeToast() {
 
 function renderTree() {
     if (!String(S.treeRootNodeId || "").trim()) return;
+    // 已离开详情视图：跳过整树重建（含各在途请求与交互回调的收尾渲染），
+    // 避免在任务大厅里阻塞主线程；重新进入详情视图必然完整重载。
+    if (!treeDetailViewActive()) return;
     // 大任务初始分块加载期间不渲染残缺树，全部块落位后由 loadTaskTreeSnapshot 渲染。
     if (String(S.treeBulkLoadingTaskId || "").trim()
         && String(S.treeBulkLoadingTaskId || "").trim() === String(S.currentTaskId || "").trim()) return;
