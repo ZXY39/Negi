@@ -170,7 +170,6 @@ class TaskLogService:
         self._live_patch_history_guard = threading.Lock()
         self._pending_live_patch_history: dict[str, dict[str, Any]] = {}
         self._live_patch_history_timers: dict[str, threading.Timer] = {}
-        self._last_node_patch_persist_fingerprints: dict[tuple[str, str], str] = {}
         # 磁盘治理（P0）：事件写失败计数。
         self._event_write_failures = 0
 
@@ -217,11 +216,6 @@ class TaskLogService:
                 timer.cancel()
             except Exception:
                 pass
-        try:
-            for key in [key for key in self._last_node_patch_persist_fingerprints if str(key[0]) == normalized]:
-                self._last_node_patch_persist_fingerprints.pop(key, None)
-        except Exception:
-            pass
         with self._task_locks_guard:
             self._task_locks.pop(normalized, None)
 
@@ -317,25 +311,6 @@ class TaskLogService:
             self.flush_live_patch_history(task_id)
             return
         timer.start()
-
-    @staticmethod
-    def _node_patch_persist_fingerprint(payload: dict[str, Any]) -> str:
-        node_payload = dict(payload.get('node') or {}) if isinstance(payload.get('node'), dict) else {}
-        normalized = {
-            'node_id': str(node_payload.get('node_id') or '').strip(),
-            'parent_node_id': str(node_payload.get('parent_node_id') or '').strip(),
-            'depth': int(node_payload.get('depth') or 0),
-            'node_kind': str(node_payload.get('node_kind') or '').strip(),
-            'status': str(node_payload.get('status') or '').strip(),
-            'title': str(node_payload.get('title') or '').strip(),
-            'updated_at': str(node_payload.get('updated_at') or '').strip(),
-            'final_output': str(node_payload.get('final_output') or '').strip(),
-            'final_output_ref': str(node_payload.get('final_output_ref') or '').strip(),
-            'failure_reason': str(node_payload.get('failure_reason') or '').strip(),
-            'check_result': str(node_payload.get('check_result') or '').strip(),
-            'children_fingerprint': str(node_payload.get('children_fingerprint') or '').strip(),
-        }
-        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
     @staticmethod
     def _default_frame(*, node_id: str = '', depth: int = 0, node_kind: str = 'execution', phase: str = '') -> dict[str, Any]:
@@ -1282,7 +1257,6 @@ class TaskLogService:
                         created_at=changed_at,
                         payload=model_call_payload,
                     )
-                    self._append_task_event(task=task, event_type='task.model.call', data=model_call_payload)
                     self._dispatch_live_event_locked(task=task, event_type='task.model.call', data=model_call_payload)
                 self._notify_task_visible_output(task_id, occurred_at=_precise_now_iso())
             root_node_id = str(getattr(task, 'root_node_id', '') or '').strip() if task is not None else ''
@@ -4755,7 +4729,6 @@ class TaskLogService:
             payload=runtime_meta,
         )
         payload = {'task': payload_task}
-        self._append_task_event(task=task, event_type='task.summary.patch', data=payload)
         self._dispatch_live_event_locked(
             task=task,
             event_type='task.summary.patch',
@@ -4790,12 +4763,6 @@ class TaskLogService:
                 ),
             }
         }
-        fingerprint = self._node_patch_persist_fingerprint(payload)
-        cache_key = (str(task.task_id or '').strip(), str(node.node_id or '').strip())
-        previous_fingerprint = self._last_node_patch_persist_fingerprints.get(cache_key)
-        if previous_fingerprint != fingerprint:
-            self._append_task_event(task=task, event_type='task.node.patch', data=payload)
-            self._last_node_patch_persist_fingerprints[cache_key] = fingerprint
         self._dispatch_live_event_locked(task=task, event_type='task.node.patch', data=payload)
 
     def _publish_task_token_patch_locked(self, *, task: TaskRecord) -> None:

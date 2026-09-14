@@ -111,7 +111,6 @@ class TaskArtifactStore:
         persisted = self._store.upsert_artifact(record)
         self._content_index[(task_id, content_hash)] = persisted
         self._note_disk_written(task_id, size_bytes)
-        self._emit_artifact_added_event(task_id=task_id, record=persisted)
         return persisted
 
     def create_json_artifact(
@@ -144,7 +143,6 @@ class TaskArtifactStore:
         )
         persisted = self._store.upsert_artifact(record)
         self._note_disk_written(task_id, size_bytes)
-        self._emit_artifact_added_event(task_id=task_id, record=persisted)
         return persisted
 
     def create_or_replace_singleton_text_artifact(
@@ -238,23 +236,6 @@ class TaskArtifactStore:
         safe_artifact_id = artifact_id.replace(':', '_').replace('/', '_').replace('\\', '_')
         path = task_dir / f'{safe_artifact_id}{extension}'
         return artifact_id, path
-
-    def _emit_artifact_added_event(self, *, task_id: str, record: TaskArtifactRecord) -> None:
-        append_event = getattr(self._store, 'append_task_event', None)
-        if not callable(append_event):
-            return
-        try:
-            task_record = self._store.get_task(task_id)
-            session_id = str(getattr(task_record, 'session_id', '') or 'web:shared').strip() or 'web:shared'
-            append_event(
-                task_id=task_id,
-                session_id=session_id,
-                event_type='task.artifact.added',
-                created_at=record.created_at,
-                payload={'artifact': record.model_dump(mode='json')},
-            )
-        except Exception:
-            return
 
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
         return self._store.list_artifacts(task_id)

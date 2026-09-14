@@ -2796,8 +2796,8 @@ def test_task_model_call_event_includes_cache_diagnostics(tmp_path: Path) -> Non
         ],
     )
 
-    events = service.store.list_task_events(task_id=record.task_id, limit=20)
-    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    calls = service.store.list_task_model_calls(record.task_id, limit=None)
+    model_call = calls[-1]["payload"]
 
     assert model_call["prompt_cache_key_present"] is True
     assert str(model_call["prompt_cache_key_hash"]).strip()
@@ -2871,8 +2871,8 @@ def test_task_model_call_event_persists_dedicated_actual_request_artifact(tmp_pa
         provider_request_body=provider_request_body,
     )
 
-    events = service.store.list_task_events(task_id=record.task_id, limit=20)
-    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    calls = service.store.list_task_model_calls(record.task_id, limit=None)
+    model_call = calls[-1]["payload"]
     actual_request_ref = str(model_call.get("actual_request_ref") or "")
 
     assert actual_request_ref.startswith("artifact:")
@@ -2966,8 +2966,8 @@ def test_task_model_call_actual_request_artifact_degrades_after_memory_error(
         provider_request_body=provider_request_body,
     )
 
-    events = service.store.list_task_events(task_id=record.task_id, limit=20)
-    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    calls = service.store.list_task_model_calls(record.task_id, limit=None)
+    model_call = calls[-1]["payload"]
     actual_request_ref = str(model_call.get("actual_request_ref") or "")
 
     assert actual_request_ref.startswith("artifact:")
@@ -3018,8 +3018,8 @@ def test_node_actual_request_artifact_persists_effective_input_tokens(tmp_path: 
         prompt_cache_key="stable-cache-key",
     )
 
-    events = service.store.list_task_events(task_id=record.task_id, limit=20)
-    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    calls = service.store.list_task_model_calls(record.task_id, limit=None)
+    model_call = calls[-1]["payload"]
     expected_truth = {
         "effective_input_tokens": 160,
         "input_tokens": 120,
@@ -3165,8 +3165,8 @@ def test_node_actual_request_artifact_falls_back_to_preflight_truth_when_usage_h
         prompt_cache_key="stable-cache-key",
     )
 
-    events = service.store.list_task_events(task_id=record.task_id, limit=20)
-    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    calls = service.store.list_task_model_calls(record.task_id, limit=None)
+    model_call = calls[-1]["payload"]
     expected_truth = {
         "effective_input_tokens": 4321,
         "input_tokens": 4321,
@@ -3456,7 +3456,7 @@ def test_task_snapshot_preserves_nested_child_acceptance_children(tmp_path: Path
     assert subtree["nodes_by_id"][acceptance.node_id]["node_kind"] == "acceptance"
 
 
-def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint(tmp_path: Path):
+def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -3478,8 +3478,14 @@ def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint
 
     detail_before = service.get_node_detail_payload(record.task_id, root.node_id)
     fingerprint_before = str(detail_before["item"].get("children_fingerprint") or "")
-    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
-    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
 
     child = service.node_runner._create_execution_child(
         task=task,
@@ -3487,14 +3493,11 @@ def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint
         spec=SpawnChildSpec(goal="child goal", prompt="child prompt", execution_policy=_execution_policy()),
     )
 
-    patch_events = [
-        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
-        if item.get("event_type") == "task.node.patch"
-    ]
     parent_patches = [
-        item["payload"]["node"]
-        for item in patch_events
-        if str(((item.get("payload") or {}).get("node") or {}).get("node_id") or "").strip() == root.node_id
+        kwargs["data"]["node"]
+        for kwargs in captured
+        if kwargs.get("event_type") == "task.node.patch"
+        and str(((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "").strip() == root.node_id
     ]
 
     assert child is not None
@@ -3503,7 +3506,7 @@ def test_direct_child_creation_emits_parent_node_patch_with_children_fingerprint
     assert str(parent_patches[-1].get("children_fingerprint") or "") != fingerprint_before
 
 
-def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path):
+def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -3523,8 +3526,13 @@ def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path):
     assert task is not None
     assert root is not None
 
-    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
-    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
 
     service.log_service._publish_task_node_patch_locked(task=task, node=root)
     service.log_service._publish_task_node_patch_locked(
@@ -3533,15 +3541,16 @@ def test_task_node_patch_persists_when_only_updated_at_changes(tmp_path: Path):
     )
 
     node_events = [
-        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
-        if item.get("event_type") == "task.node.patch"
-        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+        kwargs
+        for kwargs in captured
+        if kwargs.get("event_type") == "task.node.patch"
+        and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
     ]
 
     assert len(node_events) == 2
 
 
-def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path):
+def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -3561,8 +3570,13 @@ def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path)
     assert task is not None
     assert root is not None
 
-    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
-    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
 
     service.log_service.update_node_status(
         record.task_id,
@@ -3572,20 +3586,21 @@ def test_task_node_patch_includes_terminal_output_summary_fields(tmp_path: Path)
     )
 
     node_events = [
-        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
-        if item.get("event_type") == "task.node.patch"
-        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+        kwargs
+        for kwargs in captured
+        if kwargs.get("event_type") == "task.node.patch"
+        and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
     ]
 
     assert node_events
-    latest_node = dict((node_events[-1].get("payload") or {}).get("node") or {})
+    latest_node = dict((node_events[-1].get("data") or {}).get("node") or {})
     assert latest_node.get("final_output") == "root done"
     assert latest_node.get("final_output_ref") == ""
     assert latest_node.get("failure_reason") == ""
     assert latest_node.get("check_result") == ""
 
 
-def test_task_node_patch_includes_failure_reason_when_failed_without_final_output(tmp_path: Path):
+def test_task_node_patch_includes_failure_reason_when_failed_without_final_output(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -3605,8 +3620,13 @@ def test_task_node_patch_includes_failure_reason_when_failed_without_final_outpu
     assert task is not None
     assert root is not None
 
-    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
-    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
 
     service.log_service.update_node_status(
         record.task_id,
@@ -3616,18 +3636,19 @@ def test_task_node_patch_includes_failure_reason_when_failed_without_final_outpu
     )
 
     node_events = [
-        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
-        if item.get("event_type") == "task.node.patch"
-        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+        kwargs
+        for kwargs in captured
+        if kwargs.get("event_type") == "task.node.patch"
+        and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
     ]
 
     assert node_events
-    latest_node = dict((node_events[-1].get("payload") or {}).get("node") or {})
+    latest_node = dict((node_events[-1].get("data") or {}).get("node") or {})
     assert latest_node.get("final_output") == ""
     assert latest_node.get("failure_reason") == "root failed"
 
 
-def test_task_node_patch_persists_when_only_failure_summary_changes(tmp_path: Path):
+def test_task_node_patch_persists_when_only_failure_summary_changes(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -3647,8 +3668,13 @@ def test_task_node_patch_persists_when_only_failure_summary_changes(tmp_path: Pa
     assert task is not None
     assert root is not None
 
-    existing_events = service.store.list_task_events(after_seq=0, task_id=record.task_id, limit=10_000)
-    after_seq = max((int(item.get("seq") or 0) for item in existing_events), default=0)
+    captured = []
+    original_dispatch = service.log_service._dispatch_live_event_locked
+    monkeypatch.setattr(
+        service.log_service,
+        "_dispatch_live_event_locked",
+        lambda **kwargs: (captured.append(kwargs), original_dispatch(**kwargs))[1],
+    )
 
     service.log_service._publish_task_node_patch_locked(
         task=task,
@@ -3660,13 +3686,14 @@ def test_task_node_patch_persists_when_only_failure_summary_changes(tmp_path: Pa
     )
 
     node_events = [
-        item for item in service.store.list_task_events(after_seq=after_seq, task_id=record.task_id, limit=10_000)
-        if item.get("event_type") == "task.node.patch"
-        and str((((item.get("payload") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
+        kwargs
+        for kwargs in captured
+        if kwargs.get("event_type") == "task.node.patch"
+        and str((((kwargs.get("data") or {}).get("node") or {}).get("node_id") or "")).strip() == root.node_id
     ]
 
     assert len(node_events) == 2
-    assert [((item.get("payload") or {}).get("node") or {}).get("failure_reason") for item in node_events] == [
+    assert [((kwargs.get("data") or {}).get("node") or {}).get("failure_reason") for kwargs in node_events] == [
         "failure one",
         "failure two",
     ]
@@ -8944,8 +8971,8 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
 
         assert result.status == "success"
         assert backend.calls
-        events = restarted.store.list_task_events(task_id=record.task_id, limit=20)
-        model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+        calls = restarted.store.list_task_model_calls(record.task_id, limit=None)
+        model_call = calls[-1]["payload"]
         actual_request_ref = str(model_call.get("actual_request_ref") or "")
 
         assert actual_request_ref.startswith("artifact:")
@@ -9694,8 +9721,8 @@ def test_task_model_call_event_persists_provider_tool_bundle_in_actual_request_a
         provider_tool_exposure_commit_reason="token_compression",
     )
 
-    events = service.store.list_task_events(task_id=record.task_id, limit=20)
-    model_call = [item for item in events if item["event_type"] == "task.model.call"][-1]["payload"]
+    calls = service.store.list_task_model_calls(record.task_id, limit=None)
+    model_call = calls[-1]["payload"]
     actual_request_ref = str(model_call.get("actual_request_ref") or "")
 
     assert model_call["callable_tool_names"] == ["submit_next_stage"]
