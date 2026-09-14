@@ -306,39 +306,73 @@ class TaskQueryService:
         return entries
 
     def get_tasks(self, session_id: str | None, task_type: int) -> list[TaskListItem]:
-        tasks = self._store.list_tasks(session_id)
+        # 窄读路径优先：json_extract 摘要避免逐任务全量解析 payload_json；
+        # 窄读不可用（老 sqlite 无 json1 等）时回退整包 TaskRecord 解析。
+        summaries = None
+        try:
+            summaries = self._store.list_task_summaries(session_id)
+        except Exception:
+            summaries = None
+        if summaries is None:
+            items = [self._task_list_item_from_record(task) for task in self._store.list_tasks(session_id)]
+        else:
+            items = [self._task_list_item_from_summary(summary) for summary in summaries]
         scope = int(task_type)
         if scope == 2:
-            tasks = [item for item in tasks if item.status == 'in_progress']
+            items = [item for item in items if item.status == 'in_progress']
         elif scope == 3:
-            tasks = [item for item in tasks if item.status == 'failed']
+            items = [item for item in items if item.status == 'failed']
         elif scope == 4:
-            tasks = [item for item in tasks if bool(item.is_unread)]
+            items = [item for item in items if bool(item.is_unread)]
         try:
-            disk_usages = self._store.get_task_disk_usages([item.task_id for item in tasks])
+            disk_usages = self._store.get_task_disk_usages([item.task_id for item in items])
         except Exception:
             disk_usages = {}
-        return [
-            TaskListItem(
-                task_id=item.task_id,
-                session_id=item.session_id,
-                title=item.title or item.task_id,
-                brief=item.brief_text or '',
-                status=item.status,
-                failure_class=normalize_failure_class((item.metadata or {}).get('failure_class')),
-                final_acceptance=normalize_final_acceptance_metadata((item.metadata or {}).get('final_acceptance')).model_dump(mode='json'),
-                retry_count=len(list((item.metadata or {}).get('retry_history') or [])),
-                recovery_notice=str((item.metadata or {}).get('recovery_notice') or '').strip(),
-                is_unread=bool(item.is_unread),
-                is_paused=bool(item.is_paused),
-                created_at=item.created_at,
-                updated_at=item.updated_at,
-                max_depth=int(item.max_depth or 0),
-                token_usage=item.token_usage,
-                disk_usage_bytes=int(disk_usages.get(item.task_id, 0) or 0),
-            )
-            for item in tasks
-        ]
+        for item in items:
+            item.disk_usage_bytes = int(disk_usages.get(item.task_id, 0) or 0)
+        return items
+
+    def _task_list_item_from_record(self, item: Any) -> TaskListItem:
+        metadata = item.metadata or {}
+        return TaskListItem(
+            task_id=item.task_id,
+            session_id=item.session_id,
+            title=item.title or item.task_id,
+            brief=item.brief_text or '',
+            status=item.status,
+            failure_class=normalize_failure_class(metadata.get('failure_class')),
+            final_acceptance=normalize_final_acceptance_metadata(metadata.get('final_acceptance')).model_dump(mode='json'),
+            retry_count=len(list(metadata.get('retry_history') or [])),
+            recovery_notice=str(metadata.get('recovery_notice') or '').strip(),
+            is_unread=bool(item.is_unread),
+            is_paused=bool(item.is_paused),
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+            max_depth=int(item.max_depth or 0),
+            token_usage=item.token_usage,
+        )
+
+    def _task_list_item_from_summary(self, summary: dict[str, Any]) -> TaskListItem:
+        metadata = summary.get('metadata') or {}
+        raw_unread = summary.get('is_unread')
+        return TaskListItem(
+            task_id=str(summary.get('task_id') or ''),
+            session_id=str(summary.get('session_id') or ''),
+            title=str(summary.get('title') or '') or str(summary.get('task_id') or ''),
+            brief=str(summary.get('brief_text') or ''),
+            status=str(summary.get('status') or '') or 'in_progress',
+            failure_class=normalize_failure_class(metadata.get('failure_class')),
+            final_acceptance=normalize_final_acceptance_metadata(metadata.get('final_acceptance')).model_dump(mode='json'),
+            retry_count=len(list(metadata.get('retry_history') or [])),
+            recovery_notice=str(metadata.get('recovery_notice') or '').strip(),
+            # 字段缺失（NULL）对齐 TaskRecord 默认值：is_unread=True。
+            is_unread=True if raw_unread is None else bool(raw_unread),
+            is_paused=bool(summary.get('is_paused')),
+            created_at=str(summary.get('created_at') or ''),
+            updated_at=str(summary.get('updated_at') or ''),
+            max_depth=int(summary.get('max_depth') or 0),
+            token_usage=TokenUsageSummary.model_validate(summary.get('token_usage') or {}),
+        )
 
     def view_progress(self, task_id: str, *, mark_read: bool = True) -> TaskProgressResult | None:
         task = self._store.get_task(task_id)

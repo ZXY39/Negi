@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from g3ku.content import artifact_ref_from_id
@@ -37,13 +39,23 @@ async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1
     await service.startup()
     normalized_session_id = str(session_id or 'web:shared').strip() or 'web:shared'
     effective_session_id = None if normalized_session_id.lower() == 'all' else normalized_session_id
-    items = service.query_service.get_tasks(effective_session_id, int(scope))
+
+    def _items_payload() -> list[dict[str, object]]:
+        items = service.query_service.get_tasks(effective_session_id, int(scope))
+        return [item.model_dump(mode='json') for item in items]
+
+    # 查询与序列化是同步 CPU/IO 重活：卸载到线程池，避免独占事件循环
+    # 把 worker-status/WS 握手等轻请求一起挂起（任务大厅返回卡顿的根因）。
+    items, worker_payload = await asyncio.gather(
+        asyncio.to_thread(_items_payload),
+        asyncio.to_thread(service.worker_status_payload),
+    )
     return {
         'ok': True,
         'session_id': 'all' if effective_session_id is None else effective_session_id,
         'scope': int(scope),
-        'items': [item.model_dump(mode='json') for item in items],
-        **service.worker_status_payload(),
+        'items': items,
+        **worker_payload,
     }
 
 
@@ -51,7 +63,8 @@ async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1
 async def get_task_worker_status():
     service = _service()
     await service.startup()
-    return {'ok': True, **service.worker_status_payload()}
+    payload = await asyncio.to_thread(service.worker_status_payload)
+    return {'ok': True, **payload}
 
 
 @router.get('/tasks/{task_id}')
@@ -63,7 +76,11 @@ async def get_task(
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_task_detail_payload(task_id, mark_read=bool(mark_read))
+    if mark_read:
+        # mark_read 会经 registry 推送 task.summary.patch（asyncio.Queue 只能
+        # 由事件循环线程操作），必须留在循环内执行；纯读的快照构建造到线程池。
+        service.log_service.mark_task_read(task_id)
+    payload = await asyncio.to_thread(service.get_task_detail_payload, task_id, mark_read=False)
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, **payload}
@@ -84,7 +101,8 @@ async def get_task_tree_snapshot(
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_task_tree_snapshot_payload(
+    payload = await asyncio.to_thread(
+        service.get_task_tree_snapshot_payload,
         task_id,
         max_nodes=max_nodes,
         after_node_id=str(after_node_id or '').strip(),
@@ -104,7 +122,7 @@ async def get_task_node_detail(
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.node_detail(task_id, node_id, detail_level=detail_level)
+    payload = await asyncio.to_thread(service.node_detail, task_id, node_id, detail_level=detail_level)
     if not isinstance(payload, dict):
         raise HTTPException(status_code=404, detail='node_not_found')
     return payload
@@ -116,7 +134,7 @@ async def get_task_node_latest_context(task_id: str, node_id: str):
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_node_latest_context_payload(task_id, node_id)
+    payload = await asyncio.to_thread(service.get_node_latest_context_payload, task_id, node_id)
     if payload is None:
         raise HTTPException(status_code=404, detail='node_not_found')
     return payload
@@ -132,7 +150,8 @@ async def get_task_node_tree_subtree(
     service = _service()
     await service.startup()
     task_id = service.normalize_task_id(task_id)
-    payload = service.get_task_tree_subtree_payload(
+    payload = await asyncio.to_thread(
+        service.get_task_tree_subtree_payload,
         task_id,
         node_id,
         round_id=round_id,
@@ -208,7 +227,7 @@ async def get_task_error_log(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
-    payload = service.get_task_error_log_payload(service.normalize_task_id(task_id))
+    payload = await asyncio.to_thread(service.get_task_error_log_payload, service.normalize_task_id(task_id))
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return payload
@@ -219,7 +238,7 @@ async def get_task_node_error_log(task_id: str, node_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
-    payload = service.get_task_node_error_log_payload(service.normalize_task_id(task_id), node_id)
+    payload = await asyncio.to_thread(service.get_task_node_error_log_payload, service.normalize_task_id(task_id), node_id)
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return payload
@@ -266,7 +285,7 @@ async def get_task_pause_state(task_id: str):
     task_id = _ensure_task_route_id(task_id)
     service = _service()
     await service.startup()
-    payload = service.get_task_pause_state_payload(service.normalize_task_id(task_id))
+    payload = await asyncio.to_thread(service.get_task_pause_state_payload, service.normalize_task_id(task_id))
     if payload is None:
         raise HTTPException(status_code=404, detail='task_not_found')
     return {'ok': True, 'item': payload}

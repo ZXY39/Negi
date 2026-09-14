@@ -632,6 +632,49 @@ class SQLiteTaskStore:
             rows = self._fetchall('SELECT payload_json FROM tasks ORDER BY updated_at DESC')
         return [self._parse(row['payload_json'], TaskRecord) for row in rows]
 
+    def list_task_summaries(self, session_id: str | None = None) -> list[dict[str, Any]]:
+        """任务大厅列表窄读路径：json_extract 直取摘要字段，避免整包读取并
+        pydantic 全量解析 payload_json（TaskRecord 含 user_request/final_output
+        等大字段，逐任务全解析会把 /api/tasks 拖成秒级并独占事件循环）。
+        json1 不可用或行解析异常时抛出，由调用方回退到 list_tasks 全量路径。"""
+        sql = (
+            'SELECT task_id, session_id, status, updated_at, '
+            "json_extract(payload_json, '$.title') AS title, "
+            "json_extract(payload_json, '$.brief_text') AS brief_text, "
+            "json_extract(payload_json, '$.is_unread') AS is_unread, "
+            "json_extract(payload_json, '$.is_paused') AS is_paused, "
+            "json_extract(payload_json, '$.created_at') AS created_at, "
+            "json_extract(payload_json, '$.max_depth') AS max_depth, "
+            "json_extract(payload_json, '$.token_usage') AS token_usage_json, "
+            "json_extract(payload_json, '$.metadata') AS metadata_json "
+            'FROM tasks'
+        )
+        params: tuple[Any, ...] = ()
+        if session_id:
+            sql += ' WHERE session_id = ?'
+            params = (session_id,)
+        sql += ' ORDER BY updated_at DESC'
+        rows = self._fetchall(sql, params)
+        summaries: list[dict[str, Any]] = []
+        for row in rows:
+            raw_unread = row['is_unread']
+            summaries.append({
+                'task_id': str(row['task_id'] or ''),
+                'session_id': str(row['session_id'] or ''),
+                'status': str(row['status'] or ''),
+                'updated_at': str(row['updated_at'] or ''),
+                'title': str(row['title'] or ''),
+                'brief_text': str(row['brief_text'] or ''),
+                # 字段缺失（NULL）对齐 TaskRecord 默认值：is_unread=True。
+                'is_unread': True if raw_unread is None else bool(raw_unread),
+                'is_paused': bool(row['is_paused']),
+                'created_at': str(row['created_at'] or ''),
+                'max_depth': int(row['max_depth'] or 0),
+                'token_usage': json.loads(row['token_usage_json']) if row['token_usage_json'] else {},
+                'metadata': json.loads(row['metadata_json']) if row['metadata_json'] else {},
+            })
+        return summaries
+
     def update_task(self, task_id: str, mutator) -> TaskRecord | None:
         def operation(conn: sqlite3.Connection) -> TaskRecord | None:
             row = conn.execute('SELECT payload_json FROM tasks WHERE task_id = ?', (task_id,)).fetchone()
