@@ -7,6 +7,29 @@ APPEND_NOTICE_CONTEXT_KEY = 'append_notice_context'
 PENDING_APPEND_NOTICE_RECORDS_KEY = 'pending_append_notice_records'
 APPEND_NOTICE_TAIL_PREFIX = '[G3KU_APPEND_NOTICE_TAIL_V1]'
 
+# 定向通知转述族：系统把用户追加的通知转述给祖先/验收节点时生成的包装消息。
+# 新记录在通知行的 payload 里带 origin 标记；存量行用消息前缀兜底识别。
+NOTICE_ORIGIN_SYSTEM_RELAY = 'system_relay'
+SYSTEM_RELAY_NOTICE_PREFIXES = (
+    '【任务收到用户定向通知】',
+    '【后代节点收到用户定向通知】',
+    '【被检验节点收到用户定向通知】',
+    '【正在检验的节点接收了用户通知】',
+)
+
+
+def is_system_relay_notice(record: Any) -> bool:
+    """该通知是否属于「定向通知转述族」（消息列表展示时过滤，不影响模型上下文）。
+
+    判定源：通知行 payload.origin == system_relay（新记录），或 message 以
+    任一已知转述前缀开头（兼容存量数据行，两者只影响展示层）。
+    """
+    payload = record.get('payload') if isinstance(record, dict) else getattr(record, 'payload', None)
+    if isinstance(payload, dict) and str(payload.get('origin') or '').strip() == NOTICE_ORIGIN_SYSTEM_RELAY:
+        return True
+    message = str(record.get('message') if isinstance(record, dict) else getattr(record, 'message', '') or '').strip()
+    return message.startswith(SYSTEM_RELAY_NOTICE_PREFIXES)
+
 
 def normalize_append_notice_context(payload: Any) -> dict[str, Any]:
     current = dict(payload or {}) if isinstance(payload, dict) else {}
@@ -336,6 +359,9 @@ __all__ = [
     'APPEND_NOTICE_CONTEXT_KEY',
     'PENDING_APPEND_NOTICE_RECORDS_KEY',
     'APPEND_NOTICE_TAIL_PREFIX',
+    'NOTICE_ORIGIN_SYSTEM_RELAY',
+    'SYSTEM_RELAY_NOTICE_PREFIXES',
+    'is_system_relay_notice',
     'build_append_notice_tail_messages',
     'consume_pending_append_notice_records',
     'normalize_append_notice_context',

@@ -19,9 +19,9 @@ from g3ku.runtime.project_environment import current_project_environment
 from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
 from main.ids import new_command_id, new_node_id
 from main.models import (
+    RESULT_SCHEMA_VERSION,
     NodeFinalResult,
     NodeRecord,
-    RESULT_SCHEMA_VERSION,
     SpawnChildFailureInfo,
     SpawnChildResult,
     SpawnChildSpec,
@@ -32,17 +32,6 @@ from main.models import (
 )
 from main.prompts import load_prompt
 from main.protocol import now_iso
-from main.runtime.append_notice_context import (
-    APPEND_NOTICE_CONTEXT_KEY,
-    PENDING_APPEND_NOTICE_RECORDS_KEY,
-    consume_pending_append_notice_records,
-    normalize_append_notice_context,
-    normalize_pending_append_notice_records,
-    record_pending_append_notice_records,
-    record_consumed_notifications,
-    supersede_append_notice_records,
-)
-from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
@@ -55,7 +44,17 @@ from main.runtime.acceptance_handshake import (
     normalize_acceptance_handshake,
     set_acceptance_handshake_state,
 )
-from main.runtime.stage_messages import _stage_has_substantive_progress
+from main.runtime.append_notice_context import (
+    APPEND_NOTICE_CONTEXT_KEY,
+    NOTICE_ORIGIN_SYSTEM_RELAY,
+    PENDING_APPEND_NOTICE_RECORDS_KEY,
+    consume_pending_append_notice_records,
+    normalize_append_notice_context,
+    normalize_pending_append_notice_records,
+    record_consumed_notifications,
+    record_pending_append_notice_records,
+    supersede_append_notice_records,
+)
 from main.runtime.internal_tools import (
     SpawnChildNodesTool,
     SubmitFinalResultTool,
@@ -64,16 +63,22 @@ from main.runtime.internal_tools import (
     SubmitNoticeInspectionDecisionTool,
 )
 from main.runtime.node_prompt_contract import extract_node_dynamic_contract_payload
-from main.storage.disk_guard import is_disk_full_error
 from main.runtime.pending_notice_state import (
-    clear_pending_notice_state,
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
     RESUME_MODE_WAIT_FOR_CHILDREN,
+    clear_pending_notice_state,
     normalize_pending_notice_state,
     set_pending_notice_state,
 )
-from main.runtime.subtree_hold import INSPECTION_RESUME_MARKER, NOTICE_INTERRUPT_REASON, resolve_subtree_hold_epoch_id
+from main.runtime.stage_messages import _stage_has_substantive_progress
+from main.runtime.subtree_hold import (
+    INSPECTION_RESUME_MARKER,
+    NOTICE_INTERRUPT_REASON,
+    resolve_subtree_hold_epoch_id,
+)
+from main.service.create_async_task_contract import normalize_create_async_task_file_targets
+from main.storage.disk_guard import is_disk_full_error
 from main.types import KIND_ACCEPTANCE, KIND_EXECUTION, STATUS_FAILED, STATUS_SUCCESS
 
 SKIPPED_CHECK_RESULT = '未检验'
@@ -2784,7 +2789,11 @@ class NodeRunner:
         source_node_id: str,
         target_node_id: str,
         message: str,
+        origin: str = '',
     ) -> None:
+        # origin 非空时写入 payload（供消息列表展示层按来源过滤，如 system_relay 转述族），
+        # 默认空串保持与历史行为一致。
+        notification_payload: dict[str, Any] = {'origin': origin} if str(origin or '').strip() else {}
         self._store.upsert_task_node_notification(
             {
                 'notification_id': new_command_id().replace('command:', 'notif:', 1),
@@ -2797,7 +2806,7 @@ class NodeRunner:
                 'created_at': _now(),
                 'delivered_at': _now(),
                 'consumed_at': '',
-                'payload': {},
+                'payload': notification_payload,
             }
         )
         self.stamp_distribution_target_pending_notice_state(
@@ -3372,6 +3381,7 @@ class NodeRunner:
                         f'【正在检验的节点接收了用户通知】被检验节点「{node_title}」（{node.node_id}）'
                         f'收到了用户追加的通知，验收判定时请纳入参考。通知内容如下：\n{incoming_message}'
                     ),
+                    origin=NOTICE_ORIGIN_SYSTEM_RELAY,
                 )
             # 目标自己的通知：决策回合已消费但不再并入其上下文（产出维持原样），
             # 显示「已消费」；若日后节点因验收拒绝重跑，恢复路径仍会并入。

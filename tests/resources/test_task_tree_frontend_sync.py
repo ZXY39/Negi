@@ -4483,13 +4483,15 @@ def test_build_node_message_list_steps_renders_message_and_distribution_details(
     assert "未下发" in result["bodyHtml"]
     assert "child two" in result["bodyHtml"]
     assert "该子节点不受影响" in result["bodyHtml"]
-    assert "改成男性角色Top20并补充证据" in result["bodyHtml"]
     # 分发结果不再显示原始账本状态文本，改用语义标签 + 图标。
     assert "[delivered]" not in result["bodyHtml"]
     assert "[consumed]" not in result["bodyHtml"]
     assert "已分发·待处理" in result["bodyHtml"]
     assert 'data-lucide="inbox"' in result["bodyHtml"]
     assert 'data-lucide="circle-slash"' in result["bodyHtml"]
+    # 分发情况不再重复展示消息正文（正文已由条目「消息内容」区展示），
+    # skipped 行的跳过原因保留显示。
+    assert "改成男性角色Top20并补充证据" not in result["bodyHtml"]
 
 
 

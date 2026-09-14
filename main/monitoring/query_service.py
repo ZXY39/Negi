@@ -43,6 +43,7 @@ from main.runtime.acceptance_handshake import (
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     PENDING_APPEND_NOTICE_RECORDS_KEY,
+    is_system_relay_notice,
     normalize_append_notice_context,
     normalize_pending_append_notice_records,
 )
@@ -103,7 +104,7 @@ class TaskQueryService:
         pending_child_count = sum(
             1
             for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-            if str(item.status or '').strip() == 'delivered'
+            if str(item.status or '').strip() == 'delivered' and not is_system_relay_notice(item)
         )
         return int(pending_root_count or 0) + pending_child_count
 
@@ -266,6 +267,10 @@ class TaskQueryService:
 
         for item in list(pending_child_notifications or []):
             if not isinstance(item, dict) or not str(item.get('message') or '').strip():
+                continue
+            # 定向通知转述族是系统自动生成的包装内容，消息列表只展示真实消息；
+            # 仅影响展示（模型上下文/存储不动）。
+            if is_system_relay_notice(item):
                 continue
             epoch_id = str(item.get('epoch_id') or '').strip()
             source_node_id = str(item.get('source_node_id') or '').strip()

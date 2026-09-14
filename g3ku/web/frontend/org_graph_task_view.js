@@ -1759,9 +1759,14 @@ function renderMessageDeliveriesField(deliveries = []) {
         const targetTitle = String(item?.target_title || item?.target_node_id || "").trim() || "未命名节点";
         const targetNodeId = String(item?.target_node_id || "").trim();
         const showNodeId = targetNodeId && targetNodeId !== targetTitle;
+        // 分发情况只展示节点信息与分发状态：distributed 行不再重复消息正文
+        // （正文已在条目「消息内容」区展示）；skipped 行保留跳过原因。
         const detail = skipped
             ? (String(item?.reason || "").trim() || "暂无跳过原因")
-            : (String(item?.message || "").trim() || "暂无消息内容");
+            : "";
+        const detailHtml = detail
+            ? `<span class="notice-delivery-detail">${esc(detail)}</span>`
+            : "";
         return `
             <div class="notice-delivery-item notice-delivery-item--${esc(descriptor.key)}">
                 <span class="notice-delivery-icon" aria-hidden="true"><i data-lucide="${esc(descriptor.icon)}"></i></span>
@@ -1771,7 +1776,7 @@ function renderMessageDeliveriesField(deliveries = []) {
                         ${showNodeId ? `<span class="notice-delivery-node-id">${esc(targetNodeId)}</span>` : ""}
                         <span class="notice-delivery-status">${esc(descriptor.label)}</span>
                     </span>
-                    <span class="notice-delivery-detail">${esc(detail)}</span>
+                    ${detailHtml}
                 </span>
             </div>
         `;
@@ -1986,12 +1991,129 @@ async function submitNodeNoticeComposer() {
         renderTree();
         const selected = findTreeNode(S.treeView, nodeId);
         if (selected) void showAgent(selected, { preserveViewState: true, forceRefresh: true });
+        // 分发是异步的：POST 返回时新消息通常还没落到目标节点的消息列表，
+        // 启动局部 settle 轮询，新消息一经记账即局部刷新展示（见下方实现）。
+        settleTaskNoticeAfterSend(taskId, nodeId, message);
     } catch (error) {
         showToast({ title: "定向通知提交失败", text: error?.message || "提交未完成", kind: "error" });
     } finally {
         send.dataset.busy = "";
         syncNoticeComposerState();
     }
+}
+
+// —— 定向通知发送后的局部 settle 轮询 ——
+// 分发链路（epoch 排队 → 分发节点决策回合 → 投递记账）是异步的，提交后新消息
+// 不会立刻出现在 message_list。这里以固定间隔重拉目标节点的 full 详情，一旦
+// 消息落表即局部刷新节点详情；超时（分发失败等）静默退出，由 WS task.node.patch
+// 与手动刷新兜底。轮询只更新缓存与当前选中节点的渲染，不动全局视图。
+const TASK_NOTICE_SETTLE_INTERVAL_MS = 2500;
+const TASK_NOTICE_SETTLE_TIMEOUT_MS = 90000;
+
+function taskNoticeSettleState() {
+    if (!S.noticeSettle || typeof S.noticeSettle !== "object") {
+        S.noticeSettle = { timer: null, taskId: "", nodeId: "", pending: [] };
+    }
+    return S.noticeSettle;
+}
+
+function stopTaskNoticeSettle() {
+    const state = S.noticeSettle;
+    if (!state) return;
+    if (state.timer) {
+        window.clearTimeout(state.timer);
+        state.timer = null;
+    }
+    state.pending = [];
+}
+
+function settleTaskNoticeAfterSend(taskId, nodeId, message) {
+    const trimmed = String(message || "").trim();
+    const targetNodeId = String(nodeId || "").trim();
+    const targetTaskId = String(taskId || "").trim();
+    if (!trimmed || !targetNodeId || !targetTaskId) return;
+    const state = taskNoticeSettleState();
+    if (String(state.taskId || "").trim() !== targetTaskId || String(state.nodeId || "").trim() !== targetNodeId) {
+        // 换了任务/节点：旧的轮询作废，从当前节点重新开始。
+        stopTaskNoticeSettle();
+        state.taskId = targetTaskId;
+        state.nodeId = targetNodeId;
+    }
+    const alreadyPending = state.pending.some(
+        (item) => item.nodeId === targetNodeId && item.message === trimmed,
+    );
+    if (!alreadyPending) {
+        state.pending.push({ nodeId: targetNodeId, message: trimmed, addedAt: Date.now() });
+    }
+    if (!state.timer) {
+        state.timer = window.setTimeout(() => {
+            void runTaskNoticeSettleTick();
+        }, TASK_NOTICE_SETTLE_INTERVAL_MS);
+    }
+}
+
+async function runTaskNoticeSettleTick() {
+    const state = S.noticeSettle;
+    if (!state) return;
+    state.timer = null;
+    const taskId = String(state.taskId || "").trim();
+    const nodeId = String(state.nodeId || "").trim();
+    if (!taskId || !nodeId) {
+        stopTaskNoticeSettle();
+        return;
+    }
+    if (String(S.currentTaskId || "").trim() !== taskId || !treeDetailViewActive()) {
+        stopTaskNoticeSettle();
+        return;
+    }
+    try {
+        const detail = await ApiClient.getTaskNodeDetail(taskId, nodeId, { detailLevel: "full" });
+        if (!S.noticeSettle || !S.noticeSettle.pending.length) return;
+        if (String(S.currentTaskId || "").trim() !== taskId) {
+            stopTaskNoticeSettle();
+            return;
+        }
+        if (detail && typeof detail === "object") {
+            S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [nodeId]: detail };
+            if (String(S.selectedNodeId || "").trim() === nodeId) S.currentNodeDetail = detail;
+            const messages = Array.isArray(detail.message_list) ? detail.message_list : [];
+            const remaining = [];
+            let matched = false;
+            const now = Date.now();
+            for (const item of state.pending) {
+                if (now - item.addedAt > TASK_NOTICE_SETTLE_TIMEOUT_MS) continue;
+                if (messages.some((entry) => String(entry?.message || "").trim() === item.message)) {
+                    matched = true;
+                } else {
+                    remaining.push(item);
+                }
+            }
+            state.pending = remaining;
+            if (matched && String(S.selectedNodeId || "").trim() === nodeId) {
+                const selected = findTreeNode(S.treeView, nodeId)
+                    || { node_id: nodeId, title: nodeId, state: "in_progress" };
+                void showAgent(selected, { preserveViewState: true });
+                if (!remaining.length) {
+                    showToast({
+                        title: "消息已更新",
+                        text: "新增消息已出现在节点消息列表",
+                        kind: "success",
+                    });
+                }
+            }
+        }
+    } catch (error) {
+        // 单轮失败不中断局部刷新（接口抖动）；条目按各自超时退出，
+        // 持续失败时轮询仍需按超时终止而不是无限重试。
+        const now = Date.now();
+        state.pending = state.pending.filter(
+            (item) => now - item.addedAt <= TASK_NOTICE_SETTLE_TIMEOUT_MS,
+        );
+    }
+    if (!state.pending.length) return;
+    state.timer = window.setTimeout(() => {
+        void runTaskNoticeSettleTick();
+    }, TASK_NOTICE_SETTLE_INTERVAL_MS);
 }
 
 function renderSpawnReviewTrace(node, { viewState = null } = {}) {

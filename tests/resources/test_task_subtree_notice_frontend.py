@@ -227,6 +227,9 @@ def test_notice_composer_submit_posts_and_refreshes() -> None:
             calls.notice.push({ taskId, nodeId, message });
             return { ok: true };
           },
+          // settle 轮询的数据源：回报消息已落表，让第一轮 tick 即命中并停止，
+          // 避免样例进程被闲置轮询定时器拖住。
+          getTaskNodeDetail: async () => ({ message_list: [{ message: "补充验收口径" }] }),
         };
         global.loadTaskTreeSnapshot = async () => { calls.snapshotLoads += 1; return null; };
         global.findTreeNode = () => ({ node_id: "node:exec" });

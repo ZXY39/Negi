@@ -8,7 +8,11 @@ from typing import Any
 from loguru import logger
 
 from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
-from main.models import NodeFinalResult, normalize_final_acceptance_metadata, normalize_result_payload
+from main.models import (
+    NodeFinalResult,
+    normalize_final_acceptance_metadata,
+    normalize_result_payload,
+)
 from main.protocol import now_iso
 from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
@@ -19,9 +23,14 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     normalize_acceptance_handshake,
 )
+from main.runtime.append_notice_context import NOTICE_ORIGIN_SYSTEM_RELAY
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.runtime.pending_notice_state import RESUME_MODE_WAIT_FOR_CHILDREN
-from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES, INSPECTION_RESUME_MARKER, NOTICE_INTERRUPT_REASON
+from main.runtime.subtree_hold import (
+    DISTRIBUTION_ACTIVE_STATES,
+    INSPECTION_RESUME_MARKER,
+    NOTICE_INTERRUPT_REASON,
+)
 from main.types import KIND_ACCEPTANCE
 
 _DEFAULT_NODE_DISPATCH_LIMITS = {
@@ -1274,6 +1283,9 @@ class TaskActorService:
                 source_node_id=source_node_id,
                 target_node_id=normalized_target,
                 message=message,
+                # 转述包装是系统自动生成的通知（非真实消息内容），
+                # 展示层据此从节点消息列表里过滤。
+                origin=NOTICE_ORIGIN_SYSTEM_RELAY,
             )
 
         for target_id in targets:

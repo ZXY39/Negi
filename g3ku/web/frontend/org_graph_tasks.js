@@ -1295,6 +1295,7 @@ function resetTaskView() {
     S.taskNodeLatestContexts = {};
     S.taskNodeLatestContextRequests = {};
     if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
+    if (typeof stopTaskNoticeSettle === "function") stopTaskNoticeSettle();
     S.taskNodeBusy = false;
     S.taskErrorLogs = [];
     S.taskErrorLogOpen = false;

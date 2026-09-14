@@ -319,6 +319,89 @@ async def test_upward_propagation_informs_ancestor_acceptance_companion(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_message_list_filters_system_relay_notices(tmp_path: Path) -> None:
+    """消息列表只展示真实消息：定向通知转述族不出现在展示层，存储与模型上下文不动。"""
+    from main.runtime.append_notice_context import (
+        NOTICE_ORIGIN_SYSTEM_RELAY,
+        SYSTEM_RELAY_NOTICE_PREFIXES,
+    )
+
+    service = _build_service(tmp_path)
+    try:
+        record, root, child_a, _child_b = await _seed_root_with_two_live_children(service)
+        # 最终验收节点（用户报告的场景：终验节点收到【任务收到用户定向通知】包装）
+        final_acc = NodeRecord(
+            node_id="node:final-acc",
+            task_id=record.task_id,
+            parent_node_id=root.node_id,
+            root_node_id=root.node_id,
+            depth=1,
+            node_kind="acceptance",
+            status="in_progress",
+            goal="最终验收",
+            prompt="acc",
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+        service.store.upsert_node(final_acc)
+        service.log_service.update_task_metadata(
+            record.task_id,
+            lambda metadata: {
+                **metadata,
+                "final_acceptance": {"required": True, "node_id": final_acc.node_id, "prompt": "verify"},
+            },
+        )
+
+        await service.task_append_notice(
+            task_ids=None, node_ids=[child_a.node_id], message="补充 a 的验收口径", session_id="web:ceo-demo",
+        )
+        assert await _drive_waves(service, record.task_id) == "completed"
+
+        def _visible_messages(node_id: str) -> list[str]:
+            detail = service.query_service.get_node_detail(record.task_id, node_id, detail_level="full")
+            return [str(item.get("message") or "").strip() for item in list(detail.message_list or [])]
+
+        # 存储不动：祖先（root）与最终验收仍收到转述投递，新记录带 origin 标记。
+        root_relays = [
+            item
+            for item in service.store.list_task_node_notifications(record.task_id, root.node_id)
+            if str(item.message or "").startswith(SYSTEM_RELAY_NOTICE_PREFIXES)
+        ]
+        assert root_relays, "祖先应收到转述投递（存储层保留）"
+        assert (root_relays[0].payload or {}).get("origin") == NOTICE_ORIGIN_SYSTEM_RELAY
+        final_relays = [
+            item
+            for item in service.store.list_task_node_notifications(record.task_id, final_acc.node_id)
+            if str(item.message or "").startswith(SYSTEM_RELAY_NOTICE_PREFIXES)
+        ]
+        assert final_relays, "最终验收应收到转述投递（存储层保留）"
+
+        # 展示层过滤：root 与最终验收的消息列表不含任何转述包装（只有真实消息才显示）。
+        for node_id in (root.node_id, final_acc.node_id):
+            visible = _visible_messages(node_id)
+            assert not any(msg.startswith(SYSTEM_RELAY_NOTICE_PREFIXES) for msg in visible)
+            assert visible == [], f"{node_id} 的消息列表应只剩真实消息（当前: {visible}）"
+
+        # 目标节点的消息列表包含真实用户消息。
+        assert any(msg == "补充 a 的验收口径" for msg in _visible_messages(child_a.node_id))
+
+        # 存量兜底：无 origin 标记的旧转述行也按前缀过滤（模拟迁移前数据）。
+        service.node_runner._persist_node_notification_direct(
+            task_id=record.task_id,
+            epoch_id="epoch:legacy",
+            source_node_id=child_a.node_id,
+            target_node_id=root.node_id,
+            message="【后代节点收到用户定向通知】存量数据行",
+        )
+        legacy_visible = _visible_messages(root.node_id)
+        assert not any(msg.startswith(SYSTEM_RELAY_NOTICE_PREFIXES) for msg in legacy_visible)
+        # 待处理计数同样不收转述行抬高（树徽标口径）。
+        assert service.query_service._node_pending_notice_count(task_id=record.task_id, node_id=root.node_id) == 0
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_acceptance_interrupt_result_does_not_consume_rejection_budget(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
