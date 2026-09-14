@@ -1273,6 +1273,36 @@ async function reconcileTaskDetailAfterWsReconnect(taskId) {
     if (String(S.treeRootNodeId || "").trim()) renderTree();
 }
 
+// 离开详情视图后，驻留的大状态（整树快照、节点 full 详情、上下文快照）与
+// 对应 DOM 没有读者：就地释放，降低标签页驻留内存。机器内存吃紧时，驻留
+// 过大的标签页会被系统裁剪换出，再次交互触发缺页换回，表现为整个浏览器
+// 进程冻结数秒、输入延迟回放。重新打开任务本就整包重载（loadTaskDetail
+// 全量重拉），这里丢弃的全部会被重建，不损失任何可见状态。
+// 注意：必须在 stashTaskDetailViewState / closeTaskDetailWs 之后调用。
+function releaseTaskDetailRetainedState() {
+    S.taskNodeDetails = {};
+    S.taskNodeDetailRequests = {};
+    S.taskNodeLatestContexts = {};
+    S.taskNodeLatestContextRequests = {};
+    S.taskNodePatchSummaries = {};
+    if (S.taskNodeErrorHistories) S.taskNodeErrorHistories = {};
+    S.currentNodeDetail = null;
+    S.recentModelCalls = [];
+    S.taskErrorLogs = [];
+    S.taskArtifacts = [];
+    S.selectedArtifactId = "";
+    S.artifactContent = "";
+    S.frontier = [];
+    S.taskRuntimeSummary = null;
+    S.liveFrameMap = {};
+    if (typeof resetTaskTreeSnapshotState === "function") resetTaskTreeSnapshotState();
+    if (U.tree) U.tree.innerHTML = "";
+    if (U.adFlow) U.adFlow.innerHTML = "";
+    if (U.adMessages) U.adMessages.innerHTML = "";
+    if (U.artifactList) U.artifactList.innerHTML = "";
+    if (U.artifactContent) U.artifactContent.textContent = "";
+}
+
 function resetTaskView() {
     closeTaskDetailWs();
     clearTaskDetailSession();

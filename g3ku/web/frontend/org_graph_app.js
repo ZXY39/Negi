@@ -11710,6 +11710,9 @@ function switchView(view) {
         clearAgentSelection({ rerender: false });
         closeTaskDetailWs();
         scheduleTaskDetailSessionPersist();
+        // 卸载详情驻留大状态与 DOM（见 releaseTaskDetailRetainedState 注释）：
+        // 降低标签页驻留内存，减轻内存吃紧机器上整页被裁剪换出造成的冻结。
+        if (typeof releaseTaskDetailRetainedState === "function") releaseTaskDetailRetainedState();
     }
     if (view === "tasks") {
         void loadTasks();
