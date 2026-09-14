@@ -24,10 +24,13 @@ def _env_default_tool_timeout_seconds() -> float:
 
 
 # 全局工具调用硬上限默认值（秒）：所有工具的最大运行时长保底，显式传入的
-# timeout 参数优先；无上限约束（调用方可传任意更大的值）。
+# timeout_seconds 参数优先；无上限约束（调用方可传任意更大的值）。
+# 参数名带单位（_seconds）以杜绝把秒误当毫秒（历史事故：模型传 60000 想要
+# 60s，实际是 60000s≈16.6h，卡死工具并把失速截止一并推到 16h 后）。
+# 下限支持真正的亚秒（0.05s），与 watchdog 轮询粒度对齐。
 DEFAULT_TOOL_TIMEOUT_SECONDS: float = _env_default_tool_timeout_seconds()
-MIN_TOOL_TIMEOUT_SECONDS: float = 1.0
-TOOL_TIMEOUT_ARGUMENT_NAME = "timeout"
+MIN_TOOL_TIMEOUT_SECONDS: float = 0.05
+TOOL_TIMEOUT_ARGUMENT_NAME = "timeout_seconds"
 
 
 @dataclass(slots=True)
@@ -365,7 +368,7 @@ def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
 
 
 def coerce_timeout_argument(value: Any) -> float | None:
-    """把调用方传入的 timeout 参数归一成秒数；无效/缺省返回 None（交给全局默认）。"""
+    """把调用方传入的 timeout_seconds 参数归一成秒数；无效/缺省返回 None（交给全局默认）。"""
     if value is None:
         return None
     if isinstance(value, bool):
@@ -403,10 +406,12 @@ def build_tool_timeout_error_text(*, tool_name: str, timeout_seconds: float) -> 
     """工具超时被停止后返回给模型的统一错误文案（含如何延长的指引）。"""
     normalized_tool_name = str(tool_name or "tool").strip() or "tool"
     seconds = max(0.0, float(timeout_seconds or 0.0))
+    # 亚秒上限要显示出小数，否则 0.3s 会渲染成 "0s" 误导模型。
+    seconds_text = f"{seconds:.2f}".rstrip("0").rstrip(".") if seconds < 1 else f"{seconds:.0f}"
     return (
-        f"Error executing {normalized_tool_name}: timed out after {seconds:.0f}s. "
-        f"该工具调用因超出 {seconds:.0f}s 运行时长上限被停止。"
-        f"如果它确实需要更长时间，请在下一次调用时显式传入更大的 \"timeout\" 参数（单位：秒）。"
+        f"Error executing {normalized_tool_name}: timed out after {seconds_text}s. "
+        f"该工具调用因超出 {seconds_text}s 运行时长上限被停止。"
+        f"如果它确实需要更长时间，请在下一次调用时显式传入更大的 \"timeout_seconds\" 参数（单位：秒，支持小数）。"
     )
 
 
@@ -907,7 +912,7 @@ async def run_tool_with_hard_timeout(
     """不走 watchdog 轮询的薄包装：到点硬超时并返回统一超时错误文案。"""
     execution_task = asyncio.create_task(awaitable, name=f"tool-hard-timeout:{tool_name}")
     try:
-        return await asyncio.wait_for(asyncio.shield(execution_task), timeout=max(0.1, float(timeout_seconds)))
+        return await asyncio.wait_for(asyncio.shield(execution_task), timeout=max(MIN_TOOL_TIMEOUT_SECONDS, float(timeout_seconds)))
     except asyncio.TimeoutError:
         await _enforce_hard_timeout(task=execution_task, cancel_token=cancel_token, tool_name=tool_name)
         return build_tool_timeout_error_text(tool_name=tool_name, timeout_seconds=timeout_seconds)

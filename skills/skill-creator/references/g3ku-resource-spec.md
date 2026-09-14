@@ -88,8 +88,8 @@ toolskill:
   enabled: true
 timeout_policy:            # 可选：统一 timeout 合同行为声明（缺省全 false）
   exempt_universal: false  # true = 不套外层最大超时，仅限长时编排类工具
-  self_enforced: false     # true = handler 自行消费 timeout 入参并结构化收尾
-  hide_parameter: false    # true = 模型 schema 不注入 timeout 参数（保底仍适用）
+  self_enforced: false     # true = handler 自行消费 timeout_seconds 入参并结构化收尾
+  hide_parameter: false    # true = 模型 schema 不注入 timeout_seconds 参数（保底仍适用）
 ```
 
 规则：

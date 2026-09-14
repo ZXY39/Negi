@@ -90,7 +90,7 @@ class AgentBrowserTool(Tool):
         profile: str | None = None,
         session_name: str | None = None,
         stdin: str | None = None,
-        timeout: float | None = None,
+        timeout_seconds: float | None = None,
         __g3ku_runtime: dict[str, Any] | None = None,
         **_: Any,
     ) -> str:
@@ -114,10 +114,11 @@ class AgentBrowserTool(Tool):
             env = self._build_process_env()
             final_args = self._inject_global_flags(argv=argv, session=None, profile=profile, session_name=session_name)
             active_session = self._session_from_args(final_args)
-            resolved_timeout = coerce_timeout_argument(timeout)
+            resolved_timeout = coerce_timeout_argument(timeout_seconds)
             if resolved_timeout is None:
                 resolved_timeout = resolve_tool_watchdog_config(runtime).default_timeout_seconds
-            effective_timeout = max(1, int(resolved_timeout))
+            # 亚秒下限与全局 MIN 对齐；保留 float 精度，不再 int 截断把 0.5s 抬成 1s。
+            effective_timeout = max(0.05, float(resolved_timeout))
 
             first_result = await self._run_command(
                 command_prefix=command_prefix,
@@ -472,7 +473,7 @@ class AgentBrowserTool(Tool):
         cwd: str,
         env: dict[str, str],
         stdin: str | None,
-        timeout_seconds: int,
+        timeout_seconds: float,
         cancel_token: Any | None,
         runtime_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
@@ -562,7 +563,7 @@ class AgentBrowserTool(Tool):
         *,
         process: asyncio.subprocess.Process,
         stdin: str | None,
-        timeout_seconds: int,
+        timeout_seconds: float,
         cancel_token: Any | None,
         runtime_context: dict[str, Any] | None,
         observation_command: list[str],

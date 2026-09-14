@@ -64,7 +64,7 @@ class ExecTool(Tool):
     """Tool to execute shell commands."""
 
     # exec 持有子进程并需要结构化收尾（杀进程树、排空管道、抢救部分输出），
-    # 由工具自身消费统一 timeout 值；外层强制层对其让位。
+    # 由工具自身消费统一 timeout_seconds 值；外层强制层对其让位。
     self_enforced_timeout = True
 
     def __init__(
@@ -121,9 +121,16 @@ class ExecTool(Tool):
     @property
     def model_description(self) -> str:
         execution_mode = self._resolve_execution_mode()
+        shell_hint = (
+            " The command already runs inside PowerShell on Windows (sh on POSIX): "
+            "write the command body directly and do NOT wrap it in another "
+            "`powershell -Command \"...\"` / `bash -c \"...\"` — redundant nesting "
+            "complicates quoting and can leave grandchild processes holding the "
+            "output pipes, which stalls the call."
+        )
         if execution_mode == EXECUTION_MODE_FULL_ACCESS:
-            return "Execute shell commands without exec-side guardrails and return structured output."
-        return "Execute shell commands with exec-side guardrails and return structured output."
+            return "Execute shell commands without exec-side guardrails and return structured output." + shell_hint
+        return "Execute shell commands with exec-side guardrails and return structured output." + shell_hint
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -144,7 +151,7 @@ class ExecTool(Tool):
     
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
-        effective_timeout = self._resolve_effective_timeout(kwargs.pop("timeout", None), runtime=runtime)
+        effective_timeout = self._resolve_effective_timeout(kwargs.pop("timeout_seconds", None), runtime=runtime)
         cwd = self._resolve_cwd(working_dir, runtime=runtime)
         execution_mode = self._resolve_execution_mode()
         if execution_mode != EXECUTION_MODE_FULL_ACCESS:
@@ -226,9 +233,14 @@ class ExecTool(Tool):
                 except asyncio.TimeoutError:
                     pass
                 stdout_capture, stderr_capture = await self._collect_terminated_process_output(process)
+                _secs_text = (
+                    f"{effective_timeout:.2f}".rstrip("0").rstrip(".")
+                    if effective_timeout < 1
+                    else f"{effective_timeout:.0f}"
+                )
                 timeout_message = (
-                    f"Command timed out after {effective_timeout:.0f} seconds. "
-                    "如需更长运行时间，请在下一次调用时显式传入更大的 \"timeout\" 参数（单位：秒）。"
+                    f"Command timed out after {_secs_text} seconds. "
+                    "如需更长运行时间，请在下一次调用时显式传入更大的 \"timeout_seconds\" 参数（单位：秒，支持小数）。"
                 )
                 return self._build_payload(
                     status="error",

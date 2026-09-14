@@ -67,16 +67,17 @@ def _normalize_parameters(schema: dict[str, Any] | None) -> dict[str, Any]:
 
 def _with_universal_timeout_property(schema: dict[str, Any]) -> dict[str, Any]:
     properties = dict(schema.get("properties") or {})
-    if "timeout" in properties:
+    if "timeout_seconds" in properties:
         return schema
     return {
         **schema,
         "properties": {
             **properties,
-            "timeout": {
+            "timeout_seconds": {
                 "type": "number",
                 "description": (
-                    "Optional maximum execution time in seconds for this call. "
+                    "Optional maximum execution time for this call, in SECONDS (fractions allowed, e.g. 0.5). "
+                    "This is seconds, NOT milliseconds — for a 60s limit pass 60, not 60000. "
                     "When omitted, the runtime default (600s) applies."
                 ),
             },
@@ -184,13 +185,14 @@ class EmbeddedMCPTool(Tool):
         self._handler = handler
         self._parameters = _normalize_parameters(descriptor.parameters)
         if self.self_enforced_timeout:
-            # 自持工具消费统一 timeout 参数：FastMCP 按注册 schema 校验入参，
+            # 自持工具消费统一 timeout_seconds 参数：FastMCP 按注册 schema 校验入参，
             # 必须把统一参数并入，否则 call_tool 会在进工具前把它拒掉。
             # 标志可能来自 handler 类属性，也可能来自清单 timeout_policy 声明。
             self._parameters = _with_universal_timeout_property(self._parameters)
         # schema/实现漂移防线：注册 schema 声明的参数未必被 handler 真实签名接受
-        # （历史事故：resource.yaml 残留 timeout_ms，实现已改为 timeout，FastMCP
-        # 按 schema 默认值给每次调用强注 timeout_ms，导致所有调用无差别报错）。
+        # （历史事故：resource.yaml 残留 timeout_ms，实现已改名，FastMCP 按 schema
+        # 默认值给每次调用强注 timeout_ms，导致所有调用无差别报错；统一 timeout
+        # 参数现名 timeout_seconds，handler 签名必须接受同名参数）。
         # 构建期交叉校验告警 + 执行期过滤未接受参数，双保险。
         self._handler_param_info = _handler_parameter_info(handler)
         self._drift_warned_keys: set[str] = set()

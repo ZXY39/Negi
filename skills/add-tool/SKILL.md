@@ -80,8 +80,8 @@ externaltools/
 
 - `timeout_policy` —— 工具在统一 timeout 合同下的行为（三个键都是布尔，缺省视为 false）：
   - `exempt_universal: true`：完全不套外层最大超时（全局默认 600s）。仅限运行时长天然无界的长时编排工具（例如一次调用内要跑完整个子任务流水线）。豁免只豁免超时、不豁免取消：必须完整实现强取消。
-  - `self_enforced: true`：handler 自己消费统一注入的 `timeout` 入参并负责结构化收尾（终止进程树、关闭会话、抢救部分输出）。声明后 handler 必须真的实现收尾，否则该工具处于无任何时限状态。
-  - `hide_parameter: true`：模型 schema 不注入 `timeout` 参数，机械保底仍适用。用于瞬时完成的内部协议类工具。
+  - `self_enforced: true`：handler 自己消费统一注入的 `timeout_seconds` 入参并负责结构化收尾（终止进程树、关闭会话、抢救部分输出）。声明后 handler 必须真的实现收尾，否则该工具处于无任何时限状态。
+  - `hide_parameter: true`：模型 schema 不注入 `timeout_seconds` 参数，机械保底仍适用。用于瞬时完成的内部协议类工具。
   - 清单声明与 handler 类属性是 OR 语义：清单只能追加这些 opt-in 行为，不能撤销代码级已声明的合同；handler 已在代码里设置标志的，清单不必重复声明。
 
 额外规则：

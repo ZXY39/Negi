@@ -139,7 +139,7 @@ async def test_ceo_support_standardizes_sidecar_timeout_stop_error_text() -> Non
 async def test_ceo_support_self_enforced_tools_keep_sidecar_but_skip_outer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     """新统一 timeout 合同：自持工具保留 watchdog（侧车道巡检仍在），
     但外层不叠加硬 deadline（hard_timeout_seconds=None），且工具收到统一
-    解析后的 timeout 值（显式传参 > 全局默认，无上限）。"""
+    解析后的 timeout_seconds 值（显式传参 > 全局默认，无上限）。"""
     inline_registry = _RecordingInlineRegistry()
     parent_token = ToolCancellationToken(session_key="web:test")
     loop = SimpleNamespace(
@@ -172,7 +172,7 @@ async def test_ceo_support_self_enforced_tools_keep_sidecar_but_skip_outer_deadl
     result, rendered, status, _started_at, _finished_at, _elapsed_seconds = await support._execute_tool_call_with_raw_result(
         tool=tool,
         tool_name="agent_browser",
-        arguments={"timeout": 1800},
+        arguments={"timeout_seconds": 1800},
         runtime_context={
             "actor_role": "ceo",
             "session_key": "web:test",
@@ -189,7 +189,7 @@ async def test_ceo_support_self_enforced_tools_keep_sidecar_but_skip_outer_deadl
     assert captured["inline_registry"] is inline_registry
     assert captured["hard_timeout_seconds"] is None
     # 自持工具收到统一解析后的有效时长（显式传参生效、无上限）。
-    assert tool.execute_kwargs[0].get("timeout") == 1800.0
+    assert tool.execute_kwargs[0].get("timeout_seconds") == 1800.0
     assert parent_token.is_cancelled() is False
 
 

@@ -284,9 +284,9 @@ class ToolRegistry:
         is_control_tool = tool_name in _CONTROL_TOOL_NAMES or timeout_exempt
         effective_timeout = resolve_effective_tool_timeout(params, runtime_context)
         if self_enforced:
-            execute_kwargs["timeout"] = effective_timeout
+            execute_kwargs["timeout_seconds"] = effective_timeout
         else:
-            execute_kwargs.pop("timeout", None)
+            execute_kwargs.pop("timeout_seconds", None)
 
         async def _invoke() -> Any:
             resource_manager = self._resolve_resource_manager(runtime_context)

@@ -1,4 +1,4 @@
-"""统一工具 timeout 合同的核心机制测试：解析、硬执行、侧车道自定排程、豁免合同。"""
+"""统一工具 timeout_seconds 合同的核心机制测试：解析、硬执行、侧车道自定排程、豁免合同。"""
 
 from __future__ import annotations
 
@@ -30,27 +30,38 @@ def test_coerce_timeout_argument_variants() -> None:
     assert coerce_timeout_argument("abc") is None
     assert coerce_timeout_argument(True) is None
     assert coerce_timeout_argument([1]) is None
-    assert coerce_timeout_argument(0) == 1.0  # 低于下限抬到 1s
-    assert coerce_timeout_argument(-5) == 1.0
+    assert coerce_timeout_argument(0) == 0.05  # 低于下限抬到 0.05s（亚秒下限）
+    assert coerce_timeout_argument(-5) == 0.05
     assert coerce_timeout_argument("900") == 900.0
     assert coerce_timeout_argument(86400) == 86400.0  # 无上限
     assert coerce_timeout_argument(float("inf")) is None
+    # 真正的亚秒：小数秒原样保留（不再被抬到 1s）
+    assert coerce_timeout_argument(0.3) == 0.3
+    assert coerce_timeout_argument(0.05) == 0.05
+    assert coerce_timeout_argument("0.5") == 0.5
+    assert coerce_timeout_argument(0.001) == 0.05  # 低于亚秒下限抬到 0.05s
 
 
 def test_resolve_effective_tool_timeout_explicit_wins_without_cap() -> None:
     context = {"tool_watchdog": {"default_timeout_seconds": 600}}
-    assert resolve_effective_tool_timeout({"timeout": 3600}, context) == 3600.0
-    assert resolve_effective_tool_timeout({"timeout": "42"}, context) == 42.0
+    assert resolve_effective_tool_timeout({"timeout_seconds": 3600}, context) == 3600.0
+    assert resolve_effective_tool_timeout({"timeout_seconds": "42"}, context) == 42.0
+    assert resolve_effective_tool_timeout({"timeout_seconds": 0.5}, context) == 0.5  # 亚秒
     # 无显式参数 → 全局默认
     assert resolve_effective_tool_timeout({}, context) == 600.0
     assert resolve_effective_tool_timeout(None, None) == DEFAULT_TOOL_TIMEOUT_SECONDS
+    # 旧名 `timeout` 已退役、不再被读取（无兜底）：只认 timeout_seconds
+    assert resolve_effective_tool_timeout({"timeout": 3600}, context) == 600.0
 
 
 def test_build_tool_timeout_error_text_shape() -> None:
     text = build_tool_timeout_error_text(tool_name="exec", timeout_seconds=600)
     assert text.startswith("Error executing exec: timed out after 600s.")
     assert "超出 600s 运行时长上限被停止" in text
-    assert 'timeout' in text
+    assert 'timeout_seconds' in text
+    # 亚秒上限要渲染出小数，不能显示成 "0s"
+    sub = build_tool_timeout_error_text(tool_name="exec", timeout_seconds=0.3)
+    assert "timed out after 0.3s." in sub
 
 
 @pytest.mark.asyncio
@@ -112,7 +123,7 @@ async def test_watchdog_self_enforced_tools_get_no_outer_deadline() -> None:
     outcome = await run_tool_with_watchdog(
         _quick(),
         tool_name="exec",
-        arguments={"timeout": 600},
+        arguments={"timeout_seconds": 600},
         runtime_context={"tool_watchdog": {"poll_interval_seconds": 0.2}},
         hard_timeout_seconds=None,
     )
@@ -256,7 +267,7 @@ def test_long_running_orchestration_and_control_tools_are_exempt() -> None:
 def test_exempt_tools_do_not_advertise_timeout_parameter() -> None:
     spawn = _spawn_tool()
     properties = spawn.to_model_schema()["function"]["parameters"].get("properties", {})
-    assert "timeout" not in properties
+    assert "timeout_seconds" not in properties
 
 
 class _KwargsRecordingInlineRegistry:
@@ -376,15 +387,15 @@ def test_manifest_policy_flags_resolve_on_manifest_backed_tool() -> None:
     assert tool.exempt_universal_timeout is True
     assert tool.hide_universal_timeout_parameter is True
     assert tool.self_enforced_timeout is False
-    # 豁免/隐藏后模型 schema 不注入 timeout 参数
-    assert "timeout" not in tool.to_model_schema()["function"]["parameters"]["properties"]
+    # 豁免/隐藏后模型 schema 不注入 timeout_seconds 参数
+    assert "timeout_seconds" not in tool.to_model_schema()["function"]["parameters"]["properties"]
 
     plain = ManifestBackedTool(_manifest_descriptor(None), _PlainManifestHandler())
     assert plain.exempt_universal_timeout is False
     assert plain.hide_universal_timeout_parameter is False
     assert plain.self_enforced_timeout is False
-    # 默认合同：注入 timeout 参数
-    assert "timeout" in plain.to_model_schema()["function"]["parameters"]["properties"]
+    # 默认合同：注入 timeout_seconds 参数
+    assert "timeout_seconds" in plain.to_model_schema()["function"]["parameters"]["properties"]
 
 
 def test_manifest_policy_is_additive_and_cannot_revoke_handler_contract() -> None:
@@ -425,17 +436,17 @@ def test_manifest_policy_flags_resolve_on_embedded_mcp_tool() -> None:
         _PlainManifestHandler(),
     )
     assert self_enforced.self_enforced_timeout is True
-    # 自持工具的统一 timeout 参数并入 FastMCP 注册 schema，避免入参校验拒掉
-    assert "timeout" in self_enforced.parameters.get("properties", {})
+    # 自持工具的统一 timeout_seconds 参数并入 FastMCP 注册 schema，避免入参校验拒掉
+    assert "timeout_seconds" in self_enforced.parameters.get("properties", {})
 
     exempt = EmbeddedMCPTool(
         _manifest_descriptor({"timeout_policy": {"exempt_universal": True}}),
         _PlainManifestHandler(),
     )
     assert exempt.exempt_universal_timeout is True
-    assert "timeout" not in exempt.to_model_schema()["function"]["parameters"]["properties"]
+    assert "timeout_seconds" not in exempt.to_model_schema()["function"]["parameters"]["properties"]
 
     plain = EmbeddedMCPTool(_manifest_descriptor(None), _PlainManifestHandler())
     assert plain.exempt_universal_timeout is False
     assert plain.self_enforced_timeout is False
-    assert "timeout" not in plain.parameters.get("properties", {})
+    assert "timeout_seconds" not in plain.parameters.get("properties", {})

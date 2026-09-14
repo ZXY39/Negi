@@ -135,13 +135,14 @@ class WebFetchTool:
         extract_main_content: bool = True,
         include_raw_html: bool = False,
         use_cache: bool = True,
-        timeout: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         normalized_url = _normalize_url(url)
         _assert_url_is_safe(normalized_url)
         max_chars = max(500, min(int(max_chars), _MAX_TEXT_CHARS))
         # 统一 timeout 合同：调用参数（已由执行层解析为显式值或全局默认）。
-        effective_timeout_seconds = max(1.0, float(timeout or 600.0))
+        # 下限 0.05s 与全局 MIN 对齐，不再把亚秒值抬回 1s。
+        effective_timeout_seconds = max(0.05, float(timeout_seconds or 600.0))
 
         cache_key = _cache_key(normalized_url, max_chars, extract_main_content, include_raw_html)
         if use_cache:

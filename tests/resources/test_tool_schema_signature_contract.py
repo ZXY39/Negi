@@ -1,19 +1,20 @@
 """resource.yaml 注册 schema 与 handler 实现签名的契约测试。
 
 背景事故（task:745f8363566b）：`web_fetch` 的实现在统一 timeout 合同改造中把
-`timeout_ms` 退役为 `timeout`（秒），但 resource.yaml 的 `parameters` 块仍声明
-`timeout_ms`（含 default 10000）。EmbeddedMCPTool 按注册 schema 构建 FastMCP
-签名，FastMCP 对每次调用做默认值填充，于是**所有** web_fetch 调用（即使模型
-参数完全正确、甚至不带任何 timeout 参数）都被强注 `timeout_ms=10000` 传给实现，
-无差别报 `unexpected keyword argument 'timeout_ms'`，工具整体瘫痪。
+`timeout_ms` 退役（秒制），但 resource.yaml 的 `parameters` 块仍声明 `timeout_ms`
+（含 default 10000）。EmbeddedMCPTool 按注册 schema 构建 FastMCP 签名，FastMCP 对
+每次调用做默认值填充，于是**所有** web_fetch 调用（即使模型参数完全正确、甚至不带
+任何 timeout 参数）都被强注 `timeout_ms=10000` 传给实现，无差别报
+`unexpected keyword argument 'timeout_ms'`，工具整体瘫痪。
 
-本文件防止同类 schema/实现漂移：
+统一 timeout 参数现名 `timeout_seconds`（秒、支持小数；旧名 `timeout`/`timeout_ms`
+均已退役）。本文件防止同类 schema/实现漂移：
 1. 清单卫生：resource.yaml 的 parameters.properties 键必须是合法 Python 标识符
    或关键字（关键字名走 ManifestBackedTool 兜底属既有设计；拦截的是被 JSON
    转义字符串写坏的 YAML 产生的病态键名）。
 2. 全量交叉校验：对测试环境可构建的每个工具，注册 schema properties 必须是
    handler 实际 dispatch 签名可接受的参数子集（handler 带 **kwargs 时豁免）；
-   自持超时工具必须接受统一 `timeout` 参数。web_fetch 必须被覆盖。
+   自持超时工具必须接受统一 `timeout_seconds` 参数。web_fetch 必须被覆盖。
 3. 事故回归：schema 声明实现不接受的参数时，EmbeddedMCPTool 执行期必须过滤掉
    该参数（含 FastMCP 默认值填充产生的强注），调用仍然成功，并记录漂移告警。
 """
@@ -169,24 +170,24 @@ def test_resource_yaml_properties_are_accepted_by_handler_signature(tmp_path: Pa
         drifted = sorted(properties - names)
         if drifted:
             violations.append(f'{tool_dir.name}: schema declares {drifted}, handler accepts {sorted(names)}')
-        # 自持超时工具会被执行层显式传入统一 timeout 参数，实现必须接受它。
-        if bool(getattr(handler, 'self_enforced_timeout', False)) and 'timeout' not in names:
-            violations.append(f'{tool_dir.name}: self_enforced_timeout handler must accept `timeout`')
+        # 自持超时工具会被执行层显式传入统一 timeout_seconds 参数，实现必须接受它。
+        if bool(getattr(handler, 'self_enforced_timeout', False)) and 'timeout_seconds' not in names:
+            violations.append(f'{tool_dir.name}: self_enforced_timeout handler must accept `timeout_seconds`')
 
     assert 'web_fetch' in checked, 'web_fetch 必须被本契约测试覆盖（事故工具）'
     assert violations == [], 'resource.yaml properties 必须是实现签名可接受参数的子集：\n' + '\n'.join(violations)
 
 
 class _DriftHandler:
-    """只接受 url/timeout 的实现；注册 schema 却仍声明 timeout_ms（复刻事故形态）。"""
+    """接受 url/timeout_seconds（现统一名）的实现；注册 schema 却仍声明旧 timeout_ms（复刻事故形态）。"""
 
     self_enforced_timeout = True
 
     def __init__(self) -> None:
         self.received: list[dict] = []
 
-    async def __call__(self, url: str, timeout: float | None = None) -> dict:
-        self.received.append({'url': url, 'timeout': timeout})
+    async def __call__(self, url: str, timeout_seconds: float | None = None) -> dict:
+        self.received.append({'url': url, 'timeout_seconds': timeout_seconds})
         return {'ok': True, 'url': url}
 
 
@@ -221,19 +222,19 @@ async def test_embedded_mcp_filters_schema_default_injected_drift_argument(caplo
     handler = _DriftHandler()
     tool = EmbeddedMCPTool(_drift_descriptor(), handler)
 
-    # 构建期就应记录 schema/实现漂移告警
+    # 构建期就应记录 schema/实现漂移告警（旧 timeout_ms 不被 handler 接受）
     assert any('timeout_ms' in record.getMessage() for record in caplog.records)
 
-    # 模型参数完全正确（不带 timeout_ms）：FastMCP 会按 schema 默认值强注
-    # timeout_ms=10000，执行层必须把它过滤掉，调用仍然成功。
-    result = await tool.execute(url='https://example.com', timeout=30)
+    # 模型参数完全正确（带统一 timeout_seconds、不带 timeout_ms）：FastMCP 会按
+    # schema 默认值强注 timeout_ms=10000，执行层必须把它过滤掉，调用仍然成功。
+    result = await tool.execute(url='https://example.com', timeout_seconds=30)
     assert json.loads(result) == {'ok': True, 'url': 'https://example.com'}
-    assert handler.received[-1] == {'url': 'https://example.com', 'timeout': 30}
+    assert handler.received[-1] == {'url': 'https://example.com', 'timeout_seconds': 30}
 
-    # 模型显式误传 timeout_ms（被文档/schema 诱导）：同样过滤，不再整体失败。
+    # 模型显式误传旧 timeout_ms（被文档/schema 诱导）：同样过滤，不再整体失败。
     result = await tool.execute(url='https://example.org', timeout_ms=15000)
     assert json.loads(result) == {'ok': True, 'url': 'https://example.org'}
-    assert handler.received[-1] == {'url': 'https://example.org', 'timeout': None}
+    assert handler.received[-1] == {'url': 'https://example.org', 'timeout_seconds': None}
     # 同一漂移键的执行期告警做过去重（防日志刷屏）：两次调用只记录一次。
     drop_warnings = [r for r in caplog.records if 'dropping arguments' in r.getMessage()]
     assert len(drop_warnings) == 1
@@ -244,5 +245,5 @@ def test_embedded_mcp_signature_still_validates_declared_parameters():
     tool = EmbeddedMCPTool(_drift_descriptor(), handler)
     signature = inspect.signature(_dispatch_target(handler))
     assert 'timeout_ms' not in signature.parameters
-    # 注册 schema（含注入的统一 timeout）仍是模型可见的调用面
-    assert set(tool.parameters.get('properties') or {}) >= {'url', 'timeout_ms', 'timeout'}
+    # 注册 schema（含注入的统一 timeout_seconds）仍是模型可见的调用面
+    assert set(tool.parameters.get('properties') or {}) >= {'url', 'timeout_ms', 'timeout_seconds'}

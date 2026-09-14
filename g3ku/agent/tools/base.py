@@ -17,12 +17,16 @@ class Tool(ABC):
 
     Universal timeout contract:
     - Every tool call is bounded by a maximum execution time: an explicit
-      `timeout` argument (seconds) wins, otherwise the global default
-      (see `g3ku.runtime.tool_watchdog.DEFAULT_TOOL_TIMEOUT_SECONDS`).
+      `timeout_seconds` argument (seconds, fractions allowed) wins, otherwise
+      the global default (see
+      `g3ku.runtime.tool_watchdog.DEFAULT_TOOL_TIMEOUT_SECONDS`). The argument
+      name carries its unit so the model never confuses seconds with
+      milliseconds (a past incident passed `60000` meaning 60s, which the
+      contract read as 60000s ≈ 16.6h).
     - Tools that own subprocesses/network sessions and need structured
       shutdown set `self_enforced_timeout = True`: they consume the
-      effective timeout value themselves (passed as the `timeout` kwarg)
-      and the outer enforcement layer defers to them.
+      effective timeout value themselves (passed as the `timeout_seconds`
+      kwarg) and the outer enforcement layer defers to them.
     - Internal protocol tools that finish instantly set
       `hide_universal_timeout_parameter = True` so the model-visible schema
       does not advertise a timeout parameter for them; the outer bound
@@ -194,7 +198,7 @@ class Tool(ABC):
         }
 
     def _model_parameters_with_universal_timeout(self) -> dict[str, Any]:
-        """向模型可见 schema 统一注入可选 `timeout` 参数（内部协议工具与豁免工具除外）。"""
+        """向模型可见 schema 统一注入可选 `timeout_seconds` 参数（内部协议工具与豁免工具除外）。"""
         schema = self.model_parameters or {}
         if (
             self.hide_universal_timeout_parameter
@@ -203,15 +207,16 @@ class Tool(ABC):
         ):
             return schema
         properties = schema.get("properties")
-        if not isinstance(properties, dict) or "timeout" in properties:
+        if not isinstance(properties, dict) or "timeout_seconds" in properties:
             return schema
         injected = dict(schema)
         injected["properties"] = {
             **properties,
-            "timeout": {
+            "timeout_seconds": {
                 "type": "number",
                 "description": (
-                    "Optional maximum execution time in seconds for this call. "
+                    "Optional maximum execution time for this call, in SECONDS (fractions allowed, e.g. 0.5). "
+                    "This is seconds, NOT milliseconds — for a 60s limit pass 60, not 60000. "
                     "When omitted, the runtime default (600s) applies and the call is stopped at that limit. "
                     "Pass an explicit larger value for legitimately long-running work; there is no upper cap."
                 ),

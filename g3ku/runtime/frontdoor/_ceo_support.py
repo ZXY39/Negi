@@ -684,9 +684,9 @@ class CeoFrontDoorSupport:
         timeout_exempt = bool(getattr(tool, "exempt_universal_timeout", False))
         effective_timeout = resolve_effective_tool_timeout(normalized_arguments, per_call_runtime)
         if self_enforced:
-            execute_kwargs["timeout"] = effective_timeout
+            execute_kwargs["timeout_seconds"] = effective_timeout
         else:
-            execute_kwargs.pop("timeout", None)
+            execute_kwargs.pop("timeout_seconds", None)
 
         def _set_inline_execution_id(execution_id: str) -> None:
             nonlocal inline_execution_id

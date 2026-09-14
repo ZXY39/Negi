@@ -11,7 +11,7 @@ from g3ku.agent.tools.base import Tool
 class MemoryWriteTool(Tool):
     """Queue explicit durable memory write requests for the CEO agent."""
 
-    # 内部入队工具、瞬时完成：不向模型暴露统一 timeout 参数。
+    # 内部入队工具、瞬时完成：不向模型暴露统一 timeout_seconds 参数。
     hide_universal_timeout_parameter = True
 
     def __init__(self, *, manager: Any):
