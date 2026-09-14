@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 
 from main.models import normalize_failure_class, normalize_final_acceptance_metadata
 
-
 TASK_TERMINAL_CALLBACK_PATH = '/api/internal/task-terminal'
 TASK_TERMINAL_CALLBACK_URL_ENV = 'G3KU_INTERNAL_CALLBACK_URL'
 TASK_TERMINAL_CALLBACK_TOKEN_ENV = 'G3KU_INTERNAL_CALLBACK_TOKEN'
@@ -119,6 +118,95 @@ def _normalize_task_terminal_text(value: Any) -> str:
     return str(value or '').strip()
 
 
+# 用户定向补充的一律从分发 epoch 重推：epoch 的 root_message / queued_root_messages
+# 是用户追加通知的权威记录，target_node_ids 点名了补充目标；失败/取消的分发跳过。
+_SUPPLEMENT_TERMINAL_EPOCH_STATES = frozenset({'failed', 'cancelled', 'cancelled_by_task_delete'})
+
+
+def collect_task_user_node_supplements(task_id: str, *, store: Any) -> list[dict[str, str]]:
+    """收集任务期间用户对各节点追加的定向通知（终态事件附带给会话模型）。
+
+    每行 = 一个 (epoch, 目标节点, 消息) 三元组；消息与目标取自分发 epoch 的
+    权威字段，节点标题用于会话模型对照（截断 60 字，兜底 node id）。
+    """
+    normalized_task_id = str(task_id or '').strip()
+    if not normalized_task_id or store is None:
+        return []
+    list_epochs = getattr(store, 'list_active_task_message_distribution_epochs', None)
+    get_node = getattr(store, 'get_node', None)
+    if not callable(list_epochs) or not callable(get_node):
+        return []
+    try:
+        epochs = list_epochs(normalized_task_id)
+    except Exception:
+        return []
+    items: list[dict[str, str]] = []
+    for epoch in list(epochs or []):
+        state = str(getattr(epoch, 'state', '') or '').strip().lower()
+        if state in _SUPPLEMENT_TERMINAL_EPOCH_STATES:
+            continue
+        payload = getattr(epoch, 'payload', None)
+        payload = payload if isinstance(payload, dict) else {}
+        messages = [
+            str(item or '').strip()
+            for item in list(payload.get('queued_root_messages') or [])
+            if str(item or '').strip()
+        ]
+        if not messages:
+            message = str(getattr(epoch, 'root_message', '') or '').strip()
+            messages = [message] if message else []
+        if not messages:
+            continue
+        targets = [
+            str(item or '').strip()
+            for item in list(payload.get('target_node_ids') or [])
+            if str(item or '').strip()
+        ]
+        epoch_id = str(getattr(epoch, 'epoch_id', '') or '').strip()
+        created_at = str(getattr(epoch, 'created_at', '') or '').strip()
+        for node_id in targets:
+            try:
+                node = get_node(node_id)
+            except Exception:
+                node = None
+            title = ' '.join(str(getattr(node, 'goal', '') or '').split())[:60].strip() if node is not None else ''
+            for raw_message in messages:
+                items.append(
+                    {
+                        'node_id': node_id,
+                        'node_title': title or node_id,
+                        'message': raw_message,
+                        'epoch_id': epoch_id,
+                        'created_at': created_at,
+                        'epoch_state': state or 'unknown',
+                    }
+                )
+    return items
+
+
+def normalize_user_node_supplements(value: Any) -> list[dict[str, str]]:
+    """清洗 user_node_supplements：仅保留有 node_id 与 message 的条目。"""
+    items: list[dict[str, str]] = []
+    for raw in list(value or []):
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get('node_id') or raw.get('nodeId') or '').strip()
+        message = str(raw.get('message') or '').strip()
+        if not node_id or not message:
+            continue
+        items.append(
+            {
+                'node_id': node_id,
+                'node_title': str(raw.get('node_title') or raw.get('nodeTitle') or '').strip() or node_id,
+                'message': message,
+                'epoch_id': str(raw.get('epoch_id') or raw.get('epochId') or '').strip(),
+                'created_at': str(raw.get('created_at') or raw.get('createdAt') or '').strip(),
+                'epoch_state': str(raw.get('epoch_state') or raw.get('epochState') or '').strip(),
+            }
+        )
+    return items
+
+
 def build_terminal_output_resolver(content_store: Any | None) -> Callable[[str], str] | None:
     """Build a resolver that re-inlines small externalized outputs.
 
@@ -172,8 +260,20 @@ def _task_terminal_delivery_payload(
     *,
     node_detail_getter: Callable[[str, str], dict[str, Any] | None] | None = None,
     output_resolver: Callable[[str], str] | None = None,
-) -> dict[str, str]:
+    supplement_getter: Callable[[str], list[dict[str, Any]]] | None = None,
+    fallback_supplements: Any = None,
+) -> dict[str, Any]:
     task_id = _normalize_task_terminal_text(getattr(task, 'task_id', ''))
+    # 用户定向补充：getter 可用且能重推到非空结果时以重推为准（同一任务、同一
+    # 数据源），否则保留上游传入值——worker 模式预计算、web 侧 getter 读不到
+    # 任务存储时兜底，保证 --no-worker 容器拓扑下该泳道不丢。
+    collected_supplements: list[dict[str, Any]] = []
+    if callable(supplement_getter):
+        try:
+            collected_supplements = normalize_user_node_supplements(supplement_getter(_normalize_task_terminal_text(getattr(task, 'task_id', ''))))
+        except Exception:
+            collected_supplements = []
+    user_node_supplements = collected_supplements if collected_supplements else normalize_user_node_supplements(fallback_supplements)
     root_node_id = _normalize_task_terminal_text(getattr(task, 'root_node_id', ''))
     metadata = getattr(task, 'metadata', None) if isinstance(getattr(task, 'metadata', None), dict) else {}
     final_acceptance = normalize_final_acceptance_metadata((metadata or {}).get('final_acceptance'))
@@ -271,10 +371,12 @@ def _task_terminal_delivery_payload(
         'terminal_failure_reason': terminal_failure_reason,
         'root_output': root_output,
         'root_output_ref': root_output_ref,
+        # 任务期间用户对各节点追加的定向通知（会话模型对齐最终需求用）。
+        'user_node_supplements': user_node_supplements,
     }
 
 
-def build_task_terminal_payload(task: Any) -> dict[str, str]:
+def build_task_terminal_payload(task: Any, *, supplement_getter: Callable[[str], list[dict[str, Any]]] | None = None) -> dict[str, Any]:
     task_id = str(getattr(task, 'task_id', '') or '').strip()
     session_id = str(getattr(task, 'session_id', '') or '').strip()
     status = str(getattr(task, 'status', '') or '').strip().lower()
@@ -291,7 +393,12 @@ def build_task_terminal_payload(task: Any) -> dict[str, str]:
         'failure_reason': str(getattr(task, 'failure_reason', '') or '').strip(),
         'finished_at': finished_at,
     }
-    payload.update(_task_terminal_delivery_payload(task))
+    payload.update(
+        _task_terminal_delivery_payload(
+            task,
+            supplement_getter=supplement_getter,
+        )
+    )
     return payload
 
 
@@ -302,7 +409,8 @@ def enrich_task_terminal_payload(
     task_getter: Callable[[str], Any | None] | None = None,
     node_detail_getter: Callable[[str, str], dict[str, Any] | None] | None = None,
     output_resolver: Callable[[str], str] | None = None,
-) -> dict[str, str]:
+    supplement_getter: Callable[[str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     normalized = normalize_task_terminal_payload(payload)
     if not normalized:
         return {}
@@ -319,12 +427,14 @@ def enrich_task_terminal_payload(
             task_record,
             node_detail_getter=node_detail_getter,
             output_resolver=output_resolver,
+            supplement_getter=supplement_getter,
+            fallback_supplements=normalized.get('user_node_supplements'),
         )
     )
     return normalize_task_terminal_payload(normalized)
 
 
-def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str, str]:
+def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
     task_id = str(source.get('task_id') or source.get('taskId') or '').strip()
     if task_id and not task_id.startswith('task:') and ':' not in task_id:
@@ -361,4 +471,7 @@ def normalize_task_terminal_payload(payload: dict[str, Any] | None) -> dict[str,
         'terminal_failure_reason': _normalize_task_terminal_text(source.get('terminal_failure_reason') or source.get('terminalFailureReason')),
         'root_output': _normalize_task_terminal_text(source.get('root_output') or source.get('rootOutput')),
         'root_output_ref': _normalize_task_terminal_text(source.get('root_output_ref') or source.get('rootOutputRef')),
+        'user_node_supplements': normalize_user_node_supplements(
+            source.get('user_node_supplements') or source.get('userNodeSupplements')
+        ),
     }

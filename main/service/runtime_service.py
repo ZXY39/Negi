@@ -147,6 +147,7 @@ from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_PATH,
     build_task_terminal_payload,
     build_terminal_output_resolver,
+    collect_task_user_node_supplements,
     enrich_task_terminal_payload,
     is_allowed_callback_url,
     load_task_terminal_callback_config,
@@ -3626,6 +3627,10 @@ class MainRuntimeService:
     def _stall_now_iso() -> str:
         return datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
+    def get_task_user_node_supplements(self, task_id: str) -> list[dict[str, str]]:
+        """任务期间用户对各节点追加的定向通知（终态心跳附带，会话模型对齐需求用）。"""
+        return collect_task_user_node_supplements(str(task_id or '').strip(), store=self.store)
+
     def _enqueue_task_terminal_callback(self, task: TaskRecord) -> None:
         if self.execution_mode != 'worker':
             return
@@ -3634,6 +3639,7 @@ class MainRuntimeService:
             task=task,
             node_detail_getter=self.get_node_detail_payload,
             output_resolver=build_terminal_output_resolver(self.content_store),
+            supplement_getter=self.get_task_user_node_supplements,
         )
         if not payload:
             return

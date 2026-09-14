@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from main.service.task_terminal_callback import TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
-
 from g3ku.core.timefmt import render_local_time
+from main.service.task_terminal_callback import TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
 
 
 @dataclass(slots=True)
@@ -243,10 +242,27 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
     terminal_failure_reason = _non_empty_text(event.get("terminal_failure_reason"))
     root_output = _non_empty_text(event.get("root_output"))
     root_output_ref = _non_empty_text(event.get("root_output_ref"))
+    # 用户定向补充：任务期间用户对各节点追加的通知（epoch 记账），终态事件携带，
+    # 让会话模型明确知道用户修改/追加过哪些节点的需求（对齐最终验收判定）。
+    user_node_supplements = [
+        item for item in list(event.get("user_node_supplements") or [])
+        if isinstance(item, dict)
+        and _non_empty_text(item.get("node_id"))
+        and _non_empty_text(item.get("message"))
+    ]
     # Terminal deliverables are allowed to inline far more than ordinary event
     # excerpts so the heartbeat turn can hand the user the full result without
     # a follow-up content_open round-trip.
     terminal_output_limit = max(output_inline_limit, TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT)
+    supplement_retrieval_parts: list[str] = ["user_node_supplements"]
+    for supplement in user_node_supplements:
+        for part in (
+            _non_empty_text(supplement.get("node_title")),
+            _non_empty_text(supplement.get("node_id")),
+            _non_empty_text(supplement.get("message"))[:terminal_output_limit],
+        ):
+            if part:
+                supplement_retrieval_parts.append(part)
     _append_retrieval_parts(
         retrieval_parts,
         "task_terminal",
@@ -261,6 +277,7 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
         terminal_check_result,
         terminal_failure_reason,
         root_output[:terminal_output_limit] if root_output and root_output != terminal_output else "",
+        *supplement_retrieval_parts,
     )
     lines = [
         f"- Task {title} ({task_id}) completed",
@@ -296,6 +313,24 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
         lines.append(f"  Result check: {terminal_check_result}")
     if terminal_failure_reason and terminal_failure_reason != summary:
         lines.append(f"  Result failure reason: {terminal_failure_reason}")
+    # 用户定向补充放在事件块末尾（任务结果之后），点名任务内的节点与追加内容，
+    # 会话模型汇报最终结果/做验收判定时必须与这些补充对齐。
+    if user_node_supplements:
+        lines.append(
+            "  User node supplements (用户定向补充：任务期间用户对以下节点追加了信息，"
+            "向用户汇报最终结果与验收判定时请将这些补充与任务结果对齐):"
+        )
+        for supplement in user_node_supplements:
+            node_id = _non_empty_text(supplement.get("node_id"))
+            node_title = _non_empty_text(supplement.get("node_title")) or node_id
+            message = _non_empty_text(supplement.get("message"))
+            if len(message) > terminal_output_limit:
+                message = f"{message[:terminal_output_limit].rstrip()}..."
+            epoch_state = _non_empty_text(supplement.get("epoch_state")).lower()
+            state_suffix = ""
+            if epoch_state and epoch_state not in {"completed", "unknown"}:
+                state_suffix = f" [distribution state: {epoch_state}]"
+            lines.append(f"    - Node {node_title} ({node_id}): {message}{state_suffix}")
     return lines
 
 

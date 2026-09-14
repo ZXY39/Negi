@@ -9,7 +9,10 @@ from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
 from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
 from g3ku.session.manager import SessionManager
-from main.service.task_terminal_callback import build_task_terminal_payload, enrich_task_terminal_payload
+from main.service.task_terminal_callback import (
+    build_task_terminal_payload,
+    enrich_task_terminal_payload,
+)
 
 
 class _Registry:
@@ -360,3 +363,119 @@ async def test_task_terminal_silent_reply_token_acks_without_visible_reply(tmp_p
     assert "ceo.internal.ack" in published_types
     # 静默 token 不走修复循环（只发生首次那一次 prompt）
     assert len(live_session.prompts) == 1
+
+
+def _supplement_store_fixture() -> SimpleNamespace:
+    """伪 store：一条 completed epoch（目标 node:child-a / node:child-b）供补充收集。"""
+
+    def _epoch(epoch_id: str, state: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            epoch_id=epoch_id,
+            state=state,
+            root_message="全树口径更新",
+            created_at="2026-03-27T01:20:00+08:00",
+            payload={
+                "queued_root_messages": ["全树口径更新", "补充 b 的要求"],
+                "target_node_ids": ["node:child-a", "node:child-b"],
+            },
+        )
+
+    epochs = [_epoch("epoch:done", "completed"), _epoch("epoch:aborted", "failed")]
+
+    def _list_active_task_message_distribution_epochs(task_id: str):
+        return epochs if str(task_id) == "task:demo-supplements" else []
+
+    def _get_node(node_id: str):
+        titles = {"node:child-a": "抓取西安市 AI 相关岗位", "node:child-b": "branch b"}
+        return SimpleNamespace(goal=titles.get(str(node_id), ""))
+
+    return SimpleNamespace(list_active_task_message_distribution_epochs=_list_active_task_message_distribution_epochs, get_node=_get_node)
+
+
+def test_terminal_payload_collects_user_node_supplements() -> None:
+    from main.service.task_terminal_callback import collect_task_user_node_supplements
+
+    task = SimpleNamespace(task_id="task:demo-supplements")
+    supplements = collect_task_user_node_supplements(task.task_id, store=_supplement_store_fixture())
+    # 失败 epoch 跳过；completed epoch 的 2 个目标 × 2 条消息 = 4 行。
+    assert len(supplements) == 4
+    assert {str(item["node_id"]) for item in supplements} == {"node:child-a", "node:child-b"}
+    child_a_rows = [item for item in supplements if item["node_id"] == "node:child-a"]
+    assert {str(item["message"]) for item in child_a_rows} == {"全树口径更新", "补充 b 的要求"}
+    assert child_a_rows[0]["node_title"] == "抓取西安市 AI 相关岗位"
+    assert child_a_rows[0]["epoch_state"] == "completed"
+
+
+def test_enrich_task_terminal_payload_renders_user_node_supplements_in_lane() -> None:
+    from main.service.task_terminal_callback import (
+        collect_task_user_node_supplements,
+        enrich_task_terminal_payload,
+    )
+
+    task_id = "task:demo-supplements"
+    task = SimpleNamespace(
+        task_id=task_id,
+        session_id="web:shared",
+        title="demo supplements task",
+        status="success",
+        root_node_id="node:root",
+        metadata={},
+        final_output="root final output",
+        final_output_ref="",
+        failure_reason="",
+        finished_at="2026-03-27T01:35:32+08:00",
+        brief_text="done",
+    )
+    payload = enrich_task_terminal_payload(
+        build_task_terminal_payload(task),
+        task=task,
+        supplement_getter=lambda current_task_id: collect_task_user_node_supplements(
+            current_task_id, store=_supplement_store_fixture()
+        ),
+    )
+
+    supplements = list(payload.get("user_node_supplements") or [])
+    assert len(supplements) == 4
+    assert {str(item["node_id"]) for item in supplements} == {"node:child-a", "node:child-b"}
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="openai:gpt-4.1",
+        stable_rules_text="Keep the user informed without exposing internal mechanics.",
+        events=[payload],
+    )
+    event_message = next(
+        message
+        for message in list(lane.request_messages)
+        if str(message.get("role") or "").strip().lower() == "user"
+    )
+    event_text = str(event_message.get("content") or "")
+    assert "User node supplements" in event_text
+    assert "Node 抓取西安市 AI 相关岗位 (node:child-a): 全树口径更新" in event_text
+    assert "Node branch b (node:child-b): 补充 b 的要求" in event_text
+    # 内容排在任务结果之后（事件块末尾提醒）。
+    assert event_text.index("User node supplements") > event_text.index("Result output")
+
+
+def test_normalize_task_terminal_payload_preserves_worker_supplements() -> None:
+    from main.service.task_terminal_callback import normalize_task_terminal_payload
+
+    worker_payload = {
+        "task_id": "task:demo-supplements",
+        "session_id": "web:shared",
+        "title": "demo supplements task",
+        "status": "success",
+        "finished_at": "2026-03-27T01:35:32+08:00",
+        "user_node_supplements": [
+            {"node_id": "node:child-a", "node_title": "child a", "message": "补充要求"},
+            {"node_id": "", "message": "drop me"},
+            {"nodeTitle": "no id either", "message": "drop me too"},
+        ],
+    }
+    normalized = normalize_task_terminal_payload(worker_payload)
+    assert normalized["user_node_supplements"] == [
+        {"node_id": "node:child-a", "node_title": "child a", "message": "补充要求", "epoch_id": "", "created_at": "", "epoch_state": ""},
+    ]
+
+    # 无 getter 可用（--no-worker 拓扑：web 读不到 worker 库）：enrich 保留上游预计算值。
+    enriched = enrich_task_terminal_payload(normalized, task=None, task_getter=lambda task_id: None)
+    assert enriched["user_node_supplements"] == normalized["user_node_supplements"]

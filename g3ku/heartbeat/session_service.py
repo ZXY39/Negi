@@ -9,7 +9,6 @@ from typing import Any
 
 from loguru import logger
 
-from g3ku.runtime.session_keys import normalize_account_id, parse_china_session_key
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane, format_local_timestamp
@@ -17,6 +16,7 @@ from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbea
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.frontdoor.canonical_context import ui_canonical_context_delta
 from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN
+from g3ku.runtime.session_keys import normalize_account_id, parse_china_session_key
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
     clear_inflight_turn_snapshot,
@@ -27,6 +27,7 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
+from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 from main.service.task_stall_callback import (
     TASK_STALL_REASON_SUSPECTED_STALL,
     TASK_STALL_REASON_USER_PAUSED,
@@ -34,7 +35,6 @@ from main.service.task_stall_callback import (
     normalize_task_stall_payload,
     normalize_task_stall_reason,
 )
-from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 from main.service.task_stall_notifier import (
     effective_silence_start,
     running_tool_deadline,
@@ -46,7 +46,6 @@ from main.service.task_terminal_callback import (
     build_task_terminal_payload,
     build_terminal_output_resolver,
     enrich_task_terminal_payload,
-    normalize_task_terminal_payload,
 )
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
@@ -184,6 +183,7 @@ class WebSessionHeartbeatService:
                 task=record,
                 node_detail_getter=getattr(self._main_task_service, 'get_node_detail_payload', None),
                 output_resolver=build_terminal_output_resolver(getattr(self._main_task_service, 'content_store', None)),
+                supplement_getter=getattr(self._main_task_service, 'get_task_user_node_supplements', None),
             )
         )
 
@@ -193,6 +193,7 @@ class WebSessionHeartbeatService:
             task_getter=getattr(self._main_task_service, 'get_task', None),
             node_detail_getter=getattr(self._main_task_service, 'get_node_detail_payload', None),
             output_resolver=build_terminal_output_resolver(getattr(self._main_task_service, 'content_store', None)),
+            supplement_getter=getattr(self._main_task_service, 'get_task_user_node_supplements', None),
         )
         session_id = str(normalized_payload.get("session_id") or "").strip()
         task_id = str(normalized_payload.get("task_id") or "").strip()
