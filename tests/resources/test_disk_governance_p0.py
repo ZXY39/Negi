@@ -288,6 +288,7 @@ def _make_log_service_harness(writer):
     service._pending_live_patch_history = {}
     service._live_patch_history_timers = {}
     service._event_write_failures = 0
+    service._last_event_failure_warn_mono = None
     return service
 
 

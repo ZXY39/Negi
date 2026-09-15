@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from loguru import logger
+
 from g3ku.content import (
     ContentNavigationService,
     artifact_ref_from_id,
@@ -140,6 +142,9 @@ def _default_governance_state(*, node_count_baseline: int = 1) -> dict[str, Any]
         'history': [],
     }
 
+# 事件写失败告警限流间隔（秒）：失败计数不受限，WARNING 至多每 300s 一条。
+_EVENT_WRITE_FAILURE_WARN_INTERVAL_SECONDS = 300.0
+
 class TaskLogService:
     def __init__(
         self,
@@ -170,8 +175,10 @@ class TaskLogService:
         self._live_patch_history_guard = threading.Lock()
         self._pending_live_patch_history: dict[str, dict[str, Any]] = {}
         self._live_patch_history_timers: dict[str, threading.Timer] = {}
-        # 磁盘治理（P0）：事件写失败计数。
+        # 磁盘治理（P0）：事件写失败计数与限流告警（计数随心跳 debug 块入库，
+        # 告警每 _EVENT_WRITE_FAILURE_WARN_INTERVAL_SECONDS 至多一条，防磁盘满刷屏）。
         self._event_write_failures = 0
+        self._last_event_failure_warn_mono: float | None = None
 
     def add_live_snapshot_publisher(self, publisher: Callable[[TaskRecord, dict[str, Any], bool], None]) -> None:
         if callable(publisher):
@@ -219,6 +226,29 @@ class TaskLogService:
         with self._task_locks_guard:
             self._task_locks.pop(normalized, None)
 
+    def _note_event_write_failure(self, exc: BaseException) -> None:
+        """事件写失败：计数随心跳 debug 块入库，告警限流（默认 300s 一条）。
+
+        静默吞异常是事件通道的既定契约（可降级写），但失败必须可观测——
+        计数对外可读，告警防止磁盘满等场景下逐条打爆日志。
+        """
+        self._event_write_failures += 1
+        now_mono = time.monotonic()
+        if (
+            self._last_event_failure_warn_mono is None
+            or now_mono - self._last_event_failure_warn_mono >= _EVENT_WRITE_FAILURE_WARN_INTERVAL_SECONDS
+        ):
+            self._last_event_failure_warn_mono = now_mono
+            logger.warning(
+                'task_events write failure (rate-limited): total={} latest={!r}',
+                self._event_write_failures,
+                exc,
+            )
+
+    def event_write_failure_count(self) -> int:
+        """进程内事件写失败累计（供心跳 debug 块与运维排障读取）。"""
+        return int(self._event_write_failures or 0)
+
     def append_task_event(
         self,
         *,
@@ -236,8 +266,8 @@ class TaskLogService:
                 event_type=event_type,
                 data=data,
             ) or 0)
-        except Exception:
-            self._event_write_failures += 1
+        except Exception as exc:
+            self._note_event_write_failure(exc)
             return 0
 
     def flush_live_patch_history(self, task_id: str) -> None:
@@ -268,8 +298,8 @@ class TaskLogService:
                 normalized_task_id,
                 json.dumps(payload, ensure_ascii=False),
             )
-        except Exception:
-            self._event_write_failures += 1
+        except Exception as exc:
+            self._note_event_write_failure(exc)
 
     def _task_lock(self, task_id: str) -> threading.RLock:
         key = str(task_id or '').strip()
@@ -5071,8 +5101,8 @@ class TaskLogService:
                 data=data,
             )
             return True
-        except Exception:
-            self._event_write_failures += 1
+        except Exception as exc:
+            self._note_event_write_failure(exc)
             return False
 
     @staticmethod

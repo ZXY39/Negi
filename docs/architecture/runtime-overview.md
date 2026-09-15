@@ -284,7 +284,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 契约按写入类别分层：
 
-- **写咽喉只分类不吞错**：全部 sqlite 写经 `SQLiteTaskStore._run_write`；磁盘满异常统一分类为 `DiskFullError` 后照常上抛，是否降级由调用点决定。writer 线程按类别累计失败计数，经 `write_failure_counts()` / `runtime_metrics_snapshot()` 暴露（`write_failure_disk_full` / `write_failure_other`），是判断"系统是否经历磁盘满"的第一指标。
+- **写咽喉只分类不吞错**：全部 sqlite 写经 `SQLiteTaskStore._run_write`；磁盘满异常统一分类为 `DiskFullError` 后照常上抛，是否降级由调用点决定。writer 线程按类别累计失败计数，经 `write_failure_counts()` / `runtime_metrics_snapshot()` 暴露（`write_failure_disk_full` / `write_failure_other`），是判断"系统是否经历磁盘满"的第一指标。计数不只在本地：心跳线程把 `sqlite_write_failures` / `event_write_failures` 一并写入 `worker_leases` / `worker_status` 的 debug 块，事件写失败（`TaskLogService.append_task_event` 与 live.patch 快照冲刷路径）另有 300s 限流 WARNING `task_events write failure (rate-limited): total=…`——静默降级可观测但告警不刷屏。排障顺序见 `operations-and-maintenance.md`「磁盘满」。
 - **关键写永远尝试**：任务/节点状态、pause 行、error_log 不做预检、失败靠调用点兜底。
 - **可降级写先过应急写预算**：actual-request artifact、`task.live.patch` 单份快照、execution trace 外置在写前调用 `has_emergency_disk_budget`（剩余空间 < max(`emergency_min_bytes`, 盘总量 × `emergency_min_ratio`) 即跳过落盘，退回 slim/minimal 形态）。预检带 5s TTL 缓存；探测失败保守放行。live.patch 快照被跳过时不写文件，下一个补丁覆盖写自然补齐（覆盖写自愈）。
 - **error pause 记录是 best-effort**：`NodeRunner` 异常路径的 error_log 与 pause 两个写点各自独立 try/except（`_persist_error_and_pause_best_effort`），任一失败都不阻断 `NodePausedError` 传播——控制流不依赖 pause 落盘，磁盘满只降级可见性、绝不放大为连锁节点暂停；未落盘的错误文本进入有界内存队列（deque maxlen=64）并留 warning 日志。`TaskActorService` 的 `NodePausedError` / `TaskPausedError` 分支里的二次 pause 状态写同样包死。

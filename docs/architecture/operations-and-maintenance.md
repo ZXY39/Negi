@@ -239,6 +239,8 @@ Provider retry troubleshooting note:
 
 排查「一直 stale」按序：`.g3ku/main-runtime/managed-worker.log` 末尾 `worker_lease_unavailable:<holder>:<expires_at>` 是旧租约未到期就被拉起（非根因，等 TTL 即可）；`managed task worker watchdog:` 打头的是看门狗决策日志；仍需确认没有外部 `g3ku worker` 残留占着租约（查 `worker_leases` 的 `holder_pid` 是否还活着）；worker 反复崩溃时继续按「任务没创建或没推进」查崩溃根因，而非只看门狗兜底。
 
+worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s 写库续租外，其余职责全部静默，唯一日志节律是每 10 分钟一行的 `worker heartbeat alive: worker_id=… pid=… active_tasks=… beats=… sqlite_write_failures=…` 存活行。判读：日志超过约 15–20 分钟不滚动而 `worker_leases.heartbeat_at` 仍新鲜（或 `holder_pid` 在 tasklist 中存活）→ 日志输出层异常，继续按本节排查；日志与心跳同时停 → 进程已死，看门狗自动兜底重启，崩溃根因按「任务没创建或没推进」查。
+
 ### 缓存命中下降或上下文疑似丢失
 
 先看：
@@ -297,7 +299,7 @@ Provider retry troubleshooting note:
 
 排障顺序：
 
-1. 先看 worker 状态快照的 `write_failure_disk_full` 计数与 `managed-worker.log` 里的 SQLITE_FULL 行——磁盘满期间错误日志本身可能写不出来，`.g3ku/errors/` 不是唯一证据源（计数契约见 `runtime-overview.md`「磁盘写保护与治理」）。
+1. 先看 worker 心跳 debug 块里的写失败计数（`worker_leases` 行 `payload_json.status_payload.debug` 下的 `sqlite_write_failures` / `event_write_failures`，`worker_status` 行 payload 与存活日志行同步携带）与 `managed-worker.log` 里的 SQLITE_FULL 行、限流告警 `task_events write failure (rate-limited): total=…`（300s 至多一条）——磁盘满期间错误日志本身可能写不出来，`.g3ku/errors/` 不是唯一证据源（计数契约见 `runtime-overview.md`「磁盘写保护与治理」）。
 2. 定位空间大户：`.g3ku/main-runtime/artifacts/`（历史任务产物）、`runtime.sqlite3`、`memory/`、`temp/tasks/`、`.tmp/`。目录统计命令要给足超时——磁盘近满时全量遍历极慢，短超时得到的数字不完整。
 3. 运行时自动行为无需干预：可降级写按应急预算自动跳过、error pause 记录失败不连锁、终态任务的中间产物自动清理；磁盘剩余跌破紧急线（max(300MB, 1%)）时运行中任务被自动暂停（新工具调用排队等待、不报错），任务大厅出现红色横幅与性能条「CPU/内存/磁盘」项的紧急着色（磁盘段显示 `0%(剩余10.1G) · 紧急`），空间恢复后紧急态自动解除、**被暂停的任务需手动 resume**。
 4. 需要人工的只有两类：回收历史存量（无写入者的死库文件），以及调整 `main_runtime.disk_guard` 配置（字段契约见 `config-and-models.md`「main_runtime」）。日常自动回收链路：任务终态即清中间产物；低于清理线（max(1GB,5%)）时全删渐进把超出 24h 宽限的最老终态任务**全量删除**（删除前报告类产出自动导出到 `.g3ku/main-runtime/deliverables/<task>/` 永久保留；任务从列表消失，不留墓碑）；每小时维护循环按 `detail_retention_days` 裁剪终态任务的五张大行表、经删除台账 sweep 补偿中断的删除并清扫孤儿 event-history 目录（契约见 `runtime-overview.md`「磁盘写保护与治理」）。event-history 每任务只存一份 live.patch 最新快照（latest.json.gz），无保留期清理链路。从带 zip 归档/逐事件归档历史的旧版本升级时，先跑一次性迁移 `scripts/migrate_slim_task_storage.py`（停机/排水后，默认 dry-run 报数，`--apply` 执行：event-history 收敛单份、存量 zip 导出产出后删除、清 live.patch DB 行与孤儿记账行）。

@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
+import time
 from typing import Any, Callable
 
+from loguru import logger
+
 from main.protocol import now_iso
+
+# 存活日志间隔（秒）：worker 静默期的心跳日志金丝雀——文件超过该间隔的
+# 数倍时长仍无新行而 worker_leases 心跳新鲜，指向日志输出层而非进程死亡。
+_WORKER_ALIVE_LOG_INTERVAL_SECONDS = 600.0
 
 
 class WorkerHeartbeatServiceV2:
@@ -19,6 +27,7 @@ class WorkerHeartbeatServiceV2:
         pressure_snapshot_supplier: Callable[[], dict[str, Any]] | None = None,
         debug_snapshot_supplier: Callable[[], dict[str, Any]] | None = None,
         lease_heartbeat: Callable[[str, dict[str, Any]], None] | None = None,
+        alive_log_interval_seconds: float = _WORKER_ALIVE_LOG_INTERVAL_SECONDS,
     ) -> None:
         self._store = store
         self._scheduler = scheduler
@@ -28,6 +37,7 @@ class WorkerHeartbeatServiceV2:
         self._pressure_snapshot_supplier = pressure_snapshot_supplier if callable(pressure_snapshot_supplier) else None
         self._debug_snapshot_supplier = debug_snapshot_supplier if callable(debug_snapshot_supplier) else None
         self._lease_heartbeat = lease_heartbeat if callable(lease_heartbeat) else None
+        self._alive_log_interval_seconds = max(0.0, float(alive_log_interval_seconds or 0.0))
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -63,6 +73,8 @@ class WorkerHeartbeatServiceV2:
         self._thread.start()
 
     def _thread_main(self) -> None:
+        beats = 0
+        last_alive_log_mono = 0.0
         while not self._stop_event.is_set():
             try:
                 active_task_count = self._scheduler.active_task_count() + self._scheduler.queued_task_count()
@@ -94,6 +106,30 @@ class WorkerHeartbeatServiceV2:
                 if self._lease_heartbeat is not None:
                     self._lease_heartbeat(updated_at, payload)
                 self._publish_status(item)
+                beats += 1
+                # 存活金丝雀：worker 静默期按间隔补一行心跳日志（web 侧不emit，
+                # console.log 自有持续流量）。附带库层写失败计数，非零时一并对账。
+                if (
+                    self._execution_mode == 'worker'
+                    and self._alive_log_interval_seconds > 0
+                    and (time.monotonic() - last_alive_log_mono) >= self._alive_log_interval_seconds
+                ):
+                    last_alive_log_mono = time.monotonic()
+                    write_failures: dict[str, Any] = {}
+                    failure_counter = getattr(self._store, 'write_failure_counts', None)
+                    if callable(failure_counter):
+                        try:
+                            write_failures = dict(failure_counter() or {})
+                        except Exception:
+                            write_failures = {}
+                    logger.info(
+                        'worker heartbeat alive: worker_id={} pid={} active_tasks={} beats={} sqlite_write_failures={}',
+                        self._worker_id,
+                        os.getpid(),
+                        active_task_count,
+                        beats,
+                        write_failures or '-',
+                    )
                 wait_seconds = 1.0 if active_task_count > 0 else 2.0
                 self._stop_event.wait(wait_seconds)
             except Exception:
