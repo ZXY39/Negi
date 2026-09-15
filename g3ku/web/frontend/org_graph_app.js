@@ -165,16 +165,16 @@ const S = {
     treeSnapshotSelfHealToken: null,
     treeSnapshotSelfHealAttempts: 0,
     treeLargeMode: false,
-    // 大树分块加载：加载期间渲染门闩与进度 toast 归属（见 org_graph_task_view.js
-    // loadTaskTreeSnapshot / renderTree）。
+    // 大树分块加载：加载期间渲染门闩与一行式进度提示条的归属（见
+    // org_graph_task_view.js loadTaskTreeSnapshot / renderTree）。
     treeBulkLoadingTaskId: "",
     treeBulkLoadToken: 0,
     // 任务详情视图代次：离开详情视图时 +1，作废在途树请求的落地（见
     // org_graph_task_view.js cancelTaskTreeLoading / ensureTaskTreeSubtree）。
     treeDetailGeneration: 0,
-    treeLoadToastTaskId: "",
-    treeLoadToastTimer: null,
-    treeLoadToastTimerTaskId: "",
+    treeLoadNoticeTaskId: "",
+    treeLoadNoticeTimer: null,
+    treeLoadNoticeTimerTaskId: "",
     taskDetailViewStates: {},
     pendingTaskDetailRestore: null,
     taskNodeBusy: false,
@@ -527,6 +527,8 @@ const U = {
     toastTitle: document.getElementById("app-toast-title"),
     toastText: document.getElementById("app-toast-text"),
     toastClose: document.getElementById("app-toast-close"),
+    taskLoadNotice: document.getElementById("task-load-notice"),
+    taskLoadNoticeText: document.getElementById("task-load-notice-text"),
     confirmBackdrop: document.getElementById("confirm-backdrop"),
     confirmTitle: document.getElementById("confirm-title"),
     confirmText: document.getElementById("confirm-text"),

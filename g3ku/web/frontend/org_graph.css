@@ -6105,8 +6105,12 @@ textarea {
     left: 160px;
     right: 0;
     display: flex;
-    justify-content: center;
-    align-items: flex-start;
+    /* Column so the load notice and a toast stack instead of overlapping if
+       both are up at once. Horizontal centering moves to align-items. */
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
     padding: 0 24px;
     z-index: 1400;
     pointer-events: none;
@@ -6118,6 +6122,47 @@ textarea {
     .app-toast-viewport {
         left: 0;
     }
+}
+
+/* 打开任务的加载进度：一行字的状态条，不是可操作提示——没有标题、没有关闭
+   按钮，也不接受指针事件（不可交互、不可关闭）。样式语言与
+   .ceo-context-load-notice-item 的标签胶囊一致。 */
+.task-load-notice {
+    display: inline-flex;
+    align-items: center;
+    max-width: min(420px, calc(100vw - 48px));
+    min-height: 34px;
+    padding: 9px 16px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-panel) 88%, var(--bg-app) 12%);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 500;
+    line-height: 1.2;
+    box-shadow: var(--shadow-sm);
+    pointer-events: none;
+    opacity: 0;
+    transform: translate3d(0, -8px, 0) scale(0.985);
+    transition: opacity 140ms ease, transform 160ms ease;
+}
+
+.task-load-notice[hidden] {
+    display: none;
+}
+
+.task-load-notice.is-open {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+}
+
+/* 单行展示：进度数字每块都会改写文本，折行会让状态条的宽度跳动。 */
+.task-load-notice-text {
+    display: block;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .app-toast {

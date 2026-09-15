@@ -293,121 +293,118 @@ function resolveTaskTreeBranchRoundId(nodeId) {
 // 上限 400 块（10 万节点）纯属防御，正常任务远达不到。
 const TASK_TREE_CHUNK_NODES = 250;
 const TASK_TREE_MAX_CHUNKS = 400;
-// 打开任务 400ms 内没走到树渲染阶段才弹加载 toast：避免小任务打开时 toast 一闪而过。
-const TASK_TREE_LOAD_TOAST_DELAY_MS = 400;
-// 全部块落位后，已显示数字的 toast 保留一小段可见窗口再关闭：showToast 后立刻
-// closeToast 没有中间绘制帧，用户永远看不到最后一段数字。
-const TASK_TREE_LOAD_TOAST_DONE_MS = 800;
+// 打开任务 400ms 内没走到树渲染阶段才亮出加载提示条：避免小任务打开时提示一闪而过。
+const TASK_TREE_LOAD_NOTICE_DELAY_MS = 400;
+// 全部块落位后，已显示数字的提示条保留一小段可见窗口再隐藏：渲染与隐藏同帧
+// 没有中间绘制帧，用户永远看不到最后一段数字。
+const TASK_TREE_LOAD_NOTICE_DONE_MS = 800;
 
-function cancelTaskTreeLoadToast(taskId = "") {
-    const key = String(taskId || "").trim();
-    const ownsToast = !!key && String(S.treeLoadToastTaskId || "").trim() === key;
-    const ownsTimer = !!key && String(S.treeLoadToastTimerTaskId || "").trim() === key;
-    if (!key || ownsToast || ownsTimer) {
-        if (S.treeLoadToastTimer) {
-            window.clearTimeout(S.treeLoadToastTimer);
-            S.treeLoadToastTimer = null;
-        }
-        S.treeLoadToastTimerTaskId = "";
-        S.treeLoadToastTaskId = "";
-    }
-    if (ownsToast && typeof closeToast === "function"
-        && U.toast
-        && (String(U.toastText?.textContent || "").trim().startsWith("加载中 (")
-            || String(U.toastTitle?.textContent || "").trim() === "正在打开任务")) {
-        closeToast();
-    }
+// 打开任务的加载进度是一行式状态条（U.taskLoadNotice，见 .task-load-notice），
+// 与 toast 卡片彻底分离：没有标题、没有关闭按钮、不接收指针事件。它只属于
+// 「打开任务」这条引导路径（loadTaskTreeSnapshot 的 announceLoad）。节点暂停/
+// 恢复、定向通知、快照自愈同样会重拉整树，但它们发生在已经打开的任务里，
+// 报「正在打开任务」会让用户以为任务又被打开了一次。
+function taskTreeLoadNoticeText(loadedCount, totalCount) {
+    const totalText = Number.isFinite(totalCount) && Number(totalCount) > 0 ? String(totalCount) : "…";
+    return `正在打开任务：加载中 (${loadedCount}/${totalText})`;
 }
 
-function beginTaskTreeLoadToast(taskId) {
+function clearTaskTreeLoadNoticeTimer() {
+    if (S.treeLoadNoticeTimer) window.clearTimeout(S.treeLoadNoticeTimer);
+    S.treeLoadNoticeTimer = null;
+    S.treeLoadNoticeTimerTaskId = "";
+}
+
+function hideTaskTreeLoadNotice() {
+    if (!U.taskLoadNotice || U.taskLoadNotice.hidden) return;
+    U.taskLoadNotice.hidden = true;
+    U.taskLoadNotice.className = "task-load-notice";
+}
+
+function showTaskTreeLoadNotice(text) {
+    if (!U.taskLoadNotice || !U.taskLoadNoticeText) return;
+    U.taskLoadNoticeText.textContent = String(text || "");
+    // 已经在显示（逐块更新数字的常规路径）：只改文本，不重复写显示状态。
+    if (!U.taskLoadNotice.hidden) return;
+    U.taskLoadNotice.hidden = false;
+    U.taskLoadNotice.className = "task-load-notice is-open";
+}
+
+function cancelTaskTreeLoadNotice(taskId = "") {
     const key = String(taskId || "").trim();
-    if (!key || typeof showToast !== "function") return;
-    if (S.treeLoadToastTimer) {
-        window.clearTimeout(S.treeLoadToastTimer);
-        S.treeLoadToastTimer = null;
-        S.treeLoadToastTimerTaskId = "";
-    }
-    S.treeLoadToastTaskId = key;
-    showToast({ title: "正在打开任务", text: "加载中 (0/…)", kind: "info", persistent: true });
+    const ownsNotice = !!key && String(S.treeLoadNoticeTaskId || "").trim() === key;
+    const ownsTimer = !!key && String(S.treeLoadNoticeTimerTaskId || "").trim() === key;
+    // 带任务 id 却不属于该任务：不动屏幕上别人的提示条。
+    if (key && !ownsNotice && !ownsTimer) return;
+    clearTaskTreeLoadNoticeTimer();
+    S.treeLoadNoticeTaskId = "";
+    if (!key || ownsNotice) hideTaskTreeLoadNotice();
+}
+
+function beginTaskTreeLoadNotice(taskId) {
+    const key = String(taskId || "").trim();
+    if (!key) return;
+    clearTaskTreeLoadNoticeTimer();
+    S.treeLoadNoticeTaskId = key;
+    showTaskTreeLoadNotice(taskTreeLoadNoticeText(0, null));
 }
 
 // 打开任务时的延迟提示：只负责"详情请求仍在途"的空窗期显示，
-// 后续进度数字由 loadTaskTreeSnapshot 的 updateTaskTreeLoadToast 接管。
-function scheduleTaskTreeLoadToast(taskId) {
+// 后续进度数字由 loadTaskTreeSnapshot 的 updateTaskTreeLoadNotice 接管。
+function scheduleTaskTreeLoadNotice(taskId) {
     const key = String(taskId || "").trim();
-    if (!key || typeof showToast !== "function") return;
-    if (String(S.treeLoadToastTaskId || "").trim() === key
-        || String(S.treeLoadToastTimerTaskId || "").trim() === key) {
-        // 同一任务：toast 已在显示（或弹出定时器已排定）。保持所有权不重置，
-        // 否则 updateTaskTreeLoadToast 会因「总数未超单块」的防闪烁闸门不再更新
+    if (!key || !U.taskLoadNotice) return;
+    if (String(S.treeLoadNoticeTaskId || "").trim() === key
+        || String(S.treeLoadNoticeTimerTaskId || "").trim() === key) {
+        // 同一任务：提示条已在显示（或弹出定时器已排定）。保持所有权不重置，
+        // 否则 updateTaskTreeLoadNotice 会因「总数未超单块」的防闪烁闸门不再更新
         // 已显示的数字，进度从此停在 0。
         return;
     }
-    if (S.treeLoadToastTimer) window.clearTimeout(S.treeLoadToastTimer);
-    S.treeLoadToastTaskId = "";
-    // 上一个任务遗留的加载 toast 失去归属：先关掉，避免切任务后残留在屏幕上。
-    if (typeof closeToast === "function"
-        && U.toast
-        && (String(U.toastText?.textContent || "").trim().startsWith("加载中 (")
-            || String(U.toastTitle?.textContent || "").trim() === "正在打开任务")) {
-        closeToast();
-    }
-    S.treeLoadToastTimerTaskId = key;
-    S.treeLoadToastTimer = window.setTimeout(() => {
-        S.treeLoadToastTimer = null;
-        S.treeLoadToastTimerTaskId = "";
+    // 上一个任务遗留的加载提示失去归属：先收掉，避免切任务后残留在屏幕上。
+    cancelTaskTreeLoadNotice();
+    S.treeLoadNoticeTimerTaskId = key;
+    S.treeLoadNoticeTimer = window.setTimeout(() => {
+        S.treeLoadNoticeTimer = null;
+        S.treeLoadNoticeTimerTaskId = "";
         if (String(S.currentTaskId || "").trim() !== key) return;
-        beginTaskTreeLoadToast(key);
-    }, TASK_TREE_LOAD_TOAST_DELAY_MS);
+        beginTaskTreeLoadNotice(key);
+    }, TASK_TREE_LOAD_NOTICE_DELAY_MS);
 }
 
-function updateTaskTreeLoadToast(taskId, loadedCount, totalCount) {
+function updateTaskTreeLoadNotice(taskId, loadedCount, totalCount) {
     const key = String(taskId || "").trim();
-    if (!key || typeof showToast !== "function") return;
-    if (S.treeLoadToastTimer) {
-        window.clearTimeout(S.treeLoadToastTimer);
-        S.treeLoadToastTimer = null;
-        S.treeLoadToastTimerTaskId = "";
-    }
-    const totalText = Number.isFinite(totalCount) && Number(totalCount) > 0 ? String(totalCount) : "…";
-    if (String(S.treeLoadToastTaskId || "").trim() !== key) {
+    if (!key || !U.taskLoadNotice) return;
+    clearTaskTreeLoadNoticeTimer();
+    if (String(S.treeLoadNoticeTaskId || "").trim() !== key) {
         // 还没到显示阈值：只有确认是分块大任务（超过一块）才立即弹出，
-        // 避免小任务打开时 toast 一闪而过。
+        // 避免小任务打开时提示条一闪而过。
         const showNow = Number(totalCount || 0) > TASK_TREE_CHUNK_NODES || Number(loadedCount || 0) > TASK_TREE_CHUNK_NODES;
         if (!showNow) return;
-        S.treeLoadToastTaskId = key;
+        S.treeLoadNoticeTaskId = key;
     }
-    showToast({ title: "正在打开任务", text: `加载中 (${loadedCount}/${totalText})`, kind: "info", persistent: true });
+    showTaskTreeLoadNotice(taskTreeLoadNoticeText(loadedCount, totalCount));
 }
 
-function finishTaskTreeLoadToast(taskId = "") {
+function finishTaskTreeLoadNotice(taskId = "") {
     const key = String(taskId || "").trim();
-    const owns = !!key && String(S.treeLoadToastTaskId || "").trim() === key;
-    if (S.treeLoadToastTimer) {
-        window.clearTimeout(S.treeLoadToastTimer);
-        S.treeLoadToastTimer = null;
-        S.treeLoadToastTimerTaskId = "";
-    }
+    const owns = !!key && String(S.treeLoadNoticeTaskId || "").trim() === key;
+    clearTaskTreeLoadNoticeTimer();
     if (!owns) {
-        // 没有显示任何加载 toast（快速打开）：只清状态，屏幕上没有可关的东西。
-        S.treeLoadToastTaskId = "";
+        // 没有显示任何加载提示（快速打开）：只清状态，屏幕上没有可收的东西。
+        S.treeLoadNoticeTaskId = "";
         return;
     }
-    // 已显示的 toast 保留 TASK_TREE_LOAD_TOAST_DONE_MS 的收尾窗口再关闭，
+    // 已显示的提示条保留 TASK_TREE_LOAD_NOTICE_DONE_MS 的收尾窗口再隐藏，
     // 保证最后一段进度数字有绘制帧、用户看得见。
-    S.treeLoadToastTimerTaskId = key;
-    S.treeLoadToastTimer = window.setTimeout(() => {
-        S.treeLoadToastTimer = null;
-        S.treeLoadToastTimerTaskId = "";
-        if (String(S.treeLoadToastTaskId || "").trim() !== key) return;
-        S.treeLoadToastTaskId = "";
-        if (typeof closeToast === "function"
-            && U.toast
-            && (String(U.toastText?.textContent || "").trim().startsWith("加载中 (")
-                || String(U.toastTitle?.textContent || "").trim() === "正在打开任务")) {
-            closeToast();
-        }
-    }, TASK_TREE_LOAD_TOAST_DONE_MS);
+    S.treeLoadNoticeTimerTaskId = key;
+    S.treeLoadNoticeTimer = window.setTimeout(() => {
+        S.treeLoadNoticeTimer = null;
+        S.treeLoadNoticeTimerTaskId = "";
+        if (String(S.treeLoadNoticeTaskId || "").trim() !== key) return;
+        S.treeLoadNoticeTaskId = "";
+        hideTaskTreeLoadNotice();
+    }, TASK_TREE_LOAD_NOTICE_DONE_MS);
 }
 
 function clearTaskTreeBranchSyncTimers() {
@@ -434,7 +431,7 @@ function cancelTaskTreeLoading() {
     S.treeBulkLoadToken = Number(S.treeBulkLoadToken || 0) + 1;
     S.treeDetailGeneration = Number(S.treeDetailGeneration || 0) + 1;
     S.treeBulkLoadingTaskId = "";
-    if (taskId) cancelTaskTreeLoadToast(taskId);
+    if (taskId) cancelTaskTreeLoadNotice(taskId);
     if (S.treeSnapshotSelfHealToken) {
         window.clearTimeout(S.treeSnapshotSelfHealToken);
         S.treeSnapshotSelfHealToken = null;
@@ -443,7 +440,10 @@ function cancelTaskTreeLoading() {
     S.treeDirtyParentsById = {};
 }
 
-async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
+// announceLoad 只由「打开任务」的引导路径（loadTaskDetail）开启：那是用户唯一
+// 期待看到"正在打开任务"进度条的时刻。原地刷新（节点暂停/恢复、定向通知、
+// 快照自愈、子树回退）走默认的 false：既不起提示条，也不接管在途打开流程的提示条。
+async function loadTaskTreeSnapshot(taskId = S.currentTaskId, { announceLoad = false } = {}) {
     const normalizedTaskId = String(taskId || "").trim();
     if (!normalizedTaskId) return null;
     // 已离开详情视图：不再启动整树加载（节点暂停/恢复、定向通知等操作的
@@ -456,7 +456,13 @@ async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
     S.treeBulkLoadingTaskId = normalizedTaskId;
     S.treeBulkLoadToken = Number(S.treeBulkLoadToken || 0) + 1;
     const loadToken = S.treeBulkLoadToken;
-    scheduleTaskTreeLoadToast(normalizedTaskId);
+    if (announceLoad) {
+        scheduleTaskTreeLoadNotice(normalizedTaskId);
+    } else {
+        // 原地刷新抢在打开流程之前（令牌已换新，打开流程的旧循环只会在下一个请求
+        // 边界静默返回，永远走不到收尾）：它留下的提示条已失去意义，就地收掉。
+        cancelTaskTreeLoadNotice(normalizedTaskId);
+    }
     let totalNodeCount = null;
     let chunkIndex = 0;
     let cursor = "";
@@ -474,7 +480,9 @@ async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
             if (Number.isFinite(Number(payload?.total_node_count)) && Number(payload?.total_node_count) > 0) {
                 totalNodeCount = Math.max(1, Number(payload.total_node_count) || 1);
             }
-            updateTaskTreeLoadToast(normalizedTaskId, Object.keys(S.treeNodesById || {}).length, totalNodeCount);
+            if (announceLoad) {
+                updateTaskTreeLoadNotice(normalizedTaskId, Object.keys(S.treeNodesById || {}).length, totalNodeCount);
+            }
             truncated = !!payload?.truncated;
             if (!truncated) break;
             cursor = String(payload?.next_after_node_id || "").trim();
@@ -486,10 +494,10 @@ async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
         S.treeSelectedRoundByNodeId = pruneTreeRoundSelections(S.treeSelectedRoundByNodeId);
         if (truncated) {
             // 触及防御上限：展示已加载部分，并明确提示不完整。
-            cancelTaskTreeLoadToast(normalizedTaskId);
+            cancelTaskTreeLoadNotice(normalizedTaskId);
             showToast({ title: "任务树加载不完整", text: `节点过多，仅加载了 ${Object.keys(S.treeNodesById || {}).length} 个节点`, kind: "warn" });
-        } else {
-            finishTaskTreeLoadToast(normalizedTaskId);
+        } else if (announceLoad) {
+            finishTaskTreeLoadNotice(normalizedTaskId);
         }
         refreshTaskTreeSearchResultsIfVisible();
         renderTree();
@@ -508,7 +516,7 @@ async function loadTaskTreeSnapshot(taskId = S.currentTaskId) {
         if (String(S.currentTaskId || "").trim() === normalizedTaskId
             && Number(S.treeBulkLoadToken || 0) === Number(loadToken || 0)) {
             S.treeBulkLoadingTaskId = "";
-            cancelTaskTreeLoadToast(normalizedTaskId);
+            cancelTaskTreeLoadNotice(normalizedTaskId);
         }
         if (!isAbortLike(error) && U.tree) {
             U.tree.innerHTML = `<div class="empty-state error">Task tree unavailable: ${esc(error.message || "Unknown error")}</div>`;

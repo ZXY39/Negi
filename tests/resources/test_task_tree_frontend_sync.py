@@ -5220,10 +5220,19 @@ def test_task_tree_snapshot_chunked_load_merges_all_chunks_and_renders_once() ->
         const fs = require("fs");
         const vm = require("vm");
         global.window = global;
-        const toastCalls = [];
-        const closeCalls = [];
-        global.showToast = (payload) => { toastCalls.push(payload); };
-        global.closeToast = () => { closeCalls.push(true); };
+        const noticeTexts = [];
+        const noticeStates = [];
+        const notice = {
+          _hidden: true,
+          className: "",
+          get hidden() { return this._hidden; },
+          set hidden(value) { this._hidden = !!value; noticeStates.push(this._hidden ? "hide" : "show"); },
+        };
+        const noticeText = {
+          _value: "",
+          get textContent() { return this._value; },
+          set textContent(value) { this._value = String(value); noticeTexts.push(this._value); },
+        };
         global.isAbortLike = () => false;
         global.refreshTaskTreeSearchResultsIfVisible = () => {};
         let renderCount = 0;
@@ -5242,13 +5251,13 @@ def test_task_tree_snapshot_chunked_load_merges_all_chunks_and_renders_once() ->
           treeSelectedRoundByNodeId: {},
           treeBulkLoadingTaskId: "",
           treeBulkLoadToken: 0,
-          treeLoadToastTaskId: "",
-          treeLoadToastTimer: null,
-          treeLoadToastTimerTaskId: "",
+          treeLoadNoticeTaskId: "",
+          treeLoadNoticeTimer: null,
+          treeLoadNoticeTimerTaskId: "",
           taskNodeDetails: {},
           liveFrameMap: {},
         };
-        global.U = { tree: { innerHTML: "" } };
+        global.U = { tree: { innerHTML: "" }, taskLoadNotice: notice, taskLoadNoticeText: noticeText };
         global.ApiClient = {
           getTaskTreeSnapshot: async (taskId, { afterNodeId = "" } = {}) => {
             chunkCount += 1;
@@ -5285,7 +5294,8 @@ def test_task_tree_snapshot_chunked_load_merges_all_chunks_and_renders_once() ->
         vm.runInThisContext(code);
         global.renderTree = () => { renderCount += 1; };
         (async () => {
-          await loadTaskTreeSnapshot("task:test");
+          await loadTaskTreeSnapshot("task:test", { announceLoad: true });
+          await new Promise((resolve) => { setTimeout(resolve, 1000); });
           console.log(JSON.stringify({
             renderCount,
             chunkCount,
@@ -5294,8 +5304,11 @@ def test_task_tree_snapshot_chunked_load_merges_all_chunks_and_renders_once() ->
             hasC: !!S.treeNodesById.c,
             hasD: !!S.treeNodesById.d,
             bulkFlag: S.treeBulkLoadingTaskId,
-            toastCalls: toastCalls.length,
-            closeCalls: closeCalls.length,
+            noticeTexts,
+            noticeStates,
+            noticeHidden: notice.hidden,
+            noticeClass: notice.className,
+            owner: S.treeLoadNoticeTaskId,
           }));
         })();
         """
@@ -5309,25 +5322,34 @@ def test_task_tree_snapshot_chunked_load_merges_all_chunks_and_renders_once() ->
     # 全部块落位后才渲染一次；渲染后门闩清空。
     assert result["renderCount"] == 1
     assert result["bulkFlag"] == ""
-    # 小树不弹加载 toast（无闪烁），也不调用关闭。
-    assert result["toastCalls"] == 0
-    assert result["closeCalls"] == 0
+    # 小树（总数未超单块）不亮加载提示条：既不写文本也不显示，连延迟定时器
+    # 都要被首个分块取消掉，否则小任务打开时提示条会一闪而过。
+    assert result["noticeTexts"] == []
+    assert result["noticeStates"] == []
+    assert result["noticeHidden"] is True
+    assert result["noticeClass"] == ""
+    assert result["owner"] == ""
 
 
-def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -> None:
+def test_task_tree_snapshot_chunked_load_shows_progress_notice_for_large_tree() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
         const vm = require("vm");
         global.window = global;
-        const toastCalls = [];
-        const closeCalls = [];
-        global.showToast = (payload) => {
-          toastCalls.push({ ...payload });
-          if (global.U.toastText) global.U.toastText.textContent = String(payload.text || "");
-          if (global.U.toastTitle) global.U.toastTitle.textContent = String(payload.title || "");
+        const noticeTexts = [];
+        const noticeStates = [];
+        const notice = {
+          _hidden: true,
+          className: "",
+          get hidden() { return this._hidden; },
+          set hidden(value) { this._hidden = !!value; noticeStates.push(this._hidden ? "hide" : "show"); },
         };
-        global.closeToast = () => { closeCalls.push(true); };
+        const noticeText = {
+          _value: "",
+          get textContent() { return this._value; },
+          set textContent(value) { this._value = String(value); noticeTexts.push(this._value); },
+        };
         global.isAbortLike = () => false;
         global.refreshTaskTreeSearchResultsIfVisible = () => {};
         global.S = {
@@ -5344,13 +5366,13 @@ def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -
           treeSelectedRoundByNodeId: {},
           treeBulkLoadingTaskId: "",
           treeBulkLoadToken: 0,
-          treeLoadToastTaskId: "",
-          treeLoadToastTimer: null,
-          treeLoadToastTimerTaskId: "",
+          treeLoadNoticeTaskId: "",
+          treeLoadNoticeTimer: null,
+          treeLoadNoticeTimerTaskId: "",
           taskNodeDetails: {},
           liveFrameMap: {},
         };
-        global.U = { tree: { innerHTML: "" }, toast: {}, toastTitle: {}, toastText: {}, toastClose: {} };
+        global.U = { tree: { innerHTML: "" }, taskLoadNotice: notice, taskLoadNoticeText: noticeText };
         const chunkNodes = [
           { n1: "root", n2: "a1" },
           { n3: "a2", n4: "a3" },
@@ -5382,18 +5404,17 @@ def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -
         vm.runInThisContext(code);
         global.renderTree = () => {};
         (async () => {
-          await loadTaskTreeSnapshot("task:test");
-          const closeRightAfterLoad = closeCalls.length;
+          await loadTaskTreeSnapshot("task:test", { announceLoad: true });
+          const visibleRightAfterLoad = notice.hidden === false;
           await new Promise((resolve) => { setTimeout(resolve, 1000); });
-          const progressTexts = toastCalls.map((call) => String(call.text || ""));
           console.log(JSON.stringify({
             nodeCount: Object.keys(S.treeNodesById).length,
-            toastCount: toastCalls.length,
-            firstText: progressTexts[0] || "",
-            lastText: progressTexts[progressTexts.length - 1] || "",
-            allProgress: progressTexts.every((text) => text.startsWith("加载中 (")),
-            closeRightAfterLoad,
-            closeCalls: closeCalls.length,
+            texts: noticeTexts,
+            allProgress: noticeTexts.every((text) => text.startsWith("正在打开任务：加载中 (")),
+            noticeStates,
+            visibleRightAfterLoad,
+            noticeHidden: notice.hidden,
+            owner: S.treeLoadNoticeTaskId,
             bulkFlag: S.treeBulkLoadingTaskId,
           }));
         })();
@@ -5401,31 +5422,40 @@ def test_task_tree_snapshot_chunked_load_shows_progress_toast_for_large_tree() -
     )
 
     assert result["nodeCount"] == 5
-    # 大任务（总数超过单块上限）在首块返回后就显示进度 toast。
-    assert result["toastCount"] >= 1
+    # 大任务（总数超过单块上限）在首块返回后就亮出进度提示条，并逐块更新数字。
+    assert result["texts"] == [
+        "正在打开任务：加载中 (2/600)",
+        "正在打开任务：加载中 (4/600)",
+        "正在打开任务：加载中 (5/600)",
+    ]
     assert result["allProgress"] is True
-    assert result["firstText"] == "加载中 (2/600)"
-    assert result["lastText"] == "加载中 (5/600)"
-    # 最后一段数字保留可见窗口，不做同帧关闭；800ms 收尾窗口结束后才关闭。
-    assert result["closeRightAfterLoad"] == 0
-    assert result["closeCalls"] == 1
+    # 最后一段数字保留可见窗口，不做同帧关闭；800ms 收尾窗口结束后才隐藏。
+    assert result["visibleRightAfterLoad"] is True
+    assert result["noticeStates"] == ["show", "hide"]
+    assert result["noticeHidden"] is True
+    assert result["owner"] == ""
     assert result["bulkFlag"] == ""
 
 
-def test_task_tree_load_toast_updates_numbers_for_single_chunk_when_visible() -> None:
+def test_task_tree_load_notice_updates_numbers_for_single_chunk_when_visible() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
         const vm = require("vm");
         global.window = global;
-        const toastCalls = [];
-        const closeCalls = [];
-        global.showToast = (payload) => {
-          toastCalls.push({ ...payload });
-          if (global.U.toastText) global.U.toastText.textContent = String(payload.text || "");
-          if (global.U.toastTitle) global.U.toastTitle.textContent = String(payload.title || "");
+        const noticeTexts = [];
+        const noticeStates = [];
+        const notice = {
+          _hidden: false,
+          className: "task-load-notice is-open",
+          get hidden() { return this._hidden; },
+          set hidden(value) { this._hidden = !!value; noticeStates.push(this._hidden ? "hide" : "show"); },
         };
-        global.closeToast = () => { closeCalls.push(true); };
+        const noticeText = {
+          _value: "正在打开任务：加载中 (0/…)",
+          get textContent() { return this._value; },
+          set textContent(value) { this._value = String(value); noticeTexts.push(this._value); },
+        };
         global.isAbortLike = () => false;
         global.refreshTaskTreeSearchResultsIfVisible = () => {};
         global.S = {
@@ -5442,14 +5472,14 @@ def test_task_tree_load_toast_updates_numbers_for_single_chunk_when_visible() ->
           treeSelectedRoundByNodeId: {},
           treeBulkLoadingTaskId: "",
           treeBulkLoadToken: 0,
-          // 模拟详情阶段较慢：400ms 定时器已弹出 加载中 (0/…)，toast 已在显示。
-          treeLoadToastTaskId: "task:test",
-          treeLoadToastTimer: null,
-          treeLoadToastTimerTaskId: "",
+          // 模拟详情阶段较慢：400ms 定时器已弹出 加载中 (0/…)，提示条已在显示。
+          treeLoadNoticeTaskId: "task:test",
+          treeLoadNoticeTimer: null,
+          treeLoadNoticeTimerTaskId: "",
           taskNodeDetails: {},
           liveFrameMap: {},
         };
-        global.U = { tree: { innerHTML: "" }, toast: {}, toastTitle: { textContent: "正在打开任务" }, toastText: { textContent: "加载中 (0/…)" }, toastClose: {} };
+        global.U = { tree: { innerHTML: "" }, taskLoadNotice: notice, taskLoadNoticeText: noticeText };
         global.ApiClient = {
           getTaskTreeSnapshot: async (taskId) => ({
             task_id: "task:test",
@@ -5469,16 +5499,16 @@ def test_task_tree_load_toast_updates_numbers_for_single_chunk_when_visible() ->
         vm.runInThisContext(code);
         global.renderTree = () => {};
         (async () => {
-          await loadTaskTreeSnapshot("task:test");
-          const progressTexts = toastCalls.map((call) => String(call.text || ""));
-          const closeRightAfterLoad = closeCalls.length;
+          await loadTaskTreeSnapshot("task:test", { announceLoad: true });
+          const visibleRightAfterLoad = notice.hidden === false;
           await new Promise((resolve) => { setTimeout(resolve, 1000); });
           console.log(JSON.stringify({
             nodeCount: Object.keys(S.treeNodesById).length,
-            toastCount: toastCalls.length,
-            texts: progressTexts,
-            closeRightAfterLoad,
-            closeCalls: closeCalls.length,
+            texts: noticeTexts,
+            noticeStates,
+            visibleRightAfterLoad,
+            noticeHidden: notice.hidden,
+            owner: S.treeLoadNoticeTaskId,
             bulkFlag: S.treeBulkLoadingTaskId,
           }));
         })();
@@ -5486,10 +5516,174 @@ def test_task_tree_load_toast_updates_numbers_for_single_chunk_when_visible() ->
     )
 
     assert result["nodeCount"] == 3
-    # 单块小树：toast 已显示时数字也必须更新，不能因防闪烁闸门停在 0。
-    assert result["toastCount"] == 1
-    assert result["texts"] == ["加载中 (3/3)"]
-    # 收尾窗口内不关闭，窗口结束后关闭一次。
-    assert result["closeRightAfterLoad"] == 0
-    assert result["closeCalls"] == 1
+    # 单块小树：提示条已显示时数字也必须更新，不能因防闪烁闸门停在 0。
+    assert result["texts"] == ["正在打开任务：加载中 (3/3)"]
+    # 收尾窗口内不隐藏（已在显示，不再重复写显示状态），窗口结束后隐藏一次。
+    assert result["visibleRightAfterLoad"] is True
+    assert result["noticeStates"] == ["hide"]
+    assert result["noticeHidden"] is True
+    assert result["owner"] == ""
     assert result["bulkFlag"] == ""
+
+
+def test_task_tree_in_place_refresh_never_shows_load_notice() -> None:
+    """暂停/恢复、定向通知、快照自愈走的原地刷新不报「正在打开任务」。
+
+    报告的问题：暂停任务时弹出「正在打开任务 加载中 (0/…)」，让人以为任务被
+    重新打开了一次。提示条只属于 loadTaskDetail 的打开引导路径（announceLoad）。
+    """
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        const noticeTexts = [];
+        const notice = {
+          _hidden: true,
+          className: "task-load-notice",
+          get hidden() { return this._hidden; },
+          set hidden(value) { this._hidden = !!value; },
+        };
+        const noticeText = {
+          _value: "",
+          get textContent() { return this._value; },
+          set textContent(value) { this._value = String(value); noticeTexts.push(this._value); },
+        };
+        global.isAbortLike = () => false;
+        global.refreshTaskTreeSearchResultsIfVisible = () => {};
+        global.S = {
+          currentTaskId: "task:test",
+          treeRootNodeId: "",
+          treeNodesById: {},
+          treeSnapshotVersion: "",
+          treeView: null,
+          treeLargeMode: false,
+          treeDirtyParentsById: {},
+          treeBranchSyncInFlightById: {},
+          treeBranchSyncQueuedById: {},
+          treeBranchSyncTokenById: {},
+          treeSelectedRoundByNodeId: {},
+          treeBulkLoadingTaskId: "",
+          treeBulkLoadToken: 0,
+          treeLoadNoticeTaskId: "",
+          treeLoadNoticeTimer: null,
+          treeLoadNoticeTimerTaskId: "",
+          taskNodeDetails: {},
+          liveFrameMap: {},
+        };
+        global.U = { tree: { innerHTML: "" }, taskLoadNotice: notice, taskLoadNoticeText: noticeText };
+        global.ApiClient = {
+          getTaskTreeSnapshot: async () => ({
+            task_id: "task:test",
+            root_node_id: "root",
+            snapshot_version: "11",
+            truncated: false,
+            // 大任务：总数远超单块上限，旧实现会在这里无条件亮出加载 toast。
+            total_node_count: 600,
+            next_after_node_id: "",
+            nodes_by_id: {
+              root: { node_id: "root", title: "root", status: "in_progress", node_kind: "execution", rounds: [], auxiliary_child_ids: [] },
+            },
+          }),
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        global.renderTree = () => {};
+        (async () => {
+          await loadTaskTreeSnapshot("task:test");
+          await new Promise((resolve) => { setTimeout(resolve, 1000); });
+          const inPlaceTexts = noticeTexts.slice();
+          const inPlaceHidden = notice.hidden;
+          const inPlaceOwner = S.treeLoadNoticeTaskId;
+          // 打开流程的提示条还在显示时被原地刷新抢先：它留下的提示条已失去意义，
+          // 必须立刻收掉；打开流程失效后的收尾也不能再把它带回来。
+          S.treeLoadNoticeTaskId = "task:test";
+          notice.hidden = false;
+          noticeText.textContent = "正在打开任务：加载中 (0/…)";
+          noticeTexts.length = 0;
+          await loadTaskTreeSnapshot("task:test");
+          const cancelledHidden = notice.hidden;
+          const cancelledOwner = S.treeLoadNoticeTaskId;
+          finishTaskTreeLoadNotice("task:test");
+          await new Promise((resolve) => { setTimeout(resolve, 1000); });
+          console.log(JSON.stringify({
+            inPlaceTexts,
+            inPlaceHidden,
+            inPlaceOwner,
+            cancelledHidden,
+            cancelledOwner,
+            textsAfterCancel: noticeTexts,
+            finalHidden: notice.hidden,
+          }));
+        })();
+        """
+    )
+
+    # 原地刷新即便加载的是超大任务也不写文本、不显示。
+    assert result["inPlaceTexts"] == []
+    assert result["inPlaceHidden"] is True
+    assert result["inPlaceOwner"] == ""
+    # 在途打开流程留下的提示条被原地刷新就地收掉，归属同时清空。
+    assert result["cancelledHidden"] is True
+    assert result["cancelledOwner"] == ""
+    assert result["textsAfterCancel"] == []
+    assert result["finalHidden"] is True
+
+
+def test_load_task_detail_announces_tree_load_only_for_real_opens() -> None:
+    """只有真正打开任务（preserveView 为假）才起「正在打开任务」提示条。
+
+    暂停/恢复、批量操作、断线重连对账走的都是 loadTaskDetail({preserveView:true})，
+    它们发生在已经打开的任务里，不能报"正在打开任务"。
+    """
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        const source = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const start = source.indexOf("async function loadTaskDetail");
+        if (start < 0) throw new Error("loadTaskDetail not found");
+        const tail = source.slice(start);
+        const end = tail.search(/\\n(async function |function )/);
+        if (end < 0) throw new Error("loadTaskDetail end not found");
+        const scheduleCalls = [];
+        const snapshotCalls = [];
+        const context = {
+          ApiClient: { getTask: async () => ({ task_id: "task:test" }) },
+          switchView: () => {},
+          resetTaskView: () => {},
+          openTaskDetailWs: () => {},
+          taskDetailViewVisible: () => true,
+          applyTaskPayload: () => {},
+          scheduleTaskTreeLoadNotice: (taskId) => { scheduleCalls.push(taskId); },
+          cancelTaskTreeLoadNotice: () => {},
+          loadTaskTreeSnapshot: async (taskId, options) => {
+            snapshotCalls.push({ taskId, announceLoad: options?.announceLoad });
+            return null;
+          },
+          S: { currentTaskId: "", treeFitOnNextRender: false },
+        };
+        const loadTaskDetail = vm.runInNewContext(`(${tail.slice(0, end)})`, context);
+        (async () => {
+          await loadTaskDetail("task:test");
+          const openSchedule = scheduleCalls.slice();
+          const openAnnounce = snapshotCalls[0] || null;
+          scheduleCalls.length = 0;
+          snapshotCalls.length = 0;
+          await loadTaskDetail("task:test", { preserveView: true, reopenSocket: false });
+          console.log(JSON.stringify({
+            openSchedule,
+            openAnnounce,
+            refreshSchedule: scheduleCalls,
+            refreshAnnounce: snapshotCalls[0] || null,
+          }));
+        })();
+        """
+    )
+
+    # 打开任务：起提示条，并把 announceLoad 传给整树加载。
+    assert result["openSchedule"] == ["task:test"]
+    assert result["openAnnounce"] == {"taskId": "task:test", "announceLoad": True}
+    # 原地刷新（暂停/恢复、批量操作、重连对账）：既不起提示条，也不传 announceLoad。
+    assert result["refreshSchedule"] == []
+    assert result["refreshAnnounce"] == {"taskId": "task:test", "announceLoad": False}

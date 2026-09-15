@@ -1722,15 +1722,19 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
         resetTaskView();
         S.treeFitOnNextRender = true;
     }
-    // 大任务详情请求可能较慢：超过阈值仍未进入树加载阶段时显示进度 toast。
-    scheduleTaskTreeLoadToast(taskId);
+    // 大任务详情请求可能较慢：超过阈值仍未进入树加载阶段时显示进度提示条。
+    // 只有真正的"打开任务"（preserveView 为假）才配这条提示：暂停/恢复/批量操作
+    // 后的对齐刷新、断线重连的整树重拉都发生在已经打开的任务里，报"正在打开任务"
+    // 会让用户以为任务被重新打开了一次。
+    const announceLoad = !preserveView;
+    if (announceLoad) scheduleTaskTreeLoadNotice(taskId);
     let payload;
     try {
         payload = await ApiClient.getTask(taskId, true);
     } catch (error) {
-        // 详情失败后进度提示没有继续存在的意义：清掉延迟 toast（含已显示的），
+        // 详情失败后进度提示没有继续存在的意义：清掉延迟提示条（含已显示的），
         // 由外层 openTask / restoreTaskDetailSession 展示错误信息。
-        cancelTaskTreeLoadToast(taskId);
+        cancelTaskTreeLoadNotice(taskId);
         throw error;
     }
     // 已离开详情视图（加载途中点了返回）：不再应用详情、不重开详情 WS、
@@ -1740,7 +1744,8 @@ async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = tru
     if (reopenSocket) {
         openTaskDetailWs(taskId);
     }
-    await loadTaskTreeSnapshot(taskId);
+    // 打开任务：整树分块加载期间显示"正在打开任务"进度提示条（原地刷新不显示）。
+    await loadTaskTreeSnapshot(taskId, { announceLoad });
     return payload;
 }
 
@@ -1774,7 +1779,7 @@ async function openTask(taskId) {
         await loadTaskArtifacts();
         scheduleTaskDetailSessionPersist();
     } catch (e) {
-        cancelTaskTreeLoadToast(String(taskId || ""));
+        cancelTaskTreeLoadNotice(String(taskId || ""));
         U.tree.innerHTML = `<div class="empty-state error">Failed to open task: ${esc(e.message)}</div>`;
         showToast({ title: "Task open failed", text: e.message || "Unknown error", kind: "error" });
     }
