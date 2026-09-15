@@ -20,6 +20,7 @@ from g3ku.runtime.external_outbox import (
     compact_outbox,
     expire_stale_pending,
     load_pending_outbound,
+    record_age_seconds,
     record_outbound_message,
 )
 from g3ku.runtime.external_sessions import EXTERNAL_OUTBOUND_CHANNEL, get_external_session_registry
@@ -56,10 +57,37 @@ _global_runtime_manager: Optional[SessionRuntimeManager] = None
 _global_web_heartbeat = None
 _global_outbound_drain_task: Optional[asyncio.Task] = None
 _global_task_worker_watchdog_task: Optional[asyncio.Task] = None
+_global_outbox_reconcile_task: Optional[asyncio.Task] = None
 _global_qq_official_service = None
 _global_runtime_services_lock: Optional[asyncio.Lock] = None
+_global_qq_official_sync_lock: Optional[asyncio.Lock] = None
 
 _NO_CEO_MODEL_CONFIGURED_MESSAGE = "No model configured for role 'ceo'."
+
+# 服务端周期 outbox 对账：启动重放（_replay_pending_external_outbox）是一次性的，
+# 覆盖不了「重启时账本为空、消息在重启后才产出」的窗口——2026-09-14 23:00 定时
+# 日报正是这样滞留的：桥启动预热扑空 → 无 pump → 日报发布进 hub 时无订阅者，
+# live 投递静默蒸发，而下一条恢复触发点（重启/入站）迟迟不来。对账循环把
+# 「足够老且无订阅者」的 pending 记录重新注入总线，配合桥侧周期对账建 pump，
+# 让滞留推送在分钟级自动补投，不再依赖重启。
+OUTBOX_RECONCILE_INTERVAL_SECONDS = 60.0
+# 重放年龄阈值：刚入账的记录留给 live 链路（订阅者可能正在建连），足够老才补投。
+OUTBOX_REPUBLISH_MIN_AGE_SECONDS = 120.0
+# 记录级重放退避：openai-compat 会话的 pending 记录永远没有 SSE 消费者，
+# 无退避会每轮重注入一次直到 24h 过期；按记录指数退避（首值 60s、×2、封顶
+# OUTBOX_REPUBLISH_MAX_BACKOFF_SECONDS）压制重复注入与日志噪声。
+OUTBOX_REPUBLISH_INITIAL_BACKOFF_SECONDS = 60.0
+OUTBOX_REPUBLISH_MAX_BACKOFF_SECONDS = 3600.0
+# 稳态压实周期（~1h）：append-only 账本每条投递产生 msg+ack 两行，周期路径若
+# 从不 compact 会无界增长，而它每分钟被对账读两次、每 30s 被桥轮询再读一次。
+OUTBOX_COMPACT_EVERY_N_CYCLES = 60
+# 每 N 个对账周期同步一次 qq-official 服务：sync_from_config 幂等，桥任务已死
+# （崩溃置 error 后无自动重启路径）或配置签名变化时重建 → 崩溃桥 ~5 分钟自愈。
+OUTBOX_BRIDGE_SYNC_EVERY_N_CYCLES = 5
+
+# outbox_id -> (loop 时间戳 not_before, 当前退避秒数)；进程内状态，记录离开
+# pending（ack/expire）即清理，重启清零（最多多注入一轮，符合 at-least-once）。
+_outbox_republish_backoff: dict[str, tuple[float, float]] = {}
 
 
 def is_no_ceo_model_configured_error(exc: BaseException | None) -> bool:
@@ -78,6 +106,13 @@ def _get_runtime_services_lock() -> asyncio.Lock:
     if _global_runtime_services_lock is None:
         _global_runtime_services_lock = asyncio.Lock()
     return _global_runtime_services_lock
+
+
+def _get_qq_official_sync_lock() -> asyncio.Lock:
+    global _global_qq_official_sync_lock
+    if _global_qq_official_sync_lock is None:
+        _global_qq_official_sync_lock = asyncio.Lock()
+    return _global_qq_official_sync_lock
 
 
 _PORT_OWNERSHIP_CACHE: dict[tuple[int, int], tuple[bool | None, float]] = {}
@@ -334,16 +369,22 @@ async def _sync_qq_official_service() -> None:
 
     Lazy import: the adapter (and only the adapter) may pull in ``qq-botpy``,
     and only when a start actually happens inside ``sync_from_config``.
+
+    整体持模块锁：sync_from_config 在 ``_restart`` 的 ``await stop()`` 窗口内
+    ``_task is None``，并发调用（runtime refresh / 启动序列 / outbox 对账循环）
+    会各自 create_task 一个桥，先建者成为无人持有的孤儿任务 → 双 botpy 连接、
+    每条消息双份投递。锁序只有 runtime-lock → sync-lock 单向嵌套，无死锁环。
     """
     global _global_qq_official_service
     from g3ku.qq_official.service import QqOfficialService
 
-    if _global_qq_official_service is None:
-        _global_qq_official_service = QqOfficialService()
-    try:
-        await _global_qq_official_service.sync_from_config()
-    except Exception:
-        logger.exception("qq-official service sync skipped on error")
+    async with _get_qq_official_sync_lock():
+        if _global_qq_official_service is None:
+            _global_qq_official_service = QqOfficialService()
+        try:
+            await _global_qq_official_service.sync_from_config()
+        except Exception:
+            logger.exception("qq-official service sync skipped on error")
 
 
 def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager:
@@ -458,14 +499,25 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
             payload["dedupe_key"] = dedupe_key
         if outbox_id:
             payload["outbox_id"] = outbox_id
-        get_session_event_hub(entry.session_key).publish("outbound.created", **payload)
+        hub = get_session_event_hub(entry.session_key)
+        hub.publish("outbound.created", **payload)
         # 语义要精确：这一行只代表"事件已发布到该会话的内存 hub"，不代表已送达
         # 渠道——真正送达以桥侧 "qq-official delivered ..." 回执日志为准。
-        logger.info(
-            "external outbound published to hub: session={} outbox_id={}",
-            entry.session_key,
-            outbox_id or "-",
-        )
+        # 无订阅者 = live 投递必然蒸发（2026-09-14 日报滞留事故的静默失败点），
+        # 升级为 WARNING 便于 grep；补投靠下面的周期 outbox 对账兜底。
+        if hub.subscriber_count() == 0:
+            logger.warning(
+                "external outbound published to hub with no live subscriber: "
+                "session={} outbox_id={} (delivery deferred to outbox reconcile)",
+                entry.session_key,
+                outbox_id or "-",
+            )
+        else:
+            logger.info(
+                "external outbound published to hub: session={} outbox_id={}",
+                entry.session_key,
+                outbox_id or "-",
+            )
 
     async def _drain_outbound() -> None:
         pending: OutboundMessage | None = None
@@ -509,6 +561,22 @@ def _ensure_outbound_drain_running() -> None:
         _global_outbound_drain_task = _start_outbound_drain(_global_bus)
 
 
+def _outbox_replay_message(record: dict[str, Any]) -> OutboundMessage:
+    """Build the bus message that re-injects one ledger record with its
+    original outbox_id (drain reuses the id, no duplicate registration)."""
+    return OutboundMessage(
+        channel=EXTERNAL_OUTBOUND_CHANNEL,
+        chat_id=str(record.get("session_key") or ""),
+        content=str(record.get("text") or ""),
+        reply_to=str(record.get("reply_to") or "") or None,
+        metadata={
+            "source": "outbox_replay",
+            "outbox_id": str(record.get("id") or ""),
+            "dedupe_key": str(record.get("dedupe_key") or ""),
+        },
+    )
+
+
 async def _replay_pending_external_outbox() -> None:
     """Replay the durable external outbox at startup.
 
@@ -519,6 +587,9 @@ async def _replay_pending_external_outbox() -> None:
     该 id，不会重复登记），过期条目标记 expired，然后压实账本。桥侧启动时按
     ``GET /outbox/pending`` 预热这些会话的 pump，消息经 SSE 重放完成投递后由
     桥 ack 销账（at-least-once：ack 丢失会在下次重启后重复投递一次）。
+
+    启动重放是一次性的；重启后才产出的滞留推送由 ``_outbox_reconcile_loop``
+    的周期对账兜底（见模块顶部常量注释）。
     """
     bus = _global_bus
     if bus is None:
@@ -527,19 +598,7 @@ async def _replay_pending_external_outbox() -> None:
         expired = expire_stale_pending()
         pending = load_pending_outbound()
         for record in pending:
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel=EXTERNAL_OUTBOUND_CHANNEL,
-                    chat_id=str(record.get("session_key") or ""),
-                    content=str(record.get("text") or ""),
-                    reply_to=str(record.get("reply_to") or "") or None,
-                    metadata={
-                        "source": "outbox_replay",
-                        "outbox_id": str(record.get("id") or ""),
-                        "dedupe_key": str(record.get("dedupe_key") or ""),
-                    },
-                )
-            )
+            await bus.publish_outbound(_outbox_replay_message(record))
         compact_outbox()
         if pending or expired:
             logger.warning(
@@ -549,6 +608,88 @@ async def _replay_pending_external_outbox() -> None:
             )
     except Exception:
         logger.exception("external outbox replay skipped on error")
+
+
+async def _reconcile_external_outbox_once() -> tuple[int, int]:
+    """One periodic reconcile pass; returns ``(republished, expired)``.
+
+    与启动重放的差别：只重放「年龄 > OUTBOX_REPUBLISH_MIN_AGE_SECONDS 且对应
+    会话 hub 当前无订阅者」的记录——有订阅者说明 pump/等待方在线，ring buffer
+    的 Last-Event-ID 重放已兜底，再注入只会制造重复副本；按记录指数退避压制
+    永久无消费者会话（openai-compat 走同一账本但从不开 SSE）的重复注入。
+    过期清理每轮都跑（不再依赖重启）。压实由调用方按周期决定。
+    """
+    bus = _global_bus
+    if bus is None:
+        return (0, 0)
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    expired = expire_stale_pending()
+    pending = load_pending_outbound()
+    live_ids = {str(record.get("id") or "") for record in pending}
+    for stale_id in [key for key in _outbox_republish_backoff if key not in live_ids]:
+        _outbox_republish_backoff.pop(stale_id, None)
+    republished = 0
+    for record in pending:
+        outbox_id = str(record.get("id") or "")
+        age = record_age_seconds(record)
+        if not outbox_id or age is None or age < OUTBOX_REPUBLISH_MIN_AGE_SECONDS:
+            continue
+        not_before, backoff = _outbox_republish_backoff.get(outbox_id, (0.0, 0.0))
+        if now < not_before:
+            continue
+        session_key = str(record.get("session_key") or "")
+        if not session_key or get_session_event_hub(session_key).subscriber_count() > 0:
+            continue
+        await bus.publish_outbound(_outbox_replay_message(record))
+        next_backoff = (
+            OUTBOX_REPUBLISH_INITIAL_BACKOFF_SECONDS
+            if backoff <= 0
+            else min(backoff * 2.0, OUTBOX_REPUBLISH_MAX_BACKOFF_SECONDS)
+        )
+        _outbox_republish_backoff[outbox_id] = (now + next_backoff, next_backoff)
+        republished += 1
+    return (republished, expired)
+
+
+async def _outbox_reconcile_loop() -> None:
+    """Periodic outbox reconcile: the recovery lane that does not depend on
+    restarts. Sleep-first（启动路径已做过全量重放），逐轮异常守护对齐
+    ``_drain_outbound``：单轮失败绝不杀循环。"""
+    cycles = 0
+    while True:
+        try:
+            await asyncio.sleep(OUTBOX_RECONCILE_INTERVAL_SECONDS)
+            cycles += 1
+            # drain 若已死，重放进总线无人路由：每轮幂等复活（done 检查早退）。
+            _ensure_outbound_drain_running()
+            republished, expired = await _reconcile_external_outbox_once()
+            if republished or expired:
+                logger.warning(
+                    "external outbox reconcile: republished {} pending message(s), expired {}",
+                    republished,
+                    expired,
+                )
+                compact_outbox()  # 活动轮立即压实，收敛 tombstone 与重放副本
+            elif cycles % OUTBOX_COMPACT_EVERY_N_CYCLES == 0:
+                compact_outbox()  # 稳态每小时压实，防 append-only 账本无界增长
+            if cycles % OUTBOX_BRIDGE_SYNC_EVERY_N_CYCLES == 0:
+                await _sync_qq_official_service()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("external outbox reconcile pass skipped on error")
+
+
+def _ensure_outbox_reconcile_running() -> None:
+    """Start the periodic outbox reconcile loop once the bus exists."""
+    global _global_outbox_reconcile_task
+    if _global_bus is None:
+        return
+    if _global_outbox_reconcile_task is None or _global_outbox_reconcile_task.done():
+        _global_outbox_reconcile_task = asyncio.create_task(
+            _outbox_reconcile_loop(), name="external-outbox-reconcile"
+        )
 
 
 def _ensure_task_worker_watchdog_running(service: Any = None) -> None:
@@ -818,6 +959,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             await cron_service.start()
         _ensure_outbound_drain_running()
         await _replay_pending_external_outbox()
+        _ensure_outbox_reconcile_running()
         try:
             await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
         except Exception:
@@ -828,6 +970,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
 async def shutdown_web_runtime() -> None:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
     global _global_outbound_drain_task, _global_task_worker_watchdog_task, _global_qq_official_service
+    global _global_outbox_reconcile_task
 
     agent = _global_agent
     runtime_manager = _global_runtime_manager
@@ -835,6 +978,7 @@ async def shutdown_web_runtime() -> None:
     cron_service = getattr(agent, "cron_service", None) if agent is not None else None
     outbound_drain_task = _global_outbound_drain_task
     task_worker_watchdog_task = _global_task_worker_watchdog_task
+    outbox_reconcile_task = _global_outbox_reconcile_task
     qq_official_service = _global_qq_official_service
 
     _global_agent = None
@@ -843,6 +987,7 @@ async def shutdown_web_runtime() -> None:
     _global_web_heartbeat = None
     _global_outbound_drain_task = None
     _global_task_worker_watchdog_task = None
+    _global_outbox_reconcile_task = None
     _global_qq_official_service = None
 
     if agent is None:
@@ -876,6 +1021,9 @@ async def shutdown_web_runtime() -> None:
 
     await _cancel_background_task(outbound_drain_task)
     await _cancel_background_task(task_worker_watchdog_task)
+    # 对账循环必须先于桥服务收割：循环每 5 轮会调 _sync_qq_official_service，
+    # 顺序反了会出现「shutdown 停桥后对账又把桥拉起来」的复活竞态。
+    await _cancel_background_task(outbox_reconcile_task)
     if qq_official_service is not None:
         await qq_official_service.stop()
 
