@@ -477,7 +477,7 @@ Canonical 阶段状态按以下表示规则收敛（这是 canonical 链唯一�
 另有两条运行时边界：
 
 - prompt token trace 只有两个字段：`pre_request_prompt_tokens` 是内联 `token_compression` 之前的发送前估算（必须包含 stage workset）；`effective_prompt_tokens` 是 prompt 组装完成后最终真实发送请求的估算。
-- 节点侧 token 压缩只是针对当次请求的 live 重写：可以缩短 provider-bound `request_messages`，但不得改写持久阶段历史、frame `messages`，或从 `model_messages` 派生的稳定 prompt-cache family 输入。
+- 节点侧 token 压缩是同一 `token_compression` 边界的节点实现：用任务目标针对型提示词对可压缩历史做一次 inline LLM 摘要后重写当次请求。它只是针对当次请求的 live 重写：可以缩短 provider-bound `request_messages`，但不得改写持久阶段历史、frame `messages`，或从 `model_messages` 派生的稳定 prompt-cache family 输入。
 
 若下一轮基线以两个收缩边界与 `user_edit_truncation` 之外的任何理由变短，按意外上下文损失排查；守卫自愈行为见本文「Frontdoor Context Compression (Current Contract)」。`user_edit_truncation` 的替换发生在轮间（守卫比较的是"会话基线 vs 本轮新请求"，替换后新请求只会更长），不会触发 quarantine。
 
@@ -515,10 +515,13 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 
 ### `token_compression`
 
-- 内联同轮 LLM 重写，在 provider 发送前立即执行：保留稳定 system 前缀、最新运行时工具契约尾与最近的 body-history 尾部，只把更早的 body-history 区间重写为一个 `G3KU_TOKEN_COMPACT_V2` 标记块。
-- 触发阈值绑定运行时所选模型的 `context_window_tokens`：估算请求 `<= 80%` 模型窗口时直接发送；介于 `80%` 与 `100%` 之间时尝试一次内联压缩；已超过 `100%` 时先失败，因为连压缩尝试本身都无法安全装进当前模型窗口。
+- 内联同轮 LLM 重写，在 provider 发送前执行：保留稳定 system 前缀、最新运行时工具契约尾与最近的 body-history 尾部，只把更早的 body-history 区间重写为一个 `G3KU_TOKEN_COMPACT_V2` 标记块。CEO/frontdoor 用通用历史摘要提示词；节点用任务目标针对型提示词（压缩载荷显式携带 `task_goal`），摘要须保住任务继续完成所需的关键结论、数据与待办；节点压缩块结构为 `system_prefix → bootstrap_user（任务目标始终保留）→ append_notice_tail → 压缩块 → recent_tail → 契约 → turn-only note`。
+- 触发阈值绑定运行时所选模型的 `context_window_tokens`，触发源按 usage-first 合同取数：请求相对上一真实请求可 append-only 比对时，以上一请求 provider 回执的有效输入 token（`input + cache read`，锚定 `actual_request_hash`）加当轮增量估算为准；不可比对、无 usage 真值（首跳 / 重启 / 压缩后首跳）或 usage 缺失时才退回全量 preview 估算。超过 `80% × 0.95` 有效阈值（或直接超窗）先尝试一次压缩，压缩后重算仍超窗则失败；旧「preview 与 usage 估算取大者」的语义已废弃——可比对时 preview 不再覆盖 usage 真值。
+- 压缩 helper 调用失败或返回空摘要，节点按 preflight 错误让发送失败，不做静默丢历史的 marker-only 回退；无可压缩历史且已超窗同样失败。压缩进行中 pause 视该轮为终态，下一次激活重新 prepare → estimate → 可选压缩 → send。
 - 对 CEO/frontdoor 与节点运行时，`token_compression` 都不是 provider bundle 提升边界：压缩发送沿用已持久化的 `provider_tool_names`，任何 provider-bundle 刷新落在压缩后的第一个普通 turn。
-- 尾部收敛保证：保留的最近 body-history 尾部（固定 4 条）是压缩后请求体的不可压缩下限。重建前先把尾部中超过字符上限（16000）的工具结果消息硬截断为「截断头部 + 检索指引」，保证压缩后估算必然收敛到窗口以内。若不做截断，一条超大尾部工具结果（例如 `content_open` 对单行巨型 artifact 的打开结果）本身就能让压缩后估算持续超窗——压缩检查必然抛错、回合必然失败，而该消息又始终落在保留尾部，形成每轮压缩、每轮失败的无限循环。
+- 尾部收敛保证：保留的最近 body-history 尾部（CEO/frontdoor 固定 4 条，节点固定 12 条）是压缩后请求体的不可压缩下限。重建前先把尾部中超过字符上限（16000）的工具结果消息硬截断为「截断头部 + 检索指引」，保证压缩后估算必然收敛到窗口以内。若不做截断，一条超大尾部工具结果（例如 `content_open` 对单行巨型 artifact 的打开结果）本身就能让压缩后估算持续超窗——压缩检查必然抛错、回合必然失败，而该消息又始终落在保留尾部，形成每轮压缩、每轮失败的无限循环。
+- 节点追加通知的因果保留：`[G3KU_APPEND_NOTICE_TAIL_V1]` 未消费通知窗口（`raw_notice_window`）无论处在历史何处都原样保留在压缩块之前，不进入 LLM 压缩——追加通知往往是任务目标的最新变更；已消费汇总窗口（`compressed_notice_window`）本身已是摘要形态，随历史一起压缩。
+- 两条路径共用 `[G3KU_TOKEN_COMPACT_V2]` 前缀，压缩块 kind 分别为 `frontdoor_token_compaction_llm`（诊断 `mode=llm`）与 `node_token_compaction_llm`，靠 kind / `node_id` 字段区分。
 
 ### `stage_compaction`
 

@@ -417,16 +417,17 @@ def build_runtime_hybrid_send_token_estimate(
         if comparable_to_previous_request and normalized_previous_effective_input_tokens > 0
         else 0
     )
-    final_estimate_tokens = max(
-        normalized_preview_estimate_tokens,
-        usage_based_estimate_tokens,
-    )
-    estimate_source = (
-        "usage_plus_delta"
-        if usage_based_estimate_tokens >= normalized_preview_estimate_tokens
-        and usage_based_estimate_tokens > 0
-        else "preview_estimate"
-    )
+    # Usage-first trigger contract（CEO 与节点共享）：上一请求 provider 回执的
+    # effective input（input + cache read）是当前 append-only 请求的权威历史基数，
+    # 全量 preview 估算只作为兜底——用于首跳、schema churn、重启后 scaffold 等
+    # 无可用 usage 真值或不可比的场景。当轮增量 delta 仍由估算器给出，故触发
+    # 层保留 0.95 安全系数不变（见 compute_runtime_send_token_preflight_thresholds）。
+    if usage_based_estimate_tokens > 0:
+        final_estimate_tokens = usage_based_estimate_tokens
+        estimate_source = "usage_plus_delta"
+    else:
+        final_estimate_tokens = normalized_preview_estimate_tokens
+        estimate_source = "preview_estimate"
     return RuntimeHybridSendTokenEstimate(
         final_estimate_tokens=final_estimate_tokens,
         preview_estimate_tokens=normalized_preview_estimate_tokens,

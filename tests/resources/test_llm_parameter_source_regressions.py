@@ -1020,6 +1020,37 @@ def test_runtime_hybrid_estimate_prefers_conservative_upper_bound() -> None:
     assert estimate.comparable_to_previous_request is True
 
 
+def test_runtime_hybrid_estimate_prefers_usage_even_when_preview_is_higher() -> None:
+    from main.runtime.send_token_preflight import build_runtime_hybrid_send_token_estimate
+
+    estimate = build_runtime_hybrid_send_token_estimate(
+        preview_estimate_tokens=30000,
+        previous_effective_input_tokens=20313,
+        delta_estimate_tokens=100,
+        comparable_to_previous_request=True,
+    )
+
+    # Usage-first 触发合同：provider 回执的 effective input 是权威历史基数，
+    # 全量 preview 估算不再覆盖它。
+    assert estimate.final_estimate_tokens == 20413
+    assert estimate.estimate_source == "usage_plus_delta"
+    assert estimate.comparable_to_previous_request is True
+
+
+def test_runtime_hybrid_estimate_falls_back_to_preview_when_not_comparable() -> None:
+    from main.runtime.send_token_preflight import build_runtime_hybrid_send_token_estimate
+
+    estimate = build_runtime_hybrid_send_token_estimate(
+        preview_estimate_tokens=30000,
+        previous_effective_input_tokens=20313,
+        delta_estimate_tokens=100,
+        comparable_to_previous_request=False,
+    )
+
+    assert estimate.final_estimate_tokens == 30000
+    assert estimate.estimate_source == "preview_estimate"
+
+
 def test_runtime_request_preview_breakdown_omits_inline_image_data_urls_from_text_estimate() -> None:
     from main.runtime.send_token_preflight import estimate_runtime_provider_request_token_breakdown
 

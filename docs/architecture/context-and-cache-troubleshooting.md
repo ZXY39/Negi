@@ -228,7 +228,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - `frontdoor_history_shrink_reason` 是 prompt assembly 与 session 持久化之间的运行时合同：只有 `token_compression` 与 `stage_compaction` 是下一轮 baseline 变短的合法理由；`user_edit_truncation` 是操作员发起的编辑重发/Fork 在轮间对 continuity 状态的整体替换（数据源 = `.g3ku/web-ceo-turn-boundaries/` 每轮边界快照，契约见 `web-and-admin.md`「Message Edit-Resend And Session Fork」）；其余理由按 runtime bug 排查，不要解释成“正常上下文整理”。
 - 编辑重发/Fork 之后的取证预期：该会话 `frontdoor_history_shrink_reason=user_edit_truncation` 的 sidecar 属正常状态；编辑后首个请求的 prompt cache 家族一次性 miss 属预期（前缀被整体替换）；被截断轮的 actual-request artifact 已被删除，`web-ceo-requests` 时间线出现对应空洞是截断的一部分（空基线截断会清空整个 artifact 目录，防止重启兜底复活被删轮内容），不要按"artifact 丢失"排查。
 - `stage_compaction` 是按阶段归属的原位压缩：过期完成阶段的工具调用消息成对移除，compact 块插回该阶段首条被移除消息的位置（既有块按记忆位置回插），阶段外的用户可见对话原位保留。内部事件束按是否承载因果拆两类处理：**事件体保留**——心跳事件束（`## EVENT BUNDLE`）、定时任务中文包装与 `[CRON INTERNAL EVENT]` 是后续回合追溯"这一轮为什么做这些动作"的因果载荷，压缩不再删除，否则心跳/定时通过开阶段处理问题后下一轮会失去触发上下文、把孤立的工具流水误读成"无事发生/被拦截"；**规则文本移除**——`This is a background heartbeat.` / `# Heartbeat Rules` 这类每次重复注入的框架规则按缓存中性规则清理：只移除不早于本次压缩既有最早结构变化点的条目；本次压缩没有任何结构变化时一律保留、留待后续压缩顺路清理，因此“历史内部事件仍在携带前缀里”本身不是非法 shrink，也不得通过请求组装期的逐轮过滤制造新的前缀断裂。缓存不变量：压缩块不收拢到上下文头部；除治愈遗留布局的一次性收敛外，每次压缩相对上一请求的首个分叉点是最早被压缩阶段的位置，而不是历史头部；同一输入二次重写必须收敛为同一输出（幂等）。排查“某一轮起缓存命中骤降”且 shrink reason 为 `stage_compaction` 时，先比对首个分叉点是否落在最早被压缩阶段处——分叉出现在历史头部（压缩块置顶或整体重排）按块放置回归排查。
-- `token_compression` 是 inline LLM 重写，仅当估算的 provider-bound request 超过所选模型 `context_window_tokens` 的 `80%` 且仍在窗口内时运行；估算已超窗时必须在发送前失败，不做任何 semantic/global-summary 回退；inline 压缩后重算仍超窗，则以同样的 context-window 错误失败。压缩保留的最近 body-history 尾部（固定 4 条）先做字符上限截断（超限工具结果消息 → 截断头部 + 检索指引），确保重算必然收敛；「压缩后重算始终超窗且无法收敛」时按尾部含超大工具结果排查，而不是按模型窗口配置排查。
+- `token_compression` 是 CEO/frontdoor 与节点的内联 LLM 重写（触发源、节点压缩结构、尾部收敛保证等合同本体详见 `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」）。取证边界：inline 压缩后重算仍超窗，以 context-window 错误失败；节点 helper 调用失败或返回空摘要同样让发送失败，不做静默丢历史的裁剪；节点未消费追加通知窗口（`raw_notice_window`）无论位置都被原样保留在压缩块之前，取证时不应指望它在压缩块之后出现。「压缩后重算始终超窗且无法收敛」时按尾部含超大工具结果排查，而不是按模型窗口配置排查。
 - 两种 shrink 原因都不得轮转 provider-facing `tools[]`：`stage_compaction` 必须保持 active `provider_tool_names` 不变；`token_compression` 所在 send 沿用压缩前已持久化的 bundle 保持不变。RBAC / hydration 驱动的 provider `tools[]` 同步只发生在 membership 刷新点，不得由压缩路径触发。
 - manual pause 与压缩的两条边界：压缩进行中暂停会丢弃迟到的压缩结果，下一可见轮从当前权威 baseline 重新走 prepare → estimate → 可选压缩 → send；若 turn 在最终 preflight 即将进入 `token_compression` 时暂停，下一 fresh turn 可从 pending shrink marker、或经上一 actual-request history 关联的后续内部 `token_compression` artifact 恢复 `frontdoor_history_shrink_reason=token_compression`——这是“压缩刚开始就暂停”的合法竞态解决路径，不是任意裁剪。
 - 完整压缩合同详见 `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」。
@@ -239,7 +239,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 
 角色合同：三个 `[G3KU_STAGE_*]` 阶段块是 **system 角色**——运行时标注的已完成阶段摘要属于压缩元数据、不是对话内容，用 assistant 角色会让模型把块当成"自己上一轮说过的话"，进而在续写位置仿造/回显整块 JSON（伪造块被当作最终回复投递给用户即此类事故）；`[G3KU_TOKEN_COMPACT_V2]` 保持 **assistant 角色**——其正文是模型直接继续阅读的自然语言会话摘要，语义上属于对话延续。阶段块识别（`is_stage_context_message`）接受 assistant/system 双角色：存量 durable baseline、continuity sidecar、续跑 seed 与 actual-request scaffold 里可能仍带 assistant 角色的旧块，双角色识别保证过渡期压缩不重复、不丢块；旧块在下一次压缩渲染回插时自然收敛为 system 角色。
 
-- `[G3KU_TOKEN_COMPACT_V2]` — 内联 LLM 全局压缩。第二行 JSON 为 `{"kind":"frontdoor_token_compaction_llm","history_message_count":N}`，空行后接中文压缩摘要正文：模型直接继续阅读的自然语言会话内容，不是结构化数据，也不是 JSON。
+- `[G3KU_TOKEN_COMPACT_V2]` — 内联 LLM 全局压缩。第二行 JSON 为 `{"kind":...,"history_message_count":N}`：kind 为 `frontdoor_token_compaction_llm`（CEO/frontdoor）或 `node_token_compaction_llm`（节点，另带 `node_id` 与各分区计数字段），空行后接压缩摘要正文（语言跟随被压缩历史，不再强制中文）：模型直接继续阅读的自然语言会话内容，不是结构化数据，也不是 JSON。
 - `[G3KU_STAGE_COMPACT_V1]` — `stage_compaction` 生成的普通完成阶段块（工具肉身已剪掉）。元数据字段：`stage_index` / `stage_kind` / `system_generated` / `mode` / `status` / `stage_goal` / `completed_stage_summary` / `key_refs` / `tool_round_budget` / `tool_rounds_used`。不携带 `rounds` / `tools` 是有损设计的预期，不是数据缺失。
 - `[G3KU_STAGE_EXTERNALIZED_V1]` — 归档压缩阶段（`stage_kind="compression"`）块，比普通完成块多 `archive_ref` / `archive_stage_index_start` / `archive_stage_index_end`，同样无 round 数据。运行时不新产生归档阶段，持久化状态中出现即历史遗留数据。
 - `[G3KU_STAGE_RAW_V1]` — 保留阶段（最近 3 个完成普通阶段 + 活动阶段）的完整原始装载：`stage_id` / `preamble_text` / `created_at` / `finished_at` / `key_refs` / `rounds`，round 内含 `tools`（`tool_call_id` / `arguments` / `arguments_text` / `output_text` / `output_ref` / 时间戳等）。这是压缩后仍携带工具正文的唯一块类型。
@@ -300,13 +300,13 @@ CEO/frontdoor 在真正发 provider 请求前有最后一层 token preflight。�
 | --- | --- |
 | `effective_input_tokens` | 上一轮 provider 输入规模的真值 |
 | `delta_estimate_tokens` | 相对上一请求的增量估算 |
-| `comparable_to_previous_request` | 为 `false` 说明退回 preview-only 估算；先查不可比原因，而不是先怀疑阈值 |
-| `estimate_source=usage_plus_delta` | continuity 已确认足够稳定；`final_request_tokens` 可能明显高于 preview-only 估算 |
-| `estimate_source=preview_estimate` | 不一定是 usage 缺失，也可能只是 continuity 不可证明 |
+| `comparable_to_previous_request` | 为 `false` 说明触发源退回 preview-only 估算（usage-first 合同的前提不成立）；先查不可比原因，而不是先怀疑阈值 |
+| `estimate_source=usage_plus_delta` | 可 append-only 比对且上一请求 usage 真值可用：触发源＝上一请求有效输入（input + cache read）＋增量估算，preview 不覆盖它 |
+| `estimate_source=preview_estimate` | usage 缺失或请求不可比对（首跳 / 重启 / schema churn / 压缩后首跳）时的兜底车道，不是默认 |
 | `observed_input_truth.source=preflight_estimate` | provider 未给出可用输入侧 usage，runtime 用最终 send 时估算兜底；预期回退，不自动是 cache bug |
 | `pre_compaction_*` | top-level `final_request_tokens` / `estimated_total_tokens` 已是压缩后值时，用它们解释“为什么这轮会先压缩” |
 
-另要排一类隐蔽误判：preflight estimator 必须基于原始 `provider_request_body` 估算，不能复用面向摘要/展示的 serializer 再把超长字段截成固定前后两段后估算。典型症状：`provider_request_body` 明明已经很大，`final_request_tokens` 却长期卡在异常偏小、几乎不随请求增长变化的常数——先按“estimator 低估导致压缩阈值永远打不到”排查，不要先怀疑 `trigger_tokens` 配置失效。
+另要排一类隐蔽误判：preflight estimator 必须基于原始 `provider_request_body` 估算，不能复用面向摘要/展示的 serializer 再把超长字段截成固定前后两段后估算。典型症状：`provider_request_body` 明明已经很大，`final_request_tokens` 却长期卡在异常偏小、几乎不随请求增长变化的常数——先按 estimator（preview 兜底与增量估算车道）低估导致压缩阈值打不到排查，不要先怀疑 `trigger_tokens` 配置失效。
 
 ### 5.6 节点侧排查要点（preflight / scaffold / append-notice）
 
@@ -327,7 +327,9 @@ preflight 判定：
 - `applied=true` 预期 `history_shrink_reason=token_compression`；actual request 变短但 `prompt_cache_key_hash` 没变，是“live request 被压缩但 caller-side family 未换”的正常行为，不是 family churn。
 - 节点 restart / resume 后的第一跳新请求可以复用“已经过 token compression 的 actual request scaffold”；这是合法延续路径，不是 context loss。
 - 节点 diagnostics 的 top-level 字段同样在 compaction 后切到“最终真正要发的 request”，压缩前 hybrid 判断保留在 `pre_compaction_*`。
-- 节点侧不再把 inline image `data:` URL 的 base64 字符串按普通文本估 token；当前轮 `content_open` 刚打开多张图片而下一跳超窗时，优先从 `estimated_image_tokens` / `image_count` 解释，不要再把根因归结为“base64 文本被算爆”。
+- 节点侧不再把 inline image `data:` URL 的 base64 字符串按普通文本估 token；当前轮 `content_open` 刚打开多张图片而下一跳超窗时，优先从 `estimated_image_tokens` / `image_count` 解释，不要再把根因归结为”base64 文本被算爆”。
+- 节点侧 `token_compression` 是一次 helper LLM 调用（诊断 `compression_helper_call` 记录历史条数与 usage，压缩载荷带 `task_goal`）：helper 不属于节点的 actual-request / `observed_input_truth` 链，按 provider 调用计数取证时注意它多出的一次发送；helper 失败或空摘要按 preflight 错误让节点发送失败（`applied` 保持 `false`、诊断带 `error`）。
+- 节点压缩不再做 marker-only 改写：压缩真正生效时 `applied=true`、`mode=llm`、压缩块 `kind=node_token_compaction_llm`；实际请求没有压缩块却带压缩诊断，按回归排查。
 
 preflight 在节点端发送模型前就失败时：先看是否 `context_window_tokens <= 25000` 这类硬错误配置，再看 preview builder / provider payload 估算错误；这类“没有模型请求”的卡顿优先查 preflight 合同与配置解析，不要先怀疑 tool loop 或 queue scheduler。
 

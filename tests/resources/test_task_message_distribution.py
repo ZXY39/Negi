@@ -1792,7 +1792,7 @@ async def test_distribution_turn_runs_node_send_preflight(tmp_path: Path, monkey
 
         observed: dict[str, object] = {}
 
-        def _fake_preflight(**kwargs):
+        async def _fake_preflight(**kwargs):
             observed.update(dict(kwargs))
             return (
                 [

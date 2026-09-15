@@ -2869,7 +2869,7 @@ class NodeRunner:
             token_preflight_diagnostics,
             history_shrink_reason,
             preflight_failure_reason,
-        ) = self._react_loop.run_node_send_preflight_for_control_turn(
+        ) = await self._react_loop.run_node_send_preflight_for_control_turn(
             task_id=str(task.task_id),
             node_id=str(node.node_id),
             model_refs=list(model_refs or []),
@@ -3226,7 +3226,7 @@ class NodeRunner:
             token_preflight_diagnostics,
             history_shrink_reason,
             preflight_failure_reason,
-        ) = self._react_loop.run_node_send_preflight_for_control_turn(
+        ) = await self._react_loop.run_node_send_preflight_for_control_turn(
             task_id=str(task.task_id),
             node_id=str(node.node_id),
             model_refs=list(model_refs or []),

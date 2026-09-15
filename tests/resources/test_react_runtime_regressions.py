@@ -4792,6 +4792,93 @@ def test_node_token_compaction_keeps_append_notice_tail_before_compact_block() -
     assert payload["contract_message_count"] == 1
 
 
+def test_node_token_compaction_hoists_deep_raw_notice_windows_out_of_compressible_history() -> None:
+    from main.runtime.append_notice_context import APPEND_NOTICE_TAIL_PREFIX
+
+    raw_notice = {
+        "role": "assistant",
+        "content": (
+            f"{APPEND_NOTICE_TAIL_PREFIX}\n"
+            '{"kind": "raw_notice_window", "notice_count": 1, "notices": [{"message": "keep raw"}]}'
+        ),
+    }
+    compressed_notice = {
+        "role": "assistant",
+        "content": (
+            f"{APPEND_NOTICE_TAIL_PREFIX}\n"
+            '{"kind": "compressed_notice_window", "notice_count": 2, "summary_text": "已消费汇总可压缩"}'
+        ),
+    }
+    request_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"t","goal":"g"}'},
+        {"role": "assistant", "content": "history 0"},
+        raw_notice,
+        {"role": "assistant", "content": "history 1"},
+        compressed_notice,
+        *[{"role": "assistant", "content": f"tail {index}"} for index in range(12)],
+    ]
+    parts = ReActToolLoop._split_request_messages_for_token_compaction(
+        request_messages=request_messages,
+        recent_tail_count=8,
+    )
+    compressible = parts["compressible_history"]
+    # 未消费 raw notice 被捞出；已消费 compressed_notice_window 留在可压缩区。
+    assert raw_notice in parts["append_notice_tail"]
+    assert raw_notice not in compressible
+    assert compressed_notice in compressible
+
+    rewritten, payload = ReActToolLoop._rewrite_request_messages_for_token_compaction(
+        node_id="node-hoist",
+        request_messages=request_messages,
+        compressed_text="压缩摘要正文",
+        recent_tail_count=8,
+    )
+    contents = [str(item.get("content") or "") for item in rewritten]
+    raw_index = next(index for index, content in enumerate(contents) if "keep raw" in content)
+    compact_index = next(
+        index for index, content in enumerate(contents)
+        if content.startswith("[G3KU_TOKEN_COMPACT_V2]")
+    )
+    # 捞出的 raw notice 在压缩块之前原样保留；已消费汇总随历史一起被压缩吸收。
+    assert raw_index < compact_index
+    assert all("已消费汇总可压缩" not in content for content in contents)
+    assert "压缩摘要正文" in contents[compact_index]
+    assert payload["kind"] == "node_token_compaction_llm"
+
+
+def test_node_token_compaction_bounds_oversized_tail_tool_results() -> None:
+    import main.runtime.react_loop as react_loop_module
+
+    char_limit = react_loop_module._NODE_TOKEN_COMPACTION_TAIL_CONTENT_CHAR_LIMIT
+    oversized = "x" * (char_limit + 5000)
+    request_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"t","goal":"g"}'},
+        *[{"role": "assistant", "content": f"filler {index}"} for index in range(10)],
+        {
+            "role": "tool",
+            "content": oversized,
+            "tool_call_id": "call:big",
+            "name": "content_open",
+        },
+    ]
+    rewritten, _payload = ReActToolLoop._rewrite_request_messages_for_token_compaction(
+        node_id="node-bound",
+        request_messages=request_messages,
+        compressed_text="摘要",
+        recent_tail_count=3,
+    )
+    tail_tool = next(
+        item for item in rewritten
+        if str(item.get("role") or "").strip().lower() == "tool"
+    )
+    bounded_text = str(tail_tool.get("content") or "")
+    assert len(bounded_text) <= char_limit + 300
+    assert "[内容已截断]" in bounded_text
+    assert "请按上文其 ref 用 content_open/content_search 检索" in bounded_text
+
+
 @pytest.mark.asyncio
 async def test_react_loop_execution_role_keeps_watchdog_inline_without_handoff(tmp_path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
@@ -6867,6 +6954,27 @@ async def test_node_send_preflight_does_not_compress_below_threshold(
     assert observed_frame.get("history_shrink_reason") in {"", None}
 
 
+def _is_node_token_compression_helper_request(messages) -> bool:
+    """节点 token 压缩 helper 调用的识别：user 消息携带 `node_token_compression` kind。"""
+    for item in list(messages or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").strip().lower() != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, str) and "node_token_compression" in content:
+            return True
+    return False
+
+
+def _node_compression_summary_response() -> LLMResponse:
+    return LLMResponse(
+        content="针对任务目标整理的压缩摘要。",
+        finish_reason="stop",
+        usage={"input_tokens": 420, "output_tokens": 30},
+    )
+
+
 @pytest.mark.asyncio
 async def test_node_send_preflight_triggers_compression_at_effective_threshold(
     monkeypatch: pytest.MonkeyPatch,
@@ -6910,9 +7018,15 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
         raising=False,
     )
 
+    helper_calls: list[list[dict[str, object]]] = []
+
     class _Backend:
         async def chat(self, **kwargs):
-            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            messages = list(kwargs.get("messages") or [])
+            if _is_node_token_compression_helper_request(messages):
+                helper_calls.append([dict(item) for item in messages])
+                return _node_compression_summary_response()
+            calls.append([dict(item) for item in messages])
             return LLMResponse(
                 content="",
                 tool_calls=[
@@ -6954,6 +7068,7 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-compress","goal":"demo"}'},
+            *[{"role": "assistant", "content": f"filler {index}"} for index in range(15)],
         ],
         tools={"submit_final_result": _submit_final_result_tool()},
         model_refs=["fake"],
@@ -6963,13 +7078,20 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
 
     assert result.status == "success"
     assert len(calls) == 1
+    assert len(helper_calls) == 1
     rendered = "\n".join(str(item.get("content") or "") for item in calls[0])
     assert "[G3KU_TOKEN_COMPACT_V2]" in rendered
+    assert "针对任务目标整理的压缩摘要。" in rendered
+    helper_rendered = "\n".join(str(item.get("content") or "") for item in helper_calls[0])
+    assert "任务目标" in helper_rendered
+    assert '"task_goal": "demo"' in helper_rendered
 
     assert observed_frame.get("history_shrink_reason") == "token_compression"
     diagnostics = observed_frame.get("token_preflight_diagnostics")
     assert isinstance(diagnostics, dict)
     assert diagnostics.get("applied") is True
+    assert diagnostics.get("mode") == "llm"
+    assert diagnostics.get("compaction_payload", {}).get("kind") == "node_token_compaction_llm"
 
 
 @pytest.mark.asyncio
@@ -7016,6 +7138,8 @@ async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_b
         raising=False,
     )
 
+    helper_calls: list[dict[str, object]] = []
+
     class _Backend:
         async def chat(self, **kwargs):
             observed_frame.update(
@@ -7024,6 +7148,10 @@ async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_b
                     "node-preflight-provider-sync",
                 )
             )
+            messages = list(kwargs.get("messages") or [])
+            if _is_node_token_compression_helper_request(messages):
+                helper_calls.append(dict(kwargs))
+                return _node_compression_summary_response()
             calls.append(dict(kwargs))
             return LLMResponse(
                 content="",
@@ -7087,6 +7215,7 @@ async def test_node_send_preflight_token_compression_keeps_prior_provider_tool_b
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-provider-sync","goal":"demo"}'},
+            *[{"role": "assistant", "content": f"filler {index}"} for index in range(15)],
         ],
         tools={
             "submit_final_result": _submit_final_result_tool(),
@@ -7149,9 +7278,15 @@ async def test_node_send_preflight_fails_when_post_compression_overflows(
         raising=False,
     )
 
+    helper_calls: list[list[dict[str, object]]] = []
+
     class _Backend:
         async def chat(self, **kwargs):
-            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            messages = list(kwargs.get("messages") or [])
+            if _is_node_token_compression_helper_request(messages):
+                helper_calls.append([dict(item) for item in messages])
+                return _node_compression_summary_response()
+            calls.append([dict(item) for item in messages])
             raise RuntimeError("chat should not be called when preflight fails")
 
     log_service = _FakeLogService()
@@ -7162,6 +7297,7 @@ async def test_node_send_preflight_fails_when_post_compression_overflows(
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-overflow","goal":"demo"}'},
+            *[{"role": "assistant", "content": f"filler {index}"} for index in range(15)],
         ],
         tools={"submit_final_result": _submit_final_result_tool()},
         model_refs=["fake"],
@@ -7171,6 +7307,7 @@ async def test_node_send_preflight_fails_when_post_compression_overflows(
 
     assert result.status == "failed"
     assert calls == []
+    assert len(helper_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -7267,9 +7404,15 @@ async def test_node_preflight_uses_previous_effective_input_tokens_when_preview_
         raising=False,
     )
 
+    helper_calls: list[list[dict[str, object]]] = []
+
     class _Backend:
         async def chat(self, **kwargs):
-            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            messages = list(kwargs.get("messages") or [])
+            if _is_node_token_compression_helper_request(messages):
+                helper_calls.append([dict(item) for item in messages])
+                return _node_compression_summary_response()
+            calls.append([dict(item) for item in messages])
             return LLMResponse(
                 content="",
                 tool_calls=[
@@ -7311,6 +7454,7 @@ async def test_node_preflight_uses_previous_effective_input_tokens_when_preview_
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-usage-plus-delta","goal":"demo"}'},
+            *[{"role": "assistant", "content": f"filler {index}"} for index in range(15)],
         ],
         tools={"submit_final_result": _submit_final_result_tool()},
         model_refs=["fake"],
@@ -7381,9 +7525,15 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
         raising=False,
     )
 
+    helper_calls: list[list[dict[str, object]]] = []
+
     class _Backend:
         async def chat(self, **kwargs):
-            calls.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            messages = list(kwargs.get("messages") or [])
+            if _is_node_token_compression_helper_request(messages):
+                helper_calls.append([dict(item) for item in messages])
+                return _node_compression_summary_response()
+            calls.append([dict(item) for item in messages])
             raise RuntimeError("chat should not be called when preflight fails")
 
     log_service = _FakeLogService()
@@ -7394,6 +7544,7 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-preflight-compress-before-fail","goal":"demo"}'},
+            *[{"role": "assistant", "content": f"filler {index}"} for index in range(15)],
         ],
         tools={"submit_final_result": _submit_final_result_tool()},
         model_refs=["fake"],
@@ -7418,6 +7569,7 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
     assert diagnostics["estimated_total_tokens"] == 25110
     assert "after compression" in str(result.blocking_reason or "")
     assert "after compression" in str(diagnostics.get("error") or "")
+    assert len(helper_calls) == 1
 
 
 @pytest.mark.asyncio

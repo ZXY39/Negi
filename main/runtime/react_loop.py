@@ -118,6 +118,19 @@ _DEFAULT_MODEL_RESPONSE_TIMEOUT_SECONDS = 120.0
 _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
 _NODE_TOKEN_COMPACT_MARKER = "[G3KU_TOKEN_COMPACT_V2]"
 _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT = 12
+# LLM token 压缩保留的最近 tail 与 CEO/frontdoor 同源约束：tail 是压缩后请求体
+# 的不可压缩下限，尾部超大工具结果必须先截断，否则压缩后重算仍超窗、每轮压缩
+# 每轮失败（收敛死循环，坑见 runtime-overview「Frontdoor Context Compression」）。
+_NODE_TOKEN_COMPACTION_TAIL_CONTENT_CHAR_LIMIT = 16_000
+_NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT = (
+    "你正在压缩一段较早的任务执行历史，以便同一模型继续该任务的后续推理。\n"
+    "这是一段围绕明确任务目标的执行过程，请针对任务目标做针对性压缩：\n"
+    "- 保留并整理有助于任务继续完成的关键结论、已确认事实、关键数据与数值、"
+    "未完成的待办事项、失败信息及其原因、重要引用与文件路径；\n"
+    "- 丢弃与目标无关的中间过程、已完成的重复尝试和纯工具调用流水；\n"
+    "- 使用与历史消息一致的语言，不要写寒暄、不要写解释、不要输出 JSON，"
+    "只输出可直接放入上下文的压缩摘要正文。"
+)
 _CONTENT_OPEN_IMAGE_CONTEXT_TEXT = "图片已通过 content_open 打开，视觉内容已附带在本轮上下文中"
 _NODE_CONTRACT_ECHO_REPAIR_MESSAGE = (
     '上一次回复把运行时注入的 `## Runtime Tool Contract` 契约原文复述了一遍。'
@@ -406,7 +419,7 @@ class ReActToolLoop:
                 token_preflight_diagnostics,
                 history_shrink_reason,
                 preflight_failure_reason,
-            ) = self._apply_node_send_token_preflight(
+            ) = await self._apply_node_send_token_preflight(
                 task_id=str(task.task_id),
                 node_id=str(node.node_id),
                 model_refs=current_model_refs,
@@ -4254,6 +4267,27 @@ class ReActToolLoop:
             return False
         return str((message or {}).get("content") or "").strip().startswith(APPEND_NOTICE_TAIL_PREFIX)
 
+    @staticmethod
+    def _append_notice_window_kind(message: dict[str, Any]) -> str:
+        if str((message or {}).get("role") or "").strip().lower() != "assistant":
+            return ""
+        content = str((message or {}).get("content") or "").strip()
+        if not content.startswith(APPEND_NOTICE_TAIL_PREFIX):
+            return ""
+        payload_text = content[len(APPEND_NOTICE_TAIL_PREFIX):].strip()
+        try:
+            payload = json.loads(payload_text)
+        except Exception:
+            # 解析失败按未消费通知保守处理：宁原样保留，不让 LLM 压缩吞掉指令。
+            return "raw_notice_window"
+        if isinstance(payload, dict) and str(payload.get("kind") or "").strip():
+            return str(payload.get("kind") or "").strip()
+        return "raw_notice_window"
+
+    @classmethod
+    def _is_raw_append_notice_window_message(cls, message: dict[str, Any]) -> bool:
+        return cls._append_notice_window_kind(message) == "raw_notice_window"
+
     @classmethod
     def _split_request_messages_for_token_compaction(
         cls,
@@ -4291,6 +4325,20 @@ class ReActToolLoop:
         keep_recent = max(1, int(recent_tail_count or 0))
         recent_tail = body_messages[-keep_recent:] if len(body_messages) > keep_recent else list(body_messages)
         compressible_history = body_messages[:-keep_recent] if len(body_messages) > keep_recent else []
+        # 因果保留：除前导连续段之外，被后续真实轮次压进可压缩区深处的未消费
+        # raw notice 窗口也要原样捞出合并进 append_notice_tail——追加通知往往是
+        # 任务目标的最新变更，LLM 压缩不得简化或吞掉其具体指令。已消费的
+        # compressed_notice_window 本身已是摘要形态，可随历史一起压缩。
+        deep_raw_notice_windows = [
+            item for item in compressible_history
+            if cls._is_raw_append_notice_window_message(item)
+        ]
+        if deep_raw_notice_windows:
+            append_notice_tail.extend(deep_raw_notice_windows)
+            compressible_history = [
+                item for item in compressible_history
+                if not cls._is_raw_append_notice_window_message(item)
+            ]
         return {
             "system_prefix": system_prefix,
             "bootstrap_user": bootstrap_user,
@@ -4300,6 +4348,43 @@ class ReActToolLoop:
             "contract_tail": contract_tail,
             "trailing_note": trailing_note,
         }
+
+    @classmethod
+    def _bound_node_compaction_tail_messages(
+        cls,
+        messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """把压缩保留的尾部工具结果截断到字符上限，确保压缩结果必然收敛。
+
+        与 CEO/frontdoor 的 `_bound_frontdoor_compaction_tail_messages` 同源：
+        尾部是压缩后请求体的不可压缩下限，超大工具结果不截断会让压缩后重算
+        永远超窗，形成每轮压缩、每轮失败的循环。
+        """
+        bounded: list[dict[str, Any]] = []
+        for item in list(messages or []):
+            if not isinstance(item, dict):
+                bounded.append(item)
+                continue
+            if str(item.get("role") or "").strip().lower() != "tool":
+                bounded.append(dict(item))
+                continue
+            content = item.get("content")
+            text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+            if len(text) <= _NODE_TOKEN_COMPACTION_TAIL_CONTENT_CHAR_LIMIT:
+                bounded.append(dict(item))
+                continue
+            updated = dict(item)
+            updated["content"] = (
+                text[:_NODE_TOKEN_COMPACTION_TAIL_CONTENT_CHAR_LIMIT].rstrip()
+                + (
+                    "\n\n[内容已截断]：该工具结果共 "
+                    f"{len(text)} 字符，超出压缩保留上限"
+                    f"（{_NODE_TOKEN_COMPACTION_TAIL_CONTENT_CHAR_LIMIT} 字符）。"
+                    "原文仍存储在对应 artifact 中，请按上文其 ref 用 content_open/content_search 检索。"
+                )
+            )
+            bounded.append(updated)
+        return bounded
 
     @classmethod
     def _rewrite_request_messages_for_token_compaction(
@@ -4339,11 +4424,105 @@ class ReActToolLoop:
             *list(parts.get("bootstrap_user") or []),
             *list(parts.get("append_notice_tail") or []),
             compacted_block,
-            *list(parts.get("recent_tail") or []),
+            *cls._bound_node_compaction_tail_messages(parts.get("recent_tail")),
             *list(parts.get("contract_tail") or []),
             *list(parts.get("trailing_note") or []),
         ]
         return rewritten, compacted_payload
+
+    def _node_token_compression_task_goal(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        request_messages: list[dict[str, Any]] | None,
+    ) -> str:
+        """节点 token 压缩的任务目标：优先取节点记录 goal，回退解析引导 user 消息。"""
+        _ = task_id
+        store = getattr(self._log_service, '_store', None)
+        get_node = getattr(store, 'get_node', None)
+        node = get_node(node_id) if callable(get_node) else None
+        goal = str(getattr(node, 'goal', '') or '').strip()
+        if goal:
+            return goal
+        for item in list(request_messages or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('role') or '').strip().lower() != 'user':
+                continue
+            content = item.get('content')
+            if not isinstance(content, str):
+                continue
+            try:
+                payload = json.loads(content)
+            except Exception:
+                continue
+            if isinstance(payload, dict) and str(payload.get('goal') or '').strip():
+                return str(payload.get('goal') or '').strip()
+        return ''
+
+    async def _request_node_token_compression_summary(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        model_refs: list[str],
+        provider_model: str,
+        request_messages: list[dict[str, Any]] | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """节点侧 token 压缩 helper：用任务目标针对型提示词对可压缩历史做一次
+        inline LLM 摘要（对齐 CEO/frontdoor 的 `token_compression` lane；该 helper
+        调用自身不参与 observed_input_truth / actual-request 链，避免污染触发锚点）。"""
+        parts = self._split_request_messages_for_token_compaction(
+            request_messages=request_messages,
+        )
+        older_history_messages = [
+            dict(item)
+            for item in list(parts.get("compressible_history") or [])
+            if isinstance(item, dict)
+        ]
+        helper_payload: dict[str, Any] = {
+            "history_message_count": len(older_history_messages),
+        }
+        if not older_history_messages:
+            return "", helper_payload
+        task_goal = self._node_token_compression_task_goal(
+            task_id=task_id,
+            node_id=node_id,
+            request_messages=request_messages,
+        )
+        compression_prompt_messages = [
+            {"role": "system", "content": _NODE_TOKEN_COMPRESSION_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "kind": "node_token_compression",
+                        "model": str(provider_model or '').strip()
+                        or (str(model_refs[0] or '').strip() if model_refs else ''),
+                        "task_goal": task_goal,
+                        "older_history_messages": older_history_messages,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        response = await self._chat_with_optional_extensions(
+            messages=compression_prompt_messages,
+            tools=None,
+            model_refs=list(model_refs or []),
+            tool_choice=None,
+            parallel_tool_calls=None,
+            prompt_cache_key="",
+            single_request_timeout_seconds=self._resolved_model_response_timeout_seconds(
+                model_refs=model_refs,
+            ),
+        )
+        compressed_text = str(getattr(response, 'content', '') or '').strip()
+        raw_usage = getattr(response, 'usage', None)
+        if isinstance(raw_usage, dict):
+            helper_payload["helper_usage"] = dict(raw_usage)
+        return compressed_text, helper_payload
 
     def _estimate_node_send_preflight_tokens(
         self,
@@ -4564,7 +4743,7 @@ class ReActToolLoop:
         current_model = current_raw.split(':', 1)[1].strip() if ':' in current_raw else current_raw
         return bool(previous_model and current_model and previous_model == current_model)
 
-    def _apply_node_send_token_preflight(
+    async def _apply_node_send_token_preflight(
         self,
         *,
         task_id: str,
@@ -4576,7 +4755,6 @@ class ReActToolLoop:
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any], str, str]:
-        _ = task_id, node_id
         normalized_model_refs = [
             str(item or "").strip()
             for item in list(model_refs or [])
@@ -4668,9 +4846,63 @@ class ReActToolLoop:
                 or int(final_estimate_tokens or 0) > int(context_window_tokens or 0)
             )
             if should_attempt_compaction:
+                compression_failure = ""
+                compressed_text = ""
+                compression_helper_call: dict[str, Any] = {}
+                try:
+                    compressed_text, compression_helper_call = await self._request_node_token_compression_summary(
+                        task_id=task_id,
+                        node_id=node_id,
+                        model_refs=normalized_model_refs,
+                        provider_model=str(getattr(info, "provider_model", "") or "").strip(),
+                        request_messages=request_messages,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except (TaskPausedError, NodePausedError):
+                    # 压缩进行中暂停：丢弃迟到的压缩结果，保留已有 pause 流转语义。
+                    raise
+                except Exception as exc:
+                    compression_failure = (
+                        "token compression helper call failed: "
+                        f"{str(exc or exc.__class__.__name__).strip() or exc.__class__.__name__}"
+                    )
+                if not compression_failure and not str(compressed_text or '').strip():
+                    if int(compression_helper_call.get('history_message_count') or 0) > 0:
+                        compression_failure = "token compression helper returned an empty summary"
+                if compression_failure:
+                    token_preflight_diagnostics["error"] = compression_failure
+                    return (
+                        request_messages,
+                        token_preflight_diagnostics,
+                        "",
+                        compression_failure,
+                    )
+                compressible_history = list(
+                    (self._split_request_messages_for_token_compaction(
+                        request_messages=request_messages,
+                    ) or {}).get('compressible_history') or []
+                )
+                if not compressible_history:
+                    if int(final_estimate_tokens or 0) > int(context_window_tokens or 0):
+                        over_window_reason = (
+                            f"estimated_total_tokens ({int(final_estimate_tokens or 0)}) exceeded "
+                            f"context_window_tokens ({int(context_window_tokens or 0)}) with no compressible history"
+                        )
+                        token_preflight_diagnostics["error"] = over_window_reason
+                        return (
+                            request_messages,
+                            token_preflight_diagnostics,
+                            "",
+                            over_window_reason,
+                        )
+                    # 无可压缩历史：跳过压缩，请求原样下发。
+                    return (request_messages, token_preflight_diagnostics, "", "")
+                compact_payload: dict[str, Any] = {}
                 rewritten_messages, compact_payload = self._rewrite_request_messages_for_token_compaction(
                     node_id=node_id,
                     request_messages=request_messages,
+                    compressed_text=compressed_text,
                 )
                 request_messages = rewritten_messages
                 pre_compaction_snapshot = dict(token_preflight_diagnostics)
@@ -4695,8 +4927,18 @@ class ReActToolLoop:
                 token_preflight_diagnostics.update(
                     {
                         "applied": True,
-                        "mode": "marker",
+                        "mode": (
+                            "llm"
+                            if str((compact_payload or {}).get('kind') or '') == 'node_token_compaction_llm'
+                            else 'marker'
+                        ),
                         "history_shrink_reason": "token_compression",
+                        "compression_helper_call": {
+                            "history_message_count": int(
+                                compression_helper_call.get('history_message_count') or 0
+                            ),
+                            "helper_usage": dict(compression_helper_call.get('helper_usage') or {}),
+                        },
                         "pre_compaction_estimated_total_tokens": int(
                             pre_compaction_snapshot.get('estimated_total_tokens') or 0
                         ),
@@ -4785,7 +5027,7 @@ class ReActToolLoop:
             failure_reason,
         )
 
-    def run_node_send_preflight_for_control_turn(
+    async def run_node_send_preflight_for_control_turn(
         self,
         *,
         task_id: str,
@@ -4797,7 +5039,7 @@ class ReActToolLoop:
         tool_choice: str | dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any], str, str]:
-        return self._apply_node_send_token_preflight(
+        return await self._apply_node_send_token_preflight(
             task_id=task_id,
             node_id=node_id,
             model_refs=model_refs,
