@@ -689,7 +689,10 @@ function taskGridRenderSignature(meta) {
         pageSize: Number(S.taskPageSize || 0),
         workerOnline: taskWorkerControlsAvailable(),
         workerState: normalizeTaskWorkerState(S.tasksWorkerState),
-        workerLastSeenAt: String(S.tasksWorkerLastSeenAt || ""),
+        // workerLastSeenAt 不参与签名：心跳时间戳每秒变化但不改变任何渲染像素，
+        // 放进来会让每次心跳都触发整网格重建，滚动位置被清零，大厅滚动形同卡死。
+        // 磁盘紧急横幅由快照数据驱动，属于可见状态，需要能触发重建。
+        diskEmergencyActive: !!taskWorkerStatusMetrics()?.disk_emergency_active,
         taskBusy: !!S.taskBusy,
         multiSelectMode: !!S.multiSelectMode,
         emptyText: taskSessionEmptyText(),
@@ -715,6 +718,10 @@ function taskGridRenderSignature(meta) {
 }
 
 function renderTasks() {
+    // 重建前记录滚动位置：本网格自身就是滚动容器（overflow-y:auto），
+    // innerHTML 清空会把 scrollTop 归零，重建后需还原，避免用户被拽回顶部。
+    const prevScrollTop = Number(U.taskGrid?.scrollTop || 0);
+    const prevPage = S.taskPage;
     const meta = paginateResources(orderedTasks(S.tasks), S.taskPage, S.taskPageSize);
     S.taskPage = meta.currentPage;
     S.visibleTaskIds = meta.items.map((task) => String(task?.task_id || "").trim()).filter(Boolean);
@@ -872,6 +879,8 @@ function renderTasks() {
     S.taskMetricAnimationTaskIds?.clear?.();
     updateTaskToolbar();
     icons();
+    // 同页重建还原滚动位置；翻页（页码变化）维持从顶部开始的既有行为。
+    if (U.taskGrid && meta.currentPage === prevPage) U.taskGrid.scrollTop = prevScrollTop;
 }
 
 async function loadTasks() {
