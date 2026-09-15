@@ -1059,6 +1059,8 @@ class TaskLogService:
         provider_tool_bundle_seeded: bool = False,
         provider_tool_exposure_revision: str = '',
         provider_tool_exposure_commit_reason: str = '',
+        request_seed_source: str = '',
+        request_seed_message_count: int = 0,
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
         token_preflight_diagnostics: dict[str, Any] | None = None,
@@ -1109,6 +1111,8 @@ class TaskLogService:
                 provider_tool_bundle_seeded=provider_tool_bundle_seeded,
                 provider_tool_exposure_revision=provider_tool_exposure_revision,
                 provider_tool_exposure_commit_reason=provider_tool_exposure_commit_reason,
+                request_seed_source=request_seed_source,
+                request_seed_message_count=request_seed_message_count,
                 provider_request_meta=provider_request_meta,
                 provider_request_body=provider_request_body,
             )
@@ -1249,6 +1253,8 @@ class TaskLogService:
                         provider_tool_bundle_seeded=provider_tool_bundle_seeded,
                         provider_tool_exposure_revision=provider_tool_exposure_revision,
                         provider_tool_exposure_commit_reason=provider_tool_exposure_commit_reason,
+                        request_seed_source=request_seed_source,
+                        request_seed_message_count=request_seed_message_count,
                         observed_input_truth=observed_input_truth,
                     )
                     self._event_writer.append_task_model_call(
@@ -1792,6 +1798,8 @@ class TaskLogService:
             'tool_signature_hash': str(payload.get('tool_signature_hash') or '').strip(),
             'callable_tool_names': cls._artifact_safe_value(payload.get('callable_tool_names') or []),
             'provider_tool_names': cls._artifact_safe_value(payload.get('provider_tool_names') or []),
+            'request_seed_source': str(payload.get('request_seed_source') or '').strip(),
+            'request_seed_message_count': int(payload.get('request_seed_message_count') or 0),
             'provider_request_meta': cls._artifact_safe_value(payload.get('provider_request_meta') or {}),
             'provider_request_body_summary': cls._summarize_provider_request_body_for_actual_request_artifact(
                 payload.get('provider_request_body')
@@ -1867,6 +1875,8 @@ class TaskLogService:
         provider_tool_bundle_seeded: bool = False,
         provider_tool_exposure_revision: str = '',
         provider_tool_exposure_commit_reason: str = '',
+        request_seed_source: str = '',
+        request_seed_message_count: int = 0,
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -1949,6 +1959,8 @@ class TaskLogService:
             'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
             'provider_tool_exposure_revision': str(provider_tool_exposure_revision or '').strip(),
             'provider_tool_exposure_commit_reason': str(provider_tool_exposure_commit_reason or '').strip(),
+            'request_seed_source': str(request_seed_source or '').strip(),
+            'request_seed_message_count': int(request_seed_message_count or 0),
             'provider_request_meta': normalized_provider_request_meta,
             'provider_request_body': normalized_provider_request_body,
         }
@@ -2147,6 +2159,8 @@ class TaskLogService:
         provider_tool_bundle_seeded: bool = False,
         provider_tool_exposure_revision: str = '',
         provider_tool_exposure_commit_reason: str = '',
+        request_seed_source: str = '',
+        request_seed_message_count: int = 0,
         actual_request_ref: str = '',
         observed_input_truth: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -2194,6 +2208,8 @@ class TaskLogService:
             'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
             'provider_tool_exposure_revision': str(provider_tool_exposure_revision or '').strip(),
             'provider_tool_exposure_commit_reason': str(provider_tool_exposure_commit_reason or '').strip(),
+            'request_seed_source': str(request_seed_source or '').strip(),
+            'request_seed_message_count': int(request_seed_message_count or 0),
             'tool_signature_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
             **actual_request_diagnostics,
             'observed_input_truth': (
@@ -4645,6 +4661,8 @@ class TaskLogService:
             'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
             'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
             'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
+            'request_seed_source': str(payload.get('request_seed_source') or '').strip(),
+            'request_seed_message_count': int(payload.get('request_seed_message_count') or 0),
             'token_preflight_diagnostics': (
                 dict(payload.get('token_preflight_diagnostics') or {})
                 if isinstance(payload.get('token_preflight_diagnostics'), dict)
@@ -5303,6 +5321,8 @@ class TaskLogService:
             'actual_request_hash': str(payload.get('actual_request_hash') or '').strip(),
             'actual_request_message_count': int(payload.get('actual_request_message_count') or 0),
             'actual_tool_schema_hash': str(payload.get('actual_tool_schema_hash') or '').strip(),
+            'request_seed_source': str(payload.get('request_seed_source') or '').strip(),
+            'request_seed_message_count': int(payload.get('request_seed_message_count') or 0),
             'token_preflight_diagnostics': (
                 dict(payload.get('token_preflight_diagnostics') or {})
                 if isinstance(payload.get('token_preflight_diagnostics'), dict)

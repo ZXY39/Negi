@@ -8940,7 +8940,10 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
         assert root is not None
 
         react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
-        assert react_state["request_body_seed_messages"] == previous_provider_input
+        # seed 取内部形态 request_messages（provider wire 项无 role，回灌 adapter
+        # 会被 _convert_messages 静默丢弃，不能作为发送侧种子）。
+        assert react_state["request_seed_state"] == "ok"
+        assert react_state["request_body_seed_messages"] == previous_request_messages
         tools = {
             "submit_next_stage": SubmitNextStageTool(
                 lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
@@ -8972,6 +8975,10 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
         assert result.status == "success"
         assert backend.calls
         calls = restarted.store.list_task_model_calls(record.task_id, limit=None)
+        # 恢复 run 的第一跳：seed scaffold adoption + notice 作为派生 delta。
+        resumed_first_call = calls[1]["payload"]
+        assert str(resumed_first_call.get("request_seed_source") or "") == "scaffold_seed_with_delta"
+        assert int(resumed_first_call.get("request_seed_message_count") or 0) == len(previous_request_messages)
         model_call = calls[-1]["payload"]
         actual_request_ref = str(model_call.get("actual_request_ref") or "")
 
@@ -8984,9 +8991,340 @@ async def test_pending_notice_keeps_provider_seed_messages_while_request_history
             trailing_messages = captured_provider_input[len(previous_provider_input) :]
         else:
             captured_request_messages = list(actual_request_payload.get("request_messages") or [])
-            assert captured_request_messages[:2] == previous_request_messages[:2]
-            trailing_messages = captured_request_messages[2:]
+            # 链式请求以内部形态 seed 为精确前缀（含 notice delta 之前的全部 scaffold 记录）
+            assert captured_request_messages[: len(previous_request_messages)] == previous_request_messages
+            trailing_messages = captured_request_messages[len(previous_request_messages) :]
         assert any("new parent constraint" in str(item) for item in trailing_messages)
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_notice_resume_first_hop_adopts_seed_prefix_with_single_notice_and_contract(tmp_path: Path):
+    # E1：notice-resume 第一跳 = seed scaffold 精确前缀 + notice 派生 delta + 尾部契约；
+    # notice 恰一次、契约恰一份、seed 前缀逐字节保留（缓存前缀不断裂）。
+    store_path = tmp_path / "runtime.sqlite3"
+    tasks_dir = tmp_path / "tasks"
+    artifacts_dir = tmp_path / "artifacts"
+    governance_path = tmp_path / "governance.sqlite3"
+
+    seed_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    previous_request_messages = [
+        {"role": "system", "content": "node system prompt"},
+        {"role": "user", "content": "projected user prompt"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call:stage",
+                    "type": "function",
+                    "function": {"name": "submit_next_stage", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call:stage",
+            "name": "submit_next_stage",
+            "content": '{"status":"success"}',
+        },
+    ]
+
+    try:
+        record = await _create_web_task(seed_service)
+        root = seed_service.get_node(record.root_node_id)
+        assert root is not None
+        seed_service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": previous_request_messages[:2],
+            },
+            publish_snapshot=False,
+        )
+        seed_service.log_service.append_node_output(
+            record.task_id,
+            root.node_id,
+            content="prior assistant",
+            tool_calls=[],
+            usage_attempts=[
+                LLMModelAttempt(
+                    model_key="sub gpt-5.4",
+                    provider_id="openai",
+                    provider_model="gpt-5.4",
+                    usage={"input_tokens": 14, "output_tokens": 6},
+                )
+            ],
+            model_messages=previous_request_messages[:2],
+            request_messages=previous_request_messages,
+            prompt_cache_key="stable-family-key-e1",
+            request_message_count=len(previous_request_messages),
+            request_message_chars=321,
+            actual_tool_schemas=[{"name": "submit_next_stage", "parameters": {"type": "object"}}],
+            provider_request_meta={"provider": "openai"},
+        )
+        seed_service.log_service.update_node_metadata(
+            root.node_id,
+            lambda metadata: {
+                **metadata,
+                "pending_append_notice_records": [
+                    {
+                        "notification_id": "root-notice:e1:1",
+                        "epoch_id": "epoch:e1",
+                        "source_node_id": root.node_id,
+                        "message": "new parent constraint",
+                        "created_at": now_iso(),
+                        "order_index": 1,
+                    }
+                ],
+            },
+        )
+    finally:
+        await seed_service.close()
+
+    backend = _CapturedRequestFinalResultChatBackend()
+    restarted = MainRuntimeService(
+        chat_backend=backend,
+        workspace_root=tmp_path,
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    try:
+        task = restarted.get_task(record.task_id)
+        root = restarted.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
+        assert react_state["request_seed_state"] == "ok"
+        tools = {
+            "submit_next_stage": SubmitNextStageTool(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
+                    task_id=task.task_id,
+                    node_id=root.node_id,
+                    stage_goal=stage_goal,
+                    tool_round_budget=tool_round_budget,
+                    completed_stage_summary=completed_stage_summary,
+                    key_refs=key_refs,
+                    final=final,
+                )
+            ),
+            "submit_final_result": SubmitFinalResultTool(
+                lambda payload: restarted.node_runner._submit_final_result(payload),
+                node_kind=root.node_kind,
+            ),
+        }
+        result = await restarted.node_runner._react_loop.run(
+            task=task,
+            node=root,
+            messages=list(react_state.get("messages") or []),
+            request_body_seed_messages=list(react_state.get("request_body_seed_messages") or []),
+            request_seed_state=str(react_state.get("request_seed_state") or ""),
+            tools=tools,
+            model_refs=["fake"],
+            runtime_context=restarted.node_runner._runtime_context(task=task, node=root),
+            max_iterations=4,
+        )
+
+        assert result.status == "success"
+        assert backend.calls
+        first_send = [dict(item) for item in list(backend.calls[0].get("messages") or [])]
+        # seed scaffold 是逐字节精确前缀
+        assert first_send[: len(previous_request_messages)] == previous_request_messages
+        after_seed = first_send[len(previous_request_messages) :]
+        # notice 恰出现一次，且位于 seed 之后的 delta 区
+        notice_records = [
+            item for item in first_send if "new parent constraint" in str(item.get("content") or "")
+        ]
+        assert notice_records == [{"role": "user", "content": "new parent constraint"}]
+        assert notice_records[0] in after_seed
+        # 尾部恰好 1 份当前契约、至多 1 份 turn-only note；携带前缀（seed）里 0 份
+        contract_records = [
+            item
+            for item in first_send
+            if str(item.get("content") or "").startswith("## Runtime Tool Contract")
+        ]
+        assert len(contract_records) == 1
+        assert contract_records[0] in after_seed
+        note_records = [
+            item
+            for item in first_send
+            if str(item.get("content") or "").startswith("System note for this turn only:")
+        ]
+        assert len(note_records) <= 1
+        assert all(item in after_seed for item in note_records)
+        # 第一跳诊断落进 model_call 行
+        calls = restarted.store.list_task_model_calls(record.task_id, limit=None)
+        resumed_first_call = calls[1]["payload"]
+        assert str(resumed_first_call.get("request_seed_source") or "") == "scaffold_seed_with_delta"
+        assert int(resumed_first_call.get("request_seed_message_count") or 0) == len(previous_request_messages)
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_degraded_actual_request_artifact_falls_back_with_explicit_seed_diagnostic(tmp_path: Path):
+    # E4：memory/disk guard 降级 artifact 不携带可回灌请求体——seed 状态显式为
+    # degraded，第一跳回退投影重组装并在 model_call/frame 落 fallback_seed_degraded，
+    # 不再静默。
+    store_path = tmp_path / "runtime.sqlite3"
+    tasks_dir = tmp_path / "tasks"
+    artifacts_dir = tmp_path / "artifacts"
+    governance_path = tmp_path / "governance.sqlite3"
+
+    seed_service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    previous_request_messages = [
+        {"role": "system", "content": "node system prompt"},
+        {"role": "user", "content": "projected user prompt"},
+        {"role": "assistant", "content": "prior assistant"},
+    ]
+
+    try:
+        record = await _create_web_task(seed_service)
+        root = seed_service.get_node(record.root_node_id)
+        assert root is not None
+        seed_service.log_service.upsert_frame(
+            record.task_id,
+            {
+                "node_id": root.node_id,
+                "depth": root.depth,
+                "node_kind": root.node_kind,
+                "phase": "before_model",
+                "messages": previous_request_messages[:2],
+            },
+            publish_snapshot=False,
+        )
+        seed_service.log_service.append_node_output(
+            record.task_id,
+            root.node_id,
+            content="prior assistant",
+            tool_calls=[],
+            usage_attempts=[
+                LLMModelAttempt(
+                    model_key="sub gpt-5.4",
+                    provider_id="openai",
+                    provider_model="gpt-5.4",
+                    usage={"input_tokens": 14, "output_tokens": 6},
+                )
+            ],
+            model_messages=previous_request_messages[:2],
+            request_messages=previous_request_messages,
+            prompt_cache_key="stable-family-key-e4",
+            request_message_count=len(previous_request_messages),
+            request_message_chars=210,
+            actual_tool_schemas=[{"name": "submit_final_result", "parameters": {"type": "object"}}],
+            provider_request_meta={"provider": "openai"},
+        )
+    finally:
+        await seed_service.close()
+
+    # 把落盘的 actual-request artifact 改写成 memory guard 降级形态。
+    degraded_targets = 0
+    for artifact_path in artifacts_dir.rglob("*.json"):
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("request_messages"), list):
+            continue
+        payload["artifact_persistence_mode"] = "memory_guard_degraded"
+        payload["artifact_persistence_reason"] = "memory_error"
+        payload["model_messages"] = []
+        payload["request_messages"] = []
+        payload["provider_request_body"] = {}
+        artifact_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        degraded_targets += 1
+    assert degraded_targets == 1
+
+    backend = _CapturedRequestFinalResultChatBackend()
+    restarted = MainRuntimeService(
+        chat_backend=backend,
+        workspace_root=tmp_path,
+        store_path=store_path,
+        files_base_dir=tasks_dir,
+        artifact_dir=artifacts_dir,
+        governance_store_path=governance_path,
+        execution_mode="web",
+        execution_model_refs=["fake"],
+        acceptance_model_refs=["fake"],
+    )
+
+    try:
+        task = restarted.get_task(record.task_id)
+        root = restarted.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        react_state = await restarted.node_runner._resume_react_state(task=task, node=root)
+        assert react_state["request_seed_state"] == "degraded"
+        assert react_state["request_body_seed_messages"] == []
+
+        tools = {
+            "submit_next_stage": SubmitNextStageTool(
+                lambda stage_goal, tool_round_budget, completed_stage_summary, key_refs, final: restarted.node_runner._submit_next_stage(
+                    task_id=task.task_id,
+                    node_id=root.node_id,
+                    stage_goal=stage_goal,
+                    tool_round_budget=tool_round_budget,
+                    completed_stage_summary=completed_stage_summary,
+                    key_refs=key_refs,
+                    final=final,
+                )
+            ),
+            "submit_final_result": SubmitFinalResultTool(
+                lambda payload: restarted.node_runner._submit_final_result(payload),
+                node_kind=root.node_kind,
+            ),
+        }
+        result = await restarted.node_runner._react_loop.run(
+            task=task,
+            node=root,
+            messages=list(react_state.get("messages") or []),
+            request_body_seed_messages=list(react_state.get("request_body_seed_messages") or []),
+            request_seed_state=str(react_state.get("request_seed_state") or ""),
+            tools=tools,
+            model_refs=["fake"],
+            runtime_context=restarted.node_runner._runtime_context(task=task, node=root),
+            max_iterations=4,
+        )
+        assert result.status == "success"
+
+        calls = restarted.store.list_task_model_calls(record.task_id, limit=None)
+        resumed_first_call = calls[1]["payload"]
+        assert str(resumed_first_call.get("request_seed_source") or "") == "fallback_seed_degraded"
+        assert int(resumed_first_call.get("request_seed_message_count") or 0) == 0
     finally:
         await restarted.close()
 
@@ -9141,7 +9479,12 @@ async def test_refresh_inflight_notice_messages_appends_after_spawn_round_histor
 
         assert refreshed_root_notice_ids == []
         assert refreshed_notification_ids == ["notif:after-spawn"]
-        assert refreshed_delta_messages == []
+        # notice 无条件镜像进 delta：链路径（previous+delta+tail）请求本体不含
+        # 投影，notice 只经 delta 进入请求；旧的 "delta 空则不产出" 门会让
+        # 工具轮之间到达的 notice 触发投影重组装小请求。
+        assert refreshed_delta_messages == [
+            {"role": "user", "content": "append after spawn round"}
+        ]
 
         notice_indexes = [
             index
@@ -9319,7 +9662,10 @@ async def test_resume_react_state_keeps_canonical_messages_separate_from_provide
         assert react_state["message_source"] == "notice"
         assert react_state["messages"][: len(canonical_messages)] == canonical_messages
         assert react_state["messages"][-1] == {"role": "user", "content": "new parent constraint"}
-        assert react_state["request_body_seed_messages"] == previous_provider_input
+        # seed = 内部形态 request_messages（/responses wire 项无 role，回灌 adapter
+        # 会被 _convert_messages 静默丢弃），与 canonical 投影历史分离、各司其职。
+        assert react_state["request_seed_state"] == "ok"
+        assert react_state["request_body_seed_messages"] == previous_request_messages
     finally:
         await restarted.close()
 

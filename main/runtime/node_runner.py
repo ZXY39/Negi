@@ -558,6 +558,7 @@ class NodeRunner:
                     node=node,
                     messages=list(react_state.get('messages') or []),
                     request_body_seed_messages=list(react_state.get('request_body_seed_messages') or []),
+                    request_seed_state=str(react_state.get('request_seed_state') or ''),
                     tools=tools,
                     tools_supplier=lambda current_task=task, current_node=node: self._build_tools(
                         task=current_task,
@@ -710,7 +711,10 @@ class NodeRunner:
     async def _resume_react_state(self, *, task, node: NodeRecord) -> dict[str, Any]:
         notifications = self._pending_node_notifications(task_id=task.task_id, node_id=node.node_id)
         pending_root_notice_records = self._pending_root_notice_records(node=node)
-        request_body_seed_messages = self._latest_actual_request_seed_messages(task=task, node=node)
+        request_body_seed_messages, request_seed_state = self._latest_actual_request_seed_messages(
+            task=task,
+            node=node,
+        )
         if notifications or pending_root_notice_records:
             if self._pending_notice_waits_for_children(node=node):
                 frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
@@ -719,11 +723,13 @@ class NodeRunner:
                         'messages': list(frame.get('messages') or []),
                         'message_source': 'restored_frame',
                         'request_body_seed_messages': request_body_seed_messages,
+                        'request_seed_state': request_seed_state,
                     }
                 return {
                     'messages': await self._build_messages(task=task, node=node),
                     'message_source': 'fresh',
                     'request_body_seed_messages': request_body_seed_messages,
+                    'request_seed_state': request_seed_state,
                 }
             messages = await self._notice_resume_messages(task=task, node=node)
             messages = self._append_notice_messages(messages=messages, notices=notifications)
@@ -739,6 +745,7 @@ class NodeRunner:
                     if str(item.get('notification_id') or '').strip()
                 ],
                 'request_body_seed_messages': request_body_seed_messages,
+                'request_seed_state': request_seed_state,
             }
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         if isinstance(frame.get('messages'), list) and frame.get('messages'):
@@ -746,11 +753,13 @@ class NodeRunner:
                 'messages': list(frame.get('messages') or []),
                 'message_source': 'restored_frame',
                 'request_body_seed_messages': request_body_seed_messages,
+                'request_seed_state': request_seed_state,
             }
         return {
             'messages': await self._build_messages(task=task, node=node),
             'message_source': 'fresh',
             'request_body_seed_messages': request_body_seed_messages,
+            'request_seed_state': request_seed_state,
         }
 
     def _pending_node_notifications(self, *, task_id: str, node_id: str) -> list[Any]:
@@ -803,9 +812,17 @@ class NodeRunner:
                     return [dict(item) for item in value if isinstance(item, dict)]
         return []
 
-    def _latest_actual_request_seed_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
+    # seed 状态随种子一起返回，供 react_loop 第一跳 adoption 落 request_seed_source 诊断；
+    # ok / legacy_provider_shape 之外的状态都会映射为 fallback_* 的投影重组装轮。
+    def _latest_actual_request_seed_messages(
+        self,
+        *,
+        task,
+        node: NodeRecord,
+    ) -> tuple[list[dict[str, Any]], str]:
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
         metadata = dict(node.metadata or {})
+        state = 'no_artifact'
         for ref in (
             str(frame.get('actual_request_ref') or '').strip(),
             str(metadata.get('latest_runtime_actual_request_ref') or '').strip(),
@@ -814,18 +831,32 @@ class NodeRunner:
                 continue
             resolved = str(self._log_service.resolve_content_ref(ref) or '').strip()
             if not resolved:
+                state = 'unreadable'
                 continue
             try:
                 parsed = json.loads(resolved)
             except Exception:
                 parsed = None
-            message_list = self._provider_input_messages_from_payload(parsed)
-            if message_list:
-                return message_list
+            if not isinstance(parsed, dict):
+                state = 'parse_fail'
+                continue
+            persistence_mode = str(parsed.get('artifact_persistence_mode') or '').strip()
+            if persistence_mode and persistence_mode != 'full':
+                # memory/disk guard 降级 artifact 不携带可回灌的请求体；
+                # 显式标记降级而不是静默返回空种子。
+                state = 'degraded'
+                continue
+            # 内部形态 request_messages 优先：/responses wire 项（function_call 等）
+            # 无 role，会被 adapter _convert_messages 静默丢弃，不能回灌；
+            # provider input 仅作 legacy 兜底，wire 残片由 adoption 头探针拦截。
             message_list = self._request_messages_from_payload(parsed)
             if message_list:
-                return message_list
-        return []
+                return message_list, 'ok'
+            message_list = self._provider_input_messages_from_payload(parsed)
+            if message_list:
+                return message_list, 'legacy_provider_shape'
+            state = 'empty'
+        return [], state
 
     async def _notice_resume_messages(self, *, task, node: NodeRecord) -> list[dict[str, Any]]:
         frame = self._log_service.read_runtime_frame(task.task_id, node.node_id) or {}
@@ -966,10 +997,13 @@ class NodeRunner:
             )
         updated_history = self._append_notice_messages(messages=updated_history, notices=new_notifications)
         updated_history = self._append_notice_messages(messages=updated_history, notices=new_root_notice_records)
-        if updated_request_delta_messages:
-            updated_request_delta_messages.extend(
-                self._notice_delta_messages(notices=[*list(new_notifications), *list(new_root_notice_records)])
-            )
+        # notice 无条件镜像进 delta：链路径（previous+delta+tail）请求本体不含投影，
+        # notice 只经 delta 进入请求一份；探针失败回退投影重组装时 delta 被丢弃，
+        # notice 只在烤入的投影里一份——两条路径都恰好一份。delta 为空时不再
+        # 跳过（旧门会让工具轮之间到达的 notice 触发投影重组装小请求）。
+        updated_request_delta_messages.extend(
+            self._notice_delta_messages(notices=[*list(new_notifications), *list(new_root_notice_records)])
+        )
         updated_notification_ids.extend(
             str(getattr(item, 'notification_id', '') or '').strip()
             for item in list(new_notifications or [])

@@ -152,8 +152,12 @@ def test_node_same_turn_merge_multiple_rounds_only_keep_latest_tail() -> None:
 
 
 # ---------------------------------------------------------------------------
-# node fresh-turn seed path
+# node fresh-turn seed adoption (scaffold + derived delta)
 # ---------------------------------------------------------------------------
+
+def _adopt(**kwargs):
+    return ReActToolLoop._adopt_fresh_turn_seed_scaffold(**kwargs)
+
 
 def test_node_fresh_turn_seed_drops_stale_note_and_contract() -> None:
     seed_records = [
@@ -170,20 +174,227 @@ def test_node_fresh_turn_seed_drops_stale_note_and_contract() -> None:
         {"role": "assistant", "content": "assistant-1"},
         {"role": "tool", "tool_call_id": "call-1", "name": "content_open", "content": "ok"},
     ]
-    live_records = [
-        *stable_records,
-        _note("current-note"),
-        _contract("current-contract"),
-    ]
-    merged = ReActToolLoop._fresh_turn_live_request_messages_from_seed_request(
+    adopted, derived_delta, source = _adopt(
         seed_request_messages=seed_records,
         stable_messages=stable_records,
-        live_request_messages=live_records,
     )
+    assert source == "scaffold_seed"
+    assert derived_delta == []
+    assert adopted is not None
+    # 陈旧 note/contract 被剥离，seed 只保留真实转录前缀
+    assert adopted == stable_records
+    # 调用方组装 [*adopted, *delta, *tail] 后尾部恰好各一份当前 note/contract
+    merged = [*adopted, *derived_delta, _note("current-note"), _contract("current-contract")]
     contents = [str(item.get("content") or "") for item in merged]
     assert sum(1 for c in contents if c.startswith("System note for this turn only:")) == 1
     assert sum(1 for c in contents if c.startswith("## Runtime Tool Contract")) == 1
     assert contents[-2:] == ["System note for this turn only:\ncurrent-note", "## Runtime Tool Contract\ncurrent-contract"]
+
+
+def test_adopt_seed_derives_delta_when_projection_diverges_mid_body() -> None:
+    # U1：投影中段被阶段压缩块改写、尾部追加了新 notice——头探针通过、
+    # 尾对齐以 seed 末条为锚找到覆盖点，投影超出部分成为显式 delta。
+    seed_records = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "assistant-1"},
+        {"role": "tool", "tool_call_id": "call-1", "name": "exec", "content": "full-tool-body"},
+        {"role": "assistant", "content": "assistant-2"},
+        {"role": "tool", "tool_call_id": "call-2", "name": "exec", "content": "latest-result"},
+    ]
+    notice = {"role": "user", "content": "child node:worker-1 completed"}
+    stable_records = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        {"role": "system", "content": "[G3KU_STAGE_COMPACT_V1]\n{}"},
+        {"role": "assistant", "content": "assistant-2"},
+        {"role": "tool", "tool_call_id": "call-2", "name": "exec", "content": "latest-result"},
+        notice,
+    ]
+    adopted, derived_delta, source = _adopt(
+        seed_request_messages=seed_records,
+        stable_messages=stable_records,
+    )
+    assert source == "scaffold_seed_with_delta"
+    assert adopted == seed_records
+    assert derived_delta == [notice]
+
+
+def test_adopt_seed_flush_tail_yields_empty_delta() -> None:
+    # U2：投影与 seed 尾齐平（无新内容）→ 空 delta。
+    seed_records = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "assistant-1"},
+    ]
+    adopted, derived_delta, source = _adopt(
+        seed_request_messages=seed_records,
+        stable_messages=list(seed_records),
+    )
+    assert source == "scaffold_seed"
+    assert adopted == seed_records
+    assert derived_delta == []
+
+
+def test_adopt_seed_covers_lagging_projection_prefix() -> None:
+    # U2b：frame 投影滞后于 seed（崩溃在 artifact 落盘与帧更新之间）——
+    # 尾锚点在投影里找不到，但投影整体是 seed 的归一化前缀 → 直接采用 seed。
+    seed_records = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "assistant-1"},
+        {"role": "tool", "tool_call_id": "call-1", "name": "exec", "content": "ok"},
+    ]
+    lagging_projection = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+    ]
+    adopted, derived_delta, source = _adopt(
+        seed_request_messages=seed_records,
+        stable_messages=lagging_projection,
+    )
+    assert source == "scaffold_seed"
+    assert adopted == seed_records
+    assert derived_delta == []
+
+
+def test_adopt_seed_fallback_sources() -> None:
+    # U3：三类回退全部显式落 source，禁止静默。
+    stable_records = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+    ]
+    # 头探针失败：跨 run 系统模板漂移
+    adopted, delta, source = _adopt(
+        seed_request_messages=[
+            {"role": "system", "content": "sys-v2"},
+            {"role": "user", "content": "prompt"},
+            {"role": "assistant", "content": "a"},
+        ],
+        stable_messages=stable_records,
+    )
+    assert adopted is None and delta == [] and source == "fallback_seed_prefix_drift"
+    # 投影尾部出现 seed 之外的新记录：头对（system+首条 user）作为兜底锚点命中，
+    # 新记录作为显式 delta 入链（frame 滞后 + 新尾部内容的合法拼接）。
+    adopted, delta, source = _adopt(
+        seed_request_messages=[
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "prompt"},
+            {"role": "assistant", "content": "never-projected"},
+        ],
+        stable_messages=[
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "prompt"},
+            {"role": "user", "content": "divergent-tail"},
+        ],
+    )
+    assert source == "scaffold_seed_with_delta"
+    assert adopted == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "never-projected"},
+    ]
+    assert delta == [{"role": "user", "content": "divergent-tail"}]
+    # 种子缺失/降级：按 node_runner 侧状态映射
+    for seed_state, expected in (
+        ("", "fallback_no_artifact"),
+        ("no_artifact", "fallback_no_artifact"),
+        ("unreadable", "fallback_seed_unreadable"),
+        ("parse_fail", "fallback_seed_parse_fail"),
+        ("degraded", "fallback_seed_degraded"),
+        ("empty", "fallback_seed_empty"),
+    ):
+        adopted, delta, source = _adopt(
+            seed_request_messages=[],
+            stable_messages=stable_records,
+            seed_state=seed_state,
+        )
+        assert adopted is None and delta == [] and source == expected
+    # 派生 delta 超限：按 misaligned 回退
+    long_stable = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        *[{"role": "user", "content": f"extra-{index}"} for index in range(10)],
+    ]
+    adopted, delta, source = _adopt(
+        seed_request_messages=long_stable[:2],
+        stable_messages=long_stable,
+        max_derived_delta=4,
+    )
+    assert adopted is None and delta == [] and source == "fallback_seed_misaligned"
+
+
+def test_adopt_seed_strips_trailing_image_overlay_record() -> None:
+    # U4：上一 run 末轮带 content_open 图像 overlay（末条被改写为多模态块）——
+    # adoption 先剥掉 overlay 尾迹再以真实末条对齐。
+    from main.runtime.react_loop import _CONTENT_OPEN_IMAGE_CONTEXT_TEXT
+
+    body = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "assistant-1"},
+    ]
+    overlay_record = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"tail-note\n\n{_CONTENT_OPEN_IMAGE_CONTEXT_TEXT}"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    }
+    seed_records = [*body, overlay_record]
+    stable_records = [*body, {"role": "user", "content": "notice-after-image"}]
+    adopted, derived_delta, source = _adopt(
+        seed_request_messages=seed_records,
+        stable_messages=stable_records,
+    )
+    assert source == "scaffold_seed_with_delta"
+    assert adopted == body
+    assert derived_delta == [{"role": "user", "content": "notice-after-image"}]
+
+
+def test_same_turn_append_only_with_source_labels() -> None:
+    # U5：链成功 / delta 空 / 探针失败三种 source；旧包装返回值保持兼容。
+    previous = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+        {"role": "assistant", "content": "assistant-1"},
+    ]
+    current = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "prompt"},
+    ]
+    delta = [{"role": "assistant", "content": "assistant-2"}]
+    tail = [_contract("current-contract")]
+    merged, source = ReActToolLoop._same_turn_append_only_request_messages_with_source(
+        previous_request_messages=previous,
+        current_model_messages=current,
+        pending_delta_messages=delta,
+        request_tail_messages=tail,
+    )
+    assert source == "same_turn_chain"
+    assert merged == [*previous, *delta, *tail]
+    assert ReActToolLoop._same_turn_append_only_request_messages(
+        previous_request_messages=previous,
+        current_model_messages=current,
+        pending_delta_messages=delta,
+        request_tail_messages=tail,
+    ) == merged
+    # delta 空 → 投影重组装（现形，不再静默）
+    _, source = ReActToolLoop._same_turn_append_only_request_messages_with_source(
+        previous_request_messages=previous,
+        current_model_messages=current,
+        pending_delta_messages=[],
+        request_tail_messages=tail,
+    )
+    assert source == "same_turn_reassembled"
+    # 前 2 条探针失败 → 投影重组装
+    _, source = ReActToolLoop._same_turn_append_only_request_messages_with_source(
+        previous_request_messages=[{"role": "system", "content": "sys-v2"}, *previous[1:]],
+        current_model_messages=current,
+        pending_delta_messages=delta,
+        request_tail_messages=tail,
+    )
+    assert source == "same_turn_reassembled"
 
 
 # ---------------------------------------------------------------------------

@@ -197,6 +197,7 @@ class ReActToolLoop:
         node,
         messages: list[dict[str, Any]],
         request_body_seed_messages: list[dict[str, Any]] | None = None,
+        request_seed_state: str = '',
         tools: dict[str, Tool],
         tools_supplier=None,
         model_refs: list[str],
@@ -213,6 +214,8 @@ class ReActToolLoop:
         fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
         previous_actual_request_messages: list[dict[str, Any]] = []
         pending_request_delta_messages: list[dict[str, Any]] = []
+        request_seed_source = ''
+        request_seed_message_count = 0
         pending_content_open_image_payloads: list[dict[str, Any]] = []
         current_model_refs: list[str] = []
         orphan_tool_result_strikes = 0
@@ -282,7 +285,9 @@ class ReActToolLoop:
                     return self._recovery_only_result(
                         summary='waiting_children recovery completed; held notice remains pending',
                     )
-                fresh_turn_request_seed_messages = []
+                # 保留 seed：恢复重放的 assistant(tool_calls)/tool 记录已烤进投影尾部，
+                # 第一跳 adoption 会把它们作为派生 delta 接到 scaffold 之后，避免
+                # restart/resume 第一跳退回投影重组装（message_count 骤降回归）。
                 attempts = max(0, attempts - 1)
                 continue
             refresh_inflight_notice_callback = runtime_context.get('refresh_inflight_notice_callback')
@@ -366,24 +371,56 @@ class ReActToolLoop:
                 build_execution_stage_overlay(node_kind=node.node_kind, stage_gate=stage_gate),
                 repair_overlay_text,
             ]
-            request_messages = self._apply_temporary_system_overlay(
+            assembled_request_messages = self._apply_temporary_system_overlay(
                 request_messages,
                 overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
             )
+            request_tail_messages = assembled_request_messages[len(model_messages) :]
             if fresh_turn_request_seed_messages:
-                request_messages = self._fresh_turn_live_request_messages_from_seed_request(
-                    seed_request_messages=fresh_turn_request_seed_messages,
-                    stable_messages=model_messages,
-                    live_request_messages=request_messages,
+                # fresh turn 第一跳：以持久 actual-request scaffold 为请求前缀，
+                # 投影超出 seed 覆盖点的尾段（notice/恢复重放/当前 user 回合）
+                # 作为显式 delta 追加；禁止静默回退，回退必带 fallback_* 诊断。
+                adopted_seed_records, derived_delta_messages, request_seed_source = (
+                    self._adopt_fresh_turn_seed_scaffold(
+                        seed_request_messages=fresh_turn_request_seed_messages,
+                        stable_messages=model_messages,
+                        seed_state=request_seed_state,
+                    )
                 )
                 fresh_turn_request_seed_messages = []
-            request_tail_messages = request_messages[len(model_messages) :]
-            request_messages = self._same_turn_append_only_request_messages(
-                previous_request_messages=previous_actual_request_messages,
-                current_model_messages=model_messages,
-                pending_delta_messages=pending_request_delta_messages,
-                request_tail_messages=request_tail_messages,
-            )
+                request_seed_message_count = len(adopted_seed_records or [])
+                if adopted_seed_records is not None:
+                    request_messages = [
+                        *adopted_seed_records,
+                        *derived_delta_messages,
+                        *request_tail_messages,
+                    ]
+                else:
+                    request_messages = list(assembled_request_messages)
+                # notice/重放记录已烤进投影并经 derived_delta 进入请求；
+                # 清空 pending delta，防止回调预填的同一批 notice 双份。
+                pending_request_delta_messages = []
+            elif previous_actual_request_messages:
+                request_seed_message_count = 0
+                request_messages, request_seed_source = (
+                    self._same_turn_append_only_request_messages_with_source(
+                        previous_request_messages=previous_actual_request_messages,
+                        current_model_messages=model_messages,
+                        pending_delta_messages=pending_request_delta_messages,
+                        request_tail_messages=request_tail_messages,
+                    )
+                )
+            else:
+                request_seed_message_count = 0
+                request_messages = list(assembled_request_messages)
+                seed_state_for_source = str(request_seed_state or '').strip()
+                if seed_state_for_source in {'', 'no_artifact'}:
+                    # 冷启动首轮：从未有过 actual-request artifact，合法链起点。
+                    request_seed_source = 'chain_start_no_previous'
+                elif seed_state_for_source in {'ok', 'legacy_provider_shape'}:
+                    request_seed_source = 'fallback_seed_empty'
+                else:
+                    request_seed_source = self._fallback_source_from_state(seed_state_for_source)
             previous_actual_request_messages = self._prompt_message_records(request_messages)
             pending_request_delta_messages = []
             repair_overlay_text = None
@@ -598,6 +635,8 @@ class ReActToolLoop:
                     'actual_request_hash': str(actual_request_diagnostics.get('actual_request_hash') or ''),
                     'actual_request_message_count': int(actual_request_diagnostics.get('actual_request_message_count') or 0),
                     'actual_tool_schema_hash': str(actual_request_diagnostics.get('actual_tool_schema_hash') or ''),
+                    'request_seed_source': str(request_seed_source or ''),
+                    'request_seed_message_count': int(request_seed_message_count or 0),
                     'token_preflight_diagnostics': dict(token_preflight_diagnostics or {}),
                     'history_shrink_reason': str(history_shrink_reason or '').strip(),
                     **self._execution_stage_frame_payload(node_kind=node.node_kind, stage_gate=stage_gate),
@@ -873,6 +912,8 @@ class ReActToolLoop:
                 provider_tool_exposure_commit_reason=str(
                     tool_schema_selection.get('provider_tool_exposure_commit_reason') or ''
                 ),
+                request_seed_source=str(request_seed_source or ''),
+                request_seed_message_count=int(request_seed_message_count or 0),
                 provider_request_meta=getattr(response, 'provider_request_meta', None),
                 provider_request_body=getattr(response, 'provider_request_body', None),
             )
@@ -6915,49 +6956,107 @@ class ReActToolLoop:
             for left, right in zip(first_records, second_records)
         )
 
+    @staticmethod
+    def _is_content_open_image_overlay_record(record: dict[str, Any]) -> bool:
+        content = record.get('content')
+        if not isinstance(content, list):
+            return False
+        return any(
+            isinstance(block, dict)
+            and _CONTENT_OPEN_IMAGE_CONTEXT_TEXT in str(block.get('text') or '')
+            for block in content
+        )
+
     @classmethod
-    def _fresh_turn_live_request_messages_from_seed_request(
+    def _fallback_source_from_state(cls, seed_state: str) -> str:
+        return {
+            'no_artifact': 'fallback_no_artifact',
+            'unreadable': 'fallback_seed_unreadable',
+            'parse_fail': 'fallback_seed_parse_fail',
+            'degraded': 'fallback_seed_degraded',
+            'empty': 'fallback_seed_empty',
+        }.get(str(seed_state or '').strip(), 'fallback_no_artifact')
+
+    @classmethod
+    def _adopt_fresh_turn_seed_scaffold(
         cls,
         *,
         seed_request_messages: list[dict[str, Any]] | None,
         stable_messages: list[dict[str, Any]] | None,
-        live_request_messages: list[dict[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
+        seed_state: str = '',
+        max_alignment_window: int = 512,
+        max_derived_delta: int = 256,
+        max_anchor_scan: int = 64,
+    ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]], str]:
+        """fresh turn 第一跳以持久 actual-request scaffold 为请求前缀。
+
+        返回 (adopted_seed_records, derived_delta, request_seed_source)；adopted 为
+        None 时调用方回退投影重组装，source 为 fallback_* 之一——禁止静默回退。
+
+        不再要求投影整体与 seed 结构等价：投影（阶段压缩块、工具正文外部化、
+        归档 notice tail 重渲染）与发送侧形态必然在中段分叉。只校验两点：
+        - 头探针：前两条（system + 首条 user）归一化相等，拦截跨 run 模板漂移
+          与 legacy wire 形态 seed（/responses 项无 role，回灌 adapter 会被丢弃）；
+        - 尾对齐（多锚点）：依次以 seed 尾部记录（剥契约/note/图像 overlay 尾迹后，
+          不含 system 头）为锚，在投影末段窗口内自尾向前找覆盖点；投影超出覆盖点
+          的记录（notice、恢复重放、当前 user 回合）即显式 delta。frame 投影滞后于
+          seed（崩溃在 artifact 落盘与帧更新之间）时更早的锚点自然命中、delta 收敛
+          为空或仅含新记录。delta 超限或与 seed 尾段重叠按 misaligned 回退。
+        """
         seed_records = strip_turn_only_system_note_messages(
             strip_node_dynamic_contract_messages(cls._prompt_message_records(seed_request_messages))
         )
+        while seed_records and cls._is_content_open_image_overlay_record(seed_records[-1]):
+            seed_records.pop()
         stable_records = cls._prompt_message_records(stable_messages)
-        live_records = cls._prompt_message_records(live_request_messages)
-        stable_len = len(stable_records)
-        seed_len = len(seed_records)
-        if not seed_records or stable_len <= 0 or len(live_records) < stable_len:
-            return live_records
-        if not cls._fresh_turn_seed_records_match(live_records[:stable_len], stable_records):
-            return live_records
-        matched_prefix_len = min(stable_len, seed_len)
-        if matched_prefix_len <= 0:
-            return live_records
-        if not cls._fresh_turn_seed_records_match(
-            seed_records[:matched_prefix_len],
-            stable_records[:matched_prefix_len],
-        ):
-            return live_records
-        if stable_len < seed_len:
-            live_tail = list(live_records[stable_len:])
-            return [*seed_records, *live_tail]
-        stable_tail = list(stable_records[seed_len:])
-        live_tail = list(live_records[stable_len:])
-        return [*seed_records, *stable_tail, *live_tail]
+        if not seed_records or not stable_records:
+            return None, [], cls._fallback_source_from_state(seed_state)
+        if not cls._fresh_turn_seed_records_match(seed_records[:2], stable_records[:2]):
+            return None, [], 'fallback_seed_prefix_drift'
+        window_start = max(0, len(stable_records) - max_alignment_window)
+        normalized_window = [
+            cls._fresh_turn_seed_normalized_value(item)
+            for item in stable_records[window_start:]
+        ]
+        anchor_limit = min(max_anchor_scan, len(seed_records) - 1)
+        for offset in range(anchor_limit + 1):
+            anchor_index = len(seed_records) - 1 - offset
+            if anchor_index < 1:
+                break
+            anchor = cls._fresh_turn_seed_normalized_value(seed_records[anchor_index])
+            alignment_index = -1
+            for position in range(len(normalized_window) - 1, -1, -1):
+                if normalized_window[position] == anchor:
+                    alignment_index = window_start + position
+                    break
+            if alignment_index < 0:
+                continue
+            derived_delta = list(stable_records[alignment_index + 1 :])
+            if len(derived_delta) > max_derived_delta:
+                return None, [], 'fallback_seed_misaligned'
+            seed_tail_after_anchor = [
+                cls._fresh_turn_seed_normalized_value(item)
+                for item in seed_records[anchor_index + 1 :]
+            ]
+            if seed_tail_after_anchor and any(
+                cls._fresh_turn_seed_normalized_value(item) in seed_tail_after_anchor
+                for item in derived_delta
+            ):
+                # delta 与 seed 尾段疑似重叠（锚点撞在重复记录上），换更早锚点。
+                continue
+            source = 'scaffold_seed_with_delta' if derived_delta else 'scaffold_seed'
+            return seed_records, derived_delta, source
+        return None, [], 'fallback_seed_misaligned'
 
     @classmethod
-    def _same_turn_append_only_request_messages(
+    def _same_turn_append_only_request_messages_with_source(
         cls,
         *,
         previous_request_messages: list[dict[str, Any]] | None,
         current_model_messages: list[dict[str, Any]] | None,
         pending_delta_messages: list[dict[str, Any]] | None,
         request_tail_messages: list[dict[str, Any]] | None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str]:
         current_records = cls._prompt_message_records(current_model_messages)
         tail_records = cls._prompt_message_records(request_tail_messages)
         live_records = [*current_records, *tail_records]
@@ -6968,11 +7067,27 @@ class ReActToolLoop:
             strip_node_dynamic_contract_messages(cls._prompt_message_records(pending_delta_messages))
         )
         if not previous_records or not delta_records:
-            return live_records
+            return live_records, 'same_turn_reassembled'
         prefix_probe = current_records[: min(2, len(current_records))]
         if prefix_probe and previous_records[: len(prefix_probe)] != prefix_probe:
-            return live_records
-        return [*previous_records, *delta_records, *tail_records]
+            return live_records, 'same_turn_reassembled'
+        return [*previous_records, *delta_records, *tail_records], 'same_turn_chain'
+
+    @classmethod
+    def _same_turn_append_only_request_messages(
+        cls,
+        *,
+        previous_request_messages: list[dict[str, Any]] | None,
+        current_model_messages: list[dict[str, Any]] | None,
+        pending_delta_messages: list[dict[str, Any]] | None,
+        request_tail_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        return cls._same_turn_append_only_request_messages_with_source(
+            previous_request_messages=previous_request_messages,
+            current_model_messages=current_model_messages,
+            pending_delta_messages=pending_delta_messages,
+            request_tail_messages=request_tail_messages,
+        )[0]
 
     @staticmethod
     def _apply_temporary_system_overlay(messages: list[dict[str, Any]], *, overlay_text: str | None) -> list[dict[str, Any]]:
