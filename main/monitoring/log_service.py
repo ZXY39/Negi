@@ -4259,6 +4259,31 @@ class TaskLogService:
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
         return compact_tool_step_for_summary(step if isinstance(step, dict) else None)
 
+    def _projection_entry_effective_status(self, entry: dict[str, Any]) -> str:
+        """D：spawn entry 的投影有效状态——绑定节点真实状态优先。
+
+        - 节点已终态（success/failed）：以节点为准（entry 的 running/error 都是漂移）；
+        - 节点非终态：queued/running 保持原义，其余记账态（如历史事故误盖的
+          error）计为 running——节点还活着就不算 failed；
+        - 绑定节点不可解析：回退 entry.status。
+        """
+        entry_status = str(entry.get('status') or '').strip().lower()
+        bound_node_id = str(entry.get('child_node_id') or '').strip()
+        if not bound_node_id:
+            return entry_status
+        try:
+            node = self._store.get_node(bound_node_id)
+        except Exception:
+            node = None
+        if node is None:
+            return entry_status
+        node_status = str(getattr(node, 'status', '') or '').strip().lower()
+        if node_status in {'success', 'failed'}:
+            return node_status
+        if node_status:
+            return entry_status if entry_status in {'queued', 'running'} else 'running'
+        return entry_status
+
     def _task_projection_round_records(self, node: NodeRecord) -> list[TaskProjectionRoundRecord]:
         payload = (node.metadata or {}).get('spawn_operations') if isinstance(node.metadata, dict) else {}
         if not isinstance(payload, dict):
@@ -4278,11 +4303,13 @@ class TaskLogService:
                 if str(item.get('child_node_id') or '').strip()
             ]
             total_children = len(child_node_ids)
-            completed_children = sum(1 for item in materialized_entries if str(item.get('status') or '').strip().lower() == 'success')
-            failed_children = sum(1 for item in materialized_entries if str(item.get('status') or '').strip().lower() == 'error')
-            running_children = sum(
-                1 for item in materialized_entries if str(item.get('status') or '').strip().lower() in {'queued', 'running'}
-            )
+            # D：计数以绑定节点真实状态优先于 spawn 合成记账——修复
+            # "entry 被误盖 error 而节点仍 in_progress"（2026-09-15 事故，
+            # failed_children 与节点状态互相矛盾）及反向漂移。
+            effective_statuses = [self._projection_entry_effective_status(item) for item in materialized_entries]
+            completed_children = sum(1 for status in effective_statuses if status == 'success')
+            failed_children = sum(1 for status in effective_statuses if status in {'error', 'failed'})
+            running_children = sum(1 for status in effective_statuses if status in {'queued', 'running'})
             records.append(
                 TaskProjectionRoundRecord(
                     task_id=node.task_id,

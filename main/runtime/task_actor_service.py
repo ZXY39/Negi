@@ -28,6 +28,7 @@ from main.runtime.node_runner import SKIPPED_CHECK_RESULT
 from main.runtime.pending_notice_state import RESUME_MODE_WAIT_FOR_CHILDREN
 from main.runtime.subtree_hold import (
     DISTRIBUTION_ACTIVE_STATES,
+    DISTRIBUTION_HOLD_STATES,
     INSPECTION_RESUME_MARKER,
     NOTICE_INTERRUPT_REASON,
 )
@@ -47,7 +48,12 @@ _DISTRIBUTION_BARRIER_SAFE_PHASES = {
 # 分发进行中的状态集合（hold 谓词与各门控共用，单一来源：subtree_hold；
 # hold 阻塞集另含 'failed'——失败后子树保持冻结直到显式恢复降级）。
 _DISTRIBUTION_ACTIVE_STATES = DISTRIBUTION_ACTIVE_STATES
+# hold 阻塞态（含 failed 冻结）：孤儿收尸在该状态下整体不介入（单一来源：subtree_hold）。
+_DISTRIBUTION_HOLD_STATES = DISTRIBUTION_HOLD_STATES
 _DISTRIBUTION_DRIVER_POLL_SECONDS = 1.0
+# A3：释放后校验清扫的两段延迟（秒）。第一段后仍卡死则再 resume 一次，
+# 第二段后仍卡死则落 ERROR（冻结→释放的终点必须可见）。
+_RELEASE_VERIFICATION_DELAY_SECONDS = 5.0
 # 决策回合 resume_execution 的结果标记（单一来源：main.runtime.subtree_hold）。
 _INSPECTION_RESUME_MARKER = INSPECTION_RESUME_MARKER
 # 合成验收中断结果的 blocking_reason（单一来源：main.runtime.subtree_hold）。
@@ -90,7 +96,12 @@ class _DispatchLease:
     async def wait_for(self, future: asyncio.Future[NodeFinalResult]) -> NodeFinalResult:
         await self._enter_nested_wait()
         try:
-            return await future
+            # B5：shield 保护子节点派发 future——等待方（父管线/看门狗取消链）被
+            # cancel 时，asyncio 会顺着 _fut_waiter 把被等的 future 一并取消，
+            # 子节点 entry 因此"活着但 future 已死"，释放复活永久跳过
+            # （2026-09-15 孤儿子节点事故的致命一环）。取消只应打断等待，
+            # 不得穿透销毁子节点的派发凭据。
+            return await asyncio.shield(future)
         finally:
             await self._exit_nested_wait()
 
@@ -203,7 +214,9 @@ class TaskNodeDispatcher:
             if current_lease.entry.node_id == entry.node_id:
                 raise RuntimeError(f'node dispatch cannot wait on itself: {entry.node_id}')
             return await current_lease.wait_for(entry.future)
-        return await entry.future
+        # B5：同 wait_for——外层（run_task/控制回合驱动）被取消时不得顺带
+        # 取消 entry future；生命周期由 dispatcher.close()/cancel_nodes 权威管理。
+        return await asyncio.shield(entry.future)
 
     async def cancel_nodes(self, node_ids: list[str]) -> None:
         entries: list[_DispatchEntry] = []
@@ -224,9 +237,20 @@ class TaskNodeDispatcher:
                     entry.future.set_result(self._node_runner.fail_paused_node(self._task_id, node_id, 'canceled'))
                 except Exception:
                     entry.future.set_exception(asyncio.CancelledError())
-        waits = [entry.future for entry in entries if not entry.future.done()]
-        if waits:
-            await asyncio.gather(*[asyncio.shield(future) for future in waits], return_exceptions=True)
+        # 先等被取消的协程真停：run_node 的 CancelledError 在活动 hold 下会转
+        # DistributionHoldError 冻结（future 保持 pending），直接 shield-await
+        # future 将永远等不到解析——supersede-kill 会死锁（B3 配套修复）。
+        running_tasks = [entry.task for entry in entries if entry.task is not None and not entry.task.done()]
+        if running_tasks:
+            await asyncio.gather(*running_tasks, return_exceptions=True)
+        # 协程停稳后仍未解析的 future 强制落终态，保持取消语义权威。
+        for entry in entries:
+            if entry.future.done():
+                continue
+            try:
+                entry.future.set_result(self._node_runner.fail_paused_node(self._task_id, entry.node_id, 'canceled'))
+            except Exception:
+                entry.future.set_exception(asyncio.CancelledError())
 
     async def resume_node(self, node_id: str) -> None:
         normalized_node_id = str(node_id or '').strip()
@@ -337,11 +361,21 @@ class TaskNodeDispatcher:
             lease = _DispatchLease(dispatcher=self, entry=entry, semaphore=semaphore)
             context_token = _CURRENT_DISPATCH_LEASE.set(lease)
             result = await self._node_runner.run_node(self._task_id, entry.node_id)
-        except DistributionHoldError:
+        except DistributionHoldError as exc:
             # 子树分发屏障冻结：对包括根在内的所有节点保持 future pending。
             # 父管线自然停摆；分发驱动器在释放时对每个 held entry 调
             # resume_node 在原 future 上重跑。绝不能 set_exception——那会被
             # 父管线的通用错误处理转成 spawn 运行时错误、杀死整条分支。
+            # A2：冻结不再静默——落 WARN 供排查"复活失败"类事故（2026-09-15）。
+            try:
+                logger.warning(
+                    'node frozen by distribution hold (future kept pending): task={} node={} epoch={}',
+                    self._task_id,
+                    entry.node_id,
+                    str(getattr(exc, 'epoch_id', '') or ''),
+                )
+            except Exception:
+                pass
             return
         except NodePausedError as exc:
             # Child entries keep their waiter future pending so the parent
@@ -363,6 +397,18 @@ class TaskNodeDispatcher:
                 entry.future.cancel()
             raise
         except Exception as exc:
+            # A2：搁浅异常必须留痕——future 可能无人消费（父链路已死时连
+            # asyncio 的 never-retrieved 告警都不会出现），日志是唯一线索。
+            try:
+                logger.error(
+                    'node entry crashed; exception parked on dispatch future '
+                    '(consumers may be gone): task={} node={} error={!r}',
+                    self._task_id,
+                    entry.node_id,
+                    exc,
+                )
+            except Exception:
+                pass
             if not entry.future.done():
                 entry.future.set_exception(exc)
         else:
@@ -458,6 +504,8 @@ class TaskActorService:
         self.distribution_failure_notifier = None
         # 每任务单飞的子树分发驱动器（side asyncio.Task）。
         self._epoch_drivers: dict[str, asyncio.Task[None]] = {}
+        # A3：释放后校验清扫任务（每任务替换式单飞，run_task finally 取消）。
+        self._release_sweeps: dict[str, asyncio.Task[None]] = {}
         self._node_runner.nested_node_executor = self._execute_nested_node
         self._node_runner.cancel_node_subtree_executor = self._cancel_node_subtree
 
@@ -635,6 +683,9 @@ class TaskActorService:
                     # - 根不在屏障内：无关分支照常执行，驱动器并发推进 epoch。
                     # 不再 control_only_return：那会把整任务冻结，违背局部暂停。
                     self.ensure_scoped_epoch_driver(task_id)
+                # C：孤儿收尸/重派发——每次 worker 拾取都决断"DB 非终态但无执行器
+                # 也无重放路径"的节点，杜绝幽灵 in_progress（2026-09-15 事故 L3）。
+                await self._reconcile_orphan_in_progress_nodes(task_id, dispatcher)
                 resumed_pending_notices = await self._resume_pending_notice_nodes(task_id)
                 if resumed_pending_notices:
                     resumed_result = self._terminal_result_after_notice_resume(task_id)
@@ -703,6 +754,12 @@ class TaskActorService:
                 blocking_reason=text,
             )
         finally:
+            # getattr 防御：轻量 stub（object.__new__）不经过 __init__。
+            sweeps = getattr(self, '_release_sweeps', None)
+            if sweeps is not None:
+                sweep = sweeps.pop(task_id, None)
+                if sweep is not None and not sweep.done():
+                    sweep.cancel()
             await dispatcher.close()
             self._dispatchers.pop(task_id, None)
             latest = self._store.get_task(task_id)
@@ -729,6 +786,171 @@ class TaskActorService:
                     self._stall_notifier.pause_task(task_id)
                 elif str(getattr(latest, 'status', '') or '').strip().lower() in {'success', 'failed'}:
                     self._stall_notifier.terminal_task(latest)
+
+    async def _reconcile_orphan_in_progress_nodes(self, task_id: str, dispatcher: 'TaskNodeDispatcher') -> None:
+        """C：孤儿收尸/重派发（每次 run_task 拾取时执行，幂等）。
+
+        不变式：DB 里的 in_progress 执行节点必须对应"在跑/即将被派发"或
+        "可由根重放恢复"，否则显式落 failed——杜绝"显示进行中但没人在跑"
+        的幽灵态（2026-09-15 孤儿子节点事故 L3）。
+
+        范围：只决断派生树内的 execution 节点（metadata 带 spawn_owner_kind='child'
+        且 spawn_owner_round_id 非空）；acceptance 节点的生命周期由验收握手与
+        `_resume_pending_notice_nodes`/最终验收机制管理，不在此收尸。
+        分发进行中（含 failed 冻结）由屏障/驱动器持有节点生命周期，整体不介入。
+        """
+        distribution = self._distribution_runtime_state(task_id)
+        if str(distribution.get('state') or '').strip() in _DISTRIBUTION_HOLD_STATES:
+            return
+        task = self._store.get_task(task_id)
+        if task is None:
+            return
+        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
+        try:
+            records = list(self._store.list_task_nodes(task_id) or [])
+        except Exception:
+            return
+        for record in records:
+            node_id = str(getattr(record, 'node_id', '') or '').strip()
+            if not node_id or node_id == root_node_id:
+                continue
+            if str(getattr(record, 'node_kind', '') or '').strip().lower() != 'execution':
+                continue
+            if str(getattr(record, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+            if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
+                continue
+            if not str(metadata.get('spawn_owner_round_id') or '').strip():
+                # 未挂派生轮的节点（非常规形态）不武断收尸，交由父管线/失速监控。
+                continue
+            if self._node_operator_paused(node):
+                continue
+            entry = dispatcher._entries.get(node_id)
+            if entry is not None and entry.task is not None and not entry.task.done():
+                continue  # 已有活执行器
+            if self._orphan_recovery_chain_reachable(
+                task_id=task_id,
+                node=node,
+                root_node_id=root_node_id,
+                dispatcher=dispatcher,
+            ):
+                try:
+                    logger.warning(
+                        'orphan node re-dispatched at task pickup (recoverable via parent replay): '
+                        'task={} node={}',
+                        task_id,
+                        node_id,
+                    )
+                except Exception:
+                    pass
+                await dispatcher.resume_node(node_id)
+                continue
+            reason = 'orphan reaped at task resume: in_progress without executor or replay path'
+            try:
+                logger.warning('orphan node reaped: task={} node={}', task_id, node_id)
+            except Exception:
+                pass
+            try:
+                self._node_runner.fail_paused_node(task_id, node_id, reason)
+            except Exception:
+                try:
+                    logger.exception('orphan reap failed: task={} node={}', task_id, node_id)
+                except Exception:
+                    pass
+                continue
+            try:
+                self._log_service.append_task_error_log(
+                    task_id=task_id,
+                    node_id=node_id,
+                    node_title=str(getattr(node, 'title', '') or getattr(node, 'goal', '') or ''),
+                    error_text=reason,
+                )
+            except Exception:
+                pass
+
+    def _orphan_recovery_chain_reachable(
+        self,
+        *,
+        task_id: str,
+        node,
+        root_node_id: str,
+        dispatcher: 'TaskNodeDispatcher',
+    ) -> bool:
+        """孤儿可恢复 ⟺ 向上逐跳：父非终态、父的最新未完成 spawn 轮仍绑定该节点、
+        且父帧保留该轮重放意图（waiting_children / pending_tool_calls 含轮 id），
+        一路抵达根（run_task 即将派发）或某个活 entry。"""
+        current = node
+        seen: set[str] = set()
+        while True:
+            node_id = str(getattr(current, 'node_id', '') or '').strip()
+            if not node_id or node_id in seen:
+                return False
+            seen.add(node_id)
+            parent_id = str(getattr(current, 'parent_node_id', '') or '').strip()
+            if not parent_id:
+                return False
+            parent = self._store.get_node(parent_id)
+            if parent is None:
+                return False
+            if str(getattr(parent, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                return False  # 父已终态，不会再重放
+            round_id = self._parent_round_binding_node(parent=parent, node_id=node_id)
+            if not round_id:
+                return False  # 父的最新未完成轮已不绑定该节点
+            parent_entry = dispatcher._entries.get(parent_id)
+            if parent_entry is not None and parent_entry.task is not None and not parent_entry.task.done():
+                return True  # 父有活执行器，重放进行中
+            if not self._parent_frame_intends_round_replay(task_id=task_id, parent=parent, round_id=round_id):
+                return False
+            if parent_id == root_node_id:
+                return True  # 根即将被 run_task 派发且保留重放意图
+            current = parent
+
+    def _parent_round_binding_node(self, *, parent, node_id: str) -> str:
+        """父节点最新未完成 spawn 轮若经 child/acceptance 绑定该节点，返回轮 id。"""
+        try:
+            latest = self._node_runner._latest_incomplete_spawn_round(parent=parent)
+        except Exception:
+            return ''
+        if not latest:
+            return ''
+        round_id, payload = latest
+        for item in list((payload or {}).get('entries') or []):
+            if not isinstance(item, dict):
+                continue
+            for field in ('child_node_id', 'acceptance_node_id'):
+                if str(item.get(field) or '').strip() == str(node_id or '').strip():
+                    return str(round_id or '').strip()
+        return ''
+
+    def _parent_frame_intends_round_replay(self, *, task_id: str, parent, round_id: str) -> bool:
+        """父帧是否保留对指定 spawn 轮的重放意图（释放/恢复后会同 id 重放）。"""
+        normalized_round_id = str(round_id or '').strip()
+        if not normalized_round_id:
+            return False
+        frame: dict[str, Any] = {}
+        getter = getattr(self._log_service, 'read_runtime_frame', None)
+        if callable(getter):
+            try:
+                frame = dict(getter(task_id, str(getattr(parent, 'node_id', '') or '').strip()) or {})
+            except Exception:
+                frame = {}
+        if str(frame.get('phase') or '').strip() == 'waiting_children':
+            return True
+        for item in list(frame.get('pending_tool_calls') or []):
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get('id') or item.get('tool_call_id') or '').strip()
+            if candidate and candidate == normalized_round_id:
+                return True
+        for item in list(frame.get('active_round_tool_call_ids') or []):
+            if str(item or '').strip() == normalized_round_id:
+                return True
+        return False
 
     def request_cancel(self, task_id: str) -> None:
         self._log_service.request_cancel(task_id)
@@ -1198,16 +1420,27 @@ class TaskActorService:
         )
 
     async def _release_scoped_epoch_holds(self, task_id: str, barrier_node_ids: list[str]) -> None:
-        """释放子树冻结：对每个 held entry 重跑（meta 已先行清除，hold 谓词关闭）。"""
+        """释放子树冻结：对每个 held entry 重跑（meta 已先行清除，hold 谓词关闭）。
+
+        A2：每个跳过项落原因；done future 携带未消费异常时把异常打出来——
+        父链路已死时这是搁浅异常的唯一痕迹（2026-09-15 孤儿子节点事故 L2）。
+        A3：成功复活的节点进入延迟校验清扫，保证"冻结→释放"的终点只能是
+        在跑或显式终态/告警，不允许静默 pending。
+        """
         dispatcher = self._dispatchers.get(task_id)
         if dispatcher is None:
+            try:
+                logger.info('release skip: dispatcher missing (task not running here): task={}', task_id)
+            except Exception:
+                pass
             return
+        resumed_node_ids: list[str] = []
         for raw_node_id in list(barrier_node_ids or []):
             node_id = str(raw_node_id or '').strip()
             if not node_id:
                 continue
             entry = dispatcher._entries.get(node_id)
-            if entry is None or entry.future.done():
+            if entry is None:
                 continue
             node = self._store.get_node(node_id)
             if node is None:
@@ -1216,8 +1449,133 @@ class TaskActorService:
                 continue
             if self._node_operator_paused(node):
                 # 人工暂停的节点保持暂停，不因分发释放被唤醒。
+                try:
+                    logger.info('release skip (operator paused): task={} node={}', task_id, node_id)
+                except Exception:
+                    pass
+                continue
+            if entry.future.done():
+                self._log_stranded_entry_future(task_id, node_id, entry)
+                if entry.task is not None and not entry.task.done():
+                    # future 已解析但协程还在跑：不重建（防双跑），留给 A3 清扫观测。
+                    continue
+                # B5 兜底：future 被取消/异常搁浅而节点非终态——弹出残骸重建
+                # entry 复活（resume_node 对已弹出节点走 _get_or_create_entry）。
+                dispatcher._entries.pop(node_id, None)
+                await dispatcher.resume_node(node_id)
+                resumed_node_ids.append(node_id)
                 continue
             await dispatcher.resume_node(node_id)
+            resumed_node_ids.append(node_id)
+        if resumed_node_ids:
+            self._schedule_release_verification(task_id, resumed_node_ids)
+
+    def _log_stranded_entry_future(self, task_id: str, node_id: str, entry: _DispatchEntry) -> None:
+        """A2：done future 若被取消或携带无人消费的异常，落日志（否则永久静默）。"""
+        try:
+            future = entry.future
+            if future.cancelled():
+                logger.warning(
+                    'release: dispatch future was cancelled while node non-terminal (rebuilding entry): '
+                    'task={} node={}',
+                    task_id,
+                    node_id,
+                )
+                return
+            exc = future.exception()
+            if exc is not None:
+                logger.error(
+                    'release: dispatch future already failed with stranded exception (rebuilding entry): '
+                    'task={} node={} error={!r}',
+                    task_id,
+                    node_id,
+                    exc,
+                )
+        except Exception:
+            pass
+
+    def _schedule_release_verification(self, task_id: str, node_ids: list[str]) -> None:
+        """A3：释放后延迟校验（每任务替换式单飞；run_task finally 取消）。"""
+        normalized = [str(item or '').strip() for item in list(node_ids or []) if str(item or '').strip()]
+        if not normalized:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        previous = self._release_sweeps.pop(task_id, None)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        sweep = loop.create_task(
+            self._verify_release_revival(task_id, normalized),
+            name=f'task-release-verification:{task_id}',
+        )
+        self._release_sweeps[task_id] = sweep
+
+        def _cleanup(completed_task: 'asyncio.Task[None]', *, tid: str = task_id) -> None:
+            if self._release_sweeps.get(tid) is completed_task:
+                self._release_sweeps.pop(tid, None)
+
+        sweep.add_done_callback(_cleanup)
+
+    async def _verify_release_revival(self, task_id: str, node_ids: list[str]) -> None:
+        await asyncio.sleep(_RELEASE_VERIFICATION_DELAY_SECONDS)
+        wedged = self._collect_wedged_release_nodes(task_id, node_ids)
+        if not wedged:
+            return
+        dispatcher = self._dispatchers.get(task_id)
+        if dispatcher is None:
+            return
+        for node_id in wedged:
+            try:
+                logger.warning(
+                    'release verification: node still frozen after epoch release, re-resuming once: '
+                    'task={} node={}',
+                    task_id,
+                    node_id,
+                )
+            except Exception:
+                pass
+            await dispatcher.resume_node(node_id)
+        await asyncio.sleep(_RELEASE_VERIFICATION_DELAY_SECONDS)
+        for node_id in self._collect_wedged_release_nodes(task_id, wedged):
+            try:
+                logger.error(
+                    'release verification failed: node wedged after re-resume (needs attention): '
+                    'task={} node={}',
+                    task_id,
+                    node_id,
+                )
+            except Exception:
+                pass
+
+    def _collect_wedged_release_nodes(self, task_id: str, node_ids: list[str]) -> list[str]:
+        """卡死形态：future pending + entry task done + 非终态 + 非人工暂停 + 无活动 hold。"""
+        dispatcher = self._dispatchers.get(task_id)
+        if dispatcher is None:
+            return []
+        wedged: list[str] = []
+        for raw_node_id in list(node_ids or []):
+            node_id = str(raw_node_id or '').strip()
+            if not node_id:
+                continue
+            entry = dispatcher._entries.get(node_id)
+            if entry is None or entry.future.done():
+                continue
+            if entry.task is not None and not entry.task.done():
+                continue
+            node = self._store.get_node(node_id)
+            if node is None:
+                continue
+            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            if self._node_operator_paused(node):
+                continue
+            if self._node_runner._subtree_hold_epoch_id(task_id=task_id, node_id=node_id):
+                # 新一轮屏障又冻上了——合法冻结，不算卡死。
+                continue
+            wedged.append(node_id)
+        return wedged
 
     def _ancestor_node_ids(self, node_id: str) -> list[str]:
         chain: list[str] = []

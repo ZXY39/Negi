@@ -16,6 +16,12 @@ hold 判定是唯一的冻结真源，被三处检查点共用：
    上溯：节点自身是目标、或任一祖先是目标 ⇒ 处于子树内 ⇒ hold。
 3. ``distributing`` 状态下 frontier 成员豁免（它们走分发控制回合而不是
    被冻结），与 ``run_node`` 中「分发分支先于 hold 检查」的顺序互为保险。
+4. 陈旧 meta 防御（A1）：runtime meta 是缓存、epochs 表是权威。调用方可注入
+   ``get_epoch_state``，命中 hold 后回查 epoch 的库内状态——已终态
+   （completed/cancelled/cancelled_by_task_delete）或查无（'none'）说明 meta
+   脱同步，不冻结并经 ``on_stale_hold`` 告警；``failed`` 不在陈旧之列
+   （按设计持续冻结等操作员恢复，见要点 1）。校验回调自身异常时保守维持
+   hold（fail-safe）。
 """
 
 from __future__ import annotations
@@ -30,6 +36,15 @@ DISTRIBUTION_ACTIVE_STATES = frozenset({
     'distributing',
 })
 DISTRIBUTION_HOLD_STATES = DISTRIBUTION_ACTIVE_STATES | {'failed'}
+# A1 陈旧判定：epoch 库内状态落在该集合（或解析为 'none'/空）时，meta 的 hold 视为脱同步。
+# 注意 'failed' 故意不在其中——失败 epoch 的子树按设计保持冻结（见模块要点 1/4）。
+STALE_HOLD_EPOCH_STATES = frozenset({
+    'completed',
+    'cancelled',
+    'canceled',
+    'cancelled_by_task_delete',
+    'none',
+})
 # 决策回合 resume_execution 的结果标记（node_runner 产出、task_actor_service 消费）。
 INSPECTION_RESUME_MARKER = 'inspection_resume_execution'
 # 合成验收中断结果的 blocking_reason：验收回绝处理据此走「不消耗拒绝预算、
@@ -45,13 +60,87 @@ def _id_set(values: Any) -> set[str]:
     }
 
 
+def make_epoch_state_lookup(store: Any, task_id: str) -> Callable[[str], str]:
+    """A1 接线用：epoch_id → epochs 表库内状态。
+
+    - 具体 epoch id：查无记录返回 'none'（视为陈旧）。
+    - 空/'active'（meta 未记 id 的兜底形态）：扫描该任务全部 epoch，取最早的
+      非终态（queued/活跃/failed）者状态；一个都没有则 'none'。
+    仅在 hold 命中时被调用（罕见路径），常规检查点零额外开销。
+    """
+    normalized_task_id = str(task_id or '').strip()
+
+    def _lookup(epoch_id: str) -> str:
+        normalized_epoch_id = str(epoch_id or '').strip()
+        if normalized_epoch_id and normalized_epoch_id != 'active':
+            epoch = store.get_task_message_distribution_epoch(normalized_task_id, normalized_epoch_id)
+            if epoch is None:
+                return 'none'
+            return str(getattr(epoch, 'state', '') or '').strip().lower() or 'none'
+        non_terminal = DISTRIBUTION_HOLD_STATES | {'queued'}
+        for epoch in list(store.list_active_task_message_distribution_epochs(normalized_task_id) or []):
+            state = str(getattr(epoch, 'state', '') or '').strip().lower()
+            if state in non_terminal:
+                return state or 'active'
+        return 'none'
+
+    return _lookup
+
+
+def make_stale_hold_logger(warn: Callable[[str], None]) -> Callable[[str, str, str], None]:
+    """A1 接线用：陈旧 hold 告警回调（吞掉日志失败，不影响判定）。"""
+
+    def _on_stale_hold(node_id: str, epoch_id: str, db_state: str) -> None:
+        try:
+            warn(
+                'stale subtree hold ignored (runtime meta/epochs desync): '
+                f'node={node_id} epoch={epoch_id} db_state={db_state or "none"}'
+            )
+        except Exception:
+            pass
+
+    return _on_stale_hold
+
+
+def _validated_hold_epoch_id(
+    candidate_epoch_id: str,
+    *,
+    node_id: str,
+    get_epoch_state: Callable[[str], str] | None,
+    on_stale_hold: Callable[[str, str, str], None] | None,
+) -> str:
+    """A1：命中 hold 后按 epochs 表校验 meta 是否陈旧；陈旧则不冻结并告警。"""
+    if not candidate_epoch_id or get_epoch_state is None:
+        return candidate_epoch_id
+    try:
+        db_state = str(get_epoch_state(candidate_epoch_id) or '').strip().lower() or 'none'
+    except Exception:
+        # 校验通道自身故障时保守维持 hold（fail-safe），绝不误放行。
+        return candidate_epoch_id
+    if db_state not in STALE_HOLD_EPOCH_STATES:
+        # 活跃态/failed（设计性冻结）/未知状态一律保守维持 hold。
+        return candidate_epoch_id
+    try:
+        if on_stale_hold is not None:
+            on_stale_hold(node_id, candidate_epoch_id, db_state)
+    except Exception:
+        pass
+    return ''
+
+
 def resolve_subtree_hold_epoch_id(
     *,
     distribution: dict[str, Any] | None,
     get_node: Callable[[str], Any],
     node_id: str,
+    get_epoch_state: Callable[[str], str] | None = None,
+    on_stale_hold: Callable[[str, str, str], None] | None = None,
 ) -> str:
-    """返回应冻结该节点的 epoch id；节点不在任何活动子树屏障内时返回空串。"""
+    """返回应冻结该节点的 epoch id；节点不在任何活动子树屏障内时返回空串。
+
+    ``get_epoch_state``/``on_stale_hold`` 为 A1 陈旧 meta 防御的可选注入点：
+    仅在命中 hold 时回查一次 epoch 库内状态（罕见路径，不增加常规开销）。
+    """
     dist = dict(distribution or {}) if isinstance(distribution, dict) else {}
     state = str(dist.get('state') or '').strip()
     if state not in DISTRIBUTION_HOLD_STATES:
@@ -63,7 +152,12 @@ def resolve_subtree_hold_epoch_id(
     if state == 'distributing' and normalized_node_id in _id_set(dist.get('frontier_node_ids')):
         return ''
     if normalized_node_id in _id_set(dist.get('blocked_node_ids')):
-        return epoch_id
+        return _validated_hold_epoch_id(
+            epoch_id,
+            node_id=normalized_node_id,
+            get_epoch_state=get_epoch_state,
+            on_stale_hold=on_stale_hold,
+        )
     targets = _id_set(dist.get('target_node_ids'))
     if not targets:
         return ''
@@ -71,7 +165,12 @@ def resolve_subtree_hold_epoch_id(
     current_id = normalized_node_id
     while current_id and current_id not in seen:
         if current_id in targets:
-            return epoch_id
+            return _validated_hold_epoch_id(
+                epoch_id,
+                node_id=normalized_node_id,
+                get_epoch_state=get_epoch_state,
+                on_stale_hold=on_stale_hold,
+            )
         seen.add(current_id)
         node = get_node(current_id)
         current_id = str(getattr(node, 'parent_node_id', '') or '').strip() if node is not None else ''

@@ -70,7 +70,12 @@ from main.runtime.pending_notice_state import (
     normalize_pending_notice_state,
 )
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
-from main.runtime.subtree_hold import DISTRIBUTION_ACTIVE_STATES, resolve_subtree_hold_epoch_id
+from main.runtime.subtree_hold import (
+    DISTRIBUTION_ACTIVE_STATES,
+    make_epoch_state_lookup,
+    make_stale_hold_logger,
+    resolve_subtree_hold_epoch_id,
+)
 from g3ku.providers.fallback import PUBLIC_PROVIDER_FAILURE_MESSAGE, ModelProviderExhaustedError
 from g3ku.config.live_runtime import get_runtime_config
 from main.runtime import chat_backend as runtime_chat_backend
@@ -3281,6 +3286,15 @@ class ReActToolLoop:
                             tool_content = f'{tool_content}\n\n{predicted}'.strip()
                 except TaskPausedError:
                     raise
+                except NodePausedError:
+                    # 冻结类控制信号绝不转工具错误（2026-09-15 孤儿子节点事故 L1）：
+                    # 转成 'Error executing ...' 会消费掉 tool_call_id、触发批后帧写
+                    # 清空 pending_tool_calls，摧毁同 id 幂等重放通道。
+                    raise
+                except DistributionHoldError:
+                    # 同上：分发屏障 hold 只冻结、不损坏。重抛让节点走 run_node 的
+                    # hold 冻结路径（frame 保留 pending_tool_calls，释放后同 id 重放）。
+                    raise
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # pragma: no cover - defensive fallback
@@ -3958,10 +3972,21 @@ class ReActToolLoop:
                     distribution_meta = dict(meta_getter(task_id) or {}).get('distribution')
                 except Exception:
                     distribution_meta = None
+            # A1：命中 hold 时回查 epochs 表校验 meta 新鲜度——已完成 epoch 的
+            # 陈旧 meta 不再冻结节点（2026-09-15 孤儿子节点事故 L2）。store 缺
+            # 相应方法（离线回放等）时传 None，维持旧行为。
+            hold_store = self._log_service._store
+            hold_epoch_state_getter = (
+                make_epoch_state_lookup(hold_store, task_id)
+                if callable(getattr(hold_store, 'get_task_message_distribution_epoch', None))
+                else None
+            )
             hold_epoch_id = resolve_subtree_hold_epoch_id(
                 distribution=distribution_meta if isinstance(distribution_meta, dict) else None,
-                get_node=self._log_service._store.get_node,
+                get_node=hold_store.get_node,
                 node_id=normalized_node_id,
+                get_epoch_state=hold_epoch_state_getter,
+                on_stale_hold=make_stale_hold_logger(logger.warning),
             )
             if hold_epoch_id:
                 raise DistributionHoldError(task_id, normalized_node_id, hold_epoch_id)

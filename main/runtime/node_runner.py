@@ -75,6 +75,8 @@ from main.runtime.stage_messages import _stage_has_substantive_progress
 from main.runtime.subtree_hold import (
     INSPECTION_RESUME_MARKER,
     NOTICE_INTERRUPT_REASON,
+    make_epoch_state_lookup,
+    make_stale_hold_logger,
     resolve_subtree_hold_epoch_id,
 )
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
@@ -344,13 +346,18 @@ class NodeRunner:
         if self._task_terminal_reason(task_id, task=task):
             return True
         parent = self._store.get_node(parent_node_id)
-        return bool(
-            self._node_terminal_reason(
-                parent,
-                default_failed='parent node failed',
-                default_success='parent node already completed',
-            )
-        )
+        if self._node_terminal_reason(
+            parent,
+            default_failed='parent node failed',
+            default_success='parent node already completed',
+        ):
+            return True
+        # 分发屏障 hold 期间的取消（看门狗 poll 抛 DistributionHoldError 后中止在飞
+        # spawn 协程）必须传播，绝不能把仍存活的 spawn entries 盖成 error——那会让
+        # round 永远无法 finish、同 id 幂等重入失去意义（2026-09-15 孤儿子节点事故 L1）。
+        if self._subtree_hold_epoch_id(task_id=task_id, node_id=parent_node_id):
+            return True
+        return False
 
     def _spawn_spec_payload(self, spec: SpawnChildSpec | dict[str, Any] | Any) -> dict[str, Any] | None:
         try:
@@ -652,6 +659,13 @@ class NodeRunner:
                 except Exception:
                     pass
                 raise NodePausedError(task_id, node.node_id)
+            # 无任何取消/暂停标志却收到取消（如分发屏障期间看门狗中止在飞工具、
+            # 进程内杂散取消）：若节点正处于活动 hold，转为冻结而非落 failed——
+            # 保持 future pending 等释放复活（2026-09-15 孤儿子节点事故 B3）。
+            hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=node.node_id)
+            if hold_epoch_id:
+                self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
+                raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
             return self._mark_failed(task_id, node.node_id, reason='canceled')
         except Exception as exc:
             if isinstance(exc, MemoryError):
@@ -2350,7 +2364,11 @@ class NodeRunner:
         return dict(runtime_meta.get('distribution') or {})
 
     def _subtree_hold_epoch_id(self, *, task_id: str, node_id: str) -> str:
-        """节点当前是否被子树分发屏障冻结；返回 epoch id 或空串。"""
+        """节点当前是否被子树分发屏障冻结；返回 epoch id 或空串。
+
+        A1：命中 hold 时回查 epochs 表校验 meta 新鲜度——已完成 epoch 的陈旧
+        meta 不再冻结节点（2026-09-15 孤儿子节点事故 L2：复活即再冻结）。
+        """
         normalized_node_id = str(node_id or '').strip()
         if not normalized_node_id:
             return ''
@@ -2358,6 +2376,8 @@ class NodeRunner:
             distribution=self._distribution_runtime_state(task_id),
             get_node=self._store.get_node,
             node_id=normalized_node_id,
+            get_epoch_state=make_epoch_state_lookup(self._store, task_id),
+            on_stale_hold=make_stale_hold_logger(logger.warning),
         )
 
     def _distribution_mode_active(self, *, task_id: str, node_id: str) -> bool:
