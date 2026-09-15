@@ -365,6 +365,62 @@ async def test_oversized_attachment_rejected(harness, registry):
 
 
 @pytest.mark.asyncio
+async def test_file_attachment_uses_file_cap_not_image_cap(harness, workspace, registry, monkeypatch):
+    """文件类附件走 20MiB 上限：同一尺寸超出图片 5MiB 上限但低于文件上限的
+    载荷必须以 kind=file 落盘成功，且正文提示为 file 条目（非 image）。"""
+    monkeypatch.setattr(external_v1, "WEB_CEO_IMAGE_UPLOAD_MAX_BYTES", 100)
+    monkeypatch.setattr(external_v1, "EXTERNAL_FILE_UPLOAD_MAX_BYTES", 5000)
+    app, bridge = harness(session=_FakeSession())
+    payload = base64.b64encode(b"d" * 3000).decode("ascii")
+    async with _client(app) as client:
+        created = (await client.post("/api/v1/sessions", json={"external_key": "qq:dm:doc"})).json()
+        session_id = created["session_id"]
+        response = await client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "text": "帮我看这个文档",
+                "attachments": [
+                    {
+                        "kind": "file",
+                        "name": "report.docx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "data_base64": payload,
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 200
+        await _wait_terminal(session_id)
+
+    message = bridge.prompts[0]
+    assert isinstance(message, UserInputMessage)
+    blocks = message.content
+    text_block = next(b for b in blocks if b.get("type") == "text")
+    assert "- file: report.docx" in text_block["text"]
+    assert not any(b.get("type") == "image_url" for b in blocks)
+    stored = Path(message.metadata["external_attachments"][0]["path"])
+    assert stored.exists() and stored.read_bytes() == b"d" * 3000
+    assert str(workspace) in str(stored)
+
+
+@pytest.mark.asyncio
+async def test_oversized_file_attachment_rejected(harness, registry, monkeypatch):
+    """文件上限独立于图片上限：超过文件上限一律 413。"""
+    monkeypatch.setattr(external_v1, "EXTERNAL_FILE_UPLOAD_MAX_BYTES", 1000)
+    app, _ = harness(session=_FakeSession())
+    async with _client(app) as client:
+        created = (await client.post("/api/v1/sessions", json={"external_key": "qq:dm:huge"})).json()
+        too_big = base64.b64encode(b"x" * 2000).decode("ascii")
+        response = await client.post(
+            f"/api/v1/sessions/{created['session_id']}/messages",
+            json={"text": "huge", "attachments": [{"kind": "file", "name": "huge.bin", "data_base64": too_big}]},
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "attachment_too_large"
+
+
+@pytest.mark.asyncio
 async def test_queued_message_idempotency_dedupes_resubmit(harness, registry):
     """排队提交同样占幂等位：渠道消息在回合运行期间重试/重发不得反复入队，
     否则用户收到多份重复回复。"""

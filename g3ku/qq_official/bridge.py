@@ -10,8 +10,8 @@ Real-device seam: the botpy SDK surface is verified against ``qq-botpy==1.2.1`` 
 ``on_<event>`` handler dispatch, message field names (``group_openid``,
 ``author.user_openid``, ``guild_id``/``channel_id``/``id``/``content``), the
 ``attachments`` list on inbound messages (``content_type`` / ``url`` /
-``filename`` — image payloads are downloaded and forwarded to ``/api/v1`` as
-``data_base64`` attachments, see docs/architecture/external-agent-api.md
+``filename`` — image and file payloads are downloaded and forwarded to
+``/api/v1`` as ``data_base64`` attachments, see docs/architecture/external-agent-api.md
 「回合契约」), and ``post_message`` / ``post_group_message`` /
 ``post_c2c_message`` / ``post_dms`` signatures. IMPORTANT: ``Client.run()`` is a blocking entry point
 (``loop.run_until_complete``) that raises ``RuntimeError: This event loop is
@@ -31,6 +31,7 @@ import base64
 import mimetypes
 from collections import OrderedDict
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import httpx
 from loguru import logger
@@ -57,11 +58,12 @@ _BOTPY_CORO_QUALNAMES = {
     "Client._run_event",
 }
 
-# Mirrors the /api/v1 per-attachment cap (``WEB_CEO_IMAGE_UPLOAD_MAX_BYTES`` in
-# ``g3ku/runtime/web_ceo_sessions.py``); anything larger is rejected server-side
-# with 413, so oversized downloads are skipped here instead.
-_MAX_INBOUND_ATTACHMENT_BYTES = 5 * 1024 * 1024
-_MAX_INBOUND_IMAGE_ATTACHMENTS = 4
+# 入站附件上限，镜像 /api/v1 的双上限（``g3ku/runtime/api/external_v1.py``：
+# 图片沿用 ``WEB_CEO_IMAGE_UPLOAD_MAX_BYTES``，其余文件类附件放宽到 20MiB）；
+# 超限附件在服务端会被 413 拒绝，这里按 kind 预过滤并提前截断下载。
+_MAX_INBOUND_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024
+_MAX_INBOUND_ATTACHMENTS = 4
 _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 # 服务端排队回执兜底文案（正常取 /api/v1 响应里的 receipt）。
@@ -125,9 +127,11 @@ def _create_media_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0), follow_redirects=True)
 
 
-async def _download_attachment_bytes(client: httpx.AsyncClient, url: str) -> bytes | None:
+async def _download_attachment_bytes(
+    client: httpx.AsyncClient, url: str, *, max_bytes: int
+) -> bytes | None:
     """Fetch one attachment; ``None`` on transport errors, non-200, or when the
-    stream exceeds the /api/v1 per-attachment cap."""
+    stream exceeds the per-kind /api/v1 cap."""
     try:
         async with client.stream("GET", url) as response:
             if response.status_code != 200:
@@ -141,10 +145,10 @@ async def _download_attachment_bytes(client: httpx.AsyncClient, url: str) -> byt
             total = 0
             async for chunk in response.aiter_bytes(_MEDIA_DOWNLOAD_CHUNK_BYTES):
                 total += len(chunk)
-                if total > _MAX_INBOUND_ATTACHMENT_BYTES:
+                if total > max_bytes:
                     logger.warning(
                         "qq-official attachment exceeds {} bytes and was skipped: {}",
-                        _MAX_INBOUND_ATTACHMENT_BYTES,
+                        max_bytes,
                         url,
                     )
                     return None
@@ -164,40 +168,49 @@ def _attachment_name(item: Any, content_type: str) -> str:
     return f"qq-{attachment_id}{extension}"
 
 
-async def _collect_image_attachments(
+async def _collect_attachments(
     media_client: httpx.AsyncClient, message: Any
 ) -> list[dict[str, str]]:
-    """Download the image attachments referenced by a botpy message and return
-    them as ``/api/v1`` attachment payloads (inline ``data_base64``).
+    """Download the attachments referenced by a botpy message and return them
+    as ``/api/v1`` attachment payloads (inline ``data_base64``).
 
     botpy exposes ``message.attachments`` items with ``content_type`` / ``url``
-    / ``filename`` / ``id``. Only ``image/*`` items with absolute http(s) URLs
-    are forwarded; failures degrade to text-only delivery.
+    / ``filename`` / ``id``. All items with absolute http(s) URLs are
+    forwarded: ``image/*`` as ``kind:"image"``, everything else (documents,
+    archives, ...) as ``kind:"file"`` — the server stores non-image files and
+    surfaces them to the model as local-path notes. Failures degrade to
+    text-only delivery.
     """
     raw_items = list(getattr(message, "attachments", None) or [])
     if not raw_items:
         return []
     payloads: list[dict[str, str]] = []
     for item in raw_items:
-        if len(payloads) >= _MAX_INBOUND_IMAGE_ATTACHMENTS:
+        if len(payloads) >= _MAX_INBOUND_ATTACHMENTS:
             logger.warning(
-                "qq-official message {} carries more than {} image attachments; extras skipped",
+                "qq-official message {} carries more than {} attachments; extras skipped",
                 getattr(message, "id", ""),
-                _MAX_INBOUND_IMAGE_ATTACHMENTS,
+                _MAX_INBOUND_ATTACHMENTS,
             )
             break
         content_type = str(getattr(item, "content_type", "") or "").strip().lower()
         url = str(getattr(item, "url", "") or "").strip()
-        if not content_type.startswith("image/") or not url.lower().startswith(("http://", "https://")):
+        if not url.lower().startswith(("http://", "https://")):
             continue
-        data = await _download_attachment_bytes(media_client, url)
+        is_image = content_type.startswith("image/")
+        if not content_type:
+            name = str(getattr(item, "filename", "") or "").strip()
+            content_type = str(mimetypes.guess_type(name)[0] or "").strip().lower()
+            is_image = content_type.startswith("image/")
+        max_bytes = _MAX_INBOUND_IMAGE_BYTES if is_image else _MAX_INBOUND_FILE_BYTES
+        data = await _download_attachment_bytes(media_client, url, max_bytes=max_bytes)
         if not data:
             continue
         payloads.append(
             {
-                "kind": "image",
-                "name": _attachment_name(item, content_type),
-                "mime_type": content_type,
+                "kind": "image" if is_image else "file",
+                "name": _attachment_name(item, content_type or "application/octet-stream"),
+                "mime_type": content_type or "application/octet-stream",
                 "data_base64": base64.b64encode(data).decode("ascii"),
             }
         )
@@ -275,19 +288,143 @@ async def run_qq_official_bridge(
             except Exception:  # noqa: BLE001 - 回执失败不影响消息本身
                 logger.warning("qq-official failed to deliver queued receipt to {}", external_key)
 
-    async def deliver(external_key: str, text: str) -> None:
+    def _absolute_media_url(url: str) -> str:
+        """Event attachment URLs are root-relative signed viewer paths; the
+        platform-facing upload/download calls need an absolute URL. Joining
+        happens against the base_url ORIGIN only: ``base_url`` carries the
+        ``/api/v1`` suffix while the media viewer lives under the web root
+        (``/api/ceo/...``)."""
+        raw = str(url or "").strip()
+        if not raw:
+            return ""
+        if raw.lower().startswith(("http://", "https://")):
+            return raw
+        parsed = urlparse(str(base_url))
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        return f"{origin}{raw if raw.startswith('/') else '/' + raw}"
+
+    def _media_file_type(mime_type: str) -> int:
+        mime = str(mime_type or "").lower()
+        if mime.startswith("image/"):
+            return 1  # 图片（平台支持 png/jpg）
+        if mime == "video/mp4":
+            return 2  # 视频
+        return 4  # 任意文件：botpy 1.2.1 标注「暂不开放」，尽力尝试、失败降级
+
+    async def _deliver_attachment(
+        kind: str, target: dict[str, str], attachment: dict[str, Any]
+    ) -> bool:
+        """Send one attachment as a real QQ file/media message; False means the
+        caller must degrade it to a signed-URL text line.
+
+        group/c2c 走平台文件上传接口——注意参数是 URL（QQ 服务端回源下载），
+        要求本服务端公网可达；失败（含 file_type=4 被平台拒、回源失败）降级。
+        guild/guilddm 没有文件接口：图片用 file_image 字节直发，其余降级。
+        """
+        name = str(attachment.get("name") or "attachment")
+        url = _absolute_media_url(str(attachment.get("url") or ""))
+        mime = str(attachment.get("mime_type") or "").lower()
+        if not url:
+            logger.warning("qq-official attachment {} carries no url; degrading", name)
+            return False
+        try:
+            if kind in ("group", "c2c"):
+                file_type = _media_file_type(mime)
+                if kind == "group":
+                    media = await bridge_api.post_group_file(
+                        group_openid=target["group_openid"],
+                        file_type=file_type,
+                        url=url,
+                        srv_send_msg=False,
+                    )
+                else:
+                    media = await bridge_api.post_c2c_file(
+                        openid=target["user_openid"],
+                        file_type=file_type,
+                        url=url,
+                        srv_send_msg=False,
+                    )
+                file_info = ""
+                if isinstance(media, dict):
+                    file_info = str(media.get("file_info") or "").strip()
+                if not file_info:
+                    raise RuntimeError("media upload returned no file_info")
+                if kind == "group":
+                    result = await bridge_api.post_group_message(
+                        group_openid=target["group_openid"],
+                        msg_type=7,
+                        media={"file_info": file_info},
+                    )
+                else:
+                    result = await bridge_api.post_c2c_message(
+                        openid=target["user_openid"],
+                        msg_type=7,
+                        media={"file_info": file_info},
+                    )
+                if result is None:
+                    raise RuntimeError("unconfirmed media message (empty API response)")
+                logger.info("qq-official delivered {} attachment {}", kind, name)
+                return True
+            if mime.startswith("image/"):
+                data = await _download_attachment_bytes(
+                    media_client, url, max_bytes=_MAX_INBOUND_IMAGE_BYTES
+                )
+                if not data:
+                    raise RuntimeError("image attachment download failed")
+                if kind == "guild":
+                    result = await bridge_api.post_message(
+                        channel_id=target["channel_id"], file_image=data
+                    )
+                else:
+                    result = await bridge_api.post_dms(
+                        guild_id=target["guild_id"], file_image=data
+                    )
+                if result is None:
+                    raise RuntimeError("unconfirmed guild media message (empty API response)")
+                logger.info("qq-official delivered {} image attachment {}", kind, name)
+                return True
+            logger.warning(
+                "qq-official has no file API for {} targets; attachment {} degraded to text link",
+                kind,
+                name,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001 - degrade to signed-URL text line
+            logger.warning(
+                "qq-official attachment delivery failed for {} ({}); degrading to text link",
+                name,
+                exc,
+            )
+            return False
+
+    async def deliver(
+        external_key: str, text: str, attachments: list[dict[str, Any]] | None = None
+    ) -> None:
         kind, target = parse_external_key(external_key)
-        if kind == "group":
-            result = await bridge_api.post_group_message(group_openid=target["group_openid"], content=text, msg_type=0)
-        elif kind == "c2c":
-            result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=text, msg_type=0)
-        elif kind == "guild":
-            result = await bridge_api.post_message(channel_id=target["channel_id"], content=text)
-        elif kind == "guilddm":
-            result = await bridge_api.post_dms(guild_id=target["guild_id"], content=text)
-        else:
+        if kind not in ("group", "c2c", "guild", "guilddm"):
             logger.warning("qq-official cannot deliver to target external_key={}", external_key)
             return
+        # 附件先于正文投递；失败的附件降级为签名下载链接行并入正文，用户至少
+        # 拿得到可下载的链接。全部附件成功且正文为空时不再补发空文本消息。
+        fallback_lines: list[str] = []
+        for attachment in list(attachments or []):
+            if not isinstance(attachment, dict):
+                continue
+            if await _deliver_attachment(kind, target, attachment):
+                continue
+            name = str(attachment.get("name") or "attachment")
+            fallback_lines.append(f"📎 {name}: {_absolute_media_url(str(attachment.get('url') or ''))}")
+        body = "\n".join(part for part in [str(text or "").strip(), *fallback_lines] if part).strip()
+        if not body:
+            return
+        if kind == "group":
+            result = await bridge_api.post_group_message(group_openid=target["group_openid"], content=body, msg_type=0)
+        elif kind == "c2c":
+            result = await bridge_api.post_c2c_message(openid=target["user_openid"], content=body, msg_type=0)
+        elif kind == "guild":
+            result = await bridge_api.post_message(channel_id=target["channel_id"], content=body)
+        else:
+            result = await bridge_api.post_dms(guild_id=target["guild_id"], content=body)
         # botpy 的 http 层对请求超时只打一条 WARNING 就返回 None（吞掉
         # asyncio.TimeoutError）：无回执必须视为投递失败抛出，交给 pump 按
         # 重放重试，而不是记一次假成功。
@@ -300,10 +437,11 @@ async def run_qq_official_bridge(
             message_id = str(result.get("id") or result.get("message_id") or "").strip()
         # 送达回执：排查"发没发出去"时以这行为准（published to hub 不代表送达）。
         logger.info(
-            "qq-official delivered {} message to {} (id={})",
+            "qq-official delivered {} message to {} (id={}, attachments={})",
             kind,
             external_key,
             message_id or "-",
+            len([item for item in list(attachments or []) if isinstance(item, dict)]),
         )
 
     async def _pump(session_id: str, external_key: str) -> None:
@@ -324,7 +462,13 @@ async def run_qq_official_bridge(
                     seq = int(event.get("seq") or seen)
                     event_type = str(event.get("type") or "")
                     text = str(event.get("text") or "").strip()
-                    if not is_deliverable_event(event_type) or not text:
+                    raw_attachments = event.get("attachments")
+                    attachments = (
+                        [item for item in raw_attachments if isinstance(item, dict)]
+                        if isinstance(raw_attachments, list)
+                        else []
+                    )
+                    if not is_deliverable_event(event_type) or (not text and not attachments):
                         seqs[session_id] = seq
                         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                         continue
@@ -352,7 +496,7 @@ async def run_qq_official_bridge(
                         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                         continue
                     try:
-                        await deliver(target_key, text)
+                        await deliver(target_key, text, attachments)
                     except asyncio.CancelledError:
                         raise
                     except Exception:  # noqa: BLE001 - retry via reconnect replay
@@ -474,7 +618,7 @@ async def run_qq_official_bridge(
                 external_key_for_group(getattr(message, "group_openid", "")),
                 _content_of(message),
                 getattr(message, "id", ""),
-                await _collect_image_attachments(media_client, message),
+                await _collect_attachments(media_client, message),
             )
 
         async def on_c2c_message_create(self, message):
@@ -482,7 +626,7 @@ async def run_qq_official_bridge(
                 external_key_for_c2c(_openid_of(message)),
                 _content_of(message),
                 getattr(message, "id", ""),
-                await _collect_image_attachments(media_client, message),
+                await _collect_attachments(media_client, message),
             )
 
         async def on_at_message_create(self, message):
@@ -490,7 +634,7 @@ async def run_qq_official_bridge(
                 external_key_for_guild(getattr(message, "guild_id", ""), getattr(message, "channel_id", "")),
                 _content_of(message),
                 getattr(message, "id", ""),
-                await _collect_image_attachments(media_client, message),
+                await _collect_attachments(media_client, message),
             )
 
         async def on_direct_message_create(self, message):
@@ -498,7 +642,7 @@ async def run_qq_official_bridge(
                 external_key_for_guild_dm(getattr(message, "guild_id", ""), getattr(getattr(message, "author", None), "id", "")),
                 _content_of(message),
                 getattr(message, "id", ""),
-                await _collect_image_attachments(media_client, message),
+                await _collect_attachments(media_client, message),
             )
 
     def _content_of(message: Any) -> str:

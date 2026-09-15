@@ -437,6 +437,16 @@ def _make_heartbeat_reply_notifier():
     return _notify
 
 
+def _extract_outbound_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Lazy wrapper over ceo_media extraction (same circular-import constraint
+    as ``g3ku.runtime.external_events``: ``g3ku.runtime.api`` imports this
+    shell, so it must not be imported at module load here)."""
+    from g3ku.runtime.api.ceo_media import extract_local_media_attachments
+
+    cleaned, attachments = extract_local_media_attachments(text)
+    return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
+
+
 def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
     """Create the outbound drain task and return it.
 
@@ -476,6 +486,14 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
         metadata = getattr(pending, "metadata", None) or {}
         reply_to = str(getattr(pending, "reply_to", "") or "").strip()
         dedupe_key = str(metadata.get("dedupe_key") or "").strip()
+        # 附件：重放消息自带（账本持久化过的）直接透传；首次出站从正文提取
+        # （markdown 本地文件链接 → 结构化附件，正文留下文件名标签）。重放正文
+        # 已是提取后文本，二次提取是幂等空操作。
+        carried = metadata.get("attachments")
+        if isinstance(carried, list):
+            attachments = [item for item in carried if isinstance(item, dict)]
+        else:
+            sanitized, attachments = _extract_outbound_media_attachments(sanitized)
         # 持久 outbox 登记（先于 hub 发布）：桥 pump 断连或进程重启窗口里滞留的
         # 主动推送靠它在启动重放时找回。重放消息自带 outbox_id，直接复用不重复
         # 登记；登记失败（磁盘满）降级为仅内存投递，不阻断发布。
@@ -487,12 +505,15 @@ def _start_outbound_drain(bus: MessageBus) -> asyncio.Task:
                 text=sanitized,
                 reply_to=reply_to,
                 dedupe_key=dedupe_key,
+                attachments=attachments or None,
             )
         payload: dict[str, Any] = {
             "text": sanitized,
             "external_key": entry.external_key,
             "session_key": entry.session_key,
         }
+        if attachments:
+            payload["attachments"] = attachments
         if reply_to:
             payload["reply_to"] = reply_to
         if dedupe_key:
@@ -563,17 +584,23 @@ def _ensure_outbound_drain_running() -> None:
 
 def _outbox_replay_message(record: dict[str, Any]) -> OutboundMessage:
     """Build the bus message that re-injects one ledger record with its
-    original outbox_id (drain reuses the id, no duplicate registration)."""
+    original outbox_id (drain reuses the id, no duplicate registration).
+    Persisted attachments ride along in metadata so the drain passes them
+    through instead of re-extracting from the already-cleaned text."""
+    metadata: dict[str, Any] = {
+        "source": "outbox_replay",
+        "outbox_id": str(record.get("id") or ""),
+        "dedupe_key": str(record.get("dedupe_key") or ""),
+    }
+    attachments = record.get("attachments")
+    if isinstance(attachments, list) and attachments:
+        metadata["attachments"] = [item for item in attachments if isinstance(item, dict)]
     return OutboundMessage(
         channel=EXTERNAL_OUTBOUND_CHANNEL,
         chat_id=str(record.get("session_key") or ""),
         content=str(record.get("text") or ""),
         reply_to=str(record.get("reply_to") or "") or None,
-        metadata={
-            "source": "outbox_replay",
-            "outbox_id": str(record.get("id") or ""),
-            "dedupe_key": str(record.get("dedupe_key") or ""),
-        },
+        metadata=metadata,
     )
 
 

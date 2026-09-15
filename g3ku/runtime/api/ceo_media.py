@@ -33,10 +33,27 @@ router = APIRouter()
 THUMBNAIL_MAX_BYTES = 100 * 1024
 ORIGINAL_TOKEN_TTL_SECONDS = 24 * 60 * 60
 VIEWER_ROUTE = "/api/ceo/media/original"
+# 单条渠道回复最多转为文件消息的附件数；超出的链接保留原样，由签名改写兜底。
+MAX_CHANNEL_ATTACHMENTS = 4
 
 _TOKEN_SECRET = secrets.token_bytes(32)
 _RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _THUMB_LADDER = ((1280, 85), (1280, 70), (960, 70), (720, 60), (512, 50), (384, 45), (256, 40))
+# 部分 Python 环境的 mimetypes 不含常见办公文档映射（如 .docx），渠道文件消息
+# 的 mime 会影响平台侧展示，这里保底。
+_KNOWN_DOCUMENT_MIME = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".zip": "application/zip",
+    ".7z": "application/x-7z-compressed",
+    ".rar": "application/vnd.rar",
+    ".csv": "text/csv",
+    ".md": "text/markdown",
+}
 
 _MD_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)\s]+(?:\s+"[^"]*")?)\)')
 _MD_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)\s]+(?:\s+"[^"]*")?)\)')
@@ -45,6 +62,9 @@ _PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 
 
 def guess_media_mime(name: str) -> str:
+    suffix = Path(str(name or "")).suffix.lower()
+    if suffix in _KNOWN_DOCUMENT_MIME:
+        return _KNOWN_DOCUMENT_MIME[suffix]
     return str(mimetypes.guess_type(str(name or ""))[0] or "application/octet-stream")
 
 
@@ -210,6 +230,64 @@ def rewrite_media_links_signed(content: Any) -> Any:
 
     text = _MD_IMAGE_RE.sub(replace_image, content)
     return _MD_LINK_RE.sub(replace_link, text)
+
+
+def extract_local_media_attachments(content: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Turn markdown references to existing local files into channel attachments.
+
+    Channel-facing variant of the signed rewrite: every markdown image/link
+    whose target resolves to an existing local file is REPLACED by its label
+    (fallback: the file name) and collected as an attachment descriptor with a
+    signed viewer URL (root-relative; bridges join it with their /api base
+    URL). Bare paths are never matched — only explicit markdown references are
+    sent as file messages. Tokens beyond ``MAX_CHANNEL_ATTACHMENTS`` (and
+    duplicate paths) are left untouched so the caller's signed-URL rewrite can
+    still turn them into clickable fallback links.
+    """
+    if not isinstance(content, str) or not content.strip():
+        return (content if isinstance(content, str) else ""), []
+
+    attachments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def stash(source: Path, label: str) -> str | None:
+        key = str(source)
+        if key in seen or len(attachments) >= MAX_CHANNEL_ATTACHMENTS:
+            return None
+        seen.add(key)
+        try:
+            size = source.stat().st_size
+        except OSError:
+            size = 0
+        attachments.append(
+            {
+                "name": source.name,
+                "mime_type": guess_media_mime(source.name),
+                "size": int(size),
+                "url": original_view_url(source),
+            }
+        )
+        return label.strip() or source.name
+
+    def replace_image(match: re.Match[str]) -> str:
+        alt, target = match.group(1), match.group(2)
+        source = _resolve_local_source(_TITLE_RE.sub("", target).strip())
+        if source is None or not source.is_file():
+            return match.group(0)
+        replacement = stash(source, alt)
+        return match.group(0) if replacement is None else replacement
+
+    def replace_link(match: re.Match[str]) -> str:
+        label, target = match.group(1), match.group(2)
+        source = _resolve_local_source(_TITLE_RE.sub("", target).strip())
+        if source is None or not source.is_file():
+            return match.group(0)
+        replacement = stash(source, label)
+        return match.group(0) if replacement is None else replacement
+
+    text = _MD_IMAGE_RE.sub(replace_image, content)
+    text = _MD_LINK_RE.sub(replace_link, text)
+    return text, attachments
 
 
 @router.get("/ceo/media/original")

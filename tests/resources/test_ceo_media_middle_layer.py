@@ -118,3 +118,51 @@ def test_original_endpoint_404_after_delete(monkeypatch, tmp_path, client):
     token = _viewer_token(ceo_media.original_view_url(image))
     image.unlink()
     assert client.get("/api/ceo/media/original", params={"token": token}).status_code == 404
+
+
+def test_extract_attachments_replaces_local_links_with_labels(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    doc = tmp_path / "report.docx"
+    doc.write_bytes(b"doc-bytes")
+    chart = tmp_path / "chart.png"
+    chart.write_bytes(b"\x89PNG fake")
+
+    content = f"已完成：[日报]({doc}) 和 ![]({chart}) 另见 [外部](https://example.com/a.png)"
+    text, attachments = ceo_media.extract_local_media_attachments(content)
+
+    assert "日报" in text and "chart.png" in text
+    assert f"({doc})" not in text and f"({chart})" not in text
+    assert "[外部](https://example.com/a.png)" in text
+    by_name = {item["name"]: item for item in attachments}
+    assert set(by_name) == {"report.docx", "chart.png"}
+    assert by_name["report.docx"]["mime_type"].endswith("wordprocessingml.document")
+    assert by_name["report.docx"]["size"] == len(b"doc-bytes")
+    for item in attachments:
+        assert item["url"].startswith(ceo_media.VIEWER_ROUTE + "?token=")
+
+
+def test_extract_attachments_skips_missing_and_dedupes(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    doc = tmp_path / "a.txt"
+    doc.write_text("x", encoding="utf-8")
+
+    content = f"[一]({doc}) [二]({doc}) [缺]({tmp_path / 'nope.txt'})"
+    text, attachments = ceo_media.extract_local_media_attachments(content)
+
+    assert len(attachments) == 1
+    # 重复引用与不存在的文件保留原样（由签名改写兜底）
+    assert f"[二]({doc})" in text and f"[缺]({tmp_path / 'nope.txt'})" in text
+
+
+def test_extract_attachments_caps_count(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    parts = []
+    for index in range(ceo_media.MAX_CHANNEL_ATTACHMENTS + 1):
+        file = tmp_path / f"f{index}.txt"
+        file.write_text(str(index), encoding="utf-8")
+        parts.append(f"[f{index}]({file})")
+
+    text, attachments = ceo_media.extract_local_media_attachments(" ".join(parts))
+
+    assert len(attachments) == ceo_media.MAX_CHANNEL_ATTACHMENTS
+    assert f"[f{ceo_media.MAX_CHANNEL_ATTACHMENTS}](" in text

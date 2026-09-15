@@ -60,6 +60,9 @@ from g3ku.utils.helpers import ensure_dir, safe_filename
 router = APIRouter()
 
 EXTERNAL_UPLOAD_ROOT = Path(".g3ku") / "external-uploads"
+# 图片附件沿用 web CEO 上传上限；文档/文件类附件单独放宽（渠道传文档常超
+# 5MiB）。超限一律 413 ``attachment_too_large``，桥侧按同值预过滤避免必然失败。
+EXTERNAL_FILE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 
 
 def _registry():
@@ -255,10 +258,16 @@ def _attachment_descriptor(item: Any) -> dict[str, Any] | None:
     return descriptor
 
 
-def _store_base64_attachment(session_key: str, item: dict[str, Any]) -> tuple[str, int]:
-    data = base64.b64decode(str(item.get("data_base64") or ""))
+def _store_base64_attachment(
+    session_key: str, item: dict[str, Any], *, max_bytes: int
+) -> tuple[str, int]:
+    raw = str(item.get("data_base64") or "")
+    # 先按 base64 长度廉价估算拒绝明显超限载荷，避免白白解码大对象。
+    if len(raw) > (max_bytes // 3 + 1) * 4 + 4:
+        raise HTTPException(status_code=413, detail="attachment_too_large")
+    data = base64.b64decode(raw)
     size = len(data)
-    if size > WEB_CEO_IMAGE_UPLOAD_MAX_BYTES:
+    if size > max_bytes:
         raise HTTPException(status_code=413, detail="attachment_too_large")
     name = safe_filename(str(item.get("name") or "attachment")) or "attachment"
     target_dir = ensure_dir(workspace_path() / EXTERNAL_UPLOAD_ROOT / safe_filename(session_key))
@@ -351,7 +360,14 @@ async def post_external_message(
         if descriptor is None:
             continue
         if isinstance(item, dict) and str(item.get("data_base64") or "").strip():
-            path, size = _store_base64_attachment(entry.session_key, item)
+            max_bytes = (
+                WEB_CEO_IMAGE_UPLOAD_MAX_BYTES
+                if str(descriptor.get("kind") or "") == "image"
+                else EXTERNAL_FILE_UPLOAD_MAX_BYTES
+            )
+            path, size = _store_base64_attachment(
+                entry.session_key, item, max_bytes=max_bytes
+            )
             descriptor["path"] = path
             descriptor["size"] = size
         if not descriptor.get("path") and not descriptor.get("url"):

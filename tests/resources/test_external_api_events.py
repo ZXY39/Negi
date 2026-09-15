@@ -115,6 +115,59 @@ def test_relay_skips_internal_ack_message_end():
     assert get_session_event_hub(session_key).replay(0) == []
 
 
+def test_relay_message_end_extracts_local_file_attachments(tmp_path):
+    """回复正文里的 markdown 本地文件链接被提取为结构化附件：正文留下标签，
+    事件携带签名 URL，桥据此发真实文件消息。"""
+    session_key = "ext:test-bridge:files"
+    relay = make_session_event_relay(session_key, turn_id="t2")
+    doc = tmp_path / "日报.docx"
+    doc.write_bytes(b"doc")
+
+    import asyncio
+
+    asyncio.run(
+        relay(
+            AgentEvent(
+                type="message_end",
+                payload={"turn_id": "t2", "text": f"已完成：[日报文件]({doc})", "source": "user"},
+            )
+        )
+    )
+
+    events = get_session_event_hub(session_key).replay(0)
+    assert len(events) == 1
+    final = events[0]
+    assert final["type"] == "reply.final"
+    assert final["text"] == "已完成：日报文件"
+    assert str(doc) not in final["text"]
+    assert len(final["attachments"]) == 1
+    attachment = final["attachments"][0]
+    assert attachment["name"] == "日报.docx"
+    assert attachment["size"] == 3
+    assert attachment["url"].startswith("/api/ceo/media/original?token=")
+
+
+def test_relay_message_end_without_file_links_has_no_attachments():
+    session_key = "ext:test-bridge:nofiles"
+    relay = make_session_event_relay(session_key, turn_id="t3")
+
+    import asyncio
+
+    asyncio.run(
+        relay(
+            AgentEvent(
+                type="message_end",
+                payload={"turn_id": "t3", "text": "纯文本，外链 [x](https://example.com/a.png)", "source": "user"},
+            )
+        )
+    )
+
+    events = get_session_event_hub(session_key).replay(0)
+    assert len(events) == 1
+    assert "attachments" not in events[0]
+    assert events[0]["text"] == "纯文本，外链 [x](https://example.com/a.png)"
+
+
 @pytest.fixture
 def sse_env(monkeypatch, tmp_path):
     reset_external_session_registry()

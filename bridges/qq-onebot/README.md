@@ -38,6 +38,8 @@ python -m qq_onebot_bridge --config bridge.config.json
 | replyFinalOnly | `behavior.final_only=true`：忽略 progress，只发 `reply.final` |
 | QQ 单条长度上限 | `split_outbound_text` 按 `max_message_length` 优先按行分段 |
 | 入站图片 | OneBot image 段 → 下载 → base64 → `messages.attachments`（runtime 侧 `image_multimodal_enabled` 门控生效） |
+| 入站文件 | OneBot file 段（数组或 `[CQ:file,...]`）→ 取 `url`（群文件缺 URL 时经 `get_group_file_url` 换取）→ 下载（≤20MiB、每条消息至多 4 个附件）→ `kind:"file"` 提交；取不到链接时正文追加「[文件 x 未能获取]」提示，不静默吞 |
+| 出站图片/文件 | 事件 `attachments`（见 external-agent-api.md「出站附件契约」）→ 桥下载签名媒体 URL：image 以 `[CQ:image,file=base64://...]` 段发送，其余走 `upload_private_file`/`upload_group_file`（base64 直传，无公网要求）；失败降级为签名链接文本行 |
 | event_id 重推去重 | OneBot `event_id`（缺省 `ob:{message_id}`）→ `Idempotency-Key` |
 | heartbeat/cron 主动推送 | 消费 `outbound.created` → 主动消息 |
 | @触发 | `group_require_at=true` 时群聊需 @机器人 才触发（at 段从正文剔除） |

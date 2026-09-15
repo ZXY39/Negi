@@ -48,11 +48,21 @@ class OnebotClient:
         data = await self.call_action("get_login_info")
         return int(data.get("user_id") or 0)
 
-    async def download_bytes(self, url: str) -> bytes | None:
+    async def download_bytes(self, url: str, *, max_bytes: int) -> bytes | None:
+        """Stream-download ``url``; ``None`` on transport errors or when the
+        body exceeds ``max_bytes`` (mirrors the /api/v1 per-attachment caps so
+        oversized payloads are never submitted for a guaranteed 413)."""
         try:
-            response = await self._http.get(str(url))
-            response.raise_for_status()
-            return response.content
+            async with self._http.stream("GET", str(url)) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes(64 * 1024):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks)
         except httpx.HTTPError:
             return None
 

@@ -32,6 +32,7 @@ class _FakeG3ku:
         self.send_status = send_status
         self.turn_id = turn_id
         self._active: dict[str, str] = {}
+        self.media_downloads: list[str] = []
 
     async def ensure_session(self, external_key, *, title=None):
         session_id = self.sessions.setdefault(external_key, f"ext:test:{len(self.sessions)}")
@@ -79,12 +80,26 @@ class _FakeG3ku:
     async def stream_events(self, session_id, *, on_event, backoff_seconds=3.0, stop=None):
         await asyncio.sleep(3600)
 
+    # -- outbound media (event attachments) ---------------------------------
+    media_bytes: bytes = b"file-bytes"
+
+    @property
+    def base_url(self):
+        return "http://127.0.0.1:18790"
+
+    async def download_media(self, url, *, max_bytes):
+        self.media_downloads.append(url)
+        return self.media_bytes
+
 
 class _FakeOnebot:
     def __init__(self):
         self.private: list[tuple] = []
         self.group: list[tuple] = []
         self.downloads: list[str] = []
+        self.actions: list[tuple] = []
+        self.file_url_response: dict = {"url": "https://cdn.example/group-file.docx"}
+        self.fail_actions: set[str] = set()
 
     async def send_private_msg(self, user_id, text):
         self.private.append((str(user_id), text))
@@ -92,9 +107,17 @@ class _FakeOnebot:
     async def send_group_msg(self, group_id, text):
         self.group.append((str(group_id), text))
 
-    async def download_bytes(self, url):
+    async def download_bytes(self, url, *, max_bytes):
         self.downloads.append(url)
         return b"img-bytes"
+
+    async def call_action(self, action, **params):
+        self.actions.append((action, params))
+        if action in self.fail_actions:
+            raise RuntimeError(f"action failed: {action}")
+        if action == "get_group_file_url":
+            return dict(self.file_url_response)
+        return {}
 
 
 def _dispatcher(**kwargs) -> tuple[Dispatcher, _FakeG3ku, _FakeOnebot]:
@@ -126,18 +149,67 @@ def test_parse_message_content_array():
         {"type": "text", "data": {"text": " 帮我查一下 "}},
         {"type": "image", "data": {"url": "https://cdn.example/a.png"}},
     ]
-    text, images, at_bot = parse_message_content(message, bot_user_id=999)
+    text, images, files, at_bot = parse_message_content(message, bot_user_id=999)
     assert text == "帮我查一下"
     assert images == ["https://cdn.example/a.png"]
+    assert files == []
     assert at_bot is True
 
 
 def test_parse_message_content_cq_string():
     raw = "[CQ:at,qq=999] 看看这个 [CQ:image,file=x,url=https://cdn.example/b.jpg]"
-    text, images, at_bot = parse_message_content(raw, bot_user_id=999)
+    text, images, files, at_bot = parse_message_content(raw, bot_user_id=999)
     assert "看看这个" in text and "[CQ:" not in text
     assert images == ["https://cdn.example/b.jpg"]
+    assert files == []
     assert at_bot is True
+
+
+def test_parse_message_content_file_segment_array():
+    """私聊文件消息：NapCat file 段带直连 url、文件名与大小。"""
+    message = [
+        {"type": "text", "data": {"text": "看下文档"}},
+        {
+            "type": "file",
+            "data": {
+                "file": "abc.docx",
+                "url": "https://cdn.example/abc.docx",
+                "name": "报告.docx",
+                "size": 12345,
+            },
+        },
+    ]
+    text, images, files, at_bot = parse_message_content(message, bot_user_id=999)
+    assert text == "看下文档"
+    assert images == []
+    assert at_bot is False
+    assert files == [
+        {"url": "https://cdn.example/abc.docx", "name": "报告.docx", "size": 12345, "id": None, "busid": None}
+    ]
+
+
+def test_parse_message_content_file_segment_group_without_url():
+    """群文件通常只带 id+busid：下载链接稍后经 get_group_file_url 换取。"""
+    message = [
+        {
+            "type": "file",
+            "data": {"id": "fid-1", "name": "表格.xlsx", "size": 999, "busid": "bus-7"},
+        }
+    ]
+    text, images, files, at_bot = parse_message_content(message, bot_user_id=999)
+    assert text == "" and images == [] and at_bot is False
+    assert files == [
+        {"url": None, "name": "表格.xlsx", "size": 999, "id": "fid-1", "busid": "bus-7"}
+    ]
+
+
+def test_parse_message_content_file_cq_string():
+    raw = "[CQ:file,file=abc.docx,url=https://cdn.example/abc.docx,name=报告.docx,size=123]"
+    text, images, files, at_bot = parse_message_content(raw, bot_user_id=999)
+    assert text == "" and images == [] and at_bot is False
+    assert files == [
+        {"url": "https://cdn.example/abc.docx", "name": "报告.docx", "size": 123, "id": None, "busid": None}
+    ]
 
 
 def test_split_outbound_text_prefers_line_boundaries():
@@ -312,3 +384,160 @@ async def test_progress_flush_respects_max_lines():
         await dispatcher._handle_g3ku_event(session_id, {"type": "progress", "text": f"步骤{i}"})
     await dispatcher._flush_progress(session_id)
     assert onebot.private == [("7", "步骤0\n步骤1")]
+
+
+# -- inbound files ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_message_downloaded_and_forwarded():
+    """私聊文件消息不再被静默丢弃：下载后以 kind=file 提交，mime 按文件名推断。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    await dispatcher.handle_onebot_event(
+        {
+            "post_type": "message",
+            "message_type": "private",
+            "user_id": 7,
+            "message": [
+                {
+                    "type": "file",
+                    "data": {"url": "https://cdn.example/报告.docx", "name": "报告.docx", "size": 123},
+                }
+            ],
+        }
+    )
+    assert onebot.downloads == ["https://cdn.example/报告.docx"]
+    assert len(g3ku.sent) == 1
+    payload = g3ku.sent[0]
+    assert payload["text"] == ""
+    attachments = payload["attachments"]
+    assert len(attachments) == 1
+    assert attachments[0]["kind"] == "file"
+    assert attachments[0]["name"] == "报告.docx"
+    assert attachments[0]["mime_type"].endswith("wordprocessingml.document")
+    assert attachments[0]["data_base64"]
+
+
+@pytest.mark.asyncio
+async def test_group_file_resolved_via_get_group_file_url():
+    """群文件只带 id+busid：桥调 get_group_file_url 换取下载链接。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    await dispatcher.handle_onebot_event(
+        {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 42,
+            "message": [
+                {"type": "at", "data": {"qq": "999"}},
+                {"type": "file", "data": {"id": "fid-1", "name": "表格.xlsx", "busid": "bus-7"}},
+            ],
+        }
+    )
+    assert onebot.actions == [
+        ("get_group_file_url", {"group_id": 42, "file_id": "fid-1", "busid": "bus-7"})
+    ]
+    assert onebot.downloads == ["https://cdn.example/group-file.docx"]
+    attachments = g3ku.sent[0]["attachments"]
+    assert len(attachments) == 1 and attachments[0]["kind"] == "file"
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_file_noted_in_text():
+    """拿不到下载链接的文件不得静默吞掉：正文追加提示，回合照常提交。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    onebot.fail_actions.add("get_group_file_url")
+    await dispatcher.handle_onebot_event(
+        {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 42,
+            "message": [
+                {"type": "at", "data": {"qq": "999"}},
+                {"type": "file", "data": {"id": "fid-2", "name": "数据.zip", "busid": "bus-8"}},
+            ],
+        }
+    )
+    payload = g3ku.sent[0]
+    assert "[文件 数据.zip 未能获取]" in payload["text"]
+    assert payload["attachments"] is None
+
+
+# -- outbound files ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_outbound_event_attachment_sent_as_upload_action():
+    """reply.final 携带附件：桥下载签名 URL 后经 upload_private_file 以
+    base64:// 发送，正文随后单独发送。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "private", "user_id": 7, "message": "hi"}
+    )
+    session_id = g3ku.sessions["qq:dm:7"]
+    await dispatcher._handle_g3ku_event(
+        session_id,
+        {
+            "type": "reply.final",
+            "text": "日报已生成：日报",
+            "attachments": [
+                {"name": "日报.docx", "mime_type": "application/octet-stream", "size": 10, "url": "/api/ceo/media/original?token=t1"}
+            ],
+        },
+    )
+    assert g3ku.media_downloads == ["/api/ceo/media/original?token=t1"]
+    upload = [action for action in onebot.actions if action[0] == "upload_private_file"]
+    assert len(upload) == 1
+    params = upload[0][1]
+    assert params["user_id"] == 7
+    assert params["name"] == "日报.docx"
+    assert params["file"].startswith("base64://")
+    assert onebot.private == [("7", "日报已生成：日报")]
+
+
+@pytest.mark.asyncio
+async def test_outbound_image_attachment_sent_as_cq_image():
+    dispatcher, g3ku, onebot = _dispatcher()
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "group", "group_id": 42,
+         "message": [{"type": "at", "data": {"qq": "999"}}, {"type": "text", "data": {"text": "hi"}}]}
+    )
+    session_id = g3ku.sessions["qq:group:42"]
+    await dispatcher._handle_g3ku_event(
+        session_id,
+        {
+            "type": "outbound.created",
+            "text": "图表已生成：图表",
+            "external_key": "qq:group:42",
+            "attachments": [
+                {"kind": "image", "name": "chart.png", "mime_type": "image/png", "size": 8, "url": "/api/ceo/media/original?token=t2"}
+            ],
+        },
+    )
+    assert len(onebot.group) == 2
+    image_message = onebot.group[0][1]
+    assert image_message.startswith("[CQ:image,file=base64://") and image_message.endswith("]")
+    assert onebot.group[1] == ("42", "图表已生成：图表")
+
+
+@pytest.mark.asyncio
+async def test_outbound_attachment_failure_degrades_to_signed_link():
+    """下载失败时附件降级为签名链接文本行，不静默丢失。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    g3ku.media_bytes = None
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "private", "user_id": 7, "message": "hi"}
+    )
+    session_id = g3ku.sessions["qq:dm:7"]
+    await dispatcher._handle_g3ku_event(
+        session_id,
+        {
+            "type": "reply.final",
+            "text": "日报已生成：日报",
+            "attachments": [
+                {"name": "日报.docx", "url": "/api/ceo/media/original?token=t3"}
+            ],
+        },
+    )
+    assert onebot.private == [
+        ("7", "日报已生成：日报\n📎 日报.docx: http://127.0.0.1:18790/api/ceo/media/original?token=t3")
+    ]

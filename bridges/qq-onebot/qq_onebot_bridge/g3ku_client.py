@@ -26,8 +26,30 @@ class G3kuClient:
         self._session_ids: dict[str, str] = {}
         self._last_seq: dict[str, int] = {}
 
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
     async def close(self) -> None:
         await self._http.aclose()
+
+    async def download_media(self, url: str, *, max_bytes: int) -> bytes | None:
+        """Fetch one outbound attachment (signed viewer URL, root-relative or
+        absolute) from the g3ku endpoint; ``None`` on errors or when the body
+        exceeds ``max_bytes``. Relative URLs resolve against ``base_url``."""
+        try:
+            async with self._http.stream("GET", str(url)) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes(64 * 1024):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except httpx.HTTPError:
+            return None
 
     # -- sessions -----------------------------------------------------------
 

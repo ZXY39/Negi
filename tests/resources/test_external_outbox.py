@@ -125,3 +125,20 @@ def test_missing_file_reads_as_empty(tmp_path: Path) -> None:
     assert external_outbox.load_pending_outbound() == []
     assert external_outbox.expire_stale_pending() == 0
     external_outbox.compact_outbox()  # 不存在时静默返回
+
+
+def test_attachments_roundtrip_and_survive_compact() -> None:
+    """出站附件描述符随账本持久化：启动重放靠它把文件消息补投给桥。"""
+    attachments = [
+        {"name": "日报.docx", "mime_type": "application/octet-stream", "size": 3, "url": "/api/ceo/media/original?token=t1"}
+    ]
+    first = external_outbox.record_outbound_message(
+        session_key="ext:s1", external_key="k", text="日报已生成", attachments=attachments
+    )
+    external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="纯文本")
+    external_outbox.compact_outbox()
+
+    pending = external_outbox.load_pending_outbound()
+    by_id = {item["id"]: item for item in pending}
+    assert by_id[first]["attachments"] == attachments
+    assert "attachments" not in [item for item in pending if item["id"] != first][0]

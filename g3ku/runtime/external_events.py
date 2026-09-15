@@ -144,6 +144,20 @@ def _rewrite_media_signed(text: str) -> str:
     return rewritten if isinstance(rewritten, str) else text
 
 
+def _extract_media_attachments(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """Pull markdown-referenced local files out of channel-bound reply text.
+
+    Same lazy-import constraint as ``_rewrite_media_signed``. Extraction runs
+    BEFORE the signed rewrite: extracted tokens become structured attachments
+    (bridges send them as real file messages); leftovers keep going through
+    the signed-URL rewrite as clickable fallback links.
+    """
+    from g3ku.runtime.api.ceo_media import extract_local_media_attachments
+
+    cleaned, attachments = extract_local_media_attachments(text)
+    return (cleaned if isinstance(cleaned, str) else text), list(attachments or [])
+
+
 def _turn_usage(session: Any, turn_id: str) -> dict[str, Any] | None:
     usage_map = getattr(session, "_frontdoor_turn_usage", None)
     if not isinstance(usage_map, dict) or not turn_id:
@@ -203,11 +217,14 @@ def make_session_event_relay(
                 text = sanitize_channel_outbound_text(str(payload.get("text") or ""))
                 if not text or is_silent_reply_token(text):
                     return
+                text, attachments = _extract_media_attachments(text)
                 text = _rewrite_media_signed(text)
                 final_payload: dict[str, Any] = {
                     "text": text,
                     "source": str(payload.get("source") or "user"),
                 }
+                if attachments:
+                    final_payload["attachments"] = attachments
                 usage = _resolve_turn_usage(session, str(payload.get("turn_id") or ""), turn_id)
                 if usage:
                     final_payload["usage"] = usage

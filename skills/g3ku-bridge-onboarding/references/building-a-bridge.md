@@ -23,7 +23,8 @@
 | 身份 | 群 ID / 用户 ID / 会话 ID | 拼成不透明 `external_key`（一个 external_key = 一个 g3ku 会话，dm/group/thread 的隔离粒度由桥定） |
 | 入站 | 一条平台消息 | `POST /sessions`（幂等）→ `POST /messages`（带唯一 `Idempotency-Key`，重试复用同键） |
 | 回复 | 需要展示给用户 | 订阅 SSE，`reply.final` 为权威全文（`reply.delta` 做流式全量替换，`progress` 做里程碑） |
-| 媒体 | 平台附件字节 | `attachments[].data_base64`（≤5MiB），kind 按 mime 推断 |
+| 入站媒体 | 平台附件字节 | `attachments[].data_base64`（图片 ≤5MiB、其余文件 ≤20MiB），kind 按 mime 推断 |
+| 出站媒体 | 平台「发文件/图片」能力 | `reply.final`/`outbound.created` 的 `attachments?`：下载签名媒体 URL 后按平台文件消息投递，失败降级为链接文本（契约见 `docs/architecture/external-agent-api.md`「事件流」出站附件契约） |
 | 推送 | 平台「发消息」能力 | 消费 `outbound.created` 主动推送 |
 
 **必须遵守的纪律**：
@@ -65,6 +66,8 @@ async for event in g3ku.stream_events(session_id, last_event_id=seen):
         await deliver(event)                            # 翻译回平台并发送
     elif event["type"] == "outbound.created":
         await deliver(event)
+    # reply.final / outbound.created 可能携带 attachments（出站文件）：
+    # 先按平台文件消息投递附件，失败的条目把签名链接并进正文再发
 ```
 
 ## 5. 验收清单（桥写完后逐条过）
@@ -74,6 +77,7 @@ async for event in g3ku.stream_events(session_id, last_event_id=seen):
 - [ ] 同 `Idempotency-Key` 重发返回 `status=duplicate`，不重跑。
 - [ ] 断线重连后 `Last-Event-ID` 回放不丢终态。
 - [ ] 图片/附件走 `data_base64` 能进模型（受 `image_multimodal_enabled` 门控）。
+- [ ] 出站带 `attachments` 的回复能投递为平台文件/图片消息；平台不支持或失败时用户收到签名链接兜底。
 - [ ] 群聊 @ 触发、频控、消息分段按平台要求生效。
 - [ ] Web「会话列表」渠道分组出现该会话（只读）。
 

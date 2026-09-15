@@ -45,6 +45,14 @@ class FakeBotApi:
         self.calls.append(("post_dms", kwargs))
         return {"id": "fake-message-id"}
 
+    async def post_group_file(self, **kwargs):
+        self.calls.append(("post_group_file", kwargs))
+        return {"file_uuid": "uuid-g", "file_info": "file-info-g", "ttl": 0}
+
+    async def post_c2c_file(self, **kwargs):
+        self.calls.append(("post_c2c_file", kwargs))
+        return {"file_uuid": "uuid-c", "file_info": "file-info-c", "ttl": 0}
+
 
 class FakeClient:
     """botpy.Client stand-in exposing only the async entry the bridge may use."""
@@ -370,7 +378,7 @@ async def test_bridge_drops_empty_message_without_attachments(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_bridge_skips_non_image_and_relative_attachments(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_bridge_skips_relative_and_undownloadable_attachments(monkeypatch: pytest.MonkeyPatch) -> None:
     media = _media_transport({})
     task, client = await _start_bridge(monkeypatch, media)
     try:
@@ -385,6 +393,36 @@ async def test_bridge_skips_non_image_and_relative_attachments(monkeypatch: pyte
         ext = FakeExternalApiClient.instances[-1]
         await _wait_until(lambda: ext.sent)
         assert ext.sent[0][3] == []  # nothing downloadable, text still delivered
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_bridge_forwards_non_image_attachments_as_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """入站文档附件（非 image/* content_type）必须下载并以 kind=file 转发，
+    而不是被白名单静默丢弃（本次重建前的行为）。"""
+    media = _media_transport({"https://cdn.example/doc.pdf": (200, b"pdf-bytes")})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        message = _c2c_message(
+            "帮我看这个",
+            [_image_attachment(url="https://cdn.example/doc.pdf", content_type="application/pdf", filename="doc.pdf", id="att-f")],
+        )
+        await client.on_c2c_message_create(message)
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: ext.sent)
+        session_id, text, idem, attachments = ext.sent[0]
+        assert (session_id, text, idem) == ("ext:qq-official:qq:c2c:u9", "帮我看这个", "qq-m2")
+        assert attachments == [
+            {
+                "kind": "file",
+                "name": "doc.pdf",
+                "mime_type": "application/pdf",
+                "data_base64": base64.b64encode(b"pdf-bytes").decode("ascii"),
+            }
+        ]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -411,7 +449,7 @@ async def test_bridge_degrades_to_text_on_download_failure(monkeypatch: pytest.M
 
 @pytest.mark.asyncio
 async def test_bridge_skips_oversized_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
-    oversized = b"x" * (bridge_module._MAX_INBOUND_ATTACHMENT_BYTES + 1)
+    oversized = b"x" * (bridge_module._MAX_INBOUND_IMAGE_BYTES + 1)
     media = _media_transport({"https://cdn.example/big.png": (200, oversized)})
     task, client = await _start_bridge(monkeypatch, media)
     try:
@@ -437,7 +475,7 @@ async def test_bridge_caps_forwarded_attachment_count(monkeypatch: pytest.Monkey
         await client.on_c2c_message_create(message)
         ext = FakeExternalApiClient.instances[-1]
         await _wait_until(lambda: ext.sent)
-        assert len(ext.sent[0][3]) == bridge_module._MAX_INBOUND_IMAGE_ATTACHMENTS
+        assert len(ext.sent[0][3]) == bridge_module._MAX_INBOUND_ATTACHMENTS
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -999,6 +1037,97 @@ async def test_pump_caps_total_attempts_per_outbox_id_across_seqs(
         ]
         assert ("ext:qq-official:qq:c2c:u9", "obx-ok") in ext.acked
         assert ("ext:qq-official:qq:c2c:u9", "obx-p") not in ext.acked
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_delivers_event_attachments_as_file_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """出站事件附件经平台文件上传接口投递：post_c2c_file 拿 file_info 后以
+    msg_type=7 发送，正文另发一条文本；上传 URL 按 base_url 的 origin 拼接。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "日报已生成：日报",
+                "external_key": "qq:c2c:u9",
+                "attachments": [
+                    {
+                        "name": "日报.docx",
+                        "mime_type": "application/octet-stream",
+                        "size": 3,
+                        "url": "/api/ceo/media/original?token=t1",
+                    }
+                ],
+            }
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 3)
+        upload_name, upload_kwargs = client.api.calls[0]
+        assert upload_name == "post_c2c_file"
+        assert upload_kwargs["openid"] == "u9"
+        assert upload_kwargs["file_type"] == 4  # 任意文件（平台暂不开放则走降级用例）
+        assert upload_kwargs["url"] == "http://127.0.0.1:1/api/ceo/media/original?token=t1"
+        media_name, media_kwargs = client.api.calls[1]
+        assert media_name == "post_c2c_message"
+        assert media_kwargs["msg_type"] == 7
+        assert media_kwargs["media"] == {"file_info": "file-info-c"}
+        assert client.api.calls[2] == (
+            "post_c2c_message",
+            {"openid": "u9", "content": "日报已生成：日报", "msg_type": 0},
+        )
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """平台拒绝文件上传（file_type=4 暂不开放/回源失败）时降级为签名下载链接
+    文本：用户至少拿到可下载链接，附件不能静默丢失。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        async def _reject(**kwargs):
+            raise RuntimeError("file_type 4 not available")
+
+        client.api.post_c2c_file = _reject
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f2"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "日报已生成：日报",
+                "attachments": [
+                    {
+                        "name": "日报.docx",
+                        "mime_type": "application/octet-stream",
+                        "size": 3,
+                        "url": "/api/ceo/media/original?token=t2",
+                    }
+                ],
+            }
+        )
+        await _wait_until(lambda: client.api.calls)
+        await asyncio.sleep(0.05)
+        assert client.api.calls == [
+            (
+                "post_c2c_message",
+                {
+                    "openid": "u9",
+                    "content": "日报已生成：日报\n📎 日报.docx: http://127.0.0.1:1/api/ceo/media/original?token=t2",
+                    "msg_type": 0,
+                },
+            )
+        ]
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

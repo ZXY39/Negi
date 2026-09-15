@@ -85,7 +85,7 @@ curl -N $BASE/sessions/$SESSION_ID/events -H "Authorization: Bearer $TOKEN" \
 
 ### 附件
 
-`attachments` 数组每项：`{kind?, mime_type?, name?, path?|url?|data_base64?}`。`kind` 缺失时按 `mime_type` 前缀推断 `image/audio/video/file`。走 `data_base64` 落盘、单附件 ≤ 5 MiB；`path`/`url` 则只作引用。图片能否进模型由该会话所用模型绑定的 `image_multimodal_enabled` 决定。
+`attachments` 数组每项：`{kind?, mime_type?, name?, path?|url?|data_base64?}`。`kind` 缺失时按 `mime_type` 前缀推断 `image/audio/video/file`。走 `data_base64` 落盘，双上限：`kind:"image"` ≤ 5 MiB，其余文件类 ≤ 20 MiB（超限 413 `attachment_too_large`，桥侧按同值预过滤）；`path`/`url` 则只作引用。图片能否进模型由该会话所用模型绑定的 `image_multimodal_enabled` 决定；非图片附件只以「本地路径提示」告知模型（agent 用工具自行读盘），桥转发文件时无需特殊处理。
 
 ## 4. 事件流（SSE）
 
@@ -101,9 +101,11 @@ curl -N $BASE/sessions/$SESSION_ID/events -H "Authorization: Bearer $TOKEN" \
 | `turn.completed` | `cancelled?` | 终态：完成（`cancelled=true` 表示被暂停/取消） |
 | `turn.failed` | `error`, `detail` | 终态：失败，`error` 为用户可读全文 |
 | `reply.delta` | `text`, `source` | 最新思考段权威全文——**全量替换渲染，不追加** |
-| `reply.final` | `text`, `source`, `usage?` | 权威全文（已出站清洗、媒体改写为签名 URL） |
+| `reply.final` | `text`, `source`, `usage?`, `attachments?` | 权威全文（已出站清洗、媒体改写为签名 URL） |
 | `progress` | `kind`, `text` | `kind: milestone/tool/tool_error`；g3ku 发全量，**节流是桥的职责** |
-| `outbound.created` | `external_key`, `session_key`, `text`, `dedupe_key?` | 主动推送（cron/heartbeat/任务终态回流） |
+| `outbound.created` | `external_key`, `session_key`, `text`, `dedupe_key?`, `attachments?` | 主动推送（cron/heartbeat/任务终态回流） |
+
+`attachments`（出站附件）：回复正文中以 markdown 链接引用、且解析为存在的本地文件的条目会被提取为 `[{name, mime_type, size, url}]`，`url` 是根相对签名媒体链接（24h 时效），桥按自己的 `/api/v1` base_url 的 origin 拼绝对地址下载。桥应把附件作为平台的文件/图片消息投递（先于正文），投递失败降级为把签名链接并入正文。单条事件至多 4 个附件；契约细节见 `docs/architecture/external-agent-api.md`「事件流」出站附件契约。
 
 **终态不变量**：每回合在**一切路径**上恰好发一个 `turn.completed` 或 `turn.failed`（含取消）。桥必须等到终态再发下一轮，或显式 pause/cancel；不要假设提交即串行排队。
 

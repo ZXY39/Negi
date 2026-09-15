@@ -80,6 +80,68 @@ async def test_heartbeat_ext_reply_ignores_empty_text(env):
 
 
 @pytest.mark.asyncio
+async def test_outbound_reply_extracts_file_attachments_into_event_and_outbox(env, tmp_path):
+    """主动推送正文里的 markdown 本地文件链接在统一出口（drain）被提取：
+    事件携带结构化附件，正文留标签，账本持久化附件供重启重放。"""
+    registry, bus = env
+    entry, _ = registry.resolve_or_create(bridge_id="qq", external_key="qq:group:file")
+    doc = tmp_path / "日报.docx"
+    doc.write_bytes(b"doc")
+    task = _start_outbound_drain(bus)
+    try:
+        await _notify_heartbeat_channel_reply(entry.session_key, f"日报已生成：[日报]({doc})")
+        hub = get_session_event_hub(entry.session_key)
+        await _wait_until(lambda: hub.last_seq >= 1)
+        event = hub.replay(0)[0]
+        assert event["type"] == "outbound.created"
+        assert event["text"] == "日报已生成：日报"
+        assert str(doc) not in event["text"]
+        assert len(event["attachments"]) == 1
+        attachment = event["attachments"][0]
+        assert attachment["name"] == "日报.docx"
+        assert attachment["url"].startswith("/api/ceo/media/original?token=")
+        pending = external_outbox.load_pending_outbound()
+        assert len(pending) == 1
+        assert pending[0]["attachments"] == [attachment]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_outbox_replay_preserves_attachments_without_reextracting(env, tmp_path):
+    """重启重放：账本记录的附件随 metadata 透传，drain 不对已清洗正文二次提取。"""
+    registry, bus = env
+    entry, _ = registry.resolve_or_create(bridge_id="qq", external_key="qq:group:replay")
+    attachment = {
+        "name": "日报.docx",
+        "mime_type": "application/octet-stream",
+        "size": 3,
+        "url": "/api/ceo/media/original?token=replay-token",
+    }
+    external_outbox.record_outbound_message(
+        session_key=entry.session_key,
+        external_key=entry.external_key,
+        text="日报已生成：日报",
+        attachments=[attachment],
+    )
+    task = _start_outbound_drain(bus)
+    try:
+        await web_shell._replay_pending_external_outbox()
+        hub = get_session_event_hub(entry.session_key)
+        await _wait_until(lambda: hub.last_seq >= 1)
+        events = [e for e in hub.replay(0) if e["type"] == "outbound.created"]
+        assert len(events) == 1
+        assert events[0]["text"] == "日报已生成：日报"
+        assert events[0]["attachments"] == [attachment]
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_china_keys_are_skipped_after_subsystem_removal(env, monkeypatch):
     """Legacy china: keys keep their transcripts but lost their delivery path
     when the China channel subsystem was removed: the notifier must skip

@@ -124,11 +124,14 @@ def record_outbound_message(
     text: str,
     reply_to: str = "",
     dedupe_key: str = "",
+    attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Register one pending proactive push; returns its outbox id.
 
     Empty string means registration failed (disk pressure): callers must still
-    publish to the hub so live delivery gets its chance.
+    publish to the hub so live delivery gets its chance. ``attachments`` (the
+    structured file descriptors extracted from the outbound text) are persisted
+    so startup replay can re-publish them alongside the cleaned text.
     """
     outbox_id = f"obx-{uuid.uuid4().hex[:16]}"
     record: dict[str, Any] = {
@@ -143,6 +146,8 @@ def record_outbound_message(
         record["reply_to"] = str(reply_to).strip()
     if str(dedupe_key or "").strip():
         record["dedupe_key"] = str(dedupe_key).strip()
+    if attachments:
+        record["attachments"] = [dict(item) for item in attachments if isinstance(item, dict)]
     if not _append_record(record):
         return ""
     return outbox_id
