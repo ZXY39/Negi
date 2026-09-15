@@ -11802,7 +11802,18 @@ function bind() {
     U.ceoScrollToLatestBtn?.addEventListener("click", () => scrollCeoFeedToBottom());
     updateCeoScrollToLatestButton();
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));
-    U.backToTasks?.addEventListener("click", () => switchView("tasks"));
+    // [临时] 箭头返回模拟"绕行两跳"时序：先跳会话列表，再自动切回任务大厅。
+    // v5/v6 探针与用户实测：直达返回把详情退出的大片冷内存触碰挤进一个帧，
+    // 内存吃紧机器上易触发整窗未响应；经另一板块中转把同样的活摊到两帧则平滑。
+    // CEO WS 为惰性连接，中转本身不触发重连。冻结根因解决后移除此垫片。
+    U.backToTasks?.addEventListener("click", () => {
+        switchView("ceo");
+        window.setTimeout(() => {
+            // 中转期间用户已手动切走：尊重用户操作，不再强制带回大厅。
+            if (!U.viewCeo?.classList.contains("active")) return;
+            switchView("tasks");
+        }, 60);
+    });
     U.memoryRefresh?.addEventListener("click", () => void loadMemoryView({ force: true }));
     U.memoryViewCurrent?.addEventListener("click", () => void openMemoryBrowser());
     U.memoryQueueMore?.addEventListener("click", () => void loadMoreMemoryQueue());
