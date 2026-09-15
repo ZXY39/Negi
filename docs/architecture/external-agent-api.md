@@ -54,8 +54,8 @@
 ## 6. 出站路由（主动推送）
 
 - 会话键为 `ext:` 的 heartbeat/cron/task-terminal 回复：`_notify_heartbeat_channel_reply` 的 ext 分支发布 `OutboundMessage(channel="ext", chat_id=<ext session key>)`；`_derive_session_channel_chat` 对 ext 键保留完整会话键为 chat_id。cron 零改动（payload `channel="ext"`、`to=<session key>` 即达）。
-- 共享出站 drain（`g3ku/shells/web.py::_start_outbound_drain`）只路由 `ext`：注册表 `find_by_any_key`（接受会话键或 external_key）→ **持久 outbox 登记**（见下）→ 该会话 hub 发 `outbound.created`（事件携带 `outbox_id`）；其他 channel 无消费方，告警跳过。日志 `external outbound published to hub` 只代表事件已进内存 hub，**不代表已送达渠道**；送达以桥侧回执日志为准（QQ 适配器为 `qq-official delivered ...`）。
-- drain 生命周期：`ensure_web_runtime_services` 拉起，仅进程关闭时取消。
+- 共享出站 drain（`g3ku/shells/web.py::_start_outbound_drain`）只路由 `ext`：注册表 `find_by_any_key`（接受会话键或 external_key）→ **持久 outbox 登记**（见下）→ 该会话 hub 发 `outbound.created`（事件携带 `outbox_id`）；其他 channel 无消费方，告警跳过。日志 `external outbound published to hub` 只代表事件已进内存 hub，**不代表已送达渠道**；送达以桥侧回执日志为准（QQ 适配器为 `qq-official delivered ...`）。发布时 hub 无任何订阅者则升级为 WARNING（`no live subscriber`）：live 扇出必然蒸发，投递交由持久 outbox 周期对账兜底（见下）。
+- drain 生命周期：`ensure_web_runtime_services` 拉起，仅进程关闭时取消。outbox 对账循环（`_outbox_reconcile_loop`，60s）与其同生命周期、同款幂等启动器（`_ensure_outbox_reconcile_running`），关停时先于桥服务收割（防对账在 shutdown 后复活桥）；每轮先幂等复活 drain——drain 死亡时重放进总线无人路由，对账把它降级为 ≤60s 自愈。
 - 未知目标告警丢弃；清洗后为空的纯内部文本静默 ack（不触发重试）。
 
 ### 持久 outbox（`.g3ku/external-outbox/outbox.jsonl`）
@@ -65,19 +65,20 @@ bus/hub 全是内存态：桥 pump 断连或进程重启窗口里滞留的主动
 - 账本为 append-only jsonl：`{"kind":"msg",...}` 登记记录 + `{"kind":"ack","id":...}` 销账 tombstone。登记失败（如磁盘满）降级为仅内存投递并记 error，绝不阻断 hub 发布。
 - drain 在发布 hub 前登记每条出站；桥在渠道 API 确认送达后调 `POST /sessions/{id}/outbox/{outbox_id}/ack` 销账（会话作用域防越权、幂等）。ack 丢失的代价是下次重启后重复投递一次。
 - 启动重放：`ensure_web_runtime_services` 在 drain 拉起后把 24h 时效内未 ack 的条目带原 `outbox_id` 重新注入总线（drain 复用该 id，不重复登记），过期条目标记 `expired`，随后压实账本。
-- `GET /outbox/pending` 返回本 bridge 名下会话的 pending 清单（只带路由身份 `outbox_id/session_id/external_key/ts`，不带正文——正文经 SSE 重放投递），供桥启动时预热 pump。
+- 周期对账（`_outbox_reconcile_loop`，每 60s）：启动重放是一次性的，覆盖不了「重启时账本为空、滞留推送在重启后才入账」的窗口（重启落在 cron 触发与 agent 产出之间即如此）。每轮对账执行过期清理（`expired` 判定不依赖重启）；把 pending 中「年龄超过 120s 且对应会话 hub 无订阅者」的条目带原 `outbox_id` 重新注入总线——有订阅者说明 pump 在线，SSE `Last-Event-ID` 重放已兜底，再注入只会制造重复副本。重注入按记录指数退避（60s 起步、1h 封顶），压制永久无消费者会话（openai-compat 会话走同一账本但从不开 SSE）的重复注入噪声；到达桥侧的重复副本由 pump 的 `outbox_id` 去重吸收（见「内置官方 QQ 适配器」）。活动轮立即压实账本、稳态每小时压实一次，append-only 文件不随运行时间无界增长。
+- `GET /outbox/pending` 返回本 bridge 名下会话的 pending 清单（只带路由身份 `outbox_id/session_id/external_key/ts`，不带正文——正文经 SSE 重放投递），供桥启动首跑与常驻对账循环重建 pump（见「内置官方 QQ 适配器」）。
 - 账本只覆盖走出站总线的主动推送（`outbound.created`）；普通回合的 `reply.final` 仍只依赖 hub 环形缓冲（断线超过 `eventBufferSize` 即被逐出），其可达性由桥侧 pump 的重连契约兜底。
 
 ## 7. 内置官方 QQ 适配器（qq-official）
 
 - `g3ku/qq_official/` 是 g3ku 唯一内置渠道桥，`bridge_id` 固定 `qq-official`，以 in-process 桥身份消费本契约；QQ 协议收敛在该模块内，核心其余部分不出现 QQ 代码。
 - 配置段 `qqBot`：`enabled`、`appId`、`appSecret`、`sandbox`。`appSecret` 与 `externalApi.tokens[].token` 同走 overlay 三件套（保存剥离、落盘占位、解锁回填）。管理面：Web「外部接入」页的官方 QQ 机器人面板，对应 `main/api/admin_rest.py` 的 `/api/qq-bot/settings`（GET/PUT；appSecret 只写，PUT 空串表示保留原值）与 `/api/qq-bot/status`。
-- 生命周期：`QqOfficialService` 随 web 运行时 refresh 启停（`g3ku/shells/web.py`），状态机 `enabled_off / not_configured / connecting / connected / error`；启动时若 `externalApi.tokens.qq-official` 缺失则自动签发并 `save_config`。
+- 生命周期：`QqOfficialService` 随 web 运行时 refresh 启停（`g3ku/shells/web.py`），状态机 `enabled_off / not_configured / connecting / connected / error`；启动时若 `externalApi.tokens.qq-official` 缺失则自动签发并 `save_config`。桥崩溃只置 `error` 态、自身不重启；复活靠下一次 `sync_from_config`，其触发点为 runtime refresh、启动序列与 outbox 对账循环（每 5 轮 ≈5 分钟），崩溃桥因此在分钟级自愈。`_sync_qq_official_service` 整体持模块级 asyncio 锁：`sync_from_config` 在 `_restart` 的 `await stop()` 窗口内 `_task=None`，无锁的并发调用会各自建桥、先建者沦为无人持有的孤儿任务（双 botpy 连接、每条消息双份投递）。
 - 运行入口是硬约束：botpy 的阻塞入口 `Client.run()`（内部对构造时捕获的 loop 调 `run_until_complete`）在已运行的 web 事件循环上会抛 "This event loop is already running"；桥必须走异步入口 `async with client: await client.start(...)`，使 botpy 与 uvicorn 共享同一事件循环，事件回调（`on_*`）因此可直接驱动回环 `/api/v1` 客户端。
 - 消息流：入站 `on_*` 事件按 external_key 映射建会话（`qq:group:<group_openid>` / `qq:c2c:<user_openid>` / `qq:guild:<guild>:<channel>` / `qq:guilddm:<guild>:<author>`），经 `Idempotency-Key: qq-<消息id>` 提交回合——缺消息 id 时不带幂等键提交，绝不回退 external_key：external_key 对同一用户恒定，回退会撞掉该用户首条消息的幂等位并永久丢弃消息。提交返回 `status:"queued"`（会话正忙、消息已排队）时，桥必须把回执投递给用户（响应 `receipt` 为空则用兜底文案），静默会让用户以为消息被吞而重复发送。消息中的图片附件（botpy `message.attachments` 中 `content_type` 为 `image/*` 且带绝对 http(s) URL 的条目）由桥下载后作为 `data_base64` 附件经本契约转发（单附件 ≤5MiB、每条消息至多 4 张；下载失败或超限降级为仅文本提交，纯图片消息照常提交）；每会话一条 SSE pump 消费 `reply.final` 与 `outbound.created`（主动提醒消费分支，路由见「出站路由（主动推送）」），分别经 `post_message` / `post_group_message` / `post_c2c_message` / `post_dms` 投递。
 - 主动提醒约束：只能推给已注册过会话的目标（该用户/群先与机器人产生过消息）；频率受 QQ 开放平台主动消息额度与回复时间窗规则约束。
-- 每会话 SSE pump 的存活契约（`bridge.py::_pump`）：流异常**或干净结束**（服务端重启/空闲关闭）都按 1s→60s 指数退避自动重连。重连与入站幂等重建是硬契约：pump 一旦终结且无人重建，该会话出站事件滞留内存 hub 无人消费，形成「入站正常、出站黑洞」的僵尸态。投递成功才推进 `seqs`：失败靠服务端 `Last-Event-ID` 重放自动重试（节奏随重连退避），同一事件连续失败 5 次判为毒消息，记 error 后跳过、不阻塞后续事件。
-- pump 建立时机：首条入站消息、每次入站的幂等存活校验（`_spawn_pump` 按 session 记录任务，已死则重建）、以及桥启动时按 `GET /outbox/pending` 的预热（进程重启后 sessions 映射清空，只等入站消息会让启动重放的滞留推送没有消费者）。
+- 每会话 SSE pump 的存活契约（`bridge.py::_pump`）：流异常**或干净结束**（服务端重启/空闲关闭）都按 1s→60s 指数退避自动重连。重连与入站幂等重建是硬契约：pump 一旦终结且无人重建，该会话出站事件滞留内存 hub 无人消费，形成「入站正常、出站黑洞」的僵尸态。投递成功才推进 `seqs`：失败靠服务端 `Last-Event-ID` 重放自动重试（节奏随重连退避），同一事件连续失败 5 次判为毒消息，记 error 后跳过、不阻塞后续事件。`outbound.created` 另有 `outbox_id` 维度投递历史（进程内有界 LRU，1024 个 id）：已 ack 的 id 之重复副本（服务端周期对账/重启重放注入）直接跳过，用户不会收到重复推送；同一 id 跨 seq 累计投递失败达上限（5 次）后，其后续副本零尝试丢弃——重放副本各带新 seq，仅靠 per-seq 计数会让毒消息随每份副本重新获得完整重试预算。ack 失败不进去重集：副本可再投，维持 at-least-once。
+- pump 建立时机：首条入站消息、每次入站的幂等存活校验（`_spawn_pump` 按 session 记录任务，已死则重建）、桥启动时按 `GET /outbox/pending` 的对账首跑、以及常驻对账循环（每 30s 轮询同一清单，为「有 pending 记录且无存活 pump」的会话重建 pump）。常驻循环覆盖启动首跑扑空的窗口：服务端重启落在 cron 触发与产出之间时账本尚空，滞留推送稍后才入账，而入站消息可能迟迟不来——周期对账保证分钟级补投。list 失败只记 warning，对账循环绝不因单轮失败而死。
 - 投递确认：`deliver` 校验 botpy 回执——botpy 的 http 层对请求超时只记 WARNING 就静默返回 `None`，无回执一律视为投递失败抛出并走 pump 重试；成功投递记 INFO 回执日志 `qq-official delivered ...`（含平台消息 id），排查「发没发出去」以该行为准。`outbound.created` 投递确认后经 `POST /sessions/{id}/outbox/{outbox_id}/ack` 销账（见「持久 outbox」）。
 - `qq-botpy` 在核心依赖（pyproject `dependencies`）里，`pip install -e .` 即装；唯一 `import botpy` 的模块是 `bridge.py` 且为惰性导入，环境缺失时服务报 `error` 状态，不会拖垮 web 运行时。
 
@@ -85,6 +86,6 @@ bus/hub 全是内存态：桥 pump 断连或进程重启窗口里滞留的主动
 
 - 桥拿到 403 `external_api_disabled`：配置 `externalApi.enabled` 与 tokens；401：token 不匹配或条目被禁用。
 - 消息提交成功但桥收不到回复：确认桥订阅的 SSE 会话与消息提交的会话一致（同一 `session_id`）；看事件缓冲是否被 `eventBufferSize` 淘汰（长断线超过缓冲窗口）。
-- 主动推送不到达：沿「出站路由（主动推送）」链路查——发布侧（`source=heartbeat` 日志）→ drain（`external outbound published to hub`，含 outbox_id）→ 桥侧回执（`qq-official delivered ...`）。有 published 无 delivered 说明事件没有消费者：查 pump 重连日志（`qq-official event pump error ... reconnecting` / `event stream ended ... reconnecting`）与 `GET /outbox/pending` 滞留清单；滞留消息在重启后由 outbox 重放 + pump 预热补投。会话转录/Web UI 里看得到回复而渠道端收不到时，优先怀疑本链路——转录落盘与渠道投递是两条独立链路。
+- 主动推送不到达：沿「出站路由（主动推送）」链路查——发布侧（`source=heartbeat` 日志）→ drain（`external outbound published to hub`，含 outbox_id；伴随 `no live subscriber` WARNING 说明发布时无人消费，属对账兜底路径）→ 桥侧回执（`qq-official delivered ...`）。有 published 无 delivered 说明事件没有消费者：查 pump 重连日志（`qq-official event pump error ... reconnecting` / `event stream ended ... reconnecting`）与 `GET /outbox/pending` 滞留清单。滞留消息的补投不依赖重启：服务端 60s 周期对账（动作日志 `external outbox reconcile: republished ...`）与桥侧 30s 对账（动作日志 `qq-official spawned ... pump(s) from pending outbox entries`）在 24h 时效内自动收敛；超过 24h 的滞留标记 `expired` 废弃。已知限制：独立进程第三方桥在服务端重启后持旧 `Last-Event-ID`（大于新进程 hub 的 seq）时，环形缓冲重放对它不可见，只能等 live 事件；in-process 的 qq-official 桥与服务端同生共死，seq 一起清零，不受此限。会话转录/Web UI 里看得到回复而渠道端收不到时，优先怀疑本链路——转录落盘与渠道投递是两条独立链路。
 - 终态缺失导致桥状态悬挂：属实现缺陷，对照「回合契约」终态不变量检查执行器改动。
 - QQ 机器人面板报错/不连接：先看 `/api/qq-bot/status` 的 detail——AppID/AppSecret 错误表现为登录失败，intents 未开通表现为网关拒绝；出现 "This event loop is already running" 说明桥被改回了阻塞 `Client.run()` 入口。
