@@ -7,15 +7,20 @@ client is exercised against an httpx MockTransport (no real HTTP server).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from g3ku.security.bootstrap import get_bootstrap_security_service
+import g3ku.qq_official.bridge as qq_bridge
+import g3ku.qq_official.service as qq_service
+from g3ku.config.schema import QqBotConfig
 from g3ku.qq_official.client import ExternalApiClient
 from g3ku.qq_official.service import QqOfficialService
+from g3ku.security.bootstrap import get_bootstrap_security_service
 
 
 def _write_config(workspace: Path, *, enabled: bool, app_id: str, app_secret: str) -> None:
@@ -179,3 +184,117 @@ async def test_client_sessions_messages_and_events() -> None:
     assert [event["type"] for event in events] == ["reply.final", "outbound.created"]
     assert events[1]["external_key"] == "qq:c2c:u1"
     await client.close()
+
+
+def _enable_qq_config(workspace: Path) -> None:
+    _write_config(workspace, enabled=True, app_id="123", app_secret="")
+    security = get_bootstrap_security_service(workspace)
+    security.setup_initial_realm(password="owner-password")
+    # The appSecret arrives via the overlay (like the real save path), never inline.
+    security.set_overlay_values({"config.qqBot.appSecret": "sekrit"})
+
+
+def _shrink_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(qq_service, "_BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr(qq_service, "_BRIDGE_RETRY_MAX_BACKOFF_SECONDS", 0.02)
+
+
+@pytest.mark.asyncio
+async def test_service_retries_bridge_crash_until_connected(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """瞬时崩溃（如 botpy Robot(None) 的 AttributeError）必须退避重试直到连上。"""
+    _enable_qq_config(workspace)
+    _shrink_retry_backoff(monkeypatch)
+
+    calls = {"n": 0}
+
+    async def fake_bridge(**kwargs) -> None:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise AttributeError("'NoneType' object has no attribute 'get'")
+        kwargs["on_state"]("connected", "")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+
+    service = QqOfficialService()
+    await service.sync_from_config()
+    try:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5.0
+        while service.status()["state"] != "connected":
+            assert loop.time() < deadline, f"bridge never reconnected: {service.status()}"
+            await asyncio.sleep(0.01)
+        assert calls["n"] >= 3
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_bridge_retry_loop(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """持续崩溃时 stop() 必须终结重试循环，且错误态保留异常摘要与重试提示。"""
+    _enable_qq_config(workspace)
+    _shrink_retry_backoff(monkeypatch)
+
+    calls = {"n": 0}
+
+    async def fake_bridge(**kwargs) -> None:
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+
+    service = QqOfficialService()
+    await service.sync_from_config()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 5.0
+    while calls["n"] < 3:
+        assert loop.time() < deadline, f"bridge was not retried: calls={calls['n']}"
+        await asyncio.sleep(0.01)
+    assert service.status()["state"] == "error"
+    assert "boom" in service.status()["detail"]
+    assert "重试" in service.status()["detail"]
+
+    await service.stop()
+    assert service._task is None
+    settled = calls["n"]
+    await asyncio.sleep(0.05)
+    assert calls["n"] == settled, "retry loop kept running after stop()"
+
+
+@pytest.mark.asyncio
+async def test_bridge_retry_backoff_resets_after_healthy_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """健康运行超过阈值后再崩溃，退避必须重置回起始值而不是继续翻倍。"""
+    q = QqBotConfig(enabled=True, app_id="1", app_secret="s", sandbox=False)
+    service = QqOfficialService(base_url="http://127.0.0.1:1/api/v1")
+
+    calls = {"n": 0}
+
+    async def fake_bridge(**kwargs) -> None:
+        calls["n"] += 1
+        if calls["n"] > 4:
+            return  # 干净返回：结束重试循环
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+
+    # 每轮崩溃消耗两个时刻（started / except）；第 2 轮"健康运行"80s ≥ 60s 阈值 → 重置。
+    clock = iter([0.0, 10.0, 20.0, 100.0, 110.0, 120.0, 130.0, 140.0, 150.0])
+    monkeypatch.setattr(qq_service, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+    real_sleep = asyncio.sleep
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    await service._run(q, "tok")
+    # 第 2 轮若未重置，应睡 2.0；重置后序列为 1, 1, 2, 4。
+    assert delays == [1.0, 1.0, 2.0, 4.0]
+    assert calls["n"] == 5
