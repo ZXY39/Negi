@@ -1043,6 +1043,10 @@ async def test_manage_task_nodes_tool_param_shapes_and_targets_passthrough(tmp_p
     service = _make_service(tmp_path)
     try:
         record = await service.create_task("tool shapes", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
         module = _load_manage_task_nodes_tool_module()
         tool = module._ManageTaskNodesHandler(service)
 
@@ -1058,12 +1062,15 @@ async def test_manage_task_nodes_tool_param_shapes_and_targets_passthrough(tmp_p
         missing_action = json.loads(await tool.execute(task_id=record.task_id, targets=[{"node_id": record.root_node_id}]))
         assert missing_action["ok"] is False and missing_action["error"] == "invalid_param"
 
+        # 条目未声明 cascade 时继承顶层 cascade（显式参数不得被静默忽略）。
         paused = json.loads(await tool.execute(
             task_id=record.task_id,
             targets=[{"node_id": record.root_node_id, "action": "pause"}],
+            cascade=True,
         ))
         assert paused["ok"] is True
-        root = service.get_node(record.root_node_id)
-        assert root is not None and root.pause_requested is True
+        for node_id in (root.node_id, child.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is True
     finally:
         await service.close()

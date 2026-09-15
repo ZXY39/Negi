@@ -2,7 +2,7 @@ schema_version: 1
 kind: tool
 display_name: "处理暂停节点"
 name: manage_task_nodes
-description: Manage paused task nodes with resume, keep_paused, fail, or pause actions; supports per-target cascade (apply an action to a whole subtree) and mixed per-node actions in one atomic call.
+description: Manage task nodes after an error pause or operator review - resume, keep_paused, fail, or pause single nodes, whole subtrees (cascade), or mixed per-node targets in one atomic call.
 tool_result_delivery_contract: runtime_managed
 source:
   type: ''
@@ -30,14 +30,14 @@ parameters:
       minItems: 1
       items:
         type: string
-      description: One or more node ids to control (legacy form, combine with action). Mutually exclusive with targets.
+      description: Single-action batch form - one or more node ids that all receive the same action. Combine with action; mutually exclusive with targets.
     action:
       type: string
       enum: [resume, keep_paused, fail, pause]
-      description: Action applied to every node in node_ids (legacy form). Mutually exclusive with targets.
+      description: Action applied to every node in node_ids (single-action batch form). Mutually exclusive with targets.
     cascade:
       type: boolean
-      description: Legacy form only. When true, apply the action to the whole subtree rooted at each node in node_ids instead of only that node. Ignored when targets is used (each target carries its own cascade flag).
+      description: Propagate the action down to the whole subtree rooted at each node. With node_ids it applies to every node in the batch; with targets it serves as the default for entries that omit their own cascade flag. An atomic validated batch results whenever cascade is true.
     targets:
       type: array
       items:
@@ -52,12 +52,12 @@ parameters:
             description: Action for this node or subtree.
           cascade:
             type: boolean
-            description: When true, apply the action to the whole subtree rooted at node_id. The task root node with cascade=true targets the entire tree.
+            description: When true, apply the action to the whole subtree rooted at node_id; when omitted, inherit the top-level cascade flag. The task root node with cascade=true targets the entire tree.
         required: [node_id, action]
       description: Per-node actions in one atomic call (e.g. pause subtree a while failing subtree b). The batch validates before applying anything; overlapping subtrees or repeated nodes reject the whole call with error subtree_overlap listing the covered node ids. A cascade fail requires every non-terminal descendant to be paused first, otherwise the batch is rejected with subtree_not_fully_paused. Mutually exclusive with node_ids+action.
     remark:
       type: string
-      description: Required for keep_paused; optional annotation for other actions.
+      description: One batch-wide annotation shared by all entries - failure reason for fail, registration remark for keep_paused (required there), annotation for pause. Per-entry remarks are not supported.
   required: [task_id]
 governance:
   family: task_runtime

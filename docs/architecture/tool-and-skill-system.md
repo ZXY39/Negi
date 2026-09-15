@@ -224,7 +224,7 @@ promotion 与前门状态：
 
 `tools/manage_task_nodes_cn` 提供给 agent 处理错误暂停节点的 callable tool。它调用 `MainRuntimeService.control_nodes(...)`，一次请求可以包含多个同一任务的节点，并按节点返回结果。
 
-- 两种互斥参数形态：legacy `node_ids` + 单一 `action`（逐节点独立校验，单节点冲突不阻断批次其余节点）；或 `targets: [{node_id, action, cascade?}]`（每节点独立动作，一次调用可混合 pause/fail 等）。`cascade=true`（legacy 形态用顶层 `cascade`，targets 形态用条目内 `cascade`）把动作向下传递到以该节点为根的整棵子树；传任务根节点并级联即作用于整棵树。子树成员是调用时快照，之后新 spawn 的后代不在集内（暂停的祖先会延迟其分发）。
+- 两种互斥参数形态：单动作批量 `node_ids` + 单一 `action`（无级联时逐节点独立校验，单节点冲突不阻断批次其余节点；`cascade=true` 时同样进入原子路径）；或 `targets: [{node_id, action, cascade?}]`（每节点独立动作，一次调用可混合 pause/fail 等）。`cascade=true` 把动作向下传递到以该节点为根的整棵子树：批量形态用顶层 `cascade`，targets 条目未声明 `cascade` 时继承顶层值（显式参数不得被静默忽略）。传任务根节点并级联即作用于整棵树；子树成员是调用时快照，之后新 spawn 的后代不在集内（暂停的祖先会延迟其分发）。`remark` 是批级共享注记（fail 失败原因 / keep_paused 登记备注 / pause 注记），不支持逐条目独立 remark。
 - `action` 取 `resume`、`keep_paused`、`fail`、`pause`。`keep_paused` 必须提供非空 `remark`；该备注写入节点暂停登记，供后续 heartbeat 决策使用。
 - `resume` 清除暂停并让运行中的 dispatcher 从持久化 runtime frame 续跑；`fail` 将暂停节点置为终态并释放父节点等待；`pause` 以 `pause_reason=agent` 登记 agent 发起的暂停。
 - targets/级联路径是原子两阶段：先整体校验（节点存在、子树重叠、根节点前置条件、级联 fail 要求子树内所有非终态后代已暂停），任何一项不满足整批打回不生效，返回结构化错误码——`subtree_overlap` 携带 `conflicts`（哪些节点被哪些条目的子树覆盖）、`subtree_not_fully_paused` 携带 `blocking_node_ids`，另有 `node_not_found` / `node_terminal` / `node_already_paused` / `node_not_paused`。通过校验的批次内，后代的状态冲突逐个跳过并在 `items` 报告，不打回整批。失败一棵子树是两步流程：先级联 `pause`，再级联 `fail`。

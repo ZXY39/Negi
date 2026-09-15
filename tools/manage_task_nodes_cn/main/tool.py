@@ -64,7 +64,9 @@ class _ManageTaskNodesHandler(Tool):
                     return _error(f'targets[{position}].node_id is required')
                 if not item_action:
                     return _error(f'targets[{position}].action is required')
-                normalized_targets.append({'node_id': node_id, 'action': item_action, 'cascade': bool(item.get('cascade', False))})
+                # 条目未显式声明 cascade 时继承顶层 cascade，避免显式参数被静默忽略。
+                entry_cascade = bool(item['cascade']) if 'cascade' in item else bool(cascade)
+                normalized_targets.append({'node_id': node_id, 'action': item_action, 'cascade': entry_cascade})
             result = await self._service.control_nodes(
                 str(task_id or '').strip(),
                 [],
