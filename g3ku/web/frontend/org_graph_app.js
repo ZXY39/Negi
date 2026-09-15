@@ -11692,6 +11692,7 @@ function renderMemoryProcessedCard(item) {
 function switchView(view) {
     const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
+    const leavingTaskDetails = view !== "task-details" && !!U.viewTaskDetails?.classList.contains("active");
     S.view = navView;
     U.nav.forEach((btn) => btn.classList.toggle("active", btn.dataset.view === navView));
     Object.entries(map).forEach(([key, el]) => {
@@ -11705,14 +11706,33 @@ function switchView(view) {
         // 同时掐掉树加载尾巴：分块整树加载、分支重同步、快照自愈全部失效，
         // 避免回到任务大厅后剩余的树请求与整树 DOM 重建继续阻塞主线程。
         if (typeof cancelTaskTreeLoading === "function") cancelTaskTreeLoading();
-        stashTaskDetailViewState();
-        setTaskTokenStatsOpen(false);
-        clearAgentSelection({ rerender: false });
-        closeTaskDetailWs();
-        scheduleTaskDetailSessionPersist();
-        // 卸载详情驻留大状态与 DOM（见 releaseTaskDetailRetainedState 注释）：
-        // 降低标签页驻留内存，减轻内存吃紧机器上整页被裁剪换出造成的冻结。
-        if (typeof releaseTaskDetailRetainedState === "function") releaseTaskDetailRetainedState();
+        if (leavingTaskDetails) {
+            // 立即掐掉详情 live 流，拆除期间不允许 live 事件继续改驻留状态/DOM。
+            closeTaskDetailWs();
+            // 详情退出的重步骤（视图状态捕获、大 DOM 拆除、持久化调度）推迟到下一个
+            // 宏任务，时序上对齐"侧栏绕行两跳回大厅"：点击帧只做视图切换与大厅请求
+            // （两者发起的请求完全一致：/api/tasks、/api/ws/tasks、worker-status），
+            // 大片冷内存的集中触碰挪到下一帧，不再与大厅重绘、WS 重连同帧叠加。
+            // 卸载语义见 releaseTaskDetailRetainedState：重开任务整包重载，无可见状态损失。
+            window.setTimeout(() => {
+                // 快速来回切换：用户已重新进入详情视图，本次拆除整体作废，状态留给新视图。
+                if (U.viewTaskDetails?.classList.contains("active")) return;
+                stashTaskDetailViewState();
+                setTaskTokenStatsOpen(false);
+                clearAgentSelection({ rerender: false });
+                scheduleTaskDetailSessionPersist();
+                if (typeof releaseTaskDetailRetainedState === "function") releaseTaskDetailRetainedState();
+            }, 0);
+        } else {
+            stashTaskDetailViewState();
+            setTaskTokenStatsOpen(false);
+            clearAgentSelection({ rerender: false });
+            closeTaskDetailWs();
+            scheduleTaskDetailSessionPersist();
+            // 卸载详情驻留大状态与 DOM（见 releaseTaskDetailRetainedState 注释）：
+            // 降低标签页驻留内存，减轻内存吃紧机器上整页被裁剪换出造成的冻结。
+            if (typeof releaseTaskDetailRetainedState === "function") releaseTaskDetailRetainedState();
+        }
     }
     if (view === "tasks") {
         void loadTasks();
