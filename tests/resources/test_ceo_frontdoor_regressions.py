@@ -1426,9 +1426,11 @@ async def test_graph_normalize_model_output_falls_back_on_repeated_stage_block_e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("prefix", "_kind"), _STAGE_ECHO_PREFIX_CASES)
-async def test_graph_normalize_model_output_strips_trailing_stage_block_echo(prefix: str, _kind: str) -> None:
-    # 可见答案尾部附带阶段块片段时，只剥除片段、保留可见答案（对称于 tool
-    # contract echo 尾段剥除），块原文不进入 final_output。
+async def test_graph_normalize_model_output_passes_trailing_stage_block_while_strip_disabled(prefix: str, _kind: str) -> None:
+    # 回显裁剪开关（stage_prompt_compaction.ECHO_STRIP_ENABLED）临时关闭期间，
+    # 可见答案尾部的阶段块片段随回复原样放行：裁剪按任意位置子串匹配实现，
+    # 会把答案中合法引用的块前缀一并截断（事故 web:ceo-ad3daa814d19）。
+    # 恢复开关时，本测试改回断言尾段剥离（只保留可见答案、块原文不进 final_output）。
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     block = _stage_echo_block(prefix)
     content = f"这是给用户的可见结论。\n\n{block}"
@@ -1439,9 +1441,9 @@ async def test_graph_normalize_model_output_strips_trailing_stage_block_echo(pre
     )
 
     assert result["next_step"] == "finalize"
-    assert result["final_output"] == "这是给用户的可见结论。"
-    assert prefix not in str(result.get("final_output") or "")
-    assert "stage_index" not in str(result.get("final_output") or "")
+    assert result["final_output"] == content
+    assert prefix in str(result.get("final_output") or "")
+    assert "stage_index" in str(result.get("final_output") or "")
 
 
 @pytest.mark.asyncio

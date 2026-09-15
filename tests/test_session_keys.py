@@ -126,23 +126,26 @@ def test_sanitize_channel_outbound_text_internal_only_returns_empty():
     assert sanitize_channel_outbound_text("[SESSION EVENTS]\ninternal") == ""
 
 
-def test_sanitize_channel_outbound_text_removes_runtime_tool_contract_echo():
+def test_sanitize_channel_outbound_text_passes_contract_echo_while_strip_disabled():
+    # 回显裁剪开关（stage_prompt_compaction.ECHO_STRIP_ENABLED）临时关闭期间，
+    # 契约/阶段块回显在出站消毒中原样放行；[SESSION EVENTS] 截断不受开关影响。
+    # 恢复开关时，本测试改回断言两类回显被剥除。
     contract = (
         "## Runtime Tool Contract\n"
         "kind: frontdoor_runtime_tool_contract\n"
         "callable_tools: `exec`"
     )
-    assert sanitize_channel_outbound_text(contract) == ""
-    assert sanitize_channel_outbound_text("Visible answer\n\n" + contract) == "Visible answer"
+    assert sanitize_channel_outbound_text(contract) == contract
+    assert sanitize_channel_outbound_text("Visible answer\n\n" + contract) == "Visible answer\n\n" + contract
 
 
-def test_sanitize_channel_outbound_text_removes_stage_block_echo():
+def test_sanitize_channel_outbound_text_passes_stage_block_echo_while_strip_disabled():
     compact_block = '[G3KU_STAGE_COMPACT_V1]\n{"stage_index": 48, "status": "completed"}'
     externalized_block = '[G3KU_STAGE_EXTERNALIZED_V1]\n{"stage_index": 48}'
     raw_block = '[G3KU_STAGE_RAW_V1]\n{"stage_index": 48}'
     for block in (compact_block, externalized_block, raw_block):
-        assert sanitize_channel_outbound_text(block) == ""
-        assert sanitize_channel_outbound_text("Visible answer\n\n" + block) == "Visible answer"
+        assert sanitize_channel_outbound_text(block) == block
+        assert sanitize_channel_outbound_text("Visible answer\n\n" + block) == "Visible answer\n\n" + block
 
 
 def test_build_ceo_session_catalog_lists_legacy_channel_sessions_readonly(monkeypatch, tmp_path: Path) -> None:

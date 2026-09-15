@@ -54,6 +54,7 @@ from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.stage_prompt_compaction import (
+    ECHO_STRIP_ENABLED,
     compact_stage_prompt_messages_in_place,
     is_stage_block_echo_text,
     strip_stage_block_echo,
@@ -6897,8 +6898,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
 
         if text.strip():
-            text = strip_frontdoor_tool_contract_echo(text)
-            text = strip_stage_block_echo(text)
+            if ECHO_STRIP_ENABLED:
+                # 回显裁剪开关见 stage_prompt_compaction.ECHO_STRIP_ENABLED；关闭时
+                # 尾部契约/阶段块片段随回复原样放行，避免合法内联引用被齐根截断。
+                text = strip_frontdoor_tool_contract_echo(text)
+                text = strip_stage_block_echo(text)
             if not text:
                 return {
                     'final_output': self._empty_response_explanation(

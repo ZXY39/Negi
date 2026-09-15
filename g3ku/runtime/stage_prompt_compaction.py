@@ -9,6 +9,18 @@ STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
 STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
 STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
 
+# 回显裁剪总开关（同时作用于 `strip_stage_block_echo` 与
+# `strip_frontdoor_tool_contract_echo` 两处调用点：CEO 最终回复收口
+# `_graph_normalize_model_output` 与渠道出站 `sanitize_channel_outbound_text`）。
+# 事故背景：裁剪按"任意位置子串匹配块前缀"实现，会把用户答案中合法引用的
+# `[G3KU_STAGE_*]` 齐根截断（web:ceo-ad3daa814d19 两轮回复被截）。
+# 恢复开关前必须先替换为指纹比对实现——仅剥离与当前注入真块逐字一致的回显，
+# 并同步恢复下列回归测试的裁剪断言：
+#   - tests/resources/test_ceo_frontdoor_regressions.py（trailing stage block echo）
+#   - tests/test_session_keys.py（sanitize_channel_outbound_text 两类回显裁剪）
+# standalone 打回守卫（is_*_echo_text + 私有修复提示）不在此开关内，始终生效。
+ECHO_STRIP_ENABLED = False
+
 # 内部事件束（心跳/定时）按是否承载因果拆成两类处理：
 # - 事件体（因果载荷）保留：后续回合需要它才能追溯"这一轮为什么做这些动作"，
 #   因此压缩时不再删除——否则心跳/定时通过开阶段处理问题后，下一轮模型会失去
@@ -763,6 +775,7 @@ def decompose_stage_prompt_messages(
 
 __all__ = [
     "DEFAULT_INTERNAL_RULE_MARKERS",
+    "ECHO_STRIP_ENABLED",
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",
     "STAGE_RAW_PREFIX",
