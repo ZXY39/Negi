@@ -825,6 +825,67 @@ async def test_control_nodes_targets_subtree_overlap_rejects_whole_batch(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_control_nodes_same_action_overlap_merges_into_covering_target(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("same action merge", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+
+        result = await service.control_nodes(
+            record.task_id,
+            [],
+            "",
+            targets=[
+                {"node_id": root.node_id, "action": "pause", "cascade": True},
+                {"node_id": child.node_id, "action": "pause", "cascade": True},
+            ],
+        )
+        assert result["ok"] is True
+        assert result["merged"] == [{
+            "index": 1,
+            "node_id": child.node_id,
+            "action": "pause",
+            "into_index": 0,
+            "into_node_id": root.node_id,
+        }]
+        assert [item["node_id"] for item in result["targets"]] == [root.node_id]
+        assert result["targets"][0]["applied"] == 3
+        for node_id in (root.node_id, child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is True and node.pause_reason == "agent"
+
+        # 级联/非级联混合同样合并：非级联子条目被根的级联恢复条目吸收。
+        resumed = await service.control_nodes(
+            record.task_id,
+            [],
+            "",
+            targets=[
+                {"node_id": child.node_id, "action": "resume"},
+                {"node_id": root.node_id, "action": "resume", "cascade": True},
+            ],
+        )
+        assert resumed["ok"] is True
+        assert resumed["merged"] == [{
+            "index": 0,
+            "node_id": child.node_id,
+            "action": "resume",
+            "into_index": 1,
+            "into_node_id": root.node_id,
+        }]
+        assert [item["node_id"] for item in resumed["targets"]] == [root.node_id]
+        for node_id in (root.node_id, child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and not node.pause_requested and not node.is_paused
+            assert service.store.get_task_node_pause(node_id) is None
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_control_nodes_cascade_fail_requires_fully_paused_subtree(tmp_path: Path) -> None:
     service = _make_service(tmp_path)
     try:

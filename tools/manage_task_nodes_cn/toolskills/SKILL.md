@@ -33,13 +33,20 @@ Passing the task root node with `cascade=true` targets the entire tree. The
 subtree membership is a snapshot taken at call time: nodes spawned afterwards are
 not covered (a paused ancestor defers their dispatch anyway).
 
+Same-action overlaps are auto-merged: in a tree, two subtrees are either disjoint
+or nested, so a target whose node/subtree is contained in another target with the
+**same action** is absorbed by the covering one and reported in the response
+`merged` list (the absorbed target skips its own root validation; its nodes are
+covered and reported inside the covering target's results). Only overlaps between
+**different** actions reject the batch.
+
 Cascade/targets calls validate the whole batch **before** applying anything.
 If validation fails, the entire call is rejected and no node changes. Error codes
 (returned as `{"ok": false, "error": ...}`):
 
 | error | meaning | how to fix |
 | --- | --- | --- |
-| `subtree_overlap` | a node is covered by 2+ targets' subtrees (e.g. an ancestor and its descendant in one batch); `conflicts` lists each covered node id and the claiming targets | every node must belong to exactly one entry: drop the inner entry when the ancestor's subtree already covers the intent, or split into two ordered calls |
+| `subtree_overlap` | a node is covered by 2+ targets with **different** actions (e.g. pausing an ancestor while failing its descendant in one batch); `conflicts` lists each covered node id and the claiming targets | each node must belong to exactly one action: drop or restructure the inner entry, or split into two ordered calls |
 | `node_not_found` | a target node id does not exist in the task | re-check the ids (e.g. via `task_progress`) |
 | `node_terminal` | a target root is already success/failed | nothing to do — the node is finished |
 | `node_already_paused` | a non-cascade `pause` target is already paused (cascade pause tolerates an already-paused root: the root is skipped and descendants still receive the pause request) | use cascade, or drop the entry |

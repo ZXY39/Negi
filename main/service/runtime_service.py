@@ -1609,7 +1609,9 @@ class MainRuntimeService:
 
         与旧格式的逐节点冲突语义互补：条目根节点严格校验前置条件（不满足 → 整批
         打回，返回 ok:false 与错误码）；子树内后代的状态冲突逐个跳过并在 items 报告。
-        子树展开是调用时快照，之后新 spawn 的后代不在集内（暂停的祖先会延迟其分发）。
+        同动作的子树包含关系自动合并（子集条目被吸收，见响应 merged）；跨动作重叠
+        才是需要打回的二义性。子树展开是调用时快照，之后新 spawn 的后代不在集内
+        （暂停的祖先会延迟其分发）。
         """
         if not entries:
             return {'ok': False, 'error': 'node_ids_required', 'items': []}
@@ -1632,8 +1634,31 @@ class MainRuntimeService:
             self._subtree_ids(by_parent, entry['node_id']) if entry['cascade'] else [entry['node_id']]
             for entry in entries
         ]
+        # 同动作子树重叠自动合并：树结构下任意两棵子树要么不相交、要么一方包含另一方，
+        # 相同条目去重后同动作重叠必为真子集——子集条目被覆盖条目吸收。被吸收条目
+        # 不再参与根校验与施加，其节点在覆盖条目的结果里逐个报告。
+        merged: list[dict[str, Any]] = []
+        absorbed: set[int] = set()
+        entry_sets = [set(ids) for ids in expansions]
+        for position, entry in enumerate(entries):
+            for other_position, other in enumerate(entries):
+                if other_position == position or other_position in absorbed:
+                    continue
+                if other['action'] == entry['action'] and entry_sets[position] < entry_sets[other_position]:
+                    absorbed.add(position)
+                    merged.append({
+                        'index': entry['index'],
+                        'node_id': entry['node_id'],
+                        'action': entry['action'],
+                        'into_index': other['index'],
+                        'into_node_id': other['node_id'],
+                    })
+                    break
+        kept_entries = [entry for position, entry in enumerate(entries) if position not in absorbed]
+        kept_expansions = [ids for position, ids in enumerate(expansions) if position not in absorbed]
+        # 跨动作重叠仍然原子打回：同一节点被两个不同动作声明是无法消解的二义性。
         owners: dict[str, list[dict[str, Any]]] = {}
-        for entry, ids in zip(entries, expansions):
+        for entry, ids in zip(kept_entries, kept_expansions):
             owner = {'index': entry['index'], 'node_id': entry['node_id'], 'action': entry['action'], 'cascade': entry['cascade']}
             for node_id in ids:
                 owners.setdefault(node_id, []).append(owner)
@@ -1645,7 +1670,7 @@ class MainRuntimeService:
         if conflicts:
             conflicts.sort(key=lambda item: item['node_id'])
             return {'ok': False, 'error': 'subtree_overlap', 'conflicts': conflicts, 'items': []}
-        for entry in entries:
+        for entry in kept_entries:
             node = by_id[entry['node_id']]
             status = str(node.status or '').strip().lower()
             paused = bool(node.is_paused) or bool(node.pause_requested)
@@ -1658,7 +1683,7 @@ class MainRuntimeService:
                     return {'ok': False, 'error': 'node_already_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
             elif entry['action'] in {'resume', 'keep_paused', 'fail'} and not paused:
                 return {'ok': False, 'error': 'node_not_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
-        for entry, ids in zip(entries, expansions):
+        for entry, ids in zip(kept_entries, kept_expansions):
             if entry['action'] != 'fail' or not entry['cascade']:
                 continue
             # 级联 fail 护栏：子树内所有非终态后代必须已暂停，否则整批打回。
@@ -1687,7 +1712,7 @@ class MainRuntimeService:
         target_summaries: list[dict[str, Any]] = []
         enqueue_requests: list[dict[str, Any]] = []
         any_resumed = False
-        for entry, ids in zip(entries, expansions):
+        for entry, ids in zip(kept_entries, kept_expansions):
             action = entry['action']
             applied_ids: list[str] = []
             skipped = 0
@@ -1839,7 +1864,7 @@ class MainRuntimeService:
                         'remark': str(remark or ''),
                     },
                 )
-        return {'ok': True, 'task_id': normalized_task_id, 'items': items, 'targets': target_summaries}
+        return {'ok': True, 'task_id': normalized_task_id, 'items': items, 'targets': target_summaries, 'merged': merged}
 
     async def cancel_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)

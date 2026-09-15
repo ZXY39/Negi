@@ -54,7 +54,7 @@ parameters:
             type: boolean
             description: When true, apply the action to the whole subtree rooted at node_id; when omitted, inherit the top-level cascade flag. The task root node with cascade=true targets the entire tree.
         required: [node_id, action]
-      description: Per-node actions in one atomic call (e.g. pause subtree a while failing subtree b). The batch validates before applying anything; overlapping subtrees or repeated nodes reject the whole call with error subtree_overlap listing the covered node ids. A cascade fail requires every non-terminal descendant to be paused first, otherwise the batch is rejected with subtree_not_fully_paused. Mutually exclusive with node_ids+action.
+      description: Per-node actions in one atomic call (e.g. pause subtree a while failing subtree b). The batch validates before applying anything. Subtrees claimed by different actions reject the whole call with error subtree_overlap listing the covered node ids; same-action nested subtrees are auto-merged (the absorbed target is reported in the response merged list). A cascade fail requires every non-terminal descendant to be paused first, otherwise the batch is rejected with subtree_not_fully_paused. Mutually exclusive with node_ids+action.
     remark:
       type: string
       description: One batch-wide annotation shared by all entries - failure reason for fail, registration remark for keep_paused (required there), annotation for pause. Per-entry remarks are not supported.
