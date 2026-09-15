@@ -118,9 +118,9 @@ Disk guard 维护要点（写保护契约本体见 `runtime-overview.md`「磁�
 
 ### 3.5 普通 fresh-turn 第一跳没有沿用上一轮 actual request scaffold
 
-- 坑：fresh turn 直接从 stripped body + 新 user + 新 contract 开始，第一条 provider request 在索引 3 就和上一轮分叉；或 fresh-turn seed 按原始 message dict 逐字节比对 `stable_messages[:body_len] == previous_request_body`，被微小格式漂移（如某条 `tool` 输出末尾空格被后续规范化裁掉）击穿，误判“不再是同一条 baseline”而退回未复用路径。
-- 不变量：durable baseline 可保持 stripped/finalized 形态，但普通 fresh-turn 第一条 provider request 应借上一轮 persisted actual request scaffold 保前缀；scaffold 只是 request-construction aid，不能反过来变成新的 durable source of truth。seed 判定基于 provider-facing 结构等价，最多容忍无语义影响的行尾空白 / 换行归一化差异，不做脆弱的原始 dict 全等比较。
-- 症状：每个新 turn 第一跳都在低索引处与上一轮分叉。
+- 坑：fresh turn 直接从 stripped body + 新 user + 新 contract 开始，第一条 provider request 在低索引处就和上一轮分叉；或第一跳要求“投影整体与 seed 逐字节/结构等价”——投影（阶段压缩块、工具正文外部化、归档 notice tail 重渲染）与发送侧形态在中段必然分叉，等价校验恒失败，跨 run 唤醒每次静默降级成重组装小请求：命中钉死在静态系统头、`comparable_to_previous_request` 长期 `false`、小请求还会覆盖唯一的 actual-request artifact 污染重启种子。
+- 不变量：durable baseline 可保持 stripped/finalized 形态，但普通 fresh-turn 第一条 provider request 以 persisted actual request scaffold 为前缀（`_adopt_fresh_turn_seed_scaffold` adoption）：seed 取 artifact 的内部形态 `request_messages`（`provider_request_body.input` 仅 legacy 兜底——/responses wire 项无 `role`，回灌 adapter 会被静默丢弃）；seed 剥契约/turn-only note/图像 overlay 尾迹后做头探针（前两条归一化相等，容差止于行尾空白/换行）+ 多锚点尾对齐（以 seed 尾部记录为锚在投影末段自尾向前找覆盖点），投影超出覆盖点的记录（held notice、恢复重放、当前 user 回合）即显式 delta，请求 = seed + delta + 新契约/note 尾部。seed 不可用（缺失、guard 降级、头漂移、对齐失败）才允许回退投影重组装，且必须落 `request_seed_source=fallback_*`——静默回退按 bug 处理。scaffold 只是 request-construction aid，不能反过来变成新的 durable source of truth。
+- 症状：`request_seed_source` 持续为 `fallback_*`；或每个新 turn 第一跳都在低索引处与上一轮分叉。
 
 ### 3.6 跨普通 fresh turn 的 tool schema churn
 
@@ -321,6 +321,7 @@ execution / acceptance 节点在真正发 provider 请求前也走最后一层 n
 | `prompt_cache_key_hash` | family 是否 churn |
 | `actual_request_hash` | 请求形态是否变化 |
 | `actual_request_message_count` | 消息数是否骤降 |
+| `request_seed_source` / `request_seed_message_count` | 第一跳是否采用 scaffold、回退原因（`fallback_*`）或同轮链状态 |
 
 preflight 判定：
 
@@ -338,10 +339,10 @@ preflight 在节点端发送模型前就失败时：先看是否 `context_window
 schema churn 停止后命中仍低时，先比较相邻节点 actual-request artifact：
 
 - `actual_tool_schema_hash` 稳定但命中仍低 → 查 `provider_request_body.input` 是否停止 append-only；早期 `function_call` / `function_call_output` 记录被替换而非追加 → 按节点 request-scaffold 回归排查，而不是纯 tool-schema 问题。
-- `prompt_cache_key_hash` 不变但 restart/resume 后第一条节点请求 `actual_request_message_count` 骤降 → 先比 `runtime_frame.messages` 与最新节点 `actual_request_ref.request_messages`；该模式通常是恢复后的第一跳从 projected history 重建，而不是从持久化 actual-request scaffold 重建。
-- 消费 append-notice 的第一条节点请求命中下降 → 校验新 `provider_request_body.input` 在 JSON 归一化后逐字节以前一 artifact 的 `provider_request_body.input` 开头；预期行为是 append-only notice 投递（旧 provider 可见上下文保持前缀，新 notice 追加在尾部）。
+- `prompt_cache_key_hash` 不变但 restart/resume 后第一条节点请求 `actual_request_message_count` 骤降 → 先看该轮 `request_seed_source`：`fallback_*` / `same_turn_reassembled` 即回退已现形（种子缺失、guard 降级、头漂移或尾对齐失败），按对应原因排查；`scaffold_seed*` 仍骤降才是新回归，再比 `runtime_frame.messages` 与最新节点 `actual_request_ref.request_messages`。
+- 消费 append-notice 的第一条节点请求命中下降 → 预期行为是 adoption：请求以上一 artifact 的 `request_messages`（剥契约/note 后）为精确前缀、notice 作为派生 delta 追加在尾部（`request_seed_source=scaffold_seed_with_delta`）；前缀不成立时按 `request_seed_source` 的 fallback 原因排查。
 - append-notice 延迟拾取分两条通道排查：`_resume_react_state(...)` 里的 resume 初始拾取（恢复后的 `run_node(...)` 第一次普通 send 之前）；`react_loop.run(...)` 里的同 run 刷新（长 turn 在较早一次模型响应后收到新 notice 时的下一个普通 `before_model` 边界）。notice 在 run 中途送达且节点继续迭代时，先查第二条通道，再假设 resume 逻辑丢了消息。
-- 常见回归是混用两条恢复通道：用于 prompt 组装的权威历史（`runtime_frame.messages` / `latest_runtime_messages_ref` / durable rebuild）与来自最新 actual request 的发送侧种子 scaffold（`provider_request_body.input`）。若把 provider 形态的种子当权威节点历史喂回普通 prompt 组装，stage-compaction 块、运行时契约尾部与 tool-call 记录可能被重排——语义看似正确，但缓存命中大跌且没有 `token_compression` / `stage_compaction`。同 run 迟到的 notice 应作为增量 delta 追加到当前发送侧 scaffold：不要仅从剥离的消息历史整体重建请求，也不要把 notice 插回已恢复的 `spawn_child_nodes` 或 tool-result 轮之前。
+- 两条恢复通道职责分离：权威历史（`runtime_frame.messages` / `latest_runtime_messages_ref` / durable rebuild）负责 prompt 组装与 frame/展示；发送侧种子（最新 actual request 的内部形态 `request_messages`）只负责第一跳 adoption 前缀。若把 provider wire 形态的种子当权威节点历史喂回普通 prompt 组装，stage-compaction 块、运行时契约尾部与 tool-call 记录可能被重排——语义看似正确，但缓存命中大跌且没有 `token_compression` / `stage_compaction`。同 run 迟到的 notice 无条件镜像进 delta 并追加到当前发送侧 scaffold（pending delta 为空时同样产出——工具轮之间到达的 notice 若只烤进投影历史，下一次 send 会因 delta 缺失退回投影重组装小请求）：不要仅从剥离的消息历史整体重建请求，也不要把 notice 插回已恢复的 `spawn_child_nodes` 或 tool-result 轮之前。
 - `resume_mode=wait_for_children` 仍有效时，刷新路径不得追加 notice；预期行为是“durable but held”：notice 保持 pending，直到活跃子轮结束，再出现在该已恢复 spawn/tool 轮之后的下一个合格普通 send。
 
 ## 6. 修改节点上下文策略时必须重点验证的地方
@@ -354,7 +355,7 @@ schema churn 停止后命中仍低时，先比较相邻节点 actual-request art
 
 ### 6.2 durable baseline 与 request-construction scaffold 不能互相替代
 
-节点如果也要借上一轮 actual request 保前缀，必须明确哪些内容只是“第一跳 request scaffold”，哪些内容才是 durable baseline。否则会复现 CEO/frontdoor 已经踩过的坑：planned scaffold 抢 durable baseline、durable baseline 过早丢 contract、下一轮从错误形态继续。节点侧尤其不能混用两条恢复通道：权威历史（`runtime_frame.messages` / durable rebuild）只用于 prompt 组装，发送侧种子（最新 actual request 的 `provider_request_body.input`）只用于第一跳取种子；且借用的 scaffold 不得弱化阶段门控或 hydration 规则。
+节点如果也要借上一轮 actual request 保前缀，必须明确哪些内容只是“第一跳 request scaffold”，哪些内容才是 durable baseline。否则会复现 CEO/frontdoor 已经踩过的坑：planned scaffold 抢 durable baseline、durable baseline 过早丢 contract、下一轮从错误形态继续。节点侧尤其不能混用两条恢复通道：权威历史（`runtime_frame.messages` / durable rebuild）只用于 prompt 组装与 frame/展示，发送侧种子（最新 actual request 的内部形态 `request_messages`）只用于第一跳 adoption；且借用的 scaffold 不得弱化阶段门控或 hydration 规则。
 
 ### 6.3 tool schema 稳定性要单独验证
 
@@ -379,7 +380,7 @@ schema churn 停止后命中仍低时，先比较相邻节点 actual-request art
 两套测试都要断言同一条不变量：**每个请求尾部区域恰好 1 份契约、至多 1 份 turn-only note，契约排在 note / 当前 user 回合之前（末位是 user 消息），被携带前缀里契约与 note 都是 0 份**。断言位置：
 
 - same-turn：多轮 tool 调用后，检查实际请求 JSON 的契约/note 计数，以及“真实 transcript 前缀不携带陈旧契约/note”
-- fresh-turn：上一请求带陈旧契约/note 时，第一跳 scaffold 仍应正确回退/复用真实前缀，不被静默禁用
+- fresh-turn：上一请求带陈旧契约/note 时，第一跳仍应 adoption scaffold 真实前缀并追加显式 delta；种子不可用导致的回退必须带 `fallback_*` 诊断，不被静默禁用
 
 ### 6.6 pause/new turn 与 ordinary fresh turn 也要分开测
 
@@ -404,7 +405,7 @@ schema churn 停止后命中仍低时，先比较相邻节点 actual-request art
 - 某些相邻 turn 的 provider-visible tool schema 是否仍会无意义抖动
 - restarted completed session 第一跳的 visible-set equality bridge 是否还会被意外放宽成 superset
 - `provider_request_body.input` 与 `request_messages` 是否还存在隐藏分叉
-- 节点侧是否也存在“stripped durable baseline”和“first-hop scaffold”混淆
+- 节点第一跳 `fallback_seed_misaligned` 占比是否保持趋近 0：占比偏高说明尾对齐锚点在重复记录上撞车或 delta 上限设置不当，回退轮会重新引入重组装小请求
 - 节点侧是否也有 finalize/direct reply 没补回 baseline 的问题
 
 ## 9. 给节点上下文策略修改者的简版原则
@@ -416,5 +417,6 @@ schema churn 停止后命中仍低时，先比较相邻节点 actual-request art
 - stable prefix、durable baseline、first-hop scaffold、dynamic appendix 必须分层。
 - 只有真实 provider request 才能推进 durable baseline。
 - same-turn append-only 和 fresh-turn continuity 是两套不同问题。
+- fresh-turn 第一跳回退必须带 `request_seed_source`；静默回退按 bug 处理。
 - tool schema 稳定性和消息前缀稳定性要一起验证。
 - artifact 不全时，先修 artifact，再信任何 cache 结论。
