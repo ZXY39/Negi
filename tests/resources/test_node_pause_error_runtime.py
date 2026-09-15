@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
 import time
 from pathlib import Path
 
@@ -709,5 +711,359 @@ async def test_cancel_takes_priority_over_node_error_pause(tmp_path: Path) -> No
         assert node is not None and node.status == "failed"
         assert service.log_service.list_task_error_logs(record.task_id) == []
         assert service.store.get_task_node_pause(record.root_node_id) is None
+    finally:
+        await service.close()
+
+
+def _load_manage_task_nodes_tool_module():
+    tool_path = Path(__file__).resolve().parents[2] / "tools" / "manage_task_nodes_cn" / "main" / "tool.py"
+    spec = importlib.util.spec_from_file_location("manage_task_nodes_tool_under_test", tool_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _pause_node_state(service: MainRuntimeService, task_id: str, node, *, reason: str = "manual", remark: str = "") -> None:
+    service.log_service.set_node_pause_state(
+        task_id,
+        node.node_id,
+        pause_requested=True,
+        is_paused=True,
+        pause_reason=reason,
+        remark=remark,
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_targets_mix_cascade_pause_and_fail_on_disjoint_subtrees(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("targets mixed", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child_a = _execution_child(service, task=task, parent=root, name="a")
+        grandchild_a = _execution_child(service, task=task, parent=child_a, name="a1")
+        child_b = _execution_child(service, task=task, parent=root, name="b")
+        grandchild_b = _execution_child(service, task=task, parent=child_b, name="b1")
+        for node in (child_b, grandchild_b):
+            _pause_node_state(service, record.task_id, node)
+
+        result = await service.control_nodes(
+            record.task_id,
+            [],
+            "",
+            targets=[
+                {"node_id": child_a.node_id, "action": "pause", "cascade": True},
+                {"node_id": child_b.node_id, "action": "fail", "cascade": True},
+            ],
+            remark="b branch invalidated",
+        )
+        assert result["ok"] is True
+        for node_id in (child_a.node_id, grandchild_a.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is True
+            assert node.pause_reason == "agent" and node.status == "in_progress"
+        for node_id in (child_b.node_id, grandchild_b.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == "failed"
+            assert node.failure_reason == "b branch invalidated"
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None
+        assert latest_root.status == "in_progress" and not latest_root.pause_requested
+        summaries = {item["node_id"]: item for item in result["targets"]}
+        assert summaries[child_a.node_id]["applied"] == 2 and summaries[child_a.node_id]["skipped"] == 0
+        assert summaries[child_b.node_id]["applied"] == 2 and summaries[child_b.node_id]["skipped"] == 0
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_targets_subtree_overlap_rejects_whole_batch(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("targets overlap", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+        for node in (child, grandchild):
+            _pause_node_state(service, record.task_id, node)
+        before = service.store.list_unfinished_task_commands(task_id=record.task_id)
+
+        result = await service.control_nodes(
+            record.task_id,
+            [],
+            "",
+            targets=[
+                {"node_id": root.node_id, "action": "pause", "cascade": True},
+                {"node_id": child.node_id, "action": "fail", "cascade": True},
+            ],
+            remark="overlap batch",
+        )
+        assert result["ok"] is False
+        assert result["error"] == "subtree_overlap"
+        assert result["items"] == []
+        covered = {item["node_id"]: item["covered_by"] for item in result["conflicts"]}
+        assert set(covered) == {child.node_id, grandchild.node_id}
+        for owners in covered.values():
+            assert sorted(owner["node_id"] for owner in owners) == sorted([root.node_id, child.node_id])
+            assert sorted(owner["index"] for owner in owners) == [0, 1]
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and not latest_root.pause_requested and not latest_root.is_paused
+        for node_id in (child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == "in_progress" and node.pause_requested is True
+            row = service.store.get_task_node_pause(node_id)
+            assert row is not None and row.pause_reason == "manual"
+        after = service.store.list_unfinished_task_commands(task_id=record.task_id)
+        assert len(after) == len(before)
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_cascade_fail_requires_fully_paused_subtree(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("cascade fail gate", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+        _pause_node_state(service, record.task_id, root)
+
+        blocked = await service.control_nodes(record.task_id, [root.node_id], "fail", remark="fail whole tree", cascade=True)
+        assert blocked["ok"] is False
+        assert blocked["error"] == "subtree_not_fully_paused"
+        assert sorted(blocked["blocking_node_ids"]) == sorted([child.node_id, grandchild.node_id])
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.status == "in_progress"
+
+        paused = await service.control_nodes(record.task_id, [root.node_id], "pause", cascade=True)
+        assert paused["ok"] is True
+        root_item = next(item for item in paused["items"] if item["node_id"] == root.node_id)
+        assert root_item["result"] == "conflict" and root_item["reason"] == "node_already_paused"
+        for node_id in (child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is True and node.pause_reason == "agent"
+        assert latest_root.pause_reason == "manual"
+
+        failed = await service.control_nodes(record.task_id, [root.node_id], "fail", remark="fail whole tree", cascade=True)
+        assert failed["ok"] is True
+        for node_id in (root.node_id, child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == "failed"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_cascade_pause_skips_error_paused_descendants(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("cascade pause skip", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+        _pause_node_state(service, record.task_id, child, reason="error", remark="provider unavailable")
+
+        result = await service.control_nodes(record.task_id, [root.node_id], "pause", remark="cascade pause", cascade=True)
+        assert result["ok"] is True
+        latest_root = service.get_node(root.node_id)
+        assert latest_root is not None and latest_root.pause_requested is True and latest_root.pause_reason == "agent"
+        latest_child = service.get_node(child.node_id)
+        assert latest_child is not None and latest_child.pause_reason == "error"
+        child_row = service.store.get_task_node_pause(child.node_id)
+        assert child_row is not None and child_row.remark == "provider unavailable"
+        latest_grandchild = service.get_node(grandchild.node_id)
+        assert latest_grandchild is not None and latest_grandchild.pause_requested is True
+        assert latest_grandchild.pause_reason == "agent"
+        child_item = next(item for item in result["items"] if item["node_id"] == child.node_id)
+        assert child_item["result"] == "conflict" and child_item["reason"] == "node_already_paused"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_cascade_resume_clears_subtree_and_skips_conflicts(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("cascade resume", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+        finished = _execution_child(service, task=task, parent=child, name="finished")
+        service.store.update_node(finished.node_id, lambda node: node.model_copy(update={"status": "success"}))
+        _pause_node_state(service, record.task_id, root)
+        _pause_node_state(service, record.task_id, child, reason="error", remark="provider unavailable")
+
+        result = await service.control_nodes(record.task_id, [root.node_id], "resume", cascade=True)
+        assert result["ok"] is True
+        for node_id in (root.node_id, child.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and not node.pause_requested and not node.is_paused
+            assert service.store.get_task_node_pause(node_id) is None
+        latest_grandchild = service.get_node(grandchild.node_id)
+        assert latest_grandchild is not None and not latest_grandchild.pause_requested
+        skipped = {(item["node_id"], item.get("reason")) for item in result["items"] if item["result"] == "conflict"}
+        assert (grandchild.node_id, "node_not_paused") in skipped
+        assert (finished.node_id, "node_terminal") in skipped
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_root_cascade_targets_whole_tree(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("root cascade", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+        grandchild = _execution_child(service, task=task, parent=child, name="grandchild")
+
+        # legacy 形态重复 node_id 去重后不得误判为子树重叠。
+        result = await service.control_nodes(record.task_id, [root.node_id, root.node_id], "pause", cascade=True)
+        assert result["ok"] is True
+        assert len(result["targets"]) == 1 and result["targets"][0]["applied"] == 3
+        for node_id in (root.node_id, child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is True and node.pause_reason == "agent"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_scoped_web_mode_enqueues_explicit_ids_per_entry(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("scoped web enqueue", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child_a = _execution_child(service, task=task, parent=root, name="a")
+        grandchild_a = _execution_child(service, task=task, parent=child_a, name="a1")
+        child_b = _execution_child(service, task=task, parent=root, name="b")
+        child_c = _execution_child(service, task=task, parent=root, name="c")
+        for node in (child_b, child_c):
+            _pause_node_state(service, record.task_id, node)
+        before = service.store.list_unfinished_task_commands(task_id=record.task_id)
+
+        result = await service.control_nodes(
+            record.task_id,
+            [],
+            "",
+            targets=[
+                {"node_id": child_a.node_id, "action": "pause", "cascade": True},
+                {"node_id": child_b.node_id, "action": "fail"},
+                {"node_id": child_c.node_id, "action": "keep_paused"},
+            ],
+            remark="waiting for user decision",
+        )
+        assert result["ok"] is True
+        after = service.store.list_unfinished_task_commands(task_id=record.task_id)
+        before_ids = {item["command_id"] for item in before}
+        new_commands = [command for command in after if command["command_id"] not in before_ids]
+        assert [command["command_type"] for command in new_commands] == ["pause_node", "fail_node"]
+        payloads = {}
+        for command in new_commands:
+            row = service.store.get_task_command(command["command_id"])
+            assert row is not None
+            payloads[command["command_type"]] = row["payload"]
+        pause_payload = payloads["pause_node"]
+        assert sorted(pause_payload["node_ids"]) == sorted([child_a.node_id, grandchild_a.node_id])
+        assert pause_payload["cascade"] is False and pause_payload["reason"] == "agent"
+        fail_payload = payloads["fail_node"]
+        assert fail_payload["node_ids"] == [child_b.node_id]
+        assert fail_payload["cascade"] is False
+        assert fail_payload["reason"] == "waiting for user decision"
+        assert fail_payload["remark"] == "waiting for user decision"
+        for payload in payloads.values():
+            assert child_c.node_id not in list(payload.get("node_ids") or [])
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_replay_of_scoped_commands_is_idempotent(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("scoped replay", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child_a = _execution_child(service, task=task, parent=root, name="a")
+        child_b = _execution_child(service, task=task, parent=root, name="b")
+        _pause_node_state(service, record.task_id, child_b)
+
+        result = await service.control_nodes(
+            record.task_id,
+            [],
+            "",
+            targets=[
+                {"node_id": child_a.node_id, "action": "pause", "cascade": True},
+                {"node_id": child_b.node_id, "action": "fail"},
+            ],
+            remark="replay test",
+        )
+        assert result["ok"] is True
+        commands = service.store.list_unfinished_task_commands(task_id=record.task_id)
+        assert commands
+        for command in commands:
+            row = service.store.get_task_command(command["command_id"])
+            assert row is not None
+            await service._process_worker_command(
+                {
+                    "command_id": command["command_id"],
+                    "command_type": row["command_type"],
+                    "task_id": record.task_id,
+                    "payload": row["payload"],
+                }
+            )
+        latest_a = service.get_node(child_a.node_id)
+        assert latest_a is not None and latest_a.pause_requested is True and latest_a.pause_reason == "agent"
+        latest_b = service.get_node(child_b.node_id)
+        assert latest_b is not None and latest_b.status == "failed"
+        assert service.store.list_unfinished_task_commands(task_id=record.task_id) == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_manage_task_nodes_tool_param_shapes_and_targets_passthrough(tmp_path: Path) -> None:
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("tool shapes", session_id="web:shared")
+        module = _load_manage_task_nodes_tool_module()
+        tool = module._ManageTaskNodesHandler(service)
+
+        both = json.loads(await tool.execute(
+            task_id=record.task_id,
+            node_ids=[record.root_node_id],
+            action="pause",
+            targets=[{"node_id": record.root_node_id, "action": "pause"}],
+        ))
+        assert both["ok"] is False and both["error"] == "invalid_param"
+        neither = json.loads(await tool.execute(task_id=record.task_id))
+        assert neither["ok"] is False and neither["error"] == "invalid_param"
+        missing_action = json.loads(await tool.execute(task_id=record.task_id, targets=[{"node_id": record.root_node_id}]))
+        assert missing_action["ok"] is False and missing_action["error"] == "invalid_param"
+
+        paused = json.loads(await tool.execute(
+            task_id=record.task_id,
+            targets=[{"node_id": record.root_node_id, "action": "pause"}],
+        ))
+        assert paused["ok"] is True
+        root = service.get_node(record.root_node_id)
+        assert root is not None and root.pause_requested is True
     finally:
         await service.close()

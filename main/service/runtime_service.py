@@ -1270,6 +1270,36 @@ class MainRuntimeService:
             queue.extend(item.node_id for item in by_parent.get(current_id, []) if item.node_id not in seen)
         return result
 
+    def _task_node_indexes(self, task_id: str) -> tuple[dict[str, NodeRecord], dict[str, list[str]]]:
+        """一次载入任务全部节点，构建 node_id→record 与 parent→children 双索引。
+
+        级联控制（control_nodes 两阶段路径）用它避免每个目标各做一次全量扫描。
+        """
+        normalized = str(task_id or '').strip()
+        nodes = [node for node in self.store.list_nodes(normalized) if str(node.task_id or '').strip() == normalized]
+        by_id: dict[str, NodeRecord] = {node.node_id: node for node in nodes}
+        by_parent: dict[str, list[str]] = {}
+        for node in nodes:
+            parent_id = str(node.parent_node_id or '').strip()
+            if parent_id:
+                by_parent.setdefault(parent_id, []).append(node.node_id)
+        return by_id, by_parent
+
+    @staticmethod
+    def _subtree_ids(by_parent: dict[str, list[str]], root_id: str) -> list[str]:
+        """纯函数 BFS（父先序、含根）。输出顺序即级联施加顺序（fail 必须根先子后）。"""
+        result: list[str] = []
+        seen: set[str] = set()
+        queue: list[str] = [str(root_id or '').strip()]
+        while queue:
+            current = queue.pop(0)
+            if not current or current in seen:
+                continue
+            seen.add(current)
+            result.append(current)
+            queue.extend(child for child in by_parent.get(current, []) if child not in seen)
+        return result
+
     def _require_node_control_target(self, task_id: str, node_id: str) -> tuple[TaskRecord, NodeRecord]:
         task = self.get_task(task_id)
         node = self.get_node(node_id)
@@ -1461,8 +1491,31 @@ class MainRuntimeService:
         action: str,
         *,
         remark: str = '',
+        cascade: bool = False,
+        targets: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
+        # targets/级联 → 两阶段原子路径；否则保持既有逐节点语义一字不改。
+        normalized_targets = self._normalize_control_targets(targets)
+        if normalized_targets or bool(cascade):
+            legacy_ids: list[str] = []
+            seen_legacy: set[str] = set()
+            for raw in list(node_ids or []):
+                normalized_id = self.normalize_node_id(str(raw or '').strip())
+                if not normalized_id or normalized_id in seen_legacy:
+                    continue
+                seen_legacy.add(normalized_id)
+                legacy_ids.append(normalized_id)
+            entries = normalized_targets or [
+                {
+                    'index': position,
+                    'node_id': node_id,
+                    'action': str(action or '').strip().lower(),
+                    'cascade': True,
+                }
+                for position, node_id in enumerate(legacy_ids)
+            ]
+            return await self._control_nodes_scoped(normalized_task_id, entries, remark=str(remark or ''))
         action = str(action or '').strip().lower()
         if action not in {'resume', 'keep_paused', 'fail', 'pause'}:
             raise ValueError('invalid_node_action')
@@ -1525,6 +1578,268 @@ class MainRuntimeService:
                 },
             )
         return {'ok': True, 'task_id': normalized_task_id, 'action': action, 'items': results}
+
+    def _normalize_control_targets(self, targets: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """归一化 targets 条目并去重；「同节点不同动作/不同级联范围」的冲突留给重叠检测。"""
+        entries: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, bool]] = set()
+        for item in list(targets or []):
+            if not isinstance(item, dict):
+                continue
+            node_id = self.normalize_node_id(str(item.get('node_id') or '').strip())
+            action = str(item.get('action') or '').strip().lower()
+            entry_cascade = bool(item.get('cascade', False))
+            if not node_id or not action:
+                continue
+            key = (node_id, action, entry_cascade)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append({'index': len(entries), 'node_id': node_id, 'action': action, 'cascade': entry_cascade})
+        return entries
+
+    async def _control_nodes_scoped(
+        self,
+        normalized_task_id: str,
+        entries: list[dict[str, Any]],
+        *,
+        remark: str,
+    ) -> dict[str, Any]:
+        """targets/级联的原子控制路径：先整体校验，任何一项不满足整批打回不生效。
+
+        与旧格式的逐节点冲突语义互补：条目根节点严格校验前置条件（不满足 → 整批
+        打回，返回 ok:false 与错误码）；子树内后代的状态冲突逐个跳过并在 items 报告。
+        子树展开是调用时快照，之后新 spawn 的后代不在集内（暂停的祖先会延迟其分发）。
+        """
+        if not entries:
+            return {'ok': False, 'error': 'node_ids_required', 'items': []}
+        for entry in entries:
+            if entry['action'] not in {'resume', 'keep_paused', 'fail', 'pause'}:
+                return {'ok': False, 'error': 'invalid_node_action', 'index': entry['index'], 'node_id': entry['node_id'], 'action': entry['action'], 'items': []}
+        if any(entry['action'] == 'keep_paused' for entry in entries) and not str(remark or '').strip():
+            return {'ok': False, 'error': 'remark_required_for_keep_paused', 'items': []}
+        task = self.get_task(normalized_task_id)
+        if task is None:
+            return {'ok': False, 'error': 'task_not_found', 'items': []}
+        if self.execution_mode == 'web':
+            self._assert_worker_available()
+        # —— 阶段 1：原子校验（不落任何状态）——
+        by_id, by_parent = self._task_node_indexes(normalized_task_id)
+        missing = [entry['node_id'] for entry in entries if entry['node_id'] not in by_id]
+        if missing:
+            return {'ok': False, 'error': 'node_not_found', 'node_ids': missing, 'items': []}
+        expansions: list[list[str]] = [
+            self._subtree_ids(by_parent, entry['node_id']) if entry['cascade'] else [entry['node_id']]
+            for entry in entries
+        ]
+        owners: dict[str, list[dict[str, Any]]] = {}
+        for entry, ids in zip(entries, expansions):
+            owner = {'index': entry['index'], 'node_id': entry['node_id'], 'action': entry['action'], 'cascade': entry['cascade']}
+            for node_id in ids:
+                owners.setdefault(node_id, []).append(owner)
+        conflicts = [
+            {'node_id': node_id, 'covered_by': owner_list}
+            for node_id, owner_list in owners.items()
+            if len(owner_list) > 1
+        ]
+        if conflicts:
+            conflicts.sort(key=lambda item: item['node_id'])
+            return {'ok': False, 'error': 'subtree_overlap', 'conflicts': conflicts, 'items': []}
+        for entry in entries:
+            node = by_id[entry['node_id']]
+            status = str(node.status or '').strip().lower()
+            paused = bool(node.is_paused) or bool(node.pause_requested)
+            if status in {'success', 'failed'}:
+                return {'ok': False, 'error': 'node_terminal', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
+            if entry['action'] == 'pause' and paused:
+                # 级联 pause 容忍已暂停的根（跳过根继续级联后代）：这是「先级联暂停
+                # 再级联失败」两步配方的入口——根因错误/人工已暂停而后代仍在跑是常态。
+                if not entry['cascade']:
+                    return {'ok': False, 'error': 'node_already_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
+            elif entry['action'] in {'resume', 'keep_paused', 'fail'} and not paused:
+                return {'ok': False, 'error': 'node_not_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
+        for entry, ids in zip(entries, expansions):
+            if entry['action'] != 'fail' or not entry['cascade']:
+                continue
+            # 级联 fail 护栏：子树内所有非终态后代必须已暂停，否则整批打回。
+            # 判据与旧路径 fail 门同源（is_paused or pause_requested）。
+            blocking: list[str] = []
+            for node_id in ids:
+                if node_id == entry['node_id']:
+                    continue
+                node = by_id.get(node_id)
+                if node is None or str(node.status or '').strip().lower() in {'success', 'failed'}:
+                    continue
+                if not (bool(node.is_paused) or bool(node.pause_requested)):
+                    blocking.append(node_id)
+            if blocking:
+                return {
+                    'ok': False,
+                    'error': 'subtree_not_fully_paused',
+                    'index': entry['index'],
+                    'node_id': entry['node_id'],
+                    'blocking_node_ids': blocking,
+                    'items': [],
+                }
+        # —— 阶段 2：施加（校验全过才会执行到这里）——
+        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        items: list[dict[str, Any]] = []
+        target_summaries: list[dict[str, Any]] = []
+        enqueue_requests: list[dict[str, Any]] = []
+        any_resumed = False
+        for entry, ids in zip(entries, expansions):
+            action = entry['action']
+            applied_ids: list[str] = []
+            skipped = 0
+            if action == 'pause':
+                for node_id in ids:
+                    node = self.get_node(node_id)
+                    if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                        items.append({'node_id': node_id, 'result': 'not_found', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if bool(node.is_paused) or bool(node.pause_requested):
+                        # 已暂停后代跳过不覆写：保留 pause_reason=error 等原登记与心跳重试计数。
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_already_paused', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    updated = self.log_service.set_node_pause_state(
+                        normalized_task_id,
+                        node_id,
+                        pause_requested=True,
+                        is_paused=bool(node.is_paused),
+                        pause_reason='agent',
+                        remark=remark,
+                    )
+                    if updated is None:
+                        items.append({'node_id': node_id, 'result': 'not_found', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    items.append({'node_id': node_id, 'result': 'paused', 'target_index': entry['index']})
+                    applied_ids.append(node_id)
+            elif action == 'resume':
+                # 两遍式：先全清旗再续跑，避免被唤醒的父协程命中尚未清旗的后代重新暂停。
+                resume_candidates: list[str] = []
+                for node_id in ids:
+                    node = self.get_node(node_id)
+                    if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                        items.append({'node_id': node_id, 'result': 'not_found', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if not (bool(node.is_paused) or bool(node.pause_requested)):
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    updated = self.log_service.set_node_pause_state(
+                        normalized_task_id,
+                        node_id,
+                        pause_requested=False,
+                        is_paused=False,
+                        pause_reason='',
+                        remark='',
+                    )
+                    if updated is None:
+                        items.append({'node_id': node_id, 'result': 'not_found', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    resume_candidates.append(node_id)
+                    items.append({'node_id': node_id, 'result': 'resumed', 'target_index': entry['index']})
+                    applied_ids.append(node_id)
+                if dispatcher is not None:
+                    for node_id in resume_candidates:
+                        await dispatcher.resume_node(node_id)
+                any_resumed = any_resumed or bool(resume_candidates)
+            elif action == 'fail':
+                # 根先、后代 BFS 随后：失败结果先占据根 future；后代 fail 唤醒的父协程
+                # 已终态，残余写由运行时终态短路兜住（顺序反过来会撕裂任务状态）。
+                for node_id in ids:
+                    node = self.get_node(node_id)  # 重读记录：后代可能已被终态短路关闭。
+                    if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                        items.append({'node_id': node_id, 'result': 'not_found', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if not (bool(node.is_paused) or bool(node.pause_requested)):
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if dispatcher is not None:
+                        result = await dispatcher.fail_node(node_id, remark)
+                    else:
+                        result = self.node_runner.fail_paused_node(normalized_task_id, node_id, remark)
+                    items.append({'node_id': node_id, 'result': 'failed', 'status': result.status, 'target_index': entry['index']})
+                    applied_ids.append(node_id)
+            else:  # keep_paused：leader 本地操作，不产生 worker 命令（沿用旧契约）。
+                for node_id in ids:
+                    node = self.get_node(node_id)
+                    if node is None or str(node.task_id or '').strip() != normalized_task_id:
+                        items.append({'node_id': node_id, 'result': 'not_found', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_terminal', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    if not (bool(node.is_paused) or bool(node.pause_requested)):
+                        items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    row = self.store.get_task_node_pause(node_id)
+                    if row is not None:
+                        self.log_service.register_node_pause(
+                            normalized_task_id,
+                            node_id,
+                            pause_reason=row.pause_reason,
+                            remark=str(remark or ''),
+                            delivered=bool(row.delivered),
+                        )
+                    items.append({'node_id': node_id, 'result': 'kept_paused', 'remark': str(remark or ''), 'target_index': entry['index']})
+                    applied_ids.append(node_id)
+            target_summaries.append({
+                'index': entry['index'],
+                'node_id': entry['node_id'],
+                'action': action,
+                'cascade': entry['cascade'],
+                'applied': len(applied_ids),
+                'skipped': skipped,
+            })
+            if action != 'keep_paused' and applied_ids:
+                enqueue_requests.append({'entry': entry, 'node_ids': list(applied_ids)})
+        if any_resumed:
+            # 沿用 _apply_resume_node_command 的调度恢复语义。
+            if self.execution_mode != 'web' and dispatcher is None and str(task.status or '').strip().lower() == 'in_progress' and not bool(task.is_paused):
+                await self.global_scheduler.enqueue_task(normalized_task_id)
+            self.task_actor_service.ensure_scoped_epoch_driver(normalized_task_id)
+        if self.execution_mode == 'web':
+            # 每条目一条命令：携带 leader 已展开的显式 node_ids + cascade=False，
+            # worker 不再重展开（防两次展开漂移），并保条目顺序与 remark 保真。
+            for request in enqueue_requests:
+                entry = request['entry']
+                entry_action = entry['action']
+                command_type = 'pause_node' if entry_action == 'pause' else ('resume_node' if entry_action == 'resume' else 'fail_node')
+                self._enqueue_task_command(
+                    command_type=command_type,
+                    task_id=normalized_task_id,
+                    session_id=task.session_id,
+                    payload={
+                        'node_ids': request['node_ids'],
+                        'cascade': False,
+                        'reason': 'agent' if entry_action == 'pause' else (str(remark or '') if entry_action == 'fail' else ''),
+                        'remark': str(remark or ''),
+                    },
+                )
+        return {'ok': True, 'task_id': normalized_task_id, 'items': items, 'targets': target_summaries}
 
     async def cancel_task(self, task_id: str) -> TaskRecord | None:
         task_id = self.normalize_task_id(task_id)

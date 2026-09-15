@@ -224,9 +224,12 @@ promotion 与前门状态：
 
 `tools/manage_task_nodes_cn` 提供给 agent 处理错误暂停节点的 callable tool。它调用 `MainRuntimeService.control_nodes(...)`，一次请求可以包含多个同一任务的节点，并按节点返回结果。
 
+- 两种互斥参数形态：legacy `node_ids` + 单一 `action`（逐节点独立校验，单节点冲突不阻断批次其余节点）；或 `targets: [{node_id, action, cascade?}]`（每节点独立动作，一次调用可混合 pause/fail 等）。`cascade=true`（legacy 形态用顶层 `cascade`，targets 形态用条目内 `cascade`）把动作向下传递到以该节点为根的整棵子树；传任务根节点并级联即作用于整棵树。子树成员是调用时快照，之后新 spawn 的后代不在集内（暂停的祖先会延迟其分发）。
 - `action` 取 `resume`、`keep_paused`、`fail`、`pause`。`keep_paused` 必须提供非空 `remark`；该备注写入节点暂停登记，供后续 heartbeat 决策使用。
 - `resume` 清除暂停并让运行中的 dispatcher 从持久化 runtime frame 续跑；`fail` 将暂停节点置为终态并释放父节点等待；`pause` 以 `pause_reason=agent` 登记 agent 发起的暂停。
-- web 模式下只有 `resume` / `fail` / `pause` 会入队 worker 命令（`resume_node` / `fail_node` / `pause_node`，worker 无 `keep_paused` 命令类型）；`keep_paused` 是 leader 本地操作，不产生任何 worker 命令。`fail` 的备注随命令下发并作为失败原因兜底；命令派发细节见 `runtime-overview.md`「Node-Level Pause and Recovery」。
+- targets/级联路径是原子两阶段：先整体校验（节点存在、子树重叠、根节点前置条件、级联 fail 要求子树内所有非终态后代已暂停），任何一项不满足整批打回不生效，返回结构化错误码——`subtree_overlap` 携带 `conflicts`（哪些节点被哪些条目的子树覆盖）、`subtree_not_fully_paused` 携带 `blocking_node_ids`，另有 `node_not_found` / `node_terminal` / `node_already_paused` / `node_not_paused`。通过校验的批次内，后代的状态冲突逐个跳过并在 `items` 报告，不打回整批。失败一棵子树是两步流程：先级联 `pause`，再级联 `fail`。
+- 级联有两处不对称保护：级联 `pause` 容忍已暂停的根节点（跳过根继续级联后代），且跳过已暂停后代不覆写，保留其 `pause_reason=error` 登记与心跳重试计数；级联 `resume` 清除整棵子树的暂停标志，error-pause 登记与心跳重试追踪随之清除。级联 `fail` 按根先、后代 BFS 后的顺序施加（顺序理由见 `runtime-overview.md`「Node-Level Pause and Recovery」）；对任务根节点执行 fail 会终结整个任务。
+- web 模式下只有 `resume` / `fail` / `pause` 会入队 worker 命令（`resume_node` / `fail_node` / `pause_node`，worker 无 `keep_paused` 命令类型）；`keep_paused` 是 leader 本地操作，不产生任何 worker 命令。targets/级联路径每条目入队一条命令，payload 携带 leader 已展开的显式 `node_ids` 且 `cascade=false`，worker 不重展开子树（防两次展开漂移），保条目顺序与 remark 保真。`fail` 的备注随命令下发并作为失败原因兜底；命令派发细节见 `runtime-overview.md`「Node-Level Pause and Recovery」。
 - 工具层只负责参数与结果契约，节点暂停的安全边界、future 等待和恢复语义归 `runtime-overview.md`「Node-Level Pause and Recovery」；错误暂停事件的投递归 `heartbeat-system.md`「Task Node Error Delivery」。不要通过普通 task 工具或直接改 SQLite 表替代此入口。
 
 ## 4. 一条从上下文到 callable tools 的链路
