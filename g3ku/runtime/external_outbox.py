@@ -177,6 +177,19 @@ def ack_outbound_message(outbox_id: str, *, session_key: str = "", status: str =
     )
 
 
+def record_age_seconds(record: dict[str, Any], *, now: datetime | None = None) -> float | None:
+    """Age of one ledger record in seconds; None when ts is missing/unparseable.
+
+    周期对账用它做「足够老才重放」过滤；``expire_stale_pending`` 共用同一解析
+    口径，避免两处 datetime 逻辑漂移。
+    """
+    try:
+        ts = datetime.fromisoformat(str(record.get("ts") or ""))
+    except ValueError:
+        return None
+    return ((now or datetime.now()) - ts).total_seconds()
+
+
 def load_pending_outbound() -> list[dict[str, Any]]:
     """Pending = msg records without an ack tombstone, oldest first."""
     records = _read_records()
@@ -196,11 +209,9 @@ def expire_stale_pending(max_age_seconds: float = PENDING_MAX_AGE_SECONDS) -> in
     now = datetime.now()
     expired = 0
     for record in load_pending_outbound():
-        try:
-            ts = datetime.fromisoformat(str(record.get("ts") or ""))
-        except ValueError:
-            ts = None
-        if ts is not None and (now - ts).total_seconds() <= float(max_age_seconds):
+        age = record_age_seconds(record, now=now)
+        # age None（ts 缺失/畸形）按原语义视为 stale：无法判定新鲜度的记录不留。
+        if age is not None and age <= float(max_age_seconds):
             continue
         if ack_outbound_message(str(record.get("id") or ""), status="expired"):
             expired += 1

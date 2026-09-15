@@ -96,6 +96,15 @@ class SessionEventHub:
         with self._lock:
             self._subscribers.discard(queue)
 
+    def subscriber_count(self) -> int:
+        """Live subscriber count (SSE streams + in-process reply waiters).
+
+        发布方用它区分「有消费者」与「无人消费、只能靠 durable outbox 对账
+        补投」两种局面；周期对账用它决定是否把滞留记录重新注入本 hub。
+        """
+        with self._lock:
+            return len(self._subscribers)
+
 
 _HUBS: dict[str, SessionEventHub] = {}
 _HUBS_LOCK = threading.RLock()

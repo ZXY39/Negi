@@ -66,6 +66,32 @@ def test_expire_stale_pending() -> None:
     assert [item["id"] for item in pending] == [fresh]
 
 
+def test_record_age_seconds() -> None:
+    now = datetime(2026, 9, 15, 12, 0, 0)
+    record = {"ts": (now - timedelta(seconds=90)).isoformat()}
+    assert external_outbox.record_age_seconds(record, now=now) == pytest.approx(90.0)
+    # ts 缺失或畸形 → None（调用方决定语义：expire 视为 stale，对账视为跳过）。
+    assert external_outbox.record_age_seconds({}, now=now) is None
+    assert external_outbox.record_age_seconds({"ts": "not-a-ts"}, now=now) is None
+    # 不传 now 时以当前时间计算，新鲜记录年龄接近 0。
+    fresh = {"ts": datetime.now().isoformat()}
+    age = external_outbox.record_age_seconds(fresh)
+    assert age is not None and age < 5.0
+
+
+def test_expire_treats_unparseable_ts_as_stale() -> None:
+    """ts 无法解析的记录按既有语义过期清理（helper 重构不得改变该行为）。"""
+    external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="bad")
+    path = external_outbox._outbox_path()
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines[0]["ts"] = "garbage"
+    path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in lines), encoding="utf-8"
+    )
+    assert external_outbox.expire_stale_pending() == 1
+    assert external_outbox.load_pending_outbound() == []
+
+
 def test_compact_keeps_only_pending() -> None:
     first = external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="a")
     external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="b")

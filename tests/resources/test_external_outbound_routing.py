@@ -102,6 +102,26 @@ def test_derive_session_channel_chat_ext_branch():
     assert chat_id == "ext:qq:abc123"  # full key, resolvable by the registry
 
 
+def test_hub_subscriber_count_tracks_subscribe_unsubscribe():
+    reset_session_event_hubs()
+    try:
+        hub = get_session_event_hub("ext:test:count")
+        assert hub.subscriber_count() == 0
+        queue_a = hub.subscribe()
+        assert hub.subscriber_count() == 1
+        queue_b = hub.subscribe()
+        assert hub.subscriber_count() == 2
+        hub.unsubscribe(queue_a)
+        assert hub.subscriber_count() == 1
+        # 重复 unsubscribe 幂等，不影响计数
+        hub.unsubscribe(queue_a)
+        assert hub.subscriber_count() == 1
+        hub.unsubscribe(queue_b)
+        assert hub.subscriber_count() == 0
+    finally:
+        reset_session_event_hubs()
+
+
 def test_derive_session_channel_chat_china_branch_unchanged():
     channel, chat_id = _derive_session_channel_chat("china:qqbot:acct1:group:9")
     assert channel == "qqbot"
