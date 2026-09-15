@@ -78,11 +78,25 @@ class _StubMemoryManager:
             raise ValueError("memory_body must not be empty")
         return {"memory_id": memory_id, "memory_body": memory_body, "updated_at": "2026-09-16T10:00:00+08:00"}
 
-    async def delete_current_memories(self, memory_ids, *, reason: str = ""):
-        self.calls.append(("delete_current_memories", (list(memory_ids), reason)))
+    async def delete_current_memories(self, memory_ids, *, reason: str = "", note_refs=None):
+        self.calls.append(("delete_current_memories", (list(memory_ids), reason, list(note_refs or []))))
         deleted = [mid for mid in memory_ids if mid != "missing"]
         missing = [mid for mid in memory_ids if mid == "missing"]
-        return {"deleted": deleted, "missing": missing, "deleted_at": "2026-09-16T10:00:00+08:00"}
+        return {
+            "deleted": deleted,
+            "missing": missing,
+            "deleted_at": "2026-09-16T10:00:00+08:00",
+            "notes_deleted": [ref for ref in (note_refs or []) if ref != "note_missing"],
+            "notes_missing": [ref for ref in (note_refs or []) if ref == "note_missing"],
+        }
+
+    async def update_note(self, ref, *, body: str):
+        self.calls.append(("update_note", (ref, body)))
+        if ref == "note_missing":
+            raise KeyError(f"memory note not found: {ref}")
+        if not str(body or "").strip():
+            raise ValueError("note body must not be empty")
+        return {"ref": ref, "body": body, "updated_at": "2026-09-16T10:00:00+08:00"}
 
 
 @pytest.fixture()
@@ -120,21 +134,34 @@ def test_get_memory_failed_returns_items_and_mutation_flag(stub_env, monkeypatch
     assert payload["ok"] is True
     assert payload["total"] == 1
     assert payload["items"][0]["failed_id"] == "failed_1"
-    assert payload["mutations_enabled"] is False
+    assert payload["mutations_enabled"] is True
 
 
-def test_memory_failed_mutations_are_disabled_without_feature_flag(stub_env, monkeypatch):
+def test_memory_failed_mutations_work_without_feature_flag(stub_env, monkeypatch):
+    """失败重试/放弃面已取消 env 门控：未设置开关也应可用（审计仍记录）。"""
     workspace, manager, client = stub_env
     monkeypatch.delenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", raising=False)
 
     retry = client.post("/api/memory/failed/failed_1/retry", json={"reason": "manual"})
     discard = client.post("/api/memory/failed/failed_1/discard", json={"reason": "manual"})
 
-    assert retry.status_code == 403
-    assert retry.json()["detail"]["code"] == "memory_admin_mutation_disabled"
-    assert discard.status_code == 403
-    assert discard.json()["detail"]["code"] == "memory_admin_mutation_disabled"
-    assert manager.calls == []
+    assert retry.status_code == 200
+    assert retry.json()["item"]["failed_id"] == "failed_1"
+    assert discard.status_code == 200
+    assert discard.json()["item"]["status"] == "discarded"
+    audit = _audit_lines(workspace)
+    assert [record["action"] for record in audit] == ["retry_failed", "discard_failed"]
+
+
+def test_legacy_retry_head_keeps_feature_flag_gate(stub_env, monkeypatch):
+    """遗留 retry-head 端点仍保留 env 门控（与新记忆运维面不同）。"""
+    workspace, manager, client = stub_env
+    monkeypatch.delenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", raising=False)
+
+    response = client.post("/api/memory/admin/retry-head", json={"reason": "manual"})
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "memory_admin_mutation_disabled"
 
 
 def test_memory_failed_retry_writes_audit_record(stub_env, monkeypatch):
@@ -192,17 +219,20 @@ def test_memory_failed_discard_writes_audit_record(stub_env, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_current_memory_mutations_are_disabled_without_feature_flag(stub_env, monkeypatch):
+def test_current_memory_mutations_work_without_feature_flag(stub_env, monkeypatch):
+    """记忆内容编辑/删除面已取消 env 门控：未设置开关也应可用（审计仍记录）。"""
     workspace, manager, client = stub_env
     monkeypatch.delenv("G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS", raising=False)
 
     update = client.post("/api/memory/current/update", json={"memory_id": "Ab12Z9", "memory_body": "新内容"})
     delete = client.post("/api/memory/current/delete", json={"memory_ids": ["Ab12Z9"]})
 
-    assert update.status_code == 403
-    assert update.json()["detail"]["code"] == "memory_admin_mutation_disabled"
-    assert delete.status_code == 403
-    assert manager.calls == []
+    assert update.status_code == 200
+    assert update.json()["item"]["memory_body"] == "新内容"
+    assert delete.status_code == 200
+    assert delete.json()["item"]["deleted"] == ["Ab12Z9"]
+    audit = _audit_lines(workspace)
+    assert [record["action"] for record in audit] == ["update_current_memory", "delete_current_memories"]
 
 
 def test_get_current_memories_reports_mutation_flag(stub_env, monkeypatch):
@@ -352,5 +382,77 @@ async def test_delete_current_memories_removes_rows_and_rebuilds_mirror(tmp_path
 
         with pytest.raises(ValueError):
             await manager.delete_current_memories([])
+    finally:
+        manager.close()
+
+
+# ---------------------------------------------------------------------------
+# MemoryManager 真实运行时：note 编辑与删除记忆时同步删除勾选笔记
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_note_writes_body_and_rejects_empty_or_missing(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        note_path = manager.notes_dir / "note_demo1.md"
+        note_path.write_text("旧 note 正文", encoding="utf-8")
+
+        result = await manager.update_note("note_demo1", body="新 note 正文\n第二行")
+        assert result["ref"] == "note_demo1"
+        assert note_path.read_text(encoding="utf-8") == "新 note 正文\n第二行"
+
+        with pytest.raises(KeyError):
+            await manager.update_note("note_missing", body="x")
+        with pytest.raises(ValueError):
+            await manager.update_note("note_demo1", body="   ")
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_current_memories_deletes_only_checked_notes(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        created = manager._memory_repo.create_memory(
+            memory_body="带笔记引用的记忆 见noteid:note_keep1 与 ref:note_drop1",
+            minimal_memory="memory->with notes",
+            source="user",
+            from_user=True,
+            now_iso="2026-09-16T10:00:00+08:00",
+        )
+        (manager.notes_dir / "note_keep1.md").write_text("保留的笔记", encoding="utf-8")
+        (manager.notes_dir / "note_drop1.md").write_text("要删除的笔记", encoding="utf-8")
+        (manager.notes_dir / "note_gone1.md").write_text("早已不存在的笔记", encoding="utf-8")
+        (manager.notes_dir / "note_gone1.md").unlink()
+
+        result = await manager.delete_current_memories(
+            [str(created["memory_id"])],
+            reason="cleanup",
+            note_refs=["note_drop1", "note_gone1"],
+        )
+        assert result["deleted"] == [str(created["memory_id"])]
+        assert result["notes_deleted"] == ["note_drop1"]
+        assert result["notes_missing"] == ["note_gone1"]
+        # 未勾选的 note 保留
+        assert (manager.notes_dir / "note_keep1.md").exists() is True
+        assert (manager.notes_dir / "note_drop1.md").exists() is False
+        # 记忆与镜像同步删除
+        assert manager.list_current_memories() == []
+        assert "带笔记引用的记忆" not in manager.snapshot_text()
+
+        # 不传 note_refs 时不碰任何 note
+        second = manager._memory_repo.create_memory(
+            memory_body="另一条 见noteid:note_keep1",
+            minimal_memory="second->notes",
+            source="user",
+            from_user=True,
+            now_iso="2026-09-16T10:01:00+08:00",
+        )
+        result2 = await manager.delete_current_memories([str(second["memory_id"])], reason="cleanup")
+        assert result2["notes_deleted"] == []
+        assert (manager.notes_dir / "note_keep1.md").exists() is True
     finally:
         manager.close()

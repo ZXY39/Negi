@@ -59,6 +59,10 @@ class ApiClient {
                 return "未找到对应的记忆 note。";
             case "memory_note_read_failed":
                 return "读取记忆 note 失败，请稍后重试。";
+            case "memory_note_invalid":
+                return "note 内容校验未通过（不能为空）。";
+            case "memory_note_update_failed":
+                return "记忆 note 修改未成功，请稍后重试。";
             case "memory_current_unavailable":
                 return "当前记忆列表暂不可用，请稍后刷新。";
             case "memory_current_read_failed":
@@ -1035,12 +1039,19 @@ class ApiClient {
         });
     }
 
-    static async deleteCurrentMemories(memoryIds, reason = "manual-ui") {
+    static async deleteCurrentMemories(memoryIds, reason = "manual-ui", noteRefs = []) {
         return this._request("POST", "/api/memory/current/delete", {
             body: {
                 memory_ids: Array.isArray(memoryIds) ? memoryIds : [memoryIds],
+                note_refs: Array.isArray(noteRefs) ? noteRefs : [],
                 reason,
             },
+        });
+    }
+
+    static async updateMemoryNote(ref, body, reason = "manual-ui") {
+        return this._request("POST", `/api/memory/notes/${encodeURIComponent(ref)}/update`, {
+            body: { body, reason },
         });
     }
 

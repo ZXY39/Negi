@@ -342,6 +342,9 @@ const S = {
         body: "",
         error: "",
         requestToken: 0,
+        editMode: false,
+        editBody: "",
+        saving: false,
     },
     memoryBrowser: {
         open: false,
@@ -362,6 +365,13 @@ const S = {
             memoryId: "",
             body: "",
             minimal: "",
+            busy: false,
+        },
+        deleteDialog: {
+            open: false,
+            memoryIds: [],
+            syncNotes: true,
+            notes: [],
             busy: false,
         },
     },
@@ -11002,15 +11012,26 @@ function ensureMemoryNotePreviewUi() {
     drawer.innerHTML = `
         <div class="detail-modal-header">
             <div class="memory-note-preview-head">
-                <h2 id="memory-note-preview-title">只读 Note 预览</h2>
-                <p id="memory-note-preview-subtitle" class="subtitle">仅展示 note 正文，不支持编辑或保存。</p>
+                <h2 id="memory-note-preview-title">Note 预览</h2>
+                <p id="memory-note-preview-subtitle" class="subtitle">展示 note 正文，可点「编辑」修改（保存前二次确认）。</p>
             </div>
-            <button type="button" class="toolbar-btn ghost" data-memory-note-close data-modal-close>关闭</button>
+            <div class="memory-note-head-actions">
+                <button type="button" class="toolbar-btn ghost" data-memory-note-edit-toggle title="进入编辑模式修改 note 正文">编辑</button>
+                <button type="button" class="toolbar-btn ghost" data-memory-note-close data-modal-close>关闭</button>
+            </div>
         </div>
         <div class="detail-modal-body">
             <div class="memory-note-preview-shell">
                 <div id="memory-note-preview-status" class="memory-note-preview-status"></div>
                 <pre id="memory-note-preview-body" class="memory-note-preview-body"></pre>
+                <textarea id="memory-note-edit-body" class="memory-note-edit-body" rows="12" hidden aria-label="note 正文编辑"></textarea>
+            </div>
+        </div>
+        <div id="memory-note-edit-footer" class="detail-modal-footer memory-note-edit-footer" hidden>
+            <span class="memory-note-edit-hint">保存前会再次确认；note 不提供删除入口。</span>
+            <div class="memory-note-edit-buttons">
+                <button type="button" class="toolbar-btn ghost" data-memory-note-edit-cancel>取消</button>
+                <button type="button" class="toolbar-btn success" data-memory-note-edit-save>保存修改</button>
             </div>
         </div>
     `;
@@ -11022,16 +11043,34 @@ function ensureMemoryNotePreviewUi() {
     U.memoryNoteSubtitle = drawer.querySelector("#memory-note-preview-subtitle");
     U.memoryNoteStatus = drawer.querySelector("#memory-note-preview-status");
     U.memoryNoteBody = drawer.querySelector("#memory-note-preview-body");
+    U.memoryNoteEditBody = drawer.querySelector("#memory-note-edit-body");
+    U.memoryNoteEditFooter = drawer.querySelector("#memory-note-edit-footer");
+    U.memoryNoteEditToggle = drawer.querySelector("[data-memory-note-edit-toggle]");
+    U.memoryNoteEditSave = drawer.querySelector("[data-memory-note-edit-save]");
     U.memoryNoteClose = drawer.querySelector("[data-memory-note-close]");
     U.memoryNoteClose?.addEventListener("click", () => closeMemoryNotePreview());
     U.memoryNoteBackdrop?.addEventListener("click", () => closeMemoryNotePreview());
+    U.memoryNoteEditToggle?.addEventListener("click", () => toggleMemoryNoteEditMode());
+    drawer.querySelector("[data-memory-note-edit-cancel]")?.addEventListener("click", () => {
+        S.memoryNotePreview.editMode = false;
+        renderMemoryNotePreview();
+    });
+    U.memoryNoteEditSave?.addEventListener("click", () => requestMemoryNoteSave());
+    U.memoryNoteEditBody?.addEventListener("input", () => {
+        S.memoryNotePreview.editBody = U.memoryNoteEditBody.value || "";
+    });
 }
 
 function renderMemoryNotePreview() {
     ensureMemoryNotePreviewUi();
     const noteRef = String(S.memoryNotePreview.ref || "").trim();
-    if (U.memoryNoteTitle) U.memoryNoteTitle.textContent = noteRef ? `只读 Note 预览 · ${noteRef}` : "只读 Note 预览";
-    if (U.memoryNoteSubtitle) U.memoryNoteSubtitle.textContent = "仅展示 note 正文，不支持编辑或保存。";
+    const editMode = !!S.memoryNotePreview.editMode;
+    if (U.memoryNoteTitle) U.memoryNoteTitle.textContent = noteRef ? `Note 预览 · ${noteRef}` : "Note 预览";
+    if (U.memoryNoteSubtitle) {
+        U.memoryNoteSubtitle.textContent = editMode
+            ? "编辑 note 正文，保存前会再次确认。"
+            : "展示 note 正文，可点「编辑」修改（保存前二次确认）。";
+    }
     if (U.memoryNoteStatus) {
         const errorText = String(S.memoryNotePreview.error || "").trim();
         if (S.memoryNotePreview.busy) {
@@ -11049,15 +11088,81 @@ function renderMemoryNotePreview() {
         }
     }
     if (U.memoryNoteBody) {
-        U.memoryNoteBody.textContent = S.memoryNotePreview.busy
-            ? ""
-            : String(S.memoryNotePreview.body || "").trim() || "当前 note 没有正文。";
+        U.memoryNoteBody.hidden = editMode;
+        setTextPreservingScroll(
+            U.memoryNoteBody,
+            S.memoryNotePreview.busy
+                ? ""
+                : String(S.memoryNotePreview.body || "").trim() || "当前 note 没有正文。",
+        );
     }
+    if (U.memoryNoteEditBody) {
+        U.memoryNoteEditBody.hidden = !editMode;
+        if (editMode && document.activeElement !== U.memoryNoteEditBody) {
+            U.memoryNoteEditBody.value = String(S.memoryNotePreview.editBody || "");
+        }
+    }
+    if (U.memoryNoteEditFooter) U.memoryNoteEditFooter.hidden = !editMode;
+    if (U.memoryNoteEditToggle) {
+        U.memoryNoteEditToggle.textContent = editMode ? "完成" : "编辑";
+        U.memoryNoteEditToggle.disabled = !!S.memoryNotePreview.busy || !!S.memoryNotePreview.saving;
+    }
+    if (U.memoryNoteEditSave) U.memoryNoteEditSave.disabled = !!S.memoryNotePreview.saving;
     setDrawerOpen(U.memoryNoteBackdrop, U.memoryNoteDrawer, !!S.memoryNotePreview.open);
+}
+
+function toggleMemoryNoteEditMode() {
+    const preview = S.memoryNotePreview;
+    if (preview.busy || preview.saving) return;
+    preview.editMode = !preview.editMode;
+    if (preview.editMode) {
+        preview.editBody = String(preview.body || "");
+    }
+    renderMemoryNotePreview();
+    if (preview.editMode) U.memoryNoteEditBody?.focus();
+}
+
+function requestMemoryNoteSave() {
+    const preview = S.memoryNotePreview;
+    const ref = String(preview.ref || "").trim();
+    if (!ref || preview.saving || !preview.editMode) return;
+    const body = String(U.memoryNoteEditBody?.value ?? preview.editBody ?? "");
+    if (!body.trim()) {
+        showToast({ title: "内容不能为空", text: "note 正文为必填项。", kind: "warn" });
+        return;
+    }
+    openConfirm({
+        title: "保存 note 修改",
+        text: `确定保存对 ${ref} 的修改吗？`,
+        confirmLabel: "保存",
+        confirmKind: "danger",
+        onConfirm: () => void runMemoryNoteSave(ref, body),
+    });
+}
+
+async function runMemoryNoteSave(ref, body) {
+    const preview = S.memoryNotePreview;
+    if (preview.saving) return;
+    preview.saving = true;
+    renderMemoryNotePreview();
+    try {
+        await ApiClient.updateMemoryNote(ref, body, "manual-ui");
+        showToast({ title: "已保存", text: `note ${ref} 修改已保存。`, kind: "success" });
+        preview.editMode = false;
+        preview.body = body;
+        preview.editBody = "";
+    } catch (error) {
+        showToast({ title: "保存失败", text: error?.message || "note 修改未成功，请稍后重试", kind: "error", durationMs: 5000 });
+    } finally {
+        preview.saving = false;
+        renderMemoryNotePreview();
+    }
 }
 
 function closeMemoryNotePreview() {
     S.memoryNotePreview.open = false;
+    S.memoryNotePreview.editMode = false;
+    S.memoryNotePreview.editBody = "";
     renderMemoryNotePreview();
 }
 
@@ -11070,6 +11175,8 @@ async function openMemoryNotePreview(noteRef) {
     S.memoryNotePreview.ref = normalizedRef;
     S.memoryNotePreview.body = "";
     S.memoryNotePreview.error = "";
+    S.memoryNotePreview.editMode = false;
+    S.memoryNotePreview.editBody = "";
     S.memoryNotePreview.requestToken += 1;
     const requestToken = S.memoryNotePreview.requestToken;
     renderMemoryNotePreview();
@@ -11222,7 +11329,7 @@ function renderMemoryDetailPreview() {
     }
     if (U.memoryDetailPrimary) {
         const primaryText = String(preview.primaryText || "").trim() || "当前没有可显示的正文。";
-        U.memoryDetailPrimary.innerHTML = renderMemoryTextWithNoteRefs(primaryText);
+        setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryTextWithNoteRefs(primaryText));
     }
     const secondaryText = String(preview.secondaryText || "").trim();
     const changeListHtml = renderMemoryChangeList(preview.changes);
@@ -11237,16 +11344,20 @@ function renderMemoryDetailPreview() {
     }
     if (U.memoryDetailSecondary) {
         if (changeListHtml) {
-            U.memoryDetailSecondary.innerHTML = reconstructedHint + changeListHtml;
+            setInnerHtmlPreservingScroll(U.memoryDetailSecondary, reconstructedHint + changeListHtml);
         } else {
-            U.memoryDetailSecondary.innerHTML = secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "";
+            setInnerHtmlPreservingScroll(U.memoryDetailSecondary, secondaryText ? renderMemoryTextWithNoteRefs(secondaryText) : "");
         }
     }
     const shell = U.memoryDetailDrawer?.querySelector(".memory-detail-preview-shell") || null;
     if (shell && U.memoryDetailSecondarySection && U.memoryDetailPrimarySection) {
-        if (preview.kind === "processed" || preview.kind === "failed") {
+        const wantsSecondaryFirst = preview.kind === "processed" || preview.kind === "failed";
+        const secondaryFirstNow = U.memoryDetailSecondarySection.nextElementSibling === U.memoryDetailPrimarySection;
+        // 仅在顺序确实需要改变时才移动节点：每次轮询都 insertBefore/appendChild
+        // 会重建 DOM 子树，把变更内容滚动条重置回顶部。
+        if (wantsSecondaryFirst && !secondaryFirstNow) {
             shell.insertBefore(U.memoryDetailSecondarySection, U.memoryDetailPrimarySection);
-        } else {
+        } else if (!wantsSecondaryFirst && secondaryFirstNow) {
             shell.appendChild(U.memoryDetailSecondarySection);
         }
     }
@@ -11458,6 +11569,30 @@ function ensureMemoryBrowserUi() {
                 <button type="button" class="toolbar-btn success" data-memory-browser-edit-save>保存修改</button>
             </div>
         </section>
+        <div id="memory-delete-backdrop" class="memory-browser-edit-backdrop" hidden aria-hidden="true"></div>
+        <section id="memory-delete-dialog" class="panel memory-browser-edit-dialog memory-delete-dialog" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="memory-delete-title" tabindex="-1" hidden>
+            <div class="detail-modal-header">
+                <div class="memory-browser-head">
+                    <h2 id="memory-delete-title">删除记忆</h2>
+                    <p id="memory-delete-subtitle" class="subtitle">删除后 MEMORY.md 镜像会同步重建，操作不可撤销。</p>
+                </div>
+                <button type="button" class="toolbar-btn ghost" data-memory-delete-close>取消</button>
+            </div>
+            <div class="detail-modal-body memory-delete-body">
+                <label class="memory-delete-master">
+                    <input type="checkbox" data-delete-notes-master aria-label="同步删除关联笔记" />
+                    <span>同步删除关联笔记</span>
+                </label>
+                <div id="memory-delete-notes" class="memory-delete-notes"></div>
+            </div>
+            <div class="detail-modal-footer memory-browser-edit-footer">
+                <button type="button" class="toolbar-btn ghost" data-memory-delete-cancel>取消</button>
+                <button type="button" class="toolbar-btn danger" data-memory-delete-confirm>
+                    <i data-lucide="trash-2" aria-hidden="true"></i>
+                    删除
+                </button>
+            </div>
+        </section>
     `;
     host.appendChild(backdrop);
     host.appendChild(drawer);
@@ -11498,6 +11633,13 @@ function ensureMemoryBrowserUi() {
     });
     U.memoryBrowserTbody?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
+        const noteTrigger = e.target.closest("[data-memory-note-ref]");
+        if (noteTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            void openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || "");
+            return;
+        }
         const editTrigger = e.target.closest("[data-memory-row-edit]");
         if (editTrigger) {
             e.preventDefault();
@@ -11517,6 +11659,38 @@ function ensureMemoryBrowserUi() {
     });
     U.memoryBrowserEditBackdrop?.addEventListener("click", () => closeMemoryBrowserEditDialog());
     U.memoryBrowserEditSave?.addEventListener("click", () => requestMemoryBrowserEditSave());
+    U.memoryBrowserDeleteDialog = drawer.querySelector("#memory-delete-dialog");
+    U.memoryBrowserDeleteBackdrop = drawer.querySelector("#memory-delete-backdrop");
+    U.memoryBrowserDeleteSubtitle = drawer.querySelector("#memory-delete-subtitle");
+    U.memoryBrowserDeleteMaster = drawer.querySelector("[data-delete-notes-master]");
+    U.memoryBrowserDeleteNotes = drawer.querySelector("#memory-delete-notes");
+    U.memoryBrowserDeleteConfirm = drawer.querySelector("[data-memory-delete-confirm]");
+    drawer.querySelectorAll("[data-memory-delete-close], [data-memory-delete-cancel]").forEach((button) => {
+        button.addEventListener("click", () => closeMemoryDeleteDialog());
+    });
+    U.memoryBrowserDeleteBackdrop?.addEventListener("click", () => closeMemoryDeleteDialog());
+    U.memoryBrowserDeleteMaster?.addEventListener("change", () => {
+        S.memoryBrowser.deleteDialog.syncNotes = !!U.memoryBrowserDeleteMaster.checked;
+        renderMemoryDeleteDialog();
+    });
+    U.memoryBrowserDeleteNotes?.addEventListener("change", (e) => {
+        if (!(e.target instanceof Element)) return;
+        const checkbox = e.target.closest("[data-delete-note-ref]");
+        if (!checkbox) return;
+        const ref = String(checkbox.dataset.deleteNoteRef || "").trim();
+        const note = (S.memoryBrowser.deleteDialog.notes || []).find((item) => item.ref === ref);
+        if (!note) return;
+        note.checked = !!checkbox.checked;
+    });
+    U.memoryBrowserDeleteNotes?.addEventListener("click", (e) => {
+        if (!(e.target instanceof Element)) return;
+        const expandTrigger = e.target.closest("[data-delete-note-expand]");
+        if (!expandTrigger) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void toggleDeleteNoteExpand(expandTrigger.dataset.deleteNoteExpand || "");
+    });
+    U.memoryBrowserDeleteConfirm?.addEventListener("click", () => confirmMemoryDeleteDialog());
     U.memoryBrowserSearch?.addEventListener("input", () => {
         S.memoryBrowser.search = U.memoryBrowserSearch.value || "";
         renderMemoryBrowserList();
@@ -11576,12 +11750,12 @@ function renderMemoryBrowserList() {
     const editMode = !!S.memoryBrowser.editMode && !!S.memoryBrowser.mutationsEnabled;
     const columnCount = editMode ? 8 : 6;
     if (S.memoryBrowser.busy) {
-        U.memoryBrowserTbody.innerHTML = `<tr><td colspan="${columnCount}" class="memory-browser-empty">正在加载当前记忆...</td></tr>`;
+        setInnerHtmlPreservingScroll(U.memoryBrowserTbody, `<tr><td colspan="${columnCount}" class="memory-browser-empty">正在加载当前记忆...</td></tr>`);
     } else if (!filtered.length) {
         const hasAny = Array.isArray(S.memoryBrowser.items) && S.memoryBrowser.items.length;
-        U.memoryBrowserTbody.innerHTML = `<tr><td colspan="${columnCount}" class="memory-browser-empty">${hasAny ? "没有匹配的记忆。" : "当前没有记忆。"}</td></tr>`;
+        setInnerHtmlPreservingScroll(U.memoryBrowserTbody, `<tr><td colspan="${columnCount}" class="memory-browser-empty">${hasAny ? "没有匹配的记忆。" : "当前没有记忆。"}</td></tr>`);
     } else {
-        U.memoryBrowserTbody.innerHTML = filtered.map((item) => {
+        setInnerHtmlPreservingScroll(U.memoryBrowserTbody, filtered.map((item) => {
             const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "-");
             const source = String(item?.source || "").trim() || "-";
             const memoryId = String(item?.memory_id || "").trim() || "-";
@@ -11615,11 +11789,11 @@ function renderMemoryBrowserList() {
                     <td class="memory-browser-cell-nowrap">${esc(String(item?.passed_count ?? 0))}</td>
                     <td class="memory-browser-cell-nowrap">${esc(source)}</td>
                     <td class="memory-browser-cell-nowrap">${esc(memoryId)}</td>
-                    <td class="memory-browser-cell-body">${esc(body)}</td>
+                    <td class="memory-browser-cell-body">${renderMemoryTextWithNoteRefs(body)}</td>
                     ${actionsCell}
                 </tr>
             `;
-        }).join("");
+        }).join(""));
     }
     const total = Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items.length : 0;
     if (U.memoryBrowserStatus) {
@@ -11753,38 +11927,176 @@ function requestMemoryBrowserDelete(memoryIds, scope = "bulk") {
         });
         return;
     }
-    const label = scope === "single" ? "这条记忆" : `选中的 ${ids.length} 条记忆`;
-    openConfirm({
-        title: "删除记忆",
-        text: `确定删除${label}吗？删除后 MEMORY.md 镜像会同步重建，操作不可撤销。`,
-        confirmLabel: "删除",
-        confirmKind: "danger",
-        onConfirm: () => void runMemoryBrowserDelete(ids),
-    });
+    openMemoryDeleteDialog(ids);
 }
 
-async function runMemoryBrowserDelete(memoryIds) {
+// 解析记忆正文里的 note 引用（ref:note_xxx 与 见noteid:note_xxx 两种写法）
+function memoryNoteRefsInText(text) {
+    const refs = [];
+    const pattern = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)/g;
+    const value = String(text || "");
+    let match = pattern.exec(value);
+    while (match) {
+        const ref = String(match[1] || "").trim();
+        if (ref && !refs.includes(ref)) refs.push(ref);
+        match = pattern.exec(value);
+    }
+    return refs;
+}
+
+function openMemoryDeleteDialog(memoryIds) {
+    const items = Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items : [];
+    const idSet = new Set(memoryIds);
+    const selectedBodies = items.filter((item) => idSet.has(String(item?.memory_id || "").trim()));
+    const otherBodies = items.filter((item) => !idSet.has(String(item?.memory_id || "").trim()));
+    const refs = [];
+    selectedBodies.forEach((item) => {
+        memoryNoteRefsInText(item?.memory_body).forEach((ref) => {
+            if (!refs.includes(ref)) refs.push(ref);
+        });
+    });
+    const sharedRefs = [];
+    otherBodies.forEach((item) => {
+        memoryNoteRefsInText(item?.memory_body).forEach((ref) => {
+            if (!sharedRefs.includes(ref)) sharedRefs.push(ref);
+        });
+    });
+    S.memoryBrowser.deleteDialog = {
+        open: true,
+        memoryIds,
+        syncNotes: refs.length > 0,
+        busy: false,
+        notes: refs.map((ref) => ({
+            ref,
+            checked: !sharedRefs.includes(ref),
+            expanded: false,
+            body: "",
+            loaded: false,
+            loading: false,
+            shared: sharedRefs.includes(ref),
+        })),
+    };
+    renderMemoryDeleteDialog();
+}
+
+function closeMemoryDeleteDialog() {
+    if (S.memoryBrowser.deleteDialog.busy) return;
+    S.memoryBrowser.deleteDialog = { open: false, memoryIds: [], syncNotes: true, notes: [], busy: false };
+    renderMemoryDeleteDialog();
+}
+
+function renderMemoryDeleteDialog() {
+    ensureMemoryBrowserUi();
+    const dialog = U.memoryBrowserDeleteDialog;
+    const backdrop = U.memoryBrowserDeleteBackdrop;
+    const state = S.memoryBrowser.deleteDialog || {};
+    const open = !!state.open;
+    if (dialog) {
+        dialog.hidden = !open;
+        dialog.setAttribute("aria-hidden", open ? "false" : "true");
+    }
+    if (backdrop) {
+        backdrop.hidden = !open;
+        backdrop.setAttribute("aria-hidden", open ? "false" : "true");
+    }
+    if (!open) return;
+    const subtitle = U.memoryBrowserDeleteSubtitle;
+    if (subtitle) {
+        subtitle.textContent = `将删除 ${state.memoryIds.length} 条记忆；删除后 MEMORY.md 镜像会同步重建，操作不可撤销。`;
+    }
+    const master = U.memoryBrowserDeleteMaster;
+    if (master) {
+        master.checked = !!state.syncNotes;
+        master.disabled = !!state.busy || !state.notes.length;
+    }
+    const notesHost = U.memoryBrowserDeleteNotes;
+    if (notesHost) {
+        if (!state.notes.length) {
+            notesHost.innerHTML = '<div class="memory-delete-notes-empty">这批记忆没有关联笔记。</div>';
+        } else {
+            notesHost.innerHTML = state.notes.map((note) => `
+                <div class="memory-delete-note-row${note.expanded ? " is-expanded" : ""}">
+                    <label class="memory-delete-note-check">
+                        <input type="checkbox" data-delete-note-ref="${esc(note.ref)}"${note.checked ? " checked" : ""}${!state.syncNotes || state.busy ? " disabled" : ""} aria-label="同步删除笔记 ${esc(note.ref)}" />
+                    </label>
+                    <span class="memory-delete-note-ref">${esc(note.ref)}</span>
+                    ${note.shared ? '<span class="memory-delete-note-shared" title="删除后其他记忆仍引用该笔记，引用将悬空">仍被其他记忆引用</span>' : ""}
+                    <button type="button" class="toolbar-btn ghost memory-delete-note-expand" data-delete-note-expand="${esc(note.ref)}" aria-expanded="${note.expanded ? "true" : "false"}">
+                        ${note.expanded ? "收起" : "展开内容"}
+                    </button>
+                    ${note.expanded ? `<pre class="memory-delete-note-body">${note.loading ? "正在加载 note 正文..." : esc(String(note.body || "").trim() || "（空 note）")}</pre>` : ""}
+                </div>
+            `).join("");
+        }
+    }
+    const confirmButton = U.memoryBrowserDeleteConfirm;
+    if (confirmButton) confirmButton.disabled = !!state.busy;
+    icons();
+}
+
+async function toggleDeleteNoteExpand(ref) {
+    const state = S.memoryBrowser.deleteDialog;
+    const note = (state.notes || []).find((item) => item.ref === ref);
+    if (!note || note.loading) return;
+    note.expanded = !note.expanded;
+    if (note.expanded && !note.loaded) {
+        note.loading = true;
+        renderMemoryDeleteDialog();
+        try {
+            const item = await ApiClient.getMemoryNote(ref);
+            note.body = String(item?.body || "");
+            note.loaded = true;
+        } catch (error) {
+            note.body = `加载失败：${error?.message || "读取记忆 note 失败"}`;
+            note.loaded = true;
+        } finally {
+            note.loading = false;
+            renderMemoryDeleteDialog();
+        }
+        return;
+    }
+    renderMemoryDeleteDialog();
+}
+
+function confirmMemoryDeleteDialog() {
+    const state = S.memoryBrowser.deleteDialog;
+    if (!state.open || state.busy) return;
+    const noteRefs = state.syncNotes
+        ? (state.notes || []).filter((note) => note.checked).map((note) => note.ref)
+        : [];
+    state.busy = true;
+    renderMemoryDeleteDialog();
+    void runMemoryBrowserDelete(state.memoryIds, noteRefs);
+}
+
+async function runMemoryBrowserDelete(memoryIds, noteRefs = []) {
     const ids = [...new Set((Array.isArray(memoryIds) ? memoryIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
     if (!ids.length || S.memoryBrowser.actionBusy) return;
     S.memoryBrowser.actionBusy = `delete:${ids.length}`;
     renderMemoryBrowserList();
     try {
-        const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui");
+        const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui", noteRefs);
         const deletedCount = Array.isArray(result?.item?.deleted) ? result.item.deleted.length : ids.length;
         const missingCount = Array.isArray(result?.item?.missing) ? result.item.missing.length : 0;
+        const notesDeleted = Array.isArray(result?.item?.notes_deleted) ? result.item.notes_deleted.length : 0;
         showToast({
             title: "删除完成",
-            text: missingCount
-                ? `已删除 ${deletedCount} 条记忆，${missingCount} 条未找到（可能已被删除）。`
-                : `已删除 ${deletedCount} 条记忆，镜像已同步。`,
+            text: [
+                missingCount ? `已删除 ${deletedCount} 条记忆，${missingCount} 条未找到（可能已被删除）。` : `已删除 ${deletedCount} 条记忆，镜像已同步。`,
+                notesDeleted ? `同步删除 ${notesDeleted} 个关联笔记。` : "",
+            ].filter(Boolean).join(" "),
             kind: missingCount ? "warn" : "success",
             durationMs: 4200,
         });
         const selected = { ...(S.memoryBrowser.selected || {}) };
         ids.forEach((id) => delete selected[id]);
         S.memoryBrowser.selected = selected;
+        S.memoryBrowser.deleteDialog = { open: false, memoryIds: [], syncNotes: true, notes: [], busy: false };
+        renderMemoryDeleteDialog();
         await loadMemoryBrowser();
     } catch (error) {
+        S.memoryBrowser.deleteDialog.busy = false;
+        renderMemoryDeleteDialog();
         showToast({ title: "删除失败", text: error?.message || "记忆删除未成功，请稍后重试", kind: "error", durationMs: 5000 });
     } finally {
         S.memoryBrowser.actionBusy = "";
@@ -11948,6 +12260,26 @@ function setMemoryCardExpanded(kind, key, expanded) {
     target[key] = !!expanded;
 }
 
+// 轮询刷新会重渲染详情/列表；直接写 innerHTML 会把滚动条重置到顶部。
+// 内容未变化时跳过重渲染，变化时保留原滚动位置（超出新内容高度时由浏览器钳制）。
+function setInnerHtmlPreservingScroll(el, html) {
+    if (!el) return;
+    if (el.innerHTML === html) return;
+    const previousTop = el.scrollTop;
+    const previousLeft = el.scrollLeft;
+    el.innerHTML = html;
+    el.scrollTop = previousTop;
+    el.scrollLeft = previousLeft;
+}
+
+function setTextPreservingScroll(el, text) {
+    if (!el) return;
+    if (el.textContent === text) return;
+    const previousTop = el.scrollTop;
+    el.textContent = text;
+    el.scrollTop = previousTop;
+}
+
 function stopMemoryViewAutoRefresh() {
     if (S.memoryPollIntervalId) {
         window.clearInterval(S.memoryPollIntervalId);
@@ -12069,20 +12401,20 @@ function renderMemoryView() {
     renderMemoryAdminActions();
     if (U.memoryQueueList) {
         if (S.memoryBusy && !S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">正在加载记忆队列...</div>';
+            setInnerHtmlPreservingScroll(U.memoryQueueList, '<div class="empty-state compact">正在加载记忆队列...</div>');
         } else if (!S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">当前没有未出队记忆。</div>';
+            setInnerHtmlPreservingScroll(U.memoryQueueList, '<div class="empty-state compact">当前没有未出队记忆。</div>');
         } else {
-            U.memoryQueueList.innerHTML = S.memoryQueueItems.map((item) => renderMemoryQueueCard(item)).join("");
+            setInnerHtmlPreservingScroll(U.memoryQueueList, S.memoryQueueItems.map((item) => renderMemoryQueueCard(item)).join(""));
         }
     }
     if (U.memoryProcessedList) {
         if (S.memoryBusy && !S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">正在加载已处理批次...</div>';
+            setInnerHtmlPreservingScroll(U.memoryProcessedList, '<div class="empty-state compact">正在加载已处理批次...</div>');
         } else if (!S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">当前还没有已处理记忆。</div>';
+            setInnerHtmlPreservingScroll(U.memoryProcessedList, '<div class="empty-state compact">当前还没有已处理记忆。</div>');
         } else {
-            U.memoryProcessedList.innerHTML = S.memoryProcessedItems.map((item) => renderMemoryProcessedCard(item)).join("");
+            setInnerHtmlPreservingScroll(U.memoryProcessedList, S.memoryProcessedItems.map((item) => renderMemoryProcessedCard(item)).join(""));
         }
     }
     // 失败记忆板块按需显示：仅当存在停车记录时出现，避免常态下挤占待处理队列
@@ -12090,11 +12422,11 @@ function renderMemoryView() {
     if (U.memoryFailedPanel) U.memoryFailedPanel.hidden = !hasFailedMemories;
     if (U.memoryFailedList) {
         if (S.memoryBusy && !S.memoryFailedItems.length) {
-            U.memoryFailedList.innerHTML = '<div class="empty-state compact">正在加载失败记忆...</div>';
+            setInnerHtmlPreservingScroll(U.memoryFailedList, '<div class="empty-state compact">正在加载失败记忆...</div>');
         } else if (!S.memoryFailedItems.length) {
-            U.memoryFailedList.innerHTML = '<div class="empty-state compact">没有失败停车的记忆。</div>';
+            setInnerHtmlPreservingScroll(U.memoryFailedList, '<div class="empty-state compact">没有失败停车的记忆。</div>');
         } else {
-            U.memoryFailedList.innerHTML = S.memoryFailedItems.map((item) => renderMemoryFailedCard(item)).join("");
+            setInnerHtmlPreservingScroll(U.memoryFailedList, S.memoryFailedItems.map((item) => renderMemoryFailedCard(item)).join(""));
         }
     }
     if (U.memoryQueueInfo) U.memoryQueueInfo.textContent = `共 ${S.memoryQueueTotal} 项`;

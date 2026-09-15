@@ -9496,7 +9496,7 @@ textarea {
     left: 50%;
     right: auto;
     bottom: auto;
-    width: min(1080px, calc(100vw - 32px));
+    width: min(1440px, calc(100vw - 32px));
     max-height: min(88vh, calc(100dvh - 32px));
     transform: translate(-50%, calc(-50% + 8px));
     background: var(--bg-panel);
@@ -9746,6 +9746,159 @@ textarea {
     padding: var(--space-3) var(--space-4);
     border-top: 1px solid var(--border-color);
     flex: 0 0 auto;
+}
+
+/* note 预览窗编辑态 */
+.memory-note-head-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+}
+
+.memory-note-edit-body {
+    width: 100%;
+    min-height: 240px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-app);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: inherit;
+    line-height: 1.6;
+    resize: vertical;
+}
+
+.memory-note-edit-body:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 45%, transparent);
+    outline-offset: 1px;
+}
+
+.memory-note-edit-footer {
+    justify-content: space-between;
+}
+
+.memory-note-edit-hint {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    min-width: 0;
+}
+
+.memory-note-edit-buttons {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+}
+
+/* 删除记忆确认对话框：关联笔记勾选列表 */
+.memory-delete-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.memory-delete-master {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.memory-delete-master input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    accent-color: var(--brand-primary);
+}
+
+.memory-delete-notes {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    max-height: 40vh;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.memory-delete-notes-empty {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    padding: 6px 2px;
+}
+
+.memory-delete-note-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-panel) 94%, var(--brand-primary) 3%);
+}
+
+.memory-delete-note-row.is-expanded {
+    row-gap: 6px;
+}
+
+.memory-delete-note-row .memory-delete-note-body {
+    flex: 1 1 100%;
+}
+
+.memory-delete-note-check {
+    display: inline-flex;
+    align-items: center;
+}
+
+.memory-delete-note-check input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    accent-color: var(--brand-primary);
+}
+
+.memory-delete-note-ref {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.memory-delete-note-shared {
+    font-size: 0.72rem;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #f59e0b 40%, var(--border-color));
+    background: color-mix(in srgb, #f59e0b 12%, var(--bg-panel));
+    color: color-mix(in srgb, #f59e0b 70%, var(--text-primary));
+    white-space: nowrap;
+}
+
+.memory-delete-note-expand {
+    margin-left: auto;
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    min-height: 24px;
+}
+
+.memory-delete-note-body {
+    width: 100%;
+    max-height: 220px;
+    overflow-y: auto;
+    margin: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-app);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .sort-ind {

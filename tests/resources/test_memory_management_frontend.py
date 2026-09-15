@@ -297,14 +297,19 @@ def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() 
     assert "retryMemoryFailed" in app_js
     assert "discardMemoryFailed" in app_js
 
-    # 后端变更端点同样受 env 门控并写审计
+    # 失败重试/放弃面不受 env 门控（审计 + 前端二次确认即防护），仅遗留 retry-head 保留门控
     assert "@router.post('/memory/failed/{failed_id}/retry')" in admin_rest_py
     assert "@router.post('/memory/failed/{failed_id}/discard')" in admin_rest_py
     retry_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/failed/{failed_id}/retry')")
     discard_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/failed/{failed_id}/discard')")
-    assert "_memory_admin_mutations_enabled()" in retry_route
-    assert "_memory_admin_mutations_enabled()" in discard_route
-    assert "'mutations_enabled': _memory_admin_mutations_enabled()," in admin_rest_py
+    assert "_memory_admin_mutations_enabled()" not in retry_route
+    assert "_memory_admin_mutations_enabled()" not in discard_route
+    assert "_mutate_memory_failed_record(" in retry_route
+    assert "_mutate_memory_failed_record(" in discard_route
+    failed_helper = _fragment(admin_rest_py, "async def _mutate_memory_failed_record(", "@router.post('/memory/failed/{failed_id}/retry')")
+    assert "_append_memory_admin_audit_event(" in failed_helper
+    retry_head_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/admin/retry-head')")
+    assert "_memory_admin_mutations_enabled()" in retry_head_route
 
 
 def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dialogs() -> None:
@@ -328,20 +333,25 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert "data-memory-row-delete=" in app_js
     assert "删除选中" in app_js
 
-    # 删除与保存都经过内部弹窗二次确认
+    # 删除走专用确认对话框（关联笔记可勾选/展开/悬空引用警告），保存走内部弹窗二次确认
     delete_fragment = _fragment(app_js, "function requestMemoryBrowserDelete(", "async function runMemoryBrowserDelete(")
-    assert "openConfirm({" in delete_fragment
-    assert 'title: "删除记忆"' in delete_fragment
+    assert "openMemoryDeleteDialog(ids)" in delete_fragment
+    assert 'id="memory-delete-dialog"' in app_js
+    assert "data-delete-notes-master" in app_js
+    assert "data-delete-note-ref=" in app_js
+    assert "data-delete-note-expand=" in app_js
+    assert "仍被其他记忆引用" in app_js
+    assert "function confirmMemoryDeleteDialog()" in app_js
+    assert "function toggleDeleteNoteExpand(ref)" in app_js
     save_fragment = _fragment(app_js, "function requestMemoryBrowserEditSave()", "async function runMemoryBrowserEditSave(")
     assert "openConfirm({" in save_fragment
     assert 'title: "保存记忆修改"' in save_fragment
 
-    # 编辑入口与所有变更均受 mutationsEnabled 门控
+    # 编辑入口受 mutationsEnabled 门控（服务端该标志对新记忆运维面恒为 true）
     assert "S.memoryBrowser.mutationsEnabled" in app_js
     assert "!!S.memoryBrowser.editMode && !!S.memoryBrowser.mutationsEnabled" in app_js
-    assert "G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS" in app_js
 
-    # API 客户端与后端端点
+    # API 客户端与后端端点（新记忆运维面不受 env 门控，仅遗留 retry-head 保留）
     assert "updateCurrentMemory" in api_client_js
     assert "deleteCurrentMemories" in api_client_js
     assert '"/api/memory/current/update"' in api_client_js
@@ -351,8 +361,11 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert "@router.post('/memory/current/delete')" in admin_rest_py
     update_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/current/update')")
     delete_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/current/delete')")
-    assert "_memory_admin_mutations_enabled()" in update_route
-    assert "_memory_admin_mutations_enabled()" in delete_route
+    assert "_memory_admin_mutations_enabled()" not in update_route
+    assert "_memory_admin_mutations_enabled()" not in delete_route
+    assert "_append_memory_admin_audit_event(" in update_route
+    assert "_append_memory_admin_audit_event(" in delete_route
+    assert "note_refs" in api_client_js
     assert "memory_current_update_failed" in api_client_js
     assert "memory_current_delete_failed" in api_client_js
 

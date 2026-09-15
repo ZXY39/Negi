@@ -38,33 +38,49 @@ def test_memory_page_renders_note_ref_trigger() -> None:
     assert "function renderMemoryNoteRefChip(noteRef)" in app_js
     assert 'class="memory-note-ref-trigger"' in app_js
     assert 'data-memory-note-ref="${esc(noteRef)}"' in app_js
-    # 卡片精简为 minimal-row 后，note 引用渲染收敛到详情抽屉（正文 + 补充信息区）
-    assert "U.memoryDetailPrimary.innerHTML = renderMemoryTextWithNoteRefs(primaryText);" in app_js
-    assert "renderMemoryTextWithNoteRefs(secondaryText)" in app_js
+    # 卡片精简为 minimal-row 后，note 引用渲染收敛到详情抽屉（正文 + 补充信息区），
+    # 且轮询刷新必须保留滚动位置（变更内容滚动条被重置是回归 bug）
+    assert "setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryTextWithNoteRefs(primaryText));" in app_js
+    assert "setInnerHtmlPreservingScroll(U.memoryDetailSecondary, reconstructedHint + changeListHtml);" in app_js
+    assert "const wantsSecondaryFirst = preview.kind === \"processed\" || preview.kind === \"failed\";" in app_js
+    # 查看记忆表格的记忆内容列同样把 note 引用渲染为可点击按钮
+    assert '<td class="memory-browser-cell-body">${renderMemoryTextWithNoteRefs(body)}</td>' in app_js
+    assert 'U.memoryBrowserTbody?.addEventListener("click"' in app_js
     assert "function memoryProcessedChangePreview(item)" in app_js
     assert 'U.memoryQueueList?.addEventListener("click"' in app_js
     assert 'U.memoryProcessedList?.addEventListener("click"' in app_js
     assert "openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || \"\")" in app_js
 
 
-def test_memory_page_keeps_note_preview_read_only() -> None:
+def test_memory_page_note_preview_edit_is_confirmed_and_has_no_delete() -> None:
     app_js = _source("g3ku/web/frontend/org_graph_app.js")
+    api_client_js = _source("g3ku/web/frontend/api_client.js")
+    admin_rest_py = _source("main/api/admin_rest.py")
     preview_fragment = _fragment(
         app_js,
         "function ensureMemoryNotePreviewUi()",
         "function ensureMemoryDetailPreviewUi()",
     )
 
-    assert "只读 Note 预览" in preview_fragment
-    assert "仅展示 note 正文，不支持编辑或保存。" in preview_fragment
-    assert 'class="memory-note-preview-shell"' in preview_fragment
-    assert 'class="memory-note-preview-body"' in preview_fragment
-    assert 'data-memory-note-close' in preview_fragment
-    assert "<textarea" not in preview_fragment
-    assert "contenteditable" not in preview_fragment
-    assert "saveMemoryNote" not in app_js
-    assert "updateMemoryNote" not in app_js
+    # note 窗可编辑：编辑开关 + 编辑正文 textarea + 保存（保存前内部弹窗二次确认）
+    assert "Note 预览" in preview_fragment
+    assert "data-memory-note-edit-toggle" in preview_fragment
+    assert "data-memory-note-edit-save" in preview_fragment
+    assert 'id="memory-note-edit-body"' in preview_fragment
+    assert "<textarea" in preview_fragment
+    save_fragment = _fragment(app_js, "function requestMemoryNoteSave()", "async function runMemoryNoteSave(")
+    assert "openConfirm({" in save_fragment
+    assert 'ApiClient.updateMemoryNote(ref, body, "manual-ui")' in app_js
+    assert "updateMemoryNote" in api_client_js
+    assert "@router.post('/memory/notes/{ref}/update')" in admin_rest_py
+    update_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/notes/{ref}/update')")
+    assert "_append_memory_admin_audit_event(" in update_route
     assert "ApiClient.getMemoryNote(noteRef)" in app_js
+
+    # note 面不提供任何删除入口
+    assert "data-memory-note-delete" not in app_js
+    assert "deleteMemoryNote" not in app_js
+    assert "deleteMemoryNote" not in api_client_js
 
 
 def test_memory_page_full_detail_preview_uses_centered_grouped_modal_and_scrollable_text_regions() -> None:

@@ -400,7 +400,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 - `memory/memory_state.sqlite3` 是长期记忆权威状态：每行存完整记忆正文、最小摘要、`refresh_count`、`passed_count`、`is_compressed`、来源与 `from_user` 保护元数据。
 - `memory/MEMORY.md` 是从 SQLite 状态再生的提示词快照，保留受管 Markdown 块形状供工具与内部 memory agent 检查，但不是权威元数据存储。
-- `memory/notes/` 存 `ref:note_xxxx` 引用的可选详细 note 正文，保持小而人类可读。
+- `memory/notes/` 存 `ref:note_xxxx` 引用的可选详细 note 正文，保持小而人类可读。note 正文可由记忆管理页的 note 窗编辑（保存前二次确认并写审计，无删除入口）；删除记忆时可在删除确认对话框勾选其引用的 note 同步删除（仍被其他记忆引用的 note 会标警并默认不勾选）。失去引用的孤儿 note 由 doctor 检查与 `reconcile-notes` 报告/清理；界面与端点契约见 `web-and-admin.md`「Memory Management Page And Admin Contract」。
 - `memory/queue.jsonl` 是唯一持久队列，带每请求处理状态（`pending` / `processing`、重试计时、最新错误文本）。队列条目只有两种类型：`write`（显式或已提炼的记忆文本，等待真正的记忆处理）与 `delete`（自然语言记忆删除请求，等待内部 memory agent 解析成具体 id）。
 - `memory/failed.jsonl` 是失败停车区：处理尝试失败的批次（含完整载荷与错误历史）整体移出主队列停在这里，主队列继续流动。每条记录带 `failed_id`、`category`（`provider_error` 瞬时类 / `protocol` 协议违规类）、`status`（`parked` 等待中 / `requeued` 已重排回队列）、`park_count`、`auto_requeue_count`、`manual_retry_count`、`error_history`（失败与重排事件的时间线）与累计 usage。停车不写终态记录，`request_id` 不进入已处理集合，重入队后不会被幂等去重误删。
 - `memory/ops.jsonl` 是滚动终态历史，不是进行中重试日志，也不是 append-forever 归档：applied 批次、`precheck_failed`（载荷本身不可恢复）与 `operator_discarded`（操作员显式放弃停车记录）等 durable 终态结果连同最终 snapshot / compression 元数据一起落在这里；处理尝试失败先进失败停车区而非终态历史；超过 7 天的行在正常运行时读写中自动清理。终态行不记录入队侧 `trigger_source`；区分普通窗口批次与压缩冲刷批次要对照会话转录时间线。

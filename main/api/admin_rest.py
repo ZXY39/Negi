@@ -2139,16 +2139,13 @@ async def get_current_memories():
         'ok': True,
         'items': list(items or []),
         'total': len(list(items or [])),
-        # 前端据此启用/禁用「编辑」入口；变更本身仍由后端 env 门控二次校验。
-        'mutations_enabled': _memory_admin_mutations_enabled(),
+        # 记忆内容编辑/删除面不再受 env 门控（审计 + 前端二次确认弹窗即防护），恒为可用。
+        'mutations_enabled': True,
     }
 
 
 @router.post('/memory/current/update')
 async def update_current_memory(request: Request, payload: dict | None = Body(default=None)):
-    if not _memory_admin_mutations_enabled():
-        raise _memory_admin_mutation_disabled()
-
     manager = _runtime_memory_manager()
     body = dict(payload or {})
     memory_id = str(body.get('memory_id') or '').strip()
@@ -2205,9 +2202,6 @@ async def update_current_memory(request: Request, payload: dict | None = Body(de
 
 @router.post('/memory/current/delete')
 async def delete_current_memories(request: Request, payload: dict | None = Body(default=None)):
-    if not _memory_admin_mutations_enabled():
-        raise _memory_admin_mutation_disabled()
-
     manager = _runtime_memory_manager()
     body = dict(payload or {})
     raw_ids = body.get('memory_ids')
@@ -2219,6 +2213,10 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
             status_code=400,
             detail={'code': 'memory_current_invalid_id', 'message': 'memory_ids is required'},
         )
+    raw_note_refs = body.get('note_refs')
+    if not isinstance(raw_note_refs, list):
+        raw_note_refs = [raw_note_refs] if raw_note_refs else []
+    note_refs = [str(item or '').strip() for item in raw_note_refs if str(item or '').strip()]
     method = getattr(manager, 'delete_current_memories', None)
     if not callable(method):
         raise HTTPException(
@@ -2227,7 +2225,7 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
         )
     reason = str(body.get('reason') or 'manual').strip() or 'manual'
     try:
-        result = await method(memory_ids, reason=reason)
+        result = await method(memory_ids, reason=reason, note_refs=note_refs)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -2249,6 +2247,9 @@ async def delete_current_memories(request: Request, payload: dict | None = Body(
                 'memory_ids': memory_ids,
                 'deleted': list(item.get('deleted') or []),
                 'missing': list(item.get('missing') or []),
+                'note_refs_requested': note_refs,
+                'notes_deleted': list(item.get('notes_deleted') or []),
+                'notes_missing': list(item.get('notes_missing') or []),
                 'result': 'ok',
                 'timestamp': now_iso(),
             },
@@ -2329,6 +2330,75 @@ async def get_memory_note(ref: str):
     }
 
 
+@router.post('/memory/notes/{ref}/update')
+async def update_memory_note(request: Request, ref: str, payload: dict | None = Body(default=None)):
+    manager = _runtime_memory_manager()
+    body = dict(payload or {})
+    normalized_ref = str(ref or '').strip()
+    if not normalized_ref or not MEMORY_NOTE_REF_RE.fullmatch(normalized_ref):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'memory_note_invalid_ref',
+                'message': 'note ref must match note_[a-z0-9_]+',
+            },
+        )
+    method = getattr(manager, 'update_note', None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'memory_note_unavailable',
+                'message': 'memory note update is unavailable',
+            },
+        )
+    try:
+        result = await method(normalized_ref, body=str(body.get('body') or ''))
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'code': 'memory_note_not_found',
+                'message': '未找到对应的记忆 note。',
+                'ref': normalized_ref,
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'memory_note_invalid',
+                'message': str(exc or 'invalid note body'),
+            },
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'memory_note_update_failed',
+                'message': '记忆 note 修改未成功，请稍后重试。',
+            },
+        ) from exc
+    item = dict(result or {})
+    try:
+        _append_memory_admin_audit_event(
+            manager,
+            {
+                'action': 'update_memory_note',
+                'reason': str(body.get('reason') or 'manual').strip() or 'manual',
+                'request_id': str(request.headers.get('x-request-id') or '').strip(),
+                'ref': normalized_ref,
+                'result': 'ok',
+                'timestamp': now_iso(),
+            },
+        )
+        item['audit_logged'] = True
+    except Exception as exc:
+        item['audit_logged'] = False
+        item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+    return {'ok': True, 'item': item}
+
+
 @router.post('/memory/admin/retry-head')
 async def retry_memory_queue_head(request: Request, payload: dict | None = Body(default=None)):
     if not _memory_admin_mutations_enabled():
@@ -2366,8 +2436,8 @@ async def get_memory_failed(
         'items': list(payload.get('items') or []),
         'total': int(payload.get('total', 0) or 0),
         'has_more': bool(payload.get('has_more', False)),
-        # 前端据此渲染重试/放弃按钮的可用态；变更本身仍由后端 env 门控二次校验。
-        'mutations_enabled': _memory_admin_mutations_enabled(),
+        # 失败重试/放弃面不再受 env 门控（审计 + 前端二次确认弹窗即防护），恒为可用。
+        'mutations_enabled': True,
     }
 
 
@@ -2447,9 +2517,6 @@ async def _mutate_memory_failed_record(
 
 @router.post('/memory/failed/{failed_id}/retry')
 async def retry_memory_failed_record(request: Request, failed_id: str, payload: dict | None = Body(default=None)):
-    if not _memory_admin_mutations_enabled():
-        raise _memory_admin_mutation_disabled()
-
     manager = _runtime_memory_manager()
     reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
     request_id = str(request.headers.get('x-request-id') or '').strip()
@@ -2465,9 +2532,6 @@ async def retry_memory_failed_record(request: Request, failed_id: str, payload: 
 
 @router.post('/memory/failed/{failed_id}/discard')
 async def discard_memory_failed_record(request: Request, failed_id: str, payload: dict | None = Body(default=None)):
-    if not _memory_admin_mutations_enabled():
-        raise _memory_admin_mutation_disabled()
-
     manager = _runtime_memory_manager()
     reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
     request_id = str(request.headers.get('x-request-id') or '').strip()

@@ -1247,10 +1247,17 @@ class MemoryManager:
             **({"minimal_memory": new_minimal} if new_minimal is not None else {}),
         }
 
-    async def delete_current_memories(self, memory_ids: list[str], *, reason: str = "") -> dict[str, Any]:
+    async def delete_current_memories(
+        self,
+        memory_ids: list[str],
+        *,
+        reason: str = "",
+        note_refs: list[str] | None = None,
+    ) -> dict[str, Any]:
         """管理员批量删除记忆（sqlite 为源，MEMORY.md 镜像同步重建）。
 
-        被删记忆引用的 note 文件不在这里级联清理；孤儿 note 由 doctor 检查报告。
+        `note_refs` 为操作员在删除确认弹窗中勾选的关联笔记：仅删除显式勾选的
+        note 文件，未勾选的 note 保留（孤儿 note 由 doctor / reconcile-notes 报告）。
         """
         ids: list[str] = []
         for raw_id in list(memory_ids or []):
@@ -1259,6 +1266,11 @@ class MemoryManager:
                 ids.append(normalized)
         if not ids:
             raise ValueError("memory_ids is required")
+        requested_note_refs: list[str] = []
+        for raw_ref in list(note_refs or []):
+            normalized_ref = str(raw_ref or "").strip()
+            if normalized_ref and normalized_ref not in requested_note_refs:
+                requested_note_refs.append(normalized_ref)
         now_iso = self._now_iso()
         with self._io_lock:
             repo = getattr(self, "_memory_repo", None)
@@ -1273,11 +1285,41 @@ class MemoryManager:
                     missing.append(memory_id)
             if deleted:
                 self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+            notes_deleted: list[str] = []
+            notes_missing: list[str] = []
+            for ref in requested_note_refs:
+                path = self.notes_dir / note_file_name(ref)
+                if path.exists():
+                    path.unlink()
+                    notes_deleted.append(ref)
+                else:
+                    notes_missing.append(ref)
         return {
             "deleted": deleted,
             "missing": missing,
             "deleted_at": now_iso,
             "reason": str(reason or "").strip(),
+            "notes_deleted": notes_deleted,
+            "notes_missing": notes_missing,
+        }
+
+    async def update_note(self, ref: str, *, body: str) -> dict[str, Any]:
+        """管理员编辑 note 正文（note 预览窗的受控编辑面，无删除能力）。"""
+        normalized_ref = str(ref or "").strip()
+        if not normalized_ref:
+            raise ValueError("note ref is required")
+        new_body = str(body or "")
+        if not new_body.strip():
+            raise ValueError("note body must not be empty")
+        with self._io_lock:
+            path = self.notes_dir / note_file_name(normalized_ref)
+            if not path.exists():
+                raise KeyError(f"memory note not found: {normalized_ref}")
+            path.write_text(new_body, encoding="utf-8")
+        return {
+            "ref": normalized_ref,
+            "body": new_body,
+            "updated_at": self._now_iso(),
         }
 
     def doctor_report(

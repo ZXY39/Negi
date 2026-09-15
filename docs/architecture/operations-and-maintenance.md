@@ -443,8 +443,8 @@ Operator workflow for parked failed batches:
 1. The web `记忆管理` page shows the `失败记忆` panel only while parked records exist (left column, under the pending queue). Cards are red, carry the failure category and a retry icon; clicking a card opens the detail drawer with the full error history.
 2. `provider_error` records rejoin the queue automatically: every successfully applied batch requeues the oldest parked provider-error record at the queue tail. During a provider outage nothing retries; recovery is paced by real traffic. `queue.auto_requeue_on_success=false` disables the signal entirely.
 3. `protocol` records (the memory agent answered but never produced a valid `memory_apply_batch` result) never auto-requeue; they wait for an operator.
-4. Manual retry and discard live behind the `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS` environment variable (same gate as the legacy retry-head contract). Retry requeues the record under its original `request_id`s; discard writes an `operator_discarded` terminal row into `ops.jsonl`, removes the parked record and any stale queue rows, and makes those `request_id`s dedupe-processed. Both actions append to `memory/admin_audit.jsonl`.
-5. Without the env gate the UI buttons stay disabled and the endpoints answer `403 memory_admin_mutation_disabled`; inspecting the parked records stays available to everyone.
+4. Manual retry and discard are ordinary operator actions on this surface (no environment flag): retry requeues the record under its original `request_id`s; discard writes an `operator_discarded` terminal row into `ops.jsonl`, removes the parked record and any stale queue rows, and makes those `request_id`s dedupe-processed. Both actions append to `memory/admin_audit.jsonl`. Only the legacy queue-head retry contract still requires `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS`.
+5. The UI buttons stay usable for every operator; the protective layers are the in-app second-confirmation dialogs and the audit trail. Inspecting parked records needs no flag either.
 
 Operator debugging order for a stuck queue head:
 
