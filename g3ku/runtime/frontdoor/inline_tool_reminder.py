@@ -799,10 +799,10 @@ class CeoToolReminderService:
         response = await chat_backend.chat(
             messages=list(assembly.model_messages),
             tools=[stop_tool.to_schema()],
-            model_refs=self._resolve_ceo_model_refs(),
+            model_refs=self._resolve_ceo_model_refs_for_session(record.session_key),
             parallel_tool_calls=False,
         )
-        model_refs = self._resolve_ceo_model_refs()
+        model_refs = self._resolve_ceo_model_refs_for_session(record.session_key)
         self._persist_frontdoor_internal_request_artifact(
             session_key=record.session_key,
             turn_id=record.turn_id,
@@ -947,18 +947,20 @@ class CeoToolReminderService:
         return str(value or "")
 
     def _resolve_ceo_model_refs(self) -> list[str]:
+        return self._support_ref()._resolve_ceo_model_refs()
+
+    def _resolve_ceo_model_refs_for_session(self, session_key: str | None = None) -> list[str]:
+        return self._support_ref()._resolve_ceo_model_refs_for_session(session_key)
+
+    def _support_ref(self):
         if self._support is None:
             from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
 
             self._support = CeoFrontDoorSupport(loop=self._loop)
-        return self._support._resolve_ceo_model_refs()
+        return self._support
 
     def _resolve_chat_backend(self):
-        if self._support is None:
-            from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
-
-            self._support = CeoFrontDoorSupport(loop=self._loop)
-        return self._support._resolve_chat_backend()
+        return self._support_ref()._resolve_chat_backend()
 
     def _persist_frontdoor_internal_request_artifact(
         self,

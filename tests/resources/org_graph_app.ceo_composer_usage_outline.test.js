@@ -178,7 +178,6 @@ test("composer usage brain maps ratio into progressive icon fill", () => {
     U.ceoComposerUsageBrain = new StubHTMLElement();
     U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
-    U.ceoComposerUsageBrainTip = new StubHTMLElement();
 
     syncCeoComposerUsageOutline();
 
@@ -186,7 +185,6 @@ test("composer usage brain maps ratio into progressive icon fill", () => {
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
     assert.equal(U.ceoComposerUsageBrain.dataset.usageState, "active");
     assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "openai:gpt-5.2 · 8000/32000 TOKEN");
-    assert.equal(U.ceoComposerUsageBrainTip.textContent, "openai:gpt-5.2 · 8000/32000 TOKEN");
     assert.match(String(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"] || ""), /^hsl\(/);
     assert.equal(U.ceoComposerUsageBrainBase.style.height, "75%");
     assert.equal(U.ceoComposerUsageBrainFill.style.height, "25%");

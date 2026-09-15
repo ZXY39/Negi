@@ -386,7 +386,11 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             updated_state,
             tool_names=list(updated_state.get("tool_names") or []),
         )
-        model_refs = list(updated_state.get("model_refs") or self._resolve_ceo_model_refs() or [])
+        model_refs = list(
+            updated_state.get("model_refs")
+            or self._resolve_ceo_model_refs_for_session(updated_state.get("session_key"))
+            or []
+        )
         provider_model = str(model_refs[0] if model_refs else "").strip()
         tool_schemas = []
         try:

@@ -31,7 +31,11 @@ from g3ku.runtime.tool_watchdog import (
     run_tool_with_hard_timeout,
     run_tool_with_watchdog,
 )
-from g3ku.runtime.web_ceo_sessions import SESSION_TASK_DEFAULTS_SCOPE_SESSION, ceo_session_task_defaults_scope
+from g3ku.runtime.web_ceo_sessions import (
+    SESSION_TASK_DEFAULTS_SCOPE_SESSION,
+    ceo_session_pinned_model_key,
+    ceo_session_task_defaults_scope,
+)
 from main.protocol import now_iso
 from main.runtime.chat_backend import ConfigChatBackend, sanitize_provider_messages
 from main.runtime.stage_messages import build_turn_only_system_note_message, is_turn_only_system_note_message, strip_turn_only_system_note_messages
@@ -261,6 +265,46 @@ class CeoFrontDoorSupport:
                 return refs
         default_ref = f"{getattr(self._loop, 'provider_name', '')}:{getattr(self._loop, 'model', '')}".strip(":")
         return [default_ref] if default_ref else [str(getattr(self._loop, "model", "") or "").strip()]
+
+    def _resolve_ceo_model_refs_for_session(self, session_key: str | None = None) -> list[str]:
+        """会话固定模型优先，其余情况回退角色模型链。
+
+        ``session_key`` 缺省或不带固定模型时与 ``_resolve_ceo_model_refs()`` 完全一致；
+        固定模型被删除/禁用时返回模型链（会话自动回退）。
+        """
+        pinned_ref = self._session_pinned_model_ref(session_key)
+        if pinned_ref:
+            return [pinned_ref]
+        return self._resolve_ceo_model_refs()
+
+    def _session_pinned_model_ref(self, session_key: str | None = None) -> str:
+        key = str(session_key or "").strip()
+        if not key:
+            return ""
+        sessions = getattr(self._loop, "sessions", None)
+        getter = getattr(sessions, "get_or_create", None) or getattr(sessions, "get", None)
+        if not callable(getter):
+            return ""
+        try:
+            record = getter(key)
+        except Exception:
+            logger.debug("session pinned model lookup skipped; session={}", key)
+            return ""
+        pinned = ceo_session_pinned_model_key(getattr(record, "metadata", None))
+        if not pinned:
+            return ""
+        app_config = getattr(self._loop, "app_config", None)
+        if app_config is None:
+            return ""
+        try:
+            managed = app_config.get_managed_model(pinned)
+        except Exception:
+            return ""
+        # 固定模型被删除或禁用即视为失效：会话回退模型链，而不是带着不可用模型发请求。
+        if managed is None or not bool(getattr(managed, "enabled", True)):
+            logger.info("session pinned model unavailable; fallback to ceo chain session={} model={}", key, pinned)
+            return ""
+        return pinned
 
     @staticmethod
     def _model_ref_supports_prompt_cache(app_config: Any, model_ref: str) -> bool:

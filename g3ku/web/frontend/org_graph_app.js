@@ -121,6 +121,22 @@ const S = {
     ceoComposerUsageRequestSeq: 0,
     ceoComposerUsageBusy: false,
     ceoComposerUsageNeedsRefresh: false,
+    ceoModelSelection: {
+        sessionId: "",
+        mode: "chain",
+        modelKey: "",
+        pinnedAvailable: true,
+        loading: false,
+        saving: false,
+        requestToken: 0,
+        panelOpen: false,
+        pickerOpen: false,
+        search: "",
+        chainKeys: [],
+        dragFrom: -1,
+        dropIndex: null,
+        error: "",
+    },
     liveDurationIntervalId: null,
     activeSessionId: "",
     ceoSessionBusy: false,
@@ -383,10 +399,26 @@ const U = {
     ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
     ceoEditResendBanner: document.getElementById("ceo-edit-resend-banner"),
     ceoContextLoadNotice: document.getElementById("ceo-context-load-notice"),
+    ceoModelModePanel: document.getElementById("ceo-model-mode-panel"),
+    ceoModelModeCurrent: document.getElementById("ceo-model-mode-current"),
+    ceoModelModeBadge: document.getElementById("ceo-model-mode-badge"),
+    ceoModelModeUsageFill: document.getElementById("ceo-model-mode-usage-fill"),
+    ceoModelModeUsageText: document.getElementById("ceo-model-mode-usage-text"),
+    ceoModelModeChain: document.getElementById("ceo-model-mode-chain"),
+    ceoModelModePinned: document.getElementById("ceo-model-mode-pinned"),
+    ceoModelChainPane: document.getElementById("ceo-model-chain-pane"),
+    ceoModelChainList: document.getElementById("ceo-model-chain-list"),
+    ceoModelChainEmpty: document.getElementById("ceo-model-chain-empty"),
+    ceoModelChainActions: document.getElementById("ceo-model-chain-actions"),
+    ceoModelChainApply: document.getElementById("ceo-model-chain-apply"),
+    ceoModelPicker: document.getElementById("ceo-model-picker"),
+    ceoModelPickerSearch: document.getElementById("ceo-model-picker-search"),
+    ceoModelPickerList: document.getElementById("ceo-model-picker-list"),
+    ceoModelPickerEmpty: document.getElementById("ceo-model-picker-empty"),
+    ceoModelModeNote: document.getElementById("ceo-model-mode-note"),
     ceoComposerUsageBrain: document.getElementById("ceo-context-usage-brain"),
     ceoComposerUsageBrainBase: document.getElementById("ceo-context-usage-brain-base"),
     ceoComposerUsageBrainFill: document.getElementById("ceo-context-usage-brain-fill"),
-    ceoComposerUsageBrainTip: document.getElementById("ceo-context-usage-brain-tip"),
     ceoCompressionToast: document.getElementById("ceo-compression-toast"),
     ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
     ceoModelRetryToast: document.getElementById("ceo-model-retry-toast"),
@@ -806,6 +838,7 @@ function syncCeoComposerReadonlyState() {
         U.ceoInput.removeAttribute("readonly");
         U.ceoInput.placeholder = "输入你的任务，可保留换行；也可以上传图片或文件作为补充";
     }
+    syncCeoModelModeControl();
 }
 
 function patchCeoSessionRuntimeState(sessionId, isRunning) {
@@ -1103,11 +1136,11 @@ async function ensureTraceOutputCodeBlockContent(
     const emptyText = String(element.dataset.emptyText || "").trim();
     element.dataset.previewText = previewText;
     element.dataset.outputHydrating = "true";
-    element.textContent = loadingText;
+    setTextContentPreservingScroll(element, loadingText);
     try {
         const fullText = await getTraceOutputContentByRef(outputRef, { view });
         const nextText = String(fullText || previewText || emptyText).trim() || emptyText;
-        element.textContent = nextText;
+        setTextContentPreservingScroll(element, nextText);
         element.dataset.outputHydrated = "true";
         return nextText;
     } catch (error) {
@@ -1115,9 +1148,12 @@ async function ensureTraceOutputCodeBlockContent(
             ? ApiClient.friendlyErrorMessage(error, error?.message || "未知错误")
             : String(error?.message || error || "未知错误");
         const fallbackText = String(previewText || emptyText).trim();
-        element.textContent = fallbackText
-            ? `${fallbackText}\n\n${errorPrefix}${message}`
-            : `${errorPrefix}${message}`;
+        setTextContentPreservingScroll(
+            element,
+            fallbackText
+                ? `${fallbackText}\n\n${errorPrefix}${message}`
+                : `${errorPrefix}${message}`
+        );
         element.dataset.outputHydrated = "error";
         return fallbackText;
     } finally {
@@ -1162,6 +1198,19 @@ function setElementScrollTop(element, value) {
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) return;
     element.scrollTop = Math.max(0, numericValue);
+}
+
+function setTextContentPreservingScroll(element, text) {
+    // 工具输出框自身就是滚动容器(封顶 max-height + overflow auto)。重写 textContent
+    // 会替换全部子节点、把内容高度瞬间压到 0,浏览器随之把 scrollTop 归零——用户正在
+    // 回翻输出时任何一次新输出/每秒时长刷新都会把阅读位置丢掉。文本没变时整体跳过,
+    // 变了则原位恢复,最长不越过新内容的最大滚动量。
+    if (!(element instanceof HTMLElement)) return;
+    const next = String(text ?? "");
+    if (element.textContent === next) return;
+    const previousTop = Number(element.scrollTop || 0);
+    element.textContent = next;
+    if (previousTop > 0) setElementScrollTop(element, previousTop);
 }
 
 async function copyTextToClipboard(text) {
@@ -1457,6 +1506,566 @@ function setCeoComposerUsageEstimate(sessionId, payload) {
     return normalized;
 }
 
+function ceoModelDisplayTitle(item) {
+    if (!item) return "";
+    return String(item.name || "").trim()
+        || String(item.key || "").trim()
+        || String(item.provider_model || "").trim();
+}
+
+function ceoModelCatalogItem(modelKey) {
+    const key = String(modelKey || "").trim();
+    if (!key) return null;
+    return (S.modelCatalog.catalog || []).find((item) => String(item?.key || "").trim() === key) || null;
+}
+
+function ceoModelUsageHeadlineTitle(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return "";
+    const byKey = ceoModelCatalogItem(text);
+    if (byKey) return ceoModelDisplayTitle(byKey) || text;
+    const byProviderModel = (S.modelCatalog.catalog || []).find(
+        (item) => String(item?.provider_model || "").trim() === text,
+    );
+    if (byProviderModel) return ceoModelDisplayTitle(byProviderModel) || text;
+    return text;
+}
+
+function ceoCurrentUsageEstimate() {
+    const activeSession = String(activeSessionId() || "").trim();
+    const runtimeEstimate = activeCeoRuntimeUsageEstimate(activeSession);
+    const composerEstimate = (
+        S.ceoComposerUsageEstimate
+        && String(S.ceoComposerUsageEstimate.session_id || "").trim() === activeSession
+    ) ? S.ceoComposerUsageEstimate : null;
+    return runtimeEstimate || (!S.ceoTurnActive ? composerEstimate : null);
+}
+
+function ceoModelChainKeys() {
+    const roles = S.modelCatalog && S.modelCatalog.roles ? S.modelCatalog.roles : null;
+    return (Array.isArray(roles?.ceo) ? roles.ceo : [])
+        .map((ref) => String(ref || "").trim())
+        .filter(Boolean);
+}
+
+function ceoModelSelectionFor(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key) return null;
+    return String(S.ceoModelSelection.sessionId || "").trim() === key ? S.ceoModelSelection : null;
+}
+
+function resetCeoModelSelection(sessionId) {
+    const key = String(sessionId || "").trim();
+    S.ceoModelSelection = {
+        ...S.ceoModelSelection,
+        sessionId: key,
+        mode: "chain",
+        modelKey: "",
+        pinnedAvailable: true,
+        loading: false,
+        saving: false,
+        error: "",
+        panelOpen: false,
+        pickerOpen: false,
+        search: "",
+        chainKeys: ceoModelChainKeys(),
+        dragFrom: -1,
+        dropIndex: null,
+    };
+    syncCeoModelModeControl();
+}
+
+function applyCeoModelSelectionPayload(sessionId, payload) {
+    const key = String(sessionId || "").trim();
+    const data = payload && typeof payload === "object" ? payload : {};
+    const modelKey = String(data.model_key || data.modelKey || "").trim();
+    const mode = String(data.mode || "").trim() === "model" && modelKey ? "model" : "chain";
+    S.ceoModelSelection = {
+        ...S.ceoModelSelection,
+        sessionId: String(data.session_id || key).trim() || key,
+        mode,
+        modelKey: mode === "model" ? modelKey : "",
+        pinnedAvailable: data.pinned_available !== false,
+        loading: false,
+        saving: false,
+        error: "",
+        chainKeys: ceoModelChainKeys(),
+    };
+    syncCeoModelModeControl();
+    return S.ceoModelSelection;
+}
+
+async function refreshCeoModelSelection(sessionId, { force = false } = {}) {
+    const key = String(sessionId || "").trim();
+    if (!key || activeSessionIsReadonly()) {
+        resetCeoModelSelection(key);
+        return null;
+    }
+    const current = S.ceoModelSelection;
+    if (!force && String(current.sessionId || "").trim() === key && !current.loading && !current.error) {
+        return current;
+    }
+    current.requestToken += 1;
+    const token = current.requestToken;
+    S.ceoModelSelection = { ...current, sessionId: key, loading: true, error: "" };
+    syncCeoModelModeControl();
+    try {
+        const payload = await ApiClient.getCeoSessionModelSelection(key);
+        if (token !== S.ceoModelSelection.requestToken) return null;
+        return applyCeoModelSelectionPayload(key, payload);
+    } catch (error) {
+        if (token !== S.ceoModelSelection.requestToken) return null;
+        S.ceoModelSelection = {
+            ...S.ceoModelSelection,
+            sessionId: key,
+            loading: false,
+            error: String(error?.message || "load_failed"),
+        };
+        syncCeoModelModeControl();
+        return null;
+    }
+}
+
+async function saveCeoModelSelection(mode, modelKey = "") {
+    const sessionId = String(activeSessionId() || "").trim();
+    const nextMode = mode === "model" ? "model" : "chain";
+    const nextKey = nextMode === "model" ? String(modelKey || "").trim() : "";
+    if (!sessionId || activeSessionIsReadonly() || S.ceoModelSelection.saving) return null;
+    if (nextMode === "model" && !nextKey) return null;
+    const current = ceoModelSelectionFor(sessionId) || S.ceoModelSelection;
+    if (current.mode === nextMode && String(current.modelKey || "") === nextKey) {
+        if (nextMode === "model") closeCeoModelModePanel();
+        return current;
+    }
+    S.ceoModelSelection = { ...current, sessionId, saving: true, error: "" };
+    syncCeoModelModeControl();
+    try {
+        const payload = await ApiClient.updateCeoSessionModelSelection(
+            sessionId,
+            nextMode === "model" ? { mode: "model", model_key: nextKey } : { mode: "chain" },
+        );
+        if (sessionId !== String(activeSessionId() || "").trim()) return null;
+        const applied = applyCeoModelSelectionPayload(sessionId, payload);
+        // 选好固定模型即收起面板；切回模型链留在面板里继续看链。
+        if (nextMode === "model") closeCeoModelModePanel();
+        else syncCeoModelModeControl();
+        // 固定模型会改变上下文窗口判定，用量表必须跟着重算。
+        scheduleCeoComposerUsageRefresh({ immediate: true });
+        showToast({
+            title: "模型模式已更新",
+            text: nextMode === "model" ? "本会话已固定使用所选模型" : "本会话已恢复模型链",
+            kind: "success",
+        });
+        return applied;
+    } catch (error) {
+        if (sessionId !== String(activeSessionId() || "").trim()) return null;
+        S.ceoModelSelection = {
+            ...S.ceoModelSelection,
+            sessionId,
+            saving: false,
+            error: String(error?.message || "save_failed"),
+        };
+        syncCeoModelModeControl();
+        showToast({
+            title: "模型模式保存失败",
+            text: String(error?.message || "请稍后重试"),
+            kind: "error",
+        });
+        return null;
+    }
+}
+
+async function saveCeoModelChain(keys) {
+    const sessionId = String(activeSessionId() || "").trim();
+    const modelKeys = normalizeModelRoleChain(keys);
+    if (!sessionId || activeSessionIsReadonly() || S.ceoModelSelection.saving) return null;
+    if (!modelKeys.length) return null;
+    S.ceoModelSelection = { ...S.ceoModelSelection, saving: true, error: "" };
+    syncCeoModelModeControl();
+    try {
+        const payload = await ApiClient.updateModelRoleChain("ceo", {
+            modelKeys,
+            maxIterations: S.modelCatalog.roleIterations?.ceo ?? null,
+            maxConcurrency: S.modelCatalog.roleConcurrency?.ceo ?? null,
+        });
+        if (payload) applyModelCatalog(payload, { preserveRoleDrafts: true });
+        S.ceoModelSelection = {
+            ...S.ceoModelSelection,
+            saving: false,
+            error: "",
+            chainKeys: ceoModelChainKeys(),
+            dragFrom: -1,
+            dropIndex: null,
+        };
+        syncCeoModelModeControl();
+        scheduleCeoComposerUsageRefresh({ immediate: true });
+        showToast({ title: "模型链已更新", text: "新的优先级对全部模型链会话生效", kind: "success" });
+        return payload;
+    } catch (error) {
+        // 保存失败回到服务端顺序，避免面板显示一份没生效的链。
+        S.ceoModelSelection = {
+            ...S.ceoModelSelection,
+            saving: false,
+            error: String(error?.message || "save_failed"),
+            chainKeys: ceoModelChainKeys(),
+            dragFrom: -1,
+            dropIndex: null,
+        };
+        syncCeoModelModeControl();
+        showToast({ title: "模型链保存失败", text: String(error?.message || "请稍后重试"), kind: "error" });
+        return null;
+    }
+}
+
+async function ensureCeoModelCatalog() {
+    if (S.modelCatalog.loading || (S.modelCatalog.catalog || []).length) return;
+    try {
+        await loadModels();
+    } catch (error) {
+        void error;
+    }
+    renderCeoModelPicker();
+    renderCeoModelChainPane();
+}
+
+function filterCeoModelPickerModels() {
+    const query = String(S.ceoModelSelection.search || "").trim().toLowerCase();
+    const catalog = [...(S.modelCatalog.catalog || [])];
+    const matched = query
+        ? catalog.filter((item) => [ceoModelDisplayTitle(item), item.key, item.provider_model, item.name, item.description]
+            .join("\n")
+            .toLowerCase()
+            .includes(query))
+        : catalog;
+    return matched.sort((left, right) => ceoModelDisplayTitle(left).localeCompare(ceoModelDisplayTitle(right), "zh-Hans-CN"));
+}
+
+function renderCeoModelPicker() {
+    if (!U.ceoModelPickerList) return;
+    const sessionId = String(activeSessionId() || "").trim();
+    const selection = ceoModelSelectionFor(sessionId);
+    if (!selection || !selection.panelOpen || !selection.pickerOpen) {
+        U.ceoModelPickerList.innerHTML = "";
+        return;
+    }
+    const pinnedKey = String(selection.modelKey || "");
+    const models = filterCeoModelPickerModels();
+    if (U.ceoModelPickerEmpty) U.ceoModelPickerEmpty.hidden = models.length > 0;
+    U.ceoModelPickerList.innerHTML = models.map((item) => {
+        const key = String(item.key || "").trim();
+        const title = ceoModelDisplayTitle(item) || key;
+        const subtitle = String(item.provider_model || "").trim() || key;
+        const isDisabled = item.enabled === false;
+        const isSelected = key === pinnedKey;
+        return `
+            <button type="button" class="ceo-model-picker-item${isSelected ? " is-selected" : ""}" role="option"
+                aria-selected="${isSelected ? "true" : "false"}" data-ceo-model-pick="${esc(key)}"${isDisabled ? " disabled" : ""}>
+                <span class="ceo-model-picker-item-main">
+                    <span class="ceo-model-picker-item-title">${esc(title)}</span>
+                    <span class="ceo-model-picker-item-subtitle">${esc(subtitle)}</span>
+                </span>
+                ${isDisabled ? '<span class="ceo-model-picker-item-chip">已禁用</span>' : ""}
+                <i data-lucide="check" class="ceo-model-picker-item-check" aria-hidden="true"></i>
+            </button>`;
+    }).join("");
+    icons();
+}
+
+function ceoModelChainDraft() {
+    const keys = S.ceoModelSelection.chainKeys;
+    return Array.isArray(keys) ? keys : [];
+}
+
+function ceoModelChainDirty() {
+    const draft = ceoModelChainDraft();
+    const serverKeys = ceoModelChainKeys();
+    return draft.length !== serverKeys.length || draft.some((key, index) => key !== serverKeys[index]);
+}
+
+// 固定模型被删除/禁用时运行时已回退模型链：面板按实际生效的模式展示。
+function ceoModelEffectivePinnedKey(selection) {
+    const mode = String(selection?.mode || "chain");
+    const pinnedKey = mode === "model" ? String(selection?.modelKey || "") : "";
+    if (!pinnedKey) return "";
+    return selection?.pinnedAvailable === false ? "" : pinnedKey;
+}
+
+function ceoModelStalePinnedKey(selection) {
+    const mode = String(selection?.mode || "chain");
+    const pinnedKey = mode === "model" ? String(selection?.modelKey || "") : "";
+    return pinnedKey && selection?.pinnedAvailable === false ? pinnedKey : "";
+}
+
+function renderCeoModelChainPane() {
+    if (!U.ceoModelChainList) return;
+    const sessionId = String(activeSessionId() || "").trim();
+    const selection = ceoModelSelectionFor(sessionId);
+    const visible = !!selection?.panelOpen && !selection?.pickerOpen;
+    U.ceoModelChainList.innerHTML = "";
+    if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = true;
+    if (U.ceoModelChainActions) U.ceoModelChainActions.hidden = true;
+    if (!visible) return;
+    const keys = ceoModelChainDraft();
+    if (U.ceoModelChainEmpty) U.ceoModelChainEmpty.hidden = keys.length > 0;
+    if (U.ceoModelChainActions) U.ceoModelChainActions.hidden = !ceoModelChainDirty();
+    if (U.ceoModelChainApply) U.ceoModelChainApply.disabled = !!selection?.saving;
+    U.ceoModelChainList.innerHTML = keys.map((key, index) => {
+        const item = ceoModelCatalogItem(key);
+        const title = ceoModelDisplayTitle(item) || key;
+        return `
+            <article class="ceo-model-chain-row" draggable="true" role="listitem"
+                data-ceo-chain-index="${index}" data-ceo-chain-key="${esc(key)}">
+                <span class="ceo-model-chain-grip" aria-hidden="true">&#9776;</span>
+                <span class="ceo-model-chain-title">${esc(title)}</span>
+            </article>`;
+    }).join("");
+}
+
+function clearCeoModelChainDragDecorations() {
+    const list = U.ceoModelChainList;
+    if (!list) return;
+    list.querySelectorAll(".is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+    list.querySelectorAll(".is-dragging").forEach((item) => item.classList.remove("is-dragging"));
+    list.querySelectorAll("[data-ceo-chain-placeholder]").forEach((item) => item.remove());
+    list.classList.remove("is-drop-zone");
+}
+
+function ceoModelChainDropIndex(list, clientY) {
+    const cards = [...list.querySelectorAll("[data-ceo-chain-index]")];
+    for (const card of cards) {
+        const rect = card.getBoundingClientRect();
+        if (clientY < rect.top + (rect.height / 2)) return Number(card.dataset.ceoChainIndex);
+    }
+    return cards.length;
+}
+
+function beginCeoModelChainDrag(event) {
+    const list = U.ceoModelChainList;
+    const card = event.target instanceof Element ? event.target.closest("[data-ceo-chain-index]") : null;
+    if (!list || !card || S.ceoModelSelection.saving) return;
+    const index = Number(card.dataset.ceoChainIndex);
+    if (!Number.isInteger(index) || index < 0) return;
+    S.ceoModelSelection = { ...S.ceoModelSelection, dragFrom: index, dropIndex: null };
+    card.classList.add("is-dragging");
+    if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        try {
+            event.dataTransfer.setData("text/plain", String(index));
+        } catch (error) {
+            void error;
+        }
+    }
+}
+
+function updateCeoModelChainDropTarget(event) {
+    const list = U.ceoModelChainList;
+    const from = Number(S.ceoModelSelection.dragFrom);
+    if (!list || !Number.isInteger(from) || from < 0) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    const targetIndex = ceoModelChainDropIndex(list, event.clientY);
+    // 目标位置没变就不重排占位符，避免拖动时列表抖动。
+    if (S.ceoModelSelection.dropIndex === targetIndex && list.querySelector("[data-ceo-chain-placeholder]")) return;
+    clearCeoModelChainDragDecorations();
+    S.ceoModelSelection = { ...S.ceoModelSelection, dropIndex: targetIndex };
+    const cards = [...list.querySelectorAll("[data-ceo-chain-index]")];
+    const dragging = cards.find((card) => Number(card.dataset.ceoChainIndex) === from);
+    if (dragging) dragging.classList.add("is-dragging");
+    const anchor = cards.find((card) => Number(card.dataset.ceoChainIndex) === targetIndex) || null;
+    const placeholder = document.createElement("div");
+    placeholder.className = "model-chain-drop-placeholder";
+    placeholder.dataset.ceoChainPlaceholder = "1";
+    if (anchor && anchor !== dragging) {
+        anchor.classList.add("is-drop-target");
+        list.insertBefore(placeholder, anchor);
+    } else {
+        list.appendChild(placeholder);
+    }
+    list.classList.add("is-drop-zone");
+}
+
+function finishCeoModelChainDrag(event) {
+    event.preventDefault();
+    const from = Number(S.ceoModelSelection.dragFrom);
+    const targetIndex = S.ceoModelSelection.dropIndex;
+    clearCeoModelChainDragDecorations();
+    if (!Number.isInteger(from) || from < 0) return;
+    const keys = [...ceoModelChainDraft()];
+    const insertAt = Number.isInteger(targetIndex) && targetIndex > from ? targetIndex - 1 : targetIndex;
+    const nextKeys = keys.filter((_key, index) => index !== from);
+    if (Number.isInteger(insertAt)) {
+        const bounded = Math.max(0, Math.min(nextKeys.length, insertAt));
+        nextKeys.splice(bounded, 0, keys[from]);
+    } else {
+        nextKeys.push(keys[from]);
+    }
+    // 拖动只改草稿：点「应用」才写回模型链。
+    S.ceoModelSelection = { ...S.ceoModelSelection, chainKeys: nextKeys, dragFrom: -1, dropIndex: null };
+    renderCeoModelChainPane();
+}
+
+function syncCeoModelModePanelUsage() {
+    const panel = U.ceoModelModePanel;
+    const current = U.ceoModelModeCurrent;
+    const fill = U.ceoModelModeUsageFill;
+    const text = U.ceoModelModeUsageText;
+    if (!current || !fill || !text) return;
+    const estimate = ceoCurrentUsageEstimate();
+    const hasEstimate = !!estimate;
+    const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
+    const visualRatio = hasEstimate && ratio > 0 ? Math.max(ratio, 0.06) : 0;
+    const hue = Math.max(0, Math.min(145, 145 - (visualRatio * 145)));
+    if (typeof panel?.style?.setProperty === "function") {
+        panel.style.setProperty("--ceo-context-usage-color", `hsl(${hue.toFixed(1)} 82% 58%)`);
+    }
+    fill.style.width = `${Math.max(0, Math.min(100, visualRatio * 100))}%`;
+    current.textContent = hasEstimate
+        ? (ceoModelUsageHeadlineTitle(estimate.provider_model) || "current-model")
+        : "等待 Leader 上下文预估";
+    text.textContent = hasEstimate
+        ? `${estimate.provider_model || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
+        : "等待 Leader 上下文预估";
+}
+
+function syncCeoModelModeControl() {
+    const sessionId = String(activeSessionId() || "").trim();
+    const readonly = activeSessionIsReadonly();
+    const selection = ceoModelSelectionFor(sessionId);
+    const effectiveKey = ceoModelEffectivePinnedKey(selection);
+    const staleKey = ceoModelStalePinnedKey(selection);
+    const panelOpen = !!selection?.panelOpen && !!sessionId && !readonly;
+    const brain = U.ceoComposerUsageBrain;
+    if (brain) {
+        brain.classList.toggle("is-panel-open", panelOpen);
+        brain.setAttribute("aria-expanded", panelOpen ? "true" : "false");
+    }
+    if (U.ceoModelModePanel) U.ceoModelModePanel.hidden = !panelOpen;
+    if (U.ceoModelModeChain) U.ceoModelModeChain.setAttribute("aria-checked", effectiveKey ? "false" : "true");
+    if (U.ceoModelModePinned) U.ceoModelModePinned.setAttribute("aria-checked", effectiveKey ? "true" : "false");
+    if (U.ceoModelModeBadge) {
+        U.ceoModelModeBadge.textContent = effectiveKey
+            ? `会话固定 · ${ceoModelDisplayTitle(ceoModelCatalogItem(effectiveKey)) || effectiveKey}`
+            : "模型链";
+    }
+    if (U.ceoModelPicker) U.ceoModelPicker.hidden = !(panelOpen && selection?.pickerOpen);
+    if (U.ceoModelChainPane) U.ceoModelChainPane.hidden = !(panelOpen && !selection?.pickerOpen);
+    if (U.ceoModelModeNote) {
+        const note = staleKey
+            ? "固定的模型已被删除或禁用，本会话已自动回退模型链。"
+            : "";
+        U.ceoModelModeNote.textContent = note;
+        U.ceoModelModeNote.hidden = !note;
+    }
+    if (panelOpen) syncCeoModelModePanelUsage();
+    renderCeoModelPicker();
+    renderCeoModelChainPane();
+}
+
+function openCeoModelModePanel() {
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId || activeSessionIsReadonly()) return;
+    const current = ceoModelSelectionFor(sessionId) || S.ceoModelSelection;
+    S.ceoModelSelection = {
+        ...current,
+        sessionId,
+        panelOpen: true,
+        // 只在固定确实生效时才直接进指定模型列表；失效固定按实际生效的模型链展示。
+        pickerOpen: !!ceoModelEffectivePinnedKey(current),
+        search: "",
+        chainKeys: ceoModelChainKeys(),
+        dragFrom: -1,
+        dropIndex: null,
+    };
+    if (U.ceoModelPickerSearch) U.ceoModelPickerSearch.value = "";
+    syncCeoModelModeControl();
+    if (S.ceoModelSelection.pickerOpen) U.ceoModelPickerSearch?.focus();
+    void ensureCeoModelCatalog();
+}
+
+function closeCeoModelModePanel() {
+    if (!S.ceoModelSelection.panelOpen && !S.ceoModelSelection.pickerOpen) return false;
+    S.ceoModelSelection = {
+        ...S.ceoModelSelection,
+        panelOpen: false,
+        pickerOpen: false,
+        search: "",
+        dragFrom: -1,
+        dropIndex: null,
+    };
+    syncCeoModelModeControl();
+    return true;
+}
+
+function openCeoModelModePicker() {
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId || activeSessionIsReadonly()) return;
+    S.ceoModelSelection = { ...S.ceoModelSelection, sessionId, panelOpen: true, pickerOpen: true, search: "" };
+    if (U.ceoModelPickerSearch) U.ceoModelPickerSearch.value = "";
+    syncCeoModelModeControl();
+    U.ceoModelPickerSearch?.focus();
+    void ensureCeoModelCatalog();
+}
+
+function showCeoModelChainPane() {
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId || activeSessionIsReadonly()) return;
+    S.ceoModelSelection = {
+        ...S.ceoModelSelection,
+        sessionId,
+        panelOpen: true,
+        pickerOpen: false,
+        search: "",
+        chainKeys: ceoModelChainKeys(),
+        dragFrom: -1,
+        dropIndex: null,
+    };
+    syncCeoModelModeControl();
+}
+
+function bindCeoModelModeControls() {
+    const brain = U.ceoComposerUsageBrain;
+    brain?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (S.ceoModelSelection.panelOpen) closeCeoModelModePanel();
+        else openCeoModelModePanel();
+    });
+    brain?.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (S.ceoModelSelection.panelOpen) closeCeoModelModePanel();
+        else openCeoModelModePanel();
+    });
+    U.ceoModelModeChain?.addEventListener("click", () => {
+        showCeoModelChainPane();
+        void saveCeoModelSelection("chain");
+    });
+    U.ceoModelModePinned?.addEventListener("click", () => {
+        openCeoModelModePicker();
+    });
+    U.ceoModelPickerSearch?.addEventListener("input", () => {
+        S.ceoModelSelection = { ...S.ceoModelSelection, search: String(U.ceoModelPickerSearch?.value || "") };
+        renderCeoModelPicker();
+    });
+    U.ceoModelPickerList?.addEventListener("click", (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-ceo-model-pick]") : null;
+        if (!target || target.disabled) return;
+        void saveCeoModelSelection("model", target.getAttribute("data-ceo-model-pick"));
+    });
+    U.ceoModelChainList?.addEventListener("dragstart", (event) => beginCeoModelChainDrag(event));
+    U.ceoModelChainList?.addEventListener("dragover", (event) => updateCeoModelChainDropTarget(event));
+    U.ceoModelChainList?.addEventListener("drop", (event) => finishCeoModelChainDrag(event));
+    U.ceoModelChainList?.addEventListener("dragend", () => {
+        clearCeoModelChainDragDecorations();
+        S.ceoModelSelection = { ...S.ceoModelSelection, dragFrom: -1, dropIndex: null };
+        renderCeoModelChainPane();
+    });
+    U.ceoModelChainApply?.addEventListener("click", () => {
+        if (S.ceoModelSelection.saving || !ceoModelChainDirty()) return;
+        void saveCeoModelChain(ceoModelChainDraft());
+    });
+}
+
 function setCeoComposerUsagePinnedEntries(sessionId, entries = []) {
     const key = String(sessionId || "").trim();
     const normalizedEntries = (Array.isArray(entries) ? entries : [])
@@ -1526,13 +2135,7 @@ function syncCeoComposerUsageOutline() {
     const base = U.ceoComposerUsageBrainBase;
     const fill = U.ceoComposerUsageBrainFill;
     if (!shell || !base || !fill) return;
-    const activeSession = String(activeSessionId() || "").trim();
-    const runtimeEstimate = activeCeoRuntimeUsageEstimate(activeSession);
-    const composerEstimate = (
-        S.ceoComposerUsageEstimate
-        && String(S.ceoComposerUsageEstimate.session_id || "").trim() === activeSession
-    ) ? S.ceoComposerUsageEstimate : null;
-    const estimate = runtimeEstimate || (!S.ceoTurnActive ? composerEstimate : null);
+    const estimate = ceoCurrentUsageEstimate();
     const hasEstimate = !!estimate;
     const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
     const visualRatio = hasEstimate && ratio > 0 ? Math.max(ratio, 0.06) : 0;
@@ -1557,9 +2160,11 @@ function syncCeoComposerUsageOutline() {
     const tipLabel = hasEstimate
         ? `${estimate.provider_model || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
         : "等待 Leader 上下文预估";
-    if (U.ceoComposerUsageBrainTip) U.ceoComposerUsageBrainTip.textContent = tipLabel;
+    // 数字只在面板头部展示；脑图标保留等价的无障碍名称，不用原生 title 浮层。
     shell.removeAttribute?.("title");
     if (shell.setAttribute) shell.setAttribute("aria-label", tipLabel);
+    // 面板头部展示同一份预估，两处数字必须同源。
+    if (S.ceoModelSelection.panelOpen) syncCeoModelModePanelUsage();
 }
 
 async function refreshCeoComposerUsageEstimate() {
@@ -4987,10 +5592,12 @@ function captureCeoTurnTraceViewState(turn = null) {
         flowOpen: !!(turn.flowEl && turn.flowEl.open),
         steps: {},
         roundTools: {},
+        scrolls: {},
     };
     Array.from(turn.listEl.querySelectorAll(".task-trace-step") || []).forEach((stepEl) => {
         const traceKey = String(stepEl?.dataset?.traceKey || "").trim();
         if (traceKey) state.steps[traceKey] = !!stepEl.open;
+        captureCeoNestedScrollState(stepEl, traceKey, state.scrolls);
     });
     Array.from(turn.listEl.querySelectorAll(".task-trace-round-tools") || []).forEach((host, hostIndex) => {
         const active = String(host?.dataset?.activeToolKey
@@ -4999,6 +5606,38 @@ function captureCeoTurnTraceViewState(turn = null) {
         if (active) state.roundTools[ceoTurnTraceRoundHostKey(host, hostIndex)] = active;
     });
     return state;
+}
+
+function ceoNestedScrollTargets(scopeEl = null) {
+    // 阶段轨道重建只复活 <details> 开合,输出框自身的滚动位置同样需要带过去:
+    // .interaction-step-detail 与 .task-trace-code 都是封顶滚动容器,DOM 换代即归零。
+    if (!(scopeEl instanceof HTMLElement)) return [];
+    return Array.from(scopeEl.querySelectorAll(".interaction-step-detail, .task-trace-code") || [])
+        .filter((el) => el instanceof HTMLElement);
+}
+
+function captureCeoNestedScrollState(stepEl = null, traceKey = "", sink = null) {
+    if (!sink || !traceKey) return;
+    const counters = { d: 0, c: 0 };
+    ceoNestedScrollTargets(stepEl).forEach((el) => {
+        const kind = el.classList.contains("interaction-step-detail") ? "d" : "c";
+        const key = `${traceKey}::${kind}::${counters[kind]}`;
+        counters[kind] += 1;
+        const scrollTop = Number(el.scrollTop || 0);
+        if (scrollTop > 0) sink[key] = scrollTop;
+    });
+}
+
+function applyCeoNestedScrollState(stepEl = null, traceKey = "", source = null) {
+    if (!source || !traceKey) return;
+    const counters = { d: 0, c: 0 };
+    ceoNestedScrollTargets(stepEl).forEach((el) => {
+        const kind = el.classList.contains("interaction-step-detail") ? "d" : "c";
+        const key = `${traceKey}::${kind}::${counters[kind]}`;
+        counters[kind] += 1;
+        const scrollTop = Number(source[key] || 0);
+        if (scrollTop > 0) setElementScrollTop(el, scrollTop);
+    });
 }
 
 function applyCeoTurnTraceViewState(turn = null, viewState = null) {
@@ -5010,6 +5649,7 @@ function applyCeoTurnTraceViewState(turn = null, viewState = null) {
     Array.from(turn.listEl.querySelectorAll(".task-trace-step") || []).forEach((stepEl) => {
         const traceKey = String(stepEl?.dataset?.traceKey || "").trim();
         if (traceKey && typeof viewState.steps?.[traceKey] === "boolean") stepEl.open = viewState.steps[traceKey];
+        applyCeoNestedScrollState(stepEl, traceKey, viewState.scrolls);
     });
     Array.from(turn.listEl.querySelectorAll(".task-trace-round-tools") || []).forEach((host, hostIndex) => {
         if (!(host instanceof HTMLElement)) return;
@@ -5583,6 +6223,25 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             item.task_dispatched === true ? 1 : 0,
         ];
     };
+    const projectTrace = (context) => {
+        // 阶段轨道参与签名:live 回合只渲染 canonical_context_delta,而该增量在
+        // assistant_text/usage 未变时也会长出新的阶段与工具轮。开关失效就会让
+        // 切回会话时的缓存先行渲染占住签名,把携带新阶段的权威快照整份跳过。
+        // 只投影会改像素的骨架字段(阶段/状态/工具名与状态/输出长度),不搬输出正文。
+        const stages = Array.isArray(context?.stages) ? context.stages : [];
+        if (!stages.length) return null;
+        return stages.map((stage) => [
+            String(stage?.stage_id || "").trim() || String(stage?.stage_index ?? ""),
+            String(stage?.status || "").trim().toLowerCase(),
+            (Array.isArray(stage?.rounds) ? stage.rounds : []).map((round) => (
+                (Array.isArray(round?.tools) ? round.tools : []).map((step) => [
+                    String(step?.tool_name || "").trim(),
+                    String(step?.status || "").trim().toLowerCase(),
+                    String(step?.output_text || "").length,
+                ])
+            )),
+        ]);
+    };
     const projectTurn = (snapshot) => {
         if (!snapshot || typeof snapshot !== "object") return null;
         const retryStatus = snapshot.model_retry_status && typeof snapshot.model_retry_status === "object"
@@ -5596,6 +6255,7 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             retryStatus ? Number(retryStatus.retry_count || 0) : -1,
             retryStatus ? String(retryStatus.state || "") : "",
             snapshot.usage && typeof snapshot.usage === "object" ? JSON.stringify(snapshot.usage) : "",
+            projectTrace(snapshot.canonical_context_delta || snapshot.canonical_context || null),
         ];
     };
     try {
@@ -6645,13 +7305,16 @@ function syncCeoToolStepOutput(item) {
         copyEl.hidden = !detailText;
     }
     if (previewEl instanceof HTMLElement) {
-        previewEl.textContent = previewText;
-        previewEl.hidden = expanded || !previewText;
+        setTextContentPreservingScroll(previewEl, previewText);
+        const hidePreview = expanded || !previewText;
+        // hidden 的往返赋值同样会触发浏览器回收滚动位置,状态没变就不写。
+        if (previewEl.hidden !== hidePreview) previewEl.hidden = hidePreview;
         previewEl.title = collapsible ? detailText : "";
     }
     if (detailEl instanceof HTMLElement) {
-        detailEl.textContent = detailText;
-        detailEl.hidden = !expanded || !collapsible;
+        setTextContentPreservingScroll(detailEl, detailText);
+        const hideDetail = !expanded || !collapsible;
+        if (detailEl.hidden !== hideDetail) detailEl.hidden = hideDetail;
     }
     item.classList.toggle("is-output-collapsible", collapsible);
     item.classList.toggle("is-output-expanded", expanded);
@@ -8812,6 +9475,9 @@ function resetCeoComposerState({ clearDraft = false, sessionId = activeSessionId
 }
 
 function resetCeoComposerForSessionChange(previousSessionId, nextSessionId) {
+    closeCeoModelModePanel();
+    resetCeoModelSelection(nextSessionId);
+    void refreshCeoModelSelection(nextSessionId);
     return switchCeoComposerDraft(previousSessionId, nextSessionId);
 }
 
@@ -11917,6 +12583,7 @@ function bind() {
         U.ceoFileInput?.click();
     });
     U.ceoFileInput?.addEventListener("change", (e) => void handleCeoFileSelection(e));
+    bindCeoModelModeControls();
     U.ceoUploadList?.addEventListener("click", (e) => {
         const remove = e.target.closest("[data-upload-remove]");
         if (!remove) return;
@@ -12296,12 +12963,19 @@ function bind() {
     document.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
         if (!e.target.closest(".resource-select-shell")) closeResourceSelects();
+        if (!e.target.closest("#ceo-model-mode-panel") && !e.target.closest("#ceo-context-usage-brain")) {
+            closeCeoModelModePanel();
+        }
         if (!e.target.closest(".ceo-session-actions.toolbar-dropdown")) closeCeoSessionMenus();
         if (!e.target.closest(".toolbar-dropdown")) closeTaskMenus();
     });
     document.addEventListener("keydown", (e) => {
         if (e.key !== "Escape") return;
         if (closeResourceSelects({ restoreFocus: true })) return;
+        if (closeCeoModelModePanel()) {
+            U.ceoComposerUsageBrain?.focus?.();
+            return;
+        }
         if (closeCeoSessionMenus({ restoreFocus: true })) return;
         if (S.confirmState) {
             closeConfirm();

@@ -179,6 +179,15 @@ G3KU 的模型系统分两层：
 
 绑定 key 是稳定主键：它唯一标识 `models.catalog[]` 条目，同时被 `models.roles.*` 和 `agents.multi_agent.orchestrator_model_key` 引用。管理面创建 binding 时以记录的 `default_model` 为基底自动生成 key，遇到同名模型时追加数字后缀去重，因此 key 不再等于模型名，不同供应商可以添加同名模型。展示标题的优先级是绑定级 `name` > 记录的 `default_model` > `key`：`name` 是 `models.catalog[]` 条目的绑定层字段，空值为「未命名」，展示回退到 `default_model`，写入空 `name`/删除 `name` 即回到回退展示而不改写 key；非空 `name` 在创建/编辑 binding 时做大小写不敏感的全局去重（排除自身），`/api/models` 与 `/api/llm/bindings` 两个视图都读写该字段。编辑 `default_model` 或 `name` 都会更新展示标题而不改写 key；命名与展示职责详见 `web-and-admin.md`「Model Config Page And Admin Contract」。
 
+### 会话级固定模型优先于角色链
+
+Leader（CEO/frontdoor）解析本轮模型引用时，先读会话元数据的 `model_selection`：`{"mode": "chain"}` 走 `models.roles.ceo`；`{"mode": "model", "model_key": "..."}` 时本轮 `model_refs` 是该固定模型（单元素），不再走模型链。
+
+- 固定项被删除或禁用即视为失效：运行时回退模型链继续发请求，而不是带着不可用模型发请求；失效不静默改写存储，用户重新启用/重建同名 key 后固定关系恢复。
+- 解析入口是 `CeoFrontDoorSupport._resolve_ceo_model_refs_for_session`（`g3ku/runtime/frontdoor/_ceo_support.py`），`prepare_turn`、迭代/重试边界的链轮换、composer 用量预估与内联工具提醒都走它，因此上下文窗口判定、多模态闸门与实际 provider 请求始终按同一组 refs 计算。
+- 与链变更同一口径：固定/取消固定只作用于边界处重建的下一个请求，不中途热切已在飞的 provider 请求。会话模型的读写接口与前端控件详见 `web-and-admin.md`「Composer Model Mode Panel」。
+- 固定的是 `models.catalog[]` 绑定 key，不是 provider/model 字符串：链路仍是 `key -> binding -> provider target`，删除或重建 binding 等价于删除该 key。
+
 ## 8. secret 的真实去向
 
 配置里的 secret 不一定直接写回文件。

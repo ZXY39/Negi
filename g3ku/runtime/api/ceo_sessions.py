@@ -12,12 +12,16 @@ from g3ku.runtime.ceo_catalog_offload import (
 )
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
+    SESSION_MODEL_SELECTION_KEY,
+    SESSION_MODEL_SELECTION_MODE_CHAIN,
+    SESSION_MODEL_SELECTION_MODE_MODEL,
     SESSION_TASK_DEFAULTS_SCOPE_KEY,
     SESSION_TASK_DEFAULTS_SCOPE_SESSION,
     WebCeoStateStore,
     actual_request_dir_for_session,
     build_ceo_session_catalog,
     ceo_session_family,
+    ceo_session_model_selection,
     ceo_session_task_defaults_scope,
     create_web_ceo_session,
     delete_web_ceo_session_artifacts,
@@ -26,6 +30,7 @@ from g3ku.runtime.web_ceo_sessions import (
     list_web_ceo_sessions,
     main_runtime_depth_limits,
     normalize_ceo_metadata,
+    normalize_model_selection,
     normalize_task_defaults,
     read_completed_continuity_snapshot,
     read_inflight_turn_snapshot,
@@ -743,6 +748,75 @@ async def update_ceo_session_task_defaults(session_id: str, payload: dict = Body
     session.updated_at = datetime.now()
     session_manager.save(session)
     return {"ok": True, **_task_defaults_response(session)}
+
+
+def _model_selection_response(config, session) -> dict:
+    selection = ceo_session_model_selection(getattr(session, "metadata", None))
+    model_key = selection["model_key"]
+    if not model_key:
+        # 模型链模式没有可失效的固定项。
+        pinned_available = True
+    else:
+        managed = config.get_managed_model(model_key)
+        pinned_available = bool(managed is not None and getattr(managed, "enabled", True))
+    return {
+        "ok": True,
+        "session_id": str(getattr(session, "key", "") or ""),
+        "mode": selection["mode"],
+        "model_key": model_key,
+        # 固定模型被删除/禁用时为 False：运行时已自动回退模型链，前端据此提示。
+        "pinned_available": pinned_available,
+    }
+
+
+def _live_config():
+    from g3ku.config.live_runtime import get_runtime_config
+
+    config, _revision, _changed = get_runtime_config()
+    return config
+
+
+@router.get("/ceo/sessions/{session_id}/model-selection")
+async def get_ceo_session_model_selection(session_id: str):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    _agent, session_manager, _runtime_manager, _state_store = _sessions()
+    session = _assert_known_session(session_manager, session_id)
+    return _model_selection_response(_live_config(), session)
+
+
+@router.patch("/ceo/sessions/{session_id}/model-selection")
+async def update_ceo_session_model_selection(session_id: str, payload: dict = Body(...)):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    _agent, session_manager, _runtime_manager, _state_store = _sessions()
+    session = _assert_known_session(session_manager, session_id)
+    body = payload if isinstance(payload, dict) else {}
+    requested_mode = str(body.get("mode", body.get("modelSelectionMode", "")) or "").strip().lower()
+    requested_model_key = str(body.get("model_key", body.get("modelKey", "")) or "").strip()
+    if requested_mode not in ("", SESSION_MODEL_SELECTION_MODE_MODEL, SESSION_MODEL_SELECTION_MODE_CHAIN):
+        raise HTTPException(status_code=400, detail="invalid_model_selection_mode")
+    if requested_mode == SESSION_MODEL_SELECTION_MODE_MODEL and not requested_model_key:
+        raise HTTPException(status_code=400, detail="model_key_required")
+    if requested_model_key and requested_mode != SESSION_MODEL_SELECTION_MODE_MODEL:
+        raise HTTPException(status_code=400, detail="model_key_requires_model_mode")
+    selection = normalize_model_selection(body)
+    config = _live_config()
+    if selection["mode"] == SESSION_MODEL_SELECTION_MODE_MODEL:
+        managed = config.get_managed_model(selection["model_key"])
+        if managed is None:
+            raise HTTPException(status_code=404, detail="model_key_not_found")
+        if not getattr(managed, "enabled", True):
+            raise HTTPException(status_code=409, detail="model_key_disabled")
+    metadata = normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session.key)
+    if selection["mode"] == SESSION_MODEL_SELECTION_MODE_MODEL:
+        metadata[SESSION_MODEL_SELECTION_KEY] = selection
+    else:
+        metadata.pop(SESSION_MODEL_SELECTION_KEY, None)
+    session.metadata = metadata
+    session.updated_at = datetime.now()
+    session_manager.save(session)
+    return _model_selection_response(config, session)
 
 
 @router.post("/ceo/sessions/{session_id}/composer-preflight")

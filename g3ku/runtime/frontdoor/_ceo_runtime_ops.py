@@ -2044,7 +2044,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if recorded == current_revision:
             return state
         try:
-            new_refs = list(self._resolve_ceo_model_refs())
+            new_refs = list(self._resolve_ceo_model_refs_for_session(state.get("session_key")))
         except Exception:
             logger.warning(
                 "frontdoor model refs rotation skipped; resolve failed session={}",
@@ -2138,6 +2138,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return record
         return cls._frontdoor_previous_actual_request_record(session)
 
+    @classmethod
+    def _frontdoor_seed_actual_request_record(cls, *, session: Any | None) -> dict[str, Any]:
+        """Seed record for reproducing the provider-facing request body prefix.
+
+        空闲 composer 预估发生在任何回合开始之前,此时最新请求仍在实时轨迹里;
+        用户回合开始会把实时轨迹搬进 previous 槽位(`_preserve_frontdoor_actual_request_trace_for_next_visible_turn`)。
+        send preflight 的 append-only 比对始终以最新记录为基线,种子必须解析到同一条,
+        否则 usage-first 估算静默退化成全量 preview。故这里取「最新记录」(无实时轨迹时
+        自然回落到 previous 槽位,与回合开始时的语义一致)。
+        """
+        return cls._frontdoor_latest_actual_request_record(session=session, state=None)
+
     @staticmethod
     def _frontdoor_provider_models_match(previous_provider_model: str, current_provider_model: str) -> bool:
         previous_raw = str(previous_provider_model or "").strip()
@@ -2177,11 +2189,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         previous_tool_schemas: list[dict[str, Any]] | None,
         current_tool_schemas: list[dict[str, Any]] | None,
     ) -> tuple[int, bool]:
+        # 两侧都先走 durable 投影(再剔回合内产物):长期记忆快照与工具契约块是每轮
+        # 重新生成的动态块,只存在于已发出的真实请求里,而下一轮请求由 durable 基线
+        # 重新拼装,故按原始形态比对会让前缀恒不等,usage-first 估算静默退化成全量 preview。
         previous_records = cls._strip_frontdoor_turn_only_artifacts(
-            [dict(item) for item in list(previous_request_messages or []) if isinstance(item, dict)]
+            cls._request_body_messages_without_tool_contracts(
+                [dict(item) for item in list(previous_request_messages or []) if isinstance(item, dict)]
+            )
         )
         current_records = cls._strip_frontdoor_turn_only_artifacts(
-            [dict(item) for item in list(current_request_messages or []) if isinstance(item, dict)]
+            cls._request_body_messages_without_tool_contracts(
+                [dict(item) for item in list(current_request_messages or []) if isinstance(item, dict)]
+            )
         )
         if not previous_records or len(current_records) < len(previous_records):
             return 0, False
@@ -2342,7 +2361,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         stable_messages: list[dict[str, Any]] | None,
         live_request_messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
-        previous_record = cls._frontdoor_previous_actual_request_record(session)
+        previous_record = cls._frontdoor_seed_actual_request_record(session=session)
         previous_request_messages = cls._prompt_message_records(previous_record.get("request_messages"))
         if not previous_request_messages:
             return cls._prompt_message_records(live_request_messages)
@@ -2379,7 +2398,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         expected_schema_names: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str] | None]:
         current_tool_schemas = [dict(item) for item in list(tool_schemas or []) if isinstance(item, dict)]
-        previous_record = cls._frontdoor_previous_actual_request_record(session)
+        previous_record = cls._frontdoor_seed_actual_request_record(session=session)
         previous_tool_schemas = [
             dict(item)
             for item in list(previous_record.get("tool_schemas") or [])
@@ -5647,7 +5666,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         internal_seed_messages, internal_event_bundle_text, internal_event_message_metadata = (
             self._internal_prompt_seed_messages(metadata=metadata)
         )
-        model_refs = self._resolve_ceo_model_refs()
+        model_refs = self._resolve_ceo_model_refs_for_session(getattr(session.state, "session_key", ""))
         model_refs_revision = self._frontdoor_runtime_config_revision()
         current_turn_user_content = (
             ""
@@ -6206,7 +6225,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_body_messages = self._request_body_messages_without_tool_contracts(request_body_messages)
         follow_up_messages: list[dict[str, Any]] = []
         follow_up_texts: list[str] = []
-        model_refs = list(state.get("model_refs") or self._resolve_ceo_model_refs() or [])
+        model_refs = list(
+            state.get("model_refs")
+            or self._resolve_ceo_model_refs_for_session(state.get("session_key"))
+            or []
+        )
         for item in queued_inputs:
             item_metadata = dict(getattr(item, "metadata", {}) or {})
             expanded_content = self._expand_web_ceo_uploads_for_current_request_content(
@@ -6560,7 +6583,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     if not isinstance(exc, ModelProviderExhaustedError) and PUBLIC_PROVIDER_FAILURE_MESSAGE not in str(exc or ""):
                         raise
                     if self._refresh_runtime_config_for_retry_invalidation():
-                        state_for_request["model_refs"] = list(self._resolve_ceo_model_refs())
+                        state_for_request["model_refs"] = list(
+                            self._resolve_ceo_model_refs_for_session(state_for_request.get("session_key"))
+                        )
                         state_for_request["model_refs_revision"] = self._frontdoor_runtime_config_revision()
                         restart_with_refreshed_runtime = True
                         break
@@ -6574,7 +6599,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 response_view = self._model_response_view(message)
                 if self._is_empty_model_response(response_view):
                     if self._refresh_runtime_config_for_retry_invalidation():
-                        state_for_request["model_refs"] = list(self._resolve_ceo_model_refs())
+                        state_for_request["model_refs"] = list(
+                            self._resolve_ceo_model_refs_for_session(state_for_request.get("session_key"))
+                        )
                         state_for_request["model_refs_revision"] = self._frontdoor_runtime_config_revision()
                         restart_with_refreshed_runtime = True
                         break

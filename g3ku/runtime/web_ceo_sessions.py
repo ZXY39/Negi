@@ -50,6 +50,9 @@ DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
 SESSION_TASK_DEFAULTS_SCOPE_KEY = "task_defaults_scope"
 SESSION_TASK_DEFAULTS_SCOPE_SESSION = "session"
+SESSION_MODEL_SELECTION_KEY = "model_selection"
+SESSION_MODEL_SELECTION_MODE_CHAIN = "chain"
+SESSION_MODEL_SELECTION_MODE_MODEL = "model"
 DEFAULT_LIVE_RAW_TAIL_TURNS = 4
 _TASK_MEMORY_MAX_IDS = 3
 _TASK_ID_PATTERN = re.compile(r'task:[A-Za-z0-9][\w:-]*')
@@ -726,6 +729,28 @@ def ceo_session_task_defaults_scope(metadata: Any) -> str:
     return ""
 
 
+def normalize_model_selection(payload: Any) -> dict[str, str]:
+    """会话模型模式：默认模型链；指定模式下必须带非空模型 key。"""
+    source = payload if isinstance(payload, dict) else {}
+    mode = str(source.get("mode", source.get("modelSelectionMode", "")) or "").strip().lower()
+    model_key = str(source.get("model_key", source.get("modelKey", "")) or "").strip()
+    if mode != SESSION_MODEL_SELECTION_MODE_MODEL or not model_key:
+        return {"mode": SESSION_MODEL_SELECTION_MODE_CHAIN, "model_key": ""}
+    return {"mode": SESSION_MODEL_SELECTION_MODE_MODEL, "model_key": model_key}
+
+
+def ceo_session_model_selection(metadata: Any) -> dict[str, str]:
+    source = metadata if isinstance(metadata, dict) else {}
+    return normalize_model_selection(source.get(SESSION_MODEL_SELECTION_KEY))
+
+
+def ceo_session_pinned_model_key(metadata: Any) -> str:
+    selection = ceo_session_model_selection(metadata)
+    if selection["mode"] != SESSION_MODEL_SELECTION_MODE_MODEL:
+        return ""
+    return selection["model_key"]
+
+
 def normalize_ceo_metadata(
     metadata: Any,
     *,
@@ -764,6 +789,12 @@ def normalize_ceo_metadata(
             hard_max_depth=int(resolved_depth_limits.get("hard_max_depth", DEFAULT_TASK_HARD_MAX_DEPTH) or DEFAULT_TASK_HARD_MAX_DEPTH),
         )
         normalized[SESSION_TASK_DEFAULTS_SCOPE_KEY] = SESSION_TASK_DEFAULTS_SCOPE_SESSION
+    model_selection = normalize_model_selection(payload.get(SESSION_MODEL_SELECTION_KEY))
+    # 只在确有指定模型时落键，避免给每个会话写入恒等的 chain 记录。
+    if model_selection["mode"] == SESSION_MODEL_SELECTION_MODE_MODEL:
+        normalized[SESSION_MODEL_SELECTION_KEY] = model_selection
+    else:
+        normalized.pop(SESSION_MODEL_SELECTION_KEY, None)
     return normalized
 
 

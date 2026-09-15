@@ -461,6 +461,16 @@ class ApiClient {
         return data.item || null;
     }
 
+    static async getCeoSessionModelSelection(sessionId) {
+        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/model-selection`);
+    }
+
+    static async updateCeoSessionModelSelection(sessionId, payload = {}) {
+        return this._request("PATCH", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/model-selection`, {
+            body: payload || {},
+        });
+    }
+
     static async getCeoSessionDeleteCheck(sessionId) {
         return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/delete-check`);
     }
