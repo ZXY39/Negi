@@ -7318,6 +7318,7 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
 ) -> None:
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
     from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+    from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
 
     async def _noop_ready() -> None:
         return None
@@ -7410,7 +7411,7 @@ async def test_ceo_frontdoor_prepare_turn_continues_full_context_and_appends_hid
         _frontdoor_selection_debug={},
     )
     runtime = SimpleNamespace(
-        context=ceo_runtime_ops.CeoRuntimeContext(
+        context=CeoRuntimeContext(
             loop=loop,
             session=session,
             session_key="web:shared",
@@ -7489,6 +7490,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
 ) -> None:
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
     from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+    from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
     from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 
     async def _noop_ready() -> None:
@@ -7567,7 +7569,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         _frontdoor_provider_tool_schema_names=["create_async_task", "task_list", "filesystem_write"],
     )
     runtime = SimpleNamespace(
-        context=ceo_runtime_ops.CeoRuntimeContext(
+        context=CeoRuntimeContext(
             loop=loop,
             session=session,
             session_key="web:shared",
@@ -7672,6 +7674,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
 ) -> None:
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
     from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+    from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
     from g3ku.runtime.frontdoor.tool_contract import is_frontdoor_tool_contract_message
 
     async def _noop_ready() -> None:
@@ -7748,7 +7751,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         _frontdoor_provider_tool_schema_names=["create_async_task", "task_list", "filesystem_write"],
     )
     runtime = SimpleNamespace(
-        context=ceo_runtime_ops.CeoRuntimeContext(
+        context=CeoRuntimeContext(
             loop=loop,
             session=session,
             session_key="web:shared",
@@ -7889,6 +7892,7 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
 ) -> None:
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
     from g3ku.runtime.frontdoor.prompt_cache_contract import FrontdoorPromptContract
+    from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
 
     async def _noop_ready() -> None:
         return None
@@ -7979,7 +7983,7 @@ async def test_ceo_frontdoor_prepare_turn_internal_turn_without_prior_baseline_f
         _frontdoor_provider_tool_schema_names=["filesystem_write"],
     )
     runtime = SimpleNamespace(
-        context=ceo_runtime_ops.CeoRuntimeContext(
+        context=CeoRuntimeContext(
             loop=loop,
             session=session,
             session_key="web:shared",
@@ -8861,10 +8865,12 @@ def _prepare_turn_batch_harness(monkeypatch, tmp_path: Path, *, capture_builder:
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai:gpt-4.1"])
     monkeypatch.setattr(ceo_runtime_ops, "build_frontdoor_prompt_contract", _fake_build_frontdoor_prompt_contract)
-    return ceo_runtime_ops, loop, runner
+    return loop, runner
 
 
-def _prepare_turn_batch_session(ceo_runtime_ops, loop, *, batch_inputs: list) -> SimpleNamespace:
+def _prepare_turn_batch_session(loop, *, batch_inputs: list) -> SimpleNamespace:
+    from g3ku.runtime.frontdoor.state_models import CeoRuntimeContext
+
     session = SimpleNamespace(
         state=SimpleNamespace(session_key="web:shared"),
         _memory_channel="web",
@@ -8884,7 +8890,7 @@ def _prepare_turn_batch_session(ceo_runtime_ops, loop, *, batch_inputs: list) ->
         _active_user_batch_inputs=batch_inputs,
     )
     runtime = SimpleNamespace(
-        context=ceo_runtime_ops.CeoRuntimeContext(
+        context=CeoRuntimeContext(
             loop=loop,
             session=session,
             session_key="web:shared",
@@ -8902,7 +8908,7 @@ async def test_ceo_frontdoor_prepare_turn_merges_prompt_batch_sibling_contents_i
     """C1 调用点接线：多输入批次经真实 `_graph_prepare_turn` 后，较早输入的
     文本与图片块必须按顺序并入当前回合模型请求，末条输入排最后。"""
     captured: dict[str, object] = {}
-    ceo_runtime_ops, loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path, capture_builder=captured)
+    loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path, capture_builder=captured)
     monkeypatch.setattr(runner, "_ceo_image_multimodal_enabled_for_model_refs", lambda refs: True)
 
     sibling_blocks = [
@@ -8914,9 +8920,7 @@ async def test_ceo_frontdoor_prepare_turn_merges_prompt_batch_sibling_contents_i
         metadata={"_transcript_turn_id": "turn-first"},
     )
     last_input = UserInputMessage(content="最后一条消息", metadata={"_transcript_turn_id": "turn-last"})
-    session, runtime = _prepare_turn_batch_session(
-        ceo_runtime_ops, loop, batch_inputs=[sibling_input, last_input]
-    )
+    session, runtime = _prepare_turn_batch_session(loop, batch_inputs=[sibling_input, last_input])
 
     await runner._graph_prepare_turn(
         {"user_input": {"content": last_input.content, "metadata": dict(last_input.metadata)}},
@@ -8940,10 +8944,10 @@ async def test_ceo_frontdoor_prepare_turn_keeps_single_input_batch_content_uncha
 ) -> None:
     """单输入批次（普通单条发送）走真实 prepare 路径时内容保持原样。"""
     captured: dict[str, object] = {}
-    ceo_runtime_ops, loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path, capture_builder=captured)
+    loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path, capture_builder=captured)
 
     only_input = UserInputMessage(content="单条消息", metadata={"_transcript_turn_id": "turn-only"})
-    session, runtime = _prepare_turn_batch_session(ceo_runtime_ops, loop, batch_inputs=[only_input])
+    session, runtime = _prepare_turn_batch_session(loop, batch_inputs=[only_input])
 
     await runner._graph_prepare_turn(
         {"user_input": {"content": only_input.content, "metadata": dict(only_input.metadata)}},
@@ -8962,7 +8966,7 @@ async def test_ceo_frontdoor_prepare_turn_passes_last_input_turn_id_to_batch_mer
     session 是当前运行时会话。"""
     from g3ku.runtime.frontdoor import _ceo_runtime_ops as ops_module
 
-    ceo_runtime_ops, loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path)
+    loop, runner = _prepare_turn_batch_harness(monkeypatch, tmp_path)
     merge_calls: list[dict[str, object]] = []
     original_merge = ops_module.CeoFrontDoorRuntimeOps._merge_prompt_batch_sibling_contents
 
@@ -8988,9 +8992,7 @@ async def test_ceo_frontdoor_prepare_turn_passes_last_input_turn_id_to_batch_mer
 
     sibling_input = UserInputMessage(content="较早的消息", metadata={"_transcript_turn_id": "turn-first"})
     last_input = UserInputMessage(content="最后一条消息", metadata={"_transcript_turn_id": "turn-last"})
-    session, runtime = _prepare_turn_batch_session(
-        ceo_runtime_ops, loop, batch_inputs=[sibling_input, last_input]
-    )
+    session, runtime = _prepare_turn_batch_session(loop, batch_inputs=[sibling_input, last_input])
 
     await runner._graph_prepare_turn(
         {"user_input": {"content": last_input.content, "metadata": dict(last_input.metadata)}},
