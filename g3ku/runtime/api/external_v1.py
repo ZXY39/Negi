@@ -488,6 +488,10 @@ async def stream_external_events(
         last_seq = int(str(last_event_id or "0").strip() or 0)
     except ValueError:
         last_seq = 0
+    # 服务端重启后 hub.seq 从 0 重新计数，独立进程桥缓存的却是旧进程大序号：
+    # 越过本进程已发布序号的 Last-Event-ID 一律视为旧进程遗留，从头重放积压。
+    if last_seq > hub.last_seq:
+        last_seq = 0
 
     async def generate():
         try:

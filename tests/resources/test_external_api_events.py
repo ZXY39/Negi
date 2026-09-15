@@ -189,6 +189,29 @@ async def test_sse_replays_backlog_with_last_event_id(sse_env):
 
 
 @pytest.mark.asyncio
+async def test_sse_stale_last_event_id_after_restart_replays_backlog(sse_env):
+    """服务端重启后 hub.seq 清零，桥重连携带的是旧进程的大序号；该序号
+    越过本进程已发布序号时必须回退为全量重放，而不是静默丢弃积压。"""
+    registry = sse_env
+    entry, _ = registry.resolve_or_create(bridge_id="test-bridge", external_key="qq:dm:restart")
+    hub = get_session_event_hub(entry.session_key)
+    hub.publish("turn.started", turn_id="t1")
+    hub.publish("reply.delta", turn_id="t1", text="abc")
+    hub.publish("turn.completed", turn_id="t1")
+
+    iterator = await _open_stream(entry.session_key, last_event_id="7")
+    lines = await _collect_lines(iterator, want_data_lines=3)
+    await iterator.aclose()
+
+    data_lines = [line for line in lines if line.startswith("data:")]
+    assert len(data_lines) == 3
+    assert '"turn.started"' in data_lines[0]
+    assert '"turn.completed"' in data_lines[2]
+    id_lines = [line for line in lines if line.startswith("id:")]
+    assert id_lines[:3] == ["id: 1", "id: 2", "id: 3"]
+
+
+@pytest.mark.asyncio
 async def test_sse_unknown_session_404(sse_env):
     with pytest.raises(HTTPException) as exc:
         await external_v1.stream_external_events(

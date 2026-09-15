@@ -40,7 +40,7 @@
 ## 5. 事件流
 
 - 每会话一个 `SessionEventHub`（`g3ku/runtime/external_events.py`）：有界环形缓冲 + 单调 `seq` + 订阅扇出；事件形态 `{type, seq, ts, turn_id?, ...}`。
-- `GET /sessions/{id}/events` 为 SSE（`id:` = seq）；断线以 `Last-Event-ID` 回放续订；15s 心跳注释行保活。
+- `GET /sessions/{id}/events` 为 SSE（`id:` = seq）；断线以 `Last-Event-ID` 回放续订；15s 心跳注释行保活。hub 的 seq 是内存态、随服务端重启清零：`Last-Event-ID` 若越过本进程已发布 seq（旧进程遗留的大序号），端点按全量重放处理——第三方桥重连即收到缓冲内全部积压，不因旧序号被静默过滤。
 - 事件集合：
 
 | 事件 | 来源 | 说明 |
@@ -86,6 +86,6 @@ bus/hub 全是内存态：桥 pump 断连或进程重启窗口里滞留的主动
 
 - 桥拿到 403 `external_api_disabled`：配置 `externalApi.enabled` 与 tokens；401：token 不匹配或条目被禁用。
 - 消息提交成功但桥收不到回复：确认桥订阅的 SSE 会话与消息提交的会话一致（同一 `session_id`）；看事件缓冲是否被 `eventBufferSize` 淘汰（长断线超过缓冲窗口）。
-- 主动推送不到达：沿「出站路由（主动推送）」链路查——发布侧（`source=heartbeat` 日志）→ drain（`external outbound published to hub`，含 outbox_id；伴随 `no live subscriber` WARNING 说明发布时无人消费，属对账兜底路径）→ 桥侧回执（`qq-official delivered ...`）。有 published 无 delivered 说明事件没有消费者：查 pump 重连日志（`qq-official event pump error ... reconnecting` / `event stream ended ... reconnecting`）与 `GET /outbox/pending` 滞留清单。滞留消息的补投不依赖重启：服务端 60s 周期对账（动作日志 `external outbox reconcile: republished ...`）与桥侧 30s 对账（动作日志 `qq-official spawned ... pump(s) from pending outbox entries`）在 24h 时效内自动收敛；超过 24h 的滞留标记 `expired` 废弃。已知限制：独立进程第三方桥在服务端重启后持旧 `Last-Event-ID`（大于新进程 hub 的 seq）时，环形缓冲重放对它不可见，只能等 live 事件；in-process 的 qq-official 桥与服务端同生共死，seq 一起清零，不受此限。会话转录/Web UI 里看得到回复而渠道端收不到时，优先怀疑本链路——转录落盘与渠道投递是两条独立链路。
+- 主动推送不到达：沿「出站路由（主动推送）」链路查——发布侧（`source=heartbeat` 日志）→ drain（`external outbound published to hub`，含 outbox_id；伴随 `no live subscriber` WARNING 说明发布时无人消费，属对账兜底路径）→ 桥侧回执（`qq-official delivered ...`）。有 published 无 delivered 说明事件没有消费者：查 pump 重连日志（`qq-official event pump error ... reconnecting` / `event stream ended ... reconnecting`）与 `GET /outbox/pending` 滞留清单。滞留消息的补投不依赖重启：服务端 60s 周期对账（动作日志 `external outbox reconcile: republished ...`）与桥侧 30s 对账（动作日志 `qq-official spawned ... pump(s) from pending outbox entries`）在 24h 时效内自动收敛；超过 24h 的滞留标记 `expired` 废弃。会话转录/Web UI 里看得到回复而渠道端收不到时，优先怀疑本链路——转录落盘与渠道投递是两条独立链路。
 - 终态缺失导致桥状态悬挂：属实现缺陷，对照「回合契约」终态不变量检查执行器改动。
 - QQ 机器人面板报错/不连接：先看 `/api/qq-bot/status` 的 detail——AppID/AppSecret 错误表现为登录失败，intents 未开通表现为网关拒绝；出现 "This event loop is already running" 说明桥被改回了阻塞 `Client.run()` 入口。
