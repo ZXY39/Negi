@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import mimetypes
+from collections import OrderedDict
 from typing import Any, Callable
 
 import httpx
@@ -37,8 +38,6 @@ from loguru import logger
 from g3ku.qq_official.client import ExternalApiClient
 from g3ku.qq_official.messages import (
     OUTBOUND_EVENT,
-    REPLY_DELTA_EVENT,
-    REPLY_FINAL_EVENT,
     external_key_for_c2c,
     external_key_for_group,
     external_key_for_guild,
@@ -78,6 +77,24 @@ _PUMP_RECONNECT_MAX_BACKOFF_SECONDS = 60.0
 # last_seq 重放本条自动重试；但毒消息（如目标永久 4xx）不能把 pump 卡死在
 # 同一条上，达到上限记 error 后放弃并继续消费后续事件。
 _PUMP_DELIVER_MAX_ATTEMPTS = 5
+
+# 桥侧周期 pending 对账：GET /outbox/pending 不再是启动一次性动作。服务端重启
+# 落在 cron 触发与产出之间时，启动预热会扑空（账本尚空），滞留推送稍后才入账
+# ——2026-09-14 23:00 定时日报正是这样丢掉的。周期对账为「有 pending 记录且无
+# 存活 pump」的会话重建 pump，让 SSE 重放把账补齐。
+_PENDING_RECONCILE_INTERVAL_SECONDS = 30.0
+# outbox_id 维度投递历史（有界 LRU）：acked 集防服务端对账/重放副本重复投递；
+# attempts 计数跨 seq 封顶同一 id 的总尝试次数（重放副本 seq 不同，per-seq
+# failed_attempts 会对每个副本重新计数）。
+_PUMP_OUTBOX_HISTORY_MAX_IDS = 1024
+
+
+def _lru_remember(mapping: "OrderedDict[str, Any]", key: str, value: Any = None, *, limit: int = _PUMP_OUTBOX_HISTORY_MAX_IDS) -> None:
+    """Bounded LRU write: remember ``key`` and evict the oldest beyond limit."""
+    mapping[key] = value
+    mapping.move_to_end(key)
+    while len(mapping) > max(1, int(limit)):
+        mapping.popitem(last=False)
 
 
 def _is_botpy_task(task: asyncio.Task) -> bool:
@@ -216,6 +233,11 @@ async def run_qq_official_bridge(
     seqs: dict[str, int] = {}
     pumps: set[asyncio.Task] = set()
     pump_tasks: dict[str, asyncio.Task] = {}
+    # outbox_id 维度投递历史（进程内有界 LRU，重启清零 = at-least-once 重投一次）：
+    # acked 集跳过对账/重放产生的已销账副本；attempts 跨 seq 封顶同一 id 的总
+    # 投递尝试（毒消息副本不随每份新 seq 重新获得完整预算）。
+    acked_outbox_ids: OrderedDict[str, None] = OrderedDict()
+    outbox_attempts: OrderedDict[str, int] = OrderedDict()
 
     async def on_incoming(
         external_key: str,
@@ -311,11 +333,35 @@ async def run_qq_official_bridge(
                     if event_type == OUTBOUND_EVENT:
                         target_key = str(event.get("external_key") or external_key)
                         outbox_id = str(event.get("outbox_id") or "").strip()
+                    if outbox_id and outbox_id in acked_outbox_ids:
+                        # 已送达并销账的 id：服务端对账/重放产生的副本直接跳过，
+                        # 只推进 seq（否则周期对账会造成重复推送）。
+                        seqs[session_id] = seq
+                        backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                        continue
+                    if outbox_id and int(outbox_attempts.get(outbox_id, 0)) >= _PUMP_DELIVER_MAX_ATTEMPTS:
+                        # per-seq 预算已被之前的副本耗尽：同 id 的后续副本零尝试
+                        # 丢弃，防毒消息随每份新 seq 重新获得完整重试预算。
+                        logger.error(
+                            "qq-official dropping duplicate copy of undeliverable outbox {} for session {} (seq {})",
+                            outbox_id,
+                            session_id,
+                            seq,
+                        )
+                        seqs[session_id] = seq
+                        backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
+                        continue
                     try:
                         await deliver(target_key, text)
                     except asyncio.CancelledError:
                         raise
                     except Exception:  # noqa: BLE001 - retry via reconnect replay
+                        if outbox_id:
+                            _lru_remember(
+                                outbox_attempts,
+                                outbox_id,
+                                int(outbox_attempts.get(outbox_id, 0)) + 1,
+                            )
                         failed_attempts = failed_attempts + 1 if seq == failed_seq else 1
                         failed_seq = seq
                         logger.exception(
@@ -350,6 +396,11 @@ async def run_qq_official_bridge(
                                 outbox_id,
                                 exc,
                             )
+                        else:
+                            # 仅 ack 成功才记入去重集：服务端仍视为 pending 而
+                            # 对账重放时，本桥进程内跳过重复副本；ack 失败不入
+                            # 集，副本可再投（保持 at-least-once）。
+                            _lru_remember(acked_outbox_ids, outbox_id)
                 # SSE 流干净结束（服务端重启/空闲关闭）：同样必须重连续拉。
                 logger.warning(
                     "qq-official event stream ended for session {}; reconnecting",
@@ -366,38 +417,53 @@ async def run_qq_official_bridge(
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2.0, _PUMP_RECONNECT_MAX_BACKOFF_SECONDS)
 
-    def _spawn_pump(session_id: str, external_key: str) -> None:
+    def _spawn_pump(session_id: str, external_key: str) -> bool:
+        """Spawn the session pump if absent/dead; True when a new task was created."""
         existing = pump_tasks.get(session_id)
         if existing is not None and not existing.done():
-            return
+            return False
         task = asyncio.create_task(_pump(session_id, external_key), name=f"qq-official-pump:{session_id}")
         pump_tasks[session_id] = task
         pumps.add(task)
         task.add_done_callback(pumps.discard)
+        return True
 
-    async def _warm_up_pending_pumps() -> None:
-        """按持久 outbox 的 pending 清单预热 pump。
+    async def _reconcile_pending_pumps() -> None:
+        """按持久 outbox 的 pending 清单为无存活 pump 的会话建 pump。
 
-        进程重启后 sessions 映射清空，pump 只等下一条入站消息才建；在那之前
-        服务端启动重放进 hub 的滞留推送（心跳升级、cron 提醒）没有消费者。
-        这里为每个有 pending 推送的会话先建 pump，让 SSE 重放把账补齐。
+        启动时跑一次（进程重启后 sessions 映射清空，pump 只等下一条入站消息才
+        建；在那之前服务端启动重放进 hub 的滞留推送没有消费者），随后由常驻
+        循环周期调用：服务端重启窗口里账本可能为空导致启动首跑扑空，滞留推送
+        稍后才入账（2026-09-14 日报事故）。list 失败只记 warning——对账是兜底
+        路径，绝不能让循环或桥启动因它而死。
         """
         try:
             pending = await client.list_pending_outbox()
-        except Exception as exc:  # noqa: BLE001 - 预热失败不阻断桥启动
-            logger.warning("qq-official pending outbox warm-up skipped: {}", exc)
+        except Exception as exc:  # noqa: BLE001 - 对账失败不阻断桥运行
+            logger.warning("qq-official pending outbox reconcile skipped: {}", exc)
             return
-        warmed = 0
+        spawned = 0
         for item in pending:
             pending_session = str(item.get("session_id") or "").strip()
             pending_key = str(item.get("external_key") or "").strip()
             if not pending_session or not pending_key:
                 continue
             sessions.setdefault(pending_key, pending_session)
-            _spawn_pump(pending_session, pending_key)
-            warmed += 1
-        if warmed:
-            logger.info("qq-official warmed {} pump(s) from pending outbox entries", warmed)
+            if _spawn_pump(pending_session, pending_key):
+                spawned += 1
+        if spawned:
+            # 只计真正新建的 pump：常驻对账每 30s 跑一次，幂等重建不得刷假日志。
+            logger.info("qq-official spawned {} pump(s) from pending outbox entries", spawned)
+
+    async def _pending_reconcile_loop() -> None:
+        while True:
+            await asyncio.sleep(_PENDING_RECONCILE_INTERVAL_SECONDS)
+            try:
+                await _reconcile_pending_pumps()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - reconcile loop must survive
+                logger.exception("qq-official pending outbox reconcile pass failed")
 
     class QqOfficialClient(botpy.Client):
         async def on_ready(self):
@@ -444,11 +510,17 @@ async def run_qq_official_bridge(
         return str(getattr(author, "user_openid", "") or getattr(author, "id", "") or "").strip()
 
     bridge_api: Any = None
+    reconcile_task: asyncio.Task | None = None
 
     try:
         bridge_client = QqOfficialClient(intents=intents, is_sandbox=sandbox, ext_handlers=False)
         bridge_api = getattr(bridge_client, "api", None)
-        await _warm_up_pending_pumps()
+        await _reconcile_pending_pumps()  # 启动首跑（原预热），失败不阻断启动
+        # 常驻对账在进入 botpy 网关前拉起：登录期间也在轮询，「服务端晚于桥
+        # 就绪/首跑扑空」的窗口由 30s 后的下一轮自动补齐。
+        reconcile_task = asyncio.create_task(
+            _pending_reconcile_loop(), name="qq-official-pending-reconcile"
+        )
         on_state("connecting", "waiting for QQ gateway")
         # NOTE: botpy's ``Client.run()`` is blocking (``run_until_complete`` on the
         # loop captured at construction) and raises "This event loop is already
@@ -457,6 +529,10 @@ async def run_qq_official_bridge(
         async with bridge_client:
             await bridge_client.start(appid=app_id, secret=app_secret)
     finally:
+        # 对账循环是本模块定义的普通任务，_is_botpy_task 收割器认不出它，
+        # 必须显式取消。
+        if reconcile_task is not None:
+            reconcile_task.cancel()
         for pump in list(pumps):
             pump.cancel()
         # botpy's websocket/heartbeat/runner tasks survive the cancellation of
@@ -466,8 +542,8 @@ async def run_qq_official_bridge(
         leftovers = [task for task in asyncio.all_tasks(asyncio.get_running_loop()) if _is_botpy_task(task)]
         for task in leftovers:
             task.cancel()
-        pending = list(pumps) + leftovers
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        reap = list(pumps) + leftovers + ([reconcile_task] if reconcile_task is not None else [])
+        if reap:
+            await asyncio.gather(*reap, return_exceptions=True)
         await media_client.aclose()
         await client.close()

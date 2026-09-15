@@ -13,6 +13,7 @@ import asyncio
 import base64
 import sys
 import types
+from collections import OrderedDict
 from contextlib import suppress
 from types import SimpleNamespace
 
@@ -766,3 +767,251 @@ async def test_bridge_warms_pumps_from_pending_outbox(monkeypatch: pytest.Monkey
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+class _LatePendingStreamClient(FakeExternalApiClient):
+    """启动时 pending 为空（预热扑空——复刻 2026-09-14 日报滞留事故时序），
+    之后由测试体补入滞留条目；订阅目标会话时先重放滞留事件再挂起。"""
+
+    def __init__(self, base_url: str, token: str, transport=None) -> None:
+        super().__init__(base_url, token, transport)
+        self.pending_outbox: list[dict] = []
+
+    async def stream_events(self, session_id: str, last_seq: int = 0):
+        if session_id == "ext:qq-official:qq:c2c:u7" and last_seq == 0:
+            yield {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "重启后才产出的日报",
+                "external_key": "qq:c2c:u7",
+                "outbox_id": "obx-late-1",
+            }
+        while True:
+            yield await self.events.get()
+
+
+@pytest.mark.asyncio
+async def test_bridge_periodically_respawns_pumps_from_pending_outbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归（2026-09-14 日报滞留事故）：桥启动预热在账本为空时扑空，滞留推送
+    稍后才入账，且无任何入站消息——常驻 pending 对账必须自动建 pump 并经 SSE
+    重放完成投递，而不是等重启或用户消息。全程不触发 on_incoming。"""
+    monkeypatch.setattr(bridge_module, "_PENDING_RECONCILE_INTERVAL_SECONDS", 0.05)
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, client_cls=_LatePendingStreamClient)
+    try:
+        ext = FakeExternalApiClient.instances[-1]
+        assert ext.pending_outbox == []  # 启动首跑确实扑空
+        # 滞留记录在桥就绪之后才入账（服务端 cron 产出晚于桥预热）。
+        ext.pending_outbox.append(
+            {
+                "outbox_id": "obx-late-1",
+                "session_id": "ext:qq-official:qq:c2c:u7",
+                "external_key": "qq:c2c:u7",
+                "ts": "2026-09-14T23:03:48.651494",
+            }
+        )
+        await _wait_until(lambda: client.api.calls)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u7", "content": "重启后才产出的日报", "msg_type": 0})
+        ]
+        await _wait_until(lambda: ext.acked)
+        assert ext.acked == [("ext:qq-official:qq:c2c:u7", "obx-late-1")]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+class _FlakyListClient(FakeExternalApiClient):
+    """前两次 list_pending_outbox 失败（模拟桥先于服务端就绪），之后恢复。"""
+
+    def __init__(self, base_url: str, token: str, transport=None) -> None:
+        super().__init__(base_url, token, transport)
+        self.list_calls = 0
+        self.pending_outbox = [
+            {
+                "outbox_id": "obx-flaky-1",
+                "session_id": "ext:qq-official:qq:c2c:u6",
+                "external_key": "qq:c2c:u6",
+                "ts": "2026-09-14T23:03:48",
+            }
+        ]
+
+    async def list_pending_outbox(self) -> list[dict]:
+        self.list_calls += 1
+        if self.list_calls <= 2:
+            raise httpx.ConnectError("simulated server not ready")
+        return list(self.pending_outbox)
+
+    async def stream_events(self, session_id: str, last_seq: int = 0):
+        if session_id == "ext:qq-official:qq:c2c:u6" and last_seq == 0:
+            yield {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "服务端就绪后的补投",
+                "external_key": "qq:c2c:u6",
+                "outbox_id": "obx-flaky-1",
+            }
+        while True:
+            yield await self.events.get()
+
+
+@pytest.mark.asyncio
+async def test_bridge_pending_reconcile_survives_list_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """启动首跑与前几轮对账可能碰上服务端未就绪：list 失败不得杀死桥或对账
+    循环，就绪后自动完成投递。"""
+    monkeypatch.setattr(bridge_module, "_PENDING_RECONCILE_INTERVAL_SECONDS", 0.05)
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media, client_cls=_FlakyListClient)
+    try:
+        ext = FakeExternalApiClient.instances[-1]
+        await _wait_until(lambda: client.api.calls)
+        assert ext.list_calls >= 3  # 前两次失败没有终结循环
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u6", "content": "服务端就绪后的补投", "msg_type": 0})
+        ]
+        await _wait_until(lambda: ext.acked)
+        assert ext.acked == [("ext:qq-official:qq:c2c:u6", "obx-flaky-1")]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_skips_duplicate_copy_of_acked_outbox_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """服务端周期对账/重启重放会产生同一 outbox_id 的多份副本：首份 ack 成功
+    后，后续副本必须跳过，不得重复推送给用户；无 id 的事件不受影响。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="d1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "日报",
+                "external_key": "qq:c2c:u9",
+                "outbox_id": "obx-dup",
+            }
+        )
+        await _wait_until(lambda: ext.acked)
+        # 同 id 的两份重复副本（对账注入的形态）+ 一条无 id 的正常事件。
+        await ext.events.put(
+            {"type": "outbound.created", "seq": 2, "text": "日报", "external_key": "qq:c2c:u9", "outbox_id": "obx-dup"}
+        )
+        await ext.events.put(
+            {"type": "outbound.created", "seq": 3, "text": "日报", "external_key": "qq:c2c:u9", "outbox_id": "obx-dup"}
+        )
+        await ext.events.put(
+            {"type": "outbound.created", "seq": 4, "text": "新推送", "external_key": "qq:c2c:u9"}
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+        await asyncio.sleep(0.05)  # 给潜在的错误重投留出窗口
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u9", "content": "日报", "msg_type": 0}),
+            ("post_c2c_message", {"openid": "u9", "content": "新推送", "msg_type": 0}),
+        ]
+        assert ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-dup")]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_caps_total_attempts_per_outbox_id_across_seqs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同一 outbox_id 的重放副本 seq 各不相同，per-seq 计数会对每份副本重置：
+    id 级总预算保证毒消息不会随副本反复获得完整重试轮次。"""
+    monkeypatch.setattr(bridge_module, "_PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr(bridge_module, "_PUMP_DELIVER_MAX_ATTEMPTS", 2)
+
+    attempts: dict[str, int] = {}
+    delivered: list[tuple[str, dict]] = []
+
+    async def _flaky_post_c2c(**kwargs):
+        content = str(kwargs.get("content") or "")
+        attempts[content] = attempts.get(content, 0) + 1
+        if content == "poison":
+            raise RuntimeError("simulated QQ API rejection")
+        delivered.append(("post_c2c_message", kwargs))
+        return {"id": "mid-1"}
+
+    flaky_api = FakeBotApi()
+    flaky_api.post_c2c_message = _flaky_post_c2c
+
+    class _FlakyApiClient(FakeClient):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.api = flaky_api
+
+    fake_botpy = types.ModuleType("botpy")
+    fake_botpy.Client = _FlakyApiClient
+    fake_botpy.Intents = FakeIntents
+    monkeypatch.setitem(sys.modules, "botpy", fake_botpy)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", _ReplayStreamClient)
+    media = _media_transport({})
+    monkeypatch.setattr(
+        bridge_module, "_create_media_client", lambda: httpx.AsyncClient(transport=media)
+    )
+    task = asyncio.create_task(
+        bridge_module.run_qq_official_bridge(
+            app_id="100",
+            app_secret="sekrit",
+            sandbox=False,
+            token="t",
+            base_url="http://127.0.0.1:1/api/v1",
+            on_state=lambda state, detail: None,
+        ),
+        name="test-qq-bridge-attempts",
+    )
+    try:
+        await _wait_until(lambda: FakeClient.instances and FakeClient.instances[-1].started)
+        client = FakeClient.instances[-1]
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="p2"))
+        ext = FakeExternalApiClient.instances[-1]
+        ext.feed.append(
+            {"type": "outbound.created", "seq": 1, "text": "poison", "external_key": "qq:c2c:u9", "outbox_id": "obx-p"}
+        )
+        await _wait_until(lambda: attempts.get("poison", 0) >= 2)
+        # 同 id 重放副本（新 seq）：per-seq 预算虽被重置，id 级预算已耗尽——
+        # 零尝试直接丢弃；后续正常事件不受影响。
+        ext.feed.append(
+            {"type": "outbound.created", "seq": 2, "text": "poison", "external_key": "qq:c2c:u9", "outbox_id": "obx-p"}
+        )
+        ext.feed.append(
+            {"type": "outbound.created", "seq": 3, "text": "正常", "external_key": "qq:c2c:u9", "outbox_id": "obx-ok"}
+        )
+        await _wait_until(lambda: delivered)
+        await asyncio.sleep(0.05)
+        assert attempts["poison"] == 2  # 副本没有触发新的投递尝试
+        assert delivered == [
+            ("post_c2c_message", {"openid": "u9", "content": "正常", "msg_type": 0})
+        ]
+        assert ("ext:qq-official:qq:c2c:u9", "obx-ok") in ext.acked
+        assert ("ext:qq-official:qq:c2c:u9", "obx-p") not in ext.acked
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+def test_lru_remember_evicts_oldest() -> None:
+    """投递历史 LRU 有界：超限逐出最旧条目，move_to_end 刷新的条目存活。"""
+    mapping: OrderedDict[str, None] = OrderedDict()
+    for key in ("a", "b", "c"):
+        bridge_module._lru_remember(mapping, key, limit=4)
+    bridge_module._lru_remember(mapping, "a", limit=4)  # 刷新 a
+    bridge_module._lru_remember(mapping, "d", limit=4)
+    bridge_module._lru_remember(mapping, "e", limit=4)  # 超限，逐出最旧的 b
+    assert list(mapping) == ["c", "a", "d", "e"]
+    assert "b" not in mapping
