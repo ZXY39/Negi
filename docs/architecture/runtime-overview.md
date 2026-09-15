@@ -295,7 +295,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 水位监控与紧急态（P1）在同一契约下运转：
 
-- **采样**：`WorkerPressureMonitor` 每拍（1s）经 disk_guard 的 TTL 缓存读工作区/存储盘的 `(free, total)`，随 snapshot 以 `machine_disk_free_bytes / machine_disk_usage_percent / disk_emergency_active / disk_cleanup_active` 下发到 `worker_status_payload`；前端任务大厅性能条渲染「磁盘剩余」列（紧急=critical 着色、清理线=throttled 着色），紧急态另渲染全局横幅。
+- **采样**：`WorkerPressureMonitor` 每拍（1s）经 disk_guard 的 TTL 缓存读工作区/存储盘的 `(free, total)`，随 snapshot 以 `machine_disk_free_bytes / machine_disk_usage_percent / disk_emergency_active / disk_cleanup_active` 下发到 `worker_status_payload`；前端任务大厅性能条的「CPU/内存/磁盘」项把剩余空间并进磁盘段渲染（`0%(剩余10.1G)`，紧急=critical 着色、清理线=throttled 着色），不再单列「磁盘剩余」项；紧急态另渲染全局横幅。
 - **两条水位线**：紧急线 `max(emergency_min_bytes, total×emergency_min_ratio)`、清理线 `max(cleanup_min_bytes, total×cleanup_min_ratio)`，判定带防抖（进入需连续 `emergency_streak_samples` 拍、解除需连续 `emergency_recovery_samples` 拍）。
 - **紧急态硬闸的语义是"排队等待"而非拒绝**：controller 的 `set_disk_emergency(True)` 把 `target_limit` 置 0，新工具调用在预算队列等待（模型不会收到工具级错误）；`disk_emergency` 是独立于 `pressure_state` 的布尔硬闸——压力决策链（critical/throttle/ease）与 dwell/starvation 逃逸阀在紧急态整体冻结，`_reset_idle_locked` 三处调用点带守卫，任何路径都不得把 limit 从 0 抬起。
 - **紧急态自动暂停防死锁**：进入紧急态的边沿钩子（monitor 采样线程 → `call_soon_threadsafe` 回事件循环）对全部 `in_progress` 任务执行 `force_pause_task_durably`，随后 `controller.abort_task_waiters(task_id, TaskPausedError)` 唤醒该任务排队中的 acquire future——异常沿既有 pause 流转冒泡（acquire 在 `_run_call` 的工具 try 块之外，不会被误包装成工具级错误）。竞态封口：acquire 成功返回后补一次 `_check_pause_or_cancel`（失败归还槽）；`_check_pause_or_cancel` 的 pause 分支与 `pause_task` 成功路径同样调用 abort。web/worker 双进程各自检测、各自 pause，`force_pause_task_durably` 幂等，DB 是唯一真源。

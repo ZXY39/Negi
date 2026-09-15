@@ -321,12 +321,36 @@ function hideTaskTreeLoadNotice() {
     U.taskLoadNotice.className = "task-load-notice";
 }
 
+// 一行字提示条与任务树左上角的搜索框对齐（.task-tree-search）。详情页顶栏会
+// 随窗口宽度折行，搜索框的 y 因此不是常量（宽窗口单行 ~70px，窄窗口折成两行
+// ~150px），所以每次显示时按实测几何算，不写死像素；取不到锚点（非详情视图、
+// 独立 vm 环境）就退回 CSS 里的默认偏移。
+function alignTaskTreeLoadNoticeToSearchBox() {
+    const notice = U.taskLoadNotice;
+    if (!notice || typeof notice.getBoundingClientRect !== "function") return;
+    const viewport = notice.parentElement;
+    const anchor = typeof document === "undefined"
+        ? null
+        : document.querySelector(".task-tree-search-input") || document.querySelector(".task-tree-search");
+    if (!viewport || !anchor || typeof anchor.getBoundingClientRect !== "function") {
+        notice.style.marginTop = "";
+        return;
+    }
+    const anchorRect = anchor.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    // 提示条中心线 = 搜索框中心线（两个 rect 同为窗口坐标，差值即偏移）。
+    const offset = anchorRect.top + anchorRect.height / 2 - viewportRect.top - notice.getBoundingClientRect().height / 2;
+    notice.style.marginTop = `${Math.max(0, Math.round(offset))}px`;
+}
+
 function showTaskTreeLoadNotice(text) {
     if (!U.taskLoadNotice || !U.taskLoadNoticeText) return;
     U.taskLoadNoticeText.textContent = String(text || "");
     // 已经在显示（逐块更新数字的常规路径）：只改文本，不重复写显示状态。
     if (!U.taskLoadNotice.hidden) return;
     U.taskLoadNotice.hidden = false;
+    // 对齐要用到提示条自身高度，必须先取消 hidden 再量。
+    alignTaskTreeLoadNoticeToSearchBox();
     U.taskLoadNotice.className = "task-load-notice is-open";
 }
 

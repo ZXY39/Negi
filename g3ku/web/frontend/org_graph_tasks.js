@@ -453,14 +453,12 @@ function renderTaskPerformanceBar() {
     const diskText = metrics?.machine_pressure_disk_busy_available === false
         ? "--"
         : formatTaskWorkerPercent(metrics?.machine_pressure_disk_busy_percent);
-    // 磁盘治理（P1）：剩余空间水位 + 紧急/清理态着色。
+    // 磁盘治理（P1）：剩余空间并进磁盘那一段（磁盘段显示 `0%(剩余10.1G)`），不再
+    // 单列「磁盘剩余」一项；紧急/清理态着色随之落在 CPU/内存/磁盘 这一项上。
     const diskEmergency = !!metrics?.disk_emergency_active;
     const diskCleanup = !!metrics?.disk_cleanup_active;
     const diskFreeText = formatTaskDiskFreeBytes(metrics);
-    const diskUsagePercent = Number(metrics?.machine_disk_usage_percent);
-    const diskUsageText = Number.isFinite(diskUsagePercent) && Number(metrics?.machine_disk_free_bytes) >= 0
-        ? `${diskUsagePercent.toFixed(1)}%`
-        : "--";
+    const diskBusyText = diskText === "--" ? "--" : `${diskText}(剩余${diskFreeText})`;
     const diskStateKey = diskEmergency ? "critical" : diskCleanup ? "throttled" : "normal";
     const diskStateSuffix = diskEmergency ? " · 紧急" : diskCleanup ? " · 清理线" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
@@ -473,13 +471,9 @@ function renderTaskPerformanceBar() {
             <span class="task-performance-label">压力状态</span>
             <strong class="task-performance-value">${esc(pressureState.label)}</strong>
         </div>
-        <div class="task-performance-item">
-            <span class="task-performance-label">CPU/内存/磁盘</span>
-            <strong class="task-performance-value">${esc(`${cpuText} / ${memoryText} / ${diskText}`)}</strong>
-        </div>
         <div class="task-performance-item task-performance-item--state" data-state="${esc(diskStateKey)}">
-            <span class="task-performance-label">磁盘剩余</span>
-            <strong class="task-performance-value">${esc(`${diskFreeText}（已用 ${diskUsageText}）${diskStateSuffix}`)}</strong>
+            <span class="task-performance-label">CPU/内存/磁盘</span>
+            <strong class="task-performance-value">${esc(`${cpuText} / ${memoryText} / ${diskBusyText}${diskStateSuffix}`)}</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">工具队列</span>

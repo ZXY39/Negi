@@ -6127,9 +6127,8 @@ textarea {
 /* 打开任务的加载进度：一行字的状态条，不是可操作提示——没有标题、没有关闭
    按钮，也不接受指针事件（不可交互、不可关闭）。样式语言与
    .ceo-context-load-notice-item 的标签胶囊一致。
-   下移 20px：一行字贴在最顶部时会压在内容区顶栏的中线上，看起来比原来的 toast
-   卡片更"高"；偏移后它的视觉中心落到卡片原来的中心线（视口顶 20px + 卡高约
-   75px 的一半）上。 */
+   margin-top 是兜底偏移（提示条中心线落在旧 toast 卡片的中心线上）；正常路径由
+   alignTaskTreeLoadNoticeToSearchBox 按任务树搜索框的实测位置写行内 margin。 */
 .task-load-notice {
     display: inline-flex;
     align-items: center;

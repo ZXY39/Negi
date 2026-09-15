@@ -5630,6 +5630,75 @@ def test_task_tree_in_place_refresh_never_shows_load_notice() -> None:
     assert result["finalHidden"] is True
 
 
+def test_task_tree_load_notice_aligns_to_tree_search_box() -> None:
+    """提示条落在任务树左上角搜索框的高度上，按实测几何对齐（顶栏折行会改 y）。"""
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          currentTaskId: "task:test",
+          treeLoadNoticeTaskId: "",
+          treeLoadNoticeTimer: null,
+          treeLoadNoticeTimerTaskId: "",
+        };
+        const rect = (top, height) => ({ top, height, bottom: top + height, left: 0, right: 0, width: 0 });
+        const viewport = { getBoundingClientRect: () => rect(20, 0) };
+        let noticeMeasureCalls = 0;
+        const notice = {
+          hidden: true,
+          className: "",
+          style: {},
+          parentElement: viewport,
+          getBoundingClientRect: () => { noticeMeasureCalls += 1; return rect(20, 35); },
+        };
+        // 窄窗口：详情页顶栏折成两行，搜索框落在 y=148（宽窗口单行时约 y=68）。
+        let anchorRect = rect(148, 40);
+        const anchor = { getBoundingClientRect: () => anchorRect };
+        global.document = { querySelector: (selector) => (anchorRect && selector === ".task-tree-search-input" ? anchor : null) };
+        global.U = { taskLoadNotice: notice, taskLoadNoticeText: { textContent: "" } };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        showTaskTreeLoadNotice("正在打开任务：加载中 (3/600)");
+        const firstMargin = notice.style.marginTop;
+        const firstText = U.taskLoadNoticeText.textContent;
+        const measuresAfterFirst = noticeMeasureCalls;
+        // 逐块更新数字（已在显示）：只改文本，不重复量几何。
+        showTaskTreeLoadNotice("正在打开任务：加载中 (4/600)");
+        const measuresAfterUpdate = noticeMeasureCalls;
+        // 换到宽窗口（顶栏单行）：下次显示按新的搜索框位置重新对齐。
+        hideTaskTreeLoadNotice();
+        anchorRect = rect(68, 40);
+        showTaskTreeLoadNotice("正在打开任务：加载中 (0/…)");
+        const wrappedMargin = notice.style.marginTop;
+        // 取不到锚点：退回 CSS 默认偏移（清掉行内值）。
+        hideTaskTreeLoadNotice();
+        anchorRect = null;
+        showTaskTreeLoadNotice("正在打开任务：加载中 (0/…)");
+        console.log(JSON.stringify({
+          firstMargin,
+          firstText,
+          measuresAfterFirst,
+          measuresAfterUpdate,
+          wrappedMargin,
+          fallbackMargin: notice.style.marginTop,
+        }));
+        """
+    )
+
+    # 搜索框中心线 168：168 - 视口顶 20 - 提示条半高 17.5 → 131px。
+    assert result["firstMargin"] == "131px"
+    assert result["firstText"] == "正在打开任务：加载中 (3/600)"
+    assert result["measuresAfterFirst"] == 1
+    # 已显示时逐块更新不再量几何。
+    assert result["measuresAfterUpdate"] == 1
+    # 单行顶栏（搜索框 y=68）→ 68 + 20 - 20 - 17.5 → 51px。
+    assert result["wrappedMargin"] == "51px"
+    # 无锚点时清掉行内偏移，回落到 CSS。
+    assert result["fallbackMargin"] == ""
+
+
 def test_load_task_detail_announces_tree_load_only_for_real_opens() -> None:
     """只有真正打开任务（preserveView 为假）才起「正在打开任务」提示条。
 
