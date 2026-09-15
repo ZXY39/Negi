@@ -8,8 +8,10 @@ from g3ku.runtime.stage_prompt_compaction import (
     STAGE_RAW_PREFIX,
     compact_stage_prompt_messages_in_place,
     is_stage_block_echo_text,
+    is_stage_context_message,
     keep_stage_blocks_off_continuation_tail,
     prepare_stage_prompt_messages,
+    stage_prompt_prefix,
     strip_stage_block_echo,
 )
 
@@ -765,3 +767,51 @@ def test_strip_stage_block_echo_removes_standalone_and_tail_blocks() -> None:
     # 无块的文本原样保留
     assert strip_stage_block_echo("可见答案。") == "可见答案。"
 
+
+
+def test_stage_echo_with_tool_calls_is_not_treated_as_stage_block() -> None:
+    # 携带 tool_calls 的 assistant 消息即使以阶段块前缀开头，也不是阶段块：
+    # 整块丢弃会连带丢掉工具调用声明，使其配对 role=tool 结果成为孤儿工具
+    # 结果（生产事故：ext 会话连续 5 天每轮携带同一对孤儿结果发给供应商）。
+    echo_block = f"{STAGE_COMPACT_PREFIX}\n" + json.dumps(
+        {"stage_index": 30, "status": "completed"}, ensure_ascii=False
+    )
+    echo_with_calls = {
+        "role": "assistant",
+        "content": echo_block,
+        "tool_calls": [
+            {
+                "id": "call_echo_1",
+                "type": "function",
+                "function": {"name": "load_tool_context", "arguments": "{}"},
+            },
+        ],
+    }
+    echo_without_calls = {"role": "assistant", "content": echo_block}
+    system_block = {"role": "system", "content": echo_block}
+
+    assert is_stage_context_message(echo_without_calls) is True
+    assert is_stage_context_message(system_block) is True
+    # 携带 tool_calls 的回显回合不识别为阶段块（节点/会话通道共享此谓词）。
+    assert is_stage_context_message(echo_with_calls) is False
+
+    messages = [
+        {"role": "system", "content": "sys"},
+        echo_with_calls,
+        {"role": "tool", "content": '{"ok": true}', "tool_call_id": "call_echo_1"},
+        {"role": "user", "content": "继续"},
+    ]
+    prefix, remainder = stage_prompt_prefix(messages)
+    kept = prefix + remainder
+    # 回显回合与其 tool 结果都保留，不产生孤儿。
+    assert any(list(item.get("tool_calls") or []) for item in kept if item.get("role") == "assistant")
+    assert any(str(item.get("tool_call_id") or "") == "call_echo_1" for item in kept)
+
+    # 尾部守卫同样不得把携带 tool_calls 的回显当作阶段块前移重排。
+    tail_messages = [
+        {"role": "user", "content": "current turn"},
+        echo_with_calls,
+        {"role": "tool", "content": '{"ok": true}', "tool_call_id": "call_echo_1"},
+    ]
+    reordered = keep_stage_blocks_off_continuation_tail(tail_messages)
+    assert [str(item.get("role")) for item in reordered] == ["user", "assistant", "tool"]

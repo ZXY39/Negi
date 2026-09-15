@@ -971,3 +971,107 @@ async def test_run_frontdoor_llm_token_compression_persists_internal_request_art
         "cache_hit_tokens": 0,
     }
     assert session._frontdoor_actual_request_path == "D:/tmp/frontdoor-visible-request.json"
+
+
+@pytest.mark.asyncio
+async def test_run_frontdoor_llm_token_compression_aligns_tool_pair_tail_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 固定 4 条的尾部切片不得落在并行工具批次中间：否则声明 assistant 落入
+    # 摘要区、请求里留下孤儿工具结果（节点通道事故 task:25745b5268dc 的
+    # 会话侧孪生）。修复后边界向前对齐到声明消息。
+    from g3ku.runtime.tool_history import analyze_tool_call_history
+
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "ceo_primary",
+            "provider_model": "openai:gpt-5.2",
+            "context_window_tokens": 32000,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_estimate_frontdoor_send_total_tokens",
+        lambda **_: 18000,
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "_emit_frontdoor_runtime_snapshot", lambda **_: asyncio.sleep(0))
+    monkeypatch.setattr(
+        runner,
+        "_persist_frontdoor_internal_request_artifact",
+        lambda **kwargs: {"request_id": "internal-request-align"},
+        raising=False,
+    )
+
+    async def _call_model_with_tools(**kwargs):
+        _ = kwargs
+        return AIMessage(content="[压缩后的较早历史摘要]")
+
+    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _frontdoor_actual_request_path="",
+        _frontdoor_request_body_messages=[
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "visible baseline"},
+        ],
+        _emit_state_snapshot=lambda: None,
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
+    )
+
+    batch_calls = [
+        {
+            "id": f"call_batch_{index}",
+            "type": "function",
+            "function": {"name": "exec", "arguments": "{}"},
+        }
+        for index in range(4)
+    ]
+    request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "older-1"},
+        {"role": "assistant", "content": "older-2"},
+        {"role": "user", "content": "older-3"},
+        {"role": "assistant", "content": "", "tool_calls": batch_calls},
+        *[
+            {"role": "tool", "content": f"result-{index}", "tool_call_id": f"call_batch_{index}"}
+            for index in range(4)
+        ],
+    ]
+
+    result = await runner._run_frontdoor_llm_token_compression(
+        state={
+            "session_key": "web:shared",
+            "model_refs": ["ceo_primary"],
+        },
+        runtime=runtime,
+        request_messages=request_messages,
+        model_refs=["ceo_primary"],
+        tool_schemas=[],
+    )
+
+    assert result.history_shrink_reason == "token_compression"
+    rewritten = [dict(item) for item in list(result.request_messages or [])]
+    analysis = analyze_tool_call_history(rewritten)
+    assert analysis.orphan_tool_result_ids == []
+    # 声明批次与全部 4 个结果都保留在压缩块之后的尾部。
+    tail_call_ids = [
+        str(tc.get("id"))
+        for item in rewritten
+        for tc in list(item.get("tool_calls") or [])
+    ]
+    assert all(f"call_batch_{index}" in tail_call_ids for index in range(4))
+    tail_result_ids = [
+        str(item.get("tool_call_id"))
+        for item in rewritten
+        if str(item.get("role") or "").strip().lower() == "tool"
+    ]
+    assert tail_result_ids == [f"call_batch_{index}" for index in range(4)]

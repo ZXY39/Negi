@@ -61,3 +61,31 @@ def analyze_tool_call_history(messages: list[dict[str, Any]]) -> ToolCallHistory
         orphan_tool_result_ids=orphan_tool_result_ids,
         dangling_assistant_call_ids=dangling_assistant_call_ids,
     )
+
+
+def align_compaction_keep_recent(messages: list[dict[str, Any]] | None, keep_recent: int) -> int:
+    """把压缩保留尾部的边界对齐到完整的工具调用组。
+
+    纯条数的尾部切片（``messages[-keep_recent:]``）可能把边界落在工具调用组中间：
+    尾部首条是 ``role=tool`` 结果、而声明它的 ``assistant(tool_calls)`` 消息落在更早的
+    可压缩区时，重写后的请求会包含孤儿工具结果（节点侧触发 3-strike 熔断，会话侧
+    静默污染请求；事故：task:25745b5268dc）。尾部是列表后缀，声明之后的结果必然
+    同在尾部，因此只需保证尾部首条不是 tool 结果：向前扩展边界直到首条非 tool 消息。
+
+    扩展上界为单个工具批次的消息数；最坏情况整个 body 成为尾部、无可压缩历史，
+    由调用方按既有的"无可压缩历史"分支处理。
+    """
+    seq = [item for item in list(messages or []) if isinstance(item, dict)]
+    total = len(seq)
+    k = max(0, int(keep_recent or 0))
+    if k <= 0:
+        return 0
+    if k >= total:
+        return total
+    while k < total:
+        candidate = seq[-k]
+        role = str((candidate or {}).get("role") or "").strip().lower()
+        if role != "tool":
+            break
+        k += 1
+    return k

@@ -59,6 +59,12 @@ def is_stage_context_message(message: dict[str, Any]) -> bool:
     # 造成块重复或丢失。
     if _message_role(message) not in {"assistant", "system"}:
         return False
+    # 恰好以阶段块开头、但同时携带 tool_calls 的工具调用回合不是阶段块本身：
+    # 整块丢弃会连带丢掉 assistant 的工具调用声明，使其 role=tool 结果成为
+    # 孤儿工具结果（生产事故：ext 会话连续 5 天每轮携带同一对孤儿结果）。
+    # 语义对齐 node_prompt_contract 的 _message_declares_tool_calls 守卫。
+    if list((message or {}).get("tool_calls") or []):
+        return False
     content = str((message or {}).get("content") or "")
     return (
         content.startswith(STAGE_COMPACT_PREFIX)

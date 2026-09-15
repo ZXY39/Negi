@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from loguru import logger
+
 from g3ku.agent.tools.base import Tool
 from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import ToolCallRequest
@@ -31,7 +33,11 @@ from g3ku.runtime.stage_prompt_compaction import (
     retained_completed_stage_ids as _shared_retained_completed_stage_ids,
     stage_prompt_prefix as _shared_stage_prompt_prefix,
 )
-from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
+from g3ku.runtime.tool_history import (
+    align_compaction_keep_recent,
+    analyze_tool_call_history,
+    extract_call_id,
+)
 from g3ku.runtime.tool_watchdog import (
     actor_role_allows_detached_watchdog,
     actor_role_allows_watchdog,
@@ -560,6 +566,18 @@ class ReActToolLoop:
             tool_history = analyze_tool_call_history(request_messages)
             if tool_history.has_orphan_tool_results:
                 orphan_tool_result_strikes += 1
+                try:
+                    logger.warning(
+                        'orphan tool results in request history (strike {}/{}): task={} node={} orphan_call_ids={}',
+                        orphan_tool_result_strikes,
+                        _ORPHAN_TOOL_RESULT_THRESHOLD,
+                        task.task_id,
+                        node.node_id,
+                        ','.join(tool_history.orphan_tool_result_ids[:8]),
+                    )
+                except Exception:
+                    # 磁盘满等日志写入失败不得把干净的熔断暂停污染成通用异常暂停。
+                    pass
                 if orphan_tool_result_strikes >= _ORPHAN_TOOL_RESULT_THRESHOLD:
                     return self._orphan_tool_result_failure(
                         call_ids=tool_history.orphan_tool_result_ids,
@@ -4364,6 +4382,11 @@ class ReActToolLoop:
 
         body_messages = list(normalized)
         keep_recent = max(1, int(recent_tail_count or 0))
+        # 尾部边界不得落在工具调用组中间：尾部首条是 tool 结果时向前扩展边界，
+        # 把声明它的 assistant 消息一并保留进尾部，避免重写请求含孤儿工具结果
+        # （事故：task:25745b5268dc 根节点四次熔断）。最坏退化为整 body 尾部、
+        # 无可压缩历史，由调用方既有分支处理。
+        keep_recent = align_compaction_keep_recent(body_messages, keep_recent)
         recent_tail = body_messages[-keep_recent:] if len(body_messages) > keep_recent else list(body_messages)
         compressible_history = body_messages[:-keep_recent] if len(body_messages) > keep_recent else []
         # 因果保留：除前导连续段之外，被后续真实轮次压进可压缩区深处的未消费

@@ -4879,6 +4879,79 @@ def test_node_token_compaction_bounds_oversized_tail_tool_results() -> None:
     assert "请按上文其 ref 用 content_open/content_search 检索" in bounded_text
 
 
+def test_align_compaction_keep_recent_keeps_tool_pairs_intact() -> None:
+    # 压缩保留尾部的边界不得落在工具调用组中间：尾部首条是 tool 结果时，
+    # 向前扩展边界直到声明它的 assistant 消息（事故 task:25745b5268dc）。
+    from g3ku.runtime.tool_history import align_compaction_keep_recent
+
+    body = [
+        {"role": "assistant", "content": "older"},
+        {
+            "role": "assistant",
+            "content": "declare pair",
+            "tool_calls": [
+                {"id": "call_pair_a", "type": "function", "function": {"name": "exec", "arguments": "{}"}},
+                {"id": "call_pair_b", "type": "function", "function": {"name": "exec", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "content": "result a", "tool_call_id": "call_pair_a"},
+        {"role": "tool", "content": "result b", "tool_call_id": "call_pair_b"},
+    ]
+    # 边界落在第一/第二个结果上：扩展到包含声明（两结果 -> 声明）。
+    assert align_compaction_keep_recent(body, 1) == 3
+    assert align_compaction_keep_recent(body, 2) == 3
+    # 边界本就在 assistant 声明处：不回退也不过度扩展。
+    assert align_compaction_keep_recent(body, 3) == 3
+    assert align_compaction_keep_recent(body, 4) == 4
+    # 退化：整段都是 tool 结果时扩展至整个 body（交由"无可压缩历史"分支）。
+    all_tool = [{"role": "tool", "content": "r", "tool_call_id": f"c{i}"} for i in range(3)]
+    assert align_compaction_keep_recent(all_tool, 1) == 3
+    # 空输入与零尾部。
+    assert align_compaction_keep_recent([], 5) == 0
+    assert align_compaction_keep_recent(body, 0) == 0
+
+
+def test_node_token_compaction_tail_boundary_aligns_tool_call_pairs() -> None:
+    # 事故 task:25745b5268dc 的形状：固定条数尾部切片落在并行工具批次中间、
+    # 声明 assistant 落入压缩区时，重写请求会出现孤儿工具结果并触发熔断。
+    # 修复后边界向前对齐，声明与全部结果一并保留在压缩块之后的尾部。
+    request_messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"t-align","goal":"g"}'},
+        *[{"role": "assistant", "content": f"filler {index}"} for index in range(3)],
+        {
+            "role": "assistant",
+            "content": "declare pair",
+            "tool_calls": [
+                {"id": "call_pair_a", "type": "function", "function": {"name": "exec", "arguments": "{}"}},
+                {"id": "call_pair_b", "type": "function", "function": {"name": "exec", "arguments": "{}"}},
+            ],
+        },
+        {"role": "tool", "content": "result a", "tool_call_id": "call_pair_a"},
+        {"role": "tool", "content": "result b", "tool_call_id": "call_pair_b"},
+    ]
+    # 未对齐的尾部条数 2 会把边界切在两个结果之间（声明落入压缩区）。
+    rewritten, payload = ReActToolLoop._rewrite_request_messages_for_token_compaction(
+        node_id="node-align",
+        request_messages=request_messages,
+        compressed_text="摘要",
+        recent_tail_count=2,
+    )
+    analysis = analyze_tool_call_history(rewritten)
+    assert analysis.orphan_tool_result_ids == []
+    compact_index = next(
+        index
+        for index, item in enumerate(rewritten)
+        if str(item.get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
+    )
+    tail = rewritten[compact_index + 1 :]
+    tail_call_ids = [str(tc.get("id")) for item in tail for tc in list(item.get("tool_calls") or [])]
+    tail_result_ids = [str(item.get("tool_call_id")) for item in tail if item.get("role") == "tool"]
+    assert "call_pair_a" in tail_call_ids and "call_pair_b" in tail_call_ids
+    assert tail_result_ids == ["call_pair_a", "call_pair_b"]
+    assert payload["kind"] == "node_token_compaction_llm"
+
+
 @pytest.mark.asyncio
 async def test_react_loop_execution_role_keeps_watchdog_inline_without_handoff(tmp_path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")

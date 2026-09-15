@@ -58,6 +58,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     is_stage_block_echo_text,
     strip_stage_block_echo,
 )
+from g3ku.runtime.tool_history import align_compaction_keep_recent
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
@@ -1799,6 +1800,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prompt_cache_key = str(state.get("prompt_cache_key") or "").strip()
         parallel_tool_calls = bool(state.get("parallel_enabled")) if list(tool_schemas or []) else None
         recent_tail_count = min(len(normalized_body), 4)
+        # 尾部边界不得落在工具调用组中间（与节点通道同一不变量）：尾部首条是
+        # tool 结果时向前扩展边界，把声明它的 assistant 消息一并保留；最坏
+        # 退化为整 body 尾部，落入下方无可压缩历史分支。
+        recent_tail_count = align_compaction_keep_recent(normalized_body, recent_tail_count)
         if recent_tail_count <= 0 or len(normalized_body) <= recent_tail_count:
             return FrontdoorTokenPreflightResult(
                 request_messages=list(request_messages),
