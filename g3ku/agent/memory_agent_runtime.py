@@ -609,6 +609,19 @@ class _MemoryAgentRuntimeError(RuntimeError):
     pass
 
 
+class _MemoryProviderError(RuntimeError):
+    """Provider 调用失败（限流/超时/上游错误响应），与"模型没按协议调工具"区分开。
+
+    携带失败前已累计的 usage 与 request artifacts，供停车记录保留真实成本与线索。
+    """
+
+    def __init__(self, error_text: str, *, usage: dict[str, int] | None = None, request_artifacts: list[dict[str, Any]] | None = None):
+        super().__init__(error_text)
+        self.error_text = str(error_text or "").strip()
+        self.usage = dict(usage or {})
+        self.request_artifacts = list(request_artifacts or [])
+
+
 class _MemorySqliteRepository:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -966,6 +979,32 @@ class _MemorySqliteRepository:
         finally:
             conn.close()
 
+    def update_memory(
+        self,
+        memory_id: str,
+        *,
+        memory_body: str,
+        minimal_memory: str | None = None,
+        now_iso: str,
+    ) -> bool:
+        target_id = str(memory_id or "").strip()
+        conn = self._connect()
+        try:
+            if minimal_memory is None:
+                cursor = conn.execute(
+                    "UPDATE memories SET memory_body = ?, updated_at = ? WHERE memory_id = ?",
+                    (str(memory_body or ""), str(now_iso or ""), target_id),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE memories SET memory_body = ?, minimal_memory = ?, updated_at = ? WHERE memory_id = ?",
+                    (str(memory_body or ""), str(minimal_memory or ""), str(now_iso or ""), target_id),
+                )
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        finally:
+            conn.close()
+
 
 class MemoryManager:
     _PROCESSED_BATCH_RETENTION_DAYS = 7
@@ -981,6 +1020,9 @@ class MemoryManager:
         self.notes_dir = self.workspace / str(config.document.notes_dir)
         self.queue_file = self.workspace / str(config.queue.queue_file)
         self.ops_file = self.workspace / str(config.queue.ops_file)
+        self.failed_file = self.workspace / str(
+            getattr(config.queue, "failed_file", "") or "memory/failed.jsonl"
+        )
         self.review_state_file = self.mem_dir / "review_state.json"
         self._io_lock = threading.RLock()
         self._worker_thread: threading.Thread | None = None
@@ -1013,6 +1055,8 @@ class MemoryManager:
             self.queue_file.write_text("", encoding="utf-8")
         if not self.ops_file.exists():
             self.ops_file.write_text("", encoding="utf-8")
+        if not self.failed_file.exists():
+            self.failed_file.write_text("", encoding="utf-8")
         if not self.review_state_file.exists():
             self.review_state_file.write_text('{"sessions": {}}\n', encoding="utf-8")
 
@@ -1141,6 +1185,101 @@ class MemoryManager:
             return []
         return repo.list_memories()
 
+    async def update_current_memory(
+        self,
+        memory_id: str,
+        *,
+        memory_body: str,
+        minimal_memory: str | None = None,
+    ) -> dict[str, Any]:
+        """管理员编辑单条记忆正文（sqlite 为源，MEMORY.md 镜像同步重建）。
+
+        先按候选文档做长度/格式校验，再写库与重建镜像，避免超限内容破坏快照。
+        """
+        target_id = str(memory_id or "").strip()
+        if not target_id:
+            raise ValueError("memory_id is required")
+        new_body = str(memory_body or "").strip()
+        if not new_body:
+            raise ValueError("memory_body must not be empty")
+        new_minimal = None if minimal_memory is None else str(minimal_memory or "").strip()
+        if new_minimal is not None and not new_minimal:
+            raise ValueError("minimal_memory must not be empty when provided")
+        now_iso = self._now_iso()
+        with self._io_lock:
+            repo = getattr(self, "_memory_repo", None)
+            if repo is None:
+                raise KeyError(f"memory store unavailable: {target_id}")
+            rows = [dict(row) for row in repo.list_memories()]
+            target_row = next(
+                (row for row in rows if str(row.get("memory_id") or "").strip() == target_id),
+                None,
+            )
+            if target_row is None:
+                raise KeyError(f"memory not found: {target_id}")
+            candidate_rows = []
+            for row in rows:
+                candidate = dict(row)
+                if str(candidate.get("memory_id") or "").strip() == target_id:
+                    candidate["memory_body"] = new_body
+                    if new_minimal is not None:
+                        candidate["minimal_memory"] = new_minimal
+                candidate_rows.append(candidate)
+            candidate_text = self._document_text_from_sqlite_rows(candidate_rows, now_iso=now_iso)
+            validate_memory_document(
+                candidate_text,
+                summary_max_chars=int(getattr(self.config.document, "summary_max_chars", 300) or 300),
+                document_max_chars=max(int(getattr(self.config.document, "document_max_chars", 20000) or 20000), 1),
+            )
+            updated = repo.update_memory(
+                target_id,
+                memory_body=new_body,
+                minimal_memory=new_minimal,
+                now_iso=now_iso,
+            )
+            if not updated:
+                raise KeyError(f"memory not found: {target_id}")
+            self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+        return {
+            "memory_id": target_id,
+            "memory_body": new_body,
+            "updated_at": now_iso,
+            **({"minimal_memory": new_minimal} if new_minimal is not None else {}),
+        }
+
+    async def delete_current_memories(self, memory_ids: list[str], *, reason: str = "") -> dict[str, Any]:
+        """管理员批量删除记忆（sqlite 为源，MEMORY.md 镜像同步重建）。
+
+        被删记忆引用的 note 文件不在这里级联清理；孤儿 note 由 doctor 检查报告。
+        """
+        ids: list[str] = []
+        for raw_id in list(memory_ids or []):
+            normalized = str(raw_id or "").strip()
+            if normalized and normalized not in ids:
+                ids.append(normalized)
+        if not ids:
+            raise ValueError("memory_ids is required")
+        now_iso = self._now_iso()
+        with self._io_lock:
+            repo = getattr(self, "_memory_repo", None)
+            if repo is None:
+                raise KeyError("memory store unavailable")
+            deleted: list[str] = []
+            missing: list[str] = []
+            for memory_id in ids:
+                if repo.delete_memory(memory_id):
+                    deleted.append(memory_id)
+                else:
+                    missing.append(memory_id)
+            if deleted:
+                self._rebuild_memory_snapshot_from_sqlite(now_iso=now_iso)
+        return {
+            "deleted": deleted,
+            "missing": missing,
+            "deleted_at": now_iso,
+            "reason": str(reason or "").strip(),
+        }
+
     def doctor_report(
         self,
         *,
@@ -1172,6 +1311,11 @@ class MemoryManager:
             now_iso=now_iso,
             stuck_after_seconds=stuck_after_seconds,
         )
+        parked_records = [
+            record
+            for record in self._read_failed_records()
+            if str(record.get("status") or "").strip() == "parked"
+        ]
         checks = [
             {
                 "name": "memory_document",
@@ -1207,6 +1351,17 @@ class MemoryManager:
                 if stuck_processing_head is None
                 else f"{stuck_processing_head['request_id']} age={stuck_processing_head['age_seconds']}s",
             },
+            {
+                "name": "failed_parked",
+                "ok": not parked_records,
+                "detail": "none"
+                if not parked_records
+                else ", ".join(
+                    f"{str(record.get('failed_id') or '')}({str(record.get('category') or '')})"
+                    for record in parked_records[:5]
+                )
+                + (f" +{len(parked_records) - 5} more" if len(parked_records) > 5 else ""),
+            },
         ]
         return {
             "ok": all(bool(item["ok"]) for item in checks),
@@ -1221,6 +1376,7 @@ class MemoryManager:
             "queue_head": asdict(queue_rows[0]) if queue_rows else None,
             "queue_parse_errors": queue_parse_errors,
             "stuck_processing_head": stuck_processing_head,
+            "failed_parked_count": len(parked_records),
         }
 
     def reconcile_notes(self, *, delete_orphans: bool = False) -> dict[str, Any]:
@@ -1844,6 +2000,16 @@ class MemoryManager:
             )
             if artifact is not None:
                 request_artifacts.append(artifact)
+            # Provider 错误响应（429/超时/上游错误被 provider 层转为 finish_reason="error"
+            # 的正常返回值）必须在这里显式识别：否则它会伪装成"模型没调工具"的协议违规，
+            # 真实根因被校验错误掩盖，usage/工件也全为空。
+            provider_error_text = self._provider_error_text(response)
+            if provider_error_text:
+                raise _MemoryProviderError(
+                    provider_error_text,
+                    usage=usage_total,
+                    request_artifacts=request_artifacts,
+                )
             final_text = self._response_text(response)
             tool_calls = self._normalize_tool_calls(response)
             if not tool_calls:
@@ -1909,6 +2075,25 @@ class MemoryManager:
         return normalized
 
     @staticmethod
+    def _provider_error_text(response: Any) -> str:
+        """从 chat model 响应中识别 provider 层错误（错误响应被当作正常返回值传回）。
+
+        G3kuChatModelAdapter 把 LLMResponse 的 finish_reason/error_text 放进
+        response_metadata；provider 失败（429、超时、上游 5xx）会以
+        finish_reason="error" 的响应形态到达这里，而不是抛异常。
+        """
+        metadata = getattr(response, "response_metadata", None)
+        if not isinstance(metadata, dict):
+            return ""
+        error_text = str(metadata.get("error_text") or "").strip()
+        if error_text:
+            return error_text
+        finish_reason = str(metadata.get("finish_reason") or "").strip().lower()
+        if finish_reason == "error":
+            content_text = str(getattr(response, "content", "") or "").strip()
+            return content_text or "provider returned an error response"
+        return ""
+
     @staticmethod
     def _extract_usage(response: Any) -> dict[str, int]:
         total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
@@ -2732,7 +2917,6 @@ class MemoryManager:
         self._append_ops_payload(payload)
         return payload
 
-    @staticmethod
     @staticmethod
     def _review_tool_record_key(*, stage_id: str, round_id: str, tool: dict[str, Any]) -> str:
         tool_call_id = str(tool.get("tool_call_id") or "").strip()
@@ -3616,14 +3800,31 @@ class MemoryManager:
                     model_chain=current_model_chain,
                 )
             repair_reason = last_error if attempt_index > 0 else ""
-            attempt = await self._run_memory_agent_attempt(
-                batch=processing_batch,
-                runtime_config=current_runtime_config,
-                before_text=before_text,
-                repair_reason=repair_reason,
-                queue_request_ids=queue_request_ids,
-                model_chain=current_model_chain,
-            )
+            try:
+                attempt = await self._run_memory_agent_attempt(
+                    batch=processing_batch,
+                    runtime_config=current_runtime_config,
+                    before_text=before_text,
+                    repair_reason=repair_reason,
+                    queue_request_ids=queue_request_ids,
+                    model_chain=current_model_chain,
+                )
+            except _MemoryProviderError as exc:
+                # Provider 层失败不做批内修复重试（几秒内的连续尝试只会撞同一个
+                # 限流/故障窗口），直接带真实错误返回，由上层停车等待成功信号或人工重试。
+                self._merge_usage(total_usage, dict(exc.usage or {}))
+                request_artifacts.extend(list(exc.request_artifacts or []))
+                return {
+                    "validated": None,
+                    "usage": total_usage,
+                    "attempt_count": attempt_index + 1,
+                    "assessed_text": None,
+                    "discard_reason": "provider_error",
+                    "error": exc.error_text,
+                    "model_chain": list(current_model_chain),
+                    "provider_request_ids": self._provider_request_ids_from_artifacts(request_artifacts),
+                    "request_artifact_paths": self._request_artifact_paths(request_artifacts),
+                }
             self._merge_usage(total_usage, attempt.usage)
             request_artifacts.extend(list(attempt.request_artifacts or []))
             attempt_sessions.append(attempt.session)
@@ -3748,47 +3949,61 @@ class MemoryManager:
                     model_chain=model_chain,
                 )
             except Exception as exc:
-                logger.warning("memory batch failed: {}", exc)
-                return self._mark_batch_error(batch, effective_now, str(exc or "memory batch failed"))
+                # 运行时异常（含 provider 抛出的链路耗尽错误）按瞬时失败停车：
+                # 离开主队列、保留完整载荷与错误，等成功信号或人工重试，不再队头无限自旋。
+                logger.warning("memory batch failed, parking for retry: {}", exc)
+                failed_record = self._park_failed_batch(
+                    batch,
+                    category="provider_error",
+                    discard_reason="agent_exception",
+                    error=str(exc or "memory batch failed").strip(),
+                    usage=None,
+                    model_chain=model_chain,
+                    attempt_count=0,
+                    trigger="exception",
+                    now_iso=effective_now,
+                )
+                return self._parked_batch_report(batch, failed_record, discard_reason="agent_exception")
 
-            self._drop_request_ids({item.request_id for item in batch.items})
             discard_reason = str(result.get("discard_reason") or "").strip()
             effective_model_chain = list(result.get("model_chain") or model_chain)
             if discard_reason:
-                processed_at = self._now_iso()
-                self._append_terminal_history(
-                    batch=batch,
-                    status="discarded",
-                    op=batch.op,
-                    processed_at=processed_at,
+                # 处理失败不再写 durable discarded 终态并删行（数据永久丢失），
+                # 而是移入失败停车区 memory/failed.jsonl：
+                # - provider_error（限流/超时等瞬时错误）→ 队列下次成功应用时自动重入队尾
+                # - rejected（模型真实响应但违反协议）→ 仅人工确认重试
+                # 终态记录推迟到操作员显式放弃（discard）时才写入 ops.jsonl。
+                category = "provider_error" if discard_reason == "provider_error" else "protocol"
+                failed_record = self._park_failed_batch(
+                    batch,
+                    category=category,
                     discard_reason=discard_reason,
+                    error=str(result.get("error") or "").strip(),
                     usage=result.get("usage"),
                     model_chain=effective_model_chain,
                     attempt_count=int(result.get("attempt_count", 0) or 0),
                     provider_request_ids=list(result.get("provider_request_ids") or []),
                     request_artifact_paths=list(result.get("request_artifact_paths") or []),
-                    error=str(result.get("error") or "").strip(),
+                    trigger="initial",
+                    now_iso=effective_now,
                 )
-                return {
-                    "ok": True,
-                    "status": "discarded",
-                    "discard_reason": discard_reason,
-                    "op": batch.op,
-                    "processed": len(batch.items),
-                    "request_ids": [item.request_id for item in batch.items],
-                    "attempt_count": int(result.get("attempt_count", 0) or 0),
-                    "usage": {
-                        "input_tokens": int((result.get("usage") or {}).get("input_tokens", 0) or 0),
-                        "output_tokens": int((result.get("usage") or {}).get("output_tokens", 0) or 0),
-                        "cache_read_tokens": int((result.get("usage") or {}).get("cache_read_tokens", 0) or 0),
-                    },
-                    "model_chain": list(effective_model_chain),
-                    "provider_request_ids": list(result.get("provider_request_ids") or []),
-                    "request_artifact_paths": list(result.get("request_artifact_paths") or []),
-                    "processed_at": processed_at,
-                }
+                return self._parked_batch_report(
+                    batch,
+                    failed_record,
+                    discard_reason=discard_reason,
+                    usage=result.get("usage"),
+                    attempt_count=int(result.get("attempt_count", 0) or 0),
+                    model_chain=effective_model_chain,
+                    provider_request_ids=list(result.get("provider_request_ids") or []),
+                    request_artifact_paths=list(result.get("request_artifact_paths") or []),
+                )
 
+            self._drop_request_ids({item.request_id for item in batch.items})
             self._commit_validated_write(result["validated"])
+            # 成功信号：清掉本批 request_id 对应的停车记录（终于成功了），
+            # 并把停车区里最早的一条 provider/瞬时错误批次重新入队尾（无成功信号则永不自动重试）。
+            self._purge_failed_records_for_request_ids({item.request_id for item in batch.items})
+            requeued_failed = self._requeue_next_parked_on_success(now_iso=effective_now)
             processed_at = self._now_iso()
             fallback = str(result.get("fallback") or "").strip()
             processed_payload = self._append_terminal_history(
@@ -3818,9 +4033,348 @@ class MemoryManager:
                 "processed_at": processed_at,
                 **({"noop_reason": str(processed_payload.get("noop_reason") or "").strip()} if str(processed_payload.get("noop_reason") or "").strip() else {}),
                 **({"fallback": fallback} if fallback else {}),
+                **({"requeued_failed_id": str(requeued_failed.get("failed_id") or "")} if requeued_failed else {}),
             }
         finally:
             _release_file_lock(worker_lease)
+
+    # ------------------------------------------------------------------
+    # 失败停车区（memory/failed.jsonl）
+    #
+    # 处理失败的批次不再写 durable discarded 终态并删除队列行，而是整体移入
+    # 停车区文件：主队列继续流动，失败批次保留完整载荷与错误历史。
+    # - category=provider_error：限流/超时/上游错误等瞬时失败。队列每次成功
+    #   应用新批次时（成功信号），自动把停车区里最早的一条重新入队尾；没有
+    #   成功信号则一直停车，不产生任何自动重试成本，也不设次数上限。
+    # - category=protocol：模型真实响应但违反 memory_apply_batch 协议（批内
+    #   已做过修复重试），只接受人工确认重试。
+    # 只有操作员显式放弃（discard）时才写入 ops.jsonl 终态记录，request_id
+    # 由此进入已处理集合完成幂等闭环。
+    # ------------------------------------------------------------------
+
+    def _read_failed_records(self) -> list[dict[str, Any]]:
+        if not self.failed_file.exists():
+            return []
+        with self._io_lock:
+            lines = self.failed_file.read_text(encoding="utf-8").splitlines()
+        rows: list[dict[str, Any]] = []
+        for line in lines:
+            if not str(line or "").strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                rows.append(payload)
+        return rows
+
+    def _write_failed_records(self, rows: list[dict[str, Any]]) -> None:
+        with self._io_lock:
+            text = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+            self.failed_file.parent.mkdir(parents=True, exist_ok=True)
+            self.failed_file.write_text((f"{text}\n" if text else ""), encoding="utf-8")
+
+    def _failed_queue_row_from_payload(self, payload: Any) -> MemoryQueueRequest | None:
+        try:
+            data = dict(payload or {})
+            field_names = set(MemoryQueueRequest.__dataclass_fields__)
+            row = MemoryQueueRequest(**{key: value for key, value in data.items() if key in field_names})
+        except Exception:
+            return None
+        row = self._normalize_queue_request(row)
+        row.status = "pending"
+        row.processing_started_at = ""
+        row.retry_after = ""
+        return row
+
+    @staticmethod
+    def _normalized_usage_dict(usage: dict[str, int] | None) -> dict[str, int]:
+        return {
+            "input_tokens": int((usage or {}).get("input_tokens", 0) or 0),
+            "output_tokens": int((usage or {}).get("output_tokens", 0) or 0),
+            "cache_read_tokens": int((usage or {}).get("cache_read_tokens", 0) or 0),
+        }
+
+    def _park_failed_batch(
+        self,
+        batch: MemoryBatch,
+        *,
+        category: str,
+        discard_reason: str,
+        error: str,
+        usage: dict[str, int] | None = None,
+        model_chain: list[str] | None = None,
+        attempt_count: int = 0,
+        provider_request_ids: list[str] | None = None,
+        request_artifact_paths: list[str] | None = None,
+        trigger: str = "initial",
+        now_iso: str | None = None,
+    ) -> dict[str, Any]:
+        now = str(now_iso or "").strip() or self._now_iso()
+        request_ids = [str(item.request_id or "").strip() for item in batch.items]
+        id_set = {rid for rid in request_ids if rid}
+        rows = self._read_failed_records()
+        existing: dict[str, Any] | None = None
+        for row in rows:
+            row_ids = {str(rid or "").strip() for rid in list(row.get("request_ids") or [])}
+            if row_ids & id_set:
+                existing = row
+                break
+        history_entry = {
+            "at": now,
+            "category": str(category or "").strip(),
+            "discard_reason": str(discard_reason or "").strip(),
+            "error": str(error or "").strip(),
+            "trigger": str(trigger or "initial").strip(),
+        }
+        merged_usage = self._normalized_usage_dict(usage)
+        if existing is not None:
+            existing_usage = self._normalized_usage_dict(existing.get("usage_total"))
+            self._merge_usage(existing_usage, merged_usage)
+            history = list(existing.get("error_history") or [])
+            history.append(history_entry)
+            existing.update(
+                {
+                    "op": batch.op,
+                    "request_ids": request_ids,
+                    "items": [asdict(item) for item in batch.items],
+                    "category": str(category or "").strip(),
+                    "discard_reason": str(discard_reason or "").strip(),
+                    "status": "parked",
+                    "parked_at": now,
+                    "requeued_at": "",
+                    "park_count": int(existing.get("park_count", 0) or 0) + 1,
+                    "llm_attempt_count": int(existing.get("llm_attempt_count", 0) or 0) + max(int(attempt_count or 0), 0),
+                    "last_error_text": history_entry["error"],
+                    "last_error_at": now,
+                    "error_history": history[-50:],
+                    "usage_total": existing_usage,
+                }
+            )
+            if model_chain:
+                existing["model_chain"] = [str(item or "").strip() for item in list(model_chain) if str(item or "").strip()]
+            for key, values in (
+                ("provider_request_ids", provider_request_ids),
+                ("request_artifact_paths", request_artifact_paths),
+            ):
+                if not values:
+                    continue
+                merged = list(existing.get(key) or [])
+                for value in values:
+                    normalized_value = str(value or "").strip()
+                    if normalized_value and normalized_value not in merged:
+                        merged.append(normalized_value)
+                existing[key] = merged
+            record = existing
+        else:
+            created_ats = [str(item.created_at or "").strip() for item in batch.items if str(item.created_at or "").strip()]
+            record = {
+                "failed_id": self._request_id("failed"),
+                "op": batch.op,
+                "request_ids": request_ids,
+                "items": [asdict(item) for item in batch.items],
+                "category": str(category or "").strip(),
+                "discard_reason": str(discard_reason or "").strip(),
+                "status": "parked",
+                "created_at": min(created_ats) if created_ats else now,
+                "first_parked_at": now,
+                "parked_at": now,
+                "requeued_at": "",
+                "park_count": 1,
+                "llm_attempt_count": max(int(attempt_count or 0), 0),
+                "auto_requeue_count": 0,
+                "manual_retry_count": 0,
+                "last_error_text": history_entry["error"],
+                "last_error_at": now,
+                "error_history": [history_entry],
+                "usage_total": merged_usage,
+                "model_chain": [str(item or "").strip() for item in list(model_chain or []) if str(item or "").strip()],
+                "provider_request_ids": [str(item or "").strip() for item in list(provider_request_ids or []) if str(item or "").strip()],
+                "request_artifact_paths": [str(item or "").strip() for item in list(request_artifact_paths or []) if str(item or "").strip()],
+            }
+            rows.append(record)
+        self._write_failed_records(rows)
+        self._drop_request_ids(id_set)
+        return record
+
+    def _parked_batch_report(
+        self,
+        batch: MemoryBatch,
+        record: dict[str, Any],
+        *,
+        discard_reason: str = "",
+        usage: dict[str, int] | None = None,
+        attempt_count: int = 0,
+        model_chain: list[str] | None = None,
+        provider_request_ids: list[str] | None = None,
+        request_artifact_paths: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "parked",
+            "discard_reason": str(discard_reason or record.get("discard_reason") or "").strip(),
+            "category": str(record.get("category") or "").strip(),
+            "failed_id": str(record.get("failed_id") or "").strip(),
+            "op": batch.op,
+            "processed": 0,
+            "request_ids": [item.request_id for item in batch.items],
+            "attempt_count": int(attempt_count or 0),
+            "usage": self._normalized_usage_dict(usage if usage is not None else record.get("usage_total")),
+            "model_chain": list(model_chain if model_chain is not None else (record.get("model_chain") or [])),
+            "provider_request_ids": list(provider_request_ids if provider_request_ids is not None else (record.get("provider_request_ids") or [])),
+            "request_artifact_paths": list(request_artifact_paths if request_artifact_paths is not None else (record.get("request_artifact_paths") or [])),
+            "parked_at": str(record.get("parked_at") or "").strip(),
+        }
+
+    def _purge_failed_records_for_request_ids(self, request_ids: set[str]) -> None:
+        id_set = {str(rid or "").strip() for rid in request_ids if str(rid or "").strip()}
+        if not id_set:
+            return
+        rows = self._read_failed_records()
+        remaining: list[dict[str, Any]] = []
+        changed = False
+        for row in rows:
+            row_ids = {str(rid or "").strip() for rid in list(row.get("request_ids") or [])}
+            if row_ids & id_set:
+                changed = True
+                continue
+            remaining.append(row)
+        if changed:
+            self._write_failed_records(remaining)
+
+    def _requeue_failed_record(
+        self,
+        rows: list[dict[str, Any]],
+        record: dict[str, Any],
+        *,
+        trigger: str,
+        now_iso: str | None = None,
+    ) -> dict[str, Any]:
+        now = str(now_iso or "").strip() or self._now_iso()
+        queue_rows = self._read_queue_requests()
+        existing_ids = {str(row.request_id or "").strip() for row in queue_rows}
+        requeued_ids: list[str] = []
+        for item_payload in list(record.get("items") or []):
+            row = self._failed_queue_row_from_payload(item_payload)
+            if row is None:
+                continue
+            if row.request_id and row.request_id in existing_ids:
+                continue
+            queue_rows.append(row)
+            if row.request_id:
+                existing_ids.add(row.request_id)
+            requeued_ids.append(row.request_id)
+        self._write_queue_requests(queue_rows)
+        history = list(record.get("error_history") or [])
+        history.append({"at": now, "event": "requeued", "trigger": str(trigger or "auto").strip()})
+        record["error_history"] = history[-50:]
+        record["status"] = "requeued"
+        record["requeued_at"] = now
+        if str(trigger or "").strip() == "manual":
+            record["manual_retry_count"] = int(record.get("manual_retry_count", 0) or 0) + 1
+        else:
+            record["auto_requeue_count"] = int(record.get("auto_requeue_count", 0) or 0) + 1
+        self._write_failed_records(rows)
+        return {
+            "failed_id": str(record.get("failed_id") or "").strip(),
+            "request_ids": requeued_ids,
+            "trigger": str(trigger or "auto").strip(),
+            "requeued_at": now,
+        }
+
+    def _requeue_next_parked_on_success(self, *, now_iso: str | None = None) -> dict[str, Any] | None:
+        """成功信号驱动的自动重试：每次成功应用批次后，把停车区里最早的一条
+        provider/瞬时错误批次重新入队尾。没有成功信号就永远不会自动重试。"""
+        if not bool(getattr(self.config.queue, "auto_requeue_on_success", True)):
+            return None
+        rows = self._read_failed_records()
+        candidates = [
+            row
+            for row in rows
+            if str(row.get("status") or "").strip() == "parked"
+            and str(row.get("category") or "").strip() == "provider_error"
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda row: (str(row.get("first_parked_at") or ""), str(row.get("created_at") or "")))
+        return self._requeue_failed_record(rows, candidates[0], trigger="auto", now_iso=now_iso)
+
+    async def list_failed_page(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        rows = self._read_failed_records()
+        parked = [row for row in rows if str(row.get("status") or "").strip() == "parked"]
+        parked.sort(key=lambda row: str(row.get("parked_at") or ""), reverse=True)
+        start = max(int(offset or 0), 0)
+        page_size = max(int(limit or 0), 0)
+        end = start + page_size
+        return {
+            "items": parked[start:end],
+            "total": len(parked),
+            "has_more": end < len(parked),
+        }
+
+    async def retry_failed_record(self, failed_id: str, *, reason: str = "manual") -> dict[str, Any]:
+        target = str(failed_id or "").strip()
+        rows = self._read_failed_records()
+        record = next((row for row in rows if str(row.get("failed_id") or "").strip() == target), None)
+        if record is None:
+            raise KeyError(f"failed memory record not found: {target}")
+        if str(record.get("status") or "").strip() != "parked":
+            raise ValueError(f"failed memory record is not parked (status={record.get('status')})")
+        summary = self._requeue_failed_record(rows, record, trigger="manual")
+        summary["reason"] = str(reason or "manual").strip()
+        return summary
+
+    async def discard_failed_record(self, failed_id: str, *, reason: str = "manual") -> dict[str, Any]:
+        target = str(failed_id or "").strip()
+        rows = self._read_failed_records()
+        record = next((row for row in rows if str(row.get("failed_id") or "").strip() == target), None)
+        if record is None:
+            raise KeyError(f"failed memory record not found: {target}")
+        items: list[MemoryQueueRequest] = []
+        for item_payload in list(record.get("items") or []):
+            row = self._failed_queue_row_from_payload(item_payload)
+            if row is not None:
+                items.append(row)
+        if not items:
+            items = [
+                MemoryQueueRequest(
+                    op=str(record.get("op") or "write"),
+                    decision_source="self",
+                    payload_text="",
+                    created_at=str(record.get("created_at") or ""),
+                    request_id=str(rid or ""),
+                )
+                for rid in list(record.get("request_ids") or [])
+            ]
+        batch = MemoryBatch(op=str(record.get("op") or "write"), items=items)
+        terminal = self._append_terminal_history(
+            batch=batch,
+            status="discarded",
+            op=str(record.get("op") or "write"),
+            processed_at=self._now_iso(),
+            discard_reason="operator_discarded",
+            usage=record.get("usage_total"),
+            model_chain=record.get("model_chain"),
+            attempt_count=int(record.get("llm_attempt_count", 0) or 0),
+            provider_request_ids=record.get("provider_request_ids"),
+            request_artifact_paths=record.get("request_artifact_paths"),
+            error=str(record.get("last_error_text") or "").strip(),
+        )
+        # 记录可能处于 requeued 状态（行已回到队列），放弃时把队列行一并清掉；
+        # 终态记录已写入 ops.jsonl，request_id 进入已处理集合，幂等去重兜底。
+        self._drop_request_ids({str(rid or "").strip() for rid in list(record.get("request_ids") or []) if str(rid or "").strip()})
+        self._write_failed_records(
+            [row for row in self._read_failed_records() if str(row.get("failed_id") or "").strip() != target]
+        )
+        return {
+            "failed_id": target,
+            "status": "discarded",
+            "batch_id": str(terminal.get("batch_id") or "").strip(),
+            "request_ids": list(record.get("request_ids") or []),
+            "reason": str(reason or "manual").strip(),
+            "error_history_count": len(list(record.get("error_history") or [])),
+        }
 
     def _reload_runtime_config_for_memory_retry(
         self,

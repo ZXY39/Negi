@@ -38,11 +38,10 @@ def test_memory_page_renders_note_ref_trigger() -> None:
     assert "function renderMemoryNoteRefChip(noteRef)" in app_js
     assert 'class="memory-note-ref-trigger"' in app_js
     assert 'data-memory-note-ref="${esc(noteRef)}"' in app_js
-    assert "renderMemoryTextWithNoteRefs(String(item?.payload_text || \"\"))" in app_js
+    # 卡片精简为 minimal-row 后，note 引用渲染收敛到详情抽屉（正文 + 补充信息区）
+    assert "U.memoryDetailPrimary.innerHTML = renderMemoryTextWithNoteRefs(primaryText);" in app_js
+    assert "renderMemoryTextWithNoteRefs(secondaryText)" in app_js
     assert "function memoryProcessedChangePreview(item)" in app_js
-    assert "renderMemoryTextWithNoteRefs(memoryProcessedChangePreview(item))" in app_js
-    assert "renderMemoryTextWithNoteRefs(payloadTexts.join(\"\\n\\n---\\n\\n\"))" in app_js
-    assert "renderMemoryNoteRefList(noteRefs)" in app_js
     assert 'U.memoryQueueList?.addEventListener("click"' in app_js
     assert 'U.memoryProcessedList?.addEventListener("click"' in app_js
     assert "openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || \"\")" in app_js
@@ -53,7 +52,7 @@ def test_memory_page_keeps_note_preview_read_only() -> None:
     preview_fragment = _fragment(
         app_js,
         "function ensureMemoryNotePreviewUi()",
-        "function setMemoryCardExpanded(",
+        "function ensureMemoryDetailPreviewUi()",
     )
 
     assert "只读 Note 预览" in preview_fragment
@@ -71,10 +70,11 @@ def test_memory_page_keeps_note_preview_read_only() -> None:
 def test_memory_page_full_detail_preview_uses_centered_grouped_modal_and_scrollable_text_regions() -> None:
     app_js = _source("g3ku/web/frontend/org_graph_app.js")
     css = _source("g3ku/web/frontend/org_graph.css")
+    # 详情抽屉本身保持只读；记忆浏览器（含受门控的编辑对话框）在独立函数中
     preview_fragment = _fragment(
         app_js,
         "function ensureMemoryDetailPreviewUi()",
-        "function setMemoryCardExpanded(",
+        "function ensureMemoryBrowserUi()",
     )
 
     assert "只读记忆详情" in preview_fragment

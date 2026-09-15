@@ -719,7 +719,7 @@ async def test_v2_run_due_batch_once_processes_legacy_assess_batch_as_write(tmp_
 
 
 @pytest.mark.asyncio
-async def test_v2_run_due_batch_once_records_rejected_legacy_assess_batch_in_processed_history(
+async def test_v2_run_due_batch_once_parks_rejected_legacy_assess_batch_for_manual_retry(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -762,14 +762,21 @@ async def test_v2_run_due_batch_once_records_rejected_legacy_assess_batch_in_pro
 
         report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
         processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+        failed = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
 
-        assert report["status"] == "discarded"
+        # 协议违规批次不再写 durable discarded 终态并删除，而是停车等待人工裁决
+        assert report["status"] == "parked"
         assert report["discard_reason"] == "rejected"
+        assert report["category"] == "protocol"
         assert await manager.list_queue(limit=10) == []
-        assert len(processed) == 1
-        assert processed[0]["status"] == "discarded"
-        assert processed[0]["discard_reason"] == "rejected"
-        assert processed[0]["request_ids"] == ["assess_1"]
+        assert processed == []
+        assert len(failed) == 1
+        assert failed[0]["status"] == "parked"
+        assert failed[0]["category"] == "protocol"
+        assert failed[0]["request_ids"] == ["assess_1"]
+        assert failed[0]["op"] == "assess"
+        assert failed[0]["error_history"][0]["error"] == "memory agent must call memory_apply_batch exactly once"
+        assert failed[0]["items"][0]["payload_text"] == "window payload"
     finally:
         manager.close()
 
@@ -921,7 +928,7 @@ async def test_processing_head_retries_after_retry_after(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_processing_started_at_survives_restart_retry(tmp_path: Path, monkeypatch) -> None:
+async def test_persisted_processing_head_parks_on_repeated_provider_error(tmp_path: Path, monkeypatch) -> None:
     module = _load_memory_agent_runtime_module()
     manager = module.MemoryManager(tmp_path, _memory_cfg())
     try:
@@ -956,15 +963,19 @@ async def test_processing_started_at_survives_restart_retry(tmp_path: Path, monk
 
         report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:40+08:00")
         queue_items = await manager.list_queue(limit=10)
+        failed = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
 
-        assert report["ok"] is False
-        assert report["status"] == "error"
-        assert len(queue_items) == 1
-        assert queue_items[0]["status"] == "processing"
-        assert queue_items[0]["processing_started_at"] == "2026-04-17T10:00:04+08:00"
-        assert "provider exploded again" in str(queue_items[0]["last_error_text"])
-        assert queue_items[0]["last_error_at"] == "2026-04-17T10:00:40+08:00"
-        assert queue_items[0]["retry_after"] != ""
+        # 重启后遗留的 processing 队头再次失败 → 停车（不再原地无限重试阻塞队列）
+        assert report["ok"] is True
+        assert report["status"] == "parked"
+        assert report["discard_reason"] == "agent_exception"
+        assert queue_items == []
+        assert len(failed) == 1
+        assert failed[0]["request_ids"] == ["write_1"]
+        assert "provider exploded again" in str(failed[0]["last_error_text"])
+        assert failed[0]["last_error_at"] == "2026-04-17T10:00:40+08:00"
+        # 首次认领时间随停车条目保留，供排查跨重启的重试链路
+        assert failed[0]["items"][0]["processing_started_at"] == "2026-04-17T10:00:04+08:00"
         assert _read_jsonl(tmp_path / "memory" / "ops.jsonl") == []
     finally:
         manager.close()

@@ -217,23 +217,31 @@ def test_memory_management_view_uses_read_only_queue_endpoints_with_safe_error_m
     admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")
     queue_route = _admin_route_fragment(admin_rest_py, "@router.get('/memory/queue')")
     processed_route = _admin_route_fragment(admin_rest_py, "@router.get('/memory/processed')")
+    failed_route = _admin_route_fragment(admin_rest_py, "@router.get('/memory/failed')")
 
     assert "getMemoryQueue" in api_client_js
     assert '"/api/memory/queue"' in api_client_js
     assert "getMemoryProcessed" in api_client_js
     assert '"/api/memory/processed"' in api_client_js
+    assert "getMemoryFailed" in api_client_js
+    assert '"/api/memory/failed"' in api_client_js
     assert "memory_queue_read_failed" in api_client_js
     assert "memory_processed_read_failed" in api_client_js
+    assert "memory_failed_read_failed" in api_client_js
     assert "memory_manager_unavailable" in api_client_js
     assert "memory_queue_unavailable" in api_client_js
     assert "memory_processed_unavailable" in api_client_js
+    assert "memory_failed_unavailable" in api_client_js
 
     assert "@router.get('/memory/queue')" in admin_rest_py
     assert "@router.get('/memory/processed')" in admin_rest_py
+    assert "@router.get('/memory/failed')" in admin_rest_py
     assert "memory_queue_read_failed" in queue_route
     assert "memory_processed_read_failed" in processed_route
+    assert "memory_failed_read_failed" in failed_route
     assert "detail=str(exc)" not in queue_route
     assert "detail=str(exc)" not in processed_route
+    assert "detail=str(exc)" not in failed_route
 
 
 def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> None:
@@ -254,6 +262,104 @@ def test_memory_management_view_keeps_admin_mutations_hidden_by_default() -> Non
     assert "data-memory-admin-action" not in app_js
     assert '"/api/memory/admin/retry-head"' not in app_js
     assert "/api/memory/admin/retry-head" not in html_source
+
+
+def test_memory_failed_panel_is_hidden_by_default_and_gated_by_mutations_flag() -> None:
+    html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+    memory_html = _memory_view_fragment(html_source)
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")
+
+    # 失败记忆板块默认隐藏，仅当存在停车记录时显示
+    assert 'id="memory-failed-panel"' in memory_html
+    assert 'class="resource-detail-panel memory-column memory-failed-panel" hidden' in memory_html
+    assert "处理失败的记忆列表如下，等待手动入队或下一次自动入队" in memory_html
+    assert "const hasFailedMemories = S.memoryFailedTotal > 0 || S.memoryFailedItems.length > 0;" in app_js
+    assert "U.memoryFailedPanel.hidden = !hasFailedMemories;" in app_js
+
+    # 失败卡片：整体红色 + 右侧重试图标 + 点击查看详情（含错误历史）
+    assert "function renderMemoryFailedCard(item)" in app_js
+    assert "memory-card-failed" in app_js
+    assert 'data-status="failed"' in app_js
+    assert "data-memory-failed-retry=" in app_js
+    assert 'data-lucide="rotate-ccw"' in app_js
+    assert "function memoryFailedErrorHistoryText(item)" in app_js
+    assert '"错误历史"' in app_js
+    assert ".memory-card.memory-card-failed {" in css
+    assert ".memory-failed-retry-btn {" in css
+
+    # 手动重试/放弃按钮受 mutationsEnabled 门控；放弃有二次确认弹窗
+    assert "S.memoryFailedMutationsEnabled" in app_js
+    assert "function requestMemoryFailedDiscard(failedId)" in app_js
+    assert 'title: "放弃失败记忆"' in app_js
+    assert "function runMemoryFailedAction(action, failedId)" in app_js
+    assert "retryMemoryFailed" in app_js
+    assert "discardMemoryFailed" in app_js
+
+    # 后端变更端点同样受 env 门控并写审计
+    assert "@router.post('/memory/failed/{failed_id}/retry')" in admin_rest_py
+    assert "@router.post('/memory/failed/{failed_id}/discard')" in admin_rest_py
+    retry_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/failed/{failed_id}/retry')")
+    discard_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/failed/{failed_id}/discard')")
+    assert "_memory_admin_mutations_enabled()" in retry_route
+    assert "_memory_admin_mutations_enabled()" in discard_route
+    assert "'mutations_enabled': _memory_admin_mutations_enabled()," in admin_rest_py
+
+
+def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dialogs() -> None:
+    html_source = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
+    api_client_js = (REPO_ROOT / "g3ku/web/frontend/api_client.js").read_text(encoding="utf-8")
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    admin_rest_py = (REPO_ROOT / "main/api/admin_rest.py").read_text(encoding="utf-8")
+    _ = html_source
+
+    # 「编辑」按钮位于关闭按钮旁；点击进入编辑模式后出现 操作 列与批量条
+    assert 'id="memory-browser-edit-toggle"' in app_js
+    assert 'id="memory-browser-th-actions"' in app_js
+    assert "操作</th>" in app_js
+    assert 'id="memory-browser-bulk-bar"' in app_js
+    assert 'id="memory-browser-select-all"' in app_js
+    assert "function toggleMemoryBrowserEditMode()" in app_js
+    assert "function memoryBrowserToggleSelectAll(checked)" in app_js
+    assert "data-memory-row-select=" in app_js
+    assert "data-memory-row-edit=" in app_js
+    assert "data-memory-row-delete=" in app_js
+    assert "删除选中" in app_js
+
+    # 删除与保存都经过内部弹窗二次确认
+    delete_fragment = _fragment(app_js, "function requestMemoryBrowserDelete(", "async function runMemoryBrowserDelete(")
+    assert "openConfirm({" in delete_fragment
+    assert 'title: "删除记忆"' in delete_fragment
+    save_fragment = _fragment(app_js, "function requestMemoryBrowserEditSave()", "async function runMemoryBrowserEditSave(")
+    assert "openConfirm({" in save_fragment
+    assert 'title: "保存记忆修改"' in save_fragment
+
+    # 编辑入口与所有变更均受 mutationsEnabled 门控
+    assert "S.memoryBrowser.mutationsEnabled" in app_js
+    assert "!!S.memoryBrowser.editMode && !!S.memoryBrowser.mutationsEnabled" in app_js
+    assert "G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS" in app_js
+
+    # API 客户端与后端端点
+    assert "updateCurrentMemory" in api_client_js
+    assert "deleteCurrentMemories" in api_client_js
+    assert '"/api/memory/current/update"' in api_client_js
+    assert '"/api/memory/current/delete"' in api_client_js
+    assert "mutationsEnabled: Boolean(data.mutations_enabled" in api_client_js
+    assert "@router.post('/memory/current/update')" in admin_rest_py
+    assert "@router.post('/memory/current/delete')" in admin_rest_py
+    update_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/current/update')")
+    delete_route = _admin_route_fragment(admin_rest_py, "@router.post('/memory/current/delete')")
+    assert "_memory_admin_mutations_enabled()" in update_route
+    assert "_memory_admin_mutations_enabled()" in delete_route
+    assert "memory_current_update_failed" in api_client_js
+    assert "memory_current_delete_failed" in api_client_js
+
+    # 编辑对话框样式
+    assert ".memory-browser-edit-dialog {" in css
+    assert ".memory-browser-bulk-bar {" in css
+    assert ".memory-browser-cell-actions {" in css
 
 
 def test_memory_processed_card_renders_discarded_rows_as_no_change_status_only() -> None:

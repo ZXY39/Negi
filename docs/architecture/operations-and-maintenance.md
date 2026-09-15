@@ -432,16 +432,25 @@ For the queued Markdown memory runtime, the first operator checks should be:
 1. Inspect `memory/memory_state.sqlite3` for the authoritative memory rows, `refresh_count`, `passed_count`, `is_compressed`, and `from_user` state.
 2. Inspect `memory/MEMORY.md` for the regenerated prompt snapshot currently injected into CEO/frontdoor.
 3. Inspect `memory/queue.jsonl` for pending `write` / `delete` requests.
-4. Inspect `memory/ops.jsonl` for the latest terminal batch history.
-5. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
-6. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
-7. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend.
+4. Inspect `memory/failed.jsonl` for parked failed batches: each row carries `category` (`provider_error` / `protocol`), `status` (`parked` / `requeued`), retry counters and a full `error_history`. A non-empty file means some turns of memory are waiting for a success signal or an operator decision.
+5. Inspect `memory/ops.jsonl` for the latest terminal batch history (`applied`, `precheck_failed`, `operator_discarded`).
+6. If a processed row exposes `request_artifact_paths`, inspect the referenced files under `.g3ku/memory-requests/` before blaming prompt assembly or the provider adapter.
+7. Use `g3ku memory current`, `g3ku memory queue`, and `g3ku memory flush` when you need a quick operator view without manually opening files.
+8. If the queue head is stuck in `processing`, inspect `.g3ku/config.json -> models.roles.memory` before debugging the frontend.
+
+Operator workflow for parked failed batches:
+
+1. The web `记忆管理` page shows the `失败记忆` panel only while parked records exist (left column, under the pending queue). Cards are red, carry the failure category and a retry icon; clicking a card opens the detail drawer with the full error history.
+2. `provider_error` records rejoin the queue automatically: every successfully applied batch requeues the oldest parked provider-error record at the queue tail. During a provider outage nothing retries; recovery is paced by real traffic. `queue.auto_requeue_on_success=false` disables the signal entirely.
+3. `protocol` records (the memory agent answered but never produced a valid `memory_apply_batch` result) never auto-requeue; they wait for an operator.
+4. Manual retry and discard live behind the `G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS` environment variable (same gate as the legacy retry-head contract). Retry requeues the record under its original `request_id`s; discard writes an `operator_discarded` terminal row into `ops.jsonl`, removes the parked record and any stale queue rows, and makes those `request_id`s dedupe-processed. Both actions append to `memory/admin_audit.jsonl`.
+5. Without the env gate the UI buttons stay disabled and the endpoints answer `403 memory_admin_mutation_disabled`; inspecting the parked records stays available to everyone.
 
 Operator debugging order for a stuck queue head:
 
 1. Check whether `models.roles.memory` is empty or points to an invalid model chain.
 2. Check the queue-head `last_error_text`, `last_error_at`, `retry_after`, and `processing_started_at`.
-3. Check worker logs for provider/tool-call failures or semantic validation failures.
+3. Check `memory/failed.jsonl` and the worker logs for provider/tool-call failures or semantic validation failures — processing failures park instead of blocking, so an empty queue with a non-empty failed file is the normal signature of a provider outage, not a lost queue.
 4. Only after the runtime side is healthy should you debug the web `记忆管理` page.
 
 Operator debugging order for duplicated successful memory writes:
@@ -476,7 +485,7 @@ The operator-oriented maintenance commands beyond `current`, `queue`, and `flush
 
 Use them with these boundaries in mind:
 
-- `doctor` is inspection-only: it never rewrites `MEMORY.md`, creates or deletes notes, mutates queue state, or bootstraps missing paths. It should be the first stop when an operator suspects notebook corruption or a blocked queue head. It checks the managed Markdown block format, note-ref consistency, orphan notes under `memory/notes/`, malformed `queue.jsonl` rows (line-level diagnostics), and stuck `processing` heads; malformed queue rows surface as explicit queue-parse issues with a non-zero exit instead of a bare JSON decode crash.
+- `doctor` is inspection-only: it never rewrites `MEMORY.md`, creates or deletes notes, mutates queue state, or bootstraps missing paths. It should be the first stop when an operator suspects notebook corruption or a blocked queue head. It checks the managed Markdown block format, note-ref consistency, orphan notes under `memory/notes/`, malformed `queue.jsonl` rows (line-level diagnostics), stuck `processing` heads, and parked failed batches (`failed_parked` check with `failed_parked_count`; any parked record reports issues_found and lists the first five `failed_id(category)`); malformed queue rows surface as explicit queue-parse issues with a non-zero exit instead of a bare JSON decode crash.
 - `reconcile-notes` is the explicit repair path for note/file consistency. It may create placeholder note files for missing refs and deletes orphan note files only when the operator passes the explicit delete flag.
 - `import-legacy` is dry-run by default: it parses the legacy payload and prints a summary without creating `memory/`, `MEMORY.md`, `queue.jsonl`, `ops.jsonl`, or note files. Writing requires `--apply`, and the target notebook should already be empty — do not use it as a merge tool for a live non-empty queue.
 - `cleanup-legacy` is dry-run by default and lists removable legacy artifacts (`HISTORY.md`, structured projections, sync journals, pending/audit files, `context_store/`). `--apply` refuses to delete data-bearing legacy artifacts while `MEMORY.md` is still empty: import or review old data first, then delete leftovers once the new notebook already contains the migrated memory.
@@ -488,11 +497,11 @@ Recommended operator order:
 3. If the notebook is empty and you are doing a controlled migration, run `g3ku memory import-legacy <path>` once without `--apply`, inspect the summary, then rerun with `--apply`.
 4. After migration is complete and `MEMORY.md` is already authoritative, run `g3ku memory cleanup-legacy` once in dry-run mode, review the paths, then rerun with `--apply` to remove leftovers.
 
-Two queue-head recovery caveats matter during operations:
+Queue-head recovery caveats that matter during operations:
 
 - A `processing` head that survives restart is expected durable state. Do not assume it means a live worker is still attached.
-- If `retry_after` is still in the future, the restarted worker should leave that head untouched and keep later items blocked. Once `retry_after` has passed, the same head becomes eligible for retry.
-- `processing_started_at` is the first-claim timestamp for that head batch. It should remain stable across retries, so a new `last_error_at` with an old `processing_started_at` is normal.
+- If `retry_after` is still in the future, the restarted worker should leave that head untouched and keep later items blocked. Once `retry_after` has passed, the same head becomes eligible for retry. Blocking heads come from the configuration paths (`memory` role not configured, runtime config unreadable) or from builds that predate failure parking; processing failures in the current runtime park into `memory/failed.jsonl` and leave the queue flowing.
+- `processing_started_at` is the first-claim timestamp for that head batch. It should remain stable across retries, so a new `last_error_at` with an old `processing_started_at` is normal. Parked records keep the original claim timestamp inside their stored `items`.
 
 ## Docker / Compose Startup
 

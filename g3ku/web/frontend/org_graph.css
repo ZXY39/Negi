@@ -9198,6 +9198,176 @@ textarea {
     padding: 24px 12px;
 }
 
+/* 当前记忆浏览器：编辑模式（批量选择 / 修改 / 删除） */
+.memory-browser-head-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+}
+
+.memory-browser-bulk-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--bg-panel) 92%, var(--brand-primary) 4%);
+    flex-wrap: wrap;
+}
+
+.memory-browser-bulk-bar[hidden] {
+    display: none;
+}
+
+.memory-browser-select-all {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.memory-browser-selected-count {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.memory-browser-edit-hint {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+.memory-browser-col-select {
+    width: 36px;
+}
+
+.memory-browser-col-actions {
+    width: 168px;
+}
+
+.memory-browser-cell-select {
+    text-align: center;
+    white-space: nowrap;
+}
+
+.memory-browser-cell-select input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+    accent-color: var(--brand-primary);
+}
+
+.memory-browser-cell-actions {
+    white-space: nowrap;
+}
+
+.memory-browser-row-btn {
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    min-height: 26px;
+}
+
+.memory-browser-row-btn + .memory-browser-row-btn {
+    margin-left: 6px;
+}
+
+.memory-browser-row-btn svg {
+    width: 13px;
+    height: 13px;
+}
+
+.memory-browser-table tbody tr.memory-browser-row-selected > td {
+    background: color-mix(in srgb, var(--brand-primary) 7%, transparent);
+}
+
+.memory-browser-edit-backdrop {
+    position: fixed;
+    inset: 0;
+    background: var(--modal-backdrop);
+    z-index: 1150;
+}
+
+.memory-browser-edit-backdrop[hidden] {
+    display: none;
+}
+
+.memory-browser-edit-dialog {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1200;
+    width: min(680px, calc(100vw - 48px));
+    max-height: calc(100vh - 96px);
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+.memory-browser-edit-dialog[hidden] {
+    display: none;
+}
+
+.memory-browser-edit-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding: var(--space-4);
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.memory-browser-edit-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.memory-browser-edit-field input,
+.memory-browser-edit-field textarea {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-app);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-family: inherit;
+    resize: vertical;
+}
+
+.memory-browser-edit-field input[readonly] {
+    color: var(--text-muted);
+    cursor: default;
+}
+
+.memory-browser-edit-field input:focus-visible,
+.memory-browser-edit-field textarea:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 45%, transparent);
+    outline-offset: 1px;
+}
+
+.memory-browser-edit-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--border-color);
+    flex: 0 0 auto;
+}
+
 .sort-ind {
     color: var(--text-primary);
 }
@@ -9343,6 +9513,114 @@ textarea {
     border-right: 1.75px solid currentColor;
     transform: translateX(-1px) rotate(45deg);
     transform-origin: center;
+}
+
+/* 记忆管理左列：未出队队列 + 失败记忆停车区上下堆叠 */
+.memory-column-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-height: 0;
+    min-width: 0;
+}
+
+.memory-column-stack > .memory-column {
+    flex: 1 1 0;
+    min-height: 0;
+}
+
+.memory-column-stack > .memory-failed-panel {
+    flex: 0 1 auto;
+    max-height: 42%;
+}
+
+/* 失败记忆卡片：整体红色警示 + 右侧重试图标 */
+.memory-card.memory-card-failed {
+    border-color: color-mix(in srgb, #ef4444 46%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 8%, var(--bg-panel));
+}
+
+.memory-card.memory-card-failed:hover,
+.memory-card.memory-card-failed:focus-visible {
+    border-color: color-mix(in srgb, #ef4444 66%, var(--border-color));
+    box-shadow: 0 0 0 3px color-mix(in srgb, #ef4444 14%, transparent);
+}
+
+.memory-failed-category {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #ef4444 34%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 12%, var(--bg-panel));
+    color: color-mix(in srgb, #ef4444 72%, var(--text-primary));
+    font-size: 0.75rem;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.memory-failed-retry-btn {
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, #ef4444 42%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 12%, var(--bg-panel));
+    color: color-mix(in srgb, #ef4444 76%, var(--text-primary));
+    cursor: pointer;
+    transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+.memory-failed-retry-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, #ef4444 22%, var(--bg-panel));
+    border-color: color-mix(in srgb, #ef4444 60%, var(--border-color));
+    transform: rotate(-30deg);
+}
+
+.memory-failed-retry-btn:focus-visible {
+    outline: 2px solid color-mix(in srgb, #ef4444 55%, transparent);
+    outline-offset: 2px;
+}
+
+.memory-failed-retry-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.memory-failed-retry-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+/* 失败记忆详情抽屉底部操作区 */
+.memory-detail-preview-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-top: 1px solid var(--border-color);
+    flex: 0 0 auto;
+}
+
+.memory-detail-preview-actions[hidden] {
+    display: none;
+}
+
+.memory-detail-actions-hint {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    min-width: 0;
+}
+
+.memory-detail-actions-buttons {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 0 0 auto;
 }
 
 @media (max-width: 960px) {

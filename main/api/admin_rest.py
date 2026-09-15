@@ -2139,7 +2139,125 @@ async def get_current_memories():
         'ok': True,
         'items': list(items or []),
         'total': len(list(items or [])),
+        # 前端据此启用/禁用「编辑」入口；变更本身仍由后端 env 门控二次校验。
+        'mutations_enabled': _memory_admin_mutations_enabled(),
     }
+
+
+@router.post('/memory/current/update')
+async def update_current_memory(request: Request, payload: dict | None = Body(default=None)):
+    if not _memory_admin_mutations_enabled():
+        raise _memory_admin_mutation_disabled()
+
+    manager = _runtime_memory_manager()
+    body = dict(payload or {})
+    memory_id = str(body.get('memory_id') or '').strip()
+    memory_body = str(body.get('memory_body') or '')
+    minimal_memory = body.get('minimal_memory')
+    normalized_minimal = None if minimal_memory is None else str(minimal_memory)
+    if not memory_id:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'memory_current_invalid_id', 'message': 'memory_id is required'},
+        )
+    method = getattr(manager, 'update_current_memory', None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_current_unavailable', 'message': 'memory update is unavailable'},
+        )
+    try:
+        result = await method(memory_id, memory_body=memory_body, minimal_memory=normalized_minimal)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'memory_current_not_found', 'message': str(exc or 'memory not found')},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'memory_current_invalid', 'message': str(exc or 'invalid memory payload')},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_current_update_failed', 'message': str(exc or 'memory update failed')},
+        ) from exc
+    item = dict(result or {})
+    try:
+        _append_memory_admin_audit_event(
+            manager,
+            {
+                'action': 'update_current_memory',
+                'reason': str(body.get('reason') or 'manual').strip() or 'manual',
+                'request_id': str(request.headers.get('x-request-id') or '').strip(),
+                'memory_id': memory_id,
+                'result': 'ok',
+                'timestamp': now_iso(),
+            },
+        )
+        item['audit_logged'] = True
+    except Exception as exc:
+        item['audit_logged'] = False
+        item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+    return {'ok': True, 'item': item}
+
+
+@router.post('/memory/current/delete')
+async def delete_current_memories(request: Request, payload: dict | None = Body(default=None)):
+    if not _memory_admin_mutations_enabled():
+        raise _memory_admin_mutation_disabled()
+
+    manager = _runtime_memory_manager()
+    body = dict(payload or {})
+    raw_ids = body.get('memory_ids')
+    if not isinstance(raw_ids, list):
+        raw_ids = [raw_ids] if raw_ids else []
+    memory_ids = [str(item or '').strip() for item in raw_ids if str(item or '').strip()]
+    if not memory_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'memory_current_invalid_id', 'message': 'memory_ids is required'},
+        )
+    method = getattr(manager, 'delete_current_memories', None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_current_unavailable', 'message': 'memory delete is unavailable'},
+        )
+    reason = str(body.get('reason') or 'manual').strip() or 'manual'
+    try:
+        result = await method(memory_ids, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'memory_current_invalid', 'message': str(exc or 'invalid memory_ids')},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={'code': 'memory_current_delete_failed', 'message': str(exc or 'memory delete failed')},
+        ) from exc
+    item = dict(result or {})
+    try:
+        _append_memory_admin_audit_event(
+            manager,
+            {
+                'action': 'delete_current_memories',
+                'reason': reason,
+                'request_id': str(request.headers.get('x-request-id') or '').strip(),
+                'memory_ids': memory_ids,
+                'deleted': list(item.get('deleted') or []),
+                'missing': list(item.get('missing') or []),
+                'result': 'ok',
+                'timestamp': now_iso(),
+            },
+        )
+        item['audit_logged'] = True
+    except Exception as exc:
+        item['audit_logged'] = False
+        item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+    return {'ok': True, 'item': item}
 
 
 @router.get('/memory/notes/{ref}')
@@ -2221,6 +2339,142 @@ async def retry_memory_queue_head(request: Request, payload: dict | None = Body(
     request_id = str(request.headers.get('x-request-id') or '').strip()
     item = await _retry_memory_queue_head_with_fallback(
         manager,
+        reason=reason,
+        request_id=request_id,
+    )
+    return {'ok': True, 'item': item}
+
+
+@router.get('/memory/failed')
+async def get_memory_failed(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    manager = _runtime_memory_manager()
+    reader = getattr(manager, 'list_failed_page', None)
+    if not callable(reader):
+        raise HTTPException(status_code=503, detail='memory_failed_unavailable')
+    try:
+        payload = await reader(limit=limit, offset=offset)
+    except Exception as exc:
+        raise _memory_read_error(
+            code='memory_failed_read_failed',
+            message='失败记忆暂时不可读取，请稍后刷新。',
+        ) from exc
+    return {
+        'ok': True,
+        'items': list(payload.get('items') or []),
+        'total': int(payload.get('total', 0) or 0),
+        'has_more': bool(payload.get('has_more', False)),
+        # 前端据此渲染重试/放弃按钮的可用态；变更本身仍由后端 env 门控二次校验。
+        'mutations_enabled': _memory_admin_mutations_enabled(),
+    }
+
+
+async def _mutate_memory_failed_record(
+    manager: Any,
+    failed_id: str,
+    *,
+    action: str,
+    reason: str,
+    request_id: str,
+) -> dict[str, Any]:
+    normalized_failed_id = str(failed_id or '').strip()
+    if not normalized_failed_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                'code': 'memory_failed_invalid_id',
+                'message': 'failed_id is required',
+            },
+        )
+    method = getattr(manager, f'{action}_failed_record', None)
+    if not callable(method):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'memory_failed_unavailable',
+                'message': 'failed memory operations are unavailable',
+            },
+        )
+    try:
+        result = await method(normalized_failed_id, reason=reason)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                'code': 'memory_failed_not_found',
+                'message': str(exc or 'failed memory record not found'),
+            },
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                'code': 'memory_failed_not_parked',
+                'message': str(exc or 'failed memory record is not parked'),
+            },
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                'code': 'memory_failed_mutation_failed',
+                'message': str(exc or 'failed memory operation failed'),
+            },
+        ) from exc
+    item = dict(result or {})
+    try:
+        _append_memory_admin_audit_event(
+            manager,
+            {
+                'action': f'{action}_failed',
+                'reason': reason,
+                'request_id': request_id,
+                'failed_id': normalized_failed_id,
+                'result': 'ok',
+                'timestamp': now_iso(),
+            },
+        )
+        item['audit_logged'] = True
+    except Exception as exc:
+        item['audit_logged'] = False
+        item['audit_error'] = str(exc or 'memory admin audit write failed').strip()
+    return item
+
+
+@router.post('/memory/failed/{failed_id}/retry')
+async def retry_memory_failed_record(request: Request, failed_id: str, payload: dict | None = Body(default=None)):
+    if not _memory_admin_mutations_enabled():
+        raise _memory_admin_mutation_disabled()
+
+    manager = _runtime_memory_manager()
+    reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
+    request_id = str(request.headers.get('x-request-id') or '').strip()
+    item = await _mutate_memory_failed_record(
+        manager,
+        failed_id,
+        action='retry',
+        reason=reason,
+        request_id=request_id,
+    )
+    return {'ok': True, 'item': item}
+
+
+@router.post('/memory/failed/{failed_id}/discard')
+async def discard_memory_failed_record(request: Request, failed_id: str, payload: dict | None = Body(default=None)):
+    if not _memory_admin_mutations_enabled():
+        raise _memory_admin_mutation_disabled()
+
+    manager = _runtime_memory_manager()
+    reason = str((payload or {}).get('reason') or 'manual').strip() or 'manual'
+    request_id = str(request.headers.get('x-request-id') or '').strip()
+    item = await _mutate_memory_failed_record(
+        manager,
+        failed_id,
+        action='discard',
         reason=reason,
         request_id=request_id,
     )

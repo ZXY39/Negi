@@ -63,6 +63,32 @@ class ApiClient {
                 return "当前记忆列表暂不可用，请稍后刷新。";
             case "memory_current_read_failed":
                 return "当前记忆暂时不可读取，请稍后刷新。";
+            case "memory_current_invalid_id":
+                return "记忆 ID 无效，请刷新列表后重试。";
+            case "memory_current_not_found":
+                return "未找到对应的记忆，可能已被删除，请刷新列表。";
+            case "memory_current_invalid":
+                return "记忆内容校验未通过（不能为空或超出长度限制）。";
+            case "memory_current_update_failed":
+                return "记忆修改未成功，请稍后重试。";
+            case "memory_current_delete_failed":
+                return "记忆删除未成功，请稍后重试。";
+            case "memory_failed_unavailable":
+                return "失败记忆列表暂不可用，请稍后刷新。";
+            case "memory_failed_read_failed":
+                return "失败记忆暂时不可读取，请稍后刷新。";
+            case "memory_failed_not_found":
+                return "未找到对应的失败记忆记录，可能已被处理，请刷新列表。";
+            case "memory_failed_not_parked":
+                return "该记录当前不在停车状态（可能已被自动重排队），请刷新列表。";
+            case "memory_failed_invalid_id":
+                return "失败记忆记录 ID 无效。";
+            case "memory_failed_mutation_failed":
+                return "失败记忆操作未成功，请稍后重试。";
+            case "memory_admin_mutation_disabled":
+                return "记忆运维变更未启用：请在服务端设置环境变量 G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS 后重试。";
+            case "memory_admin_audit_failed":
+                return "操作审计写入失败，本次操作已被拒绝，请稍后重试。";
             case "llm_binding_key_exists":
                 return "模型ID已存在，请使用其他模型ID。";
             default:
@@ -984,7 +1010,53 @@ class ApiClient {
         return {
             items: data.items || [],
             total: data.total || 0,
+            mutationsEnabled: Boolean(data.mutations_enabled ?? data.mutationsEnabled),
         };
+    }
+
+    static async updateCurrentMemory(memoryId, { memoryBody, minimalMemory = null, reason = "manual-ui" } = {}) {
+        return this._request("POST", "/api/memory/current/update", {
+            body: {
+                memory_id: memoryId,
+                memory_body: memoryBody,
+                minimal_memory: minimalMemory,
+                reason,
+            },
+        });
+    }
+
+    static async deleteCurrentMemories(memoryIds, reason = "manual-ui") {
+        return this._request("POST", "/api/memory/current/delete", {
+            body: {
+                memory_ids: Array.isArray(memoryIds) ? memoryIds : [memoryIds],
+                reason,
+            },
+        });
+    }
+
+    static async getMemoryFailed({ limit = 20, offset = 0 } = {}) {
+        const data = await this._request("GET", "/api/memory/failed", {
+            params: { limit, offset },
+            requestKey: `memory:failed:${offset}:${limit}`,
+        });
+        return {
+            items: data.items || [],
+            total: data.total || 0,
+            hasMore: Boolean(data.has_more ?? data.hasMore),
+            mutationsEnabled: Boolean(data.mutations_enabled ?? data.mutationsEnabled),
+        };
+    }
+
+    static async retryMemoryFailed(failedId, reason = "manual") {
+        return this._request("POST", `/api/memory/failed/${encodeURIComponent(failedId)}/retry`, {
+            body: { reason },
+        });
+    }
+
+    static async discardMemoryFailed(failedId, reason = "manual") {
+        return this._request("POST", `/api/memory/failed/${encodeURIComponent(failedId)}/discard`, {
+            body: { reason },
+        });
     }
 
     static async runLlmMigration() {

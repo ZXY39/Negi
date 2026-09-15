@@ -402,7 +402,8 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - `memory/MEMORY.md` 是从 SQLite 状态再生的提示词快照，保留受管 Markdown 块形状供工具与内部 memory agent 检查，但不是权威元数据存储。
 - `memory/notes/` 存 `ref:note_xxxx` 引用的可选详细 note 正文，保持小而人类可读。
 - `memory/queue.jsonl` 是唯一持久队列，带每请求处理状态（`pending` / `processing`、重试计时、最新错误文本）。队列条目只有两种类型：`write`（显式或已提炼的记忆文本，等待真正的记忆处理）与 `delete`（自然语言记忆删除请求，等待内部 memory agent 解析成具体 id）。
-- `memory/ops.jsonl` 是滚动终态历史，不是进行中重试日志，也不是 append-forever 归档：applied 批次与 `rejected` / `precheck_failed` 等 durable discarded 结果连同最终 snapshot / compression 元数据一起落在这里；暂时性 provider/配置失败仍留在队列头错误字段；超过 7 天的行在正常运行时读写中自动清理。终态行不记录入队侧 `trigger_source`；区分普通窗口批次与压缩冲刷批次要对照会话转录时间线。
+- `memory/failed.jsonl` 是失败停车区：处理尝试失败的批次（含完整载荷与错误历史）整体移出主队列停在这里，主队列继续流动。每条记录带 `failed_id`、`category`（`provider_error` 瞬时类 / `protocol` 协议违规类）、`status`（`parked` 等待中 / `requeued` 已重排回队列）、`park_count`、`auto_requeue_count`、`manual_retry_count`、`error_history`（失败与重排事件的时间线）与累计 usage。停车不写终态记录，`request_id` 不进入已处理集合，重入队后不会被幂等去重误删。
+- `memory/ops.jsonl` 是滚动终态历史，不是进行中重试日志，也不是 append-forever 归档：applied 批次、`precheck_failed`（载荷本身不可恢复）与 `operator_discarded`（操作员显式放弃停车记录）等 durable 终态结果连同最终 snapshot / compression 元数据一起落在这里；处理尝试失败先进失败停车区而非终态历史；超过 7 天的行在正常运行时读写中自动清理。终态行不记录入队侧 `trigger_source`；区分普通窗口批次与压缩冲刷批次要对照会话转录时间线。
 - `memory/review_state.json` 是普通复核窗口的按会话缓冲元数据：缓冲轮次载荷、阶段 delta cursor、已上报可见工具记录 cursor；不是已提交的用户记忆。
 - `.g3ku/memory-requests/` 存暴露请求元数据的 memory 请求 artifact；processed 行可以指向这些路径供后续取证。
 
@@ -420,13 +421,17 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - 每次非读变更后，运行时先改 SQLite、再重建 `MEMORY.md`、最后检查快照大小：超过 `document.compress_trigger_chars`（默认 `16000`）时按 `passed_count DESC`、`refresh_count ASC` 顺序压缩，先把整行替换为 `minimal_memory`，再只删除已压缩的非 `from_user` 行，直到回到 `document.compress_target_chars`（默认 `13000`）或没有安全压缩工作。
 - 队列消费跨进程单活：每次 `run_due_batch_once()` 必须先拿 workspace 级 memory-worker 文件锁；拿不到锁的进程保持队列不动并报告 `worker_lease_unavailable`。`request_id` 是持久幂等键：处理批次前会丢弃 `memory/ops.jsonl` 中已出现过 `request_id` 的队列行。
 
-队列状态机语义：
+队列状态机与失败停车语义：
 
 - `pending` 表示请求尚未被认领进批次；`processing` 表示队列头批次当前由唯一 memory worker 持有。
-- `memory` 角色未配置或 provider 调用失败时，队列头保持 `processing` 并携带错误，阻塞后续请求。
-- 持久化的 `processing` 队列头是重启恢复状态，不证明仍有活跃 worker；重启后等待存储的 `retry_after` 再重试同一头批次。`processing_started_at` 记录队列头批次首次成功认领，跨重试保持稳定，不是“最后重试时间”。
-- 语义非法的模型输出应在同一处理批次提交前完成自修复；若批次仍无法通过运行时 precheck 或 memory agent 始终给不出有效终态工具结果，运行时把该批次落入 durable discarded 历史，而不是无限重试。
+- provider 调用失败（限流、超时、上游错误响应或抛错）与协议违规（memory agent 批内自修复用尽仍不给出有效终态工具结果）都把批次**停车**到 `memory/failed.jsonl` 并清空其在队列中的行：失败不阻塞队列，也不立即写终态历史。两类失败由响应形态区分：错误响应（`finish_reason="error"` 或带 `error_text`）按 `provider_error` 记录真实 provider 错误文本；模型真实回复但违反 `memory_apply_batch` 协议按 `protocol` 记录。
+- `memory` 角色未配置、或运行时配置不可读时，队列头保持 `processing` 并携带错误（`blocked` / 配置错误路径），阻塞后续请求——这类是全局配置问题，停车重试没有意义。
+- 成功信号自动重排：每次批次成功 applied 后，运行时清掉本批 `request_id` 对应的停车记录（终于成功的批次不留痕），并把停车区里最早的一条 `provider_error` 记录重排到队尾（`status=requeued`）。没有成功信号就没有任何自动重试；`protocol` 类记录不参与自动重排。`queue.auto_requeue_on_success`（默认 `true`）可关闭该信号。自动重排不设次数上限，节流完全来自成功信号。
+- 人工裁决：管理员可对停车记录执行重试（按原 `request_id` 重新入队尾）或放弃（写 `operator_discarded` 终态记录进 `ops.jsonl` 并删除停车记录与队列残留行；`request_id` 由此进入已处理集合，重复入队被幂等去重）。端点与前端入口见 `web-and-admin.md`「Memory Management Page And Admin Contract」，operator 排查流程见 `operations-and-maintenance.md`「Memory Queue Workflow」。
+- 持久化的 `processing` 队列头是重启恢复状态，不证明仍有活跃 worker；重启后等待存储的 `retry_after` 再重试同一头批次。`processing_started_at` 记录队列头批次首次成功认领，跨重试保持稳定，不是“最后重试时间”；停车记录随 `items` 保留该字段供跨重启排查。
+- 语义非法的模型输出应在同一处理批次提交前完成自修复；自修复用尽后批次进入失败停车区等待人工裁决，而不是无限重试或静默丢弃。载荷本身不可恢复（空正文等 precheck 失败）仍直接写 durable discarded 终态。
 - `ops.jsonl` 出现两条相同 `request_id` 的终态行是 bug 信号（历史多 worker 竞争或旧版本运行），不是正常重复写入。
+- `doctor` 报告含 `failed_parked` 检查与 `failed_parked_count`：存在停车记录即报 issues_found，detail 列出前 5 条 `failed_id(category)`。
 
 瞬时执行状态明确在长期记忆边界之外：pause/resume 控制数据、进行中任务状态、临时修复标记与 runtime-only 协调笔记属于 transcript、session、task 或 stage 运行时状态，不进入 `MEMORY.md`。
 

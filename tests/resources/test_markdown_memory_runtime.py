@@ -2778,7 +2778,7 @@ async def test_list_processed_page_prunes_batches_older_than_seven_days(
 
 
 @pytest.mark.asyncio
-async def test_run_due_batch_once_keeps_processing_batch_on_provider_error_without_processed_record(
+async def test_run_due_batch_once_parks_batch_on_provider_error_without_processed_record(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2805,13 +2805,16 @@ async def test_run_due_batch_once_keeps_processing_batch_on_provider_error_witho
 
         report = await manager.run_due_batch_once(now_iso="2026-04-17T10:00:04+08:00")
         queue_items = await manager.list_queue(limit=10)
+        failed = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
 
-        assert report["ok"] is False
-        assert report["status"] == "error"
+        # provider 失败不再原地卡队头无限重试，而是停车到失败区等待成功信号或人工处理
+        assert report["ok"] is True
+        assert report["status"] == "parked"
+        assert report["category"] == "provider_error"
         assert manager.snapshot_text() == ""
-        assert len(queue_items) == 1
-        assert queue_items[0]["status"] == "processing"
-        assert "provider exploded" in str(queue_items[0]["last_error_text"])
+        assert queue_items == []
+        assert len(failed) == 1
+        assert "provider exploded" in str(failed[0]["last_error_text"])
         assert _read_jsonl(tmp_path / "memory" / "ops.jsonl") == []
     finally:
         manager.close()

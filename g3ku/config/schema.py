@@ -589,9 +589,13 @@ class MemoryQueueConfig(Base):
 
     queue_file: str = "memory/queue.jsonl"
     ops_file: str = "memory/ops.jsonl"
+    failed_file: str = "memory/failed.jsonl"
     batch_max_chars: int = Field(default=50000, ge=1)
     max_wait_seconds: int = Field(default=3, ge=0)
     review_interval_turns: int = Field(default=5, ge=1)
+    # 失败停车区的 provider/瞬时错误条目在"队列有新批次成功应用"时自动重新入队尾；
+    # 没有成功信号则一直停车等待，不产生任何自动重试成本。
+    auto_requeue_on_success: bool = True
 
 
 class MemoryAgentConfig(Base):

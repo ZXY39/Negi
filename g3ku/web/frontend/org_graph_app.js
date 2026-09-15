@@ -301,6 +301,12 @@ const S = {
     memoryProcessedTotal: 0,
     memoryProcessedHasMore: false,
     memoryProcessedPageSize: 20,
+    memoryFailedItems: [],
+    memoryFailedTotal: 0,
+    memoryFailedHasMore: false,
+    memoryFailedPageSize: 20,
+    memoryFailedMutationsEnabled: false,
+    memoryFailedActionBusy: "",
     memoryQueueExpanded: {},
     memoryProcessedExpanded: {},
     memoryDetailPreview: {
@@ -331,6 +337,17 @@ const S = {
         sortKey: "created_at",
         sortDir: "desc",
         requestToken: 0,
+        mutationsEnabled: false,
+        editMode: false,
+        selected: {},
+        actionBusy: "",
+        editDialog: {
+            open: false,
+            memoryId: "",
+            body: "",
+            minimal: "",
+            busy: false,
+        },
     },
     memoryLastAlertText: "",
     memoryLastBlockedText: "",
@@ -392,6 +409,10 @@ const U = {
     memoryProcessedList: document.getElementById("memory-processed-list"),
     memoryProcessedInfo: document.getElementById("memory-processed-info"),
     memoryProcessedMore: document.getElementById("memory-processed-more-btn"),
+    memoryFailedList: document.getElementById("memory-failed-list"),
+    memoryFailedInfo: document.getElementById("memory-failed-info"),
+    memoryFailedMore: document.getElementById("memory-failed-more-btn"),
+    memoryFailedPanel: document.getElementById("memory-failed-panel"),
     memoryDetailBackdrop: null,
     memoryDetailDrawer: null,
     memoryDetailTitle: null,
@@ -399,6 +420,7 @@ const U = {
     memoryDetailMeta: null,
     memoryDetailPrimary: null,
     memoryDetailSecondary: null,
+    memoryDetailActions: null,
     memoryDetailClose: null,
     memoryNoteBackdrop: null,
     memoryNoteDrawer: null,
@@ -10177,6 +10199,20 @@ function memoryOpLabel(op) {
     return String(op || "").trim().toLowerCase() === "delete" ? "删除" : "增加";
 }
 
+function memoryFailedCategoryLabel(item) {
+    const normalized = String(item?.category || "").trim().toLowerCase();
+    if (normalized === "provider_error") return "provider 瞬时错误";
+    if (normalized === "protocol") return "协议违规";
+    return normalized || "未知类别";
+}
+
+function memoryFailedAutoRetryHint(item) {
+    const normalized = String(item?.category || "").trim().toLowerCase();
+    return normalized === "provider_error"
+        ? "队列下一次成功处理后自动重排队尾"
+        : "仅支持手动重试";
+}
+
 function memoryProcessedWriteModeLabel(item) {
     const normalized = String(item?.write_mode || "").trim().toLowerCase();
     if (normalized === "rewrite") return "修改";
@@ -10614,6 +10650,16 @@ function ensureMemoryDetailPreviewUi() {
                 </section>
             </div>
         </div>
+        <div id="memory-detail-preview-actions" class="detail-modal-footer memory-detail-preview-actions" hidden>
+            <span id="memory-detail-preview-actions-hint" class="memory-detail-actions-hint"></span>
+            <div class="memory-detail-actions-buttons">
+                <button type="button" class="toolbar-btn danger" data-memory-failed-action="discard">放弃</button>
+                <button type="button" class="toolbar-btn success" data-memory-failed-action="retry">
+                    <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+                    重试（重新入队尾）
+                </button>
+            </div>
+        </div>
     `;
     host.appendChild(backdrop);
     host.appendChild(drawer);
@@ -10628,11 +10674,28 @@ function ensureMemoryDetailPreviewUi() {
     U.memoryDetailSecondarySection = drawer.querySelector("#memory-detail-preview-secondary-section");
     U.memoryDetailSecondaryTitle = drawer.querySelector("#memory-detail-preview-secondary-title");
     U.memoryDetailSecondary = drawer.querySelector("#memory-detail-preview-secondary");
+    U.memoryDetailActions = drawer.querySelector("#memory-detail-preview-actions");
+    U.memoryDetailActionsHint = drawer.querySelector("#memory-detail-preview-actions-hint");
     U.memoryDetailClose = drawer.querySelector("[data-memory-detail-close]");
     U.memoryDetailClose?.addEventListener("click", () => closeMemoryDetailPreview());
     U.memoryDetailBackdrop?.addEventListener("click", () => closeMemoryDetailPreview());
     U.memoryDetailDrawer?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
+        const failedAction = e.target.closest("[data-memory-failed-action]");
+        if (failedAction) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (failedAction.disabled) return;
+            const failedId = String(S.memoryDetailPreview?.key || "").trim();
+            const action = String(failedAction.dataset?.memoryFailedAction || "").trim();
+            if (!failedId || !action) return;
+            if (action === "discard") {
+                requestMemoryFailedDiscard(failedId);
+            } else {
+                void runMemoryFailedAction("retry", failedId);
+            }
+            return;
+        }
         const noteTrigger = e.target.closest("[data-memory-note-ref]");
         if (!noteTrigger) return;
         e.preventDefault();
@@ -10705,10 +10768,28 @@ function renderMemoryDetailPreview() {
     }
     const shell = U.memoryDetailDrawer?.querySelector(".memory-detail-preview-shell") || null;
     if (shell && U.memoryDetailSecondarySection && U.memoryDetailPrimarySection) {
-        if (preview.kind === "processed") {
+        if (preview.kind === "processed" || preview.kind === "failed") {
             shell.insertBefore(U.memoryDetailSecondarySection, U.memoryDetailPrimarySection);
         } else {
             shell.appendChild(U.memoryDetailSecondarySection);
+        }
+    }
+    if (U.memoryDetailActions) {
+        const isFailedOpen = !!preview.open && preview.kind === "failed";
+        U.memoryDetailActions.hidden = !isFailedOpen;
+        if (isFailedOpen) {
+            const failedRecord = Array.isArray(S.memoryFailedItems)
+                ? S.memoryFailedItems.find((item) => String(item?.failed_id || "").trim() === String(preview.key || "").trim())
+                : null;
+            const actionBusy = String(S.memoryFailedActionBusy || "").trim();
+            if (U.memoryDetailActionsHint) {
+                U.memoryDetailActionsHint.textContent = S.memoryFailedMutationsEnabled
+                    ? (failedRecord ? memoryFailedAutoRetryHint(failedRecord) : "")
+                    : "服务端未启用 G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS，重试 / 放弃不可用";
+            }
+            U.memoryDetailActions.querySelectorAll("[data-memory-failed-action]").forEach((button) => {
+                button.disabled = !S.memoryFailedMutationsEnabled || !!actionBusy || !failedRecord;
+            });
         }
     }
     setDrawerOpen(U.memoryDetailBackdrop, U.memoryDetailDrawer, !!preview.open);
@@ -10724,13 +10805,20 @@ function openMemoryDetailPreview(kind, key) {
     const normalizedKey = String(key || "").trim();
     if (!normalizedKind || !normalizedKey) return;
     const isProcessed = normalizedKind === "processed";
+    const isFailed = normalizedKind === "failed";
     const source = isProcessed
         ? (Array.isArray(S.memoryProcessedItems) ? S.memoryProcessedItems.find((item) => String(item?.batch_id || "").trim() === normalizedKey) : null)
-        : (Array.isArray(S.memoryQueueItems) ? S.memoryQueueItems.find((item) => String(item?.request_id || "").trim() === normalizedKey) : null);
+        : isFailed
+            ? (Array.isArray(S.memoryFailedItems) ? S.memoryFailedItems.find((item) => String(item?.failed_id || "").trim() === normalizedKey) : null)
+            : (Array.isArray(S.memoryQueueItems) ? S.memoryQueueItems.find((item) => String(item?.request_id || "").trim() === normalizedKey) : null);
     if (!source) return;
     const usage = source?.usage && typeof source.usage === "object" ? source.usage : {};
     const payloadTexts = Array.isArray(source?.payload_texts) ? source.payload_texts : [];
     const noopReason = isProcessed ? memoryProcessedNoopReason(source) : "";
+    const failedUsage = isFailed && source?.usage_total && typeof source.usage_total === "object" ? source.usage_total : {};
+    const failedPayloads = isFailed && Array.isArray(source?.items)
+        ? source.items.map((item) => String(item?.payload_text || "")).filter((text) => text.trim())
+        : [];
     const fields = isProcessed
         ? [
             { label: "批次", value: normalizedKey },
@@ -10742,31 +10830,63 @@ function openMemoryDetailPreview(kind, key) {
             { label: "输入", value: String(usage.input_tokens || 0) },
             { label: "输出", value: String(usage.output_tokens || 0) },
         ]
-        : [
-            { label: "请求", value: normalizedKey },
-            { label: "状态", value: memoryStatusLabel(source?.status) || "-" },
-            { label: "入队时间", value: formatCompactTime(source?.created_at) || String(source?.created_at || "-") },
-            { label: "开始处理", value: formatCompactTime(source?.processing_started_at) || String(source?.processing_started_at || "-") },
-            { label: "决策源", value: String(source?.decision_source || "").trim() || "-" },
-            { label: "触发来源", value: String(source?.trigger_source || "").trim() || "-" },
-            { label: "下次重试", value: formatCompactTime(source?.retry_after) || String(source?.retry_after || "-") },
-        ];
+        : isFailed
+            ? [
+                { label: "记录", value: normalizedKey },
+                { label: "失败类别", value: memoryFailedCategoryLabel(source) },
+                { label: "操作", value: memoryOpLabel(source?.op) },
+                { label: "请求数", value: String(Array.isArray(source?.request_ids) ? source.request_ids.length : 0) },
+                { label: "首次停车", value: formatCompactTime(source?.first_parked_at) || String(source?.first_parked_at || "-") },
+                { label: "最近停车", value: formatCompactTime(source?.parked_at) || String(source?.parked_at || "-") },
+                { label: "停车次数", value: String(source?.park_count || 0) },
+                { label: "自动重排", value: String(source?.auto_requeue_count || 0) },
+                { label: "手动重试", value: String(source?.manual_retry_count || 0) },
+                { label: "累计输入", value: String(failedUsage.input_tokens || 0) },
+                { label: "累计输出", value: String(failedUsage.output_tokens || 0) },
+                { label: "重试策略", value: memoryFailedAutoRetryHint(source) },
+            ]
+            : [
+                { label: "请求", value: normalizedKey },
+                { label: "状态", value: memoryStatusLabel(source?.status) || "-" },
+                { label: "入队时间", value: formatCompactTime(source?.created_at) || String(source?.created_at || "-") },
+                { label: "开始处理", value: formatCompactTime(source?.processing_started_at) || String(source?.processing_started_at || "-") },
+                { label: "决策源", value: String(source?.decision_source || "").trim() || "-" },
+                { label: "触发来源", value: String(source?.trigger_source || "").trim() || "-" },
+                { label: "下次重试", value: formatCompactTime(source?.retry_after) || String(source?.retry_after || "-") },
+            ];
     S.memoryDetailPreview = {
         open: true,
         kind: normalizedKind,
         key: normalizedKey,
-        title: "只读记忆详情",
-        subtitle: isProcessed ? `已处理批次 ${normalizedKey}` : `队列请求 ${normalizedKey}`,
+        title: isFailed ? "失败记忆详情" : "只读记忆详情",
+        groups: isFailed
+            ? [
+                { title: "基础信息", items: fields.slice(0, 4) },
+                { title: "停车与重试", items: fields.slice(4, 9) },
+                { title: "累计成本与策略", items: fields.slice(9) },
+            ]
+            : [],
+        subtitle: isProcessed
+            ? `已处理批次 ${normalizedKey}`
+            : isFailed
+                ? `失败停车批次 ${normalizedKey}`
+                : `队列请求 ${normalizedKey}`,
         fields,
         primaryText: isProcessed
             ? payloadTexts.join("\n\n---\n\n")
-            : String(source?.payload_text || ""),
+            : isFailed
+                ? failedPayloads.join("\n\n---\n\n")
+                : String(source?.payload_text || ""),
         secondaryTitle: isProcessed
             ? (noopReason ? "无变更原因" : "变更内容")
-            : "最近错误",
+            : isFailed
+                ? "错误历史"
+                : "最近错误",
         secondaryText: isProcessed
             ? String(noopReason || memoryProcessedChangePreview(source) || "")
-            : String(source?.last_error_text || ""),
+            : isFailed
+                ? memoryFailedErrorHistoryText(source)
+                : String(source?.last_error_text || ""),
         changes: isProcessed ? memoryProcessedStructuredChanges(source) : [],
         changesReconstructed: isProcessed ? Boolean(source?.changes_reconstructed) : false,
     };
@@ -10794,22 +10914,39 @@ function ensureMemoryBrowserUi() {
                 <h2 id="memory-browser-title">当前记忆</h2>
                 <p id="memory-browser-subtitle" class="subtitle">数据来自 sqlite 持久化存储。</p>
             </div>
-            <button type="button" class="toolbar-btn ghost" data-memory-browser-close data-modal-close>关闭</button>
+            <div class="memory-browser-head-actions">
+                <button type="button" class="toolbar-btn ghost" id="memory-browser-edit-toggle" title="进入编辑模式：批量选择、修改与删除记忆">编辑</button>
+                <button type="button" class="toolbar-btn ghost" data-memory-browser-close data-modal-close>关闭</button>
+            </div>
         </div>
         <div class="detail-modal-body">
             <div class="memory-browser-toolbar">
                 <input id="memory-browser-search" class="resource-search memory-browser-search-input" type="search" placeholder="搜索关键词（内容 / ID / 来源）" aria-label="搜索当前记忆" />
             </div>
+            <div id="memory-browser-bulk-bar" class="memory-browser-bulk-bar" hidden>
+                <label class="memory-browser-select-all">
+                    <input type="checkbox" id="memory-browser-select-all" aria-label="全选当前筛选结果" />
+                    <span>全选</span>
+                </label>
+                <span id="memory-browser-selected-count" class="memory-browser-selected-count">已选 0 条</span>
+                <button type="button" id="memory-browser-bulk-delete" class="toolbar-btn danger" disabled>
+                    <i data-lucide="trash-2" aria-hidden="true"></i>
+                    删除选中
+                </button>
+                <span id="memory-browser-edit-hint" class="memory-browser-edit-hint"></span>
+            </div>
             <div class="memory-browser-table-wrap">
                 <table class="memory-browser-table">
                     <thead>
                         <tr>
+                            <th id="memory-browser-th-select" class="memory-browser-col-select" hidden></th>
                             <th class="sortable" data-memory-sort="created_at" tabindex="0" role="button">创建时间<span class="sort-ind" data-sort-ind="created_at"></span></th>
                             <th class="sortable" data-memory-sort="refresh_count" tabindex="0" role="button">刷新值<span class="sort-ind" data-sort-ind="refresh_count"></span></th>
                             <th class="sortable" data-memory-sort="passed_count" tabindex="0" role="button">通过次数<span class="sort-ind" data-sort-ind="passed_count"></span></th>
                             <th>来源</th>
                             <th>ID</th>
                             <th>记忆内容</th>
+                            <th id="memory-browser-th-actions" class="memory-browser-col-actions" hidden>操作</th>
                         </tr>
                     </thead>
                     <tbody id="memory-browser-tbody"></tbody>
@@ -10817,6 +10954,34 @@ function ensureMemoryBrowserUi() {
             </div>
             <div id="memory-browser-status" class="resource-page-indicator" aria-live="polite"></div>
         </div>
+        <div id="memory-browser-edit-backdrop" class="memory-browser-edit-backdrop" hidden aria-hidden="true"></div>
+        <section id="memory-browser-edit-dialog" class="panel memory-browser-edit-dialog" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="memory-browser-edit-title" tabindex="-1" hidden>
+            <div class="detail-modal-header">
+                <div class="memory-browser-head">
+                    <h2 id="memory-browser-edit-title">编辑记忆</h2>
+                    <p id="memory-browser-edit-subtitle" class="subtitle">保存前会再次确认；修改会同步重建 MEMORY.md 镜像。</p>
+                </div>
+                <button type="button" class="toolbar-btn ghost" data-memory-browser-edit-close>取消</button>
+            </div>
+            <div class="detail-modal-body memory-browser-edit-body">
+                <label class="memory-browser-edit-field" for="memory-browser-edit-memory-id">
+                    <span>记忆 ID</span>
+                    <input id="memory-browser-edit-memory-id" type="text" readonly />
+                </label>
+                <label class="memory-browser-edit-field" for="memory-browser-edit-body">
+                    <span>记忆内容</span>
+                    <textarea id="memory-browser-edit-body" rows="6" placeholder="记忆正文（必填）"></textarea>
+                </label>
+                <label class="memory-browser-edit-field" for="memory-browser-edit-minimal">
+                    <span>最小记忆（minimal_memory，可留空保持不变）</span>
+                    <input id="memory-browser-edit-minimal" type="text" placeholder="条件->要求关键词" />
+                </label>
+            </div>
+            <div class="detail-modal-footer memory-browser-edit-footer">
+                <button type="button" class="toolbar-btn ghost" data-memory-browser-edit-cancel>取消</button>
+                <button type="button" class="toolbar-btn success" data-memory-browser-edit-save>保存修改</button>
+            </div>
+        </section>
     `;
     host.appendChild(backdrop);
     host.appendChild(drawer);
@@ -10828,8 +10993,54 @@ function ensureMemoryBrowserUi() {
     U.memoryBrowserTbody = drawer.querySelector("#memory-browser-tbody");
     U.memoryBrowserStatus = drawer.querySelector("#memory-browser-status");
     U.memoryBrowserClose = drawer.querySelector("[data-memory-browser-close]");
+    U.memoryBrowserEditToggle = drawer.querySelector("#memory-browser-edit-toggle");
+    U.memoryBrowserBulkBar = drawer.querySelector("#memory-browser-bulk-bar");
+    U.memoryBrowserSelectAll = drawer.querySelector("#memory-browser-select-all");
+    U.memoryBrowserSelectedCount = drawer.querySelector("#memory-browser-selected-count");
+    U.memoryBrowserBulkDelete = drawer.querySelector("#memory-browser-bulk-delete");
+    U.memoryBrowserEditHint = drawer.querySelector("#memory-browser-edit-hint");
+    U.memoryBrowserThSelect = drawer.querySelector("#memory-browser-th-select");
+    U.memoryBrowserThActions = drawer.querySelector("#memory-browser-th-actions");
+    U.memoryBrowserEditBackdrop = drawer.querySelector("#memory-browser-edit-backdrop");
+    U.memoryBrowserEditDialog = drawer.querySelector("#memory-browser-edit-dialog");
+    U.memoryBrowserEditMemoryId = drawer.querySelector("#memory-browser-edit-memory-id");
+    U.memoryBrowserEditBody = drawer.querySelector("#memory-browser-edit-body");
+    U.memoryBrowserEditMinimal = drawer.querySelector("#memory-browser-edit-minimal");
+    U.memoryBrowserEditSave = drawer.querySelector("[data-memory-browser-edit-save]");
     U.memoryBrowserClose?.addEventListener("click", () => closeMemoryBrowser());
     U.memoryBrowserBackdrop?.addEventListener("click", () => closeMemoryBrowser());
+    U.memoryBrowserEditToggle?.addEventListener("click", () => toggleMemoryBrowserEditMode());
+    U.memoryBrowserSelectAll?.addEventListener("change", () => {
+        memoryBrowserToggleSelectAll(!!U.memoryBrowserSelectAll?.checked);
+    });
+    U.memoryBrowserBulkDelete?.addEventListener("click", () => requestMemoryBrowserDeleteSelected());
+    U.memoryBrowserTbody?.addEventListener("change", (e) => {
+        if (!(e.target instanceof Element)) return;
+        const checkbox = e.target.closest("[data-memory-row-select]");
+        if (!checkbox) return;
+        memoryBrowserToggleRowSelected(checkbox.dataset.memoryRowSelect || "", !!checkbox.checked);
+    });
+    U.memoryBrowserTbody?.addEventListener("click", (e) => {
+        if (!(e.target instanceof Element)) return;
+        const editTrigger = e.target.closest("[data-memory-row-edit]");
+        if (editTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            openMemoryBrowserEditDialog(editTrigger.dataset.memoryRowEdit || "");
+            return;
+        }
+        const deleteTrigger = e.target.closest("[data-memory-row-delete]");
+        if (deleteTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            requestMemoryBrowserDelete([deleteTrigger.dataset.memoryRowDelete || ""].filter(Boolean), "single");
+        }
+    });
+    drawer.querySelectorAll("[data-memory-browser-edit-close], [data-memory-browser-edit-cancel]").forEach((button) => {
+        button.addEventListener("click", () => closeMemoryBrowserEditDialog());
+    });
+    U.memoryBrowserEditBackdrop?.addEventListener("click", () => closeMemoryBrowserEditDialog());
+    U.memoryBrowserEditSave?.addEventListener("click", () => requestMemoryBrowserEditSave());
     U.memoryBrowserSearch?.addEventListener("input", () => {
         S.memoryBrowser.search = U.memoryBrowserSearch.value || "";
         renderMemoryBrowserList();
@@ -10886,25 +11097,50 @@ function renderMemoryBrowserList() {
     ensureMemoryBrowserUi();
     if (!U.memoryBrowserTbody) return;
     const filtered = memoryBrowserSortedItems(memoryBrowserFilteredItems());
+    const editMode = !!S.memoryBrowser.editMode && !!S.memoryBrowser.mutationsEnabled;
+    const columnCount = editMode ? 8 : 6;
     if (S.memoryBrowser.busy) {
-        U.memoryBrowserTbody.innerHTML = '<tr><td colspan="6" class="memory-browser-empty">正在加载当前记忆...</td></tr>';
+        U.memoryBrowserTbody.innerHTML = `<tr><td colspan="${columnCount}" class="memory-browser-empty">正在加载当前记忆...</td></tr>`;
     } else if (!filtered.length) {
         const hasAny = Array.isArray(S.memoryBrowser.items) && S.memoryBrowser.items.length;
-        U.memoryBrowserTbody.innerHTML = `<tr><td colspan="6" class="memory-browser-empty">${hasAny ? "没有匹配的记忆。" : "当前没有记忆。"}</td></tr>`;
+        U.memoryBrowserTbody.innerHTML = `<tr><td colspan="${columnCount}" class="memory-browser-empty">${hasAny ? "没有匹配的记忆。" : "当前没有记忆。"}</td></tr>`;
     } else {
         U.memoryBrowserTbody.innerHTML = filtered.map((item) => {
             const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "-");
             const source = String(item?.source || "").trim() || "-";
             const memoryId = String(item?.memory_id || "").trim() || "-";
             const body = String(item?.memory_body || "").trim() || "-";
+            const selectableId = String(item?.memory_id || "").trim();
+            const checked = !!S.memoryBrowser.selected[selectableId];
+            const actionBusy = String(S.memoryBrowser.actionBusy || "").trim();
+            const rowBusy = !!actionBusy;
+            const selectCell = editMode
+                ? `<td class="memory-browser-cell-select"><input type="checkbox" data-memory-row-select="${esc(selectableId)}"${checked ? " checked" : ""}${rowBusy ? " disabled" : ""} aria-label="选择记忆 ${esc(memoryId)}" /></td>`
+                : "";
+            const actionsCell = editMode
+                ? `
+                <td class="memory-browser-cell-actions">
+                    <button type="button" class="toolbar-btn ghost memory-browser-row-btn" data-memory-row-edit="${esc(selectableId)}"${rowBusy ? " disabled" : ""} title="修改这条记忆">
+                        <i data-lucide="pencil" aria-hidden="true"></i>
+                        修改
+                    </button>
+                    <button type="button" class="toolbar-btn danger memory-browser-row-btn" data-memory-row-delete="${esc(selectableId)}"${rowBusy ? " disabled" : ""} title="删除这条记忆">
+                        <i data-lucide="trash-2" aria-hidden="true"></i>
+                        删除
+                    </button>
+                </td>
+                `
+                : "";
             return `
-                <tr>
+                <tr${checked ? ' class="memory-browser-row-selected"' : ""}>
+                    ${selectCell}
                     <td class="memory-browser-cell-nowrap">${esc(createdAt)}</td>
                     <td class="memory-browser-cell-nowrap">${esc(String(item?.refresh_count ?? 0))}</td>
                     <td class="memory-browser-cell-nowrap">${esc(String(item?.passed_count ?? 0))}</td>
                     <td class="memory-browser-cell-nowrap">${esc(source)}</td>
                     <td class="memory-browser-cell-nowrap">${esc(memoryId)}</td>
                     <td class="memory-browser-cell-body">${esc(body)}</td>
+                    ${actionsCell}
                 </tr>
             `;
         }).join("");
@@ -10928,6 +11164,242 @@ function renderMemoryBrowserList() {
         const active = key === S.memoryBrowser.sortKey;
         ind.textContent = active ? (S.memoryBrowser.sortDir === "asc" ? " ↑" : " ↓") : "";
     });
+    renderMemoryBrowserEditState();
+    icons();
+}
+
+function memoryBrowserSelectedIds() {
+    const selected = S.memoryBrowser.selected || {};
+    const items = Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items : [];
+    const knownIds = new Set(items.map((item) => String(item?.memory_id || "").trim()).filter(Boolean));
+    return Object.keys(selected).filter((id) => selected[id] && knownIds.has(id));
+}
+
+function renderMemoryBrowserEditState() {
+    const editMode = !!S.memoryBrowser.editMode && !!S.memoryBrowser.mutationsEnabled;
+    if (U.memoryBrowserThSelect) U.memoryBrowserThSelect.hidden = !editMode;
+    if (U.memoryBrowserThActions) U.memoryBrowserThActions.hidden = !editMode;
+    if (U.memoryBrowserBulkBar) U.memoryBrowserBulkBar.hidden = !editMode;
+    if (U.memoryBrowserEditToggle) {
+        U.memoryBrowserEditToggle.disabled = !S.memoryBrowser.mutationsEnabled;
+        U.memoryBrowserEditToggle.textContent = editMode ? "完成" : "编辑";
+        U.memoryBrowserEditToggle.title = S.memoryBrowser.mutationsEnabled
+            ? (editMode ? "退出编辑模式" : "进入编辑模式：批量选择、修改与删除记忆")
+            : "编辑不可用：服务端未启用 G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS";
+    }
+    const selectedIds = memoryBrowserSelectedIds();
+    const filtered = memoryBrowserSortedItems(memoryBrowserFilteredItems());
+    if (U.memoryBrowserSelectAll) {
+        const filteredIds = filtered.map((item) => String(item?.memory_id || "").trim()).filter(Boolean);
+        U.memoryBrowserSelectAll.checked = filteredIds.length > 0 && filteredIds.every((id) => selectedIds.includes(id));
+        U.memoryBrowserSelectAll.disabled = !editMode || !filteredIds.length || !!S.memoryBrowser.actionBusy;
+    }
+    if (U.memoryBrowserSelectedCount) {
+        U.memoryBrowserSelectedCount.textContent = `已选 ${selectedIds.length} 条`;
+    }
+    if (U.memoryBrowserBulkDelete) {
+        U.memoryBrowserBulkDelete.disabled = !editMode || !selectedIds.length || !!S.memoryBrowser.actionBusy;
+    }
+    if (U.memoryBrowserEditHint) {
+        U.memoryBrowserEditHint.textContent = S.memoryBrowser.actionBusy ? "正在执行操作..." : "删除与保存均会弹窗二次确认。";
+    }
+    if (U.memoryBrowserEditDialog) {
+        const dialogOpen = !!S.memoryBrowser.editDialog.open;
+        U.memoryBrowserEditDialog.hidden = !dialogOpen;
+        U.memoryBrowserEditDialog.setAttribute("aria-hidden", dialogOpen ? "false" : "true");
+        if (U.memoryBrowserEditBackdrop) {
+            U.memoryBrowserEditBackdrop.hidden = !dialogOpen;
+            U.memoryBrowserEditBackdrop.setAttribute("aria-hidden", dialogOpen ? "false" : "true");
+        }
+        if (U.memoryBrowserEditSave) U.memoryBrowserEditSave.disabled = !!S.memoryBrowser.editDialog.busy;
+    }
+}
+
+function toggleMemoryBrowserEditMode() {
+    if (!S.memoryBrowser.mutationsEnabled) {
+        showToast({
+            title: "编辑不可用",
+            text: "服务端未启用记忆运维变更（G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS）。",
+            kind: "warn",
+            durationMs: 5000,
+        });
+        return;
+    }
+    S.memoryBrowser.editMode = !S.memoryBrowser.editMode;
+    S.memoryBrowser.selected = {};
+    renderMemoryBrowserList();
+}
+
+function memoryBrowserToggleRowSelected(memoryId, checked) {
+    const normalized = String(memoryId || "").trim();
+    if (!normalized) return;
+    const selected = { ...(S.memoryBrowser.selected || {}) };
+    if (checked) {
+        selected[normalized] = true;
+    } else {
+        delete selected[normalized];
+    }
+    S.memoryBrowser.selected = selected;
+    renderMemoryBrowserList();
+}
+
+function memoryBrowserToggleSelectAll(checked) {
+    const filtered = memoryBrowserSortedItems(memoryBrowserFilteredItems());
+    const selected = { ...(S.memoryBrowser.selected || {}) };
+    filtered.forEach((item) => {
+        const id = String(item?.memory_id || "").trim();
+        if (!id) return;
+        if (checked) {
+            selected[id] = true;
+        } else {
+            delete selected[id];
+        }
+    });
+    S.memoryBrowser.selected = selected;
+    renderMemoryBrowserList();
+}
+
+function requestMemoryBrowserDeleteSelected() {
+    const selectedIds = memoryBrowserSelectedIds();
+    if (!selectedIds.length) return;
+    requestMemoryBrowserDelete(selectedIds, "bulk");
+}
+
+function requestMemoryBrowserDelete(memoryIds, scope = "bulk") {
+    const ids = [...new Set((Array.isArray(memoryIds) ? memoryIds : [memoryIds]).map((id) => String(id || "").trim()).filter(Boolean))];
+    if (!ids.length || S.memoryBrowser.actionBusy) return;
+    if (!S.memoryBrowser.mutationsEnabled) {
+        showToast({
+            title: "删除不可用",
+            text: "服务端未启用记忆运维变更（G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS）。",
+            kind: "warn",
+            durationMs: 5000,
+        });
+        return;
+    }
+    const label = scope === "single" ? "这条记忆" : `选中的 ${ids.length} 条记忆`;
+    openConfirm({
+        title: "删除记忆",
+        text: `确定删除${label}吗？删除后 MEMORY.md 镜像会同步重建，操作不可撤销。`,
+        confirmLabel: "删除",
+        confirmKind: "danger",
+        onConfirm: () => void runMemoryBrowserDelete(ids),
+    });
+}
+
+async function runMemoryBrowserDelete(memoryIds) {
+    const ids = [...new Set((Array.isArray(memoryIds) ? memoryIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
+    if (!ids.length || S.memoryBrowser.actionBusy) return;
+    S.memoryBrowser.actionBusy = `delete:${ids.length}`;
+    renderMemoryBrowserList();
+    try {
+        const result = await ApiClient.deleteCurrentMemories(ids, "manual-ui");
+        const deletedCount = Array.isArray(result?.item?.deleted) ? result.item.deleted.length : ids.length;
+        const missingCount = Array.isArray(result?.item?.missing) ? result.item.missing.length : 0;
+        showToast({
+            title: "删除完成",
+            text: missingCount
+                ? `已删除 ${deletedCount} 条记忆，${missingCount} 条未找到（可能已被删除）。`
+                : `已删除 ${deletedCount} 条记忆，镜像已同步。`,
+            kind: missingCount ? "warn" : "success",
+            durationMs: 4200,
+        });
+        const selected = { ...(S.memoryBrowser.selected || {}) };
+        ids.forEach((id) => delete selected[id]);
+        S.memoryBrowser.selected = selected;
+        await loadMemoryBrowser();
+    } catch (error) {
+        showToast({ title: "删除失败", text: error?.message || "记忆删除未成功，请稍后重试", kind: "error", durationMs: 5000 });
+    } finally {
+        S.memoryBrowser.actionBusy = "";
+        renderMemoryBrowserList();
+    }
+}
+
+function openMemoryBrowserEditDialog(memoryId) {
+    const normalized = String(memoryId || "").trim();
+    if (!normalized || S.memoryBrowser.actionBusy) return;
+    if (!S.memoryBrowser.mutationsEnabled) {
+        showToast({
+            title: "修改不可用",
+            text: "服务端未启用记忆运维变更（G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS）。",
+            kind: "warn",
+            durationMs: 5000,
+        });
+        return;
+    }
+    const items = Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items : [];
+    const target = items.find((item) => String(item?.memory_id || "").trim() === normalized);
+    if (!target) {
+        showToast({ title: "未找到记忆", text: "该记忆可能已被删除，请刷新列表。", kind: "warn" });
+        return;
+    }
+    S.memoryBrowser.editDialog = {
+        open: true,
+        memoryId: normalized,
+        body: String(target?.memory_body || ""),
+        minimal: String(target?.minimal_memory || ""),
+        busy: false,
+    };
+    renderMemoryBrowserEditState();
+    if (U.memoryBrowserEditMemoryId) U.memoryBrowserEditMemoryId.value = normalized;
+    if (U.memoryBrowserEditBody) U.memoryBrowserEditBody.value = S.memoryBrowser.editDialog.body;
+    if (U.memoryBrowserEditMinimal) U.memoryBrowserEditMinimal.value = S.memoryBrowser.editDialog.minimal;
+    U.memoryBrowserEditBody?.focus();
+}
+
+function closeMemoryBrowserEditDialog() {
+    if (S.memoryBrowser.editDialog.busy) return;
+    S.memoryBrowser.editDialog = { ...S.memoryBrowser.editDialog, open: false };
+    renderMemoryBrowserEditState();
+}
+
+function requestMemoryBrowserEditSave() {
+    const dialog = S.memoryBrowser.editDialog || {};
+    if (!dialog.open || dialog.busy) return;
+    const memoryId = String(dialog.memoryId || "").trim();
+    const body = String(U.memoryBrowserEditBody?.value ?? dialog.body ?? "");
+    const minimal = String(U.memoryBrowserEditMinimal?.value ?? dialog.minimal ?? "");
+    if (!memoryId) return;
+    if (!body.trim()) {
+        showToast({ title: "内容不能为空", text: "记忆内容为必填项。", kind: "warn" });
+        return;
+    }
+    // 二次确认：内部弹窗确认后才真正提交修改
+    openConfirm({
+        title: "保存记忆修改",
+        text: "确定保存对这条记忆的修改吗？保存后 MEMORY.md 镜像会同步重建。",
+        confirmLabel: "保存",
+        confirmKind: "danger",
+        onConfirm: () => void runMemoryBrowserEditSave(memoryId, body, minimal),
+    });
+}
+
+async function runMemoryBrowserEditSave(memoryId, body, minimal) {
+    if (S.memoryBrowser.actionBusy) return;
+    S.memoryBrowser.editDialog = { ...S.memoryBrowser.editDialog, busy: true };
+    S.memoryBrowser.actionBusy = `update:${memoryId}`;
+    renderMemoryBrowserEditState();
+    try {
+        const original = (Array.isArray(S.memoryBrowser.items) ? S.memoryBrowser.items : [])
+            .find((item) => String(item?.memory_id || "").trim() === memoryId);
+        const originalMinimal = String(original?.minimal_memory || "");
+        const minimalChanged = minimal.trim() && minimal.trim() !== originalMinimal;
+        await ApiClient.updateCurrentMemory(memoryId, {
+            memoryBody: body.trim(),
+            minimalMemory: minimalChanged ? minimal.trim() : null,
+            reason: "manual-ui",
+        });
+        showToast({ title: "已保存", text: "记忆修改已保存，镜像已同步。", kind: "success" });
+        S.memoryBrowser.editDialog = { open: false, memoryId: "", body: "", minimal: "", busy: false };
+        await loadMemoryBrowser();
+    } catch (error) {
+        showToast({ title: "保存失败", text: error?.message || "记忆修改未成功，请稍后重试", kind: "error", durationMs: 5000 });
+        S.memoryBrowser.editDialog = { ...S.memoryBrowser.editDialog, busy: false };
+    } finally {
+        S.memoryBrowser.actionBusy = "";
+        renderMemoryBrowserEditState();
+    }
 }
 
 function toggleMemoryBrowserSort(key) {
@@ -10950,6 +11422,9 @@ function renderMemoryBrowser() {
 
 function closeMemoryBrowser() {
     S.memoryBrowser.open = false;
+    S.memoryBrowser.editMode = false;
+    S.memoryBrowser.selected = {};
+    S.memoryBrowser.editDialog = { open: false, memoryId: "", body: "", minimal: "", busy: false };
     renderMemoryBrowser();
 }
 
@@ -10965,6 +11440,12 @@ async function loadMemoryBrowser() {
         if (requestToken !== S.memoryBrowser.requestToken) return;
         S.memoryBrowser.items = Array.isArray(payload?.items) ? payload.items : [];
         S.memoryBrowser.total = normalizeInt(payload?.total, S.memoryBrowser.items.length);
+        S.memoryBrowser.mutationsEnabled = !!payload?.mutationsEnabled;
+        if (!S.memoryBrowser.mutationsEnabled) {
+            S.memoryBrowser.editMode = false;
+            S.memoryBrowser.selected = {};
+            S.memoryBrowser.editDialog = { open: false, memoryId: "", body: "", minimal: "", busy: false };
+        }
         S.memoryBrowser.error = "";
     } catch (error) {
         if (requestToken !== S.memoryBrowser.requestToken) return;
@@ -10989,201 +11470,6 @@ function setMemoryCardExpanded(kind, key, expanded) {
     const target = kind === "processed" ? S.memoryProcessedExpanded : S.memoryQueueExpanded;
     if (!key) return;
     target[key] = !!expanded;
-}
-
-function renderMemoryQueueCard(item) {
-    const requestId = String(item?.request_id || "").trim();
-    const expanded = !!S.memoryQueueExpanded[requestId];
-    const statusText = memoryStatusLabel(item?.status);
-    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
-    const processingStartedAt = formatCompactTime(item?.processing_started_at) || String(item?.processing_started_at || "");
-    const errorText = String(item?.last_error_text || "").trim();
-    const lastErrorAt = formatCompactTime(item?.last_error_at) || String(item?.last_error_at || "");
-    const retryAfter = formatCompactTime(item?.retry_after) || String(item?.retry_after || "");
-    return `
-        <details class="memory-card"${expanded ? " open" : ""} data-memory-card="queue" data-memory-key="${esc(requestId)}">
-            <summary>
-                <div class="memory-card-summary">
-                    <div class="memory-card-head">
-                        <div class="memory-card-title">
-                            <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
-                            <span class="policy-chip neutral">${esc(requestId || "pending")}</span>
-                        </div>
-                        <div class="memory-card-meta">
-                            <span>入队时间：${esc(createdAt || "-")}</span>
-                        </div>
-                    </div>
-                    ${errorText ? `<div class="memory-card-error">${esc(errorText)}</div>` : ""}
-                </div>
-            </summary>
-            <div class="memory-card-body">
-                <div class="memory-card-body-text memory-card-body-text-rich">${renderMemoryTextWithNoteRefs(String(item?.payload_text || ""))}</div>
-                <div class="memory-card-field-grid">
-                    <div class="memory-card-field"><span class="memory-card-field-label">状态：</span><span>${esc(statusText || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">入队时间：</span><span>${esc(createdAt || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">开始处理：</span><span>${esc(processingStartedAt || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">最近错误：</span><span>${esc(errorText || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">最近报错时间：</span><span>${esc(lastErrorAt || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">下次重试：</span><span>${esc(retryAfter || "-")}</span></div>
-                </div>
-                <div class="memory-card-body-meta">
-                    <div>决定源：${esc(String(item?.decision_source || "") || "-")}</div>
-                    <div>触发来源：${esc(String(item?.trigger_source || "") || "-")}</div>
-                </div>
-            </div>
-        </details>
-    `;
-}
-
-function renderMemoryProcessedCard(item) {
-    const batchId = String(item?.batch_id || "").trim();
-    const expanded = !!S.memoryProcessedExpanded[batchId];
-    const usage = item?.usage && typeof item.usage === "object" ? item.usage : {};
-    const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
-    const noteRefs = Array.isArray(item?.note_refs_written) ? item.note_refs_written : [];
-    const modelChain = Array.isArray(item?.model_chain) ? item.model_chain : [];
-    const statusLabel = memoryProcessedOpLabel(item);
-    const badgeStatus = memoryProcessedBadgeStatus(item);
-    const opLabel = memoryProcessedOpLabel(item);
-    const discardReason = String(item?.discard_reason || "").trim();
-    return `
-        <details class="memory-card"${expanded ? " open" : ""} data-memory-card="processed" data-memory-key="${esc(batchId)}">
-            <summary>
-                <div class="memory-card-summary">
-                    <div class="memory-card-head">
-                        <div class="memory-card-title">
-                            <span class="status-badge" data-status="${esc(badgeStatus)}">${esc(statusLabel)}</span>
-                            <span class="policy-chip neutral">${esc(opLabel)}</span>
-                            <span class="policy-chip neutral">${esc(batchId || "batch")}</span>
-                            <span class="policy-chip neutral">${esc(String(item?.request_count || payloadTexts.length || 0))} 条</span>
-                        </div>
-                        <div class="memory-card-meta">
-                            <span>处理时间 ${esc(formatCompactTime(item?.processed_at) || String(item?.processed_at || ""))}</span>
-                            <span>输入 ${esc(String(usage.input_tokens || 0))}</span>
-                            <span>输出 ${esc(String(usage.output_tokens || 0))}</span>
-                            <span>命中 ${esc(String(usage.cache_read_tokens || 0))}</span>
-                        </div>
-                    </div>
-                </div>
-            </summary>
-            <div class="memory-card-body">
-                <div class="memory-card-body-meta">
-                    <div>终态：${esc(statusLabel || "-")}</div>
-                    <div>模型链：${esc(modelChain.join(" -> ") || "-")}</div>
-                    <div>尝试次数：${esc(String(item?.attempt_count || 0))}</div>
-                    <div>废弃原因：${esc(discardReason || "-")}</div>
-                    <div>写入 notes：${renderMemoryNoteRefList(noteRefs)}</div>
-                    <div>变更内容：<span class="memory-card-inline-rich">${renderMemoryTextWithNoteRefs(memoryProcessedChangePreview(item)) || "-"}</span></div>
-                </div>
-                <div class="memory-card-body-text memory-card-body-text-rich">${renderMemoryTextWithNoteRefs(payloadTexts.join("\n\n---\n\n"))}</div>
-            </div>
-        </details>
-    `;
-}
-
-function renderMemoryQueueCard(item) {
-    const requestId = String(item?.request_id || "").trim();
-    const expanded = !!S.memoryQueueExpanded[requestId];
-    const statusText = memoryStatusLabel(item?.status);
-    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
-    const processingStartedAt = formatCompactTime(item?.processing_started_at) || String(item?.processing_started_at || "");
-    const errorText = String(item?.last_error_text || "").trim();
-    const lastErrorAt = formatCompactTime(item?.last_error_at) || String(item?.last_error_at || "");
-    const retryAfter = formatCompactTime(item?.retry_after) || String(item?.retry_after || "");
-    return `
-        <details class="memory-card"${expanded ? " open" : ""} data-memory-card="queue" data-memory-key="${esc(requestId)}">
-            <summary>
-                <div class="memory-card-summary">
-                    <div class="memory-card-head">
-                        <div class="memory-card-title">
-                            <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
-                            <span class="policy-chip neutral">${esc(requestId || "pending")}</span>
-                        </div>
-                        <div class="memory-card-meta">
-                            <span>入队时间：${esc(createdAt || "-")}</span>
-                        </div>
-                    </div>
-                    ${errorText ? `<div class="memory-card-error">${esc(errorText)}</div>` : ""}
-                </div>
-            </summary>
-            <div class="memory-card-body">
-                ${renderMemoryPreviewBlock("正文预览", String(item?.payload_text || ""))}
-                <div class="memory-card-field-grid">
-                    <div class="memory-card-field"><span class="memory-card-field-label">状态：</span><span>${esc(statusText || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">入队时间：</span><span>${esc(createdAt || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">开始处理：</span><span>${esc(processingStartedAt || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">最近错误：</span><span>${esc(errorText || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">最近报错时间：</span><span>${esc(lastErrorAt || "-")}</span></div>
-                    <div class="memory-card-field"><span class="memory-card-field-label">下次重试：</span><span>${esc(retryAfter || "-")}</span></div>
-                </div>
-                <div class="memory-card-body-meta">
-                    <div>决策源：${esc(String(item?.decision_source || "") || "-")}</div>
-                    <div>触发来源：${esc(String(item?.trigger_source || "") || "-")}</div>
-                </div>
-                <div class="memory-card-actions">
-                    <button type="button" class="toolbar-btn ghost" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}">查看全文详情</button>
-                </div>
-            </div>
-        </details>
-    `;
-}
-
-function renderMemoryProcessedCard(item) {
-    const batchId = String(item?.batch_id || "").trim();
-    const expanded = !!S.memoryProcessedExpanded[batchId];
-    const usage = item?.usage && typeof item.usage === "object" ? item.usage : {};
-    const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
-    const noteRefs = Array.isArray(item?.note_refs_written) ? item.note_refs_written : [];
-    const modelChain = Array.isArray(item?.model_chain) ? item.model_chain : [];
-    const statusLabel = memoryProcessedOpLabel(item);
-    const badgeStatus = memoryProcessedBadgeStatus(item);
-    const opLabel = memoryProcessedOpLabel(item);
-    const discardReason = String(item?.discard_reason || "").trim();
-    return `
-        <details class="memory-card"${expanded ? " open" : ""} data-memory-card="processed" data-memory-key="${esc(batchId)}">
-            <summary>
-                <div class="memory-card-summary">
-                    <div class="memory-card-head">
-                        <div class="memory-card-title">
-                            <span class="status-badge" data-status="${esc(badgeStatus)}">${esc(statusLabel)}</span>
-                            <span class="policy-chip neutral">${esc(opLabel)}</span>
-                            <span class="policy-chip neutral">${esc(batchId || "batch")}</span>
-                            <span class="policy-chip neutral">${esc(String(item?.request_count || payloadTexts.length || 0))} 条</span>
-                        </div>
-                        <div class="memory-card-meta">
-                            <span>处理时间 ${esc(formatCompactTime(item?.processed_at) || String(item?.processed_at || ""))}</span>
-                            <span>输入 ${esc(String(usage.input_tokens || 0))}</span>
-                            <span>输出 ${esc(String(usage.output_tokens || 0))}</span>
-                            <span>命中 ${esc(String(usage.cache_read_tokens || 0))}</span>
-                        </div>
-                    </div>
-                </div>
-            </summary>
-            <div class="memory-card-body">
-                ${renderMemoryPreviewBlock("请求预览", payloadTexts.join("\n\n---\n\n"))}
-                <div class="memory-card-body-meta">
-                    <div>终态：${esc(statusLabel || "-")}</div>
-                    <div>模型链：${esc(modelChain.join(" -> ") || "-")}</div>
-                    <div>尝试次数：${esc(String(item?.attempt_count || 0))}</div>
-                    <div>废弃原因：${esc(discardReason || "-")}</div>
-                    <div>写入 notes：${renderMemoryNoteRefList(noteRefs)}</div>
-                    <div>变更内容：<span class="memory-card-inline-rich">${renderMemoryTextWithNoteRefs(memoryProcessedChangePreview(item)) || "-"}</span></div>
-                </div>
-                <div class="memory-card-actions">
-                    <button type="button" class="toolbar-btn ghost" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}">查看全文详情</button>
-                </div>
-            </div>
-        </details>
-    `;
-}
-
-function currentMemoryQueueBlockedText() {
-    const queueHead = Array.isArray(S.memoryQueueItems) && S.memoryQueueItems.length ? S.memoryQueueItems[0] : null;
-    const errorText = String(queueHead?.last_error_text || "").trim();
-    if (!queueHead || String(queueHead?.status || "").trim().toLowerCase() !== "processing" || !errorText) return "";
-    const retryAfter = String(queueHead?.retry_after || "").trim();
-    const retryText = retryAfter ? `，下次重试：${formatCompactTime(retryAfter) || retryAfter}` : "";
-    return `队首阻塞：${errorText}${retryText}`;
 }
 
 function stopMemoryViewAutoRefresh() {
@@ -11231,122 +11517,6 @@ function renderMemoryAdminActions() {
     U.memoryAdminActions.innerHTML = "";
 }
 
-function renderMemoryView() {
-    renderMemoryAdminActions();
-    if (U.memoryQueueBlockedBanner) {
-        const blockedText = currentMemoryQueueBlockedText();
-        U.memoryQueueBlockedBanner.hidden = !blockedText;
-        U.memoryQueueBlockedBanner.textContent = blockedText ? `队首阻塞整个队列。${blockedText}` : "队首阻塞整个队列";
-    }
-    if (U.memoryPageErrorBanner) {
-        const hasError = !!String(S.memoryError || "").trim();
-        U.memoryPageErrorBanner.hidden = !hasError;
-        U.memoryPageErrorBanner.textContent = hasError ? String(S.memoryError || "").trim() : "";
-    }
-    if (U.memoryQueueList) {
-        if (S.memoryBusy && !S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">正在加载记忆队列...</div>';
-        } else if (!S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">当前没有未出队记忆。</div>';
-        } else {
-            U.memoryQueueList.innerHTML = S.memoryQueueItems.map((item) => renderMemoryQueueCard(item)).join("");
-        }
-    }
-    if (U.memoryProcessedList) {
-        if (S.memoryBusy && !S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">正在加载已处理批次...</div>';
-        } else if (!S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">当前还没有已处理记忆。</div>';
-        } else {
-            U.memoryProcessedList.innerHTML = S.memoryProcessedItems.map((item) => renderMemoryProcessedCard(item)).join("");
-        }
-    }
-    if (U.memoryQueueInfo) U.memoryQueueInfo.textContent = `共 ${S.memoryQueueTotal} 项`;
-    if (U.memoryProcessedInfo) U.memoryProcessedInfo.textContent = `共 ${S.memoryProcessedTotal} 项`;
-    if (U.memoryQueueMore) U.memoryQueueMore.disabled = S.memoryBusy || !S.memoryQueueHasMore;
-    if (U.memoryProcessedMore) U.memoryProcessedMore.disabled = S.memoryBusy || !S.memoryProcessedHasMore;
-    bindMemoryCardToggles();
-    icons();
-}
-
-function maybeToastMemoryAlerts({ quiet = false } = {}) {
-    const errorText = String(S.memoryError || "").trim();
-    const blockedText = currentMemoryQueueBlockedText();
-    if (errorText && errorText !== S.memoryLastAlertText) {
-        S.memoryLastAlertText = errorText;
-        if (!quiet) showToast({ title: "记忆加载失败", text: errorText, kind: "error" });
-    }
-    if (!errorText) {
-        S.memoryLastAlertText = "";
-    }
-    if (blockedText && blockedText !== S.memoryLastBlockedText) {
-        S.memoryLastBlockedText = blockedText;
-        showToast({ title: "队列阻塞", text: blockedText, kind: "warn", durationMs: 4200 });
-    }
-    if (!blockedText) {
-        S.memoryLastBlockedText = "";
-    }
-}
-
-function renderMemoryView() {
-    renderMemoryAdminActions();
-    if (U.memoryQueueList) {
-        if (S.memoryBusy && !S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">正在加载记忆队列...</div>';
-        } else if (!S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">当前没有未出队记忆。</div>';
-        } else {
-            U.memoryQueueList.innerHTML = S.memoryQueueItems.map((item) => renderMemoryQueueCard(item)).join("");
-        }
-    }
-    if (U.memoryProcessedList) {
-        if (S.memoryBusy && !S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">正在加载已处理批次...</div>';
-        } else if (!S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">当前还没有已处理记忆。</div>';
-        } else {
-            U.memoryProcessedList.innerHTML = S.memoryProcessedItems.map((item) => renderMemoryProcessedCard(item)).join("");
-        }
-    }
-    if (U.memoryQueueInfo) U.memoryQueueInfo.textContent = `共 ${S.memoryQueueTotal} 项`;
-    if (U.memoryProcessedInfo) U.memoryProcessedInfo.textContent = `共 ${S.memoryProcessedTotal} 项`;
-    if (U.memoryQueueMore) U.memoryQueueMore.disabled = S.memoryBusy || !S.memoryQueueHasMore;
-    if (U.memoryProcessedMore) U.memoryProcessedMore.disabled = S.memoryBusy || !S.memoryProcessedHasMore;
-    bindMemoryCardToggles();
-    renderMemoryDetailPreview();
-    icons();
-}
-
-async function loadMemoryView({ force = false, quiet = false } = {}) {
-    if (S.memoryBusy) return;
-    S.memoryBusy = true;
-    if (force) S.memoryError = "";
-    renderMemoryView();
-    try {
-        const queueLimit = Math.max(normalizeInt(S.memoryQueueItems.length, 0), S.memoryQueuePageSize);
-        const processedLimit = Math.max(normalizeInt(S.memoryProcessedItems.length, 0), S.memoryProcessedPageSize);
-        const [queue, processed] = await Promise.all([
-            ApiClient.getMemoryQueue({ limit: queueLimit, offset: 0 }),
-            ApiClient.getMemoryProcessed({ limit: processedLimit, offset: 0 }),
-        ]);
-        S.memoryQueueItems = Array.isArray(queue?.items) ? queue.items : [];
-        S.memoryQueueTotal = normalizeInt(queue?.total, 0);
-        S.memoryQueueHasMore = !!queue?.hasMore;
-        S.memoryProcessedItems = Array.isArray(processed?.items) ? processed.items : [];
-        S.memoryProcessedTotal = normalizeInt(processed?.total, 0);
-        S.memoryProcessedHasMore = !!processed?.hasMore;
-        S.memoryLoadedOnce = true;
-        S.memoryError = "";
-    } catch (error) {
-        S.memoryLoadedOnce = true;
-        S.memoryError = error?.message || "记忆数据加载失败";
-        if (!quiet) showToast({ title: "记忆加载失败", text: S.memoryError, kind: "error" });
-    } finally {
-        S.memoryBusy = false;
-        renderMemoryView();
-    }
-}
-
 async function loadMoreMemoryQueue() {
     if (S.memoryBusy || !S.memoryQueueHasMore) return;
     S.memoryBusy = true;
@@ -11391,123 +11561,6 @@ function renderMemoryMetaItem(label, value) {
     return `<span class="memory-card-meta-item"><span class="memory-card-meta-label">${esc(label)}</span><span class="memory-card-meta-value">${esc(value)}</span></span>`;
 }
 
-function renderMemoryQueueCard(item) {
-    const requestId = String(item?.request_id || "").trim();
-    const statusText = memoryStatusLabel(item?.status);
-    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
-    const errorText = String(item?.last_error_text || "").trim();
-    return `
-        <article class="memory-card memory-card-compact" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="打开 ${esc(requestId || "队列请求")} 详情">
-            <div class="memory-card-summary">
-                <div class="memory-card-head">
-                    <div class="memory-card-title">
-                        <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
-                        <span class="policy-chip neutral">${esc(requestId || "pending")}</span>
-                    </div>
-                    <div class="memory-card-meta">
-                        ${renderMemoryMetaItem("入队时间", createdAt || "-")}
-                    </div>
-                </div>
-                ${errorText ? `<div class="memory-card-error">${esc(errorText)}</div>` : ""}
-                ${renderMemoryPreviewBlock("正文预览", String(item?.payload_text || ""))}
-            </div>
-        </article>
-    `;
-}
-
-function renderMemoryProcessedCard(item) {
-    const batchId = String(item?.batch_id || "").trim();
-    const usage = item?.usage && typeof item.usage === "object" ? item.usage : {};
-    const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
-    const statusLabel = memoryProcessedOpLabel(item);
-    const badgeStatus = memoryProcessedBadgeStatus(item);
-    const opLabel = memoryProcessedOpLabel(item);
-    const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
-    return `
-        <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="打开 ${esc(batchId || "已处理批次")} 详情">
-            <div class="memory-card-summary">
-                <div class="memory-card-head">
-                    <div class="memory-card-title">
-                        <span class="status-badge" data-status="${esc(badgeStatus)}">${esc(statusLabel)}</span>
-                        <span class="policy-chip neutral">${esc(opLabel)}</span>
-                        <span class="policy-chip neutral">${esc(batchId || "batch")}</span>
-                        <span class="policy-chip neutral">${esc(String(item?.request_count || payloadTexts.length || 0))} 条</span>
-                    </div>
-                    <div class="memory-card-meta">
-                        ${renderMemoryMetaItem("处理时间", processedAt || "-")}
-                        ${renderMemoryMetaItem("输入", String(usage.input_tokens || 0))}
-                        ${renderMemoryMetaItem("输出", String(usage.output_tokens || 0))}
-                        ${renderMemoryMetaItem("命中", String(usage.cache_read_tokens || 0))}
-                    </div>
-                </div>
-                ${renderMemoryPreviewBlock("请求预览", payloadTexts.join("\n\n---\n\n"))}
-            </div>
-        </article>
-    `;
-}
-
-function renderMemoryView() {
-    renderMemoryAdminActions();
-    if (U.memoryQueueList) {
-        if (S.memoryBusy && !S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">正在加载记忆队列...</div>';
-        } else if (!S.memoryQueueItems.length) {
-            U.memoryQueueList.innerHTML = '<div class="empty-state compact">当前没有未出队记忆。</div>';
-        } else {
-            U.memoryQueueList.innerHTML = S.memoryQueueItems.map((item) => renderMemoryQueueCard(item)).join("");
-        }
-    }
-    if (U.memoryProcessedList) {
-        if (S.memoryBusy && !S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">正在加载已处理批次...</div>';
-        } else if (!S.memoryProcessedItems.length) {
-            U.memoryProcessedList.innerHTML = '<div class="empty-state compact">当前还没有已处理记忆。</div>';
-        } else {
-            U.memoryProcessedList.innerHTML = S.memoryProcessedItems.map((item) => renderMemoryProcessedCard(item)).join("");
-        }
-    }
-    if (U.memoryQueueInfo) U.memoryQueueInfo.textContent = `共 ${S.memoryQueueTotal} 项`;
-    if (U.memoryProcessedInfo) U.memoryProcessedInfo.textContent = `共 ${S.memoryProcessedTotal} 项`;
-    if (U.memoryQueueMore) U.memoryQueueMore.disabled = S.memoryBusy || !S.memoryQueueHasMore;
-    if (U.memoryProcessedMore) U.memoryProcessedMore.disabled = S.memoryBusy || !S.memoryProcessedHasMore;
-    renderMemoryDetailPreview();
-    icons();
-}
-
-async function loadMemoryView({ force = false, quiet = false } = {}) {
-    if (S.memoryBusy) return;
-    S.memoryBusy = true;
-    if (force) S.memoryError = "";
-    renderMemoryView();
-    try {
-        const queueLimit = Math.max(normalizeInt(S.memoryQueueItems.length, 0), S.memoryQueuePageSize);
-        const processedLimit = Math.max(normalizeInt(S.memoryProcessedItems.length, 0), S.memoryProcessedPageSize);
-        const [queue, processed] = await Promise.all([
-            ApiClient.getMemoryQueue({ limit: queueLimit, offset: 0 }),
-            ApiClient.getMemoryProcessed({ limit: processedLimit, offset: 0 }),
-        ]);
-        S.memoryQueueItems = Array.isArray(queue?.items) ? queue.items : [];
-        S.memoryQueueTotal = normalizeInt(queue?.total, 0);
-        S.memoryQueueHasMore = !!queue?.hasMore;
-        S.memoryProcessedItems = Array.isArray(processed?.items) ? processed.items : [];
-        S.memoryProcessedTotal = normalizeInt(processed?.total, 0);
-        S.memoryProcessedHasMore = !!processed?.hasMore;
-        S.memoryLoadedOnce = true;
-        S.memoryError = "";
-    } catch (error) {
-        S.memoryLoadedOnce = true;
-        S.memoryError = error?.message || "记忆数据加载失败";
-    } finally {
-        S.memoryBusy = false;
-        renderMemoryView();
-        maybeToastMemoryAlerts({ quiet });
-    }
-}
-
-function renderMemoryMetaItem(label, value) {
-    return `<span class="memory-card-meta-item"><span class="memory-card-meta-label">${esc(label)}</span><span class="memory-card-meta-value">${esc(value)}</span></span>`;
-}
-
 function currentMemoryQueueBlockedText() {
     const queueHead = Array.isArray(S.memoryQueueItems) && S.memoryQueueItems.length ? S.memoryQueueItems[0] : null;
     const errorText = String(queueHead?.last_error_text || "").trim();
@@ -11536,59 +11589,6 @@ function maybeToastMemoryAlerts({ quiet = false } = {}) {
     }
 }
 
-function renderMemoryQueueCard(item) {
-    const requestId = String(item?.request_id || "").trim();
-    const statusText = memoryStatusLabel(item?.status);
-    const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
-    const errorText = String(item?.last_error_text || "").trim();
-    return `
-        <article class="memory-card memory-card-compact" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="打开 ${esc(requestId || "队列请求")} 详情">
-            <div class="memory-card-summary">
-                <div class="memory-card-head">
-                    <div class="memory-card-title">
-                        <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
-                        <span class="policy-chip neutral">${esc(requestId || "pending")}</span>
-                    </div>
-                    <div class="memory-card-meta">
-                        ${renderMemoryMetaItem("入队时间", createdAt || "-")}
-                    </div>
-                </div>
-                ${errorText ? `<div class="memory-card-error">${esc(errorText)}</div>` : ""}
-            </div>
-        </article>
-    `;
-}
-
-function renderMemoryProcessedCard(item) {
-    const batchId = String(item?.batch_id || "").trim();
-    const usage = item?.usage && typeof item.usage === "object" ? item.usage : {};
-    const payloadTexts = Array.isArray(item?.payload_texts) ? item.payload_texts : [];
-    const normalizedStatus = String(item?.status || "").trim().toLowerCase();
-    const isDiscarded = normalizedStatus === "discarded";
-    const opLabel = memoryProcessedOpLabel(item);
-    const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
-    return `
-        <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="打开 ${esc(batchId || "已处理批次")} 详情">
-            <div class="memory-card-summary">
-                <div class="memory-card-head">
-                    <div class="memory-card-title">
-                        ${isDiscarded ? `<span class="status-badge" data-status="unpassed">已废弃</span>` : ""}
-                        <span class="status-badge" data-status="${isDiscarded ? "pending" : "success"}">${esc(opLabel)}</span>
-                        <span class="policy-chip neutral">${esc(batchId || "batch")}</span>
-                        <span class="policy-chip neutral">${esc(String(item?.request_count || payloadTexts.length || 0))} 条</span>
-                    </div>
-                    <div class="memory-card-meta">
-                        ${renderMemoryMetaItem("处理时间", processedAt || "-")}
-                        ${renderMemoryMetaItem("输入", String(usage.input_tokens || 0))}
-                        ${renderMemoryMetaItem("输出", String(usage.output_tokens || 0))}
-                        ${renderMemoryMetaItem("命中", String(usage.cache_read_tokens || 0))}
-                    </div>
-                </div>
-            </div>
-        </article>
-    `;
-}
-
 function renderMemoryView() {
     renderMemoryAdminActions();
     if (U.memoryQueueList) {
@@ -11609,10 +11609,24 @@ function renderMemoryView() {
             U.memoryProcessedList.innerHTML = S.memoryProcessedItems.map((item) => renderMemoryProcessedCard(item)).join("");
         }
     }
+    // 失败记忆板块按需显示：仅当存在停车记录时出现，避免常态下挤占待处理队列
+    const hasFailedMemories = S.memoryFailedTotal > 0 || S.memoryFailedItems.length > 0;
+    if (U.memoryFailedPanel) U.memoryFailedPanel.hidden = !hasFailedMemories;
+    if (U.memoryFailedList) {
+        if (S.memoryBusy && !S.memoryFailedItems.length) {
+            U.memoryFailedList.innerHTML = '<div class="empty-state compact">正在加载失败记忆...</div>';
+        } else if (!S.memoryFailedItems.length) {
+            U.memoryFailedList.innerHTML = '<div class="empty-state compact">没有失败停车的记忆。</div>';
+        } else {
+            U.memoryFailedList.innerHTML = S.memoryFailedItems.map((item) => renderMemoryFailedCard(item)).join("");
+        }
+    }
     if (U.memoryQueueInfo) U.memoryQueueInfo.textContent = `共 ${S.memoryQueueTotal} 项`;
     if (U.memoryProcessedInfo) U.memoryProcessedInfo.textContent = `共 ${S.memoryProcessedTotal} 项`;
+    if (U.memoryFailedInfo) U.memoryFailedInfo.textContent = `共 ${S.memoryFailedTotal} 项`;
     if (U.memoryQueueMore) U.memoryQueueMore.disabled = S.memoryBusy || !S.memoryQueueHasMore;
     if (U.memoryProcessedMore) U.memoryProcessedMore.disabled = S.memoryBusy || !S.memoryProcessedHasMore;
+    if (U.memoryFailedMore) U.memoryFailedMore.disabled = S.memoryBusy || !S.memoryFailedHasMore;
     renderMemoryDetailPreview();
     icons();
 }
@@ -11625,9 +11639,11 @@ async function loadMemoryView({ force = false, quiet = false } = {}) {
     try {
         const queueLimit = Math.max(normalizeInt(S.memoryQueueItems.length, 0), S.memoryQueuePageSize);
         const processedLimit = Math.max(normalizeInt(S.memoryProcessedItems.length, 0), S.memoryProcessedPageSize);
-        const [queue, processed] = await Promise.all([
+        const failedLimit = Math.max(normalizeInt(S.memoryFailedItems.length, 0), S.memoryFailedPageSize);
+        const [queue, processed, failed] = await Promise.all([
             ApiClient.getMemoryQueue({ limit: queueLimit, offset: 0 }),
             ApiClient.getMemoryProcessed({ limit: processedLimit, offset: 0 }),
+            ApiClient.getMemoryFailed({ limit: failedLimit, offset: 0 }),
         ]);
         S.memoryQueueItems = Array.isArray(queue?.items) ? queue.items : [];
         S.memoryQueueTotal = normalizeInt(queue?.total, 0);
@@ -11635,6 +11651,10 @@ async function loadMemoryView({ force = false, quiet = false } = {}) {
         S.memoryProcessedItems = Array.isArray(processed?.items) ? processed.items : [];
         S.memoryProcessedTotal = normalizeInt(processed?.total, 0);
         S.memoryProcessedHasMore = !!processed?.hasMore;
+        S.memoryFailedItems = Array.isArray(failed?.items) ? failed.items : [];
+        S.memoryFailedTotal = normalizeInt(failed?.total, 0);
+        S.memoryFailedHasMore = !!failed?.hasMore;
+        S.memoryFailedMutationsEnabled = !!failed?.mutationsEnabled;
         S.memoryLoadedOnce = true;
         S.memoryError = "";
     } catch (error) {
@@ -11652,7 +11672,7 @@ function renderMemoryQueueCard(item) {
     const statusText = memoryStatusLabel(item?.status);
     const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
     return `
-        <article class="memory-card memory-card-compact" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="鎵撳紑闃熷垪璇锋眰璇︽儏">
+        <article class="memory-card memory-card-compact" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="打开队列请求详情">
             <div class="memory-card-summary">
                 <div class="memory-card-minimal-row">
                     <div class="memory-card-minimal-status">
@@ -11674,7 +11694,7 @@ function renderMemoryProcessedCard(item) {
     const statusLabel = memoryProcessedOpLabel(item);
     const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
     return `
-        <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="鎵撳紑宸插鐞嗘壒娆¤鎯?">
+        <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="打开已处理批次详情">
             <div class="memory-card-summary">
                 <div class="memory-card-minimal-row">
                     <div class="memory-card-minimal-status">
@@ -11685,6 +11705,121 @@ function renderMemoryProcessedCard(item) {
                         <span class="memory-card-arrow" aria-hidden="true">›</span>
                     </div>
                 </div>
+            </div>
+        </article>
+    `;
+}
+
+
+async function loadMoreMemoryFailed() {
+    if (S.memoryBusy || !S.memoryFailedHasMore) return;
+    S.memoryBusy = true;
+    renderMemoryView();
+    try {
+        const payload = await ApiClient.getMemoryFailed({
+            limit: S.memoryFailedPageSize,
+            offset: S.memoryFailedItems.length,
+        });
+        S.memoryFailedItems = [...S.memoryFailedItems, ...(Array.isArray(payload?.items) ? payload.items : [])];
+        S.memoryFailedTotal = normalizeInt(payload?.total, S.memoryFailedTotal);
+        S.memoryFailedHasMore = !!payload?.hasMore;
+        S.memoryFailedMutationsEnabled = !!payload?.mutationsEnabled;
+    } catch (error) {
+        showToast({ title: "加载失败", text: error?.message || "失败记忆加载失败", kind: "error" });
+    } finally {
+        S.memoryBusy = false;
+        renderMemoryView();
+    }
+}
+
+async function runMemoryFailedAction(action, failedId) {
+    const target = String(failedId || "").trim();
+    if (!target || S.memoryFailedActionBusy) return;
+    S.memoryFailedActionBusy = `${action}:${target}`;
+    renderMemoryView();
+    try {
+        if (action === "retry") {
+            await ApiClient.retryMemoryFailed(target, "manual-ui");
+            showToast({ title: "已重试", text: "失败记忆已重新入队尾，等待再次处理。", kind: "success" });
+        } else {
+            await ApiClient.discardMemoryFailed(target, "manual-ui");
+            showToast({ title: "已放弃", text: "该失败记忆已放弃，终态已记入已处理历史。", kind: "warn", durationMs: 4200 });
+        }
+        closeMemoryDetailPreview();
+        await loadMemoryView({ force: true, quiet: true });
+    } catch (error) {
+        showToast({
+            title: action === "retry" ? "重试失败" : "放弃失败",
+            text: error?.message || "操作未成功，请稍后重试",
+            kind: "error",
+            durationMs: 5000,
+        });
+    } finally {
+        S.memoryFailedActionBusy = "";
+        renderMemoryView();
+    }
+}
+
+function requestMemoryFailedDiscard(failedId) {
+    const target = String(failedId || "").trim();
+    if (!target) return;
+    openConfirm({
+        title: "放弃失败记忆",
+        text: "放弃后这批记忆将不再重试，并写入已处理历史的废弃终态记录。确定放弃吗？",
+        confirmLabel: "放弃",
+        confirmKind: "danger",
+        onConfirm: () => void runMemoryFailedAction("discard", target),
+    });
+}
+
+function memoryFailedErrorHistoryText(item) {
+    const history = Array.isArray(item?.error_history) ? item.error_history : [];
+    if (!history.length) {
+        return String(item?.last_error_text || "").trim() || "没有记录到错误详情。";
+    }
+    return history.map((entry, index) => {
+        const at = formatCompactTime(entry?.at) || String(entry?.at || "");
+        if (String(entry?.event || "").trim() === "requeued") {
+            const trigger = String(entry?.trigger || "").trim() === "manual" ? "手动重试" : "成功信号自动";
+            return `#${index + 1} [${at}] 重新入队（${trigger}）`;
+        }
+        const category = memoryFailedCategoryLabel(entry);
+        const trigger = String(entry?.trigger || "").trim();
+        const triggerLabel = trigger === "manual" ? "手动重试后失败" : trigger === "exception" ? "运行时异常" : "处理失败";
+        const errorText = String(entry?.error || "").trim() || "（无错误文本）";
+        return `#${index + 1} [${at}] ${category} · ${triggerLabel}\n${errorText}`;
+    }).join("\n\n");
+}
+
+function renderMemoryFailedCard(item) {
+    const failedId = String(item?.failed_id || "").trim();
+    const categoryLabel = memoryFailedCategoryLabel(item);
+    const parkedAt = formatCompactTime(item?.parked_at) || String(item?.parked_at || "");
+    const errorText = String(item?.last_error_text || "").trim();
+    const requestCount = Array.isArray(item?.request_ids) ? item.request_ids.length : 0;
+    const actionBusy = String(S.memoryFailedActionBusy || "").trim();
+    const retryDisabled = !S.memoryFailedMutationsEnabled || (actionBusy && actionBusy.endsWith(`:${failedId}`));
+    const retryTitle = S.memoryFailedMutationsEnabled
+        ? `重试：重新入队尾等待处理（${memoryFailedAutoRetryHint(item)}）`
+        : "重试不可用：服务端未启用 G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS";
+    return `
+        <article class="memory-card memory-card-compact memory-card-failed" data-memory-card="failed" data-memory-detail-open="failed" data-memory-detail-key="${esc(failedId)}" role="button" tabindex="0" aria-label="打开失败记忆详情">
+            <div class="memory-card-summary">
+                <div class="memory-card-minimal-row">
+                    <div class="memory-card-minimal-status">
+                        <span class="status-badge" data-status="failed">失败</span>
+                        <span class="memory-failed-category" title="${esc(memoryFailedAutoRetryHint(item))}">${esc(categoryLabel)}</span>
+                        ${requestCount > 1 ? `<span class="policy-chip neutral">${esc(String(requestCount))} 条</span>` : ""}
+                    </div>
+                    <div class="memory-card-minimal-trailing">
+                        <span class="memory-card-time">${esc(parkedAt || "-")}</span>
+                        <button type="button" class="memory-failed-retry-btn" data-memory-failed-retry="${esc(failedId)}" title="${esc(retryTitle)}" aria-label="重试失败记忆 ${esc(failedId)}"${retryDisabled ? " disabled" : ""}>
+                            <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+                        </button>
+                        <span class="memory-card-arrow" aria-hidden="true">›</span>
+                    </div>
+                </div>
+                ${errorText ? `<div class="memory-card-error">${esc(memoryPreviewText(errorText, 120))}</div>` : ""}
             </div>
         </article>
     `;
@@ -11807,6 +11942,7 @@ function bind() {
     U.memoryViewCurrent?.addEventListener("click", () => void openMemoryBrowser());
     U.memoryQueueMore?.addEventListener("click", () => void loadMoreMemoryQueue());
     U.memoryProcessedMore?.addEventListener("click", () => void loadMoreMemoryProcessed());
+    U.memoryFailedMore?.addEventListener("click", () => void loadMoreMemoryFailed());
     U.memoryQueueList?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
         const noteTrigger = e.target.closest("[data-memory-note-ref]");
@@ -11835,9 +11971,41 @@ function bind() {
         e.preventDefault();
         openMemoryDetailPreview(detailTrigger.dataset.memoryDetailOpen || "", detailTrigger.dataset.memoryDetailKey || "");
     });
-    [U.memoryQueueList, U.memoryProcessedList].forEach((root) => root?.addEventListener("keydown", (e) => {
+    U.memoryFailedList?.addEventListener("click", (e) => {
+        if (!(e.target instanceof Element)) return;
+        const retryTrigger = e.target.closest("[data-memory-failed-retry]");
+        if (retryTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (retryTrigger.disabled) return;
+            if (!S.memoryFailedMutationsEnabled) {
+                showToast({
+                    title: "重试不可用",
+                    text: "服务端未启用记忆运维变更（G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS）。",
+                    kind: "warn",
+                    durationMs: 5000,
+                });
+                return;
+            }
+            void runMemoryFailedAction("retry", retryTrigger.dataset.memoryFailedRetry || "");
+            return;
+        }
+        const noteTrigger = e.target.closest("[data-memory-note-ref]");
+        if (noteTrigger) {
+            e.preventDefault();
+            e.stopPropagation();
+            void openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || "");
+            return;
+        }
+        const detailTrigger = e.target.closest("[data-memory-detail-open]");
+        if (!detailTrigger) return;
+        e.preventDefault();
+        openMemoryDetailPreview(detailTrigger.dataset.memoryDetailOpen || "", detailTrigger.dataset.memoryDetailKey || "");
+    });
+    [U.memoryQueueList, U.memoryProcessedList, U.memoryFailedList].forEach((root) => root?.addEventListener("keydown", (e) => {
         if (!(e.target instanceof Element)) return;
         if (e.key !== "Enter" && e.key !== " ") return;
+        if (e.target.closest("[data-memory-failed-retry]")) return;
         const detailTrigger = e.target.closest("[data-memory-detail-open]");
         if (!detailTrigger) return;
         e.preventDefault();

@@ -431,7 +431,7 @@
                 <header class="content-header resource-header compact-resource-header">
                     <div class="resource-header-title">
                         <h1>记忆管理</h1>
-                        <p class="subtitle">查看未出队记忆队列与已成功处理批次。当前页面默认只读，不开放副作用运维按钮。</p>
+                        <p class="subtitle">查看未出队记忆队列与已成功处理批次；队列与终态记录只读，失败记忆区提供受门控的重试 / 放弃操作。</p>
                     </div>
                     <div class="resource-header-actions compact-resource-header-actions">
                         <button id="memory-view-current-btn" class="toolbar-btn ghost" type="button">查看记忆</button>
@@ -441,19 +441,35 @@
 
                 <div class="memory-layout">
                     <div id="memory-admin-actions" hidden aria-hidden="true"></div>
-                    <section class="resource-detail-panel memory-column">
-                        <div class="panel-header">
-                            <div>
-                                <h3>未出队的记忆队列</h3>
-                                <p class="subtitle">按真实队列顺序展示。</p>
+                    <div class="memory-column-stack">
+                        <section class="resource-detail-panel memory-column">
+                            <div class="panel-header">
+                                <div>
+                                    <h3>未出队的记忆队列</h3>
+                                    <p class="subtitle">按真实队列顺序展示。</p>
+                                </div>
                             </div>
-                        </div>
-                        <div id="memory-queue-list" class="memory-list"></div>
-                        <div class="memory-footer">
-                            <div id="memory-queue-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
-                            <button id="memory-queue-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
-                        </div>
-                    </section>
+                            <div id="memory-queue-list" class="memory-list"></div>
+                            <div class="memory-footer">
+                                <div id="memory-queue-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                                <button id="memory-queue-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
+                            </div>
+                        </section>
+
+                        <section id="memory-failed-panel" class="resource-detail-panel memory-column memory-failed-panel" hidden>
+                            <div class="panel-header">
+                                <div>
+                                    <h3>失败记忆</h3>
+                                    <p class="subtitle">处理失败的记忆列表如下，等待手动入队或下一次自动入队</p>
+                                </div>
+                            </div>
+                            <div id="memory-failed-list" class="memory-list memory-failed-list"></div>
+                            <div class="memory-footer">
+                                <div id="memory-failed-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                                <button id="memory-failed-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
+                            </div>
+                        </section>
+                    </div>
 
                     <section class="resource-detail-panel memory-column">
                         <div class="panel-header">
