@@ -1237,7 +1237,7 @@ async def test_create_async_task_tool_returns_duplicate_rejection_text():
     assert 'task:existing-1' in result
     assert '完全相同' in result
     assert 'task_append_notice' in result
-    assert '请先向用户确认是否暂停并删除旧任务' in result
+    assert '暂停旧任务或等待其进入终态（如失败）后，即可重新创建' in result
     assert captured['precheck']['session_id'] == 'web:ceo-demo'
 
 

@@ -3004,9 +3004,16 @@ class MainRuntimeService:
         return tuple(unique_tokens)
 
     def _async_task_precheck_pool(self, session_id: str) -> list[dict[str, Any]]:
+        """重复预检候选池：只收集正在运行的任务。
+
+        已暂停（is_paused）或已进入终态（success/failed）的任务不参与重复匹配——
+        创建者只需暂停旧任务或等待其失败，即可重新创建同需求的任务。
+        """
         self._refresh_task_store_read_snapshot()
         pool: list[dict[str, Any]] = []
         for task in self.list_unfinished_tasks_for_session(session_id):
+            if bool(getattr(task, 'is_paused', False)):
+                continue
             metadata = task.metadata if isinstance(task.metadata, dict) else {}
             task_text = str(getattr(task, 'user_request', '') or '').strip()
             core_requirement = str(metadata.get('core_requirement') or '').strip()
@@ -3069,7 +3076,7 @@ class MainRuntimeService:
             'decision_source': 'rule',
         }
 
-    def _unfinished_async_task_review_payload(self, session_id: str) -> list[dict[str, Any]]:
+    def _running_async_task_review_payload(self, session_id: str) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
         for item in self._async_task_precheck_pool(session_id):
             payload.append(
@@ -3147,7 +3154,7 @@ class MainRuntimeService:
                                 'requires_final_acceptance': bool(requires_final_acceptance),
                                 'final_acceptance_prompt': str(final_acceptance_prompt or '').strip(),
                             },
-                            'unfinished_session_tasks': self._unfinished_async_task_review_payload(session_id),
+                            'running_session_tasks': self._running_async_task_review_payload(session_id),
                         },
                         ensure_ascii=False,
                         indent=2,

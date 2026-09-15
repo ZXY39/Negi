@@ -161,7 +161,7 @@ async def test_precheck_skips_llm_review_when_disabled_in_config(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_precheck_includes_paused_tasks_in_duplicate_pool(tmp_path: Path):
+async def test_precheck_excludes_paused_tasks_from_duplicate_pool(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -193,8 +193,51 @@ async def test_precheck_includes_paused_tasks_in_duplicate_pool(tmp_path: Path):
             final_acceptance_prompt="",
         )
 
-        assert decision["decision"] == "reject_duplicate"
-        assert decision["matched_task_id"] == first.task_id
+        # 放宽口径：已暂停的重复任务不拦截新任务创建。
+        assert decision["decision"] == "approve_new"
+        assert decision["matched_task_id"] == ""
+        assert decision["decision_source"] == "rule"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_precheck_excludes_failed_terminal_tasks_from_duplicate_pool(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        first = await service.create_task(
+            "整理北美客户续费流失原因",
+            session_id="web:ceo-demo",
+            metadata={
+                "core_requirement": "整理北美客户续费流失原因",
+                "execution_policy": {"mode": "focus"},
+            },
+        )
+        service.log_service.mark_task_failed(first.task_id, reason="simulated failure")
+        service.log_service.refresh_task_view(first.task_id, mark_unread=False)
+
+        decision = await service.precheck_async_task_creation(
+            session_id="web:ceo-demo",
+            task_text="整理北美客户续费流失原因",
+            core_requirement="整理北美客户续费流失原因",
+            execution_policy={"mode": "focus"},
+            requires_final_acceptance=False,
+            final_acceptance_prompt="",
+        )
+
+        # 放宽口径：已进入终态（失败）的重复任务不拦截新任务创建。
+        assert decision["decision"] == "approve_new"
+        assert decision["matched_task_id"] == ""
         assert decision["decision_source"] == "rule"
     finally:
         await service.close()

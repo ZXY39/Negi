@@ -6313,7 +6313,7 @@ async def test_create_agent_postprocess_duplicate_rejection_with_old_task_id_doe
                     "role": "tool",
                     "tool_call_id": "call-1",
                     "name": "create_async_task",
-                    "content": "任务未创建：与进行中任务 task:demo-123 完全相同（命中：core_requirement exact match）。\n- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。",
+                    "content": "任务未创建：正在运行的任务 task:demo-123 与新任务完全相同（命中：core_requirement exact match）。\n- 重复拦截仅针对正在运行的任务：暂停旧任务或等待其进入终态（如失败）后，即可重新创建；\n- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n- 如确需重做该工作 → 先与用户确认意图；确需删除旧任务时，先征求用户同意再操作。",
                 },
             ],
             "used_tools": [],
@@ -6339,9 +6339,10 @@ def test_parse_create_async_task_result_recognizes_task_append_notice_guidance()
 
 def test_parse_create_async_task_result_classifies_duplicate_message_with_notice_guidance() -> None:
     parsed = ceo_runtime_ops.CeoFrontDoorRuntimeOps._parse_create_async_task_result(
-        "任务未创建：与进行中任务 task:demo-123 完全相同（命中：core_requirement exact match）。\n"
+        "任务未创建：正在运行的任务 task:demo-123 与新任务完全相同（命中：core_requirement exact match）。\n"
+        "- 重复拦截仅针对正在运行的任务：暂停旧任务或等待其进入终态（如失败）后，即可重新创建；\n"
         "- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n"
-        "- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。"
+        "- 如确需重做该工作 → 先与用户确认意图；确需删除旧任务时，先征求用户同意再操作。"
     )
 
     assert parsed["created"] is False
@@ -6420,7 +6421,7 @@ async def test_create_agent_graph_execute_tools_does_not_mark_duplicate_rejectio
         _ = tool, tool_name, arguments, runtime_context, on_progress, tool_call_id
         return (
             None,
-            "任务未创建：与进行中任务 task:demo-123 完全相同（命中：core_requirement exact match）。\n- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。",
+            "任务未创建：正在运行的任务 task:demo-123 与新任务完全相同（命中：core_requirement exact match）。\n- 重复拦截仅针对正在运行的任务：暂停旧任务或等待其进入终态（如失败）后，即可重新创建；\n- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n- 如确需重做该工作 → 先与用户确认意图；确需删除旧任务时，先征求用户同意再操作。",
             "success",
             "2026-04-18T23:00:00",
             "2026-04-18T23:00:01",

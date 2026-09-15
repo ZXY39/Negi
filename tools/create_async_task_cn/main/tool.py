@@ -59,9 +59,10 @@ def _duplicate_rejection_text(precheck: dict[str, Any]) -> str:
     reason = str(precheck.get('reason') or '').strip()
     ids_text = '、'.join(matched_ids) if matched_ids else '(unknown)'
     return (
-        f'任务未创建：与进行中任务 {ids_text} 完全相同（命中：{reason or "unknown"}）。\n'
+        f'任务未创建：正在运行的任务 {ids_text} 与新任务完全相同（命中：{reason or "unknown"}）。\n'
+        '- 重复拦截仅针对正在运行的任务：暂停旧任务或等待其进入终态（如失败）后，即可重新创建；\n'
         '- 如只是想补充约束、验收细节或更新要求 → 请改用 task_append_notice；\n'
-        '- 如确需重做该工作 → 请先向用户确认是否暂停并删除旧任务，不要自行删除。'
+        '- 如确需重做该工作 → 先与用户确认意图；确需删除旧任务时，先征求用户同意再操作。'
     )
 
 
