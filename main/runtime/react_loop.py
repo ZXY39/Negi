@@ -3689,11 +3689,13 @@ class ReActToolLoop:
             return append_parameter_error_guidance(
                 f'Error validating {tool_name}: {exc}',
                 tool_name=tool_name,
+                tool=tool,
             )
         if errors:
             return append_parameter_error_guidance(
                 'Error: ' + '; '.join(errors),
                 tool_name=tool_name,
+                tool=tool,
             )
         execute_kwargs = self._normalize_tool_call_arguments(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
@@ -3741,6 +3743,7 @@ class ReActToolLoop:
                 return append_parameter_error_guidance(
                     f'Error executing {tool_name}: {exc}',
                     tool_name=tool_name,
+                    tool=tool,
                 )
             raise
 
@@ -3753,12 +3756,17 @@ class ReActToolLoop:
         delivery_metadata: dict[str, Any] | None = None,
     ) -> str:
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
+        metadata = dict(delivery_metadata or {})
+        metadata.setdefault(
+            'tool_status',
+            self._tool_message_status(result if result is not None else rendered),
+        )
         return self._externalize_message_content(
             rendered,
             runtime_context=runtime_context,
             display_name=f'tool:{tool_name}',
             source_kind=f'tool_result:{tool_name}',
-            delivery_metadata=delivery_metadata,
+            delivery_metadata=metadata,
         )
 
     async def _execute_tool(self, *, tools: dict[str, Tool], tool_name: str, arguments: dict[str, Any], runtime_context: dict[str, Any]) -> str:

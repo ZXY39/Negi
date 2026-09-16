@@ -2477,7 +2477,11 @@ def test_externalizes_to_summary_and_ref_for_large_non_opt_in_tool_result(tmp_pa
     envelope = parse_content_envelope(rendered)
     assert envelope is not None
     assert envelope.ref.startswith('artifact:')
-    assert 'Use content_search/content_open with ref=' in envelope.summary
+    # 外置工具结果统一信封：体量 + content_open 指引 + 预览（无调用方状态时
+    # 用中性措辞，不断言成败）。
+    assert 'Tool call output externalized: large-tool-result' in envelope.summary
+    assert f'content_open(ref="{envelope.ref}")' in envelope.summary
+    assert 'Preview:' in envelope.summary
     assert envelope.next_actions == ['content_search', 'content_open']
 
     store.close()
@@ -2588,7 +2592,7 @@ def test_content_navigation_keeps_small_search_results_inline(tmp_path: Path):
     store.close()
 
 
-def test_content_navigation_externalized_tool_summary_uses_invocation_text_not_head_preview(tmp_path: Path):
+def test_content_navigation_externalized_tool_summary_shows_status_ref_and_preview(tmp_path: Path):
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
     navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
@@ -2604,12 +2608,42 @@ def test_content_navigation_externalized_tool_summary_uses_invocation_text_not_h
         display_name="tool:exec",
         source_kind="tool_result:exec",
         compact=True,
-        delivery_metadata={"invocation_text": "exec(command=python gather.py, working_dir=D:\\NewProjects\\G3KU)"},
+        delivery_metadata={
+            "invocation_text": "exec(command=python gather.py, working_dir=D:\\NewProjects\\G3KU)",
+            "tool_status": "success",
+        },
     )
     envelope = parse_content_envelope(rendered)
     assert envelope is not None
-    assert "Invocation: exec(command=python gather.py, working_dir=D:\\NewProjects\\G3KU)" in envelope.summary
-    assert "Head preview" not in envelope.summary
+    # 新契约：显式成败 + 行数/字符数 + ref + content_open 指引 + 结果预览；
+    # 不再回显调用入参（模型自己刚提交过，回显只会诱导"载荷过大"误读）。
+    assert "Tool call succeeded: tool:exec result externalized" in envelope.summary
+    assert "lines," in envelope.summary and "chars" in envelope.summary
+    assert f'content_open(ref="{envelope.ref}")' in envelope.summary
+    assert "Preview:" in envelope.summary
+    assert '"head_preview": "line one' in envelope.summary
+    assert "Invocation: exec(command=python gather.py" not in envelope.summary
+    store.close()
+
+
+def test_content_navigation_externalized_failed_tool_summary_marks_failure(tmp_path: Path):
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    navigator = ContentNavigationService(workspace=tmp_path, artifact_store=artifact_store, artifact_lookup=artifact_store)
+    rendered = navigator.externalize_for_message(
+        "Error: something went wrong\n" + ("diagnostic detail line\n" * 900),
+        runtime={"task_id": "task:test", "node_id": "node:test"},
+        display_name="tool:exec",
+        source_kind="tool_result:exec",
+        compact=True,
+        delivery_metadata={"tool_status": "error"},
+    )
+    envelope = parse_content_envelope(rendered)
+    assert envelope is not None
+    assert "Tool call failed: tool:exec error output externalized" in envelope.summary
+    assert f'content_open(ref="{envelope.ref}")' in envelope.summary
+    assert "Preview:" in envelope.summary
+    assert "Error: something went wrong" in envelope.summary
     store.close()
 
 

@@ -18,6 +18,11 @@ MAX_SEARCH_LIMIT = 50
 _HEAD_PREVIEW_LINES = 6
 _TAIL_PREVIEW_LINES = 6
 _PREVIEW_CHAR_LIMIT = 220
+# 工具结果外置后内联信封里携带的结果预览额度：足够暴露结果结构与首条条目
+# （如派生结果里的子节点目标/状态），又不挤占过多上下文。所有外置工具结果
+# 共用同一信封契约，不按工具类别特殊化。
+_TOOL_RESULT_EXTERNALIZED_PREVIEW_LINES = 6
+_TOOL_RESULT_EXTERNALIZED_PREVIEW_CHARS = 800
 _MAX_WRAPPER_DEPTH = 8
 # content_open 行模式（默认 / start_line/end_line / around_line/window）的单次
 # 打开"正文"上限（字符数，只计正文内容，不含元数据）。行对齐取整：只回显完整行，
@@ -165,6 +170,58 @@ def _compact_summary_text(summary: str) -> str:
     if marker in text:
         text = text.split(marker, 1)[0].rstrip()
     return text
+
+
+def _externalized_tool_result_preview(
+    text: str,
+    *,
+    max_chars: int = _TOOL_RESULT_EXTERNALIZED_PREVIEW_CHARS,
+) -> str:
+    lines = list(text.splitlines()[: max(1, _TOOL_RESULT_EXTERNALIZED_PREVIEW_LINES)])
+    preview = "\n".join(lines).strip()
+    if not preview:
+        return ""
+    if len(preview) <= max_chars:
+        return preview
+    return preview[:max_chars].rstrip() + "..."
+
+
+def _tool_result_externalization_summary(
+    handle: ContentHandle,
+    *,
+    call_status: str = "",
+    preview: str = "",
+) -> str:
+    """外置工具结果的内联信封摘要。
+
+    统一覆盖所有被外置的工具结果（不按工具类别特殊化）：显式给出调用成败、
+    外置 ref、总行数/字符数与结果预览，并要求用 content_open 读取完整结果。
+    不再回显调用入参——入参模型自己刚提交过，回显只会挤占上下文并诱导
+    「载荷过大导致调用失败」之类误读。
+    """
+    label = handle.display_name or handle.source_kind or "tool"
+    content_ref = handle.resolved_ref or handle.ref
+    normalized_status = str(call_status or "").strip().lower()
+    if normalized_status == "error":
+        opening = f"Tool call failed: {label} error output externalized"
+    elif normalized_status == "success":
+        opening = f"Tool call succeeded: {label} result externalized"
+    else:
+        opening = f"Tool call output externalized: {label}"
+    summary = (
+        f"{opening} "
+        f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
+        f'Read the full output with content_open(ref="{content_ref}"). '
+        "Do not pass this ref as filesystem path."
+    )
+    if str(handle.canonical_summary or "").strip():
+        summary = f"{summary}\nCanonical summary: {str(handle.canonical_summary or '').strip()}"
+    elif handle.origin_ref and handle.origin_ref != handle.ref:
+        summary = f"{summary}\nOrigin ref: {handle.origin_ref}"
+    preview_text = str(preview or "").strip()
+    if preview_text:
+        summary = f"{summary}\nPreview:\n{preview_text}"
+    return summary
 
 
 _ARTIFACT_REF_PATTERN = re.compile(r"artifact:(?:artifact:)?[A-Za-z0-9_-]+")
@@ -555,7 +612,14 @@ class ContentNavigationService:
             wrapper_depth=(1 + nested_depth) if resolved_ref and resolved_ref != handle.ref else 0,
         )
         handle.canonical_summary = self._canonical_summary_for_handle(handle)
-        summary = _content_summary(handle)
+        if source_kind.startswith("tool_result:"):
+            summary = _tool_result_externalization_summary(
+                handle,
+                call_status=str((delivery_metadata or {}).get("tool_status") or ""),
+                preview=_externalized_tool_result_preview(text),
+            )
+        else:
+            summary = _content_summary(handle)
         return ContentEnvelope(
             summary=summary,
             ref=handle.ref,
@@ -586,6 +650,15 @@ class ContentNavigationService:
         if envelope is None:
             return value
         if compact:
+            handle_source_kind = (
+                str(getattr(envelope.handle, "source_kind", "") or "").strip().lower()
+                if envelope.handle is not None
+                else ""
+            )
+            if handle_source_kind.startswith("tool_result:"):
+                # 工具结果信封的摘要本身即为模型面契约（成败 + ref + 预览），
+                # 不得再走 compact 的"剥预览"重建。
+                return _json_dumps(envelope.to_model_dict(summary_override=envelope.summary))
             summary = _compact_summary_text(envelope.summary)
             if envelope.handle is not None:
                 summary = _content_summary(envelope.handle, include_preview=False)

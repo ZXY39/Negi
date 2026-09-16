@@ -30,6 +30,11 @@ runtime_service_module = importlib.import_module("main.service.runtime_service")
 _PARAMETER_GUIDANCE_TEMPLATE = (
     '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
 )
+# 无资源 descriptor 的工具不再引导 load_tool_context（加载必被合同闸门拒绝），
+# 参数错误改为提醒核对入参。
+_PARAMETER_RECHECK_GUIDANCE = (
+    '该工具没有可加载的扩展说明。请仔细核对该工具的入参（参数名、必填项、类型与取值结构）后重新提交。'
+)
 
 
 @pytest.fixture(autouse=True)
@@ -428,13 +433,29 @@ async def test_execution_stage_runtime_appends_loader_guidance_for_parameter_lik
             )
 
         assert 'Error: missing required value' in invalid_parameter_result
-        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='value_error_tool') in invalid_parameter_result
+        assert _PARAMETER_RECHECK_GUIDANCE in invalid_parameter_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='value_error_tool') not in invalid_parameter_result
         assert "Error validating broken_validation_tool: unhashable type: 'list'" in validation_exception_result
-        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='broken_validation_tool') in validation_exception_result
+        assert _PARAMETER_RECHECK_GUIDANCE in validation_exception_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='broken_validation_tool') not in validation_exception_result
         assert 'Error executing value_error_tool: value must be an absolute path' in value_error_result
-        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='value_error_tool') in value_error_result
+        assert _PARAMETER_RECHECK_GUIDANCE in value_error_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='value_error_tool') not in value_error_result
         assert 'Error executing type_error_tool: value must be a string scalar' in type_error_result
-        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='type_error_tool') in type_error_result
+        assert _PARAMETER_RECHECK_GUIDANCE in type_error_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='type_error_tool') not in type_error_result
+
+        descriptor_tool = _ErrorTool(name='descriptor_value_error_tool', exc=ValueError('value must be an absolute path'))
+        descriptor_tool._descriptor = object()
+        descriptor_result = await service._react_loop._execute_tool(
+            tools={'descriptor_value_error_tool': descriptor_tool},
+            tool_name='descriptor_value_error_tool',
+            arguments={'value': 'demo'},
+            runtime_context=runtime_context,
+        )
+        assert 'Error executing descriptor_value_error_tool: value must be an absolute path' in descriptor_result
+        assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name='descriptor_value_error_tool') in descriptor_result
+        assert _PARAMETER_RECHECK_GUIDANCE not in descriptor_result
     finally:
         await service.close()
 

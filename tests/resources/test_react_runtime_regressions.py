@@ -5108,6 +5108,57 @@ async def test_react_loop_externalizes_tool_messages_with_canonical_ref(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_react_loop_externalized_tool_result_envelope_shows_status_and_preview(tmp_path) -> None:
+    store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
+    artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)
+    log_service = _FakeLogService()
+    log_service._content_store = ContentNavigationService(
+        workspace=tmp_path,
+        artifact_store=artifact_store,
+        artifact_lookup=artifact_store,
+    )
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
+
+    try:
+        spawn_result = json.dumps(
+            {
+                "children": [
+                    {"goal": f"child goal {index}", "node_output": "done " * 4000}
+                    for index in range(6)
+                ]
+            },
+            ensure_ascii=False,
+        )
+        rendered = loop._render_tool_message_content(
+            spawn_result,
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
+            tool_name="spawn_child_nodes",
+            delivery_metadata={"invocation_text": "spawn_child_nodes({\"children\": [ ... huge args ... ]})"},
+        )
+        payload = parse_content_envelope(rendered)
+        assert payload is not None
+        # 信封必须显式说明调用成功、给出外置 ref/体量/预览与 content_open 指引，
+        # 且不再回显调用入参（避免模型把"结果被外部化"误读成"调用因载荷过大失败"）。
+        assert "Tool call succeeded: tool:spawn_child_nodes result externalized" in payload.summary
+        assert f'content_open(ref="{payload.ref}")' in payload.summary
+        assert "Preview:" in payload.summary
+        assert "child goal 0" in payload.summary
+        assert "Invocation:" not in payload.summary
+
+        error_rendered = loop._render_tool_message_content(
+            "Error: spawn rejected\n" + ("diagnostic line\n" * 900),
+            runtime_context={"task_id": "task-1", "node_id": "node-1", "actor_role": "execution"},
+            tool_name="spawn_child_nodes",
+        )
+        error_payload = parse_content_envelope(error_rendered)
+        assert error_payload is not None
+        assert "Tool call failed: tool:spawn_child_nodes error output externalized" in error_payload.summary
+        assert f'content_open(ref="{error_payload.ref}")' in error_payload.summary
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
 async def test_inline_even_when_large_for_manifest_backed_tool_result(tmp_path) -> None:
     store = SQLiteTaskStore(tmp_path / "runtime.sqlite3")
     artifact_store = TaskArtifactStore(artifact_dir=tmp_path / "artifacts", store=store)

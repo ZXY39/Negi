@@ -2012,7 +2012,106 @@ async def test_distribution_turn_uses_runtime_child_snapshot_and_persists_decisi
 
 
 @pytest.mark.asyncio
-async def test_success_execution_node_with_acceptance_is_reactivated_and_acceptance_invalidated_on_delivery(tmp_path: Path) -> None:
+async def test_distribution_turn_sidecar_includes_child_latest_tool_round(tmp_path: Path) -> None:
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_message_distribution",
+                        "arguments": {
+                            "children": [
+                                {
+                                    "target_node_id": "CHILD_ONE",
+                                    "should_distribute": False,
+                                    "message": "",
+                                    "reason": "branch a is mid-tool-round and unaffected",
+                                },
+                                {
+                                    "target_node_id": "CHILD_TWO",
+                                    "should_distribute": False,
+                                    "message": "",
+                                    "reason": "branch b can continue unchanged",
+                                },
+                            ],
+                            "notes": "",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="new constraint",
+            frontier_node_ids=[root.node_id],
+        )
+        backend._responses[0].tool_calls[0]["arguments"]["children"][0]["target_node_id"] = branch_a.node_id
+        backend._responses[0].tool_calls[0]["arguments"]["children"][1]["target_node_id"] = branch_b.node_id
+
+        # 给 branch_a 写入「正在等待输出结果」的运行时帧：活跃轮内有一个
+        # running 的长耗时工具调用；分发回合必须看到这一最新轮实况。
+        service.log_service.update_frame(
+            record.task_id,
+            branch_a.node_id,
+            lambda frame: {
+                **(frame or {}),
+                "node_id": branch_a.node_id,
+                "phase": "tool_round",
+                "active_round_id": "call_live_spawn_round",
+                "active_round_tool_call_ids": ["call_live_spawn"],
+                "tool_calls": [
+                    {
+                        "tool_call_id": "call_stale_done",
+                        "tool_name": "exec",
+                        "status": "success",
+                        "started_at": "2026-09-17T00:00:00+08:00",
+                        "finished_at": "2026-09-17T00:00:05+08:00",
+                    },
+                    {
+                        "tool_call_id": "call_live_spawn",
+                        "tool_name": "spawn_child_nodes",
+                        "status": "running",
+                        "started_at": "2026-09-17T01:00:00+08:00",
+                        "finished_at": "",
+                    },
+                ],
+            },
+            publish_snapshot=True,
+        )
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+
+        await service.node_runner._run_distribution_node(task=task, node=root)
+
+        assert len(backend.calls) == 1
+        prompt_payload = json.loads(str(backend.calls[0]["messages"][1]["content"] or "{}"))
+        branch_a_payload = next(
+            item for item in list(prompt_payload.get("live_children") or [])
+            if item["node_id"] == branch_a.node_id
+        )
+        latest_round = branch_a_payload.get("latest_tool_round") or {}
+        assert latest_round.get("phase") == "tool_round"
+        assert latest_round.get("active_round_id") == "call_live_spawn_round"
+        tool_call_names = [str(item.get("tool_name") or "") for item in list(latest_round.get("tool_calls") or [])]
+        assert tool_call_names == ["spawn_child_nodes"]
+        assert [item.get("status") for item in latest_round["tool_calls"]] == ["running"]
+
+        branch_b_payload = next(
+            item for item in list(prompt_payload.get("live_children") or [])
+            if item["node_id"] == branch_b.node_id
+        )
+        # 无运行时帧的子节点：字段存在但没有工具轮条目，不产生误导。
+        assert (branch_b_payload.get("latest_tool_round") or {}).get("tool_calls") == []
+        assert epoch.epoch_id
+    finally:
+        await service.close()
     service = _build_service(tmp_path)
     try:
         record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")

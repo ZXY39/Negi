@@ -7,6 +7,7 @@
 - 只能提交分发决策。
 - 只针对输入中列出的当前正在运行的子节点。
 - 基于每个子节点的任务，可对应调整补充的消息。
+- 每个子节点的 `latest_tool_round` 给出其最新一轮工具状态：`phase` 为当前阶段，`tool_calls` 中 status=running 的条目表示该子节点正在等待该工具的输出结果（例如耗时较长的派生/执行调用）。判断子节点现状必须以 `latest_tool_round` 为准，不要依赖可能落后一步的历史输出或静态快照，更不要臆断其工作尚未开始。
 - 如果输入中存在 live_children，必须对每一个子节点提交一条 children 决策记录，不能省略任何子节点。
 - 每条 children 决策必须包含 target_node_id、should_distribute 和 reason；可用 action 显式指定决策类型。
 - action 取值有三种：distribute（下发消息）、skip（不下发）、terminate（终止子节点）。未给出 action 时，按 should_distribute 推断：true 等同 distribute，false 等同 skip。

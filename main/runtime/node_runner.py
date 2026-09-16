@@ -113,6 +113,9 @@ _DISTRIBUTION_ACTION_VALUES = {
 _DISTRIBUTION_TERMINATE_REASON_PREFIX = 'terminated by parent distribution decision'
 _DISTRIBUTION_DECISION_MAX_ATTEMPTS = 5
 _DISTRIBUTION_DECISION_REPAIR_PREFIX = '上一轮消息分发决策无效'
+# 分发回合里每个子节点最多向模型展示的最新工具轮条目数：够暴露「正在等待
+# 输出结果的工具」，又不至于把子节点整段历史塞进分发 prompt。
+_DISTRIBUTION_SIDECAR_MAX_TOOL_CALLS = 4
 
 
 def _notification_awaits_injection(item: Any) -> bool:
@@ -2637,9 +2640,52 @@ class NodeRunner:
                     'latest_output_preview': latest_output_preview,
                     'failure_reason': str(child.failure_reason or ''),
                     'is_live_in_current_tree': True,
+                    # 子节点最新一轮工具状态（含正在等待输出结果的工具调用），
+                    # 避免分发决策基于落后一步的静态快照做出误判。
+                    'latest_tool_round': self._distribution_child_latest_tool_round(
+                        task_id=task_id,
+                        child_node_id=str(child_node_id or '').strip(),
+                    ),
                 }
             )
         return payloads
+
+    def _distribution_child_latest_tool_round(self, *, task_id: str, child_node_id: str) -> dict[str, Any]:
+        """子节点运行时帧里的最新工具轮实况。
+
+        优先取当前活跃轮（``active_round_tool_call_ids``）内的调用——其中
+        ``status=running`` 的条目即「正在等待输出结果的工具」；没有活跃轮时
+        回退到帧内最近几条工具调用记录。
+        """
+        frame = self._log_service.read_runtime_frame(task_id, child_node_id) or {}
+        if not isinstance(frame, dict):
+            return {}
+        tool_calls = [dict(item or {}) for item in list(frame.get('tool_calls') or []) if isinstance(item, dict)]
+        active_ids = {
+            str(item or '').strip()
+            for item in list(frame.get('active_round_tool_call_ids') or [])
+            if str(item or '').strip()
+        }
+        latest = [
+            item
+            for item in tool_calls
+            if active_ids and str(item.get('tool_call_id') or '').strip() in active_ids
+        ]
+        if not latest:
+            latest = list(tool_calls)
+        latest = latest[-_DISTRIBUTION_SIDECAR_MAX_TOOL_CALLS:]
+        return {
+            'phase': str(frame.get('phase') or '').strip(),
+            'active_round_id': str(frame.get('active_round_id') or '').strip(),
+            'tool_calls': [
+                {
+                    'tool_name': str(item.get('tool_name') or '').strip(),
+                    'status': str(item.get('status') or '').strip(),
+                    'started_at': str(item.get('started_at') or '').strip(),
+                }
+                for item in latest
+            ],
+        }
 
     def _root_distribution_notice_records(self, *, epoch, created_at: str | None = None) -> list[dict[str, Any]]:
         return self._target_distribution_notice_records(

@@ -103,12 +103,14 @@ class ToolRegistry:
                 return append_parameter_error_guidance(
                     f"Error validating tool '{name}': {str(exc)}",
                     tool_name=name,
+                    tool=tool,
                 ) + _hint
             if errors:
                 await self._emit_progress(f"[tool:{name}] 参数校验失败: {'; '.join(errors)}")
                 return append_parameter_error_guidance(
                     f"Error: Invalid parameters for tool '{name}': " + "; ".join(errors),
                     tool_name=name,
+                    tool=tool,
                 ) + _hint
 
             runtime_context = self._runtime_context.get() or {}
@@ -169,7 +171,7 @@ class ToolRegistry:
                     pass
             error_text = f"Error executing {name}: {str(e)}"
             if is_parameter_like_tool_exception(e):
-                error_text = append_parameter_error_guidance(error_text, tool_name=name)
+                error_text = append_parameter_error_guidance(error_text, tool_name=name, tool=tool)
             return error_text + _hint
 
     def to_langchain_tools(self) -> list[BaseTool]:

@@ -11,6 +11,9 @@ from g3ku.agent.tools.registry import ToolRegistry
 _PARAMETER_GUIDANCE_TEMPLATE = (
     '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
 )
+_PARAMETER_RECHECK_GUIDANCE = (
+    '该工具没有可加载的扩展说明。请仔细核对该工具的入参（参数名、必填项、类型与取值结构）后重新提交。'
+)
 
 
 class _UnionTypeTool(Tool):
@@ -241,11 +244,14 @@ async def test_tool_registry_execute_degrades_validator_crash_to_error() -> None
 
     assert result.startswith("Error validating tool 'broken_validator_tool':")
     assert "unhashable type: 'list'" in result
-    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="broken_validator_tool") in result
+    # 无资源 descriptor 的内部工具不引导 load_tool_context（加载必然失败），
+    # 改为提醒核对入参。
+    assert _PARAMETER_RECHECK_GUIDANCE in result
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="broken_validator_tool") not in result
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_execute_appends_loader_guidance_for_invalid_parameters() -> None:
+async def test_tool_registry_execute_appends_recheck_guidance_for_invalid_parameters() -> None:
     registry = ToolRegistry()
     registry.register(_InvalidParameterTool())
 
@@ -253,29 +259,46 @@ async def test_tool_registry_execute_appends_loader_guidance_for_invalid_paramet
 
     assert result.startswith("Error: Invalid parameters for tool 'invalid_parameter_tool':")
     assert "missing required value" in result
-    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="invalid_parameter_tool") in result
+    assert _PARAMETER_RECHECK_GUIDANCE in result
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="invalid_parameter_tool") not in result
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_execute_appends_loader_guidance_for_value_error() -> None:
+async def test_tool_registry_execute_appends_recheck_guidance_for_value_error() -> None:
     registry = ToolRegistry()
     registry.register(_ExecuteValueErrorTool())
 
     result = await registry.execute("execute_value_error_tool", {"value": "demo"})
 
     assert result.startswith("Error executing execute_value_error_tool: value must be a canonical memory ref")
-    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_value_error_tool") in result
+    assert _PARAMETER_RECHECK_GUIDANCE in result
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_value_error_tool") not in result
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_execute_appends_loader_guidance_for_type_error() -> None:
+async def test_tool_registry_execute_appends_recheck_guidance_for_type_error() -> None:
     registry = ToolRegistry()
     registry.register(_ExecuteTypeErrorTool())
 
     result = await registry.execute("execute_type_error_tool", {"value": "demo"})
 
     assert result.startswith("Error executing execute_type_error_tool: value must be a string scalar")
-    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_type_error_tool") in result
+    assert _PARAMETER_RECHECK_GUIDANCE in result
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_type_error_tool") not in result
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_execute_keeps_loader_guidance_for_descriptor_backed_tool() -> None:
+    registry = ToolRegistry()
+    tool = _InvalidParameterTool()
+    tool._descriptor = SimpleNamespace(name="invalid_parameter_tool")
+    registry.register(tool)
+
+    result = await registry.execute("invalid_parameter_tool", {})
+
+    assert result.startswith("Error: Invalid parameters for tool 'invalid_parameter_tool':")
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="invalid_parameter_tool") in result
+    assert _PARAMETER_RECHECK_GUIDANCE not in result
 
 
 @pytest.mark.asyncio
@@ -287,6 +310,7 @@ async def test_tool_registry_execute_keeps_runtime_error_without_loader_guidance
 
     assert result.startswith("Error executing execute_runtime_error_tool: runtime execution failed")
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_runtime_error_tool") not in result
+    assert _PARAMETER_RECHECK_GUIDANCE not in result
 
 
 @pytest.mark.asyncio

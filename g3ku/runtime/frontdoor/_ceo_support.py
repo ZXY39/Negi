@@ -512,12 +512,17 @@ class CeoFrontDoorSupport:
         delivery_metadata: dict[str, Any] | None = None,
     ) -> str:
         rendered = result if isinstance(result, str) else self._render_tool_result(result)
+        metadata = dict(delivery_metadata or self._tool_result_delivery_metadata(tool=tool))
+        metadata.setdefault(
+            "tool_status",
+            self._tool_status(result if result is not None else rendered),
+        )
         return self._externalize_message_content(
             rendered,
             runtime_context=runtime_context,
             display_name=f"tool:{tool_name}",
             source_kind=f"tool_result:{tool_name}",
-            delivery_metadata=delivery_metadata or self._tool_result_delivery_metadata(tool=tool),
+            delivery_metadata=metadata,
         )
 
     @staticmethod
@@ -680,6 +685,7 @@ class CeoFrontDoorSupport:
             error_text = append_parameter_error_guidance(
                 f"Error validating {tool_name}: {exc}",
                 tool_name=tool_name,
+                tool=tool,
             )
             error_text = self._append_contract_error_example(error_text, tool_name=tool_name)
             return error_text, error_text, "error", "", "", None
@@ -687,6 +693,7 @@ class CeoFrontDoorSupport:
             error_text = append_parameter_error_guidance(
                 f"Error: {'; '.join(errors)}",
                 tool_name=tool_name,
+                tool=tool,
             )
             error_text = self._append_contract_error_example(error_text, tool_name=tool_name)
             return error_text, error_text, "error", "", "", None
@@ -805,6 +812,7 @@ class CeoFrontDoorSupport:
                 error_text = append_parameter_error_guidance(
                     error_text,
                     tool_name=tool_name,
+                    tool=tool,
                 )
             await self._emit_progress(
                 on_progress,
