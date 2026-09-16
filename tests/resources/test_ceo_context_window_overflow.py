@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import struct
 import zlib
 from types import SimpleNamespace
@@ -403,6 +404,58 @@ def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_prev
     assert preflight["estimated_total_tokens"] == 22113
     assert preflight["estimate_source"] == "usage_plus_delta"
     assert preflight["effective_input_tokens"] == 20313
+
+
+def test_frontdoor_append_only_comparison_tolerates_regenerated_dynamic_blocks() -> None:
+    """长期记忆快照/工具契约块每轮重新生成,不得让 append-only 比对恒判不可比。
+
+    已发出的真实请求带当轮动态块,而下一轮请求由 durable 基线重新拼装;按原始形态
+    比对会让前缀恒不等,composer 空闲预估就会静默退化成全量 preview 估算。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    previous_request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "assistant", "content": "## 长期记忆\n---\n旧摘要"},
+        {"role": "user", "content": "hello"},
+    ]
+    current_request_messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "assistant", "content": "## 长期记忆\n---\n重新生成的摘要"},
+        {"role": "user", "content": "hello"},
+        {"role": "user", "content": "新增内容 " * 40},
+    ]
+
+    delta, comparable = runner._frontdoor_append_only_delta_estimate_tokens(
+        previous_request_messages=previous_request_messages,
+        current_request_messages=current_request_messages,
+        previous_tool_schemas=[],
+        current_tool_schemas=[],
+    )
+
+    assert comparable is True
+    assert delta > 0
+
+
+def test_frontdoor_seed_record_prefers_live_trace_over_stale_previous_slot(tmp_path) -> None:
+    """种子记录必须解析到 usage 基线所用的同一条最新请求。
+
+    空闲 composer 预估发生在回合开始之前,此时最新请求仍在实时轨迹里;
+    用户回合开始才把它搬进 previous 槽位。若种子只认 previous 槽位,
+    刷新/重启后的空闲预估会种到陈旧请求上,append-only 比对随之失效。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    latest_path = tmp_path / "latest.json"
+    latest_path.write_text(json.dumps({"actual_request_hash": "latest-hash"}), encoding="utf-8")
+    stale_path = tmp_path / "stale.json"
+    stale_path.write_text(json.dumps({"actual_request_hash": "stale-hash"}), encoding="utf-8")
+    session = SimpleNamespace(
+        _frontdoor_actual_request_history=[{"path": str(latest_path)}],
+        _frontdoor_actual_request_path=str(latest_path),
+        _frontdoor_previous_actual_request_history=[{"path": str(stale_path)}],
+        _frontdoor_previous_actual_request_path=str(stale_path),
+    )
+
+    assert runner._frontdoor_seed_actual_request_record(session=session)["actual_request_hash"] == "latest-hash"
 
 
 @pytest.mark.asyncio
