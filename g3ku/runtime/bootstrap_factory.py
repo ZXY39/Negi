@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from g3ku.audit_events import configure_audit_sink
 from g3ku.config.schema import Config
 
 
@@ -37,6 +38,9 @@ def make_agent_loop(
         middlewares = build_middlewares(config.agents.defaults.middlewares)
 
     provider_name, model_id = config.get_scope_model_target("ceo")
+
+    # 审计事件池：web / CLI / 托管 worker 都经过本工厂，统一在此配置工作区根
+    configure_audit_sink(config.workspace_path)
 
     return AgentLoop(
         bus=bus,
