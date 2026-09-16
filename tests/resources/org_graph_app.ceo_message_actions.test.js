@@ -279,6 +279,41 @@ test("R4 buildCeoRenderSignature 覆盖编辑/Fork 标志", () => {
     assert.notEqual(signatureBase, signatureFlagged);
 });
 
+test("R4b buildCeoRenderSignature 覆盖 live 回合的阶段轨道增量", () => {
+    // 切回会话时先按缓存渲染并写签名;随后到达的权威快照若只在阶段轨道上更新,
+    // 签名相同就会被整份跳过,新阶段/新工具轮要刷新网页才出现。
+    const api = setup();
+    const inflight = {
+        source: "user",
+        turn_id: "t1",
+        status: "running",
+        assistant_text: "正在执行",
+        usage: { input_tokens: 10, output_tokens: 2 },
+    };
+    const oneStage = { stages: [{ stage_id: "s1", status: "running", rounds: [] }] };
+    const twoStages = {
+        stages: [
+            { stage_id: "s1", status: "running", rounds: [] },
+            { stage_id: "s2", status: "running", rounds: [] },
+        ],
+    };
+    const newRound = {
+        stages: [{
+            stage_id: "s1",
+            status: "running",
+            rounds: [{ tools: [{ tool_name: "exec", status: "running", output_text: "abc" }] }],
+        }],
+    };
+
+    const base = api.buildCeoRenderSignature([], { ...inflight, canonical_context_delta: oneStage }, null);
+    const grownStage = api.buildCeoRenderSignature([], { ...inflight, canonical_context_delta: twoStages }, null);
+    const grownRound = api.buildCeoRenderSignature([], { ...inflight, canonical_context_delta: newRound }, null);
+
+    assert.ok(base && grownStage && grownRound);
+    assert.notEqual(base, grownStage);
+    assert.notEqual(base, grownRound);
+});
+
 test("R5 syncCeoFeedTurnActiveClass 回合进行中隐藏按钮行", () => {
     const api = setup();
     api.syncCeoFeedTurnActiveClass();

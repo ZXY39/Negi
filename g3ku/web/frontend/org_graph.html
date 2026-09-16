@@ -213,6 +213,23 @@
                                             </div>
                                             <div id="ceo-model-chain-pane" class="ceo-model-chain-pane" hidden>
                                                 <p class="ceo-model-chain-hint">拖动调整优先级；模型链对全部会话生效。</p>
+                                                <div id="ceo-model-chain-confirm" class="ceo-model-chain-confirm"
+                                                    role="status" hidden>
+                                                    <span id="ceo-model-chain-confirm-text"
+                                                        class="ceo-model-chain-confirm-text"></span>
+                                                    <span class="ceo-model-chain-confirm-actions">
+                                                        <button id="ceo-model-chain-confirm-accept"
+                                                            class="ceo-model-confirm-btn accept" type="button"
+                                                            aria-label="确认切换到模型链">
+                                                            <i data-lucide="check"></i>
+                                                        </button>
+                                                        <button id="ceo-model-chain-confirm-cancel"
+                                                            class="ceo-model-confirm-btn cancel" type="button"
+                                                            aria-label="取消切换">
+                                                            <i data-lucide="x"></i>
+                                                        </button>
+                                                    </span>
+                                                </div>
                                                 <div id="ceo-model-chain-list" class="ceo-model-chain-list" role="list"
                                                     aria-label="CEO 模型链"></div>
                                                 <p id="ceo-model-chain-empty" class="ceo-model-chain-empty" hidden>
