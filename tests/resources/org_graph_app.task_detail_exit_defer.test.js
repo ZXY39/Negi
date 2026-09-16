@@ -76,6 +76,8 @@ function loadSwitchView({ detailActive = true } = {}) {
         closeMemoryBrowser: record("closeMemoryBrowser"),
         startMemoryViewAutoRefresh: record("startMemoryViewAutoRefresh"),
         stopMemoryViewAutoRefresh: record("stopMemoryViewAutoRefresh"),
+        startAuditViewAutoRefresh: record("startAuditViewAutoRefresh"),
+        stopAuditViewAutoRefresh: record("stopAuditViewAutoRefresh"),
         loadSkills: record("loadSkills"),
         loadTools: record("loadTools"),
         loadToolGovernanceMode: record("loadToolGovernanceMode"),

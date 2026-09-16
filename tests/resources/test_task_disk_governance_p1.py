@@ -14,7 +14,6 @@ from main.storage import disk_guard
 from main.storage.artifact_store import TaskArtifactStore
 from main.storage.disk_guard import (
     DiskPolicies,
-    cleanup_threshold_bytes,
     configure_disk_policies,
     disk_waterline_snapshot,
     emergency_threshold_bytes,
@@ -66,12 +65,14 @@ def _observe(monitor, *, free: int | None, total: int | None, **overrides):
 
 def test_threshold_pure_functions(policies_guard):
     configure_disk_policies(DiskPolicies())
-    # 100GB 盘：紧急线 = max(300MB, 1GB) = 1GB；清理线 = max(1GB, 5GB) = 5GB
+    # 100GB 盘：紧急线 = max(300MB, 1GB) = 1GB
     assert emergency_threshold_bytes(100 * GB) == 1 * GB
-    assert cleanup_threshold_bytes(100 * GB) == 5 * GB
-    # 10GB 小盘：紧急线 = max(300MB, 100MB) = 300MB；清理线 = max(1GB, 500MB) = 1GB
+    # 10GB 小盘：紧急线 = max(300MB, 100MB) = 300MB
     assert emergency_threshold_bytes(10 * GB) == 300 * 1024 * 1024
-    assert cleanup_threshold_bytes(10 * GB) == 1 * GB
+    # 清理线已随自动删除机制整体移除
+    assert not hasattr(disk_guard, 'cleanup_threshold_bytes')
+    assert not hasattr(DiskPolicies(), 'purge_enabled')
+    assert not hasattr(DiskPolicies(), 'cleanup_min_bytes')
 
 
 def test_disk_waterline_snapshot_cwd():
@@ -155,7 +156,6 @@ async def test_abort_task_waiters_only_target_task():
 async def test_monitor_emergency_enter_exit_with_hooks(policies_guard):
     configure_disk_policies(DiskPolicies(
         emergency_min_bytes=2 * GB, emergency_min_ratio=0.0,
-        cleanup_min_bytes=4 * GB, cleanup_min_ratio=0.0,
         emergency_streak_samples=3, emergency_recovery_samples=5,
     ))
     controller = AdaptiveToolBudgetController(normal_limit=2)
@@ -164,14 +164,12 @@ async def test_monitor_emergency_enter_exit_with_hooks(policies_guard):
     monitor.set_disk_emergency_hooks(
         enter=lambda: events.append('enter'),
         exit_=lambda: events.append('exit'),
-        cleanup=lambda: events.append('cleanup'),
     )
     total = 100 * GB
-    # 清理线之下、紧急线之上：第 1 拍触发 cleanup 边沿 + throttle
+    # 清理线已移除：低剩余空间（紧急线之上）不产生任何边沿事件与清理字段
     _observe(monitor, free=3 * GB, total=total)
-    assert events == ['cleanup']
-    assert monitor.snapshot()['disk_cleanup_active'] is True
-    assert controller.snapshot()['tool_pressure_state'] == 'throttled'
+    assert events == []
+    assert 'disk_cleanup_active' not in monitor.snapshot()
     # 跌破紧急线：连续 3 拍进入
     _observe(monitor, free=1 * GB, total=total)
     _observe(monitor, free=1 * GB, total=total)
@@ -201,15 +199,13 @@ async def test_monitor_emergency_enter_exit_with_hooks(policies_guard):
 async def test_monitor_starvation_valve_cannot_break_emergency(policies_guard):
     configure_disk_policies(DiskPolicies(
         emergency_min_bytes=2 * GB, emergency_min_ratio=0.0,
-        cleanup_min_bytes=4 * GB, cleanup_min_ratio=0.0,
         emergency_streak_samples=1, emergency_recovery_samples=1,
     ))
     controller = AdaptiveToolBudgetController(normal_limit=2)
     monitor = _make_monitor(controller, max_tool_wait_ms=1.0, max_pressure_dwell_seconds=0.001)
     total = 100 * GB
-    # 先落到清理线：pressure_state=throttled（restricted），逃逸阀条件就位
+    # 先观察一拍正常水位作为初始状态
     _observe(monitor, free=3 * GB, total=total)
-    assert controller.snapshot()['tool_pressure_state'] == 'throttled'
     # 跌破紧急线：streak=1 立即进入硬闸（target 0）
     _observe(monitor, free=1 * GB, total=total)
     assert controller.snapshot()['disk_emergency_active'] is True

@@ -106,6 +106,9 @@ async def test_task_stats_tool_list_filters_by_date_keyword_and_reports_disk_usa
         _write_text(Path(service.artifact_store._task_dir(first.task_id)) / 'artifact.txt', 'B' * 20)
         _write_text(service._task_temp_dir(first.task_id) / 'tmp.log', 'C' * 30)
         _write_text(_task_event_dir(service, first.task_id) / '1.json', 'D' * 40)
+        # 工具读大小记账表（展示延迟 ≤1h 契约）：绕过记账的带外写入需一次对账入账，
+        # 生产里由小时级对账循环/终态对账完成，这里显式触发。
+        service._reconcile_task_disk_usage(first.task_id)
 
         payload = json.loads(
             await stats_tool.execute(
@@ -124,7 +127,9 @@ async def test_task_stats_tool_list_filters_by_date_keyword_and_reports_disk_usa
         assert item['task_id'] == first.task_id
         assert item['status'] == 'success'
         assert item['prompt_preview_100'].startswith('prepare first announcement draft')
-        assert item['disk_usage_bytes'] == baseline_disk_usage + 100
+        # 口径 = 目录实测 + 五张大行表 payload 字节（对账值）
+        detail_bytes = sum(int(v or 0) for v in service.store.sum_task_detail_bytes([first.task_id]).values())
+        assert item['disk_usage_bytes'] == baseline_disk_usage + 100 + detail_bytes
     finally:
         await service.close()
 

@@ -708,17 +708,14 @@ class MainRuntimeDiskGuardConfig(Base):
     artifact_gzip_threshold_bytes: int = 1024 * 1024
     terminal_cleanup_enabled: bool = True
     terminal_temp_dir_cleanup_enabled: bool = False
-    # P1：清理线（全删渐进 + 强收紧）与紧急态行为。
-    cleanup_min_bytes: int = 1024 * 1024 * 1024
-    cleanup_min_ratio: float = 0.05
+    # P1：紧急态行为（自动暂停 + 防抖）。
     auto_pause_enabled: bool = True
     emergency_streak_samples: int = 3
     emergency_recovery_samples: int = 5
     alert_on_disk_emergency: bool = True
-    # P3：终态任务大行裁剪（0=关闭）与全删渐进（低于清理线时先导产出再彻底删
-    # 最老终态任务；zip 归档/压缩渐进/pin/墓碑机制已整体移除）。
-    detail_retention_days: int = 7
-    purge_enabled: bool = True
+    # P3：终态任务大行裁剪。默认 0=停用——任务数据只随用户/模型工具手动
+    # 删除而清除；配置 >0 恢复按天裁剪终态任务的五张大行表。
+    detail_retention_days: int = 0
 
     @field_validator("detail_retention_days", mode="before")
     @classmethod
@@ -726,23 +723,7 @@ class MainRuntimeDiskGuardConfig(Base):
         try:
             return max(0, int(value))
         except (TypeError, ValueError):
-            return 7
-
-    @field_validator("cleanup_min_bytes", mode="before")
-    @classmethod
-    def _normalize_cleanup_min_bytes(cls, value: Any) -> int:
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return 1024 * 1024 * 1024
-
-    @field_validator("cleanup_min_ratio", mode="before")
-    @classmethod
-    def _normalize_cleanup_min_ratio(cls, value: Any) -> float:
-        try:
-            return min(max(0.0, float(value)), 0.5)
-        except (TypeError, ValueError):
-            return 0.05
+            return 0
 
     @field_validator("emergency_streak_samples", "emergency_recovery_samples", mode="before")
     @classmethod

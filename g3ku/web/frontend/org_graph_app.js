@@ -230,6 +230,8 @@ const S = {
     taskBusy: false,
     taskPage: 1,
     taskPageSize: RESOURCE_PAGE_SIZES[0],
+    taskSortMode: "time",
+    taskTerminalReconcileId: null,
     tasksById: {},
     orderedTaskIds: [],
     visibleTaskIds: [],
@@ -526,6 +528,7 @@ const U = {
     taskPagePrev: document.getElementById("task-page-prev"),
     taskPageNext: document.getElementById("task-page-next"),
     taskMultiToggle: document.getElementById("task-multi-toggle"),
+    taskSortSelect: document.getElementById("task-sort-select"),
     taskFilterWrap: document.getElementById("task-filter-wrap"),
     taskFilterTrigger: document.getElementById("task-filter-menu-trigger"),
     taskFilterMenu: document.getElementById("task-filter-menu"),
@@ -13546,6 +13549,9 @@ function bind() {
         S.taskDefaults.customDraft = "";
         void saveTaskDefaultMaxDepth(nextValue);
     });
+    U.taskSortSelect?.addEventListener("change", (e) => {
+        setTaskSortMode(String(e.target.value || "time"));
+    });
     U.taskDepthCustomInput?.addEventListener("input", (e) => {
         S.taskDefaults.customDraft = String(e.target.value ?? "");
     });
@@ -13705,6 +13711,8 @@ function init() {
     hydrateCeoSessionSnapshotCache();
     restoreCeoComposerDraftForSession(activeSessionId());
     startLiveDurationTicker();
+    bindAuditBadge();
+    void refreshAuditBadge();
     window.addEventListener("beforeunload", () => {
         flushCeoComposerDraftCachePersist();
         flushCeoFollowUpQueueCachePersist();

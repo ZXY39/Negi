@@ -45,7 +45,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `runtime-overview.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）
 - 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `runtime-overview.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）
-- 磁盘满（Errno 28 / SQLITE_FULL）、0 字节错误日志、节点连锁 error-pause、artifact 变成 .gz、任务被自动全删（产出在 deliverables/）、managed-worker.log 轮转、runtime.sqlite3 收缩、task_events 表静默零写入 → `operations-and-maintenance.md`「磁盘满」+ `runtime-overview.md`「磁盘写保护与治理」+ `web-and-admin.md`（治理 UI 契约）
+- 磁盘满（Errno 28 / SQLITE_FULL）、0 字节错误日志、节点连锁 error-pause、artifact 变成 .gz、手动删除任务后产出在 deliverables/、任务大厅按大小排序定位大任务、managed-worker.log 轮转、runtime.sqlite3 收缩、task_events 表静默零写入 → `operations-and-maintenance.md`「磁盘满」+ `runtime-overview.md`「磁盘写保护与治理」+ `web-and-admin.md`（治理 UI 与大小/排序契约）
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
 - 任务大厅卡顿/滚动卡死、Edge 窗口「未响应」或崩溃 → `operations-and-maintenance.md`「任务大厅卡顿 / 冻结（浏览器端）」+ `web-and-admin.md`「Web Event Loop Contract」
 - Multimodal image not reaching model or fabricated image content → `runtime-overview.md` + `web-and-admin.md` (web upload/reopen) or `external-agent-api.md` (bridge inbound attachments)

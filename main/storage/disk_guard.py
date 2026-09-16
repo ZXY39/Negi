@@ -32,7 +32,6 @@ __all__ = [
     'DiskFullError',
     'DiskPolicies',
     'classify_write_error',
-    'cleanup_threshold_bytes',
     'configure_disk_policies',
     'disk_policies',
     'disk_waterline_snapshot',
@@ -102,17 +101,15 @@ class DiskPolicies:
     # 默认 False：任务临时目录与其中内容在终态后原样保留（正式产物若被
     # 误写进 temp 系目录不再因自动清理而丢失）；孤儿目录按运维脚本处置。
     terminal_temp_dir_cleanup_enabled: bool = False
-    # P1：清理线（历史任务压缩渐进 + 强收紧触发水位）。
-    cleanup_min_bytes: int = 1024 * 1024 * 1024
-    cleanup_min_ratio: float = 0.05
-    # P1：紧急态行为开关与防抖样本数（1s 采样 tick 计）。
+    # 紧急态行为开关与防抖样本数（1s 采样 tick 计）。
     auto_pause_enabled: bool = True
     emergency_streak_samples: int = 3
     emergency_recovery_samples: int = 5
     alert_on_disk_emergency: bool = True
-    # P3：终态任务大行裁剪与全删渐进（zip 归档/压缩渐进/pin 机制已移除）。
-    detail_retention_days: int = 7  # 0 = 关闭裁剪
-    purge_enabled: bool = True
+    # P3：终态任务大行裁剪。默认 0=停用（任务数据只随用户/模型工具手动删除
+    # 而清除，不做自动裁剪）；配置 >0 恢复按天裁剪（zip 归档/压缩渐进/全删渐进
+    # /pin 机制已整体移除）。
+    detail_retention_days: int = 0
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -147,14 +144,11 @@ def _policies_from_env() -> DiskPolicies:
         artifact_gzip_threshold_bytes=_env_int('G3KU_ARTIFACT_GZIP_THRESHOLD_BYTES', 1024 * 1024),
         terminal_cleanup_enabled=_env_flag('G3KU_TERMINAL_CLEANUP_ENABLED', True),
         terminal_temp_dir_cleanup_enabled=_env_flag('G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED', False),
-        cleanup_min_bytes=_env_int('G3KU_DISK_CLEANUP_MIN_BYTES', 1024 * 1024 * 1024),
-        cleanup_min_ratio=_env_float('G3KU_DISK_CLEANUP_MIN_RATIO', 0.05),
         auto_pause_enabled=_env_flag('G3KU_DISK_AUTO_PAUSE_ENABLED', True),
         emergency_streak_samples=_env_int('G3KU_DISK_EMERGENCY_STREAK_SAMPLES', 3),
         emergency_recovery_samples=_env_int('G3KU_DISK_EMERGENCY_RECOVERY_SAMPLES', 5),
         alert_on_disk_emergency=_env_flag('G3KU_DISK_ALERT_ON_EMERGENCY', True),
-        detail_retention_days=_env_int('G3KU_DISK_DETAIL_RETENTION_DAYS', 7),
-        purge_enabled=_env_flag('G3KU_DISK_PURGE_ENABLED', True),
+        detail_retention_days=_env_int('G3KU_DISK_DETAIL_RETENTION_DAYS', 0),
     )
 
 
@@ -269,12 +263,6 @@ def emergency_threshold_bytes(total_bytes: int, *, policies: DiskPolicies | None
     """紧急线 = max(emergency_min_bytes, total * emergency_min_ratio)。"""
     resolved = policies or disk_policies()
     return max(int(resolved.emergency_min_bytes), int(max(0, int(total_bytes)) * float(resolved.emergency_min_ratio)))
-
-
-def cleanup_threshold_bytes(total_bytes: int, *, policies: DiskPolicies | None = None) -> int:
-    """清理线 = max(cleanup_min_bytes, total * cleanup_min_ratio)。"""
-    resolved = policies or disk_policies()
-    return max(int(resolved.cleanup_min_bytes), int(max(0, int(total_bytes)) * float(resolved.cleanup_min_ratio)))
 
 
 def has_emergency_disk_budget(paths: Sequence[Path | str], *, policies: DiskPolicies | None = None) -> bool:

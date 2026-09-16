@@ -855,6 +855,14 @@ class SQLiteTaskStore:
         wanted = {str(item or '').strip() for item in task_ids if str(item or '').strip()}
         return {key: value for key, value in usage.items() if key in wanted}
 
+    def get_task_disk_usage(self, task_id: str) -> int:
+        """单任务点查（索引命中，供 WS summary payload 等高频路径；无记账返回 0）。"""
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return 0
+        row = self._fetchone_light('SELECT total_bytes FROM task_disk_usage WHERE task_id = ?', (normalized_task_id,))
+        return int(row['total_bytes'] or 0) if row is not None else 0
+
     # ------------------------------------------------------------------
     # 磁盘治理（P3）：终态任务大行裁剪与维护窗口记账。
     # 裁剪口径按任务（终态且 finished_at/updated_at 早于 cutoff），一次裁掉该任务

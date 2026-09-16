@@ -7,7 +7,6 @@ from datetime import datetime
 from typing import Any, Callable, Sequence
 
 from main.storage.disk_guard import (
-    cleanup_threshold_bytes,
     disk_policies,
     disk_waterline_snapshot,
     emergency_threshold_bytes,
@@ -107,12 +106,10 @@ class WorkerPressureMonitor:
         self._disk_watermark_paths: tuple[str, ...] = tuple(str(p) for p in (disk_watermark_paths or ()) if str(p or '').strip())
         self._disk_emergency_active = False
         self._disk_emergency_since = ''
-        self._disk_cleanup_active = False
         self._disk_emergency_streak = 0
         self._disk_recovery_streak = 0
         self._disk_emergency_enter_hook: Callable[[], None] | None = None
         self._disk_emergency_exit_hook: Callable[[], None] | None = None
-        self._disk_cleanup_hook: Callable[[], None] | None = None
         self._lock = threading.RLock()
         self._sample_seconds = max(0.1, float(sample_seconds or 1.0))
         self._recover_window_seconds = max(0.1, float(recover_window_seconds or 1.0))
@@ -175,7 +172,6 @@ class WorkerPressureMonitor:
             'machine_disk_usage_percent': 0.0,
             'disk_emergency_active': False,
             'disk_emergency_since': '',
-            'disk_cleanup_active': False,
             'tool_pressure_event_loop_lag_ms': 0.0,
             'tool_pressure_writer_queue_depth': 0,
             'tool_pressure_process_cpu_ratio': 0.0,
@@ -194,21 +190,17 @@ class WorkerPressureMonitor:
         *,
         enter: Callable[[], None] | None = None,
         exit_: Callable[[], None] | None = None,
-        cleanup: Callable[[], None] | None = None,
     ) -> None:
         """注入磁盘紧急态边沿回调（线程安全、必须立即返回——在 1s 采样线程内调用）。
 
         enter：跌破紧急线（连续 N 样本确认）——runtime_service 用它调度全任务自动暂停+告警；
-        exit_：回到紧急线之上（连续 N 样本确认）——只清告警，任务保持 paused；
-        cleanup：跌破清理线边沿——P2 压缩渐进的触发信号。
+        exit_：回到紧急线之上（连续 N 样本确认）——只清告警，任务保持 paused。
         """
         with self._lock:
             if enter is not None:
                 self._disk_emergency_enter_hook = enter
             if exit_ is not None:
                 self._disk_emergency_exit_hook = exit_
-            if cleanup is not None:
-                self._disk_cleanup_hook = cleanup
 
     def set_disk_watermark_paths(self, paths: Sequence[str]) -> None:
         with self._lock:
@@ -415,7 +407,6 @@ class WorkerPressureMonitor:
             if disk_watermark_available:
                 policies = disk_policies()
                 emg_now = disk_free < emergency_threshold_bytes(disk_total, policies=policies)
-                cln_now = disk_free < cleanup_threshold_bytes(disk_total, policies=policies)
                 if emg_now:
                     self._disk_emergency_streak += 1
                     self._disk_recovery_streak = 0
@@ -442,20 +433,8 @@ class WorkerPressureMonitor:
                             pass
                         if self._disk_emergency_exit_hook is not None:
                             pending_disk_hooks.append(self._disk_emergency_exit_hook)
-                if not self._disk_emergency_active:
-                    if cln_now and not self._disk_cleanup_active:
-                        self._disk_cleanup_active = True
-                        try:
-                            self._controller.throttle(at=timestamp)
-                        except Exception:
-                            pass
-                        if self._disk_cleanup_hook is not None:
-                            pending_disk_hooks.append(self._disk_cleanup_hook)
-                    elif not cln_now and self._disk_cleanup_active:
-                        self._disk_cleanup_active = False
             self._snapshot['disk_emergency_active'] = bool(self._disk_emergency_active)
             self._snapshot['disk_emergency_since'] = self._disk_emergency_since
-            self._snapshot['disk_cleanup_active'] = bool(self._disk_cleanup_active)
             if machine_state in {'warn', 'critical'}:
                 self._consecutive_machine_warn += 1
                 self._consecutive_machine_safe = 0

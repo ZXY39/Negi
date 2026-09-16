@@ -4842,7 +4842,7 @@ class TaskLogService:
         return next_task
 
     def _publish_task_summary_patch_locked(self, *, task: TaskRecord, previous_task: TaskRecord | None = None) -> bool:
-        payload_task = self._task_summary_payload(task)
+        payload_task = self._task_summary_payload(task, disk_usage_bytes=self._safe_task_disk_usage(task.task_id))
         fingerprint = self._task_summary_fingerprint(task)
         runtime_meta = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
         previous_fingerprint = str(runtime_meta.get('summary_fingerprint') or '').strip()
@@ -5190,9 +5190,9 @@ class TaskLogService:
             return False
 
     @staticmethod
-    def _task_summary_payload(task: TaskRecord) -> dict[str, Any]:
+    def _task_summary_payload(task: TaskRecord, *, disk_usage_bytes: int | None = None) -> dict[str, Any]:
         metadata = dict(task.metadata or {})
-        return {
+        payload: dict[str, Any] = {
             'task_id': task.task_id,
             'session_id': task.session_id,
             'title': task.title,
@@ -5209,6 +5209,17 @@ class TaskLogService:
             'max_depth': int(task.max_depth or 0),
             'token_usage': task.token_usage.model_dump(mode='json'),
         }
+        # 磁盘治理：任务总占用（目录+DB 明细，对账口径，延迟 ≤1h）随增量 patch
+        # 下发；取不到时省略字段（前端合并语义下缺字段不清空旧值）。
+        if disk_usage_bytes is not None:
+            payload['disk_usage_bytes'] = int(max(0, int(disk_usage_bytes or 0)))
+        return payload
+
+    def _safe_task_disk_usage(self, task_id: str) -> int | None:
+        try:
+            return int(self._store.get_task_disk_usage(task_id) or 0)
+        except Exception:
+            return None
 
     def _runtime_summary_payload(self, task_id: str, *, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
         if isinstance(runtime_state, dict):

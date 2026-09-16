@@ -130,13 +130,58 @@ function taskSessionQueryValue() {
     return "all";
 }
 
+function formatTaskBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "--";
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)}G`;
+    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)}M`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)}K`;
+    return `${Math.round(bytes)}B`;
+}
+
+function taskDiskUsageSortValue(task) {
+    const value = Number(task?.disk_usage_bytes);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function compareTaskListOrder(left, right) {
+    if (S.taskSortMode === "size") {
+        const sizeDiff = taskDiskUsageSortValue(right) - taskDiskUsageSortValue(left);
+        if (sizeDiff !== 0) return sizeDiff;
+    }
     const timeDiff = taskCreatedSortValue(right) - taskCreatedSortValue(left);
     if (timeDiff !== 0) return timeDiff;
     const rightCreatedAt = String(right?.created_at || "");
     const leftCreatedAt = String(left?.created_at || "");
     if (rightCreatedAt !== leftCreatedAt) return rightCreatedAt.localeCompare(leftCreatedAt);
     return String(left?.task_id || "").localeCompare(String(right?.task_id || ""));
+}
+
+function setTaskSortMode(mode) {
+    const normalized = String(mode || "").trim().toLowerCase() === "size" ? "size" : "time";
+    if (S.taskSortMode === normalized) return;
+    S.taskSortMode = normalized;
+    if (U.taskSortSelect && U.taskSortSelect.value !== normalized) U.taskSortSelect.value = normalized;
+    resortTaskOrderedIds();
+}
+
+function resortTaskOrderedIds() {
+    const tasksById = S.tasksById || {};
+    S.orderedTaskIds = (Array.isArray(S.orderedTaskIds) ? [...S.orderedTaskIds] : [])
+        .sort((leftId, rightId) => compareTaskListOrder(tasksById[leftId], tasksById[rightId]));
+    syncTaskArrayFromState();
+    S.taskGridSignature = "";
+    renderTasksIfVisible();
+}
+
+function scheduleTaskListReconcileSoon(delayMs = 3000) {
+    // 终态清理与对账在服务端异步执行：终态转换补丁携带的大小可能落后，
+    // 延迟一次全量 loadTasks 拿到对账后的最终占用值。
+    if (S.taskTerminalReconcileId) window.clearTimeout(S.taskTerminalReconcileId);
+    S.taskTerminalReconcileId = window.setTimeout(() => {
+        S.taskTerminalReconcileId = null;
+        if (taskListViewVisible()) void loadTasks();
+    }, Math.max(500, Number(delayMs) || 3000));
 }
 
 function syncTaskNormalizedState(items = []) {
@@ -265,6 +310,10 @@ function patchTaskCardElement(taskId) {
         const title = String(task.title || key);
         titleEl.textContent = title;
         titleEl.setAttribute("title", title);
+    }
+    const diskUsageEl = card.querySelector("[data-task-disk-usage]");
+    if (diskUsageEl) {
+        diskUsageEl.textContent = formatTaskBytes(task?.disk_usage_bytes);
     }
     const tokenUsage = taskTokenDisplayUsage(task);
     const previousMetrics = S.taskMetricSnapshot?.[key] || null;
@@ -453,14 +502,14 @@ function renderTaskPerformanceBar() {
     const diskText = metrics?.machine_pressure_disk_busy_available === false
         ? "--"
         : formatTaskWorkerPercent(metrics?.machine_pressure_disk_busy_percent);
-    // 磁盘治理（P1）：剩余空间并进磁盘那一段（磁盘段显示 `0%(剩余10.1G)`），不再
-    // 单列「磁盘剩余」一项；紧急/清理态着色随之落在 CPU/内存/磁盘 这一项上。
+    // 磁盘治理：剩余空间并进磁盘那一段（磁盘段显示 `0%(剩余10.1G)`），不再
+    // 单列「磁盘剩余」一项；紧急态着色随之落在 CPU/内存/磁盘 这一项上。
+    // 清理线已移除——磁盘紧张不再自动删除任务，由任务大小排序引导手动清理。
     const diskEmergency = !!metrics?.disk_emergency_active;
-    const diskCleanup = !!metrics?.disk_cleanup_active;
     const diskFreeText = formatTaskDiskFreeBytes(metrics);
     const diskBusyText = diskText === "--" ? "--" : `${diskText}(剩余${diskFreeText})`;
-    const diskStateKey = diskEmergency ? "critical" : diskCleanup ? "throttled" : "normal";
-    const diskStateSuffix = diskEmergency ? " · 紧急" : diskCleanup ? " · 清理线" : "";
+    const diskStateKey = diskEmergency ? "critical" : "normal";
+    const diskStateSuffix = diskEmergency ? " · 紧急" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
     const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
     const nodeRunningText = queueMetricCount(metrics?.node_queue_running_count);
@@ -695,6 +744,7 @@ function taskGridRenderSignature(meta) {
         diskEmergencyActive: !!taskWorkerStatusMetrics()?.disk_emergency_active,
         taskBusy: !!S.taskBusy,
         multiSelectMode: !!S.multiSelectMode,
+        sortMode: String(S.taskSortMode || "time"),
         emptyText: taskSessionEmptyText(),
         selectedTaskIds: [...S.selectedTaskIds].map((id) => String(id || "")).sort(),
         items: visibleItems.map((task) => {
@@ -707,6 +757,7 @@ function taskGridRenderSignature(meta) {
                 statusKey: taskStatusKey(task),
                 statusLabel: taskStatusLabel(task),
                 createdAt: taskCreatedAtText(task),
+                diskUsage: taskDiskUsageSortValue(task),
                 pauseHintPhase: String(taskPauseHintState(taskId)?.phase || ""),
                 tokenUsage: tokenUsage.tracked
                     ? [tokenUsage.input_tokens, tokenUsage.output_tokens, tokenUsage.cache_hit_tokens]
@@ -826,6 +877,7 @@ function renderTasks() {
             </div>
             <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
             <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
+            <div class="pc-created-at"><span class="pc-field-label">占用大小</span><span class="pc-field-value" data-task-disk-usage>${esc(formatTaskBytes(task?.disk_usage_bytes))}</span></div>
             <div class="pc-metrics">${metricsMarkup}</div>
             ${taskPauseHintMarkup(taskId)}
         `;
@@ -2146,7 +2198,16 @@ function initTasksWs() {
             return;
         }
         if (payload.type === "task.summary.patch") {
-            patchTaskListItem(payload.data?.task || {});
+            const patchTask = payload.data?.task || {};
+            const patchTaskId = String(patchTask?.task_id || "");
+            const previousStatus = taskStatusKey(S.tasksById?.[patchTaskId] || null);
+            patchTaskListItem(patchTask);
+            // 任务转终态后服务端会做终态清理+大小对账（异步），延迟全量刷新
+            // 让卡片拿到清理后的最终占用值。
+            const nextStatus = taskStatusKey(patchTask);
+            if (previousStatus === "in_progress" && (nextStatus === "success" || nextStatus === "failed")) {
+                scheduleTaskListReconcileSoon();
+            }
             return;
         }
         if (payload.type === "task.token.patch") {

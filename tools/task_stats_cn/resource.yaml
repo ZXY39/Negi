@@ -42,6 +42,10 @@ parameters:
       items:
         type: string
       description: Required in `id` mode. Returned in input order.
+    sort:
+      type: string
+      enum: [time, size]
+      description: "`list` 模式排序键：`time`=按创建时间倒序（默认）；`size`=按任务总占用字节（临时目录+产物+数据库明细）倒序，用于快速定位占用空间大的任务。"
   required: [mode]
 governance:
   family: task_runtime

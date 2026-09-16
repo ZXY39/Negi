@@ -158,7 +158,6 @@ from main.service.worker_heartbeat_service_v2 import WorkerHeartbeatServiceV2
 from main.storage.artifact_store import TaskArtifactStore, read_artifact_text
 from main.storage.disk_guard import (
     DiskPolicies,
-    cleanup_threshold_bytes,
     configure_disk_policies,
     disk_policies,
     disk_waterline_snapshot,
@@ -371,9 +370,8 @@ class MainRuntimeService:
         )
         self.file_store = TaskFileStore(resolved_files_base_dir)
         self.artifact_store = TaskArtifactStore(artifact_dir=resolved_artifact_dir, store=self.store)
-        # 任务删除/purge 前产出导出的持久目录（永久保留，不参与磁盘治理）。
+        # 任务删除前产出导出的持久目录（永久保留，不参与磁盘治理）。
         self._deliverables_dir = resolved_store_path.parent / 'deliverables'
-        self._task_disk_cleanup_task: asyncio.Task[Any] | None = None
         self.content_store = ContentNavigationService(
             workspace=Path.cwd(),
             artifact_store=self.artifact_store,
@@ -576,7 +574,6 @@ class MainRuntimeService:
             self.tool_pressure_monitor.set_disk_emergency_hooks(
                 enter=lambda: self._schedule_loop_task(self._auto_pause_all_due_to_disk_emergency),
                 exit_=lambda: self._schedule_loop_task(self._disk_emergency_released),
-                cleanup=lambda: self._schedule_loop_task(self._disk_cleanup_signal),
             )
         self.node_runner._adaptive_tool_budget_controller = self.adaptive_tool_budget_controller
         self.worker_heartbeat_service = WorkerHeartbeatServiceV2(
@@ -603,7 +600,6 @@ class MainRuntimeService:
         # 磁盘治理（P1）：对账循环、紧急态自动暂停互斥与边沿状态。
         self._task_disk_reconcile_task: asyncio.Task[Any] | None = None
         self._disk_emergency_pause_lock = asyncio.Lock()
-        self._disk_cleanup_requested = False
         self._disk_emergency_alerted = False
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_stall_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -689,12 +685,6 @@ class MainRuntimeService:
                 self._task_disk_reconcile_task = asyncio.create_task(
                     self._task_disk_reconcile_loop(),
                     name=f'main-runtime-disk-reconcile:{self.worker_id or self.execution_mode}',
-                )
-            # 磁盘治理（P2）：清理线巡检 + 压缩渐进（归档只归执行进程管，web 模式经命令转发）。
-            if self._task_disk_cleanup_task is None or self._task_disk_cleanup_task.done():
-                self._task_disk_cleanup_task = asyncio.create_task(
-                    self._disk_cleanup_sweep_loop(),
-                    name=f'main-runtime-disk-cleanup:{self.worker_id or self.execution_mode}',
                 )
         if self.execution_mode == 'worker':
             if self.tool_pressure_monitor is not None:
@@ -2203,16 +2193,24 @@ class MainRuntimeService:
         date_from: str = '',
         date_to: str = '',
         task_ids: list[str] | None = None,
+        sort: str = 'time',
     ) -> dict[str, Any]:
         normalized_mode = str(mode or '').strip().lower()
         if normalized_mode not in {'list', 'id'}:
             raise ValueError('invalid_mode')
+        normalized_sort = str(sort or '').strip().lower()
+        if normalized_sort not in {'time', 'size'}:
+            normalized_sort = 'time'
         if normalized_mode == 'list':
             start_at = self._parse_task_stats_date(date_from, field_name='from')
             end_at = self._parse_task_stats_date(date_to, field_name='to') + timedelta(days=1) - timedelta(milliseconds=1)
             if end_at < start_at:
                 raise ValueError('invalid_date_range')
             keywords = self._normalize_task_keyword_list(task_keywords)
+            try:
+                disk_usages = self.store.get_task_disk_usages(None) or {}
+            except Exception:
+                disk_usages = {}
             matched: list[tuple[float, dict[str, Any]]] = []
             for task in list(self.store.list_tasks()):
                 created_at = self._parse_task_timestamp(str(getattr(task, 'created_at', '') or ''))
@@ -2221,12 +2219,18 @@ class MainRuntimeService:
                 prompt = str(getattr(task, 'user_request', '') or '')
                 if keywords and not any(keyword.casefold() in prompt.casefold() for keyword in keywords):
                     continue
-                matched.append((created_at.timestamp(), self._task_stats_item(task)))
-            matched.sort(key=lambda item: item[0], reverse=True)
+                task_id = str(getattr(task, 'task_id', '') or '').strip()
+                usage = int(disk_usages.get(task_id) or 0) if task_id else 0
+                matched.append((created_at.timestamp(), self._task_stats_item(task, disk_usage_bytes=usage or None)))
+            if normalized_sort == 'size':
+                matched.sort(key=lambda item: (int(item[1].get('disk_usage_bytes') or 0), item[0]), reverse=True)
+            else:
+                matched.sort(key=lambda item: item[0], reverse=True)
             return {
                 'mode': 'list',
                 'from': str(date_from or '').strip(),
                 'to': str(date_to or '').strip(),
+                'sort': normalized_sort,
                 'items': [item for _, item in matched],
             }
         normalized_task_ids = self._normalize_task_id_list(task_ids, allow_empty=False)
@@ -2382,13 +2386,17 @@ class MainRuntimeService:
         text = ' '.join(str(value or '').split())
         return text[:100]
 
-    def _task_stats_item(self, task: TaskRecord) -> dict[str, Any]:
+    def _task_stats_item(self, task: TaskRecord, *, disk_usage_bytes: int | None = None) -> dict[str, Any]:
+        """disk_usage_bytes 为 None/0 时回退目录实测（新任务尚无记账；
+        list 模式由调用方批量传入记账表值，避免逐任务 rglob）。"""
+        if disk_usage_bytes is None or int(disk_usage_bytes or 0) <= 0:
+            disk_usage_bytes = self._task_disk_usage_bytes(task.task_id)
         return {
             'task_id': task.task_id,
             'created_at': str(getattr(task, 'created_at', '') or ''),
             'status': str(getattr(task, 'status', '') or ''),
             'prompt_preview_100': self._prompt_preview_100(getattr(task, 'user_request', '')),
-            'disk_usage_bytes': self._task_disk_usage_bytes(task.task_id),
+            'disk_usage_bytes': int(disk_usage_bytes or 0),
         }
 
     def _task_not_found_item(self, task_id: str) -> dict[str, Any]:
@@ -4950,14 +4958,11 @@ class MainRuntimeService:
             artifact_gzip_threshold_bytes=int(getattr(guard, 'artifact_gzip_threshold_bytes', defaults.artifact_gzip_threshold_bytes) or 0),
             terminal_cleanup_enabled=bool(getattr(guard, 'terminal_cleanup_enabled', defaults.terminal_cleanup_enabled)),
             terminal_temp_dir_cleanup_enabled=bool(getattr(guard, 'terminal_temp_dir_cleanup_enabled', defaults.terminal_temp_dir_cleanup_enabled)),
-            cleanup_min_bytes=max(0, int(getattr(guard, 'cleanup_min_bytes', defaults.cleanup_min_bytes) or 0)),
-            cleanup_min_ratio=min(max(0.0, float(getattr(guard, 'cleanup_min_ratio', defaults.cleanup_min_ratio) or 0.0)), 0.5),
             auto_pause_enabled=bool(getattr(guard, 'auto_pause_enabled', defaults.auto_pause_enabled)),
             emergency_streak_samples=max(1, int(getattr(guard, 'emergency_streak_samples', defaults.emergency_streak_samples) or 1)),
             emergency_recovery_samples=max(1, int(getattr(guard, 'emergency_recovery_samples', defaults.emergency_recovery_samples) or 1)),
             alert_on_disk_emergency=bool(getattr(guard, 'alert_on_disk_emergency', defaults.alert_on_disk_emergency)),
             detail_retention_days=max(0, int(getattr(guard, 'detail_retention_days', defaults.detail_retention_days) or 0)),
-            purge_enabled=bool(getattr(guard, 'purge_enabled', defaults.purge_enabled)),
         )
 
     @staticmethod
@@ -6861,9 +6866,17 @@ class MainRuntimeService:
         runtime_meta = self.log_service.read_task_runtime_meta(task_id) or {}
         configured = str(runtime_meta.get('task_temp_dir') or '').strip()
         legacy_temp_root = (self._workspace_root() / 'temp').resolve(strict=False)
+        # 默认 meta 兜底值是 temp 根目录（非每任务子目录）——等于它说明无真实
+        # 配置（如 meta 行缺失），不得当每任务目录用（否则对账/删除会作用到
+        # 整个 temp 根；正常任务创建时写入的一定是每任务子目录）。
+        fallback_meta_root: Path | None = None
+        try:
+            fallback_meta_root = Path(self.log_service._fallback_task_temp_dir()).resolve(strict=False)
+        except Exception:
+            fallback_meta_root = None
         if configured:
             configured_path = Path(configured).expanduser().resolve(strict=False)
-            if configured_path != legacy_temp_root:
+            if configured_path != legacy_temp_root and configured_path != fallback_meta_root:
                 return configured_path
         return self._task_temp_dir(task_id, create=False)
 
@@ -6904,17 +6917,19 @@ class MainRuntimeService:
             return
 
     # ------------------------------------------------------------------
-    # 磁盘治理（P0-3）：任务终态即清中间产物。
+    # 磁盘治理（P0-3）：任务终态即清「确定不再使用的数据」。
     # 保留清单（唯一权威）：kind=='patch'、kind=='final_output'、
     # task.final_output_ref 指向的 artifact、标题含 report/summary；
     # error_logs 表、节点 blocking_reason、task_events 行一律不动。
+    # 终态即删（确定无读者）：中间产物 artifact、event-history/<task>/
+    # 单份 live.patch 快照（SSE 走内存、任务树恢复帧已在终态转换时清空）、
+    # task_runtime_frames 行（log_service 终态转换时清零）。
     # temp/tasks/<id> 任务临时目录终态后默认原样保留（仅当
     # terminal_temp_dir_cleanup_enabled=true，即环境变量
     # G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED 开启时，才随终态清理硬删）；
     # 用户删任务时仍走 delete_task 全删链路（含该目录兜底回收）。
-    # event-history 只存 live.patch 单份最新快照（latest.json.gz，覆盖写，
-    # 见 store.write_task_live_snapshot），无保留期清理链路；孤儿目录由
-    # 台账 sweep 清扫。
+    # 除终态清理外不再有任何自动删除：任务只随用户/模型工具手动删除而
+    # 彻底清除（_wipe_task_data），磁盘紧张时靠大小可视化引导手动清理。
     # ------------------------------------------------------------------
 
     _TERMINAL_CLEANUP_KEEP_TITLE_TOKENS = ('report', 'summary')
@@ -7026,7 +7041,13 @@ class MainRuntimeService:
                         content_index.pop(key, None)
             except Exception:
                 pass
-        # c) event-history/*.json.gz 终态不即时删（保留期批量清理，见上方权威清单注释）
+        # c) event-history/<task>/ 目录（live.patch 单份快照）：终态后确定
+        # 无运行时读者（SSE 走内存、详情走 DB），整目录删除；迟到补丁重建
+        # 目录是单文件覆盖写、无害，用户删除时 wipe 兜底回收。
+        try:
+            remove_tree(self._task_event_history_dir(task_id))
+        except Exception:
+            pass
         # d) 清理量可观测
         if removed_files or delete_ids:
             logger.info(
@@ -7103,10 +7124,6 @@ class MainRuntimeService:
     async def _disk_emergency_released(self) -> None:
         await self._emit_disk_emergency_alert(active=False, paused_task_ids=[])
 
-    async def _disk_cleanup_signal(self) -> None:
-        # P2 压缩渐进的触发信号占位：置位后由 sweep 消费（P1 只透传状态）。
-        self._disk_cleanup_requested = True
-
     def _abort_queued_waits(self, task_id: str) -> None:
         """任务暂停生效后，唤醒其在预算队列中排队的工具调用（防死锁）。"""
         controller = getattr(self, 'adaptive_tool_budget_controller', None)
@@ -7167,7 +7184,8 @@ class MainRuntimeService:
                 continue
 
     async def _run_detail_retention_if_due(self) -> None:
-        """P3：终态任务大行 14 天裁剪（跨进程 maintenance_runs 卡权 + 紧急水位跳过）。"""
+        """P3：终态任务大行裁剪（默认停用：detail_retention_days<=0 直接返回；
+        配置 >0 时按天裁剪，跨进程 maintenance_runs 卡权 + 紧急水位跳过）。"""
         policies = disk_policies()
         retention_days = int(policies.detail_retention_days)
         if retention_days <= 0:
@@ -7201,30 +7219,43 @@ class MainRuntimeService:
             )
 
     def _reconcile_task_disk_usage(self, task_id: str) -> None:
+        """对账口径 = 目录实测（files/artifacts/event-history/temp）+ 数据库
+        明细字节（五张大行表 payload）。DB 部分失败时回落纯目录值，绝不抛。
+
+        增量记账（bump）只覆盖目录写入差值，DB 字节滞后 ≤1h（与列表端
+        「展示延迟≤1h」契约一致）；终态任务在终态清理后对账一次拿到终值。
+        """
         normalized_task_id = self.normalize_task_id(task_id)
         try:
             total = self._task_disk_usage_bytes(normalized_task_id)
+        except Exception:
+            return
+        try:
+            detail_bytes = self.store.sum_task_detail_bytes([normalized_task_id]) or {}
+            total += int(detail_bytes.get(normalized_task_id) or 0)
+        except Exception:
+            pass
+        try:
             self.store.upsert_task_disk_usage(normalized_task_id, int(total))
         except Exception:
             return
 
     # ------------------------------------------------------------------
-    # 磁盘治理（P2'）：任务删除全量清除 + 全删渐进。
-    # 治理阶梯：终态清理(P0) → 明细裁剪(P3, detail_retention_days) → 全删渐进。
-    # zip 归档/压缩渐进/pin/墓碑已整体移除（历史回放需求由单份最新快照 +
-    # 离散事件 slim 行 + DB 明细承担）。_wipe_task_data 为用户删除与全删
-    # 渐进共用的清除核心，步骤顺序（S0-S7）是契约。
+    # 磁盘治理：任务删除全量清除。
+    # 治理阶梯：终态清理（P0：中间产物 + 确定不再使用的快照数据）→ 手动删除
+    # （用户 Web 操作 / 模型删除工具）。磁盘紧张不再自动删除任何任务——由
+    # 任务大小可视化与排序引导手动清理；紧急线只做暂停/限流保护。
+    # zip 归档/压缩渐进/清理线全删渐进/pin/墓碑已整体移除（历史回放需求由
+    # 单份最新快照 + 离散事件 slim 行 + DB 明细承担）。_wipe_task_data 为
+    # 手动删除共用的清除核心，步骤顺序（S0-S7）是契约。
     # ------------------------------------------------------------------
 
-    # 全删宽限（小时，模块常量）：终态未满该窗口的任务不进全删渐进候选，
-    # 防止磁盘紧张时刚跑完的任务被立即不可逆删除（产出虽已导出，仍留回看窗口）。
-    _FULL_DELETE_GRACE_HOURS = 24.0
     # 删除台账守卫窗口（天，模块常量）：过期前做最终幂等补偿再删台账行，
     # 台账自身不允许成为新的"无条件永久保留"。
     _LEDGER_RETENTION_DAYS = 7
 
     async def _wipe_task_data(self, task: TaskRecord, *, reason: str) -> dict[str, Any]:
-        """任务删除全量清除核心（用户删除 / 全删渐进 / 墓碑清扫共用）。
+        """任务删除全量清除核心（用户删除 / 模型工具删除 / 墓碑清扫共用）。
 
         步骤顺序是契约：
         S0 路径快照（_effective_task_temp_dir 读 runtime_meta，必须在删 DB 前取）
@@ -7497,21 +7528,13 @@ class MainRuntimeService:
         return f'{slug}__{tail}{suffix}'
 
     # ------------------------------------------------------------------
-    # 全删渐进：低于清理线时按 size×age 加权把最老终态任务全量清除（先导产出）。
-    # 紧急线以下绝不执行；每批复检水位；批次上限沿用旧删除渐进的 batch=2。
+    # 紧急线水位判定（只做保护，不触发任何删除）：跌破紧急线后运行中任务
+    # 自动暂停、工具调用排队、可降级写跳过；任务数据只随用户/模型工具手动
+    # 删除而清除（_wipe_task_data），磁盘紧张时靠任务大小可视化引导手动清理。
     # ------------------------------------------------------------------
 
     def _disk_waterline(self) -> tuple[int, int] | None:
         return disk_waterline_snapshot([str(self._workspace_root())])
-
-    def _disk_cleanup_due(self) -> bool:
-        if self._disk_cleanup_requested:
-            return True
-        snapshot = self._disk_waterline()
-        if snapshot is None:
-            return False
-        free, total = snapshot
-        return free < cleanup_threshold_bytes(total)
 
     def _disk_emergency_due(self) -> bool:
         snapshot = self._disk_waterline()
@@ -7519,100 +7542,6 @@ class MainRuntimeService:
             return False
         free, total = snapshot
         return free < emergency_threshold_bytes(total)
-
-    async def _disk_cleanup_sweep_loop(self) -> None:
-        """清理线巡检（embedded/worker，60s）：低于清理线或被 P1 信号置位时跑全删渐进。"""
-        while True:
-            try:
-                await asyncio.sleep(60.0)
-                if not disk_policies().purge_enabled:
-                    self._disk_cleanup_requested = False
-                    continue
-                if not self._disk_cleanup_due():
-                    continue
-                await self._wipe_progressive_sweep()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                continue
-
-    async def _wipe_progressive_sweep(self, *, batch: int = 2) -> int:
-        """全删渐进主体：候选=终态且超出宽限窗口的任务，size×age 加权降序。"""
-        wiped = 0
-        for _round in range(5):
-            if not self._disk_cleanup_due() or self._disk_emergency_due():
-                break
-            try:
-                candidates = await asyncio.to_thread(self._query_wipe_candidates, batch)
-            except Exception:
-                break
-            if not candidates:
-                break
-            progressed = False
-            for task_id in candidates:
-                if self._disk_emergency_due():
-                    break
-                task = self.get_task(task_id)
-                if task is None:
-                    continue
-                await self._wipe_task_data(task, reason='disk_pressure')
-                wiped += 1
-                progressed = True
-            if not progressed:
-                break
-        if wiped:
-            logger.info('disk governance: wipe sweep fully deleted {} terminal task(s) (deliverables exported)', wiped)
-        return wiped
-
-    def _query_wipe_candidates(self, batch: int) -> list[str]:
-        """候选评分：size =（DB 明细字节 + 目录记账），weight = size × max(1, age_days)。
-
-        先按 age 取最老 50 个终态任务算 size（sum_task_detail_bytes 候选集有界），
-        再按加权分排序取前 batch。台账内任务与宽限窗口内的任务不进候选。
-        """
-        policies = disk_policies()
-        if not policies.purge_enabled:
-            return []
-        now_dt = datetime.now(timezone.utc)
-        grace_cutoff = now_dt - timedelta(hours=self._FULL_DELETE_GRACE_HOURS)
-        try:
-            deleted_ids = {
-                str(row.get('task_id') or '')
-                for row in self.store.list_task_delete_ledger_rows(limit=10_000)
-            }
-        except Exception:
-            deleted_ids = set()
-        try:
-            disk_usages = self.store.get_task_disk_usages(None) or {}
-        except Exception:
-            disk_usages = {}
-        pool: list[tuple[str, float]] = []
-        for task in self.store.list_tasks() or []:
-            if str(getattr(task, 'status', '') or '').strip().lower() not in {'success', 'failed'}:
-                continue
-            task_id = str(getattr(task, 'task_id', '') or '').strip()
-            if not task_id or task_id in deleted_ids:
-                continue
-            anchor = str(getattr(task, 'finished_at', '') or '').strip() or str(getattr(task, 'updated_at', '') or '')
-            finished = self._parse_task_timestamp(anchor) if anchor else None
-            if finished is not None and finished > grace_cutoff:
-                continue  # 全删宽限：刚终态的任务不动
-            age_minutes = 0.0 if finished is None else max(0.0, (now_dt - finished).total_seconds() / 60.0)
-            pool.append((task_id, age_minutes))
-        if not pool:
-            return []
-        pool.sort(key=lambda item: item[1], reverse=True)
-        pool = pool[:50]
-        try:
-            detail_bytes = self.store.sum_task_detail_bytes([item[0] for item in pool])
-        except Exception:
-            detail_bytes = {}
-        scored: list[tuple[float, str]] = []
-        for task_id, age_minutes in pool:
-            size = float(int(detail_bytes.get(task_id) or 0) + int(disk_usages.get(task_id) or 0)) + 1.0
-            scored.append((size * max(1.0, age_minutes / 1440.0), task_id))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [task_id for _score, task_id in scored[:max(1, int(batch))]]
 
     # ------------------------------------------------------------------
     # 删除台账 sweep：遗留墓碑清扫 → wiped=0 补偿 → 台账过期 → 孤儿目录清扫。
@@ -10028,12 +9957,12 @@ class MainRuntimeService:
         return payload.text
 
     async def close(self) -> None:
-        for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task, self._task_disk_cleanup_task]:
+        for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task]:
             if task is not None and not task.done():
                 task.cancel()
-        if any(t is not None for t in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task, self._task_disk_cleanup_task]):
+        if any(t is not None for t in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task]):
             await asyncio.gather(
-                *(task for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task, self._task_disk_cleanup_task] if task is not None),
+                *(task for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task] if task is not None),
                 return_exceptions=True,
             )
         delivery_tasks = [task for task in self._task_terminal_delivery_tasks.values() if task is not None and not task.done()]
@@ -10276,13 +10205,12 @@ class MainRuntimeService:
             'machine_pressure_disk_busy_available': bool(merged.get('machine_pressure_disk_busy_available')),
             'machine_pressure_disk_read_bytes_per_sec': float(merged.get('machine_pressure_disk_read_bytes_per_sec') or 0.0),
             'machine_pressure_disk_write_bytes_per_sec': float(merged.get('machine_pressure_disk_write_bytes_per_sec') or 0.0),
-            # 磁盘治理（P1）：剩余空间水位与紧急/清理态（前端性能条与横幅消费）。
+            # 磁盘治理（P1）：剩余空间水位与紧急态（前端性能条与横幅消费）。
             'machine_disk_free_bytes': int(merged.get('machine_disk_free_bytes') if merged.get('machine_disk_free_bytes') is not None else -1),
             'machine_disk_total_bytes': int(merged.get('machine_disk_total_bytes') if merged.get('machine_disk_total_bytes') is not None else -1),
             'machine_disk_usage_percent': float(merged.get('machine_disk_usage_percent') or 0.0),
             'disk_emergency_active': bool(merged.get('disk_emergency_active')),
             'disk_emergency_since': str(merged.get('disk_emergency_since') or ''),
-            'disk_cleanup_active': bool(merged.get('disk_cleanup_active')),
             'sqlite_write_wait_ms': float(merged.get('sqlite_write_wait_ms') or 0.0),
             'sqlite_query_latency_ms': float(merged.get('sqlite_query_latency_ms') or 0.0),
             'pressure_sample_at': sample_at,

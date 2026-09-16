@@ -38,6 +38,7 @@ class _TaskStatsHandler(Tool):
             date_from=str(kwargs.get('from') or '').strip(),
             date_to=str(kwargs.get('to') or '').strip(),
             task_ids=kwargs.get(TASK_ID_LIST_PARAM),
+            sort=str(kwargs.get('sort') or '').strip(),
         )
         return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
