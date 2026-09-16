@@ -95,8 +95,6 @@ class ApiClient {
                 return "操作审计写入失败，本次操作已被拒绝，请稍后重试。";
             case "audit_events_read_failed":
                 return "审计事件暂时不可读取，请稍后刷新。";
-            case "audit_summary_read_failed":
-                return "审计概览暂时不可读取，请稍后刷新。";
             case "llm_binding_key_exists":
                 return "模型ID已存在，请使用其他模型ID。";
             default:
@@ -1098,11 +1096,6 @@ class ApiClient {
             total: data.total || 0,
             hasMore: Boolean(data.has_more ?? data.hasMore),
         };
-    }
-
-    static async getAuditSummary() {
-        const data = await this._request("GET", "/api/audit/summary", { requestKey: "audit:summary" });
-        return { subsystems: data.subsystems || [], generatedAt: data.generated_at || "" };
     }
 
     static async runLlmMigration() {

@@ -182,56 +182,6 @@ def test_list_raises_when_unconfigured(monkeypatch) -> None:
     audit_events.configure_audit_sink(None)
     with pytest.raises(RuntimeError, match="audit_sink_unconfigured"):
         audit_events.list_audit_events()
-    with pytest.raises(RuntimeError, match="audit_sink_unconfigured"):
-        audit_events.audit_summary()
-
-
-def test_summary_zero_fills_fixed_subsystems(sink: Path) -> None:
-    summary = audit_events.audit_summary()
-    subsystems = summary["subsystems"]
-    assert [entry["subsystem"] for entry in subsystems] == ["provider", "task", "web_api"]
-    for entry in subsystems:
-        assert entry["status"] == "ok"
-        assert entry["event_count"] == 0
-        assert entry["error_count"] == 0
-        assert entry["warning_count"] == 0
-        assert entry["latest_event_at"] == ""
-        assert entry["latest_event_summary"] == ""
-    assert summary["generated_at"]
-
-
-def test_summary_counts_and_flips_status(sink: Path, monkeypatch) -> None:
-    stamps = [_ago(9), _ago(6), _ago(3)]
-    monkeypatch.setattr(audit_events, "_now_iso", _make_stamp_sequence(stamps))
-    audit_events.emit_audit_event("provider", "error", "a", "provider 出错", detail={"n": 1})
-    audit_events.emit_audit_event("task", "warning", "b", "任务告警")
-    audit_events.emit_audit_event("provider", "warning", "c", "调用警告")
-
-    summary = audit_events.audit_summary()
-    by_key = {entry["subsystem"]: entry for entry in summary["subsystems"]}
-    provider = by_key["provider"]
-    assert provider["status"] == "error"
-    assert provider["event_count"] == 2
-    assert provider["error_count"] == 1
-    assert provider["warning_count"] == 1
-    assert provider["latest_event_at"] == stamps[2]
-    assert provider["latest_event_level"] == "warning"
-    assert provider["latest_event_summary"] == "调用警告"
-    task = by_key["task"]
-    assert task["status"] == "ok"
-    assert task["warning_count"] == 1
-
-
-def test_summary_window_excludes_old_events(sink: Path, monkeypatch) -> None:
-    old_stamp = (datetime.now().astimezone() - timedelta(hours=25)).isoformat(timespec="seconds")
-    monkeypatch.setattr(audit_events, "_now_iso", _make_stamp_sequence([old_stamp]))
-    audit_events.emit_audit_event("provider", "error", "x", "25 小时前的错误")
-
-    summary = audit_events.audit_summary()
-    provider = next(entry for entry in summary["subsystems"] if entry["subsystem"] == "provider")
-    assert provider["status"] == "ok"
-    assert provider["error_count"] == 0
-    assert provider["event_count"] == 0
 
 
 def test_trim_keeps_newest_events(sink: Path, monkeypatch) -> None:

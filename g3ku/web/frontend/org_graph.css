@@ -12177,7 +12177,7 @@ textarea {
     }
 }
 
-/* 日志审计：侧栏导航徽标 + 健康卡片 + 事件流（只读运维面） */
+/* 日志审计：侧栏导航徽标 + 异常板块 + 原始日志（只读运维面） */
 .nav-item .nav-badge {
     margin-left: auto;
     display: inline-flex;
@@ -12198,79 +12198,104 @@ textarea {
     display: none;
 }
 
-.audit-summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: var(--space-4);
+/* 异常板块：红色来源标签 + 摘要 + 时间；无异常时整块隐藏 */
+.audit-exception-panel {
+    border-color: color-mix(in srgb, var(--danger-color, #ef4444) 45%, var(--border-color));
     margin-bottom: var(--space-4);
 }
 
-.audit-summary-card {
+.audit-exception-list {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    padding: var(--space-4);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-lg);
-    background: var(--bg-secondary);
 }
 
-.audit-summary-card .audit-status.is-ok {
-    color: var(--status-success-text, #4ade80);
+.audit-exception-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-left: 3px solid var(--danger-color, #ef4444);
+    border-radius: var(--radius-md);
+    background: color-mix(in srgb, var(--danger-color, #ef4444) 7%, var(--bg-secondary));
+}
+
+.audit-exception-source {
+    flex: 0 0 auto;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--danger-color, #ef4444) 16%, transparent);
+    color: var(--status-failed-text, #fca5a1);
+    font-size: 0.75rem;
     font-weight: 700;
 }
 
-.audit-summary-card .audit-status.is-error {
+.audit-exception-summary {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.audit-exception-time {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+/* 原始日志：终端风格单行列表，detail 可展开 */
+.audit-event-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.audit-log-line {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2);
+    border-bottom: 1px solid var(--border-color);
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    font-size: 0.8rem;
+}
+
+.audit-log-line .audit-log-time {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+}
+
+.audit-log-line .audit-log-level {
+    flex: 0 0 auto;
+    color: var(--text-secondary);
+}
+
+.audit-log-line.is-error .audit-log-level {
     color: var(--status-failed-text, #fca5a1);
     font-weight: 700;
 }
 
-.audit-summary-card .audit-latest {
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    word-break: break-all;
-}
-
-.audit-level-filters {
-    display: flex;
-    gap: var(--space-2);
-}
-
-.audit-level-chip {
-    border: 1px solid var(--border-color);
-    background: transparent;
-    color: var(--text-secondary);
-    border-radius: 999px;
-    padding: 2px 10px;
-    font-size: 0.78rem;
-    cursor: pointer;
-}
-
-.audit-level-chip.active {
-    color: var(--brand-primary);
-    border-color: var(--brand-primary);
+.audit-log-line.is-warning .audit-log-level {
+    color: var(--warning-color, #f59e0b);
     font-weight: 700;
 }
 
-.audit-event-card {
-    border-left: 3px solid var(--border-color);
-    padding-left: var(--space-3);
-    margin-bottom: var(--space-3);
+.audit-log-line .audit-log-source {
+    flex: 0 0 auto;
+    color: var(--brand-primary);
 }
 
-.audit-event-card.is-error {
-    border-left-color: var(--danger-color, #ef4444);
+.audit-log-line .audit-log-summary {
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-all;
 }
 
-.audit-event-card.is-warning {
-    border-left-color: var(--warning-color, #f59e0b);
-}
-
-.audit-event-card .audit-event-meta {
-    display: flex;
-    gap: var(--space-3);
+.audit-log-line .audit-log-type {
+    flex: 0 0 auto;
     color: var(--text-secondary);
-    font-size: 0.75rem;
+    font-size: 0.72rem;
 }
 
 .audit-event-detail {

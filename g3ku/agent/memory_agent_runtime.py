@@ -1006,6 +1006,37 @@ class _MemorySqliteRepository:
             conn.close()
 
 
+def _emit_audit_memory_parked(record: dict[str, Any], *, trigger: str = "initial") -> None:
+    """尽力而为：记忆批次停车写一条日志审计事件（失败绝不阻塞宿主流程）。
+
+    审计里只读；重试/放弃的操作面仍在记忆板块的失败停车面板。
+    """
+    try:
+        from g3ku.audit_events import emit_audit_event
+
+        category = str(record.get("category") or "").strip()
+        reason = str(record.get("discard_reason") or "").strip()
+        request_ids = list(record.get("request_ids") or [])
+        error_text = str(record.get("last_error_text") or "").strip()
+        emit_audit_event(
+            "memory",
+            "error",
+            "memory_batch_parked",
+            "记忆批次停车：" + str(reason or category or "未知原因")[:120],
+            detail={
+                "failed_id": str(record.get("failed_id") or "").strip(),
+                "category": category,
+                "discard_reason": reason,
+                "park_count": int(record.get("park_count", 0) or 0),
+                "trigger": str(trigger or "initial").strip(),
+                "request_count": len(request_ids),
+                "error_text": error_text[:500],
+            },
+        )
+    except Exception:
+        pass
+
+
 class MemoryManager:
     _PROCESSED_BATCH_RETENTION_DAYS = 7
 
@@ -4238,6 +4269,7 @@ class MemoryManager:
             rows.append(record)
         self._write_failed_records(rows)
         self._drop_request_ids(id_set)
+        _emit_audit_memory_parked(record, trigger=str(trigger or "initial").strip())
         return record
 
     def _parked_batch_report(

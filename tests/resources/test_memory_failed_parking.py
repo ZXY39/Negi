@@ -554,3 +554,48 @@ async def test_list_failed_page_returns_parked_records_newest_first(tmp_path: Pa
         assert [item["request_ids"][0] for item in page["items"]] == ["write_rl_1", "write_rl_0"]
     finally:
         manager.close()
+
+
+async def test_parking_emits_audit_event_with_memory_source(tmp_path: Path, monkeypatch) -> None:
+    """停车即向日志审计池发射 memory_batch_parked（审计只读，操作面仍在记忆板块）。"""
+    module = _load_memory_agent_runtime_module()
+    from g3ku import audit_events
+
+    audit_events.configure_audit_sink(tmp_path)
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="write",
+                decision_source="user",
+                payload_text="Remember the audit case",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="write_audit_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel([_provider_error_response("RateLimitError: 429 audit storm")])
+        _wire_runtime(module, manager, tmp_path, monkeypatch, fake_model)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        assert report["status"] == "parked"
+
+        audit_file = tmp_path / ".g3ku" / "audit.jsonl"
+        assert audit_file.exists()
+        records = [
+            json.loads(line)
+            for line in audit_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(records) == 1
+        record = records[0]
+        assert record["subsystem"] == "memory"
+        assert record["level"] == "error"
+        assert record["event_type"] == "memory_batch_parked"
+        assert record["summary"].startswith("记忆批次停车：")
+        assert record["detail"]["failed_id"] == report["failed_id"]
+        assert record["detail"]["category"] == "provider_error"
+        assert record["detail"]["request_count"] == 1
+        assert "429" in record["detail"]["error_text"]
+    finally:
+        manager.close()
+        audit_events.configure_audit_sink(None)

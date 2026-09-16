@@ -722,27 +722,29 @@
                 <header class="content-header resource-header compact-resource-header">
                     <div class="resource-header-title">
                         <h1>日志审计</h1>
-                        <p class="subtitle">各子系统近 24 小时健康状态与错误/通知事件流；记忆错误仍在记忆管理中查看。</p>
+                        <p class="subtitle">系统异常与原始事件日志；记忆问题在此只读，重试/放弃仍在记忆管理操作。</p>
                     </div>
                     <div class="resource-header-actions compact-resource-header-actions">
                         <button id="audit-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                     </div>
                 </header>
-                <div id="audit-summary-grid" class="audit-summary-grid"></div>
+                <section id="audit-exception-panel" class="resource-detail-panel audit-exception-panel" hidden>
+                    <div class="panel-header">
+                        <div>
+                            <h3>异常</h3>
+                            <p class="subtitle">最新异常与信息来源。</p>
+                        </div>
+                    </div>
+                    <div id="audit-exception-list" class="audit-exception-list"></div>
+                </section>
                 <section class="resource-detail-panel audit-feed-panel">
                     <div class="panel-header">
                         <div>
-                            <h3>事件流</h3>
-                            <p class="subtitle">最新事件在前。</p>
-                        </div>
-                        <div id="audit-level-filters" class="audit-level-filters">
-                            <button type="button" class="audit-level-chip active" data-audit-level="all">全部</button>
-                            <button type="button" class="audit-level-chip" data-audit-level="error">错误</button>
-                            <button type="button" class="audit-level-chip" data-audit-level="warning">警告</button>
-                            <button type="button" class="audit-level-chip" data-audit-level="info">信息</button>
+                            <h3>原始日志</h3>
+                            <p class="subtitle">全新在前，包含全部级别事件。</p>
                         </div>
                     </div>
-                    <div id="audit-event-list" class="memory-list audit-event-list"></div>
+                    <div id="audit-event-list" class="audit-event-list"></div>
                     <div class="memory-footer">
                         <div id="audit-event-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
                         <button id="audit-event-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>

@@ -1,4 +1,4 @@
-"""日志审计前端契约测试：导航按钮/角标结构、view-audit 区块、JS 职责、api_client 与端点钉约。"""
+"""日志审计前端契约测试：导航按钮/角标结构、异常板块 + 原始日志区块、JS 职责、api_client 与端点钉约。"""
 
 from pathlib import Path
 
@@ -46,24 +46,27 @@ def test_view_audit_section_sits_between_external_and_task_details() -> None:
         < html.index('id="view-task-details"')
     )
     section = _fragment(html, 'id="view-audit"', 'id="view-task-details"')
-    # 健康卡 + 事件流 + 刷新 + 级别筛选 + 加载更多
-    assert 'id="audit-summary-grid"' in section
+    # 异常板块（有异常才显示）+ 原始日志 + 刷新 + 加载更多
+    assert 'id="audit-exception-panel"' in section
+    assert 'id="audit-exception-list"' in section
     assert 'id="audit-event-list"' in section
     assert 'id="audit-refresh-btn"' in section
-    assert 'id="audit-level-filters"' in section
     assert 'id="audit-event-more-btn"' in section
     assert 'id="audit-event-info"' in section
-    for chip in ("全部", "错误", "警告", "信息"):
-        assert chip in section
-    assert "记忆错误仍在记忆管理中查看" in section
+    # 板块标题与简化契约：异常信息来源 + 原始日志
+    assert "异常" in section
+    assert "原始日志" in section
+    assert "记忆问题在此只读" in section
 
 
-def test_view_audit_does_not_duplicate_memory_surface() -> None:
+def test_view_audit_has_no_summary_or_level_filters() -> None:
     html = _source("g3ku/web/frontend/org_graph.html")
-    audit_section = _fragment(html, 'id="view-audit"', 'id="view-task-details"')
-    # 记忆错误面板/列表id 不得进入审计视图——记忆错误只存在于记忆板块
-    assert "memory-failed-list" not in audit_section
-    assert "memory-failed-panel" not in audit_section
+    section = _fragment(html, 'id="view-audit"', 'id="view-task-details"')
+    # 彻底简约：去掉 24h 健康卡与级别筛选，也没有记忆失败面板（操作面在记忆板块）
+    assert "audit-summary-grid" not in section
+    assert "audit-level-filters" not in section
+    assert "memory-failed-list" not in section
+    assert "memory-failed-panel" not in section
 
 
 def test_audit_js_constants_state_and_ui_cache() -> None:
@@ -77,6 +80,7 @@ def test_audit_js_constants_state_and_ui_cache() -> None:
     assert "auditBadgePollIntervalId: null" in app_js
     assert 'viewAudit: document.getElementById("view-audit")' in app_js
     assert 'auditNavBadge: document.getElementById("audit-nav-badge")' in app_js
+    assert 'auditExceptionPanel: document.getElementById("audit-exception-panel")' in app_js
     assert "audit: U.viewAudit" in app_js
 
 
@@ -88,14 +92,30 @@ def test_audit_js_lifecycle_follows_memory_view_precedent() -> None:
     assert 'if (S.view !== "audit") return;' in app_js
     assert 'if (view === "audit") startAuditViewAutoRefresh();' in app_js
     assert "function loadAuditView(" in app_js
-    assert "function loadAuditSummary(" in app_js
+    assert "function loadAuditExceptions(" in app_js
     assert "function loadAuditEvents(" in app_js
     assert "function loadMoreAuditEvents()" in app_js
-    assert "function renderAuditSummaryCards(" in app_js
+    assert "function renderAuditExceptionList(" in app_js
+    assert "function renderAuditExceptionRow(" in app_js
+    assert "function auditSubsystemLabel(subsystem)" in app_js
     assert "function renderAuditEventList(" in app_js
     # 角标常驻轮询在 init 启动（不按视图门控） + 首访刷新
     assert "bindAuditBadge();" in app_js
     assert "void refreshAuditBadge();" in app_js
+    # 彻底简约：24h 汇总与级别筛选全部移除
+    assert "auditSummaryGeneratedAt" not in app_js
+    assert "auditLevelFilter" not in app_js
+    assert "renderAuditSummaryCards" not in app_js
+
+
+def test_audit_js_subclass_labels_cover_memory() -> None:
+    app_js = _source("g3ku/web/frontend/org_graph_app.js")
+
+    # 来源标签：模型调用/任务执行/Web 接口/记忆处理（记忆错误只读进入审计池）
+    for label in ("模型调用", "任务执行", "Web 接口", "记忆处理"):
+        assert label in app_js
+    assert 'getAuditEvents({ limit: 20, level: "error" })' in app_js
+    assert "U.auditExceptionPanel.hidden = items.length === 0" in app_js
 
 
 def test_audit_js_badge_semantics() -> None:
@@ -114,19 +134,19 @@ def test_audit_js_badge_semantics() -> None:
     assert "writeSessionJson(AUDIT_LAST_SEEN_KEY" in app_js
 
 
-def test_api_client_exposes_audit_methods_and_friendly_codes() -> None:
+def test_api_client_exposes_audit_events_only() -> None:
     api_client_js = _source("g3ku/web/frontend/api_client.js")
 
     assert "static async getAuditEvents(" in api_client_js
-    assert "static async getAuditSummary()" in api_client_js
     assert '"/api/audit/events"' in api_client_js
-    assert '"/api/audit/summary"' in api_client_js
     assert "audit_events_read_failed" in api_client_js
-    assert "audit_summary_read_failed" in api_client_js
     assert "审计事件暂时不可读取，请稍后刷新。" in api_client_js
-    assert "审计概览暂时不可读取，请稍后刷新。" in api_client_js
     # 角标轮询(requestKey 含 since)与视图分页互不取消
     assert "audit:events:" in api_client_js
+    # summary 端点随 24h 汇总一并移除
+    assert "getAuditSummary" not in api_client_js
+    assert "/api/audit/summary" not in api_client_js
+    assert "audit_summary_read_failed" not in api_client_js
 
 
 def test_audit_endpoint_contract() -> None:
@@ -139,11 +159,8 @@ def test_audit_endpoint_contract() -> None:
     assert "audit_events.list_audit_events(" in events_fragment
     assert "audit_events_read_failed" in events_fragment
     assert "'has_more'" in events_fragment
-
-    assert "@router.get('/audit/summary')" in admin_rest_py
-    summary_fragment = _admin_route_fragment(admin_rest_py, "@router.get('/audit/summary')")
-    assert "audit_events.audit_summary()" in summary_fragment
-    assert "audit_summary_read_failed" in summary_fragment
+    # summary 路由已移除
+    assert "@router.get('/audit/summary')" not in admin_rest_py
 
 
 def test_audit_css_selectors() -> None:
@@ -152,11 +169,13 @@ def test_audit_css_selectors() -> None:
     # 导航内角标（首个出现在 .nav-item 里的徽标）+ 隐藏规则
     assert ".nav-item .nav-badge" in css
     assert ".nav-item .nav-badge[hidden]" in css
-    # 健康卡网格/状态/事件流筛选
-    assert ".audit-summary-grid" in css
-    assert ".audit-summary-card" in css
-    assert ".audit-status.is-ok" in css
-    assert ".audit-status.is-error" in css
-    assert ".audit-level-chip.active" in css
-    assert ".audit-event-card.is-error" in css
-    assert ".audit-event-card.is-warning" in css
+    # 异常板块 + 原始日志单行样式
+    assert ".audit-exception-panel" in css
+    assert ".audit-exception-row" in css
+    assert ".audit-exception-source" in css
+    assert ".audit-log-line" in css
+    assert ".audit-log-line.is-error" in css
+    assert ".audit-log-line.is-warning" in css
+    # 旧健康卡/筛选样式已清除
+    assert ".audit-summary-grid" not in css
+    assert ".audit-level-chip" not in css

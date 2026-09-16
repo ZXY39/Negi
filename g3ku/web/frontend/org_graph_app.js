@@ -391,12 +391,10 @@ const S = {
     auditLoadedOnce: false,
     auditPollIntervalId: null,
     auditBadgePollIntervalId: null,
-    auditLevelFilter: "",
     auditOffset: 0,
     auditHasMore: false,
     auditBusy: false,
     auditLatestEventTs: "",
-    auditSummaryGeneratedAt: "",
 };
 
 const U = {
@@ -467,12 +465,12 @@ const U = {
     viewTaskDetails: document.getElementById("view-task-details"),
     viewAudit: document.getElementById("view-audit"),
     auditNavBadge: document.getElementById("audit-nav-badge"),
-    auditSummaryGrid: document.getElementById("audit-summary-grid"),
+    auditExceptionPanel: document.getElementById("audit-exception-panel"),
+    auditExceptionList: document.getElementById("audit-exception-list"),
     auditEventList: document.getElementById("audit-event-list"),
     auditEventInfo: document.getElementById("audit-event-info"),
     auditEventMore: document.getElementById("audit-event-more-btn"),
     auditRefresh: document.getElementById("audit-refresh-btn"),
-    auditLevelFilters: document.getElementById("audit-level-filters"),
     memoryAdminActions: document.getElementById("memory-admin-actions"),
     memoryRefresh: document.getElementById("memory-refresh-btn"),
     memoryViewCurrent: document.getElementById("memory-view-current-btn"),
@@ -12417,7 +12415,7 @@ async function loadAuditView({ quiet = false } = {}) {
     S.auditBusy = true;
     S.auditOffset = 0;
     try {
-        await Promise.all([loadAuditSummary({ quiet }), loadAuditEvents({ quiet, reset: true })]);
+        await Promise.all([loadAuditExceptions({ quiet }), loadAuditEvents({ quiet, reset: true })]);
         S.auditLoadedOnce = true;
         markAuditRead();
     } finally {
@@ -12425,22 +12423,49 @@ async function loadAuditView({ quiet = false } = {}) {
     }
 }
 
-async function loadAuditSummary({ quiet = false } = {}) {
+function auditSubsystemLabel(subsystem) {
+    const labels = {
+        provider: "模型调用",
+        task: "任务执行",
+        web_api: "Web 接口",
+        memory: "记忆处理",
+    };
+    return Object.prototype.hasOwnProperty.call(labels, subsystem) ? labels[subsystem] : String(subsystem || "未知来源");
+}
+
+async function loadAuditExceptions({ quiet = false } = {}) {
     try {
-        const data = await ApiClient.getAuditSummary();
-        S.auditSummaryGeneratedAt = data.generatedAt || "";
-        renderAuditSummaryCards(data.subsystems || []);
+        const data = await ApiClient.getAuditEvents({ limit: 20, level: "error" });
+        const items = Array.isArray(data.items) ? data.items : [];
+        renderAuditExceptionList(items);
     } catch (error) {
         if (!quiet) {
             showToast({
-                title: "审计概览加载失败",
+                title: "异常列表加载失败",
                 text: String(error?.message || ""),
                 kind: "error",
                 durationMs: 2600,
             });
         }
-        renderAuditSummaryCards();
+        renderAuditExceptionList([]);
     }
+}
+
+function renderAuditExceptionList(items = []) {
+    if (U.auditExceptionPanel) U.auditExceptionPanel.hidden = items.length === 0;
+    if (!U.auditExceptionList) return;
+    U.auditExceptionList.innerHTML = items.map((item) => renderAuditExceptionRow(item)).join("");
+}
+
+function renderAuditExceptionRow(item = {}) {
+    const timestamp = String(item.timestamp || "-");
+    const summary = String(item.summary || "");
+    const source = auditSubsystemLabel(String(item.subsystem || "unknown"));
+    return `<article class="audit-exception-row">
+        <span class="audit-exception-source">${esc(source)}</span>
+        <span class="audit-exception-summary" title="${esc(summary)}">${esc(summary)}</span>
+        <span class="audit-exception-time">${esc(timestamp)}</span>
+    </article>`;
 }
 
 async function loadAuditEvents({ quiet = false, reset = false } = {}) {
@@ -12448,7 +12473,6 @@ async function loadAuditEvents({ quiet = false, reset = false } = {}) {
         const data = await ApiClient.getAuditEvents({
             limit: AUDIT_PAGE_SIZE,
             offset: reset ? 0 : S.auditOffset,
-            level: S.auditLevelFilter,
         });
         const items = Array.isArray(data.items) ? data.items : [];
         renderAuditEventList(items, { append: !reset && S.auditOffset > 0 });
@@ -12479,33 +12503,6 @@ async function loadMoreAuditEvents() {
     }
 }
 
-function renderAuditSummaryCards(subsystems = []) {
-    if (!U.auditSummaryGrid) return;
-    const list = Array.isArray(subsystems) ? subsystems : [];
-    U.auditSummaryGrid.innerHTML = list
-        .map((entry = {}) => {
-            const key = String(entry.subsystem || "unknown");
-            const label = String(entry.label || key);
-            const status = entry.status === "error" ? "error" : "ok";
-            const errorCount = Number(entry.error_count) || 0;
-            const warningCount = Number(entry.warning_count) || 0;
-            const eventCount = Number(entry.event_count) || 0;
-            const statusText = status === "error" ? `有错误 (${errorCount})` : "正常";
-            const countsText = `错误 ${errorCount} · 警告 ${warningCount} · 事件 ${eventCount}`;
-            const latestAt = String(entry.latest_event_at || "");
-            const latestText = latestAt
-                ? `${latestAt} ${String(entry.latest_event_summary || "")}`
-                : "暂无事件";
-            return `<article class="audit-summary-card">
-                <h3>${esc(label)}</h3>
-                <div class="audit-status is-${status}">${esc(statusText)}</div>
-                <div class="audit-latest">${esc(countsText)}</div>
-                <div class="audit-latest">${esc(latestText)}</div>
-            </article>`;
-        })
-        .join("");
-}
-
 function auditEventLevelClass(level) {
     if (level === "error") return "is-error";
     if (level === "warning") return "is-warning";
@@ -12519,9 +12516,10 @@ function auditEventLevelLabel(level) {
 }
 
 function renderAuditEventCard(item = {}) {
+    // 原始日志：一行一条（时间 | 级别 | 来源 | 摘要），detail 可展开
     const level = String(item.level || "info");
     const timestamp = String(item.timestamp || "-");
-    const subsystemKey = String(item.subsystem || "unknown");
+    const source = auditSubsystemLabel(String(item.subsystem || "unknown"));
     const eventType = String(item.event_type || "");
     const summary = String(item.summary || "");
     const detail = item.detail;
@@ -12535,14 +12533,12 @@ function renderAuditEventCard(item = {}) {
         }
         detailHtml = `<details class="audit-event-expand"><summary>详情</summary><pre class="audit-event-detail">${esc(pretty)}</pre></details>`;
     }
-    return `<article class="audit-event-card ${auditEventLevelClass(level)}">
-        <div class="audit-event-meta">
-            <span class="audit-event-time">${esc(timestamp)}</span>
-            <span class="audit-event-level">${esc(auditEventLevelLabel(level))}</span>
-            <span class="audit-event-subsystem">${esc(subsystemKey)}</span>
-            ${eventType ? `<span class="audit-event-type">${esc(eventType)}</span>` : ""}
-        </div>
-        <div class="audit-event-summary">${esc(summary)}</div>
+    return `<article class="audit-log-line ${auditEventLevelClass(level)}">
+        <span class="audit-log-time">${esc(timestamp)}</span>
+        <span class="audit-log-level">${esc(auditEventLevelLabel(level))}</span>
+        <span class="audit-log-source">${esc(source)}</span>
+        <span class="audit-log-summary">${esc(summary)}</span>
+        ${eventType ? `<span class="audit-log-type">${esc(eventType)}</span>` : ""}
         ${detailHtml}
     </article>`;
 }
@@ -12611,7 +12607,7 @@ function bindAuditBadge() {
 }
 
 function markAuditRead() {
-    const latest = S.auditLatestEventTs || S.auditSummaryGeneratedAt || "";
+    const latest = S.auditLatestEventTs || "";
     writeSessionJson(AUDIT_LAST_SEEN_KEY, { lastSeen: latest });
     renderAuditNavBadge(0);
 }
@@ -13080,16 +13076,6 @@ function bind() {
     U.memoryFailedMore?.addEventListener("click", () => void loadMoreMemoryFailed());
     U.auditRefresh?.addEventListener("click", () => void loadAuditView());
     U.auditEventMore?.addEventListener("click", () => void loadMoreAuditEvents());
-    U.auditLevelFilters?.addEventListener("click", (event) => {
-        if (!(event.target instanceof Element)) return;
-        const chip = event.target.closest(".audit-level-chip");
-        if (!chip) return;
-        const level = chip.dataset.auditLevel === "all" ? "" : String(chip.dataset.auditLevel || "");
-        if (S.auditLevelFilter === level) return;
-        S.auditLevelFilter = level;
-        U.auditLevelFilters?.querySelectorAll(".audit-level-chip").forEach((el) => el.classList.toggle("active", el === chip));
-        void loadAuditView({ quiet: true });
-    });
     U.memoryQueueList?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
         const noteTrigger = e.target.closest("[data-memory-note-ref]");

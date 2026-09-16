@@ -2623,20 +2623,3 @@ async def get_audit_events(
         'total': int(payload.get('total', 0) or 0),
         'has_more': bool(payload.get('has_more', False)),
     }
-
-
-@router.get('/audit/summary')
-async def get_audit_summary():
-    """各子系统近 24 小时健康概览（固定子系统补零在前）。"""
-    try:
-        payload = audit_events.audit_summary()
-    except Exception as exc:
-        raise _audit_read_error(
-            code='audit_summary_read_failed',
-            message='审计概览暂时不可读取，请稍后刷新。',
-        ) from exc
-    return {
-        'ok': True,
-        'subsystems': list(payload.get('subsystems') or []),
-        'generated_at': str(payload.get('generated_at') or ''),
-    }

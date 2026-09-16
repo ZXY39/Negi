@@ -98,29 +98,6 @@ def test_events_endpoint_rejects_bad_limits(client) -> None:
     assert test_client.get("/api/audit/events", params={"limit": 201}).status_code == 422
 
 
-def test_summary_endpoint_zero_fills_and_flips_status(client) -> None:
-    _workspace, test_client = client
-    summary = test_client.get("/api/audit/summary").json()
-    assert summary["ok"] is True
-    assert [entry["subsystem"] for entry in summary["subsystems"]] == [
-        "provider",
-        "task",
-        "web_api",
-    ]
-    for entry in summary["subsystems"]:
-        assert entry["status"] == "ok"
-        assert entry["latest_event_at"] == ""
-    assert summary["generated_at"]
-
-    audit_events.emit_audit_event("provider", "error", "x", "provider 出错")
-    summary = test_client.get("/api/audit/summary").json()
-    provider = next(entry for entry in summary["subsystems"] if entry["subsystem"] == "provider")
-    assert provider["status"] == "error"
-    assert provider["error_count"] == 1
-    assert provider["latest_event_at"]
-    assert provider["latest_event_summary"] == "provider 出错"
-
-
 def test_events_endpoint_503_contract(client, monkeypatch) -> None:
     _workspace, test_client = client
     failing = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))  # noqa: E731
@@ -128,12 +105,6 @@ def test_events_endpoint_503_contract(client, monkeypatch) -> None:
     response = test_client.get("/api/audit/events")
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "audit_events_read_failed"
-
-    failing_summary = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # noqa: E731
-    monkeypatch.setattr(audit_events, "audit_summary", failing_summary)
-    response = test_client.get("/api/audit/summary")
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "audit_summary_read_failed"
 
 
 def test_audit_events_on_disk_are_valid_jsonl(client) -> None:

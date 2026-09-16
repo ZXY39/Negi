@@ -115,6 +115,8 @@ function loadApp() {
             renderAuditNavBadge,
             auditUnreadFromResponse,
             resolveAuditLastSeen,
+            auditSubsystemLabel,
+            renderAuditExceptionRow,
             switchView,
             stopAuditViewAutoRefresh,
         };`,
@@ -182,6 +184,37 @@ test("resolveAuditLastSeen implements first-visit semantics", () => {
     const behind = api.resolveAuditLastSeen("2026-09-17T10:00:01+08:00", newest);
     assert.equal(behind.lastSeen, "2026-09-17T10:00:01+08:00");
     assert.equal(behind.unread, 0);
+});
+
+test("auditSubsystemLabel maps subsystem keys to Chinese source labels", () => {
+    const api = loadApp();
+    assert.equal(api.auditSubsystemLabel("provider"), "模型调用");
+    assert.equal(api.auditSubsystemLabel("task"), "任务执行");
+    assert.equal(api.auditSubsystemLabel("web_api"), "Web 接口");
+    assert.equal(api.auditSubsystemLabel("memory"), "记忆处理");
+    assert.equal(api.auditSubsystemLabel("future_thing"), "future_thing");
+    assert.equal(api.auditSubsystemLabel(""), "未知来源");
+});
+
+test("renderAuditExceptionRow renders source, summary and time", () => {
+    const api = loadApp();
+    const html = api.renderAuditExceptionRow({
+        timestamp: "2026-09-17T10:00:00+08:00",
+        subsystem: "memory",
+        summary: "记忆批次停车：provider_error",
+    });
+    assert.match(html, /audit-exception-row/);
+    assert.match(html, /audit-exception-source/);
+    assert.match(html, /记忆处理/);
+    assert.match(html, /记忆批次停车：provider_error/);
+    assert.match(html, /2026-09-17T10:00:00\+08:00/);
+    // 摘要全部过 esc：HTML 特殊字符被转义
+    const escaped = api.renderAuditExceptionRow({
+        timestamp: "t",
+        subsystem: "provider",
+        summary: "<script>alert(1)</script>",
+    });
+    assert.match(escaped, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 });
 
 test("switchView('audit') moves the view state and activates the nav item", () => {

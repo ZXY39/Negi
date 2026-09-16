@@ -9,14 +9,14 @@ unconfigured or the write fails. A sink is configured at runtime bootstrap
 (``configure_audit_sink`` in ``g3ku/runtime/bootstrap_factory.py``), which
 covers the web process, the CLI, and the managed worker.
 
-Read semantics: ``list_audit_events`` / ``audit_summary`` resolve the
-workspace root from the configured sink, falling back to the live runtime
-config, and raise ``RuntimeError('audit_sink_unconfigured')`` when neither
-resolves. There is deliberately no ``Path.cwd()`` fallback: provider-factory
-unit tests run from the repo root and must never touch a real workspace.
+Read semantics: ``list_audit_events`` resolves the workspace root from the
+configured sink, falling back to the live runtime config, and raises
+``RuntimeError('audit_sink_unconfigured')`` when neither resolves. There is
+deliberately no ``Path.cwd()`` fallback: provider-factory unit tests run from
+the repo root and must never touch a real workspace.
 
-Memory errors do NOT enter this sink; they stay in the memory view
-(``memory/failed.jsonl``).
+Memory errors DO enter this sink (read-only); their operational surface
+(retry/discard) remains in the memory view (``memory/failed.jsonl``).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import json
 import os
 import secrets
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,12 +36,12 @@ AUDIT_FILE_NAME = "audit.jsonl"
 AUDIT_MAX_FILE_BYTES = 2 * 1024 * 1024
 AUDIT_TRIM_KEEP_EVENTS = 2000
 AUDIT_MAX_EVENT_COUNT = 4000
-AUDIT_SUMMARY_WINDOW_HOURS = 24
 
 KNOWN_SUBSYSTEM_LABELS = {
     "provider": "模型调用",
     "task": "任务执行",
     "web_api": "Web 接口",
+    "memory": "记忆处理",
 }
 AUDIT_LEVELS = ("info", "warning", "error")
 
@@ -180,48 +180,6 @@ def list_audit_events(
     return {"items": items, "total": total, "has_more": offset + limit < total}
 
 
-def audit_summary() -> dict[str, Any]:
-    """Per-subsystem rollup over the last 24 hours.
-
-    The fixed known subsystems are always present (zero-filled, in
-    ``KNOWN_SUBSYSTEM_LABELS`` order); subsystems seen only in records follow
-    in first-discovery order. Each entry carries 24h error/warning/event
-    counts, the latest event's timestamp/level/summary, and a status of
-    ``'error'`` when any error landed in the window, else ``'ok'``.
-    """
-    root = _resolve_read_root()
-    window_start = datetime.now().astimezone() - timedelta(hours=AUDIT_SUMMARY_WINDOW_HOURS)
-    entries: dict[str, dict[str, Any]] = {}
-    for key, label in KNOWN_SUBSYSTEM_LABELS.items():
-        entries[key] = _empty_summary_entry(key, label)
-    for record in _read_events(root):
-        ts_text = str(record.get("timestamp") or "")
-        try:
-            ts = datetime.fromisoformat(ts_text)
-        except ValueError:
-            continue
-        if ts < window_start:
-            continue
-        key = str(record.get("subsystem") or "unknown").strip().lower() or "unknown"
-        entry = entries.get(key)
-        if entry is None:
-            entry = _empty_summary_entry(key, key)
-            entries[key] = entry
-        level = str(record.get("level") or "info").strip().lower()
-        entry["event_count"] = int(entry["event_count"]) + 1
-        if level == "error":
-            entry["error_count"] = int(entry["error_count"]) + 1
-        elif level == "warning":
-            entry["warning_count"] = int(entry["warning_count"]) + 1
-        if not entry["latest_event_at"]:
-            entry["latest_event_at"] = ts_text
-            entry["latest_event_level"] = level
-            entry["latest_event_summary"] = str(record.get("summary") or "")
-    for entry in entries.values():
-        entry["status"] = "error" if int(entry["error_count"]) > 0 else "ok"
-    return {"subsystems": list(entries.values()), "generated_at": _now_iso()}
-
-
 def _now_iso() -> str:
     """Local-aware ISO timestamp with second precision (matches main.protocol)."""
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -295,17 +253,3 @@ def _trim_if_needed_locked(path: Path) -> None:
             tmp_path.unlink(missing_ok=True)
         except OSError:
             pass
-
-
-def _empty_summary_entry(key: str, label: str) -> dict[str, Any]:
-    return {
-        "subsystem": key,
-        "label": label,
-        "status": "ok",
-        "event_count": 0,
-        "error_count": 0,
-        "warning_count": 0,
-        "latest_event_at": "",
-        "latest_event_level": "",
-        "latest_event_summary": "",
-    }
