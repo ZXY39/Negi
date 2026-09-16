@@ -73,6 +73,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
+- 日志审计侧栏角标不更新、审计事件缺失、子系统健康卡空白、`/api/audit` 503 → `web-and-admin.md`「Log Audit Page And Event Contract」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息 → `context-and-cache-troubleshooting.md`「残留 paused 转录条目」
 - 同一份 heartbeat 规则 / event bundle 在请求体里重复多份、token 逐轮线性上涨而对话无实质推进、或模型被已 success 节点的过期暂停通知误导 → `context-and-cache-troubleshooting.md`「heartbeat / cron 上下文残骸」
@@ -108,7 +109,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair, node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
 | Tool/skill four concepts, candidate→callable chain, Tool Admin RBAC semantics, duplicate-call guard, universal tool timeout contract | `tool-and-skill-system.md` |
 | Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
-| Websocket/UI contracts, composer/media rendering, image upload gating, model config admin draft contract, container deployment | `web-and-admin.md` |
+| Websocket/UI contracts, composer/media rendering, image upload gating, model config admin draft contract, log audit event sink and audit page contract, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
