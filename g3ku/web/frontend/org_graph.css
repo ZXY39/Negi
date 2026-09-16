@@ -12176,3 +12176,107 @@ textarea {
         align-items: stretch;
     }
 }
+
+/* 日志审计：侧栏导航徽标 + 健康卡片 + 事件流（只读运维面） */
+.nav-item .nav-badge {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--danger-color, #ef4444);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.nav-item .nav-badge[hidden] {
+    display: none;
+}
+
+.audit-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--space-4);
+    margin-bottom: var(--space-4);
+}
+
+.audit-summary-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    background: var(--bg-secondary);
+}
+
+.audit-summary-card .audit-status.is-ok {
+    color: var(--status-success-text, #4ade80);
+    font-weight: 700;
+}
+
+.audit-summary-card .audit-status.is-error {
+    color: var(--status-failed-text, #fca5a1);
+    font-weight: 700;
+}
+
+.audit-summary-card .audit-latest {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    word-break: break-all;
+}
+
+.audit-level-filters {
+    display: flex;
+    gap: var(--space-2);
+}
+
+.audit-level-chip {
+    border: 1px solid var(--border-color);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+
+.audit-level-chip.active {
+    color: var(--brand-primary);
+    border-color: var(--brand-primary);
+    font-weight: 700;
+}
+
+.audit-event-card {
+    border-left: 3px solid var(--border-color);
+    padding-left: var(--space-3);
+    margin-bottom: var(--space-3);
+}
+
+.audit-event-card.is-error {
+    border-left-color: var(--danger-color, #ef4444);
+}
+
+.audit-event-card.is-warning {
+    border-left-color: var(--warning-color, #f59e0b);
+}
+
+.audit-event-card .audit-event-meta {
+    display: flex;
+    gap: var(--space-3);
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.audit-event-detail {
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin-top: var(--space-2);
+}

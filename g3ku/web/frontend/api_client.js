@@ -93,6 +93,10 @@ class ApiClient {
                 return "记忆运维变更未启用：请在服务端设置环境变量 G3KU_ENABLE_MEMORY_ADMIN_MUTATIONS 后重试。";
             case "memory_admin_audit_failed":
                 return "操作审计写入失败，本次操作已被拒绝，请稍后重试。";
+            case "audit_events_read_failed":
+                return "审计事件暂时不可读取，请稍后刷新。";
+            case "audit_summary_read_failed":
+                return "审计概览暂时不可读取，请稍后刷新。";
             case "llm_binding_key_exists":
                 return "模型ID已存在，请使用其他模型ID。";
             default:
@@ -1078,6 +1082,27 @@ class ApiClient {
         return this._request("POST", `/api/memory/failed/${encodeURIComponent(failedId)}/discard`, {
             body: { reason },
         });
+    }
+
+    static async getAuditEvents({ limit = 50, offset = 0, level = "", subsystem = "", since = "" } = {}) {
+        const params = { limit, offset };
+        if (level) params.level = level;
+        if (subsystem) params.subsystem = subsystem;
+        if (since) params.since = since;
+        const data = await this._request("GET", "/api/audit/events", {
+            params,
+            requestKey: `audit:events:${offset}:${limit}:${level || "-"}:${subsystem || "-"}:${since || "-"}`,
+        });
+        return {
+            items: data.items || [],
+            total: data.total || 0,
+            hasMore: Boolean(data.has_more ?? data.hasMore),
+        };
+    }
+
+    static async getAuditSummary() {
+        const data = await this._request("GET", "/api/audit/summary", { requestKey: "audit:summary" });
+        return { subsystems: data.subsystems || [], generatedAt: data.generated_at || "" };
     }
 
     static async runLlmMigration() {

@@ -37,6 +37,10 @@ const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
 const CEO_FOLLOW_UP_QUEUE_CACHE_KEY = "g3ku.ceo.follow-up-queues.v1";
 const CEO_FOLLOW_UP_QUEUE_CACHE_LIMIT = 24;
 const CEO_FOLLOW_UP_QUEUE_PER_SESSION_LIMIT = 20;
+const AUDIT_LAST_SEEN_KEY = "g3ku.audit.last-seen.v1";
+const AUDIT_VIEW_POLL_MS = 15000;
+const AUDIT_BADGE_POLL_MS = 30000;
+const AUDIT_PAGE_SIZE = 30;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -382,6 +386,15 @@ const S = {
     memoryLastAlertText: "",
     memoryLastBlockedText: "",
     memoryPollIntervalId: null,
+    auditLoadedOnce: false,
+    auditPollIntervalId: null,
+    auditBadgePollIntervalId: null,
+    auditLevelFilter: "",
+    auditOffset: 0,
+    auditHasMore: false,
+    auditBusy: false,
+    auditLatestEventTs: "",
+    auditSummaryGeneratedAt: "",
 };
 
 const U = {
@@ -450,6 +463,14 @@ const U = {
     viewModels: document.getElementById("view-models"),
     viewExternal: document.getElementById("view-external"),
     viewTaskDetails: document.getElementById("view-task-details"),
+    viewAudit: document.getElementById("view-audit"),
+    auditNavBadge: document.getElementById("audit-nav-badge"),
+    auditSummaryGrid: document.getElementById("audit-summary-grid"),
+    auditEventList: document.getElementById("audit-event-list"),
+    auditEventInfo: document.getElementById("audit-event-info"),
+    auditEventMore: document.getElementById("audit-event-more-btn"),
+    auditRefresh: document.getElementById("audit-refresh-btn"),
+    auditLevelFilters: document.getElementById("audit-level-filters"),
     memoryAdminActions: document.getElementById("memory-admin-actions"),
     memoryRefresh: document.getElementById("memory-refresh-btn"),
     memoryViewCurrent: document.getElementById("memory-view-current-btn"),
@@ -12371,6 +12392,227 @@ function startMemoryViewAutoRefresh() {
     }, MEMORY_VIEW_POLL_MS);
 }
 
+// 日志审计：视图内 15s 自动刷新（与记忆视图同一模式，保留滚动按零内容变化策略处理）
+
+function stopAuditViewAutoRefresh() {
+    if (S.auditPollIntervalId) {
+        window.clearInterval(S.auditPollIntervalId);
+        S.auditPollIntervalId = null;
+    }
+}
+
+function startAuditViewAutoRefresh() {
+    if (S.auditPollIntervalId) return;
+    S.auditPollIntervalId = window.setInterval(() => {
+        if (S.view !== "audit") return;
+        void loadAuditView({ quiet: true });
+    }, AUDIT_VIEW_POLL_MS);
+}
+
+async function loadAuditView({ quiet = false } = {}) {
+    if (S.auditBusy) return;
+    S.auditBusy = true;
+    S.auditOffset = 0;
+    try {
+        await Promise.all([loadAuditSummary({ quiet }), loadAuditEvents({ quiet, reset: true })]);
+        S.auditLoadedOnce = true;
+        markAuditRead();
+    } finally {
+        S.auditBusy = false;
+    }
+}
+
+async function loadAuditSummary({ quiet = false } = {}) {
+    try {
+        const data = await ApiClient.getAuditSummary();
+        S.auditSummaryGeneratedAt = data.generatedAt || "";
+        renderAuditSummaryCards(data.subsystems || []);
+    } catch (error) {
+        if (!quiet) {
+            showToast({
+                title: "审计概览加载失败",
+                text: String(error?.message || ""),
+                kind: "error",
+                durationMs: 2600,
+            });
+        }
+        renderAuditSummaryCards();
+    }
+}
+
+async function loadAuditEvents({ quiet = false, reset = false } = {}) {
+    try {
+        const data = await ApiClient.getAuditEvents({
+            limit: AUDIT_PAGE_SIZE,
+            offset: reset ? 0 : S.auditOffset,
+            level: S.auditLevelFilter,
+        });
+        const items = Array.isArray(data.items) ? data.items : [];
+        renderAuditEventList(items, { append: !reset && S.auditOffset > 0 });
+        S.auditOffset += items.length;
+        S.auditHasMore = Boolean(data.hasMore);
+        if (U.auditEventInfo) U.auditEventInfo.textContent = `共 ${Number(data.total) || 0} 项`;
+        if (U.auditEventMore) U.auditEventMore.hidden = !S.auditHasMore;
+        if (reset && items.length) S.auditLatestEventTs = String(items[0]?.timestamp || "");
+    } catch (error) {
+        if (!quiet) {
+            showToast({
+                title: "审计事件加载失败",
+                text: String(error?.message || ""),
+                kind: "error",
+                durationMs: 2600,
+            });
+        }
+    }
+}
+
+async function loadMoreAuditEvents() {
+    if (S.auditBusy || !S.auditHasMore) return;
+    S.auditBusy = true;
+    try {
+        await loadAuditEvents({ quiet: true, reset: false });
+    } finally {
+        S.auditBusy = false;
+    }
+}
+
+function renderAuditSummaryCards(subsystems = []) {
+    if (!U.auditSummaryGrid) return;
+    const list = Array.isArray(subsystems) ? subsystems : [];
+    U.auditSummaryGrid.innerHTML = list
+        .map((entry = {}) => {
+            const key = String(entry.subsystem || "unknown");
+            const label = String(entry.label || key);
+            const status = entry.status === "error" ? "error" : "ok";
+            const errorCount = Number(entry.error_count) || 0;
+            const warningCount = Number(entry.warning_count) || 0;
+            const eventCount = Number(entry.event_count) || 0;
+            const statusText = status === "error" ? `有错误 (${errorCount})` : "正常";
+            const countsText = `错误 ${errorCount} · 警告 ${warningCount} · 事件 ${eventCount}`;
+            const latestAt = String(entry.latest_event_at || "");
+            const latestText = latestAt
+                ? `${latestAt} ${String(entry.latest_event_summary || "")}`
+                : "暂无事件";
+            return `<article class="audit-summary-card">
+                <h3>${esc(label)}</h3>
+                <div class="audit-status is-${status}">${esc(statusText)}</div>
+                <div class="audit-latest">${esc(countsText)}</div>
+                <div class="audit-latest">${esc(latestText)}</div>
+            </article>`;
+        })
+        .join("");
+}
+
+function auditEventLevelClass(level) {
+    if (level === "error") return "is-error";
+    if (level === "warning") return "is-warning";
+    return "";
+}
+
+function auditEventLevelLabel(level) {
+    if (level === "error") return "错误";
+    if (level === "warning") return "警告";
+    return "信息";
+}
+
+function renderAuditEventCard(item = {}) {
+    const level = String(item.level || "info");
+    const timestamp = String(item.timestamp || "-");
+    const subsystemKey = String(item.subsystem || "unknown");
+    const eventType = String(item.event_type || "");
+    const summary = String(item.summary || "");
+    const detail = item.detail;
+    let detailHtml = "";
+    if (detail && typeof detail === "object" && Object.keys(detail).length) {
+        let pretty = "";
+        try {
+            pretty = JSON.stringify(detail, null, 2);
+        } catch {
+            pretty = String(detail);
+        }
+        detailHtml = `<details class="audit-event-expand"><summary>详情</summary><pre class="audit-event-detail">${esc(pretty)}</pre></details>`;
+    }
+    return `<article class="audit-event-card ${auditEventLevelClass(level)}">
+        <div class="audit-event-meta">
+            <span class="audit-event-time">${esc(timestamp)}</span>
+            <span class="audit-event-level">${esc(auditEventLevelLabel(level))}</span>
+            <span class="audit-event-subsystem">${esc(subsystemKey)}</span>
+            ${eventType ? `<span class="audit-event-type">${esc(eventType)}</span>` : ""}
+        </div>
+        <div class="audit-event-summary">${esc(summary)}</div>
+        ${detailHtml}
+    </article>`;
+}
+
+function renderAuditEventList(items = [], { append = false } = {}) {
+    if (!U.auditEventList) return;
+    const html = items.map((item) => renderAuditEventCard(item)).join("");
+    if (append && U.auditEventList.innerHTML) {
+        U.auditEventList.insertAdjacentHTML("beforeend", html);
+    } else {
+        U.auditEventList.innerHTML = html;
+    }
+}
+
+// 未读角标：lastSeen 存 sessionStorage（tab 作用域）。
+// 首访（无 lastSeen）以最新事件时间戳初始化，历史不点亮；打开审计视图即已读。
+
+function renderAuditNavBadge(count = 0) {
+    if (!U.auditNavBadge) return;
+    const unread = Math.max(0, Number(count) || 0);
+    U.auditNavBadge.textContent = unread > 99 ? "99+" : String(unread);
+    U.auditNavBadge.hidden = unread <= 0;
+}
+
+function auditUnreadFromResponse(total) {
+    return Math.max(0, Number(total) || 0);
+}
+
+function resolveAuditLastSeen(storedLastSeen, newestTimestamp) {
+    // 首访语义：尚无 lastSeen 时锚定到最新事件时间戳（未读 0）；
+    // 已有 lastSeen 原样保持。严格大于过滤由服务端 since 完成。
+    return {
+        lastSeen: String(storedLastSeen || "") || String(newestTimestamp || ""),
+        unread: 0,
+    };
+}
+
+function auditBadgeStateFromStorage() {
+    return readSessionJson(AUDIT_LAST_SEEN_KEY) || null;
+}
+
+async function refreshAuditBadge() {
+    try {
+        const stored = auditBadgeStateFromStorage();
+        const lastSeen = String(stored?.lastSeen || "");
+        if (!lastSeen) {
+            const latest = await ApiClient.getAuditEvents({ limit: 1 });
+            const newest = String(latest?.items?.[0]?.timestamp || "");
+            const resolved = resolveAuditLastSeen("", newest);
+            writeSessionJson(AUDIT_LAST_SEEN_KEY, { lastSeen: resolved.lastSeen });
+            renderAuditNavBadge(0);
+            return;
+        }
+        const data = await ApiClient.getAuditEvents({ limit: 1, since: lastSeen });
+        renderAuditNavBadge(auditUnreadFromResponse(data.total));
+    } catch {
+        // 静默：保持上一次角标状态
+    }
+}
+
+function bindAuditBadge() {
+    if (S.auditBadgePollIntervalId) return;
+    S.auditBadgePollIntervalId = window.setInterval(() => {
+        void refreshAuditBadge();
+    }, AUDIT_BADGE_POLL_MS);
+}
+
+function markAuditRead() {
+    const latest = S.auditLatestEventTs || S.auditSummaryGeneratedAt || "";
+    writeSessionJson(AUDIT_LAST_SEEN_KEY, { lastSeen: latest });
+    renderAuditNavBadge(0);
+}
+
 function bindMemoryCardToggles() {
     if (U.memoryQueueList instanceof HTMLElement) {
         U.memoryQueueList.querySelectorAll("details[data-memory-card='queue']").forEach((card) => {
@@ -12711,7 +12953,7 @@ function renderMemoryFailedCard(item) {
 
 
 function switchView(view) {
-    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, "task-details": U.viewTaskDetails };
+    const map = { ceo: U.viewCeo, tasks: U.viewTasks, skills: U.viewSkills, tools: U.viewTools, memory: U.viewMemory, models: U.viewModels, external: U.viewExternal, audit: U.viewAudit, "task-details": U.viewTaskDetails };
     const navView = view === "task-details" ? "tasks" : view;
     const leavingTaskDetails = view !== "task-details" && !!U.viewTaskDetails?.classList.contains("active");
     S.view = navView;
@@ -12783,6 +13025,12 @@ function switchView(view) {
     }
     if (view === "models") void loadModels();
     if (view === "external") void loadExternalApiView();
+    if (view === "audit") startAuditViewAutoRefresh();
+    else stopAuditViewAutoRefresh();
+    if (view === "audit") {
+        if (!S.auditLoadedOnce) void loadAuditView();
+        else void loadAuditView({ quiet: true });
+    }
 }
 
 function toggleTheme() {
@@ -12827,6 +13075,18 @@ function bind() {
     U.memoryQueueMore?.addEventListener("click", () => void loadMoreMemoryQueue());
     U.memoryProcessedMore?.addEventListener("click", () => void loadMoreMemoryProcessed());
     U.memoryFailedMore?.addEventListener("click", () => void loadMoreMemoryFailed());
+    U.auditRefresh?.addEventListener("click", () => void loadAuditView());
+    U.auditEventMore?.addEventListener("click", () => void loadMoreAuditEvents());
+    U.auditLevelFilters?.addEventListener("click", (event) => {
+        if (!(event.target instanceof Element)) return;
+        const chip = event.target.closest(".audit-level-chip");
+        if (!chip) return;
+        const level = chip.dataset.auditLevel === "all" ? "" : String(chip.dataset.auditLevel || "");
+        if (S.auditLevelFilter === level) return;
+        S.auditLevelFilter = level;
+        U.auditLevelFilters?.querySelectorAll(".audit-level-chip").forEach((el) => el.classList.toggle("active", el === chip));
+        void loadAuditView({ quiet: true });
+    });
     U.memoryQueueList?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
         const noteTrigger = e.target.closest("[data-memory-note-ref]");

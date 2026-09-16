@@ -85,6 +85,11 @@
                 <i data-lucide="plug"></i>
                 <span>外部接入</span>
             </button>
+            <button class="nav-item" data-view="audit" type="button">
+                <i data-lucide="scroll-text"></i>
+                <span>日志审计</span>
+                <span id="audit-nav-badge" class="nav-badge" hidden>0</span>
+            </button>
 
             <div class="sidebar-spacer"></div>
 
@@ -702,6 +707,37 @@
                         <div id="external-token-list" class="external-token-list"></div>
                     </section>
                 </div>
+            </section>
+            <section id="view-audit" class="view-section" style="display: none;">
+                <header class="content-header resource-header compact-resource-header">
+                    <div class="resource-header-title">
+                        <h1>日志审计</h1>
+                        <p class="subtitle">各子系统近 24 小时健康状态与错误/通知事件流；记忆错误仍在记忆管理中查看。</p>
+                    </div>
+                    <div class="resource-header-actions compact-resource-header-actions">
+                        <button id="audit-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
+                    </div>
+                </header>
+                <div id="audit-summary-grid" class="audit-summary-grid"></div>
+                <section class="resource-detail-panel audit-feed-panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>事件流</h3>
+                            <p class="subtitle">最新事件在前。</p>
+                        </div>
+                        <div id="audit-level-filters" class="audit-level-filters">
+                            <button type="button" class="audit-level-chip active" data-audit-level="all">全部</button>
+                            <button type="button" class="audit-level-chip" data-audit-level="error">错误</button>
+                            <button type="button" class="audit-level-chip" data-audit-level="warning">警告</button>
+                            <button type="button" class="audit-level-chip" data-audit-level="info">信息</button>
+                        </div>
+                    </div>
+                    <div id="audit-event-list" class="memory-list audit-event-list"></div>
+                    <div class="memory-footer">
+                        <div id="audit-event-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
+                        <button id="audit-event-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
+                    </div>
+                </section>
             </section>
             <section id="view-task-details" class="view-section" style="display: none;">
                 <header class="content-header project-header task-detail-header">
