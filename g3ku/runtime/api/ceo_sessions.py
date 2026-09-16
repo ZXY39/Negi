@@ -776,21 +776,56 @@ def _live_config():
     return config
 
 
+def _resolve_model_selection_session(session_manager, runtime_manager, state_store, session_id: str):
+    """模型模式对本地会话与渠道会话同样可设。
+
+    渠道会话键是规范会话键（``ext:`` / ``china:``），先按会话文件直接定位；
+    文件尚未落盘时回退目录解析，避免依赖目录缓存的新鲜度。
+    """
+    key = str(session_id or "").strip()
+    if not key:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    if key.startswith("web:"):
+        return _assert_known_session(session_manager, key)
+    if not _is_channel_session_id(key):
+        raise HTTPException(status_code=404, detail="session_not_found")
+    if session_manager.get_path(key).exists():
+        return session_manager.get_or_create(key)
+    resolved_session_id, _catalog = _assert_known_catalog_session(
+        session_manager,
+        runtime_manager,
+        state_store,
+        key,
+    )
+    return session_manager.get_or_create(resolved_session_id)
+
+
+def _write_session_model_selection(session_manager, session, selection) -> None:
+    if str(getattr(session, "key", "") or "").startswith("web:"):
+        metadata = normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session.key)
+    else:
+        # 渠道会话元数据由渠道侧管理：只增删本键，不做 web CEO 元数据归一化。
+        metadata = dict(getattr(session, "metadata", None) or {})
+    if selection["mode"] == SESSION_MODEL_SELECTION_MODE_MODEL:
+        metadata[SESSION_MODEL_SELECTION_KEY] = selection
+    else:
+        metadata.pop(SESSION_MODEL_SELECTION_KEY, None)
+    session.metadata = metadata
+    session.updated_at = datetime.now()
+    session_manager.save(session)
+
+
 @router.get("/ceo/sessions/{session_id}/model-selection")
 async def get_ceo_session_model_selection(session_id: str):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
-    _agent, session_manager, _runtime_manager, _state_store = _sessions()
-    session = _assert_known_session(session_manager, session_id)
+    _agent, session_manager, runtime_manager, state_store = _sessions()
+    session = _resolve_model_selection_session(session_manager, runtime_manager, state_store, session_id)
     return _model_selection_response(_live_config(), session)
 
 
 @router.patch("/ceo/sessions/{session_id}/model-selection")
 async def update_ceo_session_model_selection(session_id: str, payload: dict = Body(...)):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
-    _agent, session_manager, _runtime_manager, _state_store = _sessions()
-    session = _assert_known_session(session_manager, session_id)
+    _agent, session_manager, runtime_manager, state_store = _sessions()
+    session = _resolve_model_selection_session(session_manager, runtime_manager, state_store, session_id)
     body = payload if isinstance(payload, dict) else {}
     requested_mode = str(body.get("mode", body.get("modelSelectionMode", "")) or "").strip().lower()
     requested_model_key = str(body.get("model_key", body.get("modelKey", "")) or "").strip()
@@ -808,14 +843,7 @@ async def update_ceo_session_model_selection(session_id: str, payload: dict = Bo
             raise HTTPException(status_code=404, detail="model_key_not_found")
         if not getattr(managed, "enabled", True):
             raise HTTPException(status_code=409, detail="model_key_disabled")
-    metadata = normalize_ceo_metadata(getattr(session, "metadata", None), session_key=session.key)
-    if selection["mode"] == SESSION_MODEL_SELECTION_MODE_MODEL:
-        metadata[SESSION_MODEL_SELECTION_KEY] = selection
-    else:
-        metadata.pop(SESSION_MODEL_SELECTION_KEY, None)
-    session.metadata = metadata
-    session.updated_at = datetime.now()
-    session_manager.save(session)
+    _write_session_model_selection(session_manager, session, selection)
     return _model_selection_response(config, session)
 
 

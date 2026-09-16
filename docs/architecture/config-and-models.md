@@ -184,6 +184,7 @@ G3KU 的模型系统分两层：
 Leader（CEO/frontdoor）解析本轮模型引用时，先读会话元数据的 `model_selection`：`{"mode": "chain"}` 走 `models.roles.ceo`；`{"mode": "model", "model_key": "..."}` 时本轮 `model_refs` 是该固定模型（单元素），不再走模型链。
 
 - 固定项被删除或禁用即视为失效：运行时回退模型链继续发请求，而不是带着不可用模型发请求；失效不静默改写存储，用户重新启用/重建同名 key 后固定关系恢复。
+- 本地与渠道会话（`ext:` / `china:`）都可固定：渠道会话键即规范会话键，设置接口按会话文件定位，只增删 `model_selection` 键，不动渠道侧自有元数据。
 - 解析入口是 `CeoFrontDoorSupport._resolve_ceo_model_refs_for_session`（`g3ku/runtime/frontdoor/_ceo_support.py`），`prepare_turn`、迭代/重试边界的链轮换、composer 用量预估与内联工具提醒都走它，因此上下文窗口判定、多模态闸门与实际 provider 请求始终按同一组 refs 计算。
 - 与链变更同一口径：固定/取消固定只作用于边界处重建的下一个请求，不中途热切已在飞的 provider 请求。会话模型的读写接口与前端控件详见 `web-and-admin.md`「Composer Model Mode Panel」。
 - 固定的是 `models.catalog[]` 绑定 key，不是 provider/model 字符串：链路仍是 `key -> binding -> provider target`，删除或重建 binding 等价于删除该 key。

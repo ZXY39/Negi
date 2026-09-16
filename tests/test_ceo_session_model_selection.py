@@ -124,10 +124,45 @@ def test_patch_rejects_key_without_model_mode(env):
     assert response.json()["detail"] == "model_key_requires_model_mode"
 
 
-def test_channel_session_is_readonly(env):
-    response = env.client.get("/api/ceo/sessions/ext:qq-demo/model-selection")
-    assert response.status_code == 409
-    assert response.json()["detail"] == "channel_session_readonly"
+def _seed_channel_session(manager, key: str = "ext:qq-demo") -> None:
+    session = manager.get_or_create(key)
+    session.metadata = {"title": "渠道会话", "handled_terminal_dedupe_keys": ["task-terminal:seed"]}
+    manager.save(session)
+
+
+def test_channel_session_model_selection_read_write(env):
+    _seed_channel_session(env.manager)
+    response = env.client.patch(
+        "/api/ceo/sessions/ext:qq-demo/model-selection",
+        json={"mode": "model", "model_key": "alpha"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["session_id"] == "ext:qq-demo"
+    assert payload["mode"] == "model"
+    assert payload["model_key"] == "alpha"
+    reloaded = SessionManager(env.workspace).get_or_create("ext:qq-demo")
+    assert wcs.ceo_session_pinned_model_key(reloaded.metadata) == "alpha"
+    # 渠道侧自有元数据不被模型模式写入破坏。
+    assert reloaded.metadata["handled_terminal_dedupe_keys"] == ["task-terminal:seed"]
+    assert reloaded.metadata["title"] == "渠道会话"
+    assert env.client.get("/api/ceo/sessions/ext:qq-demo/model-selection").json()["mode"] == "model"
+
+
+def test_channel_session_switch_back_to_chain(env):
+    _seed_channel_session(env.manager)
+    env.client.patch("/api/ceo/sessions/ext:qq-demo/model-selection", json={"mode": "model", "model_key": "alpha"})
+    response = env.client.patch("/api/ceo/sessions/ext:qq-demo/model-selection", json={"mode": "chain"})
+    assert response.status_code == 200, response.text
+    assert response.json()["mode"] == "chain"
+    reloaded = SessionManager(env.workspace).get_or_create("ext:qq-demo")
+    assert wcs.SESSION_MODEL_SELECTION_KEY not in reloaded.metadata
+    assert reloaded.metadata["handled_terminal_dedupe_keys"] == ["task-terminal:seed"]
+
+
+def test_unknown_channel_session_404(env):
+    response = env.client.get("/api/ceo/sessions/ext:qq-missing/model-selection")
+    assert response.status_code == 404
 
 
 def test_pinned_availability_false_after_model_disappears(env, monkeypatch):

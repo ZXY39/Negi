@@ -185,6 +185,9 @@ function loadApp(apiClientOverrides = {}) {
             finishCeoModelChainDrag,
             bindCeoModelModeControls,
             ceoModelChainDirty,
+            showCeoModelChainPane,
+            cancelCeoModelChainSwitch,
+            confirmCeoModelChainSwitch,
         };`,
         context
     );
@@ -201,6 +204,8 @@ const CATALOG = [
 
 // VM 内构造的载荷对象跨 realm，先序列化回宿主对象再做严格比较。
 const callsOf = (app) => JSON.parse(JSON.stringify(app.calls));
+// 开面板会触发一次 GET；断言“没有写入”时只看写操作。
+const writesOf = (app) => callsOf(app).filter((call) => call[0] === "patch" || call[0] === "chain");
 
 function mountControl(app, { readonly = false, chain = ["alpha", "beta", "gamma"] } = {}) {
     const { U, S } = app;
@@ -219,6 +224,10 @@ function mountControl(app, { readonly = false, chain = ["alpha", "beta", "gamma"
     U.ceoModelChainEmpty = new StubHTMLElement();
     U.ceoModelChainActions = new StubHTMLElement();
     U.ceoModelChainApply = new StubHTMLElement();
+    U.ceoModelChainConfirm = new StubHTMLElement();
+    U.ceoModelChainConfirmText = new StubHTMLElement();
+    U.ceoModelChainConfirmAccept = new StubHTMLElement();
+    U.ceoModelChainConfirmCancel = new StubHTMLElement();
     U.ceoModelPicker = new StubHTMLElement();
     U.ceoModelPickerSearch = new StubHTMLElement();
     U.ceoModelPickerList = new StubHTMLElement();
@@ -363,17 +372,115 @@ test("保存失败时保留错误状态并收起保存中标记", async () => {
     assert.equal(app.S.ceoModelSelection.error, "model_key_disabled");
 });
 
-test("渠道/只读会话不打开面板也不发起读写", async () => {
+test("会话切换后真正拉取服务端模式而不是复用默认态", async () => {
+    const app = loadApp();
+    mountControl(app);
+    app.resetCeoModelSelection("web:other");
+
+    const loaded = await app.refreshCeoModelSelection("web:other");
+
+    assert.deepEqual(callsOf(app), [["get", "web:other"]]);
+    assert.equal(loaded.sessionId, "web:other");
+    assert.equal(app.S.ceoModelSelection.loaded, true);
+});
+
+test("渠道会话同样可以打开面板并读取模式", async () => {
     const app = loadApp();
     mountControl(app, { readonly: true });
 
     app.openCeoModelModePanel();
     const loaded = await app.refreshCeoModelSelection("web:test");
 
-    assert.equal(app.U.ceoModelModePanel.hidden, true);
-    assert.equal(app.U.ceoComposerUsageBrain.getAttribute("aria-expanded"), "false");
-    assert.equal(loaded, null);
-    assert.deepEqual(callsOf(app), []);
+    assert.equal(app.U.ceoModelModePanel.hidden, false);
+    assert.equal(app.U.ceoComposerUsageBrain.getAttribute("aria-expanded"), "true");
+    assert.deepEqual(callsOf(app), [["get", "web:test"]]);
+    assert.equal(loaded.mode, "chain");
+});
+
+test("无激活会话时不打开面板", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.S.activeSessionId = "";
+
+    app.openCeoModelModePanel();
+
+    assert.equal(app.S.ceoModelSelection.panelOpen, false);
+    assert.deepEqual(writesOf(app), []);
+});
+
+test("打开面板停在正在使用的板块：固定生效直接进指定模型列表", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.applyCeoModelSelectionPayload("web:test", { mode: "model", model_key: "alpha", pinned_available: true });
+
+    app.openCeoModelModePanel();
+
+    assert.equal(app.U.ceoModelPicker.hidden, false);
+    assert.equal(app.U.ceoModelChainPane.hidden, true);
+});
+
+test("面板打开后到达的固定态把板块自动切到指定模型", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+    // 打开瞬间还没有固定信息，先显示模型链板块。
+    assert.equal(app.U.ceoModelChainPane.hidden, false);
+
+    app.applyCeoModelSelectionPayload("web:test", { mode: "model", model_key: "alpha", pinned_available: true });
+
+    assert.equal(app.U.ceoModelPicker.hidden, false);
+    assert.equal(app.U.ceoModelChainPane.hidden, true);
+});
+
+test("点模型链先出确认条，勾了才切换", async () => {
+    const app = loadApp();
+    mountControl(app);
+    app.bindCeoModelModeControls();
+    app.applyCeoModelSelectionPayload("web:test", { mode: "model", model_key: "alpha", pinned_available: true });
+    app.openCeoModelModePanel();
+
+    app.U.ceoModelModeChain.listeners.click[0]();
+    assert.equal(app.U.ceoModelChainPane.hidden, false);
+    assert.equal(app.U.ceoModelChainConfirm.hidden, false);
+    assert.match(app.U.ceoModelChainConfirmText.textContent, /切换到模型链/);
+    // 还没确认，不发写请求。
+    assert.deepEqual(writesOf(app), []);
+
+    app.U.ceoModelChainConfirmAccept.listeners.click[0]();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(writesOf(app), [["patch", "web:test", { mode: "chain" }]]);
+    assert.equal(app.U.ceoModelChainConfirm.hidden, true);
+    assert.equal(app.U.ceoModelModeChain.getAttribute("aria-checked"), "true");
+});
+
+test("确认条点叉取消，回到正在使用的固定板块", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.bindCeoModelModeControls();
+    app.applyCeoModelSelectionPayload("web:test", { mode: "model", model_key: "alpha", pinned_available: true });
+    app.openCeoModelModePanel();
+
+    app.U.ceoModelModeChain.listeners.click[0]();
+    app.U.ceoModelChainConfirmCancel.listeners.click[0]();
+
+    assert.deepEqual(writesOf(app), []);
+    assert.equal(app.U.ceoModelChainConfirm.hidden, true);
+    assert.equal(app.U.ceoModelModePinned.getAttribute("aria-checked"), "true");
+    assert.equal(app.U.ceoModelPicker.hidden, false);
+    assert.equal(app.U.ceoModelChainPane.hidden, true);
+});
+
+test("本来就是模型链时点模型链不出确认条", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+
+    app.showCeoModelChainPane();
+
+    assert.equal(app.U.ceoModelChainConfirm.hidden, true);
+    assert.equal(app.U.ceoModelChainPane.hidden, false);
+    assert.deepEqual(writesOf(app), []);
 });
 
 test("搜索按展示名与 key 过滤列表", () => {
@@ -451,8 +558,8 @@ test("拖拽换位只改草稿并亮出应用按钮", () => {
     assert.equal(app.S.ceoModelSelection.dragFrom, -1);
     assert.equal(app.ceoModelChainDirty(), true);
     assert.equal(app.U.ceoModelChainActions.hidden, false);
-    // 未点应用前不发请求。
-    assert.deepEqual(callsOf(app), []);
+    // 未点应用前不发写请求。
+    assert.deepEqual(writesOf(app), []);
 });
 
 test("拖到原位置不产生草稿差异", () => {
@@ -465,7 +572,7 @@ test("拖到原位置不产生草稿差异", () => {
 
     assert.equal(app.ceoModelChainDirty(), false);
     assert.equal(app.U.ceoModelChainActions.hidden, true);
-    assert.deepEqual(callsOf(app), []);
+    assert.deepEqual(writesOf(app), []);
 });
 
 test("点击应用按草稿顺序提交模型链并回到干净状态", async () => {
@@ -481,7 +588,7 @@ test("点击应用按草稿顺序提交模型链并回到干净状态", async ()
     handlers[0]();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    assert.deepEqual(callsOf(app).map((call) => [call[0], call[1], call[2].modelKeys]), [
+    assert.deepEqual(writesOf(app).map((call) => [call[0], call[1], call[2].modelKeys]), [
         ["chain", "ceo", ["beta", "alpha", "gamma"]],
     ]);
     assert.deepEqual(Array.from(app.ceoModelChainKeys()), ["beta", "alpha", "gamma"]);
