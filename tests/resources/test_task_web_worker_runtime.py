@@ -19,12 +19,14 @@ from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
 from main.models import (
+    ModelTokenUsageRecord,
     NodeFinalResult,
     NodeRecord,
     SpawnChildResult,
     SpawnChildSpec,
     TaskNodeNotification,
     TaskRecord,
+    TokenUsageSummary,
     normalize_execution_stage_metadata,
     normalize_final_acceptance_metadata,
 )
@@ -3225,6 +3227,67 @@ def test_task_projection_tables_are_populated_and_used_for_node_detail(tmp_path:
 
     assert node_payload is not None
     assert node_payload["item"]["output"] == "projection-output"
+
+
+def test_task_detail_summary_exposes_token_usage_by_model(tmp_path: Path):
+    """按模型 token 明细必须能经窄读路径聚合回任务详情 summary。
+
+    窄读路径的 json_extract 曾漏掉一层 ``payload.`` 前缀（明细实际嵌在
+    TaskProjectionNodeDetailRecord.payload 内），聚合结果恒为空，任务详情页
+    永远停在“当前只有任务级统计，尚无按模型明细”。
+    """
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+
+    node = root.model_copy(
+        update={
+            "token_usage": TokenUsageSummary(
+                tracked=True,
+                input_tokens=120,
+                output_tokens=60,
+                cache_hit_tokens=30,
+                call_count=2,
+                calls_with_usage=2,
+            ),
+            "token_usage_by_model": [
+                ModelTokenUsageRecord(
+                    tracked=True,
+                    input_tokens=120,
+                    output_tokens=60,
+                    cache_hit_tokens=30,
+                    call_count=2,
+                    calls_with_usage=2,
+                    model_key="deepseek-v4-flash-2",
+                    provider_id="openai",
+                    provider_model="deepseek-v4-flash",
+                )
+            ],
+        }
+    )
+    service.store.upsert_node(node)
+    service.log_service._sync_node_read_models_locked(node)
+
+    detail = service.store.get_task_node_detail(node.node_id)
+    assert detail is not None
+    assert detail.payload.get("token_usage_by_model"), "详情投影行未落盘按模型明细"
+
+    snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
+    assert snapshot is not None
+    by_model = snapshot["summary"]["token_usage_by_model"]
+    assert [item["model_key"] for item in by_model] == ["deepseek-v4-flash-2"]
+    assert by_model[0]["input_tokens"] == 120
+    assert by_model[0]["output_tokens"] == 60
 
 
 def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_path: Path):

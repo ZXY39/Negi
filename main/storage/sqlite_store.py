@@ -2598,6 +2598,9 @@ class SQLiteTaskStore:
         task_node_details 的大字段（input/output/check_result/final_output 等文本列）
         单行可达数 MB，整行读是大任务 getTask 冷缓存变慢的根因之一；json_extract 只
         读 payload_json 里的目标数组。json1 不可用时回退到只读 payload_json 列。
+
+        token 明细嵌在详情记录自身的 payload 字段内（TaskProjectionNodeDetailRecord.payload），
+        即磁盘路径为 payload_json.payload.token_usage_by_model，不要直接取顶层同名字段。
         """
         normalized_task_id = str(task_id or '').strip()
         usage_lists: list[list[dict[str, Any]]] = []
@@ -2614,7 +2617,7 @@ class SQLiteTaskStore:
 
         try:
             rows = self._fetchall(
-                "SELECT json_extract(payload_json, '$.token_usage_by_model') AS token_usage_by_model "
+                "SELECT json_extract(payload_json, '$.payload.token_usage_by_model') AS token_usage_by_model "
                 'FROM task_node_details WHERE task_id = ?',
                 (normalized_task_id,),
             )
@@ -2630,7 +2633,7 @@ class SQLiteTaskStore:
                     payload = json.loads(str(row['payload_json'] or '{}'))
                 except json.JSONDecodeError:
                     continue
-                _append(payload.get('token_usage_by_model'))
+                _append((payload.get('payload') or {}).get('token_usage_by_model'))
         return usage_lists
 
     def replace_task_runtime_frames(self, task_id: str, records: list[TaskProjectionRuntimeFrameRecord]) -> None:
