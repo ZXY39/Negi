@@ -57,6 +57,14 @@ def _runtime_model_parameters(parameters: dict[str, Any] | None) -> dict[str, An
             resolved = 0
         if resolved > 0:
             result["context_window_tokens"] = resolved
+    raw_request_timeout_seconds = payload.get("request_timeout_seconds")
+    if raw_request_timeout_seconds not in (None, ""):
+        try:
+            resolved_timeout = float(raw_request_timeout_seconds)
+        except Exception:
+            resolved_timeout = 0.0
+        if resolved_timeout > 0:
+            result["request_timeout_seconds"] = resolved_timeout
     return result
 
 
@@ -241,6 +249,7 @@ class LLMConfigFacade:
                 retry_count=binding.retry_count,
                 single_api_key_max_concurrency=binding.single_api_key_max_concurrency,
                 context_window_tokens=self._binding_context_window_tokens(record),
+                request_timeout_seconds=self._binding_request_timeout_seconds(record),
                 image_multimodal_enabled=bool(getattr(binding, "image_multimodal_enabled", False)),
             )
         )
@@ -293,6 +302,7 @@ class LLMConfigFacade:
             binding.image_multimodal_enabled = bool(raw_enabled)
         current = self._hydrate_record_secrets(self.repository.get(binding.llm_config_id))
         binding.context_window_tokens = self._binding_context_window_tokens(current)
+        binding.request_timeout_seconds = self._binding_request_timeout_seconds(current)
         merged = self._merge_draft(current, draft_payload, replace_parameters=False)
         binding.single_api_key_max_concurrency = self._validate_binding_api_key_limits(
             api_key=str(merged.api_key or ""),
@@ -321,6 +331,7 @@ class LLMConfigFacade:
         self.repository.save(self._sanitize_record_for_storage(updated), last_probe_status=probe.status.value)
         self._store_record_secrets(updated)
         binding.context_window_tokens = self._binding_context_window_tokens(updated)
+        binding.request_timeout_seconds = self._binding_request_timeout_seconds(updated)
         return self.get_binding(config, model_key)
 
     def set_binding_enabled(self, config: Any, model_key: str, enabled: bool) -> dict[str, Any]:
@@ -401,6 +412,7 @@ class LLMConfigFacade:
             "description": binding.description,
             "name": str(getattr(binding, "name", "") or "").strip(),
             "context_window_tokens": record.parameters.get("context_window_tokens"),
+            "request_timeout_seconds": record.parameters.get("request_timeout_seconds"),
             "image_multimodal_enabled": bool(getattr(binding, "image_multimodal_enabled", False)),
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
@@ -425,6 +437,16 @@ class LLMConfigFacade:
             return None
         try:
             resolved = int(dict(record.parameters or {}).get("context_window_tokens") or 0)
+        except Exception:
+            return None
+        return resolved if resolved > 0 else None
+
+    @staticmethod
+    def _binding_request_timeout_seconds(record: NormalizedProviderConfig | None) -> float | None:
+        if record is None:
+            return None
+        try:
+            resolved = float(dict(record.parameters or {}).get("request_timeout_seconds") or 0)
         except Exception:
             return None
         return resolved if resolved > 0 else None

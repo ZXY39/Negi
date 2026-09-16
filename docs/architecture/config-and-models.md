@@ -275,13 +275,14 @@ Runtime gating of image uploads by this flag: 详见 `web-and-admin.md`「Image 
 
 ## Model Request Parameter Defaults
 
-Per-model generation parameters (`max_tokens`, `temperature`, `reasoning_effort`) are resolved from the llm-config record's `parameters` and applied to every provider request.
+Per-model generation parameters (`max_tokens`, `temperature`, `reasoning_effort`) and the per-attempt request timeout (`request_timeout_seconds`) are resolved from the llm-config record's `parameters` and applied to every provider request.
 
 - `max_tokens` always resolves to an explicit value: the per-model `parameters.max_tokens` wins; when the record has none, the runtime falls back to the global default `DEFAULT_MAX_OUTPUT_TOKENS = 65536`. Requests therefore always carry an explicit output cap instead of inheriting the provider-side default (which can silently truncate long generations).
 - The engine-global `agents.defaults.maxTokens` (default `65536`) is the CEO-loop fallback; main-runtime nodes resolve per model through `_resolve_model_request_parameters` first.
 - `reasoning_effort` uses six managed levels: `none` (deep thinking disabled), `low`, `medium` (default), `high`, `xhigh`, `max`. Per-model `parameters.reasoning_effort` wins over the engine default.
 - `none` is a stored value but is never sent to the provider: every provider-facing layer (`chat_backend`, fallback chain, chat adapters, openai/responses providers) omits the `reasoning_effort` field when the resolved level is `none`.
 - The model config page stores both fields on the provider record (`parameters.max_tokens` / `parameters.reasoning_effort`), like `context_window_tokens`; the page contract lives in `web-and-admin.md`「Model Config Page And Admin Contract」.
+- `request_timeout_seconds`（配置页「请求超时时间(秒)」，位于最大输出TOKEN 右侧）是每次 provider attempt 的超时上限，同时约束外层 attempt 看门狗与流式首块/块间空闲超时：留空 = 未配置，回退全局默认 `DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS = 600`；配置则必须 `> 0`。解析优先级：调用方显式传入 → 该模型配置值 → 全局默认，链式回退因此按各模型自己的超时执行。取值真相源与其他参数一致：llm-config record `parameters.request_timeout_seconds`，binding payload 与 catalog 同步。配置里没有独立的 60/120 微默认——任何「未传超时」路径都指向同一个 600 默认。
 
 If a provider reply looks truncated (for example a response ending at exactly the sent `max_tokens` with no tool call), check the node's history record first: 详见 `web-and-admin.md`「Node Detail Error History」.
 

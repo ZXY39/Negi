@@ -38,6 +38,8 @@
       initialReasoningEffort: DEFAULT_REASONING_EFFORT,
       maxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
       initialMaxOutputTokens: String(DEFAULT_MAX_OUTPUT_TOKENS),
+      requestTimeoutSeconds: "",
+      initialRequestTimeoutSeconds: "",
       validation: null,
       probe: null,
       modelList: null,
@@ -395,6 +397,8 @@
       initialMaxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         : String(DEFAULT_MAX_OUTPUT_TOKENS),
+      requestTimeoutSeconds: trim(draft?.parameters?.request_timeout_seconds),
+      initialRequestTimeoutSeconds: trim(draft?.parameters?.request_timeout_seconds),
     };
     renderAll();
   }
@@ -436,6 +440,8 @@
       initialMaxOutputTokens: Number.isInteger(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         ? String(validMaxOutputTokensValue(draft?.parameters?.max_tokens))
         : String(DEFAULT_MAX_OUTPUT_TOKENS),
+      requestTimeoutSeconds: trim(binding.request_timeout_seconds ?? draft?.parameters?.request_timeout_seconds),
+      initialRequestTimeoutSeconds: trim(binding.request_timeout_seconds ?? draft?.parameters?.request_timeout_seconds),
     };
     renderAll();
   }
@@ -480,6 +486,7 @@
     const imageMultimodalEnabledInput = document.getElementById("llm-binding-image-multimodal-enabled");
     const reasoningEffortInput = document.getElementById("llm-binding-reasoning-effort");
     const maxOutputTokensInput = document.getElementById("llm-binding-max-output-tokens");
+    const requestTimeoutSecondsInput = document.getElementById("llm-binding-request-timeout-seconds");
     if (modelKeyInput) editor.modelKey = trim(modelKeyInput.value || editor.modelKey);
     if (providerSelect) editor.providerId = trim(providerSelect.value || editor.providerId);
     if (baseUrlInput) editor.baseUrl = String(baseUrlInput.value ?? editor.baseUrl ?? "");
@@ -498,6 +505,7 @@
     if (imageMultimodalEnabledInput) editor.imageMultimodalEnabled = Boolean(imageMultimodalEnabledInput.checked);
     if (reasoningEffortInput) editor.reasoningEffort = trim(reasoningEffortInput.value || "");
     if (maxOutputTokensInput) editor.maxOutputTokens = trim(maxOutputTokensInput.value || "");
+    if (requestTimeoutSecondsInput) editor.requestTimeoutSeconds = trim(requestTimeoutSecondsInput.value || "");
     return editor;
   }
 
@@ -531,6 +539,23 @@
     if (!text) return null;
     const parsed = Number.parseInt(text, 10);
     return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+  }
+
+  function validRequestTimeoutSecondsValue(raw) {
+    if (raw === null || raw === undefined) return null;
+    const text = String(raw).trim();
+    if (!text) return null;
+    const parsed = Number(text);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function requestTimeoutSecondsFromDraftText(raw, providerId) {
+    try {
+      const draft = parseDraftJson(raw, providerId);
+      return validRequestTimeoutSecondsValue(draft?.parameters?.request_timeout_seconds);
+    } catch (_error) {
+      return null;
+    }
   }
 
   function reasoningEffortFromDraftText(raw, providerId) {
@@ -605,6 +630,17 @@
     const normalized = Number.isInteger(parsed) ? String(parsed) : String(DEFAULT_MAX_OUTPUT_TOKENS);
     editor.maxOutputTokens = normalized;
     const input = document.getElementById("llm-binding-max-output-tokens");
+    if (input && String(input.value || "") !== normalized) input.value = normalized;
+    return true;
+  }
+
+  function syncRequestTimeoutSecondsInputValue(value) {
+    const editor = llmState().editor;
+    if (!editor) return false;
+    const parsed = validRequestTimeoutSecondsValue(value);
+    const normalized = parsed !== null ? String(parsed) : "";
+    editor.requestTimeoutSeconds = normalized;
+    const input = document.getElementById("llm-binding-request-timeout-seconds");
     if (input && String(input.value || "") !== normalized) input.value = normalized;
     return true;
   }
@@ -747,6 +783,21 @@
     if (Number.isInteger(resolved)) syncParameterIntoJsonEditor(["max_tokens"], resolved);
   }
 
+  function handleBindingRequestTimeoutSecondsInput() {
+    const editor = llmState().editor;
+    if (!editor) return;
+    const input = document.getElementById("llm-binding-request-timeout-seconds");
+    editor.requestTimeoutSeconds = trim(input?.value || "");
+    const text = editor.requestTimeoutSeconds;
+    if (!text) {
+      // 留空 = 未配置（运行时默认 600s）：把参数置空，保存时按缺省处理。
+      syncParameterIntoJsonEditor(["request_timeout_seconds"], null);
+      return;
+    }
+    const resolved = validRequestTimeoutSecondsValue(text);
+    if (resolved !== null) syncParameterIntoJsonEditor(["request_timeout_seconds"], resolved);
+  }
+
   function handleBindingJsonEditorInput() {
     const editor = llmState().editor;
     if (!editor) return;
@@ -768,6 +819,8 @@
       syncReasoningEffortInputValue(resolvedReasoning || DEFAULT_REASONING_EFFORT);
       const resolvedMaxTokens = validMaxOutputTokensValue(draft?.parameters?.max_tokens);
       syncMaxOutputTokensInputValue(Number.isInteger(resolvedMaxTokens) ? resolvedMaxTokens : DEFAULT_MAX_OUTPUT_TOKENS);
+      const resolvedRequestTimeout = validRequestTimeoutSecondsValue(draft?.parameters?.request_timeout_seconds);
+      syncRequestTimeoutSecondsInputValue(resolvedRequestTimeout);
     }
   }
 
@@ -845,15 +898,29 @@
       }
       maxOutputTokens = parsedMax;
     }
+    const requestTimeoutRaw = trim(editor?.requestTimeoutSeconds);
+    let requestTimeoutSeconds = null;
+    if (requestTimeoutRaw) {
+      requestTimeoutSeconds = validRequestTimeoutSecondsValue(requestTimeoutRaw);
+      if (requestTimeoutSeconds === null) {
+        throw new Error("请求超时时间必须是大于 0 的数字（秒），留空使用默认 600 秒");
+      }
+    }
     draft.parameters = draft.parameters && typeof draft.parameters === "object" && !Array.isArray(draft.parameters) ? draft.parameters : {};
     draft.parameters.context_window_tokens = contextWindowTokens;
     draft.parameters.reasoning_effort = reasoningEffort;
     draft.parameters.max_tokens = maxOutputTokens;
+    if (requestTimeoutSeconds === null) {
+      delete draft.parameters.request_timeout_seconds;
+    } else {
+      draft.parameters.request_timeout_seconds = requestTimeoutSeconds;
+    }
     return {
       retryOn: retryOn.length ? retryOn : [...DEFAULT_RETRY_ON],
       retryCount,
       singleApiKeyMaxConcurrency,
       contextWindowTokens,
+      requestTimeoutSeconds,
       imageMultimodalEnabled: Boolean(editor?.imageMultimodalEnabled),
       draft,
     };
@@ -952,11 +1019,21 @@
         </label>`;
   }
 
+  function renderRequestTimeoutSecondsField(editor) {
+    const value = trim(editor?.requestTimeoutSeconds);
+    return `
+        <label class="resource-field">
+          <span class="resource-field-label">请求超时时间(秒)</span>
+          <input id="llm-binding-request-timeout-seconds" class="resource-search" type="number" min="0.1" step="0.1" inputmode="decimal" value="${escv(value)}" placeholder="默认 600" title="单次模型请求（含流式首块/块间空闲）的超时秒数。留空使用默认 600 秒；同一请求在模型链回退时按各模型自己的配置执行。">
+        </label>`;
+  }
+
   function renderThinkingOutputFields(editor) {
     return `
       <div class="llm-form-grid llm-form-grid--thinking-output">
         ${renderReasoningField(editor)}
         ${renderMaxOutputTokensField(editor)}
+        ${renderRequestTimeoutSecondsField(editor)}
       </div>`;
   }
 
@@ -1756,6 +1833,10 @@
       }
       if (targetId === "llm-binding-max-output-tokens") {
         handleBindingMaxOutputTokensInput();
+        return;
+      }
+      if (targetId === "llm-binding-request-timeout-seconds") {
+        handleBindingRequestTimeoutSecondsInput();
         return;
       }
       if (targetId === "llm-json-editor") {

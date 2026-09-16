@@ -663,15 +663,44 @@ class ConfigChatBackend:
     def _normalized_model_attempt_timeout_seconds(self) -> float | None:
         return normalize_request_timeout_seconds(getattr(self, "_model_attempt_timeout_seconds", None))
 
+    def model_configured_request_timeout_seconds(self, model_ref: str | None) -> float | None:
+        """模型配置里的 `request_timeout_seconds`（请求超时时间，秒）。
+
+        与 context_window 同源：优先走 provider target 的 `model_parameters`
+        （llm-config record 真相，表单保存即时生效），catalog 档案作兜底。
+        未配置返回 None，由调用方回退到全局默认（600s）。"""
+        key = str(model_ref or "").strip()
+        if not key:
+            return None
+        try:
+            target = build_provider_from_model_key(self._config, key)
+            raw = dict(getattr(target, "model_parameters", {}) or {}).get("request_timeout_seconds")
+            resolved = normalize_request_timeout_seconds(raw)
+            if resolved is not None:
+                return resolved
+        except Exception:
+            pass
+        try:
+            profile = self._config.get_model_runtime_profile(key)
+        except Exception:
+            return None
+        if profile is None:
+            return None
+        return normalize_request_timeout_seconds(getattr(profile, "request_timeout_seconds", None))
+
     def recommended_model_response_timeout_seconds(self, *, model_refs: list[str] | None = None) -> float | None:
         """Response-time limit for a single (one-round) provider request.
 
         No longer accumulated as "attempt timeout x attempts x chain rounds":
         retryable chain retries are unbounded and paced by backoff, so the only
-        hard cap left is how long one provider request may take (10 minutes by
-        default).
+        hard cap left is how long one provider request may take. Resolution
+        order: first model in the chain that configures
+        `request_timeout_seconds`, else the global default (600s).
         """
-        _ = model_refs
+        for ref in list(model_refs or []):
+            configured = self.model_configured_request_timeout_seconds(ref)
+            if configured is not None:
+                return configured
         return self._normalized_model_attempt_timeout_seconds()
 
     async def chat(
@@ -696,11 +725,25 @@ class ConfigChatBackend:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
             raise ValueError('model_refs must not be empty')
+        explicit_attempt_timeout = single_request_timeout_seconds is not None
         request_attempt_timeout_seconds = normalize_request_timeout_seconds(
             single_request_timeout_seconds
-            if single_request_timeout_seconds is not None
+            if explicit_attempt_timeout
             else self._model_attempt_timeout_seconds
         )
+
+        def _attempt_timeout_for_target(base_target: Any, ref: str) -> float | None:
+            # 超时解析顺序：调用方显式传入 → 该模型配置的 request_timeout_seconds
+            # → 全局默认（600s）。链式回退因此天然按各模型自己的超时执行。
+            # 直接读已构建 target 的 model_parameters（llm-config record 真相），
+            # 避免每个 attempt 重复构建 provider。
+            if explicit_attempt_timeout:
+                return request_attempt_timeout_seconds
+            raw = dict(getattr(base_target, "model_parameters", {}) or {}).get("request_timeout_seconds")
+            configured = normalize_request_timeout_seconds(raw)
+            if configured is not None:
+                return configured
+            return request_attempt_timeout_seconds
 
         def _resolved_model_refs() -> list[str]:
             if not callable(model_refs_resolver):
@@ -836,7 +879,7 @@ class ConfigChatBackend:
                                 ref,
                                 api_key_index=selected_api_key_index,
                             )
-                            attempt_timeout_seconds = request_attempt_timeout_seconds
+                            attempt_timeout_seconds = _attempt_timeout_for_target(base_target, ref)
                             if use_held_turn_permit and held_turn_lease is not None:
                                 permit_lease = held_turn_lease.initial_model_permit
                                 held_turn_lease.initial_model_permit = None

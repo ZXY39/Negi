@@ -1014,7 +1014,7 @@ async def test_openai_chat_provider_falls_back_to_non_streaming_when_streaming_u
 
 
 @pytest.mark.asyncio
-async def test_openai_chat_provider_fallback_defaults_to_120_seconds_without_explicit_timeout(monkeypatch) -> None:
+async def test_openai_chat_provider_fallback_defaults_to_unified_attempt_timeout_without_explicit_timeout(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
 
     class _FakeCompletions:
@@ -1047,7 +1047,9 @@ async def test_openai_chat_provider_fallback_defaults_to_120_seconds_without_exp
 
     assert response.content == "ok"
     assert len(calls) == 2
-    assert calls[1]["timeout"] == 120.0
+    # 超时单一真相源：未显式传超时（含 None）时，流式与非流式兜底都指向
+    # DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS（600s），不再有独立的 60/120 微默认。
+    assert calls[1]["timeout"] == 600.0
 
 
 @pytest.mark.asyncio

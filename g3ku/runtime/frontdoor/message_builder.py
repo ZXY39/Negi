@@ -55,6 +55,10 @@ from g3ku.runtime.web_ceo_sessions import (
 DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K = 16
 DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
 
+# 动态 overlay 块头（跨轮可比性投影按这些常量识别并剥离，禁止散文匹配）。
+MEMORY_WRITE_HINT_HEADER = "## 长期记忆写入提示"
+RETRIEVED_MEMORY_HINT_HEADER = "## 已检索记忆使用提示"
+
 
 def _context_window_from_model_parameters(model_parameters: dict[str, Any] | None) -> int:
     payload = dict(model_parameters or {})
@@ -225,7 +229,7 @@ class CeoMessageBuilder:
         terms = ', '.join(matched_terms)
         return '\n'.join(
             [
-                '## 长期记忆写入提示',
+                MEMORY_WRITE_HINT_HEADER,
                 f'- 当前用户回合很可能在请求写入长期记忆（命中词：{terms}）。',
                 '- 如果这是稳定的身份、偏好、约束、默认值、回避规则、工作流规则或项目长期事实，请在回复前调用 `memory_write`。',
                 '- 不要把临时任务状态、猜测或未经确认的推断写入永久记忆。',
@@ -261,7 +265,7 @@ class CeoMessageBuilder:
     def _retrieved_memory_resolution_hint_block() -> str:
         return '\n'.join(
             [
-                '## 已检索记忆使用提示',
+                RETRIEVED_MEMORY_HINT_HEADER,
                 '- 下方已检索记忆中，已经包含与本轮相关、且此前确认过的用户默认值或偏好。',
                 '- 如果用户正在询问默认值是什么，请直接复述已检索到的默认值。',
                 '- 除非用户明确要求改规则，否则不要发明新的默认值、不要主动给出替代方案，也不要用通用最佳实践覆盖已检索到的默认值。',

@@ -32,6 +32,7 @@ def _optional_chat_parameters(
     temperature: Any = None,
     reasoning_effort: Any = None,
     context_window_tokens: Any = None,
+    request_timeout_seconds: Any = None,
 ) -> dict[str, Any]:
     parameters: dict[str, Any] = {}
     if max_tokens not in (None, ""):
@@ -42,6 +43,8 @@ def _optional_chat_parameters(
         parameters["reasoning_effort"] = str(reasoning_effort)
     if context_window_tokens not in (None, ""):
         parameters["context_window_tokens"] = int(context_window_tokens)
+    if request_timeout_seconds not in (None, ""):
+        parameters["request_timeout_seconds"] = float(request_timeout_seconds)
     return parameters
 
 
@@ -190,6 +193,7 @@ def _build_record(
     temperature: float | None = None,
     reasoning_effort: str | None = None,
     context_window_tokens: int | None = None,
+    request_timeout_seconds: float | None = None,
     config_id: str | None = None,
 ) -> str:
     normalized_provider_id = _normalized_provider_id(provider_id)
@@ -219,6 +223,7 @@ def _build_record(
             temperature=temperature,
             reasoning_effort=reasoning_effort,
             context_window_tokens=context_window_tokens,
+            request_timeout_seconds=request_timeout_seconds,
         ),
         headers=dict(extra_headers or {}),
         extra_options={},
@@ -312,6 +317,7 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
             temperature=item.get("temperature"),
             reasoning_effort=str(item.get("reasoningEffort", item.get("reasoning_effort", "")) or "").strip() or None,
             context_window_tokens=item.get("contextWindowTokens", item.get("context_window_tokens")),
+            request_timeout_seconds=item.get("requestTimeoutSeconds", item.get("request_timeout_seconds")),
         )
         next_item = {
             "key": key,
@@ -327,6 +333,9 @@ def migrate_raw_config_if_needed(raw_data: dict[str, Any], *, workspace: Path | 
         raw_context_window_tokens = item.get("contextWindowTokens", item.get("context_window_tokens"))
         if raw_context_window_tokens not in (None, ""):
             next_item["contextWindowTokens"] = int(raw_context_window_tokens)
+        raw_request_timeout_seconds = item.get("requestTimeoutSeconds", item.get("request_timeout_seconds"))
+        if raw_request_timeout_seconds not in (None, ""):
+            next_item["requestTimeoutSeconds"] = float(raw_request_timeout_seconds)
         raw_single_api_key_max_concurrency = item.get(
             "singleApiKeyMaxConcurrency",
             item.get("single_api_key_max_concurrency"),

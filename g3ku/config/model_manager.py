@@ -38,6 +38,7 @@ def _optional_chat_parameters(
     temperature: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
     context_window_tokens: Any = _UNSET,
+    request_timeout_seconds: Any = _UNSET,
 ) -> dict[str, Any]:
     parameters: dict[str, Any] = {}
     if max_tokens is not _UNSET and max_tokens not in (None, ""):
@@ -48,6 +49,8 @@ def _optional_chat_parameters(
         parameters["reasoning_effort"] = str(reasoning_effort).strip()
     if context_window_tokens is not _UNSET and context_window_tokens not in (None, ""):
         parameters["context_window_tokens"] = int(context_window_tokens)
+    if request_timeout_seconds is not _UNSET and request_timeout_seconds not in (None, ""):
+        parameters["request_timeout_seconds"] = float(request_timeout_seconds)
     return parameters
 
 
@@ -61,6 +64,7 @@ def _chat_binding_draft(
     temperature: float | None,
     reasoning_effort: str | None,
     context_window_tokens: int | None,
+    request_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     provider_id, model_id = Config.parse_provider_model(provider_model)
     return {
@@ -75,6 +79,7 @@ def _chat_binding_draft(
             temperature=temperature,
             reasoning_effort=reasoning_effort,
             context_window_tokens=context_window_tokens,
+            request_timeout_seconds=request_timeout_seconds,
         ),
         "extra_headers": extra_headers or {},
         "extra_options": {},
@@ -139,6 +144,7 @@ class ModelManager:
         name: str = "",
         context_window_tokens: int,
         image_multimodal_enabled: bool = False,
+        request_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         clean_key = str(key or "").strip()
         if not clean_key:
@@ -156,6 +162,7 @@ class ModelManager:
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
                 context_window_tokens=context_window_tokens,
+                request_timeout_seconds=request_timeout_seconds,
             ),
             binding_payload={
                 "key": clean_key,
@@ -193,6 +200,7 @@ class ModelManager:
         name: str | None | object = _UNSET,
         context_window_tokens: int | None | object = _UNSET,
         image_multimodal_enabled: bool | object = _UNSET,
+        request_timeout_seconds: float | None | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
         patch: dict[str, Any] = {}
@@ -205,7 +213,8 @@ class ModelManager:
         if api_base is not _UNSET:
             patch["base_url"] = str(api_base).strip()
         parameters_present = any(
-            value is not _UNSET for value in (max_tokens, temperature, reasoning_effort, context_window_tokens)
+            value is not _UNSET
+            for value in (max_tokens, temperature, reasoning_effort, context_window_tokens, request_timeout_seconds)
         )
         parameters: dict[str, Any] = {}
         if max_tokens is not _UNSET:
@@ -217,6 +226,10 @@ class ModelManager:
         if context_window_tokens is not _UNSET:
             parameters["context_window_tokens"] = (
                 None if context_window_tokens in (None, "") else int(context_window_tokens)
+            )
+        if request_timeout_seconds is not _UNSET:
+            parameters["request_timeout_seconds"] = (
+                None if request_timeout_seconds in (None, "") else float(request_timeout_seconds)
             )
         if parameters_present:
             patch["parameters"] = parameters

@@ -10,12 +10,14 @@ from typing import Any, AsyncIterator, TypeVar
 import json_repair
 
 from g3ku.providers.base import ToolCallRequest, normalize_usage_payload
+from g3ku.providers.fallback import DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
 
 T = TypeVar("T")
 
-DEFAULT_STREAMING_FIRST_CHUNK_TIMEOUT_SECONDS = 60.0
-DEFAULT_STREAMING_IDLE_CHUNK_TIMEOUT_SECONDS = 60.0
-DEFAULT_NON_STREAMING_FIRST_RESPONSE_TIMEOUT_SECONDS = 120.0
+# 超时单一真相源：未配置（或不可解析）时的兜底统一指向模型链的全局默认
+# （DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS，600s）。正常生产路径里该值由
+# chat backend 按模型配置的 request_timeout_seconds 解析后显式传入，这里的
+# 兜底只覆盖“直接构造 provider 且未传超时”的窄场景（测试/工具脚本）。
 
 
 class StreamingChunkTimeoutError(TimeoutError):
@@ -69,22 +71,22 @@ class StreamingDiagnostics:
 
 def resolve_streaming_timeout_seconds(request_timeout_seconds: float | None) -> float:
     if request_timeout_seconds is None:
-        return DEFAULT_STREAMING_FIRST_CHUNK_TIMEOUT_SECONDS
+        return DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
     try:
         value = float(request_timeout_seconds)
     except (TypeError, ValueError):
-        return DEFAULT_STREAMING_FIRST_CHUNK_TIMEOUT_SECONDS
-    return value if value > 0 else DEFAULT_STREAMING_FIRST_CHUNK_TIMEOUT_SECONDS
+        return DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
 
 
 def resolve_non_streaming_timeout_seconds(request_timeout_seconds: float | None) -> float:
     if request_timeout_seconds is None:
-        return DEFAULT_NON_STREAMING_FIRST_RESPONSE_TIMEOUT_SECONDS
+        return DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
     try:
         value = float(request_timeout_seconds)
     except (TypeError, ValueError):
-        return DEFAULT_NON_STREAMING_FIRST_RESPONSE_TIMEOUT_SECONDS
-    return value if value > 0 else DEFAULT_NON_STREAMING_FIRST_RESPONSE_TIMEOUT_SECONDS
+        return DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
 
 
 async def iterate_with_chunk_timeouts(

@@ -89,3 +89,34 @@ def align_compaction_keep_recent(messages: list[dict[str, Any]] | None, keep_rec
             break
         k += 1
     return k
+
+
+def iter_compaction_atomic_groups(messages: list[dict[str, Any]] | None) -> list[list[dict[str, Any]]]:
+    """把消息序列切成压缩不可再分的原子组，供分块压缩装箱。
+
+    原子组 = 单条非工具消息，或一个完整工具调用组（``assistant(tool_calls)`` +
+    紧随其后的全部 ``role=tool`` 结果）。分块边界落在原子组之间，保证任何一块
+    都不会切断工具调用组（与 ``align_compaction_keep_recent`` 同一不变量）。
+    孤儿工具结果（无前置声明）自成一組，不向前合并。
+    """
+    seq = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+    groups: list[list[dict[str, Any]]] = []
+    index = 0
+    total = len(seq)
+    while index < total:
+        msg = seq[index]
+        role = str((msg or {}).get("role") or "").strip().lower()
+        if role == "assistant" and list((msg or {}).get("tool_calls") or []):
+            group = [msg]
+            index += 1
+            while index < total:
+                nxt = seq[index]
+                if str((nxt or {}).get("role") or "").strip().lower() != "tool":
+                    break
+                group.append(nxt)
+                index += 1
+            groups.append(group)
+            continue
+        groups.append([msg])
+        index += 1
+    return groups

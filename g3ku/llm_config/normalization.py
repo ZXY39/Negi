@@ -220,6 +220,24 @@ def normalize_draft(
         else:
             parameters["context_window_tokens"] = context_window_tokens
 
+        # request_timeout_seconds：可选；留空 = 未配置（运行时默认 600s），
+        # 配置则必须是大于 0 的数字（秒）。
+        raw_request_timeout_seconds = draft.parameters.get("request_timeout_seconds")
+        if raw_request_timeout_seconds not in (None, ""):
+            request_timeout_seconds = _parse_number(raw_request_timeout_seconds, integer=False)
+            if not isinstance(request_timeout_seconds, (int, float)) or isinstance(
+                request_timeout_seconds, bool
+            ) or float(request_timeout_seconds) <= 0:
+                errors.append(
+                    FieldError(
+                        field="request_timeout_seconds",
+                        code="below_min",
+                        message="Must be > 0.",
+                    )
+                )
+            else:
+                parameters["request_timeout_seconds"] = float(request_timeout_seconds)
+
     extra_options = dict(draft.extra_options)
     if default_model not in template.suggested_models:
         extra_options["custom_model"] = True

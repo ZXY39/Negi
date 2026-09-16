@@ -391,6 +391,11 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
                     if getattr(item, "context_window_tokens", None) is not None
                     else {}
                 ),
+                **(
+                    {"request_timeout_seconds": float(item.request_timeout_seconds)}
+                    if getattr(item, "request_timeout_seconds", None) is not None
+                    else {}
+                ),
             },
             extra_headers=dict(
                 item.extra_headers
@@ -430,6 +435,8 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
         }
         if getattr(item, "context_window_tokens", None) is not None:
             payload["contextWindowTokens"] = int(getattr(item, "context_window_tokens", 0) or 0)
+        if getattr(item, "request_timeout_seconds", None) is not None:
+            payload["requestTimeoutSeconds"] = float(getattr(item, "request_timeout_seconds", 0) or 0)
         if getattr(item, "single_api_key_max_concurrency", None) is not None:
             payload["singleApiKeyMaxConcurrency"] = item.single_api_key_max_concurrency
         catalog.append(payload)

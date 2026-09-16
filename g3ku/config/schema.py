@@ -225,6 +225,10 @@ class ManagedModelConfig(Base):
     description: str = ""
     name: str = ""
     context_window_tokens: int | None = None
+    # 单次 provider 请求（attempt）的超时秒数；None/空白 → 运行时默认
+    # （DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS，600s）。同时约束外层 attempt
+    # 看门狗与流式首块/块间空闲超时。
+    request_timeout_seconds: float | None = None
     image_multimodal_enabled: bool = False
 
     @field_validator("key")
@@ -283,6 +287,18 @@ class ManagedModelConfig(Base):
         resolved = int(value)
         if resolved <= 25_000:
             raise ValueError("models.catalog[].context_window_tokens must be > 25000")
+        return resolved
+
+    @field_validator("request_timeout_seconds", mode="before")
+    @classmethod
+    def _normalize_request_timeout_seconds(cls, value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        resolved = float(value)
+        if resolved <= 0:
+            raise ValueError("models.catalog[].request_timeout_seconds must be > 0")
         return resolved
 
     @field_validator("reasoning_effort", mode="before")

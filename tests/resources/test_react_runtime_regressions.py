@@ -7028,14 +7028,20 @@ async def test_node_send_preflight_does_not_compress_below_threshold(
 
 
 def _is_node_token_compression_helper_request(messages) -> bool:
-    """节点 token 压缩 helper 调用的识别：user 消息携带 `node_token_compression` kind。"""
+    """节点 token 压缩 helper 调用的识别。
+
+    新合同为 append-only：末尾 user 消息携带「【上下文压缩指令】」；分块/归并
+    请求携带 `node_token_compression_chunk` / `node_token_compression_merge` kind；
+    兼容旧 JSON 巨包形态的 `node_token_compression` kind（存量断言）。"""
     for item in list(messages or []):
         if not isinstance(item, dict):
             continue
         if str(item.get("role") or "").strip().lower() != "user":
             continue
         content = item.get("content")
-        if isinstance(content, str) and "node_token_compression" in content:
+        if isinstance(content, str) and (
+            "node_token_compression" in content or "【上下文压缩指令】" in content
+        ):
             return True
     return False
 
@@ -7157,7 +7163,15 @@ async def test_node_send_preflight_triggers_compression_at_effective_threshold(
     assert "针对任务目标整理的压缩摘要。" in rendered
     helper_rendered = "\n".join(str(item.get("content") or "") for item in helper_calls[0])
     assert "任务目标" in helper_rendered
-    assert '"task_goal": "demo"' in helper_rendered
+    # append-only 新合同：任务目标写在末尾指令里，历史消息原位保留、指令殿后。
+    assert "当前任务目标：demo" in helper_rendered
+    assert "【上下文压缩指令】" in helper_rendered
+    helper_messages = list(helper_calls[0])
+    assert str(helper_messages[-1].get("role") or "") == "user"
+    assert "【上下文压缩指令】" in str(helper_messages[-1].get("content") or "")
+    helper_contents = [str(item.get("content") or "") for item in helper_messages]
+    assert any("filler 0" in content for content in helper_contents)
+    assert not any('"older_history_messages"' in content for content in helper_contents)
 
     assert observed_frame.get("history_shrink_reason") == "token_compression"
     diagnostics = observed_frame.get("token_preflight_diagnostics")
@@ -7642,7 +7656,18 @@ async def test_node_preflight_attempts_compression_before_failing_when_pre_compa
     assert diagnostics["estimated_total_tokens"] == 25110
     assert "after compression" in str(result.blocking_reason or "")
     assert "after compression" in str(diagnostics.get("error") or "")
-    assert len(helper_calls) == 1
+    # 超窗新合同：单发压缩请求自身放不下窗口 → 分块压缩（多次 helper 调用：
+    # 若干分块 + 可选归并），压缩后重算仍超窗才失败。
+    assert len(helper_calls) >= 2
+    chunk_requests = [
+        str(item.get("content") or "")
+        for call in helper_calls
+        for item in call
+        if isinstance(item, dict) and "node_token_compression_chunk" in str(item.get("content") or "")
+    ]
+    assert chunk_requests
+    assert diagnostics.get("compression_mode") == "llm_chunked"
+    assert int(diagnostics.get("chunk_count") or 0) >= 1
 
 
 @pytest.mark.asyncio

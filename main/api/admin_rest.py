@@ -1223,6 +1223,11 @@ async def create_model(payload: dict = Body(...)):
                 if 'image_multimodal_enabled' in payload
                 else payload.get('imageMultimodalEnabled', False)
             ),
+            request_timeout_seconds=(
+                payload.get('request_timeout_seconds')
+                if 'request_timeout_seconds' in payload
+                else payload.get('requestTimeoutSeconds')
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1287,6 +1292,7 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             name=_pick('name'),
             context_window_tokens=_pick('context_window_tokens', 'contextWindowTokens'),
             image_multimodal_enabled=_pick('image_multimodal_enabled', 'imageMultimodalEnabled'),
+            request_timeout_seconds=_pick('request_timeout_seconds', 'requestTimeoutSeconds'),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
