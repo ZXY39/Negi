@@ -39,6 +39,10 @@ class GlobalScheduler:
     def active_task_count(self) -> int:
         return len(self._running)
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def queued_task_count(self) -> int:
         return len(self._queued_set) + len(self._requeue_after_running)
 

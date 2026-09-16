@@ -522,6 +522,14 @@ class MainRuntimeService:
                 error_text=error_text,
             )
         )
+        self.task_actor_service.interrupted_task_requeue_callback = (
+            lambda task_id: asyncio.get_running_loop().call_soon(
+                lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
+                    self._requeue_interrupted_task(normalized_task_id),
+                    name=f'task-interrupted-requeue:{normalized_task_id}',
+                )
+            )
+        )
         self.tool_pressure_monitor = WorkerPressureMonitor(
             controller=self.adaptive_tool_budget_controller,
             store=self.store,
@@ -703,6 +711,35 @@ class MainRuntimeService:
             self._command_poller_task = asyncio.create_task(self._worker_command_loop(), name=f'main-runtime-command-poller:{self.worker_id or "worker"}')
         if self._worker_heartbeat_task is None or self._worker_heartbeat_task.done():
             self._worker_heartbeat_task = asyncio.create_task(self._worker_heartbeat_loop(), name=f'main-runtime-worker-heartbeat:{self.worker_id or "worker"}')
+
+    async def _requeue_interrupted_task(self, task_id: str) -> None:
+        """引擎级中断任务的尽力即时重排（进程仍活着时）。
+
+        延迟 1s 再入队：若中断源仍在（杂散取消未消失），限制「取消→重排→
+        取消」的回转速度，避免热循环。进程正处于退出收尾时调度器已关闭或
+        即将关闭，入队自然无效——任务由下一个 worker 启动时的
+        ``_recover_interrupted_task`` 恢复重排兜底（2026-09-16
+        task:eacd0f0467b7 事故：引擎中断被终态化成 canceled，任务永久丢失）。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return
+        try:
+            await asyncio.sleep(1.0)
+            if self.global_scheduler.closed:
+                return
+            latest = self.store.get_task(normalized_task_id)
+            if latest is None:
+                return
+            if str(latest.status or '').strip().lower() != 'in_progress':
+                return
+            if bool(latest.cancel_requested) or bool(latest.pause_requested) or bool(latest.is_paused):
+                return
+            await self.global_scheduler.enqueue_task(normalized_task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug('interrupted task requeue skipped: task={}', normalized_task_id)
 
     def _recover_interrupted_task(self, task_id: str) -> None:
         task = self.store.get_task(task_id)

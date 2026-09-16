@@ -502,6 +502,10 @@ class TaskActorService:
         }
         self.distribution_resume_callback = None
         self.distribution_failure_notifier = None
+        # 引擎级中断（无取消/暂停标志的 CancelledError）后的尽力即时重排钩子：
+        # 由 MainRuntimeService 接到 global_scheduler.enqueue_task。进程退出中
+        # 调度器关闭时自然无效，任务由下一个 worker 启动恢复兜底。
+        self.interrupted_task_requeue_callback = None
         # 每任务单飞的子树分发驱动器（side asyncio.Task）。
         self._epoch_drivers: dict[str, asyncio.Task[None]] = {}
         # A3：释放后校验清扫任务（每任务替换式单飞，run_task finally 取消）。
@@ -732,6 +736,16 @@ class TaskActorService:
                     self._log_service.set_pause_state(task_id, pause_requested=True, is_paused=True)
                 except Exception:
                     pass
+                return
+            if latest is None or not bool(latest.cancel_requested):
+                # 引擎级中断（worker 进程退出收尾、进程内杂散取消），不是用户
+                # 取消：绝不落 failed/canceled 终态——任务保持 in_progress，交给
+                # 下一个 worker 启动的 _recover_interrupted_task 恢复重排；进程
+                # 仍活着时尽力即时重排（2026-09-16 task:eacd0f0467b7 事故：
+                # 有序退出把任务终态化成 canceled，抢先于启动恢复，任务永久丢失）。
+                # 用户取消的终态由 cancel_task 服务路径与 cancel_requested 分支保证。
+                self._requeue_interrupted_task_best_effort(task_id)
+                control_only_return = True
                 return
             result = NodeFinalResult(
                 status='failed',
@@ -966,6 +980,23 @@ class TaskActorService:
         self._log_service.set_pause_state(task_id, pause_requested=False, is_paused=False)
         if self._stall_notifier is not None and hasattr(self._stall_notifier, 'reset_visible_output'):
             self._stall_notifier.reset_visible_output(task_id)
+
+    def _requeue_interrupted_task_best_effort(self, task_id: str) -> None:
+        """引擎级中断后的尽力即时重排（进程仍活着时避免任务悬空）。
+
+        钩子由 MainRuntimeService 注入；进程退出收尾中调度器即将关闭，
+        重排自然无效并由下一个 worker 的启动恢复兜底，因此这里绝不抛错。
+        """
+        callback = self.interrupted_task_requeue_callback
+        if not callable(callback):
+            return
+        try:
+            callback(task_id)
+        except Exception:
+            try:
+                logger.debug('interrupted task requeue skipped: task={}', task_id)
+            except Exception:
+                pass
 
     async def _execute_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         dispatcher = self._dispatchers.get(str(task_id or '').strip())

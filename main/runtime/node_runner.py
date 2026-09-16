@@ -666,7 +666,14 @@ class NodeRunner:
             if hold_epoch_id:
                 self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
                 raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
-            return self._mark_failed(task_id, node.node_id, reason='canceled')
+            # 引擎级中断（worker 进程退出收尾、无标志的杂散取消）：绝不落
+            # failed/canceled 终态——节点保持 in_progress，任务留给下一个
+            # worker 启动的 _recover_interrupted_task 恢复重排（2026-09-16
+            # task:eacd0f0467b7 事故：有序退出把在飞节点终态化成 canceled，
+            # 抢先于启动恢复，任务永久丢失）。用户取消/暂停已在上方分支解决
+            # （两者都先落 cancel_requested / pause_requested 标志再取消执行器）。
+            self._flush_latest_valid_result_if_paused(task_id=task_id, node_id=node.node_id)
+            raise
         except Exception as exc:
             if isinstance(exc, MemoryError):
                 self._capture_memory_error_diagnostics(task_id=task_id, node_id=node.node_id, exc=exc)
