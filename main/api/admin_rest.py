@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 
+from g3ku import audit_events
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.model_manager import _UNSET, VALID_SCOPES, ModelManager
 from g3ku.config.schema import Config, ExternalApiTokenConfig, _normalize_external_token_id
@@ -2072,6 +2073,16 @@ def _memory_read_error(*, code: str, message: str) -> HTTPException:
     )
 
 
+def _audit_read_error(*, code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            'code': str(code or '').strip(),
+            'message': str(message or '').strip(),
+        },
+    )
+
+
 @router.get('/memory/queue')
 async def get_memory_queue(
     limit: int = Query(20, ge=1, le=200),
@@ -2581,4 +2592,51 @@ async def get_memory_runtime_stats():
             'loop_manager': await _stats_for(loop_manager),
             'service_manager': await _stats_for(service_manager),
         },
+    }
+
+
+@router.get('/audit/events')
+async def get_audit_events(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    level: str | None = Query(default=None),
+    subsystem: str | None = Query(default=None),
+    since: str | None = Query(default=None),
+):
+    """日志审计事件流（新在前）；since 为 lastSeen 时间戳时 total 即未读数。"""
+    try:
+        payload = audit_events.list_audit_events(
+            limit=limit,
+            offset=offset,
+            level=level,
+            subsystem=subsystem,
+            since=since,
+        )
+    except Exception as exc:
+        raise _audit_read_error(
+            code='audit_events_read_failed',
+            message='审计事件暂时不可读取，请稍后刷新。',
+        ) from exc
+    return {
+        'ok': True,
+        'items': list(payload.get('items') or []),
+        'total': int(payload.get('total', 0) or 0),
+        'has_more': bool(payload.get('has_more', False)),
+    }
+
+
+@router.get('/audit/summary')
+async def get_audit_summary():
+    """各子系统近 24 小时健康概览（固定子系统补零在前）。"""
+    try:
+        payload = audit_events.audit_summary()
+    except Exception as exc:
+        raise _audit_read_error(
+            code='audit_summary_read_failed',
+            message='审计概览暂时不可读取，请稍后刷新。',
+        ) from exc
+    return {
+        'ok': True,
+        'subsystems': list(payload.get('subsystems') or []),
+        'generated_at': str(payload.get('generated_at') or ''),
     }
