@@ -32,12 +32,23 @@ def _admin_route_fragment(source: str, route: str) -> str:
 
 def test_memory_page_renders_note_ref_trigger() -> None:
     app_js = _source("g3ku/web/frontend/org_graph_app.js")
+    css = _source("g3ku/web/frontend/org_graph.css")
 
-    assert r"const NOTE_REF_RE = /\bref:(note_[a-z0-9_]+)\b/g;" in app_js
+    assert r"const NOTE_REF_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b/g;" in app_js
     assert "function renderMemoryTextWithNoteRefs(text)" in app_js
     assert "function renderMemoryNoteRefChip(noteRef)" in app_js
     assert 'class="memory-note-ref-trigger"' in app_js
     assert 'data-memory-note-ref="${esc(noteRef)}"' in app_js
+    # 已处理批次详情（历史视图）打开的 note 窗只读：隐藏编辑开关且保存被守卫
+    assert 'const readOnlyNote = String(S.memoryDetailPreview?.kind || "").trim() === "processed";' in app_js
+    assert 'void openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || "", { editable: !readOnlyNote });' in app_js
+    assert "U.memoryNoteEditToggle.hidden = !editable;" in app_js
+    assert "!preview.editable" in app_js
+    # note 窗必须置顶于查看记忆抽屉(100)/详情抽屉(96)之上，否则被遮挡
+    assert "#memory-note-preview-drawer {" in css
+    assert "z-index: 110;" in css
+    assert "#memory-note-preview-backdrop {" in css
+    assert "z-index: 105;" in css
     # 卡片精简为 minimal-row 后，note 引用渲染收敛到详情抽屉（正文 + 补充信息区），
     # 且轮询刷新必须保留滚动位置（变更内容滚动条被重置是回归 bug）
     assert "setInnerHtmlPreservingScroll(U.memoryDetailPrimary, renderMemoryTextWithNoteRefs(primaryText));" in app_js

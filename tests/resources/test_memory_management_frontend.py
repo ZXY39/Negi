@@ -326,6 +326,11 @@ def test_memory_browser_edit_mode_adds_guarded_bulk_operations_with_confirm_dial
     assert "操作</th>" in app_js
     assert 'id="memory-browser-bulk-bar"' in app_js
     assert 'id="memory-browser-select-all"' in app_js
+    # 批量条不再常驻提示文案；删除选中按钮为小尺寸
+    assert "删除与保存均会弹窗二次确认。" not in app_js
+    assert "memory-browser-edit-hint" not in app_js
+    assert "memory-browser-bulk-delete" in app_js
+    assert ".memory-browser-bulk-delete {" in css
     assert "function toggleMemoryBrowserEditMode()" in app_js
     assert "function memoryBrowserToggleSelectAll(checked)" in app_js
     assert "data-memory-row-select=" in app_js

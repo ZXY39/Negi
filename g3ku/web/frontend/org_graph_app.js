@@ -126,11 +126,14 @@ const S = {
         mode: "chain",
         modelKey: "",
         pinnedAvailable: true,
+        loaded: false,
         loading: false,
         saving: false,
         requestToken: 0,
         panelOpen: false,
         pickerOpen: false,
+        paneTouched: false,
+        pendingChainSwitch: false,
         search: "",
         chainKeys: [],
         dragFrom: -1,
@@ -345,6 +348,7 @@ const S = {
         editMode: false,
         editBody: "",
         saving: false,
+        editable: true,
     },
     memoryBrowser: {
         open: false,
@@ -419,6 +423,10 @@ const U = {
     ceoModelChainPane: document.getElementById("ceo-model-chain-pane"),
     ceoModelChainList: document.getElementById("ceo-model-chain-list"),
     ceoModelChainEmpty: document.getElementById("ceo-model-chain-empty"),
+    ceoModelChainConfirm: document.getElementById("ceo-model-chain-confirm"),
+    ceoModelChainConfirmText: document.getElementById("ceo-model-chain-confirm-text"),
+    ceoModelChainConfirmAccept: document.getElementById("ceo-model-chain-confirm-accept"),
+    ceoModelChainConfirmCancel: document.getElementById("ceo-model-chain-confirm-cancel"),
     ceoModelChainActions: document.getElementById("ceo-model-chain-actions"),
     ceoModelChainApply: document.getElementById("ceo-model-chain-apply"),
     ceoModelPicker: document.getElementById("ceo-model-picker"),
@@ -1572,11 +1580,14 @@ function resetCeoModelSelection(sessionId) {
         mode: "chain",
         modelKey: "",
         pinnedAvailable: true,
+        loaded: false,
         loading: false,
         saving: false,
         error: "",
         panelOpen: false,
         pickerOpen: false,
+        paneTouched: false,
+        pendingChainSwitch: false,
         search: "",
         chainKeys: ceoModelChainKeys(),
         dragFrom: -1,
@@ -1596,6 +1607,7 @@ function applyCeoModelSelectionPayload(sessionId, payload) {
         mode,
         modelKey: mode === "model" ? modelKey : "",
         pinnedAvailable: data.pinned_available !== false,
+        loaded: true,
         loading: false,
         saving: false,
         error: "",
@@ -1607,14 +1619,14 @@ function applyCeoModelSelectionPayload(sessionId, payload) {
 
 async function refreshCeoModelSelection(sessionId, { force = false } = {}) {
     const key = String(sessionId || "").trim();
-    if (!key || activeSessionIsReadonly()) {
+    if (!key) {
         resetCeoModelSelection(key);
         return null;
     }
     const current = S.ceoModelSelection;
-    if (!force && String(current.sessionId || "").trim() === key && !current.loading && !current.error) {
-        return current;
-    }
+    // 只有确实加载过该会话才复用；reset 只写 sessionId，不能当成已加载。
+    if (!force && String(current.sessionId || "").trim() === key && current.loaded) return current;
+    if (String(current.sessionId || "").trim() === key && current.loading) return current;
     current.requestToken += 1;
     const token = current.requestToken;
     S.ceoModelSelection = { ...current, sessionId: key, loading: true, error: "" };
@@ -1640,11 +1652,15 @@ async function saveCeoModelSelection(mode, modelKey = "") {
     const sessionId = String(activeSessionId() || "").trim();
     const nextMode = mode === "model" ? "model" : "chain";
     const nextKey = nextMode === "model" ? String(modelKey || "").trim() : "";
-    if (!sessionId || activeSessionIsReadonly() || S.ceoModelSelection.saving) return null;
+    if (!sessionId || S.ceoModelSelection.saving) return null;
     if (nextMode === "model" && !nextKey) return null;
     const current = ceoModelSelectionFor(sessionId) || S.ceoModelSelection;
     if (current.mode === nextMode && String(current.modelKey || "") === nextKey) {
         if (nextMode === "model") closeCeoModelModePanel();
+        else {
+            S.ceoModelSelection = { ...S.ceoModelSelection, pendingChainSwitch: false };
+            syncCeoModelModeControl();
+        }
         return current;
     }
     S.ceoModelSelection = { ...current, sessionId, saving: true, error: "" };
@@ -1656,6 +1672,7 @@ async function saveCeoModelSelection(mode, modelKey = "") {
         );
         if (sessionId !== String(activeSessionId() || "").trim()) return null;
         const applied = applyCeoModelSelectionPayload(sessionId, payload);
+        S.ceoModelSelection = { ...S.ceoModelSelection, pendingChainSwitch: false };
         // 选好固定模型即收起面板；切回模型链留在面板里继续看链。
         if (nextMode === "model") closeCeoModelModePanel();
         else syncCeoModelModeControl();
@@ -1688,7 +1705,7 @@ async function saveCeoModelSelection(mode, modelKey = "") {
 async function saveCeoModelChain(keys) {
     const sessionId = String(activeSessionId() || "").trim();
     const modelKeys = normalizeModelRoleChain(keys);
-    if (!sessionId || activeSessionIsReadonly() || S.ceoModelSelection.saving) return null;
+    if (!sessionId || S.ceoModelSelection.saving) return null;
     if (!modelKeys.length) return null;
     S.ceoModelSelection = { ...S.ceoModelSelection, saving: true, error: "" };
     syncCeoModelModeControl();
@@ -1937,13 +1954,24 @@ function syncCeoModelModePanelUsage() {
         : "等待 Leader 上下文预估";
 }
 
+function ceoModelChainConfirmVisible(selection) {
+    return !!selection?.pendingChainSwitch && !!selection?.panelOpen && !selection?.pickerOpen;
+}
+
 function syncCeoModelModeControl() {
     const sessionId = String(activeSessionId() || "").trim();
-    const readonly = activeSessionIsReadonly();
-    const selection = ceoModelSelectionFor(sessionId);
+    let selection = ceoModelSelectionFor(sessionId);
+    const panelOpen = !!selection?.panelOpen && !!sessionId;
     const effectiveKey = ceoModelEffectivePinnedKey(selection);
+    // 板块跟随当前生效的模式：手动切过板块、或正在确认切回模型链时不自动拉回。
+    if (panelOpen && !selection?.paneTouched && !selection?.pendingChainSwitch) {
+        const nextPickerOpen = !!effectiveKey;
+        if (!!selection?.pickerOpen !== nextPickerOpen) {
+            S.ceoModelSelection = { ...S.ceoModelSelection, pickerOpen: nextPickerOpen };
+            selection = ceoModelSelectionFor(sessionId);
+        }
+    }
     const staleKey = ceoModelStalePinnedKey(selection);
-    const panelOpen = !!selection?.panelOpen && !!sessionId && !readonly;
     const brain = U.ceoComposerUsageBrain;
     if (brain) {
         brain.classList.toggle("is-panel-open", panelOpen);
@@ -1966,6 +1994,17 @@ function syncCeoModelModeControl() {
         U.ceoModelModeNote.textContent = note;
         U.ceoModelModeNote.hidden = !note;
     }
+    if (U.ceoModelChainConfirm) {
+        const asking = ceoModelChainConfirmVisible(selection);
+        U.ceoModelChainConfirm.hidden = !asking;
+        if (U.ceoModelChainConfirmText) {
+            const currentTitle = ceoModelDisplayTitle(ceoModelCatalogItem(effectiveKey)) || effectiveKey;
+            U.ceoModelChainConfirmText.textContent = asking
+                ? `当前会话固定使用 ${currentTitle}，切换到模型链？`
+                : "";
+        }
+        if (U.ceoModelChainConfirmAccept) U.ceoModelChainConfirmAccept.disabled = !!selection?.saving;
+    }
     if (panelOpen) syncCeoModelModePanelUsage();
     renderCeoModelPicker();
     renderCeoModelChainPane();
@@ -1973,14 +2012,17 @@ function syncCeoModelModeControl() {
 
 function openCeoModelModePanel() {
     const sessionId = String(activeSessionId() || "").trim();
-    if (!sessionId || activeSessionIsReadonly()) return;
+    if (!sessionId) return;
     const current = ceoModelSelectionFor(sessionId) || S.ceoModelSelection;
+    const effectiveKey = ceoModelEffectivePinnedKey(current);
     S.ceoModelSelection = {
         ...current,
         sessionId,
         panelOpen: true,
-        // 只在固定确实生效时才直接进指定模型列表；失效固定按实际生效的模型链展示。
-        pickerOpen: !!ceoModelEffectivePinnedKey(current),
+        // 打开即停在正在使用的板块：固定生效则直接进指定模型列表。
+        pickerOpen: !!effectiveKey,
+        paneTouched: false,
+        pendingChainSwitch: false,
         search: "",
         chainKeys: ceoModelChainKeys(),
         dragFrom: -1,
@@ -1989,6 +2031,7 @@ function openCeoModelModePanel() {
     if (U.ceoModelPickerSearch) U.ceoModelPickerSearch.value = "";
     syncCeoModelModeControl();
     if (S.ceoModelSelection.pickerOpen) U.ceoModelPickerSearch?.focus();
+    void refreshCeoModelSelection(sessionId);
     void ensureCeoModelCatalog();
 }
 
@@ -1998,6 +2041,8 @@ function closeCeoModelModePanel() {
         ...S.ceoModelSelection,
         panelOpen: false,
         pickerOpen: false,
+        paneTouched: false,
+        pendingChainSwitch: false,
         search: "",
         dragFrom: -1,
         dropIndex: null,
@@ -2008,8 +2053,16 @@ function closeCeoModelModePanel() {
 
 function openCeoModelModePicker() {
     const sessionId = String(activeSessionId() || "").trim();
-    if (!sessionId || activeSessionIsReadonly()) return;
-    S.ceoModelSelection = { ...S.ceoModelSelection, sessionId, panelOpen: true, pickerOpen: true, search: "" };
+    if (!sessionId) return;
+    S.ceoModelSelection = {
+        ...S.ceoModelSelection,
+        sessionId,
+        panelOpen: true,
+        pickerOpen: true,
+        paneTouched: true,
+        pendingChainSwitch: false,
+        search: "",
+    };
     if (U.ceoModelPickerSearch) U.ceoModelPickerSearch.value = "";
     syncCeoModelModeControl();
     U.ceoModelPickerSearch?.focus();
@@ -2018,18 +2071,36 @@ function openCeoModelModePicker() {
 
 function showCeoModelChainPane() {
     const sessionId = String(activeSessionId() || "").trim();
-    if (!sessionId || activeSessionIsReadonly()) return;
+    if (!sessionId) return;
+    const selection = ceoModelSelectionFor(sessionId) || S.ceoModelSelection;
+    const effectiveKey = ceoModelEffectivePinnedKey(selection);
     S.ceoModelSelection = {
-        ...S.ceoModelSelection,
+        ...selection,
         sessionId,
         panelOpen: true,
         pickerOpen: false,
+        paneTouched: true,
+        // 固定生效时先确认再切回模型链；本来就是模型链则无需确认。
+        pendingChainSwitch: !!effectiveKey,
         search: "",
         chainKeys: ceoModelChainKeys(),
         dragFrom: -1,
         dropIndex: null,
     };
     syncCeoModelModeControl();
+}
+
+function cancelCeoModelChainSwitch() {
+    if (!S.ceoModelSelection.pendingChainSwitch) return false;
+    // 取消后回到正在使用的板块（固定生效时即指定模型列表）。
+    S.ceoModelSelection = { ...S.ceoModelSelection, pendingChainSwitch: false, paneTouched: false };
+    syncCeoModelModeControl();
+    return true;
+}
+
+function confirmCeoModelChainSwitch() {
+    if (!S.ceoModelSelection.pendingChainSwitch) return null;
+    return saveCeoModelSelection("chain");
 }
 
 function bindCeoModelModeControls() {
@@ -2048,10 +2119,15 @@ function bindCeoModelModeControls() {
     });
     U.ceoModelModeChain?.addEventListener("click", () => {
         showCeoModelChainPane();
-        void saveCeoModelSelection("chain");
     });
     U.ceoModelModePinned?.addEventListener("click", () => {
         openCeoModelModePicker();
+    });
+    U.ceoModelChainConfirmAccept?.addEventListener("click", () => {
+        void confirmCeoModelChainSwitch();
+    });
+    U.ceoModelChainConfirmCancel?.addEventListener("click", () => {
+        cancelCeoModelChainSwitch();
     });
     U.ceoModelPickerSearch?.addEventListener("input", () => {
         S.ceoModelSelection = { ...S.ceoModelSelection, search: String(U.ceoModelPickerSearch?.value || "") };
@@ -2075,6 +2151,7 @@ function bindCeoModelModeControls() {
         void saveCeoModelChain(ceoModelChainDraft());
     });
 }
+
 
 function setCeoComposerUsagePinnedEntries(sessionId, entries = []) {
     const key = String(sessionId || "").trim();
@@ -10754,7 +10831,7 @@ function memoryProcessedOpLabel(item) {
     return memoryProcessedStatusLabel(item);
 }
 
-const NOTE_REF_RE = /\bref:(note_[a-z0-9_]+)\b/g;
+const NOTE_REF_RE = /(?:\bref:|见noteid:)(note_[a-z0-9_]+)\b/g;
 const MEMORY_VIEW_POLL_MS = 15000;
 
 function renderMemoryNoteRefChip(noteRef) {
@@ -11064,12 +11141,15 @@ function ensureMemoryNotePreviewUi() {
 function renderMemoryNotePreview() {
     ensureMemoryNotePreviewUi();
     const noteRef = String(S.memoryNotePreview.ref || "").trim();
-    const editMode = !!S.memoryNotePreview.editMode;
+    const editable = !!S.memoryNotePreview.editable;
+    const editMode = !!S.memoryNotePreview.editMode && editable;
     if (U.memoryNoteTitle) U.memoryNoteTitle.textContent = noteRef ? `Note 预览 · ${noteRef}` : "Note 预览";
     if (U.memoryNoteSubtitle) {
-        U.memoryNoteSubtitle.textContent = editMode
-            ? "编辑 note 正文，保存前会再次确认。"
-            : "展示 note 正文，可点「编辑」修改（保存前二次确认）。";
+        U.memoryNoteSubtitle.textContent = !editable
+            ? "只读视图：已处理批次的历史入口不支持编辑 note。"
+            : editMode
+                ? "编辑 note 正文，保存前会再次确认。"
+                : "展示 note 正文，可点「编辑」修改（保存前二次确认）。";
     }
     if (U.memoryNoteStatus) {
         const errorText = String(S.memoryNotePreview.error || "").trim();
@@ -11104,6 +11184,7 @@ function renderMemoryNotePreview() {
     }
     if (U.memoryNoteEditFooter) U.memoryNoteEditFooter.hidden = !editMode;
     if (U.memoryNoteEditToggle) {
+        U.memoryNoteEditToggle.hidden = !editable;
         U.memoryNoteEditToggle.textContent = editMode ? "完成" : "编辑";
         U.memoryNoteEditToggle.disabled = !!S.memoryNotePreview.busy || !!S.memoryNotePreview.saving;
     }
@@ -11113,7 +11194,7 @@ function renderMemoryNotePreview() {
 
 function toggleMemoryNoteEditMode() {
     const preview = S.memoryNotePreview;
-    if (preview.busy || preview.saving) return;
+    if (preview.busy || preview.saving || !preview.editable) return;
     preview.editMode = !preview.editMode;
     if (preview.editMode) {
         preview.editBody = String(preview.body || "");
@@ -11125,7 +11206,7 @@ function toggleMemoryNoteEditMode() {
 function requestMemoryNoteSave() {
     const preview = S.memoryNotePreview;
     const ref = String(preview.ref || "").trim();
-    if (!ref || preview.saving || !preview.editMode) return;
+    if (!ref || preview.saving || !preview.editMode || !preview.editable) return;
     const body = String(U.memoryNoteEditBody?.value ?? preview.editBody ?? "");
     if (!body.trim()) {
         showToast({ title: "内容不能为空", text: "note 正文为必填项。", kind: "warn" });
@@ -11166,7 +11247,7 @@ function closeMemoryNotePreview() {
     renderMemoryNotePreview();
 }
 
-async function openMemoryNotePreview(noteRef) {
+async function openMemoryNotePreview(noteRef, options = {}) {
     const normalizedRef = String(noteRef || "").trim();
     if (!normalizedRef) return;
     ensureMemoryNotePreviewUi();
@@ -11177,6 +11258,8 @@ async function openMemoryNotePreview(noteRef) {
     S.memoryNotePreview.error = "";
     S.memoryNotePreview.editMode = false;
     S.memoryNotePreview.editBody = "";
+    // 已处理批次的历史入口（变更内容等）打开的 note 窗只读，不提供编辑
+    S.memoryNotePreview.editable = options.editable !== false;
     S.memoryNotePreview.requestToken += 1;
     const requestToken = S.memoryNotePreview.requestToken;
     renderMemoryNotePreview();
@@ -11283,7 +11366,9 @@ function ensureMemoryDetailPreviewUi() {
         if (!noteTrigger) return;
         e.preventDefault();
         e.stopPropagation();
-        void openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || "");
+        // 已处理批次详情（含变更内容）是历史视图：其 note 窗只读，不提供编辑
+        const readOnlyNote = String(S.memoryDetailPreview?.kind || "").trim() === "processed";
+        void openMemoryNotePreview(noteTrigger.dataset.memoryNoteRef || "", { editable: !readOnlyNote });
     });
 }
 
@@ -11516,11 +11601,10 @@ function ensureMemoryBrowserUi() {
                     <span>全选</span>
                 </label>
                 <span id="memory-browser-selected-count" class="memory-browser-selected-count">已选 0 条</span>
-                <button type="button" id="memory-browser-bulk-delete" class="toolbar-btn danger" disabled>
+                <button type="button" id="memory-browser-bulk-delete" class="toolbar-btn danger memory-browser-bulk-delete" disabled>
                     <i data-lucide="trash-2" aria-hidden="true"></i>
                     删除选中
                 </button>
-                <span id="memory-browser-edit-hint" class="memory-browser-edit-hint"></span>
             </div>
             <div class="memory-browser-table-wrap">
                 <table class="memory-browser-table">
@@ -11609,7 +11693,6 @@ function ensureMemoryBrowserUi() {
     U.memoryBrowserSelectAll = drawer.querySelector("#memory-browser-select-all");
     U.memoryBrowserSelectedCount = drawer.querySelector("#memory-browser-selected-count");
     U.memoryBrowserBulkDelete = drawer.querySelector("#memory-browser-bulk-delete");
-    U.memoryBrowserEditHint = drawer.querySelector("#memory-browser-edit-hint");
     U.memoryBrowserThSelect = drawer.querySelector("#memory-browser-th-select");
     U.memoryBrowserThActions = drawer.querySelector("#memory-browser-th-actions");
     U.memoryBrowserEditBackdrop = drawer.querySelector("#memory-browser-edit-backdrop");
@@ -11849,9 +11932,6 @@ function renderMemoryBrowserEditState() {
     }
     if (U.memoryBrowserBulkDelete) {
         U.memoryBrowserBulkDelete.disabled = !editMode || !selectedIds.length || !!S.memoryBrowser.actionBusy;
-    }
-    if (U.memoryBrowserEditHint) {
-        U.memoryBrowserEditHint.textContent = S.memoryBrowser.actionBusy ? "正在执行操作..." : "删除与保存均会弹窗二次确认。";
     }
     if (U.memoryBrowserEditDialog) {
         const dialogOpen = !!S.memoryBrowser.editDialog.open;

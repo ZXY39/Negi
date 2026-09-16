@@ -4145,6 +4145,74 @@ textarea {
     display: none !important;
 }
 
+/* 切回模型链前的就地确认：文案 + ✓/✗。 */
+.ceo-model-chain-confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 36%, var(--border-color));
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-panel));
+}
+
+.ceo-model-chain-confirm[hidden] {
+    display: none !important;
+}
+
+.ceo-model-chain-confirm-text {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: 0.74rem;
+    line-height: 1.35;
+}
+
+.ceo-model-chain-confirm-actions {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ceo-model-confirm-btn {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+    transition: background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+.ceo-model-confirm-btn > svg {
+    width: 14px;
+    height: 14px;
+}
+
+.ceo-model-confirm-btn:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--brand-primary) 44%, var(--border-color));
+    color: var(--text-primary);
+}
+
+.ceo-model-confirm-btn.accept:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--brand-primary) 18%, var(--bg-panel));
+    color: color-mix(in srgb, var(--brand-primary) 78%, var(--text-primary));
+}
+
+.ceo-model-confirm-btn:focus-visible {
+    outline: 0;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 18%, transparent);
+}
+
+.ceo-model-confirm-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .ceo-model-chain-apply {
     padding: 6px 14px;
     border: 1px solid color-mix(in srgb, var(--brand-primary) 44%, var(--border-color));
@@ -9617,10 +9685,15 @@ textarea {
     white-space: nowrap;
 }
 
-.memory-browser-edit-hint {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    margin-left: auto;
+.memory-browser-bulk-delete {
+    padding: 2px 10px;
+    font-size: 0.78rem;
+    min-height: 28px;
+}
+
+.memory-browser-bulk-delete svg {
+    width: 13px;
+    height: 13px;
 }
 
 .memory-browser-col-select {
@@ -9790,6 +9863,16 @@ textarea {
     align-items: center;
     gap: var(--space-2);
     flex: 0 0 auto;
+}
+
+/* note 窗从查看记忆抽屉(z-index 100)/详情抽屉(z-index 96)内打开，
+   必须高于二者否则被遮挡 */
+#memory-note-preview-backdrop {
+    z-index: 105;
+}
+
+#memory-note-preview-drawer {
+    z-index: 110;
 }
 
 /* 删除记忆确认对话框：关联笔记勾选列表 */
