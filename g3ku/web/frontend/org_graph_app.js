@@ -11090,7 +11090,7 @@ function ensureMemoryNotePreviewUi() {
         <div class="detail-modal-header">
             <div class="memory-note-preview-head">
                 <h2 id="memory-note-preview-title">Note 预览</h2>
-                <p id="memory-note-preview-subtitle" class="subtitle">展示 note 正文，可点「编辑」修改（保存前二次确认）。</p>
+                <p id="memory-note-preview-subtitle" class="subtitle"></p>
             </div>
             <div class="memory-note-head-actions">
                 <button type="button" class="toolbar-btn ghost" data-memory-note-edit-toggle title="进入编辑模式修改 note 正文">编辑</button>
@@ -11145,11 +11145,7 @@ function renderMemoryNotePreview() {
     const editMode = !!S.memoryNotePreview.editMode && editable;
     if (U.memoryNoteTitle) U.memoryNoteTitle.textContent = noteRef ? `Note 预览 · ${noteRef}` : "Note 预览";
     if (U.memoryNoteSubtitle) {
-        U.memoryNoteSubtitle.textContent = !editable
-            ? "只读视图：已处理批次的历史入口不支持编辑 note。"
-            : editMode
-                ? "编辑 note 正文，保存前会再次确认。"
-                : "展示 note 正文，可点「编辑」修改（保存前二次确认）。";
+        U.memoryNoteSubtitle.textContent = editMode ? "编辑 note 正文，保存前会再次确认。" : "";
     }
     if (U.memoryNoteStatus) {
         const errorText = String(S.memoryNotePreview.error || "").trim();
