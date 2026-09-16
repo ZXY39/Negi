@@ -696,6 +696,8 @@ class MainRuntimeDiskGuardConfig(Base):
     - `write_guard_enabled=False` 回滚到事故前行为（写异常原样上抛、不做预检）。
     - `artifact_gzip_threshold_bytes<=0` 关闭 artifact 压缩（纯明文落盘）。
     - `terminal_cleanup_enabled=False` 完整停用终态中间产物清理。
+    - `terminal_temp_dir_cleanup_enabled=False`（默认）终态不自动硬删
+      `temp/tasks/<id>` 任务临时目录；置 True 恢复终态即删的历史行为。
     紧急线 = max(emergency_min_bytes, 盘总量 * emergency_min_ratio)。
     """
 
@@ -705,6 +707,7 @@ class MainRuntimeDiskGuardConfig(Base):
     usage_ttl_seconds: float = 5.0
     artifact_gzip_threshold_bytes: int = 1024 * 1024
     terminal_cleanup_enabled: bool = True
+    terminal_temp_dir_cleanup_enabled: bool = False
     # P1：清理线（全删渐进 + 强收紧）与紧急态行为。
     cleanup_min_bytes: int = 1024 * 1024 * 1024
     cleanup_min_ratio: float = 0.05

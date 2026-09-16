@@ -98,6 +98,10 @@ class DiskPolicies:
     usage_ttl_seconds: float = 5.0
     artifact_gzip_threshold_bytes: int = 1024 * 1024
     terminal_cleanup_enabled: bool = True
+    # 终态时是否自动硬删任务临时目录 temp/tasks/<id>。
+    # 默认 False：任务临时目录与其中内容在终态后原样保留（正式产物若被
+    # 误写进 temp 系目录不再因自动清理而丢失）；孤儿目录按运维脚本处置。
+    terminal_temp_dir_cleanup_enabled: bool = False
     # P1：清理线（历史任务压缩渐进 + 强收紧触发水位）。
     cleanup_min_bytes: int = 1024 * 1024 * 1024
     cleanup_min_ratio: float = 0.05
@@ -142,6 +146,7 @@ def _policies_from_env() -> DiskPolicies:
         usage_ttl_seconds=_env_float('G3KU_DISK_USAGE_TTL_SECONDS', 5.0),
         artifact_gzip_threshold_bytes=_env_int('G3KU_ARTIFACT_GZIP_THRESHOLD_BYTES', 1024 * 1024),
         terminal_cleanup_enabled=_env_flag('G3KU_TERMINAL_CLEANUP_ENABLED', True),
+        terminal_temp_dir_cleanup_enabled=_env_flag('G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED', False),
         cleanup_min_bytes=_env_int('G3KU_DISK_CLEANUP_MIN_BYTES', 1024 * 1024 * 1024),
         cleanup_min_ratio=_env_float('G3KU_DISK_CLEANUP_MIN_RATIO', 0.05),
         auto_pause_enabled=_env_flag('G3KU_DISK_AUTO_PAUSE_ENABLED', True),

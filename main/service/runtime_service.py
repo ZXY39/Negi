@@ -4912,6 +4912,7 @@ class MainRuntimeService:
             usage_ttl_seconds=max(0.0, float(getattr(guard, 'usage_ttl_seconds', defaults.usage_ttl_seconds) or 0.0)),
             artifact_gzip_threshold_bytes=int(getattr(guard, 'artifact_gzip_threshold_bytes', defaults.artifact_gzip_threshold_bytes) or 0),
             terminal_cleanup_enabled=bool(getattr(guard, 'terminal_cleanup_enabled', defaults.terminal_cleanup_enabled)),
+            terminal_temp_dir_cleanup_enabled=bool(getattr(guard, 'terminal_temp_dir_cleanup_enabled', defaults.terminal_temp_dir_cleanup_enabled)),
             cleanup_min_bytes=max(0, int(getattr(guard, 'cleanup_min_bytes', defaults.cleanup_min_bytes) or 0)),
             cleanup_min_ratio=min(max(0.0, float(getattr(guard, 'cleanup_min_ratio', defaults.cleanup_min_ratio) or 0.0)), 0.5),
             auto_pause_enabled=bool(getattr(guard, 'auto_pause_enabled', defaults.auto_pause_enabled)),
@@ -6856,6 +6857,10 @@ class MainRuntimeService:
         task_id = str(getattr(task, 'task_id', '') or '').strip()
         if not task_id:
             return
+        # 默认不自动清理任务临时目录（含空目录）：temp/tasks/<id> 在终态后
+        # 原样保留，仅当显式开启 terminal_temp_dir_cleanup_enabled 才回收空壳。
+        if not disk_policies().terminal_temp_dir_cleanup_enabled:
+            return
         try:
             self._remove_directory_tree_if_empty(self._effective_task_temp_dir(task_id))
         except Exception:
@@ -6866,9 +6871,13 @@ class MainRuntimeService:
     # 保留清单（唯一权威）：kind=='patch'、kind=='final_output'、
     # task.final_output_ref 指向的 artifact、标题含 report/summary；
     # error_logs 表、节点 blocking_reason、task_events 行一律不动。
+    # temp/tasks/<id> 任务临时目录终态后默认原样保留（仅当
+    # terminal_temp_dir_cleanup_enabled=true，即环境变量
+    # G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED 开启时，才随终态清理硬删）；
+    # 用户删任务时仍走 delete_task 全删链路（含该目录兜底回收）。
     # event-history 只存 live.patch 单份最新快照（latest.json.gz，覆盖写，
     # 见 store.write_task_live_snapshot），无保留期清理链路；孤儿目录由
-    # 台账 sweep 清扫；用户删任务时仍走 delete_task 全删链路。
+    # 台账 sweep 清扫。
     # ------------------------------------------------------------------
 
     _TERMINAL_CLEANUP_KEEP_TITLE_TOKENS = ('report', 'summary')
@@ -6929,13 +6938,16 @@ class MainRuntimeService:
         task = self.get_task(task_id)
         removed_files = 0
         removed_bytes = 0
-        # a) 任务临时目录硬删（temp/tasks/<id>；remove_tree 只读文件强删，残留显式告警）
-        try:
-            temp_dir = self._effective_task_temp_dir(task_id)
-            if temp_dir.exists():
-                remove_tree(temp_dir)
-        except Exception:
-            pass
+        # a) 任务临时目录硬删（temp/tasks/<id>；remove_tree 只读文件强删，残留显式告警）。
+        #    默认关闭：终态不再自动删除任务临时目录（terminal_temp_dir_cleanup_enabled=False），
+        #    目录与其中内容原样保留，避免误写入 temp 系目录的正式产物因自动清理丢失。
+        if disk_policies().terminal_temp_dir_cleanup_enabled:
+            try:
+                temp_dir = self._effective_task_temp_dir(task_id)
+                if temp_dir.exists():
+                    remove_tree(temp_dir)
+            except Exception:
+                pass
         # b) 中间 artifact：删文件 + 删 DB 行（线程内重读列表，规避入队后的竞态）
         delete_ids: list[str] = []
         try:

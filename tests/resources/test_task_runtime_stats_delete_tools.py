@@ -7,10 +7,20 @@ import pytest
 
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService, TaskDeleteTool, TaskStatsTool
+from main.storage import disk_guard
+from main.storage.disk_guard import DiskPolicies, configure_disk_policies
 
 
 TASK_KEYWORDS = '\u4efb\u52a1\u5173\u952e\u8bcd'
 TASK_IDS = '\u4efb\u52a1id\u5217\u8868'
+
+
+@pytest.fixture()
+def policies_guard():
+    previous = disk_guard.disk_policies()
+    yield
+    configure_disk_policies(previous)
+    disk_guard.invalidate_disk_usage_cache()
 
 
 class _DummyChatBackend:
@@ -201,7 +211,8 @@ async def test_task_delete_tool_preview_and_confirm_deletes_full_task_disk_footp
 
 
 @pytest.mark.asyncio
-async def test_terminal_task_auto_cleans_empty_task_temp_dir(tmp_path: Path):
+async def test_terminal_task_auto_cleans_empty_task_temp_dir_when_enabled(tmp_path: Path, policies_guard):
+    # 显式开启 temp 目录终态回收（历史行为）：空任务临时目录随终态清理回收。
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -217,10 +228,41 @@ async def test_terminal_task_auto_cleans_empty_task_temp_dir(tmp_path: Path):
 
         assert task_temp_dir.exists()
 
+        # 服务构造后配置策略（构造过程会用自身配置覆盖全局策略）。
+        configure_disk_policies(DiskPolicies(terminal_temp_dir_cleanup_enabled=True))
         service.log_service.mark_task_failed(record.task_id, reason='expected terminal cleanup')
 
         assert service.get_task(record.task_id) is not None
         assert not task_temp_dir.exists()
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_keeps_empty_task_temp_dir_by_default(tmp_path: Path, policies_guard):
+    # 默认策略：终态不再自动清理任务临时目录，空目录也原样保留，
+    # 防止误写入 temp/tasks/<id> 的正式产物因自动清理丢失。
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service, 'finish with no temp output')
+        task_temp_dir = service._task_temp_dir(record.task_id)
+
+        assert task_temp_dir.exists()
+
+        # 服务构造后配置策略（构造过程会用自身配置覆盖全局策略）。
+        configure_disk_policies(DiskPolicies())
+        service.log_service.mark_task_failed(record.task_id, reason='expected temp dir retention')
+
+        assert service.get_task(record.task_id) is not None
+        assert task_temp_dir.exists()  # 默认保留，不再自动删除
     finally:
         await service.close()
 

@@ -308,7 +308,7 @@ def _render_session_temp_dir(session_temp_dir: Any) -> list[str]:
         return []
     return [
         f'session_temp_dir: {text}',
-        'session_temp_dir_help: Write transient/intermediate files (command output redirects, raw search/fetch dumps, cleanup scripts) into session_temp_dir only; never place temporary files in the workspace root or source directories.',
+        'session_temp_dir_help: Write transient/intermediate files (command output redirects, raw search/fetch dumps, cleanup scripts) into session_temp_dir only; never place temporary files in the workspace root or source directories. Never treat session_temp_dir or any temp path as the final destination for official deliverables (reports, documents, permanent outputs): write deliverables to the persistent path the user/task specified (or the default persistent output directory named in the task), and state that absolute path explicitly in your reply.',
     ]
 
 

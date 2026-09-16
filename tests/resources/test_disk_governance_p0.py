@@ -225,7 +225,8 @@ def _bind_cleanup_harness(store, artifacts, tmp_path):
 
 
 def test_terminal_cleanup_keep_policy_and_run(tmp_path, policies_guard):
-    configure_disk_policies(DiskPolicies())
+    # 显式开启 temp 目录终态回收（历史行为），验证保留清单与硬删链路仍成立。
+    configure_disk_policies(DiskPolicies(terminal_temp_dir_cleanup_enabled=True))
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     try:
         store.upsert_task(_task_record(final_output_ref='artifact:keep-ref'))
@@ -270,7 +271,33 @@ def test_terminal_cleanup_keep_policy_and_run(tmp_path, policies_guard):
         assert not Path(drop_tool.path).exists()
         assert not Path(drop_trace.path).exists()
         assert Path(keep_patch.path).exists()
-        assert not task_temp_dir.exists()  # temp/tasks 草稿目录硬删
+        assert not task_temp_dir.exists()  # temp/tasks 草稿目录硬删（开关开启时）
+    finally:
+        store.close()
+
+
+def test_terminal_cleanup_keeps_task_temp_dir_by_default(tmp_path, policies_guard):
+    # 默认策略（terminal_temp_dir_cleanup_enabled=False）：终态清理只处理中间
+    # artifact，任务临时目录 temp/tasks/<id> 原样保留，防止误落 temp 的正式产物丢失。
+    configure_disk_policies(DiskPolicies())
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    try:
+        store.upsert_task(_task_record())
+        artifacts = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+        drop_trace = artifacts.create_text_artifact(
+            task_id='task:t1', node_id=None, kind='task_execution_trace', title='trace', content='t' * 10,
+        )
+
+        harness, task_temp_dir = _bind_cleanup_harness(store, artifacts, tmp_path)
+        (task_temp_dir / 'draft.txt').write_text('keep me', encoding='utf-8')
+
+        harness._run_terminal_intermediate_cleanup('task:t1')
+
+        # 中间 artifact 正常清理……
+        assert not Path(drop_trace.path).exists()
+        # ……但任务临时目录默认保留，内容原样可读。
+        assert task_temp_dir.exists()
+        assert (task_temp_dir / 'draft.txt').read_text(encoding='utf-8') == 'keep me'
     finally:
         store.close()
 

@@ -14,6 +14,7 @@
 - 当解释器选择必须精确一致时，优先使用 `runtime_environment.project_python_hint`。
 - 默认所有文件都放在 `runtime_environment.task_temp_dir`。只有为了满足任务要求且只能写到其他目录时，才允许例外；例外时必须显式使用绝对路径，不得隐式落到项目根目录。
 - 如果需要新建脚本、抓取结果、缓存、调试输出或其他中间文件，默认都写到 `runtime_environment.task_temp_dir`。
+- **正式交付物禁止只落在 temp 系目录**：`task_temp_dir`（形如 `<workspace>/temp/…`）只用于中间产物与脚本，不保证持久保留。任务要求的正式产出（报告、文档、数据产物等）必须落盘到任务提示词或用户明确指定的持久路径（如桌面指定文件夹），并在 `submit_final_result` 的 `answer` 与 `evidence` 中给出该绝对路径；若任务未指定持久落点，默认写入 `runtime_environment.workspace_root` 的 `output/` 目录（不存在则创建），同样在最终结果中显式声明绝对路径。禁止"只写 temp 目录后在最终输出里引用该 temp 路径"作为交付。
 - 如果真实目标项目不在当前 `runtime_environment.workspace_root` 内，使用绝对路径直达目标位置，不要先在当前仓库里做大范围兜底搜索。
 - 本地仓库/目录/文件名发现与环境探查优先使用 `exec`，并遵循当前 `runtime tool contract` / `load_tool_context` 暴露的运行约束；
 - 一旦目标收敛到具体本地文件正文，或 `exec` 多次只返回 `head_preview` 式截断结果，切换到 `content_open(path=绝对路径, start_line, end_line)` 获取稳定证据；
