@@ -145,6 +145,53 @@ def _default_governance_state(*, node_count_baseline: int = 1) -> dict[str, Any]
 # 事件写失败告警限流间隔（秒）：失败计数不受限，WARNING 至多每 300s 一条。
 _EVENT_WRITE_FAILURE_WARN_INTERVAL_SECONDS = 300.0
 
+
+def _emit_audit_task_node_error(*, task_id: str, node_id: str, node_title: str, error_text: str) -> None:
+    """尽力而为：任务节点错误写一条日志审计事件（失败绝不阻塞宿主流程）。"""
+    try:
+        from g3ku.audit_events import emit_audit_event
+
+        emit_audit_event(
+            'task',
+            'error',
+            'task_node_error',
+            '任务节点错误：' + str(node_title or node_id or '')[:120],
+            detail={
+                'task_id': str(task_id or ''),
+                'node_id': str(node_id or ''),
+                'node_title': str(node_title or '')[:120],
+                'error_text': str(error_text or '')[:500],
+            },
+        )
+    except Exception:
+        pass
+
+
+def _emit_audit_task_terminal_failed(task: TaskRecord) -> None:
+    """尽力而为：任务失败终态写一条日志审计事件（失败绝不阻塞宿主流程）。"""
+    try:
+        from g3ku.audit_events import emit_audit_event
+
+        task_id = str(getattr(task, 'task_id', '') or '')
+        title = str(getattr(task, 'title', '') or '') or task_id
+        metadata = getattr(task, 'metadata', None) or {}
+        failure_class = normalize_failure_class(metadata.get('failure_class'))
+        emit_audit_event(
+            'task',
+            'error',
+            'task_terminal_failed',
+            '任务失败：' + str(title or '')[:120],
+            detail={
+                'task_id': task_id,
+                'session_id': str(getattr(task, 'session_id', '') or ''),
+                'failure_reason': str(getattr(task, 'failure_reason', '') or '')[:500],
+                'failure_class': failure_class,
+            },
+        )
+    except Exception:
+        pass
+
+
 class TaskLogService:
     def __init__(
         self,
@@ -2313,13 +2360,20 @@ class TaskLogService:
     ) -> TaskErrorLogRecord:
         node = self._store.get_node(node_id)
         title = str(node_title or (node.goal if node is not None else node_id) or node_id).strip()
-        return self._store.append_task_error_log(
+        record = self._store.append_task_error_log(
             task_id=task_id,
             node_id=node_id,
             node_title=title,
             error_text=str(error_text or '').strip(),
             created_at=now_iso(),
         )
+        _emit_audit_task_node_error(
+            task_id=task_id,
+            node_id=node_id,
+            node_title=title,
+            error_text=str(error_text or ''),
+        )
+        return record
 
     def list_task_error_logs(self, task_id: str) -> list[TaskErrorLogRecord]:
         return self._store.list_task_error_logs(task_id)
@@ -4865,9 +4919,12 @@ class TaskLogService:
         self._dispatch_live_event_locked(task=task, event_type='task.live.patch', data=payload)
 
     def _publish_task_terminal_locked(self, *, task: TaskRecord) -> None:
-        payload = {'task': self._task_summary_payload(task)}
+        payload = {'task': self._task_summary_payload(task, disk_usage_bytes=self._safe_task_disk_usage(task.task_id))}
         self._append_task_event(task=task, event_type='task.terminal', data=payload)
         self._dispatch_live_event_locked(task=task, event_type='task.terminal', data=payload)
+        status = str(getattr(task, 'status', '') or '').strip().lower()
+        if status == 'failed':
+            _emit_audit_task_terminal_failed(task)
 
     def _dispatch_live_event_locked(
         self,

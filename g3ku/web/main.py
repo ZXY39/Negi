@@ -162,6 +162,49 @@ async def bootstrap_lock_middleware(request: Request, call_next):
             )
     return await call_next(request)
 
+
+# 日志审计 5xx 发射：审计端点自身的失败不回灌事件池（防自激循环）。
+_AUDIT_5XX_SKIP_PREFIXES = ("/api/audit",)
+
+
+def _emit_web_api_audit_event(path: str, status_code: int, note: str = "") -> None:
+    """尽力而为：Web API 5xx 写一条日志审计事件（失败绝不阻塞宿主流程）。"""
+    try:
+        normalized_path = str(path or "")
+        if not normalized_path.startswith("/api/"):
+            return
+        if normalized_path.startswith(_AUDIT_5XX_SKIP_PREFIXES):
+            return
+        from g3ku.audit_events import emit_audit_event
+
+        emit_audit_event(
+            "web_api",
+            "error",
+            "web_api_5xx",
+            f"接口返回 {int(status_code)}：{normalized_path[:120]}",
+            detail={
+                "path": normalized_path[:300],
+                "status_code": int(status_code),
+                "note": str(note or "")[:200],
+            },
+        )
+    except Exception:
+        pass
+
+
+@app.middleware("http")
+async def audit_error_capture_middleware(request: Request, call_next):
+    """捕获未处理异常与 5xx 响应并发射审计事件；绝不吞掉异常/响应。"""
+    path = str(request.url.path or "")
+    try:
+        response = await call_next(request)
+    except Exception:
+        _emit_web_api_audit_event(path, 500, "unhandled exception")
+        raise
+    if response.status_code >= 500:
+        _emit_web_api_audit_event(path, response.status_code)
+    return response
+
 WEB_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = WEB_DIR / 'frontend'
 FRONTEND_ENTRY = FRONTEND_DIR / 'org_graph.html'

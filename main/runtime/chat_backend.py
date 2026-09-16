@@ -779,6 +779,7 @@ class ConfigChatBackend:
                         raise exhausted_model_chain_error(
                             exc,
                             retry_on=list(profile.retry_on) if profile is not None else None,
+                            model_chain=list(refs),
                         ) from exc
                     raise
                 configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
@@ -1020,7 +1021,9 @@ class ConfigChatBackend:
                 # 全链（含刷新新增模型）都已耗尽：落终态。
                 if model_last_error is not None:
                     if should_fallback_model_error(model_last_error):
-                        raise exhausted_model_chain_error(model_last_error, retry_on=model_retry_on) from model_last_error
+                        raise exhausted_model_chain_error(
+                            model_last_error, retry_on=model_retry_on, model_chain=list(refs)
+                        ) from model_last_error
                     raise model_last_error
                 if model_last_response is not None:
                     model_last_response.attempts = list(attempts)
@@ -1028,7 +1031,7 @@ class ConfigChatBackend:
                 raise RuntimeError('chat backend returned no response')
             if last_error is not None:
                 if should_fallback_model_error(last_error):
-                    raise exhausted_model_chain_error(last_error) from last_error
+                    raise exhausted_model_chain_error(last_error, model_chain=list(refs)) from last_error
                 raise last_error
             if last_response is None:
                 raise RuntimeError('chat backend returned no response')

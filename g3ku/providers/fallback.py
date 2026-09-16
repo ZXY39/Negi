@@ -323,6 +323,7 @@ def exhausted_model_chain_error(
     error: Exception | str | None = None,
     *,
     retry_on: list[str] | None = None,
+    model_chain: list[str] | None = None,
 ) -> ModelProviderExhaustedError:
     if isinstance(error, Exception):
         raw_message = exception_chain_text(error)
@@ -330,11 +331,39 @@ def exhausted_model_chain_error(
     else:
         raw_message = str(error or "")
         display_message = raw_message
+    retryable = is_retryable_model_error(raw_message, retry_on=retry_on)
+    _emit_audit_chain_exhaustion(display_message, raw_message, retryable, model_chain)
     return ModelProviderExhaustedError(
         raw_message=raw_message,
         message=display_message,
-        retryable=is_retryable_model_error(raw_message, retry_on=retry_on),
+        retryable=retryable,
     )
+
+
+def _emit_audit_chain_exhaustion(
+    display_message: str,
+    raw_message: str,
+    retryable: bool,
+    model_chain: list[str] | None,
+) -> None:
+    """尽力而为：模型链耗尽写一条日志审计事件（失败绝不阻塞宿主流程）。"""
+    try:
+        from g3ku.audit_events import emit_audit_event
+
+        chain = [str(item) for item in (model_chain or []) if str(item).strip()][:8]
+        emit_audit_event(
+            "provider",
+            "error",
+            "provider_chain_exhausted",
+            "模型链耗尽：" + str(display_message or "")[:160],
+            detail={
+                "retryable": bool(retryable),
+                "model_chain": chain,
+                "error_text": str(raw_message or "")[:500],
+            },
+        )
+    except Exception:
+        pass
 
 
 def should_retry_model_chain_error(error: Exception | str, retry_on: list[str] | None = None) -> bool:
@@ -496,6 +525,7 @@ class FallbackProvider(LLMProvider):
                     raise exhausted_model_chain_error(
                         exc,
                         retry_on=list(profile.retry_on) if profile is not None else None,
+                        model_chain=list(chain),
                     ) from exc
                 raise
             configured_api_key_indexes = getattr(base_target, "api_key_indexes", None)
@@ -659,7 +689,9 @@ class FallbackProvider(LLMProvider):
                 continue
             if model_last_error is not None:
                 if should_fallback_model_error(model_last_error):
-                    raise exhausted_model_chain_error(model_last_error, retry_on=model_retry_on) from model_last_error
+                    raise exhausted_model_chain_error(
+                        model_last_error, retry_on=model_retry_on, model_chain=list(chain)
+                    ) from model_last_error
                 raise model_last_error
             if model_last_response is not None:
                 return sanitize_terminal_model_error(model_last_response)
@@ -669,7 +701,7 @@ class FallbackProvider(LLMProvider):
             return sanitize_terminal_model_error(last_response)
         if last_error is not None:
             if should_fallback_model_error(last_error):
-                raise exhausted_model_chain_error(last_error) from last_error
+                raise exhausted_model_chain_error(last_error, model_chain=list(chain)) from last_error
             raise last_error
         return LLMResponse(content="Error: no model candidate available", finish_reason="error")
 
