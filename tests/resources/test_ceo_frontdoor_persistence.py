@@ -2501,7 +2501,8 @@ async def test_graph_finalize_turn_completes_active_frontdoor_stage_for_self_exe
     assert stage_state["transition_required"] is False
     stage = stage_state["stages"][0]
     assert stage["status"] == "completed"
-    assert stage["completed_stage_summary"] == ceo_runtime_ops.STAGE_TURN_END_SUMMARY_POINTER
+    # 轮末收尾不再写指针摘要:该阶段的最终回复就是紧随块之后的对话原文,摘要留空。
+    assert not str(stage["completed_stage_summary"] or "").strip()
     assert stage["finished_at"]
 
 

@@ -450,6 +450,172 @@ def test_in_place_compaction_is_idempotent_and_dedupes_stale_blocks() -> None:
     assert "output-5" in cleaned_contents
 
 
+def _block_positions_by_stage(rendered: list[dict[str, object]]) -> dict[int, int]:
+    positions: dict[int, int] = {}
+    for position, item in enumerate(rendered):
+        content = str(item.get("content") or "")
+        if not content.startswith(STAGE_COMPACT_PREFIX):
+            continue
+        payload = json.loads(content.split("\n", 1)[1])
+        positions[int(payload["stage_index"])] = position
+    return positions
+
+
+def _stage_state_for_indexes(indexes: list[int]) -> dict[str, object]:
+    return {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            _stage_record(index, rounds=[_round(index, [f"call-work-{index}"])]) for index in indexes
+        ],
+    }
+
+
+def test_compaction_keeps_user_block_reply_order() -> None:
+    # 保序契约：压缩后仍是「用户消息 → 该阶段压缩块 → 该阶段最终回复」，且块不落在
+    # 最后一条 user 之后（末位保持当前用户回合，不占模型的续写位）。
+    messages: list[dict[str, object]] = [{"role": "system", "content": "system"}]
+    for index in range(1, 6):
+        messages.append({"role": "user", "content": f"ask-{index}"})
+        messages.extend(_stage_window(index))
+    messages.append({"role": "user", "content": "current turn"})
+
+    result = compact_stage_prompt_messages_in_place(
+        messages, stage_state=_five_completed_stage_state(), keep_latest_completed_stages=3
+    )
+    rendered = [*result["prefix"], *result["rewritten"]]
+    contents = [str(item.get("content") or "") for item in rendered]
+    positions = _block_positions_by_stage(rendered)
+
+    for index in (1, 2):  # 过期阶段：块夹在自己的用户消息与最终回复之间
+        assert contents.index(f"ask-{index}") < positions[index] < contents.index(f"report-{index}")
+    # 阶段顺序不变量：块位置相对 stage_index 单调不减
+    assert [positions[index] for index in sorted(positions)] == sorted(positions.values())
+    last_user = max(
+        position for position, item in enumerate(rendered) if str(item.get("role")) == "user"
+    )
+    assert all(position < last_user for position in positions.values())
+
+
+def test_compaction_never_parks_frameless_blocks_at_request_head() -> None:
+    # 回归：阶段帧与旧块双双缺失（请求体被重建过）时，兜底锚点不得是 0——实测
+    # ext:qq-official:f8a8001865631301 有 6 个块被永久钉在请求最前面，脱离自己的
+    # 对话。改为邻居夹逼后，这类块落在前一个已确定锚点之后。
+    messages: list[dict[str, object]] = [{"role": "system", "content": "system"}]
+    for index in (1, 2):
+        messages.append({"role": "user", "content": f"ask-{index}"})
+        messages.extend(_stage_window(index))
+    for index in (3, 4, 5):  # 无帧阶段：只剩对话，没有任何可锚定的工具帧
+        messages.append({"role": "user", "content": f"ask-{index}"})
+        messages.append({"role": "assistant", "content": f"report-{index}"})
+    messages.append({"role": "user", "content": "current turn"})
+
+    result = compact_stage_prompt_messages_in_place(
+        messages,
+        stage_state=_stage_state_for_indexes([1, 2, 3, 4, 5, 6]),
+        keep_latest_completed_stages=1,
+    )
+    rendered = [*result["prefix"], *result["rewritten"]]
+    contents = [str(item.get("content") or "") for item in rendered]
+    positions = _block_positions_by_stage(rendered)
+
+    # 阶段 6 保留为 raw；1/2 有帧可锚定，3/4/5 无帧
+    assert sorted(positions) == [1, 2, 3, 4, 5]
+    assert min(positions.values()) > 0  # 不再被甩到请求最前面
+    assert [positions[index] for index in sorted(positions)] == sorted(positions.values())
+    for index in (3, 4, 5):
+        assert positions[index] >= positions[2]
+        assert positions[index] < contents.index(f"report-{index}")
+
+
+def test_compaction_places_roundless_stage_block_in_neighbor_window() -> None:
+    # 0 轮阶段没有 call_id 可锚定（真实会话里 279 个阶段中有 1 例），必须按邻居落位：
+    # 排在前一个已确定锚点之后，且仍在它自己那段回复之前。
+    stage_state = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            _stage_record(1, rounds=[_round(1, ["call-work-1"])]),
+            {**_stage_record(2), "rounds": []},
+            _stage_record(3, rounds=[_round(3, ["call-work-3"])]),
+        ],
+    }
+    messages: list[dict[str, object]] = [{"role": "system", "content": "system"}]
+    messages.append({"role": "user", "content": "ask-1"})
+    messages.extend(_stage_window(1))
+    messages.append({"role": "user", "content": "ask-2"})
+    messages.append({"role": "assistant", "content": "report-2"})
+    messages.append({"role": "user", "content": "ask-3"})
+    messages.extend(_stage_window(3))
+    messages.append({"role": "user", "content": "current turn"})
+
+    result = compact_stage_prompt_messages_in_place(
+        messages, stage_state=stage_state, keep_latest_completed_stages=1
+    )
+    rendered = [*result["prefix"], *result["rewritten"]]
+    contents = [str(item.get("content") or "") for item in rendered]
+    positions = _block_positions_by_stage(rendered)
+
+    assert sorted(positions) == [1, 2]
+    assert positions[1] < positions[2]
+    assert positions[2] < contents.index("report-2")
+    assert positions[2] < contents.index("current turn")
+
+
+def test_compact_block_payload_omits_constant_and_empty_fields() -> None:
+    # 骨架精简：常量字段（stage_kind / status / 默认 mode）与空字段不再逐块重发。
+    # stage_index 必须保留——_stage_block_stage_index 依赖它做块位置记忆与存量去重。
+    messages: list[dict[str, object]] = [{"role": "system", "content": "system"}, {"role": "user", "content": "hi"}]
+    for index in range(1, 6):
+        messages.extend(_stage_window(index))
+
+    result = compact_stage_prompt_messages_in_place(
+        messages, stage_state=_five_completed_stage_state(), keep_latest_completed_stages=3
+    )
+    payloads = [
+        json.loads(str(item.get("content") or "").split("\n", 1)[1])
+        for item in result["rewritten"]
+        if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)
+    ]
+    assert len(payloads) == 2
+    for payload in payloads:
+        assert payload["stage_index"] in (1, 2)
+        assert payload["stage_goal"]
+        assert payload["completed_stage_summary"]
+        assert payload["tool_rounds"] == "1/3"
+        assert "stage_kind" not in payload
+        assert "status" not in payload
+        assert "mode" not in payload  # 默认值"自主执行"不写
+        assert "system_generated" not in payload
+        assert "key_refs" not in payload  # 空引用省略
+
+
+def test_compact_block_payload_keeps_non_default_mode_and_generated_flag() -> None:
+    # 非默认值必须保住，否则精简会丢信息。
+    stage_state = _stage_state_for_indexes([1, 2])
+    stage_state["stages"][0]["mode"] = "包含派生"
+    stage_state["stages"][0]["system_generated"] = True
+    stage_state["stages"][0]["key_refs"] = [{"ref": "artifact:demo", "note": "证据"}]
+    messages: list[dict[str, object]] = [{"role": "system", "content": "system"}, {"role": "user", "content": "hi"}]
+    for index in range(1, 4):
+        messages.extend(_stage_window(index))
+
+    result = compact_stage_prompt_messages_in_place(
+        messages, stage_state=stage_state, keep_latest_completed_stages=0
+    )
+    payloads = {
+        json.loads(str(item.get("content") or "").split("\n", 1)[1])["stage_index"]: json.loads(
+            str(item.get("content") or "").split("\n", 1)[1]
+        )
+        for item in result["rewritten"]
+        if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)
+    }
+    assert payloads[1]["mode"] == "包含派生"
+    assert payloads[1]["system_generated"] is True
+    assert payloads[1]["key_refs"] == [{"ref": "artifact:demo", "note": "证据"}]
+    assert "mode" not in payloads[2]
+
+
 def test_stage_blocks_render_with_system_role() -> None:
     # 角色对齐（事故 ext:qq-official:f8a8001865631301）：阶段块是运行时标注的
     # 已完成阶段摘要（压缩元数据、非对话内容），必须以 system 角色落地；

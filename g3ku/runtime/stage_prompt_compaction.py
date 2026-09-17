@@ -9,6 +9,10 @@ STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
 STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
 STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
 
+# 阶段模式的默认值（对齐 main/models.py 的 StageMode 默认 "自主执行"）。块渲染时
+# 等于默认值就不写进 payload——阶段块每轮全量重发，常量字段的重复是纯骨架开销。
+DEFAULT_STAGE_MODE = "自主执行"
+
 # 回显裁剪总开关（同时作用于 `strip_stage_block_echo` 与
 # `strip_frontdoor_tool_contract_echo` 两处调用点：CEO 最终回复收口
 # `_graph_normalize_model_output` 与渠道出站 `sanitize_channel_outbound_text`）。
@@ -237,25 +241,36 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
                 }
             )
             continue
-        payload = {
-            "stage_index": int(_stage_get(stage, "stage_index", 0) or 0),
-            "stage_kind": "normal",
-            "system_generated": bool(_stage_get(stage, "system_generated", False)),
-            "mode": str(_stage_get(stage, "mode", "") or ""),
-            "status": str(_stage_get(stage, "status", "") or ""),
-            "stage_goal": str(_stage_get(stage, "stage_goal", "") or ""),
-            "completed_stage_summary": str(_stage_get(stage, "completed_stage_summary", "") or ""),
-            "key_refs": [
-                normalized
-                for normalized in (
-                    _normalize_key_ref(item)
-                    for item in list(_stage_get(stage, "key_refs", []) or [])
-                )
-                if normalized is not None
-            ],
-            "tool_round_budget": int(_stage_get(stage, "tool_round_budget", 0) or 0),
-            "tool_rounds_used": int(_stage_get(stage, "tool_rounds_used", 0) or 0),
-        }
+        stage_goal = str(_stage_get(stage, "stage_goal", "") or "")
+        completed_summary = str(_stage_get(stage, "completed_stage_summary", "") or "")
+        stage_key_refs = [
+            normalized
+            for normalized in (
+                _normalize_key_ref(item)
+                for item in list(_stage_get(stage, "key_refs", []) or [])
+            )
+            if normalized is not None
+        ]
+        stage_mode = str(_stage_get(stage, "mode", "") or "").strip()
+        round_budget = int(_stage_get(stage, "tool_round_budget", 0) or 0)
+        rounds_used = int(_stage_get(stage, "tool_rounds_used", 0) or 0)
+        # 骨架精简:本分支恒为普通完成阶段,stage_kind/status 是常量,不再逐块重发;
+        # 空字段(摘要/引用)整体省略——摘要留空是正常形态(相应回合的最终回复就紧邻在
+        # 块之后,不需要指针复述)。stage_index 必须保留:_stage_block_stage_index
+        # 依赖它做块位置记忆与存量块去重,删掉会导致块跳位。
+        payload: dict[str, Any] = {"stage_index": int(_stage_get(stage, "stage_index", 0) or 0)}
+        if stage_goal:
+            payload["stage_goal"] = stage_goal
+        if completed_summary:
+            payload["completed_stage_summary"] = completed_summary
+        if stage_key_refs:
+            payload["key_refs"] = stage_key_refs
+        if stage_mode and stage_mode != DEFAULT_STAGE_MODE:
+            payload["mode"] = stage_mode
+        if bool(_stage_get(stage, "system_generated", False)):
+            payload["system_generated"] = True
+        if round_budget or rounds_used:
+            payload["tool_rounds"] = f"{rounds_used}/{round_budget}"
         compacted.append(
             {
                 # system 角色，理由同 externalized 块（见上方注释）。
@@ -634,25 +649,52 @@ def compact_stage_prompt_messages_in_place(
                     anchor_stage_index = submit_created_stage_index.get(assistant_index)
             _note_removed_stage_anchor(anchor_stage_index, index)
 
-    # 4) 块回插：按当前 stage_state 重新渲染，位置 = 记忆位置 → 首次移除位置 → 区域开头。
+    # 4) 块回插：按当前 stage_state 重新渲染，位置 = 记忆位置 → 本次首条被移除帧位置
+    #    → 邻居夹逼（见下）。
     blocks = completed_stage_blocks(stage_state, skip_stage_ids=retained_ids)
+    block_by_stage_index: dict[int, dict[str, Any]] = {}
+    for block in blocks:
+        block_by_stage_index[_stage_block_stage_index(block) or 0] = dict(block)
+    rendered_block_stage_indexes = set(block_by_stage_index)
+
+    known_anchors: dict[int, int] = {}
+    for stage_index in sorted(rendered_block_stage_indexes):
+        if stage_index in remembered_positions:
+            known_anchors[stage_index] = remembered_positions[stage_index]
+        elif stage_index in first_removed_by_stage:
+            known_anchors[stage_index] = first_removed_by_stage[stage_index]
+
+    # 兜底不再是 0：阶段自身的定位信息（本次被移除的帧、块记忆位置）双双缺失时
+    # （请求体被重建过，帧与旧块一起没了），0 会把块甩到请求最前面、脱离它自己的
+    # 对话（实测 ext:qq-official:f8a8001865631301 有 6 个块被永久钉在队首）。
+    # 改为夹逼在前一个已确定锚点之后，并强制锚点相对 stage_index 单调不减——
+    # 于是"用户回合 → 块 → 该阶段最终回复"的相对顺序在任何情形下都成立；退化的
+    # 只有精确邻接（原始定位信息已不存在，无法复原它原先夹在哪条消息边上）。
+    ordered_indexes = sorted(rendered_block_stage_indexes)
+    resolved_anchors: dict[int, int] = {}
+    cursor = 0
+    for position, stage_index in enumerate(ordered_indexes):
+        if stage_index in known_anchors:
+            anchor = max(known_anchors[stage_index], cursor)
+        else:
+            upper = len(remainder)
+            for later_index in ordered_indexes[position + 1 :]:
+                if later_index in known_anchors:
+                    upper = known_anchors[later_index]
+                    break
+            anchor = min(cursor, max(0, upper))
+        resolved_anchors[stage_index] = anchor
+        cursor = anchor
+
     anchors: list[tuple[int, int, dict[str, Any]]] = []
     structural_change_points: list[int] = []
-    rendered_block_stage_indexes: set[int] = set()
-    for block in blocks:
-        stage_index = _stage_block_stage_index(block) or 0
-        rendered_block_stage_indexes.add(stage_index)
-        if stage_index in remembered_positions:
-            anchor = remembered_positions[stage_index]
-            if str(block.get("content") or "") != block_contents.get(stage_index, ""):
-                structural_change_points.append(anchor)
-        elif stage_index in first_removed_by_stage:
-            anchor = first_removed_by_stage[stage_index]
+    for stage_index in ordered_indexes:
+        anchor = resolved_anchors[stage_index]
+        if stage_index not in remembered_positions or str(
+            block_by_stage_index[stage_index].get("content") or ""
+        ) != block_contents.get(stage_index, ""):
             structural_change_points.append(anchor)
-        else:
-            anchor = 0
-            structural_change_points.append(anchor)
-        anchors.append((anchor, stage_index, dict(block)))
+        anchors.append((anchor, stage_index, block_by_stage_index[stage_index]))
     anchors.sort(key=lambda item: (item[0], item[1]))
 
     # 内部事件束（心跳/定时种子）按缓存中性规则移除：只清理不早于本次压缩
@@ -775,6 +817,7 @@ def decompose_stage_prompt_messages(
 
 __all__ = [
     "DEFAULT_INTERNAL_RULE_MARKERS",
+    "DEFAULT_STAGE_MODE",
     "ECHO_STRIP_ENABLED",
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",

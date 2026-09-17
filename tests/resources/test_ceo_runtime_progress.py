@@ -4757,7 +4757,10 @@ async def test_runtime_agent_session_recovers_dispatched_async_task_after_intern
     assert summary["active_stage_id"] == ""
     stage = summary["stages"][0]
     assert stage["status"] == "completed"
-    assert stage["completed_stage_summary"] == STAGE_TURN_END_SUMMARY_POINTER
+    # 轮末收尾不再写指针摘要(见 stage_prompt_compaction 的块渲染);存量指针仍被
+    # _frontdoor_stage_summary_candidates 过滤,不得作为可见文本投递。
+    assert not str(stage["completed_stage_summary"] or "").strip()
+    assert stage["completed_stage_summary"] != STAGE_TURN_END_SUMMARY_POINTER
     assert stage["finished_at"]
 
     recent_history = web_ceo_sessions.extract_live_raw_tail(reloaded_session, turn_limit=4)

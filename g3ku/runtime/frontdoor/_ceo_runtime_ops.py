@@ -95,7 +95,6 @@ from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
-    STAGE_TURN_END_SUMMARY_POINTER,
     STAGELESS_FREE_PASS_REMINDER,
     response_tool_calls_count_against_stage_budget,
     stage_free_pass_kind,
@@ -7834,10 +7833,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             result["messages"] = list(messages)
             result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
             result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
-            finalized_stage_state = self._complete_active_frontdoor_stage_state(
-                finalized_stage_state,
-                completed_stage_summary=STAGE_TURN_END_SUMMARY_POINTER,
-            )
+            # 轮末不写摘要:纯文本收尾的回合里,该阶段的最终回复就紧邻在块之后,摘要写
+            # 指针只会让块宣称"结论已交付"却指不到任何东西(它指向的助手回复会被上下文
+            # 压缩吃掉)。留空即可——块两侧就是对话原文。模型经 submit_next_stage 自带
+            # 摘要的阶段不受影响(_complete_active_frontdoor_stage_state 仅在为空时填充)。
+            finalized_stage_state = self._complete_active_frontdoor_stage_state(finalized_stage_state)
             result["frontdoor_stage_state"] = finalized_stage_state
             result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
                 state=state,
@@ -7845,10 +7845,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             return result
         if visible_output:
-            finalized_stage_state = self._complete_active_frontdoor_stage_state(
-                finalized_stage_state,
-                completed_stage_summary=STAGE_TURN_END_SUMMARY_POINTER,
-            )
+            # 轮末不写摘要:纯文本收尾的回合里,该阶段的最终回复就紧邻在块之后,摘要写
+            # 指针只会让块宣称"结论已交付"却指不到任何东西(它指向的助手回复会被上下文
+            # 压缩吃掉)。留空即可——块两侧就是对话原文。模型经 submit_next_stage 自带
+            # 摘要的阶段不受影响(_complete_active_frontdoor_stage_state 仅在为空时填充)。
+            finalized_stage_state = self._complete_active_frontdoor_stage_state(finalized_stage_state)
         result["frontdoor_stage_state"] = finalized_stage_state
         result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
             state=state,

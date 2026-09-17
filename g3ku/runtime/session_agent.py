@@ -3166,9 +3166,9 @@ class RuntimeAgentSession:
                     internal_source or "user",
                     ",".join(task_ids),
                 )
+                # 与普通轮末收尾一致:不写指针摘要,该阶段的最终回复就是这个可见输出本身。
                 self._frontdoor_stage_state = self._complete_active_frontdoor_stage_state(
                     self._frontdoor_stage_state,
-                    completed_stage_summary=STAGE_TURN_END_SUMMARY_POINTER,
                 )
                 assistant = AssistantMessage(content=output, timestamp=self._now())
                 self._state.messages.append(assistant)
