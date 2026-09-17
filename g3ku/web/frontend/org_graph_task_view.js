@@ -2748,20 +2748,23 @@ async function handleTreeNodePauseAction(node, event) {
             renderTree();
             return;
         }
-        if (!treeNodeHasActiveChildren(node)) {
-            await submitTreeNodePause(taskId, nodeId);
-            return;
-        }
+        // 暂停一律二次确认：单节点暂停同样会打断在跑的执行，不能点一下就走。
+        // 只有存在活跃子节点时才提供级联勾选（没有子节点就没有可级联的对象）。
+        const hasActiveChildren = treeNodeHasActiveChildren(node);
         openConfirm({
             title: "暂停节点",
-            text: "暂停父节点本身不会自动停止子节点。",
+            text: hasActiveChildren
+                ? "暂停父节点本身不会自动停止子节点。"
+                : "暂停后该节点将停止执行，需要手动恢复。",
             confirmLabel: "暂停节点",
             confirmKind: "danger",
             returnFocus: event?.currentTarget || null,
-            checkbox: {
-                label: "同时暂停所有子节点（包括检验节点）",
-                checked: false,
-            },
+            checkbox: hasActiveChildren
+                ? {
+                    label: "同时暂停所有子节点（包括检验节点）",
+                    checked: false,
+                }
+                : null,
             onConfirm: async ({ checked } = {}) => submitTreeNodePause(taskId, nodeId, { cascade: !!checked }),
         });
     } catch (error) {

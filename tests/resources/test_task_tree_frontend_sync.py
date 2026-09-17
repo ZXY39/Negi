@@ -111,7 +111,7 @@ def test_rendered_tree_builds_from_normalized_snapshot() -> None:
     assert result["aChildren"] == ["a1"]
 
 
-def test_tree_node_pause_confirmation_uses_inline_modal_and_only_sends_confirmed_cascade() -> None:
+def test_tree_node_pause_always_confirms_and_only_sends_confirmed_cascade() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -158,11 +158,22 @@ def test_tree_node_pause_confirmation_uses_inline_modal_and_only_sends_confirmed
               is_paused: false,
               children: [],
             }, event);
+            const noRequestBeforeSoloConfirmation = pauseCalls.length === afterConfirmedCascade.length;
+            const soloModal = confirmation && {
+              title: confirmation.title,
+              text: confirmation.text,
+              confirmLabel: confirmation.confirmLabel,
+              checkbox: confirmation.checkbox,
+              hasOnConfirm: typeof confirmation.onConfirm === "function",
+            };
+            await confirmation.onConfirm({ checked: false });
             console.log(JSON.stringify({
               nativeConfirmPresent: code.includes("window.confirm"),
               noRequestBeforeConfirmation,
               modal,
               afterConfirmedCascade,
+              noRequestBeforeSoloConfirmation,
+              soloModal,
               afterDirectPause: pauseCalls.slice(),
               toastCount: toasts.length,
             }));
@@ -183,6 +194,14 @@ def test_tree_node_pause_confirmation_uses_inline_modal_and_only_sends_confirmed
     assert result["afterConfirmedCascade"] == [
         {"taskId": "task:test", "nodeId": "node:parent", "payload": {"cascade": True}}
     ]
+    assert result["noRequestBeforeSoloConfirmation"] is True
+    assert result["soloModal"] == {
+        "title": "暂停节点",
+        "text": "暂停后该节点将停止执行，需要手动恢复。",
+        "confirmLabel": "暂停节点",
+        "checkbox": None,
+        "hasOnConfirm": True,
+    }
     assert result["afterDirectPause"][-1] == {
         "taskId": "task:test",
         "nodeId": "node:solo",
