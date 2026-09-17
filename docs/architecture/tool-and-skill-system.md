@@ -188,6 +188,7 @@ promotion 与前门状态：
 外置工具结果信封：
 
 - 超出内联闸门的工具结果统一外部化为 `artifact:` 内容引用，信封摘要对所有工具一视同仁（不按工具类别特殊化）：显式标注调用成败（`Tool call succeeded` / `Tool call failed`，成败由执行路径按 error-lane 判定后随投递元数据传入）、外置 ref、总行数与总字符数，要求用 `content_open(ref=...)` 读取完整输出，并附结果正文头部预览（6 行、≤800 字符）。信封不回显调用入参——入参是模型刚提交的内容，回显只挤占上下文并诱发「载荷过大导致调用失败」一类误读；嵌套信封的 canonical summary / origin ref 行保留。信封以 `content_ref` 形态进入上下文，重复外部化免疫（已是信封的结果原样透传）。
+- 二进制/图片内容目标另有一套展示契约：路径目标解不出 UTF-8 文本时，正文位置放占位串（`[二进制文件：…]` / `[图片文件：…]`），`content_describe` / `content_open` 结果随之带 `binary` / `content_display_replaced` 标记，`size_bytes` 是**磁盘真实字节数**，而 `line_count` / `char_count` 只描述占位串。读端不得用占位串统计推断文件的体积、类型或有效性——合法 PDF 与 34 字节空壳在文本通道里输出逐字相同；判定二进制交付物只能依据 `size_bytes` 与字节级证据。二进制目标上的 `content_search` 扫原始字节：结果带 `byte_level`、命中为 `byte_offset` + 上下文片段、`line_count` / `char_count` 归零，`%PDF` 一类签名可被实证，文本搜索的 `line` 语义对它们不成立。
 
 统一工具 Timeout 合同：
 

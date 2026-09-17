@@ -39,6 +39,10 @@ _OPEN_NOTICE_RESERVE = 400
 # content_search 单条命中 preview 的字符上限：单行巨型文件命中时，preview 若不限
 # 长会膨胀成整行并把结果撑过内联闸门；超限则截断并以省略号标记。
 SEARCH_PREVIEW_CHAR_LIMIT = 2000
+# 二进制目标字节级搜索的流式分块大小与命中上下文窗口（字节）。
+# 流式扫描避免把大文件整份读进内存；overlap 保证跨块边界的签名（如 PDF 尾部标记）不被漏掉。
+_BINARY_SEARCH_CHUNK_BYTES = 4 * 1024 * 1024
+_BINARY_SEARCH_CONTEXT_BYTES = 48
 # Internal runtime tools that are intentionally always inlined even when their
 # payloads are large. Keep this list explicit here instead of manifest-driven
 # so these delivery exceptions stay auditable and tightly scoped.
@@ -148,11 +152,23 @@ def _runtime_node_id(runtime: dict[str, Any] | None) -> str | None:
 def _content_summary(handle: ContentHandle, *, include_preview: bool = True) -> str:
     label = handle.display_name or handle.source_kind or "content"
     content_ref = handle.resolved_ref or handle.ref
-    summary = (
-        f"Externalized {label} "
-        f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
-        f"Use content_search/content_open with ref={content_ref}. Do not pass this ref as filesystem path."
-    )
+    if handle.content_display_replaced:
+        # 二进制/图片目标：展示文本是占位串，行数/字符数是占位串的统计。显式写清真实体积，
+        # 并禁止从占位统计推断文件事实——2026-09-17 的「34 字节空壳」误判即源于此。
+        mime_type = str(handle.mime_type or "").strip() or "application/octet-stream"
+        summary = (
+            f"Binary file {label} ({mime_type}, {int(handle.size_bytes or 0)} bytes on disk). "
+            "Content is not displayed by content tools: line/char counts and preview below describe a "
+            "placeholder string, not the file. Do not derive file size, type or validity from them. "
+            f"Use content_search (byte-level) / content_open with ref={content_ref}. "
+            "Do not pass this ref as filesystem path."
+        )
+    else:
+        summary = (
+            f"Externalized {label} "
+            f"({int(handle.line_count or 0)} lines, {int(handle.char_count or 0)} chars). "
+            f"Use content_search/content_open with ref={content_ref}. Do not pass this ref as filesystem path."
+        )
     if str(handle.invocation_text or "").strip():
         summary = f"{summary}\nInvocation: {str(handle.invocation_text or '').strip()}"
     if str(handle.canonical_summary or "").strip():
@@ -518,6 +534,7 @@ def parse_content_envelope(value: Any) -> ContentEnvelope | None:
             size_bytes=int(raw_handle.get("size_bytes") or 0),
             line_count=int(raw_handle.get("line_count") or 0),
             char_count=int(raw_handle.get("char_count") or 0),
+            content_display_replaced=bool(raw_handle.get("content_display_replaced")),
             head_preview=str(raw_handle.get("head_preview") or "").strip(),
             tail_preview=str(raw_handle.get("tail_preview") or "").strip(),
             requested_ref=str(raw_handle.get("requested_ref") or "").strip(),
@@ -739,6 +756,8 @@ class ContentNavigationService:
             "size_bytes": handle.size_bytes,
             "line_count": handle.line_count,
             "char_count": handle.char_count,
+            "mime_type": handle.mime_type,
+            "content_display_replaced": bool(handle.content_display_replaced),
         }
 
     def head(self, *, ref: str | None = None, path: str | None = None, lines: int = DEFAULT_OPEN_LINES, view: str = "canonical") -> dict[str, Any]:
@@ -821,6 +840,14 @@ class ContentNavigationService:
     def _guess_path_mime_type(path: Path) -> str:
         guessed, _ = mimetypes.guess_type(str(path))
         return str(guessed or "application/octet-stream").strip() or "application/octet-stream"
+
+    @staticmethod
+    def _path_file_size(path: Path) -> int:
+        """磁盘真实字节数；取不到时回 0，让 _build_handle 回落到文本编码长度。"""
+        try:
+            return int(path.stat().st_size)
+        except OSError:
+            return 0
 
     def open_target_descriptor(
         self,
@@ -966,6 +993,10 @@ class ContentNavigationService:
         needle = str(query or "").strip()
         if not needle:
             return {"ok": False, "error": "query is required"}
+        if handle.content_display_replaced:
+            # 二进制目标：展示文本是占位串，对它做文本搜索只会产生假阴性
+            # （有效 PDF 里搜不到 %PDF 即由此而来）。改扫原始字节。
+            return self._search_binary_target(query=needle, handle=handle, limit=limit)
         lines = text.splitlines()
         results: list[dict[str, Any]] = []
         max_hits = max(1, min(int(limit or DEFAULT_SEARCH_LIMIT), MAX_SEARCH_LIMIT))
@@ -1014,6 +1045,95 @@ class ContentNavigationService:
             "message": "",
             "suggestions": [],
         }
+
+    def _search_binary_target(self, *, query: str, handle: ContentHandle, limit: int) -> dict[str, Any]:
+        """二进制目标的字节级搜索：命中回报字节偏移 + 上下文。
+
+        行/字符语义对二进制不适用，因此 line_count/char_count 恒为 0、并带 byte_level 标记；
+        真实体积始终由 size_bytes（磁盘字节数）给出。
+        """
+        max_hits = max(1, min(int(limit or DEFAULT_SEARCH_LIMIT), MAX_SEARCH_LIMIT))
+        payload: dict[str, Any] = {
+            "ok": True,
+            "ref": handle.ref,
+            "requested_ref": handle.requested_ref,
+            "resolved_ref": handle.resolved_ref or handle.ref,
+            "wrapper_ref": handle.wrapper_ref,
+            "wrapper_depth": handle.wrapper_depth,
+            "source_kind": handle.source_kind,
+            "display_name": handle.display_name,
+            "mime_type": handle.mime_type,
+            "binary": True,
+            "byte_level": True,
+            "size_bytes": int(handle.size_bytes or 0),
+            "line_count": 0,
+            "char_count": 0,
+            "query": query,
+            "hits": [],
+            "count": 0,
+            "overflow": False,
+            "requires_refine": False,
+            "cap": max_hits,
+            "overflow_lower_bound": None,
+            "message": "",
+            "suggestions": [],
+        }
+        file_path = Path(str(handle.uri or ""))
+        if not str(handle.uri or "").strip() or not file_path.is_file():
+            payload["message"] = (
+                "binary target has no readable file path; byte-level search unavailable "
+                "(artifact-backed binaries must be inspected via their file path)"
+            )
+            return payload
+        needle = query.encode("utf-8", errors="replace")
+        if not needle:
+            payload["ok"] = False
+            payload["message"] = "query is required"
+            return payload
+        regex = re.compile(re.escape(needle), re.IGNORECASE)
+        overlap = max(0, len(needle) - 1)
+        hits: list[dict[str, Any]] = []
+        scanned_bytes = 0
+        carry = b""
+        with file_path.open("rb") as fh:
+            while True:
+                chunk = fh.read(_BINARY_SEARCH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                window = carry + chunk
+                # 窗口起点 = 已扫描字节数 - carry 长度（carry 是上一窗口的尾巴，不能重复计数）。
+                window_start = scanned_bytes - len(carry)
+                for match in regex.finditer(window):
+                    # carry 段内已完整匹配过的命中不重复上报；跨边界命中（延伸到新块）保留。
+                    if match.end() <= len(carry):
+                        continue
+                    hits.append(
+                        {
+                            "byte_offset": window_start + match.start(),
+                            "preview": self._binary_search_context(window, match.start(), match.end()),
+                        }
+                    )
+                    if len(hits) > max_hits:
+                        payload["hits"] = hits[:max_hits]
+                        payload["count"] = len(payload["hits"])
+                        payload["overflow"] = True
+                        payload["requires_refine"] = True
+                        payload["overflow_lower_bound"] = max_hits + 1
+                        payload["message"] = f"more than {max_hits} byte-level matches; refine the query"
+                        return payload
+                scanned_bytes += len(chunk)
+                carry = window[-overlap:] if overlap else b""
+        payload["hits"] = hits
+        payload["count"] = len(hits)
+        payload["scanned_bytes"] = scanned_bytes
+        return payload
+
+    @staticmethod
+    def _binary_search_context(window: bytes, start: int, end: int) -> str:
+        lo = max(0, start - _BINARY_SEARCH_CONTEXT_BYTES)
+        hi = min(len(window), end + _BINARY_SEARCH_CONTEXT_BYTES)
+        raw = window[lo:hi].decode("latin-1", errors="replace")
+        return "".join(ch if 32 <= ord(ch) < 127 else "." for ch in raw)
 
     def _excerpt(self, *, ref: str | None = None, path: str | None = None, start_line: int, end_line: int | None = None, view: str = "canonical", char_cap: int | None = None) -> dict[str, Any]:
         text, handle = self._resolve(ref=ref, path=path, view=view)
@@ -1138,6 +1258,27 @@ class ContentNavigationService:
         )
 
     @staticmethod
+    def _binary_target_metadata(handle: ContentHandle) -> dict[str, Any]:
+        """二进制/图片目标的展示元数据：磁盘真实体积 + 占位说明。
+
+        excerpt 是占位串而非文件内容，这些字段必须**早出现**（外部化预览只取载荷头部），
+        否则读端拿不到真实体积，只能按占位串统计猜文件状态——2026-09-17 的
+        「22 字符占位被当成 34 字节空壳」误判即由此而来。文本目标不附加任何字段（保持精简契约）。
+        """
+        if not handle.content_display_replaced:
+            return {}
+        return {
+            "binary": True,
+            "content_display_replaced": True,
+            "mime_type": handle.mime_type,
+            "size_bytes": int(handle.size_bytes or 0),
+            "notice": (
+                "Binary file: excerpt is a placeholder, not file content. "
+                "size_bytes is the real on-disk size; line_count/char_count describe the placeholder only."
+            ),
+        }
+
+    @staticmethod
     def _open_payload(*, handle: ContentHandle, start_line: int, end_line: int, excerpt: str, truncated: bool, shown_chars: int, shown_lines: int, total_range_chars: int, remaining_chars: int, remaining_lines: int, start_char: int | None = None, end_char: int | None = None) -> dict[str, Any]:
         """精简 open/head/tail 结果：去掉嵌套 handle/预览/内部字段，保留顶层 ref 家族。
 
@@ -1145,6 +1286,9 @@ class ContentNavigationService:
         溯源、落库索引、只读去重等多处消费，必须保留；source_kind 提到顶层供
         react_loop `_is_ephemeral_tool_result` 读取；line_count/char_count 供模型分页规划。
         元数据不计入内容字符上限（内联闸门只量 excerpt）。
+
+        例外：二进制/图片目标额外携带 binary/size_bytes/mime_type/notice（见
+        `_binary_target_metadata`）——此时 excerpt 是占位串，缺了这些字段就会被读成文件内容。
         """
         payload: dict[str, Any] = {
             "ok": True,
@@ -1155,6 +1299,7 @@ class ContentNavigationService:
             "wrapper_depth": handle.wrapper_depth,
             "source_kind": handle.source_kind,
             "display_name": handle.display_name,
+            **ContentNavigationService._binary_target_metadata(handle),
             "line_count": handle.line_count,
             "char_count": handle.char_count,
             "start_line": start_line,
@@ -1172,20 +1317,24 @@ class ContentNavigationService:
             payload["end_char"] = end_char
         return payload
 
-    def _read_text_for_content_display(self, file_path: Path) -> tuple[str, str]:
+    def _read_text_for_content_display(self, file_path: Path) -> tuple[str, str, bool]:
         """Read file text for content display without crashing on binary files.
 
         Images and other non-UTF-8 binaries return a short placeholder plus the
         guessed mime type instead of raising ``UnicodeDecodeError``. Normal text
         files are read unchanged and keep the historical ``text/plain`` mime.
+
+        第三个返回值标记「展示文本是占位串，不是文件内容」——调用方据此把
+        ``content_display_replaced`` 写进 handle，让体积/行数不再被误读成文件事实
+        （2026-09-17 验收误判「34 字节空壳」即源于把占位串统计当成文件大小）。
         """
         mime_type = self._guess_path_mime_type(file_path)
         if self.is_image_mime_type(mime_type):
-            return f"[图片文件：{file_path.name}]", mime_type
+            return f"[图片文件：{file_path.name}]", mime_type, True
         try:
-            return file_path.read_text(encoding="utf-8"), "text/plain"
+            return file_path.read_text(encoding="utf-8"), "text/plain", False
         except UnicodeDecodeError:
-            return f"[二进制文件：{file_path.name}]", mime_type
+            return f"[二进制文件：{file_path.name}]", mime_type, True
 
     def _resolve(
         self,
@@ -1205,7 +1354,7 @@ class ContentNavigationService:
                 raise FileNotFoundError(f"path not found: {path}")
             if not file_path.is_file():
                 raise ValueError(f"path is not a file: {path}")
-            text, mime_type = self._read_text_for_content_display(file_path)
+            text, mime_type, display_replaced = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
             except ValueError:
@@ -1220,6 +1369,8 @@ class ContentNavigationService:
                 origin_ref="",
                 invocation_text="",
                 text=text,
+                file_size_bytes=self._path_file_size(file_path),
+                content_display_replaced=display_replaced,
             )
             handle = self._apply_handle_refs(
                 handle,
@@ -1237,7 +1388,7 @@ class ContentNavigationService:
                 raise FileNotFoundError(f"path not found: {normalized_ref[5:]}")
             if not file_path.is_file():
                 raise ValueError(f"path is not a file: {normalized_ref[5:]}")
-            text, mime_type = self._read_text_for_content_display(file_path)
+            text, mime_type, display_replaced = self._read_text_for_content_display(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
             except ValueError:
@@ -1252,6 +1403,8 @@ class ContentNavigationService:
                 origin_ref="",
                 invocation_text="",
                 text=text,
+                file_size_bytes=self._path_file_size(file_path),
+                content_display_replaced=display_replaced,
             )
             handle = self._apply_handle_refs(
                 handle,
@@ -1288,8 +1441,15 @@ class ContentNavigationService:
             from main.storage.artifact_store import read_artifact_text
 
             text = read_artifact_text(artifact)
+            display_replaced = False
+            file_size_bytes: int | None = None
         else:
-            text = self._read_text_for_content_display(artifact_path)[0] if artifact_path.exists() else ""
+            if artifact_path.exists():
+                text, _artifact_mime, display_replaced = self._read_text_for_content_display(artifact_path)
+            else:
+                text, display_replaced = "", False
+            # 文本产物沿用「内容字节数」语义；只有展示被占位串替换（plain 存二进制）时才改用磁盘真实大小。
+            file_size_bytes = self._path_file_size(artifact_path) if display_replaced else None
         handle = self._build_handle(
             ref=normalized_ref,
             artifact_id=artifact_id,
@@ -1300,6 +1460,8 @@ class ContentNavigationService:
             origin_ref="",
             invocation_text="",
             text=text,
+            file_size_bytes=file_size_bytes,
+            content_display_replaced=display_replaced,
         )
         requested_ref = _requested_ref or normalized_ref
         if resolved_view == "canonical":
@@ -1493,6 +1655,8 @@ class ContentNavigationService:
         origin_ref: str,
         invocation_text: str,
         text: str,
+        file_size_bytes: int | None = None,
+        content_display_replaced: bool = False,
     ) -> ContentHandle:
         encoded = text.encode("utf-8")
         return ContentHandle(
@@ -1503,9 +1667,12 @@ class ContentNavigationService:
             display_name=display_name,
             mime_type=mime_type,
             origin_ref=origin_ref,
-            size_bytes=len(encoded),
+            # 文件路径目标以磁盘真实字节数为准（file_size_bytes）；文本产物回落到文本编码长度。
+            # 二进制文件的 text 是占位串，绝不能拿它的长度当体积。
+            size_bytes=int(file_size_bytes) if file_size_bytes else len(encoded),
             line_count=_line_count(text),
             char_count=len(text),
+            content_display_replaced=bool(content_display_replaced),
             head_preview=_preview_text(text, lines=_HEAD_PREVIEW_LINES),
             tail_preview=_tail_preview_text(text, lines=_TAIL_PREVIEW_LINES),
             invocation_text=invocation_text,

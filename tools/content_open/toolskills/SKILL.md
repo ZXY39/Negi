@@ -35,6 +35,14 @@ For a target that is one very long line (minified JSON, single-line logs, base64
 
 Open only what you need. If you do not know where to look yet, use `content_describe` (sizes/previews) or `content_search` (find the line) first.
 
+## Binary targets (PDF, images, xlsx, archives)
+
+Opening a binary target does not return its bytes. The result sets `binary: true` /
+`content_display_replaced: true`, and `excerpt` is a placeholder (`[二进制文件：name]` / `[图片文件：name]`)
+that is **not** file content. Use the accompanying `size_bytes` (real on-disk size) and `mime_type`;
+`line_count` / `char_count` describe the placeholder only. To check structure (e.g. a `%PDF` header),
+use `content_search`, which searches raw bytes for binary targets.
+
 If the target is a historical image path or image ref and you need direct visual inspection, call `content_open`.
 
 On multimodal routes, the opened image is attached to the next model request only.
