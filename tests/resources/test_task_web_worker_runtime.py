@@ -2590,6 +2590,9 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
                 "is_partial": False,
             },
             "delta_usage_by_model": [],
+            "duration_ms": 4210,
+            "first_token_ms": 830,
+            "thinking_tokens": 2048,
         },
     )
     payload = service.get_task_detail_payload(record.task_id, mark_read=False)
@@ -2598,6 +2601,10 @@ def test_task_detail_payload_and_websocket_include_model_call_events(tmp_path: P
     assert payload["recent_model_calls"][0]["call_index"] == 3
     assert payload["recent_model_calls"][0]["node_id"] == record.root_node_id
     assert payload["recent_model_calls"][0]["created_at"]
+    # 模型调用明细三列：耗时/首 token 耗时/思考 token 必须原样透出。
+    assert payload["recent_model_calls"][0]["duration_ms"] == 4210
+    assert payload["recent_model_calls"][0]["first_token_ms"] == 830
+    assert payload["recent_model_calls"][0]["thinking_tokens"] == 2048
     assert "progress" not in payload
     assert "tree_root" not in payload
     assert payload["runtime_summary"]["dispatch_limits"] == {"execution": 0, "inspection": 0}

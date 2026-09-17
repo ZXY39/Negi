@@ -63,6 +63,16 @@ _LATEST_TOOL_CALLS_FULL_LIMIT = 5
 _TOOL_CALL_FULL_OUTPUT_MAX_CHARS = 8000
 
 
+def _optional_int(value: Any) -> int | None:
+    '''缺失/不可解析的口径保持 None（前端显示 "--"），不要塌成 0。'''
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class TaskQueryService:
     def __init__(self, *, store, file_store, log_service, debug_recorder=None):
         self._store = store
@@ -1532,6 +1542,9 @@ class TaskQueryService:
                         for item in list(payload.get('delta_usage_by_model') or [])
                         if isinstance(item, dict)
                     ],
+                    duration_ms=_optional_int(payload.get('duration_ms')),
+                    first_token_ms=_optional_int(payload.get('first_token_ms')),
+                    thinking_tokens=_optional_int(payload.get('thinking_tokens')),
                 )
             )
         if limit is None:

@@ -761,6 +761,11 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
             prepared_message_count: idx + 2,
             prepared_message_chars: (idx + 1) * 100,
             response_tool_call_count: idx % 4,
+            // 每 5 条缺耗时、每 7 条缺思考 token：第 2 页（序号 35..1）同时覆盖
+            // 有值 / "--" 两种渲染；idx=1 → 920ms、idx=34 → 1.6s 覆盖两种耗时格式。
+            duration_ms: idx % 5 === 0 ? null : 900 + idx * 20,
+            first_token_ms: idx % 5 === 0 ? null : 200 + idx,
+            thinking_tokens: idx % 7 === 0 ? null : idx * 3,
             delta_usage: {
               tracked: true,
               input_tokens: idx + 10,
@@ -810,9 +815,18 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
             "新增输入 Token",
             "缓存命中",
             "命中率",
+            "思考 Token",
             "工具调用数",
+            "首 Token 耗时",
+            "总耗时",
             "模型",
           ].every((label) => html.includes(label)),
+          durationColumnsRendered: /<td class="task-token-call-duration"[^>]*>\\d+ms<\\/td>/.test(tableBody)
+            && /<td class="task-token-call-duration"[^>]*>\\d+\\.\\ds<\\/td>/.test(tableBody),
+          durationFallbackRendered: (tableBody.match(/task-token-call-duration[^>]*>--</g) || []).length >= 2,
+          thinkingColumnRendered: (tableBody.match(/<td class="task-token-call-thinking"/g) || []).length
+            === callIndexValues.length,
+          thinkingFallbackRendered: /<td class="task-token-call-thinking"[^>]*>--<\\/td>/.test(tableBody),
           timeColumnRendered: /<td>\\d{1,2}:\\d{2}:\\d{2}<\\/td>/.test(tableBody)
             || /<td>\\d{2}-\\d{2} \\d{1,2}:\\d{2}:\\d{2}<\\/td>/.test(tableBody),
           nodeIdColumnRendered: tableBody.includes("node:demo:"),
@@ -829,6 +843,10 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
     assert result["headingLocalized"] is True
     assert result["paginationLocalized"] is True
     assert result["columnsLocalized"] is True
+    assert result["durationColumnsRendered"] is True
+    assert result["durationFallbackRendered"] is True
+    assert result["thinkingColumnRendered"] is True
+    assert result["thinkingFallbackRendered"] is True
     assert result["timeColumnRendered"] is True
     assert result["nodeIdColumnRendered"] is True
     assert result["searchBoxRendered"] is True

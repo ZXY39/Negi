@@ -1333,6 +1333,7 @@ class TaskLogService:
                         request_seed_source=request_seed_source,
                         request_seed_message_count=request_seed_message_count,
                         observed_input_truth=observed_input_truth,
+                        usage_attempts=usage_attempts,
                     )
                     self._event_writer.append_task_model_call(
                         task_id=task_id,
@@ -2230,6 +2231,44 @@ class TaskLogService:
             pass
 
     @staticmethod
+    def _model_call_attempt_metrics(usage_attempts: list[Any] | None) -> dict[str, Any]:
+        '''把本次调用（一个 turn 内可能含多次 provider 请求/重试）的 attempt 折算成
+        明细表的三列口径。
+
+        总耗时/思考 token 取各次求和；首 token 耗时取**最后一次**上报值而非最小值 ——
+        重试链上先失败的请求可能瞬间返回，取最小会把失败尝试的首 token 耗时记成这一行
+        的值。任一口径没有任何 provider 上报时返回 None，让前端显示 "--"，不伪造 0。
+        '''
+        attempts = list(usage_attempts or [])
+
+        def _numeric(value: Any) -> float | None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            numeric = float(value)
+            return numeric if numeric >= 0 else None
+
+        durations = [value for value in (_numeric(getattr(item, 'duration_ms', None)) for item in attempts) if value is not None]
+        first_token_values = [
+            value for value in (_numeric(getattr(item, 'first_token_ms', None)) for item in attempts) if value is not None
+        ]
+        thinking_tokens = 0
+        thinking_reported = False
+        for attempt in attempts:
+            usage = dict(getattr(attempt, 'usage', {}) or {})
+            if 'thinking_tokens' not in usage:
+                continue
+            reported = _numeric(usage.get('thinking_tokens'))
+            if reported is None:
+                continue
+            thinking_reported = True
+            thinking_tokens += int(reported)
+        return {
+            'duration_ms': int(round(sum(durations))) if durations else None,
+            'first_token_ms': int(round(first_token_values[-1])) if first_token_values else None,
+            'thinking_tokens': thinking_tokens if thinking_reported else None,
+        }
+
+    @staticmethod
     def _model_call_payload(
         *,
         task_id: str,
@@ -2253,6 +2292,7 @@ class TaskLogService:
         request_seed_message_count: int = 0,
         actual_request_ref: str = '',
         observed_input_truth: dict[str, Any] | None = None,
+        usage_attempts: list[Any] | None = None,
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
         request_list = list(request_messages or message_list)
@@ -2309,6 +2349,7 @@ class TaskLogService:
             ),
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
+            **TaskLogService._model_call_attempt_metrics(usage_attempts),
         }
 
     @staticmethod

@@ -179,6 +179,7 @@ class OpenAIChatProvider(LLMProvider):
                     usage=usage,
                     reasoning_content=reasoning_content,
                     visible_text_streamed=diagnostics.first_text_delta_received_at is not None,
+                    first_token_ms=diagnostics.first_token_ms(),
                 )
             except Exception as stream_exc:
                 if not should_fallback_to_non_streaming_from_error(stream_exc):

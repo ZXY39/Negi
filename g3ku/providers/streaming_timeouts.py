@@ -50,6 +50,19 @@ class StreamingDiagnostics:
         if is_text and self.first_text_delta_received_at is None:
             self.first_text_delta_received_at = now
 
+    def first_token_ms(self) -> float | None:
+        """首 token 耗时（毫秒）。以首个到达的分片为准（推理模型的首分片常是
+        reasoning delta），只有首个分片缺失时才退回首个文本增量。整轮没收到分片返回 None。
+        """
+        first_at = (
+            self.first_chunk_received_at
+            if self.first_chunk_received_at is not None
+            else self.first_text_delta_received_at
+        )
+        if first_at is None:
+            return None
+        return max(0.0, (first_at - self.started_at) * 1000.0)
+
     def render_summary(self, *, outcome: str, extra_fields: dict[str, object] | None = None) -> str:
         now = time.perf_counter()
         elapsed_ms = lambda ts: "" if ts is None else f"{max(0.0, (ts - self.started_at) * 1000.0):.1f}"

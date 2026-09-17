@@ -31,6 +31,12 @@ class LLMModelAttempt:
     provider_model: str
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = "stop"
+    # 本次请求的墙钟耗时（毫秒），由咽喉点（main/runtime/chat_backend.py）在
+    # provider 调用两侧测量后回填；未经该路径产生的 attempt 保持 None。
+    duration_ms: float | None = None
+    # 首 token 耗时（毫秒）：从请求发出到首个流式分片到达。只有流式路径能测到，
+    # 非流式请求与未接入诊断的 provider 保持 None（前端显示 "--"）。
+    first_token_ms: float | None = None
 
 
 @dataclass
@@ -58,6 +64,8 @@ class LLMResponse:
     provider_request_meta: dict[str, Any] = field(default_factory=dict)
     provider_request_body: dict[str, Any] = field(default_factory=dict)
     visible_text_streamed: bool = False
+    # 首 token 耗时（毫秒，请求发出 → 首个流式分片）。仅流式 provider 能填。
+    first_token_ms: float | None = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -309,4 +317,18 @@ def normalize_usage_payload(raw_usage: Any) -> dict[str, int]:
         payload["cache_hit_tokens"] = breakdown_cache_tokens
         if input_found:
             payload["input_tokens"] = max(0, input_total - breakdown_cache_tokens)
+
+    # 思考/推理 token 是输出 token 的细分项（各家命名不一）：只在 provider 明确上报时
+    # 才写键，缺失时不写 0——否则上层无法区分「没思考」与「provider 未上报」。
+    for path in (
+        ("completion_tokens_details", "reasoning_tokens"),
+        ("output_tokens_details", "reasoning_tokens"),
+        ("reasoning_tokens",),
+        ("thinking_tokens",),
+    ):
+        found, value = _usage_lookup(raw_usage, *path)
+        if not found:
+            continue
+        payload["thinking_tokens"] = _coerce_usage_int(value)
+        break
     return payload

@@ -67,7 +67,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-and-skill-system.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
-- Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、模型调用明细按时间倒序/搜索跨全部记录的行为疑问，或任务级统计有数字却显示「尚无按模型明细」 → `web-and-admin.md`「Task Token Stats Window Contract」
+- Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、模型调用明细按时间倒序/搜索跨全部记录的行为疑问、任务级统计有数字却显示「尚无按模型明细」，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `runtime-overview.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」

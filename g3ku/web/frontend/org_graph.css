@@ -10670,18 +10670,21 @@ textarea {
     overflow-x: auto;
 }
 
+/* 12 列表格：靠收紧内边距/字号让整表落在模态宽度内，而不是让右列被挤掉。
+   窄屏仍由 wrap 的横向滚动兜底（去掉旧的 1020px 硬下限，它会让列更早溢出）。 */
 .task-token-call-table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 1020px;
+    min-width: 100%;
 }
 
 .task-token-call-table th,
 .task-token-call-table td {
-    padding: 10px 12px;
+    padding: 6px 7px;
     border-bottom: 1px solid var(--border-color);
     text-align: left;
-    font-size: 0.84rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
     color: var(--text-secondary);
     white-space: nowrap;
 }
@@ -10693,9 +10696,21 @@ textarea {
 
 /* 节点 ID 可能很长：单元格截断，完整 ID 走 title 提示 */
 .task-token-call-table td.task-token-call-node-id {
-    max-width: 220px;
+    max-width: 168px;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* 模型名可能是 provider_model 全名：同样截断 + title，避免它独占宽度把整表推出模态 */
+.task-token-call-table td.task-token-call-model {
+    max-width: 190px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.task-token-call-table td.task-token-call-thinking,
+.task-token-call-table td.task-token-call-duration {
+    font-variant-numeric: tabular-nums;
 }
 
 .task-token-call-table tbody tr:last-child td {

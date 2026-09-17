@@ -1669,6 +1669,9 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
         const modelNames = item.delta_usage_by_model.length
             ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
             : "未提供";
+        // 思考 token 为 null 表示 provider 未上报（旧记录 / 非流式 / 不回传
+        // reasoning_tokens），显示 "--" 而不是 0；耗时两列的 null 由 formatDurationMs 兜底。
+        const thinkingText = item.thinking_tokens === null ? "--" : formatTokenCount(item.thinking_tokens);
         return `
             <tr>
                 <td data-task-call-index>${esc(formatTokenCount(item.call_index))}</td>
@@ -1678,8 +1681,11 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
                 <td>${esc(formatTokenCount(item.delta_usage.input_tokens))}</td>
                 <td>${esc(formatTokenCount(item.delta_usage.cache_hit_tokens))}</td>
                 <td>${esc((modelCallHitRate(item) * 100).toFixed(1))}%</td>
+                <td class="task-token-call-thinking" title="${esc(item.thinking_tokens === null ? "provider 未上报思考 token" : `${formatTokenCount(item.thinking_tokens)} 思考 token`)}">${esc(thinkingText)}</td>
                 <td>${esc(formatTokenCount(item.response_tool_call_count))}</td>
-                <td>${esc(modelNames)}</td>
+                <td class="task-token-call-duration" title="${esc(item.first_token_ms === null ? "未测到首 token（非流式请求）" : `首 token ${formatDurationMs(item.first_token_ms)}`)}">${esc(formatDurationMs(item.first_token_ms))}</td>
+                <td class="task-token-call-duration" title="${esc(item.duration_ms === null ? "未记录耗时" : `本次调用累计 ${formatDurationMs(item.duration_ms)}`)}">${esc(formatDurationMs(item.duration_ms))}</td>
+                <td class="task-token-call-model" title="${esc(modelNames)}">${esc(modelNames)}</td>
             </tr>
         `;
     }).join("");
@@ -1695,7 +1701,10 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
                         <th>新增输入 Token</th>
                         <th>缓存命中</th>
                         <th>命中率</th>
+                        <th>思考 Token</th>
                         <th>工具调用数</th>
+                        <th>首 Token 耗时</th>
+                        <th>总耗时</th>
                         <th>模型</th>
                     </tr>
                 </thead>

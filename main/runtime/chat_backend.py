@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -367,9 +368,21 @@ def _normalize_model_attempts(attempts: list[LLMModelAttempt] | None) -> list[LL
                 provider_model=str(getattr(attempt, 'provider_model', '') or '').strip(),
                 usage=normalize_usage_payload(getattr(attempt, 'usage', None)),
                 finish_reason=str(getattr(attempt, 'finish_reason', 'stop') or 'stop'),
+                duration_ms=_normalize_optional_ms(getattr(attempt, 'duration_ms', None)),
+                first_token_ms=_normalize_optional_ms(getattr(attempt, 'first_token_ms', None)),
             )
         )
     return normalized_attempts
+
+
+def _normalize_optional_ms(value: Any) -> float | None:
+    """把可选的毫秒数值收敛为 float 或 None（非数值/负值一律视为缺失）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    numeric = float(value)
+    if numeric < 0:
+        return None
+    return numeric
 
 
 def build_actual_request_diagnostics(
@@ -934,6 +947,7 @@ class ConfigChatBackend:
                                     )
                             provider_request_count += 1
                             last_request_model_ref = current_model_ref
+                            attempt_started_monotonic = time.perf_counter()
                             response = await wait_for_model_attempt(
                                 target.provider.chat(
                                     **provider_kwargs,
@@ -943,6 +957,12 @@ class ConfigChatBackend:
                                 provider_id=str(getattr(target, "provider_id", "") or ""),
                                 provider_model=str(getattr(target, "model_id", "") or ""),
                                 key_index=selected_api_key_index,
+                            )
+                            attempt_duration_ms = max(
+                                0.0, (time.perf_counter() - attempt_started_monotonic) * 1000.0
+                            )
+                            attempt_first_token_ms = _normalize_optional_ms(
+                                getattr(response, 'first_token_ms', None)
                             )
                         except Exception as exc:
                             last_error = model_last_error = exc
@@ -978,6 +998,13 @@ class ConfigChatBackend:
                                     finish_reason=str(response.finish_reason or 'stop'),
                                 )
                             ]
+                        # 耗时归属：同一次 provider 请求产生的 attempt 共享该请求的墙钟耗时；
+                        # 首 token 耗时只有 provider 的流式诊断能给（非流式请求保持 None）。
+                        for attempt in response_attempts:
+                            if attempt.duration_ms is None:
+                                attempt.duration_ms = attempt_duration_ms
+                            if attempt.first_token_ms is None and attempt_first_token_ms is not None:
+                                attempt.first_token_ms = attempt_first_token_ms
                         attempts.extend(response_attempts)
                         response.attempts = list(attempts)
                         response.visible_text_streamed = bool(

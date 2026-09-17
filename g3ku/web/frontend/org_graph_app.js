@@ -10549,6 +10549,13 @@ function normalizeTaskModelCall(raw) {
         const num = Number(value);
         return Number.isFinite(num) && num >= 0 ? Math.floor(num) : 0;
     };
+    // 耗时/思考 token 是可选口径：null 表示 provider 未上报（旧记录、非流式请求、
+    // 不回传 reasoning_tokens 的 provider），与真实的 0 区分，渲染为 "--"。
+    const toOptionalInt = (value) => {
+        if (value === null || value === undefined || value === "") return null;
+        const num = Number(value);
+        return Number.isFinite(num) && num >= 0 ? Math.floor(num) : null;
+    };
     return {
         call_index: toInt(source.call_index),
         node_id: String(source.node_id || "").trim(),
@@ -10556,6 +10563,9 @@ function normalizeTaskModelCall(raw) {
         prepared_message_count: toInt(source.prepared_message_count),
         prepared_message_chars: toInt(source.prepared_message_chars),
         response_tool_call_count: toInt(source.response_tool_call_count),
+        duration_ms: toOptionalInt(source.duration_ms),
+        first_token_ms: toOptionalInt(source.first_token_ms),
+        thinking_tokens: toOptionalInt(source.thinking_tokens),
         delta_usage: normalizeTokenUsage(source.delta_usage),
         delta_usage_by_model: Array.isArray(source.delta_usage_by_model)
             ? source.delta_usage_by_model.map(normalizeModelTokenUsage)
@@ -10575,6 +10585,18 @@ function formatTokenCount(value) {
     const num = Number(value);
     if (!Number.isFinite(num)) return "0";
     return new Intl.NumberFormat("zh-CN").format(Math.max(0, Math.floor(num)));
+}
+
+// 耗时列统一口径：<1s 用毫秒，<1min 用秒（一位小数），更长用 mSSs。
+// null/undefined/负数/非法值一律 "--"，区分「未上报」与「0ms」。
+function formatDurationMs(value) {
+    const num = Number(value);
+    if (value === null || value === undefined || value === "" || !Number.isFinite(num) || num < 0) return "--";
+    if (num < 1000) return `${Math.round(num)}ms`;
+    if (num < 60_000) return `${(num / 1000).toFixed(1)}s`;
+    const minutes = Math.floor(num / 60_000);
+    const seconds = Math.round((num % 60_000) / 1000);
+    return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 }
 
 function tokenKnownTotal(usage) {

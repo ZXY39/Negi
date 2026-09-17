@@ -265,6 +265,7 @@ class ResponsesProvider(LLMProvider):
                         provider_request_meta=provider_request_meta,
                         provider_request_body=provider_request_body,
                         visible_text_streamed=diagnostics._diagnostics.first_text_delta_received_at is not None,
+                        first_token_ms=diagnostics._diagnostics.first_token_ms(),
                     )
         except Exception as e:
             partial_content = str(getattr(e, "partial_content", "") or "").strip()

@@ -338,6 +338,14 @@ class TaskModelCallRecord(Model):
     response_tool_call_count: int = 0
     delta_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     delta_usage_by_model: list[ModelTokenUsageRecord] = Field(default_factory=list)
+    # 逐次调用的耗时与思考 token（web「模型调用明细」三列）。None 表示该口径没有任何
+    # provider 上报（旧记录、非流式请求、未回传 reasoning_tokens 的 provider），与 0
+    # 区分开，前端据此显示 "--" 而不是伪造一个 0。
+    # duration_ms 含同一 turn 内所有重试请求的墙钟耗时之和；first_token_ms 取最后一次
+    # 上报的首 token 耗时；thinking_tokens 为各次 provider usage 的求和。
+    duration_ms: int | None = None
+    first_token_ms: int | None = None
+    thinking_tokens: int | None = None
 
 
 class TaskProjectionRoundRecord(Model):
