@@ -999,6 +999,98 @@ async def test_control_nodes_root_cascade_targets_whole_tree(tmp_path: Path) -> 
         for node_id in (root.node_id, child.node_id, grandchild.node_id):
             node = service.get_node(node_id)
             assert node is not None and node.pause_requested is True and node.pause_reason == "agent"
+        # 根节点驱动口径：根被暂停 ⇒ 任务级标志同步，任务大厅才会显示 Paused 而不是处理中。
+        task = service.get_task(record.task_id)
+        assert task is not None and task.pause_requested is True and task.is_paused is True
+
+        resumed = await service.control_nodes(record.task_id, [root.node_id], "resume", cascade=True)
+        assert resumed["ok"] is True
+        task = service.get_task(record.task_id)
+        assert task is not None and task.pause_requested is False and task.is_paused is False
+        for node_id in (root.node_id, child.node_id, grandchild.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is False and node.is_paused is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_task_level_pause_and_root_node_pause_stay_in_sync(tmp_path: Path) -> None:
+    """任务级暂停（pause_task）与根节点暂停态双向一致，恢复后不得被回填路径重新置为 Paused。"""
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("round trip", session_id="web:shared")
+        root_id = record.root_node_id
+
+        await service.pause_task(record.task_id)
+        task = service.get_task(record.task_id)
+        root = service.get_node(root_id)
+        assert task is not None and task.is_paused is True
+        assert root is not None and root.pause_requested is True
+
+        await service.resume_task(record.task_id)
+        task = service.get_task(record.task_id)
+        root = service.get_node(root_id)
+        assert task is not None and task.is_paused is False and task.pause_requested is False
+        assert root is not None and root.pause_requested is False and root.is_paused is False
+
+        # 回归护栏：刷新任务视图不得把暂停态回填回来（否则全局恢复表现为无效）。
+        service.log_service.refresh_task_view(record.task_id, mark_unread=False)
+        task = service.get_task(record.task_id)
+        assert task is not None and task.is_paused is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_error_pause_on_root_marks_task_paused_then_clears_on_resume(tmp_path: Path) -> None:
+    """根节点 error-pause 同样驱动任务级标志，级联恢复后两侧一起清干净。"""
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("root error pause", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            root.node_id,
+            pause_requested=True,
+            is_paused=True,
+            pause_reason="error",
+            remark="provider unavailable",
+        )
+        task = service.get_task(record.task_id)
+        assert task is not None and task.is_paused is True
+
+        await service.control_nodes(record.task_id, [], "resume")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and task.is_paused is False and task.pause_requested is False
+        assert root is not None and root.is_paused is False and root.pause_reason == ""
+        assert service.store.get_task_node_pause(root.node_id) is None
+        child_after = service.get_node(child.node_id)
+        assert child_after is not None and child_after.pause_requested is False
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_subtree_pause_leaves_task_status_running(tmp_path: Path) -> None:
+    """只暂停子树、根仍在跑时任务级不置暂停（根节点驱动口径，不是「任意节点暂停」）。"""
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("subtree only", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+
+        result = await service.control_nodes(record.task_id, [child.node_id], "pause", cascade=True)
+        assert result["ok"] is True
+        task = service.get_task(record.task_id)
+        assert task is not None and task.is_paused is False and task.pause_requested is False
     finally:
         await service.close()
 
@@ -1133,5 +1225,78 @@ async def test_manage_task_nodes_tool_param_shapes_and_targets_passthrough(tmp_p
         for node_id in (root.node_id, child.node_id):
             node = service.get_node(node_id)
             assert node is not None and node.pause_requested is True
+
+        # 显式空 targets 不静默升级为全局。
+        empty_targets = json.loads(await tool.execute(task_id=record.task_id, targets=[], action="pause"))
+        assert empty_targets["ok"] is False and empty_targets["error"] == "invalid_param"
+
+        # 全局形态：只给 action ⇒ 整任务（与根节点 + cascade 等价）。
+        await service.control_nodes(record.task_id, [record.root_node_id], "resume", cascade=True)
+        global_pause = json.loads(await tool.execute(task_id=record.task_id, action="pause"))
+        assert global_pause["ok"] is True and global_pause["scope"] == "task"
+        assert global_pause["node_id"] == record.root_node_id
+        for node_id in (root.node_id, child.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is True
+        task_after = service.get_task(record.task_id)
+        assert task_after is not None and task_after.is_paused is True
+        # 任务大厅载荷（`GET /api/tasks` 的数据源）必须同步可见——「节点已暂停但大厅
+        # 仍显示处理中」正是这一层没同步导致的。
+        hall = next(item for item in service.query_service.get_tasks(None, 1) if item.task_id == record.task_id)
+        assert hall.is_paused is True and hall.status == "in_progress"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_control_nodes_task_id_only_applies_to_whole_task(tmp_path: Path) -> None:
+    """只传 task_id + action ⇒ 整任务生效，复用根节点 + cascade 的同一条原子路径。"""
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("global scope", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None and root is not None
+        child = _execution_child(service, task=task, parent=root, name="child")
+
+        paused = await service.control_nodes(record.task_id, [], "pause")
+        assert paused["ok"] is True and paused["scope"] == "task" and paused["node_id"] == root.node_id
+        for node_id in (root.node_id, child.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.pause_requested is True
+        task = service.get_task(record.task_id)
+        assert task is not None and task.is_paused is True
+        # 运行时等效：全局暂停还下发任务级 pause_task 命令（与 pause_task 同一实现），
+        # 不只是节点级 pause_node，否则「显示已暂停但调度队列里仍在排队」。
+        armed = {
+            str(item["command_type"])
+            for item in service.store.list_unfinished_task_commands(task_id=record.task_id)
+        }
+        assert "pause_task" in armed
+
+        resumed = await service.control_nodes(record.task_id, [], "resume")
+        assert resumed["ok"] is True
+        task = service.get_task(record.task_id)
+        assert task is not None and task.is_paused is False
+        # 恢复必须同样反映到大厅载荷，否则表现为「全局恢复无效」。
+        hall = next(item for item in service.query_service.get_tasks(None, 1) if item.task_id == record.task_id)
+        assert hall.is_paused is False
+
+        # 非法动作走同一条校验路径，不得被静默忽略。
+        invalid = await service.control_nodes(record.task_id, [], "stop")
+        assert invalid["ok"] is False and invalid["error"] == "invalid_node_action"
+
+        no_remark = await service.control_nodes(record.task_id, [], "keep_paused")
+        assert no_remark["ok"] is False and no_remark["error"] == "remark_required_for_keep_paused"
+
+        # 全局 fail 沿用两步配方（先 pause 再 fail）并终结整任务。
+        await service.control_nodes(record.task_id, [], "pause")
+        failed = await service.control_nodes(record.task_id, [], "fail", remark="global stop")
+        assert failed["ok"] is True
+        for node_id in (root.node_id, child.node_id):
+            node = service.get_node(node_id)
+            assert node is not None and node.status == "failed"
+        task = service.get_task(record.task_id)
+        assert task is not None and task.status == "failed" and task.is_paused is False
     finally:
         await service.close()

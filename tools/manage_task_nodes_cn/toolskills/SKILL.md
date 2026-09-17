@@ -16,7 +16,7 @@ failure reason for `fail`, the registration remark for `keep_paused` (required
 there), the annotation for `pause`. Per-entry remarks are not supported — split
 into separate calls if different reasons matter.
 
-## Two call shapes (mutually exclusive)
+## Call shapes (mutually exclusive)
 
 1. Single-action batch: `node_ids` + one `action` for all of them, optional
    `cascade`. Without cascade, nodes are checked independently — a conflict on
@@ -25,11 +25,37 @@ into separate calls if different reasons matter.
 2. `targets`: a list of `{node_id, action, cascade?}` entries — one atomic call
    that can mix actions (e.g. pause subtree a while failing subtree b). Entries
    omitting `cascade` inherit the top-level `cascade` flag.
+3. Whole task: `task_id` + `action`, with no `node_ids` and no `targets`.
+
+## Whole-task scope
+
+Shape 3 and "the task root node with `cascade=true`" are the **same operation**
+sharing one code path — use whichever reads better:
+
+```
+manage_task_nodes(task_id="task:abc", action="pause")                    # whole task
+manage_task_nodes(task_id="task:abc", node_ids=["node:root"], action="pause", cascade=True)
+```
+
+A whole-task action moves the **task itself**, not only its nodes: a whole-task
+`pause` makes the task show as Paused in the task hall and stops it being
+scheduled or queued, and a whole-task `resume` clears that. So there is no
+separate "pause the task" call to reach for. The task reads as Paused **iff its
+root node is paused** (a root node is the task root unless you were given a
+different one) — pausing some other node affects only that subtree and leaves
+the task status alone.
+
+- A whole-task `fail` terminates the entire task (the two-step recipe below
+  still applies: pause first, then fail).
+- A whole-task `keep_paused` still requires a non-empty `remark`.
+- An explicit empty `targets` array is rejected rather than treated as
+  whole-task — omit `targets` entirely to mean the whole task.
 
 ## Cascade (propagate down)
 
 With `cascade=true` the action applies to the whole subtree rooted at the node.
-Passing the task root node with `cascade=true` targets the entire tree. The
+Passing the task root node with `cascade=true` targets the entire tree (and the
+task status, see above). The
 subtree membership is a snapshot taken at call time: nodes spawned afterwards are
 not covered (a paused ancestor defers their dispatch anyway).
 

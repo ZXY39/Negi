@@ -48,11 +48,14 @@ class _ManageTaskNodesHandler(Tool):
         legacy_action = str(action or '').strip().lower()
         has_legacy = bool(legacy_node_ids) or bool(legacy_action)
         has_targets = isinstance(targets, list) and len(list(targets)) > 0
+        if isinstance(targets, list) and not has_targets:
+            # 显式空 targets 不静默升级为全局：多为模型笔误，宁可打回。
+            return _error('targets must contain at least one entry')
         # 两形态互斥校验放在 execute（schema 校验器不支持 oneOf）。
         if has_legacy and has_targets:
             return _error('provide either node_ids+action or targets, not both')
         if not has_legacy and not has_targets:
-            return _error('provide node_ids+action, or targets')
+            return _error('provide node_ids+action, targets, or an action to act on the whole task')
         if has_targets:
             normalized_targets: list[dict[str, Any]] = []
             for position, item in enumerate(list(targets or [])):
@@ -75,10 +78,10 @@ class _ManageTaskNodesHandler(Tool):
                 targets=normalized_targets,
             )
             return json.dumps(result, ensure_ascii=False)
-        if not legacy_node_ids:
-            return _error('node_ids must contain at least one node id')
         if not legacy_action:
             return _error('action is required together with node_ids')
+        # 只给 action 不给节点 ⇒ 全局形态：服务层解析任务根节点并级联，与
+        # 「传根节点 + cascade=True」是同一条路径，不是第二套语义。
         result = await self._service.control_nodes(
             str(task_id or '').strip(),
             legacy_node_ids,

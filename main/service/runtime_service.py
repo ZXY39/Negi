@@ -1522,6 +1522,23 @@ class MainRuntimeService:
         targets: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
+        # 全局形态：只给 task_id + action（不给任何节点）⇒ 作用于整棵任务树。它与「传任务
+        # 根节点 + cascade=True」走同一条 _control_nodes_scoped 路径，因此前置校验、错误码、
+        # 重叠合并、任务级暂停同步全部一致——不引入第二套「全局」语义。
+        normalized_action = str(action or '').strip().lower()
+        if not list(node_ids or []) and not list(targets or []) and normalized_action:
+            scoped_task = self.get_task(normalized_task_id)
+            if scoped_task is None:
+                return {'ok': False, 'error': 'task_not_found', 'items': []}
+            root_node_id = str(scoped_task.root_node_id or '').strip()
+            if not root_node_id:
+                return {'ok': False, 'error': 'task_root_missing', 'items': []}
+            scoped_result = await self._control_nodes_scoped(
+                normalized_task_id,
+                [{'index': 0, 'node_id': root_node_id, 'action': normalized_action, 'cascade': True}],
+                remark=str(remark or ''),
+            )
+            return {**scoped_result, 'scope': 'task', 'node_id': root_node_id}
         # targets/级联 → 两阶段原子路径；否则保持既有逐节点语义一字不改。
         normalized_targets = self._normalize_control_targets(targets)
         if normalized_targets or bool(cascade):
@@ -1735,9 +1752,11 @@ class MainRuntimeService:
                 }
         # —— 阶段 2：施加（校验全过才会执行到这里）——
         dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        root_node_id = str(task.root_node_id or '').strip()
         items: list[dict[str, Any]] = []
         target_summaries: list[dict[str, Any]] = []
         enqueue_requests: list[dict[str, Any]] = []
+        global_scope_actions: list[str] = []
         any_resumed = False
         for entry, ids in zip(kept_entries, kept_expansions):
             action = entry['action']
@@ -1868,9 +1887,26 @@ class MainRuntimeService:
             })
             if action != 'keep_paused' and applied_ids:
                 enqueue_requests.append({'entry': entry, 'node_ids': list(applied_ids)})
+                if action in {'pause', 'resume'} and root_node_id and root_node_id in ids:
+                    global_scope_actions.append(action)
+        # 全局作用域（动作覆盖任务根节点）⇒ 复用 pause_task/resume_task 的任务级运行时
+        # 副作用：「根节点 + cascade ≡ 全局」不只是状态一致，取消调度排队、唤醒排队等待、
+        # 分发失败态复位也走同一条实现，避免两套「全局」语义漂移。
+        for global_action in dict.fromkeys(global_scope_actions):
+            if global_action == 'pause':
+                await self.pause_task(normalized_task_id)
+            else:
+                await self.resume_task(normalized_task_id)
         if any_resumed:
-            # 沿用 _apply_resume_node_command 的调度恢复语义。
-            if self.execution_mode != 'web' and dispatcher is None and str(task.status or '').strip().lower() == 'in_progress' and not bool(task.is_paused):
+            # 沿用 _apply_resume_node_command 的调度恢复语义。重读任务而不是用调用开始时的
+            # 快照：恢复刚把暂停标志清掉，旧快照会误判「仍在暂停」而跳过重新入队。
+            resumed_task = self.get_task(normalized_task_id)
+            if (
+                self.execution_mode != 'web'
+                and dispatcher is None
+                and str(getattr(resumed_task, 'status', '') or '').strip().lower() == 'in_progress'
+                and not bool(getattr(resumed_task, 'is_paused', False))
+            ):
                 await self.global_scheduler.enqueue_task(normalized_task_id)
             self.task_actor_service.ensure_scoped_epoch_driver(normalized_task_id)
         if self.execution_mode == 'web':
