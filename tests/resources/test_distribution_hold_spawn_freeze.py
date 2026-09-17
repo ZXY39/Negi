@@ -1042,9 +1042,11 @@ async def test_barrier_drain_kicks_stalled_spawn_round_parent(tmp_path: Path) ->
         assert epoch.state == "barrier_draining"
         assert root.node_id in list(epoch.payload.get("drain_pending_node_ids") or [])
         assert kicks == [root.node_id], "停摆父节点必须被踢起"
-        assert epoch.payload.get("drain_kick_rounds") == [f"{root.node_id}::round-stalled"]
+        ledger = dict(epoch.payload.get("drain_kick_rounds") or {})
+        assert list(ledger) == [f"{root.node_id}::round-stalled"], "踢起必须记账（键=父节点+轮）"
+        assert str(ledger[f"{root.node_id}::round-stalled"]).strip(), "记账必须带上次踢起时刻（冷却重试用）"
 
-        # 幂等：同轮不重复踢
+        # 冷却期内不重复踢
         await service.task_actor_service._run_distribution_epoch(task_id)
         assert kicks == [root.node_id]
     finally:
@@ -1080,6 +1082,142 @@ async def test_barrier_drain_kick_requires_replay_intent(tmp_path: Path) -> None
         assert outcome == "draining"
         assert kicks == []
         epoch = service.store.list_active_task_message_distribution_epochs(task_id)[0]
-        assert epoch.payload.get("drain_kick_rounds") == []
+        assert dict(epoch.payload.get("drain_kick_rounds") or {}) == {}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_barrier_drain_kick_retries_when_previous_kick_made_no_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """踢了但没进展的轮必须能再踢：一次失败不能永久卡住 drain。
+
+    冷却窗口（`_DRAIN_KICK_RETRY_SECONDS`）只限制频率；早期列表形态的记账（无时刻）
+    按冷却已过处理，无需迁移即可重试。
+    """
+    monkeypatch.setattr(task_actor_module, "_DRAIN_KICK_RETRY_SECONDS", 0.0)
+    service = _build_service(tmp_path, _DummyChatBackend())
+    try:
+        record = await service.create_task("kick retry", session_id="web:ceo-demo")
+        task_id = record.task_id
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        _stall_spawn_round(service, root=root, round_id="round-retry")
+        service.log_service.update_frame(
+            task_id,
+            root.node_id,
+            lambda frame: {**frame, "phase": "waiting_children"},
+        )
+        dispatcher = service.task_actor_service._create_dispatcher(task_id)
+        service.task_actor_service._dispatchers[task_id] = dispatcher
+        kicks: list[str] = []
+
+        async def _record_resume(node_id: str) -> None:
+            kicks.append(str(node_id))
+
+        dispatcher.resume_node = _record_resume  # type: ignore[assignment]
+
+        await service.task_append_notice(
+            task_ids=[task_id],
+            node_ids=[],
+            message="收紧渲染目录约定",
+            session_id=record.session_id,
+        )
+        # 早期列表形态：预置一次「已踢过」的记账（无时刻）→ 冷却视为已过
+        epoch = service.store.list_active_task_message_distribution_epochs(task_id)[0]
+        service.store.upsert_task_message_distribution_epoch(
+            epoch.model_copy(
+                update={
+                    "payload": {
+                        **dict(epoch.payload or {}),
+                        "drain_kick_rounds": [f"{root.node_id}::round-retry"],
+                    }
+                }
+            )
+        )
+
+        outcome = await service.task_actor_service._run_distribution_epoch(task_id)
+        assert outcome == "draining"
+        assert kicks == [root.node_id], "无进展的轮在冷却过后必须被重新踢起"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_kicked_stalled_parent_materializes_despite_entry_hold_check(
+    tmp_path: Path,
+    _fast_watchdog,
+) -> None:
+    """自愈踢起已停摆父节点后，run_node 入口的 hold 检查也必须让位于未物化豁免。
+
+    这条路径与「通知在节点运行中途到达」不同：节点已停摆、重新进入 run_node，
+    入口检查先于 react_loop 的安全检查点执行。若入口不放行，节点会在被踢起后
+    立刻再次冻结（实测 42ms），drain 依旧等不到物化。
+    """
+    backend = _ScriptedBackend(
+        [
+            # 重放 spawn 轮时唯一需要的一轮模型调用：spawn 治理审查放行
+            _review_allow_response("call:review-1"),
+        ]
+    )
+    service = _build_service(tmp_path, backend)
+    try:
+        record = await service.create_task("kicked stalled parent", session_id="web:ceo-demo")
+        task_id = record.task_id
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        _stall_spawn_round(service, root=root, round_id="round-stalled", goal="late child")
+        # 停摆形态：帧保留重放入口（waiting_children → 同 id 重放）
+        service.log_service.update_frame(
+            task_id,
+            root.node_id,
+            lambda frame: {**frame, "phase": "waiting_children"},
+        )
+        dispatcher = service.task_actor_service._create_dispatcher(task_id)
+        service.task_actor_service._dispatchers[task_id] = dispatcher
+
+        await service.task_append_notice(
+            task_ids=[task_id],
+            node_ids=[],
+            message="统一渲染目录与输出路径",
+            session_id=record.session_id,
+        )
+
+        # 真实驱动（不 stub resume）：drain 自愈踢起父节点 → 入口放行 → 同 id 重放 → 物化
+        outcome = await service.task_actor_service._run_distribution_epoch(task_id)
+        assert outcome == "draining"
+
+        def _round_entries() -> list:
+            current = service.store.get_node(root.node_id)
+            ops = dict((current.metadata or {}).get("spawn_operations") or {})
+            return [dict(item) for item in list((ops.get("round-stalled") or {}).get("entries") or [])]
+
+        await _wait_until(
+            lambda: bool(_round_entries()) and bool(_round_entries()[0].get("child_node_id")),
+            timeout=15,
+            message="kicked parent materialized its spawn round",
+        )
+        entries = _round_entries()
+        child_id = str(entries[0].get("child_node_id") or "").strip()
+        child = service.store.get_node(child_id)
+        assert child is not None, "重放必须物化出子节点"
+        assert str(child.metadata.get("spawn_owner_round_id") or "") == "round-stalled"
+
+        # drain 的待物化条件已可满足（死锁解开）
+        assert (
+            service.task_actor_service._barrier_materialize_pending_entries(
+                task_id=task_id,
+                barrier_node_ids=[root.node_id],
+            )
+            == []
+        )
+        # 且豁免不越界：物化完成后节点仍会在安全相位被冻结
+        await _wait_until(
+            lambda: _entry_frozen(service, task_id, root.node_id),
+            timeout=15,
+            message="parent frozen after materialization",
+        )
     finally:
         await service.close()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from loguru import logger
@@ -52,6 +53,9 @@ _DISTRIBUTION_ACTIVE_STATES = DISTRIBUTION_ACTIVE_STATES
 # hold 阻塞态（含 failed 冻结）：孤儿收尸在该状态下整体不介入（单一来源：subtree_hold）。
 _DISTRIBUTION_HOLD_STATES = DISTRIBUTION_HOLD_STATES
 _DISTRIBUTION_DRIVER_POLL_SECONDS = 1.0
+# drain 自愈的重复踢起冷却（秒）：踢了但没进展的轮必须能再踢，但不能逐秒重复
+# resume 同一个未缓存 review 的轮。
+_DRAIN_KICK_RETRY_SECONDS = 30.0
 # A3：释放后校验清扫的两段延迟（秒）。第一段后仍卡死则再 resume 一次，
 # 第二段后仍卡死则落 ERROR（冻结→释放的终点必须可见）。
 _RELEASE_VERIFICATION_DELAY_SECONDS = 5.0
@@ -1124,6 +1128,40 @@ class TaskActorService:
             ),
         )
 
+    @staticmethod
+    def _drain_kick_ledger(payload: dict[str, Any]) -> dict[str, str]:
+        """把 `drain_kick_rounds` 读成 {父节点::轮: 上次踢起时刻}。
+
+        兼容早期列表形态：无时刻即视为冷却已过，允许重试（踢了但没进展的轮
+        必须能再踢，否则一次失败就永久卡住）。
+        """
+        raw = payload.get('drain_kick_rounds')
+        ledger: dict[str, str] = {}
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                normalized = str(key or '').strip()
+                if normalized:
+                    ledger[normalized] = str(value or '').strip()
+        elif isinstance(raw, list):
+            for item in raw:
+                normalized = str(item or '').strip()
+                if normalized:
+                    ledger[normalized] = ''
+        return ledger
+
+    @staticmethod
+    def _drain_kick_cooldown_active(last_kicked_at: str) -> bool:
+        """同一 父节点+轮 的重复踢起是否仍在冷却期内。时刻不可解析时按可重试处理。"""
+        text = str(last_kicked_at or '').strip()
+        if not text:
+            return False
+        try:
+            last_dt = datetime.fromisoformat(text.replace('Z', '+00:00'))
+            now_dt = datetime.fromisoformat(now_iso().replace('Z', '+00:00'))
+        except Exception:
+            return False
+        return (now_dt - last_dt).total_seconds() < _DRAIN_KICK_RETRY_SECONDS
+
     async def _kick_stalled_spawn_round_parents(
         self,
         *,
@@ -1138,23 +1176,22 @@ class TaskActorService:
         仍保留该轮的重放入口（``_parent_frame_intends_round_replay``，B4），
         否则重放不成立、只会让模型发一轮新 spawn。
 
-        每个 (父节点, 轮) 只踢一次：账记在 epoch payload 的 ``drain_kick_rounds``，
-        避免每秒重复 resume 同一个未缓存 review 的轮。
+        同一 父节点+轮 有冷却期（``_DRAIN_KICK_RETRY_SECONDS``）：踢了但没进展的轮
+        会再次被踢（不能一次失败就永久卡住），但不会逐秒重复 resume 同一个未缓存
+        review 的轮。账记在 epoch payload 的 ``drain_kick_rounds``（键 → 上次踢起时刻）。
         """
         dispatcher = self._dispatchers.get(str(task_id or '').strip())
         if dispatcher is None:
             return
-        kicked = [
-            str(item or '').strip()
-            for item in list(payload.get('drain_kick_rounds') or [])
-            if str(item or '').strip()
-        ]
+        ledger = self._drain_kick_ledger(payload)
         for raw_item in list(entries or []):
             item = dict(raw_item) if isinstance(raw_item, dict) else {}
             parent_node_id = str(item.get('parent_node_id') or '').strip()
             round_id = str(item.get('round_id') or '').strip()
+            if not parent_node_id or not round_id:
+                continue
             key = f'{parent_node_id}::{round_id}'
-            if not parent_node_id or not round_id or key in kicked:
+            if self._drain_kick_cooldown_active(ledger.get(key, '')):
                 continue
             entry = dispatcher._entries.get(parent_node_id)
             if entry is not None and entry.task is not None and not entry.task.done():
@@ -1170,7 +1207,7 @@ class TaskActorService:
                 round_id=round_id,
             ):
                 continue
-            kicked.append(key)
+            ledger[key] = now_iso()
             logger.warning(
                 'barrier drain self-heal: kicking stalled spawn-round parent: task={} node={} round={}',
                 task_id,
@@ -1185,7 +1222,7 @@ class TaskActorService:
                     task_id,
                     parent_node_id,
                 )
-        payload['drain_kick_rounds'] = kicked
+        payload['drain_kick_rounds'] = ledger
 
     def _queue_root_distribution_notices(self, *, epoch, created_at: str) -> None:
         self._node_runner._queue_pending_root_distribution_notices(epoch=epoch, created_at=created_at)

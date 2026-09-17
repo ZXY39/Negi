@@ -78,6 +78,7 @@ from main.runtime.subtree_hold import (
     make_epoch_state_lookup,
     make_stale_hold_logger,
     resolve_subtree_hold_epoch_id,
+    spawn_round_has_unmaterialized_entries,
 )
 from main.service.create_async_task_contract import normalize_create_async_task_file_targets
 from main.storage.disk_guard import is_disk_full_error
@@ -453,7 +454,7 @@ class NodeRunner:
             return await self._run_distribution_node(task=task, node=node)
         # 子树分发屏障 hold：必须在分发 frontier 分支之后（frontier 节点走控制
         # 回合而非冻结）、在人工节点暂停之后（操作员暂停优先，延迟分发目标）。
-        hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=node.node_id)
+        hold_epoch_id = self._blocking_subtree_hold_epoch_id(task_id=task_id, node=node)
         if hold_epoch_id:
             raise DistributionHoldError(task_id, node.node_id, hold_epoch_id)
         if self._pause_requested(task_id):
@@ -2436,6 +2437,29 @@ class NodeRunner:
             get_epoch_state=make_epoch_state_lookup(self._store, task_id),
             on_stale_hold=make_stale_hold_logger(logger.warning),
         )
+
+    def _blocking_subtree_hold_epoch_id(self, *, task_id: str, node) -> str:
+        """应真正中止该节点运行的分发 hold epoch id（空串 = 不中止）。
+
+        要点 5 未物化豁免（`main/runtime/subtree_hold.py`）：持有未完成且仍有未物化
+        entry 的 spawn 轮的节点，在物化完成前不被 hold 中止——子节点物化只能由该节点
+        自己的协程产出，物化前中止它，屏障 drain 就会等一个只有「释放屏障」才能产生的
+        结果（互等死锁）。物化一完成谓词立即为假，下个检查点照常冻结。
+        判定通道异常时保守维持原有冻结行为。
+        """
+        hold_epoch_id = self._subtree_hold_epoch_id(task_id=task_id, node_id=str(getattr(node, 'node_id', '') or '').strip())
+        if not hold_epoch_id:
+            return ''
+        try:
+            if spawn_round_has_unmaterialized_entries(
+                get_node=self._store.get_node,
+                task_id=task_id,
+                node=node,
+            ):
+                return ''
+        except Exception:
+            pass
+        return hold_epoch_id
 
     def _distribution_mode_active(self, *, task_id: str, node_id: str) -> bool:
         distribution = self._distribution_runtime_state(task_id)
