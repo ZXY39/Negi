@@ -23,9 +23,34 @@ import pytest
 from g3ku.qq_official import bridge as bridge_module
 
 
+class FakeRoute:
+    """botpy ``Route`` 替身（媒体直传经 http 层，不经 api 包装）。"""
+
+    def __init__(self, method: str, path: str, **params) -> None:
+        self.method = method
+        self.path = path
+        self.params = params
+
+
+class FakeBotHttp:
+    def __init__(self, api: "FakeBotApi") -> None:
+        self._api = api
+
+    async def request(self, route: FakeRoute, **kwargs):
+        self._api.http_calls.append(
+            (route.path, {"method": route.method, "params": route.params, **kwargs})
+        )
+        if self._api.fail_file_data:
+            raise RuntimeError("simulated file_data rejection")
+        return {"file_uuid": "uuid-fd", "file_info": "file-info-fd", "ttl": 0}
+
+
 class FakeBotApi:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.http_calls: list[tuple[str, dict]] = []
+        self._http = FakeBotHttp(self)
+        self.fail_file_data = False
 
     # 真实 botpy 成功时返回响应 JSON、超时静默返回 None；fake 默认按成功返回
     # 回执 dict（deliver() 会把 None 判为投递失败）。
@@ -139,9 +164,13 @@ def _reset_fake_registries():
 
 
 def _install_fake_botpy(monkeypatch: pytest.MonkeyPatch, intents_cls=FakeIntents) -> None:
+    fake_http = types.ModuleType("botpy.http")
+    fake_http.Route = FakeRoute
     fake_botpy = types.ModuleType("botpy")
     fake_botpy.Client = FakeClient
     fake_botpy.Intents = intents_cls
+    fake_botpy.http = fake_http
+    monkeypatch.setitem(sys.modules, "botpy.http", fake_http)
     monkeypatch.setitem(sys.modules, "botpy", fake_botpy)
 
 
@@ -1043,11 +1072,26 @@ async def test_pump_caps_total_attempts_per_outbox_id_across_seqs(
             await task
 
 
+def _outbound_attachment(name: str, mime_type: str, token: str = "t1") -> dict:
+    return {
+        "name": name,
+        "mime_type": mime_type,
+        "size": 9,
+        "url": f"/api/ceo/media/original?token={token}",
+    }
+
+
+def _absolute_media(token: str) -> str:
+    # base_url 是 http://127.0.0.1:1/api/v1，媒体 URL 按 origin 拼接。
+    return f"http://127.0.0.1:1/api/ceo/media/original?token={token}"
+
+
 @pytest.mark.asyncio
-async def test_pump_delivers_event_attachments_as_file_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    """出站事件附件经平台文件上传接口投递：post_c2c_file 拿 file_info 后以
-    msg_type=7 发送，正文另发一条文本；上传 URL 按 base_url 的 origin 拼接。"""
-    media = _media_transport({})
+async def test_pump_delivers_event_attachment_via_file_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """出站附件以 file_data（base64）直传：桥从本机签名 URL 取字节后直接调平台
+    媒体上传接口（不经 botpy 只暴露 url 的包装），拿到 file_info 以 msg_type=7
+    发送，正文另发一条文本。"""
+    media = _media_transport({_absolute_media("t1"): (200, b"doc-bytes")})
     task, client = await _start_bridge(monkeypatch, media)
     try:
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f1"))
@@ -1058,29 +1102,68 @@ async def test_pump_delivers_event_attachments_as_file_messages(monkeypatch: pyt
                 "seq": 1,
                 "text": "日报已生成：日报",
                 "external_key": "qq:c2c:u9",
-                "attachments": [
-                    {
-                        "name": "日报.docx",
-                        "mime_type": "application/octet-stream",
-                        "size": 3,
-                        "url": "/api/ceo/media/original?token=t1",
-                    }
-                ],
+                "attachments": [_outbound_attachment("日报.docx", "application/octet-stream")],
             }
         )
-        await _wait_until(lambda: len(client.api.calls) >= 3)
-        upload_name, upload_kwargs = client.api.calls[0]
-        assert upload_name == "post_c2c_file"
-        assert upload_kwargs["openid"] == "u9"
-        assert upload_kwargs["file_type"] == 4  # 任意文件（平台暂不开放则走降级用例）
-        assert upload_kwargs["url"] == "http://127.0.0.1:1/api/ceo/media/original?token=t1"
-        media_name, media_kwargs = client.api.calls[1]
-        assert media_name == "post_c2c_message"
-        assert media_kwargs["msg_type"] == 7
-        assert media_kwargs["media"] == {"file_info": "file-info-c"}
-        assert client.api.calls[2] == (
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+
+        assert len(client.api.http_calls) == 1
+        path, payload = client.api.http_calls[0]
+        assert path == "/v2/users/{openid}/files"
+        assert payload["params"] == {"openid": "u9"}
+        body = payload["json"]
+        assert body["file_type"] == 4  # 任意文件
+        assert base64.b64decode(body["file_data"]) == b"doc-bytes"
+        assert body["srv_send_msg"] is False
+        assert client.api.calls == [
+            (
+                "post_c2c_message",
+                {"openid": "u9", "msg_type": 7, "media": {"file_info": "file-info-fd"}},
+            ),
+            (
+                "post_c2c_message",
+                {"openid": "u9", "content": "日报已生成：日报", "msg_type": 0},
+            ),
+        ]
+        # 未回退到 url 上传路径（那条路径要求平台能回源本服务端）。
+        assert not [call for call in client.api.calls if call[0] == "post_c2c_file"]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_falls_back_to_url_upload_when_file_data_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """file_data 被平台拒时回退 url 回源上传（要求本服务端公网可达），
+    回退成功仍以 msg_type=7 送达，不降级。"""
+    media = _media_transport({_absolute_media("t2"): (200, b"pdf-bytes")})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        client.api.fail_file_data = True
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f2"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "简历已渲染：简历.pdf",
+                "attachments": [_outbound_attachment("简历.pdf", "application/pdf", "t2")],
+            }
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 2)
+
+        assert client.api.http_calls and client.api.http_calls[0][1]["json"]["file_type"] == 4
+        assert ("post_c2c_file", {"openid": "u9", "file_type": 4, "url": _absolute_media("t2"), "srv_send_msg": False}) in client.api.calls
+        assert (
             "post_c2c_message",
-            {"openid": "u9", "content": "日报已生成：日报", "msg_type": 0},
+            {"openid": "u9", "msg_type": 7, "media": {"file_info": "file-info-c"}},
+        ) in client.api.calls
+        assert client.api.calls[-1] == (
+            "post_c2c_message",
+            {"openid": "u9", "content": "简历已渲染：简历.pdf", "msg_type": 0},
         )
     finally:
         task.cancel()
@@ -1089,31 +1172,76 @@ async def test_pump_delivers_event_attachments_as_file_messages(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+async def test_pump_maps_attachment_mime_to_platform_file_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mime → file_type 映射：图片 1、mp4 2、语音 3、其余（文档）4；群聊走群接口。"""
+    media = _media_transport(
+        {
+            _absolute_media("i1"): (200, b"png-bytes"),
+            _absolute_media("d1"): (200, b"docx-bytes"),
+        }
+    )
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_group_at_message_create(
+            SimpleNamespace(group_openid="g1", content="hi", id="m9", attachments=[])
+        )
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "好了",
+                "external_key": "qq:group:g1",
+                "attachments": [
+                    _outbound_attachment("chart.png", "image/png", "i1"),
+                    _outbound_attachment("报告.docx", "application/octet-stream", "d1"),
+                ],
+            }
+        )
+        await _wait_until(lambda: len(client.api.calls) >= 3)
+
+        paths = [path for path, _ in client.api.http_calls]
+        assert paths == ["/v2/groups/{group_openid}/files", "/v2/groups/{group_openid}/files"]
+        file_types = [payload["json"]["file_type"] for _, payload in client.api.http_calls]
+        assert file_types == [1, 4]
+        assert all(payload["params"] == {"group_openid": "g1"} for _, payload in client.api.http_calls)
+        assert client.api.calls == [
+            (
+                "post_group_message",
+                {"group_openid": "g1", "msg_type": 7, "media": {"file_info": "file-info-fd"}},
+            ),
+            (
+                "post_group_message",
+                {"group_openid": "g1", "msg_type": 7, "media": {"file_info": "file-info-fd"}},
+            ),
+            ("post_group_message", {"group_openid": "g1", "content": "好了", "msg_type": 0}),
+        ]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
 async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    """平台拒绝文件上传（file_type=4 暂不开放/回源失败）时降级为签名下载链接
-    文本：用户至少拿到可下载链接，附件不能静默丢失。"""
-    media = _media_transport({})
+    """两条上传路径都失败时降级为签名下载链接文本：用户至少拿到可下载链接，
+    附件不能静默丢失。"""
+    media = _media_transport({_absolute_media("t3"): (200, b"doc-bytes")})
     task, client = await _start_bridge(monkeypatch, media)
     try:
         async def _reject(**kwargs):
-            raise RuntimeError("file_type 4 not available")
+            raise RuntimeError("simulated url upload rejection")
 
+        client.api.fail_file_data = True
         client.api.post_c2c_file = _reject
-        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f2"))
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="f3"))
         ext = FakeExternalApiClient.instances[-1]
         await ext.events.put(
             {
                 "type": "reply.final",
                 "seq": 1,
                 "text": "日报已生成：日报",
-                "attachments": [
-                    {
-                        "name": "日报.docx",
-                        "mime_type": "application/octet-stream",
-                        "size": 3,
-                        "url": "/api/ceo/media/original?token=t2",
-                    }
-                ],
+                "attachments": [_outbound_attachment("日报.docx", "application/octet-stream", "t3")],
             }
         )
         await _wait_until(lambda: client.api.calls)
@@ -1123,7 +1251,7 @@ async def test_pump_degrades_failed_attachment_to_signed_link_text(monkeypatch: 
                 "post_c2c_message",
                 {
                     "openid": "u9",
-                    "content": "日报已生成：日报\n📎 日报.docx: http://127.0.0.1:1/api/ceo/media/original?token=t2",
+                    "content": f"日报已生成：日报\n📎 日报.docx: {_absolute_media('t3')}",
                     "msg_type": 0,
                 },
             )

@@ -13,7 +13,13 @@ Real-device seam: the botpy SDK surface is verified against ``qq-botpy==1.2.1`` 
 ``filename`` — image and file payloads are downloaded and forwarded to
 ``/api/v1`` as ``data_base64`` attachments, see docs/architecture/external-agent-api.md
 「回合契约」), and ``post_message`` / ``post_group_message`` /
-``post_c2c_message`` / ``post_dms`` signatures. IMPORTANT: ``Client.run()`` is a blocking entry point
+``post_c2c_message`` / ``post_dms`` signatures. Outbound media uploads go
+through ``file_data`` (base64) on the same `/files` routes: botpy's
+``post_group_file`` / ``post_c2c_file`` wrappers only expose the ``url``
+parameter, which the platform fetches itself (public reachability required),
+so the bridge issues the request directly with the SDK's own route/http pair
+(see docs/architecture/external-agent-api.md「内置官方 QQ 适配器」).
+IMPORTANT: ``Client.run()`` is a blocking entry point
 (``loop.run_until_complete``) that raises ``RuntimeError: This event loop is
 already running`` inside the web runtime's live loop — this bridge therefore
 uses the async entry (``async with client: await client.start(...)``), sharing
@@ -65,6 +71,9 @@ _MAX_INBOUND_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024
 _MAX_INBOUND_ATTACHMENTS = 4
 _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+# 出站附件：桥从本机签名媒体 URL 取字节的下载上限（与服务端出站产出上限一致）。
+# 超过即降级为签名链接文本，不向平台发起必然失败的巨型上传。
+_MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 # 服务端排队回执兜底文案（正常取 /api/v1 响应里的 receipt）。
 _QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
@@ -309,7 +318,66 @@ async def run_qq_official_bridge(
             return 1  # 图片（平台支持 png/jpg）
         if mime == "video/mp4":
             return 2  # 视频
-        return 4  # 任意文件：botpy 1.2.1 标注「暂不开放」，尽力尝试、失败降级
+        if mime.startswith("audio/"):
+            return 3  # 语音
+        return 4  # 任意文件（docx/pdf/zip…）
+
+    def _media_files_route(kind: str, target: dict[str, str]) -> Any:
+        from botpy.http import Route  # 惰性：botpy 只在桥运行时可用
+
+        if kind == "group":
+            return Route(
+                "POST", "/v2/groups/{group_openid}/files", group_openid=target["group_openid"]
+            )
+        return Route("POST", "/v2/users/{openid}/files", openid=target["user_openid"])
+
+    async def _upload_media_data(
+        kind: str, target: dict[str, str], data: bytes, file_type: int
+    ) -> str:
+        """``file_data``（base64）直传媒体，返回 ``file_info``（空串=失败）。
+
+        botpy 的 ``post_group_file`` / ``post_c2c_file`` 只暴露 ``url`` 参数——那
+        条路径由 QQ 服务器回源下载，要求本服务端公网可达；``file_data`` 不回源，
+        服务端只监听回环地址时同样成立。故这里用与 botpy 内部完全相同的写法
+        直接发请求，仅补上 SDK 未暴露的入参。
+        """
+        payload = {
+            "file_type": file_type,
+            "file_data": base64.b64encode(data).decode("ascii"),
+            "srv_send_msg": False,
+        }
+        try:
+            media = await bridge_api._http.request(_media_files_route(kind, target), json=payload)
+        except Exception as exc:  # noqa: BLE001 - 回退 url 路径
+            logger.warning(
+                "qq-official file_data media upload failed ({}); falling back to url upload", exc
+            )
+            return ""
+        return str(media.get("file_info") or "").strip() if isinstance(media, dict) else ""
+
+    async def _upload_media_url(
+        kind: str, target: dict[str, str], url: str, file_type: int
+    ) -> str:
+        """回退路径：平台按 URL 回源下载（要求本服务端公网可达）。"""
+        try:
+            if kind == "group":
+                media = await bridge_api.post_group_file(
+                    group_openid=target["group_openid"],
+                    file_type=file_type,
+                    url=url,
+                    srv_send_msg=False,
+                )
+            else:
+                media = await bridge_api.post_c2c_file(
+                    openid=target["user_openid"],
+                    file_type=file_type,
+                    url=url,
+                    srv_send_msg=False,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("qq-official url media upload failed ({})", exc)
+            return ""
+        return str(media.get("file_info") or "").strip() if isinstance(media, dict) else ""
 
     async def _deliver_attachment(
         kind: str, target: dict[str, str], attachment: dict[str, Any]
@@ -317,9 +385,11 @@ async def run_qq_official_bridge(
         """Send one attachment as a real QQ file/media message; False means the
         caller must degrade it to a signed-URL text line.
 
-        group/c2c 走平台文件上传接口——注意参数是 URL（QQ 服务端回源下载），
-        要求本服务端公网可达；失败（含 file_type=4 被平台拒、回源失败）降级。
-        guild/guilddm 没有文件接口：图片用 file_image 字节直发，其余降级。
+        group/c2c：桥先从本机签名媒体 URL 取字节，再以 ``file_data``（base64）
+        直传给平台媒体上传接口——不回源、不要求公网可达；``file_data`` 被拒时
+        回退平台回源上传（``url`` 路径）。拿到 ``file_info`` 后以 ``msg_type=7``
+        富媒体消息发出。
+        guild/guilddm：平台没有文件接口，图片用 ``file_image`` 字节直发，其余降级。
         """
         name = str(attachment.get("name") or "attachment")
         url = _absolute_media_url(str(attachment.get("url") or ""))
@@ -330,25 +400,18 @@ async def run_qq_official_bridge(
         try:
             if kind in ("group", "c2c"):
                 file_type = _media_file_type(mime)
-                if kind == "group":
-                    media = await bridge_api.post_group_file(
-                        group_openid=target["group_openid"],
-                        file_type=file_type,
-                        url=url,
-                        srv_send_msg=False,
+                data = await _download_attachment_bytes(
+                    media_client, url, max_bytes=_MAX_OUTBOUND_ATTACHMENT_BYTES
+                )
+                if not data:
+                    raise RuntimeError(
+                        "signed media download failed or exceeds the outbound attachment cap"
                     )
-                else:
-                    media = await bridge_api.post_c2c_file(
-                        openid=target["user_openid"],
-                        file_type=file_type,
-                        url=url,
-                        srv_send_msg=False,
-                    )
-                file_info = ""
-                if isinstance(media, dict):
-                    file_info = str(media.get("file_info") or "").strip()
+                file_info = await _upload_media_data(kind, target, data, file_type)
                 if not file_info:
-                    raise RuntimeError("media upload returned no file_info")
+                    file_info = await _upload_media_url(kind, target, url, file_type)
+                if not file_info:
+                    raise RuntimeError("media upload failed on both file_data and url paths")
                 if kind == "group":
                     result = await bridge_api.post_group_message(
                         group_openid=target["group_openid"],
@@ -367,7 +430,7 @@ async def run_qq_official_bridge(
                 return True
             if mime.startswith("image/"):
                 data = await _download_attachment_bytes(
-                    media_client, url, max_bytes=_MAX_INBOUND_IMAGE_BYTES
+                    media_client, url, max_bytes=_MAX_OUTBOUND_ATTACHMENT_BYTES
                 )
                 if not data:
                     raise RuntimeError("image attachment download failed")

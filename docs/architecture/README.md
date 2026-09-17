@@ -54,6 +54,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Channel/bridge reply emits `## Runtime Tool Contract` or `[G3KU_STAGE_*]` stage-block/internal context text -> `runtime-overview.md`「frontdoor 与任务运行时的关系」(回显守卫) + `external-agent-api.md` (outbound sanitize contract)
 - 第三方桥接应用接入（/api/v1 鉴权、外部会话、事件流、主动推送不到达）→ `external-agent-api.md`「常见排障入口」
 - 会话转录/Web UI 有回复但渠道端（QQ 等）收不到、渠道「能收不能发」、重启后旧提醒补投或重复 → `external-agent-api.md`「出站路由（主动推送）」+「持久 outbox」+「内置官方 QQ 适配器」
+- 渠道端只收到文件签名链接、模型回复里引用的图片/文件没有作为媒体消息送达 → `external-agent-api.md`「事件流」出站附件契约 +「内置官方 QQ 适配器」
 - 官方 QQ 机器人面板报错、不连接或收不到消息 → `external-agent-api.md`「内置官方 QQ 适配器」+「常见排障入口」
 - OpenAI 兼容端点 401/403/423/503、回复总是 "still working"、流式文本与终稿不一致 → `agent-gateway.md`「常见排障入口」
 - MCP 工具全部 connection_failed、MCP 客户端协议解析错误（stdout 被污染）→ `agent-gateway.md`「常见排障入口」+「MCP stdio 网关契约」
