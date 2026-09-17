@@ -2495,10 +2495,16 @@ class NodeRunner:
         return next_payload
 
     @classmethod
-    def _distribution_response_arguments(cls, response: Any) -> dict[str, Any]:
+    def _distribution_response_arguments(
+        cls,
+        response: Any,
+        *,
+        expected_tool_name: str = 'submit_message_distribution',
+    ) -> dict[str, Any]:
+        expected_name = str(expected_tool_name or '').strip()
         for item in cls._distribution_response_tool_calls(response):
             name = str(item.get('name') or '').strip()
-            if name != 'submit_message_distribution':
+            if name != expected_name:
                 continue
             arguments = item.get('arguments')
             if isinstance(arguments, str):
@@ -3394,7 +3400,10 @@ class NodeRunner:
                     node_id=node.node_id,
                 ),
             )
-            arguments = self._distribution_response_arguments(response)
+            arguments = self._distribution_response_arguments(
+                response,
+                expected_tool_name=decision_tool.name,
+            )
             submitted = await decision_tool.execute(
                 action=str(arguments.get('action') or ''),
                 reason=str(arguments.get('reason') or ''),

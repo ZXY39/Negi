@@ -4,16 +4,28 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+
 import pytest
 
+from g3ku.heartbeat.prompt_lane import _task_distribution_error_lines
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.providers.fallback import normalize_forced_function_tool_choice
-from g3ku.heartbeat.prompt_lane import _task_distribution_error_lines
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.tool_visibility import CEO_FIXED_BUILTIN_TOOL_NAMES, NODE_FIXED_BUILTIN_TOOL_NAMES
-from main.models import NodeFinalResult, NodeRecord, SpawnChildSpec, TaskMessageDistributionEpoch, TaskNodeNotification, TokenUsageSummary
+from main.models import (
+    NodeFinalResult,
+    NodeRecord,
+    SpawnChildSpec,
+    TaskMessageDistributionEpoch,
+    TaskNodeNotification,
+    TokenUsageSummary,
+)
 from main.protocol import now_iso
-from main.runtime.node_runner import _DISTRIBUTION_DECISION_MAX_ATTEMPTS
+from main.runtime.acceptance_handshake import (
+    ACCEPTANCE_HANDSHAKE_KEY,
+    ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+)
+from main.runtime.node_runner import _DISTRIBUTION_DECISION_MAX_ATTEMPTS, NodeRunner
 from main.runtime.pending_notice_state import (
     PENDING_NOTICE_STATE_KEY,
     RESUME_MODE_ORDINARY,
@@ -1482,6 +1494,131 @@ async def test_distribution_turn_rejects_invalid_action(tmp_path: Path) -> None:
 
         assert result.status == "failed"
         assert result.blocking_reason == "distribution_decision_invalid_action"
+    finally:
+        await service.close()
+
+
+def test_distribution_response_arguments_accept_expected_tool_name() -> None:
+    response = SimpleNamespace(
+        tool_calls=[
+            {
+                "name": "submit_notice_inspection_decision",
+                "arguments": {
+                    "action": "continue_acceptance",
+                    "reason": "the notice does not change the submitted output",
+                },
+            }
+        ]
+    )
+
+    assert NodeRunner._distribution_response_arguments(
+        response,
+        expected_tool_name="submit_notice_inspection_decision",
+    ) == {
+        "action": "continue_acceptance",
+        "reason": "the notice does not change the submitted output",
+    }
+
+
+@pytest.mark.asyncio
+async def test_notice_inspection_decision_uses_its_tool_arguments(tmp_path: Path) -> None:
+    reason = "通知只调整执行策略，不改变该节点已经提交的产出。"
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_notice_inspection_decision",
+                        "arguments": {
+                            "action": "continue_acceptance",
+                            "reason": reason,
+                            "notes": "继续验收",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, _branch_b = await seed_live_root_with_two_running_children(service)
+        acceptance = NodeRecord(
+            node_id="node:acceptance",
+            task_id=record.task_id,
+            parent_node_id=branch_a.node_id,
+            root_node_id=root.node_id,
+            depth=2,
+            node_kind="acceptance",
+            status="in_progress",
+            goal="branch acceptance",
+            prompt="inspect branch a",
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+        service.store.upsert_node(acceptance)
+
+        def _set_handshake(metadata: dict) -> dict:
+            metadata[ACCEPTANCE_HANDSHAKE_KEY] = {
+                "state": ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+                "acceptance_node_id": acceptance.node_id,
+            }
+            return metadata
+
+        service.log_service.update_node_metadata(branch_a.node_id, _set_handshake)
+        refreshed_branch_a = service.store.get_node(branch_a.node_id)
+        assert refreshed_branch_a is not None
+        branch_a = refreshed_branch_a
+        epoch = await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="新的验收约束",
+            frontier_node_ids=[branch_a.node_id],
+        )
+        epoch = epoch.model_copy(
+            update={
+                "payload": {
+                    **dict(epoch.payload or {}),
+                    "target_node_ids": [branch_a.node_id],
+                    "scope_node_ids": [branch_a.node_id, acceptance.node_id],
+                    "barrier_node_ids": [branch_a.node_id],
+                    "frontier_node_ids": [branch_a.node_id],
+                    "distributed_node_ids": [],
+                }
+            }
+        )
+        service.store.upsert_task_message_distribution_epoch(epoch)
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": epoch.epoch_id,
+                "state": "distributing",
+                "target_node_ids": [branch_a.node_id],
+                "frontier_node_ids": [branch_a.node_id],
+                "blocked_node_ids": [branch_a.node_id],
+                "pending_notice_node_ids": [branch_a.node_id],
+                "queued_epoch_count": 0,
+                "pending_mailbox_count": 0,
+            },
+        )
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+        result = await service.node_runner.run_notice_inspection_decision(task=task, node=branch_a)
+
+        assert result.status == "success"
+        assert result.summary == f"inspection continues for {branch_a.node_id}"
+        assert len(backend.calls) == 1
+        refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert refreshed_epoch is not None
+        decision_records = list(refreshed_epoch.payload.get("decision_records") or [])
+        assert decision_records[-1]["action"] == "continue_acceptance"
+        assert decision_records[-1]["reason"] == reason
+        assert branch_a.node_id in refreshed_epoch.payload.get("distributed_node_ids")
+
+        notifications = service.store.list_task_node_notifications(record.task_id, acceptance.node_id)
+        assert len(notifications) == 1
+        assert "新的验收约束" in notifications[0].message
     finally:
         await service.close()
 
