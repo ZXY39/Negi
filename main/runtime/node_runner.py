@@ -88,6 +88,7 @@ _RECOVERY_FINGERPRINT_KEY = 'recovery_fingerprint'
 BLOCKED_VERIFICATION_PROMPT_FILE = 'blocked_verification.md'
 _BLOCKED_VERIFICATION_ONLY_KEY = 'blocked_verification_only'
 _BLOCKED_VERIFICATION_LOG_KEY = 'blocked_verification_log'
+_ACCEPTANCE_EVIDENCE_AUDIT_KEY = 'acceptance_evidence_audit'
 _REJECTION_HISTORY_KEY = 'rejection_history'
 _BLOCKED_VERIFICATION_FALLBACK_PROMPT = (
     '核验被检验执行节点提交的 failed+blocked 阻塞声明是否成立：'
@@ -1608,6 +1609,10 @@ class NodeRunner:
     ) -> NodeFinalResult:
         execution = self._accepted_execution_node(task_id=task.task_id, acceptance=acceptance)
         handshake = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if execution is not None else {}))
+        try:
+            self._record_acceptance_evidence_audit(acceptance=acceptance, result=result)
+        except Exception as exc:  # 审计是旁路：记账失败绝不影响验收控制流
+            logger.debug(f'acceptance evidence audit skipped: {acceptance.node_id}: {describe_exception(exc)}')
         if str(result.status or '').strip() == STATUS_SUCCESS:
             self._finalize_acceptance_pass(task=task, execution=execution, acceptance=acceptance, result=result)
             return NodeFinalResult(
@@ -2103,6 +2108,48 @@ class NodeRunner:
             return metadata
 
         self._log_service.update_node_metadata(node_id, _mutate)
+
+    def _record_acceptance_evidence_audit(self, *, acceptance: NodeRecord, result: NodeFinalResult) -> None:
+        """记录验收裁定引用的文件证据在裁定时刻的磁盘真值（中立事实，不做判定）。
+
+        裁定的路径与体积声明是验收误判高发区：出现过引用根本不存在的路径当「造假证据」、
+        把内容工具对二进制文件返回的占位串长度当「实测文件大小」。这里只落盘存在性/体积/mtime，
+        供事后对账；判定门槛本身由验收提示词的证据纪律约束（见 `main/prompts/acceptance_execution.md`）。
+        """
+        cited: list[dict[str, Any]] = []
+        for item in list(result.evidence or []):
+            if str(getattr(item, 'kind', '') or '').strip().lower() != 'file':
+                continue
+            path_text = str(getattr(item, 'path', '') or '').strip()
+            if not path_text:
+                continue
+            entry: dict[str, Any] = {'path': path_text}
+            try:
+                info = Path(path_text).stat()
+            except OSError:
+                entry['exists'] = False
+            else:
+                entry['exists'] = True
+                entry['size_bytes'] = int(info.st_size)
+                entry['mtime'] = datetime.fromtimestamp(info.st_mtime).isoformat(timespec='seconds')
+            cited.append(entry)
+        if not cited:
+            return
+        record = {
+            'at': now_iso(),
+            'status': str(result.status or '').strip(),
+            'delivery_status': str(result.delivery_status or '').strip(),
+            'cited_files': cited,
+            'missing_count': sum(1 for item in cited if not item.get('exists')),
+        }
+
+        def _mutate(metadata: dict[str, Any]) -> dict[str, Any]:
+            history = list(metadata.get(_ACCEPTANCE_EVIDENCE_AUDIT_KEY) or [])
+            history.append(record)
+            metadata[_ACCEPTANCE_EVIDENCE_AUDIT_KEY] = history[-5:]
+            return metadata
+
+        self._log_service.update_node_metadata(acceptance.node_id, _mutate)
 
     def _allow_blocked_failure(
         self,
