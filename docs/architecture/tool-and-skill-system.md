@@ -189,6 +189,7 @@ promotion 与前门状态：
 
 - 超出内联闸门的工具结果统一外部化为 `artifact:` 内容引用，信封摘要对所有工具一视同仁（不按工具类别特殊化）：显式标注调用成败（`Tool call succeeded` / `Tool call failed`，成败由执行路径按 error-lane 判定后随投递元数据传入）、外置 ref、总行数与总字符数，要求用 `content_open(ref=...)` 读取完整输出，并附结果正文头部预览（6 行、≤800 字符）。信封不回显调用入参——入参是模型刚提交的内容，回显只挤占上下文并诱发「载荷过大导致调用失败」一类误读；嵌套信封的 canonical summary / origin ref 行保留。信封以 `content_ref` 形态进入上下文，重复外部化免疫（已是信封的结果原样透传）。
 - 二进制/图片内容目标另有一套展示契约：路径目标解不出 UTF-8 文本时，正文位置放占位串（`[二进制文件：…]` / `[图片文件：…]`），`content_describe` / `content_open` 结果随之带 `binary` / `content_display_replaced` 标记，`size_bytes` 是**磁盘真实字节数**，而 `line_count` / `char_count` 只描述占位串。读端不得用占位串统计推断文件的体积、类型或有效性——合法 PDF 与 34 字节空壳在文本通道里输出逐字相同；判定二进制交付物只能依据 `size_bytes` 与字节级证据。二进制目标上的 `content_search` 扫原始字节：结果带 `byte_level`、命中为 `byte_offset` + 上下文片段、`line_count` / `char_count` 归零，`%PDF` 一类签名可被实证，文本搜索的 `line` 语义对它们不成立。
+- 只读测量通道 `filesystem_stat`：`paths` 逐条返回存在性、`size_bytes`（磁盘真实字节数）、`mtime`，目录另给 `file_count` / `total_bytes` / 最大最小文件与有界条目清单；只做 stat/遍历，不写不删。它挂在 `filesystem` 家族的 `stat` 动作上，`allowed_roles` 含 `inspection`——与 `write` / `edit` / `delete` / `propose_patch` 等写动作的 inspection 拒绝互不影响，验收节点因此能测量「这批产物有几个、多大、哪些是本轮写的、真实文件名是什么」，而不必依赖内容通道的占位串统计或凭清单外推文件名。
 
 统一工具 Timeout 合同：
 

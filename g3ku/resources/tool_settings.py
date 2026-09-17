@@ -44,6 +44,12 @@ class ContentToolSettings(Base):
     restrict_to_workspace: bool = False
 
 
+class FilesystemStatToolSettings(Base):
+    # 只读测量工具：默认允许测量 workspace 之外的目标（交付物常落在桌面/输出目录），
+    # 需要收紧时置 true 把作用域限定在 workspace 内。
+    restrict_to_workspace: bool = False
+
+
 class MemoryRuntimeSettings(MemoryToolsConfig):
     pass
 

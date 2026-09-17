@@ -1,0 +1,53 @@
+schema_version: 1
+kind: tool
+name: filesystem_stat
+display_name: Filesystem Stat
+description: Read-only measurement of files and directories (existence, real byte size, mtime, bounded listings and size aggregates).
+tool_result_delivery_contract: runtime_managed
+protocol: mcp
+mcp:
+  transport: embedded
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem:
+    - workspace
+settings:
+  restrict_to_workspace: false
+parameters:
+  type: object
+  properties:
+    paths:
+      type: array
+      description: Paths to measure. Files return size/mtime; directories return bounded listings and aggregates (file count, total/min/max size).
+      items:
+        type: string
+        description: Absolute file or directory path.
+    max_entries:
+      type: integer
+      description: Max entries listed per directory (default 200, max 2000). Aggregates always cover the whole tree.
+      minimum: 1
+      maximum: 2000
+  required:
+    - paths
+governance:
+  family: filesystem
+  display_name: Filesystem
+  description: Write, edit, copy, move, delete, and propose patches for local files; filesystem_stat measures them read-only.
+  actions:
+    - id: stat
+      label: Measure Paths
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+        - execution
+        - inspection
+exposure:
+  agent: true
+  main_runtime: true
+toolskill:
+  enabled: true

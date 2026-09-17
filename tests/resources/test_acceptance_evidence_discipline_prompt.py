@@ -37,6 +37,13 @@ def test_acceptance_prompt_pins_binary_evidence_sources() -> None:
     assert "只描述占位串本身" in prompt
 
 
+def test_acceptance_prompt_names_read_only_measurement_tool() -> None:
+    prompt = _prompt()
+    # 命名具体工具，验收节点才知道除了内容通道还有一条能实测的只读通道。
+    assert "`filesystem_stat`" in prompt
+    assert "`file_count` / `total_bytes`" in prompt
+
+
 def test_acceptance_prompt_requires_authoritative_sample_names() -> None:
     prompt = _prompt()
     assert "必须取自权威清单" in prompt
