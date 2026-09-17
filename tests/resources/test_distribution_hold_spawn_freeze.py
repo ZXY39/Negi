@@ -856,3 +856,230 @@ def test_projection_entry_effective_status_prefers_bound_node() -> None:
     # 绑定不可解析：回退 entry 记账
     assert effective(svc, {"status": "error", "child_node_id": "gone"}) == "error"
     assert effective(svc, {"status": "error"}) == "error"
+
+
+# ---------------------------------------------------------------------------
+# 要点 5：未物化 spawn 批次不得被 hold 在物化前中止
+# （2026-09-18 task:d596a609bbb3：epoch 永久卡 barrier_draining 且静默）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inflight_spawn_review_defers_hold_until_materialized(
+    tmp_path: Path,
+    _fast_watchdog,
+) -> None:
+    """hold 在 spawn review 在飞时到达：批次先物化，再在安全相位冻结。
+
+    历史缺陷：看门狗 poll 在 review 内命中 hold → 取消在飞协程（CancelledError
+    不被 _review_spawn_batch 的 except Exception 吞掉）→ entries 停在 queued、
+    轮没有子节点；而屏障 drain 正等这些子节点物化，物化又只能由这个已被取消的
+    协程产出 → 互等死锁。本用例锁定：review 在飞期间的 poll 必须延后，
+    放行后批次照常物化，随后才冻结（轮仍可同 id 重放）。
+    """
+    review_gate = asyncio.Event()
+    review_entered = asyncio.Event()
+
+    async def _gated_review(kwargs):
+        review_entered.set()
+        await asyncio.wait_for(review_gate.wait(), timeout=15)
+        return _review_allow_response("call:review-1")
+
+    backend = _ScriptedBackend(
+        [
+            # 1) 根首轮：派生一个子节点
+            _spawn_response("call:spawn-1", goal="child goal", prompt="child prompt"),
+            # 2) spawn 治理审查：被 gate 挡住，制造「review 在飞」窗口
+            _gated_review,
+            # 3) 根的分发控制回合：逐子 skip，通知留在本地
+            _decision_skip_children,
+            # 4) 释放后子节点复活轮
+            _final_response("call:child-final-1", summary="child work done (resumed)"),
+            # 5) 根收尾轮（同 id 重放拿到子结果之后）
+            _final_response("call:root-final", summary="root done"),
+        ]
+    )
+    service = _build_service(tmp_path, backend)
+    try:
+        record = await service.create_task("review window notice", session_id="web:ceo-demo")
+        task_id = record.task_id
+        runner = asyncio.create_task(service.task_actor_service.run_task(task_id))
+        await asyncio.wait_for(review_entered.wait(), timeout=15)
+
+        # review 在飞时播种通知 → 屏障生效（快照期 root 在 blocked 内）
+        task = service.get_task(task_id)
+        assert task is not None
+        await service.task_append_notice(
+            task_ids=[task_id],
+            node_ids=[],
+            message="补充要求：统一渲染目录与输出路径",
+            session_id=task.session_id,
+        )
+
+        # 跨过多个 poll 周期（_fast_watchdog=0.2s）：批次必须仍在飞、未被中止
+        await asyncio.sleep(0.7)
+        assert not _entry_frozen(service, task_id, record.root_node_id), "物化前不得被 hold 冻结"
+        root_mid = service.store.get_node(record.root_node_id)
+        ops_mid = dict((root_mid.metadata or {}).get("spawn_operations") or {})
+        round_mid = dict(ops_mid.get("call:spawn-1") or {})
+        assert not round_mid.get("completed"), "review 未放行前轮不得被标记完成"
+
+        def _execution_children() -> list:
+            return [
+                item
+                for item in service.store.list_children(record.root_node_id)
+                if str(getattr(item, "node_kind", "")).strip().lower() == "execution"
+            ]
+
+        # 放行 review：批次照常物化出子节点（本修复的核心保证）
+        review_gate.set()
+        await _wait_until(lambda: bool(_execution_children()), timeout=15, message="child materialized under hold")
+        child_node = _execution_children()[0]
+
+        # 物化后：在安全相位冻结；轮未完成、entry 未被盖 error、绑定仍在
+        await _wait_until(
+            lambda: _entry_frozen(service, task_id, record.root_node_id),
+            timeout=15,
+            message="root frozen after materialization",
+        )
+        root_after = service.store.get_node(record.root_node_id)
+        ops_after = dict((root_after.metadata or {}).get("spawn_operations") or {})
+        round_after = dict(ops_after.get("call:spawn-1") or {})
+        entries_after = [dict(item) for item in list(round_after.get("entries") or []) if isinstance(item, dict)]
+        assert not round_after.get("completed")
+        assert entries_after and entries_after[0].get("child_node_id") == child_node.node_id
+        assert entries_after[0].get("status") != "error", "hold 取消不得盖 error 记账"
+
+        # 死锁被解开的地方：drain 的待物化条件已可满足
+        assert (
+            service.task_actor_service._barrier_materialize_pending_entries(
+                task_id=task_id,
+                barrier_node_ids=[record.root_node_id],
+            )
+            == []
+        )
+
+        # 驱动 epoch 到完成 → 释放 → 根同 id 重放、重挂原子节点、收尾
+        outcome = "idle"
+        for _ in range(16):
+            outcome = await service.task_actor_service._run_distribution_epoch(task_id)
+            if outcome in {"completed", "failed", "idle"}:
+                break
+            await asyncio.sleep(0.05)
+        assert outcome == "completed", f"epoch 不得卡在 barrier_draining，实际 {outcome}"
+        await asyncio.wait_for(runner, timeout=30)
+
+        root_final = service.store.get_node(record.root_node_id)
+        child_final = service.store.get_node(child_node.node_id)
+        assert str(root_final.status) == "success"
+        assert str(child_final.status) == "success"
+        assert len(_execution_children()) == 1, "不得重复派生子节点"
+        assert service.store.list_task_error_logs(task_id) == []
+    finally:
+        review_gate.set()
+        await service.close()
+
+
+def _stall_spawn_round(
+    service: MainRuntimeService,
+    *,
+    root,
+    round_id: str,
+    goal: str = "late child",
+) -> None:
+    spec = SpawnChildSpec(goal=goal, prompt=f"{goal} prompt", execution_policy={"mode": "focus"})
+    _set_spawn_operations(
+        service,
+        root_node_id=root.node_id,
+        payload={
+            round_id: {
+                "specs": [spec.model_dump(mode="json")],
+                "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+                "completed": False,
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_barrier_drain_kicks_stalled_spawn_round_parent(tmp_path: Path) -> None:
+    """drain 自愈：持有未物化轮、已被停摆的父节点会被踢起来完成物化。
+
+    不踢的话 drain 等的是「只有释放屏障才能产生」的结果（互等死锁）。
+    踢一次即记账（drain_kick_rounds），避免每秒重复 resume 同一个轮。
+    """
+    service = _build_service(tmp_path, _DummyChatBackend())
+    try:
+        record = await service.create_task("stalled spawn round", session_id="web:ceo-demo")
+        task_id = record.task_id
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        _stall_spawn_round(service, root=root, round_id="round-stalled")
+        # 停摆形态：帧保留重放入口，但没有存活 entry
+        service.log_service.update_frame(
+            task_id,
+            root.node_id,
+            lambda frame: {**frame, "phase": "waiting_children"},
+        )
+        dispatcher = service.task_actor_service._create_dispatcher(task_id)
+        service.task_actor_service._dispatchers[task_id] = dispatcher
+        kicks: list[str] = []
+
+        async def _record_resume(node_id: str) -> None:
+            kicks.append(str(node_id))
+
+        dispatcher.resume_node = _record_resume  # type: ignore[assignment]
+
+        await service.task_append_notice(
+            task_ids=[task_id],
+            node_ids=[],
+            message="收紧渲染目录约定",
+            session_id=record.session_id,
+        )
+        outcome = await service.task_actor_service._run_distribution_epoch(task_id)
+        assert outcome == "draining"
+        epoch = service.store.list_active_task_message_distribution_epochs(task_id)[0]
+        assert epoch.state == "barrier_draining"
+        assert root.node_id in list(epoch.payload.get("drain_pending_node_ids") or [])
+        assert kicks == [root.node_id], "停摆父节点必须被踢起"
+        assert epoch.payload.get("drain_kick_rounds") == [f"{root.node_id}::round-stalled"]
+
+        # 幂等：同轮不重复踢
+        await service.task_actor_service._run_distribution_epoch(task_id)
+        assert kicks == [root.node_id]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_barrier_drain_kick_requires_replay_intent(tmp_path: Path) -> None:
+    """无重放入口（帧里没有该轮）时不踢：重放不成立，踢了只会让模型发新轮。"""
+    service = _build_service(tmp_path, _DummyChatBackend())
+    try:
+        record = await service.create_task("no replay intent", session_id="web:ceo-demo")
+        task_id = record.task_id
+        root = service.get_node(record.root_node_id)
+        assert root is not None
+        _stall_spawn_round(service, root=root, round_id="round-noframe")
+        dispatcher = service.task_actor_service._create_dispatcher(task_id)
+        service.task_actor_service._dispatchers[task_id] = dispatcher
+        kicks: list[str] = []
+
+        async def _record_resume(node_id: str) -> None:
+            kicks.append(str(node_id))
+
+        dispatcher.resume_node = _record_resume  # type: ignore[assignment]
+
+        await service.task_append_notice(
+            task_ids=[task_id],
+            node_ids=[],
+            message="收紧渲染目录约定",
+            session_id=record.session_id,
+        )
+        outcome = await service.task_actor_service._run_distribution_epoch(task_id)
+        assert outcome == "draining"
+        assert kicks == []
+        epoch = service.store.list_active_task_message_distribution_epochs(task_id)[0]
+        assert epoch.payload.get("drain_kick_rounds") == []
+    finally:
+        await service.close()

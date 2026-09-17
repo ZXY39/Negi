@@ -31,6 +31,7 @@ from main.runtime.subtree_hold import (
     DISTRIBUTION_HOLD_STATES,
     INSPECTION_RESUME_MARKER,
     NOTICE_INTERRUPT_REASON,
+    spawn_entry_child_fully_materialized,
 )
 from main.types import KIND_ACCEPTANCE
 
@@ -1107,25 +1108,84 @@ class TaskActorService:
         entry: dict[str, Any],
     ) -> bool:
         child_node_id = str(entry.get('child_node_id') or '').strip()
-        if not child_node_id:
-            return False
-        child = self._store.get_node(child_node_id)
-        if child is None or str(child.task_id or '').strip() != str(task_id or '').strip():
-            return False
-        metadata = dict(child.metadata or {}) if isinstance(child.metadata, dict) else {}
-        if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
-            return False
-        if str(metadata.get('spawn_owner_parent_node_id') or '').strip() != str(parent_node_id or '').strip():
-            return False
-        if str(metadata.get('spawn_owner_round_id') or '').strip() != str(round_id or '').strip():
-            return False
-        try:
-            owner_entry_index = int(metadata.get('spawn_owner_entry_index'))
-        except (TypeError, ValueError):
-            return False
-        if owner_entry_index != int(entry_index):
-            return False
-        return bool(self._node_runner.node_is_in_live_distribution_tree(task_id=task_id, node_id=child_node_id))
+        child = self._store.get_node(child_node_id) if child_node_id else None
+        # 字段级判定与检查点侧共用单一真源（main.runtime.subtree_hold），避免漂移；
+        # 驱动器额外要求子节点仍在活动分发树内。
+        return spawn_entry_child_fully_materialized(
+            task_id=task_id,
+            parent_node_id=parent_node_id,
+            round_id=round_id,
+            entry_index=entry_index,
+            entry=entry,
+            child=child,
+            is_in_live_tree=lambda node_id: self._node_runner.node_is_in_live_distribution_tree(
+                task_id=task_id,
+                node_id=node_id,
+            ),
+        )
+
+    async def _kick_stalled_spawn_round_parents(
+        self,
+        *,
+        task_id: str,
+        entries: list[dict[str, Any]],
+        payload: dict[str, Any],
+    ) -> None:
+        """drain 自愈：把「持有未物化 spawn 轮、但已被屏障停摆」的父节点踢起来。
+
+        这类节点没有存活 entry（例如进程重启后、或它的协程早已被 hold 中止），
+        屏障的 drain 却在等它物化子节点——不踢就是永久互等。踢之前要求帧里
+        仍保留该轮的重放入口（``_parent_frame_intends_round_replay``，B4），
+        否则重放不成立、只会让模型发一轮新 spawn。
+
+        每个 (父节点, 轮) 只踢一次：账记在 epoch payload 的 ``drain_kick_rounds``，
+        避免每秒重复 resume 同一个未缓存 review 的轮。
+        """
+        dispatcher = self._dispatchers.get(str(task_id or '').strip())
+        if dispatcher is None:
+            return
+        kicked = [
+            str(item or '').strip()
+            for item in list(payload.get('drain_kick_rounds') or [])
+            if str(item or '').strip()
+        ]
+        for raw_item in list(entries or []):
+            item = dict(raw_item) if isinstance(raw_item, dict) else {}
+            parent_node_id = str(item.get('parent_node_id') or '').strip()
+            round_id = str(item.get('round_id') or '').strip()
+            key = f'{parent_node_id}::{round_id}'
+            if not parent_node_id or not round_id or key in kicked:
+                continue
+            entry = dispatcher._entries.get(parent_node_id)
+            if entry is not None and entry.task is not None and not entry.task.done():
+                continue  # 已有活执行器：它会自己把物化跑完
+            parent = self._store.get_node(parent_node_id)
+            if parent is None or self._node_operator_paused(parent):
+                continue
+            if str(getattr(parent, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+                continue
+            if not self._parent_frame_intends_round_replay(
+                task_id=task_id,
+                parent=parent,
+                round_id=round_id,
+            ):
+                continue
+            kicked.append(key)
+            logger.warning(
+                'barrier drain self-heal: kicking stalled spawn-round parent: task={} node={} round={}',
+                task_id,
+                parent_node_id,
+                round_id,
+            )
+            try:
+                await dispatcher.resume_node(parent_node_id)
+            except Exception:
+                logger.exception(
+                    'barrier drain self-heal: resume failed: task={} node={}',
+                    task_id,
+                    parent_node_id,
+                )
+        payload['drain_kick_rounds'] = kicked
 
     def _queue_root_distribution_notices(self, *, epoch, created_at: str) -> None:
         self._node_runner._queue_pending_root_distribution_notices(epoch=epoch, created_at=created_at)
@@ -1847,6 +1907,13 @@ class TaskActorService:
                 parent_node_id = str(item.get('parent_node_id') or '').strip()
                 if parent_node_id and parent_node_id not in drain_pending_node_ids:
                     drain_pending_node_ids.append(parent_node_id)
+            # 自愈：未物化批次的父节点若已被屏障停摆（无存活 entry），它自己不会再
+            # 跑，而物化只能由它自己的协程产出——干等就是互等死锁（要点 5）。
+            await self._kick_stalled_spawn_round_parents(
+                task_id=task_id,
+                entries=materialize_pending_entries,
+                payload=payload,
+            )
             payload['drain_pending_node_ids'] = list(drain_pending_node_ids)
             payload['materialize_pending_entries'] = [dict(item) for item in materialize_pending_entries]
             if drain_pending_node_ids:

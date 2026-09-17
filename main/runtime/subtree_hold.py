@@ -22,6 +22,14 @@ hold 判定是唯一的冻结真源，被三处检查点共用：
    脱同步，不冻结并经 ``on_stale_hold`` 告警；``failed`` 不在陈旧之列
    （按设计持续冻结等操作员恢复，见要点 1）。校验回调自身异常时保守维持
    hold（fail-safe）。
+5. 未物化 spawn 轮豁免：屏障 drain 会等「在飞 spawn 轮的子节点物化」
+   （``_barrier_materialize_pending_entries``），而物化只能由该父节点自己的
+   协程产出（``_materialize_spawn_batch_children`` / ``_run_child_pipeline``）。
+   若 hold 在这个协程跑到物化之前就把它中止，drain 就会等一个只有「释放屏障」
+   才能产生的结果——互等死锁（2026-09-18 task:d596a609bbb3 事故）。因此
+   ``spawn_round_has_unmaterialized_entries`` 命中的节点：检查点延后中止、
+   恢复优先级不拦其同 id 重放、driver 在 drain 期间把它踢起来收尾。
+   判据只放宽「何时停」，不放宽「停在哪」——物化一完成，豁免立即失效。
 """
 
 from __future__ import annotations
@@ -175,3 +183,99 @@ def resolve_subtree_hold_epoch_id(
         node = get_node(current_id)
         current_id = str(getattr(node, 'parent_node_id', '') or '').strip() if node is not None else ''
     return ''
+
+
+def spawn_entry_child_fully_materialized(
+    *,
+    task_id: str,
+    parent_node_id: str,
+    round_id: str,
+    entry_index: int,
+    entry: dict[str, Any],
+    child: Any,
+    is_in_live_tree: Callable[[str], bool] | None = None,
+) -> bool:
+    """spawn entry 是否已完整物化到「由本父节点本轮的该 entry 拥有」的子节点。
+
+    字段级判定（child 归属、``spawn_owner_kind='child'``、parent/round/entry_index
+    三项匹配）是单一真源，驱动器与检查点共用，避免两处判定漂移。
+    ``is_in_live_tree`` 为可选的活动分发树回调：驱动器传它做更严的判据；拿不到时
+    省略——省略只会让判定更宽松（更早认定「已物化」），即更早允许冻结，
+    与既有行为一致，不会引入「该冻却不冻」。
+    """
+    child_node_id = str(entry.get('child_node_id') or '').strip()
+    if not child_node_id or child is None:
+        return False
+    if str(getattr(child, 'task_id', '') or '').strip() != str(task_id or '').strip():
+        return False
+    metadata = dict(getattr(child, 'metadata', None) or {}) if isinstance(getattr(child, 'metadata', None), dict) else {}
+    if str(metadata.get('spawn_owner_kind') or '').strip().lower() != 'child':
+        return False
+    if str(metadata.get('spawn_owner_parent_node_id') or '').strip() != str(parent_node_id or '').strip():
+        return False
+    if str(metadata.get('spawn_owner_round_id') or '').strip() != str(round_id or '').strip():
+        return False
+    try:
+        owner_entry_index = int(metadata.get('spawn_owner_entry_index'))
+    except (TypeError, ValueError):
+        return False
+    if owner_entry_index != int(entry_index):
+        return False
+    if is_in_live_tree is not None:
+        try:
+            return bool(is_in_live_tree(child_node_id))
+        except Exception:
+            return False
+    return True
+
+
+def spawn_round_has_unmaterialized_entries(
+    *,
+    get_node: Callable[[str], Any],
+    task_id: str,
+    node: Any,
+    is_in_live_tree: Callable[[str], bool] | None = None,
+) -> bool:
+    """节点是否持有「未完成且仍有未物化 entry」的 spawn 轮。
+
+    判据与驱动器 drain 的 ``_barrier_materialize_pending_entries`` 同源：未完成轮里
+    存在 ``status ∈ {queued, running}``、未被 spawn review 拦下（``review_decision``
+    非 ``blocked``）、且未完整物化的 entry。被全部拦下的轮永远不会物化，因此不算
+    「待物化」——否则节点再也不会被冻结（要点 5）。
+    """
+    parent_node_id = str(getattr(node, 'node_id', '') or '').strip()
+    if not parent_node_id:
+        return False
+    metadata = dict(getattr(node, 'metadata', None) or {}) if isinstance(getattr(node, 'metadata', None), dict) else {}
+    operations = metadata.get('spawn_operations')
+    if not isinstance(operations, dict):
+        return False
+    for raw_round_id, raw_payload in operations.items():
+        if not isinstance(raw_payload, dict) or bool(raw_payload.get('completed')):
+            continue
+        round_id = str(raw_round_id or '').strip()
+        for fallback_index, raw_entry in enumerate(list(raw_payload.get('entries') or [])):
+            if not isinstance(raw_entry, dict):
+                continue
+            if str(raw_entry.get('review_decision') or '').strip().lower() == 'blocked':
+                continue
+            if str(raw_entry.get('status') or '').strip().lower() not in {'queued', 'running'}:
+                continue
+            child_node_id = str(raw_entry.get('child_node_id') or '').strip()
+            child = get_node(child_node_id) if child_node_id else None
+            try:
+                entry_index = int(raw_entry.get('index') or fallback_index)
+            except (TypeError, ValueError):
+                entry_index = fallback_index
+            if spawn_entry_child_fully_materialized(
+                task_id=task_id,
+                parent_node_id=parent_node_id,
+                round_id=round_id,
+                entry_index=entry_index,
+                entry=raw_entry,
+                child=child,
+                is_in_live_tree=is_in_live_tree,
+            ):
+                continue
+            return True
+    return False

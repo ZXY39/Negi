@@ -76,6 +76,7 @@ from main.runtime.subtree_hold import (
     make_epoch_state_lookup,
     make_stale_hold_logger,
     resolve_subtree_hold_epoch_id,
+    spawn_round_has_unmaterialized_entries,
 )
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
@@ -1756,8 +1757,7 @@ class ReActToolLoop:
         )
         return prepared_history
 
-    @staticmethod
-    def _distribution_priority_blocks_recovery(*, runtime_context: dict[str, Any], node) -> bool:
+    def _distribution_priority_blocks_recovery(self, *, runtime_context: dict[str, Any], node) -> bool:
         distribution = dict((runtime_context or {}).get('distribution_state') or {})
         # 兼容旧持久化 meta：task_wide_barrier 是 subtree_barrier 的历史名称
         # （根目标定向即原全局模式），两者语义一致。
@@ -1766,6 +1766,19 @@ class ReActToolLoop:
         normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
         if not normalized_node_id:
             return False
+        # 要点 5 豁免：持有未物化 spawn 轮的节点必须让它的同 id 重放跑完（走
+        # waiting_children / pending_tool 恢复），否则被拦下的父节点只会让模型
+        # 重发一轮 spawn（新 call id → 双轮/重复派生），而屏障 drain 正等着的
+        # 是原轮的子节点。判定不可用时维持既有行为（照常拦阻）。
+        try:
+            if spawn_round_has_unmaterialized_entries(
+                get_node=self._log_service._store.get_node,
+                task_id=str(getattr(node, 'task_id', '') or '').strip(),
+                node=node,
+            ):
+                return False
+        except Exception:
+            pass
         blocked_node_ids = {
             str(item or '').strip()
             for item in list(distribution.get('blocked_node_ids') or [])
@@ -4023,6 +4036,23 @@ class ReActToolLoop:
                 on_stale_hold=make_stale_hold_logger(logger.warning),
             )
             if hold_epoch_id:
+                # 要点 5 豁免：持有未物化 spawn 轮的节点不得在物化前被中止——
+                # 它的子节点只可能由它自己的协程产出，而屏障 drain 正等着那些
+                # 子节点（否则互等死锁，2026-09-18 task:d596a609bbb3 事故）。
+                # 只放宽「何时停」：物化一完成，谓词立刻为假，下个检查点照常冻结。
+                # 判定不可用时保守维持既有行为（照常冻结）。
+                if node is not None:
+                    deferred = False
+                    try:
+                        deferred = spawn_round_has_unmaterialized_entries(
+                            get_node=hold_store.get_node,
+                            task_id=task_id,
+                            node=node,
+                        )
+                    except Exception:
+                        deferred = False
+                    if deferred:
+                        return
                 raise DistributionHoldError(task_id, normalized_node_id, hold_epoch_id)
 
     def _abort_queued_tool_waits(self, task_id: str, exc: BaseException) -> None:
