@@ -7,21 +7,21 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import g3ku.config.model_manager as model_manager
 import g3ku.runtime.web_ceo_sessions as web_ceo_sessions
 from g3ku.config.loader import ensure_startup_config_ready
 from g3ku.content.navigation import _artifact_id_from_ref
-import g3ku.config.model_manager as model_manager
 from g3ku.llm_config.enums import ProbeStatus
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.resources import ResourceManager
+from g3ku.resources.loader import ResourceLoader
+from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.frontdoor._ceo_support import CeoFrontDoorSupport
-from g3ku.security import get_bootstrap_security_service
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import Session
 from main.api import admin_rest
@@ -30,8 +30,6 @@ from main.governance.resource_filter import list_effective_tool_names
 from main.models import TaskRecord
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService, TaskNodeDetailTool
-from g3ku.resources.loader import ResourceLoader
-from g3ku.resources.registry import ResourceRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -3482,6 +3480,29 @@ def test_models_endpoint_returns_role_iterations(tmp_path: Path, monkeypatch):
     assert payload['items'][0]['context_window_tokens'] == 128000
     assert payload['items'][0]['image_multimodal_enabled'] is False
 
+
+def test_model_role_endpoint_is_not_captured_by_generic_model_update(tmp_path: Path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_runtime_config(workspace)
+    monkeypatch.chdir(workspace)
+
+    async def _fake_refresh(*, force: bool = False, reason: str = 'runtime', force_memory_sync: bool = False) -> bool:
+        return True
+
+    monkeypatch.setattr(admin_rest, 'refresh_web_agent_runtime', _fake_refresh)
+
+    app = FastAPI()
+    app.include_router(admin_rest.router, prefix='/api')
+    client = TestClient(app)
+
+    response = client.put('/api/models/roles/ceo', json={'modelKeys': ['m']})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload['scope'] == 'ceo'
+    assert payload['roles']['model_keys'] == ['m']
+    assert payload['all_roles']['ceo'] == ['m']
 
 def test_model_retry_count_update_persists_and_refreshes_runtime(tmp_path: Path, monkeypatch):
     workspace = tmp_path / 'workspace'

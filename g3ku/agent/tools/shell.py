@@ -21,7 +21,6 @@ from main.governance.exec_tool_policy import (
     resolve_exec_execution_mode,
 )
 
-
 _STREAM_READ_CHUNK_SIZE = 4096
 _STREAM_CAPTURE_BYTE_LIMIT = 64 * 1024
 # 进程退出后，输出管道尾部排空的宽限上限（秒）。正常命令在进程退出瞬间即到 EOF、
@@ -43,6 +42,32 @@ _PYTHON_INLINE_SYNTAX_NOTE = (
     "filesystem_write 在任务级临时目录写一个 .py 文件，再用 exec 跑 `python <file>`，"
     "不要把整段脚本塞进 `-c`：嵌套引号、花括号、三引号、中文/Markdown 片段、长 JSON "
     "都极易把真正的 Python 错误混成 shell 解析错误。"
+)
+
+# exec runs as a child of the Web/worker runtime. A command that terminates
+# processes can therefore kill the host that is waiting for the command result
+# (for example: ``Get-Process python | Stop-Process -Force``). This is a host
+# integrity boundary, not an ordinary read-only/deny-pattern rule: it remains
+# active in ``full_access`` mode and cannot be bypassed by command approval.
+_HOST_PROCESS_TERMINATION_PATTERNS = (
+    r"\bstop-process(?:\.exe)?\b",
+    r"\bspps(?:\.exe)?\b",  # PowerShell alias for Stop-Process
+    r"\btaskkill(?:\.exe)?\b",
+    r"\bkillall(?:\.exe)?\b",
+    r"\bpkill(?:\.exe)?\b",
+    r"(?<![\w.-])kill(?:\.exe)?(?=\s|$)",
+    r"\bwmic(?:\.exe)?\s+process\b[^\r\n]*(?:\bdelete\b|\bcall\s+terminate\b)",
+    r"\binvoke-cimmethod\b[^\r\n]*(?:terminate|delete)",
+    r"\b(?:os|signal)\.(?:kill|killpg|pthread_kill)\s*\(",
+    r"\bterminateprocess(?:es)?\b",
+    r"\.\s*(?:kill|terminate)\s*\(",
+)
+
+_HOST_PROCESS_TERMINATION_ERROR = (
+    "Error: exec blocked host-process termination. The command could terminate "
+    "the G3KU Web/runtime or managed worker. Use read-only process inspection, "
+    "or let exec timeout/cancellation clean up the child process it started; do not "
+    "terminate arbitrary processes by PID/name (for example, all python processes)."
 )
 
 
@@ -148,10 +173,16 @@ class ExecTool(Tool):
             "to a file (`Start-Process -RedirectStandardOutput log` / `nohup cmd >log 2>&1 &`) and poll "
             "the file; a child left holding exec's output pipes is killed shortly after the call ends "
             "and its output is truncated. For non-trivial Python, write a temp .py with filesystem_write "
-            "and run `python file.py`; avoid inline `python -c` with heavy quoting."
+            "and run `python file.py`; avoid inline `python -c` with heavy quoting. "
+            "Host/runtime process termination is always blocked, including in full_access mode; "
+            "use process inspection and let exec timeout/cancellation clean up its own child."
         )
         if execution_mode == EXECUTION_MODE_FULL_ACCESS:
-            return "Execute shell commands without exec-side guardrails and return structured output." + shell_hint
+            return (
+                "Execute shell commands without exec-side guardrails (ordinary checks) and return structured output. "
+                "The host-process termination boundary still applies."
+                + shell_hint
+            )
         return "Execute shell commands with exec-side guardrails and return structured output." + shell_hint
 
     @property
@@ -170,12 +201,25 @@ class ExecTool(Tool):
             },
             "required": ["command"]
         }
-    
+
     async def execute(self, command: str, working_dir: str | None = None, **kwargs: Any) -> str:
         runtime = kwargs.pop("__g3ku_runtime", None) or {}
         effective_timeout = self._resolve_effective_timeout(kwargs.pop("timeout_seconds", None), runtime=runtime)
         cwd = self._resolve_cwd(working_dir, runtime=runtime)
         execution_mode = self._resolve_execution_mode()
+
+        # Full-access exec may skip ordinary exec guardrails, but it can never
+        # terminate the runtime host that owns this tool call.
+        host_process_error = self._enforce_host_process_safety(command)
+        if host_process_error:
+            return self._build_payload(
+                status="error",
+                exit_code=None,
+                stdout_text="",
+                stderr_text=host_process_error,
+                error=host_process_error,
+            )
+
         if execution_mode != EXECUTION_MODE_FULL_ACCESS:
             # 路径监禁层：temp/系统路径策略与工作区边界，永不被白名单或审批豁免。
             policy_error = self._enforce_command_path_policy(command, cwd, runtime=runtime)
@@ -407,6 +451,23 @@ class ExecTool(Tool):
             family=family,
             settings_payload={'execution_mode': self.execution_mode_default},
         )
+
+    @staticmethod
+    def _enforce_host_process_safety(command: str) -> str | None:
+        """Block common shell forms that can terminate the runtime host.
+
+        This boundary is deliberately independent of ``execution_mode`` and
+        operator approval. It covers common PowerShell, Windows, POSIX, and
+        Python process-termination spellings. It is not a general OS sandbox:
+        arbitrary native code still requires process/container isolation.
+        """
+        normalized = str(command or "").strip().lower()
+        if not normalized:
+            return None
+        for pattern in _HOST_PROCESS_TERMINATION_PATTERNS:
+            if re.search(pattern, normalized):
+                return _HOST_PROCESS_TERMINATION_ERROR
+        return None
 
     def _enforce_read_only_command(self, command: str) -> str | None:
         normalized = str(command or "").strip()

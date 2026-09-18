@@ -69,6 +69,34 @@ async def test_exec_tool_runs_pwd_on_windows() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        'Get-Process python | Stop-Process -Force',
+        'taskkill /F /IM python.exe',
+        'Get-Process python | Spps -Force',
+        'python -c "import os; os.killpg(123, 9)"',
+        'pkill -f g3ku',
+        'python -c "import os; os.kill(123, 9)"',
+    ],
+)
+async def test_exec_tool_blocks_host_process_termination_even_in_full_access(command: str) -> None:
+    tool = ExecTool(execution_mode_default='full_access')
+    payload = json.loads(await tool.execute(command=command, __g3ku_runtime={'session_key': 'web:shared'}))
+
+    assert payload['status'] == 'error'
+    assert payload['exit_code'] is None
+    assert 'host-process termination' in payload['error']
+
+
+def test_exec_tool_host_process_safety_allows_read_only_process_inspection() -> None:
+    tool = ExecTool()
+
+    assert tool._enforce_host_process_safety('Get-Process python | Select-Object Id,Path') is None
+    assert tool._enforce_host_process_safety('Get-Process | Where-Object {$_.Name -like "python*"}') is None
+
+
+@pytest.mark.asyncio
 async def test_exec_tool_safety_guard_enabled_by_default() -> None:
     # 默认开启破坏性命令黑名单：命中且无审批服务时直接拒绝（保持旧错误文本）。
     tool = ExecTool()

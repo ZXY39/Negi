@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import errno
 import json
 import os
 import re
@@ -1249,6 +1248,27 @@ async def update_model_roles_bulk(payload: dict = Body(...)):
     }
 
 
+@router.put('/models/roles/{scope}')
+async def update_model_roles(scope: str, payload: dict = Body(...)):
+    manager = ModelManager.load()
+    try:
+        update_kwargs = _scope_route_update_kwargs(payload)
+        roles = manager.update_scope_route(
+            scope,
+            **update_kwargs,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _refresh_runtime('admin_model_roles')
+    return {
+        'ok': True,
+        'scope': scope,
+        'roles': roles,
+        'all_roles': _model_roles(manager),
+        'role_iterations': _model_role_iterations(manager),
+        'role_concurrency': _model_role_concurrency(manager),
+    }
+
 @router.put('/models/{model_key:path}')
 async def update_model(model_key: str, payload: dict = Body(...)):
     manager = ModelManager.load()
@@ -1331,28 +1351,6 @@ async def delete_model(model_key: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _refresh_runtime('admin_model_delete')
     return {'ok': True, 'item': item}
-
-
-@router.put('/models/roles/{scope}')
-async def update_model_roles(scope: str, payload: dict = Body(...)):
-    manager = ModelManager.load()
-    try:
-        update_kwargs = _scope_route_update_kwargs(payload)
-        roles = manager.update_scope_route(
-            scope,
-            **update_kwargs,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await _refresh_runtime('admin_model_roles')
-    return {
-        'ok': True,
-        'scope': scope,
-        'roles': roles,
-        'all_roles': _model_roles(manager),
-        'role_iterations': _model_role_iterations(manager),
-        'role_concurrency': _model_role_concurrency(manager),
-    }
 
 
 @router.get('/llm/templates')

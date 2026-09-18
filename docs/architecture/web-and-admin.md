@@ -101,6 +101,11 @@ The left rail carries a `日志审计` page: a read-only, two-panel surface back
 
 The top-level `模型配置` page manages `llm-config` provider records and model bindings. Config source-of-truth, binding resolution, and secret handling are owned by `config-and-models.md`「llm_config 子系统」; this section covers the admin surface and the add/edit model workflow.
 
+### Model-Role Route Specificity
+
+- The browser's session brain-chain reorder action and the model-configuration page both persist role chains through the role-specific endpoint `PUT /api/models/roles/{scope}` (for example, `scope=ceo`).
+- In `main/api/admin_rest.py`, register that route before the generic `PUT /api/models/{model_key:path}` binding-update route. Starlette matches routes in declaration order; if the generic path comes first, `roles/ceo` is treated as a model key and the binding facade returns `Unknown model key: roles/ceo` instead of updating the CEO chain.
+- When debugging a failed chain save, inspect the browser request URL first, then confirm the route declaration order before changing model-key validation or frontend drag payloads.
 ### Frontend Responsibilities
 
 - The add/edit model modal keeps one provider-config JSON draft as its source of truth. Dedicated `请求地址` (`base_url`) and `Apikey` inputs stay two-way synced with that JSON draft. There is no manual binding-key (`模型ID`) field in create mode: the binding key is derived by the backend from the draft's `default_model`, so picking the model is what establishes its identity. Create mode opens with a required `配置名称` input (placeholder `请输入配置名称`) in place of the modal title; the name must not duplicate an existing config name (case-insensitive) and is saved into the binding's `name` field (see `config-and-models.md`「模型系统不是只靠 config.json」for the display-title priority).

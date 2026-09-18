@@ -221,6 +221,14 @@ Provider retry troubleshooting note:
 
 任务终态仅由根节点 + 最终验收推导，终态流转本身不强制收尾残留节点（见 `runtime-overview.md`「Node-Level Pause and Recovery」）。真正“不会再被驱动”的残留节点由 worker 启动自愈清理：启动引导对每个终态任务调用 `log_service.sweep_residual_nodes`，把仍 `in_progress` 的节点置为 `failed`，`failure_reason` 带 `task_terminal_cleanup` 前缀并附产物定位（`execution_trace_ref` / `result_payload_ref`），只改状态、不删转录/产物，并发布 node patch 事件。因此终端里“重启后残留节点自动落终态”是预期行为，不是数据丢失；进行中任务不参与清扫。
 
+### 任务执行了全局进程清理 / Web 与 worker 同时退出
+
+如果任务执行了按进程名或宽泛 PID 范围清理的命令（例如 `Get-Process python | Stop-Process`、`taskkill /IM python.exe`、`pkill`），Web 主进程和托管 worker 可能被一起终止；这种退出没有正常 shutdown 日志，任务通常停在 `waiting_tool_results` 或被标记为异常停止。先看任务 artifact 中最后一个 `exec` 调用的 `arguments_text`，再对照 `.g3ku/logs/console.log`、`.g3ku/main-runtime/manual-web-run.log` 与 `.g3ku/main-runtime/managed-worker.log` 的最后时间戳；若三者在同一时刻截断且没有 graceful-exit 记录，优先判定为外部/任务侧强杀，不要先归因于模型或数据库。
+
+当前 `exec` 在执行模式、白名单与审批判定之前增加宿主进程保护：常见 `Stop-Process` / `Spps` / `taskkill` / `pkill` / `killall` / `kill` / WMI-CIM terminate-delete / Python `os.kill` 等命令直接返回 `host-process termination` 错误；`full_access` 也不能绕过，白名单和操作者审批也不能放行。只读进程检查仍允许。保护是命令形态拦截，不是完整 OS 隔离；如果必须运行不可信的任意 native code 或外部二进制，仍应把任务放入独立 worker/container/低权限账户，并避免按进程名清理。
+
+恢复后重点确认：托管 worker 看门狗是否重新拉起 worker、`worker_leases` 是否清掉陈旧租约、任务是否出现 `metadata.recovery_notice`。如果是误杀宿主后的遗留任务，不要用全局 `python` 清理；只使用任务级 pause/cancel，或由 `exec` 超时/取消路径清理该次调用自己启动的子进程树。
+
 ### 重启后任务未自动恢复 / 出现“异常停止”toast
 
 先分清这次退出是优雅暂停还是异常中断：
