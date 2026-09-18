@@ -34,7 +34,6 @@ from g3ku.providers.fallback import (
     normalized_retry_count,
     response_requires_retry,
     response_requires_fallback,
-    retryable_chain_config_changed_error,
     sanitize_terminal_model_error,
     should_fallback_model_error,
     wait_for_model_attempt,
@@ -50,6 +49,11 @@ from main.runtime.node_turn_controller import NodeTurnLease
 _MISSING = object()
 # 前端折叠态只做视觉截断、点击展开需要全文，因此这里仅做防超大 payload 的宽上限。
 _MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT = 4096
+# 运行途中改写模型链（`model_config` 工具 / 管理面保存）会让 runtime config
+# revision 前进。链重试循环在退避边界检测到 revision 变化时，重新解析当前角色链
+# 并按新链重启重试，而不是抛错中止回合。此上限只兜底"链反复变化 + 一直不成功"的
+# 病态抖动，正常一次改链只消耗一次。
+_MAX_CHAIN_CHANGE_RESTARTS = 12
 
 
 def _model_retry_status_error_text(value: Any) -> str:
@@ -785,6 +789,9 @@ class ConfigChatBackend:
         suppress_next_request_retry_emission = False
         # 已耗尽预算/已试过的模型 ref：模型前进边界的链刷新后据此跳过，不回头重试。
         tried_model_refs: set[str] = set()
+        # 链变更重启次数：链在重试途中被改写时按新链重启，此计数跨重启累计，
+        # 只兜底病态抖动，不随单模型轮预算重置。
+        chain_restart_count = 0
 
         async def _emit_model_retry_status(status: dict[str, Any]) -> None:
             nonlocal retry_status_emitted
@@ -869,6 +876,7 @@ class ConfigChatBackend:
                 model_last_response: LLMResponse | None = None
                 model_last_failure_reason: Any = None
                 advance_to_next_model = False
+                restart_with_refreshed_chain = False
                 while True:  # 本模型轮循环：一轮 = 完整轮过该模型所有 key
                     round_retryable_failed = False
                     # 单轮 = 每个 key 各试一次（retry_count=0 → 单趟 key 遍历）；
@@ -1031,7 +1039,32 @@ class ConfigChatBackend:
                     rounds_used += 1
                     if round_retryable_failed and rounds_used < budget_rounds:
                         if current_runtime_config_revision() != start_revision:
-                            raise retryable_chain_config_changed_error() from model_last_error
+                            # 链在重试途中被改写：重新解析当前角色链并按新链重启重试，
+                            # 而不是抛错中止回合。只有真的解析出不同链（且未超过病态
+                            # 抖动上限）才重启；否则只刷新 revision 基线并继续既有
+                            # 重试账本，避免在同一 revision 上空转。
+                            refreshed_refs = _resolved_model_refs()
+                            if (
+                                refreshed_refs
+                                and refreshed_refs != refs
+                                and chain_restart_count < _MAX_CHAIN_CHANGE_RESTARTS
+                            ):
+                                chain_restart_count += 1
+                                logger.warning(
+                                    "Model chain changed during retry; restarting chain {} -> {} (restart {}/{})",
+                                    ", ".join(refs),
+                                    ", ".join(refreshed_refs),
+                                    chain_restart_count,
+                                    _MAX_CHAIN_CHANGE_RESTARTS,
+                                )
+                                refs = list(refreshed_refs)
+                                start_revision = current_runtime_config_revision()
+                                # 新链等价于新的一轮预算账本：清掉已试集合，让新链里
+                                # 之前被跳过的模型重新获得机会。
+                                tried_model_refs.clear()
+                                restart_with_refreshed_chain = True
+                                break
+                            start_revision = current_runtime_config_revision()
                         delay_seconds = model_retry_backoff_seconds(rounds_used)
                         logger.warning(
                             "Retryable model failure for {} (round {}/{}); retrying in {:.1f}s: {}",
@@ -1062,6 +1095,11 @@ class ConfigChatBackend:
                         await asyncio.sleep(delay_seconds)
                         continue  # 同模型重跑一轮
                     break  # 预算耗尽或本轮无可重试失败 → 本模型耗尽
+                if restart_with_refreshed_chain:
+                    # 链在重试途中被改写：已按新链更新 refs 与已试集合，回到外层从
+                    # 新链链首重新评估。不记成"跨模型 fallback"。
+                    model_index = 0
+                    continue
                 # 本模型耗尽：在模型前进边界活刷新链（运行中新增的 fallback 模型
                 # 在此可见），跳过已试模型后决定前进还是落终态。
                 model_index += 1

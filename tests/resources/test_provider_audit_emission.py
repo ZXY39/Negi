@@ -66,13 +66,6 @@ def test_chain_exhaustion_unconfigured_creates_nothing(tmp_path: Path, monkeypat
     assert not (tmp_path / ".g3ku").exists()
 
 
-def test_config_changed_error_emits_nothing(sink: Path) -> None:
-    # 瞬态配置修订信号不进审计流
-    error = fallback.retryable_chain_config_changed_error()
-    assert error.config_revision_changed is True
-    assert _lines(sink) == []
-
-
 def test_all_raise_sites_pass_model_chain() -> None:
     fallback_src = _source("g3ku/providers/fallback.py")
     chat_backend_src = _source("main/runtime/chat_backend.py")

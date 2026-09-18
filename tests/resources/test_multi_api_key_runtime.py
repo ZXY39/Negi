@@ -559,9 +559,20 @@ async def test_config_chat_backend_honors_per_model_retry_round_budgets(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_config_chat_backend_aborts_retry_loop_when_runtime_config_revision_changes(monkeypatch) -> None:
+async def test_config_chat_backend_restarts_with_refreshed_chain_when_runtime_config_revision_changes(monkeypatch) -> None:
+    """链在重试途中被改写：按新链重启重试，而不是抛错中止。
+
+    新链把可用模型换到链首：只有真的按新链重启，才会在 primary 的第二个轮预算
+    （共 10 轮）远未用尽时就落到 secondary。守卫在"一轮轮过所有 key"之后判定，
+    因此新链生效前必然还会打出那一轮的首发请求——断言里体现为第二次 primary。
+    """
     calls: list[str] = []
-    revisions = iter([5, 6])
+    # 首次快照 5；第 1 轮退避边界仍是 5（不重启）；第 2 轮边界前进到 6 → 触发按新链重启。
+    revision_reads: list[int] = []
+    providers = {
+        "primary": _AlwaysRetryableChainProvider("primary", calls),
+        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=1),
+    }
 
     def _builder(config, model_key, *, api_key_index=None):
         _ = config, api_key_index
@@ -569,34 +580,49 @@ async def test_config_chat_backend_aborts_retry_loop_when_runtime_config_revisio
             provider_ref=str(model_key),
             provider_id="custom",
             model_id=f"{model_key}-model",
-            provider=_AlwaysRetryableChainProvider(str(model_key), calls),
+            provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
             retry_count=0,
             api_key_count=1,
         )
 
+    resolver_calls: list[int] = []
+
+    def _resolver():
+        resolver_calls.append(1)
+        # 首次解析仍是单模型链；revision 变化后的重启解析给出新链（可用模型在链首）。
+        return ["primary"] if len(resolver_calls) <= 1 else ["secondary", "primary"]
+
+    def _revision() -> int:
+        revision_reads.append(1)
+        return 5 if len(revision_reads) <= 2 else 6
+
     monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
-    monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", lambda: next(revisions, 6))
+    monkeypatch.setattr(chat_backend_module, "current_runtime_config_revision", _revision)
     monkeypatch.setattr(chat_backend_module, "build_provider_from_model_key", _builder)
 
     backend = chat_backend_module.ConfigChatBackend(config=SimpleNamespace())
+    response = await backend.chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=["primary"],
+        model_refs_resolver=_resolver,
+    )
 
-    with pytest.raises(fallback_module.ModelProviderExhaustedError) as exc_info:
-        await backend.chat(
-            messages=[{"role": "user", "content": "demo"}],
-            tools=None,
-            model_refs=["primary"],
-        )
-
-    assert exc_info.value.retryable is True
-    assert exc_info.value.config_revision_changed is True
-    assert calls == ["primary"]
+    # 不再抛 ModelProviderExhaustedError：按新链重启后落到链首的 secondary 并成功。
+    assert response.content == "ok"
+    assert calls == ["primary", "primary", "secondary"]
 
 
 @pytest.mark.asyncio
-async def test_fallback_provider_aborts_retry_loop_when_runtime_config_revision_changes(monkeypatch) -> None:
+async def test_fallback_provider_restarts_with_refreshed_chain_when_runtime_config_revision_changes(monkeypatch) -> None:
+    """同一契约的前门 FallbackProvider 侧：revision 变化按新角色链重启重试。"""
     calls: list[str] = []
-    revisions = iter([5, 6])
+    revision_reads: list[int] = []
+    providers = {
+        "primary": _AlwaysRetryableChainProvider("primary", calls),
+        "secondary": _RetryableChainThenSuccessProvider("secondary", calls, succeed_on_call=1),
+    }
 
     def _builder(config, model_key, *, api_key_index=None):
         _ = config, api_key_index
@@ -604,28 +630,35 @@ async def test_fallback_provider_aborts_retry_loop_when_runtime_config_revision_
             provider_ref=str(model_key),
             provider_id="custom",
             model_id=f"{model_key}-model",
-            provider=_AlwaysRetryableChainProvider(str(model_key), calls),
+            provider=providers[str(model_key)],
             retry_on=["network", "429", "502"],
             retry_count=0,
             api_key_count=1,
         )
 
+    config = SimpleNamespace(get_role_model_keys=lambda role: ["secondary", "primary"])
+
+    def _revision() -> int:
+        revision_reads.append(1)
+        return 5 if len(revision_reads) <= 2 else 6
+
     monkeypatch.setattr(fallback_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
-    monkeypatch.setattr(fallback_module, "current_runtime_config_revision", lambda: next(revisions, 6))
+    monkeypatch.setattr(fallback_module, "current_runtime_config_revision", _revision)
     monkeypatch.setattr("g3ku.providers.provider_factory.build_provider_from_model_key", _builder)
 
     provider = fallback_module.FallbackProvider(
-        config=SimpleNamespace(),
+        config=config,
         model_chain=["primary"],
         default_model_ref="primary",
+        role="ceo",
     )
 
-    with pytest.raises(fallback_module.ModelProviderExhaustedError) as exc_info:
-        await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
+    response = await provider.chat(messages=[{"role": "user", "content": "demo"}], model="primary")
 
-    assert exc_info.value.retryable is True
-    assert exc_info.value.config_revision_changed is True
-    assert calls == ["primary"]
+    # 不再抛 ModelProviderExhaustedError：按新链重启后落到链首的 secondary 并成功。
+    # 第二次 primary 是"守卫在整轮之后判定"导致的该轮首发，见上一个测试的说明。
+    assert response.content == "ok"
+    assert calls == ["primary", "primary", "secondary"]
 
 
 @pytest.mark.asyncio

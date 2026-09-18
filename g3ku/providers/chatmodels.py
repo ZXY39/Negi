@@ -31,7 +31,12 @@ def build_chat_model(
         target_label = f"role '{role_name}'" if role_name else f"model_key '{direct_model_key}'"
         raise ValueError(f"No model configured for {target_label}.")
 
-    provider = FallbackProvider(config=config, model_chain=chain or [default_key], default_model_ref=default_key)
+    provider = FallbackProvider(
+        config=config,
+        model_chain=chain or [default_key],
+        default_model_ref=default_key,
+        role=role_name,
+    )
     return G3kuChatModelAdapter(
         chat_backend=provider,
         default_model=default_key,

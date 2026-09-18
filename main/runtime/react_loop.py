@@ -764,10 +764,10 @@ class ReActToolLoop:
                     except Exception as exc:
                         if not self._is_provider_chain_exhausted_error(exc):
                             raise
-                        if (
-                            bool(getattr(exc, 'config_revision_changed', False))
-                            or self._refresh_runtime_config_for_retry_invalidation()
-                        ):
+                        # 闭包安全：except 作用域结束后 exc 会被删除，而 update_frame 的
+                        # 回调在其后才执行，因此先把文本落到独立局部变量里再引用。
+                        last_provider_error_text = str(exc)
+                        if self._refresh_runtime_config_for_retry_invalidation():
                             self._log_service.update_frame(
                                 task.task_id,
                                 node.node_id,
@@ -784,7 +784,7 @@ class ReActToolLoop:
                             exhausted_message = (
                                 f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
                                 f'Automatic retries exhausted after {provider_retry_count} attempts. '
-                                f'Last error: {exc}'
+                                f'Last error: {last_provider_error_text}'
                             )
                             self._log_service.update_frame(
                                 task.task_id,
@@ -797,7 +797,7 @@ class ReActToolLoop:
                             )
                             return self._provider_retry_failure(
                                 attempt_count=provider_retry_count,
-                                error_text=str(exc),
+                                error_text=last_provider_error_text,
                             )
                         delay_seconds = self._provider_retry_delay_seconds(provider_retry_count)
                         self._log_service.update_frame(
@@ -809,7 +809,7 @@ class ReActToolLoop:
                                     f'{PUBLIC_PROVIDER_FAILURE_MESSAGE} '
                                     f'Retrying automatically in {delay_seconds:.1f}s '
                                     f'(attempt {provider_retry_count}). '
-                                    f'Last error: {exc}'
+                                    f'Last error: {last_provider_error_text}'
                                 ),
                             },
                             publish_snapshot=True,

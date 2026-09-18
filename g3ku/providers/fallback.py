@@ -43,6 +43,11 @@ RETRY_BACKOFF_JITTER_RATIO = 0.25
 # 预算是唯一权威上限（请求耗时另由 DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS
 # 单次约束），不存在无限重试循环。
 DEFAULT_RETRYABLE_MODEL_ROUNDS = 10
+# 运行途中改写模型链（`model_config` 工具 / 管理面保存）会让 runtime config
+# revision 前进。链重试循环在退避边界检测到 revision 变化时，按新链重启重试而
+# 不是报错中止；此上限只兜底"链反复变化 + 一直不可重试成功"的病态抖动，正常一次
+# 改链只消耗一次。
+DEFAULT_MAX_CHAIN_CHANGE_RESTARTS = 12
 _INTERNAL_RUNTIME_ERROR_TOKENS = (
     "sqlite",
     "database",
@@ -61,17 +66,12 @@ class ModelProviderExhaustedError(RuntimeError):
         raw_message: str = "",
         retryable: bool = False,
         message: str = "",
-        config_revision_changed: bool = False,
     ) -> None:
         # Surface the original provider error untouched; fall back to the
         # public message only when no raw error text is available.
         super().__init__(str(message or "").strip() or PUBLIC_PROVIDER_FAILURE_MESSAGE)
         self.raw_message = str(raw_message or "")
         self.retryable = bool(retryable)
-        # Set when the chain retry loop aborted because the runtime config
-        # revision changed mid-retry, so callers should rebuild/restart with
-        # the refreshed model chain instead of counting a normal retry attempt.
-        self.config_revision_changed = bool(config_revision_changed)
 
 
 class ModelProviderResponseError(RuntimeError):
@@ -440,17 +440,6 @@ def current_runtime_config_revision() -> int:
         return 0
 
 
-def retryable_chain_config_changed_error(reason: str = "") -> ModelProviderExhaustedError:
-    """Retryable exhaustion raised when the runtime config revision changed mid-retry."""
-    message = str(reason or "").strip() or "runtime config revision changed during model chain retry"
-    return ModelProviderExhaustedError(
-        raw_message=message,
-        message=message,
-        retryable=True,
-        config_revision_changed=True,
-    )
-
-
 def _build_provider_target_compat(build_provider_from_model_key, config: Config, model_key: str, *, api_key_index: int | None = None):
     if api_key_index is None:
         return build_provider_from_model_key(config, model_key)
@@ -479,11 +468,30 @@ def _log_model_chain_retry(*, model_ref: str, reason: Any) -> None:
 class FallbackProvider(LLMProvider):
     """LLMProvider wrapper that retries through an ordered model chain."""
 
-    def __init__(self, *, config: Config, model_chain: list[str], default_model_ref: str):
+    def __init__(
+        self,
+        *,
+        config: Config,
+        model_chain: list[str],
+        default_model_ref: str,
+        role: str = "",
+    ):
         super().__init__(api_key=None, api_base=None)
         self._config = config
         self._model_chain = [str(item or "").strip() for item in model_chain if str(item or "").strip()]
         self._default_model_ref = str(default_model_ref or "").strip()
+        # 角色名（可选）：链重试途中配置 revision 变化时据此重新解析当前角色链。
+        self._role = str(role or "").strip()
+
+    def _resolve_current_chain(self) -> list[str]:
+        """Best-effort re-read of the live role chain after a config revision change."""
+        if not self._role:
+            return []
+        try:
+            resolved = self._config.get_role_model_keys(self._role)
+        except Exception:
+            return []
+        return [str(item or "").strip() for item in list(resolved or []) if str(item or "").strip()]
 
     async def chat(
         self,
@@ -509,6 +517,7 @@ class FallbackProvider(LLMProvider):
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
         start_revision = current_runtime_config_revision()
+        chain_restart_count = 0
         model_index = 0
         while model_index < len(chain):
             model_key = chain[model_index]
@@ -580,6 +589,7 @@ class FallbackProvider(LLMProvider):
             model_last_response: LLMResponse | None = None
             model_last_failure_reason: Any = None
             advance_to_next_model = False
+            restart_with_refreshed_chain = False
             while True:  # 本模型的轮循环
                 round_retryable_failed = False
                 # 单轮 = 每个 key 各试一次（retry_count=0 → 单趟 key 遍历）。
@@ -661,7 +671,25 @@ class FallbackProvider(LLMProvider):
                 rounds_used += 1
                 if round_retryable_failed and rounds_used < budget_rounds:
                     if current_runtime_config_revision() != start_revision:
-                        raise retryable_chain_config_changed_error() from model_last_error
+                        # 链在重试途中被改写：按新链重启重试，而不是抛错中止回合。
+                        # 只有真的解析出新链（且未超过病态抖动上限）才重启；否则只
+                        # 刷新 revision 基线并继续既有重试账本，避免空转。
+                        refreshed_chain = self._resolve_current_chain()
+                        if refreshed_chain and refreshed_chain != chain and chain_restart_count < DEFAULT_MAX_CHAIN_CHANGE_RESTARTS:
+                            chain_restart_count += 1
+                            logger.warning(
+                                "Model chain changed during retry for {}; restarting chain {} -> {} (restart {}/{})",
+                                model_key,
+                                ", ".join(chain),
+                                ", ".join(refreshed_chain),
+                                chain_restart_count,
+                                DEFAULT_MAX_CHAIN_CHANGE_RESTARTS,
+                            )
+                            chain = list(refreshed_chain)
+                            start_revision = current_runtime_config_revision()
+                            restart_with_refreshed_chain = True
+                            break
+                        start_revision = current_runtime_config_revision()
                     delay_seconds = model_retry_backoff_seconds(rounds_used)
                     reason_text = str(model_last_failure_reason or "")
                     logger.warning(
@@ -678,6 +706,11 @@ class FallbackProvider(LLMProvider):
                     continue  # 同模型重跑一轮
                 break  # 预算耗尽或本轮无可重试失败 → 本模型耗尽
 
+            if restart_with_refreshed_chain:
+                # 链在重试途中被改写：已按新链更新 chain，回到外层从新链链首重新评估。
+                # 不记成"跨模型 fallback"。
+                model_index = 0
+                continue
             # 本模型耗尽：非链尾前进到下一模型，链尾落终态。
             if model_index < len(chain) - 1:
                 logger.warning(
