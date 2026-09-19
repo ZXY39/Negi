@@ -91,6 +91,9 @@ _BLOCKED_VERIFICATION_ONLY_KEY = 'blocked_verification_only'
 _BLOCKED_VERIFICATION_LOG_KEY = 'blocked_verification_log'
 _ACCEPTANCE_EVIDENCE_AUDIT_KEY = 'acceptance_evidence_audit'
 _REJECTION_HISTORY_KEY = 'rejection_history'
+# 交给验收节点的交付正文一律只给指针 + 有界摘要：验收节点按 ref 复核当前提交，
+# 而不是靠上下文里堆着的历次全文。
+_ACCEPTANCE_SUMMARY_CHARS = 2000
 _BLOCKED_VERIFICATION_FALLBACK_PROMPT = (
     '核验被检验执行节点提交的 failed+blocked 阻塞声明是否成立：'
     '阻塞成立返回 success 并附证据；阻塞不成立返回 failed+final，'
@@ -434,7 +437,7 @@ class NodeRunner:
         if task is None or node is None:
             raise ValueError(f'missing task or node: {task_id} / {node_id}')
         if node.node_kind == KIND_ACCEPTANCE:
-            node = self._refresh_acceptance_node_prompt(task=task, node=node)
+            node = self._refresh_acceptance_node_metadata(task=task, node=node)
         if node.status in {STATUS_SUCCESS, STATUS_FAILED}:
             return self._result_from_record(node)
         # Cancellation has priority over a node pause so a canceled task cannot
@@ -1820,7 +1823,11 @@ class NodeRunner:
             epoch_id='',
             source_node_id=node.node_id,
             target_node_id=acceptance.node_id,
-            message=f"新的被检验节点输出如下，请继续在当前验收上下文中核验：{str(result.answer or '').strip()}",
+            message=self._acceptance_handoff_message(
+                node=node,
+                result=result,
+                result_ref=result_ref,
+            ),
         )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
         return NodeFinalResult(
@@ -1912,7 +1919,7 @@ class NodeRunner:
                     status=ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
                 )
             acceptance = self._reset_acceptance_for_blocked_verification(task=task, acceptance=acceptance)
-            acceptance = self._refresh_acceptance_node_prompt(task=task, node=acceptance)
+            acceptance = self._refresh_acceptance_node_metadata(task=task, node=acceptance)
             self._persist_node_notification_direct(
                 task_id=task_id,
                 epoch_id='',
@@ -2068,6 +2075,33 @@ class NodeRunner:
         self._log_service.sync_node_read_model(task.task_id, acceptance.node_id)
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
         return self._store.get_node(acceptance.node_id) or acceptance
+
+    def _acceptance_handoff_message(
+        self,
+        *,
+        node: NodeRecord,
+        result: NodeFinalResult,
+        result_ref: str,
+    ) -> str:
+        """交接通知：只给指针 + 有界摘要，交付正文由验收节点按 ref 解析。
+
+        旧形态把 `result.answer` 整篇塞进通知，而通知会被归档进验收节点的持久上下文，
+        于是每打回一轮就多一份全文——核验方面对的不再是"当前这一份提交"，而是历次
+        交付的堆叠。`result_ref` 按设计在载荷内容变化时轮转，它指向的才是本轮该判的
+        那一份。
+        """
+        summary = str(result.summary or '').strip() or str(result.answer or '').strip()
+        lines = [
+            '执行节点提交了新的待验交付，请继续在当前验收上下文中核验。',
+            f'被检验节点：{node.node_id}',
+            f'待验提交结果载荷 ref：{result_ref or "(none)"}',
+            (
+                f'提交摘要（截断至 {_ACCEPTANCE_SUMMARY_CHARS} 字符，正文以上方 ref 为准）：'
+                f'{summary[:_ACCEPTANCE_SUMMARY_CHARS] or "(empty)"}'
+            ),
+            '只判该 ref 指向的当前提交；上下文里更早的交付正文一律不再是核验对象。',
+        ]
+        return '\n'.join(lines)
 
     def _blocked_verification_activation_message(
         self,
@@ -3701,6 +3735,10 @@ class NodeRunner:
                 'content': json.dumps(payload, ensure_ascii=False, indent=2),
             },
         ]
+        if node.node_kind == KIND_ACCEPTANCE:
+            turn_tail = self._acceptance_turn_tail(task=task, node=node)
+            if turn_tail:
+                messages.append({'role': 'user', 'content': turn_tail})
         if self._context_enricher is not None:
             enriched = await self._context_enricher(task=task, node=node, messages=list(messages))
             if isinstance(enriched, list) and enriched:
@@ -5463,7 +5501,7 @@ class NodeRunner:
                 cached_payload=cached_payload,
                 index=index,
             )
-            acceptance = self._refresh_acceptance_node_prompt(task=task, node=acceptance)
+            acceptance = self._refresh_acceptance_node_metadata(task=task, node=acceptance)
             self._update_spawn_entry(
                 task_id=task.task_id,
                 parent_node_id=parent.node_id,
@@ -5473,7 +5511,7 @@ class NodeRunner:
                 check_status='running',
             )
             while True:
-                acceptance = self._refresh_acceptance_node_prompt(task=task, node=acceptance)
+                acceptance = self._refresh_acceptance_node_metadata(task=task, node=acceptance)
                 handshake = normalize_acceptance_handshake((child.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
                 self._set_execution_waiting_acceptance_state(
                     task_id=task.task_id,
@@ -5546,8 +5584,8 @@ class NodeRunner:
                     message=(
                         '被检验执行节点已在打回后重新提交，请保留当前验收上下文，继续核验新的交付，'
                         '不要重新检验已被取代的旧结果载荷。\n'
-                        f'上一轮验收反馈：{str(acceptance_result.answer or "").strip()}\n'
-                        f'新的子节点输出摘要：{child_summary}\n'
+                        f'上一轮验收反馈：{str(acceptance_result.answer or "").strip()[:_ACCEPTANCE_SUMMARY_CHARS]}\n'
+                        f'新的子节点输出摘要：{child_summary[:_ACCEPTANCE_SUMMARY_CHARS]}\n'
                         f'新的子节点输出 ref：{child_ref}\n'
                         f'新的子节点结果载荷 ref：{str(child_handoff.get("result_payload_ref") or "")}'
                     ),
@@ -6195,8 +6233,9 @@ class NodeRunner:
         expected_fingerprint = self._acceptance_node_recovery_fingerprint(
             parent_node_id=parent_node_id,
             goal=goal,
-            prompt=expected_prompt,
+            acceptance_prompt=acceptance_prompt,
             accepted_node_id=accepted_node.node_id,
+            submission_ref=str(child_handoff.get('result_payload_ref') or ''),
         )
         return self._find_reusable_node(
             parent_node_id=parent_node_id,
@@ -6268,14 +6307,27 @@ class NodeRunner:
             }
         )
 
-    def _acceptance_node_recovery_fingerprint(self, *, parent_node_id: str, goal: str, prompt: str, accepted_node_id: str) -> str:
+    def _acceptance_node_recovery_fingerprint(
+        self,
+        *,
+        parent_node_id: str,
+        goal: str,
+        acceptance_prompt: str,
+        accepted_node_id: str,
+        submission_ref: str,
+    ) -> str:
+        # 指纹认的是「哪一份验收合同、判的是哪一次提交」：验收标准正文与提交载荷 ref
+        # 足够定身份，提交**正文**绝不进指纹——否则每次重提交都会改动指纹，验收节点
+        # 的 durable 身份随交付漂移，重启复用（`_find_reusable_acceptance_node`）也
+        # 因此在唯一真正该复用的场景（同一份提交的重放）里失配。
         return self._recovery_fingerprint(
             {
                 'node_kind': KIND_ACCEPTANCE,
                 'parent_node_id': str(parent_node_id or '').strip(),
                 'goal': str(goal or ''),
-                'prompt': str(prompt or ''),
+                'acceptance_prompt': str(acceptance_prompt or ''),
                 'accepted_node_id': str(accepted_node_id or '').strip(),
+                'submission_ref': str(submission_ref or '').strip(),
             }
         )
 
@@ -6360,25 +6412,16 @@ class NodeRunner:
             node=accepted_node,
             fallback_output='',
         )
-        notice_block = (
-            self._acceptance_notice_block(accepted_node=accepted_node)
-            if str(accepted_node.node_id or '').strip() == str(task.root_node_id or '').strip()
-            else ''
-        )
-        base_prompt = self._compose_acceptance_prompt(
-            acceptance_prompt=str(acceptance_prompt or ''),
-            node_output=str(child_handoff.get('summary') or ''),
-            node_output_ref=str(child_handoff.get('output_ref') or ''),
-            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
-            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-        )
+        # 验收 bootstrap 在创建时定稿，之后不再被任何刷新改写：它进的是持久历史，
+        # 每次重提交都重写它会把 scaffold 头探针的比对基准搬走（`fallback_seed_prefix_drift`），
+        # 而交付正文本来就有交接通知这条 append 通道。见本文「验收」合同与
+        # `context-and-cache-troubleshooting.md`「append-only 规则」。
         prompt = self._compose_acceptance_prompt(
             acceptance_prompt=str(acceptance_prompt or ''),
             node_output=str(child_handoff.get('summary') or ''),
             node_output_ref=str(child_handoff.get('output_ref') or ''),
             result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
             evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-            notice_block=notice_block,
         )
         base_metadata = {
             'accepted_node_id': accepted_node.node_id,
@@ -6387,8 +6430,9 @@ class NodeRunner:
             _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
                 parent_node_id=parent_node_id or accepted_node.node_id,
                 goal=goal,
-                prompt=base_prompt,
+                acceptance_prompt=str(acceptance_prompt or ''),
                 accepted_node_id=accepted_node.node_id,
+                submission_ref=str(child_handoff.get('result_payload_ref') or ''),
             ),
             'spawn_owner_parent_node_id': str(owner_parent_node_id or '').strip(),
             'spawn_owner_round_id': str(owner_round_id or '').strip(),
@@ -6418,7 +6462,13 @@ class NodeRunner:
         )
         return self._log_service.create_node(task.task_id, acceptance)
 
-    def _refresh_acceptance_node_prompt(self, *, task, node: NodeRecord) -> NodeRecord:
+    def _refresh_acceptance_node_metadata(self, *, task, node: NodeRecord) -> NodeRecord:
+        """刷新验收节点的**元数据**（验收标准模板回填 + 恢复指纹）；bootstrap 正文不动。
+
+        历史上这个函数每次刷新都把最新一次交付的正文搬回 `prompt`/`input`，于是
+        持久历史里最该稳定的那段（scaffold 头探针比对的 bootstrap）成了移动靶，而
+        交付本来就有交接通知这条 append 通道可达。返回库内最新记录。
+        """
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
             return node
         metadata = dict(getattr(node, 'metadata', {}) or {})
@@ -6437,26 +6487,6 @@ class NodeRunner:
             node=accepted_node,
             fallback_output='',
         )
-        notice_block = (
-            self._acceptance_notice_block(accepted_node=accepted_node)
-            if str(accepted_node.node_id or '').strip() == str(task.root_node_id or '').strip()
-            else ''
-        )
-        base_prompt = self._compose_acceptance_prompt(
-            acceptance_prompt=acceptance_prompt,
-            node_output=str(child_handoff.get('summary') or ''),
-            node_output_ref=str(child_handoff.get('output_ref') or ''),
-            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
-            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-        )
-        prompt = self._compose_acceptance_prompt(
-            acceptance_prompt=acceptance_prompt,
-            node_output=str(child_handoff.get('summary') or ''),
-            node_output_ref=str(child_handoff.get('output_ref') or ''),
-            result_payload_ref=str(child_handoff.get('result_payload_ref') or ''),
-            evidence_summary=str(child_handoff.get('evidence_summary') or ''),
-            notice_block=notice_block,
-        )
         next_metadata = {
             **metadata,
             'accepted_node_id': accepted_node.node_id,
@@ -6464,15 +6494,12 @@ class NodeRunner:
             _RECOVERY_FINGERPRINT_KEY: self._acceptance_node_recovery_fingerprint(
                 parent_node_id=str(node.parent_node_id or accepted_node.node_id).strip() or accepted_node.node_id,
                 goal=str(node.goal or ''),
-                prompt=base_prompt,
+                acceptance_prompt=acceptance_prompt,
                 accepted_node_id=accepted_node.node_id,
+                submission_ref=str(child_handoff.get('result_payload_ref') or ''),
             ),
         }
-        if (
-            str(node.prompt or '') == prompt
-            and str(node.input or '') == prompt
-            and dict(metadata or {}) == next_metadata
-        ):
+        if dict(metadata or {}) == next_metadata:
             return node
         updater = getattr(self._store, 'update_node', None)
         updated = None
@@ -6481,8 +6508,6 @@ class NodeRunner:
                 node.node_id,
                 lambda record: record.model_copy(
                     update={
-                        'prompt': prompt,
-                        'input': prompt,
                         'updated_at': _now(),
                         'metadata': next_metadata,
                     }
@@ -6494,13 +6519,7 @@ class NodeRunner:
                 sync_read_model(task.task_id, node.node_id)
             self._log_service.refresh_task_view(task.task_id, mark_unread=True)
             return updated
-        return node.model_copy(
-            update={
-                'prompt': prompt,
-                'input': prompt,
-                'metadata': next_metadata,
-            }
-        )
+        return node.model_copy(update={'metadata': next_metadata})
 
     def _stamp_spawn_owner_metadata(
         self,
@@ -6659,20 +6678,57 @@ class NodeRunner:
         node_output_ref: str,
         result_payload_ref: str,
         evidence_summary: str,
-        notice_block: str = '',
     ) -> str:
         normalized_acceptance_prompt = str(acceptance_prompt or '').strip()
-        prompt = (
+        normalized_output = str(node_output or '').strip()
+        if len(normalized_output) > _ACCEPTANCE_SUMMARY_CHARS:
+            normalized_output = (
+                normalized_output[:_ACCEPTANCE_SUMMARY_CHARS]
+                + f'…（摘要截断至 {_ACCEPTANCE_SUMMARY_CHARS} 字符，正文见下方 ref）'
+            )
+        return (
             f'{normalized_acceptance_prompt}\n\n'
-            f'子节点输出摘要：\n{node_output or "(empty)"}\n\n'
+            f'子节点输出摘要：\n{normalized_output or "(empty)"}\n\n'
             f'子节点输出 ref：{node_output_ref or "(none)"}\n'
             f'子节点结果载荷 ref：{result_payload_ref or "(none)"}\n'
             f'子节点证据摘要：\n{evidence_summary or "(none)"}\n'
         )
-        normalized_notice_block = str(notice_block or '').strip()
-        if normalized_notice_block:
-            prompt += f'\n{normalized_notice_block}\n'
-        return prompt
+
+    def _acceptance_turn_tail(self, *, task, node: NodeRecord) -> str:
+        """验收回合的只进本轮尾块：当前待验提交的指针 + 根节点的追加任务要求。
+
+        这两块每轮都在变。放进 bootstrap 等于把持久历史里最该稳定的首记录改成
+        移动靶（scaffold 头探针比对的正是它，见
+        `context-and-cache-troubleshooting.md`「append-only 规则」）；放在尾块里，
+        bootstrap 一次定稿，而"这一轮该判哪份提交"仍然每轮重新按当前状态算出来。
+        摘要按字符上限截断并保留 ref，核验方据此解析当前提交，而不是依赖上下文里
+        残留的旧正文。
+        """
+        metadata = dict(getattr(node, 'metadata', {}) or {})
+        accepted_node_id = str(metadata.get('accepted_node_id') or node.parent_node_id or '').strip()
+        accepted_node = self._store.get_node(accepted_node_id) if accepted_node_id else None
+        if accepted_node is None or str(accepted_node.task_id or '').strip() != str(task.task_id or '').strip():
+            return ''
+        handshake = normalize_acceptance_handshake((accepted_node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+        lines: list[str] = []
+        result_ref = str(handshake.get('latest_execution_result_ref') or '').strip()
+        result_summary = str(handshake.get('latest_execution_result_summary') or '').strip()
+        output_ref = str(getattr(accepted_node, 'final_output_ref', '') or '').strip()
+        if result_ref or output_ref or result_summary:
+            lines.append(f'待验提交结果载荷 ref：{result_ref or "(none)"}')
+            lines.append(f'交付输出 ref：{output_ref or "(none)"}')
+            if result_summary:
+                lines.append(
+                    f'提交摘要（截断至 {_ACCEPTANCE_SUMMARY_CHARS} 字符，正文以上方 ref 为准）：'
+                    f'{result_summary[:_ACCEPTANCE_SUMMARY_CHARS]}'
+                )
+        if str(accepted_node.node_id or '').strip() == str(task.root_node_id or '').strip():
+            notice_block = self._acceptance_notice_block(accepted_node=accepted_node)
+            if notice_block:
+                lines.append(notice_block)
+        if not lines:
+            return ''
+        return '【本轮验收上下文（运行时注入，不是新的用户指令）】\n' + '\n'.join(lines)
 
     def _child_handoff_payload(self, *, task_id: str, node: NodeRecord, fallback_output: str) -> dict[str, str]:
         latest = self._log_service.ensure_node_output_externalized(task_id, node.node_id) or self._store.get_node(node.node_id) or node
