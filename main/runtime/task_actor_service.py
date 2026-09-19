@@ -646,6 +646,41 @@ class TaskActorService:
         self._node_runner._refresh_resume_ready_distribution_state(task_id=task_id)
         await self._enqueue_acceptance_followup_if_needed(task_id)
 
+    async def _resume_inflight_final_acceptance(self, task_id: str) -> bool:
+        """重派发「握手在等、但回合半路断掉」的最终验收节点——通知账本之外的兜底路径。
+
+        验收节点进入回合的第一步就消费并合并自己的交接通知，所以
+        `_resume_pending_notice_nodes` 在重启后永远看不到它。这里以握手状态为凭据
+        把它重新派发，并复用同一套结算路径（`_settle_final_acceptance_notice_result`）
+        与终态判定（`_terminal_result_after_notice_resume`）：命中即返回 True，
+        一次 run_task 不会同时驱动根节点与验收节点。
+        """
+        distribution = self._distribution_runtime_state(task_id)
+        if str(distribution.get('state') or '').strip() in _DISTRIBUTION_HOLD_STATES:
+            # 分发屏障/失败冻结期间节点生命周期由驱动器持有，不在此插手。
+            return False
+        node_id = str(self._node_runner.resumable_final_acceptance_node_id(task_id) or '').strip()
+        if not node_id:
+            return False
+        dispatcher = self._dispatchers.get(str(task_id or '').strip())
+        entry = None if dispatcher is None else dispatcher._entries.get(node_id)
+        if entry is not None and entry.task is not None and not entry.task.done():
+            return False
+        task = self._store.get_task(task_id)
+        root = None if task is None else self._store.get_node(str(task.root_node_id or '').strip())
+        handshake = normalize_acceptance_handshake((getattr(root, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+        logger.warning(
+            'final acceptance round re-dispatched after interruption: '
+            'task={} acceptance_node={} inspected_execution_node={} state={}',
+            task_id,
+            node_id,
+            str(getattr(root, 'node_id', '') or '').strip(),
+            str(handshake.get('state') or '').strip(),
+        )
+        result = await self._execute_node(task_id, node_id)
+        await self._settle_final_acceptance_notice_result(task_id, node_id, result)
+        return True
+
     def configure_node_dispatch_limits(self, *, execution: int | None, inspection: int | None) -> None:
         self._node_dispatch_limits = {
             'execution': _normalize_dispatch_limit(execution, default=_DEFAULT_NODE_DISPATCH_LIMITS['execution']),
@@ -694,8 +729,12 @@ class TaskActorService:
                 # C：孤儿收尸/重派发——每次 worker 拾取都决断"DB 非终态但无执行器
                 # 也无重放路径"的节点，杜绝幽灵 in_progress（2026-09-15 事故 L3）。
                 await self._reconcile_orphan_in_progress_nodes(task_id, dispatcher)
-                resumed_pending_notices = await self._resume_pending_notice_nodes(task_id)
-                if resumed_pending_notices:
+                resumed_offroot_nodes = await self._resume_pending_notice_nodes(task_id)
+                if not resumed_offroot_nodes:
+                    # 通知账本里没人可派发时，再看握手：半路断掉的验收回合已经从
+                    # 账本里消失，落回根节点会让被检验节点白跑一轮新回合。
+                    resumed_offroot_nodes = await self._resume_inflight_final_acceptance(task_id)
+                if resumed_offroot_nodes:
                     resumed_result = self._terminal_result_after_notice_resume(task_id)
                     if resumed_result is None:
                         control_only_return = True

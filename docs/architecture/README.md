@@ -73,6 +73,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `runtime-overview.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
+- 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `final acceptance round re-dispatched after interruption`
 - 任务显示「已取消」但无人取消过（payload `cancel_requested=false`，常伴随 `Managed task worker exited` 日志）→ `runtime-overview.md`「Node-Level Pause and Recovery」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启、managed-worker.log 长时间不滚动但心跳与进程仍在 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」

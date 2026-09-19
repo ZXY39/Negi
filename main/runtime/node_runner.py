@@ -1258,6 +1258,56 @@ class NodeRunner:
             '需待其消费通知并重新提交后再继续核验。'
         )
 
+    def resumable_final_acceptance_node_id(self, task_id: str) -> str:
+        """握手仍等它的根最终验收节点 id；不构成承诺时返回空串。
+
+        验收节点在回合第一步就消费并合并自己的交接通知，从此离开通知账本
+        （`nodes_with_pending_distribution_notices` 只数未合并的通知）。它的半截
+        回合因此两头无着：孤儿收尸只管 `spawn_owner_kind='child'` 的执行节点，
+        notice-resume 又只认通知账本。进程一退，`run_task` 便落回
+        `dispatcher.execute_node(root)`，被检验的节点重跑一整轮新回合，而它等的那份
+        裁定其实一直挂在握手状态里（事故复盘：task:c7f1dbfae6e2，验收节点 15:48
+        中断后被弃三小时）。
+
+        握手状态本身就是这半截回合的持久承诺，所以这里只读既有状态，不新增任何
+        持久字段。范围只覆盖根的最终验收：子节点的验收由子管线自己驱动。
+        是否"已无人执行"要读 dispatcher entry，那是调用方（`TaskActorService.
+        _resume_inflight_final_acceptance`）的一跳。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            return ''
+        root_node_id = str(getattr(task, 'root_node_id', '') or '').strip()
+        root = self._store.get_node(root_node_id) if root_node_id else None
+        if root is None or self._normalized_status(root.status) in {STATUS_SUCCESS, STATUS_FAILED}:
+            return ''
+        handshake = normalize_acceptance_handshake((root.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+        if str(handshake.get('state') or '').strip() not in {
+            ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+            ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
+        }:
+            return ''
+        acceptance = self._required_acceptance_node(task=task, node=root)
+        if acceptance is None:
+            return ''
+        node_id = str(getattr(acceptance, 'node_id', '') or '').strip()
+        if not node_id:
+            return ''
+        named_node_id = str(handshake.get('acceptance_node_id') or '').strip()
+        if named_node_id and named_node_id != node_id:
+            # 握手点名的是另一份验收节点（已被重建）：复活旧节点只会产出一份
+            # 裁定不了当前提交的假验收。
+            return ''
+        if self._normalized_status(acceptance.status) in {STATUS_SUCCESS, STATUS_FAILED}:
+            return ''
+        if bool(getattr(acceptance, 'pause_requested', False)) or bool(getattr(acceptance, 'is_paused', False)):
+            return ''
+        if self._final_acceptance_freeze_reason(task=task, node=acceptance):
+            # 冻结中的验收一被派发就返回 partial 回合，会被
+            # _handle_acceptance_node_result 读成一次打回，凭空多一轮 rejection。
+            return ''
+        return node_id
+
     def _persist_acceptance_candidate_result(self, *, task_id: str, node_id: str, result: NodeFinalResult) -> str:
         self._persist_result_payload(task_id, node_id, result)
         latest = self._log_service.ensure_node_result_payload_externalized(task_id, node_id) or self._store.get_node(node_id)
