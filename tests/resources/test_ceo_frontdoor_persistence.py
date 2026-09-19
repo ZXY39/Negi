@@ -65,6 +65,49 @@ def test_ceo_snapshot_keeps_canonical_context_and_compression_payloads() -> None
     assert "tool_events" not in snapshot[0]
 
 
+def test_ceo_snapshot_projects_silent_turn_as_rail_only_assistant_row() -> None:
+    canonical_context = {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_goal": "inspect repository",
+                "rounds": [{"round_index": 1, "tools": [{"tool_name": "filesystem"}]}],
+            }
+        ],
+    }
+
+    snapshot = websocket_ceo._build_ceo_snapshot(
+        [
+            {"role": "user", "content": "静默测试"},
+            {
+                "role": "assistant",
+                "content": "",
+                "metadata": {"silent_reply": True, "prompt_visible": False},
+                "canonical_context": canonical_context,
+            },
+            # 改动前落盘的占位文案同样按静默归一化，不再显示到会话框。
+            {
+                "role": "assistant",
+                "content": "信息已静默",
+                "canonical_context": canonical_context,
+            },
+            # 没有任何阶段/工具轨道的静默行没有可展示内容，整行跳过。
+            {
+                "role": "assistant",
+                "content": "",
+                "metadata": {"silent_reply": True},
+            },
+        ]
+    )
+
+    assert [item["role"] for item in snapshot] == ["user", "assistant", "assistant"]
+    assert [item["content"] for item in snapshot[1:]] == ["", ""]
+    assert [item["silent_reply"] for item in snapshot[1:]] == [True, True]
+    assert [len(item["canonical_context"]["stages"]) for item in snapshot[1:]] == [1, 1]
+
+
 def test_ceo_snapshot_includes_message_local_canonical_context_delta() -> None:
     snapshot = websocket_ceo._build_ceo_snapshot(
         [

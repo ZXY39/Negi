@@ -4962,7 +4962,7 @@ def test_ceo_websocket_forwards_message_end_as_final_reply(tmp_path: Path, monke
     assert final_events[0]["data"]["text"] == "I will keep waiting for the install."
 
 
-def test_ceo_websocket_silent_message_end_forwards_placeholder_final(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_silent_message_end_forwards_empty_final_with_stage_context(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -5016,8 +5016,11 @@ def test_ceo_websocket_silent_message_end_forwards_placeholder_final(tmp_path: P
 
     final_events = [item for item in messages if item["type"] == "ceo.reply.final"]
     assert len(final_events) == 1
-    assert final_events[0]["data"]["text"] == "信息已静默"
+    # 静默回合不再有占位文案，但仍走普通 final 通道收尾，好让前端就地结束流式气泡
+    # 并保留本回合已经发布的阶段/工具轨道（缺 text 只会让气泡卡在 streaming）。
+    assert final_events[0]["data"]["text"] == ""
     assert final_events[0]["data"]["silent_reply"] is True
+    assert final_events[0]["data"]["turn_id"] == "turn-silent"
 
 
 def test_ceo_websocket_forwards_reply_delta_without_turn_patch_spam(tmp_path: Path, monkeypatch) -> None:

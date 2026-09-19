@@ -34,7 +34,7 @@ from g3ku.runtime.frontdoor.canonical_context import (
 from g3ku.runtime.frontdoor.canonical_context import (
     ui_canonical_context_delta as _ui_canonical_context_delta,
 )
-from g3ku.runtime.reply_tokens import SILENT_REPLY_VISIBLE_TEXT, is_silent_reply_token
+from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
@@ -75,6 +75,8 @@ from main.protocol import build_envelope
 
 router = APIRouter()
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+# 静默回合的历史占位文案：存量转录里仍带这一行，快照层按静默归一化后不显示到会话框。
+_LEGACY_SILENT_REPLY_TEXT = "信息已静默"
 _APPROVAL_INTERRUPT_KINDS = {
     "frontdoor_tool_approval",
     "frontdoor_tool_approval_batch",
@@ -741,6 +743,13 @@ def _build_ceo_snapshot(
             status = str(raw.get('status') or '').strip().lower()
             if status:
                 item['status'] = status
+            # 静默回合的空 assistant 行只为承载阶段轨道；没有轨道就没有可展示的内容，
+            # 整行跳过，避免前端渲染出一个空气泡。旧转录里的占位文案同样按静默处理。
+            if metadata.get('silent_reply') is True or content == _LEGACY_SILENT_REPLY_TEXT:
+                if not canonical_context:
+                    continue
+                item['silent_reply'] = True
+                item['content'] = ''
         turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
         if turn_id:
             item['turn_id'] = turn_id
@@ -940,9 +949,7 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     if str(data.get("role") or "").strip().lower() != "assistant":
         return False
     text = str(data.get("text") or "").strip()
-    if not text:
-        return False
-    if bool(data.get("silent_reply")) or is_silent_reply_token(text):
+    if not text or is_silent_reply_token(text):
         return False
     if bool(data.get("heartbeat_internal")) and text != _HEARTBEAT_OK:
         return True
@@ -1293,34 +1300,14 @@ async def ceo_websocket(websocket: WebSocket):
             return
         if event.type == 'message_end':
             payload = dict(event.payload or {})
-            if bool(payload.get('silent_reply')):
-                # 静默回合：仍需向 Web 前端发一个 final 事件收尾流式气泡（否则气泡
-                # 卡在 streaming），前端据此渲染"信息已静默"；外部渠道由 external
-                # relay 单独跳过，不会投递到 QQ。
-                silent_source = str(payload.get('source') or 'user').strip().lower() or 'user'
-                silent_turn_id = str(payload.get('turn_id') or '').strip()
-                await _push_stream_event(
-                    'ceo.reply.final',
-                    {
-                        'text': SILENT_REPLY_VISIBLE_TEXT,
-                        'silent_reply': True,
-                        'source': silent_source,
-                        'turn_id': silent_turn_id,
-                    },
-                )
-                _publish_ceo_session_patch(
-                    agent=agent,
-                    transcript_store=transcript_store,
-                    runtime_manager=runtime_manager,
-                    state_store=state_store,
-                    session_id=session_id,
-                    preview_text=SILENT_REPLY_VISIBLE_TEXT,
-                    is_running=False,
-                )
+            # 静默回合（模型输出 [G3KU_SILENT]）走同一条 final 通道，只是回复文本置空：
+            # 早退会让 final 丢掉 canonical_context / user_messages / usage，前端就没有
+            # 阶段轨道可收尾，本回合的阶段与工具调用会被整段吞掉。外部渠道仍由 external
+            # relay 依据 silent_reply 跳过，不会投递到 QQ。
+            silent_reply = bool(payload.get('silent_reply'))
+            if not silent_reply and not _should_forward_message_end(payload):
                 return
-            if not _should_forward_message_end(payload):
-                return
-            text = str(payload.get('text') or '').strip()
+            text = "" if silent_reply else str(payload.get('text') or '').strip()
             source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()
             snapshot = _build_inflight_turn_snapshot(session, session_id)
@@ -1367,9 +1354,10 @@ async def ceo_websocket(websocket: WebSocket):
             await _push_stream_event(
                 'ceo.reply.final',
                 {
-                    'text': rewrite_assistant_media_content(session_id, text),
+                    'text': '' if silent_reply else rewrite_assistant_media_content(session_id, text),
                     'source': source,
                     'turn_id': turn_id,
+                    **({'silent_reply': True} if silent_reply else {}),
                     **({'user_messages': user_messages} if user_messages else {}),
                     **({'usage': turn_usage} if turn_usage else {}),
                     **final_reply_canonical_merge(canonical_context, canonical_context_delta),
@@ -1381,7 +1369,7 @@ async def ceo_websocket(websocket: WebSocket):
                 runtime_manager=runtime_manager,
                 state_store=state_store,
                 session_id=session_id,
-                preview_text=text,
+                preview_text=None if silent_reply else text,
                 is_running=False,
             )
             return

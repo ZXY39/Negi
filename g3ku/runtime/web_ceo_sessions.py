@@ -825,10 +825,11 @@ def update_ceo_session_after_turn(
             metadata["title"] = next_title
             changed = True
     preview_source = str(assistant_text or "").strip() or str(user_text or "").strip()
-    next_preview = summarize_preview_text(preview_source)
-    if metadata.get("last_preview_text") != next_preview:
-        metadata["last_preview_text"] = next_preview
-        changed = True
+    if preview_source:
+        next_preview = summarize_preview_text(preview_source)
+        if metadata.get("last_preview_text") != next_preview:
+            metadata["last_preview_text"] = next_preview
+            changed = True
     if 'frontdoor_context' in metadata:
         metadata.pop('frontdoor_context', None)
         changed = True

@@ -2760,6 +2760,7 @@ function normalizeCeoSnapshotMessage(message = {}) {
         if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
         if (usage) next.usage = usage;
         if (message?.task_dispatched === true) next.task_dispatched = true;
+        if (message?.silent_reply === true) next.silent_reply = true;
         if (!String(next.content || "").trim() && !canonicalContext && !canonicalContextDelta && status !== "paused") return null;
         return next;
     }
@@ -5555,6 +5556,18 @@ function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
     syncCeoTurnLoadingOnlyState(turn, false);
 }
 
+// 静默回合（模型输出 [G3KU_SILENT]）没有可见回复文本，只隐藏回复气泡本身；
+// 阶段轨道与工具步骤照常保留，否则本回合的活动记录会随气泡一起消失。
+function hideCeoAssistantText(turn) {
+    if (!turn?.textEl) return;
+    turn.textEl.hidden = true;
+    turn.textEl.innerHTML = "";
+    turn.textEl.classList.remove("pending");
+    turn.textEl.classList.remove("assistant-text-loading");
+    syncCeoAssistantLoadingAria(turn.textEl);
+    syncCeoTurnLoadingOnlyState(turn, false);
+}
+
 function clearCeoReplyDeltaBuffer(sessionId = "", { turnId = "" } = {}) {
     const key = String(sessionId || "").trim();
     if (!key) return false;
@@ -6088,6 +6101,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         ? normalizeCeoSnapshotCanonicalContext(item.canonical_context_delta)
         : (normalizeCeoSnapshotCanonicalContext(item.canonical_context) || null);
     const content = String(item?.content || "");
+    const silentReply = item?.silent_reply === true;
     const status = String(item?.status || "").trim().toLowerCase();
     // follow-up 归档半截回合(后端 archive turn_id = `{原 turn_id}:followup:{随机}`)：
     // 其最后一个阶段在收到补充消息时被拦腰打断,需要打上打断标记。
@@ -6095,13 +6109,17 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     const historyTimestamp = String(item?.timestamp || "").trim();
     const historyUsage = item?.usage || null;
     if (status !== "paused" && !canonicalContext) {
+        // 静默回合没有任何可展示内容时不出气泡。
+        if (silentReply) return;
         // 无轨道兜底气泡同样携带悬停元信息(完成时间 + token 用量)。
         addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
         return;
     }
     const turn = createPendingCeoTurn("history", { scrollMode: "preserve" });
     if (!turn) {
-        addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
+        if (!silentReply) {
+            addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
+        }
         return;
     }
     const historyTurnId = normalizeCeoTurnId(item?.turn_id || "");
@@ -6110,7 +6128,8 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     }
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
-        renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
+        if (silentReply) hideCeoAssistantText(turn);
+        else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
         turn.flowEl.open = true;
@@ -6124,7 +6143,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     }
     // meta 带上 usage/timestamp:随后的 finalizeCeoTurn 写缓存与 usage 行时
     // 用历史值而非当前时间,保证刷新后完成时间稳定。
-    finalizeCeoTurn(content, { source: "history", usage: historyUsage, timestamp: historyTimestamp });
+    finalizeCeoTurn(content, { source: "history", usage: historyUsage, timestamp: historyTimestamp, silent_reply: silentReply });
 }
 
 // ---- CEO 会话视图状态保持 -----------------------------------------------------
@@ -6417,9 +6436,11 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     // usage/timestamp 无条件写入缓存:会话切换/刷新后从缓存渲染时,
     // 悬停元信息(token 用量 + 完成时间)不再依赖服务端快照补齐。
     const completedTimestamp = String(completedAt || "").trim();
+    const silentReply = meta?.silent_reply === true;
     messages = appendCeoSessionSnapshotMessage(messages, {
         role: "assistant",
-        content: String(text || "").trim() || "Done.",
+        content: silentReply ? "" : (String(text || "").trim() || "Done."),
+        ...(silentReply ? { silent_reply: true } : {}),
         canonical_context: persistedCanonicalContext,
         canonical_context_delta: finalTraceContext,
         usage: meta?.usage || null,
@@ -7753,6 +7774,7 @@ function finalizeCeoTurn(text, meta = {}) {
     syncCeoPrimaryButton();
     const normalizedSource = normalizeCeoTurnSource(meta?.source || "user");
     const normalizedTurnId = normalizeCeoTurnId(meta?.turn_id || "");
+    const silentReply = meta?.silent_reply === true;
     const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
     const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
     const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
@@ -7789,7 +7811,7 @@ function finalizeCeoTurn(text, meta = {}) {
     // 不做全量重建;增量路径只用于 final 带 user_messages 的场景。
     if (!finalUserMessages.length) {
         if (!turn?.textEl || !turn?.flowEl) {
-            addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+            if (!silentReply) addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
             discardPendingCeoTurns({
                 force: normalizedSource === "heartbeat",
                 source: normalizedSource,
@@ -7803,9 +7825,14 @@ function finalizeCeoTurn(text, meta = {}) {
             turn.finalized = true;
             turn.liveStreamText = "";
             renderCeoLiveStreamTextIntoTurn(turn);
-            turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
-            turn.textEl.classList.remove("pending");
-            turn.textEl.classList.add("markdown-content");
+            if (silentReply) {
+                hideCeoAssistantText(turn);
+            } else {
+                turn.textEl.hidden = false;
+                turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
+                turn.textEl.classList.remove("pending");
+                turn.textEl.classList.add("markdown-content");
+            }
             if (finalTraceContext) {
                 renderCeoStageTraceIntoTurn(turn, finalTraceContext);
             }
@@ -7873,9 +7900,14 @@ function finalizeCeoTurn(text, meta = {}) {
             turn.finalized = true;
             turn.liveStreamText = "";
             renderCeoLiveStreamTextIntoTurn(turn);
-            turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
-            turn.textEl.classList.remove("pending");
-            turn.textEl.classList.add("markdown-content");
+            if (silentReply) {
+                hideCeoAssistantText(turn);
+            } else {
+                turn.textEl.hidden = false;
+                turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
+                turn.textEl.classList.remove("pending");
+                turn.textEl.classList.add("markdown-content");
+            }
             if (finalTraceContext) {
                 renderCeoStageTraceIntoTurn(turn, finalTraceContext);
             }

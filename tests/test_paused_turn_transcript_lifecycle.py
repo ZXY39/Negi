@@ -170,10 +170,8 @@ def test_reconcile_stops_reinjecting_paused_message_after_completion():
     assert healed == seed_template, "修复后 paused 条目退役，种子不再被追加幻影消息"
 
 
-def test_persist_turn_transcript_silent_reply_marks_visible_placeholder():
+def test_persist_turn_transcript_silent_reply_persists_empty_carrier_row():
     import asyncio
-
-    from g3ku.runtime.reply_tokens import SILENT_REPLY_VISIBLE_TEXT
 
     session = _FakePersistedSession([])
     agent = _build_agent(session)
@@ -187,20 +185,21 @@ def test_persist_turn_transcript_silent_reply_marks_visible_placeholder():
         agent._persist_turn_transcript(
             user_input=user_input,
             user_text="静默测试",
-            assistant_text=SILENT_REPLY_VISIBLE_TEXT,
+            assistant_text="",
             interaction_flow=[],
             internal_source=None,
             route_kind="dm",
-            assistant_metadata={"silent_reply": True},
+            assistant_metadata={"silent_reply": True, "prompt_visible": False, "ui_visible": True},
             complete_lingering_paused_turns=True,
         )
     )
 
     assistant_records = [m for m in session.messages if m.get("role") == "assistant"]
-    assert assistant_records, "静默回合应持久化一条 assistant 占位消息"
+    assert assistant_records, "静默回合仍要落一条 assistant 行承载阶段轨道"
     last = assistant_records[-1]
-    assert last["content"] == SILENT_REPLY_VISIBLE_TEXT
+    assert last["content"] == "", "静默回合不得再写可见占位文案"
     assert last["metadata"]["silent_reply"] is True
+    assert last["metadata"]["prompt_visible"] is False, "被吞掉的回复不得经转录重放回到模型上下文"
 
 
 def test_persist_turn_transcript_attaches_frontdoor_turn_usage():
