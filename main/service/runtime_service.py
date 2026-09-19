@@ -792,68 +792,6 @@ class MainRuntimeService:
         self.log_service.refresh_task_view(task.task_id, mark_unread=True)
 
     @staticmethod
-    def _recovery_discard_node_ids(root_node_id: str, nodes: list[NodeRecord]) -> set[str]:
-        children_by_parent: dict[str, list[str]] = {}
-        for node in list(nodes or []):
-            parent_id = str(node.parent_node_id or '').strip()
-            if parent_id:
-                children_by_parent.setdefault(parent_id, []).append(node.node_id)
-
-        discard_ids: set[str] = set()
-
-        def _discard_subtree(node_id: str) -> None:
-            if not str(node_id or '').strip() or node_id in discard_ids:
-                return
-            discard_ids.add(node_id)
-            for child_id in list(children_by_parent.get(node_id, [])):
-                _discard_subtree(child_id)
-
-        for node in list(nodes or []):
-            if node.node_id == root_node_id:
-                continue
-            if str(node.status or '').strip().lower() == 'success':
-                continue
-            _discard_subtree(node.node_id)
-        return discard_ids
-
-    def _sanitize_recovered_node(self, node: NodeRecord) -> None:
-        metadata = self._sanitize_recovered_node_metadata(dict(node.metadata or {}), clear_result_payload=False)
-        self.store.upsert_node(node.model_copy(update={'metadata': metadata, 'updated_at': now_iso()}))
-
-    def _reset_root_for_recovery(self, root: NodeRecord) -> NodeRecord:
-        metadata = self._sanitize_recovered_node_metadata(dict(root.metadata or {}), clear_result_payload=True)
-        return root.model_copy(
-            update={
-                'status': 'in_progress',
-                'input': root.prompt,
-                'input_ref': '',
-                'output': [],
-                'check_result': '',
-                'check_result_ref': '',
-                'final_output': '',
-                'final_output_ref': '',
-                'failure_reason': '',
-                'finished_at': None,
-                'updated_at': now_iso(),
-                'metadata': metadata,
-            }
-        )
-
-    @staticmethod
-    def _sanitize_recovered_node_metadata(metadata: dict[str, Any], *, clear_result_payload: bool) -> dict[str, Any]:
-        cleaned = dict(metadata or {})
-        cleaned.pop('spawn_operations', None)
-        cleaned.pop('execution_stages', None)
-        if clear_result_payload:
-            # 载荷正文清空时外部化 ref/摘要必须同步清空，否则恢复后的节点会残留
-            # 指向旧载荷 artifact 的 ref，重提交时短路再外部化并误导验收读取方。
-            cleaned.pop('result_schema_version', None)
-            cleaned.pop('result_payload', None)
-            cleaned.pop('result_payload_ref', None)
-            cleaned.pop('result_payload_summary', None)
-        return cleaned
-
-    @staticmethod
     def _sanitize_recovered_task_metadata(metadata: dict[str, Any], *, preserve_final_acceptance: bool) -> dict[str, Any]:
         cleaned = dict(metadata or {})
         cleaned.pop('final_execution_output', None)

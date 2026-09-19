@@ -4521,6 +4521,7 @@ class TaskLogService:
         payload = dict(frame or {})
         node_id = str(payload.get('node_id') or '').strip()
         messages = [dict(item) for item in list(payload.get('messages') or []) if isinstance(item, dict)]
+        carried_messages_ref = str(payload.get('messages_ref') or '').strip()
         callable_tool_snapshots = self._append_callable_tool_snapshot(
             existing_snapshots=payload.get('callable_tool_snapshots') or [],
             frame=payload,
@@ -4541,7 +4542,20 @@ class TaskLogService:
             list(skill_visibility_diagnostics.get('registry_skill_ids') or [])
             or list(skill_visibility_diagnostics.get('entries') or [])
         )
-        if messages or callable_tool_snapshots or contract_visible_skill_ids or has_skill_visibility_diagnostics:
+        # 帧正文外置在 messages_ref 指向的 artifact 里。读-改-写回路（启动恢复、
+        # update_frame、replace_runtime_frames）在 ref 解析失败时拿到的是空 messages，
+        # 无条件重写会把指针换成一份空正文、旧历史永久丢失且不留任何痕迹。
+        # 只有真正携带正文的写才允许换指针：空写入保留原 ref。
+        if not messages and carried_messages_ref:
+            logger.warning(
+                'runtime frame write carries no messages; keeping existing messages_ref: '
+                'task={} node={} ref={} messages_count={}',
+                task.task_id,
+                node_id,
+                carried_messages_ref,
+                int(payload.get('messages_count') or 0),
+            )
+        elif messages or callable_tool_snapshots or contract_visible_skill_ids or has_skill_visibility_diagnostics:
             serialized = json.dumps(
                 {
                     'messages': messages,
@@ -4757,6 +4771,7 @@ class TaskLogService:
             payload.get('skill_visibility_diagnostics') or {}
         )
         ref = str(payload.get('messages_ref') or '').strip()
+        stored_messages_count = int(payload.get('messages_count') or 0)
         if ref:
             text = self._resolve_content_ref(ref)
             if text:
@@ -4781,6 +4796,15 @@ class TaskLogService:
                         skill_visibility_diagnostics = self._sanitize_skill_visibility_diagnostics(
                             parsed.get('skill_visibility_diagnostics') or {}
                         )
+            if not messages:
+                # 指针在、正文取不到：区分"确实没有历史"与"历史读不出来"。前者 ref 为空，
+                # 后者走到这里——后续写帧时必须保留原 ref，见 _runtime_frame_record。
+                logger.warning(
+                    'runtime frame messages_ref resolved to no messages: task={} node={} ref={}',
+                    record.task_id,
+                    record.node_id,
+                    ref,
+                )
         return {
             'node_id': record.node_id,
             'depth': int(record.depth or 0),
@@ -4803,6 +4827,9 @@ class TaskLogService:
             ],
             'active_round_started_at': str(payload.get('active_round_started_at') or ''),
             'messages': messages,
+            # ref/count 必须随帧一起带回：读-改-写回路只有拿到原指针才不会把历史写没。
+            'messages_ref': ref,
+            'messages_count': len(messages) if messages else stored_messages_count,
             'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
             'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
@@ -5478,6 +5505,9 @@ class TaskLogService:
             ],
             'active_round_started_at': str(payload.get('active_round_started_at') or ''),
             'messages': [dict(item) for item in list(payload.get('messages') or []) if isinstance(item, dict)],
+            # 本函数按枚举键清洗，漏一个键等于删一个键：messages 指针必须过沙。
+            'messages_ref': str(payload.get('messages_ref') or ''),
+            'messages_count': int(payload.get('messages_count') or 0),
             'pending_tool_calls': [dict(item) for item in list(payload.get('pending_tool_calls') or []) if isinstance(item, dict)],
             'pending_child_specs': [dict(item) for item in list(payload.get('pending_child_specs') or []) if isinstance(item, dict)],
             'partial_child_results': [dict(item) for item in list(payload.get('partial_child_results') or []) if isinstance(item, dict)],
