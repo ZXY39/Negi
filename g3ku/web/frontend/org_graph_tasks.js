@@ -1503,7 +1503,30 @@ async function focusErrorLogNode(nodeId) {
 function setTaskTokenStatsOpen(open) {
     S.taskTokenStatsOpen = !!open;
     setDrawerOpen(U.taskTokenBackdrop, U.taskTokenDrawer, !!open);
-    if (open) renderTaskTokenStats({ force: true });
+    if (!open) return;
+    renderTaskTokenStats({ force: true });
+    void ensureTaskTokenModelCatalog();
+}
+
+// 模型目录正常在 boot 时已加载；那一次请求失败会让整片 token 统计退化成裸配置 key，
+// 所以打开面板时补一次加载，拿到目录后强制重绘。
+async function ensureTaskTokenModelCatalog() {
+    if (S.modelCatalog?.loading || (S.modelCatalog?.catalog || []).length) return;
+    try {
+        await loadModels();
+    } catch (error) {
+        void error;
+        return;
+    }
+    if (S.taskTokenStatsOpen) renderTaskTokenStats({ force: true });
+}
+
+// 账本只记录配置 key（不存显示名），这里经模型目录换成用户写的配置名，与 CEO 会话
+// 用量标题同一口径；目录查不到（配置已删）才退回 key 本身。
+function taskModelDisplayName(row) {
+    const raw = String(row?.model_key || row?.provider_model || row?.provider_id || "").trim();
+    if (!raw) return "";
+    return ceoModelUsageHeadlineTitle(raw) || raw;
 }
 
 function renderTaskTokenStats(options = {}) {
@@ -1527,7 +1550,7 @@ function renderTaskTokenStats(options = {}) {
         ? S.taskSummary.token_usage_by_model.map(normalizeModelTokenUsage).sort((a, b) => {
             const delta = tokenKnownTotal(b) - tokenKnownTotal(a);
             if (delta !== 0) return delta;
-            return String(a.model_key || "").localeCompare(String(b.model_key || ""));
+            return taskModelDisplayName(a).localeCompare(taskModelDisplayName(b));
         })
         : [];
     const callViewState = taskModelCallViewState();
@@ -1556,20 +1579,22 @@ function renderTaskTokenStats(options = {}) {
     }
     const rowsMarkup = modelRows.length
         ? modelRows.map((item) => {
-            const subtitleParts = [item.provider_id, item.provider_model].filter(Boolean);
+            const displayTitle = taskModelDisplayName(item) || "未命名配置";
+            const configKey = String(item.model_key || "").trim();
+            const subtitleParts = [
+                configKey && configKey !== displayTitle ? configKey : "",
+                item.provider_id,
+                item.provider_model,
+            ].filter(Boolean);
             const displayUsage = tokenDisplayUsage(item);
             const badges = [];
             if (item.is_partial) badges.push('<span class="task-token-badge warn">部分缺失</span>');
             if (!item.calls_without_usage) badges.push('<span class="task-token-badge success">完整</span>');
-            const configEntry = String(item.model_key || "").trim()
-                ? (Array.isArray(S.modelCatalog?.catalog) ? S.modelCatalog.catalog : []).find((entry) => String(entry.key || "").trim() === String(item.model_key || "").trim())
-                : null;
-            const configTitle = String(configEntry?.name || "").trim() || item.model_key || "未命名配置";
             return `
                 <div class="task-token-model-item">
                     <div class="task-token-model-head">
                         <div>
-                            <h3>${esc(configTitle)}</h3>
+                            <h3>${esc(displayTitle)}</h3>
                             <p>${esc(subtitleParts.join(" · ") || "模型标识未提供")}</p>
                         </div>
                         <div class="task-token-model-badges">${badges.join("")}</div>
@@ -1627,7 +1652,7 @@ function taskModelCallMatchesQuery(call, query) {
     if (String(call?.call_index ?? "").includes(needle)) return true;
     if (String(call?.node_id || "").toLowerCase().includes(needle)) return true;
     return (Array.isArray(call?.delta_usage_by_model) ? call.delta_usage_by_model : []).some((row) =>
-        [row?.model_key, row?.provider_model, row?.provider_id]
+        [taskModelDisplayName(row), row?.model_key, row?.provider_model, row?.provider_id]
             .some((value) => String(value || "").toLowerCase().includes(needle)));
 }
 
@@ -1666,9 +1691,10 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
         return `<div class="empty-state task-token-empty">${hasQuery ? "未找到匹配的记录。" : "暂无逐次调用明细。"}</div>`;
     }
     const rows = meta.items.map((item) => {
-        const modelNames = item.delta_usage_by_model.length
-            ? item.delta_usage_by_model.map((row) => row.model_key || row.provider_model || row.provider_id || "").filter(Boolean).join(", ")
-            : "未提供";
+        const usageRows = Array.isArray(item.delta_usage_by_model) ? item.delta_usage_by_model : [];
+        const modelNames = usageRows.map((row) => taskModelDisplayName(row)).filter(Boolean).join(", ") || "未提供";
+        // 悬停保留账本原始 key：配置改名或删除后仍可据此定位是哪一条配置。
+        const modelKeys = usageRows.map((row) => String(row?.model_key || "").trim()).filter(Boolean).join(", ") || modelNames;
         // 思考 token 为 null 表示 provider 未上报（旧记录 / 非流式 / 不回传
         // reasoning_tokens），显示 "--" 而不是 0；耗时两列的 null 由 formatDurationMs 兜底。
         const thinkingText = item.thinking_tokens === null ? "--" : formatTokenCount(item.thinking_tokens);
@@ -1685,7 +1711,7 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
                 <td>${esc(formatTokenCount(item.response_tool_call_count))}</td>
                 <td class="task-token-call-duration" title="${esc(item.first_token_ms === null ? "未测到首 token（非流式请求）" : `首 token ${formatDurationMs(item.first_token_ms)}`)}">${esc(formatDurationMs(item.first_token_ms))}</td>
                 <td class="task-token-call-duration" title="${esc(item.duration_ms === null ? "未记录耗时" : `本次调用累计 ${formatDurationMs(item.duration_ms)}`)}">${esc(formatDurationMs(item.duration_ms))}</td>
-                <td class="task-token-call-model" title="${esc(modelNames)}">${esc(modelNames)}</td>
+                <td class="task-token-call-model" title="${esc(modelKeys)}">${esc(modelNames)}</td>
             </tr>
         `;
     }).join("");

@@ -792,9 +792,11 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -929,9 +931,11 @@ def test_render_task_token_stats_sorts_model_calls_by_time_desc() -> None:
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -999,9 +1003,11 @@ def test_render_task_token_stats_search_filters_all_records_not_current_page() -
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1115,9 +1121,11 @@ def test_render_task_token_stats_search_supports_call_index() -> None:
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1134,6 +1142,122 @@ def test_render_task_token_stats_search_supports_call_index() -> None:
     # "2" 按序号子串匹配 call 2 与 call 12（节点/模型均无数字，证明序号搜索生效）。
     assert result["indexes"] == [12, 2]
     assert result["summary"] is True
+
+
+def test_render_task_token_stats_labels_models_with_user_config_names() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        const usage = (input, output) => ({
+          tracked: true,
+          input_tokens: input,
+          output_tokens: output,
+          cache_hit_tokens: 0,
+          call_count: 1,
+          calls_with_usage: 1,
+          calls_without_usage: 0,
+          is_partial: false,
+        });
+        global.S = {
+          currentTask: { token_usage: usage(1200, 120) },
+          modelCatalog: {
+            catalog: [
+              { key: "glm-5.2", name: "glm 主力", provider_model: "zhipu:glm-5.2" },
+              { key: "glm-5.2-2", name: "glm 5.21", provider_model: "zhipu:glm-5.2" },
+            ],
+          },
+          taskSummary: {
+            token_usage_by_model: [
+              { ...usage(700, 70), model_key: "glm-5.2-2", provider_id: "zhipu", provider_model: "glm-5.2" },
+              { ...usage(500, 50), model_key: "orphan-key", provider_id: "zhipu", provider_model: "glm-5.2" },
+            ],
+          },
+          recentModelCalls: [
+            {
+              call_index: 1,
+              node_id: "node:alpha",
+              created_at: "2026-09-14T00:00:01.000Z",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 0,
+              delta_usage: usage(700, 70),
+              delta_usage_by_model: [{ ...usage(700, 70), model_key: "glm-5.2-2", provider_id: "zhipu", provider_model: "glm-5.2" }],
+            },
+            {
+              call_index: 2,
+              node_id: "node:beta",
+              created_at: "2026-09-14T00:00:02.000Z",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 0,
+              delta_usage: usage(500, 50),
+              delta_usage_by_model: [{ ...usage(500, 50), model_key: "orphan-key", provider_id: "zhipu", provider_model: "glm-5.2" }],
+            },
+          ],
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
+        const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
+        vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
+        const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
+        vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
+
+        const readModelCells = (markup) => {
+          const tableBody = markup.match(/<tbody>([\\s\\S]*?)<\\/tbody>/)?.[1] || "";
+          return Array.from(tableBody.matchAll(/<td class="task-token-call-model" title="([^"]*)">([^<]*)<\\/td>/g))
+            .map((match) => ({ title: match[1], text: match[2] }));
+        };
+
+        renderTaskTokenStats();
+        const html = U.taskTokenContent.innerHTML;
+
+        S.taskModelCallsQuery = "glm 5.21";
+        S.taskModelCallsPage = 1;
+        renderTaskTokenStats({ force: true });
+        const byConfigName = readModelCells(U.taskTokenContent.innerHTML);
+
+        console.log(JSON.stringify({
+          html,
+          modelCells: readModelCells(html),
+          byConfigName,
+        }));
+        """
+    )
+
+    html = result["html"]
+    # 汇总行与明细列都显示用户写的配置名，而不是账本里的裸 key
+    assert "<h3>glm 5.21</h3>" in html
+    assert result["modelCells"] == [
+        {"title": "orphan-key", "text": "orphan-key"},
+        {"title": "glm-5.2-2", "text": "glm 5.21"},
+    ]
+    # 配置名之外的 key 仍留在副标题与悬停标题里，改名/删配置后可据此定位
+    assert "glm-5.2-2 · zhipu · glm-5.2" in html
+    # 目录里查不到（配置已删）时退回 key 本身，不显示空白
+    assert "<h3>orphan-key</h3>" in html
+    # 搜索命中的是配置名：该串不出现在任何 key / provider_model 里
+    assert result["byConfigName"] == [{"title": "glm-5.2-2", "text": "glm 5.21"}]
 
 
 def test_render_task_token_stats_freezes_auto_refresh_while_open() -> None:
@@ -1189,9 +1313,11 @@ def test_render_task_token_stats_freezes_auto_refresh_while_open() -> None:
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1273,9 +1399,11 @@ def test_refresh_task_token_call_table_rerenders_only_table_region() -> None:
         const tokenStart = appCode.indexOf("const EMPTY_TOKEN_USAGE");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
@@ -1527,9 +1655,11 @@ def test_render_task_token_stats_uses_effective_input_tokens_for_hit_rate() -> N
         const tokenStart = appCode.indexOf("const canPause");
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
-        const tokenStatsStart = tasksCode.indexOf("function renderTaskTokenStats");
+        const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
         const tokenStatsEnd = tasksCode.indexOf("async function loadTaskDetail");
         vm.runInThisContext(tasksCode.slice(tokenStatsStart, tokenStatsEnd));
 
