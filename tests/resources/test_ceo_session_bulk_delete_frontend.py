@@ -57,6 +57,33 @@ def test_ceo_session_bulk_delete_css_contract() -> None:
     assert compact_select_override_index > generic_search_index
 
 
+def test_ceo_session_checkbox_render_contract() -> None:
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+
+    input_rule = re.search(r"\.ceo-session-checkbox input\s*\{(?P<body>[^}]+)\}", css)
+    box_rule = re.search(r"\.ceo-session-checkbox__box\s*\{(?P<body>[^}]+)\}", css)
+    check_rule = re.search(r"\.ceo-session-checkbox__box::after\s*\{(?P<body>[^}]+)\}", css)
+
+    assert input_rule is not None
+    assert box_rule is not None
+    assert check_rule is not None
+    # 原生 input 透明铺满 label 负责交互，视觉由 __box 自绘，不再依赖 accent-color
+    assert "opacity: 0;" in input_rule.group("body")
+    assert "accent-color" not in input_rule.group("body")
+    # 对勾元素靠 flex 居中（不得用 left/top 手调定位），并补偿旋转后的视觉重心；
+    # 否则勾号整体偏下，叠加卡片的小数 y 取值后各卡片取整方向不同，看起来高低不一。
+    assert "align-items: center;" in box_rule.group("body")
+    assert "justify-content: center;" in box_rule.group("body")
+    assert "position: absolute" not in check_rule.group("body")
+    assert "transform: translate(0, -2.12px) rotate(45deg);" in check_rule.group("body")
+    # 收缩态窄栏只留图标，勾选框不得残留
+    assert re.search(
+        r'\.ceo-session-panel\[data-panel-state="collapsed"\] \.ceo-session-checkbox\s*\{[^}]*display: none !important;',
+        css,
+        flags=re.MULTILINE,
+    )
+
+
 def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
 

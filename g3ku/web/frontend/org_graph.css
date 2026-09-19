@@ -2428,6 +2428,9 @@ textarea {
     position: relative;
     width: 20px;
     height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 7px;
     border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
     background: var(--bg-surface-inner);
@@ -2438,14 +2441,14 @@ textarea {
 
 .ceo-session-checkbox__box::after {
     content: "";
-    position: absolute;
-    left: 6px;
-    top: 3px;
     width: 6px;
     height: 10px;
     border-right: 2px solid transparent;
     border-bottom: 2px solid transparent;
-    transform: rotate(45deg);
+    /* 6x10 直角边绕自身中心转 45 度后,对勾的视觉重心比几何中心低 2.12px。
+       不补这段偏差时勾号整体偏下,再叠加卡片 y 的小数取值,各卡片取整方向不同,
+       看起来就是"有的居中有的偏下";补后重心落在方框整数中心,残余只剩 ±0.5px 对称抖动。 */
+    transform: translate(0, -2.12px) rotate(45deg);
     opacity: 0;
     transition: opacity 0.18s ease, border-color 0.18s ease;
 }
