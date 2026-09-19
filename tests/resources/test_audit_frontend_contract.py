@@ -55,7 +55,7 @@ def test_view_audit_section_sits_between_external_and_task_details() -> None:
     # 异常栏已移除：只留原始日志
     assert 'id="audit-exception-panel"' not in section
     assert 'id="audit-exception-list"' not in section
-    assert "原始日志" in section
+    assert "原始日志" not in section
     assert "记忆问题在此只读" in section
     # 面板副标题去掉，把高度让给日志列表
     assert "最新在前" not in section
@@ -123,7 +123,7 @@ def test_audit_list_scrolls_and_preserves_offset_on_quiet_poll() -> None:
     app_js = _source("g3ku/web/frontend/org_graph_app.js")
     css = _source("g3ku/web/frontend/org_graph.css")
 
-    # 列表自身滚动（滚轮可达全部行），表头与分页常驻：静默轮询保留滚动位置，换页回到顶部
+    # 列表自身滚动（滚轮可达全部行），分页常驻：静默轮询保留滚动位置，换页回到顶部
     assert "function renderAuditEventList(items = [], { preserveScroll = false } = {})" in app_js
     assert "preserveScroll: quiet" in app_js
     assert "U.auditEventList.scrollTop = previousScrollTop;" in app_js
@@ -133,7 +133,7 @@ def test_audit_list_scrolls_and_preserves_offset_on_quiet_poll() -> None:
     assert "flex: 1 1 auto" in list_rule
     panel_rule = _fragment(css, ".audit-feed-panel {", "}")
     assert "min-height: 0" in panel_rule
-    assert ".audit-feed-panel .panel-header" in css
+    assert ".audit-feed-panel .panel-header" not in css
     assert ".audit-feed-panel .memory-footer" in css
 
 

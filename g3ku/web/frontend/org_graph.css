@@ -12213,15 +12213,10 @@ textarea {
     display: none;
 }
 
-/* 原始日志：面板占满视图剩余高度，表头/分页常驻，只有日志列表滚动（滚轮可达全部行） */
+/* 原始日志：面板占满视图剩余高度，分页常驻，只有日志列表滚动（滚轮可达全部行） */
 .audit-feed-panel {
     flex: 1 1 auto;
     min-height: 0;
-}
-
-.audit-feed-panel .panel-header {
-    flex: 0 0 auto;
-    padding: var(--space-3) var(--space-5);
 }
 
 .audit-feed-panel .memory-footer {
