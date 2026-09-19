@@ -1444,6 +1444,47 @@ class NodeRunner:
             )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
 
+    def _finalize_acceptance_terminal_failure(
+        self,
+        *,
+        task,
+        execution: NodeRecord | None,
+        acceptance: NodeRecord,
+        result: NodeFinalResult,
+        rejection_count: int,
+    ) -> None:
+        """Persist an explicit acceptance verdict that must not trigger a retry."""
+        failure_text = str(result.failure_text or result.summary or 'acceptance rejected without retry').strip()
+        if str(getattr(acceptance, 'status', '') or '').strip().lower() != STATUS_FAILED:
+            self._log_service.update_node_status(
+                task.task_id,
+                acceptance.node_id,
+                status=STATUS_FAILED,
+                final_output=str(result.output or '').strip(),
+                failure_reason=failure_text,
+            )
+        if execution is None:
+            return
+        current = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
+        self._update_execution_acceptance_handshake(
+            node_id=execution.node_id,
+            state=ACCEPTANCE_STATE_REJECTED_TERMINAL,
+            acceptance_node_id=acceptance.node_id,
+            rejection_count=int(rejection_count or 0),
+            latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
+            latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
+            latest_rejection_feedback_ref='',
+            latest_rejection_feedback_summary=failure_text,
+        )
+        if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
+            self._set_task_final_acceptance_state(
+                task_id=task.task_id,
+                acceptance_node_id=acceptance.node_id,
+                status=FINAL_ACCEPTANCE_STATUS_FAILED,
+                final_execution_output=str(getattr(execution, 'final_output', '') or '').strip(),
+            )
+        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
+
     def _finalize_acceptance_pass(
         self,
         *,
@@ -1600,9 +1641,28 @@ class NodeRunner:
                 remaining_work=[],
                 blocking_reason='',
             )
-        # 拒收无次数上限：每一次拒绝都只是打回——把验收反馈投给执行节点、
-        # 复活验收与执行双方，交给下一轮「执行→验收」继续，绝不因拒收次数
-        # 把节点对或任务判成终态（终态只来自验收通过、执行失败或外部中断）。
+        if str(result.delivery_status or '').strip().lower() == 'blocked':
+            # 显式 blocked 是验收节点对执行结果作出的「不再打回」终局失败，
+            # 与普通 failed+final 质量拒收严格区分：不得进入无上限拒收循环。
+            self._finalize_acceptance_terminal_failure(
+                task=task,
+                execution=execution,
+                acceptance=acceptance,
+                result=result,
+                rejection_count=next_rejection_count,
+            )
+            return NodeFinalResult(
+                status=STATUS_FAILED,
+                delivery_status='blocked',
+                summary=str(result.summary or ''),
+                answer=str(result.answer or ''),
+                evidence=list(result.evidence or []),
+                remaining_work=[],
+                blocking_reason=str(result.blocking_reason or result.summary or '').strip(),
+            )
+        # 拒收无次数上限：每一次普通 failed+final 拒绝都只是打回——把验收反馈
+        # 投给执行节点、复活验收与执行双方，交给下一轮「执行→验收」继续，
+        # 绝不因拒收次数把节点对或任务判成终态。
         feedback_text = self._acceptance_feedback_text(result)
         self._persist_rejection_feedback_and_keep_acceptance_live(
             task=task,

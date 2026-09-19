@@ -463,7 +463,7 @@ class SubmitFinalResultTool(Tool):
             return (
                 'Submit the final structured acceptance result for the current node. '
                 'Use this only when you are ready to end the node, and make it the only tool call in the turn. '
-                'If you reject the delivery, the tool may return a revised execution output for another acceptance pass instead of ending immediately.'
+                'For a repairable rejection, use failed + delivery_status=final; the runtime returns revised execution output for another acceptance pass. For an execution anomaly that must not be retried, use failed + delivery_status=blocked and explain why in blocking_reason.'
             )
         return (
             'Submit the final structured result for the current execution node. '
@@ -474,7 +474,7 @@ class SubmitFinalResultTool(Tool):
     @property
     def model_description(self) -> str:
         if self._node_kind == 'acceptance':
-            return 'Submit the current acceptance result; rejection may trigger another acceptance pass with revised execution output.'
+            return 'Submit the current acceptance result; failed+final requests repair, while failed+blocked records an execution anomaly as terminal without retry.'
         return 'Submit the current result; rejection returns acceptance feedback instead of ending the node.'
 
     @property
@@ -490,7 +490,7 @@ class SubmitFinalResultTool(Tool):
                 'delivery_status': {
                     'type': 'string',
                     'enum': ['final', 'blocked'],
-                    'description': 'Use final for completed delivery or explicit rejection; use blocked only for genuine blockers.',
+                    'description': 'Use final for success or a repairable rejection; use blocked for an execution anomaly that must not be retried or a genuine blocker.',
                 },
                 'summary': {
                     'type': 'string',

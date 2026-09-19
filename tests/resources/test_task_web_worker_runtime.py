@@ -7275,6 +7275,61 @@ async def test_first_acceptance_rejection_keeps_acceptance_live_and_feeds_back_e
 
 
 @pytest.mark.asyncio
+async def test_acceptance_blocked_result_is_terminal_without_retry(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task(
+            "terminal acceptance anomaly",
+            session_id="web:shared",
+            metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
+        )
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        acceptance_id = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance")).node_id
+        acceptance = service.store.get_node(acceptance_id)
+
+        assert task is not None
+        assert root is not None
+        assert acceptance is not None
+
+        service.node_runner._set_execution_waiting_acceptance_state(
+            task_id=task.task_id,
+            execution_node_id=root.node_id,
+            acceptance_node_id=acceptance.node_id,
+            result_ref="artifact:result",
+            result_summary="execution crashed without a repair path",
+        )
+        terminal = service.node_runner._handle_acceptance_node_result(
+            task=task,
+            acceptance=acceptance,
+            result=NodeFinalResult(
+                status="failed",
+                delivery_status="blocked",
+                summary="execution anomaly; do not retry",
+                answer="",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="execution crashed and provided no repair path",
+            ),
+        )
+
+        latest_acceptance = service.store.get_node(acceptance.node_id)
+        latest_root = service.store.get_node(root.node_id)
+        latest_task = service.get_task(task.task_id)
+        assert latest_acceptance is not None
+        assert latest_root is not None
+        assert latest_task is not None
+        assert terminal.status == "failed"
+        assert terminal.delivery_status == "blocked"
+        assert latest_acceptance.status == "failed"
+        assert dict((latest_root.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})["state"] == ACCEPTANCE_STATE_REJECTED_TERMINAL
+        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
+        assert service.store.list_task_node_notifications(task.task_id, root.node_id) == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_reactivated_acceptance_syncs_task_node_projection_after_rejection(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:

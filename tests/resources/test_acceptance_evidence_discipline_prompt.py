@@ -62,3 +62,11 @@ def test_acceptance_prompt_raises_bar_for_fabrication_accusations() -> None:
     assert "“伪造 / 造假 / 虚构证据”一类指控有更高门槛" in prompt
     assert "至少用一条独立通道复核" in prompt
     assert "不得以指控代替结论" in prompt
+
+
+def test_acceptance_prompt_batches_rejections_and_distinguishes_terminal_blocked() -> None:
+    prompt = _prompt()
+    assert "不得在发现单一不符合点后立即终止验收并打回" in prompt
+    assert "一次性列出全部已发现的不符合点" in prompt
+    assert 'failed + delivery_status="blocked"' in prompt
+    assert "不得要求执行节点再次提交" in prompt

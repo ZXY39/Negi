@@ -19,6 +19,7 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+    ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     normalize_acceptance_handshake,
@@ -2248,10 +2249,14 @@ class TaskActorService:
         self._log_service.refresh_task_view(task_id, mark_unread=True)
         return NodeFinalResult(
             status='failed',
-            delivery_status='final',
+            delivery_status=(
+                'blocked'
+                if str(acceptance_result.delivery_status or '').strip().lower() == 'blocked'
+                else 'final'
+            ),
             summary=check_result,
             answer=execution_output,
-            evidence=[],
+            evidence=list(acceptance_result.evidence or []),
             remaining_work=[],
             blocking_reason=failure_reason,
         )
@@ -2358,10 +2363,25 @@ class TaskActorService:
                 blocking_reason='',
             )
         if acceptance_status == 'failed':
-            # 拒收无次数上限：不存在「打回预算耗尽即终态」的验收失败。节点级
-            # 验收失败只是打回的中转态——交还控制权让驱动层复活执行节点重跑，
-            # 绝不用任务级「验收失败」把未打回的失败折叠成终态
-            # （事故复盘：task:eb6dda95055b 验收抢跑零打回终结）。
+            handshake = normalize_acceptance_handshake((root.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+            if str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_REJECTED_TERMINAL:
+                failure_text = (
+                    str(getattr(root, 'failure_reason', '') or '').strip()
+                    or str(task.failure_reason or '').strip()
+                    or str(final_acceptance.prompt or '').strip()
+                    or 'final acceptance rejected without retry'
+                )
+                return NodeFinalResult(
+                    status='failed',
+                    delivery_status='blocked',
+                    summary=failure_text,
+                    answer=execution_output,
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason=failure_text,
+                )
+            # 普通 failed+final 拒收没有次数上限：它只是打回的中转态，
+            # 交还控制权让驱动层复活执行节点重跑。
             return None
 
         if acceptance_status == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE:
