@@ -5793,3 +5793,78 @@ def test_load_task_detail_announces_tree_load_only_for_real_opens() -> None:
     # 原地刷新（暂停/恢复、批量操作、重连对账）：既不起提示条，也不传 announceLoad。
     assert result["refreshSchedule"] == []
     assert result["refreshAnnounce"] == {"taskId": "task:test", "announceLoad": False}
+
+
+def test_task_recovery_notice_dismissal_survives_page_reload() -> None:
+    """关闭「任务自动恢复」toast 必须跨刷新/重启生效。
+
+    整树每次渲染都会重新评估该提示，所以 dismissed 记录只放在内存里时，
+    刷新页面或重启项目后用户点过叉号的任务仍会反复弹出。
+    """
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        global.U = {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+
+        const NOTICE = "本任务遇到异常停止，已回退到稳定步骤继续。";
+        const STORAGE_KEY = "g3ku.taskRecoveryNotice.dismissed.v1";
+        // 浏览器 localStorage：跨页面加载存活，只有它能让关闭动作持久下来。
+        const backing = new Map();
+        const localStorage = {
+          getItem: (key) => (backing.has(key) ? backing.get(key) : null),
+          setItem: (key, value) => backing.set(key, String(value)),
+        };
+
+        function loadPage(taskId, notice) {
+          const handlers = [];
+          const textEl = { textContent: "" };
+          global.window = { localStorage };
+          global.document = {
+            getElementById: (id) => {
+              if (id === "app-toast") {
+                return {
+                  classList: { contains: () => true },
+                  addEventListener: (_type, fn) => handlers.push(fn),
+                };
+              }
+              return id === "app-toast-text" ? textEl : null;
+            },
+          };
+          global.showToast = ({ text }) => { textEl.textContent = text; };
+          global.closeToast = () => { textEl.textContent = ""; };
+          global.S = { currentTask: { task_id: taskId, metadata: { recovery_notice: notice } } };
+          maybeShowTaskRecoveryNoticeToast();
+          return {
+            shown: textEl.textContent === notice,
+            dismiss: () => handlers.forEach((fn) => fn()),
+          };
+        }
+
+        const first = loadPage("task:crashed", NOTICE);
+        first.dismiss();
+        const reopened = loadPage("task:crashed", NOTICE);
+        const otherTask = loadPage("task:other", NOTICE);
+        const reworded = loadPage("task:crashed", "另一条恢复提示");
+        console.log(JSON.stringify({
+          firstShown: first.shown,
+          reopenedShown: reopened.shown,
+          otherTaskShown: otherTask.shown,
+          rewordedShown: reworded.shown,
+          stored: JSON.parse(backing.get(STORAGE_KEY) || "{}"),
+        }));
+        """
+    )
+
+    assert result["firstShown"] is True
+    # 点过叉号后重新加载页面：同一任务不再弹出。
+    assert result["reopenedShown"] is False
+    # 关闭只作用于产生提示的任务，其他任务的同类提示照常弹出。
+    assert result["otherTaskShown"] is True
+    # 记账按提示文本，文案换版后老任务会再提示一次。
+    assert result["rewordedShown"] is True
+    assert result["stored"] == {"task:crashed": "本任务遇到异常停止，已回退到稳定步骤继续。"}

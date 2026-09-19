@@ -460,7 +460,8 @@ The backend contract behind that UI behavior is:
 
 - 「本任务遇到异常停止，已回退到稳定步骤继续。」（`task.metadata.recovery_notice`）以全局 toast 呈现，不再是任务树内的内联气泡：打开对应任务或该任务数据刷新时弹出一次，`kind=warn`、persistent（不自动消失），标题「任务自动恢复」。
 - 全局 toast 的外观合同（所有 toast 共用）：文案下方不再渲染进度条（persistent 与非 persistent 一视同仁）；toast 视口在桌面布局下以主内容区为居中基准（`left` 偏移等于侧栏宽度 160px），窄屏（≤480px，侧栏改为顶部堆叠）回落到整窗居中；垂直位置（顶部 20px + safe-area）不变。
-- 用户可以点击关闭：点击 toast 任意位置（含右上角关闭按钮）即关闭，并把该任务记入本次页面会话的 dismissed 集合——同一任务不再重复弹出；切换到其他带提示的任务仍会弹出自己的提示。
+- 用户可以点击关闭：点击 toast 任意位置（含右上角关闭按钮）即关闭，并把该任务的关闭记录写入浏览器 `localStorage`（键 `g3ku.taskRecoveryNotice.dismissed.v1`，内容为 任务 id → 提示文本），前端在首次评估提示时一次性读入 `S.taskRecoveryNoticeDismissals` 后按内存值判重——整树每次渲染都会重新评估该提示，只靠内存集合会在刷新页面或重启 Web 后把已关闭的提示再弹一次。同一任务不再重复弹出；切换到其他带提示的任务仍会弹出自己的提示；提示文本变化（含后端换文案）使记录失配，该任务会再提示一次。
+- 该记录只存在于浏览器侧，不是后端状态：任务元数据里的 `recovery_notice` 不会因关闭而被清除，换浏览器或换设备会重新提示一次，也不需要任何服务端清理入口。
 - 若 toast 在用户关闭前被其他提示覆盖，下一次任务树渲染会重新弹出该提示（显示状态按“当前显示的提示文本”去重，而不是按“曾经显示过”）。
 - 提示是否出现由后端元数据决定：只有非优雅中断后的恢复清洗写 `recovery_notice`；优雅暂停 + 自动恢复不产生该提示。生命周期语义见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」。
 

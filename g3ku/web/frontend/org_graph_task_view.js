@@ -3104,12 +3104,50 @@ function bindTaskTreeSearch() {
 }
 
 
+const RECOVERY_NOTICE_DISMISSALS_STORAGE_KEY = "g3ku.taskRecoveryNotice.dismissed.v1";
+
 function currentTaskRecoveryNotice() {
     return String(S.currentTask?.metadata?.recovery_notice || "").trim();
 }
 
 function appToastTextEl() {
     return document.getElementById("app-toast-text");
+}
+
+function recoveryNoticeDismissalsFromStorage() {
+    try {
+        const raw = window.localStorage?.getItem?.(RECOVERY_NOTICE_DISMISSALS_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : null;
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function writeRecoveryNoticeDismissalsToStorage(value) {
+    try {
+        window.localStorage?.setItem?.(RECOVERY_NOTICE_DISMISSALS_STORAGE_KEY, JSON.stringify(value));
+    } catch { }
+}
+
+function taskRecoveryNoticeDismissals() {
+    // The tree re-arms the notice on every render, so an in-memory set would
+    // re-toast a notice the user already closed after a reload or a server
+    // restart. Dismissals are durable per task; the stored notice text is the
+    // signature, so a reworded notice shows once again.
+    if (!S.taskRecoveryNoticeDismissals) {
+        S.taskRecoveryNoticeDismissals = recoveryNoticeDismissalsFromStorage();
+    }
+    return S.taskRecoveryNoticeDismissals;
+}
+
+function isTaskRecoveryNoticeDismissed(taskId, notice) {
+    return taskRecoveryNoticeDismissals()[taskId] === notice;
+}
+
+function dismissTaskRecoveryNotice(taskId, notice) {
+    taskRecoveryNoticeDismissals()[taskId] = notice;
+    writeRecoveryNoticeDismissalsToStorage(S.taskRecoveryNoticeDismissals);
 }
 
 function recoveryNoticeToastCurrentlyShown(notice) {
@@ -3135,10 +3173,7 @@ function ensureTaskRecoveryNoticeToastBound() {
         const active = S.taskRecoveryNoticeActive;
         const textEl = appToastTextEl();
         const isOurToast = !!active && !!textEl && String(textEl.textContent || "").trim() === active.text;
-        if (isOurToast) {
-            S.taskRecoveryNoticeDismissed = S.taskRecoveryNoticeDismissed || {};
-            S.taskRecoveryNoticeDismissed[active.taskId] = true;
-        }
+        if (isOurToast) dismissTaskRecoveryNotice(active.taskId, active.text);
         S.taskRecoveryNoticeActive = null;
         if (typeof closeToast === "function") closeToast();
     });
@@ -3151,8 +3186,7 @@ function maybeShowTaskRecoveryNoticeToast() {
     const notice = currentTaskRecoveryNotice();
     const taskId = String(S.currentTask?.task_id || "").trim();
     if (!notice || !taskId) return;
-    S.taskRecoveryNoticeDismissed = S.taskRecoveryNoticeDismissed || {};
-    if (S.taskRecoveryNoticeDismissed[taskId]) return;
+    if (isTaskRecoveryNoticeDismissed(taskId, notice)) return;
     if (recoveryNoticeToastCurrentlyShown(notice)) return;
     ensureTaskRecoveryNoticeToastBound();
     S.taskRecoveryNoticeActive = { taskId, text: notice };
