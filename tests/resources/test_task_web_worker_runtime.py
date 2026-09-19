@@ -387,6 +387,15 @@ def _execution_policy(mode: str = "focus") -> dict[str, str]:
     return {"mode": mode}
 
 
+def _acceptance_turn_tail_of(messages: list[dict[str, object]]) -> str:
+    """从装配好的消息里取验收回合尾块（工具合同由 enricher 追加在更后面，不能按下标取）。"""
+    for item in reversed(list(messages or [])):
+        content = str((item or {}).get("content") or "")
+        if "本轮验收上下文" in content:
+            return content
+    return ""
+
+
 def _mark_worker_at(
     service: MainRuntimeService,
     updated_at: str,
@@ -7727,10 +7736,10 @@ async def test_run_final_acceptance_avoids_duplicate_task_state_rewrites_after_s
 
 
 @pytest.mark.asyncio
-async def test_spawn_child_acceptance_refreshes_eager_prompt_before_acceptance_run(tmp_path: Path) -> None:
+async def test_spawn_child_acceptance_bootstrap_stays_frozen_and_tail_carries_submission(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
-        record = await service.create_task("child acceptance prompt refresh", session_id="web:shared")
+        record = await service.create_task("child acceptance frozen bootstrap", session_id="web:shared")
         task = service.get_task(record.task_id)
         root = service.get_node(record.root_node_id)
 
@@ -7781,6 +7790,8 @@ async def test_spawn_child_acceptance_refreshes_eager_prompt_before_acceptance_r
                 return NodeFinalResult(status="success", summary="child complete", output="announcement complete")
             if target.node_kind == "acceptance":
                 captured_prompt["prompt"] = str(target.prompt or "")
+                messages = await service.node_runner._build_messages(task=task, node=target)
+                captured_prompt["tail"] = _acceptance_turn_tail_of(messages)
                 return NodeFinalResult(status="success", summary="accepted", output="accepted")
             raise AssertionError(f"unexpected nested node {node_id}")
 
@@ -7796,8 +7807,11 @@ async def test_spawn_child_acceptance_refreshes_eager_prompt_before_acceptance_r
         )
 
         assert result.check_result == "accepted"
-        assert "announcement complete" in captured_prompt["prompt"]
-        assert "(empty)" not in captured_prompt["prompt"]
+        # 验收 bootstrap 一次定稿：子节点交付不再回写 prompt，改由只进本轮的尾块带指针。
+        assert "(empty)" in captured_prompt["prompt"]
+        assert "announcement complete" not in captured_prompt["prompt"]
+        assert "待验提交结果载荷 ref" in captured_prompt["tail"]
+        assert "announcement complete" in captured_prompt["tail"]
     finally:
         await service.close()
 
@@ -8211,11 +8225,11 @@ async def test_run_child_pipeline_sends_continuation_notice_with_fresh_payload_r
 
 
 @pytest.mark.asyncio
-async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp_path: Path) -> None:
+async def test_root_final_acceptance_bootstrap_is_frozen_and_tail_names_current_submission(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
         record = await service.create_task(
-            "root acceptance refresh",
+            "root acceptance frozen bootstrap",
             session_id="web:shared",
             metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
         )
@@ -8227,9 +8241,9 @@ async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp
 
         final_acceptance = normalize_final_acceptance_metadata((task.metadata or {}).get("final_acceptance"))
         acceptance = service.store.get_node(final_acceptance.node_id)
-
         assert acceptance is not None
         assert "(empty)" in acceptance.prompt
+        creation_prompt = str(acceptance.prompt or "")
 
         service.log_service.update_node_status(
             record.task_id,
@@ -8237,18 +8251,62 @@ async def test_root_final_acceptance_refreshes_eager_prompt_from_root_output(tmp
             status="success",
             final_output="root deliverable ready",
         )
+        handoff = service.node_runner._maybe_start_acceptance_handshake(
+            task=task,
+            node=root,
+            result=NodeFinalResult(
+                status="success",
+                delivery_status="final",
+                summary="root deliverable ready",
+                answer="root deliverable ready",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            ),
+        )
+        assert handoff is not None and handoff.delivery_status == "partial"
 
-        refreshed = service.node_runner._refresh_acceptance_node_prompt(task=task, node=acceptance)
+        after_first_round = service.node_runner._refresh_acceptance_node_metadata(task=task, node=acceptance)
+        assert str(after_first_round.prompt or "") == creation_prompt
+        assert str(after_first_round.input or "") == creation_prompt
 
-        assert "root deliverable ready" in refreshed.prompt
-        assert refreshed.input == refreshed.prompt
-        assert "(empty)" not in refreshed.prompt
+        messages = await service.node_runner._build_messages(task=task, node=after_first_round)
+        tail = _acceptance_turn_tail_of(messages)
+        assert "待验提交结果载荷 ref" in tail
+        assert "root deliverable ready" in tail
+
+        # 重提交只换待验指针：bootstrap 不受交付正文影响，指纹跟着载荷 ref 走。
+        first_fingerprint = str((after_first_round.metadata or {}).get("recovery_fingerprint") or "")
+        resubmission = service.node_runner._maybe_start_acceptance_handshake(
+            task=task,
+            node=service.store.get_node(root.node_id),
+            result=NodeFinalResult(
+                status="success",
+                delivery_status="final",
+                summary="resubmitted deliverable",
+                answer="resubmitted deliverable",
+                evidence=[],
+                remaining_work=[],
+                blocking_reason="",
+            ),
+        )
+        assert resubmission is not None
+        resubmitted = service.node_runner._refresh_acceptance_node_metadata(
+            task=task,
+            node=service.store.get_node(acceptance.node_id),
+        )
+        assert str(resubmitted.prompt or "") == creation_prompt
+        assert str((resubmitted.metadata or {}).get("recovery_fingerprint") or "") != first_fingerprint
+        resubmission_tail = _acceptance_turn_tail_of(
+            await service.node_runner._build_messages(task=task, node=resubmitted)
+        )
+        assert "resubmitted deliverable" in resubmission_tail
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_root_final_acceptance_prompt_includes_appended_notices(tmp_path: Path) -> None:
+async def test_root_final_acceptance_appended_notices_reach_the_turn_tail(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
         record = await service.create_task(
@@ -8285,12 +8343,16 @@ async def test_root_final_acceptance_prompt_includes_appended_notices(tmp_path: 
 
         service.log_service.update_node_metadata(root.node_id, _mutate)
 
-        refreshed = service.node_runner._refresh_acceptance_node_prompt(task=task, node=acceptance)
+        refreshed = service.node_runner._refresh_acceptance_node_metadata(task=task, node=acceptance)
 
-        assert "追加任务要求" in refreshed.prompt
-        assert "追加要求：修复还需覆盖 iOS Safari 场景" in refreshed.prompt
+        # 追加要求是 pull-on-rebuild 的只进本轮尾块：不再回写 bootstrap，
+        # 因此通知到达不会搬动 scaffold 头探针的比对基准。
+        assert "追加任务要求" not in refreshed.prompt
         assert "verify root output" in refreshed.prompt
-        assert refreshed.input == refreshed.prompt
+        messages = await service.node_runner._build_messages(task=task, node=refreshed)
+        tail = _acceptance_turn_tail_of(messages)
+        assert "追加任务要求" in tail
+        assert "追加要求：修复还需覆盖 iOS Safari 场景" in tail
     finally:
         await service.close()
 

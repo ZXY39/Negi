@@ -189,6 +189,18 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 不变量：装饰文本只派生自记录自带的 `timestamp`（固定值，跨请求字节一致）；所有跨"投影副本 vs 原文"的内容相等性比较先过 `strip_arrival_time_stamp`（`g3ku/core/timefmt.py`）；持久化转录、RAG ingest、web UI 永远只见原文，装饰只存在于请求投影层。
 - 症状：缓存命中率下降且 stable prefix hash 逐轮变化，但请求消息数与阶段结构无变化；或同一条用户消息在请求体里出现原文与带时间行两个版本。
 
+### 3.15 帧的 messages 指针被读-改-写回路写没
+
+- 坑：帧正文外置在 `messages_ref` 指向的 artifact 里。hydrate → sanitize → record 的读-改-写回路（启动恢复的 `replace_runtime_frames`、`update_frame`）在 ref 解析失败时只给出空 messages，若无条件换指针就等于用一份空正文覆盖旧历史——不报错、不留痕。
+- 不变量：写帧规则本体见 `runtime-overview.md`「任务侧」（只有携带 messages 正文的写才允许换 `messages_ref`）。本文只登记它的**取证读法**：一次恢复不得缩减任何节点的 durable 历史，缩了必然在 `request_seed_source` 上留痕。
+- 症状：恢复后某节点 `model_message_count` 突然掉到个位数、`request_seed_source=fallback_seed_*`，或 `task_runtime_frames` 行 `messages_ref=''` 而节点 `latest_runtime_messages_ref` 仍在；WARN `keeping existing messages_ref` / `resolved to no messages` 是保留规则被触发的直接证据。
+
+### 3.16 验收 bootstrap 定稿与回合尾块
+
+- 坑：验收节点的 bootstrap（`node.prompt`/`node.input`）若随每次交付刷新，就等于每轮搬走头探针的比对基准——头探针取投影首两条记录与 seed 前缀对齐（`_adopt_fresh_turn_seed_scaffold`），第二条正是 `_build_messages` 用 `node.prompt` 装成的 bootstrap user。基准一动，跨轮/跨重启的第一跳只能报 `fallback_seed_prefix_drift`，退回整段重建。
+- 不变量：验收 bootstrap 在 `create_acceptance_node` 一次定稿，之后没有任何写路径回写它（`_refresh_acceptance_node_metadata` 只维护 metadata）。每轮的变化量全部落在**只进本轮的尾块**里：交接通知（`_acceptance_handoff_message`）与重建尾块（`_acceptance_turn_tail`）都只给 `result_payload_ref` / `final_output_ref` + `_ACCEPTANCE_SUMMARY_CHARS` 有界摘要，交付正文一律不进上下文；恢复指纹同样只认验收标准模板 + 提交载荷 ref。派发侧合同见 `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收段）。
+- 症状：验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论 → 先确认 `node.prompt` 跨轮逐字节未变（变了就是刷新路径回写了 bootstrap），再看 `request_seed_source` 是否仍在 `scaffold_seed*`。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。
