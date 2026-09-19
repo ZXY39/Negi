@@ -856,6 +856,7 @@ function setCeoSessionPanelExpanded(expanded) {
         closeCeoSessionMenus();
     }
     syncCeoSessionPanelState();
+    renderCeoSessions();
     syncCeoSessionActions();
 }
 
@@ -9635,6 +9636,7 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
             ${isBulkMode ? `
                 <label class="ceo-session-checkbox" aria-label="${esc(`选择会话 ${title}`)}">
                     <input type="checkbox" data-session-bulk-checkbox="${esc(sessionId)}" ${isSelected ? "checked" : ""}>
+                    <span class="ceo-session-checkbox__box" aria-hidden="true"></span>
                 </label>
             ` : ""}
             <button

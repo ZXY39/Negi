@@ -95,7 +95,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { S, U, canCreateCeoSessions, syncCeoSessionActions, setCeoSessionTab, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions, requestDeleteCeoSession, requestProjectExit, displayChinaChannelLabel };`,
+        `${APP_CODE}\nthis.__testExports = { S, U, canCreateCeoSessions, syncCeoSessionActions, setCeoSessionTab, setCeoSessionPanelExpanded, renderCeoSessionCard, toggleCeoBulkSelectAll, buildCeoBulkDeleteSummary, requestDeleteSelectedCeoSessions, requestDeleteCeoSession, requestProjectExit, displayChinaChannelLabel };`,
         context
     );
     vm.runInContext(
@@ -293,6 +293,27 @@ test("renderCeoSessionCard shows checkbox markup in bulk mode", () => {
 
     assert.match(html, /data-session-bulk-checkbox="web:1"/);
     assert.match(html, /ceo-session-checkbox/);
+    assert.match(html, /class="ceo-session-checkbox__box"/);
+    assert.match(html, /<input type="checkbox"[^>]*data-session-bulk-checkbox="web:1"[^>]*>\s*<span class="ceo-session-checkbox__box"/);
+});
+
+test("setCeoSessionPanelExpanded drops bulk mode and re-renders so no checkbox survives collapse", () => {
+    const { S, setCeoSessionPanelExpanded, __context, __makeSet } = loadApp();
+
+    S.ceoSessionPanelExpanded = true;
+    S.ceoBulkMode = true;
+    S.ceoSelectedSessionIds = __makeSet(["web:1"]);
+    vm.runInContext(
+        "renderCeoSessions = () => { this.__renderCalls = (this.__renderCalls || 0) + 1; };",
+        __context
+    );
+
+    setCeoSessionPanelExpanded(false);
+
+    assert.equal(S.ceoSessionPanelExpanded, false);
+    assert.equal(S.ceoBulkMode, false);
+    assert.equal(S.ceoSelectedSessionIds.size, 0);
+    assert.equal(__context.__renderCalls, 1);
 });
 
 test("buildCeoBulkDeleteSummary deduplicates related task ids across sessions", () => {

@@ -2401,10 +2401,10 @@ textarea {
 
 .ceo-session-checkbox {
     position: absolute;
-    top: var(--space-3);
-    left: var(--space-3);
-    width: 20px;
-    height: 20px;
+    top: 12px;
+    left: 12px;
+    width: 22px;
+    height: 22px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -2412,12 +2412,66 @@ textarea {
     cursor: pointer;
 }
 
+/* 原生 input 铺满 label 并透明置顶:点击/键盘仍走原生 checkbox,视觉由 __box 承担 */
 .ceo-session-checkbox input {
-    width: 18px;
-    height: 18px;
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
     margin: 0;
-    accent-color: var(--brand-primary);
+    opacity: 0;
     cursor: pointer;
+}
+
+.ceo-session-checkbox__box {
+    position: relative;
+    width: 20px;
+    height: 20px;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, var(--border-strong) 88%, transparent);
+    background: var(--bg-surface-inner);
+    box-shadow: var(--shadow-sm);
+    pointer-events: none;
+    transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.ceo-session-checkbox__box::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 3px;
+    width: 6px;
+    height: 10px;
+    border-right: 2px solid transparent;
+    border-bottom: 2px solid transparent;
+    transform: rotate(45deg);
+    opacity: 0;
+    transition: opacity 0.18s ease, border-color 0.18s ease;
+}
+
+.ceo-session-checkbox:hover .ceo-session-checkbox__box {
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, var(--border-strong));
+}
+
+.ceo-session-checkbox input:focus-visible + .ceo-session-checkbox__box {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 22%, transparent);
+}
+
+.ceo-session-checkbox input:checked + .ceo-session-checkbox__box {
+    border-color: var(--brand-primary);
+    background: var(--brand-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-primary) 14%, transparent);
+}
+
+.ceo-session-checkbox input:checked + .ceo-session-checkbox__box::after {
+    opacity: 1;
+    border-right-color: var(--bg-panel);
+    border-bottom-color: var(--bg-panel);
+}
+
+.ceo-session-checkbox input:disabled + .ceo-session-checkbox__box {
+    opacity: 0.5;
 }
 
 .ceo-session-select:focus-visible,
@@ -2586,10 +2640,19 @@ textarea {
     display: none !important;
 }
 
-/* bulk 模式左上角要让给骑角 unread 角标:勾选框整体下移右移 6px 避让 */
-.ceo-session-card.is-bulk-mode .ceo-session-checkbox {
-    top: calc(var(--space-3) + 6px);
-    left: calc(var(--space-3) + 6px);
+/* 多选态左上角归勾选框:unread 角标改挂卡片右上角(此时 more 菜单已隐藏,该位置空闲) */
+.ceo-session-card.is-bulk-mode .ceo-session-unread {
+    left: auto;
+    right: calc(-1 * var(--space-3) - 7px);
+}
+
+/* 角标已让开左上角,首行不再需要为它下移 */
+.ceo-session-card.is-bulk-mode.has-unread .ceo-session-head {
+    padding-top: 0;
+}
+
+.ceo-session-panel[data-panel-state="collapsed"] .ceo-session-checkbox {
+    display: none !important;
 }
 
 .ceo-session-menu {
@@ -5418,6 +5481,12 @@ textarea {
         height: 22px;
         padding: 0 7px;
         font-size: 0.72rem;
+    }
+
+    /* 特异性与上面的窄屏角标规则持平且位置靠后:多选态仍把角标让到右上角 */
+    .ceo-session-card.is-bulk-mode .ceo-session-unread {
+        left: auto;
+        right: calc(-1 * var(--space-3) - 7px);
     }
 
     .ceo-session-actions {
