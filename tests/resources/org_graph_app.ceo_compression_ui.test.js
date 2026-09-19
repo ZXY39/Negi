@@ -91,15 +91,11 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, syncCeoCompressionToast, syncCeoModelRetryToast, setCeoSessionSnapshotCache, handleCeoError, syncCeoPrimaryButton };`,
+        this.__testExports = { S, U, syncCeoCompressionDivider, syncCeoModelRetryToast, setCeoSessionSnapshotCache, handleCeoError, syncCeoPrimaryButton };`,
         context
     );
-    context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
-    context.__testExports.U.ceoCompressionToastText = new StubHTMLElement();
     context.__testExports.U.ceoModelRetryToast = new StubHTMLElement();
     context.__testExports.U.ceoModelRetryToastText = new StubHTMLElement();
-    context.__testExports.U.ceoCompressionActions = new StubHTMLElement();
-    context.__testExports.U.ceoCompressionPause = new StubHTMLButtonElement();
     context.__testExports.U.ceoInput = new StubHTMLTextAreaElement();
     context.__testExports.U.ceoSend = new StubHTMLButtonElement();
     context.__testExports.S.ceoUploads = [];
@@ -116,25 +112,14 @@ function loadApp() {
     return context.__testExports;
 }
 
-test("compression toast keeps dedicated compression pause controls hidden while compression is running", () => {
-    const { syncCeoCompressionToast, S, U } = loadApp();
-    S.ceoSnapshotCache = {
-        "web:test": {
-            session_id: "web:test",
-            inflight_turn: {
-                status: "running",
-                compression: { status: "running", text: "上下文压缩中", source: "token_compression" },
-            },
-        },
-    };
-    U.ceoCompressionActions.hidden = true;
-    U.ceoCompressionPause.disabled = true;
+test("压缩进度改由会话流区分线承载，输入区不再保留压缩 toast 元素", () => {
+    const html = fs.readFileSync("g3ku/web/frontend/org_graph.html", "utf8");
 
-    syncCeoCompressionToast();
-
-    assert.equal(U.ceoCompressionToast.hidden, false);
-    assert.equal(U.ceoCompressionActions.hidden, true);
-    assert.equal(U.ceoCompressionPause.disabled, true);
+    assert.equal(html.includes("ceo-compression-toast"), false);
+    assert.equal(html.includes("ceoModelModeCurrent"), false);
+    assert.equal(html.includes("id=\"ceo-model-mode-current\""), false);
+    assert.equal(html.includes("ceo-context-usage-brain-ring"), true);
+    assert.match(html, /<span id="ceo-context-usage-brain-hint"[^>]*>长按压缩上下文<\/span>/);
 });
 
 test("model retry toast shows retry count and provider error from live inflight state", () => {

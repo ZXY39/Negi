@@ -692,6 +692,27 @@ def _session_edit_fork_gates(
     )
 
 
+def _snapshot_compression_marker(metadata: Any) -> dict[str, Any]:
+    """把转录里的上下文压缩区分线行翻成 UI 载荷。
+
+    键名/取值与 session_agent.CONTEXT_COMPRESSION_MARKER_* 一致；这里用字面量是
+    为避免与 session_agent 形成循环导入（同 web_ceo_sessions 里 discarded 的做法）。
+    """
+    if str(metadata.get("kind") or "").strip().lower() != "context_compression":
+        return {}
+    state = str(metadata.get("compression_state") or "").strip().lower()
+    if state not in {"completed", "paused"}:
+        return {}
+    marker: dict[str, Any] = {
+        "state": state,
+        "source": str(metadata.get("source") or "").strip().lower(),
+    }
+    stats = metadata.get("stats")
+    if isinstance(stats, dict) and stats:
+        marker["stats"] = dict(stats)
+    return marker
+
+
 def _build_ceo_snapshot(
     messages: list[dict[str, Any]] | None,
     *,
@@ -779,6 +800,9 @@ def _build_ceo_snapshot(
             turn_usage = transcript_usage or (usage_by_turn.get(turn_id) if turn_id else None)
             if turn_usage:
                 item['usage'] = turn_usage
+        marker = _snapshot_compression_marker(metadata)
+        if marker:
+            item['compression_marker'] = marker
         items.append(item)
     return items
 

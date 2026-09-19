@@ -51,6 +51,13 @@ _INTERNAL_PROMPT_KINDS = frozenset(
 )
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 _ASSISTANT_STREAM_FLUSH_WINDOW_SECONDS = 0.075
+# 上下文压缩区分线：转录里一条 UI-only 的 system 行，永久标出「已折叠的历史」与
+# 「之后新回合」的分界。手动压缩由 API 层写，自动（发送时）压缩由回合收尾写。
+CONTEXT_COMPRESSION_MARKER_KIND = "context_compression"
+CONTEXT_COMPRESSION_MARKER_LABELS = {
+    "completed": "会话已压缩",
+    "paused": "压缩已暂停",
+}
 
 
 def _project_transcript_canonical_context(canonical_context: Any) -> dict[str, Any]:
@@ -239,6 +246,10 @@ class RuntimeAgentSession:
             data["last_error"] = asdict(self._state.last_error)
         if self._last_stop_reason:
             data["stop_reason"] = self._last_stop_reason
+        # 回合外的手动压缩没有 inflight turn 可挂载进度，state 快照是它唯一的实时通道。
+        compression = self._compression_snapshot()
+        if compression:
+            data["compression"] = compression
         return data
 
     @staticmethod
@@ -1988,6 +1999,51 @@ class RuntimeAgentSession:
             return {}
         return snapshot
 
+    def append_context_compression_marker(
+        self,
+        *,
+        state: str,
+        source: str,
+        stats: dict[str, Any] | None = None,
+        persisted_session: Any | None = None,
+    ) -> bool:
+        """在转录末尾落一条上下文压缩区分线，把已折叠的历史与之后的新回合永久分开。
+
+        UI-only：prompt_visible=False 让模型侧看不到它，ui_visible=True 让快照放行。
+        传入 persisted_session 时由调用方负责 save（回合收尾本来就是一次整体落盘）。
+        """
+        normalized_state = str(state or "").strip().lower()
+        label = CONTEXT_COMPRESSION_MARKER_LABELS.get(normalized_state)
+        if not label:
+            return False
+        owns_store = persisted_session is None
+        store = getattr(self._loop, "sessions", None)
+        if owns_store and store is None:
+            return False
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key:
+            return False
+        try:
+            target = persisted_session if persisted_session is not None else store.get_or_create(session_key)
+            target.add_message(
+                "system",
+                label,
+                metadata={
+                    "kind": CONTEXT_COMPRESSION_MARKER_KIND,
+                    "compression_state": normalized_state,
+                    "source": str(source or "").strip().lower(),
+                    "prompt_visible": False,
+                    "ui_visible": True,
+                    "stats": dict(stats or {}),
+                },
+            )
+            if owns_store:
+                store.save(target)
+        except Exception:
+            logger.opt(exception=True).warning("Failed to persist context compression marker")
+            return False
+        return True
+
     def _begin_frontdoor_compression_generation(self) -> int:
         self._frontdoor_compression_generation_seq = int(self._frontdoor_compression_generation_seq or 0) + 1
         generation_id = self._frontdoor_compression_generation_seq
@@ -2537,6 +2593,14 @@ class RuntimeAgentSession:
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
             persisted_session.add_message("assistant", assistant_text, **assistant_payload)
+            # 发送时（自动）压缩在收尾处落线：区分线以上是这轮被折进摘要的历史。
+            if str(getattr(self, "_frontdoor_compressed_turn_id", "") or "").strip() == turn_id and turn_id:
+                setattr(self, "_frontdoor_compressed_turn_id", "")
+                self.append_context_compression_marker(
+                    state="completed",
+                    source="auto",
+                    persisted_session=persisted_session,
+                )
             if self._state.session_key.startswith("web:"):
                 from g3ku.runtime.web_ceo_sessions import update_ceo_session_after_turn
 
@@ -3625,6 +3689,11 @@ class RuntimeAgentSession:
         if manual:
             self._set_paused_execution_context(paused_snapshot)
         await self._emit_safe_stop_notice("pause")
+        # 暂停正好落在自动压缩途中：区分线要停在「压缩已暂停」而不是无声消失，否则会
+        # 留下一段既没有摘要也没有标记的历史。手动压缩走自己的收尾，不重复落线。
+        pausing_active_compression = (
+            manual and getattr(self, "_active_frontdoor_compression_generation", None) is not None
+        )
         self._cancel_active_frontdoor_compression_generation()
         if self._active_cancel_token is not None:
             self._active_cancel_token.cancel(reason="用户已请求暂停，正在安全停止...")
@@ -3643,6 +3712,12 @@ class RuntimeAgentSession:
             self._last_stop_reason = "user_pause"
             self._sync_completed_continuity_snapshot(source_reason="manual_stop")
             self.clear_paused_execution_context()
+            if pausing_active_compression:
+                self.append_context_compression_marker(state="paused", source="auto")
+                # 摘要任务可能在 cancel_session_tasks 里被直接掐掉，来不及走自己的
+                # finally；这里替它收口，否则下一回合会被一个已无人认领的代际挡住。
+                self._compression_state = {}
+                self._active_frontdoor_compression_generation = None
             # Manual pause persists the current prompt's transcript state using the
             # existing turn id so the pending user message can be updated in place.
             # Clear the active turn binding again afterwards so the next real user

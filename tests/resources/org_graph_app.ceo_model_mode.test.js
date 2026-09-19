@@ -213,7 +213,6 @@ function mountControl(app, { readonly = false, chain = ["alpha", "beta", "gamma"
     S.ceoSessions = [{ session_id: "web:test", is_readonly: readonly }];
     U.ceoComposerUsageBrain = new StubHTMLElement();
     U.ceoModelModePanel = new StubHTMLElement();
-    U.ceoModelModeCurrent = new StubHTMLElement();
     U.ceoModelModeBadge = new StubHTMLElement();
     U.ceoModelModeUsageFill = new StubHTMLElement();
     U.ceoModelModeUsageText = new StubHTMLElement();
@@ -248,7 +247,8 @@ test("默认态是模型链，脑图标未展开面板", () => {
     assert.equal(app.U.ceoModelModePanel.hidden, true);
     assert.equal(app.U.ceoModelModeChain.getAttribute("aria-checked"), "true");
     assert.equal(app.U.ceoModelModePinned.getAttribute("aria-checked"), "false");
-    assert.equal(app.U.ceoModelModeBadge.textContent, "模型链");
+    // 胶囊不再当模式指示灯：它只在面板打开时按当前生效模型刷新。
+    assert.equal(app.U.ceoModelModeBadge.textContent, "");
     assert.equal(app.U.ceoComposerUsageBrain.getAttribute("aria-expanded"), "false");
     assert.equal(app.U.ceoComposerUsageBrain.classList.contains("is-panel-open"), false);
 });
@@ -283,7 +283,8 @@ test("固定模型后链面板换成指定模型列表并显示固定标签", ()
     assert.equal(app.U.ceoModelChainPane.hidden, true);
     assert.equal(app.U.ceoModelPicker.hidden, false);
     assert.equal(app.U.ceoModelModePinned.getAttribute("aria-checked"), "true");
-    assert.equal(app.U.ceoModelModeBadge.textContent, "会话固定 · Alpha 配置");
+    // 胶囊直接显示正在使用的模型配置名，不再带「会话固定 ·」前缀。
+    assert.equal(app.U.ceoModelModeBadge.textContent, "Alpha 配置");
 });
 
 test("固定模型失效时回到模型链并给出回退提示", () => {
@@ -297,7 +298,9 @@ test("固定模型失效时回到模型链并给出回退提示", () => {
     app.openCeoModelModePanel();
 
     assert.equal(app.U.ceoModelModeChain.getAttribute("aria-checked"), "true");
-    assert.equal(app.U.ceoModelModeBadge.textContent, "模型链");
+    // 既无预估也无固定项时胶囊回落到占位态。
+    assert.equal(app.U.ceoModelModeBadge.textContent, "等待 Leader 上下文预估");
+    assert.equal(app.U.ceoModelModeBadge.classList.contains("is-pending"), true);
     assert.equal(app.U.ceoModelModeNote.hidden, false);
     assert.match(app.U.ceoModelModeNote.textContent, /已自动回退模型链/);
     // 失效后展示的是真实模型链，而不是固定项。
@@ -318,8 +321,22 @@ test("面板头部展示当前模型展示名与上下文数字", () => {
 
     app.syncCeoModelModePanelUsage();
 
-    assert.equal(app.U.ceoModelModeCurrent.textContent, "Alpha 配置");
-    assert.match(app.U.ceoModelModeUsageText.textContent, /alpha · 12000\/390000 TOKEN/);
+    assert.equal(app.U.ceoModelModeBadge.textContent, "Alpha 配置");
+    // 进度条下方只留 token 占用值，模型名不再重复一遍。
+    assert.equal(app.U.ceoModelModeUsageText.hidden, false);
+    assert.equal(app.U.ceoModelModeUsageText.textContent, "12000/390000 TOKEN");
+});
+
+test("没有上下文预估时进度条下方整行隐藏", () => {
+    const app = loadApp();
+    mountControl(app);
+    app.openCeoModelModePanel();
+    app.S.ceoComposerUsageEstimate = null;
+
+    app.syncCeoModelModePanelUsage();
+
+    assert.equal(app.U.ceoModelModeUsageText.hidden, true);
+    assert.equal(app.U.ceoModelModeUsageText.textContent, "");
 });
 
 test("选择模型提交 PATCH 并收起面板", async () => {
@@ -343,7 +360,6 @@ test("切回模型链提交 chain 载荷并留在面板继续看链", async () =
 
     assert.deepEqual(callsOf(app), [["patch", "web:test", { mode: "chain" }]]);
     assert.equal(app.U.ceoModelModeChain.getAttribute("aria-checked"), "true");
-    assert.equal(app.U.ceoModelModeBadge.textContent, "模型链");
     assert.equal(app.U.ceoModelModePanel.hidden, true);
 });
 

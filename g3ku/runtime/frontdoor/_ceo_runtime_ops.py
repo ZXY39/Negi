@@ -4085,6 +4085,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         provider_request_body: dict[str, Any] | None = None,
         usage: dict[str, Any] | None = None,
         provider_request_started_at: str = "",
+        request_kind: str = "frontdoor_actual_request",
+        request_lane: str = "visible_frontdoor",
     ) -> dict[str, Any]:
         session_key = str(state.get("session_key") or getattr(getattr(runtime, "context", None), "session_key", "") or "").strip()
         if not session_key:
@@ -4111,8 +4113,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             provider_request_meta=provider_request_meta,
             provider_request_body=provider_request_body,
             usage=usage,
-            request_kind="frontdoor_actual_request",
-            request_lane="visible_frontdoor",
+            request_kind=request_kind,
+            request_lane=request_lane,
             provider_request_started_at=provider_request_started_at,
         )
         if target_session is not None:
@@ -6806,6 +6808,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 )
                 request_messages = list(preflight.request_messages)
                 durable_request_messages = strip_multimodal_blocks_from_message_records(request_messages)
+                if runtime_session is not None and dict(preflight.diagnostics or {}).get("applied"):
+                    # 按 turn 记账，回合收尾时据此落「会话已压缩」区分线。用 turn_id 而不是
+                    # 布尔标志：被打断的回合留下的标志不会被下一个回合误读成一次新压缩。
+                    compressed_turn_id = str(getattr(runtime_session, "_active_turn_id", "") or "").strip()
+                    setattr(runtime_session, "_frontdoor_compressed_turn_id", compressed_turn_id)
                 post_compaction_tokens = int(preflight.final_request_tokens or 0)
                 post_compaction_snapshot = build_runtime_send_token_preflight_snapshot(
                     context_window_tokens=context_window_tokens,

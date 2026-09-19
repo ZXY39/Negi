@@ -471,6 +471,23 @@ class ApiClient {
         return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/model-selection`);
     }
 
+    static async startCeoContextCompression(sessionId) {
+        return this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/compress-context`, {
+            body: {},
+            timeoutMs: 20000,
+        });
+    }
+
+    static async getCeoContextCompression(sessionId) {
+        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/compress-context`);
+    }
+
+    static async cancelCeoContextCompression(sessionId) {
+        return this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/compress-context/cancel`, {
+            body: {},
+        });
+    }
+
     static async updateCeoSessionModelSelection(sessionId, payload = {}) {
         return this._request("PATCH", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/model-selection`, {
             body: payload || {},

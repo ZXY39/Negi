@@ -31,7 +31,15 @@ const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
-const CEO_COMPRESSION_TOAST_TEXT = "上下文压缩中";
+// 长按上下文脑图标满 5 秒即发起手动压缩；进度环按住期间连续刷新。
+const CEO_BRAIN_LONG_PRESS_MS = 5000;
+const CEO_COMPRESSION_POLL_MS = 1000;
+const CEO_COMPRESSION_DIVIDER_CLASS = "ceo-compression-divider";
+const CEO_COMPRESSION_TEXT = {
+    running: "上下文压缩中",
+    completed: "会话已压缩",
+    paused: "压缩已暂停",
+};
 const CEO_COMPOSER_DRAFT_CACHE_KEY = "g3ku.ceo.composer-drafts.v1";
 const CEO_COMPOSER_DRAFT_CACHE_LIMIT = 24;
 const CEO_FOLLOW_UP_QUEUE_CACHE_KEY = "g3ku.ceo.follow-up-queues.v1";
@@ -125,6 +133,14 @@ const S = {
     ceoComposerUsageRequestSeq: 0,
     ceoComposerUsageBusy: false,
     ceoComposerUsageNeedsRefresh: false,
+    // 手动上下文压缩：本机按住脑图标满 5 秒后由服务端起跑，这里只记发起方与轮询。
+    ceoContextCompressionStatus: "idle",
+    ceoContextCompressionCancelRequested: false,
+    ceoContextCompressionSessionId: "",
+    ceoContextCompressionPollId: null,
+    ceoBrainHold: { active: false, startedAt: 0, rafId: null, sessionId: "" },
+    // 长按满阈值后到达的那次 click 是副产物，不能顺带弹开模型面板。
+    ceoBrainHoldConsumedClick: false,
     ceoModelSelection: {
         sessionId: "",
         mode: "chain",
@@ -428,7 +444,6 @@ const U = {
     ceoEditResendBanner: document.getElementById("ceo-edit-resend-banner"),
     ceoContextLoadNotice: document.getElementById("ceo-context-load-notice"),
     ceoModelModePanel: document.getElementById("ceo-model-mode-panel"),
-    ceoModelModeCurrent: document.getElementById("ceo-model-mode-current"),
     ceoModelModeBadge: document.getElementById("ceo-model-mode-badge"),
     ceoModelModeUsageFill: document.getElementById("ceo-model-mode-usage-fill"),
     ceoModelModeUsageText: document.getElementById("ceo-model-mode-usage-text"),
@@ -451,8 +466,8 @@ const U = {
     ceoComposerUsageBrain: document.getElementById("ceo-context-usage-brain"),
     ceoComposerUsageBrainBase: document.getElementById("ceo-context-usage-brain-base"),
     ceoComposerUsageBrainFill: document.getElementById("ceo-context-usage-brain-fill"),
-    ceoCompressionToast: document.getElementById("ceo-compression-toast"),
-    ceoCompressionToastText: document.getElementById("ceo-compression-toast-text"),
+    ceoComposerUsageBrainRing: document.getElementById("ceo-context-usage-brain-ring"),
+    ceoComposerUsageBrainHint: document.getElementById("ceo-context-usage-brain-hint"),
     ceoModelRetryToast: document.getElementById("ceo-model-retry-toast"),
     ceoModelRetryToastText: document.getElementById("ceo-model-retry-toast-text"),
     ceoSend: document.getElementById("ceo-send-btn"),
@@ -1954,12 +1969,19 @@ function finishCeoModelChainDrag(event) {
     renderCeoModelChainPane();
 }
 
+function ceoModelBadgeTitle(estimate) {
+    const sessionId = String(activeSessionId() || "").trim();
+    const effectiveKey = ceoModelEffectivePinnedKey(ceoModelSelectionFor(sessionId));
+    const fromEstimate = estimate ? ceoModelUsageHeadlineTitle(estimate.provider_model) : "";
+    return fromEstimate || ceoModelDisplayTitle(ceoModelCatalogItem(effectiveKey)) || "";
+}
+
 function syncCeoModelModePanelUsage() {
     const panel = U.ceoModelModePanel;
-    const current = U.ceoModelModeCurrent;
+    const badge = U.ceoModelModeBadge;
     const fill = U.ceoModelModeUsageFill;
     const text = U.ceoModelModeUsageText;
-    if (!current || !fill || !text) return;
+    if (!badge || !fill || !text) return;
     const estimate = ceoCurrentUsageEstimate();
     const hasEstimate = !!estimate;
     const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
@@ -1969,12 +1991,15 @@ function syncCeoModelModePanelUsage() {
         panel.style.setProperty("--ceo-context-usage-color", `hsl(${hue.toFixed(1)} 82% 58%)`);
     }
     fill.style.width = `${Math.max(0, Math.min(100, visualRatio * 100))}%`;
-    current.textContent = hasEstimate
-        ? (ceoModelUsageHeadlineTitle(estimate.provider_model) || "current-model")
-        : "等待 Leader 上下文预估";
+    const title = ceoModelBadgeTitle(estimate);
+    badge.textContent = title || "等待 Leader 上下文预估";
+    badge.setAttribute?.("title", title);
+    badge.classList?.toggle("is-pending", !title);
+    // 进度条下方只留 token 占用值；没有数据时整行隐藏，不再重复脑图标上的占位文案。
+    text.hidden = !hasEstimate;
     text.textContent = hasEstimate
-        ? `${estimate.provider_model || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
-        : "等待 Leader 上下文预估";
+        ? `${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
+        : "";
 }
 
 function ceoModelChainConfirmVisible(selection) {
@@ -2003,11 +2028,6 @@ function syncCeoModelModeControl() {
     if (U.ceoModelModePanel) U.ceoModelModePanel.hidden = !panelOpen;
     if (U.ceoModelModeChain) U.ceoModelModeChain.setAttribute("aria-checked", effectiveKey ? "false" : "true");
     if (U.ceoModelModePinned) U.ceoModelModePinned.setAttribute("aria-checked", effectiveKey ? "true" : "false");
-    if (U.ceoModelModeBadge) {
-        U.ceoModelModeBadge.textContent = effectiveKey
-            ? `会话固定 · ${ceoModelDisplayTitle(ceoModelCatalogItem(effectiveKey)) || effectiveKey}`
-            : "模型链";
-    }
     if (U.ceoModelPicker) U.ceoModelPicker.hidden = !(panelOpen && selection?.pickerOpen);
     if (U.ceoModelChainPane) U.ceoModelChainPane.hidden = !(panelOpen && !selection?.pickerOpen);
     if (U.ceoModelModeNote) {
@@ -2126,13 +2146,88 @@ function confirmCeoModelChainSwitch() {
     return saveCeoModelSelection("chain");
 }
 
+// ---- 长按上下文脑图标：按住满 5 秒发起手动压缩 -----------------------------
+
+function setCeoBrainHoldProgress(progress) {
+    const shell = U.ceoComposerUsageBrain;
+    const clamped = Math.max(0, Math.min(1, Number(progress) || 0));
+    if (typeof shell?.style?.setProperty === "function") {
+        shell.style.setProperty("--ceo-brain-hold", String(clamped));
+    }
+    shell?.classList?.toggle("is-holding", clamped > 0);
+}
+
+function ceoBrainHoldBlockedReason() {
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId) return "";
+    if (!sessionId.startsWith("web:") || activeSessionIsReadonly()) return "只有本地会话可以压缩上下文";
+    if (S.ceoUploadBusy) return "附件上传中，请稍后再试";
+    if (activeCeoSessionCompressionState()) return "正在压缩上下文";
+    return "";
+}
+
+function beginCeoBrainHold(event) {
+    if (event?.button !== undefined && Number(event.button) !== 0) return;
+    if (event?.pointerType === "touch") return;
+    const hold = S.ceoBrainHold;
+    if (hold.active) return;
+    hold.active = true;
+    hold.startedAt = Date.now();
+    hold.sessionId = String(activeSessionId() || "").trim();
+    stepCeoBrainHold();
+}
+
+function stepCeoBrainHold() {
+    const hold = S.ceoBrainHold;
+    if (!hold.active) return;
+    const elapsed = Date.now() - Number(hold.startedAt || 0);
+    const progress = Math.min(1, elapsed / CEO_BRAIN_LONG_PRESS_MS);
+    setCeoBrainHoldProgress(progress);
+    if (progress < 1) {
+        hold.rafId = window.requestAnimationFrame(() => stepCeoBrainHold());
+        return;
+    }
+    const sessionId = String(hold.sessionId || "");
+    const blocked = ceoBrainHoldBlockedReason();
+    // 满阈值后这次按住要吞掉随后到达的 click，否则松手会顺手把模型面板弹开。
+    S.ceoBrainHoldConsumedClick = true;
+    finishCeoBrainHold();
+    if (blocked) {
+        showToast({ title: "暂不能压缩上下文", text: blocked, kind: "warn" });
+        return;
+    }
+    void beginCeoContextCompression(sessionId);
+}
+
+function finishCeoBrainHold() {
+    const hold = S.ceoBrainHold;
+    if (!hold.active) return false;
+    hold.active = false;
+    hold.startedAt = 0;
+    hold.sessionId = "";
+    if (hold.rafId !== null && hold.rafId !== undefined) {
+        window.cancelAnimationFrame(hold.rafId);
+    }
+    hold.rafId = null;
+    setCeoBrainHoldProgress(0);
+    return true;
+}
+
 function bindCeoModelModeControls() {
     const brain = U.ceoComposerUsageBrain;
     brain?.addEventListener("click", (event) => {
         event.stopPropagation();
+        if (S.ceoBrainHoldConsumedClick) {
+            S.ceoBrainHoldConsumedClick = false;
+            return;
+        }
         if (S.ceoModelSelection.panelOpen) closeCeoModelModePanel();
         else openCeoModelModePanel();
     });
+    brain?.addEventListener("pointerdown", (event) => beginCeoBrainHold(event));
+    brain?.addEventListener("pointerup", () => finishCeoBrainHold());
+    brain?.addEventListener("pointerleave", () => finishCeoBrainHold());
+    brain?.addEventListener("pointercancel", () => finishCeoBrainHold());
     brain?.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
@@ -2277,6 +2372,16 @@ function syncCeoComposerUsageOutline() {
     if (S.ceoModelSelection.panelOpen) syncCeoModelModePanelUsage();
 }
 
+function activeCeoSessionHasHistory(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    const item = (S.ceoSessions || []).find((entry) => String(entry?.session_id || "").trim() === key) || null;
+    if (item) return sessionMessageCount(item) > 0;
+    // 目录里查不到时（例如刚从缓存渲染）退回已缓存的转录条数。
+    const cached = getCeoSessionSnapshotCache(key);
+    return !!(cached?.messages || []).length;
+}
+
 async function refreshCeoComposerUsageEstimate() {
     const sessionId = String(activeSessionId() || "").trim();
     if (!sessionId || activeSessionIsReadonly() || S.ceoUploadBusy) {
@@ -2293,7 +2398,8 @@ async function refreshCeoComposerUsageEstimate() {
         return null;
     }
     const entries = buildCeoComposerPreflightEntries(sessionId);
-    if (!entries.length) {
+    if (!entries.length && !activeCeoSessionHasHistory(sessionId)) {
+        // 只有新会话（没有任何历史）才没有可显示的占用值。
         clearCeoComposerUsageEstimate();
         return null;
     }
@@ -2736,6 +2842,16 @@ function normalizeCeoModelRetryStatus(value = null) {
     return next;
 }
 
+function normalizeCeoSnapshotCompressionMarker(marker = null) {
+    if (!marker || typeof marker !== "object") return null;
+    const state = String(marker?.state || "").trim().toLowerCase();
+    if (state !== "completed" && state !== "paused") return null;
+    const next = { state };
+    const source = String(marker?.source || "").trim().toLowerCase();
+    if (source) next.source = source;
+    return next;
+}
+
 function normalizeCeoSnapshotMessage(message = {}) {
     if (!message || typeof message !== "object") return null;
     const role = String(message?.role || "").trim().toLowerCase();
@@ -2744,6 +2860,8 @@ function normalizeCeoSnapshotMessage(message = {}) {
         role,
         content: String(message?.content || ""),
     };
+    const compressionMarker = normalizeCeoSnapshotCompressionMarker(message?.compression_marker);
+    if (compressionMarker) next.compression_marker = compressionMarker;
     const turnId = String(message?.turn_id || "").trim();
     if (turnId) next.turn_id = turnId;
     const timestamp = String(message?.timestamp || "").trim();
@@ -2998,7 +3116,7 @@ function setCeoSessionSnapshotCache(sessionId, entry = {}) {
         [key]: normalized,
     });
     schedulePersistCeoSessionSnapshotCache();
-    syncCeoCompressionToast();
+    syncCeoCompressionDivider();
     syncCeoModelRetryToast();
     syncCeoComposerUsageOutline();
     if (!ceoRunningInflightTurnForSession(key) && !hasActiveCeoComposerUsageEstimate(key)) {
@@ -3030,14 +3148,21 @@ function clearCeoSessionSnapshotCache(sessionId) {
     delete next[key];
     S.ceoSnapshotCache = pruneCeoSessionSnapshotCache(next);
     schedulePersistCeoSessionSnapshotCache();
-    syncCeoCompressionToast();
+    syncCeoCompressionDivider();
     syncCeoModelRetryToast();
     syncCeoComposerUsageOutline();
     if (!hasActiveCeoComposerUsageEstimate(key)) scheduleCeoComposerUsageRefresh();
     return true;
 }
 
+function activeCeoManualCompressionRunning() {
+    return String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running"
+        && String(S.ceoContextCompressionSessionId || "") === String(activeSessionId() || "").trim();
+}
+
 function activeCeoSessionCompressionState() {
+    // 回合外的手动压缩没有 inflight turn，进度只存在于本机发起状态里；自动压缩仍读快照。
+    if (activeCeoManualCompressionRunning()) return { status: "running", source: "manual_context_compression" };
     const cacheEntry = getCeoSessionSnapshotCache(activeSessionId());
     const inflightTurn = normalizeCeoSnapshotInflight(cacheEntry?.inflight_turn);
     const inflightStatus = String(inflightTurn?.status || "").trim().toLowerCase();
@@ -3047,16 +3172,162 @@ function activeCeoSessionCompressionState() {
     return String(compression.status || "").trim().toLowerCase() === "running" ? compression : null;
 }
 
-function syncCeoCompressionToast() {
-    const toastEl = U.ceoCompressionToast;
-    const textEl = U.ceoCompressionToastText;
-    if (!toastEl || !textEl) return;
-    const compression = activeCeoSessionCompressionState();
-    const visible = !!compression;
-    textEl.textContent = visible ? CEO_COMPRESSION_TOAST_TEXT : "";
-    toastEl.hidden = !visible;
-    if (toastEl.classList?.toggle) toastEl.classList.toggle("is-visible", visible);
-    toastEl.setAttribute("aria-hidden", visible ? "false" : "true");
+function buildCeoCompressionDividerControl(state, interactive) {
+    if (state === "running" && interactive) {
+        return `<button type="button" class="ceo-compression-divider-action" data-ceo-compress-pause
+               aria-label="暂停压缩" title="暂停压缩"><i data-lucide="loader-circle"></i></button>`;
+    }
+    if (state === "running") {
+        return '<span class="ceo-compression-divider-icon" aria-hidden="true"><i data-lucide="loader-circle"></i></span>';
+    }
+    if (state === "paused") {
+        return '<span class="ceo-compression-divider-icon" aria-hidden="true"><i data-lucide="pause"></i></span>';
+    }
+    // 完成态按需求只留文案，不再挂图标。
+    return "";
+}
+
+function appendCeoCompressionDivider(state, options = {}) {
+    const { interactive = true } = options;
+    if (!U.ceoFeed || !CEO_COMPRESSION_TEXT[state]) return null;
+    const el = document.createElement("div");
+    el.className = `message system ${CEO_COMPRESSION_DIVIDER_CLASS} is-${state}`;
+    el.dataset.ceoCompressionState = state;
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", state === "running" ? "polite" : "off");
+    el.innerHTML = `<div class="ceo-compression-divider-inner"><span>${
+        CEO_COMPRESSION_TEXT[state]
+    }</span>${buildCeoCompressionDividerControl(state, interactive)}</div>`;
+    mutateCeoFeed(() => {
+        U.ceoFeed.appendChild(el);
+        icons();
+    }, { scrollMode: "preserve" });
+    return el;
+}
+
+function removeCeoCompressionLiveDivider() {
+    if (typeof U.ceoFeed?.querySelector !== "function") return false;
+    const el = U.ceoFeed.querySelector(`.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`);
+    if (!el) return false;
+    el.remove();
+    return true;
+}
+
+function syncCeoCompressionDivider() {
+    if (!U.ceoFeed || typeof U.ceoFeed.querySelector !== "function") return;
+    const running = !!activeCeoSessionCompressionState();
+    const existing = U.ceoFeed.querySelector(`.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`);
+    if (running && !existing) {
+        appendCeoCompressionDivider("running");
+        scrollCeoFeedToBottom();
+        return;
+    }
+    if (!running && existing) removeCeoCompressionLiveDivider();
+}
+
+function stopCeoContextCompressionPolling() {
+    if (S.ceoContextCompressionPollId !== null) {
+        window.clearInterval(S.ceoContextCompressionPollId);
+        S.ceoContextCompressionPollId = null;
+    }
+}
+
+function applyCeoContextCompressionStatus(payload = {}) {
+    const status = String(payload?.status || "idle").trim().toLowerCase();
+    const sessionId = String(S.ceoContextCompressionSessionId || activeSessionId() || "").trim();
+    const previous = String(S.ceoContextCompressionStatus || "").trim().toLowerCase();
+    S.ceoContextCompressionStatus = status;
+    S.ceoContextCompressionCancelRequested = payload?.cancel_requested === true;
+    if (status !== "running") {
+        stopCeoContextCompressionPolling();
+        S.ceoContextCompressionSessionId = "";
+    }
+    if (previous === "running" && status !== "running") {
+        // 区分线由转录里的持久标记行承载；终局后重开会话才能拿到它，这里强制刷新一次。
+        S.ceoFeedRenderSignature = "";
+        if (sessionId) void reloadCeoSessionSnapshot(sessionId);
+    }
+    syncCeoCompressionDivider();
+    syncCeoComposerUsageOutline();
+}
+
+async function reloadCeoSessionSnapshot(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key || key !== String(activeSessionId() || "").trim()) return;
+    // 区分线只随 snapshot.ceo 的转录行下发；重开这条 WS 才能拿到刚落盘的标记行。
+    clearCeoSessionSnapshotCache(key);
+    closeCeoWs();
+    initCeoWs();
+}
+
+function startCeoContextCompressionPolling(sessionId) {
+    stopCeoContextCompressionPolling();
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    S.ceoContextCompressionPollId = window.setInterval(async () => {
+        if (String(activeSessionId() || "").trim() !== key) {
+            stopCeoContextCompressionPolling();
+            return;
+        }
+        try {
+            const payload = await ApiClient.getCeoContextCompression(key);
+            applyCeoContextCompressionStatus(payload || {});
+        } catch (error) {
+            stopCeoContextCompressionPolling();
+        }
+    }, CEO_COMPRESSION_POLL_MS);
+}
+
+async function beginCeoContextCompression(sessionId) {
+    const key = String(sessionId || "").trim();
+    if (!key) return;
+    if (String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running") return;
+    S.ceoContextCompressionSessionId = key;
+    S.ceoContextCompressionStatus = "running";
+    S.ceoContextCompressionCancelRequested = false;
+    syncCeoCompressionDivider();
+    try {
+        const payload = await ApiClient.startCeoContextCompression(key);
+        applyCeoContextCompressionStatus(payload || {});
+        if (String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running") {
+            startCeoContextCompressionPolling(key);
+        }
+    } catch (error) {
+        S.ceoContextCompressionStatus = "idle";
+        S.ceoContextCompressionSessionId = "";
+        syncCeoCompressionDivider();
+        showToast({
+            title: "压缩失败",
+            text: String(error?.message || "上下文压缩未能开始。"),
+            kind: "error",
+        });
+    }
+}
+
+function requestCeoContextCompressionPause() {
+    const key = String(S.ceoContextCompressionSessionId || activeSessionId() || "").trim();
+    if (!key) return;
+    openConfirm({
+        title: "暂停上下文压缩",
+        text: "正在压缩上下文。暂停后本次压缩不会写回摘要，历史保持原样。",
+        confirmLabel: "暂停压缩",
+        confirmKind: "danger",
+        onConfirm: async () => {
+            S.ceoContextCompressionCancelRequested = true;
+            syncCeoCompressionDivider();
+            try {
+                const payload = await ApiClient.cancelCeoContextCompression(key);
+                applyCeoContextCompressionStatus(payload || {});
+            } catch (error) {
+                S.ceoContextCompressionCancelRequested = false;
+                showToast({
+                    title: "暂停失败",
+                    text: String(error?.message || "当前没有可暂停的上下文压缩。"),
+                    kind: "error",
+                });
+            }
+        },
+    });
 }
 
 function activeCeoSessionModelRetryStatus() {
@@ -6518,7 +6789,12 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
                 return;
             }
             if (role === "system" && content.trim()) {
-                addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+                const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
+                if (marker) {
+                    appendCeoCompressionDivider(marker.state, { interactive: false });
+                } else {
+                    addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+                }
                 tagLastFeedChildKey(item, "system");
             }
         });
@@ -9630,7 +9906,7 @@ function resetCeoSessionState({ scrollToLatest = false } = {}) {
     S.ceoTurnActive = false;
     S.ceoPauseBusy = false;
     if (scrollToLatest) S.ceoScrollToLatestOnSnapshot = true;
-    syncCeoCompressionToast();
+    syncCeoCompressionDivider();
     syncCeoPrimaryButton();
 }
 
@@ -9718,7 +9994,7 @@ function renderCeoSessions() {
         syncCeoComposerReadonlyState();
         syncCeoAttachButton();
         syncCeoSessionActions();
-        syncCeoCompressionToast();
+        syncCeoCompressionDivider();
         return;
     }
     if (S.ceoSessionTab === "channel") {
@@ -9739,7 +10015,7 @@ function renderCeoSessions() {
     syncCeoComposerReadonlyState();
     syncCeoAttachButton();
     syncCeoSessionActions();
-    syncCeoCompressionToast();
+    syncCeoCompressionDivider();
     icons();
 }
 
@@ -13327,6 +13603,13 @@ function bind() {
         removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));
     });
     U.ceoFeed?.addEventListener("click", (e) => {
+        const pauseCompressionBtn = e.target.closest("[data-ceo-compress-pause]");
+        if (pauseCompressionBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            requestCeoContextCompressionPause();
+            return;
+        }
         const editBtn = e.target.closest("[data-ceo-edit-resend]");
         if (editBtn) {
             e.preventDefault();

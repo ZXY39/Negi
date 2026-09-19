@@ -5201,12 +5201,12 @@ def test_set_trace_round_active_tool_prefetches_full_output_for_active_panel() -
     assert result["placeholderHidden"] is False
 
 
-def test_ceo_composer_html_includes_local_compression_toast() -> None:
+def test_ceo_composer_html_includes_brain_long_press_controls() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
 
-    assert 'id="ceo-compression-toast"' in html
-    assert 'id="ceo-compression-toast-text"' in html
-    assert "上下文压缩中" in html
+    assert 'class="ceo-context-usage-brain-ring"' in html
+    assert 'id="ceo-context-usage-brain-hint"' in html
+    assert "长按压缩上下文" in html
 
 
 def test_model_retry_toasts_are_wired_for_ceo_and_task_node_views() -> None:

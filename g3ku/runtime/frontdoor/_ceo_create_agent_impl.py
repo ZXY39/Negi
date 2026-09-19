@@ -471,20 +471,9 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             if not str(rendered_text or "").strip() and not attachments:
                 continue
             normalized_inputs.append(item)
-        if not normalized_inputs:
-            return {
-                "estimated_total_tokens": 0,
-                "context_window_tokens": 0,
-                "ratio": 0.0,
-                "provider_model": "",
-                "trigger_tokens": 0,
-                "would_trigger_token_compression": False,
-                "would_exceed_context_window": False,
-                "missing_context_window": False,
-            }
         batch_query_text = ""
         batch_query_builder = getattr(session, "_batch_query_text", None)
-        if callable(batch_query_builder):
+        if callable(batch_query_builder) and normalized_inputs:
             batch_query_text = str(batch_query_builder(normalized_inputs) or "").strip()
         elif len(normalized_inputs) > 1:
             batch_query_text = "\n\n".join(
@@ -492,33 +481,22 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 for item in normalized_inputs
                 if str(getattr(item, "content", "") or "").strip()
             ).strip()
-        last_input = normalized_inputs[-1]
-        metadata = dict(getattr(last_input, "metadata", {}) or {})
-        if batch_query_text:
-            metadata["web_ceo_batch_query_text"] = batch_query_text
-            last_input.metadata = metadata
-        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
-        runtime_context = CeoRuntimeContext(
-            loop=self._loop,
-            session=session,
-            session_key=session_key,
-            on_progress=None,
-        )
-        prepared = await self._prepare_turn_state(
-            user_input={
+        # 空草稿不再回零：没有新消息时预检重建的就是 durable 基线本身，也就是下一
+        # 回合真正要发的请求体。输入框为空时用量表要常驻显示这个数，手动压缩也取它。
+        user_input: dict[str, Any] = {"content": "", "metadata": {}}
+        if normalized_inputs:
+            last_input = normalized_inputs[-1]
+            metadata = dict(getattr(last_input, "metadata", {}) or {})
+            if batch_query_text:
+                metadata["web_ceo_batch_query_text"] = batch_query_text
+                last_input.metadata = metadata
+            user_input = {
                 "content": getattr(last_input, "content", ""),
-                "metadata": dict(getattr(last_input, "metadata", {}) or {}),
-            },
-            runtime_context=runtime_context,
-        )
-        runtime_shim = CeoRuntime(context=runtime_context)
-        preflight = self._frontdoor_send_preflight_snapshot(
-            state=dict(prepared or {}),
-            runtime=runtime_shim,
-            langchain_tools=self._build_langchain_tools_for_state(
-                state=dict(prepared or {}),
-                runtime=runtime_shim,
-            ),
+                "metadata": metadata,
+            }
+        _state, _runtime, preflight = await self.build_session_send_preflight(
+            session,
+            user_input=user_input,
         )
         return {
             "estimated_total_tokens": int(preflight.get("estimated_total_tokens") or 0),
@@ -529,6 +507,126 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "would_trigger_token_compression": bool(preflight.get("would_trigger_token_compression")),
             "would_exceed_context_window": bool(preflight.get("would_exceed_context_window")),
             "missing_context_window": bool(preflight.get("missing_context_window")),
+        }
+
+    async def build_session_send_preflight(
+        self,
+        session,
+        *,
+        user_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], CeoRuntime, dict[str, Any]]:
+        """重建「下一回合真正要发的请求体」：只跑 prepare_turn，不发 provider、不写转录。
+
+        返回 (回合状态, runtime, 预检快照)；预检快照里的 request_messages 即请求体，
+        estimate_turn_preflight 只用它的 token 数，手动压缩用它的消息。
+        """
+        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        runtime_context = CeoRuntimeContext(
+            loop=self._loop,
+            session=session,
+            session_key=session_key,
+            on_progress=None,
+        )
+        prepared = await self._prepare_turn_state(
+            user_input=dict(user_input or {}),
+            runtime_context=runtime_context,
+        )
+        runtime = CeoRuntime(context=runtime_context)
+        state = dict(prepared or {})
+        snapshot = self._frontdoor_send_preflight_snapshot(
+            state=state,
+            runtime=runtime,
+            langchain_tools=self._build_langchain_tools_for_state(state=state, runtime=runtime),
+        )
+        return state, runtime, snapshot
+
+    async def compress_session_context(self, *, session) -> dict[str, Any]:
+        """把会话当前的 durable 上下文基线真实压缩一次，并把结果写回基线。
+
+        与发送时压缩共用同一个摘要器，区别只在于这里没有新消息：请求体就是下一
+        回合的起点，压缩结果经 `_persist_frontdoor_actual_request` 成为新的基线与
+        可对账工件，下一回合直接基于摘要续写，不会再按同一批历史重复摘要。
+        取消（用户点暂停、进程异常）走 CancelledError/Exception 向上抛，由调用方
+        落「压缩已暂停」区分线。
+        """
+        session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
+        if not session_key:
+            return {"applied": False, "reason": "no_session_key"}
+        state_for_request, runtime, preflight = await self.build_session_send_preflight(
+            session,
+            user_input={"content": "", "metadata": {}},
+        )
+        request_messages = list(preflight.get("request_messages") or [])
+        tool_schemas = list(preflight.get("tool_schemas") or [])
+        model_refs = list(state_for_request.get("model_refs") or [])
+        context_window_tokens = int(preflight.get("context_window_tokens") or 0)
+        pre_tokens = int(preflight.get("estimated_total_tokens") or 0)
+        if context_window_tokens <= 25_000:
+            return {
+                "applied": False,
+                "reason": "missing_context_window",
+                "pre_tokens": pre_tokens,
+                "post_tokens": pre_tokens,
+                "provider_model": str(preflight.get("provider_model") or ""),
+            }
+        result = await self._run_frontdoor_llm_token_compression(
+            state=state_for_request,
+            runtime=runtime,
+            request_messages=request_messages,
+            model_refs=model_refs,
+            tool_schemas=tool_schemas,
+        )
+        diagnostics = dict(result.diagnostics or {})
+        post_tokens = int(result.final_request_tokens or 0)
+        provider_model = str(preflight.get("provider_model") or "")
+        if not diagnostics.get("applied"):
+            return {
+                "applied": False,
+                "reason": str(diagnostics.get("reason") or "not_applied"),
+                "pre_tokens": pre_tokens,
+                "post_tokens": post_tokens,
+                "provider_model": provider_model,
+            }
+        # 写回基线：工件与内存基线必须同源，否则重启后按工件字节对账会把压缩结果
+        # 判为失配并清空 trace（见 session_agent._enrich_restored_frontdoor_actual_request_trace）。
+        state_for_request["frontdoor_token_preflight_diagnostics"] = {
+            **dict(state_for_request.get("frontdoor_token_preflight_diagnostics") or {}),
+            "applied": True,
+            "final_request_tokens": post_tokens,
+            "max_context_tokens": context_window_tokens,
+            "provider_model": provider_model,
+        }
+        self._persist_frontdoor_actual_request(
+            state=state_for_request,
+            runtime=runtime,
+            request_messages=list(result.request_messages),
+            tool_schemas=tool_schemas,
+            prompt_cache_key=str(preflight.get("prompt_cache_key") or ""),
+            prompt_cache_diagnostics=dict(preflight.get("prompt_cache_diagnostics") or {}),
+            parallel_tool_calls=bool(state_for_request.get("parallel_enabled")) if tool_schemas else None,
+            provider_request_body=self._build_frontdoor_provider_request_body_preview(
+                request_messages=list(result.request_messages),
+                tool_schemas=tool_schemas,
+                model_info=dict(preflight.get("model_info") or {}),
+                prompt_cache_key=str(preflight.get("prompt_cache_key") or ""),
+                parallel_tool_calls=bool(state_for_request.get("parallel_enabled")) if tool_schemas else None,
+            ),
+            request_kind="frontdoor_manual_compression_request",
+            request_lane="manual_context_compression",
+        )
+        setattr(session, "_frontdoor_history_shrink_reason", str(result.history_shrink_reason or "token_compression"))
+        sync_continuity = getattr(session, "_sync_completed_continuity_snapshot", None)
+        if callable(sync_continuity):
+            sync_continuity(source_reason="finalize")
+        return {
+            "applied": True,
+            "reason": "",
+            "pre_tokens": pre_tokens,
+            "post_tokens": post_tokens,
+            "provider_model": provider_model,
+            "context_window_tokens": context_window_tokens,
+            "compressed_history_message_count": int(diagnostics.get("compressed_history_message_count") or 0),
+            "compression_mode": str(diagnostics.get("compression_mode") or ""),
         }
 
     @staticmethod

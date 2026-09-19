@@ -163,12 +163,6 @@
                                 aria-live="polite" aria-hidden="true" hidden></div>
                             <div class="ceo-composer">
                                 <div id="ceo-upload-list" class="ceo-upload-list" hidden aria-live="polite"></div>
-                                <div id="ceo-compression-toast" class="ceo-compression-toast" role="status"
-                                    aria-live="polite" aria-hidden="true" hidden>
-                                    <span class="ceo-compression-toast-dot" aria-hidden="true"></span>
-                                    <span id="ceo-compression-toast-text"
-                                        class="ceo-compression-toast-text">上下文压缩中</span>
-                                </div>
                                 <div id="ceo-follow-up-queue" class="ceo-follow-up-queue" hidden aria-live="polite">
                                 </div>
                                 <div id="ceo-edit-resend-banner" class="ceo-edit-resend-banner" hidden aria-live="polite">
@@ -179,6 +173,8 @@
                                         <button id="ceo-context-usage-brain" class="ceo-context-usage-brain" type="button"
                                             aria-haspopup="dialog" aria-expanded="false"
                                             aria-controls="ceo-model-mode-panel" aria-label="等待 Leader 上下文预估">
+                                            <span id="ceo-context-usage-brain-ring"
+                                                class="ceo-context-usage-brain-ring" aria-hidden="true"></span>
                                             <span class="ceo-context-usage-brain-iconbox" aria-hidden="true">
                                                 <span id="ceo-context-usage-brain-base"
                                                     class="ceo-context-usage-brain-layer ceo-context-usage-brain-base">
@@ -191,6 +187,8 @@
                                                     </span>
                                                 </span>
                                             </span>
+                                            <span id="ceo-context-usage-brain-hint"
+                                                class="ceo-context-usage-brain-hint">长按压缩上下文</span>
                                         </button>
                                         <button id="ceo-attach-btn" class="ceo-attach-btn" type="button"
                                             aria-label="上传附件">
@@ -199,8 +197,6 @@
                                         <div id="ceo-model-mode-panel" class="ceo-model-mode-panel" role="dialog"
                                             aria-label="模型与上下文" hidden>
                                             <div class="ceo-model-mode-headline">
-                                                <span id="ceo-model-mode-current"
-                                                    class="ceo-model-mode-current">等待 Leader 上下文预估</span>
                                                 <span id="ceo-model-mode-badge"
                                                     class="ceo-model-mode-badge">模型链</span>
                                             </div>
@@ -208,8 +204,8 @@
                                                 <span id="ceo-model-mode-usage-fill"
                                                     class="ceo-model-mode-usage-fill"></span>
                                             </div>
-                                            <div id="ceo-model-mode-usage-text" class="ceo-model-mode-usage-text">
-                                                等待 Leader 上下文预估</div>
+                                            <div id="ceo-model-mode-usage-text" class="ceo-model-mode-usage-text"
+                                                hidden></div>
                                             <div class="ceo-model-mode-options" role="radiogroup" aria-label="模型模式">
                                                 <button id="ceo-model-mode-chain" class="ceo-model-mode-option"
                                                     type="button" role="radio" aria-checked="true">模型链</button>

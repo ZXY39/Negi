@@ -206,11 +206,9 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, syncCeoCompressionToast, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, renderCeoToolEventsIntoTurn, applyCeoToolEventToTurn, patchCeoInflightTurn, finalizeCeoTurn, normalizeCeoSnapshotToolEvents, stageTraceStatus, displayTaskStageStatus, toggleCeoToolStepOutput, resolvePreferredCeoTraceContext, resolveFinalCeoTraceContext, normalizeCeoSnapshotCanonicalContext, renderPersistedCeoAssistantTurn, ceoLiveStreamResidual, S, U };`,
         context
     );
-    context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
-    context.__testExports.U.ceoCompressionToastText = new StubHTMLElement();
     context.__testExports.__context = context;
     return context.__testExports;
 }
@@ -723,51 +721,6 @@ test("ceo tool_start running rows stay empty until a result arrives", () => {
     assert.equal(item.querySelector(".interaction-step-preview").textContent, "");
     assert.equal(item.querySelector(".interaction-step-detail").textContent, "");
     assert.equal(item.querySelector(".interaction-step-status").textContent.length > 0, true);
-});
-
-test("ceo composer shows session-local compression toast only for active compressing session", () => {
-    const { syncCeoCompressionToast, S, U } = loadApp();
-
-    S.activeSessionId = "web:ceo-a";
-    S.ceoSnapshotCache = {
-        "web:ceo-a": {
-            session_id: "web:ceo-a",
-            inflight_turn: {
-                status: "running",
-                compression: { status: "running", text: COMPRESSION_TEXT, source: "user" },
-            },
-        },
-        "web:ceo-b": {
-            session_id: "web:ceo-b",
-            inflight_turn: {
-                status: "running",
-                compression: { status: "running", text: COMPRESSION_TEXT, source: "user" },
-            },
-        },
-    };
-
-    syncCeoCompressionToast();
-    assert.equal(U.ceoCompressionToast.hidden, false);
-    assert.equal(U.ceoCompressionToastText.textContent, COMPRESSION_TEXT);
-});
-
-test("ceo composer hides compression toast when inflight turn is paused", () => {
-    const { syncCeoCompressionToast, S, U } = loadApp();
-
-    S.activeSessionId = "web:ceo-a";
-    S.ceoSnapshotCache = {
-        "web:ceo-a": {
-            session_id: "web:ceo-a",
-            inflight_turn: {
-                status: "paused",
-                compression: { status: "running", text: COMPRESSION_TEXT, source: "user" },
-            },
-        },
-    };
-
-    syncCeoCompressionToast();
-    assert.equal(U.ceoCompressionToast.hidden, true);
-    assert.equal(U.ceoCompressionToastText.textContent, "");
 });
 
 test("shared stage status maps active to running semantics", () => {

@@ -92,6 +92,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 临时文件散落在工作区根目录（`.tmp_*` / `tmp_*`、命令重定向落盘）→ `runtime-overview.md`「任务侧」+ `tool-and-skill-system.md`「四个概念必须分清」
 - 会话固定了指定模型却仍走模型链、固定模型被删除/禁用后未回退、或切换后用量表按旧模型窗口显示 → `config-and-models.md`「会话级固定模型优先于角色链」+ `web-and-admin.md`「Composer Model Mode Panel」
 - 上下文脑图标只按新输入变化、读数长期低于上一请求的真实输入规模 → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」+ `web-and-admin.md`「Composer Context Usage Meter」
+- 长按脑图标不发起压缩、区分线停在「压缩已暂停」、或历史变短却找不到对应的 provider 请求 → `web-and-admin.md`「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 

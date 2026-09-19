@@ -561,8 +561,6 @@ test("snapshot refresh does not force another composer estimate once token mode 
         context_window_tokens: 32000,
         provider_model: "openai:gpt-5.2",
     };
-    U.ceoCompressionToast = new StubHTMLElement();
-    U.ceoCompressionToastText = new StubHTMLElement();
     U.ceoCompressionActions = new StubHTMLElement();
     U.ceoCompressionPause = new StubHTMLButtonElement();
     let scheduled = 0;
@@ -634,8 +632,6 @@ test("active turn prefers runtime next-request snapshot over stale composer esti
     U.ceoComposerUsageBrain = new StubHTMLElement();
     U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
-    U.ceoCompressionToast = new StubHTMLElement();
-    U.ceoCompressionToastText = new StubHTMLElement();
     U.ceoCompressionActions = new StubHTMLElement();
     U.ceoCompressionPause = new StubHTMLButtonElement();
 

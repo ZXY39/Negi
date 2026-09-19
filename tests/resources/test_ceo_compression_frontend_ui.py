@@ -17,18 +17,29 @@ def test_ceo_compression_ui_uses_shared_primary_pause_button() -> None:
     assert "ceoCompressionPause" not in app_js
 
 
-def test_ceo_compression_toast_stays_in_flow_and_precedes_follow_up_queue() -> None:
+def test_compression_progress_renders_as_feed_divider_not_composer_toast() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
+    app_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_app.js").read_text(encoding="utf-8")
     css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
-    assert html.index('id="ceo-compression-toast"') < html.index('id="ceo-follow-up-queue"')
 
-    match = re.search(r"\.ceo-compression-toast\s*\{(?P<body>.*?)\n\}", css, re.S)
+    assert "ceo-compression-toast" not in html
+    assert "ceo-compression-toast" not in css
+
+    match = re.search(r"\.ceo-compression-divider-inner\s*\{(?P<body>.*?)\n\}", css, re.S)
     assert match is not None
     body = match.group("body")
+    assert "display: flex;" in body
 
-    assert "position: absolute;" not in body
-    assert "margin-inline-start: calc(var(--ceo-input-leading-width) + var(--ceo-input-row-gap));" in body
-    assert "align-self: flex-start;" in body
+    # 两条细线夹住文案，进行中/已暂停各带一个图标位。
+    assert ".ceo-compression-divider-inner::before" in css
+    assert ".ceo-compression-divider-inner::after" in css
+    assert "#39c5bb" in css
+    assert "ceo-compression-divider" in app_js
+    assert '"上下文压缩中"' in app_js
+    assert '"会话已压缩"' in app_js
+    assert '"压缩已暂停"' in app_js
+    # 进行中的那条要留下可点的暂停入口。
+    assert "data-ceo-compress-pause" in app_js
 
 
 def test_ceo_context_load_notice_uses_single_right_aligned_column_and_kind_icons() -> None:

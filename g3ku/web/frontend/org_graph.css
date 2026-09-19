@@ -53,6 +53,8 @@
     --ceo-session-unread: #39c5bb;
     --ceo-session-unread-text: #052e2b;
     --ceo-session-unread-ring: var(--bg-panel);
+    /* 上下文压缩的识别色：长按进度环与会话流里的压缩区分线共用。 */
+    --ceo-context-compress-color: #39c5bb;
     --tree-node-bg: rgba(255, 255, 255, 0.8);
     --tree-node-border: rgba(24, 24, 27, 0.1);
     --tree-node-shadow: 0 4px 6px -1px rgba(24, 24, 27, 0.05), 0 2px 4px -2px rgba(24, 24, 27, 0.02);
@@ -4070,19 +4072,13 @@ textarea {
     min-width: 0;
 }
 
-.ceo-model-mode-current {
-    flex: 1;
+.ceo-model-mode-badge {
+    flex: none;
     min-width: 0;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--text-primary);
-    font-size: 0.82rem;
-    line-height: 1.3;
-}
-
-.ceo-model-mode-badge {
-    flex: none;
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid color-mix(in srgb, var(--brand-primary) 34%, transparent);
@@ -4090,6 +4086,12 @@ textarea {
     color: color-mix(in srgb, var(--brand-primary) 74%, var(--text-primary));
     font-size: 0.68rem;
     line-height: 1.5;
+}
+
+.ceo-model-mode-badge.is-pending {
+    border-color: var(--border-strong);
+    background: var(--bg-surface-inner);
+    color: var(--text-muted);
 }
 
 .ceo-model-mode-usage {
@@ -4587,6 +4589,62 @@ textarea {
     animation: ceo-context-usage-brain-pulse 1.8s ease-in-out infinite;
 }
 
+/* 长按进度环：按住时从 12 点方向填满 5 秒即发起压缩，松手立刻回到 0。 */
+.ceo-context-usage-brain-ring {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 2;
+    width: 36px;
+    height: 36px;
+    transform: translate(-50%, -50%);
+    border-radius: 999px;
+    opacity: 0;
+    pointer-events: none;
+    background: conic-gradient(
+        from -90deg,
+        var(--ceo-context-compress-color) calc(var(--ceo-brain-hold, 0) * 360deg),
+        transparent 0
+    );
+    -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+    mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+    transition: opacity 140ms ease;
+}
+
+.ceo-context-usage-brain.is-holding .ceo-context-usage-brain-ring {
+    opacity: 1;
+}
+
+/* 悬停提示说清长按能做什么；用量读数仍只在点开的面板里出现一次。 */
+.ceo-context-usage-brain-hint {
+    position: absolute;
+    left: 50%;
+    top: calc(100% + 2px);
+    z-index: 7;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--ceo-context-compress-color) 42%, transparent);
+    background: color-mix(in srgb, var(--ceo-context-compress-color) 16%, var(--bg-panel));
+    color: var(--text-primary);
+    font-size: 0.66rem;
+    line-height: 1.4;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-50%);
+    transition: opacity 140ms ease;
+}
+
+.ceo-context-usage-brain:hover .ceo-context-usage-brain-hint,
+.ceo-context-usage-brain:focus-visible .ceo-context-usage-brain-hint,
+.ceo-context-usage-brain.is-holding .ceo-context-usage-brain-hint {
+    opacity: 1;
+}
+
+.ceo-context-usage-brain.is-holding {
+    transform: scale(0.96);
+}
+
 .ceo-context-usage-brain-layer {
     position: absolute;
     left: 0;
@@ -4880,44 +4938,68 @@ textarea {
     }
 }
 
-.ceo-compression-toast {
-    display: inline-flex;
+/* 上下文压缩区分线：线色取品牌青绿 #39c5bb（与 unread 角标同色）。
+   进行中的那条是 live-only，终态的两条由转录里的持久标记行渲染，永久留在历史里。 */
+.message.ceo-compression-divider {
+    justify-content: center;
+    padding: 6px 0;
+}
+
+.ceo-compression-divider-inner {
+    display: flex;
     align-items: center;
     gap: 8px;
-    align-self: flex-start;
-    margin-inline-start: calc(var(--ceo-input-leading-width) + var(--ceo-input-row-gap));
-    max-width: min(320px, calc(100% - 24px));
-    padding: 8px 12px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--brand-primary) 38%, transparent);
-    background: color-mix(in srgb, var(--brand-primary) 12%, var(--bg-panel));
-    color: var(--text-secondary);
-    font-size: 0.78rem;
+    width: 100%;
+    color: color-mix(in srgb, var(--ceo-context-compress-color) 78%, var(--text-primary));
+    font-size: 0.74rem;
     line-height: 1.2;
-    pointer-events: none;
-    position: relative;
-    z-index: 1;
-    opacity: 0;
-    transform: translateY(-2px);
-    transition: opacity 180ms ease, transform 180ms ease;
+    letter-spacing: 0.02em;
 }
 
-.ceo-compression-toast.is-visible {
-    opacity: 1;
-    transform: translateY(0);
+.ceo-compression-divider-inner::before,
+.ceo-compression-divider-inner::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: color-mix(in srgb, var(--ceo-context-compress-color) 55%, transparent);
 }
 
-.ceo-compression-toast-dot {
-    width: 8px;
-    height: 8px;
+.ceo-compression-divider-inner::after {
+    flex: none;
+    width: 12%;
+}
+
+.ceo-compression-divider-icon,
+.ceo-compression-divider-action {
+    display: inline-flex;
+    align-items: center;
+    color: var(--ceo-context-compress-color);
+}
+
+.ceo-compression-divider-action {
+    border: 0;
+    padding: 2px;
+    margin: 0;
+    background: none;
     border-radius: 999px;
-    background: var(--brand-primary);
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-primary) 34%, transparent);
+    cursor: pointer;
+    line-height: 0;
+}
+
+.ceo-compression-divider-action:hover {
+    background: color-mix(in srgb, var(--ceo-context-compress-color) 16%, transparent);
+}
+
+.ceo-compression-divider.is-running .ceo-compression-divider-action > svg {
+    animation: interaction-step-icon-spin 0.9s linear infinite;
+}
+
+.ceo-compression-divider.is-running .ceo-compression-divider-inner::after {
     animation: ceo-compression-pulse 1.4s ease-in-out infinite;
 }
 
-.ceo-compression-toast-text {
-    white-space: nowrap;
+.ceo-compression-divider.is-paused .ceo-compression-divider-inner {
+    color: color-mix(in srgb, var(--text-muted) 70%, var(--ceo-context-compress-color));
 }
 
 .model-retry-toast {

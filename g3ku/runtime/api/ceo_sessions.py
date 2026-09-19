@@ -869,6 +869,224 @@ async def estimate_ceo_session_composer_preflight(session_id: str, payload: dict
     return {"ok": True, "session_id": session.key, "item": item}
 
 
+# ---- 手动上下文压缩 -------------------------------------------------------
+#
+# 与发送时的自动压缩共用同一个摘要器（见 frontdoor `_run_frontdoor_llm_token_compression`），
+# 区别只在于它由浏览器长按上下文脑图标发起、跑在回合之外。因此进度不走 inflight turn
+# 快照，而是 `state.compression` + 本模块的任务状态字典两条道：前者驱动会话流里的
+# 实时区分线，后者供 GET 轮询取终局（completed / paused / not_needed）。
+
+_MANUAL_COMPRESSION_STATE_ATTR = "_manual_context_compression"
+_MANUAL_COMPRESSION_TASK_ATTR = "_manual_context_compression_task"
+_MANUAL_COMPRESSION_RUNNING = "running"
+_MANUAL_COMPRESSION_CANCELLED_REASON = "cancelled"
+_MANUAL_COMPRESSION_KEYS = (
+    "status",
+    "source",
+    "started_at",
+    "finished_at",
+    "reason",
+    "cancel_requested",
+    "pre_tokens",
+    "post_tokens",
+    "provider_model",
+    "context_window_tokens",
+    "compression_mode",
+)
+
+
+def _manual_compression_view(runtime_session) -> dict:
+    value = getattr(runtime_session, _MANUAL_COMPRESSION_STATE_ATTR, None)
+    if not isinstance(value, dict):
+        return {"status": "idle", "cancel_requested": False}
+    return {key: value.get(key) for key in _MANUAL_COMPRESSION_KEYS if key in value}
+
+
+def _set_manual_compression_state(runtime_session, **changes) -> dict:
+    current = dict(getattr(runtime_session, _MANUAL_COMPRESSION_STATE_ATTR, None) or {})
+    current.update(changes)
+    setattr(runtime_session, _MANUAL_COMPRESSION_STATE_ATTR, current)
+    return current
+
+
+async def _emit_runtime_state_snapshot(runtime_session) -> None:
+    emit = getattr(runtime_session, "_emit_state_snapshot", None)
+    if not callable(emit):
+        return
+    try:
+        await emit()
+    except Exception:
+        pass
+
+
+async def _finish_manual_compression(
+    runtime_session,
+    *,
+    status: str,
+    marker_state: str,
+    stats: dict,
+    reason: str,
+) -> None:
+    if marker_state:
+        runtime_session.append_context_compression_marker(
+            state=marker_state,
+            source="manual",
+            stats=stats,
+        )
+    setattr(
+        runtime_session,
+        "_compression_state",
+        {"status": "", "text": "", "source": "", "needs_recheck": False},
+    )
+    _set_manual_compression_state(
+        runtime_session,
+        status=status,
+        finished_at=datetime.now().isoformat(timespec="seconds"),
+        reason=reason,
+        **stats,
+    )
+    sync_continuity = getattr(runtime_session, "_sync_completed_continuity_snapshot", None)
+    if callable(sync_continuity):
+        try:
+            sync_continuity(source_reason="finalize")
+        except Exception:
+            pass
+    await _emit_runtime_state_snapshot(runtime_session)
+
+
+async def _execute_manual_context_compression(agent, runtime_session) -> None:
+    runner = getattr(agent, "multi_agent_runner", None)
+    try:
+        result = dict(await runner.compress_session_context(session=runtime_session))
+    except asyncio.CancelledError:
+        await _finish_manual_compression(
+            runtime_session,
+            status="paused",
+            marker_state="paused",
+            stats={},
+            reason=_MANUAL_COMPRESSION_CANCELLED_REASON,
+        )
+        raise
+    except Exception as exc:
+        await _finish_manual_compression(
+            runtime_session,
+            status="paused",
+            marker_state="paused",
+            stats={},
+            reason=f"failed:{type(exc).__name__}",
+        )
+        return
+    if not result.get("applied"):
+        await _finish_manual_compression(
+            runtime_session,
+            status="not_needed",
+            marker_state="",
+            stats={},
+            reason=str(result.get("reason") or "not_applied"),
+        )
+        return
+    stats = {
+        key: result.get(key)
+        for key in ("pre_tokens", "post_tokens", "provider_model", "context_window_tokens", "compression_mode")
+    }
+    await _finish_manual_compression(
+        runtime_session,
+        status="completed",
+        marker_state="completed",
+        stats=stats,
+        reason="",
+    )
+
+
+@router.post("/ceo/sessions/{session_id}/compress-context")
+async def compress_ceo_session_context(session_id: str):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    agent, session_manager, runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _ensure_runtime_session(runtime_manager, session)
+    if runtime_session is None:
+        raise HTTPException(status_code=503, detail="session_runtime_unavailable")
+    runner = getattr(agent, "multi_agent_runner", None)
+    if not callable(getattr(runner, "compress_session_context", None)):
+        raise HTTPException(status_code=503, detail="frontdoor_compression_unavailable")
+    current = _manual_compression_view(runtime_session)
+    if current.get("status") == _MANUAL_COMPRESSION_RUNNING:
+        return {"ok": True, "session_id": session.key, **current}
+    # 会话正在跑时先安全停手：pause(manual=True) 会停后台工具执行、取消在途请求并
+    # await 到落盘完成，之后基线才是稳定的。
+    if _session_is_running(runtime_manager, session.key):
+        pause = getattr(runtime_session, "pause", None)
+        if not callable(pause):
+            raise HTTPException(status_code=409, detail="session_pause_unavailable")
+        await pause(manual=True)
+    _set_manual_compression_state(
+        runtime_session,
+        status=_MANUAL_COMPRESSION_RUNNING,
+        source="manual",
+        started_at=datetime.now().isoformat(timespec="seconds"),
+        finished_at="",
+        reason="",
+        cancel_requested=False,
+        pre_tokens=0,
+        post_tokens=0,
+    )
+    setattr(
+        runtime_session,
+        "_compression_state",
+        {"status": "running", "text": "上下文压缩中", "source": "manual_context_compression", "needs_recheck": False},
+    )
+    await _emit_runtime_state_snapshot(runtime_session)
+    task = asyncio.create_task(_execute_manual_context_compression(agent, runtime_session))
+    setattr(runtime_session, _MANUAL_COMPRESSION_TASK_ATTR, task)
+    return {"ok": True, "session_id": session.key, **_manual_compression_view(runtime_session)}
+
+
+@router.get("/ceo/sessions/{session_id}/compress-context")
+async def get_ceo_session_context_compression(session_id: str):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    agent, session_manager, runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _runtime_session(runtime_manager, session.key)
+    if runtime_session is None:
+        return {"ok": True, "session_id": session.key, "status": "idle", "cancel_requested": False}
+    return {"ok": True, "session_id": session.key, **_manual_compression_view(runtime_session)}
+
+
+@router.post("/ceo/sessions/{session_id}/compress-context/cancel")
+async def cancel_ceo_session_context_compression(session_id: str):
+    if _is_channel_session_id(session_id):
+        _raise_channel_session_readonly()
+    agent, session_manager, runtime_manager, _state_store = _sessions()
+    if agent is None:
+        raise HTTPException(status_code=503, detail="no_model_configured")
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _runtime_session(runtime_manager, session.key)
+    if runtime_session is None:
+        raise HTTPException(status_code=409, detail="compression_not_running")
+    if _manual_compression_view(runtime_session).get("status") != _MANUAL_COMPRESSION_RUNNING:
+        raise HTTPException(status_code=409, detail="compression_not_running")
+    # 沿用自动压缩的软取消：摘要器在每个 provider 尝试后轮询该代际，命中即抛
+    # CancelledError，由 _execute_manual_context_compression 落「压缩已暂停」。
+    # 代际要等摘要器真正开跑才存在；在此之前请求取消只能直接掐掉任务，否则取消会静默丢失。
+    generation = getattr(runtime_session, "_active_frontdoor_compression_generation", None)
+    cancel = getattr(runtime_session, "_cancel_active_frontdoor_compression_generation", None)
+    if generation is not None and callable(cancel):
+        cancel()
+    else:
+        task = getattr(runtime_session, _MANUAL_COMPRESSION_TASK_ATTR, None)
+        if task is None or not callable(getattr(task, "cancel", None)):
+            raise HTTPException(status_code=503, detail="compression_cancel_unavailable")
+        task.cancel()
+    _set_manual_compression_state(runtime_session, cancel_requested=True)
+    return {"ok": True, "session_id": session.key, "accepted": True, **_manual_compression_view(runtime_session)}
+
+
 @router.post("/ceo/sessions/{session_id}/activate")
 async def activate_ceo_session(session_id: str):
     agent, session_manager, runtime_manager, state_store = _sessions()

@@ -163,7 +163,7 @@ test("governance script can load after app script without global wrapper name co
         syncCeoPrimaryButton = () => {};
         syncCeoComposerReadonlyState = () => {};
         syncCeoAttachButton = () => {};
-        syncCeoCompressionToast = () => {};
+        syncCeoCompressionDivider = () => {};
     `, context);
     context.syncCeoApprovalFromSnapshotEntry = (sessionId, entry, options = {}) => {
         context.syncCeoApprovalFromSnapshotEntryCalls.push({
@@ -250,7 +250,7 @@ test("approval submit clears cached approval interrupts and rebinds the active t
         syncCeoPrimaryButton = () => {};
         syncCeoComposerReadonlyState = () => {};
         syncCeoAttachButton = () => {};
-        syncCeoCompressionToast = () => {};
+        syncCeoCompressionDivider = () => {};
     `, context);
     context.syncCeoApprovalFromSnapshotEntry = () => {};
     context.refreshCeoApprovalFromServer = () => Promise.resolve([]);
@@ -377,7 +377,7 @@ test("approval pending no longer blocks view switching or session activation", (
         syncCeoPrimaryButton = () => {};
         syncCeoComposerReadonlyState = () => {};
         syncCeoAttachButton = () => {};
-        syncCeoCompressionToast = () => {};
+        syncCeoCompressionDivider = () => {};
         globalThis.__switchCalls = [];
         canMutateCeoSessions = () => true;
         canCreateCeoSessions = () => true;

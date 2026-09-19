@@ -104,7 +104,7 @@ function loadApp() {
         syncCeoPrimaryButton = () => {};
         syncCeoComposerReadonlyState = () => {};
         syncCeoAttachButton = () => {};
-        syncCeoCompressionToast = () => {};
+        syncCeoCompressionDivider = () => {};
     `,
         context
     );

@@ -160,8 +160,6 @@ function loadApp() {
         `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, S, U };`,
         context
     );
-    context.__testExports.U.ceoCompressionToast = new StubHTMLElement();
-    context.__testExports.U.ceoCompressionToastText = new StubHTMLElement();
     return context.__testExports;
 }
 
