@@ -23,6 +23,7 @@ class StubHTMLElement extends StubElement {
         this.textContent = "";
         this.innerHTML = "";
         this.title = "";
+        this.scrollTop = 0;
         this.dataset = {};
         this.attributes = {};
         this.children = [];
@@ -116,7 +117,10 @@ function loadApp() {
             auditUnreadFromResponse,
             resolveAuditLastSeen,
             auditSubsystemLabel,
-            renderAuditExceptionRow,
+            formatAuditTimestamp,
+            renderAuditEventCard,
+            renderAuditEventList,
+            auditPageSummary,
             switchView,
             stopAuditViewAutoRefresh,
         };`,
@@ -196,25 +200,71 @@ test("auditSubsystemLabel maps subsystem keys to Chinese source labels", () => {
     assert.equal(api.auditSubsystemLabel(""), "未知来源");
 });
 
-test("renderAuditExceptionRow renders source, summary and time", () => {
+test("formatAuditTimestamp renders system local time as YYYY-MM-DD HH:mm:ss", () => {
     const api = loadApp();
-    const html = api.renderAuditExceptionRow({
-        timestamp: "2026-09-17T10:00:00+08:00",
+
+    // 用本地时间构造再回读：结果与运行时区无关，始终等于本地的 10:00:00。
+    const localIso = new Date(2026, 8, 17, 10, 0, 0).toISOString();
+    assert.equal(api.formatAuditTimestamp(localIso), "2026-09-17 10:00:00");
+
+    // 带时区偏移的 ISO 串按浏览器本地时间换算，格式固定为 24 小时制。
+    assert.match(api.formatAuditTimestamp("2026-09-17T10:00:00+08:00"), /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    // 缺失/不可解析一律安全降级，不抛错
+    assert.equal(api.formatAuditTimestamp(""), "-");
+    assert.equal(api.formatAuditTimestamp(null), "-");
+    assert.equal(api.formatAuditTimestamp("not-a-time"), "not-a-time");
+});
+
+test("renderAuditEventCard renders one raw-log line with system time", () => {
+    const api = loadApp();
+    const localIso = new Date(2026, 8, 17, 10, 0, 0).toISOString();
+    const html = api.renderAuditEventCard({
+        timestamp: localIso,
+        level: "error",
         subsystem: "memory",
-        summary: "记忆批次停车：provider_error",
-    });
-    assert.match(html, /audit-exception-row/);
-    assert.match(html, /audit-exception-source/);
-    assert.match(html, /记忆处理/);
-    assert.match(html, /记忆批次停车：provider_error/);
-    assert.match(html, /2026-09-17T10:00:00\+08:00/);
-    // 摘要全部过 esc：HTML 特殊字符被转义
-    const escaped = api.renderAuditExceptionRow({
-        timestamp: "t",
-        subsystem: "provider",
+        event_type: "memory_batch_parked",
         summary: "<script>alert(1)</script>",
+        detail: { failed_id: "f-1" },
     });
-    assert.match(escaped, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+
+    assert.match(html, /audit-log-line is-error/);
+    assert.match(html, /2026-09-17 10:00:00/);
+    assert.match(html, /记忆处理/);
+    assert.match(html, /memory_batch_parked/);
+    // 摘要/详情全部过 esc
+    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.match(html, /failed_id/);
+    // 原始 ISO 串不再直接出现在日志行里
+    assert.ok(!html.includes(localIso));
+});
+
+test("renderAuditEventList preserves or resets the list scroll offset", () => {
+    const api = loadApp();
+    const list = new StubHTMLElement();
+    api.U.auditEventList = list;
+    const items = [{ timestamp: "2026-09-17T10:00:00+08:00", subsystem: "task", summary: "row" }];
+
+    // 静默轮询：滚动位置保留，阅读旧日志不会被打回顶部
+    list.scrollTop = 420;
+    api.renderAuditEventList(items, { preserveScroll: true });
+    assert.equal(list.scrollTop, 420);
+
+    // 换页/显式刷新：回到列表顶部
+    api.renderAuditEventList(items);
+    assert.equal(list.scrollTop, 0);
+});
+
+test("auditPageSummary reports page window and total", () => {
+    const api = loadApp();
+
+    assert.equal(api.auditPageSummary(1, 1, 0), "第 1/1 页 · 共 0 条");
+    // 每页 100 条：第 2 页显示 101-200
+    assert.equal(api.auditPageSummary(2, 3, 250), "第 2/3 页 · 显示 101-200 / 共 250 条");
+    // 末页裁剪到总数
+    assert.equal(api.auditPageSummary(3, 3, 250), "第 3/3 页 · 显示 201-250 / 共 250 条");
+    // 越界页归一化到末页
+    assert.equal(api.auditPageSummary(99, 3, 250), "第 3/3 页 · 显示 201-250 / 共 250 条");
 });
 
 test("switchView('audit') moves the view state and activates the nav item", () => {

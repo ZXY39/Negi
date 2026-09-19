@@ -40,7 +40,7 @@ const CEO_FOLLOW_UP_QUEUE_PER_SESSION_LIMIT = 20;
 const AUDIT_LAST_SEEN_KEY = "g3ku.audit.last-seen.v1";
 const AUDIT_VIEW_POLL_MS = 15000;
 const AUDIT_BADGE_POLL_MS = 30000;
-const AUDIT_PAGE_SIZE = 30;
+const AUDIT_PAGE_SIZE = 100;
 const cloneModelRoles = (roles = EMPTY_MODEL_ROLES()) => {
     const next = EMPTY_MODEL_ROLES();
     MODEL_SCOPES.forEach(({ key }) => {
@@ -391,8 +391,9 @@ const S = {
     auditLoadedOnce: false,
     auditPollIntervalId: null,
     auditBadgePollIntervalId: null,
-    auditOffset: 0,
-    auditHasMore: false,
+    auditPage: 1,
+    auditPageCount: 1,
+    auditTotal: 0,
     auditBusy: false,
     auditLatestEventTs: "",
 };
@@ -465,11 +466,10 @@ const U = {
     viewTaskDetails: document.getElementById("view-task-details"),
     viewAudit: document.getElementById("view-audit"),
     auditNavBadge: document.getElementById("audit-nav-badge"),
-    auditExceptionPanel: document.getElementById("audit-exception-panel"),
-    auditExceptionList: document.getElementById("audit-exception-list"),
     auditEventList: document.getElementById("audit-event-list"),
     auditEventInfo: document.getElementById("audit-event-info"),
-    auditEventMore: document.getElementById("audit-event-more-btn"),
+    auditPagePrev: document.getElementById("audit-page-prev"),
+    auditPageNext: document.getElementById("audit-page-next"),
     auditRefresh: document.getElementById("audit-refresh-btn"),
     memoryAdminActions: document.getElementById("memory-admin-actions"),
     memoryRefresh: document.getElementById("memory-refresh-btn"),
@@ -12435,13 +12435,17 @@ function startAuditViewAutoRefresh() {
 async function loadAuditView({ quiet = false } = {}) {
     if (S.auditBusy) return;
     S.auditBusy = true;
-    S.auditOffset = 0;
+    // 静默轮询停留在当前页；显式刷新（按钮/首次进入）回到第 1 页（最新）。
+    const page = quiet ? S.auditPage : 1;
     try {
-        await Promise.all([loadAuditExceptions({ quiet }), loadAuditEvents({ quiet, reset: true })]);
+        await loadAuditEvents({ quiet, page, preserveScroll: quiet });
+        // 非首页的列表里没有最新事件，角标已读锚点需要单独取一次。
+        if (page !== 1) await refreshAuditLatestEventTs();
         S.auditLoadedOnce = true;
         markAuditRead();
     } finally {
         S.auditBusy = false;
+        renderAuditPager();
     }
 }
 
@@ -12455,54 +12459,37 @@ function auditSubsystemLabel(subsystem) {
     return Object.prototype.hasOwnProperty.call(labels, subsystem) ? labels[subsystem] : String(subsystem || "未知来源");
 }
 
-async function loadAuditExceptions({ quiet = false } = {}) {
+async function refreshAuditLatestEventTs() {
     try {
-        const data = await ApiClient.getAuditEvents({ limit: 20, level: "error" });
-        const items = Array.isArray(data.items) ? data.items : [];
-        renderAuditExceptionList(items);
-    } catch (error) {
-        if (!quiet) {
-            showToast({
-                title: "异常列表加载失败",
-                text: String(error?.message || ""),
-                kind: "error",
-                durationMs: 2600,
-            });
-        }
-        renderAuditExceptionList([]);
+        const latest = await ApiClient.getAuditEvents({ limit: 1 });
+        const newest = String(latest?.items?.[0]?.timestamp || "");
+        if (newest) S.auditLatestEventTs = newest;
+    } catch {
+        // 静默：锚点取不到时保持原值
     }
 }
 
-function renderAuditExceptionList(items = []) {
-    if (U.auditExceptionPanel) U.auditExceptionPanel.hidden = items.length === 0;
-    if (!U.auditExceptionList) return;
-    U.auditExceptionList.innerHTML = items.map((item) => renderAuditExceptionRow(item)).join("");
-}
-
-function renderAuditExceptionRow(item = {}) {
-    const timestamp = String(item.timestamp || "-");
-    const summary = String(item.summary || "");
-    const source = auditSubsystemLabel(String(item.subsystem || "unknown"));
-    return `<article class="audit-exception-row">
-        <span class="audit-exception-source">${esc(source)}</span>
-        <span class="audit-exception-summary" title="${esc(summary)}">${esc(summary)}</span>
-        <span class="audit-exception-time">${esc(timestamp)}</span>
-    </article>`;
-}
-
-async function loadAuditEvents({ quiet = false, reset = false } = {}) {
+async function loadAuditEvents({ quiet = false, page = 1, preserveScroll = false } = {}) {
+    const requested = Math.max(1, Math.floor(Number(page) || 1));
     try {
         const data = await ApiClient.getAuditEvents({
             limit: AUDIT_PAGE_SIZE,
-            offset: reset ? 0 : S.auditOffset,
+            offset: (requested - 1) * AUDIT_PAGE_SIZE,
         });
         const items = Array.isArray(data.items) ? data.items : [];
-        renderAuditEventList(items, { append: !reset && S.auditOffset > 0 });
-        S.auditOffset += items.length;
-        S.auditHasMore = Boolean(data.hasMore);
-        if (U.auditEventInfo) U.auditEventInfo.textContent = `共 ${Number(data.total) || 0} 项`;
-        if (U.auditEventMore) U.auditEventMore.hidden = !S.auditHasMore;
-        if (reset && items.length) S.auditLatestEventTs = String(items[0]?.timestamp || "");
+        const total = Math.max(0, Number(data.total) || 0);
+        const pageCount = Math.max(1, Math.ceil(total / AUDIT_PAGE_SIZE));
+        // 事件被修剪/丢弃后当前页可能越界：回落到最后一页，避免空白页。
+        if (total > 0 && requested > pageCount) {
+            await loadAuditEvents({ quiet, page: pageCount, preserveScroll });
+            return;
+        }
+        S.auditPage = requested;
+        S.auditTotal = total;
+        S.auditPageCount = pageCount;
+        renderAuditEventList(items, { preserveScroll });
+        renderAuditPager();
+        if (requested === 1 && items.length) S.auditLatestEventTs = String(items[0]?.timestamp || "");
     } catch (error) {
         if (!quiet) {
             showToast({
@@ -12515,14 +12502,34 @@ async function loadAuditEvents({ quiet = false, reset = false } = {}) {
     }
 }
 
-async function loadMoreAuditEvents() {
-    if (S.auditBusy || !S.auditHasMore) return;
+async function goToAuditPage(page) {
+    if (S.auditBusy) return;
+    const target = Math.max(1, Math.floor(Number(page) || 1));
+    if (target === S.auditPage) return;
     S.auditBusy = true;
     try {
-        await loadAuditEvents({ quiet: true, reset: false });
+        // 换页回到列表顶部（preserveScroll 为假）。
+        await loadAuditEvents({ quiet: true, page: target });
     } finally {
         S.auditBusy = false;
+        renderAuditPager();
     }
+}
+
+function auditPageSummary(page, pageCount, total) {
+    if (!total) return "第 1/1 页 · 共 0 条";
+    const current = Math.min(Math.max(1, Number(page) || 1), pageCount);
+    const start = ((current - 1) * AUDIT_PAGE_SIZE) + 1;
+    const end = Math.min(current * AUDIT_PAGE_SIZE, total);
+    return `第 ${current}/${pageCount} 页 · 显示 ${start}-${end} / 共 ${total} 条`;
+}
+
+function renderAuditPager() {
+    if (U.auditEventInfo) {
+        U.auditEventInfo.textContent = auditPageSummary(S.auditPage, S.auditPageCount, S.auditTotal);
+    }
+    if (U.auditPagePrev) U.auditPagePrev.disabled = S.auditBusy || S.auditPage <= 1;
+    if (U.auditPageNext) U.auditPageNext.disabled = S.auditBusy || S.auditPage >= S.auditPageCount;
 }
 
 function auditEventLevelClass(level) {
@@ -12537,10 +12544,22 @@ function auditEventLevelLabel(level) {
     return "信息";
 }
 
+// 日志时间统一渲染为浏览器所在系统的本地时间（YYYY-MM-DD HH:mm:ss），
+// 事件本身带时区偏移的 ISO 串只用于角标 since 比较，不直接展示。
+function formatAuditTimestamp(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "-";
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return raw;
+    const pad = (part) => String(part).padStart(2, "0");
+    return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`
+        + ` ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
+}
+
 function renderAuditEventCard(item = {}) {
     // 原始日志：一行一条（时间 | 级别 | 来源 | 摘要），detail 可展开
     const level = String(item.level || "info");
-    const timestamp = String(item.timestamp || "-");
+    const timestamp = formatAuditTimestamp(item.timestamp);
     const source = auditSubsystemLabel(String(item.subsystem || "unknown"));
     const eventType = String(item.event_type || "");
     const summary = String(item.summary || "");
@@ -12565,14 +12584,13 @@ function renderAuditEventCard(item = {}) {
     </article>`;
 }
 
-function renderAuditEventList(items = [], { append = false } = {}) {
+function renderAuditEventList(items = [], { preserveScroll = false } = {}) {
     if (!U.auditEventList) return;
-    const html = items.map((item) => renderAuditEventCard(item)).join("");
-    if (append && U.auditEventList.innerHTML) {
-        U.auditEventList.insertAdjacentHTML("beforeend", html);
-    } else {
-        U.auditEventList.innerHTML = html;
-    }
+    // 静默轮询保留滚动位置，避免每 15s 把正在翻看旧日志的人弹回顶部；
+    // 换页/显式刷新（preserveScroll 为假）回到列表顶部。
+    const previousScrollTop = preserveScroll ? U.auditEventList.scrollTop : 0;
+    U.auditEventList.innerHTML = items.map((item) => renderAuditEventCard(item)).join("");
+    U.auditEventList.scrollTop = previousScrollTop;
 }
 
 // 未读角标：lastSeen 存 sessionStorage（tab 作用域）。
@@ -13097,7 +13115,8 @@ function bind() {
     U.memoryProcessedMore?.addEventListener("click", () => void loadMoreMemoryProcessed());
     U.memoryFailedMore?.addEventListener("click", () => void loadMoreMemoryFailed());
     U.auditRefresh?.addEventListener("click", () => void loadAuditView());
-    U.auditEventMore?.addEventListener("click", () => void loadMoreAuditEvents());
+    U.auditPagePrev?.addEventListener("click", () => void goToAuditPage(S.auditPage - 1));
+    U.auditPageNext?.addEventListener("click", () => void goToAuditPage(S.auditPage + 1));
     U.memoryQueueList?.addEventListener("click", (e) => {
         if (!(e.target instanceof Element)) return;
         const noteTrigger = e.target.closest("[data-memory-note-ref]");

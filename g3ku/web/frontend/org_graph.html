@@ -722,32 +722,23 @@
                 <header class="content-header resource-header compact-resource-header">
                     <div class="resource-header-title">
                         <h1>日志审计</h1>
-                        <p class="subtitle">系统异常与原始事件日志；记忆问题在此只读，重试/放弃仍在记忆管理操作。</p>
+                        <p class="subtitle">原始事件日志；记忆问题在此只读，重试/放弃仍在记忆管理操作。</p>
                     </div>
                     <div class="resource-header-actions compact-resource-header-actions">
                         <button id="audit-refresh-btn" class="toolbar-btn ghost" type="button">刷新</button>
                     </div>
                 </header>
-                <section id="audit-exception-panel" class="resource-detail-panel audit-exception-panel" hidden>
-                    <div class="panel-header">
-                        <div>
-                            <h3>异常</h3>
-                            <p class="subtitle">最新异常与信息来源。</p>
-                        </div>
-                    </div>
-                    <div id="audit-exception-list" class="audit-exception-list"></div>
-                </section>
                 <section class="resource-detail-panel audit-feed-panel">
                     <div class="panel-header">
-                        <div>
-                            <h3>原始日志</h3>
-                            <p class="subtitle">全新在前，包含全部级别事件。</p>
-                        </div>
+                        <h3>原始日志</h3>
                     </div>
                     <div id="audit-event-list" class="audit-event-list"></div>
                     <div class="memory-footer">
-                        <div id="audit-event-info" class="resource-page-indicator" aria-live="polite">共 0 项</div>
-                        <button id="audit-event-more-btn" class="toolbar-btn ghost" type="button">加载更多</button>
+                        <div id="audit-event-info" class="resource-page-indicator" aria-live="polite">第 1/1 页 · 共 0 条</div>
+                        <div class="resource-pagination-actions">
+                            <button id="audit-page-prev" class="toolbar-btn ghost" type="button" disabled>上一页</button>
+                            <button id="audit-page-next" class="toolbar-btn ghost" type="button" disabled>下一页</button>
+                        </div>
                     </div>
                 </section>
             </section>

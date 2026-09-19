@@ -12192,7 +12192,7 @@ textarea {
     }
 }
 
-/* 日志审计：侧栏导航徽标 + 异常板块 + 原始日志（只读运维面） */
+/* 日志审计：侧栏导航徽标 + 原始日志（只读运维面） */
 .nav-item .nav-badge {
     margin-left: auto;
     display: inline-flex;
@@ -12213,76 +12213,62 @@ textarea {
     display: none;
 }
 
-/* 异常板块：红色来源标签 + 摘要 + 时间；无异常时整块隐藏 */
-.audit-exception-panel {
-    border-color: color-mix(in srgb, var(--danger-color, #ef4444) 45%, var(--border-color));
-    margin-bottom: var(--space-4);
-}
-
-.audit-exception-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-}
-
-.audit-exception-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border-left: 3px solid var(--danger-color, #ef4444);
-    border-radius: var(--radius-md);
-    background: color-mix(in srgb, var(--danger-color, #ef4444) 7%, var(--bg-secondary));
-}
-
-.audit-exception-source {
-    flex: 0 0 auto;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--danger-color, #ef4444) 16%, transparent);
-    color: var(--status-failed-text, #fca5a1);
-    font-size: 0.75rem;
-    font-weight: 700;
-}
-
-.audit-exception-summary {
+/* 原始日志：面板占满视图剩余高度，表头/分页常驻，只有日志列表滚动（滚轮可达全部行） */
+.audit-feed-panel {
     flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-height: 0;
 }
 
-.audit-exception-time {
+.audit-feed-panel .panel-header {
     flex: 0 0 auto;
-    color: var(--text-secondary);
-    font-size: 0.75rem;
-    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    padding: var(--space-3) var(--space-5);
 }
 
-/* 原始日志：终端风格单行列表，detail 可展开 */
+.audit-feed-panel .memory-footer {
+    flex: 0 0 auto;
+    padding: var(--space-2) var(--space-4);
+}
+
+/* 原始日志：终端风格单行列表（时间 | 级别 | 来源 | 摘要），detail 可展开 */
 .audit-event-list {
     display: flex;
     flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
 }
 
 .audit-log-line {
     display: flex;
     align-items: center;
-    gap: var(--space-3);
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
     padding: var(--space-1) var(--space-2);
     border-bottom: 1px solid var(--border-color);
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
     font-size: 0.8rem;
 }
 
+/* 可读性：隔行底色 + 悬停高亮，长列表更易横向对读 */
+.audit-log-line:nth-child(even) {
+    background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
+}
+
+.audit-log-line:hover {
+    background: color-mix(in srgb, var(--brand-primary) 10%, transparent);
+}
+
 .audit-log-line .audit-log-time {
     flex: 0 0 auto;
     color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
 }
 
 .audit-log-line .audit-log-level {
     flex: 0 0 auto;
+    min-width: 2.4em;
     color: var(--text-secondary);
 }
 
@@ -12309,6 +12295,19 @@ textarea {
 
 .audit-log-line .audit-log-type {
     flex: 0 0 auto;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+}
+
+/* 展开的详情独占一行，避免把摘要挤成窄条 */
+.audit-log-line .audit-event-expand {
+    flex: 1 0 100%;
+    order: 10;
+    min-width: 0;
+}
+
+.audit-log-line .audit-event-expand > summary {
+    cursor: pointer;
     color: var(--text-secondary);
     font-size: 0.72rem;
 }
