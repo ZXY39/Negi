@@ -1330,7 +1330,6 @@ class NodeRunner:
         state: str,
         acceptance_node_id: str,
         rejection_count: int,
-        max_rejections: int,
         latest_execution_result_ref: str,
         latest_execution_result_summary: str,
         latest_rejection_feedback_ref: str,
@@ -1345,7 +1344,6 @@ class NodeRunner:
                 state=state,
                 acceptance_node_id=str(acceptance_node_id or '').strip(),
                 rejection_count=int(rejection_count or 0),
-                max_rejections=int(max_rejections or 3),
                 latest_execution_result_ref=str(latest_execution_result_ref or '').strip(),
                 latest_execution_result_summary=str(latest_execution_result_summary or '').strip(),
                 latest_rejection_feedback_ref=str(latest_rejection_feedback_ref or '').strip(),
@@ -1391,7 +1389,6 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
             acceptance_node_id=acceptance.node_id,
             rejection_count=int(handshake.get('rejection_count') or 0),
-            max_rejections=int(handshake.get('max_rejections') or 3),
             latest_execution_result_ref=str(handshake.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(handshake.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1424,7 +1421,6 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
             acceptance_node_id=acceptance.node_id,
             rejection_count=int(rejection_count or 0),
-            max_rejections=int(current.get('max_rejections') or 3),
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1472,7 +1468,6 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_ACCEPTED,
             acceptance_node_id=acceptance.node_id,
             rejection_count=int(current.get('rejection_count') or 0),
-            max_rejections=int(current.get('max_rejections') or 3),
             latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1484,47 +1479,6 @@ class NodeRunner:
                 acceptance_node_id=acceptance.node_id,
                 status='passed',
                 final_execution_output='',
-            )
-        self._log_service.refresh_task_view(task.task_id, mark_unread=True)
-
-    def _finalize_acceptance_failure(
-        self,
-        *,
-        task,
-        execution: NodeRecord | None,
-        acceptance: NodeRecord,
-        result: NodeFinalResult,
-        rejection_count: int,
-    ) -> None:
-        if str(getattr(acceptance, 'status', '') or '').strip().lower() != STATUS_FAILED:
-            self._log_service.update_node_status(
-                task.task_id,
-                acceptance.node_id,
-                status=STATUS_FAILED,
-                final_output=str(result.output or '').strip(),
-                failure_reason=str(result.failure_text or '').strip(),
-            )
-        if execution is None:
-            return
-        current = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY)))
-        self._update_execution_acceptance_handshake(
-            node_id=execution.node_id,
-            state=ACCEPTANCE_STATE_REJECTED_TERMINAL,
-            acceptance_node_id=acceptance.node_id,
-            rejection_count=int(rejection_count or 0),
-            max_rejections=int(current.get('max_rejections') or 3),
-            latest_execution_result_ref=str(current.get('latest_execution_result_ref') or '').strip(),
-            latest_execution_result_summary=str(current.get('latest_execution_result_summary') or '').strip(),
-            latest_rejection_feedback_ref='',
-            latest_rejection_feedback_summary=self._acceptance_feedback_text(result),
-        )
-        if self._acceptance_updates_task_final_acceptance(task=task, execution=execution, acceptance=acceptance):
-            execution_output = str(getattr(execution, 'final_output', '') or '').strip()
-            self._set_task_final_acceptance_state(
-                task_id=task.task_id,
-                acceptance_node_id=acceptance.node_id,
-                status='failed',
-                final_execution_output=execution_output,
             )
         self._log_service.refresh_task_view(task.task_id, mark_unread=True)
 
@@ -1581,7 +1535,6 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
             acceptance_node_id=acceptance_node_id,
             rejection_count=int(handshake.get('rejection_count') or 0),
-            max_rejections=int(handshake.get('max_rejections') or 3),
             latest_execution_result_ref=str(handshake.get('latest_execution_result_ref') or '').strip(),
             latest_execution_result_summary=str(handshake.get('latest_execution_result_summary') or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1629,7 +1582,7 @@ class NodeRunner:
         next_rejection_count = int(handshake.get('rejection_count') or 0) + 1
         if str(result.blocking_reason or '').strip() == NOTICE_INTERRUPT_REASON:
             # 定向通知打断验收（决策回合 resume_execution 的合成结果）：
-            # 不消耗拒绝预算、不发验收→执行交接消息（用户通知本身就是给
+            # 不消耗拒收计数、不发验收→执行交接消息（用户通知本身就是给
             # 执行节点的消息）。验收节点的作废与 frame 丢弃由驱动器在解析
             # future 前完成；这里只把执行节点恢复为等待重试并交还管线循环。
             self._interrupt_acceptance_for_notice_retry(
@@ -1647,40 +1600,25 @@ class NodeRunner:
                 remaining_work=[],
                 blocking_reason='',
             )
-        if next_rejection_count < int(handshake.get('max_rejections') or 3):
-            feedback_text = self._acceptance_feedback_text(result)
-            self._persist_rejection_feedback_and_keep_acceptance_live(
-                task=task,
-                execution=execution,
-                acceptance=acceptance,
-                feedback_text=feedback_text,
-                rejection_count=next_rejection_count,
-            )
-            return NodeFinalResult(
-                status=STATUS_SUCCESS,
-                delivery_status='partial',
-                summary='waiting for execution retry',
-                answer=feedback_text,
-                evidence=[],
-                remaining_work=[],
-                blocking_reason='',
-            )
-
-        self._finalize_acceptance_failure(
+        # 拒收无次数上限：每一次拒绝都只是打回——把验收反馈投给执行节点、
+        # 复活验收与执行双方，交给下一轮「执行→验收」继续，绝不因拒收次数
+        # 把节点对或任务判成终态（终态只来自验收通过、执行失败或外部中断）。
+        feedback_text = self._acceptance_feedback_text(result)
+        self._persist_rejection_feedback_and_keep_acceptance_live(
             task=task,
             execution=execution,
             acceptance=acceptance,
-            result=result,
+            feedback_text=feedback_text,
             rejection_count=next_rejection_count,
         )
         return NodeFinalResult(
-            status=STATUS_FAILED,
-            delivery_status='final',
-            summary=str(result.summary or ''),
-            answer=str(result.answer or ''),
-            evidence=list(result.evidence or []),
+            status=STATUS_SUCCESS,
+            delivery_status='partial',
+            summary='waiting for execution retry',
+            answer=feedback_text,
+            evidence=[],
             remaining_work=[],
-            blocking_reason=str(result.blocking_reason or result.summary or ''),
+            blocking_reason='',
         )
 
     def _set_execution_waiting_acceptance_state(
@@ -1702,7 +1640,6 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
             acceptance_node_id=acceptance_node_id,
             rejection_count=int(rejection_count if rejection_count is not None else current.get('rejection_count') or 0),
-            max_rejections=int(current.get('max_rejections') or 3),
             latest_execution_result_ref=str(result_ref or '').strip(),
             latest_execution_result_summary=str(result_summary or '').strip(),
             latest_rejection_feedback_ref='',
@@ -1798,7 +1735,9 @@ class NodeRunner:
         The execution node's claimed blockage is verified by its acceptance node
         (existing, final-acceptance, or an ad-hoc one created on demand). The
         verdict either allows the failure or rejects the claim and sends the
-        execution node back to work, sharing the handshake rejection budget.
+        execution node back to work; the claim may be rejected any number of
+        times, because the rejection loop has no budget. A rejected claim only
+        ever consumes one more ``rejection_count`` tick for feedback/forensics.
         Returns the finalized NodeFinalResult when the gate handled the
         submission, or None when the gate does not apply.
         """
@@ -1814,20 +1753,6 @@ class NodeRunner:
         node = self._store.get_node(node_id) or node
         handshake = normalize_acceptance_handshake((node.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         rejection_count = int(handshake.get('rejection_count') or 0)
-        max_rejections = max(1, int(handshake.get('max_rejections') or 3))
-        if rejection_count >= max_rejections:
-            existing = self._blocked_verification_node(task=task, node=node, create_if_missing=False)
-            return self._allow_blocked_failure(
-                task_id=task_id,
-                node=node,
-                result=result,
-                decision='exhausted',
-                acceptance=existing,
-                verdict=None,
-                result_ref=str(handshake.get('latest_execution_result_ref') or ''),
-                rejection_count=rejection_count,
-                max_rejections=max_rejections,
-            )
         acceptance = self._blocked_verification_node(task=task, node=node)
         if acceptance is None:
             return self._allow_blocked_failure(
@@ -1839,7 +1764,6 @@ class NodeRunner:
                 verdict=None,
                 result_ref='',
                 rejection_count=rejection_count,
-                max_rejections=max_rejections,
             )
         invalid_verdict_rounds = 0
         loop_round = 0
@@ -1866,7 +1790,6 @@ class NodeRunner:
                 state=ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
                 acceptance_node_id=acceptance.node_id,
                 rejection_count=rejection_count,
-                max_rejections=max_rejections,
                 latest_execution_result_ref=result_ref,
                 latest_execution_result_summary=str(result.summary or '').strip(),
                 latest_rejection_feedback_ref='',
@@ -1932,7 +1855,6 @@ class NodeRunner:
                     verdict=verdict,
                     result_ref=result_ref,
                     rejection_count=rejection_count,
-                    max_rejections=max_rejections,
                 )
             if decision == 'allow':
                 return self._allow_blocked_failure(
@@ -1944,7 +1866,6 @@ class NodeRunner:
                     verdict=verdict,
                     result_ref=result_ref,
                     rejection_count=rejection_count,
-                    max_rejections=max_rejections,
                 )
             # decision == 'reject'（阻塞不成立），或 invalid 裁决两次后按不成立处理
             if decision == 'invalid':
@@ -1965,18 +1886,8 @@ class NodeRunner:
                 'acceptance_node_id': str(acceptance.node_id or ''),
                 'rejection_count': next_rejection_count,
             })
-            if next_rejection_count >= max_rejections:
-                return self._allow_blocked_failure(
-                    task_id=task_id,
-                    node=node,
-                    result=result,
-                    decision='exhausted',
-                    acceptance=acceptance,
-                    verdict=verdict,
-                    result_ref=result_ref,
-                    rejection_count=next_rejection_count,
-                    max_rejections=max_rejections,
-                )
+            # 打回无次数上限：被驳回的阻塞声明一律交还执行节点重跑，重复声明
+            # 多少次都不会因次数被放行。
             self._persist_rejection_feedback_and_keep_acceptance_live(
                 task=task,
                 execution=node,
@@ -2163,7 +2074,6 @@ class NodeRunner:
         verdict: NodeFinalResult | None,
         result_ref: str,
         rejection_count: int,
-        max_rejections: int,
     ) -> NodeFinalResult:
         acceptance_node_id = str(getattr(acceptance, 'node_id', '') or '').strip()
         verdict_summary = str(getattr(verdict, 'summary', '') or '').strip() if verdict is not None else ''
@@ -2179,7 +2089,6 @@ class NodeRunner:
             state=ACCEPTANCE_STATE_REJECTED_TERMINAL,
             acceptance_node_id=acceptance_node_id,
             rejection_count=int(rejection_count or 0),
-            max_rejections=int(max_rejections or 3),
             latest_execution_result_ref=str(result_ref or ''),
             latest_execution_result_summary=str(result.summary or '').strip(),
             latest_rejection_feedback_ref='',
@@ -2200,10 +2109,6 @@ class NodeRunner:
         marker = {
             'justified': '[blocked核验] 验收核验判定阻塞成立，失败放行。',
             'unverifiable': '[blocked核验] 核验方无法完成核验，失败放行（核验无法完成）。',
-            'exhausted': (
-                f'[blocked核验] 阻塞声明被打回后额度耗尽（{int(rejection_count or 0)}/{int(max_rejections or 3)}），'
-                '失败按额度规则放行。'
-            ),
             'no_verifier': '[blocked核验] 无法创建核验节点，失败放行。',
         }.get(str(decision or ''), '')
         amended = result

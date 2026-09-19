@@ -1,9 +1,11 @@
-"""验收握手拒收预算回归测试。
+"""验收握手拒收计数回归测试。
 
 修复缺陷：执行节点重新提交时 _set_execution_waiting_acceptance_state 的
-默认参数把 rejection_count 重置为 0，导致连续拒收永远达不到上限，任务在
-"执行→验收拒绝→重跑→再提交"之间无限循环。预算必须在重新提交间保留，
-仅当调用方显式传入计数时才覆盖。
+默认参数把 rejection_count 重置为 0，导致连续拒收永远统计不到真实打回次数。
+计数必须在重新提交间保留，仅当调用方显式传入计数时才覆盖。
+
+拒收没有次数上限：rejection_count 只用于反馈与取证（展示"被打回过几次"），
+不参与任何终态判定，握手也不再持久化 max_rejections。
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ def _execution_with_handshake(rejection_count: int | None) -> SimpleNamespace:
     return SimpleNamespace(node_id="exec-1", metadata=metadata)
 
 
-def _resubmit(runner: NodeRunner, **overrides) -> dict:
+def _resubmit(runner: NodeRunner, **overrides) -> None:
     kwargs = dict(
         task_id="task-1",
         execution_node_id="exec-1",
@@ -65,7 +67,7 @@ def _resubmit(runner: NodeRunner, **overrides) -> dict:
     runner._set_execution_waiting_acceptance_state(**kwargs)  # type: ignore[attr-defined]
 
 
-def test_resubmission_without_count_preserves_rejection_budget() -> None:
+def test_resubmission_without_count_preserves_rejection_count() -> None:
     runner, recorded = _make_runner(_execution_with_handshake(2))
     _resubmit(runner)
     assert recorded, "handshake update must be recorded"
@@ -82,3 +84,9 @@ def test_fresh_handshake_starts_at_zero() -> None:
     runner, recorded = _make_runner(_execution_with_handshake(None))
     _resubmit(runner)
     assert recorded[0]["rejection_count"] == 0
+
+
+def test_legacy_budget_key_is_not_forwarded() -> None:
+    runner, recorded = _make_runner(_execution_with_handshake(9))
+    _resubmit(runner)
+    assert "max_rejections" not in recorded[0]

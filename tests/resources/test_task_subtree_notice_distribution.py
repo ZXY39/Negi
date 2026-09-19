@@ -402,7 +402,7 @@ async def test_message_list_filters_system_relay_notices(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_acceptance_interrupt_result_does_not_consume_rejection_budget(tmp_path: Path) -> None:
+async def test_acceptance_interrupt_result_does_not_consume_rejection_count(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:
         record, root, child_a, _child_b = await _seed_root_with_two_live_children(service)
@@ -426,7 +426,6 @@ async def test_acceptance_interrupt_result_does_not_consume_rejection_budget(tmp
                 "state": ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
                 "acceptance_node_id": acceptance.node_id,
                 "rejection_count": 1,
-                "max_rejections": 3,
             }
             return metadata
 
@@ -450,7 +449,7 @@ async def test_acceptance_interrupt_result_does_not_consume_rejection_budget(tmp
         assert result.delivery_status == "partial"
         refreshed = service.store.get_node(child_a.node_id)
         handshake = dict((refreshed.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
-        # 拒绝预算不消耗、状态回到等待执行重试、执行节点被重新激活
+        # 拒收计数不消耗、状态回到等待执行重试、执行节点被重新激活
         assert int(handshake.get("rejection_count") or 0) == 1
         assert handshake.get("state") == "waiting_execution_retry"
         assert refreshed.status == "in_progress"

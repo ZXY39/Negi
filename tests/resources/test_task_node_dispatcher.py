@@ -495,7 +495,7 @@ async def test_task_actor_service_kicks_back_execution_on_first_pending_notice_a
     """首次验收拒绝必须打回执行节点，而不是直接终态。
 
     旧缺陷：notice-resume 跑完验收后结果被丢弃，任务经
-    _terminal_result_after_notice_resume 捷径终态，拒收预算从未消费
+    _terminal_result_after_notice_resume 捷径终态，打回从未被消费
     （生产 5 例 business_unpassed 全部 rejection_count=0）。
     """
     service = _make_service(tmp_path)
@@ -621,13 +621,13 @@ async def test_task_actor_service_kicks_back_execution_on_first_pending_notice_a
 
 
 @pytest.mark.asyncio
-async def test_task_actor_service_terminalizes_root_after_acceptance_rejection_budget_exhausted(
+async def test_task_actor_service_kicks_back_root_even_past_former_rejection_budget(
     tmp_path: Path,
 ) -> None:
-    """拒收预算耗尽后才允许终态：success + business_unpassed。"""
+    """拒收无次数上限：第 3 次（乃至第 N 次）拒绝仍打回根执行节点重跑。"""
     service = _make_service(tmp_path)
     record = await service.create_task(
-        "root pending acceptance budget exhausted",
+        "root pending acceptance retry",
         session_id="web:shared",
         metadata={"final_acceptance": {"required": True, "prompt": "verify root output"}},
     )
@@ -652,6 +652,7 @@ async def test_task_actor_service_terminalizes_root_after_acceptance_rejection_b
         blocking_reason="",
     )
     service.node_runner._persist_result_payload(task.task_id, root.node_id, root_result)
+    # 预置旧上限（3）内的计数：按历史行为，这一轮拒绝就该终态化任务。
     service.node_runner._set_execution_waiting_acceptance_state(
         task_id=task.task_id,
         execution_node_id=root.node_id,
@@ -723,18 +724,17 @@ async def test_task_actor_service_terminalizes_root_after_acceptance_rejection_b
     assert latest_root is not None
     assert latest_acceptance is not None
     assert call_order == [acceptance.node_id]
-    assert latest_acceptance.status == "failed"
-    assert latest_root.status == "success"
-    assert latest_root.final_output == "draft ready"
+    # 打回：验收与执行双方复活重跑，任务保持 in_progress，绝不因拒绝次数终态化。
+    assert latest_acceptance.status == "in_progress"
+    assert latest_root.status == "in_progress"
     assert latest_root.check_result == "reject thrice"
     handshake = dict((latest_root.metadata or {}).get("acceptance_handshake") or {})
-    assert handshake["state"] == "rejected_terminal"
+    assert handshake["state"] == "waiting_execution_retry"
     assert handshake["rejection_count"] == 3
-    assert latest_task.status == "success"
-    assert latest_task.failure_reason == "reject thrice"
-    assert latest_task.metadata.get("failure_class") == "business_unpassed"
-    assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
-    assert list(service.store.list_task_runtime_frames(record.task_id) or []) == []
+    assert "max_rejections" not in handshake
+    assert latest_task.status == "in_progress"
+    assert not latest_task.metadata.get("failure_class")
+    assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "waiting_execution_retry"
 
 
 @pytest.mark.asyncio

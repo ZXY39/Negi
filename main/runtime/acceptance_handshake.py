@@ -1,3 +1,16 @@
+"""Acceptance handshake payload normalization.
+
+The execution <-> acceptance loop has no rejection cap: every rejection feeds
+the acceptance verdict back to the execution node, reactivates it, and the pair
+keeps iterating until the acceptance node passes — or until the loop is
+interrupted from outside (node pause, task cancel, execution failure). The
+handshake therefore tracks only the running ``rejection_count`` for feedback and
+forensics; there is no rejection budget field and no budget-exhaustion terminal.
+
+Legacy payloads carrying ``max_rejections`` are normalized by dropping the key;
+normalization never re-emits it.
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -51,16 +64,10 @@ def normalize_acceptance_handshake(payload: Any) -> dict[str, Any]:
     if state not in _KNOWN_ACCEPTANCE_STATES:
         state = ACCEPTANCE_STATE_IDLE
     rejection_count = max(0, _coerce_int(current.get("rejection_count"), default=0))
-    max_rejections = _coerce_int(current.get("max_rejections"), default=3)
-    if rejection_count < 0:
-        rejection_count = 0
-    if max_rejections <= 0:
-        max_rejections = 3
     return {
         "state": state,
         "acceptance_node_id": str(current.get("acceptance_node_id") or "").strip(),
         "rejection_count": rejection_count,
-        "max_rejections": max_rejections,
         "latest_execution_result_ref": str(current.get("latest_execution_result_ref") or "").strip(),
         "latest_execution_result_summary": str(current.get("latest_execution_result_summary") or "").strip(),
         "latest_rejection_feedback_ref": str(current.get("latest_rejection_feedback_ref") or "").strip(),
@@ -75,7 +82,6 @@ def set_acceptance_handshake_state(
     state: str,
     acceptance_node_id: str,
     rejection_count: int,
-    max_rejections: int,
     latest_execution_result_ref: str,
     latest_execution_result_summary: str,
     latest_rejection_feedback_ref: str,
@@ -86,9 +92,6 @@ def set_acceptance_handshake_state(
     current["state"] = state if state in _KNOWN_ACCEPTANCE_STATES else ACCEPTANCE_STATE_IDLE
     current["acceptance_node_id"] = str(acceptance_node_id or "").strip()
     current["rejection_count"] = max(0, _coerce_int(rejection_count, default=0))
-    current["max_rejections"] = _coerce_int(max_rejections, default=3)
-    if current["max_rejections"] <= 0:
-        current["max_rejections"] = 3
     current["latest_execution_result_ref"] = str(latest_execution_result_ref or "").strip()
     current["latest_execution_result_summary"] = str(latest_execution_result_summary or "").strip()
     current["latest_rejection_feedback_ref"] = str(latest_rejection_feedback_ref or "").strip()

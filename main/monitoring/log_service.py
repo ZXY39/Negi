@@ -1550,11 +1550,12 @@ class TaskLogService:
     ) -> None:
         normalized_status = str(status or '').strip().lower()
         if normalized_status == 'failed':
-            # 任务级「验收失败」是终局裁决，仅由拒收预算路径写入
-            # （_finalize_acceptance_failure → _set_task_final_acceptance_state）。
-            # 节点级 failed 在此只同步展示层（check_result），否则抢跑/未经
-            # 预算循环路由的验收失败会借 _terminal_result_after_notice_resume
-            # 把任务捷径终态，跳过打回（事故复盘：task:eb6dda95055b）。
+            # 任务级「验收失败」只由阻塞核验放行路径写入（_allow_blocked_failure
+            # → _set_task_final_acceptance_state）。普通验收拒绝没有次数上限、
+            # 一律打回执行节点重跑，故节点级 failed 在此只同步展示层
+            # （check_result）；否则抢跑/未经打回循环路由的验收失败会借
+            # _terminal_result_after_notice_resume 把任务捷径终态，跳过打回
+            # （事故复盘：task:eb6dda95055b）。
             return
         task = self._store.get_task(task_id)
         if task is None:

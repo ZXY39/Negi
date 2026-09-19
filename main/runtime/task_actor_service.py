@@ -19,7 +19,6 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
-    ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
     normalize_acceptance_handshake,
@@ -559,7 +558,7 @@ class TaskActorService:
             if self._final_acceptance_awaiting_execution_submission(task_id, node_id):
                 # 门控：被检验执行节点尚未提交结果（握手未进入等待验收）时，
                 # 不得由 notice-resume 抢跑最终验收——否则会对仍在执行的节点
-                # 判出「交付物缺失」，绕过拒收预算把任务提前终态
+                # 判出「交付物缺失」，绕过打回循环把任务提前终态
                 # （事故复盘：task:eb6dda95055b 重启后验收抢跑，零打回终结）。
                 skipped_premature_acceptance = True
                 continue
@@ -623,14 +622,13 @@ class TaskActorService:
         node_id: str,
         result: NodeFinalResult | None,
     ) -> None:
-        """把 notice-resume 跑完的最终验收结果接入拒收预算循环。
+        """把 notice-resume 跑完的最终验收结果接入打回循环。
 
         历史上该结果被直接丢弃，任务生死由 _terminal_result_after_notice_resume
-        读取投影状态决定，拒收预算（max_rejections）从未被消费。现在统一经
+        读取投影状态决定，打回从未被消费。现在统一经
         _handle_acceptance_node_result 路由（对齐子节点管线的打回语义）：
         - 验收通过 → 正常进入终态；
-        - 拒绝且预算未尽 → 打回：执行节点带反馈复活，补入队下轮重跑；
-        - 预算耗尽 → 落终局拒绝态，交由 _terminal_result_after_notice_resume 终态。
+        - 任何一次拒绝 → 打回：执行节点带反馈复活，补入队下轮重跑（无次数上限）；
         """
         if result is None:
             return
@@ -2341,28 +2339,15 @@ class TaskActorService:
         execution_output = str(root_result.answer or root_result.summary or '').strip()
         check_result = str(getattr(root, 'check_result', '') or '').strip()
 
-        if acceptance_status in {'passed', 'failed'}:
-            if acceptance_status == 'failed':
-                # 拒收预算守卫：验收失败只有在打回预算耗尽时才允许在此终态。
-                # 合法耗尽由 _finalize_acceptance_failure 写入 rejected_terminal
-                # 且 rejection_count>=max_rejections；若计数未达上限（例如验收
-                # 抢跑/结果未被预算循环路由），交还控制权让驱动层复活执行节点，
-                # 而不是把「未打回的失败」折叠成 success 终态。
-                root_handshake = normalize_acceptance_handshake(
-                    (getattr(root, 'metadata', None) or {}).get(ACCEPTANCE_HANDSHAKE_KEY)
-                )
-                if int(root_handshake.get('rejection_count') or 0) < int(root_handshake.get('max_rejections') or 3):
-                    return None
+        if acceptance_status == 'passed':
             self._reconcile_root_acceptance_handshake_after_notice_resume(
                 root=root,
                 acceptance_node_id=acceptance_node_id,
-                state=ACCEPTANCE_STATE_ACCEPTED if acceptance_status == 'passed' else ACCEPTANCE_STATE_REJECTED_TERMINAL,
-                rejection_feedback='' if acceptance_status == 'passed' else (check_result or str(task.failure_reason or '').strip()),
+                state=ACCEPTANCE_STATE_ACCEPTED,
+                rejection_feedback='',
                 root_result=root_result,
             )
-            summary = check_result or execution_output or (
-                'final acceptance passed' if acceptance_status == 'passed' else 'final acceptance failed'
-            )
+            summary = check_result or execution_output or 'final acceptance passed'
             return NodeFinalResult(
                 status='success',
                 delivery_status='final',
@@ -2372,6 +2357,12 @@ class TaskActorService:
                 remaining_work=[],
                 blocking_reason='',
             )
+        if acceptance_status == 'failed':
+            # 拒收无次数上限：不存在「打回预算耗尽即终态」的验收失败。节点级
+            # 验收失败只是打回的中转态——交还控制权让驱动层复活执行节点重跑，
+            # 绝不用任务级「验收失败」把未打回的失败折叠成终态
+            # （事故复盘：task:eb6dda95055b 验收抢跑零打回终结）。
+            return None
 
         if acceptance_status == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE:
             failure_text = (
@@ -2426,7 +2417,6 @@ class TaskActorService:
             state=str(state or '').strip(),
             acceptance_node_id=acceptance_node_id or str(handshake.get('acceptance_node_id') or '').strip(),
             rejection_count=int(handshake.get('rejection_count') or 0),
-            max_rejections=int(handshake.get('max_rejections') or 3),
             latest_execution_result_ref=result_ref,
             latest_execution_result_summary=result_summary,
             latest_rejection_feedback_ref='',

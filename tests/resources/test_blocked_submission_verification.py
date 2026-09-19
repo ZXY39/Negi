@@ -289,7 +289,6 @@ async def test_gate_reuses_waiting_acceptance_and_preserves_original_rejection(t
             state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
             acceptance_node_id=acceptance.node_id,
             rejection_count=1,
-            max_rejections=3,
             latest_execution_result_ref="",
             latest_execution_result_summary="",
             latest_rejection_feedback_ref="",
@@ -325,7 +324,8 @@ async def test_gate_reuses_waiting_acceptance_and_preserves_original_rejection(t
 
 
 @pytest.mark.asyncio
-async def test_gate_exhausted_budget_allows_failure_with_marker(tmp_path: Path) -> None:
+async def test_gate_high_rejection_count_still_rejects_block_claim(tmp_path: Path) -> None:
+    """打回无次数上限：拒收计数远超旧上限（3）时，阻塞声明仍被打回重跑。"""
     service = _make_service(tmp_path)
     try:
         record = await _create_task(service)
@@ -337,7 +337,6 @@ async def test_gate_exhausted_budget_allows_failure_with_marker(tmp_path: Path) 
             state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
             acceptance_node_id="",
             rejection_count=2,
-            max_rejections=3,
             latest_execution_result_ref="",
             latest_execution_result_summary="",
             latest_rejection_feedback_ref="",
@@ -346,7 +345,7 @@ async def test_gate_exhausted_budget_allows_failure_with_marker(tmp_path: Path) 
         _install_fake_verifier(service, [
             _verdict("failed", summary="阻塞不成立", blocking_reason="继续干活"),
         ])
-        rerun_calls = _install_fake_rerun(service, NodeFinalResult(status="success", summary="never"))
+        rerun_calls = _install_fake_rerun(service, NodeFinalResult(status="success", summary="resumed"))
 
         result = await service.node_runner._maybe_gate_blocked_submission(
             task=service.get_task(record.task_id),
@@ -354,19 +353,23 @@ async def test_gate_exhausted_budget_allows_failure_with_marker(tmp_path: Path) 
             result=_blocked_result(),
         )
 
-        assert result.status == STATUS_FAILED
-        assert rerun_calls == []
+        assert result.status == STATUS_SUCCESS
+        assert len(rerun_calls) == 1
+        handshake = _handshake(service, child.node_id)
+        assert handshake.get("state") == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY
+        assert int(handshake.get("rejection_count") or 0) == 3
+        assert "max_rejections" not in handshake
         failed_child = service.get_node(child.node_id)
-        assert "额度耗尽" in str(failed_child.failure_reason or "")
-        assert "2/3" in str(failed_child.failure_reason or "") or "3/3" in str(failed_child.failure_reason or "")
+        assert "额度耗尽" not in str(failed_child.failure_reason or "")
         log = list((failed_child.metadata or {}).get(_BLOCKED_VERIFICATION_LOG_KEY) or [])
-        assert log and log[-1]["decision"] == "allowed:exhausted"
+        assert log and log[-1]["decision"] == "rejected"
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_gate_entry_exhausted_skips_verification_entirely(tmp_path: Path) -> None:
+async def test_gate_rejection_past_former_budget_still_creates_verifier(tmp_path: Path) -> None:
+    """旧上限之外不再短路：拒收计数很大时依然要跑核验节点，而不是直接放行失败。"""
     service = _make_service(tmp_path)
     try:
         record = await _create_task(service)
@@ -377,14 +380,16 @@ async def test_gate_entry_exhausted_skips_verification_entirely(tmp_path: Path) 
             node_id=child.node_id,
             state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
             acceptance_node_id="",
-            rejection_count=3,
-            max_rejections=3,
+            rejection_count=42,
             latest_execution_result_ref="",
             latest_execution_result_summary="",
             latest_rejection_feedback_ref="",
             latest_rejection_feedback_summary="",
         )
-        _install_forbidden_verifier(service)
+        verifier_calls = _install_fake_verifier(service, [
+            _verdict("failed", summary="阻塞不成立", blocking_reason="继续干活"),
+        ])
+        rerun_calls = _install_fake_rerun(service, NodeFinalResult(status="success", summary="resumed"))
 
         result = await service.node_runner._maybe_gate_blocked_submission(
             task=task,
@@ -392,9 +397,10 @@ async def test_gate_entry_exhausted_skips_verification_entirely(tmp_path: Path) 
             result=_blocked_result(),
         )
 
-        assert result.status == STATUS_FAILED
-        assert "额度耗尽" in str(service.get_node(child.node_id).failure_reason or "")
-        assert _acceptance_children(service, child.node_id) == []
+        assert result.status == STATUS_SUCCESS
+        assert len(verifier_calls) == 1
+        assert len(rerun_calls) == 1
+        assert int(_handshake(service, child.node_id).get("rejection_count") or 0) == 43
     finally:
         await service.close()
 
@@ -526,7 +532,6 @@ async def test_cancel_waiting_acceptance_preserves_original_verdict(tmp_path: Pa
                 state=state,
                 acceptance_node_id=acceptance.node_id,
                 rejection_count=1,
-                max_rejections=3,
                 latest_execution_result_ref="",
                 latest_execution_result_summary="",
                 latest_rejection_feedback_ref="",
@@ -596,7 +601,6 @@ async def test_adhoc_verifier_finalized_when_execution_succeeds(tmp_path: Path) 
             state=ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY,
             acceptance_node_id=verifier.node_id,
             rejection_count=1,
-            max_rejections=3,
             latest_execution_result_ref="",
             latest_execution_result_summary="",
             latest_rejection_feedback_ref="",

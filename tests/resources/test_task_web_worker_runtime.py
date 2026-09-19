@@ -452,7 +452,6 @@ def test_normalize_acceptance_handshake_defaults() -> None:
         "state": ACCEPTANCE_STATE_IDLE,
         "acceptance_node_id": "",
         "rejection_count": 0,
-        "max_rejections": 3,
         "latest_execution_result_ref": "",
         "latest_execution_result_summary": "",
         "latest_rejection_feedback_ref": "",
@@ -461,13 +460,26 @@ def test_normalize_acceptance_handshake_defaults() -> None:
     }
 
 
+def test_normalize_acceptance_handshake_drops_legacy_rejection_budget() -> None:
+    normalized = normalize_acceptance_handshake(
+        {
+            "state": "waiting_acceptance",
+            "rejection_count": 7,
+            "max_rejections": 3,
+            "acceptance_node_id": "node:acceptance",
+        }
+    )
+
+    assert "max_rejections" not in normalized
+    assert normalized["rejection_count"] == 7
+
+
 def test_set_acceptance_handshake_state_overwrites_runtime_fields() -> None:
     updated = set_acceptance_handshake_state(
         {},
         state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
         acceptance_node_id="node:acceptance",
         rejection_count=1,
-        max_rejections=2,
         latest_execution_result_ref="artifact:result",
         latest_execution_result_summary="draft answer",
         latest_rejection_feedback_ref="",
@@ -478,7 +490,8 @@ def test_set_acceptance_handshake_state_overwrites_runtime_fields() -> None:
     assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
     assert updated["acceptance_node_id"] == "node:acceptance"
     assert updated["rejection_count"] == 1
-    assert updated["max_rejections"] == 2
+    assert updated["latest_execution_result_summary"] == "draft answer"
+    assert "max_rejections" not in updated
 
 
 def test_normalize_final_acceptance_metadata_allows_handshake_statuses() -> None:
@@ -4812,6 +4825,12 @@ async def test_spawn_children_parent_frame_does_not_inline_partial_results(tmp_p
 
 @pytest.mark.asyncio
 async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """验收终结性失败必须随子节点结果一起上报，且不得抹掉子节点自身的输出。
+
+    拒收无次数上限后，真实 `_handle_acceptance_node_result` 对任何拒绝都只打回
+    （partial），子节点流水线不会因拒绝次数结束；这里直接替换裁决入口，钉住
+    「裁决最终为 failed 时流水线如何收尾」这一条契约。
+    """
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -4860,6 +4879,11 @@ async def test_spawn_children_surfaces_acceptance_failure_info_while_preserving_
             )
 
         monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+        monkeypatch.setattr(
+            service.node_runner,
+            "_handle_acceptance_node_result",
+            lambda *, task, acceptance, result: result,
+        )
 
         results = await service.node_runner._spawn_children(
             task_id=record.task_id,
@@ -6970,7 +6994,13 @@ def test_rest_node_detail_accepts_full_detail_level_query_parameter(tmp_path: Pa
     assert response.json()["item"]["detail_level"] == "full"
 
 
-def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_business_unpassed(tmp_path: Path):
+def test_final_acceptance_rejection_kicks_back_even_past_former_budget(tmp_path: Path):
+    """拒收无次数上限：最终验收拒绝永远是打回，不再折叠成「验收失败」终态。
+
+    历史行为：打回预算（max_rejections=3）耗尽时 _finalize_acceptance_failure
+    把任务写成 success + business_unpassed。该路径随拒收上限一并删除，故这里
+    预置远超旧上限的拒收计数，验证仍走打回。
+    """
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -6991,7 +7021,7 @@ def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_busin
             metadata={
                 "final_acceptance": {
                     "required": True,
-                    "prompt": "鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
+                    "prompt": "verify final output",
                 }
             },
         )
@@ -7018,22 +7048,20 @@ def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_busin
         task=task,
         accepted_node=root,
         goal=f"最终验收:{root.goal}",
-        acceptance_prompt="鏍稿鏈€缁堢粨鏋滄槸鍚︽弧瓒宠姹傘€?",
+        acceptance_prompt="verify final output",
         parent_node_id=root.node_id,
         metadata={"final_acceptance": True},
     )
-    # 任务级「验收失败」终局由拒收预算路径写入（节点级 raw failed 只同步
-    # 展示层）：把预算预置到仅剩一次，再经 _handle_acceptance_node_result
-    # 走完最后一次拒绝 → _finalize_acceptance_failure。
+    # 预置远超旧上限（3）的拒收计数：打回次数不再有任何上限。
     service.node_runner._set_execution_waiting_acceptance_state(
         task_id=record.task_id,
         execution_node_id=root.node_id,
         acceptance_node_id=acceptance.node_id,
         result_ref="artifact:root",
         result_summary="root deliverable",
-        rejection_count=2,
+        rejection_count=42,
     )
-    service.node_runner._handle_acceptance_node_result(
+    result = service.node_runner._handle_acceptance_node_result(
         task=task,
         acceptance=acceptance,
         result=NodeFinalResult(
@@ -7049,24 +7077,32 @@ def test_failed_final_acceptance_node_preserves_root_status_and_marks_task_busin
 
     latest_task = service.get_task(record.task_id)
     latest_root = service.get_node(record.root_node_id)
-    final_acceptance = normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")) if latest_task is not None else None
+    latest_acceptance = service.get_node(acceptance.node_id)
 
     assert latest_task is not None
     assert latest_root is not None
-    assert latest_root.status == "success"
-    assert latest_root.final_output == "root deliverable"
-    assert latest_root.failure_reason == ""
-    assert latest_root.check_result == "final acceptance failed"
-    assert latest_task.status == "success"
-    assert latest_task.failure_reason == "final acceptance failed"
-    assert final_acceptance is not None
-    assert final_acceptance.status == "failed"
-    assert latest_task.metadata.get("failure_class") == "business_unpassed"
-    assert latest_task.metadata.get("final_execution_output") == "root deliverable"
-    items = service.query_service.get_tasks("web:shared", 1)
-    assert len(items) == 1
-    assert items[0].failure_class == "business_unpassed"
-    assert items[0].final_acceptance.get("status") == "failed"
+    assert latest_acceptance is not None
+    assert result.delivery_status == "partial"
+    # 打回：执行与验收双方复活重跑，上一轮交付物移入 rejection_history。
+    assert latest_root.status == "in_progress"
+    assert latest_acceptance.status == "in_progress"
+    assert latest_root.final_output == ""
+    history = list((latest_root.metadata or {}).get("rejection_history") or [])
+    assert any(entry.get("final_output") == "root deliverable" for entry in history)
+    handshake = dict((latest_root.metadata or {}).get("acceptance_handshake") or {})
+    assert handshake["state"] == "waiting_execution_retry"
+    assert handshake["rejection_count"] == 43
+    assert "max_rejections" not in handshake
+    # 任务保持 in_progress：任务级「验收失败」不再由拒绝次数写入。
+    assert latest_task.status == "in_progress"
+    assert not latest_task.metadata.get("failure_class")
+    final_acceptance = normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance"))
+    assert final_acceptance.status == "waiting_execution_retry"
+    feedback = [
+        str(getattr(item, "message", "") or "")
+        for item in list(service.store.list_task_node_notifications(record.task_id, root.node_id) or [])
+    ]
+    assert feedback == ["final acceptance failed"]
 
 
 @pytest.mark.asyncio
@@ -7353,7 +7389,8 @@ async def test_second_acceptance_rejection_still_requests_execution_retry(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_third_acceptance_rejection_terminalizes_pair_and_preserves_root_output(tmp_path: Path) -> None:
+async def test_high_rejection_count_still_requests_execution_retry(tmp_path: Path) -> None:
+    """第三次（以及第 N 次）拒绝同样只打回：拒收没有次数上限。"""
     service = _build_service(tmp_path)
     try:
         record = await service.create_task(
@@ -7390,7 +7427,7 @@ async def test_third_acceptance_rejection_terminalizes_pair_and_preserves_root_o
             blocking_reason="still missing board format",
         )
 
-        terminal = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
+        partial = service.node_runner._handle_acceptance_node_result(task=task, acceptance=acceptance, result=rejection)
         latest_task = service.get_task(record.task_id)
         latest_root = service.store.get_node(root.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
@@ -7398,12 +7435,15 @@ async def test_third_acceptance_rejection_terminalizes_pair_and_preserves_root_o
         assert latest_task is not None
         assert latest_root is not None
         assert latest_acceptance is not None
-        assert terminal.status == "failed"
-        assert latest_acceptance.status == "failed"
-        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["state"] == ACCEPTANCE_STATE_REJECTED_TERMINAL
-        assert dict((latest_root.metadata or {}).get("acceptance_handshake") or {})["rejection_count"] == 3
-        assert normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance")).status == "failed"
-        assert latest_task.metadata.get("final_execution_output") == "board draft"
+        assert partial.delivery_status == "partial"
+        assert latest_acceptance.status == "in_progress"
+        handshake = dict((latest_root.metadata or {}).get("acceptance_handshake") or {})
+        assert handshake["state"] == "waiting_execution_retry"
+        assert handshake["rejection_count"] == 3
+        assert latest_task.status == "in_progress"
+        final_acceptance = normalize_final_acceptance_metadata((latest_task.metadata or {}).get("final_acceptance"))
+        assert final_acceptance.status == "waiting_execution_retry"
+        assert latest_task.metadata.get("final_execution_output") in {None, ""}
     finally:
         await service.close()
 
@@ -7708,7 +7748,8 @@ async def test_spawn_child_acceptance_refreshes_eager_prompt_before_acceptance_r
 
 
 @pytest.mark.asyncio
-async def test_run_child_pipeline_loops_until_third_acceptance_rejection_is_terminal(tmp_path: Path) -> None:
+async def test_run_child_pipeline_loops_past_former_rejection_budget(tmp_path: Path) -> None:
+    """拒收无次数上限：子节点流水线被打回 5 次后仍继续重跑，直到验收通过。"""
     service = _build_service(tmp_path)
     try:
         record = await service.create_task("child acceptance retry loop", session_id="web:shared")
@@ -7746,6 +7787,8 @@ async def test_run_child_pipeline_loops_until_third_acceptance_rejection_is_term
 
         assert acceptance is not None
 
+        rejection_limit = 5
+        accepted_summary = f"accepted after {rejection_limit} rejections"
         execution_call_count = 0
         acceptance_call_count = 0
 
@@ -7766,6 +7809,22 @@ async def test_run_child_pipeline_loops_until_third_acceptance_rejection_is_term
                 return NodeFinalResult(status="success", summary=output, answer=output)
             if target.node_kind == "acceptance":
                 acceptance_call_count += 1
+                if acceptance_call_count > rejection_limit:
+                    service.log_service.update_node_status(
+                        task_id,
+                        node_id,
+                        status="success",
+                        final_output=accepted_summary,
+                    )
+                    return NodeFinalResult(
+                        status="success",
+                        delivery_status="final",
+                        summary=accepted_summary,
+                        answer=accepted_summary,
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason="",
+                    )
                 feedback = f"reject attempt {acceptance_call_count}"
                 service.log_service.update_node_status(
                     task_id,
@@ -7804,15 +7863,14 @@ async def test_run_child_pipeline_loops_until_third_acceptance_rejection_is_term
         latest_child = service.store.get_node(child.node_id)
         latest_acceptance = service.store.get_node(acceptance.node_id)
         handshake = dict((latest_child.metadata or {}).get("acceptance_handshake") or {}) if latest_child is not None else {}
-        assert execution_call_count == 3
-        assert acceptance_call_count == 3
-        assert result.check_result == "reject attempt 3"
-        assert result.failure_info is not None
-        assert result.failure_info.source == "acceptance"
+        assert execution_call_count == rejection_limit + 1
+        assert acceptance_call_count == rejection_limit + 1
+        assert result.check_result == accepted_summary
+        assert result.failure_info is None
         assert latest_acceptance is not None
-        assert latest_acceptance.status == "failed"
-        assert handshake["state"] == ACCEPTANCE_STATE_REJECTED_TERMINAL
-        assert handshake["rejection_count"] == 3
+        assert latest_acceptance.status == "success"
+        assert handshake["state"] == ACCEPTANCE_STATE_ACCEPTED
+        assert handshake["rejection_count"] == rejection_limit
     finally:
         await service.close()
 
@@ -8376,40 +8434,6 @@ async def test_resubmission_after_terminal_acceptance_resets_and_reopens_handsha
         await service.close()
 
 
-def test_normalize_acceptance_handshake_defaults() -> None:
-    assert normalize_acceptance_handshake(None) == {
-        "state": ACCEPTANCE_STATE_IDLE,
-        "acceptance_node_id": "",
-        "rejection_count": 0,
-        "max_rejections": 3,
-        "latest_execution_result_ref": "",
-        "latest_execution_result_summary": "",
-        "latest_rejection_feedback_ref": "",
-        "latest_rejection_feedback_summary": "",
-        "updated_at": "",
-    }
-
-
-def test_set_acceptance_handshake_state_overwrites_runtime_fields() -> None:
-    updated = set_acceptance_handshake_state(
-        {},
-        state=ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
-        acceptance_node_id="node:acceptance",
-        rejection_count=1,
-        max_rejections=2,
-        latest_execution_result_ref="artifact:result",
-        latest_execution_result_summary="draft answer",
-        latest_rejection_feedback_ref="",
-        latest_rejection_feedback_summary="",
-        updated_at="2026-04-25T08:00:00+08:00",
-    )
-
-    assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
-    assert updated["acceptance_node_id"] == "node:acceptance"
-    assert updated["rejection_count"] == 1
-    assert updated["max_rejections"] == 2
-
-
 def test_acceptance_handshake_numeric_fields_fall_back_safely() -> None:
     normalized = normalize_acceptance_handshake(
         {
@@ -8424,12 +8448,10 @@ def test_acceptance_handshake_numeric_fields_fall_back_safely() -> None:
         {
             "state": "waiting_execution_retry",
             "rejection_count": "nope",
-            "max_rejections": "still nope",
         },
         state="waiting_acceptance",
         acceptance_node_id=" node:acceptance ",
         rejection_count="nope",
-        max_rejections="still nope",
         latest_execution_result_ref="artifact:result",
         latest_execution_result_summary="draft answer",
         latest_rejection_feedback_ref="",
@@ -8439,10 +8461,9 @@ def test_acceptance_handshake_numeric_fields_fall_back_safely() -> None:
 
     assert normalized["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
     assert normalized["rejection_count"] == 0
-    assert normalized["max_rejections"] == 3
+    assert "max_rejections" not in normalized
     assert updated["state"] == ACCEPTANCE_STATE_WAITING_ACCEPTANCE
     assert updated["rejection_count"] == 0
-    assert updated["max_rejections"] == 3
 
 
 def test_normalize_final_acceptance_metadata_allows_handshake_statuses() -> None:
