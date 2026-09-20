@@ -4217,3 +4217,277 @@ async def test_distribution_failure_marks_paused_and_invokes_notifier(tmp_path: 
         ]
     finally:
         await service.close()
+
+
+async def _seed_under_inspection_target(service: MainRuntimeService, *, message: str):
+    """构造「执行节点正被验收检验中 + 定向通知已入库待分发」的波次入口状态。"""
+    record, root, branch_a, _branch_b = await seed_live_root_with_two_running_children(service)
+    acceptance = NodeRecord(
+        node_id="node:acc-under-inspection",
+        task_id=record.task_id,
+        parent_node_id=branch_a.node_id,
+        root_node_id=root.node_id,
+        depth=2,
+        node_kind="acceptance",
+        status="in_progress",
+        goal="branch acceptance",
+        prompt="inspect branch a",
+        created_at=now_iso(),
+        updated_at=now_iso(),
+    )
+    service.store.upsert_node(acceptance)
+
+    def _set_handshake(metadata: dict) -> dict:
+        metadata[ACCEPTANCE_HANDSHAKE_KEY] = {
+            "state": ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+            "acceptance_node_id": acceptance.node_id,
+        }
+        return metadata
+
+    service.log_service.update_node_metadata(branch_a.node_id, _set_handshake)
+    epoch = await _seed_distributing_epoch(
+        service,
+        task_id=record.task_id,
+        message=message,
+        frontier_node_ids=[branch_a.node_id],
+    )
+    epoch = epoch.model_copy(
+        update={
+            "payload": {
+                **dict(epoch.payload or {}),
+                "target_node_ids": [branch_a.node_id],
+                "scope_node_ids": [branch_a.node_id, acceptance.node_id],
+                "barrier_node_ids": [branch_a.node_id],
+                "frontier_node_ids": [branch_a.node_id],
+                "distributed_node_ids": [],
+            }
+        }
+    )
+    service.store.upsert_task_message_distribution_epoch(epoch)
+    service.log_service.update_task_runtime_meta(
+        record.task_id,
+        distribution={
+            "active_epoch_id": epoch.epoch_id,
+            "state": "distributing",
+            "mode": "subtree_barrier",
+            "target_node_ids": [branch_a.node_id],
+            "frontier_node_ids": [branch_a.node_id],
+            "blocked_node_ids": [branch_a.node_id],
+            "pending_notice_node_ids": [branch_a.node_id],
+            "queued_epoch_count": 0,
+            "pending_mailbox_count": 0,
+        },
+    )
+    refreshed_branch_a = service.store.get_node(branch_a.node_id)
+    assert refreshed_branch_a is not None
+    return record, root, refreshed_branch_a, acceptance, epoch
+
+
+@pytest.mark.asyncio
+async def test_notice_inspection_resume_execution_wave_interrupts_acceptance(tmp_path: Path) -> None:
+    """resume_execution 决策走完整波次（2026-09-20 task:e5d3d0c2fbe1 回归）。
+
+    旧实现把进程内标记塞进 NodeFinalResult.delivery_status 的 Literal，构造即抛
+    ValidationError：决策已落库、打断从未执行、驱动器退出后屏障永久冻结。
+    """
+    from main.runtime.acceptance_handshake import ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY
+
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_notice_inspection_decision",
+                        "arguments": {
+                            "action": "resume_execution",
+                            "reason": "通知要求改写已提交的最终产出。",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, _root, branch_a, _acceptance, epoch = await _seed_under_inspection_target(
+            service, message="把页脚去掉，重新排版"
+        )
+
+        assert await _drive_distribution_to_terminal(service, record.task_id) == "completed"
+        assert len(backend.calls) == 1
+
+        refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert refreshed_epoch is not None
+        payload = dict(refreshed_epoch.payload or {})
+        assert [item.get("action") for item in list(payload.get("decision_records") or [])] == ["resume_execution"]
+        effects = [
+            item for item in list(payload.get("wave_effects") or []) if item.get("node_id") == branch_a.node_id
+        ]
+        assert [item.get("effect") for item in effects] == ["acceptance_interrupt"]
+        assert str(effects[0].get("skipped") or "") == ""
+
+        execution = service.store.get_node(branch_a.node_id)
+        assert execution is not None
+        handshake = dict((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+        assert handshake.get("state") == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY
+
+        meta = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("distribution") or {})
+        assert meta.get("state") == ""
+        assert meta.get("blocked_node_ids") == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_notice_interrupt_effect_is_applied_once_per_epoch(tmp_path: Path) -> None:
+    """执行账已落：重放波次不重复作废验收（幂等由 wave_effects 保证）。"""
+    backend = _QueuedChatBackend(
+        [
+            SimpleNamespace(
+                tool_calls=[
+                    {
+                        "name": "submit_notice_inspection_decision",
+                        "arguments": {
+                            "action": "resume_execution",
+                            "reason": "通知要求改写已提交的最终产出。",
+                        },
+                    }
+                ],
+                content="",
+            )
+        ]
+    )
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, _root, branch_a, _acceptance, epoch = await _seed_under_inspection_target(
+            service, message="把页脚去掉，重新排版"
+        )
+        assert await _drive_distribution_to_terminal(service, record.task_id) == "completed"
+        # 驱动器已经退出过一次的形态：决定与执行账都在，重复清扫不得再动验收。
+        before = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert before is not None
+        before_effects = list(dict(before.payload or {}).get("wave_effects") or [])
+        await service.task_actor_service._apply_notice_interrupt_effects(
+            task_id=record.task_id,
+            epoch_id=epoch.epoch_id,
+        )
+        after = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert after is not None
+        assert list(dict(after.payload or {}).get("wave_effects") or []) == before_effects
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_notice_replay_repairs_missing_interrupt_without_asking_model(tmp_path: Path) -> None:
+    """事故形态回放：决策已落库、驱动器在落副作用前死掉 → 重放必须补做打断且不再问模型。
+
+    这是 task:e5d3d0c2fbe1 的解冻路径（epoch 停在 distributing、屏障无人释放）。
+    """
+    from main.runtime.acceptance_handshake import ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY
+
+    service = _build_service_with_backend(tmp_path, chat_backend=_QueuedChatBackend([]))
+    try:
+        record, _root, branch_a, acceptance, epoch = await _seed_under_inspection_target(
+            service, message="把页脚去掉，重新排版"
+        )
+        payload = dict(epoch.payload or {})
+        payload["decision_records"] = [
+            {
+                "source_node_id": branch_a.node_id,
+                "turn": "inspection_decision",
+                "action": "resume_execution",
+                "reason": "通知要求改写已提交的最终产出。",
+                "acceptance_node_id": acceptance.node_id,
+                "created_at": now_iso(),
+            }
+        ]
+        payload["distributed_node_ids"] = [branch_a.node_id]
+        service.store.upsert_task_message_distribution_epoch(epoch.model_copy(update={"payload": payload}))
+
+        assert await _drive_distribution_to_terminal(service, record.task_id) == "completed"
+
+        refreshed = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert refreshed is not None
+        effects = [
+            item
+            for item in list(dict(refreshed.payload or {}).get("wave_effects") or [])
+            if item.get("node_id") == branch_a.node_id
+        ]
+        assert [item.get("effect") for item in effects] == ["acceptance_interrupt"]
+        execution = service.store.get_node(branch_a.node_id)
+        assert execution is not None
+        handshake = dict((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) or {})
+        assert handshake.get("state") == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY
+        meta = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("distribution") or {})
+        assert meta.get("state") == ""
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_distribution_wave_crash_retries_bounded_then_fails_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """波次异常不再「记一条日志就退出」：有界重试后显式 failed，否则屏障无人释放。"""
+    import main.runtime.task_actor_service as task_actor_module
+
+    monkeypatch.setattr(task_actor_module, "_DISTRIBUTION_WAVE_CRASH_RETRY_SECONDS", 0.0)
+    service = _build_service_with_backend(tmp_path, chat_backend=_QueuedChatBackend([]))
+    try:
+        record, _root, _branch_a, _acceptance, epoch = await _seed_under_inspection_target(
+            service, message="崩溃收口回归"
+        )
+        actor = service.task_actor_service
+        wave_calls: list[int] = []
+
+        async def _crashing_wave(*args, **kwargs):
+            wave_calls.append(1)
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(actor, "_run_distribution_epoch", _crashing_wave)
+        await actor._drive_scoped_epoch(record.task_id)
+
+        assert len(wave_calls) == task_actor_module._DISTRIBUTION_WAVE_CRASH_RETRY_LIMIT + 1
+        refreshed = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert refreshed is not None
+        assert refreshed.state == "failed"
+        assert "boom" in str(refreshed.error_text or "")
+        assert int(dict(refreshed.payload or {}).get("wave_crash_count") or 0) == len(wave_calls)
+        meta = dict((service.log_service.read_task_runtime_meta(record.task_id) or {}).get("distribution") or {})
+        assert meta.get("error_text")
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_distribution_drivers_rearms_only_local_missing_drivers(tmp_path: Path) -> None:
+    """外部接管：活跃 epoch + 驱动器缺席 → ensure；驱动器在跑 → 不打扰。"""
+    service = _build_service_with_backend(tmp_path, chat_backend=_QueuedChatBackend([]))
+    try:
+        record, _root, _branch_a, _acceptance, _epoch = await _seed_under_inspection_target(
+            service, message="接管回归"
+        )
+        actor = service.task_actor_service
+        ensured: list[str] = []
+        actor.ensure_scoped_epoch_driver = lambda task_id: ensured.append(task_id)
+
+        # 无派发器 = 不是本进程在执行的任务（多 worker 下不得替别人武装波次）
+        assert actor.reconcile_distribution_drivers() == []
+        assert ensured == []
+
+        actor._dispatchers[record.task_id] = SimpleNamespace()
+        assert actor.reconcile_distribution_drivers() == [record.task_id]
+        assert ensured == [record.task_id]
+
+        live_driver = asyncio.create_task(asyncio.sleep(30.0))
+        actor._epoch_drivers[record.task_id] = live_driver
+        ensured.clear()
+        assert actor.reconcile_distribution_drivers() == []
+        assert ensured == []
+        live_driver.cancel()
+    finally:
+        await service.close()
+
