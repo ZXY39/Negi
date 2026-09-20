@@ -177,6 +177,8 @@ def build_execution_trace(
                 'tool_rounds_used': int(stage.tool_rounds_used or 0),
                 'created_at': str(stage.created_at or ''),
                 'finished_at': str(stage.finished_at or ''),
+                # 收口阶段才写这个键，缺失即可见：时间线条目数不因收口而变。
+                **({} if stage.context_visible else {'context_visible': False}),
                 'rounds': rounds,
                 'tool_calls': stage_tool_calls,
             }
