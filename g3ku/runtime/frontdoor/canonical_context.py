@@ -551,14 +551,34 @@ def ui_canonical_context_delta(previous_context: Any, current_context: Any) -> d
     """
     previous_view = project_canonical_context_for_transcript(previous_context)
     current_view = project_canonical_context_for_transcript(current_context)
+    return ui_canonical_context_delta_from_views(previous_view, current_view, current_context)
+
+
+def ui_canonical_context_delta_from_views(
+    previous_view: Any,
+    current_view: Any,
+    current_source: Any,
+) -> dict[str, Any]:
+    """UI delta over transcript-projected views the caller already holds.
+
+    The snapshot loop replays transcript rows in order and keeps the previous
+    row's transcript projection, so re-projecting both sides per row would make
+    the whole build quadratic. Both views are treated as read-only: the sticky
+    baseline adjustments are applied to per-stage copies, and the returned delta
+    is byte-identical to what `ui_canonical_context_delta` produces from raw
+    inputs. `current_source` supplies the unprojected round bodies.
+    """
     previous_by_identity = {
         canonical_stage_identity(stage, index): stage
         for index, stage in enumerate(list((previous_view or {}).get("stages") or []))
         if isinstance(stage, dict)
     }
+    adjusted_stages: list[dict[str, Any]] = []
     for index, stage in enumerate(list((current_view or {}).get("stages") or [])):
         if not isinstance(stage, dict):
             continue
+        current = dict(stage)
+        adjusted_stages.append(current)
         previous_stage = previous_by_identity.get(canonical_stage_identity(stage, index))
         if previous_stage is None:
             continue
@@ -566,18 +586,23 @@ def ui_canonical_context_delta(previous_context: Any, current_context: Any) -> d
         if previous_representation != RAW_REPRESENTATION:
             # A stage the baseline renders as compact must not re-expand just
             # because the latest-stage window moved after a new turn.
-            stage["representation"] = previous_representation
-            stage["rounds"] = []
-        elif _as_str(stage.get("representation")) != RAW_REPRESENTATION:
+            current["representation"] = previous_representation
+            current["rounds"] = []
+        elif _as_str(current.get("representation")) != RAW_REPRESENTATION:
             # The window also moves in the other direction: a stage that the
             # baseline kept raw would otherwise be stripped from this view and
             # reappear as a delta. Restore the established raw baseline.
-            stage["representation"] = RAW_REPRESENTATION
-            stage["rounds"] = copy.deepcopy(list(previous_stage.get("rounds") or []))
-    delta = canonical_context_delta(previous_view, current_view)
+            current["representation"] = RAW_REPRESENTATION
+            current["rounds"] = copy.deepcopy(list(previous_stage.get("rounds") or []))
+    current_view_for_delta = (
+        {**current_view, "stages": adjusted_stages}
+        if isinstance(current_view, dict)
+        else {"stages": adjusted_stages}
+    )
+    delta = canonical_context_delta(previous_view, current_view_for_delta)
     if not list(delta.get("stages") or []):
         return {}
-    scoped_bodies, unscoped_bodies = _round_bodies_by_identity(current_context)
+    scoped_bodies, unscoped_bodies = _round_bodies_by_identity(current_source)
     for stage in list(delta.get("stages") or []):
         stage_id = canonical_stage_identity(stage, int(stage.get("stage_index") or 0))
         rebuilt: list[dict[str, Any]] = []
@@ -644,13 +669,20 @@ def canonical_tool_identity(tool_payload: dict[str, Any], index: int) -> str:
 
 
 def canonical_context_delta(previous_context: Any, current_context: Any) -> dict[str, Any]:
-    previous = copy.deepcopy(previous_context) if isinstance(previous_context, dict) else {}
-    current = copy.deepcopy(current_context) if isinstance(current_context, dict) else {}
-    current_stages = [dict(item) for item in list(current.get("stages") or []) if isinstance(item, dict)]
+    """Structural diff of two canonical contexts (stage -> round -> tool).
+
+    Both inputs are treated as read-only; only changed objects are copied into
+    the returned delta. Unchanged prefixes dominate transcript replays, so each
+    level first tries a plain dict equality before the JSON fingerprint — on
+    normalized (JSON-parsed) views the two checks agree.
+    """
+    previous = previous_context if isinstance(previous_context, dict) else {}
+    current = current_context if isinstance(current_context, dict) else {}
+    current_stages = [item for item in list(current.get("stages") or []) if isinstance(item, dict)]
     if not current_stages:
         return {}
     previous_stages = {
-        canonical_stage_identity(stage, index): dict(stage)
+        canonical_stage_identity(stage, index): stage
         for index, stage in enumerate(list(previous.get("stages") or []))
         if isinstance(stage, dict)
     }
@@ -661,13 +693,16 @@ def canonical_context_delta(previous_context: Any, current_context: Any) -> dict
         if previous_stage is None:
             delta_stages.append(copy.deepcopy(stage))
             continue
-        stage_header = {key: copy.deepcopy(value) for key, value in stage.items() if key != "rounds"}
-        previous_stage_header = {
-            key: copy.deepcopy(value) for key, value in previous_stage.items() if key != "rounds"
-        }
-        stage_header_changed = canonical_value_fingerprint(previous_stage_header) != canonical_value_fingerprint(stage_header)
+        if stage == previous_stage:
+            continue
+        stage_header = {key: value for key, value in stage.items() if key != "rounds"}
+        previous_stage_header = {key: value for key, value in previous_stage.items() if key != "rounds"}
+        stage_header_changed = (
+            canonical_value_fingerprint(previous_stage_header)
+            != canonical_value_fingerprint(stage_header)
+        )
         previous_rounds = {
-            canonical_round_identity(round_payload, round_index): dict(round_payload)
+            canonical_round_identity(round_payload, round_index): round_payload
             for round_index, round_payload in enumerate(list(previous_stage.get("rounds") or []))
             if isinstance(round_payload, dict)
         }
@@ -680,8 +715,10 @@ def canonical_context_delta(previous_context: Any, current_context: Any) -> dict
             if previous_round is None:
                 delta_rounds.append(copy.deepcopy(round_payload))
                 continue
+            if round_payload == previous_round:
+                continue
             previous_tools = {
-                canonical_tool_identity(tool_payload, tool_index): dict(tool_payload)
+                canonical_tool_identity(tool_payload, tool_index): tool_payload
                 for tool_index, tool_payload in enumerate(list(previous_round.get("tools") or []))
                 if isinstance(tool_payload, dict)
             }
@@ -693,6 +730,8 @@ def canonical_context_delta(previous_context: Any, current_context: Any) -> dict
                 previous_tool = previous_tools.get(tool_identity)
                 if previous_tool is None:
                     delta_tools.append(copy.deepcopy(tool_payload))
+                    continue
+                if tool_payload == previous_tool:
                     continue
                 if canonical_value_fingerprint(previous_tool) != canonical_value_fingerprint(tool_payload):
                     delta_tools.append(copy.deepcopy(tool_payload))
@@ -734,4 +773,5 @@ __all__ = [
     "rebase_turn_stage_state_against_context",
     "TRANSCRIPT_PROJECTION_MODE",
     "ui_canonical_context_delta",
+    "ui_canonical_context_delta_from_views",
 ]

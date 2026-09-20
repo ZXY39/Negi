@@ -59,7 +59,8 @@ def test_ceo_snapshot_keeps_canonical_context_and_compression_payloads() -> None
         ]
     )
 
-    assert snapshot[0]["canonical_context"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert snapshot[0]["canonical_context_delta"]["stages"][0]["stage_goal"] == "inspect repository"
+    assert "canonical_context" not in snapshot[0]
     assert snapshot[0]["compression"]["status"] == "running"
     assert "execution_trace_summary" not in snapshot[0]
     assert "tool_events" not in snapshot[0]
@@ -105,7 +106,11 @@ def test_ceo_snapshot_projects_silent_turn_as_rail_only_assistant_row() -> None:
     assert [item["role"] for item in snapshot] == ["user", "assistant", "assistant"]
     assert [item["content"] for item in snapshot[1:]] == ["", ""]
     assert [item["silent_reply"] for item in snapshot[1:]] == [True, True]
-    assert [len(item["canonical_context"]["stages"]) for item in snapshot[1:]] == [1, 1]
+    # 快照只携带 delta：首行相对空基线带 1 条轨道；第二行 cc 与上一行完全相同，
+    # delta 为 {}——前端据此不再重画旧轨道（与 WS 渲染的 hasDelta 语义一致）。
+    assert len(snapshot[1]["canonical_context_delta"]["stages"]) == 1
+    assert snapshot[2]["canonical_context_delta"] == {}
+    assert all("canonical_context" not in item for item in snapshot[1:])
 
 
 def test_ceo_snapshot_includes_message_local_canonical_context_delta() -> None:

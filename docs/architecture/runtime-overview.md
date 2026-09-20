@@ -472,6 +472,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 - canonical 归一化以 `stage_id` 和完成阶段内容身份做 last-write collapse：同一逻辑阶段被 rebase 后再次并入时保留最新副本，不重复追加整个携带 workset。排查 sidecar 膨胀时，记录数应与 distinct stage 身份数一致；持续增长说明合并边界回归。
 - `project_canonical_context_for_transcript()` 只用于 assistant 转录记录：保留当前 canonical 表示窗口（最近 3 个完成普通阶段与活动阶段为 raw，更早阶段为 compact），并截短 raw round 内超大工具正文与入参（`output_text` > 2000 置空、结构化 `arguments` > 2000 置 `{}`、`arguments_text` 与 `round.text` 各限 4000）。provider prompt 仍以 durable canonical context 和当前 stage state 为权威，不读这份转录投影。
 - Web UI 载荷使用同一投影视图，而不是把未投影的 live workset 直接下发：`project_canonical_context_for_ui_payload()` 保留 raw 窗口阶段未投影的 round 正文；`ui_canonical_context_delta()` 先把前后两侧都按转录投影对齐，再让已存在阶段沿用基线表示（compact 不因新增阶段造成窗口移动而重新展开），因此新回合 delta 只携带新阶段与真实变化，并把 delta 保留阶段的正文回填为实时未投影值。UI 最新气泡重新出现全部历史阶段的回归通常是 UI delta 退回原始 `canonical_context_delta`。
+- 转录投影对已投影输入幂等：带 `stage_window` 标记的转录行本身即转录投影视图，按序回放（如快照 delta 链）可直接作为基线视图使用；`ui_canonical_context_delta_from_views()` 接收两侧已投影的视图，输出与从原始输入投影的路径逐字节一致，逐行重投影整份转录属于平方级构建回归。
 - 若当前轮阶段状态里已包含与 `frontdoor_canonical_context` 中实质相同的 completed stage，prompt 组装必须按重叠处理、跳过把它 rebase 成新的合成 stage id——否则一个 completed stage 会在 fresh-turn 重建中膨胀成重复的原始阶段块。
 - UI 面向的 turn payload 暴露当前轮的 `canonical_context` 投影切片；prompt 组装读 durable 跨回合 canonical context，inflight / paused / final-reply payload 只描述可见轮自己的阶段轨迹。
 

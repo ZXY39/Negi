@@ -1188,13 +1188,23 @@ async def activate_ceo_session(session_id: str):
     requested_session_id = str(session_id or "").strip()
     if not requested_session_id:
         raise HTTPException(status_code=404, detail="session_not_found")
-    catalog = _build_catalog(session_manager, runtime_manager, active_session_id=requested_session_id)
+    # 目录构建是逐会话全量转录加载的 N+1；同步跑在事件循环上会把整个 web
+    # 服务钉死数十秒（切会话卡顿的主因），统一走带 TTL 缓存的卸载路径。
+    catalog = await build_ceo_session_catalog_async(
+        session_manager,
+        active_session_id=requested_session_id,
+        is_running_resolver=lambda sid: _session_is_running(runtime_manager, sid),
+    )
     item = find_ceo_session_catalog_item(catalog, requested_session_id)
     if item is None:
         raise HTTPException(status_code=404, detail="session_not_found")
     target_id = str(item.get("session_id") or "").strip()
     if target_id and target_id != requested_session_id:
-        catalog = _build_catalog(session_manager, runtime_manager, active_session_id=target_id)
+        catalog = await build_ceo_session_catalog_async(
+            session_manager,
+            active_session_id=target_id,
+            is_running_resolver=lambda sid: _session_is_running(runtime_manager, sid),
+        )
         item = find_ceo_session_catalog_item(catalog, target_id)
     state_store.set_active_session_id(target_id)
     store_ceo_catalog_cache(target_id, catalog)
