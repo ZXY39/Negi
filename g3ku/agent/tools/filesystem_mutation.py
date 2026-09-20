@@ -22,6 +22,27 @@ _EDIT_MODE_RANGE = 'line_range'
 _EDIT_MODE_ERROR = 'Error: edit requires exactly one mode: text-replace or line-range'
 _EDIT_TARGET_EXACT_TEXT = 'exact_text'
 _EDIT_TARGET_ANCHOR_PAIR = 'anchor_pair'
+_ALREADY_APPLIED_PREFIX = 'Already applied:'
+
+
+def _already_applied_message(*, path: str, content: str, old_text: str, new_text: str) -> str | None:
+    """Report a no-op when the file already holds the requested replacement.
+
+    A caller that retries an applied edit otherwise reads `old_text not found` and
+    re-searches the file forever. Same judgement the recovery check makes for a lost
+    tool result, so a replay resolves instead of looping.
+    """
+    if not old_text or not new_text or old_text == new_text:
+        return None
+    if old_text in content:
+        return None
+    if content.count(new_text) != 1:
+        return None
+    line = _line_number_for_offset(content, content.find(new_text))
+    return (
+        f'{_ALREADY_APPLIED_PREFIX} new_text is already present once at line {line} of {path} '
+        'and old_text is absent. File left unchanged.'
+    )
 
 
 def _content_ref_path_error(path: str) -> str | None:
@@ -544,7 +565,12 @@ class FilesystemTool:
                 if old_text is not None or start_line is not None or end_line is not None or replacement is not None:
                     return 'Error: target cannot be combined with legacy edit fields'
                 if new_text is None:
-                    return 'Error: new_text is required when target is provided'
+                    if isinstance(target, dict) and 'new_text' in target:
+                        return (
+                            'Error: new_text is inside target, but target only locates the region. '
+                            'Move new_text out to the top level, beside target.'
+                        )
+                    return 'Error: new_text is required when target is provided. Pass it at the top level, beside target.'
                 target_resolution = self._resolve_edit_target(
                     path=path,
                     content=original,
@@ -586,7 +612,9 @@ class FilesystemTool:
                 updated_or_error = self._edit_by_text(path=path, content=original, old_text=old_text, new_text=new_text)
             else:
                 updated_or_error = self._edit_by_range(path=path, content=original, start_line=start_line, end_line=end_line, replacement=replacement)
-            if isinstance(updated_or_error, str) and updated_or_error.startswith(('Error:', 'Warning:')):
+            if isinstance(updated_or_error, str) and updated_or_error.startswith(
+                ('Error:', 'Warning:', _ALREADY_APPLIED_PREFIX)
+            ):
                 return updated_or_error
             updated = str(updated_or_error)
             file_path.write_text(updated, encoding='utf-8')
@@ -1020,6 +1048,11 @@ class FilesystemTool:
         if target_by == _EDIT_TARGET_EXACT_TEXT:
             old_text = str(target.get('text') or '')
             if old_text not in content:
+                already_applied = _already_applied_message(
+                    path=path, content=content, old_text=old_text, new_text=new_text
+                )
+                if already_applied is not None:
+                    return already_applied
                 return FilesystemTool._not_found_message(old_text, content, path)
             count = content.count(old_text)
             if count > 1:
@@ -1051,9 +1084,16 @@ class FilesystemTool:
             if len(regions) > 1:
                 return f'Warning: anchor_pair matched {len(regions)} regions in {path}. Provide more specific anchors.'
             start_index, end_offset_exclusive = regions[0]
+            region = content[start_index:end_offset_exclusive]
+            if region == new_text:
+                line = _line_number_for_offset(content, start_index)
+                return (
+                    f'{_ALREADY_APPLIED_PREFIX} the region between the anchors is already the intended '
+                    f'text at line {line} of {path}. File left unchanged.'
+                )
             return {
                 'mode': _EDIT_MODE_TEXT,
-                'old_text': content[start_index:end_offset_exclusive],
+                'old_text': region,
                 'resolved_span': _resolved_line_span(
                     content=content,
                     start_offset=start_index,
@@ -1083,6 +1123,11 @@ class FilesystemTool:
     @staticmethod
     def _edit_by_text(*, path: str, content: str, old_text: str, new_text: str) -> str:
         if old_text not in content:
+            already_applied = _already_applied_message(
+                path=path, content=content, old_text=old_text, new_text=new_text
+            )
+            if already_applied is not None:
+                return already_applied
             return FilesystemTool._not_found_message(old_text, content, path)
         count = content.count(old_text)
         if count > 1:
@@ -1374,7 +1419,7 @@ class FilesystemActionTool:
     def description(self) -> str:
         return {
             'write': 'Write file content to disk.',
-            'edit': 'Edit one file by resolving a target span or using legacy text-replace/line-range mode.',
+            'edit': 'Replace one exact text region in one file with new_text.',
             'copy': 'Copy one or more files or directory trees to new absolute destinations.',
             'move': 'Move one or more files or directory trees to new absolute destinations.',
             'delete': 'Delete one or more files or directory paths.',
