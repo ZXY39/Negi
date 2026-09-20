@@ -73,7 +73,8 @@ from main.runtime.pending_notice_state import (
 )
 from main.runtime.stage_messages import _stage_has_substantive_progress
 from main.runtime.subtree_hold import (
-    INSPECTION_RESUME_MARKER,
+    NOTICE_ACTION_CONTINUE_ACCEPTANCE,
+    NOTICE_ACTION_RESUME_EXECUTION,
     NOTICE_INTERRUPT_REASON,
     make_epoch_state_lookup,
     make_stale_hold_logger,
@@ -3406,8 +3407,8 @@ class NodeRunner:
         """被验收检验中的目标节点收到定向通知时的决策回合（Q2）。
 
         模型二选一：
-        - resume_execution：需要更改最终输出 → 返回带 INSPECTION_RESUME_MARKER
-          的结果，由波次驱动器执行打断验收/作废/恢复序列；
+        - resume_execution：需要更改最终输出 → 决定落进 epoch 的 decision_records，
+          由波次驱动器按账本执行打断验收/作废/恢复序列；
         - continue_acceptance：不需要 → 验收继续，验收节点当场收到
           「被检验节点收到了通知（转述+原文）」的信箱告知。
         """
@@ -3534,7 +3535,7 @@ class NodeRunner:
             )
             action = str(submitted.get('action') or '').strip().lower()
             reason = str(submitted.get('reason') or '').strip()
-            if action not in {'resume_execution', 'continue_acceptance'}:
+            if action not in {NOTICE_ACTION_RESUME_EXECUTION, NOTICE_ACTION_CONTINUE_ACCEPTANCE}:
                 validation_error = 'inspection_decision_invalid_action'
             elif not reason:
                 validation_error = 'inspection_decision_missing_reason'
@@ -3604,7 +3605,7 @@ class NodeRunner:
         self._store.upsert_task_message_distribution_epoch(
             epoch.model_copy(update={'state': 'distributing', 'payload': epoch_payload})
         )
-        if action == 'continue_acceptance':
+        if action == NOTICE_ACTION_CONTINUE_ACCEPTANCE:
             # 验收继续：验收节点收到「被检验节点收到了通知」的告知（转述+原文）。
             if (
                 acceptance_node is not None
@@ -3643,8 +3644,9 @@ class NodeRunner:
                 remaining_work=[],
                 blocking_reason='',
             )
-        # resume_execution：自己的通知保持待处理（打断后随恢复路径并入上下文），
-        # 打断验收的副作用由波次驱动器按标记执行。
+        # resume_execution：自己的通知保持待处理（打断后随恢复路径并入上下文）。
+        # 决定已在 decision_records 落账，打断副作用由波次驱动器按账本执行，
+        # 不经返回值传内部信号。
         if self._node_is_epoch_target(node=node, epoch=epoch):
             self.queue_pending_target_distribution_notices(
                 epoch=epoch,
@@ -3652,7 +3654,6 @@ class NodeRunner:
             )
         return NodeFinalResult(
             status='success',
-            delivery_status=INSPECTION_RESUME_MARKER,
             summary=f'acceptance interrupt requested for {node.node_id}',
             answer='',
             evidence=[],

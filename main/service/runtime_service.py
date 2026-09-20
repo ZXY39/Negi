@@ -599,6 +599,8 @@ class MainRuntimeService:
         self._worker_heartbeat_task: asyncio.Task[Any] | None = None
         # 磁盘治理（P1）：对账循环、紧急态自动暂停互斥与边沿状态。
         self._task_disk_reconcile_task: asyncio.Task[Any] | None = None
+        # 分发驱动器接管对账循环（子树屏障不能只靠驱动器自己活着）。
+        self._distribution_reconcile_task: asyncio.Task[Any] | None = None
         self._disk_emergency_pause_lock = asyncio.Lock()
         self._disk_emergency_alerted = False
         self._task_terminal_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -685,6 +687,13 @@ class MainRuntimeService:
                 self._task_disk_reconcile_task = asyncio.create_task(
                     self._task_disk_reconcile_loop(),
                     name=f'main-runtime-disk-reconcile:{self.worker_id or self.execution_mode}',
+                )
+            # 分发接管：epoch 处于活跃分发态但驱动器已不在跑 → 重新武装，
+            # 让「驱动器退出」从永久冻结降级为 ≤60s 自愈。
+            if self._distribution_reconcile_task is None or self._distribution_reconcile_task.done():
+                self._distribution_reconcile_task = asyncio.create_task(
+                    self._distribution_reconcile_loop(),
+                    name=f'main-runtime-distribution-reconcile:{self.worker_id or self.execution_mode}',
                 )
         if self.execution_mode == 'worker':
             if self.tool_pressure_monitor is not None:
@@ -7157,6 +7166,22 @@ class MainRuntimeService:
             except Exception:
                 continue
 
+    async def _distribution_reconcile_loop(self) -> None:
+        """分发收尾接管对账（60s）：驱动器缺席 → 重新武装；释放账未销 → 补跑释放。
+
+        分发驱动器与释放路径都是子树屏障的唯一解除者，任何一次半路退出都会把任务留成
+        「无声 in_progress」；这里保证那种形态最多存活一个扫描周期。必须在事件循环线程
+        调用（ensure 依赖 get_running_loop，释放要 resume 进程内 entry）。
+        """
+        while True:
+            try:
+                await asyncio.sleep(60.0)
+                await self.task_actor_service.reconcile_distribution_drivers()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
     async def _run_detail_retention_if_due(self) -> None:
         """P3：终态任务大行裁剪（默认停用：detail_retention_days<=0 直接返回；
         配置 >0 时按天裁剪，跨进程 maintenance_runs 卡权 + 紧急水位跳过）。"""
@@ -9931,12 +9956,18 @@ class MainRuntimeService:
         return payload.text
 
     async def close(self) -> None:
-        for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task]:
+        loop_tasks = [
+            self._command_poller_task,
+            self._worker_heartbeat_task,
+            self._task_disk_reconcile_task,
+            self._distribution_reconcile_task,
+        ]
+        for task in loop_tasks:
             if task is not None and not task.done():
                 task.cancel()
-        if any(t is not None for t in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task]):
+        if any(t is not None for t in loop_tasks):
             await asyncio.gather(
-                *(task for task in [self._command_poller_task, self._worker_heartbeat_task, self._task_disk_reconcile_task] if task is not None),
+                *(task for task in loop_tasks if task is not None),
                 return_exceptions=True,
             )
         delivery_tasks = [task for task in self._task_terminal_delivery_tasks.values() if task is not None and not task.done()]
