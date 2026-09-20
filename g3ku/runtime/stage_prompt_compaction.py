@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 from g3ku.runtime.tool_history import extract_call_id
@@ -878,24 +880,206 @@ def stage_ref_candidates(
     return ordered
 
 
+# --- 压缩信封（两车道共用：CEO/frontdoor 与 execution/acceptance 节点） ----------
+#
+# 一次内联 `token_compression` 除摘要正文外还要产出三件东西：交给模型挑号的证据引用
+# 候选清单、模型选完后由运行时逐字回填的索引小节、被收口阶段的落档指针。让模型自己
+# 抄引用不可靠（跨代实测：路径逐字保真约 30%、不透明 id 约 10%），所以选择权给模型、
+# 逐字性归运行时；两车道共用同一份实现，避免同一合同出现第二套写法后各自漂移。
+
+TOKEN_COMPACT_V2_PREFIX = "[G3KU_TOKEN_COMPACT_V2]"
+STAGE_REF_INDEX_HEADING = "## 证据索引"
+STAGE_ARCHIVE_HEADING = "## 阶段归档"
+STAGE_REF_CANDIDATE_HEADING = "【证据引用候选】"
+STAGE_REF_SELECTION_RULE = (
+    "上文末尾的【证据引用候选】列出历史阶段登记过的证据引用（编号 + 引用 + 说明）。\n"
+    "要保留哪几条，就在正文末尾另起一节「## 证据索引」，每行只写一个 `- [#编号]`；"
+    "引用的完整内容由系统按编号逐字回填。\n"
+    "不要抄写、改写或凭记忆补造引用内容与编号；没有值得保留的引用就不要输出这一节。"
+)
+
+_FILE_LINE_SUFFIX = re.compile(r":\d+(-\d+)?$")
+_REF_NUMBER_IN_LINE = re.compile(r"\d{1,4}")
+
+
+def is_filesystem_ref(ref: Any) -> bool:
+    """区分文件系统路径与运行时句柄，只有前者做存在性复核。
+
+    `task:` / `artifact:` / `node:` / 裸 id 由运行时对象解析，按文件系统判定会被
+    误杀成死链；Windows 盘符路径的 ``:`` 是路径的一部分而不是命名空间，必须单独认。"""
+    text = str(ref or "").strip()
+    if not text:
+        return False
+    if len(text) > 2 and text[1] == ":" and text[2] in {"/", "\\"}:
+        return True
+    stripped = _FILE_LINE_SUFFIX.sub("", text)
+    scheme_index = stripped.find(":")
+    separator_index = min((index for index in (stripped.find("\\"), stripped.find("/")) if index >= 0), default=-1)
+    if scheme_index >= 0 and (separator_index < 0 or scheme_index < separator_index):
+        return False
+    return separator_index >= 0
+
+
+def stage_ref_is_dead(ref: Any) -> bool:
+    """引用指向的文件已不存在时为 True；非路径句柄一律不判（无法按文件系统否定）。"""
+    if not is_filesystem_ref(ref):
+        return False
+    text = _FILE_LINE_SUFFIX.sub("", str(ref).strip())
+    try:
+        return not Path(text).exists()
+    except Exception:
+        return False
+
+
+def render_stage_ref_candidate_block(candidates: list[dict[str, Any]]) -> str:
+    """交给摘要模型挑选的带编号候选清单；没有候选时返回空串（不输出空标题）。"""
+    lines = [STAGE_REF_CANDIDATE_HEADING]
+    for item in list(candidates or []):
+        ref = str((item or {}).get("ref") or "").strip()
+        if not ref:
+            continue
+        note = str((item or {}).get("note") or "").strip()
+        lines.append(f"[#{int((item or {}).get('candidate_id') or 0)}] {ref}" + (f" — {note}" if note else ""))
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def split_stage_ref_selection(compressed_text: Any) -> tuple[str, list[int]]:
+    """摘出模型写的 `## 证据索引` 小节并取回编号，正文里由运行时重写该小节。
+
+    每行只认第一个数字：模型若违规把引用正文抄在旁边，抄的那段会被丢掉，回填的仍是
+    逐字原文；越界编号在 `render_stage_ref_index` 阶段丢弃。"""
+    text = str(compressed_text or "")
+    lines = text.splitlines()
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip().startswith(STAGE_REF_INDEX_HEADING)
+        ),
+        None,
+    )
+    if start is None:
+        return text, []
+    end = start + 1
+    while end < len(lines) and not lines[end].strip().startswith("#"):
+        end += 1
+    selected: list[int] = []
+    for line in lines[start + 1 : end]:
+        found = _REF_NUMBER_IN_LINE.search(line)
+        if not found:
+            continue
+        value = int(found.group(0))
+        if value not in selected:
+            selected.append(value)
+    remainder = "\n".join([*lines[:start], *lines[end:]]).strip()
+    return remainder, selected
+
+
+def render_stage_ref_index(candidates: list[dict[str, Any]], selected_ids: list[int]) -> tuple[str, int, int]:
+    """按编号逐字回填索引小节，返回 (小节文本, 保留条数, 因死链丢弃条数)。"""
+    by_id = {int((item or {}).get("candidate_id") or 0): dict(item) for item in list(candidates or [])}
+    lines: list[str] = []
+    dropped_dead = 0
+    for value in list(selected_ids or []):
+        item = by_id.get(int(value or 0))
+        if not isinstance(item, dict):
+            continue
+        ref = str(item.get("ref") or "").strip()
+        if not ref:
+            continue
+        if stage_ref_is_dead(ref):
+            dropped_dead += 1
+            continue
+        note = str(item.get("note") or "").strip()
+        lines.append(f"- stage {int(item.get('stage_index') or 0)} | {ref}" + (f" — {note}" if note else ""))
+    if not lines:
+        return "", 0, dropped_dead
+    return "\n".join([STAGE_REF_INDEX_HEADING, *lines]), len(lines), dropped_dead
+
+
+def _token_compact_payload(message: Any) -> dict[str, Any]:
+    content = str((message or {}).get("content") or "") if isinstance(message, dict) else ""
+    if not content.startswith(TOKEN_COMPACT_V2_PREFIX):
+        return {}
+    lines = content.split("\n", 2)
+    if len(lines) < 2:
+        return {}
+    try:
+        payload = json.loads(lines[1])
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def stage_archive_ids_from_request_messages(request_messages: Any) -> list[str]:
+    """从请求体的压缩块元数据读回待收口阶段清单。
+
+    清单由摘要块自带、在车道自己的 durable 提交点被应用：压缩算完不代表 provider
+    看到了摘要——此刻就翻账本标记，而这次发送随后被暂停或失败时，基线仍是带块的旧
+    请求体，下一轮块渲染剔除收口阶段等于把那批阶段连同摘要一起丢掉。历史上可能同时
+    存在多份压缩块（回显残留等），取并集即可，应用是幂等的。"""
+    collected: list[str] = []
+    for message in list(request_messages or []):
+        archive = _token_compact_payload(message).get("stage_archive")
+        if not isinstance(archive, dict):
+            continue
+        for item in list(archive.get("stage_ids") or []):
+            stage_id = str(item or "").strip()
+            if stage_id and stage_id not in collected:
+                collected.append(stage_id)
+    return collected
+
+
+def build_stage_archive_document(
+    *,
+    session_key: Any,
+    created_at: Any,
+    stages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """被收口阶段的完整账本（逐条 key_refs、轮次都在），构造为落档文档。
+
+    只产出内容不碰磁盘：目录解析属于车道职责（前门 session_temp_dir、节点
+    task_temp_dir），共享层不决定文件落哪儿。"""
+    records = [dict(item) for item in list(stages or []) if isinstance(item, dict)]
+    return {
+        "kind": "frontdoor_stage_archive",
+        "session_key": str(session_key or "").strip(),
+        "created_at": str(created_at or "").strip(),
+        "stage_count": len(records),
+        "stages": records,
+    }
+
+
 __all__ = [
     "DEFAULT_INTERNAL_RULE_MARKERS",
     "DEFAULT_STAGE_MODE",
     "ECHO_STRIP_ENABLED",
+    "STAGE_ARCHIVE_HEADING",
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",
     "STAGE_RAW_PREFIX",
+    "STAGE_REF_CANDIDATE_HEADING",
+    "STAGE_REF_INDEX_HEADING",
+    "STAGE_REF_SELECTION_RULE",
+    "TOKEN_COMPACT_V2_PREFIX",
+    "build_stage_archive_document",
     "compact_stage_prompt_messages_in_place",
     "completed_stage_blocks",
     "current_stage_active_window",
     "decompose_stage_prompt_messages",
+    "is_filesystem_ref",
     "is_stage_block_echo_text",
     "is_stage_context_message",
     "keep_stage_blocks_off_continuation_tail",
     "prepare_stage_prompt_messages",
+    "render_stage_ref_candidate_block",
+    "render_stage_ref_index",
     "repair_split_stage_tool_boundaries",
     "retained_completed_stage_ids",
+    "split_stage_ref_selection",
+    "stage_archive_ids_from_request_messages",
     "stage_prompt_prefix",
     "stage_ref_candidates",
+    "stage_ref_is_dead",
     "strip_stage_block_echo",
 ]

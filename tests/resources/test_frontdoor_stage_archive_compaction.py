@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from g3ku.runtime.frontdoor import _ceo_runtime_ops as ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.canonical_context import (
     combine_canonical_context,
@@ -13,10 +12,17 @@ from g3ku.runtime.frontdoor.canonical_context import (
 )
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
 from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_ARCHIVE_HEADING,
     STAGE_COMPACT_PREFIX,
+    STAGE_REF_CANDIDATE_HEADING,
+    STAGE_REF_INDEX_HEADING,
     compact_stage_prompt_messages_in_place,
     completed_stage_blocks,
+    is_filesystem_ref,
+    render_stage_ref_index,
     retained_completed_stage_ids,
+    split_stage_ref_selection,
+    stage_archive_ids_from_request_messages,
     stage_ref_candidates,
 )
 
@@ -181,16 +187,16 @@ def test_selection_is_parsed_and_backfilled_verbatim(tmp_path: Path) -> None:
         {"candidate_id": 2, "ref": str(live), "note": "有效产物", "stage_index": 1, "stage_id": "s1"},
         {"candidate_id": 3, "ref": "task:7e2a270eec34", "note": "在跑的任务", "stage_index": 2, "stage_id": "s2"},
     ]
-    text, selected = CreateAgentCeoFrontDoorRunner._frontdoor_split_stage_ref_selection(
+    text, selected = split_stage_ref_selection(
         "## 一、身份\n管家角色。\n\n## 证据索引\n- [#2]\n- [#3]\n- [#99]\n- 2\n\n## 二、待办\n继续跑任务"
     )
     assert selected == [2, 3, 99]
     assert "证据索引" not in text
     assert "## 二、待办" in text
 
-    section, count, dropped = CreateAgentCeoFrontDoorRunner._frontdoor_render_stage_ref_index(candidates, selected)
+    section, count, dropped = render_stage_ref_index(candidates, selected)
     lines = section.splitlines()
-    assert lines[0] == ops.FRONTDOOR_STAGE_REF_INDEX_HEADING
+    assert lines[0] == STAGE_REF_INDEX_HEADING
     # 逐字回填：ref 与 note 都取候选原文，越界编号丢弃。
     assert f"- stage 1 | {live} — 有效产物" in lines
     assert "- stage 2 | task:7e2a270eec34 — 在跑的任务" in lines
@@ -198,20 +204,20 @@ def test_selection_is_parsed_and_backfilled_verbatim(tmp_path: Path) -> None:
     assert dropped == 0
 
     # 死链只按文件系统判定：task: / artifact: 句柄不能被误杀成死链。
-    _, alive_count, dropped_dead = CreateAgentCeoFrontDoorRunner._frontdoor_render_stage_ref_index(
+    _, alive_count, dropped_dead = render_stage_ref_index(
         candidates, [1, 2, 3]
     )
     assert alive_count == 2
     assert dropped_dead == 1
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_is_filesystem_ref("task:7e2a270eec34") is False
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_is_filesystem_ref("c601b416") is False
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_is_filesystem_ref(str(live)) is True
+    assert is_filesystem_ref("task:7e2a270eec34") is False
+    assert is_filesystem_ref("c601b416") is False
+    assert is_filesystem_ref(str(live)) is True
 
 
 def test_missing_index_section_yields_no_selection() -> None:
-    text, selected = CreateAgentCeoFrontDoorRunner._frontdoor_split_stage_ref_selection("只有正文，没选引用。")
+    text, selected = split_stage_ref_selection("只有正文，没选引用。")
     assert (text, selected) == ("只有正文，没选引用。", [])
-    section, count, dropped = CreateAgentCeoFrontDoorRunner._frontdoor_render_stage_ref_index([], [])
+    section, count, dropped = render_stage_ref_index([], [])
     assert (section, count, dropped) == ("", 0, 0)
 
 
@@ -325,7 +331,7 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     )
     assert result.history_shrink_reason == "token_compression"
     instruction = str(captured["messages"][-1]["content"])
-    assert ops._FRONTDOOR_STAGE_REF_CANDIDATE_HEADING in instruction
+    assert STAGE_REF_CANDIDATE_HEADING in instruction
     assert "[#1]" in instruction and "[#2]" in instruction
 
     summary = next(
@@ -338,7 +344,7 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     assert f"- stage 1 | {live} — 有效产物" in summary
     assert "gone.txt" not in summary
     assert "- stage 2 | task:7e2a270eec34 — 在跑的任务" in summary
-    assert ops.FRONTDOOR_STAGE_ARCHIVE_HEADING in summary
+    assert STAGE_ARCHIVE_HEADING in summary
 
     payload = json.loads(summary.splitlines()[1])
     archive_ref = payload["stage_archive"]["ref"]
@@ -356,7 +362,7 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     assert all(value is None for value in marked.values())
     assert payload["stage_archive"]["stage_ids"] == ["frontdoor-stage-1", "frontdoor-stage-2"]
 
-    pending = CreateAgentCeoFrontDoorRunner._frontdoor_stage_archive_ids(result.request_messages)
+    pending = stage_archive_ids_from_request_messages(result.request_messages)
     assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, pending) == 2
     marked = {stage["stage_id"]: stage.get("context_visible") for stage in session._frontdoor_canonical_context["stages"]}
     assert marked["frontdoor-stage-1"] is False
@@ -381,12 +387,12 @@ def test_token_compression_without_selection_still_archives(monkeypatch, tmp_pat
         if str(item.get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
     )
     # 模型不选引用不是错误：不出现索引小节，收口与归档照常，绝不回退成逐轮全量渲染。
-    assert ops.FRONTDOOR_STAGE_REF_INDEX_HEADING not in summary
-    assert ops.FRONTDOOR_STAGE_ARCHIVE_HEADING in summary
+    assert STAGE_REF_INDEX_HEADING not in summary
+    assert STAGE_ARCHIVE_HEADING in summary
     assert result.diagnostics["stage_ref_selected_count"] == 0
     assert result.diagnostics["stage_archive_pending_count"] == 2
     assert session._frontdoor_canonical_context["stages"][0].get("context_visible") is None
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_stage_archive_ids(result.request_messages) == [
+    assert stage_archive_ids_from_request_messages(result.request_messages) == [
         "frontdoor-stage-1",
         "frontdoor-stage-2",
     ]
@@ -416,10 +422,10 @@ def test_token_compression_skips_archive_when_export_fails(monkeypatch, tmp_path
         for item in result.request_messages
         if str(item.get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
     )
-    assert ops.FRONTDOOR_STAGE_ARCHIVE_HEADING not in summary
+    assert STAGE_ARCHIVE_HEADING not in summary
     assert json.loads(summary.splitlines()[1]).get("stage_archive") is None
     assert result.diagnostics["stage_archive_ref"] == ""
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_stage_archive_ids(result.request_messages) == []
+    assert stage_archive_ids_from_request_messages(result.request_messages) == []
     assert all(stage.get("context_visible") is None for stage in session._frontdoor_canonical_context["stages"])
 
 
