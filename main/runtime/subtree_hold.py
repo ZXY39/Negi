@@ -53,8 +53,10 @@ STALE_HOLD_EPOCH_STATES = frozenset({
     'cancelled_by_task_delete',
     'none',
 })
-# 决策回合 resume_execution 的结果标记（node_runner 产出、task_actor_service 消费）。
-INSPECTION_RESUME_MARKER = 'inspection_resume_execution'
+# 决策回合的 action 词表（单一来源）：由 submit_notice_inspection_decision 产出、
+# 落进 epoch payload 的 decision_records，驱动器和节点 runner 共用同一组值。
+NOTICE_ACTION_RESUME_EXECUTION = 'resume_execution'
+NOTICE_ACTION_CONTINUE_ACCEPTANCE = 'continue_acceptance'
 # 合成验收中断结果的 blocking_reason：验收回绝处理据此走「不消耗拒绝预算、
 # 不发验收→执行交接消息」分支（通知本身就是给执行节点的消息）。
 NOTICE_INTERRUPT_REASON = 'acceptance interrupted by user notice (distribution decision: resume execution)'

@@ -73,7 +73,8 @@ from main.runtime.pending_notice_state import (
 )
 from main.runtime.stage_messages import _stage_has_substantive_progress
 from main.runtime.subtree_hold import (
-    INSPECTION_RESUME_MARKER,
+    NOTICE_ACTION_CONTINUE_ACCEPTANCE,
+    NOTICE_ACTION_RESUME_EXECUTION,
     NOTICE_INTERRUPT_REASON,
     make_epoch_state_lookup,
     make_stale_hold_logger,
@@ -102,9 +103,16 @@ _BLOCKED_VERIFICATION_FALLBACK_PROMPT = (
 _SUPERSEDED_SPAWN_REASON_PREFIX = 'superseded by newer spawn round'
 _SPAWN_REVIEW_TOOL_NAME = 'review_spawn_candidates'
 _SPAWN_REVIEW_BLOCKED_CHECK_RESULT = '派生已被拦截'
+# 检验车道自身故障（模型链缺失 / provider 异常 / 连续拿不到可解析判定）时，本批候选
+# 是"没被审过"而不是"审了并被拒"。两者必须在 check_result 上可分，否则父节点会把基建
+# 故障当成评审意见去改写 spec，账本上也无法区分。
+_SPAWN_REVIEW_SYSTEM_FAILURE_CHECK_RESULT = '派生未审查（系统故障）'
 _SPAWN_REVIEW_DEFAULT_BLOCK_REASON = '检验派生未批准该候选派生。'
 _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION = '请在当前父节点内自行执行，或收缩为更聚焦的单一派生。'
 _SPAWN_REVIEW_RETRY_DELAY_SECONDS = 0.1
+# 检验派生的无效响应重试上限，对齐消息分发决策车道的 _DISTRIBUTION_DECISION_MAX_ATTEMPTS：
+# 评审模型持续不回可解析结构时会话级重发没有终点，每轮还多带一条 repair 消息。
+_SPAWN_REVIEW_MAX_ATTEMPTS = 5
 _SPAWN_REVIEW_REPAIR_PREFIX = '上一轮检验派生回复无效。'
 
 DISTRIBUTION_ACTION_DISTRIBUTE = 'distribute'
@@ -3403,8 +3411,8 @@ class NodeRunner:
         """被验收检验中的目标节点收到定向通知时的决策回合（Q2）。
 
         模型二选一：
-        - resume_execution：需要更改最终输出 → 返回带 INSPECTION_RESUME_MARKER
-          的结果，由波次驱动器执行打断验收/作废/恢复序列；
+        - resume_execution：需要更改最终输出 → 决定落进 epoch 的 decision_records，
+          由波次驱动器按账本执行打断验收/作废/恢复序列；
         - continue_acceptance：不需要 → 验收继续，验收节点当场收到
           「被检验节点收到了通知（转述+原文）」的信箱告知。
         """
@@ -3531,7 +3539,7 @@ class NodeRunner:
             )
             action = str(submitted.get('action') or '').strip().lower()
             reason = str(submitted.get('reason') or '').strip()
-            if action not in {'resume_execution', 'continue_acceptance'}:
+            if action not in {NOTICE_ACTION_RESUME_EXECUTION, NOTICE_ACTION_CONTINUE_ACCEPTANCE}:
                 validation_error = 'inspection_decision_invalid_action'
             elif not reason:
                 validation_error = 'inspection_decision_missing_reason'
@@ -3601,7 +3609,7 @@ class NodeRunner:
         self._store.upsert_task_message_distribution_epoch(
             epoch.model_copy(update={'state': 'distributing', 'payload': epoch_payload})
         )
-        if action == 'continue_acceptance':
+        if action == NOTICE_ACTION_CONTINUE_ACCEPTANCE:
             # 验收继续：验收节点收到「被检验节点收到了通知」的告知（转述+原文）。
             if (
                 acceptance_node is not None
@@ -3640,8 +3648,9 @@ class NodeRunner:
                 remaining_work=[],
                 blocking_reason='',
             )
-        # resume_execution：自己的通知保持待处理（打断后随恢复路径并入上下文），
-        # 打断验收的副作用由波次驱动器按标记执行。
+        # resume_execution：自己的通知保持待处理（打断后随恢复路径并入上下文）。
+        # 决定已在 decision_records 落账，打断副作用由波次驱动器按账本执行，
+        # 不经返回值传内部信号。
         if self._node_is_epoch_target(node=node, epoch=epoch):
             self.queue_pending_target_distribution_notices(
                 epoch=epoch,
@@ -3649,7 +3658,6 @@ class NodeRunner:
             )
         return NodeFinalResult(
             status='success',
-            delivery_status=INSPECTION_RESUME_MARKER,
             summary=f'acceptance interrupt requested for {node.node_id}',
             answer='',
             evidence=[],
@@ -4204,12 +4212,17 @@ class NodeRunner:
             specs=specs,
             cache_key=cache_key,
         )
+        # 评审车道不过节点 preflight，也没有 actual-request 工件；把正文规模记进
+        # spawn_review 是本车道唯一可留存的体积证据（_record_spawn_review_token_usage
+        # 只把 usage 并进父节点聚合，事后无法还原是哪一次评审花的）。
+        review_request_chars = sum(len(str(item.get('content') or '')) for item in messages if isinstance(item, dict))
         tools = [self._spawn_review_tool_schema()]
         model_refs = list(self._acceptance_model_refs or self._execution_model_refs)
         if not model_refs:
             return self._default_spawn_review_result(
                 specs=specs,
                 reason='RuntimeError: spawn review inspection model chain is empty',
+                review_request_chars=review_request_chars,
             )
         invalid_response_count = 0
         usage_attempts: list[Any] = []
@@ -4235,6 +4248,8 @@ class NodeRunner:
                 return self._default_spawn_review_result(
                     specs=specs,
                     reason=describe_exception(exc),
+                    review_attempts=invalid_response_count + 1,
+                    review_request_chars=review_request_chars,
                 )
             usage_attempts.extend(list(response.attempts or []))
             parsed = self._parse_spawn_review_response(response, spec_count=len(specs))
@@ -4242,10 +4257,23 @@ class NodeRunner:
                 self._record_spawn_review_token_usage(task=task, parent=parent, usage_attempts=usage_attempts)
                 return {
                     'reviewed_at': _now(),
+                    'review_outcome': 'verdict',
                     'requested_specs': [self._spawn_review_requested_spec_payload(index=index, spec=spec) for index, spec in enumerate(specs)],
+                    'review_attempts': invalid_response_count + 1,
+                    'review_request_chars': review_request_chars,
                     **parsed,
                 }
             invalid_response_count += 1
+            if invalid_response_count >= _SPAWN_REVIEW_MAX_ATTEMPTS:
+                return self._default_spawn_review_result(
+                    specs=specs,
+                    reason=(
+                        f'RuntimeError: spawn review kept returning unparseable decisions '
+                        f'({_SPAWN_REVIEW_MAX_ATTEMPTS} attempts)'
+                    ),
+                    review_attempts=invalid_response_count,
+                    review_request_chars=review_request_chars,
+                )
             await asyncio.sleep(_SPAWN_REVIEW_RETRY_DELAY_SECONDS)
 
     def _record_spawn_review_token_usage(self, *, task, parent: NodeRecord, usage_attempts: list[Any]) -> None:
@@ -4641,11 +4669,21 @@ class NodeRunner:
             'error_text': '',
         }
 
-    def _default_spawn_review_result(self, *, specs: list[SpawnChildSpec], reason: str) -> dict[str, Any]:
+    def _default_spawn_review_result(
+        self,
+        *,
+        specs: list[SpawnChildSpec],
+        reason: str,
+        review_attempts: int = 0,
+        review_request_chars: int = 0,
+    ) -> dict[str, Any]:
         normalized_reason = str(reason or 'RuntimeError: spawn review failed').strip() or 'RuntimeError: spawn review failed'
         return {
             'reviewed_at': _now(),
+            'review_outcome': 'system_failure',
             'requested_specs': [self._spawn_review_requested_spec_payload(index=index, spec=spec) for index, spec in enumerate(specs)],
+            'review_attempts': max(0, int(review_attempts or 0)),
+            'review_request_chars': max(0, int(review_request_chars or 0)),
             'allowed_indexes': [],
             'blocked_specs': [
                 {
@@ -4673,6 +4711,7 @@ class NodeRunner:
             for item in list(spawn_review.get('allowed_indexes') or [])
             if 0 <= int(item) < len(specs)
         ]
+        system_failure = str(spawn_review.get('review_outcome') or '').strip() == 'system_failure'
         allowed_set = set(allowed_indexes)
         blocked_by_index = {
             int(item.get('index') or 0): dict(item)
@@ -4698,10 +4737,13 @@ class NodeRunner:
                 'reason': _SPAWN_REVIEW_DEFAULT_BLOCK_REASON,
                 'suggestion': _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
             }
+            # 故障态下不能用"未批准该候选"兜底——那会把基建故障说成评审否决。
+            default_reason = '检验派生车道故障，本批未经审查。' if system_failure else _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
             result = self._spawn_review_blocked_result(
                 spec,
-                reason=str(blocked_payload.get('reason') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON,
+                reason=str(blocked_payload.get('reason') or '').strip() or default_reason,
                 suggestion=str(blocked_payload.get('suggestion') or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION,
+                system_failure=system_failure,
             )
             entries_so_far = list(cached_payload.get('entries') or [])
             current_entry = dict(entries_so_far[index] or {}) if index < len(entries_so_far) else {}
@@ -4754,46 +4796,94 @@ class NodeRunner:
             'allowed_indexes': list(allowed_indexes),
             'blocked_specs': [dict(item) for item in list(spawn_review.get('blocked_specs') or []) if isinstance(item, dict)],
             'error_text': str(spawn_review.get('error_text') or '').strip(),
+            # 'verdict' = 审过并给出裁决；'system_failure' = 车道自身故障、本批未经审查。
+            # 账本上两者过去同为 blocked + status=success，不分型就只能靠读 reason 文本猜。
+            'review_outcome': 'system_failure' if system_failure else 'verdict',
+            # 车道证据只有落进这份持久载荷才读得到（投影从 spawn_operations 重读），
+            # 少写这两个键就等于评审请求多大、重发过几次仍然不可知。
+            'review_attempts': int(spawn_review.get('review_attempts') or 0),
+            'review_request_chars': int(spawn_review.get('review_request_chars') or 0),
         }
         self._save_spawn_cache(task_id, parent_node_id, cache_key, cached_payload)
         return allowed_indexes
 
     @staticmethod
-    def _spawn_review_blocked_text(*, reason: str, suggestion: str) -> str:
+    def _spawn_review_blocked_text(*, reason: str, suggestion: str, system_failure: bool = False) -> str:
+        if system_failure:
+            # 与"审了并被拒"分开：父节点若把基建故障当评审意见，会去改写 spec 而不是
+            # 结束节点或等待恢复，所以这里直接给出可执行的终态调用（字段名照 schema 写）。
+            failure_reason = str(reason or '').strip() or '检验派生车道故障，本批未经审查。'
+            return (
+                f'派生未被审查：检验车道自身故障，本批候选一律未放行（未创建、未执行）。错误信息：{failure_reason}。'
+                '这不是评审否决，不要靠改写候选 spec 来规避。'
+                '若你在不派生子节点的情况下无法继续完成任务，调用 '
+                "submit_final_result(status='failed', delivery_status='blocked', "
+                f"blocking_reason='派生审查车道故障：{failure_reason}') 结束本节点并说明原因"
+                '（submit_final_result 必须是本回合唯一的工具调用）；'
+                '否则请在当前父节点内自行完成这一步，或改为更小批次的派生。'
+            )
         normalized_reason = str(reason or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
         normalized_suggestion = str(suggestion or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION
         return f'派生已被拦截。原因：{normalized_reason}。建议：{normalized_suggestion}'
 
     @staticmethod
-    def _spawn_review_blocked_summary(*, reason: str) -> str:
+    def _spawn_review_blocked_summary(*, reason: str, system_failure: bool = False) -> str:
+        if system_failure:
+            return f'派生未审查：{str(reason or "").strip() or "检验派生车道故障。"}'
         normalized_reason = str(reason or '').strip() or _SPAWN_REVIEW_DEFAULT_BLOCK_REASON
         return f'派生拦截：{normalized_reason}'
 
     @classmethod
-    def _spawn_review_blocked_result(cls, spec: SpawnChildSpec, *, reason: str, suggestion: str) -> SpawnChildResult:
-        output_text = cls._spawn_review_blocked_text(reason=reason, suggestion=suggestion)
-        summary_text = cls._spawn_review_blocked_summary(reason=reason)
+    def _spawn_review_blocked_result(
+        cls,
+        spec: SpawnChildSpec,
+        *,
+        reason: str,
+        suggestion: str,
+        system_failure: bool = False,
+    ) -> SpawnChildResult:
+        output_text = cls._spawn_review_blocked_text(
+            reason=reason,
+            suggestion=suggestion,
+            system_failure=system_failure,
+        )
+        summary_text = cls._spawn_review_blocked_summary(reason=reason, system_failure=system_failure)
         return SpawnChildResult(
             goal=spec.goal,
-            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
+            check_result=(
+                _SPAWN_REVIEW_SYSTEM_FAILURE_CHECK_RESULT if system_failure else _SPAWN_REVIEW_BLOCKED_CHECK_RESULT
+            ),
             node_output=output_text,
             node_output_summary=summary_text,
             node_output_ref='',
-            failure_info=None,
+            failure_info=cls._runtime_spawn_failure_info(reason) if system_failure else None,
             review_blocked=True,
         )
 
     @classmethod
-    def _spawn_review_blocked_result_by_goal(cls, *, goal: str, reason: str, suggestion: str) -> SpawnChildResult:
-        output_text = cls._spawn_review_blocked_text(reason=reason, suggestion=suggestion)
-        summary_text = cls._spawn_review_blocked_summary(reason=reason)
+    def _spawn_review_blocked_result_by_goal(
+        cls,
+        *,
+        goal: str,
+        reason: str,
+        suggestion: str,
+        system_failure: bool = False,
+    ) -> SpawnChildResult:
+        output_text = cls._spawn_review_blocked_text(
+            reason=reason,
+            suggestion=suggestion,
+            system_failure=system_failure,
+        )
+        summary_text = cls._spawn_review_blocked_summary(reason=reason, system_failure=system_failure)
         return SpawnChildResult(
             goal=str(goal or '').strip(),
-            check_result=_SPAWN_REVIEW_BLOCKED_CHECK_RESULT,
+            check_result=(
+                _SPAWN_REVIEW_SYSTEM_FAILURE_CHECK_RESULT if system_failure else _SPAWN_REVIEW_BLOCKED_CHECK_RESULT
+            ),
             node_output=output_text,
             node_output_summary=summary_text,
             node_output_ref='',
-            failure_info=None,
+            failure_info=cls._runtime_spawn_failure_info(reason) if system_failure else None,
             review_blocked=True,
         )
 

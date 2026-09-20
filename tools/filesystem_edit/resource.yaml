@@ -2,7 +2,7 @@
 kind: tool
 name: filesystem_edit
 display_name: Filesystem Edit
-description: Edit one file by resolving a target span or using legacy text-replace or line-range inputs.
+description: Replace one exact text region in one file. old_text must match the file verbatim and appear once.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -87,40 +87,15 @@ model_parameters:
     path:
       type: string
       description: Absolute file path to edit.
-    target:
-      type: object
-      description: Preferred target-first edit locator.
-      properties:
-        by:
-          type: string
-          enum:
-            - exact_text
-            - anchor_pair
-            - line_range
-          description: How to locate the existing region to replace.
-        text:
-          type: string
-          description: Existing text when target.by=exact_text.
-        start_anchor:
-          type: string
-          description: Starting anchor when target.by=anchor_pair.
-        end_anchor:
-          type: string
-          description: Ending anchor when target.by=anchor_pair.
-        start_line:
-          type: integer
-          description: Start line when target.by=line_range.
-        end_line:
-          type: integer
-          description: End line when target.by=line_range.
-      required:
-        - by
+    old_text:
+      type: string
+      description: Exact existing text to replace, copied verbatim from a fresh read and matching once.
     new_text:
       type: string
-      description: Replacement text for the resolved target region.
+      description: Replacement text for old_text.
   required:
     - path
-    - target
+    - old_text
     - new_text
 governance:
   family: filesystem

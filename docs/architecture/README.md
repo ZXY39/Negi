@@ -42,6 +42,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
 - 追加通知后任务停在 paused、任务树出现红色「消息分发失败」横幅、epoch state=failed → `runtime-overview.md`「frontdoor 与任务运行时的关系」+ `operations-and-maintenance.md`「task_append_notice / task message distribution 维护要点」
 - 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
+- 派生评审把整批候选全拦下来、或想知道评审请求本身有多大/重发过几次 → `runtime-overview.md`「frontdoor 与任务运行时的关系」（派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `runtime-overview.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）
 - 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `runtime-overview.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）
@@ -62,6 +63,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - OpenAI 兼容端点 401/403/423/503、回复总是 "still working"、流式文本与终稿不一致 → `agent-gateway.md`「常见排障入口」
 - MCP 工具全部 connection_failed、MCP 客户端协议解析错误（stdout 被污染）→ `agent-gateway.md`「常见排障入口」+「MCP stdio 网关契约」
 - 渠道会话短暂出现在本地 web 会话列表、刷新后激活会话被切回本地会话、渠道回合无法在网页暂停 → `web-and-admin.md`「CEO Session List Interaction Contract」+「Active-Turn Button Semantics」
+- 节点反复调用文件编辑类工具失败、或同一编辑被重复提交 → `tool-and-skill-system.md`「filesystem_edit 契约」（模型面平面字段与校验面宽车道的分工、`Already applied:` 幂等车道）
 - 用户连续发送消息时助手只看到最后一条、或渠道消息收到重复回复 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）

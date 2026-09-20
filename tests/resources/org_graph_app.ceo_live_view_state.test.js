@@ -157,7 +157,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, scrollCeoFeedToBottom, updateCeoScrollToLatestButton, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, scrollCeoFeedToBottom, updateCeoScrollToLatestButton, setCeoFeedFollowLatest, handleCeoFeedUserGesture, handleCeoFeedScrollEvent, markCeoFeedProgrammaticScroll, S, U };`,
         context
     );
     return context.__testExports;
@@ -412,4 +412,29 @@ test("脱离时按钮常显；scrollCeoFeedToBottom 恢复跟随并收起按钮"
     assert.equal(api.S.ceoFeedFollowLatest, true);
     assert.equal(feed.scrollTop, 1000);
     assert.equal(api.U.ceoScrollToLatestBtn.hidden, true);
+});
+
+test("竞态序列:程序钉底派发的 scroll 不得重新武装跟随", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    api.S.ceoFeedFollowLatest = false;
+    api.handleCeoFeedUserGesture(); // 用户正在拖动，处于手势窗口内
+    api.markCeoFeedProgrammaticScroll(); // 上一次突变刚钉过底
+
+    api.handleCeoFeedScrollEvent();
+    assert.equal(api.S.ceoFeedFollowLatest, false, "程序滚动落在手势窗口内也不得翻转意图位");
+});
+
+test("对照:无程序标记且几何近底+手势窗口内,滚动事件会恢复跟随(用户自己滚回底部)", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 800, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    api.S.ceoFeedFollowLatest = false;
+    api.handleCeoFeedUserGesture();
+    api.mutateCeoFeed(() => {}, { scrollMode: "preserve" }); // 刷新最近突变时间戳之外的路径不带标记
+
+    // 静默期(250ms)内事件被吞掉：意图位保持不变
+    api.handleCeoFeedScrollEvent();
+    assert.equal(api.S.ceoFeedFollowLatest, false, "直播突变静默期内的程序滚动不改意图");
 });

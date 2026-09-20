@@ -1100,6 +1100,36 @@ async def test_filesystem_edit_target_exact_text_mode(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_filesystem_edit_flat_text_pair_replays_as_already_applied(tmp_path: Path):
+    workspace = tmp_path / 'workspace'
+    target_file = workspace / 'target.txt'
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text('alpha\nold line\nomega\n', encoding='utf-8')
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('filesystem_edit')
+        assert tool is not None
+        result = await tool.execute(path=str(target_file), old_text='old line', new_text='new line')
+        assert result.startswith('Successfully edited')
+        assert target_file.read_text(encoding='utf-8') == 'alpha\nnew line\nomega\n'
+
+        replay = await tool.execute(path=str(target_file), old_text='old line', new_text='new line')
+        assert replay.startswith('Already applied:')
+        assert not replay.startswith('Error')
+        assert target_file.read_text(encoding='utf-8') == 'alpha\nnew line\nomega\n'
+
+        missing = await tool.execute(path=str(target_file), old_text='absent line', new_text='unmatched text')
+        assert missing.startswith('Error:')
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
 async def test_filesystem_edit_target_anchor_pair_mode(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     target_file = workspace / 'target.py'
@@ -1280,7 +1310,7 @@ def test_filesystem_edit_manifest_exposes_explicit_mode_enum(tmp_path: Path):
         manager.close()
 
 
-def test_filesystem_edit_provider_visible_schema_requires_target_first_contract(tmp_path: Path):
+def test_filesystem_edit_provider_visible_schema_is_a_flat_text_pair(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
@@ -1294,14 +1324,19 @@ def test_filesystem_edit_provider_visible_schema_requires_target_first_contract(
 
         _description, schema = _provider_visible_tool_contract(tool)
         properties = dict((schema or {}).get('properties') or {})
-        target_schema = dict(properties.get('target') or {})
-        target_properties = dict(target_schema.get('properties') or {})
-        by_schema = dict(target_properties.get('by') or {})
+        required = ['path', 'old_text', 'new_text']
 
-        assert target_schema.get('type') == 'object'
-        assert by_schema.get('type') == 'string'
-        assert by_schema.get('enum') == ['exact_text', 'anchor_pair', 'line_range']
-        assert list((schema or {}).get('required') or []) == ['path', 'target', 'new_text']
+        assert list((schema or {}).get('required') or []) == required
+        declared = {name: payload for name, payload in properties.items() if name != 'timeout_seconds'}
+        assert set(declared) == set(required)
+        # No object on the model surface: a nested locator beside a required
+        # sibling is where a replacement gets put into the locator instead.
+        assert all((payload or {}).get('type') != 'object' for payload in declared.values())
+
+        # The wide legacy lanes stay validator-only, so earlier calls still run.
+        validator_properties = dict(((tool.parameters or {}).get('properties') or {}))
+        assert 'target' in validator_properties
+        assert 'target' not in declared
     finally:
         manager.close()
 

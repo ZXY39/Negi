@@ -137,17 +137,32 @@ def test_filesystem_split_mutation_manifests_replace_legacy_monolith():
     assert 'operations' in move_properties
 
 
-def test_filesystem_edit_manifest_exposes_target_first_model_schema():
+def test_filesystem_edit_manifest_exposes_flat_text_pair_model_schema():
     manifest = yaml.safe_load((TOOLS_ROOT / 'filesystem_edit' / 'resource.yaml').read_text(encoding='utf-8'))
     model_parameters = dict((manifest.get('model_parameters') or {}))
     properties = dict(model_parameters.get('properties') or {})
-    target_schema = dict(properties.get('target') or {})
-    target_properties = dict(target_schema.get('properties') or {})
-    by_schema = dict(target_properties.get('by') or {})
 
-    assert list(model_parameters.get('required') or []) == ['path', 'target', 'new_text']
-    assert target_schema.get('type') == 'object'
-    assert by_schema.get('enum') == ['exact_text', 'anchor_pair', 'line_range']
+    assert list(model_parameters.get('required') or []) == ['path', 'old_text', 'new_text']
+    assert set(properties) == {'path', 'old_text', 'new_text'}
+    # The model surface must carry no object to nest a replacement inside; the wide
+    # target/legacy lanes stay validator-only so earlier calls keep working.
+    assert 'target' not in properties
+    assert 'mode' not in properties
+
+
+def test_filesystem_mutation_model_surfaces_hold_no_nested_objects():
+    """Concrete file-mutation executors expose flat required fields only.
+
+    A nested locator object beside a required sibling is where callers put the
+    replacement text into the locator; the schema cannot express that ban, so the
+    manifests are asserted instead.
+    """
+    for tool_name in ('filesystem_edit', 'filesystem_propose_patch'):
+        manifest = yaml.safe_load((TOOLS_ROOT / tool_name / 'resource.yaml').read_text(encoding='utf-8'))
+        properties = dict((manifest.get('model_parameters') or manifest.get('parameters') or {}).get('properties') or {})
+        for param_name, payload in properties.items():
+            assert (payload or {}).get('type') != 'object', f'{tool_name}.{param_name} is a nested object'
+
 
 
 def test_all_manifest_parameters_have_descriptions():
