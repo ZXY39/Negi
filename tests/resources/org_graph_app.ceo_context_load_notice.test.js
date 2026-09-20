@@ -121,7 +121,7 @@ function loadApp() {
     vm.createContext(context);
     vm.runInContext(
         `${APP_CODE}
-        this.__testExports = { S, U, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice };`,
+        this.__testExports = { S, U, createPendingCeoTurn, maybeShowCeoContextLoadNotice, showCeoContextLoadNotice, resolveCeoContextLoadNoticeRiskLevel };`,
         context
     );
     context.__testExports.U.ceoContextLoadNotice = new StubHTMLElement();
@@ -162,4 +162,32 @@ test("context load notice renders type icon before text and keeps risk dot metad
     assert.equal(notice.children[1].className, "ceo-context-load-notice-text");
     assert.equal(notice.children[2].className, "ceo-context-load-notice-risk-dot risk-high");
     assert.equal(notice.children[0].innerHTML, '<i data-lucide="sparkles"></i>');
+});
+
+test("risk level resolves concrete executors from the owning family action", () => {
+    const { S, resolveCeoContextLoadNoticeRiskLevel } = loadApp();
+    S.tools = [
+        {
+            tool_id: "filesystem",
+            actions: [
+                { action_id: "edit", risk_level: "high", executor_names: ["filesystem_edit"] },
+                { action_id: "stat", risk_level: "low", executor_names: ["filesystem_stat"] },
+            ],
+        },
+        {
+            tool_id: "content",
+            actions: [
+                { action_id: "open", risk_level: "low", executor_names: ["content_open"] },
+            ],
+        },
+    ];
+    S.skills = [{ skill_id: "find-skills", risk_level: "high" }];
+
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem_edit"), "high");
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem_stat"), "low");
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "content_open"), "low");
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "filesystem"), "high");
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("tool", "missing_tool"), "medium");
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("skill", "find-skills"), "high");
+    assert.equal(resolveCeoContextLoadNoticeRiskLevel("skill", "missing_skill"), "medium");
 });

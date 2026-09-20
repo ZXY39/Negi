@@ -401,6 +401,30 @@ async function ensureSkillFileLoaded(skillId, fileKey) {
     return S.skillFileLoads[loadKey];
 }
 
+function hasContextRiskCatalog() {
+    return (Array.isArray(S.skills) ? S.skills.length : 0) > 0
+        && (Array.isArray(S.tools) ? S.tools.length : 0) > 0;
+}
+
+// 加载 chip 的风险度图标按 skill/tool 目录取色，而目录过去只有资源页手动刷新时才填充。
+// 这里只补 S 上的目录缓存、不渲染资源页，让节点详情与会话提醒都能拿到真实风险度。
+async function ensureContextRiskCatalog() {
+    if (hasContextRiskCatalog()) return true;
+    if (S.contextRiskCatalogRequest) return S.contextRiskCatalogRequest;
+    const request = Promise.all([
+        (Array.isArray(S.skills) && S.skills.length) ? Promise.resolve(S.skills) : ApiClient.getSkills(0, 300),
+        (Array.isArray(S.tools) && S.tools.length) ? Promise.resolve(S.tools) : ApiClient.getTools(0, 300),
+    ]).then(([skills, tools]) => {
+        if (Array.isArray(skills) && skills.length) S.skills = skills;
+        if (Array.isArray(tools) && tools.length) S.tools = tools;
+        return hasContextRiskCatalog();
+    }).catch(() => false).finally(() => {
+        if (S.contextRiskCatalogRequest === request) S.contextRiskCatalogRequest = null;
+    });
+    S.contextRiskCatalogRequest = request;
+    return request;
+}
+
 async function loadSkills({ renderDetail = true } = {}) {
     if (!(S.skills || []).length) {
         U.skillList.innerHTML = '<div class="empty-state">Loading skills...</div>';

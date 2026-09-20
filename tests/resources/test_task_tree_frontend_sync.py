@@ -2148,6 +2148,160 @@ def test_build_execution_trace_steps_use_stage_goal_as_stage_title_without_dupli
     assert result["containsToolOutput"] is True
 
 
+_LOADER_CHIP_NODE_STUBS = """
+        global.window = global;
+        global.S = { liveFrameMap: {} };
+        global.U = {};
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        global.normalizeInt = (value, fallback = 0) => {
+          const parsed = Number.parseInt(String(value ?? ""), 10);
+          return Number.isFinite(parsed) ? parsed : fallback;
+        };
+        // 会话提醒车道那四个 helper 的真实形状；节点详情页复用它们，这里按同形 stub。
+        global.ceoContextLoaderKind = (name) => {
+          const normalized = String(name || "").trim().toLowerCase();
+          if (normalized === "load_tool_context" || normalized === "load_tool_context_v2") return "tool";
+          if (normalized === "load_skill_context" || normalized === "load_skill_context_v2") return "skill";
+          return "";
+        };
+        global.extractCeoContextLoadTarget = (name, raw) => {
+          const key = global.ceoContextLoaderKind(name) === "skill" ? "skill_id" : "tool_id";
+          try {
+            return String(JSON.parse(raw)?.[key] || "");
+          } catch {
+            return "";
+          }
+        };
+        global.resolveCeoContextLoadNoticeRiskLevel = (kind, id) => {
+          const table = kind === "skill"
+            ? { "demo-skill": "low" }
+            : { "filesystem_edit": "high" };
+          return table[String(id)] || "medium";
+        };
+        global.ceoContextLoadNoticeIconName = (kind) => (kind === "skill" ? "sparkles" : "wrench");
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+"""
+
+
+def test_node_detail_renders_context_load_chips_without_tool_names() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+"""
+        + _LOADER_CHIP_NODE_STUBS
+        + """
+        const toolLoad = {
+          tool_call_id: "call:load:tool",
+          tool_name: "load_tool_context",
+          arguments_text: '{"tool_id": "filesystem_edit"}',
+          output_text: JSON.stringify({ ok: true, tool_id: "filesystem_edit", content: "TOOLS-BODY-MARKER" }),
+          status: "success",
+        };
+        const skillLoad = {
+          tool_call_id: "call:load:skill",
+          tool_name: "load_skill_context",
+          arguments_text: '{"skill_id": "demo-skill"}',
+          output_text: JSON.stringify({ ok: true, skill_id: "demo-skill", content: "SKILL-BODY-MARKER" }),
+          status: "success",
+        };
+        const ordinary = {
+          tool_call_id: "call:exec",
+          tool_name: "exec",
+          arguments_text: '{"command": "ls"}',
+          output_text: "listing",
+          status: "success",
+        };
+
+        function stageHtmlOf(tools) {
+          const trace = buildNodeExecutionTrace(
+            { node_id: "node:test", goal: "inspect repository" },
+            {
+              execution_trace: {
+                stages: [
+                  {
+                    stage_id: "stage:1",
+                    stage_index: 1,
+                    stage_goal: "加载上下文并执行",
+                    tool_round_budget: 3,
+                    tool_rounds_used: 1,
+                    status: "进行中",
+                    rounds: [{ round_id: "round:1", round_index: 1, budget_counted: true, tools }],
+                  },
+                ],
+              },
+            },
+            null,
+          );
+          return String(buildExecutionTraceSteps(trace, { state: "in_progress" })[1].bodyHtml || "");
+        }
+
+        const mixed = stageHtmlOf([toolLoad, skillLoad, ordinary]);
+        const failed = stageHtmlOf([
+          {
+            tool_call_id: "call:load:fail",
+            tool_name: "load_skill_context",
+            arguments_text: '{"skill_id": "missing"}',
+            output_text: "当前运行时技能未包含 missing",
+            status: "error",
+          },
+        ]);
+
+        const flatTrace = buildNodeExecutionTrace(
+          { node_id: "node:flat", goal: "inspect repository" },
+          { execution_trace: { tool_steps: [skillLoad] } },
+          null,
+        );
+        const flatStep = buildExecutionTraceSteps(flatTrace, { state: "in_progress" })[1];
+
+        console.log(JSON.stringify({
+          showsToolLoadLabel: mixed.includes("加载 tool"),
+          showsSkillLoadLabel: mixed.includes("加载 skill"),
+          leaksLoaderName: mixed.includes("load_tool_context") || mixed.includes("load_skill_context"),
+          highRiskWrench: /context-load-icon risk-high"[^>]*><i data-lucide="wrench"/.test(mixed),
+          lowRiskSparkles: /context-load-icon risk-low"[^>]*><i data-lucide="sparkles"/.test(mixed),
+          showsToolBody: mixed.includes("TOOLS-BODY-MARKER"),
+          showsSkillBody: mixed.includes("SKILL-BODY-MARKER"),
+          paramFieldCount: (mixed.match(/>参数</g) || []).length,
+          keepsOrdinaryOutput: mixed.includes("listing"),
+          keepsTargetTooltip: mixed.includes('title="filesystem_edit"'),
+          failedKeepsName: failed.includes("load_skill_context"),
+          failedKeepsErrorText: failed.includes("当前运行时技能未包含 missing"),
+          failedSkipsContentField: !failed.includes("暂无内容"),
+          flatTitle: flatStep.title,
+          flatShowsBody: String(flatStep.bodyHtml || "").includes("SKILL-BODY-MARKER"),
+          flatSkipsArgs: !String(flatStep.bodyHtml || "").includes("Arguments"),
+        }));
+        """
+    )
+
+    assert result["showsToolLoadLabel"] is True
+    assert result["showsSkillLoadLabel"] is True
+    assert result["leaksLoaderName"] is False
+    assert result["highRiskWrench"] is True
+    assert result["lowRiskSparkles"] is True
+    assert result["showsToolBody"] is True
+    assert result["showsSkillBody"] is True
+    assert result["paramFieldCount"] == 1
+    assert result["keepsOrdinaryOutput"] is True
+    assert result["keepsTargetTooltip"] is True
+    assert result["failedKeepsName"] is True
+    assert result["failedKeepsErrorText"] is True
+    assert result["failedSkipsContentField"] is True
+    assert result["flatTitle"] == "加载 skill"
+    assert result["flatShowsBody"] is True
+    assert result["flatSkipsArgs"] is True
+
+
 def test_build_execution_trace_steps_label_summary_rounds_by_spawn_presence() -> None:
     result = _run_node_script(
         """

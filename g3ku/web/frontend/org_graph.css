@@ -3652,6 +3652,13 @@ textarea {
     background: color-mix(in srgb, var(--bg-panel) 82%, var(--bg-app));
 }
 
+.task-trace-round-chip-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
 .task-trace-round-chip-title {
     font-size: 0.85rem;
     font-weight: 600;
@@ -3659,6 +3666,35 @@ textarea {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* 加载 skill / 加载 tool 的图标按资源风险度取色，与会话提醒的风险圆点同一套色值。 */
+.context-load-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 1rem;
+    height: 1rem;
+    color: var(--text-secondary);
+}
+
+.context-load-icon i,
+.context-load-icon svg {
+    width: 1rem;
+    height: 1rem;
+}
+
+.context-load-icon.risk-low {
+    color: #22c55e;
+}
+
+.context-load-icon.risk-medium {
+    color: #f59e0b;
+}
+
+.context-load-icon.risk-high {
+    color: #ef4444;
 }
 
 .task-trace-round-chip-status {

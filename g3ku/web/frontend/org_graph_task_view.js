@@ -1441,7 +1441,7 @@ function nodeFinalTraceStatus(node) {
     return "success";
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "" }) {
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
@@ -1454,6 +1454,7 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
         <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
+                    ${leadHtml}
                     <span class="interaction-step-title">${esc(title)}</span>
                 </span>
                 <span class="interaction-step-side">
@@ -1497,18 +1498,103 @@ function buildExecutionRoundToolKey(round, step, toolIndex) {
     return `${roundKey}:tool:${stepKey}`;
 }
 
+const CONTEXT_LOAD_TITLES = { skill: "加载 skill", tool: "加载 tool" };
+const CONTEXT_LOAD_HIDDEN_STATUSES = new Set(["error", "warning", "interrupted"]);
+
+function contextLoadIconName(kind) {
+    return typeof ceoContextLoadNoticeIconName === "function" ? ceoContextLoadNoticeIconName(kind) : "";
+}
+
+function contextLoadBodyFromStep(step) {
+    const text = String(step?.output_text || "").trim();
+    if (!text.startsWith("{")) return "";
+    let parsed = null;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        return "";
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || parsed.ok !== true) return "";
+    return String(parsed.content || "").trim();
+}
+
+// 上下文加载器按「加载 skill / 加载 tool + 风险度配色」呈现；失败轮保留原始工具名与参数车道，
+// 否则错误正文会被当成空正文。哪个名字算加载器、风险度怎么取，都复用会话提醒那一份判定。
+function contextLoadDisplayFor(step) {
+    if (typeof ceoContextLoaderKind !== "function") return null;
+    const toolName = String(step?.tool_name || "").trim();
+    const kind = ceoContextLoaderKind(toolName);
+    if (!kind) return null;
+    if (CONTEXT_LOAD_HIDDEN_STATUSES.has(String(step?.status || "").trim().toLowerCase())) return null;
+    let targetId = "";
+    if (typeof extractCeoContextLoadTarget === "function") {
+        targetId = [step?.output_text, step?.arguments_text]
+            .map((raw) => String(extractCeoContextLoadTarget(toolName, String(raw || "")) || "").trim())
+            .find(Boolean) || "";
+    }
+    return {
+        kind,
+        targetId,
+        riskLevel: typeof resolveCeoContextLoadNoticeRiskLevel === "function"
+            ? resolveCeoContextLoadNoticeRiskLevel(kind, targetId)
+            : "medium",
+        iconName: contextLoadIconName(kind),
+        title: CONTEXT_LOAD_TITLES[kind] || "加载内容",
+        body: contextLoadBodyFromStep(step),
+    };
+}
+
+function renderContextLoadIcon(contextLoad) {
+    if (!contextLoad?.iconName) return "";
+    return `<span class="context-load-icon risk-${esc(contextLoad.riskLevel)}" aria-hidden="true"><i data-lucide="${esc(contextLoad.iconName)}"></i></span>`;
+}
+
+function traceHasContextLoadStep(trace) {
+    const steps = [];
+    (Array.isArray(trace?.stages) ? trace.stages : []).forEach((stage) => {
+        (Array.isArray(stage?.rounds) ? stage.rounds : []).forEach((round) => {
+            steps.push(...(Array.isArray(round?.tools) ? round.tools : []));
+        });
+    });
+    steps.push(...(Array.isArray(trace?.tool_steps) ? trace.tool_steps : []));
+    return steps.some((step) => !!contextLoadDisplayFor(step));
+}
+
+function renderContextLoadBodyField(contextLoad, step) {
+    if (contextLoad.body) {
+        return renderTraceField("内容", contextLoad.body, "暂无内容", { copyable: true });
+    }
+    if (String(step?.status || "").trim().toLowerCase() === "running") {
+        return renderTraceOutputField("内容", "", "", "等待内容加载...", { decodeEscapes: true, copyable: true });
+    }
+    // 正文解不出来（例如结果被外置成信封）时退回输出车道，让 output_ref 水合继续工作。
+    return renderTraceOutputField(
+        "内容",
+        step?.output_text,
+        step?.output_ref,
+        "暂无内容",
+        { decodeEscapes: true, copyable: true },
+    );
+}
+
 function renderExecutionRoundToolChip(round, step, toolIndex) {
     const toolKey = buildExecutionRoundToolKey(round, step, toolIndex);
     const status = String(step?.status || "info").trim() || "info";
-    const toolName = String(step?.tool_name || "tool").trim() || "tool";
+    const contextLoad = contextLoadDisplayFor(step);
+    const titleText = contextLoad ? contextLoad.title : (String(step?.tool_name || "tool").trim() || "tool");
+    const iconHtml = renderContextLoadIcon(contextLoad);
+    const titleAttr = contextLoad?.targetId ? ` title="${esc(contextLoad.targetId)}"` : "";
     return `
         <button
             type="button"
-            class="task-trace-round-chip ${esc(status)}"
+            class="task-trace-round-chip ${esc(status)}${contextLoad ? ` is-context-load is-${esc(contextLoad.kind)}` : ""}"
             data-tool-key="${esc(toolKey)}"
-            aria-pressed="false"
+            aria-pressed="false"${titleAttr}
         >
-            <span class="task-trace-round-chip-title">${esc(toolName)}</span>
+            <span class="task-trace-round-chip-label">
+                ${iconHtml}
+                <span class="task-trace-round-chip-title">${esc(titleText)}</span>
+            </span>
             <span class="task-trace-round-chip-status">${esc(traceStatusLabel(status))}</span>
         </button>
     `;
@@ -1516,6 +1602,14 @@ function renderExecutionRoundToolChip(round, step, toolIndex) {
 
 function renderExecutionRoundToolPanel(round, step, toolIndex) {
     const toolKey = buildExecutionRoundToolKey(round, step, toolIndex);
+    const contextLoad = contextLoadDisplayFor(step);
+    if (contextLoad) {
+        return `
+        <section class="task-trace-round-panel is-context-load" data-tool-key="${esc(toolKey)}" hidden>
+            ${renderContextLoadBodyField(contextLoad, step)}
+        </section>
+    `;
+    }
     const toolName = String(step?.tool_name || "tool").trim() || "tool";
     const evidenceSummary = (Array.isArray(step?.evidence) ? step.evidence : [])
         .map((item) => [String(item?.kind || "").trim(), String(item?.path || item?.ref || "").trim(), String(item?.note || "").trim()].filter(Boolean).join(" | "))
@@ -1711,22 +1805,26 @@ function buildExecutionTraceSteps(trace, node) {
     }
     return [
         initialPromptStep,
-        ...trace.tool_steps.map((step, index) => ({
-            traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
-            title: `Tool - ${step.tool_name || "tool"}`,
-            status: step.status || "info",
-            open: false,
-            bodyHtml: [
-                renderTraceField("Arguments", step.arguments_text, "No arguments", { copyable: true }),
-                renderTraceOutputField(
-                    "Output",
-                    step.output_text,
-                    step.output_ref,
-                    step.status === "running" ? "Waiting for tool output..." : "No tool output",
-                    { decodeEscapes: true, copyable: true },
-                ),
-            ].join(""),
-        })),
+        ...trace.tool_steps.map((step, index) => {
+            const contextLoad = contextLoadDisplayFor(step);
+            return {
+                traceKey: `tool:${step.tool_call_id || index}:${step.tool_name || "tool"}`,
+                title: contextLoad ? contextLoad.title : `Tool - ${step.tool_name || "tool"}`,
+                leadHtml: renderContextLoadIcon(contextLoad),
+                status: step.status || "info",
+                open: false,
+                bodyHtml: contextLoad ? renderContextLoadBodyField(contextLoad, step) : [
+                    renderTraceField("Arguments", step.arguments_text, "No arguments", { copyable: true }),
+                    renderTraceOutputField(
+                        "Output",
+                        step.output_text,
+                        step.output_ref,
+                        step.status === "running" ? "Waiting for tool output..." : "No tool output",
+                        { decodeEscapes: true, copyable: true },
+                    ),
+                ].join(""),
+            };
+        }),
     ];
 }
 
@@ -3858,6 +3956,15 @@ async function showAgent(node, { preserveViewState = true, forceRefresh = false 
         executionTrace: buildNodeExecutionTrace(node, detail || {}, liveFrame),
         model_retry_status: liveFrame?.model_retry_status || null,
     };
+    // 加载 chip 的风险度取自 skill/tool 目录，而目录过去只有资源页手动刷新时才填充：按需补一次才不至于全部退成兜底色。
+    if (typeof ensureContextRiskCatalog === "function"
+        && typeof hasContextRiskCatalog === "function"
+        && !hasContextRiskCatalog()
+        && traceHasContextLoadStep(mergedNode.executionTrace)) {
+        await ensureContextRiskCatalog();
+        if (renderToken !== S.taskDetailRenderToken) return;
+        if (String(S.selectedNodeId || "").trim() !== nodeId) return;
+    }
     S.currentNodeDetail = mergedNode;
     U.detail.style.display = "flex";
     if (U.nodeEmpty) U.nodeEmpty.style.display = "none";
