@@ -2788,3 +2788,28 @@ def test_warm_path_baseline_keeps_distinct_events_but_collapses_redispatches() -
     assert len(_warm_loop_bundle_messages(baseline)) == 2
 
 
+
+
+def test_ceo_snapshot_skips_artifact_usage_scan_when_transcript_usage_complete(monkeypatch) -> None:
+    """每行都带 transcript usage 时不再扫描请求工件目录（大会话 1s+ 的固定成本）。"""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        websocket_ceo,
+        "read_session_turn_token_usage",
+        lambda session_id: calls.append(session_id) or {},
+    )
+    rows = [
+        {
+            "role": "assistant",
+            "content": "reply",
+            "turn_id": "t1",
+            "usage": {"input_tokens": 5, "output_tokens": 2, "cache_hit_tokens": 0, "call_count": 1},
+        }
+    ]
+    snapshot = websocket_ceo._build_ceo_snapshot(rows, session_id="web:ceo-a")
+    assert calls == []
+    assert snapshot[0]["usage"]["input_tokens"] == 5
+
+    legacy_rows = [{"role": "assistant", "content": "old reply", "turn_id": "t0"}]
+    websocket_ceo._build_ceo_snapshot(legacy_rows, session_id="web:ceo-a")
+    assert calls == ["web:ceo-a"]

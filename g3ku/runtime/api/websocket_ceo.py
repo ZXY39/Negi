@@ -766,7 +766,29 @@ def _build_ceo_snapshot(
     previous_transcript_view: dict[str, Any] = {}
     # 存储重放游标：cc_upsert 行相对物理上一轨道行编码，须连同隐藏行一起推进。
     storage_view_cursor: dict[str, Any] = {}
-    usage_by_turn = read_session_turn_token_usage(session_id) if session_id else {}
+    # 按 turn_id 聚合的请求工件扫描要 glob 整个 artifact 目录并逐文件解析
+    # （大会话实测 300+ 文件 / 70MB ≈ 1s+）。transcript 级 usage 自收尾起随每轮
+    # 持久化：只有当存在"带 turn_id 却无 usage"的 assistant 行（旧转录）时才付
+    # 这笔扫描。
+    needs_artifact_usage = any(
+        isinstance(raw, dict)
+        and str(raw.get('role') or '').strip().lower() == 'assistant'
+        and not isinstance(raw.get('usage'), dict)
+        and (
+            str(raw.get('turn_id') or '').strip()
+            or str(
+                (raw.get('metadata') or {}).get('_transcript_turn_id')
+                if isinstance(raw.get('metadata'), dict)
+                else ''
+            ).strip()
+        )
+        for raw in list(messages or [])
+    )
+    usage_by_turn = (
+        read_session_turn_token_usage(session_id)
+        if session_id and needs_artifact_usage
+        else {}
+    )
     for index, raw in enumerate(list(messages or [])):
         if not isinstance(raw, dict):
             continue
