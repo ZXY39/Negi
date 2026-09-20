@@ -105,6 +105,9 @@ _SPAWN_REVIEW_BLOCKED_CHECK_RESULT = '派生已被拦截'
 _SPAWN_REVIEW_DEFAULT_BLOCK_REASON = '检验派生未批准该候选派生。'
 _SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION = '请在当前父节点内自行执行，或收缩为更聚焦的单一派生。'
 _SPAWN_REVIEW_RETRY_DELAY_SECONDS = 0.1
+# 检验派生的无效响应重试上限，对齐消息分发决策车道的 _DISTRIBUTION_DECISION_MAX_ATTEMPTS：
+# 评审模型持续不回可解析结构时会话级重发没有终点，每轮还多带一条 repair 消息。
+_SPAWN_REVIEW_MAX_ATTEMPTS = 5
 _SPAWN_REVIEW_REPAIR_PREFIX = '上一轮检验派生回复无效。'
 
 DISTRIBUTION_ACTION_DISTRIBUTE = 'distribute'
@@ -4204,12 +4207,17 @@ class NodeRunner:
             specs=specs,
             cache_key=cache_key,
         )
+        # 评审车道不过节点 preflight，也没有 actual-request 工件；把正文规模记进
+        # spawn_review 是本车道唯一可留存的体积证据（_record_spawn_review_token_usage
+        # 只把 usage 并进父节点聚合，事后无法还原是哪一次评审花的）。
+        review_request_chars = sum(len(str(item.get('content') or '')) for item in messages if isinstance(item, dict))
         tools = [self._spawn_review_tool_schema()]
         model_refs = list(self._acceptance_model_refs or self._execution_model_refs)
         if not model_refs:
             return self._default_spawn_review_result(
                 specs=specs,
                 reason='RuntimeError: spawn review inspection model chain is empty',
+                review_request_chars=review_request_chars,
             )
         invalid_response_count = 0
         usage_attempts: list[Any] = []
@@ -4235,6 +4243,8 @@ class NodeRunner:
                 return self._default_spawn_review_result(
                     specs=specs,
                     reason=describe_exception(exc),
+                    review_attempts=invalid_response_count + 1,
+                    review_request_chars=review_request_chars,
                 )
             usage_attempts.extend(list(response.attempts or []))
             parsed = self._parse_spawn_review_response(response, spec_count=len(specs))
@@ -4243,9 +4253,21 @@ class NodeRunner:
                 return {
                     'reviewed_at': _now(),
                     'requested_specs': [self._spawn_review_requested_spec_payload(index=index, spec=spec) for index, spec in enumerate(specs)],
+                    'review_attempts': invalid_response_count + 1,
+                    'review_request_chars': review_request_chars,
                     **parsed,
                 }
             invalid_response_count += 1
+            if invalid_response_count >= _SPAWN_REVIEW_MAX_ATTEMPTS:
+                return self._default_spawn_review_result(
+                    specs=specs,
+                    reason=(
+                        f'RuntimeError: spawn review kept returning unparseable decisions '
+                        f'({_SPAWN_REVIEW_MAX_ATTEMPTS} attempts)'
+                    ),
+                    review_attempts=invalid_response_count,
+                    review_request_chars=review_request_chars,
+                )
             await asyncio.sleep(_SPAWN_REVIEW_RETRY_DELAY_SECONDS)
 
     def _record_spawn_review_token_usage(self, *, task, parent: NodeRecord, usage_attempts: list[Any]) -> None:
@@ -4641,11 +4663,20 @@ class NodeRunner:
             'error_text': '',
         }
 
-    def _default_spawn_review_result(self, *, specs: list[SpawnChildSpec], reason: str) -> dict[str, Any]:
+    def _default_spawn_review_result(
+        self,
+        *,
+        specs: list[SpawnChildSpec],
+        reason: str,
+        review_attempts: int = 0,
+        review_request_chars: int = 0,
+    ) -> dict[str, Any]:
         normalized_reason = str(reason or 'RuntimeError: spawn review failed').strip() or 'RuntimeError: spawn review failed'
         return {
             'reviewed_at': _now(),
             'requested_specs': [self._spawn_review_requested_spec_payload(index=index, spec=spec) for index, spec in enumerate(specs)],
+            'review_attempts': max(0, int(review_attempts or 0)),
+            'review_request_chars': max(0, int(review_request_chars or 0)),
             'allowed_indexes': [],
             'blocked_specs': [
                 {

@@ -4334,6 +4334,8 @@ class TaskLogService:
                         if isinstance(item, dict)
                     ],
                     'error_text': str(review.get('error_text') or ''),
+                    'review_attempts': int(review.get('review_attempts') or 0),
+                    'review_request_chars': int(review.get('review_request_chars') or 0),
                     'entries': [
                         {
                             'index': int(item.get('index') or 0),

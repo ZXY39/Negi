@@ -325,7 +325,7 @@ CEO/frontdoor 在真正发 provider 请求前有最后一层 token preflight。�
 
 ### 5.6 节点侧排查要点（preflight / scaffold / append-notice）
 
-execution / acceptance 节点在真正发 provider 请求前也走最后一层 node send token preflight，包括 `message_distribution` 控制轮。两个边界必须分清：`message_distribution` 包含在 node send preflight 里；`spawn review` 是外部检验通道，故意不在 node preflight 合同里，不要混为一谈。
+execution / acceptance 节点在真正发 provider 请求前也走最后一层 node send token preflight，包括 `message_distribution` 控制轮。两个边界必须分清：`message_distribution` 包含在 node send preflight 里；`spawn review` 是外部检验通道，故意不在 node preflight 合同里，不要混为一谈。评审车道的正文规模与重发次数因此不出现在 `token_preflight_diagnostics` 里，要看 `spawn_review` 载荷上的 `review_attempts` / `review_request_chars`（合同详见 `runtime-overview.md`「frontdoor 与任务运行时的关系」）。
 
 先看节点 runtime frame 或 actual-request artifact 里的：
 
