@@ -163,14 +163,23 @@ def _dedupe_canonical_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any
     the durable canonical chain. Copies share the same ``stage_id`` and the
     newest copy is the one rendered from the current turn state, so keeping the
     last occurrence preserves content while preventing unbounded chain growth.
+    收口标记跟着逻辑阶段走：被丢弃的旧副本带标记时，存活副本也必须带上，否则
+    "较新的副本没标"会把已收口阶段的块重新渲染出来。
     """
     latest_index: dict[str, int] = {}
+    hidden_ids: set[str] = set()
     for index, stage in enumerate(stages):
         stage_id = _as_str(stage.get("stage_id"))
         if stage_id:
             latest_index[stage_id] = index
+            if stage.get("context_visible") is False:
+                hidden_ids.add(stage_id)
     return [
-        stage
+        (
+            {**stage, "context_visible": False}
+            if _as_str(stage.get("stage_id")) in hidden_ids and stage.get("context_visible") is not False
+            else stage
+        )
         for index, stage in enumerate(stages)
         if not _as_str(stage.get("stage_id")) or latest_index[_as_str(stage.get("stage_id"))] == index
     ]
@@ -203,15 +212,21 @@ def _completed_stage_content_identity(stage: dict[str, Any]) -> str:
 
 def _dedupe_completed_stage_content(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     latest_index: dict[str, int] = {}
+    hidden_identities: set[str] = set()
     for index, stage in enumerate(stages):
         identity = _completed_stage_content_identity(stage)
         if identity:
             latest_index[identity] = index
+            if stage.get("context_visible") is False:
+                hidden_identities.add(identity)
     kept: list[dict[str, Any]] = []
     for index, stage in enumerate(stages):
         identity = _completed_stage_content_identity(stage)
         if identity and latest_index.get(identity) != index:
             continue
+        if identity and identity in hidden_identities and stage.get("context_visible") is not False:
+            # 同一逻辑阶段的任一副本被收口，存活副本同样不再进 provider 上下文。
+            stage = {**stage, "context_visible": False}
         kept.append(stage)
     return kept
 

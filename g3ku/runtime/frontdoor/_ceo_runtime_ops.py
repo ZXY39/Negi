@@ -2197,29 +2197,65 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return collected
 
     @staticmethod
-    def _frontdoor_hide_summarized_stages(session: Any, stage_ids: list[str]) -> int:
+    def _frontdoor_stage_content_identity(stage: Any) -> str:
+        """跨存储识别同一条逻辑阶段：canonical 链与本轮 stage_state 用的是两套
+        stage_id 序号（实测同一条会话里 1..382 对 843..1226，交集 0），只按 id 匹配
+        必然漏掉一半。字段口径对齐 `canonical_context._completed_stage_content_identity`。"""
+        if not isinstance(stage, dict):
+            return ""
+        if str(stage.get("status") or "").strip().lower() == "active":
+            return ""
+        created_at = str(stage.get("created_at") or "").strip()
+        if not created_at:
+            return ""
+        return "|".join(
+            (
+                str(stage.get("stage_kind") or "normal"),
+                created_at,
+                str(stage.get("finished_at") or "").strip(),
+                str(stage.get("stage_goal") or "").strip(),
+                str(stage.get("completed_stage_summary") or "").strip(),
+            )
+        )
+
+    @classmethod
+    def _frontdoor_hide_summarized_stages(cls, session: Any, stage_ids: list[str]) -> int:
         """把收口标记就地写进两份 durable 账本，返回实际新标记的条数。
 
-        只动 canonical 链不够：本轮 stage_state 里同 id 的副本仍会被合并视图当作可见
-        阶段渲染回来。写入刻意不过 `normalize_frontdoor_canonical_context`——归一化会
-        按内容身份去重，收口一次就重排账本风险太高；读取端（渲染器与 `_normalize_stage`）
-        已经按原始键判定可见性。活动阶段一律不收口。"""
+        两份存储都要打：合并视图按内容身份去重时留下的是较新的一份副本（本轮
+        stage_state 里的），只标 canonical 等于没标。又因为两套 stage_id 不相交，
+        命中 id 之后还要按内容身份把同一条逻辑阶段在另一份存储里一起标掉。
+        写入刻意不过 `normalize_frontdoor_canonical_context`——归一化会重排账本，
+        收口一次就重排风险太高；读取端按原始键判定可见性。活动阶段一律不收口。"""
         wanted = {str(item or "").strip() for item in list(stage_ids or []) if str(item or "").strip()}
         if session is None or not wanted:
             return 0
-        hidden = 0
-        for attribute in ("_frontdoor_canonical_context", "_frontdoor_stage_state"):
-            current = getattr(session, attribute, None)
-            if not isinstance(current, dict):
-                continue
-            for stage in list(current.get("stages") or []):
+        stores = [
+            getattr(session, attribute, None)
+            for attribute in ("_frontdoor_canonical_context", "_frontdoor_stage_state")
+        ]
+        stores = [store for store in stores if isinstance(store, dict)]
+        if not stores:
+            return 0
+        identities: set[str] = set()
+        for store in stores:
+            for stage in list(store.get("stages") or []):
                 if not isinstance(stage, dict):
                     continue
-                if str(stage.get("stage_id") or "").strip() not in wanted:
+                if str(stage.get("stage_id") or "").strip() in wanted:
+                    identity = cls._frontdoor_stage_content_identity(stage)
+                    if identity:
+                        identities.add(identity)
+        hidden = 0
+        for store in stores:
+            for stage in list(store.get("stages") or []):
+                if not isinstance(stage, dict):
                     continue
                 if str(stage.get("status") or "").strip().lower() == "active":
                     continue
-                if stage.get("context_visible") is False:
+                stage_id = str(stage.get("stage_id") or "").strip()
+                matched = stage_id in wanted or cls._frontdoor_stage_content_identity(stage) in identities
+                if not matched or stage.get("context_visible") is False:
                     continue
                 stage["context_visible"] = False
                 hidden += 1

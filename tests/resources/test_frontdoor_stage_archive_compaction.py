@@ -423,6 +423,54 @@ def test_token_compression_skips_archive_when_export_fails(monkeypatch, tmp_path
     assert all(stage.get("context_visible") is None for stage in session._frontdoor_canonical_context["stages"])
 
 
+def test_hide_marks_across_disjoint_stage_id_namespaces() -> None:
+    """live 复现：canonical 链与本轮 stage_state 各自维护一套 stage_id（实测交集 0）。
+
+    只按 id 标记会漏掉 stage_state，而合并去重留下的正是较新的那份副本——等于完全没收口。"""
+    early = {**_stage(1), "stage_id": "frontdoor-stage-1", "created_at": "2026-09-19T20:00:00+08:00"}
+    late_copy = {**early, "stage_id": "frontdoor-stage-843", "stage_index": 843}
+    session = SimpleNamespace(
+        _frontdoor_canonical_context=_ledger([early]),
+        _frontdoor_stage_state=_ledger([late_copy]),
+    )
+    marked = CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, ["frontdoor-stage-1"])
+    assert marked == 2
+    assert session._frontdoor_canonical_context["stages"][0]["context_visible"] is False
+    assert session._frontdoor_stage_state["stages"][0]["context_visible"] is False
+
+
+def test_combine_propagates_archive_flag_onto_surviving_copy() -> None:
+    """合并视图去重后必须仍带着收口标记，否则块会在下一轮整批长回来。"""
+    durable = _ledger([_stage(1, visible=False)])
+    turn_copy = {**_stage(1), "stage_id": "frontdoor-stage-900", "stage_index": 900}
+    combined = combine_canonical_context(durable, _ledger([turn_copy]))
+    assert len(combined["stages"]) == 1
+    assert combined["stages"][0]["context_visible"] is False
+    assert completed_stage_blocks(combined) == []
+
+    # 同一 stage_id 的重复副本同理：被丢弃副本上的标记要转移到存活副本。
+    by_id = normalize_frontdoor_canonical_context(
+        _ledger([_stage(2, visible=False), {**_stage(2), "completed_stage_summary": "结论 2 更新"}])
+    )
+    assert by_id["stages"][0]["context_visible"] is False
+
+
+def test_live_shaped_ledger_renders_only_the_raw_window_after_archive() -> None:
+    """ext:qq-official 会话的真实形态：canonical 1..382（372 已收口）+ stage_state 843..1226。"""
+    canonical_stages = [
+        _stage(index, visible=index > 372) for index in range(1, 383)
+    ]
+    turn_stages = [
+        {**stage, "stage_id": f"frontdoor-stage-{842 + int(stage['stage_index'])}", "stage_index": 842 + int(stage["stage_index"])}
+        for stage in canonical_stages
+    ]
+    turn_stages.append(_stage(383, visible=True) | {"stage_id": "frontdoor-stage-1225", "stage_index": 1225})
+    turn_stages.append(_stage(384, visible=True) | {"stage_id": "frontdoor-stage-1226", "stage_index": 1226})
+    combined = combine_canonical_context(_ledger(canonical_stages), _ledger(turn_stages))
+    blocks = completed_stage_blocks(combined, skip_stage_ids=retained_completed_stage_ids(combined, keep_latest=3))
+    assert len(blocks) < 10, f"收口后块数应塌到个位数，实际 {len(blocks)}"
+
+
 def test_hide_helper_marks_both_durable_stores_and_skips_active() -> None:
     session = SimpleNamespace(
         _frontdoor_canonical_context=_ledger([_stage(1), _stage(2)]),
