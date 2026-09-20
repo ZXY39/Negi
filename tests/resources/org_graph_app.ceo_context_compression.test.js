@@ -108,7 +108,7 @@ class StubHTMLSelectElement extends StubHTMLElement {}
 
 function loadApp() {
     const clock = { now: 0 };
-    // rAF 排成队列由测试按帧推进，才能分别验证「未满 3 秒松手」和「满 3 秒」两条分支。
+    // rAF 排成队列由测试按帧推进，才能分别验证「未满 2 秒松手」和「满 2 秒」两条分支。
     const frames = [];
     // setInterval 同样记成数组：压缩轮询要能一次一次手动触发才测得准容错。
     const intervals = [];
@@ -249,7 +249,24 @@ function dividers(feed) {
     return feed.children.filter((child) => String(child.className || "").includes("ceo-compression-divider"));
 }
 
-test("长按未满 3 秒松手不发起压缩，进度环归零", () => {
+test("长按未满 2 秒松手不发起压缩，进度环归零", () => {
+    const api = loadApp();
+    api.context.beginCeoContextCompression = (sessionId) => {
+        api.compressCalls.push(sessionId);
+    };
+
+    api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
+    api.pumpFrames(1);
+    api.finishCeoBrainHold();
+
+    assert.deepEqual(api.compressCalls, []);
+    assert.equal(api.clock.now, 1000);
+    assert.equal(api.U.ceoComposerUsageBrain.style.values["--ceo-brain-hold"], "0");
+    assert.equal(api.U.ceoComposerUsageBrain.classList.contains("is-holding"), false);
+    assert.equal(api.S.ceoBrainHold.active, false);
+});
+
+test("长按满 2 秒发起压缩并吞掉随后到达的 click", () => {
     const api = loadApp();
     api.context.beginCeoContextCompression = (sessionId) => {
         api.compressCalls.push(sessionId);
@@ -257,23 +274,6 @@ test("长按未满 3 秒松手不发起压缩，进度环归零", () => {
 
     api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
     api.pumpFrames(2);
-    api.finishCeoBrainHold();
-
-    assert.deepEqual(api.compressCalls, []);
-    assert.equal(api.clock.now, 2000);
-    assert.equal(api.U.ceoComposerUsageBrain.style.values["--ceo-brain-hold"], "0");
-    assert.equal(api.U.ceoComposerUsageBrain.classList.contains("is-holding"), false);
-    assert.equal(api.S.ceoBrainHold.active, false);
-});
-
-test("长按满 3 秒发起压缩并吞掉随后到达的 click", () => {
-    const api = loadApp();
-    api.context.beginCeoContextCompression = (sessionId) => {
-        api.compressCalls.push(sessionId);
-    };
-
-    api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
-    api.pumpFrames(3);
 
     assert.deepEqual(api.compressCalls, ["web:test"]);
     assert.equal(api.S.ceoBrainHoldConsumedClick, true);
@@ -304,7 +304,7 @@ test("渠道会话同样可以长按压缩，上传中与正在压缩才拒绝",
     api.S.activeSessionId = "ext:qq";
     assert.equal(api.ceoBrainHoldBlockedReason(), "");
     api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
-    api.pumpFrames(3);
+    api.pumpFrames(2);
     assert.deepEqual(api.compressCalls, ["ext:qq"]);
 
     api.S.ceoUploadBusy = true;
@@ -646,7 +646,7 @@ test("压缩 toast 让位给会话流区分线，长按环与提示进入 DOM", 
     assert.match(CSS_CODE, /\.ceo-compression-divider\.is-running[^}]*animation/);
 });
 
-test("区分线两端留白且文字居中，图标自绘旋转，长按 3 秒、悬停不发亮", () => {
+test("区分线两端留白且文字居中，图标自绘旋转，长按 2 秒、悬停不发亮", () => {
     // 整条线两端留白，不顶到会话区边缘。
     assert.match(CSS_CODE, /\.ceo-compression-divider-inner\s*\{[^}]*padding-inline/);
     // 左右两条线等宽（都 flex:1）文字才居中；旧的 ::after 定宽写法会把文字推到右侧。
@@ -671,8 +671,8 @@ test("区分线两端留白且文字居中，图标自绘旋转，长按 3 秒�
         CSS_CODE,
         /@media \(prefers-reduced-motion: reduce\) \{\s*\.ceo-compression-divider-spinner::before\s*\{[^}]*!important/
     );
-    // 悬停只露出提示，不再提亮光晕；长按阈值 3 秒；渠道会话不再是拒绝理由。
+    // 悬停只露出提示，不再提亮光晕；长按阈值 2 秒；渠道会话不再是拒绝理由。
     assert.equal(CSS_CODE.includes(".ceo-context-usage-brain:hover::after"), false);
-    assert.match(APP_CODE, /const CEO_BRAIN_LONG_PRESS_MS = 3000;/);
+    assert.match(APP_CODE, /const CEO_BRAIN_LONG_PRESS_MS = 2000;/);
     assert.equal(APP_CODE.includes("只有本地会话可以压缩上下文"), false);
 });

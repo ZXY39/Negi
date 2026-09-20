@@ -31,8 +31,8 @@ const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
-// 长按上下文脑图标满 3 秒即发起手动压缩；进度环按住期间连续刷新。
-const CEO_BRAIN_LONG_PRESS_MS = 3000;
+// 长按上下文脑图标满 2 秒即发起手动压缩；进度环按住期间连续刷新。
+const CEO_BRAIN_LONG_PRESS_MS = 2000;
 const CEO_COMPRESSION_POLL_MS = 1000;
 // 连续这么多次轮询失败才放弃跟踪；单次超时不算（大会话收尾会占住事件循环数秒）。
 const CEO_COMPRESSION_POLL_FAIL_LIMIT = 5;
@@ -135,7 +135,7 @@ const S = {
     ceoComposerUsageRequestSeq: 0,
     ceoComposerUsageBusy: false,
     ceoComposerUsageNeedsRefresh: false,
-    // 手动上下文压缩：本机按住脑图标满 3 秒后由服务端起跑，这里只记发起方与轮询。
+    // 手动上下文压缩：本机按住脑图标满 2 秒后由服务端起跑，这里只记发起方与轮询。
     ceoContextCompressionStatus: "idle",
     ceoContextCompressionCancelRequested: false,
     ceoContextCompressionSessionId: "",
@@ -2149,7 +2149,7 @@ function confirmCeoModelChainSwitch() {
     return saveCeoModelSelection("chain");
 }
 
-// ---- 长按上下文脑图标：按住满 3 秒发起手动压缩 -----------------------------
+// ---- 长按上下文脑图标：按住满 2 秒发起手动压缩 -----------------------------
 
 function setCeoBrainHoldProgress(progress) {
     const shell = U.ceoComposerUsageBrain;

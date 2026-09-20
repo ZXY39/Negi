@@ -4588,7 +4588,7 @@ textarea {
     animation: ceo-context-usage-brain-pulse 1.8s ease-in-out infinite;
 }
 
-/* 长按进度环：按住时从 12 点方向填满 3 秒即发起压缩，松手立刻回到 0。 */
+/* 长按进度环：按住时从 12 点方向填满 2 秒即发起压缩，松手立刻回到 0。 */
 .ceo-context-usage-brain-ring {
     position: absolute;
     left: 50%;
