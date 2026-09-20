@@ -165,9 +165,73 @@ test("composer preflight entries include queued follow-ups plus current draft", 
     );
 });
 
+test("idle session renders the brain neutral grey while keeping the reading", () => {
+    const { syncCeoComposerUsageOutline, S, U } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = false;
+    U.ceoComposerUsageBrain = new StubHTMLElement();
+    U.ceoComposerUsageBrainBase = new StubHTMLElement();
+    U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    S.ceoComposerUsageEstimate = {
+        session_id: "web:test",
+        ratio: 0.52,
+        estimated_total_tokens: 16640,
+        context_window_tokens: 32000,
+        provider_model: "openai:gpt-5.2",
+    };
+
+    syncCeoComposerUsageOutline();
+
+    assert.equal(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"], "var(--text-muted)");
+    // 灰的是颜色，不是仪表：填充高度与无障碍读数都还在。
+    assert.equal(U.ceoComposerUsageBrainFill.style.height, "52%");
+    assert.match(String(U.ceoComposerUsageBrain.attributes["aria-label"]), /16640\/32000/);
+
+    // 回合起跑即恢复占用色。
+    S.ceoTurnActive = true;
+    syncCeoComposerUsageOutline();
+    assert.match(String(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"] || ""), /^hsl\(/);
+    S.ceoTurnActive = false;
+
+    // 回合外的手动压缩也算「正在进行」。
+    S.ceoContextCompressionStatus = "running";
+    S.ceoContextCompressionSessionId = "web:test";
+    syncCeoComposerUsageOutline();
+    assert.match(String(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"] || ""), /^hsl\(/);
+});
+
+test("idle session renders the brain neutral grey while keeping the reading", () => {
+    const { syncCeoComposerUsageOutline, S, U } = loadApp();
+    S.activeSessionId = "web:test";
+    S.ceoTurnActive = false;
+    U.ceoComposerUsageBrain = new StubHTMLElement();
+    U.ceoComposerUsageBrainBase = new StubHTMLElement();
+    U.ceoComposerUsageBrainFill = new StubHTMLElement();
+    S.ceoComposerUsageEstimate = {
+        session_id: "web:test",
+        ratio: 0.52,
+        estimated_total_tokens: 16640,
+        context_window_tokens: 32000,
+        provider_model: "openai:gpt-5.2",
+    };
+
+    syncCeoComposerUsageOutline();
+
+    assert.equal(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"], "var(--text-muted)");
+    // 灰的是颜色，不是仪表：填充高度与无障碍读数都还在。
+    assert.equal(U.ceoComposerUsageBrainFill.style.height, "52%");
+    assert.match(String(U.ceoComposerUsageBrain.attributes["aria-label"]), /16640\/32000/);
+
+    // 回合起跑即恢复占用色。
+    S.ceoTurnActive = true;
+    syncCeoComposerUsageOutline();
+    assert.match(String(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"] || ""), /^hsl\(/);
+});
+
 test("composer usage brain maps ratio into progressive icon fill", () => {
     const { syncCeoComposerUsageOutline, S, U } = loadApp();
     S.activeSessionId = "web:test";
+    S.ceoTurnActive = true;
     S.ceoComposerUsageEstimate = {
         session_id: "web:test",
         ratio: 0.25,
@@ -396,6 +460,7 @@ test("brain icon splits base and fill into non-overlapping clips", () => {
 test("brain icon color transitions continuously from green to red", () => {
     const { syncCeoComposerUsageOutline, S, U } = loadApp();
     S.activeSessionId = "web:test";
+    S.ceoTurnActive = true;
     U.ceoComposerUsageBrain = new StubHTMLElement();
     U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
@@ -448,7 +513,7 @@ test("brain icon no longer hardcodes warning and overflow colors in css", () => 
     );
 });
 
-test("active turn clears stale composer estimate after draft is cleared when runtime snapshot is unavailable", async () => {
+test("active turn keeps the last token reading until runtime usage refreshes it", async () => {
     const { refreshCeoComposerUsageEstimate, S, U } = loadApp();
     S.activeSessionId = "web:test";
     S.ceoTurnActive = true;
@@ -465,8 +530,27 @@ test("active turn clears stale composer estimate after draft is cleared when run
 
     const result = await refreshCeoComposerUsageEstimate();
 
-    assert.equal(result, null);
-    assert.equal(S.ceoComposerUsageEstimate, null);
+    // 回合刚起跑、runtime usage 还没到货：读数必须原地保持，不能归零成「等待 Leader 上下文预估」。
+    assert.equal(result?.estimated_total_tokens, 16640);
+    assert.equal(S.ceoComposerUsageEstimate?.estimated_total_tokens, 16640);
+
+    // runtime usage 一到，立刻压过这份旧读数。
+    S.ceoSnapshotCache = {
+        "web:test": {
+            session_id: "web:test",
+            messages: [],
+            inflight_turn: {
+                status: "running",
+                frontdoor_token_preflight_diagnostics: {
+                    final_request_tokens: 24000,
+                    max_context_tokens: 32000,
+                    provider_model: "openai:gpt-5.2",
+                },
+            },
+        },
+    };
+    const refreshed = await refreshCeoComposerUsageEstimate();
+    assert.equal(refreshed?.estimated_total_tokens, 24000);
 });
 
 test("active turn never falls back to pinned sent entries for context usage", async () => {

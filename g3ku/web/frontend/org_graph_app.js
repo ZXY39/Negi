@@ -1601,7 +1601,10 @@ function ceoCurrentUsageEstimate() {
         S.ceoComposerUsageEstimate
         && String(S.ceoComposerUsageEstimate.session_id || "").trim() === activeSession
     ) ? S.ceoComposerUsageEstimate : null;
-    return runtimeEstimate || (!S.ceoTurnActive ? composerEstimate : null);
+    // 回合刚起跑时 runtime usage 还没到货，此时仍要拿上一份 composer 读数顶上：
+    // 读数归零成「等待 Leader 上下文预估」会让人以为上下文被清空了。
+    // runtime 一有新值就自动压过它，所以这里不需要按回合状态分叉。
+    return runtimeEstimate || composerEstimate;
 }
 
 function ceoModelChainKeys() {
@@ -2356,12 +2359,17 @@ function syncCeoComposerUsageOutline() {
     const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
     const visualRatio = hasEstimate && ratio > 0 ? Math.max(ratio, 0.06) : 0;
     const hue = Math.max(0, Math.min(145, 145 - (visualRatio * 145)));
+    // 占用色只描述「这一回合正在吃掉多少上下文」：回合没在跑（含手动/自动压缩之外的所有
+    // 空闲态）统一用中性灰，避免一个静止的绿长期挂着被读成正在消耗。
+    // 填充高度与 aria/面板数值不受影响，仍然按占用率显示。
+    const usageLive = !!S.ceoTurnActive || !!activeCeoSessionCompressionState();
+    const usageColor = usageLive ? `hsl(${hue.toFixed(1)} 82% 58%)` : "var(--text-muted)";
     const fillPercent = Math.max(0, Math.min(100, visualRatio * 100));
     const basePercent = Math.max(0, Math.min(100, 100 - fillPercent));
     if (typeof shell.style?.setProperty === "function") {
-        shell.style.setProperty("--ceo-context-usage-color", `hsl(${hue.toFixed(1)} 82% 58%)`);
+        shell.style.setProperty("--ceo-context-usage-color", usageColor);
     } else {
-        shell.style["--ceo-context-usage-color"] = `hsl(${hue.toFixed(1)} 82% 58%)`;
+        shell.style["--ceo-context-usage-color"] = usageColor;
     }
     base.style.height = `${basePercent}%`;
     fill.style.height = `${fillPercent}%`;
@@ -2403,12 +2411,14 @@ async function refreshCeoComposerUsageEstimate() {
     }
     const runtimeEstimate = activeCeoRuntimeUsageEstimate(sessionId);
     if (runtimeEstimate) {
-        clearCeoComposerUsageEstimate();
+        // 不清 composer 读数：runtime 有值时它天然压过 composer，而这份旧值正是
+        // 下一回合起跑、新 usage 还没到货时唯一能顶上的读数。
         return runtimeEstimate;
     }
     if (S.ceoTurnActive) {
-        clearCeoComposerUsageEstimate();
-        return null;
+        // 回合进行中不再发预检（读数归 runtime 通道），但也不能清零：保留上一份读数显示，
+        // 直到 runtime usage 到货刷新（回归零会让 token 数在每次调用模型时闪成「等待预估」）。
+        return ceoCurrentUsageEstimate();
     }
     const entries = buildCeoComposerPreflightEntries(sessionId);
     if (!entries.length && !activeCeoSessionHasHistory(sessionId)) {
