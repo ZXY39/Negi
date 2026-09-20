@@ -300,16 +300,15 @@ def _run_compression(
     *,
     helper_text: str,
     archive_fails: bool = False,
+    stage_count: int = 5,
 ):
     live = tmp_path / "keep.txt"
     live.write_text("x", encoding="utf-8")
     stages = [
         _stage(1, key_refs=[{"ref": str(live), "note": "有效产物"}, {"ref": str(tmp_path / "gone.txt"), "note": "已失效"}]),
         _stage(2, key_refs=[{"ref": "task:7e2a270eec34", "note": "在跑的任务"}]),
-        _stage(3),
-        _stage(4),
-        _stage(5),
     ]
+    stages.extend(_stage(index) for index in range(3, max(2, int(stage_count)) + 1))
     session = SimpleNamespace(
         _frontdoor_canonical_context=_ledger(stages),
         _frontdoor_stage_state=_ledger([]),
@@ -340,7 +339,7 @@ def _run_compression(
         runner._run_frontdoor_llm_token_compression(
             state={"session_key": "web:shared", "prompt_cache_key": "", "parallel_enabled": False},
             runtime=SimpleNamespace(context=SimpleNamespace(session=session)),
-            request_messages=_prompt_messages(blocks_for=[1, 2, 3, 4, 5]),
+            request_messages=_prompt_messages(blocks_for=list(range(1, max(2, int(stage_count)) + 1))),
             model_refs=["openai:gpt-5.2"],
             tool_schemas=[],
         )
@@ -588,3 +587,67 @@ def test_hide_helper_marks_both_durable_stores_and_skips_active() -> None:
         session, _archive_body(stage_ids=["frontdoor-stage-1"])
     )
     assert again == 0
+
+
+# ---- 不变量：不重复、不成第二层地板、清单不随条数增长 ------------------------
+
+
+def _rendered_stage_indexes(ledger: dict) -> set[int]:
+    blocks = completed_stage_blocks(
+        ledger,
+        skip_stage_ids=retained_completed_stage_ids(ledger, keep_latest=3),
+    )
+    return {int(json.loads(block["content"].split("\n", 1)[1])["stage_index"]) for block in blocks}
+
+
+def test_swallowed_stage_is_rendered_exactly_once_either_in_blocks_or_in_summary(monkeypatch, tmp_path: Path) -> None:
+    """同一阶段不能既在摘要里又被逐轮出块；也不能两边都没有。"""
+    result, session, _captured, _live = _run_compression(monkeypatch, tmp_path, helper_text="## 一、身份\n摘要正文。")
+    ledger = session._frontdoor_canonical_context
+    before = _rendered_stage_indexes(ledger)
+    assert {1, 2} <= before, "未收口前 1/2 号块应在场（否则这条断言测不到东西）"
+
+    CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, result.request_messages)
+    after = _rendered_stage_indexes(ledger)
+    assert {1, 2}.isdisjoint(after), "被吞阶段还在出块 = 摘要与块两份并存"
+    assert after == before - {1, 2}, "收口不该顺带改掉未被吞阶段的渲染结果"
+
+
+def test_evidence_index_is_only_a_section_inside_the_summary_block(monkeypatch, tmp_path: Path) -> None:
+    """证据索引必须住在摘要块正文里，受下一轮压缩管辖；独立成条就是第二套逐轮重注入的地板。"""
+    result, _session, _captured, _live = _run_compression(
+        monkeypatch,
+        tmp_path,
+        helper_text="## 一、身份\n摘要正文。\n\n## 证据索引\n- [#1]\n- [#2]\n- [#3]\n",
+    )
+    carriers = [
+        str((item or {}).get("content") or "")
+        for item in result.request_messages
+        if STAGE_REF_INDEX_HEADING in str((item or {}).get("content") or "")
+    ]
+    assert len(carriers) == 1, f"证据索引只应出现在摘要块内一次，实际 {len(carriers)} 条消息"
+    assert carriers[0].startswith("[G3KU_TOKEN_COMPACT_V2]")
+    assert "- stage 1 |" in carriers[0], "索引小节被 strip 后没回填 = 这条不变量测不到东西"
+
+
+def test_archive_manifest_bytes_do_not_grow_with_the_swallowed_set(monkeypatch, tmp_path: Path) -> None:
+    """收口口径的字节数与阶段条数无关——这正是清单改水位线的全部理由，钉成不变量。"""
+    small, *_ = _run_compression(monkeypatch, tmp_path, helper_text="## 一、身份\n摘要。", stage_count=5)
+    large, *_ = _run_compression(monkeypatch, tmp_path, helper_text="## 一、身份\n摘要。", stage_count=9)
+
+    def _manifest(result) -> dict:
+        summary = next(
+            str((item or {}).get("content") or "")
+            for item in result.request_messages
+            if str((item or {}).get("content") or "").startswith("[G3KU_TOKEN_COMPACT_V2]")
+        )
+        return json.loads(summary.splitlines()[1])["stage_archive"]
+
+    small_manifest, large_manifest = _manifest(small), _manifest(large)
+    assert small_manifest["stage_count"] < large_manifest["stage_count"], "样本没拉开被吞条数，测不出增长"
+    assert "stage_ids" not in large_manifest
+    delta = abs(
+        len(json.dumps(small_manifest, ensure_ascii=False, sort_keys=True))
+        - len(json.dumps(large_manifest, ensure_ascii=False, sort_keys=True))
+    )
+    assert delta <= 2, f"清单字节数随条数增长：{delta} 字符差（逐条 id 口径每阶段约 22 字符）"
