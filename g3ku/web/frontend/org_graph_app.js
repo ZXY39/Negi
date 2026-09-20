@@ -5602,6 +5602,28 @@ function setCeoFeedFollowLatest(on) {
     updateCeoScrollToLatestButton();
 }
 
+function handleCeoFeedUserGesture() {
+    ceoFeedUserScrollIntentAt = Date.now();
+}
+
+function handleCeoFeedScrollEvent() {
+    // 意图位只由"突变静默期之外、且非程序钉底派发"的滚动改写：
+    // atBottom 分支的钉底/图片异步 re-pin 都会派发 scroll，若不隔离，
+    // 手势后窗口内的程序滚动会被误判成"用户回到底部"而重新武装跟随，
+    // 直播高频突变下用户永远翻不出底部。
+    const now = Date.now();
+    if (now < ceoFeedProgrammaticScrollUntil || now - ceoFeedLastMutationAt < 250) {
+        updateCeoScrollToLatestButton();
+        return;
+    }
+    if (ceoFeedNearBottom()) {
+        setCeoFeedFollowLatest(true);
+    } else if (now - ceoFeedUserScrollIntentAt < 1500) {
+        setCeoFeedFollowLatest(false);
+    }
+    updateCeoScrollToLatestButton();
+}
+
 function updateCeoScrollToLatestButton() {
     if (!U.ceoScrollToLatestBtn) return;
     const atLatest = S.ceoFeedFollowLatest !== false && ceoFeedNearBottom();
@@ -13536,25 +13558,9 @@ function bind() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
     U.projectExit?.addEventListener("click", () => void requestProjectExit());
-    U.ceoFeed?.addEventListener("scroll", () => {
-        // 意图位只由"突变静默期之外、且非程序钉底派发"的滚动改写：
-        // atBottom 分支的钉底/图片异步 re-pin 都会派发 scroll，若不隔离，
-        // 手势后 800ms 内的程序滚动会被误判成"用户回到底部"而重新武装跟随，
-        // 直播高频突变下用户永远翻不出底部（第一版修复的竞态残留）。
-        const now = Date.now();
-        if (now < ceoFeedProgrammaticScrollUntil || now - ceoFeedLastMutationAt < 250) {
-            updateCeoScrollToLatestButton();
-            return;
-        }
-        if (ceoFeedNearBottom()) {
-            setCeoFeedFollowLatest(true);
-        } else if (now - ceoFeedUserScrollIntentAt < 1500) {
-            setCeoFeedFollowLatest(false);
-        }
-        updateCeoScrollToLatestButton();
-    }, { passive: true });
+    U.ceoFeed?.addEventListener("scroll", handleCeoFeedScrollEvent, { passive: true });
     ["wheel", "pointerdown", "keydown", "touchstart"].forEach((type) => {
-        U.ceoFeed?.addEventListener(type, () => { ceoFeedUserScrollIntentAt = Date.now(); }, { passive: true });
+        U.ceoFeed?.addEventListener(type, handleCeoFeedUserGesture, { passive: true });
     });
     U.ceoScrollToLatestBtn?.addEventListener("click", () => scrollCeoFeedToBottom());
     updateCeoScrollToLatestButton();
