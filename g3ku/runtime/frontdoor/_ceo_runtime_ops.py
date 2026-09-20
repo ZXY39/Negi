@@ -50,6 +50,7 @@ from g3ku.runtime.context.summarizer import estimate_tokens
 from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_WRITE_HINT_HEADER,
     RETRIEVED_MEMORY_HINT_HEADER,
+    memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.token_preflight_compaction import (
     FrontdoorTokenPreflightResult,
@@ -4443,6 +4444,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             request_kind=request_kind,
             request_lane=request_lane,
             provider_request_started_at=provider_request_started_at,
+            memory_snapshot=memory_snapshot_provenance(target_session),
         )
         if target_session is not None:
             restore_source = str(getattr(target_session, "_frontdoor_restore_source", "none") or "none").strip() or "none"
@@ -4643,6 +4645,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         request_lane: str,
         parent_request_id: str = "",
         provider_request_started_at: str = "",
+        memory_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         diagnostics = dict(prompt_cache_diagnostics or {})
         provider_model = str((list(state.get("model_refs") or []) or [""])[0] or "").strip()
@@ -4687,6 +4690,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             ],
             "frontdoor_history_shrink_reason": str(state.get("frontdoor_history_shrink_reason") or "").strip(),
             "frontdoor_token_preflight_diagnostics": copy.deepcopy(frontdoor_token_preflight_diagnostics),
+            # 长期记忆快照是会话级冻结值（采纳点=首请求/压缩轮末/手动压缩后），而本地 prompt
+            # cache key 与 preflight 投影都不含这个块，只有这组字段能证明冻结生效。
+            "memory_snapshot": dict(memory_snapshot or {}),
             "parallel_tool_calls": parallel_tool_calls,
             "prompt_cache_key": str(prompt_cache_key or "").strip(),
             "prompt_cache_key_hash": str(diagnostics.get("prompt_cache_key_hash") or "").strip(),
@@ -4765,6 +4771,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 request_kind="frontdoor_internal_request",
                 request_lane=request_lane,
                 parent_request_id=parent_request_id,
+                memory_snapshot=memory_snapshot_provenance(target_session),
             ),
         )
 

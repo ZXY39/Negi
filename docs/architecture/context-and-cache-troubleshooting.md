@@ -201,6 +201,12 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - 不变量：验收 bootstrap 在 `create_acceptance_node` 一次定稿，之后没有任何写路径回写它（`_refresh_acceptance_node_metadata` 只维护 metadata）。每轮的变化量全部落在**只进本轮的尾块**里：交接通知（`_acceptance_handoff_message`）与重建尾块（`_acceptance_turn_tail`）都只给 `result_payload_ref` / `final_output_ref` + `_ACCEPTANCE_SUMMARY_CHARS` 有界摘要，交付正文一律不进上下文；恢复指纹同样只认验收标准模板 + 提交载荷 ref。派发侧合同见 `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收段）。
 - 症状：验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论 → 先确认 `node.prompt` 跨轮逐字节未变（变了就是刷新路径回写了 bootstrap），再看 `request_seed_source` 是否仍在 `scaffold_seed*`。
 
+### 3.17 长期记忆快照的会话级冻结
+
+- 坑：`## 长期记忆` 块注入在 message index 1（`system` 之后、全部历史之前），身后是整段对话历史。块字节一变，可复用前缀就只剩 `system` 与 `tools[]`：实测中位请求要重铺 84% 的正文，其中块本身只占 8%，其余全是被它顶掉的历史。
+- 不变量：取数是**会话级冻结**，采纳点 = 会话首请求 / 内联 `token_compression` 轮末 / 手动压缩成功后，规则本体见 `runtime-overview.md`「Memory Runtime Notes」。选压缩轮末是因为那里前缀已经被 `[G3KU_TOKEN_COMPACT_V2]` 砍到 system 头部，记忆更新搭这次断点不额外破缓存；所以复核冲刷（含 `run_due_batch_once()`）必须先于读快照，反序会让采纳点静默失效、表现为整会话冻结。跨轮可比性投影与 durable 基线两侧都剥这个块，它的变化因此永不应被 `comparable_to_previous_request` 报成前缀破坏；`build_stable_prompt_cache_key` 同样不含它——本地 cache key 对这个块是盲的，判读只能看 artifact 的 `memory_snapshot` 字段。
+- 症状：某轮命中前缀在第二条消息就分叉且 `memory_snapshot.hash` 同时变了 → 该轮是采纳点，属预期；「用户说记住/忘掉，模型照旧」→ 比对 `memory_snapshot.adopted_at` 与该会话压缩事件的时间差，就是这条记忆的可见性延迟。
+
 ## 4. Prompt Cache Family 与 Actual Request
 
 本节是 actual request 的取证合同：family/key 语义、per-request 取证顺序、baseline 与恢复顺序、shrink 原因边界。
@@ -216,7 +222,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 - CEO/frontdoor 与节点都为每次 `call_model` 落 per-round actual-request artifact。frontdoor 写 `.g3ku/web-ceo-requests/<session>/...json`，session snapshot 只保留最新文件路径与短元数据历史——per-round JSON 是精确请求取证权威，快照保持轻量以服务 websocket restore 与 UI 调试。
 - `visible_frontdoor`、`token_compression`、`inline_tool_reminder`、`manual_context_compression` 都落在同一 artifact 族：普通 send 与 internal subrequest 可以从同一条时间线解释。`request_lane=manual_context_compression`（`request_kind=frontdoor_manual_compression_request`）是操作员发起的回合外压缩写下的**基线落点**，不是发往 provider 的请求：它的 `usage` 为空，正文即压缩后的 `[G3KU_TOKEN_COMPACT_V2]` 请求体。它必须与当时的 durable 基线同源，因为重启恢复按 `request_messages` 字节对账挑 artifact 重建 trace，对不上就整体清空 trace（压缩随之丢失）。取证时不要把它当成一次真实发送，也不要用它的 `created_at` 归因某轮响应耗时。
 - artifact 内保存 runtime-side 投影（`model_messages` / `request_messages`、`actual_tool_schemas`、cache-family 诊断）与可用时的最终 transport payload（`provider_request_meta`、`provider_request_body`）；`request_messages` 是保存请求顺序的兼容权威，不要重新引入旧 `messages` 全量镜像。
-- 每条 artifact 还带归一化的 `usage`、`frontdoor_history_shrink_reason`、`frontdoor_token_preflight_diagnostics`：用它们比较“preflight 以为要发什么”与“provider 实际计费了什么”，不要只靠 transcript 时间线重建这层关系。
+- 每条 artifact 还带归一化的 `usage`、`frontdoor_history_shrink_reason`、`frontdoor_token_preflight_diagnostics`：用它们比较“preflight 以为要发什么”与“provider 实际计费了什么”，不要只靠 transcript 时间线重建这层关系。另有 `memory_snapshot`（`hash` / `adopted_at` / `adoption_reason`）记录该请求携带的长期记忆快照是哪个采纳点定稿的——cache key 与 preflight 投影都不含这个块，它是一切记忆相关的命中判断的唯一取证入口（见「长期记忆快照的会话级冻结」）。
 - CEO/frontdoor artifact 另带首跳取证三字段：`turn_inbound_received_at`（bridge 接收回合时写入用户消息 metadata）、`provider_request_started_at`（该 `call_model` 首次真正发请求前写入；provider 重试沿用同一值）、`inbound_to_request_start_seconds`（两者差值，缺少入站时间戳时为 `null`）。`created_at` 是响应完成后的 artifact 写入时间，不能用它归因派发、转录持久化、prompt 组装或 preflight；“入站后迟迟没有请求”先看这三个字段。
 - `.g3ku/web-ceo-requests/<session>/` 保留最新 300 份 artifact，以及被 paused/inflight/completed sidecar 引用的 artifact；更早且未被引用的文件按写入计数定期清理（每 25 次持久化触发一次，因此磁盘上限为 keep + 25）。排查长时间线时按现有 artifact 与 continuity history 的 `path` 对齐，不因目录缩短就认定历史请求不存在。
 - 前端每轮 token 展示与本取证合同同源：实时轮次读会话内存累积（`_frontdoor_turn_usage`）；历史轮次重载优先读 transcript 每条 assistant 消息持久化的 `usage`（收尾时写入，不受本目录保留窗口影响），仅旧 transcript 缺该字段时才回退按 `turn_id` 聚合本目录 artifact。聚合只读计费三通道、只服务 UI 展示，不参与 baseline/恢复判定——UI 合同见 `web-and-admin.md`「Per-Turn Token Usage Contract」。

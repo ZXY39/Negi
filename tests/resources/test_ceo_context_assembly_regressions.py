@@ -12,7 +12,12 @@ from g3ku.core.timefmt import strip_arrival_time_stamp
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.context.types import RetrievedContextBundle
 from g3ku.runtime.frontdoor.capability_snapshot import build_capability_snapshot
-from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+from g3ku.runtime.frontdoor.message_builder import (
+    MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
+    CeoMessageBuilder,
+    adopt_memory_snapshot,
+    memory_snapshot_provenance,
+)
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
@@ -3402,6 +3407,172 @@ async def test_ceo_context_assembly_keeps_memory_snapshot_out_of_turn_overlay_an
     assert "id:Ab12Z9" not in str(stable_messages[1]["content"] or "")
     assert "2026/4/18-user" not in str(stable_messages[1]["content"] or "")
     assert "Prefer concise answers" in str(stable_messages[1]["content"] or "")
+
+
+class _MutableMemoryManager:
+    """文档可被外部改写的 memory manager，记录读盘与冲刷次序。
+
+    `snapshot_text` 的调用次序就是采纳规则的判据：注入侧一次都不该在采纳点之外读盘。
+    """
+
+    def __init__(self, document: str) -> None:
+        self.document = document
+        self.reads: list[str] = []
+        self.events: list[str] = []
+        self.sync_catalog = None
+
+    def snapshot_text(self, **_kwargs):
+        self.events.append("read")
+        self.reads.append(self.document)
+        return self.document
+
+    async def flush_review_window(self, **_kwargs):
+        self.events.append("flush")
+        # 冲刷会同步应用记忆批次：文档从这一刻起才是新版本。
+        self.document = "---\nid:Qq11Ww\n2026/9/21-self：\nadopted after flush\n"
+        return {"status": "queued"}
+
+    async def run_due_batch_once(self):
+        self.events.append("apply")
+        return {"status": "applied"}
+
+
+def _query_builder(manager: _MutableMemoryManager) -> CeoMessageBuilder:
+    return CeoMessageBuilder(loop=_loop(manager), prompt_builder=_PromptBuilder())
+
+
+async def _collect(builder: CeoMessageBuilder, session: SimpleNamespace) -> dict[str, object]:
+    return await builder._collect_turn_context_sources(
+        session=session,
+        query_text="ordinary question",
+        exposure={"tool_names": ["memory_write"], "tool_families": [], "skills": []},
+        user_content="ordinary question",
+        hydrated_tool_names=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_snapshot_stays_frozen_between_requests_until_adopted() -> None:
+    """快照注入在 message index 1，同轮多次 provider 往返必须逐字节复用同一份文档。
+
+    磁盘被记忆 worker 改写（含同轮内改写）都不算：只有采纳点能换版本，否则轮内前缀漂移
+    会把块身后整段历史重铺一遍。
+    """
+    manager = _MutableMemoryManager("---\nid:AA11aa\n2026/9/1-self：\nfrozen v1\n")
+    builder = _query_builder(manager)
+    session = _session()
+
+    first = await _collect(builder, session)
+    manager.document = "---\nid:BB22bb\n2026/9/2-self：\nhot v2\n"
+    second = await _collect(builder, session)
+
+    assert "frozen v1" in str(first["memory_snapshot_text"] or "")
+    assert str(second["memory_snapshot_text"] or "") == str(first["memory_snapshot_text"] or "")
+    assert manager.reads == ["---\nid:AA11aa\n2026/9/1-self：\nfrozen v1\n"]
+
+    adopt_memory_snapshot(session, memory_manager=manager, reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION)
+    third = await _collect(builder, session)
+    assert "hot v2" in str(third["memory_snapshot_text"] or "")
+    assert len(manager.reads) == 2
+
+
+@pytest.mark.asyncio
+async def test_compression_turn_tail_adopts_the_snapshot_after_the_review_flush() -> None:
+    """顺序契约：冲刷会同步应用记忆批次，先读快照就永远采纳到旧文档。"""
+    from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    manager = _MutableMemoryManager("---\nid:AA11aa\n2026/9/1-self：\nbefore flush\n")
+    emitted: list[str] = []
+
+    async def _emit(_event_type: str, **payload):
+        emitted.append(str(payload.get("kind") or ""))
+
+    stub = SimpleNamespace(
+        _loop=SimpleNamespace(memory_manager=manager),
+        _state=SimpleNamespace(session_key="web:shared"),
+        _emit=_emit,
+        _frontdoor_memory_snapshot_text="stale",
+    )
+
+    await RuntimeAgentSession._flush_memory_review_after_compression(stub)
+
+    assert manager.events == ["flush", "apply", "read"]
+    assert "adopted after flush" in str(stub._frontdoor_memory_snapshot_text or "")
+    assert emitted == []
+
+
+def test_failed_snapshot_read_keeps_the_frozen_value_and_the_old_adoption_stamp() -> None:
+    """瞬时读失败（记忆 worker 正在重写 MEMORY.md）不得把整会话钉成空记忆。"""
+
+    class _Boom:
+        sync_catalog = None
+
+        def snapshot_text(self, **_kwargs):
+            raise OSError("memory/MEMORY.md is being rewritten")
+
+    session = _session()
+    session._frontdoor_memory_snapshot_text = "frozen v1"
+    session._frontdoor_memory_snapshot_adopted_at = "2026-09-21T00:00:00+08:00"
+    session._frontdoor_memory_snapshot_adoption_reason = MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+
+    adopted = adopt_memory_snapshot(session, memory_manager=_Boom(), reason="manual_compression")
+
+    assert adopted == "frozen v1"
+    assert session._frontdoor_memory_snapshot_adopted_at == "2026-09-21T00:00:00+08:00"
+    assert session._frontdoor_memory_snapshot_adoption_reason == MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+
+
+def test_snapshot_adoption_is_per_session_and_reported_in_artifact_provenance() -> None:
+    """每个会话各自冻结（不同会话呈现不同版本是规则的一部分），且 provenance 可判读。"""
+    manager = _MutableMemoryManager("---\nid:AA11aa\n2026/9/1-self：\nshared doc\n")
+    first = _session()
+    second = _session()
+
+    assert memory_snapshot_provenance(first) == {}
+    adopt_memory_snapshot(first, memory_manager=manager, reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION)
+    first_hash = memory_snapshot_provenance(first)["hash"]
+    manager.document = ""
+    adopt_memory_snapshot(second, memory_manager=manager, reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION)
+
+    provenance = memory_snapshot_provenance(second)
+    assert first_hash and provenance["hash"] != first_hash
+    assert first._frontdoor_memory_snapshot_text == "---\nid:AA11aa\n2026/9/1-self：\nshared doc"
+    assert provenance["adoption_reason"] == MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+    assert provenance["adopted_at"]
+
+
+def _artifact_payload(runner: CreateAgentCeoFrontDoorRunner, session: SimpleNamespace) -> dict[str, object]:
+    return runner._build_frontdoor_request_artifact_payload(
+        state={"session_key": "web:shared", "model_refs": ["custom:test-model"]},
+        session_key="web:shared",
+        turn_id="turn-1",
+        request_messages=[{"role": "system", "content": "BASE PROMPT"}],
+        tool_schemas=[],
+        prompt_cache_key="cache-key",
+        prompt_cache_diagnostics={},
+        parallel_tool_calls=None,
+        request_kind="frontdoor_actual_request",
+        request_lane="visible_frontdoor",
+        memory_snapshot=memory_snapshot_provenance(session),
+    )
+
+
+def test_actual_request_artifact_reports_memory_snapshot_provenance() -> None:
+    """冻结生效与可见性延迟只能靠 artifact 这组字段判读：本地 cache key 与 preflight
+    投影都不含记忆块，命中变化在诊断面上本来是不可见的。"""
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    session = _session()
+    session._frontdoor_memory_snapshot_text = "---\nid:AA11aa\n2026/9/1-self：\nfrozen v1\n"
+    session._frontdoor_memory_snapshot_adopted_at = "2026-09-21T01:00:00+08:00"
+    session._frontdoor_memory_snapshot_adoption_reason = MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+
+    payload = _artifact_payload(runner, session)
+    reported = dict(payload["memory_snapshot"] or {})  # type: ignore[arg-type]
+    assert reported["adoption_reason"] == MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION
+    assert reported["adopted_at"] == "2026-09-21T01:00:00+08:00"
+    assert len(str(reported["hash"])) == 12
+    # 尚未采纳过的会话留空字典，不伪造时间戳。
+    assert dict(_artifact_payload(runner, _session())["memory_snapshot"] or {}) == {}  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

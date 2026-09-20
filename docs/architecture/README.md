@@ -84,6 +84,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
+- 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime Notes」（快照会话级冻结与采纳点）+ `context-and-cache-troubleshooting.md`「长期记忆快照的会话级冻结」
 - 日志审计侧栏角标不更新、原始日志为空或翻页停在空白页、时间显示与事件时间戳不一致、`/api/audit` 503 → `web-and-admin.md`「Log Audit Page And Event Contract」
 - Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息 → `context-and-cache-troubleshooting.md`「残留 paused 转录条目」

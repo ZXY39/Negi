@@ -30,6 +30,10 @@ from g3ku.runtime.frontdoor.canonical_context import (
     project_canonical_context_for_transcript,
     repair_transcript_cc_chain,
 )
+from g3ku.runtime.frontdoor.message_builder import (
+    MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
+    adopt_memory_snapshot,
+)
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.reply_tokens import is_silent_reply_token
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
@@ -194,6 +198,11 @@ class RuntimeAgentSession:
         # 本轮是否真实发生过内联 token 压缩（任一请求 applied 即置位，轮首清零）。
         # 只表达“当轮压缩事件”，与跨轮残留的 _frontdoor_history_shrink_reason 不同。
         self._frontdoor_token_compression_applied_turn: bool = False
+        # 长期记忆快照的会话级冻结值：注入侧只读它，改写只发生在采纳点
+        # （会话首请求 / 压缩轮末 / 手动压缩成功后）。None = 本会话尚未采纳。
+        self._frontdoor_memory_snapshot_text: str | None = None
+        self._frontdoor_memory_snapshot_adopted_at: str = ""
+        self._frontdoor_memory_snapshot_adoption_reason: str = ""
         self._frontdoor_compression_generation_seq: int = 0
         self._active_frontdoor_compression_generation: int | None = None
         self._cancelled_frontdoor_compression_generations: set[int] = set()
@@ -2016,6 +2025,35 @@ class RuntimeAgentSession:
             return {}
         return snapshot
 
+    async def _flush_memory_review_after_compression(self) -> None:
+        """压缩轮末：先冲刷复核窗口，再采纳冻结的长期记忆快照。
+
+        顺序是这套采纳规则的契约本身：`run_due_batch_once()` 会同步应用记忆批次改写
+        `MEMORY.md`，先读快照就永远读到旧文档，采纳点等于没接上。
+        """
+        memory_manager = getattr(self._loop, "memory_manager", None)
+        if memory_manager is None:
+            return
+        try:
+            flush_result = await memory_manager.flush_review_window(
+                session_key=self._state.session_key,
+                trigger_source="token_compression",
+            )
+            if str(flush_result.get("status") or "").strip() == "queued":
+                await memory_manager.run_due_batch_once()
+        except Exception:
+            await self._emit(
+                "message_delta",
+                channel="analysis",
+                kind="persistence_warning",
+                text="Memory compression flush failed; turn history is still available in session transcript.",
+            )
+        adopt_memory_snapshot(
+            self,
+            memory_manager=memory_manager,
+            reason=MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION,
+        )
+
     def append_context_compression_marker(
         self,
         *,
@@ -3483,20 +3521,7 @@ class RuntimeAgentSession:
                     # _frontdoor_history_shrink_reason 是“baseline 为何比上一轮短”的
                     # 粘滞解释，会跨轮残留，不能当作本轮压缩事件信号。
                     if bool(getattr(self, "_frontdoor_token_compression_applied_turn", False)):
-                        try:
-                            flush_result = await self._loop.memory_manager.flush_review_window(
-                                session_key=self._state.session_key,
-                                trigger_source="token_compression",
-                            )
-                            if str(flush_result.get("status") or "").strip() == "queued":
-                                await self._loop.memory_manager.run_due_batch_once()
-                        except Exception:
-                            await self._emit(
-                                "message_delta",
-                                channel="analysis",
-                                kind="persistence_warning",
-                                text="Memory compression flush failed; turn history is still available in session transcript.",
-                            )
+                        await self._flush_memory_review_after_compression()
                         tail_profiler.mark("memory_review_flush")
             await self._emit(
                 "message_end",

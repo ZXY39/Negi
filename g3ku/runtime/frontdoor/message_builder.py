@@ -63,6 +63,76 @@ DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
 MEMORY_WRITE_HINT_HEADER = "## 长期记忆写入提示"
 RETRIEVED_MEMORY_HINT_HEADER = "## 已检索记忆使用提示"
 
+# 长期记忆快照的会话级冻结载体。快照注入在 message index 1（system 之后、整段历史之前），
+# 所以它的字节变化等价于把身后全部历史重铺一遍；采纳点因此被限制在"前缀反正已经断了"的
+# 位置：会话首请求、内联 token 压缩轮末、手动压缩成功后。
+MEMORY_SNAPSHOT_TEXT_ATTR = "_frontdoor_memory_snapshot_text"
+MEMORY_SNAPSHOT_ADOPTED_AT_ATTR = "_frontdoor_memory_snapshot_adopted_at"
+MEMORY_SNAPSHOT_ADOPTION_REASON_ATTR = "_frontdoor_memory_snapshot_adoption_reason"
+MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST = "session_first_request"
+MEMORY_SNAPSHOT_ADOPTION_TOKEN_COMPRESSION = "token_compression"
+MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION = "manual_compression"
+
+
+def _read_memory_snapshot_text(session: Any, memory_manager: Any) -> str | None:
+    """读当份文档快照；None 表示这次读取失败（与"文档确实为空"的 "" 区分开）。"""
+    reader = getattr(memory_manager, "snapshot_text", None)
+    if not callable(reader):
+        return None
+    session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "")
+    try:
+        return str(
+            reader(
+                session_key=session_key,
+                channel=str(getattr(session, "_memory_channel", getattr(session, "_channel", "cli")) or "cli"),
+                chat_id=str(
+                    getattr(session, "_memory_chat_id", getattr(session, "_chat_id", session_key)) or session_key
+                ),
+            )
+            or ""
+        ).strip()
+    except Exception:
+        return None
+
+
+def adopt_memory_snapshot(session: Any, *, memory_manager: Any, reason: str) -> str:
+    """采纳点：重读文档并覆盖会话冻结值。
+
+    读取失败时保留上一次的冻结值且不盖时间戳——记忆 worker 与这里是并发的，
+    一次瞬时读失败不该把整会话钉成空记忆。
+    """
+    text = _read_memory_snapshot_text(session, memory_manager)
+    if text is None:
+        return str(getattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, "") or "")
+    setattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, text)
+    setattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, datetime.now().astimezone().isoformat())
+    setattr(session, MEMORY_SNAPSHOT_ADOPTION_REASON_ATTR, str(reason or "").strip())
+    return text
+
+
+def adopted_memory_snapshot_text(session: Any, *, memory_manager: Any) -> str:
+    """注入侧唯一取数口：本会话已采纳过就只读冻结值，否则先采纳一次。"""
+    frozen = getattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, None)
+    if isinstance(frozen, str):
+        return frozen
+    return adopt_memory_snapshot(session, memory_manager=memory_manager, reason=MEMORY_SNAPSHOT_ADOPTION_FIRST_REQUEST)
+
+
+def memory_snapshot_provenance(session: Any) -> dict[str, Any]:
+    """artifact 用的采纳溯源三元组。
+
+    本地 prompt cache key 与 send-preflight 投影都不含记忆块，没有这组字段就无法验证
+    冻结生效、也无法判读一条记忆还要多久才对当前会话可见。
+    """
+    text = getattr(session, MEMORY_SNAPSHOT_TEXT_ATTR, None)
+    if not isinstance(text, str):
+        return {}
+    return {
+        "hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
+        "adopted_at": str(getattr(session, MEMORY_SNAPSHOT_ADOPTED_AT_ATTR, "") or ""),
+        "adoption_reason": str(getattr(session, MEMORY_SNAPSHOT_ADOPTION_REASON_ATTR, "") or ""),
+    }
+
 
 def _context_window_from_model_parameters(model_parameters: dict[str, Any] | None) -> int:
     payload = dict(model_parameters or {})
@@ -1416,21 +1486,11 @@ class CeoMessageBuilder:
             if str(name or '').strip()
         }
         turn_overlay_parts: list[str] = []
-        memory_snapshot_text = ""
-        if memory_manager is not None:
-            snapshot_reader = getattr(memory_manager, "snapshot_text", None)
-            if callable(snapshot_reader):
-                try:
-                    memory_snapshot_text = str(
-                        snapshot_reader(
-                            session_key=str(getattr(getattr(session, "state", None), "session_key", "") or ""),
-                            channel=str(getattr(session, "_memory_channel", getattr(session, "_channel", "cli")) or "cli"),
-                            chat_id=str(getattr(session, "_memory_chat_id", getattr(session, "_chat_id", session.state.session_key)) or session.state.session_key),
-                        )
-                        or ""
-                    ).strip()
-                except Exception:
-                    memory_snapshot_text = ""
+        memory_snapshot_text = (
+            adopted_memory_snapshot_text(session, memory_manager=memory_manager)
+            if memory_manager is not None
+            else ""
+        )
         if memory_write_terms and memory_write_visible:
             turn_overlay_parts.append(self._memory_write_hint_block(memory_write_terms))
 

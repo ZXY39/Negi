@@ -11,6 +11,10 @@ from g3ku.runtime.ceo_catalog_offload import (
     run_off_event_loop,
     store_ceo_catalog_cache,
 )
+from g3ku.runtime.frontdoor.message_builder import (
+    MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
+    adopt_memory_snapshot,
+)
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_MODEL_SELECTION_KEY,
@@ -1087,6 +1091,15 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         stats=stats,
         reason="",
     )
+    memory_manager = getattr(agent, "memory_manager", None)
+    if memory_manager is not None:
+        # 采纳点：手动压缩同样把可复用前缀砍到 system 头部，且它跑在回合外，
+        # 够不到 session_agent 轮末那个压缩采纳点，所以在这里单独接一次。
+        adopt_memory_snapshot(
+            runtime_session,
+            memory_manager=memory_manager,
+            reason=MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
+        )
 
 
 @router.post("/ceo/sessions/{session_id}/compress-context")
