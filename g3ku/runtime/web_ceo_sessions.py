@@ -16,6 +16,7 @@ from g3ku.config.loader import get_config_path, load_config
 from g3ku.runtime.external_sessions import ExternalSessionEntry, ExternalSessionRegistry
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
+    materialize_transcript_view,
     project_canonical_context_for_ui_payload,
 )
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
@@ -659,7 +660,9 @@ def final_reply_canonical_merge(canonical_context: Any, canonical_context_delta:
 
 def latest_assistant_message_canonical_context(session: Any, *, exclude_turn_id: str = "") -> dict[str, Any]:
     excluded = str(exclude_turn_id or "").strip()
-    for raw in reversed(list(getattr(session, "messages", []) or [])):
+    messages = list(getattr(session, "messages", []) or [])
+    for row_index in range(len(messages) - 1, -1, -1):
+        raw = messages[row_index]
         if not isinstance(raw, dict):
             continue
         if str(raw.get("role") or "").strip().lower() != "assistant":
@@ -679,6 +682,11 @@ def latest_assistant_message_canonical_context(session: Any, *, exclude_turn_id:
         canonical_context = raw.get("canonical_context")
         if isinstance(canonical_context, dict) and canonical_context:
             return dict(canonical_context)
+        if isinstance(raw.get("cc_upsert"), dict):
+            # delta 存储行：调用方要的是该行自己的累积视图。
+            view = materialize_transcript_view(messages, row_index)
+            if view:
+                return dict(view)
     return {}
 
 
@@ -883,9 +891,15 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     # disabled), where open() fails with FileNotFoundError even though the
     # parent directory exists.
     temp_path = directory / f"{path.name}.{uuid.uuid4().hex[:12]}.tmp"
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-    temp_path.replace(path)
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        temp_path.replace(path)
+    except BaseException:
+        # Failed writes used to leak `.tmp` files next to every artifact they
+        # retried; the manager's transcript rewrite path cleans up and re-raises.
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _normalized_name_list(values: Any) -> list[str]:
@@ -1397,9 +1411,13 @@ def _atomic_write_json_gz(path: Path, payload: dict[str, Any]) -> None:
     directory = ensure_dir(path.parent)
     # Same short-temp-suffix contract as _atomic_write_json (Windows MAX_PATH).
     temp_path = directory / f"{path.name}.{uuid.uuid4().hex[:12]}.tmp"
-    with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False)
-    temp_path.replace(path)
+    try:
+        with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        temp_path.replace(path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _prune_turn_boundary_snapshots(directory: Path, *, keep: int = TURN_BOUNDARY_SNAPSHOT_KEEP) -> None:

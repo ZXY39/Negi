@@ -37,7 +37,11 @@ from g3ku.runtime.tool_visibility import (
     filter_visible_tool_families_for_semantic_top_k,
 )
 from g3ku.runtime.frontdoor.capability_snapshot import CapabilitySnapshot, build_capability_snapshot
-from g3ku.runtime.frontdoor.canonical_context import combine_canonical_context, normalize_frontdoor_canonical_context
+from g3ku.runtime.frontdoor.canonical_context import (
+    combine_canonical_context,
+    materialize_transcript_view,
+    normalize_frontdoor_canonical_context,
+)
 from g3ku.runtime.frontdoor.cron_hidden_prompt import strip_cron_hidden_prompt
 from g3ku.runtime.frontdoor.prompt_cache_contract import DEFAULT_CACHE_FAMILY_REVISION
 from g3ku.runtime.frontdoor.raw_stage_renderer import retained_raw_stage_messages
@@ -890,7 +894,12 @@ class CeoMessageBuilder:
         return datetime.now().isoformat()
 
     @staticmethod
-    def _normalize_hidden_internal_summary_message(message: dict[str, Any]) -> dict[str, Any] | None:
+    def _normalize_hidden_internal_summary_message(
+        message: dict[str, Any],
+        *,
+        source_rows: list[Any] | None = None,
+        row_index: int = -1,
+    ) -> dict[str, Any] | None:
         if not isinstance(message, dict):
             return None
         if message_role(message) != "assistant":
@@ -908,6 +917,9 @@ class CeoMessageBuilder:
             if isinstance(message.get("canonical_context"), dict)
             else {}
         )
+        if not canonical_context and isinstance(message.get("cc_upsert"), dict) and source_rows is not None:
+            # delta 存储行只带当轮 upsert；进 prompt 的内部摘要需要该行自己的累积视图。
+            canonical_context = materialize_transcript_view(source_rows, row_index)
         if canonical_context:
             text_parts.append(
                 "Canonical context:\n"
@@ -925,9 +937,14 @@ class CeoMessageBuilder:
         checkpoint_messages: list[dict[str, Any]] | None,
     ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        for raw in list(getattr(persisted_session, "messages", []) or []) if persisted_session is not None else []:
+        persisted_rows = list(getattr(persisted_session, "messages", []) or []) if persisted_session is not None else []
+        for row_index, raw in enumerate(persisted_rows):
             if isinstance(raw, dict):
-                normalized = cls._normalize_hidden_internal_summary_message(raw)
+                normalized = cls._normalize_hidden_internal_summary_message(
+                    raw,
+                    source_rows=persisted_rows,
+                    row_index=row_index,
+                )
                 if normalized is not None:
                     items.append(normalized)
         for raw in list(checkpoint_messages or []):

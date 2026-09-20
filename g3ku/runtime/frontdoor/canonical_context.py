@@ -632,6 +632,146 @@ def ui_canonical_context_delta_from_views(
     return delta
 
 
+TRANSCRIPT_DELTA_PROJECTION_MODE = "delta_window"
+TRANSCRIPT_CC_UPSERT_FIELD = "cc_upsert"
+_MISSING_HEADER = object()
+
+
+def apply_cc_upsert(previous_view: Any, upsert: Any) -> dict[str, Any]:
+    """Replay a transcript stage-view upsert onto the previous stored view.
+
+    Storage-side delta: each entry is a complete stage object in transcript
+    projection shape. An existing `stage_id` is replaced in place (covers the
+    active->completed finalization and one-way raw->compact window moves), an
+    unknown one is appended (covers new stages). Header overrides ride along
+    only when the writer saw a change. Pure function; inputs are not mutated.
+    """
+    payload = upsert if isinstance(upsert, dict) else {}
+    previous_stages = [
+        copy.deepcopy(stage)
+        for stage in list((previous_view or {}).get("stages") or [])
+        if isinstance(stage, dict)
+    ]
+    positions = {
+        _as_str(stage.get("stage_id")): index
+        for index, stage in enumerate(previous_stages)
+        if _as_str(stage.get("stage_id"))
+    }
+    stages = previous_stages
+    for stage in list(payload.get("upsert") or []):
+        if not isinstance(stage, dict):
+            continue
+        current = copy.deepcopy(stage)
+        stage_id = _as_str(current.get("stage_id"))
+        if stage_id and stage_id in positions:
+            stages[positions[stage_id]] = current
+        else:
+            if stage_id:
+                positions[stage_id] = len(stages)
+            stages.append(current)
+    view: dict[str, Any] = {}
+    if isinstance(previous_view, dict):
+        for key, value in previous_view.items():
+            if key != "stages":
+                view[key] = copy.deepcopy(value)
+    view["stages"] = stages
+    headers = payload.get("headers")
+    if isinstance(headers, dict):
+        for key, value in headers.items():
+            if key != "stages":
+                view[key] = copy.deepcopy(value)
+    return view
+
+
+def encode_cc_upsert(previous_view: Any, current_view: Any) -> dict[str, Any] | None:
+    """Reduce two transcript views to a replayable upsert payload, or None.
+
+    The candidate is always verified by replay: if applying it to
+    `previous_view` does not reproduce `current_view` exactly (stage order or
+    content drift beyond replace/append semantics), the writer must store a
+    full checkpoint row instead. That self-check is what keeps a delta chain
+    from silently diverging.
+    """
+    if not isinstance(current_view, dict):
+        return None
+    if not list(current_view.get("stages") or []):
+        return None
+    previous = (previous_view or {}) if isinstance(previous_view, dict) else {}
+    previous_stages = [stage for stage in list(previous.get("stages") or []) if isinstance(stage, dict)]
+    previous_by_id = {
+        _as_str(stage.get("stage_id")): stage
+        for stage in previous_stages
+        if _as_str(stage.get("stage_id"))
+    }
+    entries: list[dict[str, Any]] = []
+    for stage in list(current_view.get("stages") or []):
+        if not isinstance(stage, dict):
+            return None
+        stage_id = _as_str(stage.get("stage_id"))
+        stored = previous_by_id.get(stage_id)
+        if stored is None or stored != stage:
+            entries.append(copy.deepcopy(stage))
+    payload: dict[str, Any] = {"upsert": entries}
+    headers = {
+        key: copy.deepcopy(value)
+        for key, value in current_view.items()
+        if key != "stages" and previous.get(key, _MISSING_HEADER) != value
+    }
+    if headers:
+        payload["headers"] = headers
+    # Always verify by replay: an empty upsert must still prove the two views
+    # are identical (a pure reorder encodes to nothing but replays wrong).
+    if apply_cc_upsert(previous_view, payload) != current_view:
+        return None
+    return payload
+
+
+def materialize_transcript_view(messages: Any, index: int) -> dict[str, Any]:
+    """Replay a transcript row's stored view from its nearest full anchor.
+
+    cc_upsert rows only carry the stage-level delta relative to the previous
+    rail row (hidden runtime rows included), so readers that need one row's
+    cumulative view backtrack to the nearest stored `canonical_context` and
+    re-apply the chain forward. Rows with a stored full `canonical_context`
+    return it as-is (legacy raw rows keep their unprojected bodies exactly as
+    persisted); returns {} for non-rail rows or broken chains.
+    """
+    rows = list(messages or [])
+    if not isinstance(index, int) or not (0 <= index < len(rows)):
+        return {}
+    target = rows[index]
+    if not isinstance(target, dict) or not isinstance(target.get("cc_upsert"), dict):
+        # Only upsert rows need a replay; full rows and non-rail rows answer directly.
+        stored = target.get("canonical_context") if isinstance(target, dict) else None
+        if isinstance(stored, dict) and stored:
+            return stored
+        return {}
+    chain: list[dict[str, Any]] = [target[TRANSCRIPT_CC_UPSERT_FIELD]]
+    anchor: dict[str, Any] | None = None
+    cursor = index - 1
+    while cursor >= 0:
+        row = rows[cursor]
+        cursor -= 1
+        if not isinstance(row, dict) or str(row.get("role") or "").strip().lower() != "assistant":
+            continue
+        stored = row.get("canonical_context")
+        if isinstance(stored, dict) and stored:
+            if str(row.get("canonical_context_projection") or "").strip() == TRANSCRIPT_PROJECTION_MODE:
+                anchor = stored
+            else:
+                anchor = project_canonical_context_for_transcript(stored)
+            break
+        upsert = row.get(TRANSCRIPT_CC_UPSERT_FIELD)
+        if isinstance(upsert, dict):
+            chain.append(upsert)
+    if anchor is None:
+        return {}
+    view = anchor
+    for payload in reversed(chain):
+        view = apply_cc_upsert(view, payload)
+    return view
+
+
 def merge_turn_stage_state_into_canonical_context(
     canonical_context: Any,
     turn_stage_state: Any,
@@ -787,6 +927,11 @@ __all__ = [
     "project_canonical_context_for_transcript",
     "rebase_turn_stage_state_against_context",
     "TRANSCRIPT_PROJECTION_MODE",
+    "TRANSCRIPT_DELTA_PROJECTION_MODE",
+    "TRANSCRIPT_CC_UPSERT_FIELD",
+    "apply_cc_upsert",
+    "encode_cc_upsert",
+    "materialize_transcript_view",
     "ui_canonical_context_delta",
     "ui_canonical_context_delta_from_views",
 ]
