@@ -1064,20 +1064,150 @@ def stage_archive_selector_from_request_messages(request_messages: Any) -> dict[
     return {"stage_ids": collected_ids, "archived_through_created_at": watermark}
 
 
+def stage_message_call_ids(messages: Any) -> set[str]:
+    """一批消息里出现过的工具调用 id（assistant 声明的与 tool 回执的都算）。"""
+    collected: set[str] = set()
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        for tool_call in list(message.get("tool_calls") or []):
+            call_id = extract_call_id((tool_call or {}).get("id"))
+            if call_id:
+                collected.add(call_id)
+        call_id = extract_call_id(message.get("tool_call_id"))
+        if call_id:
+            collected.add(call_id)
+    return {item for item in collected if item}
+
+
+def stage_block_indexes(
+    messages: Any,
+    *,
+    prefixes: tuple[str, ...] = (STAGE_COMPACT_PREFIX, STAGE_EXTERNALIZED_PREFIX, STAGE_RAW_PREFIX),
+) -> set[int]:
+    """请求体里还翻得出来的阶段块编号；`prefixes` 用来只认某一类块。"""
+    indexes: set[int] = set()
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        content = str(message.get("content") or "")
+        if not content.startswith(prefixes):
+            continue
+        try:
+            payload = json.loads(content.split("\n", 1)[1])
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        try:
+            value = int(payload.get("stage_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            indexes.add(value)
+    return indexes
+
+
+def stage_round_call_ids(stage: Any) -> set[str]:
+    """该阶段登记过的工具调用 id；账本条目可能是 dict（前门）或模型（节点），统一走 `_stage_get`。"""
+    collected: set[str] = set()
+    for round_item in list(_stage_get(stage, "rounds", []) or []):
+        for call_id in list(_stage_get(round_item, "tool_call_ids", []) or []):
+            normalized = extract_call_id(call_id)
+            if normalized:
+                collected.add(normalized)
+        for tool in list(_stage_get(round_item, "tools", []) or []):
+            normalized = extract_call_id(_stage_get(tool, "tool_call_id", ""))
+            if normalized:
+                collected.add(normalized)
+    return collected
+
+
+def stage_is_swallowable(
+    stage: Any,
+    *,
+    active_stage_id: str,
+    retained_ids: set[str],
+    body_stage_indexes: set[int],
+    body_call_ids: set[str],
+) -> bool:
+    """这条阶段是否已经不必再逐轮渲染：完成的普通阶段，且肉身和块都不在场。
+
+    工具轮次还留在请求体里、或它自己的阶段块还翻得出来，收口它就是直接在上下文里挖洞；
+    `body_stage_indexes` 的口径由调用方给（压缩时认全部块，提交点只认 raw 块）。
+    `retained_ids` 是近场 raw 窗口（保住最近几条执行细节）让出来的名额。"""
+    if not isinstance(stage, dict) and not hasattr(stage, "stage_id"):
+        return False
+    if str(_stage_get(stage, "stage_kind", "normal") or "normal").strip().lower() != "normal":
+        return False
+    if str(_stage_get(stage, "status", "") or "").strip().lower() == "active":
+        return False
+    stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
+    if not stage_id or stage_id == active_stage_id or stage_id in retained_ids:
+        return False
+    if _stage_get(stage, "context_visible", True) is False:
+        return False
+    try:
+        stage_index = int(_stage_get(stage, "stage_index", 0) or 0)
+    except (TypeError, ValueError):
+        stage_index = 0
+    if stage_index in body_stage_indexes:
+        return False
+    return not (stage_round_call_ids(stage) & body_call_ids)
+
+
+def summarized_stage_ids(stage_state: Any, *, body_messages: Any, keep_latest: int = 3) -> list[str]:
+    """一次压缩真正吞掉的阶段：完成普通阶段 − 近场 raw 窗口 − 仍在体内字面存在的阶段。"""
+    retained_ids = retained_completed_stage_ids(stage_state, keep_latest=keep_latest)
+    body_indexes = stage_block_indexes(body_messages)
+    body_call_ids = stage_message_call_ids(body_messages)
+    active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
+    swallowed: list[str] = []
+    for stage in list(_stage_get(stage_state, "stages", []) or []):
+        if not stage_is_swallowable(
+            stage,
+            active_stage_id=active_stage_id,
+            retained_ids=retained_ids,
+            body_stage_indexes=body_indexes,
+            body_call_ids=body_call_ids,
+        ):
+            continue
+        stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
+        if stage_id and stage_id not in swallowed:
+            swallowed.append(stage_id)
+    return swallowed
+
+
+def stage_record_dict(stage: Any) -> dict[str, Any]:
+    """账本条目统一成 dict：前门是 dict，节点是 pydantic 记录。"""
+    if isinstance(stage, dict):
+        return dict(stage)
+    dumper = getattr(stage, "model_dump", None)
+    if not callable(dumper):
+        return {}
+    try:
+        payload = dumper(mode="json")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def build_stage_archive_document(
     *,
-    session_key: Any,
+    kind: str,
+    owner: str,
     created_at: Any,
-    stages: list[dict[str, Any]],
+    stages: list[Any],
 ) -> dict[str, Any]:
     """被收口阶段的完整账本（逐条 key_refs、轮次都在），构造为落档文档。
 
     只产出内容不碰磁盘：目录解析属于车道职责（前门 session_temp_dir、节点
-    task_temp_dir），共享层不决定文件落哪儿。"""
-    records = [dict(item) for item in list(stages or []) if isinstance(item, dict)]
+    task_temp_dir），共享层不决定文件落哪儿；`kind` / `owner` 让打开文件的模型
+    与维护者一眼分清这是哪条车道的哪份账本。"""
+    records = [item for item in (stage_record_dict(stage) for stage in list(stages or [])) if item]
     return {
-        "kind": "frontdoor_stage_archive",
-        "session_key": str(session_key or "").strip(),
+        "kind": str(kind or "").strip(),
+        "owner": str(owner or "").strip(),
         "created_at": str(created_at or "").strip(),
         "stage_count": len(records),
         "stages": records,
@@ -1112,10 +1242,16 @@ __all__ = [
     "retained_completed_stage_ids",
     "split_stage_ref_selection",
     "stage_archive_selector_from_request_messages",
+    "stage_block_indexes",
     "stage_created_at_ceiling",
     "stage_created_at_within_watermark",
+    "stage_is_swallowable",
+    "stage_message_call_ids",
     "stage_prompt_prefix",
+    "stage_record_dict",
     "stage_ref_candidates",
     "stage_ref_is_dead",
+    "stage_round_call_ids",
     "strip_stage_block_echo",
+    "summarized_stage_ids",
 ]

@@ -70,10 +70,14 @@ from g3ku.runtime.stage_prompt_compaction import (
     retained_completed_stage_ids,
     split_stage_ref_selection,
     stage_archive_selector_from_request_messages,
+    stage_block_indexes,
     stage_created_at_ceiling,
     stage_created_at_within_watermark,
+    stage_is_swallowable,
+    stage_message_call_ids,
     stage_ref_candidates,
     strip_stage_block_echo,
+    summarized_stage_ids,
 )
 from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
@@ -1922,7 +1926,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             (
                 index
                 for index, message in enumerate(body)
-                if self._frontdoor_message_call_ids([message]) & window_call_ids
+                if stage_message_call_ids([message]) & window_call_ids
             ),
             None,
         )
@@ -1966,7 +1970,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             directory = Path(self._ceo_session_temp_dir(session_key))
             directory.mkdir(parents=True, exist_ok=True)
             payload = build_stage_archive_document(
-                session_key=session_key,
+                kind="frontdoor_stage_archive",
+                owner=str(session_key or "").strip(),
                 created_at=now_iso(),
                 stages=records,
             )
@@ -1977,111 +1982,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             logger.debug("frontdoor stage archive export failed for {}", str(session_key or ""))
             return "", 0, 0
 
-    @staticmethod
-    def _frontdoor_message_call_ids(messages: list[dict[str, Any]]) -> set[str]:
-        collected: set[str] = set()
-        for message in list(messages or []):
-            if not isinstance(message, dict):
-                continue
-            for tool_call in list(message.get("tool_calls") or []):
-                call_id = extract_call_id((tool_call or {}).get("id"))
-                if call_id:
-                    collected.add(call_id)
-            call_id = extract_call_id(message.get("tool_call_id"))
-            if call_id:
-                collected.add(call_id)
-        return {item for item in collected if item}
-
-    @staticmethod
-    def _frontdoor_body_stage_indexes(
-        messages: list[dict[str, Any]],
-        *,
-        prefixes: tuple[str, ...] = ("[G3KU_STAGE_",),
-    ) -> set[int]:
-        """请求体里还翻得出来的阶段块编号；`prefixes` 用来只认某一类块。"""
-        indexes: set[int] = set()
-        for message in list(messages or []):
-            if not isinstance(message, dict):
-                continue
-            content = str(message.get("content") or "")
-            if not content.startswith(prefixes):
-                continue
-            try:
-                payload = json.loads(content.split("\n", 1)[1])
-            except Exception:
-                continue
-            if isinstance(payload, dict):
-                try:
-                    indexes.add(int(payload.get("stage_index") or 0))
-                except (TypeError, ValueError):
-                    continue
-        return {item for item in indexes if item > 0}
-
-    @classmethod
-    def _frontdoor_stage_is_swallowable(
-        cls,
-        stage: Any,
-        *,
-        active_stage_id: str,
-        retained_ids: set[str],
-        body_stage_indexes: set[int],
-        body_call_ids: set[str],
-    ) -> bool:
-        """这条阶段是否已经不必再逐轮渲染：完成的普通阶段，且肉身和块都不在场。
-
-        工具轮次还留在请求体里、或它自己的阶段块还翻得出来，收口它就是直接在上下文里
-        挖洞；`body_stage_indexes` 的口径由调用方给（压缩时认全部块，提交点只认 raw 块）。
-        `retained_ids` 是近场 raw 窗口（保住最近几条执行细节）让出来的名额。"""
-        if not isinstance(stage, dict):
-            return False
-        if str(stage.get("stage_kind") or "normal").strip().lower() != "normal":
-            return False
-        if str(stage.get("status") or "").strip().lower() == "active":
-            return False
-        stage_id = str(stage.get("stage_id") or "").strip()
-        if not stage_id or stage_id == active_stage_id or stage_id in retained_ids:
-            return False
-        if stage.get("context_visible") is False:
-            return False
-        if int(stage.get("stage_index") or 0) in body_stage_indexes:
-            return False
-        stage_call_ids: set[str] = set()
-        for round_item in list(stage.get("rounds") or []):
-            if not isinstance(round_item, dict):
-                continue
-            for call_id in list(round_item.get("tool_call_ids") or []):
-                normalized = extract_call_id(call_id)
-                if normalized:
-                    stage_call_ids.add(normalized)
-            for tool in list(round_item.get("tools") or []):
-                normalized = extract_call_id((tool or {}).get("tool_call_id")) if isinstance(tool, dict) else ""
-                if normalized:
-                    stage_call_ids.add(normalized)
-        return not (stage_call_ids & body_call_ids)
-
     def _frontdoor_summarized_stage_ids(
         self,
         *,
         stage_state: dict[str, Any],
         recent_tail: list[dict[str, Any]],
     ) -> list[str]:
-        """本次压缩真正吞掉的阶段：完成普通阶段 − 保留 raw 窗口 − 尾部仍字面存在的阶段。"""
-        retained_ids = retained_completed_stage_ids(stage_state, keep_latest=3)
-        body_stage_indexes = self._frontdoor_body_stage_indexes(recent_tail)
-        body_call_ids = self._frontdoor_message_call_ids(recent_tail)
-        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
-        hidden: list[str] = []
-        for stage in list(stage_state.get("stages") or []):
-            if not self._frontdoor_stage_is_swallowable(
-                stage,
-                active_stage_id=active_stage_id,
-                retained_ids=retained_ids,
-                body_stage_indexes=body_stage_indexes,
-                body_call_ids=body_call_ids,
-            ):
-                continue
-            hidden.append(str(stage.get("stage_id") or "").strip())
-        return hidden
+        """本次压缩真正吞掉的阶段（判定规则与节点车道共用 `summarized_stage_ids`）。"""
+        return summarized_stage_ids(stage_state, body_messages=recent_tail, keep_latest=3)
 
     @staticmethod
     def _frontdoor_stage_content_identity(stage: Any) -> str:
@@ -2135,8 +2043,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     identity = cls._frontdoor_stage_content_identity(stage)
                     if identity:
                         identities.add(identity)
-        body_raw_stage_indexes = cls._frontdoor_body_stage_indexes(body_messages, prefixes=(STAGE_RAW_PREFIX,))
-        body_call_ids = cls._frontdoor_message_call_ids(body_messages)
+        body_raw_stage_indexes = stage_block_indexes(body_messages, prefixes=(STAGE_RAW_PREFIX,))
+        body_call_ids = stage_message_call_ids(body_messages)
         hidden = 0
         for store in usable:
             active_stage_id = str(store.get("active_stage_id") or "").strip()
@@ -2158,7 +2066,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     )
                 if not matched:
                     continue
-                if watermark and not cls._frontdoor_stage_is_swallowable(
+                if watermark and not stage_is_swallowable(
                     stage,
                     active_stage_id=active_stage_id,
                     retained_ids=retained_ids,
