@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -110,3 +111,55 @@ async def test_first_attempt_review_records_attempts_and_request_size() -> None:
     assert result["review_attempts"] == 1
     assert result["review_request_chars"] > 0
     assert runner.usage_records == 1
+
+
+class _ApplyStub:
+    """`_apply_spawn_review_results` 是按白名单重建持久载荷的，新增字段必须在这里
+    也落一次——否则车道证据只存在于函数返回值里，节点详情与投影永远读不到。"""
+
+    _apply_spawn_review_results = NodeRunner._apply_spawn_review_results
+
+    def __init__(self) -> None:
+        self.saved: dict[str, Any] = {}
+
+    def _update_spawn_entry(self, **_kwargs: Any) -> None:
+        return None
+
+    def _spawn_entry_non_terminal_node(self, _entry: Any) -> str:
+        return ""
+
+    def _warn_spawn_entry_review_over_live_node(self, **_kwargs: Any) -> None:
+        return None
+
+    def _spawn_review_blocked_result(self, _spec: Any, *, reason: str, suggestion: str) -> Any:
+        return SimpleNamespace(node_output_summary=reason, review_blocked=True)
+
+    def _save_spawn_cache(self, _task_id: str, _node_id: str, _cache_key: str, payload: dict) -> None:
+        self.saved.update(payload)
+
+
+def test_review_forensics_survive_the_persisted_spawn_payload() -> None:
+    runner = _ApplyStub()
+    specs = _specs(2)
+
+    allowed = runner._apply_spawn_review_results(
+        task_id="task:review-persist",
+        parent_node_id="node:parent",
+        cache_key="call:review-persist",
+        cached_payload={"entries": [{}, {}]},
+        specs=specs,
+        spawn_review={
+            "reviewed_at": "2026-09-20T00:00:00",
+            "requested_specs": [],
+            "allowed_indexes": [0],
+            "blocked_specs": [{"index": 1, "reason": "dup", "suggestion": "split"}],
+            "error_text": "",
+            "review_attempts": 3,
+            "review_request_chars": 4242,
+        },
+    )
+
+    assert allowed == [0]
+    persisted = runner.saved["spawn_review"]
+    assert persisted["review_attempts"] == 3
+    assert persisted["review_request_chars"] == 4242

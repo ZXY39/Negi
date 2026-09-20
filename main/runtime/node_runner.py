@@ -4786,6 +4786,10 @@ class NodeRunner:
             'allowed_indexes': list(allowed_indexes),
             'blocked_specs': [dict(item) for item in list(spawn_review.get('blocked_specs') or []) if isinstance(item, dict)],
             'error_text': str(spawn_review.get('error_text') or '').strip(),
+            # 车道证据只有落进这份持久载荷才读得到（投影从 spawn_operations 重读），
+            # 少写这两个键就等于评审请求多大、重发过几次仍然不可知。
+            'review_attempts': int(spawn_review.get('review_attempts') or 0),
+            'review_request_chars': int(spawn_review.get('review_request_chars') or 0),
         }
         self._save_spawn_cache(task_id, parent_node_id, cache_key, cached_payload)
         return allowed_indexes
