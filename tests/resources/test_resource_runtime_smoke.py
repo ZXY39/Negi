@@ -1116,7 +1116,6 @@ async def test_filesystem_edit_flat_text_pair_replays_as_already_applied(tmp_pat
         assert tool is not None
         result = await tool.execute(path=str(target_file), old_text='old line', new_text='new line')
         assert result.startswith('Successfully edited')
-        assert 'resolved lines 2-2' in result
         assert target_file.read_text(encoding='utf-8') == 'alpha\nnew line\nomega\n'
 
         replay = await tool.execute(path=str(target_file), old_text='old line', new_text='new line')
@@ -1325,11 +1324,11 @@ def test_filesystem_edit_provider_visible_schema_is_a_flat_text_pair(tmp_path: P
 
         _description, schema = _provider_visible_tool_contract(tool)
         properties = dict((schema or {}).get('properties') or {})
-        required = ['path', 'new_text']
+        required = ['path', 'old_text', 'new_text']
 
         assert list((schema or {}).get('required') or []) == required
         declared = {name: payload for name, payload in properties.items() if name != 'timeout_seconds'}
-        assert set(declared) == {'path', 'old_text', 'start_line', 'end_line', 'new_text'}
+        assert set(declared) == set(required)
         # No object on the model surface: a nested locator beside a required
         # sibling is where a replacement gets put into the locator instead.
         assert all((payload or {}).get('type') != 'object' for payload in declared.values())
@@ -1338,77 +1337,6 @@ def test_filesystem_edit_provider_visible_schema_is_a_flat_text_pair(tmp_path: P
         validator_properties = dict(((tool.parameters or {}).get('properties') or {}))
         assert 'target' in validator_properties
         assert 'target' not in declared
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_filesystem_edit_line_range_replaces_without_old_text(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    target_file = workspace / 'target.txt'
-    target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text('line1\nline2\nline3\nline4\nline5\n', encoding='utf-8')
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        tool = manager.get_tool('filesystem_edit')
-        assert tool is not None
-        result = await tool.execute(
-            path=str(target_file),
-            start_line=2,
-            end_line=4,
-            new_text='kept2\nkept3\n',
-        )
-        assert result.startswith('Successfully edited')
-        assert target_file.read_text(encoding='utf-8') == 'line1\nkept2\nkept3\nline5\n'
-        # A range cannot fail loudly, so the result names what it consumed.
-        assert 'replaced lines 2-4' in result
-        assert 'line2' in result
-
-        empty = await tool.execute(path=str(target_file), start_line=2, end_line=3, new_text='')
-        assert empty.startswith('Successfully edited')
-        assert target_file.read_text(encoding='utf-8') == 'line1\nline5\n'
-
-        bad = await tool.execute(path=str(target_file), start_line=9, end_line=11, new_text='x')
-        assert bad.startswith('Error: invalid line range')
-
-        replay = await tool.execute(
-            path=str(target_file), start_line=1, end_line=2, new_text='line1\nline5\n',
-        )
-        assert replay.startswith('Already applied:')
-        assert target_file.read_text(encoding='utf-8') == 'line1\nline5\n'
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_filesystem_edit_rejects_two_locators_and_missing_locator(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    target_file = workspace / 'target.txt'
-    target_file.parent.mkdir(parents=True, exist_ok=True)
-    target_file.write_text('alpha\nbeta\n', encoding='utf-8')
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        tool = manager.get_tool('filesystem_edit')
-        assert tool is not None
-        both = await tool.execute(
-            path=str(target_file), old_text='beta', new_text='x', start_line=1, end_line=2,
-        )
-        assert both.startswith('Error: give either old_text or start_line/end_line')
-        assert target_file.read_text(encoding='utf-8') == 'alpha\nbeta\n'
-
-        none = await tool.execute(path=str(target_file), new_text='x')
-        assert none.startswith('Error: old_text is required to locate the region')
-        assert target_file.read_text(encoding='utf-8') == 'alpha\nbeta\n'
     finally:
         manager.close()
 

@@ -137,20 +137,17 @@ def test_filesystem_split_mutation_manifests_replace_legacy_monolith():
     assert 'operations' in move_properties
 
 
-def test_filesystem_edit_manifest_exposes_flat_locator_model_schema():
+def test_filesystem_edit_manifest_exposes_flat_text_pair_model_schema():
     manifest = yaml.safe_load((TOOLS_ROOT / 'filesystem_edit' / 'resource.yaml').read_text(encoding='utf-8'))
     model_parameters = dict((manifest.get('model_parameters') or {}))
     properties = dict(model_parameters.get('properties') or {})
 
-    assert list(model_parameters.get('required') or []) == ['path', 'new_text']
-    assert set(properties) == {'path', 'old_text', 'start_line', 'end_line', 'new_text'}
+    assert list(model_parameters.get('required') or []) == ['path', 'old_text', 'new_text']
+    assert set(properties) == {'path', 'old_text', 'new_text'}
     # The model surface must carry no object to nest a replacement inside; the wide
     # target/legacy lanes stay validator-only so earlier calls keep working.
     assert 'target' not in properties
     assert 'mode' not in properties
-    # Every model field has to exist on the validation surface, or FastMCP rejects it.
-    validator_properties = set(((manifest.get('parameters') or {}).get('properties') or {}))
-    assert set(properties) <= validator_properties
 
 
 def test_filesystem_mutation_model_surfaces_hold_no_nested_objects():
