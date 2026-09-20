@@ -197,6 +197,9 @@ def _patch_compression_runner(monkeypatch, runner, *, applied: bool, context_win
     def _fake_persist(**kwargs):
         calls["persisted_messages"] = list(kwargs["request_messages"])
         calls["persisted_lane"] = kwargs.get("request_lane")
+        calls["persisted_shrink_reason"] = str(
+            (kwargs.get("state") or {}).get("frontdoor_history_shrink_reason") or ""
+        )
         return {"frontdoor_actual_request_path": "artifact.json"}
 
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", _fake_persist)
@@ -229,6 +232,8 @@ def test_compress_session_context_rewrites_durable_baseline(monkeypatch) -> None
     # 摘要结果写回基线，并且工件带上手写压缩的泳道标记。
     assert calls["persisted_messages"] == [{"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n摘要"}]
     assert calls["persisted_lane"] == "manual_context_compression"
+    # shrink 原因必须随工件一起落，工件自己就说得清这次缩短是谁做的。
+    assert calls["persisted_shrink_reason"] == "token_compression"
     assert session._frontdoor_history_shrink_reason == "token_compression"
     assert synced == {"source_reason": "finalize"}
 
@@ -289,9 +294,12 @@ class _FakeCompressionRunner:
         self.calls = 0
         self._block = block
         self._started = asyncio.Event()
+        # 压缩起跑时是否已经停过手——pause 现在跑在后台任务里，顺序只能这样取证。
+        self.paused_before_compress: bool | None = None
 
     async def compress_session_context(self, *, session):
         self.calls += 1
+        self.paused_before_compress = bool(getattr(session, "pause_calls", None))
         if self._block:
             self._started.set()
             await asyncio.Event()  # 挂住，由取消端点结束
@@ -306,13 +314,22 @@ class _FakeCompressionRunner:
         }
 
 
-def _install_endpoint_runtime(monkeypatch, tmp_path: Path, *, runner, runtime_session):
+def _install_endpoint_runtime(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    runner,
+    runtime_session,
+    session_key: str = "web:shared",
+):
     session_manager = SessionManager(tmp_path)
-    session = session_manager.get_or_create("web:shared")
+    session = session_manager.get_or_create(session_key)
     session_manager.save(session)
     runtime_manager = SimpleNamespace(
-        get=lambda session_id: runtime_session if session_id == "web:shared" else None,
-        get_or_create=lambda **_: runtime_session,
+        get=lambda session_id: runtime_session if session_id == session_key else None,
+        get_or_create=lambda **kwargs: runtime_session
+        if kwargs.get("session_key") == session_key
+        else None,
     )
     agent = SimpleNamespace(sessions=session_manager, multi_agent_runner=runner)
     monkeypatch.setattr(
@@ -335,19 +352,33 @@ def _idle_runtime_session():
     )
 
 
-def test_compress_context_endpoint_rejects_channel_session(tmp_path: Path, monkeypatch) -> None:
+def test_compress_context_endpoint_accepts_channel_session(tmp_path: Path, monkeypatch) -> None:
+    """渠道（QQ / 外部桥接）会话不再被只读门禁挡住：长历史撑爆窗口的风险与发起方无关，
+    而基线恢复与压缩写回本来就覆盖 ``ext:`` / ``china:``。"""
+    runner = _FakeCompressionRunner()
+    runtime_session = _idle_runtime_session()
+    markers: list[dict] = []
+    runtime_session.append_context_compression_marker = lambda **kwargs: markers.append(kwargs) or True
     _install_endpoint_runtime(
         monkeypatch,
         tmp_path,
-        runner=_FakeCompressionRunner(),
-        runtime_session=_idle_runtime_session(),
+        runner=runner,
+        runtime_session=runtime_session,
+        session_key="ext:qq",
     )
 
     client = TestClient(_build_app())
     response = client.post("/api/ceo/sessions/ext:qq/compress-context")
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "channel_session_readonly"
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "ext:qq"
+    assert runner.calls == 1
+    assert markers and markers[-1]["state"] == "completed"
+
+    # 没有转录的渠道会话没有可压缩基线，按不存在处理而不是静默建会话。
+    missing = client.post("/api/ceo/sessions/ext:none/compress-context")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "session_not_found"
 
 
 def test_compress_context_endpoint_runs_and_writes_completed_marker(tmp_path: Path, monkeypatch) -> None:
@@ -377,6 +408,7 @@ def test_compress_context_endpoint_pauses_running_turn_first(tmp_path: Path, mon
     runtime_session = _idle_runtime_session()
     runtime_session.state.is_running = True
     paused: list[bool] = []
+    runtime_session.pause_calls = paused
     runtime_session.pause = lambda **kwargs: paused.append(True) or asyncio.sleep(0)
     _install_endpoint_runtime(monkeypatch, tmp_path, runner=runner, runtime_session=runtime_session)
 
@@ -384,7 +416,12 @@ def test_compress_context_endpoint_pauses_running_turn_first(tmp_path: Path, mon
     response = client.post("/api/ceo/sessions/web:shared/compress-context")
 
     assert response.status_code == 200
+    # 端点自己不再 await pause：大会话的 pause 要整份重写转录（实测 73MB 是秒级的），
+    # 留在请求里就会撑爆浏览器侧 20 秒超时，前端会把还在跑的压缩误判成失败。
+    assert response.json()["status"] in {"running", "completed"}
+    # 但压缩开始前必须先停手，这件事由后台任务保证。
     assert paused == [True]
+    assert runner.paused_before_compress is True
 
 
 def test_cancel_endpoint_rejects_when_nothing_is_running(tmp_path: Path, monkeypatch) -> None:
@@ -415,3 +452,45 @@ def test_get_endpoint_reports_idle_when_session_runtime_missing(tmp_path: Path, 
 
     assert response.status_code == 200
     assert response.json()["status"] == "idle"
+
+
+def test_composer_preflight_endpoint_covers_channel_session(tmp_path: Path, monkeypatch) -> None:
+    """只读预估不吃渠道只读门禁：QQ 会话的脑图标也要常驻显示自己的上下文占用值。"""
+    session_manager = SessionManager(tmp_path)
+    session_key = "ext:qq-official:abc123"
+    session_manager.save(session_manager.get_or_create(session_key))
+    runtime_session = SimpleNamespace(
+        state=SimpleNamespace(session_key=session_key),
+        _restore_frontdoor_persistent_state=lambda: "none",
+    )
+    runtime_manager = SimpleNamespace(
+        get=lambda session_id: runtime_session if session_id == session_key else None,
+        get_or_create=lambda **kwargs: runtime_session if kwargs.get("session_key") == session_key else None,
+    )
+    captured: dict[str, object] = {}
+
+    class _Runner:
+        async def estimate_turn_preflight(self, *, user_inputs, session):
+            captured["user_inputs"] = list(user_inputs)
+            return {
+                "estimated_total_tokens": 15_230,
+                "context_window_tokens": 390_000,
+                "ratio": 0.039,
+                "provider_model": "openai:glm-5.2",
+            }
+
+    agent = SimpleNamespace(sessions=session_manager, multi_agent_runner=_Runner())
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_sessions",
+        lambda: (agent, session_manager, runtime_manager, SimpleNamespace()),
+    )
+
+    client = TestClient(_build_app())
+    response = client.post(f"/api/ceo/sessions/{session_key}/composer-preflight", json={"messages": []})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["session_id"] == session_key
+    assert response.json()["item"]["estimated_total_tokens"] == 15_230
+    # 空草稿照常估：渠道会话没有输入框内容，读数只能来自基线本身。
+    assert captured["user_inputs"] == []

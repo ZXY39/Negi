@@ -479,12 +479,16 @@ class ApiClient {
     }
 
     static async getCeoContextCompression(sessionId) {
-        return this.get(`/api/ceo/sessions/${encodeURIComponent(sessionId)}/compress-context`);
+        // 与 start 同档：大会话收尾要整份重写转录，事件循环被占住时 10 秒默认值会误判成失败。
+        return this._request("GET", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/compress-context`, {
+            timeoutMs: 20000,
+        });
     }
 
     static async cancelCeoContextCompression(sessionId) {
         return this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/compress-context/cancel`, {
             body: {},
+            timeoutMs: 20000,
         });
     }
 

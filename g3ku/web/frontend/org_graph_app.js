@@ -31,9 +31,11 @@ const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
-// 长按上下文脑图标满 5 秒即发起手动压缩；进度环按住期间连续刷新。
-const CEO_BRAIN_LONG_PRESS_MS = 5000;
+// 长按上下文脑图标满 3 秒即发起手动压缩；进度环按住期间连续刷新。
+const CEO_BRAIN_LONG_PRESS_MS = 3000;
 const CEO_COMPRESSION_POLL_MS = 1000;
+// 连续这么多次轮询失败才放弃跟踪；单次超时不算（大会话收尾会占住事件循环数秒）。
+const CEO_COMPRESSION_POLL_FAIL_LIMIT = 5;
 const CEO_COMPRESSION_DIVIDER_CLASS = "ceo-compression-divider";
 const CEO_COMPRESSION_TEXT = {
     running: "上下文压缩中",
@@ -133,11 +135,12 @@ const S = {
     ceoComposerUsageRequestSeq: 0,
     ceoComposerUsageBusy: false,
     ceoComposerUsageNeedsRefresh: false,
-    // 手动上下文压缩：本机按住脑图标满 5 秒后由服务端起跑，这里只记发起方与轮询。
+    // 手动上下文压缩：本机按住脑图标满 3 秒后由服务端起跑，这里只记发起方与轮询。
     ceoContextCompressionStatus: "idle",
     ceoContextCompressionCancelRequested: false,
     ceoContextCompressionSessionId: "",
     ceoContextCompressionPollId: null,
+    ceoContextCompressionPollFails: 0,
     ceoBrainHold: { active: false, startedAt: 0, rafId: null, sessionId: "" },
     // 长按满阈值后到达的那次 click 是副产物，不能顺带弹开模型面板。
     ceoBrainHoldConsumedClick: false,
@@ -2146,7 +2149,7 @@ function confirmCeoModelChainSwitch() {
     return saveCeoModelSelection("chain");
 }
 
-// ---- 长按上下文脑图标：按住满 5 秒发起手动压缩 -----------------------------
+// ---- 长按上下文脑图标：按住满 3 秒发起手动压缩 -----------------------------
 
 function setCeoBrainHoldProgress(progress) {
     const shell = U.ceoComposerUsageBrain;
@@ -2160,7 +2163,6 @@ function setCeoBrainHoldProgress(progress) {
 function ceoBrainHoldBlockedReason() {
     const sessionId = String(activeSessionId() || "").trim();
     if (!sessionId) return "";
-    if (!sessionId.startsWith("web:") || activeSessionIsReadonly()) return "只有本地会话可以压缩上下文";
     if (S.ceoUploadBusy) return "附件上传中，请稍后再试";
     if (activeCeoSessionCompressionState()) return "正在压缩上下文";
     return "";
@@ -2384,7 +2386,9 @@ function activeCeoSessionHasHistory(sessionId = activeSessionId()) {
 
 async function refreshCeoComposerUsageEstimate() {
     const sessionId = String(activeSessionId() || "").trim();
-    if (!sessionId || activeSessionIsReadonly() || S.ceoUploadBusy) {
+    // 只读门槛不适用在这里：composer-preflight 不改写会话，渠道会话同样要常驻显示自己的
+    // 上下文占用值（脑图标空着 = 需求里「非常驻显示 token 量」没做到）。
+    if (!sessionId || S.ceoUploadBusy) {
         clearCeoComposerUsageEstimate();
         return null;
     }
@@ -3172,16 +3176,26 @@ function activeCeoSessionCompressionState() {
     return String(compression.status || "").trim().toLowerCase() === "running" ? compression : null;
 }
 
+// 图标自绘而不是取 lucide 字形：loader-circle 是中心对称圆环，转起来看不出动静；
+// 这里的旋转环负责「还在跑」，中间两条竖杠负责「点这里可以暂停」。
+function buildCeoCompressionPauseGlyph(withSpinnerRing) {
+    const className = withSpinnerRing
+        ? "ceo-compression-divider-spinner"
+        : "ceo-compression-divider-spinner is-bars-only";
+    return `<span class="${className}" aria-hidden="true"><i></i><i></i></span>`;
+}
+
 function buildCeoCompressionDividerControl(state, interactive) {
-    if (state === "running" && interactive) {
-        return `<button type="button" class="ceo-compression-divider-action" data-ceo-compress-pause
-               aria-label="暂停压缩" title="暂停压缩"><i data-lucide="loader-circle"></i></button>`;
-    }
     if (state === "running") {
-        return '<span class="ceo-compression-divider-icon" aria-hidden="true"><i data-lucide="loader-circle"></i></span>';
+        const glyph = buildCeoCompressionPauseGlyph(true);
+        if (interactive) {
+            return `<button type="button" class="ceo-compression-divider-action" data-ceo-compress-pause
+                   aria-label="暂停压缩" title="暂停压缩">${glyph}</button>`;
+        }
+        return `<span class="ceo-compression-divider-icon">${glyph}</span>`;
     }
     if (state === "paused") {
-        return '<span class="ceo-compression-divider-icon" aria-hidden="true"><i data-lucide="pause"></i></span>';
+        return `<span class="ceo-compression-divider-icon">${buildCeoCompressionPauseGlyph(false)}</span>`;
     }
     // 完成态按需求只留文案，不再挂图标。
     return "";
@@ -3215,6 +3229,7 @@ function removeCeoCompressionLiveDivider() {
 
 function syncCeoCompressionDivider() {
     if (!U.ceoFeed || typeof U.ceoFeed.querySelector !== "function") return;
+    ensureCeoContextCompressionPolling();
     const running = !!activeCeoSessionCompressionState();
     const existing = U.ceoFeed.querySelector(`.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`);
     if (running && !existing) {
@@ -3232,6 +3247,13 @@ function stopCeoContextCompressionPolling() {
     }
 }
 
+function ceoContextCompressionTerminalText(status, reason) {
+    if (status === "not_needed") {
+        return "没有可压缩的历史，或所选模型没有可用的上下文窗口（需大于 25000 token）。";
+    }
+    return `压缩任务未能开始或中途中止：${String(reason || "unknown")}`;
+}
+
 function applyCeoContextCompressionStatus(payload = {}) {
     const status = String(payload?.status || "idle").trim().toLowerCase();
     const sessionId = String(S.ceoContextCompressionSessionId || activeSessionId() || "").trim();
@@ -3243,6 +3265,14 @@ function applyCeoContextCompressionStatus(payload = {}) {
         S.ceoContextCompressionSessionId = "";
     }
     if (previous === "running" && status !== "running") {
+        if (status === "not_needed" || status === "failed") {
+            // 这两种终局都不会落区分线，不解释一句的话用户看到的就是「线莫名其妙没了」。
+            showToast({
+                title: "上下文未压缩",
+                text: ceoContextCompressionTerminalText(status, payload?.reason),
+                kind: "warn",
+            });
+        }
         // 区分线由转录里的持久标记行承载；终局后重开会话才能拿到它，这里强制刷新一次。
         S.ceoFeedRenderSignature = "";
         if (sessionId) void reloadCeoSessionSnapshot(sessionId);
@@ -3264,18 +3294,40 @@ function startCeoContextCompressionPolling(sessionId) {
     stopCeoContextCompressionPolling();
     const key = String(sessionId || "").trim();
     if (!key) return;
+    S.ceoContextCompressionPollFails = 0;
+    let inFlight = false;
     S.ceoContextCompressionPollId = window.setInterval(async () => {
         if (String(activeSessionId() || "").trim() !== key) {
+            // 切走会话时停轮询；切回来由 ensureCeoContextCompressionPolling 续上。
             stopCeoContextCompressionPolling();
             return;
         }
+        // 大会话收尾会把事件循环占住数秒，单次请求可能叠在上一条后面，别并发打出去。
+        if (inFlight) return;
+        inFlight = true;
         try {
             const payload = await ApiClient.getCeoContextCompression(key);
+            S.ceoContextCompressionPollFails = 0;
             applyCeoContextCompressionStatus(payload || {});
         } catch (error) {
-            stopCeoContextCompressionPolling();
+            // 一次超时不能当作终局：停掉轮询就等于永久收不到 completed，区分线会挂在
+            // 「压缩中」直到刷新。攒到连续多次失败才放弃。
+            S.ceoContextCompressionPollFails += 1;
+            if (S.ceoContextCompressionPollFails >= CEO_COMPRESSION_POLL_FAIL_LIMIT) {
+                stopCeoContextCompressionPolling();
+            }
+        } finally {
+            inFlight = false;
         }
     }, CEO_COMPRESSION_POLL_MS);
+}
+
+function ensureCeoContextCompressionPolling() {
+    const key = String(S.ceoContextCompressionSessionId || "").trim();
+    if (!key || S.ceoContextCompressionPollId !== null) return;
+    if (String(S.ceoContextCompressionStatus || "").trim().toLowerCase() !== "running") return;
+    if (String(activeSessionId() || "").trim() !== key) return;
+    startCeoContextCompressionPolling(key);
 }
 
 async function beginCeoContextCompression(sessionId) {

@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, HTTPException
 
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
+    run_off_event_loop,
     store_ceo_catalog_cache,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
@@ -166,6 +167,54 @@ def _is_channel_session_id(session_id: str) -> bool:
 
 def _raise_channel_session_readonly() -> None:
     raise HTTPException(status_code=409, detail="channel_session_readonly")
+
+
+def _channel_runtime_session(runtime_manager, session_key: str):
+    """按 WS 会话同款形状取渠道会话的运行时会话。
+
+    渠道转录可达数十 MB，这里不碰转录存储：只取/建运行时会话，并照常从
+    continuity 快照或最新实际请求工件恢复 frontdoor 基线。
+    """
+    existing = _runtime_session(runtime_manager, session_key)
+    if existing is not None:
+        return existing
+    creator = getattr(runtime_manager, "get_or_create", None)
+    if not callable(creator):
+        return None
+    channel, _, chat_id = str(session_key).partition(":")
+    runtime_session = creator(
+        session_key=session_key,
+        channel=channel or "web",
+        chat_id=chat_id or "shared",
+        memory_channel=None,
+        memory_chat_id=None,
+    )
+    restore_frontdoor_state = getattr(runtime_session, "_restore_frontdoor_persistent_state", None)
+    if callable(restore_frontdoor_state):
+        restore_frontdoor_state()
+    return runtime_session
+
+
+def _resolve_frontdoor_session(session_manager, runtime_manager, session_id: str, *, create: bool):
+    """定位一个有 frontdoor 基线的会话，返回 ``(session_key, runtime_session)``。
+
+    回合外压缩与 composer 预估都只读/改写该会话自己的基线，跟发起方是谁无关，所以
+    两者共用这条解析：基线恢复本来就覆盖 ``china:`` / ``ext:``（`session_agent` 的
+    ``_FRONTDOOR_CONTINUITY_SESSION_KEY_PREFIXES``）。``create=False`` 只读已驻留的
+    运行时会话，供轮询与取消用，不在每次请求上重建会话。渠道会话不碰转录存储——
+    那份 JSONL 可达数十 MB，读它属于会话 IO 线程的活。
+    """
+    key = str(session_id or "").strip()
+    if _is_channel_session_id(key):
+        if not session_manager.get_path(key).exists():
+            raise HTTPException(status_code=404, detail="session_not_found")
+        if not create:
+            return key, _runtime_session(runtime_manager, key)
+        return key, _channel_runtime_session(runtime_manager, key)
+    session = _assert_known_session(session_manager, key)
+    if not create:
+        return session.key, _runtime_session(runtime_manager, session.key)
+    return session.key, _ensure_runtime_session(runtime_manager, session)
 
 
 def _assert_known_catalog_session(
@@ -849,13 +898,17 @@ async def update_ceo_session_model_selection(session_id: str, payload: dict = Bo
 
 @router.post("/ceo/sessions/{session_id}/composer-preflight")
 async def estimate_ceo_session_composer_preflight(session_id: str, payload: dict | None = Body(default=None)):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
     agent, session_manager, runtime_manager, _state_store = _sessions()
     if agent is None:
         raise HTTPException(status_code=503, detail="no_model_configured")
-    session = _assert_known_session(session_manager, session_id)
-    runtime_session = _ensure_runtime_session(runtime_manager, session)
+    # 只读预估不改写渠道侧任何东西，渠道会话同样需要常驻的上下文读数：它的输入就是
+    # 该会话自己的 frontdoor 基线。
+    session_key, runtime_session = _resolve_frontdoor_session(
+        session_manager,
+        runtime_manager,
+        session_id,
+        create=True,
+    )
     if runtime_session is None:
         raise HTTPException(status_code=503, detail="session_runtime_unavailable")
     runner = getattr(agent, "multi_agent_runner", None)
@@ -864,9 +917,9 @@ async def estimate_ceo_session_composer_preflight(session_id: str, payload: dict
         raise HTTPException(status_code=503, detail="frontdoor_preflight_unavailable")
     from g3ku.runtime.api.websocket_ceo import _normalize_client_user_messages
 
-    user_messages = _normalize_client_user_messages(session.key, payload or {})
+    user_messages = _normalize_client_user_messages(session_key, payload or {})
     item = await estimator(user_inputs=user_messages, session=runtime_session)
-    return {"ok": True, "session_id": session.key, "item": item}
+    return {"ok": True, "session_id": session_key, "item": item}
 
 
 # ---- 手动上下文压缩 -------------------------------------------------------
@@ -928,10 +981,14 @@ async def _finish_manual_compression(
     reason: str,
 ) -> None:
     if marker_state:
-        runtime_session.append_context_compression_marker(
-            state=marker_state,
-            source="manual",
-            stats=stats,
+        # 区分线要重写整份转录，而渠道会话的 JSONL 可达数十 MB：按本仓库的会话 IO
+        # 合同离开事件循环，否则一次收尾就把所有在跑的会话流一起卡住。
+        await run_off_event_loop(
+            lambda: runtime_session.append_context_compression_marker(
+                state=marker_state,
+                source="manual",
+                stats=stats,
+            )
         )
     setattr(
         runtime_session,
@@ -954,8 +1011,42 @@ async def _finish_manual_compression(
     await _emit_runtime_state_snapshot(runtime_session)
 
 
-async def _execute_manual_context_compression(agent, runtime_session) -> None:
+async def _execute_manual_context_compression(agent, runtime_session, *, pause_first: bool) -> None:
     runner = getattr(agent, "multi_agent_runner", None)
+    if pause_first:
+        # 先安全停手再压缩：pause(manual=True) 停后台工具执行、取消在途请求并 await 到
+        # 落盘完成，之后基线才是稳定的。它要整份重写转录，大会话里是秒级的慢活，所以
+        # 必须待在后台任务里——放在端点内就把浏览器端 10 秒的请求超时撑爆了。
+        pause = getattr(runtime_session, "pause", None)
+        if not callable(pause):
+            await _finish_manual_compression(
+                runtime_session,
+                status="failed",
+                marker_state="",
+                stats={},
+                reason="session_pause_unavailable",
+            )
+            return
+        try:
+            await pause(manual=True)
+        except asyncio.CancelledError:
+            await _finish_manual_compression(
+                runtime_session,
+                status="paused",
+                marker_state="",
+                stats={},
+                reason=_MANUAL_COMPRESSION_CANCELLED_REASON,
+            )
+            raise
+        except Exception as exc:
+            await _finish_manual_compression(
+                runtime_session,
+                status="failed",
+                marker_state="",
+                stats={},
+                reason=f"pause_failed:{type(exc).__name__}",
+            )
+            return
     try:
         result = dict(await runner.compress_session_context(session=runtime_session))
     except asyncio.CancelledError:
@@ -1000,13 +1091,15 @@ async def _execute_manual_context_compression(agent, runtime_session) -> None:
 
 @router.post("/ceo/sessions/{session_id}/compress-context")
 async def compress_ceo_session_context(session_id: str):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
     agent, session_manager, runtime_manager, _state_store = _sessions()
     if agent is None:
         raise HTTPException(status_code=503, detail="no_model_configured")
-    session = _assert_known_session(session_manager, session_id)
-    runtime_session = _ensure_runtime_session(runtime_manager, session)
+    session_key, runtime_session = _resolve_frontdoor_session(
+        session_manager,
+        runtime_manager,
+        session_id,
+        create=True,
+    )
     if runtime_session is None:
         raise HTTPException(status_code=503, detail="session_runtime_unavailable")
     runner = getattr(agent, "multi_agent_runner", None)
@@ -1014,14 +1107,10 @@ async def compress_ceo_session_context(session_id: str):
         raise HTTPException(status_code=503, detail="frontdoor_compression_unavailable")
     current = _manual_compression_view(runtime_session)
     if current.get("status") == _MANUAL_COMPRESSION_RUNNING:
-        return {"ok": True, "session_id": session.key, **current}
-    # 会话正在跑时先安全停手：pause(manual=True) 会停后台工具执行、取消在途请求并
-    # await 到落盘完成，之后基线才是稳定的。
-    if _session_is_running(runtime_manager, session.key):
-        pause = getattr(runtime_session, "pause", None)
-        if not callable(pause):
-            raise HTTPException(status_code=409, detail="session_pause_unavailable")
-        await pause(manual=True)
+        return {"ok": True, "session_id": session_key, **current}
+    # 会话是否正在跑要在起任务前问一次：这一步只是读内存状态，真正的停手交给任务，
+    # 端点本身必须在浏览器请求超时之前返回（见 _execute_manual_context_compression）。
+    pause_first = _session_is_running(runtime_manager, session_key)
     _set_manual_compression_state(
         runtime_session,
         status=_MANUAL_COMPRESSION_RUNNING,
@@ -1039,34 +1128,40 @@ async def compress_ceo_session_context(session_id: str):
         {"status": "running", "text": "上下文压缩中", "source": "manual_context_compression", "needs_recheck": False},
     )
     await _emit_runtime_state_snapshot(runtime_session)
-    task = asyncio.create_task(_execute_manual_context_compression(agent, runtime_session))
+    task = asyncio.create_task(
+        _execute_manual_context_compression(agent, runtime_session, pause_first=pause_first)
+    )
     setattr(runtime_session, _MANUAL_COMPRESSION_TASK_ATTR, task)
-    return {"ok": True, "session_id": session.key, **_manual_compression_view(runtime_session)}
+    return {"ok": True, "session_id": session_key, **_manual_compression_view(runtime_session)}
 
 
 @router.get("/ceo/sessions/{session_id}/compress-context")
 async def get_ceo_session_context_compression(session_id: str):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
     agent, session_manager, runtime_manager, _state_store = _sessions()
     if agent is None:
         raise HTTPException(status_code=503, detail="no_model_configured")
-    session = _assert_known_session(session_manager, session_id)
-    runtime_session = _runtime_session(runtime_manager, session.key)
+    session_key, runtime_session = _resolve_frontdoor_session(
+        session_manager,
+        runtime_manager,
+        session_id,
+        create=False,
+    )
     if runtime_session is None:
-        return {"ok": True, "session_id": session.key, "status": "idle", "cancel_requested": False}
-    return {"ok": True, "session_id": session.key, **_manual_compression_view(runtime_session)}
+        return {"ok": True, "session_id": session_key, "status": "idle", "cancel_requested": False}
+    return {"ok": True, "session_id": session_key, **_manual_compression_view(runtime_session)}
 
 
 @router.post("/ceo/sessions/{session_id}/compress-context/cancel")
 async def cancel_ceo_session_context_compression(session_id: str):
-    if _is_channel_session_id(session_id):
-        _raise_channel_session_readonly()
     agent, session_manager, runtime_manager, _state_store = _sessions()
     if agent is None:
         raise HTTPException(status_code=503, detail="no_model_configured")
-    session = _assert_known_session(session_manager, session_id)
-    runtime_session = _runtime_session(runtime_manager, session.key)
+    session_key, runtime_session = _resolve_frontdoor_session(
+        session_manager,
+        runtime_manager,
+        session_id,
+        create=False,
+    )
     if runtime_session is None:
         raise HTTPException(status_code=409, detail="compression_not_running")
     if _manual_compression_view(runtime_session).get("status") != _MANUAL_COMPRESSION_RUNNING:
@@ -1084,7 +1179,7 @@ async def cancel_ceo_session_context_compression(session_id: str):
             raise HTTPException(status_code=503, detail="compression_cancel_unavailable")
         task.cancel()
     _set_manual_compression_state(runtime_session, cancel_requested=True)
-    return {"ok": True, "session_id": session.key, "accepted": True, **_manual_compression_view(runtime_session)}
+    return {"ok": True, "session_id": session_key, "accepted": True, **_manual_compression_view(runtime_session)}
 
 
 @router.post("/ceo/sessions/{session_id}/activate")

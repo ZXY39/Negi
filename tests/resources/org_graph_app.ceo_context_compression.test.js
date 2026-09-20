@@ -108,8 +108,10 @@ class StubHTMLSelectElement extends StubHTMLElement {}
 
 function loadApp() {
     const clock = { now: 0 };
-    // rAF 排成队列由测试按帧推进，才能分别验证「未满 5 秒松手」和「满 5 秒」两条分支。
+    // rAF 排成队列由测试按帧推进，才能分别验证「未满 3 秒松手」和「满 3 秒」两条分支。
     const frames = [];
+    // setInterval 同样记成数组：压缩轮询要能一次一次手动触发才测得准容错。
+    const intervals = [];
 
     class FakeDate {
         constructor() {}
@@ -137,8 +139,14 @@ function loadApp() {
         Promise,
         setTimeout,
         clearTimeout,
-        setInterval: () => 1,
-        clearInterval: () => {},
+        setInterval: (callback, ms) => {
+            intervals.push({ callback, ms, cleared: false });
+            return intervals.length;
+        },
+        clearInterval: (id) => {
+            const entry = intervals[Number(id) - 1];
+            if (entry) entry.cleared = true;
+        },
         queueMicrotask,
         navigator: { clipboard: { writeText: async () => {} } },
         location: { protocol: "http:", host: "localhost", origin: "http://localhost", pathname: "/org_graph.html" },
@@ -196,12 +204,14 @@ function loadApp() {
             appendCeoCompressionDivider, syncCeoCompressionDivider,
             normalizeCeoSnapshotMessage, activeCeoSessionHasHistory,
             refreshCeoComposerUsageEstimate, syncCeoModelModePanelUsage,
-            CEO_BRAIN_LONG_PRESS_MS,
+            startCeoContextCompressionPolling, applyCeoContextCompressionStatus,
+            CEO_BRAIN_LONG_PRESS_MS, CEO_COMPRESSION_POLL_FAIL_LIMIT,
         };`,
         context
     );
     const api = context.__testExports;
     api.clock = clock;
+    api.intervals = intervals;
     api.pumpFrames = (count, stepMs = 1000) => {
         for (let index = 0; index < count; index += 1) {
             const callback = frames.shift();
@@ -238,31 +248,31 @@ function dividers(feed) {
     return feed.children.filter((child) => String(child.className || "").includes("ceo-compression-divider"));
 }
 
-test("长按未满 5 秒松手不发起压缩，进度环归零", () => {
+test("长按未满 3 秒松手不发起压缩，进度环归零", () => {
     const api = loadApp();
     api.context.beginCeoContextCompression = (sessionId) => {
         api.compressCalls.push(sessionId);
     };
 
     api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
-    api.pumpFrames(4);
+    api.pumpFrames(2);
     api.finishCeoBrainHold();
 
     assert.deepEqual(api.compressCalls, []);
-    assert.equal(api.clock.now, 4000);
+    assert.equal(api.clock.now, 2000);
     assert.equal(api.U.ceoComposerUsageBrain.style.values["--ceo-brain-hold"], "0");
     assert.equal(api.U.ceoComposerUsageBrain.classList.contains("is-holding"), false);
     assert.equal(api.S.ceoBrainHold.active, false);
 });
 
-test("长按满 5 秒发起压缩并吞掉随后到达的 click", () => {
+test("长按满 3 秒发起压缩并吞掉随后到达的 click", () => {
     const api = loadApp();
     api.context.beginCeoContextCompression = (sessionId) => {
         api.compressCalls.push(sessionId);
     };
 
     api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
-    api.pumpFrames(5);
+    api.pumpFrames(3);
 
     assert.deepEqual(api.compressCalls, ["web:test"]);
     assert.equal(api.S.ceoBrainHoldConsumedClick, true);
@@ -284,20 +294,105 @@ test("触摸与右键不启动长按", () => {
     assert.equal(api.S.ceoBrainHold.active, false);
 });
 
-test("渠道会话与上传中拒绝压缩并给出原因", () => {
+test("渠道会话同样可以长按压缩，上传中与正在压缩才拒绝", () => {
     const api = loadApp();
+    api.context.beginCeoContextCompression = (sessionId) => {
+        api.compressCalls.push(sessionId);
+    };
 
     api.S.activeSessionId = "ext:qq";
-    assert.equal(api.ceoBrainHoldBlockedReason(), "只有本地会话可以压缩上下文");
+    assert.equal(api.ceoBrainHoldBlockedReason(), "");
+    api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
+    api.pumpFrames(3);
+    assert.deepEqual(api.compressCalls, ["ext:qq"]);
 
-    api.S.activeSessionId = "web:test";
     api.S.ceoUploadBusy = true;
     assert.equal(api.ceoBrainHoldBlockedReason(), "附件上传中，请稍后再试");
 
     api.S.ceoUploadBusy = false;
     api.S.ceoContextCompressionStatus = "running";
-    api.S.ceoContextCompressionSessionId = "web:test";
+    api.S.ceoContextCompressionSessionId = "ext:qq";
     assert.equal(api.ceoBrainHoldBlockedReason(), "正在压缩上下文");
+});
+
+test("轮询按失败上限容错：单次超时不停跟踪", async () => {
+    const api = loadApp();
+    api.S.ceoContextCompressionSessionId = "web:test";
+    api.S.ceoContextCompressionStatus = "running";
+    const limit = api.CEO_COMPRESSION_POLL_FAIL_LIMIT;
+    let remainingFailures = limit - 1;
+    api.ApiClient.getCeoContextCompression = async () => {
+        if (remainingFailures > 0) {
+            remainingFailures -= 1;
+            throw new Error("Request timeout");
+        }
+        return { status: "completed" };
+    };
+
+    api.startCeoContextCompressionPolling("web:test");
+    const poll = api.intervals[api.intervals.length - 1];
+    for (let index = 0; index < limit - 1; index += 1) {
+        await poll.callback();
+        // 大会话收尾会把事件循环占住数秒，单次超时不能把还在跑的压缩判成结束。
+        assert.equal(poll.cleared, false);
+        assert.equal(api.S.ceoContextCompressionStatus, "running");
+    }
+    await poll.callback();
+    assert.equal(api.S.ceoContextCompressionStatus, "completed");
+    assert.equal(poll.cleared, true);
+});
+
+test("轮询连续失败到上限才放弃跟踪", async () => {
+    const api = loadApp();
+    api.S.ceoContextCompressionSessionId = "web:test";
+    api.S.ceoContextCompressionStatus = "running";
+    api.ApiClient.getCeoContextCompression = async () => {
+        throw new Error("Request timeout");
+    };
+
+    api.startCeoContextCompressionPolling("web:test");
+    const poll = api.intervals[api.intervals.length - 1];
+    for (let index = 0; index < api.CEO_COMPRESSION_POLL_FAIL_LIMIT - 1; index += 1) {
+        await poll.callback();
+        assert.equal(poll.cleared, false);
+    }
+    await poll.callback();
+    assert.equal(poll.cleared, true);
+});
+
+test("压缩没有落区分线时给出原因而不是让线凭空消失", () => {
+    const api = loadApp();
+    api.S.ceoContextCompressionSessionId = "web:test";
+    api.S.ceoContextCompressionStatus = "running";
+
+    api.applyCeoContextCompressionStatus({ status: "not_needed", reason: "no_compressible_history" });
+
+    const toast = api.toasts.find((entry) => entry.title === "上下文未压缩");
+    assert.ok(toast, "not_needed 终局必须解释一句");
+    assert.match(toast.text, /没有可压缩的历史/);
+});
+
+test("只读的渠道会话照样拉 composer 预估", async () => {
+    const api = loadApp();
+    let requested = "";
+    api.S.activeSessionId = "ext:qq";
+    api.S.ceoSessions = [
+        { session_id: "ext:qq", session_family: "channel", is_readonly: true, message_count: 42 },
+    ];
+    api.ApiClient.estimateCeoComposerPreflight = async (sessionId) => {
+        requested = sessionId;
+        return {
+            estimated_total_tokens: 15230,
+            context_window_tokens: 390000,
+            ratio: 0.039,
+            provider_model: "openai:glm-5.2",
+        };
+    };
+
+    const item = await api.refreshCeoComposerUsageEstimate();
+
+    assert.equal(requested, "ext:qq");
+    assert.equal(item?.estimated_total_tokens, 15230);
 });
 
 test("手动压缩进行中即视为该会话正在压缩", () => {
@@ -326,6 +421,10 @@ test("实时区分线只挂一条，进行中的图标即暂停按钮", () => {
     assert.equal(live[0].dataset.ceoCompressionState, "running");
     assert.match(live[0].innerHTML, /上下文压缩中/);
     assert.match(live[0].innerHTML, /data-ceo-compress-pause/);
+    // 图标自绘：旋转环 + 中间两条竖杠，且不依赖 lucide 字形替换。
+    assert.match(live[0].innerHTML, /class="ceo-compression-divider-spinner"/);
+    assert.match(live[0].innerHTML, /<i><\/i><i><\/i>/);
+    assert.doesNotMatch(live[0].innerHTML, /data-lucide/);
 
     api.S.ceoContextCompressionStatus = "idle";
     api.syncCeoCompressionDivider();
@@ -340,11 +439,39 @@ test("终态区分线不带暂停按钮，完成态只有文案", () => {
     assert.match(completed.innerHTML, /会话已压缩/);
     assert.doesNotMatch(completed.innerHTML, /data-ceo-compress-pause/);
     assert.doesNotMatch(completed.innerHTML, /data-lucide/);
+    assert.doesNotMatch(completed.innerHTML, /ceo-compression-divider-spinner/);
 
     const paused = api.appendCeoCompressionDivider("paused", { interactive: false });
     assert.match(paused.innerHTML, /压缩已暂停/);
-    assert.match(paused.innerHTML, /data-lucide="pause"/);
+    assert.match(paused.innerHTML, /ceo-compression-divider-spinner is-bars-only/);
+    assert.doesNotMatch(paused.innerHTML, /data-lucide/);
     assert.doesNotMatch(paused.innerHTML, /data-ceo-compress-pause/);
+});
+
+test("切走再切回同一会话，实时区分线与轮询都要恢复", () => {
+    const api = loadApp();
+    api.S.activeSessionId = "ext:qq";
+    api.S.ceoContextCompressionSessionId = "ext:qq";
+    api.S.ceoContextCompressionStatus = "running";
+
+    api.syncCeoCompressionDivider();
+    assert.equal(dividers(api.U.ceoFeed).length, 1);
+
+    // 切走：这条线属于那个会话，不该留在别的会话视图里。
+    api.S.activeSessionId = "web:other";
+    api.syncCeoCompressionDivider();
+    assert.equal(dividers(api.U.ceoFeed).length, 0);
+    // 切走时轮询自停（真实代码里由 stopCeoContextCompressionPolling 做）。
+    api.S.ceoContextCompressionPollId = null;
+
+    // 切回：线必须重新挂上，轮询必须续上，否则终局永远收不到，只能靠刷新网页。
+    api.S.activeSessionId = "ext:qq";
+    api.syncCeoCompressionDivider();
+    assert.equal(dividers(api.U.ceoFeed).length, 1);
+    assert.notEqual(api.S.ceoContextCompressionPollId, null);
+    api.S.ceoContextCompressionStatus = "idle";
+    api.S.ceoContextCompressionSessionId = "";
+    api.stopCeoContextCompressionPolling?.();
 });
 
 test("转录标记只认 completed 与 paused 两种终态", () => {
@@ -480,4 +607,35 @@ test("压缩 toast 让位给会话流区分线，长按环与提示进入 DOM", 
     assert.match(CSS_CODE, /\.message\.ceo-compression-divider\s*\{[^}]*\}/);
     assert.match(CSS_CODE, /--ceo-context-compress-color:\s*#39c5bb/);
     assert.match(CSS_CODE, /\.ceo-compression-divider\.is-running[^}]*animation/);
+});
+
+test("区分线两端留白且文字居中，图标自绘旋转，长按 3 秒、悬停不发亮", () => {
+    // 整条线两端留白，不顶到会话区边缘。
+    assert.match(CSS_CODE, /\.ceo-compression-divider-inner\s*\{[^}]*padding-inline/);
+    // 左右两条线等宽（都 flex:1）文字才居中；旧的 ::after 定宽写法会把文字推到右侧。
+    assert.match(
+        CSS_CODE,
+        /\.ceo-compression-divider-inner::before,\s*\.ceo-compression-divider-inner::after\s*\{[^}]*flex: 1 1 0/
+    );
+    assert.equal(CSS_CODE.includes("width: 12%"), false);
+    // 线条加粗。
+    assert.match(CSS_CODE, /\.ceo-compression-divider-inner::before,[^}]*height: 2px/);
+    // 进行中图标：环在转、中间两条竖杠，尺寸按 em 与文字同号。
+    assert.match(CSS_CODE, /\.ceo-compression-divider-spinner\s*\{[^}]*width: 1\.15em/);
+    assert.match(CSS_CODE, /\.ceo-compression-divider-spinner::before\s*\{[^}]*interaction-step-icon-spin/);
+    // 图标占住文字右侧的推进宽度，左侧线留一段等宽间隙把文字补回正中。
+    assert.match(
+        CSS_CODE,
+        /\.ceo-compression-divider\.is-running \.ceo-compression-divider-inner::before,[^}]*margin-right/
+    );
+    // 全局 prefers-reduced-motion 规则把所有 animation 打成 none；压缩环必须豁免，
+    // 否则「进行中」图标在这类机器上就是静态的（用户报的正是这个）。
+    assert.match(
+        CSS_CODE,
+        /@media \(prefers-reduced-motion: reduce\) \{\s*\.ceo-compression-divider-spinner::before\s*\{[^}]*!important/
+    );
+    // 悬停只露出提示，不再提亮光晕；长按阈值 3 秒；渠道会话不再是拒绝理由。
+    assert.equal(CSS_CODE.includes(".ceo-context-usage-brain:hover::after"), false);
+    assert.match(APP_CODE, /const CEO_BRAIN_LONG_PRESS_MS = 3000;/);
+    assert.equal(APP_CODE.includes("只有本地会话可以压缩上下文"), false);
 });

@@ -596,6 +596,12 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "max_context_tokens": context_window_tokens,
             "provider_model": provider_model,
         }
+        # shrink 原因要在落盘之前就位：artifact 的该字段取自 state 而不是会话属性
+        # （`_ceo_runtime_ops` 里 `_persist_frontdoor_actual_request` 会按 state 反向覆盖会话属性），
+        # 事后才设的话工件会带着上一轮的旧原因，取证时这条基线缩短就对不上是谁干的。
+        shrink_reason = str(result.history_shrink_reason or "token_compression")
+        state_for_request["frontdoor_history_shrink_reason"] = shrink_reason
+        setattr(session, "_frontdoor_history_shrink_reason", shrink_reason)
         self._persist_frontdoor_actual_request(
             state=state_for_request,
             runtime=runtime,
@@ -614,7 +620,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             request_kind="frontdoor_manual_compression_request",
             request_lane="manual_context_compression",
         )
-        setattr(session, "_frontdoor_history_shrink_reason", str(result.history_shrink_reason or "token_compression"))
         sync_continuity = getattr(session, "_sync_completed_continuity_snapshot", None)
         if callable(sync_continuity):
             sync_continuity(source_reason="finalize")

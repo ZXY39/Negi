@@ -4028,13 +4028,12 @@ textarea {
     position: relative;
 }
 
-/* 脑图标既是用量表也是本面板入口：只加悬停/展开反馈，不加按钮外壳。 */
-.ceo-context-usage-brain:hover,
+/* 脑图标既是入口也是用量表：悬停只负责露出长按提示，不提亮、不上浮；
+   抬起与光晕抬升都留给面板真正打开的那一刻。 */
 .ceo-context-usage-brain.is-panel-open {
     transform: translateY(-1px);
 }
 
-.ceo-context-usage-brain:hover::after,
 .ceo-context-usage-brain.is-panel-open::after {
     opacity: 1;
 }
@@ -4589,7 +4588,7 @@ textarea {
     animation: ceo-context-usage-brain-pulse 1.8s ease-in-out infinite;
 }
 
-/* 长按进度环：按住时从 12 点方向填满 5 秒即发起压缩，松手立刻回到 0。 */
+/* 长按进度环：按住时从 12 点方向填满 3 秒即发起压缩，松手立刻回到 0。 */
 .ceo-context-usage-brain-ring {
     position: absolute;
     left: 50%;
@@ -4615,7 +4614,8 @@ textarea {
     opacity: 1;
 }
 
-/* 悬停提示说清长按能做什么；用量读数仍只在点开的面板里出现一次。 */
+/* 悬停提示说清长按能做什么；用量读数仍只在点开的面板里出现一次。
+   提示是中性贴片，不带品牌色底与描边——悬停时不该有任何发亮的东西。 */
 .ceo-context-usage-brain-hint {
     position: absolute;
     left: 50%;
@@ -4623,8 +4623,8 @@ textarea {
     z-index: 7;
     padding: 3px 8px;
     border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--ceo-context-compress-color) 42%, transparent);
-    background: color-mix(in srgb, var(--ceo-context-compress-color) 16%, var(--bg-panel));
+    border: 1px solid var(--border-strong);
+    background: var(--bg-panel);
     color: var(--text-primary);
     font-size: 0.66rem;
     line-height: 1.4;
@@ -4939,19 +4939,21 @@ textarea {
 }
 
 /* 上下文压缩区分线：线色取品牌青绿 #39c5bb（与 unread 角标同色）。
-   进行中的那条是 live-only，终态的两条由转录里的持久标记行渲染，永久留在历史里。 */
+   进行中的那条是 live-only，终态的两条由转录里的持久标记行渲染，永久留在历史里。
+   左右两条线等宽所以文字居中；整条线两端各留一段空白，不顶到会话区边缘。 */
 .message.ceo-compression-divider {
     justify-content: center;
-    padding: 6px 0;
+    padding: 8px 0;
 }
 
 .ceo-compression-divider-inner {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     width: 100%;
+    padding-inline: clamp(20px, 7%, 88px);
     color: color-mix(in srgb, var(--ceo-context-compress-color) 78%, var(--text-primary));
-    font-size: 0.74rem;
+    font-size: 0.78rem;
     line-height: 1.2;
     letter-spacing: 0.02em;
 }
@@ -4959,14 +4961,18 @@ textarea {
 .ceo-compression-divider-inner::before,
 .ceo-compression-divider-inner::after {
     content: "";
-    flex: 1;
-    height: 1px;
+    flex: 1 1 0;
+    min-width: 0;
+    height: 2px;
+    border-radius: 999px;
     background: color-mix(in srgb, var(--ceo-context-compress-color) 55%, transparent);
 }
 
-.ceo-compression-divider-inner::after {
-    flex: none;
-    width: 12%;
+/* 带图标的两种状态里，图标排在文字右侧会把文字推离中轴；左侧线后留一段与
+   「图标 + 间距」等宽的透明间隙，两条线仍然等长，而文字自己正好落在正中。 */
+.ceo-compression-divider.is-running .ceo-compression-divider-inner::before,
+.ceo-compression-divider.is-paused .ceo-compression-divider-inner::before {
+    margin-right: calc(1.15em + 10px);
 }
 
 .ceo-compression-divider-icon,
@@ -4979,7 +4985,9 @@ textarea {
 .ceo-compression-divider-action {
     border: 0;
     padding: 2px;
-    margin: 0;
+    /* 负外边距抵掉这 2px 内边距的布局宽度：可点区域和悬停底不变，但按钮版与非按钮版
+       的图标推进宽度一致，上面的左侧补偿间隙因此对两种行都把文字精确留在正中。 */
+    margin: -2px;
     background: none;
     border-radius: 999px;
     cursor: pointer;
@@ -4990,8 +4998,46 @@ textarea {
     background: color-mix(in srgb, var(--ceo-context-compress-color) 16%, transparent);
 }
 
-.ceo-compression-divider.is-running .ceo-compression-divider-action > svg {
+/* 图标尺寸按 em 跟随上面的字号，与文字同大；环转、中间两条竖杠静止，
+   读起来就是「正在跑，点这里可以停」。 */
+.ceo-compression-divider-spinner {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    width: 1.15em;
+    height: 1.15em;
+}
+
+.ceo-compression-divider-spinner::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px solid color-mix(in srgb, var(--ceo-context-compress-color) 22%, transparent);
+    border-top-color: var(--ceo-context-compress-color);
+    border-radius: 999px;
     animation: interaction-step-icon-spin 0.9s linear infinite;
+}
+
+.ceo-compression-divider-spinner.is-bars-only::before {
+    content: none;
+}
+
+.ceo-compression-divider-spinner > i {
+    width: 2px;
+    height: 0.52em;
+    border-radius: 1px;
+    background: currentColor;
+}
+
+/* 全局 prefers-reduced-motion 规则会把所有 animation 打成 none，这条豁免压缩环：
+   它是「压缩还在跑」的唯一状态信号，冻住就等于没有反馈（正是图标看起来静态的原因）。
+   选择器比全局的 `*::before` 更具体，两边都带 !important 时按特异性取胜。 */
+@media (prefers-reduced-motion: reduce) {
+    .ceo-compression-divider-spinner::before {
+        animation: interaction-step-icon-spin 0.9s linear infinite !important;
+    }
 }
 
 .ceo-compression-divider.is-running .ceo-compression-divider-inner::after {
