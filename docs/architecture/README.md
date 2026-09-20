@@ -97,7 +97,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 会话固定了指定模型却仍走模型链、固定模型被删除/禁用后未回退、或切换后用量表按旧模型窗口显示 → `config-and-models.md`「会话级固定模型优先于角色链」+ `web-and-admin.md`「Composer Model Mode Panel」
 - 上下文脑图标只按新输入变化、读数长期低于上一请求的真实输入规模 → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」+ `web-and-admin.md`「Composer Context Usage Meter」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、渠道会话脑图标没有读数 → `web-and-admin.md`「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
-- 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」
+- 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
 - 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 

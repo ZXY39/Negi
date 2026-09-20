@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from g3ku.runtime.tool_history import extract_call_id
@@ -878,24 +881,389 @@ def stage_ref_candidates(
     return ordered
 
 
+# --- 压缩信封（两车道共用：CEO/frontdoor 与 execution/acceptance 节点） ----------
+#
+# 一次内联 `token_compression` 除摘要正文外还要产出三件东西：交给模型挑号的证据引用
+# 候选清单、模型选完后由运行时逐字回填的索引小节、被收口阶段的落档指针。让模型自己
+# 抄引用不可靠（跨代实测：路径逐字保真约 30%、不透明 id 约 10%），所以选择权给模型、
+# 逐字性归运行时；两车道共用同一份实现，避免同一合同出现第二套写法后各自漂移。
+
+TOKEN_COMPACT_V2_PREFIX = "[G3KU_TOKEN_COMPACT_V2]"
+STAGE_REF_INDEX_HEADING = "## 证据索引"
+STAGE_ARCHIVE_HEADING = "## 阶段归档"
+STAGE_REF_CANDIDATE_HEADING = "【证据引用候选】"
+STAGE_REF_SELECTION_RULE = (
+    "上文末尾的【证据引用候选】列出历史阶段登记过的证据引用（编号 + 引用 + 说明）。\n"
+    "要保留哪几条，就在正文末尾另起一节「## 证据索引」，每行只写一个 `- [#编号]`；"
+    "引用的完整内容由系统按编号逐字回填。\n"
+    "不要抄写、改写或凭记忆补造引用内容与编号；没有值得保留的引用就不要输出这一节。"
+)
+
+_FILE_LINE_SUFFIX = re.compile(r":\d+(-\d+)?$")
+_REF_NUMBER_IN_LINE = re.compile(r"\d{1,4}")
+
+
+def is_filesystem_ref(ref: Any) -> bool:
+    """区分文件系统路径与运行时句柄，只有前者做存在性复核。
+
+    `task:` / `artifact:` / `node:` / 裸 id 由运行时对象解析，按文件系统判定会被
+    误杀成死链；Windows 盘符路径的 ``:`` 是路径的一部分而不是命名空间，必须单独认。"""
+    text = str(ref or "").strip()
+    if not text:
+        return False
+    if len(text) > 2 and text[1] == ":" and text[2] in {"/", "\\"}:
+        return True
+    stripped = _FILE_LINE_SUFFIX.sub("", text)
+    scheme_index = stripped.find(":")
+    separator_index = min((index for index in (stripped.find("\\"), stripped.find("/")) if index >= 0), default=-1)
+    if scheme_index >= 0 and (separator_index < 0 or scheme_index < separator_index):
+        return False
+    return separator_index >= 0
+
+
+def stage_ref_is_dead(ref: Any) -> bool:
+    """引用指向的文件已不存在时为 True；非路径句柄一律不判（无法按文件系统否定）。"""
+    if not is_filesystem_ref(ref):
+        return False
+    text = _FILE_LINE_SUFFIX.sub("", str(ref).strip())
+    try:
+        return not Path(text).exists()
+    except Exception:
+        return False
+
+
+def render_stage_ref_candidate_block(candidates: list[dict[str, Any]]) -> str:
+    """交给摘要模型挑选的带编号候选清单；没有候选时返回空串（不输出空标题）。"""
+    lines = [STAGE_REF_CANDIDATE_HEADING]
+    for item in list(candidates or []):
+        ref = str((item or {}).get("ref") or "").strip()
+        if not ref:
+            continue
+        note = str((item or {}).get("note") or "").strip()
+        lines.append(f"[#{int((item or {}).get('candidate_id') or 0)}] {ref}" + (f" — {note}" if note else ""))
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def split_stage_ref_selection(compressed_text: Any) -> tuple[str, list[int]]:
+    """摘出模型写的 `## 证据索引` 小节并取回编号，正文里由运行时重写该小节。
+
+    每行只认第一个数字：模型若违规把引用正文抄在旁边，抄的那段会被丢掉，回填的仍是
+    逐字原文；越界编号在 `render_stage_ref_index` 阶段丢弃。"""
+    text = str(compressed_text or "")
+    lines = text.splitlines()
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip().startswith(STAGE_REF_INDEX_HEADING)
+        ),
+        None,
+    )
+    if start is None:
+        return text, []
+    end = start + 1
+    while end < len(lines) and not lines[end].strip().startswith("#"):
+        end += 1
+    selected: list[int] = []
+    for line in lines[start + 1 : end]:
+        found = _REF_NUMBER_IN_LINE.search(line)
+        if not found:
+            continue
+        value = int(found.group(0))
+        if value not in selected:
+            selected.append(value)
+    remainder = "\n".join([*lines[:start], *lines[end:]]).strip()
+    return remainder, selected
+
+
+def render_stage_ref_index(candidates: list[dict[str, Any]], selected_ids: list[int]) -> tuple[str, int, int]:
+    """按编号逐字回填索引小节，返回 (小节文本, 保留条数, 因死链丢弃条数)。"""
+    by_id = {int((item or {}).get("candidate_id") or 0): dict(item) for item in list(candidates or [])}
+    lines: list[str] = []
+    dropped_dead = 0
+    for value in list(selected_ids or []):
+        item = by_id.get(int(value or 0))
+        if not isinstance(item, dict):
+            continue
+        ref = str(item.get("ref") or "").strip()
+        if not ref:
+            continue
+        if stage_ref_is_dead(ref):
+            dropped_dead += 1
+            continue
+        note = str(item.get("note") or "").strip()
+        lines.append(f"- stage {int(item.get('stage_index') or 0)} | {ref}" + (f" — {note}" if note else ""))
+    if not lines:
+        return "", 0, dropped_dead
+    return "\n".join([STAGE_REF_INDEX_HEADING, *lines]), len(lines), dropped_dead
+
+
+def _token_compact_payload(message: Any) -> dict[str, Any]:
+    content = str((message or {}).get("content") or "") if isinstance(message, dict) else ""
+    if not content.startswith(TOKEN_COMPACT_V2_PREFIX):
+        return {}
+    lines = content.split("\n", 2)
+    if len(lines) < 2:
+        return {}
+    try:
+        payload = json.loads(lines[1])
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def stage_created_at_within_watermark(created_at: Any, watermark: Any) -> bool:
+    """阶段创建时间是否落在收口水位线之前（含）。
+
+    两边都出自 `now_iso()`，同时区同精度时字典序即时序；偏移一旦不同字典序就会错，
+    所以能按 ISO 解析就按解析比。任一为空永不命中——宁可少收口一轮，也不能把还在
+    上下文里的阶段收进摘要够不到的地方。"""
+    left = str(created_at or "").strip()
+    right = str(watermark or "").strip()
+    if not left or not right:
+        return False
+    try:
+        return datetime.fromisoformat(left) <= datetime.fromisoformat(right)
+    except ValueError:
+        return left <= right
+
+
+def stage_created_at_ceiling(stages: list[dict[str, Any]]) -> str:
+    """这批阶段里最晚的 created_at，也就是收口水位线；一个可用时间戳都没有时返回空串。"""
+    ceiling = ""
+    for stage in list(stages or []):
+        if not isinstance(stage, dict):
+            continue
+        candidate = str(stage.get("created_at") or "").strip()
+        if candidate and (not ceiling or stage_created_at_within_watermark(ceiling, candidate)):
+            ceiling = candidate
+    return ceiling
+
+
+def stage_archive_selector_from_request_messages(request_messages: Any) -> dict[str, Any]:
+    """读回"这一版摘要该收口哪批阶段"：created_at 水位线 + 存量显式清单。
+
+    清单曾经是唯一口径，但 375 条 stage_id 要 8,469 字符，比它守着的摘要正文还长，
+    而且每轮随块重发。改成一个时间戳上限后还有额外好处：两份账本各维护一套 stage_id
+    序号（实测交集为 0），靠 id 匹配必须再绕一层内容身份，而 created_at 是同一条逻辑
+    阶段在两边共享的同一个值。存量块里的 `stage_ids` 继续读到它被下一次压缩改写为止。
+    历史里可能同时存在多份压缩块（回显残留等），水位线取最新、清单取并集，应用幂等。"""
+    collected_ids: list[str] = []
+    watermark = ""
+    for message in list(request_messages or []):
+        archive = _token_compact_payload(message).get("stage_archive")
+        if not isinstance(archive, dict):
+            continue
+        for item in list(archive.get("stage_ids") or []):
+            stage_id = str(item or "").strip()
+            if stage_id and stage_id not in collected_ids:
+                collected_ids.append(stage_id)
+        candidate = str(archive.get("archived_through_created_at") or "").strip()
+        if candidate and (not watermark or stage_created_at_within_watermark(watermark, candidate)):
+            watermark = candidate
+    return {"stage_ids": collected_ids, "archived_through_created_at": watermark}
+
+
+def stage_message_call_ids(messages: Any) -> set[str]:
+    """一批消息里出现过的工具调用 id（assistant 声明的与 tool 回执的都算）。"""
+    collected: set[str] = set()
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        for tool_call in list(message.get("tool_calls") or []):
+            call_id = extract_call_id((tool_call or {}).get("id"))
+            if call_id:
+                collected.add(call_id)
+        call_id = extract_call_id(message.get("tool_call_id"))
+        if call_id:
+            collected.add(call_id)
+    return {item for item in collected if item}
+
+
+def stage_block_indexes(
+    messages: Any,
+    *,
+    prefixes: tuple[str, ...] = (STAGE_COMPACT_PREFIX, STAGE_EXTERNALIZED_PREFIX, STAGE_RAW_PREFIX),
+) -> set[int]:
+    """请求体里还翻得出来的阶段块编号；`prefixes` 用来只认某一类块。"""
+    indexes: set[int] = set()
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        content = str(message.get("content") or "")
+        if not content.startswith(prefixes):
+            continue
+        try:
+            payload = json.loads(content.split("\n", 1)[1])
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        try:
+            value = int(payload.get("stage_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            indexes.add(value)
+    return indexes
+
+
+def stage_round_call_ids(stage: Any) -> set[str]:
+    """该阶段登记过的工具调用 id；账本条目可能是 dict（前门）或模型（节点），统一走 `_stage_get`。"""
+    collected: set[str] = set()
+    for round_item in list(_stage_get(stage, "rounds", []) or []):
+        for call_id in list(_stage_get(round_item, "tool_call_ids", []) or []):
+            normalized = extract_call_id(call_id)
+            if normalized:
+                collected.add(normalized)
+        for tool in list(_stage_get(round_item, "tools", []) or []):
+            normalized = extract_call_id(_stage_get(tool, "tool_call_id", ""))
+            if normalized:
+                collected.add(normalized)
+    return collected
+
+
+_TERMINAL_STAGE_STATUSES = frozenset({"completed", "failed", "完成", "失败"})
+
+
+def stage_is_terminal(stage: Any) -> bool:
+    """阶段是否已终态：两车道各写一套状态词表（前门 `completed`，节点 `完成` / `失败`），都要认。
+
+    判定"能不能收口/归档"用终态白名单，而不是排除某个"进行中"字样：认不出的状态一律当作
+    还在跑——少收一轮只是多花 token，多收一轮就是把还在写的阶段收进摘要够不到的地方。"""
+    return str(_stage_get(stage, "status", "") or "").strip().lower() in _TERMINAL_STAGE_STATUSES
+
+
+def stage_is_swallowable(
+    stage: Any,
+    *,
+    active_stage_id: str,
+    retained_ids: set[str],
+    body_stage_indexes: set[int],
+    body_call_ids: set[str],
+) -> bool:
+    """这条阶段是否已经不必再逐轮渲染：终态的普通阶段，且肉身和块都不在场。
+
+    工具轮次还留在请求体里、或它自己的阶段块还翻得出来，收口它就是直接在上下文里挖洞；
+    `body_stage_indexes` 的口径由调用方给（压缩时认全部块，提交点只认 raw 块）。
+    `retained_ids` 是近场 raw 窗口（保住最近几条执行细节）让出来的名额。"""
+    if not isinstance(stage, dict) and not hasattr(stage, "stage_id"):
+        return False
+    if str(_stage_get(stage, "stage_kind", "normal") or "normal").strip().lower() != "normal":
+        return False
+    if not stage_is_terminal(stage):
+        return False
+    stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
+    if not stage_id or stage_id == active_stage_id or stage_id in retained_ids:
+        return False
+    if _stage_get(stage, "context_visible", True) is False:
+        return False
+    try:
+        stage_index = int(_stage_get(stage, "stage_index", 0) or 0)
+    except (TypeError, ValueError):
+        stage_index = 0
+    if stage_index in body_stage_indexes:
+        return False
+    return not (stage_round_call_ids(stage) & body_call_ids)
+
+
+def summarized_stage_ids(stage_state: Any, *, body_messages: Any, keep_latest: int = 3) -> list[str]:
+    """一次压缩真正吞掉的阶段：完成普通阶段 − 近场 raw 窗口 − 仍在体内字面存在的阶段。"""
+    retained_ids = retained_completed_stage_ids(stage_state, keep_latest=keep_latest)
+    body_indexes = stage_block_indexes(body_messages)
+    body_call_ids = stage_message_call_ids(body_messages)
+    active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
+    swallowed: list[str] = []
+    for stage in list(_stage_get(stage_state, "stages", []) or []):
+        if not stage_is_swallowable(
+            stage,
+            active_stage_id=active_stage_id,
+            retained_ids=retained_ids,
+            body_stage_indexes=body_indexes,
+            body_call_ids=body_call_ids,
+        ):
+            continue
+        stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
+        if stage_id and stage_id not in swallowed:
+            swallowed.append(stage_id)
+    return swallowed
+
+
+def stage_record_dict(stage: Any) -> dict[str, Any]:
+    """账本条目统一成 dict：前门是 dict，节点是 pydantic 记录。"""
+    if isinstance(stage, dict):
+        return dict(stage)
+    dumper = getattr(stage, "model_dump", None)
+    if not callable(dumper):
+        return {}
+    try:
+        payload = dumper(mode="json")
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def build_stage_archive_document(
+    *,
+    kind: str,
+    owner: str,
+    created_at: Any,
+    stages: list[Any],
+) -> dict[str, Any]:
+    """被收口阶段的完整账本（逐条 key_refs、轮次都在），构造为落档文档。
+
+    只产出内容不碰磁盘：目录解析属于车道职责（前门 session_temp_dir、节点
+    task_temp_dir），共享层不决定文件落哪儿；`kind` / `owner` 让打开文件的模型
+    与维护者一眼分清这是哪条车道的哪份账本。"""
+    records = [item for item in (stage_record_dict(stage) for stage in list(stages or [])) if item]
+    return {
+        "kind": str(kind or "").strip(),
+        "owner": str(owner or "").strip(),
+        "created_at": str(created_at or "").strip(),
+        "stage_count": len(records),
+        "stages": records,
+    }
+
+
 __all__ = [
     "DEFAULT_INTERNAL_RULE_MARKERS",
     "DEFAULT_STAGE_MODE",
     "ECHO_STRIP_ENABLED",
+    "STAGE_ARCHIVE_HEADING",
     "STAGE_COMPACT_PREFIX",
     "STAGE_EXTERNALIZED_PREFIX",
     "STAGE_RAW_PREFIX",
+    "STAGE_REF_CANDIDATE_HEADING",
+    "STAGE_REF_INDEX_HEADING",
+    "STAGE_REF_SELECTION_RULE",
+    "TOKEN_COMPACT_V2_PREFIX",
+    "build_stage_archive_document",
     "compact_stage_prompt_messages_in_place",
     "completed_stage_blocks",
     "current_stage_active_window",
     "decompose_stage_prompt_messages",
+    "is_filesystem_ref",
     "is_stage_block_echo_text",
     "is_stage_context_message",
     "keep_stage_blocks_off_continuation_tail",
     "prepare_stage_prompt_messages",
+    "render_stage_ref_candidate_block",
+    "render_stage_ref_index",
     "repair_split_stage_tool_boundaries",
     "retained_completed_stage_ids",
+    "split_stage_ref_selection",
+    "stage_archive_selector_from_request_messages",
+    "stage_block_indexes",
+    "stage_created_at_ceiling",
+    "stage_created_at_within_watermark",
+    "stage_is_swallowable",
+    "stage_is_terminal",
+    "stage_message_call_ids",
     "stage_prompt_prefix",
+    "stage_record_dict",
     "stage_ref_candidates",
+    "stage_ref_is_dead",
+    "stage_round_call_ids",
     "strip_stage_block_echo",
+    "summarized_stage_ids",
 ]

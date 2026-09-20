@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from main.types import NodeKind, NodeStatus, TaskStatus
 
@@ -154,6 +154,10 @@ class ExecutionStageRecord(Model):
     stage_goal: str = ''
     completed_stage_summary: str = ''
     final_stage: bool = False
+    # 收口标记：False 表示这条完成阶段已经被某次 token_compression 吞进全局摘要，
+    # 不再逐轮进入 provider 上下文。口径与 CEO/frontdoor 一致：只在收口时写出这个键，
+    # 缺失即可见；账本条数与 stage_index 都不变，Web 时间线仍以账本为权威。
+    context_visible: bool = True
     key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
     archive_ref: str = ''
     archive_stage_index_start: int = 0
@@ -163,6 +167,14 @@ class ExecutionStageRecord(Model):
     created_at: str = ''
     finished_at: str = ''
     rounds: list[ExecutionStageRound] = Field(default_factory=list)
+
+    @model_serializer(mode='wrap')
+    def _serialize_omitting_visible_flag(self, handler: Any) -> dict[str, Any]:
+        """落盘只写"已收口"这一侧：可见是默认态，逐条写 true 等于给每条阶段都加一份体积。"""
+        payload = handler(self)
+        if payload.get('context_visible') is not False:
+            payload.pop('context_visible', None)
+        return payload
 
 
 class ExecutionStageState(Model):

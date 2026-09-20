@@ -2724,6 +2724,7 @@ class TaskLogService:
                     'archive_stage_index_end': int(stage.archive_stage_index_end or 0),
                     'tool_round_budget': int(stage.tool_round_budget or 0),
                     'tool_rounds_used': int(stage.tool_rounds_used or 0),
+                    **({} if stage.context_visible else {'context_visible': False}),
                 }
                 for stage in list(state.stages or [])
                 if str(stage.status or '') != _EXECUTION_STAGE_STATUS_ACTIVE
