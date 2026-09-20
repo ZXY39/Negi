@@ -32,6 +32,12 @@ from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_PROJECTION_MODE,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
+    apply_cc_upsert as _apply_cc_upsert,
+)
+from g3ku.runtime.frontdoor.canonical_context import (
+    materialize_transcript_view as _materialize_transcript_view,
+)
+from g3ku.runtime.frontdoor.canonical_context import (
     project_canonical_context_for_transcript as _project_canonical_context_for_transcript,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
@@ -722,6 +728,28 @@ def _snapshot_compression_marker(metadata: Any) -> dict[str, Any]:
     return marker
 
 
+def _snapshot_row_transcript_view(
+    raw: dict[str, Any],
+    role: str,
+    storage_cursor: dict[str, Any],
+) -> dict[str, Any]:
+    """三态解析一条转录行的投影视图：stage_window 直通、cc_upsert 重放一步、旧格式投影一次。
+
+    存储重放链必须遍历所有带轨道的行（含 ui_visible False 的 heartbeat/cron 运行轮——
+    写入侧的 upsert 是相对物理上一轨道行编码的），与只遍历可见行的出帧 delta 链分开。"""
+    if role != 'assistant':
+        return {}
+    stored = raw.get('canonical_context')
+    if isinstance(stored, dict) and stored:
+        if str(raw.get('canonical_context_projection') or '').strip() == TRANSCRIPT_PROJECTION_MODE:
+            return stored
+        return _project_canonical_context_for_transcript(stored)
+    upsert = raw.get('cc_upsert')
+    if isinstance(upsert, dict):
+        return _apply_cc_upsert(storage_cursor, upsert)
+    return {}
+
+
 def _build_ceo_snapshot(
     messages: list[dict[str, Any]] | None,
     *,
@@ -736,17 +764,22 @@ def _build_ceo_snapshot(
     # 滚动保存上一条 assistant 行的转录投影视图：快照按序回放，逐行重新投影会
     # 让整帧构建退化为平方级（渠道会话单转录数十 MB 时实测 12s+）。
     previous_transcript_view: dict[str, Any] = {}
+    # 存储重放游标：cc_upsert 行相对物理上一轨道行编码，须连同隐藏行一起推进。
+    storage_view_cursor: dict[str, Any] = {}
     usage_by_turn = read_session_turn_token_usage(session_id) if session_id else {}
     for index, raw in enumerate(list(messages or [])):
         if not isinstance(raw, dict):
             continue
         metadata = raw.get('metadata') if isinstance(raw.get('metadata'), dict) else {}
+        role = str(raw.get('role') or '').strip().lower()
+        if role not in {'user', 'assistant', 'system'}:
+            continue
+        current_view = _snapshot_row_transcript_view(raw, role, storage_view_cursor)
+        if current_view:
+            storage_view_cursor = current_view
         if metadata.get('ui_visible') is False:
             continue
         if is_internal_ceo_user_message(raw):
-            continue
-        role = str(raw.get('role') or '').strip().lower()
-        if role not in {'user', 'assistant', 'system'}:
             continue
         if hide_pending_users and role == "user" and _snapshot_message_transcript_state(raw) == "pending":
             continue
@@ -759,16 +792,16 @@ def _build_ceo_snapshot(
             content = rewrite_assistant_media_content(session_id, content)
         attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
         canonical_context = (
-            dict(raw.get('canonical_context'))
+            raw.get('canonical_context')
             if role == 'assistant' and isinstance(raw.get('canonical_context'), dict)
-            else {}
+            else None
         )
         compression = (
             dict(raw.get('compression'))
             if role == 'assistant' and isinstance(raw.get('compression'), dict)
             else {}
         )
-        if not content and not attachments and not canonical_context and not compression:
+        if not content and not attachments and not current_view and not compression:
             continue
         item = {'role': role, 'content': content}
         if role == 'assistant':
@@ -778,7 +811,7 @@ def _build_ceo_snapshot(
             # 静默回合的空 assistant 行只为承载阶段轨道；没有轨道就没有可展示的内容，
             # 整行跳过，避免前端渲染出一个空气泡。旧转录里的占位文案同样按静默处理。
             if metadata.get('silent_reply') is True or content == _LEGACY_SILENT_REPLY_TEXT:
-                if not canonical_context:
+                if not current_view:
                     continue
                 item['silent_reply'] = True
                 item['content'] = ''
@@ -797,22 +830,18 @@ def _build_ceo_snapshot(
             item['timestamp'] = timestamp.strip()
         if attachments:
             item['attachments'] = attachments
-        if canonical_context:
-            # 带 stage_window 标记的行落盘时已完成转录投影（幂等），直接用作视图；
-            # 旧格式行才补一次投影。出帧只携带 delta：前端轨道渲染是 delta 优先，
-            # 逐行全量累积 cc 是首帧 payload 平方级膨胀的主项（QQ 渠道会话实测
-            # 69 MB 中 51 MB 前端直接丢弃）。空 delta 以 {} 落键——前端据此渲染
-            # 纯文本气泡而不回退重画旧轨道（org_graph_app.js hasDelta 语义）。
-            if str(raw.get('canonical_context_projection') or '').strip() == TRANSCRIPT_PROJECTION_MODE:
-                current_transcript_view = canonical_context
-            else:
-                current_transcript_view = _project_canonical_context_for_transcript(canonical_context)
+        if current_view:
+            # 出帧只携带 delta：前端轨道渲染是 delta 优先，逐行全量累积 cc 是首帧
+            # payload 平方级膨胀的主项（QQ 渠道会话实测 69 MB 中 51 MB 前端直接
+            # 丢弃）。空 delta 以 {} 落键——前端据此渲染纯文本气泡而不回退重画旧
+            # 轨道（org_graph_app.js hasDelta 语义）。body 回填只对带全量 cc 的行
+            # 用存量原文（旧 raw 行保留未截断正文），cc_upsert 行的正文就在视图里。
             item['canonical_context_delta'] = _ui_canonical_context_delta_from_views(
                 previous_transcript_view,
-                current_transcript_view,
-                canonical_context,
+                current_view,
+                canonical_context if canonical_context is not None else current_view,
             )
-            previous_transcript_view = current_transcript_view
+            previous_transcript_view = current_view
         if compression:
             item['compression'] = compression
         if role == 'assistant':
@@ -870,11 +899,21 @@ def _assistant_canonical_context(message: dict[str, Any] | None) -> dict[str, An
 
 
 def _latest_persisted_assistant_canonical_context(persisted_session: Any | None) -> dict[str, Any]:
-    persisted_messages = getattr(persisted_session, "messages", None)
-    for raw in reversed(list(persisted_messages or [])):
+    messages = list(getattr(persisted_session, "messages", None) or [])
+    for index in range(len(messages) - 1, -1, -1):
+        raw = messages[index]
         canonical_context = _assistant_canonical_context(raw)
         if canonical_context:
             return canonical_context
+        if (
+            isinstance(raw, dict)
+            and str(raw.get("role") or "").strip().lower() == "assistant"
+            and isinstance(raw.get("cc_upsert"), dict)
+        ):
+            # delta 存储行：live/final 基线要的是该行自己的累积视图。
+            view = _materialize_transcript_view(messages, index)
+            if view:
+                return dict(view)
     return {}
 
 

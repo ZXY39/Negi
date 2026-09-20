@@ -24,8 +24,11 @@ from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_PROJECTION_MODE,
     canonical_context_tool_items,
     default_frontdoor_canonical_context,
+    materialize_transcript_view,
     normalize_frontdoor_canonical_context,
+    plan_transcript_cc_row,
     project_canonical_context_for_transcript,
+    repair_transcript_cc_chain,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
 from g3ku.runtime.reply_tokens import is_silent_reply_token
@@ -1496,8 +1499,9 @@ class RuntimeAgentSession:
             if canonical_context:
                 projected = _project_transcript_canonical_context(canonical_context)
                 if projected:
-                    assistant_payload["canonical_context"] = projected
-                    assistant_payload["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+                    assistant_payload.update(
+                        plan_transcript_cc_row(getattr(persisted_session, "messages", None), projected)
+                    )
             if compression:
                 assistant_payload["compression"] = compression
             persisted_session.add_message("assistant", archived_text, **assistant_payload)
@@ -1599,32 +1603,39 @@ class RuntimeAgentSession:
             "status": "paused",
             "metadata": metadata,
         }
+        projected_paused_context: dict[str, Any] = {}
         if canonical_context:
-            projected = _project_transcript_canonical_context(canonical_context)
-            if projected:
-                assistant_payload["canonical_context"] = projected
-                assistant_payload["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+            projected_paused_context = _project_transcript_canonical_context(canonical_context)
         if compression:
             assistant_payload["compression"] = compression
         try:
             persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
             existing_index = self._find_archived_paused_assistant_index(persisted_session, turn_id=turn_id)
             if existing_index is None:
+                if projected_paused_context:
+                    # 暂停归档行永远落全量 checkpoint：它可能被后续替换重写，
+                    # delta 形态会让那次就地变更牵连下游链。
+                    assistant_payload.update(
+                        {
+                            "canonical_context": projected_paused_context,
+                            "canonical_context_projection": TRANSCRIPT_PROJECTION_MODE,
+                        }
+                    )
                 persisted_session.add_message("assistant", assistant_text, **assistant_payload)
             else:
+                # 修复下游链要先按旧链取回被替换行的原视图。
+                replaced_old_view = materialize_transcript_view(
+                    persisted_session.messages,
+                    existing_index,
+                )
                 archived_message = dict(persisted_session.messages[existing_index])
                 archived_message["content"] = assistant_text
                 archived_message["turn_id"] = turn_id
                 archived_message["status"] = "paused"
                 archived_message["metadata"] = metadata
-                if canonical_context:
-                    projected = _project_transcript_canonical_context(canonical_context)
-                    if projected:
-                        archived_message["canonical_context"] = projected
-                        archived_message["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
-                    else:
-                        archived_message.pop("canonical_context", None)
-                        archived_message.pop("canonical_context_projection", None)
+                if projected_paused_context:
+                    archived_message["canonical_context"] = projected_paused_context
+                    archived_message["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
                 else:
                     archived_message.pop("canonical_context", None)
                     archived_message.pop("canonical_context_projection", None)
@@ -1633,6 +1644,12 @@ class RuntimeAgentSession:
                 else:
                     archived_message.pop("compression", None)
                 persisted_session.messages[existing_index] = archived_message
+                # 就地替换了轨道行：以旧视图为锚的后续 delta 行按新链重编码。
+                repair_transcript_cc_chain(
+                    persisted_session.messages,
+                    existing_index,
+                    replaced_old_view,
+                )
                 if hasattr(persisted_session, "updated_at"):
                     persisted_session.updated_at = datetime.now()
             if self._state.session_key.startswith("web:"):
@@ -2564,8 +2581,9 @@ class RuntimeAgentSession:
             if canonical_context:
                 projected = _project_transcript_canonical_context(canonical_context)
                 if projected:
-                    assistant_payload["canonical_context"] = projected
-                    assistant_payload["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+                    assistant_payload.update(
+                        plan_transcript_cc_row(getattr(persisted_session, "messages", None), projected)
+                    )
             if compression:
                 assistant_payload["compression"] = compression
             metadata_payload = dict(assistant_metadata or {})

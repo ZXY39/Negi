@@ -16,6 +16,7 @@ from g3ku.config.loader import get_config_path, load_config
 from g3ku.runtime.external_sessions import ExternalSessionEntry, ExternalSessionRegistry
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
+    materialize_transcript_view,
     project_canonical_context_for_ui_payload,
 )
 from g3ku.runtime.memory_scope import DEFAULT_WEB_MEMORY_SCOPE, normalize_memory_scope
@@ -369,9 +370,13 @@ def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None
     return payload or None
 
 
-def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]:
+def _compact_tool_trace_payload(
+    message: dict[str, Any],
+    *,
+    transcript_view: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     summaries: list[dict[str, str]] = []
-    canonical_context = (
+    canonical_context = transcript_view if transcript_view else (
         message.get('canonical_context')
         if isinstance(message.get('canonical_context'), dict)
         else {}
@@ -393,7 +398,11 @@ def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]
     return summaries[-_RECENT_HISTORY_TOOL_TRACE_LIMIT:]
 
 
-def _history_content_from_message(message: dict[str, Any]) -> str:
+def _history_content_from_message(
+    message: dict[str, Any],
+    *,
+    transcript_view: dict[str, Any] | None = None,
+) -> str:
     blocks: list[str] = []
     content = str(message.get('content') or '').strip()
     if content:
@@ -417,7 +426,7 @@ def _history_content_from_message(message: dict[str, Any]) -> str:
             if task_id and excerpt:
                 lines.append(f"- {task_id}: {excerpt}")
         blocks.append('\n'.join(lines))
-    tool_trace = _compact_tool_trace_payload(message)
+    tool_trace = _compact_tool_trace_payload(message, transcript_view=transcript_view)
     if tool_trace:
         lines = ['Recent tool results:']
         for item in tool_trace:
@@ -428,14 +437,31 @@ def _history_content_from_message(message: dict[str, Any]) -> str:
     return '\n'.join(block for block in blocks if block).strip()
 
 
-def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
+def _live_tail_transcript_view(session: Any, message: dict[str, Any]) -> dict[str, Any] | None:
+    """delta 存储行在 live tail 里的物化视图；全量行返回 None（走原读取路径）。"""
+    if not isinstance(message, dict) or not isinstance(message.get('cc_upsert'), dict):
+        return None
+    rows = list(getattr(session, 'messages', []) or [])
+    for row_index, row in enumerate(rows):
+        if row is message:
+            return materialize_transcript_view(rows, row_index)
+    return None
+
+
+def _history_entry_from_message(
+    message: dict[str, Any],
+    *,
+    transcript_view: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "role": str(message.get("role") or ""),
-        "content": _history_content_from_message(message),
+        "content": _history_content_from_message(message, transcript_view=transcript_view),
     }
     for key in ("tool_calls", "tool_call_id", "name", "canonical_context", "compression"):
         if key in message:
             entry[key] = message[key]
+    if transcript_view and "canonical_context" not in entry:
+        entry["canonical_context"] = transcript_view
     return entry
 
 
@@ -554,10 +580,16 @@ def extract_live_raw_tail_context(
     if pending_users:
         turn_groups.append(list(pending_users))
     if not turn_groups:
-        return [_history_entry_from_message(message) for message in messages], 'transcript'
+        return [
+            _history_entry_from_message(message, transcript_view=_live_tail_transcript_view(session, message))
+            for message in messages
+        ], 'transcript'
     selected_groups = turn_groups[-normalized_turns:]
     flattened = [message for group in selected_groups for message in group]
-    return [_history_entry_from_message(message) for message in flattened], 'transcript'
+    return [
+        _history_entry_from_message(message, transcript_view=_live_tail_transcript_view(session, message))
+        for message in flattened
+    ], 'transcript'
 
 
 def extract_live_raw_tail(
@@ -659,7 +691,9 @@ def final_reply_canonical_merge(canonical_context: Any, canonical_context_delta:
 
 def latest_assistant_message_canonical_context(session: Any, *, exclude_turn_id: str = "") -> dict[str, Any]:
     excluded = str(exclude_turn_id or "").strip()
-    for raw in reversed(list(getattr(session, "messages", []) or [])):
+    messages = list(getattr(session, "messages", []) or [])
+    for row_index in range(len(messages) - 1, -1, -1):
+        raw = messages[row_index]
         if not isinstance(raw, dict):
             continue
         if str(raw.get("role") or "").strip().lower() != "assistant":
@@ -679,6 +713,11 @@ def latest_assistant_message_canonical_context(session: Any, *, exclude_turn_id:
         canonical_context = raw.get("canonical_context")
         if isinstance(canonical_context, dict) and canonical_context:
             return dict(canonical_context)
+        if isinstance(raw.get("cc_upsert"), dict):
+            # delta 存储行：调用方要的是该行自己的累积视图。
+            view = materialize_transcript_view(messages, row_index)
+            if view:
+                return dict(view)
     return {}
 
 
@@ -883,9 +922,15 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     # disabled), where open() fails with FileNotFoundError even though the
     # parent directory exists.
     temp_path = directory / f"{path.name}.{uuid.uuid4().hex[:12]}.tmp"
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
-    temp_path.replace(path)
+    try:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        temp_path.replace(path)
+    except BaseException:
+        # Failed writes used to leak `.tmp` files next to every artifact they
+        # retried; the manager's transcript rewrite path cleans up and re-raises.
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _normalized_name_list(values: Any) -> list[str]:
@@ -1397,9 +1442,13 @@ def _atomic_write_json_gz(path: Path, payload: dict[str, Any]) -> None:
     directory = ensure_dir(path.parent)
     # Same short-temp-suffix contract as _atomic_write_json (Windows MAX_PATH).
     temp_path = directory / f"{path.name}.{uuid.uuid4().hex[:12]}.tmp"
-    with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False)
-    temp_path.replace(path)
+    try:
+        with gzip.open(temp_path, "wt", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        temp_path.replace(path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _prune_turn_boundary_snapshots(directory: Path, *, keep: int = TURN_BOUNDARY_SNAPSHOT_KEEP) -> None:
