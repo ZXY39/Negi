@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -87,6 +86,7 @@ async def test_unparseable_reviews_stop_at_cap_and_fail_closed() -> None:
     assert result["allowed_indexes"] == []
     assert len(result["blocked_specs"]) == len(specs)
     assert "unparseable" in result["error_text"]
+    assert result["review_outcome"] == "system_failure"
     assert result["review_attempts"] == node_runner_module._SPAWN_REVIEW_MAX_ATTEMPTS
     # 降级路径同样要留下体积证据，否则这条车道仍然不可度量
     assert result["review_request_chars"] == len("review prompt") + len("review context payload")
@@ -108,6 +108,7 @@ async def test_first_attempt_review_records_attempts_and_request_size() -> None:
     assert backend.calls == 1
     assert result["allowed_indexes"] == [0, 1]
     assert result["error_text"] == ""
+    assert result["review_outcome"] == "verdict"
     assert result["review_attempts"] == 1
     assert result["review_request_chars"] > 0
     assert runner.usage_records == 1
@@ -115,15 +116,18 @@ async def test_first_attempt_review_records_attempts_and_request_size() -> None:
 
 class _ApplyStub:
     """`_apply_spawn_review_results` 是按白名单重建持久载荷的，新增字段必须在这里
-    也落一次——否则车道证据只存在于函数返回值里，节点详情与投影永远读不到。"""
+    也落一次——否则车道证据只存在于函数返回值里，节点详情与投影永远读不到。
+    被拦截结果的构造走真实实现，分型（裁决 vs 车道故障）正是那条路径要锁的行为。"""
 
     _apply_spawn_review_results = NodeRunner._apply_spawn_review_results
+    _spawn_review_blocked_result = NodeRunner._spawn_review_blocked_result
 
     def __init__(self) -> None:
         self.saved: dict[str, Any] = {}
+        self.entry_updates: list[dict[str, Any]] = []
 
-    def _update_spawn_entry(self, **_kwargs: Any) -> None:
-        return None
+    def _update_spawn_entry(self, **kwargs: Any) -> None:
+        self.entry_updates.append(kwargs)
 
     def _spawn_entry_non_terminal_node(self, _entry: Any) -> str:
         return ""
@@ -131,18 +135,12 @@ class _ApplyStub:
     def _warn_spawn_entry_review_over_live_node(self, **_kwargs: Any) -> None:
         return None
 
-    def _spawn_review_blocked_result(self, _spec: Any, *, reason: str, suggestion: str) -> Any:
-        return SimpleNamespace(node_output_summary=reason, review_blocked=True)
-
     def _save_spawn_cache(self, _task_id: str, _node_id: str, _cache_key: str, payload: dict) -> None:
         self.saved.update(payload)
 
 
-def test_review_forensics_survive_the_persisted_spawn_payload() -> None:
-    runner = _ApplyStub()
-    specs = _specs(2)
-
-    allowed = runner._apply_spawn_review_results(
+def _apply_stub_review(stub: _ApplyStub, *, outcome: str, specs: list[SpawnChildSpec]) -> Any:
+    return stub._apply_spawn_review_results(
         task_id="task:review-persist",
         parent_node_id="node:parent",
         cache_key="call:review-persist",
@@ -152,14 +150,64 @@ def test_review_forensics_survive_the_persisted_spawn_payload() -> None:
             "reviewed_at": "2026-09-20T00:00:00",
             "requested_specs": [],
             "allowed_indexes": [0],
-            "blocked_specs": [{"index": 1, "reason": "dup", "suggestion": "split"}],
-            "error_text": "",
+            "blocked_specs": [{"index": 1, "reason": "dup" if outcome == "verdict" else "429 storm", "suggestion": "split"}],
+            "error_text": "" if outcome == "verdict" else "Error code: 429",
+            "review_outcome": outcome,
             "review_attempts": 3,
             "review_request_chars": 4242,
         },
     )
 
+
+def test_review_forensics_survive_the_persisted_spawn_payload() -> None:
+    runner = _ApplyStub()
+
+    allowed = _apply_stub_review(runner, outcome="verdict", specs=_specs(2))
+
     assert allowed == [0]
     persisted = runner.saved["spawn_review"]
     assert persisted["review_attempts"] == 3
     assert persisted["review_request_chars"] == 4242
+    assert persisted["review_outcome"] == "verdict"
+
+
+def test_system_failure_outcome_is_typed_apart_from_a_review_verdict() -> None:
+    runner = _ApplyStub()
+
+    _apply_stub_review(runner, outcome="system_failure", specs=_specs(2))
+
+    blocked = [u for u in runner.entry_updates if u.get("review_decision") == "blocked"]
+    assert len(blocked) == 1
+    assert blocked[0]["blocked_reason"] == "429 storm"
+    assert runner.saved["spawn_review"]["review_outcome"] == "system_failure"
+    assert runner.saved["spawn_review"]["error_text"] == "Error code: 429"
+    # 故障态不得回落到"未批准该候选"那句兜底文案
+    assert "未批准" not in blocked[0]["blocked_reason"]
+
+
+def test_blocked_result_text_names_the_existing_final_result_call() -> None:
+    failure = NodeRunner._spawn_review_blocked_result(
+        _specs(1)[0],
+        reason="Error code: 429",
+        suggestion="",
+        system_failure=True,
+    )
+    verdict = NodeRunner._spawn_review_blocked_result(
+        _specs(1)[0],
+        reason="与兄弟节点重复",
+        suggestion="拆批",
+        system_failure=False,
+    )
+
+    assert failure.check_result == "派生未审查（系统故障）"
+    assert verdict.check_result == "派生已被拦截"
+    assert failure.failure_info is not None
+    assert failure.failure_info.source == "runtime"
+    assert failure.failure_info.delivery_status == "blocked"
+    assert "Error code: 429" in failure.failure_info.blocking_reason
+    assert verdict.failure_info is None
+    # 文案必须指向真实存在的工具与 schema 字段，否则模型会去找一个不存在的动作
+    assert "submit_final_result" in failure.node_output
+    assert "delivery_status='blocked'" in failure.node_output
+    assert "派生未被审查" in failure.node_output
+    assert "submit_final_result" not in verdict.node_output
