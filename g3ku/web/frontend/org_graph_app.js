@@ -31,6 +31,9 @@ const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
+// 长按上下文脑图标：按住先静置 200ms 起手，之后才开始计时并显示进度环。
+// 目的是让普通点击（含手抖的短按）完全不出现压缩进度反馈，计时从起手完成的那一刻算满 2 秒。
+const CEO_BRAIN_HOLD_ARM_MS = 200;
 // 长按上下文脑图标满 2 秒即发起手动压缩；进度环按住期间连续刷新。
 const CEO_BRAIN_LONG_PRESS_MS = 2000;
 const CEO_COMPRESSION_POLL_MS = 1000;
@@ -2183,7 +2186,12 @@ function stepCeoBrainHold() {
     const hold = S.ceoBrainHold;
     if (!hold.active) return;
     const elapsed = Date.now() - Number(hold.startedAt || 0);
-    const progress = Math.min(1, elapsed / CEO_BRAIN_LONG_PRESS_MS);
+    if (elapsed < CEO_BRAIN_HOLD_ARM_MS) {
+        // 起手窗口里什么都不画：短按（普通点击）不该先闪出一个进度环再取消。
+        hold.rafId = window.requestAnimationFrame(() => stepCeoBrainHold());
+        return;
+    }
+    const progress = Math.min(1, (elapsed - CEO_BRAIN_HOLD_ARM_MS) / CEO_BRAIN_LONG_PRESS_MS);
     setCeoBrainHoldProgress(progress);
     if (progress < 1) {
         hold.rafId = window.requestAnimationFrame(() => stepCeoBrainHold());

@@ -256,24 +256,46 @@ test("长按未满 2 秒松手不发起压缩，进度环归零", () => {
     };
 
     api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
-    api.pumpFrames(1);
+    api.pumpFrames(2);
     api.finishCeoBrainHold();
 
     assert.deepEqual(api.compressCalls, []);
-    assert.equal(api.clock.now, 1000);
+    assert.equal(api.clock.now, 2000);
     assert.equal(api.U.ceoComposerUsageBrain.style.values["--ceo-brain-hold"], "0");
     assert.equal(api.U.ceoComposerUsageBrain.classList.contains("is-holding"), false);
     assert.equal(api.S.ceoBrainHold.active, false);
 });
 
-test("长按满 2 秒发起压缩并吞掉随后到达的 click", () => {
+test("起手 200ms 内不显示进度环，之后才开始计时", () => {
+    const api = loadApp();
+    api.context.beginCeoContextCompression = (sessionId) => {
+        api.compressCalls.push(sessionId);
+    };
+    const shell = api.U.ceoComposerUsageBrain;
+
+    api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
+    // 静置窗口内（第 100、200ms 两帧）既不计时也不起环。
+    api.pumpFrames(2, 100);
+    assert.equal(shell.style.values["--ceo-brain-hold"], "0");
+    assert.equal(shell.classList.contains("is-holding"), false);
+    assert.equal(api.clock.now, 200);
+
+    // 过了起手窗口才开始填环：第 300ms 时按 (300-200)/2000 计算。
+    api.pumpFrames(1, 100);
+    assert.equal(shell.style.values["--ceo-brain-hold"], "0.05");
+    assert.equal(shell.classList.contains("is-holding"), true);
+    api.finishCeoBrainHold();
+    assert.deepEqual(api.compressCalls, []);
+});
+
+test("长按满 2 秒（起手 200ms 后起算）发起压缩并吞掉随后到达的 click", () => {
     const api = loadApp();
     api.context.beginCeoContextCompression = (sessionId) => {
         api.compressCalls.push(sessionId);
     };
 
     api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
-    api.pumpFrames(2);
+    api.pumpFrames(3);
 
     assert.deepEqual(api.compressCalls, ["web:test"]);
     assert.equal(api.S.ceoBrainHoldConsumedClick, true);
@@ -304,7 +326,7 @@ test("渠道会话同样可以长按压缩，上传中与正在压缩才拒绝",
     api.S.activeSessionId = "ext:qq";
     assert.equal(api.ceoBrainHoldBlockedReason(), "");
     api.beginCeoBrainHold({ button: 0, pointerType: "mouse" });
-    api.pumpFrames(2);
+    api.pumpFrames(3);
     assert.deepEqual(api.compressCalls, ["ext:qq"]);
 
     api.S.ceoUploadBusy = true;
