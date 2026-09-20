@@ -2875,15 +2875,21 @@ function normalizeCeoSnapshotMessage(message = {}) {
     if (role === "assistant") {
         const status = String(message?.status || "").trim().toLowerCase();
         const canonicalContext = normalizeCeoSnapshotCanonicalContext(message?.canonical_context);
-        const canonicalContextDelta = normalizeCeoSnapshotCanonicalContext(message?.canonical_context_delta);
+        // {} delta 是后端"本轮无新轨道"的显式信号：必须原样保留键存在性，
+        // 否则缓存重渲会按"无 delta"回退全量 cc，把上一轮的旧轨道复活。
+        const hasDeltaKey = message?.canonical_context_delta
+            && typeof message.canonical_context_delta === "object";
+        const canonicalContextDelta = hasDeltaKey
+            ? normalizeCeoSnapshotCanonicalContext(message.canonical_context_delta)
+            : null;
         const usage = normalizeCeoTurnUsage(message?.usage);
         if (status) next.status = status;
         if (canonicalContext) next.canonical_context = canonicalContext;
-        if (canonicalContextDelta) next.canonical_context_delta = canonicalContextDelta;
+        if (hasDeltaKey) next.canonical_context_delta = canonicalContextDelta || {};
         if (usage) next.usage = usage;
         if (message?.task_dispatched === true) next.task_dispatched = true;
         if (message?.silent_reply === true) next.silent_reply = true;
-        if (!String(next.content || "").trim() && !canonicalContext && !canonicalContextDelta && status !== "paused") return null;
+        if (!String(next.content || "").trim() && !canonicalContext && !hasDeltaKey && status !== "paused") return null;
         return next;
     }
     if (role === "user" && message?.can_edit_fork === true) next.can_edit_fork = true;

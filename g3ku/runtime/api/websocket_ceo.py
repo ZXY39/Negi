@@ -29,10 +29,19 @@ from g3ku.runtime.ceo_catalog_offload import (
     run_off_event_loop,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
+    TRANSCRIPT_PROJECTION_MODE,
+)
+from g3ku.runtime.frontdoor.canonical_context import (
+    project_canonical_context_for_transcript as _project_canonical_context_for_transcript,
+)
+from g3ku.runtime.frontdoor.canonical_context import (
     project_canonical_context_for_ui_payload as _project_canonical_context_for_ui_payload,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
     ui_canonical_context_delta as _ui_canonical_context_delta,
+)
+from g3ku.runtime.frontdoor.canonical_context import (
+    ui_canonical_context_delta_from_views as _ui_canonical_context_delta_from_views,
 )
 from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.session_keys import is_channel_session_key
@@ -724,7 +733,9 @@ def _build_ceo_snapshot(
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
     hide_pending_users = inflight_status in {"running", "in_progress", "active"}
     items: list[dict[str, Any]] = []
-    previous_assistant_context: dict[str, Any] = {}
+    # 滚动保存上一条 assistant 行的转录投影视图：快照按序回放，逐行重新投影会
+    # 让整帧构建退化为平方级（渠道会话单转录数十 MB 时实测 12s+）。
+    previous_transcript_view: dict[str, Any] = {}
     usage_by_turn = read_session_turn_token_usage(session_id) if session_id else {}
     for index, raw in enumerate(list(messages or [])):
         if not isinstance(raw, dict):
@@ -787,10 +798,21 @@ def _build_ceo_snapshot(
         if attachments:
             item['attachments'] = attachments
         if canonical_context:
-            projected_canonical_context = _project_canonical_context_for_ui_payload(canonical_context)
-            item['canonical_context'] = projected_canonical_context or canonical_context
-            item['canonical_context_delta'] = _ui_canonical_context_delta(previous_assistant_context, canonical_context)
-            previous_assistant_context = projected_canonical_context or canonical_context
+            # 带 stage_window 标记的行落盘时已完成转录投影（幂等），直接用作视图；
+            # 旧格式行才补一次投影。出帧只携带 delta：前端轨道渲染是 delta 优先，
+            # 逐行全量累积 cc 是首帧 payload 平方级膨胀的主项（QQ 渠道会话实测
+            # 69 MB 中 51 MB 前端直接丢弃）。空 delta 以 {} 落键——前端据此渲染
+            # 纯文本气泡而不回退重画旧轨道（org_graph_app.js hasDelta 语义）。
+            if str(raw.get('canonical_context_projection') or '').strip() == TRANSCRIPT_PROJECTION_MODE:
+                current_transcript_view = canonical_context
+            else:
+                current_transcript_view = _project_canonical_context_for_transcript(canonical_context)
+            item['canonical_context_delta'] = _ui_canonical_context_delta_from_views(
+                previous_transcript_view,
+                current_transcript_view,
+                canonical_context,
+            )
+            previous_transcript_view = current_transcript_view
         if compression:
             item['compression'] = compression
         if role == 'assistant':

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from g3ku.runtime.frontdoor.canonical_context import (
+    TRANSCRIPT_PROJECTION_MODE,
     canonical_context_delta,
     merge_turn_stage_state_into_canonical_context,
     normalize_frontdoor_canonical_context,
@@ -303,3 +304,56 @@ def test_ui_payload_projection_keeps_window_bodies_bounded() -> None:
 def test_transcript_projection_returns_empty_for_missing_stage_state() -> None:
     assert project_canonical_context_for_transcript({}) == {}
     assert project_canonical_context_for_transcript({"stages": []}) == {}
+
+
+def _old_loop_deltas(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """改动前 `_build_ceo_snapshot` 的逐行 delta（滚动 UI 投影链），用于 parity 对比。"""
+    previous: dict[str, object] = {}
+    deltas = []
+    for row in rows:
+        canonical_context = row["canonical_context"]
+        projected = project_canonical_context_for_ui_payload(canonical_context)
+        deltas.append(ui_canonical_context_delta(previous, canonical_context))
+        previous = projected or canonical_context
+    return deltas
+
+
+def test_snapshot_delta_contract_and_projection_parity() -> None:
+    from g3ku.runtime.api import websocket_ceo
+
+    def _cc(stage_count: int, revise_last: bool) -> dict[str, object]:
+        stages = [
+            _stage(
+                f"frontdoor-stage-{index}",
+                index,
+                summary=f"summary {index} revised" if (revise_last and index == stage_count) else "",
+                rounds=[
+                    {
+                        "round_index": 1,
+                        "tools": [_tool(f"t{index}", output_text="out " * 500)],
+                    }
+                ],
+            )
+            for index in range(1, stage_count + 1)
+        ]
+        return {"active_stage_id": "", "stages": stages}
+
+    raw_rows = [
+        {"role": "assistant", "content": f"reply {i}", "canonical_context": _cc(4 + i, revise_last=(i == 2))}
+        for i in range(3)
+    ]
+    marked_rows = [
+        {
+            "role": "assistant",
+            "content": f"reply {i}",
+            "canonical_context": project_canonical_context_for_transcript(row["canonical_context"]),
+            "canonical_context_projection": TRANSCRIPT_PROJECTION_MODE,
+        }
+        for i, row in enumerate(raw_rows)
+    ]
+
+    for rows in (raw_rows, marked_rows):
+        items = websocket_ceo._build_ceo_snapshot(rows)
+        assert all("canonical_context" not in item for item in items)
+        assert all("canonical_context_delta" in item for item in items)
+        assert [item["canonical_context_delta"] for item in items] == _old_loop_deltas(rows)

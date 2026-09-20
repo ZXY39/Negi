@@ -833,3 +833,37 @@ test("ceo.tool.reminder forwards live reminder events into the active session fe
     assert.equal(__context.__reminderEvents[0].execution_id, "inline-tool-exec:1");
     assert.equal(__context.__reminderEvents[0].decision, "stop");
 });
+
+test("snapshot.ceo keeps empty-delta rows in cache so re-render cannot resurrect old stages", () => {
+    const { S, initCeoWs, getCeoSessionSnapshotCache, __socket } = loadApp();
+
+    S.activeSessionId = "web:shared";
+    initCeoWs();
+
+    const socket = __socket();
+    assert.ok(socket);
+
+    socket.onmessage({
+        data: JSON.stringify({
+            type: "snapshot.ceo",
+            session_id: "web:shared",
+            data: {
+                messages: [
+                    { role: "assistant", content: "no new rail", canonical_context_delta: {} },
+                    { role: "assistant", content: "", silent_reply: true, canonical_context_delta: {} },
+                ],
+                inflight_turn: null,
+            },
+        }),
+    });
+
+    const entry = getCeoSessionSnapshotCache("web:shared");
+    // 后端快照不再逐行携带全量 canonical_context；{} delta 键必须原样进缓存，
+    // 缓存重渲走 hasDelta 分支渲染纯文本/跳过，而不是回退全量重画旧轨道。
+    assert.ok(entry?.messages?.[0] && "canonical_context_delta" in entry.messages[0]);
+    assert.equal(Object.keys(entry.messages[0].canonical_context_delta).length, 0);
+    assert.equal(entry?.messages?.[0]?.content, "no new rail");
+    assert.equal(entry?.messages?.[1]?.silent_reply, true);
+    assert.ok(entry?.messages?.[1] && "canonical_context_delta" in entry.messages[1]);
+    assert.equal(Object.keys(entry.messages[1].canonical_context_delta).length, 0);
+});
