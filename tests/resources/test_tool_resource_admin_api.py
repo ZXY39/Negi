@@ -394,7 +394,7 @@ async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_age
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'filesystem_edit', 'filesystem_edit_anchors')
+    _copy_repo_tools(workspace, 'filesystem_edit')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -431,10 +431,6 @@ async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_age
             assert 'target' not in properties
             assert 'old_text' in dict(toolskill['example_arguments'] or {})
             assert 'target' not in str(toolskill.get('content') or '')
-
-        anchors = service.get_tool_toolskill('filesystem_edit_anchors')
-        assert anchors is not None
-        assert anchors['required_parameters'] == ['path', 'start_anchor', 'end_anchor', 'new_text']
     finally:
         await service.close()
         manager.close()

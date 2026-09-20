@@ -1409,7 +1409,6 @@ class FilesystemActionTool:
         return {
             'write': 'filesystem_write',
             'edit': 'filesystem_edit',
-            'edit_anchors': 'filesystem_edit_anchors',
             'copy': 'filesystem_copy',
             'move': 'filesystem_move',
             'delete': 'filesystem_delete',
@@ -1421,7 +1420,6 @@ class FilesystemActionTool:
         return {
             'write': 'Write file content to disk.',
             'edit': 'Replace one exact text region in one file with new_text.',
-            'edit_anchors': 'Replace the region between two anchors in one file with new_text.',
             'copy': 'Copy one or more files or directory trees to new absolute destinations.',
             'move': 'Move one or more files or directory trees to new absolute destinations.',
             'delete': 'Delete one or more files or directory paths.',
@@ -1473,23 +1471,6 @@ class FilesystemActionTool:
                     'replacement': {'type': 'string', 'description': 'Replacement text for legacy line-range mode.'},
                 },
                 'required': ['path'],
-            }
-        if self._action == 'edit_anchors':
-            return {
-                'type': 'object',
-                'properties': {
-                    'path': {'type': 'string', 'description': 'Absolute file path to edit.'},
-                    'start_anchor': {
-                        'type': 'string',
-                        'description': 'Exact text opening the region to replace. Matches once.',
-                    },
-                    'end_anchor': {
-                        'type': 'string',
-                        'description': 'Exact text closing the region to replace. Matches once, after start_anchor.',
-                    },
-                    'new_text': {'type': 'string', 'description': 'Replacement text for the anchored region.'},
-                },
-                'required': ['path', 'start_anchor', 'end_anchor', 'new_text'],
             }
         if self._action in {'copy', 'move'}:
             return {
@@ -1566,18 +1547,6 @@ class FilesystemActionTool:
                 start_line=kwargs.get('start_line'),
                 end_line=kwargs.get('end_line'),
                 replacement=kwargs.get('replacement'),
-            )
-        if self._action == 'edit_anchors':
-            return await self._delegate.edit(
-                path=str(kwargs.get('path') or ''),
-                old_text=None,
-                target={
-                    'by': _EDIT_TARGET_ANCHOR_PAIR,
-                    'start_anchor': kwargs.get('start_anchor'),
-                    'end_anchor': kwargs.get('end_anchor'),
-                },
-                new_text=kwargs.get('new_text'),
-                runtime=runtime,
             )
         if self._action == 'copy':
             return await self._delegate.copy(

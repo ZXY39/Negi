@@ -70,26 +70,6 @@ def test_recovery_check_filesystem_edit_verifies_done_for_flat_text_pair(tmp_pat
     assert "requested edit is already reflected on disk" in result.lost_result_summary
 
 
-def test_recovery_check_filesystem_edit_anchors_verifies_done_from_top_level_anchors(tmp_path: Path) -> None:
-    target = tmp_path / "anchored.txt"
-    target.write_text("body {\n  padding: 6mm;\n}\n", encoding="utf-8")
-
-    result = _engine(tmp_path).inspect_tool_call(
-        tool_name="filesystem_edit_anchors",
-        arguments={
-            "path": str(target),
-            "start_anchor": "body {",
-            "end_anchor": "}",
-            "new_text": "body {\n  padding: 6mm;\n}",
-        },
-        runtime_context={"task_temp_dir": str(tmp_path)},
-    )
-
-    assert result.decision == RecoveryCheckDecision.VERIFIED_DONE
-    assert result.expected_tool_status == "success"
-    assert result.evidence[0]["path"] == str(target)
-
-
 def test_recovery_check_filesystem_copy_verifies_done_when_all_targets_exist_and_sources_remain(tmp_path: Path) -> None:
     source_a = tmp_path / "source-a.txt"
     source_b = tmp_path / "source-b.txt"

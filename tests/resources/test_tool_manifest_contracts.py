@@ -150,23 +150,6 @@ def test_filesystem_edit_manifest_exposes_flat_text_pair_model_schema():
     assert 'mode' not in properties
 
 
-def test_filesystem_edit_anchors_manifest_is_a_flat_anchor_contract():
-    manifest_path = TOOLS_ROOT / 'filesystem_edit_anchors' / 'resource.yaml'
-    assert manifest_path.exists(), 'missing manifest for filesystem_edit_anchors'
-    manifest = yaml.safe_load(manifest_path.read_text(encoding='utf-8'))
-
-    assert manifest['name'] == 'filesystem_edit_anchors'
-    assert (manifest.get('governance') or {}).get('family') == 'filesystem'
-    action_ids = [str(item.get('id') or '') for item in list((manifest.get('governance') or {}).get('actions') or [])]
-    # FilesystemTool.edit() authorizes the 'edit' action regardless of executor name.
-    assert action_ids == ['edit']
-
-    for surface in ('parameters', 'model_parameters'):
-        payload = dict(manifest.get(surface) or {})
-        assert list(payload.get('required') or []) == ['path', 'start_anchor', 'end_anchor', 'new_text']
-        assert set(payload.get('properties') or {}) == {'path', 'start_anchor', 'end_anchor', 'new_text'}
-
-
 def test_filesystem_mutation_model_surfaces_hold_no_nested_objects():
     """Concrete file-mutation executors expose flat required fields only.
 
@@ -174,7 +157,7 @@ def test_filesystem_mutation_model_surfaces_hold_no_nested_objects():
     replacement text into the locator; the schema cannot express that ban, so the
     manifests are asserted instead.
     """
-    for tool_name in ('filesystem_edit', 'filesystem_edit_anchors', 'filesystem_propose_patch'):
+    for tool_name in ('filesystem_edit', 'filesystem_propose_patch'):
         manifest = yaml.safe_load((TOOLS_ROOT / tool_name / 'resource.yaml').read_text(encoding='utf-8'))
         properties = dict((manifest.get('model_parameters') or manifest.get('parameters') or {}).get('properties') or {})
         for param_name, payload in properties.items():

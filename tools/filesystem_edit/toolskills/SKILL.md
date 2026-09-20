@@ -22,4 +22,4 @@ Rules:
 
 Repeated calls are safe: when `old_text` is absent because the change is already on disk, the result starts with `Already applied:` and the file is left untouched. Treat that as success instead of re-reading and retrying.
 
-When the region is too large or too volatile to quote exactly, use `filesystem_edit_anchors`. When the whole file is being created or replaced, use `filesystem_write`.
+One call changes one region; to change several regions, make one call per region. When the whole file is being created or replaced, use `filesystem_write`.

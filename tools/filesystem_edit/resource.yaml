@@ -2,7 +2,7 @@
 kind: tool
 name: filesystem_edit
 display_name: Filesystem Edit
-description: Replace one exact text region in one file with new_text. Use filesystem_edit_anchors instead when the exact old text is unknown but stable surrounding anchors exist.
+description: Replace one exact text region in one file. old_text must match the file verbatim and appear once.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:

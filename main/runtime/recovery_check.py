@@ -34,7 +34,7 @@ class RecoveryCheckEngine:
         normalized_tool_name = str(tool_name or "").strip().lower()
         payload = dict(arguments or {})
         _runtime = dict(runtime_context or {})
-        if normalized_tool_name in {"filesystem_write", "filesystem_edit", "filesystem_edit_anchors", "filesystem_copy", "filesystem_move", "filesystem_delete", "filesystem_propose_patch"}:
+        if normalized_tool_name in {"filesystem_write", "filesystem_edit", "filesystem_copy", "filesystem_move", "filesystem_delete", "filesystem_propose_patch"}:
             return self._inspect_split_filesystem_call(normalized_tool_name, payload)
         if normalized_tool_name in {"exec", "shell"}:
             return RecoveryCheckResult(
@@ -53,7 +53,7 @@ class RecoveryCheckEngine:
     def _inspect_split_filesystem_call(self, tool_name: str, arguments: dict[str, Any]) -> RecoveryCheckResult:
         if tool_name == "filesystem_write":
             return self._inspect_filesystem_write(arguments)
-        if tool_name in {"filesystem_edit", "filesystem_edit_anchors"}:
+        if tool_name == "filesystem_edit":
             return self._inspect_filesystem_edit(arguments)
         if tool_name == "filesystem_copy":
             return self._inspect_filesystem_copy(arguments)
@@ -196,13 +196,7 @@ class RecoveryCheckEngine:
     @staticmethod
     def _normalized_edit_target(arguments: dict[str, Any]) -> dict[str, Any]:
         target = arguments.get("target")
-        if isinstance(target, dict) and target:
-            return dict(target)
-        start_anchor = arguments.get("start_anchor")
-        end_anchor = arguments.get("end_anchor")
-        if isinstance(start_anchor, str) and isinstance(end_anchor, str):
-            return {"by": "anchor_pair", "start_anchor": start_anchor, "end_anchor": end_anchor}
-        return {}
+        return dict(target) if isinstance(target, dict) else {}
 
     @staticmethod
     def _coerce_line_number(value: Any) -> int | None:

@@ -79,7 +79,6 @@ def _copy_filesystem_split_tools(workspace: Path, *tool_names: str) -> None:
     names = tool_names or (
         'filesystem_write',
         'filesystem_edit',
-        'filesystem_edit_anchors',
         'filesystem_copy',
         'filesystem_move',
         'filesystem_delete',
@@ -594,7 +593,6 @@ def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_famil
     for tool_name in (
         'filesystem_write',
         'filesystem_edit',
-        'filesystem_edit_anchors',
         'filesystem_copy',
         'filesystem_move',
         'filesystem_delete',
@@ -610,16 +608,13 @@ def test_filesystem_split_tools_are_discoverable_and_merge_into_filesystem_famil
     assert set(family.metadata['sources']) == {
         'filesystem_write',
         'filesystem_edit',
-        'filesystem_edit_anchors',
         'filesystem_copy',
         'filesystem_move',
         'filesystem_delete',
         'filesystem_propose_patch',
     }
     assert 'filesystem_write' in action_map['write'].executor_names
-    # Both edit executors share the `edit` action: the runtime authorizes the action,
-    # not the executor name, so a role granted filesystem.edit gets both lanes.
-    assert {'filesystem_edit', 'filesystem_edit_anchors'} <= set(action_map['edit'].executor_names)
+    assert 'filesystem_edit' in action_map['edit'].executor_names
     assert 'filesystem_copy' in action_map['copy'].executor_names
     assert 'filesystem_move' in action_map['move'].executor_names
     assert 'filesystem_delete' in action_map['delete'].executor_names
@@ -1319,72 +1314,29 @@ def test_filesystem_edit_provider_visible_schema_is_a_flat_text_pair(tmp_path: P
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_filesystem_split_tools(workspace, 'filesystem_edit', 'filesystem_edit_anchors')
+    _copy_filesystem_split_tools(workspace, 'filesystem_edit')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
     try:
-        surfaces = {
-            'filesystem_edit': ['path', 'old_text', 'new_text'],
-            'filesystem_edit_anchors': ['path', 'start_anchor', 'end_anchor', 'new_text'],
-        }
-        for tool_name, required in surfaces.items():
-            tool = manager.get_tool(tool_name)
-            assert tool is not None
-
-            _description, schema = _provider_visible_tool_contract(tool)
-            properties = dict((schema or {}).get('properties') or {})
-
-            assert list((schema or {}).get('required') or []) == required
-            declared = {name: payload for name, payload in properties.items() if name != 'timeout_seconds'}
-            assert set(declared) == set(required)
-            # No object on the model surface: a nested locator beside a required
-            # sibling is where a replacement gets put into the locator instead.
-            assert all((payload or {}).get('type') != 'object' for payload in declared.values())
-
-            # The wide legacy lanes stay validator-only, so earlier calls still run.
-            validator_properties = dict(((tool.parameters or {}).get('properties') or {}))
-            if tool_name == 'filesystem_edit':
-                assert 'target' in validator_properties
-                assert 'target' not in properties
-    finally:
-        manager.close()
-
-
-@pytest.mark.asyncio
-async def test_filesystem_edit_anchors_replaces_and_replays_idempotently(tmp_path: Path):
-    workspace = tmp_path / 'workspace'
-    target_file = workspace / 'page.html'
-    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
-    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_filesystem_split_tools(workspace, 'filesystem_edit_anchors')
-    target_file.write_text('.page {\n  padding: 7mm;\n}\n.sec { margin: 1mm; }\n', encoding='utf-8')
-
-    manager = ResourceManager(workspace, app_config=_resource_app_config())
-    manager.reload_now(trigger='test-bind')
-    try:
-        tool = manager.get_tool('filesystem_edit_anchors')
+        tool = manager.get_tool('filesystem_edit')
         assert tool is not None
 
-        result = await tool.execute(
-            path=str(target_file),
-            start_anchor='.page {',
-            end_anchor='}',
-            new_text='.page {\n  padding: 6mm;\n}',
-        )
-        assert result.startswith('Successfully edited')
-        assert target_file.read_text(encoding='utf-8') == '.page {\n  padding: 6mm;\n}\n.sec { margin: 1mm; }\n'
+        _description, schema = _provider_visible_tool_contract(tool)
+        properties = dict((schema or {}).get('properties') or {})
+        required = ['path', 'old_text', 'new_text']
 
-        before = target_file.read_text(encoding='utf-8')
-        replay = await tool.execute(
-            path=str(target_file),
-            start_anchor='.page {',
-            end_anchor='}',
-            new_text='.page {\n  padding: 6mm;\n}',
-        )
-        assert replay.startswith('Already applied:')
-        assert not replay.startswith('Error')
-        assert target_file.read_text(encoding='utf-8') == before
+        assert list((schema or {}).get('required') or []) == required
+        declared = {name: payload for name, payload in properties.items() if name != 'timeout_seconds'}
+        assert set(declared) == set(required)
+        # No object on the model surface: a nested locator beside a required
+        # sibling is where a replacement gets put into the locator instead.
+        assert all((payload or {}).get('type') != 'object' for payload in declared.values())
+
+        # The wide legacy lanes stay validator-only, so earlier calls still run.
+        validator_properties = dict(((tool.parameters or {}).get('properties') or {}))
+        assert 'target' in validator_properties
+        assert 'target' not in declared
     finally:
         manager.close()
 
