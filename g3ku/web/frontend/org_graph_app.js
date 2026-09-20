@@ -5588,6 +5588,14 @@ function ceoFeedNearBottom(threshold = 64) {
 // 再动滚动位置。判定只认用户手势（滚轮/指针/触摸/键盘）引发的滚动——程序写
 // scrollTop 触发的 scroll 事件不改变意图，这正是「上翻被反复拽回底部」的根因。
 let ceoFeedUserScrollIntentAt = 0;
+// 程序钉底(含 batch bottom 模式与图片异步 re-pin)派发的 scroll 绝不能重新武装
+// 跟随；突变静默期之前的滚动事件一律不改意图位。
+let ceoFeedProgrammaticScrollUntil = 0;
+let ceoFeedLastMutationAt = 0;
+
+function markCeoFeedProgrammaticScroll() {
+    ceoFeedProgrammaticScrollUntil = Date.now() + 1000;
+}
 
 function setCeoFeedFollowLatest(on) {
     S.ceoFeedFollowLatest = !!on;
@@ -5603,8 +5611,12 @@ function updateCeoScrollToLatestButton() {
 function scrollCeoFeedToBottom() {
     if (!U.ceoFeed) return;
     S.ceoFeedFollowLatest = true;
+    ceoFeedLastMutationAt = Date.now();
     const applyBottom = () => {
         if (!U.ceoFeed) return;
+        // 挂起的 rAF/图片 re-pin 迟到时用户可能已上滚：跟随位一旦脱离立即作废本次钉底。
+        if (S.ceoFeedFollowLatest === false) return;
+        markCeoFeedProgrammaticScroll();
         U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
         updateCeoScrollToLatestButton();
     };
@@ -5651,6 +5663,7 @@ function captureCeoFeedScrollSnapshot() {
 function restoreCeoFeedScrollSnapshot(snapshot = null) {
     if (!U || !U.ceoFeed) return;
     const feed = U.ceoFeed;
+    ceoFeedLastMutationAt = Date.now();
     if (!snapshot) {
         updateCeoScrollToLatestButton();
         return;
@@ -5658,6 +5671,7 @@ function restoreCeoFeedScrollSnapshot(snapshot = null) {
     if (snapshot.atBottom) {
         // 直播跟随直接钉底,不走 scrollCeoFeedToBottom 的异步 re-pin:流式期间每次
         // mutation 都会重新判定,而挂起的 rAF 会在用户上滚离开后把视口拽回底部。
+        markCeoFeedProgrammaticScroll();
         feed.scrollTop = feed.scrollHeight;
         updateCeoScrollToLatestButton();
         return;
@@ -5665,6 +5679,7 @@ function restoreCeoFeedScrollSnapshot(snapshot = null) {
     const maxTop = Math.max(0, (feed.scrollHeight || 0) - (feed.clientHeight || 0));
     const anchored = ceoFeedAnchoredScrollTop(feed, snapshot.anchor);
     const nextTop = Number.isFinite(anchored) ? anchored : Number(snapshot.prevTop || 0);
+    markCeoFeedProgrammaticScroll();
     feed.scrollTop = Math.max(0, Math.min(nextTop, maxTop));
     updateCeoScrollToLatestButton();
 }
@@ -6666,6 +6681,7 @@ function ceoFeedAnchoredScrollTop(feed, anchor = null) {
 
 function restoreCeoFeedScroll(viewState = null) {
     if (!viewState || !U || !U.ceoFeed) return;
+    ceoFeedLastMutationAt = Date.now();
     if (viewState.atBottom) {
         scrollCeoFeedToBottom();
         return;
@@ -6676,6 +6692,7 @@ function restoreCeoFeedScroll(viewState = null) {
         const maxTop = Math.max(0, (feed.scrollHeight || 0) - (feed.clientHeight || 0));
         const anchored = ceoFeedAnchoredScrollTop(feed, viewState.anchor);
         const nextTop = Number.isFinite(anchored) ? anchored : Number(viewState.prevTop || 0);
+        markCeoFeedProgrammaticScroll();
         feed.scrollTop = Math.max(0, Math.min(nextTop, maxTop));
         updateCeoScrollToLatestButton();
     };
@@ -13520,11 +13537,18 @@ function bind() {
     bindModelRetryToastExpansion();
     U.projectExit?.addEventListener("click", () => void requestProjectExit());
     U.ceoFeed?.addEventListener("scroll", () => {
-        // 程序写 scrollTop 也会派发 scroll：只有真实手势（近 800ms 内有滚轮/指针/
-        // 触摸/键盘输入）才允许关闭跟随；滚回底部则无条件恢复跟随。
+        // 意图位只由"突变静默期之外、且非程序钉底派发"的滚动改写：
+        // atBottom 分支的钉底/图片异步 re-pin 都会派发 scroll，若不隔离，
+        // 手势后 800ms 内的程序滚动会被误判成"用户回到底部"而重新武装跟随，
+        // 直播高频突变下用户永远翻不出底部（第一版修复的竞态残留）。
+        const now = Date.now();
+        if (now < ceoFeedProgrammaticScrollUntil || now - ceoFeedLastMutationAt < 250) {
+            updateCeoScrollToLatestButton();
+            return;
+        }
         if (ceoFeedNearBottom()) {
             setCeoFeedFollowLatest(true);
-        } else if (Date.now() - ceoFeedUserScrollIntentAt < 800) {
+        } else if (now - ceoFeedUserScrollIntentAt < 1500) {
             setCeoFeedFollowLatest(false);
         }
         updateCeoScrollToLatestButton();
