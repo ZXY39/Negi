@@ -471,6 +471,46 @@ def test_live_shaped_ledger_renders_only_the_raw_window_after_archive() -> None:
     assert len(blocks) < 10, f"收口后块数应塌到个位数，实际 {len(blocks)}"
 
 
+def test_stage_archive_applies_at_ledger_commit_not_session_attribute() -> None:
+    """回归：收口标记必须在账本提交点应用。
+
+    实盘失败形态：标记打在会话属性上，回合收尾用轮初 state 快照重建 canonical 并回灌，
+    标记在同回合内被整体覆盖 → marked=0、阶段块照旧逐轮渲染。这里用"轮初快照无标记"
+    的 result 复现该覆盖，断言应用点产出的账本仍带标记。"""
+    archived = [stage["stage_id"] for stage in (_stage(index) for index in range(1, 6))]
+    body = [
+        {"role": "system", "content": "基础提示"},
+        {
+            "role": "assistant",
+            "content": "[G3KU_TOKEN_COMPACT_V2]\n"
+            + json.dumps(
+                {
+                    "kind": "frontdoor_token_compaction_llm",
+                    "history_message_count": 40,
+                    "stage_archive": {"ref": "x", "stage_ids": archived},
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n\n摘要正文",
+        },
+    ]
+    # finalize 产出的两份账本都来自轮初快照：还没有任何标记。
+    result = {
+        "frontdoor_canonical_context": _ledger([_stage(index) for index in range(1, 6)]),
+        "frontdoor_stage_state": _ledger([{**_stage(index), "stage_id": f"turn-{index}"} for index in range(1, 6)]),
+    }
+    applied = CreateAgentCeoFrontDoorRunner._frontdoor_apply_stage_archive(result, body)
+    assert applied == 10  # 两份存储各 5 条（第二套 stage_id 靠内容身份跨存储命中）
+    assert all(stage.get("context_visible") is False for stage in result["frontdoor_canonical_context"]["stages"])
+    assert all(stage.get("context_visible") is False for stage in result["frontdoor_stage_state"]["stages"])
+    # 幂等：同一份基线被再次提交不得二次改动
+    assert CreateAgentCeoFrontDoorRunner._frontdoor_apply_stage_archive(result, body) == 0
+    # 没有收口清单的基线不动账本
+    untouched = {"frontdoor_canonical_context": _ledger([_stage(9)]), "frontdoor_stage_state": _ledger([])}
+    assert CreateAgentCeoFrontDoorRunner._frontdoor_apply_stage_archive(untouched, [{"role": "user", "content": "hi"}]) == 0
+
+
 def test_hide_helper_marks_both_durable_stores_and_skips_active() -> None:
     session = SimpleNamespace(
         _frontdoor_canonical_context=_ledger([_stage(1), _stage(2)]),

@@ -2219,8 +2219,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
 
     @classmethod
-    def _frontdoor_hide_summarized_stages(cls, session: Any, stage_ids: list[str]) -> int:
-        """把收口标记就地写进两份 durable 账本，返回实际新标记的条数。
+    def _frontdoor_mark_stages_archived(cls, stores: list[Any], stage_ids: list[str]) -> int:
+        """把收口标记就地写进给定的账本结构，返回实际新标记的条数（幂等）。
 
         两份存储都要打：合并视图按内容身份去重时留下的是较新的一份副本（本轮
         stage_state 里的），只标 canonical 等于没标。又因为两套 stage_id 不相交，
@@ -2228,17 +2228,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         写入刻意不过 `normalize_frontdoor_canonical_context`——归一化会重排账本，
         收口一次就重排风险太高；读取端按原始键判定可见性。活动阶段一律不收口。"""
         wanted = {str(item or "").strip() for item in list(stage_ids or []) if str(item or "").strip()}
-        if session is None or not wanted:
+        if not wanted:
             return 0
-        stores = [
-            getattr(session, attribute, None)
-            for attribute in ("_frontdoor_canonical_context", "_frontdoor_stage_state")
-        ]
-        stores = [store for store in stores if isinstance(store, dict)]
-        if not stores:
+        usable = [store for store in list(stores or []) if isinstance(store, dict)]
+        if not usable:
             return 0
         identities: set[str] = set()
-        for store in stores:
+        for store in usable:
             for stage in list(store.get("stages") or []):
                 if not isinstance(stage, dict):
                     continue
@@ -2247,7 +2243,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     if identity:
                         identities.add(identity)
         hidden = 0
-        for store in stores:
+        for store in usable:
             for stage in list(store.get("stages") or []):
                 if not isinstance(stage, dict):
                     continue
@@ -2260,6 +2256,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 stage["context_visible"] = False
                 hidden += 1
         return hidden
+
+    @classmethod
+    def _frontdoor_apply_stage_archive(cls, result: dict[str, Any], request_messages: Any) -> int:
+        """账本提交点应用收口：标记必须跟着"即将成为 durable"的那份账本副本一起产出。
+
+        会话属性不是账本的权威写入者——`_graph_finalize_turn` 用轮初 state 快照重建
+        canonical 再回灌，只标会话属性会在同一回合收尾时被整体覆盖（实盘表现为
+        标记数归零、阶段块照旧逐轮渲染）。所以这里对 finalize 产出的两份 result
+        账本动手，读取的请求体也正是同一份即将落定的基线请求体。"""
+        if not isinstance(result, dict):
+            return 0
+        stage_ids = cls._frontdoor_stage_archive_ids(request_messages)
+        if not stage_ids:
+            return 0
+        return cls._frontdoor_mark_stages_archived(
+            [result.get("frontdoor_canonical_context"), result.get("frontdoor_stage_state")],
+            stage_ids,
+        )
+
+    @classmethod
+    def _frontdoor_hide_summarized_stages(cls, session: Any, stage_ids: list[str]) -> int:
+        """会话属性版的收口标记（手动压缩车道：没有 finalize 回合，持久化点即提交点）。"""
+        if session is None:
+            return 0
+        return cls._frontdoor_mark_stages_archived(
+            [
+                getattr(session, "_frontdoor_canonical_context", None),
+                getattr(session, "_frontdoor_stage_state", None),
+            ],
+            stage_ids,
+        )
 
     async def _run_frontdoor_llm_token_compression(
         self,
@@ -8328,6 +8355,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 state=state,
                 frontdoor_stage_state=finalized_stage_state,
             )
+            self._frontdoor_apply_stage_archive(result, authoritative_request_body_messages)
             return result
         if visible_output:
             # 轮末不写摘要:纯文本收尾的回合里,该阶段的最终回复就紧邻在块之后,摘要写
@@ -8343,6 +8371,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         result["messages"] = list(messages)
         result["frontdoor_request_body_messages"] = list(authoritative_request_body_messages)
         result["frontdoor_history_shrink_reason"] = frontdoor_history_shrink_reason
+        self._frontdoor_apply_stage_archive(result, authoritative_request_body_messages)
         return result
 
     @staticmethod
