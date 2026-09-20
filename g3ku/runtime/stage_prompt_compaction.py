@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1011,23 +1012,56 @@ def _token_compact_payload(message: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def stage_archive_ids_from_request_messages(request_messages: Any) -> list[str]:
-    """从请求体的压缩块元数据读回待收口阶段清单。
+def stage_created_at_within_watermark(created_at: Any, watermark: Any) -> bool:
+    """阶段创建时间是否落在收口水位线之前（含）。
 
-    清单由摘要块自带、在车道自己的 durable 提交点被应用：压缩算完不代表 provider
-    看到了摘要——此刻就翻账本标记，而这次发送随后被暂停或失败时，基线仍是带块的旧
-    请求体，下一轮块渲染剔除收口阶段等于把那批阶段连同摘要一起丢掉。历史上可能同时
-    存在多份压缩块（回显残留等），取并集即可，应用是幂等的。"""
-    collected: list[str] = []
+    两边都出自 `now_iso()`，同时区同精度时字典序即时序；偏移一旦不同字典序就会错，
+    所以能按 ISO 解析就按解析比。任一为空永不命中——宁可少收口一轮，也不能把还在
+    上下文里的阶段收进摘要够不到的地方。"""
+    left = str(created_at or "").strip()
+    right = str(watermark or "").strip()
+    if not left or not right:
+        return False
+    try:
+        return datetime.fromisoformat(left) <= datetime.fromisoformat(right)
+    except ValueError:
+        return left <= right
+
+
+def stage_created_at_ceiling(stages: list[dict[str, Any]]) -> str:
+    """这批阶段里最晚的 created_at，也就是收口水位线；一个可用时间戳都没有时返回空串。"""
+    ceiling = ""
+    for stage in list(stages or []):
+        if not isinstance(stage, dict):
+            continue
+        candidate = str(stage.get("created_at") or "").strip()
+        if candidate and (not ceiling or stage_created_at_within_watermark(ceiling, candidate)):
+            ceiling = candidate
+    return ceiling
+
+
+def stage_archive_selector_from_request_messages(request_messages: Any) -> dict[str, Any]:
+    """读回"这一版摘要该收口哪批阶段"：created_at 水位线 + 存量显式清单。
+
+    清单曾经是唯一口径，但 375 条 stage_id 要 8,469 字符，比它守着的摘要正文还长，
+    而且每轮随块重发。改成一个时间戳上限后还有额外好处：两份账本各维护一套 stage_id
+    序号（实测交集为 0），靠 id 匹配必须再绕一层内容身份，而 created_at 是同一条逻辑
+    阶段在两边共享的同一个值。存量块里的 `stage_ids` 继续读到它被下一次压缩改写为止。
+    历史里可能同时存在多份压缩块（回显残留等），水位线取最新、清单取并集，应用幂等。"""
+    collected_ids: list[str] = []
+    watermark = ""
     for message in list(request_messages or []):
         archive = _token_compact_payload(message).get("stage_archive")
         if not isinstance(archive, dict):
             continue
         for item in list(archive.get("stage_ids") or []):
             stage_id = str(item or "").strip()
-            if stage_id and stage_id not in collected:
-                collected.append(stage_id)
-    return collected
+            if stage_id and stage_id not in collected_ids:
+                collected_ids.append(stage_id)
+        candidate = str(archive.get("archived_through_created_at") or "").strip()
+        if candidate and (not watermark or stage_created_at_within_watermark(watermark, candidate)):
+            watermark = candidate
+    return {"stage_ids": collected_ids, "archived_through_created_at": watermark}
 
 
 def build_stage_archive_document(
@@ -1077,7 +1111,9 @@ __all__ = [
     "repair_split_stage_tool_boundaries",
     "retained_completed_stage_ids",
     "split_stage_ref_selection",
-    "stage_archive_ids_from_request_messages",
+    "stage_archive_selector_from_request_messages",
+    "stage_created_at_ceiling",
+    "stage_created_at_within_watermark",
     "stage_prompt_prefix",
     "stage_ref_candidates",
     "stage_ref_is_dead",

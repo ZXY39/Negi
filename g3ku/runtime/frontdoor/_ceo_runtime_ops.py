@@ -60,6 +60,7 @@ from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.stage_prompt_compaction import (
     ECHO_STRIP_ENABLED,
     STAGE_ARCHIVE_HEADING,
+    STAGE_RAW_PREFIX,
     STAGE_REF_SELECTION_RULE,
     build_stage_archive_document,
     compact_stage_prompt_messages_in_place,
@@ -68,7 +69,9 @@ from g3ku.runtime.stage_prompt_compaction import (
     render_stage_ref_index,
     retained_completed_stage_ids,
     split_stage_ref_selection,
-    stage_archive_ids_from_request_messages,
+    stage_archive_selector_from_request_messages,
+    stage_created_at_ceiling,
+    stage_created_at_within_watermark,
     stage_ref_candidates,
     strip_stage_block_echo,
 )
@@ -1990,13 +1993,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return {item for item in collected if item}
 
     @staticmethod
-    def _frontdoor_tail_stage_indexes(messages: list[dict[str, Any]]) -> set[int]:
+    def _frontdoor_body_stage_indexes(
+        messages: list[dict[str, Any]],
+        *,
+        prefixes: tuple[str, ...] = ("[G3KU_STAGE_",),
+    ) -> set[int]:
+        """请求体里还翻得出来的阶段块编号；`prefixes` 用来只认某一类块。"""
         indexes: set[int] = set()
         for message in list(messages or []):
             if not isinstance(message, dict):
                 continue
             content = str(message.get("content") or "")
-            if not content.startswith("[G3KU_STAGE_"):
+            if not content.startswith(prefixes):
                 continue
             try:
                 payload = json.loads(content.split("\n", 1)[1])
@@ -2009,50 +2017,70 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     continue
         return {item for item in indexes if item > 0}
 
+    @classmethod
+    def _frontdoor_stage_is_swallowable(
+        cls,
+        stage: Any,
+        *,
+        active_stage_id: str,
+        retained_ids: set[str],
+        body_stage_indexes: set[int],
+        body_call_ids: set[str],
+    ) -> bool:
+        """这条阶段是否已经不必再逐轮渲染：完成的普通阶段，且肉身和块都不在场。
+
+        工具轮次还留在请求体里、或它自己的阶段块还翻得出来，收口它就是直接在上下文里
+        挖洞；`body_stage_indexes` 的口径由调用方给（压缩时认全部块，提交点只认 raw 块）。
+        `retained_ids` 是近场 raw 窗口（保住最近几条执行细节）让出来的名额。"""
+        if not isinstance(stage, dict):
+            return False
+        if str(stage.get("stage_kind") or "normal").strip().lower() != "normal":
+            return False
+        if str(stage.get("status") or "").strip().lower() == "active":
+            return False
+        stage_id = str(stage.get("stage_id") or "").strip()
+        if not stage_id or stage_id == active_stage_id or stage_id in retained_ids:
+            return False
+        if stage.get("context_visible") is False:
+            return False
+        if int(stage.get("stage_index") or 0) in body_stage_indexes:
+            return False
+        stage_call_ids: set[str] = set()
+        for round_item in list(stage.get("rounds") or []):
+            if not isinstance(round_item, dict):
+                continue
+            for call_id in list(round_item.get("tool_call_ids") or []):
+                normalized = extract_call_id(call_id)
+                if normalized:
+                    stage_call_ids.add(normalized)
+            for tool in list(round_item.get("tools") or []):
+                normalized = extract_call_id((tool or {}).get("tool_call_id")) if isinstance(tool, dict) else ""
+                if normalized:
+                    stage_call_ids.add(normalized)
+        return not (stage_call_ids & body_call_ids)
+
     def _frontdoor_summarized_stage_ids(
         self,
         *,
         stage_state: dict[str, Any],
         recent_tail: list[dict[str, Any]],
     ) -> list[str]:
-        """本次压缩真正吞掉的阶段：完成普通阶段 − 保留 raw 窗口 − 尾部仍字面存在的阶段。
-
-        尾部（recent_tail）里还留着某阶段的工具肉身或它的阶段块，就不算被摘要掉，
-        收口它会直接造成上下文黑洞。"""
+        """本次压缩真正吞掉的阶段：完成普通阶段 − 保留 raw 窗口 − 尾部仍字面存在的阶段。"""
         retained_ids = retained_completed_stage_ids(stage_state, keep_latest=3)
-        tail_call_ids = self._frontdoor_message_call_ids(recent_tail)
-        tail_stage_indexes = self._frontdoor_tail_stage_indexes(recent_tail)
+        body_stage_indexes = self._frontdoor_body_stage_indexes(recent_tail)
+        body_call_ids = self._frontdoor_message_call_ids(recent_tail)
         active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
         hidden: list[str] = []
         for stage in list(stage_state.get("stages") or []):
-            if not isinstance(stage, dict):
+            if not self._frontdoor_stage_is_swallowable(
+                stage,
+                active_stage_id=active_stage_id,
+                retained_ids=retained_ids,
+                body_stage_indexes=body_stage_indexes,
+                body_call_ids=body_call_ids,
+            ):
                 continue
-            if str(stage.get("stage_kind") or "normal").strip().lower() != "normal":
-                continue
-            if str(stage.get("status") or "").strip().lower() == "active":
-                continue
-            stage_id = str(stage.get("stage_id") or "").strip()
-            if not stage_id or stage_id == active_stage_id or stage_id in retained_ids:
-                continue
-            if stage.get("context_visible") is False:
-                continue
-            if int(stage.get("stage_index") or 0) in tail_stage_indexes:
-                continue
-            stage_call_ids: set[str] = set()
-            for round_item in list(stage.get("rounds") or []):
-                if not isinstance(round_item, dict):
-                    continue
-                for call_id in list(round_item.get("tool_call_ids") or []):
-                    normalized = extract_call_id(call_id)
-                    if normalized:
-                        stage_call_ids.add(normalized)
-                for tool in list(round_item.get("tools") or []):
-                    normalized = extract_call_id((tool or {}).get("tool_call_id")) if isinstance(tool, dict) else ""
-                    if normalized:
-                        stage_call_ids.add(normalized)
-            if stage_call_ids & tail_call_ids:
-                continue
-            hidden.append(stage_id)
+            hidden.append(str(stage.get("stage_id") or "").strip())
         return hidden
 
     @staticmethod
@@ -2078,16 +2106,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
 
     @classmethod
-    def _frontdoor_mark_stages_archived(cls, stores: list[Any], stage_ids: list[str]) -> int:
+    def _frontdoor_mark_stages_archived(cls, stores: list[Any], selector: dict[str, Any], *, body_messages: Any) -> int:
         """把收口标记就地写进给定的账本结构，返回实际新标记的条数（幂等）。
 
-        两份存储都要打：合并视图按内容身份去重时留下的是较新的一份副本（本轮
-        stage_state 里的），只标 canonical 等于没标。又因为两套 stage_id 不相交，
-        命中 id 之后还要按内容身份把同一条逻辑阶段在另一份存储里一起标掉。
-        写入刻意不过 `normalize_frontdoor_canonical_context`——归一化会重排账本，
-        收口一次就重排风险太高；读取端按原始键判定可见性。活动阶段一律不收口。"""
-        wanted = {str(item or "").strip() for item in list(stage_ids or []) if str(item or "").strip()}
-        if not wanted:
+        清单口径（存量压缩块的 `stage_ids`）走内容身份匹配：两份账本各维护一套 stage_id
+        序号（实测交集 0），只标 canonical 等于没标（合并去重留下的是本轮 stage_state
+        那份）；水位线直接命中，created_at 是同一条逻辑阶段在两边共享的同一个值。写入
+        刻意不过 `normalize_frontdoor_canonical_context`，归一化会重排账本。活动阶段、
+        已收口的、非普通阶段一律不收口；水位线口径额外保住近场 raw 窗口，以及肉身或 raw
+        块还在即将落定的请求体里的阶段——那批内容没进摘要，收了就是挖洞。"""
+        wanted = {
+            str(item or "").strip()
+            for item in list((selector or {}).get("stage_ids") or [])
+            if str(item or "").strip()
+        }
+        watermark = str((selector or {}).get("archived_through_created_at") or "").strip()
+        if not wanted and not watermark:
             return 0
         usable = [store for store in list(stores or []) if isinstance(store, dict)]
         if not usable:
@@ -2101,16 +2135,36 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     identity = cls._frontdoor_stage_content_identity(stage)
                     if identity:
                         identities.add(identity)
+        body_raw_stage_indexes = cls._frontdoor_body_stage_indexes(body_messages, prefixes=(STAGE_RAW_PREFIX,))
+        body_call_ids = cls._frontdoor_message_call_ids(body_messages)
         hidden = 0
         for store in usable:
+            active_stage_id = str(store.get("active_stage_id") or "").strip()
+            retained_ids = retained_completed_stage_ids(store, keep_latest=3)
             for stage in list(store.get("stages") or []):
                 if not isinstance(stage, dict):
                     continue
                 if str(stage.get("status") or "").strip().lower() == "active":
                     continue
+                if stage.get("context_visible") is False:
+                    continue
                 stage_id = str(stage.get("stage_id") or "").strip()
-                matched = stage_id in wanted or cls._frontdoor_stage_content_identity(stage) in identities
-                if not matched or stage.get("context_visible") is False:
+                matched = stage_id in wanted or (
+                    bool(identities) and cls._frontdoor_stage_content_identity(stage) in identities
+                )
+                if not matched:
+                    matched = bool(watermark) and stage_created_at_within_watermark(
+                        stage.get("created_at"), watermark
+                    )
+                if not matched:
+                    continue
+                if watermark and not cls._frontdoor_stage_is_swallowable(
+                    stage,
+                    active_stage_id=active_stage_id,
+                    retained_ids=retained_ids,
+                    body_stage_indexes=body_raw_stage_indexes,
+                    body_call_ids=body_call_ids,
+                ):
                     continue
                 stage["context_visible"] = False
                 hidden += 1
@@ -2126,25 +2180,26 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         账本动手，读取的请求体也正是同一份即将落定的基线请求体。"""
         if not isinstance(result, dict):
             return 0
-        stage_ids = stage_archive_ids_from_request_messages(request_messages)
-        if not stage_ids:
-            return 0
+        selector = stage_archive_selector_from_request_messages(request_messages)
         return cls._frontdoor_mark_stages_archived(
             [result.get("frontdoor_canonical_context"), result.get("frontdoor_stage_state")],
-            stage_ids,
+            selector,
+            body_messages=request_messages,
         )
 
     @classmethod
-    def _frontdoor_hide_summarized_stages(cls, session: Any, stage_ids: list[str]) -> int:
+    def _frontdoor_hide_summarized_stages(cls, session: Any, request_messages: Any) -> int:
         """会话属性版的收口标记（手动压缩车道：没有 finalize 回合，持久化点即提交点）。"""
         if session is None:
             return 0
+        selector = stage_archive_selector_from_request_messages(request_messages)
         return cls._frontdoor_mark_stages_archived(
             [
                 getattr(session, "_frontdoor_canonical_context", None),
                 getattr(session, "_frontdoor_stage_state", None),
             ],
-            stage_ids,
+            selector,
+            body_messages=request_messages,
         )
 
     async def _run_frontdoor_llm_token_compression(
@@ -2364,8 +2419,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "stage_index_start": archive_stage_start,
                     "stage_index_end": archive_stage_end,
                     "stage_count": len(summarized_stage_records),
-                    # 收口清单随摘要块一起 durable：基线推进到这份请求体的那一刻才被应用。
-                    "stage_ids": list(summarized_stage_ids),
+                    # 收口水位线随摘要块一起 durable：基线推进到这份请求体的那一刻才被应用。
+                    # 逐条 stage_id 清单换成一个 created_at 上限：375 条 id 要 8.4k 字符，
+                    # 比它守护的摘要正文还长且每轮重发。缺时间戳的阶段收不到，只能多渲染
+                    # 一轮——反方向（收了没摘要的阶段）才是丢内容。
+                    "archived_through_created_at": stage_created_at_ceiling(summarized_stage_records),
                 }
             compacted_block = {
                 "role": "assistant",
@@ -4447,13 +4505,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {}
         target_session = getattr(getattr(runtime, "context", None), "session", None)
         # 这里是 durable 基线唯一的前进点，阶段收口跟着它一起落地：请求体里那份摘要块
-        # 自带待收口清单（`stage_archive.stage_ids`）。压缩算完但没走到这一步的回合
-        # （发送失败、压缩后被暂停）不翻任何标记，下一轮照旧渲染块，不会丢历史。
+        # 自带收口水位线（`stage_archive.archived_through_created_at`）。压缩算完但没走到
+        # 这一步的回合（发送失败、压缩后被暂停）不翻任何标记，下一轮照旧渲染块，不会丢历史。
         try:
-            self._frontdoor_hide_summarized_stages(
-                target_session,
-                stage_archive_ids_from_request_messages(request_messages),
-            )
+            self._frontdoor_hide_summarized_stages(target_session, request_messages)
         except Exception:
             logger.debug("frontdoor stage archive apply failed for {}", session_key)
         turn_id = ""

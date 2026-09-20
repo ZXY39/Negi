@@ -22,7 +22,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     render_stage_ref_index,
     retained_completed_stage_ids,
     split_stage_ref_selection,
-    stage_archive_ids_from_request_messages,
+    stage_archive_selector_from_request_messages,
     stage_ref_candidates,
 )
 
@@ -50,6 +50,31 @@ def _stage(index: int, *, visible: bool = True, key_refs=None, tool_call_ids=Non
 
 def _ledger(stages: list[dict]) -> dict:
     return {"active_stage_id": "", "transition_required": False, "stages": stages}
+
+
+def _archive_body(
+    *,
+    stage_ids: list[str] | None = None,
+    watermark: str = "",
+    extra_messages: list[dict] | None = None,
+) -> list[dict]:
+    """压缩后的 durable 请求体：头部一条摘要块（自带收口口径）+ 可选的在场肉身。"""
+    archive: dict = {"ref": "x"}
+    if stage_ids:
+        archive["stage_ids"] = list(stage_ids)
+    if watermark:
+        archive["archived_through_created_at"] = watermark
+    payload = {"kind": "frontdoor_token_compaction_llm", "history_message_count": 40, "stage_archive": archive}
+    return [
+        {"role": "system", "content": "基础提示"},
+        {
+            "role": "assistant",
+            "content": "[G3KU_TOKEN_COMPACT_V2]\n"
+            + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            + "\n\n摘要正文",
+        },
+        *[dict(item) for item in list(extra_messages or [])],
+    ]
 
 
 def _prompt_messages(*, blocks_for: list[int], dialogue: int = 6) -> list[dict]:
@@ -357,13 +382,23 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
         "task:7e2a270eec34",
     }
 
-    marked = {stage["stage_id"]: stage.get("context_visible") for stage in session._frontdoor_canonical_context["stages"]}
+    compacted = {stage["stage_id"]: stage.get("context_visible") for stage in session._frontdoor_canonical_context["stages"]}
     # 压缩本身不翻账本标记：发送失败或压缩后被暂停时基线不会推进，标记必须留到那一步。
-    assert all(value is None for value in marked.values())
-    assert payload["stage_archive"]["stage_ids"] == ["frontdoor-stage-1", "frontdoor-stage-2"]
+    assert all(value is None for value in compacted.values())
+    archive = payload["stage_archive"]
+    # 收口口径是一个 created_at 上限，不再是逐条 id 清单：375 条 id 要 8.4k 字符，比摘要正文还长。
+    assert archive["archived_through_created_at"] == "2026-09-20T02:00:00+08:00"
+    # 元数据行的字段就是收口合同的全部：条数与区间是常数大小，阶段再多也不随行增长。
+    assert sorted(archive) == [
+        "archived_through_created_at",
+        "ref",
+        "stage_count",
+        "stage_index_end",
+        "stage_index_start",
+    ]
 
-    pending = stage_archive_ids_from_request_messages(result.request_messages)
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, pending) == 2
+    # 提交点应用：水位线之内、且肉身与块都不在即将落定的请求体里的阶段才被收掉。
+    assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, result.request_messages) == 2
     marked = {stage["stage_id"]: stage.get("context_visible") for stage in session._frontdoor_canonical_context["stages"]}
     assert marked["frontdoor-stage-1"] is False
     assert marked["frontdoor-stage-2"] is False
@@ -371,7 +406,7 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     assert marked["frontdoor-stage-3"] is None
     assert marked["frontdoor-stage-5"] is None
     # 同一份基线被重复提交（每个请求都会再持久化一次）不得二次改动账本。
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, pending) == 0
+    assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, result.request_messages) == 0
 
     assert result.diagnostics["stage_ref_selected_count"] == 2
     assert result.diagnostics["stage_ref_dropped_dead"] == 1
@@ -392,10 +427,10 @@ def test_token_compression_without_selection_still_archives(monkeypatch, tmp_pat
     assert result.diagnostics["stage_ref_selected_count"] == 0
     assert result.diagnostics["stage_archive_pending_count"] == 2
     assert session._frontdoor_canonical_context["stages"][0].get("context_visible") is None
-    assert stage_archive_ids_from_request_messages(result.request_messages) == [
-        "frontdoor-stage-1",
-        "frontdoor-stage-2",
-    ]
+    assert stage_archive_selector_from_request_messages(result.request_messages) == {
+        "stage_ids": [],
+        "archived_through_created_at": "2026-09-20T02:00:00+08:00",
+    }
 
 
 def test_token_compression_is_idempotent_across_repeats(monkeypatch, tmp_path: Path) -> None:
@@ -425,7 +460,10 @@ def test_token_compression_skips_archive_when_export_fails(monkeypatch, tmp_path
     assert STAGE_ARCHIVE_HEADING not in summary
     assert json.loads(summary.splitlines()[1]).get("stage_archive") is None
     assert result.diagnostics["stage_archive_ref"] == ""
-    assert stage_archive_ids_from_request_messages(result.request_messages) == []
+    assert stage_archive_selector_from_request_messages(result.request_messages) == {
+        "stage_ids": [],
+        "archived_through_created_at": "",
+    }
     assert all(stage.get("context_visible") is None for stage in session._frontdoor_canonical_context["stages"])
 
 
@@ -439,10 +477,43 @@ def test_hide_marks_across_disjoint_stage_id_namespaces() -> None:
         _frontdoor_canonical_context=_ledger([early]),
         _frontdoor_stage_state=_ledger([late_copy]),
     )
-    marked = CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, ["frontdoor-stage-1"])
+    marked = CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(
+        session, _archive_body(stage_ids=["frontdoor-stage-1"])
+    )
     assert marked == 2
     assert session._frontdoor_canonical_context["stages"][0]["context_visible"] is False
     assert session._frontdoor_stage_state["stages"][0]["context_visible"] is False
+
+
+def test_watermark_archives_by_created_at_alone() -> None:
+    """新版口径：只给一个 created_at 上限，两份账本各自被就地收口。
+
+    清单要 8.4k 字符且每轮重发，而 created_at 是同一条逻辑阶段在两套 stage_id 之间
+    共享的同一个值，水位线因此既省字节又天然跨存储。"""
+    def _store(prefix: str) -> dict:
+        stages = []
+        for index in range(1, 7):
+            stage = _stage(index, tool_call_ids=["c9"] if index == 2 else None)
+            stages.append({**stage, "stage_id": f"{prefix}-{index}"})
+        return _ledger(stages)
+
+    session = SimpleNamespace(
+        _frontdoor_canonical_context=_store("frontdoor-stage"),
+        _frontdoor_stage_state=_store("turn"),
+    )
+    body = _archive_body(
+        watermark="2026-09-20T03:00:00+08:00",
+        extra_messages=[{"role": "tool", "tool_call_id": "c9", "content": "还在场的工具结果"}],
+    )
+    assert stage_archive_selector_from_request_messages(body) == {
+        "stage_ids": [],
+        "archived_through_created_at": "2026-09-20T03:00:00+08:00",
+    }
+    # 水位线内的 1/2/3：2 的肉身还在请求体里不收；4~6 由近场 raw 窗口与水位线一起挡住。
+    assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, body) == 4
+    for store in (session._frontdoor_canonical_context, session._frontdoor_stage_state):
+        flags = [stage.get("context_visible") for stage in store["stages"]]
+        assert flags == [False, None, False, None, None, None], store["stages"][0]["stage_id"]
 
 
 def test_combine_propagates_archive_flag_onto_surviving_copy() -> None:
@@ -484,23 +555,7 @@ def test_stage_archive_applies_at_ledger_commit_not_session_attribute() -> None:
     标记在同回合内被整体覆盖 → marked=0、阶段块照旧逐轮渲染。这里用"轮初快照无标记"
     的 result 复现该覆盖，断言应用点产出的账本仍带标记。"""
     archived = [stage["stage_id"] for stage in (_stage(index) for index in range(1, 6))]
-    body = [
-        {"role": "system", "content": "基础提示"},
-        {
-            "role": "assistant",
-            "content": "[G3KU_TOKEN_COMPACT_V2]\n"
-            + json.dumps(
-                {
-                    "kind": "frontdoor_token_compaction_llm",
-                    "history_message_count": 40,
-                    "stage_archive": {"ref": "x", "stage_ids": archived},
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            + "\n\n摘要正文",
-        },
-    ]
+    body = _archive_body(stage_ids=archived)
     # finalize 产出的两份账本都来自轮初快照：还没有任何标记。
     result = {
         "frontdoor_canonical_context": _ledger([_stage(index) for index in range(1, 6)]),
@@ -522,10 +577,14 @@ def test_hide_helper_marks_both_durable_stores_and_skips_active() -> None:
         _frontdoor_canonical_context=_ledger([_stage(1), _stage(2)]),
         _frontdoor_stage_state=_ledger([{**_stage(1, ), "status": "active"}]),
     )
-    marked = CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, ["frontdoor-stage-1", "frontdoor-stage-2"])
+    marked = CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(
+        session, _archive_body(stage_ids=["frontdoor-stage-1", "frontdoor-stage-2"])
+    )
     assert marked == 2
     assert session._frontdoor_canonical_context["stages"][0]["context_visible"] is False
     # 活动阶段一律不收口：它的轮次还在写。
     assert session._frontdoor_stage_state["stages"][0].get("context_visible") is None
-    again = CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, ["frontdoor-stage-1"])
+    again = CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(
+        session, _archive_body(stage_ids=["frontdoor-stage-1"])
+    )
     assert again == 0
