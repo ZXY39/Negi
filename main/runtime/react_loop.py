@@ -8,6 +8,7 @@ import json
 import re
 import time
 import traceback
+import uuid
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,14 +25,24 @@ from g3ku.runtime.tool_error_guidance import (
 )
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_ARCHIVE_HEADING,
     STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
     STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
+    STAGE_REF_SELECTION_RULE,
+    build_stage_archive_document,
     compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
     completed_stage_blocks as _shared_completed_stage_blocks,
     current_stage_active_window as _shared_current_stage_active_window,
     is_stage_context_message as _shared_is_stage_context_message,
+    render_stage_ref_candidate_block,
+    render_stage_ref_index,
     retained_completed_stage_ids as _shared_retained_completed_stage_ids,
+    split_stage_ref_selection,
+    stage_created_at_ceiling,
     stage_prompt_prefix as _shared_stage_prompt_prefix,
+    stage_record_dict,
+    stage_ref_candidates,
+    summarized_stage_ids,
 )
 from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
@@ -4539,6 +4550,142 @@ class ReActToolLoop:
             bounded.append(updated)
         return bounded
 
+    def _node_durable_stage_state(self, node_id: str) -> Any:
+        """节点压缩侧读的账本：与渲染端同源的那份 durable ledger。
+
+        节点只有一份账本，没有前门"canonical 与 stage_state 各一套 stage_id"的问题。"""
+        store = getattr(self._log_service, '_store', None)
+        getter = getattr(store, 'get_node', None) if store is not None else None
+        node = getter(str(node_id or '').strip()) if callable(getter) else None
+        metadata = getattr(node, 'metadata', None) if node is not None else None
+        payload = metadata.get('execution_stages') if isinstance(metadata, dict) else {}
+        return normalize_execution_stage_metadata(payload)
+
+    def _node_task_temp_dir(self, task_id: str) -> str:
+        """节点归档的落点：只认任务 runtime meta 里的绝对 task_temp_dir，拿不到返回空串。
+
+        不退回工作区根目录——那会让归档落在任务目录之外、躲开磁盘治理。"""
+        getter = getattr(self._log_service, 'read_task_runtime_meta', None)
+        if not callable(getter):
+            return ''
+        try:
+            runtime_meta = dict(getter(str(task_id or '').strip()) or {})
+        except Exception:
+            return ''
+        raw = str(runtime_meta.get('task_temp_dir') or '').strip()
+        if not raw:
+            return ''
+        try:
+            candidate = Path(raw).expanduser().resolve(strict=False)
+        except Exception:
+            return ''
+        return str(candidate) if candidate.is_absolute() else ''
+
+    def _write_node_stage_archive_file(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        records: list[dict[str, Any]],
+    ) -> tuple[str, int, int]:
+        """被吞阶段的完整账本导档，返回 (路径, stage 区间起, 区间止)；落不了盘时 ('', 0, 0)。"""
+        if not list(records or []):
+            return '', 0, 0
+        directory = self._node_task_temp_dir(task_id)
+        if not directory:
+            return '', 0, 0
+        try:
+            target = Path(directory)
+            target.mkdir(parents=True, exist_ok=True)
+            payload = build_stage_archive_document(
+                kind='node_stage_archive',
+                owner=f'task:{task_id}/node:{node_id}',
+                created_at=now_iso(),
+                stages=records,
+            )
+            path = target / f'g3ku_node_stage_archive_{len(records)}_{uuid.uuid4().hex[:8]}.json'
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+            indexes = [int((item or {}).get('stage_index') or 0) for item in list(payload.get('stages') or [])]
+            return str(path), min(indexes or [0]), max(indexes or [0])
+        except Exception:
+            return '', 0, 0
+
+    def _node_stage_archive_plan(self, *, stage_state: Any, recent_tail: list[dict[str, Any]]) -> dict[str, Any]:
+        """本轮真正吞掉的阶段 + 交给模型挑号的证据引用候选。"""
+        swallowed_ids = summarized_stage_ids(stage_state, body_messages=recent_tail, keep_latest=3)
+        if not swallowed_ids:
+            return {'stage_ids': [], 'candidates': [], 'records': []}
+        wanted = set(swallowed_ids)
+        records = [
+            stage_record_dict(stage)
+            for stage in list(getattr(stage_state, 'stages', []) or [])
+            if str(getattr(stage, 'stage_id', '') or '').strip() in wanted
+        ]
+        return {
+            'stage_ids': swallowed_ids,
+            'candidates': list(stage_ref_candidates(stage_state, stage_ids=wanted)),
+            'records': records,
+        }
+
+    def _node_stage_archive_envelope(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        compressed_text: str,
+        plan: dict[str, Any],
+        allow_ref_selection: bool = True,
+    ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        """把摘要正文补成与前门同款的信封，返回 (正文, 压缩块 stage_archive, 诊断计数)。
+
+        `## 证据索引` 由模型选编号、运行时逐字回填；`## 阶段归档` 只留一行路径指针。
+        归档落不了盘就整轮不收口（payload 不带 `stage_archive`，落盘点因此什么都不会标）：
+        宁可不缩，也不能把阶段收进模型打不开的地方。分块车道 `allow_ref_selection=False`
+        ——每块看不到全量候选，选择语义不成立，只留指针。"""
+        records = list((plan or {}).get('records') or [])
+        if not records:
+            return compressed_text, {}, {}
+        candidates = list((plan or {}).get('candidates') or [])
+        body = str(compressed_text or '')
+        selected_ids: list[int] = []
+        if allow_ref_selection:
+            body, selected_ids = split_stage_ref_selection(body)
+        index_text, selected_count, dropped_dead = render_stage_ref_index(candidates, selected_ids)
+        archive_path, archive_start, archive_end = self._write_node_stage_archive_file(
+            task_id=task_id,
+            node_id=node_id,
+            records=records,
+        )
+        archive_text = ''
+        stage_archive: dict[str, Any] = {}
+        if archive_path:
+            archive_text = '\n'.join(
+                [
+                    STAGE_ARCHIVE_HEADING,
+                    f'- stage {archive_start}-{archive_end} 共 {len(records)} '
+                    '个阶段的完整记录（含逐条 key_refs 与工具轮次）已收口，不再逐轮进入上下文：'
+                    f'{archive_path}',
+                    '  需要回看这些阶段的细节时用 content_open 按上面的路径打开。',
+                ]
+            )
+            stage_archive = {
+                'ref': archive_path,
+                'stage_index_start': archive_start,
+                'stage_index_end': archive_end,
+                'stage_count': len(records),
+                # 收口水位线：与阶段落盘点（`_persist_actual_request_artifact`）之间的合同。
+                'archived_through_created_at': stage_created_at_ceiling(records),
+            }
+        sections = [item for item in (body.strip(), index_text, archive_text) if item]
+        diagnostics = {
+            'stage_ref_candidate_count': len(candidates),
+            'stage_ref_selected_count': int(selected_count),
+            'stage_ref_dropped_dead': int(dropped_dead),
+            'stage_archive_pending_count': len(records),
+            'stage_archive_ref': archive_path,
+        }
+        return '\n\n'.join(sections).strip(), stage_archive, diagnostics
+
     @classmethod
     def _rewrite_request_messages_for_token_compaction(
         cls,
@@ -4547,6 +4694,7 @@ class ReActToolLoop:
         request_messages: list[dict[str, Any]] | None,
         compressed_text: str = "",
         recent_tail_count: int = _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT,
+        stage_archive: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         parts = cls._split_request_messages_for_token_compaction(
             request_messages=request_messages,
@@ -4564,14 +4712,18 @@ class ReActToolLoop:
             "contract_message_count": len(list(parts.get("contract_tail") or [])),
             "append_notice_tail_count": len(list(parts.get("append_notice_tail") or [])),
         }
-        compacted_block = {
-            "role": "assistant",
-            "content": (
-                f"{_NODE_TOKEN_COMPACT_MARKER}\n"
-                f"{json.dumps(compacted_payload, ensure_ascii=False, sort_keys=True)}"
-                f"{f'\\n\\n{str(compressed_text or '').strip()}' if str(compressed_text or '').strip() else ''}"
-            ).strip(),
-        }
+        if dict(stage_archive or {}).get("ref"):
+            compacted_payload["stage_archive"] = dict(stage_archive)
+        summary_text = str(compressed_text or "").strip()
+        # 块形态与前门一致：首行前缀、第二行 JSON 元数据、空行后接摘要正文。元数据行必须
+        # 能单独解析回来——落盘点要靠它读收口水位线，写成转义字面量就等于永远读不到。
+        block_content = (
+            f"{_NODE_TOKEN_COMPACT_MARKER}\n"
+            f"{json.dumps(compacted_payload, ensure_ascii=False, sort_keys=True)}"
+        )
+        if summary_text:
+            block_content = f"{block_content}\n\n{summary_text}"
+        compacted_block = {"role": "assistant", "content": block_content.strip()}
         rewritten = [
             *list(parts.get("system_prefix") or []),
             *list(parts.get("bootstrap_user") or []),
@@ -4654,6 +4806,12 @@ class ReActToolLoop:
         }
         if not older_history_messages:
             return "", helper_payload
+        stage_state = self._node_durable_stage_state(node_id)
+        plan = self._node_stage_archive_plan(
+            stage_state=stage_state,
+            recent_tail=list(parts.get("recent_tail") or []),
+        )
+        helper_payload["stage_archive_plan"] = plan
         task_goal = self._node_token_compression_task_goal(
             task_id=task_id,
             node_id=node_id,
@@ -4662,6 +4820,10 @@ class ReActToolLoop:
         instruction_text = _NODE_TOKEN_COMPRESSION_INSTRUCTION_TEMPLATE.format(
             task_goal=task_goal or "（未提供）"
         )
+        # 候选清单只挂在单发指令尾部：分块车道每块看不到全量候选，选择语义不成立。
+        candidate_block = render_stage_ref_candidate_block(list(plan.get("candidates") or []))
+        if candidate_block:
+            instruction_text = f"{instruction_text}\n{STAGE_REF_SELECTION_RULE}\n\n{candidate_block}"
         system_prefix = [dict(item) for item in list(parts.get("system_prefix") or []) if isinstance(item, dict)]
         bootstrap_user = [dict(item) for item in list(parts.get("bootstrap_user") or []) if isinstance(item, dict)]
         append_notice_tail = [
@@ -5251,10 +5413,21 @@ class ReActToolLoop:
                     # 无可压缩历史：跳过压缩，请求原样下发。
                     return (request_messages, token_preflight_diagnostics, "", "")
                 compact_payload: dict[str, Any] = {}
+                # 阶段收口信封：正文补 `## 证据索引` / `## 阶段归档` 两节，压缩块带上
+                # 收口水位线，供真实发送落盘点（`_persist_actual_request_artifact`）标账本。
+                compressed_text, stage_archive_payload, stage_archive_diagnostics = self._node_stage_archive_envelope(
+                    task_id=task_id,
+                    node_id=node_id,
+                    compressed_text=compressed_text,
+                    plan=dict(compression_helper_call.get('stage_archive_plan') or {}),
+                    allow_ref_selection=str(compression_helper_call.get('compression_mode') or 'llm') == 'llm',
+                )
+                token_preflight_diagnostics.update(stage_archive_diagnostics)
                 rewritten_messages, compact_payload = self._rewrite_request_messages_for_token_compaction(
                     node_id=node_id,
                     request_messages=request_messages,
                     compressed_text=compressed_text,
+                    stage_archive=stage_archive_payload,
                 )
                 request_messages = rewritten_messages
                 pre_compaction_snapshot = dict(token_preflight_diagnostics)
