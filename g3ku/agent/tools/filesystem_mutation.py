@@ -237,6 +237,40 @@ def _resolved_line_span(*, content: str, start_offset: int, end_offset_exclusive
     return f'resolved lines {start_line}-{end_line}'
 
 
+def _replaced_span_note(
+    *,
+    content: str,
+    mode: str,
+    old_text: Any,
+    start_line: Any,
+    end_line: Any,
+) -> str:
+    """Name the region a flat-lane edit replaced, so a wrong span is visible.
+
+    A range locator cannot fail loudly the way old_text does when it points at
+    the wrong lines, so the result echoes the span and its first line.
+    """
+    if mode == _EDIT_MODE_RANGE:
+        start = _coerce_line_number(start_line)
+        end = _coerce_line_number(end_line)
+        if start is None or end is None:
+            return ''
+        lines = content.splitlines()
+        first = lines[start - 1].strip()[:48] if start - 1 < len(lines) else ''
+        if first:
+            return f'replaced lines {start}-{end}, first was: {first!r}'
+        return f'replaced lines {start}-{end}'
+    if isinstance(old_text, str) and old_text:
+        index = content.find(old_text)
+        if index != -1:
+            return _resolved_line_span(
+                content=content,
+                start_offset=index,
+                end_offset_exclusive=index + len(old_text),
+            )
+    return ''
+
+
 def _coerce_line_number(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
@@ -589,7 +623,21 @@ class FilesystemTool:
                 replacement = target_resolution.get('replacement')
                 resolved_span = str(target_resolution.get('resolved_span') or '').strip()
             else:
-                if selected_mode == _EDIT_MODE_TEXT:
+                if (
+                    not selected_mode
+                    and old_text is None
+                    and replacement is None
+                    and new_text is not None
+                    and _coerce_line_number(start_line) is not None
+                    and _coerce_line_number(end_line) is not None
+                ):
+                    # 平面行号车道：new_text 直接承载替换内容，不要求复述旧文本
+                    replacement = new_text
+                    selected_mode = _EDIT_MODE_RANGE
+                elif not selected_mode and old_text is not None and replacement is None and new_text is not None \
+                        and _coerce_line_number(start_line) is not None and _coerce_line_number(end_line) is not None:
+                    return 'Error: give either old_text or start_line/end_line with new_text, not both.'
+                elif selected_mode == _EDIT_MODE_TEXT:
                     if range_mode:
                         return _EDIT_MODE_ERROR
                     text_mode = True
@@ -601,12 +649,12 @@ class FilesystemTool:
                     if text_mode and range_mode:
                         return _EDIT_MODE_ERROR
                     if not text_mode and not range_mode:
-                        return _EDIT_MODE_ERROR
+                        return 'Error: filesystem_edit needs new_text plus either old_text or start_line and end_line'
                     selected_mode = _EDIT_MODE_TEXT if text_mode else _EDIT_MODE_RANGE
 
             if selected_mode == _EDIT_MODE_TEXT:
                 if old_text is None:
-                    return 'Error: old_text is required in text-replace mode'
+                    return 'Error: old_text is required to locate the region, or give start_line and end_line'
                 if new_text is None:
                     return 'Error: new_text is required in text-replace mode'
                 updated_or_error = self._edit_by_text(path=path, content=original, old_text=old_text, new_text=new_text)
@@ -640,6 +688,14 @@ class FilesystemTool:
                 commands_by_ext=dict(self._settings.edit_validation_commands_by_ext or {}),
             ) or 0)
             details: list[str] = []
+            if not resolved_span:
+                resolved_span = _replaced_span_note(
+                    content=original,
+                    mode=selected_mode,
+                    old_text=old_text,
+                    start_line=start_line,
+                    end_line=end_line,
+                )
             if resolved_span:
                 details.append(resolved_span)
             if validated_count > 0:
@@ -1147,6 +1203,11 @@ class FilesystemTool:
         if start < 1 or end < start or end > len(lines):
             return 'Error: invalid line range'
         replacement_text = '' if replacement is None else str(replacement)
+        if ''.join(lines[start - 1:end]) == replacement_text and replacement_text:
+            return (
+                f'{_ALREADY_APPLIED_PREFIX} lines {start}-{end} of {path} already hold the intended text. '
+                'File left unchanged.'
+            )
         replacement_lines = replacement_text.splitlines(keepends=True)
         if replacement_text and not replacement_lines:
             replacement_lines = [replacement_text]

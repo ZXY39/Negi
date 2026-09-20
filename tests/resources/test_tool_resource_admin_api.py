@@ -424,13 +424,18 @@ async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_age
             ),
         ):
             assert toolskill is not None
-            assert toolskill['required_parameters'] == ['path', 'old_text', 'new_text']
+            assert toolskill['required_parameters'] == ['path', 'new_text']
             properties = dict((toolskill['parameters_schema'] or {}).get('properties') or {})
             # The wider target/legacy lanes stay validator-only: documenting them
             # again would hand back the nested locator this contract removed.
             assert 'target' not in properties
-            assert 'old_text' in dict(toolskill['example_arguments'] or {})
-            assert 'target' not in str(toolskill.get('content') or '')
+            assert {'old_text', 'start_line', 'end_line'} <= set(properties)
+            content = str(toolskill.get('content') or '')
+            assert 'target' not in content
+            # Example arguments are built from required fields only, so the two
+            # locator shapes have to come through in the toolskill body.
+            assert '"old_text"' in content
+            assert '"start_line"' in content
     finally:
         await service.close()
         manager.close()

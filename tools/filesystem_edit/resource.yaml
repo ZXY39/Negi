@@ -2,7 +2,7 @@
 kind: tool
 name: filesystem_edit
 display_name: Filesystem Edit
-description: Replace one exact text region in one file. old_text must match the file verbatim and appear once.
+description: Replace one region in one file with new_text. Locate the region with old_text (exact text, matching once) or with start_line/end_line.
 tool_result_delivery_contract: runtime_managed
 protocol: mcp
 mcp:
@@ -89,13 +89,18 @@ model_parameters:
       description: Absolute file path to edit.
     old_text:
       type: string
-      description: Exact existing text to replace, copied verbatim from a fresh read and matching once.
+      description: Exact existing text to replace, copied verbatim from a fresh read and matching once. Use this or start_line/end_line.
+    start_line:
+      type: integer
+      description: 1-based first line of the region to replace. Use instead of old_text when the block is large.
+    end_line:
+      type: integer
+      description: 1-based last line of the region to replace, inclusive.
     new_text:
       type: string
-      description: Replacement text for old_text.
+      description: Replacement text. Empty string deletes the region.
   required:
     - path
-    - old_text
     - new_text
 governance:
   family: filesystem
