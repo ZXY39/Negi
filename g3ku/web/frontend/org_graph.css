@@ -4002,6 +4002,26 @@ textarea {
     display: none;
 }
 
+/* 看不到最新输出时按钮持续呼吸（渐变发亮发暗）；hover 的位移/描边不受影响。 */
+@keyframes ceo-scroll-latest-breathe {
+    0%, 100% {
+        box-shadow: 0 10px 28px -12px color-mix(in srgb, var(--brand-primary) 30%, transparent), var(--shadow-sm);
+    }
+    50% {
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--brand-primary) 22%, transparent), 0 14px 34px -10px color-mix(in srgb, var(--brand-primary) 55%, transparent);
+    }
+}
+
+.ceo-scroll-to-latest-btn:not([hidden]) {
+    animation: ceo-scroll-latest-breathe 1.8s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ceo-scroll-to-latest-btn:not([hidden]) {
+        animation: none;
+    }
+}
+
 .ceo-composer {
     min-width: 0;
     display: flex;

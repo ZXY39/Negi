@@ -157,7 +157,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, scrollCeoFeedToBottom, updateCeoScrollToLatestButton, S, U };`,
         context
     );
     return context.__testExports;
@@ -310,6 +310,7 @@ test("preserve 模式:上方内容增高时按锚点元素补偿,不再像素漂
     const childB = makeFeedChild({ key: "m:2", contentTop: 500, height: 500 });
     const feed = makeFeed({ children: [childA, childB], scrollTop: 700, scrollHeight: 1000, clientHeight: 200 });
     const api = setupScrollApi(feed);
+    api.S.ceoFeedFollowLatest = false; // 新契约:上滚是意图位,不靠瞬时几何
 
     api.mutateCeoFeed(() => {
         // 视口上方的消息 A 增高 300(工具输出撑开),B 被推下去。
@@ -328,6 +329,7 @@ test("preserve 模式:上方内容缩短(折叠)时锚点跟随,不被 clamp 甩
     const childB = makeFeedChild({ key: "m:2", contentTop: 500, height: 500 });
     const feed = makeFeed({ children: [childA, childB], scrollTop: 700, scrollHeight: 1000, clientHeight: 200 });
     const api = setupScrollApi(feed);
+    api.S.ceoFeedFollowLatest = false; // 新契约:上滚是意图位,不靠瞬时几何
 
     api.mutateCeoFeed(() => {
         childA._height = 100;
@@ -357,6 +359,7 @@ test("preserve 模式:上滚用户不被贴底跟随打扰,回到底部提示按
     const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
     const feed = makeFeed({ children: [childA], scrollTop: 100, scrollHeight: 1000, clientHeight: 200 });
     const api = setupScrollApi(feed);
+    api.S.ceoFeedFollowLatest = false; // 新契约:上滚是意图位,不靠瞬时几何
 
     api.mutateCeoFeed(() => {
         childA._height = 1200;
@@ -365,4 +368,48 @@ test("preserve 模式:上滚用户不被贴底跟随打扰,回到底部提示按
 
     assert.equal(feed.scrollTop, 100, "上滚用户视口必须原地保持");
     assert.equal(api.U.ceoScrollToLatestBtn.hidden, false, "离开底部后应显示回到底部按钮");
+});
+
+test("意图脱离竞态:几何近底但用户已上滚,直播突变不得钉底", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    // scrollTop=750 距底部仅 12px<64 阈值——旧几何判定会误判"在底部"并钉回。
+    const feed = makeFeed({ children: [childA], scrollTop: 750, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    api.S.ceoFeedFollowLatest = false;
+
+    api.mutateCeoFeed(() => {
+        childA._height = 1200;
+        feed.scrollHeight = 1200;
+    }, { scrollMode: "preserve" });
+
+    assert.notEqual(feed.scrollTop, 1200, "跟随与否只看意图位,不再被瞬时几何骗走");
+    assert.equal(feed.scrollTop, 750, "锚点(m:1 内偏移 750)保持原位");
+});
+
+test("跟随意图保持时:内容增长自动钉到最新底部", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 300, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    // S.ceoFeedFollowLatest 默认 true：上一次突变刚把新内容撑出视口，几何暂时远离底部。
+
+    api.mutateCeoFeed(() => {
+        childA._height = 1200;
+        feed.scrollHeight = 1200;
+    }, { scrollMode: "preserve" });
+
+    assert.equal(feed.scrollTop, 1200);
+});
+
+test("脱离时按钮常显；scrollCeoFeedToBottom 恢复跟随并收起按钮", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 100, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    api.S.ceoFeedFollowLatest = false;
+    api.updateCeoScrollToLatestButton();
+    assert.equal(api.U.ceoScrollToLatestBtn.hidden, false, "看不到最新输出时按钮必须可见(呼吸样式挂在可见态上)");
+
+    api.scrollCeoFeedToBottom();
+    assert.equal(api.S.ceoFeedFollowLatest, true);
+    assert.equal(feed.scrollTop, 1000);
+    assert.equal(api.U.ceoScrollToLatestBtn.hidden, true);
 });

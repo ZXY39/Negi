@@ -118,6 +118,7 @@ const S = {
     ceoBulkMode: false,
     ceoSelectedSessionIds: new Set(),
     ceoScrollToLatestOnSnapshot: false,
+    ceoFeedFollowLatest: true,
     ceoFeedRenderSessionId: "",
     ceoFeedRenderSignature: "",
     ceoFeedRenderedMessageKeys: [],
@@ -5583,13 +5584,25 @@ function ceoFeedNearBottom(threshold = 64) {
     return U.ceoFeed.scrollHeight - U.ceoFeed.scrollTop - U.ceoFeed.clientHeight <= threshold;
 }
 
+// 用户「跟随最新」意图：true=贴底跟随；false=用户正在读历史，任何直播突变都不得
+// 再动滚动位置。判定只认用户手势（滚轮/指针/触摸/键盘）引发的滚动——程序写
+// scrollTop 触发的 scroll 事件不改变意图，这正是「上翻被反复拽回底部」的根因。
+let ceoFeedUserScrollIntentAt = 0;
+
+function setCeoFeedFollowLatest(on) {
+    S.ceoFeedFollowLatest = !!on;
+    updateCeoScrollToLatestButton();
+}
+
 function updateCeoScrollToLatestButton() {
     if (!U.ceoScrollToLatestBtn) return;
-    U.ceoScrollToLatestBtn.hidden = ceoFeedNearBottom();
+    const atLatest = S.ceoFeedFollowLatest !== false && ceoFeedNearBottom();
+    U.ceoScrollToLatestBtn.hidden = atLatest;
 }
 
 function scrollCeoFeedToBottom() {
     if (!U.ceoFeed) return;
+    S.ceoFeedFollowLatest = true;
     const applyBottom = () => {
         if (!U.ceoFeed) return;
         U.ceoFeed.scrollTop = U.ceoFeed.scrollHeight;
@@ -5625,7 +5638,9 @@ function captureCeoFeedScrollSnapshot() {
     if (!U || !U.ceoFeed) return null;
     const feed = U.ceoFeed;
     const prevTop = Math.max(0, Number(feed.scrollTop || 0));
-    const atBottom = ceoFeedNearBottom();
+    // 用意图位而非瞬时几何：直播突变每几百毫秒一次，用户拖动滚动条的过程中
+    // 几何判定会反复误判「还在底部」并把视口钉回去（“翻许多次才翻得动”的根因）。
+    const atBottom = S.ceoFeedFollowLatest !== false;
     return {
         prevTop,
         atBottom,
@@ -6549,7 +6564,7 @@ function captureCeoFeedViewState(sessionId = "") {
     const feed = U.ceoFeed;
     const state = {
         sessionId: key,
-        atBottom: ceoFeedNearBottom(),
+        atBottom: S.ceoFeedFollowLatest !== false,
         prevTop: Math.max(0, Number(feed.scrollTop || 0)),
         turnFlows: {},
         steps: {},
@@ -6810,6 +6825,10 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
     const targetSessionId = String(sessionId || activeSessionId()).trim();
+    // 跨会话渲染或显式"回到最新"：回到贴底跟随态，再走各自的滚动还原。
+    if (shouldScrollToLatest || String(S.ceoFeedRenderSessionId || "") !== targetSessionId) {
+        S.ceoFeedFollowLatest = true;
+    }
     const normalizedPreservedTurn = (
         preservedTurn
         && ceoAssistantTurnAlreadyPersisted(preservedTurn?.turn_id || "", { messages, sessionId: targetSessionId })
@@ -13500,7 +13519,19 @@ function bind() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
     U.projectExit?.addEventListener("click", () => void requestProjectExit());
-    U.ceoFeed?.addEventListener("scroll", updateCeoScrollToLatestButton, { passive: true });
+    U.ceoFeed?.addEventListener("scroll", () => {
+        // 程序写 scrollTop 也会派发 scroll：只有真实手势（近 800ms 内有滚轮/指针/
+        // 触摸/键盘输入）才允许关闭跟随；滚回底部则无条件恢复跟随。
+        if (ceoFeedNearBottom()) {
+            setCeoFeedFollowLatest(true);
+        } else if (Date.now() - ceoFeedUserScrollIntentAt < 800) {
+            setCeoFeedFollowLatest(false);
+        }
+        updateCeoScrollToLatestButton();
+    }, { passive: true });
+    ["wheel", "pointerdown", "keydown", "touchstart"].forEach((type) => {
+        U.ceoFeed?.addEventListener(type, () => { ceoFeedUserScrollIntentAt = Date.now(); }, { passive: true });
+    });
     U.ceoScrollToLatestBtn?.addEventListener("click", () => scrollCeoFeedToBottom());
     updateCeoScrollToLatestButton();
     U.nav.forEach((btn) => btn.addEventListener("click", () => switchView(btn.dataset.view)));

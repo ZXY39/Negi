@@ -308,6 +308,8 @@ test("锚定滚动:上方内容高度变化后,锚点仍保持在用户正在读
     });
 
     // 用户滚动到 520:命中的锚是 turn 元素,元素内偏移 20。
+    // 新契约:上滚由意图位表达(follow=false),不再靠捕获瞬间的几何判定。
+    api.S.ceoFeedFollowLatest = false;
     api.U.ceoFeed.scrollTop = 520;
     const state = api.captureCeoFeedViewState("s1");
     assert.equal(state.anchor.key, "turn:t1");
@@ -338,6 +340,7 @@ test("锚定元素消失时回退像素 clamp,丢失锚点时不做猜测", () =
     const api = setup({
         feed: makeFeed({ children: [message, turn], scrollTop: 0, scrollHeight: 1300, clientHeight: 600 }),
     });
+    api.S.ceoFeedFollowLatest = false;
     api.U.ceoFeed.scrollTop = 520;
     const state = api.captureCeoFeedViewState("s1");
 
