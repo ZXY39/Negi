@@ -10,6 +10,7 @@ WRITE_ALLOWED_ROLES = ['ceo', 'execution']
 TOOL_FAMILY_ALIASES: dict[str, str] = {
     'filesystem_write': 'filesystem',
     'filesystem_edit': 'filesystem',
+    'filesystem_edit_anchors': 'filesystem',
     'filesystem_copy': 'filesystem',
     'filesystem_move': 'filesystem',
     'filesystem_delete': 'filesystem',

@@ -1,34 +1,25 @@
 # filesystem_edit
 
-Use this for precise edits to an existing file.
+Replace one exact text region in an existing file.
 
-Preferred workflow:
-- Read the file first with `content_open`.
-- Use the target-first contract: `path`, `target`, `new_text`.
+Read the region first with `content_open`, then quote it verbatim.
 
-Preferred target-first locators:
-- `target={"by":"exact_text","text":"..."}` when you already have the exact old block and it should match uniquely.
-- `target={"by":"anchor_pair","start_anchor":"...","end_anchor":"..."}` when exact old text is too large or too fragile, but stable surrounding anchors exist.
-- `target={"by":"line_range","start_line":N,"end_line":M}` only when you already know the exact current lines from a fresh read.
+Call shape — three top-level fields, all required:
 
-Target-first call shape:
-- `path`
-- `target`
-- `new_text`
+```json
+{
+  "path": "C:\\notes\\todo.md",
+  "old_text": "- [ ] call the vendor",
+  "new_text": "- [x] call the vendor"
+}
+```
 
-Legacy text-replace mode is still supported for backward compatibility:
-- `path`
-- `mode="text_replace"`
-- `old_text`
-- `new_text`
+Rules:
+- `old_text` must match the file byte-for-byte, including indentation and newlines, and must appear exactly once. Widen it with neighbouring lines until it is unique.
+- Keep `old_text` as small as it can be while still unique. Do not quote a whole block to change one line.
+- Pass `new_text: ""` to delete the region.
+- `old_text` and `new_text` sit side by side at the top level. Neither belongs inside an object.
 
-Legacy line-range mode is still supported for backward compatibility:
-- `path`
-- `mode="line_range"`
-- `start_line`
-- `end_line`
-- `replacement`
+Repeated calls are safe: when `old_text` is absent because the change is already on disk, the result starts with `Already applied:` and the file is left untouched. Treat that as success instead of re-reading and retrying.
 
-Do not mix `target` with real legacy edit fields in the same call.
-
-If a caller auto-fills placeholder legacy values such as `start_line=0`, `end_line=0`, `replacement=""`, or empty legacy text fields, omit them. Placeholder cleanup only exists to absorb adapter noise, not to support real mixed-mode edits.
+When the region is too large or too volatile to quote exactly, use `filesystem_edit_anchors`. When the whole file is being created or replaced, use `filesystem_write`.

@@ -394,7 +394,7 @@ async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_age
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'filesystem_edit')
+    _copy_repo_tools(workspace, 'filesystem_edit', 'filesystem_edit_anchors')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -415,28 +415,26 @@ async def test_load_tool_context_filesystem_edit_prefers_callable_schema_for_age
     try:
         await service.startup()
 
-        toolskill = service.get_tool_toolskill('filesystem_edit')
-        assert toolskill is not None
-        assert toolskill['required_parameters'] == ['path', 'target', 'new_text']
-        assert toolskill['parameters_schema']['properties']['target']['properties']['by']['enum'] == [
-            'exact_text',
-            'anchor_pair',
-            'line_range',
-        ]
-        assert dict(toolskill['example_arguments']).get('target', {}).get('by') == 'exact_text'
+        for toolskill in (
+            service.get_tool_toolskill('filesystem_edit'),
+            service.load_tool_context_v2(
+                actor_role='ceo',
+                session_id='web:shared',
+                tool_id='filesystem_edit',
+            ),
+        ):
+            assert toolskill is not None
+            assert toolskill['required_parameters'] == ['path', 'old_text', 'new_text']
+            properties = dict((toolskill['parameters_schema'] or {}).get('properties') or {})
+            # The wider target/legacy lanes stay validator-only: documenting them
+            # again would hand back the nested locator this contract removed.
+            assert 'target' not in properties
+            assert 'old_text' in dict(toolskill['example_arguments'] or {})
+            assert 'target' not in str(toolskill.get('content') or '')
 
-        payload_v2 = service.load_tool_context_v2(
-            actor_role='ceo',
-            session_id='web:shared',
-            tool_id='filesystem_edit',
-        )
-        assert payload_v2['required_parameters'] == ['path', 'target', 'new_text']
-        assert payload_v2['parameters_schema']['properties']['target']['properties']['by']['enum'] == [
-            'exact_text',
-            'anchor_pair',
-            'line_range',
-        ]
-        assert dict(payload_v2['example_arguments']).get('target', {}).get('by') == 'exact_text'
+        anchors = service.get_tool_toolskill('filesystem_edit_anchors')
+        assert anchors is not None
+        assert anchors['required_parameters'] == ['path', 'start_anchor', 'end_anchor', 'new_text']
     finally:
         await service.close()
         manager.close()
