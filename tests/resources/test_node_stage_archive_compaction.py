@@ -156,6 +156,29 @@ def _swallowable_stages(*, key_refs=None) -> list[dict]:
     return [_stage(index, key_refs=key_refs if index == 1 else []) for index in range(1, 7)]
 
 
+def test_unregistered_in_flight_stage_is_never_swallowed() -> None:
+    """节点状态写中文 `进行中`，渲染层历史上只排除英文 `active`（前门才是英文词表）。
+
+    没登记成 `active_stage_id` 的在跑阶段一旦被算进被吞集合，就是把它还在写的轮次连同
+    key_refs 一起收进归档——摘要里没有它，正文里也没它。判定改成"终态白名单"。"""
+    stages = [
+        {**_stage(1, status='进行中'), 'key_refs': [{'ref': 'artifact:还在产出的中间物', 'note': '在跑'}]},
+        _stage(2),
+        _stage(3),
+        _stage(4),
+        _stage(5),
+        _stage(6),
+        _stage(7),
+    ]
+    loop = _loop(stages=stages)
+    plan = _plan(loop)
+    # 7 条里保留窗口吃掉 5/6/7，被吞的只能是已终态的 2/3/4；在跑的 1 号不进去。
+    assert plan['stage_ids'] == ['node-stage-2', 'node-stage-3', 'node-stage-4']
+    assert [item['ref'] for item in plan['candidates']] == ['artifact:out-2', 'artifact:out-3', 'artifact:out-4']
+    assert 'artifact:还在产出的中间物' not in json.dumps(plan['candidates'], ensure_ascii=False)
+    assert [item['stage_index'] for item in plan['records']] == [2, 3, 4]
+
+
 def test_node_plan_spares_raw_window_and_tail_survivors() -> None:
     loop = _loop(stages=[
         _stage(1, key_refs=[{'ref': 'artifact:a1', 'note': '结论产物'}]),

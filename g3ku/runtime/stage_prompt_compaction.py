@@ -1123,6 +1123,17 @@ def stage_round_call_ids(stage: Any) -> set[str]:
     return collected
 
 
+_TERMINAL_STAGE_STATUSES = frozenset({"completed", "failed", "完成", "失败"})
+
+
+def stage_is_terminal(stage: Any) -> bool:
+    """阶段是否已终态：两车道各写一套状态词表（前门 `completed`，节点 `完成` / `失败`），都要认。
+
+    判定"能不能收口/归档"用终态白名单，而不是排除某个"进行中"字样：认不出的状态一律当作
+    还在跑——少收一轮只是多花 token，多收一轮就是把还在写的阶段收进摘要够不到的地方。"""
+    return str(_stage_get(stage, "status", "") or "").strip().lower() in _TERMINAL_STAGE_STATUSES
+
+
 def stage_is_swallowable(
     stage: Any,
     *,
@@ -1131,7 +1142,7 @@ def stage_is_swallowable(
     body_stage_indexes: set[int],
     body_call_ids: set[str],
 ) -> bool:
-    """这条阶段是否已经不必再逐轮渲染：完成的普通阶段，且肉身和块都不在场。
+    """这条阶段是否已经不必再逐轮渲染：终态的普通阶段，且肉身和块都不在场。
 
     工具轮次还留在请求体里、或它自己的阶段块还翻得出来，收口它就是直接在上下文里挖洞；
     `body_stage_indexes` 的口径由调用方给（压缩时认全部块，提交点只认 raw 块）。
@@ -1140,7 +1151,7 @@ def stage_is_swallowable(
         return False
     if str(_stage_get(stage, "stage_kind", "normal") or "normal").strip().lower() != "normal":
         return False
-    if str(_stage_get(stage, "status", "") or "").strip().lower() == "active":
+    if not stage_is_terminal(stage):
         return False
     stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
     if not stage_id or stage_id == active_stage_id or stage_id in retained_ids:
@@ -1246,6 +1257,7 @@ __all__ = [
     "stage_created_at_ceiling",
     "stage_created_at_within_watermark",
     "stage_is_swallowable",
+    "stage_is_terminal",
     "stage_message_call_ids",
     "stage_prompt_prefix",
     "stage_record_dict",
