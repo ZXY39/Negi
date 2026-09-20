@@ -237,6 +237,7 @@ class SessionManager:
                 commit_turn_counter=commit_turn_counter,
             )
             self._migrate_oversized_records(session)
+            self._migrate_cc_rows_to_delta(session)
             path_size = path.stat().st_size if path.exists() else 0
             self._file_states[key] = {
                 "record_count": len(session.messages),
@@ -290,6 +291,34 @@ class SessionManager:
         except Exception as exc:
             logger.warning(
                 "Skipped transcript projection migration for session {}: {}",
+                session.key,
+                exc,
+            )
+
+    def _migrate_cc_rows_to_delta(self, session: Session) -> None:
+        """Fold cumulative transcript cc rows into checkpoint/cc_upsert form.
+
+        Idempotent and crash-reentrant: every rewritten row is replay-verified
+        by the encoder, rows already in either stored form only advance the
+        chain cursor, and any failure leaves the transcript untouched. The
+        row mutations flag a structural edit, so the next save persists the
+        converged file."""
+        try:
+            if str((session.metadata or {}).get("cc_format") or "") == "delta_window_v1":
+                return
+            from g3ku.runtime.frontdoor.canonical_context import migrate_transcript_rows_to_delta
+
+            migrated = migrate_transcript_rows_to_delta(session.messages)
+            session.metadata = {**(session.metadata or {}), "cc_format": "delta_window_v1"}
+            if migrated:
+                logger.info(
+                    "Delta-encoded {} transcript cc row(s) for session {}; next save rewrites",
+                    migrated,
+                    session.key,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Skipped transcript cc migration for session {}: {}",
                 session.key,
                 exc,
             )

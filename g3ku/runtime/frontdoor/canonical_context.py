@@ -634,7 +634,121 @@ def ui_canonical_context_delta_from_views(
 
 TRANSCRIPT_DELTA_PROJECTION_MODE = "delta_window"
 TRANSCRIPT_CC_UPSERT_FIELD = "cc_upsert"
+# checkpoint 密度：真实渠道会话实测相邻视图 100% 可 upsert 编码（均值 2 个
+# stage/行），每 K 行一个全量锚点把重放长度与体积同时钉死在上界。
+TRANSCRIPT_CC_CHECKPOINT_INTERVAL_ROWS = 40
+TRANSCRIPT_CC_CHECKPOINT_CHAIN_BYTES = 96_000
 _MISSING_HEADER = object()
+
+
+def _transcript_rail_fields(row: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not isinstance(row, dict) or str(row.get("role") or "").strip().lower() != "assistant":
+        return None, None
+    stored = row.get("canonical_context")
+    stored = stored if isinstance(stored, dict) and stored else None
+    upsert = row.get(TRANSCRIPT_CC_UPSERT_FIELD)
+    upsert = upsert if isinstance(upsert, dict) else None
+    return stored, upsert
+
+
+def plan_transcript_cc_row(messages: Any, view: dict[str, Any]) -> dict[str, Any]:
+    """Fields for the assistant rail row about to be appended at the tail.
+
+    Emits a `cc_upsert` row when the tail chain stays short/light and the
+    candidate replays exactly; otherwise falls back to a full checkpoint row.
+    Every fallback keeps the file readable by the same row-level dispatch the
+    snapshot loop uses, so a chain never has to be "fixed" retroactively here.
+    """
+    checkpoint_fields = {
+        "canonical_context": copy.deepcopy(view),
+        "canonical_context_projection": TRANSCRIPT_PROJECTION_MODE,
+    }
+    rows = list(messages or [])
+    prev_index = -1
+    chain_rows = 0
+    chain_bytes = 0
+    for index in range(len(rows) - 1, -1, -1):
+        stored, upsert = _transcript_rail_fields(rows[index])
+        if stored is not None:
+            prev_index = index
+            break
+        if upsert is not None:
+            chain_rows += 1
+            chain_bytes += len(json.dumps(upsert, ensure_ascii=False))
+            continue
+    if prev_index < 0:
+        return checkpoint_fields
+    if (
+        chain_rows >= TRANSCRIPT_CC_CHECKPOINT_INTERVAL_ROWS
+        or chain_bytes >= TRANSCRIPT_CC_CHECKPOINT_CHAIN_BYTES
+    ):
+        return checkpoint_fields
+    prev_view = materialize_transcript_view(rows, prev_index)
+    if not prev_view:
+        return checkpoint_fields
+    payload = encode_cc_upsert(prev_view, view)
+    if payload is None:
+        return checkpoint_fields
+    return {
+        TRANSCRIPT_CC_UPSERT_FIELD: payload,
+        "canonical_context_projection": TRANSCRIPT_DELTA_PROJECTION_MODE,
+    }
+
+
+def _transcript_stored_view(row: Any) -> dict[str, Any]:
+    """View of a row that stores a full `canonical_context` (checkpoint or legacy raw)."""
+    stored, _ = _transcript_rail_fields(row)
+    if stored is None:
+        return {}
+    if str(row.get("canonical_context_projection") or "").strip() == TRANSCRIPT_PROJECTION_MODE:
+        return stored
+    return project_canonical_context_for_transcript(stored)
+
+
+def repair_transcript_cc_chain(messages: Any, index: int, replaced_view: Any) -> int:
+    """Re-encode delta rows that followed an in-place-mutated rail row.
+
+    A rail row replaced mid-file (paused archive upsert) invalidates every
+    `cc_upsert` row encoded against its old view. The caller must pass the
+    replaced row's pre-mutation view: downstream originals are only
+    recoverable by replaying the old chain forward from it. Each upsert row is
+    then re-encoded against the fresh anchor chain, checkpointing whatever
+    will not re-encode. Returns the number of rows rewritten.
+    """
+    rows = messages if isinstance(messages, list) else list(messages or [])
+    if not isinstance(index, int) or not (0 <= index < len(rows)):
+        return 0
+    originals: list[tuple[int, dict[str, Any]]] = []
+    walk = replaced_view if isinstance(replaced_view, dict) else {}
+    for cursor in range(index + 1, len(rows)):
+        stored, upsert = _transcript_rail_fields(rows[cursor])
+        if stored is not None:
+            walk = _transcript_stored_view(rows[cursor])
+            continue
+        if upsert is None:
+            continue
+        original = apply_cc_upsert(walk, upsert)
+        originals.append((cursor, original))
+        walk = original
+    rewritten = 0
+    prev_view = _transcript_stored_view(rows[index]) or materialize_transcript_view(rows, index)
+    for cursor, original_view in originals:
+        if not original_view:
+            continue
+        row = dict(rows[cursor])
+        row.pop(TRANSCRIPT_CC_UPSERT_FIELD, None)
+        row.pop("canonical_context", None)
+        payload = encode_cc_upsert(prev_view, original_view) if prev_view else None
+        if payload is None:
+            row["canonical_context"] = copy.deepcopy(original_view)
+            row["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+        else:
+            row[TRANSCRIPT_CC_UPSERT_FIELD] = payload
+            row["canonical_context_projection"] = TRANSCRIPT_DELTA_PROJECTION_MODE
+        rows[cursor] = row
+        rewritten += 1
+        prev_view = original_view
+    return rewritten
 
 
 def apply_cc_upsert(previous_view: Any, upsert: Any) -> dict[str, Any]:
@@ -647,8 +761,12 @@ def apply_cc_upsert(previous_view: Any, upsert: Any) -> dict[str, Any]:
     only when the writer saw a change. Pure function; inputs are not mutated.
     """
     payload = upsert if isinstance(upsert, dict) else {}
+    # Copy-on-write: unchanged stages stay shared with the previous view (the
+    # whole pipeline treats views as read-only after C2-a removed the input
+    # deepcopy); only replaced/appended stages get their own copies. Per-row
+    # full deep copies put the snapshot build back on a quadratic curve.
     previous_stages = [
-        copy.deepcopy(stage)
+        stage
         for stage in list((previous_view or {}).get("stages") or [])
         if isinstance(stage, dict)
     ]
@@ -657,7 +775,7 @@ def apply_cc_upsert(previous_view: Any, upsert: Any) -> dict[str, Any]:
         for index, stage in enumerate(previous_stages)
         if _as_str(stage.get("stage_id"))
     }
-    stages = previous_stages
+    stages = list(previous_stages)
     for stage in list(payload.get("upsert") or []):
         if not isinstance(stage, dict):
             continue
@@ -673,13 +791,13 @@ def apply_cc_upsert(previous_view: Any, upsert: Any) -> dict[str, Any]:
     if isinstance(previous_view, dict):
         for key, value in previous_view.items():
             if key != "stages":
-                view[key] = copy.deepcopy(value)
+                view[key] = value
     view["stages"] = stages
     headers = payload.get("headers")
     if isinstance(headers, dict):
         for key, value in headers.items():
             if key != "stages":
-                view[key] = copy.deepcopy(value)
+                view[key] = value
     return view
 
 
@@ -770,6 +888,73 @@ def materialize_transcript_view(messages: Any, index: int) -> dict[str, Any]:
     for payload in reversed(chain):
         view = apply_cc_upsert(view, payload)
     return view
+
+
+def migrate_transcript_rows_to_delta(messages: Any) -> int:
+    """Rewrite legacy full-rail rows into the checkpoint/delta forms in place.
+
+    Runs at load time (next to `_migrate_oversized_records`) so a persisted
+    session converges to the storage contract the writer produces: every
+    `stage_window` row becomes a `cc_upsert` row while its replay is verified
+    per step (``encode_cc_upsert`` refuses anything it cannot reproduce, and
+    refusal just keeps the row as the next anchor), legacy unprojected rows
+    first collapse to checkpoint form, and rows already in delta form only
+    advance the cursor — which makes the pass idempotent and crash-reentrant.
+    Returns the number of rows rewritten; the caller's next full save
+    (structural edit already flagged by the mutation) persists them.
+    """
+    rows = messages if isinstance(messages, list) else list(messages or [])
+    rewritten = 0
+    prev_view: dict[str, Any] | None = None
+    chain_rows = 0
+    chain_bytes = 0
+    for index, row in enumerate(rows):
+        stored, upsert = _transcript_rail_fields(row)
+        if upsert is not None and stored is None:
+            if prev_view is None:
+                # Delta without a preceding anchor: leave the row untouched and
+                # let the next full row restart the chain.
+                chain_rows = 0
+                chain_bytes = 0
+                continue
+            # 滚动推进，绝不做按行回溯物化：那会把整趟扫描拖成平方级。
+            prev_view = apply_cc_upsert(prev_view, upsert)
+            chain_rows += 1
+            chain_bytes += len(json.dumps(upsert, ensure_ascii=False))
+            continue
+        if stored is None:
+            continue
+        marker = str(row.get("canonical_context_projection") or "").strip()
+        view = stored if marker == TRANSCRIPT_PROJECTION_MODE else project_canonical_context_for_transcript(stored)
+        if not list(view.get("stages") or []):
+            continue
+        reducible = (
+            prev_view is not None
+            and chain_rows < TRANSCRIPT_CC_CHECKPOINT_INTERVAL_ROWS
+            and chain_bytes < TRANSCRIPT_CC_CHECKPOINT_CHAIN_BYTES
+        )
+        payload = encode_cc_upsert(prev_view, view) if reducible else None
+        if payload is None:
+            if marker != TRANSCRIPT_PROJECTION_MODE:
+                normalized = dict(row)
+                normalized["canonical_context"] = copy.deepcopy(view)
+                normalized["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+                rows[index] = normalized
+                rewritten += 1
+            prev_view = view
+            chain_rows = 0
+            chain_bytes = 0
+            continue
+        delta_row = dict(row)
+        delta_row.pop("canonical_context", None)
+        delta_row[TRANSCRIPT_CC_UPSERT_FIELD] = payload
+        delta_row["canonical_context_projection"] = TRANSCRIPT_DELTA_PROJECTION_MODE
+        rows[index] = delta_row
+        rewritten += 1
+        prev_view = view
+        chain_rows += 1
+        chain_bytes += len(json.dumps(payload, ensure_ascii=False))
+    return rewritten
 
 
 def merge_turn_stage_state_into_canonical_context(
@@ -929,9 +1114,14 @@ __all__ = [
     "TRANSCRIPT_PROJECTION_MODE",
     "TRANSCRIPT_DELTA_PROJECTION_MODE",
     "TRANSCRIPT_CC_UPSERT_FIELD",
+    "TRANSCRIPT_CC_CHECKPOINT_INTERVAL_ROWS",
+    "TRANSCRIPT_CC_CHECKPOINT_CHAIN_BYTES",
     "apply_cc_upsert",
     "encode_cc_upsert",
     "materialize_transcript_view",
+    "migrate_transcript_rows_to_delta",
+    "plan_transcript_cc_row",
+    "repair_transcript_cc_chain",
     "ui_canonical_context_delta",
     "ui_canonical_context_delta_from_views",
 ]

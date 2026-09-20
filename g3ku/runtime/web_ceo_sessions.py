@@ -370,9 +370,13 @@ def _compact_task_meta_payload(message: dict[str, Any]) -> dict[str, Any] | None
     return payload or None
 
 
-def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]:
+def _compact_tool_trace_payload(
+    message: dict[str, Any],
+    *,
+    transcript_view: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
     summaries: list[dict[str, str]] = []
-    canonical_context = (
+    canonical_context = transcript_view if transcript_view else (
         message.get('canonical_context')
         if isinstance(message.get('canonical_context'), dict)
         else {}
@@ -394,7 +398,11 @@ def _compact_tool_trace_payload(message: dict[str, Any]) -> list[dict[str, str]]
     return summaries[-_RECENT_HISTORY_TOOL_TRACE_LIMIT:]
 
 
-def _history_content_from_message(message: dict[str, Any]) -> str:
+def _history_content_from_message(
+    message: dict[str, Any],
+    *,
+    transcript_view: dict[str, Any] | None = None,
+) -> str:
     blocks: list[str] = []
     content = str(message.get('content') or '').strip()
     if content:
@@ -418,7 +426,7 @@ def _history_content_from_message(message: dict[str, Any]) -> str:
             if task_id and excerpt:
                 lines.append(f"- {task_id}: {excerpt}")
         blocks.append('\n'.join(lines))
-    tool_trace = _compact_tool_trace_payload(message)
+    tool_trace = _compact_tool_trace_payload(message, transcript_view=transcript_view)
     if tool_trace:
         lines = ['Recent tool results:']
         for item in tool_trace:
@@ -429,14 +437,31 @@ def _history_content_from_message(message: dict[str, Any]) -> str:
     return '\n'.join(block for block in blocks if block).strip()
 
 
-def _history_entry_from_message(message: dict[str, Any]) -> dict[str, Any]:
+def _live_tail_transcript_view(session: Any, message: dict[str, Any]) -> dict[str, Any] | None:
+    """delta 存储行在 live tail 里的物化视图；全量行返回 None（走原读取路径）。"""
+    if not isinstance(message, dict) or not isinstance(message.get('cc_upsert'), dict):
+        return None
+    rows = list(getattr(session, 'messages', []) or [])
+    for row_index, row in enumerate(rows):
+        if row is message:
+            return materialize_transcript_view(rows, row_index)
+    return None
+
+
+def _history_entry_from_message(
+    message: dict[str, Any],
+    *,
+    transcript_view: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "role": str(message.get("role") or ""),
-        "content": _history_content_from_message(message),
+        "content": _history_content_from_message(message, transcript_view=transcript_view),
     }
     for key in ("tool_calls", "tool_call_id", "name", "canonical_context", "compression"):
         if key in message:
             entry[key] = message[key]
+    if transcript_view and "canonical_context" not in entry:
+        entry["canonical_context"] = transcript_view
     return entry
 
 
@@ -555,10 +580,16 @@ def extract_live_raw_tail_context(
     if pending_users:
         turn_groups.append(list(pending_users))
     if not turn_groups:
-        return [_history_entry_from_message(message) for message in messages], 'transcript'
+        return [
+            _history_entry_from_message(message, transcript_view=_live_tail_transcript_view(session, message))
+            for message in messages
+        ], 'transcript'
     selected_groups = turn_groups[-normalized_turns:]
     flattened = [message for group in selected_groups for message in group]
-    return [_history_entry_from_message(message) for message in flattened], 'transcript'
+    return [
+        _history_entry_from_message(message, transcript_view=_live_tail_transcript_view(session, message))
+        for message in flattened
+    ], 'transcript'
 
 
 def extract_live_raw_tail(

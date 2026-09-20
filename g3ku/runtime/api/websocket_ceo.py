@@ -35,6 +35,9 @@ from g3ku.runtime.frontdoor.canonical_context import (
     apply_cc_upsert as _apply_cc_upsert,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
+    materialize_transcript_view as _materialize_transcript_view,
+)
+from g3ku.runtime.frontdoor.canonical_context import (
     project_canonical_context_for_transcript as _project_canonical_context_for_transcript,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
@@ -896,11 +899,21 @@ def _assistant_canonical_context(message: dict[str, Any] | None) -> dict[str, An
 
 
 def _latest_persisted_assistant_canonical_context(persisted_session: Any | None) -> dict[str, Any]:
-    persisted_messages = getattr(persisted_session, "messages", None)
-    for raw in reversed(list(persisted_messages or [])):
+    messages = list(getattr(persisted_session, "messages", None) or [])
+    for index in range(len(messages) - 1, -1, -1):
+        raw = messages[index]
         canonical_context = _assistant_canonical_context(raw)
         if canonical_context:
             return canonical_context
+        if (
+            isinstance(raw, dict)
+            and str(raw.get("role") or "").strip().lower() == "assistant"
+            and isinstance(raw.get("cc_upsert"), dict)
+        ):
+            # delta 存储行：live/final 基线要的是该行自己的累积视图。
+            view = _materialize_transcript_view(messages, index)
+            if view:
+                return dict(view)
     return {}
 
 

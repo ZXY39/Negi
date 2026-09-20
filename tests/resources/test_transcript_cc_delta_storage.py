@@ -10,9 +10,16 @@ from g3ku.runtime.frontdoor.canonical_context import (
     apply_cc_upsert,
     encode_cc_upsert,
     materialize_transcript_view,
+    plan_transcript_cc_row,
     project_canonical_context_for_transcript,
+    repair_transcript_cc_chain,
 )
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+
+
+def _read_lines(path) -> list[dict]:
+    with path.open(encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
 
 
 def _stage(index: int, *, summary: str = "", rounds: list[dict] | None = None) -> dict:
@@ -223,3 +230,101 @@ def test_view_json_payload_is_transportable() -> None:
     assert payload is not None
     wire = json.loads(json.dumps(payload, ensure_ascii=False))
     assert apply_cc_upsert(v4, wire) == v6
+
+
+def _raw_row(content: str, view: dict) -> dict:
+    # 旧格式行：未投影、无 marker。
+    return {"role": "assistant", "content": content, "canonical_context": view}
+
+
+def test_migrate_transcript_rows_to_delta_is_lossless_and_idempotent(tmp_path) -> None:
+    from g3ku.session.manager import SessionManager
+
+    views = [_view(2 + 2 * n) for n in range(5)]
+    rows: list[dict] = []
+    for n, view in enumerate(views):
+        if n == 1:
+            rows.append(_raw_row(f"r{n}", view))  # legacy unprojected mid-file
+        elif n == 2:
+            rows.append(
+                _checkpoint_row(
+                    f"r{n}",
+                    view,
+                    metadata={"ui_visible": False, "prompt_visible": False, "source": "heartbeat"},
+                )
+            )
+        else:
+            rows.append(_checkpoint_row(f"r{n}", view))
+    before = websocket_ceo._build_ceo_snapshot(rows)
+
+    def _trace_of(items: list[dict]) -> list[tuple]:
+        # 经 SessionManager 往返的行会补 timestamp 等运行时字段，比较轨道语义即可。
+        return [
+            (item.get("role"), item.get("content"), item.get("canonical_context_delta"))
+            for item in items
+        ]
+
+    manager = SessionManager(tmp_path)
+    session = manager.get_or_create("web:legacy")
+    for row in rows:
+        extra = {k: v for k, v in row.items() if k not in ("role", "content")}
+        session.add_message(row["role"], row.get("content", ""), **extra)
+    manager.save(session)
+
+    migrated_manager = SessionManager(tmp_path)
+    migrated = migrated_manager.get_or_create("web:legacy")
+    # 快照出帧必须与迁移前逐字节一致（读路径以行视图为准，不看存储形态）。
+    assert _trace_of(websocket_ceo._build_ceo_snapshot(list(migrated.messages))) == _trace_of(before)
+    migrated_manager.save(migrated)
+
+    stored = [item for item in _read_lines(migrated_manager.get_path("web:legacy")) if item.get("_type") != "metadata"]
+    modes = [str(item.get("canonical_context_projection") or "") for item in stored]
+    assert modes[0] == TRANSCRIPT_PROJECTION_MODE
+    assert modes.count("delta_window") == 4
+    # 再加载一次：已 delta 化的行只推进游标，零改写（幂等 / 崩溃可重入）。
+    second = SessionManager(tmp_path).get_or_create("web:legacy")
+    assert _trace_of(websocket_ceo._build_ceo_snapshot(list(second.messages))) == _trace_of(before)
+    stored_again = [
+        item
+        for item in _read_lines(SessionManager(tmp_path).get_path("web:legacy"))
+        if item.get("_type") != "metadata"
+    ]
+    assert [str(item.get("canonical_context_projection") or "") for item in stored_again] == modes
+
+
+def test_plan_transcript_cc_row_delta_then_budget_checkpoint() -> None:
+    views = [_view(n) for n in range(1, 21)]
+    rows: list[dict] = [{**_checkpoint_row("r0", views[0])}]
+    forms = []
+    for view in views[1:]:
+        fields = plan_transcript_cc_row(rows, view)
+        forms.append(str(fields.get("canonical_context_projection")))
+        rows.append({"role": "assistant", "content": "r", **fields})
+    assert forms[0] == "delta_window"
+    # 重放链无论落在哪种形态，每行的物化视图都必须与全量存储逐字节一致。
+    for n, view in enumerate(views):
+        assert materialize_transcript_view(rows, n) == view
+
+
+def test_repair_transcript_cc_chain_after_anchor_replacement() -> None:
+    v1, v2, v3 = _view(2), _view(4), _view(6)
+    d12 = encode_cc_upsert(v1, v2)
+    d23 = encode_cc_upsert(v2, v3)
+    assert d12 is not None and d23 is not None
+    rows = [_checkpoint_row("r1", v1), _delta_row("r2", d12), _delta_row("r3", d23)]
+
+    # 模拟 paused 归档就地替换锚点行：调用方带上传入替换前视图。
+    v1b = _view(2, revise_last=True)
+    rows[0] = _checkpoint_row("r1 replaced", v1b)
+    rewritten = repair_transcript_cc_chain(rows, 0, v1)
+    assert rewritten == 2
+    assert materialize_transcript_view(rows, 1) == v2
+    assert materialize_transcript_view(rows, 2) == v3
+    # 出帧与"同内容全量存储文件"逐字节一致：锚点内容变了，egress delta 相应
+    # 变化是正确行为，一致性标准是全量等价文件。
+    full_equivalent = [
+        _checkpoint_row("r1 replaced", v1b),
+        _checkpoint_row("r2", v2),
+        _checkpoint_row("r3", v3),
+    ]
+    assert websocket_ceo._build_ceo_snapshot(rows) == websocket_ceo._build_ceo_snapshot(full_equivalent)
