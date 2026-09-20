@@ -1116,6 +1116,7 @@ async def test_filesystem_edit_flat_text_pair_replays_as_already_applied(tmp_pat
         assert tool is not None
         result = await tool.execute(path=str(target_file), old_text='old line', new_text='new line')
         assert result.startswith('Successfully edited')
+        assert 'resolved lines 2-2' in result
         assert target_file.read_text(encoding='utf-8') == 'alpha\nnew line\nomega\n'
 
         replay = await tool.execute(path=str(target_file), old_text='old line', new_text='new line')

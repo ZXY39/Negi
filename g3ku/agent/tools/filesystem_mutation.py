@@ -640,6 +640,14 @@ class FilesystemTool:
                 commands_by_ext=dict(self._settings.edit_validation_commands_by_ext or {}),
             ) or 0)
             details: list[str] = []
+            if not resolved_span and selected_mode == _EDIT_MODE_TEXT:
+                match_index = original.find(str(old_text))
+                if match_index != -1:
+                    resolved_span = _resolved_line_span(
+                        content=original,
+                        start_offset=match_index,
+                        end_offset_exclusive=match_index + len(str(old_text)),
+                    )
             if resolved_span:
                 details.append(resolved_span)
             if validated_count > 0:
