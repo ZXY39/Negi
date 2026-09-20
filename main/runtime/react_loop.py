@@ -4639,7 +4639,7 @@ class ReActToolLoop:
         """把摘要正文补成与前门同款的信封，返回 (正文, 压缩块 stage_archive, 诊断计数)。
 
         `## 证据索引` 由模型选编号、运行时逐字回填；`## 阶段归档` 只留一行路径指针。
-        归档落不了盘就整轮不收口（payload 不带 `stage_archive`，落盘点因此什么都不会标）：
+        归档落不了盘就整轮不声明（payload 不带 `stage_archive`、正文不出现归档小节）：
         宁可不缩，也不能把阶段收进模型打不开的地方。分块车道 `allow_ref_selection=False`
         ——每块看不到全量候选，选择语义不成立，只留指针。"""
         records = list((plan or {}).get('records') or [])
@@ -4659,11 +4659,14 @@ class ReActToolLoop:
         archive_text = ''
         stage_archive: dict[str, Any] = {}
         if archive_path:
+            # 措辞只声明本次发送移出了什么：节点压缩按契约是 live-only， durable 帧里没有
+            # 阶段块层，也没有任何应用 `context_visible` 的落点，写"已收口、不再逐轮进入
+            # 上下文"会让模型以为这些细节已经不在体内，而它们下一轮照样会被再摘要一次。
             archive_text = '\n'.join(
                 [
                     STAGE_ARCHIVE_HEADING,
                     f'- stage {archive_start}-{archive_end} 共 {len(records)} '
-                    '个阶段的完整记录（含逐条 key_refs 与工具轮次）已收口，不再逐轮进入上下文：'
+                    '个阶段的完整记录（含逐条 key_refs 与工具轮次）已导档，本次压缩不再把它们逐条展开：'
                     f'{archive_path}',
                     '  需要回看这些阶段的细节时用 content_open 按上面的路径打开。',
                 ]
@@ -4673,7 +4676,8 @@ class ReActToolLoop:
                 'stage_index_start': archive_start,
                 'stage_index_end': archive_end,
                 'stage_count': len(records),
-                # 收口水位线：与阶段落盘点（`_persist_actual_request_artifact`）之间的合同。
+                # 水位线今天没有任何读者：节点侧还没有把标记写回账本的落点。留着它是为了
+                # 接入时不必再改块形态（届时按 created_at <= 此值标记，见前门同名小节）。
                 'archived_through_created_at': stage_created_at_ceiling(records),
             }
         sections = [item for item in (body.strip(), index_text, archive_text) if item]

@@ -202,6 +202,10 @@ def test_node_envelope_backfills_selected_refs_verbatim_and_archives(tmp_path: P
     assert 'gone.txt' not in text
     assert '- stage 1 | task:7e2a270eec34 — 在跑的任务' in text
     assert STAGE_ARCHIVE_HEADING in text
+    # 指针只声明"本次压缩不再逐条展开"：节点还没有把标记写回账本的落点，
+    # 声称"已收口、不再逐轮进入上下文"会让模型误判这些细节已经不在体内。
+    assert '已收口' not in text and '不再逐轮进入上下文' not in text
+    assert str(tmp_path) in text
     assert diagnostics['stage_ref_candidate_count'] == 3
     assert diagnostics['stage_ref_selected_count'] == 2
     assert diagnostics['stage_ref_dropped_dead'] == 1
