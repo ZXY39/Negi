@@ -1570,18 +1570,20 @@ class TaskActorService:
         )
         return False
 
-    def reconcile_distribution_drivers(self) -> list[str]:
-        """接管缺席的驱动器：epoch 仍在活跃分发态但该任务没有在跑的驱动器 → 重新 ensure。
+    async def reconcile_distribution_drivers(self) -> list[str]:
+        """接管分发收尾的两个缺席面：驱动器没了 / 释放账没销。
 
-        幂等由 ``ensure_scoped_epoch_driver`` 保证（有活驱动器即返回）。没有这条外部
-        对账时，「驱动器退出」只能靠操作员重启 worker 才能解锁。返回本轮重新武装的
-        task_id。
+        - epoch 处于活跃分发态而该任务没有在跑的驱动器 → 重新 ensure（幂等由
+          ``ensure_scoped_epoch_driver`` 保证，有活驱动器即返回）；
+        - epoch 已终态但 ``payload.release_pending`` 仍有值 → 完成序列在「清 meta」之后
+          半路抛过，hold 谓词已关、对账器第一条判据再也看不见它，重跑释放补销账。
+          A3 的「冻结→释放的终点只能是在跑或显式告警」由这条才真正闭合。
 
-        只接管本进程正在执行的任务（``_dispatchers`` 有该任务的派发器）：分发驱动器
-        是进程内对象，扫全库会在多 worker 部署里替别的 worker 武装波次。进程真死过的
-        任务由 worker 重启的 ``run_task`` 入口负责 ensure。
+        只接管本进程正在执行的任务（``_dispatchers`` 有该任务的派发器）：分发收尾对象
+        都是进程内资源，扫全库会在多 worker 部署里替别的 worker 武装波次。进程真死过的
+        任务由 worker 重启的 ``run_task`` 入口负责 ensure。返回本轮动过接管的 task_id。
         """
-        reconciled: list[str] = []
+        touched: list[str] = []
         for task_id, dispatcher in list(self._dispatchers.items()):
             if dispatcher is None:
                 continue
@@ -1590,23 +1592,62 @@ class TaskActorService:
                 continue
             distribution = self._distribution_runtime_state(task_id)
             state = str(distribution.get('state') or '').strip()
-            if state not in _DISTRIBUTION_ACTIVE_STATES:
+            if state in _DISTRIBUTION_ACTIVE_STATES:
+                driver = self._epoch_drivers.get(task_id)
+                if driver is not None and not driver.done():
+                    continue
+                try:
+                    logger.warning(
+                        'distribution driver missing for active epoch, re-arming: task={} epoch={} state={}',
+                        task_id,
+                        str(distribution.get('active_epoch_id') or '').strip(),
+                        state,
+                    )
+                except Exception:
+                    pass
+                self.ensure_scoped_epoch_driver(task_id)
+                touched.append(task_id)
                 continue
-            driver = self._epoch_drivers.get(task_id)
-            if driver is not None and not driver.done():
+            unreleased = self._unreleased_release_ledger(task_id)
+            if not unreleased:
                 continue
+            pending_epoch_id, barrier_node_ids = unreleased
             try:
                 logger.warning(
-                    'distribution driver missing for active epoch, re-arming: task={} epoch={} state={}',
+                    'distribution release ledger unfinished, re-releasing: task={} epoch={} barrier_nodes={}',
                     task_id,
-                    str(distribution.get('active_epoch_id') or '').strip(),
-                    state,
+                    pending_epoch_id,
+                    len(barrier_node_ids),
                 )
             except Exception:
                 pass
-            self.ensure_scoped_epoch_driver(task_id)
-            reconciled.append(task_id)
-        return reconciled
+            await self._release_scoped_epoch_holds(task_id, barrier_node_ids)
+            # 销账在释放之后：再抛就留给下一轮对账重试，不会既漏释放又反复空跑。
+            self._clear_release_pending(task_id, epoch_id=pending_epoch_id)
+            touched.append(task_id)
+        return touched
+
+    def _unreleased_release_ledger(self, task_id: str) -> tuple[str, list[str]] | None:
+        """最近一个还挂着未销释放账的 epoch（完成序列半路中断的形态）。"""
+        epochs = list(self._store.list_active_task_message_distribution_epochs(task_id) or [])
+        for epoch in reversed(epochs):
+            payload = dict(epoch.payload or {}) if isinstance(epoch.payload, dict) else {}
+            barrier = [
+                str(item or '').strip()
+                for item in list(payload.get('release_pending') or [])
+                if str(item or '').strip()
+            ]
+            if barrier:
+                return str(epoch.epoch_id or '').strip(), barrier
+        return None
+
+    def _clear_release_pending(self, task_id: str, *, epoch_id: str) -> None:
+        epoch = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
+        if epoch is None or not list(dict(epoch.payload or {}).get('release_pending') or []):
+            return
+        payload = dict(epoch.payload or {})
+        payload['release_pending'] = []
+        self._store.upsert_task_message_distribution_epoch(epoch.model_copy(update={'payload': payload}))
 
     async def _run_frontier_turn(self, task, epoch, node_id: str) -> NodeFinalResult | None:
         """按目标节点自身状态选择接收方式（需求一.1/.2/.3 + Q2）。"""
@@ -2297,6 +2338,10 @@ class TaskActorService:
             )
             return 'promoted'
         completed_at = now_iso()
+        # 释放账先落：完成序列的后半段（清 meta → 释放 held entries → 续跑分发）任何一处
+        # 抛异常，meta 已清、hold 谓词关闭，「活跃态」判据再也看不见这个任务；这条账
+        # 让对账器仍能认出「冻结过但没被释放」的形态并补跑释放。
+        payload['release_pending'] = list(barrier_node_ids)
         completed_epoch = self._store.upsert_task_message_distribution_epoch(
             refreshed_epoch.model_copy(
                 update={
@@ -2328,6 +2373,7 @@ class TaskActorService:
         await self._release_scoped_epoch_holds(task_id, barrier_node_ids)
         self._reset_stall_clock(task_id)
         await self._resume_distribution_if_needed(task_id)
+        self._clear_release_pending(task_id, epoch_id=epoch_id)
         return 'completed'
 
     async def _run_final_acceptance_if_needed(self, task_id: str) -> NodeFinalResult:

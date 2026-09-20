@@ -7167,16 +7167,16 @@ class MainRuntimeService:
                 continue
 
     async def _distribution_reconcile_loop(self) -> None:
-        """分发驱动器接管对账（60s）：活跃 epoch + 无在跑驱动器 → 重新武装。
+        """分发收尾接管对账（60s）：驱动器缺席 → 重新武装；释放账未销 → 补跑释放。
 
-        驱动器是子树屏障的唯一释放者，任何退出（含被 except 吞掉的崩溃）都会把任务
-        留成「无声 in_progress」；这里保证那种状态最多存活一个扫描周期。必须在事件
-        循环线程调用（ensure 依赖 get_running_loop）。
+        分发驱动器与释放路径都是子树屏障的唯一解除者，任何一次半路退出都会把任务留成
+        「无声 in_progress」；这里保证那种形态最多存活一个扫描周期。必须在事件循环线程
+        调用（ensure 依赖 get_running_loop，释放要 resume 进程内 entry）。
         """
         while True:
             try:
                 await asyncio.sleep(60.0)
-                self.task_actor_service.reconcile_distribution_drivers()
+                await self.task_actor_service.reconcile_distribution_drivers()
             except asyncio.CancelledError:
                 raise
             except Exception:

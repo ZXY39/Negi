@@ -4475,19 +4475,78 @@ async def test_reconcile_distribution_drivers_rearms_only_local_missing_drivers(
         actor.ensure_scoped_epoch_driver = lambda task_id: ensured.append(task_id)
 
         # 无派发器 = 不是本进程在执行的任务（多 worker 下不得替别人武装波次）
-        assert actor.reconcile_distribution_drivers() == []
+        assert await actor.reconcile_distribution_drivers() == []
         assert ensured == []
 
         actor._dispatchers[record.task_id] = SimpleNamespace()
-        assert actor.reconcile_distribution_drivers() == [record.task_id]
+        assert await actor.reconcile_distribution_drivers() == [record.task_id]
         assert ensured == [record.task_id]
 
         live_driver = asyncio.create_task(asyncio.sleep(30.0))
         actor._epoch_drivers[record.task_id] = live_driver
         ensured.clear()
-        assert actor.reconcile_distribution_drivers() == []
+        assert await actor.reconcile_distribution_drivers() == []
         assert ensured == []
         live_driver.cancel()
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_release_ledger_is_cleared_on_completion_and_repaired_by_reconcile(tmp_path: Path) -> None:
+    """完成序列的后半段（清 meta → 释放 held entries）抛过时，只有释放账认得出该形态。
+
+    此时 epoch 已终态、hold 谓词已关，「活跃分发态」判据永久失明；A3 的释放校验清扫
+    也只在释放跑完时才安排。对账器必须补跑释放并销账。
+    """
+    service = _build_service_with_backend(tmp_path, chat_backend=_QueuedChatBackend([]))
+    try:
+        record, _root, branch_a, acceptance, epoch = await _seed_under_inspection_target(
+            service, message="把页脚去掉，重新排版"
+        )
+        seeded = dict(epoch.payload or {})
+        seeded["decision_records"] = [
+            {
+                "source_node_id": branch_a.node_id,
+                "turn": "inspection_decision",
+                "action": "resume_execution",
+                "reason": "通知要求改写已提交的最终产出。",
+                "acceptance_node_id": acceptance.node_id,
+                "created_at": now_iso(),
+            }
+        ]
+        seeded["distributed_node_ids"] = [branch_a.node_id]
+        service.store.upsert_task_message_distribution_epoch(epoch.model_copy(update={"payload": seeded}))
+        actor = service.task_actor_service
+
+        assert await _drive_distribution_to_terminal(service, record.task_id) == "completed"
+        completed = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert completed is not None
+        # 正常收尾：账写过一次并销掉
+        assert "release_pending" in dict(completed.payload or {})
+        assert list(dict(completed.payload or {}).get("release_pending") or []) == []
+
+        service.store.upsert_task_message_distribution_epoch(
+            completed.model_copy(
+                update={"payload": {**dict(completed.payload or {}), "release_pending": [branch_a.node_id]}}
+            )
+        )
+        actor._dispatchers[record.task_id] = SimpleNamespace()
+        released: list[list[str]] = []
+
+        async def _spy_release(task_id: str, barrier_node_ids: list[str]) -> None:
+            released.append(list(barrier_node_ids))
+
+        actor._release_scoped_epoch_holds = _spy_release
+        assert await actor.reconcile_distribution_drivers() == [record.task_id]
+        assert released == [[branch_a.node_id]]
+        repaired = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
+        assert repaired is not None
+        assert list(dict(repaired.payload or {}).get("release_pending") or []) == []
+        # 销账后不再反复空跑
+        released.clear()
+        assert await actor.reconcile_distribution_drivers() == []
+        assert released == []
     finally:
         await service.close()
 
