@@ -4980,12 +4980,32 @@ function holdApprovalPausedCeoTurnLegacy(text = "", { source = "", turnId = "" }
     return true;
 }
 
+function adoptCeoContextCompressionFromState(state = {}) {
+    // 回合外的手动压缩没有 inflight turn，进行中状态只活在 state.compression 里；
+    // 刷新页面会清空本机 S.ceoContextCompression*，不接回这个信号就再也看不到区分线，
+    // 连压缩完成的那次状态推送都会被丢掉（要再刷一次才看得到结果）。
+    const compression = normalizeCeoSnapshotCompression(state?.compression);
+    if (String(compression?.status || "").trim().toLowerCase() !== "running") return;
+    if (String(compression?.source || "").trim().toLowerCase() !== "manual_context_compression") return;
+    const sessionId = String(activeSessionId() || "").trim();
+    if (!sessionId) return;
+    if (String(S.ceoContextCompressionSessionId || "").trim() === sessionId
+        && String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running") {
+        return;
+    }
+    S.ceoContextCompressionSessionId = sessionId;
+    S.ceoContextCompressionStatus = "running";
+    S.ceoContextCompressionCancelRequested = false;
+    syncCeoCompressionDivider();
+}
+
 function applyCeoState(state = {}, meta = {}) {
     const status = String(state?.status || "").trim().toLowerCase();
     const source = String(meta?.source || state?.source || "").trim().toLowerCase();
     const turnId = String(meta?.turn_id || state?.turn_id || "").trim();
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
+    adoptCeoContextCompressionFromState(state);
     const activeTurn = source || turnId ? getActiveCeoTurn(source, turnId) : getActiveCeoTurn();
     const hadTurnContext = !!activeTurn || !!S.ceoTurnActive;
     S.ceoTurnActive = running;

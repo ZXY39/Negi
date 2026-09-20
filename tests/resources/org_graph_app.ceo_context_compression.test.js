@@ -205,6 +205,7 @@ function loadApp() {
             normalizeCeoSnapshotMessage, activeCeoSessionHasHistory,
             refreshCeoComposerUsageEstimate, syncCeoModelModePanelUsage,
             startCeoContextCompressionPolling, applyCeoContextCompressionStatus,
+            adoptCeoContextCompressionFromState,
             CEO_BRAIN_LONG_PRESS_MS, CEO_COMPRESSION_POLL_FAIL_LIMIT,
         };`,
         context
@@ -472,6 +473,42 @@ test("切走再切回同一会话，实时区分线与轮询都要恢复", () =>
     api.S.ceoContextCompressionStatus = "idle";
     api.S.ceoContextCompressionSessionId = "";
     api.stopCeoContextCompressionPolling?.();
+});
+
+test("刷新页面后收到 state.compression 仍会恢复进行中的压缩标识", () => {
+    const api = loadApp();
+    // 模拟刚刷新：本机没有任何发起痕迹，只有服务端 state 里的进行中压缩。
+    api.S.ceoContextCompressionStatus = "idle";
+    api.S.ceoContextCompressionSessionId = "";
+    api.S.ceoContextCompressionPollId = null;
+
+    api.adoptCeoContextCompressionFromState({
+        compression: { status: "running", text: "上下文压缩中", source: "manual_context_compression" },
+    });
+
+    assert.equal(api.S.ceoContextCompressionStatus, "running");
+    assert.equal(api.S.ceoContextCompressionSessionId, "web:test");
+    const live = dividers(api.U.ceoFeed);
+    assert.equal(live.length, 1);
+    assert.equal(live[0].dataset.ceoCompressionState, "running");
+    // 接回跟踪必须同时续上轮询，否则终局照样收不到。
+    assert.notEqual(api.S.ceoContextCompressionPollId, null);
+});
+
+test("自动压缩的进行中状态不走手动恢复通道", () => {
+    const api = loadApp();
+    api.S.ceoContextCompressionStatus = "idle";
+    api.S.ceoContextCompressionSessionId = "";
+
+    api.adoptCeoContextCompressionFromState({
+        compression: { status: "running", text: "上下文压缩中", source: "token_compression" },
+    });
+
+    assert.equal(api.S.ceoContextCompressionStatus, "idle");
+    assert.equal(api.S.ceoContextCompressionSessionId, "");
+    assert.equal(dividers(api.U.ceoFeed).length, 0);
+    // 接线本身也要有断言：applyCeoState 不调用它，刷新恢复就又是一句空话。
+    assert.match(APP_CODE, /adoptCeoContextCompressionFromState\(state\)/);
 });
 
 test("转录标记只认 completed 与 paused 两种终态", () => {
