@@ -189,6 +189,8 @@ def _patch_compression_runner(monkeypatch, runner, *, applied: bool, context_win
                 "reason": "" if applied else "no_compressible_history",
                 "compression_mode": "llm",
                 "compressed_history_message_count": 12,
+                "stage_archive_pending_count": 7,
+                "stage_ref_selected_count": 3,
             },
         )
 
@@ -199,6 +201,9 @@ def _patch_compression_runner(monkeypatch, runner, *, applied: bool, context_win
         calls["persisted_lane"] = kwargs.get("request_lane")
         calls["persisted_shrink_reason"] = str(
             (kwargs.get("state") or {}).get("frontdoor_history_shrink_reason") or ""
+        )
+        calls["persisted_diagnostics"] = dict(
+            (kwargs.get("state") or {}).get("frontdoor_token_preflight_diagnostics") or {}
         )
         return {"frontdoor_actual_request_path": "artifact.json"}
 
@@ -234,6 +239,10 @@ def test_compress_session_context_rewrites_durable_baseline(monkeypatch) -> None
     assert calls["persisted_lane"] == "manual_context_compression"
     # shrink 原因必须随工件一起落，工件自己就说得清这次缩短是谁做的。
     assert calls["persisted_shrink_reason"] == "token_compression"
+    # 收口与证据引用计数必须随工件落盘：手动车道没有 provider 回执，这条工件是唯一能
+    # 解释"下一轮阶段块为什么变少"的证据，计数只留在返回值里就等于没有。
+    assert calls["persisted_diagnostics"]["stage_archive_pending_count"] == 7
+    assert calls["persisted_diagnostics"]["stage_ref_selected_count"] == 3
     assert session._frontdoor_history_shrink_reason == "token_compression"
     assert synced == {"source_reason": "finalize"}
 

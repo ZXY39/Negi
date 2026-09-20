@@ -591,6 +591,9 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         # 判为失配并清空 trace（见 session_agent._enrich_restored_frontdoor_actual_request_trace）。
         state_for_request["frontdoor_token_preflight_diagnostics"] = {
             **dict(state_for_request.get("frontdoor_token_preflight_diagnostics") or {}),
+            # 收口与证据引用的计数（stage_archive_* / stage_ref_*）必须随这条基线工件落盘：
+            # 手动车道没有 provider 回执，工件是唯一能解释"块为什么少了"的证据。
+            **{key: value for key, value in diagnostics.items() if str(key).startswith("stage_")},
             "applied": True,
             "final_request_tokens": post_tokens,
             "max_context_tokens": context_window_tokens,
