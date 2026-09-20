@@ -199,6 +199,9 @@ def retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[s
             continue
         if str(_stage_get(stage, "status", "") or "").strip().lower() == "active":
             continue
+        if _stage_get(stage, "context_visible", True) is False:
+            # 收口阶段不占保留窗口名额（与 raw_stage_renderer 同一规则）。
+            continue
         completed.append((int(_stage_get(stage, "stage_index", 0) or 0), stage_id))
     completed.sort()
     return {stage_id for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]}
@@ -216,6 +219,10 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
     for stage in list(_stage_get(stage_state, "stages", []) or []):
         stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
         if stage_id == active_stage_id or stage_id in skipped:
+            continue
+        if _stage_get(stage, "context_visible", True) is False:
+            # 收口阶段：正文已进过摘要，块不再逐轮重渲染。账本保留（UI 时间线照旧），
+            # 只有 provider 可见层不再携带它——这是压缩真正能收缩阶段体积的支点。
             continue
         if str(_stage_get(stage, "stage_kind", "normal") or "normal").strip() == "compression":
             payload = {
@@ -815,6 +822,62 @@ def decompose_stage_prompt_messages(
     }
 
 
+def stage_ref_candidates(
+    stage_state: Any,
+    *,
+    stage_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """压缩时的证据引用候选：按 stage_index 顺序取出候选阶段的 `key_refs`，同一 ref 只留最后一次。
+
+    候选清单带编号交给摘要模型挑选，模型只回编号、不复述路径；运行时按编号逐字回填
+    （LLM 复述路径的逐字节保真度实测只有 30%，不透明 id 更是 10%）。
+    `stage_ids` 为 None 时覆盖全部仍可见的完成普通阶段。"""
+    wanted = {
+        str(item or "").strip()
+        for item in list(stage_ids or [])
+        if str(item or "").strip()
+    }
+    active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
+    collected: list[dict[str, Any]] = []
+    stages = sorted(
+        list(_stage_get(stage_state, "stages", []) or []),
+        key=lambda item: int(_stage_get(item, "stage_index", 0) or 0),
+    )
+    for stage in stages:
+        stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
+        if not stage_id or stage_id == active_stage_id:
+            continue
+        if str(_stage_get(stage, "stage_kind", "normal") or "normal").strip().lower() != "normal":
+            continue
+        if str(_stage_get(stage, "status", "") or "").strip().lower() == "active":
+            continue
+        if _stage_get(stage, "context_visible", True) is False:
+            continue
+        if wanted and stage_id not in wanted:
+            continue
+        stage_index = int(_stage_get(stage, "stage_index", 0) or 0)
+        for key_ref in list(_stage_get(stage, "key_refs", []) or []):
+            normalized = _normalize_key_ref(key_ref) or {}
+            ref = str(normalized.get("ref") or "").strip()
+            if not ref:
+                continue
+            collected.append(
+                {
+                    "ref": ref,
+                    "note": str(normalized.get("note") or "").strip(),
+                    "stage_index": stage_index,
+                    "stage_id": stage_id,
+                }
+            )
+    latest_by_ref: dict[str, dict[str, Any]] = {}
+    for item in collected:
+        latest_by_ref[item["ref"]] = item
+    ordered = sorted(latest_by_ref.values(), key=lambda item: (item["stage_index"], item["ref"]))
+    for position, item in enumerate(ordered, start=1):
+        item["candidate_id"] = position
+    return ordered
+
+
 __all__ = [
     "DEFAULT_INTERNAL_RULE_MARKERS",
     "DEFAULT_STAGE_MODE",
@@ -833,5 +896,6 @@ __all__ = [
     "repair_split_stage_tool_boundaries",
     "retained_completed_stage_ids",
     "stage_prompt_prefix",
+    "stage_ref_candidates",
     "strip_stage_block_echo",
 ]

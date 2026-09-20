@@ -121,6 +121,10 @@ def retained_completed_raw_stage_ids(stage_state: Any, *, keep_latest: int) -> s
             continue
         if str(stage.get("status") or "").strip().lower() == "active":
             continue
+        if stage.get("context_visible") is False:
+            # 收口阶段不占 raw 窗口名额：它们已确定不进上下文，占位只会把仍可见的
+            # 近期阶段挤出窗口，等于让收口连带抹掉近场执行细节。
+            continue
         completed.append((int(stage.get("stage_index") or 0), stage_id))
     completed.sort()
     return {stage_id for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]}

@@ -44,6 +44,14 @@ def _normalize_key_refs(values: Any) -> list[dict[str, Any]]:
     return [copy.deepcopy(item) for item in list(values or []) if isinstance(item, dict)]
 
 
+def _is_context_visible(value: Any) -> bool:
+    """收口标记的读法：只有显式 False 才隐藏，字段缺失/历史数据一律可见。
+
+    存量 durable 基线、continuity sidecar 与转录投影里的阶段记录都没有这个字段，
+    按 True 处理才能保证旧账本不被静默抹掉。"""
+    return value is not False
+
+
 def _normalize_tool(tool: Any) -> dict[str, Any]:
     item = _as_dict(tool)
     arguments = item.get("arguments")
@@ -119,7 +127,7 @@ def _normalize_stage(stage: Any, *, fallback_index: int) -> dict[str, Any]:
     rounds.sort(key=lambda item: int(item.get("round_index") or 0))
     if representation != RAW_REPRESENTATION:
         rounds = []
-    return {
+    normalized_stage = {
         "stage_id": _as_str(current.get("stage_id") or f"frontdoor-stage-{fallback_index}"),
         "stage_index": _as_int(current.get("stage_index"), fallback_index),
         "stage_goal": _as_str(current.get("stage_goal")),
@@ -141,6 +149,11 @@ def _normalize_stage(stage: Any, *, fallback_index: int) -> dict[str, Any]:
         "finished_at": _as_str(current.get("finished_at")),
         "rounds": rounds,
     }
+    # 收口标记只在隐藏时落字段：可见是常态，逐条带一个布尔键会让存量大会话的
+    # 转录投影与 continuity sidecar 白涨体积（每轮投影 382 条 × ~24 字符）。
+    if not _is_context_visible(current.get("context_visible")):
+        normalized_stage["context_visible"] = False
+    return normalized_stage
 
 
 def _dedupe_canonical_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -247,6 +260,10 @@ def _completed_stage_overlap_signature(stage: Any) -> str:
     current.pop("stage_id", None)
     current.pop("stage_index", None)
     current.pop("representation", None)
+    # 收口标记不得进入重叠签名：否则被隐藏的 durable 阶段与本轮携带的可见副本
+    # 判不成同一条阶段，rebase 会把同一阶段当新阶段追加（stage_index 虚增 +
+    # 已收口阶段的块重新长回来）。
+    current.pop("context_visible", None)
     return json.dumps(current, ensure_ascii=False, sort_keys=True)
 
 
