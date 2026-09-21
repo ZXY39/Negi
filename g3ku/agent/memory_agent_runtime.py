@@ -39,6 +39,10 @@ _REVIEW_TOOL_OUTPUT_MAX_CHARS = 400
 _REVIEW_TOOL_PREVIEW_MAX_CHARS = 240
 _REVIEW_REPORTED_TOOL_ID_CAP = 5000
 _STAGED_DOCUMENT_UNSET = object()
+_DELETE_NOOP_RULE = (
+    "delete batch may not use noop_reason; submit the resolved ids in deletes, "
+    "or declare already_satisfied when the delete target is no longer in the snapshot"
+)
 _LEGACY_CLEANUP_RELATIVE_PATHS: tuple[str, ...] = (
     "memory/HISTORY.md",
     "memory/structured_current.jsonl",
@@ -407,6 +411,7 @@ class MemoryStrategyV2:
 class _MemoryToolSession:
     snapshot_text: str
     notes_dir: Path
+    batch_op: str = ""
     staged_document: object = _STAGED_DOCUMENT_UNSET
     staged_notes: dict[str, str] = field(default_factory=dict)
     applied_batch: dict[str, Any] | None = None
@@ -447,6 +452,7 @@ class _MemoryToolSession:
         note_upserts: dict[str, str] | None = None,
         inspired_memory_ids: list[str] | None = None,
         noop_reason: str | None = None,
+        already_satisfied: str | None = None,
     ) -> dict[str, Any]:
         errors: dict[str, str] = {}
         normalized_adds: list[dict[str, str]] = []
@@ -455,6 +461,7 @@ class _MemoryToolSession:
         normalized_note_upserts: dict[str, str] = {}
         normalized_inspired_memory_ids: list[str] = []
         normalized_noop_reason = str(noop_reason or "").strip()
+        normalized_already_satisfied = str(already_satisfied or "").strip()
 
         raw_adds = list(adds or [])
         if not isinstance(raw_adds, list):
@@ -553,8 +560,18 @@ class _MemoryToolSession:
         has_mutation = bool(normalized_adds or normalized_rewrites or normalized_deletes or normalized_note_upserts)
         if normalized_noop_reason and has_mutation:
             errors["noop_reason"] = "noop_reason may not be combined with add, rewrite, delete, or note_upsert"
-        if not normalized_noop_reason and not has_mutation:
-            errors["batch"] = "at least one add, rewrite, delete, note_upsert, or noop_reason is required"
+        if normalized_already_satisfied and (has_mutation or normalized_noop_reason):
+            errors["already_satisfied"] = (
+                "already_satisfied may not be combined with add, rewrite, delete, note_upsert, or noop_reason"
+            )
+        if self.batch_op == "delete" and normalized_noop_reason:
+            errors["noop_reason"] = _DELETE_NOOP_RULE
+        if self.batch_op != "delete" and normalized_already_satisfied:
+            errors["already_satisfied"] = "already_satisfied is only valid for delete batches"
+        if not normalized_noop_reason and not normalized_already_satisfied and not has_mutation:
+            errors["batch"] = (
+                "at least one add, rewrite, delete, note_upsert, noop_reason, or already_satisfied is required"
+            )
 
         if errors:
             return {"ok": False, "errors": errors}
@@ -567,6 +584,7 @@ class _MemoryToolSession:
             "note_upserts": normalized_note_upserts,
             "inspired_memory_ids": normalized_inspired_memory_ids,
             "noop_reason": normalized_noop_reason,
+            "already_satisfied": normalized_already_satisfied,
         }
         return {"ok": True, "status": "batch_staged"}
 
@@ -593,6 +611,7 @@ class _MemoryValidatedWrite:
     inspired_memory_ids: list[str] = field(default_factory=list)
     write_mode: str = ""
     noop_reason: str = ""
+    already_satisfied: str = ""
     compression_triggered: bool = False
     compressed_memory_ids: list[str] = field(default_factory=list)
     deleted_by_compression_ids: list[str] = field(default_factory=list)
@@ -2041,7 +2060,11 @@ class MemoryManager:
         queue_request_ids: list[str],
         model_chain: list[str],
     ) -> _MemoryAttemptResult:
-        session = _MemoryToolSession(snapshot_text=before_text, notes_dir=self.notes_dir)
+        session = _MemoryToolSession(
+            snapshot_text=before_text,
+            notes_dir=self.notes_dir,
+            batch_op=str(batch.op or "").strip().lower(),
+        )
         tools = self._memory_agent_tools(session)
         model = build_chat_model(runtime_config, role="memory").bind_tools(tools)
         messages: list[Any] = [
@@ -2987,6 +3010,9 @@ class MemoryManager:
             normalized_noop_reason = str(validated.noop_reason or "").strip()
             if normalized_noop_reason:
                 payload["noop_reason"] = normalized_noop_reason
+            normalized_already_satisfied = str(validated.already_satisfied or "").strip()
+            if normalized_already_satisfied:
+                payload["already_satisfied"] = normalized_already_satisfied
         self._append_ops_payload(payload)
         return payload
 
@@ -3490,6 +3516,7 @@ class MemoryManager:
             note_upserts: dict[str, str] | None = None,
             inspired_memory_ids: list[str] | None = None,
             noop_reason: str | None = None,
+            already_satisfied: str | None = None,
         ) -> dict[str, Any]:
             """Stage one complete memory mutation batch."""
 
@@ -3500,6 +3527,7 @@ class MemoryManager:
                 note_upserts=note_upserts,
                 inspired_memory_ids=inspired_memory_ids,
                 noop_reason=noop_reason,
+                already_satisfied=already_satisfied,
             )
 
         return [memory_read_note, memory_apply_batch]
@@ -3535,10 +3563,12 @@ class MemoryManager:
             "- adds 条目必须包含 content、minimal_memory 和 decision_source。\n"
             "- rewrites 条目必须包含 id、content 和 minimal_memory；系统会保留原 source 并刷新日期。\n"
             "- delete 请求要解析成精确的记忆 id，并把这些 id 放进 deletes。\n"
+            "- delete 批次没有零变更出口：目标内容已不在当前正文里（已被改写或被更早的批次删掉）时，"
+            "单独提交 already_satisfied 说明已满足，不要提交 noop_reason。\n"
             "- note_upserts 只写需要新增或改写的 note。\n"
             "- inspired_memory_ids 可选，用于列出当前完整 snapshot 里对本批判断有实质帮助的 memory id。\n"
             "- minimal_memory 格式应写成 `条件->要求关键词`，必要时优先附加 `见noteid:<id>`，并兼容 `ref:<id>`。\n"
-            "- 当本轮无需任何记忆或 note 变更时，可单独提交 noop_reason。\n"
+            "- 当本轮无需任何记忆或 note 变更时，可单独提交 noop_reason（仅 write 批次）。\n"
             f"{repair_block}"
         )
 
@@ -3580,13 +3610,20 @@ class MemoryManager:
         else:
             inspired_memory_ids = list(raw_inspired_memory_ids)
         noop_reason = str(payload.get("noop_reason") or "").strip()
+        already_satisfied = str(payload.get("already_satisfied") or "").strip()
 
         if batch.op == "delete" and (adds or rewrites):
             raise _MemoryAgentValidationError("delete batch may not add or rewrite memories")
         if batch.op == "delete" and noop_reason:
-            raise _MemoryAgentValidationError("delete batch may not use noop_reason")
+            raise _MemoryAgentValidationError(_DELETE_NOOP_RULE)
+        if batch.op != "delete" and already_satisfied:
+            raise _MemoryAgentValidationError("already_satisfied is only valid for delete batches")
         if noop_reason and (adds or rewrites or deletes or note_upserts):
             raise _MemoryAgentValidationError("noop_reason may not be combined with add, rewrite, delete, or note_upsert")
+        if already_satisfied and (adds or rewrites or deletes or note_upserts or noop_reason):
+            raise _MemoryAgentValidationError(
+                "already_satisfied may not be combined with add, rewrite, delete, note_upsert, or noop_reason"
+            )
 
         before_entries = parse_memory_document(before_text)
         existing_by_id = {entry.memory_id: entry for entry in before_entries}
@@ -3763,8 +3800,10 @@ class MemoryManager:
                 deletes=deletes,
                 note_upserts=note_upserts,
                 noop_reason=noop_reason,
+                already_satisfied=already_satisfied,
             ),
             noop_reason=noop_reason,
+            already_satisfied=already_satisfied,
         )
 
     @staticmethod
@@ -3775,8 +3814,9 @@ class MemoryManager:
         deletes: list[Any],
         note_upserts: dict[str, Any],
         noop_reason: str,
+        already_satisfied: str = "",
     ) -> str:
-        if str(noop_reason or "").strip():
+        if str(noop_reason or "").strip() or str(already_satisfied or "").strip():
             return ""
         has_adds = bool(list(adds or []))
         has_rewrites_or_deletes = bool(list(rewrites or []) or list(deletes or []))
@@ -4105,6 +4145,11 @@ class MemoryManager:
                 "request_artifact_paths": list(processed_payload["request_artifact_paths"]),
                 "processed_at": processed_at,
                 **({"noop_reason": str(processed_payload.get("noop_reason") or "").strip()} if str(processed_payload.get("noop_reason") or "").strip() else {}),
+                **(
+                    {"already_satisfied": str(processed_payload.get("already_satisfied") or "").strip()}
+                    if str(processed_payload.get("already_satisfied") or "").strip()
+                    else {}
+                ),
                 **({"fallback": fallback} if fallback else {}),
                 **({"requeued_failed_id": str(requeued_failed.get("failed_id") or "")} if requeued_failed else {}),
             }

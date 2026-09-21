@@ -11724,7 +11724,7 @@ function memoryProcessedOpKinds(item) {
 }
 
 function memoryProcessedNoopReason(item) {
-    return String(item?.noop_reason || "").trim();
+    return String(item?.noop_reason || item?.already_satisfied || "").trim();
 }
 
 function memoryProcessedChangePreview(item) {

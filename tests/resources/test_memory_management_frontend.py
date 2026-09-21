@@ -820,6 +820,14 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
           discard_reason: "assessed_null",
           processed_at: "2026-04-23T23:01:56+08:00",
         };
+        const satisfiedItem = {
+          batch_id: "satisfied_demo",
+          op: "delete",
+          source_op: "delete",
+          status: "applied",
+          already_satisfied: "id:F0t50q 已改写为新人设，鲸鱼设定不在当前正文里。",
+          processed_at: "2026-04-23T23:01:56+08:00",
+        };
 
         console.log(JSON.stringify({
           noopStatusLabel: context.__testExports.memoryProcessedStatusLabel(noopItem),
@@ -828,6 +836,9 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
           discardedStatusLabel: context.__testExports.memoryProcessedStatusLabel(discardedItem),
           discardedOpLabel: context.__testExports.memoryProcessedOpLabel(discardedItem),
           discardedHtml: context.__testExports.renderMemoryProcessedCard(discardedItem),
+          satisfiedStatusLabel: context.__testExports.memoryProcessedStatusLabel(satisfiedItem),
+          satisfiedOpLabel: context.__testExports.memoryProcessedOpLabel(satisfiedItem),
+          satisfiedHtml: context.__testExports.renderMemoryProcessedCard(satisfiedItem),
         }));
         """
     )
@@ -845,6 +856,12 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
     assert 'data-op="nochange"' in str(result["discardedHtml"])
     assert "保持" in str(result["discardedHtml"])
     assert "已废弃" not in str(result["discardedHtml"])
+
+    # delete 批次以 already_satisfied 收尾时同样按无变更渲染，不能显示成一次删除
+    assert str(result["satisfiedStatusLabel"]) == "无变更"
+    assert str(result["satisfiedOpLabel"]) == "保持"
+    assert 'data-op="nochange"' in str(result["satisfiedHtml"])
+    assert "删除" not in str(result["satisfiedHtml"])
 
 
 def test_memory_processed_detail_preview_uses_noop_reason_in_summary_slot() -> None:

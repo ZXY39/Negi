@@ -157,6 +157,7 @@ def test_memory_runtime_loads_memory_agent_prompt_from_main_prompts(tmp_path: Pa
     assert "优先使用 rewrite" in system_prompt
     assert "不得使用 adds" in system_prompt
     assert "noop_reason" in system_prompt
+    assert "already_satisfied" in system_prompt
     assert "300" in system_prompt
 
 
@@ -281,6 +282,153 @@ async def test_v2_run_due_batch_once_accepts_explicit_noop_reason_without_changi
         assert len(processed) == 1
         assert processed[0]["request_ids"] == ["write_1"]
         assert processed[0]["noop_reason"] == "duplicate_of:Ab12Z9"
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_run_due_batch_once_applies_delete_batch_declared_already_satisfied(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        (tmp_path / "memory" / "MEMORY.md").write_text(
+            markdown_memory.format_memory_entry(
+                markdown_memory.MemoryEntry(
+                    memory_id="Ab12Z9",
+                    date_text="2026/4/18",
+                    source="user",
+                    summary="人设已替换为新人设",
+                )
+            ),
+            encoding="utf-8",
+        )
+        before_snapshot = manager.snapshot_text()
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="delete",
+                decision_source="user",
+                payload_text="忘记旧人设那一整套设定",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="delete_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {
+                                "already_satisfied": "id:Ab12Z9 已是新人设，旧人设正文里已不存在",
+                            },
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+        processed = _read_jsonl(tmp_path / "memory" / "ops.jsonl")
+        queue_rows = _read_jsonl(tmp_path / "memory" / "queue.jsonl")
+        failed_rows = _read_jsonl(tmp_path / "memory" / "failed.jsonl")
+
+        assert report["status"] == "applied"
+        assert report["already_satisfied"] == "id:Ab12Z9 已是新人设，旧人设正文里已不存在"
+        assert manager.snapshot_text() == before_snapshot
+        assert queue_rows == []
+        assert failed_rows == []
+        assert len(processed) == 1
+        assert processed[0]["op"] == "delete"
+        assert processed[0]["request_ids"] == ["delete_1"]
+        assert processed[0]["already_satisfied"] == "id:Ab12Z9 已是新人设，旧人设正文里已不存在"
+        assert "noop_reason" not in processed[0]
+    finally:
+        manager.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_delete_batch_noop_reason_is_repaired_in_band_before_it_costs_an_attempt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_memory_agent_runtime_module()
+    markdown_memory = importlib.import_module("g3ku.agent.markdown_memory")
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        (tmp_path / "memory" / "MEMORY.md").write_text(
+            markdown_memory.format_memory_entry(
+                markdown_memory.MemoryEntry(
+                    memory_id="Ab12Z9",
+                    date_text="2026/4/18",
+                    source="user",
+                    summary="人设已替换为新人设",
+                )
+            ),
+            encoding="utf-8",
+        )
+        before_snapshot = manager.snapshot_text()
+        await manager._append_queue_request(
+            module.MemoryQueueRequest(
+                op="delete",
+                decision_source="user",
+                payload_text="忘记旧人设那一整套设定",
+                created_at="2026-04-18T10:00:00+08:00",
+                request_id="delete_1",
+            )
+        )
+        fake_model = _FakeToolCallingModel(
+            [
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "memory_apply_batch",
+                            "args": {"noop_reason": "旧人设已经不在了"},
+                        }
+                    ],
+                    usage={"input_tokens": 4, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(
+                    tool_calls=[
+                        {
+                            "id": "call-2",
+                            "name": "memory_apply_batch",
+                            "args": {"already_satisfied": "id:Ab12Z9 已是新人设"},
+                        }
+                    ],
+                    usage={"input_tokens": 2, "output_tokens": 1, "cache_read_tokens": 0},
+                ),
+                _fake_response(content="done", usage={"input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0}),
+            ]
+        )
+        monkeypatch.setattr(
+            module,
+            "get_runtime_config",
+            lambda force=False: (_app_config(tmp_path, memory_chain=["memory-primary"]), 2, False),
+            raising=False,
+        )
+        monkeypatch.setattr(module, "build_chat_model", lambda config, **kwargs: fake_model, raising=False)
+
+        report = await manager.run_due_batch_once(now_iso="2026-04-18T10:00:05+08:00")
+
+        assert report["status"] == "applied"
+        assert report["attempt_count"] == 1
+        assert manager.snapshot_text() == before_snapshot
+        assert _read_jsonl(tmp_path / "memory" / "failed.jsonl") == []
     finally:
         manager.close()
 

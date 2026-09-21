@@ -1082,6 +1082,52 @@ def test_v2_memory_agent_tools_expose_read_note_and_apply_batch_only(tmp_path: P
     assert tool_names == ["memory_read_note", "memory_apply_batch"]
 
 
+def test_memory_agent_delete_batch_rejects_noop_reason_and_points_at_already_satisfied(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        session = module._MemoryToolSession(
+            snapshot_text="---\nid:Ab12Z9\n2026/4/25-user：\n人设已替换为新人设\n",
+            notes_dir=tmp_path / "memory" / "notes",
+            batch_op="delete",
+        )
+        apply_tool = next(tool for tool in manager._memory_agent_tools(session) if tool.name == "memory_apply_batch")
+        assert "already_satisfied" in apply_tool.args
+
+        rejected = apply_tool.invoke({"noop_reason": "无需变更"})
+        assert rejected["ok"] is False
+        assert "already_satisfied" in rejected["errors"]["noop_reason"]
+        assert session.apply_batch_count == 0
+
+        staged = apply_tool.invoke({"already_satisfied": "id:Ab12Z9 已是新人设，旧人设不在正文里"})
+        assert staged["ok"] is True
+        assert session.applied_batch["already_satisfied"].startswith("id:Ab12Z9")
+    finally:
+        manager.close()
+
+
+def test_memory_agent_write_batch_rejects_already_satisfied(tmp_path: Path) -> None:
+    module = _load_memory_agent_runtime_module()
+    manager = module.MemoryManager(tmp_path, _memory_cfg())
+    try:
+        session = module._MemoryToolSession(
+            snapshot_text="---\nid:Ab12Z9\n2026/4/25-user：\nPrefer concise answers\n",
+            notes_dir=tmp_path / "memory" / "notes",
+            batch_op="write",
+        )
+        apply_tool = next(tool for tool in manager._memory_agent_tools(session) if tool.name == "memory_apply_batch")
+
+        rejected = apply_tool.invoke({"already_satisfied": "目标已不存在"})
+        assert rejected["ok"] is False
+        assert rejected["errors"]["already_satisfied"] == "already_satisfied is only valid for delete batches"
+
+        combined = apply_tool.invoke({"deletes": ["Ab12Z9"], "already_satisfied": "目标已不存在"})
+        assert combined["ok"] is False
+        assert "already_satisfied" in combined["errors"]
+    finally:
+        manager.close()
+
+
 def test_memory_agent_apply_batch_tool_preserves_inspired_ids_in_active_runtime_path(tmp_path: Path) -> None:
     module = _load_memory_agent_runtime_module()
     cfg = _memory_cfg()
