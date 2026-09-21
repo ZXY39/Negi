@@ -1967,3 +1967,22 @@
     position: static;
     transform: none;
 }
+
+/* 48. 会话卡片拖动中：来源卡压暗，落位卡亮一圈品牌环。位置指示只用环，
+   不画侧边粗线；拖动态关掉文字选择，避免掠过的标题被选中。 */
+[data-ui-version="v2"] .ceo-session-card[draggable="true"] {
+    cursor: grab;
+}
+
+[data-ui-version="v2"] .ceo-session-card.is-dragging {
+    opacity: 0.55;
+    cursor: grabbing;
+}
+
+[data-ui-version="v2"] .ceo-session-card.is-drop-target {
+    box-shadow: 0 0 0 2px var(--ui-brand);
+}
+
+[data-ui-version="v2"] .ceo-session-list.is-drop-zone {
+    user-select: none;
+}

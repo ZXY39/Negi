@@ -117,6 +117,9 @@ const S = {
     ceoSessionUnreadExempt: {},
     ceoBulkMode: false,
     ceoSelectedSessionIds: new Set(),
+    // 拖动得到的手动位次：会话没有服务端顺序字段，顺序只在前端与 localStorage 生效。
+    ceoSessionOrder: [],
+    ceoSessionDrag: null,
     ceoScrollToLatestOnSnapshot: false,
     ceoFeedFollowLatest: true,
     ceoFeedWindowSource: null,
@@ -814,8 +817,22 @@ function ceoSessionCreatedTime(session) {
     return String(item.created_at || item.updated_at || "").trim();
 }
 
+function ceoSessionManualRank(sessionId) {
+    const order = Array.isArray(S.ceoSessionOrder) ? S.ceoSessionOrder : [];
+    if (!order.length) return -1;
+    return order.indexOf(String(sessionId || "").trim());
+}
+
 function sortCeoSessionsByTime(items = []) {
     return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
+        // 手动位次优先；没有位次的（拖动之后新建的）会话仍按创建时间倒序浮在手动区之上。
+        const leftRank = ceoSessionManualRank(left?.session_id);
+        const rightRank = ceoSessionManualRank(right?.session_id);
+        if (leftRank !== rightRank) {
+            if (leftRank < 0) return -1;
+            if (rightRank < 0) return 1;
+            return leftRank - rightRank;
+        }
         const leftTime = String(ceoSessionCreatedTime(left) || "");
         const rightTime = String(ceoSessionCreatedTime(right) || "");
         if (leftTime !== rightTime) return rightTime.localeCompare(leftTime);
@@ -10368,12 +10385,16 @@ function closeCeoWs() {
     socket.close();
 }
 
-function renderCeoSessionCard(item, { allowActions = false } = {}) {
+function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
     const sessionId = String(item?.session_id || "");
     const isActive = sessionId === activeSessionId();
     const isRunning = !!item?.is_running;
     const isBulkMode = !!S.ceoBulkMode;
     const isSelected = isCeoBulkSessionSelected(sessionId);
+    const dragIndex = Number.isInteger(index) ? index : -1;
+    const dragAttrs = ceoSessionDragEnabled() && dragIndex >= 0
+        ? ` draggable="true" data-ceo-session-index="${dragIndex}"`
+        : "";
     const preview = String(item?.preview_text || "").trim() || "No messages yet.";
     const title = String(item?.title || sessionId || "Session");
     const glyph = ceoSessionGlyph(item);
@@ -10388,7 +10409,7 @@ function renderCeoSessionCard(item, { allowActions = false } = {}) {
         item?.is_readonly ? '<span class="ceo-session-pill readonly">只读</span>' : "",
     ].filter(Boolean).join("");
     return `
-        <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}${isBulkMode ? " is-bulk-mode" : ""}${isSelected ? " is-bulk-selected" : ""}" role="listitem">
+        <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}${isBulkMode ? " is-bulk-mode" : ""}${isSelected ? " is-bulk-selected" : ""}" role="listitem"${dragAttrs}>
             ${isBulkMode ? `
                 <label class="ceo-session-checkbox" aria-label="${esc(`选择会话 ${title}`)}">
                     <input type="checkbox" data-session-bulk-checkbox="${esc(sessionId)}" ${isSelected ? "checked" : ""}>
@@ -10458,13 +10479,105 @@ function renderCeoSessions() {
             `;
         }).join("");
     } else {
-        U.ceoSessionList.innerHTML = sessions.map((item) => renderCeoSessionCard(item, { allowActions: true })).join("");
+        U.ceoSessionList.innerHTML = sessions.map((item, index) => renderCeoSessionCard(item, { allowActions: true, index })).join("");
     }
     syncCeoComposerReadonlyState();
     syncCeoAttachButton();
     syncCeoSessionActions();
     syncCeoCompressionDivider();
     icons();
+}
+
+// ---- 会话卡片拖动排序（照 CEO 模型链那一套：容器代理 + 垂直中点位次）------
+
+function ceoSessionDragEnabled() {
+    // 渠道页签按群类型分组、没有扁平序号；批量模式整卡是勾选区。两者都不拖动。
+    return S.ceoSessionTab !== "channel" && !S.ceoBulkMode;
+}
+
+function clearCeoSessionDragDecorations() {
+    const list = U.ceoSessionList;
+    if (!list) return;
+    list.querySelectorAll(".is-drop-target").forEach((item) => item.classList.remove("is-drop-target"));
+    list.querySelectorAll(".is-dragging").forEach((item) => item.classList.remove("is-dragging"));
+    list.classList.remove("is-drop-zone");
+}
+
+function ceoSessionDropIndex(list, clientY) {
+    const cards = [...list.querySelectorAll("[data-ceo-session-index]")];
+    for (const card of cards) {
+        const rect = card.getBoundingClientRect();
+        if (clientY < rect.top + (rect.height / 2)) return Number(card.dataset.ceoSessionIndex);
+    }
+    return cards.length;
+}
+
+function beginCeoSessionCardDrag(event) {
+    const list = U.ceoSessionList;
+    const card = event.target instanceof Element ? event.target.closest("[data-ceo-session-index]") : null;
+    if (!list || !card || !ceoSessionDragEnabled()) return;
+    const index = Number(card.dataset.ceoSessionIndex);
+    if (!Number.isInteger(index) || index < 0) return;
+    S.ceoSessionDrag = { from: index, dropIndex: null };
+    card.classList.add("is-dragging");
+    if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        try {
+            event.dataTransfer.setData("text/plain", String(index));
+        } catch (error) {
+            void error;
+        }
+    }
+}
+
+function updateCeoSessionCardDropTarget(event) {
+    const list = U.ceoSessionList;
+    const drag = S.ceoSessionDrag;
+    const from = Number(drag?.from);
+    if (!list || !Number.isInteger(from) || from < 0) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    const targetIndex = ceoSessionDropIndex(list, event.clientY);
+    // 目标没变就不重画指示，避免拖动时列表抖动。
+    if (drag.dropIndex === targetIndex) return;
+    S.ceoSessionDrag = { ...drag, dropIndex: targetIndex };
+    clearCeoSessionDragDecorations();
+    const cards = [...list.querySelectorAll("[data-ceo-session-index]")];
+    const dragging = cards.find((card) => Number(card.dataset.ceoSessionIndex) === from);
+    if (dragging) dragging.classList.add("is-dragging");
+    const anchor = cards.find((card) => Number(card.dataset.ceoSessionIndex) === targetIndex) || cards[cards.length - 1];
+    if (anchor) anchor.classList.add("is-drop-target");
+    list.classList.add("is-drop-zone");
+}
+
+function cancelCeoSessionCardDrag() {
+    clearCeoSessionDragDecorations();
+    S.ceoSessionDrag = null;
+}
+
+function finishCeoSessionCardDrag(event) {
+    event.preventDefault();
+    const drag = S.ceoSessionDrag;
+    cancelCeoSessionCardDrag();
+    const from = Number(drag?.from);
+    if (!Number.isInteger(from) || from < 0) return;
+    const ids = visibleCeoSessions()
+        .map((item) => String(item?.session_id || "").trim())
+        .filter(Boolean);
+    if (!ids[from]) return;
+    // 位次按“插到锚点之前”计，越过自身时补回一格（与模型链同一算法）。
+    const target = Number.isInteger(drag.dropIndex)
+        ? (drag.dropIndex > from ? drag.dropIndex - 1 : drag.dropIndex)
+        : from;
+    if (target === from) return;
+    const next = ids.filter((_id, index) => index !== from);
+    next.splice(Math.max(0, Math.min(next.length, target)), 0, ids[from]);
+    if (next.join("\n") === ids.join("\n")) return;
+    setCeoSessionOrder(next);
+    // 顺序只在入站时重算，这里立刻按新手顺排一次，否则要到下一次快照才看得见。
+    S.ceoLocalSessions = sortCeoSessionsByTime(S.ceoLocalSessions);
+    rebuildCeoSessionIndex();
+    renderCeoSessions();
 }
 
 function applyCeoSessionsPayload(payload = {}, { preferLocalActive = false } = {}) {
@@ -13911,6 +14024,23 @@ function readSidebarPreference() {
     return null;
 }
 
+const CEO_SESSION_ORDER_KEY = "g3ku.ui.ceo.session-order.v1";
+
+function readStoredCeoSessionOrder() {
+    try {
+        const parsed = JSON.parse(readStoredUiPreference(CEO_SESSION_ORDER_KEY) || "[]");
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map((id) => String(id || "").trim()).filter(Boolean);
+    } catch (error) {
+        return [];
+    }
+}
+
+function setCeoSessionOrder(order) {
+    S.ceoSessionOrder = [...(Array.isArray(order) ? order : [])];
+    writeStoredUiPreference(CEO_SESSION_ORDER_KEY, JSON.stringify(S.ceoSessionOrder));
+}
+
 function updateSidebarButtonA11y() {
     if (!U.sidebarToggle) return;
     const label = uiSidebarCollapsed ? "显示名称" : "紧凑模式";
@@ -13959,6 +14089,7 @@ function initializeUiPreferences() {
     initializeTheme();
     applySidebarState(readSidebarPreference() === true);
     U.sidebarToggle?.addEventListener("click", toggleSidebar);
+    S.ceoSessionOrder = readStoredCeoSessionOrder();
 }
 
 function bind() {
@@ -14139,6 +14270,10 @@ function bind() {
             requestDeleteCeoSession(remove.dataset.sessionDelete);
         }
     });
+    U.ceoSessionList?.addEventListener("dragstart", (event) => beginCeoSessionCardDrag(event));
+    U.ceoSessionList?.addEventListener("dragover", (event) => updateCeoSessionCardDropTarget(event));
+    U.ceoSessionList?.addEventListener("drop", (event) => finishCeoSessionCardDrag(event));
+    U.ceoSessionList?.addEventListener("dragend", () => cancelCeoSessionCardDrag());
     U.ceoSend?.addEventListener("click", handleCeoPrimaryAction);
     U.ceoAttach?.addEventListener("click", () => {
         if (S.ceoUploadBusy) return;
