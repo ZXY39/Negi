@@ -1517,7 +1517,7 @@
 [data-ui-version="v2"] .task-depth-setting-main .resource-select-trigger {
     width: auto;
     min-height: 34px;
-    padding: 0 6px;
+    padding: 0 4px;
     border: 0;
     border-radius: var(--ui-radius-control);
     background: transparent;
@@ -1525,6 +1525,50 @@
     color: var(--ui-text);
     font-size: 13px;
     font-weight: 600;
+    gap: 2px;
+}
+
+/* 当前选项不在按钮上展示，点开才在下方出现下拉面板 */
+[data-ui-version="v2"] .task-depth-setting-main .resource-select-value {
+    display: none;
+}
+
+[data-ui-version="v2"] .task-depth-setting-main .resource-select-icon {
+    width: 14px;
+    height: 14px;
+}
+
+/* 29. CPU / 内存 / 磁盘 读数各自按紧张度着色，不再整段跟随磁盘紧急态 */
+[data-ui-version="v2"] .task-performance-metric.is-warning {
+    color: var(--ui-warning);
+}
+
+[data-ui-version="v2"] .task-performance-metric.is-critical {
+    color: var(--ui-danger);
+}
+
+/* 30. 记忆管理与日志审计的标题说明不再占据头部 */
+[data-ui-version="v2"] #view-memory .content-header .subtitle,
+[data-ui-version="v2"] #view-audit .content-header .subtitle {
+    display: none;
+}
+
+/* 31. 面板扁平后收紧页面留白；会话列表与日志审计保持原样 */
+[data-ui-version="v2"] .resource-layout,
+[data-ui-version="v2"] .llm-page-layout,
+[data-ui-version="v2"] .memory-layout,
+[data-ui-version="v2"] .external-api-shell {
+    padding-right: var(--ui-space-3);
+    padding-left: var(--ui-space-3);
+}
+
+/* 32. 会话卡片按内容高度排列，不被列高压缩成重叠 */
+[data-ui-version="v2"] .ceo-session-list > .ceo-session-card {
+    flex: 0 0 auto;
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-list {
+    gap: var(--ui-space-3);
 }
 
 [data-ui-version="v2"] .task-depth-setting-main .resource-select-trigger:hover {

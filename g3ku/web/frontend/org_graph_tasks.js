@@ -479,6 +479,17 @@ function queueMetricCount(value) {
     return Number.isFinite(numeric) ? String(Math.max(0, Math.trunc(numeric))) : "--";
 }
 
+// 资源读数按各自的占用档位着色：整段磁盘紧急态只决定描边，不再把三个数字一起染绿。
+function taskWorkerMetricSpan(text, value) {
+    const numeric = Number(value);
+    let level = "";
+    if (Number.isFinite(numeric)) {
+        if (numeric >= 90) level = " is-critical";
+        else if (numeric >= 75) level = " is-warning";
+    }
+    return `<span class="task-performance-metric${level}">${esc(text)}</span>`;
+}
+
 function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
     const workerState = normalizeTaskWorkerState(S.tasksWorkerState);
     if (workerState === "offline" || workerState === "stopped") return { key: "offline", label: "离线" };
@@ -529,7 +540,7 @@ function renderTaskPerformanceBar() {
         </div>
         <div class="task-performance-item task-performance-item--state" data-state="${esc(diskStateKey)}">
             <span class="task-performance-label">CPU/内存/磁盘</span>
-            <strong class="task-performance-value">${esc(`${cpuText} / ${memoryText} / ${diskBusyText}${diskStateSuffix}`)}</strong>
+            <strong class="task-performance-value">${taskWorkerMetricSpan(cpuText, metrics?.machine_pressure_cpu_percent)} / ${taskWorkerMetricSpan(memoryText, metrics?.machine_pressure_memory_percent)} / ${taskWorkerMetricSpan(diskBusyText, metrics?.machine_pressure_disk_busy_available === false ? Number.NaN : metrics?.machine_pressure_disk_busy_percent)}${esc(diskStateSuffix)}</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">工具队列</span>
