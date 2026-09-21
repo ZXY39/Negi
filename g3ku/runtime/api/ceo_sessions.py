@@ -1015,6 +1015,15 @@ async def _finish_manual_compression(
         except Exception:
             pass
     await _emit_runtime_state_snapshot(runtime_session)
+    # 压缩收尾就是"会话回到空闲"的那个时刻，而队列的排水通道原本只长在请求处理里：
+    # 压缩在途时受理的消息（web 候选 / 渠道排队）到这里才该发出去。谁让会话变空闲，
+    # 谁在自己的收尾调用派发；它内部会再问一次 hold，重复调用与并发终局都安全。
+    dispatch_queued = getattr(runtime_session, "dispatch_queued_follow_ups_if_idle", None)
+    if callable(dispatch_queued):
+        try:
+            await dispatch_queued(source="manual_compression_finished")
+        except Exception:
+            pass
 
 
 async def _execute_manual_context_compression(agent, runtime_session, *, pause_first: bool) -> None:

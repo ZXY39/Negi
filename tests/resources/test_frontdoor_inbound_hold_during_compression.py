@@ -29,7 +29,7 @@ from g3ku.runtime.api.external_turns import (
     ExternalTurnService,
 )
 from g3ku.runtime.bridge import SessionRuntimeBridge
-from g3ku.runtime.external_events import reset_session_event_hubs
+from g3ku.runtime.external_events import get_session_event_hub, reset_session_event_hubs
 from g3ku.runtime.external_sessions import ExternalSessionEntry
 from g3ku.runtime.session_agent import (
     MANUAL_COMPRESSION_RUNNING,
@@ -383,3 +383,277 @@ async def test_requeue_of_the_same_message_does_not_stack_duplicates(tmp_path: P
 
     assert [str(row.get("content") or "") for row in _transcript_rows(tmp_path, key) if str(row.get("role")) == "user"] == ["同一条"]
     assert len(reopened._state.queued_follow_up_messages) == 1
+
+
+# -- f) 回到空闲后的派发 ------------------------------------------------------
+
+
+class _RecordingSession:
+    """真谓词 + 可观察的派发：只替换 `prompt_batch`，其余走 RuntimeAgentSession 本体。"""
+
+    def __init__(self, session: RuntimeAgentSession) -> None:
+        self._session = session
+        self.calls: list[list[str]] = []
+        self.hold_at_call: list[str] = []
+        self.listeners_at_call: list[int] = []
+        self.fail_with: Exception | None = None
+
+    async def _prompt_batch(self, messages, **kwargs):
+        _ = kwargs
+        self.hold_at_call.append(self._session.frontdoor_inbound_hold())
+        self.listeners_at_call.append(len(getattr(self._session, "_listeners", ())))
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.calls.append([str(getattr(item, "content", item)) for item in messages])
+        return SimpleNamespace(output="答复")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sends_the_queue_in_order_when_idle(tmp_path: Path) -> None:
+    key = "ext:test-bridge:dispatch-idle"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["先到的", "后到的"], persist_transcript=True)
+
+    result = await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    assert recorder.calls == [["先到的", "后到的"]]
+    assert result["dispatched"] == 2
+    assert list(session._state.queued_follow_up_messages or []) == []
+    assert recorder.hold_at_call == [""]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_refuses_while_compression_holds(tmp_path: Path) -> None:
+    key = "ext:test-bridge:dispatch-held"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["在排队"], persist_transcript=True)
+    setattr(session, MANUAL_COMPRESSION_STATE_ATTR, {"status": MANUAL_COMPRESSION_RUNNING})
+
+    result = await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    assert recorder.calls == []
+    assert result["reason"] == "held:manual_context_compression"
+    assert [str(item.content) for item in session._state.queued_follow_up_messages] == ["在排队"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_waits_for_a_pending_tool_approval(tmp_path: Path) -> None:
+    """审批中的回合会把基线一起改掉，派发必须排在它后面。"""
+    key = "ext:test-bridge:dispatch-approval"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["在排队"], persist_transcript=True)
+    session._state.pending_interrupts = [{"id": "i-1"}]
+
+    result = await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    assert recorder.calls == []
+    assert result["reason"] == "tool_approval_pending"
+    assert len(session._state.queued_follow_up_messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_dispatch_returns_the_items_to_the_front_of_the_queue(tmp_path: Path) -> None:
+    key = "ext:test-bridge:dispatch-fail"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    recorder.fail_with = RuntimeError("provider 503")
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["旧的一条"], persist_transcript=True)
+    fresh = await session.queue_follow_up_batch(["新到的一条"], persist_transcript=True)
+    _ = fresh
+
+    result = await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    assert result["reason"] == "dispatch_failed"
+    assert [str(item.content) for item in session._state.queued_follow_up_messages] == [
+        "旧的一条",
+        "新到的一条",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dispatched_message_keeps_its_turn_id_so_the_row_flips_not_duplicates(
+    tmp_path: Path,
+) -> None:
+    """派发后那一轮按同一 turn_id 升 completed：转录里不能出现第二条同样的用户消息。"""
+    key = "ext:test-bridge:dispatch-flip"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    queued = await session.queue_follow_up_batch(["保持 turn_id"], persist_transcript=True)
+    turn_id = str((queued[0].metadata or {}).get("_transcript_turn_id") or "").strip()
+
+    await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    sent_item = recorder.calls[0]
+    assert sent_item == ["保持 turn_id"]
+    await session._persist_turn_transcript(
+        user_input=queued[0],
+        user_text="保持 turn_id",
+        assistant_text="答复",
+        interaction_flow=[],
+        internal_source=None,
+        route_kind="",
+    )
+    rows = [
+        row
+        for row in _transcript_rows(tmp_path, key)
+        if str(row.get("role") or "") == "user"
+    ]
+    assert len(rows) == 1
+    assert str((rows[0].get("metadata") or {}).get("_transcript_state") or "") == "completed"
+    assert str((rows[0].get("metadata") or {}).get("_transcript_turn_id") or "") == turn_id
+    # 翻转之后，重启不再接回这条。
+    assert _real_session(tmp_path, key)._state.queued_follow_up_messages == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_relay_is_subscribed_only_for_its_own_turn(tmp_path: Path) -> None:
+    """relay 订阅必须随派发结束：留在 _listeners 里，之后每个回合的事件都会往这个已终局
+    的 turn_id 上灌（ruff 的 F841 就是在这一处抓到的）。"""
+    key = "ext:test-bridge:dispatch-listeners"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["在排队"], persist_transcript=True)
+    before = len(session._listeners)
+
+    result = await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    assert result["dispatched"] == 1
+    assert recorder.listeners_at_call == [before + 1]
+    assert len(session._listeners) == before
+
+
+@pytest.mark.asyncio
+async def test_dispatch_publishes_exactly_one_hub_terminal_event(tmp_path: Path) -> None:
+    """渠道的 SSE pump 靠终局事件收口：派发出去的回合也要遵守同一条回合契约。"""
+    key = "ext:test-bridge:dispatch-hub"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["在排队"], persist_transcript=True)
+
+    result = await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    events = get_session_event_hub(key).replay(0)
+    assert [str(event["type"]) for event in events] == ["turn.started", "turn.completed"]
+    assert {str(event.get("turn_id")) for event in events} == {str(result["turn_id"])}
+    assert len(session._listeners) == 0
+
+
+@pytest.mark.asyncio
+async def test_failed_dispatch_still_closes_the_hub_turn(tmp_path: Path) -> None:
+    key = "ext:test-bridge:dispatch-hub-fail"
+    session = _real_session(tmp_path, key)
+    recorder = _RecordingSession(session)
+    recorder.fail_with = RuntimeError("provider 503")
+    session.prompt_batch = recorder._prompt_batch  # type: ignore[method-assign]
+    await session.queue_follow_up_batch(["在排队"], persist_transcript=True)
+
+    await session.dispatch_queued_follow_ups_if_idle(source="test")
+
+    events = get_session_event_hub(key).replay(0)
+    assert [str(event["type"]) for event in events] == ["turn.started", "turn.failed"]
+    assert len(session._listeners) == 0
+
+
+# -- g) 压缩收尾这个缝确实接上了 ----------------------------------------------
+
+class _EndpointSession:
+    """手动压缩端点用的替身：真谓词 + 记录派发时刻的 hold 状态。"""
+
+    def __init__(self) -> None:
+        self.state = _state(running=False, session_key="web:shared")
+        self._state = self.state
+        self._compression_state: dict = {}
+        self._active_frontdoor_compression_generation = None
+        self.dispatch_calls: list[tuple[str, str]] = []
+        self.pause_calls: list[bool] = []
+
+    frontdoor_inbound_hold = RuntimeAgentSession.frontdoor_inbound_hold
+
+    def _emit_state_snapshot(self):
+        return asyncio.sleep(0)
+
+    def _sync_completed_continuity_snapshot(self, **kwargs):
+        _ = kwargs
+        return None
+
+    def append_context_compression_marker(self, **kwargs):
+        _ = kwargs
+        return True
+
+    def _cancel_active_frontdoor_compression_generation(self):
+        return None
+
+    async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict:
+        # 关键断言点：派发发生在压缩已终局之后，否则 hold 还在，队列原地不动。
+        self.dispatch_calls.append((source, self.frontdoor_inbound_hold()))
+        return {"dispatched": 0, "reason": "empty", "source": source}
+
+
+@pytest.mark.asyncio
+async def test_compression_finish_seam_dispatches_after_the_hold_is_released(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from g3ku.runtime.api import ceo_sessions
+    from g3ku.session.manager import SessionManager
+
+    class _Runner:
+        async def compress_session_context(self, *, session):
+            _ = session
+            return {
+                "applied": True,
+                "reason": "",
+                "pre_tokens": 116_036,
+                "post_tokens": 17_956,
+                "provider_model": "openai:glm-5.2",
+                "context_window_tokens": 390_000,
+                "compression_mode": "llm",
+            }
+
+    runtime_session = _EndpointSession()
+    session_manager = SessionManager(tmp_path)
+    stored = session_manager.get_or_create("web:shared")
+    session_manager.save(stored)
+    runtime_manager = SimpleNamespace(
+        get=lambda session_id: runtime_session if session_id == "web:shared" else None,
+        get_or_create=lambda **kwargs: runtime_session
+        if kwargs.get("session_key") == "web:shared"
+        else None,
+    )
+    agent = SimpleNamespace(
+        sessions=session_manager,
+        multi_agent_runner=_Runner(),
+        memory_manager=None,
+    )
+    monkeypatch.setattr(
+        ceo_sessions,
+        "_sessions",
+        lambda: (agent, session_manager, runtime_manager, SimpleNamespace()),
+    )
+
+    app = FastAPI()
+    app.include_router(ceo_sessions.router, prefix="/api")
+    client = TestClient(app)
+    response = client.post("/api/ceo/sessions/web:shared/compress-context")
+    assert response.status_code == 200
+    for _ in range(60):
+        if runtime_session.dispatch_calls:
+            break
+        await asyncio.sleep(0.05)
+
+    assert runtime_session.dispatch_calls == [("manual_compression_finished", "")]
+    view = client.get("/api/ceo/sessions/web:shared/compress-context").json()
+    assert view["status"] == "completed"
+    assert view["post_tokens"] == 17_956

@@ -3786,6 +3786,100 @@ class RuntimeAgentSession:
             )
         return len(restored)
 
+    async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict[str, Any]:
+        """会话回到空闲时把排队中的消息发出去。返回 {dispatched, reason}。
+
+        排水通道本来只有两条，且都长在请求处理里：WS 的回合链
+        （api/websocket_ceo `_run_user_turn`）和 external 的 `_drain_queued_follow_ups`。
+        于是"没有客户端在等回包"的场合——手动压缩刚结束、浏览器刷新过、进程重启过——
+        排队的消息会一直躺在队列里。这里补第三条通道：谁让会话变空闲，谁在自己的收尾调用它。
+
+        出站沿用渠道自己那条路：`make_session_event_relay` 只要 session_key 和 turn_id
+        就能把 reply.final 发到该会话的 hub，QQ 桥的 SSE pump 照收（cron 就是这个形状）。
+        web 会话不需要额外投递：WS 的订阅是 socket 级而非按消息的，转录与会话摘要负责重连。
+
+        失败时把条目放回队列（转录那行仍是 pending，重启后也会被重新接回），因为这三个
+        缝都是低频事件，不会形成重试热循环。"""
+        session_key = str(self._state.session_key or "").strip()
+        hold = self.frontdoor_inbound_hold()
+        if hold:
+            return {"dispatched": 0, "reason": f"held:{hold}", "source": source}
+        if list(self._state.pending_interrupts or []):
+            return {"dispatched": 0, "reason": "tool_approval_pending", "source": source}
+        queued = self.drain_queued_follow_up_messages()
+        if not queued:
+            return {"dispatched": 0, "reason": "empty", "source": source}
+
+        turn_id = uuid.uuid4().hex
+        unsubscribe: Callable[[], Any] | None = None
+        hub: Any = None
+        try:
+            from g3ku.runtime.external_events import get_session_event_hub, make_session_event_relay
+
+            relay = make_session_event_relay(session_key, turn_id=turn_id, session=self)
+            unsubscribe = self.subscribe(relay)
+            hub = get_session_event_hub(session_key)
+            hub.publish("turn.started", turn_id=turn_id)
+        except Exception:
+            logger.debug("queued follow-up relay unavailable for {}", session_key)
+
+        try:
+            try:
+                result = await self.prompt_batch(queued)
+            finally:
+                # 订阅必须随这次派发结束：留在 self._listeners 里会让之后每一个回合的
+                # 事件继续往这个已终局的 turn_id 上灌。
+                if callable(unsubscribe):
+                    try:
+                        unsubscribe()
+                    except Exception:
+                        logger.debug("queued follow-up relay unsubscribe failed for {}", session_key)
+        except Exception as exc:
+            self._restore_queued_follow_ups_front(queued)
+            if hub is not None:
+                self._publish_queued_follow_up_terminal(hub, turn_id, failed=True)
+            logger.warning(
+                "Queued follow-up dispatch failed for {} ({} message(s) restored): {}",
+                session_key,
+                len(queued),
+                exc,
+            )
+            return {"dispatched": 0, "reason": "dispatch_failed", "source": source}
+        if hub is not None:
+            self._publish_queued_follow_up_terminal(hub, turn_id, failed=False)
+        logger.info(
+            "Dispatched {} queued follow-up message(s) for {} ({})",
+            len(queued),
+            session_key,
+            source or "idle",
+        )
+        return {
+            "dispatched": len(queued),
+            "reason": "",
+            "source": source,
+            "turn_id": turn_id,
+            "output": str(getattr(result, "output", "") or ""),
+        }
+
+    def _restore_queued_follow_ups_front(self, queued: list[UserInputMessage]) -> None:
+        restored = [
+            item
+            for item in list(queued or [])
+            if isinstance(item, UserInputMessage)
+        ]
+        if not restored:
+            return
+        remaining = list(self._state.queued_follow_up_messages or [])
+        self._state.queued_follow_up_messages[:] = [*restored, *remaining]
+
+    @staticmethod
+    def _publish_queued_follow_up_terminal(hub: Any, turn_id: str, *, failed: bool) -> None:
+        """渠道契约：每个回合恰好一个终局事件，派发出去的回合也不能只发 started。"""
+        try:
+            hub.publish("turn.failed" if failed else "turn.completed", turn_id=turn_id)
+        except Exception:
+            return
+
     async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
         return await self.prompt(self._last_prompt, live_context=live_context)
 

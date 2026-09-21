@@ -1537,6 +1537,12 @@ async def ceo_websocket(websocket: WebSocket):
                 data={'messages': persisted_messages, **turn_payload},
             )
         )
+        # 重连也是"会话回到空闲"的时刻之一（进程重启后第一次连上来就走这里，构造期已把
+        # 转录里仍是 pending 的条目接回队列）。起任务而不是 await：这条回合会把握手后的
+        # 第一个 read 挡到回合结束。
+        dispatch_queued = getattr(session, 'dispatch_queued_follow_ups_if_idle', None)
+        if callable(dispatch_queued):
+            asyncio.create_task(dispatch_queued(source='ws_reconnect'))
         while True:
             if closed.is_set():
                 break
