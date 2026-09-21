@@ -290,6 +290,7 @@ def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_
           [pausedTree, ...pausedTree.children].map((node) => [node.node_id, node])
         );
         S.currentTask = { task_id: "task:test", status: "in_progress", is_paused: false, pause_requested: false };
+        S.liveFrameMap = { running: { node_id: "running", phase: "waiting_tool_results", tool_calls: [{ tool_call_id: "t1", tool_name: "exec", status: "running" }], child_pipelines: [] } };
         const resumedTree = buildExecutionTreeFromSnapshot();
         const resumedById = Object.fromEntries(
           [resumedTree, ...resumedTree.children].map((node) => [node.node_id, node])
@@ -315,8 +316,8 @@ def test_task_pause_projects_over_non_terminal_tree_nodes_without_mutating_node_
     assert result["paused"]["running"] == ["\u4efb\u52a1\u6682\u505c", True, False]
     assert result["paused"]["done"] == ["SUCCESS", False]
     assert result["paused"]["local"] == ["\u4efb\u52a1\u6682\u505c", True, True]
-    assert result["resumed"]["root"] == ["IN_PROGRESS", False]
-    assert result["resumed"]["running"] == ["IN_PROGRESS", False]
+    assert result["resumed"]["root"] == ["等待中", False]
+    assert result["resumed"]["running"] == ["运行中", False]
     assert result["resumed"]["done"] == ["SUCCESS", False]
     assert result["resumed"]["local"] == ["\u5df2\u6682\u505c\uff08manual\uff09", True, True]
 
@@ -4921,7 +4922,7 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
     assert result["hasStatusBadge"] is False
 
 
-def test_build_execution_tree_from_snapshot_keeps_execution_visible_while_waiting_acceptance() -> None:
+def test_build_execution_tree_from_snapshot_keeps_undispatched_acceptance_visible_as_waiting() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -4939,7 +4940,6 @@ def test_build_execution_tree_from_snapshot_keeps_execution_visible_while_waitin
               rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
               auxiliary_child_ids: ["node:acceptance"],
               parent_visible: true,
-              tree_visible: true,
             },
             "node:child": {
               node_id: "node:child",
@@ -4950,7 +4950,6 @@ def test_build_execution_tree_from_snapshot_keeps_execution_visible_while_waitin
               rounds: [],
               auxiliary_child_ids: [],
               parent_visible: false,
-              tree_visible: true,
               acceptance_handshake_state: "waiting_acceptance",
             },
             "node:acceptance": {
@@ -4962,8 +4961,6 @@ def test_build_execution_tree_from_snapshot_keeps_execution_visible_while_waitin
               rounds: [],
               auxiliary_child_ids: [],
               parent_visible: true,
-              tree_visible: false,
-              acceptance_display_phase: "inactive",
             },
           },
           liveFrameMap: {},
@@ -4982,15 +4979,25 @@ def test_build_execution_tree_from_snapshot_keeps_execution_visible_while_waitin
         const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
         vm.runInThisContext(code);
         const tree = buildExecutionTreeFromSnapshot("node:root");
+        const child = (tree?.children || []).find((item) => item.node_id === "node:child");
         console.log(JSON.stringify({
           childIds: Array.isArray(tree?.children) ? tree.children.map((item) => item.node_id) : [],
           inspectionIds: Array.isArray(tree?.inspectionNodes) ? tree.inspectionNodes.map((item) => item.node_id) : [],
+          states: [
+            child?.display_state,
+            (tree?.inspectionNodes || [])[0]?.display_state,
+            child?.visual_state,
+            (tree?.inspectionNodes || [])[0]?.visual_state,
+          ],
         }));
         """
     )
 
     assert result["childIds"] == ["node:child"]
-    assert result["inspectionIds"] == []
+    # 检验节点不再隐藏：执行节点只要挂着检验节点就一直显示。
+    assert result["inspectionIds"] == ["node:acceptance"]
+    # 未派发的检验节点与刚提交、正等检验的执行节点都是「等待中」，不共用「检验中」。
+    assert result["states"] == ["等待中", "等待中", "waiting", "waiting"]
 
 
 def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_after_rejection() -> None:
@@ -5011,7 +5018,6 @@ def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_a
               rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
               auxiliary_child_ids: [],
               parent_visible: true,
-              tree_visible: true,
             },
             "node:child": {
               node_id: "node:child",
@@ -5022,7 +5028,6 @@ def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_a
               rounds: [],
               auxiliary_child_ids: ["node:acceptance"],
               parent_visible: false,
-              tree_visible: true,
               acceptance_handshake_state: "waiting_execution_retry",
             },
             "node:acceptance": {
@@ -5034,8 +5039,6 @@ def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_a
               rounds: [],
               auxiliary_child_ids: [],
               parent_visible: false,
-              tree_visible: true,
-              acceptance_display_phase: "waiting_retry",
             },
           },
           liveFrameMap: {},
@@ -5065,62 +5068,63 @@ def test_build_execution_tree_from_snapshot_keeps_activated_acceptance_visible_a
 
     assert result["childIds"] == ["node:child"]
     assert result["inspectionIds"] == ["node:acceptance"]
-    assert result["inspectionStates"] != ["检验中"]
+    # 打回执行节点后，检验节点在等待下一次派发：等待中，不是检验中。
+    assert result["inspectionStates"] == ["等待中"]
 
 
-def test_build_execution_tree_from_snapshot_force_shows_all_nodes_during_distribution_mode() -> None:
+def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
         const vm = require("vm");
         global.window = global;
+        const node = (id, extra) => ({
+          node_id: id,
+          parent_node_id: "node:root",
+          node_kind: "execution",
+          status: "in_progress",
+          title: id,
+          rounds: [],
+          auxiliary_child_ids: [],
+          parent_visible: true,
+          ...extra,
+        });
         global.S = {
           treeRootNodeId: "node:root",
           treeSelectedRoundByNodeId: {},
           treeNodesById: {
-            "node:root": {
-              node_id: "node:root",
-              node_kind: "execution",
-              status: "in_progress",
-              title: "root",
-              rounds: [{ round_id: "round-1", is_latest: true, child_ids: ["node:child"] }],
-              auxiliary_child_ids: ["node:acceptance"],
-              parent_visible: true,
-              tree_visible: true,
-            },
-            "node:child": {
-              node_id: "node:child",
-              parent_node_id: "node:root",
-              node_kind: "execution",
-              status: "in_progress",
-              title: "child",
-              rounds: [],
-              auxiliary_child_ids: [],
-              parent_visible: false,
-              tree_visible: false,
-              acceptance_handshake_state: "waiting_acceptance",
-            },
-            "node:acceptance": {
-              node_id: "node:acceptance",
-              parent_node_id: "node:child",
+            "node:root": node("node:root", {
+              parent_node_id: null,
+              rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:submitted", "node:busy", "node:idle", "node:spawn"] }],
+            }),
+            "node:submitted": node("node:submitted", {
+              status: "success",
+              auxiliary_child_ids: ["node:acc-running", "node:acc-queued"],
+            }),
+            "node:acc-running": node("node:acc-running", {
+              parent_node_id: "node:submitted",
               node_kind: "acceptance",
-              status: "in_progress",
-              title: "acceptance",
-              rounds: [],
-              auxiliary_child_ids: [],
-              parent_visible: false,
-              tree_visible: false,
-              acceptance_display_phase: "inactive",
+            }),
+            "node:acc-queued": node("node:acc-queued", {
+              parent_node_id: "node:submitted",
+              node_kind: "acceptance",
+            }),
+            "node:busy": node("node:busy"),
+            "node:idle": node("node:idle"),
+            "node:spawn": node("node:spawn"),
+          },
+          liveFrameMap: {
+            "node:root": { node_id: "node:root", phase: "waiting_children", tool_calls: [], child_pipelines: [{ index: 1, status: "running" }] },
+            "node:acc-running": { node_id: "node:acc-running", phase: "before_model", tool_calls: [], child_pipelines: [] },
+            "node:busy": { node_id: "node:busy", phase: "after_model", tool_calls: [{ tool_call_id: "t1", tool_name: "exec", status: "running" }], child_pipelines: [] },
+            "node:spawn": {
+              node_id: "node:spawn",
+              phase: "waiting_tool_results",
+              tool_calls: [{ tool_call_id: "t2", tool_name: "spawn_child_nodes", status: "running" }],
+              child_pipelines: [{ index: 0, status: "queued" }],
             },
           },
-          liveFrameMap: {},
-          taskRuntimeSummary: {
-            distribution: {
-              active_epoch_id: "epoch:test",
-              state: "distributing",
-              mode: "task_wide_barrier",
-            },
-          },
+          taskRuntimeSummary: null,
         };
         global.U = {};
         global.ApiClient = {};
@@ -5135,23 +5139,30 @@ def test_build_execution_tree_from_snapshot_force_shows_all_nodes_during_distrib
         const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
         vm.runInThisContext(code);
         const tree = buildExecutionTreeFromSnapshot("node:root");
-        const visibleIds = [];
-        const walk = (node) => {
-          if (!node) return;
-          visibleIds.push(node.node_id);
-          (Array.isArray(node.inspectionNodes) ? node.inspectionNodes : []).forEach(walk);
-          (Array.isArray(node.children) ? node.children : []).forEach(walk);
+        const byId = new Map();
+        const walk = (item) => {
+          if (!item) return;
+          byId.set(item.node_id, item.display_state);
+          (item.inspectionNodes || []).forEach(walk);
+          (item.children || []).forEach(walk);
         };
         walk(tree);
-        console.log(JSON.stringify({
-          visibleIds: visibleIds.sort(),
-          inspectionStates: Array.isArray(tree?.inspectionNodes) ? tree.inspectionNodes.map((item) => item.display_state) : [],
-        }));
+        console.log(JSON.stringify(Object.fromEntries(byId)));
         """
     )
 
-    assert result["visibleIds"] == ["node:acceptance", "node:child", "node:root"]
-    assert result["inspectionStates"] != ["检验中"]
+    assert result == {
+        # 派生工具还没返回：父节点是等待中，不是运行中。
+        "node:root": "等待中",
+        # 已提交交付、检验还没结论：等待中。
+        "node:submitted": "等待中",
+        "node:busy": "运行中",
+        "node:idle": "等待中",
+        # 派生工具在飞、子节点还没返回：等子节点的结果，不是运行中。
+        "node:spawn": "等待中",
+        "node:acc-running": "检验中",
+        "node:acc-queued": "等待中",
+    }
 
 
 def test_build_execution_trace_steps_excludes_spawn_review_rounds() -> None:

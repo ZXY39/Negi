@@ -61,9 +61,7 @@ function normalizeTaskTreeSnapshotNode(value = {}, existing = null) {
         pending_notice_count: Math.max(0, treeNormalizeInt(value?.pending_notice_count ?? prior?.pending_notice_count, 0)),
         distribution_status: String(value?.distribution_status || prior?.distribution_status || "").trim(),
         parent_visible: value?.parent_visible ?? prior?.parent_visible ?? true,
-        tree_visible: value?.tree_visible ?? prior?.tree_visible ?? true,
         acceptance_handshake_state: String(value?.acceptance_handshake_state || prior?.acceptance_handshake_state || "").trim(),
-        acceptance_display_phase: String(value?.acceptance_display_phase || prior?.acceptance_display_phase || "").trim(),
     };
 }
 
@@ -90,19 +88,11 @@ function snapshotNodeSelectedRoundId(node, selections = S.treeSelectedRoundByNod
     return snapshotNodeDefaultRoundId(node);
 }
 
-function shouldRenderTreeSnapshotNode(node, distributionState = activeTaskDistributionState()) {
-    if (!node) return false;
-    if (distributionState?.ui_mode === "distribution") return true;
-    return node.tree_visible !== false;
-}
-
-function snapshotNodeVisibleChildIds(node, selections = S.treeSelectedRoundByNodeId, distributionState = activeTaskDistributionState()) {
+function snapshotNodeVisibleChildIds(node, selections = S.treeSelectedRoundByNodeId) {
     const seen = new Set();
     const out = [];
     (Array.isArray(node?.auxiliary_child_ids) ? node.auxiliary_child_ids : []).forEach((childId) => {
         const normalized = String(childId || "").trim();
-        const childNode = treeSnapshotNode(normalized);
-        if (childNode && !shouldRenderTreeSnapshotNode(childNode, distributionState)) return;
         if (!normalized || seen.has(normalized)) return;
         seen.add(normalized);
         out.push(normalized);
@@ -113,8 +103,6 @@ function snapshotNodeVisibleChildIds(node, selections = S.treeSelectedRoundByNod
     const selectedRound = rounds.find((round) => round.round_id === selectedRoundId) || null;
     (Array.isArray(selectedRound?.child_ids) ? selectedRound.child_ids : []).forEach((childId) => {
         const normalized = String(childId || "").trim();
-        const childNode = treeSnapshotNode(normalized);
-        if (childNode && !shouldRenderTreeSnapshotNode(childNode, distributionState)) return;
         if (!normalized || seen.has(normalized)) return;
         seen.add(normalized);
         out.push(normalized);
@@ -694,21 +682,19 @@ function buildExecutionTreeFromSnapshot(
     nodeId = S.treeRootNodeId,
     selections = S.treeSelectedRoundByNodeId,
     seen = new Set(),
-    distributionState = activeTaskDistributionState(),
     taskPaused = taskPauseDisplayActive(),
 ) {
     const normalizedNodeId = String(nodeId || "").trim();
     if (!normalizedNodeId || seen.has(normalizedNodeId)) return null;
     const snapshotNode = treeSnapshotNode(normalizedNodeId);
     if (!snapshotNode) return null;
-    if (!shouldRenderTreeSnapshotNode(snapshotNode, distributionState) && normalizedNodeId !== String(S.treeRootNodeId || "").trim()) return null;
     seen.add(normalizedNodeId);
     const kind = String(snapshotNode.node_kind || "execution").trim().toLowerCase() || "execution";
     const status = String(snapshotNode.status || "unknown").trim().toLowerCase() || "unknown";
     const title = resolveNodeTitle(snapshotNode, snapshotNode);
     const roundState = buildNodeRoundState(snapshotNode, selections);
-    const visibleChildren = snapshotNodeVisibleChildIds(snapshotNode, selections, distributionState)
-        .map((childId) => buildExecutionTreeFromSnapshot(childId, selections, seen, distributionState, taskPaused))
+    const visibleChildren = snapshotNodeVisibleChildIds(snapshotNode, selections)
+        .map((childId) => buildExecutionTreeFromSnapshot(childId, selections, seen, taskPaused))
         .filter(Boolean);
     const inspectionNodes = [];
     const childNodes = [];
@@ -716,19 +702,21 @@ function buildExecutionTreeFromSnapshot(
         if (isAcceptanceNodeKind(child?.kind)) inspectionNodes.push(child);
         else childNodes.push(child);
     });
-    const inspectionActive = inspectionNodes.some((child) => isInspectionActiveStatus(child?.visual_state || child?.state));
+    const inspectionPending = inspectionNodes.some((child) => !isTerminalTreeNodeStatus(child?.state));
     const effectiveIsPaused = effectiveTreeNodePaused(snapshotNode, taskPaused);
+    const liveFrame = S.liveFrameMap?.[normalizedNodeId] || null;
+    const inTurn = isLiveTurnFrame(liveFrame);
     const stateMeta = resolveTreeNodeStatusLabel(status, {
         kind,
-        inspectionActive,
+        inTurn,
+        inspectionPending,
         isPaused: !!snapshotNode.is_paused,
         taskPaused,
         pauseReason: String(snapshotNode.pause_reason || "").trim(),
-        acceptanceDisplayPhase: String(snapshotNode.acceptance_display_phase || "").trim().toLowerCase(),
     });
-    const liveFrame = S.liveFrameMap?.[normalizedNodeId] || null;
-    const waitingForChildren = isWaitingForChildResultsFrame(liveFrame);
-    const isActiveNode = !isTerminalTreeNodeStatus(status) && !waitingForChildren;
+    // 检验节点常驻显示后，"活跃"必须按真实在执行判定，否则每个未派发的检验节点
+    // 都会被计入头部计数。
+    const isActiveNode = !isTerminalTreeNodeStatus(status) && (inTurn || effectiveIsPaused);
     const activeNodeCount = (isActiveNode ? 1 : 0)
         + visibleChildren.reduce((sum, child) => sum + treeNormalizeInt(child?.activeNodeCount, 0), 0);
     return {
@@ -750,9 +738,7 @@ function buildExecutionTreeFromSnapshot(
         activeNodeCount,
         distribution_status: String(snapshotNode.distribution_status || "").trim(),
         parent_visible: snapshotNode.parent_visible !== false,
-        tree_visible: snapshotNode.tree_visible !== false,
         acceptance_handshake_state: String(snapshotNode.acceptance_handshake_state || "").trim(),
-        acceptance_display_phase: String(snapshotNode.acceptance_display_phase || "").trim(),
         task_paused: taskPaused,
         effective_is_paused: effectiveIsPaused,
         is_paused: !!snapshotNode.is_paused,
@@ -781,6 +767,18 @@ function isTerminalTreeNodeStatus(status) {
 function isActiveChildPipelineStatus(status) {
     const normalized = String(status || "").trim().toLowerCase();
     return normalized === "queued" || normalized === "running";
+}
+
+// 该节点的回合是否还在自己执行。等子节点（派生工具未返回、或等验收结论）不算在
+// 执行——那一帧虽然在，但节点眼下什么都不做。相位集合与在飞工具判据必须与
+// main/monitoring/log_service.py::_frame_index_payload 的 runnable 口径同源。
+function isLiveTurnFrame(frame) {
+    if (!frame || typeof frame !== "object") return false;
+    if (isWaitingForChildResultsFrame(frame)) return false;
+    const phase = String(frame?.phase || "").trim().toLowerCase();
+    if (phase === "before_model" || phase === "after_model" || phase === "message_distribution") return true;
+    return (Array.isArray(frame?.tool_calls) ? frame.tool_calls : [])
+        .some((item) => isActiveChildPipelineStatus(item?.status || ""));
 }
 
 function isWaitingForChildResultsFrame(frame) {
@@ -1064,15 +1062,13 @@ function taskNodeDisplayState(node, taskPaused = taskPauseDisplayActive()) {
     if (node?.is_paused) {
         return `\u5df2\u6682\u505c\uff08${String(node.pause_reason || "").trim() || "manual"}\uff09`;
     }
-    return String(node?.display_state || node?.state || node?.status || "").trim()
-        || String(node?.state || node?.status || "").toUpperCase();
+    return String(node?.display_state || "").trim() || treeNodeStatusFallbackLabel(status);
 }
 
-function isInspectionActiveStatus(status) {
-    return ["queued", "running", "pending", "waiting", "checking", "inspecting"].includes(String(status || "").trim().toLowerCase());
-}
-
-function resolveTreeNodeStatusLabel(status, { kind = "", inspectionActive = false, isPaused = false, taskPaused = false, pauseReason = "", acceptanceDisplayPhase = "" } = {}) {
+// 树节点的中文状态标签。判据只有两条：节点自己的运行相位（live 帧）和验收子节点
+// 是否还没结论——两者都由 task.live.patch / task.node.patch 实时推送，不依赖
+// 整树重拉。非终态节点一律不落英文状态原文：没在执行就是等待中。
+function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "" } = {}) {
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
     if (taskPaused && !isTerminalTreeNodeStatus(normalizedStatus)) {
         return {
@@ -1086,17 +1082,28 @@ function resolveTreeNodeStatusLabel(status, { kind = "", inspectionActive = fals
             displayState: pauseReason ? `\u5df2\u6682\u505c\uff08${pauseReason}\uff09` : "\u5df2\u6682\u505c",
         };
     }
-    const normalizedAcceptancePhase = String(acceptanceDisplayPhase || "").trim().toLowerCase();
-    if (normalizedAcceptancePhase === "checking") {
-        return { visualState: "inspecting", displayState: "\u68c0\u9a8c\u4e2d" };
+    if (isTerminalTreeNodeStatus(normalizedStatus)) {
+        // 已提交但验收子节点还没结论：交付物还没被接受，不算完成。
+        if (normalizedStatus === "success" && inspectionPending) {
+            return { visualState: "waiting", displayState: "\u7b49\u5f85\u4e2d" };
+        }
+        return {
+            visualState: normalizedStatus,
+            displayState: normalizedStatus.toUpperCase(),
+        };
     }
-    if (inspectionActive) {
-        return { visualState: "inspecting", displayState: "\u68c0\u9a8c\u4e2d" };
+    if (!inTurn) {
+        return { visualState: "waiting", displayState: "\u7b49\u5f85\u4e2d" };
     }
-    return {
-        visualState: normalizedStatus,
-        displayState: normalizedStatus.toUpperCase(),
-    };
+    return isAcceptanceNodeKind(kind)
+        ? { visualState: "inspecting", displayState: "\u68c0\u9a8c\u4e2d" }
+        : { visualState: "running", displayState: "\u8fd0\u884c\u4e2d" };
+}
+
+function treeNodeStatusFallbackLabel(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (normalized === "success" || normalized === "failed") return normalized.toUpperCase();
+    return "\u7b49\u5f85\u4e2d";
 }
 
 function treeViewChildren(node) {

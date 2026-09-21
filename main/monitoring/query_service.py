@@ -1236,7 +1236,6 @@ class TaskQueryService:
         self,
         record: Any,
         *,
-        task: Any | None,
         node_map: dict[str, Any],
         rounds_by_parent: dict[str, list[Any]],
         direct_children: dict[str, list[str]],
@@ -1269,21 +1268,18 @@ class TaskQueryService:
         status = str(getattr(record, 'status', '') or 'in_progress').strip() or 'in_progress'
         # 窄读路径：暂停/握手状态均落在投影列（写入时同步），快照构建不再为每个
         # 节点全量读 nodes.payload（单节点 payload 可达数 MB，逐节点读是大任务
-        # tree-snapshot 超时的根因之一）。运行时节点只保留两处兜底：
-        # 1) acceptance 节点的展示相位需要其 accepted 节点的元数据；
-        # 2) 旧投影行缺 acceptance_handshake_state 时从运行时元数据补握手状态。
+        # tree-snapshot 超时的根因之一）。只保留一处兜底：旧投影行缺
+        # acceptance_handshake_state 时从运行时元数据补握手状态。
         is_paused = bool(getattr(record, 'is_paused', False) or payload.get('is_paused'))
         pause_reason = str(getattr(record, 'pause_reason', '') or payload.get('pause_reason') or '').strip()
         pause_row = self._store.get_task_node_pause(node_id)
         pause_remark = str(getattr(pause_row, 'remark', '') or payload.get('pause_remark') or '').strip()
         handshake_state = str(payload.get('acceptance_handshake_state') or '').strip()
-        runtime_node: NodeRecord | None = None
-        if node_kind == 'acceptance' or not handshake_state:
+        if not handshake_state:
             runtime_node = self._store.get_node(node_id)
             metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
-            if not handshake_state:
-                acceptance_handshake = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
-                handshake_state = str(acceptance_handshake.get('state') or '').strip()
+            acceptance_handshake = normalize_acceptance_handshake(metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
+            handshake_state = str(acceptance_handshake.get('state') or '').strip()
         parent_visible = True
         if str(getattr(record, 'parent_node_id', '') or '').strip():
             if node_kind in {'execution', 'acceptance'} and status in {'success', 'failed'}:
@@ -1293,14 +1289,6 @@ class TaskQueryService:
                 ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
             }:
                 parent_visible = False
-        acceptance_display_phase = self._acceptance_display_phase(
-            task=task,
-            node_id=node_id,
-            node_kind=node_kind,
-            status=status,
-            runtime_node=runtime_node,
-        )
-        tree_visible = True if node_kind == 'execution' else acceptance_display_phase != 'inactive'
         return TaskTreeSnapshotNode(
             node_id=node_id,
             parent_node_id=str(getattr(record, 'parent_node_id', '') or '').strip() or None,
@@ -1325,63 +1313,8 @@ class TaskQueryService:
                 ),
             ),
             parent_visible=parent_visible,
-            tree_visible=tree_visible,
             acceptance_handshake_state=handshake_state,
-            acceptance_display_phase=acceptance_display_phase,
         )
-
-    def _acceptance_display_phase(
-        self,
-        *,
-        task: Any | None,
-        node_id: str,
-        node_kind: str,
-        status: str,
-        runtime_node: NodeRecord | None,
-    ) -> str:
-        if str(node_kind or '').strip().lower() != 'acceptance':
-            return ''
-        metadata = dict(runtime_node.metadata or {}) if runtime_node is not None and isinstance(runtime_node.metadata, dict) else {}
-        accepted_node_id = str(metadata.get('accepted_node_id') or getattr(runtime_node, 'parent_node_id', '') or '').strip()
-        accepted_node = self._store.get_node(accepted_node_id) if accepted_node_id else None
-        accepted_metadata = dict(accepted_node.metadata or {}) if accepted_node is not None and isinstance(accepted_node.metadata, dict) else {}
-        accepted_handshake = normalize_acceptance_handshake(accepted_metadata.get(ACCEPTANCE_HANDSHAKE_KEY))
-        if str(accepted_handshake.get('acceptance_node_id') or '').strip() == str(node_id or '').strip():
-            handshake_state = str(accepted_handshake.get('state') or '').strip()
-            if handshake_state == ACCEPTANCE_STATE_WAITING_ACCEPTANCE:
-                return 'checking'
-            if handshake_state == ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION:
-                return 'checking'
-            if handshake_state == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY:
-                return 'waiting_retry'
-            if handshake_state == ACCEPTANCE_STATE_ACCEPTED:
-                return 'accepted'
-            if handshake_state == ACCEPTANCE_STATE_REJECTED_TERMINAL:
-                return 'rejected'
-            if handshake_state == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE:
-                return 'canceled'
-        if task is not None:
-            final_acceptance = normalize_final_acceptance_metadata((getattr(task, 'metadata', {}) or {}).get('final_acceptance'))
-            if str(final_acceptance.node_id or '').strip() == str(node_id or '').strip():
-                final_status = str(final_acceptance.status or '').strip().lower()
-                if final_status in {'pending', ''}:
-                    return 'inactive'
-                if final_status in {'running', ACCEPTANCE_STATE_WAITING_ACCEPTANCE, ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION}:
-                    return 'checking'
-                if final_status == ACCEPTANCE_STATE_WAITING_EXECUTION_RETRY:
-                    return 'waiting_retry'
-                if final_status in {'passed', ACCEPTANCE_STATE_ACCEPTED}:
-                    return 'accepted'
-                if final_status in {'failed', ACCEPTANCE_STATE_REJECTED_TERMINAL}:
-                    return 'rejected'
-                if final_status == ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE:
-                    return 'canceled'
-        normalized_status = str(status or '').strip().lower()
-        if normalized_status == 'success':
-            return 'accepted'
-        if normalized_status == 'failed':
-            return 'rejected'
-        return 'inactive'
 
     def _build_tree_snapshot(
         self,
@@ -1393,7 +1326,6 @@ class TaskQueryService:
         max_nodes: int | None = None,
         after_node_id: str = '',
     ) -> TaskTreeSnapshot:
-        task = self._store.get_task(task_id)
         node_map, rounds_by_parent, direct_children = self._projection_maps(task_id)
         effective_max_nodes = max(1, int(max_nodes)) if max_nodes is not None else None
         included_ids: set[str]
@@ -1478,7 +1410,6 @@ class TaskQueryService:
         snapshot_nodes = {
             node_id: self._snapshot_node_from_projection(
                 node_map[node_id],
-                task=task,
                 node_map=node_map,
                 rounds_by_parent=rounds_by_parent,
                 direct_children=direct_children,

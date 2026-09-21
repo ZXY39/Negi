@@ -43,9 +43,7 @@ class TaskTreeSnapshotNode(Model):
     pending_notice_count: int = 0
     distribution_status: str = ''
     parent_visible: bool = True
-    tree_visible: bool = True
     acceptance_handshake_state: str = ''
-    acceptance_display_phase: str = ''
 
     @field_validator('distribution_status', mode='before')
     @classmethod
@@ -55,11 +53,6 @@ class TaskTreeSnapshotNode(Model):
     @field_validator('acceptance_handshake_state', mode='before')
     @classmethod
     def _normalize_acceptance_handshake_state(cls, value: Any) -> str:
-        return normalize_optional_text(value)
-
-    @field_validator('acceptance_display_phase', mode='before')
-    @classmethod
-    def _normalize_acceptance_display_phase(cls, value: Any) -> str:
         return normalize_optional_text(value)
 
 
