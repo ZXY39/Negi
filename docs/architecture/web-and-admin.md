@@ -181,10 +181,12 @@ Two collapse systems exist and must not be merged:
 
 `data-status` keeps one meaning across every page, and the label text is always present so color is never the only signal:
 
-- `running` / `in_progress` / `inspecting` → brand teal. Blue is reserved for informational copy, links and help text, never lifecycle state.
+- `running` / `in_progress` / `inspecting` → `--ui-running` purple. Lifecycle "in progress" is deliberately not brand teal (teal stays reserved for selection and primary actions) and never blue.
 - `completed` / `passed` / `success` → success green; `failed` → danger red; `unpassed` → warning amber.
 - `paused` / `queued` / `pending` / `waiting` / `blocked` / `unknown`, plus read-only and disabled → neutral gray.
 - An unmapped `data-status` renders neutral gray with its original text; it never inherits brand or danger styling and never renders unstyled.
+
+Task hall status badges are labeled in Chinese from `taskStatusLabel` (`运行 / 成功 / 失败 / 暂停 / 未通过 / 未知`); the task detail pill uses its own Chinese mapping. Both must stay Chinese so the two surfaces agree.
 
 ### Page Surfaces Are Flat
 
@@ -192,7 +194,7 @@ Admin pages draw one level of boxes only. The page-level containers (`.resource-
 
 Each view's own `<h1>` page title is visually hidden (clipped to 1px, kept in the accessibility tree) because the top bar already marks the current section; the header row keeps only its toolbar and status content. Do not delete the `<h1>` — it is the page's accessible name.
 
-The task hall header follows the same rule: the pressure state and the CPU/memory/disk reading share one capsule, and each of the three resource numbers colors itself by its own occupancy tier (≥75% warning, ≥90% danger) so the reading is not pinned to one color.「任务排序」and「全局任务树深度」are single borderless buttons carrying only their name and a chevron — the chosen option is not echoed on the button — and their dropdown appears below the button on click. At ≥1200px the title, the status capsules and these two buttons share one row.
+The task hall header follows the same rule and is one left-aligned row: 多选 → 任务排序 → 全局任务树深度 → the status capsules. The pressure state and the CPU/memory/disk reading share one capsule, and each of the three resource numbers colors itself by its own occupancy tier (≥75% warning, ≥90% danger) so the reading is not pinned to one color.「任务排序」and「全局任务树深度」are single borderless buttons carrying only their name and a chevron — the chosen option is not echoed on the button — and their dropdown appears below the button on click. At ≥1200px the title, the status capsules and these two buttons share one row.
 
 ### Responsive Bands
 

@@ -714,14 +714,14 @@ def test_task_status_helpers_ignore_legacy_continuation_metadata() -> None:
 
     assert result["recreatedRetry"] is False
     assert result["recreatedStatus"] == "failed"
-    assert result["recreatedLabel"] == "Failed"
+    assert result["recreatedLabel"] == "失败"
     assert result["recreatedSummary"] == ""
     # zip 归档/pin 机制已移除：终态任务卡片动作仅剩删除。
     assert result["recreatedActions"] == ["delete"]
     assert result["recreatedPrimary"] is None
     assert result["recreatedDetailLabel"] == "失败"
     assert result["retriedStatus"] == "in_progress"
-    assert result["retriedLabel"] == "Running"
+    assert result["retriedLabel"] == "运行"
     assert result["retriedSummary"] == ""
     assert result["retriedDetailLabel"] == "运行中"
     assert result["retriedPrimary"]["action"] == "pause"

@@ -5,7 +5,7 @@ const TASK_SUMMARY_IDLE_RECONCILE_MS = 15_000;
 
 
 function taskStatusLabel(task) {
-    return ({ in_progress: "Running", success: "Done", failed: "Failed", blocked: "Paused", unpassed: "\u672a\u901a\u8fc7", unknown: "Unknown" })[taskStatusKey(task)] || "Unknown";
+    return ({ in_progress: "\u8fd0\u884c", success: "\u6210\u529f", failed: "\u5931\u8d25", blocked: "\u6682\u505c", unpassed: "\u672a\u901a\u8fc7", unknown: "\u672a\u77e5" })[taskStatusKey(task)] || "\u672a\u77e5";
 }
 
 function statusBucketMatches(task, bucketKey) {
