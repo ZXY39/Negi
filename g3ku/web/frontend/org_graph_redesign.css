@@ -1600,33 +1600,5 @@
     transform: translateY(-50%);
 }
 
-/* 36. 任务 / Skill / Tool 的滚动条贴右边缘，静止 2 倍宽、悬停 4 倍宽 */
-[data-ui-version="v2"] .project-card-grid,
-[data-ui-version="v2"] .resource-list {
-    margin-right: calc(var(--ui-space-3) * -1);
-    padding-right: var(--ui-space-3);
-    /* 旧样式给全局设了 scrollbar-color，Chromium 会因此忽略 ::-webkit-scrollbar；
-       回到 initial 才能自定义宽度。 */
-    scrollbar-width: auto;
-    scrollbar-color: initial;
-}
-
-[data-ui-version="v2"] .project-card-grid::-webkit-scrollbar,
-[data-ui-version="v2"] .resource-list::-webkit-scrollbar {
-    width: 24px;
-}
-
-[data-ui-version="v2"] .project-card-grid::-webkit-scrollbar-thumb,
-[data-ui-version="v2"] .resource-list::-webkit-scrollbar-thumb {
-    border: 6px solid transparent;
-}
-
-[data-ui-version="v2"] .project-card-grid:hover::-webkit-scrollbar,
-[data-ui-version="v2"] .resource-list:hover::-webkit-scrollbar {
-    width: 48px;
-}
-
-[data-ui-version="v2"] .project-card-grid:hover::-webkit-scrollbar-thumb,
-[data-ui-version="v2"] .resource-list:hover::-webkit-scrollbar-thumb {
-    border-width: 12px;
-}
+/* 36. 页面滚动条统一走日志那一套：继承全局 scrollbar-width: thin 与
+   --scrollbar-thumb / transparent 轨道，不做逐页覆盖，也不随悬停变化。 */
