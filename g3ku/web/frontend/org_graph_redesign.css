@@ -306,7 +306,6 @@
     background: var(--ui-brand-soft);
     color: var(--ui-brand);
     font-weight: 700;
-    box-shadow: inset 0 -2px 0 var(--ui-brand);
 }
 
 /* 紧凑模式：只留图标，审计角标挂在图标右上角 */
@@ -811,10 +810,9 @@
     transform: none;
 }
 
-/* 选中态只画在卡片这一层：内层按钮再画一遍就是框中框错位 */
+/* 选中态只画在卡片这一层：不再叠加侧边粗线，也不在内层按钮重复描边 */
 [data-ui-version="v2"] .ceo-session-card.is-active {
     background: var(--ui-brand-soft);
-    box-shadow: inset 3px 0 0 var(--ui-brand);
 }
 
 [data-ui-version="v2"] .ceo-session-title {
@@ -962,12 +960,6 @@
     grid-column: 1 / -1;
     width: 100%;
     margin: 0;
-    border-left: 3px solid var(--ui-brand);
-}
-
-[data-ui-version="v2"] .model-retry-toast[aria-live],
-[data-ui-version="v2"] .ceo-context-load-notice.is-error {
-    border-left-color: var(--ui-warning);
 }
 
 /* 18. CEO 页响应式降级（只用白名单断点） */
@@ -1124,24 +1116,6 @@
 [data-ui-version="v2"] .project-card.is-selected,
 [data-ui-version="v2"] .project-card.is-multi-mode {
     border-color: color-mix(in srgb, var(--ui-brand) 45%, transparent);
-}
-
-[data-ui-version="v2"] .project-card:has(.status-badge[data-status="failed"]),
-[data-ui-version="v2"] .project-card:has(.status-badge[data-status="unpassed"]) {
-    box-shadow: inset 3px 0 0 var(--ui-danger);
-}
-
-[data-ui-version="v2"] .project-card:has(.status-badge[data-status="unpassed"]) {
-    box-shadow: inset 3px 0 0 var(--ui-warning);
-}
-
-[data-ui-version="v2"] .project-card:has(.status-badge[data-status="completed"]) {
-    box-shadow: inset 3px 0 0 var(--ui-success);
-}
-
-[data-ui-version="v2"] .project-card:has(.status-badge[data-status="paused"]),
-[data-ui-version="v2"] .project-card:has(.status-badge[data-status="queued"]) {
-    box-shadow: inset 3px 0 0 var(--ui-border-strong);
 }
 
 [data-ui-version="v2"] .pc-title {
@@ -1602,3 +1576,122 @@
 
 /* 36. 页面滚动条统一走日志那一套：继承全局 scrollbar-width: thin 与
    --scrollbar-thumb / transparent 轨道，不做逐页覆盖，也不随悬停变化。 */
+
+/* 37. 头部控件统一尺寸：按钮、搜索框、筛选下拉、排序与深度同一高度同一圆角 */
+[data-ui-version="v2"] .content-header {
+    min-height: 60px;
+    padding-top: var(--ui-space-2);
+    padding-bottom: var(--ui-space-2);
+}
+
+[data-ui-version="v2"] .content-header .toolbar-btn,
+[data-ui-version="v2"] .content-header .resource-search,
+[data-ui-version="v2"] .content-header .task-depth-setting-main,
+[data-ui-version="v2"] #view-skills .resource-select-trigger,
+[data-ui-version="v2"] #view-tools .resource-select-trigger {
+    height: 42px;
+    min-height: 42px;
+    padding: 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    color: var(--ui-text);
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .content-header .toolbar-btn:hover:not(:disabled),
+[data-ui-version="v2"] #view-skills .resource-select-trigger:hover,
+[data-ui-version="v2"] #view-tools .resource-select-trigger:hover {
+    background: var(--ui-neutral-soft);
+    border-color: var(--ui-border-strong);
+}
+
+[data-ui-version="v2"] .content-header .resource-search {
+    width: clamp(220px, 22vw, 320px);
+    min-width: 220px;
+}
+
+[data-ui-version="v2"] #view-skills .resource-select-shell,
+[data-ui-version="v2"] #view-tools .resource-select-shell {
+    width: auto;
+    min-width: 112px;
+}
+
+[data-ui-version="v2"] #view-skills .resource-select-trigger,
+[data-ui-version="v2"] #view-tools .resource-select-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ui-space-2);
+    width: 100%;
+}
+
+/* 38. 记忆管理：列标题上移、去掉列说明，操作组靠左 */
+[data-ui-version="v2"] .memory-layout {
+    padding-top: var(--ui-space-3);
+}
+
+[data-ui-version="v2"] .memory-column .panel-header {
+    padding: var(--ui-space-2) var(--ui-space-1);
+}
+
+[data-ui-version="v2"] .memory-column .panel-header .subtitle {
+    display: none;
+}
+
+[data-ui-version="v2"] #view-memory .resource-header-actions {
+    position: absolute;
+    left: var(--ui-space-6);
+    top: 50%;
+    transform: translateY(-50%);
+    margin-left: 0;
+}
+
+[data-ui-version="v2"] #view-memory #memory-refresh-btn {
+    position: static;
+    transform: none;
+}
+
+/* 39. 会话面板折叠态：展开按钮与下方控件同宽，箭头居中 */
+[data-ui-version="v2"] .ceo-session-panel-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 42px;
+    min-height: 42px;
+    padding: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-toggle {
+    width: 42px;
+}
+
+[data-ui-version="v2"] .ceo-new-session-btn {
+    width: 100%;
+    height: 42px;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+/* 40. 卡片网格间距：行距加倍、列距加一半 */
+[data-ui-version="v2"] .project-card-grid,
+[data-ui-version="v2"] .resource-list {
+    row-gap: var(--ui-space-6);
+    column-gap: 18px;
+}
+
+/* 41. 状态类侧边粗线已在各处删除；这里只兜底旧样式里同类的强调条。
+   2px 的 .interaction-step / .ceo-stage-preamble / blockquote 是内容引用条，
+   不是状态强调，保留。 */
+[data-ui-version="v2"] .notice-item {
+    border-left: 0;
+}
