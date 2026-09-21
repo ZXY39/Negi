@@ -8384,6 +8384,17 @@ textarea {
     white-space: nowrap;
 }
 
+.pc-field-label--end {
+    margin-left: 4px;
+}
+
+.pc-elapsed {
+    margin-left: auto;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
 .pc-metrics {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -10338,6 +10349,7 @@ textarea {
     align-items: center;
     gap: var(--space-2);
     min-width: 0;
+    flex-wrap: wrap;
 }
 
 .memory-card-minimal-status .status-badge {
@@ -10347,6 +10359,44 @@ textarea {
     min-height: 24px;
     padding: 0.125rem 0.75rem;
     line-height: 1.25;
+}
+
+/* 已处理批次外层：逐笔操作各占一枚着色图标，配色与详情变更块 .memory-change-type 一致 */
+.memory-op-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 24px;
+    padding: 0.125rem 0.625rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.25;
+    white-space: nowrap;
+    border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    background: color-mix(in srgb, currentColor 9%, var(--bg-panel));
+}
+
+.memory-op-chip svg {
+    width: 13px;
+    height: 13px;
+    stroke-width: 2.4;
+}
+
+.memory-op-chip[data-op="add"] {
+    color: #047857;
+}
+
+.memory-op-chip[data-op="rewrite"] {
+    color: #b45309;
+}
+
+.memory-op-chip[data-op="delete"] {
+    color: #b91c1c;
+}
+
+.memory-op-chip[data-op="note_upsert"] {
+    color: #6d28d9;
 }
 
 .memory-card-minimal-trailing {

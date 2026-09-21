@@ -8566,12 +8566,12 @@ function syncDetailSaveButton(kind) {
     const busy = isSkill ? S.skillBusy : S.toolBusy;
 
     if (button) {
-        button.textContent = busy ? "Saving..." : dirty ? "Save changes" : "Save";
+        button.textContent = busy ? "保存中…" : "保存";
         button.disabled = !!busy || !dirty;
     }
     if (hint) {
         hint.classList.toggle("is-dirty", dirty);
-        hint.textContent = dirty ? (busy ? "正在自动保存..." : "变更已暂存，将自动保存。") : "";
+        hint.textContent = dirty ? (busy ? "正在保存…" : "有未保存的修改，请点击「保存」。") : "";
         hint.hidden = !dirty;
     }
 }
@@ -11418,12 +11418,34 @@ function memoryFailedAutoRetryHint(item) {
         : "仅支持手动重试";
 }
 
-function memoryProcessedWriteModeLabel(item) {
-    const normalized = String(item?.write_mode || "").trim().toLowerCase();
-    if (normalized === "rewrite") return "修改";
-    if (normalized === "mixed") return "混合变更";
-    if (normalized === "add") return "增加";
-    return "";
+const MEMORY_OP_KINDS = {
+    add: { label: "增加", icon: "plus" },
+    rewrite: { label: "修改", icon: "pencil" },
+    delete: { label: "删除", icon: "trash-2" },
+    note_upsert: { label: "更新 Note", icon: "notebook-pen" },
+};
+
+// write_mode 把删除并进 rewrite 桶、把多种操作压成 mixed；只有持久化的 changes
+// 逐笔记录了操作类型与顺序，因此它是显示的第一来源。
+function memoryProcessedOpKinds(item) {
+    if (memoryProcessedIsNoChange(item)) return [];
+    const kinds = [];
+    const pushKind = (kind) => {
+        if (MEMORY_OP_KINDS[kind] && !kinds.includes(kind)) kinds.push(kind);
+    };
+    for (const change of memoryProcessedStructuredChanges(item)) {
+        pushKind(String(change?.type || "").trim().toLowerCase());
+    }
+    if (kinds.length) return kinds;
+    const requestOps = [item?.source_op, item?.op]
+        .map((value) => String(value || "").trim().toLowerCase());
+    if (requestOps.includes("delete")) return ["delete"];
+    const writeMode = String(item?.write_mode || "").trim().toLowerCase();
+    if (writeMode === "add") return ["add"];
+    if (writeMode === "rewrite") return ["rewrite"];
+    if (writeMode === "mixed") return ["add", "rewrite"];
+    if (requestOps.includes("write")) return ["add"];
+    return [];
 }
 
 function memoryProcessedNoopReason(item) {
@@ -11458,18 +11480,8 @@ function memoryProcessedBadgeStatus(item) {
 
 function memoryProcessedOpLabel(item) {
     if (memoryProcessedIsNoChange(item)) return "无变更";
-    const writeModeLabel = memoryProcessedWriteModeLabel(item);
-    if (writeModeLabel) return writeModeLabel;
-    const opLabels = [item?.source_op, item?.op]
-        .map((value) => String(value || "").trim().toLowerCase())
-        .map((value) => {
-            if (value === "write") return "增加";
-            if (value === "delete") return "删除";
-            return "";
-        })
-        .filter(Boolean);
-    const uniqueLabels = [...new Set(opLabels)];
-    if (uniqueLabels.length) return uniqueLabels.join(" / ");
+    const kinds = memoryProcessedOpKinds(item);
+    if (kinds.length) return kinds.map((kind) => MEMORY_OP_KINDS[kind].label).join(" / ");
     return memoryProcessedStatusLabel(item);
 }
 
@@ -13451,17 +13463,28 @@ function renderMemoryQueueCard(item) {
     `;
 }
 
+function renderMemoryOpChips(kinds) {
+    return kinds.map((kind) => {
+        const { label, icon } = MEMORY_OP_KINDS[kind];
+        return `<span class="memory-op-chip" data-op="${esc(kind)}" title="${esc(label)}"><i data-lucide="${icon}" aria-hidden="true"></i>${esc(label)}</span>`;
+    }).join("");
+}
+
 function renderMemoryProcessedCard(item) {
     const batchId = String(item?.batch_id || "").trim();
     const badgeStatus = memoryProcessedBadgeStatus(item);
     const statusLabel = memoryProcessedOpLabel(item);
+    const opKinds = memoryProcessedOpKinds(item);
     const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
+    const statusSlot = opKinds.length
+        ? renderMemoryOpChips(opKinds)
+        : `<span class="status-badge" data-status="${badgeStatus}">${esc(statusLabel)}</span>`;
     return `
         <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="打开已处理批次详情">
             <div class="memory-card-summary">
                 <div class="memory-card-minimal-row">
                     <div class="memory-card-minimal-status">
-                        <span class="status-badge" data-status="${badgeStatus}">${esc(statusLabel)}</span>
+                        ${statusSlot}
                     </div>
                     <div class="memory-card-minimal-trailing">
                         <span class="memory-card-time">${esc(processedAt || "-")}</span>

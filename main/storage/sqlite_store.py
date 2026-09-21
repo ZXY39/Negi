@@ -656,6 +656,7 @@ class SQLiteTaskStore:
             "json_extract(payload_json, '$.is_unread') AS is_unread, "
             "json_extract(payload_json, '$.is_paused') AS is_paused, "
             "json_extract(payload_json, '$.created_at') AS created_at, "
+            "json_extract(payload_json, '$.finished_at') AS finished_at, "
             "json_extract(payload_json, '$.max_depth') AS max_depth, "
             "json_extract(payload_json, '$.token_usage') AS token_usage_json, "
             "json_extract(payload_json, '$.metadata') AS metadata_json "
@@ -681,6 +682,7 @@ class SQLiteTaskStore:
                 'is_unread': True if raw_unread is None else bool(raw_unread),
                 'is_paused': bool(row['is_paused']),
                 'created_at': str(row['created_at'] or ''),
+                'finished_at': str(row['finished_at'] or ''),
                 'max_depth': int(row['max_depth'] or 0),
                 'token_usage': json.loads(row['token_usage_json']) if row['token_usage_json'] else {},
                 'metadata': json.loads(row['metadata_json']) if row['metadata_json'] else {},

@@ -132,8 +132,11 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     llm_js = (REPO_ROOT / "g3ku/web/frontend/org_graph_llm.js").read_text(encoding="utf-8")
     assert "当前首选" not in app_js
     assert "当前首选" not in llm_js
-    assert "skill-modal-save" not in resources_js
-    assert "tool-modal-save" not in resources_js
+    assert "skill-modal-save" in resources_js
+    assert "tool-modal-save" in resources_js
+    assert "queueSkillAutosave(1200)" not in resources_js
+    assert "queueToolAutosave(120)" not in resources_js
+    assert "将自动保存" not in app_js
     assert "resource-select-option-check" not in app_js
     assert '(isCoreTool && agentVisible && role === "ceo")' not in resources_js
     assert '当前 action 对所有角色禁用。' in resources_js

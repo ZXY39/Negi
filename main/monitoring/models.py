@@ -183,6 +183,8 @@ class TaskListItem(Model):
     is_paused: bool = False
     created_at: str = ''
     updated_at: str = ''
+    # 任务终态时间：仅 success/failed 时有值，供任务卡片「结束」行与总耗时定格。
+    finished_at: str = ''
     max_depth: int = 0
     token_usage: TokenUsageSummary = Field(default_factory=TokenUsageSummary)
     # 磁盘治理（P1）：任务磁盘占用（增量记账 + 每小时/终态对账，展示允许 ≤1h 延迟）。

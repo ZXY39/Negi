@@ -278,6 +278,7 @@ function renderSkillDetail() {
                     <p class="subtitle">${esc(S.selectedSkill.skill_id)}</p>
                 </div>
                 <div class="detail-modal-actions">
+                    <button type="button" class="toolbar-btn" id="skill-modal-save">保存</button>
                     <button type="button" class="toolbar-btn ghost" id="skill-modal-close" data-modal-close>关闭</button>
                 </div>
             </div>
@@ -318,17 +319,16 @@ function renderSkillDetail() {
         </article>`;
     dockResourceStatusBadge(U.skillDetail);
     U.skillDetail.querySelector("#skill-modal-close")?.addEventListener("click", clearSkillSelection);
+    U.skillDetail.querySelector("#skill-modal-save")?.addEventListener("click", () => void saveSkill());
     U.skillDetail.querySelector("#skill-enable-btn")?.addEventListener("click", () => {
         S.selectedSkill.enabled = true;
         setSkillDirty(true);
         renderSkillDetail();
-        queueSkillAutosave(120);
     });
     U.skillDetail.querySelector("#skill-disable-btn")?.addEventListener("click", () => {
         S.selectedSkill.enabled = false;
         setSkillDirty(true);
         renderSkillDetail();
-        queueSkillAutosave(120);
     });
     U.skillDetail.querySelector("#skill-delete-btn")?.addEventListener("click", () => void requestDeleteSkill());
     U.skillDetail.querySelectorAll(".skill-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
@@ -338,7 +338,6 @@ function renderSkillDetail() {
         S.selectedSkill.allowed_roles = [...nextRoles];
         setSkillDirty(true);
         renderSkillDetail();
-        queueSkillAutosave(120);
     }));
     U.skillDetail.querySelectorAll(".skill-file").forEach((button) => button.addEventListener("click", () => {
         const nextFileKey = String(button.dataset.file || "").trim();
@@ -356,7 +355,6 @@ function renderSkillDetail() {
         if (!S.selectedSkillFile) return;
         S.skillContents[S.selectedSkillFile] = e.target.value;
         setSkillDirty(true);
-        queueSkillAutosave(1200);
     });
     renderSkillActions();
 }
@@ -610,6 +608,7 @@ function renderToolDetail() {
                     <p class="subtitle">${esc(S.selectedTool.tool_id)}</p>
                 </div>
                 <div class="detail-modal-actions">
+                    <button type="button" class="toolbar-btn" id="tool-modal-save">保存</button>
                     <button type="button" class="toolbar-btn ghost" id="tool-modal-close" data-modal-close>关闭</button>
                 </div>
             </div>
@@ -732,17 +731,16 @@ function renderToolDetail() {
     }
     dockResourceStatusBadge(U.toolDetail);
     U.toolDetail.querySelector("#tool-modal-close")?.addEventListener("click", clearToolSelection);
+    U.toolDetail.querySelector("#tool-modal-save")?.addEventListener("click", () => void saveTool());
     U.toolDetail.querySelector("#tool-enable-btn")?.addEventListener("click", () => {
         S.selectedTool.enabled = true;
         setToolDirty(true);
         renderToolDetail();
-        queueToolAutosave(120);
     });
     U.toolDetail.querySelector("#tool-disable-btn")?.addEventListener("click", () => {
         S.selectedTool.enabled = false;
         setToolDirty(true);
         renderToolDetail();
-        queueToolAutosave(120);
     });
     U.toolDetail.querySelector("#tool-delete-btn")?.addEventListener("click", () => void requestDeleteTool());
     U.toolDetail.querySelectorAll(".exec-mode-input").forEach((radio) => radio.addEventListener("change", (e) => {
@@ -751,7 +749,6 @@ function renderToolDetail() {
         applyExecToolExecutionMode(S.selectedTool, nextMode);
         setToolDirty(true);
         renderToolDetail();
-        queueToolAutosave(120);
     }));
     U.toolDetail.querySelectorAll(".tool-role").forEach((checkbox) => checkbox.addEventListener("change", (e) => {
         const action = S.selectedTool.actions.find((item) => item.action_id === e.target.dataset.action);
@@ -762,7 +759,6 @@ function renderToolDetail() {
         action.allowed_roles = [...set];
         e.target.closest(".role-toggle")?.classList.toggle("checked", e.target.checked);
         setToolDirty(true);
-        queueToolAutosave(120);
     }));
     renderToolActions();
 }
@@ -951,7 +947,6 @@ async function refreshSkills() {
         if (selectedId && S.skills.some((skill) => skill.skill_id === selectedId)) {
             await openSkill(selectedId);
         }
-        addNotice({ kind: "resource_refreshed", title: "Skills refreshed", text: "Resource registry reloaded." });
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Skill refresh failed", text: e.message || "Unknown error" });
     } finally {
@@ -970,7 +965,6 @@ async function refreshTools() {
         if (selectedId && S.tools.some((tool) => tool.tool_id === selectedId)) {
             await openTool(selectedId);
         }
-        addNotice({ kind: "resource_refreshed", title: "Tools refreshed", text: "Resource registry reloaded." });
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Tool refresh failed", text: e.message || "Unknown error" });
     } finally {

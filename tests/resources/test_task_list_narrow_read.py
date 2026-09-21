@@ -63,8 +63,8 @@ def _rich_task(task_id: str, session_id: str, status: str, **overrides) -> TaskR
 
 def _seed(service: MainRuntimeService) -> None:
     service.store.upsert_task(_rich_task('task:a1', 'web:one', 'in_progress'))
-    service.store.upsert_task(_rich_task('task:a2', 'web:one', 'failed', is_unread=False, is_paused=False))
-    service.store.upsert_task(_rich_task('task:b1', 'web:two', 'success', is_paused=False))
+    service.store.upsert_task(_rich_task('task:a2', 'web:one', 'failed', is_unread=False, is_paused=False, finished_at='2026-09-14T10:00:02+08:00'))
+    service.store.upsert_task(_rich_task('task:b1', 'web:two', 'success', is_paused=False, finished_at='2026-09-14T10:00:03+08:00'))
     service.store.upsert_task(_rich_task('task:b2', 'web:two', 'in_progress', metadata={}, token_usage=TokenUsageSummary()))
     service.store.upsert_task_disk_usage('task:a1', 12345)
 
@@ -96,6 +96,10 @@ def test_narrow_read_matches_full_parse_global(tmp_path) -> None:
     assert by_id['task:a1'].final_acceptance.get('status') == 'passed'
     assert by_id['task:a1'].token_usage.input_tokens == 111
     assert by_id['task:a1'].max_depth == 3
+    # finished_at 窄读必须与整包路径一致：终态带值、运行中为空。
+    assert by_id['task:a1'].finished_at == ''
+    assert by_id['task:a2'].finished_at == '2026-09-14T10:00:02+08:00'
+    assert by_id['task:b1'].finished_at == '2026-09-14T10:00:03+08:00'
 
 
 def test_narrow_read_matches_full_parse_session_and_scopes(tmp_path) -> None:
