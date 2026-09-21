@@ -314,7 +314,7 @@
 /* 紧凑模式：只留图标，审计角标挂在图标右上角 */
 [data-ui-version="v2"] .sidebar.is-collapsed .brand-text,
 [data-ui-version="v2"] .sidebar.is-collapsed .nav-item > span:not(.nav-badge),
-[data-ui-version="v2"] .sidebar.is-collapsed .exit-label {
+[data-ui-version="v2"] .sidebar.is-collapsed .settings-label {
     display: none;
 }
 
@@ -355,7 +355,7 @@
     align-self: center;
 }
 
-[data-ui-version="v2"] #project-exit-btn {
+[data-ui-version="v2"] #project-settings-btn {
     width: auto;
     height: 36px;
     padding: 0 var(--ui-space-3);
@@ -363,25 +363,25 @@
     background: var(--ui-bg-surface);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
-    color: var(--ui-danger);
+    color: var(--ui-text);
     font-size: 13px;
     font-weight: 600;
     box-shadow: none;
 }
 
-[data-ui-version="v2"] #project-exit-btn:hover:not(:disabled) {
-    background: var(--ui-danger-soft);
-    border-color: color-mix(in srgb, var(--ui-danger) 40%, transparent);
-    color: var(--ui-danger);
+[data-ui-version="v2"] #project-settings-btn:hover:not(:disabled) {
+    background: var(--ui-neutral-soft);
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
 }
 
-[data-ui-version="v2"] #project-exit-btn svg {
+[data-ui-version="v2"] #project-settings-btn svg {
     width: 16px;
     height: 16px;
     flex: 0 0 auto;
 }
 
-[data-ui-version="v2"] .sidebar.is-collapsed #project-exit-btn {
+[data-ui-version="v2"] .sidebar.is-collapsed #project-settings-btn {
     width: 36px;
     padding: 0;
 }
@@ -1987,4 +1987,40 @@
 
 [data-ui-version="v2"] .ceo-session-list.is-drop-zone {
     user-select: none;
+}
+
+/* 49. 设置弹窗：沿用 confirm 皮肤，只补分节与字段排布；分节不画第二层盒子 */
+[data-ui-version="v2"] .project-settings-dialog {
+    width: min(520px, calc(100vw - 48px));
+}
+
+[data-ui-version="v2"] .project-settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-5);
+    max-height: min(560px, calc(100vh - 200px));
+    padding: var(--ui-space-2) var(--ui-space-6) var(--ui-space-4);
+    overflow-y: auto;
+}
+
+[data-ui-version="v2"] .project-settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-3);
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+
+[data-ui-version="v2"] .project-settings-section h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ui-text);
+}
+
+[data-ui-version="v2"] .project-settings-actions {
+    display: flex;
+    gap: var(--ui-space-3);
 }

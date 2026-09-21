@@ -246,7 +246,17 @@ Leader（CEO/frontdoor）解析本轮模型引用时，先读会话元数据的 
 Container deployment introduces a second bootstrap path besides the interactive unlock UI.
 
 - `G3KU_BOOTSTRAP_PASSWORD` may be provided at process start so web and worker containers can unlock the existing project automatically.
-- `G3KU_BOOTSTRAP_MASTER_KEY` still exists, but it remains the internal fast path for a web-managed child worker rather than the preferred Compose/operator contract.
+- `G3KU_BOOTSTRAP_MASTER_KEY` is the fast path: it activates the project without any password. The web process hands it to its managed child worker, and the browser's 自动解锁 switch also writes it into its own process environment.
+
+Startup unlock order is fixed: already unlocked → `G3KU_BOOTSTRAP_MASTER_KEY` → the auto-unlock file → `G3KU_BOOTSTRAP_PASSWORD`. `auto_unlock_from_env()` (`g3ku/deployment/runtime_startup.py`) is the single hook every entrypoint calls.
+
+The browser side of the same contract is the project settings dialog, served by `main/api/bootstrap_rest.py`:
+
+- `POST /api/bootstrap/change-password` re-wraps the existing master key under a new password. It requires an unlocked process plus the current password, and it never rotates the key: sessions, the secret overlay and an enabled auto-unlock keep working, while the old password stops being accepted.
+- `POST /api/bootstrap/auto-unlock` with `{enabled}` writes or removes `.g3ku/llm-config/auto-unlock.key` (the master key itself, mode 0600) together with the `G3KU_BOOTSTRAP_MASTER_KEY` environment variable. `GET /api/bootstrap/status` reports the result as `auto_unlock`, which is what renders the checkbox state. Enabling requires an unlocked process; disabling never does, so the credential can always be revoked.
+- `POST /api/bootstrap/lock` clears only the web process's in-memory master key. Background tasks, sessions and the managed worker keep running; only the browser falls back to the unlock screen. It is not the exit path — `POST /api/bootstrap/exit` is the one that pauses running work and shuts the server down.
+
+Treat the auto-unlock file as a bearer credential: whoever can read `.g3ku/llm-config/auto-unlock.key` can unlock the project without a password. That is why it is opt-in, why unchecking deletes both the file and the environment variable, and why a shared `.g3ku/` volume must stay inside the trust boundary of the master key.
 
 Maintainers should keep the persistence boundary straight:
 

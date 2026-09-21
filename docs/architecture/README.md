@@ -48,6 +48,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务树节点徽标与真实执行不符（未派发的检验节点显示「检验中」、被检验的执行节点跟着显示「检验中」、非终态节点出现 `IN_PROGRESS` 原文、检验节点不见了）→ `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」+「Task Message Distribution UI Contract」
 - 任务树刷新时轮次下拉框自己收起/跳回默认轮次 → `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」（重绘后的稳定身份与展开态恢复）
 - 本地会话列表拖动后的顺序被打回原样、或换浏览器顺序不一致 → `web-and-admin.md`「CEO Session List Interaction Contract」（手动顺序只存前端 localStorage）
+- 改了密码旧密码还能用、勾了自动解锁重启仍要输密码、或「锁定项目」后界面仍可读数 → `config-and-models.md`「Deployment Unlock Contract」（改密只换信封不换钥匙、解锁顺序 env→本地密钥文件→口令、锁定只清 web 进程内存主密钥）
 - 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `runtime-overview.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）
 - 恢复后节点上下文突然只剩几条消息、`task_model_calls` 里 `request_seed_source` 出现 `fallback_seed_*`、帧 `messages_ref` 为空 → `runtime-overview.md`「任务侧」（帧写入的 messages_ref 保留规则）+ `context-and-cache-troubleshooting.md`「append-only 规则」
 - 磁盘满（Errno 28 / SQLITE_FULL）、0 字节错误日志、节点连锁 error-pause、artifact 变成 .gz、手动删除任务后产出在 deliverables/、任务大厅按大小排序定位大任务、managed-worker.log 轮转、runtime.sqlite3 收缩、task_events 表静默零写入 → `operations-and-maintenance.md`「磁盘满」+ `runtime-overview.md`「磁盘写保护与治理」+ `web-and-admin.md`（治理 UI 与大小/排序契约）

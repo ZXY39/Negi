@@ -76,6 +76,9 @@ def auto_unlock_from_env(
         return "already_unlocked"
 
     master_key = str(os.getenv(BOOTSTRAP_MASTER_KEY_ENV, "") or "").strip()
+    if not master_key:
+        # 操作者在设置里勾过「记住密码自动解锁」时，钥匙落在 .g3ku/llm-config 里。
+        master_key = str(security.auto_unlock_master_key() or "").strip()
     if master_key:
         security.activate_with_master_key(master_key=master_key)
         return "master_key"

@@ -228,9 +228,16 @@ async def bootstrap_setup(payload: dict = Body(...)):
 @router.post("/bootstrap/unlock")
 async def bootstrap_unlock(payload: dict = Body(...)):
     password = str(payload.get("password") or "")
+    remember = bool(
+        payload.get("remember")
+        or payload.get("save_auto_unlock")
+        or payload.get("saveAutoUnlock")
+    )
     service = _service()
     try:
         service.unlock(password=password)
+        if remember:
+            service.set_auto_unlock(enabled=True)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
@@ -238,6 +245,39 @@ async def bootstrap_unlock(payload: dict = Body(...)):
     except Exception as exc:
         logger.warning("bootstrap unlock succeeded but runtime startup is deferred: {}", exc)
     return {"ok": True, "item": _status_payload(include_preview=False)}
+
+
+@router.post("/bootstrap/change-password")
+async def bootstrap_change_password(payload: dict = Body(...)):
+    current_password = str(payload.get("current_password") or payload.get("currentPassword") or "")
+    new_password = str(payload.get("new_password") or payload.get("newPassword") or "")
+    password_confirm = str(payload.get("password_confirm") or payload.get("passwordConfirm") or "")
+    if new_password != password_confirm:
+        raise HTTPException(status_code=400, detail="password_confirmation_mismatch")
+    try:
+        item = _service().change_password(current_password=current_password, new_password=new_password)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "item": item}
+
+
+@router.post("/bootstrap/auto-unlock")
+async def bootstrap_auto_unlock(payload: dict | None = Body(default=None)):
+    body = payload if isinstance(payload, dict) else {}
+    if "enabled" not in body:
+        raise HTTPException(status_code=400, detail="enabled_required")
+    try:
+        item = _service().set_auto_unlock(enabled=bool(body.get("enabled")))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "item": item}
+
+
+@router.post("/bootstrap/lock")
+async def bootstrap_lock():
+    # 只清掉本进程的内存主密钥：后台任务、会话与 worker 继续跑。
+    _assert_unlocked()
+    return {"ok": True, "item": _service().lock()}
 
 
 @router.get("/bootstrap/exit-check")

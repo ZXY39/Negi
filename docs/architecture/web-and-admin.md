@@ -157,7 +157,9 @@ The browser shell renders one visual system per theme. Theme and layout are fron
 
 ### Navigation Bar And Compact Mode
 
-Primary navigation is a full-width top bar, 56px tall: brand plus the collapse toggle at the left, the eight view buttons in a row, and the theme toggle and 退出项目 at the right. Below 900px the bar scrolls horizontally; there is no drawer layer.
+Primary navigation is a full-width top bar, 56px tall: brand plus the collapse toggle at the left, the eight view buttons in a row, and the theme toggle and 设置 at the right. Below 900px the bar scrolls horizontally; there is no drawer layer.
+
+设置 opens a centered dialog (`#project-settings-backdrop` / `#project-settings-dialog`, reusing the confirm-dialog skin like the exec-whitelist dialog) holding 修改密码 (当前密码 / 新密码 / 确认新密码), the 自动解锁 checkbox, and 锁定项目 / 退出项目 buttons. Escape and a backdrop click close it, and closing clears the three password inputs. The boot screen is deliberately minimal: in `locked` mode it shows only the 请输入密码 field plus a 记住密码自动解锁 checkbox whose state comes from `status.auto_unlock`; the explanatory subtitle is hidden there and the `setup` flow keeps its confirm-password and legacy-reset controls. Endpoint paths, credential storage and the lock-vs-exit boundary are owned by `config-and-models.md`「Deployment Unlock Contract」.
 
 Two collapse systems exist and must not be merged:
 

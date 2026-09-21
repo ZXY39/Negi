@@ -35,6 +35,14 @@ class _SecurityStub:
     def status(self) -> dict[str, str]:
         return {"mode": "locked"}
 
+    def auto_unlock_master_key(self) -> str:
+        return ""
+
+    def activate_with_master_key(self, *, master_key: str) -> dict[str, str]:
+        self.calls.append(("master_key", master_key))
+        self._unlocked = True
+        return {"mode": "unlocked"}
+
     def unlock(self, *, password: str) -> dict[str, str]:
         self.calls.append(("password", password))
         self._unlocked = True

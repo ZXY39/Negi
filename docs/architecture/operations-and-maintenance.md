@@ -569,6 +569,7 @@ Do not treat only `.g3ku/` as sufficient persistence. Detached task temp files l
 Deployment unlock has an operator-facing env contract:
 
 - `G3KU_BOOTSTRAP_PASSWORD` allows a locked project to auto-unlock at process start
+- `.g3ku/llm-config/auto-unlock.key` (written when the operator checks 记住密码自动解锁 in the web 设置 dialog) unlocks the project at start without any env var; it holds the master key, so treat it as a password
 - `G3KU_INTERNAL_CALLBACK_URL` allows the worker container to call back into the web container over the Compose network instead of assuming `127.0.0.1`
 - The official container image also pins text/runtime locale explicitly with `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, and `PYTHONIOENCODING=utf-8`. If container-only `exec`, validation-command, or Python traceback output shows mojibake, verify those three env vars before blaming prompt assembly or websocket rendering.
 

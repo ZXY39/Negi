@@ -666,7 +666,17 @@ const U = {
     confirmCheckboxDetails: document.getElementById("confirm-checkbox-details"),
     confirmCancel: document.getElementById("confirm-cancel"),
     confirmAccept: document.getElementById("confirm-accept"),
-    projectExit: document.getElementById("project-exit-btn"),
+    projectSettings: document.getElementById("project-settings-btn"),
+    projectSettingsBackdrop: document.getElementById("project-settings-backdrop"),
+    projectSettingsDialog: document.getElementById("project-settings-dialog"),
+    projectSettingsClose: document.getElementById("project-settings-close-btn"),
+    projectSettingsCurrentPassword: document.getElementById("project-settings-current-password"),
+    projectSettingsNewPassword: document.getElementById("project-settings-new-password"),
+    projectSettingsNewPasswordConfirm: document.getElementById("project-settings-new-password-confirm"),
+    projectSettingsChangePassword: document.getElementById("project-settings-change-password-btn"),
+    projectSettingsAutoUnlock: document.getElementById("project-settings-auto-unlock"),
+    projectSettingsLock: document.getElementById("project-settings-lock-btn"),
+    projectSettingsExit: document.getElementById("project-settings-exit-btn"),
 };
 
 const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -9233,7 +9243,7 @@ async function requestProjectExit() {
             label: "暂停正在进行的所有对话和任务",
             hint: summary,
         } : null,
-        returnFocus: U.projectExit,
+        returnFocus: U.projectSettings,
         onConfirm: async ({ checked }) => {
             if (hasRunning && !checked) {
                 throw new Error("请先勾选“暂停正在进行的所有对话和任务”。");
@@ -9242,6 +9252,129 @@ async function requestProjectExit() {
             finalizeProjectExit();
         },
     });
+}
+
+const PROJECT_SETTINGS_ERROR_TEXT = {
+    "invalid password": "当前密码不正确",
+    "password is required": "请输入新密码",
+    "password_confirmation_mismatch": "两次输入的新密码不一致",
+    "project is locked": "项目已锁定，请先解锁",
+    "secret key is not configured": "项目还没有设置密码",
+};
+
+function projectSettingsErrorText(error) {
+    const key = String(error?.message || error?.code || "").trim();
+    return PROJECT_SETTINGS_ERROR_TEXT[key] || key || "操作失败";
+}
+
+function isProjectSettingsOpen() {
+    return !!U.projectSettingsBackdrop && !U.projectSettingsBackdrop.hidden;
+}
+
+function setProjectSettingsBusy(busy) {
+    const disabled = Boolean(busy);
+    [U.projectSettingsChangePassword, U.projectSettingsAutoUnlock, U.projectSettingsLock, U.projectSettingsExit]
+        .forEach((element) => {
+            if (element) element.disabled = disabled;
+        });
+}
+
+function clearProjectSettingsPasswords() {
+    [U.projectSettingsCurrentPassword, U.projectSettingsNewPassword, U.projectSettingsNewPasswordConfirm]
+        .forEach((element) => {
+            if (element) element.value = "";
+        });
+}
+
+function openProjectSettingsDialog() {
+    if (!U.projectSettingsBackdrop) return;
+    U.projectSettingsBackdrop.hidden = false;
+    U.projectSettingsBackdrop.classList.add("is-open");
+    U.projectSettings?.setAttribute("aria-expanded", "true");
+    void syncProjectSettingsAutoUnlock();
+    window.requestAnimationFrame(() => U.projectSettingsClose?.focus?.());
+}
+
+function closeProjectSettingsDialog() {
+    if (!U.projectSettingsBackdrop) return;
+    U.projectSettingsBackdrop.hidden = true;
+    U.projectSettingsBackdrop.classList.remove("is-open");
+    U.projectSettings?.setAttribute("aria-expanded", "false");
+    clearProjectSettingsPasswords();
+}
+
+async function syncProjectSettingsAutoUnlock() {
+    try {
+        const status = await ApiClient.getBootstrapStatus();
+        if (U.projectSettingsAutoUnlock) {
+            U.projectSettingsAutoUnlock.checked = Boolean(status?.auto_unlock);
+        }
+    } catch (error) {
+        // 状态读不到时保持勾选框原样，让操作者自己决定。
+    }
+}
+
+async function submitProjectPasswordChange() {
+    const currentPassword = String(U.projectSettingsCurrentPassword?.value || "");
+    const newPassword = String(U.projectSettingsNewPassword?.value || "");
+    const passwordConfirm = String(U.projectSettingsNewPasswordConfirm?.value || "");
+    if (!currentPassword || !newPassword) {
+        showToast({ title: "请填写完整", text: "当前密码与新密码都不能为空。", kind: "error" });
+        return;
+    }
+    if (newPassword !== passwordConfirm) {
+        showToast({ title: "两次输入的新密码不一致", kind: "error" });
+        return;
+    }
+    setProjectSettingsBusy(true);
+    try {
+        await ApiClient.changeBootstrapPassword({
+            current_password: currentPassword,
+            new_password: newPassword,
+            password_confirm: passwordConfirm,
+        });
+        clearProjectSettingsPasswords();
+        showToast({ title: "密码已修改", text: "自动解锁保存的是主密钥，改密后仍然有效。", kind: "success" });
+    } catch (error) {
+        showToast({ title: "修改密码失败", text: projectSettingsErrorText(error), kind: "error" });
+    } finally {
+        setProjectSettingsBusy(false);
+    }
+}
+
+async function applyProjectAutoUnlockChange(enabled) {
+    setProjectSettingsBusy(true);
+    try {
+        const status = await ApiClient.setBootstrapAutoUnlock(enabled);
+        if (U.projectSettingsAutoUnlock) {
+            U.projectSettingsAutoUnlock.checked = Boolean(status?.auto_unlock);
+        }
+        showToast({
+            title: enabled ? "已开启自动解锁" : "已关闭自动解锁",
+            text: enabled
+                ? "解锁凭据已写入环境变量与 .g3ku 本地文件，下次启动自动解锁。"
+                : "已删除环境变量与 .g3ku 本地保存的解锁凭据。",
+            kind: "success",
+        });
+    } catch (error) {
+        if (U.projectSettingsAutoUnlock) U.projectSettingsAutoUnlock.checked = !enabled;
+        showToast({ title: "自动解锁设置失败", text: projectSettingsErrorText(error), kind: "error" });
+    } finally {
+        setProjectSettingsBusy(false);
+    }
+}
+
+async function lockProjectFromSettings() {
+    setProjectSettingsBusy(true);
+    try {
+        await ApiClient.lockBootstrap();
+        closeProjectSettingsDialog();
+        // 锁定后所有 /api 都会 423，直接回到解锁界面，而不是让界面留着报错。
+        window.location.reload();
+    } catch (error) {
+        setProjectSettingsBusy(false);
+        showToast({ title: "锁定失败", text: projectSettingsErrorText(error), kind: "error" });
+    }
 }
 
 function modelScopeLabel(scope) {
@@ -14097,7 +14230,18 @@ function initializeUiPreferences() {
 function bind() {
     U.theme?.addEventListener("click", toggleTheme);
     bindModelRetryToastExpansion();
-    U.projectExit?.addEventListener("click", () => void requestProjectExit());
+    U.projectSettings?.addEventListener("click", () => openProjectSettingsDialog());
+    U.projectSettingsClose?.addEventListener("click", () => closeProjectSettingsDialog());
+    U.projectSettingsBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.projectSettingsBackdrop) closeProjectSettingsDialog();
+    });
+    U.projectSettingsChangePassword?.addEventListener("click", () => void submitProjectPasswordChange());
+    U.projectSettingsAutoUnlock?.addEventListener("change", (e) => void applyProjectAutoUnlockChange(Boolean(e.target?.checked)));
+    U.projectSettingsLock?.addEventListener("click", () => void lockProjectFromSettings());
+    U.projectSettingsExit?.addEventListener("click", () => {
+        closeProjectSettingsDialog();
+        void requestProjectExit();
+    });
     U.ceoFeed?.addEventListener("scroll", handleCeoFeedScrollEvent, { passive: true });
     ["wheel", "pointerdown", "keydown", "touchstart"].forEach((type) => {
         U.ceoFeed?.addEventListener(type, handleCeoFeedUserGesture, { passive: true });
@@ -14686,6 +14830,11 @@ function bind() {
             return;
         }
         if (closeCeoSessionMenus({ restoreFocus: true })) return;
+        if (isProjectSettingsOpen()) {
+            closeProjectSettingsDialog();
+            U.projectSettings?.focus?.();
+            return;
+        }
         if (S.confirmState) {
             closeConfirm();
             return;

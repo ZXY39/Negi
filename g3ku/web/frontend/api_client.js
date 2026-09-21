@@ -382,6 +382,21 @@ class ApiClient {
         return data.item || null;
     }
 
+    static async changeBootstrapPassword(payload) {
+        const data = await this.post("/api/bootstrap/change-password", payload || {});
+        return data.item || null;
+    }
+
+    static async setBootstrapAutoUnlock(enabled) {
+        const data = await this.post("/api/bootstrap/auto-unlock", { enabled: !!enabled });
+        return data.item || null;
+    }
+
+    static async lockBootstrap() {
+        const data = await this.post("/api/bootstrap/lock", {});
+        return data.item || null;
+    }
+
     static getCeoWsUrl(sessionId = this.getActiveSessionId()) {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const host = API_BASE_URL ? new URL(API_BASE_URL).host : window.location.host;

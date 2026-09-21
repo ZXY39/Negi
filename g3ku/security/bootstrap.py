@@ -18,6 +18,8 @@ from cryptography.fernet import Fernet, InvalidToken
 MASTER_KEY_VERSION = 2
 UNLOCK_SCOPE = "global"
 BOOTSTRAP_MASTER_KEY_ENV = "G3KU_BOOTSTRAP_MASTER_KEY"
+# 自动解锁凭据：落盘的是主密钥本身，能读到这个文件就等于能解锁项目。
+AUTO_UNLOCK_FILENAME = "auto-unlock.key"
 LEGACY_EXPORT_PREFIX = "legacy-secret-export"
 MIGRATION_BACKUP_DIR = "security-migration-backups"
 REALM_OVERLAY_DIR = "secret-realms"
@@ -36,6 +38,10 @@ def _llm_config_root(workspace: Path) -> Path:
 
 def _master_key_path(workspace: Path) -> Path:
     return _llm_config_root(workspace) / "master.key"
+
+
+def _auto_unlock_key_path(workspace: Path) -> Path:
+    return _llm_config_root(workspace) / AUTO_UNLOCK_FILENAME
 
 
 def _overlay_root(workspace: Path) -> Path:
@@ -249,21 +255,16 @@ class BootstrapSecurityService:
     def status(self) -> dict[str, Any]:
         with self._lock:
             if self._active_master_key is not None:
-                return {
-                    "mode": "unlocked",
-                    "unlock_scope": UNLOCK_SCOPE,
-                    "legacy_detected": self.legacy_detected(),
-                }
-            if self._has_configured_secret_key():
-                return {
-                    "mode": "locked",
-                    "unlock_scope": UNLOCK_SCOPE,
-                    "legacy_detected": self.legacy_detected(),
-                }
+                mode = "unlocked"
+            elif self._has_configured_secret_key():
+                mode = "locked"
+            else:
+                mode = "setup"
             return {
-                "mode": "setup",
+                "mode": mode,
                 "unlock_scope": UNLOCK_SCOPE,
                 "legacy_detected": self.legacy_detected(),
+                "auto_unlock": _auto_unlock_key_path(self.workspace).exists(),
             }
 
     def is_unlocked(self) -> bool:
@@ -380,6 +381,59 @@ class BootstrapSecurityService:
             self._active_master_key = None
             self._overlay_cache = {}
             self._overlay_unverified = False
+            return self.status()
+
+    def change_password(self, *, current_password: str, new_password: str) -> dict[str, Any]:
+        """Re-wrap the live master key under a new login password.
+
+        Only the envelope changes: sessions, secrets and any auto-unlock
+        credential keep working because the master key itself is untouched.
+        """
+        with self._lock:
+            master_key = str(self._active_master_key or "")
+            if not master_key:
+                raise ValueError("project is locked")
+            clean_new = str(new_password or "")
+            if not clean_new:
+                raise ValueError("password is required")
+            payload = self._read_master_payload()
+            if payload is None or not self._is_single_envelope(payload):
+                raise ValueError("secret key is not configured")
+            # 当前口令必须解得开信封，且解出的就是内存里这把钥匙，否则改密等于绕过解锁。
+            verified = self._unwrap_single_master_key(envelope=payload, password=str(current_password or ""))
+            if verified != master_key:
+                raise ValueError("master key mismatch")
+            self._write_master_payload(self._create_single_envelope(password=clean_new, master_key=master_key))
+            return self.status()
+
+    def auto_unlock_master_key(self) -> str:
+        path = _auto_unlock_key_path(self.workspace)
+        if not path.exists():
+            return ""
+        try:
+            return str(path.read_text(encoding="utf-8").strip())
+        except OSError:
+            return ""
+
+    def set_auto_unlock(self, *, enabled: bool) -> dict[str, Any]:
+        with self._lock:
+            path = _auto_unlock_key_path(self.workspace)
+            if not enabled:
+                if path.exists():
+                    path.unlink()
+                os.environ.pop(BOOTSTRAP_MASTER_KEY_ENV, None)
+                return self.status()
+            master_key = str(self._active_master_key or "")
+            if not master_key:
+                raise ValueError("project is locked")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{master_key}\n", encoding="utf-8")
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+            # 本进程树内后续拉起的 worker 直接继承这把钥匙；跨重启由上面的文件接手。
+            os.environ[BOOTSTRAP_MASTER_KEY_ENV] = master_key
             return self.status()
 
     def legacy_detected(self) -> bool:

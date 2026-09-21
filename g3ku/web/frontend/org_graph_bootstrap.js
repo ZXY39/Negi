@@ -11,7 +11,6 @@
     titleLocked: "\u9879\u76ee\u89e3\u9501",
     titleUnlocked: "\u9879\u76ee\u5df2\u89e3\u9501",
     subtitleSetup: "\u4e3a\u9879\u76ee\u8bbe\u7f6e\u552f\u4e00\u53e3\u4ee4\u3002\u5b8c\u6210\u540e\u7cfb\u7edf\u4f1a\u8fdb\u5165\u4e3b\u754c\u9762\u3002",
-    subtitleLocked: "\u8f93\u5165\u53e3\u4ee4\u540e\u624d\u80fd\u8fdb\u5165\u9879\u76ee\u4e3b\u754c\u9762\u4e0e\u542f\u52a8\u540e\u53f0\u80fd\u529b\u3002",
     subtitleUnlocked: "\u9879\u76ee\u5df2\u89e3\u9501\u3002",
     initIdle: "\u521d\u59cb\u5316\u5e76\u8fdb\u5165\u9879\u76ee",
     initBusy: "\u521d\u59cb\u5316\u4e2d...",
@@ -41,6 +40,7 @@
     U.bootSetupSubmit = document.getElementById("boot-setup-submit");
     U.bootUnlockForm = document.getElementById("boot-unlock-form");
     U.bootUnlockPassword = document.getElementById("boot-unlock-password");
+    U.bootRememberUnlock = document.getElementById("boot-remember-unlock");
     U.bootUnlockSubmit = document.getElementById("boot-unlock-submit");
     if (U.bootBanner) {
       U.bootBanner.setAttribute("role", "status");
@@ -74,6 +74,7 @@
     setDisabled(U.bootSetupPasswordConfirm, setupBusy);
     setDisabled(U.bootLegacyConfirm, setupBusy);
     setDisabled(U.bootUnlockPassword, unlockBusy);
+    setDisabled(U.bootRememberUnlock, unlockBusy);
 
     if (U.bootSetupSubmit) {
       U.bootSetupSubmit.disabled = setupBusy;
@@ -116,15 +117,19 @@
     }
     if (U.bootSetupForm) U.bootSetupForm.hidden = mode !== "setup";
     if (U.bootUnlockForm) U.bootUnlockForm.hidden = mode !== "locked";
+    if (U.bootRememberUnlock && mode === "locked") {
+      U.bootRememberUnlock.checked = Boolean(state.status?.auto_unlock);
+    }
     if (U.bootTitle) {
       U.bootTitle.textContent = mode === "setup"
         ? TEXT.titleSetup
         : (mode === "locked" ? TEXT.titleLocked : TEXT.titleUnlocked);
     }
     if (U.bootSubtitle) {
-      U.bootSubtitle.textContent = mode === "setup"
-        ? TEXT.subtitleSetup
-        : (mode === "locked" ? TEXT.subtitleLocked : TEXT.subtitleUnlocked);
+      // 解锁界面只留「请输入密码」一条提示，解释性副标题不再显示。
+      const subtitle = mode === "setup" ? TEXT.subtitleSetup : TEXT.subtitleUnlocked;
+      U.bootSubtitle.hidden = mode === "locked";
+      U.bootSubtitle.textContent = subtitle;
     }
     maybeCreateIcons();
     renderBusyState();
@@ -172,6 +177,7 @@
       setBanner(TEXT.unlockLoading);
       state.status = await ApiClient.unlockBootstrap({
         password: U.bootUnlockPassword?.value || "",
+        remember: Boolean(U.bootRememberUnlock?.checked),
       }, {
         onRetry: () => {
           if (!state.busy) return;

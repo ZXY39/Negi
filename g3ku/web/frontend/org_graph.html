@@ -43,9 +43,13 @@
             </form>
             <form id="boot-unlock-form" class="boot-form" hidden>
                 <label class="resource-field">
-                    <span class="resource-field-label">输入口令</span>
+                    <span class="resource-field-label">请输入密码</span>
                     <input id="boot-unlock-password" class="resource-search" type="password"
                         autocomplete="current-password">
+                </label>
+                <label class="confirm-checkbox-row" for="boot-remember-unlock">
+                    <input id="boot-remember-unlock" type="checkbox">
+                    <span>记住密码自动解锁</span>
                 </label>
                 <button id="boot-unlock-submit" class="btn-primary" type="submit">解锁项目</button>
             </form>
@@ -104,10 +108,10 @@
                     <i data-lucide="sun" class="light-icon" style="display: none;"></i>
                     <i data-lucide="moon" class="dark-icon"></i>
                 </button>
-                <button class="toolbar-btn danger" id="project-exit-btn" type="button" aria-label="退出项目"
-                    title="退出项目">
-                    <i data-lucide="log-out" aria-hidden="true"></i>
-                    <span class="exit-label">退出项目</span>
+                <button class="toolbar-btn" id="project-settings-btn" type="button" aria-label="设置"
+                    title="设置" aria-haspopup="dialog" aria-expanded="false">
+                    <i data-lucide="settings" aria-hidden="true"></i>
+                    <span class="settings-label">设置</span>
                 </button>
             </div>
         </nav>
@@ -980,6 +984,58 @@
                         <button id="confirm-accept" class="toolbar-btn danger" type="button">确认</button>
                     </div>
                 </div>
+            </div>
+
+            <div id="project-settings-backdrop" class="confirm-backdrop" hidden>
+                <section id="project-settings-dialog" class="confirm-dialog project-settings-dialog" role="dialog"
+                    aria-modal="true" aria-labelledby="project-settings-title" tabindex="-1">
+                    <div class="confirm-header">
+                        <h2 id="project-settings-title">设置</h2>
+                    </div>
+                    <div class="project-settings-body">
+                        <section class="project-settings-section">
+                            <h3>修改密码</h3>
+                            <label class="resource-field">
+                                <span class="resource-field-label">当前密码</span>
+                                <input id="project-settings-current-password" class="resource-search" type="password"
+                                    autocomplete="current-password">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">新密码</span>
+                                <input id="project-settings-new-password" class="resource-search" type="password"
+                                    autocomplete="new-password">
+                            </label>
+                            <label class="resource-field">
+                                <span class="resource-field-label">确认新密码</span>
+                                <input id="project-settings-new-password-confirm" class="resource-search"
+                                    type="password" autocomplete="new-password">
+                            </label>
+                            <div class="project-settings-actions">
+                                <button id="project-settings-change-password-btn" class="toolbar-btn success"
+                                    type="button">修改密码</button>
+                            </div>
+                        </section>
+                        <section class="project-settings-section">
+                            <h3>自动解锁</h3>
+                            <label class="confirm-checkbox-row" for="project-settings-auto-unlock">
+                                <input id="project-settings-auto-unlock" type="checkbox">
+                                <span>记住密码自动解锁</span>
+                            </label>
+                            <p class="confirm-checkbox-hint">勾选后把解锁凭据存到环境变量与 .g3ku 本地文件，下次启动不再要求输入密码；取消勾选会删除这两处保存。</p>
+                        </section>
+                        <section class="project-settings-section">
+                            <h3>项目</h3>
+                            <div class="project-settings-actions">
+                                <button id="project-settings-lock-btn" class="toolbar-btn ghost" type="button">锁定项目</button>
+                                <button id="project-settings-exit-btn" class="toolbar-btn danger" type="button">退出项目</button>
+                            </div>
+                            <p class="confirm-checkbox-hint">锁定只收起当前浏览器的解锁状态，后台任务与会话继续运行；退出会关闭项目服务。</p>
+                        </section>
+                    </div>
+                    <div class="confirm-actions">
+                        <button id="project-settings-close-btn" class="toolbar-btn ghost" type="button">关闭</button>
+                    </div>
+                </section>
             </div>
 
             <div id="exec-whitelist-backdrop" class="confirm-backdrop" hidden>
