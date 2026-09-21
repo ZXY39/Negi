@@ -1814,7 +1814,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--ui-space-3);
-    min-height: 300px;
     padding: var(--ui-space-4);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
@@ -1843,11 +1842,14 @@
 [data-ui-version="v2"] .memory-card-queue .memory-card-body {
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 14;
+    -webkit-line-clamp: 3;
     overflow: hidden;
     min-height: 0;
+    /* 正文固定占三行：不足三行也撑满，队列卡片等高、不留整块空白 */
+    height: 66px;
+    margin: 0;
     font-size: 13px;
-    line-height: 1.7;
+    line-height: 22px;
     color: var(--ui-text-secondary);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
