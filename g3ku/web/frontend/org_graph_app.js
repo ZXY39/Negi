@@ -8320,6 +8320,32 @@ function stopLiveDurationTicker() {
     S.liveDurationIntervalId = null;
 }
 
+function parseCeoSubmittedStage(event = {}) {
+    const candidates = [event?.text, event?.output_preview_text, event?.output_text, event?.arguments_text];
+    for (const raw of candidates) {
+        const text = String(raw || "").trim();
+        if (!text.startsWith("{") || !text.includes("stage_id")) continue;
+        let parsed = null;
+        try {
+            parsed = JSON.parse(text);
+        } catch (error) {
+            // 工具输出被预览截断时不是完整 JSON，交回普通工具卡片渲染。
+            continue;
+        }
+        if (!parsed || typeof parsed !== "object") continue;
+        if (!parsed.stage_id && !parsed.stage_index) continue;
+        if (!String(parsed.stage_goal || parsed.preamble_text || "").trim()) continue;
+        return parsed;
+    }
+    return null;
+}
+
+function extractCeoSubmittedStageContext(toolName = "", event = {}) {
+    if (String(toolName || "").trim().toLowerCase() !== "submit_next_stage") return null;
+    const stage = parseCeoSubmittedStage(event);
+    return stage ? { stages: [stage] } : null;
+}
+
 function applyCeoToolEventToTurn(turn, event = {}) {
     if (!turn?.listEl || !turn?.flowEl) return null;
     const status = resolveCeoToolEventStatus(event);
@@ -8337,6 +8363,15 @@ function applyCeoToolEventToTurn(turn, event = {}) {
             ],
         });
         return null;
+    }
+    if (status !== "error") {
+        const submittedStageContext = extractCeoSubmittedStageContext(toolName, event);
+        if (submittedStageContext && renderCeoStageTraceIntoTurn(turn, mergeCeoLiveTraceContext(
+            submittedStageContext,
+            turn.lastExecutionTraceSummary
+        ))) {
+            return null;
+        }
     }
     const eventKind = String(event.kind || "").trim().toLowerCase();
     const detail = status === "running" && eventKind === "tool_start"

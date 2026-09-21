@@ -956,7 +956,6 @@
 }
 
 [data-ui-version="v2"] .ceo-approval-viewport,
-[data-ui-version="v2"] .ceo-context-load-notice,
 [data-ui-version="v2"] .model-retry-toast,
 [data-ui-version="v2"] .ceo-follow-up-queue,
 [data-ui-version="v2"] .ceo-edit-resend-banner,
@@ -968,8 +967,25 @@
     color: var(--ui-text-secondary);
 }
 
+/* .ceo-context-load-notice 只负责定位，可见的小弹窗是里面的 item；
+   给容器上底色和描边会拉出一条与弹窗无关的长条。 */
+[data-ui-version="v2"] .ceo-context-load-notice {
+    width: min(420px, calc(100% - 24px));
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .ceo-context-load-notice-item {
+    background: var(--ui-bg-elevated);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    box-shadow: var(--ui-shadow-sm);
+    color: var(--ui-text-secondary);
+}
+
 [data-ui-version="v2"] .ceo-approval-viewport,
-[data-ui-version="v2"] .ceo-context-load-notice,
 [data-ui-version="v2"] .model-retry-toast,
 [data-ui-version="v2"] .ceo-edit-resend-banner {
     grid-column: 1 / -1;

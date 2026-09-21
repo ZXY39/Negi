@@ -365,6 +365,8 @@ User message bubbles carry a hover action row (`编辑` / `Fork`, `.msg-actions`
 ### CEO Stage Trace Round Rendering Contract
 
 - The browser CEO stage view should treat `canonical_context.stages[].rounds[].tools` as the authoritative round-level tool list.
+- A `ceo.agent.tool` frame for `submit_next_stage` carries the new stage's full header in its result text. The frontend parses it and upserts that stage into the live rail immediately (`extractCeoSubmittedStageContext` → `mergeCeoLiveTraceContext` → `renderCeoStageTraceIntoTurn`), so the turn leaves tool-card form at the moment the stage is committed instead of waiting for the next `canonical_context` delta. The tool card is not rendered for that frame. When the authoritative delta later arrives, the same stage id is replaced in place, so the provisional header never duplicates.
+- The early switch is best-effort: a non-`submit_next_stage` tool, a truncated (non-parseable) payload, or a header without a stage goal all fall back to the normal tool card.
 - Refreshing the page or reopening a completed session should reproduce the same round grouping that live inflight snapshots used; the frontend should not try to regroup same-name tools on its own.
 - `tool_names` and `tool_call_ids` may still be present for compatibility, but they are summary metadata rather than a second grouping algorithm.
 - The stage progress badge in both the CEO session view and the shared task-trace components must reflect budget-counted rounds rather than raw round history length.
