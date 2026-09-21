@@ -255,10 +255,23 @@ async def test_channel_message_starts_normally_once_idle_again() -> None:
 
 def test_real_session_predicate_round_trips(tmp_path: Path) -> None:
     """真 RuntimeAgentSession 上同一个判定可用（property state 与 _state 不分叉）。"""
-    loop = SimpleNamespace(
+    session = _real_session(tmp_path, "web:ceo-hold-real")
+
+    assert session.frontdoor_inbound_hold() == ""
+    setattr(session, MANUAL_COMPRESSION_STATE_ATTR, {"status": MANUAL_COMPRESSION_RUNNING})
+    assert session.frontdoor_inbound_hold() == "manual_context_compression"
+    session.state.is_running = True
+    assert session.frontdoor_inbound_hold() == "turn_running"
+
+
+# -- e) 队列的 durable 那一半：pending 行可重放 --------------------------------
+
+
+def _loop(workspace: Path) -> SimpleNamespace:
+    return SimpleNamespace(
         model="gpt-test",
         reasoning_effort=None,
-        sessions=SessionManager(tmp_path),
+        sessions=SessionManager(workspace),
         multi_agent_runner=None,
         memory_manager=None,
         commit_service=None,
@@ -267,15 +280,106 @@ def test_real_session_predicate_round_trips(tmp_path: Path) -> None:
         release_session_cancellation_token=lambda _key, _token: None,
         _use_rag_memory=lambda: False,
     )
-    session = RuntimeAgentSession(
-        loop,
-        session_key="web:ceo-hold-real",
-        channel="web",
-        chat_id="ceo-hold-real",
+
+
+def _real_session(workspace: Path, key: str) -> RuntimeAgentSession:
+    return RuntimeAgentSession(
+        _loop(workspace),
+        session_key=key,
+        channel="ext",
+        chat_id=key.rsplit(":", 1)[-1],
     )
 
-    assert session.frontdoor_inbound_hold() == ""
-    setattr(session, MANUAL_COMPRESSION_STATE_ATTR, {"status": MANUAL_COMPRESSION_RUNNING})
-    assert session.frontdoor_inbound_hold() == "manual_context_compression"
-    session.state.is_running = True
-    assert session.frontdoor_inbound_hold() == "turn_running"
+
+def _transcript_rows(workspace: Path, key: str) -> list[dict]:
+    return list(SessionManager(workspace).get_or_create(key).messages or [])
+
+
+@pytest.mark.asyncio
+async def test_queued_message_survives_a_restart_in_transcript_order(tmp_path: Path) -> None:
+    """重启=新 SessionManager + 新会话对象：队列必须从盘上接回来，顺序不变。"""
+    key = "ext:test-bridge:queue-restart"
+    session = _real_session(tmp_path, key)
+
+    await session.queue_follow_up_batch(["第一条在排队", "第二条在排队"], persist_transcript=True)
+    assert [str(item.content) for item in session._state.queued_follow_up_messages] == [
+        "第一条在排队",
+        "第二条在排队",
+    ]
+
+    reopened = _real_session(tmp_path, key)
+    queued = reopened._state.queued_follow_up_messages
+
+    assert [str(item.content) for item in queued] == ["第一条在排队", "第二条在排队"]
+    rows = [
+        row
+        for row in _transcript_rows(tmp_path, key)
+        if str(row.get("role") or "") == "user"
+    ]
+    assert [str(row.get("content") or "") for row in rows] == ["第一条在排队", "第二条在排队"]
+
+
+@pytest.mark.asyncio
+async def test_rehydrated_items_keep_their_turn_id_so_the_row_flips_once_sent(
+    tmp_path: Path,
+) -> None:
+    """接回来必须带原 turn_id：派发后 `_persist_turn_transcript` 按同一 turn_id 升
+    completed，不会在转录里再插一条重复的用户消息。"""
+    key = "ext:test-bridge:queue-turn-id"
+    session = _real_session(tmp_path, key)
+    await session.queue_follow_up_batch(["保持 turn_id"], persist_transcript=True)
+    original_turn_id = str(
+        (session._state.queued_follow_up_messages[0].metadata or {}).get("_transcript_turn_id") or ""
+    ).strip()
+    assert original_turn_id
+
+    reopened = _real_session(tmp_path, key)
+    item = reopened._state.queued_follow_up_messages[0]
+
+    assert str((item.metadata or {}).get("_transcript_turn_id") or "").strip() == original_turn_id
+    assert str((item.metadata or {}).get("_transcript_state") or "") == "pending"
+
+
+@pytest.mark.asyncio
+async def test_pending_row_whose_turn_already_answered_is_not_requeued(tmp_path: Path) -> None:
+    """崩溃在状态翻转之前的那一轮已经答过：重发等于把同一个问题再答一遍。"""
+    key = "ext:test-bridge:queue-answered"
+    session = _real_session(tmp_path, key)
+    await session.queue_follow_up_batch(["已经答过了"], persist_transcript=True)
+    turn_id = str(
+        (session._state.queued_follow_up_messages[0].metadata or {}).get("_transcript_turn_id") or ""
+    ).strip()
+
+    manager = SessionManager(tmp_path)
+    answered = manager.get_or_create(key)
+    answered.messages = list(answered.messages)
+    answered.messages.append(
+        {
+            "role": "assistant",
+            "content": "答完了",
+            "timestamp": "2026-09-21T13:07:13.308040",
+            "turn_id": turn_id,
+            "metadata": {},
+        }
+    )
+    manager.save(answered)
+
+    reopened = _real_session(tmp_path, key)
+
+    assert list(reopened._state.queued_follow_up_messages or []) == []
+
+
+@pytest.mark.asyncio
+async def test_requeue_of_the_same_message_does_not_stack_duplicates(tmp_path: Path) -> None:
+    """同一条渠道消息重投（幂等位之外的场景）：转录按 turn_id 原地更新，队列不叠两份。"""
+    key = "ext:test-bridge:queue-idem"
+    session = _real_session(tmp_path, key)
+    queued = await session.queue_follow_up_batch(["同一条"], persist_transcript=True)
+    session._state.queued_follow_up_messages.clear()
+    session._state.queued_follow_up_messages.extend(list(queued))
+
+    await session.queue_follow_up_batch(list(queued), persist_transcript=True)
+    reopened = _real_session(tmp_path, key)
+
+    assert [str(row.get("content") or "") for row in _transcript_rows(tmp_path, key) if str(row.get("role")) == "user"] == ["同一条"]
+    assert len(reopened._state.queued_follow_up_messages) == 1

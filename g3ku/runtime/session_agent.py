@@ -241,6 +241,7 @@ class RuntimeAgentSession:
         self._assistant_segment_open: bool = False
         self._turn_lock = asyncio.Lock()
         self._restore_frontdoor_persistent_state()
+        self._rehydrate_queued_follow_ups()
 
     @property
     def state(self) -> AgentState:
@@ -3721,6 +3722,69 @@ class RuntimeAgentSession:
         ]
         self._state.queued_follow_up_messages.clear()
         return queued_inputs
+
+    def _rehydrate_queued_follow_ups(self) -> int:
+        """把转录里仍是 pending 的用户条目接回内存队列，返回接回的条数。
+
+        队列的 durable 那一半本来就在盘上：`queue_follow_up_batch` 入队时写一条
+        `_transcript_state=pending` 的用户行，回合真跑起来后 `_persist_turn_transcript`
+        按同一个 turn_id 把它升成 completed。缺的只有读它的人——此前
+        `_TRANSCRIPT_STATE_PENDING` 全仓零读者，所以重启后队列归零，那条消息停在转录里
+        显示成"已发送"，却再也不会被回答。
+
+        已经有助手行的 turn 不接回：那一轮已经答过，只是崩在状态翻转之前，重发就是重复回答。"""
+        session_key = str(self._state.session_key or "").strip()
+        if not session_key or getattr(self._loop, "sessions", None) is None:
+            return 0
+        if list(self._state.queued_follow_up_messages or []):
+            return 0
+        try:
+            rows = list(self._loop.sessions.get_or_create(session_key).messages or [])
+        except Exception:
+            logger.debug("queued follow-up rehydrate skipped for {}", session_key)
+            return 0
+        answered_turn_ids = set()
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("role") or "") != "assistant":
+                continue
+            turn_id = str(
+                row.get("turn_id")
+                or ((row.get("metadata") or {}).get(_TRANSCRIPT_TURN_ID_KEY))
+                or ""
+            ).strip()
+            if turn_id:
+                answered_turn_ids.add(turn_id)
+        restored: list[UserInputMessage] = []
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("role") or "") != "user":
+                continue
+            metadata = dict(row.get("metadata") or {})
+            if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() != _TRANSCRIPT_STATE_PENDING:
+                continue
+            turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            if turn_id and turn_id in answered_turn_ids:
+                continue
+            content = str(row.get("content") or "")
+            attachments = list(row.get("attachments") or [])
+            if not content.strip() and not attachments:
+                continue
+            restored.append(
+                UserInputMessage(
+                    content=content,
+                    attachments=attachments,
+                    metadata=metadata,
+                )
+            )
+        if restored:
+            self._state.queued_follow_up_messages.extend(restored)
+            # 重启后"突然回答一条旧消息"必须有迹可循：运营看到的是这一行，而不是
+            # 转录里一条一直停在 pending 的静默消息。
+            logger.info(
+                "Rehydrated {} queued follow-up message(s) for {}",
+                len(restored),
+                session_key,
+            )
+        return len(restored)
 
     async def continue_(self, *, live_context: dict[str, str] | None = None) -> RunResult:
         return await self.prompt(self._last_prompt, live_context=live_context)
