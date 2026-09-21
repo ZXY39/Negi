@@ -28,8 +28,6 @@
     --ui-sidebar-width-collapsed: 72px;
     --ui-sidebar-width-drawer: 248px;
     --ui-ceo-session-width: 92px;
-    --ui-chat-reading-width: 960px;
-    --ui-chat-message-width: 760px;
     --ui-page-max-width: 1440px;
 
     --ui-motion-sidebar-width: 220ms;
@@ -916,20 +914,20 @@
     background: var(--ui-bg-canvas);
 }
 
-/* 16. 聊天阅读轴：960 列 + 760 消息宽 */
+/* 16. 聊天列：填满可用宽度，不做居中阅读轴 */
 [data-ui-version="v2"] .chat-feed {
     width: 100%;
-    max-width: var(--ui-chat-reading-width);
-    margin: 0 auto;
-    padding: var(--ui-space-6) var(--ui-space-8);
+    max-width: none;
+    margin: 0;
+    padding: var(--ui-space-6) var(--ui-space-6) var(--ui-space-4);
     gap: var(--ui-space-5);
 }
 
 [data-ui-version="v2"] .message {
     width: 100%;
-    max-width: var(--ui-chat-message-width);
-    margin-right: auto;
-    margin-left: auto;
+    max-width: none;
+    margin-right: 0;
+    margin-left: 0;
     align-items: flex-end;
 }
 
@@ -947,7 +945,7 @@
 }
 
 [data-ui-version="v2"] .message .msg-content {
-    max-width: var(--ui-chat-message-width);
+    max-width: 100%;
     padding: var(--ui-space-3) var(--ui-space-4);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card) var(--ui-radius-card) var(--ui-radius-card) 4px;
@@ -959,7 +957,7 @@
 }
 
 [data-ui-version="v2"] .message.user .msg-content {
-    max-width: 680px;
+    max-width: 100%;
     border-radius: var(--ui-radius-card) var(--ui-radius-card) 4px var(--ui-radius-card);
     background: var(--ui-brand-soft);
     border-color: color-mix(in srgb, var(--ui-brand) 26%, transparent);
@@ -1000,7 +998,7 @@
     align-items: end;
     gap: var(--ui-space-2) var(--ui-space-3);
     width: 100%;
-    padding: 12px max(var(--ui-space-6), calc((100% - var(--ui-chat-reading-width)) / 2)) 20px;
+    padding: 12px var(--ui-space-6) 20px;
     background: var(--ui-bg-canvas);
     border: 0;
     border-top: 1px solid var(--ui-border);
@@ -1043,8 +1041,8 @@
 [data-ui-version="v2"] .model-retry-toast,
 [data-ui-version="v2"] .ceo-edit-resend-banner {
     grid-column: 1 / -1;
-    width: min(100%, var(--ui-chat-reading-width));
-    margin: 0 auto;
+    width: 100%;
+    margin: 0;
     border-left: 3px solid var(--ui-brand);
 }
 
@@ -1078,8 +1076,9 @@
         grid-template-columns: var(--ui-ceo-session-width) minmax(0, 1fr);
     }
 
+    /* 覆盖式展开：面板脱离网格流，聊天区独占整行宽度 */
     [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded {
-        --ui-ceo-session-width: min(288px, calc(100vw - 24px));
+        grid-template-columns: minmax(0, 1fr);
     }
 
     [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel {
@@ -1088,6 +1087,7 @@
         bottom: 0;
         left: 0;
         z-index: 5;
+        width: min(288px, calc(100vw - 24px));
         height: auto;
         box-shadow: var(--ui-shadow-dialog);
     }
@@ -1115,8 +1115,12 @@
     padding-bottom: var(--ui-space-6);
 }
 
-/* 20. 卡片网格列数：只用 1200 / 1024 / 768 白名单断点 */
-[data-ui-version="v2"] .project-card-grid,
+/* 20. 卡片网格：任务大厅按宽度自适应列数，其余页面走白名单断点 */
+[data-ui-version="v2"] .project-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: var(--ui-space-4);
+}
+
 [data-ui-version="v2"] .resource-list {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--ui-space-3);
@@ -1134,16 +1138,12 @@
 }
 
 @media (min-width: 768px) {
-
-    [data-ui-version="v2"] .project-card-grid,
     [data-ui-version="v2"] .resource-list {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
 
 @media (min-width: 1024px) {
-
-    [data-ui-version="v2"] .project-card-grid,
     [data-ui-version="v2"] .resource-list {
         grid-template-columns: repeat(3, minmax(0, 1fr));
     }
@@ -1159,7 +1159,6 @@
 
 @media (min-width: 1200px) {
 
-    [data-ui-version="v2"] .project-card-grid,
     [data-ui-version="v2"] .resource-list,
     [data-ui-version="v2"] .model-routing-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1188,8 +1187,8 @@
 
 /* 21. 任务卡片 */
 [data-ui-version="v2"] .project-card {
-    padding: var(--ui-space-3);
-    gap: var(--ui-space-2);
+    padding: var(--ui-space-4);
+    gap: var(--ui-space-3);
     background: var(--ui-bg-surface);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
@@ -1252,12 +1251,12 @@
 }
 
 [data-ui-version="v2"] .pc-metrics {
-    gap: var(--ui-space-2) var(--ui-space-1);
+    gap: var(--ui-space-3);
 }
 
 [data-ui-version="v2"] .pc-metric {
-    min-height: 58px;
-    padding: 8px;
+    min-height: 62px;
+    padding: 10px 12px;
     gap: 2px;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);

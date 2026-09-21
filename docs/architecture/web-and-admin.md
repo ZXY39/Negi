@@ -171,7 +171,8 @@ Two collapse systems exist and must not be merged:
 ### CEO Reading Column
 
 - `.ceo-shell` is a two-column grid whose first column is `var(--ui-ceo-session-width)`: 92px collapsed, 288px expanded. A hardcoded `288px` column or `auto` both break the session-panel toggle and are not valid.
-- Feed, message bubbles, composer and status notices share one centered reading axis (`--ui-chat-reading-width` 960px, `--ui-chat-message-width` 760px). Below 768px an expanded session panel overlays the chat column at `min(288px, calc(100vw - 24px))` rather than widening the page.
+- Feed, message bubbles, composer and status notices fill the chat column edge to edge; the chat page carries no centered reading width, so it blends into the page background instead of floating a narrow column inside wide gutters.
+- Below 768px an expanded session panel leaves the grid flow: `.ceo-shell` drops to a single column so the chat keeps the full width, and the panel overlays it at `min(288px, calc(100vw - 24px))`. Keeping two columns there lets grid auto-placement drop the chat wrapper into the 92px track.
 
 ### Status Color Semantics
 
@@ -184,7 +185,7 @@ Two collapse systems exist and must not be merged:
 
 ### Responsive Bands
 
-Page grids may only use the shared bands 1200 / 1024 / 900 / 768 / 640px. Task hall and Skill/Tool cards step 4 → 3 → 2 → 1 at 1200 / 1024 / 768; model role cards 4 → 2 → 1 at 1200 / 1024; memory keeps two columns at ≥1024px; external access keeps two columns at ≥900px. When space runs short between two bands, tighten gap, card padding and control min-width before dropping a column, and never add a page-specific breakpoint.
+The task hall grid is content-sized — `repeat(auto-fill, minmax(300px, 1fr))` — so its column count follows the available width, and a long token count wraps inside a fixed-size card rather than the card shrinking to fit one line. Every other page grid may only use the shared bands 1200 / 1024 / 900 / 768 / 640px: Skill/Tool cards step 4 → 3 → 2 → 1 at 1200 / 1024 / 768; model role cards 4 → 2 → 1 at 1200 / 1024; memory keeps two columns at ≥1024px; external access keeps two columns at ≥900px. When space runs short between two bands, tighten gap, card padding and control min-width before dropping a column, and never add a page-specific breakpoint.
 
 ## CEO Composer Runtime
 
