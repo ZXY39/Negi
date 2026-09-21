@@ -155,18 +155,21 @@ The browser shell renders one visual system per theme. Theme and layout are fron
 - Switching theme does not reload the page, request data, or rebuild the current view.
 - Every `localStorage` read/write is guarded: blocked or unavailable storage degrades to dark theme plus the default navigation state instead of breaking startup.
 
-### Navigation Collapse
+### Navigation Bar And Compact Mode
+
+Primary navigation is a full-width top bar, 56px tall: brand plus the collapse toggle at the left, the eight view buttons in a row, and the theme toggle and 退出项目 at the right. Below 900px the bar scrolls horizontally; there is no drawer layer.
 
 Two collapse systems exist and must not be merged:
 
-| System | Controls | State source | Scope |
+| System | Controls | State source | Effect |
 | --- | --- | --- | --- |
-| Global left navigation | `#sidebar-toggle`, `#sidebar-open-btn`, `#sidebar-backdrop` | `is-collapsed` / `is-mobile-open` on `.sidebar`, preference key `g3ku.ui.sidebar.collapsed.v1` | Application shell width |
+| Top navigation bar | `#sidebar-toggle` | `is-collapsed` on `.sidebar`, preference key `g3ku.ui.sidebar.collapsed.v1` | Labels shown or icon-only |
 | CEO session list | `#ceo-session-panel-toggle` | `S.ceoSessionPanelExpanded`, `.ceo-shell.is-session-panel-expanded`, `data-panel-state` | CEO page column only |
 
-- At ≥1200px the navigation defaults to expanded (216px); 768–1199px defaults to collapsed (72px). A stored preference wins in both ranges. Below 768px the navigation leaves the document flow and becomes a 248px drawer with a scrim, closed by scrim click, `Escape`, choosing a navigation item, or `#sidebar-toggle`; drawer open state is never written to the collapse preference key.
-- Collapsed navigation hides labels but keeps icons, `aria-label` / `title`, and the audit badge — `#audit-nav-badge` moves to the top-right of its item icon instead of disappearing.
-- Breakpoint geometry is CSS-driven. JS only chooses the initial state and reacts to `matchMedia` changes, so collapsing the navigation never re-renders session, task or resource data.
+- Compact mode drops the brand text, the nav labels and the exit-project label but keeps every icon, its `aria-label` / `title`, and the audit badge — `#audit-nav-badge` moves to the top-right corner of its icon instead of disappearing. The bar height stays 56px either way.
+- The toggle's accessible name states what the next click produces (「紧凑模式」 while expanded, 「显示名称」 while collapsed) and `aria-expanded` mirrors label visibility.
+- Nav labels are short (`会话 / 任务 / Skill / Tool / 记忆 / 模型 / 外部 / 日志`); `data-view` values are unchanged and each view's own page title keeps its full name.
+- Collapsing the bar, switching the theme and toggling the CEO session panel are independent, and none of them re-renders session, task or resource data or calls an API.
 
 ### CEO Reading Column
 
@@ -187,7 +190,7 @@ Two collapse systems exist and must not be merged:
 
 Admin pages draw one level of boxes only. The page-level containers (`.resource-list-panel`, `.resource-detail-panel`, `.memory-column`, `.audit-feed-panel`) are transparent and borderless, so repeated content — task cards, Skill/Tool cards, model rows, memory records, token rows — is the only framed layer. Drawers and dialogs keep surface fill, border and `--ui-shadow-dialog` because they float above the page rather than nesting inside it. A new admin surface must not wrap content in a second bordered panel.
 
-The task hall header follows the same rule: the pressure state and the CPU/memory/disk reading share one capsule (the load tier stays readable from the value text color, not from a tinted background), and「任务排序」and「全局任务树深度」render as a single button each — label plus current value inside one control — whose dropdown opens on click.
+The task hall header follows the same rule: the pressure state and the CPU/memory/disk reading share one capsule, and each of the three resource numbers colors itself by its own occupancy tier (≥75% warning, ≥90% danger) so the reading is not pinned to one color.「任务排序」and「全局任务树深度」are single borderless buttons carrying only their name and a chevron — the chosen option is not echoed on the button — and their dropdown appears below the button on click. At ≥1200px the title, the status capsules and these two buttons share one row.
 
 ### Responsive Bands
 
