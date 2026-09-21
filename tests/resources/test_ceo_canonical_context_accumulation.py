@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_PROJECTION_MODE,
+    apply_cc_upsert,
     canonical_context_delta,
+    encode_cc_upsert,
     merge_turn_stage_state_into_canonical_context,
     normalize_frontdoor_canonical_context,
-    project_canonical_context_for_ui_payload,
     project_canonical_context_for_transcript,
+    project_canonical_context_for_ui_payload,
     ui_canonical_context_delta,
 )
 
@@ -202,6 +204,66 @@ def test_ui_delta_ignores_projection_representation_flips() -> None:
 
     assert len(raw_delta.get("stages") or []) >= 2
     assert ui_delta == {}
+
+
+def test_ui_delta_ignores_bulk_closure_marks() -> None:
+    """压缩收口一次性给历史阶段盖 context_visible=False 时，UI delta 必须为空。
+
+    收口标记只决定阶段正文进不进模型上下文，前端不读它；把它算成展示变化，收口
+    那一轮的气泡就会堆满整本历史账本（QQ 渠道会话实测一行 delta 429 条阶段 / 302KB）。
+    存储侧仍必须带这个标记，所以这里同时断言 upsert 编码没被顺手削掉。
+    """
+    rounds = [
+        {
+            "round_index": 1,
+            "text": f"round {index}",
+            "tools": [_tool(f"read-{index}", output_text="out")],
+        }
+        for index in range(1, 7)
+    ]
+    before = normalize_frontdoor_canonical_context(
+        {"stages": [_stage(f"frontdoor-stage-{index}", index, rounds=[rounds[index - 1]]) for index in range(1, 7)]}
+    )
+    after = normalize_frontdoor_canonical_context(
+        {
+            "stages": [
+                {
+                    **_stage(f"frontdoor-stage-{index}", index, rounds=[rounds[index - 1]]),
+                    "context_visible": False,
+                }
+                for index in range(1, 7)
+            ]
+        }
+    )
+
+    assert ui_canonical_context_delta(before, after) == {}
+    assert canonical_context_delta(before, after) == {}
+
+    upsert = encode_cc_upsert(before, after)
+    assert upsert is not None
+    assert any(stage.get("context_visible") is False for stage in (upsert.get("upsert") or []))
+    assert apply_cc_upsert(before, upsert) == after
+
+
+def test_ui_delta_reports_a_closed_stage_only_for_its_visible_change() -> None:
+    """同一个阶段既被收口又真的改了展示内容：delta 带上它，但不带簿记位。"""
+    before = normalize_frontdoor_canonical_context({"stages": [_stage("frontdoor-stage-1", 1)]})
+    after = normalize_frontdoor_canonical_context(
+        {
+            "stages": [
+                {
+                    **_stage("frontdoor-stage-1", 1, summary="收口之后又改了摘要"),
+                    "context_visible": False,
+                }
+            ]
+        }
+    )
+
+    stages = list((ui_canonical_context_delta(before, after).get("stages") or []))
+
+    assert len(stages) == 1
+    assert stages[0]["completed_stage_summary"] == "收口之后又改了摘要"
+    assert "context_visible" not in stages[0]
 
 
 def test_ui_delta_keeps_only_new_stages_and_backfills_live_bodies() -> None:

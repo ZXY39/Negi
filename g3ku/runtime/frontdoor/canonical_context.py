@@ -1008,13 +1008,27 @@ def canonical_tool_identity(tool_payload: dict[str, Any], index: int) -> str:
     return f"{tool_name}:{index}"
 
 
+# 收口标记只决定阶段正文进不进模型上下文，不决定轨道怎么画，前端也完全不读它。
+# 把它算进 UI delta 的代价实测很贵：一次 token 压缩会把压缩区间内几百个历史阶段一次性
+# 标记收口，全部落进同一行转录，那一行的 delta 变成 429 条阶段 / 302KB，
+# 对应气泡看起来像把整部历史堆在自己身上（QQ 渠道会话）。
+UI_INERT_STAGE_FIELDS = frozenset({"context_visible"})
+
+
+def _ui_comparable_stage(stage: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in stage.items() if key not in UI_INERT_STAGE_FIELDS}
+
+
 def canonical_context_delta(previous_context: Any, current_context: Any) -> dict[str, Any]:
     """Structural diff of two canonical contexts (stage -> round -> tool).
 
     Both inputs are treated as read-only; only changed objects are copied into
     the returned delta. Unchanged prefixes dominate transcript replays, so each
     level first tries a plain dict equality before the JSON fingerprint — on
-    normalized (JSON-parsed) views the two checks agree.
+    normalized (JSON-parsed) views the two checks agree. UI-inert stage fields
+    (``UI_INERT_STAGE_FIELDS``) are excluded from both the comparison and the
+    emitted payload: this function feeds the rendered rail only, and the storage
+    upsert codec keeps those fields independently.
     """
     previous = previous_context if isinstance(previous_context, dict) else {}
     current = current_context if isinstance(current_context, dict) else {}
@@ -1031,12 +1045,19 @@ def canonical_context_delta(previous_context: Any, current_context: Any) -> dict
         stage_identity = canonical_stage_identity(stage, stage_index)
         previous_stage = previous_stages.get(stage_identity)
         if previous_stage is None:
-            delta_stages.append(copy.deepcopy(stage))
+            delta_stages.append(_ui_comparable_stage(copy.deepcopy(stage)))
             continue
         if stage == previous_stage:
             continue
-        stage_header = {key: value for key, value in stage.items() if key != "rounds"}
-        previous_stage_header = {key: value for key, value in previous_stage.items() if key != "rounds"}
+        stage_for_ui = _ui_comparable_stage(stage)
+        previous_stage_for_ui = _ui_comparable_stage(previous_stage)
+        if stage_for_ui == previous_stage_for_ui:
+            # 只有簿记位变了：这条阶段在轨道上没有任何可视差异，不重画。
+            continue
+        stage_header = {key: value for key, value in stage_for_ui.items() if key != "rounds"}
+        previous_stage_header = {
+            key: value for key, value in previous_stage_for_ui.items() if key != "rounds"
+        }
         stage_header_changed = (
             canonical_value_fingerprint(previous_stage_header)
             != canonical_value_fingerprint(stage_header)
@@ -1080,7 +1101,7 @@ def canonical_context_delta(previous_context: Any, current_context: Any) -> dict
                 delta_round["tools"] = delta_tools
                 delta_rounds.append(delta_round)
         if stage_header_changed or delta_rounds:
-            delta_stage = copy.deepcopy(stage)
+            delta_stage = copy.deepcopy(stage_for_ui)
             delta_stage["rounds"] = delta_rounds
             delta_stages.append(delta_stage)
     if not delta_stages:
@@ -1098,6 +1119,7 @@ __all__ = [
     "COMPACT_REPRESENTATION",
     "EXTERNALIZED_REPRESENTATION",
     "RAW_REPRESENTATION",
+    "UI_INERT_STAGE_FIELDS",
     "canonical_context_delta",
     "canonical_context_tool_items",
     "canonical_round_identity",
