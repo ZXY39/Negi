@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import html as html_module
 import json
-from pathlib import Path
+import re
 import subprocess
 import textwrap
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,6 +41,83 @@ def _run_node_script(script: str) -> dict[str, object]:
         cwd=REPO_ROOT,
     )
     return json.loads(completed.stdout.strip())
+
+
+_APP_SANDBOX = """
+const fs = require("fs");
+const vm = require("vm");
+
+const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+
+class StubElement {}
+class StubHTMLElement extends StubElement {}
+class StubHTMLButtonElement extends StubHTMLElement {}
+class StubHTMLInputElement extends StubHTMLElement {}
+class StubHTMLTextAreaElement extends StubHTMLElement {}
+class StubHTMLSelectElement extends StubHTMLElement {}
+
+class StubDocument {
+  getElementById() { return null; }
+  querySelector() { return null; }
+  querySelectorAll() { return []; }
+  addEventListener() {}
+  createElement() { return {}; }
+}
+
+const context = {
+  console,
+  setTimeout,
+  clearTimeout,
+  setInterval,
+  clearInterval,
+  queueMicrotask,
+  navigator: { clipboard: { writeText: async () => {} } },
+  location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
+  localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  document: new StubDocument(),
+  window: {},
+  Element: StubElement,
+  HTMLElement: StubHTMLElement,
+  HTMLButtonElement: StubHTMLButtonElement,
+  HTMLInputElement: StubHTMLInputElement,
+  HTMLTextAreaElement: StubHTMLTextAreaElement,
+  HTMLSelectElement: StubHTMLSelectElement,
+  URLSearchParams,
+  URL,
+  AbortController,
+  fetch: async () => ({ ok: true, json: async () => ({}) }),
+  lucide: { createIcons() {} },
+  marked: { parse: (value) => String(value) },
+  DOMPurify: { sanitize: (value) => String(value) },
+  structuredClone: global.structuredClone,
+  performance: { now: () => 0 },
+  requestAnimationFrame: (callback) => { callback(); return 1; },
+  cancelAnimationFrame: () => {},
+  WebSocket: function WebSocket() {},
+  addEventListener() {},
+  removeEventListener() {},
+};
+context.window = context;
+
+vm.createContext(context);
+vm.runInContext(
+  `${appCode}\\nthis.__testExports = { @@EXPORTS@@ };`,
+  context,
+);
+
+const __out = {};
+@@BODY@@
+console.log(JSON.stringify(__out));
+"""
+
+
+def _run_app_script(body: str, exports: list[str]) -> dict[str, object]:
+    """Load the app in a minimal DOM stub and return the script's __out object."""
+    script = _APP_SANDBOX.replace("@@EXPORTS@@", ", ".join(exports)).replace(
+        "@@BODY@@", textwrap.indent(textwrap.dedent(body).strip(), "  ")
+    )
+    return _run_node_script(script)
 
 
 def test_memory_management_view_uses_detail_modal_and_toasts_instead_of_page_banners() -> None:
@@ -473,7 +550,7 @@ def test_memory_processed_card_renders_discarded_rows_as_no_change_status_only()
     assert "已废弃" not in rendered
 
 
-def test_memory_processed_applied_row_uses_processed_status_and_time_only() -> None:
+def test_memory_processed_applied_row_renders_operation_chip_and_time_only() -> None:
     result = _run_node_script(
         """
         const fs = require("fs");
@@ -555,7 +632,9 @@ def test_memory_processed_applied_row_uses_processed_status_and_time_only() -> N
     )
 
     rendered = str(result["html"])
-    assert 'data-status="success"' in rendered
+    assert 'data-op="add"' in rendered
+    assert "增加" in rendered
+    assert 'class="status-badge"' not in rendered
     assert "policy-chip" not in rendered
     assert "memory-card-time" in rendered
     assert "memory-card-arrow" in rendered
@@ -1059,3 +1138,64 @@ def test_memory_processed_card_uses_write_mode_to_render_rewrite_as_modify() -> 
     assert "修改" in str(result["rewriteHtml"])
     assert "增加" in str(result["addHtml"])
     assert "已应用" not in str(result["rewriteHtml"])
+
+
+def test_memory_processed_card_renders_actual_operations_in_change_order() -> None:
+    result = _run_app_script(
+        """
+        const deleteItem = {
+          batch_id: "delete_c4fa73858ba7",
+          op: "delete",
+          source_op: "delete",
+          status: "applied",
+          write_mode: "rewrite",
+          processed_at: "2026-09-21T15:46:52+08:00",
+          changes: [{ type: "delete", memory_id: "8Qc2OF", original_content: "被删掉的旧规则" }],
+        };
+        const mixedItem = {
+          batch_id: "write_mixed_demo",
+          op: "write",
+          source_op: "write",
+          status: "applied",
+          write_mode: "mixed",
+          processed_at: "2026-09-21T16:00:00+08:00",
+          changes: [
+            { type: "delete", memory_id: "aaa" },
+            { type: "add", memory_id: "bbb", content: "新增规则" },
+            { type: "add", memory_id: "ccc", content: "再一条新增" },
+            { type: "rewrite", memory_id: "ddd", content: "改后", original_content: "改前" },
+            { type: "note_upsert", note_ref: "note_keep", content: "note 正文" },
+          ],
+        };
+
+        __out.deleteHtml = context.__testExports.renderMemoryProcessedCard(deleteItem);
+        __out.mixedHtml = context.__testExports.renderMemoryProcessedCard(mixedItem);
+        __out.deleteLabel = context.__testExports.memoryProcessedOpLabel(deleteItem);
+        __out.mixedLabel = context.__testExports.memoryProcessedOpLabel(mixedItem);
+        __out.mixedKinds = context.__testExports.memoryProcessedOpKinds(mixedItem);
+        """,
+        ["renderMemoryProcessedCard", "memoryProcessedOpLabel", "memoryProcessedOpKinds"],
+    )
+
+    # write_mode=rewrite 的纯删除批次不再显示「修改」
+    delete_html = str(result["deleteHtml"])
+    assert 'data-op="delete"' in delete_html
+    assert "删除" in delete_html
+    assert "修改" not in delete_html
+    assert str(result["deleteLabel"]) == "删除"
+
+    mixed_html = str(result["mixedHtml"])
+    assert list(result["mixedKinds"]) == ["delete", "add", "rewrite", "note_upsert"]
+    positions = [mixed_html.index(f'data-op="{kind}"') for kind in ("delete", "add", "rewrite", "note_upsert")]
+    assert positions == sorted(positions)
+    assert mixed_html.count('class="memory-op-chip"') == 4
+    assert "混合变更" not in mixed_html
+    assert str(result["mixedLabel"]) == "删除 / 增加 / 修改 / 更新 Note"
+
+
+def test_memory_operation_chips_use_one_color_per_operation() -> None:
+    css = (REPO_ROOT / "g3ku/web/frontend/org_graph.css").read_text(encoding="utf-8")
+    colors = dict(re.findall(r'\.memory-op-chip\[data-op="(\w+)"\]\s*\{\s*color:\s*([^;]+);', css))
+
+    assert set(colors) == {"add", "rewrite", "delete", "note_upsert"}
+    assert len(set(colors.values())) == 4
