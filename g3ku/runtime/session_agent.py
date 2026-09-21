@@ -1407,6 +1407,56 @@ class RuntimeAgentSession:
             )
         return flipped
 
+    def _retire_consumed_pending_user_messages(self, persisted_session: Any) -> int:
+        """回合正常完成后，把转录里已不再是排队真相的 pending 用户行翻成 completed。
+
+        pending 行是排队队列的 durable 记录：`queue_follow_up_batch` 入队时写它，
+        `_rehydrate_queued_follow_ups` 在会话重建时按它接回队列。回合完成时内存队列
+        里已经没有这一条，说明本进程不再打算派发它（已被某轮消费，或被更新的输入取
+        代）；行留在 pending 只会让下一次重建把它当作从未回答的提问重新投喂。
+
+        主要漏点是内部（心跳/cron）回合：它在 prepare 阶段清空批次上下文，完成时又
+        整段跳过用户行回写，于是它中途消费的 follow-up 行永远停在 pending。
+
+        与 `_complete_lingering_paused_user_messages` 同一条硬约束：只在正常完成路径
+        调用。错误/取消路径的内存队列可能仍持有这些条目，提前翻体会让 durable 那一
+        半失去真相，消息从此在模型上下文里消失。"""
+        messages = getattr(persisted_session, "messages", None)
+        if not isinstance(messages, list):
+            return 0
+        live_turn_ids = {
+            self._user_input_turn_id(item)
+            for item in list(self._state.queued_follow_up_messages or [])
+            if self._user_input_turn_id(item)
+        }
+        flipped = 0
+        for index, raw in enumerate(list(messages)):
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("role") or "").strip().lower() != "user":
+                continue
+            metadata = raw.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() != _TRANSCRIPT_STATE_PENDING:
+                continue
+            turn_id = str(metadata.get(_TRANSCRIPT_TURN_ID_KEY) or "").strip()
+            if turn_id and turn_id in live_turn_ids:
+                continue
+            updated = dict(raw)
+            updated_metadata = dict(metadata)
+            updated_metadata[_TRANSCRIPT_STATE_KEY] = _TRANSCRIPT_STATE_COMPLETED
+            updated["metadata"] = updated_metadata
+            messages[index] = updated
+            flipped += 1
+        if flipped:
+            logger.info(
+                "Retired {} consumed pending transcript user message(s) for {}",
+                flipped,
+                self._state.session_key,
+            )
+        return flipped
+
     def _discard_internal_prompt_messages(self, persisted_session: Any, turn_id: str) -> int:
         """把指定 turn 的内部提示词消息（心跳/cron 规则 system + 事件束 user）翻成 discarded。
 
@@ -2621,7 +2671,7 @@ class RuntimeAgentSession:
         internal_source: str | None,
         route_kind: str,
         assistant_metadata: dict[str, Any] | None = None,
-        complete_lingering_paused_turns: bool = False,
+        retire_lingering_transcript_rows: bool = False,
     ) -> Any | None:
         persisted_session = None
         try:
@@ -2641,10 +2691,14 @@ class RuntimeAgentSession:
                     visible_user_texts.append(current_text)
                 if visible_user_texts:
                     user_text = visible_user_texts[-1]
-                if complete_lingering_paused_turns:
+                if retire_lingering_transcript_rows:
                     # 仅在正常完成路径清理残留 paused 条目；错误路径的请求体未必完成
                     # 基线回写，提前退役会让暂停消息从模型上下文永久消失。
                     self._complete_lingering_paused_user_messages(persisted_session)
+            if retire_lingering_transcript_rows:
+                # 排队行的退役对用户可见与内部回合都要做：上面整段被 internal 分支跳过，
+                # 而心跳/cron 回合同样会在 prepare 阶段消费排队的 follow-up。
+                self._retire_consumed_pending_user_messages(persisted_session)
             assistant_payload: dict[str, Any] = {}
             canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
@@ -3516,7 +3570,7 @@ class RuntimeAgentSession:
                     internal_source=internal_source,
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                     assistant_metadata=assistant_metadata,
-                    complete_lingering_paused_turns=True,
+                    retire_lingering_transcript_rows=True,
                 )
                 tail_profiler.mark("persist_transcript")
                 if not silent_reply and getattr(self._loop, "memory_manager", None) is not None:
