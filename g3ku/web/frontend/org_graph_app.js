@@ -8491,12 +8491,12 @@ function syncDetailSaveButton(kind) {
     const busy = isSkill ? S.skillBusy : S.toolBusy;
 
     if (button) {
-        button.textContent = busy ? "Saving..." : dirty ? "Save changes" : "Save";
+        button.textContent = busy ? "保存中…" : "保存";
         button.disabled = !!busy || !dirty;
     }
     if (hint) {
         hint.classList.toggle("is-dirty", dirty);
-        hint.textContent = dirty ? (busy ? "正在自动保存..." : "变更已暂存，将自动保存。") : "";
+        hint.textContent = dirty ? (busy ? "正在保存…" : "有未保存的修改，请点击「保存」。") : "";
         hint.hidden = !dirty;
     }
 }

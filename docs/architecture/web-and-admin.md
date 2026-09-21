@@ -625,6 +625,8 @@ The frontend responsibilities are:
 - avoid special-casing CEO for surfaced core tool families,
 - and show a clear operator-visible hint when an action is currently disabled for all roles.
 
+The Skill and Tool detail drawers share one save rule: edits persist only when the operator clicks the `保存` button beside `关闭`, which fires the same policy/file write the toolbar save used to. There is no autosave or debounce, and closing the drawer discards uncommitted edits. New maintainers often misread the draft hint (`有未保存的修改`) as an autosave indicator — it only marks dirty state that a `保存` click must commit.
+
 If an operator reports "save succeeded but reopen restored the roles", first inspect:
 
 1. the Tool Admin save payload,
