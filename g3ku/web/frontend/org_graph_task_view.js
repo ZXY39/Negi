@@ -1950,11 +1950,24 @@ function spawnReviewRoundStatus(round = {}) {
     return "info";
 }
 
+function spawnSpecHasIndependentAcceptance(spec = null) {
+    // 新载荷按 runtime_nodes 判（一个元素=运行时创建的一个独立节点）；历史轮次与
+    // log_service 回落到原始 spec 投影片段时，只能照 requires_acceptance 的推断读。
+    if (Array.isArray(spec?.runtime_nodes)) {
+        return spec.runtime_nodes.some((node) => String(node?.node_kind || "").trim() === "acceptance");
+    }
+    if (typeof spec?.requires_acceptance === "boolean") {
+        return spec.requires_acceptance;
+    }
+    return String(spec?.acceptance_prompt || "").trim() !== "";
+}
+
 function summarizeRequestedSpawnSpecs(specs = []) {
     const lines = (Array.isArray(specs) ? specs : []).map((spec, index) => {
         const goal = String(spec?.goal || "").trim() || `spec ${index + 1}`;
         const mode = String(spec?.execution_policy?.mode || "").trim() || "focus";
-        return `#${index + 1} ${goal} [${mode}]`;
+        const acceptance = spawnSpecHasIndependentAcceptance(spec) ? " [独立验收]" : "";
+        return `#${index + 1} ${goal} [${mode}]${acceptance}`;
     });
     return lines.join("\n");
 }

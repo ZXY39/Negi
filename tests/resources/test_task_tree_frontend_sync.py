@@ -4842,8 +4842,29 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
             round_id: "call:spawn-1",
             reviewed_at: "2026-04-06T12:00:00+08:00",
             requested_specs: [
-              { goal: "blocked branch", prompt: "blocked prompt", execution_policy: { mode: "focus" } },
-              { goal: "allowed branch", prompt: "allowed prompt", execution_policy: { mode: "coverage" } },
+              {
+                goal: "blocked branch",
+                prompt: "blocked prompt",
+                execution_policy: { mode: "focus" },
+                requires_acceptance: false,
+                runtime_nodes: [{ node_kind: "execution" }],
+              },
+              {
+                goal: "allowed branch",
+                prompt: "allowed prompt",
+                execution_policy: { mode: "coverage" },
+                requires_acceptance: true,
+                runtime_nodes: [
+                  { node_kind: "execution" },
+                  { node_kind: "acceptance", goal: "accept:allowed branch", acceptance_prompt: "独立核磁盘" },
+                ],
+              },
+              {
+                goal: "legacy branch",
+                prompt: "legacy prompt",
+                execution_policy: { mode: "focus" },
+                requires_acceptance: true,
+              },
             ],
             allowed_indexes: [1],
             blocked_specs: [
@@ -4893,6 +4914,8 @@ def test_build_spawn_review_trace_steps_formats_blocked_and_allowed_results() ->
     assert "请由父节点直接执行" in result["body"]
     assert "杩斿洖鎽樿" not in result["body"]
     assert "娲剧敓宸茶鎷︽埅锛氭媶鍒嗚繃缁嗭紝鍋忕褰撳墠鐖惰妭鐐圭洰鏍?" not in result["body"]
+    # 带独立验收的候选要在「原始请求」里可辨：解析视图与历史/原始 spec 两条回落都要覆盖。
+    assert result["body"].count("[独立验收]") == 2
     assert result["body"].count('class="task-trace-label"') == 4
     assert result["showStatus"] is False
     assert result["hasStatusBadge"] is False
