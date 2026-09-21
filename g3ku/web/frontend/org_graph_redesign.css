@@ -1713,6 +1713,33 @@
     box-shadow: none;
 }
 
+/* 折叠栏只有 92px：本地/渠道要和上下两枚按钮同宽同高。工具行的轨道不显式
+   声明就按 max-content 收成文字宽，页签永远填不满列；两枚页签保持竖排，
+   每枚才能拿到和收缩/新建按钮一样的整列长度。规则只作用于折叠态，
+   否则展开态的胶囊页签会被 min-height 顶高，把整行基线拉偏。 */
+[data-ui-version="v2"] .ceo-shell:not(.is-session-panel-expanded) .ceo-session-toolbar-row {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+[data-ui-version="v2"] .ceo-shell:not(.is-session-panel-expanded) .ceo-session-tab {
+    height: 42px;
+}
+
+/* 展开态首行同样锁到 42px：胶囊页签组与收缩/新建/多选同一高度，
+   头部行高固定后折叠与展开两态的首按钮才落在同一条基线上。 */
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-header {
+    height: 42px;
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-tabs {
+    height: 42px;
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-bulk-toggle {
+    height: 42px;
+    min-height: 42px;
+}
+
 /* 40. 卡片网格间距：行距加倍、列距加一半 */
 [data-ui-version="v2"] .project-card-grid,
 [data-ui-version="v2"] .resource-list {
@@ -1884,7 +1911,16 @@
     color: var(--ui-text-secondary);
 }
 
-/* 46. 任务大厅头部整体左对齐：多选 → 排序 → 树深度 → 性能读数 */
+/* 46. 任务大厅头部整体左对齐：多选 → 排序 → 树深度 → 性能读数。
+   h1 已经视觉隐藏，但 .task-header-main 仍在流里占一行宽，会把多选推到
+   左内边距 + 标题宽度 + gap 之后；其他页的刷新按钮是绝对定位在左内边距，
+   所以这里把标题容器移出流，让多选与其他页刷新按钮同一 x。 */
+[data-ui-version="v2"] #view-tasks-list .task-header-main {
+    position: absolute;
+    min-height: 0;
+    margin: 0;
+}
+
 [data-ui-version="v2"] #view-tasks-list .task-header-actions {
     justify-content: flex-start;
     margin-left: 0;
