@@ -183,6 +183,12 @@ Two collapse systems exist and must not be merged:
 - `paused` / `queued` / `pending` / `waiting` / `blocked` / `unknown`, plus read-only and disabled → neutral gray.
 - An unmapped `data-status` renders neutral gray with its original text; it never inherits brand or danger styling and never renders unstyled.
 
+### Page Surfaces Are Flat
+
+Admin pages draw one level of boxes only. The page-level containers (`.resource-list-panel`, `.resource-detail-panel`, `.memory-column`, `.audit-feed-panel`) are transparent and borderless, so repeated content — task cards, Skill/Tool cards, model rows, memory records, token rows — is the only framed layer. Drawers and dialogs keep surface fill, border and `--ui-shadow-dialog` because they float above the page rather than nesting inside it. A new admin surface must not wrap content in a second bordered panel.
+
+The task hall header follows the same rule: the pressure state and the CPU/memory/disk reading share one capsule (the load tier stays readable from the value text color, not from a tinted background), and「任务排序」and「全局任务树深度」render as a single button each — label plus current value inside one control — whose dropdown opens on click.
+
 ### Responsive Bands
 
 The task hall grid is content-sized — `repeat(auto-fill, minmax(300px, 1fr))` — so its column count follows the available width, and a long token count wraps inside a fixed-size card rather than the card shrinking to fit one line. Every other page grid may only use the shared bands 1200 / 1024 / 900 / 768 / 640px: Skill/Tool cards step 4 → 3 → 2 → 1 at 1200 / 1024 / 768; model role cards 4 → 2 → 1 at 1200 / 1024; memory keeps two columns at ≥1024px; external access keeps two columns at ≥900px. When space runs short between two bands, tighten gap, card padding and control min-width before dropping a column, and never add a page-specific breakpoint.

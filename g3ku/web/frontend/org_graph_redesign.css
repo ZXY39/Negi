@@ -700,14 +700,24 @@
     color: var(--ui-text-muted);
 }
 
-/* 11. 面板 */
-[data-ui-version="v2"] .panel,
-[data-ui-version="v2"] .resource-list-panel,
-[data-ui-version="v2"] .resource-detail-panel {
+/* 11. 面板：抽屉与弹窗保留浮层质感，页面内的容器一律扁平 */
+[data-ui-version="v2"] .panel {
     background: var(--ui-bg-surface);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
     box-shadow: none;
+}
+
+[data-ui-version="v2"] .resource-list-panel:not(.detail-drawer),
+[data-ui-version="v2"] .resource-detail-panel:not(.detail-drawer),
+[data-ui-version="v2"] .memory-column,
+[data-ui-version="v2"] .audit-feed-panel {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    padding-left: 0;
+    padding-right: 0;
 }
 
 [data-ui-version="v2"] .panel-header {
@@ -1093,9 +1103,8 @@
     }
 }
 
-/* 19. 管理页主体宽度与内边距 */
-[data-ui-version="v2"] .task-list-panel,
-[data-ui-version="v2"] .resource-list-panel,
+/* 19. 页面主体宽度与内边距：内边距只加在页面容器上，面板层已扁平 */
+[data-ui-version="v2"] .resource-layout,
 [data-ui-version="v2"] .memory-layout,
 [data-ui-version="v2"] .external-api-shell,
 [data-ui-version="v2"] .llm-page-layout,
@@ -1367,9 +1376,6 @@
 /* 24. 记忆管理 */
 [data-ui-version="v2"] .memory-column {
     min-height: 0;
-    border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-card);
-    background: var(--ui-bg-surface);
 }
 
 [data-ui-version="v2"] .memory-card {
@@ -1434,4 +1440,94 @@
         width: 100%;
         flex-wrap: wrap;
     }
+}
+
+/* 27. 任务状态栏：压力状态与资源读数共用一个胶囊 */
+[data-ui-version="v2"] .task-performance-bar > .task-performance-item:nth-child(1),
+[data-ui-version="v2"] .task-performance-bar > .task-performance-item:nth-child(2) {
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+@media (min-width: 768px) {
+
+    [data-ui-version="v2"] .task-performance-bar > .task-performance-item:nth-child(1) {
+        margin-right: calc(var(--ui-space-2) * -1);
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+        border-right-color: transparent;
+    }
+
+    [data-ui-version="v2"] .task-performance-bar > .task-performance-item:nth-child(2) {
+        border-top-left-radius: 0;
+        border-bottom-left-radius: 0;
+        border-left-color: transparent;
+    }
+}
+
+/* 底色统一后，压力档位改由数值颜色与文字表达 */
+[data-ui-version="v2"] .task-performance-item--state[data-state="normal"] .task-performance-value {
+    color: var(--ui-success);
+}
+
+[data-ui-version="v2"] .task-performance-item--state[data-state="easing"] .task-performance-value {
+    color: var(--ui-brand);
+}
+
+[data-ui-version="v2"] .task-performance-item--state[data-state="throttled"] .task-performance-value {
+    color: var(--ui-warning);
+}
+
+[data-ui-version="v2"] .task-performance-item--state[data-state="critical"] .task-performance-value,
+[data-ui-version="v2"] .task-performance-item--state[data-state="unfresh"] .task-performance-value,
+[data-ui-version="v2"] .task-performance-item--state[data-state="stale"] .task-performance-value,
+[data-ui-version="v2"] .task-performance-item--state[data-state="starting"] .task-performance-value,
+[data-ui-version="v2"] .task-performance-item--state[data-state="offline"] .task-performance-value {
+    color: var(--ui-danger);
+}
+
+/* 28. 任务排序与树深度：标签并入控件，整体是一个按钮，点击才展开下拉 */
+[data-ui-version="v2"] .task-depth-setting-main {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    height: 38px;
+    padding: 0 var(--ui-space-1) 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    cursor: pointer;
+}
+
+[data-ui-version="v2"] .task-depth-setting-main:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-neutral-soft);
+}
+
+[data-ui-version="v2"] .task-depth-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ui-text-muted);
+}
+
+[data-ui-version="v2"] .task-depth-setting-main .resource-select-shell {
+    width: auto;
+}
+
+[data-ui-version="v2"] .task-depth-setting-main .resource-select-trigger {
+    width: auto;
+    min-height: 34px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: var(--ui-radius-control);
+    background: transparent;
+    box-shadow: none;
+    color: var(--ui-text);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+[data-ui-version="v2"] .task-depth-setting-main .resource-select-trigger:hover {
+    background: transparent;
+    border-color: transparent;
 }
