@@ -1695,3 +1695,56 @@
 [data-ui-version="v2"] .notice-item {
     border-left: 0;
 }
+
+/* 42. 模型页：目录标题与搜索框对齐右侧角色卡标题，条目样式与模型链一致 */
+[data-ui-version="v2"] .llm-bindings-panel .panel-header .subtitle {
+    display: none;
+}
+
+[data-ui-version="v2"] .llm-bindings-panel {
+    padding: 0;
+}
+
+[data-ui-version="v2"] .llm-bindings-panel .panel-header {
+    align-items: center;
+    padding: 0 0 var(--ui-space-3);
+    border-bottom: 0;
+}
+
+[data-ui-version="v2"] .model-shared-actions {
+    width: auto;
+    min-width: 220px;
+}
+
+[data-ui-version="v2"] .llm-bindings-panel .panel-header h3,
+[data-ui-version="v2"] .model-chain-card .card-header h3 {
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 42px;
+}
+
+[data-ui-version="v2"] .model-shared-list {
+    gap: var(--ui-space-3);
+    padding: 0;
+}
+
+[data-ui-version="v2"] .llm-binding-card.model-available-item {
+    padding: var(--ui-space-4);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-subtle);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .llm-binding-card.model-available-item:hover {
+    border-color: var(--ui-border-strong);
+    background: var(--ui-bg-elevated);
+    transform: none;
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .model-available-item .resource-list-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--ui-text);
+}
