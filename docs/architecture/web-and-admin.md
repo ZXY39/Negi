@@ -190,6 +190,8 @@ Two collapse systems exist and must not be merged:
 
 Admin pages draw one level of boxes only. The page-level containers (`.resource-list-panel`, `.resource-detail-panel`, `.memory-column`, `.audit-feed-panel`) are transparent and borderless, so repeated content — task cards, Skill/Tool cards, model rows, memory records, token rows — is the only framed layer. Drawers and dialogs keep surface fill, border and `--ui-shadow-dialog` because they float above the page rather than nesting inside it. A new admin surface must not wrap content in a second bordered panel.
 
+Each view's own `<h1>` page title is visually hidden (clipped to 1px, kept in the accessibility tree) because the top bar already marks the current section; the header row keeps only its toolbar and status content. Do not delete the `<h1>` — it is the page's accessible name.
+
 The task hall header follows the same rule: the pressure state and the CPU/memory/disk reading share one capsule, and each of the three resource numbers colors itself by its own occupancy tier (≥75% warning, ≥90% danger) so the reading is not pinned to one color.「任务排序」and「全局任务树深度」are single borderless buttons carrying only their name and a chevron — the chosen option is not echoed on the button — and their dropdown appears below the button on click. At ≥1200px the title, the status capsules and these two buttons share one row.
 
 ### Responsive Bands
