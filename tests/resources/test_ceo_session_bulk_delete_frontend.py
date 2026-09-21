@@ -106,7 +106,9 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert 'id="tool-governance-banner"' not in skill_html
     assert skill_html.index('id="skill-risk-filter"') < skill_html.index('id="skill-status-filter"')
     assert skill_html.index('id="skill-status-filter"') < skill_html.index('id="skill-search-input"')
-    assert skill_html.count('>全部</option>') == 2
+    # 两个筛选并列后 value=all 的占位项按筛选名标注，不再共用「全部」
+    assert skill_html.count('<option value="all">风险</option>') == 1
+    assert skill_html.count('<option value="all">状态</option>') == 1
 
     tool_section = re.search(r'<section id="view-tools".*?</section>', html, flags=re.DOTALL)
     assert tool_section is not None
@@ -117,7 +119,8 @@ def test_resource_headers_and_ceo_bulk_actions_follow_latest_layout() -> None:
     assert tool_html.index('id="tool-governance-banner"') < tool_html.index('id="tool-risk-filter"')
     assert tool_html.index('id="tool-risk-filter"') < tool_html.index('id="tool-status-filter"')
     assert tool_html.index('id="tool-status-filter"') < tool_html.index('id="tool-search-input"')
-    assert tool_html.count('>全部</option>') == 2
+    assert tool_html.count('<option value="all">风险</option>') == 1
+    assert tool_html.count('<option value="all">状态</option>') == 1
 
     model_section = re.search(r'<section id="view-models".*?</section>', html, flags=re.DOTALL)
     assert model_section is not None

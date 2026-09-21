@@ -540,13 +540,14 @@ def test_memory_processed_card_renders_discarded_rows_as_no_change_status_only()
     )
 
     rendered = str(result["html"])
+    # 已废弃/未落地的批次不额外挂状态徽章，只在操作槽给出「保持」胶囊
     assert 'data-status="success"' not in rendered
-    assert 'data-status="pending"' in rendered
+    assert 'data-op="nochange"' in rendered
     assert 'data-memory-detail-open="processed"' in rendered
     assert "policy-chip" not in rendered
     assert "memory-card-time" in rendered
     assert "memory-card-arrow" in rendered
-    assert "无变更" in rendered
+    assert "保持" in rendered
     assert "已废弃" not in rendered
 
 
@@ -799,7 +800,7 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
 
         vm.createContext(context);
         vm.runInContext(
-          `${appCode}\\nthis.__testExports = { renderMemoryProcessedCard, memoryProcessedStatusLabel, memoryProcessedBadgeStatus, memoryProcessedOpLabel };`,
+          `${appCode}\\nthis.__testExports = { renderMemoryProcessedCard, memoryProcessedStatusLabel, memoryProcessedOpLabel };`,
           context,
         );
 
@@ -823,26 +824,26 @@ def test_memory_processed_noop_and_discarded_batches_render_as_no_change() -> No
         console.log(JSON.stringify({
           noopStatusLabel: context.__testExports.memoryProcessedStatusLabel(noopItem),
           noopOpLabel: context.__testExports.memoryProcessedOpLabel(noopItem),
-          noopBadgeStatus: context.__testExports.memoryProcessedBadgeStatus(noopItem),
           noopHtml: context.__testExports.renderMemoryProcessedCard(noopItem),
           discardedStatusLabel: context.__testExports.memoryProcessedStatusLabel(discardedItem),
           discardedOpLabel: context.__testExports.memoryProcessedOpLabel(discardedItem),
-          discardedBadgeStatus: context.__testExports.memoryProcessedBadgeStatus(discardedItem),
           discardedHtml: context.__testExports.renderMemoryProcessedCard(discardedItem),
         }));
         """
     )
 
+    # 详情面板说明批次性质用「无变更」，列表里的操作胶囊只留两字「保持」
     assert str(result["noopStatusLabel"]) == "无变更"
-    assert str(result["noopOpLabel"]) == "无变更"
-    assert str(result["noopBadgeStatus"]) == "pending"
-    assert "无变更" in str(result["noopHtml"])
+    assert str(result["noopOpLabel"]) == "保持"
+    assert 'data-op="nochange"' in str(result["noopHtml"])
+    assert "保持" in str(result["noopHtml"])
+    assert "无变更" not in str(result["noopHtml"])
     assert "增加" not in str(result["noopHtml"])
 
     assert str(result["discardedStatusLabel"]) == "无变更"
-    assert str(result["discardedOpLabel"]) == "无变更"
-    assert str(result["discardedBadgeStatus"]) == "pending"
-    assert "无变更" in str(result["discardedHtml"])
+    assert str(result["discardedOpLabel"]) == "保持"
+    assert 'data-op="nochange"' in str(result["discardedHtml"])
+    assert "保持" in str(result["discardedHtml"])
     assert "已废弃" not in str(result["discardedHtml"])
 
 
