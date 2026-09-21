@@ -883,8 +883,12 @@
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-card {
     min-height: 72px;
-    padding: 10px 12px;
-    gap: var(--ui-space-1);
+    padding: 12px var(--ui-space-4);
+    gap: var(--ui-space-2);
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-body {
+    gap: var(--ui-space-2);
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-preview {
@@ -1568,7 +1572,7 @@
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-list {
-    gap: var(--ui-space-3);
+    gap: var(--ui-space-4);
 }
 
 [data-ui-version="v2"] .task-depth-setting-main .resource-select-trigger:hover {
