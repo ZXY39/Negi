@@ -947,7 +947,6 @@ async function refreshSkills() {
         if (selectedId && S.skills.some((skill) => skill.skill_id === selectedId)) {
             await openSkill(selectedId);
         }
-        addNotice({ kind: "resource_refreshed", title: "Skills refreshed", text: "Resource registry reloaded." });
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Skill refresh failed", text: e.message || "Unknown error" });
     } finally {
@@ -966,7 +965,6 @@ async function refreshTools() {
         if (selectedId && S.tools.some((tool) => tool.tool_id === selectedId)) {
             await openTool(selectedId);
         }
-        addNotice({ kind: "resource_refreshed", title: "Tools refreshed", text: "Resource registry reloaded." });
     } catch (e) {
         addNotice({ kind: "resource_failed", title: "Tool refresh failed", text: e.message || "Unknown error" });
     } finally {
