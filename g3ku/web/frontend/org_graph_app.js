@@ -428,6 +428,10 @@ const S = {
 const U = {
     nav: [...document.querySelectorAll(".nav-item")],
     theme: document.getElementById("theme-toggle"),
+    sidebar: document.querySelector(".sidebar"),
+    sidebarToggle: document.getElementById("sidebar-toggle"),
+    sidebarOpenBtn: document.getElementById("sidebar-open-btn"),
+    sidebarBackdrop: document.getElementById("sidebar-backdrop"),
     ceoShell: document.getElementById("ceo-shell"),
     ceoSessionPanel: document.getElementById("ceo-session-panel"),
     ceoSessionPanelToggle: document.getElementById("ceo-session-panel-toggle"),
@@ -13695,14 +13699,11 @@ function switchView(view) {
 
 function toggleTheme() {
     const html = document.documentElement;
-    const dark = html.getAttribute("data-theme") === "dark";
-    html.setAttribute("data-theme", dark ? "light" : "dark");
-    const darkIcon = U.theme?.querySelector(".dark-icon");
-    const lightIcon = U.theme?.querySelector(".light-icon");
-    if (darkIcon && lightIcon) {
-        darkIcon.style.display = dark ? "none" : "block";
-        lightIcon.style.display = dark ? "block" : "none";
-    }
+    const theme = html.getAttribute("data-theme") === "light" ? "dark" : "light";
+    html.setAttribute("data-theme", theme);
+    syncThemeToggleIcons();
+    updateThemeToggleA11y();
+    writeStoredUiPreference(THEME_KEY, theme);
 }
 
 function bindModelRetryToastExpansion() {
@@ -13718,6 +13719,151 @@ function bindModelRetryToastExpansion() {
         if (!retryToast) return;
         event.preventDefault();
         toggleModelRetryToastExpanded(retryToast);
+    });
+}
+
+const SIDEBAR_COLLAPSED_KEY = "g3ku.ui.sidebar.collapsed.v1";
+const THEME_KEY = "g3ku.ui.theme.v1";
+let uiMobileMql = null;
+let uiDesktopWideMql = null;
+let uiSidebarCollapsed = false;
+let uiMobileNavOpen = false;
+
+function readStoredUiPreference(key) {
+    try {
+        return window.localStorage.getItem(key);
+    } catch (error) {
+        return null;
+    }
+}
+
+function writeStoredUiPreference(key, value) {
+    try {
+        window.localStorage.setItem(key, value);
+    } catch (error) {
+        // 隐私模式或存储不可用：偏好退化为本次会话内有效。
+    }
+}
+
+function isMobileViewport() {
+    return !!(uiMobileMql && uiMobileMql.matches);
+}
+
+function isDesktopWide() {
+    return !!(uiDesktopWideMql && uiDesktopWideMql.matches);
+}
+
+function readSidebarPreference() {
+    const raw = readStoredUiPreference(SIDEBAR_COLLAPSED_KEY);
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    return null;
+}
+
+function updateSidebarButtonA11y() {
+    const mobile = isMobileViewport();
+    if (U.sidebarToggle) {
+        const label = mobile ? "关闭导航" : (uiSidebarCollapsed ? "展开导航" : "折叠导航");
+        U.sidebarToggle.setAttribute("aria-label", label);
+        U.sidebarToggle.setAttribute("title", label);
+        U.sidebarToggle.setAttribute("aria-expanded", String(mobile ? uiMobileNavOpen : !uiSidebarCollapsed));
+    }
+    if (U.sidebarOpenBtn) {
+        U.sidebarOpenBtn.setAttribute("aria-expanded", String(uiMobileNavOpen));
+    }
+}
+
+function applySidebarState(state) {
+    uiSidebarCollapsed = !!state;
+    U.sidebar?.classList.toggle("is-collapsed", uiSidebarCollapsed);
+    updateSidebarButtonA11y();
+}
+
+function openMobileSidebar() {
+    uiMobileNavOpen = true;
+    U.sidebar?.classList.add("is-mobile-open");
+    if (U.sidebarBackdrop) U.sidebarBackdrop.hidden = false;
+    updateSidebarButtonA11y();
+}
+
+function closeMobileSidebar() {
+    const wasOpen = uiMobileNavOpen;
+    uiMobileNavOpen = false;
+    U.sidebar?.classList.remove("is-mobile-open");
+    if (U.sidebarBackdrop) U.sidebarBackdrop.hidden = true;
+    if (wasOpen && U.sidebar?.contains(document.activeElement)) {
+        U.sidebarOpenBtn?.focus?.({ preventScroll: true });
+    }
+    updateSidebarButtonA11y();
+}
+
+function toggleSidebar() {
+    if (isMobileViewport()) {
+        if (uiMobileNavOpen) closeMobileSidebar();
+        else openMobileSidebar();
+        return;
+    }
+    const next = !uiSidebarCollapsed;
+    applySidebarState(next);
+    writeStoredUiPreference(SIDEBAR_COLLAPSED_KEY, String(next));
+}
+
+function handleSidebarViewportChange() {
+    if (isMobileViewport()) {
+        closeMobileSidebar();
+        updateSidebarButtonA11y();
+        return;
+    }
+    closeMobileSidebar();
+    const stored = readSidebarPreference();
+    if (stored === null) applySidebarState(!isDesktopWide());
+    else updateSidebarButtonA11y();
+}
+
+function syncThemeToggleIcons() {
+    const dark = document.documentElement.getAttribute("data-theme") !== "light";
+    const darkIcon = U.theme?.querySelector(".dark-icon");
+    const lightIcon = U.theme?.querySelector(".light-icon");
+    if (darkIcon) darkIcon.style.display = dark ? "block" : "none";
+    if (lightIcon) lightIcon.style.display = dark ? "none" : "block";
+}
+
+function updateThemeToggleA11y() {
+    if (!U.theme) return;
+    const label = document.documentElement.getAttribute("data-theme") === "light" ? "切换到深色主题" : "切换到亮色主题";
+    U.theme.setAttribute("aria-label", label);
+    U.theme.setAttribute("title", label);
+}
+
+function initializeTheme() {
+    const theme = readStoredUiPreference(THEME_KEY) === "light" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", theme);
+    syncThemeToggleIcons();
+    updateThemeToggleA11y();
+}
+
+function initializeUiPreferences() {
+    if (window.matchMedia) {
+        uiMobileMql = window.matchMedia("(max-width: 767.98px)");
+        uiDesktopWideMql = window.matchMedia("(min-width: 1200px)");
+    }
+    initializeTheme();
+    const stored = readSidebarPreference();
+    applySidebarState(stored === null ? !isDesktopWide() : stored);
+
+    U.sidebarToggle?.addEventListener("click", toggleSidebar);
+    U.sidebarOpenBtn?.addEventListener("click", openMobileSidebar);
+    U.sidebarBackdrop?.addEventListener("click", closeMobileSidebar);
+    U.nav.forEach((btn) => btn.addEventListener("click", () => {
+        if (uiMobileNavOpen) closeMobileSidebar();
+    }));
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && uiMobileNavOpen) closeMobileSidebar();
+    });
+    [uiMobileMql, uiDesktopWideMql].forEach((mql) => {
+        if (!mql) return;
+        if (typeof mql.addEventListener === "function") mql.addEventListener("change", handleSidebarViewportChange);
+        else if (typeof mql.addListener === "function") mql.addListener(handleSidebarViewportChange);
     });
 }
 
@@ -14402,5 +14548,6 @@ function init() {
     });
 }
 
+initializeUiPreferences();
 document.addEventListener("DOMContentLoaded", maybeInit);
 window.addEventListener("g3ku:boot-unlocked", maybeInit);
