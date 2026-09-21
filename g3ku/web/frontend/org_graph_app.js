@@ -13561,23 +13561,36 @@ async function loadMemoryView({ force = false, quiet = false } = {}) {
     }
 }
 
+const MEMORY_QUEUE_BODY_CHARS = 900;
+
+function memoryQueueSourceLabel(item) {
+    const decision = String(item?.decision_source || "").trim().toLowerCase();
+    const trigger = String(item?.trigger_source || "").trim().toLowerCase();
+    if (decision === "user") return "用户指令";
+    if (trigger.startsWith("autonomous_review")) return "自动复核";
+    if (trigger) return "工具调用";
+    return "自动触发";
+}
+
 function renderMemoryQueueCard(item) {
     const requestId = String(item?.request_id || "").trim();
     const statusText = memoryStatusLabel(item?.status);
     const createdAt = formatCompactTime(item?.created_at) || String(item?.created_at || "");
+    const body = String(item?.payload_text || "").replace(/\s+/g, " ").trim();
+    const preview = body.length > MEMORY_QUEUE_BODY_CHARS
+        ? `${body.slice(0, MEMORY_QUEUE_BODY_CHARS)}…`
+        : body;
     return `
-        <article class="memory-card memory-card-compact" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="打开队列请求详情">
-            <div class="memory-card-summary">
-                <div class="memory-card-minimal-row">
-                    <div class="memory-card-minimal-status">
-                        <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
-                    </div>
-                    <div class="memory-card-minimal-trailing">
-                        <span class="memory-card-time">${esc(createdAt || "-")}</span>
-                        <span class="memory-card-arrow" aria-hidden="true">›</span>
-                    </div>
+        <article class="memory-card memory-card-queue" data-memory-card="queue" data-memory-detail-open="queue" data-memory-detail-key="${esc(requestId)}" role="button" tabindex="0" aria-label="打开队列请求详情">
+            <div class="memory-card-head">
+                <div class="memory-card-minimal-status">
+                    <span class="status-badge" data-status="${esc(String(item?.status || "pending"))}">${esc(statusText)}</span>
                 </div>
+                <span class="memory-card-source">${esc(memoryQueueSourceLabel(item))}</span>
+                <span class="memory-card-time">${esc(createdAt || "-")}</span>
+                <span class="memory-card-arrow" aria-hidden="true">›</span>
             </div>
+            <p class="memory-card-body">${esc(preview || "（无正文）")}</p>
         </article>
     `;
 }

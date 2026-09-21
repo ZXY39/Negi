@@ -1724,6 +1724,8 @@
 }
 
 [data-ui-version="v2"] .model-shared-list {
+    display: grid;
+    grid-auto-rows: min-content;
     gap: var(--ui-space-3);
     padding: 0;
 }
@@ -1747,4 +1749,57 @@
     font-size: 14px;
     font-weight: 700;
     color: var(--ui-text);
+}
+
+/* 43. 待处理记忆：长卡片显示状态 / 来源 / 时间 / 正文，一屏约两张，其余滚动 */
+[data-ui-version="v2"] .memory-card-queue {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-3);
+    min-height: 300px;
+    padding: var(--ui-space-4);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-elevated);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .memory-card-queue .memory-card-head {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+}
+
+[data-ui-version="v2"] .memory-card-queue .memory-card-source {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ui-text-secondary);
+}
+
+[data-ui-version="v2"] .memory-card-queue .memory-card-time {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--ui-text-muted);
+}
+
+[data-ui-version="v2"] .memory-card-queue .memory-card-body {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 14;
+    overflow: hidden;
+    min-height: 0;
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--ui-text-secondary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* 44. 「无变更」徽标与 删除/修改/增加 操作 chip 同一套盒子 */
+[data-ui-version="v2"] .memory-card-minimal-status .status-badge {
+    height: 24px;
+    padding: 2px 10px;
+    gap: 5px;
+    border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    background: color-mix(in srgb, currentColor 9%, var(--ui-bg-surface));
 }
