@@ -1408,6 +1408,7 @@
 }
 
 [data-ui-version="v2"] .task-depth-setting-main {
+    position: relative;
     display: inline-flex;
     align-items: center;
     gap: var(--ui-space-2);
@@ -1425,29 +1426,34 @@
     background: var(--ui-neutral-soft);
 }
 
-[data-ui-version="v2"] .task-depth-label {
+/* 触发区铺满整颗按钮：点标签文字也要能展开下拉 */
+[data-ui-version="v2"] .task-depth-setting .resource-select-shell,
+[data-ui-version="v2"] .task-sort-setting .resource-select-shell {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    flex: none;
+}
+
+[data-ui-version="v2"] .task-depth-setting .task-depth-label,
+[data-ui-version="v2"] .task-sort-setting .task-depth-label {
     font-size: 13px;
     font-weight: 600;
     color: var(--ui-text-secondary);
-}
-
-[data-ui-version="v2"] .task-depth-setting .resource-select-shell,
-[data-ui-version="v2"] .task-sort-setting .resource-select-shell {
-    width: 16px;
-    flex: 0 0 16px;
+    pointer-events: none;
 }
 
 [data-ui-version="v2"] .task-depth-setting .resource-select-trigger,
 [data-ui-version="v2"] .task-sort-setting .resource-select-trigger {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 26px;
+    justify-content: flex-end;
+    width: 100%;
+    height: 100%;
     min-height: 0;
-    padding: 0;
+    padding: 0 var(--ui-space-2) 0 0;
     border: 0;
-    border-radius: 0;
+    border-radius: var(--ui-radius-control);
     background: transparent;
     box-shadow: none;
     color: var(--ui-text);
@@ -1470,13 +1476,14 @@
     height: 16px;
 }
 
+/* 下拉面板与按钮同宽：shell 已铺满按钮，left/right 归零即等宽 */
 [data-ui-version="v2"] .task-depth-setting .resource-select-menu,
 [data-ui-version="v2"] .task-sort-setting .resource-select-menu {
-    left: 50%;
-    right: auto;
-    transform: translateX(-50%);
-    width: 168px;
-    min-width: 168px;
+    left: 0;
+    right: 0;
+    transform: none;
+    width: auto;
+    min-width: 0;
     gap: 2px;
     padding: var(--ui-space-1);
     border-radius: var(--ui-radius-card);
@@ -1562,7 +1569,13 @@
 }
 
 /* 34. 页面大标题不再显示：顶栏已经标明当前板块，h1 只保留给读屏定位 */
-[data-ui-version="v2"] .content-header .resource-header-title > h1 {
+[data-ui-version="v2"] .content-header {
+    position: relative;
+    min-height: 56px;
+    padding: var(--ui-space-2) var(--ui-space-6);
+}
+
+[data-ui-version="v2"] .content-header h1 {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1574,7 +1587,46 @@
     border: 0;
 }
 
-[data-ui-version="v2"] .content-header {
-    min-height: 56px;
-    padding: var(--ui-space-2) var(--ui-space-6);
+/* 35. 刷新按钮固定到头部左端，右侧只留其余操作 */
+[data-ui-version="v2"] .content-header #skill-refresh-btn,
+[data-ui-version="v2"] .content-header #tool-refresh-btn,
+[data-ui-version="v2"] .content-header #memory-refresh-btn,
+[data-ui-version="v2"] .content-header #model-refresh-btn,
+[data-ui-version="v2"] .content-header #external-refresh-btn,
+[data-ui-version="v2"] .content-header #audit-refresh-btn {
+    position: absolute;
+    left: var(--ui-space-6);
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+/* 36. 任务 / Skill / Tool 的滚动条贴右边缘，静止 2 倍宽、悬停 4 倍宽 */
+[data-ui-version="v2"] .project-card-grid,
+[data-ui-version="v2"] .resource-list {
+    margin-right: calc(var(--ui-space-3) * -1);
+    padding-right: var(--ui-space-3);
+    /* 旧样式给全局设了 scrollbar-color，Chromium 会因此忽略 ::-webkit-scrollbar；
+       回到 initial 才能自定义宽度。 */
+    scrollbar-width: auto;
+    scrollbar-color: initial;
+}
+
+[data-ui-version="v2"] .project-card-grid::-webkit-scrollbar,
+[data-ui-version="v2"] .resource-list::-webkit-scrollbar {
+    width: 24px;
+}
+
+[data-ui-version="v2"] .project-card-grid::-webkit-scrollbar-thumb,
+[data-ui-version="v2"] .resource-list::-webkit-scrollbar-thumb {
+    border: 6px solid transparent;
+}
+
+[data-ui-version="v2"] .project-card-grid:hover::-webkit-scrollbar,
+[data-ui-version="v2"] .resource-list:hover::-webkit-scrollbar {
+    width: 48px;
+}
+
+[data-ui-version="v2"] .project-card-grid:hover::-webkit-scrollbar-thumb,
+[data-ui-version="v2"] .resource-list:hover::-webkit-scrollbar-thumb {
+    border-width: 12px;
 }
