@@ -5095,7 +5095,7 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
           treeNodesById: {
             "node:root": node("node:root", {
               parent_node_id: null,
-              rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:submitted", "node:busy", "node:idle", "node:spawn"] }],
+              rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:submitted", "node:busy", "node:idle", "node:spawn", "node:stalled"] }],
             }),
             "node:submitted": node("node:submitted", {
               status: "success",
@@ -5112,6 +5112,7 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
             "node:busy": node("node:busy"),
             "node:idle": node("node:idle"),
             "node:spawn": node("node:spawn"),
+            "node:stalled": node("node:stalled"),
           },
           liveFrameMap: {
             "node:root": { node_id: "node:root", phase: "waiting_children", tool_calls: [], child_pipelines: [{ index: 1, status: "running" }] },
@@ -5122,6 +5123,13 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
               phase: "waiting_tool_results",
               tool_calls: [{ tool_call_id: "t2", tool_name: "spawn_child_nodes", status: "running" }],
               child_pipelines: [{ index: 0, status: "queued" }],
+            },
+            "node:stalled": {
+              node_id: "node:stalled",
+              phase: "before_model",
+              stale: true,
+              tool_calls: [],
+              child_pipelines: [],
             },
           },
           taskRuntimeSummary: null,
@@ -5160,9 +5168,77 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
         "node:idle": "等待中",
         # 派生工具在飞、子节点还没返回：等子节点的结果，不是运行中。
         "node:spawn": "等待中",
+        # 后端标记的陈旧帧不再证明有人在跑：等待中。
+        "node:stalled": "等待中",
         "node:acc-running": "检验中",
         "node:acc-queued": "等待中",
     }
+
+
+def test_sync_selected_task_node_detail_status_follows_live_frames() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          treeRootNodeId: "node:root",
+          treeSelectedRoundByNodeId: {},
+          currentTask: { task_id: "task:test", status: "in_progress" },
+          selectedNodeId: "node:acc",
+          currentNodeDetail: { node_id: "node:acc", status: "in_progress" },
+          treeNodesById: {
+            "node:root": {
+              node_id: "node:root",
+              node_kind: "execution",
+              status: "in_progress",
+              title: "root",
+              rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:acc"] }],
+              auxiliary_child_ids: [],
+              parent_visible: true,
+            },
+            "node:acc": {
+              node_id: "node:acc",
+              parent_node_id: "node:root",
+              node_kind: "acceptance",
+              status: "in_progress",
+              title: "acc",
+              rounds: [],
+              auxiliary_child_ids: [],
+              parent_visible: true,
+            },
+          },
+          liveFrameMap: { "node:acc": { node_id: "node:acc", phase: "before_model", tool_calls: [], child_pipelines: [] } },
+          taskRuntimeSummary: null,
+        };
+        global.U = { adStatus: { textContent: "", dataset: {} } };
+        global.ApiClient = {};
+        global.showToast = () => {};
+        global.isAbortLike = () => false;
+        global.renderTree = () => {};
+        global.esc = (value) => String(value ?? "");
+        global.readableText = (value, { emptyText = "" } = {}) => {
+          const text = String(value ?? "").trim();
+          return text || emptyText;
+        };
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        const snapshot = () => [U.adStatus.textContent, U.adStatus.dataset.status];
+        syncSelectedTaskNodeDetailStatus(buildExecutionTreeFromSnapshot());
+        const inspecting = snapshot();
+        S.liveFrameMap = { "node:acc": { node_id: "node:acc", phase: "before_model", stale: true, tool_calls: [], child_pipelines: [] } };
+        syncSelectedTaskNodeDetailStatus(buildExecutionTreeFromSnapshot());
+        const stalled = snapshot();
+        S.selectedNodeId = "node:other";
+        syncSelectedTaskNodeDetailStatus(buildExecutionTreeFromSnapshot());
+        console.log(JSON.stringify({ inspecting, stalled, untouched: snapshot() }));
+        """
+    )
+
+    assert result["inspecting"] == ["检验中", "inspecting"]
+    # 帧被后端判为陈旧后，抽屉那行与树徽标一起退到等待中，不需要重开抽屉。
+    assert result["stalled"] == ["等待中", "waiting"]
+    assert result["untouched"] == result["stalled"]
 
 
 def test_build_execution_trace_steps_excludes_spawn_review_rounds() -> None:

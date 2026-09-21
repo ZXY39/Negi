@@ -42,6 +42,7 @@ from main.models import (
 )
 from main.monitoring.execution_trace import build_execution_trace
 from main.monitoring.file_store import TaskFileStore
+from main.monitoring.frame_liveness import frame_is_stale
 from main.monitoring.models import (
     TaskProjectionNodeDetailRecord,
     TaskProjectionNodeRecord,
@@ -4814,6 +4815,7 @@ class TaskLogService:
             'depth': int(record.depth or 0),
             'node_kind': str(record.node_kind or 'execution'),
             'phase': str(record.phase or ''),
+            'stale': frame_is_stale(record.updated_at),
             'await_marker': str(payload.get('await_marker') or ''),
             'await_started_at': str(payload.get('await_started_at') or ''),
             'model_retry_status': self._sanitize_model_retry_status(
@@ -5397,7 +5399,10 @@ class TaskLogService:
                 'dispatch_queued': dict(runtime_meta.get('dispatch_queued') or {}),
                 'governance': dict(runtime_meta.get('governance') or {}),
                 'distribution': dict(runtime_meta.get('distribution') or {}),
-                'frames': [dict(record.payload or {}) for record in frame_records],
+                'frames': [
+                    {**dict(record.payload or {}), 'stale': frame_is_stale(record.updated_at)}
+                    for record in frame_records
+                ],
             }
         return {
             'active_node_ids': [str(item) for item in list(state.get('active_node_ids') or []) if str(item or '').strip()],
@@ -5629,6 +5634,7 @@ class TaskLogService:
             'depth': int(payload.get('depth') or 0),
             'node_kind': str(payload.get('node_kind') or 'execution'),
             'phase': str(payload.get('phase') or ''),
+            'stale': bool(payload.get('stale')),
             'await_marker': str(payload.get('await_marker') or ''),
             'await_started_at': str(payload.get('await_started_at') or ''),
             'model_retry_status': TaskLogService._sanitize_model_retry_status(

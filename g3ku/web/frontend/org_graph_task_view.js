@@ -769,11 +769,11 @@ function isActiveChildPipelineStatus(status) {
     return normalized === "queued" || normalized === "running";
 }
 
-// 该节点的回合是否还在自己执行。等子节点（派生工具未返回、或等验收结论）不算在
-// 执行——那一帧虽然在，但节点眼下什么都不做。相位集合与在飞工具判据必须与
-// main/monitoring/log_service.py::_frame_index_payload 的 runnable 口径同源。
+// 节点是否还在自己的回合里：等子节点（派生工具未返回、或等验收结论）与后端标记的
+// 陈旧帧都不算在执行。相位集合须与 log_service._frame_index_payload 的 runnable 同源。
 function isLiveTurnFrame(frame) {
     if (!frame || typeof frame !== "object") return false;
+    if (frame.stale === true) return false;
     if (isWaitingForChildResultsFrame(frame)) return false;
     const phase = String(frame?.phase || "").trim().toLowerCase();
     if (phase === "before_model" || phase === "after_model" || phase === "message_distribution") return true;
@@ -3925,6 +3925,18 @@ function refreshRenderedTreeNodeStatuses() {
         treeViewChildren(node).forEach(walk);
     };
     walk(nextTreeView);
+    syncSelectedTaskNodeDetailStatus(nextTreeView);
+}
+
+// 抽屉的状态行与树徽标同源：task.live.patch 只重绘树、不重拉节点详情，
+// 否则选中节点自己的标签会停在打开抽屉那一刻。
+function syncSelectedTaskNodeDetailStatus(treeView) {
+    const selectedNodeId = String(S.selectedNodeId || "").trim();
+    if (!selectedNodeId) return;
+    if (String(S.currentNodeDetail?.node_id || "").trim() !== selectedNodeId) return;
+    const selectedNode = findTreeNode(treeView, selectedNodeId);
+    if (!selectedNode) return;
+    renderTaskNodeDetailStatus({ ...selectedNode, ...S.currentNodeDetail });
 }
 
 function refreshRenderedTreeNodeStatus() {

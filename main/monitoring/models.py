@@ -111,6 +111,7 @@ class TaskLiveFrame(Model):
     depth: int = 0
     node_kind: str = 'execution'
     phase: str = ''
+    stale: bool = False
     stage_mode: str = ''
     stage_status: str = ''
     stage_goal: str = ''

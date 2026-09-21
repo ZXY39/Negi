@@ -14,6 +14,7 @@ from main.models import (
     normalize_tool_file_changes,
 )
 from main.monitoring.execution_trace import build_execution_trace
+from main.monitoring.frame_liveness import STALE_FRAME_MINUTES, frame_is_stale
 from main.monitoring.models import (
     LatestTaskNodeOutput,
     TaskDistributionState,
@@ -50,11 +51,6 @@ from main.runtime.append_notice_context import (
 from main.token_usage import aggregate_node_token_usage
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
-
-# task_progress 文本真化:活跃帧超过该时长未更新时不再渲染为「运行中」,
-# 避免把「从未清理的陈旧帧 / 恢复后未获执行资格的任务」表述成真实执行。
-# 阈值取停滞提醒首档(20 分钟)的一半,给正常长工具执行留足余量。
-_STALE_FRAME_MINUTES = 10.0
 
 # node_detail summary 档附带的「最新一批」工具调用完整信息条数;
 # 与 Recent tool calls 摘要上限(5)保持一致,排查卡点看最后几步足够。
@@ -1579,6 +1575,7 @@ class TaskQueryService:
                     depth=int(record.depth or 0),
                     node_kind=str(record.node_kind or 'execution'),
                     phase=str(record.phase or ''),
+                    stale=frame_is_stale(record.updated_at),
                     stage_mode=str(payload.get('stage_mode') or ''),
                     stage_status=str(payload.get('stage_status') or ''),
                     stage_goal=str(payload.get('stage_goal') or ''),
@@ -1676,7 +1673,7 @@ class TaskQueryService:
                 continue
             age_minutes = self._elapsed_minutes(record.updated_at, now=now)
             if bool(record.active):
-                if age_minutes is not None and age_minutes >= _STALE_FRAME_MINUTES:
+                if age_minutes is not None and age_minutes >= STALE_FRAME_MINUTES:
                     labels[node_id] = f'疑似中断(活跃帧{int(age_minutes)}分钟未更新)'
                 else:
                     labels[node_id] = '运行中'
@@ -1712,7 +1709,7 @@ class TaskQueryService:
                 latest_activity = (node_id, updated_at)
             if bool(record.active):
                 age_minutes = self._elapsed_minutes(updated_at, now=now)
-                if age_minutes is None or age_minutes < _STALE_FRAME_MINUTES:
+                if age_minutes is None or age_minutes < STALE_FRAME_MINUTES:
                     fresh_active.append((node_id, updated_at))
         if fresh_active:
             fresh_active.sort(key=lambda item: item[1], reverse=True)
