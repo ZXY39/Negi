@@ -315,6 +315,13 @@ function patchTaskCardElement(taskId) {
     if (diskUsageEl) {
         diskUsageEl.textContent = formatTaskBytes(task?.disk_usage_bytes);
     }
+    // 总耗时随增量补丁刷新：运行中卡片走该路径避免整网格重建（防滚动清零），
+    // 只有在这里同步数字，运行中任务的耗时才会逐分钟推进；暂停/终态卡片
+    // taskElapsedText 返回定格值，重复写入也恒定。
+    const elapsedEl = card.querySelector("[data-task-elapsed]");
+    if (elapsedEl) {
+        elapsedEl.textContent = taskElapsedText(task);
+    }
     const tokenUsage = taskTokenDisplayUsage(task);
     const previousMetrics = S.taskMetricSnapshot?.[key] || null;
     const nextMetrics = taskMetricSnapshotValue(task);
@@ -566,6 +573,52 @@ function taskMetaText(task) {
 
 function taskCreatedAtText(task) {
     return task?.created_at ? formatSessionTime(task.created_at) : "\u6682\u65e0";
+}
+
+function parseTaskTimeMs(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return null;
+    const parsed = new Date(raw).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+// \u7ec8\u6001\uff1a\u4efb\u52a1\u5df2\u8dd1\u5b8c\uff08\u6210\u529f/\u5931\u8d25/\u9a8c\u6536\u672a\u901a\u8fc7\uff09\u3002\u6b64\u65f6\u8017\u65f6\u5b9a\u683c\u5728 finished_at\u3002
+function taskIsTerminal(task) {
+    const key = taskStatusKey(task);
+    return key === "success" || key === "failed" || key === "unpassed";
+}
+
+function taskFinishedAtText(task) {
+    const raw = String(task?.finished_at || task?.updated_at || "").trim();
+    return raw ? formatSessionTime(raw) : "\u6682\u65e0";
+}
+
+function formatTaskElapsedMs(ms) {
+    const total = Number.isFinite(ms) && ms > 0 ? ms : 0;
+    const totalMinutes = Math.floor(total / 60000);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return hours > 0 ? `${hours}h${minutes}m` : `${minutes}m`;
+}
+
+// \u603b\u8017\u65f6\uff1a\u4ece created_at \u5230\u300c\u53c2\u8003\u7ed3\u675f\u65f6\u523b\u300d\u7684\u5899\u949f\u65f6\u957f\uff0c\u7cbe\u786e\u5230\u5206\u949f\u3002
+// - \u7ec8\u6001\uff1a\u5b9a\u683c\u5728 finished_at\uff08\u56de\u9000 updated_at\uff09\uff0c\u6052\u5b9a\u4e0d\u53d8\u3002
+// - \u6682\u505c\uff08blocked\uff09\uff1a\u5b9a\u683c\u5728 updated_at\u2014\u2014\u6682\u505c\u540e actor \u505c\u6b62\u3001\u65e0\u8282\u70b9\u6d3b\u52a8\uff0c
+//   updated_at \u4e0d\u518d\u524d\u8fdb\uff0c\u56e0\u6b64\u6570\u5b57\u5728\u6682\u505c\u671f\u95f4\u4e0d\u589e\u957f\u3002
+// - \u8fd0\u884c\u4e2d\uff1a\u7528\u5f53\u524d\u65f6\u523b\uff0c\u968f\u5361\u7247\u91cd\u5efa\uff08\u4ee4\u724c/\u8f93\u51fa\u53d8\u5316\u89e6\u53d1\uff09\u9010\u5206\u949f\u5237\u65b0\u3002
+function taskElapsedText(task) {
+    const startMs = parseTaskTimeMs(task?.created_at);
+    if (startMs === null) return "--";
+    let endMs;
+    if (taskIsTerminal(task)) {
+        endMs = parseTaskTimeMs(task?.finished_at) ?? parseTaskTimeMs(task?.updated_at);
+    } else if (taskStatusKey(task) === "blocked") {
+        endMs = parseTaskTimeMs(task?.updated_at);
+    } else {
+        endMs = Date.now();
+    }
+    if (endMs === null) return "--";
+    return formatTaskElapsedMs(endMs - startMs);
 }
 
 async function copyTaskId(taskId) {
@@ -876,8 +929,8 @@ function renderTasks() {
                 ` : ""}
             </div>
             <div class="pc-header"><div class="pc-header-left"><h3 class="pc-title" data-task-title title="${esc(task.title || taskId)}">${esc(task.title || taskId)}</h3></div></div>
-            <div class="pc-created-at"><span class="pc-field-label">创建时间</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span></div>
-            <div class="pc-created-at"><span class="pc-field-label">占用大小</span><span class="pc-field-value" data-task-disk-usage>${esc(formatTaskBytes(task?.disk_usage_bytes))}</span></div>
+            <div class="pc-created-at"><span class="pc-field-label">开始</span><span class="pc-field-value">${esc(taskCreatedAtText(task))}</span>${taskIsTerminal(task) ? `<span class="pc-field-label pc-field-label--end">结束</span><span class="pc-field-value" data-task-finished-at>${esc(taskFinishedAtText(task))}</span>` : ""}</div>
+            <div class="pc-created-at"><span class="pc-field-label">占用大小</span><span class="pc-field-value" data-task-disk-usage>${esc(formatTaskBytes(task?.disk_usage_bytes))}</span><span class="pc-field-value pc-elapsed" data-task-elapsed title="总耗时">${esc(taskElapsedText(task))}</span></div>
             <div class="pc-metrics">${metricsMarkup}</div>
             ${taskPauseHintMarkup(taskId)}
         `;

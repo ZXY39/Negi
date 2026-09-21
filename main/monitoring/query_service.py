@@ -363,6 +363,7 @@ class TaskQueryService:
             is_paused=bool(item.is_paused),
             created_at=item.created_at,
             updated_at=item.updated_at,
+            finished_at=str(item.finished_at or ''),
             max_depth=int(item.max_depth or 0),
             token_usage=item.token_usage,
         )
@@ -385,6 +386,7 @@ class TaskQueryService:
             is_paused=bool(summary.get('is_paused')),
             created_at=str(summary.get('created_at') or ''),
             updated_at=str(summary.get('updated_at') or ''),
+            finished_at=str(summary.get('finished_at') or ''),
             max_depth=int(summary.get('max_depth') or 0),
             token_usage=TokenUsageSummary.model_validate(summary.get('token_usage') or {}),
         )

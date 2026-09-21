@@ -8384,6 +8384,17 @@ textarea {
     white-space: nowrap;
 }
 
+.pc-field-label--end {
+    margin-left: 4px;
+}
+
+.pc-elapsed {
+    margin-left: auto;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
 .pc-metrics {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
