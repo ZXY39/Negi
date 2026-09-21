@@ -137,39 +137,54 @@ The top-level `模型配置` page manages `llm-config` provider records and mode
 - If `获取模型列表` fails but `测试连接` succeeds, compare the draft `base_url`/`api_key` sync state in `g3ku/web/frontend/org_graph_llm.js` with `POST /api/llm/drafts/models` before debugging the provider.
 - If catalog fetch returns a non-JSON or empty-catalog error, treat it as a provider endpoint-shape problem (same triage as a failed model-catalog connection probe), not as a frontend bug.
 
-## Frontend I18n Runtime And Language Switching
+## Frontend Theme And Layout Contract
 
-The frontend language switcher is architecture-relevant because it changes operator-visible workflow and UI state behavior.
+The browser shell renders one visual system per theme. Theme and layout are frontend-only concerns: they never change API, WebSocket, permission or state-machine contracts, and the backend stays the authority for session, task and runtime state.
 
-### Core Runtime Pieces
+### Layering And Rollback
 
-- `g3ku/web/frontend/locales/zh-CN.js` and `g3ku/web/frontend/locales/en-US.js` register locale dictionaries into `window.G3KU_LOCALES`.
-- `g3ku/web/frontend/i18n.js` exposes `window.G3KUI18n` and applies translations to:
-  - `data-i18n` text content
-  - `data-i18n-placeholder` placeholder text
-  - `data-i18n-aria-label` accessibility labels
-- Locale preference is persisted in browser storage under key `g3ku.ui.locale.v1`.
+- `g3ku/web/frontend/org_graph.css` keeps the legacy system; `g3ku/web/frontend/org_graph_redesign.css` is the active layer and loads after it in `org_graph.html`.
+- Every rule in the active layer is rooted at `[data-ui-version="v2"]` on `<html>`, combined with `[data-theme="dark"]` / `[data-theme="light"]` for theme-scoped values. Dropping the `<link>` and the `data-ui-version` attribute returns the page to the legacy appearance.
+- The active layer re-anchors the legacy custom properties (`--bg-app`, `--bg-panel`, `--text-primary`, `--brand-primary`, `--status-*`, `--radius-*`, `--shadow-*`, `--space-*`) onto its own `--ui-*` tokens, so retheming means editing `--ui-*` values rather than chasing component rules. Legacy rules that hardcode a color, radius or shadow instead of consuming those variables still need an active-layer rule of at least equal selector depth.
+- In the legacy file light is the `:root` default and dark is an override set, so both themes carry explicit token blocks. A change checked in one theme is incomplete until the other is checked.
 
-### Shell Integration Flow
+### Theme Persistence
 
-1. `org_graph.html` loads locale files before `i18n.js` so dictionaries are available during i18n initialization.
-2. `i18n.js` resolves locale from persisted value or fallback locale and applies translations.
-3. The shell language `<select id="language-switch">` calls `window.G3KUI18n.setLocale(nextLocale)` on change.
-4. `i18n.js` emits `g3ku:locale-changed` after successful locale changes.
-5. Shell listeners update locale-linked UI state (for example, `<html lang=...>` and switcher selection sync).
+- Default theme is dark; a first visit without a stored preference renders dark.
+- `#theme-toggle` flips `data-theme` on `<html>`, stores the choice under `g3ku.ui.theme.v1`, and updates the sun/moon icon plus the button `aria-label` / `title` so they name the theme the next click produces. Only `dark` and `light` are valid; any other stored value falls back to dark.
+- Switching theme does not reload the page, request data, or rebuild the current view.
+- Every `localStorage` read/write is guarded: blocked or unavailable storage degrades to dark theme plus the default navigation state instead of breaking startup.
 
-### Maintenance Caveats
+### Navigation Collapse
 
-- Script order is contract-sensitive: locale dictionaries must load before `i18n.js`.
-- New frontend copy should use translation keys rather than hardcoded language strings.
-- If new controls need localized placeholders or ARIA labels, use the existing `data-i18n-*` attributes.
-- Locale persistence is browser-local; no backend API currently stores per-user UI locale.
+Two collapse systems exist and must not be merged:
 
-## Operator-Visible Behavior
+| System | Controls | State source | Scope |
+| --- | --- | --- | --- |
+| Global left navigation | `#sidebar-toggle`, `#sidebar-open-btn`, `#sidebar-backdrop` | `is-collapsed` / `is-mobile-open` on `.sidebar`, preference key `g3ku.ui.sidebar.collapsed.v1` | Application shell width |
+| CEO session list | `#ceo-session-panel-toggle` | `S.ceoSessionPanelExpanded`, `.ceo-shell.is-session-panel-expanded`, `data-panel-state` | CEO page column only |
 
-- Operators can switch between Simplified Chinese (`zh-CN`) and English (`en-US`) from the shell footer.
-- The selected locale persists across page reloads for the same browser profile.
-- Runtime-generated labels/messages that depend on `window.G3KUI18n.t(...)` update to the active locale without requiring backend restart.
+- At ≥1200px the navigation defaults to expanded (216px); 768–1199px defaults to collapsed (72px). A stored preference wins in both ranges. Below 768px the navigation leaves the document flow and becomes a 248px drawer with a scrim, closed by scrim click, `Escape`, choosing a navigation item, or `#sidebar-toggle`; drawer open state is never written to the collapse preference key.
+- Collapsed navigation hides labels but keeps icons, `aria-label` / `title`, and the audit badge — `#audit-nav-badge` moves to the top-right of its item icon instead of disappearing.
+- Breakpoint geometry is CSS-driven. JS only chooses the initial state and reacts to `matchMedia` changes, so collapsing the navigation never re-renders session, task or resource data.
+
+### CEO Reading Column
+
+- `.ceo-shell` is a two-column grid whose first column is `var(--ui-ceo-session-width)`: 92px collapsed, 288px expanded. A hardcoded `288px` column or `auto` both break the session-panel toggle and are not valid.
+- Feed, message bubbles, composer and status notices share one centered reading axis (`--ui-chat-reading-width` 960px, `--ui-chat-message-width` 760px). Below 768px an expanded session panel overlays the chat column at `min(288px, calc(100vw - 24px))` rather than widening the page.
+
+### Status Color Semantics
+
+`data-status` keeps one meaning across every page, and the label text is always present so color is never the only signal:
+
+- `running` / `in_progress` / `inspecting` → brand teal. Blue is reserved for informational copy, links and help text, never lifecycle state.
+- `completed` / `passed` / `success` → success green; `failed` → danger red; `unpassed` → warning amber.
+- `paused` / `queued` / `pending` / `waiting` / `blocked` / `unknown`, plus read-only and disabled → neutral gray.
+- An unmapped `data-status` renders neutral gray with its original text; it never inherits brand or danger styling and never renders unstyled.
+
+### Responsive Bands
+
+Page grids may only use the shared bands 1200 / 1024 / 900 / 768 / 640px. Task hall and Skill/Tool cards step 4 → 3 → 2 → 1 at 1200 / 1024 / 768; model role cards 4 → 2 → 1 at 1200 / 1024; memory keeps two columns at ≥1024px; external access keeps two columns at ≥900px. When space runs short between two bands, tighten gap, card padding and control min-width before dropping a column, and never add a page-specific breakpoint.
 
 ## CEO Composer Runtime
 
@@ -566,10 +581,10 @@ Web-specific artifact locations kept here:
 
 ## Verification Pointers
 
-Use these focused checks when validating i18n shell behavior:
+Use these focused checks when validating shell and frontend behavior:
 
-- `python -m pytest tests/web/test_frontend_i18n.py -v`
 - `python -m pytest tests/resources/test_bootstrap_runtime_status.py -v`
+- `node --test tests/resources/*.test.js` — browser modules are evaluated in a vm stub harness, so code that touches `document` or `window` APIs the stubs do not provide fails here first.
 
 ## CEO Compression UI Contract
 

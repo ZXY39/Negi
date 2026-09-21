@@ -105,6 +105,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点详情页的「加载 skill / 加载 tool」chip 风险色全部同一档、或展开看不到正文 → `web-and-admin.md`「Context Loader Notices」
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」 → `web-and-admin.md`「Node Output Content Read Contract」
+- 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱 → `web-and-admin.md`「Frontend Theme And Layout Contract」
 
 ## Maintenance Rules
 
@@ -115,7 +116,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 3. Pointers name topics, never section numbers.
 4. Present tense only. No "now / no longer / previously / 现在 / 不再 / 曾经" — that is changelog language.
 5. Superseded text is deleted outright, never left as "obsolete notes".
-6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 114 KB / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 55 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 26 KB / `config-and-models` 26 KB / `external-agent-api` 16 KB / `agent-gateway` 10 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
+6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 160 KB (raised from 114 KB: one contract per operator-visible web surface, and the frontend theme/layout system needed its own section) / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 55 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 26 KB / `config-and-models` 26 KB / `external-agent-api` 16 KB / `agent-gateway` 10 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
 
 ## Topic Ownership
 
@@ -127,7 +128,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair, node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
 | Tool/skill four concepts, candidate→callable chain, Tool Admin RBAC semantics, duplicate-call guard, universal tool timeout contract | `tool-and-skill-system.md` |
 | Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
-| Websocket/UI contracts, composer/media rendering, image upload gating, model config admin draft contract, log audit event sink and audit page contract, node output content-read API contract, container deployment | `web-and-admin.md` |
+| Websocket/UI contracts, composer/media rendering, image upload gating, frontend theme and layout contract, model config admin draft contract, log audit event sink and audit page contract, node output content-read API contract, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock | `config-and-models.md` |
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |

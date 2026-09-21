@@ -1076,3 +1076,340 @@
         box-shadow: var(--ui-shadow-dialog);
     }
 }
+
+/* 19. 管理页主体宽度与内边距 */
+[data-ui-version="v2"] .task-list-panel,
+[data-ui-version="v2"] .resource-list-panel,
+[data-ui-version="v2"] .memory-layout,
+[data-ui-version="v2"] .external-api-shell,
+[data-ui-version="v2"] .llm-page-layout,
+[data-ui-version="v2"] .audit-feed-panel {
+    width: 100%;
+    max-width: var(--ui-page-max-width);
+    margin-right: auto;
+    margin-left: auto;
+    padding-right: var(--ui-space-6);
+    padding-left: var(--ui-space-6);
+}
+
+[data-ui-version="v2"] .memory-layout,
+[data-ui-version="v2"] .external-api-shell,
+[data-ui-version="v2"] .llm-page-layout {
+    padding-top: var(--ui-space-5);
+    padding-bottom: var(--ui-space-6);
+}
+
+/* 20. 卡片网格列数：只用 1200 / 1024 / 768 白名单断点 */
+[data-ui-version="v2"] .project-card-grid,
+[data-ui-version="v2"] .resource-list {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-4);
+}
+
+[data-ui-version="v2"] .model-routing-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-4);
+}
+
+[data-ui-version="v2"] .memory-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-4);
+}
+
+@media (min-width: 768px) {
+
+    [data-ui-version="v2"] .project-card-grid,
+    [data-ui-version="v2"] .resource-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1024px) {
+
+    [data-ui-version="v2"] .project-card-grid,
+    [data-ui-version="v2"] .resource-list {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    [data-ui-version="v2"] .model-routing-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    [data-ui-version="v2"] .memory-layout {
+        grid-template-columns: 1.15fr 0.85fr;
+    }
+}
+
+@media (min-width: 1200px) {
+
+    [data-ui-version="v2"] .project-card-grid,
+    [data-ui-version="v2"] .resource-list,
+    [data-ui-version="v2"] .model-routing-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 900px) {
+    [data-ui-version="v2"] .external-api-shell {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+        gap: var(--ui-space-4);
+        align-items: start;
+    }
+
+    [data-ui-version="v2"] .external-master-panel,
+    [data-ui-version="v2"] .qq-bot-panel {
+        grid-column: 1;
+    }
+
+    [data-ui-version="v2"] .external-tokens-panel {
+        grid-column: 2;
+        grid-row: 1 / span 2;
+        align-self: stretch;
+    }
+}
+
+/* 21. 任务卡片 */
+[data-ui-version="v2"] .project-card {
+    padding: var(--ui-space-4);
+    gap: var(--ui-space-3);
+    background: var(--ui-bg-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    box-shadow: none;
+    transition: border-color 160ms var(--ui-motion-ease), box-shadow 160ms var(--ui-motion-ease),
+        transform 160ms var(--ui-motion-ease);
+}
+
+[data-ui-version="v2"] .project-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--ui-border-strong);
+    box-shadow: var(--ui-shadow-sm);
+}
+
+[data-ui-version="v2"] .project-card.is-selected,
+[data-ui-version="v2"] .project-card.is-multi-mode {
+    border-color: color-mix(in srgb, var(--ui-brand) 45%, transparent);
+}
+
+[data-ui-version="v2"] .project-card:has(.status-badge[data-status="failed"]),
+[data-ui-version="v2"] .project-card:has(.status-badge[data-status="unpassed"]) {
+    box-shadow: inset 3px 0 0 var(--ui-danger);
+}
+
+[data-ui-version="v2"] .project-card:has(.status-badge[data-status="unpassed"]) {
+    box-shadow: inset 3px 0 0 var(--ui-warning);
+}
+
+[data-ui-version="v2"] .project-card:has(.status-badge[data-status="completed"]) {
+    box-shadow: inset 3px 0 0 var(--ui-success);
+}
+
+[data-ui-version="v2"] .project-card:has(.status-badge[data-status="paused"]),
+[data-ui-version="v2"] .project-card:has(.status-badge[data-status="queued"]) {
+    box-shadow: inset 3px 0 0 var(--ui-border-strong);
+}
+
+[data-ui-version="v2"] .pc-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--ui-text);
+}
+
+[data-ui-version="v2"] .pc-task-id-value {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+[data-ui-version="v2"] .pc-created-at,
+[data-ui-version="v2"] .pc-field-label {
+    font-size: 12px;
+    color: var(--ui-text-muted);
+}
+
+[data-ui-version="v2"] .pc-metrics {
+    gap: var(--ui-space-2);
+}
+
+[data-ui-version="v2"] .pc-metric {
+    min-height: 62px;
+    padding: 10px var(--ui-space-3);
+    gap: var(--ui-space-1);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-subtle);
+}
+
+[data-ui-version="v2"] .pc-metric-value {
+    font-size: 14px;
+    color: var(--ui-text);
+}
+
+@media (max-width: 639.98px) {
+    [data-ui-version="v2"] .pc-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+/* 22. Skill / Tool 卡片 */
+[data-ui-version="v2"] .resource-list {
+    padding: var(--ui-space-4);
+}
+
+[data-ui-version="v2"] .resource-list-item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-4);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .resource-list-item:hover,
+[data-ui-version="v2"] .resource-list-item.active,
+[data-ui-version="v2"] .resource-list-item.selected {
+    border-color: color-mix(in srgb, var(--ui-brand) 45%, transparent);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .resource-list-item.selected {
+    background: var(--ui-brand-soft);
+}
+
+[data-ui-version="v2"] .resource-list-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.45;
+    color: var(--ui-text);
+}
+
+[data-ui-version="v2"] .resource-list-subtitle {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ui-text-secondary);
+}
+
+[data-ui-version="v2"] .resource-list-meta {
+    margin-top: auto;
+    font-size: 12px;
+    color: var(--ui-text-muted);
+}
+
+/* 23. 模型配置 */
+[data-ui-version="v2"] .llm-page-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--ui-space-4);
+}
+
+@media (min-width: 1024px) {
+    [data-ui-version="v2"] .llm-page-layout {
+        grid-template-columns: 320px minmax(0, 1fr);
+        gap: var(--ui-space-5);
+    }
+}
+
+[data-ui-version="v2"] .model-shared-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    padding: var(--ui-space-2);
+}
+
+[data-ui-version="v2"] .model-chain-card {
+    padding: var(--ui-space-4);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+/* 24. 记忆管理 */
+[data-ui-version="v2"] .memory-column {
+    min-height: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-surface);
+}
+
+[data-ui-version="v2"] .memory-card {
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-elevated);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .memory-card-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ui-text);
+}
+
+[data-ui-version="v2"] .memory-card-meta,
+[data-ui-version="v2"] .memory-card-meta-label {
+    font-size: 12px;
+    color: var(--ui-text-muted);
+}
+
+/* 25. 日志审计 */
+[data-ui-version="v2"] .audit-log-line {
+    padding: var(--ui-space-2);
+    border-bottom: 1px solid var(--ui-border);
+    font-size: 12px;
+    color: var(--ui-text-secondary);
+}
+
+[data-ui-version="v2"] .audit-log-line:hover {
+    background: var(--ui-neutral-soft);
+}
+
+/* 26. 小屏页面降级 */
+@media (max-width: 767.98px) {
+
+    [data-ui-version="v2"] .task-list-panel,
+    [data-ui-version="v2"] .resource-list-panel,
+    [data-ui-version="v2"] .memory-layout,
+    [data-ui-version="v2"] .external-api-shell,
+    [data-ui-version="v2"] .llm-page-layout,
+    [data-ui-version="v2"] .audit-feed-panel {
+        padding-right: var(--ui-space-4);
+        padding-left: var(--ui-space-4);
+    }
+
+    [data-ui-version="v2"] .content-header {
+        padding-right: var(--ui-space-4);
+        padding-left: var(--ui-space-4);
+    }
+}
+
+@media (max-width: 639.98px) {
+    [data-ui-version="v2"] .content-header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: var(--ui-space-3);
+    }
+
+    [data-ui-version="v2"] .content-header .resource-header-actions,
+    [data-ui-version="v2"] .content-header .compact-resource-header-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+}

@@ -13843,6 +13843,8 @@ function initializeTheme() {
 }
 
 function initializeUiPreferences() {
+    // 本模块会被 tests/resources 的 vm 桩环境直接求值，那里没有 documentElement。
+    if (!document.documentElement) return;
     if (window.matchMedia) {
         uiMobileMql = window.matchMedia("(max-width: 767.98px)");
         uiDesktopWideMql = window.matchMedia("(min-width: 1200px)");
