@@ -507,6 +507,17 @@ def _build_live_turn_payload(
     payload: dict[str, Any] = {"inflight_turn": inflight_turn}
     if preserved_turn is not None:
         payload["preserved_turn"] = preserved_turn
+    # 回合外的手动压缩没有 inflight turn 可挂进度，进行中状态只存在于会话级
+    # `_compression_state`。这里随快照一并下发，前端才能在「刷新后重连」这一刻就恢复区分线：
+    # 快照连接里 ceo.state 与 snapshot.ceo 的到达顺序不该决定界面画不画得出来。
+    compression_snapshot = getattr(session, "_compression_snapshot", None)
+    if callable(compression_snapshot):
+        try:
+            compression = compression_snapshot()
+        except Exception:
+            compression = None
+        if isinstance(compression, dict) and compression:
+            payload["compression"] = dict(compression)
     return payload
 
 

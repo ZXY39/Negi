@@ -3364,7 +3364,9 @@ function syncCeoCompressionDivider() {
     const existing = U.ceoFeed.querySelector(`.${CEO_COMPRESSION_DIVIDER_CLASS}.is-running`);
     if (running && !existing) {
         appendCeoCompressionDivider("running");
-        scrollCeoFeedToBottom();
+        // 只有本来就在跟随最新时才钉底：这条线现在也由 renderCeoSnapshot 在每次整页重建后
+        // 重挂，若无条件钉底会把正在往上翻历史的用户每次重建都拽回底部。
+        if (S.ceoFeedFollowLatest !== false) scrollCeoFeedToBottom();
         return;
     }
     if (!running && existing) removeCeoCompressionLiveDivider();
@@ -5116,20 +5118,20 @@ function holdApprovalPausedCeoTurnLegacy(text = "", { source = "", turnId = "" }
     return true;
 }
 
-function adoptCeoContextCompressionFromState(state = {}) {
-    // 回合外的手动压缩没有 inflight turn，进行中状态只活在 state.compression 里；
-    // 刷新页面会清空本机 S.ceoContextCompression*，不接回这个信号就再也看不到区分线，
-    // 连压缩完成的那次状态推送都会被丢掉（要再刷一次才看得到结果）。
-    const compression = normalizeCeoSnapshotCompression(state?.compression);
-    if (String(compression?.status || "").trim().toLowerCase() !== "running") return;
-    if (String(compression?.source || "").trim().toLowerCase() !== "manual_context_compression") return;
-    const sessionId = String(activeSessionId() || "").trim();
-    if (!sessionId) return;
-    if (String(S.ceoContextCompressionSessionId || "").trim() === sessionId
+function adoptCeoContextCompression(sessionId, compression) {
+    // 回合外的手动压缩没有 inflight turn，进行中状态只活在服务端会话级 `compression` 里
+    // （state 快照与 snapshot.ceo 都带）。刷新会清空本机 S.ceoContextCompression*，不认领
+    // 回来就再也看不到区分线，也收不到终局——必须再刷一次才看得到「会话已压缩」。
+    const key = String(sessionId || "").trim();
+    const normalized = normalizeCeoSnapshotCompression(compression);
+    if (!key) return;
+    if (String(normalized?.status || "").trim().toLowerCase() !== "running") return;
+    if (String(normalized?.source || "").trim().toLowerCase() !== "manual_context_compression") return;
+    if (String(S.ceoContextCompressionSessionId || "").trim() === key
         && String(S.ceoContextCompressionStatus || "").trim().toLowerCase() === "running") {
         return;
     }
-    S.ceoContextCompressionSessionId = sessionId;
+    S.ceoContextCompressionSessionId = key;
     S.ceoContextCompressionStatus = "running";
     S.ceoContextCompressionCancelRequested = false;
     syncCeoCompressionDivider();
@@ -5141,7 +5143,7 @@ function applyCeoState(state = {}, meta = {}) {
     const turnId = String(meta?.turn_id || state?.turn_id || "").trim();
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
-    adoptCeoContextCompressionFromState(state);
+    adoptCeoContextCompression(activeSessionId(), state?.compression);
     // 候选条以 runtime 的队列为真相：换标签页/重启后 sessionStorage 里没有的东西，
     // 也要在输入框上方看得见（它已经落在转录里，只是还没成回合）。
     if (adoptCeoServerQueuedFollowUpsFromState(state)) renderQueuedCeoFollowUps(activeSessionId());
@@ -7201,6 +7203,10 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     if (viewState?.anchor?.key && !ceoFeedAnchorRendered(viewState.anchor.key)) {
         loadOlderCeoFeedMessages({ upToKey: viewState.anchor.key, maxPages: CEO_FEED_ANCHOR_EXPANSION_PAGES });
     }
+    // 「压缩中」那条实时线不属于转录数据，resetCeoFeed 每次重建都会把它抹掉：
+    // 刷新页面时服务端先推 ceo.state（认领进行中、挂线）再推 snapshot.ceo（整页重建），
+    // 不在这里重挂就会稳定地看不见。必须在滚动精校之前，补进去的那一行要参与锚定。
+    syncCeoCompressionDivider();
     // 批次内的像素 clamp 之后再按捕获状态精校(锚定滚动/展开项)。
     applyCeoFeedViewState(viewState);
 }
@@ -11030,6 +11036,8 @@ function initCeoWs() {
             if (effectiveSessionId) {
                 setCeoSessionSnapshotCache(effectiveSessionId, snapshotEntry);
             }
+            // 快照自己也带会话级 compression：与 ceo.state 谁先到都能认领，恢复不依赖消息顺序。
+            adoptCeoContextCompression(effectiveSessionId, payload.data?.compression);
             if (effectiveSessionId === activeSessionId()) {
                 renderCeoSnapshot(
                     payload.data?.messages || [],

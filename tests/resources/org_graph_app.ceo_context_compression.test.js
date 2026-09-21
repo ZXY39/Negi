@@ -205,7 +205,7 @@ function loadApp() {
             normalizeCeoSnapshotMessage, activeCeoSessionHasHistory,
             refreshCeoComposerUsageEstimate, syncCeoModelModePanelUsage,
             startCeoContextCompressionPolling, applyCeoContextCompressionStatus,
-            adoptCeoContextCompressionFromState,
+            adoptCeoContextCompression,
             CEO_BRAIN_LONG_PRESS_MS, CEO_COMPRESSION_POLL_FAIL_LIMIT,
         };`,
         context
@@ -504,8 +504,8 @@ test("刷新页面后收到 state.compression 仍会恢复进行中的压缩标�
     api.S.ceoContextCompressionSessionId = "";
     api.S.ceoContextCompressionPollId = null;
 
-    api.adoptCeoContextCompressionFromState({
-        compression: { status: "running", text: "上下文压缩中", source: "manual_context_compression" },
+    api.adoptCeoContextCompression("web:test", {
+        status: "running", text: "上下文压缩中", source: "manual_context_compression",
     });
 
     assert.equal(api.S.ceoContextCompressionStatus, "running");
@@ -522,15 +522,55 @@ test("自动压缩的进行中状态不走手动恢复通道", () => {
     api.S.ceoContextCompressionStatus = "idle";
     api.S.ceoContextCompressionSessionId = "";
 
-    api.adoptCeoContextCompressionFromState({
-        compression: { status: "running", text: "上下文压缩中", source: "token_compression" },
+    api.adoptCeoContextCompression("web:test", {
+        status: "running", text: "上下文压缩中", source: "token_compression",
     });
 
     assert.equal(api.S.ceoContextCompressionStatus, "idle");
     assert.equal(api.S.ceoContextCompressionSessionId, "");
     assert.equal(dividers(api.U.ceoFeed).length, 0);
-    // 接线本身也要有断言：applyCeoState 不调用它，刷新恢复就又是一句空话。
-    assert.match(APP_CODE, /adoptCeoContextCompressionFromState\(state\)/);
+    // 接线本身也要有断言：两条权威消息（ceo.state 与 snapshot.ceo）都得认领，
+    // 少一条就退化成"看消息顺序运气"的恢复。
+    assert.match(APP_CODE, /adoptCeoContextCompression\(activeSessionId\(\), state\?\.compression\)/);
+    assert.match(APP_CODE, /adoptCeoContextCompression\(effectiveSessionId, payload\.data\?\.compression\)/);
+});
+
+test("快照整页重建后必须重挂进行中的区分线", () => {
+    const api = loadApp();
+    // 刷新链路的真实顺序：先 snapshot.ceo 重建（内部 resetCeoFeed 会 innerHTML=""），
+    // 进行中线不是转录数据，重建收尾不重挂就稳定地看不见。
+    assert.match(
+        APP_CODE.slice(
+            APP_CODE.indexOf("function renderCeoSnapshot("),
+            APP_CODE.indexOf("function createPendingCeoTurn(")
+        ),
+        /syncCeoCompressionDivider\(\);/
+    );
+    assert.match(
+        APP_CODE.slice(
+            APP_CODE.indexOf("function renderCeoSnapshot("),
+            APP_CODE.indexOf("function createPendingCeoTurn(")
+        ),
+        /syncCeoCompressionDivider\(\);[\s\S]{0,160}applyCeoFeedViewState\(viewState\);/
+    );
+
+    // 往上翻历史时重挂不得把用户拽回底部（给足几何余量，避免被 maxTop 钳住干扰判断）。
+    api.S.ceoContextCompressionStatus = "running";
+    api.S.ceoContextCompressionSessionId = "web:test";
+    api.S.ceoFeedFollowLatest = false;
+    api.U.ceoFeed.scrollHeight = 5000;
+    api.U.ceoFeed.clientHeight = 800;
+    api.U.ceoFeed.scrollTop = 120;
+    api.syncCeoCompressionDivider();
+    assert.equal(dividers(api.U.ceoFeed).length, 1);
+    assert.equal(api.U.ceoFeed.scrollTop, 120);
+
+    api.S.ceoFeedFollowLatest = true;
+    api.U.ceoFeed.children.length = 0;
+    api.syncCeoCompressionDivider();
+    assert.equal(dividers(api.U.ceoFeed).length, 1);
+    // 跟随最新时才钉底（桩里 scrollTop 直接落到 scrollHeight，不锁死具体算法）。
+    assert.ok(api.U.ceoFeed.scrollTop > 120, `预期钉底，实际 scrollTop=${api.U.ceoFeed.scrollTop}`);
 });
 
 test("转录标记只认 completed 与 paused 两种终态", () => {

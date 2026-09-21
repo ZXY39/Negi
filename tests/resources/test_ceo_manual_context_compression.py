@@ -500,6 +500,38 @@ def test_get_endpoint_reports_idle_when_session_runtime_missing(tmp_path: Path, 
     assert response.json()["status"] == "idle"
 
 
+def test_live_turn_payload_carries_out_of_turn_compression(monkeypatch) -> None:
+    """snapshot.ceo 自带会话级 compression：刷新后的恢复不能取决于 ceo.state 与 snapshot.ceo
+    谁先到，也不能依赖 inflight turn（回合外压缩根本没有回合可挂）。"""
+    from g3ku.runtime.api import websocket_ceo as ws
+
+    monkeypatch.setattr(ws, "_latest_persisted_assistant_canonical_context", lambda *_: {})
+    monkeypatch.setattr(ws, "_build_inflight_turn_snapshot", lambda *_, **__: None)
+    monkeypatch.setattr(ws, "_build_preserved_turn_snapshot", lambda *_, **__: None)
+    monkeypatch.setattr(ws, "_with_canonical_context_delta", lambda snapshot, _previous: snapshot)
+    monkeypatch.setattr(ws, "_rewrite_turn_snapshot_media", lambda _sid, snapshot: snapshot)
+
+    running = SimpleNamespace(
+        _compression_snapshot=lambda: {
+            "status": "running",
+            "text": "上下文压缩中",
+            "source": "manual_context_compression",
+            "needs_recheck": False,
+        }
+    )
+    payload = ws._build_live_turn_payload(running, "ext:qq-official:abc")
+    assert payload["compression"]["source"] == "manual_context_compression"
+    assert payload["compression"]["status"] == "running"
+
+    # 没有进行中压缩时不下发该字段，前端据此认领才不会挂在「进行中」。
+    idle = SimpleNamespace(_compression_snapshot=lambda: {})
+    assert "compression" not in ws._build_live_turn_payload(idle, "ext:qq-official:abc")
+
+    # 老形状的运行时会话（没有该属性）不能让快照构建炸掉。
+    legacy = SimpleNamespace()
+    assert "compression" not in ws._build_live_turn_payload(legacy, "web:shared")
+
+
 def test_composer_preflight_endpoint_covers_channel_session(tmp_path: Path, monkeypatch) -> None:
     """只读预估不吃渠道只读门禁：QQ 会话的脑图标也要常驻显示自己的上下文占用值。"""
     session_manager = SessionManager(tmp_path)
