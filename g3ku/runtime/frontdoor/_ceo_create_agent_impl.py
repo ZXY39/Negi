@@ -561,6 +561,9 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         model_refs = list(state_for_request.get("model_refs") or [])
         context_window_tokens = int(preflight.get("context_window_tokens") or 0)
         pre_tokens = int(preflight.get("estimated_total_tokens") or 0)
+        # 摘要器要跑几十秒，这段时间里基线可能被别的回合前进过（渠道回合 pause 等不到，
+        # 见 external_turns 模块 docstring）。先记下读取时的代号，落盘前对一次。
+        baseline_revision = int(getattr(session, "_frontdoor_baseline_revision", 0) or 0)
         if context_window_tokens <= 25_000:
             return {
                 "applied": False,
@@ -583,6 +586,17 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             return {
                 "applied": False,
                 "reason": str(diagnostics.get("reason") or "not_applied"),
+                "pre_tokens": pre_tokens,
+                "post_tokens": post_tokens,
+                "provider_model": provider_model,
+            }
+        if int(getattr(session, "_frontdoor_baseline_revision", 0) or 0) != baseline_revision:
+            # 基线在摘要期间被别的回合前进过：这份摘要是对着旧基线算的，落盘会连对方的
+            # 回合内容一起丢掉（实盘那次还连带把收口水位线选择器一起抹了）。宁可不落，
+            # 也不能写一份"声称缩小、实际回退"的基线，所以这里在任何状态改写之前就返回。
+            return {
+                "applied": False,
+                "reason": "baseline_advanced",
                 "pre_tokens": pre_tokens,
                 "post_tokens": post_tokens,
                 "provider_model": provider_model,

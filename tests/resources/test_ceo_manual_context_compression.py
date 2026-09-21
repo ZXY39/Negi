@@ -247,6 +247,43 @@ def test_compress_session_context_rewrites_durable_baseline(monkeypatch) -> None
     assert synced == {"source_reason": "finalize"}
 
 
+def test_compress_session_context_refuses_to_overwrite_an_advanced_baseline(monkeypatch) -> None:
+    """摘要器要跑几十秒，期间 durable 基线可能被另一个回合前进过——渠道回合注册在 None
+    键上，pause 既停不掉它也等不到它（external_turns 模块 docstring）。那份摘要是对着
+    旧基线算的，落盘会把对方刚写的回合内容连同一并写进去的收口水位线选择器一起抹掉：
+    实盘 13:06:28 的 17,956 tok 摘要就是这样被 13:06:46 的 115,338 tok 基线覆盖的。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    calls = _patch_compression_runner(monkeypatch, runner, applied=True)
+    synced: dict[str, str] = {}
+    session = SimpleNamespace(
+        state=_agent_state(),
+        _frontdoor_history_shrink_reason="",
+        _frontdoor_baseline_revision=41,
+        _sync_completed_continuity_snapshot=lambda **kwargs: synced.update(kwargs),
+    )
+
+    async def _summariser(**kwargs):
+        session._frontdoor_baseline_revision = 42
+        return FrontdoorTokenPreflightResult(
+            request_messages=[{"role": "assistant", "content": "[G3KU_TOKEN_COMPACT_V2]\n摘要"}],
+            final_request_tokens=9_000,
+            history_shrink_reason="token_compression",
+            diagnostics={"applied": True, "compression_mode": "llm"},
+        )
+
+    monkeypatch.setattr(runner, "_run_frontdoor_llm_token_compression", _summariser)
+
+    result = asyncio.run(runner.compress_session_context(session=session))
+
+    assert result["applied"] is False
+    assert result["reason"] == "baseline_advanced"
+    assert result["post_tokens"] == 9_000
+    assert "persisted_messages" not in calls
+    assert session._frontdoor_history_shrink_reason == ""
+    assert synced == {}
+
+
 def test_compress_session_context_skips_baseline_when_nothing_to_compress(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     calls = _patch_compression_runner(monkeypatch, runner, applied=False)

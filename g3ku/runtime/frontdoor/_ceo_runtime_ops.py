@@ -4489,6 +4489,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             setattr(target_session, "_frontdoor_actual_request_path", str(record.get("path") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_history", list(existing_history))
             setattr(target_session, "_frontdoor_request_body_messages", list(authoritative_request_body_messages))
+            # 基线每前进一次换一代：这是 durable 基线唯一的前进点，手动压缩据此判断
+            # 自己读到的那条基线是否已被别的（可能在跑的）回合顶掉。
+            setattr(
+                target_session,
+                "_frontdoor_baseline_revision",
+                int(getattr(target_session, "_frontdoor_baseline_revision", 0) or 0) + 1,
+            )
             setattr(target_session, "_frontdoor_prompt_cache_key_hash", str(record.get("prompt_cache_key_hash") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_hash", str(record.get("actual_request_hash") or "").strip())
             setattr(target_session, "_frontdoor_actual_request_message_count", int(record.get("actual_request_message_count") or 0))

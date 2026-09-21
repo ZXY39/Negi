@@ -211,6 +211,12 @@ class RuntimeAgentSession:
         self._active_frontdoor_compression_generation: int | None = None
         self._cancelled_frontdoor_compression_generations: set[int] = set()
         self._frontdoor_actual_request_path: str = ""
+        # durable 基线的写入代号：只在唯一前进点 `_persist_frontdoor_actual_request` 递增。
+        # 手动压缩拿它做"我读到的基线还是不是当前基线"的判定——渠道回合注册在 None 键上，
+        # pause 既停不掉它也等不到它（external_turns 模块 docstring），所以压缩在途时
+        # 完全可能有一个用旧种子组装的回合先/后落盘（实盘：17,956 tok 摘要 18 秒后被
+        # 115,338 tok 覆盖）。没有这条判定，闸门只能挡住"新起的回合"，挡不住"已经在跑的回合"。
+        self._frontdoor_baseline_revision: int = 0
         self._frontdoor_actual_request_history: list[dict[str, Any]] = []
         self._frontdoor_previous_actual_request_path: str = ""
         self._frontdoor_previous_actual_request_history: list[dict[str, Any]] = []

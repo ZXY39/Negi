@@ -3314,6 +3314,12 @@ function stopCeoContextCompressionPolling() {
 }
 
 function ceoContextCompressionTerminalText(status, reason) {
+    const normalizedReason = String(reason || "").trim().toLowerCase();
+    if (normalizedReason === "baseline_advanced") {
+        // 摘要算完了，但基线在这期间被另一个回合改写过：不落盘也不落区分线，
+        // 说成「没有可压缩的历史」会把人引向错误的下一步。
+        return "压缩期间这条会话的上下文基线被另一个回合改写了。为避免丢掉那条回合的内容，本次摘要没有落盘；请等这条回复结束后再压缩一次。";
+    }
     if (status === "not_needed") {
         return "没有可压缩的历史，或所选模型没有可用的上下文窗口（需大于 25000 token）。";
     }
