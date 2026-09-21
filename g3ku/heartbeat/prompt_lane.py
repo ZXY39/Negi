@@ -283,6 +283,14 @@ def _task_terminal_lines(event: dict[str, Any], retrieval_parts: list[str], *, o
         f"- Task {title} ({task_id}) completed",
         f"  Status: {status}",
     ]
+    # 收尾规则挂在失败分类与最终验收状态上：这两个值一直在 payload 里但从未渲染，
+    # 模型只能从摘要文案反推分类，会把终局失败当成还能自动续跑的失败。
+    failure_class = _non_empty_text(event.get("failure_class"))
+    if failure_class:
+        lines.append(f"  Failure class: {failure_class}")
+    final_acceptance_status = _non_empty_text(event.get("final_acceptance_status"))
+    if final_acceptance_status and final_acceptance_status != "pending":
+        lines.append(f"  Final acceptance: {final_acceptance_status}")
     # finished_at 一直在 payload 里但从未渲染：heartbeat 可能在任务完成后很久才唤醒，
     # 缺了它模型会把"几小时前完成"误报成"刚完成"。
     finished_at = format_local_timestamp(event.get("finished_at"))

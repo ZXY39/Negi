@@ -223,6 +223,44 @@ def test_build_heartbeat_prompt_lane_includes_root_output_when_acceptance_failed
     assert "Execution output ref: artifact:artifact:root-output" in event_text
 
 
+def _terminal_bundle_text(**fields: object) -> str:
+    event = {
+        "reason": "task_terminal",
+        "task_id": "task:demo-failure-class",
+        "title": "demo failure class task",
+        "status": "failed",
+        "brief_text": "acceptance failed",
+        **fields,
+    }
+    lane = build_heartbeat_prompt_lane(
+        provider_model="openai:gpt-4.1",
+        stable_rules_text="rules",
+        events=[event],
+    )
+    message = next(
+        message
+        for message in list(lane.request_messages)
+        if str(message.get("role") or "").strip().lower() == "user"
+    )
+    return str(message.get("content") or "")
+
+
+def test_task_terminal_bundle_renders_failure_class_and_final_acceptance() -> None:
+    # frontdoor §3 的收尾分支挂在这个分类上：payload 一直带值但不渲染，模型就只能从
+    # 摘要文案反推，会把不再打回的终局失败说成"仍在重试"。
+    event_text = _terminal_bundle_text(
+        failure_class="non_retryable_blocked",
+        final_acceptance_status="rejected_terminal",
+    )
+
+    assert "Failure class: non_retryable_blocked" in event_text
+    assert "Final acceptance: rejected_terminal" in event_text
+
+    assert "Failure class:" not in _terminal_bundle_text()
+    # pending 不渲染：未跑过最终验收的任务不该被读成"验收进行中"。
+    assert "Final acceptance:" not in _terminal_bundle_text(final_acceptance_status="pending")
+
+
 @pytest.mark.asyncio
 async def test_web_session_heartbeat_includes_root_output_when_acceptance_failed(tmp_path) -> None:
     session_id = "web:ceo-heartbeat-task-terminal-root-output"
