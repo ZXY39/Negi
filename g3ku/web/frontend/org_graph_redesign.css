@@ -1911,10 +1911,10 @@
     color: var(--ui-text-secondary);
 }
 
-/* 46. 任务大厅头部整体左对齐：多选 → 排序 → 树深度 → 性能读数。
-   h1 已经视觉隐藏，但 .task-header-main 仍在流里占一行宽，会把多选推到
-   左内边距 + 标题宽度 + gap 之后；其他页的刷新按钮是绝对定位在左内边距，
-   所以这里把标题容器移出流，让多选与其他页刷新按钮同一 x。 */
+/* 46. 任务大厅头部：多选 → 排序 → 树深度靠左成组，树深度之后的性能读数
+   推到右端。h1 已经视觉隐藏，但 .task-header-main 仍在流里占一行宽，会把
+   多选推到左内边距 + 标题宽度 + gap 之后；其他页的刷新按钮是绝对定位在
+   左内边距，所以这里把标题容器移出流，让多选与其他页刷新按钮同一 x。 */
 [data-ui-version="v2"] #view-tasks-list .task-header-main {
     position: absolute;
     min-height: 0;
@@ -1937,8 +1937,8 @@
 
 [data-ui-version="v2"] #view-tasks-list #task-performance-bar {
     order: 2;
-    justify-content: flex-start;
-    flex-wrap: wrap;
+    /* 旧样式在 ≤1100px 把读数改回左对齐，这里不分宽度一律靠右 */
+    justify-content: flex-end;
 }
 
 /* 三个控件同一基线：按钮文字不能按 line-height: normal 排 */
@@ -1947,4 +1947,23 @@
 [data-ui-version="v2"] .content-header .task-depth-setting-main {
     line-height: 20px;
     align-items: center;
+}
+
+/* 47. 模型页头部：刷新与「添加配置」「编辑模型链」并成一组靠左，
+   组内间距沿用 .resource-header-actions 的 12px，与任务/Skill 同一节奏。
+   刷新回到流内领排，标题容器移出流，否则整组会被它挤到 44px。 */
+[data-ui-version="v2"] #view-models .resource-header-title {
+    position: absolute;
+    min-width: 0;
+}
+
+[data-ui-version="v2"] #view-models .resource-header-actions {
+    justify-content: flex-start;
+    margin-left: 0;
+    width: 100%;
+}
+
+[data-ui-version="v2"] #view-models #model-refresh-btn {
+    position: static;
+    transform: none;
 }
