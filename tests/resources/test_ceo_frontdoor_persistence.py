@@ -1072,6 +1072,7 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
         "error_text": "",
         "reasoning_content": "reasoning trace",
         "thinking_blocks": [{"type": "thinking", "text": "step one"}],
+        "stream_incomplete": False,
         "provider_request_meta": {
             "provider": "responses",
             "endpoint": "https://example.test/v1/responses",

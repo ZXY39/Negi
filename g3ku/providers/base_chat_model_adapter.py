@@ -150,6 +150,8 @@ class G3kuChatModelAdapter(BaseChatModel):
             additional_kwargs["reasoning_content"] = response.reasoning_content
         if getattr(response, "thinking_blocks", None):
             additional_kwargs["thinking_blocks"] = response.thinking_blocks
+        if getattr(response, "stream_incomplete", False):
+            additional_kwargs["stream_incomplete"] = True
 
         tool_calls_payload: list[dict[str, Any]] = []
         for tc in list(getattr(response, "tool_calls", None) or []):

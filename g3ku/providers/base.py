@@ -64,6 +64,11 @@ class LLMResponse:
     provider_request_meta: dict[str, Any] = field(default_factory=dict)
     provider_request_body: dict[str, Any] = field(default_factory=dict)
     visible_text_streamed: bool = False
+    # 流式响应未收到终止分片（没有任何 choice 分片携带 finish_reason）。上游在
+    # 思考或生成中途关闭 SSE 时，finish_reason 仍会落到默认 "stop"，上层无法据此
+    # 判断这一轮到底说完没有；该字段把这个事实单独暴露出来，供上层决定重放。
+    # 只有自行消费流式分片的 provider 会置位，其余保持 False。
+    stream_incomplete: bool = False
     # 首 token 耗时（毫秒，请求发出 → 首个流式分片）。仅流式 provider 能填。
     first_token_ms: float | None = None
 

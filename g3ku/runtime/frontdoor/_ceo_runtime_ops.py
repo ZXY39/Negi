@@ -6053,6 +6053,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "error_text": str(payload.get("error_text", "") or ""),
                     "reasoning_content": payload.get("reasoning_content"),
                     "thinking_blocks": payload.get("thinking_blocks"),
+                    "stream_incomplete": bool(payload.get("stream_incomplete") or False),
                     "provider_request_meta": payload.get("provider_request_meta"),
                     "provider_request_body": payload.get("provider_request_body"),
                 },
@@ -6069,6 +6070,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "error_text": str(response_metadata.get("error_text", "") or ""),
                 "reasoning_content": additional_kwargs.get("reasoning_content"),
                 "thinking_blocks": additional_kwargs.get("thinking_blocks"),
+                "stream_incomplete": bool(additional_kwargs.get("stream_incomplete") or False),
                 "provider_request_meta": response_metadata.get("provider_request_meta"),
                 "provider_request_body": response_metadata.get("provider_request_body"),
             },
@@ -6138,6 +6140,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "error_text": str(response_view.error_text or ""),
             "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
             "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
+            "stream_incomplete": bool(getattr(response_view, "stream_incomplete", False)),
             "provider_request_meta": _checkpoint_safe_value(response_view.provider_request_meta),
             "provider_request_body": self._checkpoint_safe_provider_request_body(response_view.provider_request_body),
         }
@@ -7360,7 +7363,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
                     continue
                 response_view = self._model_response_view(message)
-                if self._is_empty_model_response(response_view):
+                stream_unterminated = self._is_unterminated_empty_response(response_view)
+                if stream_unterminated or self._is_empty_model_response(response_view):
                     if self._refresh_runtime_config_for_retry_invalidation():
                         state_for_request["model_refs"] = list(
                             self._resolve_ceo_model_refs_for_session(state_for_request.get("session_key"))
@@ -7369,6 +7373,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         restart_with_refreshed_runtime = True
                         break
                     empty_response_retry_count += 1
+                    if empty_response_retry_count >= _PROVIDER_RETRY_LIMIT:
+                        # 与节点车道同构：耗尽后失败上抛，由 session_agent 的错误车道
+                        # 落成「这一轮处理失败：…」，不把运行时内部文案当助手回复投递。
+                        raise ModelProviderExhaustedError(
+                            message=(
+                                "响应流未正常终止"
+                                if stream_unterminated
+                                else "模型返回空响应（无正文、无工具调用）"
+                            )
+                            + f"，自动重试 {empty_response_retry_count} 次仍未取得可用回复。"
+                        )
                     await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
                     continue
                 break

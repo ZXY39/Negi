@@ -157,6 +157,24 @@ class CeoFrontDoorSupport:
             return False
         return True
 
+    @classmethod
+    def _is_unterminated_empty_response(cls, response: Any) -> bool:
+        """上游中途关闭 SSE 的响应：既无正文也无工具调用，且从未出现终止分片。
+
+        只在「这一轮没有任何可用输出」时才判定，因此带正文或带工具调用的响应永远
+        不会被当成截断——省略 finish_reason 的非规范 provider 也不会被误伤。
+        reasoning-only 的响应在 ``_is_empty_model_response`` 里算非空，正是靠这里补上。
+        """
+        if not bool(getattr(response, "stream_incomplete", False)):
+            return False
+        if list(getattr(response, "tool_calls", None) or []):
+            return False
+        if cls._content_text(getattr(response, "content", "")).strip():
+            return False
+        if str(getattr(response, "error_text", None) or "").strip():
+            return False
+        return True
+
     @staticmethod
     def _model_content(value: Any) -> Any:
         return value if isinstance(value, list) else str(value or "")
