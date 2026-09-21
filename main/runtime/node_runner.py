@@ -108,12 +108,34 @@ _SPAWN_REVIEW_BLOCKED_CHECK_RESULT = '派生已被拦截'
 # 故障当成评审意见去改写 spec，账本上也无法区分。
 _SPAWN_REVIEW_SYSTEM_FAILURE_CHECK_RESULT = '派生未审查（系统故障）'
 _SPAWN_REVIEW_DEFAULT_BLOCK_REASON = '检验派生未批准该候选派生。'
-_SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION = '请在当前父节点内自行执行，或收缩为更聚焦的单一派生。'
+# 兜底建议不能只说「收缩为单一派生」：父节点会据此把可并行分支继续拆轮，或删掉
+# requires_acceptance 来凑批量，两条都是往错误方向收敛。
+_SPAWN_REVIEW_DEFAULT_BLOCK_SUGGESTION = (
+    '请在当前父节点内自行执行；确需派生时把互不依赖的分支合并为一次 spawn_child_nodes 批量派生，'
+    '需要独立验收的分支在该候选上设置 requires_acceptance=true 并给出 acceptance_prompt。'
+)
 _SPAWN_REVIEW_RETRY_DELAY_SECONDS = 0.1
 # 检验派生的无效响应重试上限，对齐消息分发决策车道的 _DISTRIBUTION_DECISION_MAX_ATTEMPTS：
 # 评审模型持续不回可解析结构时会话级重发没有终点，每轮还多带一条 repair 消息。
 _SPAWN_REVIEW_MAX_ATTEMPTS = 5
 _SPAWN_REVIEW_REPAIR_PREFIX = '上一轮检验派生回复无效。'
+# 独立验收节点的 goal 前缀只在这里定义一次：派生审查载荷要按同一口径回显「运行时会
+# 创建哪条节点」，改一半就会让评审看到的 goal 与真实节点对不上。
+_SPAWN_ACCEPTANCE_GOAL_PREFIX = 'accept:'
+
+
+def _spawn_acceptance_goal(goal: str) -> str:
+    return _SPAWN_ACCEPTANCE_GOAL_PREFIX + str(goal or '')
+
+
+def _spec_requires_acceptance(spec: SpawnChildSpec) -> bool:
+    """`requires_acceptance` 未显式给时按 `acceptance_prompt` 非空推断——载荷与建节点必须同源。"""
+    if spec.requires_acceptance is True:
+        return True
+    if spec.requires_acceptance is False:
+        return False
+    return bool(str(spec.acceptance_prompt or '').strip())
+
 
 DISTRIBUTION_ACTION_DISTRIBUTE = 'distribute'
 DISTRIBUTION_ACTION_SKIP = 'skip'
@@ -4519,15 +4541,32 @@ class NodeRunner:
 
     @staticmethod
     def _spawn_review_requested_spec_payload(*, index: int, spec: SpawnChildSpec) -> dict[str, Any]:
+        """审查车道看到的候选 = 运行时将创建的节点集合，不是模型入参的字面平铺。
+
+        `acceptance_prompt` 与 goal/prompt 同级时，评审会把它读成"验收内嵌、自产自销"并建议
+        把生成与它的验收排进同批（事故 task:9b89e2cfc6a5），故按 `_ensure_spawn_acceptance_node`
+        的真实物化结果展开。原始入参仍单独存于 `spawn_operations[round]['specs']`。
+        """
+        goal = str(spec.goal or '')
+        requires_acceptance = _spec_requires_acceptance(spec)
+        runtime_nodes: list[dict[str, Any]] = [{'node_kind': 'execution'}]
+        if requires_acceptance:
+            runtime_nodes.append(
+                {
+                    'node_kind': 'acceptance',
+                    'goal': _spawn_acceptance_goal(goal),
+                    'parent_node': '上一条 execution 节点（本候选自己的子节点，不是兄弟候选）',
+                    'activation': '本候选整条子管线终态后才激活',
+                    'acceptance_prompt': str(spec.acceptance_prompt or ''),
+                }
+            )
         return {
             'index': int(index),
-            'goal': str(spec.goal or ''),
+            'goal': goal,
             'prompt': str(spec.prompt or ''),
             'execution_policy': normalize_execution_policy_metadata(spec.execution_policy.model_dump(mode='json')).model_dump(mode='json'),
-            'acceptance_prompt': str(spec.acceptance_prompt or ''),
-            'requires_acceptance': bool(
-                spec.requires_acceptance if spec.requires_acceptance is not None else bool(str(spec.acceptance_prompt or '').strip())
-            ),
+            'requires_acceptance': requires_acceptance,
+            'runtime_nodes': runtime_nodes,
         }
 
     @classmethod
@@ -6191,7 +6230,7 @@ class NodeRunner:
         acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
         acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
         if acceptance is None:
-            acceptance_goal = f'accept:{spec.goal}'
+            acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
             acceptance = self._find_reusable_acceptance_node(
                 task=task,
@@ -6255,11 +6294,7 @@ class NodeRunner:
         controller.release_work_slot(lease)
 
     def _requires_acceptance(self, spec: SpawnChildSpec) -> bool:
-        if spec.requires_acceptance is True:
-            return True
-        if spec.requires_acceptance is False:
-            return False
-        return bool(str(spec.acceptance_prompt or '').strip())
+        return _spec_requires_acceptance(spec)
 
     @staticmethod
     def _claimed_spawn_node_ids(*, entries: list[dict[str, Any]], field: str, skip_index: int) -> set[str]:

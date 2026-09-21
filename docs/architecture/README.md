@@ -42,7 +42,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
 - 追加通知后任务停在 paused、任务树出现红色「消息分发失败」横幅、epoch state=failed → `runtime-overview.md`「frontdoor 与任务运行时的关系」+ `operations-and-maintenance.md`「task_append_notice / task message distribution 维护要点」
 - 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
-- 派生评审把整批候选全拦下来、或想知道评审请求本身有多大/重发过几次 → `runtime-overview.md`「frontdoor 与任务运行时的关系」（派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
+- 派生评审把整批候选全拦下来、把带 `requires_acceptance` 的候选判成"验收内嵌/自产自销"、或想知道评审请求本身有多大/重发过几次 → `runtime-overview.md`「frontdoor 与任务运行时的关系」（送审候选的解析结构、派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `runtime-overview.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）
 - 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `runtime-overview.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）

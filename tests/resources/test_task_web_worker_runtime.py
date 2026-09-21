@@ -13618,6 +13618,99 @@ async def test_spawn_review_request_uses_root_to_parent_path_tree_and_stage_goal
 
 
 @pytest.mark.asyncio
+async def test_spawn_review_request_sends_parsed_candidate_structure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """评审车道收到的候选要展开成运行时会创建的节点集合，而不是模型入参的字面平铺。
+
+    事故 task:9b89e2cfc6a5：`acceptance_prompt` 与 `goal`/`prompt` 同级摆放时，评审模型判成
+    "验收内嵌在生成节点里、自产自销"，反过来建议把生成节点与它的验收节点排进同一批。
+    """
+    backend = _SpawnReviewToolCallChatBackend(arguments={"allowed_indexes": [0, 1], "blocked_specs": []})
+    service = MainRuntimeService(
+        chat_backend=backend,
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    service.global_scheduler.enqueue_task = _noop_enqueue_task
+
+    try:
+        record = await service.create_task("spawn review parsed payload", session_id="web:shared", max_depth=3)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        parent = service.node_runner._create_execution_child(
+            task=task,
+            parent=root,
+            spec=SpawnChildSpec(goal="parent branch", prompt="parent prompt", execution_policy=_execution_policy()),
+        )
+
+        async def _fake_run_node(task_id: str, node_id: str):
+            node = service.get_node(node_id)
+            assert node is not None
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary=f"{node.goal} done",
+                    answer=f"{node.goal} done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
+
+        await service.node_runner._spawn_children(
+            task_id=record.task_id,
+            parent_node_id=parent.node_id,
+            specs=[
+                SpawnChildSpec(
+                    goal="gen branch",
+                    prompt="gen prompt",
+                    execution_policy=_execution_policy(),
+                    requires_acceptance=True,
+                    acceptance_prompt="独立核磁盘与 PNG",
+                ),
+                SpawnChildSpec(goal="plain branch", prompt="plain prompt", execution_policy=_execution_policy()),
+            ],
+            call_id="parsed-payload-review",
+        )
+
+        call = next(
+            candidate
+            for candidate in backend.calls
+            if len(list(candidate.get("messages") or [])) >= 2
+            and '"parent_node_id"' in str((candidate.get("messages") or [None, {}])[1].get("content") or "")
+        )
+        payload = json.loads(str(call["messages"][1]["content"]))
+        requested = payload["spawn_request"]["requested_specs"]
+        assert [node["node_kind"] for node in requested[0]["runtime_nodes"]] == ["execution", "acceptance"]
+        assert requested[0]["runtime_nodes"][1]["acceptance_prompt"] == "独立核磁盘与 PNG"
+        assert "acceptance_prompt" not in requested[0]
+        assert requested[1]["runtime_nodes"] == [{"node_kind": "execution"}]
+
+        # 回显给评审的 goal 必须就是真被创建出来的那条节点，否则"独立"仍是模型要靠猜的。
+        acceptance_nodes = [
+            node for node in service.list_nodes(record.task_id) if node.node_kind == 'acceptance' and node.parent_node_id != root.node_id
+        ]
+        assert [node.goal for node in acceptance_nodes] == [requested[0]["runtime_nodes"][1]["goal"]]
+
+        round_payload = dict((service.get_node(parent.node_id).metadata or {})["spawn_operations"]["parsed-payload-review"])
+        assert dict(round_payload["specs"][0])["acceptance_prompt"] == "独立核磁盘与 PNG"
+        assert "acceptance_prompt" not in dict(round_payload["spawn_review"]["requested_specs"][0])
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_spawn_review_request_includes_consumed_distribution_notices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     backend = _SpawnReviewToolCallChatBackend(
         arguments={"allowed_indexes": [0], "blocked_specs": []}
@@ -13729,6 +13822,22 @@ def test_spawn_review_prompt_prioritizes_consumed_distribution_notices() -> None
     assert "consumed_distribution_notices" in prompt
     assert "Priority rule:" in prompt
     assert "use the latest consumed distribution notice as the effective current requirement" in prompt
+
+
+def test_spawn_review_prompt_states_parsed_structure_and_merge_template() -> None:
+    """提示词必须自己讲清物化语义，否则评审会按字段摆放位置推断"验收是否独立"。"""
+    review_prompt = load_prompt("spawn_child_review.md")
+
+    assert "runtime_nodes" in review_prompt
+    assert "自产自销" in review_prompt
+    assert "不是模型原始入参的字面拷贝" in review_prompt
+    assert "合并为一次 `spawn_child_nodes` 调用" in review_prompt
+    assert "建议必须自身合规" in review_prompt
+
+    execution_prompt = load_prompt("node_execution.md")
+
+    assert "这就是结构上独立的验收节点" in execution_prompt
+    assert "默认开启这条验收闭环" in execution_prompt
 
 
 @pytest.mark.asyncio
