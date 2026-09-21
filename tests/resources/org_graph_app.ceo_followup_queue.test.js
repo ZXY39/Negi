@@ -167,6 +167,9 @@ function loadApp() {
             handleCeoPrimaryAction,
             setCeoQueuedFollowUps,
             removeCeoQueuedFollowUp,
+            applyCeoState,
+            getMergedCeoQueuedFollowUps,
+            renderQueuedCeoFollowUps,
         };`,
         context
     );
@@ -256,4 +259,66 @@ test("sending while a turn is active queues follow-up and sends it to the runtim
     assert.equal(U.ceoFollowUpQueue.hidden, false);
     assert.match(U.ceoFollowUpQueue.innerHTML, /前10个/);
     assert.equal((__context.__showToastCalls || []).length, 0);
+});
+
+test("state snapshot with a runtime-held queue paints the accepted chip", () => {
+    const { U, applyCeoState, getMergedCeoQueuedFollowUps } = loadApp();
+
+    applyCeoState({
+        status: "idle",
+        queued_follow_up_messages: [
+            { content: "压缩途中发的那条", attachments: [], metadata: { _transcript_turn_id: "t-1" } },
+        ],
+    });
+
+    // 换标签页/重启后 sessionStorage 是空的，这条候选只能由服务端状态快照画出来。
+    assert.equal(U.ceoFollowUpQueue.hidden, false);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /压缩途中发的那条/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /已受理/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove/);
+    const merged = getMergedCeoQueuedFollowUps("web:test");
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].accepted_by_runtime, true);
+    assert.equal(merged[0].id, "server:t-1");
+});
+
+test("a follow-up the runtime already holds is not painted twice", () => {
+    const { U, applyCeoState, setCeoQueuedFollowUps, getMergedCeoQueuedFollowUps } = loadApp();
+    setCeoQueuedFollowUps("web:test", [
+        { id: "local-sent", text: "同一条", runtime_sent_at: "2026-09-21T13:06:01" },
+    ]);
+
+    applyCeoState({
+        status: "idle",
+        queued_follow_up_messages: [
+            { content: "同一条", attachments: [], metadata: { _transcript_turn_id: "t-2" } },
+        ],
+    });
+
+    const merged = getMergedCeoQueuedFollowUps("web:test");
+    assert.equal(merged.length, 1);
+    assert.equal(merged[0].id, "server:t-2");
+    assert.equal((U.ceoFollowUpQueue.innerHTML.match(/同一条/g) || []).length, 1);
+});
+
+test("an unsent local draft stays removable beside the server queue", () => {
+    const { S, U, applyCeoState, setCeoQueuedFollowUps, getMergedCeoQueuedFollowUps } = loadApp();
+    setCeoQueuedFollowUps("web:test", [{ id: "local-unsent", text: "还没发出去的" }]);
+    // 会话忙（压缩在途就是这个形状）：空闲快照会触发浏览器自己把未发送的草稿发出去。
+    S.ceoSessionBusy = true;
+
+    applyCeoState({
+        status: "idle",
+        queued_follow_up_messages: [
+            { content: "服务端已在排队", attachments: [], metadata: { _transcript_turn_id: "t-3" } },
+        ],
+    });
+
+    const merged = getMergedCeoQueuedFollowUps("web:test");
+    // 不用 deepEqual：app 跑在 vm 沙箱里，沙箱内新建的数组与宿主 Array.prototype 不同域。
+    assert.equal(merged.length, 2);
+    assert.equal(merged[0].text, "服务端已在排队");
+    assert.equal(merged[1].text, "还没发出去的");
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="local-unsent"/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="server:t-3"/);
 });

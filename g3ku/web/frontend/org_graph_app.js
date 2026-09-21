@@ -132,6 +132,9 @@ const S = {
     ceoComposerDraftPersistId: null,
     ceoQueuedFollowUps: {},
     ceoQueuedFollowUpsPersistId: null,
+    // runtime 已经受理、正在排队的条目：来源是 ceo.state 的 queued_follow_up_messages。
+    // 它是候选列表的真相，浏览器的 sessionStorage 只负责"还没发出去"的那一半。
+    ceoServerQueuedFollowUps: {},
     ceoQueuedFollowUpDispatching: false,
     ceoComposerUsageEstimate: null,
     ceoComposerUsagePinnedEntries: null,
@@ -2546,6 +2549,33 @@ function normalizeCeoQueuedFollowUpList(items = []) {
         .slice(0, CEO_FOLLOW_UP_QUEUE_PER_SESSION_LIMIT);
 }
 
+function ceoServerFollowUpText(content) {
+    if (typeof content === "string") return content.trim();
+    if (Array.isArray(content)) {
+        return content.map((part) => String(part?.text || "")).filter(Boolean).join(" ").trim();
+    }
+    return "";
+}
+
+function normalizeCeoServerQueuedFollowUpList(items = []) {
+    return (Array.isArray(items) ? items : [])
+        .map((item, index) => {
+            const uploads = cloneCeoSnapshotAttachments(item?.attachments);
+            const text = ceoServerFollowUpText(item?.content);
+            if (!text && !uploads.length) return null;
+            const turnId = String(item?.metadata?.["_transcript_turn_id"] || "").trim();
+            return {
+                id: `server:${turnId || index}`,
+                text,
+                uploads,
+                queued_at: "",
+                runtime_sent_at: "server",
+                accepted_by_runtime: true,
+            };
+        })
+        .filter(Boolean);
+}
+
 function pruneCeoFollowUpQueueCache(cache = {}) {
     const entries = Object.entries(cache || {})
         .map(([sessionId, items]) => {
@@ -2613,6 +2643,36 @@ function getCeoQueuedFollowUps(sessionId = activeSessionId()) {
     const key = String(sessionId || "").trim();
     if (!key) return [];
     return normalizeCeoQueuedFollowUpList(S.ceoQueuedFollowUps?.[key] || []);
+}
+
+function getCeoServerQueuedFollowUps(sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return [];
+    return normalizeCeoServerQueuedFollowUpList(S.ceoServerQueuedFollowUps?.[key] || []);
+}
+
+function getMergedCeoQueuedFollowUps(sessionId = activeSessionId()) {
+    const serverItems = getCeoServerQueuedFollowUps(sessionId);
+    const represented = new Set(serverItems.map((item) => String(item.text || "").trim()).filter(Boolean));
+    // 浏览器这一侧只保留"还没发给 runtime"的条目：带 runtime_sent_at 的那一半服务端已经
+    // 知道了，两份都画就会在候选条里重复出现。
+    const localItems = getCeoQueuedFollowUps(sessionId).filter((item) => {
+        if (!String(item?.runtime_sent_at || "").trim()) return true;
+        return !represented.has(String(item.text || "").trim());
+    });
+    return [...serverItems, ...localItems];
+}
+
+function adoptCeoServerQueuedFollowUpsFromState(state = {}, sessionId = activeSessionId()) {
+    const key = String(sessionId || "").trim();
+    if (!key) return false;
+    // 只存原样数组，读的时候再规范化：存规范化结果会让第二次读把已规范化的条目再过滤一遍
+    // （它们没有 content 字段），候选条于是自己把自己清空。
+    const next = Array.isArray(state?.queued_follow_up_messages) ? state.queued_follow_up_messages : [];
+    const current = Array.isArray(S.ceoServerQueuedFollowUps?.[key]) ? S.ceoServerQueuedFollowUps[key] : [];
+    if (JSON.stringify(next) === JSON.stringify(current)) return false;
+    S.ceoServerQueuedFollowUps = { ...(S.ceoServerQueuedFollowUps || {}), [key]: next };
+    return true;
 }
 
 function setCeoQueuedFollowUps(sessionId, items = []) {
@@ -4910,7 +4970,7 @@ function renderPendingCeoUploads() {
 function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     if (!U.ceoFollowUpQueue) return;
     const key = String(sessionId || "").trim();
-    const items = normalizeCeoQueuedFollowUpList((S.ceoQueuedFollowUps || {})[key] || []);
+    const items = getMergedCeoQueuedFollowUps(key);
     U.ceoFollowUpQueue.hidden = !items.length;
     if (!items.length) {
         U.ceoFollowUpQueue.innerHTML = "";
@@ -4918,15 +4978,21 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     }
     U.ceoFollowUpQueue.innerHTML = `
         <div class="ceo-follow-up-chip-list" role="list">
-            ${items.map((item, index) => `
+            ${items.map((item, index) => {
+                // runtime 已受理的条目不能删：它已经落进队列（重启也还在），撤回它没有对应操作。
+                const trailing = item.accepted_by_runtime
+                    ? `<span class="ceo-follow-up-state">已受理</span>`
+                    : `<button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${esc(String(item.id || ""))}" aria-label="删除待发送补充">
+                            <i data-lucide="x"></i>
+                        </button>`;
+                return `
                 <div class="ceo-follow-up-chip" role="listitem">
                     <span class="ceo-follow-up-kind">${index + 1}</span>
                     <span class="ceo-follow-up-name">${esc(String(item.text || "").trim() || summarizeUploads(item.uploads || []))}</span>
-                    <button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${esc(String(item.id || ""))}" aria-label="删除待发送补充">
-                        <i data-lucide="x"></i>
-                    </button>
+                    ${trailing}
                 </div>
-            `).join("")}
+            `;
+            }).join("")}
         </div>
     `;
     scheduleCeoComposerUsageRefresh();
@@ -5072,6 +5138,9 @@ function applyCeoState(state = {}, meta = {}) {
     const running = !!state?.is_running || status === "running";
     const paused = !!state?.paused || status === "paused";
     adoptCeoContextCompressionFromState(state);
+    // 候选条以 runtime 的队列为真相：换标签页/重启后 sessionStorage 里没有的东西，
+    // 也要在输入框上方看得见（它已经落在转录里，只是还没成回合）。
+    if (adoptCeoServerQueuedFollowUpsFromState(state)) renderQueuedCeoFollowUps(activeSessionId());
     const activeTurn = source || turnId ? getActiveCeoTurn(source, turnId) : getActiveCeoTurn();
     const hadTurnContext = !!activeTurn || !!S.ceoTurnActive;
     S.ceoTurnActive = running;
