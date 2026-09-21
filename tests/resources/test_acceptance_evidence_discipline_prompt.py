@@ -70,3 +70,11 @@ def test_acceptance_prompt_batches_rejections_and_distinguishes_terminal_blocked
     assert "一次性列出全部已发现的不符合点" in prompt
     assert 'failed + delivery_status="blocked"' in prompt
     assert "不得要求执行节点再次提交" in prompt
+
+
+def test_acceptance_prompt_keeps_verdict_taxonomy_out_of_the_repair_message() -> None:
+    prompt = _prompt()
+    assert '`failed + delivery_status="final"` 时，`blocking_reason` 必须传空字符串' in prompt
+    assert "运行时把 `summary` 与 `remaining_work` 拼成打回消息" in prompt
+    # §3.3 阻塞核验模式反过来要求用 blocking_reason 承载下一步，两处规则必须有显式让位声明。
+    assert "本节对 `blocking_reason` 的用法覆盖 §4.2 的留空规则" in prompt

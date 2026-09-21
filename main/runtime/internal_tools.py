@@ -474,7 +474,7 @@ class SubmitFinalResultTool(Tool):
     @property
     def model_description(self) -> str:
         if self._node_kind == 'acceptance':
-            return 'Submit the current acceptance result; failed+final requests repair, while failed+blocked records an execution anomaly as terminal without retry.'
+            return 'Submit the current acceptance result; failed+final requests repair, while failed+blocked records an execution anomaly as terminal without retry. For a repairable failed+final verdict, send blocking_reason as an empty string: the inspected execution node reads summary plus remaining_work as its repair instructions, and nothing else you write into blocking_reason.'
         return 'Submit the current result; rejection returns acceptance feedback instead of ending the node.'
 
     @property

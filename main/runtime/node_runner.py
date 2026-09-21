@@ -1350,6 +1350,26 @@ class NodeRunner:
 
     @staticmethod
     def _acceptance_feedback_text(result: NodeFinalResult) -> str:
+        """打回正文 = 不通过原因 + 逐条修复要求；blocking_reason 属于 blocked 形态，此处不读。"""
+        parts: list[str] = []
+        conclusion = str(result.summary or result.answer or '').strip()
+        if conclusion:
+            parts.append(conclusion)
+        remaining_work = [
+            str(item or '').strip()
+            for item in list(result.remaining_work or [])
+            if str(item or '').strip()
+        ]
+        if remaining_work:
+            parts.append('修复要求：\n' + '\n'.join(f'- {item}' for item in remaining_work))
+        text = '\n\n'.join(parts).strip()
+        if len(text) > _ACCEPTANCE_SUMMARY_CHARS:
+            return f'{text[:_ACCEPTANCE_SUMMARY_CHARS]}…（反馈正文已截断）'
+        return text or str(result.blocking_reason or '').strip()
+
+    @staticmethod
+    def _blocked_verification_feedback_text(result: NodeFinalResult) -> str:
+        """阻塞核验车道的正文：核验方按契约把「接下来做什么」写进 blocking_reason。"""
         return str(result.blocking_reason or result.summary or result.answer or '').strip()
 
     def _accepted_execution_node(self, *, task_id: str, acceptance: NodeRecord) -> NodeRecord | None:
@@ -2021,7 +2041,7 @@ class NodeRunner:
                     '请继续执行剩余工作后重新提交结果。'
                 )
             else:
-                feedback_text = self._acceptance_feedback_text(verdict) or (
+                feedback_text = self._blocked_verification_feedback_text(verdict) or (
                     '阻塞声明不成立：仍存在可行下一步或阶段预算未用尽。请继续处理剩余工作后重新提交。'
                 )
             next_rejection_count = rejection_count + 1

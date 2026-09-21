@@ -23,6 +23,7 @@ from main.runtime.node_runner import (
     _BLOCKED_VERIFICATION_LOG_KEY,
     _BLOCKED_VERIFICATION_ONLY_KEY,
     _REJECTION_HISTORY_KEY,
+    NodeRunner,
 )
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.stage_budget import STAGE_TOOL_ROUND_BUDGET_MIN
@@ -841,3 +842,60 @@ async def test_gate_resolution_supersedes_activation_notice_tail(tmp_path: Path)
         assert build_append_notice_tail_messages(context) == []
     finally:
         await service.close()
+
+
+def test_rejection_feedback_uses_repair_fields_not_blocking_reason() -> None:
+    """普通拒收正文只取 summary+remaining_work：blocking_reason 是必填项，模型会往里写「为什么不是 blocked」。"""
+    verdict = NodeFinalResult(
+        status="failed",
+        delivery_status="final",
+        summary="row08 覆盖率仍 56.2%，007 .tpl 未删",
+        answer="完整核验对账表，正文留在验收节点结论里",
+        evidence=[],
+        remaining_work=["补齐 row08 缺失的 7 个关键词后重转 PDF", "删除 007_智能体开发工程师-双休.html.tpl"],
+        blocking_reason="不适用——本节点裁定为 failed + final（可打回修复），非 blocked。",
+    )
+    feedback = NodeRunner._acceptance_feedback_text(verdict)
+    assert "row08 覆盖率仍 56.2%" in feedback
+    assert "删除 007_智能体开发工程师-双休.html.tpl" in feedback
+    assert "不适用" not in feedback
+    assert "完整核验对账表" not in feedback
+
+
+def test_rejection_feedback_falls_back_and_stays_bounded() -> None:
+    empty_verdict = NodeFinalResult(
+        status="failed",
+        delivery_status="final",
+        summary="",
+        answer="",
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="只有 blocking_reason 有值时仍要给出反馈",
+    )
+    assert NodeRunner._acceptance_feedback_text(empty_verdict) == "只有 blocking_reason 有值时仍要给出反馈"
+    oversized = NodeFinalResult(
+        status="failed",
+        delivery_status="final",
+        summary="问" * 3000,
+        answer="",
+        evidence=[],
+        remaining_work=[],
+        blocking_reason="",
+    )
+    feedback = NodeRunner._acceptance_feedback_text(oversized)
+    assert len(feedback) < 3000
+    assert feedback.endswith("…（反馈正文已截断）")
+
+
+def test_blocked_verification_feedback_still_prefers_blocking_reason() -> None:
+    """阻塞核验车道契约相反：核验方把「接下来做什么」写在 blocking_reason。"""
+    verdict = NodeFinalResult(
+        status="failed",
+        delivery_status="final",
+        summary="阻塞不成立",
+        answer="",
+        evidence=[],
+        remaining_work=["继续写入 child_c.md"],
+        blocking_reason="预算未用尽，请继续写入 child_c.md 后重新提交",
+    )
+    assert NodeRunner._blocked_verification_feedback_text(verdict) == "预算未用尽，请继续写入 child_c.md 后重新提交"
