@@ -800,6 +800,9 @@
 
 [data-ui-version="v2"] .ceo-session-main {
     border-radius: var(--ui-radius-control);
+    padding: 0;
+    background: transparent;
+    box-shadow: none;
 }
 
 [data-ui-version="v2"] .ceo-session-card:hover {
@@ -808,8 +811,8 @@
     transform: none;
 }
 
-[data-ui-version="v2"] .ceo-session-card.is-active,
-[data-ui-version="v2"] .ceo-session-card .ceo-session-select[aria-pressed="true"] {
+/* 选中态只画在卡片这一层：内层按钮再画一遍就是框中框错位 */
+[data-ui-version="v2"] .ceo-session-card.is-active {
     background: var(--ui-brand-soft);
     box-shadow: inset 3px 0 0 var(--ui-brand);
 }
@@ -1532,7 +1535,28 @@
     gap: var(--ui-space-4);
 }
 
-[data-ui-version="v2"] .task-depth-setting-main .resource-select-trigger:hover {
-    background: transparent;
-    border-color: transparent;
+/* 33. 任务详情头部：返回、状态、初始提示词、活跃节点与操作按钮恒定一行，
+   缩放时只压缩提示词的可见宽度 */
+[data-ui-version="v2"] .task-detail-header {
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: var(--ui-space-2);
+    min-height: 56px;
+    padding: 8px var(--ui-space-4);
+}
+
+[data-ui-version="v2"] .task-detail-header > * {
+    flex: 0 0 auto;
+    min-width: 0;
+}
+
+[data-ui-version="v2"] .task-detail-header .task-prompt-disclosure {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+[data-ui-version="v2"] .task-detail-header .header-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
 }
