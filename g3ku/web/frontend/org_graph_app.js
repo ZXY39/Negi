@@ -8868,6 +8868,21 @@ function openResourceSelect(select, { focus = "selected" } = {}) {
     focusResourceSelectOption(shell, focus);
 }
 
+// 容器重绘后把用户正开着的那个下拉框重新打开。下拉框的身份必须稳定
+// （select.id），否则整块 DOM 重建等于把它关掉；S.openResourceSelectId 只在
+// 真正开着时非空，所以选完值、按 Esc、点别处之后不会再被"恢复"打开。
+function restoreOpenResourceSelect(container = document) {
+    const openId = String(S.openResourceSelectId || "").trim();
+    if (!openId) return false;
+    if (!container || typeof container.querySelector !== "function") return false;
+    const shell = container.querySelector(`.resource-select-shell[data-select-id="${openId}"]`);
+    if (!shell || shell.classList.contains("is-open")) return false;
+    const select = shell.querySelector("select.resource-select");
+    if (!(select instanceof HTMLSelectElement)) return false;
+    openResourceSelect(select);
+    return true;
+}
+
 function buildResourceSelect(select) {
     if (!(select instanceof HTMLSelectElement) || select.dataset.customized === "true") return;
     const parent = select.parentElement;

@@ -2695,6 +2695,14 @@ function executionTreeNodeSelector(nodeId) {
     return `.execution-tree-node[data-id="${escaped}"]`;
 }
 
+// 轮次下拉框的稳定身份：整树重绘时 shell.dataset.selectId 由它派生，
+// 展开状态才能被 restoreOpenResourceSelect 认回来。
+function treeRoundSelectId(nodeId) {
+    const key = String(nodeId || "").trim();
+    if (!key) return "";
+    return `tree-round-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
 function refreshTreeViewFromSnapshot() {
     S.treeView = buildExecutionTreeFromSnapshot(S.treeRootNodeId, S.treeSelectedRoundByNodeId);
     return S.treeView;
@@ -3449,6 +3457,7 @@ function renderTree() {
             label.className = "execution-tree-round-label";
             label.textContent = "轮次";
             const select = document.createElement("select");
+            select.id = treeRoundSelectId(node.node_id);
             select.className = "execution-tree-round-select resource-select";
             select.dataset.resourceSelectLabel = `${fullTitle} 轮次`;
             roundOptions.forEach((round) => {
@@ -3487,6 +3496,7 @@ function renderTree() {
     if (distributionState) U.tree.appendChild(buildTaskTreeDistributionBubble());
     U.tree.appendChild(wrapper);
     if (typeof enhanceResourceSelects === "function") enhanceResourceSelects();
+    if (typeof restoreOpenResourceSelect === "function") restoreOpenResourceSelect(U.tree);
     maybeReapplyTaskTreeLocateHighlight();
     if (S.selectedNodeId) {
         const selected = findTreeNode(S.treeView, S.selectedNodeId);

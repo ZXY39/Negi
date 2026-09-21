@@ -5175,6 +5175,32 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
     }
 
 
+def test_tree_round_select_id_is_stable_and_selector_safe() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {};
+        const code = fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8");
+        vm.runInThisContext(code);
+        console.log(JSON.stringify({
+          first: treeRoundSelectId("node:1a2b/c d"),
+          again: treeRoundSelectId("node:1a2b/c d"),
+          other: treeRoundSelectId("node:other"),
+          empty: treeRoundSelectId("  "),
+        }));
+        """
+    )
+
+    # 重绘后要按这个 id 找回展开中的下拉框：同一节点必须得到同一个值，且能安全
+    # 放进 [data-select-id="..."] 选择器里。
+    assert result["first"] == result["again"]
+    assert result["first"] != result["other"]
+    assert result["empty"] == ""
+    assert result["first"] == "tree-round-node-1a2b-c-d"
+
+
 def test_sync_selected_task_node_detail_status_follows_live_frames() -> None:
     result = _run_node_script(
         """
