@@ -11590,7 +11590,7 @@ function memoryProcessedStatusLabel(item) {
 }
 
 function memoryProcessedOpLabel(item) {
-    if (memoryProcessedIsNoChange(item)) return "无变更";
+    if (memoryProcessedIsNoChange(item)) return "保持";
     const kinds = memoryProcessedOpKinds(item);
     if (kinds.length) return kinds.map((kind) => MEMORY_OP_KINDS[kind].label).join(" / ");
     return memoryProcessedStatusLabel(item);

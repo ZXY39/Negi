@@ -1819,7 +1819,6 @@
     border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
     border-radius: var(--ui-radius-pill);
     background: color-mix(in srgb, currentColor 9%, var(--ui-bg-surface));
-    color: var(--ui-text-secondary);
     font-size: 12px;
     font-weight: 700;
     line-height: 1.25;
@@ -1830,6 +1829,24 @@
     width: 14px;
     height: 14px;
     flex: 0 0 auto;
+    color: inherit;
+}
+
+/* 描边与底色都走 currentColor，所以按操作风险度上色会同时作用到图标和文字 */
+[data-ui-version="v2"] .memory-op-chip[data-op="delete"] {
+    color: var(--ui-danger);
+}
+
+[data-ui-version="v2"] .memory-op-chip[data-op="rewrite"] {
+    color: var(--ui-warning);
+}
+
+[data-ui-version="v2"] .memory-op-chip[data-op="add"] {
+    color: var(--ui-success);
+}
+
+[data-ui-version="v2"] .memory-op-chip[data-op="note_upsert"] {
+    color: var(--ui-info);
 }
 
 [data-ui-version="v2"] .memory-op-chip[data-op="nochange"] {
