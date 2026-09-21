@@ -777,8 +777,19 @@
     box-shadow: none;
 }
 
+/* 展开态首行与折叠态同一基线：顶距同为 10px，头部行高锁定 42px，
+   两态下第一个按钮的 y 才一致。 */
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel {
-    padding: var(--ui-space-4);
+    padding: 10px var(--ui-space-4) var(--ui-space-4);
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-header {
+    min-height: 42px;
+    align-items: center;
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-controls {
+    align-items: center;
 }
 
 [data-ui-version="v2"] .ceo-session-card {
