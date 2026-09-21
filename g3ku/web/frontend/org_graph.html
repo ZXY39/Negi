@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="dark" data-ui-version="v2">
 
 <head>
     <meta charset="UTF-8">
@@ -8,6 +8,7 @@
     <link rel="icon" href="/favicon.ico">
     <link rel="stylesheet" href="vendor/fonts/google-fonts.css">
     <link rel="stylesheet" href="org_graph.css">
+    <link rel="stylesheet" href="org_graph_redesign.css">
     <script src="vendor/lucide.min.js"></script>
 </head>
 
@@ -55,6 +56,11 @@
             <div class="brand">
                 <img class="brand-icon" src="favicon.ico" alt="G3KU">
                 <span class="brand-text">G3KU</span>
+                <button id="sidebar-toggle" class="sidebar-toggle icon-btn" type="button" aria-label="折叠导航"
+                    aria-expanded="true" title="折叠导航">
+                    <i data-lucide="panel-left-close" class="sidebar-icon-collapse" aria-hidden="true"></i>
+                    <i data-lucide="panel-left-open" class="sidebar-icon-expand" aria-hidden="true"></i>
+                </button>
             </div>
 
             <button class="nav-item active" data-view="ceo" type="button">
@@ -98,11 +104,21 @@
                     <i data-lucide="sun" class="light-icon" style="display: none;"></i>
                     <i data-lucide="moon" class="dark-icon"></i>
                 </button>
-                <button class="toolbar-btn danger" id="project-exit-btn" type="button">退出项目</button>
+                <button class="toolbar-btn danger" id="project-exit-btn" type="button" aria-label="退出项目"
+                    title="退出项目">
+                    <i data-lucide="log-out" aria-hidden="true"></i>
+                    <span class="exit-label">退出项目</span>
+                </button>
             </div>
         </nav>
 
+        <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+
         <main class="main-content">
+            <button id="sidebar-open-btn" class="sidebar-open-btn icon-btn" type="button" aria-label="打开导航"
+                aria-expanded="false" title="打开导航">
+                <i data-lucide="panel-left-open" aria-hidden="true"></i>
+            </button>
             <section id="view-ceo" class="view-section active">
                 <div id="ceo-shell" class="ceo-shell">
                     <aside id="ceo-session-panel" class="ceo-session-panel" aria-label="会话列表">
