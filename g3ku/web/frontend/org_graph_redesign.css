@@ -1490,13 +1490,25 @@
     color: var(--ui-danger);
 }
 
-/* 28. 任务排序与树深度：标签并入控件，整体是一个按钮，点击才展开下拉 */
+/* 28. 任务排序与树深度：外层框去掉，标签加箭头合成一颗按钮，下拉面板固定在按钮正下方 */
+[data-ui-version="v2"] .task-sort-setting,
+[data-ui-version="v2"] .task-depth-setting {
+    min-height: 0;
+    padding: 0;
+    gap: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+
 [data-ui-version="v2"] .task-depth-setting-main {
     display: inline-flex;
     align-items: center;
     gap: var(--ui-space-2);
+    flex: 0 0 auto;
     height: 38px;
-    padding: 0 var(--ui-space-1) 0 var(--ui-space-3);
+    padding: 0 var(--ui-space-2) 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
     background: var(--ui-bg-surface);
@@ -1509,37 +1521,61 @@
 }
 
 [data-ui-version="v2"] .task-depth-label {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
-    color: var(--ui-text-muted);
+    color: var(--ui-text-secondary);
 }
 
-[data-ui-version="v2"] .task-depth-setting-main .resource-select-shell {
-    width: auto;
+[data-ui-version="v2"] .task-depth-setting .resource-select-shell,
+[data-ui-version="v2"] .task-sort-setting .resource-select-shell {
+    width: 16px;
+    flex: 0 0 16px;
 }
 
-[data-ui-version="v2"] .task-depth-setting-main .resource-select-trigger {
-    width: auto;
-    min-height: 34px;
-    padding: 0 4px;
+[data-ui-version="v2"] .task-depth-setting .resource-select-trigger,
+[data-ui-version="v2"] .task-sort-setting .resource-select-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 26px;
+    min-height: 0;
+    padding: 0;
     border: 0;
-    border-radius: var(--ui-radius-control);
+    border-radius: 0;
     background: transparent;
     box-shadow: none;
     color: var(--ui-text);
-    font-size: 13px;
-    font-weight: 600;
-    gap: 2px;
+}
+
+[data-ui-version="v2"] .task-depth-setting .resource-select-trigger:hover,
+[data-ui-version="v2"] .task-sort-setting .resource-select-trigger:hover {
+    background: transparent;
 }
 
 /* 当前选项不在按钮上展示，点开才在下方出现下拉面板 */
-[data-ui-version="v2"] .task-depth-setting-main .resource-select-value {
+[data-ui-version="v2"] .task-depth-setting .resource-select-value,
+[data-ui-version="v2"] .task-sort-setting .resource-select-value {
     display: none;
 }
 
-[data-ui-version="v2"] .task-depth-setting-main .resource-select-icon {
-    width: 14px;
-    height: 14px;
+[data-ui-version="v2"] .task-depth-setting .resource-select-icon,
+[data-ui-version="v2"] .task-sort-setting .resource-select-icon {
+    width: 16px;
+    height: 16px;
+}
+
+[data-ui-version="v2"] .task-depth-setting .resource-select-menu,
+[data-ui-version="v2"] .task-sort-setting .resource-select-menu {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+    width: 168px;
+    min-width: 168px;
+    gap: 2px;
+    padding: var(--ui-space-1);
+    border-radius: var(--ui-radius-card);
+    box-shadow: var(--ui-shadow-dialog);
 }
 
 /* 29. CPU / 内存 / 磁盘 读数各自按紧张度着色，不再整段跟随磁盘紧急态 */
@@ -1549,6 +1585,25 @@
 
 [data-ui-version="v2"] .task-performance-metric.is-critical {
     color: var(--ui-danger);
+}
+
+/* 宽屏下任务大厅头部只占一行：标题、状态胶囊、排序与深度按钮同行 */
+@media (min-width: 1200px) {
+
+    [data-ui-version="v2"] #view-tasks-list .content-header {
+        flex-wrap: nowrap;
+    }
+
+    [data-ui-version="v2"] #view-tasks-list .task-performance-bar {
+        flex: 1 1 auto;
+        min-width: 0;
+        flex-wrap: nowrap;
+    }
+
+    [data-ui-version="v2"] #view-tasks-list .task-header-actions {
+        flex: 0 0 auto;
+        flex-wrap: nowrap;
+    }
 }
 
 /* 30. 记忆管理与日志审计的标题说明不再占据头部 */
