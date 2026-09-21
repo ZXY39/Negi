@@ -27,7 +27,7 @@
 
 ## 4. 回合契约
 
-- `POST /sessions/{id}/messages` 异步提交：空闲 → 启动回合并返回 `{turn_id, status:"started"}`；运行中 → `queue_follow_up_batch` 排队并返回 `{status:"queued", receipt:"收到，将在当前任务中一并处理。"}`。
+- `POST /sessions/{id}/messages` 异步提交：空闲 → 启动回合并返回 `{turn_id, status:"started"}`；会话被 hold（有回合在跑，**或该会话正在跑一次手动上下文压缩**）→ `queue_follow_up_batch` 排队并返回 `{status:"queued", receipt:"收到，将在当前任务中一并处理。"}`。渠道不因此丢消息：排队条目以转录 `pending` 行为 durable 记录，会话回到空闲后由派发通道发出（合同见 `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」）。
 - 执行走 `SessionRuntimeBridge.prompt/prompt_batch`（与 web/CLI/cron 同一语义基座）。
 - **终态不变量**：每回合在全部路径上恰好发一个 `turn.completed` 或 `turn.failed`；`asyncio.CancelledError` 单独捕获、先发终态再上抛（缺终态曾卡死旧宿主的按会话串行队列，此为硬契约）。`turn.failed.error` 是用户可读全文（空则回退友好文案），`detail` 供排障。
 - 排空兜底：prompt 返回后循环 `drain_queued_follow_up_messages` → `archive_follow_up_chain_transition` → `prompt_batch` 续跑，整条回合链对外只有一个终态。`prompt_batch` 只以批次最后一条输入驱动回合，较早输入的内容块在请求构建期并入（合同见 `runtime-overview.md`「prompt_batch 批次回合内容合并」）。
