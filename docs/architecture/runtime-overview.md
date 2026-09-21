@@ -95,7 +95,7 @@
 
 另外两条不变量：
 
-- 手动 pause 的语义是“冻结上一轮”，不是“等待下一条输入来补写原请求”：session 以 `completed` + `stop_reason=user_pause` 收尾，pause 当下的轮次上下文照常持久化，收尾时立即写 completed continuity sidecar，并把 paused assistant 气泡归档成带 `status=paused`、`history_visible=false`、`source=manual_pause_archive` 的 durable 记录。后续输入必须作为新一轮 user turn 发送，不得走 `resume(additional_context=...)`。被暂停回合的用户消息经续跑种子对账继承进下一轮模型上下文，即使暂停发生在任何 provider 请求发出之前；对账规则详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。残留的 paused 转录条目随下一个用户可见回合正常完成被对账退役一次；退役边界与反复注入风险详见 `context-and-cache-troubleshooting.md`「残留 paused 转录条目」。
+- 手动 pause 的语义是“冻结上一轮”，不是“等待下一条输入来补写原请求”：session 以 `completed` + `stop_reason=user_pause` 收尾，pause 当下的轮次上下文照常持久化，收尾时立即写 completed continuity sidecar，并把 paused assistant 气泡归档成带 `status=paused`、`history_visible=false`、`source=manual_pause_archive` 的 durable 记录。后续输入必须作为新一轮 user turn 发送，不得走 `resume(additional_context=...)`。被暂停回合的用户消息经续跑种子对账继承进下一轮模型上下文，即使暂停发生在任何 provider 请求发出之前；对账规则详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。残留的 paused 转录条目随下一个用户可见回合正常完成被对账退役一次；退役边界与反复注入风险详见 `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目」。
 - 运行中补充的消息作为一批独立 user message 持久化，在同一轮下一次 `call_model` 前一起注入，不拼接成一条文本；可见用户顺序的权威是 `inflight_turn.user_messages` 与 `ceo.reply.final.user_messages`（兼容字段 `user_message` 只保留批内最后一条），`pending` user rows 只是 durability/continuity 记录。
 
 手动暂停恢复规则、排队补充消息与 follow-up 消费的完整契约详见 `web-and-admin.md`「Manual Pause Resume Rule」与「Queued Follow-Ups」。
@@ -581,7 +581,8 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 - 三条入站车道问同一个判定，命中就绝不起回合：web WS 转入候选队列（`queue_follow_up_batch`）、渠道 `/api/v1`（QQ 官方 / onebot / openai-compat 都回环到这里）转入排队回执、heartbeat 沿用"忙则改期"。cron 刻意不加闸门：定时投递没有"稍后再说"的操作语义，排队等于把提醒改期到不可预期；它起的回合由下面的代号仲裁兜住，最坏情况是这一次压缩拒写而不是丢一次投递。
 - durable 基线每前进一次换一代（`_frontdoor_baseline_revision`，只在唯一前进点递增）。手动压缩记下读取输入时的代号，落盘前对不上就不写，并回报 `baseline_advanced`：不落"已压缩"区分线，UI 给专门的文案让人等这条回复结束后再压一次。
 - 为什么闸门还不够、必须再加代号：闸门只挡得住"压缩开始后到达的消息"，挡不住"压缩开始时已经在跑的回合"。渠道回合的任务刻意注册在 `None` 键上（真实键会让 pause 的 `cancel_session_tasks` 自我 gather 死锁），因此 pause 既停不掉它也等不到它，它照常会在摘要落盘之后用压缩前的种子把基线写回去。那种覆盖连摘要里的阶段收口水位线选择器一起抹掉，后果是压缩白做且收口也无从应用。宁可不缩，也不写一份"声称缩小、实际回退"的基线。
-- 排队条目的 durable 记录是转录里的 `pending` 用户行：入队即写，成回合后按同一 `turn_id` 升为 `completed`，因此"仍是 pending"就是"已受理但从未成回合"的充分标记，不需要另建队列。会话构造时把仍是 pending、且该 turn 没有助手行的条目按转录顺序接回队列（有助手行的说明已经答过，重发等于把同一个问题再答一遍）。
+- 排队条目的 durable 记录是转录里的 `pending` 用户行：入队即写，不需要另建队列。会话构造时把仍是 pending、且该 turn 没有助手行的条目按转录顺序接回队列（有助手行的说明已经答过，重发等于把同一个问题再答一遍），接回时沿用行上的原始 `timestamp`——inflight 快照靠它报告送达时间，前端才能把气泡落在时间序上该在的位置。
+- `pending` 升回 `completed` 有两条路，缺一不可：消费它的那一回合按 `turn_id` 就地升态（`_persist_turn_transcript` 遍历本批输入），以及**任何**正常完成回合收尾时把"内存队列已不再持有"的 pending 行统一退役。第二条不可省：内部（心跳/cron）回合会在 prepare 阶段消费排队的 follow-up，但它的完成回写整段跳过用户行，只靠第一条这些行永远停在 pending，下一次会话重建就把早已回答过的提问重新投喂，还会把当轮真正要回答的输入挤到批次中间。退役只在正常完成路径做，与残留 paused 条目同一条约束——错误路径的内存队列可能仍持有这些条目，提前翻体等于让 durable 那一半失去真相，消息从此消失。
 - 排水通道共五条：两条请求内的（WS 的回合链、external 的排空循环，只有发起方进程还连着才有效），加三条"会话回到空闲"的——压缩收尾、WS 重连握手完成后、进程启动重放。启动重放只扫转录头一行加有界尾窗挑出值得构造的会话（全量构造所有会话去问一遍队列太贵），命中后逐个 await 而不是并发。派发器先问 hold 与工具审批，失败把条目放回队首；这三条缝都是低频事件，不构成重试热循环。派发出去的回合也遵守"恰好一个终态事件"的渠道契约，其 relay 只订阅在这次派发期间。
 
 排查 prompt 连续性问题时的前两个问题：相关上下文是否仍在保留的 stage workset 内？若不在，内联 `token_compression` 或 `stage_compaction` 是否合法缩短了下一轮基线？基线与 artifact 的完整取证详见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」。

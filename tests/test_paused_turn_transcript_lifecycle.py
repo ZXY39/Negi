@@ -406,9 +406,12 @@ def test_internal_turn_completion_stops_the_rehydrate_resurrection_loop():
     import asyncio
 
     rows = [_pending_record("是什么原因导致你把内容都写进去了", turn_id="turn-a")]
+    rows[0]["timestamp"] = "2026-09-21T03:20:57.001651"
     session = _FakePersistedSession(rows)
     first = _build_agent(session)
     assert len(first._state.queued_follow_up_messages) == 1, "复现前提：构造期 pending 行被接回队列"
+    # 接回的是 durable 行：inflight 快照必须报出原始送达时间，前端才可能按时间落位气泡。
+    assert first._state.queued_follow_up_messages[0].timestamp == "2026-09-21T03:20:57.001651"
 
     cron_input = UserInputMessage(
         content="[CRON INTERNAL EVENT]",

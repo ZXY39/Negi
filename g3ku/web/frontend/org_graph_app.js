@@ -4896,7 +4896,7 @@ function renderStructuredChatAttachments(items = [], { sessionId = activeSession
 }
 
 function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", turnId = "", canEditFork = false } = {}) {
-    addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork });
+    return addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork });
 }
 
 function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, sessionId = "" } = {}) {
@@ -5872,7 +5872,7 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
 }
 
 function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false } = {}) {
-    mutateCeoFeed(() => {
+    return mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
         const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
@@ -5896,10 +5896,38 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         } else {
             el.innerHTML = `<div class="${contentClass}">${content}${attachmentMarkup}</div>`;
         }
+        const stamp = String(timestamp || "").trim();
+        if (stamp) el.dataset.ceoTimestamp = stamp;
         U.ceoFeed.appendChild(el);
         icons();
         return el;
     }, { scrollMode });
+}
+
+function ceoMessageTimestampMs(value = "") {
+    const text = String(value || "").trim();
+    if (!text) return NaN;
+    return Date.parse(text);
+}
+
+function placeCeoUserBubbleByTimestamp(el, timestamp = "") {
+    // inflight/preserved 回合携带的 user_messages 是"当前批次"而不是"刚刚发送"：批次里
+    // 可能混着更早排队的消息，一律 append 会让旧提问冒到最新回复下面，读起来像用户重发。
+    // 有可解析的原始时间戳时按时间落位到已渲染气泡之间；实时新输入没有时间戳，保持追加。
+    const stamp = ceoMessageTimestampMs(timestamp);
+    if (!Number.isFinite(stamp) || !el || !U || !U.ceoFeed || typeof U.ceoFeed.children === "undefined") return;
+    const children = Array.from(U.ceoFeed.children || []);
+    const anchor = children.find((child) => {
+        if (child === el) return false;
+        const other = ceoMessageTimestampMs(child?.dataset?.ceoTimestamp || "");
+        return Number.isFinite(other) && other > stamp;
+    });
+    if (!anchor || anchor === el) return;
+    try {
+        U.ceoFeed.insertBefore(el, anchor);
+    } catch (error) {
+        void error;
+    }
 }
 
 function defaultCeoInternalAckLabel({ source = "", reason = "" } = {}) {
@@ -6500,12 +6528,14 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
     if (userMessages.length && !isHeartbeat) {
         userMessages.forEach((userMessage) => {
             const attachments = normalizeUploadList(userMessage.attachments);
-            addCeoUserMessage(String(userMessage.content || ""), {
+            const timestamp = String(userMessage.timestamp || "");
+            const el = addCeoUserMessage(String(userMessage.content || ""), {
                 attachments,
                 scrollMode: "preserve",
                 sessionId,
-                timestamp: String(userMessage.timestamp || ""),
+                timestamp,
             });
+            placeCeoUserBubbleByTimestamp(el, timestamp);
         });
     } else {
         const userMessage = snapshot.user_message && typeof snapshot.user_message === "object" ? snapshot.user_message : null;
@@ -6524,12 +6554,14 @@ function restoreCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = 
             return;
         }
         const attachments = normalizeUploadList(userMessage.attachments);
-        addCeoUserMessage(String(userMessage.content || ""), {
+        const timestamp = String(userMessage.timestamp || "");
+        const el = addCeoUserMessage(String(userMessage.content || ""), {
             attachments,
             scrollMode: "preserve",
             sessionId,
-            timestamp: String(userMessage.timestamp || ""),
+            timestamp,
         });
+        placeCeoUserBubbleByTimestamp(el, timestamp);
     }
     patchCeoInflightTurn(snapshot, { sessionId, cacheField });
     const status = String(snapshot.status || "").trim().toLowerCase();

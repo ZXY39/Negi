@@ -3833,6 +3833,9 @@ class RuntimeAgentSession:
                     content=content,
                     attachments=attachments,
                     metadata=metadata,
+                    # 接回的是 durable 行：送达时间沿用行上的原始时间。丢掉它会让 inflight
+                    # 快照把很久以前排队的消息报成刚发送，前端也就无法按时间落位气泡。
+                    timestamp=str(row.get("timestamp") or "").strip() or None,
                 )
             )
         if restored:
