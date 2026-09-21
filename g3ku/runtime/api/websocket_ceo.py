@@ -1255,6 +1255,13 @@ async def ceo_websocket(websocket: WebSocket):
         status = str(getattr(session.state, 'status', '') or '').strip().lower()
         return bool(getattr(session.state, 'is_running', False)) or status == 'running'
 
+    def _inbound_hold() -> str:
+        """running 的超集：还包含跑在回合外的手动压缩。压缩在途时 is_running 是假的
+        false，此时新消息会起一个真回合并用压缩前的种子覆盖刚落地的摘要基线。
+        判定本体在 RuntimeAgentSession.frontdoor_inbound_hold，与渠道车道同一个问题。"""
+        hold = getattr(session, 'frontdoor_inbound_hold', None)
+        return str(hold() or '').strip() if callable(hold) else ''
+
     def _register_turn_task(task: asyncio.Task[Any]) -> None:
         register_task = getattr(agent, '_register_active_task', None)
         if callable(register_task):
@@ -1536,7 +1543,7 @@ async def ceo_websocket(websocket: WebSocket):
             data = await websocket_receive_json(websocket)
             message_type = str(data.get('type') or '')
             if message_type == 'client.resume_interrupt':
-                if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
+                if _current_session_is_running() or _inbound_hold() or (current_turn_task is not None and not current_turn_task.done()):
                     await _safe_send(
                         build_envelope(
                             channel='ceo',
@@ -1601,7 +1608,7 @@ async def ceo_websocket(websocket: WebSocket):
                     )
                 )
                 continue
-            if _current_session_is_running() or (current_turn_task is not None and not current_turn_task.done()):
+            if _current_session_is_running() or _inbound_hold() or (current_turn_task is not None and not current_turn_task.done()):
                 queue_follow_up_batch = getattr(session, 'queue_follow_up_batch', None)
                 if not callable(queue_follow_up_batch):
                     await _safe_send(

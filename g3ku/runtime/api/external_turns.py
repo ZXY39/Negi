@@ -11,10 +11,14 @@ over verbatim in spirit:
   ``except Exception``; a missing terminal event wedged the legacy host's
   per-session dispatch queue, so this is contractual, not cosmetic).
 - Running-session messages queue as follow-ups and are drained after the
-  prompt returns, chaining turns under a single terminal event.
+  prompt returns, chaining turns under a single terminal event. The same
+  hold also covers a manual context compression in flight, which is *not*
+  visible as running: the gate asks ``frontdoor_inbound_hold``.
 - Turn tasks register with a ``None`` key: registering under the real session
   key makes pause's ``cancel_session_tasks`` gather collect on itself and
-  deadlock.
+  deadlock. Side effect an inbound gate cannot rely on: ``pause()`` neither
+  cancels nor awaits a turn on this lane, which is why the durable baseline
+  write is arbitrated by revision instead.
 """
 
 from __future__ import annotations
@@ -127,7 +131,10 @@ class ExternalTurnService:
                 }
 
             session = self._runtime_bridge.get_existing_session(session_key)
-            if SessionRuntimeBridge.session_is_running(session) and session is not None:
+            # hold = 有回合在跑，或手动上下文压缩正在跑。两者都必须排队：压缩在途时
+            # is_running 是假的 false（pause_first 只在点击时正在跑才 pause），此时投递
+            # 会起一个真回合，并用压缩前的种子把 durable 基线写回去覆盖摘要。
+            if session is not None and SessionRuntimeBridge.frontdoor_inbound_hold(session):
                 await session.queue_follow_up_batch([user_message], persist_transcript=True)
                 if idem:
                     # 排队提交同样要占住幂等位：否则同一条渠道消息在回合运行

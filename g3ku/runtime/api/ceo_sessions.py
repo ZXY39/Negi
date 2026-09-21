@@ -15,6 +15,10 @@ from g3ku.runtime.frontdoor.message_builder import (
     MEMORY_SNAPSHOT_ADOPTION_MANUAL_COMPRESSION,
     adopt_memory_snapshot,
 )
+from g3ku.runtime.session_agent import (
+    MANUAL_COMPRESSION_RUNNING,
+    MANUAL_COMPRESSION_STATE_ATTR,
+)
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
     SESSION_MODEL_SELECTION_KEY,
@@ -933,9 +937,7 @@ async def estimate_ceo_session_composer_preflight(session_id: str, payload: dict
 # 快照，而是 `state.compression` + 本模块的任务状态字典两条道：前者驱动会话流里的
 # 实时区分线，后者供 GET 轮询取终局（completed / paused / not_needed）。
 
-_MANUAL_COMPRESSION_STATE_ATTR = "_manual_context_compression"
 _MANUAL_COMPRESSION_TASK_ATTR = "_manual_context_compression_task"
-_MANUAL_COMPRESSION_RUNNING = "running"
 _MANUAL_COMPRESSION_CANCELLED_REASON = "cancelled"
 _MANUAL_COMPRESSION_KEYS = (
     "status",
@@ -953,16 +955,16 @@ _MANUAL_COMPRESSION_KEYS = (
 
 
 def _manual_compression_view(runtime_session) -> dict:
-    value = getattr(runtime_session, _MANUAL_COMPRESSION_STATE_ATTR, None)
+    value = getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None)
     if not isinstance(value, dict):
         return {"status": "idle", "cancel_requested": False}
     return {key: value.get(key) for key in _MANUAL_COMPRESSION_KEYS if key in value}
 
 
 def _set_manual_compression_state(runtime_session, **changes) -> dict:
-    current = dict(getattr(runtime_session, _MANUAL_COMPRESSION_STATE_ATTR, None) or {})
+    current = dict(getattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, None) or {})
     current.update(changes)
-    setattr(runtime_session, _MANUAL_COMPRESSION_STATE_ATTR, current)
+    setattr(runtime_session, MANUAL_COMPRESSION_STATE_ATTR, current)
     return current
 
 
@@ -1119,14 +1121,14 @@ async def compress_ceo_session_context(session_id: str):
     if not callable(getattr(runner, "compress_session_context", None)):
         raise HTTPException(status_code=503, detail="frontdoor_compression_unavailable")
     current = _manual_compression_view(runtime_session)
-    if current.get("status") == _MANUAL_COMPRESSION_RUNNING:
+    if current.get("status") == MANUAL_COMPRESSION_RUNNING:
         return {"ok": True, "session_id": session_key, **current}
     # 会话是否正在跑要在起任务前问一次：这一步只是读内存状态，真正的停手交给任务，
     # 端点本身必须在浏览器请求超时之前返回（见 _execute_manual_context_compression）。
     pause_first = _session_is_running(runtime_manager, session_key)
     _set_manual_compression_state(
         runtime_session,
-        status=_MANUAL_COMPRESSION_RUNNING,
+        status=MANUAL_COMPRESSION_RUNNING,
         source="manual",
         started_at=datetime.now().isoformat(timespec="seconds"),
         finished_at="",
@@ -1177,7 +1179,7 @@ async def cancel_ceo_session_context_compression(session_id: str):
     )
     if runtime_session is None:
         raise HTTPException(status_code=409, detail="compression_not_running")
-    if _manual_compression_view(runtime_session).get("status") != _MANUAL_COMPRESSION_RUNNING:
+    if _manual_compression_view(runtime_session).get("status") != MANUAL_COMPRESSION_RUNNING:
         raise HTTPException(status_code=409, detail="compression_not_running")
     # 沿用自动压缩的软取消：摘要器在每个 provider 尝试后轮询该代际，命中即抛
     # CancelledError，由 _execute_manual_context_compression 落「压缩已暂停」。

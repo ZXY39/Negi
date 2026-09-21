@@ -51,6 +51,10 @@ _TRANSCRIPT_STATE_COMPLETED = "completed"
 # _persist_internal_prompt_messages），失败回合若不回收会在每一轮请求体里反复堆积
 # （实测单会话累积到占上下文 38.8%）。原始 jsonl 行保留，仅改 metadata 状态。
 _TRANSCRIPT_STATE_DISCARDED = "discarded"
+# 手动上下文压缩的运行态：由 api/ceo_sessions 写、由 frontdoor_inbound_hold() 读。
+# 常量放在运行层，是为了让四条入站车道问的是同一个字段名（api 层依赖运行层，反向不行）。
+MANUAL_COMPRESSION_STATE_ATTR = "_manual_context_compression"
+MANUAL_COMPRESSION_RUNNING = "running"
 # _internal_prompt_message_metadata 写入的内部提示词种类；翻转 discarded 时按此匹配，
 # 避免误伤同 turn 的助手错误行（其 metadata 无 internal_prompt_kind）。
 _INTERNAL_PROMPT_KINDS = frozenset(
@@ -2132,6 +2136,27 @@ class RuntimeAgentSession:
         if normalized_generation_id <= 0:
             return False
         return normalized_generation_id in self._cancelled_frontdoor_compression_generations
+
+    def frontdoor_inbound_hold(self) -> str:
+        """入站车道唯一要问的问题：现在能不能为该会话起一个前门回合。空串=可以。
+
+        不能只问 running：手动压缩跑在回合外，而 `pause(manual=True)` 只在点击那一刻
+        会话正在跑时才叫（api/ceo_sessions 的 `pause_first`），所以压缩在途时
+        `is_running`/`status` 与空闲会话完全同形。实盘后果：13:05:31 起压缩，13:06:01
+        的渠道消息照常起回合，13:06:28 落地的 17,956 tok 摘要在 13:06:46 被该回合用
+        30 秒前的种子写的 115,338 tok 基线覆盖，收口水位线选择器一起消失。靠 pause 兜底
+        也不解决：渠道侧的回合注册在 `None` 键上，pause 既停不掉它也等不到它
+        （见 external_turns 模块 docstring）。
+
+        自动压缩不算 hold：它在回合内部跑，那时本来就有回合在跑，判成 hold 会让自动车道
+        自己等自己。"""
+        status = str(getattr(self._state, "status", "") or "").strip().lower()
+        if bool(getattr(self._state, "is_running", False)) or status == "running":
+            return "turn_running"
+        manual = getattr(self, MANUAL_COMPRESSION_STATE_ATTR, None)
+        if isinstance(manual, dict) and str(manual.get("status") or "").strip().lower() == MANUAL_COMPRESSION_RUNNING:
+            return "manual_context_compression"
+        return ""
 
     def reminder_context_snapshot(self) -> dict[str, Any] | None:
         status = str(self._state.status or "").strip().lower()

@@ -253,6 +253,21 @@ class SessionRuntimeBridge:
         status = str(getattr(state, "status", "") or "").strip().lower()
         return bool(getattr(state, "is_running", False)) or status == "running"
 
+    @staticmethod
+    def frontdoor_inbound_hold(session: RuntimeAgentSession | None) -> str:
+        """`session_is_running` 的超集：还包含回合外的手动压缩。理由见
+        `RuntimeAgentSession.frontdoor_inbound_hold`。空串=可投递。"""
+        if session is None:
+            return ""
+        hold = getattr(session, "frontdoor_inbound_hold", None)
+        if not callable(hold):
+            return (
+                "turn_running"
+                if SessionRuntimeBridge.session_is_running(session)
+                else ""
+            )
+        return str(hold() or "").strip()
+
     async def pause(self, session_key: str, *, manual: bool = True) -> int:
         """Pause a running session. Returns 1 when a running turn was paused.
 

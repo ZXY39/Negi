@@ -1610,7 +1610,15 @@ class WebSessionHeartbeatService:
         state = getattr(session, "state", None)
         status = str(getattr(state, "status", "") or "").strip().lower()
         next_delay = self._events.next_delay(key)
-        if bool(getattr(state, "is_running", False)) or status == "running":
+        # 与渠道/web 车道问同一个问题：手动压缩跑在回合外，is_running 那时是假的 false，
+        # 唤醒一次就会起真回合并用压缩前的种子覆盖摘要基线（实盘那次 13:07:41 的唤醒落在
+        # 13:06:46 的覆盖写之后）。这里沿用既有的"忙则改期"，不新造等待机制。
+        inbound_hold = getattr(session, "frontdoor_inbound_hold", None)
+        if (
+            bool(getattr(state, "is_running", False))
+            or status == "running"
+            or (callable(inbound_hold) and str(inbound_hold() or "").strip())
+        ):
             if next_delay is None:
                 return 1.0
             return min(1.0, max(0.1, next_delay))
