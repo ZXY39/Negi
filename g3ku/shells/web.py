@@ -928,6 +928,65 @@ async def resume_shutdown_paused_sessions(
     return resumed
 
 
+async def replay_queued_follow_ups(
+    agent: AgentLoop | None = None,
+    runtime_manager: SessionRuntimeManager | None = None,
+) -> int:
+    """启动重放排队消息：进程重启后"已受理但从未成回合"的消息要在会话回到空闲时发出去。
+
+    durable 记录是转录里的 pending 用户行，所以这里只做两件事：用有界尾窗粗筛出哪些会话
+    值得构造（`keys_with_pending_user_rows`），然后把它们交给会话自己的派发器——构造期
+    `_rehydrate_queued_follow_ups` 会把队列接回来，派发器再问一次 hold（可能刚被
+    `resume_shutdown_paused_sessions` 唤醒成 running，那时它会让路）。
+
+    逐个 await 而不是并发：刚起来的进程同时开 N 个回合会直接顶到 provider 限流上。
+    返回真正发出消息的会话数。
+    """
+    runtime_agent = agent if agent is not None else _global_agent
+    current_manager = runtime_manager if runtime_manager is not None else _global_runtime_manager
+    if runtime_agent is None or current_manager is None:
+        return 0
+    session_manager = getattr(runtime_agent, "sessions", None)
+    scan = getattr(session_manager, "keys_with_pending_user_rows", None)
+    if not callable(scan):
+        return 0
+    try:
+        keys = [str(item or "").strip() for item in list(scan() or []) if str(item or "").strip()]
+    except Exception:
+        logger.exception("queued follow-up boot scan skipped on error")
+        return 0
+    if not keys:
+        return 0
+    # 渠道/会话键的拆分不能想当然：naive split 会污染 runtime 会话元数据并让出站
+    # 路由认错目标，因此复用 heartbeat 里已经处理过 ext:/china: 的那一份。
+    from g3ku.heartbeat.session_service import _derive_session_channel_chat
+
+    replayed = 0
+    for session_key in keys:
+        channel, chat_id = _derive_session_channel_chat(session_key)
+        try:
+            session = current_manager.get_or_create(
+                session_key=session_key,
+                channel=str(channel or "web"),
+                chat_id=str(chat_id or "shared"),
+            )
+            dispatch = getattr(session, "dispatch_queued_follow_ups_if_idle", None)
+            if not callable(dispatch):
+                continue
+            result = dict(await dispatch(source="boot_replay") or {})
+        except Exception:
+            logger.debug("queued follow-up boot replay skipped for {}", session_key)
+            continue
+        if int(result.get("dispatched") or 0) > 0:
+            replayed += 1
+    logger.warning(
+        "queued follow-up boot replay: {} session(s) scanned, {} dispatched",
+        len(keys),
+        replayed,
+    )
+    return replayed
+
+
 def get_web_heartbeat_service(agent: AgentLoop | None = None):
     runtime_agent = agent or get_agent()
     runtime_manager = get_runtime_manager(runtime_agent)
@@ -991,6 +1050,10 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
             await resume_shutdown_paused_sessions(runtime_agent, get_runtime_manager(runtime_agent), _global_web_heartbeat)
         except Exception:
             logger.debug("shutdown-paused session resume skipped during startup")
+        try:
+            await replay_queued_follow_ups(runtime_agent, get_runtime_manager(runtime_agent))
+        except Exception:
+            logger.debug("queued follow-up boot replay skipped during startup")
         await _sync_qq_official_service()
 
 

@@ -470,3 +470,51 @@ class SessionManager:
 
         return sorted(entries, key=lambda x: x.get("updated_at", ""), reverse=True)
 
+    def keys_with_pending_user_rows(self) -> list[str]:
+        """有界尾窗粗筛：返回转录尾部留着 pending 用户行的会话键。
+
+        pending 用户行就是排队队列的 durable 记录（见
+        `RuntimeAgentSession._rehydrate_queued_follow_ups`）。启动时把每个会话都构造出来
+        问一遍"你有没有排队消息"太贵（本仓库实测 51 个会话 / 73MB，构造还要各读自己的
+        continuity sidecar），所以沿用 `_session_list_entry` 那套"只读头一行 + 有界尾窗"。
+
+        这是粗筛：误报的代价只是多构造一个会话（队列为空时派发直接返回），漏报只可能
+        发生在 pending 行正好落在尾窗里被截断的那一行上，该会话下次被打开时仍会接回。"""
+        keys: list[str] = []
+        for path in sorted(self.sessions_dir.glob("*.jsonl")):
+            try:
+                with open(path, "rb") as handle:
+                    head = handle.readline(_METADATA_TAIL_WINDOW_BYTES).decode("utf-8", errors="ignore")
+                    handle.seek(0, os.SEEK_END)
+                    size = handle.tell()
+                    handle.seek(max(0, size - _METADATA_TAIL_WINDOW_BYTES))
+                    tail = handle.read().decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+            key = str((self._metadata_entry(head, path) or {}).get("key") or "").strip()
+            if not key or key in keys:
+                continue
+            if not self._tail_has_pending_user_row(tail):
+                continue
+            keys.append(key)
+        return keys
+
+    @staticmethod
+    def _tail_has_pending_user_row(tail: str) -> bool:
+        for line in tail.split("\n")[1:]:
+            text = line.strip()
+            if not text or '"pending"' not in text:
+                continue
+            try:
+                data = json.loads(text)
+            except Exception:
+                continue
+            if not isinstance(data, dict) or data.get("role") != "user":
+                continue
+            metadata = data.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("_transcript_state") or "").strip().lower() == "pending":
+                return True
+        return False
+

@@ -657,3 +657,100 @@ async def test_compression_finish_seam_dispatches_after_the_hold_is_released(
     view = client.get("/api/ceo/sessions/web:shared/compress-context").json()
     assert view["status"] == "completed"
     assert view["post_tokens"] == 17_956
+
+
+# -- h) 重启后的启动重放 ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_boot_scan_lists_only_sessions_with_a_queued_row(tmp_path: Path) -> None:
+    """粗筛要有区分度：排队中的进、正常答完的不进——否则启动时会把所有会话都构造一遍。"""
+    key = "ext:test-bridge:boot-scan"
+    session = _real_session(tmp_path, key)
+    await session.queue_follow_up_batch(["重启时还在排队"], persist_transcript=True)
+
+    manager = SessionManager(tmp_path)
+    answered = manager.get_or_create("ext:test-bridge:boot-answered")
+    answered.messages = list(answered.messages)
+    answered.messages.append(
+        {
+            "role": "user",
+            "content": "正常答完的一条",
+            "timestamp": "2026-09-21T13:11:03.029342",
+            "metadata": {"_transcript_turn_id": "t-answered", "_transcript_state": "completed"},
+        }
+    )
+    answered.messages.append(
+        {
+            "role": "assistant",
+            "content": "答完了",
+            "timestamp": "2026-09-21T13:11:21.628361",
+            "turn_id": "t-answered",
+            "metadata": {},
+        }
+    )
+    manager.save(answered)
+
+    keys = SessionManager(tmp_path).keys_with_pending_user_rows()
+
+    assert keys == [key]
+
+
+@pytest.mark.asyncio
+async def test_boot_replay_dispatches_each_scanned_session_in_order(tmp_path: Path) -> None:
+    from g3ku.shells import web
+
+    calls: list[tuple[str, str]] = []
+
+    class _Sessions:
+        def keys_with_pending_user_rows(self) -> list[str]:
+            return ["ext:qq-official:boot-a", "web:ceo-boot-b"]
+
+    class _DispatchingSession:
+        def __init__(self, key: str) -> None:
+            self._key = key
+
+        async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict:
+            calls.append((self._key, source))
+            return {"dispatched": 1 if self._key.endswith("boot-a") else 0, "reason": ""}
+
+    class _Manager:
+        def get_or_create(self, **kwargs):
+            return _DispatchingSession(str(kwargs.get("session_key") or ""))
+
+    agent = SimpleNamespace(sessions=_Sessions())
+
+    replayed = await web.replay_queued_follow_ups(agent, _Manager())
+
+    assert calls == [
+        ("ext:qq-official:boot-a", "boot_replay"),
+        ("web:ceo-boot-b", "boot_replay"),
+    ]
+    assert replayed == 1
+
+
+@pytest.mark.asyncio
+async def test_boot_replay_survives_one_session_failing_to_construct(tmp_path: Path) -> None:
+    from g3ku.shells import web
+
+    calls: list[str] = []
+
+    class _Sessions:
+        def keys_with_pending_user_rows(self) -> list[str]:
+            return ["ext:qq-official:broken", "ext:qq-official:good"]
+
+    class _Good:
+        async def dispatch_queued_follow_ups_if_idle(self, *, source: str = "") -> dict:
+            calls.append(source)
+            return {"dispatched": 1, "reason": ""}
+
+    class _Manager:
+        def get_or_create(self, **kwargs):
+            if str(kwargs.get("session_key") or "").endswith("broken"):
+                raise RuntimeError("transcript unreadable")
+            return _Good()
+
+    replayed = await web.replay_queued_follow_ups(SimpleNamespace(sessions=_Sessions()), _Manager())
+
+    assert calls == ["boot_replay"]
+    assert replayed == 1
