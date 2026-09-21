@@ -490,7 +490,7 @@ Canonical 阶段状态按以下表示规则收敛（这是 canonical 链唯一�
 - 更早的完成普通阶段变为 `compact`。
 - canonical 链只有 `raw` 与 `compact` 两级表示：历史数据中已存在的归档压缩阶段（`stage_kind="compression"`，外置表示）继续规范化与渲染，运行时不把完成阶段合并成新的归档阶段；长会话的阶段体积由 `compact` 块承载，并在 `token_compression` 边界整体收口——块按阶段账本逐轮重渲染，收口（上一条）是压缩能真正收缩阶段体积的支点，缺了它压缩只删得掉工具肉身、删不掉块，总体积兜底也就无从谈起。
 - 这些表示渲染为 `[G3KU_STAGE_*]` 消息块时以 system 角色落地（识别端接受 assistant/system 双角色以兼容存量旧块；角色合同本体见 `context-and-cache-troubleshooting.md`「压缩块的格式与字段语义」）。
-- 完成阶段还可以带 `context_visible: false` 收口标记：它不是第四种表示，而是"这条阶段已经进过全局摘要"的 durable 记账。带标记的阶段不渲染任何块、也不占最近 3 个的 raw 保留名额，但记录本身留在账本里——Web 时间线与转录投影照常读到它。标记只在 `token_compression` 边界写入（见本文「Frontdoor Context Compression (Current Contract)」），逐轮重算按回归排查。字段缺失即视为可见，存量账本与旧 sidecar 不需要迁移。
+- 完成阶段还可以带 `context_visible: false` 收口标记：它不是第四种表示，而是"这条阶段已经进过全局摘要"的 durable 记账。带标记的阶段不渲染任何块、也不占最近 3 个的 raw 保留名额，但记录本身留在账本里——Web 时间线与转录投影照常读到它。标记只在 `token_compression` 边界写入（见本文「Frontdoor Context Compression (Current Contract)」），逐轮重算按回归排查。字段缺失即视为可见，存量账本与旧 sidecar 不需要迁移。标记必须在这两份账本各自的**归一化白名单**里都留位（canonical 的 `normalize_frontdoor_canonical_context` 与 stage_state 的 `_frontdoor_stage_state_snapshot`）：账本每过一回合都要重新过一次归一化，白名单漏掉这个字段等于逐轮抹掉标记，而渲染读的是 stage_state，所以只有一份留住标记的可观测结果就是"完全没收口"。
 
 另有两条运行时边界：
 

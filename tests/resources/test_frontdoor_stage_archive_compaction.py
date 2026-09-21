@@ -571,6 +571,37 @@ def test_stage_archive_applies_at_ledger_commit_not_session_attribute() -> None:
     assert CreateAgentCeoFrontDoorRunner._frontdoor_apply_stage_archive(untouched, [{"role": "user", "content": "hi"}]) == 0
 
 
+def test_stage_state_snapshot_carries_the_mark_across_turns() -> None:
+    """回归（实盘 2026-09-21）：收口标记必须穿过 stage_state 的归一化白名单。
+
+    上面那条应用点测试直接查 finalize 产出的 result 字典，所以它是绿的；但账本每过一回合
+    都要重新过一次 `_frontdoor_stage_state_snapshot`，白名单里没有 `context_visible` 就等于
+    逐轮抹掉标记。实盘形态：水位线摘要确实落进了基线，`frontdoor_canonical_context` 标了
+    425/430 条，而 `frontdoor_stage_state` 0/432 条——渲染读的是后者，于是 432 个
+    `[G3KU_STAGE_COMPACT_V1]` 块照旧每轮发出，模型如实报告"压缩了但阶段还在"。"""
+    archived = [stage["stage_id"] for stage in (_stage(index) for index in range(1, 6))]
+    result = {
+        "frontdoor_canonical_context": _ledger([_stage(index) for index in range(1, 6)]),
+        "frontdoor_stage_state": _ledger([{**_stage(index), "stage_id": f"turn-{index}"} for index in range(1, 6)]),
+    }
+    assert CreateAgentCeoFrontDoorRunner._frontdoor_apply_stage_archive(
+        result, _archive_body(stage_ids=archived)
+    ) == 10
+
+    rebuilt = CreateAgentCeoFrontDoorRunner._frontdoor_stage_state_snapshot(
+        {"frontdoor_stage_state": result["frontdoor_stage_state"]}
+    )
+
+    assert all(stage.get("context_visible") is False for stage in rebuilt["stages"])
+    assert completed_stage_blocks(rebuilt) == []
+    # 可见阶段不得写入该字段：口径是"缺失即可见"（与节点侧 serializer 同规则），
+    # 补一个恒等 True 会让两份 durable 账本都多背一个键。
+    visible = CreateAgentCeoFrontDoorRunner._frontdoor_stage_state_snapshot(
+        {"frontdoor_stage_state": _ledger([_stage(7)])}
+    )
+    assert "context_visible" not in visible["stages"][0]
+
+
 def test_hide_helper_marks_both_durable_stores_and_skips_active() -> None:
     session = SimpleNamespace(
         _frontdoor_canonical_context=_ledger([_stage(1), _stage(2)]),

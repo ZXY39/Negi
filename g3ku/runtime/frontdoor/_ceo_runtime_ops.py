@@ -4903,37 +4903,41 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             stage_status = str(raw_stage.get("status") or "").strip() or (
                 "active" if stage_id and stage_id == active_stage_id else "completed"
             )
-            normalized_stages.append(
-                {
-                    "stage_id": stage_id,
-                    "stage_index": int(raw_stage.get("stage_index") or index),
-                    "stage_goal": str(raw_stage.get("stage_goal") or "").strip(),
-                    "preamble_text": str(raw_stage.get("preamble_text") or "").strip(),
-                    "tool_round_budget": max(0, int(raw_stage.get("tool_round_budget") or 0)),
-                    "tool_rounds_used": max(0, int(raw_stage.get("tool_rounds_used") or 0)),
-                    "status": stage_status,
-                    "mode": str(raw_stage.get("mode") or "自主执行").strip() or "自主执行",
-                    "stage_kind": str(raw_stage.get("stage_kind") or "normal").strip() or "normal",
-                    "system_generated": bool(raw_stage.get("system_generated", False)),
-                    "completed_stage_summary": str(raw_stage.get("completed_stage_summary") or "").strip(),
-                    "final_stage": bool(raw_stage.get("final_stage", False)),
-                    "key_refs": [
-                        dict(item)
-                        for item in list(raw_stage.get("key_refs") or [])
-                        if isinstance(item, dict)
-                    ],
-                    "archive_ref": str(raw_stage.get("archive_ref") or "").strip(),
-                    "archive_stage_index_start": max(0, int(raw_stage.get("archive_stage_index_start") or 0)),
-                    "archive_stage_index_end": max(0, int(raw_stage.get("archive_stage_index_end") or 0)),
-                    "rounds": [
-                        dict(item)
-                        for item in list(raw_stage.get("rounds") or [])
-                        if isinstance(item, dict)
-                    ],
-                    "created_at": str(raw_stage.get("created_at") or ""),
-                    "finished_at": str(raw_stage.get("finished_at") or ""),
-                }
-            )
+            normalized_stage = {
+                "stage_id": stage_id,
+                "stage_index": int(raw_stage.get("stage_index") or index),
+                "stage_goal": str(raw_stage.get("stage_goal") or "").strip(),
+                "preamble_text": str(raw_stage.get("preamble_text") or "").strip(),
+                "tool_round_budget": max(0, int(raw_stage.get("tool_round_budget") or 0)),
+                "tool_rounds_used": max(0, int(raw_stage.get("tool_rounds_used") or 0)),
+                "status": stage_status,
+                "mode": str(raw_stage.get("mode") or "自主执行").strip() or "自主执行",
+                "stage_kind": str(raw_stage.get("stage_kind") or "normal").strip() or "normal",
+                "system_generated": bool(raw_stage.get("system_generated", False)),
+                "completed_stage_summary": str(raw_stage.get("completed_stage_summary") or "").strip(),
+                "final_stage": bool(raw_stage.get("final_stage", False)),
+                "key_refs": [
+                    dict(item)
+                    for item in list(raw_stage.get("key_refs") or [])
+                    if isinstance(item, dict)
+                ],
+                "archive_ref": str(raw_stage.get("archive_ref") or "").strip(),
+                "archive_stage_index_start": max(0, int(raw_stage.get("archive_stage_index_start") or 0)),
+                "archive_stage_index_end": max(0, int(raw_stage.get("archive_stage_index_end") or 0)),
+                "rounds": [
+                    dict(item)
+                    for item in list(raw_stage.get("rounds") or [])
+                    if isinstance(item, dict)
+                ],
+                "created_at": str(raw_stage.get("created_at") or ""),
+                "finished_at": str(raw_stage.get("finished_at") or ""),
+            }
+            # 收口标记必须穿过这份白名单：渲染读的是 stage_state，标记一旦在这里被
+            # 丢掉，压缩落地的水位线就只活在 canonical 那份里，块照旧逐轮渲染。
+            # 与 canonical 归一化器同一口径——只在 False 时写，缺失即视为可见。
+            if raw_stage.get("context_visible") is False:
+                normalized_stage["context_visible"] = False
+            normalized_stages.append(normalized_stage)
         if active_stage_id and not any(
             str(stage.get("stage_id") or "").strip() == active_stage_id
             and str(stage.get("status") or "").strip().lower() == "active"
