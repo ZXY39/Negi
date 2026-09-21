@@ -11589,14 +11589,6 @@ function memoryProcessedStatusLabel(item) {
     return normalized || "已处理";
 }
 
-function memoryProcessedBadgeStatus(item) {
-    if (memoryProcessedIsNoChange(item)) return "pending";
-    const normalized = String(item?.status || "").trim().toLowerCase();
-    if (normalized === "discarded") return "unpassed";
-    if (normalized === "applied") return "success";
-    return normalized || "pending";
-}
-
 function memoryProcessedOpLabel(item) {
     if (memoryProcessedIsNoChange(item)) return "无变更";
     const kinds = memoryProcessedOpKinds(item);
@@ -13604,13 +13596,12 @@ function renderMemoryOpChips(kinds) {
 
 function renderMemoryProcessedCard(item) {
     const batchId = String(item?.batch_id || "").trim();
-    const badgeStatus = memoryProcessedBadgeStatus(item);
     const statusLabel = memoryProcessedOpLabel(item);
     const opKinds = memoryProcessedOpKinds(item);
     const processedAt = formatCompactTime(item?.processed_at) || String(item?.processed_at || "");
     const statusSlot = opKinds.length
         ? renderMemoryOpChips(opKinds)
-        : `<span class="status-badge" data-status="${badgeStatus}">${esc(statusLabel)}</span>`;
+        : `<span class="memory-op-chip" data-op="nochange"><i data-lucide="minus" aria-hidden="true"></i>${esc(statusLabel)}</span>`;
     return `
         <article class="memory-card memory-card-compact" data-memory-card="processed" data-memory-detail-open="processed" data-memory-detail-key="${esc(batchId)}" role="button" tabindex="0" aria-label="打开已处理批次详情">
             <div class="memory-card-summary">
