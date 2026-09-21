@@ -48,7 +48,7 @@
 
     --ui-text: #f3f6f7;
     --ui-text-secondary: #b2bec3;
-    --ui-text-muted: #7f8c92;
+    --ui-text-muted: #8a959a;
     --ui-text-disabled: #5f6b70;
 
     --ui-brand: #2dc7b5;
@@ -71,34 +71,37 @@
 
     --ui-neutral-soft: rgba(178, 190, 195, 0.12);
     --ui-scrim: rgba(6, 9, 11, 0.60);
+    --ui-on-brand: #04211d;
 }
 
-/* 3. 亮色主题 */
+/* 3. 亮色主题：计划 §4.5 的原始取值在 12px 文字上达不到 AA（muted 3.34、
+   brand 3.30、danger-on-soft 4.15、选中底 vs 白 1.11），这里按同一色相压深，
+   使文字/底色全部 >=4.5、边框与选中底肉眼可分。 */
 [data-ui-version="v2"][data-theme="light"] {
     --ui-bg-canvas: #f4f7f8;
     --ui-bg-surface: #ffffff;
     --ui-bg-elevated: #ffffff;
-    --ui-bg-subtle: #eef3f4;
+    --ui-bg-subtle: #e6eef0;
     --ui-bg-input: #ffffff;
 
-    --ui-border: #dbe4e7;
-    --ui-border-strong: #c7d3d7;
+    --ui-border: #c9d5d9;
+    --ui-border-strong: #a9b9bf;
 
     --ui-text: #192326;
     --ui-text-secondary: #526368;
-    --ui-text-muted: #7c898f;
-    --ui-text-disabled: #a2adb1;
+    --ui-text-muted: #586770;
+    --ui-text-disabled: #97a4a9;
 
-    --ui-brand: #0f9f8d;
-    --ui-brand-hover: #0b8476;
-    --ui-brand-soft: #e6f6f3;
-    --ui-brand-soft-strong: #ccece6;
+    --ui-brand: #0a7266;
+    --ui-brand-hover: #085b52;
+    --ui-brand-soft: #d8efea;
+    --ui-brand-soft-strong: #c4e6de;
 
-    --ui-success: #23855a;
+    --ui-success: #1d7a51;
     --ui-success-soft: #e5f4eb;
-    --ui-warning: #a66a16;
+    --ui-warning: #8f5a12;
     --ui-warning-soft: #fff3dc;
-    --ui-danger: #c84242;
+    --ui-danger: #b83636;
     --ui-danger-soft: #fde8e8;
     --ui-info: #2563c7;
     --ui-info-soft: #e8f0ff;
@@ -107,13 +110,9 @@
     --ui-shadow-md: 0 8px 24px rgba(31, 41, 55, 0.10);
     --ui-shadow-dialog: 0 16px 44px rgba(31, 41, 55, 0.18);
 
-    --ui-neutral-soft: #e7edee;
+    --ui-neutral-soft: #dfe8ea;
     --ui-scrim: rgba(25, 35, 38, 0.36);
-}
-
-/* 4. 品牌实心填充上的文字色：白字对 #2dc7b5 / #0f9f8d 均不足 4.5:1，两个主题统一用深青。 */
-[data-ui-version="v2"] {
-    --ui-on-brand: #04211d;
+    --ui-on-brand: #ffffff;
 }
 
 /* 5. 旧 token 重定向。org_graph.css 的上千条规则消费的是下面这些变量，
