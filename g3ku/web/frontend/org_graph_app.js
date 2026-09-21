@@ -119,6 +119,8 @@ const S = {
     ceoSelectedSessionIds: new Set(),
     ceoScrollToLatestOnSnapshot: false,
     ceoFeedFollowLatest: true,
+    ceoFeedWindowSource: null,
+    ceoFeedAppendTarget: null,
     ceoFeedRenderSessionId: "",
     ceoFeedRenderSignature: "",
     ceoFeedRenderedMessageKeys: [],
@@ -3341,7 +3343,7 @@ function appendCeoCompressionDivider(state, options = {}) {
         CEO_COMPRESSION_TEXT[state]
     }</span>${buildCeoCompressionDividerControl(state, interactive)}</div>`;
     mutateCeoFeed(() => {
-        U.ceoFeed.appendChild(el);
+        ceoFeedAppendHost().appendChild(el);
         icons();
     }, { scrollMode: "preserve" });
     return el;
@@ -5707,6 +5709,56 @@ async function handleCeoForkClick(turnId) {
     }
 }
 
+function ceoFeedAppendHost() {
+    // 窗口分页补渲染时，渲染器写进临时容器而不是 feed 尾部；平时行为不变。
+    return S.ceoFeedAppendTarget || U.ceoFeed;
+}
+
+// 首屏窗口化：全量消息可达数百条（渠道会话实测 771 条/4 万节点，整列重建
+// 2-7s）；首帧只渲染尾部 N 条，向上滚动或锚点需要时再从内存数组补渲染分片。
+const CEO_FEED_WINDOW_SIZE = 80;
+const CEO_FEED_ANCHOR_EXPANSION_PAGES = 3;
+
+function loadOlderCeoFeedMessages({ upToKey = "", maxPages = 1 } = {}) {
+    const source = S.ceoFeedWindowSource;
+    if (!source || !U || !U.ceoFeed) return false;
+    if (String(S.ceoFeedRenderSessionId || "") !== String(source.sessionId || "")) return false;
+    let loaded = false;
+    for (let page = 0; page < Math.max(1, maxPages); page += 1) {
+        if (source.start <= 0) break;
+        const newStart = Math.max(0, source.start - CEO_FEED_WINDOW_SIZE);
+        const host = document.createElement("div");
+        S.ceoFeedAppendTarget = host;
+        try {
+            renderCeoSnapshotMessageRange(source.messages, source.keys, newStart, source.start, source.sessionId);
+        } finally {
+            S.ceoFeedAppendTarget = null;
+        }
+        const beforeHeight = U.ceoFeed.scrollHeight || 0;
+        const anchorChild = U.ceoFeed.firstChild;
+        while (host.firstChild) U.ceoFeed.insertBefore(host.firstChild, anchorChild);
+        const grew = (U.ceoFeed.scrollHeight || 0) - beforeHeight;
+        if (grew > 0) {
+            markCeoFeedProgrammaticScroll();
+            U.ceoFeed.scrollTop = Math.max(0, (Number(U.ceoFeed.scrollTop || 0) + grew));
+        }
+        source.start = newStart;
+        S.ceoFeedRenderedMessageKeys = source.keys.slice(newStart);
+        updateCeoScrollToLatestButton();
+        loaded = true;
+        if (!upToKey) break;
+        if (ceoFeedAnchorRendered(upToKey)) break;
+    }
+    return loaded;
+}
+
+function ceoFeedAnchorRendered(key = "") {
+    const needle = String(key || "").trim();
+    if (!needle || !U || !U.ceoFeed) return false;
+    const children = Array.from(U.ceoFeed.children || []);
+    return children.some((child) => ceoFeedElementDataKey(child) === needle);
+}
+
 function ceoFeedNearBottom(threshold = 64) {
     if (!U.ceoFeed) return true;
     return U.ceoFeed.scrollHeight - U.ceoFeed.scrollTop - U.ceoFeed.clientHeight <= threshold;
@@ -5735,6 +5787,10 @@ function handleCeoFeedUserGesture() {
 }
 
 function handleCeoFeedScrollEvent() {
+    // 接近顶部且还有未渲染的历史：从内存数组补一片（补偿滚动，视口不动）。
+    if (U.ceoFeed && Number(U.ceoFeed.scrollTop || 0) < 400) {
+        loadOlderCeoFeedMessages();
+    }
     // 意图位只由"突变静默期之外、且非程序钉底派发"的滚动改写：
     // atBottom 分支的钉底/图片异步 re-pin 都会派发 scroll，若不隔离，
     // 手势后窗口内的程序滚动会被误判成"用户回到底部"而重新武装跟随，
@@ -5898,7 +5954,7 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         }
         const stamp = String(timestamp || "").trim();
         if (stamp) el.dataset.ceoTimestamp = stamp;
-        U.ceoFeed.appendChild(el);
+        ceoFeedAppendHost().appendChild(el);
         icons();
         return el;
     }, { scrollMode });
@@ -5950,7 +6006,7 @@ function handleCeoInternalAck(payload = {}) {
         if (payload?.turn_id && typeof el.setAttribute === "function") {
             el.setAttribute("data-turn-id", String(payload.turn_id || "").trim());
         }
-        U.ceoFeed.appendChild(el);
+        ceoFeedAppendHost().appendChild(el);
         icons();
         return el;
     }, { scrollMode: "preserve" });
@@ -7020,6 +7076,55 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     return { messages, inflight_turn: inflightMatchesSource ? null : inflightTurn };
 }
 
+function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targetSessionId) {
+    // 渲染 messages[fromIndex,toIndex) 到 ceoFeedAppendHost()；首屏窗口与
+    // 分页补渲染共用。key 由 buildCeoMessageKeyList 全局算好传入，occ 计数
+    // 与整列一致，窗口起点无关。
+    for (let index = fromIndex; index < toIndex; index += 1) {
+        const item = messages[index];
+        const role = String(item?.role || "").trim().toLowerCase();
+        const content = String(item?.content || "");
+        const attachments = normalizeUploadList(item?.attachments);
+        const tagRendered = () => {
+            const host = ceoFeedAppendHost();
+            const child = host?.lastElementChild || (host?.children || [])[ (host?.children || []).length - 1 ] || null;
+            const key = String(keys[index] || "");
+            if (!child || !key || typeof child.setAttribute !== "function") return;
+            child.setAttribute("data-ceo-key", key);
+            if (child.dataset && typeof child.dataset.ceoKey !== "string") {
+                try { child.dataset.ceoKey = key; } catch (error) { void error; }
+            }
+        };
+        if (role === "user") {
+            if (!content.trim() && !attachments.length) continue;
+            addCeoUserMessage(content, {
+                attachments,
+                scrollMode: "preserve",
+                sessionId: targetSessionId,
+                timestamp: String(item?.timestamp || ""),
+                turnId: String(item?.turn_id || ""),
+                canEditFork: item?.can_edit_fork === true,
+            });
+            tagRendered();
+            continue;
+        }
+        if (role === "assistant") {
+            renderPersistedCeoAssistantTurn(item);
+            tagRendered();
+            continue;
+        }
+        if (role === "system" && content.trim()) {
+            const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
+            if (marker) {
+                appendCeoCompressionDivider(marker.state, { interactive: false });
+            } else {
+                addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
+            }
+            tagRendered();
+        }
+    }
+}
+
 function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "", preservedTurn = null } = {}) {
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
@@ -7052,56 +7157,11 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     // 重建前捕获用户视觉状态(展开项/锚点);跨会话时内部自动跳过。
     const viewState = captureCeoFeedViewState(targetSessionId);
     hideCeoContextLoadNotice();
-    const messageKeyCounters = {};
-    const tagLastFeedChildKey = (item = null, role = "") => {
-        if (!U || !U.ceoFeed || typeof U.ceoFeed.querySelectorAll !== "function") return;
-        const children = Array.from(U.ceoFeed.children || []);
-        const child = U.ceoFeed.lastElementChild || children[children.length - 1] || null;
-        if (!child || typeof child.setAttribute !== "function") return;
-        const base = String(item && item.turn_id ? item.turn_id : "-").trim() || "-";
-        const counterKey = `${base}:${role}`;
-        const occ = Number(messageKeyCounters[counterKey] || 0);
-        messageKeyCounters[counterKey] = occ + 1;
-        // key 在 (turn_id, role) 内按出现次序消歧,同批 user 消息/重复 turn_id 不会互相覆盖。
-        child.setAttribute("data-ceo-key", `m:${base}:${role}:${occ}`);
-        if (child.dataset && typeof child.dataset.ceoKey !== "string") {
-            try { child.dataset.ceoKey = `m:${base}:${role}:${occ}`; } catch (error) { void error; }
-        }
-    };
+    const messageKeys = buildCeoMessageKeyList(messages);
+    const windowStart = Math.max(0, (Array.isArray(messages) ? messages.length : 0) - CEO_FEED_WINDOW_SIZE);
     withCeoFeedBatch(() => {
         resetCeoFeed();
-        messages.forEach((item) => {
-            const role = String(item?.role || "").trim().toLowerCase();
-            const content = String(item?.content || "");
-            const attachments = normalizeUploadList(item?.attachments);
-            if (role === "user") {
-                if (!content.trim() && !attachments.length) return;
-                addCeoUserMessage(content, {
-                    attachments,
-                    scrollMode: "preserve",
-                    sessionId: targetSessionId,
-                    timestamp: String(item?.timestamp || ""),
-                    turnId: String(item?.turn_id || ""),
-                    canEditFork: item?.can_edit_fork === true,
-                });
-                tagLastFeedChildKey(item, "user");
-                return;
-            }
-            if (role === "assistant") {
-                renderPersistedCeoAssistantTurn(item);
-                tagLastFeedChildKey(item, "assistant");
-                return;
-            }
-            if (role === "system" && content.trim()) {
-                const marker = normalizeCeoSnapshotCompressionMarker(item?.compression_marker);
-                if (marker) {
-                    appendCeoCompressionDivider(marker.state, { interactive: false });
-                } else {
-                    addMsg(content, "system", { markdown: true, scrollMode: "preserve" });
-                }
-                tagLastFeedChildKey(item, "system");
-            }
-        });
+        renderCeoSnapshotMessageRange(messages, messageKeys, windowStart, (Array.isArray(messages) ? messages.length : 0), targetSessionId);
         restoreCeoInflightTurn(
             dedupeInflightUserMessageAgainstMessages(messages, normalizedPreservedTurn),
             { sessionId: targetSessionId, cacheField: "preserved_turn" }
@@ -7127,10 +7187,20 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
         }
         S.ceoFeedRenderSessionId = targetSessionId;
         S.ceoFeedRenderSignature = renderSignature;
-        S.ceoFeedRenderedMessageKeys = buildCeoMessageKeyList(messages);
+        S.ceoFeedRenderedMessageKeys = messageKeys.slice(windowStart);
+        S.ceoFeedWindowSource = {
+            sessionId: targetSessionId,
+            messages: Array.isArray(messages) ? messages : [],
+            keys: messageKeys,
+            start: windowStart,
+        };
     }, {
         scrollMode: shouldScrollToLatest ? "bottom" : "preserve",
     });
+    // 阅读位置锚点在首屏窗口之外：先补渲染历史分片（有页数上限），再精校。
+    if (viewState?.anchor?.key && !ceoFeedAnchorRendered(viewState.anchor.key)) {
+        loadOlderCeoFeedMessages({ upToKey: viewState.anchor.key, maxPages: CEO_FEED_ANCHOR_EXPANSION_PAGES });
+    }
     // 批次内的像素 clamp 之后再按捕获状态精校(锚定滚动/展开项)。
     applyCeoFeedViewState(viewState);
 }
@@ -7157,7 +7227,7 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
                 <div class="ceo-tool-reminder" hidden></div>
             </div>
         `;
-        U.ceoFeed.appendChild(el);
+        ceoFeedAppendHost().appendChild(el);
         const toggleButton = el.querySelector(".interaction-flow-toggle");
         const turn = {
             el,
