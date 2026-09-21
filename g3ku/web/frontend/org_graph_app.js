@@ -1154,6 +1154,19 @@ function extractTraceOutputContentText(payload = null) {
     return String(formatArtifactDisplayValue(raw) || "").trim();
 }
 
+const TRACE_OUTPUT_CLEANED_TEXT = "完整输出已被清理，仅保留预览片段";
+
+// 只有 404 算终态（目标已被磁盘治理清理）；503/超时/传输失败仍要留重试机会。
+function isTraceOutputMissingError(error) {
+    return Number(error?.status) === 404;
+}
+
+function traceOutputMissingError() {
+    const error = new Error("content_not_found");
+    error.status = 404;
+    return error;
+}
+
 async function getTraceOutputContentByRef(outputRef = "", { view = "canonical" } = {}) {
     const normalizedRef = normalizeTraceOutputRef(outputRef);
     if (!normalizedRef) return "";
@@ -1161,18 +1174,29 @@ async function getTraceOutputContentByRef(outputRef = "", { view = "canonical" }
     const cacheKey = traceOutputContentCacheKey(normalizedRef, view);
     if (!cacheKey) return "";
     if (Object.prototype.hasOwnProperty.call(S.traceOutputContentByKey, cacheKey)) {
-        return String(S.traceOutputContentByKey[cacheKey] || "");
+        const cached = S.traceOutputContentByKey[cacheKey];
+        if (cached && typeof cached === "object" && cached.missing) {
+            throw traceOutputMissingError();
+        }
+        return String(cached || "");
     }
     if (S.traceOutputRequestsByKey[cacheKey]) {
         return S.traceOutputRequestsByKey[cacheKey];
     }
     const request = (async () => {
-        const payload = typeof ApiClient?.readContent === "function"
-            ? await ApiClient.readContent({ ref: normalizedRef, view })
-            : await ApiClient.openContent({ ref: normalizedRef, view, startLine: 1, endLine: 200 });
-        const text = extractTraceOutputContentText(payload);
-        S.traceOutputContentByKey[cacheKey] = text;
-        return text;
+        try {
+            const payload = typeof ApiClient?.readContent === "function"
+                ? await ApiClient.readContent({ ref: normalizedRef, view })
+                : await ApiClient.openContent({ ref: normalizedRef, view, startLine: 1, endLine: 200 });
+            const text = extractTraceOutputContentText(payload);
+            S.traceOutputContentByKey[cacheKey] = text;
+            return text;
+        } catch (error) {
+            if (isTraceOutputMissingError(error)) {
+                S.traceOutputContentByKey[cacheKey] = { missing: true };
+            }
+            throw error;
+        }
     })();
     S.traceOutputRequestsByKey[cacheKey] = request;
     try {
@@ -1208,10 +1232,18 @@ async function ensureTraceOutputCodeBlockContent(
         element.dataset.outputHydrated = "true";
         return nextText;
     } catch (error) {
+        const fallbackText = String(previewText || emptyText).trim();
+        if (isTraceOutputMissingError(error)) {
+            setTextContentPreservingScroll(
+                element,
+                fallbackText ? `${fallbackText}\n\n${TRACE_OUTPUT_CLEANED_TEXT}` : TRACE_OUTPUT_CLEANED_TEXT,
+            );
+            element.dataset.outputHydrated = "cleaned";
+            return fallbackText;
+        }
         const message = typeof ApiClient?.friendlyErrorMessage === "function"
             ? ApiClient.friendlyErrorMessage(error, error?.message || "未知错误")
             : String(error?.message || error || "未知错误");
-        const fallbackText = String(previewText || emptyText).trim();
         setTextContentPreservingScroll(
             element,
             fallbackText
@@ -1243,6 +1275,14 @@ async function ensureCeoToolStepFullOutput(item, { view = "canonical" } = {}) {
         item.dataset.outputHydrated = "true";
         return nextText;
     } catch (error) {
+        if (isTraceOutputMissingError(error)) {
+            setCeoToolStepOutput(
+                item,
+                previewText ? `${previewText}\n\n${TRACE_OUTPUT_CLEANED_TEXT}` : TRACE_OUTPUT_CLEANED_TEXT,
+            );
+            item.dataset.outputHydrated = "cleaned";
+            return previewText;
+        }
         const message = typeof ApiClient?.friendlyErrorMessage === "function"
             ? ApiClient.friendlyErrorMessage(error, error?.message || "未知错误")
             : String(error?.message || error || "未知错误");

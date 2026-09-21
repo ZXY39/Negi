@@ -33,6 +33,23 @@ def _task_control_error_status(detail: str) -> int:
     return 503 if detail in {'task_worker_offline', 'task_worker_starting', 'task_worker_stale'} else 400
 
 
+def _content_action(action, *args, **kwargs):
+    """内容 ref 失效是常态（临时产物/artifact 已被清理），不能让 FileNotFoundError
+    逃到中间件——那会被记成 web_api_5xx 审计事件并淹没日志板块。"""
+    try:
+        return action(*args, **kwargs)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={'code': 'content_not_found', 'message': str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={'code': 'content_ref_invalid', 'message': str(exc)},
+        ) from exc
+
+
 @router.get('/tasks')
 async def list_tasks(session_id: str = Query('web:shared'), scope: int = Query(1)):
     service = _service()
@@ -373,9 +390,10 @@ async def get_artifact(
         # 磁盘治理（P0）：统一读端，兼容 gzip artifact；延迟导入保持 rest 模块轻量。
         from main.storage.artifact_store import read_artifact_text
 
-        content = read_artifact_text(artifact)
+        content = _content_action(read_artifact_text, artifact)
     else:
-        excerpt = service.open_content(
+        excerpt = _content_action(
+            service.open_content,
             ref=ref,
             view='raw',
             start_line=start_line,
@@ -391,7 +409,10 @@ async def get_artifact(
 async def describe_content(ref: str | None = Query(None), path: str | None = Query(None), view: str = Query('canonical')):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.describe_content(ref=ref, path=path, view=view)}
+    return {
+        'ok': True,
+        **_content_action(service.describe_content, ref=ref, path=path, view=view),
+    }
 
 
 @router.get('/content/search')
@@ -406,7 +427,19 @@ async def search_content(
 ):
     service = _service()
     await service.startup()
-    return {'ok': True, **service.search_content(query=query, ref=ref, path=path, view=view, limit=limit, before=before, after=after)}
+    return {
+        'ok': True,
+        **_content_action(
+            service.search_content,
+            query=query,
+            ref=ref,
+            path=path,
+            view=view,
+            limit=limit,
+            before=before,
+            after=after,
+        ),
+    }
 
 
 @router.get('/content/open')
@@ -423,7 +456,8 @@ async def open_content(
     await service.startup()
     return {
         'ok': True,
-        **service.open_content(
+        **_content_action(
+            service.open_content,
             ref=ref,
             path=path,
             view=view,
@@ -445,7 +479,8 @@ async def read_content(
     await service.startup()
     return {
         'ok': True,
-        **service.read_content(
+        **_content_action(
+            service.read_content,
             ref=ref,
             path=path,
             view=view,
