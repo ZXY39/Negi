@@ -2040,23 +2040,6 @@
     overflow-y: auto;
 }
 
-[data-ui-version="v2"] .project-settings-section {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ui-space-3);
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-}
-
-[data-ui-version="v2"] .project-settings-section h3 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 700;
-    color: var(--ui-text);
-}
-
 [data-ui-version="v2"] .project-settings-actions {
     display: flex;
     gap: var(--ui-space-3);
