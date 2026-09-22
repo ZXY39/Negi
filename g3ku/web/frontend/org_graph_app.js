@@ -10560,8 +10560,7 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
     const glyph = ceoSessionGlyph(item);
     const unreadCount = isActive ? 0 : sessionUnreadCount(sessionId);
     const unreadText = unreadCount > 99 ? "99+" : String(unreadCount);
-    const displayTime = ceoSessionDisplayTime(item);
-    const shortId = shortSessionIdLabel(sessionId);
+    const createdText = formatSessionTime(item?.created_at);
     const type = String(item?.chat_type || "").trim();
     const typeLabel = type === "dm" ? "DM merged" : type === "group" ? "Group" : type === "thread" ? "Thread" : "";
     const badges = [
@@ -10589,9 +10588,7 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
                     <span class="ceo-session-head">
                         <span class="ceo-session-title">${esc(title)}</span>
                     </span>
-                    <span class="ceo-session-id">${esc(shortId)}</span>
                     <span class="ceo-session-preview">${esc(preview)}</span>
-                    <span class="ceo-session-meta">${esc(formatSessionTime(displayTime))}</span>
                     ${badges ? `<span class="ceo-session-badges">${badges}</span>` : ""}
                 </span>
                 ${unreadCount > 0 ? `<span class="ceo-session-unread" aria-label="${esc(`${unreadCount} unread message${unreadCount > 1 ? "s" : ""}`)}">${esc(unreadText)}</span>` : ""}
@@ -10602,6 +10599,10 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
                         <i data-lucide="more-horizontal"></i>
                     </button>
                     <div class="toolbar-menu ceo-session-menu" role="menu" hidden>
+                        <div class="ceo-session-menu-info">
+                            <span class="ceo-session-menu-info-row"><span>会话 ID</span><code>${esc(sessionId || "-")}</code></span>
+                            <span class="ceo-session-menu-info-row"><span>创建时间</span><code>${esc(createdText || "-")}</code></span>
+                        </div>
                         <button type="button" class="toolbar-menu-item" data-session-rename="${esc(sessionId)}" role="menuitem">命名</button>
                         <button type="button" class="toolbar-menu-item danger" data-session-delete="${esc(sessionId)}" role="menuitem">删除</button>
                     </div>

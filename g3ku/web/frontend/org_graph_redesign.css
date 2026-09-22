@@ -778,9 +778,9 @@
 }
 
 /* 展开态首行与折叠态同一基线：顶距同为 10px，头部行高锁定 42px，
-   两态下第一个按钮的 y 才一致。 */
+   两态下第一个按钮的 y 才一致。左右只留 10px，把宽度让给卡片文字。 */
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel {
-    padding: 10px var(--ui-space-4) var(--ui-space-4);
+    padding: 10px var(--ui-space-2) var(--ui-space-4);
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-header {
@@ -797,14 +797,21 @@
     box-shadow: none;
 }
 
+/* 卡片只留标题 + 摘要：会话 ID 与创建时间进了右上角菜单，
+   两行没了，最小高度跟着降到 64px。 */
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-card {
-    min-height: 72px;
-    padding: 12px var(--ui-space-4);
+    min-height: 64px;
+    padding: 12px var(--ui-space-3);
     gap: var(--ui-space-2);
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-body {
     gap: var(--ui-space-2);
+}
+
+/* ⋯ 绝对定位在卡片右上角，只有标题行需要给它让位；摘要用满整行宽度 */
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-head {
+    padding-right: 32px;
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-preview {
@@ -1545,6 +1552,8 @@
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-list {
     gap: var(--ui-space-4);
+    /* 滚动条本身 10px，右侧留 6px 就够，其余宽度还给卡片 */
+    padding-right: 6px;
 }
 
 /* 33. 任务详情头部：返回、状态、初始提示词、活跃节点与操作按钮恒定一行，
@@ -2124,4 +2133,35 @@
 [data-ui-version="v2"] .ceo-turn-message .msg-content:has(> .assistant-text-loading) {
     width: fit-content;
     max-width: 100%;
+}
+
+/* 52. 会话右上角菜单：会话 ID 与创建时间作为只读信息放在「命名」「删除」之前 */
+[data-ui-version="v2"] .ceo-session-menu {
+    min-width: 240px;
+}
+
+[data-ui-version="v2"] .ceo-session-menu-info {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    padding: var(--ui-space-1) 12px var(--ui-space-2);
+    margin-bottom: var(--ui-space-1);
+    border-bottom: 1px solid var(--ui-border);
+}
+
+[data-ui-version="v2"] .ceo-session-menu-info-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--ui-space-3);
+    font-size: 12px;
+    color: var(--ui-text-muted);
+}
+
+[data-ui-version="v2"] .ceo-session-menu-info-row code {
+    min-width: 0;
+    font-size: 11.5px;
+    color: var(--ui-text-secondary);
+    text-align: right;
+    overflow-wrap: anywhere;
 }
