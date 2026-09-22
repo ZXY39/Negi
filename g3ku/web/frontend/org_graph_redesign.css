@@ -79,12 +79,12 @@
     --ui-on-brand: #04211d;
 }
 
-/* 3. 亮色主题：只把深灰/黑的表面换成浅色，重点色本体（brand / success / warning /
-   danger / info / inspecting）与暗色逐字相同；只有强调底色按主题各给一档实色
-   （亮色取强调色 26%/36% 混白），因为实色底不能靠 alpha 自动适配两种表面。
-   代价是这些亮色作小字号文字时达不到 WCAG AA，按操作者要求保留。
-   两个主题的表面层（canvas / surface / elevated / subtle / input / border /
-   scrim）一律无彩 R=G=B，色相只出现在强调色上。 */
+/* 3. 亮色主题：表面层（canvas / surface / elevated / subtle / input / border /
+   scrim）一律无彩 R=G=B，色相只出现在强调色上。强调色本体在亮色单独压深一档，
+   与暗色不再逐字相同：#2dc7b5 这一档白底 13px 文字只有 1.9:1，看着像褪色的。
+   压深后本体对纯白 ≥4.5:1；淡底取本体 30% 混白（旧的 26% 档太浅，且 rgba 叠白
+   会再被提亮一档），本体文字在其上约 3.0:1。文字与自身浓底要同时到 4.5:1 在
+   数学上不可能（底色里掺的就是文字色），所以淡底档按 3:1 定，不再往深走。 */
 [data-ui-version="v2"][data-theme="light"] {
     --ui-bg-canvas: #f6f6f6;
     --ui-bg-surface: #ffffff;
@@ -100,29 +100,31 @@
     --ui-text-muted: #586770;
     --ui-text-disabled: #97a4a9;
 
-    --ui-brand: #2dc7b5;
-    --ui-brand-hover: #1eae9f;
-    --ui-brand-soft: #c8f0ec;
-    --ui-brand-soft-strong: #b3ebe4;
+    --ui-brand: #1e8478;
+    --ui-brand-hover: #197066;
+    --ui-brand-soft: #bbdad7;
+    --ui-brand-soft-strong: #a0ccc6;
 
-    --ui-success: #4dc98a;
-    --ui-success-soft: #d1f1e1;
-    --ui-warning: #e7b75b;
-    --ui-warning-soft: #f9ecd4;
-    --ui-danger: #f27777;
-    --ui-danger-soft: #fcdcdc;
-    --ui-info: #76a9fa;
-    --ui-info-soft: #dbe9fe;
-    --ui-inspecting: #a78bfa;
-    --ui-inspecting-soft: #e8e1fe;
+    --ui-success: #288556;
+    --ui-success-soft: #bfdacc;
+    --ui-warning: #9a6d17;
+    --ui-warning-soft: #e1d3b9;
+    --ui-danger: #e91c1c;
+    --ui-danger-soft: #f8bbbb;
+    --ui-info: #196ef7;
+    --ui-info-soft: #bad4fc;
+    --ui-inspecting: #8058f8;
+    --ui-inspecting-soft: #d9cdfd;
 
     --ui-shadow-sm: 0 1px 3px rgba(31, 41, 55, 0.07);
     --ui-shadow-md: 0 8px 24px rgba(31, 41, 55, 0.10);
     --ui-shadow-dialog: 0 16px 44px rgba(31, 41, 55, 0.18);
 
-    --ui-neutral-soft: rgba(188, 188, 188, 0.12);
+    /* 中性叠加层在亮色换成实色：rgba(188,188,188,.12) 叠白算出来是 #f7f7f7，
+       徽标与悬停底色几乎看不见。暗色仍走 alpha，因为它要叠在深浅不一的表面上。 */
+    --ui-neutral-soft: #e6e6e6;
     --ui-scrim: rgba(33, 33, 33, 0.36);
-    --ui-on-brand: #04211d;
+    --ui-on-brand: #ffffff;
 }
 
 /* 5. 旧 token 重定向。org_graph.css 的上千条规则消费的是下面这些变量，
