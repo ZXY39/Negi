@@ -160,8 +160,6 @@ exec 与 memory 工具家族：
 - 对 CEO/frontdoor，`frontdoor_runtime_tool_contract` 摘要会把 `candidate_skills` 明确标成“可通过 `load_skill_context` 读取正文”的候选，避免模型把它们误读成需要安装/水合的候选工具
 - repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引（`skill_repair_required` payload 携带 `warnings` / `errors` / `next_actions`），不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
 - 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）、`tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）与 `skills/skill-creator/references/g3ku-resource-spec.md`（创建后三态复核 + `requires` 探测声明规则）承载
-- 任务树中"该用哪个 skill"的判定权在派发方：CEO 的 `task` 说明、父节点写给子节点的 `prompt` / `acceptance_prompt` 都要求写确切 `skill_id`，而不是"查看相关技能"这类泛指。依据是接收方没有检索通道——它只看到 `candidate_skills` 的 `{skill_id, description}` 摘要，`load_skill_context` 硬拒 `search_query`（`skill_search_not_allowed`），节点提示词又禁止它自行扩大 skill 范围；把相关性判定留在下游，等于让子节点凭一行 description 猜
-- 被点名的 `skill_id` 不在该节点当轮 `candidate_skills` 时按过期提示处理：继续用本轮实际候选，确实没有相关项就在交付里说明缺口，不构成阻塞条件。加载门禁的拒绝文本会回贴本轮候选名单，接收方因此能自我纠正；这条回落规则由 `main/prompts/node_runtime_contract_shared.md`（执行/验收节点共享提示块）承载
 
 ### 3.4 hydrated tools
 
@@ -334,7 +332,7 @@ CEO/frontdoor 合同载体：
 - 本质上是工作流文本/说明文档资源
 - 由 `SkillsLoader` / `ResourceManager` 加载
 - 不是直接 executable tool
-- 是否使用取决于 prompt 约束与派发方点名的 `skill_id`（判定权与过期回落规则见「candidate skills」）
+- 是否使用取决于 prompt 约束和 agent 行为
 
 ## 7. 维护时最容易踩坑的点
 
