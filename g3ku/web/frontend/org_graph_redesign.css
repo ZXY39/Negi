@@ -2215,3 +2215,12 @@
     text-align: right;
     overflow-wrap: anywhere;
 }
+
+/* 54. 提示层回到窗口正中：旧样式给 toast 视口留了 left:160px，用来抵消当时
+   160px 的左侧栏；V2 导航已改成顶栏，那 160px 变成了纯偏移，toast 与
+   「正在打开任务」提示条整体右移 80px。fixed 层里只有这一处补偿，其余
+   （抽屉/弹窗）都是 top/left:50% 居中，不受影响。 */
+[data-ui-version="v2"] .app-toast-viewport {
+    left: 0;
+    right: 0;
+}

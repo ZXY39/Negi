@@ -887,9 +887,16 @@ function syncTaskTreeHeaderState(projectedRoot = null) {
 }
 
 function resetTaskTreeRoundSelections() {
+    const hadSelections = Object.keys(normalizeTreeRoundSelections(S.treeSelectedRoundByNodeId)).length > 0;
     S.treeSelectedRoundByNodeId = {};
     renderTree();
     scheduleTaskDetailSessionPersist();
+    // 选轮次时子树按「先删旧子树再整体重建」合并进缓存，默认轮次的孩子已经被
+    // 换掉了；只清选择会让这些节点渲染成空子树（整棵树看着没加载出来），
+    // 所以回到最新必须补一次整树快照，让默认轮次的孩子回来。
+    if (hadSelections && String(S.currentTaskId || "").trim()) {
+        void loadTaskTreeSnapshot(S.currentTaskId);
+    }
 }
 
 function setNodeRoundSelection(nodeId, roundId) {
