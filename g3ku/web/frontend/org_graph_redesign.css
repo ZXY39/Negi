@@ -644,7 +644,7 @@
 }
 
 /* 12. 状态标签：语义映射固定，颜色不作为唯一表达。圆角与按钮同档，标签才
-   能和同一行里的控件读成一套盒子（详情头部 42px 胶囊用 999px 会顶成跑道形）。 */
+   能和同一行里的控件读成一套盒子（详情头部 40px 胶囊用 999px 会顶成跑道形）。 */
 [data-ui-version="v2"] .status-badge {
     height: 24px;
     padding: 0 var(--ui-space-2);
@@ -791,14 +791,14 @@
     box-shadow: none;
 }
 
-/* 展开态首行与折叠态同一基线：顶距同为 10px，头部行高锁定 42px，
+/* 展开态首行与折叠态同一基线：顶距同为 10px，头部行高锁定 40px，
    两态下第一个按钮的 y 才一致。左右只留 10px，把宽度让给卡片文字。 */
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel {
     padding: 10px var(--ui-space-2) var(--ui-space-4);
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-header {
-    min-height: 42px;
+    min-height: 40px;
     align-items: center;
 }
 
@@ -947,7 +947,7 @@
 }
 
 /* 17. 输入区：贴底工具条。脑图标 / 附件 / 输入框 / 发送暂停四个控件同高
-   （42px）、同圆角（--ui-radius-control）、同一条中心线；工具条自身不再画
+   （40px）、同圆角（--ui-radius-control）、同一条中心线；工具条自身不再画
    背景与分隔线，控件直接坐在页面背景上。 */
 [data-ui-version="v2"] .chat-input-area {
     position: relative;
@@ -987,9 +987,9 @@
 
 [data-ui-version="v2"] #ceo-context-usage-brain,
 [data-ui-version="v2"] #ceo-attach-btn {
-    width: 42px;
-    height: 42px;
-    min-height: 42px;
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
     padding: 0;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
@@ -1003,7 +1003,7 @@
     border-color: var(--ui-border-strong);
 }
 
-/* 用量环是 conic-gradient 仪表，保持圆形，只缩到能塞进 42px 按钮 */
+/* 用量环是 conic-gradient 仪表，保持圆形，只缩到能塞进 40px 按钮 */
 [data-ui-version="v2"] #ceo-context-usage-brain .ceo-context-usage-brain-ring {
     width: 32px;
     height: 32px;
@@ -1016,7 +1016,7 @@
 }
 
 [data-ui-version="v2"] .chat-input-area textarea {
-    min-height: 42px;
+    min-height: 40px;
     max-height: 180px;
     padding: 10px var(--ui-space-3);
     border: 1px solid var(--ui-border);
@@ -1027,8 +1027,8 @@
 }
 
 [data-ui-version="v2"] #ceo-send-btn {
-    height: 42px;
-    min-height: 42px;
+    height: 40px;
+    min-height: 40px;
     padding: 0 var(--ui-space-3);
     gap: var(--ui-space-2);
     border: 1px solid transparent;
@@ -1500,7 +1500,7 @@
     align-items: center;
     gap: var(--ui-space-2);
     flex: 0 0 auto;
-    height: 38px;
+    height: 40px;
     padding: 0 var(--ui-space-2) 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
@@ -1704,8 +1704,8 @@
 [data-ui-version="v2"] .content-header .task-depth-setting-main,
 [data-ui-version="v2"] #view-skills .resource-select-trigger,
 [data-ui-version="v2"] #view-tools .resource-select-trigger {
-    height: 42px;
-    min-height: 42px;
+    height: 40px;
+    min-height: 40px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
@@ -1775,8 +1775,8 @@
     align-items: center;
     justify-content: center;
     width: 100%;
-    height: 42px;
-    min-height: 42px;
+    height: 40px;
+    min-height: 40px;
     padding: 0;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
@@ -1785,12 +1785,12 @@
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-toggle {
-    width: 42px;
+    width: 40px;
 }
 
 [data-ui-version="v2"] .ceo-new-session-btn {
     width: 100%;
-    height: 42px;
+    height: 40px;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
     background: var(--ui-bg-surface);
@@ -1806,22 +1806,22 @@
 }
 
 [data-ui-version="v2"] .ceo-shell:not(.is-session-panel-expanded) .ceo-session-tab {
-    height: 42px;
+    height: 40px;
 }
 
-/* 展开态首行同样锁到 42px：胶囊页签组与收缩/新建/多选同一高度，
+/* 展开态首行同样锁到 40px：胶囊页签组与收缩/新建/多选同一高度，
    头部行高固定后折叠与展开两态的首按钮才落在同一条基线上。 */
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-panel-header {
-    height: 42px;
+    height: 40px;
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-tabs {
-    height: 42px;
+    height: 40px;
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-bulk-toggle {
-    height: 42px;
-    min-height: 42px;
+    height: 40px;
+    min-height: 40px;
 }
 
 /* 40. 卡片网格间距：行距加倍、列距加一半 */
@@ -2233,30 +2233,39 @@
     right: 0;
 }
 
-/* 55. 任务详情头部并入「大控件」档（42px 高 + §1 的 8px 控制圆角 + 同一表面底色）。
+/* 55. 任务详情头部并入「大控件」档（40px 高 + §1 的 8px 控制圆角 + 同一表面底色）。
    旧层这一行是 14px 圆角、#131313 底加 shadow-sm，而返回键走 .icon-btn 只有
    36px 见方，所以同一行里并排着两套盒子。 */
 [data-ui-version="v2"] .task-detail-header .task-detail-pill:not(.status-badge):not(.task-prompt-disclosure),
 [data-ui-version="v2"] .task-detail-header .task-detail-back-btn {
-    height: 42px;
-    min-height: 42px;
+    height: 40px;
+    min-height: 40px;
     padding: 0 var(--ui-space-3);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
     background: var(--ui-bg-surface);
     box-shadow: none;
+    font-size: 13px;
 }
 
 [data-ui-version="v2"] .task-detail-header .task-detail-back-btn {
-    width: 42px;
+    width: 40px;
     padding: 0;
+}
+
+/* pill 自己的字号压到 13px 不够：标签与数值在旧层各带 rem 尺寸，肉眼读到的
+   仍是 14px 上下，整行按 13px 收口。 */
+[data-ui-version="v2"] .task-detail-header .task-detail-pill-label,
+[data-ui-version="v2"] .task-detail-header .task-detail-pill-value,
+[data-ui-version="v2"] .task-detail-header .task-prompt-text {
+    font-size: 13px;
 }
 
 /* 状态胶囊同时挂 .status-badge（24px 标签档）与 .task-detail-pill：这里只抬盒子，
    底色与描边仍由 §12 的生命周期色给出。 */
 [data-ui-version="v2"] .task-detail-header .status-badge {
-    height: 42px;
-    min-height: 42px;
+    height: 40px;
+    min-height: 40px;
     padding: 0 var(--ui-space-3);
     border-radius: var(--ui-radius-control);
     box-shadow: none;
@@ -2268,15 +2277,66 @@
     border-radius: var(--ui-radius-control);
     background: var(--ui-bg-surface);
     box-shadow: none;
+    font-size: 13px;
 }
 
-/* 折叠态可见高度由内部 summary 的 42px min-height 再加 details 自身上下边框撑到
-   44px；锁到 42px 才与左右按钮同高。展开态不给 height，提示词照旧整块撑开。 */
+/* 折叠态：旧层 .task-detail-pill 的 min-height:42px 加内部 summary 的 42px
+   min-height，让这颗盒子比同行按钮高 2~4px。两处 min-height 都要清掉才锁得到
+   40px。展开态不给 height，提示词照旧整块撑开。 */
 [data-ui-version="v2"] .task-detail-header .task-prompt-disclosure:not([open]) {
-    height: 42px;
+    height: 40px;
+    min-height: 0;
 }
 
 [data-ui-version="v2"] .task-detail-header .task-prompt-disclosure:not([open]) .task-prompt-summary {
     height: 100%;
     min-height: 0;
+    font-size: 13px;
+}
+
+/* 56. 控件档收口：旧层把圆角与字号写死在控件自己身上，同名控件在不同页面落到
+   不同档（任务大厅的「每页数量」trigger 是 46px/16px/15.2px，Skill/Tool 的同类
+   trigger 走 §37）。这里一次性锁到 40px 高 + --ui-radius-control + 13px。
+   不锁高度的：卡片型控件与内容行（.resource-list-item、.execution-tree-node、
+   .memory-card、.task-trace-summary、模型页的两行式角色行）按内容排高；
+   .tool-governance-switch 的 999px 是开关轨道形状，保持。 */
+[data-ui-version="v2"] .resource-select-trigger {
+    height: 40px;
+    min-height: 40px;
+    border-radius: var(--ui-radius-control);
+    font-size: 13px;
+}
+
+[data-ui-version="v2"] .resource-search,
+[data-ui-version="v2"] .resource-select,
+[data-ui-version="v2"] input[type="text"],
+[data-ui-version="v2"] input[type="password"],
+[data-ui-version="v2"] input[type="number"],
+[data-ui-version="v2"] input[type="url"],
+[data-ui-version="v2"] input[type="search"],
+[data-ui-version="v2"] select,
+[data-ui-version="v2"] .icon-btn,
+[data-ui-version="v2"] #ceo-attach-btn,
+[data-ui-version="v2"] #ceo-context-usage-brain,
+[data-ui-version="v2"] .nav-item,
+[data-ui-version="v2"] .ceo-session-select,
+[data-ui-version="v2"] .model-available-main,
+[data-ui-version="v2"] .model-chain-main,
+[data-ui-version="v2"] .task-trace-round-chip {
+    font-size: 13px;
+}
+
+[data-ui-version="v2"] .ceo-session-tab,
+[data-ui-version="v2"] .task-trace-round-chip,
+[data-ui-version="v2"] .msg-action-btn,
+[data-ui-version="v2"] .memory-op-chip,
+[data-ui-version="v2"] .execution-tree-node-pause-action,
+[data-ui-version="v2"] .task-tree-search-input,
+[data-ui-version="v2"] .task-token-call-search {
+    border-radius: var(--ui-radius-control);
+}
+
+[data-ui-version="v2"] .task-tree-search-input,
+[data-ui-version="v2"] .task-token-call-search {
+    font-size: 13px;
 }
