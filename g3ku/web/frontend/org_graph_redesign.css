@@ -67,8 +67,8 @@
     --ui-danger-soft: #3a2727;
     --ui-info: #76a9fa;
     --ui-info-soft: #272f3b;
-    --ui-running: #a78bfa;
-    --ui-running-soft: #302b3d;
+    --ui-inspecting: #a78bfa;
+    --ui-inspecting-soft: #302b3d;
 
     --ui-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.24);
     --ui-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.30);
@@ -80,7 +80,7 @@
 }
 
 /* 3. 亮色主题：只把深灰/黑的表面换成浅色，重点色本体（brand / success / warning /
-   danger / info / running）与暗色逐字相同；只有强调底色按主题各给一档实色
+   danger / info / inspecting）与暗色逐字相同；只有强调底色按主题各给一档实色
    （亮色取强调色 26%/36% 混白），因为实色底不能靠 alpha 自动适配两种表面。
    代价是这些亮色作小字号文字时达不到 WCAG AA，按操作者要求保留。
    两个主题的表面层（canvas / surface / elevated / subtle / input / border /
@@ -113,8 +113,8 @@
     --ui-danger-soft: #fcdcdc;
     --ui-info: #76a9fa;
     --ui-info-soft: #dbe9fe;
-    --ui-running: #a78bfa;
-    --ui-running-soft: #e8e1fe;
+    --ui-inspecting: #a78bfa;
+    --ui-inspecting-soft: #e8e1fe;
 
     --ui-shadow-sm: 0 1px 3px rgba(31, 41, 55, 0.07);
     --ui-shadow-md: 0 8px 24px rgba(31, 41, 55, 0.10);
@@ -170,7 +170,8 @@
     --brand-primary-hover: var(--ui-brand-hover);
     --brand-surface: var(--ui-brand-soft);
 
-    /* 状态语义固定映射：running / in_progress / inspecting 一律走品牌青绿，不用蓝色表达生命周期。 */
+    /* 旧层 --status-running-* 的消费方是节点卡片底色/边框、树线这类容器色，
+       V2 一律锚到品牌青绿；状态标签自身的生命周期色在 §12 单独映射。 */
     --status-running-bg: var(--ui-brand-soft);
     --status-running-text: var(--ui-brand);
     --status-success-bg: var(--ui-success-soft);
@@ -642,11 +643,12 @@
     line-height: 1.4;
 }
 
-/* 12. 状态标签：语义映射固定，颜色不作为唯一表达 */
+/* 12. 状态标签：语义映射固定，颜色不作为唯一表达。圆角与按钮同档，标签才
+   能和同一行里的控件读成一套盒子（详情头部 42px 胶囊用 999px 会顶成跑道形）。 */
 [data-ui-version="v2"] .status-badge {
     height: 24px;
     padding: 0 var(--ui-space-2);
-    border-radius: var(--ui-radius-pill);
+    border-radius: var(--ui-radius-control);
     font-size: 11px;
     font-weight: 700;
     line-height: 1;
@@ -657,13 +659,19 @@
     border: 1px solid transparent;
 }
 
-/* 运行中用紫色档：品牌青绿留给选中态与主操作，不与生命周期色混用 */
+/* 运行中=蓝、检验中=紫：两者都还在推进，但蓝给执行、紫给验收；品牌青绿留给
+   选中态与主操作，节点卡片底/边框仍走 §5 的青绿锚点。 */
 [data-ui-version="v2"] .status-badge[data-status="running"],
-[data-ui-version="v2"] .status-badge[data-status="in_progress"],
+[data-ui-version="v2"] .status-badge[data-status="in_progress"] {
+    background: var(--ui-info-soft);
+    color: var(--ui-info);
+    border-color: var(--ui-info);
+}
+
 [data-ui-version="v2"] .status-badge[data-status="inspecting"] {
-    background: var(--ui-running-soft);
-    color: var(--ui-running);
-    border-color: var(--ui-running);
+    background: var(--ui-inspecting-soft);
+    color: var(--ui-inspecting);
+    border-color: var(--ui-inspecting);
 }
 
 [data-ui-version="v2"] .status-badge[data-status="completed"],
@@ -2223,4 +2231,52 @@
 [data-ui-version="v2"] .app-toast-viewport {
     left: 0;
     right: 0;
+}
+
+/* 55. 任务详情头部并入「大控件」档（42px 高 + §1 的 8px 控制圆角 + 同一表面底色）。
+   旧层这一行是 14px 圆角、#131313 底加 shadow-sm，而返回键走 .icon-btn 只有
+   36px 见方，所以同一行里并排着两套盒子。 */
+[data-ui-version="v2"] .task-detail-header .task-detail-pill:not(.status-badge):not(.task-prompt-disclosure),
+[data-ui-version="v2"] .task-detail-header .task-detail-back-btn {
+    height: 42px;
+    min-height: 42px;
+    padding: 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .task-detail-header .task-detail-back-btn {
+    width: 42px;
+    padding: 0;
+}
+
+/* 状态胶囊同时挂 .status-badge（24px 标签档）与 .task-detail-pill：这里只抬盒子，
+   底色与描边仍由 §12 的生命周期色给出。 */
+[data-ui-version="v2"] .task-detail-header .status-badge {
+    height: 42px;
+    min-height: 42px;
+    padding: 0 var(--ui-space-3);
+    border-radius: var(--ui-radius-control);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .task-detail-header .task-prompt-disclosure {
+    padding: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+/* 折叠态可见高度由内部 summary 的 42px min-height 再加 details 自身上下边框撑到
+   44px；锁到 42px 才与左右按钮同高。展开态不给 height，提示词照旧整块撑开。 */
+[data-ui-version="v2"] .task-detail-header .task-prompt-disclosure:not([open]) {
+    height: 42px;
+}
+
+[data-ui-version="v2"] .task-detail-header .task-prompt-disclosure:not([open]) .task-prompt-summary {
+    height: 100%;
+    min-height: 0;
 }
