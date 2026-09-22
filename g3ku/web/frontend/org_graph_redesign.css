@@ -37,11 +37,11 @@
 
 /* 2. 深色主题（默认） */
 [data-ui-version="v2"][data-theme="dark"] {
-    --ui-bg-canvas: #0f1214;
-    --ui-bg-surface: #151a1d;
-    --ui-bg-elevated: #1b2225;
-    --ui-bg-subtle: #20282b;
-    --ui-bg-input: #111619;
+    --ui-bg-canvas: #121212;
+    --ui-bg-surface: #191919;
+    --ui-bg-elevated: #212121;
+    --ui-bg-subtle: #272727;
+    --ui-bg-input: #151515;
 
     --ui-border: rgba(255, 255, 255, 0.08);
     --ui-border-strong: rgba(255, 255, 255, 0.15);
@@ -71,23 +71,25 @@
     --ui-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.30);
     --ui-shadow-dialog: 0 16px 44px rgba(0, 0, 0, 0.48);
 
-    --ui-neutral-soft: rgba(178, 190, 195, 0.12);
-    --ui-scrim: rgba(6, 9, 11, 0.60);
+    --ui-neutral-soft: rgba(188, 188, 188, 0.12);
+    --ui-scrim: rgba(9, 9, 9, 0.60);
     --ui-on-brand: #04211d;
 }
 
 /* 3. 亮色主题：只把深灰/黑的表面换成浅色，重点色（brand / success / warning /
    danger / info / running 及各自的 soft 底）与暗色逐字相同，两个主题的强调色
-   观感一致。代价是这些亮色作小字号文字时达不到 WCAG AA，按操作者要求保留。 */
+   观感一致。代价是这些亮色作小字号文字时达不到 WCAG AA，按操作者要求保留。
+   两个主题的表面层（canvas / surface / elevated / subtle / input / border /
+   scrim）一律无彩 R=G=B，色相只出现在强调色上。 */
 [data-ui-version="v2"][data-theme="light"] {
-    --ui-bg-canvas: #f4f7f8;
+    --ui-bg-canvas: #f6f6f6;
     --ui-bg-surface: #ffffff;
     --ui-bg-elevated: #ffffff;
-    --ui-bg-subtle: #e6eef0;
+    --ui-bg-subtle: #ececec;
     --ui-bg-input: #ffffff;
 
-    --ui-border: #c9d5d9;
-    --ui-border-strong: #a9b9bf;
+    --ui-border: #d3d3d3;
+    --ui-border-strong: #b6b6b6;
 
     --ui-text: #192326;
     --ui-text-secondary: #526368;
@@ -114,8 +116,8 @@
     --ui-shadow-md: 0 8px 24px rgba(31, 41, 55, 0.10);
     --ui-shadow-dialog: 0 16px 44px rgba(31, 41, 55, 0.18);
 
-    --ui-neutral-soft: rgba(178, 190, 195, 0.12);
-    --ui-scrim: rgba(25, 35, 38, 0.36);
+    --ui-neutral-soft: rgba(188, 188, 188, 0.12);
+    --ui-scrim: rgba(33, 33, 33, 0.36);
     --ui-on-brand: #04211d;
 }
 
