@@ -2351,55 +2351,46 @@
     box-shadow: none;
 }
 
-/* 57. 状态容器落到实色档：卡片底直接用强调色本体（与「保存并连接」「编辑模型链」
-   同一档纯色），文字走 --ui-on-brand（亮色白字压深底、暗色近黑字压亮底），
-   卡内状态徽标保持表面底，才在深底上分得出来。运行中与检验中按既有定案共用
-   品牌青绿，只有标签分蓝紫。
+/* 57. 状态容器不再被二次稀释：旧层把状态底色又淡了一遍（color-mix(soft 24%,
+   面板色)，亮色算出来 #f0f6f3），这里落到 §2/§3 的实色淡档：底 = --ui-*-soft、
+   描边 = --ui-*，文字仍是主文本色（卡片是淡底，不翻字）。运行中与检验中按既有
+   定案共用品牌青绿容器，只有标签分蓝紫。
    注意：只给 .execution-tree-node 上色。.execution-tree-item 是包住整棵子树的
-   <li>，旧层只借它设连接线颜色，给它上底会把一片子树染成一个大方块。 */
+   <li>，旧层只借它设连接线颜色 --tree-branch-color，给它上底会把一片子树染成
+   一个大方块，节点卡反而看不出边界。 */
 [data-ui-version="v2"] .execution-tree-node[data-status="running"],
 [data-ui-version="v2"] .execution-tree-node[data-status="in_progress"],
 [data-ui-version="v2"] .execution-tree-node[data-status="inspecting"] {
-    background: var(--ui-brand);
+    background: var(--ui-brand-soft);
     border-color: var(--ui-brand);
-    color: var(--ui-on-brand);
 }
 
 [data-ui-version="v2"] .execution-tree-node[data-status="success"],
 [data-ui-version="v2"] .execution-tree-node[data-status="completed"],
 [data-ui-version="v2"] .execution-tree-node[data-status="passed"] {
-    background: var(--ui-success);
+    background: var(--ui-success-soft);
     border-color: var(--ui-success);
-    color: var(--ui-on-brand);
 }
 
 [data-ui-version="v2"] .execution-tree-node[data-status="failed"],
 [data-ui-version="v2"] .execution-tree-node[data-status="error"] {
-    background: var(--ui-danger);
+    background: var(--ui-danger-soft);
     border-color: var(--ui-danger);
-    color: var(--ui-on-brand);
 }
 
 [data-ui-version="v2"] .execution-tree-node.execution-tree-node--distribution-blocked {
-    background: var(--ui-warning);
+    background: var(--ui-warning-soft);
     border-color: var(--ui-warning);
-    color: var(--ui-on-brand);
 }
 
-/* 深底上再按状态写死描边色就看不出选中了，选中态换成主文本色描边：
-   两主题下它都与任何状态填充反差最大。 */
+/* 状态规则按状态写死了描边色，选中态要在它之后把品牌描边抬回来，
+   否则选中一张彩色卡只剩投影能看出来。 */
 [data-ui-version="v2"] .execution-tree-node.selected {
-    border-color: var(--ui-text);
+    border-color: var(--ui-brand);
     box-shadow: var(--ui-shadow-md);
 }
 
-/* 标题与副文本各自带色，不跟着翻就会在深底上写深字 */
-[data-ui-version="v2"] .execution-tree-node[data-status] .execution-tree-node-title,
-[data-ui-version="v2"] .execution-tree-node[data-status] .execution-tree-node-note {
-    color: inherit;
-}
-
-/* 卡片走实色档之后，节点内的状态徽标改成表面底：与卡片同 token 会糊成一片，
+/* 卡片与卡内状态徽标同 token，两片同色贴在一起只剩描边分层：徽标改表面底，
    状态色由文字与描边承担（状态文字本来就在）。 */
 [data-ui-version="v2"] .execution-tree-node .status-badge {
     background: var(--ui-bg-surface);
