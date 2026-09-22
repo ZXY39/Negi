@@ -8585,7 +8585,7 @@ class MainRuntimeService:
         item['spawn_owner_entry_index'] = int(runtime_metadata.get('spawn_owner_entry_index') or 0)
         item['spawn_owner_kind'] = str(runtime_metadata.get('spawn_owner_kind') or '').strip()
         item['latest_live_distribution_round_id'] = latest_live_distribution_round_id
-        latest_context = self.get_node_latest_context_payload(normalized_task_id, normalized_node_id)
+        latest_context = self._node_latest_context_refs(normalized_task_id, normalized_node_id)
         if latest_context is not None:
             if not str(item.get('actual_request_ref') or '').strip():
                 item['actual_request_ref'] = str(
@@ -8610,7 +8610,8 @@ class MainRuntimeService:
             'item': item,
         }
 
-    def get_node_latest_context_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+    def _node_latest_context_refs(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        """最近一次真实请求的指针与哈希：只读 runtime frame / 节点 metadata，不解析 artifact 正文。"""
         normalized_task_id = self.normalize_task_id(task_id)
         normalized_node_id = self.normalize_node_id(node_id)
         task = self.get_task(normalized_task_id)
@@ -8655,9 +8656,6 @@ class MainRuntimeService:
         if not ref:
             metadata = dict(node.metadata or {})
             ref = str(metadata.get('latest_runtime_messages_ref') or '').strip()
-        resolver = getattr(self.log_service, 'resolve_content_ref', None)
-        raw_content = str(resolver(ref) or '') if callable(resolver) and ref else ''
-        content = self._render_node_latest_context_content(raw_content)
         return {
             'ok': True,
             'task_id': normalized_task_id,
@@ -8669,13 +8667,21 @@ class MainRuntimeService:
             'ref': ref,
             'actual_request_ref': actual_request_ref,
             'messages_ref': messages_ref,
-            'content': content,
             'prompt_cache_key_hash': prompt_cache_key_hash,
             'actual_request_hash': actual_request_hash,
             'actual_request_message_count': actual_request_message_count,
             'actual_tool_schema_hash': actual_tool_schema_hash,
             'observed_input_truth': observed_input_truth,
         }
+
+    def get_node_latest_context_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        payload = self._node_latest_context_refs(task_id, node_id)
+        if payload is None:
+            return None
+        resolver = getattr(self.log_service, 'resolve_content_ref', None)
+        ref = str(payload.get('ref') or '')
+        raw_content = str(resolver(ref) or '') if callable(resolver) and ref else ''
+        return {**payload, 'content': self._render_node_latest_context_content(raw_content)}
 
     def record_node_file_change(self, task_id: str, node_id: str, *, path: str, change_type: str) -> None:
         normalized_task_id = self.normalize_task_id(task_id)

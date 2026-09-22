@@ -6554,6 +6554,79 @@ def test_latest_context_prefers_dedicated_actual_request_ref_over_messages_ref(t
     assert dict(node_after.metadata or {}).get("latest_runtime_actual_request_ref") == actual_request_ref
 
 
+def test_node_detail_payload_does_not_resolve_actual_request_content(tmp_path: Path, monkeypatch):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+
+    request_messages = [
+        {"role": "system", "content": "node system prompt"},
+        {"role": "user", "content": "actual provider request"},
+    ]
+    service.log_service.append_node_output(
+        record.task_id,
+        root.node_id,
+        content='{"status":"success"}',
+        tool_calls=[],
+        usage_attempts=[
+            LLMModelAttempt(
+                model_key="sub gpt-5.4",
+                provider_id="openai",
+                provider_model="gpt-5.4",
+                usage={"input_tokens": 4, "output_tokens": 2},
+            )
+        ],
+        request_messages=request_messages,
+        prompt_cache_key="stable-family-key",
+        request_message_count=len(request_messages),
+        request_message_chars=123,
+        provider_request_meta={"provider": "openai"},
+        provider_request_body={"input": request_messages},
+    )
+
+    frame = service.store.get_task_runtime_frame(record.task_id, root.node_id)
+    assert frame is not None
+    actual_request_ref = str((frame.payload or {}).get("actual_request_ref") or "")
+    assert actual_request_ref.startswith("artifact:")
+
+    resolved_refs: list[str] = []
+    monkeypatch.setattr(
+        service.log_service,
+        "resolve_content_ref",
+        lambda ref: resolved_refs.append(ref) or "",
+    )
+
+    detail_payload = service.get_node_detail_payload(record.task_id, root.node_id)
+    assert detail_payload is not None
+    item = detail_payload["item"]
+    assert item["actual_request_ref"] == actual_request_ref
+    assert actual_request_ref not in resolved_refs
+
+    detail_resolved = list(resolved_refs)
+
+    latest_context = service.get_node_latest_context_payload(record.task_id, root.node_id)
+    assert latest_context is not None
+    assert latest_context["ref"] == actual_request_ref
+    assert resolved_refs[len(detail_resolved):] == [actual_request_ref]
+    for key in (
+        "prompt_cache_key_hash",
+        "actual_request_hash",
+        "actual_request_message_count",
+        "actual_tool_schema_hash",
+    ):
+        assert item[key] == latest_context[key]
+
+
 def test_latest_context_route_returns_payload(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
