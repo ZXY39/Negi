@@ -141,6 +141,9 @@ function loadApp(apiClientOverrides = {}) {
             openProjectSettingsDialog,
             closeProjectSettingsDialog,
             isProjectSettingsOpen,
+            openPasswordChangeDialog,
+            closePasswordChangeDialog,
+            isPasswordChangeOpen,
             submitProjectPasswordChange,
             applyProjectAutoUnlockChange,
             lockProjectFromSettings,
@@ -164,8 +167,14 @@ function mountDialog(app) {
     const { U } = app;
     U.projectSettings = new StubHTMLElement();
     U.projectSettingsBackdrop = new StubHTMLElement();
+    U.projectSettingsBackdrop.hidden = true;
     U.projectSettingsDialog = new StubHTMLElement();
     U.projectSettingsClose = new StubHTMLElement();
+    U.projectSettingsOpenPassword = new StubHTMLElement();
+    U.passwordChangeBackdrop = new StubHTMLElement();
+    U.passwordChangeBackdrop.hidden = true;
+    U.passwordChangeDialog = new StubHTMLElement();
+    U.passwordChangeClose = new StubHTMLElement();
     U.projectSettingsCurrentPassword = new StubHTMLElement();
     U.projectSettingsNewPassword = new StubHTMLElement();
     U.projectSettingsNewPasswordConfirm = new StubHTMLElement();
@@ -233,6 +242,7 @@ test("改密成功按 snake_case 提交并清空输入", async () => {
         password_confirm: "next",
     }]]);
     assert.equal(app.U.projectSettingsNewPassword.value, "");
+    assert.equal(app.U.passwordChangeBackdrop.hidden, true);
     assert.equal(app.U.projectSettingsChangePassword.disabled, false);
 });
 
@@ -283,4 +293,29 @@ test("锁定项目成功后关闭弹窗并刷新页面", async () => {
     assert.ok(app.calls.some((call) => call[0] === "lock"));
     assert.equal(app.U.projectSettingsBackdrop.hidden, true);
     assert.deepEqual(app.calls.at(-1), ["reload"]);
+});
+
+test("三个密码输入框只在修改密码子窗口里，关闭设置时一并收掉", () => {
+    const app = loadApp();
+    assert.equal(app.isPasswordChangeOpen(), false);
+
+    app.openPasswordChangeDialog();
+    assert.equal(app.isPasswordChangeOpen(), true);
+
+    app.U.projectSettingsCurrentPassword.value = "current";
+    app.closeProjectSettingsDialog();
+
+    assert.equal(app.isPasswordChangeOpen(), false);
+    assert.equal(app.U.projectSettingsCurrentPassword.value, "");
+});
+
+test("子窗口关闭只收子窗口，设置窗口仍在", () => {
+    const app = loadApp();
+    app.openProjectSettingsDialog();
+    app.openPasswordChangeDialog();
+
+    app.closePasswordChangeDialog();
+
+    assert.equal(app.isPasswordChangeOpen(), false);
+    assert.equal(app.isProjectSettingsOpen(), true);
 });

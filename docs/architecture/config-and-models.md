@@ -256,7 +256,7 @@ The browser side of the same contract is the project settings dialog, served by 
 - `POST /api/bootstrap/auto-unlock` with `{enabled}` writes or removes `.g3ku/llm-config/auto-unlock.key` (the master key itself, mode 0600) together with the `G3KU_BOOTSTRAP_MASTER_KEY` environment variable. `GET /api/bootstrap/status` reports the result as `auto_unlock`, which is what renders the checkbox state. Enabling requires an unlocked process; disabling never does, so the credential can always be revoked.
 - `POST /api/bootstrap/lock` clears only the web process's in-memory master key. Background tasks, sessions and the managed worker keep running; only the browser falls back to the unlock screen. It is not the exit path — `POST /api/bootstrap/exit` is the one that pauses running work and shuts the server down.
 
-Treat the auto-unlock file as a bearer credential: whoever can read `.g3ku/llm-config/auto-unlock.key` can unlock the project without a password. That is why it is opt-in, why unchecking deletes both the file and the environment variable, and why a shared `.g3ku/` volume must stay inside the trust boundary of the master key.
+Treat the auto-unlock file as a bearer credential: whoever can read `.g3ku/llm-config/auto-unlock.key` can unlock the project without a password. That is why it is opt-in, why unchecking deletes both the file and the environment variable, and why a shared `.g3ku/` volume must stay inside the trust boundary of the master key. The write requests `0600`, which is only enforced on POSIX: on Windows the file inherits the directory ACL, so the workspace directory itself is the real boundary there.
 
 Maintainers should keep the persistence boundary straight:
 

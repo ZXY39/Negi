@@ -670,6 +670,10 @@ const U = {
     projectSettingsBackdrop: document.getElementById("project-settings-backdrop"),
     projectSettingsDialog: document.getElementById("project-settings-dialog"),
     projectSettingsClose: document.getElementById("project-settings-close-btn"),
+    projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
+    passwordChangeBackdrop: document.getElementById("password-change-backdrop"),
+    passwordChangeDialog: document.getElementById("password-change-dialog"),
+    passwordChangeClose: document.getElementById("password-change-close-btn"),
     projectSettingsCurrentPassword: document.getElementById("project-settings-current-password"),
     projectSettingsNewPassword: document.getElementById("project-settings-new-password"),
     projectSettingsNewPasswordConfirm: document.getElementById("project-settings-new-password-confirm"),
@@ -9286,17 +9290,36 @@ function clearProjectSettingsPasswords() {
         });
 }
 
+function isPasswordChangeOpen() {
+    return !!U.passwordChangeBackdrop && !U.passwordChangeBackdrop.hidden;
+}
+
+function openPasswordChangeDialog() {
+    if (!U.passwordChangeBackdrop) return;
+    U.passwordChangeBackdrop.hidden = false;
+    U.passwordChangeBackdrop.classList.add("is-open");
+    window.requestAnimationFrame(() => U.projectSettingsCurrentPassword?.focus?.());
+}
+
+function closePasswordChangeDialog() {
+    if (!U.passwordChangeBackdrop) return;
+    U.passwordChangeBackdrop.hidden = true;
+    U.passwordChangeBackdrop.classList.remove("is-open");
+    clearProjectSettingsPasswords();
+}
+
 function openProjectSettingsDialog() {
     if (!U.projectSettingsBackdrop) return;
     U.projectSettingsBackdrop.hidden = false;
     U.projectSettingsBackdrop.classList.add("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "true");
     void syncProjectSettingsAutoUnlock();
-    window.requestAnimationFrame(() => U.projectSettingsClose?.focus?.());
+    window.requestAnimationFrame(() => U.projectSettingsDialog?.focus?.());
 }
 
 function closeProjectSettingsDialog() {
     if (!U.projectSettingsBackdrop) return;
+    closePasswordChangeDialog();
     U.projectSettingsBackdrop.hidden = true;
     U.projectSettingsBackdrop.classList.remove("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "false");
@@ -9333,7 +9356,7 @@ async function submitProjectPasswordChange() {
             new_password: newPassword,
             password_confirm: passwordConfirm,
         });
-        clearProjectSettingsPasswords();
+        closePasswordChangeDialog();
         showToast({ title: "密码已修改", text: "自动解锁保存的是主密钥，改密后仍然有效。", kind: "success" });
     } catch (error) {
         showToast({ title: "修改密码失败", text: projectSettingsErrorText(error), kind: "error" });
@@ -14235,6 +14258,11 @@ function bind() {
     U.projectSettingsBackdrop?.addEventListener("click", (e) => {
         if (e.target === U.projectSettingsBackdrop) closeProjectSettingsDialog();
     });
+    U.projectSettingsOpenPassword?.addEventListener("click", () => openPasswordChangeDialog());
+    U.passwordChangeClose?.addEventListener("click", () => closePasswordChangeDialog());
+    U.passwordChangeBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.passwordChangeBackdrop) closePasswordChangeDialog();
+    });
     U.projectSettingsChangePassword?.addEventListener("click", () => void submitProjectPasswordChange());
     U.projectSettingsAutoUnlock?.addEventListener("change", (e) => void applyProjectAutoUnlockChange(Boolean(e.target?.checked)));
     U.projectSettingsLock?.addEventListener("click", () => void lockProjectFromSettings());
@@ -14830,6 +14858,10 @@ function bind() {
             return;
         }
         if (closeCeoSessionMenus({ restoreFocus: true })) return;
+        if (isPasswordChangeOpen()) {
+            closePasswordChangeDialog();
+            return;
+        }
         if (isProjectSettingsOpen()) {
             closeProjectSettingsDialog();
             U.projectSettings?.focus?.();

@@ -1989,17 +1989,38 @@
     user-select: none;
 }
 
-/* 49. 设置弹窗：沿用 confirm 皮肤，只补分节与字段排布；分节不画第二层盒子 */
+/* 49. 设置弹窗：沿用 confirm 皮肤，只补分节、右上角叉号与底部左右按钮位 */
 [data-ui-version="v2"] .project-settings-dialog {
-    width: min(520px, calc(100vw - 48px));
+    position: relative;
+    width: min(460px, calc(100vw - 48px));
+}
+
+[data-ui-version="v2"] .project-settings-dialog .confirm-header {
+    padding-right: 36px;
+}
+
+[data-ui-version="v2"] .dialog-close-btn {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: var(--ui-radius-control);
+    color: var(--ui-text-secondary);
+}
+
+[data-ui-version="v2"] .dialog-close-btn svg {
+    width: 16px;
+    height: 16px;
 }
 
 [data-ui-version="v2"] .project-settings-body {
     display: flex;
     flex-direction: column;
     gap: var(--ui-space-5);
-    max-height: min(560px, calc(100vh - 200px));
-    padding: var(--ui-space-2) var(--ui-space-6) var(--ui-space-4);
+    max-height: min(420px, calc(100vh - 240px));
+    padding: 0;
     overflow-y: auto;
 }
 
@@ -2023,4 +2044,76 @@
 [data-ui-version="v2"] .project-settings-actions {
     display: flex;
     gap: var(--ui-space-3);
+}
+
+[data-ui-version="v2"] .project-settings-footer {
+    justify-content: space-between;
+}
+
+/* 50. 勾选框：原生框在暗色下几乎看不见，统一换成品牌底 + 伪元素勾形，
+   勾形不依赖 lucide，解锁界面与设置弹窗共用同一份。 */
+[data-ui-version="v2"] .ui-checkbox-row {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    min-height: 24px;
+    color: var(--ui-text);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+}
+
+[data-ui-version="v2"] .ui-checkbox-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+[data-ui-version="v2"] .ui-checkbox-box {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    border: 1px solid var(--ui-border-strong);
+    border-radius: 5px;
+    background: var(--ui-bg-input);
+    transition: background-color 140ms var(--ui-motion-ease), border-color 140ms var(--ui-motion-ease);
+}
+
+[data-ui-version="v2"] .ui-checkbox-box::after {
+    content: "";
+    width: 4px;
+    height: 8px;
+    margin-top: -2px;
+    border: solid var(--ui-on-brand);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg) scale(0);
+}
+
+[data-ui-version="v2"] .ui-checkbox-input:checked + .ui-checkbox-box {
+    background: var(--ui-brand);
+    border-color: var(--ui-brand);
+}
+
+[data-ui-version="v2"] .ui-checkbox-input:checked + .ui-checkbox-box::after {
+    transform: rotate(45deg) scale(1);
+}
+
+[data-ui-version="v2"] .ui-checkbox-input:focus-visible + .ui-checkbox-box {
+    outline: 2px solid var(--ui-brand);
+    outline-offset: 2px;
+}
+
+[data-ui-version="v2"] .ui-checkbox-input:disabled + .ui-checkbox-box {
+    opacity: 0.5;
+}
+
+[data-ui-version="v2"] .ui-checkbox-input:disabled ~ * {
+    color: var(--ui-text-disabled);
 }
