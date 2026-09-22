@@ -2112,6 +2112,7 @@
 
 [data-ui-version="v2"] .project-settings-actions {
     display: flex;
+    align-items: center;
     gap: var(--ui-space-3);
 }
 
