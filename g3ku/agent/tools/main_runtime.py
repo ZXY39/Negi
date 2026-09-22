@@ -4,6 +4,7 @@ import json
 from typing import Any, Callable
 
 from g3ku.agent.tools.base import Tool
+from g3ku.runtime.tool_error_guidance import format_name_group, no_load_needed_hint
 from main.governance.tool_context import apply_runtime_tool_context_projection
 
 
@@ -54,7 +55,9 @@ def _candidate_gate_error(
         return ""
     if target in set(candidates):
         return ""
-    return f"Error: 当前运行时{label}未包含 `{target}`，只能加载本轮候选{label}"
+    # 「只能加载本轮候选」而不列候选，模型只能猜一个名字再撞一次。
+    group = format_name_group(f"本轮候选{label}：", candidates)
+    return f"Error: 当前运行时{label}未包含 `{target}`，只能加载本轮候选{label}" + (f"；{group}" if group else "")
 
 
 def _live_registered_skill_visible(
@@ -110,8 +113,10 @@ def _loadable_tool_gate_error(
     target = str(requested_id or "").strip()
     if not target:
         return ""
-    candidates = set(_normalized_runtime_names(payload.get("candidate_tool_names")))
-    visible = set(_normalized_runtime_names(payload.get("rbac_visible_tool_names")))
+    candidate_list = _normalized_runtime_names(payload.get("candidate_tool_names"))
+    visible_list = _normalized_runtime_names(payload.get("rbac_visible_tool_names"))
+    candidates = set(candidate_list)
+    visible = set(visible_list)
     if target in candidates or target in visible:
         return ""
     if "rbac_visible_tool_names" not in payload:
@@ -121,10 +126,23 @@ def _loadable_tool_gate_error(
             requested_id=target,
             label="工具",
         )
-    return (
-        f"Error: 当前运行时未将 `{target}` 暴露为可加载工具；"
-        "只能加载本轮候选工具或 RBAC 可见 surfaced tools"
+    # 常驻内置工具（exec 等）根本没有 toolskill，被拒时必须先答"它不用加载"；
+    # 只说"只能加载候选"而不列名单，模型只能换个名字再撞一次。
+    parts = [f"Error: 当前运行时未将 `{target}` 暴露为可加载工具"]
+    no_load = no_load_needed_hint(requested=target, actor_role=_runtime_actor_role(runtime))
+    parts.append(no_load or "只能加载本轮候选工具或 RBAC 可见 surfaced tools")
+    text = "；".join(parts)
+    tail = "；".join(
+        [
+            item
+            for item in (
+                format_name_group("本轮候选工具：", [name for name in candidate_list if name not in visible]),
+                format_name_group("RBAC 可见 surfaced tools：", visible_list),
+            )
+            if item
+        ]
     )
+    return text + (f"。{tail}" if tail else "")
 
 
 class _MainRuntimeTool(Tool):

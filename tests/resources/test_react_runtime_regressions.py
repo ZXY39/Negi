@@ -3279,6 +3279,27 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
 
 
 @pytest.mark.asyncio
+async def test_react_loop_names_available_tools_when_a_tool_name_is_not_callable() -> None:
+    """名称被拒时必须同时给出可调用集与可加载候选：只说 not available 无法判断该改名、该加载还是该换工具。"""
+    class _NoCallBackend:
+        async def chat(self, **kwargs):
+            raise AssertionError('chat must not be called')
+
+    loop = ReActToolLoop(chat_backend=_NoCallBackend(), log_service=_FakeLogService(), max_iterations=3)
+
+    result = await loop._execute_tool_raw(
+        tools={'submit_final_result': _submit_final_result_tool()},
+        tool_name='submit_final_resultt',
+        arguments={},
+        runtime_context={'candidate_tool_names': ['agent_browser'], 'node_kind': 'execution'},
+    )
+
+    assert 'tool not available: submit_final_resultt' in str(result)
+    assert '当前可直接调用的工具：submit_final_result' in str(result)
+    assert '本轮可加载的候选工具：agent_browser' in str(result)
+
+
+@pytest.mark.asyncio
 async def test_react_loop_recovers_when_a_rejected_final_submission_is_resubmitted_within_budget() -> None:
     turns: list[int] = []
     request_messages: list[list[dict[str, object]]] = []

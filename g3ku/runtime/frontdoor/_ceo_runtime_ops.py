@@ -80,6 +80,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     strip_stage_block_echo,
     summarized_stage_ids,
 )
+from g3ku.runtime.tool_error_guidance import availability_hint
 from g3ku.runtime.tool_history import (
     align_compaction_keep_recent,
     extract_call_id,
@@ -7898,7 +7899,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return await _error_result(payload, duplicate_load_error)
             tool = visible_tools.get(tool_name)
             if tool is None:
-                return await _error_result(payload, f"tool not available: {tool_name}")
+                hint = availability_hint(
+                    requested=tool_name,
+                    callable_names=list(visible_tools.keys()),
+                    candidate_names=(runtime_context or {}).get("candidate_tool_names") or [],
+                )
+                return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
             async with semaphore:
                 raw_result, result_text, status, started_at, finished_at, elapsed_seconds = await self._execute_tool_call_with_raw_result(
                     tool=tool,

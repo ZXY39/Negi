@@ -21,6 +21,7 @@ from g3ku.content import content_summary_and_ref, parse_content_envelope
 from g3ku.providers.base import ToolCallRequest
 from g3ku.runtime.tool_error_guidance import (
     append_parameter_error_guidance,
+    availability_hint,
     is_parameter_like_tool_exception,
 )
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
@@ -3774,7 +3775,14 @@ class ReActToolLoop:
             return f'Error: {stage_gate_error}'
         tool = tools.get(tool_name)
         if tool is None:
-            return f'Error: tool not available: {tool_name}'
+            # 只说"不可用"模型无从判断该改名、该先加载、还是该换工具；两个名单都
+            # 在本轮 runtime payload 里，必须随错误一起给。
+            hint = availability_hint(
+                requested=tool_name,
+                callable_names=list(tools.keys()),
+                candidate_names=runtime_context.get('candidate_tool_names') or [],
+            )
+            return f'Error: tool not available: {tool_name}' + (f'\n{hint}' if hint else '')
         search_signature = self._search_overflow_signature_for_call(tool_name=tool_name, arguments=arguments)
         prior_overflow_signatures = {
             str(item or '').strip()

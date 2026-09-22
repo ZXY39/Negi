@@ -32,6 +32,22 @@ _PARAMETER_CONTRACT_MAX_CHARS = 800
 _UNRECOGNIZED_KEYS_PREFIX = '本次提交中该工具不接受这些参数名：'
 _UNRECOGNIZED_KEYS_SUFFIX = '；它们不会进入该工具，请改用上方契约里的参数名。'
 _UNRECOGNIZED_KEYS_MAX = 5
+# 提交里一个参数都没有时，"缺全部必填字段"有两种可能：模型真发了空对象，或参数
+# JSON 在解析处失败被静默降级成 {}（`_normalize_tool_call_arguments` 与
+# `base_chat_model_adapter` 都这么做）。两者无法从结果区分，所以把第二种可能明说，
+# 别让模型逐字段去补一个根本没收到的参数串。
+_EMPTY_SUBMISSION_NOTE = (
+    '本次调用未携带任何参数：如果你确实写了参数内容，说明参数 JSON 没有被成功解析，'
+    '请压缩内容后按下方结构重新提交。'
+)
+_AVAILABILITY_CALLABLE_PREFIX = '当前可直接调用的工具：'
+_AVAILABILITY_CANDIDATE_PREFIX = '本轮可加载的候选工具：'
+_AVAILABILITY_NAME_MAX = 20
+_NOT_HYDRATED_NOTE = (
+    '「{name}」本轮只是候选、尚未水化，因此不可直接调用；'
+    '请先 load_tool_context(tool_id="{name}") 后再使用。'
+)
+_NO_LOAD_NEEDED_NOTE = '「{name}」是常驻内置工具，无需加载说明即可直接调用；它没有可加载的 toolskill。'
 
 
 def tool_supports_context_load(tool: Any) -> bool:
@@ -43,6 +59,68 @@ def tool_supports_context_load(tool: Any) -> bool:
     资源条目，加载必然失败。
     """
     return tool is not None and getattr(tool, "_descriptor", None) is not None
+
+
+def _availability_name_list(names: Any) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw_name in list(names or []):
+        name = str(raw_name or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
+
+
+def format_name_group(prefix: str, names: Any, *, limit: int = _AVAILABILITY_NAME_MAX) -> str:
+    """Render one capped `前缀：a、b、c 等 N 个` group, or '' when there is nothing to list.
+
+    公开给同一条修复道上的其他错误文本（`load_*` 的门禁拒绝等）复用，避免各处
+    自己拼名单、各自定上限。
+    """
+    ordered = _availability_name_list(names)
+    if not ordered:
+        return ""
+    shown = ordered[:limit]
+    tail = f" 等 {len(ordered)} 个" if len(ordered) > limit else ""
+    return prefix + "、".join(shown) + tail
+
+
+def _format_availability_group(prefix: str, names: list[str]) -> str:
+    return format_name_group(prefix, names)
+
+
+def availability_hint(*, requested: str, callable_names: Any = None, candidate_names: Any = None) -> str:
+    """名称被拒时说明"什么能用"：候选未水化与纯未知名的修法不同，必须分开讲。"""
+    name = str(requested or "").strip()
+    callable_list = _availability_name_list(callable_names)
+    candidate_list = _availability_name_list(candidate_names)
+    parts: list[str] = []
+    if name and name in set(candidate_list):
+        parts.append(_NOT_HYDRATED_NOTE.format(name=name))
+    group = _format_availability_group(_AVAILABILITY_CALLABLE_PREFIX, callable_list)
+    if group:
+        parts.append(group)
+    unseen_candidates = [item for item in candidate_list if item not in set(callable_list)]
+    group = _format_availability_group(_AVAILABILITY_CANDIDATE_PREFIX, unseen_candidates)
+    if group:
+        parts.append(group)
+    return "；".join(parts)
+
+
+def no_load_needed_hint(*, requested: str, actor_role: str = "") -> str:
+    """常驻内置工具被送去 load_tool_context 时，先回答"它不用加载"再列候选。"""
+    name = str(requested or "").strip()
+    if not name:
+        return ""
+    try:
+        from g3ku.runtime.tool_visibility import fixed_builtin_tool_name_set_for_actor_role
+
+        builtin_names = fixed_builtin_tool_name_set_for_actor_role(str(actor_role or "").strip())
+    except Exception:
+        return ""
+    return _NO_LOAD_NEEDED_NOTE.format(name=name) if name in builtin_names else ""
 
 
 def _base_type_label(schema: dict[str, Any]) -> str:
@@ -219,6 +297,9 @@ def parameter_error_guidance(
         return hint
     if tool is not None and not tool_supports_context_load(tool):
         body = _render_parameter_contract(tool) or PARAMETER_RECHECK_GUIDANCE_TEMPLATE
+        # 「按下方结构」只有在契约真被内联到下面时才成立，故不挂到指针分支上。
+        if body is not PARAMETER_RECHECK_GUIDANCE_TEMPLATE and isinstance(arguments, dict) and not arguments:
+            hint = "\n".join([item for item in (_EMPTY_SUBMISSION_NOTE, hint) if item])
     else:
         body = _parameter_repair_pointer(normalized_tool_name, tool=tool, runtime_context=runtime_context)
     guidance = "\n".join([item for item in (hint, body) if item])
@@ -258,7 +339,10 @@ __all__ = [
     "PARAMETER_RECHECK_GUIDANCE_TEMPLATE",
     "PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE",
     "append_parameter_error_guidance",
+    "availability_hint",
+    "format_name_group",
     "is_parameter_like_tool_exception",
+    "no_load_needed_hint",
     "parameter_error_guidance",
     "tool_supports_context_load",
 ]

@@ -13,10 +13,13 @@ from types import SimpleNamespace
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
+from g3ku.agent.tools.main_runtime import _candidate_gate_error, _loadable_tool_gate_error
 from g3ku.runtime.tool_error_guidance import (
     PARAMETER_ERROR_GUIDANCE_TEMPLATE,
     PARAMETER_RECHECK_GUIDANCE_TEMPLATE,
     append_parameter_error_guidance,
+    availability_hint,
+    no_load_needed_hint,
     parameter_error_guidance,
 )
 from main.runtime.internal_tools import SubmitFinalResultTool
@@ -256,3 +259,98 @@ def test_missing_toolskill_file_falls_back_to_the_load_pointer(tmp_path) -> None
     )
 
     assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')
+
+
+# --- 名称被拒：必须说清"什么能用" --------------------------------------------
+
+
+def test_availability_hint_separates_not_hydrated_from_unknown_name() -> None:
+    hint = availability_hint(
+        requested='web_search',
+        callable_names=['exec', 'content_open'],
+        candidate_names=['web_search', 'image_search'],
+    )
+
+    # 候选未水化 → 给出加载动作；同时列出可调用与全部候选（含它自己，便于改选别的）。
+    assert '「web_search」本轮只是候选、尚未水化' in hint
+    assert '当前可直接调用的工具：exec、content_open' in hint
+    assert '本轮可加载的候选工具：web_search、image_search' in hint
+
+
+def test_availability_hint_for_unknown_name_lists_no_candidate_group() -> None:
+    hint = availability_hint(requested='nope', callable_names=['exec'], candidate_names=[])
+
+    assert '只是候选' not in hint
+    assert '当前可直接调用的工具：exec' in hint
+
+
+def test_availability_hint_caps_long_lists_but_reports_the_true_count() -> None:
+    names = [f'tool_{index}' for index in range(45)]
+
+    hint = availability_hint(requested='missing', callable_names=names)
+
+    assert 'tool_19' in hint
+    assert 'tool_20' not in hint
+    assert '等 45 个' in hint
+
+
+def test_no_load_needed_hint_answers_for_resident_builtin_tools() -> None:
+    hint = no_load_needed_hint(requested='exec', actor_role='ceo')
+
+    assert '「exec」是常驻内置工具，无需加载说明即可直接调用' in hint
+    assert no_load_needed_hint(requested='some_resource_tool', actor_role='ceo') == ''
+    assert no_load_needed_hint(requested='exec', actor_role='') == ''
+
+
+def test_loadable_tool_gate_error_names_builtin_and_lists_candidates() -> None:
+    runtime = {
+        'tool_contract_enforced': True,
+        'actor_role': 'ceo',
+        'candidate_tool_names': ['agent_browser', 'web_search'],
+        'rbac_visible_tool_names': ['content_search'],
+    }
+
+    text = _loadable_tool_gate_error(runtime=runtime, requested_id='exec')
+
+    assert '是常驻内置工具' in text
+    assert '本轮候选工具：agent_browser、web_search' in text
+    assert 'RBAC 可见 surfaced tools：content_search' in text
+
+
+def test_candidate_gate_error_enumerates_the_candidates_it_demands() -> None:
+    runtime = {
+        'tool_contract_enforced': True,
+        'candidate_skill_ids': ['skill-creator', 'pdf-tools'],
+    }
+
+    text = _candidate_gate_error(
+        runtime=runtime,
+        field_name='candidate_skill_ids',
+        requested_id='nope',
+        label='技能',
+    )
+
+    assert '本轮候选技能：skill-creator、pdf-tools' in text
+
+
+# --- 空提交：区分"没写参数"与"参数没解析成功" ---------------------------------
+
+
+def test_empty_submission_is_called_out_next_to_the_inlined_contract() -> None:
+    tool = _submit_tool()
+
+    guidance = parameter_error_guidance(tool.name, tool=tool, arguments={})
+
+    assert '本次调用未携带任何参数' in guidance
+    assert '参数 JSON 没有被成功解析' in guidance
+    assert CONTRACT_PREFIX in guidance
+
+
+def test_empty_submission_note_stays_off_the_pointer_branches() -> None:
+    """指针分支下面没有内联结构，不能出现"按下方结构"这种指错地方的话。"""
+    tool = _submit_tool()
+    tool._descriptor = object()  # type: ignore[attr-defined]
+
+    guidance = parameter_error_guidance('submit_final_result', tool=tool, arguments={})
+
+    assert '本次调用未携带任何参数' not in guidance
