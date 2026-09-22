@@ -315,8 +315,8 @@
 }
 
 [data-ui-version="v2"] .nav-item.active {
-    background: var(--ui-brand-soft);
-    color: var(--ui-brand);
+    background: var(--ui-brand);
+    color: var(--ui-on-brand);
     font-weight: 700;
 }
 
@@ -2396,30 +2396,51 @@
     background: var(--ui-bg-surface);
 }
 
-/* 58. 实心强调按钮：描边与投影走实色，不再用 color-mix(..., transparent) 的
-   半透描边和同色光晕（白页上那圈光晕看着像污渍）。文字按主题走 on-brand 档：
-   亮色白字压深底、暗色近黑字压亮底。 */
+/* 58. .toolbar-btn.success 不再做「实心强调」档：旧层给它的是品牌填充 +
+   color-mix(..., transparent) 半透描边 + 同色光晕投影，在亮色压深后读起来就是一块
+   蓝绿。现在它和普通控件档同形：表面底、--ui-border 描边、主文本色、无光晕，
+   hover 走中性底。用这个类的按钮一起变普通：编辑模型链 / 保存并连接 /
+   签发桥接 token / 签发 / 确定 / 保存 / 确认修改 / 添加 / 启用模型。
+   #model-roles-save-btn 在旧层另有一条同色的 id 规则，必须一起压住。 */
 [data-ui-version="v2"] .toolbar-btn.success,
 [data-ui-version="v2"] #model-roles-save-btn {
-    background: var(--ui-brand);
-    border-color: var(--ui-brand);
-    color: var(--ui-on-brand);
+    background: var(--ui-bg-surface);
+    border: 1px solid var(--ui-border);
+    color: var(--ui-text);
     box-shadow: none;
 }
 
 [data-ui-version="v2"] .toolbar-btn.success:hover:not(:disabled),
 [data-ui-version="v2"] #model-roles-save-btn:hover:not(:disabled) {
-    background: var(--ui-brand-hover);
-    border-color: var(--ui-brand-hover);
-    color: var(--ui-on-brand);
+    background: var(--ui-neutral-soft);
+    border-color: var(--ui-border-strong);
+    color: var(--ui-text);
     box-shadow: none;
 }
 
-/* 这颗按钮在模型目录加载/保存中被禁用，实心档必须给出对应的熄灭态，
-   否则禁用后仍是一片品牌底，看不出不可点。 */
 [data-ui-version="v2"] .toolbar-btn.success:disabled,
 [data-ui-version="v2"] #model-roles-save-btn:disabled {
     background: var(--ui-bg-subtle);
     border-color: var(--ui-border);
     color: var(--ui-text-disabled);
+}
+
+/* 59. 模型配置头部的「是否为图像多模态」与同排控件同档：旧层给它 46px 高 +
+   14px 圆角 + --border-strong 描边，而同一行里的模型列表按钮 36px、最大上下文
+   输入框 38px 都是 8px 圆角，整行就它突出来一块。 */
+[data-ui-version="v2"] .llm-image-checkbox-control {
+    height: 38px;
+    padding: 0 var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    color: var(--ui-text);
+    font-size: 13px;
+}
+
+/* 行内档（模型列表那一行的紧凑版）跟着换圆角与描边，高度留它自己的 34px。 */
+[data-ui-version="v2"] .llm-image-checkbox-control--inline {
+    height: 34px;
+    min-height: 34px;
+    padding: 0 var(--ui-space-2);
 }
