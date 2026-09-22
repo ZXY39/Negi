@@ -183,7 +183,7 @@ promotion 与前门状态：
 
 参数错误与状态分类：
 
-- 工具参数校验错误在 `ToolRegistry`、CEO/frontdoor 直接工具执行、节点 `ReActToolLoop` 之间共享同一维护契约：`validate_params(...)` 返回错误、`validate_params(...)` 自身崩溃，或工具执行抛出 `ValueError` / `TypeError` 时，返回的错误文本保留原始错误，并按工具可加载性分支追加修复提示：资源支撑工具（实例带资源 `_descriptor`，toolskill/参数契约可由 `load_tool_context` 加载）追加指回 `load_tool_context(tool_id="<tool_name>")` 的提示；没有可加载契约文档的纯内部工具（运行时注入的控制工具如 `spawn_child_nodes` / `submit_next_stage` / `submit_final_result`——对它们调用 `load_tool_context` 必然被运行时合同闸门拒绝，门禁见「candidate tools」）改为追加核对入参提示（参数名、必填项、类型与取值结构），把模型留在原地修复而不是推进一条必死的加载链路。权限错误、路径策略错误、超时停止、watchdog 停止、pause/cancel 信号与普通 `RuntimeError` 保持原语义，不误标为参数错误。
+- 工具参数校验错误在 `ToolRegistry`、CEO/frontdoor 直接工具执行、节点 `ReActToolLoop` 之间共享同一维护契约：`validate_params(...)` 返回错误、`validate_params(...)` 自身崩溃，或工具执行抛出 `ValueError` / `TypeError` 时，返回的错误文本保留原始错误，并按工具可加载性分支追加修复提示：资源支撑工具（实例带资源 `_descriptor`，toolskill/参数契约可由 `load_tool_context` 加载）追加指回 `load_tool_context(tool_id="<tool_name>")` 的提示；没有可加载契约文档的纯内部工具（运行时注入的控制工具如 `spawn_child_nodes` / `submit_next_stage` / `submit_final_result`——对它们调用 `load_tool_context` 必然被运行时合同闸门拒绝，门禁见「candidate tools」）改为把校验面实际使用的必填契约回贴进错误文本——以 `Tool.parameters`（`validate_params` 拒收时用的就是它，不是可能被裁剪的 model-visible `model_parameters`）为准渲染必填参数名、类型、enum 取值与数组元素结构；只渲染必填项并设有长度上限，上限外或渲染不出必填项时退回泛化的核对入参提示（参数名、必填项、类型与取值结构），把模型留在原地修复而不是推进一条必死的加载链路。只提醒「核对必填项」而不给出必填项等于没有可核对的材料，模型下一跳会撞同一堵墙，因此契约文本本身是这条修复道的一部分。权限错误、路径策略错误、超时停止、watchdog 停止、pause/cancel 信号与普通 `RuntimeError` 保持原语义，不误标为参数错误。
 - 任何顶层为 `{"ok": false, ...}` 的结构化工具结果，在三条路径上都按 error-lane 工具结果处理；这条规则有意比参数引导规则更宽，让以 JSON payload 编码失败的内嵌工具也进入错误车道。
 
 外置工具结果信封：

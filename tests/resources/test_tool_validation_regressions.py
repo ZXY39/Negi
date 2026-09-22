@@ -14,6 +14,8 @@ _PARAMETER_GUIDANCE_TEMPLATE = (
 _PARAMETER_RECHECK_GUIDANCE = (
     '该工具没有可加载的扩展说明。请仔细核对该工具的入参（参数名、必填项、类型与取值结构）后重新提交。'
 )
+# 无资源 descriptor 的工具：参数错误回贴校验面实际使用的必填契约，而不是泛化提醒。
+_PARAMETER_CONTRACT_GUIDANCE_PREFIX = '该工具没有可加载的扩展说明，参数契约如下（必填项及其类型与取值结构）：'
 
 
 class _UnionTypeTool(Tool):
@@ -245,13 +247,14 @@ async def test_tool_registry_execute_degrades_validator_crash_to_error() -> None
     assert result.startswith("Error validating tool 'broken_validator_tool':")
     assert "unhashable type: 'list'" in result
     # 无资源 descriptor 的内部工具不引导 load_tool_context（加载必然失败），
-    # 改为提醒核对入参。
-    assert _PARAMETER_RECHECK_GUIDANCE in result
+    # 改为回贴必填契约。
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in result
+    assert "value=string" in result
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="broken_validator_tool") not in result
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_execute_appends_recheck_guidance_for_invalid_parameters() -> None:
+async def test_tool_registry_execute_appends_parameter_contract_guidance_for_invalid_parameters() -> None:
     registry = ToolRegistry()
     registry.register(_InvalidParameterTool())
 
@@ -259,31 +262,32 @@ async def test_tool_registry_execute_appends_recheck_guidance_for_invalid_parame
 
     assert result.startswith("Error: Invalid parameters for tool 'invalid_parameter_tool':")
     assert "missing required value" in result
-    assert _PARAMETER_RECHECK_GUIDANCE in result
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in result
+    assert "value=string" in result
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="invalid_parameter_tool") not in result
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_execute_appends_recheck_guidance_for_value_error() -> None:
+async def test_tool_registry_execute_appends_parameter_contract_guidance_for_value_error() -> None:
     registry = ToolRegistry()
     registry.register(_ExecuteValueErrorTool())
 
     result = await registry.execute("execute_value_error_tool", {"value": "demo"})
 
     assert result.startswith("Error executing execute_value_error_tool: value must be a canonical memory ref")
-    assert _PARAMETER_RECHECK_GUIDANCE in result
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in result
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_value_error_tool") not in result
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_execute_appends_recheck_guidance_for_type_error() -> None:
+async def test_tool_registry_execute_appends_parameter_contract_guidance_for_type_error() -> None:
     registry = ToolRegistry()
     registry.register(_ExecuteTypeErrorTool())
 
     result = await registry.execute("execute_type_error_tool", {"value": "demo"})
 
     assert result.startswith("Error executing execute_type_error_tool: value must be a string scalar")
-    assert _PARAMETER_RECHECK_GUIDANCE in result
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in result
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="execute_type_error_tool") not in result
 
 
@@ -299,6 +303,7 @@ async def test_tool_registry_execute_keeps_loader_guidance_for_descriptor_backed
     assert result.startswith("Error: Invalid parameters for tool 'invalid_parameter_tool':")
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="invalid_parameter_tool") in result
     assert _PARAMETER_RECHECK_GUIDANCE not in result
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX not in result
 
 
 @pytest.mark.asyncio

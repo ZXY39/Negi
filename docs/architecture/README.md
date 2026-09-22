@@ -79,6 +79,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-and-skill-system.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
 - Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、模型调用明细按时间倒序/搜索跨全部记录的行为疑问、任务级统计有数字却显示「尚无按模型明细」，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
+- 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan reaped at task resume` 收尸）→ `runtime-overview.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
+- 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `runtime-overview.md`「Node-Level Pause and Recovery」（各拒收车道共用同一 strike 预算）+ `tool-and-skill-system.md`「参数错误与状态分类」（必填契约回贴）
 - 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `runtime-overview.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
 - 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `final acceptance round re-dispatched after interruption`

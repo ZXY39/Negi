@@ -1356,7 +1356,9 @@ class MainRuntimeService:
                 remark='',
             )
             if dispatcher is not None and updated is not None:
-                await dispatcher.resume_node(node_id)
+                # 走 TaskActorService 的复活入口：清标志不等于复活，必须留下活执行器
+                # 或把现场落进日志，并由延迟校验兜底（见 resume_node_entry）。
+                await self.task_actor_service.resume_node_entry(normalized_task_id, node_id)
             results.append({'node_id': node_id, 'result': 'resumed' if updated is not None else 'not_found'})
         if schedule_if_inactive and dispatcher is None and any(item.get('result') == 'resumed' for item in results) and str(task.status or '').strip().lower() == 'in_progress' and not bool(task.is_paused):
             await self.global_scheduler.enqueue_task(normalized_task_id)
@@ -1773,7 +1775,7 @@ class MainRuntimeService:
                     applied_ids.append(node_id)
                 if dispatcher is not None:
                     for node_id in resume_candidates:
-                        await dispatcher.resume_node(node_id)
+                        await self.task_actor_service.resume_node_entry(normalized_task_id, node_id)
                 any_resumed = any_resumed or bool(resume_candidates)
             elif action == 'fail':
                 # 根先、后代 BFS 随后：失败结果先占据根 future；后代 fail 唤醒的父协程

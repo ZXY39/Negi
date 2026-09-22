@@ -1086,17 +1086,17 @@ class ReActToolLoop:
                         runtime_context=runtime_context,
                         error_content=self._exclusive_tool_turn_error(FINAL_RESULT_TOOL_NAME),
                     )
-                    invalid_final_submission_count += 1
                     last_contract_violations = [
                         f'{FINAL_RESULT_TOOL_NAME} must be the only tool call in its turn',
                     ]
                     last_invalid_final_submission_reason = '; '.join(last_contract_violations)
-                    self._record_invalid_final_submission_error_log(
+                    invalid_final_submission_count = self._apply_invalid_final_submission_strike(
                         task_id=task.task_id,
                         node_id=node.node_id,
                         node_title=node.goal,
                         count=invalid_final_submission_count,
                         reason=last_invalid_final_submission_reason,
+                        violations=last_contract_violations,
                         response=response,
                         response_tool_calls=response_tool_calls,
                     )
@@ -1128,10 +1128,33 @@ class ReActToolLoop:
                     reason_parts = list(contract_violations or [])
                     if protocol_error:
                         reason_parts.append(protocol_error)
-                    return self._invalid_final_submission_failure(
-                        reason='; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected',
-                        count=1,
+                    reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
+                    invalid_final_submission_count = self._apply_invalid_final_submission_strike(
+                        task_id=task.task_id,
+                        node_id=node.node_id,
+                        node_title=node.goal,
+                        count=invalid_final_submission_count,
+                        reason=reason,
+                        violations=reason_parts,
+                        response=response,
+                        response_tool_calls=response_tool_calls,
                     )
+                    last_invalid_final_submission_reason = reason
+                    last_contract_violations = reason_parts
+                    if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
+                        return self._invalid_final_submission_failure(
+                            reason=reason,
+                            count=invalid_final_submission_count,
+                        )
+                    repair_overlay_text = (
+                        self._result_contract_violation_message(
+                            reason_parts,
+                            node_kind=node.node_kind,
+                        )
+                        if reason_parts
+                        else self._result_protocol_message(node_kind=node.node_kind)
+                    )
+                    continue
                 duplicate_call_violations: list[dict[str, Any]] = []
                 for call in response_tool_calls:
                     tool_name = str(getattr(call, 'name', '') or '').strip()
@@ -1485,29 +1508,45 @@ class ReActToolLoop:
                 reason_parts = list(contract_violations or [])
                 if protocol_error:
                     reason_parts.append(protocol_error)
-                return self._invalid_final_submission_failure(
-                    reason='; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected',
-                    count=1,
+                reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
+                invalid_final_submission_count = self._apply_invalid_final_submission_strike(
+                    task_id=task.task_id,
+                    node_id=node.node_id,
+                    node_title=node.goal,
+                    count=invalid_final_submission_count,
+                    reason=reason,
+                    violations=reason_parts,
+                    response=response,
+                    response_tool_calls=response_tool_calls,
                 )
+                last_invalid_final_submission_reason = reason
+                last_contract_violations = reason_parts
+                if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
+                    return self._invalid_final_submission_failure(
+                        reason=reason,
+                        count=invalid_final_submission_count,
+                    )
+                repair_overlay_text = (
+                    self._result_contract_violation_message(
+                        reason_parts,
+                        node_kind=node.node_kind,
+                    )
+                    if reason_parts
+                    else self._result_protocol_message(node_kind=node.node_kind)
+                )
+                continue
 
-            invalid_final_submission_count += 1
             last_contract_violations = []
             last_invalid_final_submission_reason = (
                 f'final result must be submitted via {FINAL_RESULT_TOOL_NAME}'
             )
-            self._persist_invalid_final_submission_state(
-                task_id=task.task_id,
-                node_id=node.node_id,
-                count=invalid_final_submission_count,
-                reason=last_invalid_final_submission_reason,
-                violations=last_contract_violations,
-            )
-            self._record_invalid_final_submission_error_log(
+            invalid_final_submission_count = self._apply_invalid_final_submission_strike(
                 task_id=task.task_id,
                 node_id=node.node_id,
                 node_title=node.goal,
                 count=invalid_final_submission_count,
                 reason=last_invalid_final_submission_reason,
+                violations=last_contract_violations,
                 response=response,
                 response_tool_calls=response_tool_calls,
             )
@@ -1997,6 +2036,43 @@ class ReActToolLoop:
             },
             publish_snapshot=True,
         )
+
+    def _apply_invalid_final_submission_strike(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        node_title: str,
+        count: int,
+        reason: str,
+        violations: list[str],
+        response: Any,
+        response_tool_calls: list[Any],
+    ) -> int:
+        """Take one strike for a rejected final submission and return the new count.
+
+        Every invalid-final-submission lane must go through here so the budget is
+        uniformly `_INVALID_FINAL_SUBMISSION_LIMIT` and every strike carries the
+        truncation forensics, not only the strike that killed the node.
+        """
+        strikes = max(0, int(count or 0)) + 1
+        self._persist_invalid_final_submission_state(
+            task_id=task_id,
+            node_id=node_id,
+            count=strikes,
+            reason=reason,
+            violations=violations,
+        )
+        self._record_invalid_final_submission_error_log(
+            task_id=task_id,
+            node_id=node_id,
+            node_title=node_title,
+            count=strikes,
+            reason=reason,
+            response=response,
+            response_tool_calls=response_tool_calls,
+        )
+        return strikes
 
     def _record_invalid_final_submission_error_log(
         self,

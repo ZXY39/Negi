@@ -911,7 +911,7 @@ class TaskActorService:
                     )
                 except Exception:
                     pass
-                await dispatcher.resume_node(node_id)
+                await self.resume_node_entry(task_id, node_id)
                 continue
             reason = 'orphan reaped at task resume: in_progress without executor or replay path'
             try:
@@ -1260,7 +1260,7 @@ class TaskActorService:
                 round_id,
             )
             try:
-                await dispatcher.resume_node(parent_node_id)
+                await self.resume_node_entry(task_id, parent_node_id)
             except Exception:
                 logger.exception(
                     'barrier drain self-heal: resume failed: task={} node={}',
@@ -1726,36 +1726,90 @@ class TaskActorService:
             node_id = str(raw_node_id or '').strip()
             if not node_id:
                 continue
-            entry = dispatcher._entries.get(node_id)
-            if entry is None:
-                continue
-            node = self._store.get_node(node_id)
-            if node is None:
-                continue
-            if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
-                continue
-            if self._node_operator_paused(node):
-                # 人工暂停的节点保持暂停，不因分发释放被唤醒。
-                try:
-                    logger.info('release skip (operator paused): task={} node={}', task_id, node_id)
-                except Exception:
-                    pass
-                continue
-            if entry.future.done():
-                self._log_stranded_entry_future(task_id, node_id, entry)
-                if entry.task is not None and not entry.task.done():
-                    # future 已解析但协程还在跑：不重建（防双跑），留给 A3 清扫观测。
-                    continue
-                # B5 兜底：future 被取消/异常搁浅而节点非终态——弹出残骸重建
-                # entry 复活（resume_node 对已弹出节点走 _get_or_create_entry）。
-                dispatcher._entries.pop(node_id, None)
-                await dispatcher.resume_node(node_id)
+            outcome = await self._revive_dispatch_entry_for_resume(task_id, dispatcher, node_id)
+            if outcome == 'resumed':
                 resumed_node_ids.append(node_id)
-                continue
-            await dispatcher.resume_node(node_id)
-            resumed_node_ids.append(node_id)
         if resumed_node_ids:
             self._schedule_release_verification(task_id, resumed_node_ids)
+
+    async def _revive_dispatch_entry_for_resume(
+        self,
+        task_id: str,
+        dispatcher: 'TaskNodeDispatcher',
+        node_id: str,
+    ) -> str:
+        """把单个已登记 entry 恢复到"有活执行器"，并回报现场判读。
+
+        返回 `resumed` / `deferred` / `missing` / `skipped:<reason>`。分发释放与
+        resume 命令两条道共用这一份判读，避免命令道把"什么都没重启"报成成功
+        （2026-09-22 node:abaf5c7d6e11：暂停标志被清、执行器从未复活，幽灵态悬空
+        82 分钟后才被孤儿收尸）。`missing` 只回报不重建，由调用方决定要不要建
+        新 entry——释放道对无 entry 的节点保持不介入。
+        """
+        entry = dispatcher._entries.get(node_id)
+        if entry is None:
+            return 'missing'
+        node = self._store.get_node(node_id)
+        if node is None:
+            return 'skipped:node_missing'
+        if str(getattr(node, 'status', '') or '').strip().lower() in {'success', 'failed'}:
+            return 'skipped:node_terminal'
+        if self._node_operator_paused(node):
+            # 人工暂停的节点保持暂停，不因分发释放被唤醒。
+            try:
+                logger.info('release skip (operator paused): task={} node={}', task_id, node_id)
+            except Exception:
+                pass
+            return 'skipped:operator_paused'
+        if entry.future.done():
+            self._log_stranded_entry_future(task_id, node_id, entry)
+            if entry.task is not None and not entry.task.done():
+                # future 已解析但协程还在跑：不重建（防双跑），执行器仍然活着。
+                try:
+                    logger.warning(
+                        'node resume triage deferred (future resolved while coroutine still runs): '
+                        'task={} node={}',
+                        task_id,
+                        node_id,
+                    )
+                except Exception:
+                    pass
+                return 'deferred'
+            # B5 兜底：future 被取消/异常搁浅而节点非终态——弹出残骸重建
+            # entry 复活（resume_node 对已弹出节点走 _get_or_create_entry）。
+            dispatcher._entries.pop(node_id, None)
+            await dispatcher.resume_node(node_id)
+            return 'resumed'
+        await dispatcher.resume_node(node_id)
+        return 'resumed'
+
+    async def resume_node_entry(self, task_id: str, node_id: str, *, arm_verification: bool = True) -> str:
+        """复活一个非终态节点的执行器入口：保证留下活执行器，并回报现场判读。
+
+        `arm_verification=False` 供延迟校验清扫自身调用——它已在 sweep 协程里，
+        再装填会把正在跑的清扫 cancel 掉。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        normalized_node_id = str(node_id or '').strip()
+        dispatcher = self._dispatchers.get(normalized_task_id)
+        if dispatcher is None:
+            return 'no_dispatcher'
+        outcome = await self._revive_dispatch_entry_for_resume(normalized_task_id, dispatcher, normalized_node_id)
+        if outcome == 'missing':
+            await dispatcher.resume_node(normalized_node_id)
+            outcome = 'resumed'
+        if arm_verification and outcome in {'resumed', 'deferred'}:
+            self._schedule_release_verification(normalized_task_id, [normalized_node_id])
+        try:
+            logger.info(
+                'node resume triage: task={} node={} outcome={}',
+                normalized_task_id,
+                normalized_node_id,
+                outcome,
+            )
+        except Exception:
+            pass
+        return outcome
 
     def _log_stranded_entry_future(self, task_id: str, node_id: str, entry: _DispatchEntry) -> None:
         """A2：done future 若被取消或携带无人消费的异常，落日志（否则永久静默）。"""
@@ -1823,7 +1877,7 @@ class TaskActorService:
                 )
             except Exception:
                 pass
-            await dispatcher.resume_node(node_id)
+            await self.resume_node_entry(task_id, node_id, arm_verification=False)
         await asyncio.sleep(_RELEASE_VERIFICATION_DELAY_SECONDS)
         for node_id in self._collect_wedged_release_nodes(task_id, wedged):
             try:

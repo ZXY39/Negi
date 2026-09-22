@@ -713,6 +713,140 @@ async def test_release_verification_sweep_re_resumes_wedged_entry(monkeypatch: p
 
 
 # ---------------------------------------------------------------------------
+# B：resume 命令道与释放道共用同一份 entry 判读——清标志必须留下活执行器
+# ---------------------------------------------------------------------------
+
+
+def _resume_triage_service(
+    entry,
+    *,
+    node_status: str = "in_progress",
+):
+    """装配一个只带 entry 判读所需依赖的 TaskActorService，并记录 resume 调用。"""
+    service = object.__new__(TaskActorService)
+    service._release_sweeps = {}
+    service._dispatchers = {}
+    service._store = SimpleNamespace(
+        get_node=lambda node_id: SimpleNamespace(
+            status=node_status, is_paused=False, pause_requested=False
+        ),
+    )
+    service._node_operator_paused = lambda node: False
+    calls: list[str] = []
+
+    async def _resume(node_id: str) -> None:
+        calls.append(node_id)
+
+    entries = {} if entry is None else {entry.node_id: entry}
+    dispatcher = SimpleNamespace(_entries=entries, resume_node=_resume)
+    service._dispatchers["task:r"] = dispatcher
+    return service, dispatcher, calls
+
+
+async def _triage_entry(*, future_resolved: bool, task_finished: bool):
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    if future_resolved:
+        future.set_result("stale")
+    gate = asyncio.Event()
+
+    async def _coroutine() -> None:
+        if not task_finished:
+            await gate.wait()
+
+    task = asyncio.create_task(_coroutine())
+    if task_finished:
+        await task
+    return SimpleNamespace(
+        node_id="node:child",
+        future=future,
+        task=task,
+        gate=gate,
+        role="execution",
+        interrupt_result=None,
+        queued_counted=False,
+        running_counted=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_command_lane_rebuilds_entry_whose_future_already_resolved() -> None:
+    """事故形态：future 已解析 + 协程已停 + 节点非终态 → 弹残骸重建，绝不静默返回。"""
+    entry = await _triage_entry(future_resolved=True, task_finished=True)
+    service, dispatcher, calls = _resume_triage_service(entry)
+
+    outcome = await service.resume_node_entry("task:r", "node:child")
+
+    assert outcome == "resumed"
+    assert dispatcher._entries == {}, "残骸 entry 必须弹出，否则新 future 无人 await"
+    assert calls == ["node:child"]
+    assert service._release_sweeps.get("task:r") is not None, "命令道也要进延迟校验兜底"
+    # 清扫本身由 test_release_verification_sweep_re_resumes_wedged_entry 覆盖，这里只验装填。
+    service._release_sweeps.pop("task:r").cancel()
+
+
+@pytest.mark.asyncio
+async def test_resume_command_lane_defers_without_double_running_a_live_coroutine() -> None:
+    entry = await _triage_entry(future_resolved=True, task_finished=False)
+    service, dispatcher, calls = _resume_triage_service(entry)
+    try:
+        outcome = await service.resume_node_entry("task:r", "node:child")
+
+        assert outcome == "deferred"
+        assert calls == [], "协程还在跑就不再 resume（防双跑）"
+        assert dispatcher._entries.get("node:child") is entry
+        assert service._release_sweeps.get("task:r") is not None
+    finally:
+        entry.gate.set()
+        await entry.task
+
+
+@pytest.mark.asyncio
+async def test_resume_command_lane_relaunches_paused_child_with_pending_future() -> None:
+    """常规形态：NodePausedError 让 future 保持 pending，resume 应直接在原 future 上重跑。"""
+    entry = await _triage_entry(future_resolved=False, task_finished=True)
+    service, dispatcher, calls = _resume_triage_service(entry)
+
+    outcome = await service.resume_node_entry("task:r", "node:child")
+
+    assert outcome == "resumed"
+    assert calls == ["node:child"]
+    assert dispatcher._entries.get("node:child") is entry, "pending future 不重建"
+    assert not entry.future.done()
+    service._release_sweeps.pop("task:r").cancel()
+
+
+@pytest.mark.asyncio
+async def test_release_lane_still_ignores_nodes_without_an_entry() -> None:
+    """共用判读不得改动释放道语义：无 entry 的节点仍然不介入、不新建。"""
+    service, dispatcher, calls = _resume_triage_service(None)
+    armed: list[list[str]] = []
+
+    def _arm(task_id: str, node_ids) -> None:
+        armed.append(list(node_ids))
+
+    service._schedule_release_verification = _arm
+
+    await service._release_scoped_epoch_holds("task:r", ["node:child"])
+
+    assert calls == []
+    assert armed == []
+
+
+@pytest.mark.asyncio
+async def test_release_lane_and_command_lane_agree_on_entry_triage() -> None:
+    """同一条 done-future 残骸，两条道必须走同一段判读。"""
+    entry = await _triage_entry(future_resolved=True, task_finished=True)
+    service, dispatcher, calls = _resume_triage_service(entry)
+    service._schedule_release_verification = lambda task_id, node_ids: None
+
+    await service._release_scoped_epoch_holds("task:r", ["node:child"])
+
+    assert calls == ["node:child"]
+    assert dispatcher._entries == {}
+
+
+# ---------------------------------------------------------------------------
 # C：run_task 入口的孤儿决断——收尸 / 重派发
 # ---------------------------------------------------------------------------
 

@@ -373,11 +373,12 @@ class _BrokenValidationTool(Tool):
 _PARAMETER_GUIDANCE_TEMPLATE = (
     '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
 )
-# 无资源 descriptor 的工具不再引导 load_tool_context（加载必被合同闸门拒绝），
-# 参数错误改为提醒核对入参。
+# 无资源 descriptor 的工具不再引导 load_tool_context（加载必被合同闸门拒绝）。
+# 参数错误改为把该校验面实际使用的契约回贴给模型；渲染不出必填项时才退回泛化核对提醒。
 _PARAMETER_RECHECK_GUIDANCE = (
     '该工具没有可加载的扩展说明。请仔细核对该工具的入参（参数名、必填项、类型与取值结构）后重新提交。'
 )
+_PARAMETER_CONTRACT_GUIDANCE_PREFIX = '该工具没有可加载的扩展说明，参数契约如下（必填项及其类型与取值结构）：'
 
 
 class _ExecuteErrorTool(Tool):
@@ -1174,7 +1175,9 @@ async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool
     assert result["status"] == "error"
     assert "Error validating broken_validation_tool" in result["result_text"]
     assert "unhashable type: 'list'" in result["result_text"]
-    assert _PARAMETER_RECHECK_GUIDANCE in result["result_text"]
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in result["result_text"]
+    assert "value=string" in result["result_text"]
+    assert _PARAMETER_RECHECK_GUIDANCE not in result["result_text"]
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="broken_validation_tool") not in result["result_text"]
     assert [item[1] for item in progress_calls] == ["tool_error"]
 
@@ -7006,16 +7009,21 @@ async def test_create_agent_frontdoor_execute_tool_call_appends_loader_guidance_
 
     assert value_error_status == "error"
     assert "Error executing value_error_tool: value must be an absolute path" in value_error_text
-    assert _PARAMETER_RECHECK_GUIDANCE in value_error_text
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in value_error_text
+    assert "value=string" in value_error_text
+    assert _PARAMETER_RECHECK_GUIDANCE not in value_error_text
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="value_error_tool") not in value_error_text
     assert type_error_status == "error"
     assert "Error executing type_error_tool: value must be a string scalar" in type_error_text
-    assert _PARAMETER_RECHECK_GUIDANCE in type_error_text
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in type_error_text
+    assert "value=string" in type_error_text
+    assert _PARAMETER_RECHECK_GUIDANCE not in type_error_text
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="type_error_tool") not in type_error_text
     assert runtime_error_status == "error"
     assert "Error executing runtime_error_tool: runtime execution failed" in runtime_error_text
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="runtime_error_tool") not in runtime_error_text
     assert _PARAMETER_RECHECK_GUIDANCE not in runtime_error_text
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX not in runtime_error_text
 
     descriptor_tool = _ExecuteErrorTool(name="descriptor_value_error_tool", exc=ValueError("value must be an absolute path"))
     descriptor_tool._descriptor = object()
@@ -7030,6 +7038,7 @@ async def test_create_agent_frontdoor_execute_tool_call_appends_loader_guidance_
     assert "Error executing descriptor_value_error_tool: value must be an absolute path" in descriptor_text
     assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="descriptor_value_error_tool") in descriptor_text
     assert _PARAMETER_RECHECK_GUIDANCE not in descriptor_text
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX not in descriptor_text
 
 
 

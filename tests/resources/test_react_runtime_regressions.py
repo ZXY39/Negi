@@ -34,7 +34,7 @@ from main.runtime.node_prompt_contract import (
 )
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
-from main.runtime.react_loop import ReActToolLoop
+from main.runtime.react_loop import _INVALID_FINAL_SUBMISSION_LIMIT, ReActToolLoop
 from main.runtime.stage_budget import STAGELESS_FREE_PASS_REMINDER
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
 from main.service.runtime_service import MainRuntimeService
@@ -157,6 +157,11 @@ class _SlowCompleteTool(Tool):
         _ = kwargs
         await asyncio.sleep(0.08)
         return "done"
+
+
+# 无资源 descriptor 的控制工具（submit_final_result 等）参数错误必须自带契约，
+# 这句前缀是"契约已回贴"而不是"泛化提醒"的判别标记。
+_PARAMETER_CONTRACT_GUIDANCE_PREFIX = '该工具没有可加载的扩展说明，参数契约如下（必填项及其类型与取值结构）：'
 
 
 def _submit_final_result_tool(*, node_kind: str = "execution") -> SubmitFinalResultTool:
@@ -3254,7 +3259,7 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
 
     result = await loop.run(
         task=SimpleNamespace(task_id='task-1'),
-        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution'),
+        node=SimpleNamespace(node_id='node-1', depth=0, node_kind='execution', goal='demo'),
         messages=initial_messages,
         tools={},
         model_refs=['fake'],
@@ -3264,11 +3269,135 @@ async def test_react_loop_orphan_tool_result_circuit_breaker_fails_current_node(
 
     assert result.status == "failed"
     assert result.delivery_status == "blocked"
-    assert "final result submission guard triggered" in result.summary
-    assert "submit_final_result" in result.blocking_reason
-    assert "Detected orphan tool results" not in result.blocking_reason
-    assert "call-orphan|fc_orphan" not in result.blocking_reason
-    assert len(calls) == 1
+    assert result.failure_disposition == 'pause'
+    # The orphan breaker has its own threshold and the precise reason; a single rejected
+    # submission must not preempt it with the generic final-submission guard.
+    assert result.summary == 'orphan tool result circuit breaker triggered'
+    assert 'call-orphan' in result.blocking_reason
+    assert 'final result submission guard triggered' not in result.summary
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_react_loop_recovers_when_a_rejected_final_submission_is_resubmitted_within_budget() -> None:
+    turns: list[int] = []
+    request_messages: list[list[dict[str, object]]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            self.turn += 1
+            turns.append(self.turn)
+            request_messages.append([dict(item) for item in list(kwargs.get("messages") or [])])
+            if self.turn == 1:
+                # The 2026-09-22 incident shape: the long answer made it, the envelope did not.
+                return LLMResponse(
+                    content='',
+                    tool_calls=[
+                        ToolCallRequest(
+                            id='call:incident',
+                            name='submit_final_result',
+                            arguments={'answer': 'deliverables are on disk', 'evidence': '[{"kind":"file"}]'},
+                        )
+                    ],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:fixed',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': 'done',
+                            'answer': 'deliverables are on disk',
+                            'evidence': [],
+                            'remaining_work': [],
+                            'blocking_reason': '',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=5)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-resubmit'),
+        node=SimpleNamespace(node_id='node-resubmit', depth=0, node_kind='execution', goal='demo'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-resubmit","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-resubmit', 'node_id': 'node-resubmit'},
+        max_iterations=5,
+    )
+
+    assert result.status == 'success'
+    assert result.summary == 'done'
+    assert turns == [1, 2]
+    # The rejection reaches the next request, and it carries the contract that was violated.
+    second_request = json.dumps(request_messages[1], ensure_ascii=False)
+    assert 'missing required status' in second_request
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in second_request
+    assert 'delivery_status=string(final|blocked)' in second_request
+
+
+@pytest.mark.asyncio
+async def test_react_loop_trips_final_submission_guard_only_after_the_full_strike_budget() -> None:
+    turns: list[int] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            turns.append(self.turn)
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id=f'call:bad:{self.turn}',
+                        name='submit_final_result',
+                        arguments={'answer': 'still no envelope', 'evidence': '[]'},
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    log_service = _FakeLogService()
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=20)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-budget'),
+        node=SimpleNamespace(node_id='node-budget', depth=0, node_kind='execution', goal='demo'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-budget","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-budget', 'node_id': 'node-budget'},
+        max_iterations=20,
+    )
+
+    assert result.status == 'failed'
+    assert result.delivery_status == 'blocked'
+    assert result.summary == 'final result submission guard triggered'
+    assert len(turns) == _INVALID_FINAL_SUBMISSION_LIMIT
+    assert 'missing required status' in result.blocking_reason
+    frame = log_service.read_runtime_frame('task-budget', 'node-budget')
+    assert int(frame.get('invalid_final_submission_count') or 0) == _INVALID_FINAL_SUBMISSION_LIMIT
 
 
 @pytest.mark.asyncio
