@@ -32,6 +32,7 @@ from main.runtime.subtree_hold import (
     DISTRIBUTION_HOLD_STATES,
     NOTICE_ACTION_RESUME_EXECUTION,
     NOTICE_INTERRUPT_REASON,
+    node_in_target_subtree,
     spawn_entry_child_fully_materialized,
 )
 from main.types import KIND_ACCEPTANCE
@@ -1611,7 +1612,7 @@ class TaskActorService:
             unreleased = self._unreleased_release_ledger(task_id)
             if not unreleased:
                 continue
-            pending_epoch_id, barrier_node_ids = unreleased
+            pending_epoch_id, barrier_node_ids, target_node_ids = unreleased
             try:
                 logger.warning(
                     'distribution release ledger unfinished, re-releasing: task={} epoch={} barrier_nodes={}',
@@ -1621,14 +1622,18 @@ class TaskActorService:
                 )
             except Exception:
                 pass
-            await self._release_scoped_epoch_holds(task_id, barrier_node_ids)
+            await self._release_scoped_epoch_holds(task_id, barrier_node_ids, target_node_ids=target_node_ids)
             # 销账在释放之后：再抛就留给下一轮对账重试，不会既漏释放又反复空跑。
             self._clear_release_pending(task_id, epoch_id=pending_epoch_id)
             touched.append(task_id)
         return touched
 
-    def _unreleased_release_ledger(self, task_id: str) -> tuple[str, list[str]] | None:
-        """最近一个还挂着未销释放账的 epoch（完成序列半路中断的形态）。"""
+    def _unreleased_release_ledger(self, task_id: str) -> tuple[str, list[str], list[str]] | None:
+        """最近一个还挂着未销释放账的 epoch（完成序列半路中断的形态）。
+
+        连同 ``target_node_ids`` 一起回，让重跑的释放能按冻结面（目标子树）宽算，
+        而不是只重放 barrier 快照。
+        """
         epochs = list(self._store.list_active_task_message_distribution_epochs(task_id) or [])
         for epoch in reversed(epochs):
             payload = dict(epoch.payload or {}) if isinstance(epoch.payload, dict) else {}
@@ -1638,7 +1643,12 @@ class TaskActorService:
                 if str(item or '').strip()
             ]
             if barrier:
-                return str(epoch.epoch_id or '').strip(), barrier
+                targets = [
+                    str(item or '').strip()
+                    for item in list(payload.get('target_node_ids') or [])
+                    if str(item or '').strip()
+                ]
+                return str(epoch.epoch_id or '').strip(), barrier, targets
         return None
 
     def _clear_release_pending(self, task_id: str, *, epoch_id: str) -> None:
@@ -1706,13 +1716,25 @@ class TaskActorService:
             refreshed.model_copy(update={'payload': payload})
         )
 
-    async def _release_scoped_epoch_holds(self, task_id: str, barrier_node_ids: list[str]) -> None:
+    async def _release_scoped_epoch_holds(
+        self,
+        task_id: str,
+        barrier_node_ids: list[str],
+        *,
+        target_node_ids: list[str] | None = None,
+    ) -> None:
         """释放子树冻结：对每个 held entry 重跑（meta 已先行清除，hold 谓词关闭）。
 
         A2：每个跳过项落原因；done future 携带未消费异常时把异常打出来——
         父链路已死时这是搁浅异常的唯一痕迹（2026-09-15 孤儿子节点事故 L2）。
         A3：成功复活的节点进入延迟校验清扫，保证"冻结→释放"的终点只能是
         在跑或显式终态/告警，不允许静默 pending。
+
+        释放集 = ``barrier_node_ids`` ∪ 「本进程 entry 落在本 epoch 目标子树内的节点」。
+        只按 barrier 释放是 2026-09-22 task:2311f30ddace 的根因：barrier 由
+        ``live_distribution_tree_node_ids`` 重推，而它对验收节点直接判否，于是沿祖先
+        上溯被冻住的验收子节点整批落在释放面之外——future 永久 pending、零 ERROR、
+        零告警。子树归属复用冻结面同一函数 ``node_in_target_subtree``，两侧不再漂移。
         """
         dispatcher = self._dispatchers.get(task_id)
         if dispatcher is None:
@@ -1721,16 +1743,42 @@ class TaskActorService:
             except Exception:
                 pass
             return
+        candidates = [str(item or '').strip() for item in list(barrier_node_ids or []) if str(item or '').strip()]
+        candidates.extend(self._entry_node_ids_in_target_subtrees(dispatcher, target_node_ids=target_node_ids))
         resumed_node_ids: list[str] = []
-        for raw_node_id in list(barrier_node_ids or []):
-            node_id = str(raw_node_id or '').strip()
-            if not node_id:
-                continue
+        for node_id in dict.fromkeys(candidates):
             outcome = await self._revive_dispatch_entry_for_resume(task_id, dispatcher, node_id)
             if outcome == 'resumed':
                 resumed_node_ids.append(node_id)
         if resumed_node_ids:
             self._schedule_release_verification(task_id, resumed_node_ids)
+
+    def _entry_node_ids_in_target_subtrees(
+        self,
+        dispatcher: 'TaskNodeDispatcher',
+        *,
+        target_node_ids: list[str] | None,
+    ) -> list[str]:
+        """本进程已登记、且落在本 epoch 目标子树内的节点 id（= 冻结面的真实作用集）。
+
+        只认 entry：冻结只可能发生在 ``_run_entry`` 里，无 entry 即无 pending future。
+        正常在跑的 entry 由 ``TaskNodeDispatcher.resume_node`` 自身的双跑保护兜住
+        （协程未停即 no-op），因此这里宽算集合不会重启任何活执行器。
+        """
+        targets = {
+            str(item or '').strip() for item in list(target_node_ids or []) if str(item or '').strip()
+        }
+        if not targets:
+            return []
+        try:
+            entry_ids = [str(node_id or '').strip() for node_id in list(dispatcher._entries) if str(node_id or '').strip()]
+        except Exception:
+            return []
+        return [
+            node_id
+            for node_id in dict.fromkeys(entry_ids)
+            if node_in_target_subtree(get_node=self._store.get_node, node_id=node_id, targets=targets)
+        ]
 
     async def _revive_dispatch_entry_for_resume(
         self,
@@ -2424,7 +2472,7 @@ class TaskActorService:
             blocked=[],
             pending_notice=pending_notice_node_ids,
         )
-        await self._release_scoped_epoch_holds(task_id, barrier_node_ids)
+        await self._release_scoped_epoch_holds(task_id, barrier_node_ids, target_node_ids=targets)
         self._reset_stall_clock(task_id)
         await self._resume_distribution_if_needed(task_id)
         self._clear_release_pending(task_id, epoch_id=epoch_id)

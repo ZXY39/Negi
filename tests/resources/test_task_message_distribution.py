@@ -4530,15 +4530,25 @@ async def test_release_ledger_is_cleared_on_completion_and_repaired_by_reconcile
         )
         actor._dispatchers[record.task_id] = SimpleNamespace()
         released: list[list[str]] = []
+        targets_forwarded: list[list[str] | None] = []
 
-        async def _spy_release(task_id: str, barrier_node_ids: list[str]) -> None:
+        async def _spy_release(
+            task_id: str,
+            barrier_node_ids: list[str],
+            *,
+            target_node_ids: list[str] | None = None,
+        ) -> None:
             released.append(list(barrier_node_ids))
+            targets_forwarded.append(target_node_ids)
 
         actor._release_scoped_epoch_holds = _spy_release
         assert await actor.reconcile_distribution_drivers() == [record.task_id]
         assert released == [[branch_a.node_id]]
         repaired = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
         assert repaired is not None
+        assert targets_forwarded == [
+            list(dict(repaired.payload or {}).get("target_node_ids") or [])
+        ], "对账补跑释放必须带上该 epoch 自己的目标子树，否则冻结面宽算在恢复路径上失效"
         assert list(dict(repaired.payload or {}).get("release_pending") or []) == []
         # 销账后不再反复空跑
         released.clear()

@@ -14,6 +14,9 @@ hold 判定是唯一的冻结真源，被三处检查点共用：
 2. ``blocked_node_ids`` 是入队快照 + 每波重推的并集；为了兜住 drain 期间
    新物化、还没进快照的子孙节点，判定还会沿 ``parent_node_id`` 链实时
    上溯：节点自身是目标、或任一祖先是目标 ⇒ 处于子树内 ⇒ hold。
+   该上溯由 ``node_in_target_subtree`` 单一实现，**释放面复用它**——
+   ``blocked_node_ids`` 按「存活分发树」重推而结构性排除验收节点，只按
+   快照释放会漏掉被冻结的验收子孙（见函数 docstring 引用的事故）。
 3. ``distributing`` 状态下 frontier 成员豁免（它们走分发控制回合而不是
    被冻结），与 ``run_node`` 中「分发分支先于 hold 检查」的顺序互为保险。
 4. 陈旧 meta 防御（A1）：runtime meta 是缓存、epochs 表是权威。调用方可注入
@@ -112,6 +115,31 @@ def make_stale_hold_logger(warn: Callable[[str], None]) -> Callable[[str, str, s
     return _on_stale_hold
 
 
+def node_in_target_subtree(
+    *,
+    get_node: Callable[[str], Any],
+    node_id: str,
+    targets: set[str],
+) -> bool:
+    """节点自身或任一祖先是分发目标 ⇒ 落在该目标的子树内（屏障冻结面）。
+
+    冻结判定与释放判定必须走这同一个函数：``blocked_node_ids`` 是按「存活分发树」
+    重推的，而该集合结构性地排除验收节点，所以只按快照列表释放会把冻结过的
+    验收节点整批漏掉（2026-09-22 task:2311f30ddace：3 个验收节点永久悬空）。
+    """
+    if not targets:
+        return False
+    seen: set[str] = set()
+    current_id = str(node_id or '').strip()
+    while current_id and current_id not in seen:
+        if current_id in targets:
+            return True
+        seen.add(current_id)
+        node = get_node(current_id)
+        current_id = str(getattr(node, 'parent_node_id', '') or '').strip() if node is not None else ''
+    return False
+
+
 def _validated_hold_epoch_id(
     candidate_epoch_id: str,
     *,
@@ -171,20 +199,14 @@ def resolve_subtree_hold_epoch_id(
     targets = _id_set(dist.get('target_node_ids'))
     if not targets:
         return ''
-    seen: set[str] = set()
-    current_id = normalized_node_id
-    while current_id and current_id not in seen:
-        if current_id in targets:
-            return _validated_hold_epoch_id(
-                epoch_id,
-                node_id=normalized_node_id,
-                get_epoch_state=get_epoch_state,
-                on_stale_hold=on_stale_hold,
-            )
-        seen.add(current_id)
-        node = get_node(current_id)
-        current_id = str(getattr(node, 'parent_node_id', '') or '').strip() if node is not None else ''
-    return ''
+    if not node_in_target_subtree(get_node=get_node, node_id=normalized_node_id, targets=targets):
+        return ''
+    return _validated_hold_epoch_id(
+        epoch_id,
+        node_id=normalized_node_id,
+        get_epoch_state=get_epoch_state,
+        on_stale_hold=on_stale_hold,
+    )
 
 
 def spawn_entry_child_fully_materialized(

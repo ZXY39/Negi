@@ -712,6 +712,97 @@ async def test_release_verification_sweep_re_resumes_wedged_entry(monkeypatch: p
     assert not future.done(), "清扫只复活，不伪造结果"
 
 
+@pytest.mark.asyncio
+async def test_release_revives_frozen_acceptance_entry_missing_from_barrier_snapshot() -> None:
+    """释放面必须按冻结面（目标子树）宽算，不能只信 barrier 快照。
+
+    事故形态（2026-09-22 task:2311f30ddace）：屏障目标是任务根，hold 沿祖先上溯
+    把根的验收孙节点一并冻住；但 ``barrier_node_ids`` 经 ``live_distribution_tree_node_ids``
+    重推，而它对验收节点直接判否 ⇒ 该 entry 从未被释放，future 永久 pending、
+    零 ERROR 零告警，根一直等它的验收结论。
+    """
+    service = object.__new__(TaskActorService)
+    service._release_sweeps = {}
+    parent_of = {"node:accept": "node:exec", "node:exec": "node:root", "node:root": ""}
+    service._store = SimpleNamespace(
+        get_node=lambda node_id: SimpleNamespace(
+            status="in_progress",
+            is_paused=False,
+            pause_requested=False,
+            parent_node_id=parent_of.get(str(node_id), ""),
+        ),
+    )
+    service._node_operator_paused = lambda node: False
+
+    loop = asyncio.get_running_loop()
+    entry = SimpleNamespace(
+        node_id="node:accept",
+        future=loop.create_future(),  # 冻结语义：future 保持 pending
+        task=None,
+        role="inspection",
+        interrupt_result=None,
+        queued_counted=False,
+        running_counted=False,
+    )
+    calls: list[str] = []
+
+    async def _resume(node_id: str) -> None:
+        calls.append(str(node_id))
+
+    dispatcher = SimpleNamespace(_entries={"node:accept": entry}, resume_node=_resume)
+    service._dispatchers = {"task:s": dispatcher}
+
+    await service._release_scoped_epoch_holds(
+        "task:s",
+        ["node:root", "node:exec"],  # barrier 快照里没有验收节点
+        target_node_ids=["node:root"],
+    )
+
+    assert calls == ["node:accept"], "被冻结的验收 entry 必须随目标子树一起释放"
+    sweep = service._release_sweeps.get("task:s")
+    assert sweep is not None, "复活项要进 A3 延迟校验"
+    sweep.cancel()
+    service._release_sweeps.pop("task:s", None)
+
+
+@pytest.mark.asyncio
+async def test_release_without_targets_keeps_barrier_only_behavior() -> None:
+    """宽算只在给出目标子树时发生：无 targets 仍是既有的 barrier-only 释放语义。
+
+    与上一条配对——同一个冻结的验收 entry，给了 targets 才复活，说明救活它的是
+    子树归属判定而不是别的路径顺带做的。
+    """
+    service = object.__new__(TaskActorService)
+    service._release_sweeps = {}
+    service._store = SimpleNamespace(
+        get_node=lambda node_id: SimpleNamespace(status="in_progress", is_paused=False, pause_requested=False),
+    )
+    service._node_operator_paused = lambda node: False
+
+    loop = asyncio.get_running_loop()
+    entry = SimpleNamespace(
+        node_id="node:accept",
+        future=loop.create_future(),
+        task=None,
+        role="inspection",
+        interrupt_result=None,
+        queued_counted=False,
+        running_counted=False,
+    )
+    calls: list[str] = []
+
+    async def _resume(node_id: str) -> None:
+        calls.append(str(node_id))
+
+    dispatcher = SimpleNamespace(_entries={"node:accept": entry}, resume_node=_resume)
+    service._dispatchers = {"task:t": dispatcher}
+
+    await service._release_scoped_epoch_holds("task:t", ["node:root", "node:exec"], target_node_ids=None)
+
+    assert calls == [], "barrier 快照里没有该节点就不该动它"
+    assert service._release_sweeps.get("task:t") is None
+
+
 # ---------------------------------------------------------------------------
 # B：resume 命令道与释放道共用同一份 entry 判读——清标志必须留下活执行器
 # ---------------------------------------------------------------------------
