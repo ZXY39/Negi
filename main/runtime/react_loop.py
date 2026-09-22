@@ -7136,10 +7136,24 @@ class ReActToolLoop:
                 continue
             seen.add(path)
             mime_type = str(target.get('mime_type') or payload.get('mime_type') or 'image/png').strip() or 'image/png'
+            display_name = str(target.get('display_name') or Path(path).name).strip() or path
+            # 这里抛出的异常不在工具错误道内，会把整个节点打成 error-pause，模型既拿不到
+            # 工具结果也看不到原因（docs/architecture/tool-and-skill-system.md「单张图问题
+            # 不中断整轮」契约）。缺图/读失败一律降级成文本说明。
+            if not Path(path).expanduser().is_file():
+                blocks.append({'type': 'text', 'text': f'[图片 {display_name} 文件不存在，未能附带]'})
+                continue
+            try:
+                data_url = self._content_open_image_data_url(path=path, mime_type=mime_type)
+            except OSError as exc:
+                blocks.append(
+                    {'type': 'text', 'text': f'[图片 {display_name} 读取失败（{describe_exception(exc)}），未能附带]'}
+                )
+                continue
             blocks.append(
                 {
                     'type': 'image_url',
-                    'image_url': {'url': self._content_open_image_data_url(path=path, mime_type=mime_type)},
+                    'image_url': {'url': data_url},
                 }
             )
         return blocks if len(blocks) > 1 else []

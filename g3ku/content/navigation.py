@@ -863,6 +863,13 @@ class ContentNavigationService:
         resolved_view = self._normalize_view(view)
         if path:
             file_path = self._resolve_workspace_path(path)
+            # 图片 reopen 走这条分支且只读扩展名就返回 ok:True，缺文件时必须在这里失败：
+            # 抛错让 tool 的 except 收成 ok:False 工具错误，绝不允许把不存在的路径交给
+            # 下一轮多模态请求（先例：node:9749c1299074 因此整节点停车）。
+            if not file_path.exists():
+                raise FileNotFoundError(f"path not found: {path}")
+            if not file_path.is_file():
+                raise ValueError(f"path is not a file: {path}")
             mime_type = self._guess_path_mime_type(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")
@@ -883,6 +890,10 @@ class ContentNavigationService:
         normalized_ref = self._normalize_ref(ref)
         if normalized_ref.startswith("path:"):
             file_path = self._resolve_ref_workspace_path(normalized_ref[5:])
+            if not file_path.exists():
+                raise FileNotFoundError(f"path not found: {normalized_ref[5:]}")
+            if not file_path.is_file():
+                raise ValueError(f"path is not a file: {normalized_ref[5:]}")
             mime_type = self._guess_path_mime_type(file_path)
             try:
                 ref_path = str(file_path.relative_to(self._workspace)).replace("\\", "/")

@@ -1016,6 +1016,38 @@ async def test_content_open_image_path_returns_runtime_managed_image_payload(tmp
         manager.close()
 
 
+@pytest.mark.asyncio
+async def test_content_open_image_path_missing_file_returns_tool_error(tmp_path: Path):
+    """不存在的图片路径必须在工具结果里失败，不得返回 ok:True 的待附带承诺。"""
+    workspace = tmp_path / 'workspace'
+    (workspace / 'skills').mkdir(parents=True, exist_ok=True)
+    (workspace / 'tools').mkdir(parents=True, exist_ok=True)
+    shutil.copytree(REPO_ROOT / 'tools' / 'content', workspace / 'tools' / 'content')
+    shutil.copytree(REPO_ROOT / 'tools' / 'content_open', workspace / 'tools' / 'content_open')
+
+    missing_path = workspace / 'hallucinated.png'
+
+    manager = ResourceManager(workspace, app_config=_resource_app_config())
+    manager.reload_now(trigger='test-bind')
+    try:
+        tool = manager.get_tool('content_open')
+        assert tool is not None
+
+        payload = json.loads(
+            await tool.execute(
+                path=str(missing_path),
+                __g3ku_runtime={'image_multimodal_enabled': True, 'provider_model': 'gpt-test'},
+            )
+        )
+
+        assert payload['ok'] is False
+        assert 'path not found' in str(payload['error'])
+        assert str(missing_path) in str(payload['error'])
+        assert 'multimodal_open_pending' not in payload
+    finally:
+        manager.close()
+
+
 def test_content_open_split_tool_schema_only_exposes_line_range_selector(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)

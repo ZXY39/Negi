@@ -3645,6 +3645,62 @@ def test_node_runtime_builds_content_open_image_overlay_message_blocks(tmp_path:
     assert str(blocks[1]['image_url']['url']).startswith('data:image/png;base64,')
 
 
+def test_node_runtime_content_open_image_overlay_degrades_missing_image(tmp_path: Path):
+    """缺图不得抛出：该构造点在工具错误道之外，异常会把整个节点打成 error-pause。"""
+    loop = _react_loop_for_content_open_image_overlay()
+    good_path = tmp_path / 'good.png'
+    good_path.write_bytes(b'\x89PNG\r\n\x1a\nsmall')
+    missing_path = tmp_path / 'hallucinated.png'
+
+    def _payload(path: Path) -> dict:
+        return {
+            'ok': True,
+            'content_kind': 'image',
+            'mime_type': 'image/png',
+            'multimodal_open_pending': True,
+            'runtime_image_target': {
+                'path': str(path),
+                'mime_type': 'image/png',
+                'display_name': path.name,
+            },
+        }
+
+    blocks = loop._content_open_image_overlay_message_blocks(
+        [_payload(missing_path), _payload(good_path)],
+        runtime_context={'image_multimodal_enabled': True},
+    )
+
+    notices = [block for block in blocks if block.get('type') == 'text' and 'hallucinated.png' in str(block.get('text'))]
+    attached = [block for block in blocks if block.get('type') == 'image_url']
+    assert len(notices) == 1
+    assert '文件不存在' in str(notices[0]['text'])
+    assert len(attached) == 1
+    assert str(attached[0]['image_url']['url']).startswith('data:image/png;base64,')
+
+
+def test_node_runtime_content_open_image_overlay_degrades_non_file_image_target(tmp_path: Path):
+    """目标是目录时 is_file() 先挡下，绝不让 IsADirectoryError 走到 read_bytes 之外。"""
+    loop = _react_loop_for_content_open_image_overlay()
+    directory_target = tmp_path / 'not-a-file.png'
+    directory_target.mkdir()
+
+    blocks = loop._content_open_image_overlay_message_blocks(
+        [
+            {
+                'ok': True,
+                'content_kind': 'image',
+                'mime_type': 'image/png',
+                'multimodal_open_pending': True,
+                'runtime_image_target': {'path': str(directory_target), 'mime_type': 'image/png'},
+            }
+        ],
+        runtime_context={'image_multimodal_enabled': True},
+    )
+
+    assert not any(block.get('type') == 'image_url' for block in blocks)
+    assert any('未能附带' in str(block.get('text')) for block in blocks if block.get('type') == 'text')
+
+
 def test_node_runtime_strip_content_open_image_overlay_from_durable_messages() -> None:
     loop = _react_loop_for_content_open_image_overlay()
 

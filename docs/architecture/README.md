@@ -77,6 +77,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-and-skill-system.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
+- 节点 error_text 是不带 `Error executing` 前缀的裸异常（`FileNotFoundError: …png` 一类）而对应工具结果显示 success、或 `content_open` 声称图片已打开却没有进上下文 → `tool-and-skill-system.md`「fixed builtin tools」（图片 reopen 的存在性校验与 overlay 单图降级）
 - Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、模型调用明细按时间倒序/搜索跨全部记录的行为疑问、任务级统计有数字却显示「尚无按模型明细」，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan reaped at task resume` 收尸）→ `runtime-overview.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
