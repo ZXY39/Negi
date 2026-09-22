@@ -938,20 +938,21 @@
     height: auto;
 }
 
-/* 17. 输入区：贴底工具条，与阅读轴共享 960px 宽度 */
+/* 17. 输入区：贴底工具条。脑图标 / 附件 / 输入框 / 发送暂停四个控件同高
+   （42px）、同圆角（--ui-radius-control）、同一条中心线；工具条自身不再画
+   背景与分隔线，控件直接坐在页面背景上。 */
 [data-ui-version="v2"] .chat-input-area {
     position: relative;
     inset: auto;
     transform: none;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    align-items: end;
+    align-items: center;
     gap: var(--ui-space-2) var(--ui-space-3);
     width: 100%;
     padding: 12px var(--ui-space-6) 20px;
-    background: var(--ui-bg-canvas);
+    background: transparent;
     border: 0;
-    border-top: 1px solid var(--ui-border);
     border-radius: 0;
     box-shadow: none;
 }
@@ -966,11 +967,66 @@
     margin: 0;
 }
 
+[data-ui-version="v2"] .ceo-input-row {
+    align-items: center;
+    gap: var(--ui-space-2);
+}
+
+[data-ui-version="v2"] .ceo-input-leading-group {
+    align-self: center;
+    gap: var(--ui-space-2);
+}
+
+[data-ui-version="v2"] #ceo-context-usage-brain,
+[data-ui-version="v2"] #ceo-attach-btn {
+    width: 42px;
+    height: 42px;
+    min-height: 42px;
+    padding: 0;
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] #ceo-context-usage-brain:hover,
+[data-ui-version="v2"] #ceo-attach-btn:hover {
+    background: var(--ui-neutral-soft);
+    border-color: var(--ui-border-strong);
+}
+
+/* 用量环是 conic-gradient 仪表，保持圆形，只缩到能塞进 42px 按钮 */
+[data-ui-version="v2"] #ceo-context-usage-brain .ceo-context-usage-brain-ring {
+    width: 32px;
+    height: 32px;
+    border-radius: 999px;
+}
+
+[data-ui-version="v2"] #ceo-attach-btn svg {
+    width: 18px;
+    height: 18px;
+}
+
 [data-ui-version="v2"] .chat-input-area textarea {
-    min-height: 48px;
+    min-height: 42px;
     max-height: 180px;
-    border-radius: 10px;
+    padding: 10px var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
     background: var(--ui-bg-input);
+    font-size: 13px;
+    line-height: 20px;
+}
+
+[data-ui-version="v2"] #ceo-send-btn {
+    height: 42px;
+    min-height: 42px;
+    padding: 0 var(--ui-space-3);
+    gap: var(--ui-space-2);
+    border: 1px solid transparent;
+    border-radius: var(--ui-radius-control);
+    font-size: 13px;
+    font-weight: 600;
 }
 
 [data-ui-version="v2"] .ceo-approval-viewport,
