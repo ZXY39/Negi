@@ -147,6 +147,7 @@ The browser shell renders one visual system per theme. Theme and layout are fron
 - Every rule in the active layer is rooted at `[data-ui-version="v2"]` on `<html>`, combined with `[data-theme="dark"]` / `[data-theme="light"]` for theme-scoped values. Dropping the `<link>` and the `data-ui-version` attribute returns the page to the legacy appearance.
 - The active layer re-anchors the legacy custom properties (`--bg-app`, `--bg-panel`, `--text-primary`, `--brand-primary`, `--status-*`, `--radius-*`, `--shadow-*`, `--space-*`) onto its own `--ui-*` tokens, so retheming means editing `--ui-*` values rather than chasing component rules. Legacy rules that hardcode a color, radius or shadow instead of consuming those variables still need an active-layer rule of at least equal selector depth.
 - In the legacy file light is the `:root` default and dark is an override set, so both themes carry explicit token blocks. A change checked in one theme is incomplete until the other is checked.
+- The light block changes surfaces only: canvas / surface / elevated / input / subtle, borders, text tiers, shadows and scrim. The accent tiers (`--ui-brand`, `--ui-success`, `--ui-warning`, `--ui-danger`, `--ui-info`, `--ui-running` and their `-soft` fills) plus `--ui-on-brand` are byte-identical to dark, so an accent reads the same in both themes. Consequence to keep in mind: those bright accents are below WCAG AA when used as small text on white (brand ≈1.9:1), which is accepted deliberately — darkening them for one theme is a regression against this rule, not a fix.
 
 ### Theme Persistence
 
@@ -177,6 +178,7 @@ Two collapse systems exist and must not be merged:
 
 - `.ceo-shell` is a two-column grid whose first column is `var(--ui-ceo-session-width)`: 92px collapsed, 288px expanded. A hardcoded `288px` column or `auto` both break the session-panel toggle and are not valid.
 - Feed, message bubbles, composer and status notices fill the chat column edge to edge; the chat page carries no centered reading width, so it blends into the page background instead of floating a narrow column inside wide gutters.
+- A turn bubble whose assistant line is still the loading placeholder shrinks its background to its content (`.msg-content:has(> .assistant-text-loading)` → `width: fit-content`), because transcript rows can keep that placeholder after the turn state has moved on and a full-width gray bubble around eight characters reads as a layout break. `fit-content` sizes to the widest child, so a turn that also carries a stage rail or long text still fills the column. Finalizing a turn clears `assistant-text-loading` and its `role="status"` label for the same reason.
 - Below 768px an expanded session panel leaves the grid flow: `.ceo-shell` drops to a single column so the chat keeps the full width, and the panel overlays it at `min(288px, calc(100vw - 24px))`. Keeping two columns there lets grid auto-placement drop the chat wrapper into the 92px track.
 
 ### Status Color Semantics

@@ -76,9 +76,9 @@
     --ui-on-brand: #04211d;
 }
 
-/* 3. 亮色主题：计划 §4.5 的原始取值在 12px 文字上达不到 AA（muted 3.34、
-   brand 3.30、danger-on-soft 4.15、选中底 vs 白 1.11），这里按同一色相压深，
-   使文字/底色全部 >=4.5、边框与选中底肉眼可分。 */
+/* 3. 亮色主题：只把深灰/黑的表面换成浅色，重点色（brand / success / warning /
+   danger / info / running 及各自的 soft 底）与暗色逐字相同，两个主题的强调色
+   观感一致。代价是这些亮色作小字号文字时达不到 WCAG AA，按操作者要求保留。 */
 [data-ui-version="v2"][data-theme="light"] {
     --ui-bg-canvas: #f4f7f8;
     --ui-bg-surface: #ffffff;
@@ -94,29 +94,29 @@
     --ui-text-muted: #586770;
     --ui-text-disabled: #97a4a9;
 
-    --ui-brand: #0a7266;
-    --ui-brand-hover: #085b52;
-    --ui-brand-soft: #d8efea;
-    --ui-brand-soft-strong: #c4e6de;
+    --ui-brand: #2dc7b5;
+    --ui-brand-hover: #1eae9f;
+    --ui-brand-soft: rgba(45, 199, 181, 0.13);
+    --ui-brand-soft-strong: rgba(45, 199, 181, 0.20);
 
-    --ui-success: #1d7a51;
-    --ui-success-soft: #e5f4eb;
-    --ui-warning: #8f5a12;
-    --ui-warning-soft: #fff3dc;
-    --ui-danger: #b83636;
-    --ui-danger-soft: #fde8e8;
-    --ui-info: #2563c7;
-    --ui-info-soft: #e8f0ff;
-    --ui-running: #6d28d9;
-    --ui-running-soft: #ede9fe;
+    --ui-success: #4dc98a;
+    --ui-success-soft: rgba(77, 201, 138, 0.14);
+    --ui-warning: #e7b75b;
+    --ui-warning-soft: rgba(231, 183, 91, 0.15);
+    --ui-danger: #f27777;
+    --ui-danger-soft: rgba(242, 119, 119, 0.15);
+    --ui-info: #76a9fa;
+    --ui-info-soft: rgba(118, 169, 250, 0.15);
+    --ui-running: #a78bfa;
+    --ui-running-soft: rgba(167, 139, 250, 0.16);
 
     --ui-shadow-sm: 0 1px 3px rgba(31, 41, 55, 0.07);
     --ui-shadow-md: 0 8px 24px rgba(31, 41, 55, 0.10);
     --ui-shadow-dialog: 0 16px 44px rgba(31, 41, 55, 0.18);
 
-    --ui-neutral-soft: #dfe8ea;
+    --ui-neutral-soft: rgba(178, 190, 195, 0.12);
     --ui-scrim: rgba(25, 35, 38, 0.36);
-    --ui-on-brand: #ffffff;
+    --ui-on-brand: #04211d;
 }
 
 /* 5. 旧 token 重定向。org_graph.css 的上千条规则消费的是下面这些变量，
@@ -2116,4 +2116,12 @@
 
 [data-ui-version="v2"] .ui-checkbox-input:disabled ~ * {
     color: var(--ui-text-disabled);
+}
+
+/* 51. 「处理中...」占位回合：气泡背景只包到内容宽度，不铺满整列。
+   转录里残留的占位行拿不到 .ceo-turn-loading-only，只能按内容自身收缩；
+   fit-content 取最宽子项，所以带阶段轨道或长文本的回合照常撑开。 */
+[data-ui-version="v2"] .ceo-turn-message .msg-content:has(> .assistant-text-loading) {
+    width: fit-content;
+    max-width: 100%;
 }

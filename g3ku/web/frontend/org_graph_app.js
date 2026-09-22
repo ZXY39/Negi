@@ -8572,6 +8572,8 @@ function finalizeCeoTurn(text, meta = {}) {
                 turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
                 turn.textEl.classList.remove("pending");
                 turn.textEl.classList.add("markdown-content");
+                turn.textEl.classList.remove("assistant-text-loading");
+                syncCeoAssistantLoadingAria(turn.textEl);
             }
             if (finalTraceContext) {
                 renderCeoStageTraceIntoTurn(turn, finalTraceContext);
@@ -8647,6 +8649,8 @@ function finalizeCeoTurn(text, meta = {}) {
                 turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
                 turn.textEl.classList.remove("pending");
                 turn.textEl.classList.add("markdown-content");
+                turn.textEl.classList.remove("assistant-text-loading");
+                syncCeoAssistantLoadingAria(turn.textEl);
             }
             if (finalTraceContext) {
                 renderCeoStageTraceIntoTurn(turn, finalTraceContext);
