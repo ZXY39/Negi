@@ -202,6 +202,7 @@ async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_
     prompt = str(live_session.prompts[0].content)
     assert "suspected_stall" in prompt
     assert "task_progress(task_id)" in prompt
+    assert "Perf in stall window" in prompt
     assert "stop_tool_execution(task_id)" in prompt
     assert task.task_id in prompt
     assert "may be stalled" in prompt

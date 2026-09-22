@@ -580,6 +580,11 @@ class WebSessionHeartbeatService:
                         if hasattr(service, "_task_stall_runtime_summary")
                         else str((latest.payload or {}).get("runtime_summary_excerpt") or "").strip()
                     ),
+                    "perf_window_summary": (
+                        service._perf_stall_window_summary(baseline_iso)
+                        if hasattr(service, "_perf_stall_window_summary")
+                        else str((latest.payload or {}).get("perf_window_summary") or "").strip()
+                    ),
                 }
             )
             if not latest.payload:
@@ -1061,6 +1066,8 @@ class WebSessionHeartbeatService:
                     "In task_progress output, 'in_progress' only means non-terminal, not actively running;",
                     "only lines with a fresh 运行中/检验中 marker plus a recent 最近活动 time count as executing.",
                     "If the task appears stuck and must be stopped, you may call stop_tool_execution with the task_id.",
+                    "The 'Perf in stall window' line is the worker resource evidence for that window; when it is missing "
+                    "or you need a wider window, load and call perf_inspect(mode=window).",
                     "After any stop decision, explain the likely cause and the next follow-up action.",
                 ]
             )
@@ -1128,6 +1135,9 @@ class WebSessionHeartbeatService:
                 lines.append(f"  Brief: {brief_text}")
                 lines.append(f"  Latest node: {latest_node_summary}")
                 lines.append(f"  Runtime: {runtime_excerpt}")
+                perf_summary = str(payload.get("perf_window_summary") or "").strip()
+                if perf_summary:
+                    lines.append(f"  Perf in stall window: {perf_summary}")
                 lines.append("  Suggested first step: task_progress(task_id)")
                 lines.append("  If needed: stop_tool_execution(task_id)")
                 continue

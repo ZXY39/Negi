@@ -74,6 +74,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
 - 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收段：交接通知与回合尾块只给 ref + 有界摘要）
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
+- 想判断任务停滞是不是资源排队造成、或性能条只看得到「现在」而要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（失速事件已自带一行窗口判读，更长的窗口用 `perf_inspect`）
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
@@ -130,7 +131,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 
 | Topic | Owning doc |
 |---|---|
-| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, distribution / append-notice contract, provider timeout boundary | `runtime-overview.md` |
+| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, distribution / append-notice contract, provider timeout boundary, worker performance history (`perf_samples` sampling, retention, and the shared perf read model) | `runtime-overview.md` |
 | Frontdoor context compression contract (`token_compression` / `stage_compaction`, 阶段收口 `context_visible` 与证据索引回填) | `runtime-overview.md` |
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
 | Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair, node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |

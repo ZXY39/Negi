@@ -316,6 +316,18 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 维护者常见误读：把 `DiskFullError` 当新异常类型去 catch——它继承 `OSError`，既有 `except OSError` 分支自动覆盖；把终态清理当"数据丢失"——被删的只是确定不再使用的中间产物与恢复快照，保留清单与 error_logs / task_events 行保证可回顾性（产出在删除任务时自动导出 deliverables）；把磁盘紧张当"会自动删任务"——磁盘治理没有任何自动任务删除路径，跌破紧急线只做自动暂停与可降级写跳过，任务全删仅用户手动或模型删除工具两条入口；在磁盘满排障时只看 `.g3ku/errors/`——磁盘满期间错误日志本身可能是 0 字节空文件，权威信号是 `write_failure_counts` 与 worker 日志里的 SQLITE_FULL 行；把紧急态下"工具不动了"当卡死——那是 target_limit=0 的排队等待，任务随即被自动暂停，恢复磁盘空间后手动 resume。
 
+## Worker Performance History (perf_samples)
+
+任务大厅顶部性能条的整条数据链——`WorkerPressureMonitor` 每拍（1s）采样的单槽 snapshot、`worker_status` 按 `worker_id` 主键的 UPSERT 行、`SQLiteTaskStore` 的单槽 runtime metrics——只承载"最新值"。覆盖写意味着失速通知（20 分钟量级才送达）到达时，当时是否有压力已经查不出来了。`perf_samples` 表补的就是这个时间维度。
+
+- **写入点是 worker 心跳，不是采样线程**：`WorkerHeartbeatServiceV2` 一拍末尾把本次心跳 payload 里性能条用到的字段（`_PERF_HISTORY_FIELDS` 白名单）追加成一行，节拍门 15s，每写满 240 行顺带按 24h 保留期裁剪。放在心跳侧的理由：这一拍已经在做 `upsert_worker_status` 落库、并且天然携带 `worker_id`；采样线程保持零写入，历史失败绝不放大成心跳丢失或存活日志断供（历史写排在存活金丝雀之后并单独吞异常）。
+- **15s 而不是 1s**：判"停滞是不是性能造成的"只需要知道某段窗口处于哪个档位、队列有没有等待，1s 粒度对结论无增益，却把行数与库体积乘 15。
+- **落库而不是进程内环形缓冲**：web 与 task worker 是两个进程，读端（CEO 工具、失速判读）在 web 进程，跨进程可读依赖的正是这块共享 sqlite（`task_worker_status_outbox` 同前提）；内存缓冲在进程重启后即消失，而"重启后回看昨晚"恰是主用途。
+- **行不是任务作用域**：性能是机器级事实，因此不进 `delete_task` 的级联删除，只随保留期裁剪。
+- **读端只有一份聚合口径**：`MainRuntimeService._perf_sample_stats` 是唯一判读实现，两种渲染共用它——`perf_report()` 给模型（工具契约见 `tool-and-skill-system.md`「fixed builtin tools」表的 `perf_inspect` 行），`_perf_window_brief()` 给失速事件那一行（事件契约见 `heartbeat-system.md`「Task Stall Detection」）。新增消费方不得再写一份档位/队列判读。
+- **必须保住的判读语义**：`Samples=0` 与 `Sampling gap` 表示那段区间没有记录，不等于机器空闲，也不等于性能停滞——读端因此区分"库里从未有过行（跑着的 worker 早于该采样器，需重启）"与"采样中途停了（worker 掉线/未心跳）"。序列最多 40 桶：窗口变长只放大桶宽，报告长度与窗口无关，这是它能安全进上下文的前提。
+- **时间戳口径**：行按 worker 本地时区的 ISO 秒写入（与 `worker_status.updated_at` 同格式），查询锚点先 `.astimezone()` 再做字符串区间比较；带另一偏移的锚点（例如被规范化成 UTC 的失速静默时间）必须先转本地再比，否则整窗漏行。
+
 ## Node-Level Pause and Recovery
 
 `main/runtime/` treats node pause as a node-local control state layered on `NodeRecord.status`. The pause reasons are `manual`, `agent`, and `error`; a paused node remains `status=in_progress` until it resumes or is explicitly failed.

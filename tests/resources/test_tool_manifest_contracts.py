@@ -90,6 +90,7 @@ def test_tool_manifests_match_explicit_parameter_contracts():
         'memory_note',
         'memory_write',
         'model_config',
+        'perf_inspect_cn',
         'task_append_notice_cn',
         'task_delete_cn',
         'task_fetch_cn',
@@ -177,6 +178,7 @@ def test_all_manifest_parameters_have_descriptions():
 def test_task_runtime_resource_tools_are_self_describing_and_not_host_wrapped():
     expected = {
         'create_async_task_cn': ('create_async_task', 'create_async_task'),
+        'perf_inspect_cn': ('perf_inspect', 'perf_inspect_cn'),
         'task_append_notice_cn': ('task_append_notice', 'append_notice_cn'),
         'task_delete_cn': ('task_delete', 'delete_cn'),
         'task_failed_nodes_cn': ('task_failed_nodes', 'failed_nodes_cn'),
@@ -202,6 +204,7 @@ def test_task_runtime_resource_tools_are_self_describing_and_not_host_wrapped():
 def test_task_runtime_resource_tools_do_not_depend_on_host_action_mapper_entries():
     hosted = {
         'create_async_task',
+        'perf_inspect',
         'task_append_notice',
         'task_delete',
         'task_failed_nodes',

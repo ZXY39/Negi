@@ -157,6 +157,9 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
         f"  Latest node: {latest_node_summary}",
         f"  Runtime: {runtime_excerpt}",
     ]
+    perf_summary = _non_empty_text(event.get("perf_window_summary"))
+    if perf_summary:
+        lines.append(f"  Perf in stall window: {perf_summary}")
     paused_nodes = [item for item in list(event.get("paused_nodes") or []) if isinstance(item, dict)]
     if paused_nodes:
         rendered = [

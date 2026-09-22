@@ -47,9 +47,13 @@ class _FakeClock:
 class _FakeHeartbeatStore:
     def __init__(self) -> None:
         self.statuses: list[dict] = []
+        self.perf_samples: list[dict] = []
 
     def upsert_worker_status(self, **_kwargs) -> None:
         self.statuses.append(dict(_kwargs))
+
+    def record_perf_sample(self, **_kwargs) -> None:
+        self.perf_samples.append(dict(_kwargs))
 
     def write_failure_counts(self) -> dict[str, int]:
         return {'disk_full': 1, 'error': 2}

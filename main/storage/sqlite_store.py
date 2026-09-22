@@ -496,6 +496,13 @@ class SQLiteTaskStore:
                 created_at TEXT NOT NULL
             )
             ''',
+            '''
+            CREATE TABLE IF NOT EXISTS perf_samples (
+                sampled_at TEXT PRIMARY KEY,
+                worker_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            )
+            ''',
             'CREATE INDEX IF NOT EXISTS idx_nodes_task_id ON nodes(task_id)',
             'CREATE INDEX IF NOT EXISTS idx_nodes_parent_node_id ON nodes(parent_node_id)',
             'CREATE INDEX IF NOT EXISTS idx_task_node_pauses_task_id ON task_node_pauses(task_id)',
@@ -2439,6 +2446,56 @@ class SQLiteTaskStore:
                 }
             )
         return items
+
+    def record_perf_sample(self, *, sampled_at: str, worker_id: str, payload: dict[str, object]) -> None:
+        self._execute_write(
+            'INSERT OR REPLACE INTO perf_samples(sampled_at, worker_id, payload_json) VALUES (?, ?, ?)',
+            (str(sampled_at or ''), str(worker_id or ''), json.dumps(payload)),
+        )
+
+    def list_perf_samples(self, *, since_iso: str, until_iso: str = '', limit: int = 2000) -> list[dict[str, object]]:
+        sql = 'SELECT sampled_at, worker_id, payload_json FROM perf_samples WHERE sampled_at >= ?'
+        params: list[object] = [str(since_iso or '')]
+        normalized_until = str(until_iso or '').strip()
+        if normalized_until:
+            sql += ' AND sampled_at <= ?'
+            params.append(normalized_until)
+        sql += ' ORDER BY sampled_at ASC LIMIT ?'
+        params.append(max(1, int(limit or 1)))
+        rows = self._fetchall_light(sql, tuple(params))
+        items: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(row['payload_json'])
+            items.append(
+                {
+                    'sampled_at': row['sampled_at'],
+                    'worker_id': row['worker_id'],
+                    'payload': payload if isinstance(payload, dict) else {},
+                }
+            )
+        return items
+
+    def count_perf_samples(self) -> int:
+        row = self._fetchone_light('SELECT COUNT(*) AS total FROM perf_samples')
+        return int(row['total'] if row is not None else 0)
+
+    def newest_perf_sample(self) -> dict[str, object] | None:
+        row = self._fetchone_light('SELECT sampled_at, worker_id, payload_json FROM perf_samples ORDER BY sampled_at DESC LIMIT 1')
+        if row is None:
+            return None
+        payload = json.loads(row['payload_json'])
+        return {
+            'sampled_at': row['sampled_at'],
+            'worker_id': row['worker_id'],
+            'payload': payload if isinstance(payload, dict) else {},
+        }
+
+    def prune_perf_samples(self, *, before_iso: str) -> int:
+        def operation(conn: sqlite3.Connection) -> int:
+            cursor = conn.execute('DELETE FROM perf_samples WHERE sampled_at < ?', (str(before_iso or ''),))
+            return int(cursor.rowcount or 0)
+
+        return int(self._run_write(operation) or 0)
 
     def upsert_task_projection_meta(self, record: TaskProjectionMetaRecord) -> TaskProjectionMetaRecord:
         self._upsert(

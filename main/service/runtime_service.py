@@ -195,6 +195,115 @@ _WORKER_STATE_STALE = 'stale'
 _WORKER_STATE_STOPPED = 'stopped'
 _WORKER_STATE_OFFLINE = 'offline'
 _WORKER_STATUS_TERMINAL_STATES = frozenset({'stopped', 'offline', 'dead'})
+# 性能历史读窗口：判"任务是否因性能停滞"要看过去值，而 worker_status 只有
+# 最新一行。采样侧每 15s 落一行（见 worker_heartbeat_service_v2），这里只做
+# 有界读取 + 降采样渲染，返回体量必须落在上下文内联闸门以下。
+_PERF_REPORT_DEFAULT_WINDOW_MINUTES = 10.0
+_PERF_REPORT_MAX_WINDOW_MINUTES = 1440.0
+_PERF_REPORT_MAX_ROWS = 6000
+# 单样本窗口没有可测步长；按采样周期记一份占用时长，否则 1 个 throttled 样本
+# 会算出 restricted_share=0%，读起来正好是反的。
+_PERF_SAMPLE_INTERVAL_FALLBACK_SECONDS = 15.0
+# 序列行数上限：超过 40 桶时把步长放大到 window/40，所以报告长度与窗口无关。
+_PERF_REPORT_MAX_BUCKETS = 40
+_PERF_TIER_ORDER = ('normal', 'easing', 'throttled', 'critical')
+# 每个统计轴的 (报告标签, 载荷字段, 单位)；序列与统计行共用这一份词表，
+# 避免"少一列"只在渲染处暴露。
+_PERF_STAT_AXES = (
+    ('cpu', 'machine_pressure_cpu_percent', 'percent'),
+    ('mem', 'machine_pressure_memory_percent', 'percent'),
+    ('disk', 'machine_pressure_disk_busy_percent', 'percent'),
+    ('tq_run', 'tool_queue_running_count', 'count'),
+    ('tq_wait', 'tool_queue_waiting_count', 'count'),
+    ('nq_run', 'node_queue_running_count', 'count'),
+    ('nq_wait', 'node_queue_waiting_count', 'count'),
+    ('nq_frozen', 'node_queue_frozen_count', 'count'),
+    ('tq_oldest', 'worker_execution_oldest_wait_ms', 'ms'),
+    ('lag', 'tool_pressure_event_loop_lag_ms', 'ms'),
+    ('db_wait', 'sqlite_write_wait_ms', 'ms'),
+    ('db_query', 'sqlite_query_latency_ms', 'ms'),
+    ('wq', 'tool_pressure_writer_queue_depth', 'count'),
+    ('disk_free', 'machine_disk_free_bytes', 'bytes'),
+    ('tasks', 'active_task_count', 'count'),
+)
+# 序列只画这 8 个轴（其余留给统计行）：一行一桶，列宽固定，模型不用对齐表头。
+_PERF_SERIES_LABELS = ('cpu', 'mem', 'disk', 'tq_run', 'tq_wait', 'nq_run', 'nq_wait', 'lag')
+_PERF_AXIS_KEY = {label: key for label, key, _kind in _PERF_STAT_AXES}
+_PERF_AXIS_KIND = {label: kind for label, _key, kind in _PERF_STAT_AXES}
+_PERF_GROUPED_AXES = (
+    ('Queues', ('tq_run', 'tq_wait', 'tq_oldest', 'nq_run', 'nq_wait', 'nq_frozen', 'tasks')),
+    ('Machine', ('cpu', 'mem', 'disk', 'disk_free')),
+    ('Library', ('db_wait', 'db_query', 'wq', 'lag')),
+)
+
+
+def _perf_number(value: Any, *, drop_negative: bool = False) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric != numeric:
+        return None
+    if drop_negative and numeric < 0.0:
+        return None
+    return numeric
+
+
+def _perf_percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * max(0.0, min(1.0, fraction))
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return float(ordered[lower]) + (float(ordered[upper]) - float(ordered[lower])) * (position - lower)
+
+
+def _perf_axis_text(label: str, kind: str, stats: dict[str, float]) -> str:
+    if kind == 'percent':
+        return f"{label} max={stats['max']:.0f}% p50={stats['p50']:.0f}%"
+    if kind == 'ms':
+        return f"{label} max={_perf_duration_text(stats['max'])} p50={_perf_duration_text(stats['p50'])}"
+    if kind == 'bytes':
+        return f"{label} min={_perf_bytes_text(stats['min'])} last={_perf_bytes_text(stats['last'])}"
+    return f"{label} max={stats['max']:.0f} p50={stats['p50']:.1f}"
+
+
+def _perf_duration_text(milliseconds: float) -> str:
+    value = max(0.0, float(milliseconds or 0.0))
+    if value >= 60000.0:
+        return f'{value / 60000.0:.1f}m'
+    if value >= 1000.0:
+        return f'{value / 1000.0:.1f}s'
+    return f'{value:.0f}ms'
+
+
+def _perf_seconds_text(seconds: float) -> str:
+    value = max(0.0, float(seconds or 0.0))
+    if value >= 60.0:
+        return f'{value / 60.0:.1f}m'
+    return f'{value:.0f}s'
+
+
+def _perf_bytes_text(value: float) -> str:
+    numeric = float(value or 0.0)
+    if numeric >= 1024 ** 3:
+        return f'{numeric / 1024 ** 3:.1f}G'
+    if numeric >= 1024 ** 2:
+        return f'{numeric / 1024 ** 2:.0f}M'
+    return f'{numeric / 1024:.0f}K'
+
+
+def _perf_clock_text(stamp: datetime) -> str:
+    return stamp.astimezone().strftime('%H:%M:%S')
+
+
+def _perf_tiers_text(tier_seconds: dict[str, float]) -> str:
+    ordered = sorted(
+        tier_seconds.items(),
+        key=lambda item: _PERF_TIER_ORDER.index(item[0]) if item[0] in _PERF_TIER_ORDER else 99,
+    )
+    return ' '.join(f'{state}={_perf_seconds_text(seconds)}' for state, seconds in ordered)
 _TASK_RECOVERY_NOTICE_KEY = 'recovery_notice'
 _TASK_RECOVERY_NOTICE_TEXT = '本任务遇到异常停止，已回退到稳定步骤继续。'
 _TASK_RUNTIME_V3_MARKER = '.task-runtime-v3'
@@ -4178,6 +4287,7 @@ class MainRuntimeService:
                 'brief_text': str(getattr(task, 'brief_text', '') or '').strip(),
                 'latest_node_summary': self._task_stall_latest_node_summary(detail),
                 'runtime_summary_excerpt': self._task_stall_runtime_summary(detail),
+                'perf_window_summary': self._perf_stall_window_summary(baseline_iso),
                 'paused_nodes': paused_nodes,
             }
         )
@@ -4236,6 +4346,13 @@ class MainRuntimeService:
                 summary = f'{summary} children_running={running_children}/{len(child_pipelines)}'
             parts.append(summary)
         return '; '.join(parts)[:320]
+
+    def _perf_stall_window_summary(self, baseline_iso: str) -> str:
+        """静默锚点到现在的性能判读，一行；与 perf_inspect 工具同一份聚合口径。"""
+        anchor = self._perf_sample_time(baseline_iso)
+        if anchor is None:
+            return ''
+        return self._perf_window_brief(start_at=anchor, end_at=datetime.now(timezone.utc))[:400]
 
     def _enqueue_task_worker_status_callback(self, payload: dict[str, Any] | None) -> None:
         if self.execution_mode != 'worker':
@@ -10229,6 +10346,319 @@ class MainRuntimeService:
             **summary_stats,
             'debug': dict(merged.get('debug') or {}) if isinstance(merged.get('debug'), dict) else {},
         }
+
+    def perf_report(self, *, mode: Any = '', window_minutes: Any = None) -> str:
+        normalized_mode = str(mode or 'window').strip().lower()
+        if normalized_mode not in {'live', 'window'}:
+            return (
+                "perf_inspect accepts mode='window' (sampled history, the default) or "
+                "mode='live' (current worker snapshot plus that same window)."
+            )
+        if window_minutes in (None, ''):
+            window = _PERF_REPORT_DEFAULT_WINDOW_MINUTES
+        else:
+            parsed_window = _perf_number(window_minutes)
+            if parsed_window is None:
+                return 'perf_inspect window_minutes must be a number of minutes between 1 and 1440.'
+            window = max(1.0, min(parsed_window, _PERF_REPORT_MAX_WINDOW_MINUTES))
+        end_at = datetime.now(timezone.utc)
+        rows = self._perf_sample_rows(start_at=end_at - timedelta(minutes=window), end_at=end_at)
+        if normalized_mode == 'live':
+            return self._render_perf_live_report(rows=rows, window_minutes=window)
+        return self._render_perf_window_report(rows=rows, window_minutes=window)
+
+    def _perf_sample_rows(self, *, start_at: datetime, end_at: datetime) -> list[dict[str, Any]]:
+        raw = self.store.list_perf_samples(
+            since_iso=start_at.astimezone().isoformat(timespec='seconds'),
+            until_iso=end_at.astimezone().isoformat(timespec='seconds'),
+            limit=_PERF_REPORT_MAX_ROWS,
+        )
+        rows: list[dict[str, Any]] = []
+        for item in raw:
+            stamp = self._perf_sample_time(item.get('sampled_at'))
+            if stamp is None or stamp < start_at or stamp > end_at:
+                continue
+            payload = item.get('payload') if isinstance(item.get('payload'), dict) else {}
+            rows.append({'sampled_at': str(item.get('sampled_at') or ''), 'stamp': stamp, 'payload': payload})
+        return rows
+
+    @staticmethod
+    def _perf_sample_time(value: Any) -> datetime | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone(timezone.utc)
+
+    def _perf_sample_stats(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        stamps = [row['stamp'] for row in rows]
+        steps = [(stamps[index + 1] - stamps[index]).total_seconds() for index in range(len(stamps) - 1)]
+        median_step = _perf_percentile(steps, 0.5) if steps else _PERF_SAMPLE_INTERVAL_FALLBACK_SECONDS
+        tier_seconds: dict[str, float] = {}
+        tier_runs: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            owned = steps[index] if index < len(steps) else median_step
+            state = str(row['payload'].get('budget_state') or 'normal').strip().lower() or 'normal'
+            tier_seconds[state] = tier_seconds.get(state, 0.0) + owned
+            run_until = stamps[index + 1] if index + 1 < len(stamps) else stamps[index]
+            if tier_runs and str(tier_runs[-1].get('state') or '') == state:
+                tier_runs[-1]['until'] = run_until
+                tier_runs[-1]['seconds'] = float(tier_runs[-1].get('seconds') or 0.0) + owned
+            else:
+                tier_runs.append({'state': state, 'since': stamps[index], 'until': run_until, 'seconds': owned})
+        gap_threshold = max(45.0, median_step * 3.0)
+        gaps = [
+            {'since': stamps[index], 'until': stamps[index + 1], 'seconds': step}
+            for index, step in enumerate(steps)
+            if step > gap_threshold
+        ]
+        axes: dict[str, dict[str, float]] = {}
+        for label, key, kind in _PERF_STAT_AXES:
+            values: list[float] = []
+            for row in rows:
+                payload = row['payload']
+                if label == 'disk' and not bool(payload.get('machine_pressure_disk_busy_available', True)):
+                    continue
+                numeric = _perf_number(payload.get(key), drop_negative=kind == 'bytes')
+                if numeric is None:
+                    continue
+                values.append(numeric)
+            if not values:
+                continue
+            axes[label] = {
+                'max': max(values),
+                'min': min(values),
+                'p50': _perf_percentile(values, 0.5),
+                'last': values[-1],
+            }
+        restricted = sum(seconds for state, seconds in tier_seconds.items() if state != 'normal')
+        disk_emergency_seconds = sum(
+            (steps[index] if index < len(steps) else median_step)
+            for index, row in enumerate(rows)
+            if bool(row['payload'].get('disk_emergency_active'))
+        )
+        return {
+            'sample_count': len(rows),
+            'first': stamps[0] if stamps else None,
+            'last': stamps[-1] if stamps else None,
+            'median_step': median_step,
+            'tier_seconds': tier_seconds,
+            'tier_runs': tier_runs,
+            'gaps': gaps,
+            'gap_threshold': gap_threshold,
+            'axes': axes,
+            'restricted_seconds': restricted,
+            'covered_seconds': sum(tier_seconds.values()),
+            'machine_available_samples': sum(1 for row in rows if bool(row['payload'].get('machine_pressure_available'))),
+            'disk_emergency_seconds': disk_emergency_seconds,
+        }
+
+    def _perf_series_buckets(self, rows: list[dict[str, Any]], *, window_minutes: float) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        bucket_seconds = max(60.0, (float(window_minutes) * 60.0) / float(_PERF_REPORT_MAX_BUCKETS))
+        origin = rows[0]['stamp']
+        buckets: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        for row in rows:
+            index = int((row['stamp'] - origin).total_seconds() // bucket_seconds)
+            if current is None or int(current['index']) != index:
+                current = {
+                    'index': index,
+                    'since': row['stamp'],
+                    'peaks': {},
+                    'state': 'normal',
+                    'state_rank': _PERF_TIER_ORDER.index('normal'),
+                }
+                buckets.append(current)
+            payload = row['payload']
+            for label in _PERF_SERIES_LABELS:
+                numeric = _perf_number(payload.get(_PERF_AXIS_KEY.get(label, '')))
+                if numeric is None:
+                    continue
+                peaks = current['peaks']
+                peaks[label] = max(numeric, float(peaks.get(label) or 0.0))
+            state = str(payload.get('budget_state') or 'normal').strip().lower() or 'normal'
+            rank = _PERF_TIER_ORDER.index(state) if state in _PERF_TIER_ORDER else -1
+            if rank >= int(current['state_rank']):
+                current['state_rank'] = rank
+                current['state'] = state
+        return buckets
+
+    def _perf_axis_lines(self, stats: dict[str, Any]) -> list[str]:
+        axes = stats['axes']
+        # 缺轴直接不出现，不用 '--' 占位：占位会被读成"测到了 0"。
+        lines: list[str] = []
+        for title, labels in _PERF_GROUPED_AXES:
+            parts = [
+                _perf_axis_text(label, _PERF_AXIS_KIND[label], axes[label])
+                for label in labels
+                if label in axes
+            ]
+            if parts:
+                lines.append(f'{title}: ' + ' | '.join(parts))
+        if stats['machine_available_samples'] and stats['machine_available_samples'] < stats['sample_count']:
+            lines.append(
+                f"Machine metrics unavailable in {stats['sample_count'] - stats['machine_available_samples']}"
+                f"/{stats['sample_count']} samples (cpu/mem/disk read as 0 there, not measured)."
+            )
+        return lines
+
+    def _render_perf_window_report(self, *, rows: list[dict[str, Any]], window_minutes: float) -> str:
+        lines = [f'Perf window: {window_minutes:g}m requested.']
+        if not rows:
+            lines.append('Samples=0 means nothing was recorded in this window, NOT that the machine was idle.')
+            lines.extend(self._perf_coverage_lines())
+            return '\n'.join(lines)
+        stats = self._perf_sample_stats(rows)
+        lines.append(
+            f"Samples: {stats['sample_count']} from {_perf_clock_text(stats['first'])} to {_perf_clock_text(stats['last'])}, "
+            f"step={_perf_seconds_text(stats['median_step'])}."
+        )
+        covered = float(stats['covered_seconds'] or 0.0)
+        share = (float(stats['restricted_seconds']) / covered * 100.0) if covered > 0.0 else 0.0
+        lines.append(f"Tiers: {_perf_tiers_text(stats['tier_seconds'])} | restricted_share={share:.0f}% of sampled time.")
+        runs = [run for run in stats['tier_runs'] if str(run['state']) != 'normal']
+        if runs:
+            rendered = [
+                f"{run['state']} {_perf_clock_text(run['since'])}->{_perf_clock_text(run['until'])} ({_perf_seconds_text(run['seconds'])})"
+                for run in runs[-8:]
+            ]
+            lines.append('Pressure runs: ' + '; '.join(rendered))
+        else:
+            lines.append('Pressure runs: none - the tool budget stayed unrestricted for the whole window.')
+        lines.extend(self._perf_axis_lines(stats))
+        if float(stats['disk_emergency_seconds']) > 0.0:
+            lines.append(
+                f"Disk emergency: held for {_perf_seconds_text(stats['disk_emergency_seconds'])} - the tool budget was "
+                'hard-gated to zero there, so waiting calls were waiting on disk, not on the model.'
+            )
+        if stats['gaps']:
+            rendered = [
+                f"{_perf_clock_text(gap['since'])}->{_perf_clock_text(gap['until'])} ({_perf_seconds_text(gap['seconds'])})"
+                for gap in stats['gaps'][-10:]
+            ]
+            lines.append(
+                f"Sampling gaps > {_perf_seconds_text(stats['gap_threshold'])}: {len(stats['gaps'])} ({'; '.join(rendered)}). "
+                'A gap means the worker recorded nothing there, so it cannot be read as idle.'
+            )
+        buckets = self._perf_series_buckets(rows, window_minutes=window_minutes)
+        lines.append('Series (worst value per bucket): ' + ' '.join(['ts'] + list(_PERF_SERIES_LABELS) + ['state']))
+        for bucket in buckets:
+            peaks = bucket['peaks']
+            cells = [_perf_clock_text(bucket['since'])]
+            for label in _PERF_SERIES_LABELS:
+                value = peaks.get(label)
+                cells.append('--' if value is None else f'{value:.0f}')
+            cells.append(str(bucket['state']))
+            lines.append(' '.join(cells))
+        return '\n'.join(lines)
+
+    def _render_perf_live_report(self, *, rows: list[dict[str, Any]], window_minutes: float) -> str:
+        payload = self.worker_status_payload()
+        lines = ['Perf now (live worker snapshot):']
+        lines.append(
+            f"Worker: state={payload.get('worker_state')} last_heartbeat={payload.get('worker_last_seen_at') or '-'} "
+            f"heartbeat_age_ms={payload.get('worker_heartbeat_age_ms')} snapshot_fresh={payload.get('pressure_snapshot_fresh')}"
+        )
+        if not payload.get('machine_pressure_available'):
+            lines.append('Machine: not measured (machine_pressure_available=false) - do not read the zeroed cpu/mem/disk as idle.')
+        free_bytes = _perf_number(payload.get('machine_disk_free_bytes'), drop_negative=True)
+        lines.append(
+            "Queues: "
+            f"tool_running={payload.get('tool_queue_running_count')}/{payload.get('tool_pressure_target_limit')} "
+            f"tool_waiting={payload.get('tool_queue_waiting_count')} "
+            f"oldest_tool_wait={_perf_duration_text(payload.get('worker_execution_oldest_wait_ms') or 0)} "
+            f"node_running={payload.get('node_queue_running_count')} "
+            f"node_waiting={payload.get('node_queue_waiting_count')} "
+            f"node_oldest_wait={_perf_duration_text(payload.get('node_queue_oldest_wait_ms') or 0)}"
+        )
+        lines.append(
+            f"Machine: cpu={payload.get('machine_pressure_cpu_percent')}% mem={payload.get('machine_pressure_memory_percent')}% "
+            f"disk_busy={payload.get('machine_pressure_disk_busy_percent')}% "
+            f"disk_free={_perf_bytes_text(free_bytes) if free_bytes is not None else 'unknown'} "
+            f"disk_emergency={bool(payload.get('disk_emergency_active'))} "
+            f"sqlite_write_wait={_perf_duration_text(payload.get('sqlite_write_wait_ms') or 0)} "
+            f"sqlite_query={_perf_duration_text(payload.get('sqlite_query_latency_ms') or 0)} "
+            f"event_loop_lag={_perf_duration_text(payload.get('tool_pressure_event_loop_lag_ms') or 0)}"
+        )
+        lines.append(
+            f"Tiers: budget={payload.get('budget_state')} machine={payload.get('machine_pressure_state')} "
+            f"local={payload.get('local_pressure_state')} throttled_since={payload.get('tool_pressure_throttled_since') or '-'} "
+            f"critical_since={payload.get('tool_pressure_critical_since') or '-'} sample_at={payload.get('pressure_sample_at') or '-'}"
+        )
+        lines.append('')
+        lines.append(self._render_perf_window_report(rows=rows, window_minutes=window_minutes))
+        return '\n'.join(lines)
+
+    def _perf_coverage_lines(self) -> list[str]:
+        total = int(self.store.count_perf_samples())
+        if total <= 0:
+            return [
+                'Perf table: rows_total=0.',
+                'Cause: the worker perf sampler never wrote a row - the running worker process predates it, '
+                'so a worker restart is required before history exists.',
+            ]
+        newest = self.store.newest_perf_sample() or {}
+        lines = [f'Perf table: rows_total={total}.']
+        newest_stamp = self._perf_sample_time(newest.get('sampled_at'))
+        if newest_stamp is None:
+            return lines
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - newest_stamp).total_seconds())
+        lines.append(
+            f"Newest sample: {newest.get('sampled_at')} age={_perf_seconds_text(age_seconds)} "
+            f"worker_id={newest.get('worker_id') or '-'}."
+        )
+        if age_seconds > 90.0:
+            lines.append('Cause: sampling stopped at that point - the worker process was down, paused, or not heartbeating.')
+        return lines
+
+    def _perf_coverage_brief(self) -> str:
+        """失速事件用的短版覆盖说明：只回答"为什么没有样本"，不铺开成多行。"""
+        total = int(self.store.count_perf_samples())
+        if total <= 0:
+            return 'no perf samples ever recorded - the running worker predates the sampler'
+        newest_stamp = self._perf_sample_time((self.store.newest_perf_sample() or {}).get('sampled_at'))
+        if newest_stamp is None:
+            return f'no perf samples in window (rows_total={total})'
+        age_seconds = max(0.0, (datetime.now(timezone.utc) - newest_stamp).total_seconds())
+        if age_seconds > 90.0:
+            return f'perf sampling stopped {_perf_seconds_text(age_seconds)} ago - the worker was down or not heartbeating'
+        return f'no perf samples in window (rows_total={total})'
+
+    def _perf_window_brief(self, *, start_at: datetime, end_at: datetime) -> str:
+        """失速窗口的一行性能判读，与 perf_inspect 共用同一份聚合口径。"""
+        rows = self._perf_sample_rows(start_at=start_at, end_at=end_at)
+        if not rows:
+            return f'perf: {self._perf_coverage_brief()}'
+        stats = self._perf_sample_stats(rows)
+        axes = stats['axes']
+        parts = [f"perf samples={stats['sample_count']}", _perf_tiers_text(stats['tier_seconds'])]
+        for label in ('tq_wait', 'tq_oldest', 'nq_wait', 'cpu', 'mem', 'disk', 'db_wait', 'lag'):
+            axis = axes.get(label)
+            if not axis:
+                continue
+            kind = _PERF_AXIS_KIND[label]
+            if kind == 'percent':
+                parts.append(f'{label} max={axis["max"]:.0f}%')
+            elif kind == 'ms':
+                parts.append(f'{label} max={_perf_duration_text(axis["max"])}')
+            elif kind == 'bytes':
+                parts.append(f'{label} min={_perf_bytes_text(axis["min"])}')
+            else:
+                parts.append(f'{label} max={axis["max"]:.0f}')
+        if stats['gaps']:
+            parts.append(f'sampling gaps={len(stats["gaps"])} (largest {_perf_seconds_text(max(gap["seconds"] for gap in stats["gaps"]))})')
+        if float(stats['disk_emergency_seconds']) > 0.0:
+            parts.append(f'disk_emergency={_perf_seconds_text(stats["disk_emergency_seconds"])}')
+        if float(stats['restricted_seconds']) <= 0.0 and not stats['gaps']:
+            parts.append('no resource restriction in this window, so the silence was not perf-caused')
+        return '; '.join(parts)
 
     def _clamp_depth(self, requested: int | None) -> int:
         if requested is None:

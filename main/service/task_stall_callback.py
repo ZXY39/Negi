@@ -141,6 +141,9 @@ def normalize_task_stall_payload(payload: dict[str, Any] | None) -> dict[str, An
         "runtime_summary_excerpt": str(
             source.get("runtime_summary_excerpt") or source.get("runtimeSummaryExcerpt") or ""
         ).strip(),
+        "perf_window_summary": str(
+            source.get("perf_window_summary") or source.get("perfWindowSummary") or ""
+        ).strip()[:400],
         "paused_nodes": [
             {
                 "node_id": str(item.get("node_id") or item.get("nodeId") or "").strip(),

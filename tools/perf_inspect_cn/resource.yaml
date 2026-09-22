@@ -1,0 +1,62 @@
+schema_version: 1
+kind: tool
+display_name: "性能记录查看工具"
+name: perf_inspect
+description: >-
+  Read the worker performance record that the task hall header shows: pressure tier, CPU/memory/disk,
+  tool and node queue waits, SQLite latency. Judging rules for the returned report:
+  'Samples: 0' or a listed 'Sampling gap' means the worker recorded NOTHING in that span - it is not
+  evidence the machine was idle, and it is not evidence of a perf stall either; report it as missing
+  coverage. 'restricted_share=0%' plus no gaps means the silence was not perf-caused, so keep looking
+  at node/tool logic instead. Non-zero 'tq_wait'/'nq_wait' or 'Pressure runs' entries mean calls were
+  actually queued at that clock time, which is the evidence needed to blame performance.
+tool_result_delivery_contract: runtime_managed
+source:
+  type: ''
+  url: ''
+  ref: ''
+current_version:
+  summary: >-
+    Resource-local task runtime tool. Reads the perf_samples history written by the worker heartbeat
+    (15s cadence, 24h retention) plus the live worker-status snapshot, and renders a bounded report
+    used to decide whether a stalled task was resource-caused or logic-caused.
+  compare_rule: Treat manifest, main/, parameter contract, or returned payload changes as version-relevant.
+  source_of_truth: resource.yaml, main/, and toolskills together define the effective behavior.
+requires:
+  tools: []
+  bins: []
+  env: []
+permissions:
+  network: false
+  filesystem: []
+parameters:
+  type: object
+  properties:
+    mode:
+      type: string
+      enum: [window, live]
+      description: >-
+        `window` = downsampled history for the requested window only; `live` = the worker's current
+        snapshot (queue counts, tier, since-when timestamps) followed by the same window report.
+    window_minutes:
+      type: integer
+      description: >-
+        How far back to read, 1-1440 minutes, default 10. The series is always rendered as at most 40
+        buckets, so a longer window widens the bucket step instead of the output.
+  required: [mode]
+governance:
+  family: task_runtime
+  display_name: Task Runtime
+  description: Inspect worker performance history.
+  actions:
+    - id: perf_inspect_cn
+      label: Perf Inspect
+      risk_level: low
+      destructive: false
+      allowed_roles:
+        - ceo
+exposure:
+  agent: true
+  main_runtime: false
+toolskill:
+  enabled: true
