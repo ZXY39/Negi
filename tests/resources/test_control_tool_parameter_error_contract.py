@@ -9,6 +9,7 @@ only to "recheck the parameters".
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from g3ku.agent.tools.base import Tool
@@ -127,3 +128,131 @@ def test_append_guidance_is_idempotent_and_keeps_the_original_error_first() -> N
     assert once.startswith('Error: missing required status')
     assert CONTRACT_PREFIX in once
     assert once == twice
+
+
+# --- ②：未识别参数名的因果提示（校验器静默放过多余键）-------------------------
+
+
+def test_unrecognized_key_is_named_with_a_near_miss_suggestion() -> None:
+    tool = _SchemaTool(
+        name='demo',
+        schema={
+            'type': 'object',
+            'properties': {'value': {'type': 'string'}, 'mode': {'type': 'string'}},
+            'required': ['value'],
+        },
+    )
+
+    guidance = parameter_error_guidance('demo', tool=tool, arguments={'valu': 'x'})
+
+    assert '本次提交中该工具不接受这些参数名：valu→value?' in guidance
+
+
+def test_unrecognized_key_without_a_close_match_is_still_named() -> None:
+    tool = _SchemaTool(
+        name='demo',
+        schema={'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value']},
+    )
+
+    guidance = parameter_error_guidance('demo', tool=tool, arguments={'zzz': 1})
+
+    assert '本次提交中该工具不接受这些参数名：zzz' in guidance
+    assert '→' not in guidance
+
+
+def test_no_unrecognized_hint_when_every_submitted_key_is_defined() -> None:
+    tool = _SchemaTool(
+        name='demo',
+        schema={'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value']},
+    )
+
+    guidance = parameter_error_guidance('demo', tool=tool, arguments={'value': 'x'})
+
+    assert '不接受这些参数名' not in guidance
+
+
+def test_control_tool_error_carries_both_cause_and_contract() -> None:
+    """事故形态：缺 envelope 字段 + evidence 写成串 → 原因在前、契约在后。"""
+    tool = _submit_tool()
+    text = append_parameter_error_guidance(
+        'Error: missing required status',
+        tool_name=tool.name,
+        tool=tool,
+        arguments={'answer': 'a', 'evidence': '[]', 'anwer': 'typo'},
+    )
+
+    assert 'anwer→answer?' in text
+    assert CONTRACT_PREFIX in text
+    assert text.index('anwer→answer?') < text.index(CONTRACT_PREFIX)
+
+
+# --- ①：说明文档指针三分支 --------------------------------------------------
+
+
+def _resource_tool(tmp_path, *, with_toolskill: bool):
+    tool = _SchemaTool(
+        name='filesystem_write',
+        schema={'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path']},
+    )
+    path = None
+    if with_toolskill:
+        path = tmp_path / 'toolskill.md'
+        path.write_text('# contract', encoding='utf-8')
+    tool._descriptor = SimpleNamespace(toolskill_main_path=path, toolskills_main_path=path)  # type: ignore[attr-defined]
+    return tool, str(path or '')
+
+
+def test_hydrated_resource_tool_is_pointed_at_content_open_not_load_tool_context(tmp_path) -> None:
+    tool, path = _resource_tool(tmp_path, with_toolskill=True)
+
+    guidance = parameter_error_guidance(
+        'filesystem_write',
+        tool=tool,
+        runtime_context={'hydrated_executor_names': ['filesystem_write']},
+    )
+
+    assert 'content_open' in guidance
+    assert path in guidance
+    assert 'load_tool_context(tool_id=' not in guidance
+
+
+def test_not_yet_hydrated_resource_tool_keeps_the_load_pointer(tmp_path) -> None:
+    tool, _path = _resource_tool(tmp_path, with_toolskill=True)
+
+    guidance = parameter_error_guidance(
+        'filesystem_write',
+        tool=tool,
+        runtime_context={'hydrated_executor_names': []},
+    )
+
+    assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')
+
+
+def test_acceptance_content_ref_allowlist_suppresses_the_content_open_pointer(tmp_path) -> None:
+    """验收节点白名单下不承诺外开路径，否则指针自己会被闸门拒。"""
+    tool, path = _resource_tool(tmp_path, with_toolskill=True)
+
+    guidance = parameter_error_guidance(
+        'filesystem_write',
+        tool=tool,
+        runtime_context={
+            'hydrated_executor_names': ['filesystem_write'],
+            'enforce_content_ref_allowlist': True,
+            'allowed_content_refs': [],
+        },
+    )
+
+    assert path not in guidance
+    assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')
+
+
+def test_missing_toolskill_file_falls_back_to_the_load_pointer(tmp_path) -> None:
+    tool, _path = _resource_tool(tmp_path, with_toolskill=False)
+
+    guidance = parameter_error_guidance(
+        'filesystem_write',
+        tool=tool,
+        runtime_context={'hydrated_executor_names': ['filesystem_write']},
+    )
+
+    assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')

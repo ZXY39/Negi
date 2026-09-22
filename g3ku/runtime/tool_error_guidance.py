@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import difflib
+from pathlib import Path
 from typing import Any
 
 PARAMETER_ERROR_GUIDANCE_TEMPLATE = (
     '请先调用 load_tool_context(tool_id="{tool_name}") 查看该工具的详细说明、参数契约和示例后，再重新使用该工具。'
+)
+
+# 说明已在本轮上下文里的工具不能被再引导去 load_tool_context——同版本重复读取会被
+# 守卫拒绝（节点道与 frontdoor 的「禁止重复读取」），指针于是指向一条必死调用。
+# 这种情形改为给出 toolskill 文件路径，让模型用 content_open 定点读需要的那一段。
+PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE = (
+    '该工具的说明已在本轮上下文中，重复 load_tool_context 会被拒绝。'
+    '请改用 content_open(path="{path}") 查看参数契约与示例后再重新提交。'
 )
 
 # 没有可加载契约文档的工具（如内部控制工具：无资源 descriptor / toolskill）不能
@@ -19,6 +29,9 @@ _PARAMETER_CONTRACT_OPTIONAL_PREFIX = '。可选：'
 # 契约文本随每条参数错误进上下文，必须有界；控制工具的 schema 很小，超限即视为
 # 渲染不适用于该工具，退回泛化提醒而不是截断出一份自相矛盾的契约。
 _PARAMETER_CONTRACT_MAX_CHARS = 800
+_UNRECOGNIZED_KEYS_PREFIX = '本次提交中该工具不接受这些参数名：'
+_UNRECOGNIZED_KEYS_SUFFIX = '；它们不会进入该工具，请改用上方契约里的参数名。'
+_UNRECOGNIZED_KEYS_MAX = 5
 
 
 def tool_supports_context_load(tool: Any) -> bool:
@@ -115,18 +128,118 @@ def _render_parameter_contract(tool: Any) -> str:
         return ""
 
 
-def parameter_error_guidance(tool_name: str, *, tool: Any | None = None) -> str:
-    normalized_tool_name = str(tool_name or "").strip()
-    if not normalized_tool_name:
+def _schema_properties(tool: Any) -> dict[str, Any]:
+    try:
+        schema = getattr(tool, "parameters", None)
+        if not isinstance(schema, dict):
+            return {}
+        properties = schema.get("properties")
+        return properties if isinstance(properties, dict) else {}
+    except Exception:
+        return {}
+
+
+def _render_unrecognized_keys_hint(tool: Any, arguments: Any) -> str:
+    """Name the parameters the schema does not define, with near-miss suggestions.
+
+    校验器只遍历 schema 认识的键、多余键静默放过，所以键名拼错的表象是
+    "missing required X" 而不是"你把 X 拼错了"：模型看不出因果，只能整段重写。
+    本提示不改变校验结论（这些键今天同样被忽略），只补因果。
+    """
+    properties = _schema_properties(tool)
+    if not properties or not isinstance(arguments, dict):
         return ""
-    if tool is not None and not tool_supports_context_load(tool):
-        return _render_parameter_contract(tool) or PARAMETER_RECHECK_GUIDANCE_TEMPLATE
+    known = [str(name) for name in properties]
+    unknown = [str(name) for name in arguments if str(name).strip() and str(name) not in properties]
+    if not unknown:
+        return ""
+    parts: list[str] = []
+    for name in unknown[:_UNRECOGNIZED_KEYS_MAX]:
+        near = difflib.get_close_matches(name, known, n=1, cutoff=0.6)
+        parts.append(f"{name}→{near[0]}?" if near else name)
+    if len(unknown) > _UNRECOGNIZED_KEYS_MAX:
+        parts.append(f"等 {len(unknown)} 个")
+    return _UNRECOGNIZED_KEYS_PREFIX + "、".join(parts) + _UNRECOGNIZED_KEYS_SUFFIX
+
+
+def _toolskill_path(tool: Any) -> str:
+    try:
+        path = getattr(getattr(tool, "_descriptor", None), "toolskills_main_path", None)
+        if path is None:
+            return ""
+        text = str(path).strip()
+        if not text:
+            return ""
+        return text if Path(text).exists() else ""
+    except Exception:
+        return ""
+
+
+def _tool_context_names(runtime_context: Any, *keys: str) -> set[str]:
+    if not isinstance(runtime_context, dict):
+        return set()
+    names: set[str] = set()
+    for key in keys:
+        value = runtime_context.get(key)
+        if isinstance(value, (list, tuple, set)):
+            names.update(str(item or "").strip() for item in value if str(item or "").strip())
+    return names
+
+
+def _parameter_repair_pointer(tool_name: str, *, tool: Any, runtime_context: Any) -> str:
+    """说明文档指针三分支：已在上下文 → content_open 定点读；否则 → load_tool_context。"""
+    normalized_tool_name = str(tool_name or "").strip()
+    path = _toolskill_path(tool) if tool is not None else ""
+    hydrated = _tool_context_names(runtime_context, "hydrated_executor_names", "hydrated_tool_names")
+    # 验收节点带 content ref 白名单（react_loop 的 enforce_content_ref_allowlist）：
+    # 承诺一个可能被闸门拒的读取路径等于又造一条必死指针，故退回加载模板。
+    allowlist_enforced = bool(
+        isinstance(runtime_context, dict) and runtime_context.get("enforce_content_ref_allowlist")
+    )
+    if path and normalized_tool_name in hydrated and not allowlist_enforced:
+        return PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE.format(path=path)
     return PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name=normalized_tool_name)
 
 
-def append_parameter_error_guidance(message: str, *, tool_name: str, tool: Any | None = None) -> str:
+def parameter_error_guidance(
+    tool_name: str,
+    *,
+    tool: Any | None = None,
+    arguments: Any = None,
+    runtime_context: Any = None,
+) -> str:
+    """Compose the repair material for a tool parameter error.
+
+    顺序固定为「本次错在哪」在前、「去哪儿看契约」在后：前者解释这一跳为什么失败，
+    后者只是取材料的路径；只有指针而没有前者时，模型知道自己要重读却不知该改什么。
+    """
+    normalized_tool_name = str(tool_name or "").strip()
+    hint = _render_unrecognized_keys_hint(tool, arguments) if tool is not None else ""
+    if not normalized_tool_name:
+        return hint
+    if tool is not None and not tool_supports_context_load(tool):
+        body = _render_parameter_contract(tool) or PARAMETER_RECHECK_GUIDANCE_TEMPLATE
+    else:
+        body = _parameter_repair_pointer(normalized_tool_name, tool=tool, runtime_context=runtime_context)
+    guidance = "\n".join([item for item in (hint, body) if item])
+    return guidance or body
+
+
+def append_parameter_error_guidance(
+    message: str,
+    *,
+    tool_name: str,
+    tool: Any | None = None,
+    arguments: Any = None,
+    runtime_context: Any = None,
+) -> str:
     text = str(message or "").strip()
-    guidance = parameter_error_guidance(tool_name, tool=tool)
+    guidance = parameter_error_guidance(
+        tool_name,
+        tool=tool,
+        arguments=arguments,
+        runtime_context=runtime_context,
+    )
     if not guidance:
         return text
     if guidance in text:
@@ -143,6 +256,7 @@ def is_parameter_like_tool_exception(exc: BaseException | None) -> bool:
 __all__ = [
     "PARAMETER_ERROR_GUIDANCE_TEMPLATE",
     "PARAMETER_RECHECK_GUIDANCE_TEMPLATE",
+    "PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE",
     "append_parameter_error_guidance",
     "is_parameter_like_tool_exception",
     "parameter_error_guidance",

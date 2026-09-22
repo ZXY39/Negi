@@ -704,6 +704,8 @@ class CeoFrontDoorSupport:
                 f"Error validating {tool_name}: {exc}",
                 tool_name=tool_name,
                 tool=tool,
+                arguments=normalized_arguments,
+                runtime_context=runtime_context,
             )
             error_text = self._append_contract_error_example(error_text, tool_name=tool_name)
             return error_text, error_text, "error", "", "", None
@@ -712,6 +714,8 @@ class CeoFrontDoorSupport:
                 f"Error: {'; '.join(errors)}",
                 tool_name=tool_name,
                 tool=tool,
+                arguments=normalized_arguments,
+                runtime_context=runtime_context,
             )
             error_text = self._append_contract_error_example(error_text, tool_name=tool_name)
             return error_text, error_text, "error", "", "", None
@@ -831,6 +835,8 @@ class CeoFrontDoorSupport:
                     error_text,
                     tool_name=tool_name,
                     tool=tool,
+                    arguments=normalized_arguments,
+                    runtime_context=runtime_context,
                 )
             await self._emit_progress(
                 on_progress,

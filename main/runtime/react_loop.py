@@ -3790,12 +3790,16 @@ class ReActToolLoop:
                 f'Error validating {tool_name}: {exc}',
                 tool_name=tool_name,
                 tool=tool,
+                arguments=arguments,
+                runtime_context=runtime_context,
             )
         if errors:
             return append_parameter_error_guidance(
                 'Error: ' + '; '.join(errors),
                 tool_name=tool_name,
                 tool=tool,
+                arguments=arguments,
+                runtime_context=runtime_context,
             )
         execute_kwargs = self._normalize_tool_call_arguments(arguments)
         runtime_param_name = self._runtime_context_parameter_name(tool)
@@ -3844,6 +3848,8 @@ class ReActToolLoop:
                     f'Error executing {tool_name}: {exc}',
                     tool_name=tool_name,
                     tool=tool,
+                    arguments=arguments,
+                    runtime_context=runtime_context,
                 )
             raise
 
