@@ -809,9 +809,14 @@
     gap: var(--ui-space-2);
 }
 
-/* ⋯ 绝对定位在卡片右上角，只有标题行需要给它让位；摘要用满整行宽度 */
+/* ⋯ 绝对定位在卡片右上角，只有标题行需要给它让位；摘要用满整行宽度。
+   top 8px：按钮 28px 比 21px 的标题行高，按顶对齐会低 3.5px，这里按中心对齐。 */
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-head {
     padding-right: 32px;
+}
+
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-actions {
+    top: 8px;
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-preview {
@@ -1551,7 +1556,7 @@
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-list {
-    gap: var(--ui-space-4);
+    gap: var(--ui-space-2);
     /* 滚动条本身 10px，右侧留 6px 就够，其余宽度还给卡片 */
     padding-right: 6px;
 }
