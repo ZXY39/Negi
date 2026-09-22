@@ -325,17 +325,23 @@ function patchTaskCardElement(taskId) {
     const tokenUsage = taskTokenDisplayUsage(task);
     const previousMetrics = S.taskMetricSnapshot?.[key] || null;
     const nextMetrics = taskMetricSnapshotValue(task);
+    const breathingEls = [];
     ["input_tokens", "output_tokens", "cache_hit_tokens"].forEach((metricKey) => {
         const valueEl = card.querySelector(`[data-task-metric-value="${metricKey}"]`);
-        const wrapEl = card.querySelector(`[data-task-metric="${metricKey}"]`);
-        if (!valueEl || !wrapEl) return;
+        if (!valueEl) return;
         const metricValue = tokenUsage.tracked ? Number(tokenUsage[metricKey] || 0) : null;
         const previousValue = previousMetrics && Number.isFinite(previousMetrics[metricKey]) ? previousMetrics[metricKey] : null;
         const isIncreasing = previousValue !== null && Number.isFinite(metricValue) && metricValue > previousValue;
         valueEl.textContent = Number.isFinite(metricValue) ? formatTokenCount(metricValue) : "--";
-        wrapEl.classList.toggle("is-increasing", !!isIncreasing);
-        valueEl.classList.toggle("is-increasing", !!isIncreasing);
+        valueEl.classList.remove("is-increasing");
+        if (isIncreasing) breathingEls.push(valueEl);
     });
+    if (breathingEls.length) {
+        // 连续增长时 class 一直挂着，CSS animation 不会重放；先摘掉 class、
+        // 每张卡片只强制一次重排，再挂回，保证每次增长都呼吸一轮。
+        void card.offsetWidth;
+        breathingEls.forEach((el) => el.classList.add("is-increasing"));
+    }
     S.taskMetricSnapshot = {
         ...(S.taskMetricSnapshot || {}),
         [key]: nextMetrics,
@@ -907,7 +913,7 @@ function renderTasks() {
             const hasValue = Number.isFinite(item.value);
             const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
             const isIncreasing = metricAnimationTaskIds.has(taskId) && previousValue !== null && hasValue && item.value > previousValue;
-            return `<div class="pc-metric${isIncreasing ? " is-increasing" : ""}" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}" data-task-metric-value="${item.key}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
+            return `<div class="pc-metric" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}" data-task-metric-value="${item.key}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
         }).join("");
         const cardActions = taskCardActions(task);
         const el = document.createElement("div");
