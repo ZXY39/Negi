@@ -86,6 +86,7 @@
 ### 3.2 子节点提示词
 
 - 显式要求所有子节点若提供的skills或工具有可用于完成任务的，需要使用，避免产出偏移实际需求。
+- 点名要用哪个 skill 时，必须写成你本轮 `candidate_skills` 里的确切 `skill_id`（如「先按 `<skill_id>` 的流程执行」），不要只写「使用相关技能」：子节点看不到 skill 正文，只能凭 `candidate_skills` 里的一行 description 自行判断相关性，你给出确切名字就替它做完了这一步。确实没有相关项时保留上一条泛指即可，禁止凭猜测填 `skill_id`。
 - 为每个子节点单独设置 `execution_policy.mode`，由该子节点自身任务类型决定；不要求与父节点保持一致。
 - 若子节点只需要最高价值、最必要、与分支目标直接相关的动作，用 `focus`；若子节点明确需要补漏、扩展范围或系统性覆盖，用 `coverage`。
 - 当一次要派生多个已就绪并行分支时，必须先把每个分支的 goal、prompt、`execution_policy`、必要时的 `acceptance_prompt` 全部补全，再通过一次 `spawn_child_nodes` 统一提交。

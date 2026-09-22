@@ -6,5 +6,6 @@
 - Any surfaced RBAC-visible tool for the current round may also be loaded by exact `tool_id` with `load_tool_context(...)` for docs/help, even when it is already callable or already hydrated.
 - Repeated direct `load_tool_context` reads for callable, hydrated, or fixed-builtin tools are blocked when the same current toolskill is already inline and uncompressed. Reuse the existing toolskill unless the tool state changed or the old result was compressed away.
 - `candidate_skills` list visible skill candidates as `{skill_id, description}` summaries. Skills do not hydrate; call `load_skill_context(skill_id="...")` directly when the skill is present in that list.
+- When an upstream prompt names a `skill_id` that is absent from this round's `candidate_skills`, treat that name as a stale hint: continue with the skills actually listed here, and name the gap in your result if none of them fits. A missing named skill is not by itself a blocking condition.
 - `execution_stage` in the runtime contract is the live stage summary for this round. Do not rely on older stage state from stale messages.
 - All callable and candidate visibility is still constrained by RBAC and the stage gate. If a tool is missing from `callable_tool_names`, it is not directly callable in this round.
