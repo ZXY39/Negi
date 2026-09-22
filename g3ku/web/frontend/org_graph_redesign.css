@@ -1528,7 +1528,7 @@
 [data-ui-version="v2"] .task-sort-setting .task-depth-label {
     font-size: 13px;
     font-weight: 600;
-    color: var(--ui-text-secondary);
+    color: var(--ui-text);
     pointer-events: none;
 }
 
@@ -2341,4 +2341,92 @@
 [data-ui-version="v2"] .task-tree-search-input,
 [data-ui-version="v2"] .task-token-call-search {
     font-size: 13px;
+}
+
+/* 树搜索框自带一圈品牌色光晕（color-mix(brand 36%, transparent)）和 88% 透明
+   描边，白底上就是卡片外一层淡青雾；换成与其它头部控件同一套实色描边、无光晕。 */
+[data-ui-version="v2"] .task-tree-search-input {
+    border: 1px solid var(--ui-border);
+    background: var(--ui-bg-surface);
+    box-shadow: none;
+}
+
+/* 57. 状态容器落到实色档：旧层把状态底色又稀释了一遍（soft 的 24% 叠面板色，
+   亮色算出来 #f0f6f3，等于没有底色），描边同样只有 24% 强度。这里直接用 §2/§3
+   的实色档：底色 = --ui-*-soft，描边 = --ui-*。节点内的状态标签自带同族描边，
+   放在同族淡底上仍然分得开。运行中与检验中的容器按既有定案一律走品牌青绿，
+   只有标签分蓝紫。 */
+[data-ui-version="v2"] .execution-tree-node[data-status="running"],
+[data-ui-version="v2"] .execution-tree-node[data-status="in_progress"],
+[data-ui-version="v2"] .execution-tree-node[data-status="inspecting"],
+[data-ui-version="v2"] .execution-tree-item[data-status="running"],
+[data-ui-version="v2"] .execution-tree-item[data-status="in_progress"],
+[data-ui-version="v2"] .execution-tree-item[data-status="inspecting"] {
+    background: var(--ui-brand-soft);
+    border-color: var(--ui-brand);
+}
+
+[data-ui-version="v2"] .execution-tree-node[data-status="success"],
+[data-ui-version="v2"] .execution-tree-node[data-status="completed"],
+[data-ui-version="v2"] .execution-tree-node[data-status="passed"],
+[data-ui-version="v2"] .execution-tree-item[data-status="success"],
+[data-ui-version="v2"] .execution-tree-item[data-status="completed"],
+[data-ui-version="v2"] .execution-tree-item[data-status="passed"] {
+    background: var(--ui-success-soft);
+    border-color: var(--ui-success);
+}
+
+[data-ui-version="v2"] .execution-tree-node[data-status="failed"],
+[data-ui-version="v2"] .execution-tree-node[data-status="error"],
+[data-ui-version="v2"] .execution-tree-item[data-status="failed"],
+[data-ui-version="v2"] .execution-tree-item[data-status="error"] {
+    background: var(--ui-danger-soft);
+    border-color: var(--ui-danger);
+}
+
+[data-ui-version="v2"] .execution-tree-node.execution-tree-node--distribution-blocked {
+    background: var(--ui-warning-soft);
+    border-color: var(--ui-warning);
+}
+
+/* 选中态压在状态色之后：上面按状态写死了描边色，这里把选中的品牌描边抬回来，
+   否则选中一个成功节点时只剩投影、边框看不出差别。 */
+[data-ui-version="v2"] .execution-tree-node.selected {
+    border-color: var(--ui-brand);
+    box-shadow: var(--ui-shadow-md);
+}
+
+/* 卡片走实色档之后，节点内的状态徽标与卡片是同一个 token，两片同色贴在一起
+   就只剩描边在分层。徽标改成表面底 + 同族文字与描边：仍是"芯片压在卡片上"，
+   颜色信号由文字色和描边承担（状态文字本来就在）。 */
+[data-ui-version="v2"] .execution-tree-node .status-badge {
+    background: var(--ui-bg-surface);
+}
+
+/* 58. 实心强调按钮：描边与投影走实色，不再用 color-mix(..., transparent) 的
+   半透描边和同色光晕（白页上那圈光晕看着像污渍）。文字按主题走 on-brand 档：
+   亮色白字压深底、暗色近黑字压亮底。 */
+[data-ui-version="v2"] .toolbar-btn.success,
+[data-ui-version="v2"] #model-roles-save-btn {
+    background: var(--ui-brand);
+    border-color: var(--ui-brand);
+    color: var(--ui-on-brand);
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .toolbar-btn.success:hover:not(:disabled),
+[data-ui-version="v2"] #model-roles-save-btn:hover:not(:disabled) {
+    background: var(--ui-brand-hover);
+    border-color: var(--ui-brand-hover);
+    color: var(--ui-on-brand);
+    box-shadow: none;
+}
+
+/* 这颗按钮在模型目录加载/保存中被禁用，实心档必须给出对应的熄灭态，
+   否则禁用后仍是一片品牌底，看不出不可点。 */
+[data-ui-version="v2"] .toolbar-btn.success:disabled,
+[data-ui-version="v2"] #model-roles-save-btn:disabled {
+    background: var(--ui-bg-subtle);
+    border-color: var(--ui-border);
+    color: var(--ui-text-disabled);
 }
