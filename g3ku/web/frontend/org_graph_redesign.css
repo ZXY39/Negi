@@ -51,21 +51,24 @@
     --ui-text-muted: #8a959a;
     --ui-text-disabled: #5f6b70;
 
+    /* 强调色本体两主题相同；强调底色一律实色——下面这些值就是原 rgba 强调色
+       叠在 --ui-bg-surface(#191919) 上的合成结果，所以深色主题观感不变，
+       亮色主题不再叠白底变浅，改用自己的实色档。 */
     --ui-brand: #2dc7b5;
     --ui-brand-hover: #1eae9f;
-    --ui-brand-soft: rgba(45, 199, 181, 0.13);
-    --ui-brand-soft-strong: rgba(45, 199, 181, 0.20);
+    --ui-brand-soft: #1c302d;
+    --ui-brand-soft-strong: #1d3c38;
 
     --ui-success: #4dc98a;
-    --ui-success-soft: rgba(77, 201, 138, 0.14);
+    --ui-success-soft: #203229;
     --ui-warning: #e7b75b;
-    --ui-warning-soft: rgba(231, 183, 91, 0.15);
+    --ui-warning-soft: #383123;
     --ui-danger: #f27777;
-    --ui-danger-soft: rgba(242, 119, 119, 0.15);
+    --ui-danger-soft: #3a2727;
     --ui-info: #76a9fa;
-    --ui-info-soft: rgba(118, 169, 250, 0.15);
+    --ui-info-soft: #272f3b;
     --ui-running: #a78bfa;
-    --ui-running-soft: rgba(167, 139, 250, 0.16);
+    --ui-running-soft: #302b3d;
 
     --ui-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.24);
     --ui-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.30);
@@ -76,9 +79,10 @@
     --ui-on-brand: #04211d;
 }
 
-/* 3. 亮色主题：只把深灰/黑的表面换成浅色，重点色（brand / success / warning /
-   danger / info / running 及各自的 soft 底）与暗色逐字相同，两个主题的强调色
-   观感一致。代价是这些亮色作小字号文字时达不到 WCAG AA，按操作者要求保留。
+/* 3. 亮色主题：只把深灰/黑的表面换成浅色，重点色本体（brand / success / warning /
+   danger / info / running）与暗色逐字相同；只有强调底色按主题各给一档实色
+   （亮色取强调色 26%/36% 混白），因为实色底不能靠 alpha 自动适配两种表面。
+   代价是这些亮色作小字号文字时达不到 WCAG AA，按操作者要求保留。
    两个主题的表面层（canvas / surface / elevated / subtle / input / border /
    scrim）一律无彩 R=G=B，色相只出现在强调色上。 */
 [data-ui-version="v2"][data-theme="light"] {
@@ -98,19 +102,19 @@
 
     --ui-brand: #2dc7b5;
     --ui-brand-hover: #1eae9f;
-    --ui-brand-soft: rgba(45, 199, 181, 0.13);
-    --ui-brand-soft-strong: rgba(45, 199, 181, 0.20);
+    --ui-brand-soft: #c8f0ec;
+    --ui-brand-soft-strong: #b3ebe4;
 
     --ui-success: #4dc98a;
-    --ui-success-soft: rgba(77, 201, 138, 0.14);
+    --ui-success-soft: #d1f1e1;
     --ui-warning: #e7b75b;
-    --ui-warning-soft: rgba(231, 183, 91, 0.15);
+    --ui-warning-soft: #f9ecd4;
     --ui-danger: #f27777;
-    --ui-danger-soft: rgba(242, 119, 119, 0.15);
+    --ui-danger-soft: #fcdcdc;
     --ui-info: #76a9fa;
-    --ui-info-soft: rgba(118, 169, 250, 0.15);
+    --ui-info-soft: #dbe9fe;
     --ui-running: #a78bfa;
-    --ui-running-soft: rgba(167, 139, 250, 0.16);
+    --ui-running-soft: #e8e1fe;
 
     --ui-shadow-sm: 0 1px 3px rgba(31, 41, 55, 0.07);
     --ui-shadow-md: 0 8px 24px rgba(31, 41, 55, 0.10);
@@ -462,7 +466,7 @@
 [data-ui-version="v2"] .toolbar-btn.active,
 [data-ui-version="v2"] .toolbar-btn[aria-pressed="true"] {
     background: var(--ui-brand-soft);
-    border-color: color-mix(in srgb, var(--ui-brand) 45%, transparent);
+    border-color: var(--ui-brand);
     color: var(--ui-brand);
 }
 
@@ -483,13 +487,13 @@
 
 [data-ui-version="v2"] .toolbar-btn.danger {
     background: var(--ui-bg-surface);
-    border-color: color-mix(in srgb, var(--ui-danger) 34%, transparent);
+    border-color: var(--ui-danger);
     color: var(--ui-danger);
 }
 
 [data-ui-version="v2"] .toolbar-btn.danger:hover:not(:disabled) {
     background: var(--ui-danger-soft);
-    border-color: color-mix(in srgb, var(--ui-danger) 52%, transparent);
+    border-color: var(--ui-danger);
     color: var(--ui-danger);
 }
 
@@ -659,7 +663,7 @@
 [data-ui-version="v2"] .status-badge[data-status="inspecting"] {
     background: var(--ui-running-soft);
     color: var(--ui-running);
-    border-color: color-mix(in srgb, var(--ui-running) 32%, transparent);
+    border-color: var(--ui-running);
 }
 
 [data-ui-version="v2"] .status-badge[data-status="completed"],
@@ -667,19 +671,19 @@
 [data-ui-version="v2"] .status-badge[data-status="success"] {
     background: var(--ui-success-soft);
     color: var(--ui-success);
-    border-color: color-mix(in srgb, var(--ui-success) 30%, transparent);
+    border-color: var(--ui-success);
 }
 
 [data-ui-version="v2"] .status-badge[data-status="failed"] {
     background: var(--ui-danger-soft);
     color: var(--ui-danger);
-    border-color: color-mix(in srgb, var(--ui-danger) 32%, transparent);
+    border-color: var(--ui-danger);
 }
 
 [data-ui-version="v2"] .status-badge[data-status="unpassed"] {
     background: var(--ui-warning-soft);
     color: var(--ui-warning);
-    border-color: color-mix(in srgb, var(--ui-warning) 32%, transparent);
+    border-color: var(--ui-warning);
 }
 
 [data-ui-version="v2"] .status-badge[data-status="queued"],
@@ -906,7 +910,7 @@
     max-width: 100%;
     border-radius: var(--ui-radius-card) var(--ui-radius-card) 4px var(--ui-radius-card);
     background: var(--ui-brand-soft);
-    border-color: color-mix(in srgb, var(--ui-brand) 26%, transparent);
+    border-color: var(--ui-brand);
     color: var(--ui-text);
 }
 
@@ -1160,7 +1164,7 @@
 
 [data-ui-version="v2"] .project-card.is-selected,
 [data-ui-version="v2"] .project-card.is-multi-mode {
-    border-color: color-mix(in srgb, var(--ui-brand) 45%, transparent);
+    border-color: var(--ui-brand);
 }
 
 [data-ui-version="v2"] .pc-title {
@@ -1237,7 +1241,7 @@
 [data-ui-version="v2"] .resource-list-item:hover,
 [data-ui-version="v2"] .resource-list-item.active,
 [data-ui-version="v2"] .resource-list-item.selected {
-    border-color: color-mix(in srgb, var(--ui-brand) 45%, transparent);
+    border-color: var(--ui-brand);
     background: var(--ui-bg-surface);
     box-shadow: none;
 }
@@ -1876,7 +1880,7 @@
     height: 24px;
     padding: 2px 10px;
     gap: 5px;
-    border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    border: 1px solid currentColor;
     background: color-mix(in srgb, currentColor 9%, var(--ui-bg-surface));
 }
 
@@ -1892,7 +1896,7 @@
     min-height: 24px;
     padding: 2px 10px;
     gap: 5px;
-    border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    border: 1px solid currentColor;
     border-radius: var(--ui-radius-pill);
     background: color-mix(in srgb, currentColor 9%, var(--ui-bg-surface));
     font-size: 12px;
