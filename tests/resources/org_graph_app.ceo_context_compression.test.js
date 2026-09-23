@@ -697,12 +697,19 @@ test("压缩端点走 compress-context 三个路由", async () => {
     ]);
 });
 
-test("压缩 toast 让位给会话流区分线，长按环与提示进入 DOM", () => {
+test("压缩 toast 让位给会话流区分线，长按进度条与提示进入 DOM", () => {
     assert.equal(HTML_CODE.includes("ceo-compression-toast"), false);
     assert.equal(HTML_CODE.includes('id="ceo-model-mode-current"'), false);
     assert.match(HTML_CODE, /class="ceo-context-usage-brain-ring"/);
+    // 进度条沿按钮边缘跑：矩形周长被 pathLength 归一化成 100，dash 长度才是百分比。
+    assert.match(HTML_CODE, /<rect[^>]*pathLength="100"/);
+    assert.match(
+        CSS_CODE,
+        /\.ceo-context-usage-brain-ring rect\s*\{[^}]*stroke-dashoffset: calc\(100px - var\(--ceo-brain-hold, 0\) \* 100px\)/
+    );
+    // 内嵌圆环的 conic-gradient 画法已经退役，不能再回来。
+    assert.equal(CSS_CODE.includes("conic-gradient"), false);
     assert.match(HTML_CODE, /<span id="ceo-context-usage-brain-hint"[^>]*>长按压缩上下文<\/span>/);
-    assert.match(CSS_CODE, /\.ceo-context-usage-brain-ring\s*\{[^}]*conic-gradient/);
     assert.match(CSS_CODE, /\.message\.ceo-compression-divider\s*\{[^}]*\}/);
     assert.match(CSS_CODE, /--ceo-context-compress-color:\s*#39c5bb/);
     assert.match(CSS_CODE, /\.ceo-compression-divider\.is-running[^}]*animation/);

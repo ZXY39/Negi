@@ -917,7 +917,7 @@
     max-width: 100%;
     padding: var(--ui-space-3) var(--ui-space-4);
     border: 1px solid var(--ui-border);
-    border-radius: var(--ui-radius-card) var(--ui-radius-card) var(--ui-radius-card) 4px;
+    border-radius: var(--ui-radius-control);
     background: var(--ui-bg-surface);
     box-shadow: none;
     color: var(--ui-text);
@@ -927,7 +927,6 @@
 
 [data-ui-version="v2"] .message.user .msg-content {
     max-width: 100%;
-    border-radius: var(--ui-radius-card) var(--ui-radius-card) 4px var(--ui-radius-card);
     background: var(--ui-brand-soft);
     /* 与 §57 节点卡同一描边口径：底已是 --ui-brand-soft，描边再满色会让气泡
        比树里的运行中节点亮一档。 */
@@ -1037,11 +1036,9 @@
     content: none;
 }
 
-/* 用量环是 conic-gradient 仪表，保持圆形，只缩到能塞进 40px 按钮 */
+/* 长按进度条沿 40px 按钮的边缘跑，圆角跟控件同一个值；基准层按圆形按钮取半径，这里改回方形。 */
 [data-ui-version="v2"] #ceo-context-usage-brain .ceo-context-usage-brain-ring {
-    width: 32px;
-    height: 32px;
-    border-radius: 999px;
+    --ceo-brain-ring-radius: calc(var(--ui-radius-control) - 1px);
 }
 
 [data-ui-version="v2"] #ceo-attach-btn svg {

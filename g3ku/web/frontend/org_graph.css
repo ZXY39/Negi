@@ -4715,26 +4715,35 @@ textarea {
     animation: ceo-context-usage-brain-pulse 1.8s ease-in-out infinite;
 }
 
-/* 长按进度环：按住时从 12 点方向填满 2 秒即发起压缩，松手立刻回到 0。 */
+/* 长按进度：按住时沿按钮边缘绕满 2 秒即发起压缩，松手立刻回到 0。
+   进度条就是压在按钮边框上的一条描边。pathLength=100 把矩形周长归一化成 100，
+   所以 --ceo-brain-hold（0~1）可以直接当百分比用，不必按按钮尺寸换算 dash 长度。 */
 .ceo-context-usage-brain-ring {
     position: absolute;
-    left: 50%;
-    top: 50%;
+    /* 绝对定位的包含块是按钮的 padding box：带 1px 边框的皮肤已经替描边让出了半宽，
+       所以这里 inset 0，2px 描边的外沿正好落在按钮外沿上。 */
+    inset: 0;
     z-index: 2;
-    width: 36px;
-    height: 36px;
-    transform: translate(-50%, -50%);
-    border-radius: 999px;
     opacity: 0;
     pointer-events: none;
-    background: conic-gradient(
-        from -90deg,
-        var(--ceo-context-compress-color) calc(var(--ceo-brain-hold, 0) * 360deg),
-        transparent 0
-    );
-    -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
-    mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+    /* 无边框的圆形按钮：描边中心线就是按钮的半径。带边框的皮肤改成自己的圆角。 */
+    --ceo-brain-ring-radius: calc(var(--ceo-input-leading-size) / 2);
     transition: opacity 140ms ease;
+}
+
+.ceo-context-usage-brain-ring svg {
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.ceo-context-usage-brain-ring rect {
+    fill: none;
+    stroke: var(--ceo-context-compress-color);
+    stroke-width: 2;
+    rx: var(--ceo-brain-ring-radius);
+    stroke-dasharray: 100px;
+    stroke-dashoffset: calc(100px - var(--ceo-brain-hold, 0) * 100px);
 }
 
 .ceo-context-usage-brain.is-holding .ceo-context-usage-brain-ring {
