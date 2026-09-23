@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.runtime import web_ceo_sessions as wcs
@@ -121,3 +122,26 @@ def test_session_edit_fork_gates_channel_and_stability_short_circuit(tmp_path, m
         session, "web:ceo-x", messages, turn_payload={}, is_channel_session=False, agent=None
     )
     assert gates == {0: True, 2: True}
+
+
+def test_edit_fork_eligible_turn_ids_maps_gate_indices_to_turn_ids():
+    messages = [
+        _user("t1", "同批第一条"),
+        _user("t1", "同批第二条"),
+        _assistant("t1"),
+        {"role": "user", "content": "旧转录无 turn_id", "metadata": {}},
+    ]
+    # 门槛按原始下标编码，翻成前端可匹配的 turn_id；无 turn_id 的行按 key 定位不到，跳过。
+    assert websocket_ceo._edit_fork_eligible_turn_ids(messages, {0: True, 1: False}) == ["t1"]
+    assert websocket_ceo._edit_fork_eligible_turn_ids(messages, {3: True}) == []
+    assert websocket_ceo._edit_fork_eligible_turn_ids(messages, None) == []
+    # 下标越界（门槛来自更早的一份转录）不能带崩收尾推送。
+    assert websocket_ceo._edit_fork_eligible_turn_ids(messages, {99: True}) == []
+
+
+def test_relay_pushes_gates_frame_when_session_becomes_stable():
+    source = Path(websocket_ceo.__file__).read_text(encoding="utf-8")
+    start = source.index("if event.type == 'state_snapshot':")
+    relay_block = source[start:source.index("if event.type == 'message_end':")]
+    assert "await _push_edit_fork_gates()" in relay_block, "稳定态回到时未补发编辑/Fork 门槛"
+    assert "_session_fully_stable_for_history_edit(session, turn_payload)" in source

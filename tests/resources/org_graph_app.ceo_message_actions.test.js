@@ -9,7 +9,8 @@ const vm = require("node:vm");
 // - normalizeCeoSnapshotMessage 保留 can_edit_fork/task_dispatched(R3);
 // - buildCeoRenderSignature 覆盖两个 flag,权威快照到达必须触发重建(R4);
 // - syncCeoFeedTurnActiveClass:回合进行中给 feed 挂 .ceo-turn-active(R5);
-// - editForkErrorText 映射服务端错误码(R6)。
+// - editForkErrorText 映射服务端错误码(R6);
+// - applyCeoEditForkGates:收尾后服务端补发门槛,按钮不等手动刷新(R8)。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
@@ -205,6 +206,8 @@ function loadApp() {
             syncCeoFeedTurnActiveClass,
             editForkErrorText,
             activeSessionId,
+            applyCeoEditForkGates,
+            getCeoSessionSnapshotCache,
         };`,
         context
     );
@@ -374,4 +377,52 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
     assert.ok(css.includes(".msg-actions"), "CSS 缺少 .msg-actions");
     assert.ok(css.includes(".ceo-turn-active .msg-actions"), "CSS 缺少防御型隐藏规则");
+    // 收尾后服务端补发的门槛帧必须有分发。
+    assert.ok(
+        APP_CODE.includes('payload.type === "ceo.edit_fork.gates"'),
+        "WS 分发缺少 ceo.edit_fork.gates 处理"
+    );
+});
+
+function seedRenderedCeoCache(api, messages) {
+    // 模拟"刚按无 flag 的缓存渲染完"：签名与渲染会话都对齐当前消息列表。
+    api.S.ceoFeedRenderSessionId = "web:ceo-s1";
+    api.S.ceoScrollToLatestOnSnapshot = false;
+    api.S.ceoSnapshotCache["web:ceo-s1"] = {
+        session_id: "web:ceo-s1",
+        messages,
+        inflight_turn: null,
+        preserved_turn: null,
+    };
+    api.S.ceoFeedRenderSignature = api.buildCeoRenderSignature(messages, null, null);
+}
+
+test("R8 applyCeoEditForkGates 收尾后补发门槛:按钮不等手动刷新", () => {
+    const api = setup();
+    seedRenderedCeoCache(api, [
+        { role: "user", content: "同批第一条", turn_id: "t2" },
+        { role: "user", content: "同批第二条", turn_id: "t2" },
+        { role: "assistant", content: "a2", turn_id: "t2" },
+    ]);
+    const feed = new FeedStub();
+    api.U.ceoFeed = feed;
+
+    api.applyCeoEditForkGates({ turn_ids: ["t2"] });
+
+    const cached = api.getCeoSessionSnapshotCache("web:ceo-s1").messages;
+    assert.equal(cached[0].can_edit_fork, true, "同批首条必须拿到 flag");
+    assert.equal(cached[1].can_edit_fork, undefined, "同批共享 turn_id 的后续行不得拿到 flag");
+    const renderedHtml = feed.children.map((child) => child.innerHTML).join("\n");
+    assert.ok(renderedHtml.includes('data-ceo-edit-resend="t2"'), renderedHtml);
+    assert.equal((renderedHtml.match(/msg-actions/g) || []).length, 1);
+
+    // 同一集合重复推送：签名未变，不得再重建一次。
+    const rebuilds = feed.resetCount;
+    api.applyCeoEditForkGates({ turn_ids: ["t2"] });
+    assert.equal(feed.resetCount, rebuilds);
+
+    // 空集合 = 整份收回（本轮派发了任务，或旧行掉出"最近 3 轮"窗口）。
+    api.applyCeoEditForkGates({ turn_ids: [] });
+    assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[0].can_edit_fork, undefined);
+    assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("msg-actions"));
 });

@@ -718,6 +718,26 @@ def _session_edit_fork_gates(
     )
 
 
+def _edit_fork_eligible_turn_ids(
+    raw_messages: list[Any],
+    gates: dict[int, bool] | None,
+) -> list[str]:
+    """把按转录下标编码的门槛翻成前端可匹配的 turn_id 列表。
+
+    门槛只落在 run 首条用户消息上，因此一个合格下标对应一个 turn_id；
+    旧转录里没有 turn_id 的行无法作为按钮键使用（前端按 turn_id 定位），直接跳过。
+    """
+    turn_ids: list[str] = []
+    for index in sorted(gates or {}):
+        if not gates.get(index):
+            continue
+        raw = raw_messages[index] if 0 <= index < len(raw_messages) else None
+        turn_id = _snapshot_message_turn_id(raw if isinstance(raw, dict) else None)
+        if turn_id and turn_id not in turn_ids:
+            turn_ids.append(turn_id)
+    return turn_ids
+
+
 def _snapshot_compression_marker(metadata: Any) -> dict[str, Any]:
     """把转录里的上下文压缩区分线行翻成 UI 载荷。
 
@@ -1262,6 +1282,36 @@ async def ceo_websocket(websocket: WebSocket):
             persisted_session = None
         await _push_stream_event('ceo.turn.patch', _build_live_turn_payload(session, session_id, persisted_session))
 
+    async def _push_edit_fork_gates() -> None:
+        # 编辑/Fork 门槛原本只随连接时的 snapshot.ceo 下发一次：回合收尾后转录里
+        # 才既有本轮 assistant 行（任务派发要收回资格）又已清掉 inflight sidecar（稳定态
+        # 判定要放行），但没有任何通道再算一遍，按钮只能等用户手动刷新。这里在会话
+        # 回到稳定态时按同一套门槛补发一次，前端据此给缓存行打/收 flag。
+        if is_channel_session:
+            return
+        try:
+            persisted_session = transcript_store.get_or_create(session_id)
+        except Exception:
+            persisted_session = None
+        turn_payload = _build_live_turn_payload(session, session_id, persisted_session)
+        if not _session_fully_stable_for_history_edit(session, turn_payload):
+            return
+        raw_messages = list(getattr(persisted_session, 'messages', []) or [])
+        gates = await run_off_event_loop(
+            lambda: _session_edit_fork_gates(
+                session,
+                session_id,
+                raw_messages,
+                turn_payload=turn_payload,
+                is_channel_session=is_channel_session,
+                agent=agent,
+            )
+        )
+        await _push_stream_event(
+            'ceo.edit_fork.gates',
+            {'turn_ids': _edit_fork_eligible_turn_ids(raw_messages, gates)},
+        )
+
     def _current_session_is_running() -> bool:
         status = str(getattr(session.state, 'status', '') or '').strip().lower()
         return bool(getattr(session.state, 'is_running', False)) or status == 'running'
@@ -1414,6 +1464,7 @@ async def ceo_websocket(websocket: WebSocket):
             status = str(state.get('status') or '').strip().lower()
             if status != 'paused':
                 await _push_turn_patch()
+                await _push_edit_fork_gates()
             _publish_ceo_session_patch(
                 agent=agent,
                 transcript_store=transcript_store,

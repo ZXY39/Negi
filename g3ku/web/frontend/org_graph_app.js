@@ -5467,6 +5467,48 @@ function findCeoSnapshotMessageByTurnId(sessionId, turnId) {
     return null;
 }
 
+function applyCeoEditForkGates(payload = {}, sessionId = "") {
+    // 回合收尾后服务端补发的权威门槛：把它落到缓存里对应的用户行上，再走
+    // renderCeoSnapshot 的签名重建，编辑/Fork 按钮就不必等手动刷新才出现。
+    // 整份替换语义（不在列表里的行一律收 flag）与 snapshot.ceo 一致：新回合会让
+    // 上一轮失去"最近 3 轮"窗口，任务派发会收回整批资格。
+    const key = String(sessionId || activeSessionId() || "").trim();
+    if (!key || key !== String(activeSessionId() || "").trim()) return;
+    const eligibleTurnIds = new Set((Array.isArray(payload?.turn_ids) ? payload.turn_ids : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean));
+    const entry = getCeoSessionSnapshotCache(key);
+    const messages = Array.isArray(entry?.messages) ? entry.messages : [];
+    if (!messages.length) return;
+    const claimedTurnIds = new Set();
+    let changed = false;
+    const nextMessages = messages.map((item) => {
+        if (!item || typeof item !== "object") return item;
+        if (String(item.role || "").trim().toLowerCase() !== "user") return item;
+        const turnId = String(item.turn_id || "").trim();
+        // 同一 run 的连续消息共享 turn_id，门槛只属首条行——与按下标编码的服务端一致。
+        const allowed = !!turnId && eligibleTurnIds.has(turnId) && !claimedTurnIds.has(turnId);
+        if (allowed) claimedTurnIds.add(turnId);
+        if (allowed === (item.can_edit_fork === true)) return item;
+        changed = true;
+        const next = { ...item };
+        if (allowed) next.can_edit_fork = true;
+        else delete next.can_edit_fork;
+        return next;
+    });
+    if (!changed) return;
+    const updatedEntry = patchCeoSessionSnapshotCache(key, (current) => ({
+        ...(current || {}),
+        messages: nextMessages,
+    }));
+    const renderEntry = updatedEntry || getCeoSessionSnapshotCache(key);
+    renderCeoSnapshot(
+        renderEntry?.messages || nextMessages,
+        renderEntry?.inflight_turn || null,
+        { sessionId: key, preservedTurn: renderEntry?.preserved_turn || null }
+    );
+}
+
 function ceoHistoryEditBusyReason() {
     if (S.ceoTurnActive) return "回合进行中（含心跳内部轮），请等待结束或先暂停。";
     if (S.ceoSessionBusy || S.ceoSessionCatalogBusy) return "会话操作进行中，请稍后再试。";
@@ -11428,6 +11470,9 @@ function initCeoWs() {
                     });
                 }
             }
+        }
+        if (payload.type === "ceo.edit_fork.gates" && effectiveSessionId === activeSessionId()) {
+            applyCeoEditForkGates(payload.data || {}, effectiveSessionId);
         }
         if (payload.type === "ceo.agent.tool" && effectiveSessionId === activeSessionId()) {
             appendCeoToolEvent(payload.data || {});
