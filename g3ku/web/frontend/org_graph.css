@@ -4879,7 +4879,8 @@ textarea {
     overflow-wrap: anywhere;
 }
 
-.ceo-follow-up-remove {
+.ceo-follow-up-remove,
+.ceo-follow-up-action {
     flex: 0 0 auto;
     border: none;
     background: transparent;
@@ -4894,12 +4895,15 @@ textarea {
 }
 
 .ceo-follow-up-remove:hover,
-.ceo-follow-up-remove:focus-visible {
+.ceo-follow-up-action:hover,
+.ceo-follow-up-remove:focus-visible,
+.ceo-follow-up-action:focus-visible {
     color: var(--text-primary);
     background: color-mix(in srgb, var(--border-color) 64%, transparent);
 }
 
-.ceo-follow-up-remove:focus-visible {
+.ceo-follow-up-remove:focus-visible,
+.ceo-follow-up-action:focus-visible {
     outline: 0;
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
 }

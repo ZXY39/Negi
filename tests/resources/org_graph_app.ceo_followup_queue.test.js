@@ -134,6 +134,11 @@ function loadApp() {
         removeEventListener() {},
         ApiClient: {
             getActiveSessionId: () => "web:test",
+            withdrawCeoQueuedFollowUp: async (sessionId, payload) => {
+                context.__withdrawCalls = context.__withdrawCalls || [];
+                context.__withdrawCalls.push({ sessionId, payload });
+                return { ok: true };
+            },
         },
         activeSessionIsReadonly: () => false,
         icons: () => {},
@@ -167,9 +172,13 @@ function loadApp() {
             handleCeoPrimaryAction,
             setCeoQueuedFollowUps,
             removeCeoQueuedFollowUp,
+            enqueueCeoFollowUp,
             applyCeoState,
             getMergedCeoQueuedFollowUps,
             renderQueuedCeoFollowUps,
+            flushCeoQueuedFollowUp,
+            withdrawCeoQueuedFollowUp,
+            sendCeoMessage,
         };`,
         context
     );
@@ -240,7 +249,7 @@ test("primary button shows send when there is input during an active turn", () =
     assert.match(U.ceoSend.innerHTML, /发送/);
 });
 
-test("sending while a turn is active queues follow-up and sends it to the runtime immediately", () => {
+test("sending while a turn is active holds the follow-up in the browser, not the runtime", () => {
     const { S, U, handleCeoPrimaryAction, socket, __context } = loadApp();
     S.ceoTurnActive = true;
     U.ceoInput.value = "前10个";
@@ -250,15 +259,86 @@ test("sending while a turn is active queues follow-up and sends it to the runtim
     assert.equal(__context.__pauseRequested || 0, 0);
     assert.equal(Array.isArray(S.ceoQueuedFollowUps?.["web:test"]), true);
     assert.equal(S.ceoQueuedFollowUps["web:test"].length, 1);
-    assert.equal(socket.sent.length, 1);
-    assert.equal(socket.sent[0]?.type, "client.user_message");
-    assert.equal(socket.sent[0]?.session_id, "web:test");
-    assert.equal(Array.isArray(socket.sent[0]?.messages), true);
-    assert.equal(socket.sent[0].messages.length, 1);
+    // 默认不并入正在跑的这一轮：一条 WS 帧都不发，等本轮最终输出后按顺序起新回合。
+    assert.equal(socket.sent.length, 0);
     assert.equal(S.ceoQueuedFollowUps["web:test"][0].text, "前10个");
+    assert.equal(String(S.ceoQueuedFollowUps["web:test"][0].runtime_sent_at || ""), "");
     assert.equal(U.ceoFollowUpQueue.hidden, false);
     assert.match(U.ceoFollowUpQueue.innerHTML, /前10个/);
     assert.equal((__context.__showToastCalls || []).length, 0);
+});
+
+test("chip offers 立即发送 only for unsent items while a turn runs", () => {
+    const { S, U, setCeoQueuedFollowUps } = loadApp();
+    S.ceoTurnActive = true;
+    setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "还没发出去的补充" }]);
+
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush="draft"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="draft"/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="draft"/);
+
+    // 回合结束后没有"下一轮"可并，立即发送按钮不再出现，撤回与丢弃留着。
+    S.ceoTurnActive = false;
+    setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "还没发出去的补充" }]);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="draft"/);
+});
+
+test("立即发送 arms a single queued item on the runtime lane", () => {
+    const { S, U, socket, setCeoQueuedFollowUps, flushCeoQueuedFollowUp } = loadApp();
+    S.ceoTurnActive = true;
+    setCeoQueuedFollowUps("web:test", [
+        { id: "a", text: "第一条" },
+        { id: "b", text: "第二条" },
+    ]);
+
+    assert.equal(flushCeoQueuedFollowUp("a"), true);
+
+    assert.equal(socket.sent.length, 1);
+    assert.equal(socket.sent[0].type, "client.user_message");
+    // 只武装点的那一条：另一条继续留在浏览器队列里等收尾。
+    assert.equal(socket.sent[0].messages.length, 1);
+    assert.equal(socket.sent[0].messages[0].text, "第一条");
+    const local = S.ceoQueuedFollowUps["web:test"];
+    assert.ok(String(local.find((item) => item.id === "a").runtime_sent_at || ""));
+    assert.equal(String(local.find((item) => item.id === "b").runtime_sent_at || ""), "");
+    assert.match(U.ceoFollowUpQueue.innerHTML, /第二条/);
+});
+
+test("撤回已受理条目走服务端删除并回填输入框", async () => {
+    const api = loadApp();
+    const { S, U, applyCeoState, withdrawCeoQueuedFollowUp, __context } = api;
+    applyCeoState({
+        status: "running",
+        queued_follow_up_messages: [
+            { content: "压缩途中发的那条", attachments: [], metadata: { _transcript_turn_id: "t-9" } },
+        ],
+    });
+    U.ceoInput.value = "";
+
+    assert.equal(await withdrawCeoQueuedFollowUp("server:t-9"), true);
+
+    const calls = __context.__withdrawCalls || [];
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].sessionId, "web:test");
+    assert.equal(calls[0].payload.turn_id, "t-9");
+    // 撤回的落点是输入框，不是转录：回填后可继续编辑，不自动发送。
+    assert.equal(U.ceoInput.value, "压缩途中发的那条");
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
+});
+
+test("撤回未受理条目不碰服务端，只把内容还给输入框", async () => {
+    const api = loadApp();
+    const { S, U, setCeoQueuedFollowUps, withdrawCeoQueuedFollowUp, __context } = api;
+    S.ceoTurnActive = true;
+    setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "写错了要改", uploads: [] }]);
+    U.ceoInput.value = "";
+
+    assert.equal(await withdrawCeoQueuedFollowUp("draft"), true);
+
+    assert.equal((__context.__withdrawCalls || []).length, 0);
+    assert.equal(U.ceoInput.value, "写错了要改");
+    assert.equal(U.ceoFollowUpQueue.hidden, true);
 });
 
 test("state snapshot with a runtime-held queue paints the accepted chip", () => {

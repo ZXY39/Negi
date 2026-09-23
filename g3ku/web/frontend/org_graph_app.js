@@ -2806,10 +2806,16 @@ function consumeRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
     return setCeoQueuedFollowUps(key, retained);
 }
 
-function sendActiveCeoFollowUpsToRuntime(sessionId = activeSessionId()) {
+function sendActiveCeoFollowUpsToRuntime(sessionId = activeSessionId(), onlyIds = null) {
     const key = String(sessionId || "").trim();
     if (!key) return null;
-    const queued = getCeoQueuedFollowUps(key).filter((item) => !String(item?.runtime_sent_at || "").trim());
+    const targetIds = Array.isArray(onlyIds)
+        ? new Set(onlyIds.map((item) => String(item || "").trim()).filter(Boolean))
+        : null;
+    const queued = getCeoQueuedFollowUps(key).filter((item) => {
+        if (String(item?.runtime_sent_at || "").trim()) return false;
+        return !targetIds || targetIds.has(String(item?.id || "").trim());
+    });
     if (!queued.length) return null;
     const wsOpenState = Number(WebSocket?.OPEN ?? 1);
     if (!S.ceoWs || S.ceoWs.readyState !== wsOpenState) {
@@ -5078,17 +5084,30 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     U.ceoFollowUpQueue.innerHTML = `
         <div class="ceo-follow-up-chip-list" role="list">
             ${items.map((item, index) => {
-                // runtime 已受理的条目不能删：它已经落进队列（重启也还在），撤回它没有对应操作。
-                const trailing = item.accepted_by_runtime
-                    ? `<span class="ceo-follow-up-state">已受理</span>`
-                    : `<button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${esc(String(item.id || ""))}" aria-label="删除待发送补充">
+                const entryId = esc(String(item.id || ""));
+                const actions = [];
+                // 已受理 = 服务端队列里的条目（重启也还在）：不再显示"立即发送"，
+                // 但撤回有对应操作了（服务端把内存队列与转录 pending 行一起删）。
+                if (item.accepted_by_runtime) {
+                    actions.push(`<span class="ceo-follow-up-state">已受理</span>`);
+                } else if (S.ceoTurnActive) {
+                    actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-flush="${entryId}" aria-label="立即并入下一轮">
+                            <i data-lucide="send"></i>
+                        </button>`);
+                }
+                actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="撤回重新编辑">
+                        <i data-lucide="rotate-ccw"></i>
+                    </button>`);
+                if (!item.accepted_by_runtime) {
+                    actions.push(`<button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="丢弃待发送补充">
                             <i data-lucide="x"></i>
-                        </button>`;
+                        </button>`);
+                }
                 return `
                 <div class="ceo-follow-up-chip" role="listitem">
                     <span class="ceo-follow-up-kind">${index + 1}</span>
                     <span class="ceo-follow-up-name">${esc(String(item.text || "").trim() || summarizeUploads(item.uploads || []))}</span>
-                    ${trailing}
+                    ${actions.join("")}
                 </div>
             `;
             }).join("")}
@@ -5096,6 +5115,72 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     `;
     scheduleCeoComposerUsageRefresh();
     icons();
+}
+
+function findCeoQueuedFollowUpEntry(sessionId, entryId) {
+    const key = String(sessionId || "").trim();
+    const target = String(entryId || "").trim();
+    if (!key || !target) return null;
+    return getMergedCeoQueuedFollowUps(key).find((item) => String(item?.id || "").trim() === target) || null;
+}
+
+// 服务端队列条目的 id 由 normalizeCeoServerQueuedFollowUpList 生成：server:<turn_id>。
+function ceoServerQueuedFollowUpTurnId(entryId) {
+    const raw = String(entryId || "").trim();
+    return raw.startsWith("server:") ? raw.slice("server:".length).trim() : "";
+}
+
+function flushCeoQueuedFollowUp(entryId) {
+    const sessionId = activeSessionId();
+    const item = findCeoQueuedFollowUpEntry(sessionId, entryId);
+    if (!sessionId || !item || item.accepted_by_runtime) return false;
+    const sent = sendActiveCeoFollowUpsToRuntime(sessionId, [String(item.id || "")]);
+    if (!sent) {
+        showToast({ title: "未能并入本轮", text: "连接未就绪，条目仍留在待发送里。", kind: "warn" });
+        return false;
+    }
+    renderQueuedCeoFollowUps(sessionId);
+    return true;
+}
+
+async function withdrawCeoQueuedFollowUp(entryId) {
+    const sessionId = activeSessionId();
+    const item = findCeoQueuedFollowUpEntry(sessionId, entryId);
+    if (!sessionId || !item) return false;
+    const turnId = ceoServerQueuedFollowUpTurnId(item.id);
+    if (item.accepted_by_runtime && turnId) {
+        // 已受理的条目活在服务端（内存队列 + 转录 pending 行），必须先删那边，
+        // 否则下一次 state 帧会把它原样画回来。
+        try {
+            await ApiClient.withdrawCeoQueuedFollowUp(sessionId, { turn_id: turnId });
+        } catch (error) {
+            showToast({
+                title: "撤回失败",
+                text: String(error?.message || "该条补充可能已被本轮接走，无法撤回。"),
+                kind: "error",
+            });
+            return false;
+        }
+        // 服务端撤回会随帧清掉认领的队列；本地这条也顺手丢弃，避免重复画。
+        const serverKey = String(sessionId || "").trim();
+        const remainingServerItems = (Array.isArray(S.ceoServerQueuedFollowUps?.[serverKey]) ? S.ceoServerQueuedFollowUps[serverKey] : [])
+            .filter((raw) => String(raw?.metadata?.["_transcript_turn_id"] || "").trim() !== turnId);
+        S.ceoServerQueuedFollowUps = {
+            ...(S.ceoServerQueuedFollowUps || {}),
+            [serverKey]: remainingServerItems,
+        };
+    } else {
+        removeCeoQueuedFollowUp(sessionId, item.id);
+    }
+    // 回填输入框：与 Fork 一样走草稿通道，附件一起回来，不自动发送。
+    setCeoComposerDraft(sessionId, {
+        text: String(item.text || ""),
+        uploads: normalizeUploadList(item.uploads),
+    });
+    restoreCeoComposerDraftForSession(sessionId);
+    renderQueuedCeoFollowUps(sessionId);
+    syncCeoPrimaryButton();
+    return true;
 }
 
 function syncCeoPrimaryButton() {
@@ -11746,8 +11831,9 @@ function sendCeoMessage() {
     }
     try {
         if (S.ceoTurnActive) {
+            // 默认只留在浏览器队列里，等本轮最终输出后由 maybeDispatchQueuedCeoFollowUps
+            // 按顺序起新回合；要现在就并进正在跑的这一轮，点条目上的"立即发送"。
             enqueueCeoFollowUp(activeSessionId(), { text, uploads });
-            sendActiveCeoFollowUpsToRuntime(activeSessionId());
         } else {
             const sent = sendImmediateCeoMessage({ text, uploads, scrollMode: "bottom" });
             if (!sent) return;
@@ -14723,6 +14809,16 @@ function bind() {
         removePendingCeoUpload(Number(remove.dataset.uploadRemove));
     });
     U.ceoFollowUpQueue?.addEventListener("click", (e) => {
+        const flush = e.target.closest("[data-follow-up-flush]");
+        if (flush) {
+            flushCeoQueuedFollowUp(String(flush.dataset.followUpFlush || ""));
+            return;
+        }
+        const withdraw = e.target.closest("[data-follow-up-withdraw]");
+        if (withdraw) {
+            void withdrawCeoQueuedFollowUp(String(withdraw.dataset.followUpWithdraw || ""));
+            return;
+        }
         const remove = e.target.closest("[data-follow-up-remove]");
         if (!remove) return;
         removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));

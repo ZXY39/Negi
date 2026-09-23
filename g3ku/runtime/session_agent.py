@@ -3734,6 +3734,55 @@ class RuntimeAgentSession:
             await self._persist_pending_user_messages(user_inputs=queued_inputs)
         return list(queued_inputs)
 
+    def withdraw_queued_follow_up(self, turn_id: str) -> bool:
+        """把一条还没被任何回合接走的补充消息从队列里撤回，返回是否撤到。
+
+        内存队列与转录里的 pending 行必须一起删：只删内存，重启时
+        ``_rehydrate_queued_follow_ups`` 会照原样把它接回来；只删转录，本回合结束时
+        drain 仍会把内存里那条发出去。队列里没有这个 turn_id 就返回失败——那说明它
+        已被 take/drain 接走，删它等于删一条已经回答过的用户消息。
+        """
+        key = str(self._state.session_key or "").strip()
+        target = str(turn_id or "").strip()
+        if not key or not target:
+            return False
+        queued = list(self._state.queued_follow_up_messages or [])
+        kept = [item for item in queued if self._user_input_turn_id(item) != target]
+        if len(kept) == len(queued):
+            return False
+        self._state.queued_follow_up_messages[:] = kept
+        try:
+            persisted_session = self._loop.sessions.get_or_create(key)
+        except Exception:
+            logger.debug("queued follow-up withdraw transcript step skipped for {}", key)
+            return True
+        rows = getattr(persisted_session, "messages", None)
+        if not isinstance(rows, list):
+            return True
+        remaining = [
+            row
+            for row in rows
+            if not (
+                isinstance(row, dict)
+                and str(row.get("role") or "").strip().lower() == "user"
+                and str((row.get("metadata") or {}).get(_TRANSCRIPT_STATE_KEY) or "").strip().lower()
+                == _TRANSCRIPT_STATE_PENDING
+                and str((row.get("metadata") or {}).get(_TRANSCRIPT_TURN_ID_KEY) or "").strip() == target
+            )
+        ]
+        if len(remaining) == len(rows):
+            return True
+        from g3ku.runtime.web_ceo_history_edit import _recompute_session_counters
+
+        persisted_session.messages = remaining
+        _recompute_session_counters(persisted_session, remaining)
+        persisted_session.updated_at = datetime.now()
+        try:
+            self._loop.sessions.save(persisted_session)
+        except Exception:
+            logger.debug("queued follow-up withdraw save failed for {}", key)
+        return True
+
     async def take_follow_up_batch_for_call_model(self) -> list[UserInputMessage]:
         queued_inputs = [
             item

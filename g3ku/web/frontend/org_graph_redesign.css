@@ -1031,6 +1031,12 @@
     border-color: var(--ui-border-strong);
 }
 
+/* 用量光晕：旧皮肤靠这圈径向渐变把"有读数"画出来，v2 的读数已经在填充层与面板里，
+   留在一个圆角方块按钮里就只是一个和按钮形状不符的圆。 */
+[data-ui-version="v2"] #ceo-context-usage-brain::after {
+    content: none;
+}
+
 /* 用量环是 conic-gradient 仪表，保持圆形，只缩到能塞进 40px 按钮 */
 [data-ui-version="v2"] #ceo-context-usage-brain .ceo-context-usage-brain-ring {
     width: 32px;
@@ -1073,13 +1079,27 @@
 
 [data-ui-version="v2"] .ceo-approval-viewport,
 [data-ui-version="v2"] .model-retry-toast,
-[data-ui-version="v2"] .ceo-follow-up-queue,
 [data-ui-version="v2"] .ceo-upload-list {
     background: var(--ui-bg-elevated);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
     box-shadow: none;
     color: var(--ui-text-secondary);
+}
+
+/* 待发送队列同理：容器只负责占位，可见的面是每条 chip。
+   容器再画一层底和描边，就会在 chip 的圆角外面露出一圈更方的盒子。 */
+[data-ui-version="v2"] .ceo-follow-up-queue {
+    margin-inline-start: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .ceo-follow-up-chip {
+    border-radius: var(--ui-radius-control);
+    box-shadow: none;
 }
 
 /* 编辑重发横幅与上下文提示条同理：容器只负责占位，可见的面是里面的 chip。

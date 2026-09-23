@@ -754,3 +754,45 @@ async def test_boot_replay_survives_one_session_failing_to_construct(tmp_path: P
 
     assert calls == ["boot_replay"]
     assert replayed == 1
+
+
+# -- 撤回待发送补充 ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_withdraw_drops_memory_item_and_its_pending_row(tmp_path: Path) -> None:
+    """撤回必须两边一起删：只删内存会被重启回灌，只删行会在收尾时被 drain 发出去。"""
+    key = "ext:test-bridge:queue-withdraw"
+    session = _real_session(tmp_path, key)
+    await session.queue_follow_up_batch(["先撤回这条", "留下这条"], persist_transcript=True)
+    first_turn_id = str(
+        (session._state.queued_follow_up_messages[0].metadata or {}).get("_transcript_turn_id") or ""
+    ).strip()
+    assert first_turn_id
+
+    assert session.withdraw_queued_follow_up(first_turn_id) is True
+
+    assert [str(item.content) for item in session._state.queued_follow_up_messages] == ["留下这条"]
+    rows = [row for row in _transcript_rows(tmp_path, key) if str(row.get("role") or "") == "user"]
+    assert [str(row.get("content") or "") for row in rows] == ["留下这条"]
+    # 重启后不再诈尸：接回来的只剩没被撤回的那条。
+    reopened = _real_session(tmp_path, key)
+    assert [str(item.content) for item in reopened._state.queued_follow_up_messages] == ["留下这条"]
+
+
+@pytest.mark.asyncio
+async def test_withdraw_refuses_a_turn_the_runtime_already_consumed(tmp_path: Path) -> None:
+    """已被 take/drain 接走的条目属转录历史：删它等于删一条已回答的用户消息。"""
+    key = "ext:test-bridge:queue-withdraw-consumed"
+    session = _real_session(tmp_path, key)
+    await session.queue_follow_up_batch(["已经并入下一轮"], persist_transcript=True)
+    turn_id = str(
+        (session._state.queued_follow_up_messages[0].metadata or {}).get("_transcript_turn_id") or ""
+    ).strip()
+
+    drained = await session.take_follow_up_batch_for_call_model()
+
+    assert [str(item.content) for item in drained] == ["已经并入下一轮"]
+    assert session.withdraw_queued_follow_up(turn_id) is False
+    rows = [row for row in _transcript_rows(tmp_path, key) if str(row.get("role") or "") == "user"]
+    assert [str(row.get("content") or "") for row in rows] == ["已经并入下一轮"]
