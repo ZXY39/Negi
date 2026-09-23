@@ -1005,7 +1005,9 @@
 
 [data-ui-version="v2"] .ceo-input-leading-group {
     position: absolute;
-    left: 8px;
+    /* 左右对称内缩 48px = 原 8px + 一颗 40px 脑图标，两侧必须同值，
+       否则控件带看起来是歪的。纵向仍贴底 8px。 */
+    left: 48px;
     bottom: 8px;
     z-index: 2;
     gap: var(--ui-space-2);
@@ -1042,7 +1044,7 @@
 }
 
 [data-ui-version="v2"] .chat-input-area textarea {
-    min-height: 80px;
+    min-height: 120px;
     max-height: 180px;
     /* 底部 52px 是控件带：40px 按钮 + 8px 内缩 + 4px 气口，文字不能排到按钮底下。 */
     padding: 10px var(--ui-space-3) 52px;
@@ -1056,7 +1058,7 @@
 /* 发送/暂停坐在输入框内部的右下角，与左下角的脑图标、附件同一带。 */
 [data-ui-version="v2"] #ceo-send-btn {
     position: absolute;
-    right: 8px;
+    right: 48px;
     bottom: 8px;
     z-index: 2;
     height: 40px;
