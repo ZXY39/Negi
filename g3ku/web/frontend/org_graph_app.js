@@ -8984,7 +8984,7 @@ function buildResourceSelectOptionButton(select, shell, option) {
 function rebuildResourceSelectOptions(select) {
     if (!(select instanceof HTMLSelectElement)) return;
     const shell = select.closest(".resource-select-shell");
-    const menu = shell?.querySelector(".resource-select-menu");
+    const menu = getResourceSelectMenu(shell);
     if (!(shell instanceof HTMLElement) || !(menu instanceof HTMLElement)) return;
     const signature = [...select.options]
         .map((option) => `${String(option.value)}\u0000${String(option.textContent || "").trim()}`)
@@ -9005,9 +9005,12 @@ function closeResourceSelects({ exceptId = "", restoreFocus = false } = {}) {
         const selectId = String(shell.dataset.selectId || "");
         if (exceptId && selectId === exceptId) return;
         const trigger = shell.querySelector(".resource-select-trigger");
-        const menu = shell.querySelector(".resource-select-menu");
+        const menu = getResourceSelectMenu(shell);
         shell.classList.remove("is-open");
-        if (menu) menu.hidden = true;
+        if (menu) {
+            menu.hidden = true;
+            returnResourceSelectMenuPortal(shell, menu);
+        }
         if (trigger) trigger.setAttribute("aria-expanded", "false");
         if (restoreFocus && trigger instanceof HTMLElement) trigger.focus();
         closed = true;
@@ -9023,8 +9026,8 @@ function syncResourceSelectUI(select) {
     rebuildResourceSelectOptions(select);
     const trigger = shell.querySelector(".resource-select-trigger");
     const valueEl = shell.querySelector(".resource-select-value");
-    const menu = shell.querySelector(".resource-select-menu");
-    const optionButtons = [...shell.querySelectorAll(".resource-select-option")];
+    const menu = getResourceSelectMenu(shell);
+    const optionButtons = menu ? [...menu.querySelectorAll(".resource-select-option")] : [];
     const selectedOption = select.selectedOptions?.[0] || [...select.options].find((option) => option.value === select.value) || select.options[0];
     const selectedValue = String(selectedOption?.value ?? "");
     const isDisabled = !!select.disabled;
@@ -9055,7 +9058,8 @@ function syncResourceSelectUI(select) {
 
 function focusResourceSelectOption(shell, direction = "selected") {
     if (!(shell instanceof HTMLElement)) return;
-    const options = [...shell.querySelectorAll(".resource-select-option")];
+    const menu = getResourceSelectMenu(shell);
+    const options = menu ? [...menu.querySelectorAll(".resource-select-option")] : [];
     if (!options.length) return;
     const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const currentIndex = active ? options.indexOf(active) : -1;
@@ -9082,17 +9086,93 @@ function setResourceSelectValue(select, value, { close = true } = {}) {
     if (close) closeResourceSelects({ restoreFocus: true });
 }
 
+const RESOURCE_SELECT_PORTAL_GAP = 10;
+
+// 展开态的下拉面板默认绝对定位在 .resource-select-shell 里，一旦这个 shell 处在
+// 滚动容器内（模型配置弹窗的 body），面板会把容器撑高、并被聚焦的选中项滚动到可视区，
+// 整张表单就往上跳。带 data-resource-select-portal 的下拉改为挂到 body 上按视口定位。
+function getResourceSelectMenu(shell) {
+    if (!(shell instanceof HTMLElement)) return null;
+    const own = shell.querySelector(".resource-select-menu");
+    if (own) return own;
+    const selectId = String(shell.dataset.selectId || "");
+    return selectId ? document.getElementById(`${selectId}-menu`) : null;
+}
+
+function positionResourceSelectMenuPortal(trigger, menu) {
+    const rect = trigger.getBoundingClientRect();
+    menu.style.left = `${Math.round(rect.left)}px`;
+    menu.style.width = `${Math.round(rect.width)}px`;
+    menu.style.right = "auto";
+    const menuHeight = menu.getBoundingClientRect().height;
+    const below = window.innerHeight - rect.bottom;
+    if (below < menuHeight + RESOURCE_SELECT_PORTAL_GAP && rect.top > below) {
+        menu.style.top = "auto";
+        menu.style.bottom = `${Math.round(window.innerHeight - rect.top + RESOURCE_SELECT_PORTAL_GAP)}px`;
+    } else {
+        menu.style.bottom = "auto";
+        menu.style.top = `${Math.round(rect.bottom + RESOURCE_SELECT_PORTAL_GAP)}px`;
+    }
+}
+
+function detachResourceSelectMenuPortal(menu) {
+    menu.classList.remove("resource-select-menu--portal");
+    menu.style.left = "";
+    menu.style.top = "";
+    menu.style.right = "";
+    menu.style.bottom = "";
+    menu.style.width = "";
+    menu.__resourceSelectOwner = null;
+    menu.remove();
+}
+
+function syncResourceSelectMenuPortals() {
+    let liveCount = 0;
+    document.querySelectorAll("body > .resource-select-menu--portal").forEach((menu) => {
+        const owner = menu.__resourceSelectOwner;
+        const trigger = owner?.querySelector(".resource-select-trigger");
+        if (!owner || !owner.isConnected || !(trigger instanceof HTMLElement)) {
+            detachResourceSelectMenuPortal(menu);
+            return;
+        }
+        liveCount += 1;
+        positionResourceSelectMenuPortal(trigger, menu);
+    });
+    if (!liveCount) {
+        window.removeEventListener("scroll", syncResourceSelectMenuPortals, true);
+        window.removeEventListener("resize", syncResourceSelectMenuPortals, true);
+    }
+}
+
+function portalResourceSelectMenu(shell, trigger, menu) {
+    if (!(menu instanceof HTMLElement) || !(trigger instanceof HTMLElement)) return;
+    if (menu.parentElement !== document.body) document.body.appendChild(menu);
+    menu.__resourceSelectOwner = shell;
+    menu.classList.add("resource-select-menu--portal");
+    positionResourceSelectMenuPortal(trigger, menu);
+    window.addEventListener("scroll", syncResourceSelectMenuPortals, true);
+    window.addEventListener("resize", syncResourceSelectMenuPortals, true);
+}
+
+function returnResourceSelectMenuPortal(shell, menu) {
+    if (!(menu instanceof HTMLElement) || !menu.classList.contains("resource-select-menu--portal")) return;
+    detachResourceSelectMenuPortal(menu);
+    if (shell?.isConnected) shell.appendChild(menu);
+    syncResourceSelectMenuPortals();
+}
+
 function openResourceSelect(select, { focus = "selected" } = {}) {
     if (!(select instanceof HTMLSelectElement)) return;
     if (select.disabled) return;
     const shell = select.closest(".resource-select-shell");
     if (!shell) return;
     const trigger = shell.querySelector(".resource-select-trigger");
-    const menu = shell.querySelector(".resource-select-menu");
+    const menu = getResourceSelectMenu(shell);
     closeResourceSelects({ exceptId: select.id });
     shell.classList.add("is-open");
     if (menu) menu.hidden = false;
     if (trigger) trigger.setAttribute("aria-expanded", "true");
+    if (select.dataset.resourceSelectPortal === "true") portalResourceSelectMenu(shell, trigger, menu);
     S.openResourceSelectId = select.id;
     focusResourceSelectOption(shell, focus);
 }
@@ -9230,6 +9310,7 @@ function buildResourceSelect(select) {
 }
 
 function enhanceResourceSelects() {
+    syncResourceSelectMenuPortals();
     document.querySelectorAll("select.resource-select").forEach((select) => buildResourceSelect(select));
 }
 

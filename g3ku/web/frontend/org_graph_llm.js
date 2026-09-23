@@ -1018,7 +1018,7 @@
     return `
         <label class="resource-field">
           <span class="resource-field-label">深度思考（Reasoning Effort）</span>
-          <select id="llm-binding-reasoning-effort" class="resource-search resource-select" data-resource-select-label="Reasoning effort">
+          <select id="llm-binding-reasoning-effort" class="resource-search resource-select" data-resource-select-label="Reasoning effort" data-resource-select-portal="true">
             ${REASONING_EFFORT_LEVELS.map((level) => `<option value="${escv(level)}"${level === value ? " selected" : ""}>${escv(REASONING_EFFORT_LABELS[level] || level)}</option>`).join("")}
           </select>
         </label>`;

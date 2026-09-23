@@ -9184,6 +9184,13 @@ textarea {
     contain: layout paint;
 }
 
+/* 展开态浮到弹窗外面：面板挂到 body 上按视口定位，滚动容器里不留占位，
+   所以既不会把容器撑高，也不会因为聚焦选中项把整张表单顶上去。 */
+.resource-select-menu.resource-select-menu--portal {
+    position: fixed;
+    z-index: 1000;
+}
+
 .resource-select-option {
     width: 100%;
     min-height: 42px;

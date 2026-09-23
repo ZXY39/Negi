@@ -75,6 +75,7 @@ function makeShell(selectId, select) {
         return null;
     };
     shell.querySelectorAll = (selector) => (selector === ".resource-select-option" ? shell.options : []);
+    shell.menu.querySelectorAll = (selector) => (selector === ".resource-select-option" ? shell.options : []);
     shell.closest = (selector) => (selector === ".resource-select-shell" ? shell : null);
     return shell;
 }
