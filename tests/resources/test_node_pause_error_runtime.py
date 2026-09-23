@@ -1300,3 +1300,105 @@ async def test_control_nodes_task_id_only_applies_to_whole_task(tmp_path: Path) 
         assert task is not None and task.status == "failed" and task.is_paused is False
     finally:
         await service.close()
+
+
+def _make_embedded_service(tmp_path: Path) -> MainRuntimeService:
+    """派发面（dispatcher）只在跑任务的进程里可见，web 模式看不到，故直落判定要 embedded。"""
+    return MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+
+
+class _FakeDispatcher:
+    def __init__(self, entries: dict[str, object]) -> None:
+        self._entries = entries
+
+
+@pytest.mark.asyncio
+async def test_requested_pause_lands_directly_when_node_has_no_dispatch_entry(tmp_path: Path) -> None:
+    """实盘形态：节点脱离派发面后，操作员点的暂停挂了 50 分钟没落地。"""
+    service = _make_embedded_service(tmp_path)
+    try:
+        record = await service.create_task("stranded pause", session_id="web:shared")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            record.root_node_id,
+            pause_requested=True,
+            pause_reason="manual",
+        )
+        node = service.get_node(record.root_node_id)
+        assert node is not None and node.pause_requested is True and node.is_paused is False
+
+        landed = service._land_pause_for_stranded_nodes(record.task_id)
+
+        assert landed == [record.root_node_id]
+        node = service.get_node(record.root_node_id)
+        assert node is not None
+        assert node.is_paused is True
+        assert node.pause_requested is True
+        assert node.pause_reason == "manual"
+        assert service.store.get_task_node_pause(record.root_node_id) is not None
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_requested_pause_never_falsely_lands_while_node_is_dispatched(tmp_path: Path) -> None:
+    service = _make_embedded_service(tmp_path)
+    try:
+        record = await service.create_task("running pause", session_id="web:shared")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            record.root_node_id,
+            pause_requested=True,
+            pause_reason="manual",
+        )
+        service.task_actor_service._dispatchers[record.task_id] = _FakeDispatcher(
+            {record.root_node_id: object()}
+        )
+
+        assert service._land_pause_for_stranded_nodes(record.task_id) == []
+        node = service.get_node(record.root_node_id)
+        assert node is not None and node.is_paused is False, "仍在派发面上的节点不得被谎标成已暂停"
+    finally:
+        service.task_actor_service._dispatchers.pop(record.task_id, None)
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_sweep_skips_terminal_and_unrequested_nodes(tmp_path: Path) -> None:
+    service = _make_embedded_service(tmp_path)
+    try:
+        record = await service.create_task("sweep scope", session_id="web:shared")
+        # 没人要求暂停的节点，以及已终态的节点，都不该被这条道改动。
+        service.log_service.update_node_status(record.task_id, record.root_node_id, status="failed")
+        assert service._land_pause_for_stranded_nodes(record.task_id) == []
+        node = service.get_node(record.root_node_id)
+        assert node is not None and node.is_paused is False and node.status == "failed"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_web_mode_pause_writer_does_not_land_pause_it_cannot_observe(tmp_path: Path) -> None:
+    """web 进程看不见 worker 的派发面，直落会把正在跑的节点谎标成已暂停。"""
+    service = _make_service(tmp_path)  # execution_mode == "web"
+    try:
+        record = await service.create_task("web mode", session_id="web:shared")
+        service.log_service.set_node_pause_state(
+            record.task_id,
+            record.root_node_id,
+            pause_requested=True,
+            pause_reason="manual",
+        )
+        assert service._land_pause_for_stranded_nodes(record.task_id) == []
+        node = service.get_node(record.root_node_id)
+        assert node is not None and node.is_paused is False
+    finally:
+        await service.close()

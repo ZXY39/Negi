@@ -136,6 +136,7 @@ from main.service.task_stall_callback import (
     normalize_task_stall_payload,
     resolve_task_stall_callback_token,
     resolve_task_stall_callback_url,
+    task_notice_audience_ok,
 )
 from main.service.task_stall_notifier import (
     TaskStallNotifier,
@@ -1435,7 +1436,43 @@ class MainRuntimeService:
                 remark=remark,
             )
             results.append({'node_id': node_id, 'result': 'paused' if updated is not None else 'not_found'})
+        self._land_pause_for_stranded_nodes(normalized_task_id)
         return {'ok': True, 'task_id': normalized_task_id, 'items': results}
+
+    def _land_pause_for_stranded_nodes(self, task_id: str) -> list[str]:
+        """把"已请求但永远落不了"的暂停直接挂到节点上。
+
+        暂停原本是纯协作式的：`react_loop._check_pause_or_cancel` 是唯一把
+        `pause_requested` 转成 `is_paused` 的地方，而它只在节点真的被跑起来时才执行。
+        节点一旦脱离派发面（dispatcher 里没有它的 entry），操作员点的暂停就永久挂着——
+        2026-09-23 task:321604599eb0 实测 `pause_requested=True` 挂了 50 分钟没落地。
+
+        只处理"已经有人要求暂停"的节点，且只在看得见派发面的进程里判；仍在运行的节点
+        一律不动，保留 `_align_root_node_pause_locked` 的"绝不谎标仍在运行的节点"约束。
+        """
+        if self.execution_mode not in {'embedded', 'worker'}:
+            return []
+        normalized_task_id = self.normalize_task_id(task_id)
+        dispatcher = self.task_actor_service._dispatchers.get(normalized_task_id)
+        live_entries = getattr(dispatcher, '_entries', None) or {}
+        landed: list[str] = []
+        for node in self.list_nodes(normalized_task_id):
+            if not bool(node.pause_requested) or bool(node.is_paused):
+                continue
+            if str(node.status or '').strip().lower() in {'success', 'failed'}:
+                continue
+            if node.node_id in live_entries:
+                continue
+            updated = self.log_service.set_node_pause_state(
+                normalized_task_id,
+                node.node_id,
+                pause_requested=True,
+                is_paused=True,
+                pause_reason=str(node.pause_reason or '').strip() or 'manual',
+            )
+            if updated is not None:
+                landed.append(node.node_id)
+        return landed
 
     async def _apply_resume_node_command(self, task_id: str, *, node_ids: list[str], force: bool = False, schedule_if_inactive: bool = True) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
@@ -2026,6 +2063,7 @@ class MainRuntimeService:
                 )
         # 磁盘治理（P1）防死锁：暂停生效后唤醒该任务在预算队列中排队的工具调用。
         self._abort_queued_waits(task_id)
+        self._land_pause_for_stranded_nodes(task_id)
         return self.get_task(task_id)
 
     async def force_pause_task_durably(self, task_id: str) -> TaskRecord | None:
@@ -4245,7 +4283,7 @@ class MainRuntimeService:
         if task is None:
             return {}
         origin_session_id = self._task_origin_session_id(task)
-        if not origin_session_id.startswith('web:'):
+        if not task_notice_audience_ok(origin_session_id):
             return {}
         runtime_state = self.log_service.read_runtime_state(task.task_id) or {}
         stall_reason = self.classify_task_stall_reason(task.task_id, runtime_state=runtime_state)

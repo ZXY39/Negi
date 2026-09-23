@@ -600,3 +600,90 @@ async def test_notifier_suppresses_then_emits_around_tool_deadline() -> None:
         assert service.emitted[0]["bucket_minutes"] == 30
     finally:
         await notifier.close()
+
+
+def test_task_notice_audience_accepts_web_and_channel_sessions() -> None:
+    from main.service.task_stall_callback import task_notice_audience_ok
+
+    assert task_notice_audience_ok("web:ceo-1") is True
+    assert task_notice_audience_ok("ext:qq-official:f8a8001865631301") is True
+    # 中国渠道子系统移除后，这类会话只剩可读转录，没有活的投递路径。
+    assert task_notice_audience_ok("china:legacy") is False
+    assert task_notice_audience_ok("") is False
+    assert task_notice_audience_ok(None) is False
+
+
+def test_notifier_audience_helper_resolves_origin_session_not_task_prefix() -> None:
+    from main.service.task_stall_notifier import TaskStallNotifier
+
+    task = SimpleNamespace(session_id="ext:qq-official:abc")
+    service = SimpleNamespace(_task_origin_session_id=lambda _task: "ext:qq-official:abc")
+    assert TaskStallNotifier._has_notice_audience(service, task) is True
+    # 服务没有该探针时回落到 task.session_id，仍不得按 web: 拒绝。
+    assert TaskStallNotifier._has_notice_audience(SimpleNamespace(), task) is True
+
+
+@pytest.mark.asyncio
+async def test_build_task_stall_payload_reaches_channel_session(tmp_path: Path) -> None:
+    """两道 `web:` 闸门的第二道在 payload 构造里，只放行网页会话会让渠道静默归零。
+
+    实盘：task:321604599eb0（会话 ext:qq-official:*）静默 57 分钟，
+    `last_stall_notice_bucket_minutes` 始终为 0，一条告警都没发。
+    """
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    service._assert_worker_available = lambda: None
+    try:
+        service.store.upsert_worker_status(
+            worker_id="worker:test",
+            role="task_worker",
+            status="running",
+            updated_at=now_iso(),
+            payload={"active_task_count": 1, "execution_mode": "worker"},
+        )
+        task = await service.create_task("channel stall", session_id="ext:qq-official:stall-demo")
+        silent_at = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat(timespec="microseconds")
+        service.log_service.update_task_runtime_meta(task.task_id, last_visible_output_at=silent_at)
+
+        assert service.classify_task_stall_reason(task.task_id) == TASK_STALL_REASON_SUSPECTED_STALL
+        payload = service.build_task_stall_payload(task.task_id, bucket_minutes=20)
+        assert payload, "渠道会话必须能构造出失速载荷"
+        assert str(payload.get("session_id") or "") == "ext:qq-official:stall-demo"
+        assert int(payload.get("bucket_minutes") or 0) >= 20
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_build_task_stall_payload_still_skips_legacy_china_session(tmp_path: Path) -> None:
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    service._assert_worker_available = lambda: None
+    try:
+        service.store.upsert_worker_status(
+            worker_id="worker:test",
+            role="task_worker",
+            status="running",
+            updated_at=now_iso(),
+            payload={"active_task_count": 1, "execution_mode": "worker"},
+        )
+        task = await service.create_task("legacy stall", session_id="china:dead-audience")
+        silent_at = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat(timespec="microseconds")
+        service.log_service.update_task_runtime_meta(task.task_id, last_visible_output_at=silent_at)
+        assert service.build_task_stall_payload(task.task_id, bucket_minutes=20) == {}
+    finally:
+        await service.close()

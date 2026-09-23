@@ -45,6 +45,16 @@ def _int_value(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+RUNTIME_FAULT_MARKER = 'runtime_fault:'
+
+
+def _runtime_fault_class(error_text: str) -> str:
+    """把"运行时自身缺陷"型暂停单独标出来：resume 只会让节点再撞同一条异常。"""
+    if RUNTIME_FAULT_MARKER not in str(error_text or ''):
+        return ''
+    return 'runtime_fault（运行时自身缺陷，resume 无效，需操作员重启 worker 后再恢复）'
+
+
 def format_local_timestamp(value: Any) -> str:
     """把 ISO 时间戳渲染为本地带偏移格式，供提示词展示。
 
@@ -185,14 +195,19 @@ def _task_node_error_lines(event: dict[str, Any], retrieval_parts: list[str], *,
     error_text = _non_empty_text(event.get('error_text') or event.get('remark')) or 'Unknown node error.'
     task_title = _non_empty_text(event.get('task_title') or task_id) or 'task'
     _append_retrieval_parts(retrieval_parts, 'task_node_error', task_title, task_id, node_title, node_id, pause_reason, error_text[:output_inline_limit])
+    error_line = (
+        f'  Error excerpt: {error_text[:output_inline_limit].rstrip()}...'
+        if len(error_text) > output_inline_limit
+        else f'  Error: {error_text}'
+    )
+    failure_class = _runtime_fault_class(error_text)
     lines = [
         f'- Task {task_title} ({task_id}) has a node paused after an error',
         f'  Node: {node_title} ({node_id})',
         f'  Pause reason: {pause_reason}',
-        f'  Error: {error_text}',
+        *([f'  Failure class: {failure_class}'] if failure_class else []),
+        error_line,
     ]
-    if len(error_text) > output_inline_limit:
-        lines[3] = f'  Error excerpt: {error_text[:output_inline_limit].rstrip()}...'
     # 重试状态：让模型知道这是第几次失败、上次/下次时间，而不是误以为每次都是第一次。
     # 数据由 session_service 从 heartbeat_node_retry_state 表 + task_error_logs 注入。
     failed = _int_value(event.get('retry_attempt'), 0)

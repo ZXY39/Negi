@@ -21,6 +21,23 @@ TASK_STALL_REASON_NOT_IN_PROGRESS = "not_in_progress"
 TASK_STALL_REASON_MISSING_TASK = "missing_task"
 # 子树分发屏障期间的"无可见输出"是预期行为，不是失速（不可操作）。
 TASK_STALL_REASON_DISTRIBUTION_BARRIER = "distribution_barrier"
+# 中国渠道子系统移除后，`china:*` 会话只剩可读转录，没有活的投递路径。
+LEGACY_UNDELIVERABLE_SESSION_PREFIX = "china:"
+
+
+def task_notice_audience_ok(session_id: Any) -> bool:
+    """这条任务的提醒事件有没有活的受众（`web:` 与 `ext:` 渠道会话都算）。
+
+    失速提醒历史上被 `startswith("web:")` 挡成只发网页会话，而 `task_terminal` /
+    `task_node_error` / `task_distribution_error` / `shutdown_resume` 四类都没有这个
+    限制；渠道会话（`ext:qq-official:*`）静默一小时也无人告知。判据统一到这里，
+    避免再被复制成第二份前缀白名单。
+    """
+    text = str(session_id or "").strip()
+    if not text:
+        return False
+    return not text.startswith(LEGACY_UNDELIVERABLE_SESSION_PREFIX)
+
 _TASK_STALL_REASONS = {
     TASK_STALL_REASON_SUSPECTED_STALL,
     TASK_STALL_REASON_USER_PAUSED,

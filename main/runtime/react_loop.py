@@ -60,7 +60,7 @@ from g3ku.runtime.tool_watchdog import (
 )
 from main.governance.exec_tool_policy import EXEC_TOOL_EXECUTOR_NAME, EXEC_TOOL_FAMILY_ID
 from main.governance.tool_context import apply_runtime_tool_context_projection
-from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception
+from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception, is_runtime_self_fault
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
 from main.runtime.append_notice_context import (
@@ -140,6 +140,9 @@ _UNCOMPACTED_COMPLETED_STAGE_WINDOWS = 3
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
+# 与上面两条同档：一次抖动不该熔断，但运行时自身缺陷必须在一分钟内被叫停。
+# 实盘基线：2026-09-23 task:321604599eb0 同一 NameError 连撞 18 次无人发现。
+_TOOL_FAULT_LIMIT = 5
 _STAGE_ONLY_TRANSITION_LIMIT = 5
 _NODE_CONTRACT_ECHO_REPAIR_LIMIT = 2
 _PROVIDER_RETRY_LIMIT = 3
@@ -278,6 +281,7 @@ class ReActToolLoop:
         xml_repair_last_issue = ''
         contract_echo_attempt_count = 0
         read_only_repeat_violation_counts: dict[str, int] = {}
+        tool_fault_counts: dict[str, int] = {}
         persisted_frame = self._runtime_frame(task.task_id, node.node_id)
         if isinstance(persisted_frame, dict):
             try:
@@ -1358,6 +1362,15 @@ class ReActToolLoop:
                     publish_snapshot=True,
                 )
                 message_history = list(prepared_history)
+                tool_fault_hit = self._register_tool_fault_results(
+                    results=results,
+                    fault_counts=tool_fault_counts,
+                )
+                if tool_fault_hit is not None:
+                    return self._tool_fault_failure(
+                        signature=str(tool_fault_hit.get('signature') or ''),
+                        count=int(tool_fault_hit.get('count') or 0),
+                    )
                 if stage_only_transition_turn:
                     stage_turn_succeeded = self._tool_results_succeeded(results)
                     stage_goal = str((tool_calls[0].get('arguments') or {}).get('stage_goal') or '').strip()
@@ -3319,6 +3332,7 @@ class ReActToolLoop:
                 started_at = now_iso()
                 started_monotonic = time.monotonic()
                 slot_lease = None
+                runtime_fault = ''
                 controller = getattr(self, '_adaptive_tool_budget_controller', None)
                 if controller is not None and not self._should_bypass_execution_budget(call=call):
                     slot_lease = await controller.acquire_tool_slot(
@@ -3424,6 +3438,10 @@ class ReActToolLoop:
                 except Exception as exc:  # pragma: no cover - defensive fallback
                     raw_result = None
                     tool_content = f'Error executing {call.name}: {describe_exception(exc)}'
+                    runtime_fault = self._runtime_fault_signature(
+                        tool_name=str(call.name or ''),
+                        exc=exc,
+                    )
                 finally:
                     if controller is not None:
                         controller.release_tool_slot(slot_lease)
@@ -3448,6 +3466,7 @@ class ReActToolLoop:
                 return {
                     'index': index,
                     'raw_result': raw_result,
+                    'runtime_fault': runtime_fault,
                     'live_state': {
                         'tool_call_id': str(call.id or ''),
                         'tool_name': str(call.name or 'tool'),
@@ -4318,6 +4337,66 @@ class ReActToolLoop:
             blocking_reason=(
                 f'Invalid stage progression detected {int(count or 0)} consecutive times. '
                 f'Latest issue: {text}.{suffix}'
+            ),
+            failure_disposition='pause',
+        )
+
+    @staticmethod
+    def _runtime_fault_signature(*, tool_name: str, exc: BaseException | None) -> str:
+        """给"运行时自身缺陷"型工具异常打一个可累计签名，其余异常返回空串。"""
+        if not is_runtime_self_fault(exc):
+            return ''
+        normalized_tool = str(tool_name or '').strip() or 'tool'
+        return f'runtime_fault:{normalized_tool}:{describe_exception(exc)}'
+
+    @staticmethod
+    def _register_tool_fault_results(
+        *,
+        results: list[dict[str, Any]],
+        fault_counts: dict[str, int],
+    ) -> dict[str, Any] | None:
+        """按 (工具, 异常文本) 累计运行时缺陷，返回首个撞上限的命中。
+
+        不按"连续次数"计：实盘 18 连败中间夹着宽限成功的其它工具轮，连续判据会被打断。
+        同一工具一旦正常返回就丢掉它的签名，避免把已经恢复的工具继续算成在坏。
+        """
+        executed_tools: set[str] = set()
+        faulted_tools: set[str] = set()
+        for item in list(results or []):
+            if not isinstance(item, dict):
+                continue
+            tool_name = str((item.get('live_state') or {}).get('tool_name') or '').strip()
+            executed_tools.add(tool_name)
+            signature = str(item.get('runtime_fault') or '').strip()
+            if not signature:
+                continue
+            faulted_tools.add(tool_name)
+            fault_counts[signature] = int(fault_counts.get(signature, 0) or 0) + 1
+        recovered_tools = executed_tools - faulted_tools
+        if recovered_tools:
+            for signature in list(fault_counts):
+                parts = signature.split(':', 2)
+                if len(parts) >= 2 and parts[1] in recovered_tools:
+                    fault_counts.pop(signature, None)
+        for signature, count in fault_counts.items():
+            if int(count or 0) >= _TOOL_FAULT_LIMIT:
+                return {'signature': signature, 'count': int(count)}
+        return None
+
+    @classmethod
+    def _tool_fault_failure(cls, *, signature: str, count: int) -> NodeFinalResult:
+        text = str(signature or '').strip() or 'runtime_fault:<unknown>'
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='tool fault guard triggered',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                f'{text} —— 同一工具连续 {int(count or 0)} 次抛同一条运行时异常。'
+                '这是运行时自身缺陷，不是工具用法问题：resume 只会再撞同一条异常，'
+                '需操作员重启 worker 后再恢复该节点。'
             ),
             failure_disposition='pause',
         )

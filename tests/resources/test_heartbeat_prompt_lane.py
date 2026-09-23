@@ -149,3 +149,54 @@ def test_node_error_bundle_escalation_forces_user_report() -> None:
     # 升级时不再给"自行 resume"的常规指引，改为强制上报 + keep_paused
     assert "Use manage_task_nodes to resume" not in text
     assert "keep_paused" in text
+
+
+def test_node_error_bundle_marks_runtime_fault_class() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error",
+            "error_text": "runtime_fault:submit_next_stage:NameError: name '_X' is not defined",
+            "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
+        }],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "Failure class: runtime_fault" in text
+    assert "重启 worker" in text
+
+
+def test_node_error_bundle_omits_failure_class_for_ordinary_errors() -> None:
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "error_text": "boom", "retry_attempt": 0, "retry_cap": 5, "retry_escalated": False,
+        }],
+    )
+    assert "Failure class" not in str(_field(lane, "event_bundle_text"))
+
+
+def test_node_error_bundle_keeps_error_excerpt_after_failure_class_slot() -> None:
+    """`Failure class` 插在 Error 之前，长错误正文的 excerpt 分支不能错位。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[{
+            "reason": "task_node_error", "task_id": "task:t", "node_id": "node:n",
+            "pause_reason": "error",
+            "error_text": "runtime_fault:exec:AttributeError: " + ("very long " * 900),
+            "retry_attempt": 1, "retry_cap": 5, "retry_escalated": False,
+        }],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "Error excerpt:" in text
+    assert "Failure class: runtime_fault" in text

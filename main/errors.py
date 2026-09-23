@@ -1,3 +1,6 @@
+import os
+
+
 class TaskPausedError(Exception):
     pass
 
@@ -35,4 +38,41 @@ def describe_exception(exc: BaseException | None) -> str:
     if rendered and rendered != f'{name}()':
         return f'{name}: {rendered}'
     return name
+
+
+_RUNTIME_SELF_FAULT_TYPES = frozenset({
+    'NameError',
+    'UnboundLocalError',
+    'AttributeError',
+    'ImportError',
+    'TypeError',
+})
+
+
+def is_runtime_self_fault(exc: BaseException | None) -> bool:
+    """区分"运行时自身缺陷"与"工具用法错误"。
+
+    只认最后一帧落在本仓库运行时包（`main/`、`g3ku/`）内的那批异常：炸在 `tools/`
+    里是工具实现的输入校验问题，炸在标准库或三方库里多半是数据问题，两者都不该
+    被当成运行时坏了。2026-09-23 事故里 worker 进程加载了改到一半的 `log_service.py`，
+    每次 `submit_next_stage` 抛同一个 `NameError`，空转 24 轮无人发现。
+    """
+    if exc is None:
+        return False
+    if type(exc).__name__ not in _RUNTIME_SELF_FAULT_TYPES:
+        return False
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    owned_prefixes = (
+        os.path.join(root, 'main') + os.sep,
+        os.path.join(root, 'g3ku') + os.sep,
+    )
+    last_file = ''
+    traceback_frame = exc.__traceback__
+    while traceback_frame is not None:
+        last_file = str(traceback_frame.tb_frame.f_code.co_filename or '')
+        traceback_frame = traceback_frame.tb_next
+    if not last_file:
+        return False
+    normalized = os.path.abspath(last_file) + os.sep
+    return any(normalized.startswith(prefix) for prefix in owned_prefixes)
 

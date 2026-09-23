@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from main.service.task_stall_callback import task_notice_audience_ok
+
 
 def _parse_iso(value: Any) -> datetime | None:
     text = str(value or "").strip()
@@ -142,17 +144,17 @@ class TaskStallNotifier:
         self.minute_seconds = max(0.001, float(minute_seconds or 60.0))
 
     @staticmethod
-    def _is_web_task(service: Any, task: Any) -> bool:
+    def _has_notice_audience(service: Any, task: Any) -> bool:
         origin_getter = getattr(service, "_task_origin_session_id", None)
         if callable(origin_getter):
             session_id = str(origin_getter(task) or "").strip()
         else:
             session_id = str(getattr(task, "session_id", "") or "").strip()
-        return session_id.startswith("web:")
+        return task_notice_audience_ok(session_id)
 
     def start_task(self, task_id: str) -> None:
         task = self._service.get_task(task_id)
-        if task is None or not self._is_web_task(self._service, task):
+        if task is None or not self._has_notice_audience(self._service, task):
             self.cancel_task(task_id)
             return
         runtime_meta = self._service.log_service.read_task_runtime_meta(task.task_id) or {}
@@ -171,7 +173,7 @@ class TaskStallNotifier:
 
     def reset_visible_output(self, task_id: str, *, occurred_at: str | None = None) -> None:
         task = self._service.get_task(task_id)
-        if task is None or not self._is_web_task(self._service, task):
+        if task is None or not self._has_notice_audience(self._service, task):
             self.cancel_task(task_id)
             return
         reset_at = str(occurred_at or "").strip() or self._service._stall_now_iso()
@@ -226,7 +228,7 @@ class TaskStallNotifier:
             return
         self.cancel_task(key)
         task = self._service.get_task(key)
-        if task is None or not self._is_web_task(self._service, task):
+        if task is None or not self._has_notice_audience(self._service, task):
             return
         runtime_state = self._service.log_service.read_runtime_state(key) or {}
         is_actionable = getattr(self._service, "is_task_stall_actionable", None)
@@ -276,7 +278,7 @@ class TaskStallNotifier:
 
     async def _emit_if_still_due(self, task_id: str) -> None:
         task = self._service.get_task(task_id)
-        if task is None or not self._is_web_task(self._service, task):
+        if task is None or not self._has_notice_audience(self._service, task):
             return
         runtime_state = self._service.log_service.read_runtime_state(task_id) or {}
         is_actionable = getattr(self._service, "is_task_stall_actionable", None)
