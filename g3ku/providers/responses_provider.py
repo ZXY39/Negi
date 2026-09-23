@@ -200,13 +200,14 @@ class ResponsesProvider(LLMProvider):
                 "content": [{"type": "input_text", "text": f"[SYSTEM]\n{system_prompt}\n[END SYSTEM]"}],
             })
 
+        # text.verbosity is an OpenAI-only extension: /responses endpoints that proxy
+        # to a Chat Completions backend reject the whole request over it.
         body: dict[str, Any] = {
             "model": model,
             "store": False,
             "stream": True,
             "instructions": system_prompt,
             "input": input_items,
-            "text": {"verbosity": "high" if reasoning_effort == "high" else "medium"},
             "include": ["reasoning.encrypted_content"],
             "prompt_cache_key": str(prompt_cache_key or _prompt_cache_key(messages)),
         }

@@ -80,6 +80,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
+- 模型切到 responses 协议后「测试连接」通过、真实回合却 HTTP 400（字段级不兼容）→ `config-and-models.md`「llm_config 子系统」
 - 模型配置弹窗里一打开下拉，整张表单就往上跳或弹窗变高 → `web-and-admin.md`「Frontend Theme And Layout Contract」（展开面板必须脱离滚动容器挂到 body）
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-and-skill-system.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
 - 节点 error_text 是不带 `Error executing` 前缀的裸异常（`FileNotFoundError: …png` 一类）而对应工具结果显示 success、或 `content_open` 声称图片已打开却没有进上下文 → `tool-and-skill-system.md`「fixed builtin tools」（图片 reopen 的存在性校验与 overlay 单图降级）

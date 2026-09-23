@@ -1654,7 +1654,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "stream": True,
             "instructions": system_prompt,
             "input": input_items,
-            "text": {"verbosity": "medium"},
             "include": ["reasoning.encrypted_content"],
             "prompt_cache_key": str(prompt_cache_key or _preview_prompt_cache_key(list(request_messages or []))),
         }
