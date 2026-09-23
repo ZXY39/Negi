@@ -4080,6 +4080,36 @@ textarea {
     z-index: 1;
 }
 
+/* 顶边拖拽把手。必须是 .ceo-input-row 的第一个子节点：左侧按钮组是后置的
+   定位元素，绘制在把手之上，把手才不会吃掉按钮顶部的点击。 */
+.ceo-input-resize-handle {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 8px;
+    cursor: ns-resize;
+    touch-action: none;
+    display: flex;
+    justify-content: center;
+}
+
+.ceo-input-resize-handle::after {
+    content: "";
+    width: 44px;
+    height: 3px;
+    margin-top: 2px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.ceo-input-resize-handle:hover::after,
+.ceo-input-resize-handle.is-resizing::after {
+    opacity: 1;
+}
+
 .ceo-input-leading-group {
     display: inline-flex;
     align-items: center;

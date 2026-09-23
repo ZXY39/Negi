@@ -958,9 +958,10 @@
     height: auto;
 }
 
-/* 17. 输入区：贴底工具条。脑图标 / 附件 / 输入框 / 发送暂停四个控件同高
-   （40px）、同圆角（--ui-radius-control）、同一条中心线；工具条自身不再画
-   背景与分隔线，控件直接坐在页面背景上。 */
+/* 17. 输入区：占聊天列一半宽度、水平居中的贴底工具条。脑图标 / 附件 / 输入框 /
+   发送暂停四个控件同高（40px）、同圆角（--ui-radius-control）、同一条中心线；
+   工具条自身不再画背景与分隔线，控件直接坐在页面背景上。
+   居中之后两侧留白由 margin 负责，padding-inline 归零，保证「框」本身就是半宽。 */
 [data-ui-version="v2"] .chat-input-area {
     position: relative;
     inset: auto;
@@ -969,8 +970,9 @@
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: var(--ui-space-2) var(--ui-space-3);
-    width: 100%;
-    padding: 12px var(--ui-space-6) 20px;
+    width: 50%;
+    margin-inline: auto;
+    padding: 12px 0 20px;
     background: transparent;
     border: 0;
     border-radius: 0;
@@ -1102,6 +1104,7 @@
     }
 
     [data-ui-version="v2"] .chat-input-area {
+        width: 100%;
         padding-right: var(--ui-space-3);
         padding-left: var(--ui-space-3);
     }

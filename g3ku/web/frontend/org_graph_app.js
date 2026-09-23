@@ -105,6 +105,8 @@ const S = {
     ceoPauseBusy: false,
     ceoUploads: [],
     ceoUploadBusy: false,
+    // 顶边拖拽得到的输入框高度；0 = 未拖过，仍按内容自动增高。
+    ceoInputManualHeight: 0,
     // 编辑重发模式:{sessionId, turnId, prevDraft} | null;Fork/编辑相关辅助状态。
     ceoEditResend: null,
     ceoWsOpenWaiters: [],
@@ -458,6 +460,7 @@ const U = {
     ceoFeed: document.getElementById("ceo-chat-feed"),
     ceoScrollToLatestBtn: document.getElementById("ceo-scroll-to-latest-btn"),
     ceoInput: document.getElementById("ceo-input"),
+    ceoInputResizeHandle: document.getElementById("ceo-input-resize-handle"),
     ceoAttach: document.getElementById("ceo-attach-btn"),
     ceoFileInput: document.getElementById("ceo-file-input"),
     ceoUploadList: document.getElementById("ceo-upload-list"),
@@ -4968,8 +4971,39 @@ function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, se
 
 function syncCeoInputHeight() {
     if (!U.ceoInput) return;
+    // 拖出来的高度是用户的显式意图：不再按内容重排，内容超出时靠 overflow-y 滚动。
+    if (S.ceoInputManualHeight) return;
     U.ceoInput.style.height = "auto";
     U.ceoInput.style.height = `${Math.min(U.ceoInput.scrollHeight, 200)}px`;
+}
+
+function beginCeoInputResize(event) {
+    if (!U.ceoInput || event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const startY = event.clientY;
+    const startHeight = U.ceoInput.getBoundingClientRect().height;
+    const floor = Math.round(parseFloat(getComputedStyle(U.ceoInput).minHeight)) || 0;
+    // 聊天列高度是唯一合理的上限：输入框最多吃掉六成，消息流不能被顶没。
+    const wrapper = U.ceoInput.closest(".chat-wrapper");
+    const ceiling = Math.floor((wrapper?.clientHeight || 0) * 0.6);
+    handle.classList.add("is-resizing");
+    const onMove = (moveEvent) => {
+        const desired = startHeight + (startY - moveEvent.clientY);
+        const height = Math.round(Math.min(Math.max(desired, floor), ceiling));
+        S.ceoInputManualHeight = height;
+        // 输入框带 CSS max-height，不抬起来刚写进去的高度就会被裁回原样。
+        U.ceoInput.style.maxHeight = "none";
+        U.ceoInput.style.height = `${height}px`;
+    };
+    const stop = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", stop);
+        handle.classList.remove("is-resizing");
+    };
+    // 把手只有 8px 高，鼠标一出发就会离开它；监听挂在 window 上才接得住后续事件。
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", stop);
 }
 
 function syncCeoAttachButton() {
@@ -14670,6 +14704,7 @@ function bind() {
         scheduleSyncCeoComposerUsageOutline();
         scheduleCeoComposerUsageRefresh();
     });
+    U.ceoInputResizeHandle?.addEventListener("pointerdown", beginCeoInputResize);
     window.addEventListener("resize", () => scheduleSyncCeoComposerUsageOutline());
     U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);
