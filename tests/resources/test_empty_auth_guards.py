@@ -1224,6 +1224,16 @@ def test_probe_config_uses_30_second_timeout(monkeypatch) -> None:
 
     captured: dict[str, object] = {}
 
+    class _StreamContext:
+        def __init__(self, response: httpx.Response) -> None:
+            self._response = response
+
+        def __enter__(self) -> httpx.Response:
+            return self._response
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
     class _FakeClient:
         def __init__(self, *args, **kwargs):
             captured["timeout"] = kwargs.get("timeout")
@@ -1237,12 +1247,17 @@ def test_probe_config_uses_30_second_timeout(monkeypatch) -> None:
         def get(self, url, headers=None):
             return httpx.Response(200, json={"data": []})
 
+        def stream(self, method, url, headers=None, json=None):
+            captured["stream_url"] = url
+            return _StreamContext(httpx.Response(200, json={"id": "resp_probe"}))
+
     monkeypatch.setattr(probe_strategies_module.httpx, "Client", _FakeClient)
 
     result = probe_config(config)
 
     assert result.success is True
     assert captured["timeout"] == 30
+    assert captured["stream_url"].endswith("/v1/chat/completions")
 
 
 def test_probe_config_for_concurrency_uses_minimal_inference_request_for_openai_compatible() -> None:
@@ -1289,7 +1304,8 @@ def test_probe_config_rotates_api_keys_after_auth_failure() -> None:
     assert result.success is True
     assert result.diagnostics["api_key_count"] == 2
     assert result.diagnostics["api_key_attempts"] == 2
-    assert seen_tokens == ["Bearer bad-key", "Bearer good-key"]
+    # catalog 401 on the first key, then catalog + inference envelope on the second.
+    assert seen_tokens == ["Bearer bad-key", "Bearer good-key", "Bearer good-key"]
 
 
 def test_probe_config_does_not_rotate_api_keys_after_bad_request() -> None:
@@ -1312,7 +1328,9 @@ def test_probe_config_does_not_rotate_api_keys_after_bad_request() -> None:
 
     assert result.success is False
     assert result.http_status == 400
-    assert result.message == "Fallback request failed."
+    assert result.message.startswith("Fallback request failed:")
+    assert "bad payload" in result.message
+    assert result.diagnostics["upstream_detail"] == "bad payload"
     assert result.diagnostics["api_key_count"] == 2
     assert result.diagnostics["api_key_attempts"] == 1
     assert seen_tokens == ["Bearer bad-key", "Bearer bad-key"]

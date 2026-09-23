@@ -6,6 +6,10 @@ from typing import Any
 
 import httpx
 
+from g3ku.json_schema_utils import (
+    normalize_openai_tool_definitions,
+    normalize_responses_tool_definitions,
+)
 from g3ku.utils.api_keys import parse_api_keys, should_switch_api_key_for_http_status
 
 from .enums import AuthMode, ProbeStatus, ProtocolAdapter
@@ -135,54 +139,120 @@ def _build_openai_headers(config: NormalizedProviderConfig) -> dict[str, str]:
 
 
 
+def _probe_reasoning_effort(config: NormalizedProviderConfig) -> str:
+    effort = str(config.parameters.get("reasoning_effort") or "").strip().lower()
+    return "" if effort in {"", "none"} else effort
+
+
+PROBE_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "g3ku_connection_probe",
+        "description": "Connection probe placeholder. Never call it.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+
 def _build_openai_fallback_payload(config: NormalizedProviderConfig) -> tuple[str, dict[str, Any]]:
-    endpoint = "/responses" if config.protocol_adapter == ProtocolAdapter.OPENAI_RESPONSES else "/chat/completions"
-    if endpoint == "/responses":
-        return endpoint, {"model": config.default_model, "input": "ping", "max_output_tokens": 1}
-    return endpoint, {
+    """A ping shaped like the real request.
+
+    The field set mirrors `ResponsesProvider.chat` / `OpenAIChatProvider.chat` for a
+    tools-present call, and the tool goes through the same normalizer each sender uses,
+    so a backend that rejects one of those fields fails 测试连接 instead of failing the
+    first real turn.
+    """
+    if config.protocol_adapter == ProtocolAdapter.OPENAI_RESPONSES:
+        payload: dict[str, Any] = {
+            "model": config.default_model,
+            "store": False,
+            "stream": True,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "ping"}]}],
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "g3ku-connection-probe",
+            "max_output_tokens": 1,
+            "tools": normalize_responses_tool_definitions([PROBE_TOOL]),
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
+        effort = _probe_reasoning_effort(config)
+        if effort:
+            payload["reasoning"] = {"effort": effort}
+        return "/responses", payload
+    payload = {
         "model": config.default_model,
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 1,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "tools": normalize_openai_tool_definitions([PROBE_TOOL]),
+        "tool_choice": "auto",
     }
+    effort = _probe_reasoning_effort(config)
+    if effort:
+        payload["reasoning_effort"] = effort
+    return "/chat/completions", payload
 
 
-def _probe_openai_minimal_inference(client: httpx.Client, config: NormalizedProviderConfig) -> ProbeResult:
+def _extract_upstream_error_detail(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return "no detail returned"
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text[:200]
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        parts = [str(error.get("message") or "").strip(), str(error.get("code") or "").strip()]
+        detail = " | ".join(part for part in parts if part)
+        if detail:
+            return detail[:200]
+    if isinstance(error, str) and error.strip():
+        return error.strip()[:200]
+    return text[:200]
+
+
+def _probe_openai_inference_envelope(
+    client: httpx.Client,
+    config: NormalizedProviderConfig,
+    *,
+    label: str = "Inference",
+    extra_diagnostics: dict[str, Any] | None = None,
+) -> ProbeResult:
     headers = _build_openai_headers(config)
     endpoint, payload = _build_openai_fallback_payload(config)
     start = time.perf_counter()
-    response = client.post(_join_url(config.base_url, endpoint), headers=headers, json=payload)
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    if response.status_code in {401, 403}:
-        return _failure_result(
-            config,
-            status=ProbeStatus.AUTH_ERROR,
-            http_status=response.status_code,
-            latency_ms=latency_ms,
-            message="Authentication failed during minimal inference request.",
-        )
-    try:
-        response_payload = response.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=response,
-            latency_ms=latency_ms,
-            label="Minimal inference endpoint returned a non-JSON response",
-        )
-    if 200 <= response.status_code < 300:
-        return _success_result(
-            config,
-            latency_ms=latency_ms,
-            http_status=response.status_code,
-            message="Minimal inference request succeeded.",
-            diagnostics={"response_keys": sorted(response_payload.keys()) if isinstance(response_payload, dict) else []},
-        )
+    with client.stream("POST", _join_url(config.base_url, endpoint), headers=headers, json=payload) as response:
+        http_status = response.status_code
+        if http_status in {401, 403}:
+            return _failure_result(
+                config,
+                status=ProbeStatus.AUTH_ERROR,
+                http_status=http_status,
+                latency_ms=int((time.perf_counter() - start) * 1000),
+                message="Authentication failed during inference request.",
+            )
+        if 200 <= http_status < 300:
+            return _success_result(
+                config,
+                latency_ms=int((time.perf_counter() - start) * 1000),
+                http_status=http_status,
+                message=f"{label} request succeeded.",
+                diagnostics={
+                    **(extra_diagnostics or {}),
+                    "request_fields": sorted(payload.keys()),
+                    "response_content_type": _response_content_type(response),
+                },
+            )
+        detail = _extract_upstream_error_detail(response.read().decode("utf-8", "ignore"))
     return _failure_result(
         config,
         status=ProbeStatus.INVALID_RESPONSE,
-        http_status=response.status_code,
-        latency_ms=latency_ms,
-        message="Minimal inference request failed.",
+        http_status=http_status,
+        latency_ms=int((time.perf_counter() - start) * 1000),
+        message=f"{label} request failed: {detail}",
+        diagnostics={**(extra_diagnostics or {}), "upstream_detail": detail},
     )
 
 
@@ -241,47 +311,27 @@ def _probe_openai_compatible(client: httpx.Client, config: NormalizedProviderCon
                 model_count = len(payload["data"])
             elif isinstance(payload, list):
                 model_count = len(payload)
+            # A readable model catalog only proves the credentials reach the provider;
+            # the model itself is only exercised by a real inference envelope.
+            envelope = _probe_openai_inference_envelope(client, config, label="Envelope")
+            if not envelope.success:
+                return envelope.model_copy(
+                    update={
+                        "diagnostics": {**envelope.diagnostics, "model_count": model_count, "catalog_ok": True}
+                    }
+                )
             return _success_result(
                 config,
                 latency_ms=latency_ms,
                 http_status=response.status_code,
                 message="Model catalog request succeeded.",
-                diagnostics={"model_count": model_count},
+                diagnostics={"model_count": model_count, "envelope_checked": True},
             )
-    endpoint, payload = _build_openai_fallback_payload(config)
-    fallback = client.post(_join_url(config.base_url, endpoint), headers=headers, json=payload)
-    if fallback.status_code in {401, 403}:
-        return _failure_result(
-            config,
-            status=ProbeStatus.AUTH_ERROR,
-            http_status=fallback.status_code,
-            latency_ms=latency_ms,
-            message="Authentication failed during fallback request.",
-        )
-    try:
-        fallback_payload = fallback.json()
-    except json.JSONDecodeError:
-        return _non_json_failure(
-            config,
-            response=fallback,
-            latency_ms=latency_ms,
-            label="Fallback endpoint returned a non-JSON response",
-        )
-    if 200 <= fallback.status_code < 300:
-        return _success_result(
-            config,
-            latency_ms=latency_ms,
-            http_status=fallback.status_code,
-            message="Fallback request succeeded.",
-            diagnostics={"fallback_used": True, "response_keys": sorted(fallback_payload.keys())},
-        )
-    return _failure_result(
+    return _probe_openai_inference_envelope(
+        client,
         config,
-        status=ProbeStatus.INVALID_RESPONSE,
-        http_status=fallback.status_code,
-        latency_ms=latency_ms,
-        message="Fallback request failed.",
-        diagnostics={"fallback_used": True},
+        label="Fallback",
+        extra_diagnostics={"fallback_used": True},
     )
 
 
@@ -313,7 +363,7 @@ def _probe_single_config_for_concurrency(
     timeout_value = _PROBE_TIMEOUT_SECONDS
     try:
         with httpx.Client(timeout=timeout_value, transport=transport, follow_redirects=True) as client:
-            return _probe_openai_minimal_inference(client, config)
+            return _probe_openai_inference_envelope(client, config)
     except httpx.TimeoutException:
         return _failure_result(config, status=ProbeStatus.TIMEOUT, message="Probe timed out.")
     except (httpx.ConnectError, httpx.NetworkError, httpx.RemoteProtocolError):
