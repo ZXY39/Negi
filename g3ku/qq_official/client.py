@@ -12,6 +12,11 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+# SSE 是长连接：服务端每 SSE_HEARTBEAT_INTERVAL_SECONDS(15s) 发一条 `: keep-alive`，
+# 读超时必须容得下好几次心跳缺席。用客户端默认的 30s 时，事件循环被大会话转录重写
+# 占住几秒就会掐断这条流，泵每轮都重连并甩一条 ReadTimeout 栈（无害但把真故障埋进噪音里）。
+SSE_STREAM_READ_TIMEOUT_SECONDS = 90.0
+
 
 class ExternalApiClient:
     def __init__(self, base_url: str, token: str, *, transport: Any = None):
@@ -81,7 +86,12 @@ class ExternalApiClient:
         headers = self._headers({"Accept": "text/event-stream"})
         if last_seq > 0:
             headers["Last-Event-ID"] = str(last_seq)
-        async with self._client.stream("GET", f"/sessions/{session_id}/events", headers=headers) as response:
+        async with self._client.stream(
+            "GET",
+            f"/sessions/{session_id}/events",
+            headers=headers,
+            timeout=httpx.Timeout(SSE_STREAM_READ_TIMEOUT_SECONDS, connect=5.0),
+        ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if line.startswith("data:"):

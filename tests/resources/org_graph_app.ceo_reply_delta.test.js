@@ -143,7 +143,14 @@ function loadApp() {
             return rafQueue.length;
         },
         cancelAnimationFrame: () => {},
-        WebSocket: function WebSocket() {},
+        WebSocket: function WebSocket() {
+            this.readyState = 0;
+            this.close = () => {};
+            this.send = () => {};
+        },
+        ApiClient: {
+            getCeoWsUrl: (sessionId) => `ws://test/api/ws/ceo?session_id=${encodeURIComponent(String(sessionId || ""))}`,
+        },
         addEventListener() {},
         removeEventListener() {},
     };
@@ -160,6 +167,7 @@ function loadApp() {
             renderCeoAssistantTextIntoTurn,
             getCeoSessionSnapshotCache,
             setCeoSessionSnapshotCache,
+            handleCeoWsUnparsableFrame,
         };`,
         context
     );
@@ -256,4 +264,32 @@ test("final assistant renderer still uses markdown after streamed plain text", (
 
     assert.deepEqual(markdownCalls, ["**done**"]);
     assert.match(String(turn.textEl.innerHTML || ""), /\*\*done\*\*/);
+});
+
+test("解析不了的 WS 帧触发有界重连，而不是让这条车道永久静默", () => {
+    const api = loadApp();
+    api.S.activeSessionId = "web:ceo-delta";
+    api.S.ceoWs = null;
+    api.S.ceoWsParseResyncs = 0;
+
+    api.handleCeoWsUnparsableFrame(new Error("bad frame"));
+
+    assert.equal(api.S.ceoWsParseResyncs, 1);
+    const firstSocket = api.S.ceoWs;
+    assert.ok(firstSocket, "解析失败后必须重开一条 WS 重取快照");
+
+    // 重连预算用尽后不再制造重连风暴。
+    api.S.ceoWsParseResyncs = 3;
+    api.handleCeoWsUnparsableFrame(new Error("bad frame"));
+    api.handleCeoWsUnparsableFrame(new Error("bad frame"));
+    assert.equal(api.S.ceoWs, firstSocket, "超过上限后不得再重连");
+
+    // 接线：onmessage 必须包住 JSON.parse，收到干净快照即恢复预算。
+    const onmessageBlock = APP_CODE.slice(
+        APP_CODE.indexOf("S.ceoWs.onmessage = (ev) =>"),
+        APP_CODE.indexOf('if (payload.type === "snapshot.ceo")')
+    );
+    assert.ok(onmessageBlock.includes("JSON.parse(ev.data)"), "onmessage 缺少帧解析");
+    assert.ok(onmessageBlock.includes("handleCeoWsUnparsableFrame"), "JSON.parse 未被 try/catch 包住");
+    assert.ok(APP_CODE.includes("S.ceoWsParseResyncs = 0;"), "成功快照未重置重连预算");
 });

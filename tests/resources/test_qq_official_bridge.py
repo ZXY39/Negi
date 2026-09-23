@@ -1272,3 +1272,27 @@ def test_lru_remember_evicts_oldest() -> None:
     bridge_module._lru_remember(mapping, "e", limit=4)  # 超限，逐出最旧的 b
     assert list(mapping) == ["c", "a", "d", "e"]
     assert "b" not in mapping
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_read_timeout_tolerates_missed_keepalives() -> None:
+    """SSE 这条流不能沿用客户端默认的 30s 读超时：服务端每 SSE_HEARTBEAT_INTERVAL_SECONDS
+    才发一条 ``: keep-alive``，30s 上限等于让任何一次事件循环抖动（大会话转录重写）掐断
+    这条流并甩一串 ReadTimeout 栈，把真故障埋进重连噪音里。锁住"至少容得下 3 次心跳缺席"。"""
+    from g3ku.qq_official.client import ExternalApiClient
+    from g3ku.runtime.external_events import SSE_HEARTBEAT_INTERVAL_SECONDS
+
+    recorded: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded.update(dict(request.extensions.get("timeout") or {}))
+        return httpx.Response(200, text="")
+
+    client = ExternalApiClient("http://test", "token", transport=httpx.MockTransport(handler))
+    try:
+        [event async for event in client.stream_events("ext:qq-official:pump-x", last_seq=1)]
+    finally:
+        await client.close()
+
+    assert recorded["read"] >= 3 * SSE_HEARTBEAT_INTERVAL_SECONDS, recorded
+    assert recorded["connect"] <= 5.0, recorded

@@ -30,6 +30,8 @@ const CEO_SESSION_SNAPSHOT_CACHE_KEY = "g3ku.ceo.session-snapshots.v2";
 const CEO_SESSION_SNAPSHOT_CACHE_LIMIT = 6;
 const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
+// CEO websocket 解析失败后最多强制重连几次（拿到正常快照即清零），避免重连风暴。
+const CEO_WS_PARSE_RESYNC_LIMIT = 3;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
 // 长按上下文脑图标：按住先静置 200ms 起手，之后才开始计时并显示进度环。
 // 目的是让普通点击（含手抖的短按）完全不出现压缩进度反馈，计时从起手完成的那一刻算满 2 秒。
@@ -97,6 +99,7 @@ const S = {
     ceoWs: null,
     ceoWsToken: 0,
     ceoWsLastErrorCode: "",
+    ceoWsParseResyncs: 0,
     ceoPendingTurns: [],
     ceoTurnActive: false,
     ceoPauseBusy: false,
@@ -11357,6 +11360,20 @@ async function requestDeleteSelectedCeoSessions() {
     });
 }
 
+function handleCeoWsUnparsableFrame(error) {
+    // 服务端只会发 JSON：解析失败说明这条车道已经不干净，之后每一帧都会被这个异常吞掉，
+    // 界面就永久停在半截回合上转圈 —— socket 还是开的，onclose 不触发，自动重连也就
+    // 不会发生。所以主动重连一次重取快照；连着几次都还解析不了就不再重试（避免重连风暴）。
+    S.ceoWsParseResyncs = Number(S.ceoWsParseResyncs || 0) + 1;
+    if (S.ceoWsParseResyncs > CEO_WS_PARSE_RESYNC_LIMIT) {
+        console.warn("ceo ws: frames still unparsable after resyncs, stop resyncing", error);
+        return;
+    }
+    console.warn("ceo ws: unparsable frame, resyncing session snapshot", error);
+    closeCeoWs();
+    initCeoWs();
+}
+
 function initCeoWs() {
     const requestedSessionId = String(S.activeSessionId || "").trim();
     if (S.ceoWs && S.ceoWs.readyState <= 1 && S.ceoWs.sessionId === requestedSessionId) return;
@@ -11372,12 +11389,20 @@ function initCeoWs() {
     };
     S.ceoWs.onmessage = (ev) => {
         if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
-        const payload = JSON.parse(ev.data);
+        let payload = null;
+        try {
+            payload = JSON.parse(ev.data);
+        } catch (error) {
+            handleCeoWsUnparsableFrame(error);
+            return;
+        }
         const payloadSessionId = String(payload?.session_id || payload?.data?.session_id || "").trim();
         const effectiveSessionId = payloadSessionId || requestedSessionId || activeSessionId();
         if (payload.type === "snapshot.ceo") {
             clearCeoReplyDeltaBuffer(effectiveSessionId);
             S.ceoWsLastErrorCode = "";
+            // 整帧快照解析成功 = 这条车道又干净了，重连预算重新充满。
+            S.ceoWsParseResyncs = 0;
             const snapshotEntry = {
                 session_id: effectiveSessionId,
                 messages: payload.data?.messages || [],

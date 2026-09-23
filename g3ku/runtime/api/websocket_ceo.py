@@ -19,6 +19,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse
+from loguru import logger
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
@@ -90,6 +91,8 @@ from main.protocol import build_envelope
 
 router = APIRouter()
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+# 连续几帧都写不出去才认定这条 socket 已废（单帧失败通常是载荷问题，下一帧还能发）。
+_SENDER_CONSECUTIVE_FAILURE_LIMIT = 3
 # 静默回合的历史占位文案：存量转录里仍带这一行，快照层按静默归一化后不显示到会话框。
 _LEGACY_SILENT_REPLY_TEXT = "信息已静默"
 _APPROVAL_INTERRUPT_KINDS = {
@@ -1407,11 +1410,45 @@ async def ceo_websocket(websocket: WebSocket):
             return
 
     async def sender(source_queue: asyncio.Queue[dict[str, Any]]) -> None:
+        # 单帧写失败（载荷不可序列化、连接半开）绝不能让这个任务死掉：三条 sender 都是
+        # 静默退出，socket 还开着、客户端收不到 close，也就不会自动重连，界面会永久停在
+        # 半截的回合上。所以逐帧兜住并计数，连续失败才认定链路已废——主动关掉 socket，
+        # 让前端的 onclose 走重连重取快照。
+        failures = 0
         while True:
             payload = await source_queue.get()
-            await _safe_send(payload)
+            try:
+                await _safe_send(payload)
+            except WebSocketChannelClosed:
+                raise
+            except Exception:
+                failures += 1
+                logger.exception(
+                    'CEO websocket failed to send frame {} to {} ({}/{} consecutive)',
+                    str((payload or {}).get('type') or ''),
+                    session_id,
+                    failures,
+                    _SENDER_CONSECUTIVE_FAILURE_LIMIT,
+                )
+                if failures >= _SENDER_CONSECUTIVE_FAILURE_LIMIT:
+                    closed.set()
+                    await websocket_close(websocket, code=1011)
+                    return
+                continue
+            failures = 0
 
     async def relay_session_event(event: AgentEvent) -> None:
+        # RuntimeAgentSession._emit 逐个 await 订阅者且不做捕获：转发层里漏一个异常，
+        # 就会顺着 message_end/state_snapshot 把正在收尾的回合打断，前端只留下一个永不
+        # 结束的回合。所以本层任何失败都只记日志，绝不再往上抛。
+        try:
+            await _relay_session_event(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('CEO websocket relay failed for {} event {}', session_id, event.type)
+
+    async def _relay_session_event(event: AgentEvent) -> None:
         if event.type == 'frontdoor_interrupt':
             payload = dict(event.payload or {})
             await _push_stream_event(

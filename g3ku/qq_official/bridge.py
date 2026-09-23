@@ -615,6 +615,15 @@ async def run_qq_official_bridge(
                 )
             except asyncio.CancelledError:
                 raise
+            except httpx.TimeoutException as exc:  # noqa: BLE001 - idle stream is routine, replay covers it
+                # 读超时只代表这条流安静得过头（事件循环被大会话转录重写占住、代理掐线）：
+                # 重连按 last_seq 重放积压，不丢投递。真故障仍走下面的 exception 栈。
+                logger.warning(
+                    "qq-official event stream idle timeout for session {} ({}); reconnecting in {:.0f}s",
+                    session_id,
+                    type(exc).__name__,
+                    backoff,
+                )
             except Exception:  # noqa: BLE001 - reconnect loop keeps the pump alive
                 logger.exception(
                     "qq-official event pump error for session {}; reconnecting in {:.0f}s",

@@ -359,6 +359,14 @@ User message bubbles carry a hover action row (`编辑` / `Fork`, `.msg-actions`
 - **Validation and concurrency**: both endpoints re-run the full gate server-side (`turn_not_found` 404; `turn_not_run_first` / `boundary_unavailable` / `edit_fork_blocked_by_async_task` / `ceo_turn_in_progress` / `channel_session_readonly` 409; `no_model_configured` 503). Truncate acquires the session `_turn_lock` (5s timeout, full re-validation inside the lock, closing the heartbeat race); fork needs no lock.
 - **Known edges**: bubbles appended by the live send path or client-side finalize carry no flag of their own — the action row for a finished turn arrives with the gates frame, and falls back to the next `snapshot.ceo` when that frame is suppressed (a stability condition still open: queued follow-up, pending approval, blocking tool, or a preserved heartbeat/cron lane); a turn dispatched after the boundary is outside the gate by spec — truncation removes its transcript row while the task keeps running and its terminal callback still targets the session (banner text warns); the first post-edit request pays a one-time prompt-cache miss; the memory review window (`memory/review_state.json`) has no per-turn pruning, so buffered review records of removed turns may still flush to the advisory memory lane later (conversation context is unaffected); `user_edit_truncation` is a whitelisted continuity shrink/source reason (forensics in `context-and-cache-troubleshooting.md`).
 
+### 2.9. CEO Websocket Lane Failure Contract
+
+`/ws/ceo` 的失败面只有一个方向会致命：车道静默而 socket 还开着。此时浏览器既收不到后续帧，也不会触发 `onclose` 的 1 秒自动重连，界面就永久停在半截回合（转圈、没有最终文案），只有手动刷新才同步——转录里通常早已落好完整 assistant 行，所以这属展示层车道故障，不是数据缺失。
+
+- 三条 `sender()` 队列与连接期内联发送共用一条 socket。单帧写失败（载荷不可序列化、半开连接）只丢那一帧并记 `logger.exception`；连续 `_SENDER_CONSECUTIVE_FAILURE_LIMIT`（3）帧都失败才判定链路已废：置 `closed`、以 code 1011 主动关掉 socket，让前端走 `onclose` 重连重取快照。sender 静默退出等于把一次可恢复故障变成永久静默。
+- 转发层 `relay_session_event` 是 `_relay_session_event` 的守卫包装：`RuntimeAgentSession._emit` 逐个 `await` 订阅者且不做捕获，转发层抛出异常会打断正在收尾的回合（`message_end` 之后还有 `state_snapshot`/`turn_end`），前端因此连权威收尾帧都等不到。守卫只记日志不上抛，`CancelledError` 继续传播。
+- 浏览器只接受 JSON 帧：`onmessage` 的 `JSON.parse` 必须带 try/catch。裸解析下，一帧解析失败会让该 socket 之后每帧都被同一个异常吞掉。失败即 `closeCeoWs()` + `initCeoWs()` 重连重取快照，并按 `CEO_WS_PARSE_RESYNC_LIMIT` 限量（收到 `snapshot.ceo` 即恢复预算），避免解析不了时打成重连风暴。
+
 ### 3. Context Loader Notices
 
 - Successful CEO/frontdoor `load_tool_context` and `load_skill_context` calls do not render as ordinary `Interaction Flow` steps under the assistant bubble.
