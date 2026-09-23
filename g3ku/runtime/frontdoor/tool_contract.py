@@ -286,8 +286,8 @@ def _render_silent_help(callable_tool_names: list[str]) -> list[str]:
         return []
     return [
         f'silent_help: To end this turn with nothing delivered to the user, call '
-        f'`{SILENT_TOOL_NAME}(reason="...")`. A sentinel such as [G3KU_SILENT] is not a silent exit '
-        '— nothing recognizes it, and it is delivered to the user verbatim.',
+        f'`{SILENT_TOOL_NAME}(reason="...")`. There is no text form of silence: any marker written '
+        'in the reply body is delivered to the user verbatim.',
     ]
 
 

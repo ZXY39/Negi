@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.agent.tools.registry import ToolRegistry
@@ -129,16 +130,35 @@ def _contract(callable_names: list[str]) -> str:
 
 
 def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
-    """B：心跳车道那份措辞覆盖不到普通用户回合 —— 23:25 那轮模型正是按压缩块里残留的
-    旧契约去输出文本哨兵，所以可见回合必须自己说一句"哨兵不是静默出口"。"""
+    """B：心跳车道那份措辞覆盖不到普通用户回合 —— 23:25 那轮模型正是按上下文里残留的
+    旧契约去输出文本哨兵，所以可见回合必须自己说一句"静默没有文本写法"。"""
     rendered = _contract(['exec', SILENT_TOOL_NAME])
     help_line = next((line for line in rendered.splitlines() if line.startswith('silent_help:')), '')
     assert f'`{SILENT_TOOL_NAME}(reason=' in help_line
-    assert '[G3KU_SILENT] is not a silent exit' in help_line
-    # 措辞挂在每轮重渲染的契约里，不新起一层：实测该契约 6,614 字符，这条 +215。
+    assert 'There is no text form of silence' in help_line
+    # 措辞挂在每轮重渲染的契约里，不新起一层：实测该契约 6,614 字符，这条 +200。
     assert len(help_line) < 300
 
 
 def test_silent_help_follows_the_callable_list() -> None:
     """工具没注册时不能继续叫模型去调它 —— 与 P1 的"未注册则整条消失"同一条边界。"""
     assert 'silent_help:' not in _contract(['exec'])
+
+
+def test_no_model_facing_surface_still_names_the_deleted_sentinel() -> None:
+    """旧哨兵的字面串一旦重新进入任何逐字送达模型的面，模型就会继续用它 —— 而识别已删。
+
+    23:25 与 00:34 两次实盘都是这么来的：一次是压缩块里的旧措辞，一次是
+    `ceo_frontdoor.md` 这条每轮注入的系统提示从没被改写成工具。这里只钉"逐字渲染"的
+    两处（提示词文件与契约渲染器）；代码里的其余命中都在注释/文档串里，记录的是
+    "为什么删"，不进上下文。
+    """
+    root = Path(__file__).resolve().parents[2]
+    offenders: list[str] = []
+    for path in sorted((root / 'g3ku' / 'runtime' / 'prompts').glob('*.md')):
+        if 'G3KU_SILENT' in path.read_text(encoding='utf-8'):
+            offenders.append(str(path.relative_to(root)))
+    contract = root / 'g3ku' / 'runtime' / 'frontdoor' / 'tool_contract.py'
+    if 'G3KU_SILENT' in contract.read_text(encoding='utf-8'):
+        offenders.append(str(contract.relative_to(root)))
+    assert offenders == []
