@@ -3074,6 +3074,7 @@ function normalizeCeoSnapshotMessage(message = {}) {
         if (usage) next.usage = usage;
         if (message?.task_dispatched === true) next.task_dispatched = true;
         if (message?.silent_reply === true) next.silent_reply = true;
+        if (message?.silent_reason) next.silent_reason = String(message.silent_reason);
         if (!String(next.content || "").trim() && !canonicalContext && !hasDeltaKey && status !== "paused") return null;
         return next;
     }
@@ -6442,14 +6443,33 @@ function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
     syncCeoTurnLoadingOnlyState(turn, false);
 }
 
-// 静默回合（模型输出 [G3KU_SILENT]）没有可见回复文本，只隐藏回复气泡本身；
+// 静默回合（模型调用 silent 工具）不外发，但正文是留给模型的痕迹，也是这里「展开」
+// 要显示的内容。所以不再隐藏气泡，而是折成一行：摘要给出「已静默」+ 模型填的理由，
+// 展开看原文。用原生 <details> 而不是自建折叠状态：零 JS、零 CSS 依赖，也不与
+// prefers-reduced-motion 下的动画开关打架。
 // 阶段轨道与工具步骤照常保留，否则本回合的活动记录会随气泡一起消失。
-function hideCeoAssistantText(turn) {
+function renderCeoSilentTurn(turn, { reason = "", text = "" } = {}) {
     if (!turn?.textEl) return;
-    turn.textEl.hidden = true;
-    turn.textEl.innerHTML = "";
+    const normalizedReason = String(reason || "").trim();
+    const normalizedText = String(text || "").trim();
+    turn.textEl.hidden = false;
     turn.textEl.classList.remove("pending");
     turn.textEl.classList.remove("assistant-text-loading");
+    turn.textEl.innerHTML = "";
+    // reason 是模型写的自由文本，这里用 DOM 节点 + textContent 装配而不是拼字符串：
+    // 本文件没有 HTML 转义助手，拼进 innerHTML 等于开一个注入面。
+    const details = document.createElement("details");
+    details.className = "ceo-silent-turn";
+    const summary = document.createElement("summary");
+    summary.textContent = normalizedReason ? `已静默 · ${normalizedReason}` : "已静默";
+    details.appendChild(summary);
+    if (normalizedText) {
+        const body = document.createElement("div");
+        body.className = "ceo-silent-turn-body markdown-content";
+        body.innerHTML = renderMarkdown(normalizedText);
+        details.appendChild(body);
+    }
+    turn.textEl.appendChild(details);
     syncCeoAssistantLoadingAria(turn.textEl);
     syncCeoTurnLoadingOnlyState(turn, false);
 }
@@ -6992,16 +7012,16 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         : (normalizeCeoSnapshotCanonicalContext(item.canonical_context) || null);
     const content = String(item?.content || "");
     const silentReply = item?.silent_reply === true;
+    const silentReason = String(item?.silent_reason || "");
     const status = String(item?.status || "").trim().toLowerCase();
     // follow-up 归档半截回合(后端 archive turn_id = `{原 turn_id}:followup:{随机}`)：
     // 其最后一个阶段在收到补充消息时被拦腰打断,需要打上打断标记。
     const isFollowUpArchive = String(item?.turn_id || "").includes(":followup:");
     const historyTimestamp = String(item?.timestamp || "").trim();
     const historyUsage = item?.usage || null;
-    if (status !== "paused" && !canonicalContext) {
-        // 静默回合没有任何可展示内容时不出气泡。
-        if (silentReply) return;
+    if (status !== "paused" && !canonicalContext && !silentReply) {
         // 无轨道兜底气泡同样携带悬停元信息(完成时间 + token 用量)。
+        // 静默回合不走这条：它有自己的折叠行，落到下方共用路径渲染，避免两处装配。
         addMsg(content, "system", { markdown: true, scrollMode: "preserve", timestamp: historyTimestamp, usage: historyUsage });
         return;
     }
@@ -7018,7 +7038,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     }
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
-        if (silentReply) hideCeoAssistantText(turn);
+        if (silentReply) renderCeoSilentTurn(turn, { reason: silentReason, text: content });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
@@ -7332,8 +7352,10 @@ function buildFinalizedCeoTurnPayload(sessionId, { normalizedSource = "", normal
     const silentReply = meta?.silent_reply === true;
     messages = appendCeoSessionSnapshotMessage(messages, {
         role: "assistant",
-        content: silentReply ? "" : (String(text || "").trim() || "Done."),
-        ...(silentReply ? { silent_reply: true } : {}),
+        // 静默回合的正文要留在缓存行里：那是折叠行「展开」的内容，也是与后端快照
+        // 一致的形状（后端已不再抹空）。抹成 "" 会让刷新后折叠行展开出空白。
+        content: String(text || "").trim() || (silentReply ? "" : "Done."),
+        ...(silentReply ? { silent_reply: true, silent_reason: String(meta?.silent_reason || "") } : {}),
         canonical_context: persistedCanonicalContext,
         canonical_context_delta: finalTraceContext,
         usage: meta?.usage || null,
@@ -8800,7 +8822,7 @@ function finalizeCeoTurn(text, meta = {}) {
             turn.liveStreamText = "";
             renderCeoLiveStreamTextIntoTurn(turn);
             if (silentReply) {
-                hideCeoAssistantText(turn);
+                renderCeoSilentTurn(turn, { reason: String(meta?.silent_reason || ""), text });
             } else {
                 turn.textEl.hidden = false;
                 turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
@@ -8877,7 +8899,7 @@ function finalizeCeoTurn(text, meta = {}) {
             turn.liveStreamText = "";
             renderCeoLiveStreamTextIntoTurn(turn);
             if (silentReply) {
-                hideCeoAssistantText(turn);
+                renderCeoSilentTurn(turn, { reason: String(meta?.silent_reason || ""), text });
             } else {
                 turn.textEl.hidden = false;
                 turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");

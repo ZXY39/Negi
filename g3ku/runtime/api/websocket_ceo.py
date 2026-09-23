@@ -891,10 +891,14 @@ def _build_ceo_snapshot(
             # 静默回合的空 assistant 行只为承载阶段轨道；没有轨道就没有可展示的内容，
             # 整行跳过，避免前端渲染出一个空气泡。旧转录里的占位文案同样按静默处理。
             if metadata.get('silent_reply') is True or content == _LEGACY_SILENT_REPLY_TEXT:
-                if not current_view:
-                    continue
+                # 保留正文：它是折叠行「展开」要显示的内容，也是模型下一轮的痕迹。
+                # 空正文且无轨道的行由上方的空行过滤统一跳过。
                 item['silent_reply'] = True
-                item['content'] = ''
+                silent_reason = str(metadata.get('silent_reason') or '').strip()
+                if silent_reason:
+                    item['silent_reason'] = silent_reason
+                if content == _LEGACY_SILENT_REPLY_TEXT:
+                    item['content'] = ''
         turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
         if turn_id:
             item['turn_id'] = turn_id
@@ -1636,7 +1640,11 @@ async def ceo_websocket(websocket: WebSocket):
             silent_reply = bool(payload.get('silent_reply'))
             if not silent_reply and not _should_forward_message_end(payload):
                 return
-            text = "" if silent_reply else str(payload.get('text') or '').strip()
+            # 静默回合不再抹正文：那正文就是给模型的痕迹，也是前端折叠行「展开」要显示的
+            # 内容。不外发由 silent_reply flag 决定（外部渠道与 cron 各自据它闸门），
+            # 不再靠把文本清空。
+            text = str(payload.get('text') or '').strip()
+            silent_reason = str(payload.get('silent_reason') or '').strip()
             source = str(payload.get('source') or 'user').strip().lower() or 'user'
             turn_id = str(payload.get('turn_id') or '').strip()
             snapshot = _build_inflight_turn_snapshot(session, session_id)
@@ -1683,10 +1691,11 @@ async def ceo_websocket(websocket: WebSocket):
             await _push_stream_event(
                 'ceo.reply.final',
                 {
-                    'text': '' if silent_reply else rewrite_assistant_media_content(session_id, text),
+                    'text': rewrite_assistant_media_content(session_id, text),
                     'source': source,
                     'turn_id': turn_id,
                     **({'silent_reply': True} if silent_reply else {}),
+                    **({'silent_reason': silent_reason} if silent_reply and silent_reason else {}),
                     **({'user_messages': user_messages} if user_messages else {}),
                     **({'usage': turn_usage} if turn_usage else {}),
                     **final_reply_canonical_merge(canonical_context, canonical_context_delta),

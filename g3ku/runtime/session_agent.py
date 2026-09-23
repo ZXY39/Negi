@@ -3421,8 +3421,9 @@ class RuntimeAgentSession:
                 await self._emit(
                     "message_end",
                     role="assistant",
-                    text="" if silent_reply else output,
+                    text=str(output or ""),
                     silent_reply=silent_reply,
+                    silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
                     heartbeat_internal=heartbeat_internal,
                     heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                     source=internal_source or "user",
@@ -3641,8 +3642,9 @@ class RuntimeAgentSession:
             await self._emit(
                 "message_end",
                 role="assistant",
-                text="" if silent_reply else output,
+                text=str(output or ""),
                 silent_reply=silent_reply,
+                silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
                 heartbeat_internal=heartbeat_internal,
                 heartbeat_reason=str((user_input.metadata or {}).get("heartbeat_reason") or "").strip(),
                 source=internal_source or "user",
@@ -4166,8 +4168,9 @@ class RuntimeAgentSession:
             await self._emit(
                 "message_end",
                 role="assistant",
-                text="" if silent_reply else str(output or ""),
+                text=str(output or ""),
                 silent_reply=silent_reply,
+                silent_reason=str(getattr(self, "_last_silent_reason", "") or ""),
                 source="user",
                 turn_id=self._current_turn_id(),
             )

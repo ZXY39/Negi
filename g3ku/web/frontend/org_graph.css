@@ -2873,6 +2873,38 @@ textarea {
     min-height: 28px;
 }
 
+/* 静默回合（模型调用 silent 工具）折成一行：摘要=已静默+模型填的理由，展开=原文。
+   放在旧层而不是 V2 band：这是个全新类，不与任何既有状态类争覆盖顺序。 */
+.ceo-silent-turn {
+    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+    border-radius: 8px;
+    padding: 0 10px;
+    color: var(--text-secondary);
+}
+
+.ceo-silent-turn > summary {
+    cursor: pointer;
+    list-style: none;
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+}
+
+.ceo-silent-turn > summary::-webkit-details-marker {
+    display: none;
+}
+
+.ceo-silent-turn[open] > summary {
+    border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
+    margin-bottom: 8px;
+}
+
+.ceo-silent-turn-body {
+    color: var(--text-primary);
+    white-space: normal;
+    padding-bottom: 10px;
+}
+
 .ceo-turn-usage {
     font-size: 0.76rem;
     line-height: 1.4;
