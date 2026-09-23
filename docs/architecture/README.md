@@ -69,6 +69,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - OpenAI 兼容端点 401/403/423/503、回复总是 "still working"、流式文本与终稿不一致 → `agent-gateway.md`「常见排障入口」
 - MCP 工具全部 connection_failed、MCP 客户端协议解析错误（stdout 被污染）→ `agent-gateway.md`「常见排障入口」+「MCP stdio 网关契约」
 - 渠道会话短暂出现在本地 web 会话列表、刷新后激活会话被切回本地会话、渠道回合无法在网页暂停 → `web-and-admin.md`「CEO Session List Interaction Contract」+「Active-Turn Button Semantics」
+- 网页在渠道会话里发不出消息（回 `channel_session_readonly`）、或发出去了但渠道端没有回复 → `external-agent-api.md`「会话注册表与 key 命名空间」+「回合契约」
 - 节点反复调用文件编辑类工具失败、或同一编辑被重复提交 → `tool-and-skill-system.md`「filesystem_edit 契约」（模型面平面字段与校验面宽车道的分工、`Already applied:` 幂等车道）
 - 用户连续发送消息时助手只看到最后一条、或渠道消息收到重复回复 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」

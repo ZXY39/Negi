@@ -1703,6 +1703,7 @@ def build_session_summary(
         "session_family": "local",
         "session_origin": "web",
         "is_readonly": False,
+        "can_message": True,
         "can_rename": True,
         "can_delete": True,
     }
@@ -1875,6 +1876,7 @@ def _channel_session_summary_from_entry(
         "session_family": "channel",
         "session_origin": "china",
         "is_readonly": True,
+        "can_message": False,
         "can_rename": False,
         "can_delete": False,
         "channel_id": parsed.channel,
@@ -2042,6 +2044,9 @@ def _external_channel_row(
         "session_family": "channel",
         "session_origin": "external",
         "is_readonly": True,
+        # 可输入 = 注册表里有这条会话（`submit` 的必填 entry 就是它）。没有条目的
+        # 孤儿 ext 转录（注册表丢失/手工文件）与 `china:` 归档同样落到 False。
+        "can_message": entry is not None,
         "can_rename": False,
         "can_delete": False,
         "channel_id": f"ext:{bridge_id}",

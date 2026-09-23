@@ -750,6 +750,14 @@ function activeSessionIsReadonly() {
     return !!activeSessionItem()?.is_readonly;
 }
 
+// 两条轴各判各的：can_message 管"能不能往里发"，is_readonly 管"历史能不能改"。
+// 目录里查不到该行（刚建的本地会话）按可写处理，与服务端未下发时同样回退旧语义。
+function activeSessionCanMessage() {
+    const item = activeSessionItem();
+    if (!item) return true;
+    return typeof item.can_message === "boolean" ? item.can_message : !item.is_readonly;
+}
+
 function displayChinaChannelLabel(channelId) {
     return ({
         qqbot: "QQ Bot",
@@ -936,7 +944,7 @@ function setCeoSessionTab(tab) {
 
 function syncCeoComposerReadonlyState() {
     if (!U.ceoInput) return;
-    if (activeSessionIsReadonly()) {
+    if (!activeSessionCanMessage()) {
         U.ceoInput.setAttribute("readonly", "readonly");
         U.ceoInput.placeholder = "当前为渠道会话，只能查看来自渠道的历史消息";
     } else {
@@ -4971,7 +4979,7 @@ function syncCeoAttachButton() {
         || !!S.ceoSessionBusy
         || !!S.ceoSessionCatalogBusy
         || !activeSessionId()
-        || activeSessionIsReadonly()
+        || !activeSessionCanMessage()
     );
 }
 
@@ -5043,9 +5051,9 @@ function syncCeoPrimaryButton() {
     syncCeoFeedTurnActiveClass();
     syncCeoAttachButton();
     if (!U.ceoSend) return;
-    if (activeSessionIsReadonly()) {
+    if (!activeSessionCanMessage()) {
         if (S.ceoTurnActive) {
-            // 渠道会话禁止发送，但运行中的回合必须能暂停：只读早期返回
+            // 归档渠道会话禁止发送，但运行中的回合必须能暂停：只读早期返回
             // 曾把唯一的暂停入口也禁掉，导致渠道回合无法在网页暂停。
             const label = S.ceoPauseBusy ? "暂停中" : "暂停";
             U.ceoSend.innerHTML = `<i data-lucide="pause"></i> ${label}`;
@@ -5409,7 +5417,7 @@ function handleCeoPrimaryAction() {
         requestCeoPause();
         return;
     }
-    if (activeSessionIsReadonly()) {
+    if (!activeSessionCanMessage()) {
         showToast({ title: "渠道会话只读", text: "当前只能查看渠道历史消息，不能在 Leader 面板直接发送。", kind: "info" });
         return;
     }
@@ -10610,7 +10618,7 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
     const typeLabel = type === "dm" ? "DM merged" : type === "group" ? "Group" : type === "thread" ? "Thread" : "";
     const badges = [
         typeLabel ? `<span class="ceo-session-pill">${esc(typeLabel)}</span>` : "",
-        item?.is_readonly ? '<span class="ceo-session-pill readonly">只读</span>' : "",
+        item?.is_readonly && !item?.can_message ? '<span class="ceo-session-pill readonly">只读</span>' : "",
     ].filter(Boolean).join("");
     return `
         <div class="ceo-session-card${isActive ? " is-active" : ""}${unreadCount > 0 ? " has-unread" : ""}${isRunning ? " is-running" : ""}${isBulkMode ? " is-bulk-mode" : ""}${isSelected ? " is-bulk-selected" : ""}" role="listitem"${dragAttrs}>
@@ -11539,7 +11547,7 @@ function initCeoWs() {
 }
 
 function sendCeoMessage() {
-    if (activeSessionIsReadonly()) return;
+    if (!activeSessionCanMessage()) return;
     if (S.ceoSessionBusy || S.ceoSessionCatalogBusy || !activeSessionId()) return;
     const text = String(U.ceoInput.value || "");
     const uploads = normalizeUploadList(S.ceoUploads);

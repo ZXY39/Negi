@@ -190,11 +190,14 @@ def test_build_ceo_session_catalog_lists_legacy_channel_sessions_readonly(monkey
     for item in channel_items:
         assert item["is_readonly"] is True
         assert item["can_delete"] is False
+        # 归档渠道会话两条轴都关：历史不可改，也不可向里发。
+        assert item["can_message"] is False
 
 
-def test_build_ceo_session_catalog_lists_external_bridge_sessions_readonly(monkeypatch, tmp_path: Path) -> None:
+def test_build_ceo_session_catalog_lists_external_bridge_sessions_in_channel_groups(monkeypatch, tmp_path: Path) -> None:
     """Live ``ext:*`` bridge sessions surface in the channel catalog as
-    read-only groups keyed by bridge, titled from the registry mapping."""
+    bridge-keyed groups, titled from the registry mapping: history stays
+    read-only, but a registered session accepts web input."""
     from g3ku.runtime.external_sessions import ExternalSessionRegistry, reset_external_session_registry
 
     monkeypatch.setattr(
@@ -241,6 +244,7 @@ def test_build_ceo_session_catalog_lists_external_bridge_sessions_readonly(monke
     assert item["session_id"] == entry.session_key
     assert item["is_readonly"] is True
     assert item["can_delete"] is False
+    assert item["can_message"] is True
     assert item["session_origin"] == "external"
     assert "qq:dm:user-1" in item["title"]
 
@@ -412,7 +416,8 @@ def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> N
         registry = ExternalSessionRegistry(tmp_path)
         entry, _ = registry.resolve_or_create(bridge_id="qq-official", external_key="qq:c2c:user-1")
         china_key = "china:qqbot:default:dm:user-a"
-        store = _RefreshStore(tmp_path, [entry.session_key, china_key, "web:shared"])
+        orphan_key = "ext:qq-official:deadbeef00000000"
+        store = _RefreshStore(tmp_path, [entry.session_key, china_key, orphan_key, "web:shared"])
 
         ext_item = build_channel_ceo_session_item(
             store, entry.session_key, active_session_id=entry.session_key, is_running=True
@@ -424,9 +429,16 @@ def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> N
         assert ext_item["is_readonly"] is True
         assert ext_item["can_rename"] is False
         assert ext_item["can_delete"] is False
+        # 有注册表条目 ⇒ 可向里发（提交要靠 entry 路由回复）。
+        assert ext_item["can_message"] is True
         assert ext_item["is_active"] is True
         assert ext_item["is_running"] is True
         assert "qq:c2c:user-1" in ext_item["title"]
+
+        orphan_item = build_channel_ceo_session_item(store, orphan_key, active_session_id="")
+        assert orphan_item is not None
+        assert orphan_item["is_readonly"] is True
+        assert orphan_item["can_message"] is False, "注册表里没有条目的孤儿 ext 转录必须保持只读"
 
         china_item = build_channel_ceo_session_item(store, china_key, active_session_id="web:shared")
         assert china_item is not None
@@ -434,6 +446,7 @@ def test_build_channel_ceo_session_item_keeps_channel_shape(tmp_path: Path) -> N
         assert china_item["session_origin"] == "china"
         assert china_item["channel_id"] == "qqbot"
         assert china_item["is_readonly"] is True
+        assert china_item["can_message"] is False
         assert china_item["is_active"] is False
 
         assert build_channel_ceo_session_item(store, "web:shared", active_session_id="") is None

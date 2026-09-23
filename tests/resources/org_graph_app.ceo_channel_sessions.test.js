@@ -100,6 +100,9 @@ function loadApp() {
             applyCeoSessionPatch,
             syncCeoPrimaryButton,
             activeSessionItem,
+            activeSessionIsReadonly,
+            activeSessionCanMessage,
+            buildCeoUserMessageActionsMarkup,
         };`,
         context
     );
@@ -252,4 +255,65 @@ test("syncCeoPrimaryButton shows an enabled pause button for readonly channel se
     syncCeoPrimaryButton();
     assert.equal(U.ceoSend.disabled, true);
     assert.ok(U.ceoSend.innerHTML.includes("渠道会话只读"));
+});
+
+// --- 两轴分离：can_message 管输入，is_readonly 管改历史 -----------------------
+
+test("registered ext session accepts composer input but keeps history actions hidden", () => {
+    const ctx = loadApp();
+    const { S, U, activeSessionCanMessage, activeSessionIsReadonly, buildCeoUserMessageActionsMarkup } = ctx;
+    const item = extChannelItem({ can_message: true });
+    S.activeSessionId = item.session_id;
+    S.ceoSessions = [item];
+
+    assert.equal(activeSessionCanMessage(), true, "注册过的渠道会话必须能输入");
+    assert.equal(activeSessionIsReadonly(), true, "同一行历史仍然不可改：两轴不得合并");
+
+    // 主按钮走普通车道形状：有文本即可发送，不再是「渠道会话只读」禁用态。
+    U.ceoSend = makeButtonElement();
+    U.ceoInput = { value: "帮我把报告改成表格" };
+    S.ceoTurnActive = false;
+    ctx.syncCeoPrimaryButton();
+    assert.equal(U.ceoSend.disabled, false);
+    assert.ok(U.ceoSend.innerHTML.includes("发送"), U.ceoSend.innerHTML);
+    assert.ok(!U.ceoSend.innerHTML.includes("只读"), U.ceoSend.innerHTML);
+
+    // 编辑重发/Fork 必须继续缺席：门槛判 is_readonly，不跟输入闸门一起放宽。
+    assert.equal(
+        buildCeoUserMessageActionsMarkup({ turnId: "t1", canEditFork: true, sessionId: item.session_id }),
+        ""
+    );
+});
+
+test("china archive row keeps both axes closed", () => {
+    const { S, activeSessionCanMessage } = loadApp();
+    const item = {
+        session_id: "china:qqbot:default:dm",
+        session_family: "channel",
+        session_origin: "china",
+        is_readonly: true,
+        can_message: false,
+    };
+    S.activeSessionId = item.session_id;
+    S.ceoSessions = [item];
+
+    assert.equal(activeSessionCanMessage(), false);
+});
+
+test("catalog rows predating can_message fall back to the readonly semantics", () => {
+    const { S, activeSessionCanMessage } = loadApp();
+    const item = extChannelItem(); // 无 can_message 字段：旧目录快照形状
+    S.activeSessionId = item.session_id;
+    S.ceoSessions = [item];
+
+    assert.equal(activeSessionCanMessage(), false, "未下发字段时不得放开输入");
+});
+
+test("active session missing from the catalog stays writable", () => {
+    const { S, activeSessionCanMessage } = loadApp();
+    // 刚建好、还没进目录的本地会话：谓词不能把它判成不可输入。
+    S.activeSessionId = "web:ceo-brand-new";
+    S.ceoSessions = [];
+
+    assert.equal(activeSessionCanMessage(), true);
 });

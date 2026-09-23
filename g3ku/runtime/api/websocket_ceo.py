@@ -24,11 +24,13 @@ from loguru import logger
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
+from g3ku.runtime.api.external_turns import get_external_turn_service
 from g3ku.runtime.ceo_catalog_offload import (
     build_ceo_session_catalog_async,
     build_ceo_session_catalog_cached,
     run_off_event_loop,
 )
+from g3ku.runtime.external_sessions import ExternalSessionEntry, get_external_session_registry
 from g3ku.runtime.frontdoor.canonical_context import (
     TRANSCRIPT_PROJECTION_MODE,
 )
@@ -51,7 +53,10 @@ from g3ku.runtime.frontdoor.canonical_context import (
     ui_canonical_context_delta_from_views as _ui_canonical_context_delta_from_views,
 )
 from g3ku.runtime.reply_tokens import is_silent_reply_token
-from g3ku.runtime.session_keys import is_channel_session_key
+from g3ku.runtime.session_keys import (
+    EXTERNAL_SESSION_KEY_PREFIX,
+    is_channel_session_key,
+)
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     WebCeoStateStore,
@@ -179,6 +184,22 @@ def _pending_tool_approval_interrupts(
 
 def _is_channel_session_id(session_id: str) -> bool:
     return is_channel_session_key(session_id)
+
+
+def _external_entry_for_channel_input(session_id: str) -> ExternalSessionEntry | None:
+    """网页可往这个渠道会话里投消息所需的注册表条目，拿不到就保持只读。
+
+    判定不是新策略而是依赖：提交走 ``ExternalTurnService.submit``，它的必填参数就是
+    这条 ``ExternalSessionEntry``（``bridge_id`` + ``external_key`` 是回复出站的路由）。
+    所以 ``china:*`` 归档与未注册的 ``ext:`` 天然拿不到条目，无需额外的开关位。
+    """
+    if not str(session_id or "").startswith(EXTERNAL_SESSION_KEY_PREFIX):
+        return None
+    try:
+        return get_external_session_registry().get_by_session_key(session_id)
+    except Exception:
+        logger.debug("external registry lookup failed for {}", session_id)
+        return None
 
 
 def _publish_ceo_sessions_snapshot(*, agent, transcript_store, runtime_manager, state_store) -> None:
@@ -1193,6 +1214,8 @@ async def ceo_websocket(websocket: WebSocket):
         session_id = fallback_session_id
     session_path = transcript_store.get_path(session_id)
     is_channel_session = _is_channel_session_id(session_id)
+    # 在连接期解析一次：注册表条目决定了本 socket 能否输入，socket 生命周期内不必再查。
+    external_entry = _external_entry_for_channel_input(session_id) if is_channel_session else None
 
     def _load_persisted_session():
         # get_or_create 冷缓存时逐行解析整份转录（渠道会话可达数十 MB），
@@ -1408,6 +1431,89 @@ async def ceo_websocket(websocket: WebSocket):
                 },
             )
             return
+
+    async def _handle_channel_user_input(user_messages: list[UserInputMessage]) -> None:
+        """渠道会话的网页输入：提交转投外部车道，本 socket 只负责回执与侧栏状态。
+
+        为什么不能就地用 `_invoke_user_turn`：对外事件 relay 只挂在
+        `external_turns._execute_turn` 上，WS 原生 prompt 路径不挂。走原生路会造出
+        「网页 feed 有回复、会话 hub 上没有 reply.final、渠道 pump 无事可投」的形状
+        （合同见 docs/architecture/external-agent-api.md「回合契约」）。
+
+        排队与起回合的裁决权一并交给 `submit`（它的 hold 判定覆盖「有回合在跑或手动压缩
+        在途」），本分支不重复排队；也不登记 current_turn_task —— 回合 task 归外部车道
+        所有（注册在 None 键），暂停走既有的 `session.pause` 通道。
+        渠道转录可达数十 MB，这里一次都不碰转录存储：message_count 不填。
+        """
+        if _pending_tool_approval_interrupts(session, session_id, None):
+            await _safe_send(
+                build_envelope(
+                    channel='ceo',
+                    session_id=session_id,
+                    type='error',
+                    data={
+                        'code': 'ceo_approval_pending',
+                        'message': 'A CEO tool approval batch is pending. Complete approval before sending a new message.',
+                    },
+                )
+            )
+            return
+        if bool(getattr(session, 'has_blocking_tool_execution', lambda: False)()):
+            await _safe_send(
+                build_envelope(
+                    channel='ceo',
+                    session_id=session_id,
+                    type='error',
+                    data={
+                        'code': 'ceo_blocked_by_running_tool',
+                        'message': '当前会话仍在等待长工具结束，暂不接收新的用户输入。',
+                    },
+                )
+            )
+            return
+        try:
+            service = get_external_turn_service()
+        except Exception:
+            await _safe_send(
+                build_envelope(
+                    channel='ceo',
+                    session_id=session_id,
+                    type='error',
+                    data={'code': 'task_service_unavailable'},
+                )
+            )
+            return
+
+        any_queued = False
+        for item in list(user_messages or []):
+            try:
+                result = await service.submit(entry=external_entry, user_message=item)
+            except Exception as exc:
+                await _safe_send(
+                    build_envelope(
+                        channel='ceo',
+                        session_id=session_id,
+                        type='error',
+                        data={'code': 'task_service_unavailable', 'message': str(exc)},
+                    )
+                )
+                return
+            any_queued = any_queued or str(result.get('status') or '') == 'queued'
+
+        _publish_ceo_session_patch(
+            agent=agent,
+            transcript_store=transcript_store,
+            runtime_manager=runtime_manager,
+            state_store=state_store,
+            session_id=session_id,
+            preview_text=_history_text(user_messages[-1].content),
+            is_running=True,
+        )
+        if any_queued:
+            # queue_follow_up_batch 不发会话事件，网页自己排队时是后续回合事件顺带把
+            # ceo.state 带来的；本车道排队意味着本地没有回合在跑，不补这一帧，操作者
+            # 投出去的那条要等渠道侧下一次事件才出现在候选发送条里。
+            await _push_stream_event('ceo.state', {'state': session.state_dict()})
 
     async def sender(source_queue: asyncio.Queue[dict[str, Any]]) -> None:
         # 单帧写失败（载荷不可序列化、连接半开）绝不能让这个任务死掉：三条 sender 都是
@@ -1672,7 +1778,7 @@ async def ceo_websocket(websocket: WebSocket):
                 continue
             if message_type != 'client.user_message':
                 continue
-            if is_channel_session:
+            if is_channel_session and external_entry is None:
                 await _safe_send(
                     build_envelope(
                         channel='ceo',
@@ -1698,6 +1804,9 @@ async def ceo_websocket(websocket: WebSocket):
                 )
                 continue
             if not user_messages:
+                continue
+            if is_channel_session:
+                await _handle_channel_user_input(user_messages)
                 continue
             persisted = transcript_store.get_or_create(session_id)
             if _pending_tool_approval_interrupts(session, session_id, persisted):
