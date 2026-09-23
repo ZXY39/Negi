@@ -1,9 +1,10 @@
 """Responses 协议实际发出的请求体字段。
 
-`text.verbosity` 是 OpenAI 专有扩展：把 /responses 代理到 Chat Completions 后端的
-供应商会因为这一个字段整单拒绝（HTTP 400 "text.verbosity is not supported by the
-selected Chat Completions backend"），而连接探测走的是最小请求体，所以「测试连接」
-通过、真实回合失败。
+`text.verbosity` 与 `instructions` 都是会把请求打回口的字段：把 /responses 代理到
+Chat Completions 后端的供应商，前者报 "text.verbosity is not supported by the selected
+Chat Completions backend"，后者报 "inference request is invalid"
+（code=invalid_parameter_error）。系统提示词因此只走 `input` 里的 `[SYSTEM]` 块。
+连接探测用的是最小体，所以这类字段级拒绝只在真实回合暴露。
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ def _fake_client(captured: dict) -> type:
 
 async def _send(monkeypatch: pytest.MonkeyPatch, **chat_kwargs) -> dict:
     captured: dict = {}
+    messages = chat_kwargs.pop("messages", [{"role": "user", "content": "ping"}])
 
     async def _fake_consume_sse(response):
         return "ok", [], "stop", {}
@@ -52,7 +54,7 @@ async def _send(monkeypatch: pytest.MonkeyPatch, **chat_kwargs) -> dict:
     monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
 
     provider = ResponsesProvider(api_key="test-key", api_base="https://example.com/v1")
-    await provider.chat(messages=[{"role": "user", "content": "ping"}], **chat_kwargs)
+    await provider.chat(messages=messages, **chat_kwargs)
     return captured
 
 
@@ -75,3 +77,22 @@ async def test_responses_body_keeps_reasoning_out_when_effort_is_none(monkeypatc
     assert "text" not in body
     assert "reasoning" not in body
     assert body["store"] is False
+
+
+@pytest.mark.asyncio
+async def test_responses_body_carries_system_prompt_in_input_not_instructions(monkeypatch) -> None:
+    captured = await _send(
+        monkeypatch,
+        model="demo",
+        messages=[
+            {"role": "system", "content": "你是 G3KU。"},
+            {"role": "user", "content": "ping"},
+        ],
+    )
+
+    body = captured["body"]
+    assert "instructions" not in body
+    first_item = body["input"][0]
+    assert first_item["role"] == "user"
+    assert "你是 G3KU。" in first_item["content"][0]["text"]
+    assert first_item["content"][0]["text"].startswith("[SYSTEM]")

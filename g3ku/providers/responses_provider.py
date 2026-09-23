@@ -193,8 +193,8 @@ class ResponsesProvider(LLMProvider):
             headers.update(self.extra_headers)
 
         if system_prompt:
-            # Prepend system prompt as a user message to ensure visibility
-            # This is a workaround for providers that ignore the 'instructions' field
+            # The system prompt rides in `input`: /responses endpoints that proxy to a
+            # Chat Completions backend reject the `instructions` field outright.
             input_items.insert(0, {
                 "role": "user",
                 "content": [{"type": "input_text", "text": f"[SYSTEM]\n{system_prompt}\n[END SYSTEM]"}],
@@ -206,7 +206,6 @@ class ResponsesProvider(LLMProvider):
             "model": model,
             "store": False,
             "stream": True,
-            "instructions": system_prompt,
             "input": input_items,
             "include": ["reasoning.encrypted_content"],
             "prompt_cache_key": str(prompt_cache_key or _prompt_cache_key(messages)),

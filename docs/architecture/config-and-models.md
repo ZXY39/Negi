@@ -161,7 +161,7 @@ G3KU 的模型系统分两层：
 
 协议（`protocol_adapter`）是记录级派生字段：它由 `provider_id` 命中的 provider 模板唯一决定，draft 里同名参数不参与解析，因此切换协议等于换模板而不是写一个独立字段；归一化后的值随 runtime target 导出，由 `g3ku/providers/provider_factory.py` 决定构建 Chat Completions 还是 Responses provider。模板同时决定 `parameters` 的字段集合与 `reasoning_effort` 白名单，两者必须保持一致，否则管理面会给出保存得了但校验不过的字段。
 
-Responses 协议的请求体只带各家 `/responses` 共同支持的字段，OpenAI 专有的 `text.*` 不在其中：把 `/responses` 代理到 Chat Completions 后端的供应商会因为这类扩展字段整单 400，而 `reasoning.effort` 是各家都认的深度思考通道。连接探测发的是最小体（模型 + 一条 ping + 输出上限），所以它只证明端点可达与鉴权可用，不证明完整请求体的字段兼容——「测试连接」通过而真实回合 400 就是这条差异，判读时先比对 `provider_request_body` 与探测体的字段差，再怀疑供应商。管理面「完整上下文」侧的预览请求体与真实发送体保持同形状，否则预览给出的字段清单不可信。
+Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`text.*` 这类 OpenAI 扩展会被代理到 Chat Completions 后端的供应商整单拒绝，`instructions` 同样会被判成 `inference request is invalid`，因此系统提示词只以 `input` 首位的 `[SYSTEM]…[END SYSTEM]` user 块送达，深度思考走 `reasoning.effort`。连接探测发的是最小体（模型 + 一条 ping + 输出上限），所以它只证明端点可达与鉴权可用，不证明完整请求体的字段兼容——「测试连接」通过而真实回合 400 就是这条差异，判读时先比对 `provider_request_body` 与探测体的字段差，再怀疑供应商。管理面「完整上下文」侧的预览请求体与真实发送体保持同形状，否则预览给出的字段清单不可信。
 
 ## 7. 运行时是如何拿到模型的
 
