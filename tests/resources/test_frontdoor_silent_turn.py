@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -239,6 +240,70 @@ def test_session_silence_comes_only_from_the_tool_signal() -> None:
     assert agent._resolve_silent_reply() is False
     setattr(agent, "_last_silent_reply", True)
     assert agent._resolve_silent_reply() is True
+
+
+# ---------- A：可见回合"没有正文"= 静默，不是机器编一条回复 ----------
+
+
+async def _finalize(output: str, **overrides) -> dict:
+    runner = _runner()
+    state = dict(initial_persistent_state(user_input={"content": "x", "metadata": {}}))
+    state.update(
+        {
+            "final_output": output,
+            "query_text": "接下来读取桌面文件数，然后等我来问你，不要主动告诉我",
+            "route_kind": "direct_reply",
+            "messages": [{"role": "user", "content": "x"}],
+            "frontdoor_request_body_messages": [],
+            "frontdoor_stage_state": json.loads(json.dumps(_STAGE_STATE)),
+            **overrides,
+        }
+    )
+    return await runner._graph_finalize_turn(state)
+
+
+@pytest.mark.asyncio
+async def test_visible_turn_with_no_text_is_silent_not_a_fabricated_reply() -> None:
+    """2026-09-23 23:25:48 实盘：模型读完桌面文件数后不给正文，机器拼了一句英文内部
+    文案当可见回复，并在 23:25:51 被 `qq_official.bridge:deliver` 投给了 QQ 用户。
+    机器不许替模型编造它没有要求的推送 —— 没有正文就是不说。"""
+    result = await _finalize("")
+    assert result["silent_reply"] is True
+    assert result["final_output"] == ""
+    assert result["silent_reason"] == "模型未给出可见正文"
+    assert "No visible reply" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_pure_legacy_sentinel_reply_lands_in_the_same_silent_lane() -> None:
+    """模型照压缩块里残留的旧契约输出纯 `[G3KU_SILENT]`：剥完即空，空即静默。
+    这条把"删了识别却没给新出口"的窗口期变成无害，两种成因在 reason 上分开留痕。"""
+    result = await _finalize("[G3KU_SILENT]")
+    assert result["silent_reply"] is True
+    assert result["final_output"] == ""
+    assert result["silent_reason"] == "旧静默哨兵剥除后无正文"
+    body = result.get("frontdoor_request_body_messages") or []
+    assert [item for item in body if "G3KU_SILENT" in str(item.get("content") or "")] == []
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_internal_empty_turn_keeps_its_own_lane() -> None:
+    """内部回合有自己的修复车道与上限文案，A 不越界去改它。"""
+    result = await _finalize("", heartbeat_internal=True)
+    assert result["silent_reply"] is False
+    assert result["final_output"] == ""
+
+
+def test_no_fabricated_visible_reply_text_survives_in_production_sources() -> None:
+    """兜底文案整条删掉，不留"改天再清"的尾巴：只要它还在源码里，就还会被某条空回复
+    路径拼进可见正文。"""
+    root = Path(__file__).resolve().parents[2]
+    offenders: list[str] = []
+    for package in ("g3ku", "main"):
+        for path in (root / package).rglob("*.py"):
+            if "No visible reply" in path.read_text(encoding="utf-8"):
+                offenders.append(str(path.relative_to(root)))
+    assert offenders == []
 
 
 def test_tool_silent_trace_row_is_visible_to_model_and_hidden_from_delivery() -> None:

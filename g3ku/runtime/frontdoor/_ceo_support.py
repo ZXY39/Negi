@@ -178,15 +178,6 @@ class CeoFrontDoorSupport:
         return value if isinstance(value, list) else str(value or "")
 
     @staticmethod
-    def _empty_reply_fallback(query_text: str) -> str:
-        snippet = " ".join(str(query_text or "").split()).strip()
-        if len(snippet) > 64:
-            snippet = f"{snippet[:61].rstrip()}..."
-        if snippet:
-            return f"No visible reply was generated for: {snippet}"
-        return "No visible reply was generated."
-
-    @staticmethod
     def _cron_internal_system_message(metadata: dict[str, Any]) -> dict[str, str] | None:
         if not bool(metadata.get("cron_internal")):
             return None

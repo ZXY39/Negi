@@ -8276,21 +8276,28 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return result
 
     async def _graph_finalize_turn(self, state: CeoGraphState) -> dict[str, Any]:
-        output = str(state.get("final_output") or "").strip()
+        raw_output = str(state.get("final_output") or "").strip()
         # 纯显示层清洗，不是静默触发器：实盘 11 次旧哨兵用法全部写成「正文 + 空行 +
         # [G3KU_SILENT]」，识别已在 P4 删除，若不剥掉这行尾巴就会把它当正文发给用户。
         # 只在首/末整行时剥离，绝不因句子中间出现该串就动正文。
-        output = self._strip_legacy_silent_sentinel_line(output)
+        output = self._strip_legacy_silent_sentinel_line(raw_output)
         silent_reply = bool(state.get("silent_reply"))
+        silent_reason = str(state.get("silent_reason") or "").strip()
         if not output and not silent_reply and not bool(state.get("heartbeat_internal")):
-            output = self._empty_reply_fallback(str(state.get("query_text") or ""))
+            # 本轮没有可见正文 = 模型选择不说，机器不得替它编一条推给用户：旧的英文兜底
+            # 会在 QQ 侧留下一条内部文案（2026-09-23 23:25:51 `qq_official.bridge:deliver`
+            # 实盘投递，会话 ext:qq-official:f8a8001865631301）。改成静默后，模型照旧契约
+            # 输出纯 `[G3KU_SILENT]` 也只会落到"剥完即空、空即静默"，那条废弃写法不再泄漏。
+            silent_reply = True
+            silent_reason = (
+                "旧静默哨兵剥除后无正文" if output != raw_output else "模型未给出可见正文"
+            )
         route_kind = str(state.get("route_kind") or "direct_reply")
-        # 静默回合不再在此处把 final_output 清零：清零会吞掉 is_silent_reply 信号，
-        # session_agent 侧无法把 [G3KU_SILENT] 归一化为 output='' + is_silent_reply=True，
-        # 心跳修复循环会把合法静默误判为"无效空回复"，连续撞上限后发出误导性的
-        # "连续失败"兜底文案（任务结果本来正常）。改为保留原文并把 silent_reply 显式
-        # 写回 state，由 session_agent 的精确匹配识别完成归一化；基线回填与阶段收尾
-        # 统一按 visible_output 判断，确保 token 本身不进历史/基线。
+        # 静默回合不再在此处把 final_output 清零：清零会吞掉 silent_reply 信号，落盘侧
+        # 就分不出"本轮静默"和"本轮真的没输出"，心跳修复循环还会把合法静默判成无效空
+        # 回复、连撞上限后发出误导性的"连续失败"兜底文案。改为保留原文并把 silent_reply
+        # 显式写回 result，由 session_agent 经回填通道读取；基线回填与阶段收尾统一按
+        # visible_output 判断，确保正文不会同文两份。
         visible_output = "" if silent_reply else output
         # 工具静默时不回填正文不是漏改：随工具一起给出的那段文本已经躺在 execute_tools
         # 追加的 assistant tool_calls 行里进了基线，再 append 一遍就是同文两份。
@@ -8302,7 +8309,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if silent_reply:
             # 把判据一路带到转录落盘处，供痕迹行与审计读取；session_agent 侧拿不到
             # 本轮工具调用，只能靠这条回填通道。
-            result["silent_reason"] = str(state.get("silent_reason") or "").strip()
+            result["silent_reason"] = silent_reason
             result["silent_subject"] = str(state.get("silent_subject") or "").strip()
             result["silent_superseded_by"] = str(state.get("silent_superseded_by") or "").strip()
         messages = list(state.get("messages") or [])

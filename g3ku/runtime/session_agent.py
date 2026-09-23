@@ -2671,6 +2671,30 @@ class RuntimeAgentSession:
         """
         return bool(getattr(self, "_last_silent_reply", False))
 
+    def _silent_reply_metadata(self, output: str) -> tuple[dict[str, Any], str]:
+        """静默回合的落盘元数据与痕迹正文；非静默时返回 ``({}, output)``。
+
+        痕迹行必须 ``prompt_visible=True``：下一轮的模型要靠它看见"上次对哪个任务选了
+        静默"才谈得上反悔 —— 取消机器闸门之后这是唯一兜底。静默回合照样落一行，因为
+        本轮 canonical_context 挂在它上面，Web 刷新后才画得出阶段轨道。
+        """
+        if not self._resolve_silent_reply():
+            return {}, str(output or "")
+        metadata: dict[str, Any] = {
+            "prompt_visible": True,
+            "ui_visible": True,
+            "silent_reply": True,
+        }
+        for key, attr in (
+            ("silent_reason", "_last_silent_reason"),
+            ("silent_subject", "_last_silent_subject"),
+            ("silent_superseded_by", "_last_silent_superseded_by"),
+        ):
+            value = str(getattr(self, attr, "") or "").strip()
+            if value:
+                metadata[key] = value
+        return metadata, str(output or "")
+
     async def _persist_turn_transcript(
         self,
         *,
@@ -3401,9 +3425,8 @@ class RuntimeAgentSession:
                         "task_ids": task_ids,
                         "reason": "async_dispatch_runtime_recovered",
                     }
-                    if silent_reply:
-                        assistant_metadata["silent_reply"] = True
-                        assistant_metadata["prompt_visible"] = False
+                    silent_metadata, silent_trace_text = self._silent_reply_metadata(output)
+                    assistant_metadata.update(silent_metadata)
                     if cron_internal:
                         assistant_metadata["source"] = "cron"
                         assistant_metadata["cron_job_id"] = str(
@@ -3412,7 +3435,7 @@ class RuntimeAgentSession:
                     await self._persist_turn_transcript(
                         user_input=user_input,
                         user_text=user_text,
-                        assistant_text="" if silent_reply else output,
+                        assistant_text=silent_trace_text,
                         interaction_flow=interaction_flow,
                         internal_source=internal_source,
                         route_kind=str(getattr(self, "_last_route_kind", "") or ""),
@@ -3563,39 +3586,14 @@ class RuntimeAgentSession:
                     if cron_internal:
                         assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
                 if silent_reply:
-                    tool_origin_silent = bool(getattr(self, "_last_silent_reply", False))
-                    # 静默回合始终落一条 assistant 行承载本轮 canonical_context，
-                    # Web 会话框刷新后才画得出阶段轨道。
-                    #
-                    # 工具静默与文案静默在这一个字段上分道，是刻意分开的：
-                    # - 文案哨兵（旧）：整条输出就是哨兵，没有可留的东西，且当年的
-                    #   决定是"静默输出既不进基线也不回放到模型上下文"。
-                    # - 工具（新）：模型另给了正文，那正文就是痕迹本体。它必须
-                    #   prompt_visible=True，否则下一轮的模型看不见"我上次对哪个任务
-                    #   选了静默"，也就无从反悔 —— 而这正是取消机器闸门后唯一的兜底。
-                    assistant_metadata = {
-                        **(assistant_metadata or {}),
-                        "prompt_visible": tool_origin_silent,
-                        "ui_visible": True,
-                        "silent_reply": True,
-                    }
-                    for _key, _attr in (
-                        ("silent_reason", "_last_silent_reason"),
-                        ("silent_subject", "_last_silent_subject"),
-                        ("silent_superseded_by", "_last_silent_superseded_by"),
-                    ):
-                        _value = str(getattr(self, _attr, "") or "").strip()
-                        if _value:
-                            assistant_metadata[_key] = _value
-                silent_trace_text = (
-                    str(output or "")
-                    if silent_reply and bool(getattr(self, "_last_silent_reply", False))
-                    else ""
-                )
+                    silent_metadata, silent_trace_text = self._silent_reply_metadata(output)
+                    assistant_metadata = {**(assistant_metadata or {}), **silent_metadata}
+                else:
+                    silent_trace_text = output
                 persisted_session = await self._persist_turn_transcript(
                     user_input=user_input,
                     user_text=user_text,
-                    assistant_text=silent_trace_text if silent_reply else output,
+                    assistant_text=silent_trace_text,
                     interaction_flow=interaction_flow,
                     internal_source=internal_source,
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),
