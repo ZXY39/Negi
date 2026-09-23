@@ -337,7 +337,7 @@ def test_internal_turn_completion_retires_consumed_pending_rows():
             agent,
             user_input=heartbeat_input,
             user_text="This is a background heartbeat.",
-            assistant_text="HEARTBEAT_OK",
+            assistant_text="",
             internal_source="heartbeat",
         )
     )

@@ -608,7 +608,9 @@ def test_heartbeat_build_prompt_instructs_resume_not_heartbeat_ok(tmp_path: Path
     assert "always end with a user-visible reply" in prompt
     assert "Complete the user's previously interrupted request" in prompt
     assert service._events_require_visible_reply(events) is True
-    assert service._visible_reply_requires_repair("HEARTBEAT_OK") is True
+    # 文本哨兵已删：现在只有空输出算无效，任何实际文本（含旧哨兵字面串）都算正常回复。
+    assert service._visible_reply_requires_repair("HEARTBEAT_OK") is False
+    assert service._visible_reply_requires_repair("已经处理完了") is False
     assert service._visible_reply_requires_repair("   ") is True
 
 

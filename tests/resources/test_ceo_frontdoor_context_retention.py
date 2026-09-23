@@ -597,12 +597,12 @@ async def test_finalize_turn_appends_visible_heartbeat_reply_to_baseline() -> No
 
 @pytest.mark.asyncio
 async def test_finalize_turn_does_not_append_silent_heartbeat_ack_to_baseline() -> None:
-    # 静默 ACK（HEARTBEAT_OK）是 live-only 例外，不得污染跨回合基线。
+    # 空输出的内部 ACK 是 live-only 例外，不得污染跨回合基线。
     runner = CeoFrontDoorRunner(loop=_loop_with_session("web:shared"))
     state = {
         "query_text": "continue",
         "route_kind": "direct_reply",
-        "final_output": "HEARTBEAT_OK",
+        "final_output": "",
         "messages": [
             {"role": "system", "content": "SYSTEM"},
             {"role": "user", "content": "This is a background heartbeat. Do not explain internal mechanics."},
@@ -655,19 +655,35 @@ async def test_finalize_turn_does_not_append_empty_heartbeat_output_to_baseline(
 
 
 @pytest.mark.asyncio
-async def test_finalize_turn_preserves_silent_reply_token_for_run_turn_contract() -> None:
-    # 回归：[G3KU_SILENT] 必须在 finalize 层保留原文并把 silent_reply 写回 state，
-    # 供 run_turn 透传给 session_agent 归一化为 output='' + is_silent_reply=True。
-    # 此前此处把 final_output 清零，吞掉了静默信号，心跳修复循环把合法静默误判为
-    # "无效空回复"，连续撞上限后向用户发出误导性的"连续失败"兜底文案。
+async def test_finalize_turn_passes_tool_silent_signal_through_for_session_agent() -> None:
+    # 回归（原为文本哨兵版）：静默信号必须在 finalize 层原样写回 state，供 run_turn
+    # 透传给 session_agent 落痕迹。此前此处把 final_output 清零会吞掉静默信号，心跳
+    # 修复循环把合法静默误判成"无效空回复"，连续撞上限后向用户发出误导性的
+    # "连续失败"兜底文案（任务结果本来正常）。判据现已换成 `silent` 工具，这条
+    # 不变量不变：静默回合的正文不能被当成空回复。
     runner = CeoFrontDoorRunner(loop=_loop_with_session("web:shared"))
+    accompanying = "这份 CSV 已在 17:49 那轮汇报过，本轮不再外发。"
     state = {
         "query_text": "continue",
         "route_kind": "direct_reply",
-        "final_output": "[G3KU_SILENT]",
+        "final_output": accompanying,
+        "silent_reply": True,
+        "silent_reason": "已被 task:9771d6c5469d 覆盖",
         "messages": [
             {"role": "system", "content": "SYSTEM"},
             {"role": "user", "content": "This is a background heartbeat. Do not explain internal mechanics."},
+            {
+                "role": "assistant",
+                "content": accompanying,
+                "tool_calls": [
+                    {
+                        "id": "call-silent-1",
+                        "type": "function",
+                        "function": {"name": "silent", "arguments": '{"reason":"已被覆盖"}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-silent-1", "content": '{"silenced": true}'},
         ],
         "frontdoor_request_body_messages": [
             {"role": "system", "content": "SYSTEM"},
@@ -682,15 +698,14 @@ async def test_finalize_turn_preserves_silent_reply_token_for_run_turn_contract(
 
     finalized = await runner._graph_finalize_turn(state)
 
-    assert finalized["final_output"] == "[G3KU_SILENT]"
     assert finalized["silent_reply"] is True
-    # token 本身不进基线/历史
-    assert finalized["frontdoor_request_body_messages"] == [
-        *state["frontdoor_request_body_messages"],
-    ]
-    assert all(
-        str(message.get("content") or "") != "[G3KU_SILENT]"
-        for message in list(finalized.get("messages") or [])
+    assert finalized["final_output"] == accompanying
+    assert finalized["silent_reason"] == "已被 task:9771d6c5469d 覆盖"
+    # 正文不额外回填：带 tool_calls 的那行已经把它带进基线了，再 append 一份就是同文两份。
+    assert finalized["frontdoor_request_body_messages"] == state["frontdoor_request_body_messages"]
+    assert (
+        sum(1 for message in list(finalized.get("messages") or []) if str(message.get("content") or "") == accompanying)
+        == 1
     )
 
 

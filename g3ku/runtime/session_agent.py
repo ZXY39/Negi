@@ -35,7 +35,6 @@ from g3ku.runtime.frontdoor.message_builder import (
     adopt_memory_snapshot,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted
-from g3ku.runtime.reply_tokens import is_silent_reply_token
 from main.runtime.stage_budget import STAGE_TURN_END_SUMMARY_POINTER
 
 _CONTROL_TOOL_NAMES = {"stop_tool_execution"}
@@ -2661,14 +2660,16 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("Skipped paused execution context sync for {}", session_key)
 
-    def _resolve_silent_reply(self, output: str) -> bool:
-        """本轮是否静默：`silent` 工具信号优先，文案哨兵在 P4 删除前并行生效。
+    def _resolve_silent_reply(self) -> bool:
+        """本轮是否静默：唯一真相源是 `silent` 工具信号。
 
-        两条信号并存的唯一理由是提交窗口 —— 若在同一 commit 里既换成工具又删掉文案，
-        中间态会出现"两条出口都不认"。工具信号来自 runner 回填（见
-        `_apply_silent_signal_to_session`），这里拿不到本轮工具调用。
+        以前这里比较的是输出文本（`[G3KU_SILENT]` 精确相等、`HEARTBEAT_OK`），而实盘
+        扫 160,675 条 assistant 消息的结果是精确匹配 0 次、失败 11 次且形态全部为
+        「正文 + 空行 + 哨兵」—— 文案一条通道承载不了"这段留下但别发"这个意图。
+        工具信号由 runner 回填（`_apply_silent_signal_to_session`），此处拿不到本轮
+        工具调用，所以只能走这条通道。
         """
-        return bool(getattr(self, "_last_silent_reply", False)) or is_silent_reply_token(output)
+        return bool(getattr(self, "_last_silent_reply", False))
 
     async def _persist_turn_transcript(
         self,
@@ -3392,7 +3393,7 @@ class RuntimeAgentSession:
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
                 self._last_verified_task_ids = list(task_ids)
-                silent_reply = self._resolve_silent_reply(output)
+                silent_reply = self._resolve_silent_reply()
                 if getattr(self._loop, "prompt_trace", False):
                     logger.info(render_output_trace(output))
                 if persist_transcript:
@@ -3533,7 +3534,7 @@ class RuntimeAgentSession:
             raise
         else:
             tail_profiler = _TurnTailProfiler(session_key=self._state.session_key)
-            silent_reply = self._resolve_silent_reply(output)
+            silent_reply = self._resolve_silent_reply()
             assistant = AssistantMessage(content="" if silent_reply else output, timestamp=self._now())
             self._state.messages.append(assistant)
             self._cancel_assistant_stream_flush_task()
@@ -3548,7 +3549,7 @@ class RuntimeAgentSession:
                 logger.info(render_output_trace(output))
             persisted_session = None
             should_persist_transcript_reply = persist_transcript and not (
-                internal_source is not None and str(output or "").strip() in {"", "HEARTBEAT_OK"}
+                internal_source is not None and not str(output or "").strip()
             )
             if should_persist_transcript_reply:
                 assistant_metadata = None
@@ -4160,7 +4161,7 @@ class RuntimeAgentSession:
             self._state.status = "completed"
             self._cancel_assistant_stream_flush_task()
             self._assistant_stream_pending_text = ""
-            silent_reply = self._resolve_silent_reply(output)
+            silent_reply = self._resolve_silent_reply()
             self._state.latest_message = "" if silent_reply else str(output or "")
             await self._emit(
                 "message_end",

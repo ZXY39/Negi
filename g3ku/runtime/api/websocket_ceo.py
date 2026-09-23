@@ -52,7 +52,6 @@ from g3ku.runtime.frontdoor.canonical_context import (
 from g3ku.runtime.frontdoor.canonical_context import (
     ui_canonical_context_delta_from_views as _ui_canonical_context_delta_from_views,
 )
-from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.session_keys import (
     EXTERNAL_SESSION_KEY_PREFIX,
     is_channel_session_key,
@@ -95,7 +94,6 @@ from main.api.websocket_utils import (
 from main.protocol import build_envelope
 
 router = APIRouter()
-_HEARTBEAT_OK = "HEARTBEAT_OK"
 # 连续几帧都写不出去才认定这条 socket 已废（单帧失败通常是载荷问题，下一帧还能发）。
 _SENDER_CONSECUTIVE_FAILURE_LIMIT = 3
 # 静默回合的历史占位文案：存量转录里仍带这一行，快照层按静默归一化后不显示到会话框。
@@ -1118,22 +1116,22 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     data = payload if isinstance(payload, dict) else {}
     if str(data.get("role") or "").strip().lower() != "assistant":
         return False
-    text = str(data.get("text") or "").strip()
-    if not text or is_silent_reply_token(text):
+    if bool(data.get("silent_reply")):
         return False
-    if bool(data.get("heartbeat_internal")) and text != _HEARTBEAT_OK:
-        return True
-    if text == _HEARTBEAT_OK:
-        return str(data.get("source") or "").strip().lower() == "cron"
-    return True
+    return bool(str(data.get("text") or "").strip())
 
 
 def _is_internal_ack_message_end(payload: dict[str, Any] | None) -> bool:
+    """内部回合「本轮无话可说」的判定：改读 silent 工具信号，不再匹配文本。
+
+    旧判据是 `text == "HEARTBEAT_OK"`，即模型用文案哨兵收尾时给前端推一条 ack 而不是
+    空气泡。现在同一个意图由 `silent` 工具表达，所以这里换成 flag；排除 task_terminal
+    心跳那一支（它走回复通道，见 heartbeat/session_service 的 ack 投递）。
+    """
     data = payload if isinstance(payload, dict) else {}
     if str(data.get("role") or "").strip().lower() != "assistant":
         return False
-    text = str(data.get("text") or "").strip()
-    if text != _HEARTBEAT_OK:
+    if not bool(data.get("silent_reply")):
         return False
     source = str(data.get("source") or "").strip().lower()
     if source == "heartbeat" and str(data.get("heartbeat_reason") or "").strip().lower() == "task_terminal":
@@ -1631,7 +1629,7 @@ async def ceo_websocket(websocket: WebSocket):
             return
         if event.type == 'message_end':
             payload = dict(event.payload or {})
-            # 静默回合（模型输出 [G3KU_SILENT]）走同一条 final 通道，只是回复文本置空：
+            # 静默回合（模型调用 silent 工具）走同一条 final 通道，只是回复文本置空：
             # 早退会让 final 丢掉 canonical_context / user_messages / usage，前端就没有
             # 阶段轨道可收尾，本回合的阶段与工具调用会被整段吞掉。外部渠道仍由 external
             # relay 依据 silent_reply 跳过，不会投递到 QQ。

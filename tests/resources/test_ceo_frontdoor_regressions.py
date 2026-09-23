@@ -19,6 +19,7 @@ from g3ku.runtime.frontdoor._ceo_runtime_ops import _build_args_schema
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.session.manager import SessionManager
+from main.runtime.internal_tools import SilentTool
 from main.runtime.stage_messages import build_ceo_stage_reply_bounce_message
 
 
@@ -362,12 +363,16 @@ async def test_runtime_agent_session_prompt_records_internal_turn_visible_surfac
     monkeypatch.setattr(web_ceo_sessions, "workspace_path", lambda: tmp_path)
 
     class _ScriptedRunner(_MultiAgentRunner):
-        def __init__(self, reply: str) -> None:
+        def __init__(self, reply: str, *, silent: bool = False) -> None:
             self._reply = reply
+            self._silent = silent
 
         async def run_turn(self, *, user_input, session, on_progress=None) -> str:
             _ = user_input, on_progress
             setattr(session, "_last_route_kind", "direct_reply")
+            # 静默回合走的是 `_apply_silent_signal_to_session` 那条回填通道，
+            # 与真实 runner 同形；旧的 "HEARTBEAT_OK" 文本哨兵已不再是判据。
+            setattr(session, "_last_silent_reply", self._silent)
             return self._reply
 
     hidden_bundle_text = "HIDDEN_EVENT_BUNDLE_SHOULD_NOT_APPEAR"
@@ -404,14 +409,15 @@ async def test_runtime_agent_session_prompt_records_internal_turn_visible_surfac
     assert hidden_bundle_text not in str(memory_manager.calls[0])
 
     # Silent internal turn: nothing is recorded.
-    silent_session, silent_memory_manager = _build_session(_ScriptedRunner("HEARTBEAT_OK"))
+    silent_session, silent_memory_manager = _build_session(_ScriptedRunner("这段留在上下文里", silent=True))
     silent_input = UserInputMessage(
         content=hidden_bundle_text,
         metadata={"heartbeat_internal": True},
     )
     silent_result = await silent_session.prompt(silent_input)
 
-    assert silent_result.output == "HEARTBEAT_OK"
+    assert silent_result.is_silent_reply is True
+    assert silent_result.output == ""
     assert silent_memory_manager.calls == []
 
 
@@ -505,24 +511,45 @@ async def test_ceo_frontdoor_runner_directly_executes_visible_tool_without_stage
 
 
 @pytest.mark.asyncio
-async def test_ceo_frontdoor_runner_returns_silent_reply_token_through_finalize(
+async def test_ceo_frontdoor_runner_ends_turn_on_silent_tool_without_second_call(
     monkeypatch, tmp_path
 ) -> None:
-    # 回归：模型以 [G3KU_SILENT] 收尾时，run_turn 必须原样把它返回给 session_agent
-    # （由后者归一化为 RunResult(output='', is_silent_reply=True)）。此前 finalize 层
-    # 把 final_output 清零，session_agent 拿不到信号，心跳修复循环把合法静默误判为
-    # "无效空回复"并发出"连续失败"兜底文案。
+    # 回归（原为文本哨兵版）：模型调 `silent` 收尾时，run_turn 必须把正文原样返回给
+    # session_agent，并把 silent 信号回填到 session（由后者归一化为
+    # RunResult(output=正文, is_silent_reply=True)）。两点各自防一次真实事故：
+    # finalize 层清零会吞掉信号 → 心跳修复循环把合法静默判成"无效空回复"并发
+    # "连续失败"兜底文案；而批次跑完不回模型，是因为要求模型"说话才能不说"
+    # 正是旧文案车道 0 次成功的根源。backend.calls == 1 就是这条终态边的证据。
     async def _noop_ready() -> None:
         return None
 
-    backend = _BackendRecorder([LLMResponse(content="[G3KU_SILENT]", finish_reason="stop")])
+    accompanying = "这份结果已在 17:49 那轮汇报过了。"
+    backend = _BackendRecorder(
+        [
+            LLMResponse(
+                content=accompanying,
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-silent-1",
+                        name="silent",
+                        arguments={
+                            "reason": "已被 task:9771d6c5469d 覆盖",
+                            "subject": "task:543e0f15d798",
+                            "superseded_by": "task:9771d6c5469d",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
     loop = SimpleNamespace(
         _ensure_checkpointer_ready=_noop_ready,
         sessions=SessionManager(tmp_path),
         _checkpointer=None,
         _store=None,
         main_task_service=None,
-        tools=_FakeToolRegistry([]),
+        tools=_FakeToolRegistry([SilentTool()]),
         max_iterations=8,
         resource_manager=None,
         tool_execution_manager=None,
@@ -567,8 +594,10 @@ async def test_ceo_frontdoor_runner_returns_silent_reply_token_through_finalize(
         session=session,
     )
 
-    assert output == "[G3KU_SILENT]"
+    assert output == accompanying
     assert len(backend.calls) == 1
+    assert getattr(session, "_last_silent_reply", False) is True
+    assert getattr(session, "_last_silent_superseded_by", "") == "task:9771d6c5469d"
 
 
 @pytest.mark.asyncio

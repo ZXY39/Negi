@@ -111,7 +111,7 @@ def test_relay_skips_internal_ack_message_end():
 
     import asyncio
 
-    asyncio.run(relay(AgentEvent(type="message_end", payload={"heartbeat_internal": True, "text": "HEARTBEAT_OK"})))
+    asyncio.run(relay(AgentEvent(type="message_end", payload={"heartbeat_internal": True, "text": ""})))
     assert get_session_event_hub(session_key).replay(0) == []
 
 

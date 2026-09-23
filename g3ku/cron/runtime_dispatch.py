@@ -10,7 +10,6 @@ from loguru import logger
 from g3ku.bus.events import OutboundMessage
 from g3ku.core.messages import UserInputMessage
 from g3ku.cron.types import CronJob
-from g3ku.runtime.reply_tokens import is_silent_reply_token
 
 
 def resolve_cron_session_key(job: CronJob, *, session_manager: Any | None = None) -> str:
@@ -69,8 +68,10 @@ async def dispatch_cron_job(
         register_task=register_task,
     )
     output = str(getattr(result, "output", "") or "")
-    deliver = bool(getattr(payload, "deliver", False))
-    if deliver and output.strip() and not is_silent_reply_token(output) and publish_outbound is not None and chat_id and chat_id != "direct":
+    # 静默判据改为读 `silent` 工具归一化出的 is_silent_reply，不再匹配输出文本。
+    # 工具静默时 output 仍带着正文/理由，光靠 truthiness 判不出来。
+    deliver = bool(getattr(payload, "deliver", False)) and not bool(getattr(result, "is_silent_reply", False))
+    if deliver and output.strip() and publish_outbound is not None and chat_id and chat_id != "direct":
         try:
             outbound = OutboundMessage(
                 channel=channel,

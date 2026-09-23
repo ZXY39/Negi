@@ -39,11 +39,11 @@ class _OkPromptSession:
 
     async def prompt(self, user_input, persist_transcript: bool = True):
         self.prompt_calls += 1
-        return SimpleNamespace(output="HEARTBEAT_OK")
+        return SimpleNamespace(output="")
 
 
 class _VisibleReplyPromptSession:
-    """Runtime session whose prompt() returns a user-visible reply（非 HEARTBEAT_OK）。"""
+    """Runtime session whose prompt() returns a user-visible reply（非静默 ACK）。"""
 
     def __init__(self, output: str = "给用户看的结论") -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)

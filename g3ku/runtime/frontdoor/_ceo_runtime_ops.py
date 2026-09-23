@@ -57,7 +57,6 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import (
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
-from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.stage_prompt_compaction import (
     ECHO_STRIP_ENABLED,
     STAGE_ARCHIVE_HEADING,
@@ -169,6 +168,10 @@ ToolExecutor = Callable[..., Awaitable[Any]]
 CeoGraphState = CeoPersistentState
 
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
+# 旧文案静默哨兵的字面值。P4 之后它不再是任何判据，只作为"该被清洗掉的噪声"保留一份：
+# 转录里仍存有历史轮次的这类尾巴，模型有模仿上下文的倾向，不剥就会当正文发给用户。
+# 实盘该形态出现 11 次（占全部静默尝试的 11/11），所以这条清洗有真实对象。
+LEGACY_SILENT_SENTINEL = "[G3KU_SILENT]"
 _DEFAULT_IMAGE_ESTIMATION_METHOD = "openai_vision_heuristic"
 _OPENAI_DEFAULT_IMAGE_LOW_TOKENS = 70
 _OPENAI_DEFAULT_IMAGE_HIGH_BASE_TOKENS = 70
@@ -6259,6 +6262,22 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return payloads
 
     @staticmethod
+    def _strip_legacy_silent_sentinel_line(text: str) -> str:
+        """剥掉首行或末行上孤立存在的旧静默哨兵，只当噪声清洗，不作静默判据。"""
+        lines = [line for line in str(text or "").splitlines()]
+        trimmed = list(lines)
+        changed = False
+        while trimmed and trimmed[0].strip() == LEGACY_SILENT_SENTINEL:
+            trimmed.pop(0)
+            changed = True
+        while trimmed and trimmed[-1].strip() == LEGACY_SILENT_SENTINEL:
+            trimmed.pop(-1)
+            changed = True
+        if not changed:
+            return str(text or "").strip()
+        return "\n".join(trimmed).strip()
+
+    @staticmethod
     def _silent_signal_from_tool_payloads(payloads: list[dict[str, Any]] | None) -> dict[str, Any]:
         """取本轮最后一次 `silent` 调用的判据；没有则返回 {}。
 
@@ -8258,9 +8277,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     async def _graph_finalize_turn(self, state: CeoGraphState) -> dict[str, Any]:
         output = str(state.get("final_output") or "").strip()
-        # 静默判定的真相源换成工具信号；文案哨兵在 P4 删除前继续并行生效，
-        # 免得两个 commit 之间出现"两条出口都不认"的窗口。
-        silent_reply = bool(state.get("silent_reply")) or is_silent_reply_token(output)
+        # 纯显示层清洗，不是静默触发器：实盘 11 次旧哨兵用法全部写成「正文 + 空行 +
+        # [G3KU_SILENT]」，识别已在 P4 删除，若不剥掉这行尾巴就会把它当正文发给用户。
+        # 只在首/末整行时剥离，绝不因句子中间出现该串就动正文。
+        output = self._strip_legacy_silent_sentinel_line(output)
+        silent_reply = bool(state.get("silent_reply"))
         if not output and not silent_reply and not bool(state.get("heartbeat_internal")):
             output = self._empty_reply_fallback(str(state.get("query_text") or ""))
         route_kind = str(state.get("route_kind") or "direct_reply")
@@ -8304,8 +8325,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         finalized_stage_state = self._frontdoor_absorb_orphan_rounds(finalized_stage_state)
         is_internal_turn = bool(state.get("heartbeat_internal")) or bool(state.get("cron_internal"))
         # 内部回合的真实可见回复必须像普通回合一样进基线，才能被下一轮上下文看见；
-        # 只排除静默 ACK（空输出或 HEARTBEAT_OK），与 session_agent 转录持久化的判据一致。
-        is_silent_internal_ack = is_internal_turn and str(output or "").strip() in {"", "HEARTBEAT_OK"}
+        # 只排除空输出的内部 ACK，与 session_agent 转录持久化的判据一致。旧的
+        # HEARTBEAT_OK 字面判据已随文案出口一并删除（实盘 0 次单独命中）。
+        is_silent_internal_ack = is_internal_turn and not str(output or "").strip()
         should_append_visible_output = bool(visible_output) and not is_silent_internal_ack
         if should_append_visible_output:
             messages.append({"role": "assistant", "content": visible_output})

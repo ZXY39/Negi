@@ -7,7 +7,7 @@ import pytest
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
 from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
-from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
+from g3ku.heartbeat.session_service import WebSessionHeartbeatService
 from g3ku.session.manager import SessionManager
 from main.service.task_terminal_callback import (
     build_task_terminal_payload,
@@ -267,7 +267,7 @@ async def test_web_session_heartbeat_includes_root_output_when_acceptance_failed
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "I have read both the acceptance failure and the execution deliverable."])
+    live_session = _FakeHeartbeatSession(outputs=["", "I have read both the acceptance failure and the execution deliverable."])
     task_service = _TaskService()
     task_id = "task:demo-acceptance-output"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -333,20 +333,14 @@ async def test_web_session_heartbeat_includes_root_output_when_acceptance_failed
     assert "Execution output ref: artifact:artifact:root-output" in prompt_text
 
 
-def test_silent_reply_token_exact_match_only() -> None:
-    from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN, is_silent_reply_token
+async def test_task_terminal_silent_turn_acks_without_visible_reply(tmp_path) -> None:
+    """模型调 `silent` 工具收尾（runtime 归一化为 output=''+is_silent_reply）时走静默 ACK：
+    不投递 ceo.reply.final、不触发修复循环、不落兜底文案。
 
-    assert SILENT_REPLY_TOKEN == "[G3KU_SILENT]"
-    assert is_silent_reply_token("[G3KU_SILENT]")
-    assert is_silent_reply_token("  [G3KU_SILENT]\n")
-    assert not is_silent_reply_token("")
-    assert not is_silent_reply_token("[G3KU_SILENT] 附言")
-    assert not is_silent_reply_token("请保持[G3KU_SILENT]")
-
-
-async def test_task_terminal_silent_reply_token_acks_without_visible_reply(tmp_path) -> None:
-    """模型对 task_terminal 输出 [G3KU_SILENT]（runtime 归一化为 output=''+is_silent_reply）时，
-    走静默 ACK：不投递 ceo.reply.final、不触发修复循环、不落兜底文案。"""
+    原先这条测的是文本哨兵 `[G3KU_SILENT]`，该判据已在 P4 随文案出口一并删除；
+    "哨兵只许整行精确匹配、绝不子串命中"这条约束改由
+    test_frontdoor_silent_turn.py 的清洗用例承接。
+    """
     session_id = "web:ceo-heartbeat-task-terminal-silent-reply"
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
@@ -360,7 +354,7 @@ async def test_task_terminal_silent_reply_token_acks_without_visible_reply(tmp_p
                 self._outputs.pop(0)
             return SimpleNamespace(output="", is_silent_reply=True)
 
-    live_session = _SilentReplySession(outputs=["[G3KU_SILENT]"])
+    live_session = _SilentReplySession(outputs=[""])
     task_service = _TaskService()
     task_id = "task:demo-silent-reply"
     task_service.tasks[task_id] = SimpleNamespace(

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from g3ku.core.messages import UserInputMessage
-from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
+from g3ku.heartbeat.session_service import WebSessionHeartbeatService
 from g3ku.session.manager import SessionManager
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
@@ -55,7 +55,7 @@ class _RuntimeManager:
 
 
 class _FakeHeartbeatSession:
-    def __init__(self, *, output: str = HEARTBEAT_OK) -> None:
+    def __init__(self, *, output: str = "") -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)
         self.prompts: list[UserInputMessage] = []
         self._listeners = set()

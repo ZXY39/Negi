@@ -48,7 +48,6 @@ from main.service.task_terminal_callback import (
     enrich_task_terminal_payload,
 )
 
-HEARTBEAT_OK = "HEARTBEAT_OK"
 HeartbeatReplyNotifier = Callable[[str, str], Awaitable[None] | None]
 _TASK_TERMINAL_OUTPUT_INLINE_LIMIT = TASK_TERMINAL_OUTPUT_INLINE_CHAR_LIMIT
 _TASK_TERMINAL_REPAIR_ATTEMPT_LIMIT = 5
@@ -1215,8 +1214,9 @@ class WebSessionHeartbeatService:
 
     @staticmethod
     def _visible_reply_requires_repair(output: Any) -> bool:
-        text = str(output or "").strip()
-        return not text or text == HEARTBEAT_OK
+        """必须对用户说话的那几类事件（task_terminal / shutdown_resume）里，
+        空输出算无效进修复轮；静默由 `silent` 工具表达，其回合根本不走这条路。"""
+        return not str(output or "").strip()
 
     @staticmethod
     def _fixed_visible_reply_error_text(events: list[SessionHeartbeatEvent]) -> str:
@@ -1798,7 +1798,7 @@ class WebSessionHeartbeatService:
             self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
-        if silent_reply or ((not output or output == HEARTBEAT_OK) and not require_visible_reply):
+        if silent_reply or (not output and not require_visible_reply):
             preserved_source, preserved_turn_id = self._clear_preserved_inflight_turn(key, session)
             if preserved_source:
                 discard_payload = {"source": preserved_source}

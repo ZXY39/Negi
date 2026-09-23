@@ -29,7 +29,6 @@ from typing import Any, Awaitable, Callable
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.bridge import cli_event_text
-from g3ku.runtime.reply_tokens import is_silent_reply_token
 from g3ku.runtime.session_keys import sanitize_channel_outbound_text
 
 DEFAULT_EVENT_BUFFER_SIZE = 512
@@ -215,7 +214,7 @@ def make_session_event_relay(
                 if payload.get("heartbeat_internal") or payload.get("silent_reply"):
                     return
                 text = sanitize_channel_outbound_text(str(payload.get("text") or ""))
-                if not text or is_silent_reply_token(text):
+                if not text:
                     return
                 text, attachments = _extract_media_attachments(text)
                 text = _rewrite_media_signed(text)

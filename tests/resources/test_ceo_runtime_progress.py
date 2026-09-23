@@ -21,7 +21,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.content import ContentNavigationService, parse_content_envelope
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
-from g3ku.heartbeat.session_service import HEARTBEAT_OK, WebSessionHeartbeatService
+from g3ku.heartbeat.session_service import WebSessionHeartbeatService
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.runtime import web_ceo_sessions
@@ -270,7 +270,7 @@ class _FakeHeartbeatSession:
     def __init__(
         self,
         *,
-        output: str = HEARTBEAT_OK,
+        output: str = "",
         outputs: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.state = SimpleNamespace(status="idle", is_running=False)
@@ -300,16 +300,18 @@ class _FakeHeartbeatSession:
         self.prompts.append(user_message)
         output = self._outputs.pop(0) if self._outputs else ""
         heartbeat_reason = str((getattr(user_message, "metadata", None) or {}).get("heartbeat_reason") or "").strip()
-        if output:
-            await self._emit(
-                "message_end",
-                role="assistant",
-                text=str(output),
-                source="heartbeat",
-                heartbeat_internal=True,
-                heartbeat_reason=heartbeat_reason,
-                turn_id=self.turn_id,
-            )
+        # 真实 session_agent 无论回复内容是否为空都会发一条 message_end（静默/ACK 回合
+        # 靠 silent_reply flag 区分，不是靠"干脆不发事件"）。以前这里用 `if output:`
+        # 少发一条，会让 heartbeat_turn_id 在空回复场景下取不到值。
+        await self._emit(
+            "message_end",
+            role="assistant",
+            text=str(output),
+            source="heartbeat",
+            heartbeat_internal=True,
+            heartbeat_reason=heartbeat_reason,
+            turn_id=self.turn_id,
+        )
         return SimpleNamespace(output=output)
 
 
@@ -420,7 +422,7 @@ class _PersistingHeartbeatSession(_FakeHeartbeatSession):
                     },
                 )
             output_text = str(getattr(result, "output", "") or "").strip()
-            if output_text and output_text != HEARTBEAT_OK:
+            if output_text and output_text != "":
                 persisted.add_message(
                     "assistant",
                     output_text,
@@ -938,7 +940,7 @@ async def test_runtime_agent_session_marks_heartbeat_message_end(tmp_path: Path,
     class _FakeRunner:
         async def run_turn(self, *, user_input, session, on_progress):
             _ = user_input, session, on_progress
-            return HEARTBEAT_OK
+            return ""
 
     async def _cancel_session_tasks(session_key: str) -> int:
         _ = session_key
@@ -973,7 +975,7 @@ async def test_runtime_agent_session_marks_heartbeat_message_end(tmp_path: Path,
     )
 
     message_end = next(event for event in events if event.type == "message_end")
-    assert message_end.payload["text"] == HEARTBEAT_OK
+    assert message_end.payload["text"] == ""
     assert message_end.payload["heartbeat_internal"] is True
 
 
@@ -1531,7 +1533,7 @@ async def test_inflight_snapshot_preserves_paused_user_turn_across_heartbeat_pro
             _ = session, on_progress
             metadata = dict(getattr(user_input, "metadata", None) or {})
             if bool(metadata.get("heartbeat_internal")):
-                return HEARTBEAT_OK
+                return ""
             return "normal reply"
 
     async def _cancel_session_tasks(session_key: str) -> int:
@@ -1892,7 +1894,7 @@ async def test_runtime_agent_session_persists_hidden_heartbeat_prompt_messages_a
 
     heartbeat_rules_text = (
         "This is a background heartbeat. Do not explain internal mechanics.\n"
-        "If no user-facing update is needed, reply with exactly HEARTBEAT_OK."
+        "If no user-facing update is needed, call the silent tool."
     )
     heartbeat_event_bundle = "[SESSION EVENTS]\n## EVENT BUNDLE\n- Task demo completed"
 
@@ -5227,7 +5229,7 @@ def test_ceo_websocket_final_reply_includes_current_turn_user_messages(tmp_path:
     ]
 
 
-def test_ceo_websocket_forwards_cron_heartbeat_ok_as_internal_ack(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_forwards_cron_silent_turn_as_internal_ack(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -5264,17 +5266,20 @@ def test_ceo_websocket_forwards_cron_heartbeat_ok_as_internal_ack(tmp_path: Path
             self.state.status = "running"
             self.state.is_running = True
             await self._emit("state_snapshot", state=self.state_dict())
+            # cron 的"本轮无话可说"现在由 silent 工具表达：正文留在上下文但不外发，
+            # WS 侧据 silent_reply flag 推一条 ceo.internal.ack 而不是空气泡。
             await self._emit(
                 "message_end",
                 role="assistant",
-                text=HEARTBEAT_OK,
+                text="定时任务无新增，本轮不外发。",
+                silent_reply=True,
                 source="cron",
                 turn_id="turn-cron-ack",
             )
             self.state.status = "completed"
             self.state.is_running = False
             await self._emit("state_snapshot", state=self.state_dict())
-            return SimpleNamespace(output=HEARTBEAT_OK)
+            return SimpleNamespace(output="", is_silent_reply=True)
 
     monkeypatch.setattr(websocket_ceo, "ensure_web_runtime_services", _ensure_services)
     session_id = "web:ceo-cron-ack"
@@ -6510,7 +6515,7 @@ async def test_ceo_websocket_queues_running_turn_follow_up_and_chains_next_turn(
     )
 
 
-def test_ceo_websocket_filters_only_silent_internal_ack_message_end() -> None:
+def test_ceo_websocket_filters_silent_internal_ack_by_flag_not_text() -> None:
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": "normal reply", "heartbeat_internal": False}
     ) is True
@@ -6518,20 +6523,32 @@ def test_ceo_websocket_filters_only_silent_internal_ack_message_end() -> None:
         {"role": "assistant", "text": "visible heartbeat reply", "heartbeat_internal": True, "source": "heartbeat"}
     ) is True
     assert websocket_ceo._should_forward_message_end(
-        {"role": "assistant", "text": HEARTBEAT_OK, "heartbeat_internal": True}
+        {"role": "assistant", "text": "", "heartbeat_internal": True}
+    ) is False
+    # 工具静默：即便模型给了正文也不转发（正文只进上下文，不外发）。
+    assert websocket_ceo._should_forward_message_end(
+        {"role": "assistant", "text": "这段留在上下文里", "source": "cron", "silent_reply": True}
     ) is False
     assert websocket_ceo._should_forward_message_end(
-        {"role": "assistant", "text": HEARTBEAT_OK, "source": "cron"}
+        {"role": "assistant", "text": "cron 给了实际结论", "source": "cron"}
     ) is True
     assert websocket_ceo._should_forward_message_end(
-        {"role": "assistant", "text": HEARTBEAT_OK}
+        {"role": "assistant", "text": ""}
     ) is False
+    # 内部 ack 的认定从"文本等于 HEARTBEAT_OK"改读 silent 工具信号：cron/心跳的静默
+    # 回合推一条 ceo.internal.ack，而不是留一个空气泡；task_terminal 心跳走回复通道。
     assert websocket_ceo._is_internal_ack_message_end(
-        {"role": "assistant", "text": HEARTBEAT_OK, "source": "heartbeat", "heartbeat_reason": "task_terminal"}
-    ) is False
-    assert websocket_ceo._is_internal_ack_message_end(
-        {"role": "assistant", "text": HEARTBEAT_OK, "source": "heartbeat", "heartbeat_reason": "tool_background"}
+        {"role": "assistant", "text": "这段留在上下文里", "source": "cron", "silent_reply": True}
     ) is True
+    assert websocket_ceo._is_internal_ack_message_end(
+        {"role": "assistant", "text": "", "source": "heartbeat", "heartbeat_reason": "task_terminal", "silent_reply": True}
+    ) is False
+    assert websocket_ceo._is_internal_ack_message_end(
+        {"role": "assistant", "text": "", "source": "heartbeat", "heartbeat_reason": "tool_background", "silent_reply": True}
+    ) is True
+    assert websocket_ceo._is_internal_ack_message_end(
+        {"role": "assistant", "text": "", "source": "heartbeat", "silent_reply": False}
+    ) is False
 
 
 def test_ceo_upload_endpoint_rejects_oversized_image(tmp_path: Path, monkeypatch) -> None:
@@ -7087,7 +7104,7 @@ async def test_web_session_heartbeat_repairs_task_terminal_when_model_returns_he
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "整理后的最终结论"])
+    live_session = _FakeHeartbeatSession(outputs=["", "整理后的最终结论"])
     task_service = _TaskService()
     service = WebSessionHeartbeatService(
         workspace=tmp_path,
@@ -7134,7 +7151,7 @@ async def test_web_session_heartbeat_repairs_unpassed_task_terminal_when_model_r
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "虽然未通过验收，但结果已基本可交付。"])
+    live_session = _FakeHeartbeatSession(outputs=["", "虽然未通过验收，但结果已基本可交付。"])
     task_service = _TaskService()
     service = WebSessionHeartbeatService(
         workspace=tmp_path,
@@ -7180,7 +7197,7 @@ async def test_web_session_heartbeat_uses_fixed_error_after_task_terminal_repair
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK, HEARTBEAT_OK])
+    live_session = _FakeHeartbeatSession(outputs=["", "", "", "", "", ""])
     task_service = _TaskService()
     service = WebSessionHeartbeatService(
         workspace=tmp_path,
@@ -7225,7 +7242,7 @@ async def test_web_session_heartbeat_does_not_auto_retry_engine_failure_in_place
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 root 输出并整理回复。"])
+    live_session = _FakeHeartbeatSession(outputs=["", "已读取 root 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-engine-retry"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -7273,7 +7290,7 @@ async def test_web_session_heartbeat_prompt_includes_terminal_root_output_and_me
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 root 输出并整理回复。"])
+    live_session = _FakeHeartbeatSession(outputs=["", "已读取 root 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-root-output"
     task_service.tasks[task_id] = SimpleNamespace(
@@ -8065,7 +8082,7 @@ async def test_web_session_heartbeat_prefers_acceptance_output_when_final_accept
     session_manager = SessionManager(tmp_path)
     persisted = session_manager.get_or_create(session_id)
     session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(outputs=[HEARTBEAT_OK, "已读取 acceptance 输出并整理回复。"])
+    live_session = _FakeHeartbeatSession(outputs=["", "已读取 acceptance 输出并整理回复。"])
     task_service = _TaskService()
     task_id = "task:demo-acceptance-output"
     task_service.tasks[task_id] = SimpleNamespace(

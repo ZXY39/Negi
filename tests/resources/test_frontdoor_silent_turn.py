@@ -192,13 +192,17 @@ async def test_finalize_carries_the_tool_signal_and_does_not_duplicate_the_text(
 
 
 @pytest.mark.asyncio
-async def test_legacy_text_sentinel_is_still_recognised_until_p4() -> None:
-    """P2/P4 之间两条出口并存 —— 这条回归在 P4 删除哨兵时一并移除。"""
+async def test_legacy_text_sentinel_no_longer_silences_but_is_scrubbed() -> None:
+    """P4 之后的双向合同：文本哨兵不再是判据，但作为噪声要从可见正文里剥掉。
+
+    不剥的话，实盘那 11 次「正文 + 空行 + [G3KU_SILENT]」的形态会把哨行当正文尾巴发给
+    用户 —— 那是全部静默尝试的形状，不是假想场景。
+    """
     runner = _runner()
     state = dict(initial_persistent_state(user_input={"content": "x", "metadata": {}}))
     state.update(
         {
-            "final_output": "[G3KU_SILENT]",
+            "final_output": "结果已经修好了。\n\n[G3KU_SILENT]",
             "route_kind": "direct_reply",
             "messages": [{"role": "user", "content": "x"}],
             "frontdoor_request_body_messages": [],
@@ -207,15 +211,34 @@ async def test_legacy_text_sentinel_is_still_recognised_until_p4() -> None:
         }
     )
     result = await runner._graph_finalize_turn(state)
-    assert result["silent_reply"] is True
+    assert result["silent_reply"] is False
+    assert result["final_output"] == "结果已经修好了。"
 
 
-def test_session_resolves_silent_from_tool_signal_or_legacy_token() -> None:
+@pytest.mark.asyncio
+async def test_sentinel_wording_inside_a_sentence_is_left_alone() -> None:
+    """只在首/末整行时剥离：模型在正文里引用这三个词不能被吃掉半个字。"""
+    runner = _runner()
+    quoted = "以后不要用 [G3KU_SILENT] 这种写法了，改调工具。"
+    state = dict(initial_persistent_state(user_input={"content": "x", "metadata": {}}))
+    state.update(
+        {
+            "final_output": quoted,
+            "route_kind": "direct_reply",
+            "messages": [{"role": "user", "content": "x"}],
+            "frontdoor_request_body_messages": [],
+            "frontdoor_stage_state": json.loads(json.dumps(_STAGE_STATE)),
+        }
+    )
+    result = await runner._graph_finalize_turn(state)
+    assert result["final_output"] == quoted
+
+
+def test_session_silence_comes_only_from_the_tool_signal() -> None:
     agent = RuntimeAgentSession.__new__(RuntimeAgentSession)
-    assert agent._resolve_silent_reply("普通回复") is False
-    assert agent._resolve_silent_reply("[G3KU_SILENT]") is True
+    assert agent._resolve_silent_reply() is False
     setattr(agent, "_last_silent_reply", True)
-    assert agent._resolve_silent_reply("随工具一起给出的正文") is True
+    assert agent._resolve_silent_reply() is True
 
 
 def test_tool_silent_trace_row_is_visible_to_model_and_hidden_from_delivery() -> None:
