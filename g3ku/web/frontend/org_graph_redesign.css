@@ -1005,9 +1005,9 @@
 
 [data-ui-version="v2"] .ceo-input-leading-group {
     position: absolute;
-    /* 左右对称内缩 48px = 原 8px + 一颗 40px 脑图标，两侧必须同值，
+    /* 左右对称内缩 28px = 原 8px 气口 + 半颗 40px 脑图标，两侧必须同值，
        否则控件带看起来是歪的。纵向仍贴底 8px。 */
-    left: 48px;
+    left: 28px;
     bottom: 8px;
     z-index: 2;
     gap: var(--ui-space-2);
@@ -1058,7 +1058,7 @@
 /* 发送/暂停坐在输入框内部的右下角，与左下角的脑图标、附件同一带。 */
 [data-ui-version="v2"] #ceo-send-btn {
     position: absolute;
-    right: 48px;
+    right: 28px;
     bottom: 8px;
     z-index: 2;
     height: 40px;
