@@ -125,7 +125,6 @@ _LATEST_SPAWN_STAGE_KEY_REF_NOTE = '最近一次 spawn_child_nodes 返回结果'
 
 
 _STAGE_GOAL_CHAR_LIMIT = 240
-_STAGE_SUMMARY_CHAR_LIMIT = 800
 _STAGE_ROUND_TEXT_CHAR_LIMIT = 800
 _STAGE_KEY_REF_LIMIT = 4
 
@@ -2639,9 +2638,9 @@ class TaskLogService:
         return refs
 
     @staticmethod
-    def _clip_stage_text(value: Any, *, limit: int) -> str:
+    def _clip_stage_text(value: Any, *, limit: int | None) -> str:
         text = " ".join(str(value or "").split()).strip()
-        if len(text) <= limit:
+        if limit is None or len(text) <= limit:
             return text
         return f"{text[: max(0, limit - 3)].rstrip()}..."
 
@@ -2837,7 +2836,8 @@ class TaskLogService:
                 raise ValueError(f'node not found: {node_id}')
             normalized_goal = self._clip_stage_text(stage_goal, limit=_STAGE_GOAL_CHAR_LIMIT)
             normalized_budget = int(tool_round_budget or 0)
-            normalized_completed_summary = self._clip_stage_text(completed_stage_summary, limit=_STAGE_SUMMARY_CHAR_LIMIT)
+            # 阶段摘要是模型自己写的收尾内容，逐字落盘；只折叠换行，不截长度。
+            normalized_completed_summary = self._clip_stage_text(completed_stage_summary, limit=None)
             normalized_key_refs = self._canonicalize_stage_key_refs(self._normalize_stage_key_refs(key_refs))
             if not normalized_goal:
                 raise ValueError('stage_goal must not be empty')

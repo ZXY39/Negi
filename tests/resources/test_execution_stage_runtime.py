@@ -1892,6 +1892,51 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
 
 
 @pytest.mark.asyncio
+async def test_completed_stage_summary_is_stored_without_char_limit(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    long_summary = '已确认：' + ('证据' * 900)
+    assert len(long_summary) > 800
+    try:
+        record = await _create_web_task(service)
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第一阶段；自行完成：收集证据',
+            tool_round_budget=5,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:long-summary', 'name': 'filesystem', 'arguments': {'path': 'evidence'}}],
+            created_at=now_iso(),
+        )
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第二阶段；自行完成：整合结果',
+            tool_round_budget=5,
+            completed_stage_summary=long_summary,
+        )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        assert detail is not None
+        stages = detail['item']['execution_trace']['stages']
+        stored = stages[0]['completed_stage_summary']
+        assert stored == long_summary
+        assert not stored.endswith('...')
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_free_pass_stageless_records_orphan_and_grafts_on_next_stage(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

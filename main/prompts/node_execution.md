@@ -53,7 +53,7 @@
 - 每个阶段都必须提供清晰的 `stage_goal` 和 1 到 20 的 `tool_round_budget`。
 - `stage_goal` 必须清晰说明当前阶段的完成目标，派生子节点的决定，参考哪些可用的skills。
 - `stage_goal` 必须言简意赅，仅描述当前阶段的单一目标。请勿重复上一阶段的内容，列举冗长的成果清单，或将其写成战略论文。
-- `completed_stage_summary` 必须言简意赅，仅总结已确认的事实、剩余差距以及向下一阶段的交接。
+- `completed_stage_summary` 必须是对本阶段的简要概括，只写三类内容：本阶段已确认的事实、剩下的目标、从犯过的错误中总结出的经验教训。
 - `key_refs` 应仅保留权威、高价值的总结证据引用，而非包装引用。
 - 上述四个参数（`stage_goal` / `tool_round_budget` / `completed_stage_summary` / `key_refs`）的形状以 `submit_next_stage` 的工具 schema 为准；`key_refs` 每项是 `{ref, note}` 对象，写成纯字符串会被判参数非法。
 

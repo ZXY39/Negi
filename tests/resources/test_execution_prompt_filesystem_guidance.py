@@ -68,3 +68,17 @@ def test_ceo_frontdoor_prompt_requires_real_upload_paths_or_refs_in_async_task_p
     assert "如果异步任务依赖当前或历史上传的文件/图片" in prompt
     assert "必须在 `task` 说明里写明对应文件的真实 `path` 或 `ref`" in prompt
     assert "`user_uploads`、`current_uploads`、`user_image_and_docx`" in prompt
+
+
+def test_prompts_require_stage_summary_to_cover_facts_goals_and_lessons() -> None:
+    for relative_path in (
+        "g3ku/runtime/prompts/ceo_frontdoor.md",
+        "main/prompts/node_execution.md",
+        "main/prompts/acceptance_execution.md",
+    ):
+        prompt = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "`completed_stage_summary` 必须是对本阶段的简要概括" in prompt
+        assert "本阶段已确认的事实" in prompt
+        assert "剩下的目标" in prompt
+        assert "从犯过的错误中总结出的经验教训" in prompt
+        assert "剩余差距" not in prompt
