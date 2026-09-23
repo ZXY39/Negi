@@ -2,7 +2,7 @@
 <#
   G3KU one-line installer (Windows).
 
-    iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.ps1 | iex
+    iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.1/install.ps1 | iex
 
   Provisions uv (and therefore Python) on a machine that has neither, fetches the
   pinned checkout, syncs the locked environment and hands off to g3ku_bootstrap.py.
@@ -10,7 +10,7 @@
 #>
 param(
     [string]$Dir = (Join-Path $env:USERPROFILE 'G3KU-Agent'),
-    [string]$Ref = 'v1.0.0',
+    [string]$Ref = 'v1.0.1',
     [switch]$NoStart,
     [switch]$Upgrade
 )

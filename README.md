@@ -51,13 +51,13 @@
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.ps1 | iex
+iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.1/install.ps1 | iex
 ```
 
 Linux / macOS:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.1/install.sh | bash
 ```
 
 默认装到 `~/G3KU-Agent`，不需要预装 Python；没有 git 时改走源码包下载（需要 curl 或 wget，以及 unzip）。
@@ -87,7 +87,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 
 - 有没有新版：在项目目录里跑 `g3ku status`，最后一行 `Release:` 报当前版本与远端最新标签。离线、没有 git 或远端不是本仓库时这一行直接不出现，不会给你假的"已是最新"。
 - 升级：`.\install.ps1 -Upgrade`（Linux / macOS `./install.sh --upgrade`）。默认升到脚本里钉住的 ref，要指定版本加 `-Ref v1.0.1` / `--ref v1.0.1`。
-- 过渡一次：`v1.0.0` 的一行指令还不认识 `-Upgrade`，装在那个版本上的设备先用 `git pull`（或删目录重装）拿到新脚本，此后都走 `-Upgrade`。
+- 过渡一次：`v1.0.1` 之前的安装不认识 `-Upgrade`，先在该目录跑一次 `git pull`（或删目录重装）拿到新脚本，此后都走 `-Upgrade`。
 - 有未提交改动时 `-Upgrade` 拒绝执行，先自行提交或丢弃。
 - 已知不做：源码包方式的升级只覆盖新版带来的文件，上一版里被删掉的不会回收；在意就用 git 安装，或删目录重装。
 
