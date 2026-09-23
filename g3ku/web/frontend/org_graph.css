@@ -3751,10 +3751,12 @@ textarea {
     display: none !important;
 }
 
-.task-trace-round-panel-title {
-    font-size: 0.88rem;
-    font-weight: 700;
-    color: var(--text-primary);
+/* 工具面板里参数/输出正文不再套第二层描边框:面板本身就是容器,只留标签 + 正文。 */
+.task-trace-round-panel .task-trace-code {
+    min-height: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
 }
 
 .task-trace-field {
