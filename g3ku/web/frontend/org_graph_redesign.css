@@ -221,6 +221,13 @@
     outline-offset: 2px;
 }
 
+/* tabindex="-1" 的弹窗容器只作键盘落焦点，不是可操作控件。
+   排除后必须显式 none，否则浏览器 UA 的 outline:auto 会补上默认环。 */
+[data-ui-version="v2"] [tabindex="-1"]:focus-visible {
+    outline: none;
+    outline-offset: 0;
+}
+
 /* 7. 顶部导航条：常驻全宽，紧凑模式只留图标 */
 [data-ui-version="v2"] .app-layout {
     display: flex;
