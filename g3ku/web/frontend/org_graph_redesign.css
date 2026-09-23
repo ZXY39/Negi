@@ -959,20 +959,21 @@
     height: auto;
 }
 
-/* 17. 输入区：悬浮在聊天列底部的半宽工具条，占列宽一半、水平居中。它不占
-   布局空间，消息流一路铺到底、从它底下穿过，所以它身后不许再画任何底。
-   脑图标 / 附件 / 输入框 / 发送暂停四个控件同高（40px）、同圆角
-   （--ui-radius-control）、同一条中心线。
-   居中由 margin-inline 负责，padding-inline 归零，保证「框」本身就是半宽。 */
+/* 17. 输入区：悬浮在聊天列底部的工具条，宽度按视口算（50vw），所以左侧会话栏
+   展开/折叠不会把它一起挤窄。它不占布局空间，消息流一路铺到底、从它底下穿过，
+   所以它身后不许再画任何底。
+   脑图标 / 附件 / 发送暂停三颗控件都坐在输入框内部的下沿（左下两颗、右下一颗），
+   工具条这一层只剩输入框一个网格列——「回到最新」和顶边把手因此与输入框同轴居中。
+   居中由 margin-inline 负责，padding-inline 归零。 */
 [data-ui-version="v2"] .chat-input-area {
     position: absolute;
     inset: auto 0 0;
     transform: none;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
     align-items: center;
-    gap: var(--ui-space-2) var(--ui-space-3);
-    width: 50%;
+    gap: var(--ui-space-2);
+    width: min(50vw, 100%);
     margin-inline: auto;
     padding: 12px 0 20px;
     background: transparent;
@@ -991,13 +992,22 @@
     margin: 0;
 }
 
+/* 输入框独占这一行，控件浮在它下沿之上。 */
 [data-ui-version="v2"] .ceo-input-row {
+    grid-template-columns: minmax(0, 1fr);
     align-items: center;
     gap: var(--ui-space-2);
 }
 
+[data-ui-version="v2"] .ceo-input-resize-handle {
+    grid-column: 1;
+}
+
 [data-ui-version="v2"] .ceo-input-leading-group {
-    align-self: center;
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    z-index: 2;
     gap: var(--ui-space-2);
 }
 
@@ -1032,9 +1042,10 @@
 }
 
 [data-ui-version="v2"] .chat-input-area textarea {
-    min-height: 40px;
+    min-height: 80px;
     max-height: 180px;
-    padding: 10px var(--ui-space-3);
+    /* 底部 52px 是控件带：40px 按钮 + 8px 内缩 + 4px 气口，文字不能排到按钮底下。 */
+    padding: 10px var(--ui-space-3) 52px;
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-control);
     background: var(--ui-bg-input);
@@ -1042,7 +1053,12 @@
     line-height: 20px;
 }
 
+/* 发送/暂停坐在输入框内部的右下角，与左下角的脑图标、附件同一带。 */
 [data-ui-version="v2"] #ceo-send-btn {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    z-index: 2;
     height: 40px;
     min-height: 40px;
     padding: 0 var(--ui-space-3);
@@ -1841,6 +1857,11 @@
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-tabs {
     height: 40px;
+}
+
+/* 页签文字并入大控件档的 13px（旧层两态各写 0.78rem / 0.8rem）。 */
+[data-ui-version="v2"] .ceo-session-tab {
+    font-size: 13px;
 }
 
 /* 页签自己不能写死高度：容器 40px 扣掉 1px 描边与 4px 内衬只剩 30px，基线那档

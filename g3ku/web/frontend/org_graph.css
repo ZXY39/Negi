@@ -4073,7 +4073,7 @@ textarea {
 
 .ceo-input-row {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) auto;
     gap: var(--ceo-input-row-gap);
     align-items: end;
     position: relative;
@@ -5752,7 +5752,7 @@ textarea {
     }
 
     .ceo-input-row {
-        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-columns: auto minmax(0, 1fr) auto;
         gap: var(--ceo-input-row-gap);
     }
 
