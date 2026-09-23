@@ -6248,6 +6248,12 @@ textarea {
     overflow: hidden;
 }
 
+/* 折叠时 textarea 仍是一个 0 高 flex item，gap 会在 summary 下面留一条 8px
+   死带并被 overflow 裁掉，卡片下沿因此比上沿厚；只有展开才需要这道间距。 */
+.llm-json-details:not([open]) {
+    gap: 0;
+}
+
 .llm-json-summary {
     display: flex;
     align-items: center;

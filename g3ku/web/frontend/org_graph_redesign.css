@@ -928,7 +928,9 @@
     max-width: 100%;
     border-radius: var(--ui-radius-card) var(--ui-radius-card) 4px var(--ui-radius-card);
     background: var(--ui-brand-soft);
-    border-color: var(--ui-brand);
+    /* 与 §57 节点卡同一描边口径：底已是 --ui-brand-soft，描边再满色会让气泡
+       比树里的运行中节点亮一档。 */
+    border-color: color-mix(in srgb, var(--ui-brand) 50%, transparent);
     color: var(--ui-text);
 }
 
