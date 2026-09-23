@@ -1163,12 +1163,23 @@
 [data-ui-version="v2"] .resource-layout,
 [data-ui-version="v2"] .memory-layout,
 [data-ui-version="v2"] .external-api-shell,
-[data-ui-version="v2"] .llm-page-layout,
-[data-ui-version="v2"] .audit-feed-panel {
+[data-ui-version="v2"] .llm-page-layout {
     width: 100%;
     max-width: var(--ui-page-max-width);
     margin-right: auto;
     margin-left: auto;
+    padding-right: var(--ui-space-6);
+    padding-left: var(--ui-space-6);
+}
+
+/* 日志行是终端式单行摘要，横向铺满视口才有意义：页面越宽读到越多正文，
+   缩小浏览器缩放时不再出现两侧空白。左右内缩与顶栏刷新按钮对齐；选择器要带上
+   .resource-detail-panel 才能压过第 11 节面板扁平化那条给的 padding: 0。 */
+[data-ui-version="v2"] .resource-detail-panel.audit-feed-panel {
+    width: 100%;
+    max-width: none;
+    margin-right: 0;
+    margin-left: 0;
     padding-right: var(--ui-space-6);
     padding-left: var(--ui-space-6);
 }
@@ -1455,7 +1466,7 @@
     [data-ui-version="v2"] .memory-layout,
     [data-ui-version="v2"] .external-api-shell,
     [data-ui-version="v2"] .llm-page-layout,
-    [data-ui-version="v2"] .audit-feed-panel {
+    [data-ui-version="v2"] .resource-detail-panel.audit-feed-panel {
         padding-right: var(--ui-space-4);
         padding-left: var(--ui-space-4);
     }
