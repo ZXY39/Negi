@@ -1,4 +1,14 @@
 .env
+.env.*
+!.env.*.example
+
+# 凭据与密钥材料（.g3ku/ 整目录已在下方忽略，这里兜住仓库其他位置）
+*.key
+*.pem
+*.p12
+*.pfx
+*.bak
+*.sqlite
 *.pyc
 dist/
 build/
@@ -55,6 +65,7 @@ Thumbs.db
 .agent-browser-profile/
 .agents/
 .vscode/
+.idea/
 
 browser-profile/
 default/
