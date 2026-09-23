@@ -19,6 +19,7 @@ from g3ku.runtime.frontdoor.message_builder import (
     memory_snapshot_provenance,
 )
 from g3ku.runtime.frontdoor.prompt_builder import CeoPromptBuilder
+from main.runtime.stage_budget import SILENT_TOOL_NAME
 from g3ku.runtime.frontdoor.tool_contract import (
     build_frontdoor_tool_contract,
     frontdoor_tool_contract_payload_from_message,
@@ -442,7 +443,8 @@ async def test_message_builder_dense_unavailable_exposes_all_visible_skills_and_
         "focused-skill",
         "secondary-skill",
     ]
-    assert result.tool_names == []
+    # `silent` 是常驻内置控制工具：上下文选择一条都没选中时它照样可调用。
+    assert result.tool_names == [SILENT_TOOL_NAME]
     assert result.candidate_tool_names == ["filesystem", "agent_browser", "web_fetch"]
     assert result.trace["semantic_frontdoor"]["mode"] == "visible_only"
     assert result.trace["retrieval_scope"]["mode"] == "disabled"
@@ -826,7 +828,7 @@ async def test_message_builder_keeps_callable_and_candidate_tools_separate() -> 
         persisted_session=None,
     )
 
-    assert result.tool_names == ["load_tool_context"]
+    assert result.tool_names == ["load_tool_context", SILENT_TOOL_NAME]
     assert result.candidate_tool_names == ["agent_browser", "web_fetch"]
 
 
@@ -932,7 +934,7 @@ async def test_message_builder_prefers_specific_filesystem_candidates_for_write_
         persisted_session=None,
     )
 
-    assert result.tool_names == ["load_tool_context", "exec"]
+    assert result.tool_names == ["load_tool_context", "exec", SILENT_TOOL_NAME]
     assert expected_tool_id in result.candidate_tool_names
 
 
@@ -1087,7 +1089,7 @@ async def test_message_builder_promotes_hydrated_tools_into_callable_list() -> N
     finally:
         message_builder_module.semantic_catalog_rankings = original
 
-    assert result.tool_names == ["load_tool_context", "filesystem_write"]
+    assert result.tool_names == ["load_tool_context", "filesystem_write", SILENT_TOOL_NAME]
     assert "content_open" in result.candidate_tool_names
     assert "content_search" in result.candidate_tool_names
     assert "agent_browser" in result.candidate_tool_names
@@ -1127,7 +1129,7 @@ async def test_message_builder_promotes_hydrated_content_tools_back_into_callabl
     finally:
         message_builder_module.semantic_catalog_rankings = original
 
-    assert result.tool_names == ["load_tool_context", "content_open"]
+    assert result.tool_names == ["load_tool_context", "content_open", SILENT_TOOL_NAME]
     assert result.candidate_tool_names == ["content_search"]
 
 
