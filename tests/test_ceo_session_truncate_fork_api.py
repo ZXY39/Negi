@@ -215,6 +215,24 @@ def test_fork_blocked_by_task_gate(env):
     assert response.json()["detail"] == "edit_fork_blocked_by_async_task"
 
 
+def test_fork_ignores_source_runtime_state_while_truncate_does_not(env):
+    """解耦只作用于 Fork：源轮在跑也放行（只读前缀、源转录零变更），编辑照旧 409。
+
+    别把 ``_assert_edit_fork_runtime_idle`` 补进 fork 端点来"对齐"这两行——那正是本
+    契约要分开的轴：会话被阻塞时输入不可用，Fork 是唯一出口。
+    """
+    env.runtime.state.is_running = True
+    env.runtime.state.status = "running"
+    before = [dict(m) for m in env.manager.get_or_create(env.key).messages]
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t2"})
+    assert response.status_code == 200, response.text
+    assert [dict(m) for m in env.manager.get_or_create(env.key).messages] == before
+
+    blocked = env.client.post(f"/api/ceo/sessions/{env.key}/truncate", json={"turn_id": "t2"})
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"] == "ceo_turn_in_progress"
+
+
 def test_assert_edit_fork_runtime_idle_rejects_pending_interrupts():
     runtime = _RuntimeSessionStub()
     runtime.state.pending_interrupts = [{"id": "approval"}]

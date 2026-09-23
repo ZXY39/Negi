@@ -2918,7 +2918,7 @@ textarea {
 }
 
 /* 用户气泡下方的编辑重发/Fork 操作行:与 .msg-meta 相同的悬停显隐模式。
-   回合进行中(含心跳内部轮)由 feed 级 .ceo-turn-active 整体隐藏(防御型显示)。 */
+   两个按钮分别由服务端 can_edit_fork / can_fork 驱动渲染。 */
 .msg-actions {
     display: flex;
     align-items: center;
@@ -2936,10 +2936,10 @@ textarea {
     pointer-events: auto;
 }
 
-.ceo-turn-active .msg-actions {
-    opacity: 0 !important;
-    transform: translateY(2px) !important;
-    pointer-events: none !important;
+/* 回合进行中(含心跳内部轮)只隐藏编辑:它要改源会话转录。
+   Fork 是只读前缀复制、源会话零变更，运行/暂停/等审批中都留着可点。 */
+.ceo-turn-active .msg-action-edit {
+    display: none;
 }
 
 .msg-action-btn {
