@@ -162,8 +162,8 @@
 静默相关的三种不同症状分岔查（合同见 `runtime-overview.md`「3.3 静默回复（`silent` 工具）」）：
 
 - **会话回复了本不该再说的旧结果**（典型为"项目一启动就自动回一条几小时前的任务汇报"）：`main-runtime/runtime.sqlite3` 的 `task_terminal_outbox` 里有滞留行被启动或 60s 节拍重放。按 `created_at` 与 `delivered_at` 的差值、以及 `attempts` / `last_error` 判读；`delivery_state='abandoned'` 表示投递上限耗尽后留痕，不再被拾取。
-- **该静默却把话发出去了**：转录里那一轮有没有 `silent` 的 tool_call 行。文本不再参与静默判定，所以模型写出的任何"看起来像哨兵"的句子都只会作为正文投递。
-- **该回复却整轮没出声**：同一轮的 `silent_reply` 行是否被写进了转录；以及它是否还在两条压缩车道里被裁掉（豁免规则见 `runtime-overview.md`「Frontdoor Context Compression」）。
+- **该静默却把话发出去了**：转录里那一轮有没有 `silent` 的 tool_call 行。文本不再参与静默判定，所以模型写出的任何"看起来像哨兵"的句子都只会作为正文投递；唯一例外是整行就是旧哨兵 `[G3KU_SILENT]`，它会被清洗成空正文并落进"无正文即静默"那条道。
+- **该回复却整轮没出声**：同一轮的 `silent_reply` 行是否被写进了转录，以及它的 `silent_reason` 是哪一种——工具静默带的是模型写的理由，"模型未给出可见正文" / "旧静默哨兵剥除后无正文" 则是收尾兜底，后者说明模型还在沿用已删除的文本出口（多半是压缩摘要里残留了旧契约措辞）。再查它是否被两条压缩车道裁掉（豁免规则见 `runtime-overview.md`「Frontdoor Context Compression」）。
 
 ### 任务没创建或没推进
 

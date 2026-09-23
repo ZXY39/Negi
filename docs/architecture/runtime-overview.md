@@ -116,6 +116,10 @@ transcript 落一条 assistant 行，带 `silent_reply=true`、`prompt_visible=t
 
 两条历史压缩车道对这条行都豁免，否则痕迹活不下来（裸 tool_call 行实盘存活率约 6%）：阶段车道把它排除出可删集合、配对的 tool 结果行随之一起保留；token 车道是位置型切分，白名单无效，所以整组摘出待压缩区间、压缩完成后回插在摘要块与最近尾部之间（顺序单调，且 assistant 与 tool 结果必须同进同出，否则 provider 拒孤儿结果）。详见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」。
 
+**模型没给正文的可见回合同样按静默收尾**，机器不替它编一条回复：`_graph_finalize_turn` 里 `final_output` 经旧哨兵清洗后为空、且本轮不是心跳内部轮时，直接置 `silent_reply=true` 而不产出任何可见文本。这条替换掉的是历史遗留的英文兜底文案（"No visible reply was generated for: …"）——实盘 2026-09-23 23:25 一轮读文件数后模型选择沉默，那句内部文案被当正常回复投给了 QQ 用户。判据与工具静默共用同一个 flag，只在 `silent_reason` 上分两种："模型未给出可见正文" 与 "旧静默哨兵剥除后无正文"，后者顺带把"模型仍在沿用已删除的文本哨兵"变成可计数信号（成因是压缩摘要里可能残留旧契约措辞，见下）。心跳内部轮不走这条，它有自己的修复车道与上限文案。
+
+可见回合从哪儿知道有这个出口：`_render_frontdoor_contract_summary` 在 `silent` 出现在 callable 名单时渲染一行 `silent_help:`，除指路之外还明说 `[G3KU_SILENT]` 不再是静默出口（它作为正文会原样送达用户）。心跳车道那份措辞（`heartbeat/session_service.py` 的 `_silent_tool_instruction`）只覆盖事件轮，覆盖不到普通用户回合，而工具名恒定出现在契约里并不等于模型知道该在什么时候用它。
+
 Web 侧没有"静默占位文案"这个概念：静默回合走与普通回合**同一条** `ceo.reply.final` 通道，带上正文、`silent_reply=true` 与 `silent_reason`，并照常携带 `source` / `turn_id` / `user_messages` / `usage` / canonical context 合并结果。前端渲染成一行可展开的「已静默 · 理由」，展开显示原文；UI 合同详见 `web-and-admin.md`「CEO Turn Silent Reply Contract」。新维护者最容易误读的一点：静默 final 一旦缺少 canonical context 又缺少正文，`finalizeCeoTurn` 会退到"无回合元素"兜底分支并 `discardPendingCeoTurns`，整条阶段轨道连同工具步骤一起被删掉——表现为"静默回合什么都没显示"，根因在 final 载荷字段不全，不在渲染层。会话列表 preview 在没有可见文本时保持原值（`update_ceo_session_after_turn` 对空 `preview_source` 不写回）。
 
 内部轮还有一层 live-only ACK：模型调用 `silent` 结束的 heartbeat/cron 回合，`_is_internal_ack_message_end` 依据 `silent_reply` flag 认定，前端收到一条 `ceo.internal.ack` 而不是一个空气泡；`task_terminal` 心跳走回复通道，不算 ACK。

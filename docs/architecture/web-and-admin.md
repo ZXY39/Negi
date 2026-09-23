@@ -774,7 +774,8 @@ A turn that calls `silent` is visible in the session box as one collapsed line, 
 
 - `ceo.reply.final` carries the real reply text plus `silent_reply: true` and `silent_reason`; the backend no longer blanks the text on its way out. Delivery suppression is the flag's job, and the channel/cron lanes read the same flag, so the web surface and the channel surface stay consistent.
 - The row renders as `已静默 · <reason>` with the original text behind a native `<details>` disclosure. The reason is model-authored free text, so the summary is assembled with DOM nodes and `textContent` — this frontend has no HTML-escaping helper, and string-interpolating it into `innerHTML` would open an injection path.
-- Snapshot rows keep their content for the same reason, so a refresh rebuilds the same collapsed line. Legacy transcript rows carrying the old placeholder text still normalize to a silent row.
+- A visible turn that ends with no text at all is silent too and renders the same line, with a runtime-authored reason and nothing to expand (contract: `runtime-overview.md`「3.3 静默回复（`silent` 工具）」). Such a turn used to surface an English "no visible reply was generated" sentence as an ordinary reply.
+- Snapshot rows keep their content for the same reason, so a refresh rebuilds the same collapsed line.
 - A silent row with no stage track still renders: the collapsed line is itself displayable content. Dropping track-less silent rows was correct only while the backend also emptied their text.
 - `finalizeCeoTurn` and `renderPersistedCeoAssistantTurn` are the two render entry points; both branch on `silent_reply`, and the stage rail, tool steps, usage line and completion timestamp are finalized exactly as on a delivered turn.
 
