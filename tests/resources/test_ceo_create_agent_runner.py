@@ -1750,7 +1750,7 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
             "visible_skill_ids": [],
         },
         "selected_skills": [],
-        "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write"],
+        "callable_tool_names": ["submit_next_stage", "load_tool_context", "filesystem_write", "silent"],
         "candidate_tool_names": [],
         "hydrated_tool_names": ["filesystem_write"],
     }
@@ -1944,13 +1944,14 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
     assert len(contract_messages) == 1
     contract_text = str(contract_messages[0]["content"] or "")
     assert (
-        "callable_tools: `create_async_task`, `task_list`, `cron`, `submit_next_stage`"
+        "callable_tools: `create_async_task`, `task_list`, `cron`, `silent`, `submit_next_stage`"
         in contract_text
     )
     assert list(prepared["frontdoor_selection_debug"]["callable_tool_names"]) == [
         "create_async_task",
         "task_list",
         "cron",
+        "silent",
         "submit_next_stage",
     ]
 

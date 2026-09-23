@@ -605,7 +605,7 @@ def test_heartbeat_build_prompt_instructs_resume_not_heartbeat_ok(tmp_path: Path
     prompt = service._build_prompt(events)
 
     assert "shutdown_resume" in prompt
-    assert "must not reply with HEARTBEAT_OK" in prompt
+    assert "always end with a user-visible reply" in prompt
     assert "Complete the user's previously interrupted request" in prompt
     assert service._events_require_visible_reply(events) is True
     assert service._visible_reply_requires_repair("HEARTBEAT_OK") is True

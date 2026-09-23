@@ -94,6 +94,11 @@ class CeoPersistentState(TypedDict, total=False):
     final_output: str
 
     silent_reply: bool
+    # silent 工具的判据。工具参数是这条车道的真相源：execute_tools 解析一次，
+    # finalize 与转录落盘都读这三个字段，不再回头重新解析文本。
+    silent_reason: str
+    silent_subject: str
+    silent_superseded_by: str
 
     error_message: str
 

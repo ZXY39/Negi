@@ -15,7 +15,6 @@ from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane, format_local
 from g3ku.heartbeat.session_events import SessionHeartbeatEvent, SessionHeartbeatEventQueue
 from g3ku.heartbeat.session_wake import SessionHeartbeatWakeQueue
 from g3ku.runtime.frontdoor.canonical_context import ui_canonical_context_delta
-from g3ku.runtime.reply_tokens import SILENT_REPLY_TOKEN
 from g3ku.runtime.session_keys import normalize_account_id, parse_china_session_key
 from g3ku.runtime.web_ceo_sessions import (
     _extract_task_ids_from_text,
@@ -27,6 +26,7 @@ from g3ku.runtime.web_ceo_sessions import (
 )
 from main.models import TaskRecord
 from main.protocol import build_envelope, now_iso
+from main.runtime.stage_budget import SILENT_TOOL_NAME
 from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 from main.service.task_stall_callback import (
     TASK_STALL_REASON_SUSPECTED_STALL,
@@ -976,6 +976,20 @@ class WebSessionHeartbeatService:
         remaining_events = self._events.peek_ready(key)
         return self._node_error_backoff_seconds(1) if remaining_events else None
 
+    @staticmethod
+    def _silent_tool_instruction() -> str:
+        """静默出口的唯一措辞来源。
+
+        以前每个分支各自拼一句 "reply with exactly HEARTBEAT_OK" / "output exactly
+        [G3KU_SILENT]"，五处措辞互不一致；实盘结果是文案哨兵 0 次成功、11 次全部写成
+        「正文 + 空行 + 哨兵」而被当成正常回复发出去。收成一处，避免再漂移。
+        """
+        return (
+            f"Use the `{SILENT_TOOL_NAME}` tool to end this turn with nothing delivered to the "
+            "user; your accompanying text stays in the conversation and is visible to you on "
+            "later turns."
+        )
+
     def _build_prompt(
         self,
         events: list[SessionHeartbeatEvent],
@@ -993,16 +1007,18 @@ class WebSessionHeartbeatService:
         if has_task_terminal:
             lines.extend(
                 [
-                    f"For task_terminal events, you must not reply with {HEARTBEAT_OK} or empty text.",
+                    f"For task_terminal events, do not end the turn with empty text. {self._silent_tool_instruction()}",
                     (
-                        f"If you conclude nothing needs to be shown to the user, output exactly "
-                        f"{SILENT_REPLY_TOKEN} on its own line to stay silent; the runtime swallows it "
-                        f"and delivers no reply."
+                        f"Call `{SILENT_TOOL_NAME}` only when a reply already in this session's history "
+                        "covered the same deliverable — typically a newer task that fixed this one's output; "
+                        "put that covering id in `superseded_by`. If the result has not actually been reported "
+                        "yet, report it: never silence a deliverable the user may still be waiting for. "
+                        "When you cannot tell, report."
                     ),
                     "You must finish this turn by doing one of the following:",
                     "1. Output only the final text to show the user.",
                     "2. Call tools to inspect or organize the result, then output the final text to show the user.",
-                    "If the task is already sufficiently complete for the user, summarize the usable conclusion now instead of staying silent.",
+                    f"3. Call `{SILENT_TOOL_NAME}` with the reason, per the rule above.",
                 ]
             )
             if repair_attempt > 0:
@@ -1013,19 +1029,18 @@ class WebSessionHeartbeatService:
                             "Your previous output was invalid for task_terminal because it was "
                             f"{self._task_terminal_invalid_output_label(invalid_output)}."
                         ),
-                        f"Do not reply with {HEARTBEAT_OK} or empty text in this repair turn.",
+                        f"Do not end this repair turn with empty text. {self._silent_tool_instruction()}",
                     ]
                 )
                 lines.extend(self._task_terminal_repair_status_lines(events))
         elif has_shutdown_resume:
+            # 不再给这一支开静默出口，也不再提旧的文本哨兵：shutdown_resume 的语义是
+            # "用户那条被重启打断的请求还没交付"，此时沉默恰恰是错的；后面两行已经说清
+            # 了该怎么办（接着做完，或已满足就简报现状）。旧文案写"不许回 HEARTBEAT_OK"
+            # 却又推荐哨兵，而哨兵的识别在 P4 一并删除 —— 留着就会把哨兵当正文发给用户。
             lines.extend(
                 [
-                    "For shutdown_resume events, you must not reply with HEARTBEAT_OK or empty text.",
-                    (
-                        f"If you conclude nothing needs to be shown to the user, output exactly "
-                        f"{SILENT_REPLY_TOKEN} on its own line to stay silent; the runtime swallows it "
-                        f"and delivers no reply."
-                    ),
+                    "For shutdown_resume events, always end with a user-visible reply.",
                     "This session was paused by a project restart while the user's request was still being handled.",
                     "The user's paused request is present in the conversation context above.",
                     "Continue completing that request directly, using tools as needed, then output the final text to show the user.",
@@ -1040,13 +1055,13 @@ class WebSessionHeartbeatService:
                             "Your previous output was invalid for shutdown_resume because it was "
                             f"{self._task_terminal_invalid_output_label(invalid_output)}."
                         ),
-                        f"Do not reply with {HEARTBEAT_OK} or empty text in this repair turn.",
+                        f"Do not end this repair turn with empty text. {self._silent_tool_instruction()}",
                     ]
                 )
         else:
             lines.extend(
                 [
-                    f"If no user-facing update is needed, reply with exactly {HEARTBEAT_OK}.",
+                    self._silent_tool_instruction(),
                     "If a user-facing update is needed, output only the text to show the user.",
                 ]
             )
@@ -1056,7 +1071,10 @@ class WebSessionHeartbeatService:
                     "For tool_background events, the payload below has already been refreshed just now.",
                     "Do not start a new tool chain in this heartbeat turn.",
                     "Only call stop_tool_execution if you are certain the background execution should be terminated.",
-                    f"If the tool is still running and no user-visible update is needed, reply with exactly {HEARTBEAT_OK}.",
+                    (
+                        "If the tool is still running and no user-visible update is needed, "
+                        f"call `{SILENT_TOOL_NAME}`."
+                    ),
                 ]
             )
         if has_task_stall:

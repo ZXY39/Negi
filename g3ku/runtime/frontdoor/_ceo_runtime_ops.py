@@ -6206,6 +6206,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return payloads
 
     @staticmethod
+    def _silent_signal_from_tool_payloads(payloads: list[dict[str, Any]] | None) -> dict[str, Any]:
+        """取本轮最后一次 `silent` 调用的判据；没有则返回 {}。
+
+        只在这里解析一次：工具参数同时充当审计载荷与痕迹正文，finalize 与转录落盘
+        都读解析结果，避免像旧的文案哨兵那样在多处重复匹配字符串。
+        """
+        latest: dict[str, Any] = {}
+        for item in list(payloads or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("name") or "").strip() != SILENT_TOOL_NAME:
+                continue
+            arguments = dict(item.get("arguments") or {}) if isinstance(item.get("arguments"), dict) else {}
+            latest = {
+                "reason": str(arguments.get("reason") or "").strip(),
+                "subject": str(arguments.get("subject") or "").strip(),
+                "superseded_by": str(arguments.get("superseded_by") or "").strip(),
+            }
+        return latest
+
+    @staticmethod
     def _assistant_tool_calls_from_payloads(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [
             {
@@ -8157,6 +8178,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for item in list(state.get("repair_required_skill_items") or [])
             if isinstance(item, dict)
         ]
+        silent_signal = self._silent_signal_from_tool_payloads(original_tool_call_payloads)
+        if silent_signal:
+            # 批次里其余工具已经跑完，本轮到此以静默收尾，不再回模型索要一句收尾话
+            # （要求模型"说话才能不说"正是要换掉的东西：文案哨兵实盘 0 次成功）。
+            # 前门此前没有工具即终态的先例 —— submit_final_result 只存在于节点侧，
+            # 所以这条 finalize 边是新增的，收尾文本取同一条助手消息里随工具一起
+            # 给出的正文；模型只调工具不给正文时退回 reason。
+            accompanying_text = str(self._model_content(assistant_message.get("content")) or "").strip()
+            result["silent_reply"] = True
+            result["silent_reason"] = str(silent_signal.get("reason") or "")
+            result["silent_subject"] = str(silent_signal.get("subject") or "")
+            result["silent_superseded_by"] = str(silent_signal.get("superseded_by") or "")
+            result["final_output"] = accompanying_text or str(silent_signal.get("reason") or "")
+            result["next_step"] = "finalize"
         result.update(
             self._refresh_frontdoor_dynamic_contract_state(
                 state={
@@ -8170,7 +8205,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     async def _graph_finalize_turn(self, state: CeoGraphState) -> dict[str, Any]:
         output = str(state.get("final_output") or "").strip()
-        silent_reply = is_silent_reply_token(output)
+        # 静默判定的真相源换成工具信号；文案哨兵在 P4 删除前继续并行生效，
+        # 免得两个 commit 之间出现"两条出口都不认"的窗口。
+        silent_reply = bool(state.get("silent_reply")) or is_silent_reply_token(output)
         if not output and not silent_reply and not bool(state.get("heartbeat_internal")):
             output = self._empty_reply_fallback(str(state.get("query_text") or ""))
         route_kind = str(state.get("route_kind") or "direct_reply")
@@ -8181,11 +8218,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 写回 state，由 session_agent 的精确匹配识别完成归一化；基线回填与阶段收尾
         # 统一按 visible_output 判断，确保 token 本身不进历史/基线。
         visible_output = "" if silent_reply else output
+        # 工具静默时不回填正文不是漏改：随工具一起给出的那段文本已经躺在 execute_tools
+        # 追加的 assistant tool_calls 行里进了基线，再 append 一遍就是同文两份。
         result = {
             "final_output": output,
             "silent_reply": silent_reply,
             "route_kind": route_kind,
         }
+        if silent_reply:
+            # 把判据一路带到转录落盘处，供痕迹行与审计读取；session_agent 侧拿不到
+            # 本轮工具调用，只能靠这条回填通道。
+            result["silent_reason"] = str(state.get("silent_reason") or "").strip()
+            result["silent_subject"] = str(state.get("silent_subject") or "").strip()
+            result["silent_superseded_by"] = str(state.get("silent_superseded_by") or "").strip()
         messages = list(state.get("messages") or [])
         if hasattr(self, "_state_message_records"):
             messages = list(getattr(self, "_state_message_records")(messages))

@@ -2661,6 +2661,15 @@ class RuntimeAgentSession:
         except Exception:
             logger.debug("Skipped paused execution context sync for {}", session_key)
 
+    def _resolve_silent_reply(self, output: str) -> bool:
+        """本轮是否静默：`silent` 工具信号优先，文案哨兵在 P4 删除前并行生效。
+
+        两条信号并存的唯一理由是提交窗口 —— 若在同一 commit 里既换成工具又删掉文案，
+        中间态会出现"两条出口都不认"。工具信号来自 runner 回填（见
+        `_apply_silent_signal_to_session`），这里拿不到本轮工具调用。
+        """
+        return bool(getattr(self, "_last_silent_reply", False)) or is_silent_reply_token(output)
+
     async def _persist_turn_transcript(
         self,
         *,
@@ -3383,7 +3392,7 @@ class RuntimeAgentSession:
                 self._state.last_error = None
                 self._state.pending_tool_calls.clear()
                 self._last_verified_task_ids = list(task_ids)
-                silent_reply = is_silent_reply_token(output)
+                silent_reply = self._resolve_silent_reply(output)
                 if getattr(self._loop, "prompt_trace", False):
                     logger.info(render_output_trace(output))
                 if persist_transcript:
@@ -3524,7 +3533,7 @@ class RuntimeAgentSession:
             raise
         else:
             tail_profiler = _TurnTailProfiler(session_key=self._state.session_key)
-            silent_reply = is_silent_reply_token(output)
+            silent_reply = self._resolve_silent_reply(output)
             assistant = AssistantMessage(content="" if silent_reply else output, timestamp=self._now())
             self._state.messages.append(assistant)
             self._cancel_assistant_stream_flush_task()
@@ -3552,20 +3561,39 @@ class RuntimeAgentSession:
                     if cron_internal:
                         assistant_metadata["cron_job_id"] = str((user_input.metadata or {}).get("cron_job_id") or "").strip()
                 if silent_reply:
-                    # 静默回合落一条空文本 assistant 行：回复本身被吞掉，但这行携带本轮的
-                    # canonical_context，让 Web 会话框刷新后仍能渲染阶段轨道与工具步骤。
-                    # prompt_visible=False 与 `_graph_finalize_turn` 一致——静默输出既不回填
-                    # 请求体基线，也不该经转录重放回到模型上下文。
+                    tool_origin_silent = bool(getattr(self, "_last_silent_reply", False))
+                    # 静默回合始终落一条 assistant 行承载本轮 canonical_context，
+                    # Web 会话框刷新后才画得出阶段轨道。
+                    #
+                    # 工具静默与文案静默在这一个字段上分道，是刻意分开的：
+                    # - 文案哨兵（旧）：整条输出就是哨兵，没有可留的东西，且当年的
+                    #   决定是"静默输出既不进基线也不回放到模型上下文"。
+                    # - 工具（新）：模型另给了正文，那正文就是痕迹本体。它必须
+                    #   prompt_visible=True，否则下一轮的模型看不见"我上次对哪个任务
+                    #   选了静默"，也就无从反悔 —— 而这正是取消机器闸门后唯一的兜底。
                     assistant_metadata = {
                         **(assistant_metadata or {}),
-                        "prompt_visible": False,
+                        "prompt_visible": tool_origin_silent,
                         "ui_visible": True,
                         "silent_reply": True,
                     }
+                    for _key, _attr in (
+                        ("silent_reason", "_last_silent_reason"),
+                        ("silent_subject", "_last_silent_subject"),
+                        ("silent_superseded_by", "_last_silent_superseded_by"),
+                    ):
+                        _value = str(getattr(self, _attr, "") or "").strip()
+                        if _value:
+                            assistant_metadata[_key] = _value
+                silent_trace_text = (
+                    str(output or "")
+                    if silent_reply and bool(getattr(self, "_last_silent_reply", False))
+                    else ""
+                )
                 persisted_session = await self._persist_turn_transcript(
                     user_input=user_input,
                     user_text=user_text,
-                    assistant_text="" if silent_reply else output,
+                    assistant_text=silent_trace_text if silent_reply else output,
                     interaction_flow=interaction_flow,
                     internal_source=internal_source,
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),
@@ -4132,7 +4160,7 @@ class RuntimeAgentSession:
             self._state.status = "completed"
             self._cancel_assistant_stream_flush_task()
             self._assistant_stream_pending_text = ""
-            silent_reply = is_silent_reply_token(output)
+            silent_reply = self._resolve_silent_reply(output)
             self._state.latest_message = "" if silent_reply else str(output or "")
             await self._emit(
                 "message_end",

@@ -913,8 +913,25 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
                 raise RuntimeError("ceo_frontdoor_unknown_step")
         return current_state
 
+    @staticmethod
+    def _apply_silent_signal_to_session(*, session: Any, values: dict[str, Any]) -> None:
+        """把本轮 silent 判据回填到 session，供转录落痕迹。
+
+        session_agent 侧只看得到最终字符串，拿不到本轮的工具调用，所以判据必须走这条
+        与 `_last_route_kind` 同形的通道，否则它只能继续靠匹配文案哨兵来判静默。
+        """
+        setattr(session, "_last_silent_reply", bool(values.get("silent_reply")))
+        setattr(session, "_last_silent_reason", str(values.get("silent_reason") or "").strip())
+        setattr(session, "_last_silent_subject", str(values.get("silent_subject") or "").strip())
+        setattr(
+            session,
+            "_last_silent_superseded_by",
+            str(values.get("silent_superseded_by") or "").strip(),
+        )
+
     async def run_turn(self, *, user_input, session, on_progress=None) -> str:
         setattr(session, "_last_route_kind", "direct_reply")
+        self._apply_silent_signal_to_session(session=session, values={})
         session_key = str(getattr(getattr(session, "state", None), "session_key", "") or "").strip()
         runtime_context = CeoRuntimeContext(
             loop=self._loop,
@@ -935,6 +952,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        self._apply_silent_signal_to_session(session=session, values=values)
         self._sync_runtime_session_frontdoor_state(state=values, session=session)
         return str(values.get("final_output") or "")
 
@@ -963,5 +981,6 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         setattr(session, "_last_route_kind", str(values.get("route_kind") or "direct_reply"))
         setattr(session, "_last_verified_task_ids", list(values.get("verified_task_ids") or []))
+        self._apply_silent_signal_to_session(session=session, values=values)
         self._sync_runtime_session_frontdoor_state(state=values, session=session)
         return str(values.get("final_output") or "")

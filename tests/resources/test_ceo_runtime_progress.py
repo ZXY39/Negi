@@ -7122,7 +7122,7 @@ async def test_web_session_heartbeat_repairs_task_terminal_when_model_returns_he
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
     assert len(task_service.delivered) == 1
     assert task_service.delivered[0][0] == "task-terminal:task:demo-terminal:success:2026-03-23T01:34:32+08:00"
-    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].metadata["heartbeat_stable_rules_text"] or "")
+    assert "Do not end this repair turn with empty text." in str(live_session.prompts[1].metadata["heartbeat_stable_rules_text"] or "")
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "整理后的最终结论"
@@ -7168,7 +7168,7 @@ async def test_web_session_heartbeat_repairs_unpassed_task_terminal_when_model_r
     assert envelope["type"] == "ceo.reply.final"
     assert envelope["data"]["source"] == "heartbeat"
     assert envelope["data"]["turn_id"] == "turn-heartbeat-default"
-    assert "must not reply with HEARTBEAT_OK" in str(live_session.prompts[1].metadata["heartbeat_stable_rules_text"] or "")
+    assert "Do not end this repair turn with empty text." in str(live_session.prompts[1].metadata["heartbeat_stable_rules_text"] or "")
 
     reloaded = SessionManager(tmp_path).get_or_create(session_id)
     assert reloaded.messages[-1]["content"] == "虽然未通过验收，但结果已基本可交付。"
