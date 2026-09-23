@@ -118,3 +118,27 @@ def test_silent_schema_stays_cheap_in_the_stable_prefix() -> None:
     """常驻 schema 的成本论证：设计期实测 32 个工具合计 12,406 字符，加这条
     约 +0.2%。这条断言防的是日后往描述里堆散文把它撑大。"""
     assert len(json.dumps(SilentTool().parameters, ensure_ascii=False)) < 800
+
+
+def _contract(callable_names: list[str]) -> str:
+    from g3ku.runtime.frontdoor.tool_contract import _render_frontdoor_contract_summary
+
+    return _render_frontdoor_contract_summary(
+        {'callable_tool_names': callable_names, 'hydrated_tool_names': [], 'candidate_skill_ids': [], 'candidate_tools': []}
+    )
+
+
+def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
+    """B：心跳车道那份措辞覆盖不到普通用户回合 —— 23:25 那轮模型正是按压缩块里残留的
+    旧契约去输出文本哨兵，所以可见回合必须自己说一句"哨兵不是静默出口"。"""
+    rendered = _contract(['exec', SILENT_TOOL_NAME])
+    help_line = next((line for line in rendered.splitlines() if line.startswith('silent_help:')), '')
+    assert f'`{SILENT_TOOL_NAME}(reason=' in help_line
+    assert '[G3KU_SILENT] is not a silent exit' in help_line
+    # 措辞挂在每轮重渲染的契约里，不新起一层：实测该契约 6,614 字符，这条 +215。
+    assert len(help_line) < 300
+
+
+def test_silent_help_follows_the_callable_list() -> None:
+    """工具没注册时不能继续叫模型去调它 —— 与 P1 的"未注册则整条消失"同一条边界。"""
+    assert 'silent_help:' not in _contract(['exec'])

@@ -4,6 +4,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from main.runtime.stage_budget import SILENT_TOOL_NAME
+
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
@@ -276,11 +278,25 @@ def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> s
     return 'exec_runtime_policy: ' + ('; '.join(parts) if parts else 'none')
 
 
+def _render_silent_help(callable_tool_names: list[str]) -> list[str]:
+    """可见回合的静默出口措辞。心跳车道那份（`heartbeat/session_service.py`）覆盖不到
+    普通用户回合，而实盘 23:25 那轮模型正是按压缩块里残留的旧契约去输出文本哨兵。
+    """
+    if SILENT_TOOL_NAME not in callable_tool_names:
+        return []
+    return [
+        f'silent_help: To end this turn with nothing delivered to the user, call '
+        f'`{SILENT_TOOL_NAME}(reason="...")`. A sentinel such as [G3KU_SILENT] is not a silent exit '
+        '— nothing recognizes it, and it is delivered to the user verbatim.',
+    ]
+
+
 def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
     candidate_tools = _normalized_candidate_tool_items(payload.get('candidate_tools'))
     repair_required_tools = _normalized_repair_required_tool_items(payload.get('repair_required_tools'))
     repair_required_skills = _normalized_repair_required_skill_items(payload.get('repair_required_skills'))
     attachment_reopen_targets = _normalized_attachment_reopen_targets(payload.get('attachment_reopen_targets'))
+    callable_tool_names = _normalized_name_list(payload.get('callable_tool_names'))
     lines = [
         FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
@@ -291,6 +307,7 @@ def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
         'load_skill_context_help: Skills listed in `candidate_skills` do not hydrate. Call `load_skill_context(skill_id="<skill_id>")` to read the skill body when `load_skill_context` is callable; if only `submit_next_stage` is callable, start a stage first.',
         'load_tool_context_help: Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help, including tools that are already callable or already hydrated.',
         'load_tool_context_repeat_guard: For callable, hydrated, or fixed-builtin tools, do not reread the same inline uncompressed toolskill. Reuse it unless the tool state changed or the old result was compressed away.',
+        *_render_silent_help(callable_tool_names),
         *_render_attachment_reopen_target_section(attachment_reopen_targets),
         *_render_candidate_tool_section(candidate_tools),
         *_render_repair_required_tool_section(repair_required_tools),
