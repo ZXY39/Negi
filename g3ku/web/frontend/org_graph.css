@@ -4080,10 +4080,13 @@ textarea {
     z-index: 1;
 }
 
-/* 顶边拖拽把手。必须是 .ceo-input-row 的第一个子节点：左侧按钮组是后置的
-   定位元素，绘制在把手之上，把手才不会吃掉按钮顶部的点击。 */
+/* 顶边拖拽把手。grid-column 把它钉在输入框那一格：绝对定位的网格子元素以
+   自己的网格区作包含块，于是把手带和提示条天然对 textarea 居中，也不会压到
+   左侧按钮顶部的点击区。 */
 .ceo-input-resize-handle {
     position: absolute;
+    grid-column: 2;
+    grid-row: 1;
     top: 0;
     left: 0;
     right: 0;
@@ -4100,7 +4103,7 @@ textarea {
     height: 3px;
     margin-top: 2px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--text-muted) 55%, transparent);
+    background: #39c5bb;
     opacity: 0;
     transition: opacity 0.15s ease;
 }

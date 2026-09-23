@@ -5006,6 +5006,17 @@ function beginCeoInputResize(event) {
     window.addEventListener("pointerup", stop);
 }
 
+// 输入区悬浮后不占布局，消息流得按它的实测高度留底部空间，否则最后几条永远压在
+// 框底下。拖高、排队条、附件条都会改变这个高度，所以观察尺寸而不是在每条路径上补写。
+function watchCeoComposerInset() {
+    const area = U.ceoInput?.closest(".chat-input-area");
+    const wrapper = area?.closest(".chat-wrapper");
+    if (!area || !wrapper || !window.ResizeObserver) return;
+    const apply = () => wrapper.style.setProperty("--ceo-composer-inset", `${area.offsetHeight + 24}px`);
+    apply();
+    new ResizeObserver(apply).observe(area);
+}
+
 function syncCeoAttachButton() {
     if (!U.ceoAttach) return;
     U.ceoAttach.disabled = (
@@ -14705,6 +14716,7 @@ function bind() {
         scheduleCeoComposerUsageRefresh();
     });
     U.ceoInputResizeHandle?.addEventListener("pointerdown", beginCeoInputResize);
+    watchCeoComposerInset();
     window.addEventListener("resize", () => scheduleSyncCeoComposerUsageOutline());
     U.modelRefresh?.addEventListener("click", () => void loadModels());
     U.modelCreate?.addEventListener("click", startCreateModel);

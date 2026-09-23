@@ -882,12 +882,13 @@
     background: var(--ui-bg-canvas);
 }
 
-/* 16. 聊天列：填满可用宽度，不做居中阅读轴 */
+/* 16. 聊天列：填满可用宽度，不做居中阅读轴。底部留白由 --ceo-composer-inset
+   提供（前端按悬浮输入区的实测高度写上来），固定值只兜住控件的静止高度。 */
 [data-ui-version="v2"] .chat-feed {
     width: 100%;
     max-width: none;
     margin: 0;
-    padding: var(--ui-space-6) var(--ui-space-6) var(--ui-space-4);
+    padding: var(--ui-space-6) var(--ui-space-6) var(--ceo-composer-inset, 96px);
     gap: var(--ui-space-5);
 }
 
@@ -958,13 +959,14 @@
     height: auto;
 }
 
-/* 17. 输入区：占聊天列一半宽度、水平居中的贴底工具条。脑图标 / 附件 / 输入框 /
-   发送暂停四个控件同高（40px）、同圆角（--ui-radius-control）、同一条中心线；
-   工具条自身不再画背景与分隔线，控件直接坐在页面背景上。
-   居中之后两侧留白由 margin 负责，padding-inline 归零，保证「框」本身就是半宽。 */
+/* 17. 输入区：悬浮在聊天列底部的半宽工具条，占列宽一半、水平居中。它不占
+   布局空间，消息流一路铺到底、从它底下穿过，所以它身后不许再画任何底。
+   脑图标 / 附件 / 输入框 / 发送暂停四个控件同高（40px）、同圆角
+   （--ui-radius-control）、同一条中心线。
+   居中由 margin-inline 负责，padding-inline 归零，保证「框」本身就是半宽。 */
 [data-ui-version="v2"] .chat-input-area {
-    position: relative;
-    inset: auto;
+    position: absolute;
+    inset: auto 0 0;
     transform: none;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -1054,13 +1056,20 @@
 [data-ui-version="v2"] .ceo-approval-viewport,
 [data-ui-version="v2"] .model-retry-toast,
 [data-ui-version="v2"] .ceo-follow-up-queue,
-[data-ui-version="v2"] .ceo-edit-resend-banner,
 [data-ui-version="v2"] .ceo-upload-list {
     background: var(--ui-bg-elevated);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
     box-shadow: none;
     color: var(--ui-text-secondary);
+}
+
+/* 编辑重发横幅与上下文提示条同理：容器只负责占位，可见的面是里面的 chip。
+   容器再画一层底和描边，就会在 chip 的圆角外面露出一圈更方的盒子。
+   chip 是这条横幅唯一的面，圆角与 .app-toast 的 16px 同档。 */
+[data-ui-version="v2"] .ceo-edit-resend-chip {
+    border-radius: var(--ui-radius-control);
+    box-shadow: none;
 }
 
 /* .ceo-context-load-notice 只负责定位，可见的小弹窗是里面的 item；
@@ -1832,6 +1841,13 @@
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-tabs {
     height: 40px;
+}
+
+/* 页签自己不能写死高度：容器 40px 扣掉 1px 描边与 4px 内衬只剩 30px，基线那档
+   36px 会从内容盒顶部起排、向下溢出 6px，文字既比同一行的「多选」低 3px，也不在
+   高亮胶囊正中。交给网格拉伸，页签盒与 ::before 胶囊就永远是同一个盒子。 */
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-tab {
+    height: auto;
 }
 
 [data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-session-bulk-toggle {
