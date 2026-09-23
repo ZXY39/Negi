@@ -44,7 +44,47 @@
 
 对话主流程只需要 Python 环境；接入外部聊天渠道（QQ/飞书等）不需要在 G3KU 内安装任何额外依赖，而是由独立的桥接进程通过 External Agent API 完成，见「4. 通信配置（可选）」。
 
+### 一行指令安装（新设备）
+
+新设备上输入一行指令即可完成安装并启动：脚本自己装 uv、装 Python、拉代码、按 `uv.lock` 建环境，最后拉起 Web。
+
+Windows PowerShell:
+
+```powershell
+iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.ps1 | iex
+```
+
+Linux / macOS:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.sh | bash
+```
+
+默认装到 `~/G3KU-Agent`，不需要预装 Python；没有 git 时改走源码包下载（需要 curl 或 wget，以及 unzip）。
+
+可选参数：
+
+- `-Dir PATH` / `--dir PATH`：换安装目录
+- `-NoStart` / `--no-start`：只准备环境，不启动 Web
+- `-Ref TAG` / `--ref TAG`：换要安装的版本，用于回滚或试装
+
+国内网络取 PyPI 或 Python 发行包慢时，给 uv 传镜像环境变量即可，脚本不另设开关：
+
+```bash
+export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
+```
+
+两条边界要说清楚：
+
+- 安装完成的终点是**项目口令设置页**。首次启动会在浏览器里要求创建项目口令，设完才进入配置页面。
+- 安装得到的是 git 跟踪集：项目自带的 skills/tools 在里面，本地通过市场安装的 skills、`externaltools/` 与 `.g3ku/` 不在里面，装完按需在 Web 里重新添加。
+
+下面的「环境配置步骤」是手动路径，供开发者或想自己控制环境的人使用。
+
 ### 环境配置步骤
+
+下面是手动路径，适合开发者或要指定 fork / 自定义目录的场景。用上面「一行指令安装」的用户可以直接跳到「如何启动项目」。
 
 1. 克隆项目并进入仓库目录。
 

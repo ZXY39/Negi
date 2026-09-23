@@ -128,6 +128,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 翻看工具输出时新输出把输出框滚动条顶回顶部 → `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」 → `web-and-admin.md`「Node Output Content Read Contract」
 - 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱 → `web-and-admin.md`「Frontend Theme And Layout Contract」
+- 新设备一行指令装完发现 skill/tools 比开发机少、或要知道安装器接管了哪几步 → `operations-and-maintenance.md`「新设备首次安装」
 
 ## Maintenance Rules
 

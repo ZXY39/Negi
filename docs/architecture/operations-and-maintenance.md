@@ -9,6 +9,19 @@
 
 ## 1. 基本启动方式
 
+### 新设备首次安装
+
+用户侧一行指令（Windows `install.ps1`，Linux / macOS `install.sh`，仓库根），随后进入一键启动脚本同一条链路。
+
+维护上要记住：
+
+- 安装器只负责补齐它上游的两件事：**取解释器**（缺 uv 就装 uv，再由 uv 按 `.python-version` 提供 Python）与**取代码**（有 git 走 `git clone --branch <ref>`，没有 git 退化成 GitHub 源码包下载）。依赖安装与环境复用全部交给既有的 `g3ku_bootstrap.py`，安装器不实现第二套
+- 最后一步用 **venv 里的 python** 跑 `g3ku_bootstrap.py web`。这既让 `g3ku_bootstrap.py` 的宿主 Python 版本检查落在刚装好的解释器上，也保持了分发形态的前提：本项目安装的是**完整 checkout 就地运行**（bootstrap 会 `chdir` 到仓库根，`main/` 从工作目录导入），不是一个自包含的 Python 包 —— wheel/sdist 目前不含 `main/`，所以安装器与 `uv sync --frozen` / `pip install -e .` 才是唯一可用路径
+- 安装得到的资源集等于 git 跟踪集：仓库自带 skills/tools 在内，操作员本地通过市场安装的 skills、`externaltools/`、`.g3ku/` 不在内。"新设备上少了一批 skill/tools" 属预期，不是安装失败
+- 一行指令指向不可变 ref（发布标签）。要覆盖用 `-Ref` / `--ref`，换目录用 `-Dir` / `--dir`，只建环境不启动用 `-NoStart` / `--no-start`
+- 镜像源不设安装器参数：uv 直接读 `UV_DEFAULT_INDEX` 与 `UV_PYTHON_INSTALL_MIRROR` 环境变量
+- 安装完成的终点是项目口令设置页，不是可用系统（解锁合同见 `config-and-models.md`「Deployment Unlock Contract」）
+
 ### 首选一键启动脚本
 
 - Windows PowerShell: `.\start-g3ku.ps1`
