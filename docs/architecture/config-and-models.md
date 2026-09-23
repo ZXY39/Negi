@@ -283,6 +283,28 @@ If a worker container reports `project_locked` while the web container appears h
 2. whether the shared `.g3ku/` volume is actually the same volume
 3. whether the existing project was already initialized with a bootstrap password rather than left in `setup` mode
 
+## Config Bundle Export And Import
+
+`g3ku/config/config_bundle.py` moves one deployment's configuration面 to another as a single password-encrypted file (`.g3kucb`, written under `.g3ku/config-bundles/`). It covers wiring, not history: `config.json`, `resources.state.json`, the `llm-config/` records, `secret-realms/`, and the governance database at `main_runtime.governance_store_path`. Tasks, sessions, transcripts, artifacts and logs are out of scope. Path values are read from the raw `config.json` rather than `load_config()`, because import must also run on a project that is still locked and whose overlay is not yet installed.
+
+The envelope is a scrypt-derived Fernet token using `PASSWORD_KDF`, the same recipe as the bootstrap envelope. Inside it sit the file entries plus the **active master key itself** — which is why export requires an unlocked process: a bundle is not a copy of `master.key`, it is the key that `master.key` wraps.
+
+Two exclusions are load-bearing:
+
+- `llm-config/master.key` stays out. Its envelope is bound to the *source* login password, so shipping it would make the target unlock with a password nobody typed there; import re-wraps the transported key under the bundle password instead.
+- `llm-config/auto-unlock.key` stays out. It is a bearer credential, and re-enabling passwordless startup on a new machine is a change the operator has to opt into again.
+
+Import is a whole replace, never a merge, because envelope and overlay swap as a pair. A key that cannot open the installed overlay lands in the read-only unverified state, so a half-applied import would leave the deployment unable to persist anything: `_preflight()` proves the transported key opens the transported overlay before writing, and `install_master_key()` re-locks if activation reports that state. Replaced files are copied to `.g3ku/config-bundle-imports/<timestamp>/` first and restored if the apply step raises.
+
+The governance database travels through SQLite's online backup API in both directions rather than as a swapped file: web and worker keep open connections to it, and replacing the file under a live `-wal` resurrects rows that were deleted. Read-only export is also why a bundle carries no `-wal`/`-shm`.
+
+Two consequences belong in the UI, not in the operator's head:
+
+- After import the target unlocks with the **bundle password**; the previous password stops working.
+- The managed worker still holds the previous master key in memory until restart, so the import response carries `restart_required`. Until then web runs the new config and the worker the old one.
+
+Routes live at `/api/bootstrap/config-bundle/{export,download,import}` in `main/api/bootstrap_rest.py`; that prefix is the lock middleware's exemption, which is what lets import run against a locked or freshly installed project. Export raises `423 project_locked` with no active key. Import reuses the exit flow's running-work gate: in-flight sessions or tasks require explicit confirmation and are paused durably before anything is written. Failure text returns as snake_case codes (`bundle_password_invalid`, `bundle_file_invalid`, `bundle_version_unsupported`, `bundle_path_rejected`) translated in `api_client.js`, never as English sentences. UI surface: 详见 `web-and-admin.md`「Frontend Theme And Layout Contract」配置段.
+
 ## Image Multimodal Binding Flag
 
 `models.catalog[]` carries a second binding-owned chat field: `image_multimodal_enabled` (`imageMultimodalEnabled` in saved JSON / admin payload aliases).

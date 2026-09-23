@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 MASTER_KEY_VERSION = 2
 UNLOCK_SCOPE = "global"
+PASSWORD_KDF = {"name": "scrypt", "n": 16384, "r": 8, "p": 1}
 BOOTSTRAP_MASTER_KEY_ENV = "G3KU_BOOTSTRAP_MASTER_KEY"
 # 自动解锁凭据：落盘的是主密钥本身，能读到这个文件就等于能解锁项目。
 AUTO_UNLOCK_FILENAME = "auto-unlock.key"
@@ -74,11 +75,11 @@ def _json_dump(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def _fernet_from_key(key: str) -> Fernet:
+def fernet_from_key(key: str) -> Fernet:
     return Fernet(str(key).encode("utf-8"))
 
 
-def _derive_password_key(password: str, *, salt: bytes, n: int, r: int, p: int) -> str:
+def derive_password_key(password: str, *, salt: bytes, n: int, r: int, p: int) -> str:
     derived = hashlib.scrypt(
         str(password or "").encode("utf-8"),
         salt=salt,
@@ -204,7 +205,7 @@ class SecretOverlayStore:
         if not path.exists():
             return {}
         try:
-            decrypted = _fernet_from_key(master_key).decrypt(path.read_bytes())
+            decrypted = fernet_from_key(master_key).decrypt(path.read_bytes())
             payload = json.loads(decrypted.decode("utf-8"))
         except Exception as exc:
             # A present-but-undecryptable overlay means the caller holds the
@@ -216,7 +217,7 @@ class SecretOverlayStore:
     def save(self, *, master_key: str, payload: dict[str, Any]) -> None:
         path = _single_overlay_path(self.workspace)
         path.parent.mkdir(parents=True, exist_ok=True)
-        encrypted = _fernet_from_key(master_key).encrypt(
+        encrypted = fernet_from_key(master_key).encrypt(
             json.dumps(payload or {}, ensure_ascii=False, indent=2).encode("utf-8")
         )
         path.write_bytes(encrypted)
@@ -236,7 +237,7 @@ class SecretOverlayStore:
         if not path.exists():
             return {}
         try:
-            decrypted = _fernet_from_key(master_key).decrypt(path.read_bytes())
+            decrypted = fernet_from_key(master_key).decrypt(path.read_bytes())
             payload = json.loads(decrypted.decode("utf-8"))
         except Exception:
             return {}
@@ -406,6 +407,32 @@ class BootstrapSecurityService:
             self._write_master_payload(self._create_single_envelope(password=clean_new, master_key=master_key))
             return self.status()
 
+    def install_master_key(self, *, master_key: str, password: str) -> dict[str, Any]:
+        """Adopt a master key produced elsewhere and re-wrap it under `password`.
+
+        Callers must put the matching secret overlay on disk first: envelope
+        and overlay swap as a pair, and a key that cannot read the overlay
+        lands in the read-only unverified state instead of importing data.
+        """
+        clean_key = str(master_key or "").strip()
+        if not clean_key:
+            raise ValueError("master key is required")
+        clean_password = str(password or "")
+        if not clean_password:
+            raise ValueError("password is required")
+        with self._lock:
+            try:
+                self._write_master_payload(
+                    self._create_single_envelope(password=clean_password, master_key=clean_key)
+                )
+                self._activate(master_key=clean_key)
+                if self._overlay_unverified:
+                    raise ValueError("master key cannot decrypt the installed secret overlay")
+            except Exception:
+                self.lock()
+                raise
+            return self.status()
+
     def auto_unlock_master_key(self) -> str:
         path = _auto_unlock_key_path(self.workspace)
         if not path.exists():
@@ -474,9 +501,9 @@ class BootstrapSecurityService:
             raise ValueError("password is required")
         salt = os.urandom(16)
         actual_master_key = str(master_key or Fernet.generate_key().decode("utf-8"))
-        kdf = {"name": "scrypt", "n": 16384, "r": 8, "p": 1}
-        derived_key = _derive_password_key(clean_password, salt=salt, n=kdf["n"], r=kdf["r"], p=kdf["p"])
-        wrapped = _fernet_from_key(derived_key).encrypt(actual_master_key.encode("utf-8"))
+        kdf = dict(PASSWORD_KDF)
+        derived_key = derive_password_key(clean_password, salt=salt, n=kdf["n"], r=kdf["r"], p=kdf["p"])
+        wrapped = fernet_from_key(derived_key).encrypt(actual_master_key.encode("utf-8"))
         now = _now_iso()
         return {
             "version": MASTER_KEY_VERSION,
@@ -496,7 +523,7 @@ class BootstrapSecurityService:
             raise ValueError("invalid secret key envelope")
         salt = base64.b64decode(salt_b64.encode("ascii"))
         wrapped = base64.b64decode(wrapped_b64.encode("ascii"))
-        derived_key = _derive_password_key(
+        derived_key = derive_password_key(
             str(password or ""),
             salt=salt,
             n=int(kdf.get("n") or 16384),
@@ -504,7 +531,7 @@ class BootstrapSecurityService:
             p=int(kdf.get("p") or 1),
         )
         try:
-            return _fernet_from_key(derived_key).decrypt(wrapped).decode("utf-8")
+            return fernet_from_key(derived_key).decrypt(wrapped).decode("utf-8")
         except InvalidToken as exc:
             raise ValueError("invalid password") from exc
 
@@ -532,7 +559,7 @@ class BootstrapSecurityService:
         wrapped_b64 = str(realm.get("wrapped_master_key_b64") or "").strip()
         salt = base64.b64decode(salt_b64.encode("ascii"))
         wrapped = base64.b64decode(wrapped_b64.encode("ascii"))
-        derived_key = _derive_password_key(
+        derived_key = derive_password_key(
             str(password or ""),
             salt=salt,
             n=int(kdf.get("n") or 16384),
@@ -540,7 +567,7 @@ class BootstrapSecurityService:
             p=int(kdf.get("p") or 1),
         )
         try:
-            return _fernet_from_key(derived_key).decrypt(wrapped).decode("utf-8")
+            return fernet_from_key(derived_key).decrypt(wrapped).decode("utf-8")
         except InvalidToken as exc:
             raise ValueError("invalid password") from exc
 

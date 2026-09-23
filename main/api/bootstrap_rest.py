@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import shutil
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from loguru import logger
 
+from g3ku.config.config_bundle import (
+    BUNDLE_EXTENSION,
+    BUNDLE_OUTPUT_DIR,
+    export_bundle,
+    import_bundle,
+)
 from g3ku.config.loader import load_config
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import (
@@ -17,8 +28,11 @@ from g3ku.shells.web import (
 )
 from g3ku.shells.web import wait_shutdown_pause_commands_drained
 from g3ku.web.server_control import request_server_shutdown
+from main.api.admin_rest import _refresh_runtime_after_save
 
 router = APIRouter()
+
+_BUNDLE_FILENAME_RE = re.compile(r"^g3ku-config-bundle-\d{8}-\d{6}\.g3kucb$")
 
 
 def _service():
@@ -197,6 +211,44 @@ async def _pause_running_work() -> dict[str, int]:
     return {"paused_sessions": paused_sessions, "paused_tasks": paused_tasks}
 
 
+_BUNDLE_ERROR_CODES: tuple[tuple[str, str, int], ...] = (
+    ("project is locked", "project_locked", 423),
+    ("invalid password", "bundle_password_invalid", 400),
+    ("at least", "bundle_password_too_short", 400),
+    ("rejected", "bundle_path_rejected", 400),
+    ("unsupported config bundle version", "bundle_version_unsupported", 400),
+    ("config bundle", "bundle_file_invalid", 400),
+    ("master key", "bundle_file_invalid", 400),
+)
+
+
+def _bundle_http_exception(exc: Exception) -> HTTPException:
+    message = str(exc or "").strip()
+    for needle, code, status in _BUNDLE_ERROR_CODES:
+        if needle in message:
+            return HTTPException(status_code=status, detail=code)
+    return HTTPException(status_code=400, detail="config_bundle_failed")
+
+
+async def _pause_running_work_for_bundle_import(confirmed: bool) -> None:
+    # 锁定态没有 web 侧运行时可被打断，此时唯一的代价是 worker 要重启才换钥匙。
+    if not _service().is_unlocked():
+        return
+    snapshot = await _running_work_snapshot()
+    if not snapshot["has_running_work"]:
+        return
+    if not confirmed:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "running_work_requires_confirmation",
+                "message": "导入会整体替换配置面，请先确认暂停正在进行的所有对话和任务。",
+                **snapshot,
+            },
+        )
+    await _pause_running_work()
+
+
 @router.get("/bootstrap/status")
 async def bootstrap_status():
     return {"ok": True, "item": _status_payload()}
@@ -336,6 +388,51 @@ async def bootstrap_exit(payload: dict | None = Body(default=None)):
             **paused,
         },
     }
+
+
+@router.post("/bootstrap/config-bundle/export")
+async def bootstrap_config_bundle_export(payload: dict = Body(...)):
+    try:
+        item = export_bundle(Path.cwd(), password=str(payload.get("password") or ""))
+    except Exception as exc:
+        raise _bundle_http_exception(exc) from exc
+    item.pop("path", None)
+    return {"ok": True, "item": item}
+
+
+@router.get("/bootstrap/config-bundle/download")
+async def bootstrap_config_bundle_download(filename: str):
+    if not _BUNDLE_FILENAME_RE.match(str(filename or "")):
+        raise HTTPException(status_code=400, detail="bundle_filename_rejected")
+    path = Path.cwd() / BUNDLE_OUTPUT_DIR / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="bundle_not_found")
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
+@router.post("/bootstrap/config-bundle/import")
+async def bootstrap_config_bundle_import(
+    file: UploadFile = File(...),
+    password: str = Form(...),
+    confirm_running_work: bool = Form(False),
+):
+    await _pause_running_work_for_bundle_import(confirm_running_work)
+    staging_dir = Path.cwd() / BUNDLE_OUTPUT_DIR / "incoming"
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    staged = staging_dir / f"{uuid4().hex}{BUNDLE_EXTENSION}"
+    try:
+        with staged.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+        try:
+            item = import_bundle(Path.cwd(), archive_path=staged, password=password)
+        except Exception as exc:
+            raise _bundle_http_exception(exc) from exc
+    finally:
+        staged.unlink(missing_ok=True)
+    refresh = await _refresh_runtime_after_save('admin_config_bundle_import')
+    logger.info("Config bundle imported: {} entries restored", item["entry_count"])
+    # 只有重启才让托管 worker 换掉内存里的旧主密钥，界面必须把这条说清楚。
+    return {"ok": True, "item": {**item, "refresh": refresh, "restart_required": True}}
 
 
 __all__ = ["router"]

@@ -33,6 +33,18 @@ class ApiClient {
                 return "当前项目还没有配置可用模型。请先进入“模型配置”页面，新增并保存至少一个模型，并把它分配给主Agent（Leader）角色。";
             case "project_locked":
                 return "项目当前已锁定，请先完成解锁后再继续。";
+            case "bundle_password_invalid":
+                return "配置包口令不正确。";
+            case "bundle_password_too_short":
+                return "口令至少 8 位。";
+            case "bundle_file_invalid":
+                return "这个文件不是可用的配置包，或包内密钥已损坏。";
+            case "bundle_version_unsupported":
+                return "配置包版本比当前程序更新，请先升级后再导入。";
+            case "bundle_path_rejected":
+                return "配置包内含越界路径，已拒绝写入。";
+            case "config_bundle_failed":
+                return "配置包处理失败。";
             case "task_service_unavailable":
                 return "任务运行服务暂未就绪，请稍后再试。";
             case "main_task_service_unavailable":
@@ -394,6 +406,30 @@ class ApiClient {
 
     static async lockBootstrap() {
         const data = await this.post("/api/bootstrap/lock", {});
+        return data.item || null;
+    }
+
+    static async exportConfigBundle(password) {
+        const data = await this._request("POST", "/api/bootstrap/config-bundle/export", {
+            body: { password },
+            timeoutMs: 60000,
+        });
+        return data.item || null;
+    }
+
+    static getConfigBundleDownloadUrl(filename) {
+        return this._buildUrl("/api/bootstrap/config-bundle/download", { filename }).toString();
+    }
+
+    static async importConfigBundle(file, password, { confirmRunningWork = false } = {}) {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("password", password);
+        formData.append("confirm_running_work", confirmRunningWork ? "true" : "false");
+        const data = await this._request("POST", "/api/bootstrap/config-bundle/import", {
+            body: formData,
+            timeoutMs: 180000,
+        });
         return data.item || null;
     }
 

@@ -679,6 +679,18 @@ const U = {
     projectSettingsDialog: document.getElementById("project-settings-dialog"),
     projectSettingsClose: document.getElementById("project-settings-close-btn"),
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
+    projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
+    configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
+    configBundleDialog: document.getElementById("config-bundle-dialog"),
+    configBundleClose: document.getElementById("config-bundle-close-btn"),
+    configBundleExportPassword: document.getElementById("config-bundle-export-password"),
+    configBundleExportConfirm: document.getElementById("config-bundle-export-confirm"),
+    configBundleExport: document.getElementById("config-bundle-export-btn"),
+    configBundleImportFile: document.getElementById("config-bundle-import-file"),
+    configBundleImportPick: document.getElementById("config-bundle-import-pick-btn"),
+    configBundleImportName: document.getElementById("config-bundle-import-name"),
+    configBundleImportPassword: document.getElementById("config-bundle-import-password"),
+    configBundleImport: document.getElementById("config-bundle-import-btn"),
     passwordChangeBackdrop: document.getElementById("password-change-backdrop"),
     passwordChangeDialog: document.getElementById("password-change-dialog"),
     passwordChangeClose: document.getElementById("password-change-close-btn"),
@@ -5636,6 +5648,8 @@ function syncCeoFeedTurnActiveClass() {
     // 防御型显示:任何回合进行中(含 heartbeat/cron 内部轮)隐藏编辑按钮(Fork 不受影响)。
     if (!U.ceoFeed || !U.ceoFeed.classList) return;
     U.ceoFeed.classList.toggle("ceo-turn-active", !!S.ceoTurnActive);
+    // 同一状态位驱动「回到最新」的呼吸:收尾后按钮只是常显,没有新内容要追就不该继续闪。
+    U.ceoScrollToLatestBtn?.classList?.toggle("is-breathing", !!S.ceoTurnActive);
 }
 
 function findCeoSnapshotMessageByTurnId(sessionId, turnId) {
@@ -6078,6 +6092,8 @@ function updateCeoScrollToLatestButton() {
     if (!U.ceoScrollToLatestBtn) return;
     const atLatest = S.ceoFeedFollowLatest !== false && ceoFeedNearBottom();
     U.ceoScrollToLatestBtn.hidden = atLatest;
+    // 按钮常显但只在回合进行中呼吸:回合收尾后才出现的"上翻读历史"没有新内容要追。
+    U.ceoScrollToLatestBtn.classList?.toggle("is-breathing", !!S.ceoTurnActive);
 }
 
 function scrollCeoFeedToBottom() {
@@ -9661,6 +9677,7 @@ function openProjectSettingsDialog() {
 function closeProjectSettingsDialog() {
     if (!U.projectSettingsBackdrop) return;
     closePasswordChangeDialog();
+    closeConfigBundleDialog();
     U.projectSettingsBackdrop.hidden = true;
     U.projectSettingsBackdrop.classList.remove("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "false");
@@ -9739,6 +9756,136 @@ async function lockProjectFromSettings() {
         setProjectSettingsBusy(false);
         showToast({ title: "锁定失败", text: projectSettingsErrorText(error), kind: "error" });
     }
+}
+
+function isConfigBundleOpen() {
+    return !!U.configBundleBackdrop && !U.configBundleBackdrop.hidden;
+}
+
+function setConfigBundleBusy(busy) {
+    const disabled = Boolean(busy);
+    [U.configBundleExport, U.configBundleImport]
+        .forEach((element) => {
+            if (element) element.disabled = disabled;
+        });
+}
+
+function syncConfigBundleFileName() {
+    if (!U.configBundleImportName) return;
+    const file = U.configBundleImportFile?.files?.[0];
+    U.configBundleImportName.textContent = file ? String(file.name || "已选择") : "未选择文件";
+}
+
+function clearConfigBundleInputs() {
+    [U.configBundleExportPassword, U.configBundleExportConfirm, U.configBundleImportPassword]
+        .forEach((element) => {
+            if (element) element.value = "";
+        });
+    if (U.configBundleImportFile) U.configBundleImportFile.value = "";
+    syncConfigBundleFileName();
+}
+
+function openConfigBundleDialog() {
+    if (!U.configBundleBackdrop) return;
+    U.configBundleBackdrop.hidden = false;
+    U.configBundleBackdrop.classList.add("is-open");
+    window.requestAnimationFrame(() => U.configBundleDialog?.focus?.());
+}
+
+function closeConfigBundleDialog() {
+    if (!U.configBundleBackdrop) return;
+    U.configBundleBackdrop.hidden = true;
+    U.configBundleBackdrop.classList.remove("is-open");
+    clearConfigBundleInputs();
+}
+
+function downloadConfigBundleFile(filename) {
+    const link = document.createElement("a");
+    link.href = ApiClient.getConfigBundleDownloadUrl(filename);
+    link.download = String(filename || "");
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+}
+
+async function submitConfigBundleExport() {
+    const password = String(U.configBundleExportPassword?.value || "");
+    const passwordConfirm = String(U.configBundleExportConfirm?.value || "");
+    if (!password || !passwordConfirm) {
+        showToast({ title: "请填写完整", text: "导出口令需要输入两次。", kind: "error" });
+        return;
+    }
+    if (password !== passwordConfirm) {
+        showToast({ title: "两次输入的口令不一致", kind: "error" });
+        return;
+    }
+    setConfigBundleBusy(true);
+    try {
+        const item = await ApiClient.exportConfigBundle(password);
+        downloadConfigBundleFile(item?.filename);
+        clearConfigBundleInputs();
+        showToast({
+            title: "配置包已导出",
+            text: `共 ${item?.entry_count || 0} 个文件。口令不会随文件另存，丢了无法导入。`,
+            kind: "success",
+        });
+    } catch (error) {
+        showToast({ title: "导出失败", text: projectSettingsErrorText(error), kind: "error" });
+    } finally {
+        setConfigBundleBusy(false);
+    }
+}
+
+function applyConfigBundleImportResult(item) {
+    closeConfigBundleDialog();
+    closeProjectSettingsDialog();
+    showToast({
+        title: "配置包已导入",
+        text: `已还原 ${item?.entry_count || 0} 个文件，解锁口令改成包口令；重启后 worker 才用新配置。`,
+        kind: "success",
+    });
+    window.setTimeout(() => window.location.reload(), 1500);
+}
+
+async function submitConfigBundleImport() {
+    const file = U.configBundleImportFile?.files?.[0];
+    const password = String(U.configBundleImportPassword?.value || "");
+    if (!file) {
+        showToast({ title: "请选择配置包文件", kind: "error" });
+        return;
+    }
+    if (!password) {
+        showToast({ title: "请输入包口令", kind: "error" });
+        return;
+    }
+    // 锁定态读不到在跑的工作，按"没有"处理：新机器上本来就没有。
+    const snapshot = await ApiClient.getBootstrapExitCheck().catch(() => null);
+    const hasRunning = !!snapshot?.has_running_work;
+    const summary = String(snapshot?.summary_text || "").trim();
+    // confirm 弹窗在层叠里排在配置包之后，必须先收掉本层才会露出来。
+    closeConfigBundleDialog();
+    closeProjectSettingsDialog();
+    openConfirm({
+        title: "确认导入配置包？",
+        text: hasRunning
+            ? `检测到${summary}。导入会整体替换配置面，需要先暂停它们。`
+            : "导入会整体替换当前配置面，并把解锁口令改为包口令。",
+        confirmLabel: "导入配置包",
+        confirmKind: "danger",
+        checkbox: hasRunning ? {
+            checked: false,
+            label: "暂停正在进行的所有对话和任务",
+            hint: summary,
+        } : null,
+        returnFocus: U.projectSettings,
+        onConfirm: async ({ checked }) => {
+            if (hasRunning && !checked) {
+                throw new Error("请先勾选“暂停正在进行的所有对话和任务”。");
+            }
+            const item = await ApiClient.importConfigBundle(file, password, { confirmRunningWork: !!checked });
+            applyConfigBundleImportResult(item);
+        },
+    });
 }
 
 function modelScopeLabel(scope) {
@@ -14637,6 +14784,15 @@ function bind() {
         if (e.target === U.projectSettingsBackdrop) closeProjectSettingsDialog();
     });
     U.projectSettingsOpenPassword?.addEventListener("click", () => openPasswordChangeDialog());
+    U.projectSettingsOpenBundle?.addEventListener("click", () => openConfigBundleDialog());
+    U.configBundleClose?.addEventListener("click", () => closeConfigBundleDialog());
+    U.configBundleBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.configBundleBackdrop) closeConfigBundleDialog();
+    });
+    U.configBundleExport?.addEventListener("click", () => void submitConfigBundleExport());
+    U.configBundleImport?.addEventListener("click", () => void submitConfigBundleImport());
+    U.configBundleImportPick?.addEventListener("click", () => U.configBundleImportFile?.click());
+    U.configBundleImportFile?.addEventListener("change", () => syncConfigBundleFileName());
     U.passwordChangeClose?.addEventListener("click", () => closePasswordChangeDialog());
     U.passwordChangeBackdrop?.addEventListener("click", (e) => {
         if (e.target === U.passwordChangeBackdrop) closePasswordChangeDialog();

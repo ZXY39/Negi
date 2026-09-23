@@ -2229,6 +2229,14 @@
     justify-content: space-between;
 }
 
+/* 隐藏的 file input 由「选择配置包」按钮代挑，回显只当状态行用。 */
+[data-ui-version="v2"] .config-bundle-file-name {
+    margin: 0;
+    color: var(--ui-text-secondary);
+    font-size: 13px;
+    word-break: break-all;
+}
+
 /* 50. 勾选框：原生框在暗色下几乎看不见，统一换成品牌底 + 伪元素勾形，
    勾形不依赖 lucide，解锁界面与设置弹窗共用同一份。 */
 [data-ui-version="v2"] .ui-checkbox-row {
