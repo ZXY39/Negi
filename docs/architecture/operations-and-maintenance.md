@@ -9,7 +9,7 @@
 
 ## 1. 基本启动方式
 
-### 新设备首次安装
+### 新设备首次安装与升级
 
 用户侧一行指令（Windows `install.ps1`，Linux / macOS `install.sh`，仓库根），随后进入一键启动脚本同一条链路。
 
@@ -21,6 +21,11 @@
 - 一行指令指向不可变 ref（发布标签）。要覆盖用 `-Ref` / `--ref`，换目录用 `-Dir` / `--dir`，只建环境不启动用 `-NoStart` / `--no-start`
 - 镜像源不设安装器参数：uv 直接读 `UV_DEFAULT_INDEX` 与 `UV_PYTHON_INSTALL_MIRROR` 环境变量
 - 安装完成的终点是项目口令设置页，不是可用系统（解锁合同见 `config-and-models.md`「Deployment Unlock Contract」）
+- 不带 `-Upgrade` 时对已存在的目录是**幂等不动代码**（只补环境与启动）。升级是显式动作：git 检出走 `fetch --depth 1` + `checkout --detach FETCH_HEAD`，无 git 的源码包安装走"下归档 + 逐顶层覆盖"，两条路都只换代码，`.venv/` 与 `.g3ku/` 保留
+- 升级前置校验：`git status --porcelain` 非空即拒绝执行，不静默覆盖用户改动
+- 两种取码方式**不可混用**：把源码包盖在 git 检出上会让整棵树在 autocrlf 下变成永久"脏"，从而被下一次升级的脏检查挡住。因此"有 `.git` 但 git 不可用"时报错，而不是退化成覆盖
+- 版本识别通道是 `git ls-remote --tags origin`，只接受 `refs/tags/vX.Y.Z` 形状（`backup/*` 这类路径标签与 peeled `^{}` 行都按形状过滤掉），与 `g3ku/__init__.py` 的 `__version__` 比对，结果只落在 `g3ku status` 的 `Release:` 行。约束：只读不外发、超时 2 秒、失败即整行不出现（离线设备不得显示"已是最新"）
+- 发版动作 = 打标签 + 同步 `pyproject.toml` 与 `g3ku/__init__.py` 两处版本号 + 更新安装脚本与 README 里钉住的 ref 默认值
 
 ### 首选一键启动脚本
 

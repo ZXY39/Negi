@@ -1,10 +1,10 @@
-# Fix Plan: 一行指令安装（`install.ps1` / `install.sh` / `.python-version` / tag `v1.0.0`）
+# Fix Plan: 一行指令安装（`install.ps1` / `install.sh` / `.python-version` / tag `v1.0.0`）+ 升级与版本识别
 
-> Origin: operator request, 2026-09-23 —— 「应用可在一个新设备上，输入一行指令完成安装」。追问过是否要发 release，裁决为：**只打 tag 固定安装入口，不发 release 资产、不上 PyPI**。
+> Origin: operator request, 2026-09-23 —— 「应用可在一个新设备上，输入一行指令完成安装」。追问过是否要发 release，裁决为：**只打 tag 固定安装入口，不发 release 资产、不上 PyPI**。同日追加第二问：「安装后如何升级、默认装在哪、能否自动识别新版本」⇒ 本文覆盖 P1–P5（安装，已上线 `v1.0.0`）与 P6–P9（升级与版本识别）。
 >
-> Status: 设计已定，四个阶段（P1 脚本本体 → P2 版本钉 → P3 验证 → P4 文档 → P5 提交打标签）。
+> Status: P1–P5 已落地并推送（tag `v1.0.0`）。P6–P9 设计已定，形状在 §2.6–§2.8。
 >
-> Scope: 仓库根的 `install.ps1` / `install.sh`、新增 `.python-version`、`README.md` §1–§2、`docs/architecture/operations-and-maintenance.md` §1。**运行时代码一字不改**（见 §2.2：绕开宿主 Python 检查的方式不需要动 `g3ku_bootstrap.py`）。
+> Scope: 仓库根的 `install.ps1` / `install.sh`、`.python-version`、`.gitattributes`、`README.md` §1–§2、`docs/architecture/operations-and-maintenance.md` §1；P6 起新增运行时刻线：`g3ku/update_check.py` 与 `g3ku status` 的一行输出（安装阶段本身不碰运行时代码）。
 
 ---
 
@@ -79,15 +79,44 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.sh 
 
 | 参数 | 用途 |
 | --- | --- |
-| `-Dir` | 安装位置，默认 `%USERPROFILE%\G3KU-Agent` / `$HOME/G3KU-Agent` |
-| `-NoStart` | 装到第 4 步为止，不拉 Web —— 也是本计划 §4 的验证入口 |
-| `-Ref` | 覆盖钉住的 ref，用于回滚或试装预发布 |
+| `-Dir` / `--dir` | 安装位置，默认 `%USERPROFILE%\G3KU-Agent` / `$HOME/G3KU-Agent` |
+| `-NoStart` / `--no-start` | 装到第 4 步为止，不拉 Web —— 也是本计划 §4 的验证入口 |
+| `-Ref` / `--ref` | 覆盖钉住的 ref，用于回滚或试装预发布 |
+| `-Upgrade` / `--upgrade` | 显式升级已装好的设备（§2.6） |
 
 网络镜像**不加参数**：uv 自身读 `UV_DEFAULT_INDEX` 与 `UV_PYTHON_INSTALL_MIRROR`，环境变量天然穿透，脚本再包一层就是重复配置面。国内弱网时在指令前 `set`/`export` 即可。
 
 ### 2.4 边界：一行指令做不到的那一步
 
 安装完成的终点是**口令设置页**，不是可用系统。缺 `.g3ku/llm-config/master.key` 时除 `/api/bootstrap` 外全部 `/api/*` 返回 `423 project_locked`（合同见 `config-and-models.md`「Deployment Unlock Contract」）。这是设计上的安全边界，脚本只能打印 URL 后停在那里。
+
+### 2.5 升级：`-Upgrade` 的两条取码路
+
+默认（不带 `-Upgrade`）对已存在的目录是**幂等不动代码**，只补环境与启动 —— 这一条是刻意的：一行指令既是安装也是启动入口，它不能顺手覆盖用户已经在用的代码树。升级因此是显式动作：
+
+| 安装形态 | 升级动作 | 保护 |
+| --- | --- | --- |
+| git 检出 | `git fetch --depth 1 origin <ref>` + `git checkout --detach FETCH_HEAD` | 先跑 `git status --porcelain`，非空即**拒绝**，不静默覆盖用户改动 |
+| 无 git（源码包） | 重新下载归档，逐顶层条目覆盖 | 跳过 `.venv` / `.g3ku` / `.git`；用户数据与环境原地保留 |
+
+两条实测约束：
+
+- **混用有代价**。把源码包盖在 git 检出上，autocrlf 会让整棵树在 `git status` 里变成永久"脏"（内容其实等价，`git diff` 无 hunk），下一次升级就被自己的脏检查挡住 —— 本机验证时真踩到（873 个文件全标 ` M`）。所以"有 `.git` 但 git 不可用"直接报错，不退化覆盖。
+- **源码包升级不回收删除文件**。上一版存在、新版没有的文件会留在原地。可接受，README 与运维文档都写明；在意就删目录重装。
+
+### 2.6 版本识别：只读一条通道
+
+| 通道 | 判定 |
+| --- | --- |
+| `git ls-remote --tags origin` | **采用**。分发形态本就是 checkout（M3），不吃 API 配额，离线/失败可静默 |
+| GitHub API `/repos/.../tags` | 未鉴权 60 次/小时/IP，不适合常规调用；`/releases/latest` 更要求先发 release，与既定裁决冲突 |
+| raw 上的 `VERSION` 文件 | 只在无 git 的设备上才需要，会多出"发版要同步第三处"的维护面 —— 暂不做 |
+
+形状规则：只接受 `refs/tags/vX.Y.Z`，按形状过滤掉路径型标签（`refs/tags/backup/...`）与 peeled 的 `^{}` 重复行，取最高 semver 而非文件序最后一行。本地侧与 `g3ku/__init__.py` 的 `__version__` 比对。
+
+三条硬约束：**只出不进**（不上传任何本地信息，版本号也不外发）、**超时 2 秒**、**失败即静默**（离线设备不得显示"已是最新"，宁可不出现）。
+
+呈现面只有一个：`g3ku status` 尾行 `Release:`。不做启动时自动弹窗、不做 Web 界面横幅 —— 检查更新的主动权留在操作员手上，避免把一次网络往返塞进启动路径。
 
 ---
 
@@ -99,7 +128,11 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.sh 
 | P2 | 新增 `.python-version` = `3.12`（与本机 `.venv` 实测版本一致） | 1 个文件 |
 | P3 | 验证（§4） | 证据，不落文件 |
 | P4 | `README.md` §1–§2 与 `docs/architecture/operations-and-maintenance.md` §1 就地改写 | 文档 |
-| P5 | 提交 + 轻量标签 `v1.0.0`（推送需操作员确认） | 1 commit + 1 tag |
+| P5 | 提交 + 标签 `v1.0.0` | 已推送 |
+| P6 | `g3ku/update_check.py` + `g3ku status` 的 `Release:` 行 + `tests/test_update_check.py` | 运行时刻线 |
+| P7 | 两个安装脚本加 `-Upgrade` / `--upgrade`（§2.5），含混用拒绝 | 安装器 |
+| P8 | 验证（§4 的 6–9 项） | 证据 |
+| P9 | README「升级与版本检查」+ 运维文档同节就地改写 | 文档 |
 
 ---
 
@@ -110,6 +143,10 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.sh 
 3. 装完的树里做导入冒烟：`<临时>/.venv/Scripts/python.exe -c "import main.protocol, g3ku.cli.commands"` ⇒ 证明跟踪集自身完备（覆盖 M3 的 42 处 `from main`）。
 4. 全程不启 Web，避免和在跑的 18790 主实例抢单实例锁（`.g3ku/start.lock`）。
 5. 清理临时目录。
+6. 版本识别的纯函数用单测覆盖（最高 semver、形状过滤、空输出、无 origin 时返回 None），不依赖网络。
+7. 脏树守卫：在临时安装里改一个跟踪文件 → `-Upgrade` 必须非零退出并指名目录；还原后必须成功。
+8. 无 git 形态：把 PATH 收窄到"只有 uv 和 Windows 系统目录"（`Get-Command git` 为假），先跑一次全新归档安装（断言目录里没有 `.git`），再跑 `-Upgrade`，断言 `.g3ku/`、`.venv/` 里的哨兵文件仍在、被删的跟踪文件被恢复。
+9. `Release:` 行走真实 origin：`g3ku status` 应打出当前版本与最新标签；把 `fetch_latest_release_tag` 打桩成更高标签，应改走"有新版"文案。
 
 未列入本计划、但需要操作员实盘确认的：**在一台真的什么都没有的机器上跑一次**。本机验证只能覆盖"已有 uv 与热缓存"的路径。
 
@@ -124,3 +161,6 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.sh 
 | 离线自包含大包（嵌入 Python + wheels 矩阵） | M4 证明运行时不需要外网，弱网问题用镜像环境变量解决即可 |
 | 默认安装 `playwright install chromium` | 只有浏览器类工具需要，几百 MB，不进默认路径 |
 | 改 `g3ku_bootstrap.py` 的宿主 Python 检查 | §2.2 已说明不需要；放宽它等于删掉一条真实的前置校验 |
+| 不带参数的隐式升级 | 一行指令同时是"再启动一次"的入口，隐式换代码会把用户的运行现场掀掉 |
+| 启动时自动检查更新 / Web 上的版本横幅 | §2.6：检查留在操作员主动跑的 `g3ku status` 里 |
+| 自动回滚上一次升级 | 需要留副本与状态机，代价远高于"再跑一次 `-Ref <旧 tag>`" |

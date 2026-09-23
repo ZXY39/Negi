@@ -11,7 +11,8 @@
 param(
     [string]$Dir = (Join-Path $env:USERPROFILE 'G3KU-Agent'),
     [string]$Ref = 'v1.0.0',
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$Upgrade
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +23,8 @@ $RepoName = 'G3KU-Agent'
 $RepoGit = "https://github.com/$RepoOwner/$RepoName.git"
 $RepoZip = "https://github.com/$RepoOwner/$RepoName/archive/${Ref}.zip"
 $UvInstaller = 'https://astral.sh/uv/install.ps1'
+# Kept across upgrades: the environment and everything the operator created.
+$ProtectedEntries = @('.venv', '.g3ku', '.git')
 
 function Write-Step {
     param([string]$Message)
@@ -83,19 +86,8 @@ function Get-ProjectPin {
     return $null
 }
 
-function Ensure-Checkout {
-    param([string]$Root)
-    if (Test-Path (Join-Path $Root 'pyproject.toml')) {
-        Write-Step "checkout already present at $Root, skipping download"
-        return
-    }
-    New-Item -ItemType Directory -Force -Path $Root | Out-Null
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        Write-Step "git clone --branch $Ref into $Root"
-        Invoke-Checked @('git', 'clone', '--depth', '1', '--branch', $Ref, $RepoGit, $Root) -Where $Root
-        return
-    }
-    Write-Step "git not available, downloading $RepoZip"
+function Install-FromArchive {
+    param([string]$Root, [switch]$Overwrite)
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("g3ku-" + [Guid]::NewGuid().ToString('N'))
     $zip = Join-Path $tmp 'source.zip'
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -106,11 +98,62 @@ function Ensure-Checkout {
         if (-not $inner) {
             Write-Error "[install] archive for $Ref contained no top-level directory"
         }
-        Get-ChildItem -LiteralPath $inner.FullName -Force | Move-Item -Destination $Root
+        if ($Overwrite) {
+            # Top-level merge: environment and operator data are never touched.
+            # Files the new release deleted stay behind until a reinstall.
+            Get-ChildItem -LiteralPath $inner.FullName -Force | ForEach-Object {
+                if ($ProtectedEntries -notcontains $_.Name) {
+                    Copy-Item -LiteralPath $_.FullName -Destination $Root -Recurse -Force
+                }
+            }
+        }
+        else {
+            Get-ChildItem -LiteralPath $inner.FullName -Force | Move-Item -Destination $Root
+        }
     }
     finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Update-GitCheckout {
+    param([string]$Root)
+    $dirty = (& git -C $Root status --porcelain 2>$null)
+    if ($dirty) {
+        Write-Error "[install] $Root has uncommitted changes; commit or discard them before upgrading"
+    }
+    Write-Step "git fetch --depth 1 origin $Ref"
+    Invoke-Checked @('git', '-C', $Root, 'fetch', '--depth', '1', 'origin', $Ref) -Where $Root
+    Invoke-Checked @('git', '-C', $Root, 'checkout', '--detach', 'FETCH_HEAD') -Where $Root
+    Write-Step "code updated to $Ref"
+}
+
+function Update-Code {
+    param([string]$Root)
+    if (Test-Path (Join-Path $Root 'pyproject.toml')) {
+        if (-not $Upgrade) {
+            Write-Step "checkout already present at $Root, code untouched (pass -Upgrade to update it)"
+            return
+        }
+        if ((Test-Path (Join-Path $Root '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+            Update-GitCheckout -Root $Root
+            return
+        }
+        if (Test-Path (Join-Path $Root '.git')) {
+            Write-Error "[install] $Root is a git checkout but git is unavailable; install git so the upgrade stays consistent"
+        }
+        Write-Step "upgrading code from the $Ref source archive (keeping .venv and .g3ku)"
+        Install-FromArchive -Root $Root -Overwrite
+        return
+    }
+    New-Item -ItemType Directory -Force -Path $Root | Out-Null
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Write-Step "git clone --branch $Ref into $Root"
+        Invoke-Checked @('git', 'clone', '--depth', '1', '--branch', $Ref, $RepoGit, $Root) -Where $Root
+        return
+    }
+    Write-Step "git not available, downloading $RepoZip"
+    Install-FromArchive -Root $Root
 }
 
 function Install-Environment {
@@ -140,7 +183,7 @@ function Get-VenvPython {
 
 Write-Step "target directory: $Dir"
 $uv = Ensure-Uv
-Ensure-Checkout -Root $Dir
+Update-Code -Root $Dir
 Install-Environment -uv $uv -Root $Dir
 
 if ($NoStart) {

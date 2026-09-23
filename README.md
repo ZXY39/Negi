@@ -67,6 +67,7 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.0/install.sh 
 - `-Dir PATH` / `--dir PATH`：换安装目录
 - `-NoStart` / `--no-start`：只准备环境，不启动 Web
 - `-Ref TAG` / `--ref TAG`：换要安装的版本，用于回滚或试装
+- `-Upgrade` / `--upgrade`：把已装好的设备更新到 `-Ref` 指定的版本
 
 国内网络取 PyPI 或 Python 发行包慢时，给 uv 传镜像环境变量即可，脚本不另设开关：
 
@@ -79,6 +80,16 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 
 - 安装完成的终点是**项目口令设置页**。首次启动会在浏览器里要求创建项目口令，设完才进入配置页面。
 - 安装得到的是 git 跟踪集：项目自带的 skills/tools 在里面，本地通过市场安装的 skills、`externaltools/` 与 `.g3ku/` 不在里面，装完按需在 Web 里重新添加。
+
+### 升级与版本检查
+
+默认安装位置：Windows `%USERPROFILE%\G3KU-Agent`，Linux / macOS `~/G3KU-Agent`。环境（`.venv/`）和数据（`.g3ku/`）都在这个目录里，升级不碰它们。
+
+- 有没有新版：在项目目录里跑 `g3ku status`，最后一行 `Release:` 报当前版本与远端最新标签。离线、没有 git 或远端不是本仓库时这一行直接不出现，不会给你假的"已是最新"。
+- 升级：`.\install.ps1 -Upgrade`（Linux / macOS `./install.sh --upgrade`）。默认升到脚本里钉住的 ref，要指定版本加 `-Ref v1.0.1` / `--ref v1.0.1`。
+- 过渡一次：`v1.0.0` 的一行指令还不认识 `-Upgrade`，装在那个版本上的设备先用 `git pull`（或删目录重装）拿到新脚本，此后都走 `-Upgrade`。
+- 有未提交改动时 `-Upgrade` 拒绝执行，先自行提交或丢弃。
+- 已知不做：源码包方式的升级只覆盖新版带来的文件，上一版里被删掉的不会回收；在意就用 git 安装，或删目录重装。
 
 下面的「环境配置步骤」是手动路径，供开发者或想自己控制环境的人使用。
 

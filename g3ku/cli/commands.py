@@ -752,6 +752,22 @@ def cron_run(
 # ============================================================================
 
 
+def _print_release_status() -> None:
+    """Report the local version against the newest release tag. Silent when the
+    remote cannot be read, so an offline device gets no false 'up to date'."""
+    from g3ku.update_check import fetch_latest_release_tag, parse_version
+
+    latest_tag = fetch_latest_release_tag(Path.cwd())
+    if not latest_tag:
+        return
+    latest = parse_version(latest_tag)
+    current = parse_version(__version__)
+    if latest and current and latest > current:
+        console.print(f"Release: v{__version__} [yellow]有新版 {latest_tag}[/yellow]（升级：重跑安装脚本加 -Upgrade）")
+    else:
+        console.print(f"Release: v{__version__} [green]已是最新标签 {latest_tag}[/green]")
+
+
 @app.command()
 def status():
     """Show g3ku status."""
@@ -768,6 +784,7 @@ def status():
 
     console.print(f"Config: {config_path} {_status_mark(config_path.exists())}")
     console.print(f"Workspace: {workspace} {_status_mark(workspace.exists())}")
+    _print_release_status()
 
     if config_path.exists():
         from g3ku.providers.registry import PROVIDERS
