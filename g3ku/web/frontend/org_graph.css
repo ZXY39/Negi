@@ -4050,7 +4050,6 @@ textarea {
     align-items: center;
     justify-content: center;
     box-shadow: 0 10px 28px -12px color-mix(in srgb, var(--brand-primary) 30%, transparent), var(--shadow-sm);
-    backdrop-filter: blur(10px);
     z-index: 3;
     cursor: pointer;
     padding: 0;
@@ -4072,22 +4071,35 @@ textarea {
     display: none;
 }
 
-/* 看不到最新输出时按钮持续呼吸（渐变发亮发暗）；hover 的位移/描边不受影响。 */
+/* 看不到最新输出时按钮呼吸（渐变发亮发暗）；hover 的位移/描边不受影响。
+   呼吸只能动光晕的 opacity：形状画在不参与布局的 ::after 上，扩散范围全程恒定。
+   在按钮自身上插值 box-shadow 的 spread 会让轮廓每 1.8s 涨落一次，峰值向外多画 6px，
+   顶到上方消息与下方输入框的间距上。is-breathing 由回合是否进行中驱动。 */
+.ceo-scroll-to-latest-btn::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-primary) 26%, transparent), 0 0 12px 2px color-mix(in srgb, var(--brand-primary) 34%, transparent);
+    opacity: 0;
+    pointer-events: none;
+}
+
 @keyframes ceo-scroll-latest-breathe {
     0%, 100% {
-        box-shadow: 0 10px 28px -12px color-mix(in srgb, var(--brand-primary) 30%, transparent), var(--shadow-sm);
+        opacity: 0.15;
     }
     50% {
-        box-shadow: 0 0 0 6px color-mix(in srgb, var(--brand-primary) 22%, transparent), 0 14px 34px -10px color-mix(in srgb, var(--brand-primary) 55%, transparent);
+        opacity: 1;
     }
 }
 
-.ceo-scroll-to-latest-btn:not([hidden]) {
+.ceo-scroll-to-latest-btn.is-breathing:not([hidden])::after {
     animation: ceo-scroll-latest-breathe 1.8s ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .ceo-scroll-to-latest-btn:not([hidden]) {
+    .ceo-scroll-to-latest-btn.is-breathing:not([hidden])::after {
         animation: none;
     }
 }

@@ -6,12 +6,14 @@ const vm = require("node:vm");
 // 直播回合视图状态保持:renderCeoStageTraceIntoTurn 整段重建前后的展开态捕获/还原,
 // 以及 mutateCeoFeed preserve 模式的锚定滚动/贴底跟随契约。
 // 覆盖:阶段 details 开合、轮次工具条选中、Interaction Flow 用户折叠、跨轮换轨不串态、
-// 上滚锚定(上方内容增高/缩短不跳变)、贴底自动跟随。
+// 上滚锚定(上方内容增高/缩短不跳变)、贴底自动跟随、「回到最新」按钮的呼吸门控与动画载体。
 
 const TASK_VIEW_PATH = "g3ku/web/frontend/org_graph_task_view.js";
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
+const CSS_PATH = "g3ku/web/frontend/org_graph.css";
 const TASK_VIEW_CODE = fs.readFileSync(TASK_VIEW_PATH, "utf8");
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const APP_CSS = fs.readFileSync(CSS_PATH, "utf8");
 
 class StubElement {}
 
@@ -157,7 +159,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, scrollCeoFeedToBottom, updateCeoScrollToLatestButton, setCeoFeedFollowLatest, handleCeoFeedUserGesture, handleCeoFeedScrollEvent, markCeoFeedProgrammaticScroll, S, U };`,
+        `${TASK_VIEW_CODE}\n${APP_CODE}\nthis.__testExports = { renderCeoStageTraceIntoTurn, mutateCeoFeed, scrollCeoFeedToBottom, updateCeoScrollToLatestButton, syncCeoFeedTurnActiveClass, setCeoFeedFollowLatest, handleCeoFeedUserGesture, handleCeoFeedScrollEvent, markCeoFeedProgrammaticScroll, S, U };`,
         context
     );
     return context.__testExports;
@@ -297,6 +299,21 @@ function makeFeedChild({ key = "", contentTop = 0, height = 10 } = {}) {
     return child;
 }
 
+// 「回到最新」的呼吸和 feed 的回合进行中态都挂在类名上,被测元素需要一个能记事的 classList。
+function withClassRecorder(el = {}) {
+    const classes = new Set();
+    el.classes = classes;
+    el.classList = {
+        toggle: (name, on) => {
+            if (on) classes.add(name);
+            else classes.delete(name);
+            return classes.has(name);
+        },
+        contains: (name) => classes.has(name),
+    };
+    return el;
+}
+
 function setupScrollApi(feed) {
     const api = loadApp();
     api.S.activeSessionId = "s1";
@@ -412,6 +429,64 @@ test("脱离时按钮常显；scrollCeoFeedToBottom 恢复跟随并收起按钮"
     assert.equal(api.S.ceoFeedFollowLatest, true);
     assert.equal(feed.scrollTop, 1000);
     assert.equal(api.U.ceoScrollToLatestBtn.hidden, true);
+});
+
+test("呼吸只在回合进行中:收尾后按钮常显但不再闪烁", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 100, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    const btn = withClassRecorder({ hidden: true });
+    api.U.ceoScrollToLatestBtn = btn;
+    api.S.ceoFeedFollowLatest = false;
+
+    api.S.ceoTurnActive = true;
+    api.updateCeoScrollToLatestButton();
+    assert.equal(btn.hidden, false);
+    assert.ok(btn.classes.has("is-breathing"), "回合进行中且看不到最新输出:按钮呼吸");
+
+    // 回合收尾不回收可见性(操作者仍没在看最新输出),只停呼吸。
+    api.S.ceoTurnActive = false;
+    api.updateCeoScrollToLatestButton();
+    assert.equal(btn.hidden, false, "会话收尾后按钮仍要常显");
+    assert.ok(!btn.classes.has("is-breathing"), "会话已收尾:没有新内容要追,不该继续闪");
+});
+
+test("回合状态翻转经 syncCeoFeedTurnActiveClass 落到按钮,不依赖滚动事件", () => {
+    const childA = makeFeedChild({ key: "m:1", contentTop: 0, height: 1000 });
+    const feed = makeFeed({ children: [childA], scrollTop: 100, scrollHeight: 1000, clientHeight: 200 });
+    const api = setupScrollApi(feed);
+    withClassRecorder(feed);
+    const btn = withClassRecorder({ hidden: true });
+    api.U.ceoScrollToLatestBtn = btn;
+    api.S.ceoFeedFollowLatest = false;
+    api.updateCeoScrollToLatestButton();
+
+    api.S.ceoTurnActive = true;
+    api.syncCeoFeedTurnActiveClass();
+    assert.ok(btn.classes.has("is-breathing"));
+    assert.ok(feed.classes.has("ceo-turn-active"), "同一状态位也要继续驱动 feed 的回合进行中类");
+
+    api.S.ceoTurnActive = false;
+    api.syncCeoFeedTurnActiveClass();
+    assert.ok(!btn.classes.has("is-breathing"), "收尾必须即时停呼吸");
+    assert.ok(!feed.classes.has("ceo-turn-active"));
+});
+
+test("呼吸画在伪元素的 opacity 上:不插值 box-shadow spread,按钮不带 backdrop-filter", () => {
+    const breathe = APP_CSS.match(/@keyframes ceo-scroll-latest-breathe\s*\{[\s\S]*?\n\}/);
+    assert.ok(breathe, "呼吸 keyframes 必须存在");
+    assert.ok(!/box-shadow/.test(breathe[0]), "呼吸只能动 opacity:插值 spread 会让光晕随周期涨到周围内容上");
+    assert.match(breathe[0], /opacity/);
+
+    const btnRule = APP_CSS.match(/\.ceo-scroll-to-latest-btn\s*\{[\s\S]*?\n\}/);
+    assert.ok(btnRule, "按钮基础样式必须存在");
+    assert.ok(!/backdrop-filter/.test(btnRule[0]), "backdrop-filter 每帧重算,是这层光斑漫开的载体");
+
+    assert.match(
+        APP_CSS,
+        /\.ceo-scroll-to-latest-btn\.is-breathing:not\(\[hidden\]\)::after\s*\{/,
+        "呼吸必须由「进行中 + 未贴底」两个条件共同门控"
+    );
 });
 
 test("竞态序列:程序钉底派发的 scroll 不得重新武装跟随", () => {
