@@ -503,6 +503,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             "context_window_tokens": int(preflight.get("context_window_tokens") or 0),
             "ratio": float(preflight.get("ratio") or 0.0),
             "provider_model": str(preflight.get("provider_model") or ""),
+            "resolved_model_key": str(preflight.get("resolved_model_key") or ""),
             "trigger_tokens": int(preflight.get("trigger_tokens") or 0),
             "would_trigger_token_compression": bool(preflight.get("would_trigger_token_compression")),
             "would_exceed_context_window": bool(preflight.get("would_exceed_context_window")),

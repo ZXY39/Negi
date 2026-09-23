@@ -183,6 +183,13 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 
 绑定 key 是稳定主键：它唯一标识 `models.catalog[]` 条目，同时被 `models.roles.*` 和 `agents.multi_agent.orchestrator_model_key` 引用。管理面创建 binding 时以记录的 `default_model` 为基底自动生成 key，遇到同名模型时追加数字后缀去重，因此 key 不再等于模型名，不同供应商可以添加同名模型。展示标题的优先级是绑定级 `name` > 记录的 `default_model` > `key`：`name` 是 `models.catalog[]` 条目的绑定层字段，空值为「未命名」，展示回退到 `default_model`，写入空 `name`/删除 `name` 即回到回退展示而不改写 key；非空 `name` 在创建/编辑 binding 时做大小写不敏感的全局去重（排除自身），`/api/models` 与 `/api/llm/bindings` 两个视图都读写该字段。编辑 `default_model` 或 `name` 都会更新展示标题而不改写 key；命名与展示职责详见 `web-and-admin.md`「Model Config Page And Admin Contract」。
 
+### 角色链顺序即路由顺序
+
+`models.roles.ceo` 的原序就是 CEO/frontdoor 的路由顺序：解析出的 `model_refs` 既不被过滤，也不按 provider 模板或协议能力重排。只有链首失败后才前进到链上下一个模型（重试与轮换预算见 `runtime-overview.md`「Chat provider 超时与重试边界」）。
+
+- provider 的 `supports_prompt_caching` 不参与模型选择。它描述的是这条车道转不转发 `prompt_cache_key` 这个请求字段，而不是这个模型吃不吃得到缓存——命中来自网关侧自动前缀缓存，两家车道都会回报 `cached_tokens`（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。把它当成路由门控会把不具备该字段的模型整段移出链，连带取消它们的容灾资格。
+- 「面板显示的模型不像链首」按两个字段判读：preflight diagnostics 的 `resolved_model_key` 是本轮生效的绑定 key，`provider_model` 是 provider 侧模型名。多条绑定可以共用同一个 `provider_model`，只有绑定 key 能区分它们。
+
 ### 会话级固定模型优先于角色链
 
 Leader（CEO/frontdoor）解析本轮模型引用时，先读会话元数据的 `model_selection`：`{"mode": "chain"}` 走 `models.roles.ceo`；`{"mode": "model", "model_key": "..."}` 时本轮 `model_refs` 是该固定模型（单元素），不再走模型链。

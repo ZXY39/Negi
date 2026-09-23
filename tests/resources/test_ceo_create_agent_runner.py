@@ -493,7 +493,12 @@ async def test_create_agent_runner_prompt_keeps_history_uncompacted_after_legacy
 
 
 
-def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(monkeypatch) -> None:
+def test_create_agent_runner_resolve_ceo_model_refs_keeps_config_chain_order(monkeypatch) -> None:
+    """角色链顺序即路由顺序：协议/缓存能力位不参与模型选择。
+
+    命中缓存靠网关侧自动前缀缓存，与请求是否带 prompt_cache_key 无关，因此
+    chat 车道不能被当成「无缓存」而从链上抹掉。
+    """
     from g3ku.runtime.frontdoor import _ceo_support as ceo_support
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
@@ -510,20 +515,9 @@ def test_create_agent_runner_resolve_ceo_model_refs_prefers_cache_capable_refs(m
     )
 
     monkeypatch.setattr(ceo_support, "refresh_loop_runtime_config", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        ceo_support,
-        "build_provider_from_model_key",
-        lambda _config, ref: SimpleNamespace(provider_id=str(ref).split(":", 1)[0]),
-    )
-    monkeypatch.setattr(
-        ceo_support,
-        "find_by_name",
-        lambda name: SimpleNamespace(
-            supports_prompt_caching=name == "responses"
-        ),
-    )
 
     assert runner._resolve_ceo_model_refs() == [
+        "openai:gpt-4.1",
         "responses:gpt-5.4",
     ]
 

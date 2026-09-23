@@ -1584,6 +1584,7 @@ function normalizeCeoComposerUsageEstimate(sessionId, payload = null) {
         context_window_tokens: contextWindowTokens,
         ratio: Math.max(0, Number.isFinite(ratio) ? ratio : 0),
         provider_model: providerModel,
+        resolved_model_key: String(item.resolved_model_key || item.resolvedModelKey || "").trim(),
         trigger_tokens: toInt(item.trigger_tokens ?? item.triggerTokens),
         would_trigger_token_compression: !!(item.would_trigger_token_compression ?? item.wouldTriggerTokenCompression),
         would_exceed_context_window: !!(item.would_exceed_context_window ?? item.wouldExceedContextWindow),
@@ -1614,6 +1615,7 @@ function normalizeCeoRuntimeUsageDiagnostics(payload = null) {
         effective_input_tokens: toInt(item.effective_input_tokens ?? item.effectiveInputTokens),
         estimate_source: String(item.estimate_source || item.estimateSource || "").trim(),
         provider_model: providerModel,
+        resolved_model_key: String(item.resolved_model_key || item.resolvedModelKey || "").trim(),
         applied: !!item.applied,
     };
 }
@@ -1637,6 +1639,7 @@ function normalizeCeoRuntimeUsageEstimate(sessionId, inflightTurn = null) {
         context_window_tokens: Math.floor(contextWindowTokens),
         ratio,
         provider_model: String(diagnostics.provider_model || "").trim(),
+        resolved_model_key: String(diagnostics.resolved_model_key || "").trim(),
         trigger_tokens: activeTriggerTokens > 0 ? Math.floor(activeTriggerTokens) : 0,
         would_trigger_token_compression: activeTriggerTokens > 0 && estimatedTotalTokens >= activeTriggerTokens,
         would_exceed_context_window: estimatedTotalTokens > contextWindowTokens,
@@ -2077,7 +2080,12 @@ function finishCeoModelChainDrag(event) {
 function ceoModelBadgeTitle(estimate) {
     const sessionId = String(activeSessionId() || "").trim();
     const effectiveKey = ceoModelEffectivePinnedKey(ceoModelSelectionFor(sessionId));
-    const fromEstimate = estimate ? ceoModelUsageHeadlineTitle(estimate.provider_model) : "";
+    // 绑定 key 优先：多条绑定可以共用同一个 provider 模型名，只按模型名解析必然撞名，
+    // 显示出来的会是另一条绑定的标题。
+    const fromEstimate = estimate
+        ? (ceoModelUsageHeadlineTitle(estimate.resolved_model_key)
+            || ceoModelUsageHeadlineTitle(estimate.provider_model))
+        : "";
     return fromEstimate || ceoModelDisplayTitle(ceoModelCatalogItem(effectiveKey)) || "";
 }
 
@@ -2477,7 +2485,7 @@ function syncCeoComposerUsageOutline() {
                     : "active"
     );
     const tipLabel = hasEstimate
-        ? `${estimate.provider_model || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
+        ? `${ceoModelBadgeTitle(estimate) || "current-model"} · ${estimate.estimated_total_tokens}/${estimate.context_window_tokens} TOKEN`
         : "等待 Leader 上下文预估";
     // 数字只在面板头部展示；脑图标保留等价的无障碍名称，不用原生 title 浮层。
     shell.removeAttribute?.("title");

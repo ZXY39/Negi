@@ -217,6 +217,7 @@ Heartbeat / cron 不再在主 CEO/frontdoor 路径上使用单独的短 `ceo_hea
 
 - caller-side prompt cache family 只由 stable prefix 加显式 cache-family revision 输入定义；普通 callable/candidate/hydrated 工具漂移、阶段门控 schema 变化、loader 触发的 hydration 升级可以改变 actual request，但不得单独轮转 family key。
 - CEO/frontdoor `call_model` 必须把为该轮重建的 request 与匹配重建的 `prompt_cache_key` 一起发送；重建 request 配旧 key 属于 runtime bug——它会掩盖 miss 到底来自 family churn 还是请求本身变化。节点同理：静态前缀保持前置 append-only、尾部恰好 1 份当前契约，`prompt_cache_key_hash` 与 `actual_request_hash` 分开排查。
+- 命中量不按协议车道归因。`prompt_cache_key` 只有 Responses 车道转发（`g3ku/providers/responses_provider.py`），Chat Completions 车道在 provider 入口丢弃该参数（`g3ku/providers/openai_chat_provider.py`），而两家 usage 都以 `cached_tokens` 回报命中——缓存由网关按前缀复用自动发生。所以「这条车道不发 cache key」不等于它零命中，反过来有命中也不能证明请求带了 key；判读只看 `observed_input_truth.cache_hit_tokens` 与 family key 是否稳定，模型选择也不该被这个字段门控（见 `config-and-models.md`「角色链顺序即路由顺序」）。
 - provider-facing `tools[]` 保持与曝光可见的具体工具集对齐的稳定超集，而不是更窄的当前轮 callable 集；bundle 刻意最小化，丰富的工具/技能说明放在尾部契约里，让 cache miss 更容易归因到真实请求增长而不是 schema 文本漂移。
 
 ### 4.2 Per-request 取证顺序

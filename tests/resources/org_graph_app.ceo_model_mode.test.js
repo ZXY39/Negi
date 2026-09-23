@@ -181,6 +181,7 @@ function loadApp(apiClientOverrides = {}) {
             renderCeoModelChainPane,
             filterCeoModelPickerModels,
             ceoModelDisplayTitle,
+            ceoModelBadgeTitle,
             ceoModelChainKeys,
             finishCeoModelChainDrag,
             bindCeoModelModeControls,
@@ -643,4 +644,23 @@ test("展示名优先级为 name > key > provider_model", () => {
     assert.equal(app.ceoModelDisplayTitle({ name: "  ", key: "k", provider_model: "p" }), "k");
     assert.equal(app.ceoModelDisplayTitle({ key: "", provider_model: "p" }), "p");
     assert.equal(app.ceoModelDisplayTitle(null), "");
+});
+
+test("徽标按绑定 key 解析实跑模型，provider 模型名撞名不串到别的绑定", () => {
+    const app = loadApp();
+    mountControl(app, { chain: ["alpha", "beta"] });
+    // 两条绑定共用同一个 provider 模型名：只按 provider_model 解析会命中 key 相同的那条。
+    app.S.modelCatalog.catalog = [
+        { key: "beta", name: "实跑绑定", provider_model: "shared-model", enabled: true },
+        { key: "alpha", name: "撞名绑定", provider_model: "shared-model", enabled: true },
+    ];
+    assert.equal(
+        app.ceoModelBadgeTitle({
+            provider_model: "shared-model",
+            resolved_model_key: "beta",
+        }),
+        "实跑绑定",
+    );
+    // 读数里没有绑定 key 时仍按 provider 模型名解析。
+    assert.equal(app.ceoModelBadgeTitle({ provider_model: "alpha" }), "撞名绑定");
 });
