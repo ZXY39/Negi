@@ -5091,11 +5091,13 @@ textarea {
     background: currentColor;
 }
 
-/* 全局 prefers-reduced-motion 规则会把所有 animation 打成 none，这条豁免压缩环：
-   它是「压缩还在跑」的唯一状态信号，冻住就等于没有反馈（正是图标看起来静态的原因）。
-   选择器比全局的 `*::before` 更具体，两边都带 !important 时按特异性取胜。 */
+/* 全局 prefers-reduced-motion 规则会把所有 animation 打成 none，这两处豁免：
+   压缩环与回合/工具步的旋转图标都是「还在跑」的唯一状态信号，冻住就等于没有反馈
+   （正是图标看起来静态的原因）。选择器比全局的 `*` 更具体，两边都带 !important
+   时按特异性取胜。旋转是 0→360deg 的 linear infinite，首尾同角，循环无缝。 */
 @media (prefers-reduced-motion: reduce) {
-    .ceo-compression-divider-spinner::before {
+    .ceo-compression-divider-spinner::before,
+    .interaction-step-icon.is-spinning svg {
         animation: interaction-step-icon-spin 0.9s linear infinite !important;
     }
 }
