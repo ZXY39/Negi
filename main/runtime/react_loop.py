@@ -117,6 +117,7 @@ from main.runtime.stage_budget import (
 from main.runtime.stage_messages import (
     build_execution_stage_overlay,
     build_execution_stage_result_block_message,
+    build_node_plain_text_reply_block_message,
     build_turn_only_system_note_message,
     is_turn_only_system_note_message,
     strip_turn_only_system_note_messages,
@@ -143,6 +144,10 @@ _INVALID_STAGE_SUBMISSION_LIMIT = 5
 # 与上面两条同档：一次抖动不该熔断，但运行时自身缺陷必须在一分钟内被叫停。
 # 实盘基线：2026-09-23 task:321604599eb0 同一 NameError 连撞 18 次无人发现。
 _TOOL_FAULT_LIMIT = 5
+# 阶段进行中只回纯文本（零工具调用）的连续打回上限：到点转错误暂停。
+# 与 _INVALID_STAGE_SUBMISSION_LIMIT 分道，是因为两道的出口不同：预算边界那一道
+# 要求同批开新阶段，这一道要求继续干活或直接 submit_final_result。
+_PLAIN_TEXT_REPLY_STRIKE_LIMIT = 3
 _STAGE_ONLY_TRANSITION_LIMIT = 5
 _NODE_CONTRACT_ECHO_REPAIR_LIMIT = 2
 _PROVIDER_RETRY_LIMIT = 3
@@ -272,6 +277,7 @@ class ReActToolLoop:
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
         invalid_stage_submission_count = 0
+        plain_text_reply_strikes = 0
         stage_only_transition_streak = 0
         last_invalid_final_submission_reason = ''
         last_invalid_stage_submission_reason = ''
@@ -997,6 +1003,7 @@ class ReActToolLoop:
                 if ordinary_tool_turn:
                     invalid_final_submission_count = 0
                     invalid_stage_submission_count = 0
+                    plain_text_reply_strikes = 0
                     stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
                     last_invalid_stage_submission_reason = ''
@@ -1494,6 +1501,30 @@ class ReActToolLoop:
                     node_kind=node.node_kind,
                     stage_gate=stage_gate,
                 )
+                continue
+
+            # 阶段进行中、预算还剩一半却只回一段规划文字：过去这里直接落到下面的
+            # auto-wrap，把这段文字升格成 success+final 交付（事故 task:355a512a78d8：
+            # 三轮同一份纯文本载荷，磁盘零变更）。现在打回并自动续跑，逼节点继续
+            # 用工具，连续到上限才收口成可恢复的错误暂停。
+            plain_text_reply_message = (
+                build_node_plain_text_reply_block_message(
+                    node_kind=node.node_kind,
+                    stage_gate=stage_gate,
+                )
+                if bool(stage_gate.get('enabled'))
+                and not matched_raw_final_result_payload
+                and str(response.content or '').strip()
+                else ''
+            )
+            if plain_text_reply_message:
+                plain_text_reply_strikes += 1
+                if plain_text_reply_strikes >= _PLAIN_TEXT_REPLY_STRIKE_LIMIT:
+                    return self._plain_text_reply_failure(
+                        count=plain_text_reply_strikes,
+                        reply_excerpt=str(response.content or ''),
+                    )
+                repair_overlay_text = plain_text_reply_message
                 continue
 
             auto_wrapped_final_call = (
@@ -4397,6 +4428,25 @@ class ReActToolLoop:
                 f'{text} —— 同一工具连续 {int(count or 0)} 次抛同一条运行时异常。'
                 '这是运行时自身缺陷，不是工具用法问题：resume 只会再撞同一条异常，'
                 '需操作员重启 worker 后再恢复该节点。'
+            ),
+            failure_disposition='pause',
+        )
+
+    @classmethod
+    def _plain_text_reply_failure(cls, *, count: int, reply_excerpt: str) -> NodeFinalResult:
+        excerpt = ' '.join(str(reply_excerpt or '').split())[:160]
+        suffix = f' Latest plain-text reply: "{excerpt}."' if excerpt else ''
+        return NodeFinalResult(
+            status='failed',
+            delivery_status='blocked',
+            summary='plain-text reply guard triggered',
+            answer='',
+            evidence=[],
+            remaining_work=[],
+            blocking_reason=(
+                f'Node answered with plain text and no tool call {int(count or 0)} consecutive times '
+                f'while a stage with unused budget was active, instead of continuing with a tool '
+                f'or calling {FINAL_RESULT_TOOL_NAME}. Plain-text answers are never a delivery.{suffix}'
             ),
             failure_disposition='pause',
         )

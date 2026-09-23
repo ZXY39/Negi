@@ -719,27 +719,31 @@ def _session_edit_fork_gates(
     turn_payload: dict[str, Any] | None,
     is_channel_session: bool,
     agent: Any,
-) -> dict[int, bool] | None:
-    """计算快照消息级 can_edit_fork 门槛（键 = 原始转录下标）。
+) -> tuple[dict[int, bool] | None, dict[int, bool] | None]:
+    """计算快照消息级门槛，返回 ``(编辑重发门槛, Fork 门槛)``（键 = 原始转录下标）。
 
-    返回 None 表示整个会话不满足防御型显示条件（渠道会话/非稳定态），
-    快照不下发任何按钮标志。
+    两者共用同一套内容判据（任务派发 / run 首条 / 边界快照可用），差别只在运行态：
+    编辑重发要改源会话转录，必须等会话没有活的执行体；Fork 是只读前缀复制、源会话
+    零变更（``fork_ceo_session`` 端点本来就不查运行态），所以回合在跑、等审批、压缩在途
+    都照样给资格。
+    某一项为 None 表示不下发该类 flag：渠道会话两项都 None，非稳定态只 None 掉编辑项。
     """
     key = str(session_id or "").strip()
     if is_channel_session or not key.startswith("web:"):
-        return None
-    if not _session_fully_stable_for_history_edit(session, turn_payload):
-        return None
+        return None, None
     from g3ku.runtime.web_ceo_history_edit import compute_edit_fork_gates, legacy_task_created_ats
     from g3ku.runtime.web_ceo_sessions import list_turn_boundary_snapshot_turn_ids
 
     raw_messages = list(messages or [])
-    return compute_edit_fork_gates(
+    fork_gates = compute_edit_fork_gates(
         raw_messages,
         enabled=True,
         task_created_ats=legacy_task_created_ats(agent, key, raw_messages),
         available_boundary_turn_ids=list_turn_boundary_snapshot_turn_ids(key),
     )
+    if not _session_fully_stable_for_history_edit(session, turn_payload):
+        return None, fork_gates
+    return fork_gates, fork_gates
 
 
 def _edit_fork_eligible_turn_ids(
@@ -811,6 +815,7 @@ def _build_ceo_snapshot(
     inflight_turn: dict[str, Any] | None = None,
     session_id: str | None = None,
     edit_fork_gates: dict[int, bool] | None = None,
+    fork_gates: dict[int, bool] | None = None,
 ) -> list[dict[str, Any]]:
     inflight_payload = inflight_turn if isinstance(inflight_turn, dict) else {}
     inflight_status = str(inflight_payload.get("status") or "").strip().lower()
@@ -895,8 +900,11 @@ def _build_ceo_snapshot(
         turn_id = str(raw.get('turn_id') or raw.get('metadata', {}).get('_transcript_turn_id') or '').strip() if isinstance(raw.get('metadata'), dict) else str(raw.get('turn_id') or '').strip()
         if turn_id:
             item['turn_id'] = turn_id
-        if role == 'user' and edit_fork_gates and edit_fork_gates.get(index):
-            item['can_edit_fork'] = True
+        if role == 'user':
+            if edit_fork_gates and edit_fork_gates.get(index):
+                item['can_edit_fork'] = True
+            if fork_gates and fork_gates.get(index):
+                item['can_fork'] = True
         if role == 'assistant' and any(
             str(task_id or '').startswith('task:')
             for task_id in list(metadata.get('task_ids') or [])
@@ -1269,7 +1277,7 @@ async def ceo_websocket(websocket: WebSocket):
     # 编辑/Fork 门槛在同一次卸载内计算（转录行走 + 边界快照目录列举 + 可选任务表兜底）。
     def _compose_ceo_snapshot() -> list[dict[str, Any]]:
         raw_messages = getattr(persisted_session, 'messages', [])
-        gates = _session_edit_fork_gates(
+        edit_gates, fork_gates = _session_edit_fork_gates(
             session,
             session_id,
             raw_messages,
@@ -1281,7 +1289,8 @@ async def ceo_websocket(websocket: WebSocket):
             raw_messages,
             inflight_turn=turn_payload.get("inflight_turn") if isinstance(turn_payload, dict) else None,
             session_id=session_id,
-            edit_fork_gates=gates,
+            edit_fork_gates=edit_gates,
+            fork_gates=fork_gates,
         )
 
     persisted_messages = await run_off_event_loop(_compose_ceo_snapshot)
@@ -1311,8 +1320,8 @@ async def ceo_websocket(websocket: WebSocket):
     async def _push_edit_fork_gates() -> None:
         # 编辑/Fork 门槛原本只随连接时的 snapshot.ceo 下发一次：回合收尾后转录里
         # 才既有本轮 assistant 行（任务派发要收回资格）又已清掉 inflight sidecar（稳定态
-        # 判定要放行），但没有任何通道再算一遍，按钮只能等用户手动刷新。这里在会话
-        # 回到稳定态时按同一套门槛补发一次，前端据此给缓存行打/收 flag。
+        # 判定要放行），但没有任何通道再算一遍，按钮只能等用户手动刷新。这里每个
+        # state_snapshot 都按同一套门槛补发一次，前端据此给缓存行打/收 flag。
         if is_channel_session:
             return
         try:
@@ -1320,10 +1329,8 @@ async def ceo_websocket(websocket: WebSocket):
         except Exception:
             persisted_session = None
         turn_payload = _build_live_turn_payload(session, session_id, persisted_session)
-        if not _session_fully_stable_for_history_edit(session, turn_payload):
-            return
         raw_messages = list(getattr(persisted_session, 'messages', []) or [])
-        gates = await run_off_event_loop(
+        edit_gates, fork_gates = await run_off_event_loop(
             lambda: _session_edit_fork_gates(
                 session,
                 session_id,
@@ -1335,7 +1342,10 @@ async def ceo_websocket(websocket: WebSocket):
         )
         await _push_stream_event(
             'ceo.edit_fork.gates',
-            {'turn_ids': _edit_fork_eligible_turn_ids(raw_messages, gates)},
+            {
+                'turn_ids': _edit_fork_eligible_turn_ids(raw_messages, edit_gates),
+                'fork_turn_ids': _edit_fork_eligible_turn_ids(raw_messages, fork_gates),
+            },
         )
 
     def _current_session_is_running() -> bool:
@@ -1607,7 +1617,9 @@ async def ceo_websocket(websocket: WebSocket):
             status = str(state.get('status') or '').strip().lower()
             if status != 'paused':
                 await _push_turn_patch()
-                await _push_edit_fork_gates()
+            # 门槛帧不跟着 paused 一起跳过：Fork 资格不看运行态，而暂停/等审批恰恰是
+            # 输入被闸门挡住、只剩 Fork 可用的时刻。
+            await _push_edit_fork_gates()
             _publish_ceo_session_patch(
                 agent=agent,
                 transcript_store=transcript_store,

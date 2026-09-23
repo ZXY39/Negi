@@ -4,13 +4,14 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 // 用户消息编辑重发/Fork 的前端契约:
-// - buildCeoUserMessageActionsMarkup:canEditFork + web: 会话才产出按钮行(R1);
+// - buildCeoUserMessageActionsMarkup:两个按钮各吃一个服务端 flag,web: 会话才产出行(R1);
 // - addMsg 用户分支把按钮行渲染进 message-stack(R2);
-// - normalizeCeoSnapshotMessage 保留 can_edit_fork/task_dispatched(R3);
+// - normalizeCeoSnapshotMessage 保留 can_edit_fork/can_fork/task_dispatched(R3);
 // - buildCeoRenderSignature 覆盖两个 flag,权威快照到达必须触发重建(R4);
 // - syncCeoFeedTurnActiveClass:回合进行中给 feed 挂 .ceo-turn-active(R5);
 // - editForkErrorText 映射服务端错误码(R6);
-// - applyCeoEditForkGates:收尾后服务端补发门槛,按钮不等手动刷新(R8)。
+// - applyCeoEditForkGates:收尾后服务端补发门槛,按钮不等手动刷新(R8/R8b);
+// - finalizePausedCeoTurn:暂停收尾把用户行落进快照缓存,门槛帧才有行可 flag(R9)。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
@@ -208,6 +209,7 @@ function loadApp() {
             activeSessionId,
             applyCeoEditForkGates,
             getCeoSessionSnapshotCache,
+            finalizePausedCeoTurn,
         };`,
         context
     );
@@ -224,25 +226,36 @@ function setup() {
     return api;
 }
 
-test("R1 buildCeoUserMessageActionsMarkup 只在 canEditFork + web 会话时产出按钮", () => {
+test("R1 buildCeoUserMessageActionsMarkup 两个按钮各吃一个 flag + web 会话", () => {
     const api = setup();
-    const markup = api.buildCeoUserMessageActionsMarkup({
+    const both = api.buildCeoUserMessageActionsMarkup({
         turnId: "t1",
         canEditFork: true,
+        canFork: true,
         sessionId: "web:ceo-s1",
     });
-    assert.ok(markup.includes('data-ceo-edit-resend="t1"'), markup);
-    assert.ok(markup.includes('data-ceo-fork="t1"'), markup);
-    assert.ok(markup.includes('class="msg-actions"'), markup);
+    assert.ok(both.includes('data-ceo-edit-resend="t1"'), both);
+    assert.ok(both.includes('data-ceo-fork="t1"'), both);
+    assert.ok(both.includes('class="msg-actions"'), both);
 
-    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "t1", canEditFork: false, sessionId: "web:ceo-s1" }), "");
-    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "", canEditFork: true, sessionId: "web:ceo-s1" }), "");
-    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "t1", canEditFork: true, sessionId: "ext:qq:1" }), "");
+    // 只有 Fork 资格：回合在跑/等审批/压缩在途时服务端只发 can_fork。
+    const forkOnly = api.buildCeoUserMessageActionsMarkup({
+        turnId: "t1",
+        canEditFork: false,
+        canFork: true,
+        sessionId: "web:ceo-s1",
+    });
+    assert.ok(forkOnly.includes('data-ceo-fork="t1"'), forkOnly);
+    assert.ok(!forkOnly.includes("data-ceo-edit-resend"), forkOnly);
+
+    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "t1", sessionId: "web:ceo-s1" }), "");
+    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "", canEditFork: true, canFork: true, sessionId: "web:ceo-s1" }), "");
+    assert.equal(api.buildCeoUserMessageActionsMarkup({ turnId: "t1", canEditFork: true, canFork: true, sessionId: "ext:qq:1" }), "");
 });
 
 test("R2 addMsg 用户分支把按钮行渲染进 message-stack", () => {
     const api = setup();
-    api.addMsg("带按钮的消息", "user", { turnId: "t9", canEditFork: true, sessionId: "web:ceo-s1", timestamp: "2026-09-14T10:00:00" });
+    api.addMsg("带按钮的消息", "user", { turnId: "t9", canEditFork: true, canFork: true, sessionId: "web:ceo-s1", timestamp: "2026-09-14T10:00:00" });
     const el = api.U.ceoFeed.children[0];
     assert.ok(el.innerHTML.includes('class="message-stack"'), el.innerHTML);
     assert.ok(el.innerHTML.includes('data-ceo-edit-resend="t9"'), el.innerHTML);
@@ -252,24 +265,27 @@ test("R2 addMsg 用户分支把按钮行渲染进 message-stack", () => {
     const plain = api.U.ceoFeed.children[1];
     assert.ok(!plain.innerHTML.includes("msg-actions"), plain.innerHTML);
 
-    // live 发送路径(不带 flag)不渲染按钮。
-    api.addMsg("live 消息", "user", { turnId: "t10", canEditFork: false, sessionId: "web:ceo-s1" });
+    // live 发送路径(两个 flag 都不带)不渲染按钮。
+    api.addMsg("live 消息", "user", { turnId: "t10", canEditFork: false, canFork: false, sessionId: "web:ceo-s1" });
     assert.ok(!api.U.ceoFeed.children[2].innerHTML.includes("msg-actions"));
 });
 
-test("R3 normalizeCeoSnapshotMessage 保留 can_edit_fork/task_dispatched", () => {
+test("R3 normalizeCeoSnapshotMessage 保留 can_edit_fork/can_fork/task_dispatched", () => {
     const api = setup();
-    const user = api.normalizeCeoSnapshotMessage({ role: "user", content: "u", turn_id: "t1", can_edit_fork: true });
+    const user = api.normalizeCeoSnapshotMessage({ role: "user", content: "u", turn_id: "t1", can_edit_fork: true, can_fork: true });
     assert.equal(user.can_edit_fork, true);
+    assert.equal(user.can_fork, true);
     const userNoFlag = api.normalizeCeoSnapshotMessage({ role: "user", content: "u", turn_id: "t2" });
     assert.equal(userNoFlag.can_edit_fork, undefined);
+    assert.equal(userNoFlag.can_fork, undefined);
     const assistant = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "a", turn_id: "t1", task_dispatched: true });
     assert.equal(assistant.task_dispatched, true);
-    // user 角色不接受 task_dispatched,assistant 角色不接受 can_edit_fork。
+    // user 角色不接受 task_dispatched,assistant 角色不接受两个按钮 flag。
     const userCross = api.normalizeCeoSnapshotMessage({ role: "user", content: "u", task_dispatched: true });
     assert.equal(userCross.task_dispatched, undefined);
-    const assistantCross = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "a", can_edit_fork: true });
+    const assistantCross = api.normalizeCeoSnapshotMessage({ role: "assistant", content: "a", can_edit_fork: true, can_fork: true });
     assert.equal(assistantCross.can_edit_fork, undefined);
+    assert.equal(assistantCross.can_fork, undefined);
 });
 
 test("R4 buildCeoRenderSignature 覆盖编辑/Fork 标志", () => {
@@ -280,6 +296,9 @@ test("R4 buildCeoRenderSignature 覆盖编辑/Fork 标志", () => {
     const signatureFlagged = api.buildCeoRenderSignature(withFlag, null, null);
     assert.ok(signatureBase && signatureFlagged);
     assert.notEqual(signatureBase, signatureFlagged);
+    // can_fork 单独变化也必须触发重建，否则回合在跑时补发的 Fork 资格落不到像素上。
+    const withForkOnly = [{ role: "user", content: "u", turn_id: "t1", can_fork: true }, { role: "assistant", content: "a", turn_id: "t1" }];
+    assert.notEqual(signatureBase, api.buildCeoRenderSignature(withForkOnly, null, null));
 });
 
 test("R4b buildCeoRenderSignature 覆盖 live 回合的阶段轨道增量", () => {
@@ -373,10 +392,12 @@ test("R7 接线静态契约:委托/时序/横幅/HTML 元素", () => {
     const html = fs.readFileSync("g3ku/web/frontend/org_graph.html", "utf8");
     assert.ok(html.includes('id="ceo-edit-resend-banner"'), "org_graph.html 缺少横幅容器");
     assert.ok(APP_CODE.includes('ceoEditResendBanner: document.getElementById("ceo-edit-resend-banner")'), "U 缺少横幅绑定");
-    // CSS:按钮行悬停显隐 + 回合进行中隐藏。
+    // CSS:按钮行悬停显隐 + 回合进行中只隐藏编辑按钮。
     const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
     assert.ok(css.includes(".msg-actions"), "CSS 缺少 .msg-actions");
-    assert.ok(css.includes(".ceo-turn-active .msg-actions"), "CSS 缺少防御型隐藏规则");
+    assert.ok(css.includes(".ceo-turn-active .msg-action-edit"), "CSS 缺少编辑按钮的防御型隐藏规则");
+    // 整行隐藏会把 Fork 一起吃掉（暂停/运行中正是唯一还能 Fork 的时刻）。
+    assert.ok(!css.includes(".ceo-turn-active .msg-actions"), "CSS 仍在回合进行中整行隐藏按钮");
     // 收尾后服务端补发的门槛帧必须有分发。
     assert.ok(
         APP_CODE.includes('payload.type === "ceo.edit_fork.gates"'),
@@ -425,4 +446,88 @@ test("R8 applyCeoEditForkGates 收尾后补发门槛:按钮不等手动刷新", 
     api.applyCeoEditForkGates({ turn_ids: [] });
     assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[0].can_edit_fork, undefined);
     assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("msg-actions"));
+});
+
+test("R8b 两份门槛列表各自独立:回合在跑时只发 Fork 资格", () => {
+    const api = setup();
+    seedRenderedCeoCache(api, [
+        { role: "user", content: "第一条", turn_id: "t1" },
+        { role: "assistant", content: "a1", turn_id: "t1" },
+    ]);
+    const feed = new FeedStub();
+    api.U.ceoFeed = feed;
+
+    // 服务端在非稳定态返回 (edit=None, fork=gates)：编辑资格收回、Fork 资格保留。
+    api.applyCeoEditForkGates({ turn_ids: [], fork_turn_ids: ["t1"] });
+    const cached = api.getCeoSessionSnapshotCache("web:ceo-s1").messages;
+    assert.equal(cached[0].can_edit_fork, undefined);
+    assert.equal(cached[0].can_fork, true);
+    const renderedHtml = feed.children.map((child) => child.innerHTML).join("\n");
+    assert.ok(renderedHtml.includes('data-ceo-fork="t1"'), renderedHtml);
+    assert.ok(!renderedHtml.includes("data-ceo-edit-resend"), renderedHtml);
+
+    api.applyCeoEditForkGates({ turn_ids: [], fork_turn_ids: [] });
+    assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[0].can_fork, undefined);
+    assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("msg-actions"));
+});
+
+function seedPausedTurn(api, turnId) {
+    // 手写 live 回合：finalizePausedCeoTurn 只吃 textEl/flowEl 两个元素句柄。
+    const turn = {
+        source: "user",
+        turnId,
+        textEl: new StubHTMLElement(),
+        flowEl: new StubHTMLElement(),
+        steps: 0,
+        finalized: false,
+        liveStreamText: "",
+    };
+    api.S.ceoPendingTurns = [turn];
+    api.S.ceoSnapshotCache["web:ceo-s1"] = {
+        session_id: "web:ceo-s1",
+        messages: [],
+        inflight_turn: {
+            source: "user",
+            turn_id: turnId,
+            status: "running",
+            user_message: { content: "刚发出去就被暂停", timestamp: "2026-09-14T10:00:00" },
+        },
+        preserved_turn: null,
+    };
+    return turn;
+}
+
+test("R9 暂停收尾把用户行落进快照缓存，补发门槛帧才有行可 flag", () => {
+    const api = setup();
+    api.U.ceoFeed = new FeedStub();
+    seedPausedTurn(api, "t2");
+
+    assert.equal(
+        api.finalizePausedCeoTurn("已暂停", { source: "user", turnId: "t2", landTranscriptRows: true }),
+        true
+    );
+    const messages = api.getCeoSessionSnapshotCache("web:ceo-s1").messages;
+    const pausedRow = messages.find((item) => item.role === "user" && item.turn_id === "t2");
+    assert.ok(pausedRow, "暂停没有 ceo.reply.final，收尾必须自己把用户行按 turn_id 落进缓存");
+
+    // 落进行里之后，同一轮补发的门槛帧才盖得上章——此前正是"刷新才有按钮"的根因。
+    api.applyCeoEditForkGates({ turn_ids: ["t2"], fork_turn_ids: ["t2"] });
+    const flagged = api.getCeoSessionSnapshotCache("web:ceo-s1").messages
+        .find((item) => item.role === "user" && item.turn_id === "t2");
+    assert.equal(flagged.can_fork, true);
+    assert.equal(flagged.can_edit_fork, true);
+});
+
+test("R9b 审批等待造成的暂停不落地转录行（回合还没结束）", () => {
+    const api = setup();
+    api.U.ceoFeed = new FeedStub();
+    seedPausedTurn(api, "t3");
+
+    assert.equal(
+        api.finalizePausedCeoTurn("已暂停", { source: "user", turnId: "t3" }),
+        true
+    );
+    const entry = api.getCeoSessionSnapshotCache("web:ceo-s1");
+    assert.equal((entry.messages || []).length, 0, "未结束的回合不得伪装成转录行");
+    assert.equal(entry.inflight_turn.status, "paused");
 });

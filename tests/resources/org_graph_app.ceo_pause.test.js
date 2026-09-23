@@ -948,17 +948,21 @@ test("running-turn follow-up stays in the queue and does not render a user bubbl
         seenMessages.filter((item) => item.role !== "user"),
         []
     );
-    assert.equal(S.ceoWs.sent.length, 1);
-    assert.deepEqual(S.ceoWs.sent[0], {
-        type: "client.user_message",
-        session_id: "web:test",
-        messages: [{ text: "Queued follow-up", uploads: [] }],
-    });
+    // 默认不并入正在跑的这一轮：不发帧、不打 runtime_sent_at，条目只留在浏览器队列里，
+    // 等本轮最终输出后由 maybeDispatchQueuedCeoFollowUps 起新回合。
+    assert.deepEqual(S.ceoWs.sent, []);
     assert.equal(Array.isArray(S.ceoQueuedFollowUps?.["web:test"]), true);
     assert.equal(S.ceoQueuedFollowUps["web:test"].length, 1);
-    assert.match(String(S.ceoQueuedFollowUps["web:test"][0].runtime_sent_at || ""), /\d{4}-\d{2}-\d{2}T/);
+    assert.equal(String(S.ceoQueuedFollowUps["web:test"][0].runtime_sent_at || ""), "");
     assert.deepEqual(userBubbles, []);
     assert.equal(U.ceoInput.value, "");
+
+    // runtime 只会带着它真正持有的消息回来：先按"立即发送"打过 runtime_sent_at，
+    // 再喂这条 patch（默认排队那一半由 flushCeoQueuedFollowUp 的独立用例覆盖）。
+    S.ceoQueuedFollowUps["web:test"] = S.ceoQueuedFollowUps["web:test"].map((item) => ({
+        ...item,
+        runtime_sent_at: "2026-09-23T15:00:00.000Z",
+    }));
 
     patchCeoInflightTurn({
         source: "user",

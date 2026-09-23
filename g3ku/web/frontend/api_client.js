@@ -447,6 +447,13 @@ class ApiClient {
         });
     }
 
+    static async withdrawCeoQueuedFollowUp(sessionId, payload = {}) {
+        // 撤回一条已被 runtime 受理的待发送补充：内存队列与转录 pending 行一起删。
+        return this._request("POST", `/api/ceo/sessions/${encodeURIComponent(sessionId)}/queued-follow-ups/withdraw`, {
+            body: payload || {},
+        });
+    }
+
     static async getMainRuntimeTaskDefaults() {
         return this.get("/api/main-runtime/settings");
     }

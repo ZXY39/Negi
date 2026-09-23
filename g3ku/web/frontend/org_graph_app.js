@@ -32,6 +32,8 @@ const CEO_SESSION_SNAPSHOT_MESSAGE_LIMIT = 24;
 const CEO_SESSION_SNAPSHOT_TOOL_EVENT_LIMIT = 12;
 // CEO websocket 解析失败后最多强制重连几次（拿到正常快照即清零），避免重连风暴。
 const CEO_WS_PARSE_RESYNC_LIMIT = 3;
+// 快照忙标志的兜底解除时长，见 initCeoWs 的 onopen。
+const CEO_SNAPSHOT_BUSY_GUARD_MS = 10000;
 const CEO_CONTEXT_LOAD_NOTICE_DURATION_MS = 10000;
 // 长按上下文脑图标：按住先静置 200ms 起手，之后才开始计时并显示进度环。
 // 目的是让普通点击（含手抖的短按）完全不出现压缩进度反馈，计时从起手完成的那一刻算满 2 秒。
@@ -2804,10 +2806,16 @@ function consumeRepresentedRuntimeSentCeoFollowUps(sessionId = activeSessionId()
     return setCeoQueuedFollowUps(key, retained);
 }
 
-function sendActiveCeoFollowUpsToRuntime(sessionId = activeSessionId()) {
+function sendActiveCeoFollowUpsToRuntime(sessionId = activeSessionId(), onlyIds = null) {
     const key = String(sessionId || "").trim();
     if (!key) return null;
-    const queued = getCeoQueuedFollowUps(key).filter((item) => !String(item?.runtime_sent_at || "").trim());
+    const targetIds = Array.isArray(onlyIds)
+        ? new Set(onlyIds.map((item) => String(item || "").trim()).filter(Boolean))
+        : null;
+    const queued = getCeoQueuedFollowUps(key).filter((item) => {
+        if (String(item?.runtime_sent_at || "").trim()) return false;
+        return !targetIds || targetIds.has(String(item?.id || "").trim());
+    });
     if (!queued.length) return null;
     const wsOpenState = Number(WebSocket?.OPEN ?? 1);
     if (!S.ceoWs || S.ceoWs.readyState !== wsOpenState) {
@@ -3062,6 +3070,7 @@ function normalizeCeoSnapshotMessage(message = {}) {
         return next;
     }
     if (role === "user" && message?.can_edit_fork === true) next.can_edit_fork = true;
+    if (role === "user" && message?.can_fork === true) next.can_fork = true;
     if (role === "user" && !String(next.content || "").trim() && !attachments.length) return null;
     if (role === "system" && !String(next.content || "").trim()) return null;
     return next;
@@ -4944,27 +4953,30 @@ function renderStructuredChatAttachments(items = [], { sessionId = activeSession
     `;
 }
 
-function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", turnId = "", canEditFork = false } = {}) {
-    return addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork });
+function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", turnId = "", canEditFork = false, canFork = false } = {}) {
+    return addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork, canFork });
 }
 
-function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, sessionId = "" } = {}) {
-    // 用户气泡下方的编辑重发/Fork 按钮行。渲染条件三重防御:
-    // 服务端 can_edit_fork 门槛(任务派发/run 首条/边界快照/稳定态) + web: 会话 + 非只读。
-    // 回合进行中由 feed 级 .ceo-turn-active class 整体隐藏(防御型显示)。
+function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, canFork = false, sessionId = "" } = {}) {
+    // 用户气泡下方的编辑重发/Fork 操作行。两个按钮各吃一个服务端 flag：
+    // can_edit_fork 额外要求会话没有活的执行体（要改源转录），can_fork 只看内容判据
+    // （只读前缀、源会话零变更），所以回合在跑/等审批/压缩在途时只剩 Fork 可点。
+    // 另有 web: 前缀 + 非只读 + feed 级 .ceo-turn-active 隐藏编辑按钮三重防御。
     const key = String(turnId || "").trim();
-    if (!key || canEditFork !== true) return "";
+    if (!key || (canEditFork !== true && canFork !== true)) return "";
     if (!String(sessionId || "").trim().startsWith("web:")) return "";
     if (typeof activeSessionIsReadonly === "function" && activeSessionIsReadonly()) return "";
     const safeTurn = esc(key);
     return `
         <div class="msg-actions">
-            <button type="button" class="msg-action-btn" data-ceo-edit-resend="${safeTurn}" title="编辑重发：发送后该消息及其后所有内容将被清空" aria-label="编辑重发">
+            ${canEditFork === true ? `
+            <button type="button" class="msg-action-btn msg-action-edit" data-ceo-edit-resend="${safeTurn}" title="编辑重发：发送后该消息及其后所有内容将被清空" aria-label="编辑重发">
                 <i data-lucide="pencil"></i><span>编辑</span>
-            </button>
-            <button type="button" class="msg-action-btn" data-ceo-fork="${safeTurn}" title="Fork：把此消息之前的内容复制成新会话，此消息回填输入框" aria-label="Fork 会话">
+            </button>` : ""}
+            ${canFork === true ? `
+            <button type="button" class="msg-action-btn msg-action-fork" data-ceo-fork="${safeTurn}" title="Fork：把此消息之前的内容复制成新会话，此消息回填输入框" aria-label="Fork 会话">
                 <i data-lucide="git-fork"></i><span>Fork</span>
-            </button>
+            </button>` : ""}
         </div>
     `;
 }
@@ -5072,17 +5084,30 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     U.ceoFollowUpQueue.innerHTML = `
         <div class="ceo-follow-up-chip-list" role="list">
             ${items.map((item, index) => {
-                // runtime 已受理的条目不能删：它已经落进队列（重启也还在），撤回它没有对应操作。
-                const trailing = item.accepted_by_runtime
-                    ? `<span class="ceo-follow-up-state">已受理</span>`
-                    : `<button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${esc(String(item.id || ""))}" aria-label="删除待发送补充">
+                const entryId = esc(String(item.id || ""));
+                const actions = [];
+                // 已受理 = 服务端队列里的条目（重启也还在）：不再显示"立即发送"，
+                // 但撤回有对应操作了（服务端把内存队列与转录 pending 行一起删）。
+                if (item.accepted_by_runtime) {
+                    actions.push(`<span class="ceo-follow-up-state">已受理</span>`);
+                } else if (S.ceoTurnActive) {
+                    actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-flush="${entryId}" aria-label="立即并入下一轮">
+                            <i data-lucide="send"></i>
+                        </button>`);
+                }
+                actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="撤回重新编辑">
+                        <i data-lucide="rotate-ccw"></i>
+                    </button>`);
+                if (!item.accepted_by_runtime) {
+                    actions.push(`<button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="丢弃待发送补充">
                             <i data-lucide="x"></i>
-                        </button>`;
+                        </button>`);
+                }
                 return `
                 <div class="ceo-follow-up-chip" role="listitem">
                     <span class="ceo-follow-up-kind">${index + 1}</span>
                     <span class="ceo-follow-up-name">${esc(String(item.text || "").trim() || summarizeUploads(item.uploads || []))}</span>
-                    ${trailing}
+                    ${actions.join("")}
                 </div>
             `;
             }).join("")}
@@ -5090,6 +5115,72 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
     `;
     scheduleCeoComposerUsageRefresh();
     icons();
+}
+
+function findCeoQueuedFollowUpEntry(sessionId, entryId) {
+    const key = String(sessionId || "").trim();
+    const target = String(entryId || "").trim();
+    if (!key || !target) return null;
+    return getMergedCeoQueuedFollowUps(key).find((item) => String(item?.id || "").trim() === target) || null;
+}
+
+// 服务端队列条目的 id 由 normalizeCeoServerQueuedFollowUpList 生成：server:<turn_id>。
+function ceoServerQueuedFollowUpTurnId(entryId) {
+    const raw = String(entryId || "").trim();
+    return raw.startsWith("server:") ? raw.slice("server:".length).trim() : "";
+}
+
+function flushCeoQueuedFollowUp(entryId) {
+    const sessionId = activeSessionId();
+    const item = findCeoQueuedFollowUpEntry(sessionId, entryId);
+    if (!sessionId || !item || item.accepted_by_runtime) return false;
+    const sent = sendActiveCeoFollowUpsToRuntime(sessionId, [String(item.id || "")]);
+    if (!sent) {
+        showToast({ title: "未能并入本轮", text: "连接未就绪，条目仍留在待发送里。", kind: "warn" });
+        return false;
+    }
+    renderQueuedCeoFollowUps(sessionId);
+    return true;
+}
+
+async function withdrawCeoQueuedFollowUp(entryId) {
+    const sessionId = activeSessionId();
+    const item = findCeoQueuedFollowUpEntry(sessionId, entryId);
+    if (!sessionId || !item) return false;
+    const turnId = ceoServerQueuedFollowUpTurnId(item.id);
+    if (item.accepted_by_runtime && turnId) {
+        // 已受理的条目活在服务端（内存队列 + 转录 pending 行），必须先删那边，
+        // 否则下一次 state 帧会把它原样画回来。
+        try {
+            await ApiClient.withdrawCeoQueuedFollowUp(sessionId, { turn_id: turnId });
+        } catch (error) {
+            showToast({
+                title: "撤回失败",
+                text: String(error?.message || "该条补充可能已被本轮接走，无法撤回。"),
+                kind: "error",
+            });
+            return false;
+        }
+        // 服务端撤回会随帧清掉认领的队列；本地这条也顺手丢弃，避免重复画。
+        const serverKey = String(sessionId || "").trim();
+        const remainingServerItems = (Array.isArray(S.ceoServerQueuedFollowUps?.[serverKey]) ? S.ceoServerQueuedFollowUps[serverKey] : [])
+            .filter((raw) => String(raw?.metadata?.["_transcript_turn_id"] || "").trim() !== turnId);
+        S.ceoServerQueuedFollowUps = {
+            ...(S.ceoServerQueuedFollowUps || {}),
+            [serverKey]: remainingServerItems,
+        };
+    } else {
+        removeCeoQueuedFollowUp(sessionId, item.id);
+    }
+    // 回填输入框：与 Fork 一样走草稿通道，附件一起回来，不自动发送。
+    setCeoComposerDraft(sessionId, {
+        text: String(item.text || ""),
+        uploads: normalizeUploadList(item.uploads),
+    });
+    restoreCeoComposerDraftForSession(sessionId);
+    renderQueuedCeoFollowUps(sessionId);
+    syncCeoPrimaryButton();
+    return true;
 }
 
 function syncCeoPrimaryButton() {
@@ -5130,7 +5221,7 @@ function syncCeoPrimaryButton() {
     icons();
 }
 
-function finalizePausedCeoTurn(text = "已暂停", { source = null } = {}) {
+function finalizePausedCeoTurn(text = "已暂停", { source = null, landTranscriptRows = false } = {}) {
     const hasExplicitSource = source !== null && source !== undefined && String(source || "").trim();
     const normalizedSource = hasExplicitSource ? normalizeCeoTurnSource(source) : null;
     const normalizedTurnId = normalizeCeoTurnId(arguments?.[1]?.turnId || "");
@@ -5151,19 +5242,48 @@ function finalizePausedCeoTurn(text = "已暂停", { source = null } = {}) {
         }
         setCeoTurnUsageCollapsed(turn, true);
     }, { scrollMode: "preserve" });
-    patchCeoSessionSnapshotCache(activeSessionId(), (entry) => {
+    const sessionId = activeSessionId();
+    patchCeoSessionSnapshotCache(sessionId, (entry) => {
         const inflightTurn = normalizeCeoSnapshotInflight(entry?.inflight_turn);
         if (!inflightTurn) return entry || {};
         const inflightSource = String(inflightTurn?.source || "").trim().toLowerCase();
         if (normalizedSource && inflightSource && normalizeCeoTurnSource(inflightSource) !== normalizedSource) {
             return entry || {};
         }
+        if (!landTranscriptRows) {
+            return {
+                ...(entry || {}),
+                inflight_turn: {
+                    ...inflightTurn,
+                    status: "paused",
+                },
+            };
+        }
+        // 手动暂停没有 ceo.reply.final，缓存里因此一行都没有，而补发的门槛帧只能给
+        // 转录行打 flag ⇒ 刚暂停那条的编辑/Fork 按钮永远等不到，只能刷新。服务端这一轮
+        // 已归档成转录行并清掉 inflight sidecar，这里按 finalizeCeoTurn 同一套构造补齐，
+        // 让缓存形状与刷新后拿到的那份一致。
+        // lane 的 user_message 不带 turn_id（normalizeCeoSnapshotInflight 只留 content/
+        // timestamp），而门槛帧按 turn_id 匹配，所以行上的 turn_id 由本帧的回合 id 补上。
+        const laneTurnId = normalizedTurnId || String(inflightTurn?.turn_id || "").trim();
+        const laneUserMessages = normalizeCeoSnapshotUserMessages(
+            inflightTurn?.user_messages,
+            inflightTurn?.user_message
+        ).map((item) => (item.turn_id || !laneTurnId ? item : { ...item, turn_id: laneTurnId }));
+        const payload = buildFinalizedCeoTurnPayload(sessionId, {
+            normalizedSource: normalizedSource || inflightSource,
+            normalizedTurnId,
+            finalUserMessages: laneUserMessages,
+            finalTraceContext: turn?.lastExecutionTraceSummary || null,
+            finalCanonicalContext: null,
+            text,
+            meta: turn?.usage ? { usage: turn.usage } : {},
+            completedAt: new Date().toISOString(),
+        });
         return {
             ...(entry || {}),
-            inflight_turn: {
-                ...inflightTurn,
-                status: "paused",
-            },
+            messages: payload.messages,
+            inflight_turn: payload.inflight_turn,
         };
     });
     return true;
@@ -5271,7 +5391,7 @@ function handleCeoControlAck(payload = {}) {
     }
     S.ceoTurnActive = false;
     if (patchCeoSessionRuntimeState(activeSessionId(), false)) renderCeoSessions();
-    finalizePausedCeoTurn("已暂停", { source, turnId });
+    finalizePausedCeoTurn("已暂停", { source, turnId, landTranscriptRows: true });
     syncCeoSessionActions();
     syncCeoPrimaryButton();
     pruneRuntimeSentCeoFollowUps(activeSessionId());
@@ -5499,11 +5619,12 @@ function removePendingCeoUpload(index) {
 }
 
 // ===== 用户消息编辑重发 / Fork 会话 =====
-// 按钮可见性由服务端 can_edit_fork 门槛驱动(任务派发严格判定 / user-run 首条 /
-// 边界快照可用 / 会话完全稳定);前端另有 .ceo-turn-active 防御性隐藏与点击守卫。
+// 按钮可见性由服务端两个独立门槛驱动(任务派发严格判定 / user-run 首条 / 边界快照可用),
+// 其中 can_edit_fork 还要求会话没有活的执行体,can_fork 不要求;前端另有
+// .ceo-turn-active 隐藏编辑按钮与点击守卫。
 
 function syncCeoFeedTurnActiveClass() {
-    // 防御型显示:任何回合进行中(含 heartbeat/cron 内部轮)整体隐藏编辑/Fork 按钮。
+    // 防御型显示:任何回合进行中(含 heartbeat/cron 内部轮)隐藏编辑按钮(Fork 不受影响)。
     if (!U.ceoFeed || !U.ceoFeed.classList) return;
     U.ceoFeed.classList.toggle("ceo-turn-active", !!S.ceoTurnActive);
 }
@@ -5528,29 +5649,36 @@ function applyCeoEditForkGates(payload = {}, sessionId = "") {
     // renderCeoSnapshot 的签名重建，编辑/Fork 按钮就不必等手动刷新才出现。
     // 整份替换语义（不在列表里的行一律收 flag）与 snapshot.ceo 一致：新回合会让
     // 上一轮失去"最近 3 轮"窗口，任务派发会收回整批资格。
+    // 两份列表各自独立：turn_ids 额外吃会话稳定态，fork_turn_ids 只看内容判据。
     const key = String(sessionId || activeSessionId() || "").trim();
     if (!key || key !== String(activeSessionId() || "").trim()) return;
-    const eligibleTurnIds = new Set((Array.isArray(payload?.turn_ids) ? payload.turn_ids : [])
-        .map((item) => String(item || "").trim())
-        .filter(Boolean));
     const entry = getCeoSessionSnapshotCache(key);
     const messages = Array.isArray(entry?.messages) ? entry.messages : [];
     if (!messages.length) return;
-    const claimedTurnIds = new Set();
+    let nextMessages = messages;
     let changed = false;
-    const nextMessages = messages.map((item) => {
-        if (!item || typeof item !== "object") return item;
-        if (String(item.role || "").trim().toLowerCase() !== "user") return item;
-        const turnId = String(item.turn_id || "").trim();
-        // 同一 run 的连续消息共享 turn_id，门槛只属首条行——与按下标编码的服务端一致。
-        const allowed = !!turnId && eligibleTurnIds.has(turnId) && !claimedTurnIds.has(turnId);
-        if (allowed) claimedTurnIds.add(turnId);
-        if (allowed === (item.can_edit_fork === true)) return item;
-        changed = true;
-        const next = { ...item };
-        if (allowed) next.can_edit_fork = true;
-        else delete next.can_edit_fork;
-        return next;
+    [
+        { flag: "can_edit_fork", ids: payload?.turn_ids },
+        { flag: "can_fork", ids: payload?.fork_turn_ids },
+    ].forEach(({ flag, ids }) => {
+        const eligibleTurnIds = new Set((Array.isArray(ids) ? ids : [])
+            .map((item) => String(item || "").trim())
+            .filter(Boolean));
+        const claimedTurnIds = new Set();
+        nextMessages = nextMessages.map((item) => {
+            if (!item || typeof item !== "object") return item;
+            if (String(item.role || "").trim().toLowerCase() !== "user") return item;
+            const turnId = String(item.turn_id || "").trim();
+            // 同一 run 的连续消息共享 turn_id，门槛只属首条行——与按下标编码的服务端一致。
+            const allowed = !!turnId && eligibleTurnIds.has(turnId) && !claimedTurnIds.has(turnId);
+            if (allowed) claimedTurnIds.add(turnId);
+            if (allowed === (item[flag] === true)) return item;
+            changed = true;
+            const next = { ...item };
+            if (allowed) next[flag] = true;
+            else delete next[flag];
+            return next;
+        });
     });
     if (!changed) return;
     const updatedEntry = patchCeoSessionSnapshotCache(key, (current) => ({
@@ -5800,11 +5928,9 @@ async function handleCeoForkClick(turnId) {
     if (!key) return;
     const sessionId = activeSessionId();
     if (!sessionId) return;
-    const busyReason = ceoHistoryEditBusyReason();
-    if (busyReason) {
-        showToast({ title: "当前不可 Fork", text: busyReason, kind: "warn" });
-        return;
-    }
+    // Fork 不吃 ceoHistoryEditBusyReason()：那条守卫的语义是"回合在跑/转录缓存可能陈旧"，
+    // 而 Fork 是只读前缀复制、源会话零变更，服务端 fork 端点也不查运行态。
+    // 只留下 canCreateCeoSessions()（上传/暂停请求/会话目录操作在飞）这一道。
     if (typeof canCreateCeoSessions === "function" && !canCreateCeoSessions()) {
         showToast({ title: "当前不可新建", text: "请先等待当前上传、暂停请求或会话切换操作完成后再 Fork。", kind: "warn" });
         return;
@@ -6058,7 +6184,7 @@ function mutateCeoFeed(mutator, { scrollMode = "preserve" } = {}) {
     return result;
 }
 
-function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false } = {}) {
+function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", usage = null, turnId = "", canEditFork = false, canFork = false } = {}) {
     return mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
@@ -6071,7 +6197,7 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         const metaText = buildCeoMessageMetaText({ role, timestamp, usage });
         const metaMarkup = metaText ? `<div class="msg-meta">${esc(metaText)}</div>` : "";
         const actionsMarkup = role === "user"
-            ? buildCeoUserMessageActionsMarkup({ turnId, canEditFork, sessionId })
+            ? buildCeoUserMessageActionsMarkup({ turnId, canEditFork, canFork, sessionId })
             : "";
         if (role === "user" && (attachmentMarkup || metaMarkup || actionsMarkup)) {
             const textBubble = hasRenderableText(text)
@@ -7107,6 +7233,7 @@ function buildCeoRenderSignature(messages = [], inflightTurn = null, preservedTu
             // 编辑/Fork 按钮标志参与签名:flag 迟到(缓存渲染无 flag、权威快照
             // 有 flag,或任务派发后 flag 收回)必须触发重建。
             item.can_edit_fork === true ? 1 : 0,
+            item.can_fork === true ? 1 : 0,
             item.task_dispatched === true ? 1 : 0,
         ];
     };
@@ -7235,6 +7362,7 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
                 timestamp: String(item?.timestamp || ""),
                 turnId: String(item?.turn_id || ""),
                 canEditFork: item?.can_edit_fork === true,
+                canFork: item?.can_fork === true,
             });
             tagRendered();
             continue;
@@ -11520,6 +11648,16 @@ function initCeoWs() {
         if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
         // 编辑重发的"截断→重连→发送"时序依赖 open 信号(whenCeoWsOpen)。
         settleCeoWsOpenWaiters(true);
+        // S.ceoSessionBusy 的两个解除点都依赖服务端产帧（snapshot.ceo / onclose），
+        // 而这条车道已观测到静默不产出。忙标志挂住会把编辑/Fork 的点击整个吃掉
+        // （ceoHistoryEditBusyReason），表现为"等一会儿才能点"。再挂一个不依赖对端的兜底。
+        window.setTimeout(() => {
+            if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
+            if (!S.ceoSessionBusy) return;
+            S.ceoSessionBusy = false;
+            renderCeoSessions();
+            syncCeoPrimaryButton();
+        }, CEO_SNAPSHOT_BUSY_GUARD_MS);
     };
     S.ceoWs.onmessage = (ev) => {
         if (token !== S.ceoWsToken || S.ceoWs !== socket) return;
@@ -11693,8 +11831,9 @@ function sendCeoMessage() {
     }
     try {
         if (S.ceoTurnActive) {
+            // 默认只留在浏览器队列里，等本轮最终输出后由 maybeDispatchQueuedCeoFollowUps
+            // 按顺序起新回合；要现在就并进正在跑的这一轮，点条目上的"立即发送"。
             enqueueCeoFollowUp(activeSessionId(), { text, uploads });
-            sendActiveCeoFollowUpsToRuntime(activeSessionId());
         } else {
             const sent = sendImmediateCeoMessage({ text, uploads, scrollMode: "bottom" });
             if (!sent) return;
@@ -14670,6 +14809,16 @@ function bind() {
         removePendingCeoUpload(Number(remove.dataset.uploadRemove));
     });
     U.ceoFollowUpQueue?.addEventListener("click", (e) => {
+        const flush = e.target.closest("[data-follow-up-flush]");
+        if (flush) {
+            flushCeoQueuedFollowUp(String(flush.dataset.followUpFlush || ""));
+            return;
+        }
+        const withdraw = e.target.closest("[data-follow-up-withdraw]");
+        if (withdraw) {
+            void withdrawCeoQueuedFollowUp(String(withdraw.dataset.followUpWithdraw || ""));
+            return;
+        }
         const remove = e.target.closest("[data-follow-up-remove]");
         if (!remove) return;
         removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));

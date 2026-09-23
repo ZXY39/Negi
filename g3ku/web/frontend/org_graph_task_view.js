@@ -1624,7 +1624,6 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
         </section>
     `;
     }
-    const toolName = String(step?.tool_name || "tool").trim() || "tool";
     const evidenceSummary = (Array.isArray(step?.evidence) ? step.evidence : [])
         .map((item) => [String(item?.kind || "").trim(), String(item?.path || item?.ref || "").trim(), String(item?.note || "").trim()].filter(Boolean).join(" | "))
         .filter(Boolean)
@@ -1638,7 +1637,6 @@ function renderExecutionRoundToolPanel(round, step, toolIndex) {
         : "";
     return `
         <section class="task-trace-round-panel" data-tool-key="${esc(toolKey)}" hidden>
-            <div class="task-trace-round-panel-title">${esc(toolName)}</div>
             ${[
                 renderTraceField("参数", step?.arguments_text, "无参数", { copyable: true }),
                 renderTraceOutputField(

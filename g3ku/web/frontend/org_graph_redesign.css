@@ -1031,6 +1031,12 @@
     border-color: var(--ui-border-strong);
 }
 
+/* 用量光晕：旧皮肤靠这圈径向渐变把"有读数"画出来，v2 的读数已经在填充层与面板里，
+   留在一个圆角方块按钮里就只是一个和按钮形状不符的圆。 */
+[data-ui-version="v2"] #ceo-context-usage-brain::after {
+    content: none;
+}
+
 /* 用量环是 conic-gradient 仪表，保持圆形，只缩到能塞进 40px 按钮 */
 [data-ui-version="v2"] #ceo-context-usage-brain .ceo-context-usage-brain-ring {
     width: 32px;
@@ -1073,13 +1079,27 @@
 
 [data-ui-version="v2"] .ceo-approval-viewport,
 [data-ui-version="v2"] .model-retry-toast,
-[data-ui-version="v2"] .ceo-follow-up-queue,
 [data-ui-version="v2"] .ceo-upload-list {
     background: var(--ui-bg-elevated);
     border: 1px solid var(--ui-border);
     border-radius: var(--ui-radius-card);
     box-shadow: none;
     color: var(--ui-text-secondary);
+}
+
+/* 待发送队列同理：容器只负责占位，可见的面是每条 chip。
+   容器再画一层底和描边，就会在 chip 的圆角外面露出一圈更方的盒子。 */
+[data-ui-version="v2"] .ceo-follow-up-queue {
+    margin-inline-start: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+[data-ui-version="v2"] .ceo-follow-up-chip {
+    border-radius: var(--ui-radius-control);
+    box-shadow: none;
 }
 
 /* 编辑重发横幅与上下文提示条同理：容器只负责占位，可见的面是里面的 chip。
@@ -1163,12 +1183,23 @@
 [data-ui-version="v2"] .resource-layout,
 [data-ui-version="v2"] .memory-layout,
 [data-ui-version="v2"] .external-api-shell,
-[data-ui-version="v2"] .llm-page-layout,
-[data-ui-version="v2"] .audit-feed-panel {
+[data-ui-version="v2"] .llm-page-layout {
     width: 100%;
     max-width: var(--ui-page-max-width);
     margin-right: auto;
     margin-left: auto;
+    padding-right: var(--ui-space-6);
+    padding-left: var(--ui-space-6);
+}
+
+/* 日志行是终端式单行摘要，横向铺满视口才有意义：页面越宽读到越多正文，
+   缩小浏览器缩放时不再出现两侧空白。左右内缩与顶栏刷新按钮对齐；选择器要带上
+   .resource-detail-panel 才能压过第 11 节面板扁平化那条给的 padding: 0。 */
+[data-ui-version="v2"] .resource-detail-panel.audit-feed-panel {
+    width: 100%;
+    max-width: none;
+    margin-right: 0;
+    margin-left: 0;
     padding-right: var(--ui-space-6);
     padding-left: var(--ui-space-6);
 }
@@ -1455,7 +1486,7 @@
     [data-ui-version="v2"] .memory-layout,
     [data-ui-version="v2"] .external-api-shell,
     [data-ui-version="v2"] .llm-page-layout,
-    [data-ui-version="v2"] .audit-feed-panel {
+    [data-ui-version="v2"] .resource-detail-panel.audit-feed-panel {
         padding-right: var(--ui-space-4);
         padding-left: var(--ui-space-4);
     }
@@ -1837,6 +1868,35 @@
     border-radius: var(--ui-radius-control);
     background: var(--ui-bg-surface);
     box-shadow: none;
+}
+
+/* 展开态这两枚必须同为 40px 见方：旧层给新建键写的是 42px 档，而它的选择器
+   （带 .is-session-panel-expanded）比上面那条 V2 规则更具体，所以是它赢，
+   同一行里 + 就比左边的 « 大一圈。图标也跟 « 对齐：.icon-btn 是 18px，
+   .toolbar-btn 是 16px。 */
+[data-ui-version="v2"] .ceo-shell.is-session-panel-expanded .ceo-new-session-btn {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0;
+}
+
+[data-ui-version="v2"] .ceo-new-session-btn svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* 墨色也跟左边那颗 .icon-btn 对齐（secondary 常态、hover 转主文本色），
+   否则同一个 40px 方框里一个亮一个暗，读起来还是两枚不同档的控件。
+   :not(:disabled) 是必需的：.toolbar-btn:disabled 的灰在更前面，直接覆盖会
+   让禁用态的新建键看起来仍然可用。 */
+[data-ui-version="v2"] .ceo-new-session-btn:not(:disabled) {
+    color: var(--ui-text-secondary);
+}
+
+[data-ui-version="v2"] .ceo-new-session-btn:hover:not(:disabled) {
+    color: var(--ui-text);
 }
 
 /* 折叠栏只有 92px：本地/渠道要和上下两枚按钮同宽同高。工具行的轨道不显式

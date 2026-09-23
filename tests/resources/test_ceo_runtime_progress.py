@@ -6239,6 +6239,17 @@ def test_ceo_websocket_manual_pause_restores_paused_inflight_turn_without_final_
         assert pause_ack["data"]["source"] == "user"
         assert all(item.get("type") != "ceo.reply.final" for item in seen)
 
+        gates_frame, _gates_seen = _recv_until(
+            ws,
+            lambda payload: payload.get("type") == "ceo.edit_fork.gates",
+        )
+        gates_data = dict(gates_frame.get("data") or {})
+        # 暂停收尾必须仍补发门槛帧（它曾被 paused 分支整段跳过），且 Fork 资格不跟着
+        # 稳定态一起收窄：暂停时输入不可用，Fork 是把这条前缀救走的唯一出口。
+        assert isinstance(gates_data.get("turn_ids"), list)
+        assert isinstance(gates_data.get("fork_turn_ids"), list)
+        assert len(gates_data["fork_turn_ids"]) >= len(gates_data["turn_ids"])
+
     holder.manager = SessionRuntimeManager(agent)
 
     with client.websocket_connect(f"/api/ws/ceo?session_id={session_id}") as ws:

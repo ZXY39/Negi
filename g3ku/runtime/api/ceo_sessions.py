@@ -735,6 +735,29 @@ async def fork_ceo_session(session_id: str, payload: dict | None = Body(default=
     }
 
 
+@router.post("/ceo/sessions/{session_id}/queued-follow-ups/withdraw")
+async def withdraw_ceo_queued_follow_up(session_id: str, payload: dict = Body(...)):
+    """撤回一条待发送补充消息：runtime 内存队列与转录 pending 行一起删。
+
+    只处理还没被回合接走的条目。接走后的条目属转录历史，撤回它会删掉一条已回答的
+    用户消息，因此返回 409 让前端给出可读提示。
+    """
+    agent, session_manager, runtime_manager, state_store = _sessions()
+    turn_id = str((payload or {}).get("turn_id") or "").strip()
+    if not turn_id:
+        raise HTTPException(status_code=400, detail="turn_id_required")
+    session = _assert_known_session(session_manager, session_id)
+    runtime_session = _runtime_session(runtime_manager, session.key)
+    if runtime_session is None:
+        # 队列的 durable 那一半在盘上：没有 live 对象时先实例化，再走同一个删除口。
+        runtime_session = _recreate_runtime_session(runtime_manager, session)
+    withdraw = getattr(runtime_session, "withdraw_queued_follow_up", None)
+    if not callable(withdraw) or not bool(withdraw(turn_id)):
+        raise HTTPException(status_code=409, detail="follow_up_not_queued")
+    await _emit_runtime_state_snapshot(runtime_session)
+    return {"ok": True, "session_id": session.key, "turn_id": turn_id}
+
+
 @router.patch("/ceo/sessions/{session_id}")
 async def rename_ceo_session(session_id: str, payload: dict = Body(...)):
     agent, session_manager, runtime_manager, state_store = _sessions()

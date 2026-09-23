@@ -277,6 +277,40 @@ def build_execution_stage_result_block_message(*, node_kind: str, stage_gate: di
     return ''
 
 
+def build_node_plain_text_reply_block_message(*, node_kind: str, stage_gate: dict[str, Any]) -> str:
+    """阶段进行中、预算未耗尽时只回纯文本的打回文案。
+
+    只在「有活动阶段且未 `transition_required`」时非空：没开首阶段与预算耗尽两种状态由
+    `build_execution_stage_result_block_message` 负责，两条道的限次与出口不同。
+    """
+    normalized_kind = str(node_kind or '').strip().lower()
+    if normalized_kind not in _STAGE_BUDGET_NODE_KINDS:
+        return ''
+    if not bool(stage_gate.get('enabled')):
+        return ''
+    if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
+        return ''
+    active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
+    goal = str(active.get('stage_goal') or '').strip() or '（空）'
+    mode = str(active.get('mode') or '').strip() or '自主执行'
+    status = str(active.get('status') or '').strip() or '进行中'
+    used = int(active.get('tool_rounds_used') or 0)
+    budget = int(active.get('tool_round_budget') or 0)
+    work = (
+        '调用普通工具继续核验当前验收标准'
+        if normalized_kind == 'acceptance'
+        else '调用普通工具（必要时派生子节点）继续推进本阶段目标'
+    )
+    return (
+        '本轮只输出了纯文本、没有调用任何工具，运行时不把它当成交付，也不会替你再提交一次。'
+        f'当前阶段【{mode} | {status}】目标：{goal}，普通工具轮次使用 {used}/{budget}。'
+        f'下一步只能是三选一：{work}；'
+        '目标已完成就调用 `submit_final_result` 正式提交（`status`/`answer`/`evidence` 全部写进工具参数）；'
+        '需要新一轮工作就把 `submit_next_stage` 与目标工具同批提交开启下一阶段。'
+        '把计划、进度说明或"接下来我要做什么"写在正文里不构成任何提交。'
+    )
+
+
 TURN_ONLY_SYSTEM_NOTE_PREFIX = "System note for this turn only:"
 
 

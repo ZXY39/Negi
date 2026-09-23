@@ -2918,7 +2918,7 @@ textarea {
 }
 
 /* 用户气泡下方的编辑重发/Fork 操作行:与 .msg-meta 相同的悬停显隐模式。
-   回合进行中(含心跳内部轮)由 feed 级 .ceo-turn-active 整体隐藏(防御型显示)。 */
+   两个按钮分别由服务端 can_edit_fork / can_fork 驱动渲染。 */
 .msg-actions {
     display: flex;
     align-items: center;
@@ -2936,10 +2936,10 @@ textarea {
     pointer-events: auto;
 }
 
-.ceo-turn-active .msg-actions {
-    opacity: 0 !important;
-    transform: translateY(2px) !important;
-    pointer-events: none !important;
+/* 回合进行中(含心跳内部轮)只隐藏编辑:它要改源会话转录。
+   Fork 是只读前缀复制、源会话零变更，运行/暂停/等审批中都留着可点。 */
+.ceo-turn-active .msg-action-edit {
+    display: none;
 }
 
 .msg-action-btn {
@@ -3751,10 +3751,12 @@ textarea {
     display: none !important;
 }
 
-.task-trace-round-panel-title {
-    font-size: 0.88rem;
-    font-weight: 700;
-    color: var(--text-primary);
+/* 工具面板里参数/输出正文不再套第二层描边框:面板本身就是容器,只留标签 + 正文。 */
+.task-trace-round-panel .task-trace-code {
+    min-height: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
 }
 
 .task-trace-field {
@@ -4877,7 +4879,8 @@ textarea {
     overflow-wrap: anywhere;
 }
 
-.ceo-follow-up-remove {
+.ceo-follow-up-remove,
+.ceo-follow-up-action {
     flex: 0 0 auto;
     border: none;
     background: transparent;
@@ -4892,12 +4895,15 @@ textarea {
 }
 
 .ceo-follow-up-remove:hover,
-.ceo-follow-up-remove:focus-visible {
+.ceo-follow-up-action:hover,
+.ceo-follow-up-remove:focus-visible,
+.ceo-follow-up-action:focus-visible {
     color: var(--text-primary);
     background: color-mix(in srgb, var(--border-color) 64%, transparent);
 }
 
-.ceo-follow-up-remove:focus-visible {
+.ceo-follow-up-remove:focus-visible,
+.ceo-follow-up-action:focus-visible {
     outline: 0;
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-primary) 18%, transparent);
 }
