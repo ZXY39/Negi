@@ -1,8 +1,25 @@
 # Fix Plan: `silent` 常驻内置工具取代两个文案静默出口（痕迹进模型上下文 + 压缩豁免 + 前端折叠行），并修好终态 outbox 的滞留重放
 
+> **SHIPPED on `main` as P0 `979b028e` / P1 `ab979af4` / P2 `bd8b8fbd` / P3 `1e71d54e` / P4 `173acb1e` / P5 `c3abf9de` + docs, 2026-09-23.** 未推送；进程未重启＝未生效。
+>
+> Verification as observed: 新增测试文件 `test_task_terminal_outbox_reliability.py` 7、`test_frontdoor_silent_tool_exposure.py` 8、`test_frontdoor_silent_turn.py` 11；改写 `org_graph_app.ceo_silent_turn.test.js` 为 6 条（含一条 HTML 注入防护）。回归面 `test_ceo_runtime_progress` 138、`test_ceo_create_agent_runner` 115、`test_task_web_worker_runtime` 216、`test_task_stall_runtime` 17、`test_heartbeat_task_terminal_root_output` 9、`test_shutdown_graceful_pause_resume` 22、`test_ceo_frontdoor_stage_runtime` 10、`test_ceo_frontdoor_regressions` 32、stage compaction 25 + 20、`test_cron_runtime` 47、external 契约 12/20/28、snapshot/fork flags 6 + 12、smoke 99 passed / 7 skipped / 5 xfailed。`node --test tests/resources/*.test.js` 365 项 364 passed，唯一失败项是 `org_graph_app.ceo_context_compression.test.js` 的 reduced-motion 断言，已在干净 HEAD worktree 上复现同样失败（baseline 329/1）。`ruff` 逐文件与 HEAD 比对：本次触及的源文件零新增 finding，6 个文件因删导入顺带少一条 I001。全量收集 3,383 tests 无收集错误。
+>
+> **尚未验证**：(1) §4.9 / §4.10 的实盘验收需要操作者亲自重启 worker，本会话未重启；(2) 折叠行的视觉与展开交互未在浏览器实测（应用无 `--reload`）。另 §4.6 只覆盖了静默方向：`HEARTBEAT_OK` 字面串如今会作为普通文本投递，这是删除识别的必然结果，实盘该形态单独出现 0 次，故未加兼容分支。
+>
+> Deviations from this plan, with reasons：
+> - **§2.2 低估了一项。** 计划把"工具调用不能当终态"记成代价；实施时确认前门**根本没有**工具即终态的先例（`submit_final_result` 是节点侧；`grep FINAL_RESULT g3ku/runtime/frontdoor/` 零命中），`_graph_execute_tools` 原本唯一出口是 `call_model`。所以 P1/P2 的边界改为"P1 只曝光（schema 因此只冷启动一次）、P2 新增 `execute_tools → finalize` 边 + 识别 + prompt"。代价是 `silent` 在 P1 单独上线时是惰性的——这是刻意的，为了让 P4 之前不存在"两条出口都不认"的窗口。
+> - **§2.1 的 reason 回退**（计划未写）：模型只调工具不给正文时，收尾文本退回 `reason`；否则痕迹行正文为空、折叠行展开是空白。
+> - **§2.3 stage 车道形状**：只用"assistant 行不可删位"，配对结果行按既有成对规则自动保留，约 2 行；计划里设想的"同时排除出 `expired_call_ids`"不需要，少一个真相源。
+> - **§2.4 装配方式**：DOM 节点 + `textContent` 而非拼 `innerHTML`——该文件没有 HTML 转义助手，而 `reason` 是模型自由文本。
+> - **§2.5 之外保留一条纯显示层清洗** `_strip_legacy_silent_sentinel_line`：只剥首/末整行孤立哨兵、不作静默判据。不剥就会把 `[G3KU_SILENT]` 当正文尾巴发给用户，而那正是实盘 11/11 的失败形态。
+> - **§2.6 的 timeout 放宽覆盖三条 outbox 车道**（terminal / stall / distribution_error）而非只 terminal；`worker_status` 与 `summary` 保持 2.0，它们是高频车道。
+> - **`shutdown_resume` 分支取消静默出口**（计划未提）：该分支语义就是"用户请求还没交付"，而旧文案一边禁 `HEARTBEAT_OK` 一边推荐哨兵；哨兵识别删除后留着会把哨兵当正文发给用户。
+> - **§6 第 3 条按计划接受**：`silent` 全轮生效，渠道用户轮被静默时屏幕上没有任何痕迹（网页有折叠行可展）。
+> - **未做**：事件年龄标签；§2.3 提过的"心跳前言重注入静默台账"退路（压缩豁免已足够，避免同一事实两个真相源）；另四张 outbox 表的同款收口。
+
 > Origin: operator request, 2026-09-23 —— 起点是「QQ 会话一启动就自动回一条几小时前的旧任务结果」。取证见 §1.6。追加要求依次为：① 推送与否必须交给模型、不许机器压着等下次输入；② 静默轮必须在转录里留下「模型可见 / 用户不可见」的痕迹；③ 静默出口从文案改成工具调用，且**调用该工具的 turn 不得被阶段压缩裁掉**；④ `G3KU_SILENT` 与 `HEARTBEAT_OK` 两个文案出口全部删除；⑤ 网页侧把静默回合折叠成一行「已静默」，展开可看原文。
 >
-> Status: 设计已定，六个阶段。P0（终态 outbox 可靠性）与其余各项**完全独立**，可先行单独上线。P1→P2→P3 构成静默车道本体，P4 是删除旧出口，P5 是网页渲染，P6 文档。
+> Status: 六个阶段全部落地（见上 SHIPPED 块）。P0 与其余各项完全独立；P1→P2→P3 构成静默车道本体，P4 删除旧出口，P5 网页渲染，P6 文档。
 >
 > Scope: 前门（CEO / `web:` / `ext:` / `china:` 全部会话）的静默判定与痕迹落盘、两条历史压缩车道的豁免、心跳 prompt 的收尾指令、`task_terminal_outbox` 的投递与重放、网页静默回合渲染。心跳事件的**入队与唤醒语义一字不改**（照旧无条件唤醒并交给模型，见 §2.0 的既定裁决）。
 

@@ -760,12 +760,23 @@ If operators report "the image has the new built-in skill/tool but the running p
 
 ## Heartbeat/Cron ACK Contract
 
-The browser handles a dedicated live-only ACK event for silent internal turns.
+The browser handles a dedicated live-only ACK event for internal turns that called `silent`.
 
-- `ceo.internal.ack` is emitted when a heartbeat or cron turn explicitly ends with `HEARTBEAT_OK`; it is not a normal assistant reply and must not reuse `ceo.reply.final` persistence or rendering rules. Non-silent heartbeat/cron assistant replies use the ordinary `message_end -> ceo.reply.final` path.
+- `ceo.internal.ack` is emitted when a heartbeat or cron turn ends by calling the `silent` tool; detection reads the `silent_reply` flag on `message_end`, never the reply text. It is not a normal assistant reply and must not reuse `ceo.reply.final` persistence or rendering rules.
 - The frontend renders the ACK as a distinct non-conversational bubble so operators can see the internal turn was received and intentionally stayed silent.
 - That ACK bubble is ephemeral: it is not appended to the CEO session snapshot `messages` list and disappears on full refresh.
 - Heartbeat `task_terminal` turns do not reach the browser as `ceo.internal.ack`; `ceo.turn.discard` still only closes a specific visible pending turn by `turn_id`.
+- Non-silent heartbeat/cron assistant replies use the ordinary `message_end -> ceo.reply.final` path.
+
+### CEO Turn Silent Reply Contract
+
+A turn that calls `silent` is visible in the session box as one collapsed line, not as an absent turn.
+
+- `ceo.reply.final` carries the real reply text plus `silent_reply: true` and `silent_reason`; the backend no longer blanks the text on its way out. Delivery suppression is the flag's job, and the channel/cron lanes read the same flag, so the web surface and the channel surface stay consistent.
+- The row renders as `已静默 · <reason>` with the original text behind a native `<details>` disclosure. The reason is model-authored free text, so the summary is assembled with DOM nodes and `textContent` — this frontend has no HTML-escaping helper, and string-interpolating it into `innerHTML` would open an injection path.
+- Snapshot rows keep their content for the same reason, so a refresh rebuilds the same collapsed line. Legacy transcript rows carrying the old placeholder text still normalize to a silent row.
+- A silent row with no stage track still renders: the collapsed line is itself displayable content. Dropping track-less silent rows was correct only while the backend also emptied their text.
+- `finalizeCeoTurn` and `renderPersistedCeoAssistantTurn` are the two render entry points; both branch on `silent_reply`, and the stage rail, tool steps, usage line and completion timestamp are finalized exactly as on a delivered turn.
 
 ## CEO Live Tool Reminder Contract
 
