@@ -16,6 +16,7 @@ from g3ku.resources.tool_settings import (
 )
 from g3ku.runtime.frontdoor import CeoFrontDoorRunner
 from main.runtime.chat_backend import ConfigChatBackend
+from main.runtime.internal_tools import SilentTool
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -129,6 +130,10 @@ class RuntimeBootstrapBridge:
                 inline_registry_getter,
             )
         )
+        # 静默收尾信号：无回调、无副作用，仅把「本轮不外发」这件事连同判据落成一次
+        # 可审计的工具调用。注册在此处是为了让 _frontdoor_provider_visible_tool_names
+        # 能解析到它 —— 光靠 callable 名单点名不够，工具必须先存在于 registry。
+        self._loop.tools.register(SilentTool())
 
     def _resource_services(self) -> dict[str, object]:
         return {

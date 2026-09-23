@@ -7,6 +7,10 @@ from typing import Any
 STAGE_TOOL_NAME = "submit_next_stage"
 FINAL_RESULT_TOOL_NAME = "submit_final_result"
 SPAWN_CHILD_NODES_TOOL_NAME = "spawn_child_nodes"
+# 前门专用的收尾控制信号：调它 = 本轮不外发、不推渠道，正文仍留在上下文里。
+# 只在前门的三处硬注入里曝光（见 _ceo_runtime_ops），所以节点侧永远不会看到它，
+# 这里只需要拿到「不占阶段预算、不被阶段闸门拦」两条豁免。
+SILENT_TOOL_NAME = "silent"
 STAGE_TOOL_ROUND_BUDGET_MIN = 1
 STAGE_TOOL_ROUND_BUDGET_MAX = 20
 CONTROL_STAGE_TOOL_NAMES = frozenset({"wait_tool_execution", "stop_tool_execution"})
@@ -26,6 +30,7 @@ DEFAULT_STAGE_GATE_BYPASS_TOOLS = frozenset(
         STAGE_TOOL_NAME,
         FINAL_RESULT_TOOL_NAME,
         SPAWN_CHILD_NODES_TOOL_NAME,
+        SILENT_TOOL_NAME,
         *CONTROL_STAGE_TOOL_NAMES,
         *CONTEXT_LOADER_STAGE_TOOL_NAMES,
     }
@@ -35,6 +40,7 @@ DEFAULT_NON_BUDGET_STAGE_TOOLS = frozenset(
         STAGE_TOOL_NAME,
         FINAL_RESULT_TOOL_NAME,
         SPAWN_CHILD_NODES_TOOL_NAME,
+        SILENT_TOOL_NAME,
         *CONTROL_STAGE_TOOL_NAMES,
         *CONTEXT_LOADER_STAGE_TOOL_NAMES,
     }

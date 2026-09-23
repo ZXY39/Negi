@@ -8,6 +8,7 @@ from g3ku.agent.tools.base import Tool
 from main.models import NodeEvidenceItem, SpawnChildResult, SpawnChildSpec, build_execution_policy_schema
 from main.runtime.stage_budget import (
     FINAL_RESULT_TOOL_NAME,
+    SILENT_TOOL_NAME,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
@@ -172,6 +173,108 @@ class SubmitNextStageTool(Tool):
             bool(final),
         )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
+
+
+class SilentTool(Tool):
+    """本轮对用户保持静默的收尾信号。
+
+    替代旧的 `[G3KU_SILENT]` / `HEARTBEAT_OK` 文案出口：那两条要求模型把整条输出
+    恰好等于哨兵串，实盘 11 次尝试全部写成「正文 + 空行 + 哨兵」而静默失败。调工具
+    把「不外发」变成一个与正文彼此独立的通道，正文照常进上下文，于是同一动作既是
+    静默也是痕迹。参数落进转录行，审计与后续轮次都能读到判据。
+    """
+
+    hide_universal_timeout_parameter = True
+
+    @property
+    def name(self) -> str:
+        return SILENT_TOOL_NAME
+
+    @property
+    def description(self) -> str:
+        return (
+            'End this turn without delivering a reply to the user or the channel. Your accompanying '
+            'text is still kept in the conversation and visible to you on later turns; only delivery '
+            'is suppressed. Call it when a later reply in this session already covered the same '
+            'deliverable — name that covering reply in `superseded_by`. When the deliverable has not '
+            'actually been reported yet, reply normally instead: never use this to dodge a result '
+            'the user is waiting for.'
+        )
+
+    @property
+    def model_description(self) -> str:
+        return 'Stay silent this turn: keep the text for context, deliver nothing.'
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'reason': {
+                    'type': 'string',
+                    'description': (
+                        'Why nothing is being delivered. On a user-initiated turn this doubles as '
+                        'the fallback text, so it must read as something the user could be shown.'
+                    ),
+                    'minLength': 1,
+                },
+                'subject': {
+                    'type': 'string',
+                    'description': 'What is being silenced, usually a task or event id.',
+                },
+                'superseded_by': {
+                    'type': 'string',
+                    'description': 'Id of the later reply that already covered this deliverable.',
+                },
+            },
+            'required': ['reason'],
+        }
+
+    @property
+    def model_parameters(self) -> dict[str, Any]:
+        return {
+            'type': 'object',
+            'properties': {
+                'reason': {
+                    'type': 'string',
+                    'description': 'Why nothing is delivered this turn.',
+                },
+                'subject': {
+                    'type': 'string',
+                    'description': 'Task or event id being silenced.',
+                },
+                'superseded_by': {
+                    'type': 'string',
+                    'description': 'Id of the later reply that already covered it.',
+                },
+            },
+            'required': ['reason'],
+        }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+        if not str((params or {}).get('reason') or '').strip():
+            errors.append('reason must not be empty')
+        return errors
+
+    async def execute(
+        self,
+        reason: str = '',
+        subject: str = '',
+        superseded_by: str = '',
+        **kwargs: Any,
+    ) -> str:
+        _ = kwargs
+        return json.dumps(
+            {
+                'silenced': True,
+                'reason': str(reason or '').strip(),
+                'subject': str(subject or '').strip(),
+                'superseded_by': str(superseded_by or '').strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
 
 class SpawnChildNodesTool(Tool):

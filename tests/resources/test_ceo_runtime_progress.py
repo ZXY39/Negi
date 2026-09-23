@@ -7640,6 +7640,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         "create_async_task",
         "task_list",
         "filesystem_write",
+        "silent",
         "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
@@ -7675,7 +7676,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
     assert len(contract_messages) == 1
     contract_text = str(contract_messages[0]["content"] or "")
     assert (
-        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `submit_next_stage`"
+        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
         in contract_text
     )
     assert "hydrated_tools: `filesystem_write`" in contract_text
@@ -7825,6 +7826,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         "create_async_task",
         "task_list",
         "filesystem_write",
+        "silent",
         "submit_next_stage",
     ]
     assert state_update["frontdoor_selection_debug"]["candidate_tool_names"] == ["web_fetch"]
@@ -7893,7 +7895,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
     assert len(contract_messages) == 1
     contract_text = str(contract_messages[0]["content"] or "")
     assert (
-        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `submit_next_stage`"
+        "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
         in contract_text
     )
     assert "hydrated_tools: `filesystem_write`" in contract_text

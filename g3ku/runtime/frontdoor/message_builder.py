@@ -55,6 +55,7 @@ from g3ku.runtime.web_ceo_sessions import (
     prompt_history_messages,
     transcript_messages,
 )
+from main.runtime.stage_budget import SILENT_TOOL_NAME
 
 DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K = 16
 DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
@@ -198,6 +199,11 @@ class CeoMessageBuilder:
         'model_config': ('model', 'provider', 'config', 'token', 'temperature'),
     }
     RESERVED_INTERNAL_TOOLS: tuple[str, ...] = ("stop_tool_execution",)
+    # 与 RESERVED_INTERNAL_TOOLS 的区别只在一点：这些名字**不要求已经可见**，因此
+    # 不依赖任何 tools/*/resource.yaml 声明族。RESERVED_INTERNAL_TOOLS 只保证
+    # 「已可见时不被语义 top-k 挤掉」，不具备注入能力 —— 照它加是加不进 schema 的。
+    # 目前唯一的成员是静默收尾信号：它是前门的合同的一部分，不是可被选中的能力。
+    ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = (SILENT_TOOL_NAME,)
     FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = CEO_FIXED_BUILTIN_TOOL_NAMES
     ATTACHMENT_REOPEN_TARGET_LIMIT = 8
 
@@ -544,6 +550,15 @@ class CeoMessageBuilder:
         for name in list(hydrated_tool_names or []):
             normalized = str(name or '').strip()
             if not normalized or normalized not in visible_set or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        # 追加而不是前插：既有 callable 顺序保持不变，渲染出的契约只在尾部多一项。
+        # 与 _frontdoor_callable_tool_names_for_state 同一位置口径，避免同一个名字
+        # 在两条路径上落在不同下标。
+        for name in cls.ALWAYS_CALLABLE_INTERNAL_TOOLS:
+            normalized = str(name or '').strip()
+            if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
             ordered.append(normalized)

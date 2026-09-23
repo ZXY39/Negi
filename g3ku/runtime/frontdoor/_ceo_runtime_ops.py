@@ -112,6 +112,7 @@ from main.runtime.send_token_preflight import (
     compute_runtime_send_token_preflight_thresholds,
 )
 from main.runtime.stage_budget import (
+    SILENT_TOOL_NAME,
     STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
     STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
     STAGE_TOOL_NAME,
@@ -3294,6 +3295,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if raw_names is None and isinstance(state, dict):
             raw_names = list(state.get("tool_names") or [])
         normalized = self._normalized_tool_name_state_list(raw_names)
+        # 静默收尾信号恒可调用：它是回合收尾合同的一部分，不随阶段态、曝光层或
+        # 候选池水化而消失。缺了它模型只剩「把正文写短一点」这一种伪静默手段。
+        if SILENT_TOOL_NAME not in normalized:
+            normalized = [*normalized, SILENT_TOOL_NAME]
         if isinstance(state, dict) and (
             bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
         ):
@@ -3323,6 +3328,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if raw_names is None and isinstance(state, dict):
             raw_names = list(state.get("provider_tool_names") or state.get("tool_names") or [])
         normalized = self._normalized_tool_name_state_list(raw_names)
+        # 与 callable 侧同一份常驻合同：provider schema 里也要恒定出现，
+        # 否则模型看见了名字却调不动（或反之，两种都造成静默失败）。
+        if SILENT_TOOL_NAME not in normalized:
+            normalized = [*normalized, SILENT_TOOL_NAME]
         if isinstance(state, dict) and (
             bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
         ):
