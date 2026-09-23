@@ -34,7 +34,7 @@ from main.runtime.node_prompt_contract import (
 )
 import main.service.runtime_service as runtime_service_module
 from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
-from main.runtime.react_loop import _INVALID_FINAL_SUBMISSION_LIMIT, ReActToolLoop
+from main.runtime.react_loop import _INVALID_FINAL_SUBMISSION_LIMIT, _PLAIN_TEXT_REPLY_STRIKE_LIMIT, ReActToolLoop
 from main.runtime.stage_budget import STAGELESS_FREE_PASS_REMINDER
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
 from main.service.runtime_service import MainRuntimeService
@@ -6728,6 +6728,132 @@ async def test_react_loop_auto_wraps_plain_text_final_result_with_tool_evidence(
     assert result.answer == 'Final answer after tool usage'
     assert result.evidence
     assert any('count_tool' in str(item.note or '') for item in result.evidence)
+
+
+def _midstage_stage_gate(*args, **kwargs) -> dict[str, object]:
+    _ = args, kwargs
+    return {
+        'has_active_stage': True,
+        'transition_required': False,
+        'active_stage': {
+            'stage_id': 'stage-mid',
+            'stage_index': 3,
+            'mode': '自主执行',
+            'status': '进行中',
+            'stage_goal': '重建 6 列 CSV 并重新打包 ZIP',
+            'tool_round_budget': 14,
+            'tool_rounds_used': 3,
+            'rounds': [{'round_index': 1, 'tool_names': ['exec'], 'budget_counted': True}],
+        },
+    }
+
+
+def _request_message_text(request: dict[str, object]) -> str:
+    parts: list[str] = []
+    for item in list(request.get('messages') or []):
+        if isinstance(item, dict):
+            parts.append(str(item.get('content') or ''))
+    return '\n'.join(parts)
+
+
+@pytest.mark.asyncio
+async def test_react_loop_bounces_midstage_plain_text_instead_of_auto_wrapping() -> None:
+    requests: list[dict[str, object]] = []
+
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            requests.append(dict(kwargs))
+            self.turn += 1
+            if self.turn <= 2:
+                return LLMResponse(
+                    content='我需要彻底重做。先探明备份文件位置，然后重建 CSV。',
+                    tool_calls=[],
+                    finish_reason='stop',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id='call:real-final',
+                        name='submit_final_result',
+                        arguments={
+                            'status': 'success',
+                            'delivery_status': 'final',
+                            'summary': '真交付',
+                            'answer': 'CSV 与 ZIP 已按备份重建',
+                        },
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    log_service = _FakeLogService()
+    log_service.execution_stage_gate_snapshot = _midstage_stage_gate
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=5)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-midstage-plain-text'),
+        node=SimpleNamespace(node_id='node-midstage-plain-text', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-midstage-plain-text","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-midstage-plain-text', 'node_id': 'node-midstage-plain-text'},
+        max_iterations=5,
+    )
+
+    assert result.summary == '真交付'
+    assert result.answer == 'CSV 与 ZIP 已按备份重建'
+    assert 'auto-wrapped' not in str(result.summary)
+    assert '不把它当成交付' not in _request_message_text(requests[0])
+    assert '不把它当成交付' in _request_message_text(requests[1])
+    assert '不把它当成交付' in _request_message_text(requests[2])
+    assert len(requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_react_loop_pauses_after_three_consecutive_plain_text_replies() -> None:
+    turns: list[int] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            turns.append(1)
+            return LLMResponse(
+                content='接下来我要检查列错位。',
+                tool_calls=[],
+                finish_reason='stop',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    log_service = _FakeLogService()
+    log_service.execution_stage_gate_snapshot = _midstage_stage_gate
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=6)
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-plain-text-strike'),
+        node=SimpleNamespace(node_id='node-plain-text-strike', depth=0, node_kind='execution'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-plain-text-strike","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-plain-text-strike', 'node_id': 'node-plain-text-strike'},
+        max_iterations=6,
+    )
+
+    assert len(turns) == _PLAIN_TEXT_REPLY_STRIKE_LIMIT
+    assert result.status == 'failed'
+    assert result.delivery_status == 'blocked'
+    assert result.summary == 'plain-text reply guard triggered'
+    assert result.failure_disposition == 'pause'
+    assert 'submit_final_result' in str(result.blocking_reason)
 
 
 @pytest.mark.asyncio

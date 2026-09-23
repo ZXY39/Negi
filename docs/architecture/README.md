@@ -74,6 +74,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 用户连续发送消息时助手只看到最后一条、或渠道消息收到重复回复 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
 - 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
+- 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-and-skill-system.md`「阶段门控与 callable 收紧」
 - 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收段：交接通知与回合尾块只给 ref + 有界摘要）
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
 - 想判断任务停滞是不是资源排队造成、或性能条只看得到「现在」而要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（失速事件已自带一行窗口判读，更长的窗口用 `perf_inspect`）
