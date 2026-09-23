@@ -417,6 +417,9 @@
       configId: trim(binding.config_id || binding.llm_config_id),
       modelKey: trim(binding.key),
       providerId: trim(record?.provider_id || ""),
+      nameEditing: false,
+      editName: "",
+      editNameOriginal: "",
       baseUrl: String(draft.base_url || ""),
       apiKey: String(draft.api_key || ""),
       defaultModel: String(draft.default_model || ""),
@@ -991,6 +994,17 @@
         </div>`;
   }
 
+  function renderProviderField(options = {}) {
+    const state = llmState();
+    const fieldClass = options.compact ? "resource-field llm-edit-protocol-field" : "resource-field";
+    const optionsHtml = state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("");
+    return `
+      <label class="${fieldClass}">
+        <span class="resource-field-label">协议</span>
+        <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${optionsHtml}</select>
+      </label>`;
+  }
+
   function renderContextWindowField(editor) {
     return `
         <label class="resource-field">
@@ -1167,10 +1181,7 @@
           <div class="detail-modal-body model-config-body">
             <div class="llm-section">
               <div class="llm-form-grid llm-form-grid--binding-header">
-                <label class="resource-field">
-                  <span class="resource-field-label">协议</span>
-                  <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("")}</select>
-                </label>
+                ${renderProviderField()}
                 ${renderImageMultimodalField({ layout: "header" })}
               </div>
               ${renderConnectionFields()}
@@ -1186,13 +1197,17 @@
         </article>`;
     } else {
       const binding = currentBinding();
+      const nameControl = state.editor.nameEditing ? `
+                <input id="llm-edit-name-input" class="resource-search llm-edit-name-input" type="text" maxlength="40" autocomplete="off" value="${escv(state.editor.editName)}" data-original-value="${escv(state.editor.editNameOriginal)}" placeholder="${escv(state.editor.editNameOriginal)}" aria-label="配置名称" />` : `
+                <h2 id="llm-edit-name-display">${escv(bindingTitle(binding) || state.editor.bindingKey)}</h2>
+                <button type="button" class="icon-btn llm-edit-name-btn" data-llm-action="edit-name" title="编辑配置名称" aria-label="编辑配置名称"><i data-lucide="pencil"></i></button>`;
       U.llmEditorShell.innerHTML = `
         <article class="model-detail-card model-config-shell">
           <div class="detail-modal-header model-config-header">
             <div class="detail-modal-title">
               <div class="llm-edit-name-row">
-                <h2 id="llm-edit-name-display">${escv(bindingTitle(binding) || state.editor.bindingKey)}</h2>
-                <button type="button" class="icon-btn llm-edit-name-btn" data-llm-action="edit-name" title="编辑配置名称" aria-label="编辑配置名称"><i data-lucide="pencil"></i></button>
+                ${nameControl}
+                ${renderProviderField({ compact: true })}
               </div>
               <p class="subtitle">可同时编辑当前配置的 JSON 配置与降级重试策略。</p>
             </div>
@@ -1225,6 +1240,21 @@
         createNameInput.value = state.editor.createName || "";
         createNameInput.addEventListener("input", (event) => {
           state.editor.createName = trim(event.target.value || "");
+        });
+      }
+    } else {
+      const editNameInput = document.getElementById("llm-edit-name-input");
+      if (editNameInput) {
+        editNameInput.addEventListener("input", (event) => {
+          state.editor.editName = String(event.target.value || "");
+        });
+        editNameInput.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            cancelModelNameEdit();
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+          }
         });
       }
     }
@@ -1934,32 +1964,24 @@
   function enterModelNameEditMode() {
     const state = llmState();
     const binding = currentBinding();
-    const display = document.getElementById("llm-edit-name-display");
-    if (!binding || !display) return;
+    if (!binding || state.editor.nameEditing) return;
     const currentDisplay = String(bindingTitle(binding) || state.editor.bindingKey || "").trim();
-    const input = document.createElement("input");
-    input.id = "llm-edit-name-input";
-    input.className = "resource-search llm-edit-name-input";
-    input.type = "text";
-    input.maxLength = 40;
-    input.autocomplete = "off";
-    input.value = currentDisplay;
-    input.dataset.originalValue = currentDisplay;
-    input.placeholder = currentDisplay;
-    display.replaceWith(input);
-    input.focus();
-    input.select();
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        cancelModelNameEdit();
-      } else if (event.key === "Enter") {
-        event.preventDefault();
-      }
-    });
+    state.editor.nameEditing = true;
+    state.editor.editName = currentDisplay;
+    state.editor.editNameOriginal = currentDisplay;
+    renderAll();
+    const input = document.getElementById("llm-edit-name-input");
+    if (input) {
+      input.focus();
+      input.select();
+    }
   }
 
   function cancelModelNameEdit() {
+    const state = llmState();
+    state.editor.nameEditing = false;
+    state.editor.editName = "";
+    state.editor.editNameOriginal = "";
     renderAll();
   }
 

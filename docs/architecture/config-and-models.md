@@ -159,6 +159,8 @@ G3KU 的模型系统分两层：
 - 把 secrets 存进安全 overlay，而不是明文长期放在 record 中
 - 为管理面「添加模型」流程提供 draft 校验、连接探测、最大并发探测与供应商模型目录拉取（管理面契约详见 `web-and-admin.md`「Model Config Page And Admin Contract」）
 
+协议（`protocol_adapter`）是记录级派生字段：它由 `provider_id` 命中的 provider 模板唯一决定，draft 里同名参数不参与解析，因此切换协议等于换模板而不是写一个独立字段；归一化后的值随 runtime target 导出，由 `g3ku/providers/provider_factory.py` 决定构建 Chat Completions 还是 Responses provider。模板同时决定 `parameters` 的字段集合与 `reasoning_effort` 白名单，两者必须保持一致，否则管理面会给出保存得了但校验不过的字段。
+
 ## 7. 运行时是如何拿到模型的
 
 典型路径如下：

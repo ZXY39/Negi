@@ -12122,7 +12122,8 @@ textarea {
 
 .llm-edit-name-row {
     display: inline-flex;
-    align-items: center;
+    align-items: flex-end;
+    flex-wrap: wrap;
     gap: 8px;
 }
 .llm-edit-name-row h2 {
@@ -12134,6 +12135,11 @@ textarea {
 .llm-edit-name-input {
     width: min(320px, 56vw);
     font-size: 0.95rem;
+}
+.llm-edit-protocol-field {
+    flex: 0 0 auto;
+    width: 168px;
+    margin: 0;
 }
 
 .llm-note-wrap {

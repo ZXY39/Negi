@@ -652,6 +652,8 @@ def test_llm_create_editor_renders_new_connection_and_policy_fields() -> None:
     assert "测试连接" in create_html
 
     detail_html = str(result["detailHtml"])
+    assert "协议" in detail_html
+    assert 'id="llm-provider-select"' in detail_html
     assert "llm-binding-default-model" in detail_html
     assert 'value="gpt-4o"' in detail_html
     assert "获取模型列表" in detail_html
