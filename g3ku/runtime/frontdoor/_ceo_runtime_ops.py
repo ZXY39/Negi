@@ -7974,9 +7974,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             for index, payload in indexed_payloads
             if str(payload.get("name") or "").strip() != STAGE_TOOL_NAME
         ]
-        predicted_exhaustion_reminder = self._frontdoor_predicted_exhaustion_reminder(
-            mutable_stage_state,
-            ordinary_payloads=[payload for _, payload in ordinary_items],
+        # 同批含 submit_next_stage 时不预告:那批普通工具记到刚开的新阶段上,按旧阶段预算
+        # 算出的预告既失配、又会贴到 sns 自己的返回值里,成为与账本相反的陈述。
+        predicted_exhaustion_reminder = (
+            ""
+            if stage_items
+            else self._frontdoor_predicted_exhaustion_reminder(
+                mutable_stage_state,
+                ordinary_payloads=[payload for _, payload in ordinary_items],
+            )
         )
         ordered_results: dict[int, dict[str, Any]] = {}
         stage_failed = False

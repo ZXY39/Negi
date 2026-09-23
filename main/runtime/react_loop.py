@@ -3955,10 +3955,19 @@ class ReActToolLoop:
         stage_gate: dict[str, Any],
         tool_calls: list[Any],
     ) -> str:
-        """在合法轮即将打满预算时,给本轮普通工具结果附上"下轮必须同批 sns"的预告提醒。"""
+        """在合法轮即将打满预算时,给本轮普通工具结果附上"下轮必须同批 sns"的预告提醒。
+
+        同批已含 submit_next_stage 时整批不预告：那批普通工具会记到刚开的新阶段上,
+        按旧阶段预算算出的预告既失配、又会贴到 sns 自己的返回值里,成为与账本相反的陈述。
+        """
         if not bool(stage_gate.get('enabled')):
             return ''
         if not bool(stage_gate.get('has_active_stage')) or bool(stage_gate.get('transition_required')):
+            return ''
+        if any(
+            str(getattr(call, 'name', '') or '').strip() == STAGE_TOOL_NAME
+            for call in list(tool_calls or [])
+        ):
             return ''
         active = stage_gate.get('active_stage') if isinstance(stage_gate.get('active_stage'), dict) else {}
         budget = int(active.get('tool_round_budget') or 0)

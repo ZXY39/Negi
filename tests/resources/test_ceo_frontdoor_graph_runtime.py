@@ -837,6 +837,177 @@ async def test_graph_execute_tools_attaches_overflow_round_when_budget_exhausted
     assert "预算已耗尽" in str(tool_messages[0]["content"])
 
 
+def _near_exhaustion_stage_state() -> dict[str, object]:
+    """frontdoor-stage-1: 预算 2 已用 1，本轮就是最后一条合法轮。"""
+    return {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": "work",
+                "preamble_text": "",
+                "tool_round_budget": 2,
+                "tool_rounds_used": 1,
+                "status": "active",
+                "mode": "自主执行",
+                "stage_kind": "normal",
+                "system_generated": False,
+                "completed_stage_summary": "",
+                "final_stage": False,
+                "key_refs": [],
+                "rounds": [
+                    {
+                        "round_id": "frontdoor-stage-1:round-1",
+                        "round_index": 1,
+                        "created_at": "2026-04-15T00:00:00+08:00",
+                        "text": "",
+                        "tool_names": ["echo_tool"],
+                        "tool_call_ids": ["call-prev-1"],
+                        "budget_counted": True,
+                    }
+                ],
+            }
+        ],
+        "pending_orphan_rounds": [],
+    }
+
+
+def _execute_tools_state(
+    *,
+    frontdoor_stage_state: dict[str, object],
+    tool_call_payloads: list[dict[str, object]],
+    parallel_enabled: bool = False,
+    max_parallel_tool_calls: int = 1,
+) -> dict[str, object]:
+    return {
+        "messages": [],
+        "tool_names": ["echo_tool"],
+        "candidate_tool_names": [],
+        "hydrated_tool_names": [],
+        "visible_skill_ids": [],
+        "candidate_skill_ids": [],
+        "rbac_visible_tool_names": ["echo_tool"],
+        "rbac_visible_skill_ids": [],
+        "frontdoor_stage_state": frontdoor_stage_state,
+        "tool_call_payloads": tool_call_payloads,
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "parallel_enabled": parallel_enabled,
+        "max_parallel_tool_calls": max_parallel_tool_calls,
+        "synthetic_tool_calls_used": False,
+        "response_payload": {"content": "", "tool_calls": []},
+        "session_key": "web:shared",
+    }
+
+
+@pytest.mark.asyncio
+async def test_graph_execute_tools_attaches_predicted_exhaustion_reminder_on_last_legal_round(
+    monkeypatch,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    executed: list[str] = []
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, runtime_context, on_progress, tool_call_id
+        executed.append(tool_name)
+        return (
+            {"ok": True},
+            json.dumps({"ok": True}),
+            "success",
+            "2026-04-15T00:00:00+08:00",
+            "2026-04-15T00:00:01+08:00",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
+
+    result = await runner._graph_execute_tools(
+        _execute_tools_state(
+            frontdoor_stage_state=_near_exhaustion_stage_state(),
+            tool_call_payloads=[{"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}}],
+        ),
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    tool_messages = [
+        dict(message)
+        for message in list(result["messages"])
+        if str(message.get("role") or "").strip().lower() == "tool"
+    ]
+    assert executed == ["echo_tool"]
+    content = str(tool_messages[0]["content"])
+    assert "本轮结束后当前阶段预算将耗尽（1/2 将用满）" in content
+    # 预告必须说清单调仍会宽限一次，否则模型读到的是与执行期政策相反的威胁。
+    assert "单独调用仍会宽限执行一次并记为本阶段的溢出轮次" in content
+    assert "否则调用将被拦截" not in content
+    assert result["frontdoor_stage_state"]["stages"][0]["tool_rounds_used"] == 2
+
+
+@pytest.mark.asyncio
+async def test_graph_execute_tools_omits_predicted_exhaustion_reminder_when_stage_tool_in_batch(
+    monkeypatch,
+) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    executed: list[str] = []
+
+    monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"echo_tool": _EchoTool()})
+    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, runtime_context, on_progress, tool_call_id
+        executed.append(tool_name)
+        return (
+            {"ok": True},
+            json.dumps({"ok": True}),
+            "success",
+            "2026-04-15T00:00:00+08:00",
+            "2026-04-15T00:00:01+08:00",
+            1.0,
+        )
+
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _fake_execute_tool_call_with_raw_result)
+
+    result = await runner._graph_execute_tools(
+        _execute_tools_state(
+            frontdoor_stage_state=_near_exhaustion_stage_state(),
+            tool_call_payloads=[
+                {
+                    "id": "call-stage-2",
+                    "name": ceo_runtime_ops.STAGE_TOOL_NAME,
+                    "arguments": {
+                        "stage_goal": "Continue after the budget is filled",
+                        "completed_stage_summary": "stage-1 done",
+                        "tool_round_budget": 3,
+                    },
+                },
+                {"id": "call-echo-1", "name": "echo_tool", "arguments": {"value": "alpha"}},
+            ],
+            parallel_enabled=True,
+            max_parallel_tool_calls=2,
+        ),
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    tool_messages = [
+        dict(message)
+        for message in list(result["messages"])
+        if str(message.get("role") or "").strip().lower() == "tool"
+    ]
+    assert executed == [ceo_runtime_ops.STAGE_TOOL_NAME, "echo_tool"]
+    # 模型已合规同批开阶段：旧阶段算出的预告既失配，又会贴到 submit_next_stage 自己的
+    # 返回值上，与它刚写进结果的 tool_rounds_used=0 直接矛盾。
+    for message in tool_messages:
+        assert "本轮结束后当前阶段预算将耗尽" not in str(message["content"])
+    stage_state = result["frontdoor_stage_state"]
+    assert stage_state["active_stage_id"] == "frontdoor-stage-2"
+    assert stage_state["stages"][-1]["tool_rounds_used"] == 1
+
+
 @pytest.mark.asyncio
 async def test_graph_execute_tools_rejects_extra_submit_next_stage_in_same_batch(
     monkeypatch,

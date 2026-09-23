@@ -376,6 +376,59 @@ async def test_execution_stage_blocks_other_tools_before_stage_and_after_budget(
 
 
 @pytest.mark.asyncio
+async def test_execution_stage_predicted_reminder_skips_batch_that_already_opens_a_stage(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        loop = service._react_loop
+
+        def _gate() -> dict:
+            return loop._execution_stage_gate(
+                task_id=record.task_id,
+                node_id=record.root_node_id,
+                node_kind='execution',
+            )
+
+        def _predicted(tool_calls: list[SimpleNamespace]) -> str:
+            return loop._execution_stage_exhaustion_predicted_reminder(
+                stage_gate=_gate(),
+                tool_calls=tool_calls,
+            )
+
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='整理证据',
+            tool_round_budget=2,
+        )
+        ordinary = [SimpleNamespace(name='ordinary_tool', id='call-1', arguments={})]
+        assert _predicted(ordinary) == ''
+
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call-1', 'name': 'ordinary_tool', 'arguments': {}}],
+            created_at=now_iso(),
+        )
+        predicted = _predicted(ordinary)
+        assert '本轮结束后当前阶段预算将耗尽（1/2 将用满）' in predicted
+        assert '单独调用仍会宽限执行一次并记为本阶段的溢出轮次' in predicted
+
+        # 同批已含 submit_next_stage：那批普通工具记到新阶段上，按旧阶段预算算出的预告失配。
+        assert _predicted([SimpleNamespace(name=STAGE_TOOL_NAME, id='call-2', arguments={}), *ordinary]) == ''
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_execution_stage_runtime_appends_loader_guidance_for_parameter_like_execute_errors(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

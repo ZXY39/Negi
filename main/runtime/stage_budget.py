@@ -58,7 +58,8 @@ STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER = (
 )
 STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE = (
     "[阶段预算] 本轮结束后当前阶段预算将耗尽（{used}/{budget} 将用满）。"
-    "下一轮如需继续调用工具，必须同批提交 submit_next_stage，否则调用将被拦截。"
+    "下一轮如需继续调用工具，须与 submit_next_stage 同批提交；"
+    "单独调用仍会宽限执行一次并记为本阶段的溢出轮次，此后再单独调用才被拦截。"
 )
 
 
