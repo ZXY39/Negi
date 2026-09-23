@@ -1000,7 +1000,7 @@
     const optionsHtml = state.templates.map((item) => `<option value="${escv(item.provider_id)}"${trim(item.provider_id) === trim(state.editor.providerId) ? " selected" : ""}>${escv(item.display_name || item.provider_id)}</option>`).join("");
     return `
       <label class="${fieldClass}">
-        <span class="resource-field-label">协议</span>
+        <span class="resource-field-label llm-provider-label-spacer">协议</span>
         <select id="llm-provider-select" class="resource-search resource-select" data-resource-select-label="LLM provider">${optionsHtml}</select>
       </label>`;
   }

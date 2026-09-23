@@ -6085,6 +6085,10 @@ textarea {
     visibility: hidden;
 }
 
+.llm-provider-label-spacer {
+    visibility: hidden;
+}
+
 .llm-image-checkbox-control {
     width: 100%;
     height: 46px;

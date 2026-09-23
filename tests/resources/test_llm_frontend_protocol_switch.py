@@ -147,6 +147,8 @@ def test_detail_editor_header_renders_protocol_select() -> None:
 
     detail_html = str(result["detailHtml"])
     assert "llm-edit-protocol-field" in detail_html
+    # 协议文字只作为占位标签存在，控件本身自描述
+    assert '<span class="resource-field-label llm-provider-label-spacer">协议</span>' in detail_html
     assert "llm-provider-select" in detail_html
     assert 'value="openai" selected' in detail_html
     assert "OpenAI Responses" in detail_html

@@ -2455,3 +2455,12 @@
     min-height: 34px;
     padding: 0 var(--ui-space-2);
 }
+
+/* 60. 模型配置弹窗内的下拉与「获取模型列表」按钮收到 §10/§59 的 38px 档：
+   §56 把下拉 trigger 全局锁在 40px、按钮档是 36px，而这张表单里的输入框和
+   「是否为图像多模态」勾选块都是 38px，同一行会排出三种高度。 */
+[data-ui-version="v2"] .model-config-shell .resource-select-trigger,
+[data-ui-version="v2"] .model-config-shell .llm-fetch-btn {
+    height: 38px;
+    min-height: 38px;
+}
