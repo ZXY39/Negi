@@ -65,7 +65,7 @@ from main.runtime.acceptance_handshake import (
 )
 from main.runtime.react_loop import ReActToolLoop
 from main.runtime.node_runner import SKIPPED_CHECK_RESULT
-from main.service.runtime_service import MainRuntimeService
+from main.service.runtime_service import _INTERNAL_CALLBACK_TIMEOUT_SECONDS, MainRuntimeService
 from main.service.task_stall_callback import build_task_stall_dedupe_key, normalize_task_stall_payload
 from main.service.task_terminal_callback import (
     TASK_TERMINAL_CALLBACK_TOKEN_ENV,
@@ -1796,7 +1796,7 @@ async def test_worker_task_terminal_outbox_falls_back_to_file_callback_config_wh
 
     async def _post(url: str, *, payload: dict[str, object], headers: dict[str, str], timeout: float):
         attempts.append((str(url), str(headers.get("x-g3ku-internal-token") or "")))
-        assert float(timeout) == 2.0
+        assert float(timeout) == _INTERNAL_CALLBACK_TIMEOUT_SECONDS
         if ":19999/" in str(url):
             raise httpx.ConnectError("stale callback target")
         assert str(url).endswith("/api/internal/task-terminal")

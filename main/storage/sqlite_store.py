@@ -1976,10 +1976,12 @@ class SQLiteTaskStore:
         return self._task_terminal_outbox_row(row) if row else None
 
     def list_pending_task_terminal_outbox(self, *, limit: int = 200) -> list[dict[str, object]]:
+        # 只取 'pending'：'abandoned' 是投递上限耗尽后的留痕终态，不得被常驻补投
+        # 循环无限撞（2026-09-23 task:543e0f15d798 滞留 1h39m 的形状）。
         rows = self._fetchall(
             'SELECT dedupe_key, task_id, session_id, delivery_state, created_at, updated_at, delivered_at, attempts, last_attempt_at, last_error, accepted, rejected_reason, payload_json '
-            'FROM task_terminal_outbox WHERE delivery_state != ? ORDER BY created_at ASC LIMIT ?',
-            ('delivered', max(1, int(limit or 200))),
+            "FROM task_terminal_outbox WHERE delivery_state = ? ORDER BY created_at ASC LIMIT ?",
+            ('pending', max(1, int(limit or 200))),
         )
         return [self._task_terminal_outbox_row(row) for row in rows]
 
@@ -2019,21 +2021,35 @@ class SQLiteTaskStore:
 
         self._run_write(operation)
 
-    def mark_task_terminal_outbox_attempt(self, dedupe_key: str, *, attempted_at: str, error_text: str) -> None:
+    def mark_task_terminal_outbox_attempt(
+        self,
+        dedupe_key: str,
+        *,
+        attempted_at: str,
+        error_text: str,
+        attempt_limit: int = 0,
+    ) -> None:
+        """记一次失败投递；``attempt_limit>0`` 且累计次数达上限时落 'abandoned'。
+
+        'abandoned' 是留痕终态而非删除：attempts / last_error 全部保留，供
+        「重启后才自动回复旧结果」这类事故反查是哪一行、卡了多久、错在哪。
+        """
         key = str(dedupe_key or '').strip()
         if not key:
             return
+        limit = max(0, int(attempt_limit or 0))
         def operation(conn: sqlite3.Connection) -> None:
             row = conn.execute('SELECT attempts, delivery_state FROM task_terminal_outbox WHERE dedupe_key = ?', (key,)).fetchone()
             if row is None:
                 return
             delivery_state = str(row['delivery_state'] or '').strip() or 'pending'
-            if delivery_state == 'delivered':
+            if delivery_state in {'delivered', 'abandoned'}:
                 return
             attempts = int(row['attempts'] or 0) + 1
+            next_state = 'abandoned' if limit and attempts >= limit else 'pending'
             conn.execute(
                 'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, attempts = ?, last_attempt_at = ?, last_error = ? WHERE dedupe_key = ?',
-                ('pending', attempted_at, attempts, attempted_at, str(error_text or ''), key),
+                (next_state, attempted_at, attempts, attempted_at, str(error_text or ''), key),
             )
         self._run_write(operation)
 
@@ -2041,9 +2057,11 @@ class SQLiteTaskStore:
         key = str(dedupe_key or '').strip()
         if not key:
             return
+        # last_error 不再清空：投递最终成功但曾反复失败，正是需要留下的形状
+        # （2026-09-23 取证时 last_error 已被清成空串，拿不到原始错误）。
         self._execute_write(
-            'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, last_error = ?, accepted = ?, rejected_reason = ? WHERE dedupe_key = ?',
-            ('delivered', delivered_at, delivered_at, '', 1, '', key),
+            'UPDATE task_terminal_outbox SET delivery_state = ?, updated_at = ?, delivered_at = ?, accepted = ?, rejected_reason = ? WHERE dedupe_key = ?',
+            ('delivered', delivered_at, delivered_at, 1, '', key),
         )
 
     def put_task_stall_outbox(

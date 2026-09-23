@@ -176,6 +176,14 @@ _WORKER_STATUS_ACTIVE_TASK_STALE_AFTER_SECONDS = 60.0
 _WORKER_STATUS_STARTING_GRACE_SECONDS = 10.0
 _WORKER_STATUS_CALLBACK_RETRY_DELAYS = [0.0, 0.5, 2.0, 5.0]
 _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS = 2.0
+# 终态/失速/分发错误三条 outbox 车道共用：2.0s 在 web 侧跑模型探测或抢
+# runtime.sqlite3 写锁时必然超时，而超时会让事件一路滞留到下次进程重启才补投
+# （2026-09-23 task:543e0f15d798 滞留 1h39m、task:7e2a270eec34 滞留 10h16m）。
+_INTERNAL_CALLBACK_TIMEOUT_SECONDS = 5.0
+# 累计投递上限：达到即落 'abandoned' 留痕，避免常驻补投循环无限撞。
+# 一次梯子 4 发，10 次 ≈ 2.5 轮，足够跨过一次短暂的 web 重启。
+_TASK_TERMINAL_OUTBOX_ATTEMPT_LIMIT = 10
+_TASK_TERMINAL_DELIVERY_MAX_INFLIGHT = 8
 _WORKER_RUNTIME_REFRESH_TIMEOUT_SECONDS = 5.0
 _WORKER_RUNTIME_REFRESH_POLL_SECONDS = 0.1
 _WORKER_LEASE_ROLE = 'task_worker'
@@ -4825,7 +4833,7 @@ class MainRuntimeService:
                         callback_url,
                         payload=payload,
                         headers=headers,
-                        timeout=2.0,
+                        timeout=_INTERNAL_CALLBACK_TIMEOUT_SECONDS,
                     )
                     if 200 <= int(response.status_code or 0) < 300:
                         self.store.mark_task_stall_outbox_delivered(dedupe_key, delivered_at=now_iso())
@@ -4924,7 +4932,7 @@ class MainRuntimeService:
                         callback_url,
                         payload=payload,
                         headers=headers,
-                        timeout=2.0,
+                        timeout=_INTERNAL_CALLBACK_TIMEOUT_SECONDS,
                     )
                     if 200 <= int(response.status_code or 0) < 300:
                         self.store.mark_task_distribution_error_outbox_delivered(dedupe_key, delivered_at=now_iso())
@@ -4960,6 +4968,10 @@ class MainRuntimeService:
         current = self._task_terminal_delivery_tasks.get(key)
         if current is not None and not current.done():
             return
+        # 常驻补投接管后，web 长时间不可达会让 pending 行全部长挂；用在途上限把
+        # 重启风暴压成多轮慢补，而不是一次涌出上百个挂起 task。
+        if len(self._task_terminal_delivery_tasks) >= _TASK_TERMINAL_DELIVERY_MAX_INFLIGHT:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -4981,7 +4993,7 @@ class MainRuntimeService:
             entry = self.store.get_task_terminal_outbox(dedupe_key)
             if not entry:
                 return
-            if str(entry.get('delivery_state') or '').strip().lower() == 'delivered':
+            if str(entry.get('delivery_state') or '').strip().lower() in {'delivered', 'abandoned'}:
                 return
             payload = dict(entry.get('payload') or {})
             workspace = Path.cwd()
@@ -4991,6 +5003,7 @@ class MainRuntimeService:
                     dedupe_key,
                     attempted_at=now_iso(),
                     error_text='task_terminal_callback_url_unavailable',
+                    attempt_limit=_TASK_TERMINAL_OUTBOX_ATTEMPT_LIMIT,
                 )
                 return
             error_text = 'task_terminal_callback_failed'
@@ -5001,7 +5014,7 @@ class MainRuntimeService:
                         callback_url,
                         payload=payload,
                         headers=headers,
-                        timeout=2.0,
+                        timeout=_INTERNAL_CALLBACK_TIMEOUT_SECONDS,
                     )
                     if 200 <= int(response.status_code or 0) < 300:
                         self.store.mark_task_terminal_outbox_delivered(dedupe_key, delivered_at=now_iso())
@@ -5020,6 +5033,7 @@ class MainRuntimeService:
                 dedupe_key,
                 attempted_at=now_iso(),
                 error_text=error_text,
+                attempt_limit=_TASK_TERMINAL_OUTBOX_ATTEMPT_LIMIT,
             )
 
     @staticmethod
@@ -7329,15 +7343,26 @@ class MainRuntimeService:
         分发驱动器与释放路径都是子树屏障的唯一解除者，任何一次半路退出都会把任务留成
         「无声 in_progress」；这里保证那种形态最多存活一个扫描周期。必须在事件循环线程
         调用（ensure 依赖 get_running_loop，释放要 resume 进程内 entry）。
+
+        同一次扫描顺带补投 pending 的终态 outbox 行：在接入这条节拍之前，滞留的终态行
+        只有进程启动时才被重放（`_schedule_pending_task_terminal_callbacks` 的唯一调用点
+        在 startup），一次投递失败就是把结果压到下次重启 —— 2026-09-23 实盘两条分别压了
+        1h39m 与 10h16m，重启后作为陈旧事件唤醒会话、自动向用户回一条考古汇报。
         """
         while True:
+            await asyncio.sleep(60.0)
             try:
-                await asyncio.sleep(60.0)
                 await self.task_actor_service.reconcile_distribution_drivers()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                continue
+                pass
+            try:
+                self._schedule_pending_task_terminal_callbacks()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
 
     async def _run_detail_retention_if_due(self) -> None:
         """P3：终态任务大行裁剪（默认停用：detail_retention_days<=0 直接返回；
