@@ -12,6 +12,12 @@ STAGE_COMPACT_PREFIX = "[G3KU_STAGE_COMPACT_V1]"
 STAGE_EXTERNALIZED_PREFIX = "[G3KU_STAGE_EXTERNALIZED_V1]"
 STAGE_RAW_PREFIX = "[G3KU_STAGE_RAW_V1]"
 
+# 静默收尾工具名，对齐 main/runtime/stage_budget.py 的 SILENT_TOOL_NAME；本模块不成文
+# 地不 import main.*（同下方 DEFAULT_STAGE_MODE 的处理）。含这个调用的 assistant 行必须
+# 活过阶段过期压缩 —— 它那行的全部用途就是让后续轮次看见"上次对哪个任务选了沉默"，
+# 被裁掉等于这条判据从未存在过（实盘：裸 tool_call 行在两条压缩车道下 94% 会消失）。
+SILENT_TRACE_TOOL_NAME = "silent"
+
 # 阶段模式的默认值（对齐 main/models.py 的 StageMode 默认 "自主执行"）。块渲染时
 # 等于默认值就不写进 payload——阶段块每轮全量重发，常量字段的重复是纯骨架开销。
 DEFAULT_STAGE_MODE = "自主执行"
@@ -605,7 +611,12 @@ def compact_stage_prompt_messages_in_place(
                 call_id = extract_call_id((tool_call or {}).get("id"))
                 function = (tool_call or {}).get("function") or {}
                 tool_name = str(function.get("name") or (tool_call or {}).get("name") or "").strip()
-                if tool_name == normalized_stage_tool:
+                if tool_name == SILENT_TRACE_TOOL_NAME:
+                    # 钉住整行：静默痕迹不参与阶段过期，无论它的 call_id 是否已进
+                    # expired_call_ids。配对的 tool 结果行由下方成对清理按 remove_flags
+                    # 决定，本行不删 ⇒ 结果行也不会被单独删，不产生孤儿。
+                    removable_all = False
+                elif tool_name == normalized_stage_tool:
                     if submit_remove.get(index):
                         expired_any = True
                         created_index = submit_created_stage_index.get(index)

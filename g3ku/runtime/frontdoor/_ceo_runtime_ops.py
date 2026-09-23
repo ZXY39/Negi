@@ -2158,6 +2158,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
         older_history_messages = [dict(item) for item in normalized_body[:-recent_tail_count]]
         recent_tail = [dict(item) for item in normalized_body[-recent_tail_count:]]
+        # 静默痕迹先摘出待压缩区间，压缩完成后原样回插：这条行的全部意义在于
+        # "后续轮次看得见上次选了沉默"，被摘要吞掉等于这条判据从未存在过。
+        older_history_messages, preserved_silent_groups = self._lift_silent_trace_groups(
+            older_history_messages
+        )
         # 防御：可压缩历史末尾若残留「assistant 声明工具调用但结果缺失」的悬空组
         # （正常对齐后不应出现，续跑种子/异常状态可能带入），从压缩请求里丢弃，
         # 避免 provider 拒绝请求；计数仅入诊断。
@@ -2342,7 +2347,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     f"{compressed_text}"
                 ).strip(),
             }
-            rewritten_messages = [*system_prefix, compacted_block, *recent_tail, *contract_messages]
+            # 摘出的静默痕迹回插在摘要块之后、recent_tail 之前：它们比尾部更早，
+            # 放这个位置保持时间顺序单调，不会在摘要与近况之间造出时序空洞。
+            rewritten_messages = [
+                *system_prefix,
+                compacted_block,
+                *preserved_silent_groups,
+                *recent_tail,
+                *contract_messages,
+            ]
             rewritten_tokens = self._estimate_frontdoor_send_total_tokens(
                 provider_request_body=self._build_frontdoor_provider_request_body_preview(
                     request_messages=rewritten_messages,
@@ -2396,6 +2409,46 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     finish_generation(generation_id)
                 except Exception:
                     pass
+
+    @classmethod
+    def _lift_silent_trace_groups(
+        cls,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """把 `silent` 痕迹组（assistant 行 + 它声明的 tool 结果行）从待压缩区间摘出来。
+
+        token 压缩是位置型的 —— `older_history_messages` 整段换成一条摘要块，白名单
+        对它无效，所以只能摘出再回插。组必须整体搬：只搬 assistant 行会留下没有声明方
+        的 tool 结果，provider 直接拒；只搬 tool 行则反过来出现悬空声明。
+        返回 (剩余消息, 摘出的组)，两侧都保持原相对顺序。
+        """
+        records = [dict(item) for item in list(messages or []) if isinstance(item, dict)]
+        preserved_indexes: set[int] = set()
+        preserved_call_ids: set[str] = set()
+        for index, item in enumerate(records):
+            if str(item.get("role") or "").strip().lower() != "assistant":
+                continue
+            call_ids = {
+                extract_call_id((call or {}).get("id"))
+                for call in list(item.get("tool_calls") or [])
+                if str(
+                    ((call or {}).get("function") or {}).get("name") or (call or {}).get("name") or ""
+                ).strip()
+                == SILENT_TOOL_NAME
+            }
+            call_ids.discard("")
+            if not call_ids:
+                continue
+            preserved_indexes.add(index)
+            preserved_call_ids |= call_ids
+        for index, item in enumerate(records):
+            if index in preserved_indexes or str(item.get("role") or "").strip().lower() != "tool":
+                continue
+            if extract_call_id(item.get("tool_call_id")) in preserved_call_ids:
+                preserved_indexes.add(index)
+        remaining = [item for index, item in enumerate(records) if index not in preserved_indexes]
+        preserved = [item for index, item in enumerate(records) if index in preserved_indexes]
+        return remaining, preserved
 
     @classmethod
     def _drop_dangling_trailing_tool_call_groups(

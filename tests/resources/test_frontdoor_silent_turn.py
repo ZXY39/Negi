@@ -24,6 +24,7 @@ import pytest
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
+from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from g3ku.runtime.session_agent import RuntimeAgentSession
 from g3ku.runtime.web_ceo_sessions import is_prompt_visible_message, is_ui_visible_message
@@ -230,3 +231,109 @@ def test_tool_silent_trace_row_is_visible_to_model_and_hidden_from_delivery() ->
     # 投递侧不看转录，只看 message_end 上的 silent_reply flag（见 heartbeat :1783 与
     # external_events），所以 ui_visible=True 不等于会外发。
     assert is_ui_visible_message(tool_trace) is True
+
+
+# ---------- P3：痕迹必须活过两条压缩车道（实盘裸 tool_call 行存活率仅 6%） ----------
+
+
+def _assistant_with_calls(call_id: str, name: str, *, content: str = "") -> dict:
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}],
+    }
+
+
+def _stage(index: int, *, tool_call_ids: list[str] | None = None) -> dict:
+    stage = {
+        "stage_id": f"frontdoor-stage-{index}",
+        "stage_index": index,
+        "stage_goal": f"目标 {index}",
+        "status": "completed",
+        "stage_kind": "normal",
+        "mode": "自主执行",
+        "completed_stage_summary": f"结论 {index}",
+        "created_at": f"2026-09-20T0{index}:00:00+08:00",
+        "finished_at": f"2026-09-20T0{index}:00:30+08:00",
+        "key_refs": [],
+        "rounds": [],
+    }
+    if tool_call_ids:
+        stage["rounds"] = [{"round_index": 1, "tool_call_ids": list(tool_call_ids), "tools": []}]
+    return stage
+
+
+def test_stage_compaction_keeps_the_silent_row_it_would_otherwise_expire() -> None:
+    """同一个已过期阶段里的两行：普通工具行照删，silent 行必须留下。
+
+    只留 assistant 行就够 —— 配对的 tool 结果行按 remove_flags 成对处理，父行不删
+    则结果行也不会被单独删，不产生 provider 孤儿。
+    """
+    from g3ku.runtime.stage_prompt_compaction import compact_stage_prompt_messages_in_place
+
+    ledger = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            _stage(1, tool_call_ids=["call-exec", "call-silent"]),
+            _stage(2),
+            _stage(3),
+            _stage(4),
+        ],
+    }
+    messages = [
+        {"role": "system", "content": "基础提示"},
+        {"role": "user", "content": "最早的问题"},
+        _assistant_with_calls("call-exec", "exec", content="我看一下"),
+        {"role": "tool", "tool_call_id": "call-exec", "content": "ok"},
+        _assistant_with_calls("call-silent", SILENT_TOOL_NAME, content="这份结果已被 17:49 那轮覆盖。"),
+        {"role": "tool", "tool_call_id": "call-silent", "content": '{"silenced": true}'},
+        {"role": "user", "content": "最新问题"},
+        {"role": "assistant", "content": "最新回答"},
+    ]
+    parts = compact_stage_prompt_messages_in_place(messages, stage_state=ledger, keep_latest_completed_stages=3)
+    body = [*parts["prefix"], *parts["rewritten"]]
+    surviving = [str((item.get("tool_calls") or [{}])[0].get("id")) for item in body if item.get("tool_calls")]
+
+    assert "call-exec" not in surviving, "普通工具行本该随过期阶段一起删"
+    assert "call-silent" in surviving, "静默痕迹被阶段压缩裁掉了"
+    assert [item for item in body if item.get("role") == "tool" and item.get("tool_call_id") == "call-exec"] == []
+    assert [item for item in body if item.get("tool_call_id") == "call-silent"] != []
+
+
+def test_token_lane_lift_moves_the_group_whole_and_leaves_no_orphans() -> None:
+    remaining, preserved = ceo_runtime_ops.CeoFrontDoorRuntimeOps._lift_silent_trace_groups(
+        [
+            _assistant_with_calls("call-a", "exec"),
+            {"role": "tool", "tool_call_id": "call-a", "content": "ok"},
+            _assistant_with_calls("call-s", SILENT_TOOL_NAME, content="痕迹正文"),
+            {"role": "tool", "tool_call_id": "call-s", "content": '{"silenced": true}'},
+            {"role": "user", "content": "下一条"},
+        ]
+    )
+    assert [item.get("role") for item in preserved] == ["assistant", "tool"]
+    assert [item.get("role") for item in remaining] == ["assistant", "tool", "user"]
+    declared = {call.get("id") for item in remaining if item.get("tool_calls") for call in item["tool_calls"]}
+    answered = {item.get("tool_call_id") for item in remaining if item.get("role") == "tool"}
+    assert declared == answered == {"call-a"}, "摘组必须整组搬，两侧都不能留孤儿"
+
+
+def test_token_lane_lift_is_a_noop_without_silent() -> None:
+    messages = [
+        _assistant_with_calls("call-a", "exec"),
+        {"role": "tool", "tool_call_id": "call-a", "content": "ok"},
+    ]
+    remaining, preserved = ceo_runtime_ops.CeoFrontDoorRuntimeOps._lift_silent_trace_groups(messages)
+    assert preserved == []
+    assert [item.get("role") for item in remaining] == ["assistant", "tool"]
+
+
+def test_token_lane_lift_tolerates_composite_call_ids() -> None:
+    """id 可能是 `call_x|resp_y` 形态（responses 车道），两侧归一化才配得上对。"""
+    messages = [
+        _assistant_with_calls("call-s|fc_resp_1", SILENT_TOOL_NAME, content="痕迹正文"),
+        {"role": "tool", "tool_call_id": "call-s", "content": '{"silenced": true}'},
+    ]
+    remaining, preserved = ceo_runtime_ops.CeoFrontDoorRuntimeOps._lift_silent_trace_groups(messages)
+    assert len(preserved) == 2
+    assert remaining == []
