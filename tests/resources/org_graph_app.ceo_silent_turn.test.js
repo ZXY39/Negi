@@ -237,7 +237,6 @@ function makeTurn({ turnId = "", source = "user" } = {}) {
         usageEl: new StubHTMLElement(),
         reminderEl: new StubHTMLElement(),
         silentLineEl: null,
-        silentReasonEl: null,
         steps: 0,
         hasError: false,
         finalized: false,
@@ -327,9 +326,9 @@ const SILENT_TEXT = "这份 CSV 的链接已在 17:49 那轮汇报过了。";
 const SILENT_REASON = "已被 task:9771d6c5469d 覆盖";
 const SILENT_AT = "2026-09-23T23:55:11";
 
-// 静默回合的呈现合同（2026-09-24 改版）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头，
-// 默认折叠；点开露出正文、阶段轨道与工具步骤，并在气泡底部常驻一行静默原因。
-// 旧的 <details> 折叠盒（描边框 + summary 标记）已去掉。
+// 静默回合的呈现合同（2026-09-24 两次改版后）：整条响应折成一行「静默消息 HH:MM:SS」+
+// 下箭头，默认折叠且**这一行在气泡外面**（折叠时看不到任何气泡壳）；点开露出正文、阶段
+// 轨道与工具步骤。不再单独渲染静默原因行 —— 工具静默时正文本身就是 reason，补一行会重复。
 // 折叠行与原因行都用 DOM 节点 + textContent 装配（本文件没有 HTML 转义助手，
 // 拼进 innerHTML 等于开注入面），而桩的 appendChild 只记 children、不序列化 innerHTML，
 // 所以断言走结构遍历而不是字符串比对。
@@ -353,9 +352,8 @@ function labelOf(turn) {
     return line && line.children[0] ? String(line.children[0].textContent || "") : "";
 }
 
-function reasonOf(turn) {
-    const node = findByClass(turn.el, "ceo-silent-reason");
-    return node ? String(node.textContent || "") : "";
+function reasonNodes(turn) {
+    return findAllByClass(turn.el, "ceo-silent-reason");
 }
 
 function findAllByClass(root, className) {
@@ -399,9 +397,9 @@ test("live 静默收尾折成一行「静默消息 + 时间」，正文与阶段
     assert.equal(turn.finalized, true);
     const line = lineOf(turn);
     assert.ok(line, "必须有一条折叠行");
-    const container = line.parentElement;
-    assert.ok(container, "折叠行必须挂在气泡内容容器上");
-    assert.equal(container.children[0], line, "折叠行排在容器子节点最前");
+    assert.equal(line.parentElement, turn.el, "折叠行挂在 turn 上，在 .msg-content 气泡外面");
+    assert.equal(turn.el.children[0], line, "折叠行排在气泡上方");
+    assert.equal(String(line.parentElement.className).includes("msg-content"), false);
     assert.equal(silentLineNodes(turn).length, 1, "重复收尾不得再插一条");
     assert.match(labelOf(turn), /^静默消息 (\d\d[-/]\d\d )?\d{2}:\d{2}:\d{2}$/);
     assert.equal(String(turn.el.className).includes("ceo-silent-message"), true);
@@ -409,7 +407,7 @@ test("live 静默收尾折成一行「静默消息 + 时间」，正文与阶段
     assert.equal(line.getAttribute("aria-expanded"), "false");
     assert.equal(turn.textEl.hidden, false, "靠 CSS 折叠，不靠 hidden 属性");
     assert.equal(String(turn.textEl.innerHTML).includes("汇报过了"), true, "正文照常渲染，展开才可见");
-    assert.equal(reasonOf(turn), `静默原因：${SILENT_REASON}`, "原因常驻在气泡底部");
+    assert.equal(reasonNodes(turn).length, 0, "不再单独挂原因行");
     assert.equal(turn.flowEl.hidden, false, "阶段轨道必须保持存在");
     assert.equal(String(turn.listEl.innerHTML).includes("inspect repository"), true);
     assert.equal(findByClass(turn.el, "ceo-silent-turn"), null, "旧的 details 折叠盒已去掉");
@@ -442,24 +440,24 @@ test("原因与正文进缓存行，不落占位串也不回落兜底文案", ()
     assert.equal(row.silent_reason, SILENT_REASON);
 });
 
-test("reason 是模型写的自由文本，不得作为 HTML 注入", () => {
+test("reason 不再进渲染面，只留在缓存行里供审计", () => {
     const api = setup();
     const turn = makeTurn({ turnId: "t1" });
     const hostile = "<img src=x onerror=alert(1)>";
     finalizeSilent(api, turn, { silent_reason: hostile, text: "" });
 
-    assert.equal(reasonOf(turn), `静默原因：${hostile}`, "原文照 textContent 呈现");
-    assert.equal(findByClass(turn.el, "ceo-silent-turn-body"), null);
+    assert.deepEqual(reasonNodes(turn), [], "没有原因节点，也就没有注入面");
     assert.equal(String(turn.textEl.innerHTML).includes("onerror"), false);
+    assert.equal(api.S.ceoSnapshotCache["s1"].messages.at(-1).silent_reason, hostile, "原因仍随转录行留存");
 });
 
-test("没有理由时只留折叠行，不挂空原因节点", () => {
+test("没有理由时照样只有一行折叠行", () => {
     const api = setup();
     const turn = makeTurn({ turnId: "t1" });
     finalizeSilent(api, turn, { silent_reason: "" });
 
     assert.ok(lineOf(turn));
-    assert.equal(findByClass(turn.el, "ceo-silent-reason"), null);
+    assert.equal(reasonNodes(turn).length, 0);
 });
 
 test("静默 final 找不到回合元素时不得补一个空 system 气泡", () => {
@@ -496,7 +494,7 @@ test("历史静默行渲染为带轨道的回合，折叠行取消息自带时�
     assert.ok(turn, "历史静默行必须创建回合元素");
     assert.match(labelOf(turn), /^静默消息 (\d\d[-/]\d\d )?\d{2}:\d{2}:\d{2}$/);
     assert.equal(String(turn.textEl.innerHTML).includes("汇报过了"), true);
-    assert.equal(reasonOf(turn), `静默原因：${SILENT_REASON}`);
+    assert.equal(reasonNodes(turn).length, 0);
     assert.equal(turn.flowEl.hidden, false);
     assert.equal(String(turn.listEl.innerHTML).includes("inspect repository"), true);
 });

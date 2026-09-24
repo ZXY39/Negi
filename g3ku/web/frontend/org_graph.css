@@ -2873,10 +2873,10 @@ textarea {
     min-height: 28px;
 }
 
-/* 静默回合（模型调用 silent 工具）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头，
-   点开才露出正文、阶段轨道与工具步骤，展开后气泡底部常驻静默原因。
-   折叠只用一个 display 规则完成（不在 DOM 里搬节点），所以全新类不与既有状态类争覆盖顺序。 */
-.ceo-silent-message:not(.ceo-silent-expanded) .ceo-turn-content > :not(.ceo-silent-line) {
+/* 静默回合（模型调用 silent 工具）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头。
+   折叠行是 turn 元素的直接子节点、在 .msg-content 气泡**外面**，所以折叠时气泡连
+   它的底/边框/内边距一起不出现（用户明确不要给这一行套壳），点开才露出正文与轨道。 */
+.ceo-silent-message:not(.ceo-silent-expanded) > :not(.ceo-silent-line) {
     display: none;
 }
 
@@ -2895,6 +2895,10 @@ textarea {
     font-size: 0.76rem;
     letter-spacing: 0.01em;
     cursor: pointer;
+}
+
+.ceo-silent-expanded > .ceo-silent-line {
+    margin-bottom: 6px;
 }
 
 /* 两侧的细线是这行唯一的装饰：不描边框、不画折叠盒。 */
@@ -2922,13 +2926,6 @@ textarea {
 
 .ceo-silent-expanded .ceo-silent-caret {
     transform: rotate(-135deg);
-}
-
-.ceo-silent-reason {
-    color: var(--text-muted);
-    font-size: 0.78rem;
-    line-height: 1.5;
-    white-space: normal;
 }
 
 .ceo-turn-usage {

@@ -6465,16 +6465,13 @@ function renderCeoAssistantTextIntoTurn(turn, text = "", { status = "" } = {}) {
 }
 
 // 静默回合（模型调用 silent 工具）不外发，但正文与阶段轨道是留给模型和运维的痕迹。
-// 呈现方式：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头，点开才露出正文、阶段轨道
-// 与工具步骤；展开后气泡底部常驻一行静默原因。折叠靠 turn.el 上的两个类完成（CSS 里
-// 隐藏兄弟节点），不在 DOM 里搬动节点。
-// 时间、原因都用 DOM 节点 + textContent 装配：本文件没有 HTML 转义助手，拼进
-// innerHTML 等于开一个注入面（原因是模型写的自由文本）。
-function renderCeoSilentTurn(turn, { reason = "", text = "", timestamp = "" } = {}) {
-    if (!turn?.textEl) return;
-    const contentEl = turn.textEl.parentElement;
-    if (!contentEl) return;
-    const normalizedReason = String(reason || "").trim();
+// 呈现方式：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头，这一行在气泡**外面**——
+// 折叠时气泡整体不出现（不给它套一层壳），点开才露出正文、阶段轨道与工具步骤。
+// 不单独渲染静默原因：工具静默时正文本身就是 reason（finalize 取 accompanying_text or
+// reason），再补一行会重复。折叠行用 DOM 节点 + textContent 装配，本文件没有 HTML
+// 转义助手，拼进 innerHTML 等于开一个注入面。
+function renderCeoSilentTurn(turn, { text = "", timestamp = "" } = {}) {
+    if (!turn?.textEl || !turn?.el) return;
     const normalizedText = String(text || "").trim();
     turn.textEl.hidden = false;
     turn.textEl.classList.remove("pending");
@@ -6482,7 +6479,7 @@ function renderCeoSilentTurn(turn, { reason = "", text = "", timestamp = "" } = 
     turn.textEl.innerHTML = normalizedText ? renderMarkdown(normalizedText) : "";
     syncCeoAssistantLoadingAria(turn.textEl);
     syncCeoTurnLoadingOnlyState(turn, false);
-    if (turn.el) turn.el.classList.add("ceo-silent-message");
+    turn.el.classList.add("ceo-silent-message");
 
     let line = turn.silentLineEl;
     if (!line) {
@@ -6499,30 +6496,15 @@ function renderCeoSilentTurn(turn, { reason = "", text = "", timestamp = "" } = 
         line.appendChild(rule);
         line.appendChild(caret);
         line.addEventListener("click", () => {
-            if (!turn.el) return;
             const expanded = turn.el.classList.toggle("ceo-silent-expanded");
             line.setAttribute("aria-expanded", expanded ? "true" : "false");
         });
-        contentEl.insertBefore(line, turn.textEl);
+        turn.el.insertBefore(line, turn.el.children[0] || null);
         turn.silentLineEl = line;
     }
     const clock = formatCompactTime(timestamp || turn.completedAt || "");
     line.children[0].textContent = clock ? `静默消息 ${clock}` : "静默消息";
-    line.setAttribute("aria-expanded", turn.el && turn.el.classList.contains("ceo-silent-expanded") ? "true" : "false");
-
-    let reasonEl = turn.silentReasonEl;
-    if (!normalizedReason) {
-        if (reasonEl) reasonEl.remove();
-        turn.silentReasonEl = null;
-        return;
-    }
-    if (!reasonEl) {
-        reasonEl = document.createElement("div");
-        reasonEl.className = "ceo-silent-reason";
-        contentEl.appendChild(reasonEl);
-        turn.silentReasonEl = reasonEl;
-    }
-    reasonEl.textContent = `静默原因：${normalizedReason}`;
+    line.setAttribute("aria-expanded", turn.el.classList.contains("ceo-silent-expanded") ? "true" : "false");
 }
 
 function clearCeoReplyDeltaBuffer(sessionId = "", { turnId = "" } = {}) {
@@ -7089,7 +7071,7 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     }
     S.ceoPendingTurns.push(turn);
     withCeoFeedBatch(() => {
-        if (silentReply) renderCeoSilentTurn(turn, { reason: silentReason, text: content, timestamp: historyTimestamp });
+        if (silentReply) renderCeoSilentTurn(turn, { text: content, timestamp: historyTimestamp });
         else renderCeoAssistantTextIntoTurn(turn, content || (status === "paused" ? "已暂停" : ""), { status });
         renderCeoStageTraceIntoTurn(turn, canonicalContext, { interruptedStageMarker: isFollowUpArchive });
         turn.flowEl.hidden = false;
@@ -7104,8 +7086,8 @@ function renderPersistedCeoAssistantTurn(item = {}) {
     }
     // meta 带上 usage/timestamp:随后的 finalizeCeoTurn 写缓存与 usage 行时
     // 用历史值而非当前时间,保证刷新后完成时间稳定。
-    // silent_reason 必须一起带上：finalize 会用 meta 重画静默行，缺了它就把
-    // 上面刚挂上的常驻原因行又摘掉（刷新前那条原因就凭空消失）。
+    // silent_reason 必须一起带上：finalize 走 buildFinalizedCeoTurnPayload 重写缓存行，
+    // 缺了它这一行的 silent_reason 就落成空串，刷新后审计面看不到静默理由。
     finalizeCeoTurn(content, { source: "history", usage: historyUsage, timestamp: historyTimestamp, silent_reply: silentReply, silent_reason: silentReason });
 }
 
@@ -7585,9 +7567,8 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
             footerEl: el.querySelector(".interaction-flow-footer"),
             toggleEl: toggleButton,
             reminderEl: el.querySelector(".ceo-tool-reminder"),
-            // 静默回合的两个自持节点（折叠行与常驻原因行），由 renderCeoSilentTurn 建一次。
+            // 静默折叠行（在气泡外面），由 renderCeoSilentTurn 建一次。
             silentLineEl: null,
-            silentReasonEl: null,
             steps: 0,
             hasError: false,
             finalized: false,
@@ -8878,7 +8859,7 @@ function finalizeCeoTurn(text, meta = {}) {
             turn.liveStreamText = "";
             renderCeoLiveStreamTextIntoTurn(turn);
             if (silentReply) {
-                renderCeoSilentTurn(turn, { reason: String(meta?.silent_reason || ""), text, timestamp: completedAt });
+                renderCeoSilentTurn(turn, { text, timestamp: completedAt });
             } else {
                 turn.textEl.hidden = false;
                 turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
@@ -8955,7 +8936,7 @@ function finalizeCeoTurn(text, meta = {}) {
             turn.liveStreamText = "";
             renderCeoLiveStreamTextIntoTurn(turn);
             if (silentReply) {
-                renderCeoSilentTurn(turn, { reason: String(meta?.silent_reason || ""), text, timestamp: completedAt });
+                renderCeoSilentTurn(turn, { text, timestamp: completedAt });
             } else {
                 turn.textEl.hidden = false;
                 turn.textEl.innerHTML = renderMarkdown(String(text || "").trim() || "已完成。");
