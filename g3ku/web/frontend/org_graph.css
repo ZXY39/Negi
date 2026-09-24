@@ -3098,14 +3098,8 @@ textarea {
     background: color-mix(in srgb, var(--border-color) 64%, transparent);
 }
 
-/* 气泡里的加载图标只留旋转弧，不要外面那圈徽章。
-   必须写成 `.assistant-loading-indicator.interaction-step-icon`：徽章的底色和描边来自
-   .interaction-step-icon，那条规则在本块之后、特异性相同，单写类名会被它盖住。 */
-.assistant-loading-indicator.interaction-step-icon {
-    background: none;
-    border: 0;
-}
-
+/* 气泡里的加载占位弧比轨道步骤图标大一档。选择器要带上 .interaction-step-icon
+   才压得住同特异性的 `.interaction-step-icon svg`，单写类名会静默输掉。 */
 .assistant-loading-indicator.interaction-step-icon svg {
     width: 16px;
     height: 16px;
@@ -3401,35 +3395,28 @@ textarea {
     justify-content: flex-end;
 }
 
+/* 轨道里的步骤图标只画裸字形，不套徽章：状态由 color + 标题文字双通道表达，
+   底色和描边只是第三份冗余。26px 盒子保留，图标列的左基线因此不移动。 */
 .interaction-step-icon {
     width: 26px;
     height: 26px;
     flex-shrink: 0;
-    border-radius: 999px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    background: color-mix(in srgb, var(--bg-app) 70%, transparent);
     color: var(--text-secondary);
-    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
 }
 
 .interaction-step.running .interaction-step-icon {
     color: var(--status-running-text);
-    background: color-mix(in srgb, var(--status-running-bg) 88%, transparent);
-    border-color: color-mix(in srgb, var(--status-running-text) 26%, transparent);
 }
 
 .interaction-step.success .interaction-step-icon {
     color: var(--status-success-text);
-    background: color-mix(in srgb, var(--status-success-bg) 88%, transparent);
-    border-color: color-mix(in srgb, var(--status-success-text) 28%, transparent);
 }
 
 .interaction-step.error .interaction-step-icon {
     color: var(--status-failed-text);
-    background: color-mix(in srgb, var(--status-failed-bg) 88%, transparent);
-    border-color: color-mix(in srgb, var(--status-failed-text) 28%, transparent);
 }
 
 .interaction-step-icon svg {
@@ -5182,8 +5169,8 @@ textarea {
     background: color-mix(in srgb, var(--ceo-context-compress-color) 16%, transparent);
 }
 
-/* 图标尺寸按 em 跟随上面的字号，与文字同大；环转、中间两条竖杠静止，
-   读起来就是「正在跑，点这里可以停」。 */
+/* 图标尺寸按 em 跟随上面的字号，与文字同大；外圈只画一段旋转弧（不画整环底轨）、
+   中间两条竖杠静止，读起来就是「正在跑，点这里可以停」。 */
 .ceo-compression-divider-spinner {
     position: relative;
     display: inline-flex;
@@ -5198,7 +5185,10 @@ textarea {
     content: "";
     position: absolute;
     inset: 0;
-    border: 2px solid color-mix(in srgb, var(--ceo-context-compress-color) 22%, transparent);
+    /* 整圈底轨改透明，只留上边一段实心弧在转：静态的 22% 圆环会把「在跑」画成
+       「一个静止的圆」，去掉之后暂停态（is-bars-only，整段不渲染）与运行态的差别
+       只剩这段弧，反而更清楚。 */
+    border: 2px solid transparent;
     border-top-color: var(--ceo-context-compress-color);
     border-radius: 999px;
     animation: interaction-step-icon-spin 0.9s linear infinite;

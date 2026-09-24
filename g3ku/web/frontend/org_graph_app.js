@@ -3385,9 +3385,9 @@ function activeCeoSessionCompressionState() {
 }
 
 // 图标自绘而不是取 lucide 字形：loader-circle 是中心对称圆环，转起来看不出动静；
-// 这里的旋转环负责「还在跑」，中间两条竖杠负责「点这里可以暂停」。
-function buildCeoCompressionPauseGlyph(withSpinnerRing) {
-    const className = withSpinnerRing
+// 这里的旋转弧负责「还在跑」，中间两条竖杠负责「点这里可以暂停」。
+function buildCeoCompressionPauseGlyph(withSpinnerArc) {
+    const className = withSpinnerArc
         ? "ceo-compression-divider-spinner"
         : "ceo-compression-divider-spinner is-bars-only";
     return `<span class="${className}" aria-hidden="true"><i></i><i></i></span>`;
