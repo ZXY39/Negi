@@ -71,12 +71,34 @@ def test_export_bundle_requires_unlocked_project(tmp_path: Path) -> None:
         config_bundle.export_bundle(workspace, password=BUNDLE_PASSWORD)
 
 
-def test_export_bundle_rejects_short_password(tmp_path: Path) -> None:
+def test_export_bundle_accepts_short_password(tmp_path: Path) -> None:
     workspace = _write_workspace(tmp_path / "source")
     _unlock(workspace)
 
-    with pytest.raises(ValueError, match="at least"):
-        config_bundle.export_bundle(workspace, password="123")
+    archive = Path(config_bundle.export_bundle(workspace, password="7")["path"])
+    target = tmp_path / "target"
+    target.mkdir()
+
+    restored = config_bundle.import_bundle(target, archive_path=archive, password="7")
+    assert restored["status"]["mode"] == "unlocked"
+
+
+def test_export_bundle_still_requires_a_password(tmp_path: Path) -> None:
+    workspace = _write_workspace(tmp_path / "source")
+    _unlock(workspace)
+
+    with pytest.raises(ValueError, match="password is required"):
+        config_bundle.export_bundle(workspace, password="")
+
+
+def test_verify_password_accepts_only_the_live_envelope_password(tmp_path: Path) -> None:
+    workspace = _write_workspace(tmp_path / "source")
+    service = get_bootstrap_security_service(workspace)
+    service.setup_initial_realm(password=OWNER_PASSWORD)
+
+    assert service.verify_password(password=OWNER_PASSWORD) is True
+    assert service.verify_password(password="bundle-pass-1234") is False
+    assert service.verify_password(password="") is False
 
 
 def test_export_bundle_keeps_master_key_envelope_and_auto_unlock_out(tmp_path: Path) -> None:
@@ -204,6 +226,28 @@ def test_export_route_returns_summary_and_downloadable_bundle(tmp_path: Path, mo
     assert client.get(
         "/api/bootstrap/config-bundle/download", params={"filename": "../config.json"}
     ).status_code == 400
+
+
+def test_export_route_verifies_claimed_project_password(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = _write_workspace(tmp_path / "source")
+    _unlock(workspace)
+    monkeypatch.chdir(workspace)
+    client = _client()
+
+    wrong = client.post(
+        "/api/bootstrap/config-bundle/export",
+        json={"password": "not-my-password", "use_project_password": True},
+    )
+    assert wrong.status_code == 400
+    assert wrong.json()["detail"] == "bundle_project_password_mismatch"
+    assert not (workspace / config_bundle.BUNDLE_OUTPUT_DIR).exists()
+
+    right = client.post(
+        "/api/bootstrap/config-bundle/export",
+        json={"password": OWNER_PASSWORD, "use_project_password": True},
+    )
+    assert right.status_code == 200
+    assert right.json()["item"]["entry_count"] >= 3
 
 
 def test_export_route_rejects_locked_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

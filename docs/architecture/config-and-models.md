@@ -289,6 +289,8 @@ If a worker container reports `project_locked` while the web container appears h
 
 The envelope is a scrypt-derived Fernet token using `PASSWORD_KDF`, the same recipe as the bootstrap envelope. Inside it sit the file entries plus the **active master key itself** — which is why export requires an unlocked process: a bundle is not a copy of `master.key`, it is the key that `master.key` wraps.
 
+The bundle password is any non-empty string; there is no strength gate, because it protects a file the operator holds, not a network credential. Export defaults to reusing the **project unlock password** so the operator invents nothing: the typed value is checked against the live envelope with `verify_password()` before anything is written, because the password is not recoverable from disk and an unverified guess would produce a bundle that only fails at import time. Mismatch answers `bundle_project_password_mismatch`. Clearing that checkbox switches the dialog to a freshly typed 导出口令 pair, which is never stored anywhere.
+
 Two exclusions are load-bearing:
 
 - `llm-config/master.key` stays out. Its envelope is bound to the *source* login password, so shipping it would make the target unlock with a password nobody typed there; import re-wraps the transported key under the bundle password instead.
@@ -300,7 +302,7 @@ The governance database travels through SQLite's online backup API in both direc
 
 Two consequences belong in the UI, not in the operator's head:
 
-- After import the target unlocks with the **bundle password**; the previous password stops working.
+- After import the target unlocks with the **bundle password**. With the default export path that is the same password the source used; with a custom one the target's previous password stops working.
 - The managed worker still holds the previous master key in memory until restart, so the import response carries `restart_required`. Until then web runs the new config and the worker the old one.
 
 Routes live at `/api/bootstrap/config-bundle/{export,download,import}` in `main/api/bootstrap_rest.py`; that prefix is the lock middleware's exemption, which is what lets import run against a locked or freshly installed project. Export raises `423 project_locked` with no active key. Import reuses the exit flow's running-work gate: in-flight sessions or tasks require explicit confirmation and are paused durably before anything is written. Failure text returns as snake_case codes (`bundle_password_invalid`, `bundle_file_invalid`, `bundle_version_unsupported`, `bundle_path_rejected`) translated in `api_client.js`, never as English sentences. UI surface: 详见 `web-and-admin.md`「Frontend Theme And Layout Contract」配置段.

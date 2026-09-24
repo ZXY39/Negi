@@ -31,7 +31,6 @@ BUNDLE_VERSION = 1
 BUNDLE_EXTENSION = ".g3kucb"
 BUNDLE_OUTPUT_DIR = ".g3ku/config-bundles"
 IMPORT_BACKUP_DIR = ".g3ku/config-bundle-imports"
-MIN_PASSWORD_CHARS = 8
 
 CONFIG_FILENAME = ".g3ku/config.json"
 RESOURCES_STATE_PATH = ".g3ku/resources.state.json"
@@ -162,8 +161,8 @@ def _collect_entries(workspace: Path) -> dict[str, str]:
 
 def _validate_password(password: str) -> str:
     text = str(password or "")
-    if len(text) < MIN_PASSWORD_CHARS:
-        raise ValueError(f"password must be at least {MIN_PASSWORD_CHARS} characters")
+    if not text:
+        raise ValueError("password is required")
     return text
 
 
@@ -349,7 +348,6 @@ __all__ = [
     "BUNDLE_EXTENSION",
     "BUNDLE_KIND",
     "IMPORT_BACKUP_DIR",
-    "MIN_PASSWORD_CHARS",
     "bundle_paths",
     "export_bundle",
     "import_bundle",

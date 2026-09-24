@@ -1066,12 +1066,23 @@
                         </button>
                     </div>
                     <div class="project-settings-body">
-                        <label class="resource-field">
+                        <label class="ui-checkbox-row" for="config-bundle-use-project-password">
+                            <input id="config-bundle-use-project-password" class="ui-checkbox-input" type="checkbox"
+                                checked>
+                            <span class="ui-checkbox-box" aria-hidden="true"></span>
+                            <span>使用项目解锁密码</span>
+                        </label>
+                        <label id="config-bundle-project-field" class="resource-field">
+                            <span class="resource-field-label">项目解锁密码</span>
+                            <input id="config-bundle-project-password" class="resource-search" type="password"
+                                autocomplete="current-password">
+                        </label>
+                        <label id="config-bundle-export-password-field" class="resource-field" hidden>
                             <span class="resource-field-label">导出口令</span>
                             <input id="config-bundle-export-password" class="resource-search" type="password"
                                 autocomplete="new-password">
                         </label>
-                        <label class="resource-field">
+                        <label id="config-bundle-export-confirm-field" class="resource-field" hidden>
                             <span class="resource-field-label">确认导出口令</span>
                             <input id="config-bundle-export-confirm" class="resource-search" type="password"
                                 autocomplete="new-password">

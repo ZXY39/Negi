@@ -433,6 +433,23 @@ class BootstrapSecurityService:
                 raise
             return self.status()
 
+    def verify_password(self, *, password: str) -> bool:
+        """Report whether `password` opens this project's envelope.
+
+        The password itself is never recoverable from disk, so callers that
+        want to reuse it as another key (a config bundle, say) have to check
+        it here instead of assuming the typed value is right.
+        """
+        with self._lock:
+            payload = self._read_master_payload()
+            if payload is None or not self._is_single_envelope(payload):
+                return False
+            try:
+                self._unwrap_single_master_key(envelope=payload, password=str(password or ""))
+            except ValueError:
+                return False
+            return True
+
     def auto_unlock_master_key(self) -> str:
         path = _auto_unlock_key_path(self.workspace)
         if not path.exists():

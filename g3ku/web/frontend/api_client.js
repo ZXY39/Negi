@@ -35,8 +35,10 @@ class ApiClient {
                 return "项目当前已锁定，请先完成解锁后再继续。";
             case "bundle_password_invalid":
                 return "配置包口令不正确。";
-            case "bundle_password_too_short":
-                return "口令至少 8 位。";
+            case "bundle_project_password_mismatch":
+                return "这不是当前项目的解锁密码。";
+            case "bundle_password_required":
+                return "请输入口令。";
             case "bundle_file_invalid":
                 return "这个文件不是可用的配置包，或包内密钥已损坏。";
             case "bundle_version_unsupported":
@@ -409,9 +411,9 @@ class ApiClient {
         return data.item || null;
     }
 
-    static async exportConfigBundle(password) {
+    static async exportConfigBundle(password, { useProjectPassword = false } = {}) {
         const data = await this._request("POST", "/api/bootstrap/config-bundle/export", {
-            body: { password },
+            body: { password, use_project_password: !!useProjectPassword },
             timeoutMs: 60000,
         });
         return data.item || null;
