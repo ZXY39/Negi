@@ -35,8 +35,8 @@ class ApiClient {
                 return "项目当前已锁定，请先完成解锁后再继续。";
             case "bundle_password_invalid":
                 return "配置包口令不正确。";
-            case "bundle_project_password_mismatch":
-                return "这不是当前项目的解锁密码。";
+            case "bundle_project_password_unavailable":
+                return "这个项目没有设置解锁密码（只用环境变量主密钥解锁），请改用自定义导出口令。";
             case "bundle_password_required":
                 return "请输入口令。";
             case "bundle_file_invalid":
@@ -411,7 +411,7 @@ class ApiClient {
         return data.item || null;
     }
 
-    static async exportConfigBundle(password, { useProjectPassword = false } = {}) {
+    static async exportConfigBundle({ password = "", useProjectPassword = true } = {}) {
         const data = await this._request("POST", "/api/bootstrap/config-bundle/export", {
             body: { password, use_project_password: !!useProjectPassword },
             timeoutMs: 60000,

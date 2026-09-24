@@ -106,8 +106,8 @@ function loadApp(apiClientOverrides = {}) {
                 calls.push(["exit-check"]);
                 return { has_running_work: false, summary_text: "" };
             },
-            exportConfigBundle: async (password, options) => {
-                calls.push(["export", password, options]);
+            exportConfigBundle: async (options) => {
+                calls.push(["export", options]);
                 return { filename: "g3ku-config-bundle-20260924-010203.g3kucb", entry_count: 6 };
             },
             getConfigBundleDownloadUrl: (filename) => `http://localhost/api/bootstrap/config-bundle/download?filename=${filename}`,
@@ -199,8 +199,6 @@ function mountDialogs(app) {
     U.configBundleClose = new StubHTMLElement();
     U.configBundleUseProjectPassword = new StubHTMLElement();
     U.configBundleUseProjectPassword.checked = true;
-    U.configBundleProjectField = new StubHTMLElement();
-    U.configBundleProjectPassword = new StubHTMLElement();
     U.configBundleExportPasswordField = new StubHTMLElement();
     U.configBundleExportPasswordField.hidden = true;
     U.configBundleExportConfirmField = new StubHTMLElement();
@@ -266,12 +264,11 @@ test("选中的配置包文件名回显，关窗后复位", () => {
     assert.equal(app.U.configBundleImportName.textContent, "未选择文件");
 });
 
-test("默认勾选时用项目解锁密码，导出口令两栏保持收起", () => {
+test("默认勾选时导出口令两栏保持收起", () => {
     const app = loadApp();
     app.openConfigBundleDialog();
 
     assert.equal(app.usesProjectBundlePassword(), true);
-    assert.equal(app.U.configBundleProjectField.hidden, false);
     assert.equal(app.U.configBundleExportPasswordField.hidden, true);
     assert.equal(app.U.configBundleExportConfirmField.hidden, true);
 });
@@ -282,35 +279,23 @@ test("取消勾选才展开导出口令两栏，关窗后回到默认勾选", ()
     app.U.configBundleUseProjectPassword.checked = false;
     app.syncConfigBundlePasswordField();
 
-    assert.equal(app.U.configBundleProjectField.hidden, true);
     assert.equal(app.U.configBundleExportPasswordField.hidden, false);
     assert.equal(app.U.configBundleExportConfirmField.hidden, false);
 
     app.closeConfigBundleDialog();
     assert.equal(app.U.configBundleUseProjectPassword.checked, true);
-    assert.equal(app.U.configBundleProjectField.hidden, false);
     assert.equal(app.U.configBundleExportPasswordField.hidden, true);
 });
 
-test("勾选态下只填项目解锁密码即可导出，按项目口令提交", async () => {
+test("勾选态下不填任何口令就能导出，提交空口令", async () => {
     const app = loadApp();
     app.openConfigBundleDialog();
-    app.U.configBundleProjectPassword.value = "owner-password";
 
     await app.submitConfigBundleExport();
 
-    assert.deepEqual(plain(app.calls), [["export", "owner-password", { useProjectPassword: true }]]);
-    assert.equal(app.toasts.at(-1).text, "共 6 个文件，用项目解锁密码解开。");
-    assert.equal(app.U.configBundleProjectPassword.value, "");
-});
-
-test("勾选态下项目密码为空时不发请求", async () => {
-    const app = loadApp();
-
-    await app.submitConfigBundleExport();
-
-    assert.deepEqual(app.calls, []);
-    assert.equal(app.toasts.at(-1).title, "请输入项目解锁密码");
+    assert.deepEqual(plain(app.calls), [["export", { password: "", useProjectPassword: true }]]);
+    assert.equal(app.anchors.length, 1);
+    assert.equal(app.toasts.at(-1).text, "共 6 个文件，导入时输项目解锁密码。");
 });
 
 test("自定义口令两次不一致时不发请求", async () => {
@@ -333,7 +318,7 @@ test("自定义口令导出成功后按服务端返回的文件名触发下载�
 
     await app.submitConfigBundleExport();
 
-    assert.deepEqual(plain(app.calls), [["export", "secret-pass-123", { useProjectPassword: false }]]);
+    assert.deepEqual(plain(app.calls), [["export", { password: "secret-pass-123", useProjectPassword: false }]]);
     assert.equal(app.anchors.length, 1);
     assert.deepEqual(app.anchors[0].clicks, [
         "http://localhost/api/bootstrap/config-bundle/download?filename=g3ku-config-bundle-20260924-010203.g3kucb",
@@ -346,15 +331,14 @@ test("自定义口令导出成功后按服务端返回的文件名触发下载�
 test("导出失败时按钮恢复可用并提示错误", async () => {
     const app = loadApp({
         exportConfigBundle: async () => {
-            throw new Error("这不是当前项目的解锁密码。");
+            throw new Error("这个项目没有设置解锁密码（只用环境变量主密钥解锁），请改用自定义导出口令。");
         },
     });
-    app.U.configBundleProjectPassword.value = "owner-password";
 
     await app.submitConfigBundleExport();
 
     assert.equal(app.toasts.at(-1).title, "导出失败");
-    assert.equal(app.toasts.at(-1).text, "这不是当前项目的解锁密码。");
+    assert.match(app.toasts.at(-1).text, /请改用自定义导出口令/);
     assert.equal(app.U.configBundleExport.disabled, false);
 });
 

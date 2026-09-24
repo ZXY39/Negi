@@ -24,13 +24,16 @@ from g3ku.security import (
     derive_password_key,
     fernet_from_key,
     get_bootstrap_security_service,
+    unwrap_master_key,
 )
 
 BUNDLE_KIND = "g3ku-config-bundle"
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2
 BUNDLE_EXTENSION = ".g3kucb"
 BUNDLE_OUTPUT_DIR = ".g3ku/config-bundles"
 IMPORT_BACKUP_DIR = ".g3ku/config-bundle-imports"
+KEY_SOURCE_PROJECT_PASSWORD = "project_password"
+KEY_SOURCE_BUNDLE_PASSWORD = "bundle_password"
 
 CONFIG_FILENAME = ".g3ku/config.json"
 RESOURCES_STATE_PATH = ".g3ku/resources.state.json"
@@ -166,13 +169,38 @@ def _validate_password(password: str) -> str:
     return text
 
 
-def export_bundle(workspace: Path | None = None, *, password: str) -> dict[str, Any]:
+def export_bundle(
+    workspace: Path | None = None,
+    *,
+    password: str = "",
+    use_project_password: bool = True,
+) -> dict[str, Any]:
+    """Pack the config面 into one encrypted file.
+
+    With `use_project_password` the bundle key is the live master key and the
+    password envelope travels inside the bundle, so the operator types nothing
+    here and unlocks the import with their normal project password. The
+    envelope is not secret material — it only turns a plaintext password into
+    that key — so shipping it keeps the bundle protected by the password.
+    """
     root = (workspace or Path.cwd()).resolve()
     service = get_bootstrap_security_service(root)
     master_key = service.active_master_key()
     if not master_key:
         raise ValueError("project is locked")
-    clean_password = _validate_password(password)
+
+    salt = b""
+    unlock_envelope: dict[str, Any] | None = None
+    if use_project_password:
+        unlock_envelope = service.master_key_envelope()
+        if unlock_envelope is None:
+            raise ValueError("project unlock password is not configured")
+        bundle_key = master_key
+        key_source = KEY_SOURCE_PROJECT_PASSWORD
+    else:
+        salt = os.urandom(16)
+        bundle_key = _key_for(_validate_password(password), salt)
+        key_source = KEY_SOURCE_BUNDLE_PASSWORD
 
     stamp = _stamp()
     created_at = _now_iso()
@@ -183,8 +211,7 @@ def export_bundle(workspace: Path | None = None, *, password: str) -> dict[str, 
         "master_key": master_key,
         "entries": entries,
     }
-    salt = os.urandom(16)
-    token = fernet_from_key(_key_for(clean_password, salt)).encrypt(
+    token = fernet_from_key(bundle_key).encrypt(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     )
     envelope = {
@@ -192,8 +219,10 @@ def export_bundle(workspace: Path | None = None, *, password: str) -> dict[str, 
         "version": BUNDLE_VERSION,
         "created_at": created_at,
         "workspace_label": payload["workspace_label"],
-        "kdf": dict(PASSWORD_KDF),
-        "salt_b64": base64.b64encode(salt).decode("ascii"),
+        "key_source": key_source,
+        "kdf": {} if use_project_password else dict(PASSWORD_KDF),
+        "salt_b64": base64.b64encode(salt).decode("ascii") if salt else "",
+        "unlock_envelope": unlock_envelope,
         "payload_b64": base64.b64encode(token).decode("ascii"),
     }
 
@@ -209,6 +238,7 @@ def export_bundle(workspace: Path | None = None, *, password: str) -> dict[str, 
         "filename": filename,
         "created_at": created_at,
         "workspace_label": payload["workspace_label"],
+        "key_source": key_source,
         "entries": sorted(entries),
         "entry_count": len(entries),
         "bytes": path.stat().st_size,
@@ -228,14 +258,21 @@ def _read_envelope(archive_path: Path) -> dict[str, Any]:
 
 
 def _decrypt_payload(envelope: dict[str, Any], password: str) -> dict[str, Any]:
-    salt_b64 = str(envelope.get("salt_b64") or "").strip()
     payload_b64 = str(envelope.get("payload_b64") or "").strip()
-    if not salt_b64 or not payload_b64:
+    if not payload_b64:
         raise ValueError("invalid config bundle envelope")
+    if str(envelope.get("key_source") or "") == KEY_SOURCE_PROJECT_PASSWORD:
+        unlock_envelope = envelope.get("unlock_envelope")
+        if not isinstance(unlock_envelope, dict):
+            raise ValueError("invalid config bundle envelope")
+        bundle_key = unwrap_master_key(unlock_envelope, password)
+    else:
+        salt_b64 = str(envelope.get("salt_b64") or "").strip()
+        if not salt_b64:
+            raise ValueError("invalid config bundle envelope")
+        bundle_key = _key_for(password, base64.b64decode(salt_b64))
     try:
-        decrypted = fernet_from_key(_key_for(password, base64.b64decode(salt_b64))).decrypt(
-            base64.b64decode(payload_b64)
-        )
+        decrypted = fernet_from_key(bundle_key).decrypt(base64.b64decode(payload_b64))
         payload = json.loads(decrypted.decode("utf-8"))
     except InvalidToken as exc:
         raise ValueError("invalid password") from exc
@@ -318,7 +355,8 @@ def import_bundle(
     password: str,
 ) -> dict[str, Any]:
     root = (workspace or Path.cwd()).resolve()
-    payload = _decrypt_payload(_read_envelope(Path(archive_path)), _validate_password(password))
+    envelope = _read_envelope(Path(archive_path))
+    payload = _decrypt_payload(envelope, _validate_password(password))
     master_key, targets = _preflight(payload)
     entries = payload["entries"]
 
@@ -340,6 +378,7 @@ def import_bundle(
         "backup_dir": str(backup_root),
         "created_at": str(payload.get("created_at") or ""),
         "workspace_label": str(payload.get("workspace_label") or ""),
+        "key_source": str(envelope.get("key_source") or ""),
         "status": status,
     }
 
@@ -348,6 +387,8 @@ __all__ = [
     "BUNDLE_EXTENSION",
     "BUNDLE_KIND",
     "IMPORT_BACKUP_DIR",
+    "KEY_SOURCE_BUNDLE_PASSWORD",
+    "KEY_SOURCE_PROJECT_PASSWORD",
     "bundle_paths",
     "export_bundle",
     "import_bundle",

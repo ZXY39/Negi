@@ -684,8 +684,6 @@ const U = {
     configBundleDialog: document.getElementById("config-bundle-dialog"),
     configBundleClose: document.getElementById("config-bundle-close-btn"),
     configBundleUseProjectPassword: document.getElementById("config-bundle-use-project-password"),
-    configBundleProjectField: document.getElementById("config-bundle-project-field"),
-    configBundleProjectPassword: document.getElementById("config-bundle-project-password"),
     configBundleExportPasswordField: document.getElementById("config-bundle-export-password-field"),
     configBundleExportConfirmField: document.getElementById("config-bundle-export-confirm-field"),
     configBundleExportPassword: document.getElementById("config-bundle-export-password"),
@@ -9803,13 +9801,12 @@ function usesProjectBundlePassword() {
 
 function syncConfigBundlePasswordField() {
     const useProject = usesProjectBundlePassword();
-    if (U.configBundleProjectField) U.configBundleProjectField.hidden = !useProject;
     if (U.configBundleExportPasswordField) U.configBundleExportPasswordField.hidden = useProject;
     if (U.configBundleExportConfirmField) U.configBundleExportConfirmField.hidden = useProject;
 }
 
 function clearConfigBundleInputs() {
-    [U.configBundleProjectPassword, U.configBundleExportPassword, U.configBundleExportConfirm, U.configBundleImportPassword]
+    [U.configBundleExportPassword, U.configBundleExportConfirm, U.configBundleImportPassword]
         .forEach((element) => {
             if (element) element.value = "";
         });
@@ -9845,25 +9842,27 @@ function downloadConfigBundleFile(filename) {
 
 async function submitConfigBundleExport() {
     const useProject = usesProjectBundlePassword();
-    const password = String((useProject ? U.configBundleProjectPassword : U.configBundleExportPassword)?.value || "");
+    const password = useProject ? "" : String(U.configBundleExportPassword?.value || "");
     const passwordConfirm = String(U.configBundleExportConfirm?.value || "");
-    if (!password) {
-        showToast({ title: useProject ? "请输入项目解锁密码" : "请输入导出口令", kind: "error" });
-        return;
-    }
-    if (!useProject && password !== passwordConfirm) {
-        showToast({ title: "两次输入的口令不一致", kind: "error" });
-        return;
+    if (!useProject) {
+        if (!password) {
+            showToast({ title: "请输入导出口令", kind: "error" });
+            return;
+        }
+        if (password !== passwordConfirm) {
+            showToast({ title: "两次输入的口令不一致", kind: "error" });
+            return;
+        }
     }
     setConfigBundleBusy(true);
     try {
-        const item = await ApiClient.exportConfigBundle(password, { useProjectPassword: useProject });
+        const item = await ApiClient.exportConfigBundle({ password, useProjectPassword: useProject });
         downloadConfigBundleFile(item?.filename);
         clearConfigBundleInputs();
         showToast({
             title: "配置包已导出",
             text: useProject
-                ? `共 ${item?.entry_count || 0} 个文件，用项目解锁密码解开。`
+                ? `共 ${item?.entry_count || 0} 个文件，导入时输项目解锁密码。`
                 : `共 ${item?.entry_count || 0} 个文件。口令不会随文件另存，丢了无法导入。`,
             kind: "success",
         });

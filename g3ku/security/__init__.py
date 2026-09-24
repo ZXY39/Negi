@@ -16,6 +16,7 @@ __all__ = [
     "fernet_from_key",
     "get_bootstrap_security_service",
     "strip_config_secret_entries",
+    "unwrap_master_key",
 ]
 
 

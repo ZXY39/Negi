@@ -29,6 +29,31 @@ SCONFIG = "config"
 SLLM = "llm_config"
 
 
+def unwrap_master_key(envelope: dict[str, Any], password: str) -> str:
+    """Recover the master key from any single-envelope dict.
+
+    Config bundles carry a *foreign* envelope, so this cannot go through the
+    workspace-bound service; one implementation keeps the two readers from
+    drifting apart on the KDF parameters.
+    """
+    kdf = envelope.get("kdf") if isinstance(envelope.get("kdf"), dict) else {}
+    salt_b64 = str(envelope.get("salt_b64") or "").strip()
+    wrapped_b64 = str(envelope.get("wrapped_master_key_b64") or "").strip()
+    if not salt_b64 or not wrapped_b64:
+        raise ValueError("invalid secret key envelope")
+    derived_key = derive_password_key(
+        str(password or ""),
+        salt=base64.b64decode(salt_b64),
+        n=int(kdf.get("n") or 16384),
+        r=int(kdf.get("r") or 8),
+        p=int(kdf.get("p") or 1),
+    )
+    try:
+        return fernet_from_key(derived_key).decrypt(base64.b64decode(wrapped_b64)).decode("utf-8")
+    except InvalidToken as exc:
+        raise ValueError("invalid password") from exc
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -433,22 +458,16 @@ class BootstrapSecurityService:
                 raise
             return self.status()
 
-    def verify_password(self, *, password: str) -> bool:
-        """Report whether `password` opens this project's envelope.
+    def master_key_envelope(self) -> dict[str, Any] | None:
+        """Return the on-disk password envelope, or None when there is none.
 
-        The password itself is never recoverable from disk, so callers that
-        want to reuse it as another key (a config bundle, say) have to check
-        it here instead of assuming the typed value is right.
+        The envelope is not secret material — it is what lets a plaintext
+        password unwrap the master key — so it can travel inside a config
+        bundle and still leave the bundle protected by that password.
         """
         with self._lock:
             payload = self._read_master_payload()
-            if payload is None or not self._is_single_envelope(payload):
-                return False
-            try:
-                self._unwrap_single_master_key(envelope=payload, password=str(password or ""))
-            except ValueError:
-                return False
-            return True
+            return deepcopy(payload) if isinstance(payload, dict) and self._is_single_envelope(payload) else None
 
     def auto_unlock_master_key(self) -> str:
         path = _auto_unlock_key_path(self.workspace)
@@ -533,24 +552,7 @@ class BootstrapSecurityService:
         }
 
     def _unwrap_single_master_key(self, *, envelope: dict[str, Any], password: str) -> str:
-        kdf = envelope.get("kdf") if isinstance(envelope.get("kdf"), dict) else {}
-        salt_b64 = str(envelope.get("salt_b64") or "").strip()
-        wrapped_b64 = str(envelope.get("wrapped_master_key_b64") or "").strip()
-        if not salt_b64 or not wrapped_b64:
-            raise ValueError("invalid secret key envelope")
-        salt = base64.b64decode(salt_b64.encode("ascii"))
-        wrapped = base64.b64decode(wrapped_b64.encode("ascii"))
-        derived_key = derive_password_key(
-            str(password or ""),
-            salt=salt,
-            n=int(kdf.get("n") or 16384),
-            r=int(kdf.get("r") or 8),
-            p=int(kdf.get("p") or 1),
-        )
-        try:
-            return fernet_from_key(derived_key).decrypt(wrapped).decode("utf-8")
-        except InvalidToken as exc:
-            raise ValueError("invalid password") from exc
+        return unwrap_master_key(envelope, password)
 
     def _migrate_multi_realm_payload(self, *, payload: dict[str, Any], password: str) -> dict[str, Any]:
         for realm in list(payload.get("realms") or []):

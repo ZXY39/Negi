@@ -215,6 +215,7 @@ _BUNDLE_ERROR_CODES: tuple[tuple[str, str, int], ...] = (
     ("project is locked", "project_locked", 423),
     ("invalid password", "bundle_password_invalid", 400),
     ("password is required", "bundle_password_required", 400),
+    ("unlock password is not configured", "bundle_project_password_unavailable", 400),
     ("rejected", "bundle_path_rejected", 400),
     ("unsupported config bundle version", "bundle_version_unsupported", 400),
     ("config bundle", "bundle_file_invalid", 400),
@@ -392,14 +393,16 @@ async def bootstrap_exit(payload: dict | None = Body(default=None)):
 
 @router.post("/bootstrap/config-bundle/export")
 async def bootstrap_config_bundle_export(payload: dict = Body(...)):
-    password = str(payload.get("password") or "")
-    use_project = bool(payload.get("use_project_password") or payload.get("useProjectPassword"))
-    if use_project and not _service().verify_password(password=password):
-        # 解锁口令在盘上不可反推，只能就地验真：否则会把包加密在一个"以为是项目口令"
-        # 的错值上，导入时才报口令不正确。
-        raise HTTPException(status_code=400, detail="bundle_project_password_mismatch")
+    raw = payload.get("use_project_password")
+    if raw is None:
+        raw = payload.get("useProjectPassword")
+    use_project = True if raw is None else bool(raw)
     try:
-        item = export_bundle(Path.cwd(), password=password)
+        item = export_bundle(
+            Path.cwd(),
+            password=str(payload.get("password") or ""),
+            use_project_password=use_project,
+        )
     except Exception as exc:
         raise _bundle_http_exception(exc) from exc
     item.pop("path", None)

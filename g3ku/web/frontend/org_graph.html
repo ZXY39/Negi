@@ -1072,11 +1072,6 @@
                             <span class="ui-checkbox-box" aria-hidden="true"></span>
                             <span>使用项目解锁密码</span>
                         </label>
-                        <label id="config-bundle-project-field" class="resource-field">
-                            <span class="resource-field-label">项目解锁密码</span>
-                            <input id="config-bundle-project-password" class="resource-search" type="password"
-                                autocomplete="current-password">
-                        </label>
                         <label id="config-bundle-export-password-field" class="resource-field" hidden>
                             <span class="resource-field-label">导出口令</span>
                             <input id="config-bundle-export-password" class="resource-search" type="password"
@@ -1088,6 +1083,7 @@
                                 autocomplete="new-password">
                         </label>
                         <button id="config-bundle-export-btn" class="toolbar-btn success" type="button">导出配置包</button>
+                        <p class="confirm-text">导出内容：项目配置、模型与 provider 凭据、密钥覆盖层、工具与技能开关、治理审批；不含任务、会话与日志。口令是包的唯一防线，拿到文件即可离线反复试。</p>
                         <div class="resource-field">
                             <span class="resource-field-label">导入配置</span>
                             <input id="config-bundle-import-file" class="resource-search" type="file"
