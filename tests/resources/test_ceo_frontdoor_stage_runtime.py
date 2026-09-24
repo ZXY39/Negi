@@ -10,7 +10,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from main.service.runtime_service import MainRuntimeService
-from main.runtime.stage_budget import STAGE_TOOL_NAME
+from main.runtime.stage_budget import SILENT_TOOL_NAME, STAGE_TOOL_NAME
 
 
 def test_initial_persistent_state_tracks_frontdoor_stage_state() -> None:
@@ -207,7 +207,9 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
     )
     tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
 
-    assert set(tools_by_name) == {STAGE_TOOL_NAME, "record_tool"}
+    # silent 是常驻内置控制工具，执行侧工具对象字典无条件注入（见 79b0f53a），
+    # 所以它出现在每一份精确集合断言里，不是这一轮多放出来的可调用工具。
+    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
     stage_result = await tools_by_name[STAGE_TOOL_NAME].ainvoke(
         {
@@ -300,7 +302,7 @@ async def test_frontdoor_stage_gate_keeps_ordinary_tools_visible_but_blocks_them
     tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
     blocked_result = await tools_by_name["record_tool"].ainvoke({"value": "alpha"})
 
-    assert set(tools_by_name) == {STAGE_TOOL_NAME, "record_tool"}
+    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
     assert blocked_result["status"] == "error"
     assert str(blocked_result["result_text"]).startswith(
         "Error: no active stage; call submit_next_stage before using other tools"
@@ -382,7 +384,7 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
     )
     exhausted_tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in exhausted_tools}
     blocked_after_exhaustion = await exhausted_tools_by_name["record_tool"].ainvoke({"value": "beta"})
-    assert set(exhausted_tools_by_name) == {STAGE_TOOL_NAME, "record_tool"}
+    assert set(exhausted_tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
     assert blocked_after_exhaustion["status"] == "error"
     assert str(blocked_after_exhaustion["result_text"]).startswith(
         "Error: current stage budget is exhausted; call submit_next_stage before using other tools"
@@ -419,8 +421,8 @@ async def test_frontdoor_without_valid_stage_keeps_runtime_visible_tools_stable(
     )
     exhausted_tool_names = {str(getattr(tool, "name", "") or "") for tool in exhausted_tools}
 
-    assert no_stage_tool_names == {STAGE_TOOL_NAME, "record_tool"}
-    assert exhausted_tool_names == {STAGE_TOOL_NAME, "record_tool"}
+    assert no_stage_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
+    assert exhausted_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
 
 def test_frontdoor_stage_state_snapshot_preserves_archive_refs() -> None:

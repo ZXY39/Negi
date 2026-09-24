@@ -126,29 +126,31 @@ async def test_react_loop_survives_non_mapping_submit_final_result_arguments() -
 
     class _Backend:
         def __init__(self) -> None:
-            self._responses = [
-                LLMResponse(
-                    content="",
-                    tool_calls=[
-                        ToolCallRequest(
-                            id="call:final-invalid",
-                            name="submit_final_result",
-                            arguments=["status"],  # type: ignore[arg-type]
-                        )
-                    ],
-                    finish_reason="tool_calls",
-                    usage={"input_tokens": 8, "output_tokens": 3},
-                ),
-            ]
+            invalid_final = LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final-invalid",
+                        name="submit_final_result",
+                        arguments=["status"],  # type: ignore[arg-type]
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+            # 一次无效最终提交只记一 strike 后续跑（`_INVALID_FINAL_SUBMISSION_LIMIT` = 5），
+            # 所以排 5 份同样的坏响应：本用例要测的是「非 mapping 参数不崩循环」，终点必须
+            # 落在 strike 预算到顶。迭代上限先到的话拿到的是 RuntimeError，不是失败态。
+            self._responses = [invalid_final] * 5
 
         async def chat(self, **kwargs):
             requests.append(dict(kwargs))
             return self._responses.pop(0)
 
-    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=3)
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=8)
     result = await loop.run(
         task=SimpleNamespace(task_id="task-non-mapping-final-args"),
-        node=SimpleNamespace(node_id="node-non-mapping-final-args", depth=0, node_kind="execution"),
+        node=SimpleNamespace(node_id="node-non-mapping-final-args", depth=0, node_kind="execution", goal="demo"),
         messages=[
             {"role": "system", "content": "system"},
             {"role": "user", "content": '{"task_id":"task-non-mapping-final-args","goal":"demo"}'},
@@ -156,9 +158,9 @@ async def test_react_loop_survives_non_mapping_submit_final_result_arguments() -
         tools={"submit_final_result": _SubmitFinalResultTool()},
         model_refs=["fake"],
         runtime_context={"task_id": "task-non-mapping-final-args", "node_id": "node-non-mapping-final-args"},
-        max_iterations=3,
+        max_iterations=8,
     )
 
     assert result.status == "failed"
     assert result.delivery_status == "blocked"
-    assert len(requests) == 1
+    assert len(requests) == 5
