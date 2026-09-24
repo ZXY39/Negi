@@ -116,6 +116,25 @@ def derive_password_key(password: str, *, salt: bytes, n: int, r: int, p: int) -
     return base64.urlsafe_b64encode(derived).decode("utf-8")
 
 
+def _atomic_write_bytes(path: Path, blob: bytes) -> None:
+    """Replace `path` only once the new bytes are fully on disk.
+
+    write_bytes truncates before writing: one ENOSPC left a 0-byte overlay, and
+    the decrypt guard then refused every later save — so a single full disk
+    destroyed all stored secrets and blocked their recovery.
+    """
+    tmp = path.with_name(f"{path.name}.tmp-{os.urandom(6).hex()}")
+    try:
+        with tmp.open("wb") as handle:
+            handle.write(blob)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _deep_set(payload: dict[str, Any], path: list[str], value: Any) -> None:
     cursor = payload
     for key in path[:-1]:
@@ -245,7 +264,7 @@ class SecretOverlayStore:
         encrypted = fernet_from_key(master_key).encrypt(
             json.dumps(payload or {}, ensure_ascii=False, indent=2).encode("utf-8")
         )
-        path.write_bytes(encrypted)
+        _atomic_write_bytes(path, encrypted)
 
     def delete(self) -> None:
         path = _single_overlay_path(self.workspace)
@@ -507,25 +526,27 @@ class BootstrapSecurityService:
         with self._lock:
             return self._migrate_legacy_state(dry_run=True)
 
-    def _activate(self, *, master_key: str, replace_overlay: bool = False) -> None:
+    def _activate(self, *, master_key: str) -> None:
         self._active_master_key = master_key
         try:
             self._overlay_cache = self._overlay_store.load(master_key=master_key)
         except ValueError:
             # Present overlay that this master key cannot decrypt: the caller
-            # holds the wrong key. Stay usable in read-none mode but never
-            # persist — persisting here would destroy data owned by another
-            # key (this exact path wiped a real workspace's apikey overlay).
+            # holds the wrong key. Stay usable in read-none mode, and keep the
+            # unverified flag so a later mutation refuses instead of destroying
+            # data owned by another key.
             self._overlay_cache = {}
             self._overlay_unverified = True
             return
         self._overlay_unverified = False
-        self._persist_active_overlay(replace_overlay=replace_overlay)
+        # Activation never writes. Re-persisting what was just read turned every
+        # unlock into a rewrite of all stored secrets, and one ENOSPC during that
+        # rewrite is what truncated a real workspace's overlay to 0 bytes.
 
-    def _persist_active_overlay(self, *, replace_overlay: bool = False) -> None:
+    def _persist_active_overlay(self) -> None:
         if self._active_master_key is None:
             raise ValueError("project is locked")
-        if self._overlay_unverified and not replace_overlay:
+        if self._overlay_unverified:
             raise ValueError(
                 "secret overlay is undecryptable with the current master key; refusing to overwrite"
             )
