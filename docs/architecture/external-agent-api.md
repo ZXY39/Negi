@@ -31,7 +31,7 @@
 - 执行走 `SessionRuntimeBridge.prompt/prompt_batch`（与 web/CLI/cron 同一语义基座）。
 - 提交方可以是 HTTP 桥，也可以是 `/ws/ceo` 的网页输入车道（进程内经 `get_external_turn_service()` 调 `submit`，不经 Bearer 鉴权中间件）。两条发起方共用 `submit` 这一处裁决：入站 hold、幂等位（网页发起方不带 `Idempotency-Key`，`duplicate` 分支对它不可达）、排队回执、以及「回合契约」的终态不变量。回合的出站能力长在车道上而不是发起方上：`make_session_event_relay` 只在 `_execute_turn` 挂载，所以网页输入必须走这条车道，否则 hub 上没有 `reply.final`，表现为「网页看得到回复、渠道端什么都没有」。
 - 出站只承载 agent 回复与主动推送：**发起方的用户消息不回显到渠道**（事件集合里没有 user-echo 类型，投递它需要经总线走 `outbound.created`，那是主动消息额度）。网页在渠道会话里的接管只在转录与 web 侧可见。
-- **终态不变量**：每回合在全部路径上恰好发一个 `turn.completed` 或 `turn.failed`；`asyncio.CancelledError` 单独捕获、先发终态再上抛（缺终态曾卡死旧宿主的按会话串行队列，此为硬契约）。`turn.failed.error` 是用户可读全文（空则回退友好文案），`detail` 供排障。
+- **终态不变量**：每回合在全部路径上恰好发一个 `turn.completed` 或 `turn.failed`；`asyncio.CancelledError` 单独捕获、先发终态再上抛（缺终态曾卡死旧宿主的按会话串行队列，此为硬契约）。`turn.failed.error` 是用户可读全文（空则回退友好文案），`detail` 供排障。失败不作废这次提交：该输入在转录里保持未回答态，由下一个可见用户回合接回后回答（状态机见 `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」）。`turn.failed` 不在桥的投递事件集合里（见「内置官方 QQ 适配器」消息流），宿主若要把失败原因告诉用户，得自己消费事件流，g3ku 不替它发。
 - 排空兜底：prompt 返回后循环 `drain_queued_follow_up_messages` → `archive_follow_up_chain_transition` → `prompt_batch` 续跑，整条回合链对外只有一个终态。`prompt_batch` 只以批次最后一条输入驱动回合，较早输入的内容块在请求构建期并入（合同见 `runtime-overview.md`「prompt_batch 批次回合内容合并」）。
 - 回合任务以 `register_task(None, task)` 注册：以真实 session key 注册会在暂停时被 `cancel_session_tasks` 的 gather 自聚集死锁。
 - `Idempotency-Key` 头去重（进程内有界映射）：同会话同键重复提交返回 `status:"duplicate"` + `original_status`——原回合记录仍在则回报其状态与 `turn_id`；排队条目回报 `queued`（无 `turn_id`）；记录已被淘汰的带 id 条目回报 `completed`。排队提交同样占幂等位：否则同一条渠道消息在回合运行期间重试/重发会反复入队，用户收到多份重复回复。回合记录表有界，超限从最旧终态记录淘汰、运行中记录永不淘汰；幂等条目不随记录淘汰失效。
