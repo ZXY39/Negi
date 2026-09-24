@@ -274,6 +274,10 @@ class ResponsesProvider(LLMProvider):
             diagnostics = locals().get("diagnostics")
             if isinstance(diagnostics, _SSEDiagnosticsResponseProxy):
                 diagnostics_summary = diagnostics.render_summary(outcome="failed")
+            # 完整错误体外置到日志：节点错误与心跳只带 _format_error 的有界文本。
+            full_error_body = str(getattr(e, "error_body", "") or "").strip()
+            if full_error_body and full_error_body not in error_text:
+                logger.warning("Responses stream failure body: {}", full_error_body[:4000])
             if partial_content:
                 if diagnostics_summary:
                     logger.warning(diagnostics_summary)

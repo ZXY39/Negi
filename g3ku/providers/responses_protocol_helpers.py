@@ -24,9 +24,59 @@ from g3ku.runtime.tool_history import analyze_tool_call_history, extract_call_id
 
 
 class CodexStreamError(RuntimeError):
-    def __init__(self, message: str, *, partial_content: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_content: str = "",
+        error_body: str = "",
+    ) -> None:
         super().__init__(message)
         self.partial_content = str(partial_content or "")
+        self.error_body = str(error_body or "")
+
+
+# 心跳与节点错误栏只带这一段的长度，超出的完整错误体落到 worker 日志。
+CODEX_FAILURE_DETAIL_LIMIT = 600
+
+
+def _failure_body_from_event(event: dict[str, Any]) -> Any:
+    response = event.get("response") if isinstance(event.get("response"), dict) else {}
+    for candidate in (event.get("error"), response.get("error"), response.get("incomplete_details")):
+        if candidate:
+            return candidate if isinstance(candidate, dict) else {"message": str(candidate)}
+    if response:
+        projection = {
+            key: response.get(key)
+            for key in ("id", "status", "model", "error", "incomplete_details")
+            if response.get(key) is not None
+        }
+        if projection:
+            return projection
+    return {"message": str(event.get("message") or event.get("type") or "")}
+
+
+def _codex_failure_summary(event: dict[str, Any]) -> tuple[str, str]:
+    """Return (bounded one-line reason, full error body) for a failed stream event."""
+    body = _failure_body_from_event(event)
+    try:
+        full_body = json.dumps(body, ensure_ascii=False, default=str)
+    except Exception:
+        full_body = str(body)
+    parts: list[str] = []
+    if isinstance(body, dict):
+        parts = [
+            str(body.get(key) or "").strip()
+            for key in ("message", "type", "code", "reason")
+            if str(body.get(key) or "").strip()
+        ]
+    summary = " | ".join(parts) if parts else full_body
+    if len(summary) > CODEX_FAILURE_DETAIL_LIMIT:
+        summary = (
+            summary[:CODEX_FAILURE_DETAIL_LIMIT]
+            + f"...(截断，原文 {len(summary)} 字，完整错误体见 worker 日志)"
+        )
+    return summary, full_body
 
 
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -345,7 +395,12 @@ async def _consume_sse(
             finish_reason = _map_finish_reason(status)
             usage = normalize_usage_payload(response_payload.get("usage") or event.get("usage"))
         elif event_type in {"error", "response.failed"}:
-            raise CodexStreamError("Codex response failed", partial_content=content)
+            summary, full_body = _codex_failure_summary(event)
+            raise CodexStreamError(
+                f"Codex response failed: {summary}" if summary else "Codex response failed",
+                partial_content=content,
+                error_body=full_body,
+            )
 
     return content, tool_calls, finish_reason, usage
 
