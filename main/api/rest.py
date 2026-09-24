@@ -341,6 +341,24 @@ async def delete_task(task_id: str):
     return {'ok': True, 'deleted': True, 'task': record.model_dump(mode='json')}
 
 
+@router.post('/tasks/{task_id}/clear-temp')
+async def clear_task_temp_files(task_id: str):
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    try:
+        result = await service.clear_task_temp_files(task_id)
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == 'task_not_terminal':
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, **result}
+
+
 @router.post('/tasks/bulk-delete')
 async def bulk_delete_tasks(payload: dict | None = Body(default=None)):
     service = _service()

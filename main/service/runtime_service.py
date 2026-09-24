@@ -2356,6 +2356,66 @@ class MainRuntimeService:
             'failed_count': failed_count,
         }
 
+    async def clear_task_temp_files(self, task_id: str) -> dict[str, Any] | None:
+        """只清任务临时目录（temp/tasks/<id>），保留任务行、节点、产出与 event-history。
+
+        与 `delete_task` 的区别是本方法不删任何数据库记录，因此任务卡片与历史
+        回放照常。目录路径按删除链路的 S0 口径取双路径（runtime_meta 记录的实际
+        路径 + 确定性默认路径），防止 meta 指向别处时清错或漏清。
+
+        仅终态任务可清：任务目录是 exec / filesystem 工具的默认落点，
+        in_progress 与 paused（可能被 resume）的回合随时会再写进去。
+        """
+        task_id = self.normalize_task_id(task_id)
+        task = self.get_task(task_id)
+        if task is None:
+            return None
+        if str(task.status or '').strip().lower() not in {'success', 'failed'}:
+            raise ValueError('task_not_terminal')
+        return await asyncio.to_thread(self._clear_task_temp_dirs, task_id)
+
+    def _clear_task_temp_dirs(self, task_id: str) -> dict[str, Any]:
+        candidates = list(dict.fromkeys((
+            self._effective_task_temp_dir(task_id),
+            self._task_temp_dir(task_id, create=False),
+        )))
+        # 绝不允许作用到 temp 根或 temp 本身：meta 缺失/兜底值曾把这两级带进来。
+        protected = {
+            self._task_temp_root(create=False).resolve(strict=False),
+            (self._workspace_root() / 'temp').resolve(strict=False),
+            self._workspace_root().resolve(strict=False),
+        }
+        removed: list[str] = []
+        failed: list[str] = []
+        freed_bytes = 0
+        for path in candidates:
+            resolved = path.resolve(strict=False)
+            if resolved in protected:
+                continue
+            if not path.exists():
+                continue
+            size = self._directory_size_bytes(path)
+            if remove_tree(path):
+                removed.append(str(path))
+                freed_bytes += size
+            else:
+                failed.append(str(path))
+        try:
+            self._reconcile_task_disk_usage(task_id)
+        except Exception:
+            logger.warning('task temp clear: disk usage reconcile failed for {}', task_id, exc_info=True)
+        logger.info(
+            'task temp clear: {} removed={} failed={} freed_bytes={}',
+            task_id, len(removed), len(failed), freed_bytes,
+        )
+        return {
+            'found': True,
+            'task_id': task_id,
+            'removed_dirs': removed,
+            'failed_dirs': failed,
+            'freed_bytes': int(freed_bytes),
+        }
+
     async def _delete_task_with_task_delete_semantics(self, task_id: str) -> TaskRecord | None:
         task = self.get_task(task_id)
         if task is None:

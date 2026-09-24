@@ -12089,6 +12089,9 @@ const taskIsUnpassed = (task) => !!task && pStatus(task.status) === "success" &&
 const taskContinuationSummary = () => "";
 const canRetry = () => false;
 const canDelete = (task) => !!task && (!!task.is_paused || ["success", "failed"].includes(pStatus(task.status)));
+// 与后端 clear_task_temp_files 的门槛逐字一致：只认终态，不含 paused
+// （paused 任务可能被 resume，临时目录仍是工具默认落点）。
+const canClearTemp = (task) => !!task && ["success", "failed"].includes(pStatus(task.status));
 const EMPTY_TOKEN_USAGE = () => ({
     tracked: false,
     input_tokens: 0,

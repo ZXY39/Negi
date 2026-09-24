@@ -721,6 +721,11 @@ class ApiClient {
         return this._request("DELETE", `/api/tasks/${taskId}`, normalized);
     }
 
+    static async clearTaskTempFiles(taskId, options = {}) {
+        const normalized = options && typeof options === "object" && !Array.isArray(options) ? options : {};
+        return this._request("POST", `/api/tasks/${taskId}/clear-temp`, normalized);
+    }
+
     static async bulkDeleteTasks(taskIds = [], options = {}) {
         const normalized = options && typeof options === "object" && !Array.isArray(options) ? options : {};
         const body = {

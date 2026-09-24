@@ -1055,6 +1055,7 @@ function updateTaskToolbar() {
 
 function taskActionTone(action) {
     if (action === "pause") return "warn";
+    if (action === "clear_temp") return "warn";
     if (action === "delete") return "danger";
     return "success";
 }
@@ -1063,6 +1064,7 @@ function taskCardActions(task) {
     const actions = [];
     if (taskWorkerControlsAvailable() && canPause(task)) actions.push("pause");
     if (taskWorkerControlsAvailable() && canResume(task)) actions.push("resume");
+    if (canClearTemp(task)) actions.push("clear_temp");
     if (canDelete(task)) actions.push("delete");
     return actions.map((action) => ({ action, label: taskActionText(action, task), tone: taskActionTone(action) }));
 }
@@ -1074,16 +1076,18 @@ function primaryTaskAction(task) {
 }
 
 function taskActionText(action, task = null) {
-    return ({ pause: "\u6682\u505c", resume: "\u5f00\u59cb", delete: "\u5220\u9664" }[action] || "\u64cd\u4f5c");
+    return ({ pause: "暂停", resume: "开始", clear_temp: "清除临时文件", delete: "删除" }[action] || "操作");
 }
 
 function taskActionSuccessTitle(action) {
     if (action === "delete") return "删除成功";
+    if (action === "clear_temp") return "临时文件已清除";
     return `${taskActionText(action)}成功`;
 }
 
 function taskActionFailureTitle(action) {
     if (action === "delete") return "删除失败";
+    if (action === "clear_temp") return "清除临时文件失败";
     return `${taskActionText(action)}失败`;
 }
 
@@ -1092,6 +1096,10 @@ function taskActionErrorText(action, error) {
     if (action === "delete") {
         if (message.includes("task_still_stopping")) return "任务仍在停止中，请稍后再删";
         if (message.includes("task_not_deletable") || message.includes("task_not_paused")) return "仅已暂停或已完成的任务可删除";
+        if (message.includes("task_not_found")) return "任务不存在或已被删除";
+    }
+    if (action === "clear_temp") {
+        if (message.includes("task_not_terminal")) return "仅已完成或失败的任务可清除临时文件";
         if (message.includes("task_not_found")) return "任务不存在或已被删除";
     }
     return message || "Unknown error";
@@ -1103,7 +1111,7 @@ function taskActionRequiresWorker(action) {
 
 function taskActionRequestOptions(action, options = {}) {
     const normalized = options && typeof options === "object" && !Array.isArray(options) ? { ...options } : {};
-    if (action === "delete" && !Number.isFinite(normalized.timeoutMs)) normalized.timeoutMs = 30000;
+    if (["delete", "clear_temp"].includes(action) && !Number.isFinite(normalized.timeoutMs)) normalized.timeoutMs = 30000;
     return normalized;
 }
 
@@ -1143,8 +1151,20 @@ async function requestTaskAction(taskId, action, options = {}) {
     const requestOptions = taskActionRequestOptions(action, options);
     if (action === "pause") return ApiClient.pauseTask(taskId, requestOptions);
     if (action === "resume") return ApiClient.resumeTask(taskId, requestOptions);
+    if (action === "clear_temp") return ApiClient.clearTaskTempFiles(taskId, requestOptions);
     if (action === "delete") return ApiClient.deleteTask(taskId, requestOptions);
     throw new Error(`Unsupported task action: ${action}`);
+}
+
+function taskClearTempConfirmText() {
+    return "只删 temp/tasks 下该任务的临时目录，任务记录、节点与产出保留；临时目录里的正式交付物也会一并删除，无法恢复。";
+}
+
+function taskClearTempResultText(result) {
+    const freed = Number(result?.freed_bytes || 0);
+    const removed = Number(result?.removed_dirs?.length || 0);
+    if (!removed || freed <= 0) return "该任务没有可清除的临时目录";
+    return `已清除 ${removed} 个目录，释放 ${formatTaskBytes(freed)}`;
 }
 
 async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
@@ -1155,6 +1175,17 @@ async function runTaskAction(taskId, action, { returnFocus = null } = {}) {
             text: "删除后将移除任务记录、节点信息与全部过程数据，且无法恢复；报告类产出会自动导出到 deliverables 目录保留。",
             confirmLabel: "删除",
             confirmKind: "danger",
+            returnFocus,
+            onConfirm: () => performTaskAction(taskId, action),
+        });
+        return;
+    }
+    if (action === "clear_temp") {
+        openConfirm({
+            title: "清除临时文件",
+            text: taskClearTempConfirmText(),
+            confirmLabel: "清除",
+            confirmKind: "warn",
             returnFocus,
             onConfirm: () => performTaskAction(taskId, action),
         });
@@ -1182,8 +1213,13 @@ async function performTaskAction(taskId, action) {
             if (action === "resume") {
                 clearTaskPauseHint(taskId);
             }
-            const successText = taskId;
-            showToast({ title: taskActionSuccessTitle(action), text: successText, kind: "success" });
+            const successText = action === "clear_temp" ? taskClearTempResultText(result) : taskId;
+            const partialFailures = action === "clear_temp" && Number(result?.failed_dirs?.length || 0) > 0;
+            showToast({
+                title: partialFailures ? "部分临时目录未删除" : taskActionSuccessTitle(action),
+                text: successText,
+                kind: partialFailures ? "warn" : "success",
+            });
         }
         await loadTasks();
         if (action === "delete") {
