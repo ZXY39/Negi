@@ -334,12 +334,13 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 任务大厅顶部性能条的整条数据链——`WorkerPressureMonitor` 每拍（1s）采样的单槽 snapshot、`worker_status` 按 `worker_id` 主键的 UPSERT 行、`SQLiteTaskStore` 的单槽 runtime metrics——只承载"最新值"。覆盖写意味着失速通知（20 分钟量级才送达）到达时，当时是否有压力已经查不出来了。`perf_samples` 表补的就是这个时间维度。
 
-- **写入点是 worker 心跳，不是采样线程**：`WorkerHeartbeatServiceV2` 一拍末尾把本次心跳 payload 里性能条用到的字段（`_PERF_HISTORY_FIELDS` 白名单）追加成一行，节拍门 15s，每写满 240 行顺带按 24h 保留期裁剪。放在心跳侧的理由：这一拍已经在做 `upsert_worker_status` 落库、并且天然携带 `worker_id`；采样线程保持零写入，历史失败绝不放大成心跳丢失或存活日志断供（历史写排在存活金丝雀之后并单独吞异常）。
-- **15s 而不是 1s**：判"停滞是不是性能造成的"只需要知道某段窗口处于哪个档位、队列有没有等待，1s 粒度对结论无增益，却把行数与库体积乘 15。
+- **写入点紧跟状态落库**：`WorkerHeartbeatServiceV2` 一拍里，`upsert_worker_status` 之后第一件事就是 `_record_perf_history`（同一份 payload，白名单 `_PERF_HISTORY_FIELDS`），节拍门 15s，每写满 240 行顺带按 24h 保留期裁剪。顺序是契约而不是风格：`worker_status`/租约写入之后的 lease 续期与状态桥接投递任何一步抛异常，本拍就提前结束，排在它后面的步骤会长期不执行且无人知晓（实盘出现过心跳新鲜、历史 0 行、存活金丝雀一行没有的三连）。采样线程本身保持零写入。
+- **节拍异常必须可见**：本拍最外层 `except` 不再静默——首次与此后每 60 次连续失败各打一条 WARNING `worker heartbeat beat failed (N consecutive): <类型>: <消息>`（最坏约每分钟一行），节拍成功即清零计数。没有这条限流日志，"心跳看起来正常"与"心跳每拍都断在同一个地方"在日志上完全同形。
+- **15s 而不是 1s**：判"停滞是不是性能造成的"只需要知道某段窗口处于哪个档位、队列有没有等待，1s 粒度对结论无增益，却把行数与库体积乘 15。实测代价：一行 731 字节、一天 5760 行 ≈ 4.15 MiB（24h 封顶）、writer 占空比 0.05%；读侧 10min 窗口 3ms、24h 窗口 ~100ms——因此工具执行体必须走 `asyncio.to_thread`，同步跑会把 web 事件循环按住（与 `rest.py` 卸载 worker-status 同一理由）。
 - **落库而不是进程内环形缓冲**：web 与 task worker 是两个进程，读端（CEO 工具、失速判读）在 web 进程，跨进程可读依赖的正是这块共享 sqlite（`task_worker_status_outbox` 同前提）；内存缓冲在进程重启后即消失，而"重启后回看昨晚"恰是主用途。
 - **行不是任务作用域**：性能是机器级事实，因此不进 `delete_task` 的级联删除，只随保留期裁剪。
 - **读端只有一份聚合口径**：`MainRuntimeService._perf_sample_stats` 是唯一判读实现，两种渲染共用它——`perf_report()` 给模型（工具契约见 `tool-and-skill-system.md`「fixed builtin tools」表的 `perf_inspect` 行），`_perf_window_brief()` 给失速事件那一行（事件契约见 `heartbeat-system.md`「Task Stall Detection」）。新增消费方不得再写一份档位/队列判读。
-- **必须保住的判读语义**：`Samples=0` 与 `Sampling gap` 表示那段区间没有记录，不等于机器空闲，也不等于性能停滞——读端因此区分"库里从未有过行（跑着的 worker 早于该采样器，需重启）"与"采样中途停了（worker 掉线/未心跳）"。序列最多 40 桶：窗口变长只放大桶宽，报告长度与窗口无关，这是它能安全进上下文的前提。
+- **必须保住的判读语义**：`Samples=0` 与 `Sampling gap` 表示那段区间没有记录，不等于机器空闲，也不等于性能停滞——读端因此只报事实（库里总行数、最新一行时间、worker 心跳是否存在/新鲜到什么程度），把原因留给 worker 日志的 `worker heartbeat beat failed` / `failed to record perf sample` 两条锚点，并明说"没有行的区间事后补不回来"。**不要**在报告文案里写"就是旧进程/重启即可"这类单一断因：这条文案会被模型逐字转述给用户，而实盘已出现过心跳完全新鲜、行数为 0、原因却在写侧下游的情况。序列最多 40 桶：窗口变长只放大桶宽，报告长度与窗口无关，这是它能安全进上下文的前提。
 - **时间戳口径**：行按 worker 本地时区的 ISO 秒写入（与 `worker_status.updated_at` 同格式），查询锚点先 `.astimezone()` 再做字符串区间比较；带另一偏移的锚点（例如被规范化成 UTC 的失速静默时间）必须先转本地再比，否则整窗漏行。
 
 ## Node-Level Pause and Recovery

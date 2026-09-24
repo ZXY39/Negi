@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,13 @@ class _PerfInspectHandler(Tool):
 
     async def execute(self, *, mode: str = 'window', window_minutes: Any = None, **_kwargs: Any) -> str:
         await self._service.startup()
-        return self._service.perf_report(mode=mode, window_minutes=window_minutes)
+        # 读 24h 窗口要解析几千行 JSON（实测 ~100ms），与 rest.py 把 worker-status
+        # 查询卸载到线程池同一理由：同步跑会把事件循环按住，连带饿死轻读请求。
+        return await asyncio.to_thread(
+            self._service.perf_report,
+            mode=mode,
+            window_minutes=window_minutes,
+        )
 
 
 def build(runtime):

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -234,19 +235,66 @@ async def test_perf_report_distinguishes_never_sampled_from_stopped_sampling(tmp
         empty = service.perf_report(mode='window', window_minutes=10)
         assert 'Samples=0' in empty
         assert 'rows_total=0' in empty
-        assert 'worker restart' in empty
+        # No worker row at all => nothing can be sampled; do not blame the write path.
+        assert 'no worker heartbeat row at all' in empty
+        assert 'cannot be reconstructed afterwards' in empty
 
+        # A live heartbeat with zero rows points at the write side and hands over the
+        # discriminator instead of asserting one cause.
+        service.store.upsert_worker_status(
+            worker_id=WORKER_ID,
+            role='task_worker',
+            status='running',
+            updated_at=_local_iso(datetime.now()),
+            payload={'machine_pressure_available': False},
+        )
+        alive = service.perf_report(mode='window', window_minutes=10)
+        assert 'no perf row has ever landed' in alive
+        assert 'worker heartbeat beat failed' in alive
+
+        stale = datetime.now(timezone.utc) - timedelta(hours=5)
         service.store.record_perf_sample(
-            sampled_at=_local_iso(datetime.now(timezone.utc) - timedelta(hours=5)),
+            sampled_at=_local_iso(stale),
             worker_id=WORKER_ID,
             payload=_sample_payload(),
         )
         stopped = service.perf_report(mode='window', window_minutes=10)
         assert 'rows_total=1' in stopped
-        assert 'sampling stopped' in stopped
+        assert 'Sampling stopped' in stopped
         assert 'NOT that the machine was idle' in stopped
     finally:
         await service.close()
+
+
+def test_perf_history_survives_a_failing_status_publish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """实盘回归：publish 每拍抛异常时，历史与存活金丝雀曾被连带饿死。"""
+    from unittest.mock import MagicMock
+
+    store = SQLiteTaskStore(tmp_path / 'perf.sqlite3')
+    fake_logger = MagicMock()
+    monkeypatch.setattr(heartbeat_module, 'logger', fake_logger)
+    beat = WorkerHeartbeatServiceV2(
+        store=store,
+        scheduler=_FakeScheduler(),
+        execution_mode='worker',
+        worker_id=WORKER_ID,
+        publish_status=lambda item: (_ for _ in ()).throw(RuntimeError('Event loop is closed')),
+        perf_history_interval_seconds=0.001,
+    )
+    try:
+        beat.start_background()
+        deadline = time.monotonic() + 5.0
+        while store.count_perf_samples() < 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        asyncio.run(beat.close())
+
+    assert store.count_perf_samples() >= 1, 'the perf write must not sit behind publish'
+    assert beat._beat_failures >= 1
+    warnings = [call for call in fake_logger.warning.call_args_list if 'worker heartbeat beat failed' in str(call)]
+    assert len(warnings) == 1, 'a broken beat reports once, then rate-limits'
+    assert 'Event loop is closed' in str(warnings[0])
+    store.close()
 
 
 @pytest.mark.asyncio
@@ -346,8 +394,10 @@ async def test_stall_perf_verdict_reports_missing_coverage_without_padding(tmp_p
         service.log_service.update_task_runtime_meta(task.task_id, last_visible_output_at=silent_since.isoformat())
 
         summary = str(service.build_task_stall_payload(task.task_id, bucket_minutes=20).get('perf_window_summary') or '')
-        assert summary.startswith('perf: no perf samples ever recorded')
-        assert len(summary) < 120, 'the stall event stays one short line when there is nothing to report'
+        assert summary.startswith('perf: no perf rows')
+        assert 'coverage gap, not evidence of no pressure' in summary
+        assert 'restart' not in summary, 'the event must not assert a cause it cannot observe'
+        assert len(summary) < 160, 'the stall event stays one short line when there is nothing to report'
     finally:
         await service.close()
 

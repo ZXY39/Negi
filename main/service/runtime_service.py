@@ -10665,40 +10665,81 @@ class MainRuntimeService:
         lines.append(self._render_perf_window_report(rows=rows, window_minutes=window_minutes))
         return '\n'.join(lines)
 
-    def _perf_coverage_lines(self) -> list[str]:
+    def _perf_coverage_facts(self) -> dict[str, Any]:
+        """"为什么没有行"只给可观测事实，不断言唯一原因（原因要靠 worker 日志判）。"""
         total = int(self.store.count_perf_samples())
-        if total <= 0:
-            return [
-                'Perf table: rows_total=0.',
-                'Cause: the worker perf sampler never wrote a row - the running worker process predates it, '
-                'so a worker restart is required before history exists.',
-            ]
         newest = self.store.newest_perf_sample() or {}
-        lines = [f'Perf table: rows_total={total}.']
         newest_stamp = self._perf_sample_time(newest.get('sampled_at'))
-        if newest_stamp is None:
-            return lines
-        age_seconds = max(0.0, (datetime.now(timezone.utc) - newest_stamp).total_seconds())
-        lines.append(
-            f"Newest sample: {newest.get('sampled_at')} age={_perf_seconds_text(age_seconds)} "
-            f"worker_id={newest.get('worker_id') or '-'}."
+        newest_age_seconds: float | None = None
+        if newest_stamp is not None:
+            newest_age_seconds = max(0.0, (datetime.now(timezone.utc) - newest_stamp).total_seconds())
+        live = self.worker_status_payload()
+        heartbeat_age_ms = _perf_number(live.get('worker_heartbeat_age_ms'))
+        return {
+            'rows_total': total,
+            'newest_at': str(newest.get('sampled_at') or ''),
+            'newest_age_seconds': newest_age_seconds,
+            'worker_id': str(newest.get('worker_id') or ''),
+            'worker_state': str(live.get('worker_state') or 'unknown'),
+            'worker_online': bool(live.get('worker_online')),
+            'heartbeat_age_seconds': None if heartbeat_age_ms is None else round(heartbeat_age_ms / 1000.0, 1),
+        }
+
+    def _perf_coverage_lines(self) -> list[str]:
+        facts = self._perf_coverage_facts()
+        total = int(facts['rows_total'])
+        heartbeat_text = (
+            f"worker state={facts['worker_state']}"
+            + (f" heartbeat_age={facts['heartbeat_age_seconds']}s" if facts['heartbeat_age_seconds'] is not None else '')
         )
-        if age_seconds > 90.0:
-            lines.append('Cause: sampling stopped at that point - the worker process was down, paused, or not heartbeating.')
+        if total <= 0:
+            lines = [f'Perf table: rows_total=0; {heartbeat_text}.']
+            if facts['heartbeat_age_seconds'] is None:
+                lines.append(
+                    'There is no worker heartbeat row at all - the sampler runs inside that heartbeat, so nothing '
+                    'can be recorded until a worker starts.'
+                )
+            elif facts['worker_online']:
+                lines.append(
+                    'The worker is heartbeating yet no perf row has ever landed, so the gap is on the write side: '
+                    'that worker process runs a build without the sampler, or its write fails. Discriminator in the '
+                    "worker log: 'worker heartbeat beat failed' / 'failed to record perf sample'."
+                )
+            else:
+                lines.append('The worker heartbeat is stale/offline - sampling stops with it.')
+            lines.append('An interval with no rows cannot be reconstructed afterwards.')
+            return lines
+        lines = [f'Perf table: rows_total={total}, newest sample={facts["newest_at"]} (worker_id={facts["worker_id"] or "-"})']
+        newest_age = facts['newest_age_seconds']
+        if newest_age is not None and newest_age > 90.0:
+            lines.append(
+                f'Sampling stopped {_perf_seconds_text(newest_age)} ago while {heartbeat_text} - the process that '
+                'sampled has since been replaced, or the heartbeat beat no longer reaches the sampler (same two '
+                'worker-log lines decide).'
+            )
+        lines.append('An interval with no rows cannot be reconstructed afterwards.')
         return lines
 
     def _perf_coverage_brief(self) -> str:
         """失速事件用的短版覆盖说明：只回答"为什么没有样本"，不铺开成多行。"""
-        total = int(self.store.count_perf_samples())
+        facts = self._perf_coverage_facts()
+        total = int(facts['rows_total'])
+        heartbeat = (
+            f'worker heartbeat age={facts["heartbeat_age_seconds"]}s'
+            if facts['heartbeat_age_seconds'] is not None
+            else f"worker state={facts['worker_state']}"
+        )
         if total <= 0:
-            return 'no perf samples ever recorded - the running worker predates the sampler'
-        newest_stamp = self._perf_sample_time((self.store.newest_perf_sample() or {}).get('sampled_at'))
-        if newest_stamp is None:
-            return f'no perf samples in window (rows_total={total})'
-        age_seconds = max(0.0, (datetime.now(timezone.utc) - newest_stamp).total_seconds())
-        if age_seconds > 90.0:
-            return f'perf sampling stopped {_perf_seconds_text(age_seconds)} ago - the worker was down or not heartbeating'
-        return f'no perf samples in window (rows_total={total})'
+            if facts['heartbeat_age_seconds'] is None:
+                return 'no perf rows and no worker heartbeat row - coverage gap, not evidence of no pressure'
+            return f'no perf rows ever written ({heartbeat}) - a coverage gap, not evidence of no pressure'
+        newest_age = facts['newest_age_seconds']
+        if newest_age is not None and newest_age > 90.0:
+            return (
+                f'perf sampling stopped {_perf_seconds_text(newest_age)} ago, {heartbeat} '
+                '- a coverage gap, not evidence of no pressure'
+            )
+        return f'no perf samples in this window (rows_total={total}) - a coverage gap, not evidence of no pressure'
 
     def _perf_window_brief(self, *, start_at: datetime, end_at: datetime) -> str:
         """失速窗口的一行性能判读，与 perf_inspect 共用同一份聚合口径。"""
