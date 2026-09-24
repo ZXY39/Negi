@@ -2587,3 +2587,41 @@
     height: 38px;
     min-height: 38px;
 }
+
+/* 61. 模型页两列按窗口高度铺到底：旧层在这一页叠了四个互不相干的魔数——容器
+   min-height: calc(100vh - 120px)、面板 min-height: 72vh、模型列表 max-height:
+   calc(100dvh - 320px)、角色链 max-height: min(42dvh, 420px)。1280×690 实测模型
+   列表停在 560（面板可用到 662）、四列角色链停在 460，底部空一整条；而头部一旦
+   换行（编辑模型链时展开的最大轮数条）容器就顶出 .main-content 的 overflow:hidden，
+   最后一行再也滚不到。改成容器 flex:1 吃满剩余高度、列表 flex:1 且解除 max-height，
+   两列收在同一条基线上，滚动只发生在列表内部。只作用于 ≥1024px 的两列档：窄屏是
+   模型列表压角色链的单列，撑满会各分半窗，留旧行为。 */
+@media (min-width: 1024px) {
+    [data-ui-version="v2"] .llm-page-layout {
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+
+    [data-ui-version="v2"] .llm-bindings-panel,
+    [data-ui-version="v2"] .llm-routes-panel {
+        min-height: 0;
+    }
+
+    [data-ui-version="v2"] .model-shared-list,
+    [data-ui-version="v2"] .model-routing-grid,
+    [data-ui-version="v2"] .model-chain-list {
+        flex: 1 1 auto;
+        max-height: none;
+    }
+
+    /* 角色链的容器有两个渲染方：org_graph_llm.js 用 .role-chain-section，
+       org_graph_app.js 用 .model-role-section。旧层只给后者配了 flex:1 +
+       min-height:0，所以模型页实盘走的那一份是普通 block——列表按内容长到
+       498px，把 530px 的卡片顶穿（scrollHeight 576），底部照样看不见。 */
+    [data-ui-version="v2"] .model-chain-card > .role-chain-section {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 0;
+    }
+}

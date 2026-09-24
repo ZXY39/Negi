@@ -7013,7 +7013,7 @@ textarea {
 }
 
 .app-toast {
-    width: min(420px, calc(100vw - 48px));
+    width: min(210px, calc(100vw - 48px));
     display: flex;
     flex-direction: column;
     gap: 12px;
