@@ -2237,6 +2237,19 @@
     word-break: break-all;
 }
 
+/* 配置包对话框的两段风险文案必须整段读完：正文和段落各自都带 max-height +
+   overflow-y:auto，套起来就是"看得到但读不全"。这里放开段落自己的裁剪，
+   并把正文上限抬到视口高度，只有窗口真的很矮时才退回滚动。 */
+[data-ui-version="v2"] #config-bundle-dialog .confirm-text {
+    max-height: none;
+    overflow-y: visible;
+    padding-right: 0;
+}
+
+[data-ui-version="v2"] #config-bundle-dialog .project-settings-body {
+    max-height: min(86vh, 920px);
+}
+
 /* 50. 勾选框：原生框在暗色下几乎看不见，统一换成品牌底 + 伪元素勾形，
    勾形不依赖 lucide，解锁界面与设置弹窗共用同一份。 */
 [data-ui-version="v2"] .ui-checkbox-row {

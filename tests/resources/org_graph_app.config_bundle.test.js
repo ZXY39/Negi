@@ -5,6 +5,8 @@ const vm = require("node:vm");
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
+const V2_CSS_PATH = "g3ku/web/frontend/org_graph_redesign.css";
+const V2_CSS_CODE = fs.readFileSync(V2_CSS_PATH, "utf8");
 
 class StubElement {
     constructor() {
@@ -417,6 +419,27 @@ test("有在跑工作时必须勾选暂停才提交", async () => {
         "secret-pass-123",
         { confirmRunningWork: true },
     ]);
+});
+
+test("配置包对话框的风险文案不被 max-height 裁剪", () => {
+    const rule = (selector) => {
+        const match = V2_CSS_CODE.match(
+            new RegExp(`\\[data-ui-version="v2"\\] ${selector.replace(/[.#]/g, "\\$&")} \\{([^}]*)\\}`)
+        );
+        return match ? match[1] : null;
+    };
+
+    const text = rule("#config-bundle-dialog .confirm-text");
+    assert.ok(text, "缺少 #config-bundle-dialog .confirm-text 覆盖，风险文案会退回 24vh 内滚");
+    assert.match(text, /max-height:\s*none/);
+    assert.match(text, /overflow-y:\s*visible/);
+
+    const body = rule("#config-bundle-dialog .project-settings-body");
+    assert.ok(body, "缺少 #config-bundle-dialog .project-settings-body 高度覆盖");
+    const cap = body.match(/max-height:\s*min\((\d+)vh,\s*(\d+)px\)/);
+    assert.ok(cap, "上限必须是 vh+px 双限：只给 px 会在矮窗口溢出，只给 vh 会在大屏过长");
+    assert.ok(Number(cap[1]) >= 80, "vh 上限过低，正常窗口仍要滚动");
+    assert.ok(Number(cap[2]) >= 700, "px 上限过低，装不下完整正文");
 });
 
 test("锁定态读不到在跑工作时按无在跑工作处理", async () => {
