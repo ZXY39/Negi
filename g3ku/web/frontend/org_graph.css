@@ -12039,10 +12039,6 @@ textarea {
 }
 
 .task-trace-round-text {
-    padding: var(--space-2) var(--space-4);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-md);
-    background: var(--bg-msg-sys);
     color: var(--text-primary);
     font-size: 0.9rem;
     line-height: 1.65;
@@ -12051,7 +12047,6 @@ textarea {
 }
 
 .task-trace-live-text {
-    border-style: dashed;
     color: var(--text-secondary);
 }
 

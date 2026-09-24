@@ -928,9 +928,10 @@
 [data-ui-version="v2"] .message.user .msg-content {
     max-width: 100%;
     background: var(--ui-brand-soft);
-    /* 与 §57 节点卡同一描边口径：底已是 --ui-brand-soft，描边再满色会让气泡
-       比树里的运行中节点亮一档。 */
-    border-color: color-mix(in srgb, var(--ui-brand) 50%, transparent);
+    /* 描边比 §57 节点卡的 50% 再降一档：那里的描边承担「运行中/检验中」这个状态，
+       满色才读得出；用户气泡的身份已经由 --ui-brand-soft 底色说完，描边只需要把
+       圆角盒收住，50% 会让气泡比同屏任何一条模型输出都抢眼。 */
+    border-color: color-mix(in srgb, var(--ui-brand) 30%, transparent);
     color: var(--ui-text);
 }
 
