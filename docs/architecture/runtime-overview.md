@@ -122,7 +122,7 @@ transcript 落一条 assistant 行，带 `silent_reply=true`、`prompt_visible=t
 
 **旧哨兵的字面串不得出现在任何逐字送达模型的面。** 删除识别（P4）只覆盖代码侧判据，指令本身还长在提示词里：`g3ku/runtime/prompts/ceo_frontdoor.md` 与 `heartbeat_rules.md` 曾继续要求"整条回复只输出哨兵"，于是每个新会话的 system prompt 都在教模型用一条已经没人认的写法——2026-09-24 00:34 一个新开网页会话照做并把机制解释给用户，就是这条。同一句话还可能从**长期记忆**注入（记忆条目每轮进 index 1），那属于操作员数据，走 `/api/memory/current/delete` 清理。回归守卫见 `tests/resources/test_frontdoor_silent_tool_exposure.py`：提示词目录与契约渲染器里出现该字面串即失败。代码注释与维护文档里保留这个词是刻意的——它们记录"为什么删"，不进上下文。
 
-Web 侧没有"静默占位文案"这个概念：静默回合走与普通回合**同一条** `ceo.reply.final` 通道，带上正文、`silent_reply=true` 与 `silent_reason`，并照常携带 `source` / `turn_id` / `user_messages` / `usage` / canonical context 合并结果。前端渲染成一行可展开的「已静默 · 理由」，展开显示原文；UI 合同详见 `web-and-admin.md`「CEO Turn Silent Reply Contract」。新维护者最容易误读的一点：静默 final 一旦缺少 canonical context 又缺少正文，`finalizeCeoTurn` 会退到"无回合元素"兜底分支并 `discardPendingCeoTurns`，整条阶段轨道连同工具步骤一起被删掉——表现为"静默回合什么都没显示"，根因在 final 载荷字段不全，不在渲染层。会话列表 preview 在没有可见文本时保持原值（`update_ceo_session_after_turn` 对空 `preview_source` 不写回）。
+Web 侧没有"静默占位文案"这个概念：静默回合走与普通回合**同一条** `ceo.reply.final` 通道，带上正文、`silent_reply=true` 与 `silent_reason`，并照常携带 `source` / `turn_id` / `user_messages` / `usage` / canonical context 合并结果。前端把整条响应折成一行「静默消息 HH:MM:SS」，点开露出原文与轨道、底部常驻静默原因，UI 合同详见 `web-and-admin.md`「CEO Turn Silent Reply Contract」。新维护者最容易误读的一点：静默 final 一旦缺少 canonical context 又缺少正文，`finalizeCeoTurn` 会退到"无回合元素"兜底分支并 `discardPendingCeoTurns`，整条阶段轨道连同工具步骤一起被删掉——表现为"静默回合什么都没显示"，根因在 final 载荷字段不全，不在渲染层。会话列表 preview 在没有可见文本时保持原值（`update_ceo_session_after_turn` 对空 `preview_source` 不写回）。
 
 内部轮还有一层 live-only ACK：模型调用 `silent` 结束的 heartbeat/cron 回合，`_is_internal_ack_message_end` 依据 `silent_reply` flag 认定，前端收到一条 `ceo.internal.ack` 而不是一个空气泡；`task_terminal` 心跳走回复通道，不算 ACK。
 

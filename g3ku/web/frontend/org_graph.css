@@ -2873,36 +2873,62 @@ textarea {
     min-height: 28px;
 }
 
-/* 静默回合（模型调用 silent 工具）折成一行：摘要=已静默+模型填的理由，展开=原文。
-   放在旧层而不是 V2 band：这是个全新类，不与任何既有状态类争覆盖顺序。 */
-.ceo-silent-turn {
-    border: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
-    border-radius: 8px;
-    padding: 0 10px;
-    color: var(--text-secondary);
-}
-
-.ceo-silent-turn > summary {
-    cursor: pointer;
-    list-style: none;
-    min-height: 28px;
-    display: flex;
-    align-items: center;
-}
-
-.ceo-silent-turn > summary::-webkit-details-marker {
+/* 静默回合（模型调用 silent 工具）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头，
+   点开才露出正文、阶段轨道与工具步骤，展开后气泡底部常驻静默原因。
+   折叠只用一个 display 规则完成（不在 DOM 里搬节点），所以全新类不与既有状态类争覆盖顺序。 */
+.ceo-silent-message:not(.ceo-silent-expanded) .ceo-turn-content > :not(.ceo-silent-line) {
     display: none;
 }
 
-.ceo-silent-turn[open] > summary {
-    border-bottom: 1px solid var(--border-color, rgba(255, 255, 255, 0.12));
-    margin-bottom: 8px;
+.ceo-silent-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 0.76rem;
+    letter-spacing: 0.01em;
+    cursor: pointer;
 }
 
-.ceo-silent-turn-body {
-    color: var(--text-primary);
+/* 两侧的细线是这行唯一的装饰：不描边框、不画折叠盒。 */
+.ceo-silent-line::before,
+.ceo-silent-rule {
+    content: "";
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--border-color, rgba(255, 255, 255, 0.12));
+}
+
+.ceo-silent-label {
+    flex: 0 0 auto;
+}
+
+.ceo-silent-caret {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(45deg);
+    transition: transform 160ms ease;
+}
+
+.ceo-silent-expanded .ceo-silent-caret {
+    transform: rotate(-135deg);
+}
+
+.ceo-silent-reason {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.5;
     white-space: normal;
-    padding-bottom: 10px;
 }
 
 .ceo-turn-usage {
