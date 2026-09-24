@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, TypeVar
 
 import json_repair
@@ -36,6 +36,10 @@ class StreamingDiagnostics:
     first_text_delta_received_at: float | None = None
     last_chunk_kind: str = ""
     chunk_count: int = 0
+    # 分片 kind 计数：chunk_count 只说"上游一直在说话"，说不出说的是哪一类。缺哪种
+    # kind 即计数 0，所以"chunk_count 很大而 text/reasoning/tool_call 全缺"这类
+    # 空转流只能靠这里区分，别把它当成新的判据字段来读。
+    chunk_kind_counts: dict[str, int] = field(default_factory=dict)
     # 是否收到过携带 finish_reason 的 choice 分片。上游在思考/生成中途关闭 SSE 时
     # 该标记保持 False，而 finish_reason 仍会落到默认值，日志里看起来像正常完成。
     finish_reason_seen: bool = False
@@ -46,12 +50,17 @@ class StreamingDiagnostics:
 
     def note_chunk(self, kind: str, *, is_text: bool = False) -> None:
         now = time.perf_counter()
+        normalized_kind = str(kind or "chunk")
         self.chunk_count += 1
-        self.last_chunk_kind = str(kind or "chunk")
+        self.last_chunk_kind = normalized_kind
+        self.chunk_kind_counts[normalized_kind] = self.chunk_kind_counts.get(normalized_kind, 0) + 1
         if self.first_chunk_received_at is None:
             self.first_chunk_received_at = now
         if is_text and self.first_text_delta_received_at is None:
             self.first_text_delta_received_at = now
+
+    def render_chunk_kind_histogram(self) -> str:
+        return ",".join(f"{kind}:{count}" for kind, count in sorted(self.chunk_kind_counts.items()))
 
     def note_finish_reason(self) -> None:
         self.finish_reason_seen = True
@@ -78,6 +87,7 @@ class StreamingDiagnostics:
             f"first_text_delta_received_ms={elapsed_ms(self.first_text_delta_received_at)}",
             f"last_chunk_kind={self.last_chunk_kind or '<none>'}",
             f"chunk_count={self.chunk_count}",
+            f"chunk_kinds={self.render_chunk_kind_histogram()}",
             f"finish_reason_seen={int(self.finish_reason_seen)}",
         ]
         if outcome == "completed":

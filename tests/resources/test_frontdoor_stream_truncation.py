@@ -71,6 +71,43 @@ async def test_consumer_records_finish_reason_when_stream_terminates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_diagnostics_histogram_tells_keepalive_only_stream_apart_from_thinking_stream() -> None:
+    """长流卡在哪一侧由 kind 直方图判：chunk_count 只证明分片一直在到。
+
+    上游可以挂着 SSE 滴十几分钟不携带任何增量而照常带 finish_reason 收尾，
+    这种流既不会被 idle-chunk 超时截断，也不会留下可用的判读线索。
+    """
+    keepalive = StreamingDiagnostics.start("openai_chat")
+    await consume_openai_like_chat_stream(
+        _aiter(
+            [{"usage": {"prompt_tokens": 7}}] * 3
+            + [{"choices": [{"delta": {}, "finish_reason": "stop"}]}]
+        ),
+        diagnostics=keepalive,
+        first_chunk_timeout_seconds=5,
+        idle_chunk_timeout_seconds=5,
+    )
+    keepalive_summary = keepalive.render_summary(outcome="completed")
+    assert "first_text_delta_received_ms= " in keepalive_summary
+    assert "chunk_kinds=chunk:1,non_choice_chunk:3" in keepalive_summary
+
+    thinking = StreamingDiagnostics.start("openai_chat")
+    await consume_openai_like_chat_stream(
+        _aiter(_reasoning_only_chunks(2) + [{"choices": [{"delta": {"content": "正文"}}]}]),
+        diagnostics=thinking,
+        first_chunk_timeout_seconds=5,
+        idle_chunk_timeout_seconds=5,
+    )
+    thinking_summary = thinking.render_summary(outcome="completed")
+    assert "chunk_kinds=reasoning_delta:2,text_delta:1" in thinking_summary
+    # 直方图必须与 chunk_count 同账，否则有 kind 漏记。
+    kinds_total = sum(
+        int(item.split(":")[1]) for item in thinking_summary.split("chunk_kinds=")[1].split()[0].split(",")
+    )
+    assert kinds_total == thinking.chunk_count
+
+
+@pytest.mark.asyncio
 async def test_adapter_carries_stream_incomplete_onto_ai_message() -> None:
     async def _chat(**_kwargs):
         return LLMResponse(content=None, reasoning_content="想了一半", stream_incomplete=True)
