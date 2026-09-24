@@ -50,6 +50,9 @@ _TRANSCRIPT_STATE_COMPLETED = "completed"
 # _persist_internal_prompt_messages），失败回合若不回收会在每一轮请求体里反复堆积
 # （实测单会话累积到占上下文 38.8%）。原始 jsonl 行保留，仅改 metadata 状态。
 _TRANSCRIPT_STATE_DISCARDED = "discarded"
+# 失败回合写进转录的助手行来源标记。它不是对用户的回答：待重投判据（见
+# `_rehydrate_queued_follow_ups`）按它把该轮从"已回答"里摘出去。
+_TRANSCRIPT_ERROR_REPLY_SOURCE = "runtime_error"
 # 手动上下文压缩的运行态：由 api/ceo_sessions 写、由 frontdoor_inbound_hold() 读。
 # 常量放在运行层，是为了让四条入站车道问的是同一个字段名（api 层依赖运行层，反向不行）。
 MANUAL_COMPRESSION_STATE_ATTR = "_manual_context_compression"
@@ -1456,6 +1459,60 @@ class RuntimeAgentSession:
             )
         return flipped
 
+    def _requeue_unanswered_user_inputs(self, user_input: UserInputMessage) -> int:
+        """把没有拿到真实模型轮次的用户输入退回排队队列，返回放回条数。
+
+        ``pending`` 的真相是"内存队列还打算派发它"，所以只有放回队列才允许行留在
+        pending；否则下一个成功回合的 `_retire_consumed_pending_user_messages` 会把它
+        当成已消费的排队行翻成 completed，消息重新变成永久缺席。
+        """
+        live_turn_ids = {
+            self._user_input_turn_id(item)
+            for item in list(self._state.queued_follow_up_messages or [])
+            if self._user_input_turn_id(item)
+        }
+        restored = 0
+        for item in self._current_user_batch_inputs(user_input):
+            if not isinstance(item, UserInputMessage):
+                continue
+            text = self._history_text(item.content)
+            if not text.strip() and not item.attachments:
+                continue
+            turn_id = self._user_input_turn_id(item)
+            if turn_id and turn_id in live_turn_ids:
+                continue
+            self._state.queued_follow_up_messages.append(item)
+            if turn_id:
+                live_turn_ids.add(turn_id)
+            restored += 1
+        if restored:
+            logger.info(
+                "Requeued {} unanswered user message(s) for {} after turn failure",
+                restored,
+                self._state.session_key,
+            )
+        return restored
+
+    def _mirror_completed_continuity_as_turn_boundary(self, *, session_key: str, turn_id: str) -> None:
+        """失败轮的边界快照 = 基线在上一成功轮停下的那份样子。
+
+        截断资格取的是 **prev_turn** 的快照（`web_ceo_history_edit.py:206`），所以失败轮
+        自己不写快照，被吃掉的是"它后面那条消息"的编辑重发/Fork 资格。空基线不写：
+        那会让截断把会话清成零上下文。best-effort，失败只影响截断资格。
+        """
+        try:
+            from g3ku.runtime.web_ceo_sessions import (
+                read_completed_continuity_snapshot,
+                write_turn_boundary_snapshot,
+            )
+
+            payload = read_completed_continuity_snapshot(session_key) or {}
+            if not list(payload.get("frontdoor_request_body_messages") or []):
+                return
+            write_turn_boundary_snapshot(session_key, turn_id, payload)
+        except Exception:
+            logger.debug("Failed-turn boundary snapshot skipped for {}", session_key)
+
     def _discard_internal_prompt_messages(self, persisted_session: Any, turn_id: str) -> int:
         """把指定 turn 的内部提示词消息（心跳/cron 规则 system + 事件束 user）翻成 discarded。
 
@@ -2706,6 +2763,7 @@ class RuntimeAgentSession:
         route_kind: str,
         assistant_metadata: dict[str, Any] | None = None,
         retire_lingering_transcript_rows: bool = False,
+        promote_user_transcript_rows: bool = True,
     ) -> Any | None:
         persisted_session = None
         try:
@@ -2716,12 +2774,13 @@ class RuntimeAgentSession:
                     current_text = self._history_text(current_input.content)
                     if not current_text.strip() and not current_input.attachments:
                         continue
-                    self._upsert_transcript_user_message(
-                        persisted_session=persisted_session,
-                        user_input=current_input,
-                        user_text=current_text,
-                        transcript_state=_TRANSCRIPT_STATE_COMPLETED,
-                    )
+                    if promote_user_transcript_rows:
+                        self._upsert_transcript_user_message(
+                            persisted_session=persisted_session,
+                            user_input=current_input,
+                            user_text=current_text,
+                            transcript_state=_TRANSCRIPT_STATE_COMPLETED,
+                        )
                     visible_user_texts.append(current_text)
                 if visible_user_texts:
                     user_text = visible_user_texts[-1]
@@ -3349,6 +3408,10 @@ class RuntimeAgentSession:
             self._last_verified_task_ids = []
             if persist_transcript:
                 if internal_source is None:
+                    # 接回不能只长在会话重建上：同进程里失败回合留下的 pending 行没有
+                    # 第二个读者。放在可见用户回合分支，是为了让待重投的输入不会被
+                    # 心跳/cron 认领（内部回合走的不是这条路）。队列非空时自身短路。
+                    self._rehydrate_queued_follow_ups()
                     await self._persist_pending_user_messages(
                         user_inputs=self._current_user_batch_inputs(user_input),
                     )
@@ -3516,7 +3579,7 @@ class RuntimeAgentSession:
             )
             if persist_transcript:
                 assistant_metadata = {
-                    "source": "runtime_error",
+                    "source": _TRANSCRIPT_ERROR_REPLY_SOURCE,
                     "error_code": error.code,
                     "error_message": error.message,
                     "recoverable": error.recoverable,
@@ -3536,6 +3599,7 @@ class RuntimeAgentSession:
                     internal_source=internal_source,
                     route_kind=str(getattr(self, "_last_route_kind", "") or ""),
                     assistant_metadata=assistant_metadata,
+                    promote_user_transcript_rows=False,
                 )
                 # 失败回合：回收本轮已落盘的内部提示词（心跳/cron 规则 system + 事件束
                 # user），翻成 discarded 使其退出后续可重放上下文，避免反复堆积。助手错误
@@ -3546,6 +3610,17 @@ class RuntimeAgentSession:
                         self._current_turn_id(user_input),
                     )
                     self._loop.sessions.save(persisted_session)
+                if internal_source is None:
+                    # 用户输入保持提交点写下的 pending 并放回队列：派发它的只能是下一个
+                    # 可见用户回合（`dispatch_queued_follow_ups_if_idle` 与两条 drain 通道
+                    # 都在用户车道上），失败在这里不会静默吞进内部回合。
+                    self._requeue_unanswered_user_inputs(user_input)
+                    failed_turn_id = str(self._active_turn_id or "").strip()
+                    if failed_turn_id:
+                        self._mirror_completed_continuity_as_turn_boundary(
+                            session_key=self._state.session_key,
+                            turn_id=failed_turn_id,
+                        )
             await self._emit(
                 "error",
                 code=error.code,
@@ -3884,6 +3959,15 @@ class RuntimeAgentSession:
         answered_turn_ids = set()
         for row in rows:
             if not isinstance(row, dict) or str(row.get("role") or "") != "assistant":
+                continue
+            row_metadata = row.get("metadata")
+            if (
+                isinstance(row_metadata, dict)
+                and str(row_metadata.get("source") or "").strip().lower()
+                == _TRANSCRIPT_ERROR_REPLY_SOURCE
+            ):
+                # 错误回复行只证明"这一轮跑坏了"，不证明"用户被回答了"。把它算进已回答
+                # 集合，等于把失败回合的用户输入永久锁在 pending 之外。
                 continue
             turn_id = str(
                 row.get("turn_id")
