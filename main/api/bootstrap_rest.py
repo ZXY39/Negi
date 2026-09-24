@@ -18,6 +18,7 @@ from g3ku.config.config_bundle import (
     import_bundle,
 )
 from g3ku.config.loader import load_config
+from g3ku.deployment.data_root import DataRootError, describe_data_root, write_data_root_pointer
 from g3ku.security import get_bootstrap_security_service
 from g3ku.shells.web import (
     describe_web_runtime_services,
@@ -52,6 +53,7 @@ def _status_payload(*, include_preview: bool = True) -> dict[str, Any]:
     payload["runtime"] = runtime
     payload["runtime_ready"] = bool(runtime.get("ready"))
     payload["runtime_bootstrapping"] = bool(runtime.get("bootstrapping"))
+    payload["data_root"] = describe_data_root()
     if include_preview and payload.get("legacy_detected"):
         try:
             payload["legacy_preview"] = service.export_legacy_state()
@@ -63,6 +65,23 @@ def _status_payload(*, include_preview: bool = True) -> dict[str, Any]:
 def _assert_unlocked() -> None:
     if not _service().is_unlocked():
         raise HTTPException(status_code=423, detail="project_locked")
+
+
+def _apply_data_root_choice(raw: object) -> None:
+    """首次初始化时记录数据目录；已建好口令的安装不走这个入口改锚。"""
+    text = str(raw or "").strip()
+    if not text:
+        return
+    mode = str((_service().status() or {}).get("mode") or "").strip().lower()
+    if mode != "setup":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "data_root_requires_setup", "message": "数据目录只能在首次初始化时指定。"},
+        )
+    try:
+        write_data_root_pointer(text)
+    except DataRootError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message}) from exc
 
 
 async def _start_runtime_after_unlock() -> None:
@@ -263,6 +282,7 @@ async def bootstrap_setup(payload: dict = Body(...)):
     if password != password_confirm:
         raise HTTPException(status_code=400, detail="password_confirmation_mismatch")
     service = _service()
+    _apply_data_root_choice(payload.get("data_dir") or payload.get("dataDir"))
     try:
         service.setup_initial_realm(
             password=password,

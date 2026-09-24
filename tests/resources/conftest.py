@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from g3ku.deployment.data_root import DATA_DIR_ENV
+from g3ku.deployment.data_root import reset_cache as reset_data_root_cache
 from main.service.runtime_service import MainRuntimeService
 
 # 在 pytest 生命周期内，任何未显式指定工作区的运行时服务，其 `_workspace_root()` 的
@@ -24,4 +26,10 @@ def _isolate_runtime_workspace_root(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             return Path(tmp_path).resolve(strict=False)
         return original
 
+    # 数据根同样钉到本用例 tmp_path：默认安装里数据根与工作区根重合，测试保持这一
+    # 不变量，否则换锚后的存储会写进真实仓库。
+    monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path))
+    reset_data_root_cache()
     monkeypatch.setattr(MainRuntimeService, '_workspace_root', _isolated_workspace_root)
+    yield
+    reset_data_root_cache()

@@ -14,6 +14,7 @@ from loguru import logger
 
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path, load_config
+from g3ku.deployment.data_root import data_root
 from g3ku.runtime.external_sessions import ExternalSessionEntry, ExternalSessionRegistry
 from g3ku.runtime.frontdoor.canonical_context import (
     canonical_context_tool_items,
@@ -880,7 +881,7 @@ def update_ceo_session_after_turn(
 
 def upload_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
-    path = workspace_path() / WEB_CEO_UPLOAD_ROOT / safe_session
+    path = data_root() / WEB_CEO_UPLOAD_ROOT / safe_session
     return ensure_dir(path) if create else path
 
 
@@ -895,23 +896,23 @@ def _json_sidecar_path(root: Path, session_id: str, *, create: bool = True) -> P
 
 
 def inflight_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
-    root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
+    root = data_root() / WEB_CEO_INFLIGHT_ROOT
     return _json_sidecar_path(root, session_id, create=create)
 
 
 def paused_execution_context_path_for_session(session_id: str, *, create: bool = True) -> Path:
-    root = workspace_path() / WEB_CEO_PAUSED_ROOT
+    root = data_root() / WEB_CEO_PAUSED_ROOT
     return _json_sidecar_path(root, session_id, create=create)
 
 
 def completed_continuity_snapshot_path_for_session(session_id: str, *, create: bool = True) -> Path:
-    root = workspace_path() / WEB_CEO_CONTINUITY_ROOT
+    root = data_root() / WEB_CEO_CONTINUITY_ROOT
     return _json_sidecar_path(root, session_id, create=create)
 
 
 def actual_request_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
-    root = workspace_path() / WEB_CEO_REQUEST_ROOT
+    root = data_root() / WEB_CEO_REQUEST_ROOT
     directory = root / safe_session
     return ensure_dir(directory) if create else directory
 
@@ -1428,7 +1429,7 @@ def write_completed_continuity_snapshot(session_id: str, snapshot: dict[str, Any
 
 def turn_boundary_dir_for_session(session_id: str, *, create: bool = True) -> Path:
     safe_session = safe_filename(str(session_id or "web_shared").replace(":", "_")) or "web_shared"
-    directory = workspace_path() / WEB_CEO_TURN_BOUNDARY_ROOT / safe_session
+    directory = data_root() / WEB_CEO_TURN_BOUNDARY_ROOT / safe_session
     return ensure_dir(directory) if create else directory
 
 
@@ -1584,7 +1585,7 @@ def _decode_inflight_session_id(path: Path, snapshot: dict[str, Any] | None = No
 
 
 def list_inflight_web_ceo_sessions() -> dict[str, dict[str, Any]]:
-    root = workspace_path() / WEB_CEO_INFLIGHT_ROOT
+    root = data_root() / WEB_CEO_INFLIGHT_ROOT
     if not root.exists():
         return {}
     items: dict[str, dict[str, Any]] = {}

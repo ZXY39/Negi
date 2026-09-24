@@ -12,6 +12,7 @@ from typing import Any
 
 from loguru import logger
 
+from g3ku.deployment.data_root import data_root
 from g3ku.security import BOOTSTRAP_MASTER_KEY_ENV, get_bootstrap_security_service
 from g3ku.web.windows_job import assign_process_to_kill_on_close_job
 
@@ -92,7 +93,7 @@ def managed_worker_snapshot(*, starting_grace_s: float = _MANAGED_WORKER_STARTIN
 
 
 def _managed_worker_log_path() -> Path:
-    return Path.cwd() / _MANAGED_WORKER_LOG_RELATIVE_PATH
+    return data_root() / _MANAGED_WORKER_LOG_RELATIVE_PATH
 
 
 _MANAGED_WORKER_LOG_MAX_BYTES = 50 * 1024 * 1024       # 对齐 g3ku_bootstrap console.log rotation="50 MB"

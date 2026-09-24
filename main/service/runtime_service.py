@@ -24,6 +24,7 @@ from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitT
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
 from g3ku.content import ContentNavigationService, artifact_ref_from_id
+from g3ku.deployment.data_root import data_root, data_work_path, ensure_dir, resolve_data_path
 from g3ku.llm_config.runtime_resolver import resolve_chat_target
 from g3ku.resources.models import ResourceKind
 from g3ku.resources.tool_settings import (
@@ -441,8 +442,8 @@ class MainRuntimeService:
     ) -> None:
         self._chat_backend = chat_backend
         self._app_config = app_config
-        # 任务临时目录（temp/tasks）默认跟随工作区根目录；测试/嵌入式脚本可显式传入
-        # workspace_root 将其隔离到独立目录，避免把临时目录泄漏到进程 cwd。
+        # 任务临时目录（temp/tasks）默认跟随数据根；显式 workspace_root（测试/嵌入式
+        # 脚本）优先于数据根，把临时目录隔离到独立目录，避免泄漏到进程 cwd。
         self._workspace_root_override = (
             Path(workspace_root).expanduser().resolve(strict=False) if workspace_root is not None else None
         )
@@ -460,9 +461,9 @@ class MainRuntimeService:
             normalized_mode = 'embedded'
         self.execution_mode = normalized_mode
         self.worker_id = str(worker_id or (new_worker_id() if normalized_mode == 'worker' else '')).strip()
-        resolved_store_path = Path(store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'runtime.sqlite3'))
-        resolved_files_base_dir = Path(files_base_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'tasks'))
-        resolved_artifact_dir = Path(artifact_dir or (Path.cwd() / '.g3ku' / 'main-runtime' / 'artifacts'))
+        resolved_store_path = resolve_data_path(store_path, default='.g3ku/main-runtime/runtime.sqlite3')
+        resolved_files_base_dir = resolve_data_path(files_base_dir, default='.g3ku/main-runtime/tasks')
+        resolved_artifact_dir = resolve_data_path(artifact_dir, default='.g3ku/main-runtime/artifacts')
         event_history_settings = self._event_history_settings(app_config)
         # 磁盘治理（P0）：从 config.main_runtime.disk_guard 注入进程级策略单例。
         configure_disk_policies(self._disk_guard_policies(app_config))
@@ -491,7 +492,7 @@ class MainRuntimeService:
         # 任务删除前产出导出的持久目录（永久保留，不参与磁盘治理）。
         self._deliverables_dir = resolved_store_path.parent / 'deliverables'
         self.content_store = ContentNavigationService(
-            workspace=Path.cwd(),
+            workspace=data_root(),
             artifact_store=self.artifact_store,
             artifact_lookup=self.store,
         )
@@ -516,7 +517,9 @@ class MainRuntimeService:
         self.log_service.add_task_terminal_listener(self._cleanup_terminal_task_intermediates)
         self.log_service.add_task_terminal_listener(self.task_stall_notifier.terminal_task)
         self.query_service = TaskQueryServiceV2(store=self.store, file_store=self.file_store, log_service=self.log_service, debug_recorder=self.runtime_debug_recorder)
-        self.governance_store = GovernanceStore(governance_store_path or (Path.cwd() / '.g3ku' / 'main-runtime' / 'governance.sqlite3'))
+        self.governance_store = GovernanceStore(
+            resolve_data_path(governance_store_path, default='.g3ku/main-runtime/governance.sqlite3')
+        )
         # exec 命令白名单与操作者审批（worker 等待、web 裁决，经 governance sqlite 跨进程）。
         self.exec_approvals = ExecApprovalService(self.governance_store)
         self.resource_registry = MainRuntimeResourceRegistry(workspace_root=Path.cwd(), store=self.governance_store, resource_manager=resource_manager)
@@ -681,7 +684,7 @@ class MainRuntimeService:
             max_tool_wait_ms=float(adaptive_budget_settings['max_tool_wait_ms']),
             local_recovery_enabled=bool(adaptive_budget_settings['local_recovery_enabled']),
             disk_watermark_paths=[
-                str(self._workspace_root()),
+                str(data_root()),
                 str(resolved_store_path.parent),
                 str(resolved_artifact_dir),
             ],
@@ -2382,7 +2385,7 @@ class MainRuntimeService:
         # 绝不允许作用到 temp 根或 temp 本身：meta 缺失/兜底值曾把这两级带进来。
         protected = {
             self._task_temp_root(create=False).resolve(strict=False),
-            (self._workspace_root() / 'temp').resolve(strict=False),
+            self._temp_root().resolve(strict=False),
             self._workspace_root().resolve(strict=False),
         }
         removed: list[str] = []
@@ -7138,8 +7141,16 @@ class MainRuntimeService:
     def _safe_task_dir_name(task_id: str) -> str:
         return str(task_id or '').strip().replace(':', '_').replace('/', '_').replace('\\', '_')
 
+    def _temp_root(self, *, create: bool = False) -> Path:
+        """任务临时目录根：默认跟随数据根，显式 workspace_root（测试/嵌入式）优先。"""
+        if self._workspace_root_override is not None:
+            path = self._workspace_root_override / 'temp'
+        else:
+            path = data_work_path('temp')
+        return ensure_dir(path) if create else path
+
     def _task_temp_root(self, *, create: bool = True) -> Path:
-        root = self._workspace_root() / 'temp' / 'tasks'
+        root = self._temp_root() / 'tasks'
         if create:
             root.mkdir(parents=True, exist_ok=True)
         return root
@@ -7162,7 +7173,7 @@ class MainRuntimeService:
     def _effective_task_temp_dir(self, task_id: str) -> Path:
         runtime_meta = self.log_service.read_task_runtime_meta(task_id) or {}
         configured = str(runtime_meta.get('task_temp_dir') or '').strip()
-        legacy_temp_root = (self._workspace_root() / 'temp').resolve(strict=False)
+        legacy_temp_root = self._temp_root().resolve(strict=False)
         # 默认 meta 兜底值是 temp 根目录（非每任务子目录）——等于它说明无真实
         # 配置（如 meta 行缺失），不得当每任务目录用（否则对账/删除会作用到
         # 整个 temp 根；正常任务创建时写入的一定是每任务子目录）。
@@ -7858,7 +7869,7 @@ class MainRuntimeService:
     # ------------------------------------------------------------------
 
     def _disk_waterline(self) -> tuple[int, int] | None:
-        return disk_waterline_snapshot([str(self._workspace_root())])
+        return disk_waterline_snapshot([str(data_root())])
 
     def _disk_emergency_due(self) -> bool:
         snapshot = self._disk_waterline()

@@ -16,6 +16,7 @@ from g3ku import audit_events
 from g3ku.config.loader import load_config, save_config
 from g3ku.config.model_manager import _UNSET, VALID_SCOPES, ModelManager
 from g3ku.config.schema import Config, ExternalApiTokenConfig, _normalize_external_token_id
+from g3ku.deployment.data_root import data_root
 from g3ku.resources import get_shared_resource_manager
 from g3ku.resources.models import ResourceKind
 from g3ku.runtime.core_tools import configured_core_tools, resolve_core_tool_targets
@@ -128,12 +129,12 @@ class _StandaloneResourceService:
         self._resource_manager.start()
         self._resource_manager.reload_now(trigger='admin_resource_read')
         runtime_store_path = _resolve_workspace_relative_path(
-            self._workspace,
+            data_root(),
             getattr(cfg.main_runtime, 'store_path', None),
             fallback='.g3ku/main-runtime/runtime.sqlite3',
         )
         governance_path = _resolve_workspace_relative_path(
-            self._workspace,
+            data_root(),
             getattr(cfg.main_runtime, 'governance_store_path', None),
             fallback='.g3ku/main-runtime/governance.sqlite3',
         )

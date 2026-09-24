@@ -98,6 +98,26 @@
 
 日常排障时，先熟悉这些目录：
 
+目录分两个根：
+
+- **安装根**：进程 cwd（`g3ku web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，以及配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`。
+- **数据根**：体积数据的落点——`.g3ku/main-runtime/`、`.g3ku/web-ceo-*`、`.g3ku/logs/`、`.g3ku/cache/`、`temp/tasks/` 与下面列出的各 sidecar。相对布局与单根时代一致，只是根换了。
+
+数据根由 `g3ku/deployment/data_root.py` 解析，进程内缓存一次，顺序是：
+
+1. 环境变量 `G3KU_DATA_DIR`
+2. 安装根下的 `.g3ku/data-root.json`（首次初始化时操作员选定的目录）
+3. 进程 cwd
+
+未配置时数据根等于安装根，也就是历史布局本身，换锚因此不产生迁移。指针文件刻意留在安装根一侧：它要在解锁之前就读得到，而主密钥信封、配置与导出/导入合同都不随数据根移动——`config_bundle` 的包内路径仍以 `.g3ku/` 为相对根。
+
+- 改数据目录只在 `mode=setup` 的首次初始化入口生效（`POST /api/bootstrap/setup` 的 `data_dir` 字段，非绝对路径、落在 `.g3ku/` 内、包住安装根的候选一律拒绝）。已经建好口令的安装要换根，走人工迁移：停 web 与 worker、搬目录、写指针、再起两个进程。
+- 数据根解析变化后 web 与托管 worker 都要重启才一致：worker 继承 web 的 cwd 与环境，指针则在两边各自首次解析时读取。
+- 排障口径：任务与会话数据"消失"先看 `GET /api/bootstrap/status` 的 `data_root` 段（含 `source` 与 `default_root`），再确认 `.g3ku/data-root.json` 是否被移动或改名——指针丢失会回退到 cwd，旧数据看起来就像空库。
+- 磁盘水位与自动暂停按数据根所在盘判定（契约见 `runtime-overview.md`「磁盘写保护与治理」），把数据搬到大容量盘后紧急线随之按新盘计算。
+
+以下路径均相对各自所属的根：
+
 - `.g3ku/config.json`
   项目配置
 
@@ -591,6 +611,8 @@ The required durable paths are:
 - `externaltools/`
 
 Do not treat only `.g3ku/` as sufficient persistence. Detached task temp files live under `temp/tasks/`, external tool installs live under `externaltools/`, and mutable skill/tool resource copies may also need to survive restart.
+
+When the deployment sets a data root outside the image (`G3KU_DATA_DIR`, or a `.g3ku/data-root.json` pointer), the data path needs its own volume mounted at that same absolute path in **both** containers, and the install-root `.g3ku/` still needs a volume of its own for config and key material — one volume covering both is not equivalent, because the two roots hold different contracts (see 「关键状态文件与目录」).
 
 Deployment unlock has an operator-facing env contract:
 

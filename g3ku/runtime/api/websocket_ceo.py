@@ -23,6 +23,7 @@ from loguru import logger
 
 from g3ku.core.events import AgentEvent
 from g3ku.core.messages import UserInputMessage
+from g3ku.deployment.data_root import data_root
 from g3ku.runtime.api.ceo_media import rewrite_assistant_media_content
 from g3ku.runtime.api.external_turns import get_external_turn_service
 from g3ku.runtime.ceo_catalog_offload import (
@@ -319,7 +320,7 @@ def _serialize_upload_descriptor(path: Path, *, name: str, mime_type: str) -> di
     return {
         'name': name,
         'path': str(resolved),
-        'relative_path': resolved.relative_to(workspace_path()).as_posix(),
+        'relative_path': resolved.relative_to(data_root()).as_posix(),
         'mime_type': resolved_mime,
         'size': resolved.stat().st_size,
         'kind': _upload_kind(mime_type=resolved_mime, name=name),

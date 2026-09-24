@@ -23,6 +23,7 @@
     refreshFailed: "\u542f\u52a8\u72b6\u6001\u52a0\u8f7d\u5931\u8d25",
     setupFailed: "\u521d\u59cb\u5316\u5931\u8d25",
     unlockFailed: "\u89e3\u9501\u5931\u8d25",
+    dataDirPlaceholder: "\u9ed8\u8ba4\uff1a",
   };
 
   function refs() {
@@ -37,6 +38,7 @@
     U.bootSetupForm = document.getElementById("boot-setup-form");
     U.bootSetupPassword = document.getElementById("boot-setup-password");
     U.bootSetupPasswordConfirm = document.getElementById("boot-setup-password-confirm");
+    U.bootSetupDataDir = document.getElementById("boot-setup-data-dir");
     U.bootSetupSubmit = document.getElementById("boot-setup-submit");
     U.bootUnlockForm = document.getElementById("boot-unlock-form");
     U.bootUnlockPassword = document.getElementById("boot-unlock-password");
@@ -72,6 +74,7 @@
 
     setDisabled(U.bootSetupPassword, setupBusy);
     setDisabled(U.bootSetupPasswordConfirm, setupBusy);
+    setDisabled(U.bootSetupDataDir, setupBusy);
     setDisabled(U.bootLegacyConfirm, setupBusy);
     setDisabled(U.bootUnlockPassword, unlockBusy);
     setDisabled(U.bootRememberUnlock, unlockBusy);
@@ -116,6 +119,13 @@
       }
     }
     if (U.bootSetupForm) U.bootSetupForm.hidden = mode !== "setup";
+    if (U.bootSetupDataDir && mode === "setup") {
+      const dataRoot = state.status?.data_root || {};
+      if (dataRoot.source && dataRoot.source !== "default") {
+        U.bootSetupDataDir.value = String(dataRoot.data_root || "");
+      }
+      U.bootSetupDataDir.placeholder = `${TEXT.dataDirPlaceholder}${dataRoot.default_root || ""}`;
+    }
     if (U.bootUnlockForm) U.bootUnlockForm.hidden = mode !== "locked";
     if (U.bootRememberUnlock && mode === "locked") {
       U.bootRememberUnlock.checked = Boolean(state.status?.auto_unlock);
@@ -156,6 +166,7 @@
       state.status = await ApiClient.setupBootstrap({
         password: U.bootSetupPassword?.value || "",
         password_confirm: U.bootSetupPasswordConfirm?.value || "",
+        data_dir: String(U.bootSetupDataDir?.value || "").trim(),
         confirm_legacy_reset: Boolean(U.bootLegacyConfirm?.checked),
       });
       renderStatus();

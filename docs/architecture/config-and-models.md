@@ -18,6 +18,8 @@
 
 - `.g3ku/config.json`
 
+该路径始终相对安装根（进程 cwd），与数据根无关——选过自定义数据目录后配置仍在代码检出目录里。
+
 ## 2. 配置模型的几个核心部分
 
 ### `agents`
@@ -268,6 +270,7 @@ The browser side of the same contract is the project settings dialog, served by 
 - `POST /api/bootstrap/change-password` re-wraps the existing master key under a new password. It requires an unlocked process plus the current password, and it never rotates the key: sessions, the secret overlay and an enabled auto-unlock keep working, while the old password stops being accepted.
 - `POST /api/bootstrap/auto-unlock` with `{enabled}` writes or removes `.g3ku/llm-config/auto-unlock.key` (the master key itself, mode 0600) together with the `G3KU_BOOTSTRAP_MASTER_KEY` environment variable. `GET /api/bootstrap/status` reports the result as `auto_unlock`, which is what renders the checkbox state. Enabling requires an unlocked process; disabling never does, so the credential can always be revoked.
 - `POST /api/bootstrap/lock` clears only the web process's in-memory master key. Background tasks, sessions and the managed worker keep running; only the browser falls back to the unlock screen. It is not the exit path — `POST /api/bootstrap/exit` is the one that pauses running work and shuts the server down.
+- `POST /api/bootstrap/setup` optionally takes `data_dir`, the directory where bulk runtime data will live. It is honored only while `status.mode == "setup"`: the endpoint records it into `.g3ku/data-root.json` before the realm is created, so an installed project cannot be re-pointed through this entry (a non-setup mode answers `data_root_requires_setup`). Candidates must be absolute, writable, outside `.g3ku/`, and not an ancestor of the install root. `GET /api/bootstrap/status` answers the resolved value as a `data_root` object (`data_root` / `source` / `default_root`), which is what the 数据目录 input pre-fills from.
 
 Treat the auto-unlock file as a bearer credential: whoever can read `.g3ku/llm-config/auto-unlock.key` can unlock the project without a password. That is why it is opt-in, why unchecking deletes both the file and the environment variable, and why a shared `.g3ku/` volume must stay inside the trust boundary of the master key. The write requests `0600`, which is only enforced on POSIX: on Windows the file inherits the directory ACL, so the workspace directory itself is the real boundary there.
 
@@ -276,6 +279,7 @@ Maintainers should keep the persistence boundary straight:
 - `.g3ku/config.json` remains the structural project config source of truth
 - `.g3ku/llm-config/` still stores provider/binding records
 - `.g3ku/secret-realms/` and `.g3ku/llm-config/master.key` still hold bootstrap secret state
+- those three stay under the install root regardless of the data root, and so does every path inside a config bundle — choosing a data directory therefore moves no secret material and changes no export/import contract (see `operations-and-maintenance.md`「关键状态文件与目录」for the data root itself and its resolution order)
 
 So for container persistence, mounting only `memory/` or `sessions/` is not enough. A containerized project that must keep model bindings, secrets, and unlock state across restart must also persist `.g3ku/`.
 
