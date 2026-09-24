@@ -1455,17 +1455,21 @@ function nodeFinalTraceStatus(node) {
     return "success";
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", stageId = "" }) {
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
+    // data-trace-key 的 key 允许退化成 stage_index 乃至序号，跨回合会撞车；
+    // 阶段状态对账需要的是真 stage_id，所以单独落一个属性，不做字符串推断。
+    const normalizedStageId = String(stageId || "").trim();
+    const stageIdAttr = normalizedStageId ? ` data-stage-id="${esc(normalizedStageId)}"` : "";
     const sideParts = [];
     if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
     if (showStatus) {
         sideParts.push(`<span class="interaction-step-status">${esc(String(statusLabel || "").trim() || traceStatusLabel(status))}</span>`);
     }
     return `
-        <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}" data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
+        <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}"${stageIdAttr} data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
             <summary class="task-trace-summary">
                 <span class="interaction-step-lead">
                     ${leadHtml}

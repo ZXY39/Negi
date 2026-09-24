@@ -6752,6 +6752,7 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
         const preambleHtml = preamble ? `<div class="ceo-stage-preamble">${esc(preamble)}</div>` : "";
         return renderTraceStep({
             traceKey: `ceo:stage:${stage.stage_id || stage.stage_index || index}`,
+            stageId: String(stage?.stage_id || ""),
             title: `${formatExecutionStageTitle(stage)}${isInterrupted ? " · 收到补充，续跑见下" : ""}`,
             status: stageTraceStatus(stage),
             statusLabel: displayTaskStageStatus(stage.status),
@@ -6868,6 +6869,8 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
         setCeoTurnUsageCollapsed(turn, status !== "running");
         icons();
     }, { scrollMode: "preserve" });
+    // 阶段收尾先到 live 回合，不重建整帧；不在这里对账的话，旧行要等一次刷新才改口。
+    reconcileCeoFeedStageStatuses();
     if (targetSessionId) {
         const inflightTurn = dedupeInflightUserMessageAgainstMessages(
             getCeoSessionSnapshotCache(targetSessionId)?.messages || [],
@@ -7447,6 +7450,49 @@ function renderCeoSnapshotMessageRange(messages, keys, fromIndex, toIndex, targe
     }
 }
 
+const CEO_STAGE_STATUS_TOKENS = ["running", "success", "error", "info"];
+const CEO_STAGE_TERMINAL_TOKENS = ["success", "error"];
+
+function ceoFeedStageStepStatus(stepEl) {
+    for (const token of CEO_STAGE_STATUS_TOKENS) {
+        if (stepEl.classList?.contains?.(token)) return token;
+    }
+    return "";
+}
+
+// 轨道是逐助手行各画一份的，转录行 append-only：阶段后来收尾不会回写早先那几行，
+// 所以跨回合的阶段会停在它被写入那一刻的状态（心跳/静默回合驱动的会话尤其明显）。
+// 这里只把更早副本的状态升到终态：卡片位置、rounds、展开态、懒加载的输出块全不动，
+// 去重会牵动滚动还原与 round key 分域，不在这一步的范围里。
+function reconcileCeoFeedStageStatuses(feedEl = null) {
+    if (typeof displayTaskStageStatus !== "function") return 0;
+    const feed = feedEl || U.ceoFeed;
+    if (!feed?.querySelectorAll) return 0;
+    const steps = Array.from(feed.querySelectorAll(".task-trace-step[data-stage-id]"));
+    if (steps.length < 2) return 0;
+    const latestStatus = new Map();
+    steps.forEach((step) => {
+        const stageId = String(step.dataset?.stageId || "").trim();
+        if (!stageId) return;
+        latestStatus.set(stageId, ceoFeedStageStepStatus(step));
+    });
+    let applied = 0;
+    steps.forEach((step) => {
+        const stageId = String(step.dataset?.stageId || "").trim();
+        const finalStatus = latestStatus.get(stageId);
+        if (!CEO_STAGE_TERMINAL_TOKENS.includes(finalStatus)) return;
+        const currentStatus = ceoFeedStageStepStatus(step);
+        // 已经是终态的副本保持原样：error 不该被后来的 success 抹平。
+        if (!currentStatus || CEO_STAGE_TERMINAL_TOKENS.includes(currentStatus)) return;
+        step.classList.remove(currentStatus);
+        step.classList.add(finalStatus);
+        const label = step.querySelector?.(".interaction-step-status");
+        if (label) label.textContent = displayTaskStageStatus(finalStatus);
+        applied += 1;
+    });
+    return applied;
+}
+
 function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "", preservedTurn = null } = {}) {
     const shouldScrollToLatest = !!S.ceoScrollToLatestOnSnapshot;
     S.ceoScrollToLatestOnSnapshot = false;
@@ -7529,6 +7575,8 @@ function renderCeoSnapshot(messages = [], inflightTurn = null, { sessionId = "",
     syncCeoCompressionDivider();
     // 批次内的像素 clamp 之后再按捕获状态精校(锚定滚动/展开项)。
     applyCeoFeedViewState(viewState);
+    // 放在还原之后：这里只换 class 与标签文字，不改卡片数量与高度，不会动到刚算好的锚点。
+    reconcileCeoFeedStageStatuses();
 }
 
 function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {}) {
@@ -8899,6 +8947,9 @@ function finalizeCeoTurn(text, meta = {}) {
             source: normalizedSource,
             turnId: normalizedTurnId,
         });
+        // 收尾后才对账：discardPendingCeoTurns / hasRunningCeoToolStep 都按 .running 判活，
+        // 抢在它们前面改 class 会让一个还没收尾的回合被当成可丢弃。
+        reconcileCeoFeedStageStatuses();
         maybeDispatchQueuedCeoFollowUps();
         return;
     }
@@ -8976,6 +9027,8 @@ function finalizeCeoTurn(text, meta = {}) {
             source: normalizedSource,
             turnId: normalizedTurnId,
         });
+        // 增量分支同样要排在 discardPendingCeoTurns 之后，理由见上面的对账点。
+        reconcileCeoFeedStageStatuses();
         S.ceoFeedRenderedMessageKeys = nextKeys;
         S.ceoFeedRenderSignature = buildCeoRenderSignature(
             finalPayload.messages || [],
