@@ -7955,6 +7955,12 @@ function isCeoContextLoaderToolName(toolName = "") {
     return !!ceoContextLoaderKind(toolName);
 }
 
+// `silent` 是控制信号不是活动：它既不进 live 步骤也不进阶段轨道。展开气泡里看到
+// "模型调用了 silent"没有信息量（静默本身已由折叠行表达），失败时还会误导成任务出错。
+function isCeoSilentToolName(toolName = "") {
+    return String(toolName || "").trim().toLowerCase() === "silent";
+}
+
 function clearCeoContextLoadNoticeTimer(noticeId = "") {
     const normalizedNoticeId = String(noticeId || "").trim();
     const timers = S.ceoContextLoadNoticeTimeoutIds instanceof Map
@@ -8213,6 +8219,7 @@ function filterCeoInteractionFlowSummary(summary = null) {
                         tools: (Array.isArray(round?.tools) ? round.tools : []).filter((step) => {
                             const toolName = String(step?.tool_name || "").trim().toLowerCase();
                             const status = String(step?.status || "").trim().toLowerCase();
+                            if (isCeoSilentToolName(toolName)) return false;
                             return !isCeoContextLoaderToolName(toolName) || status === "error";
                         }),
                     }))
@@ -8673,6 +8680,7 @@ function applyCeoToolEventToTurn(turn, event = {}) {
     const status = resolveCeoToolEventStatus(event);
     const toolName = String(event.tool_name || "tool").trim() || "tool";
     const rawText = String(event.text || "").trim();
+    if (isCeoSilentToolName(toolName)) return null;
     if (isCeoContextLoaderToolName(toolName) && status !== "error") {
         maybeShowCeoContextLoadNotice(turn, {
             toolName,

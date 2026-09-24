@@ -1022,3 +1022,47 @@ test("finalize keeps the current turn's live stage trace when the payload omits 
     assert.ok(lastAssistant.canonical_context_delta, "cache delta falls back to the turn's live trace");
     assert.match(JSON.stringify(lastAssistant.canonical_context_delta), /frontdoor-stage-live/);
 });
+
+test("ceo stage trace never shows the silent control call as a step", () => {
+    const { renderCeoStageTraceIntoTurn, U, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    U.ceoContextLoadNotice = new StubHTMLElement();
+    U.ceoContextLoadNotice.hidden = true;
+    S.tools = [];
+
+    const renderedSteps = renderCeoStageTraceIntoTurn(turn, {
+        stages: [
+            {
+                stage_id: "frontdoor-stage-1",
+                stage_goal: "静默收尾，不向用户展示结果",
+                status: "running",
+                tool_round_budget: 1,
+                rounds: [
+                    {
+                        round_id: "round-1",
+                        round_index: 1,
+                        tools: [
+                            { tool_name: "exec", status: "success", output_text: "50" },
+                            { tool_name: "silent", status: "success", arguments_text: 'silent (reason="用户要求先不告知")', output_text: '{"silenced":true}' },
+                        ],
+                    },
+                ],
+            },
+        ],
+    });
+
+    assert.equal(renderedSteps, 1, "同轮的实质工具照常显示");
+    assert.match(turn.listEl.innerHTML, /exec/);
+    assert.doesNotMatch(turn.listEl.innerHTML, /silent/, "静默信号不是活动，展开气泡里也不出现");
+});
+
+test("ceo silent tool live event creates no interaction step", () => {
+    const { applyCeoToolEventToTurn, U, S } = loadApp();
+    const turn = makeTurn({ text: "" });
+    U.ceoContextLoadNotice = new StubHTMLElement();
+    U.ceoContextLoadNotice.hidden = true;
+    S.tools = [];
+
+    assert.equal(applyCeoToolEventToTurn(turn, { tool_name: "silent", status: "success", text: "已静默" }), null);
+    assert.equal(turn.listEl.innerHTML, "");
+});
