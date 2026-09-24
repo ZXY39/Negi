@@ -4981,6 +4981,13 @@ function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve
     return addMsg(String(text || ""), "user", { attachments, scrollMode, sessionId, timestamp, turnId, canEditFork, canFork });
 }
 
+// 气泡悬停复制按钮:与悬停时间同一行出现,点击后复制气泡里已渲染的可见文本。
+// 轨道回合与 addMsg 气泡共用同一份标记,位置由 CSS 按角色分角。
+function buildCeoBubbleCopyMarkup(label = "复制内容") {
+    const safeLabel = esc(label);
+    return `<button type="button" class="msg-copy-btn" data-ceo-copy="1" title="${safeLabel}" aria-label="${safeLabel}"><i data-lucide="copy"></i></button>`;
+}
+
 function buildCeoUserMessageActionsMarkup({ turnId = "", canEditFork = false, canFork = false, sessionId = "" } = {}) {
     // 用户气泡下方的编辑重发/Fork 操作行。两个按钮各吃一个服务端 flag：
     // can_edit_fork 额外要求会话没有活的执行体（要改源转录），can_fork 只看内容判据
@@ -6219,11 +6226,14 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
         const content = markdown ? renderMarkdown(text) : esc(text);
         const attachmentMarkup = renderStructuredChatAttachments(attachments, { sessionId });
-        // 悬停元信息行(发送/完成时间 + token 用量):仅在调用方提供数据时渲染,
-        // 显隐由 CSS 的 .msg-meta 悬停规则控制。有 meta 时用 message-stack 纵向
-        // 包裹,保证元信息落在气泡下方而不是 flex 行内并排。
+        // 悬停元信息行(发送/完成时间 + token 用量 + 复制按钮):时间仅在调用方提供数据
+        // 时渲染,复制按钮只要有正文就跟着出现,显隐由 CSS 的 .msg-meta 悬停规则控制。
+        // 有 meta 时用 message-stack 纵向包裹,保证元信息落在气泡下方而不是 flex 行内并排。
         const metaText = buildCeoMessageMetaText({ role, timestamp, usage });
-        const metaMarkup = metaText ? `<div class="msg-meta">${esc(metaText)}</div>` : "";
+        const copyMarkup = hasRenderableText(text) ? buildCeoBubbleCopyMarkup() : "";
+        const metaMarkup = metaText || copyMarkup
+            ? `<div class="msg-meta">${metaText ? `<span class="msg-meta-text">${esc(metaText)}</span>` : ""}${copyMarkup}</div>`
+            : "";
         const actionsMarkup = role === "user"
             ? buildCeoUserMessageActionsMarkup({ turnId, canEditFork, canFork, sessionId })
             : "";
@@ -7587,7 +7597,10 @@ function createPendingCeoTurn(source = "user", { scrollMode = "preserve" } = {})
         el.innerHTML = `
             <div class="msg-content ceo-turn-content">
                 <div class="assistant-text pending">${renderCeoAssistantLoadingMarkup()}</div>
-                <div class="ceo-turn-usage" hidden></div>
+                <div class="ceo-turn-meta">
+                    <div class="ceo-turn-usage" hidden></div>
+                    ${buildCeoBubbleCopyMarkup("复制回复")}
+                </div>
                 <details class="interaction-flow" hidden>
                     <summary class="interaction-flow-summary">
                         <span class="interaction-flow-title">Interaction Flow</span>
@@ -8546,6 +8559,27 @@ async function copyCeoToolStepOutput(item) {
     showToast({
         title: copied ? "已复制" : "复制失败",
         text: copied ? "工具结果已复制到剪贴板。" : "请手动选中文本后复制。",
+        kind: copied ? "success" : "error",
+    });
+}
+
+async function copyCeoBubbleContent(button) {
+    if (!(button instanceof HTMLElement)) return;
+    // 复制的是气泡里渲染出来的可见文本:轨道回合只取正文(不含阶段轨道),
+    // 普通气泡取 msg-content。历史回放与 live 收尾都走同一份 DOM,无需回源。
+    const message = button.closest(".message");
+    const source = message?.querySelector?.(".assistant-text") || message?.querySelector?.(".msg-content");
+    const text = String(source?.innerText ?? source?.textContent ?? "").trim();
+    if (!text) {
+        if (typeof flashTraceCopyButton === "function") flashTraceCopyButton(button, false);
+        showToast({ title: "没有可复制的内容", text: "该消息暂无正文。", kind: "error" });
+        return;
+    }
+    const copied = await copyTextToClipboard(text);
+    if (typeof flashTraceCopyButton === "function") flashTraceCopyButton(button, !!copied);
+    showToast({
+        title: copied ? "已复制" : "复制失败",
+        text: copied ? "消息内容已复制到剪贴板。" : "请手动选中文本后复制。",
         kind: copied ? "success" : "error",
     });
 }
@@ -15112,6 +15146,13 @@ function bind() {
         removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));
     });
     U.ceoFeed?.addEventListener("click", (e) => {
+        const copyBtn = e.target.closest("[data-ceo-copy]");
+        if (copyBtn) {
+            e.preventDefault();
+            e.stopPropagation();
+            void copyCeoBubbleContent(copyBtn);
+            return;
+        }
         const pauseCompressionBtn = e.target.closest("[data-ceo-compress-pause]");
         if (pauseCompressionBtn) {
             e.preventDefault();

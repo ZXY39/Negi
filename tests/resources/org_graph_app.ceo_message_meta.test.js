@@ -3,12 +3,13 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-// 气泡悬停元信息契约(token 用量 + 时间):
+// 气泡悬停元信息契约(token 用量 + 时间 + 复制按钮):
 // - setCeoTurnUsage sticky:后续不带 usage 的调用不得清空历史回合的 usage 行(R1);
 // - finalize 写缓存的 assistant 消息始终携带 usage/timestamp(R3);
 // - 渲染签名覆盖 per-message usage/timestamp,服务端权威快照必须能触发重建(R2);
 // - 用户气泡带 timestamp 时渲染 .msg-meta 发送时间行(R6);
-// - 无轨道历史助手消息兜底气泡也带完成时间 + usage 元信息(R5)。
+// - 无轨道历史助手消息兜底气泡也带完成时间 + usage 元信息(R5);
+// - 每条有正文的气泡都带 .msg-copy-btn,轨道回合把它和 usage 放在同一行(R7)。
 
 const APP_PATH = "g3ku/web/frontend/org_graph_app.js";
 const APP_CODE = fs.readFileSync(APP_PATH, "utf8");
@@ -237,7 +238,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { S, U, addMsg, finalizeCeoTurn, renderCeoSnapshot, renderPersistedCeoAssistantTurn, buildCeoRenderSignature, buildFinalizedCeoTurnPayload, setCeoTurnUsage, normalizeCeoTurnUsage };`,
+        `${APP_CODE}\nthis.__testExports = { S, U, addMsg, createPendingCeoTurn, finalizeCeoTurn, renderCeoSnapshot, renderPersistedCeoAssistantTurn, buildCeoRenderSignature, buildFinalizedCeoTurnPayload, setCeoTurnUsage, normalizeCeoTurnUsage };`,
         context
     );
     return context.__testExports;
@@ -335,7 +336,7 @@ test("渲染签名覆盖 per-message usage/timestamp(R2)", () => {
     assert.equal(baseSignature, api.buildCeoRenderSignature(base, null, null));
 });
 
-test("用户气泡带 timestamp 渲染 .msg-meta 发送时间行(R6)", () => {
+test("用户气泡带 timestamp 渲染 .msg-meta 发送时间行 + 复制按钮(R6)", () => {
     const api = setup();
     const feed = new FeedStub({ scrollHeight: 400, clientHeight: 300 });
     api.U.ceoFeed = feed;
@@ -344,11 +345,43 @@ test("用户气泡带 timestamp 渲染 .msg-meta 发送时间行(R6)", () => {
     const withMeta = feed.children[feed.children.length - 1];
     assert.ok(withMeta.innerHTML.includes("msg-meta"), withMeta.innerHTML);
     assert.ok(withMeta.innerHTML.includes("发送于"), withMeta.innerHTML);
+    assert.ok(withMeta.innerHTML.includes('class="msg-meta-text"'), withMeta.innerHTML);
     assert.ok(!withMeta.innerHTML.includes("NaN"), withMeta.innerHTML);
 
-    api.addMsg("no meta", "user", {});
-    const withoutMeta = feed.children[feed.children.length - 1];
-    assert.ok(!withoutMeta.innerHTML.includes("msg-meta"), withoutMeta.innerHTML);
+    // 没有时间戳也要有复制按钮:按钮跟时间同行,但不能靠时间戳存在才出现。
+    api.addMsg("no time", "user", {});
+    const withoutTime = feed.children[feed.children.length - 1];
+    assert.ok(!withoutTime.innerHTML.includes("发送于"), withoutTime.innerHTML);
+    assert.ok(withoutTime.innerHTML.includes("msg-copy-btn"), withoutTime.innerHTML);
+
+    // 纯附件气泡没有正文,不给复制按钮。
+    api.addMsg("", "user", { attachments: [{ id: "a1", name: "x.png" }], sessionId: "s1" });
+    const attachmentOnly = feed.children[feed.children.length - 1];
+    assert.ok(!attachmentOnly.innerHTML.includes("msg-copy-btn"), attachmentOnly.innerHTML);
+});
+
+test("轨道回合把复制按钮与 usage 行放在同一行(R7)", () => {
+    const api = setup();
+    const feed = new FeedStub({ scrollHeight: 400, clientHeight: 300 });
+    api.U.ceoFeed = feed;
+
+    const turn = api.createPendingCeoTurn("user");
+    assert.ok(turn, "createPendingCeoTurn 在桩 DOM 下应返回 turn");
+    const markup = feed.children[feed.children.length - 1].innerHTML;
+    assert.ok(markup.includes('class="ceo-turn-meta"'), markup);
+    assert.ok(markup.includes("msg-copy-btn"), markup);
+    // usage 行仍是 setCeoTurnUsage 写 textContent 的那个节点,按钮不能当它的子节点。
+    assert.ok(/<div class="ceo-turn-meta">\s*<div class="ceo-turn-usage" hidden><\/div>/.test(markup), markup);
+});
+
+test("复制走 feed 级委托,取正文节点而非整条气泡(R8)", () => {
+    assert.ok(APP_CODE.includes('closest("[data-ceo-copy]")'), "feed click 需委托 [data-ceo-copy]");
+    assert.ok(APP_CODE.includes("copyCeoBubbleContent(copyBtn)"));
+    const handler = APP_CODE.slice(APP_CODE.indexOf("async function copyCeoBubbleContent"));
+    const body = handler.slice(0, handler.indexOf("\n}\n"));
+    assert.ok(body.includes('.querySelector?.(".assistant-text")'), body);
+    assert.ok(body.includes('.querySelector?.(".msg-content")'), body);
+    assert.ok(body.includes("copyTextToClipboard(text)"), body);
 });
 
 test("无轨道历史助手消息兜底气泡带完成时间与 usage 元信息(R5)", () => {
@@ -367,4 +400,5 @@ test("无轨道历史助手消息兜底气泡带完成时间与 usage 元信息(
     assert.ok(el.innerHTML.includes("msg-meta"), el.innerHTML);
     assert.ok(el.innerHTML.includes("完成于"), el.innerHTML);
     assert.ok(el.innerHTML.includes("输入 1.2k"), el.innerHTML);
+    assert.ok(el.innerHTML.includes("msg-copy-btn"), el.innerHTML);
 });
