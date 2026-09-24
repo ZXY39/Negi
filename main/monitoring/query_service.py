@@ -1586,6 +1586,7 @@ class TaskQueryService:
                     node_kind=str(record.node_kind or 'execution'),
                     phase=str(record.phase or ''),
                     stale=frame_is_stale(record.updated_at),
+                    await_marker=str(payload.get('await_marker') or ''),
                     stage_mode=str(payload.get('stage_mode') or ''),
                     stage_status=str(payload.get('stage_status') or ''),
                     stage_goal=str(payload.get('stage_goal') or ''),

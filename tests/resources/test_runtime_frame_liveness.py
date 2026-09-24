@@ -63,6 +63,7 @@ async def test_runtime_summary_frames_carry_staleness_flag(tmp_path: Path) -> No
                 "depth": 0,
                 "node_kind": "execution",
                 "phase": "before_model",
+                "await_marker": "model.chat.await_response",
                 "tool_calls": [],
                 "child_pipelines": [],
             },
@@ -80,6 +81,9 @@ async def test_runtime_summary_frames_carry_staleness_flag(tmp_path: Path) -> No
         for frames in _flagged_frames():
             assert [str(item.get("node_id")) for item in frames] == [record.root_node_id]
             assert frames[0]["stale"] is False
+            # 「请求中」徽标读 await_marker，两份 patch 载荷都直接展开帧 payload，
+            # 天然带着它。
+            assert frames[0]["await_marker"] == "model.chat.await_response"
 
         stored = service.store.get_task_runtime_frame(task_id, record.root_node_id)
         assert stored is not None
@@ -97,5 +101,8 @@ async def test_runtime_summary_frames_carry_staleness_flag(tmp_path: Path) -> No
         frames = list((snapshot.get("runtime_summary") or {}).get("frames") or [])
         assert [item["node_id"] for item in frames] == [record.root_node_id]
         assert frames[0]["stale"] is True
+        # 快照走 TaskLiveFrame 模型而不是展开 payload：漏字段的话首帧渲染时
+        # 「请求中」判不出来，要等第一个 task.live.patch 才亮。
+        assert frames[0]["await_marker"] == "model.chat.await_response"
     finally:
         await service.close()

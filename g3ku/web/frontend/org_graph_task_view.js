@@ -709,6 +709,7 @@ function buildExecutionTreeFromSnapshot(
     const stateMeta = resolveTreeNodeStatusLabel(status, {
         kind,
         inTurn,
+        modelInFlight: isModelRequestInFlightFrame(liveFrame),
         inspectionPending,
         isPaused: !!snapshotNode.is_paused,
         taskPaused,
@@ -787,6 +788,15 @@ function isWaitingForChildResultsFrame(frame) {
     if (phase === "waiting_children" || phase === "waiting_acceptance") return true;
     return (Array.isArray(frame?.child_pipelines) ? frame.child_pipelines : [])
         .some((item) => isActiveChildPipelineStatus(item?.status || ""));
+}
+
+// 模型请求在途：await_marker 停在派发或等流两档。response_postprocess 时流已经收尾，
+// 不算还在等 API。marker 由 react_loop 在每次 await 前后写入/清空，帧里一直带着。
+const MODEL_REQUEST_IN_FLIGHT_MARKERS = new Set(["model.chat.dispatch", "model.chat.await_response"]);
+
+function isModelRequestInFlightFrame(frame) {
+    if (!frame || typeof frame !== "object" || frame.stale === true) return false;
+    return MODEL_REQUEST_IN_FLIGHT_MARKERS.has(String(frame.await_marker || "").trim());
 }
 
 function analyzeExecutionTreeLayout(root) {
@@ -1075,7 +1085,7 @@ function taskNodeDisplayState(node, taskPaused = taskPauseDisplayActive()) {
 // 树节点的中文状态标签。判据只有两条：节点自己的运行相位（live 帧）和验收子节点
 // 是否还没结论——两者都由 task.live.patch / task.node.patch 实时推送，不依赖
 // 整树重拉。非终态节点一律不落英文状态原文：没在执行就是等待中。
-function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "" } = {}) {
+function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelInFlight = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "" } = {}) {
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
     if (taskPaused && !isTerminalTreeNodeStatus(normalizedStatus)) {
         return {
@@ -1101,6 +1111,10 @@ function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, inspect
     }
     if (!inTurn) {
         return { visualState: "waiting", displayState: "\u7b49\u5f85\u4e2d" };
+    }
+    if (modelInFlight) {
+        // \u8bf7\u6c42\u4e2d\u662f\u8fd0\u884c\u4e2d\u7684\u4e00\u79cd\uff0c\u4e0d\u53e6\u8d77\u989c\u8272\uff1a\u6cbf\u7528\u6267\u884c\u84dd\uff0c\u53ea\u628a"\u5728\u7b49 API \u56de\u5b8c"\u8bf4\u51fa\u53e3\u3002
+        return { visualState: "running", displayState: "\u8bf7\u6c42\u4e2d" };
     }
     return isAcceptanceNodeKind(kind)
         ? { visualState: "inspecting", displayState: "\u68c0\u9a8c\u4e2d" }

@@ -5095,13 +5095,17 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
           treeNodesById: {
             "node:root": node("node:root", {
               parent_node_id: null,
-              rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:submitted", "node:busy", "node:idle", "node:spawn", "node:stalled"] }],
+              rounds: [{ round_id: "r1", is_latest: true, child_ids: ["node:submitted", "node:busy", "node:idle", "node:spawn", "node:stalled", "node:requesting", "node:postprocess"] }],
             }),
             "node:submitted": node("node:submitted", {
               status: "success",
-              auxiliary_child_ids: ["node:acc-running", "node:acc-queued"],
+              auxiliary_child_ids: ["node:acc-running", "node:acc-queued", "node:acc-requesting"],
             }),
             "node:acc-running": node("node:acc-running", {
+              parent_node_id: "node:submitted",
+              node_kind: "acceptance",
+            }),
+            "node:acc-requesting": node("node:acc-requesting", {
               parent_node_id: "node:submitted",
               node_kind: "acceptance",
             }),
@@ -5113,10 +5117,13 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
             "node:idle": node("node:idle"),
             "node:spawn": node("node:spawn"),
             "node:stalled": node("node:stalled"),
+            "node:requesting": node("node:requesting"),
+            "node:postprocess": node("node:postprocess"),
           },
           liveFrameMap: {
             "node:root": { node_id: "node:root", phase: "waiting_children", tool_calls: [], child_pipelines: [{ index: 1, status: "running" }] },
             "node:acc-running": { node_id: "node:acc-running", phase: "before_model", tool_calls: [], child_pipelines: [] },
+            "node:acc-requesting": { node_id: "node:acc-requesting", phase: "before_model", await_marker: "model.chat.await_response", tool_calls: [], child_pipelines: [] },
             "node:busy": { node_id: "node:busy", phase: "after_model", tool_calls: [{ tool_call_id: "t1", tool_name: "exec", status: "running" }], child_pipelines: [] },
             "node:spawn": {
               node_id: "node:spawn",
@@ -5128,6 +5135,21 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
               node_id: "node:stalled",
               phase: "before_model",
               stale: true,
+              await_marker: "model.chat.await_response",
+              tool_calls: [],
+              child_pipelines: [],
+            },
+            "node:requesting": {
+              node_id: "node:requesting",
+              phase: "before_model",
+              await_marker: "model.chat.await_response",
+              tool_calls: [],
+              child_pipelines: [],
+            },
+            "node:postprocess": {
+              node_id: "node:postprocess",
+              phase: "before_model",
+              await_marker: "model.chat.response_postprocess",
               tool_calls: [],
               child_pipelines: [],
             },
@@ -5150,7 +5172,7 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
         const byId = new Map();
         const walk = (item) => {
           if (!item) return;
-          byId.set(item.node_id, item.display_state);
+          byId.set(item.node_id, [item.display_state, item.visual_state]);
           (item.inspectionNodes || []).forEach(walk);
           (item.children || []).forEach(walk);
         };
@@ -5161,17 +5183,23 @@ def test_build_execution_tree_from_snapshot_labels_nodes_by_live_turn_activity()
 
     assert result == {
         # 派生工具还没返回：父节点是等待中，不是运行中。
-        "node:root": "等待中",
+        "node:root": ["等待中", "waiting"],
         # 已提交交付、检验还没结论：等待中。
-        "node:submitted": "等待中",
-        "node:busy": "运行中",
-        "node:idle": "等待中",
+        "node:submitted": ["等待中", "waiting"],
+        "node:busy": ["运行中", "running"],
+        "node:idle": ["等待中", "waiting"],
         # 派生工具在飞、子节点还没返回：等子节点的结果，不是运行中。
-        "node:spawn": "等待中",
-        # 后端标记的陈旧帧不再证明有人在跑：等待中。
-        "node:stalled": "等待中",
-        "node:acc-running": "检验中",
-        "node:acc-queued": "等待中",
+        "node:spawn": ["等待中", "waiting"],
+        # 后端标记的陈旧帧不再证明有人在跑：带着在途 await_marker 也一起退到等待中。
+        "node:stalled": ["等待中", "waiting"],
+        # 模型请求在途：文字换成请求中，底色沿用执行蓝（visual_state 仍是 running）。
+        "node:requesting": ["请求中", "running"],
+        # response_postprocess 时流已经收尾，不算还在等 API。
+        "node:postprocess": ["运行中", "running"],
+        "node:acc-running": ["检验中", "inspecting"],
+        # 检验节点也在等 API 回完：请求中盖过检验中，角色仍在标题前缀里。
+        "node:acc-requesting": ["请求中", "running"],
+        "node:acc-queued": ["等待中", "waiting"],
     }
 
 

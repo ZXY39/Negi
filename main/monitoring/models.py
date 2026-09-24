@@ -112,6 +112,9 @@ class TaskLiveFrame(Model):
     node_kind: str = 'execution'
     phase: str = ''
     stale: bool = False
+    # 与 task.live.patch 的 frames 条目同源：那条通道直接展开帧 payload，天然带这个
+    # 字段，快照这边漏掉的话「请求中」徽标就要等第一个 patch 才亮。
+    await_marker: str = ''
     stage_mode: str = ''
     stage_status: str = ''
     stage_goal: str = ''
