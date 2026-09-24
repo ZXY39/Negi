@@ -11647,6 +11647,39 @@ textarea {
   gap: 14px;
 }
 
+.boot-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.boot-dir-row .boot-dir-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.boot-dir-pick {
+  flex: 0 0 auto;
+  min-height: 46px;
+  padding: 0 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-surface-inner);
+  color: var(--text-primary);
+  font-weight: 600;
+  transition: var(--transition-fast);
+}
+
+.boot-dir-pick:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
+}
+
+.boot-dir-pick:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .boot-form .btn-primary:disabled {
   cursor: wait;
   opacity: 0.92;

@@ -312,3 +312,94 @@ def test_setup_endpoint_refuses_data_dir_after_setup(clean_env, monkeypatch) -> 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "data_root_requires_setup"
     assert dr.pointer_value() == ""
+
+
+def test_dir_picker_flag_follows_platform_and_tkinter(monkeypatch) -> None:
+    import main.api.bootstrap_rest as bootstrap_rest
+
+    monkeypatch.setattr(bootstrap_rest.os, "name", "posix")
+    assert bootstrap_rest.dir_picker_available() is False
+
+    monkeypatch.setattr(bootstrap_rest.os, "name", "nt")
+    assert bootstrap_rest.dir_picker_available() is True
+
+    def _boom(*args, **kwargs):
+        raise ImportError("no tkinter in this image")
+
+    monkeypatch.setitem(__import__("sys").modules, "tkinter", None)
+    assert bootstrap_rest.dir_picker_available() is False
+
+
+def test_pick_endpoint_reports_availability_in_status(clean_env, monkeypatch) -> None:
+    import main.api.bootstrap_rest as bootstrap_rest
+
+    monkeypatch, tmp_path = clean_env
+    client, _calls = _bootstrap_client(monkeypatch, "setup")
+
+    payload = client.get("/bootstrap/status").json()["item"]
+
+    assert payload["dir_picker"] == {"available": bootstrap_rest.dir_picker_available()}
+
+
+def test_pick_endpoint_returns_picked_path(clean_env, monkeypatch) -> None:
+    import main.api.bootstrap_rest as bootstrap_rest
+
+    monkeypatch, tmp_path = clean_env
+    client, _calls = _bootstrap_client(monkeypatch, "setup")
+    monkeypatch.setattr(bootstrap_rest, "_ask_directory", lambda: str(tmp_path / "picked"))
+
+    response = client.post("/bootstrap/pick-data-dir")
+
+    assert response.status_code == 200
+    assert response.json()["item"] == {"path": str(tmp_path / "picked"), "cancelled": False}
+
+
+def test_pick_endpoint_reports_cancel(clean_env, monkeypatch) -> None:
+    import main.api.bootstrap_rest as bootstrap_rest
+
+    monkeypatch, tmp_path = clean_env
+    client, _calls = _bootstrap_client(monkeypatch, "setup")
+    monkeypatch.setattr(bootstrap_rest, "_ask_directory", lambda: "")
+
+    response = client.post("/bootstrap/pick-data-dir")
+
+    assert response.status_code == 200
+    assert response.json()["item"] == {"path": "", "cancelled": True}
+
+
+def test_pick_endpoint_refuses_after_setup(clean_env, monkeypatch) -> None:
+    monkeypatch, tmp_path = clean_env
+    client, _calls = _bootstrap_client(monkeypatch, "locked")
+
+    response = client.post("/bootstrap/pick-data-dir")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "data_root_requires_setup"
+
+
+def test_pick_endpoint_single_flights_dialogs(clean_env, monkeypatch) -> None:
+    import main.api.bootstrap_rest as bootstrap_rest
+
+    monkeypatch, tmp_path = clean_env
+    client, _calls = _bootstrap_client(monkeypatch, "setup")
+    assert bootstrap_rest._DIR_PICKER_LOCK.acquire(blocking=False)
+    try:
+        response = client.post("/bootstrap/pick-data-dir")
+    finally:
+        bootstrap_rest._DIR_PICKER_LOCK.release()
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "dir_picker_busy"
+
+
+def test_pick_endpoint_degrades_when_unavailable(clean_env, monkeypatch) -> None:
+    import main.api.bootstrap_rest as bootstrap_rest
+
+    monkeypatch, tmp_path = clean_env
+    client, _calls = _bootstrap_client(monkeypatch, "setup")
+    monkeypatch.setattr(bootstrap_rest, "dir_picker_available", lambda: False)
+
+    response = client.post("/bootstrap/pick-data-dir")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "dir_picker_unavailable"

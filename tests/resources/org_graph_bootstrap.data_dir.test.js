@@ -46,7 +46,7 @@ function makeElement(id) {
   };
 }
 
-function loadBoot({ status }) {
+function loadBoot({ status, pickedDir = null }) {
   const elements = new Map();
   const document = {
     getElementById(id) {
@@ -72,6 +72,10 @@ function loadBoot({ status }) {
       },
       async unlockBootstrap() {
         return status;
+      },
+      async pickBootstrapDataDir() {
+        calls.pickCount = (calls.pickCount || 0) + 1;
+        return pickedDir;
       },
     },
     CustomEvent: class {
@@ -136,4 +140,73 @@ test("解锁态不渲染数据目录输入", async () => {
 
   assert.equal(dataDir.placeholder, "");
   assert.equal(elements("boot-setup-form").hidden, true);
+});
+
+test("服务端说可用时才露出「选择」按钮", async () => {
+  const hidden = loadBoot({
+    status: {
+      mode: "setup",
+      data_root: { source: "default", default_root: "C:\\install" },
+      dir_picker: { available: false },
+    },
+  });
+  const shown = loadBoot({
+    status: {
+      mode: "setup",
+      data_root: { source: "default", default_root: "C:\\install" },
+      dir_picker: { available: true },
+    },
+  });
+  await flush();
+
+  assert.equal(hidden.elements("boot-setup-data-dir-pick").hidden, true);
+  assert.equal(shown.elements("boot-setup-data-dir-pick").hidden, false);
+});
+
+test("点「选择」把本机目录框返回的路径填进输入框", async () => {
+  const { elements, calls } = loadBoot({
+    status: {
+      mode: "setup",
+      data_root: { source: "default", default_root: "C:\\install" },
+      dir_picker: { available: true },
+    },
+    pickedDir: { path: "D:\\G3KU-Data", cancelled: false },
+  });
+  await flush();
+  const pick = elements("boot-setup-data-dir-pick");
+
+  pick.dispatch("click");
+  await flush();
+
+  assert.equal(calls.pickCount, 1);
+  assert.equal(elements("boot-setup-data-dir").value, "D:\\G3KU-Data");
+});
+
+test("取消目录框不动输入框", async () => {
+  const { elements } = loadBoot({
+    status: {
+      mode: "setup",
+      data_root: { source: "default", default_root: "C:\\install" },
+      dir_picker: { available: true },
+    },
+    pickedDir: { path: "", cancelled: true },
+  });
+  await flush();
+  const dataDir = elements("boot-setup-data-dir");
+  dataDir.value = "C:\\keep-me";
+
+  elements("boot-setup-data-dir-pick").dispatch("click");
+  await flush();
+
+  assert.equal(dataDir.value, "C:\\keep-me");
+});
+
+test("首屏文案为「项目数据地址设置」且按钮 id 与 JS 绑定一致", () => {
+  const html = fs.readFileSync(path.join(REPO_ROOT, "g3ku", "web", "frontend", "org_graph.html"), "utf8");
+  const script = fs.readFileSync(BOOTSTRAP_SCRIPT, "utf8");
+
+  assert.match(html, /<label class="resource-field-label" for="boot-setup-data-dir">项目数据地址设置<\/label>/);
+  assert.match(html, /id="boot-setup-data-dir-pick"/);
+  assert.match(script, /getElementById\("boot-setup-data-dir-pick"\)/);
+  assert.match(script, /addEventListener\("click", handlePickDataDir\)/);
 });

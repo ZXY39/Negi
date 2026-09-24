@@ -302,6 +302,12 @@ class ApiClient {
         return data.item || null;
     }
 
+    // 原生目录框由服务端弹出并等到用户操作完成，超时按分钟级给。
+    static async pickBootstrapDataDir() {
+        const data = await this._request("POST", "/api/bootstrap/pick-data-dir", { timeoutMs: 600000 });
+        return data.item || null;
+    }
+
     static async _waitForBootstrapRuntimeReady({ maxPolls = 6, pollIntervalMs = 1000, onProgress = null } = {}) {
         const totalPolls = Math.max(1, Number(maxPolls) || 1);
         for (let pollIndex = 0; pollIndex < totalPolls; pollIndex += 1) {

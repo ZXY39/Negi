@@ -39,11 +39,15 @@
                     <input id="boot-setup-password-confirm" class="resource-search" type="password"
                         autocomplete="new-password">
                 </label>
-                <label class="resource-field">
-                    <span class="resource-field-label">数据目录</span>
-                    <input id="boot-setup-data-dir" class="resource-search" type="text" spellcheck="false"
-                        autocomplete="off">
-                </label>
+                <div class="resource-field">
+                    <label class="resource-field-label" for="boot-setup-data-dir">项目数据地址设置</label>
+                    <div class="boot-dir-row">
+                        <input id="boot-setup-data-dir" class="resource-search boot-dir-input" type="text"
+                            spellcheck="false" autocomplete="off">
+                        <button id="boot-setup-data-dir-pick" class="boot-dir-pick" type="button"
+                            hidden>选择</button>
+                    </div>
+                </div>
                 <button id="boot-setup-submit" class="btn-primary" type="submit">初始化并进入项目</button>
             </form>
             <form id="boot-unlock-form" class="boot-form" hidden>

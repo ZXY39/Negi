@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -54,6 +56,7 @@ def _status_payload(*, include_preview: bool = True) -> dict[str, Any]:
     payload["runtime_ready"] = bool(runtime.get("ready"))
     payload["runtime_bootstrapping"] = bool(runtime.get("bootstrapping"))
     payload["data_root"] = describe_data_root()
+    payload["dir_picker"] = {"available": dir_picker_available()}
     if include_preview and payload.get("legacy_detected"):
         try:
             payload["legacy_preview"] = service.export_legacy_state()
@@ -82,6 +85,68 @@ def _apply_data_root_choice(raw: object) -> None:
         write_data_root_pointer(text)
     except DataRootError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message}) from exc
+
+
+_DIR_PICKER_LOCK = threading.Lock()
+
+
+def dir_picker_available() -> bool:
+    """本机目录选择框只在 Windows + 可导入 tkinter 时提供；其余环境回手填。"""
+    if os.name != "nt":
+        return False
+    try:
+        import tkinter  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _ask_directory() -> str:
+    import tkinter
+    from tkinter import filedialog
+
+    root = tkinter.Tk()
+    try:
+        root.withdraw()
+        root.attributes("-topmost", True)
+        root.update_idletasks()
+        return str(filedialog.askdirectory(title="选择项目数据地址") or "").strip()
+    finally:
+        root.destroy()
+
+
+@router.post("/bootstrap/pick-data-dir")
+async def bootstrap_pick_data_dir():
+    if not dir_picker_available():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "dir_picker_unavailable",
+                "message": "当前环境不提供本机目录选择框，请手动填写绝对路径。",
+            },
+        )
+    mode = str((_service().status() or {}).get("mode") or "").strip().lower()
+    if mode != "setup":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "data_root_requires_setup", "message": "数据目录只能在首次初始化时指定。"},
+        )
+    if not _DIR_PICKER_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "dir_picker_busy", "message": "已有一个目录选择框在等待操作。"},
+        )
+    try:
+        path = await asyncio.to_thread(_ask_directory)
+    except Exception as exc:
+        logger.warning("bootstrap data dir picker failed: {}", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "dir_picker_failed", "message": f"目录选择框启动失败：{exc}"},
+        ) from exc
+    finally:
+        _DIR_PICKER_LOCK.release()
+    return {"ok": True, "item": {"path": path, "cancelled": not path}}
 
 
 async def _start_runtime_after_unlock() -> None:

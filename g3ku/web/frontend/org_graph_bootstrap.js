@@ -3,6 +3,7 @@
     status: null,
     unlockedInitDispatched: false,
     busy: false,
+    pickingDir: false,
   };
 
   const U = {};
@@ -24,6 +25,7 @@
     setupFailed: "\u521d\u59cb\u5316\u5931\u8d25",
     unlockFailed: "\u89e3\u9501\u5931\u8d25",
     dataDirPlaceholder: "\u9ed8\u8ba4\uff1a",
+    pickFailed: "\u76ee\u5f55\u9009\u62e9\u6846\u6253\u5f00\u5931\u8d25",
   };
 
   function refs() {
@@ -39,6 +41,7 @@
     U.bootSetupPassword = document.getElementById("boot-setup-password");
     U.bootSetupPasswordConfirm = document.getElementById("boot-setup-password-confirm");
     U.bootSetupDataDir = document.getElementById("boot-setup-data-dir");
+    U.bootSetupDataDirPick = document.getElementById("boot-setup-data-dir-pick");
     U.bootSetupSubmit = document.getElementById("boot-setup-submit");
     U.bootUnlockForm = document.getElementById("boot-unlock-form");
     U.bootUnlockPassword = document.getElementById("boot-unlock-password");
@@ -75,6 +78,7 @@
     setDisabled(U.bootSetupPassword, setupBusy);
     setDisabled(U.bootSetupPasswordConfirm, setupBusy);
     setDisabled(U.bootSetupDataDir, setupBusy);
+    setDisabled(U.bootSetupDataDirPick, setupBusy || state.pickingDir);
     setDisabled(U.bootLegacyConfirm, setupBusy);
     setDisabled(U.bootUnlockPassword, unlockBusy);
     setDisabled(U.bootRememberUnlock, unlockBusy);
@@ -125,6 +129,10 @@
         U.bootSetupDataDir.value = String(dataRoot.data_root || "");
       }
       U.bootSetupDataDir.placeholder = `${TEXT.dataDirPlaceholder}${dataRoot.default_root || ""}`;
+      // 目录框由本机进程弹出，只有服务端说可用才露出来（容器/远程部署下留手填）。
+      if (U.bootSetupDataDirPick) {
+        U.bootSetupDataDirPick.hidden = !Boolean(state.status?.dir_picker?.available);
+      }
     }
     if (U.bootUnlockForm) U.bootUnlockForm.hidden = mode !== "locked";
     if (U.bootRememberUnlock && mode === "locked") {
@@ -210,9 +218,28 @@
     }
   }
 
+  async function handlePickDataDir() {
+    if (state.pickingDir || state.busy || !U.bootSetupDataDir) return;
+    try {
+      state.pickingDir = true;
+      renderBusyState();
+      const picked = await ApiClient.pickBootstrapDataDir();
+      if (picked && picked.path) {
+        U.bootSetupDataDir.value = String(picked.path);
+        setBanner("");
+      }
+    } catch (error) {
+      setBanner(error.message || TEXT.pickFailed, { error: true });
+    } finally {
+      state.pickingDir = false;
+      renderBusyState();
+    }
+  }
+
   function bind() {
     U.bootSetupForm?.addEventListener("submit", handleSetup);
     U.bootUnlockForm?.addEventListener("submit", handleUnlock);
+    U.bootSetupDataDirPick?.addEventListener("click", handlePickDataDir);
   }
 
   document.addEventListener("DOMContentLoaded", () => {
