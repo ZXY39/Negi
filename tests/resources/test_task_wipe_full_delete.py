@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from main.models import TaskRecord
+from main.monitoring.models import TaskProjectionNodeDetailRecord
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -49,11 +50,14 @@ def _terminal_task(task_id: str, **kwargs) -> TaskRecord:
 def _seed_task_rows(service: MainRuntimeService, task_id: str) -> None:
     store = service.store
     store.upsert_task(_terminal_task(task_id))
-    store._execute_write(
-        'INSERT INTO task_node_details (node_id, task_id, updated_at, input_text, input_ref, output_text, '
-        'output_ref, check_result, check_result_ref, final_output, final_output_ref, failure_reason, '
-        'prompt_summary, execution_trace_ref, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        ('node-root', task_id, '2026-09-11T10:00:00+08:00', 'in', '', 'out', '', '', '', '', '', '', '', '', '{}'),
+    store.upsert_task_node_detail(
+        TaskProjectionNodeDetailRecord(
+            node_id='node-root',
+            task_id=task_id,
+            updated_at='2026-09-11T10:00:00+08:00',
+            input_text='in',
+            output_text='out',
+        )
     )
     store._execute_write(
         'INSERT INTO task_model_calls (task_id, node_id, created_at, payload_json) VALUES (?, ?, ?, ?)',

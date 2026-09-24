@@ -165,17 +165,11 @@ async def seed_runtime(
                     prompt_summary=f"prompt {goal}",
                     execution_trace_ref="",
                     payload={
-                        "node_id": node_id,
-                        "task_id": task_id,
                         "parent_node_id": parent_node_id,
                         "depth": depth,
                         "node_kind": "execution",
                         "status": "in_progress",
                         "goal": goal,
-                        "prompt_summary": f"prompt {goal}",
-                        "input_text": f"input {goal}",
-                        "output_text": output_text,
-                        "updated_at": updated_at,
                         "token_usage": {"tracked": True},
                         "token_usage_by_model": [],
                         "execution_trace": {

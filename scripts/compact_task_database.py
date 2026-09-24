@@ -4,7 +4,9 @@
 1. 终态任务大行裁剪：对早于保留期（默认 14 天）的 success/failed 任务，删除
    task_model_calls / task_runtime_frames / task_node_tool_results /
    task_node_rounds / task_node_details 五张大行表的任务行。
-   永久保留：tasks/nodes 结构、task_error_logs、task_events 行；
+   永久保留：tasks 行、nodes 行（注意 nodes.payload_json 是整个 NodeRecord，
+   含 input/output/metadata，是明细之外节点正文的另一份副本，本脚本不回收）、
+   task_error_logs、task_events 行；
    event-history 只存 live.patch 单份最新快照（latest.json.gz，覆盖写），
    无保留期清理链路，随任务删除/全删渐进一并回收。
 2. auto_vacuum 迁移 + 空间收缩：新库由运行时建库即 INCREMENTAL；存量库

@@ -335,17 +335,6 @@ class SQLiteTaskStore:
                 node_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                input_text TEXT NOT NULL,
-                input_ref TEXT NOT NULL,
-                output_text TEXT NOT NULL,
-                output_ref TEXT NOT NULL,
-                check_result TEXT NOT NULL,
-                check_result_ref TEXT NOT NULL,
-                final_output TEXT NOT NULL,
-                final_output_ref TEXT NOT NULL,
-                failure_reason TEXT NOT NULL,
-                prompt_summary TEXT NOT NULL,
-                execution_trace_ref TEXT NOT NULL,
                 payload_json TEXT NOT NULL
             )
             ''',
@@ -538,6 +527,9 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_commands', 'result_json', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'accepted', "INTEGER")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'rejected_reason', "TEXT NOT NULL DEFAULT ''")
+            for column in self._NODE_DETAIL_LEGACY_COLUMNS:
+                self._drop_column(self._conn, 'task_node_details', column)
+            self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -545,6 +537,26 @@ class SQLiteTaskStore:
         if str(column or '') in columns:
             return
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+    @staticmethod
+    def _drop_column(conn: sqlite3.Connection, table: str, column: str) -> None:
+        """删掉已无读者的平铺列。存量库首次打开时执行，是一次整表重写。
+
+        这些列都不在任何索引/约束里，SQLite 3.35+ 支持直接 DROP。删除失败
+        （磁盘紧张、SQLite 过旧）时只记日志不阻断启动：写侧按实际列集取值，
+        该表便继续维持旧形状，重复照旧但语义不变。
+        """
+        columns = {str(row[1]) for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
+        if str(column or '') not in columns:
+            return
+        try:
+            conn.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
+        except sqlite3.Error:
+            logger.warning('failed to drop legacy column {} from {}', column, table, exc_info=True)
+
+    @staticmethod
+    def _live_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
+        return tuple(str(row[1]) for row in conn.execute(f'PRAGMA table_info({table})').fetchall())
 
     def _writer_loop(self) -> None:
         while True:
@@ -888,6 +900,22 @@ class SQLiteTaskStore:
         'task_node_details',
     )
 
+    # 平铺正文列在 payload_json 里已有同名键，读侧四个 SELECT 点一律只取
+    # payload_json，这些列零读者；存量库打开时直接删掉。
+    _NODE_DETAIL_LEGACY_COLUMNS = (
+        'input_text',
+        'input_ref',
+        'output_text',
+        'output_ref',
+        'check_result',
+        'check_result_ref',
+        'final_output',
+        'final_output_ref',
+        'failure_reason',
+        'prompt_summary',
+        'execution_trace_ref',
+    )
+
     _PRUNABLE_TASK_SUBQUERY = (
         "SELECT task_id FROM tasks WHERE status IN ('success','failed') "
         "AND COALESCE(NULLIF(json_extract(payload_json, '$.finished_at'), ''), updated_at) < ?"
@@ -1091,6 +1119,10 @@ class SQLiteTaskStore:
 
         全删渐进 size×age 排序的 size 输入；调用方候选集有界（≤50），
         五表均有 task_id 索引，代价可控。
+
+        口径：只计 payload_json，即每段正文的一份。详情表去重前同一正文按列与
+        payload 重复计数，因此本值（以及 task_disk_usage 里的 DB 分量）在去重后
+        会低于磁盘上的历史占用，不能用来推断收缩量。
         """
         ids = [str(item or '').strip() for item in task_ids or [] if str(item or '').strip()]
         if not ids:
@@ -2601,72 +2633,46 @@ class SQLiteTaskStore:
         row = self._fetchone('SELECT payload_json FROM task_nodes WHERE node_id = ?', (node_id,))
         return self._parse(row['payload_json'], TaskProjectionNodeRecord) if row else None
 
+    def _task_node_detail_fields(self, record: TaskProjectionNodeDetailRecord) -> dict[str, object]:
+        return {
+            'node_id': record.node_id,
+            'task_id': record.task_id,
+            'updated_at': record.updated_at,
+            'input_text': record.input_text,
+            'input_ref': record.input_ref,
+            'output_text': record.output_text,
+            'output_ref': record.output_ref,
+            'check_result': record.check_result,
+            'check_result_ref': record.check_result_ref,
+            'final_output': record.final_output,
+            'final_output_ref': record.final_output_ref,
+            'failure_reason': record.failure_reason,
+            'prompt_summary': record.prompt_summary,
+            'execution_trace_ref': record.execution_trace_ref,
+            'payload_json': record.model_dump_json(),
+        }
+
+    def _task_node_detail_row(self, record: TaskProjectionNodeDetailRecord) -> tuple[list[str], list[object]]:
+        """按建表后的实际列集取值：平铺正文列已删，未删成功时旧形状照写。"""
+        fields = self._task_node_detail_fields(record)
+        columns = [column for column in self._node_detail_columns if column in fields]
+        return columns, [fields[column] for column in columns]
+
     def replace_task_node_details(self, task_id: str, records: list[TaskProjectionNodeDetailRecord]) -> None:
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute('DELETE FROM task_node_details WHERE task_id = ?', (task_id,))
             for record in records:
+                columns, values = self._task_node_detail_row(record)
+                placeholders = ', '.join('?' for _ in columns)
                 conn.execute(
-                    'INSERT INTO task_node_details (node_id, task_id, updated_at, input_text, input_ref, output_text, output_ref, check_result, check_result_ref, final_output, final_output_ref, failure_reason, prompt_summary, execution_trace_ref, payload_json) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (
-                        record.node_id,
-                        record.task_id,
-                        record.updated_at,
-                        record.input_text,
-                        record.input_ref,
-                        record.output_text,
-                        record.output_ref,
-                        record.check_result,
-                        record.check_result_ref,
-                        record.final_output,
-                        record.final_output_ref,
-                        record.failure_reason,
-                        record.prompt_summary,
-                        record.execution_trace_ref,
-                        record.model_dump_json(),
-                    ),
+                    f'INSERT INTO task_node_details ({", ".join(columns)}) VALUES ({placeholders})',
+                    values,
                 )
         self._run_write(operation)
 
     def upsert_task_node_detail(self, record: TaskProjectionNodeDetailRecord) -> TaskProjectionNodeDetailRecord:
-        self._upsert(
-            'task_node_details',
-            [
-                'node_id',
-                'task_id',
-                'updated_at',
-                'input_text',
-                'input_ref',
-                'output_text',
-                'output_ref',
-                'check_result',
-                'check_result_ref',
-                'final_output',
-                'final_output_ref',
-                'failure_reason',
-                'prompt_summary',
-                'execution_trace_ref',
-                'payload_json',
-            ],
-            [
-                record.node_id,
-                record.task_id,
-                record.updated_at,
-                record.input_text,
-                record.input_ref,
-                record.output_text,
-                record.output_ref,
-                record.check_result,
-                record.check_result_ref,
-                record.final_output,
-                record.final_output_ref,
-                record.failure_reason,
-                record.prompt_summary,
-                record.execution_trace_ref,
-                record.model_dump_json(),
-            ],
-            'node_id',
-        )
+        columns, values = self._task_node_detail_row(record)
+        self._upsert('task_node_details', columns, values, 'node_id')
         return record
 
     def get_task_node_detail(self, node_id: str) -> TaskProjectionNodeDetailRecord | None:
@@ -2680,9 +2686,9 @@ class SQLiteTaskStore:
     def list_task_node_token_usage_payloads(self, task_id: str) -> list[list[dict[str, Any]]]:
         """按节点取 token_usage_by_model 列表（token 聚合专用窄读路径）。
 
-        task_node_details 的大字段（input/output/check_result/final_output 等文本列）
-        单行可达数 MB，整行读是大任务 getTask 冷缓存变慢的根因之一；json_extract 只
-        读 payload_json 里的目标数组。json1 不可用时回退到只读 payload_json 列。
+        task_node_details 单行可达数 MB（节点正文只在 payload_json 里存一份），
+        整行读是大任务 getTask 冷缓存变慢的根因之一；json_extract 只读目标数组。
+        json1 不可用时回退到只读 payload_json 列。
 
         token 明细嵌在详情记录自身的 payload 字段内（TaskProjectionNodeDetailRecord.payload），
         即磁盘路径为 payload_json.payload.token_usage_by_model，不要直接取顶层同名字段。
