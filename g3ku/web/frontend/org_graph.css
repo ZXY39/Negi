@@ -11649,7 +11649,8 @@ textarea {
 
 .boot-dir-row {
   display: flex;
-  align-items: center;
+  /* 按钮不写死高度，靠 stretch 跟随输入框实测高度（redesign 把 .resource-search 压到 38px）。 */
+  align-items: stretch;
   gap: 10px;
 }
 
@@ -11660,19 +11661,27 @@ textarea {
 
 .boot-dir-pick {
   flex: 0 0 auto;
-  min-height: 46px;
-  padding: 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 11px;
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   background-color: var(--bg-surface-inner);
-  color: var(--text-primary);
-  font-weight: 600;
+  color: var(--text-secondary);
   transition: var(--transition-fast);
+}
+
+.boot-dir-pick svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 .boot-dir-pick:hover:not(:disabled) {
   border-color: var(--border-strong);
   background-color: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .boot-dir-pick:disabled {

@@ -44,8 +44,10 @@
                     <div class="boot-dir-row">
                         <input id="boot-setup-data-dir" class="resource-search boot-dir-input" type="text"
                             spellcheck="false" autocomplete="off">
-                        <button id="boot-setup-data-dir-pick" class="boot-dir-pick" type="button"
-                            hidden>选择</button>
+                        <button id="boot-setup-data-dir-pick" class="boot-dir-pick" type="button" hidden
+                            aria-label="选择数据目录" title="选择数据目录">
+                            <i data-lucide="folder" aria-hidden="true"></i>
+                        </button>
                     </div>
                 </div>
                 <button id="boot-setup-submit" class="btn-primary" type="submit">初始化并进入项目</button>

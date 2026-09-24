@@ -201,12 +201,25 @@ test("取消目录框不动输入框", async () => {
   assert.equal(dataDir.value, "C:\\keep-me");
 });
 
-test("首屏文案为「项目数据地址设置」且按钮 id 与 JS 绑定一致", () => {
+test("首屏文案为「项目数据地址设置」，按钮是 folder 图标且无可见中文", () => {
   const html = fs.readFileSync(path.join(REPO_ROOT, "g3ku", "web", "frontend", "org_graph.html"), "utf8");
   const script = fs.readFileSync(BOOTSTRAP_SCRIPT, "utf8");
+  const button = html.match(/<button id="boot-setup-data-dir-pick"[\s\S]*?<\/button>/);
 
+  assert.ok(button, "缺少 boot-setup-data-dir-pick 按钮");
   assert.match(html, /<label class="resource-field-label" for="boot-setup-data-dir">项目数据地址设置<\/label>/);
-  assert.match(html, /id="boot-setup-data-dir-pick"/);
+  assert.match(button[0], /data-lucide="folder"/);
+  assert.match(button[0], /aria-label="选择数据目录"/);
+  assert.doesNotMatch(button[0], />\s*选择\s*</);
   assert.match(script, /getElementById\("boot-setup-data-dir-pick"\)/);
   assert.match(script, /addEventListener\("click", handlePickDataDir\)/);
+});
+
+test("按钮高度跟随输入框，不写死 min-height", () => {
+  const css = fs.readFileSync(path.join(REPO_ROOT, "g3ku", "web", "frontend", "org_graph.css"), "utf8");
+  const row = css.match(/\.boot-dir-row \{[\s\S]*?\}/)[0];
+  const button = css.match(/\.boot-dir-pick \{[\s\S]*?\}/)[0];
+
+  assert.match(row, /align-items:\s*stretch/);
+  assert.doesNotMatch(button, /min-height/);
 });
