@@ -86,7 +86,7 @@
 
 ### D. 内置包装层 + 外部本体
 
-这是最容易误判的一类，`agent_browser` 就属于这种模式。
+这一类最容易误判：包装层本身是完好的 internal 工具，缺的其实是 `externaltools/` 里的本体，于是表现为"工具在清单里但 `available=false`"。
 
 特征：
 

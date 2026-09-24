@@ -76,7 +76,6 @@ def _load_built_tool(tool_dir: Path):
 
 def test_tool_manifests_match_explicit_parameter_contracts():
     for tool_name in [
-        'agent_browser',
         'create_async_task_cn',
         'cron',
         'filesystem_copy',

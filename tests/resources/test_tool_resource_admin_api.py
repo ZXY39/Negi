@@ -4669,11 +4669,11 @@ async def test_admin_tool_delete_endpoint_rejects_running_ceo_usage(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_admin_endpoints_expose_builtin_agent_browser_fields(tmp_path: Path):
+async def test_admin_endpoints_expose_builtin_tool_fields(tmp_path: Path):
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'agent_browser')
+    _copy_repo_tools(workspace, 'web_fetch')
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -4692,22 +4692,23 @@ async def test_admin_endpoints_expose_builtin_agent_browser_fields(tmp_path: Pat
         await service.startup()
         client = TestClient(_build_app(service))
 
-        item_response = client.get('/api/resources/tools/agent_browser')
+        item_response = client.get('/api/resources/tools/web_fetch')
         assert item_response.status_code == 200
         item = item_response.json()['item']
         assert item['tool_type'] == 'internal'
         assert item['callable'] is True
         assert item['install_dir'] is None
-        assert item['actions'][0]['action_id'] == 'browse'
-        assert item['actions'][0]['allowed_roles'] == ['ceo', 'execution']
+        assert item['actions'][0]['action_id'] == 'fetch'
+        assert item['actions'][0]['allowed_roles'] == ['ceo', 'execution', 'inspection']
 
-        toolskill_response = client.get('/api/resources/tools/agent_browser/toolskill')
+        # 样本换成自维护工具后没有安装段；安装指引透出由 external 车道用例覆盖。
+        toolskill_response = client.get('/api/resources/tools/web_fetch/toolskill')
         assert toolskill_response.status_code == 200
         payload = toolskill_response.json()
         assert payload['tool_type'] == 'internal'
         assert payload['callable'] is True
-        assert 'externaltools/agent_browser' in payload['content']
-        assert '## 安装' in payload['content']
+        assert '# web_fetch' in payload['content']
+        assert '## 何时调用' in payload['content']
     finally:
         await service.close()
         manager.close()
@@ -4718,7 +4719,18 @@ async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path:
     workspace = tmp_path / 'workspace'
     (workspace / 'skills').mkdir(parents=True, exist_ok=True)
     (workspace / 'tools').mkdir(parents=True, exist_ok=True)
-    _copy_repo_tools(workspace, 'agent_browser', 'load_tool_context')
+    _copy_repo_tools(workspace, 'web_fetch', 'load_tool_context')
+    # 本仓库现存工具的 requires 全是空的（带 requires.paths 的那颗已下线），所以给副本
+    # 注入一条不可能满足的路径，来复现「内置工具在册但不可用」这一被判定状态。
+    manifest = workspace / 'tools' / 'web_fetch' / 'resource.yaml'
+    manifest.write_text(
+        manifest.read_text(encoding='utf-8').replace(
+            'requires: []',
+            'requires:\n  paths:\n    - externaltools/web_fetch/absent.bin\n',
+            1,
+        ),
+        encoding='utf-8',
+    )
 
     manager = ResourceManager(workspace, app_config=_resource_app_config())
     manager.reload_now(trigger='test-bind')
@@ -4741,17 +4753,17 @@ async def test_unavailable_builtin_tool_context_remains_visible_to_ceo(tmp_path:
             for item in service.list_visible_tool_families(actor_role='ceo', session_id='web:shared')
         }
 
-        assert 'agent_browser' not in visible_names
-        assert 'agent_browser' in visible_families
+        assert 'web_fetch' not in visible_names
+        assert 'web_fetch' in visible_families
 
-        payload = service.load_tool_context(actor_role='ceo', session_id='web:shared', tool_id='agent_browser')
+        payload = service.load_tool_context(actor_role='ceo', session_id='web:shared', tool_id='web_fetch')
         assert payload['ok'] is True
-        assert payload['tool_id'] == 'agent_browser'
+        assert payload['tool_id'] == 'web_fetch'
         assert payload['callable'] is True
         assert payload['available'] is False
         assert len(payload['warnings']) == 1
-        assert payload['warnings'][0].startswith('missing required paths: externaltools/agent_browser/')
-        assert '# agent_browser' in payload['content']
+        assert payload['warnings'][0].startswith('missing required paths: externaltools/web_fetch/')
+        assert '# web_fetch' in payload['content']
     finally:
         await service.close()
         manager.close()

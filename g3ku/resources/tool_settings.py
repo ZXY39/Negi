@@ -60,18 +60,6 @@ class SkillInstallerToolSettings(Base):
     auto_prefer: str = "git"
 
 
-class AgentBrowserToolSettings(Base):
-    command_prefix: list[str] = Field(default_factory=list)
-    install_root: str = 'externaltools/agent_browser'
-    browser_root: str = 'externaltools/agent_browser/playwright-browsers'
-    temp_root: str = 'temp/agent_browser'
-    auto_session: bool = True
-    default_session_name: str = 'g3ku-agent-browser'
-    profile_root: str = '.g3ku/tool-data/agent_browser/profiles'
-    retry_after_session_cleanup: bool = True
-    cleanup_on_timeout: bool = True
-
-
 def raw_tool_settings_from_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     payload = (metadata or {}).get("settings") if isinstance(metadata, dict) else None
     return dict(payload or {}) if isinstance(payload, dict) else {}
