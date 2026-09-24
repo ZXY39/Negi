@@ -4142,8 +4142,8 @@ class TaskLogService:
             node_id=node.node_id,
             task_id=node.task_id,
             updated_at=str(node.updated_at or ''),
-            input_text=str(node.input or ''),
-            input_ref=str(node.input_ref or ''),
+            # 不抄 node.input/input_ref：正文的家在 nodes 行，读侧由
+            # query_service 直接取 runtime_node.input。抄一份等于把最大字段存两遍。
             output_text=self._node_output_text(node),
             output_ref=self._node_output_ref(node),
             check_result=str(node.check_result or ''),

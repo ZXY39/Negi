@@ -622,6 +622,16 @@ class TaskQueryService:
             if str(item.get('status') or '').strip() in {'consumed', 'merged'}
             and str(item.get('message') or '').strip()
         ]
+        # 节点正文只存 `nodes.input`，明细行不再抄一份；旧行里仍有，所以按
+        # payload → 平铺 → 运行节点依次取，避免同一任务内两种来源打架。
+        node_input_text = str(
+            payload.get('input_text') or detail_record.input_text
+            or (runtime_node.input if runtime_node is not None else '') or ''
+        )
+        node_input_ref = str(
+            payload.get('input_ref') or detail_record.input_ref
+            or (runtime_node.input_ref if runtime_node is not None else '') or ''
+        )
         detail = TaskNodeDetail(
             node_id=str(payload.get('node_id') or detail_record.node_id),
             task_id=str(payload.get('task_id') or detail_record.task_id),
@@ -636,9 +646,9 @@ class TaskQueryService:
             detail_level=normalized_detail_level,
             prompt=str(payload.get('prompt_summary') or detail_record.prompt_summary or ''),
             prompt_summary=str(payload.get('prompt_summary') or detail_record.prompt_summary or ''),
-            input=str(payload.get('input_text') or detail_record.input_text or ''),
-            input_preview=str(payload.get('input_text') or detail_record.input_text or ''),
-            input_ref=str(payload.get('input_ref') or detail_record.input_ref or ''),
+            input=node_input_text,
+            input_preview=node_input_text,
+            input_ref=node_input_ref,
             actual_request_ref=str(payload.get('actual_request_ref') or ''),
             prompt_cache_key_hash=str(payload.get('prompt_cache_key_hash') or ''),
             actual_request_hash=str(payload.get('actual_request_hash') or ''),

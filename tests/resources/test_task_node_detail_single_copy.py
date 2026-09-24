@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from types import SimpleNamespace
 
+from main.models import NodeRecord, TaskRecord
 from main.monitoring.models import TaskProjectionNodeDetailRecord, TaskProjectionToolResultRecord
+from main.service.runtime_service import MainRuntimeService
 from main.storage.sqlite_store import SQLiteTaskStore
 
 _DETAIL_COLUMNS = ['node_id', 'task_id', 'updated_at', 'payload_json']
@@ -389,10 +392,111 @@ def test_slimming_issues_one_table_rebuild_per_table(tmp_path) -> None:
 def test_slimming_is_a_noop_when_already_lean(tmp_path) -> None:
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     recorder = _RecordingConnection(store._conn)
+    ddl = lambda statements: [  # noqa: E731
+        item for item in statements if not item.upper().startswith('PRAGMA')
+    ]
     try:
         for table, legacy in SQLiteTaskStore._LEGACY_BODY_COLUMNS:
-            before = recorder.statements
+            before = ddl(recorder.statements)
             SQLiteTaskStore._drop_legacy_columns(recorder, table, legacy)
-            assert [item for item in recorder.statements if item not in before] == []
+            assert ddl(recorder.statements) == before
     finally:
         store.close()
+
+
+# --- 正文的家：nodes 一行，明细表不抄 ---
+
+
+class _DummyChatBackend:
+    async def chat(self, **kwargs):
+        return SimpleNamespace(content='', tool_calls=[], finish_reason='stop', usage={})
+
+
+def _service_with_node(tmp_path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    service.store.upsert_task(TaskRecord(
+        task_id='task:lane',
+        session_id='web:shared',
+        title='正文归属',
+        user_request='x',
+        status='in_progress',
+        root_node_id='node:lane',
+        created_at='2026-09-24T10:00:00+08:00',
+        updated_at='2026-09-24T10:00:00+08:00',
+    ))
+    service.store.upsert_node(NodeRecord(
+        node_id='node:lane',
+        task_id='task:lane',
+        root_node_id='node:lane',
+        goal='g',
+        prompt='p',
+        status='in_progress',
+        created_at='2026-09-24T10:00:00+08:00',
+        updated_at='2026-09-24T10:00:00+08:00',
+    ))
+    return service
+
+
+def test_node_input_is_stored_once_across_both_tables(tmp_path) -> None:
+    service = _service_with_node(tmp_path)
+    body = json.dumps([{'role': 'user', 'content': 'U' * 4000}], ensure_ascii=False)
+
+    service.log_service.update_node_input('task:lane', 'node:lane', body)
+
+    node_row = service.store._conn.execute(
+        'SELECT payload_json FROM nodes WHERE node_id = ?', ('node:lane',)
+    ).fetchone()[0]
+    detail_row = service.store._conn.execute(
+        'SELECT payload_json FROM task_node_details WHERE node_id = ?', ('node:lane',)
+    ).fetchone()[0]
+    needle = json.dumps(body)[1:-1]
+
+    # 正文只在 nodes 行出现一次；明细行既不在顶层也不在嵌套里带它。
+    assert node_row.count(needle) == 1
+    assert detail_row.count(needle) == 0
+    detail = service.store.get_task_node_detail('node:lane')
+    assert detail.input_text == ''
+    assert 'input_text' not in detail.payload
+    assert service.store.get_node('node:lane').input == body
+
+
+def test_node_detail_payload_still_serves_input_from_runtime_node(tmp_path) -> None:
+    service = _service_with_node(tmp_path)
+    body = json.dumps([{'role': 'user', 'content': 'T' * 200}], ensure_ascii=False)
+    service.log_service.update_node_input('task:lane', 'node:lane', body)
+
+    payload = service.get_node_detail_payload('task:lane', 'node:lane', 'full')
+
+    assert payload is not None
+    assert payload['item']['input'] == body
+    assert payload['item']['input_preview'] == body
+
+
+def test_legacy_detail_row_self_heals_without_losing_input(tmp_path) -> None:
+    """旧明细行自带正文时：读取会重投影，正文改由 nodes 供给，第二份副本自行消失。"""
+    service = _service_with_node(tmp_path)
+    legacy_body = '[{"role":"user","content":"OLD"}]'
+    service.store.upsert_task_node_detail(TaskProjectionNodeDetailRecord(
+        node_id='node:lane',
+        task_id='task:lane',
+        updated_at='2026-09-24T10:00:00+08:00',
+        input_text=legacy_body,
+    ))
+    service.store.update_node('node:lane', lambda record: record.model_copy(update={'input': legacy_body}))
+
+    payload = service.get_node_detail_payload('task:lane', 'node:lane', 'full')
+    assert payload['item']['input'] == legacy_body
+
+    row = service.store._conn.execute(
+        'SELECT payload_json FROM task_node_details WHERE node_id = ?', ('node:lane',)
+    ).fetchone()[0]
+    assert json.loads(row).get('input_text') in (None, '')
+    assert row.count(json.dumps(legacy_body)[1:-1]) == 0
