@@ -5116,20 +5116,25 @@ function renderQueuedCeoFollowUps(sessionId = activeSessionId()) {
         <div class="ceo-follow-up-chip-list" role="list">
             ${items.map((item, index) => {
                 const entryId = esc(String(item.id || ""));
+                const withdrawMarkup = `<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="撤回重新编辑">
+                        <i data-lucide="corner-down-left"></i>
+                    </button>`;
                 const actions = [];
-                // 已受理 = 服务端队列里的条目（重启也还在）：不再显示"立即发送"，
-                // 但撤回有对应操作了（服务端把内存队列与转录 pending 行一起删）。
+                // 三态分开：服务端队列里的条目（重启也还在，撤回有对应操作）／已转出去在飞的
+                // 条目（runtime 已持有，既不能"立即发送"也没有可撤回的东西，只能等它被那一轮
+                // 代表后由 consumeRepresentedRuntimeSentCeoFollowUps 收掉）／还没出门的本地草稿。
+                const inFlight = !item.accepted_by_runtime && !!String(item.runtime_sent_at || "").trim();
                 if (item.accepted_by_runtime) {
+                    actions.push(`<span class="ceo-follow-up-state">已受理</span>`, withdrawMarkup);
+                } else if (inFlight) {
                     actions.push(`<span class="ceo-follow-up-state">已受理</span>`);
-                } else if (S.ceoTurnActive) {
-                    actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-flush="${entryId}" aria-label="立即并入下一轮">
-                            <i data-lucide="send"></i>
-                        </button>`);
-                }
-                actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-withdraw="${entryId}" aria-label="撤回重新编辑">
-                        <i data-lucide="rotate-ccw"></i>
-                    </button>`);
-                if (!item.accepted_by_runtime) {
+                } else {
+                    if (S.ceoTurnActive) {
+                        actions.push(`<button type="button" class="ceo-follow-up-action" data-follow-up-flush="${entryId}" aria-label="立即并入下一轮">
+                                <i data-lucide="send"></i>
+                            </button>`);
+                    }
+                    actions.push(withdrawMarkup);
                     actions.push(`<button type="button" class="ceo-follow-up-remove" data-follow-up-remove="${entryId}" aria-label="丢弃待发送补充">
                             <i data-lucide="x"></i>
                         </button>`);

@@ -276,12 +276,30 @@ test("chip offers 立即发送 only for unsent items while a turn runs", () => {
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush="draft"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="draft"/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove="draft"/);
+    // 撤回的图标是左下转弯箭头，不是圆弧（圆弧那颗读起来像"刷新"）。
+    assert.match(U.ceoFollowUpQueue.innerHTML, /data-lucide="corner-down-left"/);
 
     // 回合结束后没有"下一轮"可并，立即发送按钮不再出现，撤回与丢弃留着。
     S.ceoTurnActive = false;
     setCeoQueuedFollowUps("web:test", [{ id: "draft", text: "还没发出去的补充" }]);
     assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
     assert.match(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw="draft"/);
+});
+
+test("in-flight item paints 已受理 with no affordance until it is represented", () => {
+    const { S, U, setCeoQueuedFollowUps } = loadApp();
+    S.ceoTurnActive = true;
+    // 已转出去、服务端状态帧还没跟上的那一小段：runtime 已经持有它，
+    // 既不能再"立即发送"，也没有可撤回的对象。
+    setCeoQueuedFollowUps("web:test", [
+        { id: "sent", text: "已经转出去的补充", runtime_sent_at: "2026-09-24T18:00:00.000Z" },
+    ]);
+
+    assert.match(U.ceoFollowUpQueue.innerHTML, /已经转出去的补充/);
+    assert.match(U.ceoFollowUpQueue.innerHTML, /已受理/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-flush/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-withdraw/);
+    assert.doesNotMatch(U.ceoFollowUpQueue.innerHTML, /data-follow-up-remove/);
 });
 
 test("立即发送 arms a single queued item on the runtime lane", () => {
