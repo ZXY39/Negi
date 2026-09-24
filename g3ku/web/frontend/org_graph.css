@@ -3098,15 +3098,15 @@ textarea {
     background: color-mix(in srgb, var(--border-color) 64%, transparent);
 }
 
-.assistant-loading-indicator {
-    width: 28px;
-    height: 28px;
-    color: var(--status-running-text);
-    background: color-mix(in srgb, var(--status-running-bg) 88%, transparent);
-    border-color: color-mix(in srgb, var(--status-running-text) 26%, transparent);
+/* 气泡里的加载图标只留旋转弧，不要外面那圈徽章。
+   必须写成 `.assistant-loading-indicator.interaction-step-icon`：徽章的底色和描边来自
+   .interaction-step-icon，那条规则在本块之后、特异性相同，单写类名会被它盖住。 */
+.assistant-loading-indicator.interaction-step-icon {
+    background: none;
+    border: 0;
 }
 
-.assistant-loading-indicator svg {
+.assistant-loading-indicator.interaction-step-icon svg {
     width: 16px;
     height: 16px;
 }
