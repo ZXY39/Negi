@@ -2876,6 +2876,15 @@ textarea {
 /* 静默回合（模型调用 silent 工具）：整条响应折成一行「静默消息 HH:MM:SS」+ 下箭头。
    折叠行是 turn 元素的直接子节点、在 .msg-content 气泡**外面**，所以折叠时气泡连
    它的底/边框/内边距一起不出现（用户明确不要给这一行套壳），点开才露出正文与轨道。 */
+/* .message 本身是 flex 行（V2 band 的 [data-ui-version="v2"] .message 还带
+   align-items: flex-end），折叠行不改成纵向就会和气泡并排、把内容挤到右边、线掉到
+   左下角。第二个选择器是为压过 V2 那条同级规则，单写类名会被它盖住。 */
+.ceo-silent-message,
+[data-ui-version="v2"] .message.ceo-silent-message {
+    flex-direction: column;
+    align-items: stretch;
+}
+
 .ceo-silent-message:not(.ceo-silent-expanded) > :not(.ceo-silent-line) {
     display: none;
 }
