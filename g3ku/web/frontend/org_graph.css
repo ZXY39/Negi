@@ -7012,12 +7012,16 @@ textarea {
     text-overflow: ellipsis;
 }
 
+/* 上下是定档、左右跟文案：标题与正文排一行，卡片高度只由这一行（32px 关闭键）
+   加 4px 内缩决定；宽度用 fit-content 由文案撑出来，420px 只是长文案的折行上限。
+   圆角留在 16px 一档，不随盒子变小而改。 */
 .app-toast {
-    width: min(210px, calc(100vw - 48px));
+    width: fit-content;
+    max-width: min(420px, calc(100vw - 48px));
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 14px 16px 12px;
+    gap: 0;
+    padding: 4px 12px;
     border-radius: 16px;
     border: 1px solid transparent;
     background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg-app) 6%);
@@ -7056,26 +7060,32 @@ textarea {
 
 .app-toast-main {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
-    gap: 14px;
+    gap: 8px;
 }
 
 .app-toast-copy {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    flex-direction: row;
+    align-items: baseline;
+    flex-wrap: wrap;
+    column-gap: 6px;
+    row-gap: 0;
     min-width: 0;
 }
 
 .app-toast-title {
     font-weight: 700;
+    font-size: 0.8125rem;
+    line-height: 1.5;
     color: var(--text-primary);
 }
 
 .app-toast-text {
     color: var(--text-secondary);
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
+    line-height: 1.5;
 }
 
 .app-toast-close {

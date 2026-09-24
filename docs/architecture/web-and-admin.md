@@ -576,7 +576,7 @@ The backend contract behind that UI behavior is:
 ### Task Recovery Notice UI Contract
 
 - 「本任务遇到异常停止，已回退到稳定步骤继续。」（`task.metadata.recovery_notice`）以全局 toast 呈现：打开对应任务或该任务数据刷新时弹出一次，`kind=warn`、persistent（不自动消失），标题「任务自动恢复」。
-- 全站只有一个 `#app-toast` 元素，所有提示（含任务恢复提示）共用它，因此外观合同只有一处：卡片 `width: min(210px, calc(100vw - 48px))`、圆角 16px（与 `--ui-radius-control` 同档），文案下方没有进度条（persistent 与非 persistent 一视同仁），垂直位置顶部 20px + safe-area。视口的居中基准归「Navigation Bar And Compact Mode」的 fixed 层规则。同一视口里的「正在打开任务」进度条不是可关闭面，按自身宽度渲染，不跟这条合同走。
+- 全站只有一个 `#app-toast` 元素，所有提示（含任务恢复提示）共用它，因此外观合同只有一处：**上下定档、左右跟文案**。标题与正文排同一行（13px / 行高 1.5），卡片高度只由这一行里的 32px 关闭键加 4px 上下内缩决定（1280×690 实测 42px），`width: fit-content` 让横向等于文案实测宽（短提示 137–189px），`min(420px, 100vw - 48px)` 只是长文案的折行上限而不是固定宽（30 字左右的恢复提示因此折成 3 行、68.5px）。圆角固定 16px（与 `--ui-radius-control` 同档），不随盒子变小收档。关闭键收档写在 V2 层：`.icon-btn` 全局是 36px 见方，比这行文字高，会把卡片顶回一行装不下的尺寸。文案下方没有进度条（persistent 与非 persistent 一视同仁），垂直位置顶部 20px + safe-area。视口的居中基准归「Navigation Bar And Compact Mode」的 fixed 层规则。同一视口里的「正在打开任务」进度条不是可关闭面，按自身宽度渲染，不跟这条合同走。
 - 用户可以点击关闭：点击 toast 任意位置（含右上角关闭按钮）即关闭，并把该任务的关闭记录写入浏览器 `localStorage`（键 `g3ku.taskRecoveryNotice.dismissed.v1`，内容为 任务 id → 提示文本），前端在首次评估提示时一次性读入 `S.taskRecoveryNoticeDismissals` 后按内存值判重——整树每次渲染都会重新评估该提示，只靠内存集合会在刷新页面或重启 Web 后把已关闭的提示再弹一次。同一任务不再重复弹出；切换到其他带提示的任务仍会弹出自己的提示；提示文本变化（含后端换文案）使记录失配，该任务会再提示一次。
 - 该记录只存在于浏览器侧，不是后端状态：任务元数据里的 `recovery_notice` 不会因关闭而被清除，换浏览器或换设备会重新提示一次，也不需要任何服务端清理入口。
 - 若 toast 在用户关闭前被其他提示覆盖，下一次任务树渲染会重新弹出该提示（显示状态按“当前显示的提示文本”去重，而不是按“曾经显示过”）。

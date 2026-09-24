@@ -2625,3 +2625,16 @@
         min-height: 0;
     }
 }
+
+/* 62. toast 的关闭键是这一行的定高来源：§11 的 .icon-btn 是 36px 见方，比 20px
+   的行高出一大截，卡片上下就压不到一行。收到小档 32px、图标 16px。 */
+[data-ui-version="v2"] .app-toast-close {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+}
+
+[data-ui-version="v2"] .app-toast-close svg {
+    width: 16px;
+    height: 16px;
+}
