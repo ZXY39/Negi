@@ -3421,6 +3421,93 @@ async def test_react_loop_trips_final_submission_guard_only_after_the_full_strik
     assert int(frame.get('invalid_final_submission_count') or 0) == _INVALID_FINAL_SUBMISSION_LIMIT
 
 
+def _rejected_final_backend(*, ordinary_tool: str | None = None):
+    class _Backend:
+        def __init__(self) -> None:
+            self.turn = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            self.turn += 1
+            if ordinary_tool and self.turn > 1:
+                return LLMResponse(
+                    content='',
+                    tool_calls=[ToolCallRequest(id=f'call:ordinary:{self.turn}', name=ordinary_tool, arguments={})],
+                    finish_reason='tool_calls',
+                    usage={'input_tokens': 8, 'output_tokens': 3},
+                )
+            return LLMResponse(
+                content='',
+                tool_calls=[
+                    ToolCallRequest(
+                        id=f'call:bad:{self.turn}',
+                        name='submit_final_result',
+                        arguments={'answer': 'still no envelope', 'evidence': '[]'},
+                    )
+                ],
+                finish_reason='tool_calls',
+                usage={'input_tokens': 8, 'output_tokens': 3},
+            )
+
+    return _Backend()
+
+
+@pytest.mark.asyncio
+async def test_react_loop_exhausting_budget_on_rejected_final_returns_pause_instead_of_raising() -> None:
+    """迭代预算恰好在「上一击仍被拒收」时用尽时，终态必须是结构化 pause。
+
+    抛 RuntimeError 只会被 NodeRunner 的通用 except 车道接住，而那条车道不做
+    取消/节点暂停前置判定、也不回灌节点最后一次有效结果。
+    """
+    loop = ReActToolLoop(
+        chat_backend=_rejected_final_backend(), log_service=_FakeLogService(), max_iterations=1
+    )
+    result = await loop.run(
+        task=SimpleNamespace(task_id='task-budget-exhausted'),
+        node=SimpleNamespace(node_id='node-budget-exhausted', depth=0, node_kind='execution', goal='demo'),
+        messages=[
+            {'role': 'system', 'content': 'system'},
+            {'role': 'user', 'content': '{"task_id":"task-budget-exhausted","goal":"demo"}'},
+        ],
+        tools={'submit_final_result': _submit_final_result_tool()},
+        model_refs=['fake'],
+        runtime_context={'task_id': 'task-budget-exhausted', 'node_id': 'node-budget-exhausted'},
+        max_iterations=1,
+    )
+
+    assert result.status == 'failed'
+    assert result.delivery_status == 'blocked'
+    assert result.failure_disposition == 'pause'
+    assert 'detected 1 consecutive times' in result.blocking_reason
+    assert 'missing required status' in result.blocking_reason
+
+
+@pytest.mark.asyncio
+async def test_react_loop_ordinary_tool_turn_clears_stale_contract_violations() -> None:
+    """普通工具轮清零 strike 计数时也必须清空违规清单，否则终态归因会引用一轮已被作废的违规。"""
+    loop = ReActToolLoop(
+        chat_backend=_rejected_final_backend(ordinary_tool='record_tool'),
+        log_service=_FakeLogService(),
+        max_iterations=3,
+    )
+    with pytest.raises(RuntimeError, match='exceeded maximum ReAct iterations'):
+        await loop.run(
+            task=SimpleNamespace(task_id='task-stale-violations'),
+            node=SimpleNamespace(node_id='node-stale-violations', depth=0, node_kind='execution', goal='demo'),
+            messages=[
+                {'role': 'system', 'content': 'system'},
+                {'role': 'user', 'content': '{"task_id":"task-stale-violations","goal":"demo"}'},
+            ],
+            tools={
+                'submit_final_result': _submit_final_result_tool(),
+                'record_tool': _StageProtocolNoopTool('record_tool'),
+            },
+            model_refs=['fake'],
+            runtime_context={'task_id': 'task-stale-violations', 'node_id': 'node-stale-violations'},
+            max_iterations=3,
+        )
+
+
 @pytest.mark.asyncio
 async def test_contract_echo_with_stage_tool_call_keeps_pairing_and_tail_order() -> None:
     # 回归 task:38687a51b14d：阶段预算耗尽后，模型把请求末尾的

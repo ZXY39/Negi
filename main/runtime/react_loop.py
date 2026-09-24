@@ -1007,6 +1007,10 @@ class ReActToolLoop:
                     stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
                     last_invalid_stage_submission_reason = ''
+                    # 清单必须跟着一起清：_clear_invalid_final_submission_state 已把持久帧
+                    # 里的 last_contract_violations 写成空，本地留着就会让迭代用尽时的终态
+                    # 归因引用一轮已被普通工具轮作废的违规。
+                    last_contract_violations = []
                     self._clear_invalid_final_submission_state(
                         task_id=task.task_id,
                         node_id=node.node_id,
@@ -1603,7 +1607,13 @@ class ReActToolLoop:
             repair_overlay_text = self._result_protocol_message(node_kind=node.node_kind)
 
         if last_contract_violations:
-            raise RuntimeError('result contract violation: ' + '; '.join(last_contract_violations))
+            # 迭代预算在上一击仍被拒收时用尽：必须走结构化终态，而不是抛异常。
+            # 抛出去只被 NodeRunner 的通用 except 接住，那条车道不做取消/暂停前置判定，
+            # 也不回灌节点最后一次有效结果（disposition=pause 车道在 node_runner 里做）。
+            return self._invalid_final_submission_failure(
+                reason='; '.join(last_contract_violations),
+                count=invalid_final_submission_count,
+            )
         raise RuntimeError('node exceeded maximum ReAct iterations')
 
     async def _resume_pending_tool_turn_if_needed(
