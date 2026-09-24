@@ -18,6 +18,7 @@ from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTo
 from main.runtime.node_prompt_contract import NodeRuntimeToolContract, extract_node_dynamic_contract_payload
 from main.runtime.stage_budget import (
     STAGE_TOOL_NAME,
+    STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
     callable_tool_names_for_stage_iteration,
     visible_tools_for_stage_iteration,
@@ -407,19 +408,23 @@ async def test_execution_stage_predicted_reminder_skips_batch_that_already_opens
             record.task_id,
             record.root_node_id,
             stage_goal='整理证据',
-            tool_round_budget=2,
+            tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
         )
         ordinary = [SimpleNamespace(name='ordinary_tool', id='call-1', arguments={})]
         assert _predicted(ordinary) == ''
 
-        service.log_service.record_execution_stage_round(
-            record.task_id,
-            record.root_node_id,
-            tool_calls=[{'id': 'call-1', 'name': 'ordinary_tool', 'arguments': {}}],
-            created_at=now_iso(),
-        )
+        for index in range(STAGE_TOOL_ROUND_BUDGET_MIN - 1):
+            service.log_service.record_execution_stage_round(
+                record.task_id,
+                record.root_node_id,
+                tool_calls=[{'id': f'call-{index}', 'name': 'ordinary_tool', 'arguments': {}}],
+                created_at=now_iso(),
+            )
         predicted = _predicted(ordinary)
-        assert '本轮结束后当前阶段预算将耗尽（1/2 将用满）' in predicted
+        assert (
+            f'本轮结束后当前阶段预算将耗尽'
+            f'（{STAGE_TOOL_ROUND_BUDGET_MIN - 1}/{STAGE_TOOL_ROUND_BUDGET_MIN} 将用满）'
+        ) in predicted
         assert '单独调用仍会宽限执行一次并记为本阶段的溢出轮次' in predicted
 
         # 同批已含 submit_next_stage：那批普通工具记到新阶段上，按旧阶段预算算出的预告失配。
@@ -2048,28 +2053,29 @@ async def test_free_pass_exhausted_attaches_overflow_round(tmp_path: Path):
             record.task_id,
             record.root_node_id,
             stage_goal='work',
-            tool_round_budget=1,
+            tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
         )
-        service.log_service.record_execution_stage_round(
-            record.task_id,
-            record.root_node_id,
-            tool_calls=[{'id': 'c1', 'name': 'filesystem', 'arguments': {}}],
-            created_at=now_iso(),
-        )
+        for index in range(STAGE_TOOL_ROUND_BUDGET_MIN):
+            service.log_service.record_execution_stage_round(
+                record.task_id,
+                record.root_node_id,
+                tool_calls=[{'id': f'c{index}', 'name': 'filesystem', 'arguments': {}}],
+                created_at=now_iso(),
+            )
         service.log_service.record_execution_stage_free_pass_round(
             record.task_id,
             record.root_node_id,
-            tool_calls=[{'id': 'c2', 'name': 'filesystem', 'arguments': {}}],
+            tool_calls=[{'id': 'c-overflow', 'name': 'filesystem', 'arguments': {}}],
             kind='exhausted',
             created_at=now_iso(),
         )
         snap = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
         active = snap['active_stage']
         assert snap['transition_required'] is True
-        assert len(active['rounds']) == 2
+        assert len(active['rounds']) == STAGE_TOOL_ROUND_BUDGET_MIN + 1
         assert active['rounds'][-1]['overflow'] is True
         assert active['rounds'][-1]['budget_counted'] is False
-        assert active['tool_rounds_used'] == 1  # 封顶不超预算
+        assert active['tool_rounds_used'] == STAGE_TOOL_ROUND_BUDGET_MIN  # 封顶不超预算
     finally:
         await service.close()
 
@@ -2387,17 +2393,18 @@ async def test_execution_stage_still_requires_transition_when_budget_is_exhauste
                 record.task_id,
                 record.root_node_id,
                 stage_goal='final synthesis for current evidence only',
-                tool_round_budget=1,
+                tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MIN,
                 completed_stage_summary='',
                 key_refs=[],
                 final=True,
             )
-        service.log_service.record_execution_stage_round(
-            record.task_id,
-            record.root_node_id,
-            tool_calls=[{'id': 'call:ordinary', 'name': 'ordinary_tool', 'arguments': {}}],
-            created_at=now_iso(),
-        )
+        for index in range(STAGE_TOOL_ROUND_BUDGET_MIN):
+            service.log_service.record_execution_stage_round(
+                record.task_id,
+                record.root_node_id,
+                tool_calls=[{'id': f'call:ordinary:{index}', 'name': 'ordinary_tool', 'arguments': {}}],
+                created_at=now_iso(),
+            )
         snapshot = service.log_service.execution_stage_gate_snapshot(record.task_id, record.root_node_id)
         assert snapshot is not None
         assert snapshot['transition_required'] is True
@@ -2463,7 +2470,7 @@ async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
             record.task_id,
             record.root_node_id,
             stage_goal='阶段摘要；优先派生：搜索外部依赖；自行完成：本地整理',
-            tool_round_budget=5,
+            tool_round_budget=12,
         )
 
         snapshot = service.get_task_detail_payload(record.task_id, mark_read=False)
@@ -2473,12 +2480,12 @@ async def test_stage_summary_is_exposed_in_live_runtime_frame(tmp_path: Path):
         root_frame = next(item for item in frames if item['node_id'] == record.root_node_id)
         assert root_frame['stage_status'] == '进行中'
         assert root_frame['stage_goal'] == '阶段摘要；优先派生：搜索外部依赖；自行完成：本地整理'
-        assert root_frame['stage_total_steps'] == 5
+        assert root_frame['stage_total_steps'] == 12
     finally:
         await service.close()
 
 
-def test_submit_next_stage_tool_schema_budget_range_is_one_to_fifteen() -> None:
+def test_submit_next_stage_tool_schema_budget_range_is_ten_to_thirty() -> None:
     async def _submit(
         stage_goal: str,
         tool_round_budget: int,
@@ -2494,8 +2501,10 @@ def test_submit_next_stage_tool_schema_budget_range_is_one_to_fifteen() -> None:
 
     tool = SubmitNextStageTool(_submit)
 
-    assert tool.parameters['properties']['tool_round_budget']['minimum'] == 1
-    assert tool.parameters['properties']['tool_round_budget']['maximum'] == 20
+    # 下限不进 schema：低于下限的入参由提交收口抬到 MIN，声明 minimum 会让抬升变成校验失败。
+    assert 'minimum' not in tool.parameters['properties']['tool_round_budget']
+    assert tool.parameters['properties']['tool_round_budget']['maximum'] == STAGE_TOOL_ROUND_BUDGET_MAX
+    assert tool.model_parameters['properties']['tool_round_budget']['maximum'] == STAGE_TOOL_ROUND_BUDGET_MAX
     assert 'completed_stage_summary' in tool.parameters['properties']
     assert 'key_refs' in tool.parameters['properties']
     assert tool.parameters['properties']['key_refs']['items']['required'] == ['ref', 'note']
@@ -2574,7 +2583,7 @@ def test_submit_final_result_tool_schema_is_hard_switched_to_final_or_blocked() 
 
 
 @pytest.mark.asyncio
-async def test_submit_next_stage_rejects_budget_above_fifteen(tmp_path: Path):
+async def test_submit_next_stage_rejects_budget_above_ceiling(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -2586,19 +2595,19 @@ async def test_submit_next_stage_rejects_budget_above_fifteen(tmp_path: Path):
     )
     try:
         record = await _create_web_task(service)
-        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 20'):
+        with pytest.raises(ValueError, match='tool_round_budget must not exceed 30'):
             service.log_service.submit_next_stage(
                 record.task_id,
                 record.root_node_id,
                 stage_goal='预算校验；优先派生：无；自行完成：拒绝超出上限的阶段预算',
-                tool_round_budget=21,
+                tool_round_budget=STAGE_TOOL_ROUND_BUDGET_MAX + 1,
             )
     finally:
         await service.close()
 
 
 @pytest.mark.asyncio
-async def test_submit_next_stage_rejects_budget_below_one(tmp_path: Path):
+async def test_submit_next_stage_raises_undersized_budget_to_minimum(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
         workspace_root=tmp_path,
@@ -2610,13 +2619,13 @@ async def test_submit_next_stage_rejects_budget_below_one(tmp_path: Path):
     )
     try:
         record = await _create_web_task(service)
-        with pytest.raises(ValueError, match='tool_round_budget must be between 1 and 20'):
-            service.log_service.submit_next_stage(
-                record.task_id,
-                record.root_node_id,
-                stage_goal='budget validation lower bound',
-                tool_round_budget=0,
-            )
+        stage = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='budget validation lower bound',
+            tool_round_budget=0,
+        )
+        assert stage['tool_round_budget'] == STAGE_TOOL_ROUND_BUDGET_MIN
     finally:
         await service.close()
 
@@ -3402,7 +3411,8 @@ async def test_submit_next_stage_can_share_turn_with_ordinary_tools_and_counts_n
         assert detail is not None
         stages = detail["item"]["execution_trace"]["stages"]
         assert len(stages) == 1
-        assert stages[0]["tool_round_budget"] == 1
+        # 模型给的 1 轮低于下限：提交收口抬到 MIN，同批 exec 仍只记 1 轮。
+        assert stages[0]["tool_round_budget"] == STAGE_TOOL_ROUND_BUDGET_MIN
         assert stages[0]["tool_rounds_used"] == 1
         assert len(stages[0]["rounds"]) == 1
         assert [item["tool_name"] for item in stages[0]["rounds"][0]["tools"]] == ["exec"]

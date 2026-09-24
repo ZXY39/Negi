@@ -462,7 +462,7 @@ async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persis
                     "name": ceo_runtime_ops.STAGE_TOOL_NAME,
                     "arguments": {
                         "stage_goal": "Create a stage before using tools",
-                        "tool_round_budget": 5,
+                        "tool_round_budget": 12,
                     },
                 }
             ],
@@ -486,7 +486,7 @@ async def test_graph_execute_tools_executes_runtime_submit_next_stage_and_persis
             "stage_index": 1,
             "stage_goal": "Create a stage before using tools",
             "preamble_text": "",
-            "tool_round_budget": 5,
+            "tool_round_budget": 12,
             "tool_rounds_used": 0,
             "status": "active",
             "mode": "自主执行",

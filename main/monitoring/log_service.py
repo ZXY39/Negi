@@ -2835,16 +2835,18 @@ class TaskLogService:
             if node is None:
                 raise ValueError(f'node not found: {node_id}')
             normalized_goal = self._clip_stage_text(stage_goal, limit=_STAGE_GOAL_CHAR_LIMIT)
-            normalized_budget = int(tool_round_budget or 0)
+            normalized_budget = max(
+                STAGE_TOOL_ROUND_BUDGET_MIN,
+                int(tool_round_budget or 0),
+            )
             # 阶段摘要是模型自己写的收尾内容，逐字落盘；只折叠换行，不截长度。
             normalized_completed_summary = self._clip_stage_text(completed_stage_summary, limit=None)
             normalized_key_refs = self._canonicalize_stage_key_refs(self._normalize_stage_key_refs(key_refs))
             if not normalized_goal:
                 raise ValueError('stage_goal must not be empty')
-            if normalized_budget < STAGE_TOOL_ROUND_BUDGET_MIN or normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
+            if normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
                 raise ValueError(
-                    f'tool_round_budget must be between '
-                    f'{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}'
+                    f'tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}'
                 )
             state = self._execution_stage_state(node)
             active = self._active_execution_stage(state)

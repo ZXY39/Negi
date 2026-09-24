@@ -1151,7 +1151,7 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
                         name="submit_next_stage",
                         arguments={
                             "stage_goal": "Inspect the repository structure",
-                            "tool_round_budget": 2,
+                            "tool_round_budget": 12,
                         },
                     )
                 ],
@@ -1287,7 +1287,7 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
     assert paused["execution_trace_summary"]["active_stage_id"] == "frontdoor-stage-1"
     paused_stage = paused["execution_trace_summary"]["stages"][0]
     assert paused_stage["stage_goal"] == "Inspect the repository structure"
-    assert paused_stage["tool_round_budget"] == 2
+    assert paused_stage["tool_round_budget"] == 12
     assert [round_item["tool_names"] for round_item in paused_stage["rounds"]] == [["create_async_task"]]
     assert "tool_events" not in paused
     assert paused["compression"] == {}

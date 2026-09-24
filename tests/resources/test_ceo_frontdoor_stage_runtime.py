@@ -214,7 +214,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
     stage_result = await tools_by_name[STAGE_TOOL_NAME].ainvoke(
         {
             "stage_goal": "Inspect the current request",
-            "tool_round_budget": 5,
+            "tool_round_budget": 12,
         }
     )
     stage_payload = json.loads(str(stage_result["result_text"]))
@@ -229,7 +229,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
                     tool_name=STAGE_TOOL_NAME,
                     arguments={
                         "stage_goal": "Inspect the current request",
-                        "tool_round_budget": 5,
+                        "tool_round_budget": 12,
                     },
                 )
             ],
@@ -240,7 +240,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
                     tool_name=STAGE_TOOL_NAME,
                     arguments={
                         "stage_goal": "Inspect the current request",
-                        "tool_round_budget": 5,
+                        "tool_round_budget": 12,
                     },
                 ),
                 _tool_message(
@@ -253,7 +253,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
     )
 
     assert stage_payload["stage_goal"] == "Inspect the current request"
-    assert stage_payload["tool_round_budget"] == 5
+    assert stage_payload["tool_round_budget"] == 12
     assert result is not None
     assert result["frontdoor_stage_state"] == {
         "active_stage_id": stage_payload["stage_id"],

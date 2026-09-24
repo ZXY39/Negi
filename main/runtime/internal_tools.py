@@ -66,9 +66,10 @@ class SubmitNextStageTool(Tool):
                     'type': 'integer',
                     'description': (
                         f'How many ordinary tool rounds this stage may use. '
-                        f'Must be between {STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}.'
+                        f'Must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}; plan for at least '
+                        f'{STAGE_TOOL_ROUND_BUDGET_MIN}. A smaller value is raised to '
+                        f'{STAGE_TOOL_ROUND_BUDGET_MIN} instead of failing.'
                     ),
-                    'minimum': STAGE_TOOL_ROUND_BUDGET_MIN,
                     'maximum': STAGE_TOOL_ROUND_BUDGET_MAX,
                 },
                 'completed_stage_summary': {
@@ -117,10 +118,10 @@ class SubmitNextStageTool(Tool):
                 'tool_round_budget': {
                     'type': 'integer',
                     'description': (
-                        f'Allowed ordinary tool calls for this stage. '
-                        f'Choose between {STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}.'
+                        f'Allowed ordinary tool calls for this stage. Plan for {STAGE_TOOL_ROUND_BUDGET_MIN} to '
+                        f'{STAGE_TOOL_ROUND_BUDGET_MAX}; a value under {STAGE_TOOL_ROUND_BUDGET_MIN} is raised to '
+                        f'{STAGE_TOOL_ROUND_BUDGET_MIN}, one over {STAGE_TOOL_ROUND_BUDGET_MAX} fails.'
                     ),
-                    'minimum': STAGE_TOOL_ROUND_BUDGET_MIN,
                     'maximum': STAGE_TOOL_ROUND_BUDGET_MAX,
                 },
                 'completed_stage_summary': {

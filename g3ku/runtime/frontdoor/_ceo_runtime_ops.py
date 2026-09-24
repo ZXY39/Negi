@@ -5088,15 +5088,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
-        normalized_budget = int(tool_round_budget or 0)
+        normalized_budget = max(STAGE_TOOL_ROUND_BUDGET_MIN, int(tool_round_budget or 0))
         normalized_summary = str(completed_stage_summary or "").strip()
         normalized_key_refs = [dict(item) for item in list(key_refs or []) if isinstance(item, dict)]
         if not normalized_goal:
             raise ValueError("stage_goal must not be empty")
-        if normalized_budget < STAGE_TOOL_ROUND_BUDGET_MIN or normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
+        if normalized_budget > STAGE_TOOL_ROUND_BUDGET_MAX:
             raise ValueError(
-                f"tool_round_budget must be between "
-                f"{STAGE_TOOL_ROUND_BUDGET_MIN} and {STAGE_TOOL_ROUND_BUDGET_MAX}"
+                f"tool_round_budget must not exceed {STAGE_TOOL_ROUND_BUDGET_MAX}"
             )
 
         active_stage_id = str(normalized_state.get("active_stage_id") or "").strip()
