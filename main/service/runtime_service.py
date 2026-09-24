@@ -5837,6 +5837,47 @@ class MainRuntimeService:
         return normalized_name == normalized_tool_id or get_governance_tool_id(normalized_name) == normalized_tool_id
 
     @classmethod
+    def _execution_legacy_monolith_names(cls, items: list[Any] | None) -> set[str]:
+        """家族已拆出 concrete executor 时，该家族留下的 monolith 名字（含家族 id 本身）。
+
+        provider `tools[]` 与可执行对象字典都不收它们：模型面只该看到 concrete executor。
+        入参可为治理 dict 或 family 对象（`list_visible_tool_families` 的返回形状）。
+        """
+        legacy_names: set[str] = set()
+        for item in list(items or []):
+            tool_id = str(cls._tool_family_item_value(item, 'tool_id') or '').strip()
+            all_executor_names: list[str] = []
+            for action in list(cls._tool_family_item_value(item, 'actions') or []):
+                for raw_name in list(cls._tool_family_item_value(action, 'executor_names') or []):
+                    name = str(raw_name or '').strip()
+                    if name and name not in all_executor_names:
+                        all_executor_names.append(name)
+            split_available = any(
+                not cls._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name)
+                for executor_name in all_executor_names
+            )
+            if split_available and tool_id:
+                legacy_names.add(tool_id)
+                for executor_name in all_executor_names:
+                    if cls._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name):
+                        legacy_names.add(executor_name)
+        return legacy_names
+
+    @staticmethod
+    def _tool_family_item_value(item: Any, key: str) -> Any:
+        if isinstance(item, dict):
+            return item.get(key)
+        return getattr(item, key, None)
+
+    def _legacy_monolith_names_for_role(self, *, actor_role: str, session_id: str) -> set[str]:
+        """按治理家族数据判定 legacy monolith。取不到数据让它抛，不静默放行全部名字：
+        静默兜底会把"家族 id 也可调用"这条不该出现的形状悄悄放进对象字典。
+        """
+        return self._execution_legacy_monolith_names(
+            list(self.list_visible_tool_families(actor_role=actor_role, session_id=session_id) or [])
+        )
+
+    @classmethod
     def _filter_execution_model_visible_lightweight_items(
         cls,
         *,
@@ -5980,30 +6021,18 @@ class MainRuntimeService:
         visible_rbac_tool_names = self._normalized_tool_name_list(list(self.list_effective_tool_names(actor_role=actor_role, session_id=session_id) or []))
         if not visible_rbac_tool_names:
             visible_rbac_tool_names = list(ordered_visible_tool_names)
+        # 常驻判定与候选派生的上界是治理可见集，不是本轮已构建的对象字典。对象字典按
+        # 候选回读 frame 构建（_tool_provider -> _restore_node_context_selection_entry），
+        # 拿它当上界会让一次塌缩自我放大成"能 load 不能 promote、也调不动"的死区。
+        membership_visible_tool_names = self._normalized_tool_name_list(
+            [*visible_rbac_tool_names, *ordered_visible_tool_names]
+        )
         stable_lightweight_items = self._stable_execution_visible_tool_families(
             items=list(self.execution_visible_tool_lightweight_items(actor_role=actor_role, session_id=session_id) or []),
             visible_tool_names=visible_rbac_tool_names,
         )
         lightweight_items = self._filter_execution_model_visible_lightweight_items(items=stable_lightweight_items)
-        legacy_monolith_names: set[str] = set()
-        for item in list(stable_lightweight_items or []):
-            tool_id = str((item or {}).get('tool_id') or '').strip()
-            actions = list((item or {}).get('actions') or [])
-            all_executor_names = [
-                str(executor_name or '').strip()
-                for action in actions
-                for executor_name in list((action or {}).get('executor_names') or [])
-                if str(executor_name or '').strip()
-            ]
-            split_available = any(
-                not self._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name)
-                for executor_name in all_executor_names
-            )
-            if split_available and tool_id:
-                legacy_monolith_names.add(tool_id)
-                for executor_name in all_executor_names:
-                    if self._is_legacy_execution_monolith_name(tool_id=tool_id, executor_name=executor_name):
-                        legacy_monolith_names.add(executor_name)
+        legacy_monolith_names = self._execution_legacy_monolith_names(stable_lightweight_items)
         hydrated_executor_names = self._node_hydrated_executor_names(
             task_id=str(task_id or '').strip(),
             node_id=str(node_id or '').strip(),
@@ -6024,12 +6053,12 @@ class MainRuntimeService:
         )
         for name in [
             *control_tool_names,
-            *self._execution_fixed_builtin_tool_names(visible_tool_names=ordered_visible_tool_names),
+            *self._execution_fixed_builtin_tool_names(visible_tool_names=membership_visible_tool_names),
         ]:
             normalized = str(name or '').strip()
-            if normalized and normalized in ordered_visible_tool_names and normalized not in always_callable_tool_names:
+            if normalized and normalized in membership_visible_tool_names and normalized not in always_callable_tool_names:
                 always_callable_tool_names.append(normalized)
-        for name in ordered_visible_tool_names:
+        for name in membership_visible_tool_names:
             if name in lightweight_executor_names or name in always_callable_tool_names or name in legacy_monolith_names:
                 continue
             always_callable_tool_names.append(name)
@@ -6049,7 +6078,7 @@ class MainRuntimeService:
             goal=str(getattr(node, 'goal', '') or ''),
             core_requirement=str(getattr(task, 'metadata', {}).get('core_requirement') or getattr(node, 'prompt', '') or getattr(node, 'goal', '') or ''),
             visible_tool_families=list(lightweight_items),
-            visible_tool_names=list(ordered_visible_tool_names),
+            visible_tool_names=list(membership_visible_tool_names),
             always_callable_tool_names=list(always_callable_tool_names),
             promoted_tool_names=list(promoted_hydrated_executor_names),
             schema_size_by_executor=schema_size_by_executor,
@@ -6119,7 +6148,7 @@ class MainRuntimeService:
         candidate_tool_names = [
             name
             for name in self._normalized_tool_name_list(list(getattr(selection, 'candidate_tool_names', []) or []))
-            if name not in set(selected_tool_names)
+            if name not in set(selected_tool_names) and name not in legacy_monolith_names
         ]
         return {
             'tool_names': selected_tool_names,
@@ -6347,9 +6376,15 @@ class MainRuntimeService:
         if not requested_name:
             return []
         family_tool_id = str(getattr(visible_family, 'tool_id', '') or '').strip()
-        if family_tool_id == 'filesystem' and requested_name == family_tool_id:
-            return []
         family_executors = self._family_executor_names(visible_family)
+        # 家族已拆出 concrete executor 时，家族 id 与留下的 monolith 名字都不可提升：
+        # 它们不进 provider tools[]，回一份 targets 就是承诺一次永不发生的水合。
+        # 单执行器家族（web_fetch / agent_browser 这类 id 即执行器）不受此规则影响。
+        legacy_monolith_names = self._execution_legacy_monolith_names([
+            {'tool_id': family_tool_id, 'actions': [{'executor_names': family_executors}]}
+        ])
+        if requested_name in legacy_monolith_names:
+            return []
         if requested_name in family_executors:
             fixed_builtin_names = self._fixed_builtin_tool_name_set_for_actor_role(actor_role)
             if requested_name in fixed_builtin_names:
@@ -9669,6 +9704,17 @@ class MainRuntimeService:
         for raw_name in list(getattr(selection, 'candidate_tool_names', []) or []):
             name = str(raw_name or '').strip()
             if name and name in visible_tool_names:
+                selected_visible.add(name)
+        # 对象字典按治理可见集兜底，而不是只按 selection/frame 回读出来的候选构建：候选与
+        # 对象字典互为输入输出（候选曾= 对象字典 − 已 callable），一次塌缩就会把治理明明
+        # 可见的执行器变成"能加载、不提升、也调不动"的死区。legacy monolith 不进字典——
+        # 模型面只该看到 concrete executor。
+        legacy_monolith_names = self._legacy_monolith_names_for_role(
+            actor_role=actor_role,
+            session_id=session_id,
+        )
+        for name in self._normalized_tool_name_list(visible_tool_names):
+            if name and name not in legacy_monolith_names:
                 selected_visible.add(name)
         provided = dict(self._external_tool_provider(node) or {})
         provided.update(self._builtin_tool_instances(actor_role=actor_role))

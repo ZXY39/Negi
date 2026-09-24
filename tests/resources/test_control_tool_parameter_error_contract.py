@@ -231,8 +231,13 @@ def test_not_yet_hydrated_resource_tool_keeps_the_load_pointer(tmp_path) -> None
     assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')
 
 
-def test_acceptance_content_ref_allowlist_suppresses_the_content_open_pointer(tmp_path) -> None:
-    """验收节点白名单下不承诺外开路径，否则指针自己会被闸门拒。"""
+def test_acceptance_flag_does_not_suppress_the_content_open_pointer(tmp_path) -> None:
+    """content ref 白名单没有任何执行侧实现读得到，不该再据此降级指针。
+
+    旧实现担心"承诺一条会被白名单拒的读取路径"。实盘：该拒绝全库 1 次、来自 legacy
+    `content`，而 legacy `content` 调用数为 0；split `content_*` 根本不查白名单。
+    保留降级分支只会让验收节点稳定拿到较弱的那句。
+    """
     tool, path = _resource_tool(tmp_path, with_toolskill=True)
 
     guidance = parameter_error_guidance(
@@ -245,8 +250,8 @@ def test_acceptance_content_ref_allowlist_suppresses_the_content_open_pointer(tm
         },
     )
 
-    assert path not in guidance
-    assert guidance == PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name='filesystem_write')
+    assert path in guidance
+    assert 'load_tool_context(tool_id=' not in guidance
 
 
 def test_missing_toolskill_file_falls_back_to_the_load_pointer(tmp_path) -> None:

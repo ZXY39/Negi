@@ -269,12 +269,7 @@ def _parameter_repair_pointer(tool_name: str, *, tool: Any, runtime_context: Any
     normalized_tool_name = str(tool_name or "").strip()
     path = _toolskill_path(tool) if tool is not None else ""
     hydrated = _tool_context_names(runtime_context, "hydrated_executor_names", "hydrated_tool_names")
-    # 验收节点带 content ref 白名单（react_loop 的 enforce_content_ref_allowlist）：
-    # 承诺一个可能被闸门拒的读取路径等于又造一条必死指针，故退回加载模板。
-    allowlist_enforced = bool(
-        isinstance(runtime_context, dict) and runtime_context.get("enforce_content_ref_allowlist")
-    )
-    if path and normalized_tool_name in hydrated and not allowlist_enforced:
+    if path and normalized_tool_name in hydrated:
         return PARAMETER_SKILL_REOPEN_GUIDANCE_TEMPLATE.format(path=path)
     return PARAMETER_ERROR_GUIDANCE_TEMPLATE.format(tool_name=normalized_tool_name)
 

@@ -113,6 +113,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 项目一启动会话就自动回一条几小时前的旧任务结果、或某个任务结果迟迟没汇报却也没报错 → `heartbeat-system.md`「Task Terminal Repair Contract」（终态 outbox 投递耐久性与 `abandoned` 留痕）+ `operations-and-maintenance.md`「会话无回复」
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
+- 某工具上一轮还能调、这一轮报 `tool not available`，且 `load_tool_context` 回 `ok:true` 也不把它提升 → `tool-and-skill-system.md`「hydrated tools」「加载门控」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」（压缩不是这条的原因）
 - 模型报告的日期/时间与事实不符（心算毫秒时间戳出错、引用陈旧时间、日报归属日期错误）→ `heartbeat-system.md`「Internal-turn time anchors」+ `runtime-overview.md`「用户消息时间锚点」
 - 用户消息在请求体里同时出现原文与带 `[消息送达时间]` 行的两个版本，或装饰后缓存命中率骤降 → `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」
 - 入站到首个 provider 请求发出耗时异常 → `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」

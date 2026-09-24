@@ -634,6 +634,13 @@ class ReActToolLoop:
                         call_ids=tool_history.orphan_tool_result_ids,
                         strike_count=orphan_tool_result_strikes,
                     )
+            # hydrated_executor_state 是节点生命周期级的水合台账，唯一作者是
+            # runtime_service._promote_tool_context_hydration（它负责 LRU 与淘汰记录）。
+            # 这里只把它带过本帧：用它本轮的 promoted 视图覆写，会让任何一次曝光收窄
+            # （RBAC 抖动、对象字典塌缩）永久抹掉台账，而 names 才是本轮视图。
+            prior_hydrated_state = self._normalized_name_list(
+                list((self._runtime_frame(task.task_id, node.node_id) or {}).get('hydrated_executor_state') or [])
+            )
             self._log_service.upsert_frame(
                 task.task_id,
                 {
@@ -674,7 +681,7 @@ class ReActToolLoop:
                     ),
                     'rbac_visible_skill_ids': list(selected_skill_ids),
                     'lightweight_tool_ids': list(tool_schema_selection.get('lightweight_tool_ids') or []),
-                    'hydrated_executor_state': list(tool_schema_selection.get('hydrated_executor_names') or []),
+                    'hydrated_executor_state': prior_hydrated_state,
                     'hydrated_executor_names': list(tool_schema_selection.get('hydrated_executor_names') or []),
                     'model_visible_tool_names': list(tool_schema_selection.get('tool_names') or list(model_visible_tools.keys())),
                     'provider_tool_names': list(provider_tool_names),

@@ -15,6 +15,20 @@ from main.governance.exec_tool_policy import (
     resolve_exec_runtime_policy_payload,
 )
 
+# 模型读到的 ok:true 必须自带"这次加载到底会不会提升"。此前 payload 只有
+# callable_now（治理层"对该角色可调用"），本轮真不真的能调要另看曝光集，两者被混成
+# 一件事，模型于是反复拿到"说它可用、调它报错"的循环。
+PROMOTION_HELP = {
+    "promoted_next_turn": "已记录水合，下一轮可直接调用；本轮仍不可调用。",
+    "already_callable": "本轮已可直接调用，无需再加载本说明。",
+    "already_hydrated": "该工具已在水合台账内，但不在本轮可调用名单里；请改用本轮可调用名单中的工具。",
+    "not_in_this_turn_candidates": (
+        "该名字不在本轮候选工具里，本次加载只返回说明、不会提升它；"
+        "请从合同里的本轮候选工具名单中选择，或直接使用本轮可调用名单中的工具。"
+    ),
+    "not_promotable": "该资源没有可提升的具体执行器（家族 id 或 legacy 单体不算），请改用同家族的 concrete 工具名。",
+}
+
 
 def _normalized_runtime_name_list(values: Any) -> list[str]:
     ordered: list[str] = []
@@ -52,17 +66,15 @@ def build_tool_context_fingerprint(payload: dict[str, Any] | None) -> str:
             for item in list(normalized.get("errors") or [])
             if str(item or "").strip()
         ],
-        "callable": bool(normalized.get("callable")),
-        "available": bool(normalized.get("available")),
-        "repair_required": bool(normalized.get("repair_required")),
-        "callable_now": bool(normalized.get("callable_now")),
-        "will_be_hydrated_next_turn": bool(normalized.get("will_be_hydrated_next_turn")),
-        "hydration_targets": _normalized_runtime_name_list(normalized.get("hydration_targets")),
         "exec_runtime_policy": (
             dict(normalized.get("exec_runtime_policy") or {})
             if isinstance(normalized.get("exec_runtime_policy"), dict)
             else None
         ),
+        # 刻意不含 callable / available / repair_required / callable_now /
+        # will_be_hydrated_next_turn / hydration_targets：那几项是"本轮视角"，逐轮会变。
+        # 指纹的身份是契约正文，重复读守卫拿它跨轮比对，掺进轮次状态后同一份正文会算出
+        # 两个指纹，守卫就再也拦不住重读（实盘：同一工具同长度正文出现 2-4 个指纹）。
     }
     encoded = json.dumps(
         fingerprint_payload,
@@ -104,12 +116,23 @@ def apply_runtime_tool_context_projection(
     candidate_hit = any(name in candidate_names for name in target_names)
     callable_hit = any(name in callable_names for name in target_names)
     hydrated_hit = any(name in hydrated_names for name in target_names)
+    projected["callable_this_turn"] = bool(callable_hit)
     if target_names:
-        if not candidate_hit or callable_hit or hydrated_hit:
+        if candidate_hit and not callable_hit and not hydrated_hit:
+            projected["will_be_hydrated_next_turn"] = bool(normalized_targets)
+            projected["promotion"] = "promoted_next_turn" if normalized_targets else "not_promotable"
+        else:
             normalized_targets = []
             projected["will_be_hydrated_next_turn"] = False
-        else:
-            projected["will_be_hydrated_next_turn"] = bool(normalized_targets)
+            if callable_hit:
+                projected["promotion"] = "already_callable"
+            elif hydrated_hit:
+                projected["promotion"] = "already_hydrated"
+            else:
+                projected["promotion"] = "not_in_this_turn_candidates"
+        help_text = PROMOTION_HELP.get(str(projected.get("promotion") or ""))
+        if help_text:
+            projected["promotion_help"] = help_text
     projected["hydration_targets"] = list(normalized_targets)
     fingerprint = build_tool_context_fingerprint(projected)
     if fingerprint:

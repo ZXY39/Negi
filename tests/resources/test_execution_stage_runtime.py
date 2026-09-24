@@ -624,7 +624,8 @@ async def test_selector_precompute_is_shared_by_tool_exposure_and_message_enrich
     ]
     visible_tool_families = [
         _tool_family("content_navigation", "content", primary_executor_name="content"),
-        _tool_family("filesystem", "filesystem"),
+        # 生产形状：filesystem 家族已拆出 concrete executor，家族 id 那行是 legacy 单体
+        _tool_family("filesystem", "filesystem", "filesystem_write"),
     ]
     service = _build_selector_test_service(
         task=task,
@@ -787,7 +788,8 @@ async def test_tool_provider_uses_full_visible_tool_fallback_when_selector_retur
         visible_skills=[],
         visible_tool_families=[
             _tool_family("content_navigation", "content", primary_executor_name="content"),
-            _tool_family("filesystem", "filesystem"),
+            # filesystem 家族在生产里已拆出 concrete executor，家族 id 那行是 legacy 单体
+            _tool_family("filesystem", "filesystem", "filesystem_write"),
         ],
         visible_tool_names=["content", "filesystem"],
         tool_instances={
@@ -839,7 +841,8 @@ async def test_node_build_tools_preserves_protocol_tools_when_callable_tools_are
         visible_skills=[],
         visible_tool_families=[
             _tool_family("content_navigation", "content", primary_executor_name="content"),
-            _tool_family("filesystem", "filesystem"),
+            # filesystem 家族在生产里已拆出 concrete executor，家族 id 那行是 legacy 单体
+            _tool_family("filesystem", "filesystem", "filesystem_write"),
         ],
         visible_tool_names=["content", "filesystem"],
         tool_instances={
@@ -914,7 +917,10 @@ async def test_prepare_node_context_selection_restores_callable_tools_from_persi
     service = _build_selector_test_service(
         task=task,
         visible_skills=[],
-        visible_tool_families=[],
+        visible_tool_families=[
+            _tool_family("content_navigation", "content", primary_executor_name="content"),
+            _tool_family("filesystem", "filesystem", "filesystem_write"),
+        ],
         visible_tool_names=["content", "filesystem"],
         tool_instances={
             "content": _StaticTool("content"),

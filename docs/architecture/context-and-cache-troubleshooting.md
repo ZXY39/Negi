@@ -348,6 +348,8 @@ execution / acceptance 节点在真正发 provider 请求前也走最后一层 n
 | `actual_request_message_count` | 消息数是否骤降 |
 | `request_seed_source` / `request_seed_message_count` | 第一跳是否采用 scaffold、回退原因（`fallback_*`）或同轮链状态 |
 
+“某个工具上一轮还能调、这一轮报 `tool not available`，之后 load 也救不回来”的排查顺序（水合合同本身归 `tool-and-skill-system.md`「hydrated tools」）：先看掉出那一轮的 `request_seed_source` 是否 `scaffold_seed*` —— 种子重建轮是曝光集重算的地方；再比 frame 的 `hydrated_executor_state`（台账）与 `hydrated_executor_names`（本轮视图）是否分叉，视图窄于台账是合法的，台账被写成视图才是回归；最后才看合同里的候选名单是否还含该名字（不含且也调不动＝第四态，属合同破坏）。**压缩不是这条的原因**：节点侧 `token_compression` 只复用/推迟 provider bundle，不碰 callable 也不碰水合两字段，实测同轮请求消息数不降。
+
 preflight 判定：
 
 - `applied=true` 预期 `history_shrink_reason=token_compression`；actual request 变短但 `prompt_cache_key_hash` 没变，是“live request 被压缩但 caller-side family 未换”的正常行为，不是 family churn。

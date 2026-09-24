@@ -26,7 +26,10 @@ from main.monitoring.log_service import (
     _EXECUTION_STAGE_STATUS_ACTIVE,
     _EXECUTION_STAGE_STATUS_COMPLETED,
 )
-from main.governance.tool_context import build_tool_context_fingerprint
+from main.governance.tool_context import (
+    apply_runtime_tool_context_projection,
+    build_tool_context_fingerprint,
+)
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -1741,13 +1744,20 @@ def test_promotes_selected_tool_next_turn_after_load_tool_context_variants(
             'description': 'Inspect files',
             'l0': 'Inspect files',
             'l1': 'Inspect files',
-            'actions': [{'action_id': 'inspect', 'executor_names': ['filesystem']}],
+            # 生产形状：filesystem 家族已拆出 concrete executor，家族 id 那行是 legacy 单体
+            'actions': [
+                {'action_id': 'inspect', 'executor_names': ['filesystem']},
+                {'action_id': 'write', 'executor_names': ['filesystem_write']},
+            ],
         }
     ]
     service.list_visible_tool_families = lambda *, actor_role, session_id: [
         SimpleNamespace(
             tool_id='filesystem',
-            actions=[SimpleNamespace(executor_names=['filesystem'])],
+            actions=[
+                SimpleNamespace(executor_names=['filesystem']),
+                SimpleNamespace(executor_names=['filesystem_write']),
+            ],
         )
     ]
 
@@ -1992,6 +2002,90 @@ def test_promote_tool_context_hydration_applies_lru_limit() -> None:
         'web_fetch',
         'content_open',
     ]
+
+
+def test_load_tool_context_projection_reports_promotion_and_keeps_fingerprint_stable() -> None:
+    """同一份 toolskill 正文，跨轮状态不同也必须算出同一个指纹。
+
+    指纹是重复读守卫跨轮比对的身份。掺进 candidate/callable/will_be_hydrated 这类本轮视角，
+    同一正文会算出多个指纹，守卫便永远拦不住重读（实盘：整窗口 0 次触发、同长度正文 2-4 个指纹）。
+    另外 ok:true 必须自带"这次到底会不会提升"，不能只回一个治理层含义的可调用标志。
+    """
+    payload = {
+        'ok': True,
+        'tool_id': 'content_open',
+        'content': '# content_open\nbody',
+        'parameter_contract_markdown': 'path, start_line, end_line',
+        'required_parameters': ['path'],
+        'example_arguments': {'path': 'C:/x.txt'},
+        'hydration_targets': ['content_open'],
+        'callable': False,
+        'available': True,
+    }
+
+    promotable = apply_runtime_tool_context_projection(
+        dict(payload),
+        requested_tool_id='content_open',
+        runtime={
+            'candidate_tool_names': ['content_open'],
+            'callable_tool_names': ['exec'],
+            'hydrated_executor_names': [],
+        },
+    )
+    already_callable = apply_runtime_tool_context_projection(
+        dict(payload),
+        requested_tool_id='content_open',
+        runtime={
+            'candidate_tool_names': [],
+            'callable_tool_names': ['content_open'],
+            'hydrated_executor_names': ['content_open'],
+        },
+    )
+    hidden = apply_runtime_tool_context_projection(
+        dict(payload),
+        requested_tool_id='content_open',
+        runtime={'candidate_tool_names': [], 'callable_tool_names': ['exec'], 'hydrated_executor_names': []},
+    )
+
+    assert promotable['promotion'] == 'promoted_next_turn'
+    assert promotable['will_be_hydrated_next_turn'] is True
+    assert promotable['callable_this_turn'] is False
+    assert promotable['hydration_targets'] == ['content_open']
+
+    assert already_callable['promotion'] == 'already_callable'
+    assert already_callable['will_be_hydrated_next_turn'] is False
+    assert already_callable['callable_this_turn'] is True
+    assert already_callable['hydration_targets'] == []
+    assert '无需再加载' in already_callable['promotion_help']
+
+    # 第 4 态：加载被放行、提升被拒，就必须把"不会提升"讲明白，而不是留下一个沉默的 ok:true
+    assert hidden['promotion'] == 'not_in_this_turn_candidates'
+    assert hidden['hydration_targets'] == []
+    assert hidden['callable_this_turn'] is False
+    assert '不会提升' in hidden['promotion_help']
+
+    assert promotable['tool_context_fingerprint'] == already_callable['tool_context_fingerprint']
+    assert promotable['tool_context_fingerprint'] == hidden['tool_context_fingerprint']
+
+
+def test_hydration_targets_reject_split_family_monolith_names() -> None:
+    """家族拆出 concrete executor 后，家族 id / legacy 单体不再拿到提升承诺。"""
+    service = object.__new__(MainRuntimeService)
+    family = SimpleNamespace(
+        tool_id='content_navigation',
+        actions=[SimpleNamespace(executor_names=['content', 'content_open'])],
+    )
+
+    assert service._tool_context_hydration_targets(
+        requested_tool_id='content',
+        visible_family=family,
+        actor_role='execution',
+    ) == []
+    assert service._tool_context_hydration_targets(
+        requested_tool_id='content_open',
+        visible_family=family,
+        actor_role='execution',
+    ) == ['content_open']
 
 
 def test_promote_tool_context_hydration_skips_fixed_builtin_executors() -> None:
@@ -2453,6 +2547,7 @@ def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_exclude
         },
     )
     service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'filesystem_write']
+    service.list_visible_tool_families = lambda *, actor_role, session_id: []
     service._actor_role_for_node = lambda node: 'execution'
 
     node = SimpleNamespace(
@@ -2465,6 +2560,164 @@ def test_tool_provider_includes_hydrated_tools_even_when_selection_cache_exclude
 
     assert 'content_open' in provided
     assert 'filesystem_write' in provided
+
+
+def test_execution_selector_keeps_governance_visible_executors_promotable_after_bundle_collapse() -> None:
+    """候选的上界是治理可见集，不是本轮已构建的对象字典。
+
+    对象字典塌缩到只剩常驻工具时，旧实现把候选算成空集：那些执行器既不在 callable、也不在
+    candidate，于是 load 被提升门禁拒（not candidate_hit）、调用又被拒（tool not available），
+    且文案给不出候选组——实盘里这条死区最长挂了 42 分钟。
+    """
+    service, visible_tools = _collapsed_bundle_selector_service()
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-collapse',
+        node_id='node-collapse',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-collapse',
+            'node_id': 'node-collapse',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    # 治理可见、尚未水合的执行器仍可被提升
+    assert 'content_describe' in selection['candidate_tool_names']
+    assert 'content_search' in selection['candidate_tool_names']
+    # 但曝光集与 provider bundle 都不因此变宽（前缀稳定合同）
+    assert 'content_describe' not in selection['tool_names']
+    assert 'content_describe' not in selection['provider_tool_names']
+    # legacy monolith 两头都不进：模型面只该看到 concrete executor
+    assert 'content' not in selection['candidate_tool_names']
+    assert 'content' not in selection['tool_names']
+
+
+def _collapsed_bundle_selector_service():
+    visible_tools = {
+        'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
+        'submit_final_result': _submit_final_result_tool(),
+        'exec': _ModelSchemaRecordingTool(name='exec', authoritative_description='exec', model_description='exec'),
+        'load_tool_context': _ModelSchemaRecordingTool(
+            name='load_tool_context',
+            authoritative_description='load tool context',
+            model_description='load tool context',
+        ),
+        'load_skill_context': _ModelSchemaRecordingTool(
+            name='load_skill_context',
+            authoritative_description='load skill context',
+            model_description='load skill context',
+        ),
+    }
+    service = object.__new__(MainRuntimeService)
+    service.log_service = _FakeLogService()
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(
+            task_id=task_id,
+            session_id='web:shared',
+            metadata={'core_requirement': 'read files and content for a regression'},
+        ),
+        get_node=lambda node_id: SimpleNamespace(
+            node_id=node_id,
+            prompt='read files and content for a regression',
+            goal='read files and content for a regression',
+            node_kind='execution',
+        ),
+    )
+    service.list_effective_tool_names = lambda *, actor_role, session_id: [
+        'submit_next_stage',
+        'submit_final_result',
+        'exec',
+        'load_tool_context',
+        'load_skill_context',
+        'content',
+        'content_describe',
+        'content_search',
+    ]
+    service.execution_visible_tool_lightweight_items = lambda *, actor_role, session_id: [
+        {
+            'tool_id': 'content_navigation',
+            'display_name': 'Content',
+            'description': 'Inspect content',
+            'primary_executor_name': 'content_describe',
+            'l0': 'Inspect content',
+            'l1': 'Inspect content',
+            'actions': [
+                {'action_id': 'legacy', 'executor_names': ['content']},
+                {'action_id': 'describe', 'executor_names': ['content_describe']},
+                {'action_id': 'search', 'executor_names': ['content_search']},
+            ],
+        },
+        {
+            'tool_id': 'exec_runtime',
+            'display_name': 'Exec',
+            'description': 'Run commands',
+            'primary_executor_name': 'exec',
+            'l0': 'Run commands',
+            'l1': 'Run commands',
+            'actions': [{'action_id': 'exec', 'executor_names': ['exec']}],
+        },
+    ]
+    return service, visible_tools
+
+
+def test_tool_provider_covers_governance_visible_tools_when_frame_candidates_are_empty() -> None:
+    """回灌锁：frame 候选被写成空时，对象字典仍覆盖治理可见执行器。
+
+    只修候选派生不修这里，下一轮 restore 仍会把窄候选读回对象字典，闭环依旧自放大。
+    """
+    service = object.__new__(MainRuntimeService)
+    service.store = SimpleNamespace(
+        get_task=lambda task_id: SimpleNamespace(task_id=task_id, session_id='web:shared', metadata={}),
+    )
+    service._resource_manager = SimpleNamespace(
+        tool_instances=lambda: {
+            'content_open': _ModelSchemaRecordingTool(
+                name='content_open',
+                authoritative_description='content open authoritative schema',
+                model_description='content open model schema',
+            ),
+            'content_search': _ModelSchemaRecordingTool(
+                name='content_search',
+                authoritative_description='content search authoritative schema',
+                model_description='content search model schema',
+            ),
+            'content': _ModelSchemaRecordingTool(
+                name='content',
+                authoritative_description='content legacy schema',
+                model_description='content legacy schema',
+            ),
+        }
+    )
+    service._external_tool_provider = lambda _node: {}
+    service._builtin_tool_cache = None
+    service._legacy_monolith_names_for_role = lambda **_kwargs: {'content'}
+    service._node_context_selection_cache = {
+        ('task-empty-cand', 'node-empty-cand'): {
+            'selection': NodeContextSelectionResult(
+                mode='dense_rerank',
+                selected_tool_names=[],
+                candidate_tool_names=[],
+            )
+        }
+    }
+    service.log_service = _FakeLogService()
+    service.log_service.upsert_frame(
+        'task-empty-cand',
+        {'node_id': 'node-empty-cand', 'candidate_tool_names': [], 'hydrated_executor_names': []},
+    )
+    service.list_effective_tool_names = lambda *, actor_role, session_id: ['content_open', 'content_search', 'content']
+    service._actor_role_for_node = lambda node: 'execution'
+
+    provided = service._tool_provider(
+        SimpleNamespace(task_id='task-empty-cand', node_id='node-empty-cand', node_kind='execution', can_spawn_children=False)
+    )
+
+    assert 'content_open' in provided
+    assert 'content_search' in provided
+    assert 'content' not in provided
 
 
 def test_tool_provider_includes_candidate_tools_from_restored_selection() -> None:
@@ -2501,6 +2754,7 @@ def test_tool_provider_includes_candidate_tools_from_restored_selection() -> Non
     service.list_effective_tool_names = (
         lambda *, actor_role, session_id: ['load_tool_context', 'content_open', 'content_search']
     )
+    service.list_visible_tool_families = lambda *, actor_role, session_id: []
     service._actor_role_for_node = lambda node: 'execution'
 
     node = SimpleNamespace(
@@ -3751,6 +4005,92 @@ async def test_react_loop_writes_before_model_frame_before_chat_dispatch() -> No
 
     assert result.status == "success"
     assert result.answer == "done"
+
+
+@pytest.mark.asyncio
+async def test_react_loop_keeps_durable_hydration_state_across_frame_writes() -> None:
+    """水合台账是节点生命周期级的：本轮 promoted 视图窄于台账时，帧写入不得抹掉台账。
+
+    视图（hydrated_executor_names）与台账（hydrated_executor_state）是两件事；把前者写进后者，
+    会让一次曝光收窄永久变成"已水合工具掉出 callable 且 load 救不回来"。
+    """
+    log_service = _FakeLogService()
+    final_tool = _submit_final_result_tool()
+    task_id = "task-hydration-state-durable"
+    node_id = "node-hydration-state-durable"
+    log_service.upsert_frame(
+        task_id,
+        {
+            "node_id": node_id,
+            "depth": 0,
+            "node_kind": "execution",
+            "phase": "after_tools",
+            "messages": [],
+            "hydrated_executor_state": ["content_open"],
+            "hydrated_executor_names": ["content_open"],
+        },
+    )
+
+    seen: list[dict[str, object]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            _ = kwargs
+            frame = log_service.read_runtime_frame(task_id, node_id)
+            seen.append(dict(frame or {}))
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=log_service, max_iterations=2)
+    loop._visible_tools_for_iteration = lambda **kwargs: dict(kwargs.get("tools") or {})
+    # 本轮视图为空（例如对象字典塌缩过），台账必须仍然带着 content_open
+    loop._model_visible_tools_for_iteration = lambda **kwargs: (
+        {"submit_final_result": final_tool},
+        {
+            "tool_names": ["submit_final_result"],
+            "candidate_tool_names": ["content_open"],
+            "lightweight_tool_ids": [],
+            "hydrated_executor_names": [],
+            "trace": {"rbac_visible_tool_names": ["submit_final_result", "content_open"]},
+        },
+    )
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id=task_id),
+        node=SimpleNamespace(node_id=node_id, depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-hydration-state-durable","goal":"demo"}'},
+        ],
+        tools={"submit_final_result": final_tool},
+        model_refs=["fake"],
+        runtime_context={"task_id": task_id, "node_id": node_id},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert seen, "backend never saw a before_model frame"
+    assert seen[0].get("phase") == "before_model"
+    assert seen[0].get("hydrated_executor_state") == ["content_open"]
+    assert seen[0].get("hydrated_executor_names") == []
 
 
 @pytest.mark.asyncio
