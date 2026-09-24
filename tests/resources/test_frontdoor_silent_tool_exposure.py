@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from g3ku.agent.tools.registry import ToolRegistry
 from g3ku.runtime.frontdoor._ceo_runtime_ops import CeoFrontDoorRuntimeOps
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
+from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from g3ku.runtime.tool_visibility import NODE_FIXED_BUILTIN_TOOL_NAMES
 from main.runtime.internal_tools import SilentTool
 from main.runtime.stage_budget import (
@@ -143,6 +144,21 @@ def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
 def test_silent_help_follows_the_callable_list() -> None:
     """工具没注册时不能继续叫模型去调它 —— 与 P1 的"未注册则整条消失"同一条边界。"""
     assert 'silent_help:' not in _contract(['exec'])
+
+
+def test_execution_bundle_resolves_the_silent_tool_object() -> None:
+    """01:17 实盘：模型确实调了 `silent`，却收到 `Error: tool not available: silent`。
+
+    P1 只把名字注进三个名单，而执行侧查的是 `_frontdoor_execution_bundle` 组装的
+    **工具对象字典** —— 那里历史上只塞过 `submit_next_stage`。名字可见 ≠ 对象可解析，
+    这条就是钉住第四处注入点（与 submit_next_stage 同一处、同样不依赖注册表）。
+    """
+    ops = _ops(registered=False)
+    ops._build_tool_runtime_context = lambda **kwargs: {}
+    state = dict(initial_persistent_state(user_input={'content': 'x', 'metadata': {}}))
+    bundle = ops._frontdoor_execution_bundle(state=state, runtime=SimpleNamespace(context=SimpleNamespace()))
+    assert SILENT_TOOL_NAME in bundle.visible_tools
+    assert bundle.visible_tools[SILENT_TOOL_NAME].name == SILENT_TOOL_NAME
 
 
 def test_no_model_facing_surface_still_names_the_deleted_sentinel() -> None:

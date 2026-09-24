@@ -102,7 +102,7 @@ from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     resolve_send_model_context_window_info,
 )
-from main.runtime.internal_tools import SubmitNextStageTool
+from main.runtime.internal_tools import SilentTool, SubmitNextStageTool
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
@@ -6090,6 +6090,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         all_tools = {
             **registered_tools,
             STAGE_TOOL_NAME: SubmitNextStageTool(_submit_stage),
+            SILENT_TOOL_NAME: SilentTool(),
         }
         stage_gate = self._frontdoor_stage_gate({"frontdoor_stage_state": mutable_stage_state})
         visible_tools = visible_tools_for_stage_iteration(
