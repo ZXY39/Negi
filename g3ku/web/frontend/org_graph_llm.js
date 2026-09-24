@@ -12,6 +12,7 @@
     max: "max（最强思考）",
   };
   const SCOPE_LABELS = { ceo: "主Agent", execution: "执行Agent", inspection: "检验Agent", memory: "记忆Agent" };
+  const PROBE_REUSE_WINDOW_MS = 60000;
 
 
   function emptyEditorState() {
@@ -42,6 +43,9 @@
       initialRequestTimeoutSeconds: "",
       validation: null,
       probe: null,
+      probedJsonText: "",
+      probedAt: 0,
+      busy: false,
       modelList: null,
     };
   }
@@ -346,12 +350,31 @@
     state.editor.validation = await ApiClient.validateLlmDraft(draft);
     if (!state.editor.validation?.valid) {
       state.editor.probe = null;
+      state.editor.probedJsonText = "";
+      state.editor.probedAt = 0;
       renderAll();
       return false;
     }
     state.editor.probe = await ApiClient.probeLlmDraft(draft);
+    const passed = !!state.editor.probe?.success;
+    state.editor.probedJsonText = passed ? String(state.editor.jsonText || "") : "";
+    state.editor.probedAt = passed ? Date.now() : 0;
     renderAll();
-    return !!state.editor.probe?.success;
+    return passed;
+  }
+
+  // 探测会向供应商真发一次推理请求，低 RPM 的端点上「先测试再保存」的第二次请求
+  // 常常自己把额度吃掉。同一份 JSON 文本刚测过就没必要再测一次。
+  function hasFreshProbeFor(jsonText) {
+    const editor = llmState().editor || {};
+    return !!editor.probe?.success
+      && String(editor.probedJsonText || "") === String(jsonText || "")
+      && Date.now() - Number(editor.probedAt || 0) < PROBE_REUSE_WINDOW_MS;
+  }
+
+  function editorBusy() {
+    const state = llmState();
+    return !!state.saving || !!state.editor?.busy;
   }
 
   async function openCreateModal() {
@@ -1090,7 +1113,7 @@
               <button type="button" class="icon-btn llm-kebab-btn" data-llm-action="toggle-concurrency-test" title="并发测试" aria-label="显示并发测试"><i data-lucide="more-horizontal"></i></button>
             </div>
             <div class="llm-concurrency-test-row" hidden>
-              <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency">测试最大并发数</button>
+              <button type="button" class="toolbar-btn ghost small" data-llm-action="test-max-concurrency"${editorBusy() ? " disabled" : ""}>测试最大并发数</button>
             </div>
           </label>`;
   }
@@ -1189,8 +1212,8 @@
               ${renderJsonDetails()}
               ${renderStatus()}
               <div class="llm-inline-actions">
-                <button type="button" class="toolbar-btn ghost" data-llm-action="test-create">测试连接</button>
-                <button type="button" class="toolbar-btn success" data-llm-action="save-create">添加配置</button>
+                <button type="button" class="toolbar-btn ghost" data-llm-action="test-create"${editorBusy() ? " disabled" : ""}>测试连接</button>
+                <button type="button" class="toolbar-btn success" data-llm-action="save-create"${editorBusy() ? " disabled" : ""}>添加配置</button>
               </div>
             </div>
           </div>
@@ -1224,9 +1247,9 @@
               ${renderJsonDetails()}
               ${renderStatus()}
               <div class="llm-inline-actions">
-                <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail">测试连接</button>
-                <button type="button" class="toolbar-btn success" data-llm-action="save-detail">保存修改</button>
-                <button type="button" class="toolbar-btn danger" data-llm-action="delete-detail">删除配置</button>
+                <button type="button" class="toolbar-btn ghost" data-llm-action="test-detail"${editorBusy() ? " disabled" : ""}>测试连接</button>
+                <button type="button" class="toolbar-btn success" data-llm-action="save-detail"${editorBusy() ? " disabled" : ""}>保存修改</button>
+                <button type="button" class="toolbar-btn danger" data-llm-action="delete-detail"${editorBusy() ? " disabled" : ""}>删除配置</button>
               </div>
             </div>
           </div>
@@ -1418,25 +1441,32 @@
       kind: "success",
       persistent: true,
     });
-    await probeDraft(draft);
-    if (state.editor.probe?.success) {
+    state.editor.busy = true;
+    renderAll();
+    try {
+      await probeDraft(draft);
+      if (state.editor.probe?.success) {
+        showToast({
+          title: "连接测试成功",
+          text: "当前模型配置可用。",
+          kind: "success",
+        });
+        return;
+      }
+      const validationErrors = Array.isArray(state.editor.validation?.errors) ? state.editor.validation.errors : [];
+      const validationMessage = validationErrors.length
+        ? validationErrors.map((item) => `${item.field || "field"}: ${item.message || item.code || "错误"}`).join("；")
+        : "请检查 JSON 配置中的必填项和字段格式。";
+      const probeMessage = state.editor.probe?.message || "连接测试未通过，请检查密钥、地址和模型配置。";
       showToast({
-        title: "连接测试成功",
-        text: "当前模型配置可用。",
-        kind: "success",
+        title: "连接测试失败",
+        text: state.editor.validation?.valid === false ? validationMessage : probeMessage,
+        kind: "error",
       });
-      return;
+    } finally {
+      state.editor.busy = false;
+      renderAll();
     }
-    const validationErrors = Array.isArray(state.editor.validation?.errors) ? state.editor.validation.errors : [];
-    const validationMessage = validationErrors.length
-      ? validationErrors.map((item) => `${item.field || "field"}: ${item.message || item.code || "错误"}`).join("；")
-      : "请检查 JSON 配置中的必填项和字段格式。";
-    const probeMessage = state.editor.probe?.message || "连接测试未通过，请检查密钥、地址和模型配置。";
-    showToast({
-      title: "连接测试失败",
-      text: state.editor.validation?.valid === false ? validationMessage : probeMessage,
-      kind: "error",
-    });
   }
 
   async function handleFetchModelList() {
@@ -1631,20 +1661,22 @@
     state.saving = true;
     renderAll();
     try {
-      showToast({
-        title: "检测连接中",
-        text: "正在验证当前 JSON 配置并测试连接...",
-        kind: "success",
-        persistent: true,
-      });
-      const ok = await probeDraft(draft);
-      if (!ok) {
-        const validationErrors = Array.isArray(state.editor.validation?.errors) ? state.editor.validation.errors : [];
-        const validationMessage = validationErrors.length
-          ? validationErrors.map((item) => `${item.field || "field"}: ${item.message || item.code || "错误"}`).join("；")
-          : "请检查 JSON 配置中的必填项和字段格式。";
-        const probeMessage = state.editor.probe?.message || "连接测试未通过，请检查密钥、地址和模型配置。";
-        throw new Error(state.editor.validation?.valid === false ? validationMessage : probeMessage);
+      if (!hasFreshProbeFor(jsonText)) {
+        showToast({
+          title: "检测连接中",
+          text: "正在验证当前 JSON 配置并测试连接...",
+          kind: "success",
+          persistent: true,
+        });
+        const ok = await probeDraft(draft);
+        if (!ok) {
+          const validationErrors = Array.isArray(state.editor.validation?.errors) ? state.editor.validation.errors : [];
+          const validationMessage = validationErrors.length
+            ? validationErrors.map((item) => `${item.field || "field"}: ${item.message || item.code || "错误"}`).join("；")
+            : "请检查 JSON 配置中的必填项和字段格式。";
+          const probeMessage = state.editor.probe?.message || "连接测试未通过，请检查密钥、地址和模型配置。";
+          throw new Error(state.editor.validation?.valid === false ? validationMessage : probeMessage);
+        }
       }
       showToast({
         title: "正在保存",
@@ -1718,14 +1750,16 @@
     try {
       let runtimeRefresh = null;
       if (configChanged) {
-        showToast({
-          title: "Saving",
-          text: "Validating current JSON config before applying changes...",
-          kind: "success",
-          persistent: true,
-        });
-        const ok = await probeDraft(draft);
-        if (!ok) throw new Error("请先修正 JSON 配置并通过连接测试");
+        if (!hasFreshProbeFor(jsonText)) {
+          showToast({
+            title: "Saving",
+            text: "Validating current JSON config before applying changes...",
+            kind: "success",
+            persistent: true,
+          });
+          const ok = await probeDraft(draft);
+          if (!ok) throw new Error("请先修正 JSON 配置并通过连接测试");
+        }
         const configSaveResult = await ApiClient.updateLlmConfig(state.editor.configId, draft);
         runtimeRefresh = configSaveResult?.runtimeRefresh || runtimeRefresh;
       }

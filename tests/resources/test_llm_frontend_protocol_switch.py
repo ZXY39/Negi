@@ -232,3 +232,31 @@ def test_cancel_rename_restores_name_display() -> None:
     assert 'id="llm-edit-name-display"' in after_html
     assert 'id="llm-edit-name-input"' not in after_html
     assert "我的配置" in after_html
+
+
+def test_modal_actions_disabled_while_saving_or_probing() -> None:
+    result = _run_node_script(
+        """
+        global.S.llmCenter.saving = true;
+        window.renderModelDetail();
+        const savingHtml = shellHtml();
+        global.S.llmCenter.saving = false;
+        global.S.llmCenter.editor.busy = true;
+        window.renderModelDetail();
+        const probingHtml = shellHtml();
+        global.S.llmCenter.editor.busy = false;
+        window.renderModelDetail();
+        const idleHtml = shellHtml();
+        console.log(JSON.stringify({ savingHtml, probingHtml, idleHtml }));
+        """
+    )
+
+    # 探测与保存都会向供应商发请求，进行中必须挡住重复点击。
+    for html in (str(result["savingHtml"]), str(result["probingHtml"])):
+        assert 'data-llm-action="test-detail" disabled' in html
+        assert 'data-llm-action="save-detail" disabled' in html
+        assert 'data-llm-action="delete-detail" disabled' in html
+
+    idle_html = str(result["idleHtml"])
+    assert 'data-llm-action="save-detail" disabled' not in idle_html
+    assert 'data-llm-action="test-detail" disabled' not in idle_html
