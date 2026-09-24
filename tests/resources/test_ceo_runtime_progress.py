@@ -6026,10 +6026,9 @@ def test_ceo_websocket_frontdoor_stage_synced_pushes_live_turn_patch(tmp_path: P
 
     inflight_turn = patch_payload["data"]["inflight_turn"]
     assert inflight_turn["turn_id"] == "turn-stage-sync-live"
-    stage = inflight_turn["canonical_context"]["stages"][0]
-    assert stage["stage_id"] == "frontdoor-stage-2"
     delta = inflight_turn.get("canonical_context_delta") or {}
     assert [item.get("stage_id") for item in list(delta.get("stages") or [])] == ["frontdoor-stage-2"]
+    assert "canonical_context" not in inflight_turn
 
 
 def test_ceo_websocket_error_payload_omits_legacy_interaction_trace(tmp_path: Path, monkeypatch) -> None:

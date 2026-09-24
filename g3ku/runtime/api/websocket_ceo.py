@@ -44,9 +44,6 @@ from g3ku.runtime.frontdoor.canonical_context import (
     project_canonical_context_for_transcript as _project_canonical_context_for_transcript,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
-    project_canonical_context_for_ui_payload as _project_canonical_context_for_ui_payload,
-)
-from g3ku.runtime.frontdoor.canonical_context import (
     ui_canonical_context_delta as _ui_canonical_context_delta,
 )
 from g3ku.runtime.frontdoor.canonical_context import (
@@ -96,6 +93,11 @@ from main.protocol import build_envelope
 router = APIRouter()
 # 连续几帧都写不出去才认定这条 socket 已废（单帧失败通常是载荷问题，下一帧还能发）。
 _SENDER_CONSECUTIVE_FAILURE_LIMIT = 3
+# live 轨道补丁的合并窗口：一次工具事件就重建整份工作集（实测 100-270ms 事件循环
+# CPU），一回合几十次会把帧挤到回合末尾才出得去。窗口末按当前状态重建一帧即可，
+# 补丁里的 delta 始终相对最后落库的 assistant 行，丢掉中间帧不丢阶段；回合结束帧
+# （final / 静默回执 / 错误）前强制冲一帧，快回合也不会丢轨道。
+_CEO_TURN_PATCH_MIN_INTERVAL_S = 0.25
 # 静默回合的历史占位文案：存量转录里仍带这一行，快照层按静默归一化后不显示到会话框。
 _LEGACY_SILENT_REPLY_TEXT = "信息已静默"
 _APPROVAL_INTERRUPT_KINDS = {
@@ -1008,18 +1010,17 @@ def _with_canonical_context_delta(payload: dict[str, Any] | None, previous_conte
     if not isinstance(payload, dict):
         return payload
     next_payload = copy.deepcopy(payload)
-    canonical_context = _canonical_context_copy(next_payload.get("canonical_context"))
-    if not canonical_context:
-        next_payload.pop("canonical_context_delta", None)
+    canonical_context = next_payload.pop('canonical_context', None)
+    if not isinstance(canonical_context, dict) or not canonical_context:
+        next_payload.pop('canonical_context_delta', None)
         return next_payload
     delta = _ui_canonical_context_delta(previous_context, canonical_context)
     if delta:
-        next_payload["canonical_context_delta"] = delta
+        next_payload['canonical_context_delta'] = delta
     else:
-        next_payload.pop("canonical_context_delta", None)
-    projected_canonical_context = _project_canonical_context_for_ui_payload(canonical_context)
-    if projected_canonical_context:
-        next_payload["canonical_context"] = projected_canonical_context
+        next_payload.pop('canonical_context_delta', None)
+    # 全量投影只属于 final 帧：live 轨道读的是 delta，附上整份工作集既没人用，
+    # 又让每个工具事件都为 500+ 个阶段付一次投影（QQ 会话实测单帧 462KB / 160ms）。
     return next_payload
 
 
@@ -1298,13 +1299,19 @@ async def ceo_websocket(websocket: WebSocket):
     persisted_messages = await run_off_event_loop(_compose_ceo_snapshot)
     current_turn_task: asyncio.Task[Any] | None = None
     closed = asyncio.Event()
+    _send_lock = asyncio.Lock()
+    turn_patch_gate: dict[str, Any] = {"last_sent_at": 0.0, "pending": None}
 
     async def _safe_send(payload: dict[str, Any]) -> None:
-        try:
-            await websocket_send_json(websocket, payload)
-        except WebSocketChannelClosed:
-            closed.set()
-            raise
+        # websockets legacy 协议只允许一个写者：三条 sender 任务加握手期的直发并发
+        # send() 会在 _drain_helper 里踩 `assert waiter is None or waiter.cancelled()`，
+        # 帧被吞掉而 socket 还开着（实盘 09-24 一天 418 次），界面就只能等重连补快照。
+        async with _send_lock:
+            try:
+                await websocket_send_json(websocket, payload)
+            except WebSocketChannelClosed:
+                closed.set()
+                raise
 
     async def _push_stream_event(event_type: str, data: dict[str, Any] | None = None) -> None:
         try:
@@ -1312,12 +1319,56 @@ async def ceo_websocket(websocket: WebSocket):
         except RuntimeError:
             return
 
-    async def _push_turn_patch() -> None:
+    async def _send_turn_patch_now() -> None:
+        turn_patch_gate["last_sent_at"] = asyncio.get_running_loop().time()
         try:
             persisted_session = transcript_store.get_or_create(session_id)
         except Exception:
             persisted_session = None
         await _push_stream_event('ceo.turn.patch', _build_live_turn_payload(session, session_id, persisted_session))
+
+    async def _flush_pending_turn_patch() -> None:
+        # 回合结束前先把挂起的补丁补出去：补丁必须排在 final 之前，既不能让快回合
+        # 整帧丢掉轨道，也不能在 final 之后再来一帧 running|paused 把前端顶成新回合。
+        pending = turn_patch_gate.get("pending")
+        turn_patch_gate["pending"] = None
+        if pending is None or pending.done():
+            return
+        pending.cancel()
+        await _send_turn_patch_now()
+
+    def _drop_pending_turn_patch() -> None:
+        pending = turn_patch_gate.get("pending")
+        if pending is not None and not pending.done():
+            pending.cancel()
+        turn_patch_gate["pending"] = None
+
+    async def _flush_turn_patch_after(delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            turn_patch_gate["pending"] = None
+        if closed.is_set():
+            return
+        try:
+            await _send_turn_patch_now()
+        except Exception:
+            logger.exception('CEO websocket deferred turn patch failed for {}', session_id)
+
+    async def _push_turn_patch() -> None:
+        now = asyncio.get_running_loop().time()
+        elapsed = now - float(turn_patch_gate.get("last_sent_at") or 0.0)
+        if elapsed >= _CEO_TURN_PATCH_MIN_INTERVAL_S:
+            await _send_turn_patch_now()
+            return
+        pending = turn_patch_gate.get("pending")
+        if pending is not None and not pending.done():
+            return
+        turn_patch_gate["pending"] = asyncio.create_task(
+            _flush_turn_patch_after(_CEO_TURN_PATCH_MIN_INTERVAL_S - elapsed)
+        )
 
     async def _push_edit_fork_gates() -> None:
         # 编辑/Fork 门槛原本只随连接时的 snapshot.ceo 下发一次：回合收尾后转录里
@@ -1433,6 +1484,7 @@ async def ceo_websocket(websocket: WebSocket):
                     error_message = str(last_error.get("message") or "").strip()
             if not error_message and isinstance(exc, MemoryError):
                 error_message = "运行时内存不足，未能完成当前轮次"
+            await _flush_pending_turn_patch()
             await _push_stream_event(
                 'ceo.error',
                 {
@@ -1675,6 +1727,7 @@ async def ceo_websocket(websocket: WebSocket):
                 turn_usage = snapshot.get("usage") or None
             if _is_internal_ack_message_end(payload):
                 reason = str(payload.get("heartbeat_reason") or "heartbeat_ok").strip() or "heartbeat_ok"
+                await _flush_pending_turn_patch()
                 await _push_stream_event(
                     'ceo.internal.ack',
                     {
@@ -1688,6 +1741,7 @@ async def ceo_websocket(websocket: WebSocket):
                     },
                 )
                 return
+            await _flush_pending_turn_patch()
             await _push_stream_event(
                 'ceo.reply.final',
                 {
@@ -1911,6 +1965,7 @@ async def ceo_websocket(websocket: WebSocket):
         pass
     finally:
         unsubscribe()
+        _drop_pending_turn_patch()
         sender_task.cancel()
         global_sender_task.cancel()
         stream_task.cancel()

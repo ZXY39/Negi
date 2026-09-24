@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path, load_config
 from g3ku.runtime.external_sessions import ExternalSessionEntry, ExternalSessionRegistry
 from g3ku.runtime.frontdoor.canonical_context import (
@@ -1774,7 +1775,9 @@ def _channel_session_kind(parsed) -> str:
 
 def _external_bridge_label(bridge_id: str) -> str:
     try:
-        config = load_config()
+        # 渠道行每个工具事件都要重算一次标签：load_config() 走完整迁移+校验（实测 46ms），
+        # get_runtime_config() 按配置文件 mtime 缓存，标签新鲜度不变。
+        config, _revision, _changed = get_runtime_config()
         tokens = dict(getattr(getattr(config, "external_api", None), "tokens", None) or {})
         label = str(getattr(tokens.get(str(bridge_id or "").strip()), "label", "") or "").strip()
     except Exception:

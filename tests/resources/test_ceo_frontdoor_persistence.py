@@ -335,8 +335,11 @@ def test_ceo_live_turn_payload_includes_inflight_canonical_context_delta() -> No
 
     payload = websocket_ceo._build_live_turn_payload(session, "web:shared", persisted_session)
 
-    assert payload["inflight_turn"]["canonical_context"]["stages"][1]["stage_id"] == "frontdoor-stage-2"
-    assert payload["inflight_turn"]["canonical_context_delta"]["stages"][0]["stage_id"] == "frontdoor-stage-2"
+    live_turn = payload["inflight_turn"]
+    assert "canonical_context" not in live_turn
+    assert [
+        stage["stage_id"] for stage in live_turn["canonical_context_delta"]["stages"]
+    ] == ["frontdoor-stage-2"]
 
 
 def test_ceo_snapshot_ignores_legacy_tool_events_without_canonical_context() -> None:
