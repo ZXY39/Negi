@@ -18,6 +18,7 @@ from g3ku.providers.base import LLMModelAttempt, LLMResponse, ToolCallRequest
 from main.api.internal_rest import router as internal_router
 from main.api.rest import router as rest_router
 from main.api.websocket_task import router as task_ws_router
+from main.errors import NodePausedError
 from main.models import (
     ModelTokenUsageRecord,
     NodeFinalResult,
@@ -5425,6 +5426,14 @@ async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_termi
 
         monkeypatch.setattr(service.node_runner, "run_node", _fake_run_node)
 
+        diagnostics: list[dict] = []
+        monkeypatch.setattr(
+            service.node_runner,
+            "_emit_spawn_diagnostic",
+            lambda **kwargs: diagnostics.append(dict(kwargs)),
+        )
+
+
         new_results = await service.node_runner._spawn_children(
             task_id=record.task_id,
             parent_node_id=root.node_id,
@@ -5455,6 +5464,18 @@ async def test_new_spawn_round_supersedes_active_old_subtree_and_preserves_termi
         assert stale_entry["status"] == "error"
         assert "superseded by newer spawn round: round-2" in json.dumps(stale_entry, ensure_ascii=False)
         assert spawn_operations["round-1"]["completed"] is True
+
+        # 清扫时该子树仍非终态（harness 无 dispatcher，取消不会让它自己落终态）
+        # ⇒ 强判终态可以保留，但必须留下可检索现场，操作员才读得出"工作是被掐断的"
+        forced = [
+            str(item.get("detail") or "")
+            for item in diagnostics
+            if str(item.get("title") or "") == "spawn_supersede_forced_live_node"
+        ]
+        assert any(stale_child.node_id in text for text in forced)
+        assert any(stale_descendant.node_id in text for text in forced)
+        assert not [text for text in forced if steady_child.node_id in text]
+
         assert steady_entry["status"] == "success"
     finally:
         await service.close()
@@ -7885,6 +7906,132 @@ async def test_spawn_child_acceptance_bootstrap_stays_frozen_and_tail_carries_su
         assert "announcement complete" not in captured_prompt["prompt"]
         assert "待验提交结果载荷 ref" in captured_prompt["tail"]
         assert "announcement complete" in captured_prompt["tail"]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_spawn_round_keeps_child_pause_as_freeze_instead_of_delivering_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """子节点暂停是冻结，不是子节点的交付结果。
+
+    结清成 entry error 会把"这个子节点失败"交给父节点模型；模型随即重派新一轮，
+    而新轮的活跃判据是"绑定节点非终态"，于是被 resume 救活的在飞子树整棵按
+    `superseded by newer spawn round` 清扫掉（2026-09-24 task:3151d7fe1d99）。
+    """
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="embedded",
+    )
+    try:
+        record = await _create_web_task(service)
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+
+        spec = SpawnChildSpec(
+            goal="freeze child",
+            prompt="freeze prompt",
+            execution_policy=_execution_policy(),
+            acceptance_prompt="verify freeze child",
+        )
+        cached_payload = {
+            "specs": [spec.model_dump(mode="json")],
+            "entries": [service.node_runner._normalize_spawn_entry(index=0, spec=spec, entry={})],
+            "completed": False,
+        }
+        service.node_runner._materialize_spawn_batch_children(
+            task=task,
+            parent=root,
+            specs=[spec],
+            allowed_indexes=[0],
+            cache_key="round-freeze",
+            cached_payload=cached_payload,
+        )
+        bound_entry = service.store.get_node(root.node_id).metadata["spawn_operations"]["round-freeze"]["entries"][0]
+        child_id = str(bound_entry["child_node_id"])
+
+        execution_calls: list[str] = []
+        inline_run_node_calls: list[str] = []
+        diagnostics: list[dict] = []
+
+        async def _nested_executor(task_id: str, node_id: str) -> NodeFinalResult:
+            target = service.store.get_node(node_id)
+            assert target is not None
+            if target.node_kind == "acceptance":
+                service.log_service.update_node_status(
+                    task_id,
+                    node_id,
+                    status="failed",
+                    final_output="needs work",
+                    failure_reason="needs work",
+                )
+                return NodeFinalResult(
+                    status="failed",
+                    delivery_status="final",
+                    summary="needs work",
+                    answer="needs work",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="needs work",
+                )
+            execution_calls.append(node_id)
+            if len(execution_calls) == 1:
+                return service.node_runner._mark_finished(
+                    task_id,
+                    node_id,
+                    NodeFinalResult(
+                        status="success",
+                        delivery_status="final",
+                        summary="draft v1",
+                        answer="draft v1",
+                        evidence=[],
+                        remaining_work=[],
+                        blocking_reason="",
+                    ),
+                )
+            # 打回后的重跑途中暂停（事故里由纯文本 3 连击守卫产生）
+            raise NodePausedError(task_id, node_id)
+
+        async def _spy_run_node(task_id: str, node_id: str) -> NodeFinalResult:
+            inline_run_node_calls.append(node_id)
+            return await _nested_executor(task_id, node_id)
+
+        monkeypatch.setattr(service.node_runner, "nested_node_executor", _nested_executor)
+        monkeypatch.setattr(service.node_runner, "run_node", _spy_run_node)
+        monkeypatch.setattr(service.node_runner, "_emit_spawn_diagnostic", lambda **kwargs: diagnostics.append(dict(kwargs)))
+
+        with pytest.raises(NodePausedError):
+            await service.node_runner._run_child_pipeline(
+                task=task,
+                parent=service.store.get_node(root.node_id) or root,
+                spec=spec,
+                cache_key="round-freeze",
+                cached_payload=cached_payload,
+                index=0,
+            )
+
+        latest_root = service.store.get_node(root.node_id)
+        assert latest_root is not None
+        entry = latest_root.metadata["spawn_operations"]["round-freeze"]["entries"][0]
+        assert entry["status"] == "running"
+        assert entry["finished_at"] == ""
+        assert latest_root.metadata["spawn_operations"]["round-freeze"]["completed"] is False
+        child = service.store.get_node(child_id)
+        assert child is not None
+        assert child.status == "in_progress"
+        # 打回后的重跑必须经 nested executor（生产里＝dispatch entry future），不得内联
+        assert execution_calls == [child_id, child_id]
+        assert inline_run_node_calls == []
+        assert "spawn_pause_reached_settlement_lane" in [str(item.get("title") or "") for item in diagnostics]
     finally:
         await service.close()
 
@@ -12391,6 +12538,27 @@ async def test_unmaterialized_spawn_round_bypasses_distribution_block(
 
         root = service.get_node(root.node_id)
         assert root is not None
+
+        # 本子用例只证「未物化轮不被屏障拦死」，与子节点结局无关。给子节点一个终态：
+        # 暂停自 2026-09-24 起不再被就地结清成 entry error（那是 supersede 误清扫的入口），
+        # 而本 harness 没有 dispatcher，暂停会如实上抛而不是让父管线停等。
+        async def _finish_child(task_id: str, node_id: str):
+            return service.node_runner._mark_finished(
+                task_id,
+                node_id,
+                NodeFinalResult(
+                    status="success",
+                    delivery_status="final",
+                    summary="child done",
+                    answer="child done",
+                    evidence=[],
+                    remaining_work=[],
+                    blocking_reason="",
+                ),
+            )
+
+        monkeypatch.setattr(service.node_runner, "run_node", _finish_child)
+
 
         history = await service.node_runner._react_loop._resume_waiting_children_turn_if_needed(
             task=task,

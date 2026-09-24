@@ -4134,6 +4134,23 @@ class NodeRunner:
                     )
                 except TaskPausedError:
                     raise
+                except NodePausedError as exc:
+                    # 冻结信号不得成为交付结果（与 _run_entry 保持 future pending 的
+                    # 契约同源）：结清成 entry error 会被模型读成"子节点失败"，而子节点
+                    # 只是暂停且随时可被 resume，父节点随后重派即把它在飞的工作清扫掉。
+                    # 重抛让父节点走自己的暂停路径，轮次保持未完成、可按原 call id 重入。
+                    live_entries = list(cached_payload.get('entries') or [])
+                    live_entry = live_entries[index] if index < len(live_entries) else None
+                    self._emit_spawn_diagnostic(
+                        title='spawn_pause_reached_settlement_lane',
+                        task_id=task.task_id,
+                        parent_node_id=parent.node_id,
+                        cache_key=cache_key,
+                        index=index,
+                        entry=live_entry if isinstance(live_entry, dict) else None,
+                        detail=describe_exception(exc),
+                    )
+                    raise
                 except asyncio.CancelledError as exc:
                     if self._should_propagate_child_pipeline_cancellation(
                         task_id=task.task_id,
@@ -5014,6 +5031,50 @@ class NodeRunner:
         active, _reason = self._spawn_entry_activity(entry)
         return active
 
+    def spawn_entry_settlement_reason(self, node_id: str) -> str:
+        """该节点绑定的 spawn entry 是否已作为结果结清并交付给父节点。
+
+        非空返回＝"复活它的工作不会被任何等待方采纳"：轮次 `completed` 意味着那份工具
+        结果已经进了父节点的消息链（收不回），entry 记为 `error` 意味着父节点模型已经
+        读到"这个子节点失败"。此时把节点从暂停里救活只会让下一次派生按
+        `superseded by newer spawn round` 把它连同绑定的验收节点一起清扫掉。
+        """
+        normalized_node_id = str(node_id or '').strip()
+        if not normalized_node_id:
+            return ''
+        node = self._store.get_node(normalized_node_id)
+        if node is None:
+            return ''
+        metadata = getattr(node, 'metadata', None)
+        if not isinstance(metadata, dict):
+            return ''
+        parent_node_id = str(metadata.get('spawn_owner_parent_node_id') or '').strip()
+        owner_round_id = str(metadata.get('spawn_owner_round_id') or '').strip()
+        if not parent_node_id or not owner_round_id:
+            return ''
+        parent = self._store.get_node(parent_node_id)
+        if parent is None or not isinstance(parent.metadata, dict):
+            return ''
+        operations = parent.metadata.get('spawn_operations')
+        if not isinstance(operations, dict):
+            return ''
+        payload = operations.get(owner_round_id)
+        if not isinstance(payload, dict) or not bool(payload.get('completed')):
+            return ''
+        for entry in list(payload.get('entries') or []):
+            if not isinstance(entry, dict):
+                continue
+            bound_ids = {
+                str(entry.get('child_node_id') or '').strip(),
+                str(entry.get('acceptance_node_id') or '').strip(),
+            }
+            if normalized_node_id not in bound_ids:
+                continue
+            if self._normalized_status(entry.get('status')) != 'error':
+                return ''
+            return f'spawn round {owner_round_id} already delivered entry[{entry.get("index")}] as error'
+        return ''
+
     @staticmethod
     def _emit_spawn_diagnostic(
         *,
@@ -5426,7 +5487,26 @@ class NodeRunner:
                 preterminal_node_ids.add(node_id)
 
         await self._cancel_spawn_subtrees(task_id=task.task_id, node_ids=subtree_node_ids)
-        await self._wait_for_terminal_nodes(node_ids=subtree_node_ids)
+        still_live = await self._wait_for_terminal_nodes(node_ids=subtree_node_ids)
+        # 取消后仍未落终态＝清扫时该节点真在飞（一次模型回合 p50 15s / p90 60s，
+        # 2s 等待常掐不住）。强判终态照旧执行（不留孤儿、不留双活），但必须留下可检索
+        # 现场：否则操作员从 `superseded` 一条读不出"工作是被中途掐断的"。
+        for node_id in sorted(still_live & preterminal_node_ids):
+            node = self._store.get_node(node_id)
+            self._emit_spawn_diagnostic(
+                title='spawn_supersede_forced_live_node',
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key='',
+                index=None,
+                entry=None,
+                detail=(
+                    f'forced_node_id={node_id} '
+                    f'kind={str(getattr(node, "node_kind", "") or "")} '
+                    f'depth={str(getattr(node, "depth", "") or "")} '
+                    f'replacement_round={replacement_round_id}'
+                ),
+            )
         self._force_superseded_nodes_terminal(
             task_id=task.task_id,
             node_ids=preterminal_node_ids,
@@ -5681,7 +5761,9 @@ class NodeRunner:
                 if str(acceptance_result.delivery_status or '').strip() != 'partial':
                     break
 
-                child_result = await self.run_node(task.task_id, child.node_id)
+                # 打回后的重跑同样必须经 dispatch entry：内联 `run_node` 会让子节点
+                # 的暂停直接落进 `_run_spec` 的异常兜底，被父管线当成"子节点失败"交付。
+                child_result = await self._run_nested_node(task.task_id, child.node_id)
                 child = self._store.get_node(child.node_id) or child
                 child_handoff = self._child_handoff_payload(
                     task_id=task.task_id,
@@ -5771,6 +5853,21 @@ class NodeRunner:
             )
             return result
         except TaskPausedError:
+            raise
+        except NodePausedError as exc:
+            # 子节点暂停是冻结，不是子节点的交付结果：在这里结清成 entry error 会把
+            # "失败"交给父节点模型，父节点随后重派即把这个还在跑的 subtree 按
+            # superseded 清扫掉（2026-09-24 task:3151d7fe1d99 事故路径）。重抛让轮次
+            # 保持未完成，与 _run_entry 对非根节点保持 future pending 的契约同源。
+            self._emit_spawn_diagnostic(
+                title='spawn_pause_reached_settlement_lane',
+                task_id=task.task_id,
+                parent_node_id=parent.node_id,
+                cache_key=cache_key,
+                index=index,
+                entry=dict((list(cached_payload.get('entries') or []) + [{}])[index] or {}),
+                detail=describe_exception(exc),
+            )
             raise
         except asyncio.CancelledError as exc:
             if self._should_propagate_child_pipeline_cancellation(

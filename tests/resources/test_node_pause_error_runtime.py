@@ -1402,3 +1402,77 @@ async def test_web_mode_pause_writer_does_not_land_pause_it_cannot_observe(tmp_p
         assert node is not None and node.is_paused is False
     finally:
         await service.close()
+
+@pytest.mark.asyncio
+async def test_resume_refuses_child_whose_spawn_entry_was_already_delivered(tmp_path: Path) -> None:
+    """结果已交付父节点的子节点不该被复活：它的工作不会被采纳，只会被下一轮清扫。
+
+    2026-09-24 task:3151d7fe1d99 里 `resume_node` 回的是 `resumed`，节点真跑了 3 分
+    23 秒，然后父节点重派新轮把它连同绑定验收节点一起打成 superseded。
+    """
+    service = _make_service(tmp_path)
+    try:
+        record = await service.create_task("settled spawn child", session_id="web:shared")
+        task = service.get_task(record.task_id)
+        root = service.get_node(record.root_node_id)
+        assert task is not None
+        assert root is not None
+        child = _execution_child(service, task=task, parent=root, name="settled")
+        completed = {"value": True}
+
+        def _write_round(metadata: dict) -> dict:
+            operations = dict(metadata.get("spawn_operations") or {})
+            operations["round-settled"] = {
+                "specs": [],
+                "entries": [
+                    {
+                        "index": 0,
+                        "goal": child.goal,
+                        "requires_acceptance": False,
+                        "acceptance_prompt": "",
+                        "status": "error",
+                        "started_at": child.created_at,
+                        "finished_at": child.created_at,
+                        "child_node_id": child.node_id,
+                        "acceptance_node_id": "",
+                        "check_status": "failed",
+                        "result": {},
+                    }
+                ],
+                "completed": completed["value"],
+            }
+            metadata["spawn_operations"] = operations
+            return metadata
+
+        def _stamp_owner(metadata: dict) -> dict:
+            return {
+                **metadata,
+                "spawn_owner_parent_node_id": root.node_id,
+                "spawn_owner_round_id": "round-settled",
+                "spawn_owner_entry_index": 0,
+                "spawn_owner_kind": "child",
+            }
+
+        service.log_service.update_node_metadata(root.node_id, _write_round)
+        service.log_service.update_node_metadata(child.node_id, _stamp_owner)
+        await service.pause_node(record.task_id, child.node_id, reason="error", remark="provider 故障")
+
+        refused = await service.control_nodes(record.task_id, [child.node_id], "resume", remark="让它继续")
+        item = refused["items"][0]
+        assert item["result"] == "conflict"
+        assert item["reason"] == "entry_settled"
+        assert "round-settled" in str(item.get("detail") or "")
+        assert str(item.get("hint") or "").strip()
+        # 否决过的节点不得入队：worker 按 force=True 应用，会绕过同一判据
+        assert service.store.list_unfinished_task_commands(command_type="resume_node", task_id=record.task_id) == []
+        latest_child = service.get_node(child.node_id)
+        assert latest_child is not None and latest_child.is_paused is True
+
+        # 正向对照：轮次结果尚未交付父节点时，复活照旧允许
+        completed["value"] = False
+        service.log_service.update_node_metadata(root.node_id, _write_round)
+        allowed = await service.control_nodes(record.task_id, [child.node_id], "resume", remark="继续修")
+        assert allowed["items"][0]["result"] == "resumed"
+    finally:
+        await service.close()
+

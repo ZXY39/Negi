@@ -45,7 +45,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 同一工具反复返回同一条 `Error executing <tool>`、节点长期 `in_progress` 且从不进错误暂停 → `runtime-overview.md`「Node-Level Pause and Recovery」（`runtime_fault:` 断路器）
 - 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `runtime-overview.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
 - 渠道会话（`ext:`）任务长期静默却收不到失速提醒 → `heartbeat-system.md`「Task Stall Detection」（受众谓词与它要过的两道闸门）
-- 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
+- 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round`（含节点被 resume 后白跑一段再落该原因）、或 `resume` 返回 `entry_settled` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - 派生评审把整批候选全拦下来、把带 `requires_acceptance` 的候选判成"验收内嵌/自产自销"、或想知道评审请求本身有多大/重发过几次 → `runtime-overview.md`「frontdoor 与任务运行时的关系」（送审候选的解析结构、派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
 - 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
 - `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `runtime-overview.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）

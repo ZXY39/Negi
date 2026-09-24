@@ -1482,6 +1482,19 @@ class MainRuntimeService:
                 landed.append(node.node_id)
         return landed
 
+    def _resume_entry_settled_conflict(self, node_id: str) -> dict[str, Any] | None:
+        """复活"结果已交付父节点"的子节点不会被采纳：父节点已经把它读成失败，
+        下一次派开会连同其绑定的验收节点一起按 superseded 清扫掉。返回 None 表示可复活。
+        """
+        settled_reason = str(self.node_runner.spawn_entry_settlement_reason(node_id) or '').strip()
+        if not settled_reason:
+            return None
+        return {
+            'reason': 'entry_settled',
+            'detail': settled_reason,
+            'hint': '父节点已按失败读到该子节点；请让父节点重派，或先对父节点执行控制动作。',
+        }
+
     async def _apply_resume_node_command(self, task_id: str, *, node_ids: list[str], force: bool = False, schedule_if_inactive: bool = True) -> dict[str, Any]:
         normalized_task_id = self.normalize_task_id(task_id)
         task = self.get_task(normalized_task_id)
@@ -1501,6 +1514,12 @@ class MainRuntimeService:
             if not force and not (bool(node.is_paused) or bool(node.pause_requested)):
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
                 continue
+            if not force:
+                # worker 重放（force=True）不复核：leader 否决过的节点不会被入队。
+                settled = self._resume_entry_settled_conflict(node_id)
+                if settled is not None:
+                    results.append({'node_id': node_id, 'result': 'conflict', **settled})
+                    continue
             updated = self.log_service.set_node_pause_state(
                 normalized_task_id,
                 node_id,
@@ -1588,8 +1607,14 @@ class MainRuntimeService:
         task, _node = self._require_node_control_target(normalized_task_id, normalized_node_id)
         if self.execution_mode == 'web':
             self._assert_worker_available()
-        await self._apply_resume_node_command(normalized_task_id, node_ids=[normalized_node_id], schedule_if_inactive=self.execution_mode != 'web')
-        if self.execution_mode == 'web':
+        applied = await self._apply_resume_node_command(normalized_task_id, node_ids=[normalized_node_id], schedule_if_inactive=self.execution_mode != 'web')
+        # 否决过的节点不得再入队：worker 侧按 force=True 应用，会绕过同一判据。
+        resumed = any(
+            str(item.get('result') or '').strip() == 'resumed'
+            for item in list(applied.get('items') or [])
+            if isinstance(item, dict)
+        )
+        if self.execution_mode == 'web' and resumed:
             self._enqueue_task_command(
                 command_type='resume_node',
                 task_id=normalized_task_id,
@@ -1694,6 +1719,11 @@ class MainRuntimeService:
             if action in {'resume', 'keep_paused', 'fail'} and not paused:
                 results.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused'})
                 continue
+            if action == 'resume':
+                settled = self._resume_entry_settled_conflict(node_id)
+                if settled is not None:
+                    results.append({'node_id': node_id, 'result': 'conflict', **settled})
+                    continue
             valid_ids.append(node_id)
         if action == 'pause':
             applied = await self._apply_pause_node_command(normalized_task_id, node_ids=valid_ids, reason='agent', remark=remark)
@@ -1830,6 +1860,19 @@ class MainRuntimeService:
                     return {'ok': False, 'error': 'node_already_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
             elif entry['action'] in {'resume', 'keep_paused', 'fail'} and not paused:
                 return {'ok': False, 'error': 'node_not_paused', 'index': entry['index'], 'node_id': entry['node_id'], 'items': []}
+            if entry['action'] == 'resume' and not entry['cascade']:
+                # 单目标复活：结清判据按原子打回处理（与 node_not_paused 同级）。级联条目
+                # 留给阶段 2 逐节点跳过，避免一个已结清的后代挡住整棵子树。
+                settled = self._resume_entry_settled_conflict(entry['node_id'])
+                if settled is not None:
+                    return {
+                        'ok': False,
+                        'error': 'entry_settled',
+                        'index': entry['index'],
+                        'node_id': entry['node_id'],
+                        'items': [],
+                        **settled,
+                    }
         for entry, ids in zip(kept_entries, kept_expansions):
             if entry['action'] != 'fail' or not entry['cascade']:
                 continue
@@ -1910,6 +1953,11 @@ class MainRuntimeService:
                         continue
                     if not (bool(node.is_paused) or bool(node.pause_requested)):
                         items.append({'node_id': node_id, 'result': 'conflict', 'reason': 'node_not_paused', 'target_index': entry['index']})
+                        skipped += 1
+                        continue
+                    settled = self._resume_entry_settled_conflict(node_id)
+                    if settled is not None:
+                        items.append({'node_id': node_id, 'result': 'conflict', 'target_index': entry['index'], **settled})
                         skipped += 1
                         continue
                     updated = self.log_service.set_node_pause_state(

@@ -238,8 +238,10 @@ Provider retry troubleshooting note:
 
 - `title=spawn_blocked_review_over_materialized_round`：已物化轮被重新评审且判为 blocked，但运行时拒绝让其终结仍存活的子/验收节点（只写 `review_decision=blocked`，不把管线状态写成 `success`）；
 - `title=spawn_entry_terminal_with_live_node`：entry 状态已是 terminal/blocked，但绑定节点仍非终态，属无效状态组合信号。
+- `title=spawn_pause_reached_settlement_lane`：某条车道把子节点的暂停当成可结清的异常送到结算面（正常形态是子节点派发 future 保持 pending、父管线原地停等）。命中说明该轮会被父节点读成"子节点失败"，而节点其实可被 resume；核对是哪个调用点绕开了派发 entry。
+- `title=spawn_supersede_forced_live_node`：新轮清扫时该子树取消后仍未落终态（协程当时真在执行），仍按 `superseded` 强判，`detail` 给出被掐断的节点 id 与深度。读法：拿该节点在 `task_model_calls` 的最后一格时间戳与 `task_commands` 里的 `resume_node` 行对照，可判断这是一次人工/agent 复活与重派的竞态，还是旧轮长期挂死。
 
-修复语义详见 `runtime-overview.md`「Node-Level Pause and Recovery」。这两个 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
+修复语义详见 `runtime-overview.md`「Node-Level Pause and Recovery」。这四条 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
 
 ### 残留节点自愈
 
