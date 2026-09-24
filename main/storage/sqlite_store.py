@@ -359,15 +359,6 @@ class SQLiteTaskStore:
                 node_id TEXT NOT NULL,
                 tool_call_id TEXT NOT NULL,
                 order_index INTEGER NOT NULL,
-                tool_name TEXT NOT NULL,
-                arguments_text TEXT NOT NULL,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                finished_at TEXT NOT NULL,
-                elapsed_seconds REAL,
-                output_preview_text TEXT NOT NULL,
-                output_ref TEXT NOT NULL,
-                ephemeral INTEGER NOT NULL,
                 payload_json TEXT NOT NULL,
                 PRIMARY KEY (task_id, node_id, tool_call_id)
             )
@@ -518,7 +509,15 @@ class SQLiteTaskStore:
             'CREATE INDEX IF NOT EXISTS idx_task_summary_outbox_state_updated_at ON task_summary_outbox(delivery_state, updated_at)',
         ]
         with self._conn:
+            index_statements = [item for item in statements if item.lstrip().upper().startswith('CREATE INDEX')]
             for statement in statements:
+                if statement.lstrip().upper().startswith('CREATE INDEX'):
+                    continue
+                self._conn.execute(statement)
+            # 旧表瘦身必须在建索引之前：重建会连索引一起丢弃，随后索引段负责再建。
+            for table, legacy in self._LEGACY_BODY_COLUMNS:
+                self._drop_legacy_columns(self._conn, table, legacy)
+            for statement in index_statements:
                 self._conn.execute(statement)
             self._ensure_column(self._conn, 'task_events', 'payload_is_external', "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(self._conn, 'task_events', 'payload_archive_path', "TEXT NOT NULL DEFAULT ''")
@@ -527,9 +526,8 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_commands', 'result_json', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'accepted', "INTEGER")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'rejected_reason', "TEXT NOT NULL DEFAULT ''")
-            for column in self._NODE_DETAIL_LEGACY_COLUMNS:
-                self._drop_column(self._conn, 'task_node_details', column)
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
+            self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -539,20 +537,44 @@ class SQLiteTaskStore:
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
 
     @staticmethod
-    def _drop_column(conn: sqlite3.Connection, table: str, column: str) -> None:
-        """删掉已无读者的平铺列。存量库首次打开时执行，是一次整表重写。
+    def _drop_legacy_columns(conn: sqlite3.Connection, table: str, legacy: tuple[str, ...]) -> None:
+        """一趟把带零读者平铺正文列的旧表重建成目标形状。
 
-        这些列都不在任何索引/约束里，SQLite 3.35+ 支持直接 DROP。删除失败
-        （磁盘紧张、SQLite 过旧）时只记日志不阻断启动：写侧按实际列集取值，
-        该表便继续维持旧形状，重复照旧但语义不变。
+        不能逐列 `ALTER TABLE DROP COLUMN`：SQLite 每删一列都整表重写一次，实测
+        11 列的 task_node_details 把启动阻塞近 3 分钟（端口无人监听）、WAL 冲到
+        2.7 GB。表定义从 PRAGMA table_info 反向合成，避免与建表语句两处漂移。
+
+        失败（磁盘紧张等）只告警不阻断启动：写侧按实际列集取值，该表维持旧形状。
         """
-        columns = {str(row[1]) for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
-        if str(column or '') not in columns:
+        info = conn.execute(f'PRAGMA table_info({table})').fetchall()
+        doomed = {str(column) for column in legacy}
+        kept = [row for row in info if str(row[1]) not in doomed]
+        if len(kept) == len(info):
             return
+        staging = f'{table}__slim'
+        definitions = ['{} {}{}'.format(
+            str(row[1]),
+            str(row[2] or 'TEXT'),
+            ' NOT NULL' if int(row[3] or 0) else '',
+        ) for row in kept]
+        pk_rows = sorted((row for row in kept if int(row[5] or 0)), key=lambda row: int(row[5]))
+        if pk_rows:
+            definitions.append('PRIMARY KEY ({})'.format(', '.join(str(row[1]) for row in pk_rows)))
+        names = [str(row[1]) for row in kept]
         try:
-            conn.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
+            conn.execute(f'DROP TABLE IF EXISTS {staging}')
+            conn.execute(f'CREATE TABLE {staging} ({", ".join(definitions)})')
+            conn.execute(
+                f'INSERT INTO {staging} ({", ".join(names)}) SELECT {", ".join(names)} FROM {table}'
+            )
+            conn.execute(f'DROP TABLE {table}')
+            conn.execute(f'ALTER TABLE {staging} RENAME TO {table}')
         except sqlite3.Error:
-            logger.warning('failed to drop legacy column {} from {}', column, table, exc_info=True)
+            logger.warning('failed to slim legacy columns on {}', table, exc_info=True)
+            try:
+                conn.execute(f'DROP TABLE IF EXISTS {staging}')
+            except sqlite3.Error:
+                pass
 
     @staticmethod
     def _live_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
@@ -900,20 +922,33 @@ class SQLiteTaskStore:
         'task_node_details',
     )
 
-    # 平铺正文列在 payload_json 里已有同名键，读侧四个 SELECT 点一律只取
-    # payload_json，这些列零读者；存量库打开时直接删掉。
-    _NODE_DETAIL_LEGACY_COLUMNS = (
-        'input_text',
-        'input_ref',
-        'output_text',
-        'output_ref',
-        'check_result',
-        'check_result_ref',
-        'final_output',
-        'final_output_ref',
-        'failure_reason',
-        'prompt_summary',
-        'execution_trace_ref',
+    # 平铺正文列在 payload_json 里已有同名键，读侧一律只 SELECT payload_json，
+    # 这些列零读者；存量库打开时删掉。列一律不在任何索引/约束里。
+    _LEGACY_BODY_COLUMNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ('task_node_details', (
+            'input_text',
+            'input_ref',
+            'output_text',
+            'output_ref',
+            'check_result',
+            'check_result_ref',
+            'final_output',
+            'final_output_ref',
+            'failure_reason',
+            'prompt_summary',
+            'execution_trace_ref',
+        )),
+        ('task_node_tool_results', (
+            'tool_name',
+            'arguments_text',
+            'status',
+            'started_at',
+            'finished_at',
+            'elapsed_seconds',
+            'output_preview_text',
+            'output_ref',
+            'ephemeral',
+        )),
     )
 
     _PRUNABLE_TASK_SUBQUERY = (
@@ -2779,42 +2814,33 @@ class SQLiteTaskStore:
         self._run_write(operation)
         return record
 
-    def upsert_task_node_tool_result(self, record: TaskProjectionToolResultRecord) -> TaskProjectionToolResultRecord:
-        def operation(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                'INSERT INTO task_node_tool_results (task_id, node_id, tool_call_id, order_index, tool_name, arguments_text, status, started_at, finished_at, elapsed_seconds, output_preview_text, output_ref, ephemeral, payload_json) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
-                'ON CONFLICT(task_id, node_id, tool_call_id) DO UPDATE SET '
-                'order_index=excluded.order_index, '
-                'tool_name=excluded.tool_name, '
-                'arguments_text=excluded.arguments_text, '
-                'status=excluded.status, '
-                'started_at=excluded.started_at, '
-                'finished_at=excluded.finished_at, '
-                'elapsed_seconds=excluded.elapsed_seconds, '
-                'output_preview_text=excluded.output_preview_text, '
-                'output_ref=excluded.output_ref, '
-                'ephemeral=excluded.ephemeral, '
-                'payload_json=excluded.payload_json',
-                (
-                    record.task_id,
-                    record.node_id,
-                    record.tool_call_id,
-                    int(record.order_index or 0),
-                    record.tool_name,
-                    record.arguments_text,
-                    record.status,
-                    record.started_at,
-                    record.finished_at,
-                    record.elapsed_seconds,
-                    record.output_preview_text,
-                    record.output_ref,
-                    1 if record.ephemeral else 0,
-                    record.model_dump_json(),
-                ),
-            )
+    def _task_node_tool_result_fields(self, record: TaskProjectionToolResultRecord) -> dict[str, object]:
+        return {
+            'task_id': record.task_id,
+            'node_id': record.node_id,
+            'tool_call_id': record.tool_call_id,
+            'order_index': int(record.order_index or 0),
+            'tool_name': record.tool_name,
+            'arguments_text': record.arguments_text,
+            'status': record.status,
+            'started_at': record.started_at,
+            'finished_at': record.finished_at,
+            'elapsed_seconds': record.elapsed_seconds,
+            'output_preview_text': record.output_preview_text,
+            'output_ref': record.output_ref,
+            'ephemeral': 1 if record.ephemeral else 0,
+            'payload_json': record.model_dump_json(),
+        }
 
-        self._run_write(operation)
+    def upsert_task_node_tool_result(self, record: TaskProjectionToolResultRecord) -> TaskProjectionToolResultRecord:
+        fields = self._task_node_tool_result_fields(record)
+        columns = [column for column in self._tool_result_columns if column in fields]
+        self._upsert(
+            'task_node_tool_results',
+            columns,
+            [fields[column] for column in columns],
+            ('task_id', 'node_id', 'tool_call_id'),
+        )
         return record
 
     def list_task_node_tool_results(self, task_id: str, node_id: str) -> list[TaskProjectionToolResultRecord]:
@@ -2951,7 +2977,7 @@ class SQLiteTaskStore:
         items.reverse()
         return items
 
-    def _upsert(self, table: str, columns: list[str], values: list[object], primary_key: str) -> None:
+    def _upsert(self, table: str, columns: list[str], values: list[object], primary_key: str | tuple[str, ...]) -> None:
         self._run_write(lambda conn: self._upsert_conn(conn, table, columns, values, primary_key))
 
     @staticmethod
@@ -2960,11 +2986,13 @@ class SQLiteTaskStore:
         table: str,
         columns: list[str],
         values: list[object],
-        primary_key: str,
+        primary_key: str | tuple[str, ...] | list[str],
     ) -> None:
+        pk_columns = [primary_key] if isinstance(primary_key, str) else list(primary_key)
         placeholders = ', '.join('?' for _ in columns)
-        updates = ', '.join(f"{column}=excluded.{column}" for column in columns if column != primary_key)
-        sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT({primary_key}) DO UPDATE SET {updates}"
+        updates = ', '.join(f"{column}=excluded.{column}" for column in columns if column not in pk_columns)
+        conflict_target = ', '.join(pk_columns)
+        sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT({conflict_target}) DO UPDATE SET {updates}"
         conn.execute(sql, values)
 
     def _fetchone(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
