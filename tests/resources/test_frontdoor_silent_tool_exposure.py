@@ -137,8 +137,11 @@ def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
     help_line = next((line for line in rendered.splitlines() if line.startswith('silent_help:')), '')
     assert f'`{SILENT_TOOL_NAME}(reason=' in help_line
     assert 'There is no text form of silence' in help_line
-    # 措辞挂在每轮重渲染的契约里，不新起一层：实测该契约 6,614 字符，这条 +200。
-    assert len(help_line) < 300
+    # 01:17 实盘：模型为了静默一轮先建了个「静默收尾」阶段，白占一次工具轮 ——
+    # 阶段协议那句"没活动阶段就先 submit_next_stage"读起来覆盖所有工具。
+    assert 'needs no active stage' in help_line
+    # 措辞挂在每轮重渲染的契约里，不新起一层：实盘该契约 6,614 字符，这条 309。
+    assert len(help_line) < 360
 
 
 def test_silent_help_follows_the_callable_list() -> None:

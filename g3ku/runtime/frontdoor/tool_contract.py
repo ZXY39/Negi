@@ -286,8 +286,9 @@ def _render_silent_help(callable_tool_names: list[str]) -> list[str]:
         return []
     return [
         f'silent_help: To end this turn with nothing delivered to the user, call '
-        f'`{SILENT_TOOL_NAME}(reason="...")`. There is no text form of silence: any marker written '
-        'in the reply body is delivered to the user verbatim.',
+        f'`{SILENT_TOOL_NAME}(reason="...")` — it needs no active stage and never counts against '
+        'stage budget, so do not open a stage just to stay silent. There is no text form of '
+        'silence: any marker written in the reply body is delivered to the user verbatim.',
     ]
 
 
