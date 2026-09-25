@@ -1081,13 +1081,15 @@
 /* 分色不能并进上面那条共享规则：属性选择器压过基础类，T 会被染成正文灰，
    于是语音条上唯一一个动作看起来像文字。 */
 [data-ui-version="v2"] .msg-voice-transcript-toggle {
-    border-color: color-mix(in srgb, var(--ui-brand) 45%, var(--ui-border-strong));
     color: var(--ui-brand);
+}
+
+[data-ui-version="v2"] .msg-voice-transcript-toggle:hover {
+    background: var(--ui-brand-soft);
 }
 
 [data-ui-version="v2"] .msg-voice-transcript-toggle[aria-expanded="true"] {
     background: var(--ui-brand);
-    border-color: var(--ui-brand);
     color: var(--ui-on-brand);
 }
 

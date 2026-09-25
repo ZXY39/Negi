@@ -488,6 +488,19 @@ test("voice clip is picked out of attachments and rendered as a player", () => {
     );
 });
 
+test("T 与播放键同格，并贴在语音条最右端", () => {
+    const css = fs
+        .readFileSync("g3ku/web/frontend/org_graph.css", "utf8")
+        .replace(/\r\n/g, "\n");
+    const play = css.match(/\.msg-voice-play \{([^}]*)\}/)[1];
+    const toggle = css.match(/\.msg-voice-transcript-toggle \{([^}]*)\}/)[1];
+    assert.match(play, /width: 32px/);
+    assert.match(toggle, /width: 32px/, "两颗动作权重要一样");
+    assert.match(toggle, /height: 32px/);
+    assert.match(toggle, /margin-left: auto/, "T 贴条的最右端，不跟着秒数挤在左边");
+    assert.doesNotMatch(toggle, /border:/, "条里已经有一颗实心圆钮，T 不再套方框");
+});
+
 test("audio attachments never render as file pills", () => {
     const { renderStructuredChatAttachments } = loadApp();
     const html = renderStructuredChatAttachments([

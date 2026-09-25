@@ -4888,32 +4888,31 @@ textarea {
     pointer-events: none;
 }
 
-/* T 是语音条右端的一颗小方块：展开态靠实心回填，让"文字已经露出来了"在扫一眼
-   整列气泡时也能看出来，不必回头看下方多出来的那段。 */
+/* T 与播放键同格（32px）并被推到条的最右端：两颗动作权重一样，一个开声一个开字。
+   不描边——条里已经有一颗实心圆钮，再套一个方框就成了两个框；悬停用浅底回话，
+   展开态回填成实心，扫整列气泡时能看出哪条已经被点开过。 */
 .msg-voice-transcript-toggle {
     flex: none;
-    width: 24px;
-    height: 24px;
+    width: 32px;
+    height: 32px;
+    margin-left: auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 6px;
-    border: 1px solid color-mix(in srgb, var(--brand-primary) 40%, transparent);
     background: none;
     color: var(--brand-primary);
-    font-size: 13px;
+    font-size: 17px;
     font-weight: 700;
     line-height: 1;
     cursor: pointer;
 }
 
 .msg-voice-transcript-toggle:hover {
-    border-color: var(--brand-primary);
+    background: color-mix(in srgb, var(--brand-primary) 14%, transparent);
 }
 
 .msg-voice-transcript-toggle[aria-expanded="true"] {
     background: var(--brand-primary);
-    border-color: var(--brand-primary);
     color: var(--text-inverse);
 }
 
