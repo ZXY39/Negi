@@ -5026,12 +5026,10 @@ function buildCeoVoiceBubbleMarkup(clip, transcript) {
                 <i data-lucide="play"></i>
             </button>
             <span class="msg-voice-duration" data-ceo-voice-duration>${esc(seconds)}</span>
+            ${transcript ? `<button type="button" class="msg-voice-transcript-toggle" data-ceo-voice-toggle aria-expanded="false" aria-label="转文字" title="转文字">T</button>` : ""}
             <audio class="msg-voice-audio" src="${esc(src)}" preload="metadata" data-ceo-voice-audio></audio>
         </div>
-        ${transcript ? `
-            <button type="button" class="msg-voice-transcript-toggle" data-ceo-voice-toggle aria-expanded="false">转文字</button>
-            <div class="msg-voice-transcript" data-ceo-voice-transcript hidden>${esc(transcript)}</div>
-        ` : ""}
+        ${transcript ? `<div class="msg-voice-transcript" data-ceo-voice-transcript hidden>${esc(transcript)}</div>` : ""}
     `;
 }
 
@@ -5091,10 +5089,9 @@ function handleCeoVoiceBubbleClick(event) {
     }
     const toggle = event.target?.closest?.("[data-ceo-voice-toggle]");
     if (!toggle) return;
-    // 先取相邻节点：一条消息里可能有多段语音，从父节点找会串到别段转写上。
-    const panel = toggle.nextElementSibling?.matches?.("[data-ceo-voice-transcript]")
-        ? toggle.nextElementSibling
-        : toggle.parentElement?.querySelector?.("[data-ceo-voice-transcript]");
+    // T 在语音条里面，转写块在语音条下面，两者只在消息栈这一层相遇；
+    // 一条消息只画一颗语音气泡，所以栈里那一个转写块就是它自己的。
+    const panel = toggle.closest?.(".message-stack")?.querySelector?.("[data-ceo-voice-transcript]");
     if (!panel) return;
     panel.hidden = !panel.hidden;
     toggle.setAttribute("aria-expanded", panel.hidden ? "false" : "true");

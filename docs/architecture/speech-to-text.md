@@ -33,7 +33,7 @@ QQ 侧：桥下载语音附件字节 → **进程内**直接调用引擎（桥�
 
 ### 语音气泡与音频字段的存放
 
-转写成功后，两条车道都把**解码后的 WAV** 作为普通会话附件再交一次：网页侧由前端调用既有上传车道，QQ 侧由桥把 `kind:"audio"` 附件随回合走 `/api/v1`。渠道侧的字节来自引擎的 `SttResult.wav_bytes`——存的必须是解码后的 WAV 而不是收到的原始字节，因为语音条的真身是腾讯 silk，浏览器播不了。`wav_bytes` 只在进程内传递，刻意排除在 `as_dict()` 之外。渲染层据此把这条用户消息画成语音气泡（时长 + 播放 + 「转文字」展开转写），而不是把标记文字摊在正文里——转写文本的可见性由气泡的展开动作决定，正文里的标记只服务于模型。细节在 `web-and-admin.md`「Composer Voice Input」与「Attachment Bubble Rendering Contract」。
+转写成功后，两条车道都把**解码后的 WAV** 作为普通会话附件再交一次：网页侧由前端调用既有上传车道，QQ 侧由桥把 `kind:"audio"` 附件随回合走 `/api/v1`。渠道侧的字节来自引擎的 `SttResult.wav_bytes`——存的必须是解码后的 WAV 而不是收到的原始字节，因为语音条的真身是腾讯 silk，浏览器播不了。`wav_bytes` 只在进程内传递，刻意排除在 `as_dict()` 之外。渲染层据此把这条用户消息画成语音条（时长 + 播放 + 右端一颗 `T` 展开转写，转写落在条下方），而不是把标记文字摊在正文里——转写文本的可见性由气泡的展开动作决定，正文里的标记只服务于模型。细节在 `web-and-admin.md`「Composer Voice Input」与「Attachment Bubble Rendering Contract」。
 
 **音频进的是模型的可见面之外**：附件说明行与 `UserInputMessage.attachments` 都跳过 `kind=='audio'`（`websocket_ceo._model_visible_uploads`、`external_v1._build_external_user_message`）。理由是内容已经在正文的转写里，多一行本地路径只会让模型以为要去打开一个文件。`metadata` 里保留它，历史回放才播得出来。
 
@@ -85,7 +85,7 @@ g3ku stt status             # 就绪矩阵：开关 / 二进制 / 模型 / 转�
 - `g3ku/runtime/prompts/ceo_frontdoor.md`「1. 总体规则」里一条：以 `用户语音，机器识别结果：` 开头的段落是转写而非用户原话，据此动手而理解存在歧义时先复述关键信息向用户确认，不要按字面直接执行或创建任务。位置贴着既有的图片输入规则（同一类"输入形态"约束），不新开小节。实测该文件 5784 → 5879 token（**+95 token，每个 CEO 回合**）。
 - `g3ku/runtime/prompts/heartbeat_rules.md` 规则 5 的子条：汇报结果或向用户提问时只依据本轮事件束与明确的用户输入，不要把旧消息内容当成用户现在的意思。实测 1614 → 1673 token（**+59 token，每个 heartbeat 回合**）。它是通用规则、不属于语音，但语音把"旧内容被当成用户意思"的概率抬高了：识别失败行本身也是一段会被读成用户话语的文字。
 
-标记字符串在两处各有一份常量：渠道侧 `qq_official/bridge.py::_VOICE_TRANSCRIPT_PREFIX`、网页侧 `org_graph_app.js::VOICE_AUTO_SEND_PREFIX`（只在自动发送模式加，手动模式不加）。前端画用户气泡时按同一串把标记从显示文本里剥掉（转写正文改由气泡的「转文字」展开），所以这串同时是"给模型看的记号"和"给人看的隐藏记号"。三处（两份常量 + 提示词）必须逐字一致，`tests/resources/org_graph_app.ceo_voice_input.test.js` 里有一条用例直接读源文件比这三者；但**提示词侧只被要求包含这一串**，把整条规则句子改掉而串还在，测试不会红。
+标记字符串在两处各有一份常量：渠道侧 `qq_official/bridge.py::_VOICE_TRANSCRIPT_PREFIX`、网页侧 `org_graph_app.js::VOICE_AUTO_SEND_PREFIX`（只在自动发送模式加，手动模式不加）。前端画用户气泡时按同一串把标记从显示文本里剥掉（转写正文改由语音条右端那颗 `T` 在条下方展开），所以这串同时是"给模型看的记号"和"给人看的隐藏记号"。三处（两份常量 + 提示词）必须逐字一致，`tests/resources/org_graph_app.ceo_voice_input.test.js` 里有一条用例直接读源文件比这三者；但**提示词侧只被要求包含这一串**，把整条规则句子改掉而串还在，测试不会红。
 
 ## 8. 已知边界
 

@@ -4888,18 +4888,33 @@ textarea {
     pointer-events: none;
 }
 
+/* T 是语音条右端的一颗小方块：展开态靠实心回填，让"文字已经露出来了"在扫一眼
+   整列气泡时也能看出来，不必回头看下方多出来的那段。 */
 .msg-voice-transcript-toggle {
-    align-self: flex-start;
-    padding: 0;
-    font-size: 13px;
-    color: var(--text-muted);
+    flex: none;
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 40%, transparent);
     background: none;
-    border: 0;
+    color: var(--brand-primary);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1;
     cursor: pointer;
 }
 
 .msg-voice-transcript-toggle:hover {
-    color: var(--text-primary);
+    border-color: var(--brand-primary);
+}
+
+.msg-voice-transcript-toggle[aria-expanded="true"] {
+    background: var(--brand-primary);
+    border-color: var(--brand-primary);
+    color: var(--text-inverse);
 }
 
 .msg-voice-transcript {

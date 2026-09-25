@@ -470,8 +470,17 @@ test("voice clip is picked out of attachments and rendered as a player", () => {
     assert.match(markup, /class="msg-voice-bubble"/);
     assert.match(markup, /data-ceo-voice-play/);
     assert.match(markup, /<audio[^>]+src="\/api\/ceo\/uploads\/file\?a=1"/);
-    assert.match(markup, /data-ceo-voice-toggle[^>]*>转文字</);
+    assert.match(markup, /data-ceo-voice-toggle[^>]*aria-label="转文字"[^>]*>T</);
     assert.match(markup, /data-ceo-voice-transcript hidden>刚刚给你发了啥</);
+    // T 必须在语音条里面（audio 之前），转写块在条下面：位置就是这条改动的全部。
+    assert.ok(
+        markup.indexOf("data-ceo-voice-toggle") < markup.indexOf("<audio"),
+        "T 按钮要落在语音条右端，不是条下方的一行文字"
+    );
+    assert.ok(
+        markup.indexOf("</div>") < markup.indexOf("data-ceo-voice-transcript"),
+        "转写块仍在语音条下方展开"
+    );
     assert.doesNotMatch(
         buildCeoVoiceBubbleMarkup({ path: "/x/v.wav", kind: "audio" }, ""),
         /data-ceo-voice-toggle/,
@@ -500,15 +509,20 @@ test("pending upload summary names voice clips as voice", () => {
 
 test("转文字 disclosure toggles its own transcript only", () => {
     const { handleCeoVoiceBubbleClick } = loadApp();
-    const transcript = { hidden: true, matches: () => true, setAttribute() {} };
+    // T 在语音条里、转写块在语音条外，两者只在 .message-stack 这一层相遇——
+    // 这条同时钉住"按钮搬家后还没断"和"只开自己那一条"。
+    const transcript = { hidden: true, setAttribute() {} };
+    const stack = { querySelector: (sel) => (sel === "[data-ceo-voice-transcript]" ? transcript : null) };
     const toggle = {
-        nextElementSibling: transcript,
-        parentElement: { querySelector: () => transcript },
-        setAttribute() {},
+        closest: (sel) => (sel === ".message-stack" ? stack : null),
+        setAttribute(key, value) { this[key] = value; },
     };
     const event = { target: { closest: (sel) => (sel === "[data-ceo-voice-toggle]" ? toggle : null) } };
+
     handleCeoVoiceBubbleClick(event);
     assert.equal(transcript.hidden, false);
+    assert.equal(toggle["aria-expanded"], "true");
     handleCeoVoiceBubbleClick(event);
     assert.equal(transcript.hidden, true);
+    assert.equal(toggle["aria-expanded"], "false");
 });
