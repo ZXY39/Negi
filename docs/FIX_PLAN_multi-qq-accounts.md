@@ -75,13 +75,14 @@ P2 的两条实现约束：`_restart` 里 `await stop()` 的窗口内 `_task=Non
 | 担心 | 判定 |
 | --- | --- |
 | 两号共用 bridge_id 时互相抢 outbox pending | 本方案按号分 bridge_id，由构造不成立（见不变量 2）。这条是"想改回共用"时的代价说明，不是待办 |
-| 同一自然人在两个号下变成两条会话、两份长期记忆 | 成立（QQ 开放平台的 openid 按 AppID 隔离——**这条我未查证，实现前需在你的控制台或平台文档核一次**）。操作员已明确"不需要额外隔离工作"，per-号作用域是现状默认，不加代码 |
+| 同一自然人在两个号下变成两条会话、两份长期记忆 | **已查证成立**。QQ 机器人官方文档原文：「不同的 bot(AppID) 获取到的用户 openid，群 openid，频道 openid 均不相同，若跨业务有关联用户身份需求，后续提供跨 AppID 绑定后，使用类似 unionid 的机制打通身份」（https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/api-call-guide.html）。即跨号身份打通平台**目前不提供**，不是我们可选项。操作员已明确不需要额外隔离工作，per-号作用域是现状默认，不加代码 |
 | 反过来想"多号共享同一份记忆" | 不是默认行为。`memory_scope.chat_id` 由会话键推出（实盘值 `"qq-official:f8a8001865631301"`），要共享得显式做作用域归一，属新工作项 |
+| 会话文件名变长 | **已实测**。代码不设限：`safe_filename` 只做字符替换无长度上限（`g3ku/utils/helpers.py:69-71`），路径拼 `{safe_key}.jsonl`（`g3ku/session/manager.py:172-173`）。限的是 OS：本 venv python 的裸 Win32 路径从 **260 开始失败**（`winerror 206` → 再长是 `3`；单组件 251 字符可写）。以会话键命名的自有写入面最深是 226（`web-ceo-requests` 工件的 `.tmp`）与 227（`inline_media` 缩略图），新号常规增量 **+11**（`appId` 实测 10 位）⇒ 237/238，仍在限内；但注册表的 digest 碰撞逃生可走到 40 位（`external_sessions.py:132-138`），最坏 **+35** ⇒ 261/262 **刚好越线**。盘上另有一个 294 字符的会话内文件（`temp/ceo/<session>/…` 里的技能包检出物），它是 git 写的且仓库已设 `core.longpaths=true`，不能作为"260 不生效"的证据 |
 | 存量会话变成"网页能写、QQ 收不到" | A 的预期结果，不是 bug。症状链可诊断：发布时 `no live subscriber` WARNING → 对账 `external outbox reconcile: republished` → 始终无 `qq-official delivered` → 24h 后标 `expired`。收口动作 = P4 |
 | cron 改指前丢一次提醒 | 真会丢（滞留推送无人消费）。P4 必须在切号之前做完 |
 | 配额与频控翻倍可见性 | 主动消息额度按 AppID 各算一份，这其实是要多号的主要收益；但每号独立 `error` 状态、独立退避，管理面必须逐号展示，否则一个号被限流会被误读成全坏 |
 | 密钥覆盖层列表化的写坏风险 | 最高危的一处：路径形状变了但旧 `.g3ku/secret-realms` 条目还是老键 ⇒ 解锁后 appSecret 回填不上 = 表现为"号全掉线且状态显示未配置"。P1 必须带一次旧键读兼容 + 一个"回填后 `app_secret` 非空"的显式断言 |
-| 会话文件名变长 | 未测。`safe_session` 清洗层是否有长度上限需实现期确认；appId 9–10 位数字 ⇒ 新键比旧键长约 11 字符，理论余量大 |
+| bridge_id 被塞进更长的东西 | 约束：bridge_id 只能是 `qq-official-<appId>`（+11），不得折进 label/昵称等可变字符串——那会把上面那条 260 边界从"最坏情况才撞"变成"常态就撞"。同理 P4 的运维建议里加一条：数据根路径要短（自定义数据根已支持），因为 260 是按**绝对路径**算的 |
 
 ## 4. 用户视角前后对照
 
@@ -94,7 +95,7 @@ P2 的两条实现约束：`_restart` 里 `await stop()` 的窗口内 `_task=Non
 ## 5. 本计划不会让它变好的
 
 - 一个号内部的多用户/多群仍是各自的会话（本来如此）。
-- 跨号"同一个人"的身份合并：平台不给全局 uid，需要单独设计。
+- 跨号"同一个人"的身份合并：官方文档明确**当前不给**，原文把这件事推到"后续提供跨 AppID 绑定后，使用类似 unionid 的机制打通身份"。现阶段只能自己维护映射。
 - QQ 端语音无 ASR、普通回合 `reply.final` 只走 hub 不进持久 outbox（断线超过 `eventBufferSize` 即逐出）等既有缺口，见 `external-agent-api.md`。
 - 本仓库另一条在案缺陷（`turn.failed` 不投递到渠道）不受本计划影响，用户在任一号下失败时仍收不到错误说明。
 
@@ -107,6 +108,8 @@ P2 的两条实现约束：`_restart` 里 `await stop()` 的窗口内 `_task=Non
 5. 单号故障：把一号的 AppSecret 改错 → 该号 `error` 且按退避重试，另一号收发不受影响；改回后 `sync_from_config` 分钟级复活。
 6. 收口验证（P4）：cron 改指后等一次真实触发，`qq-official delivered` 出现在**新**会话的目标上；孤儿 token `qq-official` 已停用且 `g3ku external status` 不再列它为启用。
 7. 关闭序列：进程退出时两个实例都被 `stop()`（不留悬挂 botpy 任务）。
+8. 路径长度守卫：以真实 appId 构出最坏键（digest 走满 40 位）后，断言 `.g3ku/web-ceo-requests/<session>/<最长工件名>.json`、`web-ceo-turn-boundaries/<session>/<x>.json.gz`、`sessions/<session>.jsonl` 三条绝对路径都 < 260；实现里顺带加一条 >240 的 WARNING（数据根变深时它先响）。
+9. 回归：`git config core.longpaths` 为 `true` 的仓库不因键变长而检出失败（既有 294 字符会话内文件的那条链）。
 
 ## 7. 测试
 
