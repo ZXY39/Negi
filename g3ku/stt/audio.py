@@ -1,11 +1,13 @@
 """Audio normalization for local speech-to-text.
 
 The vendored ``whisper-cli`` binary reads RIFF/WAVE itself (its loader resamples
-rate and downmixes channels), so this module has three jobs:
+rate and downmixes channels), so this module has four jobs:
 
 * hand WAV bytes through and report how long they really are,
-* convert anything else (browser WebM/Opus, container-wrapped voice notes)
-  into PCM WAV through ``ffmpeg``, and
+* recognise a Tencent silk voice note **by its bytes** (QQ labels them
+  ``audio/mp3`` and ffmpeg cannot decode them) and turn them into PCM WAV,
+* convert anything else (browser WebM/Opus, container-wrapped audio) into PCM
+  WAV through ``ffmpeg``, and
 * measure level, so an accidentally empty recording is rejected here instead of
   costing a full decode window.
 
@@ -17,6 +19,7 @@ audio.
 
 from __future__ import annotations
 
+import io
 import math
 import os
 import shutil
@@ -27,6 +30,12 @@ from typing import Any
 
 WAV_MAGIC = b"RIFF"
 WAVE_MAGIC = b"WAVE"
+# QQ/微信语音条的真实容器：可选 1 字节 0x02 前缀 + 腾讯版 silk v3 魔数。
+# 平台把它报成 `audio/mp3`，所以 content_type 不可信，只能按字节判。
+SILK_V3_MAGIC = b"#!SILK_V3"
+SILK_TENCENT_PREFIX = b"\x02"
+# 解码目标采样率：silk 内部是 16/24 kHz 固定档，24k 保真更好，whisper 侧自己重采样到 16k。
+SILK_SAMPLE_RATE = 24000
 
 # ffmpeg 兜底预算：语音条只有几十秒，超过这个时间就是卡死或恶意输入。
 _FFMPEG_TIMEOUT_SECONDS = 20.0
@@ -74,6 +83,52 @@ class NormalizedAudio:
 
 def is_wav(data: bytes) -> bool:
     return len(data) > 12 and data[:4] == WAV_MAGIC and data[8:12] == WAVE_MAGIC
+
+
+def is_tencent_silk(data: bytes) -> bool:
+    """Byte-level detection only: the platform labels these payloads `audio/mp3`."""
+    if data.startswith(SILK_V3_MAGIC):
+        return True
+    return data.startswith(SILK_TENCENT_PREFIX + SILK_V3_MAGIC)
+
+
+def wrap_pcm16_to_wav(pcm: bytes, sample_rate: int) -> bytes:
+    align = sample_rate * 2
+    return (
+        b"RIFF"
+        + struct.pack("<I", 36 + len(pcm))
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<IHHIIHH", 16, 1, 1, sample_rate, align, 2, 16)
+        + b"data"
+        + struct.pack("<I", len(pcm))
+        + pcm
+    )
+
+
+def decode_silk_to_wav(data: bytes) -> bytes:
+    """Tencent silk v3 (QQ/微信语音条) → 16-bit mono PCM WAV.
+
+    ``pysilk`` takes the payload with its 0x02 prefix intact — that is the shape
+    measured against a real QQ voice note, so nothing is stripped here.
+    """
+    try:
+        import pysilk
+    except ImportError as exc:
+        raise AudioError(
+            "audio_silk_decoder_missing",
+            "这是 QQ 语音条的 silk 格式，需要 silk 解码器（pip install silk-python）。",
+        ) from exc
+
+    handle = io.BytesIO()
+    try:
+        pysilk.decode(io.BytesIO(data), handle, SILK_SAMPLE_RATE)
+    except Exception as exc:  # noqa: BLE001 - decoder errors all mean "unusable audio"
+        raise AudioError("audio_decode_failed", f"silk 解码失败：{type(exc).__name__}: {exc}") from exc
+    pcm = handle.getvalue()
+    if not pcm:
+        raise AudioError("audio_decode_failed", "silk 解码结果为空。")
+    return wrap_pcm16_to_wav(pcm, SILK_SAMPLE_RATE)
 
 
 def parse_wav(data: bytes) -> WavInfo:
@@ -169,6 +224,11 @@ def decode_to_wav(data: bytes, *, filename: str = "", mime_type: str = "") -> No
         raise AudioError("audio_empty", "音频内容为空。")
     if is_wav(data):
         return NormalizedAudio(wav_bytes=data, info=parse_wav(data), source_kind="wav")
+    if is_tencent_silk(data):
+        # 必须先于 ffmpeg：QQ 语音条的 content_type 写着 audio/mp3，而 ffmpeg 面对
+        # 这些字节只会报 "Invalid data found when processing input"。
+        wav_bytes = decode_silk_to_wav(data)
+        return NormalizedAudio(wav_bytes=wav_bytes, info=parse_wav(wav_bytes), source_kind="silk")
 
     command: list[Any] = [
         _ffmpeg_binary(),

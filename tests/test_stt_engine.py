@@ -14,6 +14,7 @@ import json
 import math
 import os
 import struct
+import sys
 import zipfile
 from pathlib import Path
 
@@ -89,10 +90,73 @@ def test_rms_separates_silence_from_quiet_speech():
     assert level is not None and level > engine.audio.SILENCE_RMS_DBFS
 
 
-def test_decode_to_wav_rejects_empty_and_non_wav_without_ffmpeg():
+def test_decode_to_wav_rejects_empty_input():
     with pytest.raises(audio.AudioError) as empty:
         audio.decode_to_wav(b"")
     assert empty.value.code == "audio_empty"
+
+
+# --- 腾讯 silk 语音条 ---------------------------------------------------
+
+
+def _silk_bytes(seconds: float = 1.0) -> bytes:
+    """用解码器自己的编码器合成一条语音条，避免把真实用户语音放进测试。"""
+    import io
+
+    import pysilk
+
+    rate = 24000
+    frames = int(seconds * rate)
+    pcm = b"".join(
+        struct.pack("<h", int(0.25 * 32767 * math.sin(2 * math.pi * 220 * i / rate)))
+        for i in range(frames)
+    )
+    out = io.BytesIO()
+    pysilk.encode(io.BytesIO(pcm), out, rate, 12000)
+    return out.getvalue()
+
+
+def test_is_tencent_silk_recognises_both_wrappers_and_rejects_other_audio():
+    assert audio.is_tencent_silk(b"\x02" + audio.SILK_V3_MAGIC + b"...") is True
+    assert audio.is_tencent_silk(audio.SILK_V3_MAGIC + b"...") is True
+    # 平台把这类载荷的 content_type 写成 audio/mp3，所以只有字节判据可信。
+    assert audio.is_tencent_silk(b"\xff\xfb\x90\x64fake-mp3") is False
+    assert audio.is_tencent_silk(b"ID3\x03fake-mp3") is False
+
+
+def test_silk_payloads_never_reach_the_ffmpeg_lane(monkeypatch):
+    def _no_ffmpeg() -> str:
+        raise AssertionError("silk 必须先于 ffmpeg 分流")
+
+    monkeypatch.setattr(audio, "_ffmpeg_binary", _no_ffmpeg)
+    silk = _silk_bytes(1.0)
+
+    assert audio.is_tencent_silk(silk), "synthetic voice note must be silk (encoder changed?)"
+    prepared = audio.decode_to_wav(silk, filename="qq-voice", mime_type="audio/mp3")
+    assert prepared.source_kind == "silk"
+    assert prepared.seconds == pytest.approx(1.0, abs=0.05)
+
+
+def test_silk_decoder_missing_is_a_stable_code_not_a_crash(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pysilk", None)
+
+    with pytest.raises(audio.AudioError) as exc:
+        audio.decode_silk_to_wav(b"\x02" + audio.SILK_V3_MAGIC + b"\x00" * 40)
+    assert exc.value.code == "audio_silk_decoder_missing"
+
+
+def test_broken_silk_stream_reports_decode_failure(monkeypatch):
+    class _DeadSilk:
+        @staticmethod
+        def decode(_inp, _out, _rate):
+            raise RuntimeError("silk decoder rejected the stream")
+
+    monkeypatch.setitem(sys.modules, "pysilk", _DeadSilk)
+
+    with pytest.raises(audio.AudioError) as exc:
+        audio.decode_silk_to_wav(b"\x02" + audio.SILK_V3_MAGIC + b"\x00" * 40)
+    assert exc.value.code == "audio_decode_failed"
+    assert "silk" in exc.value.message
 
 
 # --- engine envelope -----------------------------------------------------

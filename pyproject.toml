@@ -50,6 +50,9 @@ dependencies = [
     # 语音识别的后处理：whisper 的 base/tiny 在本机对中文一律输出繁体，转回简体
     # 实测 48 微秒、纯 Python、0.2MB。ASR 本体是外部 whisper.cpp 二进制，不占依赖。
     "zhconv>=1.4.3,<2.0.0",
+    # QQ 语音条是腾讯版 silk v3，而平台把 content_type 写成 audio/mp3、ffmpeg 又
+    # 没有 silk 解码器；这条是渠道语音的唯一解码道（有 cp38-cp314 的 win/linux/mac 轮子）。
+    "silk-python>=0.2.8,<0.3.0",
 ]
 
 [project.optional-dependencies]
