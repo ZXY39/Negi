@@ -250,6 +250,44 @@ async def test_service_retries_bridge_crash_until_connected(
 
 
 @pytest.mark.asyncio
+async def test_repeated_sync_with_unchanged_config_keeps_bridge_alive(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """实盘回归（2026-09-25 QQ 出站黑洞）：`_prompt_locked` 每个回合开头都调
+    refresh → sync，而 ``stop()`` 清签名让每次 sync 都把健康的桥判成"配置变了"并
+    cancel 重建——入站消息刚建好的 pump 跟着桥一起死，15 秒后的回复再没人消费。
+    签名只在配置真的变了时才允许重启；显式 stop 之后靠 ``_task is None`` 复活。"""
+    _enable_qq_config(workspace)
+
+    entries = {"n": 0}
+
+    async def fake_bridge(**kwargs) -> None:
+        entries["n"] += 1
+        kwargs["on_state"]("connected", "")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
+    first_task = service._task
+    assert first_task is not None
+    await asyncio.sleep(0.01)  # 让 fake bridge 真正进入
+    assert entries["n"] == 1
+
+    for _ in range(3):  # 周期对账与每回合 refresh 都走这条路
+        await service.sync_from_config(account=_account(), global_enabled=True)
+    assert service._task is first_task, "unchanged config must not restart the bridge"
+    assert entries["n"] == 1
+
+    await service.stop()
+    await service.sync_from_config(account=_account(), global_enabled=True)
+    await asyncio.sleep(0.01)  # 新任务要下一轮才被调度
+    assert entries["n"] == 2, "stopped bridge must revive on the next sync"
+    await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_bridge_retry_loop(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

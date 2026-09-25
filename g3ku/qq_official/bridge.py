@@ -641,10 +641,10 @@ async def run_qq_official_bridge(
             backoff = min(backoff * 2.0, _PUMP_RECONNECT_MAX_BACKOFF_SECONDS)
 
     def _note_pump_exit(session_id: str, task: asyncio.Task) -> None:
-        """pump 的死因必须留痕。
-
-        实测它可以在打完一条 `pump connecting` 之后静默结束（既没有读超时也没有
-        异常栈），当时只能靠数 18790 的 ESTABLISHED 连接才判断出来。
+        """pump 的死因必须留痕：实测它能在打完一条 `pump connecting` 之后静默结束，
+        当时只能靠数 18790 的 ESTABLISHED 连接才判断出来。正是这条回执点名了真凶——
+        入站消息建好 pump 0.3 秒后出现的 ``cancelled`` 来自桥自身被重启，而不是任务
+        建在了别的 loop 上（见 service.py ``stop()`` 不清签名的理由）。
         """
         if task.cancelled():
             logger.warning("qq-official pump cancelled for session {}", session_id)
@@ -658,22 +658,11 @@ async def run_qq_official_bridge(
             logger.warning("qq-official pump exited with error for session {}: {}", session_id, error)
 
     def _spawn_pump(session_id: str, external_key: str) -> bool:
-        """Spawn the session pump **on the bridge's own loop**; True when created here.
-
-        在 botpy 的事件任务里直接 create_task，实测得到一个只执行了第一行就结束的
-        pump（12:11:53），而同一段 `_pump` 由桥自身 loop 建立时 1.3 秒就完成连接并
-        投递成功（12:24:52）。所以跨出桥 loop 的调用只登记意图，任务创建交回桥 loop。
-        """
-        loop = bridge_loop
-        if loop is None:
-            loop = asyncio.get_running_loop()
-        elif asyncio.get_running_loop() is not loop:
-            loop.call_soon_threadsafe(lambda: _spawn_pump(session_id, external_key))
-            return False
+        """Spawn the session pump if absent/dead; True when a new task was created."""
         existing = pump_tasks.get(session_id)
         if existing is not None and not existing.done():
             return False
-        task = loop.create_task(_pump(session_id, external_key), name=f"qq-official-pump:{session_id}")
+        task = asyncio.create_task(_pump(session_id, external_key), name=f"qq-official-pump:{session_id}")
         pump_tasks[session_id] = task
         pumps.add(task)
         task.add_done_callback(pumps.discard)
@@ -763,12 +752,8 @@ async def run_qq_official_bridge(
 
     bridge_api: Any = None
     reconcile_task: asyncio.Task | None = None
-    # pump 的宿主 loop：本函数运行在 web 运行时的事件循环上，桥的整条生命周期都在这
-    # 里，所以任务一律建在它上面，而不是建在每个事件回调所在的任务上下文里。
-    bridge_loop: asyncio.AbstractEventLoop | None = None
 
     try:
-        bridge_loop = asyncio.get_running_loop()
         bridge_client = QqOfficialClient(intents=intents, is_sandbox=sandbox, ext_handlers=False)
         bridge_api = getattr(bridge_client, "api", None)
         await _reconcile_pending_pumps()  # 启动首跑（原预热），失败不阻断启动

@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import sys
-import threading
 import types
 from collections import OrderedDict
 from contextlib import suppress
@@ -1297,35 +1296,3 @@ async def test_sse_stream_read_timeout_tolerates_missed_keepalives() -> None:
 
     assert recorded["read"] >= 3 * SSE_HEARTBEAT_INTERVAL_SECONDS, recorded
     assert recorded["connect"] <= 5.0, recorded
-
-
-@pytest.mark.asyncio
-async def test_inbound_from_foreign_loop_builds_pump_on_bridge_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """事故回归（2026-09-25 实盘）：从入站回调上下文直接 create_task 建出来的 pump 只执行
-    了第一行就静默结束（无读超时、无异常栈），而同一段 `_pump` 由桥自身 loop 建立时
-    1.3s 就完成连接并投递。所以 pump 任务必须落在桥 loop 上，跨 loop 的调用只登记意图。
-    """
-    media = _media_transport({})
-    task, client = await _start_bridge(monkeypatch, media)
-    bridge_loop = asyncio.get_running_loop()
-    try:
-        def _dispatch_from_foreign_loop() -> None:
-            asyncio.run(client.on_c2c_message_create(_c2c_message("别的 loop 上来的消息")))
-
-        thread = threading.Thread(target=_dispatch_from_foreign_loop)
-        thread.start()
-        await asyncio.to_thread(thread.join, 5)
-        assert not thread.is_alive()
-
-        ext = FakeExternalApiClient.instances[-1]
-        await _wait_until(lambda: ext.sent)  # 入站本身仍然被受理
-
-        def _pump_tasks() -> list[asyncio.Task]:
-            return [t for t in asyncio.all_tasks(bridge_loop) if str(t.get_name()).startswith("qq-official-pump:")]
-
-        await _wait_until(_pump_tasks)
-        assert _pump_tasks(), "pump 任务必须建在桥自己的 loop 上"
-    finally:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task

@@ -144,9 +144,12 @@ class QqOfficialService:
                 backoff = min(backoff * 2.0, _BRIDGE_RETRY_MAX_BACKOFF_SECONDS)
 
     async def stop(self) -> None:
+        """Cancel the bridge task. 绝不清 ``_config_signature``：``_restart`` 先写
+        签名再 ``await stop()``，此处清空会让下一次 sync 永远把健康的桥判成"配置变了"
+        （实盘表现为每条入站消息都把自家 pump 建 0.3s 后取消，回复从此无人消费）。
+        重启/复活由 ``_task is None`` 与 ``_task.done()`` 判定，不依赖签名被抹掉。"""
         task = self._task
         self._task = None
-        self._config_signature = ""
         if task is not None and not task.done():
             task.cancel()
             try:
