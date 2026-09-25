@@ -37,7 +37,9 @@ QQ 侧：桥下载语音附件字节 → **进程内**直接调用引擎（桥�
 
 **音频进的是模型的可见面之外**：附件说明行与 `UserInputMessage.attachments` 都跳过 `kind=='audio'`（`websocket_ceo._model_visible_uploads`、`external_v1._build_external_user_message`）。理由是内容已经在正文的转写里，多一行本地路径只会让模型以为要去打开一个文件。`metadata` 里保留它，历史回放才播得出来。
 
-`/api/ceo/transcribe` 自身仍然不落盘（见 `/ceo/transcribe` 的测试）；留下字节的是随后那次普通附件落盘：网页侧在 `.g3ku/web-ceo-uploads/<session>/`（随 `clear_web_ceo_session_artifacts` 一起删），渠道侧在 `.g3ku/external-uploads/<session>/`（该目录与其它渠道附件同样没有清理车道，会话删除也不会带走它）。两侧都是明文、与转写文本同寿命。渠道语音的字节由浏览器经 `GET /api/ceo/external-upload-file?session_id=&path=` 取回，该路由把可读范围钉在**本会话**的 external-uploads 子目录上。
+`/api/ceo/transcribe` 自身仍然不落盘（见 `/ceo/transcribe` 的测试）；留下字节的是随后那次普通附件落盘。**落盘前统一压成 MP3**（`audio.encode_to_mp3`，mono 32k）：PCM 是 32 KB/秒，一条 60 秒上限的录音就是 2 MB，而这份字节只是给人回放的素材。实测 22.85 秒样本 731 KB → 92 KB（8×）、编码 0.18 秒；选 MP3 而不是更小的 WebM/Opus，是因为后者在 Safari 里播不出来。压缩发生在两个写入接缝（网页 `_store_uploaded_file`、渠道 `_compressed_voice_clip`），**都是"压不动就原样留 WAV"**：没有 ffmpeg、字节不是 WAV、或大得不像语音条时一律退回——ffmpeg 在这套系统里始终是可选依赖，不许因为存储优化把语音打回错误。
+
+寿命：两侧都随会话删除/清空一起消失。`clear_web_ceo_session_artifacts` 会 rmtree `.g3ku/web-ceo-uploads/<slug>` 与 `.g3ku/external-uploads/<slug>`（同一 slug，两个根：前者挂 `data_root()`、后者挂 `workspace_path()`，自定义数据目录的安装里两者分叉，所以清理必须各自按写入侧的根走；`session_id` 为空时整段跳过，否则会指向 external-uploads 根本身）。渠道语音的字节由浏览器经 `GET /api/ceo/external-upload-file?session_id=&path=` 取回，该路由把可读范围钉在**本会话**的 external-uploads 子目录上。
 
 ## 4. 音频几何与门控
 

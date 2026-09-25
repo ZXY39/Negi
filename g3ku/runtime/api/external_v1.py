@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import mimetypes
 import uuid
@@ -48,6 +49,7 @@ from g3ku.runtime.external_sessions import (
 )
 from g3ku.runtime.session_keys import sanitize_channel_outbound_text
 from g3ku.runtime.web_ceo_sessions import (
+    EXTERNAL_UPLOAD_ROOT,
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     WebCeoStateStore,
     clear_web_ceo_session_artifacts,
@@ -59,10 +61,12 @@ from g3ku.utils.helpers import ensure_dir, safe_filename
 
 router = APIRouter()
 
-EXTERNAL_UPLOAD_ROOT = Path(".g3ku") / "external-uploads"
 # 图片附件沿用 web CEO 上传上限；文档/文件类附件单独放宽（渠道传文档常超
 # 5MiB）。超限一律 413 ``attachment_too_large``，桥侧按同值预过滤避免必然失败。
 EXTERNAL_FILE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+# 语音条转码的内存预算：60 秒 24 kHz WAV 是 2.9 MB，留到 8 MB 已经宽到不会把
+# 真正的语音条挡在压缩外面，也不会因为有人从渠道丢大文件而吸进整块内存。
+VOICE_CLIP_TRANSCODE_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _registry():
@@ -276,6 +280,36 @@ def _store_base64_attachment(
     return str(target), size
 
 
+async def _compressed_voice_clip(item: dict[str, Any]) -> dict[str, Any]:
+    """语音条落盘前先压成 MP3，压不动就原样交回。
+
+    渠道语音到这里的字节是引擎解码后的 PCM WAV（QQ 的原始 silk 浏览器播不了），
+    32 KB/秒 地留在盘上没有意义：实测 22.85 秒样本 731 KB → 92 KB，耗时 0.18 秒。
+    没有 ffmpeg、不是 WAV、或大得不像语音条时一律退回原形状——压缩是优化，
+    不是这条车道的前提。
+    """
+    from g3ku.stt import audio as stt_audio
+
+    if str(item.get("kind") or "").strip().lower() != "audio":
+        return item
+    try:
+        raw = base64.b64decode(str(item.get("data_base64") or ""), validate=False)
+    except (binascii.Error, ValueError):
+        return item
+    if not raw or len(raw) > VOICE_CLIP_TRANSCODE_MAX_BYTES or not stt_audio.is_wav(raw):
+        return item
+    encoded = await asyncio.to_thread(stt_audio.encode_to_mp3, raw)
+    if not encoded:
+        return item
+    stem = Path(str(item.get("name") or "voice")).stem or "voice"
+    return {
+        **item,
+        "name": f"{stem}.mp3",
+        "mime_type": "audio/mpeg",
+        "data_base64": base64.b64encode(encoded).decode("ascii"),
+    }
+
+
 def _image_url_from_attachment(attachment: dict[str, Any]) -> str | None:
     mime_type = str(attachment.get("mime_type") or "").strip() or "image/png"
     path = str(attachment.get("path") or "").strip()
@@ -363,6 +397,8 @@ async def post_external_message(
 
     descriptors: list[dict[str, Any]] = []
     for item in list(raw_attachments or []):
+        if isinstance(item, dict) and str(item.get("data_base64") or "").strip():
+            item = await _compressed_voice_clip(item)
         descriptor = _attachment_descriptor(item)
         if descriptor is None:
             continue

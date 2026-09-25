@@ -32,6 +32,10 @@ from g3ku.utils.helpers import ensure_dir, safe_filename
 DEFAULT_CEO_SESSION_TITLE = "新会话"
 WEB_CEO_STATE_FILE = Path(".g3ku") / "web-ceo-state.json"
 WEB_CEO_UPLOAD_ROOT = Path(".g3ku") / "web-ceo-uploads"
+# 渠道附件的落点。写入侧挂在 ``workspace_path()`` 而不是数据根（见
+# ``external_v1._store_base64_attachment``），所以清理侧也必须用同一个根，
+# 自定义数据目录的安装里两者是分叉的。
+EXTERNAL_UPLOAD_ROOT = Path(".g3ku") / "external-uploads"
 WEB_CEO_INFLIGHT_ROOT = Path(".g3ku") / "web-ceo-inflight"
 WEB_CEO_PAUSED_ROOT = Path(".g3ku") / "web-ceo-paused"
 WEB_CEO_CONTINUITY_ROOT = Path(".g3ku") / "web-ceo-continuity"
@@ -2294,6 +2298,14 @@ def clear_web_ceo_session_artifacts(*, session_id: str, task_service: Any | None
     upload_dir = upload_dir_for_session(session_id, create=False)
     if upload_dir.exists():
         shutil.rmtree(upload_dir, ignore_errors=True)
+    # 渠道附件（图片/文档/语音条）挂在另一个根上，但用的是同一个会话 slug，
+    # 所以删除/清空会话时一起带走——否则网页里删掉了会话，用户的原话录音还
+    # 留在盘上。slug 为空时什么都不删：那会指向 external-uploads 根本身。
+    channel_slug = safe_filename(str(session_id or ""))
+    if channel_slug:
+        channel_dir = workspace_path() / EXTERNAL_UPLOAD_ROOT / channel_slug
+        if channel_dir.exists():
+            shutil.rmtree(channel_dir, ignore_errors=True)
     archive_task_id = frontdoor_stage_archive_task_id(session_id)
     artifact_store = getattr(task_service, "artifact_store", None) if task_service is not None else None
     list_artifacts = getattr(artifact_store, "list_artifacts", None) if artifact_store is not None else None

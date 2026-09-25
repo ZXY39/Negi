@@ -56,6 +56,7 @@ from g3ku.runtime.session_keys import (
     is_channel_session_key,
 )
 from g3ku.runtime.web_ceo_sessions import (
+    EXTERNAL_UPLOAD_ROOT,
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
     WEB_CEO_VOICE_UPLOAD_MAX_BYTES,
     WebCeoStateStore,
@@ -307,8 +308,6 @@ def external_upload_dir_for_session(session_id: str) -> Path:
     its ``workspace_path()`` root and its ``safe_filename`` session slug, or a
     legitimately stored clip would be refused.
     """
-    from g3ku.runtime.api.external_v1 import EXTERNAL_UPLOAD_ROOT
-
     return workspace_path() / EXTERNAL_UPLOAD_ROOT / safe_filename(str(session_id or ''))
 
 
@@ -376,16 +375,32 @@ async def _maybe_await(value: Any) -> Any:
 
 
 async def _store_uploaded_file(session_id: str, upload: UploadFile) -> dict[str, Any]:
+    from g3ku.stt import audio as stt_audio
+
     original_name = safe_filename(str(upload.filename or '').strip()) or 'upload.bin'
+    mime_type = _guess_upload_mime_type(original_name, getattr(upload, 'content_type', None))
+    stored_name = original_name
+    clip_bytes: bytes | None = None
+    if _upload_kind(mime_type=mime_type, name=original_name) == 'audio':
+        # 语音条是给人回放的素材，PCM 没有理由留在盘上：压成 MP3（实测 8×，0.2 秒）。
+        # 只读这一格：超过录音上限的音频不是语音条（是有人拿附件口丢了个大文件），
+        # 不转码、按原样流式落盘，免得为一个转码决定把整文件吸进内存。
+        raw = upload.file.read(WEB_CEO_VOICE_UPLOAD_MAX_BYTES + 1)
+        if len(raw) <= WEB_CEO_VOICE_UPLOAD_MAX_BYTES:
+            encoded = await asyncio.to_thread(stt_audio.encode_to_mp3, raw)
+            if encoded:
+                clip_bytes = encoded
+                stored_name = f"{Path(original_name).stem or 'voice'}.mp3"
+                mime_type = 'audio/mpeg'
     target_dir = _session_upload_dir(session_id)
-    target_path = target_dir / f"{uuid.uuid4().hex[:12]}_{original_name}"
-    with target_path.open('wb') as handle:
-        shutil.copyfileobj(upload.file, handle)
-    item = _serialize_upload_descriptor(
-        target_path,
-        name=original_name,
-        mime_type=_guess_upload_mime_type(original_name, getattr(upload, 'content_type', None)),
-    )
+    target_path = target_dir / f"{uuid.uuid4().hex[:12]}_{stored_name}"
+    if clip_bytes is None:
+        upload.file.seek(0)
+        with target_path.open('wb') as handle:
+            shutil.copyfileobj(upload.file, handle)
+    else:
+        target_path.write_bytes(clip_bytes)
+    item = _serialize_upload_descriptor(target_path, name=stored_name, mime_type=mime_type)
     try:
         _validate_uploaded_descriptor_limits(item)
     except HTTPException:

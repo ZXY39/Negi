@@ -11,6 +11,9 @@ rate and downmixes channels), so this module has four jobs:
 * measure level, so an accidentally empty recording is rejected here instead of
   costing a full decode window.
 
+It also offers ``encode_to_mp3`` for the storage seam: a clip kept for playback
+does not need to sit on disk as PCM. That path never raises — see its docstring.
+
 Kept free of numpy and any decoding library on purpose: the web composer
 records straight to WAV, so the hot path never needs a decoder, and the
 fallback only costs a dependency on machines that really do receive non-WAV
@@ -206,6 +209,72 @@ def _ffmpeg_binary() -> str:
             "该音频不是 WAV，需要 ffmpeg 解码，但本机未安装 ffmpeg。",
         )
     return found
+
+
+def ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+MP3_BITRATE = "32k"
+
+
+def _looks_like_mp3(data: bytes) -> bool:
+    if data[:3] == b"ID3":
+        return True
+    return len(data) > 4 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0
+
+
+def encode_to_mp3(wav_bytes: bytes, *, bitrate: str = MP3_BITRATE) -> bytes | None:
+    """PCM WAV → MP3, or ``None`` when this machine cannot do it.
+
+    Storage-only: the clip is playback material for a human, so a lossy re-encode
+    is fine while an exception never is — every failure path here means "keep the
+    WAV you already have". Measured on the 22.85 s reference sample: 731,302 →
+    91,917 bytes (8×) in 0.18 s, and MP3 is the one format every browser plays
+    (WebM/Opus is smaller but silent in Safari).
+    """
+    if not is_wav(wav_bytes):
+        return None
+    try:
+        binary = _ffmpeg_binary()
+    except AudioError:
+        return None
+    command: list[Any] = [
+        binary,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-sn",
+        "-dn",
+        "-ac",
+        "1",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        bitrate,
+        "-f",
+        "mp3",
+        "pipe:1",
+    ]
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            command,
+            input=wav_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=_FFMPEG_TIMEOUT_SECONDS,
+            env=_scrubbed_env(),
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    encoded = completed.stdout or b""
+    if completed.returncode != 0 or not _looks_like_mp3(encoded):
+        return None
+    return encoded
 
 
 def _scrubbed_env() -> dict[str, str]:

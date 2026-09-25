@@ -460,6 +460,60 @@ def test_result_envelope_never_carries_the_decoded_wav(tmp_path):
     assert set(payload) == {"ok", "text", "error_code", "error", "model", "seconds", "wall_ms"}
 
 
+# --- 存储压缩（语音气泡落盘的那一份） ------------------------------------
+
+
+def test_encode_to_mp3_actually_shrinks_a_real_clip():
+    """PCM 是 32 KB/秒，一条 60 秒上限的录音就是 2 MB。压缩是这条车道唯一
+    让"可回放"变得可长期留存的理由，所以它必须真的把字节变小。"""
+    if not audio.ffmpeg_available():
+        pytest.skip("本机没有 ffmpeg：压缩按设计退回 WAV，不测")
+    wav = build_wav(sine_samples(3.0))
+    encoded = audio.encode_to_mp3(wav)
+    assert encoded is not None
+    assert encoded[:3] == b"ID3" or (encoded[0] == 0xFF and (encoded[1] & 0xE0) == 0xE0)
+    assert len(encoded) < len(wav) / 4
+
+
+def test_encode_to_mp3_declines_instead_of_raising(monkeypatch):
+    """调用方拿 None 就是"原样留着 WAV"。这里任何一条分支都不许抛——
+    转码失败把整条语音消息打回错误，比不压缩糟得多。"""
+    assert audio.encode_to_mp3(b"definitely not a wav") is None
+
+    monkeypatch.setattr(audio.shutil, "which", lambda _name: None)
+    assert audio.encode_to_mp3(build_wav(sine_samples(0.2))) is None
+
+
+def test_encode_to_mp3_rejects_a_failed_or_nonsense_encoder_run(monkeypatch):
+    wav = build_wav(sine_samples(0.2))
+    monkeypatch.setattr(audio.shutil, "which", lambda _name: "ffmpeg")
+
+    class _Result:
+        def __init__(self, returncode, stdout):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = b"boom"
+
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        return _Result(1, b"")
+
+    monkeypatch.setattr(audio.subprocess, "run", fake_run)
+    assert audio.encode_to_mp3(wav) is None
+
+    monkeypatch.setattr(audio.subprocess, "run", lambda *a, **k: _Result(0, b"garbage"))
+    assert audio.encode_to_mp3(wav) is None
+
+    def timeout(*args, **kwargs):
+        raise audio.subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1)
+
+    monkeypatch.setattr(audio.subprocess, "run", timeout)
+    assert audio.encode_to_mp3(wav) is None
+    assert calls
+
+
 # --- 配置持久化 ---------------------------------------------------------
 
 
