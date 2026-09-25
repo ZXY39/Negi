@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 import zipfile
 from pathlib import Path
@@ -265,35 +266,85 @@ def test_extract_archive_only_materializes_kept_members(tmp_path):
     assert not (target / "test-vad.exe").exists()
 
 
+class _FakeStreamResponse:
+    def __init__(self, payload: bytes, status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        return None
+
+    def iter_bytes(self, chunk_size=0):
+        for start in range(0, len(self._payload), max(1, chunk_size)):
+            yield self._payload[start:start + chunk_size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _FakeClient:
+    """Records the last request so the Range-resume behaviour is observable."""
+    last_headers: dict[str, str] = {}
+    payload = b""
+    status = 200
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def stream(self, method, url, headers=None, timeout=None):
+        type(self).last_headers = dict(headers or {})
+        return _FakeStreamResponse(type(self).payload, type(self).status)
+
+
 def test_prepare_binary_refuses_digest_mismatch(tmp_path, monkeypatch):
     cfg = make_cfg(tmp_path, binary_sha256="0" * 64)
-
-    class _FakeResponse:
-        status_code = 200
-        content = b"not-the-official-archive"
-
-        def raise_for_status(self):
-            return None
-
-    class _FakeClient:
-        def __init__(self, *a, **k):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def get(self, url, headers=None, timeout=None):
-            return _FakeResponse()
-
     monkeypatch.setattr(engine.httpx, "Client", _FakeClient)
+    _FakeClient.payload = b"not-the-official-archive"
+    _FakeClient.last_headers = {}
     monkeypatch.setattr(engine, "binary_dir", lambda _cfg: tmp_path / "bin")
+
     with pytest.raises(engine.SttProvisionError) as exc:
         engine.prepare_binary(cfg)
     assert "校验失败" in str(exc.value)
     assert not (tmp_path / "bin" / "whisper-cli.exe").exists()
+
+
+def test_partial_download_resumes_with_a_range_request(tmp_path, monkeypatch):
+    """A ~20KB/s link makes "restart from zero after a drop" a real cost, so the
+    partial file must be extended, not overwritten."""
+    cfg = make_cfg(tmp_path, binary_sha256="")
+    directory = tmp_path / "bin"
+    directory.mkdir(parents=True)
+    asset = engine._platform_asset()
+    archive = directory / asset
+    archive.with_name(archive.name + ".part").write_bytes(b"HEAD")
+
+    monkeypatch.setattr(engine, "binary_dir", lambda _cfg: directory)
+    monkeypatch.setattr(engine.httpx, "Client", _FakeClient)
+    _FakeClient.last_headers = {}
+    _FakeClient.payload = b"-TAIL"
+    _FakeClient.status = 206
+
+    def fake_extract(_archive, _directory):
+        (_directory / f"whisper-cli{'.exe' if os.name == 'nt' else ''}").write_bytes(b"cli")
+        return ["whisper-cli"]
+
+    monkeypatch.setattr(engine, "_extract_archive", fake_extract)
+
+    result = engine.prepare_binary(cfg)
+
+    assert _FakeClient.last_headers.get("Range") == "bytes=4-"
+    assert result["downloaded"] is True
+    assert not archive.with_name(archive.name + ".part").exists()
 
 
 def test_status_reports_readiness_across_all_three_gates(tmp_path):

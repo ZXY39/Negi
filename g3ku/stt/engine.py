@@ -359,18 +359,27 @@ def _platform_asset() -> str:
 
 
 def _stream_to(client: httpx.Client, url: str, target: Path) -> Path:
-    """Download into ``.part`` with Range resume: this box reaches GitHub
-    assets at ~20 KB/s, so minutes of progress must survive a drop."""
+    """Download into ``.part`` **incrementally**, appending as bytes arrive.
+
+    This box reaches GitHub assets at ~20 KB/s, so minutes of progress must
+    survive a dropped connection: buffering the response and writing it once
+    would leave nothing on disk mid-download, and the `Range` request below
+    would have no partial file to resume from.
+    """
     part = target.with_name(target.name + ".part")
     existing = part.stat().st_size if part.exists() else 0
     headers = {"Range": f"bytes={existing}-"} if existing else {}
-    response = client.get(url, headers=headers, timeout=httpx.Timeout(60.0, connect=10.0))
-    if response.status_code == 416 and existing:
-        return part
-    response.raise_for_status()
-    appending = response.status_code == 206
-    with part.open("ab" if appending else "wb") as handle:
-        handle.write(response.content)
+    with client.stream("GET", url, headers=headers, timeout=httpx.Timeout(60.0, connect=10.0)) as response:
+        if response.status_code == 416 and existing:
+            # 已经拿全了：直接返回现有 .part 走摘要校验。
+            return part
+        response.raise_for_status()
+        appending = response.status_code == 206
+        if existing and not appending:
+            logger.info("stt download restarts from zero (server ignored the Range request)")
+        with part.open("ab" if appending else "wb") as handle:
+            for chunk in response.iter_bytes(chunk_size=256 * 1024):
+                handle.write(chunk)
     return part
 
 
