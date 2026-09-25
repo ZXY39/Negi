@@ -2358,13 +2358,16 @@
     overflow-wrap: anywhere;
 }
 
-/* 54. 提示层回到窗口正中：旧样式给 toast 视口留了 left:160px，用来抵消当时
-   160px 的左侧栏；V2 导航已改成顶栏，那 160px 变成了纯偏移，toast 与
+/* 54. 提示层回到窗口正中，并锚到顶栏下方：旧样式给 toast 视口留了 left:160px，
+   用来抵消当时 160px 的左侧栏；V2 导航已改成顶栏，那 160px 变成了纯偏移，toast 与
    「正在打开任务」提示条整体右移 80px。fixed 层里只有这一处补偿，其余
-   （抽屉/弹窗）都是 top/left:50% 居中，不受影响。 */
+   （抽屉/弹窗）都是 top/left:50% 居中，不受影响。
+   top 也归这一条规则：旧层的 20px 只让开状态栏，toast 上沿会压在 56px 顶栏上。
+   95px = 顶栏 56px + 顶栏下沿再留 39px；顶栏高度变了要连这个字面量一起改。 */
 [data-ui-version="v2"] .app-toast-viewport {
     left: 0;
     right: 0;
+    top: calc(env(safe-area-inset-top, 0px) + 95px);
 }
 
 /* 55. 任务详情头部并入「大控件」档（40px 高 + §1 的 8px 控制圆角 + 同一表面底色）。
