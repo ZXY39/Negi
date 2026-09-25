@@ -181,6 +181,13 @@ function loadApp(contextExtra = {}) {
             setCeoVoiceAutoSend,
             handleCeoVoiceClick,
             VOICE_AUTO_SEND_PREFIX,
+            pickVoiceClip,
+            stripVoiceTranscriptMarkers,
+            buildCeoVoiceBubbleMarkup,
+            formatVoiceDuration,
+            handleCeoVoiceBubbleClick,
+            renderStructuredChatAttachments,
+            summarizeUploads,
         };`,
         context
     );
@@ -434,4 +441,74 @@ test("recording state drives aria-pressed, icon and the red class", () => {
     assert.equal(U.ceoVoiceBtn.attributes["aria-pressed"], "true");
     assert.match(U.ceoVoiceBtn.innerHTML, /data-lucide="mic-off"/);
     assert.equal(U.ceoVoiceBtn.classList.contains("is-recording"), true);
+});
+
+test("marker text is stripped for display and detected", () => {
+    const { stripVoiceTranscriptMarkers, formatVoiceDuration } = loadApp();
+    const stripped = stripVoiceTranscriptMarkers(
+        "今天怎么样\n用户语音，机器识别结果：刚刚给你发了啥"
+    );
+    assert.equal(stripped.text, "今天怎么样\n刚刚给你发了啥");
+    assert.equal(stripped.hasVoice, true);
+    assert.equal(stripVoiceTranscriptMarkers("手打文字").hasVoice, false);
+    assert.equal(stripVoiceTranscriptMarkers("用户语音，机器识别结果：只剩转写").text, "只剩转写");
+    assert.equal(formatVoiceDuration(4.34), "0:04");
+    assert.equal(formatVoiceDuration(65), "1:05");
+    assert.equal(formatVoiceDuration(NaN), "--");
+});
+
+test("voice clip is picked out of attachments and rendered as a player", () => {
+    const { pickVoiceClip, buildCeoVoiceBubbleMarkup } = loadApp();
+    const clip = pickVoiceClip([
+        { path: "/x/a.png", kind: "image" },
+        { path: "/x/v.wav", kind: "audio", mime_type: "audio/wav", url: "/api/ceo/uploads/file?a=1" },
+    ]);
+    assert.equal(clip.kind, "audio");
+    assert.equal(pickVoiceClip([{ path: "/x/a.pdf", kind: "file" }]), null);
+
+    const markup = buildCeoVoiceBubbleMarkup(clip, "刚刚给你发了啥");
+    assert.match(markup, /class="msg-voice-bubble"/);
+    assert.match(markup, /data-ceo-voice-play/);
+    assert.match(markup, /<audio[^>]+src="\/api\/ceo\/uploads\/file\?a=1"/);
+    assert.match(markup, /data-ceo-voice-toggle[^>]*>转文字</);
+    assert.match(markup, /data-ceo-voice-transcript hidden>刚刚给你发了啥</);
+    assert.doesNotMatch(
+        buildCeoVoiceBubbleMarkup({ path: "/x/v.wav", kind: "audio" }, ""),
+        /data-ceo-voice-toggle/,
+        "空转写不该画一个点开没内容的按钮"
+    );
+});
+
+test("audio attachments never render as file pills", () => {
+    const { renderStructuredChatAttachments } = loadApp();
+    const html = renderStructuredChatAttachments([
+        { path: "/x/a.pdf", name: "a.pdf", kind: "file", mime_type: "application/pdf" },
+        { path: "/x/v.wav", name: "v.wav", kind: "audio", mime_type: "audio/wav" },
+    ]);
+    assert.match(html, /a\.pdf/);
+    assert.doesNotMatch(html, /v\.wav/);
+});
+
+test("pending upload summary names voice clips as voice", () => {
+    const { summarizeUploads } = loadApp();
+    assert.equal(summarizeUploads([{ path: "/x/v.wav", kind: "audio" }]), "已附加 1 段语音");
+    assert.equal(
+        summarizeUploads([{ path: "/x/v.wav", kind: "audio" }, { path: "/x/a.pdf", kind: "file" }]),
+        "已附加 1 段语音，1 个文件"
+    );
+});
+
+test("转文字 disclosure toggles its own transcript only", () => {
+    const { handleCeoVoiceBubbleClick } = loadApp();
+    const transcript = { hidden: true, matches: () => true, setAttribute() {} };
+    const toggle = {
+        nextElementSibling: transcript,
+        parentElement: { querySelector: () => transcript },
+        setAttribute() {},
+    };
+    const event = { target: { closest: (sel) => (sel === "[data-ceo-voice-toggle]" ? toggle : null) } };
+    handleCeoVoiceBubbleClick(event);
+    assert.equal(transcript.hidden, false);
+    handleCeoVoiceBubbleClick(event);
+    assert.equal(transcript.hidden, true);
 });

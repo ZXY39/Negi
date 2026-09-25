@@ -4922,8 +4922,10 @@ function summarizeUploads(items = []) {
     const uploads = normalizeUploadList(items);
     if (!uploads.length) return "已附加附件";
     const imageCount = uploads.filter((item) => String(item.kind || "") === "image").length;
-    const fileCount = uploads.length - imageCount;
+    const audioCount = uploads.filter((item) => String(item.kind || "") === "audio").length;
+    const fileCount = uploads.length - imageCount - audioCount;
     const parts = [];
+    if (audioCount) parts.push(`${audioCount} 段语音`);
     if (imageCount) parts.push(`${imageCount} 张图片`);
     if (fileCount) parts.push(`${fileCount} 个文件`);
     return parts.length ? `已附加 ${parts.join("，")}` : "已附加附件";
@@ -4983,13 +4985,119 @@ function renderStructuredChatAttachmentCard(item = {}, { sessionId = activeSessi
 }
 
 function renderStructuredChatAttachments(items = [], { sessionId = activeSessionId() } = {}) {
-    const uploads = normalizeUploadList(items);
+    const uploads = normalizeUploadList(items).filter((item) => String(item.kind || "") !== "audio");
     if (!uploads.length) return "";
     return `
         <div class="chat-attachment-stack" role="list">
             ${uploads.map((item) => renderStructuredChatAttachmentCard(item, { sessionId })).join("")}
         </div>
     `;
+}
+
+function pickVoiceClip(items = []) {
+    return normalizeUploadList(items).find((item) => String(item.kind || "") === "audio") || null;
+}
+
+// 语音转写的标记必须留在持久文本里给模型看（前门那条规则靠它触发），但不画在气泡上：
+// 气泡改成一枚语音条，识别文字收到「转文字」后面。
+function stripVoiceTranscriptMarkers(text) {
+    const kept = [];
+    let hasVoice = false;
+    for (const line of String(text || "").split("\n")) {
+        const lead = line.slice(0, line.length - line.trimStart().length);
+        const body = line.trimStart();
+        if (body.startsWith(VOICE_AUTO_SEND_PREFIX)) {
+            hasVoice = true;
+            const rest = body.slice(VOICE_AUTO_SEND_PREFIX.length).trim();
+            if (rest) kept.push(`${lead}${rest}`);
+            continue;
+        }
+        kept.push(line);
+    }
+    return { text: kept.join("\n").trim(), hasVoice };
+}
+
+function buildCeoVoiceBubbleMarkup(clip, transcript) {
+    const src = String(clip.url || ceoAttachmentHref(clip) || "");
+    const seconds = formatVoiceDuration("");
+    return `
+        <div class="msg-voice-bubble" role="group" aria-label="语音消息">
+            <button type="button" class="msg-voice-play" data-ceo-voice-play aria-label="播放语音" aria-pressed="false">
+                <i data-lucide="play"></i>
+            </button>
+            <span class="msg-voice-duration" data-ceo-voice-duration>${esc(seconds)}</span>
+            <audio class="msg-voice-audio" src="${esc(src)}" preload="metadata" data-ceo-voice-audio></audio>
+        </div>
+        ${transcript ? `
+            <button type="button" class="msg-voice-transcript-toggle" data-ceo-voice-toggle aria-expanded="false">转文字</button>
+            <div class="msg-voice-transcript" data-ceo-voice-transcript hidden>${esc(transcript)}</div>
+        ` : ""}
+    `;
+}
+
+function formatVoiceDuration(seconds) {
+    const total = Number(seconds);
+    if (!Number.isFinite(total) || total <= 0) return "--";
+    const whole = Math.round(total);
+    return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function wireCeoVoiceBubble(host) {
+    host.querySelectorAll?.("audio[data-ceo-voice-audio]").forEach((audio) => {
+        if (audio.dataset.ceoVoiceWired === "1") return;
+        audio.dataset.ceoVoiceWired = "1";
+        const bubble = audio.closest?.(".msg-voice-bubble");
+        const label = bubble?.querySelector?.("[data-ceo-voice-duration]");
+        const button = bubble?.querySelector?.("[data-ceo-voice-play]");
+        const setIcon = (name) => {
+            if (!button) return;
+            button.innerHTML = `<i data-lucide="${name}"></i>`;
+            icons();
+        };
+        // 秒数以浏览器解出的真实时长为准：识别链路给的秒数与解码长度可能差零点几秒，
+        // 回放气泡上写一个和音频对不上的数字比不写更糟。
+        audio.addEventListener("loadedmetadata", () => {
+            if (label) label.textContent = formatVoiceDuration(audio.duration);
+        });
+        audio.addEventListener("play", () => {
+            if (button) button.setAttribute("aria-pressed", "true");
+            setIcon("pause");
+        });
+        audio.addEventListener("pause", () => {
+            if (button) button.setAttribute("aria-pressed", "false");
+            setIcon("play");
+        });
+        audio.addEventListener("ended", () => {
+            if (button) button.setAttribute("aria-pressed", "false");
+            setIcon("play");
+        });
+        audio.addEventListener("error", () => {
+            if (label) label.textContent = "无法播放";
+        });
+    });
+}
+
+function handleCeoVoiceBubbleClick(event) {
+    const play = event.target?.closest?.("[data-ceo-voice-play]");
+    if (play) {
+        const audio = play.parentElement?.querySelector?.("audio[data-ceo-voice-audio]");
+        if (!audio) return;
+        if (audio.paused) {
+            void audio.play();
+        } else {
+            audio.pause();
+        }
+        return;
+    }
+    const toggle = event.target?.closest?.("[data-ceo-voice-toggle]");
+    if (!toggle) return;
+    // 先取相邻节点：一条消息里可能有多段语音，从父节点找会串到别段转写上。
+    const panel = toggle.nextElementSibling?.matches?.("[data-ceo-voice-transcript]")
+        ? toggle.nextElementSibling
+        : toggle.parentElement?.querySelector?.("[data-ceo-voice-transcript]");
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    toggle.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
 }
 
 function addCeoUserMessage(text = "", { attachments = [], scrollMode = "preserve", sessionId = activeSessionId(), timestamp = "", turnId = "", canEditFork = false, canFork = false } = {}) {
@@ -5801,6 +5909,9 @@ async function finishCeoVoiceTranscription(capture) {
         const result = await ApiClient.transcribeCeoVoice(wav);
         closeToast();
         if (result && result.ok && result.text) {
+            // 先让录音落成会话附件，再交付文字：语音气泡要可回放，而服务端
+            // /api/ceo/transcribe 转写完就把字节丢了（不落盘是它的契约）。
+            await attachVoiceClip(wav);
             deliverVoiceText(String(result.text));
             return;
         }
@@ -5817,6 +5928,21 @@ async function finishCeoVoiceTranscription(capture) {
         S.ceoVoiceBusy = false;
         syncCeoVoiceOptions();
     }
+}
+
+function attachVoiceClip(wavBlob) {
+    // 复用附件车道：服务端按 audio/wav 判出 kind='audio'，渲染层据此画语音气泡。
+    // 上传失败不吞掉转写文字——顶多退化成一条普通文字气泡，比整条消息消失好。
+    const file = new File([wavBlob], `voice-${Date.now()}.wav`, { type: "audio/wav" });
+    return ApiClient.uploadCeoFiles([file], activeSessionId())
+        .then((uploaded) => {
+            const clips = normalizeUploadList(uploaded);
+            if (!clips.length) return;
+            S.ceoUploads = [...normalizeUploadList(S.ceoUploads), ...clips];
+            syncActiveCeoComposerDraft();
+            renderPendingCeoUploads();
+        })
+        .catch(() => {});
 }
 
 function voiceFailureText(result) {
@@ -6494,22 +6620,27 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
     return mutateCeoFeed(() => {
         const el = document.createElement("div");
         el.className = `message ${role}`;
+        const voiceClip = role === "user" ? pickVoiceClip(attachments) : null;
+        const voiceView = role === "user" ? stripVoiceTranscriptMarkers(text) : { text: String(text || ""), hasVoice: false };
+        const displayText = role === "user" ? voiceView.text : String(text || "");
         const contentClass = markdown ? "msg-content markdown-content" : "msg-content";
-        const content = markdown ? renderMarkdown(text) : esc(text);
+        const content = markdown ? renderMarkdown(displayText) : esc(displayText);
         const attachmentMarkup = renderStructuredChatAttachments(attachments, { sessionId });
         // 悬停元信息行(发送/完成时间 + token 用量 + 复制按钮):时间仅在调用方提供数据
         // 时渲染,复制按钮只要有正文就跟着出现,显隐由 CSS 的 .msg-meta 悬停规则控制。
         // 有 meta 时用 message-stack 纵向包裹,保证元信息落在气泡下方而不是 flex 行内并排。
         const metaText = buildCeoMessageMetaText({ role, timestamp, usage });
-        const copyMarkup = hasRenderableText(text) ? buildCeoBubbleCopyMarkup() : "";
+        const copyMarkup = hasRenderableText(displayText) ? buildCeoBubbleCopyMarkup() : "";
         const metaMarkup = metaText || copyMarkup
             ? `<div class="msg-meta">${metaText ? `<span class="msg-meta-text">${esc(metaText)}</span>` : ""}${copyMarkup}</div>`
             : "";
         const actionsMarkup = role === "user"
             ? buildCeoUserMessageActionsMarkup({ turnId, canEditFork, canFork, sessionId })
             : "";
-        if (role === "user" && (attachmentMarkup || metaMarkup || actionsMarkup)) {
-            const textBubble = hasRenderableText(text)
+        if (voiceClip) {
+            el.innerHTML = `<div class="message-stack">${buildCeoVoiceBubbleMarkup(voiceClip, voiceView.text)}${attachmentMarkup}${metaMarkup}${actionsMarkup}</div>`;
+        } else if (role === "user" && (attachmentMarkup || metaMarkup || actionsMarkup)) {
+            const textBubble = hasRenderableText(displayText)
                 ? `<div class="${contentClass}">${content}</div>`
                 : "";
             el.innerHTML = `<div class="message-stack">${textBubble}${attachmentMarkup}${metaMarkup}${actionsMarkup}</div>`;
@@ -6521,6 +6652,7 @@ function addMsg(text, role, { markdown = false, attachments = [], scrollMode = "
         const stamp = String(timestamp || "").trim();
         if (stamp) el.dataset.ceoTimestamp = stamp;
         ceoFeedAppendHost().appendChild(el);
+        wireCeoVoiceBubble(el);
         icons();
         return el;
     }, { scrollMode });
@@ -15528,6 +15660,7 @@ function bind() {
         removeCeoQueuedFollowUp(activeSessionId(), String(remove.dataset.followUpRemove || ""));
     });
     U.ceoFeed?.addEventListener("click", (e) => {
+        handleCeoVoiceBubbleClick(e);
         const copyBtn = e.target.closest("[data-ceo-copy]");
         if (copyBtn) {
             e.preventDefault();

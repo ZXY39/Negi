@@ -4842,6 +4842,73 @@ textarea {
     cursor: pointer;
 }
 
+/* 语音气泡：识别文字收在「转文字」后面，气泡本身是播放器。
+   标记前缀仍留在持久文本里给模型看，这里只是不画出来。 */
+.msg-voice-bubble {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 168px;
+    padding: 10px 16px;
+    border-radius: 20px 20px 6px 20px;
+    background-color: var(--bg-msg-user);
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 20%, transparent);
+}
+
+.msg-voice-play {
+    width: 32px;
+    height: 32px;
+    flex: none;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--brand-primary);
+    color: var(--text-inverse);
+}
+
+/* lucide 默认给 24px，塞进 32px 圆里只剩 4px 内边距，比输入行那排 18px 图标明显重。 */
+.msg-voice-play svg {
+    width: 18px;
+    height: 18px;
+}
+
+.msg-voice-duration {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* 不用 display:none：部分浏览器对不渲染的 audio 不触发 loadedmetadata，秒数就一直是占位。 */
+.msg-voice-audio {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.msg-voice-transcript-toggle {
+    align-self: flex-start;
+    padding: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    background: none;
+    border: 0;
+    cursor: pointer;
+}
+
+.msg-voice-transcript-toggle:hover {
+    color: var(--text-primary);
+}
+
+.msg-voice-transcript {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+}
+
 .ceo-context-usage-brain {
     position: relative;
     flex: none;

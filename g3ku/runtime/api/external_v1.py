@@ -308,12 +308,18 @@ def _build_external_user_message(
 
     lines = ["Channel attachments:"]
     for item in attachments:
-        label = "image" if str(item.get("kind") or "") == "image" else "file"
+        kind = str(item.get("kind") or "")
+        if kind == "audio":
+            # 语音条的内容已经在正文的转写里；再给一行路径只会让模型以为要去
+            # 打开一个文件。它是给人回放的素材，不是给模型的输入。
+            continue
+        label = "image" if kind == "image" else "file"
         source = str(item.get("path") or item.get("url") or "").strip()
         suffix = f" (local path: {source})" if source else ""
         lines.append(f"- {label}: {item['name']}{suffix}")
-    lines.append("You may inspect the local file paths or URLs above when helpful.")
-    note = "\n".join(lines)
+    if len(lines) > 1:
+        lines.append("You may inspect the local file paths or URLs above when helpful.")
+    note = "\n".join(lines) if len(lines) > 1 else ""
 
     text_value = str(text or "")
     merged_text = f"{text_value}\n\n{note}" if (note and text_value) else (note or text_value)
@@ -330,7 +336,8 @@ def _build_external_user_message(
     attachment_refs = [
         str(item.get("path") or item.get("url") or "").strip()
         for item in attachments
-        if str(item.get("path") or item.get("url") or "").strip()
+        if str(item.get("kind") or "") != "audio"
+        and str(item.get("path") or item.get("url") or "").strip()
     ]
     return UserInputMessage(
         content=content or [{"type": "text", "text": note or text_value}],

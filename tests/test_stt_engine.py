@@ -232,6 +232,25 @@ async def test_traditional_output_is_simplified_and_timings_reported(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_success_envelope_carries_the_decoded_wav(tmp_path, monkeypatch):
+    """语音气泡回放的是引擎解码后的那一份 WAV，不是渠道送来的字节（QQ 的语音条是腾讯
+    silk，浏览器播不了），所以成功结果必须把它带出去给进程内调用方。"""
+    cfg = make_cfg(tmp_path)
+    provision(tmp_path)
+
+    async def fake_run_cli(_cfg, _wav, _out, *, timeout):
+        return "刚刚给你发了啥"
+
+    monkeypatch.setattr(engine, "_run_cli", fake_run_cli)
+    wav = build_wav(sine_samples(1.0))
+    result = await engine.transcribe_bytes(wav, cfg=cfg)
+
+    assert result.ok is True
+    assert result.wav_bytes == wav
+    assert result.as_dict().get("wav_bytes") is None
+
+
+@pytest.mark.asyncio
 async def test_simplification_can_be_turned_off(tmp_path, monkeypatch):
     cfg = make_cfg(tmp_path, simplify_chinese=False)
     provision(tmp_path)
@@ -431,6 +450,14 @@ def test_status_reports_readiness_across_all_three_gates(tmp_path):
 def test_result_envelope_is_json_serializable(tmp_path):
     payload = engine.SttResult(True, text="x", model="base", seconds=1.234, wall_ms=7).as_dict()
     assert json.loads(json.dumps(payload))["seconds"] == 1.23
+
+
+def test_result_envelope_never_carries_the_decoded_wav(tmp_path):
+    """``wav_bytes`` 是几百 KB 的二进制，只能进程内交给调用方；漏进 as_dict 就会被
+    /ceo/transcribe 原样回给浏览器，还会被塞进会话快照。"""
+    payload = engine.SttResult(True, text="x", model="base", wav_bytes=b"RIFF" + b"\x00" * 4096).as_dict()
+    assert "wav_bytes" not in payload
+    assert set(payload) == {"ok", "text", "error_code", "error", "model", "seconds", "wall_ms"}
 
 
 # --- 配置持久化 ---------------------------------------------------------

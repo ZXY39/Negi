@@ -8,6 +8,7 @@ import uuid
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import (
     APIRouter,
@@ -299,6 +300,18 @@ def _session_upload_dir(session_id: str) -> Path:
     return upload_dir_for_session(session_id)
 
 
+def external_upload_dir_for_session(session_id: str) -> Path:
+    """The directory ``/api/v1`` writes channel attachments into.
+
+    Containment for the read route has to mirror the writer exactly, including
+    its ``workspace_path()`` root and its ``safe_filename`` session slug, or a
+    legitimately stored clip would be refused.
+    """
+    from g3ku.runtime.api.external_v1 import EXTERNAL_UPLOAD_ROOT
+
+    return workspace_path() / EXTERNAL_UPLOAD_ROOT / safe_filename(str(session_id or ''))
+
+
 def _guess_upload_mime_type(name: str, content_type: str | None = None) -> str:
     if isinstance(content_type, str) and content_type.strip():
         return content_type.strip()
@@ -307,11 +320,18 @@ def _guess_upload_mime_type(name: str, content_type: str | None = None) -> str:
 
 
 def _upload_kind(*, mime_type: str, name: str) -> str:
-    if str(mime_type or '').lower().startswith('image/'):
+    mime = str(mime_type or '').lower()
+    if mime.startswith('image/'):
         return 'image'
+    if mime.startswith('audio/'):
+        # 语音条要渲染成可播放的气泡，不是文件药丸；网页麦克风录出来的就是 WAV。
+        return 'audio'
     guessed, _ = mimetypes.guess_type(name)
-    if isinstance(guessed, str) and guessed.lower().startswith('image/'):
-        return 'image'
+    if isinstance(guessed, str):
+        if guessed.lower().startswith('image/'):
+            return 'image'
+        if guessed.lower().startswith('audio/'):
+            return 'audio'
     return 'file'
 
 
@@ -421,12 +441,25 @@ def _uploaded_files_note(uploads: list[dict[str, Any]]) -> str:
         return ''
     lines = ['Uploaded attachments:']
     for item in uploads:
-        if str(item.get('kind') or '') == 'image':
+        kind = str(item.get('kind') or '')
+        if kind == 'audio':
+            # 语音条的"内容"已经是正文里的转写文本；再给一行本地路径只会让模型
+            # 以为还需要去打开一个文件。
+            continue
+        if kind == 'image':
             lines.append(f"- image: {item['name']} (local path: {item['path']})")
         else:
             lines.append(f"- file: {item['name']} (local path: {item['path']})")
+    if len(lines) == 1:
+        return ''
     lines.append('You may inspect the local file paths above when helpful.')
     return "\n".join(lines)
+
+
+def _model_visible_uploads(uploads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Everything except the voice clip: the clip is playback material for the
+    human, and its transcription already travels in the message text."""
+    return [item for item in uploads or [] if str(item.get('kind') or '') != 'audio']
 
 
 def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserInputMessage:
@@ -434,11 +467,12 @@ def _build_user_message(text: str, uploads: list[dict[str, Any]]) -> str | UserI
         return text
 
     text_value = str(text or '')
-    note = _uploaded_files_note(uploads)
+    model_uploads = _model_visible_uploads(uploads)
+    note = _uploaded_files_note(model_uploads)
     merged_text = f"{text_value}\n\n{note}" if (note and text_value) else (note or text_value)
     return UserInputMessage(
         content=merged_text or note or text_value,
-        attachments=[str(item['path']) for item in uploads],
+        attachments=[str(item['path']) for item in model_uploads],
         metadata={'web_ceo_uploads': uploads, 'web_ceo_raw_text': text_value},
     )
 
@@ -595,6 +629,43 @@ async def transcribe_ceo_voice(file: UploadFile = File(...)):
     return result.as_dict()
 
 
+@router.get('/ceo/external-upload-file')
+async def get_ceo_external_upload_file(
+    session_id: str = Query(...),
+    path: str = Query(...),
+):
+    """Serve a file the External Agent API stored for this session.
+
+    Channel voice clips live under ``external-uploads`` (the bridge pushes them
+    through ``/api/v1`` like every other channel attachment), so a browser that
+    has to *play* one needs this read lane — ``/ceo/uploads/file`` is rooted at
+    the web upload directory and will not resolve it.
+    """
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (workspace_path() / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    if not str(session_id or "").strip():
+        # 空 session 会让下面的 allowed 退化成 external-uploads 根目录，
+        # 那等于任何会话的文件都能被任何请求读到。
+        raise HTTPException(status_code=400, detail='invalid_session_id')
+    allowed = external_upload_dir_for_session(session_id).resolve()
+    try:
+        candidate.relative_to(allowed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail='upload_path_outside_session_dir') from exc
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail='upload_file_not_found')
+    name = safe_filename(candidate.name) or candidate.name or 'attachment'
+    return FileResponse(
+        str(candidate),
+        media_type=_guess_upload_mime_type(name),
+        filename=name,
+        content_disposition_type='inline',
+    )
+
+
 @router.get('/ceo/uploads/file')
 async def get_ceo_uploaded_file(
     session_id: str = Query('web:shared'),
@@ -635,7 +706,7 @@ def _history_text(content: Any) -> str:
     return str(content or '').strip()
 
 
-def _normalize_snapshot_attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
+def _normalize_snapshot_attachments(message: dict[str, Any], session_id: str = "") -> list[dict[str, Any]]:
     metadata = message.get('metadata') if isinstance(message.get('metadata'), dict) else {}
     uploads = metadata.get('web_ceo_uploads') if isinstance(metadata, dict) else None
     items: list[dict[str, Any]] = []
@@ -658,6 +729,29 @@ def _normalize_snapshot_attachments(message: dict[str, Any]) -> list[dict[str, A
         if isinstance(size, (int, float)):
             item['size'] = int(size)
         items.append(item)
+    # 渠道侧的语音条落在 external_attachments 里（桥经 /api/v1 推上来），
+    # 历史上这个元数据从不到前端，所以只有可播放的音频被提升进气泡车道——
+    # 把所有渠道文件都画成附件卡会顺手改掉现有渠道会话的显示形状。
+    session_id = str(session_id or '').strip()
+    for raw in list(metadata.get('external_attachments') or []):
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get('kind') or '').strip().lower() != 'audio':
+            continue
+        path = str(raw.get('path') or '').strip()
+        if not path or not session_id:
+            continue
+        name = str(raw.get('name') or Path(path).name).strip() or Path(path).name or path
+        params = urlencode({'session_id': session_id, 'path': path})
+        items.append(
+            {
+                'path': path,
+                'name': name,
+                'mime_type': str(raw.get('mime_type') or '').strip() or 'audio/wav',
+                'kind': 'audio',
+                'url': f'/api/ceo/external-upload-file?{params}',
+            }
+        )
     if items:
         return items
     for raw in list(message.get('attachments') or []):
@@ -906,7 +1000,7 @@ def _build_ceo_snapshot(
                 content = raw_text
         if role == 'assistant' and session_id:
             content = rewrite_assistant_media_content(session_id, content)
-        attachments = _normalize_snapshot_attachments(raw) if role == 'user' else []
+        attachments = _normalize_snapshot_attachments(raw, session_id) if role == 'user' else []
         canonical_context = (
             raw.get('canonical_context')
             if role == 'assistant' and isinstance(raw.get('canonical_context'), dict)

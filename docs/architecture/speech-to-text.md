@@ -31,7 +31,13 @@
 
 QQ 侧：桥下载语音附件字节 → **进程内**直接调用引擎（桥与 web 在同一 event loop）→ 成功则把文本并入本条消息正文并带 `用户语音，机器识别结果：` 前缀；识别失败改写 `用户语音，机器识别失败：<原因>`；STT 未就绪时音频按原样作为 `file` 附件转发。来源标记是契约的一部分：没有它，听错的语音和手打文字在模型眼里无法区分。失败另起措辞，是为了不把"一句失败说明"伪装成"用户的原话"。
 
-音频字节**不落盘**：引擎只在临时目录里活一次调用，`finally` 里删除。这与 `/api/ceo/uploads` 有意不同——上传是用户主动附加，语音是尚未决定要留下来的个人数据。
+### 语音气泡与音频字段的存放
+
+转写成功后，两条车道都把**解码后的 WAV** 作为普通会话附件再交一次：网页侧由前端调用既有上传车道，QQ 侧由桥把 `kind:"audio"` 附件随回合走 `/api/v1`。渠道侧的字节来自引擎的 `SttResult.wav_bytes`——存的必须是解码后的 WAV 而不是收到的原始字节，因为语音条的真身是腾讯 silk，浏览器播不了。`wav_bytes` 只在进程内传递，刻意排除在 `as_dict()` 之外。渲染层据此把这条用户消息画成语音气泡（时长 + 播放 + 「转文字」展开转写），而不是把标记文字摊在正文里——转写文本的可见性由气泡的展开动作决定，正文里的标记只服务于模型。细节在 `web-and-admin.md`「Composer Voice Input」与「Attachment Bubble Rendering Contract」。
+
+**音频进的是模型的可见面之外**：附件说明行与 `UserInputMessage.attachments` 都跳过 `kind=='audio'`（`websocket_ceo._model_visible_uploads`、`external_v1._build_external_user_message`）。理由是内容已经在正文的转写里，多一行本地路径只会让模型以为要去打开一个文件。`metadata` 里保留它，历史回放才播得出来。
+
+`/api/ceo/transcribe` 自身仍然不落盘（见 `/ceo/transcribe` 的测试）；留下字节的是随后那次普通附件落盘：网页侧在 `.g3ku/web-ceo-uploads/<session>/`（随 `clear_web_ceo_session_artifacts` 一起删），渠道侧在 `.g3ku/external-uploads/<session>/`（该目录与其它渠道附件同样没有清理车道，会话删除也不会带走它）。两侧都是明文、与转写文本同寿命。渠道语音的字节由浏览器经 `GET /api/ceo/external-upload-file?session_id=&path=` 取回，该路由把可读范围钉在**本会话**的 external-uploads 子目录上。
 
 ## 4. 音频几何与门控
 
@@ -77,7 +83,7 @@ g3ku stt status             # 就绪矩阵：开关 / 二进制 / 模型 / 转�
 - `g3ku/runtime/prompts/ceo_frontdoor.md`「1. 总体规则」里一条：以 `用户语音，机器识别结果：` 开头的段落是转写而非用户原话，据此动手而理解存在歧义时先复述关键信息向用户确认，不要按字面直接执行或创建任务。位置贴着既有的图片输入规则（同一类"输入形态"约束），不新开小节。实测该文件 5784 → 5879 token（**+95 token，每个 CEO 回合**）。
 - `g3ku/runtime/prompts/heartbeat_rules.md` 规则 5 的子条：汇报结果或向用户提问时只依据本轮事件束与明确的用户输入，不要把旧消息内容当成用户现在的意思。实测 1614 → 1673 token（**+59 token，每个 heartbeat 回合**）。它是通用规则、不属于语音，但语音把"旧内容被当成用户意思"的概率抬高了：识别失败行本身也是一段会被读成用户话语的文字。
 
-标记字符串在两处各有一份常量：渠道侧 `qq_official/bridge.py::_VOICE_TRANSCRIPT_PREFIX`、网页侧 `org_graph_app.js::VOICE_AUTO_SEND_PREFIX`（只在自动发送模式加，手动模式不加）。它们必须与提示词里引用的那串完全一致——改任何一处而漏掉提示词，那条规则就变成一句永远不成立的指令，而且**没有任何测试会红**。
+标记字符串在两处各有一份常量：渠道侧 `qq_official/bridge.py::_VOICE_TRANSCRIPT_PREFIX`、网页侧 `org_graph_app.js::VOICE_AUTO_SEND_PREFIX`（只在自动发送模式加，手动模式不加）。前端画用户气泡时按同一串把标记从显示文本里剥掉（转写正文改由气泡的「转文字」展开），所以这串同时是"给模型看的记号"和"给人看的隐藏记号"。三处（两份常量 + 提示词）必须逐字一致，`tests/resources/org_graph_app.ceo_voice_input.test.js` 里有一条用例直接读源文件比这三者；但**提示词侧只被要求包含这一串**，把整条规则句子改掉而串还在，测试不会红。
 
 ## 8. 已知边界
 
@@ -95,5 +101,6 @@ g3ku stt status             # 就绪矩阵：开关 / 二进制 / 模型 / 转�
 - 提示"语音识别未就绪" → `g3ku stt status` 看是哪一道闸门：开关、二进制、还是模型
 - 一切正常但结果繁体 → `simplify_chinese` 或 `zhconv` 缺包
 - QQ 发来语音只剩「用户语音，机器识别失败：…」 → 看错误码：`audio_decoder_missing` 是缺 ffmpeg，`stt_silent` 是没录到声音，`stt_too_long` 是超上限
+- 转写出来了但气泡不能播放 → 分车道看：网页侧是那次附件上传失败（`.catch` 后刻意只退化成文字气泡）；渠道侧是 `GET /api/ceo/external-upload-file` 被拒，400 表示 `session_id` 与 `path` 不在同一个 external-uploads 子目录下，404 表示文件已被删
 - 识别很慢 → `stt.threads` 与 `stt.model`；`small` 在 2 核机器上不适合交互
 - 转写期间其它语音条一直等到 `stt_busy` → 单槽是设计，不是故障

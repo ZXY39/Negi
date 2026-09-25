@@ -78,8 +78,14 @@ class SttResult:
     model: str = ""
     seconds: float = 0.0
     wall_ms: int = 0
+    # Normalized, browser-playable WAV. QQ's original payload is Tencent silk,
+    # which nothing can play, so a channel that wants a playbackable voice
+    # bubble stores this instead of the bytes it sent us.
+    wav_bytes: bytes = b""
 
     def as_dict(self) -> dict[str, Any]:
+        """Wire shape. Deliberately excludes ``wav_bytes``: the clip is huge
+        relative to the transcript and only in-process callers can take it."""
         return {
             "ok": self.ok,
             "text": self.text,
@@ -303,7 +309,14 @@ async def transcribe_bytes(
             wall_ms,
             len(text),
         )
-        return SttResult(True, text=text, model=model, seconds=prepared.seconds, wall_ms=wall_ms)
+        return SttResult(
+            True,
+            text=text,
+            model=model,
+            seconds=prepared.seconds,
+            wall_ms=wall_ms,
+            wav_bytes=prepared.wav_bytes,
+        )
     except Exception as exc:  # noqa: BLE001 - the envelope contract
         logger.exception("stt transcription failed")
         return SttResult(

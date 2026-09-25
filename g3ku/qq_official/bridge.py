@@ -36,6 +36,7 @@ import asyncio
 import base64
 import mimetypes
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -318,6 +319,17 @@ async def _collect_attachments(
             )
             if result.ok and result.text:
                 voice_lines.append(f"{_VOICE_TRANSCRIPT_PREFIX}{result.text}")
+                if result.wav_bytes:
+                    # 让用户能回放原语音。存的必须是引擎解码后的 WAV 而不是收到的
+                    # 字节：QQ 语音条是腾讯 silk，浏览器播不出来。
+                    payloads.append(
+                        {
+                            "kind": "audio",
+                            "name": f"{Path(name).stem or 'qq-voice'}.wav",
+                            "mime_type": "audio/wav",
+                            "data_base64": base64.b64encode(result.wav_bytes).decode("ascii"),
+                        }
+                    )
             else:
                 logger.warning(
                     "qq-official voice {} was not transcribed: {} ({})",

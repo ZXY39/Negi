@@ -192,6 +192,64 @@ async def test_mixed_message_keeps_image_and_voice_separately(monkeypatch):
     assert voice_lines == ["用户语音，机器识别结果：口述内容"]
 
 
+DECODED_WAV = b"RIFF\x00\x00\x00\x00WAVEfmt " + b"\x00" * 32
+
+
+@pytest.mark.asyncio
+async def test_transcribed_voice_also_ships_a_playable_clip(monkeypatch):
+    """气泡要能回放，所以转写成功时得把解码后的 WAV 一起交出去——注意交出去的
+    不能是收到的字节：QQ 语音条是腾讯 silk，浏览器播不了。"""
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
+    monkeypatch.setattr(
+        stt_engine,
+        "transcribe_bytes",
+        transcribes(SttResult(True, text="刚刚给你发了啥", model="base", wav_bytes=DECODED_WAV)),
+    )
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(QQ_REAL_VOICE))
+
+    assert voice_lines == ["用户语音，机器识别结果：刚刚给你发了啥"]
+    assert [item["kind"] for item in payloads] == ["audio"]
+    import base64 as _b64
+
+    assert _b64.b64decode(payloads[0]["data_base64"]) == DECODED_WAV
+    assert payloads[0]["mime_type"] == "audio/wav"
+    # 语音条被命名成 .png 会让前端把它画成图片；扩展名必须跟着解码后的容器走。
+    assert payloads[0]["name"].endswith(".wav")
+    assert not payloads[0]["name"].endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_voice_lane_without_a_decoded_clip_stays_text_only(monkeypatch):
+    """老行为不能回退：引擎没给 WAV（比如解码失败）时就只有转写行，不产生空附件。"""
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
+    monkeypatch.setattr(
+        stt_engine,
+        "transcribe_bytes",
+        transcribes(SttResult(True, text="只有文字", model="base")),
+    )
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(VOICE))
+
+    assert payloads == []
+    assert voice_lines == ["用户语音，机器识别结果：只有文字"]
+
+
+@pytest.mark.asyncio
+async def test_failed_voice_ships_no_clip(monkeypatch):
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
+    monkeypatch.setattr(
+        stt_engine,
+        "transcribe_bytes",
+        transcribes(SttResult(False, error_code="stt_failed", error="引擎退出码 1", wav_bytes=DECODED_WAV)),
+    )
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(VOICE))
+
+    assert payloads == []
+    assert voice_lines == ["用户语音，机器识别失败：引擎退出码 1"]
+
+
 @pytest.mark.asyncio
 async def test_voice_without_url_is_skipped(monkeypatch):
     monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
