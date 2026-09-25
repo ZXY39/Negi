@@ -4780,6 +4780,78 @@ function isMarkdownBlockStart(lines, index) {
     return false;
 }
 
+const MD_ORDERED_ITEM = /^\s*\d+\.\s+(.*)$/;
+const MD_BULLET_ITEM = /^\s*[-*+]\s+(.*)$/;
+
+// 列表项之间的那段间隙。continues=true 表示它以另一个同类列表项收尾，间隙里的段落
+// 就是上一条的正文；撞到别的块（标题、引用、表格、另一类列表）或文本结尾时
+// continues=false，段落是否仍算正文由调用方按「这条列表有没有正文形状」决定。
+function _collectMarkdownListGap(lines, from, itemPattern) {
+    const paragraphs = [];
+    let current = [];
+    let index = from;
+    const flush = () => {
+        if (current.length) {
+            paragraphs.push(current.join("\n"));
+            current = [];
+        }
+    };
+    while (index < lines.length) {
+        const line = String(lines[index] || "");
+        if (itemPattern.test(line)) {
+            flush();
+            return { paragraphs, nextIndex: index, continues: true };
+        }
+        if (!line.trim()) {
+            flush();
+            index += 1;
+            continue;
+        }
+        if (isMarkdownBlockStart(lines, index)) {
+            flush();
+            return { paragraphs, nextIndex: index, continues: false };
+        }
+        current.push(line.trimEnd());
+        index += 1;
+    }
+    flush();
+    return { paragraphs, nextIndex: index, continues: false };
+}
+
+// 一个连续列表区只出一个 <ol>/<ul>：模型爱用空行把每一项隔开，逐行匹配会把列表切成
+// N 个单元素 <ol>，浏览器于是把每一项都编号成 1。
+function _collectMarkdownListItems(lines, from, itemPattern) {
+    const items = [];
+    let index = from;
+    while (index < lines.length) {
+        const match = String(lines[index] || "").match(itemPattern);
+        if (match) {
+            items.push({ text: match[1], bodies: [] });
+            index += 1;
+            continue;
+        }
+        const gap = _collectMarkdownListGap(lines, index, itemPattern);
+        // 列表末尾的段落只有在前面已经出现过「条目 + 正文」形状时才跟着条目走，
+        // 否则它是列表之后的一段独立文字。
+        const ownsTrailingParagraph = gap.paragraphs.length && items.some((item) => item.bodies.length);
+        if (!gap.continues && !ownsTrailingParagraph) break;
+        items[items.length - 1].bodies.push(...gap.paragraphs);
+        index = gap.nextIndex;
+        if (!gap.continues) break;
+    }
+    return { items, nextIndex: index };
+}
+
+function _markdownListBlock(tag, items) {
+    const markup = items.map((item) => {
+        const bodies = item.bodies
+            .map((paragraph) => `<p>${renderInlineMarkdown(paragraph).replace(/\n/g, "<br>")}</p>`)
+            .join("");
+        return `<li>${renderInlineMarkdown(item.text)}${bodies}</li>`;
+    }).join("");
+    return `<${tag}>${markup}</${tag}>`;
+}
+
 function renderMarkdownBlocks(value) {
     const text = String(value ?? "").replace(/\r\n?/g, "\n");
     const lines = text.split("\n");
@@ -4852,29 +4924,17 @@ function renderMarkdownBlocks(value) {
             continue;
         }
 
-        if (/^\s*\d+\.\s+/.test(line)) {
-            const items = [];
-            while (index < lines.length) {
-                const current = String(lines[index] || "");
-                const match = current.match(/^\s*\d+\.\s+(.*)$/);
-                if (!match) break;
-                items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
-                index += 1;
-            }
-            blocks.push(`<ol>${items.join("")}</ol>`);
+        if (MD_ORDERED_ITEM.test(line)) {
+            const collected = _collectMarkdownListItems(lines, index, MD_ORDERED_ITEM);
+            blocks.push(_markdownListBlock("ol", collected.items));
+            index = collected.nextIndex;
             continue;
         }
 
-        if (/^\s*[-*+]\s+/.test(line)) {
-            const items = [];
-            while (index < lines.length) {
-                const current = String(lines[index] || "");
-                const match = current.match(/^\s*[-*+]\s+(.*)$/);
-                if (!match) break;
-                items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
-                index += 1;
-            }
-            blocks.push(`<ul>${items.join("")}</ul>`);
+        if (MD_BULLET_ITEM.test(line)) {
+            const collected = _collectMarkdownListItems(lines, index, MD_BULLET_ITEM);
+            blocks.push(_markdownListBlock("ul", collected.items));
+            index = collected.nextIndex;
             continue;
         }
 

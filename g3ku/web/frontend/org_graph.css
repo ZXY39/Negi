@@ -3243,6 +3243,12 @@ textarea {
     color: var(--brand-primary);
 }
 
+/* 条目之间空行断开的列表会并成一个 <ol>/<ul>，正文作为 <p> 落在所属条目里；
+   全局 reset 把段落 margin 清零了，这里补回与块间距同档的一段呼吸。 */
+.markdown-content li > p {
+    margin-top: 8px;
+}
+
 .markdown-content a {
     color: color-mix(in srgb, var(--brand-primary) 86%, #0ea5e9 14%);
     text-decoration: none;
