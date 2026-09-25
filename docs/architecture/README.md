@@ -155,7 +155,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 
 | Topic | Owning doc |
 |---|---|
-| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, distribution / append-notice contract, provider timeout boundary, worker performance history (`perf_samples` sampling, retention, and the shared perf read model), silent reply via the `silent` tool (turn-terminal semantics, transcript trace row, compaction exemption) | `runtime-overview.md` |
+| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, distribution / append-notice contract, provider timeout boundary, worker performance history (`perf_samples` sampling, retention, and the shared perf read model), silent reply via the `silent` tool (turn-terminal semantics, transcript trace row, compaction exemption, turn-end stage closure with an empty summary slot) | `runtime-overview.md` |
 | Frontdoor context compression contract (`token_compression` / `stage_compaction`, 阶段收口 `context_visible` 与证据索引回填) | `runtime-overview.md` |
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
 | Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |

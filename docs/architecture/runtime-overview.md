@@ -112,6 +112,8 @@
 
 归一化后的边界是"不投递，但保留正文"：外部渠道与 cron 都不外发（`RunResult.is_silent_reply=true`，`RunResult.output` 为空，channel transport 与 cron dispatch 据此闸门）、`message_end` 带 `text=正文` + `silent_reply` + `silent_reason`（外部 relay 依据 flag 跳过）、回合生命周期照常走完（`turn_end` / `agent_end` / `state_snapshot`、状态 `completed`），本回合已发布的阶段与工具调用保持完整可见。
 
+轮末收口与普通可见回合共用同一个 `_complete_active_frontdoor_stage_state`，区别只在于**不传** `completed_stage_summary`：静默轮把当时的活动阶段置为 `completed`、写 `finished_at` 并清空 `active_stage_id`。这一步是阶段归属的分界，不是展示层的修饰——没收口的活动阶段会被下一轮继承（`frontdoor_stage_state` 跨回合不清空，新轮次继续往同一个 `stage_id` 里长轮），于是后面那条可见响应的轨道里出现一张归属上一个静默轮的卡。总结槽留空同样是契约的一部分：槽位由下一次 `submit_next_stage` 书写该阶段的真实结论，而"这轮为什么不出声"已经有完整去处（silent 那一轮的 `tools[].arguments.reason`，模型未给正文时静默行的可见正文本身就是 `reason`），写进总结槽等于用元理由顶掉结论并留下两份真相。`silent` 不需要活动阶段，所以无活动阶段的静默轮收口是 no-op，不产生幻影阶段；副作用是 `transition_required` 随收口归零，下一轮的闸门读数从"预算耗尽"变成"无活动阶段"，两条出口都要求 `submit_next_stage`。
+
 transcript 落一条 assistant 行，带 `silent_reply=true`、`prompt_visible=true`、`ui_visible=true` 以及 `silent_reason` / `silent_subject` / `silent_superseded_by`，正文原样保留。`prompt_visible=true` 是这条车道的关键不变量：取消机器侧的静默闸门之后，"这一轮为什么没说话"的唯一记录者就是模型自己，而它要能反悔就必须看得见自己上次的选择。基线侧同样不重复回填该正文——带 `tool_calls` 的那行助手记录已经把它带进请求体基线，再 append 一次就是同文两份。因此静默回合的正文在请求体里只有一份，这一点由回归断言钉住。
 
 两条历史压缩车道对这条行都豁免，否则痕迹活不下来（裸 tool_call 行实盘存活率约 6%）：阶段车道把它排除出可删集合、配对的 tool 结果行随之一起保留；token 车道是位置型切分，白名单无效，所以整组摘出待压缩区间、压缩完成后回插在摘要块与最近尾部之间（顺序单调，且 assistant 与 tool 结果必须同进同出，否则 provider 拒孤儿结果）。详见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」。

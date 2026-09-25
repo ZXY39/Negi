@@ -8358,11 +8358,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             self._frontdoor_apply_stage_archive(result, authoritative_request_body_messages)
             return result
-        if visible_output:
+        if visible_output or silent_reply:
             # 轮末不写摘要:纯文本收尾的回合里,该阶段的最终回复就紧邻在块之后,摘要写
             # 指针只会让块宣称"结论已交付"却指不到任何东西(它指向的助手回复会被上下文
             # 压缩吃掉)。留空即可——块两侧就是对话原文。模型经 submit_next_stage 自带
             # 摘要的阶段不受影响(_complete_active_frontdoor_stage_state 仅在为空时填充)。
+            # 静默轮同样收口但不传摘要:不收口会把这条活动阶段留给下一轮继承,后面的可见
+            # 回合会在同一条卡里长出静默轮的轮次;而把 reason 写进摘要槽会顶掉下一次
+            # submit 的真实结论——理由已有去处,就是本轮 silent 调用的 arguments.reason。
             finalized_stage_state = self._complete_active_frontdoor_stage_state(finalized_stage_state)
         result["frontdoor_stage_state"] = finalized_stage_state
         result["frontdoor_canonical_context"] = self._merged_frontdoor_canonical_context(
