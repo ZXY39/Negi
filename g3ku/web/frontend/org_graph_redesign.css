@@ -2255,21 +2255,21 @@
     gap: var(--ui-space-3);
 }
 
-[data-ui-version="v2"] .project-settings-update {
-    display: flex;
-    flex-direction: column;
-    gap: var(--ui-space-3);
-}
-
+/* 版本信息与「检查更新 / 重启并更新」同一行，靠右；窗口很窄时省略号收尾，
+   完整内容在 title 里。 */
 [data-ui-version="v2"] .project-settings-update-line {
-    margin: 0;
+    margin: 0 0 0 auto;
+    min-width: 0;
     color: var(--ui-text-secondary);
     font-size: 13px;
-    word-break: break-all;
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 [data-ui-version="v2"] .project-settings-footer {
-    justify-content: space-between;
+    justify-content: flex-end;
 }
 
 /* 隐藏的 file input 由「选择配置包」按钮代挑，回显只当状态行用。 */

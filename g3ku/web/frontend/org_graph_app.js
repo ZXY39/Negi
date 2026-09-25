@@ -14639,17 +14639,25 @@ function formatUpdateCheckedAt(value) {
 }
 
 function updateSettingsLineText(item) {
+    // 一行只放版本对：整行可用宽 412px，两个控件占 78+91+12，带上检查时间就要
+    // 443px 必然换行。时间、错误码这些细节走 title。
     if (!item?.has_ledger) return "尚未检查过版本";
-    if (item.error) return `上次检查失败（${item.error}）· ${formatUpdateCheckedAt(item.checked_at)}`;
-    if (item.newer) {
-        return `当前 v${item.current_version} · 最新 ${item.latest_tag} · 检查于 ${formatUpdateCheckedAt(item.checked_at)}`;
-    }
-    return `当前 v${item.current_version} · 已是最新（${item.latest_tag || "无标签"}）`;
+    if (item.error) return "上次检查失败";
+    if (item.newer) return `当前 v${item.current_version} · 最新 ${item.latest_tag}`;
+    return `当前 v${item.current_version} · 已是最新`;
+}
+
+function updateSettingsLineTitle(item) {
+    if (!item?.has_ledger) return "还没查过远端标签；点「检查更新」立即查一次。";
+    const checked = `检查于 ${formatUpdateCheckedAt(item.checked_at)}`;
+    if (item.error) return `${item.error} · ${checked}`;
+    return `${item.latest_tag || "无标签"} · ${checked}`;
 }
 
 function renderProjectSettingsUpdate(item) {
     if (U.projectSettingsUpdateText) {
         U.projectSettingsUpdateText.textContent = updateSettingsLineText(item);
+        U.projectSettingsUpdateText.title = updateSettingsLineTitle(item);
     }
     if (U.projectSettingsApplyUpdate) {
         U.projectSettingsApplyUpdate.hidden = !Boolean(item?.newer);

@@ -15,6 +15,7 @@ class StubHTMLElement extends StubElement {
         super();
         this.hidden = false;
         this.disabled = false;
+        this.title = "";
         this.textContent = "";
         this.attributes = {};
         this.children = [];
@@ -133,7 +134,9 @@ test("settings line keeps unknown, failed and current apart", () => {
     const text = api.U.projectSettingsUpdateText.textContent;
     assert.match(text, /当前 v1\.0\.1/);
     assert.match(text, /最新 v1\.0\.2/);
-    assert.match(text, /检查于 \d{2}-\d{2} \d{2}:\d{2}/);
+    // 行内不放检查时间：整行可用宽 412px，加上时间就要 443px 会挤到第二行。
+    assert.doesNotMatch(text, /检查于/);
+    assert.match(api.U.projectSettingsUpdateText.title, /检查于 \d{2}-\d{2} \d{2}:\d{2}/);
     assert.equal(api.U.projectSettingsApplyUpdate.hidden, false);
 
     api.renderProjectSettingsUpdate({
@@ -144,10 +147,12 @@ test("settings line keeps unknown, failed and current apart", () => {
     });
     assert.match(api.U.projectSettingsUpdateText.textContent, /上次检查失败/);
     assert.doesNotMatch(api.U.projectSettingsUpdateText.textContent, /已是最新/);
+    assert.match(api.U.projectSettingsUpdateText.title, /remote_unreachable/);
 });
 
-test("missing checked_at renders as never, not a bogus timestamp", () => {
+test("up to date never borrows the newer wording", () => {
     const api = stubbedUpdateApi();
     api.renderProjectSettingsUpdate({ has_ledger: true, newer: false, latest_tag: "v1.0.1", current_version: "1.0.1" });
-    assert.match(api.U.projectSettingsUpdateText.textContent, /已是最新（v1\.0\.1）/);
+    assert.match(api.U.projectSettingsUpdateText.textContent, /已是最新/);
+    assert.doesNotMatch(api.U.projectSettingsUpdateText.textContent, /最新 v/);
 });
