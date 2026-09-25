@@ -70,7 +70,7 @@ async def test_voice_becomes_text_when_stt_is_ready(monkeypatch):
     payloads, voice_lines = await bridge._collect_attachments(None, make_message(VOICE))
 
     assert payloads == []
-    assert voice_lines == ["[语音转文字] 帮我查一下昨天的任务"]
+    assert voice_lines == ["用户语音，机器识别结果：帮我查一下昨天的任务"]
 
 
 @pytest.mark.asyncio
@@ -96,7 +96,7 @@ async def test_failed_transcription_reports_why_instead_of_disappearing(monkeypa
     payloads, voice_lines = await bridge._collect_attachments(None, make_message(VOICE))
 
     assert payloads == []
-    assert voice_lines == ["[语音转文字] [未能识别：没有录到声音]"]
+    assert voice_lines == ["用户语音，机器识别失败：没有录到声音"]
 
 
 @pytest.mark.asyncio
@@ -121,7 +121,7 @@ async def test_mixed_message_keeps_image_and_voice_separately(monkeypatch):
     payloads, voice_lines = await bridge._collect_attachments(None, make_message(IMAGE, VOICE))
 
     assert [item["kind"] for item in payloads] == ["image"]
-    assert voice_lines == ["[语音转文字] 口述内容"]
+    assert voice_lines == ["用户语音，机器识别结果：口述内容"]
 
 
 @pytest.mark.asyncio

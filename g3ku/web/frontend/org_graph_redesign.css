@@ -1014,7 +1014,8 @@
 }
 
 [data-ui-version="v2"] #ceo-context-usage-brain,
-[data-ui-version="v2"] #ceo-attach-btn {
+[data-ui-version="v2"] #ceo-attach-btn,
+[data-ui-version="v2"] #ceo-voice-btn {
     width: 40px;
     height: 40px;
     min-height: 40px;
@@ -1026,9 +1027,18 @@
 }
 
 [data-ui-version="v2"] #ceo-context-usage-brain:hover,
-[data-ui-version="v2"] #ceo-attach-btn:hover {
+[data-ui-version="v2"] #ceo-attach-btn:hover,
+[data-ui-version="v2"] #ceo-voice-btn:hover {
     background: var(--ui-neutral-soft);
     border-color: var(--ui-border-strong);
+}
+
+/* 录音态必须在 v2 里重述一遍：v2 的 #ceo-voice-btn 带 id，特异性高于基础皮肤的
+   .ceo-voice-btn.is-recording，不重述就只剩红图标——红环与红底会被上面那组顶掉。 */
+[data-ui-version="v2"] #ceo-voice-btn.is-recording {
+    color: #ef4444;
+    border-color: color-mix(in srgb, #ef4444 55%, var(--ui-border-strong));
+    background: color-mix(in srgb, #ef4444 12%, var(--ui-bg-surface));
 }
 
 /* 用量光晕：旧皮肤靠这圈径向渐变把"有读数"画出来，v2 的读数已经在填充层与面板里，
@@ -1042,7 +1052,8 @@
     --ceo-brain-ring-radius: calc(var(--ui-radius-control) - 1px);
 }
 
-[data-ui-version="v2"] #ceo-attach-btn svg {
+[data-ui-version="v2"] #ceo-attach-btn svg,
+[data-ui-version="v2"] #ceo-voice-btn svg {
     width: 18px;
     height: 18px;
 }
@@ -2454,6 +2465,7 @@
 [data-ui-version="v2"] select,
 [data-ui-version="v2"] .icon-btn,
 [data-ui-version="v2"] #ceo-attach-btn,
+[data-ui-version="v2"] #ceo-voice-btn,
 [data-ui-version="v2"] #ceo-context-usage-brain,
 [data-ui-version="v2"] .nav-item,
 [data-ui-version="v2"] .ceo-session-select,

@@ -79,8 +79,10 @@ _MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 _QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
 
 # 语音转写进正文时带来源标记：不带标记，听错的语音和手打文字在模型眼里无法区分，
-# 它就没办法说"你刚发的语音里那句我没听清"。
-_VOICE_TRANSCRIPT_PREFIX = "[语音转文字] "
+# 它就没办法说"你刚发的语音里那句我没听清"。识别失败另起一行措辞——把失败也写成
+# "机器识别结果：" 等于让模型把一句失败说明当成用户说的话。
+_VOICE_TRANSCRIPT_PREFIX = "用户语音，机器识别结果："
+_VOICE_FAILURE_PREFIX = "用户语音，机器识别失败："
 
 # pump 重连退避。SSE 流断开（服务端事件循环阻塞超过读超时、网络抖动、进程重启）
 # 后必须自动重连：pump 一旦终结且不再重建，该会话的所有主动推送（心跳升级、
@@ -248,7 +250,7 @@ async def _collect_attachments(
                     result.error,
                 )
                 voice_lines.append(
-                    f"{_VOICE_TRANSCRIPT_PREFIX}[未能识别：{result.error or result.error_code}]"
+                    f"{_VOICE_FAILURE_PREFIX}{result.error or result.error_code}"
                 )
             continue
         payloads.append(
