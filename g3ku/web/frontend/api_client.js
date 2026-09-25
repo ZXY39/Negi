@@ -601,6 +601,18 @@ class ApiClient {
         return data.items || [];
     }
 
+    // 转写是本机 CPU 推理，实测 2 核机器上 23 秒中文音频要 9.5 秒，默认 10 秒超时
+    // 会正好掐在成功前一刻；排队预算另有 60 秒，所以这里放到 150 秒。
+    static async transcribeCeoVoice(blob, filename = "voice.wav") {
+        const formData = new FormData();
+        formData.append("file", new File([blob], filename, { type: blob.type || "audio/wav" }));
+        return await this._request("POST", "/api/ceo/transcribe", {
+            body: formData,
+            timeoutMs: 150000,
+            requestKey: "ceo-voice-transcribe",
+        });
+    }
+
     static async getTasks(scope = 1, sessionId = this.getActiveSessionId()) {
         const data = await this._request("GET", "/api/tasks", {
             params: { session_id: sessionId, scope },

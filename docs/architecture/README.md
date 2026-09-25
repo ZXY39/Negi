@@ -13,6 +13,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 7. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
 8. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
 9. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`g3ku mcp serve`)
+10. `speech-to-text.md` when the change touches local voice transcription: the composer mic button, inbound channel voice, the `stt` config section, or the vendored whisper.cpp binary
 
 ## Topic Guide
 
@@ -34,6 +35,8 @@ Start here when you are new to the repository or when a change crosses subsystem
   Use for the channel-agnostic headless API consumed by third-party bridges and the built-in official QQ adapter: auth, external session registry, turn terminal invariant, SSE event mapping, and ext outbound routing.
 - `agent-gateway.md`
   Use for the out-of-the-box agent integration surfaces built on the External Agent API: the OpenAI-compatible chat endpoint (session mapping, wait/timeout and streaming semantics) and the MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity).
+- `speech-to-text.md`
+  Use for local voice-to-text: the whisper.cpp subprocess engine and why it is not kept resident, audio normalization and silence gating, binary/model provisioning, and what the model tier choice trades in latency and accuracy.
 
 ## Debugging Entry Points
 
@@ -140,6 +143,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」 → `web-and-admin.md`「Node Output Content Read Contract」
 - 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、亮色主题下解锁/初始化窗口仍是暗卡片、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱 → `web-and-admin.md`「Frontend Theme And Layout Contract」
 - 新设备一行指令装完发现 skill/tools 比开发机少、重跑安装指令为什么没更新代码、`g3ku status` 的 `Release:` 行为什么不出现 → `operations-and-maintenance.md`「新设备首次安装与升级」
+- 点输入框麦克风按钮提示未就绪／未启用、录音结果仍是繁体、或局域网 http 打开时浏览器拒绝麦克风 → `speech-to-text.md`「分发与就绪」「已知边界」
+- QQ 发来的语音变成一行本地路径注记、或只有 `[语音转文字] [未能识别：…]`、或语音条迟迟等不到回复 → `external-agent-api.md`「内置官方 QQ 适配器」+ `speech-to-text.md`「常见排障入口」
 
 ## Maintenance Rules
 
@@ -150,7 +155,7 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 3. Pointers name topics, never section numbers.
 4. Present tense only. No "now / no longer / previously / 现在 / 不再 / 曾经" — that is changelog language.
 5. Superseded text is deleted outright, never left as "obsolete notes".
-6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 210 KB (raised from 160 KB: one contract per operator-visible web surface, and the CEO live lane now carries its own three — single-writer frame delivery, per-connection patch coalescing, and the first-paint feed window) / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 55 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 26 KB / `config-and-models` 30 KB (raised from 26 KB: the config-bundle contract — master-key transport, the two load-bearing exclusions and whole-replace import — is one new section with no prior home, and the doc's existing sections are all live facts) / `external-agent-api` 26 KB (raised from 16 KB: the built-in official QQ adapter contract — inbound idempotency, per-session SSE pump survival, durable outbox reconciliation — grew past the band while all of it is still one consumer-facing contract) / `agent-gateway` 10 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
+6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 210 KB (raised from 160 KB: one contract per operator-visible web surface, and the CEO live lane now carries its own three — single-writer frame delivery, per-connection patch coalescing, and the first-paint feed window) / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 55 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 26 KB / `config-and-models` 41 KB (raised from 30 KB: the config-bundle contract — master-key transport, the two load-bearing exclusions and whole-replace import — is one new section with no prior home, and the doc's existing sections are all live facts; raised again for the `stt` section, whose per-field measured defaults have no other home and whose serializer-whitelist trap is a live maintenance hazard) / `external-agent-api` 26 KB (raised from 16 KB: the built-in official QQ adapter contract — inbound idempotency, per-session SSE pump survival, durable outbox reconciliation — grew past the band while all of it is still one consumer-facing contract) / `agent-gateway` 10 KB / `speech-to-text` 8.5 KB. Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
 
 ## Topic Ownership
 
@@ -166,4 +171,5 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Config schema, hot refresh, model bindings, secret location, deployment unlock, config bundle export/import | `config-and-models.md` |
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
+| Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), known latency and accuracy envelope | `speech-to-text.md` |
 | Startup/deploy/troubleshooting order, install root vs data root storage layout and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |

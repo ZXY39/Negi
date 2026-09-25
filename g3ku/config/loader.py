@@ -584,6 +584,22 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
             "dispatchTimeoutSeconds": cfg.cron.dispatch_timeout_seconds,
             "dispatchCancelGraceSeconds": cfg.cron.dispatch_cancel_grace_seconds,
         },
+        "stt": {
+            "enabled": cfg.stt.enabled,
+            "model": cfg.stt.model,
+            "language": cfg.stt.language,
+            "threads": cfg.stt.threads,
+            "maxAudioSeconds": cfg.stt.max_audio_seconds,
+            "minRmsDbfs": cfg.stt.min_rms_dbfs,
+            "timeoutSeconds": cfg.stt.timeout_seconds,
+            "simplifyChinese": cfg.stt.simplify_chinese,
+            "modelDir": cfg.stt.model_dir,
+            "binaryPath": cfg.stt.binary_path,
+            "binaryReleaseTag": cfg.stt.binary_release_tag,
+            "binarySha256": cfg.stt.binary_sha256,
+            "binaryDownloadBaseUrl": cfg.stt.binary_download_base_url,
+            "modelDownloadBaseUrl": cfg.stt.model_download_base_url,
+        },
     }
 
 
@@ -602,6 +618,8 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("externalApi",),
         ("qqBot",),
         ("cron",),
+        # 可选能力段：没配就是不用，取值回落到 schema 默认。
+        ("stt",),
     }
     missing = [
         ".".join(path)

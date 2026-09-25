@@ -917,6 +917,70 @@ class CronConfig(Base):
     dispatch_cancel_grace_seconds: float = 10.0
 
 
+STT_MODEL_NAMES = ("tiny", "base", "small")
+
+
+class SttConfig(Base):
+    """Local speech-to-text, driven by the official ``whisper.cpp`` CLI binary.
+
+    Opt-in like every other inbound surface: a transcription wants both cores,
+    so it must never start because a default said so.
+
+    Every default below is measured on this product's own floor (2 vCPU / 4
+    logical CPUs, 7.7 GB RAM, no GPU) against a 22.9s Mandarin clip, not copied
+    from upstream docs:
+
+    * ``base``: 6.9s wall, 318 MB peak RSS. ``tiny``: 3.8s, ~250 MB, more
+      errors. ``small``: 20.9-32.9s (slower than realtime), 854 MB.
+    * ``threads`` 4 instead of 2 is 26% faster but saturates the box and
+      competes with a live agent turn.
+    * ``language`` ``zh`` is 33% faster than ``auto`` (6.9 s vs 9.2 s on the
+      same clip) but answered 3 s of silence with two fluent sentences, while
+      ``auto`` returned empty. Correctness wins the default; ``min_rms_dbfs``
+      reclaims most of the speed for the empty-recording case.
+    * ``-bo 1`` is deliberately not offered: on 3s of silence the default
+      best-of rejected the output (empty), best-of 1 emitted two fluent
+      sentences.
+    * ``simplify_chinese``: whisper's ``base``/``tiny`` wrote every Chinese
+      clip in traditional characters on this box; ``small`` wrote simplified.
+      Conversion costs 48 microseconds, so it is a post-pass, not a model
+      upgrade.
+
+    The binary is pinned by release tag *and* digest on purpose: upstream
+    publishes Windows builds under build tags (``b5130`` shipped the same day
+    as v1.9.4), and this machine reaches GitHub assets at ~20 KB/s, so a
+    silent "latest" lookup would be neither auditable nor fast.
+    """
+
+    enabled: bool = False
+    model: str = "base"
+    language: str = "auto"
+    threads: int = 2
+    max_audio_seconds: int = 60
+    min_rms_dbfs: float = -70.0
+    timeout_seconds: int = 45
+    simplify_chinese: bool = True
+    model_dir: str = ".g3ku/stt"
+    binary_path: str = ""
+    binary_release_tag: str = "b5130"
+    binary_sha256: str = "f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c"
+    binary_download_base_url: str = "https://github.com/ggml-org/whisper.cpp/releases/download"
+    model_download_base_url: str = "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main"
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _normalize_model(cls, value: Any) -> str:
+        name = str(value or "").strip().lower()
+        return name if name in STT_MODEL_NAMES else "base"
+
+    @field_validator("binary_download_base_url", "model_download_base_url", mode="after")
+    @classmethod
+    def _reject_insecure_download_base(cls, value: str) -> str:
+        if not str(value or "").strip().lower().startswith("https://"):
+            raise ValueError("stt download URLs must be https://")
+        return str(value).strip().rstrip("/")
+
+
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -930,6 +994,7 @@ class Config(BaseSettings):
     external_api: ExternalApiConfig = Field(default_factory=ExternalApiConfig)
     qq_bot: QqBotConfig = Field(default_factory=QqBotConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
+    stt: SttConfig = Field(default_factory=SttConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":

@@ -56,6 +56,7 @@ from g3ku.runtime.session_keys import (
 )
 from g3ku.runtime.web_ceo_sessions import (
     WEB_CEO_IMAGE_UPLOAD_MAX_BYTES,
+    WEB_CEO_VOICE_UPLOAD_MAX_BYTES,
     WebCeoStateStore,
     build_channel_ceo_session_item,
     build_local_ceo_session_item,
@@ -560,6 +561,38 @@ async def upload_ceo_files(
     if not items:
         raise HTTPException(status_code=400, detail='no_files_uploaded')
     return {'ok': True, 'session_id': session_id, 'items': items}
+
+
+@router.post('/ceo/transcribe')
+async def transcribe_ceo_voice(file: UploadFile = File(...)):
+    """Transcribe one composer voice recording and hand the text back.
+
+    Bytes are never stored: unlike ``/ceo/uploads`` this request leaves nothing
+    on disk, because a voice note is personal data the user has not chosen to
+    attach to a session. Failures come back as ``200 + error_code`` rather than
+    an HTTP error -- "no speech detected" is a valid outcome the composer has
+    to render, not a transport fault.
+    """
+    from g3ku.stt import engine as stt_engine
+
+    data = await file.read(WEB_CEO_VOICE_UPLOAD_MAX_BYTES + 1)
+    if len(data) > WEB_CEO_VOICE_UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                'code': 'voice_too_large',
+                'size_bytes': len(data),
+                'limit_bytes': WEB_CEO_VOICE_UPLOAD_MAX_BYTES,
+                'message': '录音超过 2 MiB 上限，请缩短后再试。',
+            },
+        )
+    result = await stt_engine.transcribe_bytes(
+        data,
+        filename=str(file.filename or 'voice'),
+        mime_type=str(getattr(file, 'content_type', '') or ''),
+        source='web-composer',
+    )
+    return result.as_dict()
 
 
 @router.get('/ceo/uploads/file')

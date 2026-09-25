@@ -78,6 +78,10 @@ _MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
 # 服务端排队回执兜底文案（正常取 /api/v1 响应里的 receipt）。
 _QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
 
+# 语音转写进正文时带来源标记：不带标记，听错的语音和手打文字在模型眼里无法区分，
+# 它就没办法说"你刚发的语音里那句我没听清"。
+_VOICE_TRANSCRIPT_PREFIX = "[语音转文字] "
+
 # pump 重连退避。SSE 流断开（服务端事件循环阻塞超过读超时、网络抖动、进程重启）
 # 后必须自动重连：pump 一旦终结且不再重建，该会话的所有主动推送（心跳升级、
 # cron 提醒、任务终态）都会永久滞留在服务端事件缓冲里，形成"能收不能发"的
@@ -179,9 +183,10 @@ def _attachment_name(item: Any, content_type: str) -> str:
 
 async def _collect_attachments(
     media_client: httpx.AsyncClient, message: Any
-) -> list[dict[str, str]]:
-    """Download the attachments referenced by a botpy message and return them
-    as ``/api/v1`` attachment payloads (inline ``data_base64``).
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Download the attachments referenced by a botpy message.
+
+    Returns ``(/api/v1 attachment payloads, voice transcript lines)``.
 
     botpy exposes ``message.attachments`` items with ``content_type`` / ``url``
     / ``filename`` / ``id``. All items with absolute http(s) URLs are
@@ -189,11 +194,22 @@ async def _collect_attachments(
     archives, ...) as ``kind:"file"`` — the server stores non-image files and
     surfaces them to the model as local-path notes. Failures degrade to
     text-only delivery.
+
+    ``audio/*`` is the exception: forwarded as a file it reaches the model as
+    one local-path line and the utterance itself is lost, so when local
+    speech-to-text is enabled the bytes are transcribed here and the text is
+    returned instead of an attachment. With speech-to-text off, audio keeps
+    its old file treatment byte-for-byte — the feature must never make an
+    existing deployment see less than it used to.
     """
+    from g3ku.stt import engine as stt_engine
+
     raw_items = list(getattr(message, "attachments", None) or [])
-    if not raw_items:
-        return []
     payloads: list[dict[str, str]] = []
+    voice_lines: list[str] = []
+    if not raw_items:
+        return payloads, voice_lines
+    stt_ready = await stt_engine.inbound_voice_enabled()
     for item in raw_items:
         if len(payloads) >= _MAX_INBOUND_ATTACHMENTS:
             logger.warning(
@@ -207,13 +223,33 @@ async def _collect_attachments(
         if not url.lower().startswith(("http://", "https://")):
             continue
         is_image = content_type.startswith("image/")
+        is_audio = content_type.startswith("audio/")
         if not content_type:
             name = str(getattr(item, "filename", "") or "").strip()
             content_type = str(mimetypes.guess_type(name)[0] or "").strip().lower()
             is_image = content_type.startswith("image/")
+            is_audio = content_type.startswith("audio/")
         max_bytes = _MAX_INBOUND_IMAGE_BYTES if is_image else _MAX_INBOUND_FILE_BYTES
         data = await _download_attachment_bytes(media_client, url, max_bytes=max_bytes)
         if not data:
+            continue
+        if is_audio and stt_ready:
+            name = _attachment_name(item, content_type or "audio/wav")
+            result = await stt_engine.transcribe_bytes(
+                data, filename=name, mime_type=content_type, source="qq-voice"
+            )
+            if result.ok and result.text:
+                voice_lines.append(f"{_VOICE_TRANSCRIPT_PREFIX}{result.text}")
+            else:
+                logger.warning(
+                    "qq-official voice {} was not transcribed: {} ({})",
+                    name,
+                    result.error_code,
+                    result.error,
+                )
+                voice_lines.append(
+                    f"{_VOICE_TRANSCRIPT_PREFIX}[未能识别：{result.error or result.error_code}]"
+                )
             continue
         payloads.append(
             {
@@ -223,7 +259,7 @@ async def _collect_attachments(
                 "data_base64": base64.b64encode(data).decode("ascii"),
             }
         )
-    return payloads
+    return payloads, voice_lines
 
 
 async def run_qq_official_bridge(
@@ -266,8 +302,13 @@ async def run_qq_official_bridge(
         text: str,
         event_id: str,
         attachments: list[dict[str, str]] | None = None,
+        voice_lines: list[str] | None = None,
     ) -> None:
         attachment_payloads = list(attachments or [])
+        if voice_lines:
+            # 语音转出的文字并入正文：QQ 语音往往是口语化的独立内容，并入而不是
+            # 另起回合，用户才有"发了一段话 + 一段语音"的连贯语义。
+            text = "\n".join([str(text or "").strip(), *[line for line in voice_lines if line]]).strip()
         if not text.strip() and not attachment_payloads:
             return
         session_id = sessions.get(external_key)
@@ -710,36 +751,39 @@ async def run_qq_official_bridge(
         async def on_ready(self):
             on_state("connected", "")
 
-        async def on_group_at_message_create(self, message):
+        async def _dispatch(self, external_key: str, message):
+            attachments, voice_lines = await _collect_attachments(media_client, message)
             await on_incoming(
-                external_key_for_group(getattr(message, "group_openid", "")),
+                external_key,
                 _content_of(message),
                 getattr(message, "id", ""),
-                await _collect_attachments(media_client, message),
+                attachments,
+                voice_lines,
+            )
+
+        async def on_group_at_message_create(self, message):
+            await self._dispatch(
+                external_key_for_group(getattr(message, "group_openid", "")), message
             )
 
         async def on_c2c_message_create(self, message):
-            await on_incoming(
-                external_key_for_c2c(_openid_of(message)),
-                _content_of(message),
-                getattr(message, "id", ""),
-                await _collect_attachments(media_client, message),
-            )
+            await self._dispatch(external_key_for_c2c(_openid_of(message)), message)
 
         async def on_at_message_create(self, message):
-            await on_incoming(
-                external_key_for_guild(getattr(message, "guild_id", ""), getattr(message, "channel_id", "")),
-                _content_of(message),
-                getattr(message, "id", ""),
-                await _collect_attachments(media_client, message),
+            await self._dispatch(
+                external_key_for_guild(
+                    getattr(message, "guild_id", ""), getattr(message, "channel_id", "")
+                ),
+                message,
             )
 
         async def on_direct_message_create(self, message):
-            await on_incoming(
-                external_key_for_guild_dm(getattr(message, "guild_id", ""), getattr(getattr(message, "author", None), "id", "")),
-                _content_of(message),
-                getattr(message, "id", ""),
-                await _collect_attachments(media_client, message),
+            await self._dispatch(
+                external_key_for_guild_dm(
+                    getattr(message, "guild_id", ""),
+                    getattr(getattr(message, "author", None), "id", ""),
+                ),
+                message,
             )
 
     def _content_of(message: Any) -> str:

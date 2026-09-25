@@ -107,6 +107,10 @@ const S = {
     ceoPauseBusy: false,
     ceoUploads: [],
     ceoUploadBusy: false,
+    // 语音输入：S.ceoVoice 只在录音期间非空（按钮即录音态开关），
+    // S.ceoVoiceBusy 覆盖"已停止、正在本机转写"这段没有录音但也不能重开的窗口。
+    ceoVoice: null,
+    ceoVoiceBusy: false,
     // 顶边拖拽得到的输入框高度；0 = 未拖过，仍按内容自动增高。
     ceoInputManualHeight: 0,
     // 编辑重发模式:{sessionId, turnId, prevDraft} | null;Fork/编辑相关辅助状态。
@@ -464,6 +468,7 @@ const U = {
     ceoInput: document.getElementById("ceo-input"),
     ceoInputResizeHandle: document.getElementById("ceo-input-resize-handle"),
     ceoAttach: document.getElementById("ceo-attach-btn"),
+    ceoVoiceBtn: document.getElementById("ceo-voice-btn"),
     ceoFileInput: document.getElementById("ceo-file-input"),
     ceoUploadList: document.getElementById("ceo-upload-list"),
     ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
@@ -5652,6 +5657,186 @@ function removePendingCeoUpload(index) {
     S.ceoUploads = next;
     syncActiveCeoComposerDraft();
     renderPendingCeoUploads();
+}
+
+// ===== 语音输入（本机 whisper.cpp 转写） =====
+// 采样率固定 16k：whisper 的工作率，也是 60 秒音频能压进 2MiB 上传上限的原因
+// （16k/单声道/16bit ≈ 32KB/s）。重采样在浏览器里用 OfflineAudioContext 做完，
+// 后端因此不需要 ffmpeg 也能吃下网页录音。
+const VOICE_SAMPLE_RATE = 16000;
+const VOICE_MAX_MS = 60000;
+
+function encodePcmWav(samples, sampleRate) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    const writeText = (offset, text) => {
+        for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+    };
+    writeText(0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeText(8, "WAVE");
+    writeText(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeText(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+    let offset = 44;
+    for (let i = 0; i < samples.length; i += 1) {
+        const clamped = Math.max(-1, Math.min(1, samples[i]));
+        view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+        offset += 2;
+    }
+    return new Blob([buffer], { type: "audio/wav" });
+}
+
+async function audioBlobToWav16k(blob) {
+    const raw = await blob.arrayBuffer();
+    // OfflineAudioContext 也提供 decodeAudioData，用它就不用真的打开音频输出设备。
+    const scratch = new OfflineAudioContext(1, 1, VOICE_SAMPLE_RATE);
+    const decoded = await scratch.decodeAudioData(raw);
+    const frames = Math.max(1, Math.round(decoded.duration * VOICE_SAMPLE_RATE));
+    const resampled = new OfflineAudioContext(1, frames, VOICE_SAMPLE_RATE);
+    const source = resampled.createBufferSource();
+    source.buffer = decoded;
+    source.connect(resampled.destination);
+    source.start();
+    const rendered = await resampled.startRendering();
+    return encodePcmWav(rendered.getChannelData(0), VOICE_SAMPLE_RATE);
+}
+
+function voiceCaptureSupported() {
+    return Boolean(
+        navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+        && typeof window.MediaRecorder !== "undefined"
+        && typeof window.OfflineAudioContext !== "undefined"
+    );
+}
+
+function syncCeoVoiceButton() {
+    const button = U.ceoVoiceBtn;
+    if (!button) return;
+    const recording = Boolean(S.ceoVoice);
+    button.setAttribute("aria-pressed", recording ? "true" : "false");
+    button.classList.toggle("is-recording", recording);
+    button.innerHTML = `<i data-lucide="${recording ? "mic-off" : "mic"}"></i>`;
+    button.title = recording ? "停止并识别" : "语音输入";
+    icons();
+}
+
+function stopCeoVoiceCapture() {
+    const capture = S.ceoVoice;
+    if (!capture) return;
+    S.ceoVoice = null;
+    if (capture.timer) window.clearTimeout(capture.timer);
+    capture.stream.getTracks().forEach((track) => track.stop());
+    syncCeoVoiceButton();
+    // 不在这里取数据：MediaRecorder 的最后一片要等 stop() 之后的 ondataavailable
+    // 才落地，提前读会吞掉尾音。收尾统一挂在 onstop。
+    try {
+        capture.recorder.stop();
+    } catch (error) {
+        void error;
+    }
+}
+
+async function startCeoVoiceCapture() {
+    if (S.ceoVoice || S.ceoVoiceBusy) return;
+    if (!voiceCaptureSupported()) {
+        // getUserMedia 只在安全上下文可用：用局域网 IP 走 http 打开面板时浏览器
+        // 直接禁麦克风，这里必须把原因说出来，否则按钮看起来像坏了。
+        showToast({
+            title: "无法录音",
+            text: "当前页面不是安全上下文，浏览器禁止访问麦克风。请用 http://127.0.0.1 或 HTTPS 地址打开面板。",
+            kind: "error",
+            durationMs: 8000,
+        });
+        return;
+    }
+    let stream;
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        });
+    } catch (error) {
+        showToast({ title: "麦克风不可用", text: String(error && error.message ? error.message : error), kind: "error" });
+        return;
+    }
+    const recorder = new window.MediaRecorder(stream);
+    const capture = { recorder, stream, chunks: [], startedAt: Date.now(), timer: null };
+    recorder.ondataavailable = (event) => {
+        if (event && event.data && event.data.size) capture.chunks.push(event.data);
+    };
+    recorder.onstop = () => { void finishCeoVoiceTranscription(capture); };
+    capture.mimeType = recorder.mimeType || "audio/webm";
+    // 到点自己停：上限同时受后端 stt.max_audio_seconds 约束，超了会被拒。
+    capture.timer = window.setTimeout(() => stopCeoVoiceCapture(), VOICE_MAX_MS);
+    S.ceoVoice = capture;
+    recorder.start();
+    syncCeoVoiceButton();
+}
+
+async function finishCeoVoiceTranscription(capture) {
+    S.ceoVoiceBusy = true;
+    showToast({ title: "识别中", text: "正在本机转写，通常需要几秒", kind: "info", persistent: true });
+    try {
+        const blob = new Blob(capture.chunks, { type: capture.mimeType });
+        const wav = await audioBlobToWav16k(blob);
+        const result = await ApiClient.transcribeCeoVoice(wav);
+        closeToast();
+        if (result && result.ok && result.text) {
+            appendVoiceTextToComposer(String(result.text));
+            return;
+        }
+        showToast({
+            title: "没有识别到文字",
+            text: voiceFailureText(result),
+            kind: "error",
+            durationMs: 9000,
+        });
+    } catch (error) {
+        closeToast();
+        showToast({ title: "识别失败", text: String(error && error.message ? error.message : error), kind: "error" });
+    } finally {
+        S.ceoVoiceBusy = false;
+    }
+}
+
+function voiceFailureText(result) {
+    const code = String((result && result.error_code) || "");
+    if (code === "stt_disabled") return "语音识别未启用：在配置里打开 stt.enabled。";
+    if (code === "stt_binary_missing" || code === "stt_model_missing") {
+        return "语音识别未就绪：执行 g3ku stt prepare 下载 whisper.cpp 与模型。";
+    }
+    if (code === "stt_silent" || code === "stt_empty") return "这段录音几乎是静音，没有可识别的声音。";
+    if (code === "stt_busy") return "正在处理另一段音频，请稍候再试。";
+    if (code === "stt_too_long") return "录音超过时长上限，请说短一些。";
+    if (code === "audio_decoder_missing") return "本机缺少 ffmpeg，无法解码这种音频格式。";
+    return String((result && result.error) || "未知原因");
+}
+
+function appendVoiceTextToComposer(text) {
+    const current = String(U.ceoInput ? U.ceoInput.value : "");
+    // 与后端拼接分段的同一条规则：只有两侧都是拉丁字符才补空格，
+    // 否则中文会被塞进多余的空格。
+    const needsSpace = /[A-Za-z0-9][^A-Za-z0-9]*$/.test(current) && /^[A-Za-z0-9]/.test(text);
+    U.ceoInput.value = `${current}${needsSpace ? " " : ""}${text}`;
+    syncCeoInputHeight();
+    syncActiveCeoComposerDraft();
+    syncCeoPrimaryButton();
+    U.ceoInput.focus();
+}
+
+function handleCeoVoiceClick() {
+    if (S.ceoVoice) {
+        stopCeoVoiceCapture();
+        return;
+    }
+    void startCeoVoiceCapture();
 }
 
 // ===== 用户消息编辑重发 / Fork 会话 =====
@@ -15129,6 +15314,7 @@ function bind() {
         U.ceoFileInput?.click();
     });
     U.ceoFileInput?.addEventListener("change", (e) => void handleCeoFileSelection(e));
+    U.ceoVoiceBtn?.addEventListener("click", handleCeoVoiceClick);
     bindCeoModelModeControls();
     U.ceoUploadList?.addEventListener("click", (e) => {
         const remove = e.target.closest("[data-upload-remove]");

@@ -702,6 +702,18 @@ Context compression has one operator-facing surface: a rule inside the CEO feed 
 - The canonical message is `上下文大小超出当前模型<展示名>，请更改模型链配置后继续`.
 - `<展示名>` is expected to come from the runtime-selected model's `provider_model`, with model `key` only as fallback.
 
+### Composer Voice Input
+
+The composer carries a mic button (`#ceo-voice-btn`, beside the attach button) that records locally, transcribes on the machine, and puts the text into the input box. The engine and its measured defaults are owned by `speech-to-text.md`; what this surface promises is the following.
+
+- The button is a record/stop toggle and is always rendered: readiness is reported on click (with the exact `g3ku stt prepare` instruction) rather than by hiding the control, so a not-yet-provisioned install explains itself instead of looking broken. While recording it carries `aria-pressed="true"`, the `mic-off` glyph, and the `is-recording` class.
+- Transcription **appends to the draft, never replaces it**, and the result is not sent: the user reviews and edits it before pressing send. That review step is what makes this lane safer than the channel voice lane, where transcribed text reaches the model with no human pass. Spacing follows one rule shared with the backend: a space is inserted only where latin characters meet, so Chinese drafts are not padded.
+- Recording is resampled to 16 kHz mono WAV **in the browser** (`decodeAudioData` + `OfflineAudioContext`, then a hand-written WAV header), which is why this path needs no server-side decoder and why 60 s of audio fits the 2 MiB request cap.
+- `POST /api/ceo/transcribe` answers `200` with an `{ok, text, error_code, error, seconds, wall_ms}` envelope for every outcome except an oversized body (`413 voice_too_large`). "No speech detected" is a valid result the composer renders, not a transport failure, so error branches must key off `error_code` and never off the HTTP status.
+- Voice bytes are never stored: unlike `/api/ceo/uploads`, this endpoint writes nothing under the upload root.
+- The transcription runs off the event loop and is serialized by one global slot, so a long note cannot stall the live CEO websocket lane or overlap a second inference; a concurrent request waits and then receives `stt_busy`.
+- `getUserMedia` requires a secure context. `http://127.0.0.1:<port>` works; opening the panel over `http://<lan-ip>` makes the browser refuse the microphone, and the toast says so explicitly.
+
 ### Composer Model Mode Panel
 
 The context-usage brain is also the composer's model-and-context entry: clicking it (or Enter/Space on it) opens an upward panel above the composer. The panel leads with the model actually in use and its context numbers, then the `模型链` / `指定模型` choice, then the matching pane. There is no separate model-mode button beside the brain — the numbers live in the panel so they are not shown twice. The one hover text on the brain is the `长按压缩上下文` affordance hint (see `Manual Context Compression`).

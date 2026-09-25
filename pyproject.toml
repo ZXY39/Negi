@@ -47,6 +47,9 @@ dependencies = [
     "pillow>=10.0.0,<12.0.0",
     "openai>=1.0.0,<4.0.0",
     "qq-botpy>=1.1.5,<2.0.0",
+    # 语音识别的后处理：whisper 的 base/tiny 在本机对中文一律输出繁体，转回简体
+    # 实测 48 微秒、纯 Python、0.2MB。ASR 本体是外部 whisper.cpp 二进制，不占依赖。
+    "zhconv>=1.4.3,<2.0.0",
 ]
 
 [project.optional-dependencies]

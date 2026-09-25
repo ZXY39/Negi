@@ -927,6 +927,83 @@ def external_sessions(
     console.print(table)
 
 
+# ============================================================================
+# Local speech-to-text (whisper.cpp) status and provisioning
+# ============================================================================
+
+stt_app = typer.Typer(help="本地语音识别（官方 whisper.cpp 二进制）")
+app.add_typer(stt_app, name="stt")
+
+
+@stt_app.command("status")
+def stt_status():
+    """Show the speech-to-text switch, resolved paths and readiness."""
+    from g3ku.stt import engine as stt_engine
+
+    snapshot = stt_engine.status()
+    for label, key in (
+        ("开关 stt.enabled", "enabled"),
+        ("就绪 ready", "ready"),
+        ("模型", "model"),
+        ("语言", "language"),
+        ("线程", "threads"),
+        ("时长上限秒", "max_audio_seconds"),
+        ("单次超时秒", "timeout_seconds"),
+        ("二进制", "binary_path"),
+        ("模型文件", "model_path"),
+    ):
+        console.print(f"{label:20s} {snapshot.get(key)}")
+    console.print(f"{'二进制就位':20s} {snapshot.get('binary_present')}")
+    console.print(
+        f"{'模型就位':20s} {snapshot.get('model_present')} "
+        f"({int(snapshot.get('model_bytes') or 0) // 1048576} MiB)"
+    )
+    console.print(f"{'繁简转换':20s} {snapshot.get('simplify_chinese')} (zhconv={snapshot.get('converter_available')})")
+    if not snapshot.get("ready"):
+        console.print("[yellow]未就绪：执行 g3ku stt prepare 下载二进制与模型。[/yellow]")
+        raise typer.Exit(code=1)
+
+
+@stt_app.command("prepare")
+def stt_prepare(
+    model: str = typer.Option("", "--model", "-m", help="tiny|base|small，默认取配置 stt.model"),
+    enable: bool = typer.Option(False, "--enable", help="下载完成后把 stt.enabled 置为 true"),
+):
+    """Download the pinned whisper.cpp build and the ggml model.
+
+    Nothing here runs on a request path, and nothing is saved unless --enable is
+    passed: downloading is not the same decision as turning the feature on.
+    """
+    from g3ku.config.loader import load_config, save_config
+    from g3ku.stt import engine as stt_engine
+    from g3ku.stt.engine import SttProvisionError
+
+    cfg = load_config()
+    if str(model or "").strip():
+        cfg.stt.model = model.strip().lower()
+
+    try:
+        with console.status("准备 whisper.cpp 二进制（本机到 GitHub 产物可能只有 ~20KB/s）..."):
+            binary = stt_engine.prepare_binary(cfg)
+        console.print(f"二进制：{binary['path']}")
+        with console.status("下载 ggml 模型..."):
+            downloaded = stt_engine.prepare_model(cfg)
+        console.print(f"模型：{downloaded['path']} ({downloaded['bytes'] // 1048576} MiB)")
+    except SttProvisionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    except Exception as exc:  # noqa: BLE001 - CLI surfaces download failures as text
+        console.print(f"[red]下载失败：{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if enable:
+        cfg.stt.enabled = True
+        save_config(cfg)
+        console.print("已启用 stt.enabled=true")
+    snapshot = stt_engine.status(cfg)
+    console.print(f"就绪：{snapshot['ready']}")
+
+
 if __name__ == "__main__":
     app()
 

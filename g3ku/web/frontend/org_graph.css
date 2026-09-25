@@ -4752,7 +4752,8 @@ textarea {
     display: block;
 }
 
-.ceo-attach-btn {
+.ceo-attach-btn,
+.ceo-voice-btn {
     width: var(--ceo-input-leading-size);
     height: var(--ceo-input-leading-size);
     border-radius: 20px;
@@ -4772,6 +4773,7 @@ textarea {
     box-shadow: var(--shadow-md);
 }
 
+.ceo-voice-btn:focus-visible,
 .ceo-attach-btn:focus-visible,
 .ceo-upload-remove:focus-visible {
     outline: 0;
@@ -4779,9 +4781,41 @@ textarea {
 }
 
 .ceo-attach-btn:disabled,
+.ceo-voice-btn:disabled,
 .ceo-upload-remove:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+}
+
+/* 录音态：整颗按钮着红并用伪元素呼吸。动画只动 ::after 的 opacity——
+   主元素上的 transform/box-shadow 动画会和上面那条 transition 打架。 */
+.ceo-voice-btn.is-recording {
+    position: relative;
+    color: #ef4444;
+    border-color: color-mix(in srgb, #ef4444 55%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 12%, var(--bg-panel));
+}
+
+.ceo-voice-btn.is-recording::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border-radius: 22px;
+    border: 2px solid color-mix(in srgb, #ef4444 70%, transparent);
+    animation: ceo-voice-pulse 1.4s ease-in-out infinite;
+    opacity: 0.25;
+}
+
+@keyframes ceo-voice-pulse {
+    0%, 100% { opacity: 0.15; }
+    50% { opacity: 0.7; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ceo-voice-btn.is-recording::after {
+        animation: none;
+        opacity: 0.55;
+    }
 }
 
 .ceo-context-usage-brain {

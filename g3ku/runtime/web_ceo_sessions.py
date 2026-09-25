@@ -49,6 +49,9 @@ FRONTDOOR_REQUEST_ARTIFACT_PRUNE_INTERVAL = 25
 # Per-session counter used only to throttle how often pruning runs.
 _frontdoor_artifact_persist_count: dict[str, int] = {}
 WEB_CEO_IMAGE_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+# 语音条只走转写、不落盘，所以这里限的是"能让人烧多少 CPU"：16k/单声道/16bit
+# 约 32KB/s，2MiB 正好覆盖 60 秒，与 stt.max_audio_seconds 同一量级。
+WEB_CEO_VOICE_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_TASK_MAX_DEPTH = 1
 DEFAULT_TASK_HARD_MAX_DEPTH = 4
 SESSION_TASK_DEFAULTS_SCOPE_KEY = "task_defaults_scope"
