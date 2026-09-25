@@ -124,6 +124,7 @@
                     title="设置" aria-haspopup="dialog" aria-expanded="false">
                     <i data-lucide="settings" aria-hidden="true"></i>
                     <span class="settings-label">设置</span>
+                    <span id="update-nav-dot" class="update-dot" title="有新版本" hidden></span>
                 </button>
             </div>
         </nav>
@@ -1024,6 +1025,15 @@
                                 <span class="ui-checkbox-box" aria-hidden="true"></span>
                                 <span>记住密码自动解锁</span>
                             </label>
+                        </div>
+                        <div class="project-settings-update">
+                            <p id="project-settings-update-text" class="project-settings-update-line">版本信息未读取</p>
+                            <div class="project-settings-actions">
+                                <button id="project-settings-check-update-btn" class="toolbar-btn ghost"
+                                    type="button">检查更新</button>
+                                <button id="project-settings-apply-update-btn" class="toolbar-btn" type="button"
+                                    hidden>重启并更新</button>
+                            </div>
                         </div>
                     </div>
                     <div class="confirm-actions project-settings-footer">

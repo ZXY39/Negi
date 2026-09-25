@@ -375,6 +375,7 @@
 }
 
 [data-ui-version="v2"] #project-settings-btn {
+    position: relative;
     width: auto;
     height: 36px;
     padding: 0 var(--ui-space-3);
@@ -386,6 +387,23 @@
     font-size: 13px;
     font-weight: 600;
     box-shadow: none;
+}
+
+/* 有新版本时亮在设置按钮左上角；折叠态按钮变窄，同一个偏移仍然贴角。 */
+[data-ui-version="v2"] #update-nav-dot {
+    position: absolute;
+    top: -3px;
+    left: -3px;
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    background: var(--danger-color, #ef4444);
+    box-shadow: 0 0 0 2px var(--ui-bg-surface);
+    pointer-events: none;
+}
+
+[data-ui-version="v2"] #update-nav-dot[hidden] {
+    display: none;
 }
 
 [data-ui-version="v2"] #project-settings-btn:hover:not(:disabled) {
@@ -2235,6 +2253,19 @@
     display: flex;
     align-items: center;
     gap: var(--ui-space-3);
+}
+
+[data-ui-version="v2"] .project-settings-update {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-3);
+}
+
+[data-ui-version="v2"] .project-settings-update-line {
+    margin: 0;
+    color: var(--ui-text-secondary);
+    font-size: 13px;
+    word-break: break-all;
 }
 
 [data-ui-version="v2"] .project-settings-footer {

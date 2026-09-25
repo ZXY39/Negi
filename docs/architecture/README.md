@@ -143,6 +143,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 日志板块反复出现「接口返回 500：/api/content/read」、节点详情输出框报「加载完整输出失败」或显示「完整输出已被清理」 → `web-and-admin.md`「Node Output Content Read Contract」
 - 主题切换不生效或刷新后丢失、亮色主题出现大面积灰底、亮色主题下解锁/初始化窗口仍是暗卡片、侧栏折叠后审计角标消失、页面卡片列数在某宽度错乱 → `web-and-admin.md`「Frontend Theme And Layout Contract」
 - 新设备一行指令装完发现 skill/tools 比开发机少、重跑安装指令为什么没更新代码、`g3ku status` 的 `Release:` 行为什么不出现 → `operations-and-maintenance.md`「新设备首次安装与升级」
+- 设置按钮红点不亮或误亮、面板显示"已是最新"但设备其实离线、「重启并更新」点了服务没回来 → `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」+ `operations-and-maintenance.md`「自动检查新版本与「重启并更新」」
 - 点输入框麦克风按钮提示未就绪／未启用、录音结果仍是繁体、或局域网 http 打开时浏览器拒绝麦克风 → `speech-to-text.md`「分发与就绪」「已知边界」
 - QQ 发来的语音变成一行本地路径注记、或只有「用户语音，机器识别失败：…」、或语音条迟迟等不到回复 → `external-agent-api.md`「内置官方 QQ 适配器」+ `speech-to-text.md`「常见排障入口」
 

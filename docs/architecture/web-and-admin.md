@@ -839,3 +839,21 @@ The CEO browser/runtime integration has a second live-only status lane for long-
 See `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」 for the self-scheduled patrol and decision semantics (`decision=continue` / `stop` / `unavailable`, observation-aware sidecar review, tool-call-scoped timeout-stop); the universal tool timeout deadline the patrol runs within is owned by `tool-and-skill-system.md`「统一工具 Timeout 合同」.
 
 Operators should treat `ceo.tool.reminder` as a live runtime signal, not durable conversation UI; the authoritative end state still arrives through the normal CEO tool/error/final-reply events.
+
+## Update Notification And Restart-And-Upgrade Contract
+
+This surface tells an installed device that a newer release tag exists and lets the operator apply it from the browser. It owns the web-side reading of one file: the update ledger written by the periodic release-tag check (polling cadence and the check channel are owned by `operations-and-maintenance.md`「新设备首次安装与升级」).
+
+**Endpoints** (`main/api/update_rest.py`, mounted under `/api`):
+
+- `GET /api/update/status` — reads the ledger only. It never touches the network, so the 30s UI poll costs nothing and an offline device keeps answering from the last known result.
+- `POST /api/update/check` — one forced manual check (`source=manual`), bypassing the interval gate.
+- `POST /api/update/apply` — spawns the detached upgrade runner and returns. It performs no shutdown itself.
+
+**The tri-state invariant.** `has_ledger=false` means "never checked", `error` non-empty means "checked and failed", and `newer=true` is the only state that may light anything. Rendering the first two as "up to date" — or as a red dot — is the failure mode this contract exists to prevent, because it makes an offline device indistinguishable from a current one. The settings line therefore has four distinct texts (never checked / last check failed / newer available / up to date), and the sidebar dot plus the 「重启并更新」 button stay hidden unless `newer` is true.
+
+**Where it lives in the UI.** The dot (`#update-nav-dot`) is a static span inside `#project-settings-btn`, absolutely positioned at the button's top-left corner; that button needs `position: relative` to be its containing block, otherwise the dot anchors to an outer container. The panel row reuses the existing `project-settings-actions` shape (button + one status line), and the poll rides the audit badge's existing 30s interval instead of adding a timer.
+
+**Unlock boundary.** All three endpoints sit behind the `423 project_locked` guard like any other `/api/*` route. A locked project shows no dot and issues no remote request: the check loop only starts once the web runtime bus exists.
+
+**Apply is user-initiated, once.** The button posts, the runner stops the service through the existing `POST /api/bootstrap/exit` (so "running work needs confirmation" has exactly one implementation), waits for the port to be released, upgrades the checkout, then relaunches. If the upgrade fails it relaunches the previous version rather than leaving the device without a service — the sequence and its rationale (an interpreter must never import source mid-replacement) are in `operations-and-maintenance.md`「新设备首次安装与升级」.

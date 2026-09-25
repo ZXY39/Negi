@@ -98,6 +98,7 @@ const cloneRoleConcurrency = (concurrency = DEFAULT_ROLE_CONCURRENCY()) => {
 
 const S = {
     view: "ceo",
+    updateStatus: null,
     ceoWs: null,
     ceoWsToken: 0,
     ceoWsLastErrorCode: "",
@@ -690,6 +691,10 @@ const U = {
     projectSettingsClose: document.getElementById("project-settings-close-btn"),
     projectSettingsOpenPassword: document.getElementById("project-settings-open-password-btn"),
     projectSettingsOpenBundle: document.getElementById("project-settings-open-bundle-btn"),
+    updateNavDot: document.getElementById("update-nav-dot"),
+    projectSettingsUpdateText: document.getElementById("project-settings-update-text"),
+    projectSettingsCheckUpdate: document.getElementById("project-settings-check-update-btn"),
+    projectSettingsApplyUpdate: document.getElementById("project-settings-apply-update-btn"),
     configBundleBackdrop: document.getElementById("config-bundle-backdrop"),
     configBundleDialog: document.getElementById("config-bundle-dialog"),
     configBundleClose: document.getElementById("config-bundle-close-btn"),
@@ -10051,6 +10056,8 @@ function openProjectSettingsDialog() {
     U.projectSettingsBackdrop.classList.add("is-open");
     U.projectSettings?.setAttribute("aria-expanded", "true");
     void syncProjectSettingsAutoUnlock();
+    renderProjectSettingsUpdate(S.updateStatus);
+    void refreshUpdateStatus();
     window.requestAnimationFrame(() => U.projectSettingsDialog?.focus?.());
 }
 
@@ -14602,6 +14609,8 @@ function bindAuditBadge() {
     if (S.auditBadgePollIntervalId) return;
     S.auditBadgePollIntervalId = window.setInterval(() => {
         void refreshAuditBadge();
+        // 版本红点搭同一拍：它读的是服务端台账（本地文件），不额外产生外网请求。
+        void refreshUpdateStatus();
     }, AUDIT_BADGE_POLL_MS);
 }
 
@@ -14609,6 +14618,100 @@ function markAuditRead() {
     const latest = S.auditLatestEventTs || "";
     writeSessionJson(AUDIT_LAST_SEEN_KEY, { lastSeen: latest });
     renderAuditNavBadge(0);
+}
+
+// 新版本提醒：红点只跟台账里的 `newer` 走。"从未检查"与"检查失败"都不亮 ——
+// 把未知渲染成"已是最新"或凭空亮点，都会让用户无法区分这两种状态。
+function renderUpdateNavDot(item) {
+    if (!U.updateNavDot) return;
+    U.updateNavDot.hidden = !Boolean(item?.newer);
+}
+
+function formatUpdateCheckedAt(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "从未";
+    const stamp = new Date(raw);
+    if (Number.isNaN(stamp.getTime())) return "未知";
+    const month = String(stamp.getMonth() + 1).padStart(2, "0");
+    const day = String(stamp.getDate()).padStart(2, "0");
+    const time = stamp.toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    return `${month}-${day} ${time}`;
+}
+
+function updateSettingsLineText(item) {
+    if (!item?.has_ledger) return "尚未检查过版本";
+    if (item.error) return `上次检查失败（${item.error}）· ${formatUpdateCheckedAt(item.checked_at)}`;
+    if (item.newer) {
+        return `当前 v${item.current_version} · 最新 ${item.latest_tag} · 检查于 ${formatUpdateCheckedAt(item.checked_at)}`;
+    }
+    return `当前 v${item.current_version} · 已是最新（${item.latest_tag || "无标签"}）`;
+}
+
+function renderProjectSettingsUpdate(item) {
+    if (U.projectSettingsUpdateText) {
+        U.projectSettingsUpdateText.textContent = updateSettingsLineText(item);
+    }
+    if (U.projectSettingsApplyUpdate) {
+        U.projectSettingsApplyUpdate.hidden = !Boolean(item?.newer);
+    }
+}
+
+async function refreshUpdateStatus() {
+    try {
+        const item = await ApiClient.getUpdateStatus();
+        S.updateStatus = item || null;
+    } catch {
+        return;
+    }
+    renderUpdateNavDot(S.updateStatus);
+    if (U.projectSettingsBackdrop && !U.projectSettingsBackdrop.hidden) {
+        renderProjectSettingsUpdate(S.updateStatus);
+    }
+}
+
+async function checkForUpdatesNow() {
+    if (!U.projectSettingsCheckUpdate) return;
+    U.projectSettingsCheckUpdate.disabled = true;
+    try {
+        const item = await ApiClient.checkUpdateNow();
+        S.updateStatus = item || null;
+        renderUpdateNavDot(item);
+        renderProjectSettingsUpdate(item);
+        if (item?.newer) {
+            showToast({ title: "发现新版本", text: `${item.latest_tag}（当前 v${item.current_version}）`, kind: "info" });
+        } else if (item?.error) {
+            showToast({ title: "检查失败", text: "读不到远端标签，稍后再试。", kind: "warn" });
+        } else {
+            showToast({ title: "已是最新", text: `当前 v${item?.current_version || ""}`, kind: "success" });
+        }
+    } catch (error) {
+        showToast({ title: "检查失败", text: String(error?.message || error), kind: "error" });
+    } finally {
+        U.projectSettingsCheckUpdate.disabled = false;
+    }
+}
+
+function requestApplyUpdate() {
+    const item = S.updateStatus || {};
+    openConfirm({
+        title: `重启并更新到 ${item.latest_tag || "新版本"}`,
+        text: "服务会先暂停正在进行的对话与任务，更新完成后自动重启。",
+        confirmLabel: "重启并更新",
+        confirmKind: "danger",
+        onConfirm: async () => {
+            try {
+                await ApiClient.applyUpdate({ ref: item.latest_tag || "", pause_running_work: true });
+                showToast({ title: "正在重启", text: "服务回来本页会自动恢复。", kind: "info", persistent: true });
+            } catch (error) {
+                showToast({ title: "更新未启动", text: String(error?.message || error), kind: "error" });
+            }
+        },
+    });
+}
+
+function bindUpdateNotice() {
+    U.projectSettingsCheckUpdate?.addEventListener("click", () => void checkForUpdatesNow());
+    U.projectSettingsApplyUpdate?.addEventListener("click", () => requestApplyUpdate());
 }
 
 function bindMemoryCardToggles() {
@@ -15889,6 +15992,8 @@ function init() {
     startLiveDurationTicker();
     bindAuditBadge();
     void refreshAuditBadge();
+    bindUpdateNotice();
+    void refreshUpdateStatus();
     window.addEventListener("beforeunload", () => {
         flushCeoComposerDraftCachePersist();
         flushCeoFollowUpQueueCachePersist();

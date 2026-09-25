@@ -402,6 +402,21 @@ class ApiClient {
         return data.item || null;
     }
 
+    static async getUpdateStatus() {
+        const data = await this.get("/api/update/status");
+        return data.item || null;
+    }
+
+    static async checkUpdateNow() {
+        const data = await this.post("/api/update/check", {});
+        return data.item || null;
+    }
+
+    static async applyUpdate(payload) {
+        const data = await this.post("/api/update/apply", payload || {});
+        return data.item || null;
+    }
+
     static async changeBootstrapPassword(payload) {
         const data = await this.post("/api/bootstrap/change-password", payload || {});
         return data.item || null;

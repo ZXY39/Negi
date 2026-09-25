@@ -244,6 +244,28 @@ def prepare_web_server_start(
     return root, resolved_host, resolved_port
 
 
+def _print_update_reminder() -> None:
+    """启动时把已查到的新版本说出来，但绝不为此联网：只读台账。
+
+    没查过（首次安装、离线设备）就保持安静 —— 把"没查过"渲染成"已是最新"或
+    在启动路径上塞一次外网往返，都是这条横幅要避免的。
+    """
+    try:
+        from g3ku.update_check import read_update_ledger
+
+        ledger = read_update_ledger()
+        if not ledger or not ledger.get("newer"):
+            return
+        latest = str(ledger.get("latest_tag") or "").strip()
+        current = str(ledger.get("current_version") or "").strip()
+        typer.echo(
+            f"[g3ku] 发现新版本 {latest}（当前 v{current}）："
+            "在网页「设置」里点「重启并更新」，或在项目目录给安装脚本加 -Upgrade"
+        )
+    except Exception:
+        pass
+
+
 def run_web_server_entrypoint(
     *,
     host: str | None = None,
@@ -258,6 +280,7 @@ def run_web_server_entrypoint(
         reload=reload,
         with_worker=with_worker,
     )
+    _print_update_reminder()
     try:
         if with_worker and reload:
             typer.echo(

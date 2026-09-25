@@ -30,6 +30,7 @@ from g3ku.runtime.session_keys import (
 )
 from g3ku.config.loader import get_data_dir
 from g3ku.config.live_runtime import get_runtime_config
+from g3ku.update_check import DEFAULT_INTERVAL_SECONDS, run_update_check
 from g3ku.cron.runtime_dispatch import dispatch_cron_job
 from g3ku.cron.service import CronService
 from g3ku.heartbeat.bootstrap import build_web_session_heartbeat, start_web_session_heartbeat
@@ -84,6 +85,10 @@ OUTBOX_COMPACT_EVERY_N_CYCLES = 60
 # 每 N 个对账周期同步一次 qq-official 服务：sync_from_config 幂等，桥任务已死
 # （崩溃置 error 后无自动重启路径）或配置签名变化时重建 → 崩溃桥 ~5 分钟自愈。
 OUTBOX_BRIDGE_SYNC_EVERY_N_CYCLES = 5
+# 版本检查也搭这条 60 秒循环的便车（不新建定时器）：300 轮 = 5 小时一次。
+# 真正的间隔由台账时间戳把关，这里只是触发点，所以改 config.update_check
+# .interval_hours 后最长一个触发周期内生效。
+UPDATE_CHECK_EVERY_N_CYCLES = 300
 
 # outbox_id -> (loop 时间戳 not_before, 当前退避秒数)；进程内状态，记录离开
 # pending（ack/expire）即清理，重启清零（最多多注入一轮，符合 at-least-once）。
@@ -706,11 +711,43 @@ async def _reconcile_external_outbox_once() -> tuple[int, int]:
     return (republished, expired)
 
 
+def _update_check_settings() -> tuple[bool, float]:
+    """(enabled, interval_seconds) from live config, never raising."""
+    try:
+        config, _revision, _changed = get_runtime_config()
+        section = getattr(config, 'update_check', None)
+        if section is None:
+            return True, DEFAULT_INTERVAL_SECONDS
+        return bool(section.enabled), max(1.0, float(section.interval_hours) * 3600.0)
+    except Exception:
+        return True, DEFAULT_INTERVAL_SECONDS
+
+
+async def _run_update_check_pass(source: str) -> None:
+    """One release-tag check on the reconcile loop's clock.
+
+    ``run_update_check`` gates itself on the ledger timestamp, so a pass on
+    every loop start costs nothing when a recent check is still fresh. Failures
+    are swallowed by design: no update information must never disturb the
+    outbox recovery lane this rides.
+    """
+    enabled, interval_seconds = _update_check_settings()
+    if not enabled:
+        return
+    try:
+        await asyncio.to_thread(run_update_check, source=source, interval_seconds=interval_seconds)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.debug("release update check pass skipped on error")
+
+
 async def _outbox_reconcile_loop() -> None:
     """Periodic outbox reconcile: the recovery lane that does not depend on
     restarts. Sleep-first（启动路径已做过全量重放），逐轮异常守护对齐
     ``_drain_outbound``：单轮失败绝不杀循环。"""
     cycles = 0
+    await _run_update_check_pass('auto')
     while True:
         try:
             await asyncio.sleep(OUTBOX_RECONCILE_INTERVAL_SECONDS)
@@ -729,6 +766,8 @@ async def _outbox_reconcile_loop() -> None:
                 compact_outbox()  # 稳态每小时压实，防 append-only 账本无界增长
             if cycles % OUTBOX_BRIDGE_SYNC_EVERY_N_CYCLES == 0:
                 await _sync_qq_official_service()
+            if cycles % UPDATE_CHECK_EVERY_N_CYCLES == 0:
+                await _run_update_check_pass('auto')
         except asyncio.CancelledError:
             raise
         except Exception:

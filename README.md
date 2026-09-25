@@ -69,6 +69,16 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.1/install.sh 
 - `-Ref TAG` / `--ref TAG`：换要安装的版本，用于回滚或试装
 - `-Upgrade` / `--upgrade`：把已装好的设备更新到 `-Ref` 指定的版本
 
+`raw.githubusercontent.com` 解析不了时（国内常见），换一条通道取同一个脚本即可，仓库地址与参数都不变：
+
+```powershell
+# 镜像代理前缀（把原 URL 整个拼在后面）
+iwr https://cdn.jsdelivr.net/gh/ZXY39/G3KU-Agent@v1.0.1/install.ps1 | iex
+iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.1/install.ps1 | iex
+```
+
+从下一个发布版本起，还可以直接取 release 资产：`https://github.com/ZXY39/G3KU-Agent/releases/download/<版本>/install.ps1`。第三方代理等于把"执行什么代码"交给它，稳妥做法是先下载核对再运行 —— `install.ps1` 当前 7483 字节、`install.sh` 5976 字节，且首行是 `#requires -Version 5.1` / `#!/usr/bin/env bash`。
+
 国内网络取 PyPI 或 Python 发行包慢时，给 uv 传镜像环境变量即可，脚本不另设开关：
 
 ```bash
@@ -86,6 +96,8 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 默认安装位置：Windows `%USERPROFILE%\G3KU-Agent`，Linux / macOS `~/G3KU-Agent`。环境（`.venv/`）和数据（`.g3ku/`）都在这个目录里，升级不碰它们。
 
 - 有没有新版：在项目目录里跑 `g3ku status`，最后一行 `Release:` 报当前版本与远端最新标签。离线、没有 git 或远端不是本仓库时这一行直接不出现，不会给你假的"已是最新"。
+- 自动检查：Web 服务运行期间每 5 小时查一次，启动时也会查一次；间隔与开关在 `config.json` 的 `update_check`（`enabled` / `interval_hours`）。检查只读远端标签列表，不外发任何本地信息；项目还锁着时不检查也不提醒。
+- 有新版本时：侧栏「设置」按钮左上角出现红点，`g3ku` 启动的命令行也会提示一行。点进设置能看到「当前版本 · 最新标签 · 检查于」，可以手动「检查更新」，也可以点「重启并更新」——它会先暂停正在进行的对话与任务，更新完成后自动重启服务。代码不会被自动替换，这一步一定要你点。
 - 升级：`.\install.ps1 -Upgrade`（Linux / macOS `./install.sh --upgrade`）。默认升到脚本里钉住的 ref，要指定版本加 `-Ref v1.0.1` / `--ref v1.0.1`。
 - 过渡一次：`v1.0.1` 之前的安装不认识 `-Upgrade`，先在该目录跑一次 `git pull`（或删目录重装）拿到新脚本，此后都走 `-Upgrade`。
 - 有未提交改动时 `-Upgrade` 拒绝执行，先自行提交或丢弃。

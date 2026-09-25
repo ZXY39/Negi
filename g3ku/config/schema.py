@@ -981,6 +981,20 @@ class SttConfig(Base):
         return str(value).strip().rstrip("/")
 
 
+class UpdateCheckConfig(Base):
+    """Release-tag polling cadence for an installed device.
+
+    Only the web process reads this, and only after the project is unlocked:
+    the check rides the outbox reconcile loop, which never starts while the
+    bus is absent. A check reads one remote tag list and never reports the
+    local version, so an offline or non-GitHub remote simply leaves the ledger
+    stale — which the UI renders as "unknown", never as "up to date".
+    """
+
+    enabled: bool = True
+    interval_hours: float = Field(default=5.0, ge=0.1, le=24.0)
+
+
 class Config(BaseSettings):
     """Root configuration for g3ku."""
 
@@ -995,6 +1009,7 @@ class Config(BaseSettings):
     qq_bot: QqBotConfig = Field(default_factory=QqBotConfig)
     cron: CronConfig = Field(default_factory=CronConfig)
     stt: SttConfig = Field(default_factory=SttConfig)
+    update_check: UpdateCheckConfig = Field(default_factory=UpdateCheckConfig)
 
     @model_validator(mode="after")
     def _validate_model_runtime_contract(self) -> "Config":

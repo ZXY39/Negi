@@ -25,6 +25,7 @@ docs/maintenance/*
 !docs/FIX_PLAN_failed-turn-user-message-context-adoption.md
 !docs/FIX_PLAN_multi-qq-accounts.md
 !docs/FIX_PLAN_one-line-install.md
+!docs/FIX_PLAN_update-notifications.md
 !docs/FIX_PLAN_silent-turn-stage-close.md
 docs/superpowers/
 research/

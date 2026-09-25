@@ -27,6 +27,19 @@
 - 版本识别通道是 `git ls-remote --tags origin`，只接受 `refs/tags/vX.Y.Z` 形状（`backup/*` 这类路径标签与 peeled `^{}` 行都按形状过滤掉），与 `g3ku/__init__.py` 的 `__version__` 比对，结果只落在 `g3ku status` 的 `Release:` 行。约束：只读不外发、超时 2 秒、失败即整行不出现（离线设备不得显示"已是最新"）
 - 发版动作 = 打标签 + 同步 `pyproject.toml` 与 `g3ku/__init__.py` 两处版本号 + 跑 `uv lock`（`uv.lock` 里钉着 `g3ku-ai` 自身版本，漏这一步会让所有 `uv sync --frozen` 的安装与升级直接失败）+ 更新安装脚本与 README 里钉住的 ref 默认值
 
+### 自动检查新版本与「重启并更新」
+
+已安装的设备会自己查新版本，但**永不自动换代码**：换代码永远是用户在网页上点一次的动作。
+
+- 通道仍是一条：`git ls-remote --tags origin` 取最高 `refs/tags/vX.Y.Z`（`g3ku/update_check.py`）。节拍借 web 进程已有的 60 秒对账循环（`g3ku/shells/web.py` 的 `UPDATE_CHECK_EVERY_N_CYCLES = 300`），间隔由台账 `.g3ku/update-check.json` 的 `checked_at` 把关，所以循环每轮都被调、真正联网每 5 小时一次。开关与间隔在 `config.update_check`（`enabled` / `interval_hours`）。
+- 项目锁定态不检查也不提醒：这条循环要运行时的消息总线存在才起，因此没解锁的设备不会往外发请求。
+- 台账三态必须分清：**没有文件 = 从没查过**、`error` 非空 = 查失败（`remote_unreachable`）、只有 `newer=true` 才允许点亮。把前两种渲染成"已是最新"是要防的缺陷形态——离线设备会变得和最新版本无法区分。命令行横幅与网页红点都遵守这一条。
+- 「重启并更新」的顺序不可调换：`POST /api/update/apply` 只负责踢起一个脱离子进程（`g3ku/update_apply.py`），执行体走现成的 `POST /api/bootstrap/exit` 请求优雅退出（"有在跑的活未确认"的 409 因此只有一份实现），等端口释放后才跑 `install -Upgrade`，完事再重新拉起；**升级失败也要把旧版本拉回来**，绝不把设备留在无服务状态。原因：运行中的解释器在源码被替换的窗口里 import 到半截文件会造成阶段死锁。
+- 执行体的两个参数都是安全边界，改动前先读：端口由调用方显式传入、猜不到就中止（回落到默认端口会去关同机另一个实例）；`install` 必须带 `-Dir/--dir` 指向本项目根（漏了会退回脚本默认路径，结果是"升级了另一个目录、重启未变的代码"，这条是彩排时实测出来的）。
+- 释放等待只在端口真的空下来之后才动代码；任何一次 `exit_refused_*` 或 `port still busy` 都是**不碰代码**直接退出。降级安装（新 config 配旧代码）会撞上 `Config` 的 `extra=forbid`，服务起不来属预期，不是 apply 车道的问题。
+- 全程留痕在 `.g3ku/logs/update-apply.log`。判读锚点：`exit_refused_409` = 用户没确认暂停；`port still busy` = 服务没退干净、代码未动；`relaunching the previous version` = 升级失败但服务已恢复。
+- 前端侧的端点与三态渲染契约归 `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」。
+
 ### 首选一键启动脚本
 
 - Windows PowerShell: `.\start-g3ku.ps1`
