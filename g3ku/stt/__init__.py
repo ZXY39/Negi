@@ -5,6 +5,7 @@ from __future__ import annotations
 from g3ku.stt.engine import (
     SttResult,
     inbound_voice_enabled,
+    is_voice_payload,
     prepare_binary,
     prepare_model,
     status,
@@ -14,6 +15,7 @@ from g3ku.stt.engine import (
 __all__ = [
     "SttResult",
     "inbound_voice_enabled",
+    "is_voice_payload",
     "prepare_binary",
     "prepare_model",
     "status",

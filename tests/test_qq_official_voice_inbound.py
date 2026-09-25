@@ -31,6 +31,14 @@ VOICE = {
     "filename": "voice.wav",
     "id": "att-voice",
 }
+# 实盘形状（2026-09-25 18:05:42 的 INFO 日志）：QQ 给的是类别词 'voice'，不是 MIME。
+# 早先用 "audio/wav" 写测试，所以判据错了也全绿。
+QQ_REAL_VOICE = {
+    "content_type": "voice",
+    "url": "https://multimedia.nt.qq.com.cn/download?appid=1402&fileid=x",
+    "filename": "",
+    "id": "att-qq-voice",
+}
 IMAGE = {
     "content_type": "image/png",
     "url": "https://example.test/pic.png",
@@ -76,6 +84,61 @@ async def test_voice_becomes_text_when_stt_is_ready(monkeypatch):
 
     assert payloads == []
     assert voice_lines == ["用户语音，机器识别结果：帮我查一下昨天的任务"]
+
+
+@pytest.mark.asyncio
+async def test_real_qq_category_label_voice_reaches_the_transcription_lane(monkeypatch):
+    """QQ 的 content_type 是 'voice'，`startswith('audio/')` 永不命中——实盘因此把
+    语音当文件转发，转写从来没跑过。"""
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
+    seen = {}
+
+    async def _capture(data, **kwargs):
+        seen.update(kwargs)
+        return SttResult(True, text="刚刚给你发了啥", model="base", seconds=4.34, wall_ms=8000)
+
+    monkeypatch.setattr(stt_engine, "transcribe_bytes", _capture)
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(QQ_REAL_VOICE))
+
+    assert payloads == []
+    assert voice_lines == ["用户语音，机器识别结果：刚刚给你发了啥"]
+    # 'voice' 不是 MIME，不能原样声明给服务端，也不能拿它猜扩展名（会得到 .png）。
+    assert seen["mime_type"] == ""
+    assert not seen["filename"].endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_silk_bytes_override_a_wrong_or_missing_label(monkeypatch):
+    """标签说不是语音、字节是腾讯 silk 时，仍要走转写：语音条的真实容器只有字节可信。"""
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
+    monkeypatch.setattr(stt_engine, "is_voice_payload", lambda data: True)
+    called = []
+
+    async def _record(data, **kwargs):
+        called.append(1)
+        return SttResult(True, text="按字节认出来的", model="base")
+
+    monkeypatch.setattr(stt_engine, "transcribe_bytes", _record)
+    message = make_message({**QQ_REAL_VOICE, "content_type": "file"})
+
+    payloads, voice_lines = await bridge._collect_attachments(None, message)
+
+    assert called == [1]
+    assert payloads == []
+    assert voice_lines == ["用户语音，机器识别结果：按字节认出来的"]
+
+
+@pytest.mark.asyncio
+async def test_voice_without_stt_is_not_named_like_an_image(monkeypatch):
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(False))
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(QQ_REAL_VOICE))
+
+    assert voice_lines == []
+    assert payloads[0]["kind"] == "file"
+    assert payloads[0]["mime_type"] == "application/octet-stream"
+    assert not payloads[0]["name"].endswith(".png")
 
 
 @pytest.mark.asyncio

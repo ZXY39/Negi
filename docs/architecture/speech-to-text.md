@@ -86,7 +86,7 @@ g3ku stt status             # 就绪矩阵：开关 / 二进制 / 模型 / 转�
 - 网页录音需要安全上下文：`http://127.0.0.1:18790` 可用，用局域网 IP 走 http 打开面板时浏览器直接禁麦克风。前端把这条原因显式说出来，否则按钮像坏了。
 - `/api/ceo/transcribe` 与既有 `/api/ceo/*` 同处一个鉴权面（只有启动锁 423 闸门）。上限、时长与单槽就是它的成本控制，能访问该端口的人即可消耗本机 CPU。
 - QQ 语音条实盘取证（2026-09-25 17:40 那条真消息）：容器是**腾讯版 silk v3**（字节 `\x02#!SILK_V3`，实测 7652 字节 = 4.34 秒），而平台把 `content_type` 报成 `audio/mp3`；ffmpeg 8.1.2 **没有任何 silk 编解码器**，面对这些字节只报 "Invalid data found when processing input"。所以语音条只能按**字节**判类型并走 `silk-python`（`pysilk.decode`，可直接吃 0x02 前缀），解成 24k PCM 后封装 WAV 交给 whisper。这条判据必须在 ffmpeg 分流**之前**，否则语音条会伪装成"缺解码器"。
-- 因此 `content_type` 在渠道侧不可信任到什么程度值得记住：字节是 silk、头部声明是 mp3、平台字段也是 audio/mp3。桥侧新增的附件 content_type 列表 INFO 日志就是用来持续核对这类声明与真实字节是否一致的。
+- **`content_type` 在渠道侧两个层次上都不可信**：消息事件字段给的是类别词 `'voice'`（不是 MIME），下载的 HTTP 响应头写 `audio/mp3`，而字节是腾讯 silk v3。所以桥的分类同时认类别词与 MIME，并在下载后按字节兜底判语音——详见 `external-agent-api.md`「内置官方 QQ 适配器」。
 - 非 Windows 的二进制抽取路径未实测（Linux 产物名与 so 依赖只能按命名规则推）。
 
 ## 9. 常见排障入口

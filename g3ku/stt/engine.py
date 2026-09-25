@@ -136,6 +136,13 @@ def converter_available() -> bool:
     return find_spec("zhconv") is not None
 
 
+def is_voice_payload(data: bytes) -> bool:
+    """Byte-level "this is a voice note" check for channels whose declared
+    media type cannot be trusted (QQ sends ``content_type='voice'`` for a
+    Tencent silk stream and labels the download ``audio/mp3``)."""
+    return audio.is_tencent_silk(data)
+
+
 def status(cfg: Config | None = None) -> dict[str, Any]:
     cfg = cfg or current_config()
     binary = binary_path(cfg)

@@ -88,6 +88,35 @@ _QUEUED_RECEIPT_FALLBACK_TEXT = "收到，将在当前任务中一并处理。"
 _VOICE_TRANSCRIPT_PREFIX = "用户语音，机器识别结果："
 _VOICE_FAILURE_PREFIX = "用户语音，机器识别失败："
 
+# QQ 官方附件的 content_type 是**类别词**而不是 MIME：实盘一条语音收到的是
+# `['voice']`（18:05:42），而 `startswith("audio/")` 永远不命中它，语音于是
+# 被当文件转发、从来进不了转写道。两种形状都认，因为别处仍可能给 MIME。
+_AUDIO_CONTENT_TYPES = {"voice", "audio", "sound", "speech"}
+_IMAGE_CONTENT_TYPES = {"image", "picture", "photo"}
+_VIDEO_CONTENT_TYPES = {"video"}
+
+
+def _content_kind(content_type: str) -> str:
+    """'image' | 'audio' | 'video' | 'other' from whatever the platform put there."""
+    value = str(content_type or "").strip().lower()
+    if not value:
+        return "other"
+    if value in _AUDIO_CONTENT_TYPES or value.startswith("audio/"):
+        return "audio"
+    if value in _IMAGE_CONTENT_TYPES or value.startswith("image/"):
+        return "image"
+    if value in _VIDEO_CONTENT_TYPES or value.startswith("video/"):
+        return "video"
+    return "other"
+
+
+def _declared_mime(content_type: str) -> str:
+    """The label only when it actually is a MIME type; QQ sends category words
+    there, and forwarding `'voice'` as a mime_type misleads the server-side
+    descriptor and the file-name extension guess."""
+    value = str(content_type or "").strip().lower()
+    return value if "/" in value else ""
+
 # pump 重连退避。SSE 流断开（服务端事件循环阻塞超过读超时、网络抖动、进程重启）
 # 后必须自动重连：pump 一旦终结且不再重建，该会话的所有主动推送（心跳升级、
 # cron 提醒、任务终态）都会永久滞留在服务端事件缓冲里，形成"能收不能发"的
@@ -263,13 +292,12 @@ async def _collect_attachments(
         url = str(getattr(item, "url", "") or "").strip()
         if not url.lower().startswith(("http://", "https://")):
             continue
-        is_image = content_type.startswith("image/")
-        is_audio = content_type.startswith("audio/")
-        if not content_type:
-            name = str(getattr(item, "filename", "") or "").strip()
-            content_type = str(mimetypes.guess_type(name)[0] or "").strip().lower()
-            is_image = content_type.startswith("image/")
-            is_audio = content_type.startswith("audio/")
+        kind = _content_kind(content_type)
+        if kind == "other":
+            filename = str(getattr(item, "filename", "") or "").strip()
+            kind = _content_kind(str(mimetypes.guess_type(filename)[0] or ""))
+        is_image = kind == "image"
+        is_audio = kind == "audio"
         max_bytes = _MAX_INBOUND_IMAGE_BYTES if is_image else _MAX_INBOUND_FILE_BYTES
         data = await _download_attachment_bytes(media_client, url, max_bytes=max_bytes)
         if not data:
@@ -278,10 +306,15 @@ async def _collect_attachments(
                 # ——用户端就是"发了东西然后什么都没有"。留下一行失败说明，回合照常提交。
                 voice_lines.append(f"{_VOICE_FAILURE_PREFIX}语音附件下载失败")
             continue
+        if not is_audio and stt_engine.is_voice_payload(data):
+            # 标签不可信时按字节兜底：语音条的真身是腾讯 silk，content_type 却
+            # 可能是 'voice' 之外的任何东西（含留空）。
+            is_audio = True
         if is_audio and stt_ready:
-            name = _attachment_name(item, content_type or "audio/wav")
+            # 'voice' 不是 MIME，直接拿去猜扩展名会得到 .png（语音条被命名成图片）。
+            name = _attachment_name(item, _declared_mime(content_type) or "audio/wav")
             result = await stt_engine.transcribe_bytes(
-                data, filename=name, mime_type=content_type, source="qq-voice"
+                data, filename=name, mime_type=_declared_mime(content_type), source="qq-voice"
             )
             if result.ok and result.text:
                 voice_lines.append(f"{_VOICE_TRANSCRIPT_PREFIX}{result.text}")
@@ -296,11 +329,16 @@ async def _collect_attachments(
                     f"{_VOICE_FAILURE_PREFIX}{result.error or result.error_code}"
                 )
             continue
+        # 走文件车道时同理：类别词不能当 MIME 用，扩展名要按识别出的媒体形态兜。
+        declared = _declared_mime(content_type)
+        # 猜扩展名用可猜的 MIME（guess_extension('audio/x-silk') 是 None → 会退回 .png）；
+        # 对外声明的 mime_type 仍只在真是 MIME 时才填。
+        fallback_mime = declared or ("audio/wav" if is_audio else "application/octet-stream")
         payloads.append(
             {
                 "kind": "image" if is_image else "file",
-                "name": _attachment_name(item, content_type or "application/octet-stream"),
-                "mime_type": content_type or "application/octet-stream",
+                "name": _attachment_name(item, fallback_mime),
+                "mime_type": declared or "application/octet-stream",
                 "data_base64": base64.b64encode(data).decode("ascii"),
             }
         )
