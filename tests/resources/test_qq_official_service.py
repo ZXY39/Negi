@@ -1,4 +1,4 @@
-"""Tests for the QQ-official lifecycle shell + /api/v1 client.
+"""Tests for the QQ-official per-account lifecycle shell + /api/v1 client.
 
 No botpy installed in this environment, so the bridge reports ``error`` and
 the service still exercises token provisioning + the status machine. The
@@ -17,10 +17,14 @@ import pytest
 
 import g3ku.qq_official.bridge as qq_bridge
 import g3ku.qq_official.service as qq_service
-from g3ku.config.schema import QqBotConfig
+from g3ku.config.loader import load_config
+from g3ku.config.schema import QqBotAccountConfig
 from g3ku.qq_official.client import ExternalApiClient
 from g3ku.qq_official.service import QqOfficialService
 from g3ku.security.bootstrap import get_bootstrap_security_service
+
+APP_ID = "123"
+BRIDGE_ID = "qq-official-123"
 
 
 def _write_config(workspace: Path, *, enabled: bool, app_id: str, app_secret: str) -> None:
@@ -87,7 +91,12 @@ def _write_config(workspace: Path, *, enabled: bool, app_id: str, app_secret: st
             "hardMaxDepth": 4,
             "nodeDispatchConcurrency": {"execution": 8, "inspection": 4},
         },
-        "qqBot": {"enabled": enabled, "appId": app_id, "appSecret": app_secret, "sandbox": False},
+        "qqBot": {
+            "enabled": enabled,
+            "accounts": {app_id: {"appSecret": app_secret, "sandbox": False, "enabled": True, "label": ""}}
+            if app_id
+            else {},
+        },
     }
     (workspace / ".g3ku" / "config.json").write_text(json.dumps(payload), encoding="utf-8")
 
@@ -100,42 +109,51 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return ws
 
 
+def _account(app_id: str = APP_ID) -> QqBotAccountConfig:
+    """账号对象一律走 load_config：覆盖层里的密钥必须已经被贴回来。"""
+    accounts = load_config().qq_bot.accounts
+    return accounts[app_id]
+
+
 @pytest.mark.asyncio
 async def test_service_disabled_reports_enabled_off(workspace: Path) -> None:
     _write_config(workspace, enabled=False, app_id="", app_secret="")
     get_bootstrap_security_service(workspace).setup_initial_realm(password="owner-password")
 
-    service = QqOfficialService()
-    await service.sync_from_config()
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=QqBotAccountConfig(app_secret="sekrit"), global_enabled=False)
     assert service.status()["state"] == "enabled_off"
     assert service._task is None
 
 
 @pytest.mark.asyncio
 async def test_service_enabled_without_secret_reports_not_configured(workspace: Path) -> None:
-    _write_config(workspace, enabled=True, app_id="123", app_secret="")
+    _write_config(workspace, enabled=True, app_id=APP_ID, app_secret="")
     get_bootstrap_security_service(workspace).setup_initial_realm(password="owner-password")
 
-    service = QqOfficialService()
-    await service.sync_from_config()
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
     assert service.status()["state"] == "not_configured"
     await service.stop()
 
 
 @pytest.mark.asyncio
-async def test_service_provisions_token_and_bridge_errors_without_botpy(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_config(workspace, enabled=True, app_id="123", app_secret="")
+async def test_service_provisions_token_and_bridge_errors_without_botpy(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(workspace, enabled=True, app_id=APP_ID, app_secret="")
     security = get_bootstrap_security_service(workspace)
     security.setup_initial_realm(password="owner-password")
-    # The appSecret arrives via the overlay (like the real save path), never inline.
-    security.set_overlay_values({"config.qqBot.appSecret": "sekrit"})
+    # The appSecret arrives via the overlay (like the real save path), never
+    # inline, and it is keyed per AppID.
+    security.set_overlay_values({f"config.qqBot.accounts.{APP_ID}.appSecret": "sekrit"})
     # Simulate an environment without qq-botpy: the bridge must report it, not crash.
     import sys
 
     monkeypatch.setitem(sys.modules, "botpy", None)
 
-    service = QqOfficialService()
-    await service.sync_from_config()
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
     if service._task is not None:
         await service._task
 
@@ -143,8 +161,8 @@ async def test_service_provisions_token_and_bridge_errors_without_botpy(workspac
     assert "botpy" in service.status()["detail"]
 
     overlay = security.current_overlay()
-    assert overlay.get("config.qqBot.appSecret") == "sekrit"
-    assert overlay.get("config.externalApi.tokens.qq-official.token")
+    assert overlay.get(f"config.qqBot.accounts.{APP_ID}.appSecret") == "sekrit"
+    assert overlay.get(f"config.externalApi.tokens.{BRIDGE_ID}.token")
     await service.stop()
 
 
@@ -187,11 +205,11 @@ async def test_client_sessions_messages_and_events() -> None:
 
 
 def _enable_qq_config(workspace: Path) -> None:
-    _write_config(workspace, enabled=True, app_id="123", app_secret="")
+    _write_config(workspace, enabled=True, app_id=APP_ID, app_secret="")
     security = get_bootstrap_security_service(workspace)
     security.setup_initial_realm(password="owner-password")
     # The appSecret arrives via the overlay (like the real save path), never inline.
-    security.set_overlay_values({"config.qqBot.appSecret": "sekrit"})
+    security.set_overlay_values({f"config.qqBot.accounts.{APP_ID}.appSecret": "sekrit"})
 
 
 def _shrink_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,8 +236,8 @@ async def test_service_retries_bridge_crash_until_connected(
 
     monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
 
-    service = QqOfficialService()
-    await service.sync_from_config()
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
     try:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + 5.0
@@ -247,8 +265,8 @@ async def test_stop_cancels_bridge_retry_loop(
 
     monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
 
-    service = QqOfficialService()
-    await service.sync_from_config()
+    service = QqOfficialService(app_id=APP_ID)
+    await service.sync_from_config(account=_account(), global_enabled=True)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + 5.0
     while calls["n"] < 3:
@@ -268,8 +286,8 @@ async def test_stop_cancels_bridge_retry_loop(
 @pytest.mark.asyncio
 async def test_bridge_retry_backoff_resets_after_healthy_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """健康运行超过阈值后再崩溃，退避必须重置回起始值而不是继续翻倍。"""
-    q = QqBotConfig(enabled=True, app_id="1", app_secret="s", sandbox=False)
-    service = QqOfficialService(base_url="http://127.0.0.1:1/api/v1")
+    account = QqBotAccountConfig(app_secret="s", sandbox=False)
+    service = QqOfficialService(app_id="1", base_url="http://127.0.0.1:1/api/v1")
 
     calls = {"n": 0}
 
@@ -294,7 +312,7 @@ async def test_bridge_retry_backoff_resets_after_healthy_run(monkeypatch: pytest
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
-    await service._run(q, "tok")
+    await service._run(account, "tok")
     # 第 2 轮若未重置，应睡 2.0；重置后序列为 1, 1, 2, 4。
     assert delays == [1.0, 1.0, 2.0, 4.0]
     assert calls["n"] == 5

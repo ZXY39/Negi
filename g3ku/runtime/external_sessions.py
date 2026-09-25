@@ -131,7 +131,10 @@ class ExternalSessionRegistry:
             )
             while session_key in self._entries:
                 digest_length += 8
-                if digest_length > 40:
+                # 上限 24 而不是更长的hex：会话键直接进文件路径，而 Windows 裸路径
+                # 在 260 处失败（实测本 venv python）。键每长一位，
+                # .g3ku/web-ceo-requests/<键>/… 这类深目录就少一位余量。
+                if digest_length > 24:
                     raise RuntimeError("external session key space exhausted")
                 session_key = build_external_session_key(
                     bridge_id=bridge, external_key=key, digest_length=digest_length

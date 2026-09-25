@@ -4,7 +4,7 @@
 >
 > Measured on: 2026-09-25，`.g3ku` 现网数据 + `ext:qq-official:f8a8001865631301` 这条在途会话
 >
-> Status: 计划（未实施）
+> Status: 已实现（分支 `feat/multi-qq-accounts`，P0–P3 + R + 测试 + 文档）。实盘验收未做；未合入 main、未推送。与计划的偏差见 §9
 >
 > Scope: `qqBot` 配置形状与密钥覆盖层路径、QQ 服务生命周期、外部接入管理面与状态、已定决策 A（存量会话不迁移）的数据收口；**不动**核心运行时、会话键公式、registry 形状
 
@@ -81,8 +81,14 @@ P2 的两条实现约束：`_restart` 里 `await stop()` 的窗口内 `_task=Non
 | 存量会话变成"网页能写、QQ 收不到" | A 的预期结果，不是 bug。症状链可诊断：发布时 `no live subscriber` WARNING → 对账 `external outbox reconcile: republished` → 始终无 `qq-official delivered` → 24h 后标 `expired`。收口动作 = P4 |
 | cron 改指前丢一次提醒 | 真会丢（滞留推送无人消费）。P4 必须在切号之前做完 |
 | 配额与频控翻倍可见性 | 主动消息额度按 AppID 各算一份，这其实是要多号的主要收益；但每号独立 `error` 状态、独立退避，管理面必须逐号展示，否则一个号被限流会被误读成全坏 |
-| 密钥覆盖层列表化的写坏风险 | 最高危的一处：路径形状变了但旧 `.g3ku/secret-realms` 条目还是老键 ⇒ 解锁后 appSecret 回填不上 = 表现为"号全掉线且状态显示未配置"。P1 必须带一次旧键读兼容 + 一个"回填后 `app_secret` 非空"的显式断言 |
+| 密钥覆盖层迁移顺序 | 最高危的一处，且不是"路径形状"问题而是**先后**问题：legacy 折叠若发生在覆盖层回填之前，`appSecret` 还是空占位 ⇒ 新键 `qqBot.accounts.<appId>.appSecret` 抽不到值，而保存时 `clear_updates` 会把旧 `qqBot.appSecret` 覆盖层条目清空 ⇒ **密钥当场丢失、号全掉线且显示未配置**。折叠必须在覆盖层之后，并强制复存一次让它重新抽取 |
 | bridge_id 被塞进更长的东西 | 约束：bridge_id 只能是 `qq-official-<appId>`（+11），不得折进 label/昵称等可变字符串——那会把上面那条 260 边界从"最坏情况才撞"变成"常态就撞"。同理 P4 的运维建议里加一条：数据根路径要短（自定义数据根已支持），因为 260 是按**绝对路径**算的 |
+| 干脆放宽路径长度 | 三条路的边界都实测过：本机 `HKLM\…\FileSystem\LongPathsEnabled = **0**`；裸路径 251 可写、**259 起失败**（`winerror 206`）；加 `\\?\` 前缀后 301/401/**701** 全部可写 ⇒ 代码层放宽不依赖注册表，技术可行。但本计划**不放宽**：多账号常规增量只有 +11（226→237，安全），越线的唯一来源是 registry 的 digest 碰撞逃生可长到 40 位，做法是把那个上限收到 **24**（最坏 246）。真到必须放宽那天，先做的是把拼路径收成一个 chokepoint，而不是逐点加前缀——否则边界从"OS 统一"变成"只有我们写得出去、别的工具读不进来"，而 `.g3ku` 是人肉排查现场 |
+
+## 3.5 定稿期的两处形状修正
+
+1. **配置用字典不用列表**：`qqBot.accounts` 定为 `dict[<appId>, {appSecret, sandbox, enabled, label}]`。原因是密钥回填 `_deep_set` 只走字典、不认列表索引（`g3ku/security/bootstrap.py:138-146`）；改成列表就得动它，而按 appId 键控刚好与已经在用的 `externalApi.tokens.<token_id>.token` 同形，覆盖层零改动。
+2. **迁移点**：`load_config` 里覆盖层是先贴后迁移（`g3ku/config/loader.py:726-728`），所以 qqBot 折叠必须挂在那之后，并且要能置 `changed` 强制复存——否则密钥按上一行的顺序丢失。
 
 ## 4. 用户视角前后对照
 
@@ -129,3 +135,19 @@ P2 的两条实现约束：`_restart` 里 `await stop()` 的窗口内 `_task=Non
 - `docs/architecture/config-and-models.md`：`qqBot` 形状与密钥覆盖层的按账号路径（` Where secrets really live`）。
 - `docs/architecture/web-and-admin.md`：外部接入面板的账号列表契约。
 - `docs/architecture/README.md`：只加一条症状 → 文档指针（"改配第二个号后老会话收不到回复"），不改 Topic Ownership 表（归属未变）。
+
+---
+
+## 9. 实现期结论与偏差
+
+已落地：`feat/multi-qq-accounts` 分支上的 P0–P3 + R。与计划的差异，按"计划说 / 实际做 / 为什么"记：
+
+1. 覆盖层兼容：计划 P1 写"带一次旧点路径的读兼容"。**实际不需要**——legacy 折叠发生在覆盖层回填之后，同一次 `save_config` 既抽出新键 `qqBot.accounts.<appId>.appSecret`、又把旧键从覆盖层清掉。该路径由 `test_legacy_single_account_folds_without_losing_the_secret` 钉住（断言迁移后新键有值且旧键消失）。
+2. 孤儿 token：计划把"停用 `qq-official` 旧凭证"列为 P4 手工运维。**实现为自动**——整表 PUT 后，不再对应任何账号的 `qq-official*` token 被置 `enabled=false`（不删除，同号加回可复用）。
+3. 新增（计划未列）：重启签名纳入 AppSecret 摘要。旧签名只含 `enabled|appId|sandbox` ⇒ 只改密钥的号会永远停在旧凭证的重试循环里；单号时代这件事被"重启进程"掩盖，多号并跑后"改密钥救号"是常规操作。
+4. 新增（计划未列）：状态区分 `enabled_off`（总开关关）与 `account_disabled`（本号停用）。
+5. 已按 §6 第 8 步落实：registry 的 digest 碰撞逃生上限 40 ⇒ **24**。
+
+验证（观测值，非推断）：Python 侧 `test_qq_official_multi_account_service.py` + `test_qq_official_service.py`(7) + `test_qq_official_admin.py` + `test_qq_official_bridge.py` + `test_qq_official_messages.py` 合跑 50 passed；另一批 `test_session_keys / test_security_overlay_guard / test_config_bundle_export_import / test_resource_runtime_smoke` 合跑 140 passed + 5 xfailed（存量）。前端 `tests/resources/org_graph_external.qq_accounts.test.js` 4 passed（`node --test`）。把 14 个文件塞进单进程时出现过一次 `WinError 10055`（socket 缓冲区耗尽），分文件复跑全绿——属批量规模不是逻辑。`ruff check` 在本次改动的文件上无新增告警（残留 2 条为该两文件在 main 上就有的 I001）。
+
+**未做**：浏览器实盘验证面板。启动第二个 `g3ku web` 会收割正在跑的 worker，代价大于一次目视；面板 CSS 也未新增（行复用 `resource-list-item`、字段复用 `llm-form-grid`、动作区复用 `external-token-actions`），所以布局是"继承来的"，需要在真页面上确认一次。§6 的 1–9 步全部未执行。

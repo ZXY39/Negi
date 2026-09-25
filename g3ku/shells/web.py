@@ -58,7 +58,7 @@ _global_web_heartbeat = None
 _global_outbound_drain_task: Optional[asyncio.Task] = None
 _global_task_worker_watchdog_task: Optional[asyncio.Task] = None
 _global_outbox_reconcile_task: Optional[asyncio.Task] = None
-_global_qq_official_service = None
+_global_qq_official_services: dict[str, Any] = {}
 _global_runtime_services_lock: Optional[asyncio.Lock] = None
 _global_qq_official_sync_lock: Optional[asyncio.Lock] = None
 
@@ -356,35 +356,62 @@ async def refresh_web_agent_runtime(
     return changed
 
 
-def qq_official_service_status() -> dict:
-    """Coarse status of the in-process QQ official bridge (for admin REST)."""
-    service = _global_qq_official_service
-    if service is None:
-        return {"state": "stopped", "detail": ""}
-    return service.status()
+def qq_official_service_statuses() -> list[dict]:
+    """每个已配置账号一行桥状态（admin REST 用）。"""
+    rows: list[dict] = []
+    for bridge_id, service in sorted(_global_qq_official_services.items()):
+        status = service.status()
+        rows.append({"bridge_id": bridge_id, "app_id": service.app_id, **status})
+    return rows
 
 
 async def _sync_qq_official_service() -> None:
-    """Reconcile the QQ official bridge with the current ``qqBot`` config.
+    """Reconcile the per-account QQ official bridges with the current ``qqBot`` config.
 
     Lazy import: the adapter (and only the adapter) may pull in ``qq-botpy``,
     and only when a start actually happens inside ``sync_from_config``.
 
-    整体持模块锁：sync_from_config 在 ``_restart`` 的 ``await stop()`` 窗口内
-    ``_task is None``，并发调用（runtime refresh / 启动序列 / outbox 对账循环）
-    会各自 create_task 一个桥，先建者成为无人持有的孤儿任务 → 双 botpy 连接、
-    每条消息双份投递。锁序只有 runtime-lock → sync-lock 单向嵌套，无死锁环。
+    整体持**一把**模块锁而不是每号一锁：diff 必须原子。sync_from_config 在
+    ``_restart`` 的 ``await stop()`` 窗口内 ``_task is None``，并发调用（runtime
+    refresh / 启动序列 / outbox 对账循环）会各自 create_task 一个桥，先建者成为无人
+    持有的孤儿任务 → 双 botpy 连接、每条消息双份投递。锁序只有
+    runtime-lock → sync-lock 单向嵌套，无死锁环。
     """
-    global _global_qq_official_service
+    global _global_qq_official_services
+    from g3ku.config.loader import load_config
+    from g3ku.qq_official.messages import bridge_id_for_app_id
     from g3ku.qq_official.service import QqOfficialService
 
     async with _get_qq_official_sync_lock():
-        if _global_qq_official_service is None:
-            _global_qq_official_service = QqOfficialService()
         try:
-            await _global_qq_official_service.sync_from_config()
+            qq_bot = load_config().qq_bot
         except Exception:
-            logger.exception("qq-official service sync skipped on error")
+            logger.exception("qq-official service sync skipped on config error")
+            return
+        global_enabled = bool(getattr(qq_bot, "enabled", False))
+        desired: dict[str, tuple[str, Any]] = {}
+        for app_id, account in dict(getattr(qq_bot, "accounts", None) or {}).items():
+            app = str(app_id or "").strip()
+            if not app or account is None:
+                continue
+            desired[bridge_id_for_app_id(app)] = (app, account)
+        for bridge_id in list(_global_qq_official_services):
+            if bridge_id in desired:
+                continue
+            removed = _global_qq_official_services.pop(bridge_id)
+            try:
+                await removed.stop()
+            except Exception:
+                logger.exception("qq-official bridge {} stop skipped", bridge_id)
+        for bridge_id, (app_id, account) in desired.items():
+            service = _global_qq_official_services.get(bridge_id)
+            if service is None:
+                service = QqOfficialService(app_id=app_id)
+                _global_qq_official_services[bridge_id] = service
+            try:
+                await service.sync_from_config(account=account, global_enabled=global_enabled)
+            except Exception:
+                logger.exception("qq-official service sync skipped on error: {}", bridge_id)
 
 
 def get_runtime_manager(agent: AgentLoop | None = None) -> SessionRuntimeManager:
@@ -1059,7 +1086,7 @@ async def ensure_web_runtime_services(agent: AgentLoop | None = None) -> None:
 
 async def shutdown_web_runtime() -> None:
     global _global_agent, _global_bus, _global_runtime_manager, _global_web_heartbeat
-    global _global_outbound_drain_task, _global_task_worker_watchdog_task, _global_qq_official_service
+    global _global_outbound_drain_task, _global_task_worker_watchdog_task, _global_qq_official_services
     global _global_outbox_reconcile_task
 
     agent = _global_agent
@@ -1069,7 +1096,7 @@ async def shutdown_web_runtime() -> None:
     outbound_drain_task = _global_outbound_drain_task
     task_worker_watchdog_task = _global_task_worker_watchdog_task
     outbox_reconcile_task = _global_outbox_reconcile_task
-    qq_official_service = _global_qq_official_service
+    qq_official_services = list(_global_qq_official_services.values())
 
     _global_agent = None
     _global_bus = None
@@ -1078,7 +1105,7 @@ async def shutdown_web_runtime() -> None:
     _global_outbound_drain_task = None
     _global_task_worker_watchdog_task = None
     _global_outbox_reconcile_task = None
-    _global_qq_official_service = None
+    _global_qq_official_services = {}
 
     if agent is None:
         return
@@ -1114,8 +1141,8 @@ async def shutdown_web_runtime() -> None:
     # 对账循环必须先于桥服务收割：循环每 5 轮会调 _sync_qq_official_service，
     # 顺序反了会出现「shutdown 停桥后对账又把桥拉起来」的复活竞态。
     await _cancel_background_task(outbox_reconcile_task)
-    if qq_official_service is not None:
-        await qq_official_service.stop()
+    for service in qq_official_services:
+        await service.stop()
 
     session_keys: set[str] = set()
     if runtime_manager is not None:

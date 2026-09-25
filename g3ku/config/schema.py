@@ -859,20 +859,43 @@ class ExternalApiConfig(Base):
         return normalized
 
 
+class QqBotAccountConfig(Base):
+    """One official QQ bot application. The mapping key is the AppID."""
+
+    app_secret: str = ""
+    sandbox: bool = False
+    enabled: bool = True
+    label: str = ""
+
+
+def _normalize_qq_app_id(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", str(value or "").strip()).strip("-")
+
+
 class QqBotConfig(Base):
     """First-party official QQ bot (tencent-connect/botpy) bridge.
 
-    Opt-in: operators paste the QQ open-platform AppID + AppSecret and flip
-    ``enabled``. The ``app_secret`` lives in the bootstrap secret overlay
-    (extracted on save, stripped from disk, re-applied on unlock); the adapter
-    runs in-process and talks to the local ``/api/v1`` like any external
-    bridge (bridge_id ``qq-official``).
+    Opt-in: operators paste one or more QQ open-platform AppID + AppSecret and
+    flip ``enabled``. One AppID is one account: ``accounts`` is keyed by AppID
+    (same shape as ``externalApi.tokens``), each getting its own bridge id
+    (``qq-official-<appId>``), its own auto-provisioned token and its own
+    in-process botpy connection. ``app_secret`` lives in the bootstrap secret
+    overlay (extracted on save, stripped from disk, re-applied on unlock); the
+    adapter talks to the local ``/api/v1`` like any external bridge.
     """
 
     enabled: bool = False
-    app_id: str = ""
-    app_secret: str = ""
-    sandbox: bool = False
+    accounts: dict[str, QqBotAccountConfig] = Field(default_factory=dict)
+
+    @field_validator("accounts", mode="before")
+    @classmethod
+    def _normalize_account_ids(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized: dict[str, Any] = {}
+        for raw_key, entry in value.items():
+            normalized[_normalize_qq_app_id(raw_key)] = entry
+        return normalized
 
 
 class CronConfig(Base):

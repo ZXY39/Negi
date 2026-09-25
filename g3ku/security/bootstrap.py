@@ -191,9 +191,16 @@ def extract_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
 
     qq_bot = payload.get("qqBot")
     if isinstance(qq_bot, dict):
-        app_secret = qq_bot.get("appSecret")
-        if _secret_value_present(app_secret):
-            out[f"{SCONFIG}.qqBot.appSecret"] = str(app_secret)
+        # 一个 AppID 一条密钥：accounts 以 AppID 为键，所以这里能直接走
+        # apply_config_secret_entries 的字典路径（_deep_set 不认列表索引）。
+        accounts = qq_bot.get("accounts")
+        if isinstance(accounts, dict):
+            for app_id, account in accounts.items():
+                if not isinstance(account, dict):
+                    continue
+                app_secret = account.get("appSecret")
+                if _secret_value_present(app_secret):
+                    out[f"{SCONFIG}.qqBot.accounts.{app_id}.appSecret"] = str(app_secret)
 
     return out
 
@@ -224,7 +231,11 @@ def strip_config_secret_entries(raw_data: dict[str, Any]) -> dict[str, Any]:
 
     qq_bot = payload.get("qqBot")
     if isinstance(qq_bot, dict):
-        qq_bot["appSecret"] = ""
+        accounts = qq_bot.get("accounts")
+        if isinstance(accounts, dict):
+            for account in accounts.values():
+                if isinstance(account, dict):
+                    account["appSecret"] = ""
     return payload
 
 

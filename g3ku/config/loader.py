@@ -234,6 +234,34 @@ def _migrate_removed_china_bridge_config(raw_data: dict[str, Any]) -> bool:
     return changed
 
 
+def _migrate_legacy_qq_bot_account(raw_data: dict[str, Any]) -> bool:
+    """把旧的单账号 ``qqBot`` 形状折进 ``qqBot.accounts``。
+
+    必须在密钥覆盖层贴回**之后**调用：早于它时 ``appSecret`` 还是磁盘上的空占位，折出来
+    的账号没有密钥，而保存时 ``clear_updates`` 会清掉旧覆盖层键 ⇒ 密钥当场丢失。
+    """
+    qq_bot = raw_data.get("qqBot")
+    if not isinstance(qq_bot, dict):
+        return False
+    legacy_app_id = str(qq_bot.get("appId") or qq_bot.get("app_id") or "").strip()
+    legacy_keys = ("appId", "app_id", "appSecret", "app_secret", "sandbox")
+    if not legacy_app_id and not any(key in qq_bot for key in legacy_keys):
+        return False
+    accounts = qq_bot.get("accounts")
+    folded = dict(accounts) if isinstance(accounts, dict) else {}
+    if legacy_app_id and all(legacy_app_id != str(key) for key in folded):
+        folded[legacy_app_id] = {
+            "appSecret": str(qq_bot.get("appSecret") or qq_bot.get("app_secret") or ""),
+            "sandbox": bool(qq_bot.get("sandbox", False)),
+            "enabled": True,
+            "label": "",
+        }
+    qq_bot["accounts"] = folded
+    for stale in legacy_keys:
+        qq_bot.pop(stale, None)
+    return True
+
+
 def _migrate_legacy_gateway_config(raw_data: dict[str, Any]) -> bool:
     gateway = raw_data.get("gateway")
     if not isinstance(gateway, dict):
@@ -541,9 +569,16 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
         },
         "qqBot": {
             "enabled": cfg.qq_bot.enabled,
-            "appId": cfg.qq_bot.app_id,
-            "appSecret": cfg.qq_bot.app_secret,
-            "sandbox": cfg.qq_bot.sandbox,
+            "accounts": {
+                str(app_id): {
+                    "appSecret": entry.app_secret,
+                    "sandbox": entry.sandbox,
+                    "enabled": entry.enabled,
+                    "label": entry.label,
+                }
+                for app_id, entry in (cfg.qq_bot.accounts or {}).items()
+                if str(app_id or "").strip()
+            },
         },
         "cron": {
             "dispatchTimeoutSeconds": cfg.cron.dispatch_timeout_seconds,
@@ -724,9 +759,10 @@ def load_config(config_path: Path | None = None) -> Config:
     changed = _ensure_model_role_defaults(raw_data) or changed
     changed = _migrate_removed_ceo_frontdoor_implementation(raw_data) or changed
     security = get_bootstrap_security_service(Path.cwd())
-    migrated = _migrate_config(
-        apply_config_secret_entries(deepcopy(raw_data), security.current_overlay())
-    )
+    with_overlay = apply_config_secret_entries(deepcopy(raw_data), security.current_overlay())
+    # 覆盖层已贴回，appSecret 此刻才是真值：qqBot 折叠必须发生在这一行之后。
+    changed = _migrate_legacy_qq_bot_account(with_overlay) or changed
+    migrated = _migrate_config(with_overlay)
     cfg = Config.model_validate(migrated)
     _ensure_runtime_fields_explicit(migrated, cfg)
     if changed or _raw_uses_inline_model_payload(raw_data):

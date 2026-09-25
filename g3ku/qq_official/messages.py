@@ -18,6 +18,17 @@ from typing import Any
 QQ_BRIDGE_ID = "qq-official"
 
 
+def bridge_id_for_app_id(app_id: str) -> str:
+    """一个 AppID = 一个桥身份（``qq-official-<appId>``）。
+
+    身份决定三件事：用哪条 ``externalApi.tokens`` 凭证、会话键的 bridge 段、以及
+    registry/outbox 的可见集作用域——所以多号之间的滞留推送按构造互不可见。
+    调用方需保证 ``app_id`` 非空且已由配置层 ``_normalize_qq_app_id`` 收过字符集
+    （不含 ``.``，密钥覆盖层按点分路径寻址才不歧义）。
+    """
+    return f"{QQ_BRIDGE_ID}-{str(app_id or '').strip()}"
+
+
 def external_key_for_group(group_openid: Any) -> str:
     return f"qq:group:{str(group_openid or '').strip()}"
 

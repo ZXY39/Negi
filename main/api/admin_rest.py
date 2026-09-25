@@ -1129,56 +1129,111 @@ async def delete_external_api_token(bridge_id: str):
     return {'ok': True, **_external_api_payload(cfg)}
 
 
+_QQ_BRIDGE_TOKEN_PREFIX = 'qq-official'
+
+
+def _qq_bridge_id(app_id: str) -> str:
+    from g3ku.qq_official.messages import bridge_id_for_app_id
+
+    return bridge_id_for_app_id(app_id)
+
+
+def _disable_orphan_qq_bridge_tokens(cfg: Config, keep_bridge_ids: set[str]) -> bool:
+    """把不再对应任何已配账号的 QQ 桥凭证置为停用（不删除，重新加回同号可复用）。
+
+    留着不停用就等于留一条仍然有效的回环 API 凭证，而它已经没有消费者了。
+    """
+    changed = False
+    for token_id, entry in dict(cfg.external_api.tokens or {}).items():
+        name = str(token_id or '')
+        if name != _QQ_BRIDGE_TOKEN_PREFIX and not name.startswith(f'{_QQ_BRIDGE_TOKEN_PREFIX}-'):
+            continue
+        if name in keep_bridge_ids or entry.enabled is False:
+            continue
+        entry.enabled = False
+        changed = True
+    return changed
+
+
 def _qq_bot_payload(cfg: Config) -> dict[str, Any]:
     q = cfg.qq_bot
-    secret = str(getattr(q, 'app_secret', '') or '')
-    return {
-        'enabled': bool(getattr(q, 'enabled', False)),
-        'app_id': str(getattr(q, 'app_id', '') or ''),
-        'app_secret_masked': _mask_external_api_token(secret),
-        'has_secret': bool(secret),
-        'sandbox': bool(getattr(q, 'sandbox', False)),
-    }
+    states = {str(row.get('bridge_id') or ''): row for row in _qq_bridge_service_states()}
+    accounts: list[dict[str, Any]] = []
+    for app_id, entry in sorted(dict(q.accounts or {}).items(), key=lambda item: str(item[0])):
+        secret = str(getattr(entry, 'app_secret', '') or '')
+        bridge_id = _qq_bridge_id(app_id)
+        state = states.get(bridge_id) or {}
+        accounts.append({
+            'app_id': str(app_id),
+            'bridge_id': bridge_id,
+            'app_secret_masked': _mask_external_api_token(secret),
+            'has_secret': bool(secret),
+            'sandbox': bool(getattr(entry, 'sandbox', False)),
+            'enabled': bool(getattr(entry, 'enabled', True)),
+            'label': str(getattr(entry, 'label', '') or ''),
+            'service': {
+                'state': str(state.get('state') or 'stopped'),
+                'detail': str(state.get('detail') or ''),
+            },
+        })
+    return {'enabled': bool(getattr(q, 'enabled', False)), 'accounts': accounts}
 
 
-def _qq_bot_service_state() -> dict[str, Any]:
-    from g3ku.shells.web import qq_official_service_status
+def _qq_bridge_service_states() -> list[dict]:
+    from g3ku.shells.web import qq_official_service_statuses
 
     try:
-        return qq_official_service_status()
+        return list(qq_official_service_statuses())
     except Exception:
-        return {'state': 'stopped', 'detail': ''}
+        return []
 
 
 @router.get('/qq-bot/settings')
 async def get_qq_bot_settings():
     cfg = load_config()
-    return {'ok': True, **_qq_bot_payload(cfg), 'service': _qq_bot_service_state()}
+    return {'ok': True, **_qq_bot_payload(cfg)}
 
 
 @router.put('/qq-bot/settings')
 async def update_qq_bot_settings(payload: dict | None = Body(default=None)):
+    """整表替换 QQ 账号列表；某行 appSecret 传空串表示保留该 AppID 的原密钥。"""
     body = payload if isinstance(payload, dict) else {}
     cfg = load_config()
     q = cfg.qq_bot
     if 'enabled' in body:
         q.enabled = bool(body.get('enabled'))
-    if 'appId' in body or 'app_id' in body:
-        q.app_id = str(body.get('appId', body.get('app_id')) or '').strip()
-    if 'sandbox' in body:
-        q.sandbox = bool(body.get('sandbox'))
-    if 'appSecret' in body or 'app_secret' in body:
-        raw_secret = str(body.get('appSecret', body.get('app_secret')) or '').strip()
-        if raw_secret:
-            q.app_secret = raw_secret
+    raw_accounts = body.get('accounts')
+    if isinstance(raw_accounts, list):
+        from g3ku.config.schema import QqBotAccountConfig, _normalize_qq_app_id
+
+        next_accounts: dict[str, QqBotAccountConfig] = {}
+        for raw in raw_accounts:
+            if not isinstance(raw, dict):
+                continue
+            app_id = _normalize_qq_app_id(raw.get('appId', raw.get('app_id')))
+            if not app_id:
+                continue
+            previous = q.accounts.get(app_id) if isinstance(q.accounts, dict) else None
+            entry = QqBotAccountConfig(
+                app_secret=str(raw.get('appSecret', raw.get('app_secret')) or '').strip(),
+                sandbox=bool(raw.get('sandbox', False)),
+                enabled=bool(raw.get('enabled', True)),
+                label=str(raw.get('label') or '').strip(),
+            )
+            if not entry.app_secret and previous is not None:
+                entry.app_secret = str(previous.app_secret or '')
+            next_accounts[app_id] = entry
+        q.accounts = next_accounts
+    keep = {_qq_bridge_id(app_id) for app_id in dict(q.accounts or {})}
+    _disable_orphan_qq_bridge_tokens(cfg, keep)
     save_config(cfg)
     await _refresh_runtime_after_save('admin_qq_bot_settings_update')
-    return {'ok': True, **_qq_bot_payload(cfg), 'service': _qq_bot_service_state()}
+    return {'ok': True, **_qq_bot_payload(cfg)}
 
 
 @router.get('/qq-bot/status')
 async def get_qq_bot_status():
-    return {'ok': True, 'service': _qq_bot_service_state()}
+    return {'ok': True, 'accounts': _qq_bridge_service_states()}
 
 
 @router.get('/models')
