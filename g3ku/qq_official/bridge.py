@@ -71,6 +71,10 @@ _MAX_INBOUND_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_INBOUND_FILE_BYTES = 20 * 1024 * 1024
 _MAX_INBOUND_ATTACHMENTS = 4
 _MEDIA_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+# QQ 媒体 URL 在事件落地的那一瞬间不一定可读（实测同一条语音链接先失败、几分钟后
+# 返回 200 audio/mp3），所以取一次不算数：允许一次短延时重试。
+_ATTACHMENT_DOWNLOAD_MAX_ATTEMPTS = 2
+_ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS = 1.5
 # 出站附件：桥从本机签名媒体 URL 取字节的下载上限（与服务端出站产出上限一致）。
 # 超过即降级为签名链接文本，不向平台发起必然失败的巨型上传。
 _MAX_OUTBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -146,32 +150,57 @@ async def _download_attachment_bytes(
     client: httpx.AsyncClient, url: str, *, max_bytes: int
 ) -> bytes | None:
     """Fetch one attachment; ``None`` on transport errors, non-200, or when the
-    stream exceeds the per-kind /api/v1 cap."""
-    try:
-        async with client.stream("GET", url) as response:
-            if response.status_code != 200:
-                logger.warning(
-                    "qq-official attachment download returned status {} for {}",
-                    response.status_code,
-                    url,
-                )
-                return None
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes(_MEDIA_DOWNLOAD_CHUNK_BYTES):
-                total += len(chunk)
-                if total > max_bytes:
+    stream exceeds the per-kind /api/v1 cap.
+
+    QQ media URLs are not always readable at the instant the event lands: a voice
+    note that failed here with an empty exception string at 17:40:55 returned
+    ``200 audio/mp3`` when the same URL was fetched minutes later. One retry is
+    therefore part of the contract, not a nicety — without it a pure voice message
+    degrades into nothing at all.
+    """
+    for attempt in range(1, _ATTACHMENT_DOWNLOAD_MAX_ATTEMPTS + 1):
+        try:
+            async with client.stream("GET", url) as response:
+                if response.status_code != 200:
                     logger.warning(
-                        "qq-official attachment exceeds {} bytes and was skipped: {}",
-                        max_bytes,
+                        "qq-official attachment download returned status {} for {}",
+                        response.status_code,
                         url,
                     )
                     return None
-                chunks.append(chunk)
-            return b"".join(chunks)
-    except httpx.HTTPError as exc:
-        logger.warning("qq-official attachment download failed for {}: {}", url, exc)
-        return None
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes(_MEDIA_DOWNLOAD_CHUNK_BYTES):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        logger.warning(
+                            "qq-official attachment exceeds {} bytes and was skipped: {}",
+                            max_bytes,
+                            url,
+                        )
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        except httpx.HTTPError as exc:
+            # 异常类型必须进日志：h11 送上来的 httpx.HTTPError 可以有空 __str__，
+            # 只打 {} 会留一条读不出任何信息的 WARNING（实盘就是这样）。
+            if attempt >= _ATTACHMENT_DOWNLOAD_MAX_ATTEMPTS:
+                logger.warning(
+                    "qq-official attachment download failed for {}: {}: {}",
+                    url,
+                    type(exc).__name__,
+                    exc,
+                )
+                return None
+            logger.info(
+                "qq-official attachment download attempt {} failed ({}: {}); retrying in {:.1f}s",
+                attempt,
+                type(exc).__name__,
+                exc,
+                _ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(_ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS)
+    return None
 
 
 def _attachment_name(item: Any, content_type: str) -> str:
@@ -206,9 +235,19 @@ async def _collect_attachments(
     """
     from g3ku.stt import engine as stt_engine
 
-    raw_items = list(getattr(message, "attachments", None) or [])
     payloads: list[dict[str, str]] = []
     voice_lines: list[str] = []
+    raw_items = list(getattr(message, "attachments", None) or [])
+    if raw_items:
+        # 平台到底给什么 content_type 只能这样看见：语音这条道的所有判据都挂在它上面，
+        # 而事件本身不落在任何日志里（17:40 那次"没反应"事后无从区分"事件没到"与
+        # "附件取不到"）。
+        logger.info(
+            "qq-official message {} carries {} attachment(s): {}",
+            getattr(message, "id", ""),
+            len(raw_items),
+            [str(getattr(item, "content_type", "") or "") for item in raw_items],
+        )
     if not raw_items:
         return payloads, voice_lines
     stt_ready = await stt_engine.inbound_voice_enabled()
@@ -234,6 +273,10 @@ async def _collect_attachments(
         max_bytes = _MAX_INBOUND_IMAGE_BYTES if is_image else _MAX_INBOUND_FILE_BYTES
         data = await _download_attachment_bytes(media_client, url, max_bytes=max_bytes)
         if not data:
+            if is_audio and stt_ready:
+                # 纯语音消息取不到字节时，正文与附件都是空的，on_incoming 会直接早退
+                # ——用户端就是"发了东西然后什么都没有"。留下一行失败说明，回合照常提交。
+                voice_lines.append(f"{_VOICE_FAILURE_PREFIX}语音附件下载失败")
             continue
         if is_audio and stt_ready:
             name = _attachment_name(item, content_type or "audio/wav")

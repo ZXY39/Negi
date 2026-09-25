@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 import g3ku.qq_official.bridge as bridge
@@ -58,6 +59,10 @@ def fake_download(monkeypatch: pytest.MonkeyPatch):
         return b"payload-bytes"[:max_bytes] or b"x"
 
     monkeypatch.setattr(bridge, "_download_attachment_bytes", _download)
+
+
+# autouse 桩会把真实现盖掉；测真下载函数本身的用例先把它换回来。
+_REAL_DOWNLOAD = bridge._download_attachment_bytes
 
 
 @pytest.mark.asyncio
@@ -141,3 +146,95 @@ async def test_voice_without_url_is_skipped(monkeypatch):
     assert payloads == []
     assert voice_lines == []
     assert not called
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_voice_still_reaches_the_user(monkeypatch):
+    """纯语音消息在附件下载失败时，正文与附件都是空的，on_incoming 会早退——
+    用户端表现为"发了语音然后什么都没有"。这条必须留下一行可回复的失败说明。"""
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(True))
+
+    async def _dead(_client, _url, *, max_bytes):
+        return None
+
+    monkeypatch.setattr(bridge, "_download_attachment_bytes", _dead)
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(VOICE))
+
+    assert payloads == []
+    assert voice_lines == ["用户语音，机器识别失败：语音附件下载失败"]
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_voice_without_stt_keeps_the_old_degrade(monkeypatch):
+    """开关关掉时不新增任何可见文本：今天附件取不到就是静默降级，这条不许被顺带改掉。"""
+    monkeypatch.setattr(stt_engine, "inbound_voice_enabled", ready(False))
+
+    async def _dead(_client, _url, *, max_bytes):
+        return None
+
+    monkeypatch.setattr(bridge, "_download_attachment_bytes", _dead)
+
+    payloads, voice_lines = await bridge._collect_attachments(None, make_message(VOICE))
+
+    assert payloads == []
+    assert voice_lines == []
+
+
+class _FlakyResponse:
+    status_code = 200
+
+    async def aiter_bytes(self, _chunk_size):
+        yield b"voice-bytes"
+
+
+class _FlakyContext:
+    def __init__(self, *, fail: bool):
+        self._fail = fail
+
+    async def __aenter__(self):
+        if self._fail:
+            # 实盘就是这一型：h11 送上来的 httpx.ConnectError 可以 __str__ 为空。
+            raise httpx.ConnectError("")
+        return _FlakyResponse()
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FlakyClient:
+    def __init__(self):
+        self.calls = 0
+
+    def stream(self, _method, _url):
+        self.calls += 1
+        return _FlakyContext(fail=self.calls == 1)
+
+
+@pytest.mark.asyncio
+async def test_attachment_download_retries_once_then_succeeds(monkeypatch):
+    monkeypatch.setattr(bridge, "_download_attachment_bytes", _REAL_DOWNLOAD)
+    monkeypatch.setattr(bridge, "_ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS", 0.0)
+    client = _FlakyClient()
+
+    data = await bridge._download_attachment_bytes(client, "https://example.test/v.mp3", max_bytes=1024)
+
+    assert data == b"voice-bytes"
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_attachment_download_gives_up_after_the_retry_budget(monkeypatch):
+    monkeypatch.setattr(bridge, "_download_attachment_bytes", _REAL_DOWNLOAD)
+    monkeypatch.setattr(bridge, "_ATTACHMENT_DOWNLOAD_RETRY_DELAY_SECONDS", 0.0)
+
+    class _AlwaysFailingClient(_FlakyClient):
+        def stream(self, _method, _url):
+            self.calls += 1
+            return _FlakyContext(fail=True)
+
+    client = _AlwaysFailingClient()
+    data = await bridge._download_attachment_bytes(client, "https://example.test/v.mp3", max_bytes=1024)
+
+    assert data is None
+    assert client.calls == bridge._ATTACHMENT_DOWNLOAD_MAX_ATTEMPTS
