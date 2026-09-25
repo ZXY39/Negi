@@ -111,6 +111,9 @@ const S = {
     // S.ceoVoiceBusy 覆盖"已停止、正在本机转写"这段没有录音但也不能重开的窗口。
     ceoVoice: null,
     ceoVoiceBusy: false,
+    // 自动发送开关：默认开（点麦克风的人就是要"说完就走"），实际取值由
+    // restoreCeoVoiceAutoSend 从 localStorage 覆盖；null 表示还没读过存储值。
+    ceoVoiceAutoSend: null,
     // 顶边拖拽得到的输入框高度；0 = 未拖过，仍按内容自动增高。
     ceoInputManualHeight: 0,
     // 编辑重发模式:{sessionId, turnId, prevDraft} | null;Fork/编辑相关辅助状态。
@@ -469,6 +472,8 @@ const U = {
     ceoInputResizeHandle: document.getElementById("ceo-input-resize-handle"),
     ceoAttach: document.getElementById("ceo-attach-btn"),
     ceoVoiceBtn: document.getElementById("ceo-voice-btn"),
+    ceoVoiceOptions: document.getElementById("ceo-voice-options"),
+    ceoVoiceAutoSend: document.getElementById("ceo-voice-autosend"),
     ceoFileInput: document.getElementById("ceo-file-input"),
     ceoUploadList: document.getElementById("ceo-upload-list"),
     ceoFollowUpQueue: document.getElementById("ceo-follow-up-queue"),
@@ -5719,6 +5724,7 @@ function voiceCaptureSupported() {
 
 function syncCeoVoiceButton() {
     const button = U.ceoVoiceBtn;
+    syncCeoVoiceOptions();
     if (!button) return;
     const recording = Boolean(S.ceoVoice);
     button.setAttribute("aria-pressed", recording ? "true" : "false");
@@ -5782,6 +5788,7 @@ async function startCeoVoiceCapture() {
 
 async function finishCeoVoiceTranscription(capture) {
     S.ceoVoiceBusy = true;
+    syncCeoVoiceOptions();
     showToast({ title: "识别中", text: "正在本机转写，通常需要几秒", kind: "info", persistent: true });
     try {
         const blob = new Blob(capture.chunks, { type: capture.mimeType });
@@ -5789,7 +5796,7 @@ async function finishCeoVoiceTranscription(capture) {
         const result = await ApiClient.transcribeCeoVoice(wav);
         closeToast();
         if (result && result.ok && result.text) {
-            appendVoiceTextToComposer(String(result.text));
+            deliverVoiceText(String(result.text));
             return;
         }
         showToast({
@@ -5803,6 +5810,7 @@ async function finishCeoVoiceTranscription(capture) {
         showToast({ title: "识别失败", text: String(error && error.message ? error.message : error), kind: "error" });
     } finally {
         S.ceoVoiceBusy = false;
+        syncCeoVoiceOptions();
     }
 }
 
@@ -5819,16 +5827,84 @@ function voiceFailureText(result) {
     return String((result && result.error) || "未知原因");
 }
 
-function appendVoiceTextToComposer(text) {
-    const current = String(U.ceoInput ? U.ceoInput.value : "");
-    // 与后端拼接分段的同一条规则：只有两侧都是拉丁字符才补空格，
-    // 否则中文会被塞进多余的空格。
-    const needsSpace = /[A-Za-z0-9][^A-Za-z0-9]*$/.test(current) && /^[A-Za-z0-9]/.test(text);
-    U.ceoInput.value = `${current}${needsSpace ? " " : ""}${text}`;
+// 自动发送模式下用户没有复核机会，所以正文必须带上来源标识——前门提示词里那条
+// 「看到该前缀就先复述确认」全靠它触发。手动模式不带：文本会被用户编辑，标着
+// "机器识别结果"的那段很可能已经是用户自己改过的了。
+const VOICE_AUTO_SEND_PREFIX = "用户语音，机器识别结果：";
+const VOICE_AUTO_SEND_STORAGE_KEY = "g3ku.ceoVoiceAutoSend";
+
+function ceoVoiceAutoSendEnabled() {
+    if (S.ceoVoiceAutoSend === null || S.ceoVoiceAutoSend === undefined) return true;
+    return Boolean(S.ceoVoiceAutoSend);
+}
+
+function setCeoVoiceAutoSend(enabled) {
+    S.ceoVoiceAutoSend = Boolean(enabled);
+    try {
+        window.localStorage.setItem(VOICE_AUTO_SEND_STORAGE_KEY, S.ceoVoiceAutoSend ? "1" : "0");
+    } catch (error) {
+        void error; // 隐私模式写不进去不影响本次使用
+    }
+}
+
+function restoreCeoVoiceAutoSend() {
+    let stored = null;
+    try {
+        stored = window.localStorage.getItem(VOICE_AUTO_SEND_STORAGE_KEY);
+    } catch (error) {
+        void error;
+    }
+    S.ceoVoiceAutoSend = stored === null ? true : stored === "1";
+    if (U.ceoVoiceAutoSend) U.ceoVoiceAutoSend.checked = S.ceoVoiceAutoSend;
+}
+
+function syncCeoVoiceOptions() {
+    const box = U.ceoVoiceOptions;
+    if (!box) return;
+    box.hidden = !(S.ceoVoice || S.ceoVoiceBusy);
+    if (U.ceoVoiceAutoSend) U.ceoVoiceAutoSend.checked = ceoVoiceAutoSendEnabled();
+}
+
+function insertVoiceTextAtCursor(text) {
+    const el = U.ceoInput;
+    if (!el) return;
+    const value = String(el.value || "");
+    // 插在光标处、不动两侧：已有草稿不能被语音结果覆盖，也不能被推到末尾。
+    const from = Number.isFinite(el.selectionStart) ? el.selectionStart : value.length;
+    const to = Number.isFinite(el.selectionEnd) ? el.selectionEnd : from;
+    el.value = `${value.slice(0, from)}${text}${value.slice(to)}`;
+    const caret = from + text.length;
+    if (typeof el.setSelectionRange === "function") {
+        try {
+            el.setSelectionRange(caret, caret);
+        } catch (error) {
+            void error;
+        }
+    }
     syncCeoInputHeight();
     syncActiveCeoComposerDraft();
     syncCeoPrimaryButton();
-    U.ceoInput.focus();
+    el.focus();
+}
+
+function deliverVoiceText(text) {
+    const draftBefore = String(U.ceoInput ? U.ceoInput.value : "");
+    if (ceoVoiceAutoSendEnabled() && !draftBefore.trim()) {
+        U.ceoInput.value = `${VOICE_AUTO_SEND_PREFIX}${text}`;
+        sendCeoMessage();
+        // sendCeoMessage 成功时会清空输入框；没清空说明这条发不出去
+        // （会话忙、只读、没选中会话），把文本留在框里比吞掉它好。
+        if (String(U.ceoInput.value || "") !== "") {
+            showToast({ title: "未能自动发送", text: "语音文字已留在输入框，可手动发送。", kind: "info", durationMs: 7000 });
+            syncCeoPrimaryButton();
+        }
+        return;
+    }
+    insertVoiceTextAtCursor(text);
+    if (ceoVoiceAutoSendEnabled()) {
+        // 自动发送开着但框里已有草稿：不替用户决定要不要把草稿一起发出去。
+        showToast({ title: "已插入语音文字", text: "输入框里原有内容，本次未自动发送。", kind: "info", durationMs: 7000 });
+    }
 }
 
 function handleCeoVoiceClick() {
@@ -15315,6 +15391,10 @@ function bind() {
     });
     U.ceoFileInput?.addEventListener("change", (e) => void handleCeoFileSelection(e));
     U.ceoVoiceBtn?.addEventListener("click", handleCeoVoiceClick);
+    U.ceoVoiceAutoSend?.addEventListener("change", (e) => {
+        setCeoVoiceAutoSend(Boolean(e?.target?.checked));
+    });
+    restoreCeoVoiceAutoSend();
     bindCeoModelModeControls();
     U.ceoUploadList?.addEventListener("click", (e) => {
         const remove = e.target.closest("[data-upload-remove]");

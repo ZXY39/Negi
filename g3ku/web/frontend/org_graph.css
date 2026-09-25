@@ -4818,6 +4818,30 @@ textarea {
     }
 }
 
+/* 语音选项行：只在点过麦克风后出现在输入行上方，左缩进跟 composer 其余子行
+   用同一条计算式（要让开绝对定位的那组前置控件）。 */
+.ceo-voice-options {
+    display: flex;
+    margin-inline-start: calc(var(--ceo-input-leading-width) + var(--ceo-input-row-gap));
+}
+
+.ceo-voice-option {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.ceo-voice-option input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    accent-color: var(--brand-primary);
+    cursor: pointer;
+}
+
 .ceo-context-usage-brain {
     position: relative;
     flex: none;

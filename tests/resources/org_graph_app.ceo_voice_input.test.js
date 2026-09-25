@@ -57,7 +57,19 @@ class StubHTMLElement extends StubElement {
 
 class StubHTMLButtonElement extends StubHTMLElement {}
 class StubHTMLInputElement extends StubHTMLElement {}
-class StubHTMLTextAreaElement extends StubHTMLElement {}
+
+class StubHTMLTextAreaElement extends StubHTMLElement {
+    constructor() {
+        super();
+        // 光标插入要看得见选区，桩必须真的记着它。
+        this.selectionStart = 0;
+        this.selectionEnd = 0;
+    }
+    setSelectionRange(start, end) {
+        this.selectionStart = start;
+        this.selectionEnd = end;
+    }
+}
 
 class StubDocument {
     getElementById() {
@@ -93,6 +105,16 @@ class StubBlob {
     }
 }
 
+function makeStorage(seed = {}) {
+    const data = { ...seed };
+    return {
+        getItem: (key) => (key in data ? data[key] : null),
+        setItem: (key, value) => { data[key] = String(value); },
+        removeItem: (key) => { delete data[key]; },
+        __data: data,
+    };
+}
+
 function loadApp(contextExtra = {}) {
     const context = {
         console,
@@ -103,7 +125,7 @@ function loadApp(contextExtra = {}) {
         queueMicrotask,
         navigator: { clipboard: { writeText: async () => {} } },
         location: { protocol: "http:", host: "localhost", pathname: "/org_graph.html" },
-        localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+        localStorage: makeStorage(contextExtra.__localStorageSeed),
         sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
         document: new StubDocument(),
         window: {},
@@ -150,9 +172,15 @@ function loadApp(contextExtra = {}) {
             encodePcmWav,
             voiceFailureText,
             voiceCaptureSupported,
-            appendVoiceTextToComposer,
             syncCeoVoiceButton,
+            syncCeoVoiceOptions,
+            deliverVoiceText,
+            insertVoiceTextAtCursor,
+            restoreCeoVoiceAutoSend,
+            ceoVoiceAutoSendEnabled,
+            setCeoVoiceAutoSend,
             handleCeoVoiceClick,
+            VOICE_AUTO_SEND_PREFIX,
         };`,
         context
     );
@@ -177,6 +205,17 @@ test("composer markup carries a mic button next to the attach button", () => {
     const block = APP_HTML.slice(voiceAt, voiceAt + 220);
     assert.match(block, /data-lucide="mic"/);
     assert.match(block, /aria-pressed="false"/);
+
+    // 自动发送开关：默认勾选、文案固定；它是 composer 的子行，排在输入行
+    // 之前（语音按钮本身在输入行里，所以不能用它当顺序锚点）。
+    const optionsAt = APP_HTML.indexOf('id="ceo-voice-options"');
+    const rowAt = APP_HTML.indexOf('class="ceo-input-row"');
+    const composerAt = APP_HTML.indexOf('class="ceo-composer"');
+    assert.ok(optionsAt > composerAt && optionsAt < rowAt, "option row must sit above the input row inside the composer");
+    const optionBlock = APP_HTML.slice(optionsAt, optionsAt + 300);
+    assert.match(optionBlock, /<input id="ceo-voice-autosend" type="checkbox" checked>/);
+    assert.match(optionBlock, /识别后自动发送/);
+    assert.match(optionBlock, /hidden/);
 });
 
 test("encodePcmWav writes a 16-bit mono header the binary can read", () => {
@@ -231,28 +270,153 @@ test("not-ready codes are turned into the command the operator has to run", () =
     assert.match(voiceFailureText(null), /未知原因/);
 });
 
-test("transcribed text appends to the draft instead of replacing it", () => {
-    const { U, appendVoiceTextToComposer } = loadApp();
+test("manual mode inserts at the cursor and keeps both sides of the draft", () => {
+    const { U, insertVoiceTextAtCursor } = loadApp();
     U.ceoInput = new StubHTMLTextAreaElement();
-    U.ceoInput.value = "先看这个，";
-    appendVoiceTextToComposer("然后再说别的");
-    assert.equal(U.ceoInput.value, "先看这个，然后再说别的");
+    U.ceoInput.value = "前面后面";
+    U.ceoInput.selectionStart = 2;
+    U.ceoInput.selectionEnd = 2;
 
-    U.ceoInput.value = "结尾有空格 ";
-    appendVoiceTextToComposer("接上");
-    assert.equal(U.ceoInput.value, "结尾有空格 接上");
+    insertVoiceTextAtCursor("语音");
 
+    assert.equal(U.ceoInput.value, "前面语音后面");
+    assert.equal(U.ceoInput.selectionStart, 4);
+    assert.equal(U.ceoInput.selectionEnd, 4);
+});
+
+test("manual mode replaces the live selection instead of appending", () => {
+    const { U, insertVoiceTextAtCursor } = loadApp();
+    U.ceoInput = new StubHTMLTextAreaElement();
+    U.ceoInput.value = "把这段换掉谢谢";
+    U.ceoInput.selectionStart = 0;
+    U.ceoInput.selectionEnd = 5;
+
+    insertVoiceTextAtCursor("新内容");
+
+    assert.equal(U.ceoInput.value, "新内容谢谢");
+});
+
+test("auto send is on by default and prefixes the marker before sending", () => {
+    const app = loadApp();
+    const { U, deliverVoiceText, VOICE_AUTO_SEND_PREFIX } = app;
+    const sent = [];
+    U.ceoInput = new StubHTMLTextAreaElement();
     U.ceoInput.value = "";
-    appendVoiceTextToComposer("第一段");
-    assert.equal(U.ceoInput.value, "第一段");
+    app.__context.sendCeoMessage = () => {
+        sent.push(U.ceoInput.value);
+        U.ceoInput.value = "";
+    };
 
-    // 拉丁两侧才补空格，中文标点后面不补。
-    U.ceoInput.value = "hello";
-    appendVoiceTextToComposer("world");
-    assert.equal(U.ceoInput.value, "hello world");
-    U.ceoInput.value = "hello,";
-    appendVoiceTextToComposer("world");
-    assert.equal(U.ceoInput.value, "hello, world");
+    deliverVoiceText("帮我查一下昨天的任务");
+
+    assert.deepEqual(sent, [`${VOICE_AUTO_SEND_PREFIX}帮我查一下昨天的任务`]);
+    assert.equal(VOICE_AUTO_SEND_PREFIX, "用户语音，机器识别结果：");
+    assert.equal(U.ceoInput.value, "");
+});
+
+test("auto send does not fire when a draft is already in the box", () => {
+    const app = loadApp();
+    const { U, deliverVoiceText } = app;
+    const sent = [];
+    U.ceoInput = new StubHTMLTextAreaElement();
+    U.ceoInput.value = "还没想发出去";
+    U.ceoInput.selectionStart = 7;
+    U.ceoInput.selectionEnd = 7;
+    app.__context.sendCeoMessage = () => sent.push(U.ceoInput.value);
+
+    deliverVoiceText("语音内容");
+
+    assert.deepEqual(sent, []);
+    assert.equal(U.ceoInput.value, "还没想发出去语音内容");
+});
+
+test("auto send keeps the text in the box when the send lane refuses", () => {
+    const app = loadApp();
+    const { U, deliverVoiceText, VOICE_AUTO_SEND_PREFIX } = app;
+    U.ceoInput = new StubHTMLTextAreaElement();
+    U.ceoInput.value = "";
+    // sendCeoMessage 在会话忙/只读时直接 return，不清空输入框。
+    app.__context.sendCeoMessage = () => {};
+
+    deliverVoiceText("一句话");
+
+    assert.equal(U.ceoInput.value, `${VOICE_AUTO_SEND_PREFIX}一句话`);
+});
+
+test("turning auto send off inserts without the marker", () => {
+    const app = loadApp();
+    const { U, deliverVoiceText, setCeoVoiceAutoSend } = app;
+    const sent = [];
+    U.ceoInput = new StubHTMLTextAreaElement();
+    U.ceoInput.value = "";
+    app.__context.sendCeoMessage = () => sent.push(U.ceoInput.value);
+
+    setCeoVoiceAutoSend(false);
+    deliverVoiceText("口头补充");
+
+    assert.deepEqual(sent, []);
+    assert.equal(U.ceoInput.value, "口头补充");
+});
+
+test("auto send preference persists and is restored on boot", () => {
+    const app = loadApp();
+    const { ceoVoiceAutoSendEnabled, setCeoVoiceAutoSend } = app;
+    assert.equal(ceoVoiceAutoSendEnabled(), true);
+    setCeoVoiceAutoSend(false);
+    assert.equal(app.__context.localStorage.__data["g3ku.ceoVoiceAutoSend"], "0");
+
+    const booted = loadApp({ __localStorageSeed: { "g3ku.ceoVoiceAutoSend": "0" } });
+    booted.restoreCeoVoiceAutoSend();
+    assert.equal(booted.ceoVoiceAutoSendEnabled(), false);
+
+    const fresh = loadApp();
+    fresh.restoreCeoVoiceAutoSend();
+    assert.equal(fresh.ceoVoiceAutoSendEnabled(), true);
+});
+
+test("the option row is visible only while recording or transcribing", () => {
+    const { S, U, syncCeoVoiceOptions } = loadApp();
+    U.ceoVoiceOptions = new StubHTMLElement();
+    U.ceoVoiceAutoSend = new StubHTMLInputElement();
+    U.ceoVoiceOptions.hidden = true;
+
+    S.ceoVoice = null;
+    S.ceoVoiceBusy = false;
+    syncCeoVoiceOptions();
+    assert.equal(U.ceoVoiceOptions.hidden, true);
+
+    S.ceoVoice = { chunks: [] };
+    syncCeoVoiceOptions();
+    assert.equal(U.ceoVoiceOptions.hidden, false);
+
+    S.ceoVoice = null;
+    S.ceoVoiceBusy = true;
+    syncCeoVoiceOptions();
+    assert.equal(U.ceoVoiceOptions.hidden, false);
+
+    S.ceoVoiceBusy = false;
+    syncCeoVoiceOptions();
+    assert.equal(U.ceoVoiceOptions.hidden, true);
+});
+
+test("the web and channel marker constants are the same string", () => {
+    // 提示词里引用的是这一串；渠道侧与网页侧各有一份常量，任一边改了而另一边没改，
+    // 前门那条"看到前缀先确认"就会只对一半的语音生效——所以这条相等必须被测出来。
+    const bridgeCode = fs
+        .readFileSync("g3ku/qq_official/bridge.py", "utf8")
+        .replace(/\r\n/g, "\n");
+    const channelMatch = bridgeCode.match(/_VOICE_TRANSCRIPT_PREFIX = "([^"]+)"/);
+    const promptMatch = fs
+        .readFileSync("g3ku/runtime/prompts/ceo_frontdoor.md", "utf8")
+        .replace(/\r\n/g, "\n");
+
+    assert.ok(channelMatch, "channel marker constant not found in bridge.py");
+    const { VOICE_AUTO_SEND_PREFIX } = loadApp();
+    assert.equal(VOICE_AUTO_SEND_PREFIX, channelMatch[1]);
+    assert.ok(
+        promptMatch.includes(VOICE_AUTO_SEND_PREFIX),
+        "ceo_frontdoor.md must quote the exact marker the two lanes emit"
+    );
 });
 
 test("recording state drives aria-pressed, icon and the red class", () => {
