@@ -981,3 +981,73 @@ def test_stage_echo_with_tool_calls_is_not_treated_as_stage_block() -> None:
     ]
     reordered = keep_stage_blocks_off_continuation_tail(tail_messages)
     assert [str(item.get("role")) for item in reordered] == ["user", "assistant", "tool"]
+
+
+def _node_ledger_state(*, statuses: list[str], active_stage_id: str) -> dict[str, object]:
+    """节点词表的账本：状态写 进行中/完成/失败，rounds 带 tool_call_ids。"""
+    return {
+        "active_stage_id": active_stage_id,
+        "transition_required": False,
+        "stages": [
+            _stage_record(index, status=status, rounds=[_round(index, [f"call-work-{index}"])])
+            for index, status in enumerate(statuses, start=1)
+        ],
+    }
+
+
+def _node_ledger_messages(stage_count: int) -> list[dict[str, object]]:
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1","node_id":"node-1"}'},
+    ]
+    for index in range(1, stage_count + 1):
+        messages.extend(_stage_window(index))
+    return messages
+
+
+def test_in_place_compaction_prunes_with_object_shaped_node_ledger() -> None:
+    # 回归：节点道传的是 normalize_execution_stage_metadata 的 pydantic 账本，
+    # 曾经的 dict 判读把 rounds 整段跳过 —— 收口块只增不删，投影单调上涨。
+    from main.models import normalize_execution_stage_metadata
+
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-6",
+    )
+    expected = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(6), stage_state=state, keep_latest_completed_stages=3
+    )
+    object_state = normalize_execution_stage_metadata(state)
+    assert not isinstance(object_state, dict)
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(6), stage_state=object_state, keep_latest_completed_stages=3
+    )
+
+    contents = [str(item.get("content") or "") for item in result["rewritten"]]
+    assert result["stage_compaction_applied"] is True
+    assert result["removed_message_count"] == expected["removed_message_count"] > 0
+    assert result["compacted_stage_ids"] == expected["compacted_stage_ids"]
+    assert "output-1" not in contents
+    assert "output-2" not in contents
+    assert "output-3" in contents
+    assert "output-5" in contents
+
+
+def test_in_place_compaction_keeps_non_terminal_stage_even_when_not_active() -> None:
+    # 认不出的状态一律当作还在跑：一个"进行中"却没登记成 active_stage_id 的阶段
+    # 正在往 rounds 里写，裁它就是给上下文挖洞（少裁只是多花 token）。
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "进行中", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-5",
+    )
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(5), stage_state=state, keep_latest_completed_stages=1
+    )
+
+    contents = [str(item.get("content") or "") for item in result["rewritten"]]
+    assert result["compacted_stage_ids"] == {"frontdoor-stage-1", "frontdoor-stage-2"}
+    assert "output-3" in contents
+    assert "output-4" in contents
+    assert "output-5" in contents

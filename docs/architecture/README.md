@@ -133,6 +133,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、渠道会话脑图标没有读数 → `web-and-admin.md`「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
+- 节点跑了一两百轮、请求字符与 `effective_input_tokens` 全程只涨不降，怀疑阶段压缩没生效 → `context-and-cache-troubleshooting.md`「节点侧排查要点」（投影与发送体分叉才是节点的生效判据）+ `runtime-overview.md`「stage_compaction」
 - 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 用户消息下方的「编辑 / Fork」按钮要刷新网页才出现、会话被暂停/审批/压缩挡住输入时看不到 Fork、或点了按钮提示「当前不可编辑」 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」
 - 回合进行中发的补充没被回答、待发送气泡上的「立即发送 / 撤回」行为疑问、或撤回后条目又被画回来 → `web-and-admin.md`「Queued Follow-Ups」

@@ -351,6 +351,8 @@ execution / acceptance 节点在真正发 provider 请求前也走最后一层 n
 
 “某个工具上一轮还能调、这一轮报 `tool not available`，之后 load 也救不回来”的排查顺序（水合合同本身归 `tool-and-skill-system.md`「hydrated tools」）：先看掉出那一轮的 `request_seed_source` 是否 `scaffold_seed*` —— 种子重建轮是曝光集重算的地方；再比 frame 的 `hydrated_executor_state`（台账）与 `hydrated_executor_names`（本轮视图）是否分叉，视图窄于台账是合法的，台账被写成视图才是回归；最后才看合同里的候选名单是否还含该名字（不含且也调不动＝第四态，属合同破坏）。**压缩不是这条的原因**：节点侧 `token_compression` 只复用/推迟 provider bundle，不碰 callable 也不碰水合两字段，实测同轮请求消息数不降。
 
+节点阶段压缩是否生效，看**投影与发送体是否分叉**：`model_message_chars`（`_prepare_messages` 的投影，压缩在这里发生）应在某个阶段转入终态的那一跳出现台阶式下降，而 `prepared_message_chars` / `observed_input_truth.effective_input_tokens`（真正发出去的那份）保持不变——发送体仍走 raw scaffold（「append-only 规则」与「fresh-turn 第一跳」），所以节点上的阶段压缩**不表现为请求字符回落**；两条之差就是当轮被裁掉的字符量。两条一起不降、而投影里的 `[G3KU_STAGE_COMPACT_V1]` 块数还在涨，是"只加摘要不删肉身"的回归形态，判据见 `runtime-overview.md`「stage_compaction」。
+
 preflight 判定：
 
 - `applied=true` 预期 `history_shrink_reason=token_compression`；actual request 变短但 `prompt_cache_key_hash` 没变，是“live request 被压缩但 caller-side family 未换”的正常行为，不是 family churn。

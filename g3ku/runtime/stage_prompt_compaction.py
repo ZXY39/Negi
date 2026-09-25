@@ -492,7 +492,7 @@ def compact_stage_prompt_messages_in_place(
     active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
     retained_ids = retained_completed_stage_ids(stage_state, keep_latest=keep_latest_completed_stages)
 
-    # 1) 阶段划分：过期阶段 = 完成普通阶段 − 保留集；收集其 rounds 的 tool_call_ids。
+    # 1) 阶段划分：过期阶段 = 终态普通阶段 − 保留集；收集其 rounds 的 tool_call_ids。
     expired_ids: set[str] = set()
     compacted_ids: set[str] = set()
     expired_call_ids: set[str] = set()
@@ -507,26 +507,17 @@ def compact_stage_prompt_messages_in_place(
             continue
         stage_index = int(_stage_get(stage, "stage_index", 0) or 0)
         normal_all.append((stage_index, stage_id))
-        status = str(_stage_get(stage, "status", "") or "").strip().lower()
-        if status == "active" or stage_id == active_stage_id:
+        if stage_id == active_stage_id or not stage_is_terminal(stage):
             continue
         if stage_id in retained_ids:
             continue
         compacted_ids.add(stage_id)
         expired_ids.add(stage_id)
-        for round_item in list(_stage_get(stage, "rounds", []) or []):
-            if not isinstance(round_item, dict):
-                continue
-            for call_id in list(round_item.get("tool_call_ids") or []):
-                normalized_call_id = extract_call_id(call_id)
-                if normalized_call_id:
-                    expired_call_ids.add(normalized_call_id)
-                    call_id_to_expired_index.setdefault(normalized_call_id, stage_index)
-            for tool in list(round_item.get("tools") or []):
-                normalized_call_id = extract_call_id((tool or {}).get("tool_call_id")) if isinstance(tool, dict) else ""
-                if normalized_call_id:
-                    expired_call_ids.add(normalized_call_id)
-                    call_id_to_expired_index.setdefault(normalized_call_id, stage_index)
+        # 账本条目在两条车道上形态不同（前门 dict、节点 pydantic 模型），统一走
+        # stage_round_call_ids；按序登记，保证同一 call id 跨阶段重复时锚点稳定。
+        for normalized_call_id in sorted(stage_round_call_ids(stage)):
+            expired_call_ids.add(normalized_call_id)
+            call_id_to_expired_index.setdefault(normalized_call_id, stage_index)
     normal_all.sort()
     stage_id_by_index = {stage_index: stage_id for stage_index, stage_id in normal_all}
 
