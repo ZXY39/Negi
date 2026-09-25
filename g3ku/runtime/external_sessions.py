@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.runtime.session_keys import build_external_session_key, normalize_bridge_id
 from g3ku.utils.helpers import ensure_dir
@@ -167,7 +169,13 @@ class ExternalSessionRegistry:
 
     def find_by_any_key(self, value: str | None) -> ExternalSessionEntry | None:
         """Resolve an outbound target that may be either a session_key or a
-        registered external_key (any bridge)."""
+        registered external_key (any bridge).
+
+        external_key 不是全局唯一：同一自然人在两个 QQ 号下是两个会话，而 bridge_id
+        改名（如单号 → `qq-official-<appId>`）会给同一个 external_key 留下新旧两条
+        目。按插入序静默取第一条会把推送发给可能已无桥消费的旧会话，所以多命中时取
+        `created_at` 最新的一条并留下 WARNING——WARNING 就是"该把这条改指新键"的信号。
+        """
         raw = str(value or "").strip()
         if not raw:
             return None
@@ -175,10 +183,21 @@ class ExternalSessionRegistry:
             entry = self._entries.get(raw)
             if entry is not None:
                 return entry
-            for candidate in self._entries.values():
-                if candidate.external_key == raw:
-                    return candidate
+            candidates = [item for item in self._entries.values() if item.external_key == raw]
+        if not candidates:
             return None
+        if len(candidates) > 1:
+            candidates.sort(key=lambda item: (str(item.created_at or ""), item.session_key))
+            chosen = candidates[-1]
+            logger.warning(
+                "external_key {} resolves to {} sessions; routing to newest {} — 把直连该目标的"
+                "推送/定时任务改指新会话键，否则旧会话会静默收不到",
+                raw,
+                len(candidates),
+                chosen.session_key,
+            )
+            return chosen
+        return candidates[0]
 
     def list_bridge_sessions(self, bridge_id: str) -> list[ExternalSessionEntry]:
         bridge = normalize_bridge_id(bridge_id)

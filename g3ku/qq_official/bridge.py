@@ -521,6 +521,13 @@ async def run_qq_official_bridge(
         while True:
             seen = seqs.get(session_id, 0)
             try:
+                # 排查"入站正常、出站黑洞"的唯一分界证据：这条在意味着任务真的在跑，
+                # 缺席就意味着 pump 从未被执行（任务没被调度），而不是连上了没事件。
+                logger.info(
+                    "qq-official pump connecting session={} last_seq={}",
+                    session_id,
+                    seen,
+                )
                 async for event in client.stream_events(session_id, last_seq=seen):
                     seq = int(event.get("seq") or seen)
                     event_type = str(event.get("type") or "")
