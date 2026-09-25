@@ -2724,3 +2724,38 @@
     width: 16px;
     height: 16px;
 }
+
+/* 63. 官方 QQ 机器人账号卡里的沙箱勾选项并入 §56 的输入档（38px 高、--ui-radius-control
+   圆角、同一表面色），否则同一行四格里只有它是旧层的灰盒小圆角。状态徽标复用
+   .status-badge，配色由 §12 给，这里不再上一次色。 */
+[data-ui-version="v2"] .qq-bot-sandbox {
+    border-radius: var(--ui-radius-control);
+    border-color: var(--ui-border);
+    background-color: var(--ui-bg-input);
+    color: var(--ui-text-secondary);
+    font-size: 13px;
+}
+
+[data-ui-version="v2"] .qq-bot-sandbox:hover {
+    border-color: var(--ui-border-strong);
+}
+
+[data-ui-version="v2"] .qq-bot-sandbox:has(.qq-bot-sandbox-input:checked) {
+    border-color: color-mix(in srgb, var(--ui-brand) 55%, transparent);
+    background-color: var(--ui-brand-soft);
+    color: var(--ui-text);
+}
+
+[data-ui-version="v2"] .qq-bot-sandbox-input {
+    border-color: var(--ui-border-strong);
+    background-color: var(--ui-bg-surface);
+}
+
+[data-ui-version="v2"] .qq-bot-sandbox-input:checked {
+    border-color: var(--ui-brand);
+    background-color: var(--ui-brand);
+}
+
+[data-ui-version="v2"] .qq-bot-sandbox-input:checked::after {
+    border-color: var(--ui-on-brand);
+}

@@ -349,7 +349,9 @@ function _qqBotRowStatus(row) {
     let text = _qqBotServiceLabel(state);
     if (detail) text += `（${detail}）`;
     else if (!row.has_secret && !String(row.app_secret || "").trim()) text += " · 尚未保存 AppSecret";
-    return { state, text };
+    // 徽标配色沿用状态标签那套语义档：接通=绿、失败=红、连接中=蓝，其余走中性档。
+    const badge = { connected: "completed", error: "failed", connecting: "running" }[state] || "pending";
+    return { state, text, badge };
 }
 
 function renderQqBotAccounts() {
@@ -370,6 +372,10 @@ function renderQqBotAccounts() {
         el.className = "resource-list-item qq-bot-account-row";
         el.dataset.index = String(index);
         el.innerHTML = `
+            <div class="qq-bot-account-head">
+                <span class="status-badge qq-bot-account-status" data-status="${esc(status.badge)}"
+                    title="${esc(status.text)}">${esc(status.text)}</span>
+            </div>
             <div class="llm-form-grid qq-bot-account-fields">
                 <label class="resource-field"><span class="resource-field-label">AppID</span>
                     <input class="resource-search qq-bot-appid" type="text" value="${esc(row.app_id || "")}" autocomplete="off"></label>
@@ -378,9 +384,9 @@ function renderQqBotAccounts() {
                         placeholder="${row.has_secret ? "已保存，留空不改" : "仅保存，不回显"}"></label>
                 <label class="resource-field"><span class="resource-field-label">备注</span>
                     <input class="resource-search qq-bot-label" type="text" value="${esc(row.label || "")}" autocomplete="off"></label>
-                <label class="resource-field qq-bot-sandbox-field"><span class="resource-field-label">环境</span>
+                <div class="resource-field qq-bot-sandbox-field"><span class="resource-field-label">环境</span>
                     <label class="qq-bot-sandbox"><input class="qq-bot-sandbox-input" type="checkbox"
-                        ${row.sandbox ? "checked" : ""}>沙箱</label></label>
+                        ${row.sandbox ? "checked" : ""}>沙箱</label></div>
             </div>
             <div class="external-token-actions">
                 <button class="tool-governance-switch qq-bot-row-switch" type="button"
@@ -388,7 +394,6 @@ function renderQqBotAccounts() {
                     <span class="tool-governance-switch-track" aria-hidden="true"><span class="tool-governance-switch-thumb"></span></span>
                     <span class="tool-governance-switch-label">${row.enabled ? "已启用" : "已停用"}</span>
                 </button>
-                <span class="qq-bot-status${status.state === "connected" ? " is-ok" : status.state === "error" ? " is-error" : ""}">${esc(status.text)}</span>
                 <button class="toolbar-btn ghost danger small" data-action="remove" type="button">删除</button>
             </div>`;
         listEl.appendChild(el);

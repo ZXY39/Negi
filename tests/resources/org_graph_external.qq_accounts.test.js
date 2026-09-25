@@ -160,3 +160,45 @@ test("QQ 账号面板：状态摘要按号计数，行状态区分未配置", ()
     assert.equal(status.state, "error");
     assert.match(status.text, /错误（intents 未开通）/);
 });
+
+test("QQ 账号面板：徽标坐在卡片右上角，取色跟服务态走", () => {
+    const listEl = makeListEl();
+    const { t } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
+    t.QQ_BOT_STATE.loaded = true;
+    t.QQ_BOT_STATE.enabled = true;
+    t.QQ_BOT_STATE.rows = [
+        row({ app_id: "111", has_secret: true, service: { state: "connected" } }),
+        row({ app_id: "222", service: { state: "error", detail: "intents 未开通" } }),
+        row({ app_id: "333", service: { state: "connecting" } }),
+        row({ app_id: "444", enabled: false }),
+    ];
+
+    t.renderQqBotAccounts();
+
+    const html0 = listEl.children[0].innerHTML;
+    // head 在字段网格之前，徽标才落在卡片右上角而不是底部操作行。
+    assert.match(html0, /qq-bot-account-head[\s\S]*data-status="completed"[\s\S]*qq-bot-account-fields/);
+    assert.doesNotMatch(html0, /external-token-actions[\s\S]*qq-bot-account-status/);
+    assert.match(listEl.children[1].innerHTML, /data-status="failed"/);
+    assert.match(listEl.children[2].innerHTML, /data-status="running"/);
+    assert.equal(t._qqBotRowStatus(t.QQ_BOT_STATE.rows[3]).badge, "pending");
+});
+
+test("QQ 账号面板：一卡两列，AppID/AppSecret 在前一行、备注/环境在后一行", () => {
+    const listEl = makeListEl();
+    const { t } = loadModule({ listEl, statusEl: { textContent: "", className: "" } });
+    t.QQ_BOT_STATE.loaded = true;
+    t.QQ_BOT_STATE.rows = [row({ app_id: "111", sandbox: true })];
+
+    t.renderQqBotAccounts();
+
+    const html = listEl.children[0].innerHTML;
+    // 只在字段网格里量顺序：徽标正文本身会带出「AppSecret」这个词。
+    const fields = html.slice(html.indexOf("qq-bot-account-fields"));
+    const order = ["AppID", "AppSecret", "备注", "环境"].map((label) => fields.indexOf(label));
+    assert.deepEqual(order, [...order].sort((a, b) => a - b));
+    assert.equal(order.every((i) => i >= 0), true);
+    // 环境一格原来是 label 套 label，浏览器会把内层 label 拆出外层；现在外层是 div。
+    assert.match(html, /<div class="resource-field qq-bot-sandbox-field">/);
+    assert.match(html, /<label class="qq-bot-sandbox"><input class="qq-bot-sandbox-input" type="checkbox"/);
+});

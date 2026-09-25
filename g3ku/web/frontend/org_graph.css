@@ -12739,12 +12739,87 @@ textarea {
     line-height: 1.5;
 }
 
-.qq-bot-status.is-ok {
-    color: var(--status-success-text, #4ade80);
+/* 官方 QQ 机器人：一个账号一张卡，卡内两列——AppID/AppSecret 一行，备注/环境一行。
+   .resource-list-item 的 height:100% 会把每张卡拉到整表高度、第二张卡被面板裁掉，
+   align-items:flex-start 会把卡内网格压成内容宽；两处都改回按内容排高、横向铺满。 */
+.qq-bot-account-row {
+    height: auto;
+    align-items: stretch;
 }
 
-.qq-bot-status.is-error {
-    color: var(--status-failed-text, #fca5a1);
+.qq-bot-account-head {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.qq-bot-account-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.qq-bot-account-status {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 沙箱勾选项：原生方框在淡底上几乎看不见，勾上后与不勾只差 1px 描边，
+   所以整颗做成可点标签盒，勾选态同时换描边、底色和对勾。 */
+.qq-bot-sandbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    min-height: 38px;
+    padding: 0 12px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background-color: color-mix(in srgb, var(--bg-app) 76%, transparent);
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.qq-bot-sandbox:hover {
+    border-color: var(--brand-primary);
+}
+
+.qq-bot-sandbox:has(.qq-bot-sandbox-input:checked) {
+    border-color: color-mix(in srgb, var(--brand-primary) 55%, transparent);
+    background-color: color-mix(in srgb, var(--brand-primary) 10%, transparent);
+    color: var(--text-primary);
+}
+
+.qq-bot-sandbox-input {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    display: inline-grid;
+    place-content: center;
+    border: 1.5px solid var(--border-color);
+    border-radius: 6px;
+    background-color: var(--bg-panel);
+    cursor: pointer;
+}
+
+.qq-bot-sandbox-input:checked {
+    border-color: var(--brand-primary);
+    background-color: var(--brand-primary);
+}
+
+.qq-bot-sandbox-input:checked::after {
+    content: "";
+    width: 9px;
+    height: 5px;
+    border-left: 2px solid var(--bg-panel);
+    border-bottom: 2px solid var(--bg-panel);
+    transform: rotate(-45deg) translate(1px, -2px);
+}
+
+.qq-bot-sandbox-input:focus-visible {
+    outline: 2px solid var(--brand-primary);
+    outline-offset: 2px;
 }
 
 /* exec 命令白名单与审批对话框（exec 守卫白名单豁免 + 操作者审批配套 UI） */
