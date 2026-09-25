@@ -23,6 +23,7 @@ docs/maintenance/*
 !docs/FIX_PLAN_create-async-task-aimessage-crash.md
 !docs/FIX_PLAN_heartbeat-silent-tool-and-terminal-outbox.md
 !docs/FIX_PLAN_failed-turn-user-message-context-adoption.md
+!docs/FIX_PLAN_multi-qq-accounts.md
 !docs/FIX_PLAN_one-line-install.md
 docs/superpowers/
 research/
