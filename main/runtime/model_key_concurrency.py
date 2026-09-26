@@ -41,6 +41,9 @@ class ModelKeyConcurrencyController:
         self._lock = threading.RLock()
         self._running_counts: dict[tuple[str, int], int] = {}
         self._waiters: dict[tuple[str, int], deque[_QueuedModelKeyPermitRequest]] = {}
+        # 每个 (model, key) 槽位最后一次被授予的全局序号，用于「最久未被授予」打破平局。
+        self._grant_sequence: dict[tuple[str, int], int] = {}
+        self._grant_seq_total = 0
         self._next_lease_id = 0
 
     def configure(
@@ -92,6 +95,56 @@ class ModelKeyConcurrencyController:
                 ) + 1
                 return self._build_lease(model_ref=normalized_model_ref, key_index=key_index, queued_at="")
         return None
+
+    def acquire_least_loaded(self, *, model_ref: str) -> ModelKeyPermitLease | None:
+        """在该模型有容量的 key 里取在飞最少的一把。
+
+        `try_acquire_first_available()` 按 key_indexes 的固定顺序取第一个有容量的槽位，
+        于是模型内部的 key 轴也有「首项偏置」。负载均衡改造把 model 轴摊平之后，key 轴
+        的同一偏差会成为新的热点，所以这里按当前计数选，并用最久未授予打破平局。
+        """
+        normalized_model_ref = str(model_ref or "").strip()
+        if not normalized_model_ref:
+            return None
+        with self._lock:
+            limits = self._normalized_limits(normalized_model_ref)
+            candidates: list[tuple[int, int, int]] = []
+            for key_index in list(limits["key_indexes"]):
+                if not self._slot_has_capacity_locked(normalized_model_ref, key_index, per_key_limits=limits["per_key_limits"]):
+                    continue
+                running = int(self._running_counts.get((normalized_model_ref, key_index), 0))
+                granted_seq = int(self._grant_sequence.get((normalized_model_ref, key_index), 0))
+                candidates.append((running, granted_seq, int(key_index)))
+            if not candidates:
+                return None
+            # 先比在飞数，再比最久未被授予，最后回到稳定 key index 保证可测。
+            _running, _granted_seq, chosen_index = min(candidates)
+            self._running_counts[(normalized_model_ref, chosen_index)] = int(
+                self._running_counts.get((normalized_model_ref, chosen_index), 0)
+            ) + 1
+            return self._build_lease(model_ref=normalized_model_ref, key_index=chosen_index, queued_at="")
+
+    def effective_capacity(self, model_ref: str) -> int | None:
+        """该模型的可调度容量之和；任一 key 未配置上限则返回 None 表示「本地无上限」。
+
+        返回 None 时调用方不得把它当成容量 1 参与 busy 判定：现网所有绑定的
+        `singleApiKeyMaxConcurrency` 都没配，本地因此永不排队。
+        """
+        normalized_model_ref = str(model_ref or "").strip()
+        if not normalized_model_ref:
+            return None
+        with self._lock:
+            limits = self._normalized_limits(normalized_model_ref)
+            per_key_limits = limits["per_key_limits"]
+            if not per_key_limits:
+                return None
+            total = 0
+            for key_index in limits["key_indexes"]:
+                limit = per_key_limits.get(int(key_index))
+                if limit is None:
+                    return None
+                total += max(0, int(limit))
+            return total
 
     async def acquire_specific(self, *, model_ref: str, key_index: int) -> ModelKeyPermitLease:
         normalized_model_ref = str(model_ref or "").strip()
@@ -224,6 +277,8 @@ class ModelKeyConcurrencyController:
 
     def _build_lease(self, *, model_ref: str, key_index: int, queued_at: str) -> ModelKeyPermitLease:
         self._next_lease_id += 1
+        self._grant_seq_total += 1
+        self._grant_sequence[(str(model_ref or "").strip(), max(0, int(key_index or 0)))] = self._grant_seq_total
         return ModelKeyPermitLease(
             lease_id=self._next_lease_id,
             model_ref=str(model_ref or "").strip(),
