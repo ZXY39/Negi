@@ -39,7 +39,11 @@
 - `catalog`
   管理模型条目
 - `roles`
-  把模型键映射到 `ceo / execution / inspection`
+  把模型路由到 `ceo / execution / inspection / memory`。每一项要么是一个绑定 key（旧写法，等价于 `{"type":"model"}`），要么是一个 route entry：`{"type":"model","modelKey":...}` 或 `{"type":"load_balance","groupKey":...}`
+- `loadBalanceGroups`
+  可选节。组名 → `{enabled, maxRetryRounds, modelKeys}`：组内成员平级，运行时按综合负载选一个并把节点粘滞绑上去；`maxRetryRounds` 是该组内每个成员的完整 key pass 预算，取值 `1..3`，超范围是配置错误而不是需要夹断的输入
+
+`catalog[]` 条目另有 `quotaPoolKey`：operator 显式声明「这几条 binding 共享同一个上游配额账户」。不填时运行时只按解析到的 endpoint + API key 指纹自动合并；不按 provider 名称猜测共享。
 
 ### `providers`
 
@@ -132,6 +136,8 @@
 - 因此 `model_config set_scope_chain` 之后，同一轮的下一次模型调用即用新链；在同一步把切链与被门控的工具调用作为并行工具调用发出时，闸门仍按切换前的链判定。
 - Main runtime 节点的模型链在任务运行时 chat 后端的每个链轮边界活解析（`model_refs_resolver` 读取当前角色链），路由/绑定变更在下一个链轮即生效，不必等下一个回合；可重试失败退避等待结束后同样先重新解析链再继续重试。**链在重试途中被改写不会中止回合**：退避边界发现 runtime revision 变化且能解析出与在用链不同的新链时，重试循环丢弃旧链的已试集合、刷新 revision 基线并从新链链首重新评估，成功即正常返回；链未真正变化时只刷新基线，继续原有重试账本，不在同一 revision 上空转。按链首重启意味着新链里此前被跳过的模型重新获得机会。`DEFAULT_MAX_CHAIN_CHANGE_RESTARTS`（`g3ku/providers/fallback.py`）跨重启累计，只兜底"链反复变化且始终不成功"的病态抖动，达到上限后落既有链耗尽终态。CEO/frontdoor 与二者之上还有各自的回合级守卫：`react_loop` 在链耗尽错误处按 `provider_retry_invalidation` 重建回合，frontdoor 在 provider 失败/空响应边界重新解析角色链，二者都只在 `ensure_runtime_config_current` 报告配置确有前进时触发。memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
 
+配置刷新同时重载节点侧的路由结构：`models.roles` / `models.loadBalanceGroups` 变化后，worker 会重建 `execution` / `inspection` 的 route plan 并把组定义连同新的 revision 交给负载均衡器（契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。revision 前进会清掉短期冷却与失效的节点绑定，但保留最近的请求速率与 429 观测——那两项描述的是上游，与本地配置有没有被改过无关。
+
 维护上把这理解成“迭代/重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧模型还在用”，重点检查：
 
 1. 对应进程是否真的执行到了 runtime refresh（日志 `Loop runtime config refreshed`）
@@ -191,12 +197,26 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 
 绑定 key 是稳定主键：它唯一标识 `models.catalog[]` 条目，同时被 `models.roles.*` 和 `agents.multi_agent.orchestrator_model_key` 引用。管理面创建 binding 时以记录的 `default_model` 为基底自动生成 key，遇到同名模型时追加数字后缀去重，因此 key 不再等于模型名，不同供应商可以添加同名模型。展示标题的优先级是绑定级 `name` > 记录的 `default_model` > `key`：`name` 是 `models.catalog[]` 条目的绑定层字段，空值为「未命名」，展示回退到 `default_model`，写入空 `name`/删除 `name` 即回到回退展示而不改写 key；非空 `name` 在创建/编辑 binding 时做大小写不敏感的全局去重（排除自身），`/api/models` 与 `/api/llm/bindings` 两个视图都读写该字段。编辑 `default_model` 或 `name` 都会更新展示标题而不改写 key；命名与展示职责详见 `web-and-admin.md`「Model Config Page And Admin Contract」。
 
-### 角色链顺序即路由顺序
+### 角色路由：有序 fallback 与负载均衡组
 
-`models.roles.ceo` 的原序就是 CEO/frontdoor 的路由顺序：解析出的 `model_refs` 既不被过滤，也不按 provider 模板或协议能力重排。只有链首失败后才前进到链上下一个模型（重试与轮换预算见 `runtime-overview.md`「Chat provider 超时与重试边界」）。
+一条角色链是**有序 route entry 列表**，链上顺序就是 fallback 优先级。CEO/frontdoor 的 `model_refs` 不被过滤也不按 provider 模板或协议能力重排；只有链首失败后才前进到下一个 entry（重试与轮换预算见 `runtime-overview.md`「Chat provider 超时与重试边界」）。
+
+`execution` / `inspection` 额外允许把一跳写成负载均衡组（`loadBalanceGroups` 引用）。语义差别是维护者最容易读错的地方：
+
+- 组内成员**平级**，`modelKeys` 的书写顺序只用于展示与稳定序列化，不参与选择；链上 entry 的顺序才参与。
+- `models.roles.*` 与所有「候选展开」出口（`get_role_model_keys`、`Config.get_scope_model_chain`、管理面 `roles` 字段、`facade.get_routes`）都是**候选视图**：组被摊成成员列表。任何把「候选数组第一项」当成实际执行模型的代码都只在 legacy 纯 direct 链上成立；含组时真正的成员由准入层的绑定决定（契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。
+- `route_entries` 才是有序结构。管理面读写它，`roles` 保留旧形状给存量客户端。
+- 落盘形状：一条链全是 direct 时继续写字符串数组（存量 `config.json` 零 diff），一旦出现组 entry 才整条改写成对象数组。读侧两种形状都吃。
+- `ceo` / `memory` 出现 `load_balance` 会被直接拒绝（负载均衡组当前仅支持 execution/inspection）。记忆车道有固定单并发与 chat capability 契约，CEO 有会话固定模型与缓存键约束，都不能被组语义覆盖。
+- `mainRuntime.modelRouteLoadBalanceEnabled = false` 是回滚闸门：含组的链按配置顺序摊平成 direct 候选，准入与发送侧一起回到有序链行为。
+
+两条与序列化器绑定的维护陷阱：
+
+- `models.loadBalanceGroups` 在加载器的「显式字段」校验里是**豁免前缀**。它不豁免的话，任何一份没有该节的存量 `config.json` 都会在下次加载时被要求填写组字段。
+- 写链必须走 `Config.set_role_model_keys` / `set_role_model_routes`。字段类型是 `ModelRouteEntry` 之后，就地 `append` 裸字符串不会被 pydantic 拦下（未开 `validate_assignment`），但会让改名、删除这类按 key 比较的写路径静默失配。改名要同时命中链上的 direct entry 和组内成员（`rename_model_key_in_routing`）；把模型从组里删到空是报错而不是顺手删组。
 
 - provider 的 `supports_prompt_caching` 不参与模型选择。它描述的是这条车道转不转发 `prompt_cache_key` 这个请求字段，而不是这个模型吃不吃得到缓存——命中来自网关侧自动前缀缓存，两家车道都会回报 `cached_tokens`（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。把它当成路由门控会把不具备该字段的模型整段移出链，连带取消它们的容灾资格。
-- 「面板显示的模型不像链首」按两个字段判读：preflight diagnostics 的 `resolved_model_key` 是本轮生效的绑定 key，`provider_model` 是 provider 侧模型名。多条绑定可以共用同一个 `provider_model`，只有绑定 key 能区分它们。
+- 「面板显示的模型不像链首」按两个字段判读：preflight diagnostics 的 `resolved_model_key` 是本轮生效的绑定 key，`provider_model` 是 provider 侧模型名。多条绑定可以共用同一个 `provider_model`，只有绑定 key 能区分它们。含组时 `resolved_model_key` 就是被选中的那个组成员。
 
 ### 会话级固定模型优先于角色链
 
@@ -355,6 +375,7 @@ If a provider reply looks truncated (for example a response ending at exactly th
 - 请求体形状错误只按结构化 HTTP 状态判定（400/422），无文本关键字兜底；status 不可得的错误一律走正常轮换/降级判定。
 - 换 key（轮换）只在错误**未命中 `retry_on`、且非请求体形状错误、且非内部运行时错误**时才发生，且为单趟：每个 key 各试一次即前进到链上下一个模型。**配置脚枪**：把 `401`/`403`/`invalid api key` 之类配进 `retry_on`，会让坏 key 被当成"可重试"从而只重试不换 key——坏 key 应靠"未命中 → 换 key"自愈，不要配进 `retry_on`。
 - `retry_count`（配置页「重试次数」）是该模型可重试错误的最大退避重试轮数：0/未设置用内置默认 `DEFAULT_RETRYABLE_MODEL_ROUNDS=10`；非可重试错误的轮换恒为单趟、不受该值影响。同一个 key 配置在多个模型上互不影响——轮预算按（模型, key）槽位独立计，总请求上限 = Σ(每模型轮预算 × 该模型 key 数)。
+- 负载均衡组内的成员**不继承** `retry_count`：组用 `models.loadBalanceGroups.<key>.maxRetryRounds`（默认 1，允许 1..3）。原因是一个配了 `9999` 或 `9999999` 的成员会在组内永远不让位，组内平级 fallback 随之失效。`retry_count=0` 在这两条车道上含义不同，所以组预算必须写显式值，不能靠「省略字段」落到 10 轮默认。
 - 管理面按**单 key 约束**引导配置：`org_graph_llm.js` 创建配置与保存连接信息时拒绝多 key 输入（逗号/换行分隔即报错），提示以「多配置组模型链」实现容量与容灾回退。运行时多 key 轮换代码路径保留以兼容历史存量配置；新配置从配置面即被限定为单 key。
 
 ## Frontdoor Context Window Contract

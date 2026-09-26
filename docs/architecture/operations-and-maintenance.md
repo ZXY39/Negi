@@ -355,6 +355,16 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 - 当前系统约定是：显式 runtime refresh 会同时重载已解锁进程里的 bootstrap security overlay 缓存；如果 refresh 没跑到，老进程可能继续拿旧 secret 快照
 - 如果 refresh 已完成但行为仍不对，再考虑 worker 进程是否需要重启，或是否存在多个旧 worker / 旧 Web 进程残留
 
+### 节点模型负载不均 / 一直打同一个模型
+
+`execution` / `inspection` 的车道行为契约见 `runtime-overview.md`「节点模型路由与准入绑定」，配置语义见 `config-and-models.md`「角色路由：有序 fallback 与负载均衡组」。运维判读路径：
+
+- 先看这条链到底有没有组：`g3ku status` 打印的是 route/group 结构（`Execution Route: lb:g_shared(m_a|m_b)[rounds=1] → model:m_x`），不再有「链首 = 执行模型」的读法。纯 direct 链仍按配置顺序 fallback，不存在均衡。
+- 看实际分布：`GET /api/models/load-balance/status`（数据来自 worker 心跳，因此需要 worker 在线），按成员读 `running / waiting / reserved / rolling_rpm_60s / penalty_429 / score / cooldown_reason`。`quota_bucket_count` 小于成员数说明多条绑定共用一份配额，这是预期而不是 bug。
+- 看单个节点为什么选了这个成员：`.g3ku/main-runtime/managed-worker.log` 的 `Model route selected` 行带决策时刻的负载读数与 `selection_reason`；换过成员则看 `Model node binding rebound` 的 `rebind_reason`（`cooldown` / `penalty_threshold` / `filter_changed` / `capacity` / `plan_changed` / `stage_boundary`）。
+- 「配额分布未知」看 `unresolved_bucket_count`：非 0 表示这个 worker 解析不到密钥材料（未解锁），此时桶合并与 RPM 归因都不可信，先解锁再判断。
+- 要退回旧行为：`mainRuntime.modelRouteLoadBalanceEnabled = false` 把含组的链按配置顺序摊平成 direct 候选（有序链语义），不需要改模型绑定 key，也不影响 token 台账。
+
 ### 外部渠道桥接异常
 
 内置渠道子系统已移除，IM 渠道由独立桥接进程经 External Agent API 接入。先看：

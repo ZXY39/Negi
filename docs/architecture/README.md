@@ -127,7 +127,8 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `temp/tasks/` 出现大量无主 `task_*` 目录（目录数远超任务数）→ `operations-and-maintenance.md`「关键状态文件与目录」+ `runtime-overview.md`「任务侧」
 - 临时文件散落在工作区根目录（`.tmp_*` / `tmp_*`、命令重定向落盘）→ `runtime-overview.md`「任务侧」+ `tool-and-skill-system.md`「四个概念必须分清」
 - 会话固定了指定模型却仍走模型链、固定模型被删除/禁用后未回退、或切换后用量表按旧模型窗口显示 → `config-and-models.md`「会话级固定模型优先于角色链」+ `web-and-admin.md`「Composer Model Mode Panel」
-- 模型面板显示的不是模型链链首、或显示名与实跑绑定对不上（多条绑定共用同一 provider 模型名）→ `config-and-models.md`「角色链顺序即路由顺序」+ `web-and-admin.md`「Composer Model Mode Panel」
+- 模型面板显示的不是模型链链首、或显示名与实跑绑定对不上（多条绑定共用同一 provider 模型名）→ `config-and-models.md`「角色路由：有序 fallback 与负载均衡组」+ `web-and-admin.md`「Composer Model Mode Panel」
+- 节点一直打同一个模型、组内分布不均、或"改了组配置没生效" → `runtime-overview.md`「节点模型路由与准入绑定」+ `operations-and-maintenance.md`「节点模型负载不均 / 一直打同一个模型」
 - 按协议车道判断缓存命中（"这条车道不发 `prompt_cache_key` 所以没命中"）→ `context-and-cache-troubleshooting.md`「Family 与 key 合同」
 - 上下文脑图标只按新输入变化、读数长期低于上一请求的真实输入规模 → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」+ `web-and-admin.md`「Composer Context Usage Meter」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、渠道会话脑图标没有读数 → `web-and-admin.md`「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
@@ -171,7 +172,8 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | Tool/skill four concepts, candidate→callable chain, Tool Admin RBAC semantics, duplicate-call guard, universal tool timeout contract, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool) | `tool-and-skill-system.md` |
 | Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, frontend theme and layout contract, model config admin draft contract, log audit event sink and audit page contract, node output content-read API contract, container deployment | `web-and-admin.md` |
-| Config schema, hot refresh, model bindings, secret location, deployment unlock, config bundle export/import | `config-and-models.md` |
+| Config schema, hot refresh, model bindings, secret location, deployment unlock, config bundle export/import, role route entries and load-balance group config semantics | `config-and-models.md` |
+| Node model route resolution and admission-time binding: ordered route chain vs in-chain load-balance group, quota-bucket observation (rolling RPM + decayed 429 penalty), per-node sticky binding and its rebind triggers, group member budget and intra-group pacing, worker-only process scope and the rollback switch | `runtime-overview.md` |
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), voice-clip storage and the model-visibility exclusion, known latency and accuracy envelope | `speech-to-text.md` |
