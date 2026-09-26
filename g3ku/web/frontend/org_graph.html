@@ -660,6 +660,24 @@
                     aria-hidden="true" aria-label="模型配置编辑器" tabindex="-1">
                     <div id="llm-editor-shell" class="resource-detail-shell"></div>
                 </section>
+
+                <div id="model-group-backdrop" class="confirm-backdrop" hidden>
+                    <section id="model-group-dialog" class="confirm-dialog model-group-dialog" role="dialog"
+                        aria-modal="true" aria-labelledby="model-group-title" tabindex="-1">
+                        <div class="confirm-header">
+                            <h2 id="model-group-title">负载均衡组</h2>
+                            <button id="model-group-close-btn" class="icon-btn dialog-close-btn" type="button"
+                                aria-label="关闭负载均衡组配置">
+                                <i data-lucide="x" aria-hidden="true"></i>
+                            </button>
+                        </div>
+                        <div id="model-group-dialog-body" class="project-settings-body"></div>
+                        <div class="confirm-actions">
+                            <button id="model-group-cancel-btn" class="toolbar-btn ghost" type="button">取消</button>
+                            <button id="model-group-confirm-btn" class="toolbar-btn success" type="button">确定</button>
+                        </div>
+                    </section>
+                </div>
             </section>
             <section id="view-external" class="view-section" style="display: none;">
                 <header class="content-header resource-header compact-resource-header">

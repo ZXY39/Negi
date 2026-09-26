@@ -32,12 +32,14 @@ function baseContext(elements = {}) {
             getElementById: (id) => elements[String(id)] || null,
             querySelector: () => null,
             querySelectorAll: () => [],
-            createElement: () => ({}),
+            createElement: () => ({ style: {} }),
             addEventListener: () => {},
             body: {},
         },
         Element: function Element() {},
         HTMLElement: function HTMLElement() {},
+        HTMLInputElement: function HTMLInputElement() {},
+        HTMLSelectElement: function HTMLSelectElement() {},
         URLSearchParams,
         URL,
         AbortController,
@@ -66,18 +68,20 @@ function loadApp(elements = {}) {
             buildModelRoleChainUpdates,
             chainToRouteEntries,
             chainUsesGroup,
-            createLoadBalanceGroupDraft,
+            activeLoadBalanceGroups,
+            closeLoadBalanceGroupDialog,
+            confirmLoadBalanceGroupDialog,
             deleteLoadBalanceGroupDraft,
-            draftGroupForWrite,
             groupRefToken,
             isGroupRef,
             normalizeModelRoleChain,
+            openLoadBalanceGroupDialog,
+            renderModelGroupChainTile,
             renderModelGroupColumn,
-            renderModelGroupEntryCard,
-            renameLoadBalanceGroupKey,
-            setLoadBalanceGroupRounds,
+            renderModelGroupDialog,
+            setLoadBalanceGroupDialogField,
             startModelRoleEditing,
-            toggleLoadBalanceGroupMember,
+            toggleLoadBalanceGroupDialogMember,
             cloneLoadBalanceGroups,
         };`,
         context,
@@ -185,35 +189,22 @@ test("api_client 只发一套链，且组定义随链一起原子提交", () => 
     assert.equal(legacy.route_entries, undefined);
 });
 
-test("组卡片说明「平级 + 按负载 + 粘滞」，并暴露空成员风险", () => {
+test("链上的组卡说明「平级 + 按负载 + 粘滞」，并暴露空成员风险", () => {
     const app = loadApp();
     app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
 
-    const markup = app.renderModelGroupEntryCard("execution", "g_shared", 0, false);
+    const markup = app.renderModelGroupChainTile("execution", "g_shared", 0, false);
     assert.match(markup, /组内平级/);
     assert.match(markup, /按综合负载选成员/);
     assert.match(markup, /节点绑定后粘滞/);
     assert.match(markup, /每成员 2 轮/);
+    assert.match(markup, /2 个成员/);
+    assert.match(markup, /data-model-chain-ref="group:g_shared"/);
+    assert.match(markup, /data-group-edit="g_shared"/);
     assert.doesNotMatch(markup, /成员为空/);
 
-    const empty = app.renderModelGroupEntryCard("execution", "g_missing", 1, false);
+    const empty = app.renderModelGroupChainTile("execution", "g_missing", 1, false);
     assert.match(empty, /成员为空，保存会被拒绝/);
-});
-
-test("编辑模式下的组成员增删只改草稿，不动已保存状态", () => {
-    const app = loadApp();
-    app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
-    // 直接摆出编辑态：startModelRoleEditing 会触发整页渲染，需要真实 DOM。
-    app.S.modelCatalog.roleEditing = true;
-    app.S.modelCatalog.loadBalanceGroupDrafts = app.cloneLoadBalanceGroups(app.S.modelCatalog.loadBalanceGroups);
-
-    const group = app.draftGroupForWrite("g_shared");
-    group.model_keys = ["m_a"];
-
-    sameJson(app.S.modelCatalog.loadBalanceGroups.g_shared.model_keys, ["m_a", "m_b"]);
-    const updates = app.buildModelRoleChainUpdates(["execution"], { useDrafts: true });
-    const submitted = updates.execution.loadBalanceGroups ?? updates.execution.load_balance_groups;
-    sameJson(submitted.g_shared.model_keys, ["m_a"]);
 });
 
 function stubElement(extra = {}) {
@@ -223,8 +214,11 @@ function stubElement(extra = {}) {
         value: "",
         hidden: true,
         disabled: false,
+        attributes: {},
         style: {},
         classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        setAttribute(name, value) { this.attributes[name] = value; },
+        getAttribute(name) { return this.attributes[name]; },
         querySelector: () => null,
         querySelectorAll: () => [],
         addEventListener() {},
@@ -237,12 +231,19 @@ function stubElement(extra = {}) {
     };
 }
 
-// 组列的渲染与增删改都要走整页渲染，所以按模型页真实存在的容器铺一份桩。
+// 组列、组弹窗与角色链都要走整页渲染，所以按模型页真实存在的容器铺一份桩。
 function modelPageElements() {
     return {
         "sidebar-model-hint": stubElement(),
         "model-group-list": stubElement(),
         "model-group-create-btn": stubElement(),
+        "model-group-backdrop": stubElement(),
+        "model-group-dialog": stubElement(),
+        "model-group-dialog-body": stubElement(),
+        "model-group-close-btn": stubElement(),
+        "model-group-title": stubElement(),
+        "model-group-cancel-btn": stubElement(),
+        "model-group-confirm-btn": stubElement(),
         "model-role-editors": stubElement(),
         "model-role-limits-bar": stubElement(),
         "model-roles-save-btn": stubElement(),
@@ -273,42 +274,71 @@ test("组列列出所有组并标出未加入链的那份", () => {
     // 引用状态逐行判：g_shared 在 execution 链上，g_unused 没有。
     assert.match(sharedRow, /已在 1 条链/);
     assert.match(unusedRow, /未加入链/);
-    // 非编辑态：不可拖、复选框禁用，避免「看起来能点其实改了不生效」。
+    // 成员构成要能直接看见，不用先点开弹窗。
+    assert.match(sharedRow, /2 个成员/);
+    assert.match(sharedRow, />m_a</);
+    // 非编辑态：不可拖、没有删除按钮。
     assert.doesNotMatch(sharedRow, /draggable="true"/);
-    assert.match(sharedRow, /<input type="checkbox"[^>]*disabled/);
-    // 成员清单来自模型目录，逐条一个复选框。
-    assert.equal(sharedRow.match(/<input type="checkbox"/g).length, 3);
+    assert.doesNotMatch(sharedRow, /data-group-delete/);
 });
 
-test("新建组进入编辑会话，填上成员后才进载荷", () => {
-    const { app } = loadModelPage(plainChainPayload());
+test("新建组先弹窗，点确定才落草稿并自动进入链编辑会话", () => {
+    const { app, elements } = loadModelPage(plainChainPayload());
 
-    const groupKey = app.createLoadBalanceGroupDraft();
+    app.openLoadBalanceGroupDialog();
+    const body = elements["model-group-dialog-body"].innerHTML;
+    assert.match(body, /data-group-dialog-name/);
+    assert.match(body, /data-group-dialog-rounds/);
+    // 光打开弹窗不碰数据：既没进编辑会话，也没有新组草稿。
+    assert.equal(app.S.modelCatalog.roleEditing, false);
+    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_stage, undefined);
+
+    assert.equal(app.setLoadBalanceGroupDialogField("name", "g_stage"), true);
+    assert.equal(app.toggleLoadBalanceGroupDialogMember("m_a", true), true);
+    assert.equal(app.toggleLoadBalanceGroupDialogMember("m_b", true), true);
+    assert.equal(app.setLoadBalanceGroupDialogField("rounds", "2"), true);
+    assert.equal(app.confirmLoadBalanceGroupDialog(), true);
 
     assert.equal(app.S.modelCatalog.roleEditing, true);
-    assert.equal(groupKey, "group_1");
-    sameJson(app.S.modelCatalog.loadBalanceGroupDrafts.group_1.model_keys, []);
+    sameJson(app.S.modelCatalog.loadBalanceGroupDrafts.g_stage.model_keys, ["m_a", "m_b"]);
+    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_stage.max_retry_rounds, 2);
+    assert.equal(app.S.modelCatalog.groupDialog.open, false);
 
-    // 空成员组不提交：后端会拒，而且它也没被任何链引用。
-    let updates = app.buildModelRoleChainUpdates(["execution", "inspection"], { useDrafts: true });
-    assert.doesNotMatch(JSON.stringify(updates), /group_1/);
-
-    assert.equal(app.toggleLoadBalanceGroupMember(groupKey, "m_a", true), true);
-    updates = app.buildModelRoleChainUpdates(["execution", "inspection"], { useDrafts: true });
     // 没有任何链用到组时，整份组集合挂在第一个能承载组的 scope（execution）上提交。
-    sameJson(Object.keys(updates.execution.loadBalanceGroups), ["g_shared", "g_unused", "group_1"]);
+    const updates = app.buildModelRoleChainUpdates(["execution", "inspection"], { useDrafts: true });
+    sameJson(Object.keys(updates.execution.loadBalanceGroups), ["g_shared", "g_unused", "g_stage"]);
     sameJson(updates.execution.modelKeys, ["m_a", "m_b"]);
     assert.equal(updates.execution.routeEntries, undefined);
     assert.equal(updates.inspection.loadBalanceGroups, undefined);
 });
 
-test("改组名会把链上的 group 记号一起改掉", () => {
+test("弹窗里空成员与空组名都被挡下，不落草稿", () => {
+    const { app, elements } = loadModelPage(plainChainPayload());
+
+    app.openLoadBalanceGroupDialog();
+    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.match(app.S.modelCatalog.groupDialog.error, /至少勾选 1 个模型/);
+
+    app.toggleLoadBalanceGroupDialogMember("m_a", true);
+    app.setLoadBalanceGroupDialogField("name", "   ");
+    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.match(app.S.modelCatalog.groupDialog.error, /组名不能为空/);
+
+    assert.equal(app.S.modelCatalog.roleEditing, false);
+    // 草稿仍是已保存那两份组，没有多出被拒的空白组。
+    sameJson(Object.keys(app.S.modelCatalog.loadBalanceGroupDrafts).sort(), ["g_shared", "g_unused"]);
+    assert.match(elements["model-group-dialog-body"].innerHTML, /组名不能为空/);
+});
+
+test("弹窗改组名会把链上的 group 记号一起改掉", () => {
     const { app } = loadModelPage();
     app.S.modelCatalog.roleEditing = true;
     app.S.modelCatalog.roleDrafts = { ceo: ["m_emergency"], execution: ["group:g_shared", "m_emergency"], inspection: ["m_b"], memory: [] };
     app.S.modelCatalog.loadBalanceGroupDrafts = app.cloneLoadBalanceGroups(app.S.modelCatalog.loadBalanceGroups);
 
-    assert.equal(app.renameLoadBalanceGroupKey("g_shared", "g_fast"), true);
+    app.openLoadBalanceGroupDialog("g_shared");
+    app.setLoadBalanceGroupDialogField("name", "g_fast");
+    assert.equal(app.confirmLoadBalanceGroupDialog(), true);
 
     sameJson(app.S.modelCatalog.roleDrafts.execution, ["group:g_fast", "m_emergency"]);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_shared, undefined);
@@ -317,18 +347,24 @@ test("改组名会把链上的 group 记号一起改掉", () => {
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_fast.max_retry_rounds, 2);
 });
 
-test("改组名撞名或撞模型 key 时拒绝，链保持原样", () => {
+test("弹窗改组名撞名或撞模型 key 时拒绝，链保持原样", () => {
     const { app } = loadModelPage();
     app.S.modelCatalog.roleEditing = true;
     app.S.modelCatalog.roleDrafts = { ceo: [], execution: ["group:g_shared"], inspection: [], memory: [] };
     app.S.modelCatalog.loadBalanceGroupDrafts = app.cloneLoadBalanceGroups(app.S.modelCatalog.loadBalanceGroups);
 
-    assert.equal(app.renameLoadBalanceGroupKey("g_shared", "g_unused"), false);
-    assert.equal(app.renameLoadBalanceGroupKey("g_shared", "m_a"), false);
-    assert.equal(app.renameLoadBalanceGroupKey("g_shared", "  "), false);
+    app.openLoadBalanceGroupDialog("g_shared");
+    app.setLoadBalanceGroupDialogField("name", "g_unused");
+    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.match(app.S.modelCatalog.groupDialog.error, /组名已存在：g_unused/);
+
+    app.setLoadBalanceGroupDialogField("name", "m_a");
+    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.match(app.S.modelCatalog.groupDialog.error, /不能与模型配置同名/);
 
     sameJson(app.S.modelCatalog.roleDrafts.execution, ["group:g_shared"]);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_shared.max_retry_rounds, 2);
+    assert.equal(app.S.modelCatalog.groupDialog.open, true);
 });
 
 test("删除组会把引用它的链位一起摘掉", () => {
@@ -347,14 +383,64 @@ test("删除组会把引用它的链位一起摘掉", () => {
     sameJson(updates.execution.modelKeys, ["m_emergency"]);
 });
 
-test("组预算下拉只接受 1..3", () => {
-    const { app } = loadModelPage();
-    app.S.modelCatalog.roleEditing = true;
-    app.S.modelCatalog.loadBalanceGroupDrafts = app.cloneLoadBalanceGroups(app.S.modelCatalog.loadBalanceGroups);
+const LLM_CODE = fs.readFileSync(path.join(ROOT, "g3ku/web/frontend/org_graph_llm.js"), "utf8");
 
-    app.setLoadBalanceGroupRounds("g_shared", "9");
-    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_shared.max_retry_rounds, 3);
+// /api/llm/bindings 的形状：routes 是候选展开视图，顺序与组在另外两个字段里。
+function llmBindingsPayload() {
+    return {
+        items: catalogItems().map((item) => ({ ...item, capability: "chat" })),
+        routes: { ceo: [], execution: ["m_a", "m_b"], inspection: ["m_b"], memory: [] },
+        route_entries: catalogPayload().route_entries,
+        load_balance_groups: catalogPayload().load_balance_groups,
+        role_iterations: {},
+        role_concurrency: {},
+    };
+}
 
-    app.setLoadBalanceGroupRounds("g_shared", "0");
-    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_shared.max_retry_rounds, 1);
+function loadModelPageWithLlm() {
+    const elements = modelPageElements();
+    elements["llm-bindings-list"] = stubElement();
+    const context = baseContext(elements);
+    context.window = context;
+    vm.createContext(context);
+    vm.runInContext(APP_CODE, context);
+    vm.runInContext(LLM_CODE, context);
+    const payload = llmBindingsPayload();
+    context.__llmPayload = payload;
+    vm.runInContext(`
+        const state = __llmTestHooks.llmState();
+        state.bindings = __llmPayload.items;
+        state.routes = normalizeAllModelRoles(__llmTestHooks.llmRouteChains(__llmPayload));
+        state.loadBalanceGroups = cloneLoadBalanceGroups(__llmPayload.load_balance_groups);
+    `, context);
+    return { context, elements };
+}
+
+test("llmRouteChains 用 route_entries 覆盖候选展开视图", () => {
+    const { context } = loadModelPageWithLlm();
+
+    const chains = context.__llmTestHooks.llmRouteChains(llmBindingsPayload());
+
+    // execution 的第一跳是一个组，不是 m_a。
+    sameJson(chains.execution, ["group:g_shared", "m_emergency"]);
+    sameJson(chains.inspection, ["m_b"]);
+});
+
+test("模型页由 org_graph_llm.js 渲染：renderAll 画得出组列，链里的组也不是假模型卡", () => {
+    const { context, elements } = loadModelPageWithLlm();
+
+    // 这一条钉的是「点了新建组却什么都没出现」那个缺陷：llm 模块覆盖了
+    // window.renderModelCatalog/renderModelRoleEditors，app 侧的渲染函数不会被调用。
+    context.window.renderModelCatalog();
+
+    assert.ok(elements["model-group-list"].innerHTML.length > 0, "renderAll 必须把组列画出来");
+    assert.match(elements["model-group-list"].innerHTML, /data-model-group-key="g_shared"/);
+
+    const chains = elements["model-role-editors"].innerHTML;
+    assert.match(chains, /is-group-tile/);
+    assert.match(chains, /组内平级/);
+    // 组卡不能挂到「打开模型详情」的入口上：它没有对应的 binding。
+    assert.doesNotMatch(chains, /data-model-open="group:g_shared"/);
+    // 组内的 m_a 不能被摊平成一块独立模型卡——那正是「链看起来对、保存下去变成逐个成员」的来路。
+    assert.doesNotMatch(chains, /data-model-chain-ref="m_a"/);
 });

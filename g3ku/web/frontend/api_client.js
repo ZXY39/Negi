@@ -1029,6 +1029,9 @@ class ApiClient {
         return {
             items: data.items || [],
             routes: data.routes || {},
+            // routes 是候选展开视图；链的真正顺序与组定义只在这两个字段里。
+            routeEntries: data.route_entries || data.routeEntries || {},
+            loadBalanceGroups: data.load_balance_groups || data.loadBalanceGroups || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
             roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
         };
@@ -1124,6 +1127,9 @@ class ApiClient {
         });
         return {
             routes: data.routes || {},
+            // 保存后仍要认顺序：routes 是候选展开视图，链与组的真相在这两个字段里。
+            routeEntries: data.route_entries || data.routeEntries || {},
+            loadBalanceGroups: data.load_balance_groups || data.loadBalanceGroups || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
             roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
         };

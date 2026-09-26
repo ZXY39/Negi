@@ -1536,10 +1536,9 @@
     border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
 }
 
-[data-ui-version="v2"] .model-group-name-input {
-    height: 26px;
+[data-ui-version="v2"] .model-group-name {
     font-size: 13px;
-    font-weight: 600;
+    color: var(--ui-text-primary);
 }
 
 [data-ui-version="v2"] .model-group-member-option {
@@ -1549,6 +1548,25 @@
 
 [data-ui-version="v2"] .model-group-member-option.is-selected span {
     color: var(--ui-accent);
+}
+
+[data-ui-version="v2"] .model-group-dialog-members {
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-control);
+    background: var(--ui-bg-surface);
+}
+
+[data-ui-version="v2"] .model-group-dialog-error {
+    color: var(--ui-danger);
+}
+
+[data-ui-version="v2"] .model-chain-slide.is-group-tile {
+    border-color: color-mix(in srgb, var(--ui-accent) 40%, var(--ui-border));
+    background: color-mix(in srgb, var(--ui-accent) 6%, var(--ui-bg-elevated));
+}
+
+[data-ui-version="v2"] .model-chain-slide.is-group-tile.is-incomplete {
+    border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
 }
 
 [data-ui-version="v2"] .model-shared-list {

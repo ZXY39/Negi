@@ -6271,24 +6271,35 @@ textarea {
     visibility: visible;
 }
 
-.model-group-name-input {
+.model-group-name {
     flex: 1;
     min-width: 0;
-    font-weight: 600;
-}
-
-.model-group-name-input:disabled {
+    border: 0;
     background: transparent;
-    border-color: transparent;
-    color: var(--text-primary);
+    padding: 0;
+    text-align: left;
+    font-weight: 600;
+    cursor: pointer;
 }
 
-.model-group-members {
+.model-group-foot {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.model-group-dialog {
+    width: min(460px, 92vw);
+}
+
+.model-group-dialog-members {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    max-height: 132px;
+    max-height: 260px;
     overflow-y: auto;
+    padding: var(--space-2);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
 }
 
 .model-group-member-option {
@@ -6303,9 +6314,25 @@ textarea {
     font-weight: 600;
 }
 
-.model-group-rounds-input {
-    height: 24px;
+.model-group-dialog-error {
+    margin: 0;
+    color: var(--danger, #d64545);
     font-size: 13px;
+}
+
+/* 链上的组卡：一跳是多个平级成员，必须和单个模型卡看得出区别 */
+.model-chain-slide.is-group-tile {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--brand-primary) 45%, var(--border-color));
+}
+
+.model-chain-slide.is-group-tile.is-incomplete {
+    border-color: color-mix(in srgb, var(--danger, #d64545) 55%, var(--border-color));
+}
+
+.model-chain-slide.is-group-tile .model-chain-grip {
+    color: var(--text-muted);
+    padding: 0 6px;
 }
 
 @media (max-width: 1440px) {

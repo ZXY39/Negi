@@ -313,6 +313,15 @@ const S = {
         // 负载均衡组：链里用 `group:<key>` 记号占位，成员与预算放在这里。
         loadBalanceGroups: {},
         loadBalanceGroupDrafts: {},
+        // 组配置弹窗的表单态：open=false 时不显示；editingKey="" 表示新建。
+        groupDialog: {
+            open: false,
+            editingKey: "",
+            name: "",
+            modelKeys: [],
+            maxRetryRounds: 1,
+            error: "",
+        },
         defaults: DEFAULT_MODEL_DEFAULTS(),
         loading: false,
         saving: false,
@@ -566,6 +575,13 @@ const U = {
     modelList: document.getElementById("model-list"),
     modelGroupList: document.getElementById("model-group-list"),
     modelGroupCreate: document.getElementById("model-group-create-btn"),
+    modelGroupBackdrop: document.getElementById("model-group-backdrop"),
+    modelGroupDialog: document.getElementById("model-group-dialog"),
+    modelGroupDialogBody: document.getElementById("model-group-dialog-body"),
+    modelGroupClose: document.getElementById("model-group-close-btn"),
+    modelGroupTitle: document.getElementById("model-group-title"),
+    modelGroupCancel: document.getElementById("model-group-cancel-btn"),
+    modelGroupConfirm: document.getElementById("model-group-confirm-btn"),
     modelDetailEmpty: document.getElementById("model-detail-empty"),
     modelDetail: document.getElementById("model-detail-content"),
     modelBackdrop: document.getElementById("model-detail-backdrop"),
@@ -10611,19 +10627,6 @@ function activeLoadBalanceGroups() {
         : (S.modelCatalog.loadBalanceGroups || {});
 }
 
-function nextLoadBalanceGroupKey(scope, chain) {
-    const taken = new Set([
-        ...(chain || []).filter(isGroupRef).map(groupKeyFromRef),
-        ...Object.keys(S.modelCatalog.loadBalanceGroups || {}),
-        ...Object.keys(S.modelCatalog.loadBalanceGroupDrafts || {}),
-    ]);
-    let index = 1;
-    while (taken.has(`${scope}_lb_${index}`)) index += 1;
-    const groupKey = `${scope}_lb_${index}`;
-    draftGroupForWrite(groupKey);
-    return groupKey;
-}
-
 function loadBalanceGroupsEqual(left, right) {
     const a = cloneLoadBalanceGroups(left);
     const b = cloneLoadBalanceGroups(right);
@@ -10736,6 +10739,18 @@ function remapModelRefs(refs, aliasMap = {}) {
     return normalized;
 }
 
+function routeTokenChainFromEntries(entries) {
+    return (Array.isArray(entries) ? entries : [])
+        .map((entry) => {
+            const type = String(entry?.type || "model").trim();
+            if (type === "load_balance") {
+                return groupRefToken(entry?.group_key || entry?.groupKey);
+            }
+            return String(entry?.model_key || entry?.modelKey || "").trim();
+        })
+        .filter(Boolean);
+}
+
 function normalizeCatalogEntries(items) {
     const catalog = [];
     const aliasMap = {};
@@ -10781,13 +10796,7 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
         const entries = Array.isArray(routeEntriesPayload[key]) ? routeEntriesPayload[key] : null;
         if (entries) {
             // route_entries 才是 fallback 顺序；`group:` 记号不是模型 key，不参与改名映射。
-            nextRoles[key] = entries.map((entry) => {
-                const type = String(entry?.type || "model").trim();
-                if (type === "load_balance") {
-                    return groupRefToken(entry?.group_key || entry?.groupKey);
-                }
-                return String(entry?.model_key || entry?.modelKey || "").trim();
-            }).filter(Boolean);
+            nextRoles[key] = routeTokenChainFromEntries(entries);
             return;
         }
         nextRoles[key] = remapModelRefs(
@@ -10857,71 +10866,27 @@ function renderModelHint() {
     return hint("点击“修改模型链”后再调整角色链；点击模型可打开配置弹窗。", false);
 }
 
-function draftGroupForWrite(groupKey) {
-    if (!S.modelCatalog.roleEditing) {
-        S.modelCatalog.loadBalanceGroupDrafts = cloneLoadBalanceGroups(S.modelCatalog.loadBalanceGroups);
-        S.modelCatalog.roleEditing = true;
-    }
-    const drafts = S.modelCatalog.loadBalanceGroupDrafts;
-    if (!drafts[groupKey]) {
-        drafts[groupKey] = { enabled: true, max_retry_rounds: 1, model_keys: [] };
-    }
-    return drafts[groupKey];
-}
-
-function renderModelGroupMemberPicker(groupKey, members) {
-    const selected = new Set(members);
-    const options = S.modelCatalog.catalog
-        .filter((item) => selected.has(item.key) || item.enabled !== false)
-        .map((item) => `
-            <label class="role-toggle">
-                <input type="checkbox" data-group-member="${esc(groupKey)}" data-model-ref="${esc(item.key)}" ${selected.has(item.key) ? "checked" : ""}>
-                <span>${esc(item.key)}</span>
-            </label>`)
-        .join("");
+// 链上「一跳是一个组」的那张卡。模型页的角色链由 org_graph_llm.js 渲染（它覆盖了
+// window.renderModelRoleEditors），所以这张卡由两边共用，不要再各写一份。
+function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
+    const group = activeLoadBalanceGroups()[groupKey] || {};
+    const members = group.model_keys || [];
+    const rounds = group.max_retry_rounds || 1;
     return `
-        <details class="model-chain-group-picker">
-            <summary>选择成员</summary>
-            ${options || '<span class="policy-chip neutral">没有可选模型</span>'}
-        </details>`;
-}
-
-function renderModelGroupEntryCard(scopeKey, groupKey, index, editing) {
-    const group = activeLoadBalanceGroups()[groupKey];
-    const members = group ? group.model_keys : [];
-    const rounds = group ? group.max_retry_rounds : 1;
-    const memberChips = members.length
-        ? members.map((key) => `
-            <span class="policy-chip neutral">
-                ${esc(key)}
-                ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-member-remove="${esc(groupKey)}" data-model-ref="${esc(key)}">×</button>` : ""}
-            </span>`)
-        .join("")
-        : '<span class="policy-chip neutral">还没有成员</span>';
-    return `
-        <article class="model-chain-slide is-group-card${editing ? " is-editing" : ""}"${editing ? ' draggable="true"' : ""} data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}">
-            ${editing ? '<button type="button" class="model-chain-handle" aria-label="拖动调整顺序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>' : ""}
-            <div class="model-chain-main">
-                <span class="resource-list-title">负载均衡组 ${esc(groupKey)}</span>
-                <span class="resource-list-subtitle">组内平级：按综合负载选成员，节点绑定后粘滞</span>
+        <article class="model-chain-slide is-group-tile${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}">
+            ${editing ? '<span class="model-chain-grip model-chain-handle" aria-hidden="true">&#9776;</span>' : ""}
+            <button type="button" class="model-chain-main" data-group-edit="${esc(groupKey)}">
+                <span class="resource-list-title">${esc(groupKey)}</span>
+                <span class="resource-list-subtitle">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
                 <span class="model-inline-meta">
-                    <span class="policy-chip risk-low">每成员 ${esc(rounds)} 轮</span>
+                    <span class="policy-chip neutral">${members.length} 个成员</span>
+                    <span class="policy-chip neutral">每成员 ${esc(rounds)} 轮</span>
                     ${index === 0 ? '<span class="policy-chip risk-low">链首</span>' : ""}
-                    ${group && group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
+                    ${group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
                     ${!members.length ? '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>' : ""}
                 </span>
-                <span class="model-inline-meta">${memberChips}</span>
-                ${editing ? `
-                    <label class="model-role-iterations-field">
-                        <span class="model-role-iterations-label">每成员轮预算</span>
-                        <select class="model-role-iterations-input" data-group-rounds="${esc(groupKey)}">
-                            ${[1, 2, 3].map((value) => `<option value="${value}" ${Number(rounds) === value ? "selected" : ""}>${value}</option>`).join("")}
-                        </select>
-                    </label>
-                    ${renderModelGroupMemberPicker(groupKey, members)}
-                ` : ""}
-            </div>
-            ${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${esc(scopeKey)}" data-index="${index}">移出链</button>` : ""}
+            </button>
+            ${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${esc(scopeKey)}" data-index="${index}" title="移出链" aria-label="移出链"><i data-lucide="x"></i></button>` : ""}
         </article>`;
 }
 
@@ -10948,90 +10913,185 @@ function nextStandaloneGroupKey() {
     return `group_${index}`;
 }
 
-function createLoadBalanceGroupDraft() {
-    // 新建组就是模型链编辑会话的一部分：不在编辑态时先开一份草稿，再把空白卡加进去。
-    if (!S.modelCatalog.roleEditing) startModelRoleEditing();
-    const groupKey = nextStandaloneGroupKey();
-    draftGroupForWrite(groupKey);
-    syncModelRoleDraftState();
-    renderModelCatalog();
-    return groupKey;
+// 组的增删改只走这一个弹窗：链与列表负责展示、拖入和打开配置，不再就地编辑。
+function groupKeyNameTaken(name) {
+    if (!name) return false;
+    if ((S.modelCatalog.loadBalanceGroupDrafts || {})[name]) return true;
+    return Boolean((S.modelCatalog.loadBalanceGroups || {})[name]);
 }
 
-function renameLoadBalanceGroupKey(fromKey, rawNextKey) {
-    const nextKey = String(rawNextKey || "").trim();
-    const drafts = S.modelCatalog.loadBalanceGroupDrafts || {};
-    if (!nextKey || nextKey === fromKey || !drafts[fromKey]) return false;
-    if (drafts[nextKey] || (S.modelCatalog.loadBalanceGroups || {})[nextKey]) {
-        hint(`组名已存在：${nextKey}`, true);
-        renderModelCatalog();
-        return false;
-    }
-    const collidesWithModel = (S.modelCatalog.catalog || []).some((item) => String(item?.key || "").trim() === nextKey);
-    if (collidesWithModel || modelRefItem(nextKey)) {
-        hint(`组名不能与模型配置同名：${nextKey}`, true);
-        renderModelCatalog();
-        return false;
-    }
-    drafts[nextKey] = { ...drafts[fromKey] };
-    delete drafts[fromKey];
+function groupKeyCollidesWithModel(name) {
+    if (modelRefItem(name)) return true;
+    return (S.modelCatalog.catalog || []).some((item) => String(item?.key || "").trim() === name);
+}
+
+function rewriteLoadBalanceGroupToken(fromKey, toKey) {
     const fromToken = groupRefToken(fromKey);
-    const toToken = groupRefToken(nextKey);
+    const toToken = groupRefToken(toKey);
     Object.keys(S.modelCatalog.roleDrafts || {}).forEach((scope) => {
         const chain = S.modelCatalog.roleDrafts[scope] || [];
         if (!chain.includes(fromToken)) return;
         S.modelCatalog.roleDrafts[scope] = chain.map((ref) => (ref === fromToken ? toToken : ref));
     });
-    syncModelRoleDraftState();
-    renderModelCatalog();
-    return true;
 }
 
-function deleteLoadBalanceGroupDraft(groupKey) {
-    const drafts = S.modelCatalog.loadBalanceGroupDrafts || {};
-    if (!drafts[groupKey]) return false;
-    delete drafts[groupKey];
+function removeLoadBalanceGroupToken(groupKey) {
     const token = groupRefToken(groupKey);
     Object.keys(S.modelCatalog.roleDrafts || {}).forEach((scope) => {
         const chain = S.modelCatalog.roleDrafts[scope] || [];
         if (!chain.includes(token)) return;
         S.modelCatalog.roleDrafts[scope] = chain.filter((ref) => ref !== token);
     });
-    syncModelRoleDraftState();
-    renderModelCatalog();
+}
+
+function openLoadBalanceGroupDialog(groupKey = "") {
+    const key = String(groupKey || "").trim();
+    const group = key ? (activeLoadBalanceGroups()[key] || null) : null;
+    S.modelCatalog.groupDialog = {
+        open: true,
+        editingKey: key,
+        name: key || nextStandaloneGroupKey(),
+        modelKeys: group ? [...(group.model_keys || [])] : [],
+        maxRetryRounds: Number(group?.max_retry_rounds || 1),
+        error: "",
+    };
+    renderModelGroupDialog();
     return true;
 }
 
-function toggleLoadBalanceGroupMember(groupKey, modelRef, checked) {
-    const group = draftGroupForWrite(String(groupKey || ""));
+function closeLoadBalanceGroupDialog() {
+    if (!S.modelCatalog.groupDialog.open) return false;
+    S.modelCatalog.groupDialog = { open: false, editingKey: "", name: "", modelKeys: [], maxRetryRounds: 1, error: "" };
+    renderModelGroupDialog();
+    return true;
+}
+
+function rejectLoadBalanceGroupDialog(message) {
+    S.modelCatalog.groupDialog.error = message;
+    renderModelGroupDialog();
+    return false;
+}
+
+function setLoadBalanceGroupDialogField(kind, value) {
+    const dialog = S.modelCatalog.groupDialog;
+    if (!dialog.open) return false;
+    if (kind === "name") dialog.name = String(value ?? "");
+    else if (kind === "rounds") {
+        dialog.maxRetryRounds = Math.min(GROUP_MAX_RETRY_ROUNDS_LIMIT, Math.max(1, Math.trunc(Number(value) || 1)));
+    }
+    dialog.error = "";
+    // 逐键重绘会把光标从输入框里踢出去，所以这里只同步计数与错误行。
+    syncLoadBalanceGroupDialogSummary();
+    return true;
+}
+
+function toggleLoadBalanceGroupDialogMember(modelRef, checked) {
+    const dialog = S.modelCatalog.groupDialog;
     const ref = String(modelRef || "");
-    if (!ref) return false;
-    const members = new Set(group.model_keys || []);
+    if (!dialog.open || !ref) return false;
+    const members = new Set(dialog.modelKeys);
     if (checked) members.add(ref); else members.delete(ref);
-    group.model_keys = [...members];
+    dialog.modelKeys = [...members];
+    dialog.error = "";
+    syncLoadBalanceGroupDialogSummary();
+    return true;
+}
+
+function confirmLoadBalanceGroupDialog() {
+    const dialog = S.modelCatalog.groupDialog;
+    if (!dialog.open) return false;
+    const name = String(dialog.name || "").trim();
+    if (!name) return rejectLoadBalanceGroupDialog("组名不能为空");
+    if (!dialog.modelKeys.length) return rejectLoadBalanceGroupDialog("至少勾选 1 个模型");
+    if (name !== dialog.editingKey && groupKeyNameTaken(name)) {
+        return rejectLoadBalanceGroupDialog(`组名已存在：${name}`);
+    }
+    if (name !== dialog.editingKey && groupKeyCollidesWithModel(name)) {
+        return rejectLoadBalanceGroupDialog(`组名不能与模型配置同名：${name}`);
+    }
+    // 建组就是模型链编辑会话的一部分：不在会话里先开一份，草稿才有地方落。
+    if (!S.modelCatalog.roleEditing) startModelRoleEditing();
+    const drafts = S.modelCatalog.loadBalanceGroupDrafts;
+    const payload = { enabled: true, max_retry_rounds: dialog.maxRetryRounds, model_keys: [...dialog.modelKeys] };
+    if (dialog.editingKey && dialog.editingKey !== name) {
+        drafts[name] = { ...(drafts[dialog.editingKey] || {}), ...payload };
+        delete drafts[dialog.editingKey];
+        // 改名必须把链上的 group 记号一起带走，否则链会指向一个已经不存在的组。
+        rewriteLoadBalanceGroupToken(dialog.editingKey, name);
+    } else {
+        drafts[name] = payload;
+    }
+    syncModelRoleDraftState();
+    closeLoadBalanceGroupDialog();
+    renderModelCatalog();
+    return true;
+}
+
+function deleteLoadBalanceGroupDraft(groupKey) {
+    if (!S.modelCatalog.roleEditing) startModelRoleEditing();
+    const drafts = S.modelCatalog.loadBalanceGroupDrafts;
+    if (!drafts[groupKey]) return false;
+    delete drafts[groupKey];
+    removeLoadBalanceGroupToken(groupKey);
     syncModelRoleDraftState();
     renderModelCatalog();
     return true;
 }
 
-function setLoadBalanceGroupRounds(groupKey, value) {
-    const group = draftGroupForWrite(String(groupKey || ""));
-    group.max_retry_rounds = Math.min(
-        GROUP_MAX_RETRY_ROUNDS_LIMIT,
-        Math.max(1, Math.trunc(Number(value) || 1)),
-    );
-    syncModelRoleDraftState();
-    renderModelCatalog();
-    return true;
+function loadBalanceGroupCatalogOptions() {
+    return (S.modelCatalog.catalog || [])
+        .filter((item) => String(item?.key || "").trim())
+        .sort((left, right) => String(left.key).localeCompare(String(right.key)));
 }
 
-function removeLoadBalanceGroupMember(groupKey, modelRef) {
-    const group = draftGroupForWrite(String(groupKey || ""));
-    const ref = String(modelRef || "");
-    group.model_keys = (group.model_keys || []).filter((item) => item !== ref);
-    syncModelRoleDraftState();
-    renderModelCatalog();
-    return true;
+function renderModelGroupDialog() {
+    const backdrop = U.modelGroupBackdrop;
+    const body = U.modelGroupDialogBody;
+    if (!backdrop || !body) return;
+    const dialog = S.modelCatalog.groupDialog;
+    if (!dialog.open) {
+        backdrop.hidden = true;
+        backdrop.classList.remove("is-open");
+        U.modelGroupDialog?.setAttribute("aria-hidden", "true");
+        body.innerHTML = "";
+        return;
+    }
+    if (U.modelGroupTitle) U.modelGroupTitle.textContent = dialog.editingKey ? "编辑负载均衡组" : "新建负载均衡组";
+    const selected = new Set(dialog.modelKeys);
+    const memberOptions = loadBalanceGroupCatalogOptions().map((item) => `
+        <label class="model-group-member-option${selected.has(item.key) ? " is-selected" : ""}">
+            <input type="checkbox" data-group-dialog-member="${esc(item.key)}" ${selected.has(item.key) ? "checked" : ""}>
+            <span>${esc(item.key)}</span>
+        </label>`).join("");
+    body.innerHTML = `
+        <label class="resource-field">
+            <span class="resource-field-label">组名</span>
+            <input class="resource-search" type="text" value="${esc(dialog.name)}" data-group-dialog-name placeholder="组名">
+        </label>
+        <label class="resource-field">
+            <span class="resource-field-label">每成员重试次数</span>
+            <select class="resource-search" data-group-dialog-rounds>
+                ${[1, 2, 3].map((value) => `<option value="${value}" ${Number(dialog.maxRetryRounds) === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+        </label>
+        <div class="resource-field">
+            <span class="resource-field-label" data-group-dialog-count>成员模型（${selected.size}）</span>
+            <div class="model-group-dialog-members">${memberOptions || '<span class="policy-chip neutral">没有可选模型</span>'}</div>
+        </div>
+        ${dialog.error ? `<p class="model-group-dialog-error" role="alert" data-group-dialog-error>${esc(dialog.error)}</p>` : ""}`;
+    backdrop.hidden = false;
+    backdrop.classList.add("is-open");
+    U.modelGroupDialog?.setAttribute("aria-hidden", "false");
+}
+
+// 只同步计数与错误行：整块重绘会把输入框光标和复选框焦点踢掉。
+function syncLoadBalanceGroupDialogSummary() {
+    const body = U.modelGroupDialogBody;
+    const dialog = S.modelCatalog.groupDialog;
+    if (!body || !dialog.open) return;
+    const count = body.querySelector("[data-group-dialog-count]");
+    if (count) count.textContent = `成员模型（${dialog.modelKeys.length}）`;
+    if (!dialog.error) body.querySelector("[data-group-dialog-error]")?.remove();
 }
 
 function renderModelGroupColumn() {
@@ -11042,40 +11102,32 @@ function renderModelGroupColumn() {
     const usage = loadBalanceGroupUsageCounts();
     const keys = Object.keys(groups).sort((left, right) => String(left).localeCompare(String(right)));
     if (!keys.length) {
-        U.modelGroupList.innerHTML = `<div class="empty-state compact">${editing ? "还没有组，点“新建组”后勾选模型即可。" : "还没有负载均衡组。"}</div>`;
+        U.modelGroupList.innerHTML = '<div class="empty-state compact">还没有负载均衡组，点“新建组”配置。</div>';
         return;
     }
-    const catalog = (S.modelCatalog.catalog || [])
-        .filter((item) => String(item?.key || "").trim())
-        .sort((left, right) => String(left.key).localeCompare(String(right.key)));
     U.modelGroupList.innerHTML = keys.map((key) => {
         const group = groups[key] || {};
         const members = group.model_keys || [];
         const rounds = group.max_retry_rounds || 1;
-        const selected = new Set(members);
         const usedIn = usage[key] || 0;
-        const memberOptions = catalog.map((item) => `
-            <label class="model-group-member-option${selected.has(item.key) ? " is-selected" : ""}">
-                <input type="checkbox" data-group-member="${esc(key)}" data-model-ref="${esc(item.key)}" ${selected.has(item.key) ? "checked" : ""} ${editing ? "" : "disabled"}>
-                <span>${esc(item.key)}</span>
-            </label>`).join("");
+        const memberChips = members.length
+            ? members.map((item) => `<span class="policy-chip neutral">${esc(item)}</span>`).join("")
+            : '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>';
         return `
-            <article class="model-group-item${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? " draggable=\"true\"" : ""} data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}">
+            <article class="model-group-item${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}">
                 <div class="model-group-head">
                     <span class="model-group-grip" aria-hidden="true">&#9776;</span>
-                    <input class="model-group-name-input" value="${esc(key)}" data-group-rename="${esc(key)}" aria-label="组名" ${editing ? "" : "disabled"}>
-                    ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button>` : ""}
+                    <button type="button" class="model-group-name" data-group-edit="${esc(key)}">${esc(key)}</button>
+                    ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-edit="${esc(key)}">配置</button>` : ""}
                 </div>
                 <div class="model-inline-meta">
-                    <span class="policy-chip ${members.length ? "risk-low" : "risk-high"}">${members.length} 个成员</span>
+                    <span class="policy-chip neutral">${members.length} 个成员</span>
                     <span class="policy-chip neutral">${usedIn ? `已在 ${usedIn} 条链` : "未加入链"}</span>
-                    ${editing ? `
-                        <select class="model-group-rounds-input" data-group-rounds="${esc(key)}" aria-label="每成员轮预算">
-                            ${[1, 2, 3].map((value) => `<option value="${value}" ${Number(rounds) === value ? "selected" : ""}>${value}</option>`).join("")}
-                        </select>` : `<span class="policy-chip neutral">每成员 ${esc(rounds)} 轮</span>`}
+                    <span class="policy-chip neutral">每成员 ${esc(rounds)} 轮</span>
                     ${group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
                 </div>
-                <div class="model-group-members">${memberOptions || '<span class="policy-chip neutral">没有可选模型</span>'}</div>
+                <div class="model-inline-meta">${memberChips}</div>
+                ${editing ? `<div class="model-group-foot"><button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button></div>` : ""}
             </article>`;
     }).join("");
 }
@@ -11090,7 +11142,7 @@ function renderModelRoleEditors() {
         const chainMarkup = chain.length
             ? chain.map((ref, index) => {
                 if (isGroupRef(ref)) {
-                    return renderModelGroupEntryCard(scope.key, groupKeyFromRef(ref), index, editing);
+                    return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index, editing);
                 }
                 const item = modelRefItem(ref);
                 const modelKey = String(item?.key || ref).trim();
@@ -11137,7 +11189,6 @@ function renderModelRoleEditors() {
                 <div class="model-role-section">
                     <div class="model-role-section-title">当前角色链</div>
                     <div class="model-chain-list" data-model-chain-list="${scope.key}">${chainMarkup}</div>
-                    ${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="add-group" data-scope="${scope.key}">新增负载均衡组</button>` : ""}
                 </div>
             </section>`;
     }).join("");
@@ -11671,6 +11722,8 @@ function cancelModelRoleEditing() {
     S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
     S.modelCatalog.loadBalanceGroupDrafts = cloneLoadBalanceGroups(S.modelCatalog.loadBalanceGroups);
     S.modelCatalog.rolesDirty = false;
+    // 组草稿也一起回滚，弹窗留着只会指向一份已经不存在的草稿。
+    closeLoadBalanceGroupDialog();
     finishModelDrag();
     renderModelCatalog();
     hint("已取消模型链修改。", false);
@@ -16148,14 +16201,6 @@ function bind() {
         const action = e.target.closest("[data-model-chain-action]");
         if (action) {
             const scope = String(action.dataset.scope || "");
-            if (action.dataset.modelChainAction === "add-group") {
-                if (!scope) return;
-                const chain = modelScopeChain(scope);
-                chain.push(groupRefToken(nextLoadBalanceGroupKey(scope, chain)));
-                updateRoleChainDraft(scope, chain);
-                renderModelCatalog();
-                return;
-            }
             const index = Number(action.dataset.index || -1);
             const chain = modelScopeChain(scope);
             if (!scope || index < 0 || index >= chain.length) return;
@@ -16165,67 +16210,39 @@ function bind() {
             }
             return;
         }
-        const memberRemove = e.target.closest("[data-group-member-remove]");
-        if (memberRemove) {
-            removeLoadBalanceGroupMember(
-                String(memberRemove.dataset.groupMemberRemove || ""),
-                String(memberRemove.dataset.modelRef || ""),
-            );
-        }
+        const groupEdit = e.target.closest("[data-group-edit]");
+        if (groupEdit) openLoadBalanceGroupDialog(String(groupEdit.dataset.groupEdit || ""));
     });
-    U.modelRoleEditors?.addEventListener("change", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
-        const memberToggle = e.target.closest("[data-group-member]");
-        if (memberToggle instanceof HTMLInputElement) {
-            toggleLoadBalanceGroupMember(
-                String(memberToggle.dataset.groupMember || ""),
-                String(memberToggle.dataset.modelRef || ""),
-                memberToggle.checked,
-            );
-            return;
-        }
-        const roundsField = e.target.closest("[data-group-rounds]");
-        if (roundsField instanceof HTMLSelectElement) {
-            setLoadBalanceGroupRounds(String(roundsField.dataset.groupRounds || ""), roundsField.value);
-        }
-    });
-    U.modelGroupCreate?.addEventListener("click", () => createLoadBalanceGroupDraft());
+    U.modelGroupCreate?.addEventListener("click", () => openLoadBalanceGroupDialog());
     U.modelGroupList?.addEventListener("click", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
-        const remove = e.target.closest("[data-group-member-remove]");
-        if (remove) {
-            removeLoadBalanceGroupMember(
-                String(remove.dataset.groupMemberRemove || ""),
-                String(remove.dataset.modelRef || ""),
-            );
+        const edit = e.target.closest("[data-group-edit]");
+        if (edit) {
+            openLoadBalanceGroupDialog(String(edit.dataset.groupEdit || ""));
             return;
         }
+        if (!S.modelCatalog.roleEditing) return;
         const del = e.target.closest("[data-group-delete]");
         if (del) deleteLoadBalanceGroupDraft(String(del.dataset.groupDelete || ""));
     });
-    U.modelGroupList?.addEventListener("change", (e) => {
-        if (!S.modelCatalog.roleEditing) return;
-        const memberToggle = e.target.closest("[data-group-member]");
-        if (memberToggle instanceof HTMLInputElement) {
-            toggleLoadBalanceGroupMember(
-                String(memberToggle.dataset.groupMember || ""),
-                String(memberToggle.dataset.modelRef || ""),
-                memberToggle.checked,
-            );
-            return;
-        }
-        const roundsField = e.target.closest("[data-group-rounds]");
-        if (roundsField instanceof HTMLSelectElement) {
-            setLoadBalanceGroupRounds(String(roundsField.dataset.groupRounds || ""), roundsField.value);
-            return;
-        }
-        const renameField = e.target.closest("[data-group-rename]");
-        if (renameField instanceof HTMLInputElement) {
-            renameLoadBalanceGroupKey(
-                String(renameField.dataset.groupRename || ""),
-                renameField.value,
-            );
-        }
+    U.modelGroupDialogBody?.addEventListener("click", (e) => {
+        const toggle = e.target.closest("[data-group-dialog-member]");
+        if (!(toggle instanceof HTMLInputElement)) return;
+        if (!toggleLoadBalanceGroupDialogMember(String(toggle.dataset.groupDialogMember || ""), toggle.checked)) return;
+        toggle.closest("label")?.classList.toggle("is-selected", toggle.checked);
+    });
+    U.modelGroupDialogBody?.addEventListener("input", (e) => {
+        const nameField = e.target.closest("[data-group-dialog-name]");
+        if (nameField instanceof HTMLInputElement) setLoadBalanceGroupDialogField("name", nameField.value);
+    });
+    U.modelGroupDialogBody?.addEventListener("change", (e) => {
+        const roundsField = e.target.closest("[data-group-dialog-rounds]");
+        if (roundsField instanceof HTMLSelectElement) setLoadBalanceGroupDialogField("rounds", roundsField.value);
+    });
+    U.modelGroupConfirm?.addEventListener("click", () => confirmLoadBalanceGroupDialog());
+    U.modelGroupCancel?.addEventListener("click", () => closeLoadBalanceGroupDialog());
+    U.modelGroupClose?.addEventListener("click", () => closeLoadBalanceGroupDialog());
+    U.modelGroupBackdrop?.addEventListener("click", (e) => {
+        if (e.target === U.modelGroupBackdrop) closeLoadBalanceGroupDialog();
     });
     // 组行拖进右侧任意角色链：ref 用 group token，链上的落位与模型走同一套 drop 逻辑。
     U.modelGroupList?.addEventListener("dragstart", (e) => {

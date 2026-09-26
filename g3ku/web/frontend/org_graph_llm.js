@@ -62,6 +62,7 @@
         bindings: [],
         bindingMap: {},
         routes: EMPTY_MODEL_ROLES(),
+        loadBalanceGroups: {},
         roleIterations: DEFAULT_ROLE_ITERATIONS(),
         roleConcurrency: DEFAULT_ROLE_CONCURRENCY(),
         editor: emptyEditorState(),
@@ -69,6 +70,28 @@
       };
     }
     return S.llmCenter;
+  }
+
+  // 链的顺序只认 route_entries；`routes` 是候选展开视图，含组时它会摊平成逐个成员。
+  function llmRouteChains(payload) {
+    const entriesByScope = (payload && (payload.routeEntries || payload.route_entries)) || {};
+    const next = { ...((payload && payload.routes) || {}) };
+    MODEL_SCOPES.forEach(({ key }) => {
+      const entries = entriesByScope[key];
+      if (!Array.isArray(entries)) return;
+      next[key] = routeTokenChainFromEntries(entries);
+    });
+    return next;
+  }
+
+  // 组字典的防御性拷贝：成员数组要和来源脱钩，编辑草稿不能改动已加载的那份。
+  function copyGroupMap(groups) {
+    const next = {};
+    Object.keys(groups || {}).forEach((key) => {
+      const group = groups[key] || {};
+      next[key] = { ...group, model_keys: [...(group.model_keys || [])] };
+    });
+    return next;
   }
 
   function refs() {
@@ -241,6 +264,11 @@
     S.modelCatalog.catalog = chatBindings.map((item) => ({ ...item, key: trim(item.key) }));
     S.modelCatalog.items = chatBindings.map((item) => trim(item.key));
     S.modelCatalog.roles = normalizeAllModelRoles(state.routes || EMPTY_MODEL_ROLES());
+    // 组是模型页左侧那一列的数据源；编辑会话里不能覆盖草稿，否则弹窗刚填的配置会被刷新冲掉。
+    S.modelCatalog.loadBalanceGroups = copyGroupMap(state.loadBalanceGroups);
+    if (!S.modelCatalog.roleEditing) {
+      S.modelCatalog.loadBalanceGroupDrafts = copyGroupMap(S.modelCatalog.loadBalanceGroups);
+    }
     S.modelCatalog.roleIterations = normalizeRoleIterations(state.roleIterations || DEFAULT_ROLE_ITERATIONS());
     S.modelCatalog.roleConcurrency = normalizeRoleConcurrency(state.roleConcurrency || DEFAULT_ROLE_CONCURRENCY());
     if (S.modelCatalog.roleEditing) {
@@ -1331,6 +1359,8 @@
           </div>
           <div class="role-chain-section">
             <div class="model-chain-list" data-model-chain-list="${scope.key}">${chain.length ? chain.map((ref, index) => {
+              // 一跳是一个组时不能当成模型 key 渲染：bindingMap 里没有它，会画成一块写着 group:x 的假模型卡。
+              if (isGroupRef(ref)) return renderModelGroupChainTile(scope.key, groupKeyFromRef(ref), index, editing);
               const item = llmState().bindingMap[trim(ref)] || modelRefItem(ref);
               const key = trim(item?.key || ref);
               return `<article class="model-chain-slide${editing ? ' is-editing' : ''}"${editing ? ' draggable="true"' : ''} data-model-chain-ref="${escv(key)}" data-scope="${scope.key}"><button type="button" class="model-chain-main" data-model-open="${escv(key)}"><span class="resource-list-title">${escv(bindingTitle(item) || key)}</span><span class="resource-list-subtitle">${escv(item?.api_base || "")}</span></button>${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${scope.key}" data-index="${index}" title="移除" aria-label="移除模型"><i data-lucide="x"></i></button>` : ''}</article>`;
@@ -1367,6 +1397,7 @@
     }
     renderHint();
     renderBindings();
+    if (typeof renderModelGroupColumn === "function") renderModelGroupColumn();
     renderRoutes();
     if (typeof renderRoleLimitsBar === "function") renderRoleLimitsBar();
     renderEditor();
@@ -1382,7 +1413,9 @@
       const [templates, bindingPayload] = await Promise.all([ApiClient.getLlmTemplates(), ApiClient.listLlmBindings()]);
       state.templates = Array.isArray(templates) ? templates : [];
       state.bindings = Array.isArray(bindingPayload?.items) ? bindingPayload.items : [];
-      state.routes = normalizeAllModelRoles(bindingPayload?.routes || EMPTY_MODEL_ROUTES());
+      // routes 是候选展开视图，把它直接当链用会把负载均衡组摊平成逐个成员——链的顺序只认 route_entries。
+      state.routes = normalizeAllModelRoles(llmRouteChains(bindingPayload));
+      state.loadBalanceGroups = copyGroupMap(bindingPayload?.loadBalanceGroups || bindingPayload?.load_balance_groups);
       state.roleIterations = normalizeRoleIterations(bindingPayload?.roleIterations || bindingPayload?.role_iterations || DEFAULT_ROLE_ITERATIONS());
       state.roleConcurrency = normalizeRoleConcurrency(bindingPayload?.roleConcurrency || bindingPayload?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());
       mapify();
@@ -2028,6 +2061,8 @@
   window.clearModelSelection = closeEditor;
   window.loadModels = async function loadModels() { await loadAll(); };
   window.__llmTestHooks = {
+    llmRouteChains,
+    llmState,
     expandSingleApiKeyMaxConcurrencyForEditor,
     parseSingleApiKeyMaxConcurrencyInput,
     validateSingleApiKeyMaxConcurrencyInput,
@@ -2084,17 +2119,14 @@
         kind: "success",
         persistent: true,
       });
-      const routes = await ApiClient.updateLlmRoutes(Object.fromEntries(
-        MODEL_SCOPES.map((item) => [
-          item.key,
-          {
-            modelKeys: normalizeModelRoleChain(S.modelCatalog.roleDrafts[item.key] || []),
-            maxIterations: modelScopeIterations(item.key, "draft"),
-            maxConcurrency: modelScopeConcurrency(item.key, "draft"),
-          },
-        ])
+      // 载荷交给 app 侧的构造器：含组的链必须走 route_entries + 整份组集合，
+      // 这里再手搓一份 modelKeys 就会把组摊平成逐个成员写回配置。
+      const routes = await ApiClient.updateLlmRoutes(buildModelRoleChainUpdates(
+        MODEL_SCOPES.map((item) => item.key),
+        { useDrafts: true },
       ));
-      llmState().routes = normalizeAllModelRoles(routes?.routes || EMPTY_MODEL_ROLES());
+      llmState().routes = normalizeAllModelRoles(llmRouteChains(routes));
+      llmState().loadBalanceGroups = copyGroupMap(routes?.loadBalanceGroups || {});
       llmState().roleIterations = normalizeRoleIterations(routes?.roleIterations || DEFAULT_ROLE_ITERATIONS());
       llmState().roleConcurrency = normalizeRoleConcurrency(routes?.roleConcurrency || routes?.role_concurrency || DEFAULT_ROLE_CONCURRENCY());
       S.modelCatalog.roleEditing = false;
