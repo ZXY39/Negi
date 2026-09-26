@@ -1132,6 +1132,30 @@ def test_evicted_stage_does_not_consume_retention_window_slot() -> None:
     }
 
 
+def test_block_carries_archive_ref_only_when_the_ledger_has_one() -> None:
+    # 前门裁撤时把该阶段全量账本导成文件，块里那一行 archive_ref 就是回读入口；
+    # 只有写盘成功才会有值，所以"出现这一行"等价于"真的打得开"。
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-3",
+    )
+    state["stages"][0]["context_evicted"] = True
+    state["stages"][0]["archive_ref"] = "temp/ceo/sess/g3ku_stage_archive_1_abcd1234.json"
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(3), stage_state=state, keep_latest_completed_stages=1
+    )
+
+    blocks = [
+        str(item.get("content") or "")
+        for item in result["rewritten"]
+        if STAGE_COMPACT_PREFIX in str(item.get("content") or "")
+    ]
+    assert len(blocks) == 1
+    assert "g3ku_stage_archive_1_abcd1234.json" in blocks[0]
+    assert '"evicted": true' in blocks[0]
+
+
 def test_eviction_flag_round_trips_through_the_node_ledger_without_default_noise() -> None:
     # 节点账本是 pydantic 形态，序列化必须与 context_visible 同一口径：只在成立时落字段。
     from main.models import normalize_execution_stage_metadata

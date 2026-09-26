@@ -11,9 +11,6 @@ SPAWN_CHILD_NODES_TOOL_NAME = "spawn_child_nodes"
 # 只在前门的三处硬注入里曝光（见 _ceo_runtime_ops），所以节点侧永远不会看到它，
 # 这里只需要拿到「不占阶段预算、不被阶段闸门拦」两条豁免。
 SILENT_TOOL_NAME = "silent"
-# 前门专用：把被移出上下文的阶段（含模型自己点名裁撤的）按 stage_index 读回来。
-# 节点侧不需要它——节点的原始入参出参在 task_node_tool_results 里，走 task_node_detail。
-STAGE_READ_TOOL_NAME = "read_completed_stage"
 # 下限不当错处理：模型给得比 MIN 少时按 MIN 起算（两个 submit 收口），所以工具 schema 只声明 maximum。
 STAGE_TOOL_ROUND_BUDGET_MIN = 10
 STAGE_TOOL_ROUND_BUDGET_MAX = 30
@@ -35,7 +32,6 @@ DEFAULT_STAGE_GATE_BYPASS_TOOLS = frozenset(
         FINAL_RESULT_TOOL_NAME,
         SPAWN_CHILD_NODES_TOOL_NAME,
         SILENT_TOOL_NAME,
-        STAGE_READ_TOOL_NAME,
         *CONTROL_STAGE_TOOL_NAMES,
         *CONTEXT_LOADER_STAGE_TOOL_NAMES,
     }
@@ -46,7 +42,6 @@ DEFAULT_NON_BUDGET_STAGE_TOOLS = frozenset(
         FINAL_RESULT_TOOL_NAME,
         SPAWN_CHILD_NODES_TOOL_NAME,
         SILENT_TOOL_NAME,
-        STAGE_READ_TOOL_NAME,
         *CONTROL_STAGE_TOOL_NAMES,
         *CONTEXT_LOADER_STAGE_TOOL_NAMES,
     }

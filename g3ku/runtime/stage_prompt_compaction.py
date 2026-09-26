@@ -286,6 +286,12 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
             payload["completed_stage_summary"] = completed_summary
         if stage_key_refs:
             payload["key_refs"] = stage_key_refs
+        archive_ref = str(_stage_get(stage, "archive_ref", "") or "").strip()
+        if archive_ref:
+            # 裁撤时导出的全量账本指针（节点车道不用这条：原始入参出参本来就在
+            # task_node_tool_results 里，走 task_node_detail 关联）。只在写入侧成功
+            # 落了文件才会有值，所以块里出现这一行就等于"真的能打开"。
+            payload["archive_ref"] = archive_ref
         if stage_mode and stage_mode != DEFAULT_STAGE_MODE:
             payload["mode"] = stage_mode
         if bool(_stage_get(stage, "system_generated", False)):

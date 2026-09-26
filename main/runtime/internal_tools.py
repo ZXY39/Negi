@@ -9,7 +9,6 @@ from main.models import NodeEvidenceItem, SpawnChildResult, SpawnChildSpec, buil
 from main.runtime.stage_budget import (
     FINAL_RESULT_TOOL_NAME,
     SILENT_TOOL_NAME,
-    STAGE_READ_TOOL_NAME,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
@@ -206,90 +205,6 @@ class SubmitNextStageTool(Tool):
             bool(final),
             bool(drop_completed_stage_tool_detail),
         )
-        return json.dumps(result, ensure_ascii=False, sort_keys=True)
-
-
-STAGE_READ_MAX_INDEXES = 5
-STAGE_READ_TOOL_OUTPUT_CHAR_LIMIT = 8000
-STAGE_READ_TOOL_TOTAL_CHAR_BUDGET = 24000
-
-
-class ReadCompletedStageTool(Tool):
-    """把自己会话里已被移出上下文的阶段读回来（前门专用，节点走 task_node_detail）。
-
-    账本从调用者自己那份 stage_state 闭包取，不从参数取：参数只能挑选要读哪几条阶段，
-    决定不了读谁的账本，所以这条道天然没有跨会话面。返回刻意回带 stage_goal 与
-    created_at——stage_index 会随 rebase 重编，模型必须能自查"这是不是我要的那条"。
-    """
-
-    hide_universal_timeout_parameter = True
-
-    def __init__(self, read_callback: Callable[[list[int]], dict[str, Any]]) -> None:
-        self._read_callback = read_callback
-
-    @property
-    def name(self) -> str:
-        return STAGE_READ_TOOL_NAME
-
-    @property
-    def description(self) -> str:
-        return (
-            'Read back completed stages of this session whose raw tool arguments and outputs were moved '
-            'out of context — including the ones you dropped yourself with '
-            'drop_completed_stage_tool_detail (those blocks carry "evicted": true). Pass up to '
-            f'{STAGE_READ_MAX_INDEXES} stage_index values taken from those blocks. The reply echoes each '
-            'stage goal and created_at so you can confirm it is the stage you meant, since stage numbers '
-            'are renumbered across context rebuilds. Needs no active stage and never counts against the '
-            'stage budget.'
-        )
-
-    @property
-    def model_description(self) -> str:
-        return 'Read back an evicted completed stage of this session.'
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'stage_indexes': {
-                    'type': 'array',
-                    'description': f'Stage numbers taken from the stage blocks, up to {STAGE_READ_MAX_INDEXES}.',
-                    'items': {'type': 'integer'},
-                    'minItems': 1,
-                    'maxItems': STAGE_READ_MAX_INDEXES,
-                },
-            },
-            'required': ['stage_indexes'],
-        }
-
-    @property
-    def model_parameters(self) -> dict[str, Any]:
-        return {
-            'type': 'object',
-            'properties': {
-                'stage_indexes': {
-                    'type': 'array',
-                    'description': f'Stage numbers from the stage blocks (max {STAGE_READ_MAX_INDEXES}).',
-                    'items': {'type': 'integer'},
-                },
-            },
-            'required': ['stage_indexes'],
-        }
-
-    def validate_params(self, params: dict[str, Any]) -> list[str]:
-        errors = super().validate_params(params)
-        raw = list((params or {}).get('stage_indexes') or [])
-        if not raw:
-            errors.append('stage_indexes must not be empty')
-        if len(raw) > STAGE_READ_MAX_INDEXES:
-            errors.append(f'stage_indexes accepts at most {STAGE_READ_MAX_INDEXES} entries')
-        return errors
-
-    async def execute(self, stage_indexes: list[int] | None = None, **kwargs: Any) -> str:
-        _ = kwargs
-        indexes = [int(item) for item in list(stage_indexes or []) if str(item or '').strip() != '']
-        result = await self._read_callback(indexes[:STAGE_READ_MAX_INDEXES])
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
 

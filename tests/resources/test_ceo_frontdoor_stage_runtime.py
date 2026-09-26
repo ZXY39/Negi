@@ -12,14 +12,8 @@ from g3ku.runtime.frontdoor.canonical_context import (
     _completed_stage_overlap_signature,
     _dedupe_canonical_stages,
 )
-from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
 from g3ku.runtime.stage_prompt_compaction import retained_completed_stage_ids
-from main.runtime.stage_budget import (
-    DEFAULT_NON_BUDGET_STAGE_TOOLS,
-    DEFAULT_STAGE_GATE_BYPASS_TOOLS,
-    STAGE_READ_TOOL_NAME,
-)
 from main.service.runtime_service import MainRuntimeService
 from main.runtime.stage_budget import SILENT_TOOL_NAME, STAGE_TOOL_NAME
 
@@ -220,7 +214,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
 
     # silent 是常驻内置控制工具，执行侧工具对象字典无条件注入（见 79b0f53a），
     # 所以它出现在每一份精确集合断言里，不是这一轮多放出来的可调用工具。
-    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, STAGE_READ_TOOL_NAME, "record_tool"}
+    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
     stage_result = await tools_by_name[STAGE_TOOL_NAME].ainvoke(
         {
@@ -313,7 +307,7 @@ async def test_frontdoor_stage_gate_keeps_ordinary_tools_visible_but_blocks_them
     tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
     blocked_result = await tools_by_name["record_tool"].ainvoke({"value": "alpha"})
 
-    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, STAGE_READ_TOOL_NAME, "record_tool"}
+    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
     assert blocked_result["status"] == "error"
     assert str(blocked_result["result_text"]).startswith(
         "Error: no active stage; call submit_next_stage before using other tools"
@@ -395,7 +389,7 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
     )
     exhausted_tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in exhausted_tools}
     blocked_after_exhaustion = await exhausted_tools_by_name["record_tool"].ainvoke({"value": "beta"})
-    assert set(exhausted_tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, STAGE_READ_TOOL_NAME, "record_tool"}
+    assert set(exhausted_tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
     assert blocked_after_exhaustion["status"] == "error"
     assert str(blocked_after_exhaustion["result_text"]).startswith(
         "Error: current stage budget is exhausted; call submit_next_stage before using other tools"
@@ -432,8 +426,8 @@ async def test_frontdoor_without_valid_stage_keeps_runtime_visible_tools_stable(
     )
     exhausted_tool_names = {str(getattr(tool, "name", "") or "") for tool in exhausted_tools}
 
-    assert no_stage_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, STAGE_READ_TOOL_NAME, "record_tool"}
-    assert exhausted_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, STAGE_READ_TOOL_NAME, "record_tool"}
+    assert no_stage_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
+    assert exhausted_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
 
 def test_frontdoor_stage_state_snapshot_preserves_archive_refs() -> None:
@@ -507,94 +501,71 @@ def test_frontdoor_final_stage_does_not_require_transition_when_budget_is_exhaus
     assert updated["stages"][0]["final_stage"] is True
 
 
-def _stage_read_ledger() -> dict[str, object]:
-    long_output = "o" * 9000
-    inline_only_output = "i" * 8500
-    return {
-        "active_stage_id": "frontdoor-stage-3",
-        "transition_required": False,
-        "stages": [
+def test_frontdoor_eviction_archives_the_stage_once_and_survives_write_failure(tmp_path: Path) -> None:
+    # 前门的读回不做新工具：账本是每会话的、工具 schema 从全局注册表解析，注册可执行
+    # 实例会把 A 会话账本暴露给 B 会话。改为裁撤时导档 + 块带 archive_ref，回读走
+    # content_open。这里钉住"一条阶段只导一次"和"写不成就谎称不可读"。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda session_key: str(tmp_path)  # type: ignore[assignment]
+    stage = {
+        "stage_id": "frontdoor-stage-1",
+        "stage_index": 1,
+        "status": "completed",
+        "stage_goal": "collect candidates",
+        "completed_stage_summary": "确认了候选池口径",
+        "context_evicted": True,
+        "created_at": "2026-09-26T01:00:00+08:00",
+        "key_refs": [],
+        "rounds": [
             {
-                "stage_id": "frontdoor-stage-1",
-                "stage_index": 1,
-                "status": "completed",
-                "stage_goal": "collect candidates",
-                "completed_stage_summary": "got 50 rows",
-                "context_evicted": True,
-                "created_at": "2026-09-26T01:00:00+08:00",
-                "finished_at": "2026-09-26T01:20:00+08:00",
-                "key_refs": [{"ref": "path:pool.json", "note": "候选池"}],
-                "rounds": [
+                "round_id": "frontdoor-stage-1:round-1",
+                "round_index": 1,
+                "tool_call_ids": ["c1"],
+                "tool_names": ["exec"],
+                "tools": [
                     {
-                        "round_id": "frontdoor-stage-1:round-1",
-                        "round_index": 1,
-                        "created_at": "2026-09-26T01:05:00+08:00",
-                        "text": "thinking",
-                        "tool_call_ids": ["c1", "c2"],
-                        "tool_names": ["exec", "content_open"],
-                        "tools": [
-                            {
-                                "tool_call_id": "c1",
-                                "tool_name": "exec",
-                                "status": "success",
-                                "arguments_text": "ls -1",
-                                "output_text": long_output,
-                                "output_ref": "artifact:abc",
-                            },
-                            {
-                                "tool_call_id": "c2",
-                                "tool_name": "content_open",
-                                "status": "success",
-                                "arguments_text": "ref=artifact:abc",
-                                "output_text": inline_only_output,
-                                "output_ref": "",
-                            },
-                        ],
+                        "tool_call_id": "c1",
+                        "tool_name": "exec",
+                        "status": "success",
+                        "arguments_text": "ls -1",
+                        "output_text": "file.txt",
                     }
                 ],
-            },
-            {
-                "stage_id": "frontdoor-stage-2",
-                "stage_index": 2,
-                "status": "completed",
-                "stage_goal": "score",
-                "completed_stage_summary": "",
-                "rounds": [],
-            },
+            }
         ],
     }
+    state = {
+        "active_stage_id": "frontdoor-stage-2",
+        "transition_required": False,
+        "stages": [dict(stage), {"stage_id": "frontdoor-stage-2", "stage_index": 2, "status": "active"}],
+    }
 
+    ref = runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=state, stage_id="frontdoor-stage-1")
 
-def test_frontdoor_stage_read_returns_bodies_with_identity_and_ref_rule() -> None:
-    # 读回必须给到逐条入参出参，且"只有带指针才截"——没有 output_ref 的正文被截掉
-    # 就是永久丢，而写入侧确实允许内联 8K+ 且不留指针（实盘 554 阶段里 68 个）。
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    assert ref and Path(ref).exists()
+    assert state["stages"][0]["archive_ref"] == ref
+    assert state["stages"][0]["archive_stage_index_end"] == 1
+    document = json.loads(Path(ref).read_text(encoding="utf-8"))
+    assert document["kind"] == "frontdoor_stage_eviction"
+    archived_tool = document["stages"][0]["rounds"][0]["tools"][0]
+    assert archived_tool["arguments_text"] == "ls -1"
+    assert archived_tool["output_text"] == "file.txt"
 
-    result = runner._read_frontdoor_completed_stage_detail(_stage_read_ledger(), [1, 2, 99])
+    # 再点一次不重写文件，只复用 ref。
+    files_after_first = sorted(p.name for p in tmp_path.glob("*.json"))
+    assert runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=state, stage_id="frontdoor-stage-1") == ref
+    assert sorted(p.name for p in tmp_path.glob("*.json")) == files_after_first
 
-    assert result["ok"] is True
-    assert result["missing_stage_indexes"] == [99]
-    by_index = {item["stage_index"]: item for item in result["stages"]}
-    assert by_index[1]["evicted"] is True
-    assert by_index[1]["created_at"] == "2026-09-26T01:00:00+08:00"
-    assert by_index[1]["stage_goal"] == "collect candidates"
-    assert by_index[2]["evicted"] is False
-    tools = {tool["tool_call_id"]: tool for round_item in by_index[1]["rounds"] for tool in round_item["tools"]}
-    assert tools["c1"]["output_truncated"] is True
-    assert tools["c1"]["output_ref"] == "artifact:abc"
-    assert len(tools["c1"]["output_text"]) < 9000
-    assert tools["c2"]["output_truncated"] is False
-    assert len(tools["c2"]["output_text"]) == 8500
-    assert tools["c1"]["arguments_text"] == "ls -1"
+    # 未被点名裁撤的阶段不导档。
+    kept = {"active_stage_id": "", "transition_required": False, "stages": [{**stage, "context_evicted": False}]}
+    assert runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=kept, stage_id="frontdoor-stage-1") == ""
+    assert "archive_ref" not in kept["stages"][0]
 
-
-def test_frontdoor_stage_read_tool_is_always_callable_and_never_budgeted() -> None:
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-
-    assert STAGE_READ_TOOL_NAME in CeoMessageBuilder.ALWAYS_CALLABLE_INTERNAL_TOOLS
-    assert STAGE_READ_TOOL_NAME in runner._frontdoor_callable_tool_names_for_state({"tool_names": ["exec"]})
-    assert STAGE_READ_TOOL_NAME in DEFAULT_STAGE_GATE_BYPASS_TOOLS
-    assert STAGE_READ_TOOL_NAME in DEFAULT_NON_BUDGET_STAGE_TOOLS
+    # 导不了盘就不留指针，也不谎称可读回。
+    runner._frontdoor_write_stage_archive_file = lambda **kwargs: ("", 0, 0)  # type: ignore[assignment]
+    blocked = {"active_stage_id": "", "transition_required": False, "stages": [dict(stage)]}
+    assert runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=blocked, stage_id="frontdoor-stage-1") == ""
+    assert not blocked["stages"][0].get("archive_ref")
 
 
 def test_frontdoor_eviction_mark_is_written_and_carried_by_every_rewriter() -> None:
