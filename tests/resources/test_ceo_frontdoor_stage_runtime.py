@@ -13,9 +13,12 @@ from g3ku.runtime.frontdoor.canonical_context import (
     _dedupe_canonical_stages,
 )
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
-from g3ku.runtime.stage_prompt_compaction import retained_completed_stage_ids
-from main.service.runtime_service import MainRuntimeService
+from g3ku.runtime.stage_prompt_compaction import (
+    completed_stage_blocks,
+    retained_completed_stage_ids,
+)
 from main.runtime.stage_budget import SILENT_TOOL_NAME, STAGE_TOOL_NAME
+from main.service.runtime_service import MainRuntimeService
 
 
 def test_initial_persistent_state_tracks_frontdoor_stage_state() -> None:
@@ -566,6 +569,86 @@ def test_frontdoor_eviction_archives_the_stage_once_and_survives_write_failure(t
     blocked = {"active_stage_id": "", "transition_required": False, "stages": [dict(stage)]}
     assert runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=blocked, stage_id="frontdoor-stage-1") == ""
     assert not blocked["stages"][0].get("archive_ref")
+
+
+def test_frontdoor_durable_tool_cycle_persists_eviction_pointer(tmp_path: Path) -> None:
+    # 裁撤的三样东西（标记、导出的文件、块里的指针）必须由 finalize 写 durable 账本那条
+    # 路径产出。图闭包里的 mutable_stage_state 只是本轮工作副本，写在它上面的 archive_ref
+    # 会被这里的返回值整个覆盖——上一版就栽在这里：文件照写、标记照落，块里却永远没有
+    # archive_ref，提示词承诺的 content_open 回读成了空头支票。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda session_key: str(tmp_path)  # type: ignore[assignment]
+    durable_state = {
+        "session_key": "web:evict",
+        "frontdoor_stage_state": {
+            "active_stage_id": "frontdoor-stage-1",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_kind": "normal",
+                    "mode": "自主执行",
+                    "status": "active",
+                    "stage_goal": "collect candidates",
+                    "completed_stage_summary": "",
+                    "tool_round_budget": 5,
+                    "tool_rounds_used": 1,
+                    "created_at": "2026-09-26T01:00:00+08:00",
+                    "finished_at": "",
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-1:round-1",
+                            "round_index": 1,
+                            "budget_counted": True,
+                            "tool_names": ["exec"],
+                            "tool_call_ids": ["call-exec-1"],
+                            "tools": [
+                                {
+                                    "tool_call_id": "call-exec-1",
+                                    "tool_name": "exec",
+                                    "status": "success",
+                                    "arguments_text": "dir",
+                                    "output_text": "a.txt",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    payload = {
+        "id": "call-submit-1",
+        "name": STAGE_TOOL_NAME,
+        "arguments": {
+            "stage_goal": "score candidates",
+            "tool_round_budget": 5,
+            "completed_stage_summary": "阶段1确认了候选池口径",
+            "drop_completed_stage_tool_detail": True,
+        },
+    }
+
+    updated = runner._frontdoor_stage_state_after_tool_cycle(
+        durable_state,
+        tool_call_payloads=[payload],
+        tool_results=[{"tool_name": STAGE_TOOL_NAME, "status": "success", "result_text": "ok"}],
+    )
+
+    closed = updated["stages"][0]
+    assert closed["context_evicted"] is True
+    archive_ref = str(closed.get("archive_ref") or "")
+    assert archive_ref and Path(archive_ref).exists()
+    document = json.loads(Path(archive_ref).read_text(encoding="utf-8"))
+    assert document["stages"][0]["rounds"][0]["tools"][0]["output_text"] == "a.txt"
+
+    # 指针要活过下一轮的快照白名单，并真的进块——模型看到的读回承诺只有这一处载体。
+    carried = runner._frontdoor_stage_state_snapshot({"frontdoor_stage_state": updated})
+    blocks = completed_stage_blocks(carried, skip_stage_ids=set())
+    assert len(blocks) == 1
+    rendered = json.loads(str(blocks[0]["content"]).split("\n", 1)[1])
+    assert rendered["evicted"] is True
+    assert rendered["archive_ref"] == archive_ref
 
 
 def test_frontdoor_eviction_mark_is_written_and_carried_by_every_rewriter() -> None:

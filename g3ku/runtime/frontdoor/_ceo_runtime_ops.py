@@ -5395,21 +5395,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             status = str(result.get("status") or "").strip().lower()
             if tool_name == STAGE_TOOL_NAME:
                 if status != "error":
+                    arguments = dict(payload.get("arguments") or {})
+                    closing_stage_id = str(stage_state.get("active_stage_id") or "").strip()
+                    drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
                     stage_state, _ = self._submit_frontdoor_next_stage_state(
                         stage_state,
-                        stage_goal=str(dict(payload.get("arguments") or {}).get("stage_goal") or ""),
-                        tool_round_budget=int(dict(payload.get("arguments") or {}).get("tool_round_budget") or 0),
-                        completed_stage_summary=str(
-                            dict(payload.get("arguments") or {}).get("completed_stage_summary") or ""
-                        ),
+                        stage_goal=str(arguments.get("stage_goal") or ""),
+                        tool_round_budget=int(arguments.get("tool_round_budget") or 0),
+                        # 裁撤标记必须由这条"回合后重建 durable 账本"的路径落盘：图节点里那份
+                        # mutable_stage_state 只是本轮工作副本，finalize 会用这里的返回值覆盖状态，
+                        # 少传一个参数就等于 durable 账本永远没有标记——文件照写、肉身照旧每轮重发。
+                        # 与收口标记同一教训：标记必须落在 durable 基线推进的那一步。
+                        drop_completed_stage_tool_detail=drop_detail,
+                        completed_stage_summary=str(arguments.get("completed_stage_summary") or ""),
                         key_refs=[
                             dict(item)
-                            for item in list(dict(payload.get("arguments") or {}).get("key_refs") or [])
+                            for item in list(arguments.get("key_refs") or [])
                             if isinstance(item, dict)
                         ],
-                        final=bool(dict(payload.get("arguments") or {}).get("final")),
+                        final=bool(arguments.get("final")),
                         preamble_text=cycle_narration_text,
                     )
+                    if drop_detail:
+                        # 导档同样只能落在这条路径：闭包里写进 mutable_stage_state 的 archive_ref
+                        # 会随工作副本一起被这里的返回值覆盖掉，于是块里永远只有 evicted 没有指针，
+                        # 提示词承诺的"content_open 回读"就成了空头支票。一份阶段只导一次，
+                        # ref 落盘后由快照白名单逐轮带着走。
+                        self._frontdoor_archive_evicted_stage(
+                            session_key=str(state.get("session_key") or "").strip(),
+                            stage_state=stage_state,
+                            stage_id=closing_stage_id,
+                        )
                     stage_created_this_cycle = True
                 continue
             ordinary_calls.append(dict(payload))
@@ -6129,7 +6145,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             final: bool = False,
             drop_completed_stage_tool_detail: bool = False,
         ) -> dict[str, Any]:
-            closing_stage_id = str(mutable_stage_state.get("active_stage_id") or "").strip()
             next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
                 mutable_stage_state,
                 stage_goal=stage_goal,
@@ -6142,14 +6157,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             mutable_stage_state.clear()
             mutable_stage_state.update(next_stage_state)
-            if drop_completed_stage_tool_detail:
-                # 导档必须在账本落到本轮副本之后、且在闭包返回前完成：块是逐轮从账本
-                # 重渲染的，ref 只有落在账本上才能被下一轮看见并复用。
-                self._frontdoor_archive_evicted_stage(
-                    session_key=str(state.get("session_key") or "").strip(),
-                    stage_state=mutable_stage_state,
-                    stage_id=closing_stage_id,
-                )
             return stage_payload
 
         all_tools = {
