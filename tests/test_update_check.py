@@ -183,6 +183,20 @@ async def test_apply_keeps_service_up_when_spawn_fails(monkeypatch, tmp_path: Pa
     assert exc.value.status_code == 503
 
 
+def test_run_captured_decodes_utf8_child_output(monkeypatch):
+    """子进程写 UTF-8 时不能按系统 ANSI 码页解：中文 Windows 上是 gbk，
+    解码异常会把整段升级输出吞掉（实盘日志里真炸过）。"""
+    import sys
+
+    import g3ku.update_apply as apply_mod
+
+    monkeypatch.setenv("PYTHONUTF8", "1")
+    completed = apply_mod._run_captured([sys.executable, "-c", "print('升级完成 🥬')"], Path.cwd(), 60.0)
+    assert completed.returncode == 0
+    assert "升级完成" in completed.stdout
+    assert "🥬" in completed.stdout
+
+
 def test_upgrade_command_targets_the_running_project_root():
     """漏传目录时安装脚本会退回默认位置，等于升级了另一个目录、重启未变的代码。"""
     import g3ku.update_apply as apply_mod

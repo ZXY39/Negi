@@ -40,6 +40,8 @@
 - 执行体的两个参数都是安全边界，改动前先读：端口由调用方显式传入、猜不到就中止（回落到默认端口会去关同机另一个实例）；`install` 必须带 `-Dir/--dir` 指向本项目根（漏了会退回脚本默认路径，结果是"升级了另一个目录、重启未变的代码"，这条是彩排时实测出来的）。
 - 释放等待只在端口真的空下来之后才动代码；任何一次 `exit_refused_*` 或 `port still busy` 都是**不碰代码**直接退出。降级安装（新 config 配旧代码）会撞上 `Config` 的 `extra=forbid`，服务起不来属预期，不是 apply 车道的问题。
 - 全程留痕在 `.g3ku/logs/update-apply.log`。判读锚点：`exit_refused_409` = 用户没确认暂停；`port still busy` = 服务没退干净、代码未动；`relaunching the previous version` = 升级失败但服务已恢复。
+- 一个模型都没配的设备上 `get_agent()` 构造不出运行时，`_running_work_snapshot` 因此**按空快照回答**并带 `runtime_unavailable` 溯源键，而不是抛 500 —— 退出、`start-g3ku` 的优雅重启与「重启并更新」共用这个端点，500 会让这类设备既关不掉自己也升不了级。锁状态判定不变，未解锁仍然 423。
+- 执行体收子进程输出统一按 UTF-8 解，不看系统 ANSI 码页：中文 Windows 上 gbk 解不开安装脚本写出的中文进度，读线程抛 `UnicodeDecodeError` 会让整段升级输出丢失，判据随之消失。
 - 前端侧的端点与三态渲染契约归 `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」。
 
 ### 首选一键启动脚本

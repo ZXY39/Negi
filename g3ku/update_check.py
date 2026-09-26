@@ -61,6 +61,8 @@ def fetch_latest_release_tag(project_root: Path, timeout: float = 2.0) -> str | 
             cwd=str(project_root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):

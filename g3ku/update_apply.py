@@ -147,6 +147,23 @@ def _log_tail(text: str, limit: int = 2000) -> str:
     return cleaned[-limit:]
 
 
+def _run_captured(command: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess:
+    """按 UTF-8 解子进程输出，不看系统 ANSI 码页。
+
+    安装脚本会写中文进度；默认码页（中文 Windows 上是 gbk）解码失败会让读线程抛
+    UnicodeDecodeError，整段升级输出丢失，排查时就没有判据。
+    """
+    return subprocess.run(
+        command,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
 def _run_upgrade(ref: str) -> bool:
     command = _upgrade_command(ref)
     if command is None:
@@ -154,7 +171,7 @@ def _run_upgrade(ref: str) -> bool:
         return False
     _log(f"upgrade start: {' '.join(command)}")
     try:
-        completed = subprocess.run(command, cwd=str(PROJECT_ROOT), capture_output=True, text=True, timeout=1800.0)
+        completed = _run_captured(command, PROJECT_ROOT, 1800.0)
     except (OSError, subprocess.TimeoutExpired) as exc:
         _log(f"upgrade errored: {exc}")
         return False
