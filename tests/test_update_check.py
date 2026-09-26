@@ -183,18 +183,42 @@ async def test_apply_keeps_service_up_when_spawn_fails(monkeypatch, tmp_path: Pa
     assert exc.value.status_code == 503
 
 
-def test_run_captured_decodes_utf8_child_output(monkeypatch):
-    """子进程写 UTF-8 时不能按系统 ANSI 码页解：中文 Windows 上是 gbk，
-    解码异常会把整段升级输出吞掉（实盘日志里真炸过）。"""
+def test_upgrade_output_lands_in_the_log_not_in_a_window(monkeypatch, tmp_path: Path):
+    """升级子进程的输出必须实时进日志：捕获到结束才落盘的话，慢网络下用户看到的
+    就是一个空窗口 + 一行 upgrade start，没有任何判据（实盘就是这句）。"""
     import sys
 
     import g3ku.update_apply as apply_mod
 
-    monkeypatch.setenv("PYTHONUTF8", "1")
-    completed = apply_mod._run_captured([sys.executable, "-c", "print('升级完成 🥬')"], Path.cwd(), 60.0)
-    assert completed.returncode == 0
-    assert "升级完成" in completed.stdout
-    assert "🥬" in completed.stdout
+    log_file = tmp_path / "update-apply.log"
+    monkeypatch.setattr(apply_mod, "LOG_FILE", log_file)
+    monkeypatch.setattr(
+        apply_mod,
+        "_upgrade_command",
+        lambda ref: [sys.executable, "-c", "print('正在解析依赖 🥬')"],
+    )
+
+    assert apply_mod._run_upgrade("v9.9.9") is True
+    text = log_file.read_text(encoding="utf-8")
+    assert "正在解析依赖" in text
+    assert "upgrade exit=0" in text
+
+
+def test_upgrade_reports_nonzero_instead_of_claiming_success(monkeypatch, tmp_path: Path):
+    import sys
+
+    import g3ku.update_apply as apply_mod
+
+    log_file = tmp_path / "update-apply.log"
+    monkeypatch.setattr(apply_mod, "LOG_FILE", log_file)
+    monkeypatch.setattr(
+        apply_mod,
+        "_upgrade_command",
+        lambda ref: [sys.executable, "-c", "import sys; sys.exit(3)"],
+    )
+
+    assert apply_mod._run_upgrade("v9.9.9") is False
+    assert "upgrade exit=3" in log_file.read_text(encoding="utf-8")
 
 
 def test_upgrade_command_targets_the_running_project_root():

@@ -140,8 +140,10 @@ copy_archive_over_root() {
 }
 
 update_git_checkout() {
-  if [ -n "$(git -C "$DIR" status --porcelain)" ]; then
-    fail "$DIR has uncommitted changes; commit or discard them before upgrading"
+  # 只看跟踪文件的改动。未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
+  # 正常设备上都不可能为空，把它们算成"脏"会让升级永久被拒。
+  if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no)" ]; then
+    fail "$DIR has local edits to tracked files; commit or discard them before upgrading"
   fi
   log "git fetch --depth 1 origin $REF"
   git -C "$DIR" fetch --depth 1 origin "$REF" || fail 'git fetch failed'

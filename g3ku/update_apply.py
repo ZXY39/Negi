@@ -25,6 +25,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_FILE = PROJECT_ROOT / ".g3ku" / "logs" / "update-apply.log"
 EXIT_WAIT_SECONDS = 90.0
 EXIT_POLL_SECONDS = 1.0
+# 升级子进程的看门狗：每 30 秒没结束就在日志里落一行"仍在跑"，累计超过
+# UPGRADE_TIMEOUT_SECONDS 则杀掉，避免慢网络下无限等。
+UPGRADE_HEARTBEAT_SECONDS = 30.0
+UPGRADE_TIMEOUT_SECONDS = 1200.0
 # 让发起 apply 的那次 HTTP 响应先回到浏览器，再动手关停服务。
 STARTUP_GRACE_SECONDS = 3.0
 
@@ -142,26 +146,15 @@ def _upgrade_command(ref: str) -> list[str] | None:
     return ["bash", str(script), "--dir", str(PROJECT_ROOT), "--upgrade", "--no-start", "--ref", ref]
 
 
-def _log_tail(text: str, limit: int = 2000) -> str:
-    cleaned = str(text or "").strip().replace("\r", "")
-    return cleaned[-limit:]
+def _no_window_flags() -> dict[str, int]:
+    """Windows 下别给子进程分配控制台。
 
-
-def _run_captured(command: list[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess:
-    """按 UTF-8 解子进程输出，不看系统 ANSI 码页。
-
-    安装脚本会写中文进度；默认码页（中文 Windows 上是 gbk）解码失败会让读线程抛
-    UnicodeDecodeError，整段升级输出丢失，排查时就没有判据。
+    安装脚本是控制台程序：从无人值守的执行体启动它会弹一个什么都不写的黑窗，
+    用户只能盯着它，误以为程序死了。
     """
-    return subprocess.run(
-        command,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-    )
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
 
 
 def _run_upgrade(ref: str) -> bool:
@@ -170,17 +163,45 @@ def _run_upgrade(ref: str) -> bool:
         _log("upgrade skipped: no installer script in project root")
         return False
     _log(f"upgrade start: {' '.join(command)}")
+    # 输出直接续写进同一个日志文件：捕获到子进程结束才落盘的话，慢网络下的整段
+    # 进度在日志与屏幕上都不存在，用户报上来的就只有"窗口空着不动"。
     try:
-        completed = _run_captured(command, PROJECT_ROOT, 1800.0)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        sink = LOG_FILE.open("a", encoding="utf-8", errors="replace")
+    except OSError:
+        sink = subprocess.DEVNULL
+    started = time.monotonic()
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            **_no_window_flags(),
+        )
+        while True:
+            try:
+                returncode = proc.wait(timeout=UPGRADE_HEARTBEAT_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed = int(time.monotonic() - started)
+                if elapsed >= UPGRADE_TIMEOUT_SECONDS:
+                    proc.kill()
+                    proc.wait(timeout=30)
+                    _log(f"upgrade timed out after {elapsed}s; killed")
+                    return False
+                _log(f"upgrade still running at {elapsed}s (无新输出多半卡在下载/网络)")
+    except OSError as exc:
         _log(f"upgrade errored: {exc}")
         return False
-    ok = completed.returncode == 0
-    _log(f"upgrade exit={completed.returncode}")
-    for label, stream in (("stdout", completed.stdout), ("stderr", completed.stderr)):
-        if str(stream or "").strip():
-            _log(f"upgrade {label}: {_log_tail(stream)}")
-    return ok
+    finally:
+        if sink is not subprocess.DEVNULL:
+            try:
+                sink.close()
+            except OSError:
+                pass
+    _log(f"upgrade exit={returncode}")
+    return returncode == 0
 
 
 def _spawn_detached(*args: str) -> None:

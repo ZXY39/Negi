@@ -118,9 +118,11 @@ function Install-FromArchive {
 
 function Update-GitCheckout {
     param([string]$Root)
-    $dirty = (& git -C $Root status --porcelain 2>$null)
+    # 只看跟踪文件的改动。未跟踪项（用户装的 skill、桥接产物、本地脚本）在任何
+    # 正常设备上都不可能为空，把它们算成"脏"会让升级永久被拒。
+    $dirty = (& git -C $Root status --porcelain --untracked-files=no 2>$null)
     if ($dirty) {
-        Write-Error "[install] $Root has uncommitted changes; commit or discard them before upgrading"
+        Write-Error "[install] $Root has local edits to tracked files; commit or discard them before upgrading"
     }
     Write-Step "git fetch --depth 1 origin $Ref"
     Invoke-Checked @('git', '-C', $Root, 'fetch', '--depth', '1', 'origin', $Ref) -Where $Root
