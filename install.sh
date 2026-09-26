@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # G3KU one-line installer (macOS / Linux).
 #
-#   curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.4/install.sh | bash
+#   curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.5/install.sh | bash
 #
 # Provisions uv (and therefore Python) on a machine that has neither, fetches the
 # pinned checkout, syncs the locked environment and hands off to g3ku_bootstrap.py.
@@ -14,7 +14,7 @@ set -euo pipefail
 
 REPO_OWNER='ZXY39'
 REPO_NAME='G3KU-Agent'
-REF="${G3KU_REF:-v1.0.4}"
+REF="${G3KU_REF:-v1.0.5}"
 DIR="${G3KU_DIR:-$HOME/G3KU-Agent}"
 NO_START=0
 UPGRADE=0
