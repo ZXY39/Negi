@@ -9,6 +9,22 @@ from datetime import datetime
 from typing import Callable
 
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
+from main.runtime.model_load_balancer import ModelLoadBalancer
+from main.runtime.model_route import (
+    LEASE_OUTCOME_BUILD_FAILED,
+    LEASE_OUTCOME_CANCELLED,
+    LEASE_OUTCOME_SUCCESS,
+    ModelRouteLease,
+    ModelRoutePlan,
+    RouteCandidateFilters,
+)
+
+# 有界扫描宽度：队头成员拿不出 permit 时，向后看这么多条请求，避免整条队列被一个
+# 暂时不可用的模型钉死。
+MAX_SCAN_REQUESTS = 8
+# 防饿死上界：一条请求被越过这么多此后必须等它自己可用，否则低负载车道的请求会把
+# 高负载车道的请求无限期推后。
+SKIP_AGING_LIMIT = 4
 
 
 def _now_iso() -> str:
@@ -25,6 +41,19 @@ class NodeTurnLease:
     acquired_at: str
     initial_model_permit: ModelKeyPermitLease | None = None
     queued_at: str = ""
+    route_index: int = 0
+    group_key: str = ""
+    route_plan: ModelRoutePlan | None = None
+    route_lease: ModelRouteLease | None = None
+    # 准入阶段已经算好的候选硬性要求，chat_backend 的后续选择沿用同一份。
+    route_filters: RouteCandidateFilters | None = None
+
+    @property
+    def selected_model_ref(self) -> str:
+        """本次回合实际绑定的模型：优先取 balancer 的选择结果。"""
+        if self.route_lease is not None:
+            return str(self.route_lease.model_key or "")
+        return str(self.model_ref or "")
 
 
 @dataclass(slots=True)
@@ -35,6 +64,9 @@ class _QueuedNodeTurnRequest:
     model_ref: str
     queued_at: str
     queued_mono: float
+    route_plan: ModelRoutePlan | None = None
+    filters: RouteCandidateFilters | None = None
+    skipped: int = 0
 
 
 class NodeTurnController:
@@ -42,11 +74,13 @@ class NodeTurnController:
         self,
         *,
         model_concurrency_controller: ModelKeyConcurrencyController,
+        balancer: ModelLoadBalancer | None = None,
         gate_supplier: Callable[[], bool] | None = None,
         freeze_supplier: Callable[[str], bool] | None = None,
         poll_interval_seconds: float = 0.1,
     ) -> None:
         self._model_concurrency_controller = model_concurrency_controller
+        self._balancer = balancer
         self._gate_supplier = gate_supplier if callable(gate_supplier) else (lambda: True)
         self._freeze_supplier = freeze_supplier if callable(freeze_supplier) else (lambda _task_id: False)
         self._poll_interval_seconds = max(0.05, float(poll_interval_seconds or 0.1))
@@ -65,12 +99,15 @@ class NodeTurnController:
         *,
         gate_supplier: Callable[[], bool] | None = None,
         freeze_supplier: Callable[[str], bool] | None = None,
+        balancer: ModelLoadBalancer | None = None,
     ) -> None:
         with self._lock:
             if callable(gate_supplier):
                 self._gate_supplier = gate_supplier
             if callable(freeze_supplier):
                 self._freeze_supplier = freeze_supplier
+            if balancer is not None:
+                self._balancer = balancer
         self.poke()
 
     def snapshot(self) -> dict[str, float | int]:
@@ -89,12 +126,29 @@ class NodeTurnController:
                 "node_queue_oldest_wait_ms": round(oldest_wait_ms, 3),
             }
 
-    async def acquire_turn(self, *, task_id: str, node_id: str, model_ref: str) -> NodeTurnLease:
+    async def acquire_turn(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        model_ref: str = "",
+        route_plan: ModelRoutePlan | None = None,
+        filters: RouteCandidateFilters | None = None,
+    ) -> NodeTurnLease:
+        """取得一个节点回合的执行权。
+
+        给了 `route_plan` 时**首次模型选择就发生在这里**：pump 在同一个原子操作里向
+        balancer 要候选并拿到该成员/key 的 permit。必须在 request preflight 之后调用，
+        这样 context window 与多模态的候选过滤条件已经算好。
+        没给 `route_plan` 时保持旧行为：按传入的 `model_ref` 预占 permit。
+        """
         normalized_task_id = str(task_id or "").strip()
         normalized_node_id = str(node_id or "").strip()
         normalized_model_ref = str(model_ref or "").strip()
-        if not normalized_task_id or not normalized_node_id or not normalized_model_ref:
-            raise ValueError("task_id, node_id, and model_ref are required")
+        if not normalized_task_id or not normalized_node_id:
+            raise ValueError("task_id and node_id are required")
+        if route_plan is None and not normalized_model_ref:
+            raise ValueError("model_ref or route_plan is required")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[NodeTurnLease] = loop.create_future()
         with self._lock:
@@ -106,6 +160,8 @@ class NodeTurnController:
                 model_ref=normalized_model_ref,
                 queued_at=_now_iso(),
                 queued_mono=time.perf_counter(),
+                route_plan=route_plan,
+                filters=filters,
             )
             if self._is_task_frozen_locked(normalized_task_id):
                 self._frozen_queue_for_task_locked(normalized_task_id).append(request)
@@ -131,7 +187,96 @@ class NodeTurnController:
             return
         with self._lock:
             self._running_leases.pop(int(lease.lease_id or 0), None)
+        # 回合结束但准入 permit 没被 chat 消费（取消、preflight 失败、chat 抛错）时在这
+        # 里兜底归还，否则那颗 permit 与 reserved 会一直挂在被选中的成员上。
+        self.release_route_lease(lease, outcome=LEASE_OUTCOME_CANCELLED)
         self.poke()
+
+    def release_route_lease(self, lease: NodeTurnLease | None, *, outcome: str = LEASE_OUTCOME_SUCCESS, error: str = "") -> None:
+        """归还 balancer 侧的 route lease（含底层 permit）。幂等。"""
+        if lease is None:
+            return
+        route_lease = lease.route_lease
+        if route_lease is None:
+            return
+        if self._balancer is not None:
+            self._balancer.release(route_lease, outcome=outcome, error=error)
+        lease.route_lease = None
+        lease.initial_model_permit = None
+
+    def rebind_turn(
+        self,
+        lease: NodeTurnLease | None,
+        *,
+        route_index: int | None = None,
+        filters: RouteCandidateFilters | None = None,
+        excluded_model_keys: frozenset[str] = frozenset(),
+        rebind_reason: str = "",
+    ) -> ModelRouteLease | None:
+        """组内前进：释放旧成员 lease，在**同一个 node-turn lease** 上重绑下一个候选。
+
+        不创建第二个 node-turn lease，否则同一个节点会同时占着两个回合权。
+        """
+        if lease is None or self._balancer is None:
+            return None
+        plan = lease.route_plan
+        if plan is None:
+            return None
+        target_index = int(lease.route_index if route_index is None else route_index)
+        route = plan.route_at(target_index)
+        if route is None or not route.is_load_balance:
+            return None
+        base_filters = filters or lease.route_filters or RouteCandidateFilters()
+        effective_filters = RouteCandidateFilters(
+            required_context_window_tokens=base_filters.required_context_window_tokens,
+            requires_image_multimodal=base_filters.requires_image_multimodal,
+            excluded_model_keys=frozenset(set(base_filters.excluded_model_keys) | set(excluded_model_keys)),
+        )
+        with self._lock:
+            if lease.route_lease is not None:
+                self._balancer.release(lease.route_lease, outcome=LEASE_OUTCOME_BUILD_FAILED)
+                lease.route_lease = None
+            next_lease, _reason = self._balancer.select(
+                node_id=lease.node_id,
+                route_index=target_index,
+                group_key=str(route.group_key),
+                filters=effective_filters,
+                task_id=lease.task_id,
+                rebind=True,
+                rebind_reason=rebind_reason or "fallback_after_failure",
+            )
+            if next_lease is None:
+                lease.initial_model_permit = None
+                return None
+            lease.route_index = target_index
+            lease.group_key = str(next_lease.group_key)
+            lease.model_ref = str(next_lease.model_key)
+            lease.key_index = int(next_lease.key_index)
+            lease.route_lease = next_lease
+            lease.initial_model_permit = next_lease.permit
+            lease.route_filters = effective_filters
+            return next_lease
+
+    def advance_turn_route(
+        self,
+        lease: NodeTurnLease | None,
+        *,
+        route_index: int,
+        filters: RouteCandidateFilters | None = None,
+    ) -> ModelRouteLease | None:
+        """整条 route 前进到下一个 entry（组整体耗尽后进入 direct 或下一组）。"""
+        return self.rebind_turn(
+            lease,
+            route_index=route_index,
+            filters=filters,
+            excluded_model_keys=frozenset(),
+            rebind_reason="group_exhausted",
+        )
+
+    def forget_route_binding(self, node_id: str) -> None:
+        """节点结束或阶段边界：清掉 balancer 里该节点的粘滞绑定。"""
+        if self._balancer is not None:
+            self._balancer.forget_node(node_id)
 
     def poke(self) -> None:
         wake_event = self._wake_event
@@ -180,35 +325,29 @@ class NodeTurnController:
             while True:
                 granted = False
                 while True:
-                    request = self._peek_request()
-                    if request is None:
+                    if not bool(self._gate_supplier()):
+                        break
+                    window = self._grant_window()
+                    if not window:
                         if not self._has_pending_requests():
                             return
                         break
-                    if not bool(self._gate_supplier()):
-                        break
-                    permit = self._model_concurrency_controller.try_acquire_first_available(model_ref=request.model_ref)
-                    if permit is None:
-                        break
-                    granted = True
-                    with self._lock:
-                        current = self._queue.popleft() if self._queue else None
-                        if current is None or current.future.cancelled():
-                            self._model_concurrency_controller.release(permit)
+                    chosen = None
+                    for request in window:
+                        lease = self._try_grant(request)
+                        if lease is None:
                             continue
-                        self._next_lease_id += 1
-                        lease = NodeTurnLease(
-                            lease_id=self._next_lease_id,
-                            task_id=current.task_id,
-                            node_id=current.node_id,
-                            model_ref=current.model_ref,
-                            key_index=int(permit.key_index),
-                            acquired_at=_now_iso(),
-                            initial_model_permit=permit,
-                            queued_at=current.queued_at,
-                        )
-                        self._running_leases[lease.lease_id] = lease
-                    _set_future_result_if_pending(current.future, lease)
+                        chosen = request
+                        break
+                    if chosen is None:
+                        break
+                    # 只有真被后来者越过的请求才计 skipped；到上界后它成为屏障，
+                    # 避免低负载车道的请求把高负载车道的请求无限期推后。
+                    for request in window:
+                        if request is chosen:
+                            break
+                        request.skipped += 1
+                    granted = True
                 wake_event = self._wake_event
                 if wake_event is None:
                     return
@@ -223,12 +362,132 @@ class NodeTurnController:
         finally:
             self._pump_task = None
 
-    def _peek_request(self) -> _QueuedNodeTurnRequest | None:
+    def _grant_window(self) -> list[_QueuedNodeTurnRequest]:
+        """本轮可以尝试的请求：队头优先，最多看 `MAX_SCAN_REQUESTS` 条。
+
+        到达防饿死上界的请求单独返回，成为硬屏障：它不可用时本轮不再授予后面的人。
+        """
         with self._lock:
             self._reconcile_frozen_queues_locked()
-            while self._queue and self._queue[0].future.cancelled():
-                self._queue.popleft()
-            return self._queue[0] if self._queue else None
+            # 已取消的请求就地剔除：留在队列里会让 pump 每轮空转，`_has_pending_requests`
+            # 也永远返回 True。
+            if any(item.future.cancelled() for item in self._queue):
+                self._queue = deque(item for item in self._queue if not item.future.cancelled())
+            window: list[_QueuedNodeTurnRequest] = []
+            for request in self._queue:
+                if request.skipped >= SKIP_AGING_LIMIT:
+                    return [request]
+                window.append(request)
+                if len(window) >= MAX_SCAN_REQUESTS:
+                    break
+            return window
+
+    def _try_grant(self, request: _QueuedNodeTurnRequest) -> NodeTurnLease | None:
+        """为一条请求授予回合权；选择与 permit 在同一把锁内原子完成。"""
+        with self._lock:
+            plan = request.route_plan
+            if plan is None:
+                permit = self._model_concurrency_controller.try_acquire_first_available(model_ref=request.model_ref)
+                if permit is None:
+                    return None
+                return self._register_grant_locked(
+                    request,
+                    model_ref=str(permit.model_ref or request.model_ref),
+                    key_index=int(permit.key_index),
+                    initial_model_permit=permit,
+                )
+
+            for route in plan.routes:
+                if route.is_load_balance and self._balancer is not None:
+                    route_lease, _reason = self._balancer.select(
+                        node_id=request.node_id,
+                        route_index=int(route.index),
+                        group_key=str(route.group_key),
+                        filters=request.filters,
+                        task_id=request.task_id,
+                    )
+                    if route_lease is None:
+                        # 这个组给不出候选（busy / 全部冷却 / 无容量），按链向后前进。
+                        continue
+                    return self._register_grant_locked(
+                        request,
+                        model_ref=str(route_lease.model_key),
+                        key_index=int(route_lease.key_index),
+                        initial_model_permit=route_lease.permit,
+                        route_plan=plan,
+                        route_index=int(route.index),
+                        group_key=str(route_lease.group_key),
+                        route_lease=route_lease,
+                        filters=request.filters,
+                    )
+                permit = self._model_concurrency_controller.try_acquire_first_available(model_ref=str(route.model_key or ""))
+                if permit is None:
+                    continue
+                return self._register_grant_locked(
+                    request,
+                    model_ref=str(permit.model_ref or route.model_key),
+                    key_index=int(permit.key_index),
+                    initial_model_permit=permit,
+                    route_plan=plan,
+                    route_index=int(route.index),
+                )
+            return None
+
+    def _register_grant_locked(
+        self,
+        request: _QueuedNodeTurnRequest,
+        *,
+        model_ref: str,
+        key_index: int,
+        initial_model_permit: ModelKeyPermitLease | None,
+        route_plan: ModelRoutePlan | None = None,
+        route_index: int = 0,
+        group_key: str = "",
+        route_lease: ModelRouteLease | None = None,
+        filters: RouteCandidateFilters | None = None,
+    ) -> NodeTurnLease | None:
+        # 授予的是**这条**请求，不是队头：有界扫描之后队头可能已经不是它。
+        try:
+            self._queue.remove(request)
+        except ValueError:
+            self._discard_grant_locked(route_lease=route_lease, initial_model_permit=initial_model_permit)
+            return None
+        if request.future.cancelled():
+            # 请求已被取消：把刚拿到的 permit / route lease 原样归还，不能留下幽灵占用。
+            self._discard_grant_locked(route_lease=route_lease, initial_model_permit=initial_model_permit)
+            return None
+        self._next_lease_id += 1
+        lease = NodeTurnLease(
+            lease_id=self._next_lease_id,
+            task_id=request.task_id,
+            node_id=request.node_id,
+            model_ref=str(model_ref or ""),
+            key_index=int(key_index),
+            acquired_at=_now_iso(),
+            initial_model_permit=initial_model_permit,
+            queued_at=request.queued_at,
+            route_index=int(route_index),
+            group_key=str(group_key or ""),
+            route_plan=route_plan,
+            route_lease=route_lease,
+            route_filters=filters,
+        )
+        self._running_leases[lease.lease_id] = lease
+        _set_future_result_if_pending(request.future, lease)
+        return lease
+
+    def _discard_grant_locked(
+        self,
+        *,
+        route_lease: ModelRouteLease | None,
+        initial_model_permit: ModelKeyPermitLease | None,
+    ) -> None:
+        """归还一次尚未交付的授予。route lease 自带底层 permit，只归还一次。"""
+        if route_lease is not None and self._balancer is not None:
+            self._balancer.release(route_lease, outcome=LEASE_OUTCOME_CANCELLED)
+            return
+        if initial_model_permit is not None:
+            self._model_concurrency_controller.release(initial_model_permit)
 
     def _has_pending_requests(self) -> bool:
         with self._lock:

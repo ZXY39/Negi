@@ -56,7 +56,13 @@ def test_model_key_concurrency_controller_uses_per_key_limits_and_skips_disabled
 
 
 @pytest.mark.asyncio
-async def test_node_turn_controller_enforces_strict_fifo_head_blocking() -> None:
+async def test_node_turn_controller_scans_past_blocked_head_without_losing_same_model_fifo() -> None:
+    """准入 pump 的授予窗口契约（替换旧的「队头满就整条队列停住」行为）。
+
+    旧行为：队头模型拿不到 permit 就 break，于是等 model:b 的请求会排在已满的
+    model:a 后面空等。负载均衡改造后必须跳过暂时不可用的队头去授予后面可用的
+    请求；同一条模型上的请求之间仍然严格 FIFO，防饿死上界由 aging 测试单独锁。
+    """
     model_controller = ModelKeyConcurrencyController(
         resolve_model_limits=lambda model_ref: {"key_count": 1, "per_key_limit": 1}
     )
@@ -69,33 +75,35 @@ async def test_node_turn_controller_enforces_strict_fifo_head_blocking() -> None
     try:
         head = await node_controller.acquire_turn(task_id="task:one", node_id="node:one", model_ref="model:a")
 
-        second_task = asyncio.create_task(
+        same_model_waiter = asyncio.create_task(
             node_controller.acquire_turn(task_id="task:two", node_id="node:two", model_ref="model:a")
         )
-        third_task = asyncio.create_task(
+        other_model_waiter = asyncio.create_task(
             node_controller.acquire_turn(task_id="task:three", node_id="node:three", model_ref="model:b")
         )
         await asyncio.sleep(0.15)
 
         snapshot = node_controller.snapshot()
-        assert second_task.done() is False
-        assert third_task.done() is False
-        assert snapshot["node_queue_running_count"] == 1
-        assert snapshot["node_queue_waiting_count"] == 2
+        assert same_model_waiter.done() is False
+        # 队头 model:a 已满，但等 model:b 的请求不再被它钉住。
+        assert other_model_waiter.done() is True
+        assert snapshot["node_queue_running_count"] == 2
+        assert snapshot["node_queue_waiting_count"] == 1
+
+        third = other_model_waiter.result()
+        model_controller.release(third.initial_model_permit)
+        third.initial_model_permit = None
+        node_controller.release_turn(third)
 
         model_controller.release(head.initial_model_permit)
         head.initial_model_permit = None
         node_controller.release_turn(head)
 
-        second = await asyncio.wait_for(second_task, timeout=1.0)
+        second = await asyncio.wait_for(same_model_waiter, timeout=1.0)
         assert second.node_id == "node:two"
-
         model_controller.release(second.initial_model_permit)
         second.initial_model_permit = None
         node_controller.release_turn(second)
-
-        third = await asyncio.wait_for(third_task, timeout=1.0)
-        assert third.node_id == "node:three"
     finally:
         await node_controller.close()
 
