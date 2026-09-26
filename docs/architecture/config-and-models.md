@@ -77,7 +77,9 @@
 
 ### `stt`
 
-定义本机语音识别（可选能力，默认关闭）：`enabled`、`model`（`tiny`/`base`/`small`）、`language`、`threads`、`maxAudioSeconds`、`minRmsDbfs`、`timeoutSeconds`、`simplifyChinese`、`modelDir`（默认 `.g3ku/stt`，跟随数据根）、`binaryPath`、以及分发四件 `binaryReleaseTag` / `binarySha256` / `binaryDownloadBaseUrl` / `modelDownloadBaseUrl`。没有密钥字段，因此不参与 secret overlay 的抽取/剥离三件套。
+定义本机语音识别（默认开启，关掉它是操作员说"别碰我这条车道"）：`enabled`、`model`（`tiny`/`base`/`small`）、`language`、`threads`、`maxAudioSeconds`、`minRmsDbfs`、`timeoutSeconds`、`simplifyChinese`、`modelDir`（默认 `.g3ku/stt`，跟随数据根）、`binaryPath`、以及分发四件 `binaryReleaseTag` / `binarySha256` / `binaryDownloadBaseUrl` / `modelDownloadBaseUrl`。没有密钥字段，因此不参与 secret overlay 的抽取/剥离三件套。
+
+默认开的是**许可**，不是那 157 MB 的下载：二进制与模型仍要显式取得（`g3ku stt prepare`，或网页首次点麦克风时按需下载），所以一台没下过东西的机器上 `ready` 仍是 false，引擎不会自己去联网。反过来，已经保存过配置的旧设备里 `enabled: false` 是写死在 `config.json` 里的，不会随默认值翻转——那是它自己的显式选择。
 
 该节属于加载器「显式字段校验」的豁免前缀：存量 `config.json` 不写 `stt` 节也能启动，取值回落到 schema 默认。但 `_runtime_config_payload` 是显式白名单序列化，`stt` 的每个字段都必须同时出现在那里，否则任何一次配置保存都会把整段静默丢掉（`g3ku stt prepare --enable` 就写不进去）。引擎形态、就绪判定与默认值的实测依据详见 `speech-to-text.md`。
 

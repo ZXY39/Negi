@@ -644,6 +644,99 @@ async def transcribe_ceo_voice(file: UploadFile = File(...)):
     return result.as_dict()
 
 
+# 首次点麦克风时的按需下载台账。进程内一份就够：同一台机器上并行开两个
+# whisper.cpp 下载只会互相抢那条 ~20 KB/s 的 GitHub 通道。
+_VOICE_PREPARE: dict[str, Any] = {
+    'state': 'idle',
+    'stage': '',
+    'done_bytes': 0,
+    'total_bytes': None,
+    'error': '',
+}
+_voice_prepare_task: "asyncio.Task | None" = None
+
+
+def _voice_prepare_snapshot() -> dict[str, Any]:
+    return {
+        'state': str(_VOICE_PREPARE.get('state') or 'idle'),
+        'stage': str(_VOICE_PREPARE.get('stage') or ''),
+        'done_bytes': int(_VOICE_PREPARE.get('done_bytes') or 0),
+        'total_bytes': _VOICE_PREPARE.get('total_bytes'),
+        'error': str(_VOICE_PREPARE.get('error') or ''),
+    }
+
+
+def _note_voice_prepare_progress(stage: str, done: int, total: int | None) -> None:
+    _VOICE_PREPARE['stage'] = stage
+    _VOICE_PREPARE['done_bytes'] = int(done)
+    _VOICE_PREPARE['total_bytes'] = int(total) if total else None
+
+
+async def _run_voice_prepare() -> None:
+    from g3ku.stt import engine as stt_engine
+
+    loop = asyncio.get_running_loop()
+    try:
+        for step in (stt_engine.prepare_binary, stt_engine.prepare_model):
+            # 下载是同步 httpx + 落盘，放线程里跑，别把 uvicorn 的 loop 挂住十几分钟。
+            await loop.run_in_executor(None, lambda current=step: current(None, _note_voice_prepare_progress))
+        _VOICE_PREPARE['state'] = 'ready'
+        _VOICE_PREPARE['error'] = ''
+        logger.info('stt on-demand provisioning finished')
+    except Exception as exc:  # noqa: BLE001 - 后台任务，异常只能记进台账
+        logger.exception('stt on-demand provisioning failed')
+        _VOICE_PREPARE['state'] = 'error'
+        _VOICE_PREPARE['error'] = str(exc) or type(exc).__name__
+
+
+@router.get('/ceo/voice/status')
+async def get_ceo_voice_status():
+    """就绪矩阵 + 下载进度，一个轮询点。
+
+    只报布尔与字节数，绝对路径留给 CLI：网页不需要知道模型装在哪儿。
+    """
+    from g3ku.stt import engine as stt_engine
+
+    snap = stt_engine.status()
+    return {
+        'ok': True,
+        'enabled': bool(snap['enabled']),
+        'ready': bool(snap['ready']),
+        'binary_present': bool(snap['binary_present']),
+        'model_present': bool(snap['model_present']),
+        'model': str(snap['model'] or ''),
+        'download': stt_engine.download_plan(),
+        'prepare': _voice_prepare_snapshot(),
+    }
+
+
+@router.post('/ceo/voice/prepare')
+async def start_ceo_voice_prepare():
+    """把缺的 whisper.cpp 与模型下下来（单飞）。
+
+    已经就绪或正在下都直接回当前台账，不重开第二个任务。
+    """
+    global _voice_prepare_task
+
+    from g3ku.stt import engine as stt_engine
+
+    if stt_engine.status()['ready']:
+        _VOICE_PREPARE['state'] = 'ready'
+        return {'ok': True, **_voice_prepare_snapshot()}
+    if _voice_prepare_task is not None and not _voice_prepare_task.done():
+        return {'ok': True, **_voice_prepare_snapshot()}
+    _VOICE_PREPARE.update({
+        'state': 'running',
+        'stage': 'binary',
+        'done_bytes': 0,
+        'total_bytes': None,
+        'error': '',
+    })
+    _voice_prepare_task = asyncio.create_task(_run_voice_prepare())
+    logger.info('stt on-demand provisioning started by the web composer')
+    return {'ok': True, **_voice_prepare_snapshot()}
+
+
 @router.get('/ceo/external-upload-file')
 async def get_ceo_external_upload_file(
     session_id: str = Query(...),

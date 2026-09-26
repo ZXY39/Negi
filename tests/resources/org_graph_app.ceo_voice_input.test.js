@@ -188,6 +188,11 @@ function loadApp(contextExtra = {}) {
             handleCeoVoiceBubbleClick,
             renderStructuredChatAttachments,
             summarizeUploads,
+            formatVoiceBytes,
+            voiceEngineGate,
+            voicePrepareText,
+            voiceDownloadTotalText,
+            ensureCeoVoiceEngine,
         };`,
         context
     );
@@ -538,4 +543,68 @@ test("转文字 disclosure toggles its own transcript only", () => {
     handleCeoVoiceBubbleClick(event);
     assert.equal(transcript.hidden, true);
     assert.equal(toggle["aria-expanded"], "false");
+});
+
+test("字节数按用户看得懂的方式说，未知就不编", () => {
+    const { formatVoiceBytes, voiceDownloadTotalText } = loadApp();
+    assert.equal(formatVoiceBytes(147951465), "141 MB");
+    assert.equal(formatVoiceBytes(8573270), "8.2 MB");
+    assert.equal(formatVoiceBytes(0), "");
+    assert.equal(
+        voiceDownloadTotalText({ download: { binary_bytes: 8573270, model_bytes: 147951465 } }),
+        "约 149 MB，"
+    );
+    assert.equal(voiceDownloadTotalText({ download: { binary_bytes: 0, model_bytes: null } }), "");
+});
+
+test("就绪判读把三种状态分开，关掉的设备不去下载", () => {
+    const { voiceEngineGate, voicePrepareText } = loadApp();
+    assert.equal(voiceEngineGate(null), "unknown");
+    assert.equal(voiceEngineGate({ ready: true }), "ready");
+    assert.equal(voiceEngineGate({ ready: false, enabled: false }), "disabled");
+    assert.equal(voiceEngineGate({ ready: false, enabled: true }), "provision");
+
+    assert.match(
+        voicePrepareText({ prepare: { stage: "model", done_bytes: 74475733, total_bytes: 147951465 } }),
+        /语音模型 71 MB \/ 141 MB（50%）/
+    );
+    assert.equal(
+        voicePrepareText({ prepare: { stage: "binary", done_bytes: 1024 * 1024, total_bytes: null } }),
+        "正在下载语音程序…"
+    );
+});
+
+test("未就绪的首点先下载、下完才继续，被关掉的设备不碰下载", async () => {
+    const calls = [];
+    const queue = [
+        { ok: true, ready: false, enabled: true, download: { binary_bytes: 8573270, model_bytes: 147951465 }, prepare: { state: "idle" } },
+        { ok: true, ready: true, enabled: true, download: { binary_bytes: 0, model_bytes: 0 }, prepare: { state: "ready" } },
+    ];
+    const { ensureCeoVoiceEngine } = loadApp({
+        ApiClient: {
+            getCeoVoiceStatus: async () => queue.shift(),
+            prepareCeoVoice: async () => { calls.push("prepare"); return { state: "running" }; },
+        },
+    });
+
+    assert.equal(await ensureCeoVoiceEngine(), true);
+    assert.deepEqual(calls, ["prepare"]);
+
+    const disabled = loadApp({
+        ApiClient: {
+            getCeoVoiceStatus: async () => ({ ready: false, enabled: false }),
+            prepareCeoVoice: async () => calls.push("must-not"),
+        },
+    });
+    assert.equal(await disabled.ensureCeoVoiceEngine(), false);
+    assert.deepEqual(calls, ["prepare"], "操作员明确关掉的能力不许被一次点击偷偷打开");
+});
+
+test("录音入口先问就绪，再要麦克风权限", () => {
+    const source = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8").replace(/\r\n/g, "\n");
+    const start = source.slice(source.indexOf("async function startCeoVoiceCapture"));
+    assert.ok(
+        start.indexOf("ensureCeoVoiceEngine()") < start.indexOf("navigator.mediaDevices.getUserMedia("),
+        "顺序反了就是用户说完一段话才被告知这台机器还没装模型"
+    );
 });

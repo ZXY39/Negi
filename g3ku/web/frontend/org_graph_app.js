@@ -5941,6 +5941,126 @@ function stopCeoVoiceCapture() {
     }
 }
 
+const VOICE_PREPARE_POLL_MS = 1200;
+// 二进制走 GitHub CDN（实测这类网络 ~20 KB/s，8.2 MB 要几分钟起步），模型走
+// hf-mirror（实测 20 MB/s）。30 分钟是给最坏那条通道留的止损，不是预期耗时。
+const VOICE_PREPARE_MAX_MS = 30 * 60 * 1000;
+let ceoVoiceEngineReady = false;
+let ceoVoicePreparing = null;
+
+function formatVoiceBytes(bytes) {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value <= 0) return "";
+    const mb = value / (1024 * 1024);
+    return mb >= 10 ? `${Math.round(mb)} MB` : `${Math.round(mb * 10) / 10} MB`;
+}
+
+function voiceEngineGate(status) {
+    if (!status) return "unknown";
+    if (status.ready) return "ready";
+    // 开关是关的：这是操作员明确关掉的能力，不许替他打开，更不许开始下载。
+    if (!status.enabled) return "disabled";
+    return "provision";
+}
+
+function voicePrepareText(status) {
+    const prep = (status && status.prepare) || {};
+    const label = prep.stage === "model" ? "语音模型" : "语音程序";
+    const total = Number(prep.total_bytes) || 0;
+    const done = Number(prep.done_bytes) || 0;
+    if (!total) return `正在下载${label}…`;
+    const percent = Math.max(0, Math.min(99, Math.floor((done / total) * 100)));
+    return `正在下载${label} ${formatVoiceBytes(done)} / ${formatVoiceBytes(total)}（${percent}%）`;
+}
+
+function voiceDownloadTotalText(status) {
+    const plan = (status && status.download) || {};
+    const total = (Number(plan.binary_bytes) || 0) + (Number(plan.model_bytes) || 0);
+    return total ? `约 ${formatVoiceBytes(total)}，` : "";
+}
+
+function provisionCeoVoiceEngine() {
+    if (ceoVoicePreparing) return ceoVoicePreparing;
+    const run = async () => {
+        const startedAt = Date.now();
+        try {
+            await ApiClient.prepareCeoVoice();
+            while (true) {
+                const status = await ApiClient.getCeoVoiceStatus();
+                if (status && status.ready) {
+                    closeToast();
+                    ceoVoiceEngineReady = true;
+                    showToast({ title: "语音已就绪", text: "点麦克风开始录音，说完再点一次。", kind: "success", durationMs: 4000 });
+                    return true;
+                }
+                const prep = (status && status.prepare) || {};
+                if (prep.state === "error") {
+                    showToast({ title: "语音下载失败", text: String(prep.error || "未知错误"), kind: "error", durationMs: 9000 });
+                    return false;
+                }
+                if (Date.now() - startedAt > VOICE_PREPARE_MAX_MS) {
+                    showToast({ title: "语音下载超时", text: "这台机器到下载源太慢，稍后再点一次麦克风会继续下载（支持断点续传）。", kind: "error", durationMs: 9000 });
+                    return false;
+                }
+                showToast({
+                    title: "首次使用需要下载语音",
+                    text: voicePrepareText(status),
+                    kind: "info",
+                    persistent: true,
+                });
+                await new Promise((resolve) => window.setTimeout(resolve, VOICE_PREPARE_POLL_MS));
+            }
+        } catch (error) {
+            showToast({
+                title: "语音下载失败",
+                text: String(error && error.message ? error.message : error),
+                kind: "error",
+                durationMs: 9000,
+            });
+            return false;
+        }
+    };
+    ceoVoicePreparing = run().finally(() => { ceoVoicePreparing = null; });
+    return ceoVoicePreparing;
+}
+
+async function ensureCeoVoiceEngine() {
+    if (ceoVoiceEngineReady) return true;
+    let status;
+    try {
+        status = await ApiClient.getCeoVoiceStatus();
+    } catch (error) {
+        showToast({
+            title: "无法确认语音状态",
+            text: String(error && error.message ? error.message : error),
+            kind: "error",
+            durationMs: 8000,
+        });
+        return false;
+    }
+    const gate = voiceEngineGate(status);
+    if (gate === "ready") {
+        ceoVoiceEngineReady = true;
+        return true;
+    }
+    if (gate === "disabled") {
+        showToast({
+            title: "语音识别已关闭",
+            text: "这台设备的配置里 stt.enabled 是关的，打开后才能用麦克风。",
+            kind: "error",
+            durationMs: 8000,
+        });
+        return false;
+    }
+    showToast({
+        title: "首次使用需要下载语音",
+        text: `${voiceDownloadTotalText(status)}下载完自动开始录音。`,
+        kind: "info",
+        persistent: true,
+    });
+    return await provisionCeoVoiceEngine();
+}
+
 async function startCeoVoiceCapture() {
     if (S.ceoVoice || S.ceoVoiceBusy) return;
     if (!voiceCaptureSupported()) {
@@ -5954,6 +6074,9 @@ async function startCeoVoiceCapture() {
         });
         return;
     }
+    // 新设备上那 150 MB 还没下来：先下、下完再开录音。反过来做就是用户说完一段话，
+    // 才被告知"其实还没装模型"。
+    if (!(await ensureCeoVoiceEngine())) return;
     let stream;
     try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -5991,6 +6114,15 @@ async function finishCeoVoiceTranscription(capture) {
             // /api/ceo/transcribe 转写完就把字节丢了（不落盘是它的契约）。
             await attachVoiceClip(wav);
             deliverVoiceText(String(result.text));
+            return;
+        }
+        const missingCode = String((result && result.error_code) || "");
+        if (missingCode === "stt_binary_missing" || missingCode === "stt_model_missing") {
+            // 过了状态那道门还会缺件，只可能是刚被删掉或换过数据目录：同样按下载处理，
+            // 而不是把一句 CLI 命令甩给用户。
+            ceoVoiceEngineReady = false;
+            closeToast();
+            await provisionCeoVoiceEngine();
             return;
         }
         showToast({

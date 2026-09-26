@@ -1072,8 +1072,12 @@ STT_MODEL_NAMES = ("tiny", "base", "small")
 class SttConfig(Base):
     """Local speech-to-text, driven by the official ``whisper.cpp`` CLI binary.
 
-    Opt-in like every other inbound surface: a transcription wants both cores,
-    so it must never start because a default said so.
+    On by default: a fresh install is *allowed* to transcribe, and turning this
+    off is the operator's way of saying "never touch my microphone lane". What
+    stays explicit is the ~157 MB of artifacts (15 MB binary + 142 MB ``base``
+    model) -- nothing here downloads or runs inference because a default said
+    so: the engine only reports ``ready=False`` until ``g3ku stt prepare`` (or
+    the composer's first-click download) has placed them.
 
     Every default below is measured on this product's own floor (2 vCPU / 4
     logical CPUs, 7.7 GB RAM, no GPU) against a 22.9s Mandarin clip, not copied
@@ -1101,7 +1105,7 @@ class SttConfig(Base):
     silent "latest" lookup would be neither auditable nor fast.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     model: str = "base"
     language: str = "auto"
     threads: int = 2

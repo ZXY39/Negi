@@ -628,6 +628,16 @@ class ApiClient {
         });
     }
 
+    // 就绪矩阵 + 下载进度都在 status 里，所以轮询只需要这一个口；不带 requestKey
+    // （那是"取消上一个同名请求"的语义，会把轮询自己掐掉）。
+    static async getCeoVoiceStatus() {
+        return await this._request("GET", "/api/ceo/voice/status", { timeoutMs: 8000 });
+    }
+
+    static async prepareCeoVoice() {
+        return await this._request("POST", "/api/ceo/voice/prepare", { timeoutMs: 15000 });
+    }
+
     static async getTasks(scope = 1, sessionId = this.getActiveSessionId()) {
         const data = await this._request("GET", "/api/tasks", {
             params: { session_id: sessionId, scope },

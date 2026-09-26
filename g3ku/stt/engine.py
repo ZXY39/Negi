@@ -37,7 +37,7 @@ import zipfile
 from dataclasses import dataclass
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 from loguru import logger
@@ -50,6 +50,11 @@ from g3ku.utils.process_tree import kill_process_tree
 
 _MODEL_FILENAME = "ggml-{name}.bin"
 _BINARY_ASSET = {"windows": "whisper-bin-x64.zip", "linux": "whisper-bin-ubuntu-x64.tar.gz"}
+# 首次点击要如实报出"要下多少字节"，所以这里记的是实测 Content-Length：
+# 模型来自 hf-mirror（base 这条与本机已下载文件 147,951,465 逐字节相符），
+# 二进制来自 b5130 的 whisper-bin-x64.zip。未知档位返回 None，让界面只说"需要下载"。
+_MODEL_DOWNLOAD_BYTES = {"tiny": 77691713, "base": 147951465, "small": 487601967}
+_BINARY_DOWNLOAD_BYTES = 8573270
 # 官方 zip 里除了 CLI 还有十几个测试/示例可执行文件，只留下载物必需的部分。
 _SKIP_PREFIXES = ("test-", "parakeet", "bench", "command", "stream", "talk", "lsp", "quantize", "vad", "wchess")
 
@@ -168,6 +173,20 @@ def status(cfg: Config | None = None) -> dict[str, Any]:
         "simplify_chinese": bool(cfg.stt.simplify_chinese),
         "converter_available": converter_available(),
         "ready": bool(cfg.stt.enabled and binary.is_file() and model.is_file()),
+    }
+
+
+def download_plan(cfg: Config | None = None) -> dict[str, Any]:
+    """What ``prepare`` would still have to fetch, in bytes.
+
+    The composer says the number out loud before it spends the user's traffic,
+    so an unknown model tier reports ``None`` instead of a guessed figure.
+    """
+    cfg = cfg or current_config()
+    model = str(cfg.stt.model or "").strip().lower()
+    return {
+        "binary_bytes": 0 if binary_path(cfg).is_file() else _BINARY_DOWNLOAD_BYTES,
+        "model_bytes": 0 if model_path(cfg).is_file() else _MODEL_DOWNLOAD_BYTES.get(model),
     }
 
 
@@ -378,13 +397,22 @@ def _platform_asset() -> str:
     return _BINARY_ASSET["windows" if os.name == "nt" else "linux"]
 
 
-def _stream_to(client: httpx.Client, url: str, target: Path) -> Path:
+def _stream_to(
+    client: httpx.Client,
+    url: str,
+    target: Path,
+    on_progress: Callable[[int, int | None], None] | None = None,
+) -> Path:
     """Download into ``.part`` **incrementally**, appending as bytes arrive.
 
     This box reaches GitHub assets at ~20 KB/s, so minutes of progress must
     survive a dropped connection: buffering the response and writing it once
     would leave nothing on disk mid-download, and the `Range` request below
     would have no partial file to resume from.
+
+    ``on_progress(done_bytes, total_bytes)`` fires once per chunk so a browser
+    can show a real percentage; ``total_bytes`` is ``None`` when the server did
+    not send a usable Content-Length.
     """
     part = target.with_name(target.name + ".part")
     existing = part.stat().st_size if part.exists() else 0
@@ -397,9 +425,15 @@ def _stream_to(client: httpx.Client, url: str, target: Path) -> Path:
         appending = response.status_code == 206
         if existing and not appending:
             logger.info("stt download restarts from zero (server ignored the Range request)")
+        done = existing if appending else 0
+        length = response.headers.get("content-length")
+        total = done + int(length) if length and length.isdigit() else None
         with part.open("ab" if appending else "wb") as handle:
             for chunk in response.iter_bytes(chunk_size=256 * 1024):
                 handle.write(chunk)
+                done += len(chunk)
+                if on_progress is not None:
+                    on_progress(done, total)
     return part
 
 
@@ -411,7 +445,10 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def prepare_model(cfg: Config | None = None) -> dict[str, Any]:
+def prepare_model(
+    cfg: Config | None = None,
+    on_progress: Callable[[str, int, int | None], None] | None = None,
+) -> dict[str, Any]:
     cfg = cfg or current_config()
     target = model_path(cfg)
     if target.is_file() and target.stat().st_size > 0:
@@ -419,12 +456,23 @@ def prepare_model(cfg: Config | None = None) -> dict[str, Any]:
     target.parent.mkdir(parents=True, exist_ok=True)
     url = f"{cfg.stt.model_download_base_url}/{target.name}"
     with httpx.Client(follow_redirects=True) as client:
-        part = _stream_to(client, url, target)
+        part = _stream_to(client, url, target, _stage_progress(on_progress, "model"))
     part.replace(target)
     return {"ok": True, "downloaded": True, "path": str(target), "bytes": target.stat().st_size}
 
 
-def prepare_binary(cfg: Config | None = None) -> dict[str, Any]:
+def _stage_progress(
+    on_progress: Callable[[str, int, int | None], None] | None, stage: str
+) -> Callable[[int, int | None], None] | None:
+    if on_progress is None:
+        return None
+    return lambda done, total: on_progress(stage, done, total)
+
+
+def prepare_binary(
+    cfg: Config | None = None,
+    on_progress: Callable[[str, int, int | None], None] | None = None,
+) -> dict[str, Any]:
     """Unpack the pinned official build after verifying the archive digest --
     nothing here executes before that check passes."""
     cfg = cfg or current_config()
@@ -440,7 +488,7 @@ def prepare_binary(cfg: Config | None = None) -> dict[str, Any]:
     cli.parent.mkdir(parents=True, exist_ok=True)
     archive = cli.parent / asset
     with httpx.Client(follow_redirects=True) as client:
-        part = _stream_to(client, url, archive)
+        part = _stream_to(client, url, archive, _stage_progress(on_progress, "binary"))
     digest = _sha256(part)
     expected = str(cfg.stt.binary_sha256 or "").strip().lower()
     if expected and digest != expected:
