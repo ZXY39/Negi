@@ -173,7 +173,20 @@ def _runtime_session_is_running(runtime_manager, session_id: str) -> bool:
 
 async def _running_work_snapshot() -> dict[str, Any]:
     _assert_unlocked()
-    agent = get_agent()
+    try:
+        agent = get_agent()
+    except Exception as exc:
+        # 一个模型都没配的设备构造不出 agent（resolve_role_model_key 直接抛），
+        # 但那正意味着不可能有在跑的会话或任务。按空快照回答，否则退出、优雅重启
+        # 与「重启并更新」在这类设备上全部 500 —— 它们共用这一个端点。
+        logger.warning("running-work snapshot treated as empty: runtime unavailable ({})", exc)
+        return {
+            "has_running_work": False,
+            "running_sessions": [],
+            "running_tasks": [],
+            "summary_text": "当前没有进行中的对话或任务。",
+            "runtime_unavailable": str(exc),
+        }
     runtime_manager = get_runtime_manager(agent)
     session_manager = getattr(agent, "sessions", None)
     service = getattr(agent, "main_task_service", None)
