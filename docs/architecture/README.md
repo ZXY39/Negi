@@ -57,7 +57,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 本地会话列表拖动后的顺序被打回原样、或换浏览器顺序不一致 → `web-and-admin.md`「CEO Session List Interaction Contract」（手动顺序只存前端 localStorage）
 - 改了密码旧密码还能用、勾了自动解锁重启仍要输密码、或「锁定项目」后界面仍可读数 → `config-and-models.md`「Deployment Unlock Contract」（改密只换信封不换钥匙、解锁顺序 env→本地密钥文件→口令、锁定只清 web 进程内存主密钥）
 - 任务与会话数据不在代码检出目录里、首次初始化时选过别的盘、或重启后旧任务像空库一样找不到 → `operations-and-maintenance.md`「关键状态文件与目录」（安装根与数据根的划分、`G3KU_DATA_DIR`→指针→cwd 的解析顺序、指针丢失即回退 cwd 的形态）
-- 导出配置包报 `project_locked`、导入后旧登录密码解不开、导入的包被判成越界路径、或导入完成后 worker 仍走旧模型链 → `config-and-models.md`「Config Bundle Export And Import」（包带的是主密钥本身、master.key 与 auto-unlock.key 不进包、导入是整体替换且需重启）
+- 导出配置包报 `project_locked`、导入后旧登录密码解不开、导入的包被判成越界路径、新设备导入只报一个没有 detail 的 `HTTP 500`（该机还没走完首屏、`config.json` 不存在）、或导入完成后 worker 仍走旧模型链 → `config-and-models.md`「Config Bundle Export And Import」（包带的是主密钥本身、master.key 与 auto-unlock.key 不进包、导入是整体替换且需重启）
 - 保存模型密钥报 `secret overlay is undecryptable with the current master key; refusing to overwrite`、或所有 apikey 同时变空 → `config-and-models.md`「secret 的真实去向」（覆盖层被截成 0 字节时守卫会拒绝一切写入；先取证改名该文件再 锁定→解锁 解除，写入耐久性与残留缺口同段）
 - 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `runtime-overview.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）
 - 恢复后节点上下文突然只剩几条消息、`task_model_calls` 里 `request_seed_source` 出现 `fallback_seed_*`、帧 `messages_ref` 为空 → `runtime-overview.md`「任务侧」（帧写入的 messages_ref 保留规则）+ `context-and-cache-troubleshooting.md`「append-only 规则」
