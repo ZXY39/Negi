@@ -252,20 +252,44 @@ def test_group_duplicate_member_is_rejected(tmp_path: Path, monkeypatch) -> None
     assert 'Duplicate member' in response.text
 
 
-def test_group_max_retry_rounds_is_bounded(tmp_path: Path, monkeypatch) -> None:
+def test_group_max_retry_rounds_rejects_negative_and_keeps_large(tmp_path: Path, monkeypatch) -> None:
+    _write_config(tmp_path, roles=_LEGACY_ROLES)
+    monkeypatch.chdir(tmp_path)
+
+    client = _client()
+    rejected = client.put(
+        '/api/models/roles/execution',
+        json={
+            'route_entries': [{'type': 'load_balance', 'groupKey': 'g_rounds'}],
+            'load_balance_groups': {'g_rounds': {'modelKeys': ['m_a'], 'maxRetryRounds': -1}},
+        },
+    )
+    assert rejected.status_code == 400
+    assert 'maxRetryRounds' in rejected.text
+
+    accepted = client.put(
+        '/api/models/roles/execution',
+        json={
+            'route_entries': [{'type': 'load_balance', 'groupKey': 'g_rounds'}],
+            'load_balance_groups': {'g_rounds': {'modelKeys': ['m_a'], 'maxRetryRounds': 9999}},
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_group_max_retry_rounds_zero_is_accepted(tmp_path: Path, monkeypatch) -> None:
     _write_config(tmp_path, roles=_LEGACY_ROLES)
     monkeypatch.chdir(tmp_path)
 
     response = _client().put(
         '/api/models/roles/execution',
         json={
-            'route_entries': [{'type': 'load_balance', 'groupKey': 'g_rounds'}],
-            'load_balance_groups': {'g_rounds': {'modelKeys': ['m_a'], 'maxRetryRounds': 4}},
+            'route_entries': [{'type': 'load_balance', 'groupKey': 'g_zero'}],
+            'load_balance_groups': {'g_zero': {'modelKeys': ['m_a', 'm_b'], 'maxRetryRounds': 0}},
         },
     )
 
-    assert response.status_code == 400
-    assert 'maxRetryRounds' in response.text
+    assert response.status_code == 200, response.text
 
 
 def test_ceo_chain_rejects_group_reference(tmp_path: Path, monkeypatch) -> None:

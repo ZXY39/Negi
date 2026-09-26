@@ -12,7 +12,6 @@ from g3ku.config.loader import (
     _runtime_config_payload,
 )
 from g3ku.config.schema import (
-    GROUP_MAX_RETRY_ROUNDS_LIMIT,
     Config,
     ModelLoadBalanceGroup,
     ModelRouteEntry,
@@ -101,10 +100,12 @@ def test_group_defaults_and_bounds_on_max_retry_rounds() -> None:
     assert group.max_retry_rounds == 1
     assert group.enabled is True
 
+    # 不设上限：大数是意图，只有负数是配置错误。
+    assert ModelLoadBalanceGroup.model_validate({"modelKeys": ["m_a"], "maxRetryRounds": 9999}).max_retry_rounds == 9999
+    assert ModelLoadBalanceGroup.model_validate({"modelKeys": ["m_a"], "maxRetryRounds": 0}).max_retry_rounds == 0
+
     with pytest.raises(ValueError, match="maxRetryRounds"):
-        ModelLoadBalanceGroup.model_validate({"modelKeys": ["m_a"], "maxRetryRounds": GROUP_MAX_RETRY_ROUNDS_LIMIT + 1})
-    with pytest.raises(ValueError, match="maxRetryRounds"):
-        ModelLoadBalanceGroup.model_validate({"modelKeys": ["m_a"], "maxRetryRounds": 0})
+        ModelLoadBalanceGroup.model_validate({"modelKeys": ["m_a"], "maxRetryRounds": -1})
 
 
 def test_group_duplicate_member_is_rejected_not_deduped() -> None:

@@ -1718,11 +1718,15 @@ function setCeoComposerUsageEstimate(sessionId, payload) {
     return normalized;
 }
 
-function ceoModelDisplayTitle(item) {
+function modelDisplayTitle(item) {
     if (!item) return "";
     return String(item.name || "").trim()
         || String(item.key || "").trim()
         || String(item.provider_model || "").trim();
+}
+
+function ceoModelDisplayTitle(item) {
+    return modelDisplayTitle(item);
 }
 
 function ceoModelCatalogItem(modelKey) {
@@ -10725,8 +10729,7 @@ function modelScopeContains(scope, ref, source = "active") {
 }
 
 const GROUP_REF_PREFIX = "group:";
-const GROUP_MAX_RETRY_ROUNDS_LIMIT = 3;
-// 新建组的默认每成员重试次数：给到上限，让组内第一个成员有机会自己扛过瞬时失败。
+// 新建组弹窗里的默认值；配置侧不填时后端按 1 处理。上限刻意不设。
 const GROUP_DEFAULT_MAX_RETRY_ROUNDS = 3;
 // 与后端 LOAD_BALANCE_ROUTE_SCOPES 同步：只有这两条车道能引用组。
 const LOAD_BALANCE_ROUTE_SCOPES = ["execution", "inspection"];
@@ -10746,8 +10749,8 @@ function cloneLoadBalanceGroups(groups) {
             ? (payload.model_keys || payload.modelKeys).map((item) => String(item || "").trim()).filter(Boolean)
             : [];
         const rawRounds = payload.max_retry_rounds ?? payload.maxRetryRounds;
-        const rounds = Number.isFinite(Number(rawRounds)) && Number(rawRounds) >= 1
-            ? Math.min(GROUP_MAX_RETRY_ROUNDS_LIMIT, Math.trunc(Number(rawRounds)))
+        const rounds = Number.isFinite(Number(rawRounds)) && Number(rawRounds) >= 0
+            ? Math.trunc(Number(rawRounds))
             : 1;
         next[groupKey] = {
             enabled: payload.enabled !== false,
@@ -11143,8 +11146,8 @@ function confirmLoadBalanceGroupDialog() {
         return rejectLoadBalanceGroupDialog(`组名不能与模型配置同名：${name}`);
     }
     const rounds = Number(dialog.maxRetryRounds);
-    if (!Number.isInteger(rounds) || rounds < 1 || rounds > GROUP_MAX_RETRY_ROUNDS_LIMIT) {
-        return rejectLoadBalanceGroupDialog(`每成员重试次数必须是 1..${GROUP_MAX_RETRY_ROUNDS_LIMIT} 的整数`);
+    if (!Number.isInteger(rounds) || rounds < 0) {
+        return rejectLoadBalanceGroupDialog("每成员重试次数必须是不小于 0 的整数");
     }
     // 建组就是模型链编辑会话的一部分：不在会话里先开一份，草稿才有地方落。
     if (!S.modelCatalog.roleEditing) startModelRoleEditing();
@@ -11195,11 +11198,14 @@ function renderModelGroupDialog() {
     }
     if (U.modelGroupTitle) U.modelGroupTitle.textContent = dialog.editingKey ? "编辑负载均衡组" : "新建负载均衡组";
     const selected = new Set(dialog.modelKeys);
-    const memberOptions = loadBalanceGroupCatalogOptions().map((item) => `
+    const memberOptions = loadBalanceGroupCatalogOptions().map((item) => {
+        const title = modelDisplayTitle(item);
+        return `
         <label class="model-group-member-option${selected.has(item.key) ? " is-selected" : ""}">
             <input type="checkbox" data-group-dialog-member="${esc(item.key)}" ${selected.has(item.key) ? "checked" : ""}>
-            <span>${esc(item.key)}</span>
-        </label>`).join("");
+            <span title="${esc(item.key)}">${esc(title)}</span>
+        </label>`;
+    }).join("");
     body.innerHTML = `
         <label class="resource-field">
             <span class="resource-field-label">组名</span>
@@ -11207,7 +11213,7 @@ function renderModelGroupDialog() {
         </label>
         <label class="resource-field">
             <span class="resource-field-label">每成员重试次数</span>
-            <input class="resource-search spinless-number-input" type="number" min="1" max="${GROUP_MAX_RETRY_ROUNDS_LIMIT}" step="1" inputmode="numeric" value="${esc(String(dialog.maxRetryRounds))}" data-group-dialog-rounds>
+            <input class="resource-search spinless-number-input" type="number" min="0" step="1" inputmode="numeric" value="${esc(String(dialog.maxRetryRounds))}" data-group-dialog-rounds>
         </label>
         <div class="resource-field">
             <span class="resource-field-label" data-group-dialog-count>成员模型（${selected.size}）</span>
@@ -11245,7 +11251,10 @@ function renderModelGroupColumn() {
         const members = group.model_keys || [];
         const usedIn = usage[key] || 0;
         const memberChips = members.length
-            ? members.map((item) => `<span class="policy-chip neutral">${esc(item)}</span>`).join("")
+            ? members.map((item) => {
+                const model = modelRefItem(item);
+                return `<span class="policy-chip neutral" title="${esc(item)}">${esc(modelDisplayTitle(model) || item)}</span>`;
+            }).join("")
             : '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>';
         // 整张卡都是打开配置的点击区，只有「删除」例外。
         return `

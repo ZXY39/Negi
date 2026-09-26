@@ -100,7 +100,7 @@ function loadApiClient() {
 function catalogItems() {
     // provider_model 各不相同：目录按签名去重，同 provider+同模型会被并成一条别名。
     return [
-        { key: "m_a", enabled: true, provider_model: "openai:model-a" },
+        { key: "m_a", name: "深度V4 快档", enabled: true, provider_model: "openai:model-a" },
         { key: "m_b", enabled: true, provider_model: "openai:model-b" },
         { key: "m_emergency", enabled: true, provider_model: "openai:model-c" },
     ];
@@ -144,8 +144,8 @@ test("route_entries 被读成链，组以 group: 记号占位", () => {
     sameJson(app.S.modelCatalog.roles.execution, ["group:g_shared", "m_emergency"]);
     assert.equal(app.chainUsesGroup(app.S.modelCatalog.roles.execution), true);
     assert.equal(app.S.modelCatalog.loadBalanceGroups.g_shared.max_retry_rounds, 2);
-    // 越界的组预算在读入时就按上限归一，避免保存时被后端拒绝却看不出来。
-    assert.equal(app.S.modelCatalog.loadBalanceGroups.g_unused.max_retry_rounds, 3);
+    // 组预算不再夹取：大数是用户意图，只有负数会被后端拒。
+    assert.equal(app.S.modelCatalog.loadBalanceGroups.g_unused.max_retry_rounds, 9);
     // 没有组的链仍是纯模型 key 列表，旧行为不变。
     sameJson(app.S.modelCatalog.roles.inspection, ["m_b"]);
 });
@@ -278,8 +278,9 @@ test("组列列出所有组并标出未加入链的那份", () => {
     // 引用状态逐行判：g_shared 在 execution 链上，g_unused 没有。
     assert.match(sharedRow, /已在 1 条链/);
     assert.match(unusedRow, /未加入链/);
-    // 成员构成要能直接看见，不用先点开弹窗；计数文字按裁定不显示。
-    assert.match(sharedRow, />m_a</);
+    // 成员构成要能直接看见，不用先点开弹窗；显示的是备注，key 挂在 title 上。
+    assert.match(sharedRow, /title="m_a">深度V4 快档</);
+    assert.match(sharedRow, /title="m_b">m_b</);
     assert.doesNotMatch(sharedRow, /个成员|每成员 \d+ 轮/);
     // 整张卡是点击区（rows 是按 <article 切开的，这里只匹配属性）。
     assert.match(sharedRow, /data-group-edit="g_shared"/);
@@ -294,12 +295,16 @@ test("新建组先弹窗，点确定才落草稿并自动进入链编辑会话",
     app.openLoadBalanceGroupDialog();
     const body = elements["model-group-dialog-body"].innerHTML;
     assert.match(body, /data-group-dialog-name/);
-    // 重试次数是自填数字，默认给到上限，不是 1/2/3 预设下拉。
+    // 重试次数是自填数字，默认 3，且不带 max（不设上限）。
     const roundsTag = (body.match(/<input[^>]*data-group-dialog-rounds[^>]*>/) || [null])[0];
     assert.ok(roundsTag, '重试次数必须是自填输入框');
     assert.match(roundsTag, /type="number"/);
     assert.match(roundsTag, /value="3"/);
+    assert.doesNotMatch(roundsTag, /max=/);
     assert.doesNotMatch(body, /<select[^>]*data-group-dialog-rounds/);
+    // 成员清单显示用户写的备注而不是 key，key 挂在 title 上供 hover 辨认。
+    assert.match(body, /<span title="m_a">深度V4 快档<\/span>/);
+    assert.match(body, /<span title="m_b">m_b<\/span>/);
     // 光打开弹窗不碰数据：既没进编辑会话，也没有新组草稿。
     assert.equal(app.S.modelCatalog.roleEditing, false);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_stage, undefined);
@@ -341,19 +346,19 @@ test("弹窗里空成员与空组名都被挡下，不落草稿", () => {
     assert.match(elements["model-group-dialog-body"].innerHTML, /组名不能为空/);
 });
 
-test("重试次数越界时拒绝保存而不是静默夹取", () => {
+test("重试次数只挡负数，大数按用户意图保留", () => {
     const { app } = loadModelPage(plainChainPayload());
 
     app.openLoadBalanceGroupDialog();
     app.setLoadBalanceGroupDialogField("name", "g_rounds");
     app.toggleLoadBalanceGroupDialogMember("m_a", true);
-    app.setLoadBalanceGroupDialogField("rounds", "9");
+    app.setLoadBalanceGroupDialogField("rounds", "-1");
     assert.equal(app.confirmLoadBalanceGroupDialog(), false);
-    assert.match(app.S.modelCatalog.groupDialog.error, /必须是 1\.\.3 的整数/);
+    assert.match(app.S.modelCatalog.groupDialog.error, /不小于 0 的整数/);
 
-    app.setLoadBalanceGroupDialogField("rounds", "3");
+    app.setLoadBalanceGroupDialogField("rounds", "9999");
     assert.equal(app.confirmLoadBalanceGroupDialog(), true);
-    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_rounds.max_retry_rounds, 3);
+    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_rounds.max_retry_rounds, 9999);
 });
 
 test("弹窗改组名会把链上的 group 记号一起改掉", () => {

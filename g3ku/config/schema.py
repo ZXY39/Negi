@@ -42,11 +42,10 @@ DEFAULT_NODE_DISPATCH_CONCURRENCY = {
     "inspection": 4,
 }
 
-# load-balance group 的组内预算边界（份文档 4.4/15.2）：语义是「每个成员允许的完整
-# key pass 数」，默认 1。上限刻意很小——成员 catalog 的 retry_count 可达 9999999，
-# 若被组继承，组内平级 fallback 永远不会发生。超上限是配置错误而不是需要夹断的输入：
-# 夹断会把写错的意图静默改成另一套行为。
-GROUP_MAX_RETRY_ROUNDS_LIMIT = 3
+# load-balance group 的组内预算（份文档 4.4/15.2）：语义是「每个成员允许的完整
+# key pass 数」，默认 1，允许任意非负整数（0 与 1 等价：一轮都不重试就让位）。
+# 它刻意不继承成员 catalog 的 retry_count——那边可以是 9999999，继承进来组内平级
+# fallback 就永远不会发生。负数是配置错误，直接报错而不是夹断。
 GROUP_DEFAULT_MAX_RETRY_ROUNDS = 1
 MODEL_ROUTE_ENTRY_TYPES = ("model", "load_balance")
 # 第一阶段只允许这两条车道使用负载均衡组。
@@ -425,10 +424,10 @@ class ModelLoadBalanceGroup(Base):
             rounds = int(value)
         except (TypeError, ValueError) as exc:
             raise ValueError("models.loadBalanceGroups.*.maxRetryRounds must be an integer") from exc
-        if rounds < 1 or rounds > GROUP_MAX_RETRY_ROUNDS_LIMIT:
+        if rounds < 0:
             raise ValueError(
-                "models.loadBalanceGroups.*.maxRetryRounds must be between 1 and "
-                f"{GROUP_MAX_RETRY_ROUNDS_LIMIT}; member catalog retryCount is not inherited by group routes"
+                "models.loadBalanceGroups.*.maxRetryRounds must be a non-negative integer; "
+                "member catalog retryCount is not inherited by group routes"
             )
         return rounds
 

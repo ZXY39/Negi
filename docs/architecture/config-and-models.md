@@ -41,7 +41,7 @@
 - `roles`
   把模型路由到 `ceo / execution / inspection / memory`。每一项要么是一个绑定 key（旧写法，等价于 `{"type":"model"}`），要么是一个 route entry：`{"type":"model","modelKey":...}` 或 `{"type":"load_balance","groupKey":...}`
 - `loadBalanceGroups`
-  可选节。组名 → `{enabled, maxRetryRounds, modelKeys}`：组内成员平级，运行时按综合负载选一个并把节点粘滞绑上去；`maxRetryRounds` 是该组内每个成员的完整 key pass 预算，取值 `1..3`，超范围是配置错误而不是需要夹断的输入
+  可选节。组名 → `{enabled, maxRetryRounds, modelKeys}`：组内成员平级，运行时按综合负载选一个并把节点粘滞绑上去；`maxRetryRounds` 是该组内每个成员的完整 key pass 预算，非负整数（不填按 1，0 与 1 等价），负数是配置错误而不是需要夹断的输入
 
 `catalog[]` 条目另有 `quotaPoolKey`：operator 显式声明「这几条 binding 共享同一个上游配额账户」。不填时运行时只按解析到的 endpoint + API key 指纹自动合并；不按 provider 名称猜测共享。
 
@@ -379,7 +379,7 @@ If a provider reply looks truncated (for example a response ending at exactly th
 - 请求体形状错误只按结构化 HTTP 状态判定（400/422），无文本关键字兜底；status 不可得的错误一律走正常轮换/降级判定。
 - 换 key（轮换）只在错误**未命中 `retry_on`、且非请求体形状错误、且非内部运行时错误**时才发生，且为单趟：每个 key 各试一次即前进到链上下一个模型。**配置脚枪**：把 `401`/`403`/`invalid api key` 之类配进 `retry_on`，会让坏 key 被当成"可重试"从而只重试不换 key——坏 key 应靠"未命中 → 换 key"自愈，不要配进 `retry_on`。
 - `retry_count`（配置页「重试次数」）是该模型可重试错误的最大退避重试轮数：0/未设置用内置默认 `DEFAULT_RETRYABLE_MODEL_ROUNDS=10`；非可重试错误的轮换恒为单趟、不受该值影响。同一个 key 配置在多个模型上互不影响——轮预算按（模型, key）槽位独立计，总请求上限 = Σ(每模型轮预算 × 该模型 key 数)。
-- 负载均衡组内的成员**不继承** `retry_count`：组用 `models.loadBalanceGroups.<key>.maxRetryRounds`（默认 1，允许 1..3）。原因是一个配了 `9999` 或 `9999999` 的成员会在组内永远不让位，组内平级 fallback 随之失效。`retry_count=0` 在这两条车道上含义不同，所以组预算必须写显式值，不能靠「省略字段」落到 10 轮默认。
+- 负载均衡组内的成员**不继承** `retry_count`：组用 `models.loadBalanceGroups.<key>.maxRetryRounds`（配置里不填按 1；允许任意非负整数，0 与 1 等价——一轮都不重复就让位；只有负数报错）。原因是一个配了 `9999` 或 `9999999` 的成员会在组内永远不让位，组内平级 fallback 随之失效。`retry_count=0` 在这两条车道上含义不同，所以组预算必须写显式值，不能靠「省略字段」落到 10 轮默认。
 - 管理面按**单 key 约束**引导配置：`org_graph_llm.js` 创建配置与保存连接信息时拒绝多 key 输入（逗号/换行分隔即报错），提示以「多配置组模型链」实现容量与容灾回退。运行时多 key 轮换代码路径保留以兼容历史存量配置；新配置从配置面即被限定为单 key。
 
 ## Frontdoor Context Window Contract
