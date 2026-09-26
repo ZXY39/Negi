@@ -316,6 +316,75 @@ async def test_group_slot_without_candidate_skips_to_next_route(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_retry_status_reports_route_entries_and_attempts(monkeypatch) -> None:
+    """重试 toast 的载荷必须给出真正的 fallback 链、实际试过的模型与当前组。
+
+    用「同模型换 key」触发一次 retrying 事件：跨模型前进按既有策略只计数不发 toast。
+    """
+    group = _group("m_a", "m_b")
+    plan = ModelRoutePlan(routes=[_group_route(0, group)], config_revision=1)
+    # 控制器要放行 m_a 的两把 key，否则换 key 会被判成「该 key 已禁用」。
+    turn_controller, controller, _balancer, lease = _wiring(
+        group,
+        plan=plan,
+        limits={
+            "m_a": {"key_indexes": [0, 1], "per_key_limits": {0: None, 1: None}},
+            "m_b": {"key_indexes": [0], "per_key_limits": {0: None}},
+        },
+    )
+    calls: list[str] = []
+    events: list[dict] = []
+
+    class _RotateAfterAuthError:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def chat(self, **kwargs):
+            _ = kwargs
+            calls.append("m_a")
+            self.attempts += 1
+            if self.attempts == 1:
+                raise _StatusError("HTTP 401: invalid api key", 401)
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    rotating = _RotateAfterAuthError()
+    _patch(
+        monkeypatch,
+        {
+            "m_a": _target("m_a", rotating, api_key_count=2),
+            "m_b": _target("m_b", _OkProvider("m_b", calls)),
+        },
+    )
+
+    async def _record(status: dict) -> None:
+        events.append(dict(status))
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=list(plan.candidate_model_keys),
+        model_routes=plan,
+        node_turn_lease=lease,
+        node_turn_controller=turn_controller,
+        model_concurrency_controller=controller,
+        on_model_retry_status=_record,
+    )
+
+    assert response.content == "ok"
+    assert calls == ["m_a", "m_a"]
+    retrying = [event for event in events if event.get("state") == "retrying"]
+    assert len(retrying) == 1
+    payload = retrying[0]
+    assert payload["route_entries"] == [
+        {"type": "load_balance", "group_key": "g1", "model_keys": ["m_a", "m_b"], "max_retry_rounds": 1}
+    ]
+    assert payload["selected_group_key"] == "g1"
+    assert payload["attempted_model_keys"] == ["m_a"]
+    # 旧字段保持扁平候选列表，旧 UI 不因此坏掉。
+    assert payload["model_refs"] == ["m_a", "m_b"]
+
+
+@pytest.mark.asyncio
 async def test_held_permit_key_is_rotated_to_front_of_key_pass(monkeypatch) -> None:
     """准入选中第二把 key 时，第一次 attempt 必须从那把 key 开始，否则会二次 acquire。"""
     group = _group("m_a")

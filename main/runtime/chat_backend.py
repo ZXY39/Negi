@@ -46,7 +46,11 @@ from g3ku.runtime.stage_prompt_compaction import (
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
-from main.runtime.model_route import LEASE_OUTCOME_GROUP_EXHAUSTED
+from main.runtime.model_route import (
+    LEASE_OUTCOME_GROUP_EXHAUSTED,
+    MODEL_ROUTE_KIND_LOAD_BALANCE,
+    MODEL_ROUTE_KIND_MODEL,
+)
 from main.runtime.node_turn_controller import NodeTurnLease
 from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 
@@ -735,6 +739,46 @@ def _build_route_slots(model_routes: Any, *, node_turn_refs: list[str]) -> list[
     return slots
 
 
+def _route_entries_status_payload(slots: list[dict[str, Any]], refs: list[str]) -> list[dict[str, Any]]:
+    """retry status 里的「用户配置的 fallback 链」视图。"""
+    if not slots:
+        return [{'type': MODEL_ROUTE_KIND_MODEL, 'model_key': str(ref)} for ref in list(refs or [])]
+    payload: list[dict[str, Any]] = []
+    for slot in slots:
+        if slot.get('kind') == MODEL_ROUTE_KIND_LOAD_BALANCE:
+            payload.append(
+                {
+                    'type': MODEL_ROUTE_KIND_LOAD_BALANCE,
+                    'group_key': str(slot.get('group_key') or ''),
+                    'model_keys': [str(item) for item in list(slot.get('members') or [])],
+                    'max_retry_rounds': int(slot.get('max_retry_rounds') or 1),
+                }
+            )
+            continue
+        payload.append({'type': MODEL_ROUTE_KIND_MODEL, 'model_key': str(slot.get('model_key') or '')})
+    return payload
+
+
+def _route_candidate_status_refs(slots: list[dict[str, Any]], refs: list[str]) -> list[str]:
+    """retry status 里 `model_refs` 的兼容口径：候选展开列表，而不是「一槽一位」。
+
+    含组时内部 `refs` 每个组只占一个槽位（槽位内容随绑定变化），旧 UI 读到的仍是这条
+    链会用到的全部模型，不会因为组而被压缩成一个。
+    """
+    if not slots:
+        return list(refs or [])
+    keys: list[str] = []
+    seen: set[str] = set()
+    for slot in slots:
+        candidates = list(slot.get('members') or []) if slot.get('kind') == MODEL_ROUTE_KIND_LOAD_BALANCE else [slot.get('model_key')]
+        for candidate in candidates:
+            key = str(candidate or '').strip()
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+    return keys
+
+
 def _route_slot_at(slots: list[dict[str, Any]], index: int) -> dict[str, Any] | None:
     if not slots:
         return None
@@ -906,6 +950,9 @@ class ConfigChatBackend:
         # route plan 里出现负载均衡组时，模型序列由 balancer 的绑定驱动；纯 direct 链
         # 沿用现有 refs 走位，行为与改造前一致。
         route_slots = _build_route_slots(model_routes, node_turn_refs=refs)
+        # 重试状态里 `model_refs` 继续发扁平候选（兼容旧 UI），同时给出真正的 fallback
+        # 链、本次实际试过的模型和当前选中的组，避免把候选数组当成 fallback 顺序。
+        route_entries_payload = _route_entries_status_payload(route_slots, refs)
         explicit_attempt_timeout = single_request_timeout_seconds is not None
         request_attempt_timeout_seconds = normalize_request_timeout_seconds(
             single_request_timeout_seconds
@@ -1149,7 +1196,12 @@ class ConfigChatBackend:
                                             "error_message": _model_retry_status_error_text(
                                                 str(model_last_failure_reason or "")
                                             ),
-                                            "model_refs": list(refs),
+                                            "model_refs": _route_candidate_status_refs(route_slots, refs),
+                                            "route_entries": list(route_entries_payload),
+                                            "attempted_model_keys": sorted(tried_model_refs),
+                                            "selected_group_key": str(
+                                                (route_slot or {}).get('group_key') or ''
+                                            ),
                                             "delay_seconds": 0.0,
                                             "last_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                                             "next_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1303,7 +1355,10 @@ class ConfigChatBackend:
                                 "retry_count": provider_request_count,
                                 "chain_round": rounds_used,
                                 "error_message": _model_retry_status_error_text(str(model_last_failure_reason or "")),
-                                "model_refs": list(refs),
+                                "model_refs": _route_candidate_status_refs(route_slots, refs),
+                                "route_entries": list(route_entries_payload),
+                                "attempted_model_keys": sorted(tried_model_refs),
+                                "selected_group_key": str((route_slot or {}).get("group_key") or ''),
                                 "delay_seconds": float(delay_seconds or 0.0),
                                 # 绝对时刻（本地带偏移），供前端 toast 显示"最新重试时间/下次重试时间"。
                                 "last_retry_at": datetime.now().astimezone().isoformat(timespec="seconds"),
