@@ -350,9 +350,10 @@ def test_extract_archive_only_materializes_kept_members(tmp_path):
 
 
 class _FakeStreamResponse:
-    def __init__(self, payload: bytes, status_code: int = 200):
+    def __init__(self, payload: bytes, status_code: int = 200, headers: dict | None = None):
         self._payload = payload
         self.status_code = status_code
+        self.headers = dict(headers or {})
 
     def raise_for_status(self):
         return None
@@ -371,6 +372,7 @@ class _FakeStreamResponse:
 class _FakeClient:
     """Records the last request so the Range-resume behaviour is observable."""
     last_headers: dict[str, str] = {}
+    response_headers: dict[str, str] = {}
     payload = b""
     status = 200
 
@@ -385,7 +387,9 @@ class _FakeClient:
 
     def stream(self, method, url, headers=None, timeout=None):
         type(self).last_headers = dict(headers or {})
-        return _FakeStreamResponse(type(self).payload, type(self).status)
+        return _FakeStreamResponse(
+            type(self).payload, type(self).status, getattr(type(self), "response_headers", None)
+        )
 
 
 def test_prepare_binary_refuses_digest_mismatch(tmp_path, monkeypatch):
@@ -428,6 +432,51 @@ def test_partial_download_resumes_with_a_range_request(tmp_path, monkeypatch):
     assert _FakeClient.last_headers.get("Range") == "bytes=4-"
     assert result["downloaded"] is True
     assert not archive.with_name(archive.name + ".part").exists()
+
+
+def test_download_progress_is_reported_per_chunk(tmp_path):
+    """网页要能写出"下了多少"，所以每个数据块都得回一次话；Content-Length 缺失时
+    total 是 None，界面退化成只报字节数而不是假装 0%。"""
+    seen = []
+    client = _FakeClient()
+    _FakeClient.payload = b"abcde"
+    _FakeClient.status = 200
+    _FakeClient.response_headers = {"content-length": "5"}
+
+    result = engine._stream_to(
+        client, "https://example.test/thing", tmp_path / "thing.bin",
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+
+    assert result.read_bytes() == b"abcde"
+    assert seen[-1] == (5, 5)
+
+    _FakeClient.response_headers = {}
+    seen.clear()
+    engine._stream_to(
+        client, "https://example.test/thing2", tmp_path / "thing2.bin",
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+    assert seen[-1] == (5, None)
+
+
+def test_download_plan_says_the_measured_sizes(tmp_path):
+    cfg = make_cfg(tmp_path, model="base")
+    plan = engine.download_plan(cfg)
+    assert plan["binary_bytes"] == engine._BINARY_DOWNLOAD_BYTES
+    assert plan["model_bytes"] == engine._MODEL_DOWNLOAD_BYTES["base"]
+    assert plan["model_bytes"] == 147951465, "与本机已下载的 ggml-base.bin 逐字节相符"
+
+    target = engine.model_path(cfg)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"x")
+    assert engine.download_plan(cfg)["model_bytes"] == 0
+
+
+def test_stt_is_on_by_default():
+    """新设备点麦克风应该走"下载"而不是"去改配置"：能力开关默认开，
+    那 157 MB 的下载才是那道显式的门。"""
+    assert Config().stt.enabled is True
 
 
 def test_status_reports_readiness_across_all_three_gates(tmp_path):
