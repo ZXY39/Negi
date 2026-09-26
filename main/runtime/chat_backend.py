@@ -1395,6 +1395,11 @@ class ConfigChatBackend:
                     if node_turn_controller is not None:
                         # 组整体耗尽：归还组侧 permit 与 reserved，再按链向后前进，
                         # 不允许一边占着组成员 permit 一边跑 direct 模型。
+                        logger.warning(
+                            "Model load-balance group exhausted: group={} tried_model_keys={} -> next route entry",
+                            str(route_slot.get('group_key') or ''),
+                            ','.join(sorted(tried_model_refs)) or '-',
+                        )
                         node_turn_controller.release_route_lease(
                             node_turn_lease,
                             outcome=LEASE_OUTCOME_GROUP_EXHAUSTED,

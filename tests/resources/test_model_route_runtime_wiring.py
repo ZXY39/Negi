@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -179,3 +180,54 @@ def test_quota_bucket_key_distinguishes_keys_on_same_endpoint() -> None:
     two = quota_bucket_key(endpoint='https://gw.example/v1', api_key='sk-2')
     assert one != two
     assert quota_bucket_key(endpoint='', api_key='') == ''
+
+
+def test_heartbeat_snapshot_reports_member_load_without_leaking_bucket_identity() -> None:
+    from main.runtime.model_load_balancer import ModelLoadBalancer
+
+    cfg = Config.model_validate(_config_payload())
+    plan = build_model_route_plan(cfg, 'execution')
+    permits = SimpleNamespace(
+        acquire_least_loaded=lambda *, model_ref: None,
+        release=lambda permit: None,
+        model_state=lambda model_ref: {'running': {0: 3}, 'waiting': {0: 1}, 'key_count': 1},
+        effective_capacity=lambda model_ref: None,
+    )
+    balancer = ModelLoadBalancer(
+        permit_source=permits,
+        resolve_quota_buckets=lambda model_ref: ['key:shared'],
+    )
+    balancer.configure(
+        groups={route.group_key: route.group for route in plan.routes if route.is_load_balance},
+        config_revision=9,
+    )
+
+    service = SimpleNamespace(model_load_balancer=balancer)
+    snapshot = MainRuntimeService._model_route_snapshot(service)
+
+    assert snapshot['model_route_config_revision'] == 9
+    group = snapshot['model_route_groups'][0]
+    assert group['group_key'] == 'g_shared'
+    assert group['max_retry_rounds'] == 2
+    # 同桶成员被合并计数，不虚增容量。
+    assert group['quota_bucket_count'] == 1
+    assert group['shared_bucket_member_count'] == 1
+    assert group['members'][0]['running'] == 3
+    assert group['members'][0]['waiting'] == 1
+    # 没配 per-key 上限时容量报 None（"无限"），而不是伪装成 1 参与打分。
+    assert group['members'][0]['local_capacity'] is None
+    rendered = json.dumps(snapshot, ensure_ascii=False)
+    # 载荷里不得出现任何桶标识。
+    assert 'key:shared' not in rendered
+
+
+def test_cli_route_description_shows_groups_as_peers() -> None:
+    from g3ku.cli.commands import _describe_model_route
+
+    cfg = Config.model_validate(_config_payload())
+
+    described = _describe_model_route(cfg, 'execution')
+
+    assert described == 'lb:g_shared(m_a|m_b)[rounds=2] → model:m_emergency'
+    # 纯 direct 链仍然按链序展示，不出现 lb 段。
+    assert _describe_model_route(cfg, 'ceo') == 'model:m_x'

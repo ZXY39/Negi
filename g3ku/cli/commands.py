@@ -752,6 +752,24 @@ def cron_run(
 # ============================================================================
 
 
+def _describe_model_route(config, scope: str) -> str:
+    """按 route 语义打印一条链：组显示成平级候选，不把链首说成实际执行模型。"""
+    entries = list(config.get_role_model_routes(scope) or [])
+    if not entries:
+        return "(未配置)"
+    parts: list[str] = []
+    for entry in entries:
+        if str(getattr(entry, "type", "model")) == "load_balance":
+            group = config.get_load_balance_group(getattr(entry, "group_key", ""))
+            members = "|".join(str(key) for key in list(getattr(group, "model_keys", []) or [])) if group else ""
+            rounds = int(getattr(group, "max_retry_rounds", 1) or 1) if group else 1
+            disabled = "" if (group is not None and group.enabled) else " disabled"
+            parts.append(f"lb:{getattr(entry, 'group_key', '')}({members})[rounds={rounds}{disabled}]")
+            continue
+        parts.append(f"model:{getattr(entry, 'model_key', '')}")
+    return " → ".join(parts)
+
+
 def _print_release_status() -> None:
     """Report the local version against the newest release tag. Silent when the
     remote cannot be read, so an offline device gets no false 'up to date'."""
@@ -790,8 +808,8 @@ def status():
         from g3ku.providers.registry import PROVIDERS
 
         console.print(f"主Agent Model: {config.resolve_role_model_key('ceo')}")
-        console.print(f"Execution Model: {config.resolve_role_model_key('execution')}")
-        console.print(f"Inspection Model: {config.resolve_role_model_key('inspection')}")
+        console.print(f"Execution Route: {_describe_model_route(config, 'execution')}")
+        console.print(f"Inspection Route: {_describe_model_route(config, 'inspection')}")
 
         mem_cfg = _load_memory_runtime_settings(config)
         if mem_cfg is None:

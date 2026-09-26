@@ -1270,6 +1270,24 @@ async def list_models():
     }
 
 
+@router.get('/models/load-balance/status')
+async def get_model_load_balance_status():
+    """负载均衡运行态：读 worker 心跳里带上来的快照（balancer 活在 worker 进程内）。
+
+    只输出计数与桶序号；endpoint/密钥指纹不外泄，`unresolved_bucket_count` 非 0 表示
+    该 worker 解析不到密钥材料（未解锁），配额分布未知。
+    """
+    service = _service()
+    payload = service.worker_status_payload()
+    return {
+        'ok': True,
+        'worker_online': bool(payload.get('worker_online')),
+        'config_revision': int(payload.get('model_route_config_revision') or 0),
+        'node_binding_count': int(payload.get('model_route_binding_count') or 0),
+        'groups': list(payload.get('model_route_groups') or []),
+    }
+
+
 @router.post('/models')
 async def create_model(payload: dict = Body(...)):
     manager = ModelManager.load()

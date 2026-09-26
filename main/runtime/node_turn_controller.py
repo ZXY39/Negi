@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable
 
+from loguru import logger
+
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
 from main.runtime.model_load_balancer import ModelLoadBalancer
 from main.runtime.model_route import (
@@ -203,6 +205,14 @@ class NodeTurnController:
             self._balancer.release(route_lease, outcome=outcome, error=error)
         lease.route_lease = None
         lease.initial_model_permit = None
+        logger.info(
+            "Model route lease released: group={} selected_model_key={} outcome={} node_id={} error={}",
+            route_lease.group_key,
+            route_lease.model_key,
+            str(outcome or ''),
+            lease.node_id,
+            str(error or '')[:200],
+        )
 
     def rebind_turn(
         self,
@@ -233,6 +243,7 @@ class NodeTurnController:
             excluded_model_keys=frozenset(set(base_filters.excluded_model_keys) | set(excluded_model_keys)),
         )
         with self._lock:
+            current_model_key = str(getattr(lease.route_lease, "model_key", "") or "") if lease.route_lease is not None else ""
             if lease.route_lease is not None:
                 self._balancer.release(lease.route_lease, outcome=LEASE_OUTCOME_BUILD_FAILED)
                 lease.route_lease = None
@@ -255,6 +266,16 @@ class NodeTurnController:
             lease.route_lease = next_lease
             lease.initial_model_permit = next_lease.permit
             lease.route_filters = effective_filters
+            logger.info(
+                "Model node binding rebound: group={} previous_model_key={} selected_model_key={} "
+                "rebind_reason={} excluded_model_keys={} node_id={}",
+                next_lease.group_key,
+                str(current_model_key or ''),
+                next_lease.model_key,
+                next_lease.sticky_rebind_reason or rebind_reason,
+                ",".join(sorted(excluded_model_keys)) or '-',
+                lease.node_id,
+            )
             return next_lease
 
     def advance_turn_route(
@@ -490,6 +511,27 @@ class NodeTurnController:
             route_filters=filters,
         )
         self._running_leases[lease.lease_id] = lease
+        if route_lease is not None:
+            logger.info(
+                "Model route selected: group={} selected_model_key={} route_index={} selection_reason={} "
+                "rebind_reason={} running_before={} waiting_before={} reserved_before={} rolling_rpm_60s={} "
+                "penalty_429={} local_capacity={} load_score={} config_revision={} task_id={} node_id={}",
+                route_lease.group_key,
+                route_lease.model_key,
+                int(route_lease.route_index),
+                route_lease.selection_reason,
+                route_lease.sticky_rebind_reason,
+                int(route_lease.running_before),
+                int(route_lease.waiting_before),
+                int(route_lease.reserved_before),
+                int(route_lease.rolling_rpm),
+                round(float(route_lease.penalty_before), 4),
+                route_lease.local_capacity,
+                float(route_lease.score),
+                int(route_lease.config_revision),
+                lease.task_id,
+                lease.node_id,
+            )
         _set_future_result_if_pending(request.future, lease)
         return lease
 

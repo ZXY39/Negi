@@ -219,6 +219,8 @@ _PERF_SAMPLE_INTERVAL_FALLBACK_SECONDS = 15.0
 # 序列行数上限：超过 40 桶时把步长放大到 window/40，所以报告长度与窗口无关。
 _PERF_REPORT_MAX_BUCKETS = 40
 _PERF_TIER_ORDER = ('normal', 'easing', 'throttled', 'critical')
+# 心跳里每个组最多带几个成员的明细：载荷要小，够判断「负载摊开了没有、谁在冷却」即可。
+_MODEL_ROUTE_SNAPSHOT_MAX_MEMBERS = 12
 # 每个统计轴的 (报告标签, 载荷字段, 单位)；序列与统计行共用这一份词表，
 # 避免"少一列"只在渲染处暴露。
 _PERF_STAT_AXES = (
@@ -10434,11 +10436,72 @@ class MainRuntimeService:
     def _tool_pressure_snapshot(self) -> dict[str, Any]:
         summary_stats = self._summary_stats_snapshot()
         node_turn_snapshot = self._node_turn_snapshot()
+        model_route_snapshot = self._model_route_snapshot()
         if self.tool_pressure_monitor is not None:
-            return {**dict(self.tool_pressure_monitor.snapshot() or {}), **node_turn_snapshot, **summary_stats}
+            return {
+                **dict(self.tool_pressure_monitor.snapshot() or {}),
+                **node_turn_snapshot,
+                **model_route_snapshot,
+                **summary_stats,
+            }
         if self.adaptive_tool_budget_controller is not None:
-            return {**dict(self.adaptive_tool_budget_controller.snapshot() or {}), **node_turn_snapshot, **summary_stats}
-        return {**node_turn_snapshot, **summary_stats}
+            return {
+                **dict(self.adaptive_tool_budget_controller.snapshot() or {}),
+                **node_turn_snapshot,
+                **model_route_snapshot,
+                **summary_stats,
+            }
+        return {**node_turn_snapshot, **model_route_snapshot, **summary_stats}
+
+    def _model_route_snapshot(self) -> dict[str, Any]:
+        """负载均衡器的紧凑心跳快照，随 worker 状态上报。
+
+        balancer 是 worker 进程内的运行态，web 进程读不到它的内存；把这些数字挂在心跳
+        载荷上，管理面才能跨进程看到。只给计数与桶序号——桶身份是不可逆摘要，也不外泄。
+        """
+        balancer = getattr(self, 'model_load_balancer', None)
+        if balancer is None:
+            return {'model_route_groups': []}
+        try:
+            raw = dict(balancer.snapshot() or {})
+        except Exception:
+            return {'model_route_groups': []}
+        groups: list[dict[str, Any]] = []
+        for group_key, payload in dict(raw.get('groups') or {}).items():
+            members = []
+            for member in list(payload.get('members') or [])[:_MODEL_ROUTE_SNAPSHOT_MAX_MEMBERS]:
+                members.append(
+                    {
+                        'model_key': member.get('model_key'),
+                        'running': int(member.get('running') or 0),
+                        'waiting': int(member.get('waiting') or 0),
+                        'reserved': int(member.get('reserved') or 0),
+                        'rolling_rpm_60s': int(member.get('rolling_rpm_60s') or 0),
+                        'penalty_429': float(member.get('penalty_429') or 0.0),
+                        'score': float(member.get('score') or 0.0),
+                        # None = 该成员没配 per-key 上限，本地容量无限。
+                        'local_capacity': member.get('local_capacity'),
+                        'selectable': bool(member.get('selectable')),
+                        'cooldown_reason': str(member.get('cooldown_reason') or ''),
+                        'quota_bucket_index': int(member.get('quota_bucket_index') or 0),
+                    }
+                )
+            groups.append(
+                {
+                    'group_key': str(group_key),
+                    'enabled': bool(payload.get('enabled')),
+                    'max_retry_rounds': int(payload.get('max_retry_rounds') or 1),
+                    'quota_bucket_count': int(payload.get('quota_bucket_count') or 0),
+                    'shared_bucket_member_count': int(payload.get('shared_bucket_member_count') or 0),
+                    'unresolved_bucket_count': int(payload.get('unresolved_bucket_count') or 0),
+                    'members': members,
+                }
+            )
+        return {
+            'model_route_groups': groups,
+            'model_route_config_revision': int(raw.get('config_revision') or 0),
+            'model_route_binding_count': len(list(raw.get('node_bindings') or [])),
+        }
 
     def _node_turn_snapshot(self) -> dict[str, Any]:
         controller = getattr(self, 'node_turn_controller', None)
@@ -10648,6 +10711,10 @@ class MainRuntimeService:
             'node_queue_running_count': int(merged.get('node_queue_running_count') or 0),
             'node_queue_waiting_count': int(merged.get('node_queue_waiting_count') or 0),
             'node_queue_oldest_wait_ms': float(merged.get('node_queue_oldest_wait_ms') or 0.0),
+            # 负载均衡：web 进程只能看到 worker 心跳里带上来的快照（balancer 是进程内态）。
+            'model_route_groups': list(merged.get('model_route_groups') or []),
+            'model_route_config_revision': int(merged.get('model_route_config_revision') or 0),
+            'model_route_binding_count': int(merged.get('model_route_binding_count') or 0),
             'machine_pressure_state': str(merged.get('machine_pressure_state') or 'unknown'),
             'local_pressure_state': str(merged.get('local_pressure_state') or 'unknown'),
             'budget_state': str(merged.get('budget_state') or merged.get('tool_pressure_state') or 'normal'),
