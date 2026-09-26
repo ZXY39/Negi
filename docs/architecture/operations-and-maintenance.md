@@ -24,7 +24,7 @@
 - 镜像源不设安装器参数：uv 直接读 `UV_DEFAULT_INDEX` 与 `UV_PYTHON_INSTALL_MIRROR` 环境变量
 - 安装完成的终点是项目口令设置页，不是可用系统（解锁合同见 `config-and-models.md`「Deployment Unlock Contract」）
 - 不带 `-Upgrade` 时对已存在的目录是**幂等不动代码**（只补环境与启动）。升级是显式动作：git 检出走 `fetch --depth 1` + `checkout --detach FETCH_HEAD`，无 git 的源码包安装走"下归档 + 逐顶层覆盖"，两条路都只换代码，`.venv/` 与 `.g3ku/` 保留
-- 升级前置校验：`git status --porcelain` 非空即拒绝执行，不静默覆盖用户改动
+- 升级前置校验：`git status --porcelain --untracked-files=no` 非空（**跟踪文件被本地改过**）才拒绝执行，不静默覆盖用户改动。未跟踪项不算脏 —— 装过 skill、桥接产物的设备必然有未跟踪文件，把它们算进去会让升级永久被拒
 - 两种取码方式**不可混用**：把源码包盖在 git 检出上会让整棵树在 autocrlf 下变成永久"脏"，从而被下一次升级的脏检查挡住。因此"有 `.git` 但 git 不可用"时报错，而不是退化成覆盖
 - 版本识别通道是 `git ls-remote --tags origin`，只接受 `refs/tags/vX.Y.Z` 形状（`backup/*` 这类路径标签与 peeled `^{}` 行都按形状过滤掉），与 `g3ku/__init__.py` 的 `__version__` 比对，结果只落在 `g3ku status` 的 `Release:` 行。约束：只读不外发、超时 2 秒、失败即整行不出现（离线设备不得显示"已是最新"）
 - 发版动作 = 打标签 + 同步 `pyproject.toml` 与 `g3ku/__init__.py` 两处版本号 + 跑 `uv lock`（`uv.lock` 里钉着 `g3ku-ai` 自身版本，漏这一步会让所有 `uv sync --frozen` 的安装与升级直接失败）+ 更新安装脚本与 README 里钉住的 ref 默认值
@@ -39,7 +39,7 @@
 - 「重启并更新」的顺序不可调换：`POST /api/update/apply` 只负责踢起一个脱离子进程（`g3ku/update_apply.py`），执行体走现成的 `POST /api/bootstrap/exit` 请求优雅退出（"有在跑的活未确认"的 409 因此只有一份实现），等端口释放后才跑 `install -Upgrade`，完事再重新拉起；**升级失败也要把旧版本拉回来**，绝不把设备留在无服务状态。原因：运行中的解释器在源码被替换的窗口里 import 到半截文件会造成阶段死锁。
 - 执行体的两个参数都是安全边界，改动前先读：端口由调用方显式传入、猜不到就中止（回落到默认端口会去关同机另一个实例）；`install` 必须带 `-Dir/--dir` 指向本项目根（漏了会退回脚本默认路径，结果是"升级了另一个目录、重启未变的代码"，这条是彩排时实测出来的）。
 - 释放等待只在端口真的空下来之后才动代码；任何一次 `exit_refused_*` 或 `port still busy` 都是**不碰代码**直接退出。降级安装（新 config 配旧代码）会撞上 `Config` 的 `extra=forbid`，服务起不来属预期，不是 apply 车道的问题。
-- 全程留痕在 `.g3ku/logs/update-apply.log`。判读锚点：`exit_refused_409` = 用户没确认暂停；`port still busy` = 服务没退干净、代码未动；`relaunching the previous version` = 升级失败但服务已恢复。
+- 全程留痕在 `.g3ku/logs/update-apply.log`。安装脚本的进度**实时续写**进这个文件（不再捕获到结束才落盘，也不弹控制台窗口）。判读锚点：`exit_refused_409` = 用户没确认暂停；`port still busy` = 服务没退干净、代码未动；`upgrade still running at Ns` = 子进程还在跑（多半在下载），`upgrade timed out after Ns; killed` = 超过 20 分钟被杀；`relaunching the previous version` = 升级失败但服务已恢复。
 - 一个模型都没配的设备上 `get_agent()` 构造不出运行时，`_running_work_snapshot` 因此**按空快照回答**并带 `runtime_unavailable` 溯源键，而不是抛 500 —— 退出、`start-g3ku` 的优雅重启与「重启并更新」共用这个端点，500 会让这类设备既关不掉自己也升不了级。锁状态判定不变，未解锁仍然 423。
 - 执行体收子进程输出统一按 UTF-8 解，不看系统 ANSI 码页：中文 Windows 上 gbk 解不开安装脚本写出的中文进度，读线程抛 `UnicodeDecodeError` 会让整段升级输出丢失，判据随之消失。
 - 前端侧的端点与三态渲染契约归 `web-and-admin.md`「Update Notification And Restart-And-Upgrade Contract」。
