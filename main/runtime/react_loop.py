@@ -40,6 +40,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     retained_completed_stage_ids as _shared_retained_completed_stage_ids,
     split_stage_ref_selection,
     stage_created_at_ceiling,
+    stage_message_call_ids as _shared_stage_message_call_ids,
     stage_prompt_prefix as _shared_stage_prompt_prefix,
     stage_record_dict,
     stage_ref_candidates,
@@ -416,7 +417,10 @@ class ReActToolLoop:
                     for item in list(dynamic_contract_payload.get('candidate_skills') or [])
                 ]
             )
-            model_messages = self._prepare_messages(message_history, runtime_context=runtime_context)
+            model_messages, stage_compaction_parts = self._prepare_messages_with_parts(
+                message_history,
+                runtime_context=runtime_context,
+            )
             # 契约先注入、当轮 overlay/repair 提示最后追加：请求末位保持 user
             # 回合提示而不是契约块，避免模型把契约抬头当作"上一条发言"回显进
             # 下一条 assistant 消息（回显消息携带工具调用时会被误判剥离）。
@@ -433,6 +437,7 @@ class ReActToolLoop:
                 overlay_text='\n\n'.join(str(part or '').strip() for part in overlay_parts if str(part or '').strip()),
             )
             request_tail_messages = assembled_request_messages[len(model_messages) :]
+            stage_compaction_hop = False
             if fresh_turn_request_seed_messages:
                 # fresh turn 第一跳：以持久 actual-request scaffold 为请求前缀，
                 # 投影超出 seed 覆盖点的尾段（notice/恢复重放/当前 user 回合）
@@ -459,14 +464,26 @@ class ReActToolLoop:
                 pending_request_delta_messages = []
             elif previous_actual_request_messages:
                 request_seed_message_count = 0
-                request_messages, request_seed_source = (
-                    self._same_turn_append_only_request_messages_with_source(
-                        previous_request_messages=previous_actual_request_messages,
-                        current_model_messages=model_messages,
-                        pending_delta_messages=pending_request_delta_messages,
-                        request_tail_messages=request_tail_messages,
-                    )
+                # 阶段过期点：当前发送基线里还留着「已判过期阶段」的工具肉身。这一跳改用
+                # 投影作请求体（那批肉身换成原位 compact 块），下一跳起基线就是裁过的这份、
+                # append-only 链照旧。只在过期点让位一次，是为了把 provider 前缀失效面压到
+                # 阶段过期次数，而不是每轮按投影重排。
+                stage_compaction_hop = self._stage_expiry_hop(
+                    previous_request_messages=previous_actual_request_messages,
+                    stage_compaction_parts=stage_compaction_parts,
                 )
+                if stage_compaction_hop:
+                    request_messages = list(assembled_request_messages)
+                    request_seed_source = 'same_turn_stage_compacted'
+                else:
+                    request_messages, request_seed_source = (
+                        self._same_turn_append_only_request_messages_with_source(
+                            previous_request_messages=previous_actual_request_messages,
+                            current_model_messages=model_messages,
+                            pending_delta_messages=pending_request_delta_messages,
+                            request_tail_messages=request_tail_messages,
+                        )
+                    )
             else:
                 request_seed_message_count = 0
                 request_messages = list(assembled_request_messages)
@@ -523,6 +540,9 @@ class ReActToolLoop:
                 tool_choice=current_tool_choice,
                 parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
             )
+            if stage_compaction_hop and not str(history_shrink_reason or '').strip():
+                # 请求体因阶段过期点变短必须有合法理由，否则逐轮对账会把它读成非法 shrink。
+                history_shrink_reason = 'stage_compaction'
             if str(history_shrink_reason or '').strip() == 'token_compression':
                 prior_provider_tool_names = self._normalized_name_list(
                     list((dict(tool_schema_selection.get('trace') or {})).get('prior_provider_tool_names') or [])
@@ -7626,6 +7646,14 @@ class ReActToolLoop:
         )
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
+        return self._prepare_messages_with_parts(messages, runtime_context=runtime_context)[0]
+
+    def _prepare_messages_with_parts(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        runtime_context: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         normalized_messages = strip_turn_only_system_note_messages(strip_node_dynamic_contract_messages(messages))
         stage_state = self._execution_stage_state_for_runtime(runtime_context=runtime_context)
         parts = _shared_compact_stage_prompt_messages_in_place(
@@ -7646,11 +7674,14 @@ class ReActToolLoop:
         )
         # notice_tail 保持在压缩内容之前；重写区内的块原位放置，输出头两条
         # 恒为系统+首条用户，保证同回合 append-only 前缀探针不退化。
-        return [
-            *list(parts.get('prefix') or []),
-            *notice_tail_messages,
-            *rewritten,
-        ]
+        return (
+            [
+                *list(parts.get('prefix') or []),
+                *notice_tail_messages,
+                *rewritten,
+            ],
+            parts,
+        )
 
     def _append_notice_tail_messages(
         self,
@@ -7794,6 +7825,23 @@ class ReActToolLoop:
             source = 'scaffold_seed_with_delta' if derived_delta else 'scaffold_seed'
             return seed_records, derived_delta, source
         return None, [], 'fallback_seed_misaligned'
+
+    @staticmethod
+    def _stage_expiry_hop(
+        *,
+        previous_request_messages: list[dict[str, Any]] | None,
+        stage_compaction_parts: dict[str, Any] | None,
+    ) -> bool:
+        """本跳是否正踩在阶段过期点上：当前发送基线里仍留着被判过期阶段的工具肉身。
+
+        只有这一跳允许用投影替换 append-only 基线，所以判据必须"换过基线后立刻转为假"
+        ——裁完的正文不再含那些 call id，下一跳回到字面前缀链。否则每轮按投影重排会把
+        provider 前缀失效面从"每个过期点一次"放大到"每轮一次"。
+        """
+        expired_call_ids = set(dict(stage_compaction_parts or {}).get('expired_call_ids') or set())
+        if not expired_call_ids:
+            return False
+        return bool(_shared_stage_message_call_ids(previous_request_messages) & expired_call_ids)
 
     @classmethod
     def _same_turn_append_only_request_messages_with_source(

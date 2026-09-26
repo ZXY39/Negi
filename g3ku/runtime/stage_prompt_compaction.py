@@ -485,6 +485,7 @@ def compact_stage_prompt_messages_in_place(
             "rewritten": remainder,
             "retained_completed_stage_ids": set(),
             "compacted_stage_ids": set(),
+            "expired_call_ids": set(),
             "removed_message_count": 0,
             "stage_compaction_applied": False,
         }
@@ -747,6 +748,9 @@ def compact_stage_prompt_messages_in_place(
         "rewritten": rewritten,
         "retained_completed_stage_ids": set(retained_ids),
         "compacted_stage_ids": compacted_ids,
+        # 本次判为过期阶段的工具调用 id 全集（不等于真正被删的那些）：调用方用它
+        # 判断"当前发送基线里是否还留着这些肉身"，即这次压缩是不是一个过期点。
+        "expired_call_ids": expired_call_ids,
         "removed_message_count": removed_message_count,
         "stage_compaction_applied": removed_message_count > 0,
     }

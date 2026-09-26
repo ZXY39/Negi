@@ -18,6 +18,7 @@ from g3ku.resources.loader import ManifestBackedTool
 from g3ku.resources.models import ResourceKind, ToolResourceDescriptor
 from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
+from g3ku.runtime.stage_prompt_compaction import STAGE_COMPACT_PREFIX
 from g3ku.runtime.tool_history import analyze_tool_call_history
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from main.errors import TaskPausedError
@@ -8862,3 +8863,107 @@ async def test_empty_model_responses_stop_at_retry_limit(tmp_path, monkeypatch) 
     assert result.delivery_status == 'blocked'
     assert 'empty responses' in str(result.blocking_reason)
     assert len(chat_calls) == _PROVIDER_RETRY_LIMIT, "达到上限后不得继续调用 provider"
+
+
+def _six_stage_node_history(stage_total: int = 6) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """节点账本 + 同形态历史：每个阶段一次 submit 开阶段、一轮 exec 肉身。"""
+    stages: list[dict[str, object]] = []
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": '{"task_id":"task-1","goal":"demo"}'},
+    ]
+    for index in range(1, stage_total + 1):
+        active = index == stage_total
+        stages.append(
+            {
+                "stage_id": f"stage-{index}",
+                "stage_index": index,
+                "stage_kind": "normal",
+                "system_generated": False,
+                "mode": "自主执行",
+                "status": "进行中" if active else "完成",
+                "stage_goal": f"goal {index}",
+                "completed_stage_summary": "" if active else f"summary {index}",
+                "key_refs": [],
+                "tool_round_budget": 3,
+                "tool_rounds_used": 1,
+                "rounds": [
+                    {
+                        "round_id": f"stage-{index}:round-1",
+                        "round_index": 1,
+                        "tool_call_ids": [f"call-work-{index}"],
+                    }
+                ],
+            }
+        )
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": f"call-stage-{index}",
+                            "type": "function",
+                            "function": {"name": "submit_next_stage", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "submit_next_stage",
+                    "tool_call_id": f"call-stage-{index}",
+                    "content": json.dumps({"stage_id": f"stage-{index}", "stage_index": index}, ensure_ascii=False),
+                },
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": f"call-work-{index}", "type": "function", "function": {"name": "exec", "arguments": "{}"}}
+                    ],
+                },
+                {"role": "tool", "name": "exec", "tool_call_id": f"call-work-{index}", "content": f"body-{index}"},
+            ]
+        )
+    state = {"active_stage_id": f"stage-{stage_total}", "transition_required": False, "stages": stages}
+    return state, messages
+
+
+def test_stage_expiry_hop_adopts_pruned_projection_once_then_stays_append_only() -> None:
+    # 阶段压缩要真省 token，必须有一个"过期点"把发送基线换成裁过的投影；但只能换一次，
+    # 否则前缀失效面从每个过期点一次放大成每轮一次。
+    loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+    state, history = _six_stage_node_history()
+    loop._log_service._store._node = SimpleNamespace(metadata={"execution_stages": state})
+    runtime_context = {"task_id": "task-1", "node_id": "node-1"}
+
+    projection, parts = loop._prepare_messages_with_parts(history, runtime_context=runtime_context)
+    contents = [str(item.get("content") or "") for item in projection]
+    # 保留窗 3 + 活动阶段 => 过期的是 stage-1/2，其工具肉身从投影里消失并换成两块摘要
+    assert set(parts["expired_call_ids"]) == {"call-work-1", "call-work-2"}
+    assert "body-1" not in contents
+    assert "body-2" not in contents
+    assert "body-3" in contents
+    assert len([content for content in contents if content.startswith(STAGE_COMPACT_PREFIX)]) == 2
+    assert ReActToolLoop._stage_expiry_hop(
+        previous_request_messages=history, stage_compaction_parts=parts
+    ) is True
+
+    # 换过基线之后：判据立刻转假，且下一轮投影仍以这份正文为字面前缀（只追加新轮次）。
+    next_history = [
+        *projection,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call-work-6b", "type": "function", "function": {"name": "exec", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "name": "exec", "tool_call_id": "call-work-6b", "content": "body-6b"},
+    ]
+    projection_next, parts_next = loop._prepare_messages_with_parts(next_history, runtime_context=runtime_context)
+    assert ReActToolLoop._stage_expiry_hop(
+        previous_request_messages=projection, stage_compaction_parts=parts_next
+    ) is False
+    assert projection_next[: len(projection)] == projection
+    assert "body-6b" in [str(item.get("content") or "") for item in projection_next]
