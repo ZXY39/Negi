@@ -13,11 +13,11 @@ from typing import Any, Callable
 MODEL_ROUTE_KIND_MODEL = "model"
 MODEL_ROUTE_KIND_LOAD_BALANCE = "load_balance"
 
-# lease 的释放结局，用于惩罚统计与日志归因。
+# lease 的释放结局，用于日志归因。失败本身不进运行态：只有上游限流留衰减惩罚，
+# 所以这里没有「不可用」这一类。
 LEASE_OUTCOME_SUCCESS = "success"
 LEASE_OUTCOME_RETRYABLE_FAILURE = "retryable_failure"
 LEASE_OUTCOME_SHAPE_ERROR = "shape_error"
-LEASE_OUTCOME_UNAVAILABLE = "unavailable"
 LEASE_OUTCOME_CANCELLED = "cancelled"
 LEASE_OUTCOME_BUILD_FAILED = "build_failed"
 LEASE_OUTCOME_GROUP_EXHAUSTED = "group_exhausted"

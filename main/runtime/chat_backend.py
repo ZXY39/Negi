@@ -1046,7 +1046,7 @@ class ConfigChatBackend:
                         tried_model_refs=tried_model_refs,
                     )
                     if chosen is None:
-                        # 这个组给不出任何成员（全冷却 / 全容量满 / 全被过滤）：按链前进。
+                        # 这个组给不出任何成员（全容量满 / 全被过滤 / 全已试过）：按链前进。
                         tried_model_refs.add(ref)
                         model_index += 1
                         continue

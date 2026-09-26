@@ -1,5 +1,18 @@
 # Fix Plan: 节点模型路由的重绑收口（删阶段边界清绑、删全局 revision 比较、cooldown 整条车道删除）
 
+> **SHIPPED on `feat/model-load-balancing`, 2026-09-26（P1 + P2 + P3 同批）。** 分支未合并、未推送；进程未重启＝未生效。
+>
+> Verification as observed: `test_model_load_balancer.py` + `test_model_route_admission.py` + `test_model_route_chat_backend.py` + `test_model_route_runtime_wiring.py` + `test_model_route_config_schema.py` + `test_model_route_admin_api.py` + `test_model_chain_baseline_regression.py` **87 passed**；`test_model_queue_runtime.py` + `test_llm_binding_key_sync.py` + `test_resource_runtime_smoke.py` **111 passed / 5 xfailed**；`test_react_runtime_regressions.py` + `test_task_web_worker_runtime.py` + `test_task_worker_watchdog.py` + `test_managed_worker_log_rotation.py` **371 passed**；六个触及文件 `py_compile` 通过。`ruff` 触及文件与主树同文件对比：react_loop 同为 2 条存量、chat_backend 少 1 条、`model_load_balancer.py` / `model_route.py` / `node_turn_controller.py` / `runtime_service.py` 归零，无新增。
+>
+> Deviations from this plan, with reasons：
+> - **`LEASE_OUTCOME_UNAVAILABLE` 一并删除**（§3 原写"保留常量与传入点"）：它的唯一读者就是冷却车道，删掉读者之后 main 里只剩定义、没有任何调用方传入它，留着一个纯死常量与"删干净"的口径矛盾。`release()` 的 `error` 参数仍保留（签名不动，调用方照旧传）。
+> - **负向用例拆成两条而不是一条**：除"401 之后仍选中同一成员、`penalty_429` 保持 0"外，另加 `test_rate_limit_words_come_from_the_model_chain_table`，把"限流文本只有一张表"钉住——否则后来者可以再造一份文本而不被测试发现。
+> - **`configure()` 的 revision 参数保留为纯观测**（§2 已写），同时把快照里的 `cooldown_*` 与 `consecutive_unavailable` 三个字段一起摘掉（§3 只列了前两个）。
+> - **运维文档新增整条 bullet**而非只改判据句：`401/坏密钥不留运行态记忆`，并给出该去哪 grep（`MODEL CHAIN: FALLBACK` / `Model load-balance member … exhausted`）。
+> - **`LEASE_OUTCOME_RETRYABLE_FAILURE` 与 `SHAPE_ERROR` 未动**：它们同样在 main 里没有读者，但不在本次裁定面上，不顺手扩大删除范围。
+>
+> **尚未验证**：§7 的实盘判据需要重启托管 worker（会打断在跑的任务，本会话未执行）。
+
 > **Status: 待实现。** 目标分支 `feat/model-load-balancing`（独立 worktree `G3KU-Agent-lb`，HEAD `85be3f21`），是本功能的后续收口，不单独成立——它删的三条车道都只存在于该分支上。
 >
 > Origin: 操作者要求，2026-09-26。起点是「与失败无关的重绑触发是否多余」，中途三条裁定：

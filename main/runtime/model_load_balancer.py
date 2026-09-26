@@ -24,9 +24,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from g3ku.providers.fallback import is_retryable_model_error
 from main.runtime.model_route import (
     LEASE_OUTCOME_SUCCESS,
-    LEASE_OUTCOME_UNAVAILABLE,
     ModelRouteLease,
     ResolvedLoadBalanceGroup,
     RouteCandidateFilters,
@@ -44,11 +44,12 @@ RPM_WINDOW_SECONDS = 60.0
 PENALTY_HALF_LIFE_SECONDS = 60.0
 PENALTY_RETENTION_SECONDS = PENALTY_HALF_LIFE_SECONDS * 6
 
-COOLDOWN_SECONDS_DEFAULT = 30.0
-COOLDOWN_SECONDS_MAX = 300.0
 # 粘滞优先，但上游连续打回 429 到一定程度就必须换人：这个阈值是「衰减后的 429 计数」，
 # 1.0 约等于最近一分钟内吃过一次满权重惩罚且尚未衰减。
 PENALTY_REBIND_THRESHOLD = 1.0
+
+# 限流判据复用模型链自己的 `429` 关键字表（g3ku/utils/retry_keywords.py），不另起一套文本。
+RATE_LIMIT_RETRY_ON = ["429"]
 
 UNRESOLVED_BUCKET_PREFIX = "unresolved:"
 
@@ -94,24 +95,14 @@ def classify_throttle_dimension(error_text: str) -> str:
 
 
 def is_rate_limited(status_code: int | None, error_text: str = "") -> bool:
+    """限流判据：状态码优先，取不到时回落到模型链自己的 `429` 关键字表。
+
+    故意不另起一套文本：同一个错误在旧链里判「可重试」，在这里就该判「配额到顶」，两套
+    词表会让两边的归因说法漂移。
+    """
     if status_code == 429:
         return True
-    lowered = str(error_text or "").lower()
-    return "error code: 429" in lowered or "ratelimiterror" in lowered or "rate limit" in lowered
-
-
-def _looks_unavailable(error_text: str) -> bool:
-    """配置/认证/无可用 key 这类「重试同一成员没意义」的错误，进入短期冷却。"""
-    lowered = str(error_text or "").lower()
-    markers = (
-        "all configured api keys are disabled",
-        "error code: 401",
-        "error code: 403",
-        "invalid api key",
-        "api_key is required",
-        "unknown model key",
-    )
-    return any(marker in lowered for marker in markers)
+    return is_retryable_model_error(error_text, retry_on=RATE_LIMIT_RETRY_ON)
 
 
 def _decay(age_seconds: float, half_life_seconds: float) -> float:
@@ -131,9 +122,6 @@ class _BucketState:
 class _MemberState:
     reserved: int = 0
     last_selected_seq: int = 0
-    cooldown_until: float = 0.0
-    cooldown_reason: str = ""
-    consecutive_unavailable: int = 0
 
 
 @dataclass(slots=True)
@@ -141,6 +129,8 @@ class _NodeBinding:
     group_key: str
     model_key: str
     route_index: int
+    # 仅作观测：绑定建立时的配置 revision。重绑判定不看它——组成员变化由 configure()
+    # 按「绑定成员是否已被移出组」逐节点摘除，能力变化由每次请求的 filters 现场判定。
     config_revision: int
 
 
@@ -186,13 +176,13 @@ class ModelLoadBalancer:
     # ------------------------------------------------------------------ 配置
 
     def configure(self, *, groups: dict[str, ResolvedLoadBalanceGroup] | None, config_revision: int) -> None:
-        """装载组定义。revision 前进时清掉 cooldown，但保留 RPM 与惩罚观测。
+        """装载组定义，并只摘掉「绑定成员已被移出组」的那些节点绑定。
 
-        cooldown 表达的是「这条车道在当前状态下不可用」，配置被修好后不该继续被旧结论
-        挡住；而最近的请求速率与 429 记录描述的是上游，与本地配置是否改过无关。
+        这里是重绑唯一精确的车道：加成员不动任何既有绑定（粘滞优先，新成员只会被之后的
+        新节点选到），减成员只影响正用它的那些节点，在飞请求不受影响。请求速率与 429 惩罚
+        描述的是上游，与本地配置是否改过无关，所以配置刷新本身不清任何观测。
         """
         with self._lock:
-            revision_changed = int(config_revision or 0) != int(self._config_revision or 0)
             self._groups = dict(groups or {})
             self._config_revision = int(config_revision or 0)
             live_members = {
@@ -209,11 +199,6 @@ class ModelLoadBalancer:
                 if group is None or binding.model_key not in group.candidate_model_keys:
                     # 成员被移出组：解绑，让该节点下次准入重选。在飞请求不受影响。
                     self._bindings.pop(node_id, None)
-            if revision_changed:
-                for state in self._members.values():
-                    state.cooldown_until = 0.0
-                    state.cooldown_reason = ""
-                    state.consecutive_unavailable = 0
 
     @property
     def config_revision(self) -> int:
@@ -256,8 +241,6 @@ class ModelLoadBalancer:
             binding_drop_reason = str(rebind_reason or "") if rebind else ""
             if binding is not None and binding.group_key != group.group_key:
                 binding = None
-                binding_drop_reason = "plan_changed"
-            elif binding is not None and binding.config_revision != self._config_revision:
                 binding_drop_reason = "plan_changed"
             elif binding is not None and binding.model_key not in group.candidate_model_keys:
                 binding_drop_reason = "plan_changed"
@@ -316,15 +299,10 @@ class ModelLoadBalancer:
     def _candidate_ok(self, member: RouteMemberView, filters: RouteCandidateFilters) -> bool:
         if not str(member.model_key or "").strip():
             return False
-        if not filters.allows(member):
-            return False
-        return not self._in_cooldown(member.model_key)
+        return bool(filters.allows(member))
 
     def _binding_blocked_reason(self, model_key: str, filters: RouteCandidateFilters) -> str:
         """解释「为什么粘滞失效」，让日志能回答是哪一类触发。"""
-        state = self._state(model_key)
-        if state.cooldown_until > self._monotonic():
-            return "cooldown"
         member = None
         for group in self._groups.values():
             for candidate in group.members:
@@ -365,36 +343,23 @@ class ModelLoadBalancer:
                 self._trim(bucket.request_starts, RPM_WINDOW_SECONDS)
 
     def record_outcome(self, lease: ModelRouteLease, *, status_code: int | None = None, error_text: str = "") -> None:
-        """失败归因：429 记衰减惩罚并按维度留痕；不可用类错误叠加短期冷却。"""
+        """失败归因：只有上游限流留记忆，记成衰减惩罚并按维度留痕。
+
+        其它失败一类都不记——换节点后同样的请求就可能成功，而"这条配置坏了"本来就该由
+        操作者看日志处理。判据复用模型链的 `429` 关键字表，本模块不另起一套文本。
+        """
         if lease is None:
             return
+        if not is_rate_limited(status_code, error_text):
+            return
         now = self._monotonic()
-        rate_limited = is_rate_limited(status_code, error_text)
         with self._lock:
-            buckets = self._buckets_for(lease.model_key)
-            if rate_limited:
-                for bucket_key in buckets:
-                    bucket = self._bucket(bucket_key)
-                    bucket.penalty_events.append(now)
-                    bucket.throttle_events.append((now, classify_throttle_dimension(error_text)))
-                    self._trim(bucket.penalty_events, PENALTY_RETENTION_SECONDS)
-                    self._trim(bucket.throttle_events, PENALTY_RETENTION_SECONDS)
-                return
-
-            text = str(error_text or "").strip()
-            state = self._state(lease.model_key)
-            if not text:
-                # 成功或无文案的调用：清掉「连续不可用」串，冷却由时间到点自行失效。
-                state.consecutive_unavailable = 0
-                return
-            if _looks_unavailable(text):
-                state.consecutive_unavailable += 1
-                seconds = min(COOLDOWN_SECONDS_MAX, COOLDOWN_SECONDS_DEFAULT * max(1, state.consecutive_unavailable))
-                state.cooldown_until = now + seconds
-                state.cooldown_reason = f"unavailable:{text[:120]}"
-            else:
-                # provider 侧的可重试失败不叠加 cooldown：冷却专留给重试没意义的状态。
-                state.consecutive_unavailable = 0
+            for bucket_key in self._buckets_for(lease.model_key):
+                bucket = self._bucket(bucket_key)
+                bucket.penalty_events.append(now)
+                bucket.throttle_events.append((now, classify_throttle_dimension(error_text)))
+                self._trim(bucket.penalty_events, PENALTY_RETENTION_SECONDS)
+                self._trim(bucket.throttle_events, PENALTY_RETENTION_SECONDS)
 
     def release(self, lease: ModelRouteLease, *, outcome: str = LEASE_OUTCOME_SUCCESS, error: str = "") -> None:
         """exactly-once 释放：归还 permit，并把未派发出去的 reserved 归零。"""
@@ -405,15 +370,13 @@ class ModelLoadBalancer:
             if not lease.request_started:
                 state = self._state(lease.model_key)
                 state.reserved = max(0, int(state.reserved) - 1)
-            if outcome == LEASE_OUTCOME_UNAVAILABLE and error:
-                self.record_outcome(lease, status_code=None, error_text=error)
             permit = lease.permit
             lease.permit = None
             if permit is not None and self._permit_source is not None:
                 self._permit_source.release(permit)
 
     def forget_node(self, node_id: str) -> None:
-        """节点结束或阶段边界：解除粘滞，下次准入重新按负载选择。"""
+        """节点终态：解除粘滞，下次准入重新按负载选择。"""
         normalized = str(node_id or "").strip()
         if not normalized:
             return
@@ -453,9 +416,6 @@ class ModelLoadBalancer:
                             "score": round(metrics.score, 6),
                             "context_window_tokens": int(member.context_window_tokens or 0),
                             "image_multimodal_enabled": bool(member.image_multimodal_enabled),
-                            "cooldown_until_monotonic": round(float(state.cooldown_until), 3),
-                            "cooldown_reason": state.cooldown_reason,
-                            "consecutive_unavailable": int(state.consecutive_unavailable),
                             "last_selected_at": int(state.last_selected_seq),
                             "quota_bucket_index": bucket_indices.get(member.model_key, -1),
                         }
@@ -576,17 +536,6 @@ class ModelLoadBalancer:
 
     def _state(self, model_key: str) -> _MemberState:
         return self._members.setdefault(str(model_key or "").strip(), _MemberState())
-
-    def _in_cooldown(self, model_key: str) -> bool:
-        state = self._state(model_key)
-        if state.cooldown_until <= 0:
-            return False
-        if self._monotonic() < float(state.cooldown_until):
-            return True
-        state.cooldown_until = 0.0
-        state.cooldown_reason = ""
-        state.consecutive_unavailable = 0
-        return False
 
     def _bucket(self, bucket_key: str) -> _BucketState:
         bucket = self._buckets.get(bucket_key)

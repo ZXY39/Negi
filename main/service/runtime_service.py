@@ -5575,8 +5575,8 @@ class MainRuntimeService:
                 gate_supplier=self._node_turn_gate_allowed,
             )
         if self.model_load_balancer is not None:
-            # 组定义与配置 revision 一起进 balancer；未变化的组保留 running/reserved/
-            # cooldown/亲和状态，在飞请求不被刷新打断。
+            # 组定义与配置 revision 一起进 balancer；revision 只作观测，重绑只发生在
+            # 「绑定成员已被移出组」的那些节点上，在飞请求与其余亲和状态不受影响。
             self.model_load_balancer.configure(
                 groups=self._resolved_load_balance_groups(config),
                 config_revision=int(revision or 0),
@@ -10482,7 +10482,6 @@ class MainRuntimeService:
                         # None = 该成员没配 per-key 上限，本地容量无限。
                         'local_capacity': member.get('local_capacity'),
                         'selectable': bool(member.get('selectable')),
-                        'cooldown_reason': str(member.get('cooldown_reason') or ''),
                         'quota_bucket_index': int(member.get('quota_bucket_index') or 0),
                     }
                 )

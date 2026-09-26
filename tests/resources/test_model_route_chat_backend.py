@@ -273,7 +273,8 @@ async def test_429_outcome_is_attributed_to_the_selected_member(monkeypatch) -> 
     assert calls == ["m_a", "m_b", "m_emergency"]
     members = {row["model_key"]: row for row in balancer.snapshot()["groups"]["g1"]["members"]}
     assert members["m_a"]["penalty_429"] > 0
-    assert members["m_a"]["cooldown_reason"] == ""
+    # 失败记忆只剩上游限流这一档：快照里不再有冷却类字段。
+    assert "cooldown_reason" not in members["m_a"]
     # 离开组去跑 direct 之前，组侧 permit 必须已经归还。
     assert sum(controller.model_state("m_a")["running"].values()) == 0
     assert sum(controller.model_state("m_b")["running"].values()) == 0

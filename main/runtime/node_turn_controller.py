@@ -445,7 +445,7 @@ class NodeTurnController:
                         task_id=request.task_id,
                     )
                     if route_lease is None:
-                        # 这个组给不出候选（busy / 全部冷却 / 无容量），按链向后前进。
+                        # 这个组给不出候选（全部不合格 / 无容量），按链向后前进。
                         continue
                     return self._register_grant_locked(
                         request,

@@ -6,17 +6,16 @@ import pytest
 
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
 from main.runtime.model_load_balancer import (
-    COOLDOWN_SECONDS_DEFAULT,
     PENALTY_HALF_LIFE_SECONDS,
     ModelLoadBalancer,
     classify_throttle_dimension,
+    is_rate_limited,
     quota_bucket_key,
 )
 from main.runtime.model_route import (
     LEASE_OUTCOME_BUILD_FAILED,
     LEASE_OUTCOME_CANCELLED,
     LEASE_OUTCOME_SUCCESS,
-    LEASE_OUTCOME_UNAVAILABLE,
     ModelRouteLease,
     ResolvedLoadBalanceGroup,
     RouteCandidateFilters,
@@ -228,7 +227,7 @@ def test_reserved_reservation_is_atomic_under_concurrent_selection() -> None:
 
 @pytest.mark.parametrize(
     "outcome",
-    [LEASE_OUTCOME_SUCCESS, LEASE_OUTCOME_BUILD_FAILED, LEASE_OUTCOME_CANCELLED, LEASE_OUTCOME_UNAVAILABLE],
+    [LEASE_OUTCOME_SUCCESS, LEASE_OUTCOME_BUILD_FAILED, LEASE_OUTCOME_CANCELLED],
 )
 def test_release_is_exactly_once_on_every_path(outcome: str) -> None:
     permits = _FakePermits()
@@ -296,34 +295,59 @@ def test_node_binding_is_sticky_across_rounds() -> None:
     assert set(others) == {"m_a", "m_b", "m_c"} or len(set(others)) > 1
 
 
-def test_rebind_triggers_on_cooldown_capacity_and_rebind_flag() -> None:
-    clock = _Clock()
+def test_rebind_triggers_on_capacity_and_rebind_flag() -> None:
     permits = _FakePermits(per_key_limit=1, key_count=1)
-    balancer = _balancer(_group("g1", "m_a", "m_b"), permits=permits, clock=clock)
+    balancer = _balancer(_group("g1", "m_a", "m_b"), permits=permits)
 
     first = _select(balancer, "node:1")
     assert first.model_key == "m_a"
+    balancer.release(first, outcome=LEASE_OUTCOME_SUCCESS)
 
-    # 触发一：绑定成员进入不可用冷却（401 坏 key）。
-    balancer.release(first, outcome=LEASE_OUTCOME_UNAVAILABLE, error="AuthenticationError: Error code: 401 - bad key")
+    # 触发一：绑定成员拿不出 permit（外部先把 m_a 的容量占满），才换人。
+    pinned = permits.acquire_least_loaded(model_ref="m_a")
     second = _select(balancer, "node:1")
     assert second.model_key == "m_b"
-    assert second.sticky_rebind_reason == "cooldown"
+    assert second.sticky_rebind_reason == "capacity"
     balancer.release(second, outcome=LEASE_OUTCOME_SUCCESS)
-
-    # 触发二：绑定成员（m_b）拿不出 permit，而 m_a 的冷却已过期。
-    clock.advance(COOLDOWN_SECONDS_DEFAULT + 1)
-    pinned = permits.acquire_least_loaded(model_ref="m_b")
-    third = _select(balancer, "node:1")
-    assert third.model_key == "m_a"
-    assert third.sticky_rebind_reason == "capacity"
-    balancer.release(third, outcome=LEASE_OUTCOME_SUCCESS)
     permits.release(pinned)
 
-    # 触发三：显式重绑（阶段边界）。
-    fourth = _select(balancer, "node:1", rebind=True, rebind_reason="stage_boundary")
-    assert fourth.sticky_rebind_reason == "stage_boundary"
-    balancer.release(fourth, outcome=LEASE_OUTCOME_SUCCESS)
+    # 触发二：显式重绑——组内换成员走的就是这个入口。
+    third = _select(balancer, "node:1", rebind=True, rebind_reason="fallback_after_failure")
+    assert third.sticky_rebind_reason == "fallback_after_failure"
+    balancer.release(third, outcome=LEASE_OUTCOME_SUCCESS)
+
+
+def test_non_rate_limit_failure_leaves_no_memory() -> None:
+    """失败记忆只有一档：上游限流。其余一律当场交给链 fallback，不跨请求留存。
+
+    这条断言钉的是设计而非疏漏——后来者若把「401 就先冷一段」当 bug 补回来，这里会红。
+    """
+    permits = _FakePermits()
+    balancer = _balancer(_group("g1", "m_a", "m_b"), permits=permits)
+
+    first = _select(balancer, "node:1")
+    assert first.model_key == "m_a"
+    balancer.record_outcome(first, status_code=None, error_text="AuthenticationError: Error code: 401 - bad key")
+    balancer.record_outcome(first, status_code=None, error_text="All configured API keys are disabled for model m_a")
+    balancer.release(first, outcome=LEASE_OUTCOME_SUCCESS)
+
+    again = _select(balancer, "node:1")
+    assert again.model_key == "m_a"
+    assert again.sticky_rebind_reason == ""
+    members = {row["model_key"]: row for row in balancer.snapshot()["groups"]["g1"]["members"]}
+    assert members["m_a"]["penalty_429"] == 0.0
+    balancer.release(again, outcome=LEASE_OUTCOME_SUCCESS)
+
+
+def test_rate_limit_words_come_from_the_model_chain_table() -> None:
+    """限流判据与旧链共用一张 `429` 关键字表，本模块不得自带文本。"""
+    assert is_rate_limited(None, "Error code: 429 - rpm limit")
+    assert is_rate_limited(None, "Too many requests")
+    assert is_rate_limited(None, "quota exceeded")
+    assert is_rate_limited(429, "")
+    # 状态码不是 429、文本也不在表里 ⇒ 不算限流。
+    assert not is_rate_limited(500, "upstream blew up")
+    assert not is_rate_limited(None, "AuthenticationError: Error code: 401 - bad key")
 
 
 def test_penalty_decays_and_does_not_permanently_pin_a_member() -> None:
@@ -463,20 +487,26 @@ def test_config_refresh_keeps_observations_and_exposes_new_member() -> None:
     assert after["m_a"] == before["m_a"]
 
 
-def test_config_refresh_drops_cooldown_and_unbinds_removed_member() -> None:
-    clock = _Clock()
-    balancer = _balancer(_group("g1", "m_a", "m_b"), permits=_FakePermits(), clock=clock)
+def test_config_refresh_unbinds_only_nodes_using_the_removed_member() -> None:
+    balancer = _balancer(_group("g1", "m_a", "m_b"), permits=_FakePermits())
 
-    first = _select(balancer, "node:1")
-    balancer.release(first, outcome=LEASE_OUTCOME_UNAVAILABLE, error="AuthenticationError: Error code: 401 - bad key")
-    assert balancer.bound_model_for_node("node:1") == "m_a"
+    node_a = _select(balancer, "node:a")
+    node_b = _select(balancer, "node:b")
+    assert {node_a.model_key, node_b.model_key} == {"m_a", "m_b"}
 
-    balancer.configure(groups={"g1": _group("g1", "m_b")}, config_revision=9)
+    # 无关配置的 revision 前进 + 组里加成员：既有绑定一律不动。
+    balancer.configure(groups={"g1": _group("g1", "m_a", "m_b", "m_c")}, config_revision=99)
+    assert balancer.bound_model_for_node("node:a") == "m_a"
+    assert balancer.bound_model_for_node("node:b") == "m_b"
 
-    assert balancer.bound_model_for_node("node:1") == ""
-    lease, reason = balancer.select(node_id="node:1", group_key="g1", route_index=0)
+    # 只有绑定成员被移出组的那个节点才解绑。
+    balancer.configure(groups={"g1": _group("g1", "m_b", "m_c")}, config_revision=100)
+    assert balancer.bound_model_for_node("node:a") == ""
+    assert balancer.bound_model_for_node("node:b") == "m_b"
+
+    lease, reason = balancer.select(node_id="node:a", group_key="g1", route_index=0)
     assert reason == ""
-    assert lease is not None and lease.model_key == "m_b"
+    assert lease is not None and lease.model_key in {"m_b", "m_c"}
 
 
 def test_member_removed_from_group_is_forgotten_but_active_lease_releases_cleanly() -> None:

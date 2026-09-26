@@ -136,7 +136,7 @@
 - 因此 `model_config set_scope_chain` 之后，同一轮的下一次模型调用即用新链；在同一步把切链与被门控的工具调用作为并行工具调用发出时，闸门仍按切换前的链判定。
 - Main runtime 节点的模型链在任务运行时 chat 后端的每个链轮边界活解析（`model_refs_resolver` 读取当前角色链），路由/绑定变更在下一个链轮即生效，不必等下一个回合；可重试失败退避等待结束后同样先重新解析链再继续重试。**链在重试途中被改写不会中止回合**：退避边界发现 runtime revision 变化且能解析出与在用链不同的新链时，重试循环丢弃旧链的已试集合、刷新 revision 基线并从新链链首重新评估，成功即正常返回；链未真正变化时只刷新基线，继续原有重试账本，不在同一 revision 上空转。按链首重启意味着新链里此前被跳过的模型重新获得机会。`DEFAULT_MAX_CHAIN_CHANGE_RESTARTS`（`g3ku/providers/fallback.py`）跨重启累计，只兜底"链反复变化且始终不成功"的病态抖动，达到上限后落既有链耗尽终态。CEO/frontdoor 与二者之上还有各自的回合级守卫：`react_loop` 在链耗尽错误处按 `provider_retry_invalidation` 重建回合，frontdoor 在 provider 失败/空响应边界重新解析角色链，二者都只在 `ensure_runtime_config_current` 报告配置确有前进时触发。memory queue 内部 agent 看的不是 CEO/node 的 provider retry，而是 memory 自己的同批次 validation/repair 重试点，普通 review window 不经过单独的 `assess -> apply` 交接。
 
-配置刷新同时重载节点侧的路由结构：`models.roles` / `models.loadBalanceGroups` 变化后，worker 会重建 `execution` / `inspection` 的 route plan 并把组定义连同新的 revision 交给负载均衡器（契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。revision 前进会清掉短期冷却与失效的节点绑定，但保留最近的请求速率与 429 观测——那两项描述的是上游，与本地配置有没有被改过无关。
+配置刷新同时重载节点侧的路由结构：`models.roles` / `models.loadBalanceGroups` 变化后，worker 会重建 `execution` / `inspection` 的 route plan 并把组定义连同新的 revision 交给负载均衡器（契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。revision 只作观测，不参与重绑判定：刷新只解绑「绑定成员已被移出组」的那些节点，其余绑定与最近的请求速率、429 惩罚一律保留——那两项描述的是上游，与本地配置有没有被改过无关。因此一次与路由无关的保存（改 prompt、改渠道设置）不会打断任何节点的缓存粘性。
 
 维护上把这理解成“迭代/重试边界上的重建”，而不是“请求中途热切模型”。如果用户反馈“改完模型链后旧模型还在用”，重点检查：
 

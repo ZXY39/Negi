@@ -268,8 +268,6 @@ class ReActToolLoop:
         breaker = RepeatedActionCircuitBreaker()
         limit = self._normalize_optional_limit(max_iterations, default=self._max_iterations)
         attempts = 0
-        # 上一次授予回合时所在的阶段；阶段推进时清掉负载均衡绑定，触发一次重绑。
-        previous_stage_boundary_key = ''
         last_contract_violations: list[str] = []
         message_history = list(messages or [])
         fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
@@ -780,13 +778,9 @@ class ReActToolLoop:
             if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
                 route_plan_for_turn = current_model_routes
             if node_turn_controller is not None and (route_plan_for_turn is not None or primary_model_ref):
-                # 阶段边界换过一次成员：绑定跨回合保留，只有阶段推进时才重选，
-                # 否则一个节点会每跳换一个前缀缓存命名空间。
-                stage_key = self._execution_stage_boundary_key(stage_gate=stage_gate)
-                if stage_key and stage_key != previous_stage_boundary_key:
-                    if previous_stage_boundary_key:
-                        node_turn_controller.forget_route_binding(node.node_id)
-                    previous_stage_boundary_key = stage_key
+                # 绑定跨回合、跨阶段都保留：换 model_key 等于换前缀缓存命名空间，而
+                # "该换人了"的所有真实理由（无容量、限流惩罚、能力不再匹配、成员被移出组）
+                # 都在下一次准入里现判，不需要按阶段节拍强制重选。
                 node_turn_lease = await self._await_with_model_marker(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -7327,26 +7321,6 @@ class ReActToolLoop:
                     if isinstance(part, dict) and str(part.get('type') or '').strip() == 'image_url':
                         return True
         return False
-
-    @staticmethod
-    def _execution_stage_boundary_key(*, stage_gate: dict[str, Any]) -> str:
-        """阶段边界标识；只在阶段推进时变化，用来触发一次负载均衡重绑。"""
-        if not isinstance(stage_gate, dict) or not bool(stage_gate.get('enabled')):
-            return ''
-        active = stage_gate.get('active_stage')
-        if not isinstance(active, dict):
-            return ''
-        ident = str(active.get('stage_id') or '').strip()
-        if ident:
-            return ident
-        index = active.get('index')
-        if index not in (None, ''):
-            return f'index:{index}'
-        mode = str(active.get('mode') or '').strip()
-        goal = str(active.get('stage_goal') or '').strip()
-        if mode or goal:
-            return f'{mode}:{goal}'
-        return ''
 
     @staticmethod
     def _tool_result_content_open_image_payload(raw_result: Any) -> dict[str, Any] | None:

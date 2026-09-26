@@ -258,9 +258,9 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 
 一次典型流程是：preflight 定下请求体量与是否含图像 → `acquire_turn()` 带着 route plan 入队 → pump 在同一把锁内向 balancer 要候选并拿到该成员某把 key 的 permit，把 `route_index / group_key / model_ref / key_index / permit` 记进 `NodeTurnLease` → `ConfigChatBackend` 的第一次 provider attempt **消费这颗 permit**（key 轮序按选中的 key 旋转，保证不会二次 acquire）→ 该成员的组内预算耗尽后先释放旧 lease，再由同一个 `NodeTurnLease` 就地重绑下一个候选；整组耗尽才前进到链上下一个 entry。
 
-绑定的粒度是**节点**：一个节点在其生命周期内沿用同一成员，只有四类触发会换人——阶段边界、preflight 过滤条件变化（窗口/多模态）、绑定成员进入冷却或其配额桶惩罚超阈、拿不出 permit；节点落终态时清除绑定。逐回合按负载重选会把同一节点的上下文在成员之间来回搬，而换 `model_key` 等于换前缀缓存命名空间，断点之后的整段存活上下文都要重传（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。
+绑定的粒度是**节点**：一个节点在其生命周期内沿用同一成员，换人只有四条事实会触发——本次请求的过滤条件不再匹配（窗口/多模态）、绑定成员自身的配额桶惩罚超阈、绑定成员拿不出 permit、绑定成员被移出组（配置刷新按节点逐个摘除：减成员只解绑正用它的那些节点，加成员不动任何既有绑定）。阶段推进不换人：绑定跨回合、跨阶段保留。节点落终态时清除绑定。逐回合按负载重选会把同一节点的上下文在成员之间来回搬，而换 `model_key` 等于换前缀缓存命名空间，断点之后的整段存活上下文都要重传（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。
 
-负载打分由三部分组成：本地归一化在飞（running+waiting+reserved 比本地容量）、该配额桶最近 60 秒的请求启动数、按半衰期衰减的 429 惩罚。冷却与惩罚按**配额桶**聚合而不是按 binding：同一个 endpoint + 同一把 key（或同一个显式 `quotaPoolKey`）的多条绑定共享一份观测；解析不到密钥材料时每个成员各自记 `unresolved`，绝不互并。
+负载打分由三部分组成：本地归一化在飞（running+waiting+reserved 比本地容量）、该配额桶最近 60 秒的请求启动数、按半衰期衰减的 429 惩罚。冷却与惩罚按**配额桶**聚合而不是按 binding：同一个 endpoint + 同一把 key（或同一个显式 `quotaPoolKey`）的多条绑定共享一份观测；解析不到密钥材料时每个成员各自记 `unresolved`，绝不互并。**429 是唯一的失败记忆**：其它失败（401/403、密钥被禁、5xx）一律当场交给链 fallback，不留任何跨请求状态——换节点后同样的请求可能就成功，而"这条配置坏了"是操作者按日志处理的问题。限流判据复用模型链自己的 `429` 关键字表（`g3ku/utils/retry_keywords.py`），负载均衡器不另起一套文本，否则同一个错误在两条车道上的归因会漂移。
 
 新人常误读的三点：
 
