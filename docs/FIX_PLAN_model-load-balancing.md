@@ -1153,6 +1153,8 @@ Q1 选择上移准入层、Q2 综合负载含滚动 RPM 与 429 衰减、Q3 两�
 
 ## 16. 实施状态（2026-09-26，分支 `feat/model-load-balancing`）
 
+> 后续收口：重绑触发与 cooldown 的三条删除见 `docs/FIX_PLAN_model-route-rebind-trims.md`；该计划落地后，本文件关于"四类重绑触发 / 成员冷却"的描述以它为准。
+
 Phase 0–5 全部落码，架构文档已入册。分支上的 10 个提交：`474b00f0`(Phase 0 基线) → `e73b0c82`+`ffb5d0cd`(Phase 1 配置) → `2ddd6c33`(准入) → `fe6c7fb6`(chat 链路) → `813dca93`/`4b65d1d5`/`02cfe4be`(重试状态、观测、前端) → `1a18d2c6`(docs) → `a66746a5`(本节)。
 
 已按裁定落地的关键选择：
