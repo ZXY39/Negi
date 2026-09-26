@@ -9,9 +9,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def test_ceo_session_bulk_delete_markup_and_branding() -> None:
     html = (REPO_ROOT / "g3ku/web/frontend/org_graph.html").read_text(encoding="utf-8")
 
-    assert "<title>G3KU</title>" in html
-    assert '<img class="brand-icon" src="favicon.ico" alt="G3KU">' in html
-    assert '<span class="brand-text">G3KU</span>' in html
+    assert "<title>Negi</title>" in html
+    assert '<img class="brand-icon" src="favicon.ico" alt="Negi">' in html
+    assert '<span class="brand-text">Negi</span>' in html
     assert 'id="ceo-session-bulk-toggle"' in html
     assert 'id="ceo-session-bulk-actions"' in html
     assert 'id="ceo-session-bulk-delete"' in html

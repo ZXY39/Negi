@@ -1,4 +1,4 @@
-﻿"""CLI commands for g3ku."""
+﻿"""CLI commands for Negi."""
 
 import asyncio
 import json
@@ -30,7 +30,7 @@ from g3ku.web.launcher import run_worker_runtime
 
 app = typer.Typer(
     name="g3ku",
-    help="g3ku - Personal AI Assistant",
+    help="Negi - Personal AI Assistant",
     no_args_is_help=True,
 )
 
@@ -151,7 +151,7 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     content = response or ""
     body = Markdown(content) if render_markdown else Text(content)
     console.print()
-    console.print(f"[cyan]{_logo()} g3ku[/cyan]")
+    console.print(f"[cyan]{_logo()} Negi[/cyan]")
     console.print(body)
     console.print()
 
@@ -183,7 +183,7 @@ async def _read_interactive_input_async() -> str:
 
 def version_callback(value: bool):
     if value:
-        console.print(f"{_logo()} g3ku v{__version__}")
+        console.print(f"{_logo()} Negi v{__version__}")
         raise typer.Exit()
 
 
@@ -193,7 +193,7 @@ def main(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
 ):
-    """g3ku - Personal AI Assistant."""
+    """Negi - Personal AI Assistant."""
     _suppress_noisy_dependency_warnings()
 
 
@@ -210,7 +210,7 @@ def onboard(
         help="Use project-local ./.g3ku/config.json and workspace at current directory.",
     ),
 ):
-    """Initialize g3ku configuration and workspace."""
+    """Initialize Negi configuration and workspace."""
     from g3ku.config.loader import build_project_config_from_example, get_config_path, load_config, save_config
     from g3ku.utils.helpers import get_workspace_path
 
@@ -251,7 +251,7 @@ def onboard(
 
     sync_workspace_templates(workspace)
 
-    console.print(f"\n{_logo()} g3ku is ready!")
+    console.print(f"\n{_logo()} Negi is ready!")
     console.print("\nNext steps:")
     console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
     console.print("     Bind an OpenAI Chat (/v1/chat/completions) or Responses (/v1/responses) endpoint")
@@ -329,7 +329,7 @@ def web(
     debug: bool = typer.Option(False, "--debug/--no-debug", help="Enable full backend debug trace logs."),
     with_worker: bool = typer.Option(True, "--with-worker/--no-worker", help="Allow the web process to manage a local task worker."),
 ):
-    """Start g3ku Web UI."""
+    """Start Negi Web UI."""
     from g3ku.shells.web import run_web_shell
 
     run_web_shell(
@@ -360,7 +360,7 @@ def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
-    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show g3ku runtime logs during chat"),
+    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show Negi runtime logs during chat"),
     debug: bool = typer.Option(False, "--debug/--no-debug", help="Enable full backend debug trace logs."),
 ):
     """Interact with the agent directly."""
@@ -798,7 +798,7 @@ def status():
     def _status_mark(ok: bool) -> str:
         return "[green]OK[/green]" if ok else "[red]X[/red]"
 
-    console.print(f"{_logo()} g3ku Status\n")
+    console.print(f"{_logo()} Negi Status\n")
 
     console.print(f"Config: {config_path} {_status_mark(config_path.exists())}")
     console.print(f"Workspace: {workspace} {_status_mark(workspace.exists())}")
