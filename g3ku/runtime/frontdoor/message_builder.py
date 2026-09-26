@@ -55,7 +55,7 @@ from g3ku.runtime.web_ceo_sessions import (
     prompt_history_messages,
     transcript_messages,
 )
-from main.runtime.stage_budget import SILENT_TOOL_NAME
+from main.runtime.stage_budget import SILENT_TOOL_NAME, STAGE_READ_TOOL_NAME
 
 DEFAULT_FRONTDOOR_SKILL_INVENTORY_TOP_K = 16
 DEFAULT_FRONTDOOR_EXTENSION_TOOL_TOP_K = 16
@@ -202,8 +202,9 @@ class CeoMessageBuilder:
     # 与 RESERVED_INTERNAL_TOOLS 的区别只在一点：这些名字**不要求已经可见**，因此
     # 不依赖任何 tools/*/resource.yaml 声明族。RESERVED_INTERNAL_TOOLS 只保证
     # 「已可见时不被语义 top-k 挤掉」，不具备注入能力 —— 照它加是加不进 schema 的。
-    # 目前唯一的成员是静默收尾信号：它是前门的合同的一部分，不是可被选中的能力。
-    ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = (SILENT_TOOL_NAME,)
+    # 目前成员：静默收尾信号与已裁撤阶段读回。两者都是前门合同的一部分，不是可被选中的能力，
+    # 所以不要求已可见（RESERVED_INTERNAL_TOOLS 只保证"已可见时不被挤掉"，没有注入能力）。
+    ALWAYS_CALLABLE_INTERNAL_TOOLS: tuple[str, ...] = (SILENT_TOOL_NAME, STAGE_READ_TOOL_NAME)
     FIXED_BUILTIN_TOOL_NAMES: tuple[str, ...] = CEO_FIXED_BUILTIN_TOOL_NAMES
     ATTACHMENT_REOPEN_TARGET_LIMIT = 8
 

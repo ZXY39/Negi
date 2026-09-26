@@ -292,6 +292,10 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
             payload["system_generated"] = True
         if round_budget or rounds_used:
             payload["tool_rounds"] = f"{rounds_used}/{round_budget}"
+        if _stage_get(stage, "context_evicted", False) is True:
+            # 只在成立时写。没有这个字段，模型读块时分不清"这条阶段本来就没留细节"和
+            # "细节是我上一轮自己要求移走的"——回读通道就形同不存在，裁撤也无法事后核对。
+            payload["evicted"] = True
         compacted.append(
             {
                 # system 角色，理由同 externalized 块（见上方注释）。

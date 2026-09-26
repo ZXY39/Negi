@@ -37,7 +37,14 @@ from main.runtime.node_prompt_contract import (
     inject_node_dynamic_contract_message,
 )
 import main.service.runtime_service as runtime_service_module
-from main.runtime.internal_tools import SubmitFinalResultTool, SubmitNextStageTool, SpawnChildNodesTool
+from main.runtime.internal_tools import (
+    STAGE_READ_MAX_INDEXES,
+    ReadCompletedStageTool,
+    SubmitFinalResultTool,
+    SubmitNextStageTool,
+    SpawnChildNodesTool,
+)
+from main.runtime.stage_budget import STAGE_READ_TOOL_NAME
 from main.runtime.react_loop import _INVALID_FINAL_SUBMISSION_LIMIT, _PLAIN_TEXT_REPLY_STRIKE_LIMIT, ReActToolLoop
 from main.runtime.stage_budget import STAGELESS_FREE_PASS_REMINDER
 from main.runtime.tool_call_repair import extract_tool_calls_from_xml_pseudo_content
@@ -8990,6 +8997,27 @@ def test_stage_submission_rejects_eviction_without_a_summary() -> None:
     }) == []
     # 不点名裁撤时空总结仍然合法：库里 48.8% 的终态阶段本来就是空总结。
     assert tool.validate_params({"stage_goal": "g", "tool_round_budget": 10}) == []
+
+
+def test_completed_stage_read_tool_bounds_its_arguments() -> None:
+    captured: list[list[int]] = []
+
+    async def _read(stage_indexes: list[int]) -> dict[str, object]:
+        captured.append(list(stage_indexes))
+        return {"ok": True, "stages": []}
+
+    tool = ReadCompletedStageTool(_read)
+
+    assert tool.validate_params({"stage_indexes": []}) == ["stage_indexes must not be empty"]
+    too_many = tool.validate_params({"stage_indexes": list(range(1, STAGE_READ_MAX_INDEXES + 2))})
+    assert too_many == [f"stage_indexes accepts at most {STAGE_READ_MAX_INDEXES} entries"]
+    assert tool.validate_params({"stage_indexes": list(range(1, STAGE_READ_MAX_INDEXES + 2))}) == [
+        f"stage_indexes accepts at most {STAGE_READ_MAX_INDEXES} entries"
+    ]
+    assert tool.validate_params({"stage_indexes": [1, 2]}) == []
+    asyncio.run(tool.execute(stage_indexes=[3, 4]))
+    assert captured == [[3, 4]]
+    assert STAGE_READ_TOOL_NAME == tool.name
 
 
 def test_task_node_detail_manifest_is_agent_full_and_unscoped_by_design() -> None:

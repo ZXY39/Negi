@@ -1079,6 +1079,38 @@ def test_evicted_terminal_stage_prunes_bodies_and_keeps_its_block() -> None:
     assert any("finished 3" in block for block in blocks)
 
 
+def test_block_marker_separates_evicted_from_window_expired_stages() -> None:
+    # 块必须区分"我自己点名移走的"与"窗口到期没的"：没有这个字段，模型不知道该不该回读，
+    # 事后也无法从发送体核对裁撤到底被用了没有。
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-6",
+    )
+    state["stages"][2]["context_evicted"] = True  # stage-3；跳过名额后过期集合为 {1, 3}
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(6), stage_state=state, keep_latest_completed_stages=3
+    )
+
+    assert retained_completed_stage_ids(state, keep_latest=3) == {
+        "frontdoor-stage-2",
+        "frontdoor-stage-4",
+        "frontdoor-stage-5",
+    }
+    assert set(result["compacted_stage_ids"]) == {"frontdoor-stage-1", "frontdoor-stage-3"}
+    blocks = {
+        index: block
+        for index, block in enumerate(
+            [str(item.get("content") or "") for item in result["rewritten"] if STAGE_COMPACT_PREFIX in str(item.get("content") or "")]
+        )
+    }
+    assert len(blocks) == 2
+    marked = [block for block in blocks.values() if '"completed_stage_summary": "finished 3"' in block]
+    plain = [block for block in blocks.values() if '"completed_stage_summary": "finished 1"' in block]
+    assert len(marked) == 1 and '"evicted": true' in marked[0]
+    assert len(plain) == 1 and '"evicted"' not in plain[0]
+
+
 def test_evicted_stage_does_not_consume_retention_window_slot() -> None:
     # 被点名裁撤的阶段不占窗口名额：否则一条裁撤会把另一条仍需要原文的阶段挤出窗口。
     state = _node_ledger_state(

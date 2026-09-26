@@ -54,7 +54,7 @@
 - `stage_goal` 必须清晰说明当前阶段的完成目标，派生子节点的决定，参考哪些可用的skills。
 - `stage_goal` 必须言简意赅，仅描述当前阶段的单一目标。请勿重复上一阶段的内容，列举冗长的成果清单，或将其写成战略论文。
 - `completed_stage_summary` 必须是对本阶段的简要概括，只写三类内容：本阶段已确认的事实、剩下的目标、从犯过的错误中总结出的经验教训。
-- 若下一阶段不再需要本阶段的原始工具入参/出参，就在同一次提交里带上 `drop_completed_stage_tool_detail: true`：本阶段的工具肉身从此不再进入上下文，只留下你刚写的 `completed_stage_summary`。它要求该总结非空，否则判参数非法。移出的是上下文不是数据——完整轨迹仍在任务里，事后用 `task_node_detail` 读本节点即可回读。
+- 若下一阶段不再需要本阶段的原始工具入参/出参，就在同一次提交里带上 `drop_completed_stage_tool_detail: true`：本阶段的工具肉身从此不再进入上下文，只留下你刚写的 `completed_stage_summary`。它要求该总结非空，否则判参数非法。移出的是上下文不是数据——完整轨迹仍在任务里，事后用 `task_node_detail` 读本节点即可回读；阶段块上带 `evicted` 字段的，就是你主动移走的那条。
 - `key_refs` 应仅保留权威、高价值的总结证据引用，而非包装引用。
 - 上述五个参数（`stage_goal` / `tool_round_budget` / `completed_stage_summary` / `key_refs` / `drop_completed_stage_tool_detail`）的形状以 `submit_next_stage` 的工具 schema 为准；`key_refs` 每项是 `{ref, note}` 对象，写成纯字符串会被判参数非法。
 

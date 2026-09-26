@@ -102,7 +102,13 @@ from main.runtime.chat_backend import (
     build_prompt_cache_diagnostics,
     resolve_send_model_context_window_info,
 )
-from main.runtime.internal_tools import SilentTool, SubmitNextStageTool
+from main.runtime.internal_tools import (
+    STAGE_READ_TOOL_OUTPUT_CHAR_LIMIT,
+    STAGE_READ_TOOL_TOTAL_CHAR_BUDGET,
+    ReadCompletedStageTool,
+    SilentTool,
+    SubmitNextStageTool,
+)
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_hybrid_send_token_estimate,
@@ -114,6 +120,7 @@ from main.runtime.stage_budget import (
     SILENT_TOOL_NAME,
     STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER,
     STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE,
+    STAGE_READ_TOOL_NAME,
     STAGE_TOOL_NAME,
     STAGE_TOOL_ROUND_BUDGET_MAX,
     STAGE_TOOL_ROUND_BUDGET_MIN,
@@ -3355,6 +3362,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 候选池水化而消失。缺了它模型只剩「把正文写短一点」这一种伪静默手段。
         if SILENT_TOOL_NAME not in normalized:
             normalized = [*normalized, SILENT_TOOL_NAME]
+        # 读回通道同一性质：阶段被移出上下文之后，如果连"把它读回来"这个动作都要先看
+        # 阶段闸门脸色，裁撤就成了不可撤销的单向操作，模型也学不到自己手里有这个杠杆。
+        if STAGE_READ_TOOL_NAME not in normalized:
+            normalized = [*normalized, STAGE_READ_TOOL_NAME]
         if isinstance(state, dict) and (
             bool(state.get("cron_internal")) or bool(state.get("heartbeat_internal"))
         ):
@@ -5077,6 +5088,119 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return True
         return False
 
+    @staticmethod
+    def _clip_stage_read_text(value: Any, limit: int) -> tuple[str, bool]:
+        text = str(value or "")
+        if len(text) <= limit:
+            return text, False
+        return text[:limit] + "...[truncated]", True
+
+    @classmethod
+    def _read_frontdoor_completed_stage_detail(
+        cls,
+        stage_state: Any,
+        stage_indexes: list[int] | None,
+    ) -> dict[str, Any]:
+        """按 stage_index 读回已移出上下文的阶段（含逐条工具入参与出参正文）。
+
+        读的是调用者自己这一份 stage_state —— 前门唯一带 `rounds[].tools` 正文的账本
+        （canonical 那份实测 rounds 恒空）。stage_index 会随 rebase 重编，所以每条都回带
+        `stage_goal` + `created_at` 让模型自查身份；重号时取较新的副本，与去重同口径。
+        """
+        snapshot = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
+        by_index: dict[int, dict[str, Any]] = {}
+        for stage in list(snapshot.get("stages") or []):
+            if not isinstance(stage, dict):
+                continue
+            try:
+                index = int(stage.get("stage_index") or 0)
+            except (TypeError, ValueError):
+                continue
+            by_index[index] = stage  # 后面的副本覆盖前面的，与 _dedupe_canonical_stages 同向
+
+        requested: list[int] = []
+        for item in list(stage_indexes or []):
+            try:
+                index = int(item)
+            except (TypeError, ValueError):
+                continue
+            if index not in requested:
+                requested.append(index)
+
+        stages: list[dict[str, Any]] = []
+        missing: list[int] = []
+        omitted: list[int] = []
+        spent = 0
+        for index in requested:
+            stage = by_index.get(index)
+            if stage is None:
+                missing.append(index)
+                continue
+            rounds: list[dict[str, Any]] = []
+            for round_item in list(stage.get("rounds") or []):
+                if not isinstance(round_item, dict):
+                    continue
+                tools: list[dict[str, Any]] = []
+                for tool in list(round_item.get("tools") or []):
+                    if not isinstance(tool, dict):
+                        continue
+                    output_ref = str(tool.get("output_ref") or "")
+                    # 只有带指针时才截：没有 ref 的截断就是永久丢内容，而写入侧允许内联到
+                    # 8K+ 且不留指针（实测 554 阶段里 68 个有这样的轮次）。arguments 永远不截。
+                    body, truncated = (
+                        cls._clip_stage_read_text(
+                            tool.get("output_text") or tool.get("output_preview_text"),
+                            STAGE_READ_TOOL_OUTPUT_CHAR_LIMIT,
+                        )
+                        if output_ref
+                        else (str(tool.get("output_text") or tool.get("output_preview_text") or ""), False)
+                    )
+                    tools.append(
+                        {
+                            "tool_call_id": str(tool.get("tool_call_id") or ""),
+                            "tool_name": str(tool.get("tool_name") or ""),
+                            "status": str(tool.get("status") or ""),
+                            "arguments_text": str(tool.get("arguments_text") or ""),
+                            "output_text": body,
+                            "output_ref": output_ref,
+                            "output_truncated": bool(truncated),
+                        }
+                    )
+                rounds.append(
+                    {
+                        "round_index": int(round_item.get("round_index") or 0),
+                        "created_at": str(round_item.get("created_at") or ""),
+                        "text": str(round_item.get("text") or ""),
+                        "tools": tools,
+                    }
+                )
+            record = {
+                "stage_index": index,
+                "stage_id": str(stage.get("stage_id") or ""),
+                # 身份回带：index 会漂，模型要靠这两项确认读到的是不是它要的那条阶段。
+                "created_at": str(stage.get("created_at") or ""),
+                "finished_at": str(stage.get("finished_at") or ""),
+                "stage_goal": str(stage.get("stage_goal") or ""),
+                "completed_stage_summary": str(stage.get("completed_stage_summary") or ""),
+                "evicted": stage.get("context_evicted") is True,
+                "key_refs": [dict(item) for item in list(stage.get("key_refs") or []) if isinstance(item, dict)],
+                "rounds": rounds,
+            }
+            cost = len(json.dumps(record, ensure_ascii=False))
+            if stages and spent + cost > STAGE_READ_TOOL_TOTAL_CHAR_BUDGET:
+                omitted.append(index)
+                continue
+            stages.append(record)
+            spent += cost
+
+        return {
+            "ok": True,
+            "stages": stages,
+            "missing_stage_indexes": missing,
+            "omitted_stage_indexes": omitted,
+            "char_budget": STAGE_READ_TOOL_TOTAL_CHAR_BUDGET,
+        }
+
     @classmethod
     def _submit_frontdoor_next_stage_state(
         cls,
@@ -6097,10 +6221,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             mutable_stage_state.update(next_stage_state)
             return stage_payload
 
+        async def _read_stage(stage_indexes: list[int]) -> dict[str, Any]:
+            return self._read_frontdoor_completed_stage_detail(mutable_stage_state, stage_indexes)
+
         all_tools = {
             **registered_tools,
             STAGE_TOOL_NAME: SubmitNextStageTool(_submit_stage),
             SILENT_TOOL_NAME: SilentTool(),
+            STAGE_READ_TOOL_NAME: ReadCompletedStageTool(_read_stage),
         }
         stage_gate = self._frontdoor_stage_gate({"frontdoor_stage_state": mutable_stage_state})
         visible_tools = visible_tools_for_stage_iteration(
