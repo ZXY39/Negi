@@ -122,6 +122,19 @@ async def test_status_endpoint_exposes_ledger(monkeypatch, tmp_path: Path):
     assert item["latest_tag"] == "v1.0.2"
 
 
+class _FakeURL:
+    def __init__(self, port):
+        self.port = port
+
+
+class _FakeRequest:
+    """只带端口需求的 Request 替身。"""
+
+    def __init__(self, port):
+        self.url = _FakeURL(port)
+        self.base_url = _FakeURL(port)
+
+
 async def test_apply_requires_a_version_shape_and_rejects_when_current(monkeypatch, tmp_path: Path):
     from fastapi import HTTPException
 
@@ -136,20 +149,23 @@ async def test_apply_requires_a_version_shape_and_rejects_when_current(monkeypat
         "spawn_runner",
         lambda ref, port=None, pause_running_work=True: spawned.append((ref, port, pause_running_work)),
     )
+    # 服务实际监听端口与 config.web.port 不同（--port 启动）时的回归场景。
+    request = _FakeRequest(18999)
 
     with pytest.raises(HTTPException) as bad_ref:
-        await update_api.update_apply({"ref": "v1; rm -rf /"})
+        await update_api.update_apply(request, {"ref": "v1; rm -rf /"})
     assert bad_ref.value.status_code == 400
     assert spawned == []
 
     with pytest.raises(HTTPException) as nothing:
-        await update_api.update_apply({})
+        await update_api.update_apply(request, {})
     assert nothing.value.status_code == 409
     assert nothing.value.detail["code"] == "no_update_available"
 
-    result = await update_api.update_apply({"ref": "v1.0.2", "pause_running_work": False})
+    result = await update_api.update_apply(request, {"ref": "v1.0.2", "pause_running_work": False})
     assert result["item"]["restarting"] is True
     assert spawned[0][0] == "v1.0.2"
+    assert spawned[0][1] == 18999, "执行体必须拿到这次请求真正到达的端口"
     assert spawned[0][2] is False, "用户的未确认决定要传到执行体"
 
 
@@ -163,7 +179,7 @@ async def test_apply_keeps_service_up_when_spawn_fails(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr(update_api, "spawn_runner", _boom)
     with pytest.raises(HTTPException) as exc:
-        await update_api.update_apply({"ref": "v1.0.2"})
+        await update_api.update_apply(_FakeRequest(18999), {"ref": "v1.0.2"})
     assert exc.value.status_code == 503
 
 
@@ -191,10 +207,25 @@ def test_runner_refuses_to_act_without_a_known_port(tmp_path: Path, monkeypatch)
     assert "port unknown" in (tmp_path / "apply.log").read_text(encoding="utf-8")
 
 
+def test_runner_refuses_a_port_that_is_not_this_service(tmp_path: Path, monkeypatch):
+    """端口上答话的不是本服务（端口取错的后果）⇒ 连退出请求都不发。"""
+    import g3ku.update_apply as apply_mod
+
+    requested = []
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: False)
+    monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: requested.append(port) or "exit_accepted_200")
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
+
+    assert apply_mod.run("v1.0.2", port=18999) == 5
+    assert requested == []
+    assert "no Negi bootstrap endpoint" in (tmp_path / "apply.log").read_text(encoding="utf-8")
+
+
 def test_runner_aborts_before_touching_code_when_exit_refused(tmp_path: Path, monkeypatch):
     import g3ku.update_apply as apply_mod
 
     upgraded = []
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
     monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_refused_409")
     monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: upgraded.append(ref) or True)
     monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)

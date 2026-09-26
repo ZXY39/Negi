@@ -12,7 +12,7 @@ import asyncio
 import re
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 from loguru import logger
 
 from g3ku import __version__
@@ -79,7 +79,7 @@ async def update_check_now():
 
 
 @router.post("/update/apply")
-async def update_apply(payload: dict | None = Body(default=None)):
+async def update_apply(request: Request, payload: dict | None = Body(default=None)):
     body = payload or {}
     requested_ref = str(body.get("ref") or "").strip()
     ledger = read_update_ledger()
@@ -102,17 +102,21 @@ async def update_apply(payload: dict | None = Body(default=None)):
         )
     # 默认允许执行体确认暂停在跑的会话与任务；前端确认框负责把这句话讲给用户。
     pause_running_work = bool(body.get("pause_running_work", True))
-    try:
-        # 把当前监听端口交给执行体：让它自己猜端口，可能关掉同机的另一个实例。
-        from g3ku.config.loader import load_config
+    # 端口取"这次请求真正到达的端口"：config.web.port 只是配置值，进程可以带
+    # --port 启动而不回写配置，用配置值会让执行体去关同机另一个实例，或在错误
+    # 端口上空等 90 秒后放弃（实测复现过）。配置值只作兜底。
+    live_port = request.url.port or request.base_url.port
+    if not live_port:
+        try:
+            from g3ku.config.loader import load_config
 
-        live_port = int(load_config().web.port or 0) or None
-    except Exception:
-        live_port = None
+            live_port = int(load_config().web.port or 0) or None
+        except Exception:
+            live_port = None
     try:
         spawn_runner(ref, port=live_port, pause_running_work=pause_running_work)
     except OSError as exc:
         logger.warning("update apply spawn failed: {}", exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    logger.info("update apply scheduled ref={}", ref)
-    return {"ok": True, "item": {"restarting": True, "ref": ref, "pause_running_work": pause_running_work}}
+    logger.info("update apply scheduled ref={} port={}", ref, live_port)
+    return {"ok": True, "item": {"restarting": True, "ref": ref, "port": live_port, "pause_running_work": pause_running_work}}

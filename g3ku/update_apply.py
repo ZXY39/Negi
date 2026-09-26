@@ -61,6 +61,20 @@ def _resolve_port(explicit: int | None) -> int | None:
     return _read_config_port()
 
 
+def _probe_self(port: int) -> bool:
+    """确认这个端口上确实是本服务的 bootstrap 面，再谈关停。
+
+    端口取错的两种后果都很糟：关掉同机另一个实例，或在别人的端口上空等到超时后
+    放弃（用户那边就是"点了没反应"）。所以探不到就中止，不做任何猜测。
+    """
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/bootstrap/status", timeout=5.0) as response:
+            payload = json.loads(response.read().decode() or "{}")
+    except Exception:
+        return False
+    return isinstance(payload, dict) and payload.get("ok") is True and isinstance(payload.get("item"), dict)
+
+
 def _port_busy(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(0.5)
@@ -211,6 +225,9 @@ def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -
     if resolved is None:
         _log("apply aborted: web port unknown (no --port and no readable .g3ku/config.json)")
         return 4
+    if not _probe_self(resolved):
+        _log(f"apply aborted: no Negi bootstrap endpoint answering on port {resolved}")
+        return 5
     time.sleep(STARTUP_GRACE_SECONDS)
     label = _request_exit(resolved, pause_running_work)
     _log(f"exit request: {label}")
