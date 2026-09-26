@@ -11357,8 +11357,8 @@ async def test_runtime_frame_exposes_await_marker_while_waiting_for_node_turn(tm
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def acquire_turn(self, *, task_id: str, node_id: str, model_ref: str):
-            _ = task_id, node_id, model_ref
+        async def acquire_turn(self, *, task_id: str, node_id: str, model_ref: str = "", route_plan=None, filters=None):
+            _ = task_id, node_id, model_ref, route_plan, filters
             self.started.set()
             await self.release.wait()
             return SimpleNamespace(lease_id=1)

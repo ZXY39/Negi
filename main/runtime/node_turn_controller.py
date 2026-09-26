@@ -278,6 +278,23 @@ class NodeTurnController:
         if self._balancer is not None:
             self._balancer.forget_node(node_id)
 
+    def record_route_request_start(self, lease: NodeTurnLease | None) -> None:
+        """通知 balancer「这一发真的要打到 provider 了」：reserved 转成速率样本。"""
+        if lease is None or self._balancer is None:
+            return
+        self._balancer.record_request_start(lease.route_lease)
+
+    def record_route_outcome(
+        self,
+        lease: NodeTurnLease | None,
+        *,
+        status_code: int | None = None,
+        error_text: str = "",
+    ) -> None:
+        if lease is None or self._balancer is None:
+            return
+        self._balancer.record_outcome(lease.route_lease, status_code=status_code, error_text=error_text)
+
     def poke(self) -> None:
         wake_event = self._wake_event
         loop = self._loop

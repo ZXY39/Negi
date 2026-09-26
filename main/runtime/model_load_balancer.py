@@ -382,9 +382,11 @@ class ModelLoadBalancer:
                 return
 
             text = str(error_text or "").strip()
-            if not text:
-                return
             state = self._state(lease.model_key)
+            if not text:
+                # 成功或无文案的调用：清掉「连续不可用」串，冷却由时间到点自行失效。
+                state.consecutive_unavailable = 0
+                return
             if _looks_unavailable(text):
                 state.consecutive_unavailable += 1
                 seconds = min(COOLDOWN_SECONDS_MAX, COOLDOWN_SECONDS_DEFAULT * max(1, state.consecutive_unavailable))

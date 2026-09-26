@@ -19,7 +19,6 @@ from g3ku.config.schema import (
 )
 from g3ku.json_schema_utils import normalize_openai_tool_definitions
 from g3ku.prompt_trace import render_model_chain_trace
-from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.providers.base import LLMModelAttempt, LLMResponse, normalize_usage_payload
 from g3ku.providers.fallback import (
     DEFAULT_PROVIDER_ATTEMPT_TIMEOUT_SECONDS,
@@ -32,20 +31,25 @@ from g3ku.providers.fallback import (
     model_retry_backoff_seconds,
     normalize_request_timeout_seconds,
     normalized_retry_count,
-    response_requires_retry,
     response_requires_fallback,
+    response_requires_retry,
     sanitize_terminal_model_error,
     should_fallback_model_error,
     wait_for_model_attempt,
 )
+from g3ku.providers.provider_factory import build_provider_from_model_key
 from g3ku.runtime.stage_prompt_compaction import (
     STAGE_COMPACT_PREFIX as _STAGE_COMPACT_PREFIX,
+)
+from g3ku.runtime.stage_prompt_compaction import (
     STAGE_EXTERNALIZED_PREFIX as _STAGE_EXTERNALIZED_PREFIX,
 )
 from g3ku.utils.api_keys import iter_api_key_retry_slots
-from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController, ModelKeyPermitLease
+from main.runtime.model_route import LEASE_OUTCOME_GROUP_EXHAUSTED
 from main.runtime.node_turn_controller import NodeTurnLease
+from main.runtime.send_token_preflight import estimate_runtime_provider_request_preview_tokens
+
 _MISSING = object()
 # 前端折叠态只做视觉截断、点击展开需要全文，因此这里仅做防超大 payload 的宽上限。
 _MODEL_RETRY_STATUS_ERROR_CHAR_LIMIT = 4096
@@ -672,6 +676,83 @@ def _log_model_chain_fallback(
     )
 
 
+def _model_error_status_code(error: Any) -> int | None:
+    """从异常或 LLMResponse 上取结构化 HTTP 状态；取不到返回 None。
+
+    只信任结构化状态，文本关键字不参与判定（与 `is_request_shape_error` 同一口径）。
+    """
+    for attr in ("error_status", "status_code", "status"):
+        raw = getattr(error, attr, None)
+        if raw is None:
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _build_route_slots(model_routes: Any, *, node_turn_refs: list[str]) -> list[dict[str, Any]]:
+    """把 route plan 铺成与 `refs` 下标对齐的槽位表。
+
+    返回空列表表示「没有负载均衡组」，此时 chat 走完全不变的 direct 链。含组时链上每个
+    槽位只有一个成员名额，成员由 balancer 的绑定决定，配置顺序不参与选择。
+    """
+    routes = list(getattr(model_routes, "routes", None) or [])
+    if not routes or not any(bool(getattr(route, "is_load_balance", False)) for route in routes):
+        return []
+    slots: list[dict[str, Any]] = []
+    for route in routes:
+        is_group = bool(getattr(route, "is_load_balance", False))
+        group = getattr(route, "group", None)
+        candidates = [str(item or "").strip() for item in tuple(getattr(route, "candidates", ()) or ()) if str(item or "").strip()]
+        if is_group:
+            first_member = candidates[0] if candidates else ""
+            slots.append(
+                {
+                    "kind": "load_balance",
+                    "route_index": int(getattr(route, "index", len(slots))),
+                    "group_key": str(getattr(route, "group_key", "") or ""),
+                    "max_retry_rounds": int(getattr(group, "max_retry_rounds", 1) or 1) if group is not None else 1,
+                    "members": candidates,
+                    # 占位成员：真正用哪个由准入绑定或组内重绑决定。
+                    "placeholder": first_member,
+                }
+            )
+            continue
+        model_key = str(getattr(route, "model_key", "") or "").strip()
+        slots.append({"kind": "model", "route_index": int(getattr(route, "index", len(slots))), "model_key": model_key})
+    if not any(slot["kind"] == "load_balance" for slot in slots):
+        return []
+    refs = [slot.get("placeholder") or slot.get("model_key") or "" for slot in slots]
+    refs = [item for item in refs if item]
+    if not refs:
+        return []
+    # refs 会被调用方就地改写（组槽位换成实际成员），这里直接接管入参 refs。
+    node_turn_refs[:] = refs
+    return slots
+
+
+def _route_slot_at(slots: list[dict[str, Any]], index: int) -> dict[str, Any] | None:
+    if not slots:
+        return None
+    if 0 <= index < len(slots):
+        return slots[index]
+    return None
+
+
+def _slot_max_retry_rounds(slot: dict[str, Any] | None) -> int | None:
+    if not slot or slot.get("kind") != "load_balance":
+        return None
+    try:
+        rounds = int(slot.get("max_retry_rounds") or 1)
+    except (TypeError, ValueError):
+        rounds = 1
+    return max(1, rounds)
+
+
 class ConfigChatBackend:
     def __init__(self, config: Config):
         self._config = config
@@ -720,6 +801,84 @@ class ConfigChatBackend:
                 return configured
         return self._normalized_model_attempt_timeout_seconds()
 
+    def _resolve_group_slot_ref(
+        self,
+        *,
+        controller: Any,
+        lease: Any,
+        slot: dict[str, Any],
+        model_index: int,
+        tried_model_refs: set[str],
+    ) -> str | None:
+        """该组槽位本次用哪个成员；返回 None 表示这个组给不出可用候选。
+
+        准入阶段已经绑好的成员优先直接复用（它的 permit 就在 lease 上），否则向 balancer
+        重绑一次。没有任何准入可依赖时（embedded/web 无 controller）退回槽位占位成员，
+        保持旧配置与旧进程形态可读。
+        """
+        if controller is None or lease is None:
+            member = str(slot.get("placeholder") or "")
+            return member if member and member not in tried_model_refs else None
+        bound = getattr(lease, "route_lease", None)
+        lease_route_index = int(getattr(lease, "route_index", 0) or 0)
+        if (
+            bound is not None
+            and lease_route_index == int(model_index)
+            and str(getattr(lease, "group_key", "") or "") == str(slot.get("group_key") or "")
+            and str(getattr(bound, "model_key", "") or "") not in tried_model_refs
+        ):
+            return str(bound.model_key)
+        selected = controller.rebind_turn(
+            lease,
+            route_index=int(model_index),
+            excluded_model_keys=frozenset(tried_model_refs),
+            rebind_reason="route_entry",
+        )
+        return str(getattr(selected, "model_key", "") or "") if selected is not None else None
+
+    async def _advance_group_member(
+        self,
+        *,
+        controller: Any,
+        lease: Any,
+        refs: list[str],
+        model_index: int,
+        slot: dict[str, Any],
+        tried_model_refs: set[str],
+        rotation_number: int,
+    ) -> bool:
+        """组内换下一个未试成员，并沿用同模型轮之间的退避节拍。
+
+        跨模型前进本身零等待，而组预算被压到 1..3 轮后，一次 pass 打满整组会变成对着
+        分钟级 RPM 窗口的背靠背请求；这里把节拍从模型维度搬到组维度。`rotation_number`
+        是本请求在本组内第几次换人，第 1 次用最小退避档。
+        """
+        if controller is None or lease is None:
+            return False
+        excluded = frozenset(tried_model_refs)
+        members = [str(item or "").strip() for item in list(slot.get("members") or []) if str(item or "").strip()]
+        if not [item for item in members if item not in excluded]:
+            return False
+        delay_seconds = model_retry_backoff_seconds(max(1, int(rotation_number)))
+        logger.warning(
+            "Model load-balance member {} exhausted in group {}; rotating to another member in {:.1f}s",
+            str(refs[model_index] if model_index < len(refs) else ""),
+            str(slot.get("group_key") or ""),
+            float(delay_seconds or 0.0),
+        )
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+        selected = controller.rebind_turn(
+            lease,
+            route_index=int(model_index),
+            excluded_model_keys=excluded,
+            rebind_reason="fallback_after_failure",
+        )
+        if selected is None:
+            return False
+        refs[model_index] = str(selected.model_key)
+        return True
+
     async def chat(
         self,
         *,
@@ -738,10 +897,15 @@ class ConfigChatBackend:
         model_refs_resolver: Any = None,
         single_request_timeout_seconds: float | None = None,
         on_model_retry_status: Any = None,
+        model_routes: Any = None,
+        node_turn_controller: Any = None,
     ) -> LLMResponse:
         refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
         if not refs:
             raise ValueError('model_refs must not be empty')
+        # route plan 里出现负载均衡组时，模型序列由 balancer 的绑定驱动；纯 direct 链
+        # 沿用现有 refs 走位，行为与改造前一致。
+        route_slots = _build_route_slots(model_routes, node_turn_refs=refs)
         explicit_attempt_timeout = single_request_timeout_seconds is not None
         request_attempt_timeout_seconds = normalize_request_timeout_seconds(
             single_request_timeout_seconds
@@ -789,6 +953,8 @@ class ConfigChatBackend:
         suppress_next_request_retry_emission = False
         # 已耗尽预算/已试过的模型 ref：模型前进边界的链刷新后据此跳过，不回头重试。
         tried_model_refs: set[str] = set()
+        # 本请求在负载均衡组内已经换过几个成员：决定下一次换人前的退避档位。
+        group_member_rotations = 0
         # 链变更重启次数：链在重试途中被改写时按新链重启，此计数跨重启累计，
         # 只兜底病态抖动，不随单模型轮预算重置。
         chain_restart_count = 0
@@ -823,6 +989,22 @@ class ConfigChatBackend:
                 if model_index >= len(refs):
                     break
                 ref = refs[model_index]
+                route_slot = _route_slot_at(route_slots, model_index)
+                if route_slot is not None and route_slot["kind"] == "load_balance":
+                    chosen = self._resolve_group_slot_ref(
+                        controller=node_turn_controller,
+                        lease=node_turn_lease,
+                        slot=route_slot,
+                        model_index=model_index,
+                        tried_model_refs=tried_model_refs,
+                    )
+                    if chosen is None:
+                        # 这个组给不出任何成员（全冷却 / 全容量满 / 全被过滤）：按链前进。
+                        tried_model_refs.add(ref)
+                        model_index += 1
+                        continue
+                    ref = chosen
+                    refs[model_index] = ref
                 tried_model_refs.add(ref)
                 try:
                     base_target = build_provider_from_model_key(self._config, ref)
@@ -852,9 +1034,24 @@ class ConfigChatBackend:
                     api_key_indexes = [int(item) for item in configured_api_key_indexes]
                 if int(getattr(base_target, "api_key_count", 0) or 0) > 0 and not api_key_indexes:
                     raise RuntimeError(f"All configured API keys are disabled for model {ref}")
-                # 本模型的可重试轮数预算：绑定 retry_count 即配置页「重试次数」，
-                # 0/未设置用默认 DEFAULT_RETRYABLE_MODEL_ROUNDS。一轮 = 完整轮过该模型所有 key。
-                budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
+                # 准入已经握着这颗 permit 的 key：把那一把排到轮序最前，第一次 attempt
+                # 才会命中 `use_held_turn_permit` 并消费它，而不是再 acquire 第二颗。
+                if api_key_indexes and (
+                    node_turn_lease is not None
+                    and node_turn_lease.initial_model_permit is not None
+                    and str(node_turn_lease.model_ref or "") == str(ref)
+                ):
+                    held_key_index = int(node_turn_lease.key_index)
+                    if held_key_index in api_key_indexes:
+                        api_key_indexes = [held_key_index] + [item for item in api_key_indexes if item != held_key_index]
+                # 本模型的可重试轮数预算：direct 链沿用绑定 retry_count（0/未设置用默认
+                # DEFAULT_RETRYABLE_MODEL_ROUNDS）。负载均衡组不继承成员 catalog 的值，
+                # 否则 9999999 这类配置会让该成员永远不让位、组内平级 fallback 失效。
+                group_budget = _slot_max_retry_rounds(route_slot)
+                if group_budget is not None:
+                    budget_rounds = int(group_budget)
+                else:
+                    budget_rounds = normalized_retry_count(getattr(base_target, "retry_count", 0)) or DEFAULT_RETRYABLE_MODEL_ROUNDS
                 model_retry_on = list(getattr(base_target, "retry_on", []) or [])
                 preview_payload = build_send_provider_request_preview(
                     config=self._config,
@@ -904,6 +1101,11 @@ class ConfigChatBackend:
                             if use_held_turn_permit and held_turn_lease is not None:
                                 permit_lease = held_turn_lease.initial_model_permit
                                 held_turn_lease.initial_model_permit = None
+                                # permit 归这次 attempt 所有：从 balancer 的 route lease 上
+                                # 摘下来，避免 attempt 释放之后 lease 再释放一次（双减）。
+                                route_lease = getattr(held_turn_lease, "route_lease", None)
+                                if route_lease is not None and getattr(route_lease, "permit", None) is permit_lease:
+                                    route_lease.permit = None
                             elif model_concurrency_controller is not None:
                                 permit_lease = await model_concurrency_controller.acquire_specific(
                                     model_ref=target.provider_ref,
@@ -955,6 +1157,9 @@ class ConfigChatBackend:
                                     )
                             provider_request_count += 1
                             last_request_model_ref = current_model_ref
+                            # 负载均衡观测的唯一上报点：这一发真的要打到 provider 了。
+                            if node_turn_controller is not None:
+                                node_turn_controller.record_route_request_start(node_turn_lease)
                             attempt_started_monotonic = time.perf_counter()
                             response = await wait_for_model_attempt(
                                 target.provider.chat(
@@ -976,6 +1181,12 @@ class ConfigChatBackend:
                             last_error = model_last_error = exc
                             model_last_response = None
                             model_last_failure_reason = exception_chain_display_text(exc)
+                            if node_turn_controller is not None:
+                                node_turn_controller.record_route_outcome(
+                                    node_turn_lease,
+                                    status_code=_model_error_status_code(exc),
+                                    error_text=model_last_failure_reason,
+                                )
                             if attempt_visible_text_streamed:
                                 raise
                             if is_request_shape_error(exc):
@@ -1022,12 +1233,21 @@ class ConfigChatBackend:
                         retryable_response = response_requires_retry(response, retry_on=target.retry_on)
                         fallback_response = response_requires_fallback(response)
                         if not fallback_response:
+                            if node_turn_controller is not None:
+                                # 成功终态：清掉该成员的连续不可用计数，但保留 RPM 观测。
+                                node_turn_controller.record_route_outcome(node_turn_lease)
                             return response  # 成功终态（或内部错误响应按原样返回）
                         if response.visible_text_streamed:
                             return response  # 已出现可见流式文本：不做透明重试/回退
                         model_last_response = response
                         model_last_error = None
                         model_last_failure_reason = str(response.error_text or response.content or response.finish_reason or "")
+                        if node_turn_controller is not None:
+                            node_turn_controller.record_route_outcome(
+                                node_turn_lease,
+                                status_code=_model_error_status_code(response),
+                                error_text=model_last_failure_reason,
+                            )
                         if is_request_shape_error(response):
                             advance_to_next_model = True
                             break
@@ -1100,6 +1320,31 @@ class ConfigChatBackend:
                     # 新链链首重新评估。不记成"跨模型 fallback"。
                     model_index = 0
                     continue
+                # 负载均衡组：先在同组内换一个未试成员，成员之间沿用同一套封顶指数退避。
+                # 现网请求量集中在失败尾（跨模型回合扛三成 provider 请求），今天的节拍
+                # 全部来自退避；组预算收缩后若不补节拍，一次 pass 会背靠背打满整组，而
+                # 对手是按分钟计的 RPM 窗口。
+                if route_slot is not None and route_slot["kind"] == "load_balance":
+                    moved = await self._advance_group_member(
+                        controller=node_turn_controller,
+                        lease=node_turn_lease,
+                        refs=refs,
+                        model_index=model_index,
+                        slot=route_slot,
+                        tried_model_refs=tried_model_refs,
+                        rotation_number=group_member_rotations + 1,
+                    )
+                    if moved:
+                        group_member_rotations += 1
+                        continue
+                    if node_turn_controller is not None:
+                        # 组整体耗尽：归还组侧 permit 与 reserved，再按链向后前进，
+                        # 不允许一边占着组成员 permit 一边跑 direct 模型。
+                        node_turn_controller.release_route_lease(
+                            node_turn_lease,
+                            outcome=LEASE_OUTCOME_GROUP_EXHAUSTED,
+                            error=str(model_last_failure_reason or "") or (str(model_last_error) if model_last_error is not None else ""),
+                        )
                 # 本模型耗尽：在模型前进边界活刷新链（运行中新增的 fallback 模型
                 # 在此可见），跳过已试模型后决定前进还是落终态。
                 model_index += 1

@@ -64,6 +64,7 @@ from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception, is_runtime_self_fault
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
+from main.runtime.model_route import RouteCandidateFilters
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     APPEND_NOTICE_TAIL_PREFIX,
@@ -258,6 +259,8 @@ class ReActToolLoop:
         tools_supplier=None,
         model_refs: list[str],
         model_refs_supplier=None,
+        model_routes=None,
+        model_routes_supplier=None,
         runtime_context: dict[str, Any],
         max_iterations: int | None | object = _UNSET,
         max_parallel_tool_calls: int | None | object = _UNSET,
@@ -265,6 +268,8 @@ class ReActToolLoop:
         breaker = RepeatedActionCircuitBreaker()
         limit = self._normalize_optional_limit(max_iterations, default=self._max_iterations)
         attempts = 0
+        # 上一次授予回合时所在的阶段；阶段推进时清掉负载均衡绑定，触发一次重绑。
+        previous_stage_boundary_key = ''
         last_contract_violations: list[str] = []
         message_history = list(messages or [])
         fresh_turn_request_seed_messages = self._prompt_message_records(request_body_seed_messages)
@@ -503,7 +508,30 @@ class ReActToolLoop:
             )
             if not current_model_refs:
                 raise RuntimeError('no model refs configured for node runtime')
+            # route plan 出现负载均衡组时，refs 只是「候选展开视图」：实际成员由准入层
+            # 的 balancer 绑定决定，这里不把候选数组的第一项当首选模型。
+            current_model_routes = None
+            if model_routes_supplier is not None or model_routes is not None:
+                try:
+                    current_model_routes = (
+                        model_routes_supplier() if callable(model_routes_supplier) else model_routes
+                    )
+                except Exception:
+                    current_model_routes = None
+                if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
+                    current_model_refs = list(current_model_routes.candidate_model_keys) or current_model_refs
             image_multimodal_enabled = self._image_multimodal_enabled_for_model_refs(current_model_refs)
+            if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
+                # 组内成员谁被选中要到准入才定，因此多模态闸门取候选的保守交集：
+                # 只有每个候选都支持图像时才对外宣称支持图像。
+                image_multimodal_enabled = all(
+                    self._image_multimodal_enabled_for_model_refs([item]) for item in current_model_refs
+                )
+            # prompt cache key 里的模型身份：含组时用稳定的 route signature，不再把候选
+            # 数组当成模型身份（候选顺序不代表实际被选中的成员）。
+            prompt_cache_model_refs = current_model_refs
+            if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
+                prompt_cache_model_refs = [f'route:{current_model_routes.signature()}']
             if pending_content_open_image_payloads:
                 request_messages = self._append_content_open_image_overlay_to_request_messages(
                     request_messages,
@@ -517,7 +545,7 @@ class ReActToolLoop:
             turn_prompt_cache_key = self._execution_prompt_cache_key(
                 model_messages=model_messages,
                 tool_schemas=tool_schemas,
-                model_refs=current_model_refs,
+                model_refs=prompt_cache_model_refs,
             )
             current_tool_choice = self._repair_tool_choice(
                 visible_tools=callable_visible_tools,
@@ -561,7 +589,7 @@ class ReActToolLoop:
                     compression_prompt_cache_key = self._execution_prompt_cache_key(
                         model_messages=model_messages,
                         tool_schemas=compression_tool_schemas,
-                        model_refs=current_model_refs,
+                        model_refs=prompt_cache_model_refs,
                     )
                     compression_estimate_payload = self._estimate_node_send_preflight_tokens(
                         task_id=task.task_id,
@@ -746,8 +774,19 @@ class ReActToolLoop:
                 )
             node_turn_lease = None
             node_turn_controller = getattr(self, '_node_turn_controller', None)
+            request_has_image_parts = self._request_messages_include_image_parts(request_messages)
             primary_model_ref = str(current_model_refs[0] or '').strip()
-            if node_turn_controller is not None and primary_model_ref:
+            route_plan_for_turn = None
+            if current_model_routes is not None and list(current_model_routes.load_balance_group_keys or []):
+                route_plan_for_turn = current_model_routes
+            if node_turn_controller is not None and (route_plan_for_turn is not None or primary_model_ref):
+                # 阶段边界换过一次成员：绑定跨回合保留，只有阶段推进时才重选，
+                # 否则一个节点会每跳换一个前缀缓存命名空间。
+                stage_key = self._execution_stage_boundary_key(stage_gate=stage_gate)
+                if stage_key and stage_key != previous_stage_boundary_key:
+                    if previous_stage_boundary_key:
+                        node_turn_controller.forget_route_binding(node.node_id)
+                    previous_stage_boundary_key = stage_key
                 node_turn_lease = await self._await_with_model_marker(
                     task_id=task.task_id,
                     node_id=node.node_id,
@@ -755,7 +794,14 @@ class ReActToolLoop:
                     awaitable=node_turn_controller.acquire_turn(
                         task_id=task.task_id,
                         node_id=node.node_id,
-                        model_ref=primary_model_ref,
+                        model_ref='' if route_plan_for_turn is not None else primary_model_ref,
+                        route_plan=route_plan_for_turn,
+                        filters=RouteCandidateFilters(
+                            required_context_window_tokens=int(
+                                (token_preflight_diagnostics or {}).get('estimated_total_tokens') or 0
+                            ),
+                            requires_image_multimodal=bool(request_has_image_parts),
+                        ),
                     ),
                 )
             provider_retry_count = 0
@@ -776,6 +822,8 @@ class ReActToolLoop:
                             messages=request_messages,
                             tools=tool_schemas or None,
                             model_refs=current_model_refs,
+                            model_routes=current_model_routes,
+                            node_turn_controller=node_turn_controller,
                             tool_choice=current_tool_choice,
                             parallel_tool_calls=(self._parallel_tool_calls_enabled if tool_schemas else None),
                             prompt_cache_key=turn_prompt_cache_key,
@@ -7216,6 +7264,13 @@ class ReActToolLoop:
     def _accepts_runtime_context(tool: Tool) -> bool:
         return ReActToolLoop._runtime_context_parameter_name(tool) is not None
 
+    def forget_node_route_binding(self, node_id: str) -> None:
+        """节点结束时释放负载均衡的粘滞绑定（绑定跨回合保留，只在节点结束或阶段推进时清）。"""
+        controller = getattr(self, '_node_turn_controller', None)
+        forget = getattr(controller, 'forget_route_binding', None)
+        if callable(forget):
+            forget(str(node_id or '').strip())
+
     @staticmethod
     def _runtime_context_parameter_name(tool: Tool) -> str | None:
         sig = inspect.signature(tool.execute)
@@ -7261,6 +7316,37 @@ class ReActToolLoop:
                 continue
             return bool(getattr(model, 'image_multimodal_enabled', False))
         return False
+
+    @staticmethod
+    def _request_messages_include_image_parts(messages: list[dict[str, Any]] | None) -> bool:
+        """请求里是否已经带上了图像块，用于组内候选的多模态过滤。"""
+        for message in list(messages or []):
+            content = (message or {}).get('content')
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and str(part.get('type') or '').strip() == 'image_url':
+                        return True
+        return False
+
+    @staticmethod
+    def _execution_stage_boundary_key(*, stage_gate: dict[str, Any]) -> str:
+        """阶段边界标识；只在阶段推进时变化，用来触发一次负载均衡重绑。"""
+        if not isinstance(stage_gate, dict) or not bool(stage_gate.get('enabled')):
+            return ''
+        active = stage_gate.get('active_stage')
+        if not isinstance(active, dict):
+            return ''
+        ident = str(active.get('stage_id') or '').strip()
+        if ident:
+            return ident
+        index = active.get('index')
+        if index not in (None, ''):
+            return f'index:{index}'
+        mode = str(active.get('mode') or '').strip()
+        goal = str(active.get('stage_goal') or '').strip()
+        if mode or goal:
+            return f'{mode}:{goal}'
+        return ''
 
     @staticmethod
     def _tool_result_content_open_image_payload(raw_result: Any) -> dict[str, Any] | None:

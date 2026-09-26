@@ -20,6 +20,7 @@ LEASE_OUTCOME_SHAPE_ERROR = "shape_error"
 LEASE_OUTCOME_UNAVAILABLE = "unavailable"
 LEASE_OUTCOME_CANCELLED = "cancelled"
 LEASE_OUTCOME_BUILD_FAILED = "build_failed"
+LEASE_OUTCOME_GROUP_EXHAUSTED = "group_exhausted"
 
 
 @dataclass(slots=True)
@@ -172,3 +173,69 @@ class ModelRouteLease:
 
 
 RoutePlanSupplier = Callable[[], ModelRoutePlan]
+
+
+def build_model_route_plan(config: Any, scope: str, *, revision: int = 0) -> ModelRoutePlan:
+    """把配置里的 route entry 解析成运行时 route plan。
+
+    成员的能力视图（context window、多模态）在这里一次性解析，调用方不再各自去读
+    「链上第一个模型」。禁用成员保留在候选里但会被 direct 链过滤，与既有
+    `get_scope_model_chain` 的过滤口径一致。
+    """
+    routes: list[ResolvedModelRoute] = []
+    for entry in list(config.get_role_model_routes(scope) or []):
+        entry_type = str(getattr(entry, "type", MODEL_ROUTE_KIND_MODEL) or MODEL_ROUTE_KIND_MODEL)
+        if entry_type == MODEL_ROUTE_KIND_LOAD_BALANCE:
+            group_key = str(getattr(entry, "group_key", "") or "").strip()
+            group_config = config.get_load_balance_group(group_key)
+            if group_config is None:
+                continue
+            members: list[RouteMemberView] = []
+            for member_key in list(group_config.model_keys or []):
+                key = str(member_key or "").strip()
+                if not key:
+                    continue
+                members.append(_member_view_for(config, key))
+            enabled = bool(getattr(group_config, "enabled", True))
+            routes.append(
+                ResolvedModelRoute(
+                    index=len(routes),
+                    kind=MODEL_ROUTE_KIND_LOAD_BALANCE,
+                    group_key=group_key,
+                    group=ResolvedLoadBalanceGroup(
+                        group_key=group_key,
+                        enabled=enabled,
+                        max_retry_rounds=int(getattr(group_config, "max_retry_rounds", 1) or 1),
+                        members=members if enabled else [],
+                    ),
+                    candidates=tuple(member.model_key for member in members) if enabled else (),
+                )
+            )
+            continue
+        model_key = str(getattr(entry, "model_key", "") or "").strip()
+        if not model_key:
+            continue
+        managed = config.get_managed_model(model_key)
+        if managed is not None and not bool(getattr(managed, "enabled", True)):
+            continue
+        routes.append(
+            ResolvedModelRoute(
+                index=len(routes),
+                kind=MODEL_ROUTE_KIND_MODEL,
+                model_key=model_key,
+                candidates=(model_key,),
+            )
+        )
+    return ModelRoutePlan(routes=routes, config_revision=int(revision or 0))
+
+
+def _member_view_for(config: Any, model_key: str) -> RouteMemberView:
+    managed = config.get_managed_model(model_key)
+    if managed is None:
+        return RouteMemberView(model_key=model_key, enabled=False)
+    return RouteMemberView(
+        model_key=model_key,
+        enabled=bool(getattr(managed, "enabled", True)),
+        context_window_tokens=int(getattr(managed, "context_window_tokens", 0) or 0),
+        image_multimodal_enabled=bool(getattr(managed, "image_multimodal_enabled", False)),
+    )

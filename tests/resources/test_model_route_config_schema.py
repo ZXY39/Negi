@@ -6,7 +6,11 @@ from typing import Any
 
 import pytest
 
-from g3ku.config.loader import _load_balance_groups_payload, _managed_models_payload, _runtime_config_payload
+from g3ku.config.loader import (
+    _load_balance_groups_payload,
+    _managed_models_payload,
+    _runtime_config_payload,
+)
 from g3ku.config.schema import (
     GROUP_MAX_RETRY_ROUNDS_LIMIT,
     Config,

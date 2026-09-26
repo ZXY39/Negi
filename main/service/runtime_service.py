@@ -95,6 +95,8 @@ from main.runtime.execution_trace_compaction import compact_tool_step_for_summar
 from main.runtime.global_scheduler import GlobalScheduler
 from main.runtime.internal_tools import build_detail_level_schema
 from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
+from main.runtime.model_load_balancer import ModelLoadBalancer, quota_bucket_key
+from main.runtime.model_route import build_model_route_plan
 from main.runtime.node_prompt_contract import (
     NodeRuntimeToolContract,
     extract_node_dynamic_contract_payload,
@@ -571,8 +573,20 @@ class MainRuntimeService:
         self.model_key_concurrency_controller = ModelKeyConcurrencyController(
             resolve_model_limits=self._resolve_model_limit_payload,
         ) if execution_runtime_enabled else None
+        # 全局负载均衡器与并发控制器同生命周期：同一个 worker 进程内的所有任务、节点和
+        # 两条车道共享组状态。controller 缺失（embedded/web 角色）时 balancer 为 None，
+        # 选择层退化成「无并发计数的直连绑定」，不让节点因为没有 balancer 而报错。
+        self.model_load_balancer = (
+            ModelLoadBalancer(
+                permit_source=self.model_key_concurrency_controller,
+                resolve_quota_buckets=self._resolve_quota_buckets,
+            )
+            if self.model_key_concurrency_controller is not None
+            else None
+        )
         self.node_turn_controller = NodeTurnController(
             model_concurrency_controller=self.model_key_concurrency_controller,
+            balancer=self.model_load_balancer,
             gate_supplier=self._node_turn_gate_allowed,
         ) if execution_runtime_enabled and self.model_key_concurrency_controller is not None else None
         if self.model_key_concurrency_controller is not None and self.node_turn_controller is not None:
@@ -601,6 +615,8 @@ class MainRuntimeService:
             tool_provider=self._tool_provider,
             execution_model_refs=list(execution_model_refs or ['execution']),
             acceptance_model_refs=list(acceptance_model_refs or execution_model_refs or ['inspection']),
+            execution_model_routes=self._initial_model_routes(app_config, 'execution'),
+            acceptance_model_routes=self._initial_model_routes(app_config, 'inspection'),
             execution_max_iterations=resolved_execution_max_iterations,
             acceptance_max_iterations=resolved_acceptance_max_iterations,
             max_parallel_child_pipelines=max_parallel_child_pipelines,
@@ -5512,6 +5528,13 @@ class MainRuntimeService:
         self._hard_max_depth = max(self._default_max_depth, int(getattr(config.main_runtime, 'hard_max_depth', self._default_max_depth) or self._default_max_depth))
         self.node_runner._execution_model_refs = list(config.get_role_model_keys('execution'))
         self.node_runner._acceptance_model_refs = list(config.get_role_model_keys('inspection') or config.get_role_model_keys('execution'))
+        # route plan 是权威来源；refs 只是候选展开视图。检验缺省时继承整份执行 route plan。
+        execution_routes = build_model_route_plan(config, 'execution', revision=revision)
+        inspection_routes = build_model_route_plan(config, 'inspection', revision=revision)
+        if not inspection_routes.routes:
+            inspection_routes = execution_routes
+        self.node_runner._execution_model_routes = execution_routes
+        self.node_runner._acceptance_model_routes = inspection_routes
         self.node_runner._execution_max_iterations = config.get_role_max_iterations('execution')
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
         self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
@@ -5548,6 +5571,13 @@ class MainRuntimeService:
         if self.node_turn_controller is not None:
             self.node_turn_controller.configure(
                 gate_supplier=self._node_turn_gate_allowed,
+            )
+        if self.model_load_balancer is not None:
+            # 组定义与配置 revision 一起进 balancer；未变化的组保留 running/reserved/
+            # cooldown/亲和状态，在飞请求不被刷新打断。
+            self.model_load_balancer.configure(
+                groups=self._resolved_load_balance_groups(config),
+                config_revision=int(revision or 0),
             )
         if self.tool_pressure_monitor is not None:
             self.tool_pressure_monitor.configure(
@@ -10467,6 +10497,71 @@ class MainRuntimeService:
 
 
 
+
+    def _resolve_quota_buckets(self, model_ref: str) -> list[str]:
+        """解析某条 binding 的配额身份桶（endpoint + api key，或显式 quota_pool_key）。
+
+        只在 worker 进程内调用：密钥材料要靠解锁后的 secret payload 才拿得到，未解锁或
+        解析不到时返回空列表，由 balancer 按「身份未知」处理，绝不把不同成员并进同一个
+        空桶。返回值是不可逆摘要，任何日志与管理面输出都只给桶序号。
+        """
+        key = str(model_ref or "").strip()
+        config = getattr(self, "_app_config", None)
+        if not key or config is None:
+            return []
+        managed = None
+        try:
+            managed = config.get_managed_model(key)
+        except Exception:
+            managed = None
+        pool_key = str(getattr(managed, "quota_pool_key", "") or "").strip() if managed is not None else ""
+        if pool_key:
+            return [quota_bucket_key(endpoint="", api_key="", quota_pool_key=pool_key)]
+        try:
+            target = resolve_chat_target(config, key, workspace=config.workspace_path)
+        except Exception:
+            return []
+        endpoint = str(getattr(target, "base_url", "") or "").strip()
+        raw_api_key = str((dict(getattr(target, "secret_payload", {}) or {})).get("api_key", "") or "")
+        buckets: list[str] = []
+        for api_key in parse_api_keys(raw_api_key):
+            bucket = quota_bucket_key(endpoint=endpoint, api_key=str(api_key or "").strip())
+            if bucket and bucket not in buckets:
+                buckets.append(bucket)
+        return buckets
+
+    def _initial_model_routes(self, config: Any, scope: str) -> Any:
+        """启动时解析 route plan。config 不可用时返回 None，让 refs 视图继续驱动。"""
+        if config is None:
+            return None
+        try:
+            plan = build_model_route_plan(config, scope, revision=0)
+        except Exception:
+            return None
+        if scope == 'inspection' and not list(getattr(plan, 'routes', []) or []):
+            try:
+                return build_model_route_plan(config, 'execution', revision=0)
+            except Exception:
+                return plan
+        return plan
+
+    def _resolved_load_balance_groups(self, config: Any) -> dict[str, Any]:
+        """从已解析的 route plan 里取组状态喂给 balancer，保证两侧看到的是同一份定义。"""
+        groups: dict[str, Any] = {}
+        for plan in (
+            getattr(self.node_runner, "_execution_model_routes", None),
+            getattr(self.node_runner, "_acceptance_model_routes", None),
+        ):
+            if plan is None:
+                continue
+            for route in list(getattr(plan, "routes", []) or []):
+                if not bool(getattr(route, "is_load_balance", False)):
+                    continue
+                group = getattr(route, "group", None)
+                if group is None:
+                    continue
+                groups[str(route.group_key)] = group
+        return groups
 
     def _resolve_model_limit_payload(self, model_ref: str) -> dict[str, Any]:
         config = self._app_config

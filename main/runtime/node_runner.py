@@ -178,6 +178,8 @@ class NodeRunner:
         tool_provider,
         execution_model_refs: list[str],
         acceptance_model_refs: list[str],
+        execution_model_routes: Any = None,
+        acceptance_model_routes: Any = None,
         execution_max_iterations: int | None | object = _UNSET,
         acceptance_max_iterations: int | None | object = _UNSET,
         max_parallel_child_pipelines: int | None | object = _UNSET,
@@ -194,6 +196,10 @@ class NodeRunner:
         self._tool_provider = tool_provider
         self._execution_model_refs = list(execution_model_refs or [])
         self._acceptance_model_refs = list(acceptance_model_refs or []) or list(execution_model_refs or [])
+        # route plan 是执行/检验两条车道真正的路由来源；refs 退化成候选展开视图。
+        # 检验缺省时继承整份执行 route plan（不是继承展开后的字符串数组）。
+        self._execution_model_routes = execution_model_routes
+        self._acceptance_model_routes = acceptance_model_routes if acceptance_model_routes is not None else execution_model_routes
         self._execution_max_iterations = self._normalize_optional_limit(execution_max_iterations, default=16)
         self._acceptance_max_iterations = self._normalize_optional_limit(
             acceptance_max_iterations,
@@ -611,6 +617,8 @@ class NodeRunner:
                     ),
                     model_refs=self._model_refs_for(node),
                     model_refs_supplier=lambda current_node=node: self._model_refs_for(current_node),
+                    model_routes=self._model_routes_for(node),
+                    model_routes_supplier=lambda current_node=node: self._model_routes_for(current_node),
                     runtime_context=runtime_context,
                     max_iterations=self._max_iterations_for(node),
                     max_parallel_tool_calls=self._max_parallel_tool_calls_for(node),
@@ -3813,7 +3821,49 @@ class NodeRunner:
         }
 
     def _model_refs_for(self, node: NodeRecord) -> list[str]:
+        """候选展开视图（不再是 fallback 顺序）。
+
+        有 route plan 时取 plan 展开的候选；没有 plan 的存量注入保持旧的扁平链。
+        需要按序 fallback 的调用方必须用 `_model_routes_for`。
+        """
+        routes = self._model_routes_for(node)
+        if routes is not None:
+            candidates = list(routes.candidate_model_keys)
+            if candidates:
+                return candidates
         return list(self._acceptance_model_refs if node.node_kind == KIND_ACCEPTANCE else self._execution_model_refs)
+
+    def _model_routes_for(self, node: NodeRecord) -> Any:
+        return self._acceptance_model_routes if node.node_kind == KIND_ACCEPTANCE else self._execution_model_routes
+
+    def _has_load_balance_routes(self, node: NodeRecord) -> bool:
+        routes = self._model_routes_for(node)
+        return bool(routes is not None and list(getattr(routes, 'load_balance_group_keys', []) or []))
+
+    def _load_balance_group_keys(self, node: NodeRecord) -> list[str]:
+        routes = self._model_routes_for(node)
+        return list(getattr(routes, 'load_balance_group_keys', []) or []) if routes is not None else []
+
+    def _model_route_entries_payload(self, node: NodeRecord) -> list[dict[str, Any]]:
+        """给上下文与诊断用的有序 route 视图；顺序才是 fallback 语义。"""
+        routes = self._model_routes_for(node)
+        if routes is None:
+            return [{'type': 'model', 'model_key': key} for key in self._model_refs_for(node)]
+        payload: list[dict[str, Any]] = []
+        for route in list(getattr(routes, 'routes', []) or []):
+            if bool(getattr(route, 'is_load_balance', False)):
+                group = getattr(route, 'group', None)
+                payload.append(
+                    {
+                        'type': 'load_balance',
+                        'group_key': str(getattr(route, 'group_key', '') or ''),
+                        'model_keys': list(getattr(group, 'candidate_model_keys', []) or route.candidates),
+                        'max_retry_rounds': int(getattr(group, 'max_retry_rounds', 1) or 1) if group is not None else 1,
+                    }
+                )
+                continue
+            payload.append({'type': 'model', 'model_key': str(getattr(route, 'model_key', '') or '')})
+        return payload
 
     def _max_iterations_for(self, node: NodeRecord) -> int | None:
         return self._acceptance_max_iterations if node.node_kind == KIND_ACCEPTANCE else self._execution_max_iterations
@@ -3853,6 +3903,9 @@ class NodeRunner:
             'depth': node.depth,
             'node_kind': node.node_kind,
             'model_refs': list(model_refs or []),
+            'model_route_mode': 'load_balance' if self._has_load_balance_routes(node) else 'ordered_chain',
+            'model_routes': self._model_route_entries_payload(node),
+            'load_balance_group_keys': self._load_balance_group_keys(node),
             'provider_model': str((list(model_refs or []) or [''])[0] or '').strip(),
             'actor_role': self._actor_role_for_node(node),
             'can_spawn_children': bool(node.can_spawn_children),
@@ -7068,8 +7121,19 @@ class NodeRunner:
     async def _submit_final_result(payload: dict[str, Any]) -> dict[str, Any]:
         return dict(payload or {})
 
+    def _forget_node_route_binding(self, node_id: str) -> None:
+        """节点落终态时清掉负载均衡的粘滞绑定，避免绑定表随节点数无界增长。"""
+        forget = getattr(self._react_loop, 'forget_node_route_binding', None)
+        if not callable(forget):
+            return
+        try:
+            forget(str(node_id or '').strip())
+        except Exception:
+            pass
+
     def _mark_finished(self, task_id: str, node_id: str, result: NodeFinalResult) -> NodeFinalResult:
         task = self._store.get_task(task_id)
+        self._forget_node_route_binding(node_id)
         if (
             task is not None
             and str(task.root_node_id or '').strip() == str(node_id or '').strip()
@@ -7116,6 +7180,7 @@ class NodeRunner:
         return self._result_from_record(latest) if latest is not None else result
 
     def _mark_failed(self, task_id: str, node_id: str, *, reason: str) -> NodeFinalResult:
+        self._forget_node_route_binding(node_id)
         text = str(reason or 'node failed').strip() or 'node failed'
         return self._mark_finished(
             task_id,
