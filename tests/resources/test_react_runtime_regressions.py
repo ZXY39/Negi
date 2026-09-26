@@ -8967,3 +8967,68 @@ def test_stage_expiry_hop_adopts_pruned_projection_once_then_stays_append_only()
     ) is False
     assert projection_next[: len(projection)] == projection
     assert "body-6b" in [str(item.get("content") or "") for item in projection_next]
+
+
+def test_stage_submission_rejects_eviction_without_a_summary() -> None:
+    async def _submit(*args, **kwargs):
+        return {}
+
+    tool = SubmitNextStageTool(_submit)
+
+    assert "drop_completed_stage_tool_detail" in tool.parameters["properties"]
+    assert "drop_completed_stage_tool_detail" in tool.model_parameters["properties"]
+    assert tool.validate_params({
+        "stage_goal": "g", "tool_round_budget": 10, "drop_completed_stage_tool_detail": True,
+    }) == [
+        "drop_completed_stage_tool_detail requires a non-empty completed_stage_summary in the same call"
+    ]
+    assert tool.validate_params({
+        "stage_goal": "g",
+        "tool_round_budget": 10,
+        "completed_stage_summary": "本阶段确认了 X，剩余目标 Y",
+        "drop_completed_stage_tool_detail": True,
+    }) == []
+    # 不点名裁撤时空总结仍然合法：库里 48.8% 的终态阶段本来就是空总结。
+    assert tool.validate_params({"stage_goal": "g", "tool_round_budget": 10}) == []
+
+
+def test_task_node_detail_manifest_is_agent_full_and_unscoped_by_design() -> None:
+    # 钉住两条维护者决定，不是断言"应该加护栏"：agent 侧固定返回完整轨迹（detail_level
+    # 已从模型可见 schema 摘掉），角色对三个 actor 全开且不做归属校验。
+    repo_root = Path(__file__).resolve().parents[2]
+    manifest = yaml.safe_load(
+        (repo_root / "tools" / "task_node_detail_cn" / "resource.yaml").read_text(encoding="utf-8")
+    ) or {}
+
+    assert "detail_level" not in (manifest.get("parameters") or {}).get("properties", {})
+    action = (manifest.get("governance") or {}).get("actions", [{}])[0]
+    assert sorted(action.get("allowed_roles") or []) == ["ceo", "execution", "inspection"]
+
+
+def test_provider_marker_tail_fingerprint_catches_real_corruption_only() -> None:
+    # 四条值逐字取自实盘 node:4367ff7a3325 被拒的 submit_final_result：provider 把参数块
+    # 未转义拼进 arguments，json_repair 将闭合标记吸进 status 并吃掉后面两个必填参数，
+    # 于是解析故障被读成"模型漏填参数"并按无效提交计次。残缺写法有三种，按形态判定。
+    line_feed = chr(10)
+    bar = chr(0xFF5C)
+    lt = chr(60)
+    gt = chr(62)
+    corrupted = [
+        "success" + lt + "/parameter" + gt + line_feed + lt + bar + "DSML" + bar + ":",
+        "failed" + lt + "/" + bar + "DSML" + bar + ":",
+        "success" + lt + "/" + bar + "DSML" + bar + ":",
+        "failed" + lt + "/parameter" + gt + line_feed + lt + "parameter:",
+    ]
+    for value in corrupted:
+        call = SimpleNamespace(arguments={"status": value, "answer": "", "evidence": []})
+        assert ReActToolLoop._tool_call_marker_fault(call), value
+
+    benign = [
+        {"status": "success", "delivery_status": "final", "summary": "ok", "answer": "已完成"},
+        {"status": "success", "answer": "门槛写作 a < b 时"},
+        {"status": "success", "answer": "html 里用 " + lt + "div" + gt + lt + "/div" + gt},
+        {"status": "success", "answer": "线上格式是 " + lt + bar + "DSML" + bar + "parameter" + gt + "，后面还有正文"},
+        {"status": "success", "key_refs": [{"ref": "path:a/b.py", "note": "口径"}]},
+    ]
+    for payload in benign:
+        assert ReActToolLoop._tool_call_marker_fault(SimpleNamespace(arguments=payload)) == "", payload

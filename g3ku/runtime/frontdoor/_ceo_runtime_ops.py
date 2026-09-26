@@ -1959,13 +1959,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         session_key: Any,
         stages: list[dict[str, Any]],
+        kind: str = "frontdoor_stage_archive",
     ) -> tuple[str, int, int]:
-        """把即将收口的阶段账本原样导出到会话临时目录，返回 (路径, stage 起, stage 止)。
+        """把即将收口或被点名裁撤的阶段账本原样导出到会话临时目录，返回 (路径, stage 起, stage 止)。
 
         收口只让阶段不再进 provider 上下文；全量真相源必须仍可回读。落点选
         session_temp_dir 是因为它已在运行时工具契约里公示，模型 `content_open` 本来就
         能开该目录下的文件，不需要新增工具面。写失败返回空路径——摘要里就不出现指针，
-        不阻塞压缩。"""
+        不阻塞压缩。`kind` 区分两条车道：收口归档与裁撤归档的成因不同，打开文件的人
+        与维护者都要能一眼看出是哪条。"""
         records = [dict(item) for item in list(stages or []) if isinstance(item, dict)]
         if not records:
             return "", 0, 0
@@ -1974,7 +1976,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             directory = Path(self._ceo_session_temp_dir(session_key))
             directory.mkdir(parents=True, exist_ok=True)
             payload = build_stage_archive_document(
-                kind="frontdoor_stage_archive",
+                kind=kind,
                 owner=str(session_key or "").strip(),
                 created_at=now_iso(),
                 stages=records,
@@ -1985,6 +1987,50 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         except Exception:
             logger.debug("frontdoor stage archive export failed for {}", str(session_key or ""))
             return "", 0, 0
+
+    def _frontdoor_archive_evicted_stage(
+        self,
+        *,
+        session_key: str,
+        stage_state: dict[str, Any],
+        stage_id: str,
+    ) -> str:
+        """模型点名裁撤时把该阶段全量账本导成文件，路径写回账本的 archive_ref。
+
+        读回靠 `content_open`（三角色可见、能开绝对路径），不新增工具面：工具 schema
+        由 `_selected_tool_schemas` 从**全局** `loop.tools` 注册表解析，而阶段账本是
+        **每会话**的，注册一个全局可执行实例会把 A 会话的账本暴露给 B 会话。
+        一条阶段只在被裁撤时导一次，ref 落在账本上后续逐轮复用，不重复写盘。
+        写失败就留空：块里不出现指针，也不谎称可读回。
+        """
+        wanted = str(stage_id or "").strip()
+        if not wanted:
+            return ""
+        target = next(
+            (
+                stage
+                for stage in list(stage_state.get("stages") or [])
+                if isinstance(stage, dict) and str(stage.get("stage_id") or "").strip() == wanted
+            ),
+            None,
+        )
+        if not isinstance(target, dict) or target.get("context_evicted") is not True:
+            return ""
+        existing = str(target.get("archive_ref") or "").strip()
+        if existing:
+            return existing
+        path, archive_start, archive_end = self._frontdoor_write_stage_archive_file(
+            session_key=session_key,
+            stages=[target],
+            kind="frontdoor_stage_eviction",
+        )
+        if not path:
+            return ""
+        target["archive_ref"] = path
+        index = int(target.get("stage_index") or 0)
+        target["archive_stage_index_start"] = archive_start or index
+        target["archive_stage_index_end"] = archive_end or index
+        return path
 
     def _frontdoor_summarized_stage_ids(
         self,
@@ -5001,6 +5047,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 与 canonical 归一化器同一口径——只在 False 时写，缺失即视为可见。
             if raw_stage.get("context_visible") is False:
                 normalized_stage["context_visible"] = False
+            # 裁撤标记必须和收口标记一样穿过这份白名单，否则 stage_state 侧读到的一直是
+            # "没裁过"，模型点了名也不会生效（与 canonical 归一化器同一口径）。
+            if raw_stage.get("context_evicted") is True:
+                normalized_stage["context_evicted"] = True
             normalized_stages.append(normalized_stage)
         if active_stage_id and not any(
             str(stage.get("stage_id") or "").strip() == active_stage_id
@@ -5085,6 +5135,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         final: bool = False,
         preamble_text: str = "",
         system_generated: bool = False,
+        drop_completed_stage_tool_detail: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
@@ -5132,6 +5183,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "key_refs": normalized_key_refs,
                     }
                 )
+                # 与节点侧同一口径：只有同批带了非空总结才落裁撤标记，缺失即未裁撤，
+                # 所以落盘不会给每条阶段添一个布尔键。
+                if drop_completed_stage_tool_detail and normalized_summary:
+                    current["context_evicted"] = True
             stages.append(current)
 
         next_stage_index = max((int(stage.get("stage_index") or 0) for stage in stages), default=0) + 1
@@ -5340,21 +5395,37 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             status = str(result.get("status") or "").strip().lower()
             if tool_name == STAGE_TOOL_NAME:
                 if status != "error":
+                    arguments = dict(payload.get("arguments") or {})
+                    closing_stage_id = str(stage_state.get("active_stage_id") or "").strip()
+                    drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
                     stage_state, _ = self._submit_frontdoor_next_stage_state(
                         stage_state,
-                        stage_goal=str(dict(payload.get("arguments") or {}).get("stage_goal") or ""),
-                        tool_round_budget=int(dict(payload.get("arguments") or {}).get("tool_round_budget") or 0),
-                        completed_stage_summary=str(
-                            dict(payload.get("arguments") or {}).get("completed_stage_summary") or ""
-                        ),
+                        stage_goal=str(arguments.get("stage_goal") or ""),
+                        tool_round_budget=int(arguments.get("tool_round_budget") or 0),
+                        # 裁撤标记必须由这条"回合后重建 durable 账本"的路径落盘：图节点里那份
+                        # mutable_stage_state 只是本轮工作副本，finalize 会用这里的返回值覆盖状态，
+                        # 少传一个参数就等于 durable 账本永远没有标记——文件照写、肉身照旧每轮重发。
+                        # 与收口标记同一教训：标记必须落在 durable 基线推进的那一步。
+                        drop_completed_stage_tool_detail=drop_detail,
+                        completed_stage_summary=str(arguments.get("completed_stage_summary") or ""),
                         key_refs=[
                             dict(item)
-                            for item in list(dict(payload.get("arguments") or {}).get("key_refs") or [])
+                            for item in list(arguments.get("key_refs") or [])
                             if isinstance(item, dict)
                         ],
-                        final=bool(dict(payload.get("arguments") or {}).get("final")),
+                        final=bool(arguments.get("final")),
                         preamble_text=cycle_narration_text,
                     )
+                    if drop_detail:
+                        # 导档同样只能落在这条路径：闭包里写进 mutable_stage_state 的 archive_ref
+                        # 会随工作副本一起被这里的返回值覆盖掉，于是块里永远只有 evicted 没有指针，
+                        # 提示词承诺的"content_open 回读"就成了空头支票。一份阶段只导一次，
+                        # ref 落盘后由快照白名单逐轮带着走。
+                        self._frontdoor_archive_evicted_stage(
+                            session_key=str(state.get("session_key") or "").strip(),
+                            stage_state=stage_state,
+                            stage_id=closing_stage_id,
+                        )
                     stage_created_this_cycle = True
                 continue
             ordinary_calls.append(dict(payload))
@@ -6072,6 +6143,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             completed_stage_summary: str = "",
             key_refs: list[dict[str, Any]] | None = None,
             final: bool = False,
+            drop_completed_stage_tool_detail: bool = False,
         ) -> dict[str, Any]:
             next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
                 mutable_stage_state,
@@ -6080,6 +6152,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 completed_stage_summary=completed_stage_summary,
                 key_refs=key_refs,
                 final=final,
+                drop_completed_stage_tool_detail=drop_completed_stage_tool_detail,
                 preamble_text=str(state.get("analysis_text") or "").strip(),
             )
             mutable_stage_state.clear()

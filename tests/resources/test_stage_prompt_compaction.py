@@ -11,6 +11,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     is_stage_context_message,
     keep_stage_blocks_off_continuation_tail,
     prepare_stage_prompt_messages,
+    retained_completed_stage_ids,
     stage_prompt_prefix,
     strip_stage_block_echo,
 )
@@ -1051,3 +1052,123 @@ def test_in_place_compaction_keeps_non_terminal_stage_even_when_not_active() -> 
     assert "output-3" in contents
     assert "output-4" in contents
     assert "output-5" in contents
+
+
+def test_evicted_terminal_stage_prunes_bodies_and_keeps_its_block() -> None:
+    # 裁撤 ≠ 收口：肉身移出上下文，总结块必须留在体内。裁掉的若是唯一记录，
+    # 这个机制就是在制造上下文黑洞（库里 46.2% 的终态阶段总结本就为空）。
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-5",
+    )
+    for item in state["stages"]:
+        if item["stage_id"] in {"frontdoor-stage-2", "frontdoor-stage-3"}:
+            item["context_evicted"] = True
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(5), stage_state=state, keep_latest_completed_stages=3
+    )
+
+    contents = [str(item.get("content") or "") for item in result["rewritten"]]
+    blocks = [c for c in contents if STAGE_COMPACT_PREFIX in c]
+    assert {"frontdoor-stage-2", "frontdoor-stage-3"} <= set(result["compacted_stage_ids"])
+    assert "output-2" not in contents
+    assert "output-3" not in contents
+    assert "output-4" in contents
+    assert any("finished 2" in block for block in blocks)
+    assert any("finished 3" in block for block in blocks)
+
+
+def test_block_marker_separates_evicted_from_window_expired_stages() -> None:
+    # 块必须区分"我自己点名移走的"与"窗口到期没的"：没有这个字段，模型不知道该不该回读，
+    # 事后也无法从发送体核对裁撤到底被用了没有。
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-6",
+    )
+    state["stages"][2]["context_evicted"] = True  # stage-3；跳过名额后过期集合为 {1, 3}
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(6), stage_state=state, keep_latest_completed_stages=3
+    )
+
+    assert retained_completed_stage_ids(state, keep_latest=3) == {
+        "frontdoor-stage-2",
+        "frontdoor-stage-4",
+        "frontdoor-stage-5",
+    }
+    assert set(result["compacted_stage_ids"]) == {"frontdoor-stage-1", "frontdoor-stage-3"}
+    blocks = {
+        index: block
+        for index, block in enumerate(
+            [str(item.get("content") or "") for item in result["rewritten"] if STAGE_COMPACT_PREFIX in str(item.get("content") or "")]
+        )
+    }
+    assert len(blocks) == 2
+    marked = [block for block in blocks.values() if '"completed_stage_summary": "finished 3"' in block]
+    plain = [block for block in blocks.values() if '"completed_stage_summary": "finished 1"' in block]
+    assert len(marked) == 1 and '"evicted": true' in marked[0]
+    assert len(plain) == 1 and '"evicted"' not in plain[0]
+
+
+def test_evicted_stage_does_not_consume_retention_window_slot() -> None:
+    # 被点名裁撤的阶段不占窗口名额：否则一条裁撤会把另一条仍需要原文的阶段挤出窗口。
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-6",
+    )
+    assert retained_completed_stage_ids(state, keep_latest=3) == {
+        "frontdoor-stage-3",
+        "frontdoor-stage-4",
+        "frontdoor-stage-5",
+    }
+
+    state["stages"][3]["context_evicted"] = True  # stage-4
+
+    assert retained_completed_stage_ids(state, keep_latest=3) == {
+        "frontdoor-stage-2",
+        "frontdoor-stage-3",
+        "frontdoor-stage-5",
+    }
+
+
+def test_block_carries_archive_ref_only_when_the_ledger_has_one() -> None:
+    # 前门裁撤时把该阶段全量账本导成文件，块里那一行 archive_ref 就是回读入口；
+    # 只有写盘成功才会有值，所以"出现这一行"等价于"真的打得开"。
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-3",
+    )
+    state["stages"][0]["context_evicted"] = True
+    state["stages"][0]["archive_ref"] = "temp/ceo/sess/g3ku_stage_archive_1_abcd1234.json"
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(3), stage_state=state, keep_latest_completed_stages=1
+    )
+
+    blocks = [
+        str(item.get("content") or "")
+        for item in result["rewritten"]
+        if STAGE_COMPACT_PREFIX in str(item.get("content") or "")
+    ]
+    assert len(blocks) == 1
+    assert "g3ku_stage_archive_1_abcd1234.json" in blocks[0]
+    assert '"evicted": true' in blocks[0]
+
+
+def test_eviction_flag_round_trips_through_the_node_ledger_without_default_noise() -> None:
+    # 节点账本是 pydantic 形态，序列化必须与 context_visible 同一口径：只在成立时落字段。
+    from main.models import normalize_execution_stage_metadata
+
+    state = _node_ledger_state(
+        statuses=["完成", "完成", "进行中"],
+        active_stage_id="frontdoor-stage-3",
+    )
+    state["stages"][0]["context_evicted"] = True
+
+    obj = normalize_execution_stage_metadata(state)
+
+    assert obj.stages[0].context_evicted is True
+    assert obj.stages[1].context_evicted is False
+    assert obj.stages[0].model_dump(mode="json")["context_evicted"] is True
+    assert "context_evicted" not in obj.stages[1].model_dump(mode="json")

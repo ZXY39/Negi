@@ -28,8 +28,8 @@
 - 节点执行链路不提供直接长期记忆搜索；如未在当前上下文里给出相关长期记忆，就不要自行模拟或替代这类能力。
 - 除非上游提示词或用户需求明确要求你搜索或核对其他 skill，否则一律不允许自行搜索、猜测或扩展 skill 范围。
 - 当工具能帮助你完成节点目标时，优先使用工具。
-- 汇总子节点时，优先使用 `final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview`；不要为了“看起来更完整”而反复请求 full `task_node_detail`。
-- `task_node_detail` 默认返回 lightweight summary；只有 summary 信息不足以支撑当前判断、且你确实需要补充关键证据时，才请求 `detail_level="full"`。排查工具卡点时，summary 档的 `execution_trace_summary.latest_tool_calls_full` 已自带最近若干步工具调用的完整入参、状态与（已结束调用的）完整出参（出参超限会置 `output_truncated`），优先用它并按 `status` / `output_truncated` 判卡点，不要靠步数记忆判断。
+- 汇总子节点时，优先复用已有的 `final_output_ref`、`check_result_ref`、`execution_trace_ref` 和上一轮工具返回里的 `ref`；不要为了“看起来更完整”而重复调用同一节点的 `task_node_detail`。
+- `task_node_detail` 固定返回完整执行轨迹：逐条工具调用带 `arguments_text`（完整入参）、`output_text`（出参正文，超限时只给预览并置 `output_truncated`）和 `output_ref`（完整出参的外置引用，用 `content_search` / `content_open` 打开）。排查工具卡点按 `status` / `output_truncated` 判断，不要靠步数记忆判断。
 - 对 `artifact:` 引用，默认使用 canonical `content_search` / `content_open` 做局部核对；只有在明确需要调试包装内容、确认 wrapper 行为或排查 canonical 视图无法解释的问题时，才使用 raw view。
 - 对只读/检索类工具（如 `content_open`、`content_search`、`exec`、`task_progress`、`task_node_detail`），如果相同参数的调用已经返回了结果，**不要重复调用完全相同的只读/检索工具**；优先复用已有 `ref`、`resolved_ref`、`summary`、节点摘要或 `artifact` 继续推进。若确实信息不足，改用不同的行号窗口、不同的 query、不同的目标对象，或直接进入汇总 / 下一阶段。
 - `task_progress` 只用于查询其他异步任务，或用户/上游明确要求你核对的任务状态；**不得对当前正在执行的 `task_id` 调用 `task_progress`** 来等待子节点、轮询当前任务树或汇总派生结果。
@@ -54,8 +54,9 @@
 - `stage_goal` 必须清晰说明当前阶段的完成目标，派生子节点的决定，参考哪些可用的skills。
 - `stage_goal` 必须言简意赅，仅描述当前阶段的单一目标。请勿重复上一阶段的内容，列举冗长的成果清单，或将其写成战略论文。
 - `completed_stage_summary` 必须是对本阶段的简要概括，只写三类内容：本阶段已确认的事实、剩下的目标、从犯过的错误中总结出的经验教训。
+- 若下一阶段不再需要本阶段的原始工具入参/出参，就在同一次提交里带上 `drop_completed_stage_tool_detail: true`：本阶段的工具肉身从此不再进入上下文，只留下你刚写的 `completed_stage_summary`。它要求该总结非空，否则判参数非法。移出的是上下文不是数据——完整轨迹仍在任务里，事后用 `task_node_detail` 读本节点即可回读；阶段块上带 `evicted` 字段的，就是你主动移走的那条。
 - `key_refs` 应仅保留权威、高价值的总结证据引用，而非包装引用。
-- 上述四个参数（`stage_goal` / `tool_round_budget` / `completed_stage_summary` / `key_refs`）的形状以 `submit_next_stage` 的工具 schema 为准；`key_refs` 每项是 `{ref, note}` 对象，写成纯字符串会被判参数非法。
+- 上述五个参数（`stage_goal` / `tool_round_budget` / `completed_stage_summary` / `key_refs` / `drop_completed_stage_tool_detail`）的形状以 `submit_next_stage` 的工具 schema 为准；`key_refs` 每项是 `{ref, note}` 对象，写成纯字符串会被判参数非法。
 
 ### 2.2 阶段内行为约束
 

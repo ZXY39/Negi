@@ -153,6 +153,9 @@ def _normalize_stage(stage: Any, *, fallback_index: int) -> dict[str, Any]:
     # 转录投影与 continuity sidecar 白涨体积（每轮投影 382 条 × ~24 字符）。
     if not _is_context_visible(current.get("context_visible")):
         normalized_stage["context_visible"] = False
+    # 裁撤标记同样必须穿过这份白名单，且只在成立时落字段（缺失即未裁撤）。
+    if current.get("context_evicted") is True:
+        normalized_stage["context_evicted"] = True
     return normalized_stage
 
 
@@ -164,25 +167,34 @@ def _dedupe_canonical_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any
     newest copy is the one rendered from the current turn state, so keeping the
     last occurrence preserves content while preventing unbounded chain growth.
     收口标记跟着逻辑阶段走：被丢弃的旧副本带标记时，存活副本也必须带上，否则
-    "较新的副本没标"会把已收口阶段的块重新渲染出来。
+    "较新的副本没标"会把已收口阶段的块重新渲染出来。裁撤标记同一口径。
     """
     latest_index: dict[str, int] = {}
     hidden_ids: set[str] = set()
+    evicted_ids: set[str] = set()
     for index, stage in enumerate(stages):
         stage_id = _as_str(stage.get("stage_id"))
         if stage_id:
             latest_index[stage_id] = index
             if stage.get("context_visible") is False:
                 hidden_ids.add(stage_id)
-    return [
-        (
-            {**stage, "context_visible": False}
-            if _as_str(stage.get("stage_id")) in hidden_ids and stage.get("context_visible") is not False
-            else stage
-        )
-        for index, stage in enumerate(stages)
-        if not _as_str(stage.get("stage_id")) or latest_index[_as_str(stage.get("stage_id"))] == index
-    ]
+            if stage.get("context_evicted") is True:
+                evicted_ids.add(stage_id)
+    result: list[dict[str, Any]] = []
+    for index, stage in enumerate(stages):
+        stage_id = _as_str(stage.get("stage_id"))
+        if stage_id and latest_index.get(stage_id) != index:
+            continue
+        needs_visible_mark = bool(stage_id) and stage_id in hidden_ids and stage.get("context_visible") is not False
+        needs_evicted_mark = bool(stage_id) and stage_id in evicted_ids and stage.get("context_evicted") is not True
+        if needs_visible_mark or needs_evicted_mark:
+            stage = dict(stage)
+            if needs_visible_mark:
+                stage["context_visible"] = False
+            if needs_evicted_mark:
+                stage["context_evicted"] = True
+        result.append(stage)
+    return result
 
 
 def _completed_stage_content_identity(stage: dict[str, Any]) -> str:
@@ -277,8 +289,10 @@ def _completed_stage_overlap_signature(stage: Any) -> str:
     current.pop("representation", None)
     # 收口标记不得进入重叠签名：否则被隐藏的 durable 阶段与本轮携带的可见副本
     # 判不成同一条阶段，rebase 会把同一阶段当新阶段追加（stage_index 虚增 +
-    # 已收口阶段的块重新长回来）。
+    # 已收口阶段的块重新长回来）。裁撤标记同理：它只改变肉身进不进上下文，
+    # 不改变"这是哪一条阶段"。
     current.pop("context_visible", None)
+    current.pop("context_evicted", None)
     return json.dumps(current, ensure_ascii=False, sort_keys=True)
 
 
@@ -1011,8 +1025,8 @@ def canonical_tool_identity(tool_payload: dict[str, Any], index: int) -> str:
 # 收口标记只决定阶段正文进不进模型上下文，不决定轨道怎么画，前端也完全不读它。
 # 把它算进 UI delta 的代价实测很贵：一次 token 压缩会把压缩区间内几百个历史阶段一次性
 # 标记收口，全部落进同一行转录，那一行的 delta 变成 429 条阶段 / 302KB，
-# 对应气泡看起来像把整部历史堆在自己身上（QQ 渠道会话）。
-UI_INERT_STAGE_FIELDS = frozenset({"context_visible"})
+# 对应气泡看起来像把整部历史堆在自己身上（QQ 渠道会话）。裁撤标记同一性质。
+UI_INERT_STAGE_FIELDS = frozenset({"context_visible", "context_evicted"})
 
 
 def _ui_comparable_stage(stage: dict[str, Any]) -> dict[str, Any]:

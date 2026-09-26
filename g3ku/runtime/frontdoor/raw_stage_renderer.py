@@ -125,6 +125,10 @@ def retained_completed_raw_stage_ids(stage_state: Any, *, keep_latest: int) -> s
             # 收口阶段不占 raw 窗口名额：它们已确定不进上下文，占位只会把仍可见的
             # 近期阶段挤出窗口，等于让收口连带抹掉近场执行细节。
             continue
+        if stage.get("context_evicted") is True:
+            # 与 retained_completed_stage_ids 同一判据的本地镜像（这两处窗口各写了一份，
+            # 改动必须同步）：模型点名移出的阶段既不占 raw 名额，也不在此处逐帧重渲染。
+            continue
         completed.append((int(stage.get("stage_index") or 0), stage_id))
     completed.sort()
     return {stage_id for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]}

@@ -281,6 +281,7 @@ class ReActToolLoop:
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
         invalid_stage_submission_count = 0
+        provider_parse_fault_count = 0
         plain_text_reply_strikes = 0
         stage_only_transition_streak = 0
         last_invalid_final_submission_reason = ''
@@ -1072,6 +1073,7 @@ class ReActToolLoop:
                 if ordinary_tool_turn:
                     invalid_final_submission_count = 0
                     invalid_stage_submission_count = 0
+                    provider_parse_fault_count = 0
                     plain_text_reply_strikes = 0
                     stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
@@ -1210,6 +1212,32 @@ class ReActToolLoop:
                     if terminal_result is not None:
                         self._log_service.remove_frame(task.task_id, node.node_id, publish_snapshot=True)
                         return terminal_result
+                    marker_fault = self._tool_call_marker_fault(response_tool_calls[0])
+                    if marker_fault:
+                        # provider 序列化故障不占模型的无效提交预算，但另设同值上限，
+                        # 否则上游持续故障会把节点挂在轮次循环里出不来。
+                        provider_parse_fault_count += 1
+                        fault_reason = (
+                            f'provider tool-call serialization fault: {FINAL_RESULT_TOOL_NAME} '
+                            f'arguments end with a parameter marker: {marker_fault}'
+                        )
+                        self._record_invalid_final_submission_error_log(
+                            task_id=task.task_id,
+                            node_id=node.node_id,
+                            node_title=node.goal,
+                            count=provider_parse_fault_count,
+                            reason=fault_reason,
+                            response=response,
+                            response_tool_calls=response_tool_calls,
+                        )
+                        if provider_parse_fault_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
+                            return self._invalid_final_submission_failure(
+                                reason=fault_reason,
+                                count=provider_parse_fault_count,
+                            )
+                        last_invalid_final_submission_reason = fault_reason
+                        repair_overlay_text = self._result_protocol_message(node_kind=node.node_kind)
+                        continue
                     reason_parts = list(contract_violations or [])
                     if protocol_error:
                         reason_parts.append(protocol_error)
@@ -2160,6 +2188,44 @@ class ReActToolLoop:
             },
             publish_snapshot=True,
         )
+
+    # 值以"半截标记"收尾 = provider 拼 DSML 参数块时边界错位的指纹。实测残缺有三种写法
+    # （闭合的全角竖线 DSML 标记带冒号收尾、ASCII parameter 闭合标记后接半开标记、以及
+    # 只剩标记前缀），穷举字符串必漏，所以按形态判：结尾是一个 40 字符内、未闭合就断掉、
+    # 且不含空白的尖括号片段。正常正文不会那样收尾——含空格的比较式（"a < b"）与已闭合的
+    # 标签（"<div>"）都不匹配，代价是一段被截断成裸尖括号的 answer 会被误判一次，
+    # 而误判的后果只是让模型重发，不会丢内容。
+    _PARAM_MARKER_TAIL_PATTERN = re.compile(r'<[^<>\s]{0,40}$')
+
+    @classmethod
+    def _iter_string_values(cls, value: Any):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from cls._iter_string_values(item)
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                yield from cls._iter_string_values(item)
+
+    @classmethod
+    def _tool_call_marker_fault(cls, tool_call: Any) -> str:
+        """判断这次工具调用是不是 provider 序列化故障，而不是模型填错了参数。
+
+        网关把 DSML 参数块未经转义拼进 `arguments` 时，`json_repair` 会把参数闭合标记
+        吸进第一个字符串值、并把它后面的参数整段吃掉：工具名正确、JSON 合法、参数却"缺失"，
+        于是模型收到的是 `missing required delivery_status`，并按无效提交计次——上游故障
+        变成节点被判死（实测某节点 5 次预算被这种伪缺失吃掉 4 次）。
+
+        判据只认"字符串值以参数标记残片收尾"这一形态：残缺写法实测有三种，穷举字符串必漏；
+        而正常正文不会以闭合标记收尾（代码类 answer 会把标签写在句子里），所以形态判定
+        不误伤长文本。宁可漏判不误判：漏判只是仍按原路径走，误判会放行真正该重写的调用。
+        """
+        arguments = getattr(tool_call, 'arguments', None)
+        for text in cls._iter_string_values(arguments):
+            if cls._PARAM_MARKER_TAIL_PATTERN.search(text):
+                return text[-24:]
+        return ''
 
     def _apply_invalid_final_submission_strike(
         self,

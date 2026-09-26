@@ -3377,7 +3377,7 @@ async def test_submit_next_stage_can_share_turn_with_ordinary_tools_and_counts_n
     )
 
     def _build_tools(task, node):
-        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary="", key_refs=None, final=False):
+        async def _submit_stage(stage_goal, tool_round_budget, completed_stage_summary="", key_refs=None, final=False, drop_completed_stage_tool_detail=False):
             return await service.node_runner._submit_next_stage(
                 task_id=task.task_id,
                 node_id=node.node_id,
@@ -3386,6 +3386,7 @@ async def test_submit_next_stage_can_share_turn_with_ordinary_tools_and_counts_n
                 completed_stage_summary=completed_stage_summary,
                 key_refs=list(key_refs or []),
                 final=final,
+                drop_completed_stage_tool_detail=drop_completed_stage_tool_detail,
             )
 
         return {

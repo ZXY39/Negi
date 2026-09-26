@@ -211,6 +211,11 @@ def retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[s
         if _stage_get(stage, "context_visible", True) is False:
             # 收口阶段不占保留窗口名额（与 raw_stage_renderer 同一规则）。
             continue
+        if _stage_get(stage, "context_evicted", False) is True:
+            # 模型在关闭本阶段时点名移出肉身：它既不占保留名额，也不留在 raw 里，
+            # 于是下一个投影就把它的工具帧裁掉。仍然渲染阶段块（completed_stage_blocks
+            # 只跳过收口），所以总结不会成为唯一记录。
+            continue
         completed.append((int(_stage_get(stage, "stage_index", 0) or 0), stage_id))
     completed.sort()
     return {stage_id for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]}
@@ -281,12 +286,22 @@ def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None 
             payload["completed_stage_summary"] = completed_summary
         if stage_key_refs:
             payload["key_refs"] = stage_key_refs
+        archive_ref = str(_stage_get(stage, "archive_ref", "") or "").strip()
+        if archive_ref:
+            # 裁撤时导出的全量账本指针（节点车道不用这条：原始入参出参本来就在
+            # task_node_tool_results 里，走 task_node_detail 关联）。只在写入侧成功
+            # 落了文件才会有值，所以块里出现这一行就等于"真的能打开"。
+            payload["archive_ref"] = archive_ref
         if stage_mode and stage_mode != DEFAULT_STAGE_MODE:
             payload["mode"] = stage_mode
         if bool(_stage_get(stage, "system_generated", False)):
             payload["system_generated"] = True
         if round_budget or rounds_used:
             payload["tool_rounds"] = f"{rounds_used}/{round_budget}"
+        if _stage_get(stage, "context_evicted", False) is True:
+            # 只在成立时写。没有这个字段，模型读块时分不清"这条阶段本来就没留细节"和
+            # "细节是我上一轮自己要求移走的"——回读通道就形同不存在，裁撤也无法事后核对。
+            payload["evicted"] = True
         compacted.append(
             {
                 # system 角色，理由同 externalized 块（见上方注释）。

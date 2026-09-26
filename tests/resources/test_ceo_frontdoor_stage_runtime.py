@@ -8,9 +8,17 @@ import pytest
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+from g3ku.runtime.frontdoor.canonical_context import (
+    _completed_stage_overlap_signature,
+    _dedupe_canonical_stages,
+)
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
-from main.service.runtime_service import MainRuntimeService
+from g3ku.runtime.stage_prompt_compaction import (
+    completed_stage_blocks,
+    retained_completed_stage_ids,
+)
 from main.runtime.stage_budget import SILENT_TOOL_NAME, STAGE_TOOL_NAME
+from main.service.runtime_service import MainRuntimeService
 
 
 def test_initial_persistent_state_tracks_frontdoor_stage_state() -> None:
@@ -494,6 +502,196 @@ def test_frontdoor_final_stage_does_not_require_transition_when_budget_is_exhaus
     assert updated["transition_required"] is False
     assert updated["stages"][0]["tool_rounds_used"] == 1
     assert updated["stages"][0]["final_stage"] is True
+
+
+def test_frontdoor_eviction_archives_the_stage_once_and_survives_write_failure(tmp_path: Path) -> None:
+    # 前门的读回不做新工具：账本是每会话的、工具 schema 从全局注册表解析，注册可执行
+    # 实例会把 A 会话账本暴露给 B 会话。改为裁撤时导档 + 块带 archive_ref，回读走
+    # content_open。这里钉住"一条阶段只导一次"和"写不成就谎称不可读"。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda session_key: str(tmp_path)  # type: ignore[assignment]
+    stage = {
+        "stage_id": "frontdoor-stage-1",
+        "stage_index": 1,
+        "status": "completed",
+        "stage_goal": "collect candidates",
+        "completed_stage_summary": "确认了候选池口径",
+        "context_evicted": True,
+        "created_at": "2026-09-26T01:00:00+08:00",
+        "key_refs": [],
+        "rounds": [
+            {
+                "round_id": "frontdoor-stage-1:round-1",
+                "round_index": 1,
+                "tool_call_ids": ["c1"],
+                "tool_names": ["exec"],
+                "tools": [
+                    {
+                        "tool_call_id": "c1",
+                        "tool_name": "exec",
+                        "status": "success",
+                        "arguments_text": "ls -1",
+                        "output_text": "file.txt",
+                    }
+                ],
+            }
+        ],
+    }
+    state = {
+        "active_stage_id": "frontdoor-stage-2",
+        "transition_required": False,
+        "stages": [dict(stage), {"stage_id": "frontdoor-stage-2", "stage_index": 2, "status": "active"}],
+    }
+
+    ref = runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=state, stage_id="frontdoor-stage-1")
+
+    assert ref and Path(ref).exists()
+    assert state["stages"][0]["archive_ref"] == ref
+    assert state["stages"][0]["archive_stage_index_end"] == 1
+    document = json.loads(Path(ref).read_text(encoding="utf-8"))
+    assert document["kind"] == "frontdoor_stage_eviction"
+    archived_tool = document["stages"][0]["rounds"][0]["tools"][0]
+    assert archived_tool["arguments_text"] == "ls -1"
+    assert archived_tool["output_text"] == "file.txt"
+
+    # 再点一次不重写文件，只复用 ref。
+    files_after_first = sorted(p.name for p in tmp_path.glob("*.json"))
+    assert runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=state, stage_id="frontdoor-stage-1") == ref
+    assert sorted(p.name for p in tmp_path.glob("*.json")) == files_after_first
+
+    # 未被点名裁撤的阶段不导档。
+    kept = {"active_stage_id": "", "transition_required": False, "stages": [{**stage, "context_evicted": False}]}
+    assert runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=kept, stage_id="frontdoor-stage-1") == ""
+    assert "archive_ref" not in kept["stages"][0]
+
+    # 导不了盘就不留指针，也不谎称可读回。
+    runner._frontdoor_write_stage_archive_file = lambda **kwargs: ("", 0, 0)  # type: ignore[assignment]
+    blocked = {"active_stage_id": "", "transition_required": False, "stages": [dict(stage)]}
+    assert runner._frontdoor_archive_evicted_stage(session_key="ext:x", stage_state=blocked, stage_id="frontdoor-stage-1") == ""
+    assert not blocked["stages"][0].get("archive_ref")
+
+
+def test_frontdoor_durable_tool_cycle_persists_eviction_pointer(tmp_path: Path) -> None:
+    # 裁撤的三样东西（标记、导出的文件、块里的指针）必须由 finalize 写 durable 账本那条
+    # 路径产出。图闭包里的 mutable_stage_state 只是本轮工作副本，写在它上面的 archive_ref
+    # 会被这里的返回值整个覆盖——上一版就栽在这里：文件照写、标记照落，块里却永远没有
+    # archive_ref，提示词承诺的 content_open 回读成了空头支票。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda session_key: str(tmp_path)  # type: ignore[assignment]
+    durable_state = {
+        "session_key": "web:evict",
+        "frontdoor_stage_state": {
+            "active_stage_id": "frontdoor-stage-1",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_kind": "normal",
+                    "mode": "自主执行",
+                    "status": "active",
+                    "stage_goal": "collect candidates",
+                    "completed_stage_summary": "",
+                    "tool_round_budget": 5,
+                    "tool_rounds_used": 1,
+                    "created_at": "2026-09-26T01:00:00+08:00",
+                    "finished_at": "",
+                    "rounds": [
+                        {
+                            "round_id": "frontdoor-stage-1:round-1",
+                            "round_index": 1,
+                            "budget_counted": True,
+                            "tool_names": ["exec"],
+                            "tool_call_ids": ["call-exec-1"],
+                            "tools": [
+                                {
+                                    "tool_call_id": "call-exec-1",
+                                    "tool_name": "exec",
+                                    "status": "success",
+                                    "arguments_text": "dir",
+                                    "output_text": "a.txt",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    payload = {
+        "id": "call-submit-1",
+        "name": STAGE_TOOL_NAME,
+        "arguments": {
+            "stage_goal": "score candidates",
+            "tool_round_budget": 5,
+            "completed_stage_summary": "阶段1确认了候选池口径",
+            "drop_completed_stage_tool_detail": True,
+        },
+    }
+
+    updated = runner._frontdoor_stage_state_after_tool_cycle(
+        durable_state,
+        tool_call_payloads=[payload],
+        tool_results=[{"tool_name": STAGE_TOOL_NAME, "status": "success", "result_text": "ok"}],
+    )
+
+    closed = updated["stages"][0]
+    assert closed["context_evicted"] is True
+    archive_ref = str(closed.get("archive_ref") or "")
+    assert archive_ref and Path(archive_ref).exists()
+    document = json.loads(Path(archive_ref).read_text(encoding="utf-8"))
+    assert document["stages"][0]["rounds"][0]["tools"][0]["output_text"] == "a.txt"
+
+    # 指针要活过下一轮的快照白名单，并真的进块——模型看到的读回承诺只有这一处载体。
+    carried = runner._frontdoor_stage_state_snapshot({"frontdoor_stage_state": updated})
+    blocks = completed_stage_blocks(carried, skip_stage_ids=set())
+    assert len(blocks) == 1
+    rendered = json.loads(str(blocks[0]["content"]).split("\n", 1)[1])
+    assert rendered["evicted"] is True
+    assert rendered["archive_ref"] == archive_ref
+
+
+def test_frontdoor_eviction_mark_is_written_and_carried_by_every_rewriter() -> None:
+    # 前门有两份账本和四处重写者。收口标记曾在"白名单漏字段"上栽过一次，裁撤标记
+    # 走的是同一批落点，所以逐处钉住：写出、穿过快照白名单、不占窗口名额、
+    # 不进重叠签名、去重时随逻辑阶段继承到存活副本。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    opened, _ = runner._submit_frontdoor_next_stage_state(
+        {"active_stage_id": "", "transition_required": False, "stages": []},
+        stage_goal="collect candidates",
+        tool_round_budget=5,
+        completed_stage_summary="",
+        key_refs=[],
+    )
+    opened = runner._record_frontdoor_stage_round(
+        opened,
+        tool_call_payloads=[{"id": "call:collect", "name": "exec", "arguments": {"command": "dir"}}],
+    )
+    closed, _ = runner._submit_frontdoor_next_stage_state(
+        opened,
+        stage_goal="score candidates",
+        tool_round_budget=5,
+        completed_stage_summary="阶段1确认了候选池口径",
+        key_refs=[],
+        drop_completed_stage_tool_detail=True,
+    )
+
+    first = closed["stages"][0]
+    assert first["context_evicted"] is True
+    # 默认态不落字段：逐条带布尔键会让存量大会话白涨体积。
+    assert "context_evicted" not in closed["stages"][1]
+
+    snapshot = runner._frontdoor_stage_state_snapshot({"frontdoor_stage_state": closed})
+    assert snapshot["stages"][0]["context_evicted"] is True
+    # 被裁撤的阶段不占保留名额，活动阶段也不在 completed 集合里。
+    assert retained_completed_stage_ids(snapshot, keep_latest=3) == set()
+
+    unmarked = {key: value for key, value in first.items() if key != "context_evicted"}
+    assert _completed_stage_overlap_signature(first) == _completed_stage_overlap_signature(unmarked)
+
+    deduped = _dedupe_canonical_stages([dict(first), dict(unmarked)])
+    assert len(deduped) == 1
+    assert deduped[0].get("context_evicted") is True
 
 
 @pytest.mark.asyncio
