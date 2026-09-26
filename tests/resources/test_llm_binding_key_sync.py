@@ -42,10 +42,12 @@ def _build_manager(monkeypatch: pytest.MonkeyPatch) -> tuple[object, object]:
                 ],
                 "roles": {
                     "ceo": ["old-key"],
-                    "execution": ["old-key", "other-key"],
+                    # execution 同时用组与 direct：改名必须命中链上的 entry 和组内成员。
+                    "execution": [{"type": "load_balance", "groupKey": "g1"}, "old-key", "other-key"],
                     "inspection": ["other-key"],
                     "memory": [],
                 },
+                "loadBalanceGroups": {"g1": {"modelKeys": ["old-key"]}},
             },
         }
     )
@@ -64,9 +66,13 @@ def test_rename_model_updates_catalog_roles_and_orchestrator(monkeypatch: pytest
     assert result["key"] == "new-key"
     assert manager.config.get_managed_model("old-key") is None
     assert manager.config.get_managed_model("new-key") is not None
-    assert manager.config.models.roles.ceo == ["new-key"]
-    assert manager.config.models.roles.execution == ["new-key", "other-key"]
-    assert manager.config.models.roles.inspection == ["other-key"]
+    # 公开契约是「候选展开视图」；链的结构由 get_role_model_routes 给出。
+    assert manager.config.get_role_model_keys("ceo") == ["new-key"]
+    assert manager.config.get_role_model_keys("execution") == ["new-key", "other-key"]
+    assert manager.config.get_role_model_keys("inspection") == ["other-key"]
+    # 组内成员同样跟着改名，且组 entry 没有被降级成 direct。
+    assert manager.config.get_load_balance_group("g1").model_keys == ["new-key"]
+    assert [entry.type for entry in manager.config.get_role_model_routes("execution")] == ["load_balance", "model", "model"]
     assert manager.config.agents.multi_agent.orchestrator_model_key == "new-key"
 
 

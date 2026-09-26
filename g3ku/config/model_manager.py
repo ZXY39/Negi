@@ -4,13 +4,35 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from g3ku.config.loader import load_config, save_config
-from g3ku.config.schema import Config
+from g3ku.config.schema import (
+    LOAD_BALANCE_ROUTE_SCOPES,
+    Config,
+    ModelLoadBalanceGroup,
+    ModelRouteEntry,
+    coerce_route_entry,
+)
 from g3ku.llm_config.enums import AuthMode, Capability
 from g3ku.llm_config.facade import LLMConfigFacade
 from g3ku.utils.api_keys import SingleAPIKeyMaxConcurrency, normalize_single_api_key_max_concurrency
 from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS, split_retry_keywords
 
 VALID_SCOPES = ("ceo", "execution", "inspection", "memory")
+
+
+def _pick_alias(body: dict[str, Any], snake: str, camel: str) -> Any:
+    if snake in body:
+        return body.get(snake)
+    if camel in body:
+        return body.get(camel)
+    return _UNSET
+
+
+def _pick_route_entries(body: dict[str, Any]) -> Any:
+    return _pick_alias(body, "route_entries", "routeEntries")
+
+
+def _pick_load_balance_groups(body: dict[str, Any]) -> Any:
+    return _pick_alias(body, "load_balance_groups", "loadBalanceGroups")
 _UNSET = object()
 
 
@@ -200,6 +222,7 @@ class ModelManager:
         name: str | None | object = _UNSET,
         context_window_tokens: int | None | object = _UNSET,
         image_multimodal_enabled: bool | object = _UNSET,
+        quota_pool_key: str | None | object = _UNSET,
         request_timeout_seconds: float | None | object = _UNSET,
     ) -> dict[str, Any]:
         item = self._require_model(key)
@@ -254,6 +277,9 @@ class ModelManager:
             )
         if image_multimodal_enabled is not _UNSET:
             item.image_multimodal_enabled = bool(image_multimodal_enabled)
+        if quota_pool_key is not _UNSET:
+            cleaned_pool_key = str(quota_pool_key or "").strip()
+            item.quota_pool_key = cleaned_pool_key or None
         self._revalidate()
         self.save()
         return self.get_model(key)
@@ -268,9 +294,8 @@ class ModelManager:
         if self.config.get_managed_model(clean_new_key) is not None:
             raise ValueError(f"Model key already exists: {clean_new_key}")
         item.key = clean_new_key
-        for scope in VALID_SCOPES:
-            refs = getattr(self.config.models.roles, scope)
-            setattr(self.config.models.roles, scope, [clean_new_key if ref == key else ref for ref in refs])
+        # 改名必须同时命中链上的 direct entry 和组内成员；按裸字符串比较会静默失配。
+        self.config.rename_model_key_in_routing(key, clean_new_key)
         if self.config.agents.multi_agent.orchestrator_model_key == key:
             self.config.agents.multi_agent.orchestrator_model_key = clean_new_key
         self._revalidate()
@@ -312,48 +337,41 @@ class ModelManager:
         scope: str,
         *,
         model_keys: list[str] | None | object = _UNSET,
+        route_entries: Any = _UNSET,
+        load_balance_groups: Any = _UNSET,
         max_iterations: Any = _UNSET,
         max_concurrency: Any = _UNSET,
     ) -> tuple[str, dict[str, Any]]:
         normalized_scope = _normalize_scope(scope)
         prepared: dict[str, Any] = {}
-        if model_keys is not _UNSET:
+        # 组先于链校验：一次保存可以同时定义组和引用它的链。
+        groups = None
+        if load_balance_groups is not _UNSET:
+            groups = self._normalize_load_balance_groups(load_balance_groups)
+            for group in groups.values():
+                for member in group.model_keys:
+                    self._require_chain_model(normalized_scope, member)
+            prepared["load_balance_groups"] = groups
+        groups_view = {**dict(self.config.models.load_balance_groups or {}), **(groups or {})}
+        if model_keys is not _UNSET and route_entries is not _UNSET:
+            # 不做静默合并：两份链同时给时以显式 route 为准，否则「保存了什么」和
+            # 「运行的是什么」会分叉。
+            raise ValueError("model_keys and route_entries cannot be provided together; route_entries wins")
+        if route_entries is not _UNSET:
+            entries, candidates = self._normalize_route_entries(normalized_scope, route_entries, groups_view)
+            for key in candidates:
+                self._require_chain_model(normalized_scope, key)
+            prepared["route_entries"] = entries
+            prepared["route_entry_candidates"] = candidates
+        elif model_keys is not _UNSET:
             cleaned: list[str] = []
             seen: set[str] = set()
             for ref in list(model_keys or []):
                 key = str(ref or "").strip()
                 if not key or key in seen:
+                    # 旧扁平链保持现有静默去重：老配置与旧 API 客户端不能被新校验打断。
                     continue
-                model = self._require_model(key)
-                if not model.enabled:
-                    raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
-                context_window_tokens = getattr(model, "context_window_tokens", None)
-                if not isinstance(context_window_tokens, int) or context_window_tokens <= 25_000:
-                    # Some older installs have chat bindings whose `.g3ku/config.json` catalog entry
-                    # lacks `contextWindowTokens`, even though the bound `llm-config` record has a
-                    # valid `parameters.context_window_tokens`. Backfill on save so role-chain
-                    # edits can proceed without forcing operators to manually sync the two stores.
-                    resolved = None
-                    try:
-                        resolved = self.facade.get_binding(self.config, key).get("context_window_tokens")
-                    except Exception:
-                        resolved = None
-                    try:
-                        resolved_int = int(resolved) if resolved not in (None, "") else None
-                    except (TypeError, ValueError):
-                        resolved_int = None
-                    if isinstance(resolved_int, int) and resolved_int > 25_000:
-                        model.context_window_tokens = resolved_int
-                        context_window_tokens = resolved_int
-
-                if not isinstance(context_window_tokens, int) or context_window_tokens <= 25_000:
-                    raise ValueError(
-                        f"Model {key} in scope {normalized_scope} must configure context_window_tokens > 25000"
-                    )
-                if normalized_scope == "memory":
-                    capability = self.facade.get_binding_capability(self.config, key)
-                    if capability != "chat":
-                        raise ValueError(f"memory role only accepts chat-capable models: {key}")
+                self._require_chain_model(normalized_scope, key)
                 seen.add(key)
                 cleaned.append(key)
             if not cleaned and normalized_scope != "memory":
@@ -370,12 +388,125 @@ class ModelManager:
             else:
                 prepared["max_concurrency"] = self._normalize_optional_limit(max_concurrency, field_name="max_concurrency")
         if not prepared:
-            raise ValueError("model_keys, max_iterations, or max_concurrency must be provided")
+            raise ValueError("model_keys, route_entries, load_balance_groups, max_iterations, or max_concurrency must be provided")
         return normalized_scope, prepared
 
+    def _require_chain_model(self, normalized_scope: str, key: str) -> None:
+        """链/组成员共用的单模型校验：必须存在、enabled、有可信 context window；memory 车道还要 chat capability。"""
+        model = self._require_model(key)
+        if not model.enabled:
+            raise ValueError(f"Disabled model cannot be assigned to roles: {key}")
+        context_window_tokens = getattr(model, "context_window_tokens", None)
+        if not isinstance(context_window_tokens, int) or context_window_tokens <= 25_000:
+            # Some older installs have chat bindings whose `.g3ku/config.json` catalog entry
+            # lacks `contextWindowTokens`, even though the bound `llm-config` record has a
+            # valid `parameters.context_window_tokens`. Backfill on save so role-chain
+            # edits can proceed without forcing operators to manually sync the two stores.
+            resolved = None
+            try:
+                resolved = self.facade.get_binding(self.config, key).get("context_window_tokens")
+            except Exception:
+                resolved = None
+            try:
+                resolved_int = int(resolved) if resolved not in (None, "") else None
+            except (TypeError, ValueError):
+                resolved_int = None
+            if isinstance(resolved_int, int) and resolved_int > 25_000:
+                model.context_window_tokens = resolved_int
+                context_window_tokens = resolved_int
+
+        if not isinstance(context_window_tokens, int) or context_window_tokens <= 25_000:
+            raise ValueError(
+                f"Model {key} in scope {normalized_scope} must configure context_window_tokens > 25000"
+            )
+        if normalized_scope == "memory":
+            capability = self.facade.get_binding_capability(self.config, key)
+            if capability != "chat":
+                raise ValueError(f"memory role only accepts chat-capable models: {key}")
+
+    def _normalize_route_entries(self, normalized_scope: str, raw_entries: Any, groups_view: dict[str, Any]) -> tuple[list[Any], list[str]]:
+        """显式 route_entries 的严格校验：重复项报错，组引用必须存在且车道允许。
+
+        `groups_view` 是「已有组 + 本次一起提交的组」，所以一次保存里可以同时新建组并
+        让链引用它，不会出现先存组再存链的中间悬空态。
+        """
+        items = raw_entries if isinstance(raw_entries, list) else []
+        if not items:
+            raise ValueError("route_entries must not be empty")
+        entries: list[Any] = []
+        candidates: list[str] = []
+        seen_route: set[tuple[str, str]] = set()
+        for item in items:
+            entry = coerce_route_entry(item)
+            identity = (entry.type, entry.group_key or entry.model_key or "")
+            if not identity[1]:
+                raise ValueError("route entry must set modelKey or groupKey")
+            if identity in seen_route:
+                kind = "group" if entry.type == "load_balance" else "model"
+                raise ValueError(f"Duplicate {kind} route entry in models.roles.{normalized_scope}: {identity[1]}")
+            seen_route.add(identity)
+            entries.append(entry)
+            if entry.type == "load_balance":
+                if normalized_scope not in LOAD_BALANCE_ROUTE_SCOPES:
+                    raise ValueError(
+                        f"负载均衡组当前仅支持 {', '.join(LOAD_BALANCE_ROUTE_SCOPES)}，"
+                        f"models.roles.{normalized_scope} 不能引用 groupKey: {entry.group_key}"
+                    )
+                group = groups_view.get(str(entry.group_key))
+                if group is None:
+                    raise ValueError(f"Unknown load balance group: {entry.group_key}")
+                if not bool(getattr(group, "enabled", True)):
+                    # 禁用组作为整段跳过处理，但显式保存时给出可读提示，避免运营以为生效了。
+                    raise ValueError(f"Load balance group is disabled: {entry.group_key}")
+                members = [str(member or "").strip() for member in list(group.model_keys or [])]
+                candidates.extend(member for member in members if member)
+                continue
+            candidates.append(str(entry.model_key))
+        return entries, candidates
+
+    def _normalize_load_balance_groups(self, raw_groups: Any) -> dict[str, Any]:
+        if raw_groups in (None, {}):
+            return {}
+        if not isinstance(raw_groups, dict):
+            raise ValueError("load_balance_groups must be an object keyed by group key")
+        normalized: dict[str, Any] = {}
+        for raw_key, raw_group in raw_groups.items():
+            group_key = str(raw_key or "").strip()
+            if not group_key:
+                raise ValueError("load balance group key must not be empty")
+            if self.config.get_managed_model(group_key) is not None:
+                raise ValueError(f"Group key collides with a model key: {group_key}")
+            payload = raw_group if isinstance(raw_group, dict) else {}
+            members = payload.get("modelKeys") if "modelKeys" in payload else payload.get("model_keys")
+            cleaned_members: list[str] = []
+            seen: set[str] = set()
+            for member in list(members or []):
+                key = str(member or "").strip()
+                if not key:
+                    continue
+                # 组内重复必须报错：静默去重会改变均衡权重并隐藏配置错误。
+                if key in seen:
+                    raise ValueError(f"Duplicate member in load balance group {group_key}: {key}")
+                seen.add(key)
+                cleaned_members.append(key)
+            if not cleaned_members:
+                raise ValueError(f"Load balance group {group_key} must configure modelKeys")
+            raw_rounds = payload.get("maxRetryRounds") if "maxRetryRounds" in payload else payload.get("max_retry_rounds")
+            normalized[group_key] = ModelLoadBalanceGroup(
+                enabled=bool(payload.get("enabled", True)),
+                max_retry_rounds=1 if raw_rounds in (None, "") else int(raw_rounds),
+                model_keys=cleaned_members,
+            )
+        return normalized
+
     def _apply_scope_route_update(self, normalized_scope: str, prepared: dict[str, Any]) -> None:
-        if "model_keys" in prepared:
-            setattr(self.config.models.roles, normalized_scope, list(prepared["model_keys"]))
+        # 组先落地再落链，`_revalidate()` 才能看到「链引用的组已存在」的完整图景。
+        if "load_balance_groups" in prepared:
+            self.config.models.load_balance_groups = dict(prepared["load_balance_groups"])
+        if "route_entries" in prepared:
+            self.config.set_role_model_routes(normalized_scope, prepared["route_entries"])
+        elif "model_keys" in prepared:
+            self.config.set_role_model_keys(normalized_scope, list(prepared["model_keys"]))
         if "max_iterations" in prepared:
             setattr(self.config.agents.role_iterations, normalized_scope, prepared["max_iterations"])
         if "max_concurrency" in prepared:
@@ -386,12 +517,16 @@ class ModelManager:
         scope: str,
         *,
         model_keys: list[str] | None | object = _UNSET,
+        route_entries: Any = _UNSET,
+        load_balance_groups: Any = _UNSET,
         max_iterations: Any = _UNSET,
         max_concurrency: Any = _UNSET,
     ) -> dict[str, Any]:
         normalized_scope, prepared = self._prepare_scope_route_update(
             scope,
             model_keys=model_keys,
+            route_entries=route_entries,
+            load_balance_groups=load_balance_groups,
             max_iterations=max_iterations,
             max_concurrency=max_concurrency,
         )
@@ -400,7 +535,7 @@ class ModelManager:
         self.save()
         return {
             "scope": normalized_scope,
-            "model_keys": list(getattr(self.config.models.roles, normalized_scope)),
+            **self._scope_route_view(normalized_scope),
             "max_iterations": self.config.get_role_max_iterations(normalized_scope),
             "max_concurrency": self.config.get_role_max_concurrency(normalized_scope),
         }
@@ -412,9 +547,13 @@ class ModelManager:
         seen_scopes: set[str] = set()
         for scope, payload in updates.items():
             body = payload if isinstance(payload, dict) else {}
+            route_entries = _pick_route_entries(body)
+            groups_payload = _pick_load_balance_groups(body)
             normalized_scope, prepared = self._prepare_scope_route_update(
                 str(scope or ""),
                 model_keys=body.get("model_keys", _UNSET),
+                route_entries=route_entries,
+                load_balance_groups=groups_payload,
                 max_iterations=body.get("max_iterations", _UNSET),
                 max_concurrency=body.get("max_concurrency", _UNSET),
             )
@@ -427,7 +566,9 @@ class ModelManager:
         self._revalidate()
         self.save()
         return {
-            "roles": {scope: list(getattr(self.config.models.roles, scope)) for scope in VALID_SCOPES},
+            "roles": {scope: self.config.get_role_model_keys(scope) for scope in VALID_SCOPES},
+            "routes": {scope: self.route_entries_payload(scope) for scope in VALID_SCOPES},
+            "load_balance_groups": self.load_balance_groups_payload_view(),
             "role_iterations": {scope: self.config.get_role_max_iterations(scope) for scope in VALID_SCOPES},
             "role_concurrency": {scope: self.config.get_role_max_concurrency(scope) for scope in VALID_SCOPES},
             "updated_scopes": [scope for scope, _prepared in prepared_updates],
@@ -438,9 +579,13 @@ class ModelManager:
         if not model.enabled:
             raise ValueError(f"Disabled model cannot be assigned to roles: {model.key}")
         normalized_scope = _normalize_scope(scope)
-        route = self._scope_list(normalized_scope)
-        if model.key not in route:
-            route.append(model.key)
+        if key in self._scope_list(normalized_scope):
+            return
+        # 追加而不是就地 append：链的元素类型是 ModelRouteEntry，塞裸字符串会让
+        # 后续按 key 比较的改名/删除路径静默失配。
+        entries = self.config.get_role_model_routes(normalized_scope)
+        entries.append(ModelRouteEntry(type="model", model_key=model.key))
+        self.config.set_role_model_routes(normalized_scope, entries)
 
     def get_model(self, key: str) -> dict[str, Any]:
         item = self.facade.get_binding(self.config, key)
@@ -451,8 +596,41 @@ class ModelManager:
         save_config(self.config)
 
     def _scope_list(self, scope: str) -> list[str]:
+        # 候选展开视图：组成员也算「这个模型被这条链用到」。
         normalized_scope = _normalize_scope(scope)
-        return getattr(self.config.models.roles, normalized_scope)
+        return self.config.get_role_model_keys(normalized_scope)
+
+    def route_entries_payload(self, scope: str) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for entry in self.config.get_role_model_routes(scope):
+            row: dict[str, Any] = {"type": str(entry.type or "model")}
+            if entry.model_key:
+                row["model_key"] = str(entry.model_key)
+                row["modelKey"] = str(entry.model_key)
+            if entry.group_key:
+                row["group_key"] = str(entry.group_key)
+                row["groupKey"] = str(entry.group_key)
+            payload.append(row)
+        return payload
+
+    def load_balance_groups_payload_view(self) -> dict[str, Any]:
+        groups = dict(self.config.models.load_balance_groups or {})
+        return {
+            str(group_key): {
+                "enabled": bool(group.enabled),
+                "max_retry_rounds": int(group.max_retry_rounds or 1),
+                "maxRetryRounds": int(group.max_retry_rounds or 1),
+                "model_keys": list(group.model_keys),
+                "modelKeys": list(group.model_keys),
+            }
+            for group_key, group in groups.items()
+        }
+
+    def _scope_route_view(self, scope: str) -> dict[str, Any]:
+        return {
+            "model_keys": self.config.get_role_model_keys(scope),
+            "route_entries": self.route_entries_payload(scope),
+        }
 
     @staticmethod
     def _normalize_optional_limit(value: Any, *, field_name: str) -> int | None:
@@ -466,9 +644,8 @@ class ModelManager:
         return clean_value
 
     def _remove_model_from_roles(self, key: str) -> None:
-        for scope in VALID_SCOPES:
-            refs = getattr(self.config.models.roles, scope)
-            setattr(self.config.models.roles, scope, [ref for ref in refs if ref != key])
+        # 链上静默移除（沿用旧行为），但组里删到空会报错并指出被谁引用。
+        self.config.remove_model_key_from_routing(key)
 
     def _require_model(self, key: str):
         item = self.config.get_managed_model(key)

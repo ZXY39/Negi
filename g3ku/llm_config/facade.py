@@ -349,17 +349,14 @@ class LLMConfigFacade:
         self.repository.delete(binding.llm_config_id)
 
     def get_routes(self, config: Any) -> dict[str, list[str]]:
+        # 候选展开视图：链里出现负载均衡组时，成员也算这条车道用到的模型。
+        # 旧的 fallback 顺序语义已由 `routes` 字段（route entries）承载。
         return {
-            "ceo": list(config.models.roles.ceo),
-            "execution": list(config.models.roles.execution),
-            "inspection": list(config.models.roles.inspection),
-            "memory": list(getattr(config.models.roles, "memory", []) or []),
+            "ceo": config.get_role_model_keys("ceo"),
+            "execution": config.get_role_model_keys("execution"),
+            "inspection": config.get_role_model_keys("inspection"),
+            "memory": config.get_role_model_keys("memory"),
         }
-
-    def set_route(self, config: Any, scope: str, model_keys: list[str]) -> dict[str, list[str]]:
-        normalized = str(scope or "").strip().lower().replace("-", "_")
-        setattr(config.models.roles, normalized, [str(item).strip() for item in model_keys if str(item).strip()])
-        return self.get_routes(config)
 
 
     def export_runtime_config(self, config_id: str) -> GenericRuntimeConfig:
@@ -414,6 +411,7 @@ class LLMConfigFacade:
             "context_window_tokens": record.parameters.get("context_window_tokens"),
             "request_timeout_seconds": record.parameters.get("request_timeout_seconds"),
             "image_multimodal_enabled": bool(getattr(binding, "image_multimodal_enabled", False)),
+            "quota_pool_key": str(getattr(binding, "quota_pool_key", "") or "").strip() or None,
             "capability": record.capability.value,
             "auth_mode": record.auth_mode.value,
             "config_id": record.config_id,

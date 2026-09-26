@@ -903,7 +903,16 @@ def _config_summary_probe_status(facade, config_id: str) -> str | None:
 
 
 def _model_roles(manager: ModelManager) -> dict[str, list[str]]:
-    return {scope: list(getattr(manager.config.models.roles, scope)) for scope in VALID_SCOPES}
+    # 候选展开视图，不再代表 fallback 顺序；顺序语义由 `route_entries` 承载。
+    return {scope: manager.config.get_role_model_keys(scope) for scope in VALID_SCOPES}
+
+
+def _model_routes(manager: ModelManager) -> dict[str, list[dict[str, Any]]]:
+    return {scope: manager.route_entries_payload(scope) for scope in VALID_SCOPES}
+
+
+def _load_balance_groups(manager: ModelManager) -> dict[str, Any]:
+    return manager.load_balance_groups_payload_view()
 
 
 def _model_role_iterations(manager: ModelManager) -> dict[str, int]:
@@ -917,6 +926,8 @@ def _model_role_concurrency(manager: ModelManager) -> dict[str, int | None]:
 def _model_roles_payload(manager: ModelManager) -> dict[str, Any]:
     return {
         'roles': _model_roles(manager),
+        'route_entries': _model_routes(manager),
+        'load_balance_groups': _load_balance_groups(manager),
         'role_iterations': _model_role_iterations(manager),
         'role_concurrency': _model_role_concurrency(manager),
     }
@@ -924,7 +935,10 @@ def _model_roles_payload(manager: ModelManager) -> dict[str, Any]:
 
 def _llm_routes_payload(manager: ModelManager) -> dict[str, Any]:
     return {
+        # `routes` 保留为候选展开视图（旧客户端在读）；fallback 顺序看 route_entries。
         'routes': manager.facade.get_routes(manager.config),
+        'route_entries': _model_routes(manager),
+        'load_balance_groups': _load_balance_groups(manager),
         'role_iterations': _model_role_iterations(manager),
         'role_concurrency': _model_role_concurrency(manager),
     }
@@ -945,6 +959,16 @@ def _scope_route_update_kwargs(payload: dict[str, Any] | None) -> dict[str, Any]
     update_kwargs: dict[str, Any] = {}
     if raw_model_keys is not None or 'model_keys' in body or 'modelKeys' in body:
         update_kwargs['model_keys'] = [str(item) for item in raw_model_keys] if raw_model_keys is not None else None
+    raw_route_entries = body.get('route_entries')
+    if raw_route_entries is None:
+        raw_route_entries = body.get('routeEntries')
+    if raw_route_entries is not None or 'route_entries' in body or 'routeEntries' in body:
+        update_kwargs['route_entries'] = raw_route_entries
+    raw_groups = body.get('load_balance_groups')
+    if raw_groups is None:
+        raw_groups = body.get('loadBalanceGroups')
+    if raw_groups is not None or 'load_balance_groups' in body or 'loadBalanceGroups' in body:
+        update_kwargs['load_balance_groups'] = raw_groups
     if 'max_iterations' in body or 'maxIterations' in body:
         update_kwargs['max_iterations'] = raw_max_iterations
     if 'max_concurrency' in body or 'maxConcurrency' in body:
@@ -1368,6 +1392,7 @@ async def update_model(model_key: str, payload: dict = Body(...)):
             name=_pick('name'),
             context_window_tokens=_pick('context_window_tokens', 'contextWindowTokens'),
             image_multimodal_enabled=_pick('image_multimodal_enabled', 'imageMultimodalEnabled'),
+            quota_pool_key=_pick('quota_pool_key', 'quotaPoolKey'),
             request_timeout_seconds=_pick('request_timeout_seconds', 'requestTimeoutSeconds'),
         )
     except ValueError as exc:

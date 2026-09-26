@@ -42,6 +42,16 @@ DEFAULT_NODE_DISPATCH_CONCURRENCY = {
     "inspection": 4,
 }
 
+# load-balance group 的组内预算边界（份文档 4.4/15.2）：语义是「每个成员允许的完整
+# key pass 数」，默认 1。上限刻意很小——成员 catalog 的 retry_count 可达 9999999，
+# 若被组继承，组内平级 fallback 永远不会发生。超上限是配置错误而不是需要夹断的输入：
+# 夹断会把写错的意图静默改成另一套行为。
+GROUP_MAX_RETRY_ROUNDS_LIMIT = 3
+GROUP_DEFAULT_MAX_RETRY_ROUNDS = 1
+MODEL_ROUTE_ENTRY_TYPES = ("model", "load_balance")
+# 第一阶段只允许这两条车道使用负载均衡组。
+LOAD_BALANCE_ROUTE_SCOPES = ("execution", "inspection")
+
 DEFAULT_MAX_OUTPUT_TOKENS = 65536
 VALID_REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 DEFAULT_REASONING_EFFORT = "medium"
@@ -230,6 +240,15 @@ class ManagedModelConfig(Base):
     # 看门狗与流式首块/块间空闲超时。
     request_timeout_seconds: float | None = None
     image_multimodal_enabled: bool = False
+    # 显式声明「这条 binding 与哪些 binding 共享上游配额账户」。只由 operator 填写：
+    # 运行时不按 provider 名称或 endpoint 猜测共享，猜错会把两个独立配额当一个用。
+    quota_pool_key: str | None = None
+
+    @field_validator("quota_pool_key", mode="before")
+    @classmethod
+    def _normalize_quota_pool_key(cls, value: Any) -> str | None:
+        pool_key = str(value or "").strip()
+        return pool_key or None
 
     @field_validator("key")
     @classmethod
@@ -342,34 +361,161 @@ class ManagedModelConfig(Base):
         return self
 
 
-class RoleModelRoutingConfig(Base):
-    """Ordered model references for each runtime scope."""
+class ModelRouteEntry(Base):
+    """模型链上的一个跳：要么直接指向一个 model key，要么指向一个负载均衡组。
 
-    ceo: list[str] = Field(default_factory=list)
-    execution: list[str] = Field(default_factory=list)
-    inspection: list[str] = Field(default_factory=list)
-    memory: list[str] = Field(default_factory=list)
+    链上顺序 = fallback 优先级；组内成员顺序不参与选择。业务代码不得再判断
+    「这一项是字符串还是对象」——加载时一律规范化成该类型，见
+    ``RoleModelRoutingConfig``。
+    """
 
-    @field_validator("ceo", "execution", "inspection", "memory", mode="before")
+    type: Literal["model", "load_balance"] = "model"
+    model_key: str | None = None
+    group_key: str | None = None
+
+    @field_validator("type", mode="before")
     @classmethod
-    def _normalize_chain(cls, value: Any) -> list[str]:
+    def _normalize_type(cls, value: Any) -> str:
+        normalized = str(value or "").strip().lower().replace("-", "_")
+        if not normalized:
+            return "model"
+        if normalized not in MODEL_ROUTE_ENTRY_TYPES:
+            raise ValueError(
+                f"models.roles route entry type must be one of {', '.join(MODEL_ROUTE_ENTRY_TYPES)}: {value}"
+            )
+        return normalized
+
+    @field_validator("model_key", "group_key", mode="before")
+    @classmethod
+    def _normalize_keys(cls, value: Any) -> str | None:
+        key = str(value or "").strip()
+        return key or None
+
+    @model_validator(mode="after")
+    def _validate_entry_shape(self) -> "ModelRouteEntry":
+        if self.type == "model":
+            if not self.model_key:
+                raise ValueError("models.roles route entry with type=model requires modelKey")
+            if self.group_key:
+                raise ValueError("models.roles route entry with type=model must not set groupKey")
+            return self
+        if self.group_key and self.model_key:
+            raise ValueError("models.roles route entry with type=load_balance must not set modelKey")
+        # 缺 groupKey 的空 load_balance 条目不能在此抛错：旧配置里可能带一个只写了
+        # type 的占位条目，加载时必须继续可读；由保存路径和管理面校验拒绝。
+        return self
+
+
+class ModelLoadBalanceGroup(Base):
+    """链内平级候选组：成员之间不排序，运行时按综合负载选一个绑定到节点。"""
+
+    enabled: bool = True
+    max_retry_rounds: int = GROUP_DEFAULT_MAX_RETRY_ROUNDS
+    model_keys: list[str] = Field(default_factory=list)
+
+    @field_validator("max_retry_rounds", mode="before")
+    @classmethod
+    def _normalize_max_retry_rounds(cls, value: Any) -> int:
+        # 区分「未配置」（走默认）与「写了非法值」（报错），与 retry_on 的处理口径一致。
+        if value is None:
+            return GROUP_DEFAULT_MAX_RETRY_ROUNDS
+        if isinstance(value, str) and not value.strip():
+            return GROUP_DEFAULT_MAX_RETRY_ROUNDS
+        try:
+            rounds = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("models.loadBalanceGroups.*.maxRetryRounds must be an integer") from exc
+        if rounds < 1 or rounds > GROUP_MAX_RETRY_ROUNDS_LIMIT:
+            raise ValueError(
+                "models.loadBalanceGroups.*.maxRetryRounds must be between 1 and "
+                f"{GROUP_MAX_RETRY_ROUNDS_LIMIT}; member catalog retryCount is not inherited by group routes"
+            )
+        return rounds
+
+    @field_validator("model_keys", mode="before")
+    @classmethod
+    def _normalize_model_keys(cls, value: Any) -> list[str]:
         items = value if isinstance(value, list) else []
         clean: list[str] = []
         seen: set[str] = set()
         for item in items:
             key = str(item or "").strip()
-            if not key or key in seen:
+            if not key:
                 continue
+            # 组内重复成员必须报错而不是静默去重：静默去重会改变均衡权重并隐藏配置错误
+            # （组永远是显式结构，没有 legacy 兼容负担）。
+            if key in seen:
+                raise ValueError(f"models.loadBalanceGroups member appears twice: {key}")
             seen.add(key)
             clean.append(key)
         return clean
 
 
+class RoleModelRoutingConfig(Base):
+    """Ordered route entries for each runtime scope.
+
+    输入可以是旧的字符串数组（``[model_a, model_b]``）或显式 route 对象，两者在加载时
+    统一规范化为 ``ModelRouteEntry``；序列化回配置文件时，全是 direct model 的链会保持
+    旧的字符串数组形状，避免出现无意义的 config diff（见 loader 的 roles payload）。
+    """
+
+    ceo: list[ModelRouteEntry] = Field(default_factory=list)
+    execution: list[ModelRouteEntry] = Field(default_factory=list)
+    inspection: list[ModelRouteEntry] = Field(default_factory=list)
+    memory: list[ModelRouteEntry] = Field(default_factory=list)
+
+    @field_validator("ceo", "execution", "inspection", "memory", mode="before")
+    @classmethod
+    def _normalize_chain(cls, value: Any) -> list[ModelRouteEntry]:
+        items = value if isinstance(value, list) else []
+        entries: list[ModelRouteEntry] = []
+        seen: set[tuple[str, str]] = set()
+        for item in items:
+            entry = coerce_route_entry(item)
+            identity = (entry.type, entry.group_key or entry.model_key or "")
+            # 与旧行为一致：加载时静默丢弃空项与重复项，保证存量配置和旧客户端可读。
+            # 保存路径按「显式 route_entries 重复即 400」单独严格校验（model_manager）。
+            if not identity[1] or identity in seen:
+                continue
+            seen.add(identity)
+            entries.append(entry)
+        return entries
+
+
 class ModelsConfig(Base):
-    """Managed model catalog and role routing."""
+    """Managed model catalog, role routing and load-balance groups."""
 
     catalog: list[ManagedModelConfig] = Field(default_factory=list)
     roles: RoleModelRoutingConfig = Field(default_factory=RoleModelRoutingConfig)
+    load_balance_groups: dict[str, ModelLoadBalanceGroup] = Field(default_factory=dict)
+
+    @field_validator("load_balance_groups", mode="before")
+    @classmethod
+    def _normalize_groups(cls, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        normalized: dict[str, Any] = {}
+        for raw_key, raw_group in value.items():
+            group_key = str(raw_key or "").strip()
+            if not group_key:
+                continue
+            payload = raw_group if isinstance(raw_group, dict) else {}
+            normalized[group_key] = payload
+        return normalized
+
+
+def coerce_route_entry(item: Any) -> ModelRouteEntry:
+    """把字符串或 dict 规范化为 ModelRouteEntry。"""
+    if isinstance(item, ModelRouteEntry):
+        return item
+    if isinstance(item, str):
+        return ModelRouteEntry(type="model", model_key=item.strip() or None)
+    if isinstance(item, dict):
+        payload = dict(item)
+        if "type" not in payload and ("modelKey" in payload or "model_key" in payload):
+            payload["type"] = "model"
+        return ModelRouteEntry.model_validate(payload)
+    return ModelRouteEntry(type="model", model_key=str(item or "").strip() or None)
 
 
 class MultiAgentConfig(Base):
@@ -1022,10 +1168,50 @@ class Config(BaseSettings):
                 raise ValueError(f"Duplicate model key in models.catalog: {key}")
             catalog_by_key[key] = item
 
+        groups = dict(self.models.load_balance_groups or {})
+        for group_key, group in groups.items():
+            # group key 与 model key 共用一个命名空间会让人读不出「这个引用指向谁」，
+            # 而两条解析车道完全不同（组要先展开成员）。
+            if group_key in catalog_by_key:
+                raise ValueError(
+                    f"models.loadBalanceGroups key collides with a model key: {group_key}"
+                )
+            if not group.model_keys:
+                raise ValueError(f"models.loadBalanceGroups.{group_key} must configure modelKeys")
+            for member in group.model_keys:
+                item = catalog_by_key.get(str(member or "").strip())
+                if item is None:
+                    raise ValueError(
+                        f"models.loadBalanceGroups.{group_key} references unknown model key: {member}"
+                    )
+                if not item.enabled:
+                    raise ValueError(
+                        f"models.loadBalanceGroups.{group_key} references disabled model key: {member}"
+                    )
+
+        # 组引用检查覆盖全部四个 scope：`memory` 不在 REQUIRED_MODEL_ROLES 里，但第一
+        # 阶段同样不允许它用组（记忆车道有固定单并发与 chat capability 契约）。
+        for scope in ("ceo", "execution", "inspection", "memory"):
+            for entry in self.get_role_model_routes(scope):
+                if entry.type != "load_balance":
+                    continue
+                if scope not in LOAD_BALANCE_ROUTE_SCOPES:
+                    raise ValueError(
+                        f"负载均衡组当前仅支持 execution/inspection，models.roles.{scope} "
+                        f"不能引用 groupKey: {entry.group_key}"
+                    )
+                group_key = str(entry.group_key or "").strip()
+                if not group_key:
+                    raise ValueError(f"models.roles.{scope} has a load_balance entry without groupKey")
+                if group_key not in groups:
+                    raise ValueError(f"models.roles.{scope} references unknown group key: {group_key}")
+
         for scope in REQUIRED_MODEL_ROLES:
-            chain = getattr(self.models.roles, scope)
-            for model_key in chain:
-                item = catalog_by_key.get(str(model_key or "").strip())
+            for entry in self.get_role_model_routes(scope):
+                if entry.type == "load_balance":
+                    continue
+                model_key = str(entry.model_key or "").strip()
+                item = catalog_by_key.get(model_key)
                 if item is None:
                     raise ValueError(f"models.roles.{scope} references unknown model key: {model_key}")
                 if not item.enabled:
@@ -1096,9 +1282,165 @@ class Config(BaseSettings):
                 return self.parse_provider_model(provider_model)
         return self.parse_provider_model(str(managed.provider_model or "").strip())
 
-    def get_role_model_keys(self, role: str) -> list[str]:
+    def get_role_model_routes(self, role: str) -> list[ModelRouteEntry]:
+        """该角色的有序 route entry 列表（fallback 顺序）。
+
+        返回值是副本：调用方改动不应影响活配置对象，热刷新靠整份 config 替换。
+        """
         normalized = normalize_role_scope(role)
-        return list(getattr(self.models.roles, normalized))
+        return [entry.model_copy(deep=True) for entry in getattr(self.models.roles, normalized)]
+
+    def get_load_balance_group(self, group_key: str | None) -> ModelLoadBalanceGroup | None:
+        key = str(group_key or "").strip()
+        if not key:
+            return None
+        group = dict(self.models.load_balance_groups or {}).get(key)
+        return group.model_copy(deep=True) if group is not None else None
+
+    def get_role_model_keys(self, role: str) -> list[str]:
+        """展开后的候选 model key 列表（去重，保持 route 顺序与组内声明顺序）。
+
+        这是**候选视图**，不再代表 fallback 顺序：组内的顺序只用于展示与稳定序列化。
+        需要按序 fallback 的代码必须改用 ``get_role_model_routes``；仍读第一个元素的
+        代码只允许出现在 legacy 扁平链与纯展示路径上（见 FIX_PLAN §13 Q6）。
+        被禁用的组（``enabled=false``）整段跳过，等于该 route entry 不生效。
+        """
+        normalized = normalize_role_scope(role)
+        keys: list[str] = []
+        seen: set[str] = set()
+        for entry in getattr(self.models.roles, normalized):
+            for candidate in self._route_entry_model_keys(entry):
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                keys.append(candidate)
+        return keys
+
+    def _route_entry_model_keys(self, entry: ModelRouteEntry) -> list[str]:
+        if entry.type == "load_balance":
+            group = self.get_load_balance_group(entry.group_key)
+            if group is None or not group.enabled:
+                return []
+            return [str(key or "").strip() for key in group.model_keys if str(key or "").strip()]
+        model_key = str(entry.model_key or "").strip()
+        return [model_key] if model_key else []
+
+    def set_role_model_routes(self, role: str, entries: list[Any]) -> None:
+        """写入某个 scope 的 route 列表（字符串/dict/ModelRouteEntry 混合都吃）。
+
+        所有写路径都必须经过这里：字段类型是 `ModelRouteEntry`，直接塞裸字符串不会
+        被 pydantic 拦下（未开 validate_assignment），但会让重命名/删除这类按 key 比较
+        的写路径静默失配，并在序列化时产出 unexpected-value 警告。
+        """
+        normalized = normalize_role_scope(role)
+        resolved: list[ModelRouteEntry] = []
+        seen: set[tuple[str, str]] = set()
+        for item in list(entries or []):
+            entry = coerce_route_entry(item)
+            identity = (entry.type, entry.group_key or entry.model_key or "")
+            if not identity[1] or identity in seen:
+                continue
+            seen.add(identity)
+            resolved.append(entry)
+        setattr(self.models.roles, normalized, resolved)
+
+    def set_role_model_keys(self, role: str, model_keys: list[str]) -> None:
+        """按旧的扁平字符串数组写入一条链（全是 direct model，不掺组）。"""
+        keys = [str(key or "").strip() for key in list(model_keys or []) if str(key or "").strip()]
+        self.set_role_model_routes(role, keys)
+
+    def iter_role_scopes(self) -> tuple[str, ...]:
+        return ("ceo", "execution", "inspection", "memory")
+
+    def rename_model_key_in_routing(self, old_key: str, new_key: str) -> None:
+        """把一个绑定 key 的全部路由引用改名：链上的 direct entry + 组内成员。
+
+        组内改名撞上已有成员时直接报错——静默去重会悄悄改掉这个组的负载权重。
+        """
+        old = str(old_key or "").strip()
+        new = str(new_key or "").strip()
+        if not old or not new or old == new:
+            return
+        for scope in self.iter_role_scopes():
+            entries = self.get_role_model_routes(scope)
+            touched = False
+            for entry in entries:
+                if entry.type == "model" and entry.model_key == old:
+                    entry.model_key = new
+                    touched = True
+            if touched:
+                self.set_role_model_routes(scope, entries)
+
+        groups = dict(self.models.load_balance_groups or {})
+        for group_key, group in groups.items():
+            members = [str(key or "").strip() for key in list(group.model_keys or [])]
+            if old not in members:
+                continue
+            renamed: list[str] = []
+            for member in members:
+                renamed.append(new if member == old else member)
+            if len(set(renamed)) != len(renamed):
+                raise ValueError(
+                    f"models.loadBalanceGroups.{group_key} 已经有成员 {new}，无法把 {old} 改名过去"
+                )
+            group.model_keys = renamed
+        self.models.load_balance_groups = groups
+
+    def collect_model_key_routing_refs(self, key: str) -> dict[str, Any]:
+        """列出某个 model key 被谁引用，用于删除/禁用前的可读错误。"""
+        target = str(key or "").strip()
+        refs: dict[str, Any] = {"roles": [], "groups": [], "group_backed_roles": []}
+        if not target:
+            return refs
+        for scope in self.iter_role_scopes():
+            for entry in self.get_role_model_routes(scope):
+                if entry.type == "model" and entry.model_key == target:
+                    refs["roles"].append(scope)
+                elif entry.type == "load_balance":
+                    group = self.get_load_balance_group(entry.group_key)
+                    if group is not None and target in [str(m or "").strip() for m in group.model_keys]:
+                        refs["group_backed_roles"].append(scope)
+        for group_key, group in dict(self.models.load_balance_groups or {}).items():
+            if target in [str(m or "").strip() for m in list(group.model_keys or [])]:
+                refs["groups"].append(str(group_key))
+        return refs
+
+    def remove_model_key_from_routing(self, key: str) -> None:
+        """从链上与组里摘掉一个 model key。
+
+        链上 direct entry 直接删（与旧的静默移除行为一致）。组里删成员后若组空了，
+        **报错而不是顺手删组**：那会让引用它的整条车道静默失去负载均衡。
+        """
+        target = str(key or "").strip()
+        if not target:
+            return
+        groups = dict(self.models.load_balance_groups or {})
+        emptied = [
+            str(group_key)
+            for group_key, group in groups.items()
+            if [str(m or "").strip() for m in list(group.model_keys or [])] == [target]
+        ]
+        if emptied:
+            refs = self.collect_model_key_routing_refs(target)
+            used_by = ", ".join(
+                [f"models.loadBalanceGroups.{item}" for item in emptied]
+                + [f"models.roles.{item}" for item in sorted(set(refs["group_backed_roles"]))]
+            )
+            raise ValueError(
+                f"模型 {target} 是负载均衡组的最后一个成员，不能直接删除：{used_by}。"
+                "先给这些组加入其他成员，或改用整链编辑。"
+            )
+        for group_key, group in groups.items():
+            members = [str(m or "").strip() for m in list(group.model_keys or [])]
+            if target in members:
+                group.model_keys = [m for m in members if m != target]
+        self.models.load_balance_groups = groups
+
+        for scope in self.iter_role_scopes():
+            entries = self.get_role_model_routes(scope)
+            kept = [entry for entry in entries if not (entry.type == "model" and entry.model_key == target)]
+            if len(kept) != len(entries):
+                self.set_role_model_routes(scope, kept)
 
     def get_role_max_iterations(self, role: str) -> int | None:
         normalized = normalize_role_scope(role)

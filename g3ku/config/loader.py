@@ -448,7 +448,39 @@ def _normalize_inline_model_bindings(cfg: Config) -> bool:
     return changed
 
 
-def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[str, list[str]]]:
+def _role_route_payload(entries: list[Any]) -> list[Any]:
+    """链的落盘形状：全是 direct model 时保持旧的字符串数组，避免出现无意义的 config
+    diff；一旦出现 group entry，整条链改写成 route 对象数组（读侧两种形状都吃）。"""
+    items = list(entries or [])
+    if all(str(getattr(item, "type", "") or "").strip() == "model" for item in items):
+        return [str(getattr(item, "model_key", "") or "").strip() for item in items if getattr(item, "model_key", None)]
+    payload: list[dict[str, object]] = []
+    for item in items:
+        entry_type = str(getattr(item, "type", "") or "model").strip() or "model"
+        row: dict[str, object] = {"type": entry_type}
+        model_key = str(getattr(item, "model_key", "") or "").strip()
+        group_key = str(getattr(item, "group_key", "") or "").strip()
+        if model_key:
+            row["modelKey"] = model_key
+        if group_key:
+            row["groupKey"] = group_key
+        payload.append(row)
+    return payload
+
+
+def _load_balance_groups_payload(cfg: Config) -> dict[str, dict[str, object]]:
+    groups = getattr(cfg.models, "load_balance_groups", None) or {}
+    payload: dict[str, dict[str, object]] = {}
+    for group_key, group in groups.items():
+        payload[str(group_key)] = {
+            "enabled": bool(getattr(group, "enabled", True)),
+            "maxRetryRounds": int(getattr(group, "max_retry_rounds", 1) or 1),
+            "modelKeys": [str(key or "").strip() for key in list(getattr(group, "model_keys", []) or []) if str(key or "").strip()],
+        }
+    return payload
+
+
+def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[str, list[Any]]]:
     catalog = []
     for item in cfg.models.catalog:
         payload: dict[str, object] = {
@@ -467,22 +499,34 @@ def _managed_models_payload(cfg: Config) -> tuple[list[dict[str, object]], dict[
             payload["requestTimeoutSeconds"] = float(getattr(item, "request_timeout_seconds", 0) or 0)
         if getattr(item, "single_api_key_max_concurrency", None) is not None:
             payload["singleApiKeyMaxConcurrency"] = item.single_api_key_max_concurrency
+        if getattr(item, "quota_pool_key", None):
+            # 只在显式声明时落盘：不给没配的存量配置造出一个 null 字段。
+            payload["quotaPoolKey"] = str(item.quota_pool_key)
         catalog.append(payload)
     routes = {
-        "ceo": list(cfg.models.roles.ceo),
-        "execution": list(cfg.models.roles.execution),
-        "inspection": list(cfg.models.roles.inspection),
-        "memory": list(cfg.models.roles.memory),
+        "ceo": _role_route_payload(cfg.models.roles.ceo),
+        "execution": _role_route_payload(cfg.models.roles.execution),
+        "inspection": _role_route_payload(cfg.models.roles.inspection),
+        "memory": _role_route_payload(cfg.models.roles.memory),
     }
     return catalog, routes
 
 
 def _runtime_config_payload(cfg: Config) -> dict[str, object]:
     catalog, routes = _managed_models_payload(cfg)
+    groups = _load_balance_groups_payload(cfg)
     providers = {
         provider_name: _provider_payload(cfg, provider_name)
         for provider_name in _referenced_provider_names(cfg)
     }
+
+    models_payload: dict[str, object] = {
+        "catalog": catalog,
+        "roles": routes,
+    }
+    # 空组不落盘：存量 config.json 没有该键时读侧回落到 {}，不产生无意义 diff。
+    if groups:
+        models_payload["loadBalanceGroups"] = groups
 
     return {
         "agents": {
@@ -510,10 +554,7 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "orchestratorModelKey": cfg.agents.multi_agent.orchestrator_model_key,
             },
         },
-        "models": {
-            "catalog": catalog,
-            "roles": routes,
-        },
+        "models": models_payload,
         "providers": providers,
         "web": {
             "host": cfg.web.host,
@@ -620,6 +661,9 @@ def _ensure_runtime_fields_explicit(raw_data: dict[str, Any], cfg: Config) -> No
         ("cron",),
         # 可选能力段：没配就是不用，取值回落到 schema 默认。
         ("stt",),
+        # 负载均衡组是可选段：存量 config.json 没有该节也必须能加载，成员预算等
+        # 缺省值由 `ModelLoadBalanceGroup` 承担。
+        ("models", "loadBalanceGroups"),
     }
     missing = [
         ".".join(path)
