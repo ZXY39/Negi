@@ -211,6 +211,11 @@ def retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[s
         if _stage_get(stage, "context_visible", True) is False:
             # 收口阶段不占保留窗口名额（与 raw_stage_renderer 同一规则）。
             continue
+        if _stage_get(stage, "context_evicted", False) is True:
+            # 模型在关闭本阶段时点名移出肉身：它既不占保留名额，也不留在 raw 里，
+            # 于是下一个投影就把它的工具帧裁掉。仍然渲染阶段块（completed_stage_blocks
+            # 只跳过收口），所以总结不会成为唯一记录。
+            continue
         completed.append((int(_stage_get(stage, "stage_index", 0) or 0), stage_id))
     completed.sort()
     return {stage_id for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]}

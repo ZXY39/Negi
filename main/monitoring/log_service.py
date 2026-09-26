@@ -2828,6 +2828,7 @@ class TaskLogService:
         completed_stage_summary: str = '',
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
+        drop_completed_stage_tool_detail: bool = False,
     ) -> dict[str, Any]:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
@@ -2881,6 +2882,11 @@ class TaskLogService:
                             'finished_at': now,
                             'completed_stage_summary': normalized_completed_summary,
                             'key_refs': normalized_key_refs,
+                            # 工具层已用 validate_params 拦过"空总结+点名裁撤"，这里再收一次：
+                            # 绕过工具层的写入者不能造出"肉身和总结一起消失"的黑洞态。
+                            'context_evicted': bool(
+                                drop_completed_stage_tool_detail and normalized_completed_summary
+                            ),
                         }
                     )
                 stages.append(current)

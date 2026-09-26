@@ -8,7 +8,12 @@ import pytest
 
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
+from g3ku.runtime.frontdoor.canonical_context import (
+    _completed_stage_overlap_signature,
+    _dedupe_canonical_stages,
+)
 from g3ku.runtime.frontdoor.state_models import initial_persistent_state
+from g3ku.runtime.stage_prompt_compaction import retained_completed_stage_ids
 from main.service.runtime_service import MainRuntimeService
 from main.runtime.stage_budget import SILENT_TOOL_NAME, STAGE_TOOL_NAME
 
@@ -494,6 +499,49 @@ def test_frontdoor_final_stage_does_not_require_transition_when_budget_is_exhaus
     assert updated["transition_required"] is False
     assert updated["stages"][0]["tool_rounds_used"] == 1
     assert updated["stages"][0]["final_stage"] is True
+
+
+def test_frontdoor_eviction_mark_is_written_and_carried_by_every_rewriter() -> None:
+    # 前门有两份账本和四处重写者。收口标记曾在"白名单漏字段"上栽过一次，裁撤标记
+    # 走的是同一批落点，所以逐处钉住：写出、穿过快照白名单、不占窗口名额、
+    # 不进重叠签名、去重时随逻辑阶段继承到存活副本。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    opened, _ = runner._submit_frontdoor_next_stage_state(
+        {"active_stage_id": "", "transition_required": False, "stages": []},
+        stage_goal="collect candidates",
+        tool_round_budget=5,
+        completed_stage_summary="",
+        key_refs=[],
+    )
+    opened = runner._record_frontdoor_stage_round(
+        opened,
+        tool_call_payloads=[{"id": "call:collect", "name": "exec", "arguments": {"command": "dir"}}],
+    )
+    closed, _ = runner._submit_frontdoor_next_stage_state(
+        opened,
+        stage_goal="score candidates",
+        tool_round_budget=5,
+        completed_stage_summary="阶段1确认了候选池口径",
+        key_refs=[],
+        drop_completed_stage_tool_detail=True,
+    )
+
+    first = closed["stages"][0]
+    assert first["context_evicted"] is True
+    # 默认态不落字段：逐条带布尔键会让存量大会话白涨体积。
+    assert "context_evicted" not in closed["stages"][1]
+
+    snapshot = runner._frontdoor_stage_state_snapshot({"frontdoor_stage_state": closed})
+    assert snapshot["stages"][0]["context_evicted"] is True
+    # 被裁撤的阶段不占保留名额，活动阶段也不在 completed 集合里。
+    assert retained_completed_stage_ids(snapshot, keep_latest=3) == set()
+
+    unmarked = {key: value for key, value in first.items() if key != "context_evicted"}
+    assert _completed_stage_overlap_signature(first) == _completed_stage_overlap_signature(unmarked)
+
+    deduped = _dedupe_canonical_stages([dict(first), dict(unmarked)])
+    assert len(deduped) == 1
+    assert deduped[0].get("context_evicted") is True
 
 
 @pytest.mark.asyncio

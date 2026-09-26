@@ -34,9 +34,8 @@ class _TaskNodeDetailHandler(Tool):
         await self._service.startup()
         task_id = str(kwargs.get(TASK_ID_PARAM) or '').strip()
         node_id = str(kwargs.get(NODE_ID_PARAM) or '').strip()
-        detail_level = str(kwargs.get('detail_level') or 'summary').strip()
         try:
-            result = self._service.node_detail(task_id, node_id, detail_level=detail_level)
+            result = self._service.node_detail(task_id, node_id, detail_level='full')
         except TypeError as exc:
             if "unexpected keyword argument 'detail_level'" not in str(exc):
                 raise

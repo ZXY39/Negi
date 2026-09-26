@@ -28,7 +28,9 @@ class SubmitNextStageTool(Tool):
 
     def __init__(
         self,
-        submit_callback: Callable[[str, int, str, list[dict[str, Any]], bool], Awaitable[dict[str, Any]]],
+        submit_callback: Callable[
+            [str, int, str, list[dict[str, Any]], bool, bool], Awaitable[dict[str, Any]]
+        ],
     ) -> None:
         self._submit_callback = submit_callback
 
@@ -102,6 +104,17 @@ class SubmitNextStageTool(Tool):
                         'required': ['ref', 'note'],
                     },
                 },
+                'drop_completed_stage_tool_detail': {
+                    'type': 'boolean',
+                    'description': (
+                        'Set true to move the stage you are closing out of the model context: its raw '
+                        'tool arguments and outputs stop being sent and only completed_stage_summary '
+                        'remains, as the stage block. Requires a non-empty completed_stage_summary in '
+                        'this same call. Nothing is deleted — the stage keeps its full round-by-round '
+                        'record in the durable ledger. Leave false (default) when the next stage must '
+                        'still see the exact arguments or output text of this one.'
+                    ),
+                },
             },
             'required': ['stage_goal', 'tool_round_budget'],
         }
@@ -140,13 +153,21 @@ class SubmitNextStageTool(Tool):
                         'required': ['ref', 'note'],
                     },
                 },
+                'drop_completed_stage_tool_detail': {
+                    'type': 'boolean',
+                    'description': (
+                        'Drop the closing stage\u0027s raw tool arguments/outputs from context, keeping '
+                        'completed_stage_summary. Requires that summary to be non-empty.'
+                    ),
+                },
             },
             'required': ['stage_goal', 'tool_round_budget'],
         }
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
         errors = super().validate_params(params)
-        for index, item in enumerate(list((params or {}).get('key_refs') or [])):
+        source = params or {}
+        for index, item in enumerate(list(source.get('key_refs') or [])):
             if not isinstance(item, dict):
                 errors.append(f'key_refs[{index}] must be an object')
                 continue
@@ -154,6 +175,15 @@ class SubmitNextStageTool(Tool):
                 errors.append(f'key_refs[{index}].ref must not be empty')
             if not str(item.get('note') or '').strip():
                 errors.append(f'key_refs[{index}].note must not be empty')
+        if bool(source.get('drop_completed_stage_tool_detail')) and not str(
+            source.get('completed_stage_summary') or ''
+        ).strip():
+            # 裁撤的唯一保险就是同批那条总结：没有它，移出上下文等于把该阶段唯一的
+            # 记录一起移走（库里 46.2% 的终态阶段总结为空，这不是假想情况）。
+            errors.append(
+                'drop_completed_stage_tool_detail requires a non-empty completed_stage_summary '
+                'in the same call'
+            )
         return errors
 
     async def execute(
@@ -163,6 +193,7 @@ class SubmitNextStageTool(Tool):
         completed_stage_summary: str = '',
         key_refs: list[dict[str, Any]] | None = None,
         final: bool = False,
+        drop_completed_stage_tool_detail: bool = False,
         **kwargs: Any,
     ) -> str:
         _ = kwargs
@@ -172,6 +203,7 @@ class SubmitNextStageTool(Tool):
             str(completed_stage_summary or '').strip(),
             [dict(item) for item in list(key_refs or []) if isinstance(item, dict)],
             bool(final),
+            bool(drop_completed_stage_tool_detail),
         )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 

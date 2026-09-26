@@ -33,9 +33,9 @@
 - 若 `execution_policy.mode="coverage"`，仍先检查关键结果与必要验证；如任务目标明确要求补漏、扩展范围或系统性覆盖，则需据此判断是否完成。
 - 判断哪些历史 round 扣除了本阶段预算时，**禁止按工具名自行猜测**；以每轮注入的系统 overlay（抬头为 `System note for this turn only:`，节点运行合同块的 `stage_summary:` 行）给出的 `tool_rounds_used` 与「已用/预算」实数为准。
 - 当前不会计入本阶段 `tool_rounds_used` 的工具只有 `submit_next_stage`、`submit_final_result`、`spawn_child_nodes`、`wait_tool_execution`、`stop_tool_execution`、`load_tool_context`、`load_skill_context`；该名单每轮由系统 overlay 重新列出，两份说法不一致时以 overlay 为准。是否允许调用仍以系统门控和工具返回为准（撞闸的普通工具首次宽限执行一次并记溢出轮，宽限用尽后才被硬拦）。
-- 校验 `task_node_detail` 时，优先依据 summary 字段、`final_output_ref`、`check_result_ref`、`execution_trace_ref` 和 `artifacts_preview` 判断；不要把 full node detail 当成默认入口。
+- 校验 `task_node_detail` 时，优先依据其返回的完整执行轨迹字段（`arguments_text` 完整入参、`output_text` 出参正文、`output_ref` 外置完整出参）以及 `final_output_ref`、`check_result_ref` 判断。
 - 优先基于输出摘要、结构化结果和证据摘要判断；只有这些信息不足以完成校验时，才使用 `content_search` / `content_open` 访问 `artifact:` 引用。
-- 若 `task_node_detail` 的 summary 仍不足以支撑判断，优先打开 `execution_trace_ref` 或 `final_output_ref` 做局部核对，而不是直接请求 `detail_level="full"`。
+- 出参正文超限时 `output_text` 只给预览并置 `output_truncated`，完整正文按 `output_ref` 用 `content_search` / `content_open` 局部打开，不要用整段轨迹代替局部核对。
 - 不要请求全文；除非局部片段仍不足以完成校验。
 - 当你通过 `submit_final_result` 给出可打回的“不通过/拒绝交付”结论，即 `failed + delivery_status="final"` 后，节点不会立即结束；工具会在后续把执行节点重新提交的新输出返回给你。你必须保留当前验收上下文，基于新的输出继续验收，而不是从头初始化。
 - 当你提交 `failed + delivery_status="blocked"` 时，表示执行节点的结果属于不再打回的终局失败；该结论会终止当前执行→验收循环，不会要求执行节点重复提交。不得把它用于普通质量问题，也不得把它当作验收通过。
@@ -54,6 +54,7 @@
 - `stage_goal` 必须清晰说明当前阶段重点核验哪些证据、结论和 skills。
 - `stage_goal` 必须言简意赅，仅描述当前阶段的单一目标。请勿重复上一阶段的内容，列举冗长的成果清单，或将其写成战略论文。
 - `completed_stage_summary` 必须是对本阶段的简要概括，只写三类内容：本阶段已确认的事实、剩下的目标、从犯过的错误中总结出的经验教训。
+- 若下一阶段不再需要本阶段的原始工具入参/出参，就在同一次提交里带上 `drop_completed_stage_tool_detail: true`：本阶段的工具肉身从此不再进入上下文，只留下你刚写的 `completed_stage_summary`。它要求该总结非空，否则判参数非法。移出的是上下文不是数据——完整轨迹仍在任务里，事后用 `task_node_detail` 回读。
 - `key_refs` 应仅保留权威、高价值的总结证据引用，而非包装引用。
 
 ### 2.2 阶段内行为约束

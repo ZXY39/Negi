@@ -158,6 +158,11 @@ class ExecutionStageRecord(Model):
     # 不再逐轮进入 provider 上下文。口径与 CEO/frontdoor 一致：只在收口时写出这个键，
     # 缺失即可见；账本条数与 stage_index 都不变，Web 时间线仍以账本为权威。
     context_visible: bool = True
+    # 裁撤标记：模型在关闭本阶段时主动要求把它的原始工具入参/出参移出 provider 上下文，
+    # 只留下阶段块里的总结。与 context_visible 是两件事——收口连块都不再渲染（正文已进
+    # 全局摘要），裁撤只移出肉身、块照旧逐轮在场，所以总结永远不会是唯一记录。
+    # 写出前提是 completed_stage_summary 非空，由提交点校验，不在此处兜底。
+    context_evicted: bool = False
     key_refs: list[ExecutionStageKeyRef] = Field(default_factory=list)
     archive_ref: str = ''
     archive_stage_index_start: int = 0
@@ -170,10 +175,13 @@ class ExecutionStageRecord(Model):
 
     @model_serializer(mode='wrap')
     def _serialize_omitting_visible_flag(self, handler: Any) -> dict[str, Any]:
-        """落盘只写"已收口"这一侧：可见是默认态，逐条写 true 等于给每条阶段都加一份体积。"""
+        """落盘只写"已收口 / 已裁撤"这一侧：两者默认态都是 True/False 的"未发生"，
+        逐条写等于给每条阶段都加一份体积。"""
         payload = handler(self)
         if payload.get('context_visible') is not False:
             payload.pop('context_visible', None)
+        if payload.get('context_evicted') is not True:
+            payload.pop('context_evicted', None)
         return payload
 
 

@@ -5001,6 +5001,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             # 与 canonical 归一化器同一口径——只在 False 时写，缺失即视为可见。
             if raw_stage.get("context_visible") is False:
                 normalized_stage["context_visible"] = False
+            # 裁撤标记必须和收口标记一样穿过这份白名单，否则 stage_state 侧读到的一直是
+            # "没裁过"，模型点了名也不会生效（与 canonical 归一化器同一口径）。
+            if raw_stage.get("context_evicted") is True:
+                normalized_stage["context_evicted"] = True
             normalized_stages.append(normalized_stage)
         if active_stage_id and not any(
             str(stage.get("stage_id") or "").strip() == active_stage_id
@@ -5085,6 +5089,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         final: bool = False,
         preamble_text: str = "",
         system_generated: bool = False,
+        drop_completed_stage_tool_detail: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_state = cls._frontdoor_stage_state_snapshot({"frontdoor_stage_state": stage_state})
         normalized_goal = str(stage_goal or "").strip()
@@ -5132,6 +5137,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         "key_refs": normalized_key_refs,
                     }
                 )
+                # 与节点侧同一口径：只有同批带了非空总结才落裁撤标记，缺失即未裁撤，
+                # 所以落盘不会给每条阶段添一个布尔键。
+                if drop_completed_stage_tool_detail and normalized_summary:
+                    current["context_evicted"] = True
             stages.append(current)
 
         next_stage_index = max((int(stage.get("stage_index") or 0) for stage in stages), default=0) + 1
@@ -6072,6 +6081,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             completed_stage_summary: str = "",
             key_refs: list[dict[str, Any]] | None = None,
             final: bool = False,
+            drop_completed_stage_tool_detail: bool = False,
         ) -> dict[str, Any]:
             next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
                 mutable_stage_state,
@@ -6080,6 +6090,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 completed_stage_summary=completed_stage_summary,
                 key_refs=key_refs,
                 final=final,
+                drop_completed_stage_tool_detail=drop_completed_stage_tool_detail,
                 preamble_text=str(state.get("analysis_text") or "").strip(),
             )
             mutable_stage_state.clear()
