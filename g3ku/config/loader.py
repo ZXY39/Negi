@@ -595,6 +595,9 @@ def _runtime_config_payload(cfg: Config) -> dict[str, object]:
                 "execution": cfg.get_node_dispatch_concurrency("execution"),
                 "inspection": cfg.get_node_dispatch_concurrency("inspection"),
             },
+            "modelRouteLoadBalanceEnabled": bool(
+                getattr(cfg.main_runtime, "model_route_load_balance_enabled", True)
+            ),
         },
         "externalApi": {
             "enabled": cfg.external_api.enabled,

@@ -850,6 +850,9 @@ class MainRuntimeConfig(Base):
     disk_guard: "MainRuntimeDiskGuardConfig" = Field(default_factory=lambda: MainRuntimeDiskGuardConfig())
     node_dispatch_concurrency: "NodeDispatchConcurrencyConfig" = Field(default_factory=lambda: NodeDispatchConcurrencyConfig())
     duplicate_precheck: "MainRuntimeDuplicatePrecheckConfig" = Field(default_factory=lambda: MainRuntimeDuplicatePrecheckConfig())
+    # 负载均衡总闸。关掉后含组的链按配置顺序摊平成 direct 候选，准入与 chat 一起回到
+    # 改造前的有序链语义——这是回滚路径，不是给正常运维准备的开关。
+    model_route_load_balance_enabled: bool = True
 
 
 class MainRuntimeDiskGuardConfig(Base):

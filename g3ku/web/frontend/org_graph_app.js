@@ -310,6 +310,9 @@ const S = {
         roleIterationDrafts: DEFAULT_ROLE_ITERATIONS(),
         roleConcurrency: DEFAULT_ROLE_CONCURRENCY(),
         roleConcurrencyDrafts: DEFAULT_ROLE_CONCURRENCY(),
+        // 负载均衡组：链里用 `group:<key>` 记号占位，成员与预算放在这里。
+        loadBalanceGroups: {},
+        loadBalanceGroupDrafts: {},
         defaults: DEFAULT_MODEL_DEFAULTS(),
         loading: false,
         saving: false,
@@ -10568,6 +10571,74 @@ function modelScopeContains(scope, ref, source = "active") {
     return modelScopeChain(scope, source).some((item) => modelRefEquivalent(item, ref));
 }
 
+const GROUP_REF_PREFIX = "group:";
+const GROUP_MAX_RETRY_ROUNDS_LIMIT = 3;
+
+const groupRefToken = (key) => `${GROUP_REF_PREFIX}${String(key || "").trim()}`;
+const isGroupRef = (ref) => String(ref || "").startsWith(GROUP_REF_PREFIX);
+const groupKeyFromRef = (ref) => String(ref || "").slice(GROUP_REF_PREFIX.length).trim();
+
+function cloneLoadBalanceGroups(groups) {
+    const source = groups && typeof groups === "object" ? groups : {};
+    const next = {};
+    Object.keys(source).forEach((key) => {
+        const groupKey = String(key || "").trim();
+        const payload = source[key] && typeof source[key] === "object" ? source[key] : {};
+        if (!groupKey) return;
+        const members = Array.isArray(payload.model_keys || payload.modelKeys)
+            ? (payload.model_keys || payload.modelKeys).map((item) => String(item || "").trim()).filter(Boolean)
+            : [];
+        const rawRounds = payload.max_retry_rounds ?? payload.maxRetryRounds;
+        const rounds = Number.isFinite(Number(rawRounds)) && Number(rawRounds) >= 1
+            ? Math.min(GROUP_MAX_RETRY_ROUNDS_LIMIT, Math.trunc(Number(rawRounds)))
+            : 1;
+        next[groupKey] = {
+            enabled: payload.enabled !== false,
+            max_retry_rounds: rounds,
+            model_keys: members,
+        };
+    });
+    return next;
+}
+
+function activeLoadBalanceGroups() {
+    return S.modelCatalog.roleEditing
+        ? (S.modelCatalog.loadBalanceGroupDrafts || {})
+        : (S.modelCatalog.loadBalanceGroups || {});
+}
+
+function nextLoadBalanceGroupKey(scope, chain) {
+    const taken = new Set([
+        ...(chain || []).filter(isGroupRef).map(groupKeyFromRef),
+        ...Object.keys(S.modelCatalog.loadBalanceGroups || {}),
+        ...Object.keys(S.modelCatalog.loadBalanceGroupDrafts || {}),
+    ]);
+    let index = 1;
+    while (taken.has(`${scope}_lb_${index}`)) index += 1;
+    const groupKey = `${scope}_lb_${index}`;
+    draftGroupForWrite(groupKey);
+    return groupKey;
+}
+
+function loadBalanceGroupsEqual(left, right) {
+    const a = cloneLoadBalanceGroups(left);
+    const b = cloneLoadBalanceGroups(right);
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    return [...keys].every((key) => JSON.stringify(a[key] || null) === JSON.stringify(b[key] || null));
+}
+
+// 链 → 后端 route_entries：`group:x` 记号翻译成组引用，其余是 direct model。
+function chainToRouteEntries(chain) {
+    return (chain || []).map((ref) => {
+        if (isGroupRef(ref)) return { type: "load_balance", group_key: groupKeyFromRef(ref) };
+        return { type: "model", model_key: String(ref || "").trim() };
+    }).filter((entry) => entry.group_key || entry.model_key);
+}
+
+function chainUsesGroup(chain) {
+    return (chain || []).some((ref) => isGroupRef(ref));
+}
+
 function normalizeModelRoleChain(refs) {
     const normalized = [];
     (refs || []).forEach((ref) => {
@@ -10619,7 +10690,8 @@ function modelRoleConcurrencyEqual(left, right) {
 }
 
 function syncModelRoleDraftState() {
-    const rolesChanged = !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles);
+    const rolesChanged = !modelRolesEqual(S.modelCatalog.roleDrafts, S.modelCatalog.roles)
+        || !loadBalanceGroupsEqual(S.modelCatalog.loadBalanceGroupDrafts, S.modelCatalog.loadBalanceGroups);
     const iterationsChanged = !modelRoleIterationsEqual(S.modelCatalog.roleIterationDrafts, S.modelCatalog.roleIterations);
     const concurrencyChanged = !modelRoleConcurrencyEqual(S.modelCatalog.roleConcurrencyDrafts, S.modelCatalog.roleConcurrency);
     S.modelCatalog.rolesDirty = !!S.modelCatalog.roleEditing && (rolesChanged || iterationsChanged || concurrencyChanged);
@@ -10698,7 +10770,22 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
             ? payload.role_concurrency
             : {};
     const nextRoles = EMPTY_MODEL_ROLES();
+    const routeEntriesPayload = payload.routeEntries && typeof payload.routeEntries === "object"
+        ? payload.routeEntries
+        : (payload.route_entries && typeof payload.route_entries === "object" ? payload.route_entries : {});
     MODEL_SCOPES.forEach(({ key }) => {
+        const entries = Array.isArray(routeEntriesPayload[key]) ? routeEntriesPayload[key] : null;
+        if (entries) {
+            // route_entries 才是 fallback 顺序；`group:` 记号不是模型 key，不参与改名映射。
+            nextRoles[key] = entries.map((entry) => {
+                const type = String(entry?.type || "model").trim();
+                if (type === "load_balance") {
+                    return groupRefToken(entry?.group_key || entry?.groupKey);
+                }
+                return String(entry?.model_key || entry?.modelKey || "").trim();
+            }).filter(Boolean);
+            return;
+        }
         nextRoles[key] = remapModelRefs(
             Array.isArray(rolesPayload[key])
                 ? rolesPayload[key].map((item) => String(item || "").trim()).filter(Boolean)
@@ -10711,6 +10798,7 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
         : [];
     S.modelCatalog.catalog = catalog;
     S.modelCatalog.roles = normalizeAllModelRoles(nextRoles);
+    S.modelCatalog.loadBalanceGroups = cloneLoadBalanceGroups(payload.loadBalanceGroups || payload.load_balance_groups);
     S.modelCatalog.roleIterations = normalizeRoleIterations(roleIterationsPayload);
     S.modelCatalog.roleConcurrency = normalizeRoleConcurrency(roleConcurrencyPayload);
     if (preserveRoleDrafts && S.modelCatalog.roleEditing) {
@@ -10722,6 +10810,7 @@ function applyModelCatalog(data, { preserveRoleDrafts = false } = {}) {
         S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
         S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
         S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
+        S.modelCatalog.loadBalanceGroupDrafts = cloneLoadBalanceGroups(S.modelCatalog.loadBalanceGroups);
         S.modelCatalog.roleEditing = false;
         S.modelCatalog.rolesDirty = false;
     }
@@ -10764,6 +10853,74 @@ function renderModelHint() {
     return hint("点击“修改模型链”后再调整角色链；点击模型可打开配置弹窗。", false);
 }
 
+function draftGroupForWrite(groupKey) {
+    if (!S.modelCatalog.roleEditing) {
+        S.modelCatalog.loadBalanceGroupDrafts = cloneLoadBalanceGroups(S.modelCatalog.loadBalanceGroups);
+        S.modelCatalog.roleEditing = true;
+    }
+    const drafts = S.modelCatalog.loadBalanceGroupDrafts;
+    if (!drafts[groupKey]) {
+        drafts[groupKey] = { enabled: true, max_retry_rounds: 1, model_keys: [] };
+    }
+    return drafts[groupKey];
+}
+
+function renderModelGroupMemberPicker(groupKey, members) {
+    const selected = new Set(members);
+    const options = S.modelCatalog.catalog
+        .filter((item) => selected.has(item.key) || item.enabled !== false)
+        .map((item) => `
+            <label class="role-toggle">
+                <input type="checkbox" data-group-member="${esc(groupKey)}" data-model-ref="${esc(item.key)}" ${selected.has(item.key) ? "checked" : ""}>
+                <span>${esc(item.key)}</span>
+            </label>`)
+        .join("");
+    return `
+        <details class="model-chain-group-picker">
+            <summary>选择成员</summary>
+            ${options || '<span class="policy-chip neutral">没有可选模型</span>'}
+        </details>`;
+}
+
+function renderModelGroupEntryCard(scopeKey, groupKey, index, editing) {
+    const group = activeLoadBalanceGroups()[groupKey];
+    const members = group ? group.model_keys : [];
+    const rounds = group ? group.max_retry_rounds : 1;
+    const memberChips = members.length
+        ? members.map((key) => `
+            <span class="policy-chip neutral">
+                ${esc(key)}
+                ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-member-remove="${esc(groupKey)}" data-model-ref="${esc(key)}">×</button>` : ""}
+            </span>`)
+        .join("")
+        : '<span class="policy-chip neutral">还没有成员</span>';
+    return `
+        <article class="model-chain-slide is-group-card${editing ? " is-editing" : ""}"${editing ? ' draggable="true"' : ""} data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}">
+            ${editing ? '<button type="button" class="model-chain-handle" aria-label="拖动调整顺序"><span class="model-chain-grip" aria-hidden="true">&#9776;</span></button>' : ""}
+            <div class="model-chain-main">
+                <span class="resource-list-title">负载均衡组 ${esc(groupKey)}</span>
+                <span class="resource-list-subtitle">组内平级：按综合负载选成员，节点绑定后粘滞</span>
+                <span class="model-inline-meta">
+                    <span class="policy-chip risk-low">每成员 ${esc(rounds)} 轮</span>
+                    ${index === 0 ? '<span class="policy-chip risk-low">链首</span>' : ""}
+                    ${group && group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
+                    ${!members.length ? '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>' : ""}
+                </span>
+                <span class="model-inline-meta">${memberChips}</span>
+                ${editing ? `
+                    <label class="model-role-iterations-field">
+                        <span class="model-role-iterations-label">每成员轮预算</span>
+                        <select class="model-role-iterations-input" data-group-rounds="${esc(groupKey)}">
+                            ${[1, 2, 3].map((value) => `<option value="${value}" ${Number(rounds) === value ? "selected" : ""}>${value}</option>`).join("")}
+                        </select>
+                    </label>
+                    ${renderModelGroupMemberPicker(groupKey, members)}
+                ` : ""}
+            </div>
+            ${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="remove" data-scope="${esc(scopeKey)}" data-index="${index}">移出链</button>` : ""}
+        </article>`;
+}
+
 function renderModelRoleEditors() {
     if (!U.modelRoleEditors) return;
     const editing = !!S.modelCatalog.roleEditing;
@@ -10773,6 +10930,9 @@ function renderModelRoleEditors() {
         const defaultText = chain.length ? `已配置 ${chain.length} 个模型` : "尚未配置";
         const chainMarkup = chain.length
             ? chain.map((ref, index) => {
+                if (isGroupRef(ref)) {
+                    return renderModelGroupEntryCard(scope.key, groupKeyFromRef(ref), index, editing);
+                }
                 const item = modelRefItem(ref);
                 const modelKey = String(item?.key || ref).trim();
                 const badges = [index === 0 ? '<span class="policy-chip risk-low">首选</span>' : ""];
@@ -10818,6 +10978,7 @@ function renderModelRoleEditors() {
                 <div class="model-role-section">
                     <div class="model-role-section-title">当前角色链</div>
                     <div class="model-chain-list" data-model-chain-list="${scope.key}">${chainMarkup}</div>
+                    ${editing ? `<button type="button" class="toolbar-btn ghost small" data-model-chain-action="add-group" data-scope="${scope.key}">新增负载均衡组</button>` : ""}
                 </div>
             </section>`;
     }).join("");
@@ -11338,6 +11499,7 @@ function startModelRoleEditing() {
     S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
     S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
     S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
+    S.modelCatalog.loadBalanceGroupDrafts = cloneLoadBalanceGroups(S.modelCatalog.loadBalanceGroups);
     syncModelRoleDraftState();
     renderModelCatalog();
 }
@@ -11347,6 +11509,7 @@ function cancelModelRoleEditing() {
     S.modelCatalog.roleDrafts = cloneModelRoles(S.modelCatalog.roles);
     S.modelCatalog.roleIterationDrafts = cloneRoleIterations(S.modelCatalog.roleIterations);
     S.modelCatalog.roleConcurrencyDrafts = cloneRoleConcurrency(S.modelCatalog.roleConcurrency);
+    S.modelCatalog.loadBalanceGroupDrafts = cloneLoadBalanceGroups(S.modelCatalog.loadBalanceGroups);
     S.modelCatalog.rolesDirty = false;
     finishModelDrag();
     renderModelCatalog();
@@ -11379,14 +11542,44 @@ function buildModelRoleChainUpdates(scopes = MODEL_SCOPES.map((item) => item.key
     const iterationSource = useDrafts ? S.modelCatalog.roleIterationDrafts : S.modelCatalog.roleIterations;
     const draftConcurrencySource = S.modelCatalog.roleConcurrencyDrafts || DEFAULT_ROLE_CONCURRENCY();
     const concurrencySource = useDrafts ? draftConcurrencySource : S.modelCatalog.roleConcurrency;
-    return Object.fromEntries(targets.map((scope) => [
-        scope,
-        {
-            modelKeys: normalizeModelRoleChain(roleSource[scope] || []),
+    const groupsSource = useDrafts
+        ? (S.modelCatalog.loadBalanceGroupDrafts || {})
+        : (S.modelCatalog.loadBalanceGroups || {});
+    const touchedGroups = collectTouchedLoadBalanceGroups(targets, roleSource);
+    return Object.fromEntries(targets.map((scope) => {
+        const chain = normalizeModelRoleChain(roleSource[scope] || []);
+        const base = {
             maxIterations: iterationSource[scope],
             maxConcurrency: concurrencySource[scope],
-        },
-    ]));
+        };
+        if (!chainUsesGroup(chain)) {
+            return [scope, { ...base, modelKeys: chain }];
+        }
+        // 含组的链必须走 route_entries：扁平 modelKeys 表达不了「一跳是一个组」。
+        return [scope, {
+            ...base,
+            routeEntries: chainToRouteEntries(chain),
+            loadBalanceGroups: touchedGroups,
+        }];
+    }));
+}
+
+// 只提交本次真正被链引用的组，避免把界面上还没用完的草稿组写进配置。
+function collectTouchedLoadBalanceGroups(scopes, roleSource) {
+    const groups = S.modelCatalog.roleEditing
+        ? (S.modelCatalog.loadBalanceGroupDrafts || {})
+        : (S.modelCatalog.loadBalanceGroups || {});
+    const referenced = new Set();
+    [...new Set((scopes || []).map((item) => String(item || "").trim()).filter(Boolean))].forEach((scope) => {
+        (roleSource[scope] || []).forEach((ref) => {
+            if (isGroupRef(ref)) referenced.add(groupKeyFromRef(ref));
+        });
+    });
+    const next = {};
+    Object.keys(groups).forEach((key) => {
+        if (referenced.has(String(key).trim())) next[key] = groups[key];
+    });
+    return next;
 }
 
 async function handleModelRoleEditorAction() {
@@ -15793,6 +15986,14 @@ function bind() {
         const action = e.target.closest("[data-model-chain-action]");
         if (action) {
             const scope = String(action.dataset.scope || "");
+            if (action.dataset.modelChainAction === "add-group") {
+                if (!scope) return;
+                const chain = modelScopeChain(scope);
+                chain.push(groupRefToken(nextLoadBalanceGroupKey(scope, chain)));
+                updateRoleChainDraft(scope, chain);
+                renderModelCatalog();
+                return;
+            }
             const index = Number(action.dataset.index || -1);
             const chain = modelScopeChain(scope);
             if (!scope || index < 0 || index >= chain.length) return;
@@ -15800,6 +16001,39 @@ function bind() {
                 chain.splice(index, 1);
                 updateRoleChainDraft(scope, chain);
             }
+            return;
+        }
+        const memberRemove = e.target.closest("[data-group-member-remove]");
+        if (memberRemove) {
+            const group = draftGroupForWrite(String(memberRemove.dataset.groupMemberRemove || ""));
+            const ref = String(memberRemove.dataset.modelRef || "");
+            group.model_keys = (group.model_keys || []).filter((item) => item !== ref);
+            syncModelRoleDraftState();
+            renderModelCatalog();
+        }
+    });
+    U.modelRoleEditors?.addEventListener("change", (e) => {
+        if (!S.modelCatalog.roleEditing) return;
+        const memberToggle = e.target.closest("[data-group-member]");
+        if (memberToggle instanceof HTMLInputElement) {
+            const group = draftGroupForWrite(String(memberToggle.dataset.groupMember || ""));
+            const ref = String(memberToggle.dataset.modelRef || "");
+            const members = new Set(group.model_keys || []);
+            if (memberToggle.checked) members.add(ref); else members.delete(ref);
+            group.model_keys = [...members];
+            syncModelRoleDraftState();
+            renderModelCatalog();
+            return;
+        }
+        const roundsField = e.target.closest("[data-group-rounds]");
+        if (roundsField instanceof HTMLSelectElement) {
+            const group = draftGroupForWrite(String(roundsField.dataset.groupRounds || ""));
+            group.max_retry_rounds = Math.min(
+                GROUP_MAX_RETRY_ROUNDS_LIMIT,
+                Math.max(1, Math.trunc(Number(roundsField.value) || 1)),
+            );
+            syncModelRoleDraftState();
+            renderModelCatalog();
             return;
         }
     });

@@ -812,7 +812,10 @@ class ApiClient {
         return {
             catalog: Array.isArray(data.items) ? data.items : [],
             items: Array.isArray(data.items) ? data.items.map((item) => item.key) : [],
+            // roles 是候选展开视图（含组内成员），routeEntries 才是 fallback 顺序。
             roles: data.roles || {},
+            routeEntries: data.route_entries || {},
+            loadBalanceGroups: data.load_balance_groups || data.loadBalanceGroups || {},
             roleIterations: data.roleIterations || data.role_iterations || {},
             roleConcurrency: data.roleConcurrency || data.role_concurrency || {},
             defaults: {},
@@ -893,9 +896,28 @@ class ApiClient {
                 ? source.model_keys
                 : undefined;
         const body = {};
-        if (modelKeys !== undefined) {
+        // 显式 route 与 legacy 扁平链不能同时给：后端以 route_entries 为准并走严格校验，
+        // 这里也不两套都发，避免"保存了什么"与"运行的是什么"分叉。
+        const routeEntries = Array.isArray(source.routeEntries)
+            ? source.routeEntries
+            : Array.isArray(source.route_entries)
+                ? source.route_entries
+                : undefined;
+        const groups = source.loadBalanceGroups && typeof source.loadBalanceGroups === "object"
+            ? source.loadBalanceGroups
+            : source.load_balance_groups && typeof source.load_balance_groups === "object"
+                ? source.load_balance_groups
+                : undefined;
+        if (routeEntries !== undefined) {
+            body.route_entries = routeEntries;
+            body.routeEntries = routeEntries;
+        } else if (modelKeys !== undefined) {
             body.model_keys = modelKeys;
             body.modelKeys = modelKeys;
+        }
+        if (groups !== undefined) {
+            body.load_balance_groups = groups;
+            body.loadBalanceGroups = groups;
         }
         if (has("maxIterations") || has("max_iterations")) {
             const maxIterations = has("maxIterations") ? source.maxIterations : source.max_iterations;

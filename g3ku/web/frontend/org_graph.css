@@ -13111,3 +13111,28 @@ textarea {
     font-size: 0.8rem;
     margin-top: var(--space-2);
 }
+
+/* 负载均衡组卡片：一跳是一个组，组内成员平级展示（成员顺序不代表优先级）。 */
+.model-chain-slide.is-group-card .model-chain-main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    align-items: flex-start;
+}
+
+.model-chain-group-picker {
+    width: 100%;
+    font-size: 0.8rem;
+}
+
+.model-chain-group-picker summary {
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.model-chain-group-picker .role-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 2px 0;
+}

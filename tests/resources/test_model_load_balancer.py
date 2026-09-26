@@ -127,6 +127,35 @@ def _select(balancer: ModelLoadBalancer, node_id: str, group_key: str = "g1", **
     return lease
 
 
+def test_scale_spread_stays_even_across_hundred_nodes() -> None:
+    """100 个节点首次准入到 3 成员等容量组：分布必须摊平，不允许出现热点。"""
+    balancer = _balancer(_group("g1", "m_a", "m_b", "m_c"))
+
+    bound = [_select(balancer, f"node:{index}").model_key for index in range(100)]
+
+    counts = {key: bound.count(key) for key in ("m_a", "m_b", "m_c")}
+    assert max(counts.values()) - min(counts.values()) <= 1
+    assert all(30 <= value <= 40 for value in counts.values())
+    # 连续到达的节点不能落在同一个成员上（今天的链首形态）。
+    assert len(set(bound[:3])) == 3
+
+
+def test_rate_limited_member_is_skipped_by_next_node_without_config_change() -> None:
+    clock = _Clock()
+    permits = _FakePermits()
+    balancer = _balancer(_group("g1", "m_a", "m_b"), permits=permits, clock=clock)
+
+    first = _select(balancer, "node:1")
+    balancer.record_request_start(first)
+    balancer.record_outcome(first, status_code=429, error_text="Error code: 429 - rpm limit")
+    balancer.release(first, outcome=LEASE_OUTCOME_SUCCESS)
+
+    second = _select(balancer, "node:2")
+
+    assert second.model_key == "m_b"
+    assert second.selection_reason == "least_load"
+
+
 def test_first_bindings_spread_across_equal_capacity_members() -> None:
     balancer = _balancer(_group("g1", "m_a", "m_b", "m_c"))
 

@@ -181,7 +181,13 @@ def build_model_route_plan(config: Any, scope: str, *, revision: int = 0) -> Mod
     成员的能力视图（context window、多模态）在这里一次性解析，调用方不再各自去读
     「链上第一个模型」。禁用成员保留在候选里但会被 direct 链过滤，与既有
     `get_scope_model_chain` 的过滤口径一致。
+
+    `mainRuntime.modelRouteLoadBalanceEnabled=false` 是回滚闸门：组被摊平成「按配置顺序
+    的 direct 候选」，准入与 chat 一起回到改造前的有序链语义。
     """
+    load_balance_enabled = bool(
+        getattr(getattr(config, "main_runtime", None), "model_route_load_balance_enabled", True)
+    )
     routes: list[ResolvedModelRoute] = []
     for entry in list(config.get_role_model_routes(scope) or []):
         entry_type = str(getattr(entry, "type", MODEL_ROUTE_KIND_MODEL) or MODEL_ROUTE_KIND_MODEL)
@@ -197,6 +203,19 @@ def build_model_route_plan(config: Any, scope: str, *, revision: int = 0) -> Mod
                     continue
                 members.append(_member_view_for(config, key))
             enabled = bool(getattr(group_config, "enabled", True))
+            if not load_balance_enabled:
+                for member in members:
+                    if not member.enabled:
+                        continue
+                    routes.append(
+                        ResolvedModelRoute(
+                            index=len(routes),
+                            kind=MODEL_ROUTE_KIND_MODEL,
+                            model_key=member.model_key,
+                            candidates=(member.model_key,),
+                        )
+                    )
+                continue
             routes.append(
                 ResolvedModelRoute(
                     index=len(routes),

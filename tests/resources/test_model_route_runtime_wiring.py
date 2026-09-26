@@ -182,6 +182,23 @@ def test_quota_bucket_key_distinguishes_keys_on_same_endpoint() -> None:
     assert quota_bucket_key(endpoint='', api_key='') == ''
 
 
+def test_load_balance_kill_switch_flattens_groups_into_ordered_chain() -> None:
+    payload = _config_payload()
+    payload['mainRuntime'] = {'enabled': True, 'modelRouteLoadBalanceEnabled': False}
+    cfg = Config.model_validate(payload)
+
+    plan = build_model_route_plan(cfg, 'execution')
+
+    # 回滚闸门：组摊平成按配置顺序的 direct 候选，链上不再有任何 load_balance entry，
+    # 准入因此回到「按链首预占」的旧语义。
+    assert [route.kind for route in plan.routes] == ['model', 'model', 'model']
+    assert plan.load_balance_group_keys == []
+    assert plan.candidate_model_keys == ['m_a', 'm_b', 'm_emergency']
+
+    enabled_plan = build_model_route_plan(Config.model_validate(_config_payload()), 'execution')
+    assert enabled_plan.load_balance_group_keys == ['g_shared']
+
+
 def test_heartbeat_snapshot_reports_member_load_without_leaking_bucket_identity() -> None:
     from main.runtime.model_load_balancer import ModelLoadBalancer
 
