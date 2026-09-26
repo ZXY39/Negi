@@ -141,6 +141,37 @@ def test_saving_route_entries_with_new_group_is_atomic(tmp_path: Path, monkeypat
     assert saved['models']['roles']['ceo'] == ['m_x']
 
 
+def test_group_created_before_being_dragged_into_a_chain_still_persists(tmp_path: Path, monkeypatch) -> None:
+    """模型页的组列允许「先建组、还没拖进链」就保存：链保持扁平，组照样落盘。
+
+    这是配置列与后端的契约点——`load_balance_groups` 是全局资源，不依赖某条链引用它。
+    """
+    path = _write_config(
+        tmp_path,
+        roles=_LEGACY_ROLES,
+        groups={'g_existing': {'modelKeys': ['m_a'], 'maxRetryRounds': 1}},
+    )
+    monkeypatch.chdir(tmp_path)
+
+    response = _client().put(
+        '/api/models/roles/execution',
+        json={
+            'model_keys': ['m_a', 'm_b'],
+            'load_balance_groups': {
+                'g_existing': {'modelKeys': ['m_a'], 'maxRetryRounds': 1},
+                'g_staged': {'modelKeys': ['m_a', 'm_b'], 'maxRetryRounds': 2},
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    saved = json.loads(path.read_text(encoding='utf-8'))
+    # 链没有被组的出现改成 route 形状：还是旧字符串数组。
+    assert saved['models']['roles']['execution'] == ['m_a', 'm_b']
+    assert sorted(saved['models']['loadBalanceGroups']) == ['g_existing', 'g_staged']
+    assert saved['models']['loadBalanceGroups']['g_staged']['maxRetryRounds'] == 2
+
+
 def test_legacy_model_keys_payload_still_saves_flat_shape(tmp_path: Path, monkeypatch) -> None:
     path = _write_config(tmp_path, roles=_LEGACY_ROLES)
     monkeypatch.chdir(tmp_path)

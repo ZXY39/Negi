@@ -622,6 +622,19 @@
                 <p id="sidebar-model-hint" class="ceo-model-panel-hint" hidden aria-live="polite">正在加载模型配置...</p>
 
                 <div class="llm-page-layout">
+                    <aside class="resource-detail-panel llm-groups-panel" aria-label="负载均衡组">
+                        <div class="panel-header model-shared-header">
+                            <div>
+                                <h3>负载均衡组</h3>
+                                <p class="subtitle">勾选模型组成一组，拖入右侧角色链。</p>
+                            </div>
+                            <div class="model-shared-actions">
+                                <button id="model-group-create-btn" class="toolbar-btn ghost small" type="button">新建组</button>
+                            </div>
+                        </div>
+                        <div id="model-group-list" class="model-group-list"></div>
+                    </aside>
+
                     <section class="resource-detail-panel llm-bindings-panel">
                         <div class="panel-header model-shared-header">
                             <div>

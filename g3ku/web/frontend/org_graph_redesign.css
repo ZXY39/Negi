@@ -1506,9 +1506,49 @@
 
 @media (min-width: 1024px) {
     [data-ui-version="v2"] .llm-page-layout {
-        grid-template-columns: 320px minmax(0, 1fr);
+        grid-template-columns: 280px 300px minmax(0, 1fr);
         gap: var(--ui-space-5);
     }
+}
+
+[data-ui-version="v2"] .model-group-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ui-space-2);
+    padding: var(--ui-space-2);
+    flex: 1;
+    overflow-y: auto;
+}
+
+[data-ui-version="v2"] .model-group-item {
+    gap: var(--ui-space-1);
+    padding: var(--ui-space-3);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius-card);
+    background: var(--ui-bg-elevated);
+}
+
+[data-ui-version="v2"] .model-group-item.is-editing:hover {
+    border-color: color-mix(in srgb, var(--ui-accent) 45%, var(--ui-border));
+}
+
+[data-ui-version="v2"] .model-group-item.is-incomplete {
+    border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
+}
+
+[data-ui-version="v2"] .model-group-name-input {
+    height: 26px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+[data-ui-version="v2"] .model-group-member-option {
+    font-size: 12px;
+    color: var(--ui-text-primary);
+}
+
+[data-ui-version="v2"] .model-group-member-option.is-selected span {
+    color: var(--ui-accent);
 }
 
 [data-ui-version="v2"] .model-shared-list {
@@ -2037,15 +2077,18 @@
 }
 
 /* 42. 模型页：目录标题与搜索框对齐右侧角色卡标题，条目样式与模型链一致 */
-[data-ui-version="v2"] .llm-bindings-panel .panel-header .subtitle {
+[data-ui-version="v2"] .llm-bindings-panel .panel-header .subtitle,
+[data-ui-version="v2"] .llm-groups-panel .panel-header .subtitle {
     display: none;
 }
 
-[data-ui-version="v2"] .llm-bindings-panel {
+[data-ui-version="v2"] .llm-bindings-panel,
+[data-ui-version="v2"] .llm-groups-panel {
     padding: 0;
 }
 
-[data-ui-version="v2"] .llm-bindings-panel .panel-header {
+[data-ui-version="v2"] .llm-bindings-panel .panel-header,
+[data-ui-version="v2"] .llm-groups-panel .panel-header {
     align-items: center;
     padding: 0 0 var(--ui-space-3);
     border-bottom: 0;
@@ -2056,7 +2099,12 @@
     min-width: 220px;
 }
 
+[data-ui-version="v2"] .llm-groups-panel .model-shared-actions {
+    min-width: 0;
+}
+
 [data-ui-version="v2"] .llm-bindings-panel .panel-header h3,
+[data-ui-version="v2"] .llm-groups-panel .panel-header h3,
 [data-ui-version="v2"] .model-chain-card .card-header h3 {
     font-size: 16px;
     font-weight: 700;
@@ -2706,11 +2754,13 @@
     }
 
     [data-ui-version="v2"] .llm-bindings-panel,
+    [data-ui-version="v2"] .llm-groups-panel,
     [data-ui-version="v2"] .llm-routes-panel {
         min-height: 0;
     }
 
     [data-ui-version="v2"] .model-shared-list,
+    [data-ui-version="v2"] .model-group-list,
     [data-ui-version="v2"] .model-routing-grid,
     [data-ui-version="v2"] .model-chain-list {
         flex: 1 1 auto;
