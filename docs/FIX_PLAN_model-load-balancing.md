@@ -1148,3 +1148,28 @@ Q4 落地时必须显式回答"组内成员之间是否插退避"，否则组预
 ### 15.3 其余按 §13 原样执行
 
 Q1 选择上移准入层、Q2 综合负载含滚动 RPM 与 429 衰减、Q3 两层配额模型与内存 fingerprint（空值记 `unresolved` 不互并）、Q5 双严格度校验、Q6 链首依赖全部纳入 Phase 3，均已改写进 §3–§12。
+
+---
+
+## 16. 实施状态（2026-09-26，分支 `feat/model-load-balancing`）
+
+Phase 0–5 全部落码，架构文档已入册。分支上的 8 个提交：`474b00f0`(Phase 0 基线) → `e73b0c82`+`ffb5d0cd`(Phase 1 配置) → `2ddd6c33`(准入) → `813dca93`/`4b65d1d5`/`02cfe4be`(chat、观测、前端) → `1a18d2c6`(docs)。
+
+已按裁定落地的关键选择：
+
+- 首次选择在准入层（`acquire_turn(route_plan=…, filters=…)`），第一次 attempt 消费准入 permit，key 轮序按选中 key 旋转；fallback 复用同一个 `NodeTurnLease`（`rebind_turn`），不产生第二个回合权。
+- pump 改有界扫描（8）+ 精确移除被授予的请求 + 防饿死屏障（被越过 4 次后独占本轮）；旧的「严格 FIFO 队头阻塞」测试按新契约改写，现状行为另存于 Phase 0 基线文件。
+- 负载 = 本地归一化在飞 + 配额桶 60 秒滚动请求数 + 衰减 429 惩罚；桶按 endpoint+key 指纹或显式 `quotaPoolKey` 合并，解析不到密钥材料时各自 `unresolved` 且绝不互并。
+- 组预算 `max_retry_rounds`（1..3，不继承 catalog `retry_count`），成员之间插入退避节拍。
+- 节点级粘滞绑定 + 四类重绑触发 + 节点终态清除。
+- 回滚闸门 `mainRuntime.modelRouteLoadBalanceEnabled`：关掉即把含组的链按配置顺序摊平成 direct 候选。
+- 运行态经 worker 心跳上报（`model_route_groups`）+ `GET /api/models/load-balance/status`；只输出计数与桶序号。
+
+验证口径（分支上实测）：`test_resource_runtime_smoke` 99 passed/5 xfailed；route 系列新测试 72 + 69 + 179 三批全绿；宽回归批 551 passed；JS `node --test` 447 项中与本改动无关的存量红 1 项（主树同样红）；ruff 与主树逐文件对齐且 `chat_backend.py` 少一条。
+
+尚未完成、需要授权或另开一轮的事项：
+
+1. **实盘验收（§12 场景 A–G）**。代码要生效必须重启托管 worker；这会打断他正在跑的任务，因此未自行执行。验收时优先看三条：链首 457/794 的 429 归因是否被摊开、长节点每生命周期重绑次数是否为 0、每跳 `cache_hit_tokens` 是否不低于 32,768 中位基线。
+2. **异构窗口的组**：现网 14 条 catalog 窗口全等，成员窗口不同时的保守过滤只由单测覆盖（8.4.3 的 `no_candidate` 路径）。
+3. **前端视觉核验**：模型链编辑器的组卡片只过了 JS 契约测试与 `node --check`，没有在浏览器里看过——分支不是当前 18790 端口上运行的那份代码，再起一个 web 会踢掉在跑的实例。
+4. 架构文档体积：`runtime-overview` / `context-and-cache-troubleshooting` / `operations-and-maintenance` 本轮改动前就已超出 README 的参考带宽（199/82/60 KB 对 88/71/31 KB 上限），本轮各自再加 1–4 KB。是抬参考值、还是按规则 6 的阶梯做拆分/搬移，留给你定，我没有代删他人契约。
