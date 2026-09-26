@@ -253,19 +253,19 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 `execution` / `inspection` 两条车道的模型选择由三层协作完成，边界是这条链路里最容易踩错的地方：
 
 - `main/runtime/model_route.py`：把配置里的 route entry 解析成运行时 route plan（链、组、候选展开、能力视图、稳定签名）。只做解析。
-- `main/runtime/model_load_balancer.py`：组内平级选择、配额桶观测、节点绑定与 lease。只回答「这个节点该绑哪个成员」。
+- `main/runtime/model_load_balancer.py`：组内平级选择、配额桶观测、节点绑定与 lease。只回答「这个节点该绑哪个成员」。链上有组时，准入还依赖同一进程里的另一件事：写出 route plan 的那一步必须同时把组定义注册进 balancer，否则每个 `load_balance` entry 都以 `unknown_group` 被跳过、节点永远停在排队队列（落地契约见 `config-and-models.md`「配置热刷新」）。
 - `main/runtime/node_turn_controller.py` + `main/runtime/chat_backend.py`：前者在**准入/排队**时执行首次选择，后者管理单次请求生命周期、重试与 fallback。
 
 一次典型流程是：preflight 定下请求体量与是否含图像 → `acquire_turn()` 带着 route plan 入队 → pump 在同一把锁内向 balancer 要候选并拿到该成员某把 key 的 permit，把 `route_index / group_key / model_ref / key_index / permit` 记进 `NodeTurnLease` → `ConfigChatBackend` 的第一次 provider attempt **消费这颗 permit**（key 轮序按选中的 key 旋转，保证不会二次 acquire）→ 该成员的组内预算耗尽后先释放旧 lease，再由同一个 `NodeTurnLease` 就地重绑下一个候选；整组耗尽才前进到链上下一个 entry。
 
 绑定的粒度是**节点**：一个节点在其生命周期内沿用同一成员，换人只有四条事实会触发——本次请求的过滤条件不再匹配（窗口/多模态）、绑定成员自身的配额桶惩罚超阈、绑定成员拿不出 permit、绑定成员被移出组（配置刷新按节点逐个摘除：减成员只解绑正用它的那些节点，加成员不动任何既有绑定）。阶段推进不换人：绑定跨回合、跨阶段保留。节点落终态时清除绑定。逐回合按负载重选会把同一节点的上下文在成员之间来回搬，而换 `model_key` 等于换前缀缓存命名空间，断点之后的整段存活上下文都要重传（取证口径见 `context-and-cache-troubleshooting.md`「Family 与 key 合同」）。
 
-负载打分由三部分组成：本地归一化在飞（running+waiting+reserved 比本地容量）、该配额桶最近 60 秒的请求启动数、按半衰期衰减的 429 惩罚。冷却与惩罚按**配额桶**聚合而不是按 binding：同一个 endpoint + 同一把 key（或同一个显式 `quotaPoolKey`）的多条绑定共享一份观测；解析不到密钥材料时每个成员各自记 `unresolved`，绝不互并。**429 是唯一的失败记忆**：其它失败（401/403、密钥被禁、5xx）一律当场交给链 fallback，不留任何跨请求状态——换节点后同样的请求可能就成功，而"这条配置坏了"是操作者按日志处理的问题。限流判据复用模型链自己的 `429` 关键字表（`g3ku/utils/retry_keywords.py`），负载均衡器不另起一套文本，否则同一个错误在两条车道上的归因会漂移。
+负载打分由三部分组成：本地归一化在飞（running+waiting+reserved 比本地容量）、该配额桶最近 60 秒的请求启动数、按半衰期衰减的 429 惩罚。惩罚按**配额桶**聚合而不是按 binding：同一个 endpoint + 同一把 key（或同一个显式 `quotaPoolKey`）的多条绑定共享一份观测；解析不到密钥材料时每个成员各自记 `unresolved`，绝不互并。**429 是唯一的失败记忆**：其它失败（401/403、密钥被禁、5xx）一律当场交给链 fallback，不留任何跨请求状态——换节点后同样的请求可能就成功，而"这条配置坏了"是操作者按日志处理的问题。限流判据复用模型链自己的 `429` 关键字表（`g3ku/utils/retry_keywords.py`），负载均衡器不另起一套文本，否则同一个错误在两条车道上的归因会漂移。
 
 新人常误读的三点：
 
 - `models.roles.*` 与 `runtime_context.model_refs` 都是**候选展开视图**。含组时链上第一候选不是首选模型；真正用哪个只在 lease 里（`NodeTurnLease.selected_model_ref`）。诊断字段 `selected_model_key` / prompt cache 用的 `route:<signature>` 都从这里取。
-- 「组 busy」只由事实推导：拿不到 permit、全部在冷却、或本请求全部试过。没有配 `singleApiKeyMaxConcurrency` 时本地容量恒为无限、`waiting` 恒为 0，用打分阈值造出来的 busy 是假的。
+- 「组 busy」只由事实推导：拿不到 permit、组里没有一个通过过滤的候选，或本请求已把组内成员全部试过。没有配 `singleApiKeyMaxConcurrency` 时本地容量恒为无限、`waiting` 恒为 0，用打分阈值造出来的 busy 是假的。
 - 组内换成员之间**有**退避节拍（沿用同模型轮之间的封顶指数退避），跨 direct entry 前进仍然零等待。把组预算收缩当成「立刻换下一个」会把一次 pass 变成对同一分钟窗口的背靠背请求。
 
 进程边界：balancer 与并发控制器只在 `execution_mode == 'worker'` 时存在。`embedded` / `web` 角色下选择层退化成无并发计数的直连绑定，不报错也不排队。多 worker 副本之间不共享这份内存态。

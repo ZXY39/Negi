@@ -610,6 +610,8 @@ class MainRuntimeService:
         react_loop._tool_context_hydration_promoter = self._promote_tool_context_hydration
         self._pending_task_delete_confirmations: dict[str, dict[str, Any]] = {}
         self._react_loop = react_loop
+        initial_execution_routes = self._initial_model_routes(app_config, 'execution')
+        initial_acceptance_routes = self._initial_model_routes(app_config, 'inspection')
         self.node_runner = NodeRunner(
             store=self.store,
             log_service=self.log_service,
@@ -617,8 +619,8 @@ class MainRuntimeService:
             tool_provider=self._tool_provider,
             execution_model_refs=list(execution_model_refs or ['execution']),
             acceptance_model_refs=list(acceptance_model_refs or execution_model_refs or ['inspection']),
-            execution_model_routes=self._initial_model_routes(app_config, 'execution'),
-            acceptance_model_routes=self._initial_model_routes(app_config, 'inspection'),
+            execution_model_routes=initial_execution_routes,
+            acceptance_model_routes=initial_acceptance_routes,
             execution_max_iterations=resolved_execution_max_iterations,
             acceptance_max_iterations=resolved_acceptance_max_iterations,
             max_parallel_child_pipelines=max_parallel_child_pipelines,
@@ -629,6 +631,7 @@ class MainRuntimeService:
             context_finalizer=self._clear_node_context_selection,
             workspace_root_getter=lambda: self._workspace_root(),
         )
+        self._apply_model_route_plans(initial_execution_routes, initial_acceptance_routes, revision=0)
         self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
@@ -5535,8 +5538,7 @@ class MainRuntimeService:
         inspection_routes = build_model_route_plan(config, 'inspection', revision=revision)
         if not inspection_routes.routes:
             inspection_routes = execution_routes
-        self.node_runner._execution_model_routes = execution_routes
-        self.node_runner._acceptance_model_routes = inspection_routes
+        self._apply_model_route_plans(execution_routes, inspection_routes, revision=revision)
         self.node_runner._execution_max_iterations = config.get_role_max_iterations('execution')
         self.node_runner._acceptance_max_iterations = config.get_role_max_iterations('inspection')
         self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
@@ -5573,13 +5575,6 @@ class MainRuntimeService:
         if self.node_turn_controller is not None:
             self.node_turn_controller.configure(
                 gate_supplier=self._node_turn_gate_allowed,
-            )
-        if self.model_load_balancer is not None:
-            # 组定义与配置 revision 一起进 balancer；revision 只作观测，重绑只发生在
-            # 「绑定成员已被移出组」的那些节点上，在飞请求与其余亲和状态不受影响。
-            self.model_load_balancer.configure(
-                groups=self._resolved_load_balance_groups(config),
-                config_revision=int(revision or 0),
             )
         if self.tool_pressure_monitor is not None:
             self.tool_pressure_monitor.configure(
@@ -10592,6 +10587,23 @@ class MainRuntimeService:
                 buckets.append(bucket)
         return buckets
 
+    def _apply_model_route_plans(self, execution_routes: Any, inspection_routes: Any, *, revision: int) -> None:
+        """route plan 与组定义必须同一时刻落地。
+
+        准入层对链上每个 load_balance entry 都要能在 balancer 里查到那个组，查不到就以
+        unknown_group 跳过整条链，节点永远拿不到授予。所以任何写入 node_runner route plan
+        的路径（启动构造与配置刷新）都必须同时把同一份组喂给 balancer。
+        config_revision 只作观测，重绑只发生在「绑定成员已被移出组」的那些节点上，
+        在飞请求与其余亲和状态不受影响。
+        """
+        self.node_runner._execution_model_routes = execution_routes
+        self.node_runner._acceptance_model_routes = inspection_routes
+        if self.model_load_balancer is not None:
+            self.model_load_balancer.configure(
+                groups=self._load_balance_groups_from_plans(),
+                config_revision=int(revision or 0),
+            )
+
     def _initial_model_routes(self, config: Any, scope: str) -> Any:
         """启动时解析 route plan。config 不可用时返回 None，让 refs 视图继续驱动。"""
         if config is None:
@@ -10607,7 +10619,7 @@ class MainRuntimeService:
                 return plan
         return plan
 
-    def _resolved_load_balance_groups(self, config: Any) -> dict[str, Any]:
+    def _load_balance_groups_from_plans(self) -> dict[str, Any]:
         """从已解析的 route plan 里取组状态喂给 balancer，保证两侧看到的是同一份定义。"""
         groups: dict[str, Any] = {}
         for plan in (

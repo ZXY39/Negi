@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -152,11 +153,69 @@ def test_service_balancer_groups_come_from_resolved_plans() -> None:
         )
     )
 
-    groups = MainRuntimeService._resolved_load_balance_groups(service, cfg)
+    groups = MainRuntimeService._load_balance_groups_from_plans(service)
 
     assert set(groups) == {'g_shared'}
     assert groups['g_shared'].max_retry_rounds == 2
     assert [member.model_key for member in groups['g_shared'].members] == ['m_a', 'm_b']
+
+
+def _service_with_balancer() -> tuple[Any, Any]:
+    from main.runtime.model_key_concurrency import ModelKeyConcurrencyController
+    from main.runtime.model_load_balancer import ModelLoadBalancer
+
+    concurrency = ModelKeyConcurrencyController(
+        resolve_model_limits=lambda model_ref: {'key_indexes': [0], 'per_key_limits': {0: None}},
+    )
+    balancer = ModelLoadBalancer(permit_source=concurrency)
+    # 只挂上路由这一条链路需要的协作者，其余构造函数依赖对这个测试没有意义。
+    service = object.__new__(MainRuntimeService)
+    service.node_runner = SimpleNamespace(_execution_model_routes=None, _acceptance_model_routes=None)
+    service.model_load_balancer = balancer
+    return service, balancer
+
+
+def test_applying_route_plans_registers_groups_in_the_same_step() -> None:
+    """链上有组就必须让 balancer 同时查到那个组，否则准入对每个 entry 都返回 unknown_group。"""
+    cfg = Config.model_validate(_config_payload())
+    service, balancer = _service_with_balancer()
+
+    MainRuntimeService._apply_model_route_plans(
+        service,
+        build_model_route_plan(cfg, 'execution'),
+        build_model_route_plan(cfg, 'inspection'),
+        revision=7,
+    )
+
+    lease, reason = balancer.select(node_id='node:1', route_index=0, group_key='g_shared')
+    assert lease is not None, reason
+    assert lease.model_key in {'m_a', 'm_b'}
+    assert balancer.snapshot()['config_revision'] == 7
+
+
+def test_worker_bootstrap_registers_groups_without_any_config_refresh(tmp_path: Path) -> None:
+    # 新起的 worker 不走 ensure_runtime_config_current（只有收到保存指令才走），
+    # 曾经就是这样把整条节点队列冻在准入层的。
+    cfg = Config.model_validate(_config_payload())
+    service = MainRuntimeService(
+        chat_backend=SimpleNamespace(),
+        app_config=cfg,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        workspace_root=tmp_path,
+        execution_mode='worker',
+    )
+
+    payload = service._model_route_snapshot()
+
+    assert [entry['group_key'] for entry in payload['model_route_groups']] == ['g_shared']
+    assert payload['model_route_config_revision'] == 0
+    assert [m['model_key'] for m in payload['model_route_groups'][0]['members']] == ['m_a', 'm_b']
+    # 启动路径建出的 plan 也要带组，否则连候选展开视图都对不上。
+    assert service.node_runner._execution_model_routes.load_balance_group_keys == ['g_shared']
+
 
 
 def test_quota_buckets_prefer_declared_pool_and_return_empty_when_unresolvable() -> None:
