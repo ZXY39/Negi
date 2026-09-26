@@ -47,6 +47,8 @@ class ApiClient {
                 return "配置包内含越界路径，已拒绝写入。";
             case "config_bundle_failed":
                 return "配置包处理失败。";
+            case "bundle_staging_failed":
+                return "服务器暂存上传文件失败（磁盘或权限），配置未改动。";
             case "task_service_unavailable":
                 return "任务运行服务暂未就绪，请稍后再试。";
             case "main_task_service_unavailable":

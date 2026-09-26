@@ -382,6 +382,56 @@ def test_import_route_applies_bundle_and_rejects_wrong_password(
     assert not list((target / config_bundle.BUNDLE_OUTPUT_DIR / "incoming").iterdir())
 
 
+def test_import_route_survives_a_device_that_never_finished_onboarding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新设备只设过解锁密码、config.json 还不存在时，导入不能变成 500。
+
+    1.0.4 上 _running_work_snapshot() 的 load_config() 抛 FileNotFoundError，而它
+    落在路由的 try 之外：界面只收到一个没有 detail 的 500，且配置根本没导入。
+    """
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = Path(config_bundle.export_bundle(source)["path"])
+
+    target = tmp_path / "target"
+    (target / ".g3ku").mkdir(parents=True)
+    get_bootstrap_security_service(target).setup_initial_realm(password=OWNER_PASSWORD)
+    assert not (target / ".g3ku" / "config.json").exists()
+    monkeypatch.chdir(target)
+
+    with archive.open("rb") as handle:
+        applied = _client().post(
+            "/api/bootstrap/config-bundle/import",
+            data={"password": OWNER_PASSWORD},
+            files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
+        )
+
+    assert applied.status_code == 200, applied.text
+    item = applied.json()["item"]
+    assert item["refresh"]["saved"] is True
+    assert (target / ".g3ku" / "config.json").exists()
+    assert get_bootstrap_security_service(target).current_overlay()["config.qqBot.appSecret"] == "super-secret-app"
+
+
+def test_import_route_reports_a_source_version_mismatch_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = _write_workspace(tmp_path / "source")
+    _unlock(source)
+    archive = Path(config_bundle.export_bundle(source)["path"])
+
+    target = _fresh_target(tmp_path)
+    monkeypatch.chdir(target)
+    with archive.open("rb") as handle:
+        applied = _client().post(
+            "/api/bootstrap/config-bundle/import",
+            data={"password": OWNER_PASSWORD},
+            files={"file": ("bundle.g3kucb", handle, "application/octet-stream")},
+        )
+
+    item = applied.json()["item"]
+    assert item["source_app_version"] == item["local_app_version"] == config_bundle.__version__
+
+
 def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
     workspace = _write_workspace(tmp_path / "source")
     _unlock(workspace)
@@ -393,6 +443,7 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
     assert set(envelope) == {
         "kind",
         "version",
+        "app_version",
         "created_at",
         "workspace_label",
         "key_source",
@@ -401,6 +452,7 @@ def test_bundle_envelope_shape_and_tamper_rejection(tmp_path: Path) -> None:
         "unlock_envelope",
         "payload_b64",
     }
+    assert envelope["app_version"] == config_bundle.__version__
     # 手工按同一 KDF 复算一次，确认自定义口令就是这条车道的唯一凭据。
     key = derive_password_key(
         BUNDLE_PASSWORD,

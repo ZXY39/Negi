@@ -10586,9 +10586,12 @@ async function submitConfigBundleExport() {
 function applyConfigBundleImportResult(item) {
     closeConfigBundleDialog();
     closeProjectSettingsDialog();
+    const source = String(item?.source_app_version || "");
+    const local = String(item?.local_app_version || "");
+    const versionNote = source && local && source !== local ? `包来自 ${source}，本机 ${local}。` : "";
     showToast({
         title: "配置包已导入",
-        text: `已还原 ${item?.entry_count || 0} 个文件，解锁口令改成包口令；重启后 worker 才用新配置。`,
+        text: `${versionNote}已还原 ${item?.entry_count || 0} 个文件，解锁口令改成包口令；重启后 worker 才用新配置。`,
         kind: "success",
     });
     window.setTimeout(() => window.location.reload(), 1500);

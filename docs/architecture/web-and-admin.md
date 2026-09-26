@@ -186,7 +186,7 @@ Because there is no left sidebar anymore, fixed overlays must not keep the old s
 - Export never streams bytes through the JSON lane: the POST returns metadata only (filename, entry list, size — and deliberately not the server-side path), and the browser then follows `ApiClient.getConfigBundleDownloadUrl()` through an anchor carrying `download` to hit the download route. That route accepts only the bundle filename pattern, so the UI cannot ask the server for an arbitrary file under `.g3ku/`.
 - Import posts `FormData` (file + 包口令 + `confirm_running_work`) and asks `/api/bootstrap/exit-check` first, reusing the exit flow's running-work snapshot: with work in flight the confirm dialog requires the 暂停 checkbox before submitting, and a locked process that cannot answer the check is treated as having none.
 - `#confirm-backdrop` sits earlier in the DOM than the settings and 配置 dialogs, so anything that needs `openConfirm()` must close its parent layers first or the confirm renders underneath them. Import does exactly that before opening the confirm.
-- A successful import reloads the page: the config面 and the unlock credential both changed underneath a live UI, so keeping the old DOM would render against stale state.
+- A successful import reloads the page: the config面 and the unlock credential both changed underneath a live UI, so keeping the old DOM would render against stale state. Its toast prefixes the result with `包来自 X，本机 Y` only when the bundle's `source_app_version` differs from `local_app_version` — same-version ends are the case where the report is about behavior, not about the build.
 
 Two collapse systems exist and must not be merged:
 

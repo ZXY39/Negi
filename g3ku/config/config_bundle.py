@@ -19,6 +19,7 @@ from typing import Any
 
 from cryptography.fernet import InvalidToken
 
+from g3ku import __version__
 from g3ku.security import (
     PASSWORD_KDF,
     derive_password_key,
@@ -217,6 +218,9 @@ def export_bundle(
     envelope = {
         "kind": BUNDLE_KIND,
         "version": BUNDLE_VERSION,
+        # 格式版本决定能不能读，程序版本只用于对照：跨设备排障时"两端构建不一致"
+        # 是最常见的原因，光靠 version 字段查不出来。
+        "app_version": __version__,
         "created_at": created_at,
         "workspace_label": payload["workspace_label"],
         "key_source": key_source,
@@ -237,6 +241,7 @@ def export_bundle(
         "path": str(path),
         "filename": filename,
         "created_at": created_at,
+        "app_version": __version__,
         "workspace_label": payload["workspace_label"],
         "key_source": key_source,
         "entries": sorted(entries),
@@ -378,6 +383,8 @@ def import_bundle(
         "backup_dir": str(backup_root),
         "created_at": str(payload.get("created_at") or ""),
         "workspace_label": str(payload.get("workspace_label") or ""),
+        "source_app_version": str(envelope.get("app_version") or ""),
+        "local_app_version": __version__,
         "key_source": str(envelope.get("key_source") or ""),
         "status": status,
     }

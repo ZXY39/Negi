@@ -510,20 +510,43 @@ async def bootstrap_config_bundle_import(
     password: str = Form(...),
     confirm_running_work: bool = Form(False),
 ):
-    await _pause_running_work_for_bundle_import(confirm_running_work)
+    try:
+        await _pause_running_work_for_bundle_import(confirm_running_work)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # 读不出在跑的工作不代表不能导入：新装设备的运行时本来就没起来，这里
+        # 拦下来只会让人无法导入。
+        logger.warning("config bundle import: running-work check unavailable: {}", exc)
     staging_dir = Path.cwd() / BUNDLE_OUTPUT_DIR / "incoming"
-    staging_dir.mkdir(parents=True, exist_ok=True)
     staged = staging_dir / f"{uuid4().hex}{BUNDLE_EXTENSION}"
     try:
+        staging_dir.mkdir(parents=True, exist_ok=True)
         with staged.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
+    except Exception as exc:
+        logger.warning("config bundle import: staging failed: {}", exc)
+        staged.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="bundle_staging_failed") from exc
+    try:
         try:
             item = import_bundle(Path.cwd(), archive_path=staged, password=password)
         except Exception as exc:
             raise _bundle_http_exception(exc) from exc
     finally:
         staged.unlink(missing_ok=True)
-    refresh = await _refresh_runtime_after_save('admin_config_bundle_import')
+    try:
+        refresh = await _refresh_runtime_after_save('admin_config_bundle_import')
+    except Exception as exc:
+        # 配置已经落盘。让这一步把请求打成 500，界面会报"失败"而实际已经导入，
+        # 是最坏的一类误报。
+        logger.exception("config bundle imported but runtime refresh threw")
+        refresh = {
+            "saved": True,
+            "web_refreshed": False,
+            "code": "runtime_refresh_crashed",
+            "error": str(exc),
+        }
     logger.info("Config bundle imported: {} entries restored", item["entry_count"])
     # 只有重启才让托管 worker 换掉内存里的旧主密钥，界面必须把这条说清楚。
     return {"ok": True, "item": {**item, "refresh": refresh, "restart_required": True}}
