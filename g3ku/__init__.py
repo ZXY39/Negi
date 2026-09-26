@@ -1,6 +1,6 @@
 """
-g3ku - A lightweight AI agent framework
+Negi - A lightweight AI agent framework
 """
 
-__version__ = "1.0.2"
-__logo__ = "🐈"
+__version__ = "1.0.3"
+__logo__ = "🥬"

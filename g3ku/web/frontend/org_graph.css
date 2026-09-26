@@ -7450,6 +7450,13 @@ textarea {
     pointer-events: auto;
 }
 
+/* 其他弹窗遮罩同为 1000，同层按 DOM 顺序决胜；#confirm-backdrop 排在
+   设置/密码/配置包之前，从这些弹窗里点开的确认会被整块盖住。
+   1400 是 toast、1450 是审批浮层，必须仍高于确认框。 */
+#confirm-backdrop {
+    z-index: 1300;
+}
+
 .confirm-dialog {
     width: min(480px, calc(100vw - 48px));
     max-height: min(720px, calc(100vh - 48px));

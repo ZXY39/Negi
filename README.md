@@ -2,7 +2,7 @@
   <img src="assets/banner.png" alt="G3KU-Agent" width="100%">
 </p>
 
-# G3KU
+# Negi
 
 目录：[项目介绍](#项目介绍) | [1. 配置环境](#1-配置环境) | [2. 启动项目](#2-启动项目) | [3. 配置模型](#3-配置模型) | [4. 通信配置（可选）](#4-通信配置可选) | [5. 功能介绍](#5-功能介绍) | [6. 面向开发者和-agent-的补充说明](#6-面向开发者和-agent-的补充说明) | [部署（Docker / Compose）](#部署docker--compose) | [7. 致谢与参考](#7-致谢与参考) | [8. 许可证](#8-许可证)
 
@@ -10,7 +10,7 @@
 
 [![Demo](assets/cover.png)](https://github.com/user-attachments/assets/e6ba8afb-d88e-44db-b049-122c86cdaad3)
 
-**G3KU 是一套面向复杂工作流的Harness。一个能自主进化，长期运行、扩展能力、外部通信、同时支持 Web 管理界面的智能工作系统。**
+**Negi 是一套面向复杂工作流的Harness。一个能自主进化，长期运行、扩展能力、外部通信、同时支持 Web 管理界面的智能工作系统。**
 
 它让 Agent 真正具备了可长期使用的能力：能记住重要信息、能按需调用工具、能拆解复杂任务、能在长会话里保持稳定、能在高并发下运行，也能在真实环境中把风险控制住。
 
@@ -42,7 +42,7 @@
 - Windows PowerShell、Linux 或 macOS
 - 现代浏览器，用于访问 Web 界面
 
-对话主流程只需要 Python 环境；接入外部聊天渠道（QQ/飞书等）不需要在 G3KU 内安装任何额外依赖，而是由独立的桥接进程通过 External Agent API 完成，见「4. 通信配置（可选）」。
+对话主流程只需要 Python 环境；接入外部聊天渠道（QQ/飞书等）不需要在 Negi 内安装任何额外依赖，而是由独立的桥接进程通过 External Agent API 完成，见「4. 通信配置（可选）」。
 
 ### 一行指令安装（新设备）
 
@@ -51,13 +51,13 @@
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.2/install.ps1 | iex
+iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.3/install.ps1 | iex
 ```
 
 Linux / macOS:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.2/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.3/install.sh | bash
 ```
 
 默认装到 `~/G3KU-Agent`，不需要预装 Python；没有 git 时改走源码包下载（需要 curl 或 wget，以及 unzip）。
@@ -73,11 +73,11 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.2/install.sh 
 
 ```powershell
 # 镜像代理前缀（把原 URL 整个拼在后面）
-iwr https://cdn.jsdelivr.net/gh/ZXY39/G3KU-Agent@v1.0.2/install.ps1 | iex
-iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.2/install.ps1 | iex
+iwr https://cdn.jsdelivr.net/gh/ZXY39/G3KU-Agent@v1.0.3/install.ps1 | iex
+iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.3/install.ps1 | iex
 ```
 
-自 `v1.0.2` 起每个发布版本都带 release 资产，可绕开 raw 域名：`https://github.com/ZXY39/G3KU-Agent/releases/download/v1.0.2/install.ps1`。第三方代理等于把"执行什么代码"交给它，稳妥做法是先下载核对再运行 —— `install.ps1` 当前 7483 字节、`install.sh` 5976 字节，且首行是 `#requires -Version 5.1` / `#!/usr/bin/env bash`。
+自 `v1.0.2` 起每个发布版本都带 release 资产，可绕开 raw 域名：`https://github.com/ZXY39/G3KU-Agent/releases/download/v1.0.3/install.ps1`。第三方代理等于把"执行什么代码"交给它，稳妥做法是先下载核对再运行 —— `install.ps1` 当前 7483 字节、`install.sh` 5976 字节，且首行是 `#requires -Version 5.1` / `#!/usr/bin/env bash`。
 
 国内网络取 PyPI 或 Python 发行包慢时，给 uv 传镜像环境变量即可，脚本不另设开关：
 
@@ -98,7 +98,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 - 有没有新版：在项目目录里跑 `g3ku status`，最后一行 `Release:` 报当前版本与远端最新标签。离线、没有 git 或远端不是本仓库时这一行直接不出现，不会给你假的"已是最新"。
 - 自动检查：Web 服务运行期间每 5 小时查一次，启动时也会查一次；间隔与开关在 `config.json` 的 `update_check`（`enabled` / `interval_hours`）。检查只读远端标签列表，不外发任何本地信息；项目还锁着时不检查也不提醒。
 - 有新版本时：侧栏「设置」按钮左上角出现红点，`g3ku` 启动的命令行也会提示一行。点进设置能看到「当前版本 · 最新标签 · 检查于」，可以手动「检查更新」，也可以点「重启并更新」——它会先暂停正在进行的对话与任务，更新完成后自动重启服务。代码不会被自动替换，这一步一定要你点。
-- 升级：`.\install.ps1 -Upgrade`（Linux / macOS `./install.sh --upgrade`）。默认升到脚本里钉住的 ref，要指定版本加 `-Ref v1.0.2` / `--ref v1.0.2`。
+- 升级：`.\install.ps1 -Upgrade`（Linux / macOS `./install.sh --upgrade`）。默认升到脚本里钉住的 ref，要指定版本加 `-Ref v1.0.3` / `--ref v1.0.3`。
 - 过渡一次：`v1.0.1` 之前的安装不认识 `-Upgrade`，先在该目录跑一次 `git pull`（或删目录重装）拿到新脚本，此后都走 `-Upgrade`。
 - 有未提交改动时 `-Upgrade` 拒绝执行，先自行提交或丢弃。
 - 已知不做：源码包方式的升级只覆盖新版带来的文件，上一版里被删掉的不会回收；在意就用 git 安装，或删目录重装。
@@ -319,19 +319,19 @@ Linux / macOS:
 
 ## 4. 通信配置（可选）
 
-如果你希望不只在 Web 或本地 CLI 使用 G3KU，而是接入外部聊天渠道实现跨平台通信，使用 **External Agent API**（`/api/v1`）+ 独立桥接进程的模式。
+如果你希望不只在 Web 或本地 CLI 使用 Negi，而是接入外部聊天渠道实现跨平台通信，使用 **External Agent API**（`/api/v1`）+ 独立桥接进程的模式。
 
 ### 架构一览
 
-G3KU 本体不再内置任何 IM 渠道协议，只暴露一套渠道无关的 headless agent API；平台协议（QQ/飞书/企微等）全部由独立的桥接应用承担：
+Negi 本体不再内置任何 IM 渠道协议，只暴露一套渠道无关的 headless agent API；平台协议（QQ/飞书/企微等）全部由独立的桥接应用承担：
 
 ```
-IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ G3KU External Agent API（/api/v1）
+IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ Negi External Agent API（/api/v1）
 ```
 
 ### 可以做什么
 
-- 外部桥接把平台消息推进 G3KU 会话，订阅流式事件（增量/里程碑/最终回复），把回复发回平台；
+- 外部桥接把平台消息推进 Negi 会话，订阅流式事件（增量/里程碑/最终回复），把回复发回平台；
 - heartbeat 提醒、cron 定时、任务终态等主动推送经 `outbound.created` 事件送达桥接；
 - 每个桥接一个 `bridge_id` + token，会话命名空间互相隔离，可多桥并发。
 
@@ -351,7 +351,7 @@ IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ G3KU E
    ```
 
    token 明文保存时会自动剥离进加密覆盖层（与模型密钥同一机制）。
-2. 启动你的桥接应用，指向 G3KU 的 Web 地址并携带该 token（`Authorization: Bearer <token>`）。
+2. 启动你的桥接应用，指向 Negi 的 Web 地址并携带该 token（`Authorization: Bearer <token>`）。
 3. 仓库自带参考实现：`bridges/qq-onebot/`（QQ / OneBot 11，如 NapCat），配置与运行方式见其 `README.md`。
 
 ### 了解更多
@@ -361,11 +361,11 @@ IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ G3KU E
 
 对普通用户来说，可以把它理解成：
 
-**通信配置就是把 G3KU 从“本地可用”扩展到“能在外部平台和你聊天”——由外部桥接完成，G3KU 本体保持纯 Python 单进程。**
+**通信配置就是把 Negi 从“本地可用”扩展到“能在外部平台和你聊天”——由外部桥接完成，Negi 本体保持纯 Python 单进程。**
 
 ## 5. 功能介绍
 
-如果你第一次接触 G3KU，下面这几类能力最容易快速上手：
+如果你第一次接触 Negi，下面这几类能力最容易快速上手：
 
 1. **直接问 Agent“你能做什么？有哪些技能和工具？”**
    这是最快的入门方式之一。你可以直接让 Agent 列出当前可用的能力范围，快速了解它现在能处理哪些任务、能调用哪些技能、又有哪些工具可以配合使用。
@@ -383,7 +383,7 @@ IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ G3KU E
 - `把这个 GitHub skill 接入当前项目：<url>`
 - `参考这个仓库，给项目新增一个用于 XXX 的 tool：<url>`
 - `帮我做一个 skill，用来规范 XXX 工作流`
-- `把这个 CLI / API / 脚本封装成 G3KU tool，要求支持 XXX`
+- `把这个 CLI / API / 脚本封装成 Negi tool，要求支持 XXX`
 
 一般情况下，Agent 会按资源类型自动处理：
 
@@ -403,11 +403,11 @@ IM 平台 ⇄ 桥接应用（独立进程，用户自选/自运维） ⇄ G3KU E
 如果你只是想快速开始，很多时候一句话加一个地址就够了，例如：
 
 ```text
-把这个 GitHub skill 接入当前 G3KU：<url>
+把这个 GitHub skill 接入当前 Negi：<url>
 ```
 
 ```text
-参考这个项目，帮我新增一个 G3KU tool：<url>
+参考这个项目，帮我新增一个 Negi tool：<url>
 ```
 
 完成后，你还可以在前端的 Skill 管理和 Tool 管理页面里继续查看、启用、停用或微调这些能力。
@@ -536,11 +536,11 @@ g3ku status
 - `bridges/` 是独立的外部渠道桥接应用（如 `bridges/qq-onebot`），经 `/api/v1` 与本体通信
 - `memory/` 是长期记忆相关数据目录
 
-也就是说，G3KU 不只是一个前端页面加一个聊天后端，而是一整套可以长期运行、可扩展、可运维的 Agent 基础设施。
+也就是说，Negi 不只是一个前端页面加一个聊天后端，而是一整套可以长期运行、可扩展、可运维的 Agent 基础设施。
 
 ## 部署（Docker / Compose）
 
-如果你希望把 G3KU 作为长期运行的服务部署，而不是只在本机直接启动，可以使用仓库内置的 Docker / Compose 部署方式。
+如果你希望把 Negi 作为长期运行的服务部署，而不是只在本机直接启动，可以使用仓库内置的 Docker / Compose 部署方式。
 
 ### 如何启动
 
@@ -583,18 +583,18 @@ docker compose up --build
 
 ## 7. 致谢与参考
 
-G3KU 在设计和迭代过程中，参考了部分优秀开源项目的工程实践与产品思路。在此对相关项目与作者表示感谢。
+Negi 在设计和迭代过程中，参考了部分优秀开源项目的工程实践与产品思路。在此对相关项目与作者表示感谢。
 
 - [OpenClaw](https://github.com/openclaw/openclaw.git)
-  为 G3KU 的整体项目开发方向和 Agent 工程化实践产生了启发。
+  为 Negi 的整体项目开发方向和 Agent 工程化实践产生了启发。
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent.git)
-  为 G3KU 的自主维护记忆、长期记忆沉淀与持续协作能力提供了灵感。
+  为 Negi 的自主维护记忆、长期记忆沉淀与持续协作能力提供了灵感。
 - [oh-my-openagent](https://github.com/code-yeongyu/oh-my-openagent.git)
-  为 G3KU 的多 Agent 编排、任务拆解与协同推进提供了启发。
+  为 Negi 的多 Agent 编排、任务拆解与协同推进提供了启发。
 - [OpenViking](https://github.com/volcengine/OpenViking.git)
-  为 G3KU 的分层渐进式加载、能力暴露控制与上下文组织方式提供了灵感。
+  为 Negi 的分层渐进式加载、能力暴露控制与上下文组织方式提供了灵感。
 
-说明：G3KU 为结合自身目标、运行时设计与使用场景的独立项目。历史版本曾整合 `openclaw-china`（MIT）上游运行时代码，已随内置渠道子系统一并移除。
+说明：Negi 为结合自身目标、运行时设计与使用场景的独立项目。历史版本曾整合 `openclaw-china`（MIT）上游运行时代码，已随内置渠道子系统一并移除。
 
 ## 8. 许可证
 

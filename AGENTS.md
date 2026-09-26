@@ -90,6 +90,19 @@ These usually do not require updating `docs/architecture/` unless they alter mai
 - Narrow bug fixes that do not change runtime behavior or contracts
 - Internal refactors that do not change subsystem responsibilities, flow, or operator guidance
 
+## Brand Name vs Frozen Identifiers
+
+The product is displayed as **Negi**; the code keeps the legacy `g3ku` spelling, and the repository path `ZXY39/G3KU-Agent` is unchanged by the rebrand. Do not "finish the rename" into the list below — each entry is a live contract, not branding:
+
+- The repo path and every URL built from it, including `$RepoName` in `install.ps1` / `install.sh` and the default install directory `~/G3KU-Agent`.
+- Protocol markers matched literally by the runtime: `[G3KU_STAGE_*]`, `[G3KU_SILENT`, `[G3KU_TOKEN_COMPACT_V2]`, `### G3KU_PATCH_METADATA ###`, `### G3KU_PATCH_DIFF ###`.
+- `G3KU_*` environment variables (57 of them).
+- The data root directory name `.g3ku`.
+- Outbound contract strings: `MODEL_ID = "g3ku"`, `owned_by`, the `g3ku` key in OpenAI-compatible responses, the MCP server name and `g3ku_*` tool names, and the `x-g3ku-internal-token` header.
+- Frontend storage keys such as `g3ku.audit.last-seen.v1`.
+
+Renaming the data root is the expensive one: the runtime database stores ~1,700 rows whose values are absolute paths under `.g3ku/`, and `config.json` stores 7 more. Treat any of the above as a breaking change requiring its own plan.
+
 ## Guidance For New Agents
 
 If you are new to this repository, do not start by reading files at random. Start from:

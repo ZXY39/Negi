@@ -9,6 +9,8 @@
 
 ## 1. 基本启动方式
 
+产品显示名是 **Negi**；仓库路径、CLI 命令名 `g3ku`、数据根 `.g3ku`、`G3KU_*` 环境变量与 `[G3KU_*]` 协议标记仍是旧拼写，属冻结项（清单见 `AGENTS.md`「Brand Name vs Frozen Identifiers」）。排障时看到的 `g3ku web`、`.g3ku/config.json` 都是正常的当前形态。
+
 ### 新设备首次安装与升级
 
 用户侧一行指令（Windows `install.ps1`，Linux / macOS `install.sh`，仓库根），随后进入一键启动脚本同一条链路。

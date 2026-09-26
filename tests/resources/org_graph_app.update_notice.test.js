@@ -156,3 +156,30 @@ test("up to date never borrows the newer wording", () => {
     assert.match(api.U.projectSettingsUpdateText.textContent, /已是最新/);
     assert.doesNotMatch(api.U.projectSettingsUpdateText.textContent, /最新 v/);
 });
+
+test("确认框层级压过叫它起来的弹窗，但仍在 toast 之下", () => {
+    const css = fs.readFileSync("g3ku/web/frontend/org_graph.css", "utf8");
+
+    // 按"选择器 + 开括号"定位规则块，再从块里取 z-index 数值（避免正则转义脆弱）。
+    const zIndexOf = (blockOpen) => {
+        const start = css.indexOf(blockOpen);
+        assert.ok(start >= 0, `缺少规则块：${blockOpen}`);
+        const body = css.slice(start, css.indexOf("}", start));
+        const declared = body.match(/z-index:[ \t]*(\d+)/);
+        assert.ok(declared, `规则里没有 z-index：${blockOpen}`);
+        return Number(declared[1]);
+    };
+
+    const confirm = zIndexOf("#confirm-backdrop {");
+    const dialog = zIndexOf(".confirm-backdrop {");
+    const rename = zIndexOf("#rename-session-backdrop {");
+    const memoryEdit = zIndexOf(".memory-browser-edit-dialog {");
+    const toast = zIndexOf(".app-toast-viewport {");
+    const approval = zIndexOf(".ceo-approval-viewport {");
+
+    // 同为 1000 时按 DOM 顺序决胜，而 #confirm-backdrop 排在各弹窗之前 ⇒ 必须靠层级压过
+    assert.ok(confirm > dialog && confirm > rename && confirm > memoryEdit,
+        `确认框必须压过弹窗族：${confirm} vs ${dialog}/${rename}/${memoryEdit}`);
+    assert.ok(confirm < toast && confirm < approval,
+        `toast 与审批浮层必须仍在确认框之上：${toast}/${approval} vs ${confirm}`);
+});
