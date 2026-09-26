@@ -209,6 +209,8 @@ Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`t
 - 落盘形状：一条链全是 direct 时继续写字符串数组（存量 `config.json` 零 diff），一旦出现组 entry 才整条改写成对象数组。读侧两种形状都吃。
 - `ceo` / `memory` 出现 `load_balance` 会被直接拒绝（负载均衡组当前仅支持 execution/inspection）。记忆车道有固定单并发与 chat capability 契约，CEO 有会话固定模型与缓存键约束，都不能被组语义覆盖。
 - `mainRuntime.modelRouteLoadBalanceEnabled = false` 是回滚闸门：含组的链按配置顺序摊平成 direct 候选，准入与发送侧一起回到有序链行为。
+- 组是**全局资源，不属于任何一条链**：`_prepare_scope_route_update` 在落链之前先落整份 `models.loadBalanceGroups`，所以一次 scope 保存可以只带 `model_keys` 加一份组集合（链里还没有组也行）——管理面的组配置列因此允许「先建组、之后再拖进链」。也正因每个 scope 的保存都整份替换该字典，客户端必须交**完整**组集合，交子集会把没在这条链上用到的组删掉。成员为空的组不落盘（`modelKeys` 必填），因此链指向一个空组时会得到可读的 `Unknown load balance group`，而不是静默少一跳。
+- 组名是引用位的一部分：改名要同时重写所有链上的 `group:<key>` 记号（管理面在前端一次改完），删除组要连带摘掉引用它的链位。组名撞模型 key 由 schema 直接拒。
 
 两条与序列化器绑定的维护陷阱：
 
