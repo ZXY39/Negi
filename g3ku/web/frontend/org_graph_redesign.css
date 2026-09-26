@@ -1269,7 +1269,8 @@
 [data-ui-version="v2"] .external-api-shell,
 [data-ui-version="v2"] .llm-page-layout {
     width: 100%;
-    max-width: var(--ui-page-max-width);
+    /* 角色链固定 4 列，模型页要按 4 张卡各 ~260px 反推宽度，不能沿用 1440px 限宽。 */
+    max-width: min(100%, 1760px);
     margin-right: auto;
     margin-left: auto;
     padding-right: var(--ui-space-6);
@@ -1329,7 +1330,7 @@
     }
 
     [data-ui-version="v2"] .model-routing-grid {
-        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
     [data-ui-version="v2"] .memory-layout {
@@ -1339,7 +1340,8 @@
 
 @media (min-width: 1200px) {
 
-    [data-ui-version="v2"] .resource-list {
+    [data-ui-version="v2"] .resource-list,
+    [data-ui-version="v2"] .model-routing-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
     }
 }

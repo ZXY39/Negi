@@ -197,15 +197,15 @@ test("链上的组卡说明「平级 + 按负载 + 粘滞」，并暴露空成�
     assert.match(markup, /组内平级/);
     assert.match(markup, /按综合负载选成员/);
     assert.match(markup, /节点绑定后粘滞/);
-    assert.match(markup, /每成员 2 轮/);
-    assert.match(markup, /2 个成员/);
     assert.match(markup, /data-model-chain-ref="group:g_shared"/);
-    assert.match(markup, /data-group-edit="g_shared"/);
     assert.doesNotMatch(markup, /成员为空/);
     // 结构必须和模型卡一致：live 的模型卡没有 handle 元素，多塞一个 40px 虚线把手会把
     // 主区挤成 0 宽，标题就会掉到卡片外面（他截图里那个又高又空的虚线框）。
     assert.doesNotMatch(markup, /model-chain-handle|model-chain-grip/);
-    assert.match(markup, /<article[^>]*>\s*<button type="button" class="model-chain-main"/);
+    // 计数类文字（N 个成员 / 每成员 N 轮）按裁定不显示。
+    assert.doesNotMatch(markup, /个成员|每成员 \d+ 轮/);
+    // 整张卡都是打开配置的点击区。
+    assert.match(markup, /<article[^>]*data-group-edit="g_shared"/);
 
     const empty = app.renderModelGroupChainTile("execution", "g_missing", 1, false);
     assert.match(empty, /成员为空，保存会被拒绝/);
@@ -278,9 +278,11 @@ test("组列列出所有组并标出未加入链的那份", () => {
     // 引用状态逐行判：g_shared 在 execution 链上，g_unused 没有。
     assert.match(sharedRow, /已在 1 条链/);
     assert.match(unusedRow, /未加入链/);
-    // 成员构成要能直接看见，不用先点开弹窗。
-    assert.match(sharedRow, /2 个成员/);
+    // 成员构成要能直接看见，不用先点开弹窗；计数文字按裁定不显示。
     assert.match(sharedRow, />m_a</);
+    assert.doesNotMatch(sharedRow, /个成员|每成员 \d+ 轮/);
+    // 整张卡是点击区（rows 是按 <article 切开的，这里只匹配属性）。
+    assert.match(sharedRow, /data-group-edit="g_shared"/);
     // 非编辑态：不可拖、没有删除按钮。
     assert.doesNotMatch(sharedRow, /draggable="true"/);
     assert.doesNotMatch(sharedRow, /data-group-delete/);
@@ -292,7 +294,12 @@ test("新建组先弹窗，点确定才落草稿并自动进入链编辑会话",
     app.openLoadBalanceGroupDialog();
     const body = elements["model-group-dialog-body"].innerHTML;
     assert.match(body, /data-group-dialog-name/);
-    assert.match(body, /data-group-dialog-rounds/);
+    // 重试次数是自填数字，默认给到上限，不是 1/2/3 预设下拉。
+    const roundsTag = (body.match(/<input[^>]*data-group-dialog-rounds[^>]*>/) || [null])[0];
+    assert.ok(roundsTag, '重试次数必须是自填输入框');
+    assert.match(roundsTag, /type="number"/);
+    assert.match(roundsTag, /value="3"/);
+    assert.doesNotMatch(body, /<select[^>]*data-group-dialog-rounds/);
     // 光打开弹窗不碰数据：既没进编辑会话，也没有新组草稿。
     assert.equal(app.S.modelCatalog.roleEditing, false);
     assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_stage, undefined);
@@ -332,6 +339,21 @@ test("弹窗里空成员与空组名都被挡下，不落草稿", () => {
     // 草稿仍是已保存那两份组，没有多出被拒的空白组。
     sameJson(Object.keys(app.S.modelCatalog.loadBalanceGroupDrafts).sort(), ["g_shared", "g_unused"]);
     assert.match(elements["model-group-dialog-body"].innerHTML, /组名不能为空/);
+});
+
+test("重试次数越界时拒绝保存而不是静默夹取", () => {
+    const { app } = loadModelPage(plainChainPayload());
+
+    app.openLoadBalanceGroupDialog();
+    app.setLoadBalanceGroupDialogField("name", "g_rounds");
+    app.toggleLoadBalanceGroupDialogMember("m_a", true);
+    app.setLoadBalanceGroupDialogField("rounds", "9");
+    assert.equal(app.confirmLoadBalanceGroupDialog(), false);
+    assert.match(app.S.modelCatalog.groupDialog.error, /必须是 1\.\.3 的整数/);
+
+    app.setLoadBalanceGroupDialogField("rounds", "3");
+    assert.equal(app.confirmLoadBalanceGroupDialog(), true);
+    assert.equal(app.S.modelCatalog.loadBalanceGroupDrafts.g_rounds.max_retry_rounds, 3);
 });
 
 test("弹窗改组名会把链上的 group 记号一起改掉", () => {

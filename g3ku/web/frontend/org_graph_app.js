@@ -10723,6 +10723,8 @@ function modelScopeContains(scope, ref, source = "active") {
 
 const GROUP_REF_PREFIX = "group:";
 const GROUP_MAX_RETRY_ROUNDS_LIMIT = 3;
+// 新建组的默认每成员重试次数：给到上限，让组内第一个成员有机会自己扛过瞬时失败。
+const GROUP_DEFAULT_MAX_RETRY_ROUNDS = 3;
 // 与后端 LOAD_BALANCE_ROUTE_SCOPES 同步：只有这两条车道能引用组。
 const LOAD_BALANCE_ROUTE_SCOPES = ["execution", "inspection"];
 
@@ -11003,21 +11005,18 @@ function renderModelHint() {
 function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
     const group = activeLoadBalanceGroups()[groupKey] || {};
     const members = group.model_keys || [];
-    const rounds = group.max_retry_rounds || 1;
     return `
-        <article class="model-chain-slide is-group-tile${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}">
-            <button type="button" class="model-chain-main" data-group-edit="${esc(groupKey)}">
+        <article class="model-chain-slide is-group-tile${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}" data-group-edit="${esc(groupKey)}">
+            <div class="model-chain-main">
                 <span class="resource-list-title">${esc(groupKey)}</span>
                 <span class="resource-list-subtitle">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
                 <span class="model-inline-meta">
                     <span class="policy-chip risk-low">组</span>
-                    <span class="policy-chip neutral">${members.length} 个成员</span>
-                    <span class="policy-chip neutral">每成员 ${esc(rounds)} 轮</span>
                     ${index === 0 ? '<span class="policy-chip risk-low">链首</span>' : ""}
                     ${group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
                     ${!members.length ? '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>' : ""}
                 </span>
-            </button>
+            </div>
             ${editing ? `<button type="button" class="model-chain-remove" data-model-chain-action="remove" data-scope="${esc(scopeKey)}" data-index="${index}" title="移出链" aria-label="移出链"><i data-lucide="x"></i></button>` : ""}
         </article>`;
 }
@@ -11084,7 +11083,7 @@ function openLoadBalanceGroupDialog(groupKey = "") {
         editingKey: key,
         name: key || nextStandaloneGroupKey(),
         modelKeys: group ? [...(group.model_keys || [])] : [],
-        maxRetryRounds: Number(group?.max_retry_rounds || 1),
+        maxRetryRounds: group ? Number(group.max_retry_rounds || 1) : GROUP_DEFAULT_MAX_RETRY_ROUNDS,
         error: "",
     };
     renderModelGroupDialog();
@@ -11108,9 +11107,8 @@ function setLoadBalanceGroupDialogField(kind, value) {
     const dialog = S.modelCatalog.groupDialog;
     if (!dialog.open) return false;
     if (kind === "name") dialog.name = String(value ?? "");
-    else if (kind === "rounds") {
-        dialog.maxRetryRounds = Math.min(GROUP_MAX_RETRY_ROUNDS_LIMIT, Math.max(1, Math.trunc(Number(value) || 1)));
-    }
+    // 重试次数由用户自填，输入时不静默夹取：越界要在点确定时明确说出来。
+    else if (kind === "rounds") dialog.maxRetryRounds = String(value ?? "");
     dialog.error = "";
     // 逐键重绘会把光标从输入框里踢出去，所以这里只同步计数与错误行。
     syncLoadBalanceGroupDialogSummary();
@@ -11141,10 +11139,14 @@ function confirmLoadBalanceGroupDialog() {
     if (name !== dialog.editingKey && groupKeyCollidesWithModel(name)) {
         return rejectLoadBalanceGroupDialog(`组名不能与模型配置同名：${name}`);
     }
+    const rounds = Number(dialog.maxRetryRounds);
+    if (!Number.isInteger(rounds) || rounds < 1 || rounds > GROUP_MAX_RETRY_ROUNDS_LIMIT) {
+        return rejectLoadBalanceGroupDialog(`每成员重试次数必须是 1..${GROUP_MAX_RETRY_ROUNDS_LIMIT} 的整数`);
+    }
     // 建组就是模型链编辑会话的一部分：不在会话里先开一份，草稿才有地方落。
     if (!S.modelCatalog.roleEditing) startModelRoleEditing();
     const drafts = S.modelCatalog.loadBalanceGroupDrafts;
-    const payload = { enabled: true, max_retry_rounds: dialog.maxRetryRounds, model_keys: [...dialog.modelKeys] };
+    const payload = { enabled: true, max_retry_rounds: rounds, model_keys: [...dialog.modelKeys] };
     if (dialog.editingKey && dialog.editingKey !== name) {
         drafts[name] = { ...(drafts[dialog.editingKey] || {}), ...payload };
         delete drafts[dialog.editingKey];
@@ -11202,9 +11204,7 @@ function renderModelGroupDialog() {
         </label>
         <label class="resource-field">
             <span class="resource-field-label">每成员重试次数</span>
-            <select class="resource-search" data-group-dialog-rounds>
-                ${[1, 2, 3].map((value) => `<option value="${value}" ${Number(dialog.maxRetryRounds) === value ? "selected" : ""}>${value}</option>`).join("")}
-            </select>
+            <input class="resource-search spinless-number-input" type="number" min="1" max="${GROUP_MAX_RETRY_ROUNDS_LIMIT}" step="1" inputmode="numeric" value="${esc(String(dialog.maxRetryRounds))}" data-group-dialog-rounds>
         </label>
         <div class="resource-field">
             <span class="resource-field-label" data-group-dialog-count>成员模型（${selected.size}）</span>
@@ -11240,26 +11240,20 @@ function renderModelGroupColumn() {
     U.modelGroupList.innerHTML = keys.map((key) => {
         const group = groups[key] || {};
         const members = group.model_keys || [];
-        const rounds = group.max_retry_rounds || 1;
         const usedIn = usage[key] || 0;
         const memberChips = members.length
             ? members.map((item) => `<span class="policy-chip neutral">${esc(item)}</span>`).join("")
             : '<span class="policy-chip risk-high">成员为空，保存会被拒绝</span>';
+        // 整张卡都是打开配置的点击区，只有「删除」例外。
         return `
-            <article class="model-group-item${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}">
+            <article class="model-group-item${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-group-key="${esc(key)}" data-model-group-ref="${esc(groupRefToken(key))}" data-group-edit="${esc(key)}">
                 <div class="model-group-head">
-                    <span class="model-group-grip" aria-hidden="true">&#9776;</span>
-                    <button type="button" class="model-group-name" data-group-edit="${esc(key)}">${esc(key)}</button>
-                    ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-edit="${esc(key)}">配置</button>` : ""}
-                </div>
-                <div class="model-inline-meta">
-                    <span class="policy-chip neutral">${members.length} 个成员</span>
+                    <span class="model-group-name">${esc(key)}</span>
                     <span class="policy-chip neutral">${usedIn ? `已在 ${usedIn} 条链` : "未加入链"}</span>
-                    <span class="policy-chip neutral">每成员 ${esc(rounds)} 轮</span>
-                    ${group.enabled === false ? '<span class="policy-chip neutral">已禁用</span>' : ""}
+                    ${editing ? `<button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button>` : ""}
                 </div>
                 <div class="model-inline-meta">${memberChips}</div>
-                ${editing ? `<div class="model-group-foot"><button type="button" class="toolbar-btn ghost small" data-group-delete="${esc(key)}">删除</button></div>` : ""}
+                ${group.enabled === false ? '<div class="model-inline-meta"><span class="policy-chip neutral">已禁用</span></div>' : ""}
             </article>`;
     }).join("");
 }
@@ -16329,6 +16323,12 @@ function bind() {
             openModel(open.dataset.modelOpen);
             return;
         }
+        // 组卡的整张卡都是点击区，查看态也允许打开配置看成员与预算。
+        const groupEdit = e.target.closest("[data-group-edit]");
+        if (groupEdit) {
+            openLoadBalanceGroupDialog(String(groupEdit.dataset.groupEdit || ""));
+            return;
+        }
         if (!S.modelCatalog.roleEditing) return;
         const action = e.target.closest("[data-model-chain-action]");
         if (action) {
@@ -16342,19 +16342,22 @@ function bind() {
             }
             return;
         }
-        const groupEdit = e.target.closest("[data-group-edit]");
-        if (groupEdit) openLoadBalanceGroupDialog(String(groupEdit.dataset.groupEdit || ""));
     });
     U.modelGroupCreate?.addEventListener("click", () => openLoadBalanceGroupDialog());
     U.modelGroupList?.addEventListener("click", (e) => {
-        const edit = e.target.closest("[data-group-edit]");
-        if (edit) {
-            openLoadBalanceGroupDialog(String(edit.dataset.groupEdit || ""));
+        if (!S.modelCatalog.roleEditing) {
+            const edit = e.target.closest("[data-group-edit]");
+            if (edit) openLoadBalanceGroupDialog(String(edit.dataset.groupEdit || ""));
             return;
         }
-        if (!S.modelCatalog.roleEditing) return;
+        // 「删除」在卡片内部，必须先判它，否则点删除会顺手把配置弹窗弹出来。
         const del = e.target.closest("[data-group-delete]");
-        if (del) deleteLoadBalanceGroupDraft(String(del.dataset.groupDelete || ""));
+        if (del) {
+            deleteLoadBalanceGroupDraft(String(del.dataset.groupDelete || ""));
+            return;
+        }
+        const edit = e.target.closest("[data-group-edit]");
+        if (edit) openLoadBalanceGroupDialog(String(edit.dataset.groupEdit || ""));
     });
     U.modelGroupDialogBody?.addEventListener("click", (e) => {
         const toggle = e.target.closest("[data-group-dialog-member]");
@@ -16365,10 +16368,12 @@ function bind() {
     U.modelGroupDialogBody?.addEventListener("input", (e) => {
         const nameField = e.target.closest("[data-group-dialog-name]");
         if (nameField instanceof HTMLInputElement) setLoadBalanceGroupDialogField("name", nameField.value);
+        const roundsInput = e.target.closest("[data-group-dialog-rounds]");
+        if (roundsInput instanceof HTMLInputElement) setLoadBalanceGroupDialogField("rounds", roundsInput.value);
     });
     U.modelGroupDialogBody?.addEventListener("change", (e) => {
         const roundsField = e.target.closest("[data-group-dialog-rounds]");
-        if (roundsField instanceof HTMLSelectElement) setLoadBalanceGroupDialogField("rounds", roundsField.value);
+        if (roundsField instanceof HTMLInputElement) setLoadBalanceGroupDialogField("rounds", roundsField.value);
     });
     U.modelGroupConfirm?.addEventListener("click", () => confirmLoadBalanceGroupDialog());
     U.modelGroupCancel?.addEventListener("click", () => closeLoadBalanceGroupDialog());

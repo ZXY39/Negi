@@ -6236,15 +6236,16 @@ textarea {
 .model-group-item {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: var(--space-3);
+    gap: 4px;
+    padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     background: var(--surface-raised, transparent);
 }
 
 .model-group-item.is-editing {
-    cursor: grab;
+    /* 整张卡都是打开配置的点击区。 */
+    cursor: pointer;
 }
 
 .model-group-item.is-dragging {
@@ -6261,30 +6262,13 @@ textarea {
     gap: 6px;
 }
 
-.model-group-grip {
-    color: var(--text-muted);
-    flex: 0 0 auto;
-    visibility: hidden;
-}
-
-.model-group-item.is-editing .model-group-grip {
-    visibility: visible;
-}
-
 .model-group-name {
     flex: 1;
     min-width: 0;
-    border: 0;
-    background: transparent;
-    padding: 0;
-    text-align: left;
     font-weight: 600;
-    cursor: pointer;
-}
-
-.model-group-foot {
-    display: flex;
-    justify-content: flex-end;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .model-group-dialog {
@@ -6935,8 +6919,8 @@ textarea {
 
 .model-routing-grid {
     display: grid;
-    /* 按宽度自适应列数：写死 4 列时，模型页多出一列组配置就会把每张卡压到标题省略。 */
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    /* 四条角色链固定一排四张，不换行；宽度不足时靠模型页让出左侧列宽解决。 */
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: var(--space-6);
 }
 
