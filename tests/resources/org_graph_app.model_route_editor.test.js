@@ -202,6 +202,10 @@ test("链上的组卡说明「平级 + 按负载 + 粘滞」，并暴露空成�
     assert.match(markup, /data-model-chain-ref="group:g_shared"/);
     assert.match(markup, /data-group-edit="g_shared"/);
     assert.doesNotMatch(markup, /成员为空/);
+    // 结构必须和模型卡一致：live 的模型卡没有 handle 元素，多塞一个 40px 虚线把手会把
+    // 主区挤成 0 宽，标题就会掉到卡片外面（他截图里那个又高又空的虚线框）。
+    assert.doesNotMatch(markup, /model-chain-handle|model-chain-grip/);
+    assert.match(markup, /<article[^>]*>\s*<button type="button" class="model-chain-main"/);
 
     const empty = app.renderModelGroupChainTile("execution", "g_missing", 1, false);
     assert.match(empty, /成员为空，保存会被拒绝/);

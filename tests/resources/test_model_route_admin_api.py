@@ -172,6 +172,45 @@ def test_group_created_before_being_dragged_into_a_chain_still_persists(tmp_path
     assert saved['models']['loadBalanceGroups']['g_staged']['maxRetryRounds'] == 2
 
 
+def test_bulk_llm_route_save_returns_route_entries_and_groups(tmp_path: Path, monkeypatch) -> None:
+    """`PUT /api/llm/routes` 必须带回 route_entries 与组定义。
+
+    模型页保存后直接用响应刷新前端状态；只回 `routes`（候选展开视图）的话，刚保存的组
+    在下一次渲染里就变成逐个成员——界面上看是「保存后组卡消失，点刷新才回来」。
+    """
+    _write_config(tmp_path, roles=_LEGACY_ROLES)
+    monkeypatch.chdir(tmp_path)
+
+    response = _client().put(
+        '/api/llm/routes',
+        json={
+            'updates': {
+                'execution': {
+                    'route_entries': [
+                        {'type': 'load_balance', 'groupKey': 'g_bulk'},
+                        {'type': 'model', 'modelKey': 'm_emergency'},
+                    ],
+                    'load_balance_groups': {'g_bulk': {'modelKeys': ['m_a', 'm_b'], 'maxRetryRounds': 2}},
+                }
+            }
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert [
+        {key: value for key, value in row.items() if not key.endswith('_key')}
+        for row in payload['route_entries']['execution']
+    ] == [
+        {'type': 'load_balance', 'groupKey': 'g_bulk'},
+        {'type': 'model', 'modelKey': 'm_emergency'},
+    ]
+    # routes 仍是候选展开视图（旧客户端在读），组必须同时可见。
+    assert payload['routes']['execution'] == ['m_a', 'm_b', 'm_emergency']
+    assert payload['load_balance_groups']['g_bulk']['model_keys'] == ['m_a', 'm_b']
+    assert payload['load_balance_groups']['g_bulk']['max_retry_rounds'] == 2
+
+
 def test_legacy_model_keys_payload_still_saves_flat_shape(tmp_path: Path, monkeypatch) -> None:
     path = _write_config(tmp_path, roles=_LEGACY_ROLES)
     monkeypatch.chdir(tmp_path)

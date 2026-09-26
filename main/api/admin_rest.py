@@ -1680,9 +1680,9 @@ async def update_llm_routes_bulk(payload: dict = Body(...)):
     return {
         'ok': True,
         'updated_scopes': result.get('updated_scopes', []),
-        'routes': result.get('roles', {}),
-        'role_iterations': result.get('role_iterations', {}),
-        'role_concurrency': result.get('role_concurrency', {}),
+        # 保存后必须带回 route_entries 与组定义：只回 `routes`（候选展开视图）的话，
+        # 前端下一次渲染就把刚保存的组当成逐个成员，界面上看起来"保存完就消失"。
+        **_llm_routes_payload(manager),
     }
 
 

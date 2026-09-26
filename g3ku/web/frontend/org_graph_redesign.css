@@ -1329,7 +1329,7 @@
     }
 
     [data-ui-version="v2"] .model-routing-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     }
 
     [data-ui-version="v2"] .memory-layout {
@@ -1339,8 +1339,7 @@
 
 @media (min-width: 1200px) {
 
-    [data-ui-version="v2"] .resource-list,
-    [data-ui-version="v2"] .model-routing-grid {
+    [data-ui-version="v2"] .resource-list {
         grid-template-columns: repeat(4, minmax(0, 1fr));
     }
 }
@@ -1506,7 +1505,7 @@
 
 @media (min-width: 1024px) {
     [data-ui-version="v2"] .llm-page-layout {
-        grid-template-columns: 280px 300px minmax(0, 1fr);
+        grid-template-columns: 240px 280px minmax(0, 1fr);
         gap: var(--ui-space-5);
     }
 }

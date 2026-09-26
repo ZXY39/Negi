@@ -6203,7 +6203,7 @@ textarea {
 
 .llm-page-layout {
     display: grid;
-    grid-template-columns: minmax(250px, 300px) minmax(260px, 330px) minmax(0, 1fr);
+    grid-template-columns: minmax(220px, 260px) minmax(240px, 300px) minmax(0, 1fr);
     gap: var(--space-6);
     padding: var(--space-6) var(--space-8);
     min-height: calc(100vh - 120px);
@@ -6321,6 +6321,7 @@ textarea {
 }
 
 /* 链上的组卡：一跳是多个平级成员，必须和单个模型卡看得出区别 */
+/* 链上的组卡：结构与模型卡完全一致（多一个把手会把主区挤成 0 宽），只靠虚线边区分。 */
 .model-chain-slide.is-group-tile {
     border-style: dashed;
     border-color: color-mix(in srgb, var(--brand-primary) 45%, var(--border-color));
@@ -6330,14 +6331,9 @@ textarea {
     border-color: color-mix(in srgb, var(--danger, #d64545) 55%, var(--border-color));
 }
 
-.model-chain-slide.is-group-tile .model-chain-grip {
-    color: var(--text-muted);
-    padding: 0 6px;
-}
-
 @media (max-width: 1440px) {
     .llm-page-layout {
-        grid-template-columns: minmax(250px, 300px) minmax(260px, 320px);
+        grid-template-columns: minmax(220px, 260px) minmax(240px, 300px);
     }
 
     .llm-routes-panel {
@@ -6939,7 +6935,8 @@ textarea {
 
 .model-routing-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    /* 按宽度自适应列数：写死 4 列时，模型页多出一列组配置就会把每张卡压到标题省略。 */
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: var(--space-6);
 }
 
@@ -13224,27 +13221,3 @@ textarea {
     margin-top: var(--space-2);
 }
 
-/* 负载均衡组卡片：一跳是一个组，组内成员平级展示（成员顺序不代表优先级）。 */
-.model-chain-slide.is-group-card .model-chain-main {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    align-items: flex-start;
-}
-
-.model-chain-group-picker {
-    width: 100%;
-    font-size: 0.8rem;
-}
-
-.model-chain-group-picker summary {
-    cursor: pointer;
-    color: var(--text-secondary);
-}
-
-.model-chain-group-picker .role-toggle {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    padding: 2px 0;
-}

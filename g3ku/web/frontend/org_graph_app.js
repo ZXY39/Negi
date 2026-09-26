@@ -11006,11 +11006,11 @@ function renderModelGroupChainTile(scopeKey, groupKey, index, editing) {
     const rounds = group.max_retry_rounds || 1;
     return `
         <article class="model-chain-slide is-group-tile${editing ? " is-editing" : ""}${members.length ? "" : " is-incomplete"}"${editing ? ' draggable="true"' : ""} data-model-chain-ref="${esc(groupRefToken(groupKey))}" data-scope="${esc(scopeKey)}" data-group-key="${esc(groupKey)}">
-            ${editing ? '<span class="model-chain-grip model-chain-handle" aria-hidden="true">&#9776;</span>' : ""}
             <button type="button" class="model-chain-main" data-group-edit="${esc(groupKey)}">
                 <span class="resource-list-title">${esc(groupKey)}</span>
                 <span class="resource-list-subtitle">组内平级 · 按综合负载选成员 · 节点绑定后粘滞</span>
                 <span class="model-inline-meta">
+                    <span class="policy-chip risk-low">组</span>
                     <span class="policy-chip neutral">${members.length} 个成员</span>
                     <span class="policy-chip neutral">每成员 ${esc(rounds)} 轮</span>
                     ${index === 0 ? '<span class="policy-chip risk-low">链首</span>' : ""}
