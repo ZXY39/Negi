@@ -51,13 +51,13 @@
 Windows PowerShell:
 
 ```powershell
-iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.6/install.ps1 | iex
+iwr https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.7/install.ps1 | iex
 ```
 
 Linux / macOS:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.6/install.sh | bash
+curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.7/install.sh | bash
 ```
 
 默认装到 `~/G3KU-Agent`，不需要预装 Python；没有 git 时改走源码包下载（需要 curl 或 wget，以及 unzip）。
@@ -73,11 +73,11 @@ curl -LsSf https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.6/install.sh 
 
 ```powershell
 # 镜像代理前缀（把原 URL 整个拼在后面）
-iwr https://cdn.jsdelivr.net/gh/ZXY39/G3KU-Agent@v1.0.6/install.ps1 | iex
-iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.6/install.ps1 | iex
+iwr https://cdn.jsdelivr.net/gh/ZXY39/G3KU-Agent@v1.0.7/install.ps1 | iex
+iwr https://ghfast.top/https://raw.githubusercontent.com/ZXY39/G3KU-Agent/v1.0.7/install.ps1 | iex
 ```
 
-自 `v1.0.2` 起每个发布版本都带 release 资产，可绕开 raw 域名：`https://github.com/ZXY39/G3KU-Agent/releases/download/v1.0.6/install.ps1`。第三方代理等于把"执行什么代码"交给它，稳妥做法是先下载核对再运行 —— `install.ps1` 当前 7483 字节、`install.sh` 5976 字节，且首行是 `#requires -Version 5.1` / `#!/usr/bin/env bash`。
+自 `v1.0.2` 起每个发布版本都带 release 资产，可绕开 raw 域名：`https://github.com/ZXY39/G3KU-Agent/releases/download/v1.0.7/install.ps1`。第三方代理等于把"执行什么代码"交给它，稳妥做法是先下载再看内容：首行应为 `#requires -Version 5.1` / `#!/usr/bin/env bash`，文件里钉住的版本应与 URL 里的 tag 一致；字节数以该 release 页面列出的资产大小为准。
 
 国内网络取 PyPI 或 Python 发行包慢时，给 uv 传镜像环境变量即可，脚本不另设开关：
 
@@ -98,7 +98,7 @@ export UV_PYTHON_INSTALL_MIRROR=<可用的 python-build-standalone 镜像>
 - 有没有新版：在项目目录里跑 `g3ku status`，最后一行 `Release:` 报当前版本与远端最新标签。离线、没有 git 或远端不是本仓库时这一行直接不出现，不会给你假的"已是最新"。
 - 自动检查：Web 服务运行期间每 5 小时查一次，启动时也会查一次；间隔与开关在 `config.json` 的 `update_check`（`enabled` / `interval_hours`）。检查只读远端标签列表，不外发任何本地信息；项目还锁着时不检查也不提醒。
 - 有新版本时：侧栏「设置」按钮左上角出现红点，`g3ku` 启动的命令行也会提示一行。点进设置能看到「当前版本 · 最新标签 · 检查于」，可以手动「检查更新」，也可以点「重启并更新」——它会先暂停正在进行的对话与任务，更新完成后自动重启服务。代码不会被自动替换，这一步一定要你点。
-- 升级：`.\install.ps1 -Upgrade`（Linux / macOS `./install.sh --upgrade`）。默认升到脚本里钉住的 ref，要指定版本加 `-Ref v1.0.6` / `--ref v1.0.6`。
+- 升级：`.\install.ps1 -Upgrade`（Linux / macOS `./install.sh --upgrade`）。默认升到脚本里钉住的 ref，要指定版本加 `-Ref v1.0.7` / `--ref v1.0.7`。
 - 过渡一次：`v1.0.1` 之前的安装不认识 `-Upgrade`，先在该目录跑一次 `git pull`（或删目录重装）拿到新脚本，此后都走 `-Upgrade`。
 - 改过仓库自带文件时 `-Upgrade` 拒绝执行，先提交或丢弃；你新装的 skill、桥接产物这类未跟踪文件不算改动，不影响升级。
 - 「重启并更新」的全过程写在 `.g3ku/logs/update-apply.log` 里，安装脚本的进度会实时续写进去；超过 30 秒没有新输出时会另落一行"仍在跑"，慢网络下你能看出它是在等还是在死。不会再弹一个空白的命令行窗口。
