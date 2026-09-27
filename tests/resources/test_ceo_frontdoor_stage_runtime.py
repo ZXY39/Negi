@@ -891,6 +891,8 @@ def test_frontdoor_stage_closure_report_tells_the_model_whether_it_landed(tmp_pa
     )
     assert blocked["stage_closure"]["evicted"] is False
     assert blocked["stage_closure"]["reason"] == "no_closing_target"
+    # 落空时结果自带可读说明：模型不必再去猜"是不是被压缩折叠了"，也不会向用户谎报。
+    assert "未生效" in blocked["stage_closure"]["note"]
 
     # 没给任何收尾材料的普通开阶段不添字段，存量会话的块与逐条布尔键都不因此涨体积。
     _, plain = runner._frontdoor_submit_next_stage(

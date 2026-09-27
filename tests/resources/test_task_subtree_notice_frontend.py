@@ -73,7 +73,9 @@ def test_message_list_status_descriptor_three_states() -> None:
     assert result["pending"] == {"key": "warning", "label": "待处理"}
     assert result["consumed"] == {"key": "info", "label": "已消费"}
     assert result["merged"] == {"key": "info", "label": "已并入上下文"}
-    assert result["unknown"]["label"] == "weird"
+    # 未知值不再回显原始 token（旧断言把泄漏本身当成了合同）。
+    assert result["unknown"]["label"] == "待确认"
+    assert result["unknown"]["key"] == "info"
 
 
 def test_message_delivery_status_descriptor_semantic_labels() -> None:
@@ -94,8 +96,10 @@ def test_message_delivery_status_descriptor_semantic_labels() -> None:
     assert result["consumed"] == {"key": "consumed", "label": "已消费", "icon": "circle-check"}
     assert result["merged"] == {"key": "merged", "label": "已并入上下文", "icon": "merge"}
     assert result["skipped"] == {"key": "skipped", "label": "未下发", "icon": "circle-slash"}
-    assert result["unknown"]["label"] == "weird"
-    assert result["empty"]["label"] == "已接收"
+    # 未知/空值都给中性标签：原始账本 token 不得外泄，也不得冒充「已接收」
+    # （那一档现在是投递前投影的专有意义）。
+    assert result["unknown"]["label"] == "待确认"
+    assert result["empty"]["label"] == "待确认"
 
 
 def test_render_message_deliveries_field_replaces_raw_status_tokens() -> None:
@@ -268,17 +272,32 @@ def test_distribution_bubble_text_says_new_message_distributing() -> None:
             textContent: "",
           }),
         };
-        S.taskRuntimeSummary = { distribution: {
+        const base = {
           mode: "subtree_barrier", state: "distributing", active_epoch_id: "epoch:1",
           target_node_ids: ["node:t"], frontier_node_ids: ["node:t"],
           blocked_node_ids: ["node:t"], pending_notice_node_ids: [],
           queued_epoch_count: 0, pending_mailbox_count: 0,
+        };
+        const texts = {};
+        S.taskRuntimeSummary = { distribution: { ...base } };
+        texts.draining = buildTaskTreeDistributionBubble().textContent;
+        S.taskRuntimeSummary = { distribution: { ...base, frozen_node_ids: ["node:t"] } };
+        texts.settled = buildTaskTreeDistributionBubble().textContent;
+        S.taskRuntimeSummary = { distribution: {
+          ...base, blocked_node_ids: [], frontier_node_ids: ["node:t"],
         } };
+        texts.noScope = buildTaskTreeDistributionBubble().textContent;
+        S.taskRuntimeSummary = { distribution: { ...base } };
         const bubble = buildTaskTreeDistributionBubble();
-        console.log(JSON.stringify({ text: bubble.textContent, className: bubble.className }));
+        console.log(JSON.stringify({ ...texts, className: bubble.className }));
         """
     )
-    assert result["text"] == "新消息分发中"
+    # 分发窗口可以长达分钟级，横幅必须能读出"在推进"；分子是排空账本的下界。
+    assert result["draining"].startswith("新消息分发中 · 已停步 0/1")
+    assert "已停步 1/1" in result["settled"]
+    assert "已进入分发决策回合" in result["settled"]
+    # 没有应冻集时不编造分母，退回原文案。
+    assert result["noScope"] == "新消息分发中"
     assert result["className"] == "task-tree-distribution-bubble"
 
 

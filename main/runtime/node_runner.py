@@ -7108,7 +7108,7 @@ class NodeRunner:
             final=False,
             drop_completed_stage_tool_detail=bool(drop_completed_stage_tool_detail),
         )
-        return {
+        result = {
             'stage_id': str(stage.get('stage_id') or ''),
             'stage_index': int(stage.get('stage_index') or 0),
             'stage_kind': str(stage.get('stage_kind') or 'normal'),
@@ -7119,6 +7119,12 @@ class NodeRunner:
             'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
             'final_stage': bool(stage.get('final_stage') or False),
         }
+        closure = stage.get('stage_closure')
+        if isinstance(closure, dict):
+            # 收尾材料的回执原样透出：模型据此判断裁撤有没有兑现、原文在哪个文件，
+            # 不必再凭参数倒推（与前门 stage_closure 同形）。
+            result['stage_closure'] = dict(closure)
+        return result
 
     @staticmethod
     async def _submit_final_result(payload: dict[str, Any]) -> dict[str, Any]:

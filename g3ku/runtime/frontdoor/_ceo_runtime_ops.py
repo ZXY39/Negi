@@ -60,9 +60,11 @@ from g3ku.runtime.project_environment import current_project_environment
 from g3ku.runtime.stage_prompt_compaction import (
     ECHO_STRIP_ENABLED,
     STAGE_ARCHIVE_HEADING,
+    STAGE_CLOSURE_INACTIVE_NOTES,
     STAGE_RAW_PREFIX,
     STAGE_REF_SELECTION_RULE,
     build_stage_archive_document,
+    closing_stage_target,
     compact_stage_prompt_messages_in_place,
     is_stage_block_echo_text,
     render_stage_ref_candidate_block,
@@ -73,7 +75,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_created_at_ceiling,
     stage_created_at_within_watermark,
     stage_is_swallowable,
-    stage_is_terminal,
     stage_message_call_ids,
     stage_ref_candidates,
     strip_stage_block_echo,
@@ -5078,45 +5079,18 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _frontdoor_closing_stage(stage_state: dict[str, Any] | None) -> dict[str, Any] | None:
-        """`completed_stage_summary` / `key_refs` / 裁撤三样材料的归属对象，判据只允许有一份。
+        """`completed_stage_summary` / `key_refs` / 裁撤材料的归属对象，两车道共用 `closing_stage_target`。
 
-        活动阶段优先；没有活动阶段时回退到**最后一条**阶段，且仅当它是终态普通阶段、总结
-        还空着——即上一回合被轮末结清、正等模型补写蒸馏结论的那条。回合尾必然清空
-        `active_stage_id`，而渠道会话的模型下一个回合才发 `submit_next_stage`：只认活动位
-        会让三样材料一起静默悬空（合同与实盘证据见
-        `docs/architecture/runtime-overview.md`「stage_compaction」）。回退窗口只有一条且
-        要求总结为空，所以既不改写更早的阶段，也不构成"代写摘要"的入口。
+        判据只允许有一份：前门与节点都会在轮末 / run 终局把活动阶段结清并清空
+        `active_stage_id`，而模型可能到下一个回合（前门的渠道会话形态）或恢复后的下一次提交
+        （节点的错误恢复与验收打回）才补发 `submit_next_stage`。只认活动位会让三样材料一起
+        静默悬空，新阶段却照常追加，从外表看不出异常（实盘
+        `ext:qq-official-1903529517:f8a8001865631301`：12/12 条阶段无总结、点名过的裁撤一次都没
+        兑现、归档文件 0 个）。合同详见
+        `docs/architecture/runtime-overview.md`「stage_compaction」。
         """
-        if not isinstance(stage_state, dict):
-            return None
-        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
-        stages = [
-            dict(stage)
-            for stage in list(stage_state.get("stages") or [])
-            if isinstance(stage, dict)
-        ]
-        if not stages:
-            return None
-        if active_stage_id:
-            active = next(
-                (
-                    stage
-                    for stage in stages
-                    if str(stage.get("stage_id") or "").strip() == active_stage_id
-                    and str(stage.get("status") or "").strip().lower() == "active"
-                ),
-                None,
-            )
-            if active is not None:
-                return active
-        newest = max(stages, key=lambda stage: int(stage.get("stage_index") or 0))
-        if str(newest.get("stage_kind") or "normal").strip().lower() != "normal":
-            return None
-        if not stage_is_terminal(newest):
-            return None
-        if str(newest.get("completed_stage_summary") or "").strip():
-            return None
-        return newest
+        target = closing_stage_target(stage_state)
+        return target if isinstance(target, dict) else None
 
     @classmethod
     def _frontdoor_closing_stage_id(cls, stage_state: dict[str, Any] | None) -> str:
@@ -5187,6 +5161,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 ),
                 "evicted": bool(closed and closed.get("context_evicted") is True),
                 "reason": reason,
+                # 落空时在结果里自带一句可读说明：schema 描述两车道共用，改它会整体失效
+                # provider 前缀，而结果属动态尾部，模型不必再靠猜。
+                **({} if reason == "applied" else {"note": STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
             }
         return next_state, payload
 

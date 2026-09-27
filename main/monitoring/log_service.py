@@ -5,6 +5,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -18,6 +19,12 @@ from g3ku.content import (
     parse_content_envelope,
 )
 from g3ku.content.navigation import INLINE_CHAR_LIMIT
+from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_CLOSURE_INACTIVE_NOTES,
+    build_stage_archive_document,
+    closing_stage_target,
+    stage_record_dict,
+)
 from main.ids import new_stage_id, new_stage_round_id
 from main.models import (
     FAILURE_CLASS_BUSINESS_UNPASSED,
@@ -775,6 +782,8 @@ class TaskLogService:
         target_node_ids = normalize_string_list(current.get('target_node_ids'))
         frontier_node_ids = normalize_string_list(current.get('frontier_node_ids'))
         blocked_node_ids = normalize_string_list(current.get('blocked_node_ids'))
+        # 排空账本：已走到安全检查点停住的节点子集，只作进度下界，不是释放依据。
+        frozen_node_ids = normalize_string_list(current.get('frozen_node_ids'))
         pending_notice_node_ids = normalize_string_list(current.get('pending_notice_node_ids'))
         try:
             queued_epoch_count = max(0, int(current.get('queued_epoch_count') or 0))
@@ -791,6 +800,7 @@ class TaskLogService:
             'target_node_ids': target_node_ids,
             'frontier_node_ids': frontier_node_ids,
             'blocked_node_ids': blocked_node_ids,
+            'frozen_node_ids': frozen_node_ids,
             'pending_notice_node_ids': pending_notice_node_ids,
             'queued_epoch_count': queued_epoch_count,
             'pending_mailbox_count': pending_mailbox_count,
@@ -2818,6 +2828,97 @@ class TaskLogService:
             publish_snapshot=True,
         )
 
+    def _execution_stage_eviction_record(
+        self,
+        task_id: str,
+        node_id: str,
+        stage: ExecutionStageRecord,
+    ) -> dict[str, Any]:
+        """导出用的阶段账本：逐轮按 call id 关联已外置的工具信封。
+
+        前门必须把逐字入参出参一起写进归档（它没有别的全量通道）；节点不重抄正文——
+        全文本来就在 `task_node_tool_results` 与 `output_ref` 后面，这里只带上入参文本、
+        出参预览与指针，打开一次就能知道"这条阶段做了什么、原文去哪取"，同时不把
+        一个几十轮的阶段复制成兆级文件、绕开磁盘治理。
+        """
+        record = stage_record_dict(stage)
+        try:
+            rows = list(self._store.list_task_node_tool_results(task_id, node_id) or [])
+        except Exception:
+            rows = []
+        by_call: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            call_id = str(getattr(row, 'tool_call_id', '') or '').strip()
+            if not call_id:
+                continue
+            by_call[call_id] = {
+                'tool_name': str(getattr(row, 'tool_name', '') or ''),
+                'status': str(getattr(row, 'status', '') or ''),
+                'arguments_text': str(getattr(row, 'arguments_text', '') or ''),
+                'output_preview_text': str(getattr(row, 'output_preview_text', '') or ''),
+                'output_ref': str(getattr(row, 'output_ref', '') or ''),
+            }
+        rounds: list[dict[str, Any]] = []
+        for round_item in list(record.get('rounds') or []):
+            current = dict(round_item or {})
+            current['tools'] = [
+                {'tool_call_id': str(call_id), **(by_call.get(str(call_id).strip()) or {})}
+                for call_id in list(current.get('tool_call_ids') or [])
+            ]
+            rounds.append(current)
+        return {**record, 'rounds': rounds}
+
+    def _export_execution_stage_eviction_locked(
+        self,
+        *,
+        task: Any,
+        node_id: str,
+        stage: ExecutionStageRecord,
+    ) -> ExecutionStageRecord:
+        """模型点名裁撤时把该阶段全量账本导成文件，路径写回 `archive_ref`。
+
+        与前门 `_frontdoor_archive_evicted_stage` 同一合同：块里那一行 `archive_ref` 是
+        `content_open` 的入口，节点此前只有 `task_node_detail` 一条读回通道，块本身没有指针。
+        落点只认任务 runtime meta 里的绝对 `task_temp_dir`（拿不到就不写 ref，也不谎称可读回，
+        更不回退到工作区根目录——那会让归档落在任务目录之外、躲开磁盘治理）。
+        一条阶段只导一次，已有 ref 直接复用。
+        """
+        if stage.context_evicted is not True:
+            return stage
+        if str(stage.archive_ref or '').strip():
+            return stage
+        runtime_meta = self.read_task_runtime_meta(str(task.task_id or '').strip()) or {}
+        directory = str(runtime_meta.get('task_temp_dir') or '').strip()
+        if not directory:
+            return stage
+        try:
+            target = Path(directory)
+            target.mkdir(parents=True, exist_ok=True)
+            payload = build_stage_archive_document(
+                kind='node_stage_eviction',
+                owner=f'task:{task.task_id}/node:{node_id}',
+                created_at=now_iso(),
+                stages=[self._execution_stage_eviction_record(task_id=str(task.task_id or ''), node_id=node_id, stage=stage)],
+            )
+            path = target / f'g3ku_node_stage_eviction_1_{uuid.uuid4().hex[:8]}.json'
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        except Exception:
+            logger.debug(
+                'node stage eviction archive export failed for task {} node {} stage {}',
+                str(task.task_id or ''),
+                str(node_id or ''),
+                str(stage.stage_id or ''),
+            )
+            return stage
+        stage_index = int(stage.stage_index or 0)
+        return stage.model_copy(
+            update={
+                'archive_ref': str(path),
+                'archive_stage_index_start': stage_index,
+                'archive_stage_index_end': stage_index,
+            }
+        )
+
     def submit_next_stage(
         self,
         task_id: str,
@@ -2872,14 +2973,23 @@ class TaskLogService:
             ):
                 normalized_key_refs = [*normalized_key_refs, latest_spawn_key_ref]
             now = now_iso()
+            # 收尾材料的归属对象与前门共用同一个判据：活动阶段优先；run 终局（含失败态）会
+            # 把活动阶段结清并清空 active_stage_id，而节点可以被恢复继续跑（错误恢复、验收打回），
+            # 此时模型才补发提交，落点就是那条被结清、总结还空着的阶段。
+            closing_stage = closing_stage_target(state)
+            closing_stage_id = str((closing_stage.stage_id if closing_stage is not None else '') or '').strip()
+            closing_was_active = bool(closing_stage_id) and closing_stage_id == str(state.active_stage_id or '').strip()
             stages: list[ExecutionStageRecord] = []
             for stage in list(state.stages or []):
                 current = stage
-                if str(stage.stage_id or '').strip() == str(state.active_stage_id or '').strip() and str(stage.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE:
+                if closing_stage_id and str(stage.stage_id or '').strip() == closing_stage_id:
                     current = stage.model_copy(
                         update={
                             'status': _EXECUTION_STAGE_STATUS_COMPLETED,
-                            'finished_at': now,
+                            # 被结清的阶段保留原 finished_at：它是时间线与收口水位线的命中键。
+                            'finished_at': now if closing_was_active else (
+                                str(stage.finished_at or '').strip() or now
+                            ),
                             'completed_stage_summary': normalized_completed_summary,
                             'key_refs': normalized_key_refs,
                             # 工具层已用 validate_params 拦过"空总结+点名裁撤"，这里再收一次：
@@ -2890,6 +3000,17 @@ class TaskLogService:
                         }
                     )
                 stages.append(current)
+            closing_index = next(
+                (index for index, item in enumerate(stages) if str(item.stage_id or '').strip() == closing_stage_id),
+                None,
+            )
+            if closing_index is not None:
+                stages[closing_index] = self._export_execution_stage_eviction_locked(
+                    task=task,
+                    node_id=node_id,
+                    stage=stages[closing_index],
+                )
+            closing_stage = stages[closing_index] if closing_index is not None else None
             next_stage_index = max((int(stage.stage_index or 0) for stage in stages), default=0) + 1
             pending_orphan_rounds = [item.model_copy() for item in list(state.pending_orphan_rounds or [])]
             grafted_rounds: list[ExecutionStageRound] = []
@@ -2933,7 +3054,29 @@ class TaskLogService:
             self._persist_execution_stage_state_locked(task=task, node_id=node_id, state=next_state)
             self._sync_execution_stage_frame_locked(task_id=task_id, node_id=node_id, state=next_state)
             self.refresh_task_view(task_id, mark_unread=True)
-            return next_stage.model_dump(mode='json')
+            payload = next_stage.model_dump(mode='json')
+            if normalized_completed_summary or drop_completed_stage_tool_detail:
+                # 与前门同一份回执：这批收尾材料落到哪条阶段、肉身有没有移出、归档在哪。
+                # 没有它，模型只能按提示词文案倒推自己是否裁撤成功，于是向用户谎报。
+                if not closing_stage_id:
+                    reason = 'no_closing_target'
+                elif drop_completed_stage_tool_detail and not normalized_completed_summary:
+                    reason = 'summary_required'
+                else:
+                    reason = 'applied'
+                payload['stage_closure'] = {
+                    'target_stage_id': closing_stage_id,
+                    'summary_attached': bool(
+                        closing_stage is not None and str(closing_stage.completed_stage_summary or '').strip()
+                    ),
+                    'evicted': bool(closing_stage is not None and closing_stage.context_evicted is True),
+                    'archive_ref': str(closing_stage.archive_ref or '') if closing_stage is not None else '',
+                    'reason': reason,
+                    # 与前门同一份落空说明：结果属动态尾部，工具 schema 是两车道共享的
+                    # provider 前缀，改它会整体失效一次缓存。
+                    **({} if reason == 'applied' else {'note': STAGE_CLOSURE_INACTIVE_NOTES[reason]}),
+                }
+            return payload
 
     def record_execution_stage_round(
         self,

@@ -1030,6 +1030,57 @@ def _node_ledger_messages(stage_count: int) -> list[dict[str, object]]:
     return messages
 
 
+def _target_stage_id(target: object) -> str:
+    if target is None:
+        return ""
+    return str(target.get("stage_id") if isinstance(target, dict) else getattr(target, "stage_id", ""))
+
+
+def test_closing_stage_target_prefers_active_then_newest_open_summary() -> None:
+    # 收尾材料的归属对象在两车道上必须同判据：活动阶段优先；无活动阶段时回退到
+    # 最后一条终态且总结仍为空的普通阶段（被自动结清、正等模型补写蒸馏结论的那条）。
+    # 窗口只有一条：末条已带总结就不再回退，避免改写更早的阶段。
+    from g3ku.runtime.stage_prompt_compaction import closing_stage_target
+
+    active_present = {
+        "active_stage_id": "frontdoor-stage-2",
+        "transition_required": False,
+        "stages": [_stage_record(1), _stage_record(2, status="active")],
+    }
+    assert _target_stage_id(closing_stage_target(active_present)) == "frontdoor-stage-2"
+
+    settled = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [
+            _stage_record(1),
+            {**_stage_record(2, status="completed"), "completed_stage_summary": ""},
+        ],
+    }
+    assert _target_stage_id(closing_stage_target(settled)) == "frontdoor-stage-2"
+
+    closed_out = {
+        "active_stage_id": "",
+        "transition_required": False,
+        "stages": [_stage_record(1), _stage_record(2, status="completed")],
+    }
+    assert closing_stage_target(closed_out) is None
+    assert closing_stage_target({"active_stage_id": "", "stages": []}) is None
+
+
+def test_closing_stage_target_agrees_across_both_ledger_shapes() -> None:
+    # 节点车道喂的是 pydantic 账本、前门喂 dict。曾经 dict-only 判读让压缩退化成
+    # "只渲染块、不删肉身"，同一条判据必须两种形态各跑一遍。
+    from g3ku.runtime.stage_prompt_compaction import closing_stage_target
+    from main.models import normalize_execution_stage_metadata
+
+    state = _node_ledger_state(statuses=["完成", "完成", "失败"], active_stage_id="")
+    state["stages"][2]["completed_stage_summary"] = ""
+
+    assert _target_stage_id(closing_stage_target(state)) == "frontdoor-stage-3"
+    assert _target_stage_id(closing_stage_target(normalize_execution_stage_metadata(state))) == "frontdoor-stage-3"
+
+
 def test_in_place_compaction_prunes_with_object_shaped_node_ledger() -> None:
     # 回归：节点道传的是 normalize_execution_stage_metadata 的 pydantic 账本，
     # 曾经的 dict 判读把 rounds 整段跳过 —— 收口块只增不删，投影单调上涨。

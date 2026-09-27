@@ -176,6 +176,61 @@ class _DispatchLease:
             self.dispatcher._resume_entry(self.entry)
 
 
+def _sorted_unique_node_ids(raw: Any, *extra: str) -> list[str]:
+    values = {str(item or '').strip() for item in list(raw or []) if str(item or '').strip()}
+    values.update(str(item or '').strip() for item in extra if str(item or '').strip())
+    return sorted(values)
+
+
+def record_frozen_node_id(
+    store: Any,
+    log_service: Any,
+    *,
+    task_id: str,
+    epoch_id: str,
+    node_id: str,
+) -> bool:
+    """把节点登记进子树屏障的排空账本（epoch payload + 任务 meta）。
+
+    账本只表达「该节点已走到安全检查点停住」，供操作员区分「还在等在飞请求」与
+    「已停步等释放」。它不改变任何控制流，也不是释放依据——冻结面与释放面仍按
+    `subtree_hold.node_in_target_subtree` 反算，账本缺失或陈旧都不影响分发。
+
+    幂等：已在账本内则不再写库。任何异常都吞掉并返回 False，绝不让冻结路径失败。
+    """
+    normalized_task_id = str(task_id or '').strip()
+    normalized_epoch_id = str(epoch_id or '').strip()
+    normalized_node_id = str(node_id or '').strip()
+    if not normalized_task_id or not normalized_epoch_id or not normalized_node_id:
+        return False
+    try:
+        epoch = store.get_task_message_distribution_epoch(normalized_task_id, normalized_epoch_id)
+        if epoch is None:
+            return False
+        payload = dict(epoch.payload or {})
+        existing = _sorted_unique_node_ids(payload.get('frozen_node_ids'))
+        if normalized_node_id in existing:
+            return False
+        frozen = _sorted_unique_node_ids(existing, normalized_node_id)
+        payload['frozen_node_ids'] = frozen
+        store.upsert_task_message_distribution_epoch(epoch.model_copy(update={'payload': payload}))
+        # meta 的 distribution 只有整包通道：读全量、补一个键、原样写回，
+        # 否则 _sanitize_distribution_state 会把未列出的键吃掉。
+        runtime_meta = dict(log_service.read_task_runtime_meta(normalized_task_id) or {})
+        distribution = dict(runtime_meta.get('distribution') or {})
+        distribution['frozen_node_ids'] = frozen
+        log_service.update_task_runtime_meta(normalized_task_id, distribution=distribution)
+        return True
+    except Exception:
+        logger.warning(
+            'frozen node ledger write failed: task={} epoch={} node={}',
+            normalized_task_id,
+            normalized_epoch_id,
+            normalized_node_id,
+        )
+        return False
+
+
 class TaskNodeDispatcher:
     def __init__(
         self,
@@ -389,6 +444,15 @@ class TaskNodeDispatcher:
                 )
             except Exception:
                 pass
+            # 排空账本：把「这个节点已经停住」记下来，供分发期间的进度显示逐节点判读。
+            # 只做旁证写入，失败也不影响下面的 return（future 必须保持 pending）。
+            record_frozen_node_id(
+                self._store,
+                self._log_service,
+                task_id=self._task_id,
+                epoch_id=str(getattr(exc, 'epoch_id', '') or ''),
+                node_id=entry.node_id,
+            )
             return
         except NodePausedError as exc:
             # Child entries keep their waiter future pending so the parent
