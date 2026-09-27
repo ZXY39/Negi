@@ -333,9 +333,13 @@ def test_ui_delta_keeps_only_new_stages_and_backfills_live_bodies() -> None:
     assert rendered_tool["arguments_text"] == "q" * 6000
 
 
-def test_ui_payload_projection_leaves_unmarked_bodies_in() -> None:
-    # 表示形式不再按位置切片：未被点名的阶段在 UI 投影里照样带着肉身。窗口时代这条断言
-    # 靠的是"最老的几条自动降 compact"，现在唯一的出口是标记（下两行把它标掉再看）。
+def test_ui_payload_projection_keeps_rows_for_evicted_stages() -> None:
+    """Web 轨道永远带工具行：阶段被裁撤只该影响发送体，不该让界面显示"暂无工具轮次"。
+
+    与 transcript 投影的分工是这条断言的意义所在：同一份账本，持久化投影把裁撤
+    阶段的 rounds 清空（那是发送体与存储的口径），UI 投影必须把行补回来，并按
+    transcript 上限收掉超长正文，避免整份轨道灌进每一帧。
+    """
     context = {
         "stages": [
             _stage("frontdoor-stage-1", 1, evicted=True, rounds=[{"round_index": 1, "tools": [_tool("old")]}]),
@@ -367,11 +371,33 @@ def test_ui_payload_projection_leaves_unmarked_bodies_in() -> None:
     projected = project_canonical_context_for_ui_payload(context)
 
     assert projected["stages"][0]["representation"] == "compact"
-    assert projected["stages"][0]["rounds"] == []
+    assert projected["stages"][0]["rounds"][0]["tools"][0]["tool_call_id"] == "old:1"
     assert projected["stages"][1]["representation"] == "raw"
     assert projected["stages"][1]["rounds"][0]["tools"][0]["tool_call_id"] == "old-2:1"
     assert projected["stages"][-1]["representation"] == "raw"
     assert projected["stages"][-1]["rounds"][0]["tools"][0]["output_text"] == "x" * 3000
+    # 同一行在持久化投影里确实是被清空的——两份投影的分工是刻意的
+    from g3ku.runtime.frontdoor.canonical_context import project_canonical_context_for_transcript
+
+    assert project_canonical_context_for_transcript(context)["stages"][0]["rounds"] == []
+
+
+def test_ui_payload_projection_caps_evicted_stage_bodies() -> None:
+    """裁撤阶段的正文按 transcript 上限收掉：行必须在，整段原文不灌进轨道。"""
+    context = {
+        "stages": [
+            _stage(
+                "frontdoor-stage-1",
+                1,
+                evicted=True,
+                rounds=[{"round_index": 1, "tools": [_tool("big", output_text="x" * 3000)]}],
+            )
+        ]
+    }
+
+    row = project_canonical_context_for_ui_payload(context)["stages"][0]["rounds"][0]["tools"][0]
+    assert row["tool_call_id"] == "big:1"
+    assert row["output_text"] == ""
 
 
 def test_transcript_projection_returns_empty_for_missing_stage_state() -> None:

@@ -538,26 +538,55 @@ def _round_bodies_by_identity(
     return scoped, unscoped
 
 
+def _ui_round_bodies_from_source(source_rounds: Any, *, raw: bool) -> list[dict[str, Any]]:
+    """Web 轨道的工具行：裁撤/收口过的阶段也必须继续显示。
+
+    阶段被移出模型上下文只该影响发送体，不该让界面上的调用记录消失。raw 阶段
+    沿用未投影原文（今天的行为）；非 raw 阶段带同一套 transcript 上限的正身，
+    超长 `output_text` 置空但行还在（工具名/参数/耗时/`output_ref` 都在），
+    整段原文留在 `stage.archive_ref` 归档里可取。
+    """
+    rounds = [dict(item) for item in list(source_rounds or []) if isinstance(item, dict)]
+    if not rounds:
+        return []
+    if raw:
+        return copy.deepcopy(rounds)
+    return [
+        _cap_round_payload(
+            round_payload,
+            max_round_text_chars=DEFAULT_TRANSCRIPT_MAX_ROUND_TEXT_CHARS,
+            max_output_text_chars=DEFAULT_TRANSCRIPT_MAX_OUTPUT_TEXT_CHARS,
+            max_arguments_chars=DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_CHARS,
+            max_arguments_text_chars=DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_TEXT_CHARS,
+        )
+        for round_payload in rounds
+    ]
+
+
 def project_canonical_context_for_ui_payload(canonical_context: Any) -> dict[str, Any]:
     """Project a canonical workset for Web UI payloads without losing live bodies.
 
     The transcript projection strips rounds outside the raw stage window and caps
     oversized tool bodies. UI payloads keep the same stage view so delta baselines
-    are comparable, but the retained raw stages keep their unprojected rounds so
-    tool cards still show the full narration, arguments, and output bodies live.
+    are comparable, but every stage reattaches its source rounds so tool cards still
+    list the calls: retained raw stages keep the unprojected bodies, compact /
+    evicted stages carry the transcript-capped bodies (full text stays in the
+    stage's `archive_ref`).
     """
     projected = project_canonical_context_for_transcript(canonical_context)
     if not list(projected.get("stages") or []):
         return {}
     source_by_identity = _source_stage_by_identity(canonical_context)
     for stage in list(projected.get("stages") or []):
-        if _as_str(stage.get("representation")) != RAW_REPRESENTATION:
-            continue
         source = source_by_identity.get(
             canonical_stage_identity(stage, int(stage.get("stage_index") or 0))
         )
-        if source is not None:
-            stage["rounds"] = copy.deepcopy(list(source.get("rounds") or []))
+        if source is None:
+            continue
+        stage["rounds"] = _ui_round_bodies_from_source(
+            source.get("rounds"),
+            raw=_as_str(stage.get("representation")) == RAW_REPRESENTATION,
+        )
     return projected
 
 
@@ -594,21 +623,28 @@ def ui_canonical_context_delta_from_views(
         for index, stage in enumerate(list((previous_view or {}).get("stages") or []))
         if isinstance(stage, dict)
     }
+    source_by_identity = _source_stage_by_identity(current_source)
     adjusted_stages: list[dict[str, Any]] = []
     for index, stage in enumerate(list((current_view or {}).get("stages") or [])):
         if not isinstance(stage, dict):
             continue
         current = dict(stage)
         adjusted_stages.append(current)
-        previous_stage = previous_by_identity.get(canonical_stage_identity(stage, index))
+        identity = canonical_stage_identity(stage, index)
+        source_stage = source_by_identity.get(identity)
+        previous_stage = previous_by_identity.get(identity)
         if previous_stage is None:
             continue
         previous_representation = _as_str(previous_stage.get("representation"))
         if previous_representation != RAW_REPRESENTATION:
             # A stage the baseline renders as compact must not re-expand just
-            # because the latest-stage window moved after a new turn.
+            # because the latest-stage window moved after a new turn. 表示保持
+            # 粘住，但工具行不能因此从界面上消失——裁撤只该影响发送体。
             current["representation"] = previous_representation
-            current["rounds"] = []
+            current["rounds"] = _ui_round_bodies_from_source(
+                (source_stage or {}).get("rounds") if source_stage else current.get("rounds"),
+                raw=False,
+            )
         elif _as_str(current.get("representation")) != RAW_REPRESENTATION:
             # The window also moves in the other direction: a stage that the
             # baseline kept raw would otherwise be stripped from this view and
@@ -626,6 +662,7 @@ def ui_canonical_context_delta_from_views(
     scoped_bodies, unscoped_bodies = _round_bodies_by_identity(current_source)
     for stage in list(delta.get("stages") or []):
         stage_id = canonical_stage_identity(stage, int(stage.get("stage_index") or 0))
+        is_raw_stage = _as_str(stage.get("representation")) == RAW_REPRESENTATION
         rebuilt: list[dict[str, Any]] = []
         for round_index, round_payload in enumerate(list(stage.get("rounds") or [])):
             if not isinstance(round_payload, dict):
@@ -633,7 +670,20 @@ def ui_canonical_context_delta_from_views(
                 continue
             identity = canonical_round_identity(round_payload, round_index)
             live_round = scoped_bodies.get((stage_id, identity)) or unscoped_bodies.get(identity)
-            rebuilt.append(copy.deepcopy(live_round) if live_round is not None else round_payload)
+            if live_round is None:
+                rebuilt.append(round_payload)
+                continue
+            rebuilt.append(
+                copy.deepcopy(live_round)
+                if is_raw_stage
+                else _cap_round_payload(
+                    live_round,
+                    max_round_text_chars=DEFAULT_TRANSCRIPT_MAX_ROUND_TEXT_CHARS,
+                    max_output_text_chars=DEFAULT_TRANSCRIPT_MAX_OUTPUT_TEXT_CHARS,
+                    max_arguments_chars=DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_CHARS,
+                    max_arguments_text_chars=DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_TEXT_CHARS,
+                )
+            )
         stage["rounds"] = rebuilt
     return delta
 
