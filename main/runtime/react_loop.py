@@ -33,11 +33,9 @@ from g3ku.runtime.stage_prompt_compaction import (
     build_stage_archive_document,
     compact_stage_prompt_messages_in_place as _shared_compact_stage_prompt_messages_in_place,
     completed_stage_blocks as _shared_completed_stage_blocks,
-    current_stage_active_window as _shared_current_stage_active_window,
     is_stage_context_message as _shared_is_stage_context_message,
     render_stage_ref_candidate_block,
     render_stage_ref_index,
-    retained_completed_stage_ids as _shared_retained_completed_stage_ids,
     split_stage_ref_selection,
     stage_created_at_ceiling,
     stage_message_call_ids as _shared_stage_message_call_ids,
@@ -139,7 +137,6 @@ _STAGE_HISTORY_ARCHIVE_SOURCE_KIND = 'stage_history_archive'
 _COMPACT_HISTORY_STEP_MAX_CHARS = 160
 _ORPHAN_TOOL_RESULT_THRESHOLD = 3
 _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
-_UNCOMPACTED_COMPLETED_STAGE_WINDOWS = 3
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
@@ -4988,7 +4985,7 @@ class ReActToolLoop:
 
     def _node_stage_archive_plan(self, *, stage_state: Any, recent_tail: list[dict[str, Any]]) -> dict[str, Any]:
         """本轮真正吞掉的阶段 + 交给模型挑号的证据引用候选。"""
-        swallowed_ids = summarized_stage_ids(stage_state, body_messages=recent_tail, keep_latest=3)
+        swallowed_ids = summarized_stage_ids(stage_state, body_messages=recent_tail)
         if not swallowed_ids:
             return {'stage_ids': [], 'candidates': [], 'records': []}
         wanted = set(swallowed_ids)
@@ -7759,20 +7756,8 @@ class ReActToolLoop:
         return _shared_stage_prompt_prefix(messages)
 
     @staticmethod
-    def _retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[str]:
-        return _shared_retained_completed_stage_ids(stage_state, keep_latest=keep_latest)
-
-    @staticmethod
     def _completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None = None) -> list[dict[str, Any]]:
         return _shared_completed_stage_blocks(stage_state, skip_stage_ids=skip_stage_ids)
-
-    @staticmethod
-    def _current_stage_active_window(messages: list[dict[str, Any]], *, keep_completed_stages: int = 0) -> list[dict[str, Any]]:
-        return _shared_current_stage_active_window(
-            messages,
-            keep_completed_stages=keep_completed_stages,
-            stage_tool_name=STAGE_TOOL_NAME,
-        )
 
     def _prepare_messages(self, messages: list[dict[str, Any]], *, runtime_context: dict[str, Any]) -> list[dict[str, Any]]:
         return self._prepare_messages_with_parts(messages, runtime_context=runtime_context)[0]
@@ -7788,7 +7773,6 @@ class ReActToolLoop:
         parts = _shared_compact_stage_prompt_messages_in_place(
             normalized_messages,
             stage_state=stage_state,
-            keep_latest_completed_stages=_UNCOMPACTED_COMPLETED_STAGE_WINDOWS,
             stage_tool_name=STAGE_TOOL_NAME,
         )
         rewritten = list(parts.get('rewritten') or [])

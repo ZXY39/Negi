@@ -40,7 +40,7 @@ def _tool_stage_result(call_id: str) -> dict[str, object]:
     }
 
 
-def test_prepare_stage_prompt_messages_keeps_latest_three_completed_windows_and_compacts_older_history() -> None:
+def test_prepare_stage_prompt_messages_keeps_every_unmarked_stage_raw_and_compacts_only_evicted() -> None:
     stage_state = {
         "active_stage_id": "stage-5",
         "transition_required": False,
@@ -54,6 +54,8 @@ def test_prepare_stage_prompt_messages_keeps_latest_three_completed_windows_and_
                 "status": "completed",
                 "stage_goal": "inspect stage one",
                 "completed_stage_summary": "finished stage one",
+                # 唯一离开可见层的途径：模型关闭这条阶段时点了名。
+                "context_evicted": True,
                 "key_refs": [],
                 "tool_round_budget": 2,
                 "tool_rounds_used": 1,
@@ -166,12 +168,11 @@ def test_prepare_stage_prompt_messages_keeps_latest_three_completed_windows_and_
     prepared = prepare_stage_prompt_messages(
         original,
         stage_state=stage_state,
-        keep_latest_completed_stages=3,
         stage_tool_name="submit_next_stage",
     )
 
     rendered_contents = [str(item.get("content") or "") for item in prepared]
-    # 最近 3 个完成阶段与活动阶段的工具调用原位保留
+    # 未被点名的完成阶段与活动阶段的工具调用原位保留（不再有条数上限）
     assert "stage two raw detail" in rendered_contents
     assert "stage three raw detail" in rendered_contents
     assert "stage four raw detail" in rendered_contents
@@ -253,7 +254,6 @@ def test_prepare_stage_prompt_messages_externalizes_compression_stages() -> None
     prepared = prepare_stage_prompt_messages(
         [{"role": "system", "content": "system"}, {"role": "user", "content": "hello"}],
         stage_state=stage_state,
-        keep_latest_completed_stages=0,
         stage_tool_name="submit_next_stage",
     )
 
@@ -335,10 +335,18 @@ def _stage_window(index: int) -> list[dict[str, object]]:
 
 
 def _five_completed_stage_state() -> dict[str, object]:
+    # 窗口已移除，"最老两条离开可见层"这件事现在只能由标记表达：stages 1-2 记为模型
+    # 点名裁撤（等价于过去 keep=3 挤出的那两条），3-5 未被点名就一直留在 raw 里。
+    stages = [
+        _stage_record(index, rounds=[_round(index, [f"call-work-{index}"])])
+        for index in range(1, 6)
+    ]
+    for index in (1, 2):
+        stages[index - 1]["context_evicted"] = True
     return {
         "active_stage_id": "",
         "transition_required": False,
-        "stages": [_stage_record(index, rounds=[_round(index, [f"call-work-{index}"])]) for index in range(1, 6)],
+        "stages": stages,
     }
 
 
@@ -353,7 +361,7 @@ def test_in_place_compaction_without_active_stage_keeps_latest_three_raw() -> No
     messages.append({"role": "user", "content": "现在能看见哪些阶段的工具调用？"})
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=_five_completed_stage_state(), keep_latest_completed_stages=3
+        messages, stage_state=_five_completed_stage_state()
     )
 
     assert result["stage_compaction_applied"] is True
@@ -396,7 +404,7 @@ def test_in_place_compaction_removes_internal_event_bundles_but_keeps_dialogue()
     }
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=1
+        messages, stage_state=_expire_beyond_window(stage_state, 1)
     )
 
     contents = [str(item.get("content") or "") for item in result["rewritten"]]
@@ -417,11 +425,11 @@ def test_in_place_compaction_is_idempotent_and_dedupes_stale_blocks() -> None:
     stage_state = _five_completed_stage_state()
 
     first = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=3
+        messages, stage_state=stage_state
     )
     first_output = [*first["prefix"], *first["rewritten"]]
     second = compact_stage_prompt_messages_in_place(
-        first_output, stage_state=stage_state, keep_latest_completed_stages=3
+        first_output, stage_state=stage_state
     )
     second_output = [*second["prefix"], *second["rewritten"]]
     assert first_output == second_output
@@ -443,7 +451,7 @@ def test_in_place_compaction_is_idempotent_and_dedupes_stale_blocks() -> None:
     }
     stale_layout.insert(3, stale_block)
     cleaned = compact_stage_prompt_messages_in_place(
-        stale_layout, stage_state=stage_state, keep_latest_completed_stages=3
+        stale_layout, stage_state=stage_state
     )
     cleaned_contents = [str(item.get("content") or "") for item in cleaned["rewritten"]]
     block_count = sum(1 for content in cleaned_contents if content.startswith(STAGE_COMPACT_PREFIX))
@@ -472,6 +480,23 @@ def _stage_state_for_indexes(indexes: list[int]) -> dict[str, object]:
     }
 
 
+def _expire_beyond_window(stage_state: dict[str, object], keep: int) -> dict[str, object]:
+    """把"落在窗口外"的终态阶段改成"被模型点名裁撤"。
+
+    这些用例测的是放置/幂等/对话保留等不变量，需要一个"已经离开可见层的阶段"当素材；
+    过去由 keep=N 自动提供，现在只能由标记提供。keep=0 即全部过期。"""
+    active_stage_id = str(stage_state.get("active_stage_id") or "")
+    completed = [
+        stage
+        for stage in list(stage_state.get("stages") or [])
+        if str(stage.get("stage_id") or "") != active_stage_id
+        and str(stage.get("status") or "").lower() != "active"
+    ]
+    for stage in completed[: max(0, len(completed) - max(0, int(keep)))]:
+        stage["context_evicted"] = True
+    return stage_state
+
+
 def test_compaction_keeps_user_block_reply_order() -> None:
     # 保序契约：压缩后仍是「用户消息 → 该阶段压缩块 → 该阶段最终回复」，且块不落在
     # 最后一条 user 之后（末位保持当前用户回合，不占模型的续写位）。
@@ -482,7 +507,7 @@ def test_compaction_keeps_user_block_reply_order() -> None:
     messages.append({"role": "user", "content": "current turn"})
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=_five_completed_stage_state(), keep_latest_completed_stages=3
+        messages, stage_state=_five_completed_stage_state()
     )
     rendered = [*result["prefix"], *result["rewritten"]]
     contents = [str(item.get("content") or "") for item in rendered]
@@ -513,8 +538,7 @@ def test_compaction_never_parks_frameless_blocks_at_request_head() -> None:
 
     result = compact_stage_prompt_messages_in_place(
         messages,
-        stage_state=_stage_state_for_indexes([1, 2, 3, 4, 5, 6]),
-        keep_latest_completed_stages=1,
+        stage_state=_expire_beyond_window(_stage_state_for_indexes([1, 2, 3, 4, 5, 6]), 1),
     )
     rendered = [*result["prefix"], *result["rewritten"]]
     contents = [str(item.get("content") or "") for item in rendered]
@@ -551,7 +575,7 @@ def test_compaction_places_roundless_stage_block_in_neighbor_window() -> None:
     messages.append({"role": "user", "content": "current turn"})
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=1
+        messages, stage_state=_expire_beyond_window(stage_state, 1)
     )
     rendered = [*result["prefix"], *result["rewritten"]]
     contents = [str(item.get("content") or "") for item in rendered]
@@ -571,7 +595,7 @@ def test_compact_block_payload_omits_constant_and_empty_fields() -> None:
         messages.extend(_stage_window(index))
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=_five_completed_stage_state(), keep_latest_completed_stages=3
+        messages, stage_state=_five_completed_stage_state()
     )
     payloads = [
         json.loads(str(item.get("content") or "").split("\n", 1)[1])
@@ -602,7 +626,7 @@ def test_compact_block_payload_keeps_non_default_mode_and_generated_flag() -> No
         messages.extend(_stage_window(index))
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=0
+        messages, stage_state=_expire_beyond_window(stage_state, 0)
     )
     payloads = {
         json.loads(str(item.get("content") or "").split("\n", 1)[1])["stage_index"]: json.loads(
@@ -655,7 +679,7 @@ def test_stage_blocks_render_with_system_role() -> None:
         messages.extend(_stage_window(index))
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=3
+        messages, stage_state=_expire_beyond_window(stage_state, 3)
     )
 
     blocks = [
@@ -686,7 +710,7 @@ def test_in_place_compaction_accepts_mixed_legacy_assistant_and_system_blocks() 
     stage_state = _five_completed_stage_state()
 
     first = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=3
+        messages, stage_state=stage_state
     )
     first_output = [*first["prefix"], *first["rewritten"]]
     stage_one_block = next(
@@ -703,7 +727,7 @@ def test_in_place_compaction_accepts_mixed_legacy_assistant_and_system_blocks() 
     mixed.insert(2, legacy_block)
 
     second = compact_stage_prompt_messages_in_place(
-        mixed, stage_state=stage_state, keep_latest_completed_stages=3
+        mixed, stage_state=stage_state
     )
     second_output = [*second["prefix"], *second["rewritten"]]
     # 旧块被剥离并去重：收敛回与无旧块时完全相同的布局
@@ -713,7 +737,7 @@ def test_in_place_compaction_accepts_mixed_legacy_assistant_and_system_blocks() 
     ) == 2
 
     third = compact_stage_prompt_messages_in_place(
-        second_output, stage_state=stage_state, keep_latest_completed_stages=3
+        second_output, stage_state=stage_state
     )
     assert [*third["prefix"], *third["rewritten"]] == second_output
 
@@ -784,7 +808,7 @@ def test_in_place_compaction_renders_legacy_compression_stage_blocks() -> None:
     messages.extend(_stage_window(11))
 
     result = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=3
+        messages, stage_state=_expire_beyond_window(stage_state, 3)
     )
     contents = [str(item.get("content") or "") for item in result["rewritten"]]
     externalized = [content for content in contents if content.startswith(STAGE_EXTERNALIZED_PREFIX)]
@@ -845,7 +869,7 @@ def test_in_place_compaction_keeps_event_bodies_and_removes_rule_text_after_chan
         ],
     }
 
-    result = compact_stage_prompt_messages_in_place(messages, stage_state=stage_state, keep_latest_completed_stages=1)
+    result = compact_stage_prompt_messages_in_place(messages, stage_state=_expire_beyond_window(stage_state, 1))
     contents = [str(item.get("content") or "") for item in result["rewritten"]]
 
     # 规则文本：变化点前保留、之后清理
@@ -879,9 +903,9 @@ def test_in_place_compaction_removes_rule_text_only_after_structural_change_poin
         "stages": [_stage_record(1, rounds=[_round(1, ["call-work-1"])]), _stage_record(2, rounds=[_round(2, ["call-work-2"])])],
     }
 
-    gated = compact_stage_prompt_messages_in_place(messages, stage_state=stage_state, keep_latest_completed_stages=1)
+    gated = compact_stage_prompt_messages_in_place(messages, stage_state=_expire_beyond_window(stage_state, 1))
     baseline = compact_stage_prompt_messages_in_place(
-        messages, stage_state=stage_state, keep_latest_completed_stages=1, internal_rule_markers=()
+        messages, stage_state=_expire_beyond_window(stage_state, 1), internal_rule_markers=()
     )
 
     gated_contents = [str(item.get("content") or "") for item in gated["rewritten"]]
@@ -1011,18 +1035,21 @@ def test_in_place_compaction_prunes_with_object_shaped_node_ledger() -> None:
     # 曾经的 dict 判读把 rounds 整段跳过 —— 收口块只增不删，投影单调上涨。
     from main.models import normalize_execution_stage_metadata
 
-    state = _node_ledger_state(
-        statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
-        active_stage_id="frontdoor-stage-6",
+    state = _expire_beyond_window(
+        _node_ledger_state(
+            statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
+            active_stage_id="frontdoor-stage-6",
+        ),
+        3,
     )
     expected = compact_stage_prompt_messages_in_place(
-        _node_ledger_messages(6), stage_state=state, keep_latest_completed_stages=3
+        _node_ledger_messages(6), stage_state=state
     )
     object_state = normalize_execution_stage_metadata(state)
     assert not isinstance(object_state, dict)
 
     result = compact_stage_prompt_messages_in_place(
-        _node_ledger_messages(6), stage_state=object_state, keep_latest_completed_stages=3
+        _node_ledger_messages(6), stage_state=object_state
     )
 
     contents = [str(item.get("content") or "") for item in result["rewritten"]]
@@ -1038,13 +1065,16 @@ def test_in_place_compaction_prunes_with_object_shaped_node_ledger() -> None:
 def test_in_place_compaction_keeps_non_terminal_stage_even_when_not_active() -> None:
     # 认不出的状态一律当作还在跑：一个"进行中"却没登记成 active_stage_id 的阶段
     # 正在往 rounds 里写，裁它就是给上下文挖洞（少裁只是多花 token）。
-    state = _node_ledger_state(
-        statuses=["完成", "完成", "进行中", "完成", "进行中"],
-        active_stage_id="frontdoor-stage-5",
+    state = _expire_beyond_window(
+        _node_ledger_state(
+            statuses=["完成", "完成", "进行中", "完成", "进行中"],
+            active_stage_id="frontdoor-stage-5",
+        ),
+        1,
     )
 
     result = compact_stage_prompt_messages_in_place(
-        _node_ledger_messages(5), stage_state=state, keep_latest_completed_stages=1
+        _node_ledger_messages(5), stage_state=state
     )
 
     contents = [str(item.get("content") or "") for item in result["rewritten"]]
@@ -1066,7 +1096,7 @@ def test_evicted_terminal_stage_prunes_bodies_and_keeps_its_block() -> None:
             item["context_evicted"] = True
 
     result = compact_stage_prompt_messages_in_place(
-        _node_ledger_messages(5), stage_state=state, keep_latest_completed_stages=3
+        _node_ledger_messages(5), stage_state=state
     )
 
     contents = [str(item.get("content") or "") for item in result["rewritten"]]
@@ -1079,57 +1109,80 @@ def test_evicted_terminal_stage_prunes_bodies_and_keeps_its_block() -> None:
     assert any("finished 3" in block for block in blocks)
 
 
-def test_block_marker_separates_evicted_from_window_expired_stages() -> None:
-    # 块必须区分"我自己点名移走的"与"窗口到期没的"：没有这个字段，模型不知道该不该回读，
-    # 事后也无法从发送体核对裁撤到底被用了没有。
+def test_block_marker_separates_evicted_from_closed_stages() -> None:
+    # 块必须区分"模型点名移走肉身的"（evicted，块仍在）与"压缩已收口的"（块整个不再
+    # 渲染）：没有这个字段，模型不知道该不该回读，事后也无法从发送体核对裁撤到底被用
+    # 过没有。两条离开可见层的道，只有一条留块。
     state = _node_ledger_state(
         statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
         active_stage_id="frontdoor-stage-6",
     )
-    state["stages"][2]["context_evicted"] = True  # stage-3；跳过名额后过期集合为 {1, 3}
+    state["stages"][2]["context_evicted"] = True  # stage-3：点名裁撤
+    state["stages"][0]["context_visible"] = False  # stage-1：压缩已收口
 
     result = compact_stage_prompt_messages_in_place(
-        _node_ledger_messages(6), stage_state=state, keep_latest_completed_stages=3
+        _node_ledger_messages(6), stage_state=state
     )
 
-    assert retained_completed_stage_ids(state, keep_latest=3) == {
+    assert retained_completed_stage_ids(state) == {
         "frontdoor-stage-2",
         "frontdoor-stage-4",
         "frontdoor-stage-5",
     }
     assert set(result["compacted_stage_ids"]) == {"frontdoor-stage-1", "frontdoor-stage-3"}
-    blocks = {
-        index: block
-        for index, block in enumerate(
-            [str(item.get("content") or "") for item in result["rewritten"] if STAGE_COMPACT_PREFIX in str(item.get("content") or "")]
-        )
-    }
-    assert len(blocks) == 2
-    marked = [block for block in blocks.values() if '"completed_stage_summary": "finished 3"' in block]
-    plain = [block for block in blocks.values() if '"completed_stage_summary": "finished 1"' in block]
-    assert len(marked) == 1 and '"evicted": true' in marked[0]
-    assert len(plain) == 1 and '"evicted"' not in plain[0]
+    blocks = [
+        str(item.get("content") or "")
+        for item in result["rewritten"]
+        if STAGE_COMPACT_PREFIX in str(item.get("content") or "")
+    ]
+    # 收口的 stage-1 连块都不出；点名裁撤的 stage-3 留块并带 evicted
+    assert len(blocks) == 1
+    assert '"completed_stage_summary": "finished 1"' not in blocks[0]
+    assert '"completed_stage_summary": "finished 3"' in blocks[0]
+    assert '"evicted": true' in blocks[0]
 
 
-def test_evicted_stage_does_not_consume_retention_window_slot() -> None:
-    # 被点名裁撤的阶段不占窗口名额：否则一条裁撤会把另一条仍需要原文的阶段挤出窗口。
+def test_no_stage_count_cap_leaves_raw_and_marks_are_the_only_exit() -> None:
+    # 移除窗口后的核心不变量：再多条未点名的终态阶段也全部留在 raw 里；离开可见层只有
+    # 两个入口——模型点名裁撤、压缩收口。曾经第三条道（保最近 3 条）会不告而别地裁掉
+    # 没人点名的阶段，而它切的是最老那条，位置深、缓存代价最大。
+    state = _node_ledger_state(
+        statuses=["完成"] * 9 + ["进行中"],
+        active_stage_id="frontdoor-stage-10",
+    )
+    assert retained_completed_stage_ids(state) == {f"frontdoor-stage-{index}" for index in range(1, 10)}
+
+    result = compact_stage_prompt_messages_in_place(
+        _node_ledger_messages(10), stage_state=state
+    )
+    assert result["stage_compaction_applied"] is False
+    assert result["compacted_stage_ids"] == set()
+    contents = [str(item.get("content") or "") for item in result["rewritten"]]
+    for index in range(1, 10):
+        assert f"output-{index}" in contents
+
+    state["stages"][6]["context_evicted"] = True  # stage-7
+
+    marked = compact_stage_prompt_messages_in_place(_node_ledger_messages(10), stage_state=state)
+    assert marked["compacted_stage_ids"] == {"frontdoor-stage-7"}
+    after = [str(item.get("content") or "") for item in marked["rewritten"]]
+    assert "output-7" not in after
+    assert "output-6" in after and "output-8" in after
+
+
+def test_evicting_one_stage_does_not_disturb_any_other_stage() -> None:
+    # 点名裁撤只作用于被点的那条：不再有"名额"概念，所以裁一条不可能把另一条仍需要
+    # 原文的阶段挤出可见层（过去窗口名额会，那条阶段的肉身就被不告而别地裁掉了）。
     state = _node_ledger_state(
         statuses=["完成", "完成", "完成", "完成", "完成", "进行中"],
         active_stage_id="frontdoor-stage-6",
     )
-    assert retained_completed_stage_ids(state, keep_latest=3) == {
-        "frontdoor-stage-3",
-        "frontdoor-stage-4",
-        "frontdoor-stage-5",
-    }
+    before = retained_completed_stage_ids(state)
+    assert before == {f"frontdoor-stage-{index}" for index in range(1, 6)}
 
     state["stages"][3]["context_evicted"] = True  # stage-4
 
-    assert retained_completed_stage_ids(state, keep_latest=3) == {
-        "frontdoor-stage-2",
-        "frontdoor-stage-3",
-        "frontdoor-stage-5",
-    }
+    assert retained_completed_stage_ids(state) == before - {"frontdoor-stage-4"}
 
 
 def test_block_carries_archive_ref_only_when_the_ledger_has_one() -> None:
@@ -1143,7 +1196,7 @@ def test_block_carries_archive_ref_only_when_the_ledger_has_one() -> None:
     state["stages"][0]["archive_ref"] = "temp/ceo/sess/g3ku_stage_archive_1_abcd1234.json"
 
     result = compact_stage_prompt_messages_in_place(
-        _node_ledger_messages(3), stage_state=state, keep_latest_completed_stages=1
+        _node_ledger_messages(3), stage_state=state
     )
 
     blocks = [

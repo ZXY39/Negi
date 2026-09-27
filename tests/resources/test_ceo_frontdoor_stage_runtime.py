@@ -683,8 +683,8 @@ def test_frontdoor_eviction_mark_is_written_and_carried_by_every_rewriter() -> N
 
     snapshot = runner._frontdoor_stage_state_snapshot({"frontdoor_stage_state": closed})
     assert snapshot["stages"][0]["context_evicted"] is True
-    # 被裁撤的阶段不占保留名额，活动阶段也不在 completed 集合里。
-    assert retained_completed_stage_ids(snapshot, keep_latest=3) == set()
+    # 已裁撤的阶段离开保留集；活动阶段本来就不在 completed 集合里。
+    assert retained_completed_stage_ids(snapshot) == set()
 
     unmarked = {key: value for key, value in first.items() if key != "context_evicted"}
     assert _completed_stage_overlap_signature(first) == _completed_stage_overlap_signature(unmarked)

@@ -67,7 +67,6 @@ from g3ku.runtime.stage_prompt_compaction import (
     is_stage_block_echo_text,
     render_stage_ref_candidate_block,
     render_stage_ref_index,
-    retained_completed_stage_ids,
     split_stage_ref_selection,
     stage_archive_selector_from_request_messages,
     stage_block_indexes,
@@ -966,7 +965,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         return fold_internal_prompt_history(durable)
 
     @classmethod
-    def _trim_frontdoor_seed_to_stage_window(
+    def _trim_frontdoor_seed_stage_compaction(
         cls,
         seed: list[dict[str, Any]] | None,
         stage_state: dict[str, Any] | None,
@@ -981,7 +980,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         parts = compact_stage_prompt_messages_in_place(
             records,
             stage_state=stage_state,
-            keep_latest_completed_stages=3,
             preserve_leading_system=True,
             preserve_leading_user=True,
         )
@@ -1885,61 +1883,16 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if hasattr(result, "__await__"):
                 await result
 
-    def _frontdoor_compaction_tail_count(
-        self,
-        body: list[dict[str, Any]],
-        *,
-        stage_state: dict[str, Any],
-    ) -> int:
-        """压缩保留尾部 = max(最近 4 条, 覆盖 raw 阶段窗口所需条数)。
+    @staticmethod
+    def _frontdoor_compaction_tail_count(body: list[dict[str, Any]]) -> int:
+        """压缩保留尾部 = 最近 4 条（工具调用组对齐由调用方做）。
 
-        阶段块的近场那一层（最近 3 个完成阶段 + 活动阶段的原始消息）必须活着穿过
-        压缩：收口把 compact 块从账本渲染里摘掉之后，raw 窗口是压缩后上下文里唯一
-        还带工具正文的层，被摘要一起吞掉就再无第三层可退。窗口跨度超出上限时按普通
-        尾部处理——尾部是不可压缩部分，放太大就没压缩了。"""
-        total = len(body)
-        base = min(total, 4)
-        if not isinstance(stage_state, dict) or not list(stage_state.get("stages") or []):
-            return base
-        wanted_ids = set(retained_completed_stage_ids(stage_state, keep_latest=3))
-        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
-        if active_stage_id:
-            wanted_ids.add(active_stage_id)
-        if not wanted_ids:
-            return base
-        window_call_ids: set[str] = set()
-        for stage in list(stage_state.get("stages") or []):
-            if not isinstance(stage, dict) or str(stage.get("stage_id") or "").strip() not in wanted_ids:
-                continue
-            if stage.get("context_visible") is False:
-                continue
-            for round_item in list(stage.get("rounds") or []):
-                if not isinstance(round_item, dict):
-                    continue
-                for call_id in list(round_item.get("tool_call_ids") or []):
-                    normalized = extract_call_id(call_id)
-                    if normalized:
-                        window_call_ids.add(normalized)
-                for tool in list(round_item.get("tools") or []):
-                    normalized = extract_call_id((tool or {}).get("tool_call_id")) if isinstance(tool, dict) else ""
-                    if normalized:
-                        window_call_ids.add(normalized)
-        if not window_call_ids:
-            return base
-        earliest = next(
-            (
-                index
-                for index, message in enumerate(body)
-                if stage_message_call_ids([message]) & window_call_ids
-            ),
-            None,
-        )
-        if earliest is None:
-            return base
-        window_count = total - earliest
-        if window_count <= base or window_count > _FRONTDOOR_COMPACTION_RAW_TAIL_MAX_MESSAGES:
-            return base
-        return window_count
+        这里曾额外覆盖"最近 3 个完成阶段 + 活动阶段"的 raw 窗口——收口把 compact 块
+        摘掉之后，那是压缩后上下文里唯一还带工具正文的层，被摘要一起吞掉就再无第三层
+        可退。窗口已随"阶段压缩只由模型点名"一起移除：未被点名的阶段一直留在正文里，
+        真被压缩吞掉时按收口记账（`context_visible: false`）不再回渲，所以尾部只需要
+        保住续写位本身，不再由账本反推。"""
+        return min(len(body), 4)
 
     @staticmethod
     def _frontdoor_durable_stage_state(*, session: Any, state: dict[str, Any] | None) -> dict[str, Any]:
@@ -2039,7 +1992,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         recent_tail: list[dict[str, Any]],
     ) -> list[str]:
         """本次压缩真正吞掉的阶段（判定规则与节点车道共用 `summarized_stage_ids`）。"""
-        return summarized_stage_ids(stage_state, body_messages=recent_tail, keep_latest=3)
+        return summarized_stage_ids(stage_state, body_messages=recent_tail)
 
     @staticmethod
     def _frontdoor_stage_content_identity(stage: Any) -> str:
@@ -2071,8 +2024,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         序号（实测交集 0），只标 canonical 等于没标（合并去重留下的是本轮 stage_state
         那份）；水位线直接命中，created_at 是同一条逻辑阶段在两边共享的同一个值。写入
         刻意不过 `normalize_frontdoor_canonical_context`，归一化会重排账本。活动阶段、
-        已收口的、非普通阶段一律不收口；水位线口径额外保住近场 raw 窗口，以及肉身或 raw
-        块还在即将落定的请求体里的阶段——那批内容没进摘要，收了就是挖洞。"""
+        已收口的、非普通阶段一律不收口；水位线口径额外保住肉身或 raw 块还在即将落定的
+        请求体里的阶段——那批内容没进摘要，收了就是挖洞（未被模型点名的阶段一直留在正文
+        里，所以这条守卫就是全部近场保护，没有额外的条数窗口）。"""
         wanted = {
             str(item or "").strip()
             for item in list((selector or {}).get("stage_ids") or [])
@@ -2098,7 +2052,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         hidden = 0
         for store in usable:
             active_stage_id = str(store.get("active_stage_id") or "").strip()
-            retained_ids = retained_completed_stage_ids(store, keep_latest=3)
             for stage in list(store.get("stages") or []):
                 if not isinstance(stage, dict):
                     continue
@@ -2119,7 +2072,6 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if watermark and not stage_is_swallowable(
                     stage,
                     active_stage_id=active_stage_id,
-                    retained_ids=retained_ids,
                     body_stage_indexes=body_raw_stage_indexes,
                     body_call_ids=body_call_ids,
                 ):
@@ -2180,10 +2132,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         parallel_tool_calls = bool(state.get("parallel_enabled")) if list(tool_schemas or []) else None
         session = getattr(getattr(runtime, "context", None), "session", None)
         durable_stage_state = self._frontdoor_durable_stage_state(session=session, state=state)
-        recent_tail_count = self._frontdoor_compaction_tail_count(
-            normalized_body,
-            stage_state=durable_stage_state,
-        )
+        recent_tail_count = self._frontdoor_compaction_tail_count(normalized_body)
         # 尾部边界不得落在工具调用组中间（与节点通道同一不变量）：尾部首条是
         # tool 结果时向前扩展边界，把声明它的 assistant 消息一并保留；最坏
         # 退化为整 body 尾部，落入下方无可压缩历史分支。
@@ -2995,11 +2944,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         # 阶段窗口重写是原位块重写：两侧在同一份阶段状态下做同一 trim（幂等）后才
         # 可能前缀相等，否则阶段压缩会让历史中段字节漂移、可比性失效。
         if isinstance(stage_state, dict) and list(stage_state.get("stages") or []):
-            previous_records, _previous_trimmed = cls._trim_frontdoor_seed_to_stage_window(
+            previous_records, _previous_trimmed = cls._trim_frontdoor_seed_stage_compaction(
                 previous_records,
                 stage_state,
             )
-            current_records, _current_trimmed = cls._trim_frontdoor_seed_to_stage_window(
+            current_records, _current_trimmed = cls._trim_frontdoor_seed_stage_compaction(
                 current_records,
                 stage_state,
             )
@@ -6638,7 +6587,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             seed_stage_state = dict(current_frontdoor_stage_state or {})
             if not list(seed_stage_state.get("stages") or []):
                 seed_stage_state = dict(current_frontdoor_canonical_context or {})
-            request_body_seed_messages, seed_stage_compaction_applied = self._trim_frontdoor_seed_to_stage_window(
+            request_body_seed_messages, seed_stage_compaction_applied = self._trim_frontdoor_seed_stage_compaction(
                 session_request_body_messages, seed_stage_state
             )
             # 手动暂停回合的请求从未发出，其用户消息不在基线里；按转录对账补回，

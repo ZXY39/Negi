@@ -192,14 +192,14 @@ def keep_stage_blocks_off_continuation_tail(messages: list[dict[str, Any]]) -> l
     return [*items[:last_user_index], *trailing_blocks, *kept_tail]
 
 
-def retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[str]:
-    # 保留最近 keep_latest 个完成的普通阶段为 raw。与是否存在活动阶段无关：
-    # 无活动阶段（纯对话回合）同样适用该契约，否则过期阶段无人压缩、
-    # 保留阶段又全部丢失工具上下文。
-    if keep_latest <= 0:
-        return set()
+def retained_completed_stage_ids(stage_state: Any) -> set[str]:
+    # 仍留在 raw 里的完成普通阶段 = 全部终态普通阶段减去"已被移出可见层的那两类"：
+    # 收口（`context_visible: false`，已进过 token_compression 摘要）与模型点名裁撤
+    # （`context_evicted: true`）。**没有条数上限**：一条阶段什么时候离开 provider
+    # 上下文只由模型在 `submit_next_stage` 时决定，机器不再按"最近 3 条"自动过期。
+    # 与是否存在活动阶段无关（纯对话回合同样适用，否则无人判它该不该留）。
     active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
-    completed: list[tuple[int, str]] = []
+    retained: set[str] = set()
     for stage in list(_stage_get(stage_state, "stages", []) or []):
         if str(_stage_get(stage, "stage_kind", "normal") or "normal").strip().lower() != "normal":
             continue
@@ -209,16 +209,14 @@ def retained_completed_stage_ids(stage_state: Any, *, keep_latest: int) -> set[s
         if str(_stage_get(stage, "status", "") or "").strip().lower() == "active":
             continue
         if _stage_get(stage, "context_visible", True) is False:
-            # 收口阶段不占保留窗口名额（与 raw_stage_renderer 同一规则）。
+            # 收口阶段：正文已进摘要，块也不再渲染，因此既不占可见层也不渲染块。
             continue
         if _stage_get(stage, "context_evicted", False) is True:
-            # 模型在关闭本阶段时点名移出肉身：它既不占保留名额，也不留在 raw 里，
-            # 于是下一个投影就把它的工具帧裁掉。仍然渲染阶段块（completed_stage_blocks
-            # 只跳过收口），所以总结不会成为唯一记录。
+            # 模型点名裁撤：下一个投影就把它的工具帧裁掉。仍然渲染阶段块
+            # （completed_stage_blocks 只跳过收口），所以总结不会成为唯一记录。
             continue
-        completed.append((int(_stage_get(stage, "stage_index", 0) or 0), stage_id))
-    completed.sort()
-    return {stage_id for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]}
+        retained.add(stage_id)
+    return retained
 
 
 def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None = None) -> list[dict[str, Any]]:
@@ -450,13 +448,15 @@ def compact_stage_prompt_messages_in_place(
     messages: list[dict[str, Any]],
     *,
     stage_state: Any,
-    keep_latest_completed_stages: int = 3,
     stage_tool_name: str = "submit_next_stage",
     preserve_leading_system: bool = True,
     preserve_leading_user: bool = True,
     internal_rule_markers: tuple[str, ...] = DEFAULT_INTERNAL_RULE_MARKERS,
 ) -> dict[str, Any]:
-    """按阶段归属原位压缩：只移除过期阶段的工具肉身，对话与保留阶段原位不动。
+    """按阶段归属原位压缩：只移除"已离开可见层"阶段的工具肉身，对话与在架阶段原位不动。
+
+    哪些阶段离开可见层由 `retained_completed_stage_ids` 判定（模型点名裁撤 + 压缩收口），
+    不再有条数窗口。
 
     与"块置顶 + 盲切窗口"不同：压缩块回插在被压缩阶段原本的位置，
     阶段之外的对话（用户消息/纯文本回复）逐条保留，provider 前缀缓存
@@ -506,9 +506,10 @@ def compact_stage_prompt_messages_in_place(
         }
 
     active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
-    retained_ids = retained_completed_stage_ids(stage_state, keep_latest=keep_latest_completed_stages)
+    retained_ids = retained_completed_stage_ids(stage_state)
 
-    # 1) 阶段划分：过期阶段 = 终态普通阶段 − 保留集；收集其 rounds 的 tool_call_ids。
+    # 1) 阶段划分：已离开可见层的阶段 = 终态普通阶段 − 保留集（点名裁撤 + 收口）；
+    #    收集其 rounds 的 tool_call_ids。
     expired_ids: set[str] = set()
     compacted_ids: set[str] = set()
     expired_call_ids: set[str] = set()
@@ -763,8 +764,8 @@ def compact_stage_prompt_messages_in_place(
         "rewritten": rewritten,
         "retained_completed_stage_ids": set(retained_ids),
         "compacted_stage_ids": compacted_ids,
-        # 本次判为过期阶段的工具调用 id 全集（不等于真正被删的那些）：调用方用它
-        # 判断"当前发送基线里是否还留着这些肉身"，即这次压缩是不是一个过期点。
+        # 本次判为"已离开可见层"阶段的工具调用 id 全集（不等于真正被删的那些）：
+        # 调用方用它判断"当前发送基线里是否还留着这些肉身"，即这次压缩是不是一个过期点。
         "expired_call_ids": expired_call_ids,
         "removed_message_count": removed_message_count,
         "stage_compaction_applied": removed_message_count > 0,
@@ -775,7 +776,6 @@ def prepare_stage_prompt_messages(
     messages: list[dict[str, Any]],
     *,
     stage_state: Any,
-    keep_latest_completed_stages: int = 3,
     stage_tool_name: str = "submit_next_stage",
     preserve_leading_system: bool = True,
     preserve_leading_user: bool = True,
@@ -783,7 +783,6 @@ def prepare_stage_prompt_messages(
     parts = compact_stage_prompt_messages_in_place(
         messages,
         stage_state=stage_state,
-        keep_latest_completed_stages=keep_latest_completed_stages,
         stage_tool_name=stage_tool_name,
         preserve_leading_system=preserve_leading_system,
         preserve_leading_user=preserve_leading_user,
@@ -792,58 +791,6 @@ def prepare_stage_prompt_messages(
         *list(parts["prefix"]),
         *list(parts["rewritten"]),
     ]
-
-
-def decompose_stage_prompt_messages(
-    messages: list[dict[str, Any]],
-    *,
-    stage_state: Any,
-    keep_latest_completed_stages: int = 3,
-    stage_tool_name: str = "submit_next_stage",
-    preserve_leading_system: bool = True,
-    preserve_leading_user: bool = True,
-) -> dict[str, Any]:
-    prefix, remainder = stage_prompt_prefix(
-        messages,
-        preserve_leading_system=preserve_leading_system,
-        preserve_leading_user=preserve_leading_user,
-    )
-    remainder = repair_split_stage_tool_boundaries(remainder, stage_tool_name=stage_tool_name)
-    if not list(_stage_get(stage_state, "stages", []) or []):
-        return {
-            "prefix": prefix,
-            "remainder": remainder,
-            "retained_completed_stage_ids": set(),
-            "completed_blocks": [],
-            "active_window": list(remainder),
-            "global_zone_source": [],
-        }
-    retained_ids = retained_completed_stage_ids(stage_state, keep_latest=keep_latest_completed_stages)
-    completed_blocks = completed_stage_blocks(stage_state, skip_stage_ids=retained_ids)
-    active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
-    if active_stage_id:
-        # 边界含活动阶段的 submit：保留最近 len(retained) 个完成阶段 + 活动阶段。
-        active_window = current_stage_active_window(
-            remainder,
-            keep_completed_stages=len(retained_ids),
-            stage_tool_name=stage_tool_name,
-        )
-    else:
-        # 无活动阶段时边界全属完成阶段：保留最近 len(retained) 段需 keep-1。
-        active_window = current_stage_active_window(
-            remainder,
-            keep_completed_stages=max(0, len(retained_ids) - 1),
-            stage_tool_name=stage_tool_name,
-        )
-    global_zone_length = max(0, len(remainder) - len(active_window))
-    return {
-        "prefix": prefix,
-        "remainder": remainder,
-        "retained_completed_stage_ids": retained_ids,
-        "completed_blocks": completed_blocks,
-        "active_window": active_window,
-        "global_zone_source": [dict(item) for item in remainder[:global_zone_length]],
-    }
 
 
 def stage_ref_candidates(
@@ -1159,7 +1106,6 @@ def stage_is_swallowable(
     stage: Any,
     *,
     active_stage_id: str,
-    retained_ids: set[str],
     body_stage_indexes: set[int],
     body_call_ids: set[str],
 ) -> bool:
@@ -1167,7 +1113,7 @@ def stage_is_swallowable(
 
     工具轮次还留在请求体里、或它自己的阶段块还翻得出来，收口它就是直接在上下文里挖洞；
     `body_stage_indexes` 的口径由调用方给（压缩时认全部块，提交点只认 raw 块）。
-    `retained_ids` 是近场 raw 窗口（保住最近几条执行细节）让出来的名额。"""
+    判据只看"内容还在不在体内"，不再有条数近场窗口——未被点名的阶段本来就一直留在体内。"""
     if not isinstance(stage, dict) and not hasattr(stage, "stage_id"):
         return False
     if str(_stage_get(stage, "stage_kind", "normal") or "normal").strip().lower() != "normal":
@@ -1175,7 +1121,7 @@ def stage_is_swallowable(
     if not stage_is_terminal(stage):
         return False
     stage_id = str(_stage_get(stage, "stage_id", "") or "").strip()
-    if not stage_id or stage_id == active_stage_id or stage_id in retained_ids:
+    if not stage_id or stage_id == active_stage_id:
         return False
     if _stage_get(stage, "context_visible", True) is False:
         return False
@@ -1188,9 +1134,11 @@ def stage_is_swallowable(
     return not (stage_round_call_ids(stage) & body_call_ids)
 
 
-def summarized_stage_ids(stage_state: Any, *, body_messages: Any, keep_latest: int = 3) -> list[str]:
-    """一次压缩真正吞掉的阶段：完成普通阶段 − 近场 raw 窗口 − 仍在体内字面存在的阶段。"""
-    retained_ids = retained_completed_stage_ids(stage_state, keep_latest=keep_latest)
+def summarized_stage_ids(stage_state: Any, *, body_messages: Any) -> list[str]:
+    """一次压缩真正吞掉的阶段：完成普通阶段里，肉身与块都不再出现在新正文的那些。
+
+    没有"近场窗口"这一项减数：未被模型点名的阶段一直留在正文里，因此永远不会被算成
+    吞掉；真被摘要吞走的才会，判据完全由正文派生。"""
     body_indexes = stage_block_indexes(body_messages)
     body_call_ids = stage_message_call_ids(body_messages)
     active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
@@ -1199,7 +1147,6 @@ def summarized_stage_ids(stage_state: Any, *, body_messages: Any, keep_latest: i
         if not stage_is_swallowable(
             stage,
             active_stage_id=active_stage_id,
-            retained_ids=retained_ids,
             body_stage_indexes=body_indexes,
             body_call_ids=body_call_ids,
         ):
@@ -1262,7 +1209,6 @@ __all__ = [
     "compact_stage_prompt_messages_in_place",
     "completed_stage_blocks",
     "current_stage_active_window",
-    "decompose_stage_prompt_messages",
     "is_filesystem_ref",
     "is_stage_block_echo_text",
     "is_stage_context_message",

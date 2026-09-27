@@ -2992,7 +2992,7 @@ def test_prepare_messages_rebuilds_prompt_from_completed_stages_and_active_windo
     assert "current stage tool output" in rendered_contents
 
 
-def test_prepare_messages_keeps_active_stage_and_latest_three_completed_stage_windows() -> None:
+def test_prepare_messages_keeps_active_stage_and_evicts_only_the_named_stage() -> None:
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
     loop._log_service._store._node = SimpleNamespace(
         metadata={
@@ -3009,6 +3009,8 @@ def test_prepare_messages_keeps_active_stage_and_latest_three_completed_stage_wi
                         "status": _EXECUTION_STAGE_STATUS_COMPLETED,
                         "stage_goal": "inspect stage one",
                         "completed_stage_summary": "finished stage one",
+                        # 窗口已移除：离开可见层只能由模型在关闭它时点名。
+                        "context_evicted": True,
                         "key_refs": [],
                         "tool_round_budget": 2,
                         "tool_rounds_used": 1,
@@ -8865,8 +8867,12 @@ async def test_empty_model_responses_stop_at_retry_limit(tmp_path, monkeypatch) 
     assert len(chat_calls) == _PROVIDER_RETRY_LIMIT, "达到上限后不得继续调用 provider"
 
 
-def _six_stage_node_history(stage_total: int = 6) -> tuple[dict[str, object], list[dict[str, object]]]:
-    """节点账本 + 同形态历史：每个阶段一次 submit 开阶段、一轮 exec 肉身。"""
+def _six_stage_node_history(
+    stage_total: int = 6, evict_indexes: list[int] | None = None
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """节点账本 + 同形态历史：每个阶段一次 submit 开阶段、一轮 exec 肉身。
+
+    窗口已移除，想让它里面有几条阶段离开可见层，只能点名：传 evict_indexes。"""
     stages: list[dict[str, object]] = []
     messages: list[dict[str, object]] = [
         {"role": "system", "content": "system"},
@@ -8887,6 +8893,7 @@ def _six_stage_node_history(stage_total: int = 6) -> tuple[dict[str, object], li
                 "key_refs": [],
                 "tool_round_budget": 3,
                 "tool_rounds_used": 1,
+                **({'context_evicted': True} if index in set(evict_indexes or []) else {}),
                 "rounds": [
                     {
                         "round_id": f"stage-{index}:round-1",
@@ -8933,13 +8940,13 @@ def test_stage_expiry_hop_adopts_pruned_projection_once_then_stays_append_only()
     # 阶段压缩要真省 token，必须有一个"过期点"把发送基线换成裁过的投影；但只能换一次，
     # 否则前缀失效面从每个过期点一次放大成每轮一次。
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
-    state, history = _six_stage_node_history()
+    state, history = _six_stage_node_history(evict_indexes=[1, 2])
     loop._log_service._store._node = SimpleNamespace(metadata={"execution_stages": state})
     runtime_context = {"task_id": "task-1", "node_id": "node-1"}
 
     projection, parts = loop._prepare_messages_with_parts(history, runtime_context=runtime_context)
     contents = [str(item.get("content") or "") for item in projection]
-    # 保留窗 3 + 活动阶段 => 过期的是 stage-1/2，其工具肉身从投影里消失并换成两块摘要
+    # 点名裁撤 stage-1/2 => 它们的工具肉身从投影里消失，并换成两块摘要
     assert set(parts["expired_call_ids"]) == {"call-work-1", "call-work-2"}
     assert "body-1" not in contents
     assert "body-2" not in contents

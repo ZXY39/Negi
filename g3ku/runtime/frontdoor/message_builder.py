@@ -2185,7 +2185,6 @@ class CeoMessageBuilder:
         current_user_in_history = bool(prompt_history_state["current_user_in_history"])
         retained_raw_stage_blocks, retained_completed_stage_ids = retained_raw_stage_messages(
             combined_frontdoor_context,
-            keep_latest_completed_stages=3,
         )
         completed_blocks = completed_stage_blocks(
             combined_frontdoor_context,
@@ -2206,7 +2205,6 @@ class CeoMessageBuilder:
             in_place_parts = compact_stage_prompt_messages_in_place(
                 raw_history_messages,
                 stage_state=combined_frontdoor_context,
-                keep_latest_completed_stages=3,
                 preserve_leading_system=False,
                 preserve_leading_user=True,
             )

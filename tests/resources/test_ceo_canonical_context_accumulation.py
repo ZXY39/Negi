@@ -22,8 +22,9 @@ def _stage(
     summary: str = "",
     rounds: list[dict[str, object]] | None = None,
     representation: str | None = None,
+    evicted: bool = False,
 ) -> dict[str, object]:
-    return {
+    stage: dict[str, object] = {
         "stage_id": stage_id,
         "stage_index": index,
         "stage_goal": goal or f"goal {index}",
@@ -35,6 +36,9 @@ def _stage(
         "finished_at": f"2026-09-01T00:1{index}:00+08:00",
         "rounds": list(rounds or []),
     }
+    if evicted:
+        stage["context_evicted"] = True
+    return stage
 
 
 def _tool(name: str, output_text: str = "", **overrides: object) -> dict[str, object]:
@@ -98,7 +102,9 @@ def test_repeated_finalization_does_not_reappend_the_carried_workset() -> None:
     assert len(second["stages"]) <= len(first["stages"]) + 1
 
 
-def test_transcript_projection_compacts_old_stages_and_caps_tool_bodies() -> None:
+def test_transcript_projection_compacts_marked_stages_and_caps_tool_bodies() -> None:
+    # 表示形式只由标记决定：点名裁撤的那条降为 compact 并清 rounds，其余一律 raw，
+    # 体积靠转录侧的字符上限约束，不再靠"只留最近 3 条"的位置切片。
     long_output = "x" * 2500
     long_arguments = {"payload": "y" * 3000}
     context = {
@@ -107,6 +113,7 @@ def test_transcript_projection_compacts_old_stages_and_caps_tool_bodies() -> Non
             _stage(
                 "frontdoor-stage-1",
                 1,
+                evicted=True,
                 rounds=[
                     {
                         "round_index": 1,
@@ -326,10 +333,12 @@ def test_ui_delta_keeps_only_new_stages_and_backfills_live_bodies() -> None:
     assert rendered_tool["arguments_text"] == "q" * 6000
 
 
-def test_ui_payload_projection_keeps_window_bodies_bounded() -> None:
+def test_ui_payload_projection_leaves_unmarked_bodies_in() -> None:
+    # 表示形式不再按位置切片：未被点名的阶段在 UI 投影里照样带着肉身。窗口时代这条断言
+    # 靠的是"最老的几条自动降 compact"，现在唯一的出口是标记（下两行把它标掉再看）。
     context = {
         "stages": [
-            _stage("frontdoor-stage-1", 1, rounds=[{"round_index": 1, "tools": [_tool("old")]}]),
+            _stage("frontdoor-stage-1", 1, evicted=True, rounds=[{"round_index": 1, "tools": [_tool("old")]}]),
             _stage("frontdoor-stage-2", 2, rounds=[{"round_index": 1, "tools": [_tool("old-2")]}]),
             _stage("frontdoor-stage-3", 3, rounds=[{"round_index": 1, "tools": [_tool("old-3")]}]),
             _stage(
@@ -359,6 +368,8 @@ def test_ui_payload_projection_keeps_window_bodies_bounded() -> None:
 
     assert projected["stages"][0]["representation"] == "compact"
     assert projected["stages"][0]["rounds"] == []
+    assert projected["stages"][1]["representation"] == "raw"
+    assert projected["stages"][1]["rounds"][0]["tools"][0]["tool_call_id"] == "old-2:1"
     assert projected["stages"][-1]["representation"] == "raw"
     assert projected["stages"][-1]["rounds"][0]["tools"][0]["output_text"] == "x" * 3000
 

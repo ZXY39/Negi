@@ -96,17 +96,18 @@ def test_active_stage_dump_keeps_the_same_shape() -> None:
     assert 'context_visible' not in state.model_dump(mode='json')['stages'][0]
 
 
-def test_archived_node_stage_stops_rendering_and_frees_raw_window_slot() -> None:
-    """渲染端已共用前门那套：标记一落到节点账本，块就不再逐轮重渲染。"""
+def test_archived_node_stage_stops_rendering_without_leaking_into_others() -> None:
+    """渲染端已共用前门那套：标记一落到节点账本，块就不再逐轮重渲染。
+
+    窗口移除后，未被点名的阶段不再有任何自动出口，所以这里只剩一条收口标记在起作用——
+    其余三条照常留在 raw 里，一块都不出。"""
     state = normalize_execution_stage_metadata(
         _state(stages=[_stage(1), _stage(2), _stage(3), _stage(4, archived=True)])
     )
-    retained = retained_completed_stage_ids(state, keep_latest=2)
-    # 收口阶段不占近场 raw 窗口名额，否则已进过摘要的阶段会把还在跑的细节挤出去。
-    assert retained == {'node-stage-2', 'node-stage-3'}
+    retained = retained_completed_stage_ids(state)
+    assert retained == {'node-stage-1', 'node-stage-2', 'node-stage-3'}
     blocks = completed_stage_blocks(state, skip_stage_ids=retained)
-    indexes = [json.loads(block['content'].split('\n', 1)[1])['stage_index'] for block in blocks]
-    assert indexes == [1]
+    assert blocks == []
 
 
 def test_execution_trace_export_marks_only_archived_stages() -> None:
@@ -152,7 +153,7 @@ def _plan(loop: ReActToolLoop, *, recent_tail: list[dict] | None = None) -> dict
 
 
 def _swallowable_stages(*, key_refs=None) -> list[dict]:
-    """6 条完成阶段，只有第 1 条带证据引用：raw 窗口保住 4~6，被吞的是 1~3。"""
+    """6 条完成阶段，只有第 1 条带证据引用：窗口已移除，肉身都不在体内时 1~6 全部进收口清单。"""
     return [_stage(index, key_refs=key_refs if index == 1 else []) for index in range(1, 7)]
 
 
@@ -172,14 +173,14 @@ def test_unregistered_in_flight_stage_is_never_swallowed() -> None:
     ]
     loop = _loop(stages=stages)
     plan = _plan(loop)
-    # 7 条里保留窗口吃掉 5/6/7，被吞的只能是已终态的 2/3/4；在跑的 1 号不进去。
-    assert plan['stage_ids'] == ['node-stage-2', 'node-stage-3', 'node-stage-4']
-    assert [item['ref'] for item in plan['candidates']] == ['artifact:out-2', 'artifact:out-3', 'artifact:out-4']
+    # 窗口没了：7 条里除了还在写的 1 号，其余 2-7 号肉身都不在体内，全部进收口清单。
+    assert plan['stage_ids'] == [f'node-stage-{index}' for index in range(2, 8)]
+    assert [item['ref'] for item in plan['candidates']] == [f'artifact:out-{index}' for index in range(2, 8)]
     assert 'artifact:还在产出的中间物' not in json.dumps(plan['candidates'], ensure_ascii=False)
-    assert [item['stage_index'] for item in plan['records']] == [2, 3, 4]
+    assert [item['stage_index'] for item in plan['records']] == list(range(2, 8))
 
 
-def test_node_plan_spares_raw_window_and_tail_survivors() -> None:
+def test_node_plan_spares_body_survivors_and_active_stage() -> None:
     loop = _loop(stages=[
         _stage(1, key_refs=[{'ref': 'artifact:a1', 'note': '结论产物'}]),
         _stage(2, tool_call_ids=['call:two']),
@@ -188,13 +189,15 @@ def test_node_plan_spares_raw_window_and_tail_survivors() -> None:
         _stage(5, status='进行中'),
     ])
     plan = _plan(loop, recent_tail=[{'role': 'tool', 'tool_call_id': 'call:two', 'content': '还在体内的工具结果'}])
-    # 1 = 被吞；2 = 肉身还在保留尾部；3/4 = 近场 raw 窗口；5 = 活动阶段。
-    assert plan['stage_ids'] == ['node-stage-1']
-    assert [item['ref'] for item in plan['candidates']] == ['artifact:a1']
-    assert [item['stage_index'] for item in plan['records']] == [1]
+    # 1/3/4 = 肉身不在体内，被摘要取代 → 进清单；2 = 肉身还在保留尾部，收了就是黑洞；
+    # 5 = 活动阶段。近场保护现在完全由"内容还在不在体内"承担，没有条数窗口这一项。
+    assert plan['stage_ids'] == ['node-stage-1', 'node-stage-3', 'node-stage-4']
+    assert [item['ref'] for item in plan['candidates']] == ['artifact:a1', 'artifact:out-3', 'artifact:out-4']
+    assert [item['stage_index'] for item in plan['records']] == [1, 3, 4]
     # 交给模型的只有编号清单本身，引用正文由运行时回填。
     instruction_tail = render_stage_ref_candidate_block(plan['candidates'])
-    assert instruction_tail.splitlines() == [STAGE_REF_CANDIDATE_HEADING, '[#1] artifact:a1 — 结论产物']
+    assert instruction_tail.splitlines()[0] == STAGE_REF_CANDIDATE_HEADING
+    assert '[#1] artifact:a1 — 结论产物' in instruction_tail
 
 
 def test_node_envelope_backfills_selected_refs_verbatim_and_archives(tmp_path: Path) -> None:
@@ -232,15 +235,15 @@ def test_node_envelope_backfills_selected_refs_verbatim_and_archives(tmp_path: P
     assert diagnostics['stage_ref_candidate_count'] == 3
     assert diagnostics['stage_ref_selected_count'] == 2
     assert diagnostics['stage_ref_dropped_dead'] == 1
-    assert diagnostics['stage_archive_pending_count'] == 3
+    assert diagnostics['stage_archive_pending_count'] == 6
 
     assert 'stage_ids' not in payload
-    assert payload['archived_through_created_at'] == '2026-09-20T03:00:00+08:00'
+    assert payload['archived_through_created_at'] == '2026-09-20T06:00:00+08:00'
     archived = json.loads(Path(payload['ref']).read_text(encoding='utf-8'))
     assert archived['kind'] == 'node_stage_archive'
     assert archived['owner'] == 'task:task-1/node:node-1'
-    assert archived['stage_count'] == 3
-    assert [stage['stage_index'] for stage in archived['stages']] == [1, 2, 3]
+    assert archived['stage_count'] == 6
+    assert [stage['stage_index'] for stage in archived['stages']] == list(range(1, 7))
     # 归档留全量逐字 key_refs（含死链）：收口不等于丢数据。
     assert [item['ref'] for item in archived['stages'][0]['key_refs']] == [str(live), str(dead), 'task:7e2a270eec34']
 
@@ -256,7 +259,7 @@ def test_node_envelope_without_selection_still_archives(tmp_path: Path) -> None:
     assert STAGE_REF_INDEX_HEADING not in text
     assert STAGE_ARCHIVE_HEADING in text
     assert diagnostics['stage_ref_selected_count'] == 0
-    assert payload['archived_through_created_at'] == '2026-09-20T03:00:00+08:00'
+    assert payload['archived_through_created_at'] == '2026-09-20T06:00:00+08:00'
 
 
 def test_node_envelope_writes_no_archive_pointer_when_temp_dir_unresolved(tmp_path: Path) -> None:
@@ -294,7 +297,7 @@ def test_node_chunked_lane_is_pointer_only(tmp_path: Path) -> None:
     assert '- [#1]' in text
     assert 'artifact:a1' not in text
     assert diagnostics['stage_ref_selected_count'] == 0
-    assert payload['stage_count'] == 3
+    assert payload['stage_count'] == 6
 
 
 def test_node_rewrite_carries_archive_into_compact_block(tmp_path: Path) -> None:
@@ -316,7 +319,7 @@ def test_node_rewrite_carries_archive_into_compact_block(tmp_path: Path) -> None
         stage_archive=payload,
     )
     assert compact_payload['kind'] == 'node_token_compaction_llm'
-    assert compact_payload['stage_archive']['archived_through_created_at'] == '2026-09-20T03:00:00+08:00'
+    assert compact_payload['stage_archive']['archived_through_created_at'] == '2026-09-20T06:00:00+08:00'
     assert 'stage_ids' not in compact_payload['stage_archive']
     block = next(
         str(item.get('content') or '')
@@ -324,10 +327,10 @@ def test_node_rewrite_carries_archive_into_compact_block(tmp_path: Path) -> None
         if str(item.get('content') or '').startswith('[G3KU_TOKEN_COMPACT_V2]')
     )
     assert STAGE_ARCHIVE_HEADING in block
-    assert json.loads(block.split('\n', 2)[1])['stage_archive']['stage_count'] == 3
+    assert json.loads(block.split('\n', 2)[1])['stage_archive']['stage_count'] == 6
     # 落盘点（Phase E）用共享读取器把水位线读回来：元数据行必须能单独解析，
     # 前缀与 JSON 之间、JSON 与正文之间都得是真换行。
     assert stage_archive_selector_from_request_messages(rewritten) == {
         'stage_ids': [],
-        'archived_through_created_at': '2026-09-20T03:00:00+08:00',
+        'archived_through_created_at': '2026-09-20T06:00:00+08:00',
     }

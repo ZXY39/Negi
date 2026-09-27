@@ -2307,6 +2307,7 @@ async def test_message_builder_applies_frontdoor_stage_workset_compaction_to_his
                 {
                     "stage_id": "frontdoor-stage-1",
                     "stage_index": 1,
+                    "context_evicted": True,  # 窗口已移除：离开可见层只能由模型点名
                     "stage_kind": "normal",
                     "system_generated": False,
                     "mode": "自主执行",
@@ -2618,6 +2619,7 @@ async def test_message_builder_renders_retained_raw_stage_blocks_from_stage_stat
                 {
                     "stage_id": "frontdoor-stage-1",
                     "stage_index": 1,
+                    "context_evicted": True,  # 窗口已移除：离开可见层只能由模型点名
                     "stage_kind": "normal",
                     "system_generated": False,
                     "mode": "自主执行",
@@ -3616,6 +3618,8 @@ async def test_message_builder_trims_full_transcript_history_to_active_window() 
             "key_refs": [],
             "tool_round_budget": 2,
             "tool_rounds_used": 1,
+            # 窗口已移除：阶段 1 靠模型点名裁撤离开可见层
+            **({'context_evicted': True} if index == 1 else {}),
         }
         for index in range(1, 6)
     ]
@@ -3689,12 +3693,14 @@ async def test_seed_continuation_path_trims_old_raw_with_stage_summaries() -> No
             "key_refs": [],
             "tool_round_budget": 2,
             "tool_rounds_used": 1,
+            # 窗口已移除：阶段 1 靠模型点名裁撤离开可见层
+            **({'context_evicted': True} if index == 1 else {}),
         }
         for index in range(1, 6)
     ]
 
     stage_state = {"active_stage_id": "frontdoor-stage-5", "transition_required": False, "stages": stages}
-    trimmed, stage_compaction_applied = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_to_stage_window(
+    trimmed, stage_compaction_applied = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_stage_compaction(
         seed, stage_state
     )
     rendered = "\n\n".join(str(item.get("content") or "") for item in trimmed)

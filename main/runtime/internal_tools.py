@@ -156,8 +156,10 @@ class SubmitNextStageTool(Tool):
                 'drop_completed_stage_tool_detail': {
                     'type': 'boolean',
                     'description': (
-                        'Drop the closing stage\u0027s raw tool arguments/outputs from context, keeping '
-                        'completed_stage_summary. Requires that summary to be non-empty.'
+                        'Drop the closing stage\'s raw tool arguments/outputs from context, keeping '
+                        'completed_stage_summary. Requires that summary to be non-empty. Nothing '
+                        'expires on a count any more: a stage you leave false keeps sending its tool '
+                        'rows until summary compression replaces that history.'
                     ),
                 },
             },

@@ -8,7 +8,6 @@ from typing import Any
 RAW_REPRESENTATION = "raw"
 COMPACT_REPRESENTATION = "compact"
 EXTERNALIZED_REPRESENTATION = "externalized"
-DEFAULT_RETAIN_RAW_COMPLETED_STAGES = 3
 TRANSCRIPT_PROJECTION_MODE = "stage_window"
 DEFAULT_TRANSCRIPT_MAX_OUTPUT_TEXT_CHARS = 2000
 DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_CHARS = 2000
@@ -369,15 +368,6 @@ def combine_canonical_context(
     )
 
 
-def _completed_normal_stage_positions(context: dict[str, Any]) -> list[tuple[int, dict[str, Any]]]:
-    return [
-        (index, stage)
-        for index, stage in enumerate(list(context.get("stages") or []))
-        if _as_str(stage.get("stage_kind") or "normal") == "normal"
-        and _as_str(stage.get("status")).lower() != "active"
-    ]
-
-
 def _compact_stage(stage: dict[str, Any]) -> dict[str, Any]:
     current = copy.deepcopy(stage)
     current["representation"] = COMPACT_REPRESENTATION
@@ -387,24 +377,28 @@ def _compact_stage(stage: dict[str, Any]) -> dict[str, Any]:
 
 def _apply_completed_stage_representations(
     context: dict[str, Any],
-    *,
-    keep_latest_raw: int,
 ) -> dict[str, Any]:
+    """按标记决定每条阶段在 canonical 里的表示，不再按"最近 N 条"位置切片。
+
+    表示形式必须与渲染侧的判据同源（`stage_prompt_compaction.retained_completed_stage_ids`
+    读同样的两个标记）：只有模型点名裁撤（`context_evicted`）或压缩已收口
+    （`context_visible: false`）的阶段才降为 compact 并清空 rounds。位置切片曾让这一层
+    自己持有一个"最近 3 条"窗口，于是未被点名的老阶段在真相源里就没了肉身，渲染侧却
+    仍按"未裁撤=可见"去读——两头一对齐就渲出既无肉身也无块的空壳阶段。"""
     normalized = normalize_frontdoor_canonical_context(context)
-    completed_positions = _completed_normal_stage_positions(normalized)
-    retained_positions = {
-        index
-        for index, _stage in completed_positions[-max(0, int(keep_latest_raw or 0)) :]
-    }
     stages: list[dict[str, Any]] = []
-    for index, stage in enumerate(list(normalized.get("stages") or [])):
+    for stage in list(normalized.get("stages") or []):
         current = copy.deepcopy(stage)
         if _as_str(current.get("stage_kind")) == "compression":
             current["representation"] = EXTERNALIZED_REPRESENTATION
             current["rounds"] = []
             stages.append(current)
             continue
-        if _as_str(current.get("status")).lower() == "active" or index in retained_positions:
+        if (
+            _as_str(current.get("status")).lower() == "active"
+            or (current.get("context_visible", True) is not False
+                and current.get("context_evicted") is not True)
+        ):
             current["representation"] = RAW_REPRESENTATION
             stages.append(current)
             continue
@@ -483,7 +477,6 @@ def _cap_round_payload(
 def project_canonical_context_for_transcript(
     raw: Any,
     *,
-    keep_latest_raw_completed_stages: int = DEFAULT_RETAIN_RAW_COMPLETED_STAGES,
     max_output_text_chars: int = DEFAULT_TRANSCRIPT_MAX_OUTPUT_TEXT_CHARS,
     max_arguments_chars: int = DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_CHARS,
     max_arguments_text_chars: int = DEFAULT_TRANSCRIPT_MAX_ARGUMENTS_TEXT_CHARS,
@@ -493,16 +486,15 @@ def project_canonical_context_for_transcript(
 
     The provider prompt still uses the full stage workset via the durable
     canonical chain and current stage state. Transcript records only need the
-    same representation the model sees: the latest raw stages plus compact
-    summaries for older completed stages, with oversized tool bodies capped.
+    same representation the model sees — raw unless the model evicted the stage
+    or compression closed it — with oversized tool bodies capped by the char
+    limits above, which is what bounds transcript size now that no stage count
+    does.
     """
     normalized = normalize_frontdoor_canonical_context(raw)
     if not list(normalized.get("stages") or []):
         return {}
-    projected = _apply_completed_stage_representations(
-        normalized,
-        keep_latest_raw=keep_latest_raw_completed_stages,
-    )
+    projected = _apply_completed_stage_representations(normalized)
     for stage in list(projected.get("stages") or []):
         if _as_str(stage.get("representation")) != RAW_REPRESENTATION:
             continue
@@ -974,14 +966,9 @@ def migrate_transcript_rows_to_delta(messages: Any) -> int:
 def merge_turn_stage_state_into_canonical_context(
     canonical_context: Any,
     turn_stage_state: Any,
-    *,
-    keep_latest_raw_completed_stages: int = DEFAULT_RETAIN_RAW_COMPLETED_STAGES,
 ) -> dict[str, Any]:
     combined = combine_canonical_context(canonical_context, turn_stage_state)
-    return _apply_completed_stage_representations(
-        combined,
-        keep_latest_raw=keep_latest_raw_completed_stages,
-    )
+    return _apply_completed_stage_representations(combined)
 
 
 def canonical_context_tool_items(canonical_context: Any) -> list[dict[str, Any]]:

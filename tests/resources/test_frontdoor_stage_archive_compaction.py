@@ -27,7 +27,7 @@ from g3ku.runtime.stage_prompt_compaction import (
 )
 
 
-def _stage(index: int, *, visible: bool = True, key_refs=None, tool_call_ids=None) -> dict:
+def _stage(index: int, *, visible: bool = True, evicted: bool = False, key_refs=None, tool_call_ids=None) -> dict:
     stage = {
         "stage_id": f"frontdoor-stage-{index}",
         "stage_index": index,
@@ -45,6 +45,8 @@ def _stage(index: int, *, visible: bool = True, key_refs=None, tool_call_ids=Non
         stage["rounds"] = [{"round_index": 1, "tool_call_ids": list(tool_call_ids), "tools": []}]
     if not visible:
         stage["context_visible"] = False
+    if evicted:
+        stage["context_evicted"] = True
     return stage
 
 
@@ -99,14 +101,18 @@ def test_completed_stage_blocks_skip_archived_stages() -> None:
     assert indexes == [1, 3]
 
 
-def test_archived_stages_do_not_consume_raw_window_slots() -> None:
+def test_marks_are_the_only_exit_and_never_disturb_other_stages() -> None:
+    # 没有"raw 名额"这回事了：收口与点名裁撤只影响自己，其余终态阶段无论多少条都留在
+    # raw 里。过去窗口按位置挤掉最老那条（切点深、缓存代价最大），现在机器不再替模型决定。
     ledger = _ledger([_stage(1), _stage(2, visible=False), _stage(3), _stage(4), _stage(5), _stage(6)])
-    retained = retained_completed_stage_ids(ledger, keep_latest=3)
-    assert retained == {"frontdoor-stage-4", "frontdoor-stage-5", "frontdoor-stage-6"}
-    raw_messages, raw_ids = retained_raw_stage_messages(ledger, keep_latest_completed_stages=3)
+    retained = retained_completed_stage_ids(ledger)
+    assert retained == {f"frontdoor-stage-{index}" for index in (1, 3, 4, 5, 6)}
+    raw_messages, raw_ids = retained_raw_stage_messages(ledger)
     assert raw_ids == retained
-    # 收口阶段把名额让出来，否则近场执行细节会被"已经进过摘要"的阶段挤掉。
-    assert len(raw_messages) == 3
+    assert len(raw_messages) == 5
+
+    ledger["stages"][2]["context_evicted"] = True  # stage-3 被模型点名
+    assert retained_completed_stage_ids(ledger) == {f"frontdoor-stage-{index}" for index in (1, 4, 5, 6)}
 
 
 def test_archive_flag_survives_normalize_and_combine() -> None:
@@ -139,14 +145,17 @@ def test_warm_assembly_carries_no_compact_blocks_after_archive() -> None:
         {"role": "user", "content": "刚压缩了，结构是什么"},
         {"role": "assistant", "content": "直接回答"},
     ]
-    parts = compact_stage_prompt_messages_in_place(seed, stage_state=ledger, keep_latest_completed_stages=3)
+    parts = compact_stage_prompt_messages_in_place(seed, stage_state=ledger)
     rewritten = [*parts["prefix"], *parts["rewritten"]]
     assert [item for item in rewritten if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)] == []
     assert len(rewritten) == 4
 
-    # 对照组：同一份账本未收口时，块会成批长回来——这正是收口要消除的形态。
-    visible_ledger = _ledger([{key: value for key, value in stage.items() if key != "context_visible"} for stage in stages])
-    untrimmed = compact_stage_prompt_messages_in_place(seed, stage_state=visible_ledger, keep_latest_completed_stages=3)
+    # 对照组：同一批阶段改成"被模型点名裁撤"时，块会成批长回来——收口与裁撤的分别就在
+    # 这一格：裁撤留块（带 evicted），收口连块都不留。
+    evicted_ledger = _ledger(
+        [_stage(index, evicted=True) for index in range(1, 398)] + [_stage(398), _stage(399), _stage(400)]
+    )
+    untrimmed = compact_stage_prompt_messages_in_place(seed, stage_state=evicted_ledger)
     grown = [item for item in [*untrimmed["prefix"], *untrimmed["rewritten"]] if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)]
     assert len(grown) == 397
 
@@ -170,7 +179,7 @@ def test_archived_stage_frames_are_stripped_without_block_replacement() -> None:
         {"role": "tool", "tool_call_id": "c2", "content": "结果 2"},
         {"role": "user", "content": "当前问题"},
     ]
-    parts = compact_stage_prompt_messages_in_place(seed, stage_state=ledger, keep_latest_completed_stages=1)
+    parts = compact_stage_prompt_messages_in_place(seed, stage_state=ledger)
     rewritten = [*parts["prefix"], *parts["rewritten"]]
     blocks = [item for item in rewritten if str(item.get("content") or "").startswith(STAGE_COMPACT_PREFIX)]
     # stage 1 在保留窗口内（肉身留在原位）；stage 2 已收口：肉身移除、不补块。
@@ -246,10 +255,12 @@ def test_missing_index_section_yields_no_selection() -> None:
     assert (section, count, dropped) == ("", 0, 0)
 
 
-# ---- 尾部边界（raw 窗口穿过压缩）-------------------------------------------
+# ---- 尾部边界与收口清单（纯正文派生）---------------------------------------
 
 
-def test_summarized_stage_ids_excludes_window_active_and_tail_stages() -> None:
+def test_summarized_stage_ids_excludes_body_survivors_active_and_closed() -> None:
+    # 收口清单只问一件事：这条阶段的肉身/块还在不在新正文里。窗口那项减数已随窗口一起
+    # 移除——未被点名的阶段本来就一直在体内，被摘要取代的才进清单。
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     ledger = _ledger(
         [
@@ -268,27 +279,25 @@ def test_summarized_stage_ids_excludes_window_active_and_tail_stages() -> None:
         {"role": "tool", "tool_call_id": "c2", "content": "结果"},
     ]
     hidden = runner._frontdoor_summarized_stage_ids(stage_state=ledger, recent_tail=tail)
-    # 1 = 被摘要；2 = 肉身还在尾部，收了就是黑洞；3/4/5 = 保留 raw 窗口；6 = 已收口；7 = 活动。
-    assert hidden == ["frontdoor-stage-1"]
+    # 1/3/4/5 = 肉身都不在尾部，被摘要取代 → 进清单；2 = 肉身还在尾部，收了就是黑洞；
+    # 6 = 已收口；7 = 活动。
+    assert hidden == ["frontdoor-stage-1", "frontdoor-stage-3", "frontdoor-stage-4", "frontdoor-stage-5"]
 
 
-def test_compaction_tail_count_covers_raw_window_and_respects_cap() -> None:
+def test_compaction_tail_count_is_a_flat_floor() -> None:
+    # 尾部不再由账本反推：raw 阶段窗口已移除，未被点名的阶段留在体内会被压缩自己改写，
+    # 收口清单按正文派生记账。尾部只剩"最近 4 条"这条常数地板（工具组对齐在调用方）。
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    ledger = _ledger([_stage(1), _stage(2), _stage(3, tool_call_ids=["c3"])])
 
     body = [{"role": "system", "content": "基础提示"}]
     body.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c3", "function": {"name": "exec"}}]})
     for position in range(10):
         body.append({"role": "user" if position % 2 == 0 else "assistant", "content": f"对话 {position}"})
-    # raw 窗口（stage 3）的肉身必须活着穿过压缩：尾部从它的第一条消息开始。
-    assert runner._frontdoor_compaction_tail_count(body, stage_state=ledger) == len(body) - 1
+    assert runner._frontdoor_compaction_tail_count(body) == 4
 
-    # 窗口跨度过大时退回按条数保留：尾部是压缩后请求体的不可压缩部分，放太大就没压缩了。
-    wide = [{"role": "assistant", "content": "", "tool_calls": [{"id": "c3", "function": {"name": "exec"}}]}]
-    for position in range(60):
-        wide.append({"role": "user" if position % 2 == 0 else "assistant", "content": f"对话 {position}"})
-    assert runner._frontdoor_compaction_tail_count(wide, stage_state=ledger) == 4
-    assert runner._frontdoor_compaction_tail_count(body, stage_state=_ledger([])) == 4
+    short = [{"role": "user", "content": "一条"}]
+    assert runner._frontdoor_compaction_tail_count(short) == 1
+    assert runner._frontdoor_compaction_tail_count([]) == 0
 
 
 # ---- 压缩链路端到端 ---------------------------------------------------------
@@ -373,7 +382,7 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     payload = json.loads(summary.splitlines()[1])
     archive_ref = payload["stage_archive"]["ref"]
     archived = json.loads(Path(archive_ref).read_text(encoding="utf-8"))
-    assert archived["stage_count"] == 2
+    assert archived["stage_count"] == 5
     # 归档保留逐字 key_refs 全量（含死链），收口不等于丢数据。
     assert {item["ref"].split("/")[-1].split("\\")[-1] for stage in archived["stages"] for item in stage["key_refs"]} == {
         "keep.txt",
@@ -386,7 +395,8 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     assert all(value is None for value in compacted.values())
     archive = payload["stage_archive"]
     # 收口口径是一个 created_at 上限，不再是逐条 id 清单：375 条 id 要 8.4k 字符，比摘要正文还长。
-    assert archive["archived_through_created_at"] == "2026-09-20T02:00:00+08:00"
+    # 水位线走到第 5 条：窗口没了之后，凡肉身已被摘要取代的阶段都进这一轮收口。
+    assert archive["archived_through_created_at"] == "2026-09-20T05:00:00+08:00"
     # 元数据行的字段就是收口合同的全部：条数与区间是常数大小，阶段再多也不随行增长。
     assert sorted(archive) == [
         "archived_through_created_at",
@@ -397,19 +407,20 @@ def test_token_compression_backfills_selected_refs_and_archives_ledger(monkeypat
     ]
 
     # 提交点应用：水位线之内、且肉身与块都不在即将落定的请求体里的阶段才被收掉。
-    assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, result.request_messages) == 2
+    assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, result.request_messages) == 5
     marked = {stage["stage_id"]: stage.get("context_visible") for stage in session._frontdoor_canonical_context["stages"]}
     assert marked["frontdoor-stage-1"] is False
     assert marked["frontdoor-stage-2"] is False
-    # 保留 raw 窗口的阶段不收口，压缩后仍需它承载近场执行细节。
-    assert marked["frontdoor-stage-3"] is None
-    assert marked["frontdoor-stage-5"] is None
+    # 窗口已移除：肉身与块都不在即将落定的请求体里的阶段一律进这一轮收口，剩下的 3/4/5
+    # 同样被摘要取代，所以也收（近场保护完全由"内容还在不在体内"承担）。
+    assert marked["frontdoor-stage-3"] is False
+    assert marked["frontdoor-stage-5"] is False
     # 同一份基线被重复提交（每个请求都会再持久化一次）不得二次改动账本。
     assert CreateAgentCeoFrontDoorRunner._frontdoor_hide_summarized_stages(session, result.request_messages) == 0
 
     assert result.diagnostics["stage_ref_selected_count"] == 2
     assert result.diagnostics["stage_ref_dropped_dead"] == 1
-    assert result.diagnostics["stage_archive_pending_count"] == 2
+    assert result.diagnostics["stage_archive_pending_count"] == 5
     assert result.diagnostics["stage_ref_candidate_count"] == 3
 
 
@@ -424,18 +435,18 @@ def test_token_compression_without_selection_still_archives(monkeypatch, tmp_pat
     assert STAGE_REF_INDEX_HEADING not in summary
     assert STAGE_ARCHIVE_HEADING in summary
     assert result.diagnostics["stage_ref_selected_count"] == 0
-    assert result.diagnostics["stage_archive_pending_count"] == 2
+    assert result.diagnostics["stage_archive_pending_count"] == 5
     assert session._frontdoor_canonical_context["stages"][0].get("context_visible") is None
     assert stage_archive_selector_from_request_messages(result.request_messages) == {
         "stage_ids": [],
-        "archived_through_created_at": "2026-09-20T02:00:00+08:00",
+        "archived_through_created_at": "2026-09-20T05:00:00+08:00",
     }
 
 
 def test_token_compression_is_idempotent_across_repeats(monkeypatch, tmp_path: Path) -> None:
     """同一份账本重复压缩：候选编号口径与收口清单条数必须一致。"""
     first, _session, _captured, _live = _run_compression(monkeypatch, tmp_path, helper_text="## 一、身份\n第一版摘要。")
-    assert first.diagnostics["stage_archive_pending_count"] == 2
+    assert first.diagnostics["stage_archive_pending_count"] == 5
     second, _session2, captured, _live = _run_compression(monkeypatch, tmp_path, helper_text="## 一、身份\n第二版摘要。")
     # _run_compression 每次重建账本，因此这里断言的是同一份候选集的稳定编号口径。
     assert "[#1]" in str(captured["messages"][-1]["content"])
@@ -543,7 +554,7 @@ def test_live_shaped_ledger_renders_only_the_raw_window_after_archive() -> None:
     turn_stages.append(_stage(383, visible=True) | {"stage_id": "frontdoor-stage-1225", "stage_index": 1225})
     turn_stages.append(_stage(384, visible=True) | {"stage_id": "frontdoor-stage-1226", "stage_index": 1226})
     combined = combine_canonical_context(_ledger(canonical_stages), _ledger(turn_stages))
-    blocks = completed_stage_blocks(combined, skip_stage_ids=retained_completed_stage_ids(combined, keep_latest=3))
+    blocks = completed_stage_blocks(combined, skip_stage_ids=retained_completed_stage_ids(combined))
     assert len(blocks) < 10, f"收口后块数应塌到个位数，实际 {len(blocks)}"
 
 
@@ -626,7 +637,7 @@ def test_hide_helper_marks_both_durable_stores_and_skips_active() -> None:
 def _rendered_stage_indexes(ledger: dict) -> set[int]:
     blocks = completed_stage_blocks(
         ledger,
-        skip_stage_ids=retained_completed_stage_ids(ledger, keep_latest=3),
+        skip_stage_ids=retained_completed_stage_ids(ledger),
     )
     return {int(json.loads(block["content"].split("\n", 1)[1])["stage_index"]) for block in blocks}
 
@@ -635,6 +646,10 @@ def test_swallowed_stage_is_rendered_exactly_once_either_in_blocks_or_in_summary
     """同一阶段不能既在摘要里又被逐轮出块；也不能两边都没有。"""
     result, session, _captured, _live = _run_compression(monkeypatch, tmp_path, helper_text="## 一、身份\n摘要正文。")
     ledger = session._frontdoor_canonical_context
+    # 收口之前，只有"被模型点名裁撤"的阶段会出块（窗口那条自动出口已移除），所以素材这样造。
+    for item in ledger["stages"]:
+        if item["stage_id"] in {"frontdoor-stage-1", "frontdoor-stage-2"}:
+            item["context_evicted"] = True
     before = _rendered_stage_indexes(ledger)
     assert {1, 2} <= before, "未收口前 1/2 号块应在场（否则这条断言测不到东西）"
 

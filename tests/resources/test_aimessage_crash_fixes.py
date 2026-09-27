@@ -14,7 +14,7 @@ from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _normalize_frontdoor_tool_arguments
 from g3ku.runtime.stage_prompt_compaction import (
     _message_role,
-    decompose_stage_prompt_messages,
+    compact_stage_prompt_messages_in_place,
     repair_split_stage_tool_boundaries,
 )
 
@@ -160,17 +160,16 @@ def test_repair_split_stage_tool_boundaries_tolerates_langchain_objects() -> Non
     assert any(str(item.get("role") or "").strip().lower() == "user" for item in repaired)
 
 
-def test_decompose_stage_prompt_messages_tolerates_langchain_objects() -> None:
+def test_stage_compaction_tolerates_langchain_objects() -> None:
     messages: list[object] = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hello"},
         AIMessage(content="model reply"),
         {"role": "user", "content": "again"},
     ]
-    parts = decompose_stage_prompt_messages(messages, stage_state={})  # type: ignore[arg-type]
+    parts = compact_stage_prompt_messages_in_place(messages, stage_state={})  # type: ignore[arg-type]
     assert isinstance(parts["prefix"], list)
-    assert isinstance(parts["remainder"], list)
-    assert isinstance(parts["active_window"], list)
+    assert isinstance(parts["rewritten"], list)
 
 
 def test_context_assembly_ignores_non_dict_stable_messages() -> None:

@@ -351,8 +351,8 @@ def _stage(index: int, *, tool_call_ids: list[str] | None = None) -> dict:
     return stage
 
 
-def test_stage_compaction_keeps_the_silent_row_it_would_otherwise_expire() -> None:
-    """同一个已过期阶段里的两行：普通工具行照删，silent 行必须留下。
+def test_stage_compaction_keeps_the_silent_row_it_would_otherwise_lose() -> None:
+    """同一个被点名裁撤阶段里的两行：普通工具行照删，silent 行必须留下。
 
     只留 assistant 行就够 —— 配对的 tool 结果行按 remove_flags 成对处理，父行不删
     则结果行也不会被单独删，不产生 provider 孤儿。
@@ -363,7 +363,8 @@ def test_stage_compaction_keeps_the_silent_row_it_would_otherwise_expire() -> No
         "active_stage_id": "",
         "transition_required": False,
         "stages": [
-            _stage(1, tool_call_ids=["call-exec", "call-silent"]),
+            # 窗口已移除，"离开可见层"只能由模型点名：stage-1 带裁撤标记。
+            {**_stage(1, tool_call_ids=["call-exec", "call-silent"]), "context_evicted": True},
             _stage(2),
             _stage(3),
             _stage(4),
@@ -379,7 +380,7 @@ def test_stage_compaction_keeps_the_silent_row_it_would_otherwise_expire() -> No
         {"role": "user", "content": "最新问题"},
         {"role": "assistant", "content": "最新回答"},
     ]
-    parts = compact_stage_prompt_messages_in_place(messages, stage_state=ledger, keep_latest_completed_stages=3)
+    parts = compact_stage_prompt_messages_in_place(messages, stage_state=ledger)
     body = [*parts["prefix"], *parts["rewritten"]]
     surviving = [str((item.get("tool_calls") or [{}])[0].get("id")) for item in body if item.get("tool_calls")]
 

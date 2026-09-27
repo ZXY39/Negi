@@ -4,7 +4,10 @@ import copy
 import json
 from typing import Any
 
-from g3ku.runtime.stage_prompt_compaction import STAGE_RAW_PREFIX
+from g3ku.runtime.stage_prompt_compaction import (
+    STAGE_RAW_PREFIX,
+    retained_completed_stage_ids,
+)
 
 
 def _stage_get(stage: Any, key: str, default: Any = None) -> Any:
@@ -109,55 +112,39 @@ def _normalize_stage(stage: Any) -> dict[str, Any]:
     }
 
 
-def retained_completed_raw_stage_ids(stage_state: Any, *, keep_latest: int) -> set[str]:
-    if keep_latest <= 0:
-        return set()
-    completed: list[tuple[int, str]] = []
-    for stage in _stage_list(stage_state):
-        if str(stage.get("stage_kind") or "normal").strip().lower() != "normal":
-            continue
-        stage_id = str(stage.get("stage_id") or "").strip()
-        if not stage_id:
-            continue
-        if str(stage.get("status") or "").strip().lower() == "active":
-            continue
-        if stage.get("context_visible") is False:
-            # 收口阶段不占 raw 窗口名额：它们已确定不进上下文，占位只会把仍可见的
-            # 近期阶段挤出窗口，等于让收口连带抹掉近场执行细节。
-            continue
-        if stage.get("context_evicted") is True:
-            # 与 retained_completed_stage_ids 同一判据的本地镜像（这两处窗口各写了一份，
-            # 改动必须同步）：模型点名移出的阶段既不占 raw 名额，也不在此处逐帧重渲染。
-            continue
-        completed.append((int(stage.get("stage_index") or 0), stage_id))
-    completed.sort()
-    return {stage_id for _stage_index, stage_id in completed[-max(0, int(keep_latest or 0)) :]}
-
-
 def retained_raw_stage_messages(
     stage_state: Any,
-    *,
-    keep_latest_completed_stages: int = 3,
 ) -> tuple[list[dict[str, Any]], set[str]]:
+    """仍该逐帧重渲染的阶段：共享判据 `retained_completed_stage_ids` + 活动阶段。
+
+    判据只有一份（`g3ku/runtime/stage_prompt_compaction.py`），此处不再镜像——
+    两份窗口各写一遍时，改一处就会让 raw 块与 compact 块同时漏掉或同时渲染同一条阶段。
+    """
     stages_by_id = {
         str(stage.get("stage_id") or "").strip(): stage
         for stage in _stage_list(stage_state)
         if str(stage.get("stage_id") or "").strip()
     }
-    retained_completed_ids = retained_completed_raw_stage_ids(
-        stage_state,
-        keep_latest=keep_latest_completed_stages,
-    )
-    ordered: list[dict[str, Any]] = [
+    retained_completed_ids = retained_completed_stage_ids(stage_state)
+    completed: list[dict[str, Any]] = [
         stage
         for stage in stages_by_id.values()
         if str(stage.get("stage_id") or "").strip() in retained_completed_ids
     ]
+    ordered = list(completed)
     active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
     if active_stage_id:
         active_stage = stages_by_id.get(active_stage_id)
         if isinstance(active_stage, dict):
             ordered.append(active_stage)
+
+    def _stage_id(stage: Any) -> str:
+        return str(stage.get("stage_id") or "").strip()
+
+    # 返回给调用方当 skip_stage_ids 用的是**真正渲染出来的**那批完成阶段 id：判据说
+    # "该留 raw"但本模块渲不出它（账本里混进非 dict 条目）时，把它留在 skip 集合里就等于
+    # 这条阶段既无 raw 块也无 compact 块——彻底隐身。少 skip 一格顶多多一个块。
+    rendered_completed_ids = {_stage_id(stage) for stage in completed if _stage_id(stage)}
     ordered.sort(key=lambda item: int(item.get("stage_index") or 0))
     messages = [
         {
@@ -171,10 +158,9 @@ def retained_raw_stage_messages(
         }
         for stage in ordered
     ]
-    return messages, retained_completed_ids
+    return messages, rendered_completed_ids
 
 
 __all__ = [
-    "retained_completed_raw_stage_ids",
     "retained_raw_stage_messages",
 ]
