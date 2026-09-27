@@ -184,14 +184,18 @@ class NodeTurnController:
             self.poke()
             raise
 
-    def release_turn(self, lease: NodeTurnLease | None) -> None:
+    def release_turn(self, lease: NodeTurnLease | None, *, outcome: str = LEASE_OUTCOME_CANCELLED) -> None:
+        """收尾一次回合：归还准入槽，并把没被 chat 消费掉的 permit 兜底还回去。
+
+        `outcome` 由调用方按这次授予的真实终态给：默认 `cancelled` 表示授予始终没换成一次
+        成功的模型调用（取消、preflight 失败、chat 抛错），否则那颗 permit 与 reserved 会
+        一直挂在被选中的成员上。
+        """
         if lease is None:
             return
         with self._lock:
             self._running_leases.pop(int(lease.lease_id or 0), None)
-        # 回合结束但准入 permit 没被 chat 消费（取消、preflight 失败、chat 抛错）时在这
-        # 里兜底归还，否则那颗 permit 与 reserved 会一直挂在被选中的成员上。
-        self.release_route_lease(lease, outcome=LEASE_OUTCOME_CANCELLED)
+        self.release_route_lease(lease, outcome=outcome)
         self.poke()
 
     def release_route_lease(self, lease: NodeTurnLease | None, *, outcome: str = LEASE_OUTCOME_SUCCESS, error: str = "") -> None:

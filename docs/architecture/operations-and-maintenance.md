@@ -365,7 +365,7 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 
 - 先看这条链到底有没有组：`g3ku status` 打印的是 route/group 结构（`Execution Route: lb:g_shared(m_a|m_b)[rounds=1] → model:m_x`），不再有「链首 = 执行模型」的读法。纯 direct 链仍按配置顺序 fallback，不存在均衡。
 - 看实际分布：`GET /api/models/load-balance/status`（数据来自 worker 心跳，因此需要 worker 在线），按成员读 `running / waiting / reserved / rolling_rpm_60s / penalty_429 / score`。`quota_bucket_count` 小于成员数说明多条绑定共用一份配额，这是预期而不是 bug。
-- 看单个节点为什么选了这个成员：`.g3ku/main-runtime/managed-worker.log` 的 `Model route selected` 行带决策时刻的负载读数与 `selection_reason`；换过成员则看 `Model node binding rebound` 的 `rebind_reason`（`penalty_threshold` / `filter_changed` / `capacity` / `plan_changed` / `fallback_after_failure`）。
+- 看单个节点为什么选了这个成员：`.g3ku/main-runtime/managed-worker.log` 的 `Model route selected` 行带决策时刻的负载读数与 `selection_reason`；换过成员则看 `Model node binding rebound` 的 `rebind_reason`（`filter_changed` / `capacity` / `plan_changed` / `fallback_after_failure`）。429 惩罚不再是重绑原因，它只进打分决定新绑定选谁（契约见 `runtime-overview.md`「节点模型路由与准入绑定」）。`Model route lease released` 的 `outcome` 按这次授予的真实终态打标：`success`=换到了模型回应，`cancelled`=授予没换成回应（取消/preflight 失败/chat 抛错），另有 `build_failed` 与 `group_exhausted`。
 - 401、403、密钥被禁这类失败**不留任何运行态记忆**，状态接口里也查不到：它们当场由模型链 fallback 处理，要去 `.g3ku/logs/console.log` grep `MODEL CHAIN: FALLBACK` 或 worker 日志的 `Model load-balance member … exhausted`。只有上游限流（429）会跨请求留一份衰减惩罚。
 - 「配额分布未知」看 `unresolved_bucket_count`：非 0 表示这个 worker 解析不到密钥材料（未解锁），此时桶合并与 RPM 归因都不可信，先解锁再判断。
 - 要退回旧行为：`mainRuntime.modelRouteLoadBalanceEnabled = false` 把含组的链按配置顺序摊平成 direct 候选（有序链语义），不需要改模型绑定 key，也不影响 token 台账。

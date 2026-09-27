@@ -64,7 +64,7 @@ from main.governance.tool_context import apply_runtime_tool_context_projection
 from main.errors import DistributionHoldError, NodePausedError, TaskPausedError, describe_exception, is_runtime_self_fault
 from main.models import NodeEvidenceItem, NodeFinalResult, RESULT_SCHEMA_VERSION, SpawnChildSpec, normalize_execution_stage_metadata
 from main.runtime.chat_backend import build_actual_request_diagnostics, build_stable_prompt_cache_key
-from main.runtime.model_route import RouteCandidateFilters
+from main.runtime.model_route import LEASE_OUTCOME_CANCELLED, LEASE_OUTCOME_SUCCESS, RouteCandidateFilters
 from main.runtime.append_notice_context import (
     APPEND_NOTICE_CONTEXT_KEY,
     APPEND_NOTICE_TAIL_PREFIX,
@@ -803,9 +803,11 @@ class ReActToolLoop:
             empty_response_retry_count = 0
             restart_with_refreshed_runtime = False
             inflight_notice_callback_triggered = False
+            turn_outcome = LEASE_OUTCOME_CANCELLED
             try:
                 while True:
                     self._check_pause_or_cancel(task.task_id, str(runtime_context.get('node_id') or '').strip())
+                    turn_outcome = LEASE_OUTCOME_CANCELLED
                     try:
                         self._set_model_await_marker(
                             task_id=task.task_id,
@@ -843,6 +845,7 @@ class ReActToolLoop:
                             marker='model.chat.await_response',
                             awaitable=chat_coro,
                         )
+                        turn_outcome = LEASE_OUTCOME_SUCCESS
                         consume_inflight_notice_callback = runtime_context.get('consume_inflight_notice_callback')
                         if callable(consume_inflight_notice_callback) and not inflight_notice_callback_triggered:
                             consume_inflight_notice_callback()
@@ -967,7 +970,7 @@ class ReActToolLoop:
             finally:
                 self._set_model_await_marker(task_id=task.task_id, node_id=node.node_id, marker='')
                 if node_turn_lease is not None and node_turn_controller is not None:
-                    node_turn_controller.release_turn(node_turn_lease)
+                    node_turn_controller.release_turn(node_turn_lease, outcome=turn_outcome)
             if restart_with_refreshed_runtime:
                 attempts = max(0, attempts - 1)
                 continue

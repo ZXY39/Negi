@@ -317,6 +317,31 @@ def test_rebind_triggers_on_capacity_and_rebind_flag() -> None:
     balancer.release(third, outcome=LEASE_OUTCOME_SUCCESS)
 
 
+def test_rate_limit_penalty_never_rebinds_an_existing_binding() -> None:
+    """429 惩罚只决定一次**新**绑定选谁，不动已有绑定。
+
+    被限流的成员让位由组内轮换负责（跑满 `maxRetryRounds` 才换人），与旧模型链同一口径。
+    风暴期实测九个成员跨三个组携带同一组惩罚值——换成员换不到配额缓解，而旧的阈值 1.0
+    让 45/54 个回合在准入期就重绑，把同一节点的上下文在成员之间来回搬。这条断言钉住删除
+    后的语义，别把它当"惩罚没接进选择"补回来。
+    """
+    permits = _FakePermits()
+    balancer = _balancer(_group("g1", "m_a", "m_b"), permits=permits)
+
+    first = _select(balancer, "node:1")
+    assert first.model_key == "m_a"
+    for _ in range(3):
+        balancer.record_outcome(first, status_code=429, error_text="Error code: 429 - tpm exhausted")
+    balancer.release(first, outcome=LEASE_OUTCOME_SUCCESS)
+    members = {row["model_key"]: row for row in balancer.snapshot()["groups"]["g1"]["members"]}
+    assert members["m_a"]["penalty_429"] > 1.0
+
+    again = _select(balancer, "node:1")
+    assert again.model_key == "m_a"
+    assert again.sticky_rebind_reason == ""
+    balancer.release(again, outcome=LEASE_OUTCOME_SUCCESS)
+
+
 def test_non_rate_limit_failure_leaves_no_memory() -> None:
     """失败记忆只有一档：上游限流。其余一律当场交给链 fallback，不跨请求留存。
 

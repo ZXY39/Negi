@@ -44,10 +44,6 @@ RPM_WINDOW_SECONDS = 60.0
 PENALTY_HALF_LIFE_SECONDS = 60.0
 PENALTY_RETENTION_SECONDS = PENALTY_HALF_LIFE_SECONDS * 6
 
-# 粘滞优先，但上游连续打回 429 到一定程度就必须换人：这个阈值是「衰减后的 429 计数」，
-# 1.0 约等于最近一分钟内吃过一次满权重惩罚且尚未衰减。
-PENALTY_REBIND_THRESHOLD = 1.0
-
 # 限流判据复用模型链自己的 `429` 关键字表（g3ku/utils/retry_keywords.py），不另起一套文本。
 RATE_LIMIT_RETRY_ON = ["429"]
 
@@ -253,16 +249,11 @@ class ModelLoadBalancer:
             if not candidates:
                 return None, "no_candidate"
 
-            if binding is not None and binding.model_key in candidates:
-                metrics = self._metrics(binding.model_key)
-                if metrics.penalty >= PENALTY_REBIND_THRESHOLD:
-                    binding_drop_reason = "penalty_threshold"
-                    self._bindings.pop(normalized_node_id, None)
-                    binding = None
-
             # 粘滞优先：绑定的成员只要还合格就先用它，只有它拿不出 permit 才换人。
             # 逐回合按 score 重选会把节点在成员之间来回抖，而换 model_key 等于换前缀
-            # 缓存命名空间。
+            # 缓存命名空间。429 惩罚只进打分（决定一次**新**绑定选谁），不参与已有
+            # 绑定的去留：某个成员真被限流时，让位由组内轮换完成——它跑满
+            # `maxRetryRounds` 才换下一个成员，与旧模型链同一口径。
             if binding is not None and binding.model_key in candidates:
                 lease = self._try_bind_locked(
                     node_id=normalized_node_id,
