@@ -65,11 +65,11 @@ def _target(model_key: str, provider, *, retry_count: int = 0, api_key_count: in
     )
 
 
-def _group(*keys: str, max_rounds: int = 1) -> ResolvedLoadBalanceGroup:
+def _group(*keys: str, max_rounds: int = 1, group_key: str = "g1") -> ResolvedLoadBalanceGroup:
     from main.runtime.model_route import RouteMemberView
 
     return ResolvedLoadBalanceGroup(
-        group_key="g1",
+        group_key=group_key,
         enabled=True,
         max_retry_rounds=max_rounds,
         members=[RouteMemberView(model_key=key, context_window_tokens=200000, image_multimodal_enabled=True) for key in keys],
@@ -90,11 +90,19 @@ def _model_route(index: int, model_key: str) -> ResolvedModelRoute:
     return ResolvedModelRoute(index=index, kind=MODEL_ROUTE_KIND_MODEL, model_key=model_key, candidates=(model_key,))
 
 
-def _wiring(group: ResolvedLoadBalanceGroup, *, plan: ModelRoutePlan, limits: dict[str, dict[str, object]] | None = None):
+def _wiring(
+    group: ResolvedLoadBalanceGroup,
+    *,
+    plan: ModelRoutePlan,
+    limits: dict[str, dict[str, object]] | None = None,
+    extra_groups: tuple[ResolvedLoadBalanceGroup, ...] = (),
+):
     """按准入层的真实形状造一个已绑定的 node-turn lease（不启动 pump）。"""
     controller = ModelKeyConcurrencyController(resolve_model_limits=lambda model_ref: dict((limits or {}).get(model_ref) or {"key_indexes": [0], "per_key_limits": {0: None}}))
     balancer = ModelLoadBalancer(permit_source=controller)
-    balancer.configure(groups={group.group_key: group}, config_revision=plan.config_revision)
+    groups = {group.group_key: group}
+    groups.update({item.group_key: item for item in extra_groups})
+    balancer.configure(groups=groups, config_revision=plan.config_revision)
     route_lease, reason = balancer.select(node_id="node:1", route_index=0, group_key=group.group_key)
     assert route_lease is not None, reason
     lease = NodeTurnLease(
@@ -442,3 +450,49 @@ async def test_held_permit_key_is_rotated_to_front_of_key_pass(monkeypatch) -> N
     assert response.content == "ok"
     assert calls == ["m_a"]
     assert acquired == []
+
+
+@pytest.mark.asyncio
+async def test_boundary_chain_refresh_keeps_second_group_aligned(monkeypatch) -> None:
+    """活刷新不得把候选展开的扁平列表当成链：那会让链上第二个组失去组身份。
+
+    现网形态是 `model_refs_resolver` 交回 plan 的候选展开（成员平铺）。旧实现直接用它替换
+    refs，于是 refs 比槽位表长，落在下标 >= 槽位数的成员被当作 direct 模型按配置顺序取用：
+    组内 least_load 换人、maxRetryRounds 预算与换人退避节拍全部失效。
+    """
+    g1 = _group("m_a", "m_b", max_rounds=1, group_key="g1")
+    g2 = _group("m_c", "m_d", max_rounds=1, group_key="g2")
+    plan = ModelRoutePlan(routes=[_group_route(0, g1), _group_route(1, g2)], config_revision=1)
+    turn_controller, controller, balancer, lease = _wiring(g1, plan=plan, extra_groups=(g2,))
+    calls: list[str] = []
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    _patch(
+        monkeypatch,
+        {
+            "m_a": _target("m_a", _RateLimitedProvider("m_a", calls)),
+            "m_b": _target("m_b", _RateLimitedProvider("m_b", calls)),
+            "m_c": _target("m_c", _RateLimitedProvider("m_c", calls)),
+            "m_d": _target("m_d", _OkProvider("m_d", calls)),
+        },
+    )
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=list(plan.candidate_model_keys),
+        model_routes=plan,
+        model_routes_supplier=lambda: plan,
+        model_refs_resolver=lambda: list(plan.candidate_model_keys),
+        node_turn_lease=lease,
+        node_turn_controller=turn_controller,
+        model_concurrency_controller=controller,
+    )
+
+    assert response.content == "ok"
+    # 组预算是每成员一份：m_c 只该被打通 1 轮，而不是退回 catalog/默认轮数赖在槽上。
+    assert calls == ["m_a", "m_b", "m_c", "m_d"]
+    # 第二个组要走 balancer 选人并留下绑定与观测，而不是被当成 direct 模型消费。
+    assert lease.group_key == "g2"
+    assert lease.selected_model_ref == "m_d"
+    members = {row["model_key"]: row for row in balancer.snapshot()["groups"]["g2"]["members"]}
+    assert members["m_c"]["rolling_rpm_60s"] == 1

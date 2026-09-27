@@ -739,6 +739,18 @@ def _build_route_slots(model_routes: Any, *, node_turn_refs: list[str]) -> list[
     return slots
 
 
+def _direct_refs_from_routes(model_routes: Any) -> list[str]:
+    """从 route plan 取出纯 direct 链的有序模型引用；组槽位由 balancer 决定，这里不猜成员。"""
+    refs: list[str] = []
+    for route in list(getattr(model_routes, "routes", []) or []):
+        if bool(getattr(route, "is_load_balance", False)):
+            continue
+        model_key = str(getattr(route, "model_key", "") or "").strip()
+        if model_key:
+            refs.append(model_key)
+    return refs
+
+
 def _route_entries_status_payload(slots: list[dict[str, Any]], refs: list[str]) -> list[dict[str, Any]]:
     """retry status 里的「用户配置的 fallback 链」视图。"""
     if not slots:
@@ -939,6 +951,7 @@ class ConfigChatBackend:
         model_concurrency_controller: ModelKeyConcurrencyController | None = None,
         on_text_delta: Any = None,
         model_refs_resolver: Any = None,
+        model_routes_supplier: Any = None,
         single_request_timeout_seconds: float | None = None,
         on_model_retry_status: Any = None,
         model_routes: Any = None,
@@ -982,6 +995,56 @@ class ConfigChatBackend:
                 return []
             return [str(item or '').strip() for item in list(candidate or []) if str(item or '').strip()]
 
+        def _live_route_plan() -> Any:
+            if not callable(model_routes_supplier):
+                return None
+            try:
+                return model_routes_supplier()
+            except Exception:
+                return None
+
+        def _refreshed_route_chain() -> tuple[list[str], list[dict[str, Any]], Any, bool]:
+            """按活配置重建链，返回 (链, 槽位表, plan, 是否变化)；不写回状态，由调用方决定落地点。
+
+            含组的链只认 route plan，并且 refs 与槽位表一起重建：两者必须同长同序
+            （一槽一位）。拿候选展开的扁平列表替换 refs 会让 refs 长于槽位，下标 >=
+            槽位数的组成员从此查不到槽位，退化成按配置顺序取用的 direct 模型——组内
+            least_load 选人、`maxRetryRounds` 预算与换人退避节拍一并失效。
+            """
+            if route_slots:
+                plan = _live_route_plan()
+                if plan is None:
+                    return refs, route_slots, model_routes, False
+                new_refs: list[str] = []
+                new_slots = _build_route_slots(plan, node_turn_refs=new_refs)
+                if not new_slots:
+                    new_refs = _direct_refs_from_routes(plan)
+                else:
+                    # 换人后的成员不能被抹回槽位占位成员，否则已试过的成员会重新占住槽位。
+                    for index, slot in enumerate(new_slots):
+                        if slot.get("kind") != "load_balance" or index >= len(refs):
+                            continue
+                        current_ref = str(refs[index] or "")
+                        if current_ref and current_ref in list(slot.get("members") or []):
+                            new_refs[index] = current_ref
+                changed = bool(new_refs) and new_refs != refs
+                return (new_refs, new_slots, plan, changed) if changed else (refs, route_slots, model_routes, False)
+            fresh_refs = _resolved_model_refs()
+            if fresh_refs and fresh_refs != refs:
+                return fresh_refs, route_slots, model_routes, True
+            return refs, route_slots, model_routes, False
+
+        def _adopt_route_chain(
+            new_refs: list[str],
+            new_slots: list[dict[str, Any]],
+            new_plan: Any,
+        ) -> None:
+            """把刷新结果落成在用链：refs、槽位表、plan 与重试 toast 的链视图一起换。"""
+            nonlocal route_slots, model_routes, route_entries_payload
+            route_slots = new_slots
+            model_routes = new_plan
+            route_entries_payload = _route_entries_status_payload(new_slots, new_refs)
+
         last_error: Exception | None = None
         last_response: LLMResponse | None = None
         attempts: list[LLMModelAttempt] = []
@@ -1021,14 +1084,16 @@ class ConfigChatBackend:
 
         try:
             # 发送前先做一次活解析（与旧首轮行为一致）：拿到调用前刚发生的链变更。
-            fresh_refs = _resolved_model_refs()
-            if fresh_refs and fresh_refs != refs:
+            previous_refs = list(refs)
+            fresh_refs, fresh_slots, fresh_plan, chain_changed = _refreshed_route_chain()
+            if chain_changed:
+                refs = fresh_refs
+                _adopt_route_chain(refs, fresh_slots, fresh_plan)
                 logger.info(
                     "Model chain refreshed before first model: {} -> {}",
+                    ", ".join(previous_refs),
                     ", ".join(refs),
-                    ", ".join(fresh_refs),
                 )
-                refs = fresh_refs
             model_index = 0
             while True:
                 while model_index < len(refs) and refs[model_index] in tried_model_refs:
@@ -1315,21 +1380,19 @@ class ConfigChatBackend:
                             # 而不是抛错中止回合。只有真的解析出不同链（且未超过病态
                             # 抖动上限）才重启；否则只刷新 revision 基线并继续既有
                             # 重试账本，避免在同一 revision 上空转。
-                            refreshed_refs = _resolved_model_refs()
-                            if (
-                                refreshed_refs
-                                and refreshed_refs != refs
-                                and chain_restart_count < _MAX_CHAIN_CHANGE_RESTARTS
-                            ):
+                            previous_refs = list(refs)
+                            refreshed_refs, refreshed_slots, refreshed_plan, chain_refreshed = _refreshed_route_chain()
+                            if chain_refreshed and chain_restart_count < _MAX_CHAIN_CHANGE_RESTARTS:
                                 chain_restart_count += 1
                                 logger.warning(
                                     "Model chain changed during retry; restarting chain {} -> {} (restart {}/{})",
-                                    ", ".join(refs),
+                                    ", ".join(previous_refs),
                                     ", ".join(refreshed_refs),
                                     chain_restart_count,
                                     _MAX_CHAIN_CHANGE_RESTARTS,
                                 )
                                 refs = list(refreshed_refs)
+                                _adopt_route_chain(refs, refreshed_slots, refreshed_plan)
                                 start_revision = current_runtime_config_revision()
                                 # 新链等价于新的一轮预算账本：清掉已试集合，让新链里
                                 # 之前被跳过的模型重新获得机会。
@@ -1408,14 +1471,16 @@ class ConfigChatBackend:
                 # 本模型耗尽：在模型前进边界活刷新链（运行中新增的 fallback 模型
                 # 在此可见），跳过已试模型后决定前进还是落终态。
                 model_index += 1
-                fresh_refs = _resolved_model_refs()
-                if fresh_refs and fresh_refs != refs:
+                previous_refs = list(refs)
+                fresh_refs, fresh_slots, fresh_plan, chain_refreshed = _refreshed_route_chain()
+                if chain_refreshed:
                     logger.info(
                         "Model chain refreshed at model boundary: {} -> {}",
-                        ", ".join(refs),
+                        ", ".join(previous_refs),
                         ", ".join(fresh_refs),
                     )
                     refs = fresh_refs
+                    _adopt_route_chain(refs, fresh_slots, fresh_plan)
                     model_index = 0
                 while model_index < len(refs) and refs[model_index] in tried_model_refs:
                     model_index += 1
