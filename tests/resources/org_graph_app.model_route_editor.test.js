@@ -56,15 +56,19 @@ function baseContext(elements = {}) {
     };
 }
 
-function loadApp(elements = {}) {
+function loadApp(elements = {}, globals = {}) {
     const context = baseContext(elements);
     context.window = context;
     vm.createContext(context);
+    // bind() 的尾巴上会调到别的模块提供的渲染函数；这里只按名字补空实现，
+    // 让事件绑定能跑完，不改变被测处理器的行为。
+    Object.entries(globals).forEach(([name, value]) => { context[name] = value; });
     vm.runInContext(
         `${APP_CODE}\nthis.__exports = {
             S,
             U,
             applyModelCatalog,
+            bind,
             buildModelRoleChainUpdates,
             chainToRouteEntries,
             chainUsesGroup,
@@ -74,6 +78,7 @@ function loadApp(elements = {}) {
             deleteLoadBalanceGroupDraft,
             groupRefToken,
             isGroupRef,
+            modelScopeChain,
             normalizeModelRoleChain,
             openLoadBalanceGroupDialog,
             renderModelGroupChainTile,
@@ -220,18 +225,39 @@ function stubElement(extra = {}) {
         disabled: false,
         attributes: {},
         style: {},
+        listeners: {},
         classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
         setAttribute(name, value) { this.attributes[name] = value; },
         getAttribute(name) { return this.attributes[name]; },
         querySelector: () => null,
         querySelectorAll: () => [],
-        addEventListener() {},
+        addEventListener(type, handler) { (this.listeners[type] ||= []).push(handler); },
+        // 事件委托类缺陷只能真投递：把同一个 event 交给这个容器上挂过的处理器。
+        dispatch(type, event) { (this.listeners[type] || []).forEach((handler) => handler(event)); },
         appendChild() {},
         insertBefore() {},
         remove() {},
         closest: () => null,
         getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
         ...extra,
+    };
+}
+
+// 最小 DOM 桩：只实现处理器用到的 closest(属性选择器) 与 dataset。
+function fakeNode(dataset, parent = null) {
+    return {
+        dataset,
+        parent,
+        closest(selector) {
+            const attr = String(selector || "").replace(/^\[|\]$/g, "").replace(/^data-/, "");
+            const camel = attr.replace(/-([a-z])/g, (_m, c) => c.toUpperCase());
+            let node = this;
+            while (node) {
+                if (node.dataset && camel in node.dataset) return node;
+                node = node.parent;
+            }
+            return null;
+        },
     };
 }
 
@@ -261,7 +287,7 @@ function modelPageElements() {
 
 function loadModelPage(payload = catalogPayload()) {
     const elements = modelPageElements();
-    const app = loadApp(elements);
+    const app = loadApp(elements, { renderTaskSessionScope: () => {} });
     app.applyModelCatalog(payload, { preserveRoleDrafts: false });
     return { app, elements };
 }
@@ -474,4 +500,38 @@ test("模型页由 org_graph_llm.js 渲染：renderAll 画得出组列，链里�
     assert.doesNotMatch(chains, /data-model-open="group:g_shared"/);
     // 组内的 m_a 不能被摊平成一块独立模型卡——那正是「链看起来对、保存下去变成逐个成员」的来路。
     assert.doesNotMatch(chains, /data-model-chain-ref="m_a"/);
+});
+
+test("组卡的叉号先于整卡点击区判定：点它是移出链，不是弹配置", () => {
+    const elements = modelPageElements();
+    const app = loadApp(elements, { renderTaskSessionScope: () => {} });
+    app.bind();
+    app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
+    app.startModelRoleEditing();
+    sameJson(app.modelScopeChain("execution"), ["group:g_shared", "m_emergency"]);
+
+    // 叉号在带 data-group-edit 的那张 article 里面：判定顺序错位就会弹配置。
+    const tile = fakeNode({ groupEdit: "g_shared", modelChainRef: "group:g_shared", scope: "execution" });
+    const removeButton = fakeNode({ modelChainAction: "remove", scope: "execution", index: "0" }, tile);
+
+    elements["model-role-editors"].dispatch("click", { target: removeButton });
+
+    sameJson(app.modelScopeChain("execution"), ["m_emergency"]);
+    assert.equal(app.S.modelCatalog.groupDialog.open, false, "移出链不该顺手把组配置弹窗弹出来");
+});
+
+test("组卡本体仍然整张可点：查看态也打开配置", () => {
+    const elements = modelPageElements();
+    const app = loadApp(elements, { renderTaskSessionScope: () => {} });
+    app.bind();
+    app.applyModelCatalog(catalogPayload(), { preserveRoleDrafts: false });
+
+    const tile = fakeNode({ groupEdit: "g_shared", modelChainRef: "group:g_shared" });
+    const body = fakeNode({ modelChainRef: "group:g_shared" }, tile);
+
+    elements["model-role-editors"].dispatch("click", { target: body });
+
+    assert.equal(app.S.modelCatalog.groupDialog.open, true);
+    assert.equal(app.S.modelCatalog.groupDialog.editingKey, "g_shared");
+    sameJson(app.S.modelCatalog.groupDialog.modelKeys, ["m_a", "m_b"]);
 });

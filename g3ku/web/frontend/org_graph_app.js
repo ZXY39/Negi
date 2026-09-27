@@ -16341,23 +16341,26 @@ function bind() {
             openModel(open.dataset.modelOpen);
             return;
         }
+        // 移出链的叉号在组卡内部，必须先判它；否则点叉号会被下面那条"整张卡都可点"的
+        // 分支吃掉，只会把配置弹窗弹出来。
+        if (S.modelCatalog.roleEditing) {
+            const action = e.target.closest("[data-model-chain-action]");
+            if (action) {
+                const scope = String(action.dataset.scope || "");
+                const index = Number(action.dataset.index || -1);
+                const chain = modelScopeChain(scope);
+                if (!scope || index < 0 || index >= chain.length) return;
+                if (action.dataset.modelChainAction === "remove") {
+                    chain.splice(index, 1);
+                    updateRoleChainDraft(scope, chain);
+                }
+                return;
+            }
+        }
         // 组卡的整张卡都是点击区，查看态也允许打开配置看成员与预算。
         const groupEdit = e.target.closest("[data-group-edit]");
         if (groupEdit) {
             openLoadBalanceGroupDialog(String(groupEdit.dataset.groupEdit || ""));
-            return;
-        }
-        if (!S.modelCatalog.roleEditing) return;
-        const action = e.target.closest("[data-model-chain-action]");
-        if (action) {
-            const scope = String(action.dataset.scope || "");
-            const index = Number(action.dataset.index || -1);
-            const chain = modelScopeChain(scope);
-            if (!scope || index < 0 || index >= chain.length) return;
-            if (action.dataset.modelChainAction === "remove") {
-                chain.splice(index, 1);
-                updateRoleChainDraft(scope, chain);
-            }
             return;
         }
     });
