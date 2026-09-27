@@ -42,6 +42,7 @@
     --ui-bg-elevated: #212121;
     --ui-bg-subtle: #272727;
     --ui-bg-input: #151515;
+    --ui-color-scheme: dark;
 
     --ui-border: rgba(255, 255, 255, 0.08);
     --ui-border-strong: rgba(255, 255, 255, 0.15);
@@ -91,6 +92,7 @@
     --ui-bg-elevated: #ffffff;
     --ui-bg-subtle: #ececec;
     --ui-bg-input: #ffffff;
+    --ui-color-scheme: light;
 
     --ui-border: #d3d3d3;
     --ui-border-strong: #b6b6b6;
@@ -2658,6 +2660,18 @@
     border: 1px solid var(--ui-border);
     background: var(--ui-bg-surface);
     box-shadow: none;
+}
+
+/* 这两个框是 type="search"，浏览器默认按原生 searchfield 画底：底色取系统
+   Field 色，而页面从未声明 color-scheme，UA 侧一律按浅色主题算，于是深色下
+   上面那条实色底会被原生白底盖掉。关掉 appearance 并把 color-scheme 锚到当前
+   主题，底色才完全由本层决定。代价：原生「✕ 清空」按钮随之消失，Esc 收起下拉
+   由 org_graph_task_view.js 的 keydown 处理，不依赖它。 */
+[data-ui-version="v2"] .task-tree-search-input,
+[data-ui-version="v2"] .task-token-call-search {
+    appearance: none;
+    -webkit-appearance: none;
+    color-scheme: var(--ui-color-scheme);
 }
 
 /* 57. 状态容器不再被二次稀释：旧层把状态底色又淡了一遍（color-mix(soft 24%,
