@@ -207,6 +207,9 @@ def test_silence_rules_state_which_turn_they_govern() -> None:
     frontdoor = (root / 'g3ku' / 'runtime' / 'prompts' / 'ceo_frontdoor.md').read_text(encoding='utf-8')
     preamble = (root / 'g3ku' / 'heartbeat' / 'session_service.py').read_text(encoding='utf-8')
 
-    assert '`[SESSION EVENTS]` 开头的那一轮' in rules
+    assert '只适用于本轮携带事件束的那一次唤醒' in rules
+    # 事件束标记本身不许出现在规则块里：稳定规则文本是按该标记 partition 出来的，
+    # 写进去会把后面的规则整段切掉（实盘踩过一次）。
+    assert '[SESSION EVENTS]' not in rules
     assert 'govern this event turn only' in preamble
     assert '用户一旦开口就不再适用' in frontdoor

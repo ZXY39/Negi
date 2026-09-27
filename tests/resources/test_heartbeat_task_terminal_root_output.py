@@ -333,9 +333,13 @@ async def test_web_session_heartbeat_includes_root_output_when_acceptance_failed
     assert "Execution output ref: artifact:artifact:root-output" in prompt_text
 
 
-async def test_task_terminal_silent_turn_acks_without_visible_reply(tmp_path) -> None:
-    """模型调 `silent` 工具收尾（runtime 归一化为 output=''+is_silent_reply）时走静默 ACK：
-    不投递 ceo.reply.final、不触发修复循环、不落兜底文案。
+async def test_task_terminal_silent_turn_skips_delivery_and_ack(tmp_path) -> None:
+    """模型调 `silent` 工具收尾（runtime 归一化为 output=''+is_silent_reply）时：不投递渠道、
+    不触发修复循环、不落兜底文案，也不再补一条 `ceo.internal.ack`。
+
+    网页侧这一轮的痕迹由 WS 的 final 帧（带 `silent_reply`）渲染成折叠「静默消息」行；
+    唤醒层再发 ack 会让同一轮出现两行，且与刷新后的画法打架。ack 车道只剩"空输出且本轮
+    不强制可见回复"那种机器侧兜底——模型没做静默决定时才有。
 
     原先这条测的是文本哨兵 `[G3KU_SILENT]`，该判据已在 P4 随文案出口一并删除；
     "哨兵只许整行精确匹配、绝不子串命中"这条约束改由
@@ -392,7 +396,7 @@ async def test_task_terminal_silent_turn_acks_without_visible_reply(tmp_path) ->
     assert next_delay is None
     published_types = [env.get("type") for _, env in task_service.registry.published]
     assert "ceo.reply.final" not in published_types
-    assert "ceo.internal.ack" in published_types
+    assert "ceo.internal.ack" not in published_types
     # 静默 token 不走修复循环（只发生首次那一次 prompt）
     assert len(live_session.prompts) == 1
 

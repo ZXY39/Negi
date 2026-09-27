@@ -122,13 +122,13 @@ transcript 落一条 assistant 行，带 `silent_reply=true`、`prompt_visible=t
 
 可见回合从哪儿知道有这个出口：`_render_frontdoor_contract_summary` 在 `silent` 出现在 callable 名单时渲染一行 `silent_help:`，指路之外只说"静默没有文本写法"。心跳车道那份措辞（`heartbeat/session_service.py` 的 `_silent_tool_instruction`）只覆盖事件轮，覆盖不到普通用户回合，而工具名恒定出现在契约里并不等于模型知道该在什么时候用它。
 
-**静默判据必须自带轮次作用域。** 心跳的 `This is a background heartbeat…` 行连同 `# Heartbeat Rules` 块按 append-only 规则长期留在请求体基线里，于是紧随其后的可见用户轮读到的是几条消息之前那段"本轮必须三选一收尾、可以调 `silent`"——该轮的第一句（"你正在处理内部事件，不是在处理新的用户输入"）在新用户轮里是一句错误陈述。因此规则块首句显式限定"只适用于本轮消息束以 `[SESSION EVENTS]` 开头的那一轮"，前言同样声明只治理本轮；`ceo_frontdoor.md` 面向可见轮补一条正向判据：用户在当前轮提问或追问已交付物的内容时必须回答，此前"跑完等我问""别急着告诉我"这类要求只免除主动推送，用户一旦开口就不再适用。触发这条改动的实盘形状：2026-09-27 10:15 用户问「大体结论是什么」，模型不给任何可见正文只调 `silent`，而其 `reason` 通篇在论证"我应该基于任务结果给出摘要"、`subject` 与 `superseded_by` 双空，用户再发一个「？」后模型自己翻案。机器侧不设闸门（既定裁决：推不推由模型决定，机器只负责按时送到），所以这条边界只存在于措辞里，守卫见 `tests/resources/test_frontdoor_silent_tool_exposure.py`。
+**静默判据必须自带轮次作用域。** 心跳的 `This is a background heartbeat…` 行连同 `# Heartbeat Rules` 块按 append-only 规则长期留在请求体基线里，于是紧随其后的可见用户轮读到的是几条消息之前那段"本轮必须三选一收尾、可以调 `silent`"——该轮的第一句（"你正在处理内部事件，不是在处理新的用户输入"）在新用户轮里是一句错误陈述。因此规则块首句显式限定"只适用于本轮携带事件束的那一次唤醒"，前言同样声明只治理本轮；`ceo_frontdoor.md` 面向可见轮补一条正向判据：用户在当前轮提问或追问已交付物的内容时必须回答，此前"跑完等我问""别急着告诉我"这类要求只免除主动推送，用户一旦开口就不再适用。触发这条改动的实盘形状：2026-09-27 10:15 用户问「大体结论是什么」，模型不给任何可见正文只调 `silent`，而其 `reason` 通篇在论证"我应该基于任务结果给出摘要"、`subject` 与 `superseded_by` 双空，用户再发一个「？」后模型自己翻案。机器侧不设闸门（既定裁决：推不推由模型决定，机器只负责按时送到），所以这条边界只存在于措辞里，守卫见 `tests/resources/test_frontdoor_silent_tool_exposure.py`。写这段措辞时有一条硬约束：**规则文本里不得出现事件束标记本身**——稳定规则文本是按该标记 `partition` 出来的，把它写进规则会把后面的整段规则切掉（实盘踩过一次）。
 
 **旧哨兵的字面串不得出现在任何逐字送达模型的面。** 删除识别（P4）只覆盖代码侧判据，指令本身还长在提示词里：`g3ku/runtime/prompts/ceo_frontdoor.md` 与 `heartbeat_rules.md` 曾继续要求"整条回复只输出哨兵"，于是每个新会话的 system prompt 都在教模型用一条已经没人认的写法——2026-09-24 00:34 一个新开网页会话照做并把机制解释给用户，就是这条。同一句话还可能从**长期记忆**注入（记忆条目每轮进 index 1），那属于操作员数据，走 `/api/memory/current/delete` 清理。回归守卫见 `tests/resources/test_frontdoor_silent_tool_exposure.py`：提示词目录与契约渲染器里出现该字面串即失败。代码注释与维护文档里保留这个词是刻意的——它们记录"为什么删"，不进上下文。
 
 Web 侧没有"静默占位文案"这个概念：静默回合走与普通回合**同一条** `ceo.reply.final` 通道，带上正文、`silent_reply=true` 与 `silent_reason`，并照常携带 `source` / `turn_id` / `user_messages` / `usage` / canonical context 合并结果。前端把整条响应折成气泡外的一行「静默消息 HH:MM:SS」，点开露出原文与轨道（不再单独挂原因行：工具静默时正文本身就是 reason），UI 合同详见 `web-and-admin.md`「CEO Turn Silent Reply Contract」。新维护者最容易误读的一点：静默 final 一旦缺少 canonical context 又缺少正文，`finalizeCeoTurn` 会退到"无回合元素"兜底分支并 `discardPendingCeoTurns`，整条阶段轨道连同工具步骤一起被删掉——表现为"静默回合什么都没显示"，根因在 final 载荷字段不全，不在渲染层。会话列表 preview 在没有可见文本时保持原值（`update_ceo_session_after_turn` 对空 `preview_source` 不写回）。
 
-内部轮还有一层 live-only ACK：模型调用 `silent` 结束的 heartbeat/cron 回合，`_is_internal_ack_message_end` 依据 `silent_reply` flag 认定，前端收到一条 `ceo.internal.ack` 而不是一个空气泡；`task_terminal` 心跳走回复通道，不算 ACK。
+内部轮的静默与用户轮同一种画法：模型调用 `silent` 结束的 heartbeat/cron 回合照常收到带 `silent_reply` 的 `ceo.reply.final`，前端据此画折叠「静默消息」行（没有 live 回合元素时按需补一个），渠道侧仍由同一个 flag 闸门不投递。`ceo.internal.ack` 只剩机器侧兜底一种情形——内部轮空输出且本轮不强制可见回复（模型没做静默决定），此时既没有 final 帧也没有转录痕迹，ack 是唯一的"已按时送到"证据。两条车道不得同时出声：过去 WS 与心跳唤醒层各发一条 ack、hub 排空不按类型过滤、前端也不按 `turn_id` 去重，同一轮会落两行。
 
 ## 4. frontdoor 与任务运行时的关系
 
@@ -515,7 +515,7 @@ Heartbeat 与 cron 内部轮次共享同一内部轮次合同，完整契约详�
 - 规则文本与事件载荷以隐藏内部提示消息追加：`prompt_visible=true`、`ui_visible=false`，带 `internal_prompt_kind`（`heartbeat_rule` / `heartbeat_event_bundle` / `cron_rule` / `cron_event_bundle`）；heartbeat 追加 `system` 规则 + `user` event-bundle，cron 追加两个隐藏 `system` 块。存在权威 frontdoor 基线时，内部轮次直接继承普通 CEO tool/skill 暴露合同（含无有效阶段仍保留全量 callable 的合同）。
 - 无基线的内部轮（重启后首轮、全新会话首轮）不进入续跑分支：内部事件消息单独交给 prompt 组装，由新建路径注入，基础系统提示保持首位。续跑分支只在存在真实请求体基线时使用——否则仅有的内部事件消息会冒充完整旧请求体、让基础提示被静默丢掉。内部轮基线/恢复细节见 `context-and-cache-troubleshooting.md`「heartbeat / cron 按普通 continuation shrink 规则排查」与「Baseline 合同与恢复顺序」。
 - 服务层不得替模型自动重试任务，也不得合成回退 assistant 回复。
-- `ceo.internal.ack` 帧是 live-only 的：它可以在 UI 展示"心跳已接收"，但不新建转录条目。它与静默回合的转录行是两回事——后者 durable、prompt-visible 且 ui-visible（渲染成折叠行），模型要能在后续轮次读到自己上次的静默选择。隐藏内部提示消息（`ui_visible=false`）是第三类：durable 且 prompt-visible。合同详见「3.3 静默回复」。
+- `ceo.internal.ack` 帧是 live-only 的，且只兜"内部轮空输出"这一种：它不新建转录条目。模型自己选静默的回合走 `ceo.reply.final` + `silent_reply`，其转录行才是那两回事的载体——durable、prompt-visible 且 ui-visible（渲染成折叠行），模型要能在后续轮次读到自己上次的静默选择。隐藏内部提示消息（`ui_visible=false`）是第三类：durable 且 prompt-visible。合同详见「3.3 静默回复」。
 
 ## Repeated Tool Call Guard Notes
 

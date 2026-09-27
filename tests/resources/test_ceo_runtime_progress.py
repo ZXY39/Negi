@@ -5229,7 +5229,7 @@ def test_ceo_websocket_final_reply_includes_current_turn_user_messages(tmp_path:
     ]
 
 
-def test_ceo_websocket_forwards_cron_silent_turn_as_internal_ack(tmp_path: Path, monkeypatch) -> None:
+def test_ceo_websocket_forwards_cron_silent_turn_as_silent_final(tmp_path: Path, monkeypatch) -> None:
     _mock_workspace(monkeypatch, tmp_path)
 
     async def _ensure_services(_agent) -> None:
@@ -5266,8 +5266,9 @@ def test_ceo_websocket_forwards_cron_silent_turn_as_internal_ack(tmp_path: Path,
             self.state.status = "running"
             self.state.is_running = True
             await self._emit("state_snapshot", state=self.state_dict())
-            # cron 的"本轮无话可说"现在由 silent 工具表达：正文留在上下文但不外发，
-            # WS 侧据 silent_reply flag 推一条 ceo.internal.ack 而不是空气泡。
+            # cron 的"本轮无话可说"由 silent 工具表达：正文留在上下文但不外发。
+            # WS 侧不再把它换成 ceo.internal.ack，而是照常发 final 帧带上 silent_reply，
+            # 前端据此画折叠「静默消息」行；渠道侧由同一个 flag 闸门。
             await self._emit(
                 "message_end",
                 role="assistant",
@@ -5305,14 +5306,17 @@ def test_ceo_websocket_forwards_cron_silent_turn_as_internal_ack(tmp_path: Path,
         for _ in range(6):
             payload = ws.receive_json()
             messages.append(payload)
-            if payload.get("type") == "ceo.internal.ack":
+            if payload.get("type") == "ceo.reply.final":
                 break
 
-    ack_events = [item for item in messages if item["type"] == "ceo.internal.ack"]
-    assert len(ack_events) == 1
-    assert ack_events[0]["data"]["source"] == "cron"
-    assert ack_events[0]["data"]["reason"] == "heartbeat_ok"
-    assert ack_events[0]["data"]["turn_id"] == "turn-cron-ack"
+    finals = [item for item in messages if item["type"] == "ceo.reply.final"]
+    assert len(finals) == 1
+    assert finals[0]["data"]["source"] == "cron"
+    assert finals[0]["data"]["silent_reply"] is True
+    assert finals[0]["data"]["text"] == "定时任务无新增，本轮不外发。"
+    assert finals[0]["data"]["turn_id"] == "turn-cron-ack"
+    # 折叠行是这一轮唯一的网页痕迹：再出现 ack 就是同轮两行。
+    assert [item for item in messages if item["type"] == "ceo.internal.ack"] == []
 
 
 def test_ceo_websocket_resume_interrupt_forwards_resume_payload(tmp_path, monkeypatch) -> None:
@@ -6514,7 +6518,7 @@ async def test_ceo_websocket_queues_running_turn_follow_up_and_chains_next_turn(
     )
 
 
-def test_ceo_websocket_filters_silent_internal_ack_by_flag_not_text() -> None:
+def test_ceo_websocket_forward_gate_reads_silent_flag_not_text() -> None:
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": "normal reply", "heartbeat_internal": False}
     ) is True
@@ -6533,20 +6537,6 @@ def test_ceo_websocket_filters_silent_internal_ack_by_flag_not_text() -> None:
     ) is True
     assert websocket_ceo._should_forward_message_end(
         {"role": "assistant", "text": ""}
-    ) is False
-    # 内部 ack 的认定从"文本等于 HEARTBEAT_OK"改读 silent 工具信号：cron/心跳的静默
-    # 回合推一条 ceo.internal.ack，而不是留一个空气泡；task_terminal 心跳走回复通道。
-    assert websocket_ceo._is_internal_ack_message_end(
-        {"role": "assistant", "text": "这段留在上下文里", "source": "cron", "silent_reply": True}
-    ) is True
-    assert websocket_ceo._is_internal_ack_message_end(
-        {"role": "assistant", "text": "", "source": "heartbeat", "heartbeat_reason": "task_terminal", "silent_reply": True}
-    ) is False
-    assert websocket_ceo._is_internal_ack_message_end(
-        {"role": "assistant", "text": "", "source": "heartbeat", "heartbeat_reason": "tool_background", "silent_reply": True}
-    ) is True
-    assert websocket_ceo._is_internal_ack_message_end(
-        {"role": "assistant", "text": "", "source": "heartbeat", "silent_reply": False}
     ) is False
 
 

@@ -1807,16 +1807,19 @@ class WebSessionHeartbeatService:
                 if preserved_turn_id:
                     discard_payload["turn_id"] = preserved_turn_id
                 self._publish_ceo(key, "ceo.turn.discard", discard_payload)
-            self._publish_ceo(
-                key,
-                "ceo.internal.ack",
-                {
-                    "source": "heartbeat",
-                    "reason": heartbeat_reason or "heartbeat_ok",
-                    "label": self._internal_ack_label(source="heartbeat", reason=heartbeat_reason or "heartbeat_ok"),
-                    "turn_id": heartbeat_turn_id,
-                },
-            )
+            if not silent_reply:
+                # ack 只兜"机器侧空输出"这一种：模型调 `silent` 决定的静默由 final 帧渲染成
+                # 折叠「静默消息」行，这里再补一条就成了同一轮两行，且与刷新后的画法打架。
+                self._publish_ceo(
+                    key,
+                    "ceo.internal.ack",
+                    {
+                        "source": "heartbeat",
+                        "reason": heartbeat_reason or "heartbeat_ok",
+                        "label": self._internal_ack_label(source="heartbeat", reason=heartbeat_reason or "heartbeat_ok"),
+                        "turn_id": heartbeat_turn_id,
+                    },
+                )
             event_ids = {event.event_id for event in events}
             popped = self._events.pop_many(key, event_ids=event_ids)
             self._requeue_running_background_events(key, events)

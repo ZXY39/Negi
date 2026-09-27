@@ -9540,7 +9540,7 @@ function finalizeCeoTurn(text, meta = {}) {
     const silentReply = meta?.silent_reply === true;
     const finalCanonicalContext = normalizeCeoSnapshotCanonicalContext(meta?.canonical_context || null);
     const finalUserMessages = normalizeCeoSnapshotUserMessages(meta?.user_messages, meta?.user_message);
-    const turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
+    let turn = pullActiveCeoTurn(normalizedSource, normalizedTurnId);
     // final 事件带的 canonical 数据优先（后端在 delta 为空时会连 canonical_context 一起省略）；
     // 缺失时回退到本轮在 run 中自己渲染出的轨道（lastExecutionTraceSummary），
     // 避免「阶段在最终答复后消失、刷新才回来」。该兜底是当前轮的 per-turn delta，
@@ -9574,14 +9574,23 @@ function finalizeCeoTurn(text, meta = {}) {
     // 不做全量重建;增量路径只用于 final 带 user_messages 的场景。
     if (!finalUserMessages.length) {
         if (!turn?.textEl || !turn?.flowEl) {
-            if (!silentReply) addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
-            discardPendingCeoTurns({
-                force: normalizedSource === "heartbeat",
-                source: normalizedSource,
-                turnId: normalizedTurnId,
-            });
-            maybeDispatchQueuedCeoFollowUps();
-            return;
+            // 内部轮（heartbeat / cron）不为"处理中"建 live 回合元素，模型选静默时往往
+            // 无元素可收尾。这里按需补一个再画折叠行，让内部轮与用户轮同一种画法——
+            // 否则同一轮静默在实时视图里什么都不留、刷新后才冒出来。用户轮保持原样：
+            // 它的静默由转录行与快照渲染，找不到元素说明这一轮的元素已被丢弃。
+            if (silentReply && (normalizedSource === "heartbeat" || normalizedSource === "cron")) {
+                turn = ensureActiveCeoTurn({ source: normalizedSource, turnId: normalizedTurnId });
+            }
+            if (!turn?.textEl || !turn?.flowEl) {
+                if (!silentReply) addMsg(text, "system", { markdown: true, scrollMode: "preserve" });
+                discardPendingCeoTurns({
+                    force: normalizedSource === "heartbeat",
+                    source: normalizedSource,
+                    turnId: normalizedTurnId,
+                });
+                maybeDispatchQueuedCeoFollowUps();
+                return;
+            }
         }
         mutateCeoFeed(() => {
             clearCeoToolReminder(turn, { force: true });

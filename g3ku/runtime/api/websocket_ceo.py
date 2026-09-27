@@ -1362,31 +1362,6 @@ def _should_forward_message_end(payload: dict[str, Any] | None) -> bool:
     return bool(str(data.get("text") or "").strip())
 
 
-def _is_internal_ack_message_end(payload: dict[str, Any] | None) -> bool:
-    """内部回合「本轮无话可说」的判定：改读 silent 工具信号，不再匹配文本。
-
-    旧判据是 `text == "HEARTBEAT_OK"`，即模型用文案哨兵收尾时给前端推一条 ack 而不是
-    空气泡。现在同一个意图由 `silent` 工具表达，所以这里换成 flag；排除 task_terminal
-    心跳那一支（它走回复通道，见 heartbeat/session_service 的 ack 投递）。
-    """
-    data = payload if isinstance(payload, dict) else {}
-    if str(data.get("role") or "").strip().lower() != "assistant":
-        return False
-    if not bool(data.get("silent_reply")):
-        return False
-    source = str(data.get("source") or "").strip().lower()
-    if source == "heartbeat" and str(data.get("heartbeat_reason") or "").strip().lower() == "task_terminal":
-        return False
-    return source in {"heartbeat", "cron"}
-
-
-def _internal_ack_label(*, source: str, reason: str) -> str:
-    normalized_source = str(source or "").strip().lower() or "heartbeat"
-    normalized_reason = str(reason or "").strip() or "heartbeat_ok"
-    suffix = "cron" if normalized_source == "cron" else "心跳"
-    return f"已接收来自类型：{normalized_reason}的{suffix}"
-
-
 @router.websocket('/ws/ceo')
 async def ceo_websocket(websocket: WebSocket):
     await websocket.accept()
@@ -1961,22 +1936,9 @@ async def ceo_websocket(websocket: WebSocket):
                 turn_usage = turn_usage_map.get(turn_id) or None
             if not turn_usage and isinstance(snapshot, dict):
                 turn_usage = snapshot.get("usage") or None
-            if _is_internal_ack_message_end(payload):
-                reason = str(payload.get("heartbeat_reason") or "heartbeat_ok").strip() or "heartbeat_ok"
-                await _flush_pending_turn_patch()
-                await _push_stream_event(
-                    'ceo.internal.ack',
-                    {
-                        'source': source if source in {'heartbeat', 'cron'} else 'heartbeat',
-                        'reason': reason,
-                        'label': _internal_ack_label(
-                            source=source if source in {'heartbeat', 'cron'} else 'heartbeat',
-                            reason=reason,
-                        ),
-                        'turn_id': turn_id,
-                    },
-                )
-                return
+            # 内部轮（heartbeat / cron）的静默不再换成一条 ceo.internal.ack 早退：那条 ack 会
+            # 吞掉 final 帧，于是这一轮在实时视图里没有折叠行也没有阶段轨道，刷新后才从转录行
+            # 冒出来——同一事实两种画法。静默的最终回复帧本来就带 silent_reply，渠道侧由它闸门。
             await _flush_pending_turn_patch()
             await _push_stream_event(
                 'ceo.reply.final',

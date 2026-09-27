@@ -473,6 +473,32 @@ test("静默 final 找不到回合元素时不得补一个空 system 气泡", ()
     assert.equal(feed.children.length, 0);
 });
 
+test("内部轮静默没有 live 回合元素时按需补一个，画成折叠「静默消息」行", () => {
+    // heartbeat/cron 轮不为"处理中"建元素，模型调 silent 后过去只收到一条
+    // ceo.internal.ack（live-only、无正文无轨道），刷新后才从转录行冒出折叠行——
+    // 同一事实两种画法。现在静默走 final 帧，这里必须当场画出与用户轮同款的折叠行。
+    const api = setup();
+    api.S.ceoSnapshotCache["s1"] = { session_id: "s1", messages: [{ role: "user", content: "q1" }] };
+    api.S.ceoFeedRenderedMessageKeys = ["m:-:user:0"];
+    const pushed = trackPushedTurns(api);
+    const feed = new FeedStub({ children: [], scrollHeight: 200, clientHeight: 200 });
+    api.U.ceoFeed = feed;
+
+    api.finalizeCeoTurn(SILENT_TEXT, {
+        source: "heartbeat",
+        turn_id: "turn-hb-silent",
+        silent_reply: true,
+        timestamp: SILENT_AT,
+    });
+
+    assert.equal(pushed.length, 1, "内部轮静默要按需补一个回合元素");
+    const turn = pushed[0];
+    assert.equal(turn.finalized, true);
+    assert.ok(lineOf(turn), "补出来的回合要画折叠行");
+    assert.ok(labelOf(turn).startsWith("静默消息"), `折叠行文案不对：${labelOf(turn)}`);
+    assert.equal(feed.children.length, 1, "收尾后的回合元素留在 feed 里，不被 discard 带走");
+});
+
 test("历史静默行渲染为带轨道的回合，折叠行取消息自带时间", () => {
     const api = setup();
     const feed = new FeedStub({ children: [], scrollHeight: 400, clientHeight: 300 });
