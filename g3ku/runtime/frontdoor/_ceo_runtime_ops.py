@@ -679,10 +679,13 @@ def _ceo_model_compatible_parameters_schema(tool_name: str, schema: dict[str, An
 
 
 def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
-    _model_description, model_parameters = _model_visible_tool_contract(tool)
+    model_description, model_parameters = _model_visible_tool_contract(tool)
     compatible_parameters = _ceo_model_compatible_parameters_schema(tool.name, model_parameters)
     stripped_parameters = sanitize_provider_parameters_schema(compatible_parameters)
-    return "", stripped_parameters if isinstance(stripped_parameters, dict) else compatible_parameters
+    return (
+        str(model_description or "").strip(),
+        stripped_parameters if isinstance(stripped_parameters, dict) else compatible_parameters,
+    )
 
 
 def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
@@ -8174,6 +8177,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         messages = self._strip_frontdoor_turn_only_artifacts(messages)
         messages.append(assistant_message)
         messages.extend(tool_messages)
+        # 回合内过期点：模型在 `submit_next_stage` 里点名裁撤后，前门过去要等到下一回合
+        # 装配才兑现（`_trim_frontdoor_seed_stage_compaction` 只在 prepare_turn 调用），
+        # 于是一个长回合的正文一路线性涨。这里与节点道 `_stage_expiry_hop` 同构：踩到
+        # 过期点的这一跳把正文按阶段归属原位压缩，压缩结果成为下一跳的发送基线；裁完
+        # 之后判据自然转假，下一跳回到 append-only 链，前缀失效面只有过期点那么多次。
+        stage_compacted_messages, stage_compaction_applied = self._trim_frontdoor_seed_stage_compaction(
+            messages,
+            frontdoor_stage_state,
+        )
+        if stage_compaction_applied:
+            messages = stage_compacted_messages
         authoritative_request_body_messages = self._durable_frontdoor_request_body_messages(messages)
 
         used_tools = list(state.get("used_tools") or [])
@@ -8234,6 +8248,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "pending_content_open_image_payloads": pending_content_open_image_payloads,
             "next_step": "call_model",
         }
+        if stage_compaction_applied:
+            # 基线因阶段裁撤收缩过就得带合法原因落库：下一次 prepare 的非法收缩守卫
+            # 按 `frontdoor_history_shrink_reason` 放行 stage_compaction，否则会被隔离。
+            result["frontdoor_history_shrink_reason"] = "stage_compaction"
         if dispatch_reply_overlay_text:
             result["repair_overlay_text"] = dispatch_reply_overlay_text
         result.update(updated_tool_contract_state)

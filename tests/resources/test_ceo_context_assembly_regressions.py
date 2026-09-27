@@ -876,7 +876,7 @@ async def test_message_builder_renders_candidate_tools_as_structured_tool_id_and
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
     assert isinstance(payload, dict)
     assert sorted(payload["candidate_tools"], key=lambda item: item["tool_id"]) == [
@@ -1255,18 +1255,27 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1
-    contract_message = contract_messages[0]
-    contract_text = str(contract_message.get("content") or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    stable_message, gate_message = contract_messages
+    stable_text = str(stable_message.get("content") or "")
+    gate_text = str(gate_message.get("content") or "")
+    contract_text = stable_text + "\n" + gate_text
 
-    assert contract_message["role"] == "system"
-    assert contract_text.startswith("## Runtime Tool Contract")
+    assert stable_message["role"] == "system"
+    assert gate_message["role"] == "system"
+    assert stable_text.startswith("## Runtime Tool Contract")
+    assert gate_text.startswith("## Runtime Stage Gate")
     assert '"message_type"' not in contract_text
     assert '"callable_tool_names"' not in contract_text
     assert "`filesystem_write`" in contract_text
-    assert "callable_tools:" in contract_text
-    assert "hydrated_tools:" in contract_text
+    # 每跳重写的活状态只在尾块里，稳定块里一份都没有
+    assert "callable_tools:" in gate_text and "callable_tools:" not in stable_text
+    assert "hydrated_tools:" in gate_text and "hydrated_tools:" not in stable_text
+    assert "stage_summary:" in gate_text and "stage_summary:" not in stable_text
     assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
+    # 候选工具的一句话说明由 provider tools[] 承载，契约只列名字
+    assert "candidate_tools:" in stable_text
+    assert "To use one, call" not in stable_text
 
 
 @pytest.mark.asyncio
@@ -1304,8 +1313,8 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_with_exec
         and is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
 
     assert contract_messages[0]["role"] == "system"
     assert contract_text.startswith("## Runtime Tool Contract")
@@ -1357,16 +1366,17 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
         if is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert contract_messages[0]["role"] == "system"
     assert contract_text.startswith("## Runtime Tool Contract")
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
     assert "candidate_tools: none" in contract_text
     assert "hydrated_tools: `filesystem_write`" in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
-    assert "Skills listed in `candidate_skills` do not hydrate" in contract_text
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
+    # skill/工具加载规则只在基础提示词里，契约不再抄第二份
+    assert "Skills listed in `candidate_skills` do not hydrate" not in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
 
 
 def test_frontdoor_dynamic_appendix_records_require_canonical_tool_state_fields() -> None:
@@ -1435,22 +1445,26 @@ def test_frontdoor_tool_contract_upsert_accepts_legacy_dict_and_writes_summary_t
     assert is_frontdoor_tool_contract_message(contract.to_message())
 
     updated = upsert_frontdoor_tool_contract_message([legacy_message], contract)
-    assert len(updated) == 1
+    assert len(updated) == 2  # upsert 一次写入稳定契约 + 活状态块
     assert is_frontdoor_tool_contract_message(updated[0])
     assert updated[0]["role"] == "system"
     assert isinstance(updated[0]["content"], str)
     assert str(updated[0]["content"] or "").startswith("## Runtime Tool Contract")
     assert '"message_type"' not in str(updated[0]["content"] or "")
-    assert "callable_tools: `submit_next_stage`, `filesystem_write`" in str(updated[0]["content"] or "")
-    assert "candidate_tools:" in str(updated[0]["content"] or "")
-    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in str(updated[0]["content"] or "")
-    assert "Skills listed in `candidate_skills` do not hydrate" in str(updated[0]["content"] or "")
-    assert "`agent_browser`: Browser automation" in str(updated[0]["content"] or "")
+    assert str(updated[1]["content"] or "").startswith("## Runtime Stage Gate")
+    assert "callable_tools: `submit_next_stage`, `filesystem_write`" in str(updated[1]["content"] or "")
+    stable_text = str(updated[0]["content"] or "")
+    assert "candidate_tools:" in stable_text
+    assert "candidate_skills (loadable with `load_skill_context`): `memory`" in stable_text
+    # 静态规则与逐条描述都不再进正文：规则归基础提示词，描述归 provider tools[]
+    assert "Skills listed in `candidate_skills` do not hydrate" not in stable_text
+    assert "`agent_browser`" in stable_text
+    assert "`agent_browser`: Browser automation" not in stable_text
     assert (
         'To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.'
-        in str(updated[0]["content"] or "")
+        not in stable_text
     )
-    assert 'load_tool_context(tool_id="agent_browser")' not in str(updated[0]["content"] or "")
+    assert 'load_tool_context(tool_id="agent_browser")' not in stable_text
     payload = contract.to_message_payload()
     assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
     assert payload["candidate_tools"] == [
@@ -1689,7 +1703,7 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
         if is_frontdoor_tool_contract_message(item)
     ]
 
-    assert len(contract_messages) == 1
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     payload = frontdoor_tool_contract_payload_from_message(contract_messages[0])
     assert payload is not None
     assert payload["attachment_reopen_targets"] == [
@@ -1706,7 +1720,7 @@ async def test_message_builder_surfaces_current_and_historical_attachment_reopen
             "path": str(history_path),
         },
     ]
-    contract_text = str(contract_messages[0]["content"] or "")
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "attachment_reopen_targets:" in contract_text
     assert str(current_path) in contract_text
     assert str(history_path) in contract_text
@@ -3903,3 +3917,24 @@ async def test_builder_continuation_path_ignores_separate_internal_seed_param() 
     assert contents[0] == "BASE PROMPT"
     # internal_seed_messages 未被重复注入（续跑路径不使用该参数）
     assert contents.count("CRON REMINDER") == 0
+
+
+def test_frontdoor_provider_tool_schemas_carry_model_description() -> None:
+    """契约不再抄候选工具的一句话说明，provider tools[] 必须真带上它。
+
+    这条是 ③ 的另一半：描述从正文尾部的小白块搬进稳定前置的 schema 面，
+    搬过去却仍然为空 = 模型两头都没有说明。
+    """
+    from types import SimpleNamespace
+
+    from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_visible_tool_contract
+
+    tool = SimpleNamespace(
+        name="agent_browser",
+        description="Browser automation via semantic shortlist.",
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    )
+    description, parameters = _provider_visible_tool_contract(tool)
+    assert description == "Browser automation via semantic shortlist."
+    assert isinstance(parameters, dict)
+    assert (parameters.get("properties") or {}).get("url")

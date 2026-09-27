@@ -946,6 +946,131 @@ async def test_graph_execute_tools_grows_authoritative_request_body_baseline() -
     ]
 
 
+@pytest.mark.asyncio
+async def test_graph_execute_tools_applies_named_stage_eviction_inside_the_turn() -> None:
+    """(a) 回合内过期点：模型点名裁撤后，下一跳的发送基线就得是裁过的投影。
+
+    前门过去只在 prepare_turn 裁一次，于是长回合里点名完全不兑现，正文一路线性涨。
+    这里锁定两件事：裁完的基线里那些工具肉身不在、原位有 compact 块；且判据在下一跳
+    自动转假（回到 append-only 链），否则前缀失效面会从"每个过期点一次"放大成"每轮一次"。
+    """
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=SimpleNamespace(
+                push_runtime_context=lambda context: object(),
+                pop_runtime_context=lambda token: None,
+            )
+        )
+    )
+
+    async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
+        _ = content, event_kind, event_data, kwargs
+
+    runner._build_tool_runtime_context = lambda **kwargs: {"on_progress": _on_progress}
+    runner._registered_tools_for_state = lambda state: {"demo_tool": _DemoTool()}
+
+    async def _fake_execute_tool_call_with_raw_result(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
+        _ = tool, tool_name, runtime_context, on_progress
+        return (
+            {"value": arguments["value"]},
+            json.dumps({"value": arguments["value"]}),
+            "success",
+            "2026-04-18T00:06:39+08:00",
+            "2026-04-18T00:06:40+08:00",
+            1.0,
+        )
+
+    runner._execute_tool_call_with_raw_result = _fake_execute_tool_call_with_raw_result
+
+    old_round = {
+        "round_index": 1,
+        "round_id": "r-old",
+        "tool_call_ids": ["call-old-1"],
+        "tools": [{"tool_call_id": "call-old-1", "tool_name": "demo_tool", "output_text": "old body " * 40}],
+    }
+    state = {
+        "tool_call_payloads": [
+            {"id": "call-new-1", "name": "demo_tool", "arguments": {"value": "beta"}},
+        ],
+        "messages": [
+            {"role": "system", "content": "SYSTEM"},
+            {"role": "user", "content": "本轮问题"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call-old-1", "type": "function", "function": {"name": "demo_tool", "arguments": "{\"value\":\"alpha\"}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-old-1", "name": "demo_tool", "content": "old body " * 40},
+        ],
+        "frontdoor_request_body_messages": [],
+        "frontdoor_history_shrink_reason": "",
+        "used_tools": [],
+        "route_kind": "direct_reply",
+        "parallel_enabled": False,
+        "max_parallel_tool_calls": 1,
+        "synthetic_tool_calls_used": False,
+        "response_payload": {"content": "", "tool_calls": []},
+        "frontdoor_stage_state": {
+            "active_stage_id": "frontdoor-stage-2",
+            "transition_required": False,
+            "stages": [
+                {
+                    "stage_id": "frontdoor-stage-1",
+                    "stage_index": 1,
+                    "stage_kind": "normal",
+                    "mode": "自主执行",
+                    "status": "completed",
+                    "stage_goal": "inspect repository",
+                    "completed_stage_summary": "已看完仓库结构",
+                    "context_evicted": True,
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 1,
+                    "key_refs": [],
+                    "rounds": [old_round],
+                },
+                {
+                    "stage_id": "frontdoor-stage-2",
+                    "stage_index": 2,
+                    "stage_kind": "normal",
+                    "mode": "自主执行",
+                    "status": "active",
+                    "stage_goal": "run the selected tool calls",
+                    "completed_stage_summary": "",
+                    "tool_round_budget": 2,
+                    "tool_rounds_used": 0,
+                    "key_refs": [],
+                    "rounds": [],
+                },
+            ],
+        },
+    }
+
+    result = await runner._graph_execute_tools(
+        state,
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+
+    contents = [str(item.get("content") or "") for item in list(result["messages"])]
+    carried_tool_call_ids = {
+        str(item.get("tool_call_id") or "")
+        for item in list(result["messages"])
+        if str(item.get("role") or "") == "tool"
+    }
+    assert "call-old-1" not in carried_tool_call_ids  # 过期阶段肉身当场离开基线
+    assert "call-new-1" in carried_tool_call_ids  # 活动阶段原位不动
+    assert any(item.startswith("[G3KU_STAGE_COMPACT_V1]") for item in contents)
+    assert result["frontdoor_history_shrink_reason"] == "stage_compaction"
+    assert len(result["frontdoor_request_body_messages"]) == len(result["messages"])
+    # 一次性：裁过之后同一账本再投影不再移除任何东西，下一跳回到 append-only 链
+    _, applied_again = runner._trim_frontdoor_seed_stage_compaction(
+        list(result["messages"]),
+        result["frontdoor_stage_state"],
+    )
+    assert applied_again is False
+
+
 def test_frontdoor_stage_state_after_tool_cycle_writes_precise_round_tools() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
@@ -1582,15 +1707,18 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
         for item in list(result["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools: `load_tool_context`, `filesystem_write`" in contract_text
     assert "hydrated_tools: `filesystem_write`" in contract_text
-    assert "load_tool_context_help:" in contract_text
-    assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" in contract_text
-    assert "load_tool_context_repeat_guard:" in contract_text
+    # 静态规则不再抄进契约：加载/复读语义只由基础提示词 `ceo_frontdoor.md` 承载
+    assert "load_tool_context_help:" not in contract_text
+    assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" not in contract_text
+    assert "load_tool_context_repeat_guard:" not in contract_text
     assert "candidate_tools:" in contract_text
-    assert "`agent_browser`: Browser automation via semantic shortlist." in contract_text
+    # 候选工具的一句话说明改由 provider tools[] 的 function.description 承载，契约只列名字
+    assert "`agent_browser`" in contract_text
+    assert "`agent_browser`: Browser automation via semantic shortlist." not in contract_text
 
 
 def test_frontdoor_stage_state_after_tool_cycle_ignores_raw_result_when_writing_round_tools() -> None:
@@ -1759,8 +1887,8 @@ async def test_create_agent_runner_graph_prepare_turn_seeds_session_hydrated_too
         for item in list(prepared["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools: `submit_next_stage`" in contract_text
     assert "candidate_tools: none" in contract_text
     assert "visible_skill_ids" not in contract_text
@@ -1941,8 +2069,8 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_normal_ceo_tools_for
         for item in list(prepared["dynamic_appendix_messages"] or [])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         "callable_tools: `create_async_task`, `task_list`, `cron`, `silent`, `submit_next_stage`"
         in contract_text
@@ -2033,12 +2161,13 @@ async def test_create_agent_runner_graph_prepare_turn_keeps_candidate_tools_visi
         for item in list(prepared["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools: `submit_next_stage`" in contract_text
-    assert "- `filesystem_write`: Write file content to disk." in contract_text
+    assert "`filesystem_write`" in contract_text
+    assert "- `filesystem_write`: Write file content to disk." not in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
     assert "visible_skill_ids" not in contract_text
     assert "rbac_visible_tool_names" not in contract_text
     assert "rbac_visible_skill_ids" not in contract_text
@@ -2118,7 +2247,7 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
-    assert len(prepared["dynamic_appendix_messages"]) == 1
+    assert len(prepared["dynamic_appendix_messages"]) == 2  # 一份稳定契约 + 一份活状态块
     contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
     assert is_frontdoor_tool_contract_message(contract_message)
     assert contract_message["role"] == "system"
@@ -2270,8 +2399,8 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
         for item in list(prepared["dynamic_appendix_messages"])
         if _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools: `submit_next_stage`, `load_tool_context`, `filesystem_write`" in contract_text
     assert "hydrated_tools: `filesystem_write`" in contract_text
 

@@ -7689,16 +7689,19 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         for item in list(state_update["dynamic_appendix_messages"] or [])
         if is_frontdoor_tool_contract_message(dict(item))
     ]
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
         in contract_text
     )
     assert "hydrated_tools: `filesystem_write`" in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
-    assert "`web_fetch`: fetch web pages" in contract_text
+    # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
+    assert "candidate_tools: `web_fetch`" in contract_text
+    # 候选工具的说明改由 provider tools[] 的 function.description 承载，正文不再抄第二份
+    assert "`web_fetch`: fetch web pages" not in contract_text
 
 
 @pytest.mark.asyncio
@@ -7908,16 +7911,19 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         for item in list(state_update["dynamic_appendix_messages"] or [])
         if is_frontdoor_tool_contract_message(dict(item))
     ]
-    assert len(contract_messages) == 1
-    contract_text = str(contract_messages[0]["content"] or "")
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
+    contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert (
         "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
         in contract_text
     )
     assert "hydrated_tools: `filesystem_write`" in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
-    assert 'Call `load_skill_context(skill_id="<skill_id>")`' in contract_text
-    assert "`web_fetch`: fetch web pages" in contract_text
+    # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
+    assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
+    assert "candidate_tools: `web_fetch`" in contract_text
+    # 候选工具的说明改由 provider tools[] 的 function.description 承载，正文不再抄第二份
+    assert "`web_fetch`: fetch web pages" not in contract_text
 
 
 @pytest.mark.asyncio

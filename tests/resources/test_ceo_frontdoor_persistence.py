@@ -414,7 +414,7 @@ def test_ceo_frontdoor_refresh_dynamic_contract_state_keeps_repair_required_list
     )
 
     contract_messages = [dict(message) for message in list(refreshed["dynamic_appendix_messages"] or [])]
-    assert len(contract_messages) == 1
+    assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     assert is_frontdoor_tool_contract_message(contract_messages[0])
     assert "repair_required_tools:" in str(contract_messages[0]["content"] or "")
     assert "repair_required_skills:" in str(contract_messages[0]["content"] or "")
@@ -2045,8 +2045,10 @@ async def test_ceo_frontdoor_prepare_turn_keeps_messages_uncompacted(
         for message in list(state_update["dynamic_appendix_messages"] or [])
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
-    assert len(contract_payloads) == 1
-    assert "callable_tools: `submit_next_stage`" in str(contract_payloads[0].get("content") or "")
+    assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
+    assert "callable_tools: `submit_next_stage`" in "\n".join(
+        str(item.get("content") or "") for item in contract_payloads
+    )
     assert "summary_text" not in state_update
     assert "summary_payload" not in state_update
     assert "summary_model_key" not in state_update
@@ -2425,8 +2427,10 @@ async def test_graph_prepare_turn_real_session_path_drops_summary_fields(
         for message in list(result["dynamic_appendix_messages"] or [])
         if isinstance(message, dict) and is_frontdoor_tool_contract_message(dict(message))
     ]
-    assert len(contract_payloads) == 1
-    assert "callable_tools: `submit_next_stage`" in str(contract_payloads[0].get("content") or "")
+    assert len(contract_payloads) == 2  # 一份稳定契约 + 一份活状态块
+    assert "callable_tools: `submit_next_stage`" in "\n".join(
+        str(item.get("content") or "") for item in contract_payloads
+    )
     assert "summary_text" not in result
     assert "summary_payload" not in result
     assert "summary_model_key" not in result

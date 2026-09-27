@@ -137,7 +137,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
 - 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
-- 节点跑了一两百轮、请求字符与 `effective_input_tokens` 全程只涨不降 → 先确认有没有阶段被模型点名裁撤过：**没点名的阶段一直逐轮重发是设计**（只有点名或压缩收口会让它降）。确有裁撤却仍不降，才按 `context-and-cache-troubleshooting.md`「节点侧排查要点」（投影与发送体分叉才是节点的生效判据）+ `runtime-overview.md`「stage_compaction」查
+- 一个回合跑了一两百跳、请求字符与 `effective_input_tokens` 全程只涨不降 → 先确认有没有阶段被模型点名裁撤过：**没点名的阶段一直逐轮重发是设计**（只有点名或压缩收口会让它降）。确有裁撤却仍不降，按 `runtime-overview.md`「stage_compaction」（两条车道都在过期点换基线；节点另看投影与发送体是否分叉）查
 - 切回仍在处理的会话看不到期间产生的阶段/工具调用（刷新网页才出现）→ `web-and-admin.md`「CEO Feed View State And Scroll Preservation Contract」
 - 用户消息下方的「编辑 / Fork」按钮要刷新网页才出现、会话被暂停/审批/压缩挡住输入时看不到 Fork、或点了按钮提示「当前不可编辑」 → `web-and-admin.md`「Message Edit-Resend And Session Fork Contract」
 - 回合进行中发的补充没被回答、待发送气泡上的「立即发送 / 撤回」行为疑问、或撤回后条目又被画回来 → `web-and-admin.md`「Queued Follow-Ups」

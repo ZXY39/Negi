@@ -4,11 +4,15 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from main.runtime.stage_budget import SILENT_TOOL_NAME
-
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND = 'frontdoor_runtime_tool_contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING = '## Runtime Tool Contract'
 FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY = '_frontdoor_tool_contract_payload'
+# 活状态块：`callable_tools` / `hydrated_tools` / `stage_summary` 每次阶段切换都重写
+# （实盘 1001 跳里分别 301 与 362 次），其余段一回合内是常量。拆成两份后，重写只
+# 顶掉这份小块的字节，稳定块与它前面的携带正文继续命中前缀缓存。
+FRONTDOOR_DYNAMIC_STAGE_GATE_KIND = 'frontdoor_runtime_stage_gate'
+FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING = '## Runtime Stage Gate'
+RUNTIME_APPENDIX_HEADINGS = (FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING, FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING)
 
 
 def _normalized_name_list(items: list[Any] | None) -> list[str]:
@@ -128,19 +132,13 @@ def _render_name_list(items: list[str] | None) -> str:
 
 
 def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[str]:
+    """只列名字：每个工具的说明文字由 provider `tools[]` 的 `function.description` 承载
+    （见 `_provider_visible_tool_contract`），这里不再抄第二份。
+    """
     normalized_items = _normalized_candidate_tool_items(items)
     if not normalized_items:
         return ['candidate_tools: none']
-    lines = [
-        'candidate_tools:',
-        '- These tools are visible but not callable yet. To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.',
-    ]
-    for item in normalized_items:
-        tool_id = str(item.get('tool_id') or '').strip()
-        description = str(item.get('description') or '').strip()
-        detail = description if description else 'No description available.'
-        lines.append(f'- `{tool_id}`: {detail}')
-    return lines
+    return [f'candidate_tools: {_render_name_list([str(item.get("tool_id") or "") for item in normalized_items])}']
 
 
 def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> list[str]:
@@ -278,56 +276,52 @@ def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> s
     return 'exec_runtime_policy: ' + ('; '.join(parts) if parts else 'none')
 
 
-def _render_silent_help(callable_tool_names: list[str]) -> list[str]:
-    """可见回合的静默出口措辞。心跳车道那份（`heartbeat/session_service.py`）覆盖不到
-    普通用户回合，而实盘 23:25 那轮模型正是按压缩块里残留的旧契约去输出文本哨兵。
-    """
-    if SILENT_TOOL_NAME not in callable_tool_names:
-        return []
-    return [
-        f'silent_help: To end this turn with nothing delivered to the user, call '
-        f'`{SILENT_TOOL_NAME}(reason="...")` — it needs no active stage and never counts against '
-        'stage budget, so do not open a stage just to stay silent. There is no text form of '
-        'silence: any marker written in the reply body is delivered to the user verbatim.',
-    ]
+def _contract_revision_line(payload: dict[str, Any]) -> str:
+    return f'contract_revision: {str(payload.get("contract_revision") or "").strip() or "none"}'
 
 
 def _render_frontdoor_contract_summary(payload: dict[str, Any]) -> str:
+    """回合内常量部分：候选集、待修复、附件句柄、临时目录、执行策略。"""
     candidate_tools = _normalized_candidate_tool_items(payload.get('candidate_tools'))
     repair_required_tools = _normalized_repair_required_tool_items(payload.get('repair_required_tools'))
     repair_required_skills = _normalized_repair_required_skill_items(payload.get('repair_required_skills'))
     attachment_reopen_targets = _normalized_attachment_reopen_targets(payload.get('attachment_reopen_targets'))
-    callable_tool_names = _normalized_name_list(payload.get('callable_tool_names'))
     lines = [
         FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING,
         f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}',
-        f'contract_revision: {str(payload.get("contract_revision") or "").strip() or "none"}',
-        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
-        f'hydrated_tools: {_render_name_list(payload.get("hydrated_tool_names"))}',
+        _contract_revision_line(payload),
         f'candidate_skills (loadable with `load_skill_context`): {_render_name_list(payload.get("candidate_skill_ids"))}',
-        'load_skill_context_help: Skills listed in `candidate_skills` do not hydrate. Call `load_skill_context(skill_id="<skill_id>")` to read the skill body when `load_skill_context` is callable; if only `submit_next_stage` is callable, start a stage first.',
-        'load_tool_context_help: Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help, including tools that are already callable or already hydrated.',
-        'load_tool_context_repeat_guard: For callable, hydrated, or fixed-builtin tools, do not reread the same inline uncompressed toolskill. Reuse it unless the tool state changed or the old result was compressed away.',
-        *_render_silent_help(callable_tool_names),
         *_render_attachment_reopen_target_section(attachment_reopen_targets),
         *_render_candidate_tool_section(candidate_tools),
         *_render_repair_required_tool_section(repair_required_tools),
         *_render_repair_required_skill_section(repair_required_skills),
-        _render_stage_summary(payload.get('stage_summary')),
         _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
         *_render_session_temp_dir(payload.get('session_temp_dir')),
     ]
     return '\n'.join(lines)
 
 
+def _render_frontdoor_stage_gate_summary(payload: dict[str, Any]) -> str:
+    """每跳活的状态：本轮真可调用集、水合集、活动阶段轨道。排在请求体末位。"""
+    lines = [
+        FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING,
+        f'kind: {FRONTDOOR_DYNAMIC_STAGE_GATE_KIND}',
+        _contract_revision_line(payload),
+        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
+        f'hydrated_tools: {_render_name_list(payload.get("hydrated_tool_names"))}',
+        _render_stage_summary(payload.get('stage_summary')),
+    ]
+    return '\n'.join(lines)
+
+
 def _render_session_temp_dir(session_temp_dir: Any) -> list[str]:
+    """只给路径；规则本体在基础提示词 `ceo_frontdoor.md`「临时文件与中间产物」那条，
+    它反过来写"以 runtime tool contract 中 `session_temp_dir` 给出的绝对路径为准"。
+    """
     text = str(session_temp_dir or '').strip()
     if not text:
         return []
-    return [
-        f'session_temp_dir: {text}',
-        'session_temp_dir_help: Write transient/intermediate files (command output redirects, raw search/fetch dumps, cleanup scripts) into session_temp_dir only; never place temporary files in the workspace root or source directories. Never treat session_temp_dir or any temp path as the final destination for official deliverables (reports, documents, permanent outputs): write deliverables to the persistent path the user/task specified (or the default persistent output directory named in the task), and state that absolute path explicitly in your reply.',
-    ]
+    return [f'session_temp_dir: {text}']
 
 
 def _active_stage_prompt_view(active_stage: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -427,6 +421,13 @@ class FrontdoorToolContract:
             FRONTDOOR_DYNAMIC_TOOL_CONTRACT_PAYLOAD_KEY: payload,
         }
 
+    def to_stage_gate_message(self) -> dict[str, Any]:
+        """活状态块：与契约同源，但只含每跳重写的行，排在请求体真正末位。"""
+        return {
+            'role': 'system',
+            'content': _render_frontdoor_stage_gate_summary(self.to_message_payload()),
+        }
+
 
 def _frontdoor_tool_contract_payload_from_content(content: Any) -> dict[str, Any] | None:
     payload: dict[str, Any] | None = None
@@ -522,7 +523,19 @@ def build_frontdoor_tool_contract(
     )
 
 
+def _runtime_appendix_pair(heading: str) -> str:
+    return {
+        FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING: FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND,
+        FRONTDOOR_DYNAMIC_STAGE_GATE_HEADING: FRONTDOOR_DYNAMIC_STAGE_GATE_KIND,
+    }[heading]
+
+
 def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
+    """Whether a message is one of the runtime-injected appendix blocks.
+
+    Both the turn-stable contract and the live stage gate are runtime metadata,
+    so every strip/persist/transcript path must treat them the same way.
+    """
     if frontdoor_tool_contract_payload_from_message(message) is not None:
         return True
     if _frontdoor_message_declares_tool_calls(message):
@@ -532,44 +545,48 @@ def is_frontdoor_tool_contract_message(message: dict[str, Any]) -> bool:
     if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system'}:
         return False
     content = str((message or {}).get('content') or '').strip()
-    return content.startswith(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING)
+    return any(content.startswith(heading) for heading in RUNTIME_APPENDIX_HEADINGS)
 
 
 def _frontdoor_tool_contract_heading_index(text: str) -> int:
-    """Return the start of a rendered contract embedded in ``text``.
+    """Return the start of a rendered appendix block embedded in ``text``.
 
     The heading alone is not enough to classify ordinary user prose that
     happens to mention the contract.  Requiring the canonical kind marker in
-    the nearby suffix keeps this helper focused on the provider-facing
-    contract summary that the runtime injects.
+    the nearby suffix keeps this helper focused on the provider-facing blocks
+    that the runtime injects.  The live stage gate counts too: it is the block
+    sitting at the continuation point, so it is the one a model can echo.
     """
     normalized = str(text or '')
-    heading_index = normalized.find(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING)
-    if heading_index < 0:
-        return -1
-    suffix = normalized[heading_index : heading_index + 512]
-    if f'kind: {FRONTDOOR_DYNAMIC_TOOL_CONTRACT_KIND}' not in suffix:
-        return -1
-    return heading_index
+    best = -1
+    for heading in RUNTIME_APPENDIX_HEADINGS:
+        heading_index = normalized.find(heading)
+        if heading_index < 0:
+            continue
+        suffix = normalized[heading_index : heading_index + 512]
+        if f'kind: {_runtime_appendix_pair(heading)}' not in suffix:
+            continue
+        if best < 0 or heading_index < best:
+            best = heading_index
+    return best
 
 
 def is_frontdoor_tool_contract_echo_text(text: Any) -> bool:
-    """Whether model/channel text is a standalone injected tool-contract echo."""
+    """Whether model/channel text is a standalone injected appendix-block echo."""
     normalized = str(text or '').strip()
     if not normalized:
         return False
-    if normalized.startswith(FRONTDOOR_DYNAMIC_TOOL_CONTRACT_HEADING):
+    if any(normalized.startswith(heading) for heading in RUNTIME_APPENDIX_HEADINGS):
         return _frontdoor_tool_contract_heading_index(normalized) == 0
     return is_frontdoor_tool_contract_message({'role': 'assistant', 'content': normalized})
 
 
 def strip_frontdoor_tool_contract_echo(text: Any) -> str:
-    """Remove a rendered runtime-tool-contract echo from user-facing text.
+    """Remove a rendered runtime appendix-block echo from user-facing text.
 
-    A standalone contract echo becomes empty.  If a model puts a visible
-    answer before the echoed block, preserve that answer and remove only the
-    internal suffix.  JSON contract payloads are handled by the standalone
-    classifier above.
+    A standalone echo becomes empty.  If a model puts a visible answer before
+    the echoed block, preserve that answer and remove only the internal suffix.
+    JSON contract payloads are handled by the standalone classifier above.
     """
     normalized = str(text or '')
     if is_frontdoor_tool_contract_echo_text(normalized):
@@ -584,15 +601,17 @@ def upsert_frontdoor_tool_contract_message(
     messages: list[dict[str, Any]] | None,
     contract: FrontdoorToolContract,
 ) -> list[dict[str, Any]]:
+    """携带历史里 0 份运行时块，尾部恰好一份契约 + 一份活状态块（稳定在前、活在后）。"""
+    appendix = [contract.to_message(), contract.to_stage_gate_message()]
     updated: list[dict[str, Any]] = []
-    replaced = False
+    inserted = False
     for message in list(messages or []):
         if is_frontdoor_tool_contract_message(message):
-            if not replaced:
-                updated.append(contract.to_message())
-                replaced = True
+            if not inserted:
+                updated.extend(appendix)
+                inserted = True
             continue
         updated.append(dict(message))
-    if not replaced:
-        updated.append(contract.to_message())
+    if not inserted:
+        updated.extend(appendix)
     return updated

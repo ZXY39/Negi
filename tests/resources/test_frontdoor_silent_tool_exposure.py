@@ -123,30 +123,40 @@ def test_silent_schema_stays_cheap_in_the_stable_prefix() -> None:
 
 
 def _contract(callable_names: list[str]) -> str:
-    from g3ku.runtime.frontdoor.tool_contract import _render_frontdoor_contract_summary
-
-    return _render_frontdoor_contract_summary(
-        {'callable_tool_names': callable_names, 'hydrated_tool_names': [], 'candidate_skill_ids': [], 'candidate_tools': []}
+    from g3ku.runtime.frontdoor.tool_contract import (
+        _render_frontdoor_contract_summary,
+        _render_frontdoor_stage_gate_summary,
     )
+
+    payload = {
+        'callable_tool_names': callable_names,
+        'hydrated_tool_names': [],
+        'candidate_skill_ids': [],
+        'candidate_tools': [],
+    }
+    return _render_frontdoor_contract_summary(payload) + "\n" + _render_frontdoor_stage_gate_summary(payload)
+
+
+_CEO_FRONTDOOR_PROMPT = Path(__file__).resolve().parents[2] / 'g3ku' / 'runtime' / 'prompts' / 'ceo_frontdoor.md'
 
 
 def test_visible_turns_are_told_the_silent_tool_is_the_only_exit() -> None:
-    """B：心跳车道那份措辞覆盖不到普通用户回合 —— 23:25 那轮模型正是按上下文里残留的
-    旧契约去输出文本哨兵，所以可见回合必须自己说一句"静默没有文本写法"。"""
+    """静默出口措辞的唯一载体 = 基础提示词（一份规则一个家）。
+
+    23:25 与 01:17 两次实盘的成因都是"上下文里残留的旧契约"被当成权威，所以这句说明
+    不再抄进每轮重渲染的契约；契约里只留"`silent` 在 callable 名单里"这一条事实。
+    """
     rendered = _contract(['exec', SILENT_TOOL_NAME])
-    help_line = next((line for line in rendered.splitlines() if line.startswith('silent_help:')), '')
-    assert f'`{SILENT_TOOL_NAME}(reason=' in help_line
-    assert 'There is no text form of silence' in help_line
-    # 01:17 实盘：模型为了静默一轮先建了个「静默收尾」阶段，白占一次工具轮 ——
-    # 阶段协议那句"没活动阶段就先 submit_next_stage"读起来覆盖所有工具。
-    assert 'needs no active stage' in help_line
-    # 措辞挂在每轮重渲染的契约里，不新起一层：实盘该契约 6,614 字符，这条 309。
-    assert len(help_line) < 360
+    assert f'`{SILENT_TOOL_NAME}`' in rendered  # 名单仍点名，工具没注册就消失
+    assert 'silent_help:' not in rendered
+    prompt = _CEO_FRONTDOOR_PROMPT.read_text(encoding='utf-8')
+    assert '没有文本写法' in prompt
+    assert '不受阶段闸门与工具预算限制' in prompt
 
 
 def test_silent_help_follows_the_callable_list() -> None:
-    """工具没注册时不能继续叫模型去调它 —— 与 P1 的"未注册则整条消失"同一条边界。"""
-    assert 'silent_help:' not in _contract(['exec'])
+    """工具没注册时不能继续叫模型去调它 —— 名单是唯一事实源，措辞不再是第二处。"""
+    assert SILENT_TOOL_NAME not in _contract(['exec'])
 
 
 def test_execution_bundle_resolves_the_silent_tool_object() -> None:
