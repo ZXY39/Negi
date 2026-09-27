@@ -2671,6 +2671,58 @@ textarea {
     min-width: 124px;
 }
 
+.ceo-session-menu-info-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    min-width: 0;
+}
+
+.ceo-session-menu-copy {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    background: color-mix(in srgb, var(--bg-app) 78%, transparent);
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: border-color var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.ceo-session-menu-copy:hover {
+    color: var(--text-primary);
+    border-color: color-mix(in srgb, var(--brand-primary) 34%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 10%, var(--bg-app));
+}
+
+.ceo-session-menu-copy:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--brand-primary) 72%, transparent);
+    outline-offset: 2px;
+}
+
+.ceo-session-menu-copy.is-copied {
+    color: var(--status-success-text);
+    border-color: color-mix(in srgb, var(--status-success-text) 32%, transparent);
+    background: color-mix(in srgb, var(--status-success-bg) 88%, transparent);
+}
+
+.ceo-session-menu-copy.is-copy-failed {
+    color: var(--status-failed-text);
+    border-color: color-mix(in srgb, var(--status-failed-text) 32%, transparent);
+    background: color-mix(in srgb, var(--status-failed-bg) 88%, transparent);
+}
+
+.ceo-session-menu-copy svg {
+    width: 12px;
+    height: 12px;
+}
+
 .ceo-session-action {
     width: 34px;
     height: 34px;

@@ -297,6 +297,36 @@ test("renderCeoSessionCard shows checkbox markup in bulk mode", () => {
     assert.match(html, /<input type="checkbox"[^>]*data-session-bulk-checkbox="web:1"[^>]*>\s*<span class="ceo-session-checkbox__box"/);
 });
 
+test("三点菜单在会话 ID 旁渲染复制按钮，会话 ID 为空时不渲染", () => {
+    const { renderCeoSessionCard } = loadApp();
+
+    const html = renderCeoSessionCard(
+        { session_id: "web:1", title: "Alpha", preview_text: "", created_at: "2026-04-09T10:00:00+08:00" },
+        { allowActions: true }
+    );
+    assert.match(html, /<span>会话 ID<\/span>\s*<span class="ceo-session-menu-info-value">\s*<code>web:1<\/code>/);
+    assert.match(html, /<button type="button" class="ceo-session-menu-copy" data-session-copy-id="web:1"[^>]*>\s*<i data-lucide="copy">/);
+    // 创建时间行不带复制按钮
+    assert.match(html, /<span>创建时间<\/span><code>/);
+
+    const blank = renderCeoSessionCard({ session_id: "", title: "Beta", preview_text: "" }, { allowActions: true });
+    assert.ok(!blank.includes("data-session-copy-id"), blank);
+});
+
+test("复制会话 ID 走列表级委托并调用 copyTextToClipboard", () => {
+    assert.ok(APP_CODE.includes('closest("[data-session-copy-id]")'), "session list click 需委托 [data-session-copy-id]");
+    assert.ok(APP_CODE.includes("void copyCeoSessionId(copyId)"));
+    const handler = APP_CODE.slice(APP_CODE.indexOf("async function copyCeoSessionId"));
+    // 源文件是 CRLF，按 \n}\n 切尾会整段失配，这里显式兼容两种换行
+    const end = handler.search(/\r?\n\}\r?\n/);
+    assert.ok(end > 0, "应能在函数结尾处切出函数体");
+    const body = handler.slice(0, end);
+    assert.ok(body.includes("copied = await copyTextToClipboard(text)"), body);
+    assert.ok(body.includes("flashTraceCopyButton(button, !!copied)"), body);
+    // 剪贴板 reject 也要落到失败反馈（copyTextToClipboard 自己不吞异常）
+    assert.ok(body.includes("} catch"), body);
+});
+
 test("setCeoSessionPanelExpanded drops bulk mode and re-renders so no checkbox survives collapse", () => {
     const { S, setCeoSessionPanelExpanded, __context, __makeSet } = loadApp();
 

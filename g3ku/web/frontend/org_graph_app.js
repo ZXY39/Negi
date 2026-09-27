@@ -9207,6 +9207,25 @@ async function copyCeoBubbleContent(button) {
     });
 }
 
+async function copyCeoSessionId(button) {
+    if (!(button instanceof HTMLElement)) return;
+    const text = String(button.dataset.sessionCopyId || "").trim();
+    if (!text) return;
+    let copied = false;
+    // copyTextToClipboard 不吞异常:剪贴板被拒时也必须落到失败反馈，否则点了毫无反应。
+    try {
+        copied = await copyTextToClipboard(text);
+    } catch (error) {
+        void error;
+    }
+    if (typeof flashTraceCopyButton === "function") flashTraceCopyButton(button, !!copied);
+    showToast({
+        title: copied ? "已复制" : "复制失败",
+        text: copied ? "会话 ID 已复制到剪贴板。" : "请手动选中文本后复制。",
+        kind: copied ? "success" : "error",
+    });
+}
+
 function trimCeoToolSteps(turn) {
     if (!turn?.listEl) return;
     const items = Array.from(turn.listEl.children).filter((item) => (
@@ -12230,7 +12249,13 @@ function renderCeoSessionCard(item, { allowActions = false, index = -1 } = {}) {
                     </button>
                     <div class="toolbar-menu ceo-session-menu" role="menu" hidden>
                         <div class="ceo-session-menu-info">
-                            <span class="ceo-session-menu-info-row"><span>会话 ID</span><code>${esc(sessionId || "-")}</code></span>
+                            <span class="ceo-session-menu-info-row">
+                                <span>会话 ID</span>
+                                <span class="ceo-session-menu-info-value">
+                                    <code>${esc(sessionId || "-")}</code>
+                                    ${sessionId ? `<button type="button" class="ceo-session-menu-copy" data-session-copy-id="${esc(sessionId)}" aria-label="复制会话 ID" title="复制会话 ID"><i data-lucide="copy"></i></button>` : ""}
+                                </span>
+                            </span>
                             <span class="ceo-session-menu-info-row"><span>创建时间</span><code>${esc(createdText || "-")}</code></span>
                         </div>
                         <button type="button" class="toolbar-menu-item" data-session-rename="${esc(sessionId)}" role="menuitem">命名</button>
@@ -16203,6 +16228,12 @@ function bind() {
             const shell = menuToggle.closest(".ceo-session-actions");
             const isOpen = !!shell?.classList.contains("is-open");
             setCeoSessionMenuOpen(sessionId, !isOpen);
+            return;
+        }
+        const copyId = e.target.closest("[data-session-copy-id]");
+        if (copyId) {
+            e.stopPropagation();
+            void copyCeoSessionId(copyId);
             return;
         }
         const activate = e.target.closest("[data-session-activate]");

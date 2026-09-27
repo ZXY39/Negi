@@ -2524,6 +2524,13 @@
     overflow-wrap: anywhere;
 }
 
+/* 行内只有两个弹性子项，默认都会收缩：会话 ID 一长就把「会话 ID」这个字段名压成
+   竖排逐字换行。约定是字段名不折行、值自己换行，所以这里锁住标签的基准宽。 */
+[data-ui-version="v2"] .ceo-session-menu-info-row > span:first-child {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
 /* 54. 提示层回到窗口正中，并锚到顶栏下方：旧样式给 toast 视口留了 left:160px，
    用来抵消当时 160px 的左侧栏；V2 导航已改成顶栏，那 160px 变成了纯偏移，toast 与
    「正在打开任务」提示条整体右移 80px。fixed 层里只有这一处补偿，其余
