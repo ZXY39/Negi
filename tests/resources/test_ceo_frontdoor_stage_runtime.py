@@ -694,6 +694,213 @@ def test_frontdoor_eviction_mark_is_written_and_carried_by_every_rewriter() -> N
     assert deduped[0].get("context_evicted") is True
 
 
+def _settled_frontdoor_stage_ledger(*, stages: list[dict]) -> dict:
+    """回合尾结清后的账本形态：没有活动阶段，最后一条是终态普通阶段。"""
+    return {"active_stage_id": "", "transition_required": False, "stages": stages}
+
+
+def _settled_frontdoor_stage(*, index: int, summary: str = "") -> dict:
+    return {
+        "stage_id": f"frontdoor-stage-{index}",
+        "stage_index": index,
+        "stage_kind": "normal",
+        "mode": "自主执行",
+        "status": "completed",
+        "stage_goal": f"stage {index} goal",
+        "completed_stage_summary": summary,
+        "key_refs": [],
+        "tool_round_budget": 5,
+        "tool_rounds_used": 1,
+        "created_at": f"2026-09-26T01:0{index}:00+08:00",
+        "finished_at": f"2026-09-26T01:0{index}:30+08:00",
+        "rounds": [
+            {
+                "round_id": f"frontdoor-stage-{index}:round-1",
+                "round_index": 1,
+                "budget_counted": True,
+                "tool_names": ["exec"],
+                "tool_call_ids": [f"call-exec-{index}"],
+                "tools": [
+                    {
+                        "tool_call_id": f"call-exec-{index}",
+                        "tool_name": "exec",
+                        "status": "success",
+                        "arguments_text": "dir",
+                        "output_text": f"a{index}.txt",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def test_frontdoor_cross_turn_submit_attaches_summary_to_the_settled_stage() -> None:
+    # 渠道会话一轮一阶段：回合尾把活动阶段结清并清空 active_stage_id，模型在**下一个回合**
+    # 才发 submit_next_stage。此时它写的 completed_stage_summary / key_refs 语义上归属刚被
+    # 结清的那条阶段，落点必须是它，而不是整块静默跳过（实测会话 ext:qq-official-*：
+    # 12/12 条阶段 summary 为空、drop 从未兑现）。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    state = _settled_frontdoor_stage_ledger(stages=[_settled_frontdoor_stage(index=1)])
+
+    closed, _ = runner._submit_frontdoor_next_stage_state(
+        state,
+        stage_goal="score candidates",
+        tool_round_budget=5,
+        completed_stage_summary="阶段1确认了候选池口径",
+        key_refs=[{"ref": "task:t1", "note": "口径依据"}],
+        drop_completed_stage_tool_detail=True,
+    )
+
+    settled = closed["stages"][0]
+    assert settled["completed_stage_summary"] == "阶段1确认了候选池口径"
+    assert settled["key_refs"][0]["ref"] == "task:t1"
+    assert settled["context_evicted"] is True
+    assert closed["stages"][1]["stage_index"] == 2
+
+
+def test_frontdoor_cross_turn_eviction_writes_archive_pointer(tmp_path: Path) -> None:
+    # 跨回合裁撤要一路走到 durable 账本上的 archive_ref，否则提示词承诺的 content_open
+    # 回读又是空头支票（实测该会话 temp/ceo 下归档文件数为 0）。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda session_key: str(tmp_path)  # type: ignore[assignment]
+    durable_state = {
+        "session_key": "ext:qq-official-1:abc",
+        "frontdoor_stage_state": _settled_frontdoor_stage_ledger(
+            stages=[_settled_frontdoor_stage(index=1)]
+        ),
+    }
+    payload = {
+        "id": "call-submit-1",
+        "name": STAGE_TOOL_NAME,
+        "arguments": {
+            "stage_goal": "score candidates",
+            "tool_round_budget": 5,
+            "completed_stage_summary": "阶段1确认了候选池口径",
+            "drop_completed_stage_tool_detail": True,
+        },
+    }
+
+    updated = runner._frontdoor_stage_state_after_tool_cycle(
+        durable_state,
+        tool_call_payloads=[payload],
+        tool_results=[{"tool_name": STAGE_TOOL_NAME, "status": "success", "result_text": "ok"}],
+    )
+
+    settled = updated["stages"][0]
+    assert settled["context_evicted"] is True
+    archive_ref = str(settled.get("archive_ref") or "")
+    assert archive_ref and Path(archive_ref).exists()
+    rendered = json.loads(
+        str(completed_stage_blocks(updated, skip_stage_ids=set())[0]["content"]).split("\n", 1)[1]
+    )
+    assert rendered["evicted"] is True
+    assert rendered["archive_ref"] == archive_ref
+    assert retained_completed_stage_ids(updated) == set()
+
+
+def test_frontdoor_cross_turn_submit_without_summary_never_evicts() -> None:
+    # 承接只允许在模型自带非空总结时发生。回合尾结清的阶段留空是既有合同（最终回复紧邻
+    # 块之后），指针不得变成"顺手把上一轮回复抄成摘要"或无总结裁撤的入口。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    state = _settled_frontdoor_stage_ledger(stages=[_settled_frontdoor_stage(index=1)])
+
+    closed, _ = runner._submit_frontdoor_next_stage_state(
+        state,
+        stage_goal="score candidates",
+        tool_round_budget=5,
+        completed_stage_summary="",
+        key_refs=[],
+        drop_completed_stage_tool_detail=True,
+    )
+
+    settled = closed["stages"][0]
+    assert settled["completed_stage_summary"] == ""
+    assert "context_evicted" not in settled
+
+
+def test_frontdoor_cross_turn_submit_does_not_rewrite_older_stages() -> None:
+    # 承接窗口只有"最后一条"这么大：最新那条已经带总结时，说明它已被收尾过，
+    # 后来的 submit 不得回头改写更早的阶段。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    state = _settled_frontdoor_stage_ledger(
+        stages=[
+            _settled_frontdoor_stage(index=1, summary="阶段1结论"),
+            _settled_frontdoor_stage(index=2, summary="阶段2结论"),
+        ]
+    )
+
+    closed, _ = runner._submit_frontdoor_next_stage_state(
+        state,
+        stage_goal="score candidates",
+        tool_round_budget=5,
+        completed_stage_summary="阶段3结论",
+        key_refs=[],
+        drop_completed_stage_tool_detail=True,
+    )
+
+    assert [stage["completed_stage_summary"] for stage in closed["stages"][:2]] == [
+        "阶段1结论",
+        "阶段2结论",
+    ]
+    assert all("context_evicted" not in stage for stage in closed["stages"])
+
+
+def test_frontdoor_stage_closure_report_tells_the_model_whether_it_landed(tmp_path: Path) -> None:
+    # 提示词让模型"在同一次提交里带上 drop"，它就只能按契约文案倒推自己成功了没有。
+    # 实测那次它先答"已移出"，下一轮发现没有 ref 又改口"可能被压缩折叠了或者导出失败"。
+    # 所以给了收尾材料（summary 或 drop）就必须回报归属与是否落地。
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._ceo_session_temp_dir = lambda session_key: str(tmp_path)  # type: ignore[assignment]
+    state = _settled_frontdoor_stage_ledger(stages=[_settled_frontdoor_stage(index=1)])
+
+    updated, payload = runner._frontdoor_submit_next_stage(
+        state,
+        session_key="ext:qq-official-1:abc",
+        arguments={
+            "stage_goal": "score candidates",
+            "tool_round_budget": 5,
+            "completed_stage_summary": "阶段1确认了候选池口径",
+            "drop_completed_stage_tool_detail": True,
+        },
+    )
+
+    closure = payload["stage_closure"]
+    assert closure["target_stage_id"] == "frontdoor-stage-1"
+    assert closure["summary_attached"] is True
+    assert closure["evicted"] is True
+    assert closure["reason"] == "applied"
+    # 回报只挂在给模型看的副本上，账本里的新阶段记录保持原形状。
+    assert "stage_closure" not in updated["stages"][1]
+
+    # 没有收尾对象时（最新一条已带总结）不谎称生效。
+    settled_twice = _settled_frontdoor_stage_ledger(
+        stages=[
+            _settled_frontdoor_stage(index=1, summary="阶段1结论"),
+            _settled_frontdoor_stage(index=2, summary="阶段2结论"),
+        ]
+    )
+    _, blocked = runner._frontdoor_submit_next_stage(
+        settled_twice,
+        session_key="ext:qq-official-1:abc",
+        arguments={
+            "stage_goal": "score candidates",
+            "tool_round_budget": 5,
+            "completed_stage_summary": "阶段3结论",
+            "drop_completed_stage_tool_detail": True,
+        },
+    )
+    assert blocked["stage_closure"]["evicted"] is False
+    assert blocked["stage_closure"]["reason"] == "no_closing_target"
+
+    # 没给任何收尾材料的普通开阶段不添字段，存量会话的块与逐条布尔键都不因此涨体积。
+    _, plain = runner._frontdoor_submit_next_stage(
+        _settled_frontdoor_stage_ledger(stages=[]),
+        session_key="ext:qq-official-1:abc",
+        arguments={"stage_goal": "collect candidates", "tool_round_budget": 5},
+    )
+    assert "stage_closure" not in plain
+
+
 @pytest.mark.asyncio
 async def test_completed_frontdoor_stages_are_not_externalized_into_archives(tmp_path: Path, monkeypatch) -> None:
     service = MainRuntimeService(

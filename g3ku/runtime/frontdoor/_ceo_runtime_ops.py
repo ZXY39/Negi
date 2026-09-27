@@ -73,6 +73,7 @@ from g3ku.runtime.stage_prompt_compaction import (
     stage_created_at_ceiling,
     stage_created_at_within_watermark,
     stage_is_swallowable,
+    stage_is_terminal,
     stage_message_call_ids,
     stage_ref_candidates,
     strip_stage_block_echo,
@@ -5075,6 +5076,120 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 return True
         return False
 
+    @staticmethod
+    def _frontdoor_closing_stage(stage_state: dict[str, Any] | None) -> dict[str, Any] | None:
+        """`completed_stage_summary` / `key_refs` / 裁撤三样材料的归属对象，判据只允许有一份。
+
+        活动阶段优先；没有活动阶段时回退到**最后一条**阶段，且仅当它是终态普通阶段、总结
+        还空着——即上一回合被轮末结清、正等模型补写蒸馏结论的那条。回合尾必然清空
+        `active_stage_id`，而渠道会话的模型下一个回合才发 `submit_next_stage`：只认活动位
+        会让三样材料一起静默悬空（合同与实盘证据见
+        `docs/architecture/runtime-overview.md`「stage_compaction」）。回退窗口只有一条且
+        要求总结为空，所以既不改写更早的阶段，也不构成"代写摘要"的入口。
+        """
+        if not isinstance(stage_state, dict):
+            return None
+        active_stage_id = str(stage_state.get("active_stage_id") or "").strip()
+        stages = [
+            dict(stage)
+            for stage in list(stage_state.get("stages") or [])
+            if isinstance(stage, dict)
+        ]
+        if not stages:
+            return None
+        if active_stage_id:
+            active = next(
+                (
+                    stage
+                    for stage in stages
+                    if str(stage.get("stage_id") or "").strip() == active_stage_id
+                    and str(stage.get("status") or "").strip().lower() == "active"
+                ),
+                None,
+            )
+            if active is not None:
+                return active
+        newest = max(stages, key=lambda stage: int(stage.get("stage_index") or 0))
+        if str(newest.get("stage_kind") or "normal").strip().lower() != "normal":
+            return None
+        if not stage_is_terminal(newest):
+            return None
+        if str(newest.get("completed_stage_summary") or "").strip():
+            return None
+        return newest
+
+    @classmethod
+    def _frontdoor_closing_stage_id(cls, stage_state: dict[str, Any] | None) -> str:
+        return str((cls._frontdoor_closing_stage(stage_state) or {}).get("stage_id") or "").strip()
+
+    def _frontdoor_submit_next_stage(
+        self,
+        stage_state: dict[str, Any],
+        *,
+        session_key: str,
+        arguments: dict[str, Any],
+        preamble_text: str = "",
+        system_generated: bool = False,
+        archive: bool = True,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """一次 `submit_next_stage` 提交的完整落账：解析归属 → 提交 → 按需导档 → 回报。
+
+        两条车道（图闭包的本轮工作副本、finalize 重建 durable 账本）共用这里，收尾判据只有
+        一份；`archive=False` 给闭包用，因为写在会被 durable 返回值覆盖的工作副本上的
+        `archive_ref` 只会多留一份无人引用的归档文件。`stage_closure` 回执只在模型给了收尾
+        材料时附上——没有它，模型只能按提示词文案倒推自己有没有裁撤成功，于是向用户谎报。
+        """
+        closing_stage_id = self._frontdoor_closing_stage_id(stage_state)
+        normalized_summary = str(arguments.get("completed_stage_summary") or "").strip()
+        drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
+        next_state, next_stage = self._submit_frontdoor_next_stage_state(
+            stage_state,
+            stage_goal=str(arguments.get("stage_goal") or ""),
+            tool_round_budget=int(arguments.get("tool_round_budget") or 0),
+            completed_stage_summary=normalized_summary,
+            key_refs=[
+                dict(item)
+                for item in list(arguments.get("key_refs") or [])
+                if isinstance(item, dict)
+            ],
+            final=bool(arguments.get("final")),
+            preamble_text=preamble_text,
+            system_generated=system_generated,
+            drop_completed_stage_tool_detail=drop_detail,
+        )
+        if drop_detail and archive:
+            self._frontdoor_archive_evicted_stage(
+                session_key=session_key,
+                stage_state=next_state,
+                stage_id=closing_stage_id,
+            )
+        payload = dict(next_stage)
+        if normalized_summary or drop_detail:
+            closed = next(
+                (
+                    stage
+                    for stage in list(next_state.get("stages") or [])
+                    if isinstance(stage, dict)
+                    and str(stage.get("stage_id") or "").strip() == closing_stage_id
+                ),
+                None,
+            )
+            if not closing_stage_id:
+                reason = "no_closing_target"
+            elif drop_detail and not normalized_summary:
+                reason = "summary_required"
+            else:
+                reason = "applied"
+            payload["stage_closure"] = {
+                "target_stage_id": closing_stage_id,
+                "summary_attached": bool(
+                    closed and str(closed.get("completed_stage_summary") or "").strip()
+                ),
+                "evicted": bool(closed and closed.get("context_evicted") is True),
+                "reason": reason,
+            }
+        return next_state, payload
+
     @classmethod
     def _submit_frontdoor_next_stage_state(
         cls,
@@ -5118,19 +5233,23 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "in this stage"
             )
 
+        # 归属对象只有一处判据：活动阶段优先，跨回合提交时回退到刚被轮末结清、总结还空着
+        # 的最后一条阶段。少了回退这一支，渠道会话的 summary / key_refs / 裁撤会一起悬空，
+        # 而新阶段照常追加，从外表看不出任何异常。
+        closing_stage = cls._frontdoor_closing_stage(normalized_state)
+        closing_stage_id = str((closing_stage or {}).get("stage_id") or "").strip()
+
         now = now_iso()
         stages: list[dict[str, Any]] = []
         for stage in list(normalized_state.get("stages") or []):
             current = dict(stage)
-            if (
-                active_stage is not None
-                and str(current.get("stage_id") or "").strip() == str(active_stage.get("stage_id") or "").strip()
-                and str(current.get("status") or "").strip().lower() == "active"
-            ):
+            if closing_stage_id and str(current.get("stage_id") or "").strip() == closing_stage_id:
                 current.update(
                     {
                         "status": "completed",
-                        "finished_at": now,
+                        # 轮末结清时已经落过 finished_at，跨回合补记不改动它：
+                        # 收口水位线与阶段排序都按这个时间命中。
+                        "finished_at": str(current.get("finished_at") or "").strip() or now,
                         "completed_stage_summary": normalized_summary,
                         "key_refs": normalized_key_refs,
                     }
@@ -5348,36 +5467,15 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if tool_name == STAGE_TOOL_NAME:
                 if status != "error":
                     arguments = dict(payload.get("arguments") or {})
-                    closing_stage_id = str(stage_state.get("active_stage_id") or "").strip()
-                    drop_detail = bool(arguments.get("drop_completed_stage_tool_detail"))
-                    stage_state, _ = self._submit_frontdoor_next_stage_state(
+                    # 标记、导档、块里的指针必须由这条"回合后重建 durable 账本"的路径产出：
+                    # 图节点里那份 mutable_stage_state 只是本轮工作副本，finalize 会用这里的
+                    # 返回值覆盖状态。与收口标记同一教训——标记要落在 durable 基线推进的那一步。
+                    stage_state, _ = self._frontdoor_submit_next_stage(
                         stage_state,
-                        stage_goal=str(arguments.get("stage_goal") or ""),
-                        tool_round_budget=int(arguments.get("tool_round_budget") or 0),
-                        # 裁撤标记必须由这条"回合后重建 durable 账本"的路径落盘：图节点里那份
-                        # mutable_stage_state 只是本轮工作副本，finalize 会用这里的返回值覆盖状态，
-                        # 少传一个参数就等于 durable 账本永远没有标记——文件照写、肉身照旧每轮重发。
-                        # 与收口标记同一教训：标记必须落在 durable 基线推进的那一步。
-                        drop_completed_stage_tool_detail=drop_detail,
-                        completed_stage_summary=str(arguments.get("completed_stage_summary") or ""),
-                        key_refs=[
-                            dict(item)
-                            for item in list(arguments.get("key_refs") or [])
-                            if isinstance(item, dict)
-                        ],
-                        final=bool(arguments.get("final")),
+                        session_key=str(state.get("session_key") or "").strip(),
+                        arguments=arguments,
                         preamble_text=cycle_narration_text,
                     )
-                    if drop_detail:
-                        # 导档同样只能落在这条路径：闭包里写进 mutable_stage_state 的 archive_ref
-                        # 会随工作副本一起被这里的返回值覆盖掉，于是块里永远只有 evicted 没有指针，
-                        # 提示词承诺的"content_open 回读"就成了空头支票。一份阶段只导一次，
-                        # ref 落盘后由快照白名单逐轮带着走。
-                        self._frontdoor_archive_evicted_stage(
-                            session_key=str(state.get("session_key") or "").strip(),
-                            stage_state=stage_state,
-                            stage_id=closing_stage_id,
-                        )
                     stage_created_this_cycle = True
                 continue
             ordinary_calls.append(dict(payload))
@@ -6097,15 +6195,21 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             final: bool = False,
             drop_completed_stage_tool_detail: bool = False,
         ) -> dict[str, Any]:
-            next_stage_state, stage_payload = self._submit_frontdoor_next_stage_state(
+            # 与 durable 侧重建共用同一个入口，差别只在 `archive=False`：归档要落在
+            # durable 账本那一步，写在一份会被覆盖掉的工作副本上只会多留一份没人引用的文件。
+            next_stage_state, stage_payload = self._frontdoor_submit_next_stage(
                 mutable_stage_state,
-                stage_goal=stage_goal,
-                tool_round_budget=tool_round_budget,
-                completed_stage_summary=completed_stage_summary,
-                key_refs=key_refs,
-                final=final,
-                drop_completed_stage_tool_detail=drop_completed_stage_tool_detail,
+                session_key=str(state.get("session_key") or "").strip(),
+                arguments={
+                    "stage_goal": stage_goal,
+                    "tool_round_budget": tool_round_budget,
+                    "completed_stage_summary": completed_stage_summary,
+                    "key_refs": key_refs or [],
+                    "final": final,
+                    "drop_completed_stage_tool_detail": drop_completed_stage_tool_detail,
+                },
                 preamble_text=str(state.get("analysis_text") or "").strip(),
+                archive=False,
             )
             mutable_stage_state.clear()
             mutable_stage_state.update(next_stage_state)
