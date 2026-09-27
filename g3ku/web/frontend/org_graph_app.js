@@ -6114,10 +6114,10 @@ async function finishCeoVoiceTranscription(capture) {
         const result = await ApiClient.transcribeCeoVoice(wav);
         closeToast();
         if (result && result.ok && result.text) {
-            // 先让录音落成会话附件，再交付文字：语音气泡要可回放，而服务端
-            // /api/ceo/transcribe 转写完就把字节丢了（不落盘是它的契约）。
-            await attachVoiceClip(wav);
-            deliverVoiceText(String(result.text));
+            // 字节留不留，取决于这条会不会以"语音"的身份发出去：自动发送才带标记，
+            // 才配挂一段可回放的录音；手动模式会被编辑，留下字节就是让音频和文本各说
+            // 一套，所以用完即扔。判定与上传都在 deliverVoiceText 里一次做完。
+            await deliverVoiceText(String(result.text), wav);
             return;
         }
         const missingCode = String((result && result.error_code) || "");
@@ -6232,10 +6232,15 @@ function insertVoiceTextAtCursor(text) {
     el.focus();
 }
 
-function deliverVoiceText(text) {
+async function deliverVoiceText(text, clip) {
     const draftBefore = String(U.ceoInput ? U.ceoInput.value : "");
     if (ceoVoiceAutoSendEnabled() && !draftBefore.trim()) {
         U.ceoInput.value = `${VOICE_AUTO_SEND_PREFIX}${text}`;
+        if (clip) {
+            // 带标记发出的这一条才留字节：语音气泡要能回放，而服务端
+            // /api/ceo/transcribe 转写完就把字节丢了（不落盘是它的契约）。
+            await attachVoiceClip(clip);
+        }
         sendCeoMessage();
         // sendCeoMessage 成功时会清空输入框；没清空说明这条发不出去
         // （会话忙、只读、没选中会话），把文本留在框里比吞掉它好。
@@ -6245,6 +6250,7 @@ function deliverVoiceText(text) {
         }
         return;
     }
+    // 走到这里就是不落字节的那条道：识别文字进输入框由用户改，改完当普通文本发。
     insertVoiceTextAtCursor(text);
     if (ceoVoiceAutoSendEnabled()) {
         // 自动发送开着但框里已有草稿：不替用户决定要不要把草稿一起发出去。

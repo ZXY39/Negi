@@ -608,3 +608,52 @@ test("录音入口先问就绪，再要麦克风权限", () => {
         "顺序反了就是用户说完一段话才被告知这台机器还没装模型"
     );
 });
+
+test("只有自动发送那条留录音字节，手动模式用完即扔", async () => {
+    const app = loadApp();
+    const { U, deliverVoiceText, VOICE_AUTO_SEND_PREFIX } = app;
+    const order = [];
+    U.ceoInput = new StubHTMLTextAreaElement();
+    U.ceoInput.value = "";
+    app.__context.attachVoiceClip = async () => { order.push("attach"); };
+    app.__context.sendCeoMessage = () => {
+        order.push(`send:${U.ceoInput.value.startsWith(VOICE_AUTO_SEND_PREFIX) ? "marked" : "plain"}`);
+        U.ceoInput.value = "";
+    };
+
+    await deliverVoiceText("帮我查一下昨天的任务", { size: 8 });
+
+    assert.deepEqual(order, ["attach", "send:marked"], "字节要先挂上再发，否则发出去那条没有可回放的语音气泡");
+
+    const manual = loadApp();
+    const manualOrder = [];
+    manual.setCeoVoiceAutoSend(false);
+    manual.U.ceoInput = new StubHTMLTextAreaElement();
+    manual.U.ceoInput.value = "";
+    manual.U.ceoInput.selectionStart = 0;
+    manual.U.ceoInput.selectionEnd = 0;
+    manual.__context.attachVoiceClip = async () => manualOrder.push("attach");
+    manual.__context.sendCeoMessage = () => manualOrder.push("send");
+
+    await manual.deliverVoiceText("帮我查一下昨天的任务", { size: 8 });
+
+    assert.deepEqual(manualOrder, [], "手动模式会被编辑，留下录音就是让音频和文本各说一套");
+    assert.equal(manual.U.ceoInput.value, "帮我查一下昨天的任务");
+});
+
+test("有草稿挡住自动发送时同样不留字节", async () => {
+    const app = loadApp();
+    const { U, deliverVoiceText } = app;
+    const order = [];
+    U.ceoInput = new StubHTMLTextAreaElement();
+    U.ceoInput.value = "还没想发出去";
+    U.ceoInput.selectionStart = 7;
+    U.ceoInput.selectionEnd = 7;
+    app.__context.attachVoiceClip = async () => order.push("attach");
+    app.__context.sendCeoMessage = () => order.push("send");
+
+    await deliverVoiceText("语音", { size: 8 });
+
+    assert.deepEqual(order, []);
+    assert.equal(U.ceoInput.value.includes("语音"), true);
+});

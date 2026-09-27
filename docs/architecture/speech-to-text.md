@@ -33,7 +33,7 @@ QQ 侧：桥下载语音附件字节 → **进程内**直接调用引擎（桥�
 
 ### 语音气泡与音频字段的存放
 
-转写成功后，两条车道都把**解码后的 WAV** 作为普通会话附件再交一次：网页侧由前端调用既有上传车道，QQ 侧由桥把 `kind:"audio"` 附件随回合走 `/api/v1`。渠道侧的字节来自引擎的 `SttResult.wav_bytes`——存的必须是解码后的 WAV 而不是收到的原始字节，因为语音条的真身是腾讯 silk，浏览器播不了。`wav_bytes` 只在进程内传递，刻意排除在 `as_dict()` 之外。渲染层据此把这条用户消息画成语音条（时长 + 播放 + 右端一颗 `T` 展开转写，转写落在条下方），而不是把标记文字摊在正文里——转写文本的可见性由气泡的展开动作决定，正文里的标记只服务于模型。细节在 `web-and-admin.md`「Composer Voice Input」与「Attachment Bubble Rendering Contract」。
+转写成功后，**带标记的那一条**才把解码后的 WAV 作为普通会话附件再交一次：网页侧由前端在自动发送分支里调用既有上传车道，QQ 侧由桥把 `kind:"audio"` 附件随回合走 `/api/v1`。**手动模式用完即扔**——那段文字会被用户改，改完当普通文本发出，留下录音就等于让音频和文本各说一套（气泡上播的是原话，T 展开的是改后的话）。渠道侧的字节来自引擎的 `SttResult.wav_bytes`——存的必须是解码后的 WAV 而不是收到的原始字节，因为语音条的真身是腾讯 silk，浏览器播不了。`wav_bytes` 只在进程内传递，刻意排除在 `as_dict()` 之外。渲染层据此把这条用户消息画成语音条（时长 + 播放 + 右端一颗 `T` 展开转写，转写落在条下方），而不是把标记文字摊在正文里——转写文本的可见性由气泡的展开动作决定，正文里的标记只服务于模型。细节在 `web-and-admin.md`「Composer Voice Input」与「Attachment Bubble Rendering Contract」。
 
 **音频进的是模型的可见面之外**：附件说明行与 `UserInputMessage.attachments` 都跳过 `kind=='audio'`（`websocket_ceo._model_visible_uploads`、`external_v1._build_external_user_message`）。理由是内容已经在正文的转写里，多一行本地路径只会让模型以为要去打开一个文件。`metadata` 里保留它，历史回放才播得出来。
 
