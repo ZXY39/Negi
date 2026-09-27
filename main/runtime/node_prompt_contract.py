@@ -7,6 +7,11 @@ from typing import Any
 NODE_DYNAMIC_CONTRACT_KIND = 'node_runtime_tool_contract'
 NODE_DYNAMIC_CONTRACT_HEADING = '## Runtime Tool Contract'
 NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY = '_node_runtime_tool_contract_payload'
+# 与前门 FrontdoorToolContract 同形：回合内常量的候选/修复/策略留在这份契约里，
+# 每跳重写的 callable / hydrated / 活动阶段单独成块落在请求体末位，重写只顶掉它自己。
+NODE_DYNAMIC_STAGE_GATE_KIND = 'node_runtime_stage_gate'
+NODE_DYNAMIC_STAGE_GATE_HEADING = '## Runtime Stage Gate'
+NODE_RUNTIME_APPENDIX_HEADINGS = (NODE_DYNAMIC_CONTRACT_HEADING, NODE_DYNAMIC_STAGE_GATE_HEADING)
 
 
 def _normalized_name_list(items: list[Any] | None) -> list[str]:
@@ -152,35 +157,24 @@ def _render_name_list(items: list[str] | None) -> str:
 
 
 def _render_candidate_tool_section(items: list[dict[str, str]] | None) -> list[str]:
+    """只列名字：工具说明由 provider `tools[]` 的 `function.description` 承载
+    （节点束走 `Tool.to_model_schema()`，本来就带 model description），行为口径在
+    `node_runtime_contract_shared.md` 稳定提示词里说一次。
+    """
     normalized_items = _normalized_candidate_tool_items(items)
     if not normalized_items:
         return ['candidate_tools: none']
-    lines = [
-        'candidate_tools:',
-        '- These tools are visible but not callable yet. To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.',
-    ]
-    for item in normalized_items:
-        tool_id = str(item.get('tool_id') or '').strip()
-        description = str(item.get('description') or '').strip()
-        detail = description if description else 'No description available.'
-        lines.append(f'- `{tool_id}`: {detail}')
-    return lines
+    return [f'candidate_tools: {_render_name_list([str(item.get("tool_id") or "") for item in normalized_items])}']
 
 
 def _render_candidate_skill_section(items: list[dict[str, str]] | None) -> list[str]:
+    """名单制，与前门 `candidate_skills` 同形；"skill 不水合、按 id 直接读正文"
+    的口径在 `node_runtime_contract_shared.md` 里说一次。
+    """
     normalized_items = _normalized_candidate_skill_items(items)
     if not normalized_items:
         return ['candidate_skills: none']
-    lines = [
-        'candidate_skills:',
-        '- These skills are readable by id. Call `load_skill_context(skill_id="<skill_id>")` when you need the skill body.',
-    ]
-    for item in normalized_items:
-        skill_id = str(item.get('skill_id') or '').strip()
-        description = str(item.get('description') or '').strip()
-        detail = description if description else 'No description available.'
-        lines.append(f'- `{skill_id}`: {detail}')
-    return lines
+    return [f'candidate_skills: {_render_name_list([str(item.get("skill_id") or "") for item in normalized_items])}']
 
 
 def _render_repair_required_tool_section(items: list[dict[str, str]] | None) -> list[str]:
@@ -270,19 +264,29 @@ def _render_exec_runtime_policy(exec_runtime_policy: dict[str, Any] | None) -> s
 
 
 def _render_node_dynamic_contract_summary(payload: dict[str, Any]) -> str:
+    """回合内常量部分。静态行为规则与逐条描述都不在这里：规则见
+    `node_runtime_contract_shared.md`，工具描述见 provider `tools[]`。
+    """
     lines = [
         NODE_DYNAMIC_CONTRACT_HEADING,
         f'kind: {NODE_DYNAMIC_CONTRACT_KIND}',
-        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
-        f'hydrated_tools: {_render_name_list(payload.get("hydrated_executor_names"))}',
-        'load_tool_context_help: Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help, including tools that are already callable or already hydrated.',
-        'load_tool_context_repeat_guard: For callable, hydrated, or fixed-builtin tools, do not reread the same inline uncompressed toolskill. Reuse it unless the tool state changed or the old result was compressed away.',
         *_render_candidate_tool_section(payload.get('candidate_tools')),
         *_render_candidate_skill_section(payload.get('candidate_skills')),
         *_render_repair_required_tool_section(payload.get('repair_required_tools')),
         *_render_repair_required_skill_section(payload.get('repair_required_skills')),
-        _render_stage_summary(payload.get('execution_stage')),
         _render_exec_runtime_policy(payload.get('exec_runtime_policy')),
+    ]
+    return '\n'.join(lines)
+
+
+def _render_node_stage_gate_summary(payload: dict[str, Any]) -> str:
+    """每跳重写的活状态：本轮真可调用集、水合集、活动阶段轨道。排在请求体末位。"""
+    lines = [
+        NODE_DYNAMIC_STAGE_GATE_HEADING,
+        f'kind: {NODE_DYNAMIC_STAGE_GATE_KIND}',
+        f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
+        f'hydrated_tools: {_render_name_list(payload.get("hydrated_executor_names"))}',
+        _render_stage_summary(payload.get('execution_stage')),
     ]
     return '\n'.join(lines)
 
@@ -387,6 +391,20 @@ class NodeRuntimeToolContract:
             NODE_DYNAMIC_CONTRACT_PAYLOAD_KEY: payload,
         }
 
+    def to_stage_gate_message(self) -> dict[str, Any]:
+        """活状态块：与契约同源，只含每跳重写的行，排在请求体真正末位。"""
+        return {
+            'role': 'system',
+            'content': _render_node_stage_gate_summary(self.to_message_payload()),
+        }
+
+
+def _node_runtime_appendix_kind(heading: str) -> str:
+    return {
+        NODE_DYNAMIC_CONTRACT_HEADING: NODE_DYNAMIC_CONTRACT_KIND,
+        NODE_DYNAMIC_STAGE_GATE_HEADING: NODE_DYNAMIC_STAGE_GATE_KIND,
+    }[heading]
+
 
 def is_node_dynamic_contract_message(message: dict[str, Any]) -> bool:
     if _node_dynamic_contract_payload_from_message(message) is not None:
@@ -397,25 +415,33 @@ def is_node_dynamic_contract_message(message: dict[str, Any]) -> bool:
     # assistant 角色的旧契约残留，模型回显的契约也是 assistant 文本，两类都识别。
     if str((message or {}).get('role') or '').strip().lower() not in {'assistant', 'system'}:
         return False
-    return str((message or {}).get('content') or '').strip().startswith(NODE_DYNAMIC_CONTRACT_HEADING)
+    return any(
+        str((message or {}).get('content') or '').strip().startswith(heading)
+        for heading in NODE_RUNTIME_APPENDIX_HEADINGS
+    )
 
 
 def _node_dynamic_contract_heading_index(text: str) -> int:
-    """Return the start of a rendered node contract embedded in ``text``.
+    """Return the start of a rendered node appendix block embedded in ``text``.
 
     The heading alone is not enough to classify ordinary prose that merely
     mentions the contract. Requiring the canonical kind marker in the nearby
     suffix keeps this helper focused on the provider-facing contract summary
-    that the runtime injects.
+    that the runtime injects. The live stage gate counts too: it is the block
+    at the continuation point, so it is the one a model can echo.
     """
     normalized = str(text or '')
-    heading_index = normalized.find(NODE_DYNAMIC_CONTRACT_HEADING)
-    if heading_index < 0:
-        return -1
-    suffix = normalized[heading_index : heading_index + 512]
-    if f'kind: {NODE_DYNAMIC_CONTRACT_KIND}' not in suffix:
-        return -1
-    return heading_index
+    best = -1
+    for heading in NODE_RUNTIME_APPENDIX_HEADINGS:
+        heading_index = normalized.find(heading)
+        if heading_index < 0:
+            continue
+        suffix = normalized[heading_index : heading_index + 512]
+        if f'kind: {_node_runtime_appendix_kind(heading)}' not in suffix:
+            continue
+        if best < 0 or heading_index < best:
+            best = heading_index
+    return best
 
 
 def is_node_dynamic_contract_echo_text(text: Any) -> bool:
@@ -438,9 +464,10 @@ def upsert_node_dynamic_contract_message(
     messages: list[dict[str, Any]],
     contract: NodeRuntimeToolContract,
 ) -> list[dict[str, Any]]:
-    contract_message = contract.to_message()
+    """尾部恰好两份：回合内常量的契约 + 每跳重写的活状态块（契约在前、活块在末位）。"""
     updated = strip_node_dynamic_contract_messages(messages)
-    updated.append(contract_message)
+    updated.append(contract.to_message())
+    updated.append(contract.to_stage_gate_message())
     return updated
 
 

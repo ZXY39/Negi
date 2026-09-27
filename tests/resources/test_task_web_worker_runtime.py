@@ -4390,7 +4390,8 @@ async def test_execution_node_build_messages_appends_dynamic_tool_contract_after
 
         assert len(messages) >= 3
         assert messages[-1]["role"] == "system"
-        assert str(messages[-1]["content"] or "").startswith("## Runtime Tool Contract")
+        assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
+        assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
         assert "filesystem_write" in payload["callable_tool_names"]
@@ -4450,7 +4451,8 @@ async def test_execution_node_build_messages_exposes_full_callable_tools_without
 
         assert len(messages) >= 3
         assert messages[-1]["role"] == "system"
-        assert str(messages[-1]["content"] or "").startswith("## Runtime Tool Contract")
+        assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
+        assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
         assert payload["callable_tool_names"] == ["submit_next_stage", "filesystem_write"]
@@ -4518,7 +4520,8 @@ async def test_acceptance_node_build_messages_appends_dynamic_tool_contract_afte
 
         assert len(messages) >= 3
         assert messages[-1]["role"] == "system"
-        assert str(messages[-1]["content"] or "").startswith("## Runtime Tool Contract")
+        assert str(messages[-1]["content"] or "").startswith("## Runtime Stage Gate")
+        assert str(messages[-2]["content"] or "").startswith("## Runtime Tool Contract")
         payload = extract_node_dynamic_contract_payload(messages)
         assert payload is not None
         assert "content_open" in payload["callable_tool_names"]
@@ -9814,10 +9817,10 @@ async def test_run_node_appends_notice_delivered_after_first_model_response_befo
         )
         assert note_count == 1
         assert contract_count == 1
-        # 尾部顺序：契约在前、当轮 turn-only 阶段提示压尾（末位是 user 回合提示，
-        # 契约不再占据末位，避免被模型当作"上一条发言"回显）。
+        # 尾部顺序：稳定契约、活状态块，当轮 turn-only 阶段提示压尾（末位是 user 回合提示）。
         assert str(second_messages[-1].get("content") or "").startswith("System note for this turn only:")
-        assert str(second_messages[-2].get("content") or "").startswith("## Runtime Tool Contract")
+        assert str(second_messages[-2].get("content") or "").startswith("## Runtime Stage Gate")
+        assert str(second_messages[-3].get("content") or "").startswith("## Runtime Tool Contract")
 
         notice_indexes = [
             index

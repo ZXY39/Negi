@@ -3877,10 +3877,13 @@ async def test_contract_echo_with_stage_tool_call_keeps_pairing_and_tail_order()
     assert len(echoed_declarations) == 1
     assert str(echoed_declarations[0].get("content") or "").startswith("## Runtime Tool Contract")
 
-    # 尾部顺序：契约在前、当轮 turn-only 阶段提示压尾（末位是 user 回合提示）。
+    # 尾部顺序：稳定契约、活状态块，然后当轮 turn-only 提示压尾（末位是 user 回合提示）。
     assert str(second_request[-1].get("role") or "") == "user"
     assert str(second_request[-1].get("content") or "").startswith("System note for this turn only:")
-    contract_message = second_request[-2]
+    gate_message = second_request[-2]
+    assert str(gate_message.get("role") or "") == "system"
+    assert str(gate_message.get("content") or "").startswith("## Runtime Stage Gate")
+    contract_message = second_request[-3]
     assert str(contract_message.get("role") or "") == "system"
     assert str(contract_message.get("content") or "").startswith("## Runtime Tool Contract")
 
@@ -8713,7 +8716,8 @@ async def test_node_second_tool_round_request_carries_no_stale_contract_or_note(
     )
     assert any(str(item.get("name") or "").strip() == "record_one" for item in tool_turns)
     # The carried prefix must not retain the previous round's note/contract.
-    non_tail = second_request[:-1]
+    # 尾部是两份运行时块（稳定契约 + 活状态块），所以非尾段按 -2 起算。
+    non_tail = second_request[:-2]
     assert _contract_count(non_tail) == 0
     assert _note_count(non_tail) == 0
 

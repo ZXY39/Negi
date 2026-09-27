@@ -1,10 +1,8 @@
-- The current round may include one assistant summary block headed `## Runtime Tool Contract`.
-- That summary block is the authoritative runtime contract for the current node round. Older tool or skill lists from earlier messages are not authoritative once a newer summary exists.
-- `callable_tool_names` remain the source of truth for tools that may be called directly in this round.
-- `candidate_tools` list visible but not-yet-callable concrete tools. If a tool is only listed there, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round to expose it through hydration before calling it directly.
-- `hydrated_executor_names` list tools that were already hydrated for the node. They are names only; the provider-native callable schema still comes from provider `tools[]`.
-- Any surfaced RBAC-visible tool for the current round may also be loaded by exact `tool_id` with `load_tool_context(...)` for docs/help, even when it is already callable or already hydrated.
-- Repeated direct `load_tool_context` reads for callable, hydrated, or fixed-builtin tools are blocked when the same current toolskill is already inline and uncompressed. Reuse the existing toolskill unless the tool state changed or the old result was compressed away.
-- `candidate_skills` list visible skill candidates as `{skill_id, description}` summaries. Skills do not hydrate; call `load_skill_context(skill_id="...")` directly when the skill is present in that list.
-- `execution_stage` in the runtime contract is the live stage summary for this round. Do not rely on older stage state from stale messages.
-- All callable and candidate visibility is still constrained by RBAC and the stage gate. If a tool is missing from `callable_tool_names`, it is not directly callable in this round.
+- 每轮请求尾部有两份运行时注入的 system 摘要块：`## Runtime Tool Contract` 装当轮不变的候选与修复清单，`## Runtime Stage Gate` 装这一跳真正可调用什么、活动阶段是什么。两份都是运行时元数据，不是你说过的话，也不是发给用户的内容；较新的一份覆盖历史消息里的一切旧清单。
+- `Runtime Stage Gate` 里的 `callable_tools` 是本轮可直接调用的唯一真相源。不在里面的工具即使名字出现在别处，也不可直接调用（RBAC 与阶段闸门都在它之上再收一层）。
+- `candidate_tools` 列的是"可见但还不可调"的具体工具：只出现在这里，就先 `load_tool_context(tool_id="<tool_id>")` 读它的 toolskill，等下一轮经 hydration 提升后再直接调用。每个工具的说明文字由 provider `tools[]` 的 `function.description` 给出，摘要里只列名字。
+- `hydrated_tools` 列出已为该节点水合过的执行器，只有名字；可调 schema 仍来自 provider `tools[]`。
+- 当轮任何 RBAC 可见且已 surfaced 的具体工具，都可以按精确 `tool_id` 调 `load_tool_context(...)` 读文档/帮助，即使它已经 callable 或已经水合。
+- 对已 callable、已水合或 fixed builtin 的工具，如果同版本 toolskill 已在上下文里且未被压缩掉，重复调 `load_tool_context` 会被拦下——直接复用已有说明，除非工具状态变了或旧结果已被压缩移出。
+- `candidate_skills` 列当轮可见的候选 skill id。skill 不走 hydration：名单里的 `skill_id` 就是正文入口，需要正文时直接 `load_skill_context(skill_id="...")`。
+- `stage_summary` 是这一跳的活阶段状态（阶段目标、预算、是否必须换阶段）。不要从更早消息里的旧阶段状态推断当前处境。

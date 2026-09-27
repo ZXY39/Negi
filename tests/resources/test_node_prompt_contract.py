@@ -48,10 +48,11 @@ def test_upsert_node_dynamic_contract_message_replaces_existing_contract_message
 
     updated = upsert_node_dynamic_contract_message(base_messages, contract)
 
-    assert len(updated) == 3
+    assert len(updated) == 4  # 原 3 条 + 稳定契约 + 活状态块
     assert updated[-1]["role"] == "system"
-    assert updated[-1]["content"].startswith("## Runtime Tool Contract")
-    assert '"message_type"' not in updated[-1]["content"]
+    assert updated[-1]["content"].startswith("## Runtime Stage Gate")
+    assert updated[-2]["content"].startswith("## Runtime Tool Contract")
+    assert '"message_type"' not in updated[-2]["content"]
     payload = contract.to_message_payload()
     assert payload["message_type"] == NODE_DYNAMIC_CONTRACT_KIND
     assert payload["callable_tool_names"] == ["filesystem_write"]
@@ -105,22 +106,31 @@ def test_node_runtime_contract_serializes_minimal_agent_facing_payload() -> None
     assert message["role"] == "system"
     assert message["content"].startswith("## Runtime Tool Contract")
     assert '"message_type"' not in message["content"]
-    assert "callable_tools: `exec`" in message["content"]
-    assert "candidate_tools:" in message["content"]
+    # 活状态只在尾块里，稳定块一份都没有
+    gate_content = contract.to_stage_gate_message()["content"]
+    assert gate_content.startswith("## Runtime Stage Gate")
+    assert "callable_tools: `exec`" in gate_content
+    assert "hydrated_tools: `filesystem_write`" in gate_content
+    assert "callable_tools:" not in message["content"]
+    assert "hydrated_tools:" not in message["content"]
+    # 候选只列名字：说明文字在 provider tools[] 的 function.description 里
+    assert "candidate_tools: `filesystem_write`" in message["content"]
+    assert "candidate_skills: `tmux`" in message["content"]
+    assert "- `filesystem_write`: write file" not in message["content"]
+    # 行为口径只在 node_runtime_contract_shared.md 说一次，块里不再抄第二份
     assert (
         'To use one, call `load_tool_context(tool_id="<tool_id>")` first and wait for the next round before calling it directly.'
-        in message["content"]
+        not in message["content"]
     )
     assert 'load_tool_context(tool_id="filesystem_write")' not in message["content"]
     assert (
         'Call `load_skill_context(skill_id="<skill_id>")` when you need the skill body.'
-        in message["content"]
+        not in message["content"]
     )
     assert 'load_skill_context(skill_id="tmux")' not in message["content"]
-    assert "load_tool_context_help:" in message["content"]
-    assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" in message["content"]
-    assert "load_tool_context_repeat_guard:" in message["content"]
-    assert "hydrated_tools: `filesystem_write`" in message["content"]
+    assert "load_tool_context_help:" not in message["content"]
+    assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" not in message["content"]
+    assert "load_tool_context_repeat_guard:" not in message["content"]
 
 
 def test_node_runtime_contract_renders_repair_required_sections_separately() -> None:
@@ -212,9 +222,10 @@ def test_inject_node_dynamic_contract_message_appends_contract_to_request_tail()
         contract,
     )
 
-    assert [item["role"] for item in injected] == ["system", "user", "assistant", "system"]
-    assert injected[-1]["content"].startswith("## Runtime Tool Contract")
-    assert '"message_type"' not in injected[-1]["content"]
+    assert [item["role"] for item in injected] == ["system", "user", "assistant", "system", "system"]
+    assert injected[-1]["content"].startswith("## Runtime Stage Gate")
+    assert injected[-2]["content"].startswith("## Runtime Tool Contract")
+    assert '"message_type"' not in injected[-2]["content"]
     payload = extract_node_dynamic_contract_payload(injected)
     assert payload is not None
     assert payload["candidate_skills"] == [{"skill_id": "tmux", "description": "terminal workflow"}]
