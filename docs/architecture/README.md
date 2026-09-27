@@ -56,7 +56,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务树刷新时轮次下拉框自己收起/跳回默认轮次 → `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」（重绘后的稳定身份与展开态恢复）
 - 本地会话列表拖动后的顺序被打回原样、或换浏览器顺序不一致 → `web-and-admin.md`「CEO Session List Interaction Contract」（手动顺序只存前端 localStorage）
 - 改了密码旧密码还能用、勾了自动解锁重启仍要输密码、或「锁定项目」后界面仍可读数 → `config-and-models.md`「Deployment Unlock Contract」（改密只换信封不换钥匙、解锁顺序 env→本地密钥文件→口令、锁定只清 web 进程内存主密钥）
-- 任务与会话数据不在代码检出目录里、首次初始化时选过别的盘、或重启后旧任务像空库一样找不到 → `operations-and-maintenance.md`「关键状态文件与目录」（安装根与数据根的划分、`G3KU_DATA_DIR`→指针→cwd 的解析顺序、指针丢失即回退 cwd 的形态）
+- 任务与会话数据不在代码检出目录里、首次初始化时选过别的盘、重启后旧任务像空库一样找不到、或按文档路径找不到 `console.log`/`managed-worker.log` → `operations-and-maintenance.md`「关键状态文件与目录」（安装根与数据根各装什么、`G3KU_DATA_DIR`→指针→cwd 的解析顺序、盘上两个 `.g3ku` 的嵌套、`get_data_dir()` 其实是安装根、指针丢失即回退 cwd 的形态）
 - 导出配置包报 `project_locked`、导入后旧登录密码解不开、导入的包被判成越界路径、新设备导入只报一个没有 detail 的 `HTTP 500`（该机还没走完首屏、`config.json` 不存在）、或导入完成后 worker 仍走旧模型链 → `config-and-models.md`「Config Bundle Export And Import」（包带的是主密钥本身、master.key 与 auto-unlock.key 不进包、导入是整体替换且需重启）
 - 保存模型密钥报 `secret overlay is undecryptable with the current master key; refusing to overwrite`、或所有 apikey 同时变空 → `config-and-models.md`「secret 的真实去向」（覆盖层被截成 0 字节时守卫会拒绝一切写入；先取证改名该文件再 锁定→解锁 解除，写入耐久性与残留缺口同段）
 - 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `runtime-overview.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）
@@ -180,4 +180,4 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 | External Agent API contract: `externalApi` config and token overlay, ext session registry/keys, turn terminal invariant, SSE event mapping, ext outbound routing, built-in official QQ adapter (`qqBot` config, in-process botpy bridge) | `external-agent-api.md` |
 | Agent gateway contract: OpenAI-compatible endpoint (`/api/v1/chat/completions`, session mapping, wait/200-honest-text policy, streaming diff) and MCP stdio gateway (`g3ku mcp serve`, tool surface, stdout purity) | `agent-gateway.md` |
 | Local speech-to-text contract: whisper.cpp subprocess engine and slot serialization, audio normalization and silence/language gating, traditional→simplified post-pass, binary/model provisioning (`stt` defaults' measured basis), voice-clip storage and the model-visibility exclusion, known latency and accuracy envelope | `speech-to-text.md` |
-| Startup/deploy/troubleshooting order, install root vs data root storage layout and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |
+| Startup/deploy/troubleshooting order, install root vs data root storage layout (which paths hang on which root, where to read the effective data root) and data-root resolution order, memory CLI, Docker compose | `operations-and-maintenance.md` |
