@@ -264,11 +264,12 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 
 负载打分由三部分组成：本地归一化在飞（running+waiting+reserved 比本地容量）、该配额桶最近 60 秒的请求启动数、按半衰期衰减的 429 惩罚。惩罚按**配额桶**聚合而不是按 binding：同一个 endpoint + 同一把 key（或同一个显式 `quotaPoolKey`）的多条绑定共享一份观测；解析不到密钥材料时每个成员各自记 `unresolved`，绝不互并。**429 是唯一的失败记忆**：其它失败（401/403、密钥被禁、5xx）一律当场交给链 fallback，不留任何跨请求状态——换节点后同样的请求可能就成功，而"这条配置坏了"是操作者按日志处理的问题。限流判据复用模型链自己的 `429` 关键字表（`g3ku/utils/retry_keywords.py`），负载均衡器不另起一套文本，否则同一个错误在两条车道上的归因会漂移。
 
-新人常误读的三点：
+新人常误读的四点：
 
 - `models.roles.*` 与 `runtime_context.model_refs` 都是**候选展开视图**。含组时链上第一候选不是首选模型；真正用哪个只在 lease 里（`NodeTurnLease.selected_model_ref`）。诊断字段 `selected_model_key` / prompt cache 用的 `route:<signature>` 都从这里取。
 - 「组 busy」只由事实推导：拿不到 permit、组里没有一个通过过滤的候选，或本请求已把组内成员全部试过。没有配 `singleApiKeyMaxConcurrency` 时本地容量恒为无限、`waiting` 恒为 0，用打分阈值造出来的 busy 是假的。
 - 组内换成员之间**有**退避节拍（沿用同模型轮之间的封顶指数退避），跨 direct entry 前进仍然零等待。把组预算收缩当成「立刻换下一个」会把一次 pass 变成对同一分钟窗口的背靠背请求。
+- 同一条角色链上还有两条**不过准入**的辅助车道：spawn 送审评审（`node_runner.py` 的评审调用）与异步任务重复预检（`runtime_service.py`）。它们把 `_acceptance_model_refs` / `_execution_model_refs`（展开视图）原样交给 chat，既不传 route plan 也不带 lease，于是三件事一起成立：预算取该成员目录的 `retryCount`（不是所在组的 `maxRetryRounds`）、前进序是摊平后的整池候选（链首永远先撞）、并且**不进均衡账**——`record_route_request_start` 与 `record_outcome` 都挂在 lease 上，所以这份真实消耗的配额对 60 秒滚动 RPM 与 429 惩罚不可见，组车道的打分因此会低估该链的实际负载。维持现状是量出来的结论：辅助车道一天个位数请求，而为它造一个轻量 lease 会把一次评审变成与节点回合抢准入槽的排队方，代价不对称。判据：`Retryable model failure … round x/N` 里 N 不等于任何在用组的 `maxRetryRounds`，这条请求就出自辅助车道，不是组车道出了错。
 
 进程边界：balancer 与并发控制器只在 `execution_mode == 'worker'` 时存在。`embedded` / `web` 角色下选择层退化成无并发计数的直连绑定，不报错也不排队。多 worker 副本之间不共享这份内存态。
 
