@@ -1002,6 +1002,8 @@ class WebSessionHeartbeatService:
         has_shutdown_resume = bool(self._shutdown_resume_events(events))
         lines = [
             "This is a background heartbeat. Do not explain internal mechanics.",
+            "These instructions govern this event turn only. A later user message is a new turn: "
+            "answer what it asks and do not treat it as covered by this turn's silence rules.",
         ]
         if has_task_terminal:
             lines.extend(

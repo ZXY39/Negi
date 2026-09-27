@@ -181,3 +181,22 @@ def test_no_model_facing_surface_still_names_the_deleted_sentinel() -> None:
     if 'G3KU_SILENT' in contract.read_text(encoding='utf-8'):
         offenders.append(str(contract.relative_to(root)))
     assert offenders == []
+
+
+def test_silence_rules_state_which_turn_they_govern() -> None:
+    """静默指令必须自带作用域，否则它会治理紧随其后的用户轮。
+
+    2026-09-27 10:15 实盘：心跳行里那段 task_terminal 剧本（"本轮必须三选一收尾 / 可以调
+    silent"）在基线中距用户那句「大体结论是什么」只有 3 条消息，模型照它调了 silent，
+    而它自己写的 reason 是"用户在问结论，我应该基于任务结果给出摘要"；用户只回了一个
+    「？」之后才翻案。append-only 基线里没有别的东西标记这段指令已过期，所以只能由措辞
+    自己划界。这三处各钉一句，缺任何一处都留一个无人治理的窗口。
+    """
+    root = Path(__file__).resolve().parents[2]
+    rules = (root / 'g3ku' / 'runtime' / 'prompts' / 'heartbeat_rules.md').read_text(encoding='utf-8')
+    frontdoor = (root / 'g3ku' / 'runtime' / 'prompts' / 'ceo_frontdoor.md').read_text(encoding='utf-8')
+    preamble = (root / 'g3ku' / 'heartbeat' / 'session_service.py').read_text(encoding='utf-8')
+
+    assert '`[SESSION EVENTS]` 开头的那一轮' in rules
+    assert 'govern this event turn only' in preamble
+    assert '用户一旦开口就不再适用' in frontdoor
