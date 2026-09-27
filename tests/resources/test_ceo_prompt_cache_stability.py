@@ -367,15 +367,18 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
 
     assert list(_field(first, "request_messages")) == [
         {"role": "system", "content": "stable system"},
-        contract_record,
         {"role": "user", "content": "start"},
+        contract_record,
     ]
     # Newest contract only: the stale contract carried inside the live body of the
-    # second request must be dropped. The contract is placed before the latest user
-    # message, never after a tool result where it can be echoed as assistant output.
+    # second request must be dropped. The appendix sits behind the whole carried
+    # body because it rewrites itself on every stage transition (`callable_tools`
+    # / `stage_summary`); anchored before the latest user message it would drop
+    # the entire same-turn history out of the provider prefix cache. The node lane
+    # tail-appends for the same reason, and a contract echoed at the continuation
+    # point is repaired by _TOOL_CONTRACT_ECHO_REPAIR_MESSAGE.
     assert list(_field(second, "request_messages")) == [
         {"role": "system", "content": "stable system"},
-        contract_record,
         {"role": "user", "content": "start"},
         {
             "role": "assistant",
@@ -394,6 +397,7 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
             "tool_call_id": "call-1",
             "content": '{"status":"success"}',
         },
+        contract_record,
     ]
     second_messages = list(_field(second, "request_messages"))
     contract_count = sum(
@@ -402,8 +406,8 @@ def test_frontdoor_prompt_contract_keeps_same_turn_contract_history_append_only(
         if isinstance(item, dict) and item.get("content") == contract_message["content"]
     )
     assert contract_count == 1
-    assert second_messages[1] == contract_record
-    assert second_messages[-1]["role"] == "tool"
+    assert second_messages[-1] == contract_record
+    assert second_messages[-2]["role"] == "tool"
 
 
 def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lane() -> None:
@@ -445,12 +449,12 @@ def test_frontdoor_prompt_contract_appends_dynamic_appendix_at_tail_for_main_lan
     request_messages = list(_field(contract, "request_messages"))
     assert request_messages == [
         {"role": "system", "content": "stable system"},
-        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
-        contract_record,
         {"role": "user", "content": "bootstrap user"},
         {"role": "assistant", "content": "live assistant tool call"},
         {"role": "tool", "name": "load_skill_context", "tool_call_id": "call-skill-1", "content": '{"ok": true}'},
         {"role": "assistant", "content": "old request-only appendix"},
+        {"role": "assistant", "content": "## Retrieved Context\n- memory"},
+        contract_record,
     ]
     assert list(_field(contract, "stable_messages")) == [
         {"role": "system", "content": "stable system"},

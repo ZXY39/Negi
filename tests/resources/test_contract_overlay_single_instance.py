@@ -427,11 +427,65 @@ def test_frontdoor_append_tail_cleans_stale_contract_from_body() -> None:
     )
     assert result == [
         {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello"},
         dict(contract),
+    ]
+    assert result[-1] == contract
+    assert result.count(contract) == 1
+
+
+def test_frontdoor_live_contract_rewrite_only_moves_the_tail() -> None:
+    """同一回合内活状态改写不得顶掉正文前缀。
+
+    `stage_summary` / `callable_tools` 每次阶段切换都会重写契约。契约锚在正文
+    任何前序位置时，断言的是"上一条尾帧之前逐字节不变"——只有尾插能满足。
+    """
+    from g3ku.runtime.frontdoor import prompt_cache_contract
+    from g3ku.runtime.frontdoor.tool_contract import build_frontdoor_tool_contract
+
+    def contract_for(stage_id: str) -> dict[str, str]:
+        return build_frontdoor_tool_contract(
+            callable_tool_names=["exec", "submit_next_stage"],
+            candidate_tool_names=[],
+            hydrated_tool_names=["exec"],
+            frontdoor_stage_state={
+                "active_stage_id": stage_id,
+                "stages": [
+                    {
+                        "stage_id": stage_id,
+                        "stage_index": 1,
+                        "status": "active",
+                        "stage_goal": f"goal of {stage_id}",
+                        "tool_round_budget": 10,
+                    }
+                ],
+            },
+            candidate_skill_ids=[],
+            contract_revision="exp:test",
+        ).to_message()
+
+    carried = [
+        {"role": "system", "content": "sys"},
         {"role": "user", "content": "hello"},
     ]
-    assert result[1] == contract
-    assert result[-1] == {"role": "user", "content": "hello"}
+    first = prompt_cache_contract._with_dynamic_appendix_at_tail(
+        carried, dynamic_appendix_messages=[contract_for("stage-1")]
+    )
+    grown = [
+        *carried,
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "exec", "arguments": "{}"}}]},
+        {"role": "tool", "name": "exec", "tool_call_id": "c1", "content": "result one"},
+    ]
+    second = prompt_cache_contract._with_dynamic_appendix_at_tail(
+        grown, dynamic_appendix_messages=[contract_for("stage-2")]
+    )
+
+    assert first[-1]["content"].startswith("## Runtime Tool Contract")
+    assert second[-1]["content"].startswith("## Runtime Tool Contract")
+    assert first[-1] != second[-1]  # 活状态确实改写了契约
+    body_before_contract = [item for item in first if not item["content"].startswith("## Runtime Tool Contract")]
+    assert second[: len(body_before_contract)] == body_before_contract
+    assert len(second) == len(first) + 2
 
 
 def test_frontdoor_prompt_contract_key_stable_with_dirty_live_base() -> None:
@@ -475,8 +529,8 @@ def test_frontdoor_prompt_contract_key_stable_with_dirty_live_base() -> None:
     assert clean.prompt_cache_key == dirty.prompt_cache_key
     assert list(clean.request_messages) == list(dirty.request_messages) == [
         {"role": "system", "content": "sys"},
-        dict(contract),
         {"role": "user", "content": "hello"},
+        dict(contract),
     ]
 
 # ---------------------------------------------------------------------------

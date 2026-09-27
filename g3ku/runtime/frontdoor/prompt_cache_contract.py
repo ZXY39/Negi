@@ -67,11 +67,12 @@ def _with_dynamic_appendix_at_tail(
         if not _is_frontdoor_runtime_tool_contract_record(dict(item))
     ]
     # The carried body must never retain a stale contract or a stale turn-only
-    # note.  The dynamic appendix is inserted immediately before the latest
-    # user message when one exists.  The contract is runtime metadata injected
-    # as a system message; placing it after the latest tool result formerly
-    # made some providers/models treat it as the assistant's next reply and
-    # echo it verbatim.
+    # note. The appendix is always appended at the tail: it carries live state
+    # (`callable_tools` and `stage_summary` are rewritten on every stage
+    # transition), and anchoring it earlier drops everything behind it out of
+    # the provider's prefix cache. Tail placement matches the node lane
+    # (`upsert_node_dynamic_contract_message`); a contract echoed at the
+    # continuation point is caught by `_TOOL_CONTRACT_ECHO_REPAIR_MESSAGE`.
     stripped_request_messages = [
         dict(item)
         for item in normalized_request_messages
@@ -89,21 +90,7 @@ def _with_dynamic_appendix_at_tail(
     appendix_messages = [*non_contract_messages, *contract_messages]
     if not appendix_messages:
         return merged_request_messages
-    latest_user_index = next(
-        (
-            index
-            for index in range(len(merged_request_messages) - 1, -1, -1)
-            if str(merged_request_messages[index].get('role') or '').strip().lower() == 'user'
-        ),
-        None,
-    )
-    if latest_user_index is None:
-        return [*merged_request_messages, *appendix_messages]
-    return [
-        *merged_request_messages[:latest_user_index],
-        *appendix_messages,
-        *merged_request_messages[latest_user_index:],
-    ]
+    return [*merged_request_messages, *appendix_messages]
 
 
 def _records_contain_slice(records: list[dict[str, Any]], target: list[dict[str, Any]]) -> bool:

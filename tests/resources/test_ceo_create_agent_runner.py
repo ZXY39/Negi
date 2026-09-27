@@ -2115,8 +2115,8 @@ async def test_create_agent_runner_graph_prepare_turn_persists_request_body_with
 
     assert prepared["messages"] == [
         {"role": "system", "content": "system"},
-        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
         {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
     assert len(prepared["dynamic_appendix_messages"]) == 1
     contract_message = dict(prepared["dynamic_appendix_messages"][0] or {})
@@ -6688,8 +6688,8 @@ def test_create_agent_prompt_contract_avoids_duplicate_history_when_live_message
         {"role": "system", "content": "stable system"},
         {"role": "assistant", "content": "[G3KU_LONG_CONTEXT_SUMMARY_V1]\nsummary body"},
         {"role": "assistant", "content": "latest assistant"},
-        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
         {"role": "user", "content": "latest user"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
     assert contract.stable_messages == [
         {"role": "system", "content": "stable system"},
@@ -6738,8 +6738,8 @@ def test_create_agent_prompt_contract_does_not_treat_plain_short_recap_text_as_c
     assert non_contract_request_messages == [
         {"role": "system", "content": "stable system"},
         {"role": "assistant", "content": "Short recap: here's the answer you asked for."},
-        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
         {"role": "user", "content": "latest user"},
+        {"role": "assistant", "content": "## Retrieved Context\n- authoritative memory"},
     ]
 
 
