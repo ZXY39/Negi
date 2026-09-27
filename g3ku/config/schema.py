@@ -843,7 +843,7 @@ class MainRuntimeConfig(Base):
     files_base_dir: str = '.g3ku/main-runtime/tasks'
     artifact_dir: str = '.g3ku/main-runtime/artifacts'
     governance_store_path: str = '.g3ku/main-runtime/governance.sqlite3'
-    default_max_depth: int = 1
+    default_max_depth: int = 10
     hard_max_depth: int = 4
     event_history: "MainRuntimeEventHistoryConfig" = Field(default_factory=lambda: MainRuntimeEventHistoryConfig())
     disk_guard: "MainRuntimeDiskGuardConfig" = Field(default_factory=lambda: MainRuntimeDiskGuardConfig())

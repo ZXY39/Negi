@@ -197,8 +197,8 @@ const S = {
     ceoSessionSwitchToken: 0,
     taskDefaults: {
         scope: "global",
-        maxDepth: 1,
-        defaultMaxDepth: 1,
+        maxDepth: 10,
+        defaultMaxDepth: 10,
         hardMaxDepth: 4,
         customMode: false,
         customDraft: "",

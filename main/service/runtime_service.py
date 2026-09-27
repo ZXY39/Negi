@@ -436,7 +436,7 @@ class MainRuntimeService:
         tool_provider: Callable[[NodeRecord], dict[str, Tool]] | None = None,
         execution_model_refs: list[str] | None = None,
         acceptance_model_refs: list[str] | None = None,
-        default_max_depth: int = 1,
+        default_max_depth: int = 10,
         hard_max_depth: int = 4,
         max_iterations: int | None | object = _UNSET,
         execution_max_iterations: int | None | object = _UNSET,

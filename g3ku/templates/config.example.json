@@ -131,7 +131,7 @@
     "filesBaseDir": ".g3ku/main-runtime/tasks",
     "artifactDir": ".g3ku/main-runtime/artifacts",
     "governanceStorePath": ".g3ku/main-runtime/governance.sqlite3",
-    "defaultMaxDepth": 1,
+    "defaultMaxDepth": 10,
     "hardMaxDepth": 4,
     "nodeDispatchConcurrency": {
       "execution": 8,
