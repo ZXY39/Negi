@@ -166,6 +166,8 @@
 
 补充约束：
 
+- `status` 与 `delivery_status` 各管一件事、都是必填，写了一个不等于写了另一个：`status` 只裁定本节点成败（`success`|`failed`），`delivery_status` 只裁定交付形态（`final`|`blocked`）。少 `status` 会让整条提交在参数校验就被拒收，并占用一次无效提交预算。
+- `evidence[]` 的行号是 1-based 且不适用时要整个省略：`kind="url"` 没有行号，就不要写 `start_line` / `end_line`（写 `0` 或 `-1` 占位会被拒收），把定位信息放进 `ref` 与 `note`。
 - 如果本节点使用过工具，`success` 结果必须至少提供一条 `evidence`。
 - `summary` 必须是简短结论；`answer` 是最终正文。
 - 用户或上游要求你“输出”的文件路径、结论、结构化清单、证据摘要、维护要点，都应放进 `answer` 字段。

@@ -204,6 +204,7 @@ promotion 与前门状态：
   - 未识别参数名提示列出本次提交中 schema 未定义的键并给近似建议（上限 5 个）。它存在的原因是校验器只遍历 schema 认识的 `properties`、多余键被静默放过，所以键名拼错（`status`→`startus`）的表象是 `missing required status` 而不是"这个键你不认识"；该提示只补因果，**不改变校验结论**——这些键在提示前后都同样被忽略。
   - 提交里一个参数都没有、且走的是内联契约分支时，额外说明"参数 JSON 可能没有被成功解析"：`_normalize_tool_call_arguments` 与 `base_chat_model_adapter` 都把解析失败静默降级成 `{}`，从结果上无法与"模型真发了空对象"区分，不说破就会让模型逐字段去补一个根本没收到的参数串。这句只在内联契约分支出现，指针分支下不出现（那里下方没有结构可指）。
   - 这条分支链的不变式是"原地可修"：只提醒「核对必填项」而不给出必填项等于没有可核对的材料，而指向一条必然被拒的加载链路比不指向更糟。权限错误、路径策略错误、超时停止、watchdog 停止、pause/cancel 信号与普通 `RuntimeError` 保持原语义，不误标为参数错误。
+- 模型可见投影裁的是篇幅，不是判定：`Tool.model_parameters` 必须原样带上 `Tool.parameters` 在同一键位声明的边界约束（`minimum` / `minLength` / `minItems` / `maximum` / `enum` / `required`）。拒收按权威 `parameters` 判、模型只看投影，投影少一条边界就等于让模型去撞一堵它看不见的墙（`evidence[].start_line=0` 撞 `minimum: 1` 是实发形态，与「filesystem_edit 契约」里把 `start_line=0` 当自动填充噪声读是同一类噪声）。字段级 `description` 不要求镜像：`g3ku/json_schema_utils.sanitize_provider_parameters_schema` 在 provider 出口逐层剥掉 `parameters` 内的全部 `description` 并压平组合关键字，所以能到达模型的说明只有 `function.description`（工具级，见「阶段门控与 callable 收紧」）与提示词 / toolskill 正文两处；把字段语义写进 schema description 是死文字。平价由 `tests/resources/test_control_tool_model_schema_parity.py` 对全部注入式控制工具断言，不靠注释维持；新增控制工具若重写投影，同一断言自动覆盖。
 - 任何顶层为 `{"ok": false, ...}` 的结构化工具结果，在三条路径上都按 error-lane 工具结果处理；这条规则有意比参数引导规则更宽，让以 JSON payload 编码失败的内嵌工具也进入错误车道。
 
 外置工具结果信封：
