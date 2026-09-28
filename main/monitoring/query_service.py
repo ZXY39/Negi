@@ -69,6 +69,79 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+_PENDING_PROJECTION_PREFIX = 'distribution-pending:'
+# epoch 的状态词表与任务 meta 的分发状态词表不是一套（epoch 以 pause_requested 起步），
+# 且 list_active_task_message_distribution_epochs 不做任何过滤。因此这里按
+# 「排除已知终态」判定，而不是维护一份活跃态白名单——漏一个活跃态就会让空窗复现。
+# failed 不投影：子树按设计保持冻结，红色横幅是它的权威展示面。
+_NON_PROJECTABLE_EPOCH_STATES = frozenset({
+    'completed',
+    'cancelled',
+    'cancelled_by_task_delete',
+    'failed',
+})
+
+
+def project_pending_distribution_entries(
+    entries_by_id: dict[str, dict[str, Any]],
+    active_epochs: list[dict[str, Any]],
+    *,
+    node_id: str,
+) -> list[dict[str, Any]]:
+    """投递前为该节点补「已接收 / 已冻结待释放」两条展示态。
+
+    纯视图层投影：不写 task_node_notifications，不参与 pending_notice_node_ids /
+    pending_mailbox_count / hold 谓词 / 释放集反算 / spawn 评审的
+    consumed_distribution_notices。判定源是 epoch payload 的 scope 快照与排空账本，
+    该节点在同一 epoch 上已有真实账本行时一律让位（投递落地即自动收敛，无需清理）。
+    """
+    normalized_node_id = str(node_id or '').strip()
+    if not normalized_node_id:
+        return []
+    held_epochs = {
+        str(entry.get('epoch_id') or '').strip()
+        for entry in list(entries_by_id.values())
+        if str(entry.get('epoch_id') or '').strip()
+    }
+    projected: list[dict[str, Any]] = []
+    for epoch in list(active_epochs or []):
+        epoch_id = str(epoch.get('epoch_id') or '').strip()
+        message = str(epoch.get('root_message') or '').strip()
+        state = str(epoch.get('state') or '').strip()
+        if not epoch_id or not message or state in _NON_PROJECTABLE_EPOCH_STATES:
+            continue
+        if epoch_id in held_epochs:
+            continue
+        scope_node_ids = {
+            str(item or '').strip()
+            for item in list(epoch.get('scope_node_ids') or [])
+            if str(item or '').strip()
+        }
+        if normalized_node_id not in scope_node_ids:
+            continue
+        frozen_node_ids = {
+            str(item or '').strip()
+            for item in list(epoch.get('frozen_node_ids') or [])
+            if str(item or '').strip()
+        }
+        projected.append(
+            {
+                'notification_id': f'{_PENDING_PROJECTION_PREFIX}{epoch_id}:{normalized_node_id}',
+                'epoch_id': epoch_id,
+                'source_node_id': '',
+                'message': message,
+                'received_at': str(epoch.get('created_at') or '').strip(),
+                'consumed_at': '',
+                'merged_at': '',
+                'status': 'frozen' if normalized_node_id in frozen_node_ids else 'received',
+                'compression_stage_id': '',
+                'deliveries': [],
+                'projected': True,
+            }
+        )
+    return projected
+
+
 class TaskQueryService:
     def __init__(self, *, store, file_store, log_service, debug_recorder=None):
         self._store = store
@@ -304,6 +377,22 @@ class TaskQueryService:
                     node_titles=node_titles,
                 ),
             }
+            _store_entry(entry)
+
+        for entry in project_pending_distribution_entries(
+            entries_by_id,
+            [
+                {
+                    **dict(item.payload or {}),
+                    'epoch_id': str(item.epoch_id or '').strip(),
+                    'state': str(item.state or '').strip(),
+                    'root_message': str(item.root_message or '').strip(),
+                    'created_at': str(item.created_at or '').strip(),
+                }
+                for item in list(self._store.list_active_task_message_distribution_epochs(task_id) or [])
+            ],
+            node_id=node_id,
+        ):
             _store_entry(entry)
 
         entries = list(entries_by_id.values())
@@ -1429,11 +1518,15 @@ class TaskQueryService:
         # subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧持久化
         # meta 的历史名称（根目标定向即原全局模式），两者同样标记 barrier_blocked。
         if distribution.mode in {'subtree_barrier', 'task_wide_barrier'}:
+            frozen_node_ids = set(distribution.frozen_node_ids or [])
             for node_id in set(distribution.blocked_node_ids or []):
                 current = snapshot_nodes.get(str(node_id or '').strip())
                 if current is None:
                     continue
-                snapshot_nodes[current.node_id] = current.model_copy(update={'distribution_status': 'barrier_blocked'})
+                # 排空账本比 blocked 快照更精确：blocked 只说明「该停」，
+                # frozen 才说明「已经停在检查点上了」。
+                status = 'barrier_frozen' if current.node_id in frozen_node_ids else 'barrier_blocked'
+                snapshot_nodes[current.node_id] = current.model_copy(update={'distribution_status': status})
         projection_meta = self._store.get_task_projection_meta(task_id)
         snapshot_version = str(getattr(projection_meta, 'version', '') or '').strip() or str(
             max(0, len(node_map))
@@ -1587,6 +1680,11 @@ class TaskQueryService:
                     phase=str(record.phase or ''),
                     stale=frame_is_stale(record.updated_at),
                     await_marker=str(payload.get('await_marker') or ''),
+                    await_started_at=str(payload.get('await_started_at') or ''),
+                    # 重试态过同一个白名单：直接展开原始 dict 会把未列出的字段带进快照。
+                    model_retry_status=self._log_service._sanitize_model_retry_status(
+                        payload.get('model_retry_status')
+                    ),
                     stage_mode=str(payload.get('stage_mode') or ''),
                     stage_status=str(payload.get('stage_status') or ''),
                     stage_goal=str(payload.get('stage_goal') or ''),

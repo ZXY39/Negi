@@ -710,6 +710,7 @@ function buildExecutionTreeFromSnapshot(
         kind,
         inTurn,
         modelInFlight: isModelRequestInFlightFrame(liveFrame),
+        distributionFrozen: String(snapshotNode?.distribution_status || "").trim() === "barrier_frozen",
         inspectionPending,
         isPaused: !!snapshotNode.is_paused,
         taskPaused,
@@ -1085,7 +1086,7 @@ function taskNodeDisplayState(node, taskPaused = taskPauseDisplayActive()) {
 // 树节点的中文状态标签。判据只有两条：节点自己的运行相位（live 帧）和验收子节点
 // 是否还没结论——两者都由 task.live.patch / task.node.patch 实时推送，不依赖
 // 整树重拉。非终态节点一律不落英文状态原文：没在执行就是等待中。
-function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelInFlight = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "" } = {}) {
+function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelInFlight = false, inspectionPending = false, isPaused = false, taskPaused = false, pauseReason = "", distributionFrozen = false } = {}) {
     const normalizedStatus = String(status || "").trim().toLowerCase() || "unknown";
     if (taskPaused && !isTerminalTreeNodeStatus(normalizedStatus)) {
         return {
@@ -1108,6 +1109,11 @@ function resolveTreeNodeStatusLabel(status, { kind = "", inTurn = false, modelIn
             visualState: normalizedStatus,
             displayState: normalizedStatus.toUpperCase(),
         };
+    }
+    if (distributionFrozen) {
+        // 排空账本已记到该节点：它停在检查点上，等的只有屏障释放。与节点详情消息
+        // 条目同一串文案，避免同一个事实出现两种说法。
+        return { visualState: "waiting", displayState: "已冻结待释放" };
     }
     if (!inTurn) {
         return { visualState: "waiting", displayState: "\u7b49\u5f85\u4e2d" };
@@ -1858,27 +1864,72 @@ function buildExecutionTraceSteps(trace, node) {
     ];
 }
 
-function messageListStatusDescriptor(status) {
+// 消息状态标签的唯一映射：分发链路上的每一档都从这里出，前端不再各自写字面量。
+// received/frozen 是投递前的视图层投影（后端 message_list 直接给这两档），
+// pending/consumed/merged 是既有三态，判定源仍是后端账本。
+// 原始账本 token（delivered 等）一律不得作为标签外泄，未知值走中性「待确认」。
+const MESSAGE_STATUS_LABELS = {
+    received: "已接收",
+    frozen: "已冻结待释放",
+    pending: "待处理",
+    consumed: "已消费",
+    merged: "已并入上下文",
+    skipped: "未下发",
+};
+
+function messageStatusDescriptor(status) {
     const normalized = String(status || "").trim().toLowerCase();
-    if (normalized === "pending") {
-        return { key: "warning", label: "待处理" };
+    if (normalized === "pending" || normalized === "received" || normalized === "frozen") {
+        return {
+            key: normalized,
+            label: MESSAGE_STATUS_LABELS[normalized],
+            icon: normalized === "frozen" ? "pause" : "inbox",
+        };
     }
-    if (normalized === "consumed") {
-        // 消息三态之二：控制/决策回合已处理过该消息（显示已消费），
-        // 内容可能稍后才随恢复路径真正并入上下文。
-        return { key: "info", label: "已消费" };
+    if (normalized === "consumed" || normalized === "merged") {
+        return {
+            key: normalized,
+            label: MESSAGE_STATUS_LABELS[normalized],
+            icon: normalized === "merged" ? "merge" : "circle-check",
+        };
     }
-    if (normalized === "merged") {
-        return { key: "info", label: "已并入上下文" };
+    if (normalized === "skipped") {
+        return { key: "skipped", label: MESSAGE_STATUS_LABELS.skipped, icon: "circle-slash" };
     }
-    return { key: "info", label: normalized || "已接收" };
+    if (normalized === "delivered") {
+        // 投递账本态等价于「已接收、待该节点处理」，但不回显原始 token。
+        return { key: "delivered", label: MESSAGE_STATUS_LABELS.received, icon: "inbox" };
+    }
+    return { key: normalized || "unknown", label: "待确认", icon: "circle" };
+}
+
+function messageListStatusDescriptor(status) {
+    const descriptor = messageStatusDescriptor(status);
+    // 列表条目上的 key 是**视觉档位**（warning/info），与「分发情况」行用的语义 key
+    // 是两套词表：这里只做映射，不得把两套并成一套，否则徽标配色合同会被改掉。
+    if (["pending", "received", "frozen"].includes(descriptor.key)) {
+        return { key: "warning", label: descriptor.label };
+    }
+    return { key: "info", label: descriptor.label };
+}
+
+// 「请求中」的判据与树徽标同源（isModelRequestInFlightFrame），不另立第二套：
+// 同一个标记在两处给出不同结论，正是操作员判断"到底卡在哪"时最致命的误导。
+function formatRequestInFlightSuffix(status, nodeId) {
+    if (String(status || "").trim().toLowerCase() !== "received") return "";
+    const frame = (S.liveFrameMap || {})[String(nodeId || "").trim()] || null;
+    if (!isModelRequestInFlightFrame(frame)) return "";
+    const startedAt = Date.parse(String(frame.await_started_at || ""));
+    if (Number.isNaN(startedAt)) return " · 请求中";
+    const seconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+    return ` · 请求中(已等 ${seconds}s)`;
 }
 
 function formatMessageListTitle(entry, index) {
     const time = String(entry?.received_at || entry?.consumed_at || "").trim();
     const formattedTime = time ? formatCompactTime(time) : `消息 ${index + 1}`;
     const status = messageListStatusDescriptor(entry?.status);
-    return `${formattedTime} · ${status.label}`;
+    return `${formattedTime} · ${status.label}${formatRequestInFlightSuffix(entry?.status, S.selectedNodeId)}`;
 }
 
 // 分发结果三态映射：不再向前端暴露原始账本状态文本（delivered/consumed），
@@ -1899,7 +1950,7 @@ function messageDeliveryStatusDescriptor(delivery = {}) {
         }
         return { key: "consumed", label: "已消费", icon: "circle-check" };
     }
-    return { key: status || "unknown", label: status || "已接收", icon: "circle" };
+    return messageStatusDescriptor(status);
 }
 
 function renderMessageDeliveriesField(deliveries = []) {
@@ -2182,6 +2233,23 @@ async function submitNodeNoticeComposer() {
 // 与手动刷新兜底。轮询只更新缓存与当前选中节点的渲染，不动全局视图。
 const TASK_NOTICE_SETTLE_INTERVAL_MS = 2500;
 const TASK_NOTICE_SETTLE_TIMEOUT_MS = 90000;
+// 分发进行中不能按 90 秒收窗：一次根目标分发的排空+控制回合可以跑到 9 分钟以上，
+// 固定窗口会让条目在消息真正落地前被丢弃，此后只剩手动刷新。
+// 上限用于兜住分发失败/驱动器缺席时的无限轮询。
+const TASK_NOTICE_SETTLE_DISTRIBUTION_MAX_MS = 30 * 60 * 1000;
+
+function taskNoticeSettleWindowOpen(now) {
+    if (typeof activeTaskDistributionState !== "function") return false;
+    const distributionState = activeTaskDistributionState();
+    if (!distributionState) return false;
+    const state = S.noticeSettle;
+    const oldestAt = (state?.pending || []).reduce(
+        (min, item) => (item?.addedAt && (!min || item.addedAt < min) ? item.addedAt : min),
+        0,
+    );
+    if (!oldestAt) return true;
+    return Number(now) - oldestAt <= TASK_NOTICE_SETTLE_DISTRIBUTION_MAX_MS;
+}
 
 function taskNoticeSettleState() {
     if (!S.noticeSettle || typeof S.noticeSettle !== "object") {
@@ -2253,8 +2321,9 @@ async function runTaskNoticeSettleTick() {
             const remaining = [];
             let matched = false;
             const now = Date.now();
+            const settleWindowOpen = taskNoticeSettleWindowOpen(now);
             for (const item of state.pending) {
-                if (now - item.addedAt > TASK_NOTICE_SETTLE_TIMEOUT_MS) continue;
+                if (!settleWindowOpen && now - item.addedAt > TASK_NOTICE_SETTLE_TIMEOUT_MS) continue;
                 if (messages.some((entry) => String(entry?.message || "").trim() === item.message)) {
                     matched = true;
                 } else {
@@ -2278,9 +2347,11 @@ async function runTaskNoticeSettleTick() {
     } catch (error) {
         // 单轮失败不中断局部刷新（接口抖动）；条目按各自超时退出，
         // 持续失败时轮询仍需按超时终止而不是无限重试。
+        // 分发窗口内不收窗：分发期间恰恰是最容易因负载抖动的一轮。
         const now = Date.now();
+        const settleWindowOpen = taskNoticeSettleWindowOpen(now);
         state.pending = state.pending.filter(
-            (item) => now - item.addedAt <= TASK_NOTICE_SETTLE_TIMEOUT_MS,
+            (item) => settleWindowOpen || now - item.addedAt <= TASK_NOTICE_SETTLE_TIMEOUT_MS,
         );
     }
     if (!state.pending.length) return;
@@ -2827,6 +2898,32 @@ function distributionAffectedNodeIds(distributionState = activeTaskDistributionS
     return affected;
 }
 
+// 分发横幅的聚合读数：分母取应冻集（blocked_node_ids，epoch 创建时的快照），分子取
+// 排空账本与该快照的**交集**（账本可能残留已不在应冻集的节点，取交集才不会分子超分母）。
+// 分子语义上是下界：未经检查点停住的节点不入账、worker 重启后也不重建，
+// 所以这行只能读成「至少这些已经停了」，不是精确进度条。合同见
+// docs/architecture/runtime-overview.md「frontdoor 与任务运行时的关系」。
+function summarizeDistributionProgress(distributionState) {
+    const state = distributionState && typeof distributionState === "object" ? distributionState : {};
+    const asIds = (value) => (Array.isArray(value)
+        ? value.map((item) => String(item || "").trim()).filter(Boolean)
+        : []);
+    const blockedIds = asIds(state.blocked_node_ids);
+    const blockedCount = blockedIds.length;
+    if (!blockedCount) return { frozenCount: 0, blockedCount: 0, text: "" };
+    const blockedSet = new Set(blockedIds);
+    const frozenCount = asIds(state.frozen_node_ids).filter((nodeId) => blockedSet.has(nodeId)).length;
+    const phase = String(state.state || "").trim();
+    const tail = frozenCount < blockedCount
+        ? "其余节点仍有在飞请求未落"
+        : (phase === "distributing" ? "已进入分发决策回合" : "全部已停，等待决策回合");
+    return {
+        frozenCount,
+        blockedCount,
+        text: `新消息分发中 · 已停步 ${frozenCount}/${blockedCount} · ${tail}`,
+    };
+}
+
 function buildTaskTreeDistributionBubble(text = "") {
     const distributionState = activeTaskDistributionState();
     const failedMode = distributionState?.ui_mode === "distribution_failed";
@@ -2839,7 +2936,10 @@ function buildTaskTreeDistributionBubble(text = "") {
             ? `消息分发失败（${failureText.slice(0, 120)}），任务保持暂停；可重新追加通知重试，或手动恢复任务`
             : "消息分发失败，任务保持暂停；可重新追加通知重试，或手动恢复任务";
     } else {
-        fallbackText = "新消息分发中";
+        // 分发窗口可以长达分钟级（排空要等在飞回合落地），静态一句「新消息分发中」
+        // 读不出"在推进"还是"卡死"，因此带上已停步计数。
+        const progress = summarizeDistributionProgress(distributionState);
+        fallbackText = progress.text || "新消息分发中";
     }
     const bubble = document.createElement("div");
     bubble.className = failedMode
@@ -4092,7 +4192,17 @@ function applyTaskPayload(payload) {
         : 100;
     if (taskChanged) S.taskModelCallsPage = 1;
     if (taskChanged) S.taskModelCallsQuery = "";
-    S.liveFrameMap = indexTaskLiveFrames(frontier);
+    // 快照不整表替换帧索引：快照帧只带投影模型上的字段，整表换会把 live 车道
+    // 已经收到的实时字段（重试态等）在每次树刷新时抹掉。旧帧作底、快照在后，
+    // 快照仍权威于它覆盖到的那些字段；节点终态时快照自带完整帧，不依赖旧值。
+    const previousLiveFrameMap = S.liveFrameMap || {};
+    const nextLiveFrameMap = indexTaskLiveFrames(frontier);
+    S.liveFrameMap = Object.fromEntries(
+        Object.entries(nextLiveFrameMap).map(([nodeId, frame]) => [
+            nodeId,
+            { ...(previousLiveFrameMap[nodeId] || {}), ...(frame || {}) },
+        ]),
+    );
     if (rootNode && String(rootNode?.node_id || "").trim()) {
         S.taskNodeDetails = { ...(S.taskNodeDetails || {}), [String(rootNode.node_id || "").trim()]: rootNode };
     }

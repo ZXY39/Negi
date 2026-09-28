@@ -11,6 +11,7 @@ import pytest
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.agent.tools.base import Tool
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
+from g3ku.runtime.stage_prompt_compaction import completed_stage_blocks
 from main.protocol import now_iso
 from main.runtime.chat_backend import build_stable_prompt_cache_key
 from main.runtime.node_runner import NodeRunner
@@ -1951,6 +1952,192 @@ async def test_submit_next_stage_closes_previous_stage_and_starts_new_stage(tmp_
         assert stages[0]['key_refs'] == [{'ref': 'artifact:artifact:stage-one', 'note': 'stage one note'}]
         assert stages[1]['completed_stage_summary'] == ''
         assert stages[1]['key_refs'] == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_after_a_terminal_run_still_attaches_closing_material(tmp_path: Path):
+    # run 终局（含失败态）会把活动阶段结清并清空 active_stage_id，而节点是可以被恢复继续跑的
+    # （验收打回、错误暂停后 resume）。此时模型才补发 submit_next_stage：只认活动位会让
+    # 总结、key_refs 与裁撤标记一起静默丢失，前门已在实盘渠道会话上栽过同一条。
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        first = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第一阶段；自行完成：采集数据',
+            tool_round_budget=7,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:collect', 'name': 'web_fetch', 'arguments': {'url': 'https://example.com'}}],
+            created_at=now_iso(),
+        )
+        service.log_service.finalize_execution_stage(record.task_id, record.root_node_id, status='failed')
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第二阶段；自行完成：修正后重采',
+            tool_round_budget=8,
+            completed_stage_summary='失败阶段的蒸馏结论',
+            key_refs=[{'ref': 'artifact:artifact:collect-one', 'note': '首次采集结果'}],
+            drop_completed_stage_tool_detail=True,
+        )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        settled = next(
+            stage for stage in detail['item']['execution_trace']['stages']
+            if stage['stage_id'] == first['stage_id']
+        )
+        assert settled['completed_stage_summary'] == '失败阶段的蒸馏结论'
+        assert settled['key_refs'][0]['ref'] == 'artifact:artifact:collect-one'
+        assert settled['context_evicted'] is True
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_node_eviction_exports_archive_and_carries_readback_ref(tmp_path: Path):
+    # 节点裁撤后要和前门一样能读回原文：块里那一行 archive_ref 是 content_open 的入口。
+    # 落点仍只认任务 runtime meta 里的 task_temp_dir，拿不到就不写指针、不谎称可读回。
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    temp_dir = tmp_path / 'tasks' / 'temp'
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        record = await _create_web_task(service)
+        service.log_service.read_task_runtime_meta = lambda task_id: {'task_temp_dir': str(temp_dir)}  # type: ignore[assignment]
+        first = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第一阶段；自行完成：采集数据',
+            tool_round_budget=7,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:collect', 'name': 'web_fetch', 'arguments': {'url': 'https://example.com'}}],
+            created_at=now_iso(),
+        )
+        service.log_service.record_tool_result_batch(
+            task_id=record.task_id,
+            node_id=record.root_node_id,
+            response_tool_calls=[
+                SimpleNamespace(id='call:collect', name='web_fetch', arguments={'url': 'https://example.com'})
+            ],
+            results=[
+                {
+                    'tool_message': {
+                        'tool_call_id': 'call:collect',
+                        'name': 'web_fetch',
+                        'content': 'NVDA FY2027Q2 revenue 96.221B',
+                        'status': 'success',
+                    },
+                    'live_state': {'tool_call_id': 'call:collect', 'tool_name': 'web_fetch', 'status': 'success'},
+                }
+            ],
+        )
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第二阶段；自行完成：汇总',
+            tool_round_budget=8,
+            completed_stage_summary='采集完成',
+            drop_completed_stage_tool_detail=True,
+        )
+
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        settled = next(
+            stage for stage in detail['item']['execution_trace']['stages']
+            if stage['stage_id'] == first['stage_id']
+        )
+        archive_ref = str(settled.get('archive_ref') or '')
+        assert settled['context_evicted'] is True
+        assert archive_ref and Path(archive_ref).exists()
+        document = json.loads(Path(archive_ref).read_text(encoding='utf-8'))
+        assert document['kind'] == 'node_stage_eviction'
+        assert document['owner'] == f'task:{record.task_id}/node:{record.root_node_id}'
+        archived_tool = document['stages'][0]['rounds'][0]['tools'][0]
+        assert archived_tool['tool_call_id'] == 'call:collect'
+        assert archived_tool['tool_name'] == 'web_fetch'
+        assert 'example.com' in archived_tool['arguments_text']
+        # 节点不重抄正文：预览或指针之一必须在，全文按 output_ref / task_node_detail 取。
+        assert archived_tool['output_preview_text'] or archived_tool['output_ref']
+
+        blocks = completed_stage_blocks(
+            {'active_stage_id': '', 'stages': [settled]}, skip_stage_ids=set()
+        )
+        rendered = json.loads(str(blocks[0]['content']).split('\n', 1)[1])
+        assert rendered['evicted'] is True
+        assert rendered['archive_ref'] == archive_ref
+
+        # 一条阶段只导一次：重复点名不新增归档文件。
+        files_before = sorted(p.name for p in temp_dir.glob('*.json'))
+        service.log_service.finalize_execution_stage(record.task_id, record.root_node_id, status='failed')
+        assert sorted(p.name for p in temp_dir.glob('*.json')) == files_before
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_node_eviction_without_temp_dir_keeps_mark_and_drops_pointer(tmp_path: Path):
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='web',
+    )
+    try:
+        record = await _create_web_task(service)
+        service.log_service.read_task_runtime_meta = lambda task_id: {}  # type: ignore[assignment]
+        first = service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第一阶段；自行完成：采集数据',
+            tool_round_budget=7,
+        )
+        service.log_service.record_execution_stage_round(
+            record.task_id,
+            record.root_node_id,
+            tool_calls=[{'id': 'call:collect', 'name': 'web_fetch', 'arguments': {'url': 'https://example.com'}}],
+            created_at=now_iso(),
+        )
+        service.log_service.submit_next_stage(
+            record.task_id,
+            record.root_node_id,
+            stage_goal='第二阶段；自行完成：汇总',
+            tool_round_budget=8,
+            completed_stage_summary='采集完成',
+            drop_completed_stage_tool_detail=True,
+        )
+        detail = service.get_node_detail_payload(record.task_id, record.root_node_id, detail_level='full')
+        settled = next(
+            stage for stage in detail['item']['execution_trace']['stages']
+            if stage['stage_id'] == first['stage_id']
+        )
+        assert settled['context_evicted'] is True
+        assert not str(settled.get('archive_ref') or '')
     finally:
         await service.close()
 

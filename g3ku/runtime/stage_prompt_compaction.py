@@ -219,6 +219,41 @@ def retained_completed_stage_ids(stage_state: Any) -> set[str]:
     return retained
 
 
+def closing_stage_target(stage_state: Any) -> Any:
+    """`completed_stage_summary` / `key_refs` / 点名裁撤这批收尾材料的归属阶段，两车道共用。
+
+    活动阶段优先（同轮收尾）。没有活动阶段时回退到最后一条普通阶段，且必须它已终态、
+    `completed_stage_summary` 仍为空——那是被轮末（前门）或 run 终局（节点 finalize，含失败态）
+    自动结清、正等模型补写蒸馏结论的一条。只回退一条：末条已带总结就返回 None，既不回头
+    改写更早的阶段，也不构成替模型代写摘要的入口。账本形态无关（前门 dict、节点 pydantic 记录）。
+    """
+    if not isinstance(stage_state, dict) and not hasattr(stage_state, "stages"):
+        return None
+    stages = [
+        stage
+        for stage in list(_stage_get(stage_state, "stages", []) or [])
+        if isinstance(stage, dict) or hasattr(stage, "stage_id")
+    ]
+    if not stages:
+        return None
+    active_stage_id = str(_stage_get(stage_state, "active_stage_id", "") or "").strip()
+    if active_stage_id:
+        for stage in stages:
+            if (
+                str(_stage_get(stage, "stage_id", "") or "").strip() == active_stage_id
+                and not stage_is_terminal(stage)
+            ):
+                return stage
+    newest = max(stages, key=lambda stage: int(_stage_get(stage, "stage_index", 0) or 0))
+    if str(_stage_get(newest, "stage_kind", "normal") or "normal").strip().lower() != "normal":
+        return None
+    if not stage_is_terminal(newest):
+        return None
+    if str(_stage_get(newest, "completed_stage_summary", "") or "").strip():
+        return None
+    return newest
+
+
 def completed_stage_blocks(stage_state: Any, *, skip_stage_ids: set[str] | None = None) -> list[dict[str, Any]]:
     externalized: list[dict[str, Any]] = []
     compacted: list[dict[str, Any]] = []
@@ -859,6 +894,13 @@ def stage_ref_candidates(
 TOKEN_COMPACT_V2_PREFIX = "[G3KU_TOKEN_COMPACT_V2]"
 STAGE_REF_INDEX_HEADING = "## 证据索引"
 STAGE_ARCHIVE_HEADING = "## 阶段归档"
+# 收尾材料没承接上时，结果里自带一句可读说明（两车道共用）。工具 schema 描述是两车道共享的
+# provider 前缀，改它会让全部会话的一次缓存失效；结果属动态尾部，模型在这里就能知道自己
+# 那句"已移出"其实没生效。
+STAGE_CLOSURE_INACTIVE_NOTES = {
+    "no_closing_target": "未生效：没有可承接的已结束阶段（上一条已带总结或不存在），你这次的总结与移出都被丢弃，原文仍在上下文里",
+    "summary_required": "未生效：点名移出必须同批带非空 completed_stage_summary，原文仍在上下文里",
+}
 STAGE_REF_CANDIDATE_HEADING = "【证据引用候选】"
 STAGE_REF_SELECTION_RULE = (
     "上文末尾的【证据引用候选】列出历史阶段登记过的证据引用（编号 + 引用 + 说明）。\n"
@@ -1217,6 +1259,8 @@ __all__ = [
     "render_stage_ref_candidate_block",
     "render_stage_ref_index",
     "repair_split_stage_tool_boundaries",
+    "closing_stage_target",
+    "STAGE_CLOSURE_INACTIVE_NOTES",
     "retained_completed_stage_ids",
     "split_stage_ref_selection",
     "stage_archive_selector_from_request_messages",

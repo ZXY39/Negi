@@ -115,6 +115,10 @@ class TaskLiveFrame(Model):
     # 与 task.live.patch 的 frames 条目同源：那条通道直接展开帧 payload，天然带这个
     # 字段，快照这边漏掉的话「请求中」徽标就要等第一个 patch 才亮。
     await_marker: str = ''
+    # 同一条规则的其余两个字段：树快照落地会整体替换前端的帧索引，快照缺的字段
+    # 等于每次刷新都被抹掉——分发期间重试 toast 长期不显示即由此而来。
+    await_started_at: str = ''
+    model_retry_status: dict[str, Any] | None = None
     stage_mode: str = ''
     stage_status: str = ''
     stage_goal: str = ''
@@ -131,6 +135,8 @@ class TaskDistributionState(Model):
     target_node_ids: list[str] = Field(default_factory=list)
     frontier_node_ids: list[str] = Field(default_factory=list)
     blocked_node_ids: list[str] = Field(default_factory=list)
+    # 排空账本：blocked 是「应冻结」快照，frozen 是「已走到检查点停住」的子集。
+    frozen_node_ids: list[str] = Field(default_factory=list)
     pending_notice_node_ids: list[str] = Field(default_factory=list)
     queued_epoch_count: int = 0
     pending_mailbox_count: int = 0
@@ -141,7 +147,7 @@ class TaskDistributionState(Model):
     def _normalize_text_fields(cls, value: Any) -> str:
         return normalize_optional_text(value)
 
-    @field_validator('frontier_node_ids', 'blocked_node_ids', 'pending_notice_node_ids', mode='before')
+    @field_validator('frontier_node_ids', 'blocked_node_ids', 'frozen_node_ids', 'pending_notice_node_ids', mode='before')
     @classmethod
     def _normalize_node_id_lists(cls, value: Any) -> list[str]:
         return normalize_string_list(value)

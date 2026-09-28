@@ -179,6 +179,9 @@ def build_execution_trace(
                 'finished_at': str(stage.finished_at or ''),
                 # 收口阶段才写这个键，缺失即可见：时间线条目数不因收口而变。
                 **({} if stage.context_visible else {'context_visible': False}),
+                # 裁撤同理只在成立时写：读的人要能分清"这条阶段本来就没留细节"和
+                # "模型自己点名把肉身移走了、细节在 archive_ref 里"。
+                **({'context_evicted': True} if stage.context_evicted else {}),
                 'rounds': rounds,
                 'tool_calls': stage_tool_calls,
             }

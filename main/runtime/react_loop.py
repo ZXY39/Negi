@@ -824,6 +824,8 @@ class ReActToolLoop:
                             node_turn_lease=node_turn_lease,
                             model_concurrency_controller=getattr(self, '_model_concurrency_controller', None),
                             model_refs_resolver=(model_refs_supplier if callable(model_refs_supplier) else None),
+                            # 含组的链只能按 route plan 活刷新：扁平候选列表不是 fallback 顺序。
+                            model_routes_supplier=(model_routes_supplier if callable(model_routes_supplier) else None),
                             single_request_timeout_seconds=self._resolved_model_response_timeout_seconds(
                                 model_refs=current_model_refs,
                             ),

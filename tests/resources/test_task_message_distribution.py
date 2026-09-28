@@ -250,6 +250,8 @@ async def test_task_append_notice_creates_subtree_epoch_without_task_pause(tmp_p
             "target_node_ids": [record.root_node_id],
             "frontier_node_ids": [],
             "blocked_node_ids": [record.root_node_id],
+            # 排空账本：此刻还没有节点走到检查点停住。
+            "frozen_node_ids": [],
             "pending_notice_node_ids": [record.root_node_id],
             "queued_epoch_count": 1,
             "pending_mailbox_count": 0,
@@ -3143,6 +3145,44 @@ async def test_task_append_notice_creates_barrier_state_for_live_tree(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_pending_distribution_projects_entries_before_delivery(tmp_path: Path) -> None:
+    service = build_service(tmp_path)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+
+        await service.task_append_notice(
+            task_ids=[record.task_id],
+            node_ids=[],
+            message="new constraint",
+            session_id=record.session_id,
+        )
+
+        detail = service.query_service.get_node_detail(record.task_id, branch_a.node_id, detail_level="full")
+        assert detail is not None
+        projected = [item for item in detail.message_list if item.get("projected")]
+        assert [item["status"] for item in projected] == ["received"]
+        assert projected[0]["message"] == "new constraint"
+
+        epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+        from main.runtime.task_actor_service import record_frozen_node_id
+
+        record_frozen_node_id(
+            service.store,
+            service.log_service,
+            task_id=record.task_id,
+            epoch_id=epoch.epoch_id,
+            node_id=branch_a.node_id,
+        )
+        detail = service.query_service.get_node_detail(record.task_id, branch_a.node_id, detail_level="full")
+        assert [item["status"] for item in detail.message_list if item.get("projected")] == ["frozen"]
+
+        # 投影只进视图层：信箱表一行都没多，pending_notice 账本也没被写过。
+        assert service.store.list_task_node_notifications(record.task_id, branch_a.node_id) == []
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_tree_snapshot_marks_nodes_waiting_for_distribution_barrier(tmp_path: Path) -> None:
     service = build_service(tmp_path)
     try:
@@ -3159,6 +3199,23 @@ async def test_tree_snapshot_marks_nodes_waiting_for_distribution_barrier(tmp_pa
         assert snapshot is not None
         assert snapshot.nodes_by_id[root.node_id].distribution_status == "barrier_blocked"
         assert snapshot.nodes_by_id[branch_a.node_id].distribution_status == "barrier_blocked"
+        assert snapshot.nodes_by_id[branch_b.node_id].distribution_status == "barrier_blocked"
+
+        # 排空账本落地后，已停住的节点显示得更精确，其余仍留在「应冻结」档。
+        epoch = service.store.list_active_task_message_distribution_epochs(record.task_id)[0]
+        from main.runtime.task_actor_service import record_frozen_node_id
+
+        assert record_frozen_node_id(
+            service.store,
+            service.log_service,
+            task_id=record.task_id,
+            epoch_id=epoch.epoch_id,
+            node_id=branch_a.node_id,
+        ) is True
+
+        snapshot = service.query_service.get_tree_snapshot(record.task_id)
+        assert snapshot is not None
+        assert snapshot.nodes_by_id[branch_a.node_id].distribution_status == "barrier_frozen"
         assert snapshot.nodes_by_id[branch_b.node_id].distribution_status == "barrier_blocked"
     finally:
         await service.close()
