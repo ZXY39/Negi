@@ -333,6 +333,66 @@ def test_ui_delta_keeps_only_new_stages_and_backfills_live_bodies() -> None:
     assert rendered_tool["arguments_text"] == "q" * 6000
 
 
+def test_ui_delta_does_not_reopen_settled_evicted_stages() -> None:
+    """裁撤过的历史阶段在 live 帧里必须继续算"没变"。
+
+    轨道要替被裁撤的阶段回填工具行，但回填不能发生在比对之前：transcript 投影把
+    compact 阶段的 rounds 抹成 []，未投影的 live 阶段态带着正身，于是每一帧都会把
+    这些早已收口的历史阶段重新算成新增。渠道会话实盘：573 条阶段里 545 条 / 2.85MB
+    挤进最新气泡（正确答案是 0 条），且只在 live 侧错——刷新走的是投影对投影的快照
+    路径，所以"刷新完就正常了"。
+    """
+    settled_round = {
+        "round_index": 1,
+        "text": "old round",
+        "tools": [_tool("old-1", output_text="x" * 3000)],
+    }
+    settled = _stage("frontdoor-stage-1", 1, rounds=[settled_round], evicted=True)
+    persisted_projected = project_canonical_context_for_transcript({"stages": [dict(settled)]})
+    live_settled = _stage("frontdoor-stage-1", 1, rounds=[settled_round], evicted=True)
+
+    assert ui_canonical_context_delta(persisted_projected, {"stages": [live_settled]}) == {}
+
+    new_round = {
+        "round_index": 1,
+        "text": "new round",
+        "tools": [_tool("new-1", output_text="fresh")],
+    }
+    live = {"stages": [live_settled, _stage("frontdoor-stage-2", 2, rounds=[new_round])]}
+
+    delta_stages = list((ui_canonical_context_delta(persisted_projected, live).get("stages") or []))
+
+    assert [stage["stage_id"] for stage in delta_stages] == ["frontdoor-stage-2"]
+
+
+def test_ui_delta_backfills_rows_for_a_changed_evicted_stage() -> None:
+    """裁撤阶段真的改了展示内容时，delta 仍要带上它的调用记录（回填发生在比对之后）。"""
+    settled_round = {
+        "round_index": 1,
+        "text": "old round",
+        "tools": [_tool("old-1", output_text="x" * 3000)],
+    }
+    persisted_projected = project_canonical_context_for_transcript(
+        {"stages": [_stage("frontdoor-stage-1", 1, rounds=[settled_round], evicted=True)]}
+    )
+    live_stage = _stage(
+        "frontdoor-stage-1",
+        1,
+        rounds=[settled_round],
+        summary="收口之后又改了摘要",
+        evicted=True,
+    )
+
+    stages = list((ui_canonical_context_delta(persisted_projected, {"stages": [live_stage]}).get("stages") or []))
+
+    assert [stage["stage_id"] for stage in stages] == ["frontdoor-stage-1"]
+    assert stages[0]["completed_stage_summary"] == "收口之后又改了摘要"
+    assert stages[0]["representation"] == "compact"
+    tool = stages[0]["rounds"][0]["tools"][0]
+    assert tool["tool_call_id"] == "old-1:1"
+    assert tool["output_text"] == ""
+
+
 def test_ui_payload_projection_keeps_rows_for_evicted_stages() -> None:
     """Web 轨道永远带工具行：阶段被裁撤只该影响发送体，不该让界面显示"暂无工具轮次"。
 

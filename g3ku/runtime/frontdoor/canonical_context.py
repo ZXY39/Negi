@@ -631,20 +631,18 @@ def ui_canonical_context_delta_from_views(
         current = dict(stage)
         adjusted_stages.append(current)
         identity = canonical_stage_identity(stage, index)
-        source_stage = source_by_identity.get(identity)
         previous_stage = previous_by_identity.get(identity)
         if previous_stage is None:
             continue
         previous_representation = _as_str(previous_stage.get("representation"))
         if previous_representation != RAW_REPRESENTATION:
             # A stage the baseline renders as compact must not re-expand just
-            # because the latest-stage window moved after a new turn. 表示保持
-            # 粘住，但工具行不能因此从界面上消失——裁撤只该影响发送体。
+            # because the latest-stage window moved after a new turn. 表示保持粘住。
+            # 工具行的回填必须等 delta 定型之后（见下方 backfill）：投影把 compact 阶段
+            # 的 rounds 抹成 []，未投影的源带着正身，先回填就等于拿"投影抹掉的东西"去跟
+            # 基线比——每条 live 帧都会把这些早已收口的历史阶段重新算成变了（渠道会话
+            # 实盘：573 条阶段里 545 条 / 2.85MB 挤进最新气泡，刷新后才恢复正常）。
             current["representation"] = previous_representation
-            current["rounds"] = _ui_round_bodies_from_source(
-                (source_stage or {}).get("rounds") if source_stage else current.get("rounds"),
-                raw=False,
-            )
         elif _as_str(current.get("representation")) != RAW_REPRESENTATION:
             # The window also moves in the other direction: a stage that the
             # baseline kept raw would otherwise be stripped from this view and
@@ -685,6 +683,16 @@ def ui_canonical_context_delta_from_views(
                 )
             )
         stage["rounds"] = rebuilt
+        if not rebuilt:
+            source_stage = source_by_identity.get(stage_id)
+            if isinstance(source_stage, dict):
+                # 只有阶段头变了（收口、改摘要）时 delta 的 rounds 才是空的。裁撤只该
+                # 影响发送体，这一阶段的调用记录仍要列在轨道上：正身从源补，非 raw 阶段
+                # 按 transcript 上限收正文，整段原文留在 `stage.archive_ref`。
+                stage["rounds"] = _ui_round_bodies_from_source(
+                    source_stage.get("rounds"),
+                    raw=is_raw_stage,
+                )
     return delta
 
 
