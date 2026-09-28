@@ -163,11 +163,13 @@ def _reset_fake_registries():
     FakeExternalApiClient.instances.clear()
 
 
-def _install_fake_botpy(monkeypatch: pytest.MonkeyPatch, intents_cls=FakeIntents) -> None:
+def _install_fake_botpy(
+    monkeypatch: pytest.MonkeyPatch, intents_cls=FakeIntents, client_cls=FakeClient
+) -> None:
     fake_http = types.ModuleType("botpy.http")
     fake_http.Route = FakeRoute
     fake_botpy = types.ModuleType("botpy")
-    fake_botpy.Client = FakeClient
+    fake_botpy.Client = client_cls
     fake_botpy.Intents = intents_cls
     fake_botpy.http = fake_http
     monkeypatch.setitem(sys.modules, "botpy.http", fake_http)
@@ -1296,3 +1298,108 @@ async def test_sse_stream_read_timeout_tolerates_missed_keepalives() -> None:
 
     assert recorded["read"] >= 3 * SSE_HEARTBEAT_INTERVAL_SECONDS, recorded
     assert recorded["connect"] <= 5.0, recorded
+
+
+class _DrainedSessionClient(FakeClient):
+    """``start(ret_coro=True)`` 交回一份"会话已经跑完"的协程。
+
+    真实 botpy 在第一次 ``multi_run`` 把自己的 ``_session_list`` 原地取空之后就是
+    这个形状：再让 botpy 自己回到 ``while not self._closed`` 去重取一次，拿到的
+    是永不挂起的协程，整个 web 事件循环会被钉死。
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.ret_coro_seen: bool | None = None
+        self.gateway_calls = 0
+
+    async def start(self, appid, secret, ret_coro=False):
+        self.started = True
+        self.ret_coro_seen = ret_coro
+
+        async def gateway():
+            self.gateway_calls += 1
+
+        if ret_coro:
+            return gateway()
+        await gateway()
+        while True:  # 旧路径：把收尾交给 botpy 的 while，测试里等价于不返回
+            await asyncio.sleep(3600)
+
+
+@pytest.mark.asyncio
+async def test_bridge_hands_gateway_end_back_to_the_retry_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """会话跑完必须以异常回到 ``service._run`` 的退避重连，绝不再进 botpy 的 while。"""
+    _install_fake_botpy(monkeypatch, client_cls=_DrainedSessionClient)
+    monkeypatch.setattr(bridge_module, "ExternalApiClient", FakeExternalApiClient)
+
+    states: list[tuple[str, str]] = []
+    with pytest.raises(RuntimeError, match="会话全部结束"):
+        await asyncio.wait_for(
+            bridge_module.run_qq_official_bridge(
+                app_id="100",
+                app_secret="sekrit",
+                sandbox=False,
+                token="t",
+                base_url="http://127.0.0.1:1/api/v1",
+                on_state=lambda state, detail: states.append((state, detail)),
+            ),
+            timeout=2.0,
+        )
+
+    client = FakeClient.instances[-1]
+    assert client.ret_coro_seen is True, "必须走 ret_coro，否则 botpy 自己会重入 while"
+    assert client.gateway_calls == 1, "一份会话列表只许跑一次"
+
+
+@pytest.mark.asyncio
+async def test_drained_botpy_multi_run_never_yields() -> None:
+    """钉死根因的可复现面：drained 之后的 ``multi_run`` 从不让出循环。
+
+    用真 botpy 而不是替身，替身证不了 vendor 的 ``while not self._closed``。
+    """
+    pytest.importorskip("botpy")
+    from botpy.connection import ConnectionSession
+
+    loop = asyncio.get_running_loop()
+
+    async def _connect(session):
+        await asyncio.sleep(0.01)
+
+    conn = ConnectionSession(
+        max_async=1, connect=_connect, dispatch=lambda *args: None, loop=loop, api=None
+    )
+    conn.add(
+        {
+            "session_id": "s1",
+            "last_seq": 0,
+            "intent": 1,
+            "token": "t",
+            "url": "ws://127.0.0.1:1",
+            "shards": {"shard_id": 0, "shard_count": 1},
+        }
+    )
+
+    ticks = 0
+    heartbeat_stop = asyncio.Event()
+
+    async def _heartbeat():
+        nonlocal ticks
+        while not heartbeat_stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0)
+
+    heartbeat = asyncio.create_task(_heartbeat())
+    try:
+        await conn.multi_run(0)
+        assert ticks > 0, "首跑要连接并 sleep，否则这组对比没有意义"
+        assert conn._session_list == [], "multi_run 会原地 pop 空自己的会话列表"
+
+        ticks = 0
+        await conn.multi_run(0)
+        assert ticks == 0, "drained 之后仍会让出循环的话，忙等就不成立"
+    finally:
+        heartbeat_stop.set()
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat

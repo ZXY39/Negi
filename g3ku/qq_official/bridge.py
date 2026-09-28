@@ -907,7 +907,16 @@ async def run_qq_official_bridge(
         # running" when awaited inside the web runtime's live loop. The async
         # entry below keeps botpy on the same loop as uvicorn.
         async with bridge_client:
-            await bridge_client.start(appid=app_id, secret=app_secret)
+            # ``ret_coro=True`` 不是可选的：botpy 的 ``_pool_init`` 用
+            # ``while not self._closed: await multi_run()`` 驱动，而 ``multi_run``
+            # 第一次就把它自己的 ``_session_list`` 原地 pop 空，之后每次返回的都是
+            # 一个从不挂起的协程 —— 那个 while 就成了持有 GIL 的忙等，实测把 web 的
+            # 事件循环整钉 20 分钟（单核 92%，连 /api/bootstrap/exit 都无人处理）。
+            # 所以一份会话列表只跑一次，跑完就交给 ``service._run`` 的退避重连，
+            # 由它重新登录换一份新列表。
+            gateway = await bridge_client.start(appid=app_id, secret=app_secret, ret_coro=True)
+            await gateway
+            raise RuntimeError("QQ 网关会话全部结束，需重新登录")
     finally:
         # 对账循环是本模块定义的普通任务，_is_botpy_task 收割器认不出它，
         # 必须显式取消。
