@@ -351,3 +351,30 @@ def test_runner_aborts_before_touching_code_when_exit_refused(tmp_path: Path, mo
 
     assert apply_mod.run("v1.0.2", port=18999) == 2
     assert upgraded == [], "服务没让停就不许动代码"
+
+
+def test_relaunched_web_output_lands_in_the_app_log_not_the_apply_log(tmp_path: Path, monkeypatch):
+    """重拉起的 web 不许把访问日志写进 update-apply.log。
+
+    实盘：12:58 那次 apply 的整张时间表被后面几万行 INFO 埋住，判读得先按时间戳
+    行过滤才捞得出来。执行体的锚点与服务的输出是两个流，各去各的文件。
+    """
+    import g3ku.update_apply as apply_mod
+
+    apply_log = tmp_path / "update-apply.log"
+    web_log = tmp_path / "console.log"
+    monkeypatch.setattr(apply_mod, "LOG_FILE", apply_log)
+    monkeypatch.setattr(apply_mod, "WEB_LOG_FILE", web_log)
+
+    handles = []
+    monkeypatch.setattr(
+        apply_mod.subprocess, "Popen", lambda cmd, **kwargs: handles.append(kwargs["stdout"])
+    )
+
+    apply_mod._relaunch_web(18790)
+    assert Path(handles[-1].name).name == "console.log"
+    anchors = apply_log.read_text(encoding="utf-8")
+    assert "relaunch web -m g3ku web --port 18790" in anchors, "执行体自己的锚点仍要留在这里"
+
+    apply_mod.spawn_runner("v1.0.2", port=18790)
+    assert Path(handles[-1].name).name == "update-apply.log", "执行体自身的输出不许跑偏"

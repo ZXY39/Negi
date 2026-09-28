@@ -23,6 +23,9 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_FILE = PROJECT_ROOT / ".g3ku" / "logs" / "update-apply.log"
+# 重拉起的 web 进程的输出落点：与 g3ku_bootstrap 给 web 自身日志选的文件一致，
+# 运维找服务日志只去这里，升级锚点只去 LOG_FILE，两边不互相淹没。
+WEB_LOG_FILE = PROJECT_ROOT / ".g3ku" / "logs" / "console.log"
 EXIT_WAIT_SECONDS = 90.0
 EXIT_POLL_SECONDS = 1.0
 # 升级子进程的看门狗：每 30 秒没结束就在日志里落一行"仍在跑"，累计超过
@@ -204,20 +207,26 @@ def _run_upgrade(ref: str) -> bool:
     return returncode == 0
 
 
-def _spawn_detached(*args: str) -> None:
+def _spawn_detached(*args: str, sink_path: Path | None = None) -> None:
     """Start a child that outlives this process (and the server it came from).
 
     The log handle is closed right after spawn; the child keeps its own dup of
     the OS handle, and an unwritable log dir must not block the relaunch.
+
+    ``sink_path`` defaults to this runner's own log because the runner prints
+    nothing but progress. The relaunched web server must NOT use it: its access
+    log buries the runner's anchor lines (real case: the whole apply timeline
+    had to be filtered out of tens of thousands of INFO lines to be readable).
     """
+    target = sink_path or LOG_FILE
     kwargs: dict[str, object] = {"cwd": str(PROJECT_ROOT), "stdin": subprocess.DEVNULL}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
     try:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        sink = LOG_FILE.open("a", encoding="utf-8")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        sink = target.open("a", encoding="utf-8", errors="replace")
     except OSError:
         sink = subprocess.DEVNULL
     kwargs["stdout"] = sink
@@ -240,7 +249,7 @@ def _relaunch_web(port: int | None = None) -> None:
     if port:
         args += ["--port", str(int(port))]
     _log(f"relaunch web {' '.join(args)}")
-    _spawn_detached(*args)
+    _spawn_detached(*args, sink_path=WEB_LOG_FILE)
 
 
 def spawn_runner(ref: str, *, port: int | None = None, pause_running_work: bool = True) -> None:
