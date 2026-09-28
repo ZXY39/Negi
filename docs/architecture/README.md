@@ -102,6 +102,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
 - 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan reaped at task resume` 收尸）→ `runtime-overview.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
 - 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `runtime-overview.md`「Node-Level Pause and Recovery」（各拒收车道共用同一 strike 预算）+ `tool-and-skill-system.md`「参数错误与状态分类」（必填契约回贴）
+- 模型反复提交空串 / 空数组 / `start_line=0` 这类越界值、而它看到的 schema 里没有那条边界 → `tool-and-skill-system.md`「参数错误与状态分类」（模型面投影只裁篇幅不裁判定；字段级 description 到不了模型）
 - 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `runtime-overview.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
 - 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `final acceptance round re-dispatched after interruption`

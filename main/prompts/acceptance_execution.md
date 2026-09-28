@@ -149,6 +149,8 @@
 ### 4.2 输出约束
 
 - 对 acceptance 节点来说，正常拒绝应使用 `failed + final`，而不是 `partial`。
+- `status` 与 `delivery_status` 各管一件事、都是必填，写了一个不等于写了另一个：`status` 只裁定你的验收结论（`success`=通过、`failed`=不通过），`delivery_status` 只裁定交付形态（`final`|`blocked`）。少 `status` 会让整条提交在参数校验就被拒收，并占用一次无效提交预算。
+- `evidence[]` 的行号是 1-based 且不适用时要整个省略：核验对方交付物用 `kind="file"` 给真实行区间，引用外部来源用 `kind="url"` 就不要写 `start_line` / `end_line`（写 `0` 或 `-1` 占位会被拒收），把出处放进 `ref` 与 `note`。
 - 如果本节点使用过工具，返回 `success` 时应至少提供一条 `evidence`。
 - `summary` 应是简洁的验收结论；`answer` 可给出更完整的裁定说明。
 - `failed + blocked` 时，`blocking_reason` 必须非空。

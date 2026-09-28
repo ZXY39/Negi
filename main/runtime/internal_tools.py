@@ -127,6 +127,7 @@ class SubmitNextStageTool(Tool):
                 'stage_goal': {
                     'type': 'string',
                     'description': 'Goal for the next stage.',
+                    'minLength': 1,
                 },
                 'tool_round_budget': {
                     'type': 'integer',
@@ -147,8 +148,8 @@ class SubmitNextStageTool(Tool):
                     'items': {
                         'type': 'object',
                         'properties': {
-                            'ref': {'type': 'string'},
-                            'note': {'type': 'string'},
+                            'ref': {'type': 'string', 'minLength': 1},
+                            'note': {'type': 'string', 'minLength': 1},
                         },
                         'required': ['ref', 'note'],
                     },
@@ -273,6 +274,7 @@ class SilentTool(Tool):
                 'reason': {
                     'type': 'string',
                     'description': 'Why nothing is delivered this turn.',
+                    'minLength': 1,
                 },
                 'subject': {
                     'type': 'string',
@@ -428,6 +430,7 @@ class SpawnChildNodesTool(Tool):
                         'its siblings’ outputs (e.g. acceptance) must go in a separate later batch.'
                     ),
                     'items': child_schema,
+                    'minItems': 1,
                 },
             },
             'required': ['children'],
@@ -689,7 +692,7 @@ class SubmitFinalResultTool(Tool):
                     'type': 'string',
                     'enum': ['final', 'blocked'],
                 },
-                'summary': {'type': 'string'},
+                'summary': {'type': 'string', 'minLength': 1},
                 'answer': {'type': 'string'},
                 'evidence': {
                     'type': 'array',
@@ -699,8 +702,8 @@ class SubmitFinalResultTool(Tool):
                             'kind': {'type': 'string', 'enum': ['file', 'artifact', 'url']},
                             'path': {'type': 'string'},
                             'ref': {'type': 'string'},
-                            'start_line': {'type': 'integer'},
-                            'end_line': {'type': 'integer'},
+                            'start_line': {'type': 'integer', 'minimum': 1},
+                            'end_line': {'type': 'integer', 'minimum': 1},
                             'note': {'type': 'string'},
                         },
                         'required': ['kind'],
