@@ -658,6 +658,21 @@ def _model_chain_request_context_lines(messages: list[dict[str, Any]] | None) ->
     return []
 
 
+def _route_slot_display_ref(slots: list[dict[str, Any]], refs: list[str], index: int) -> str:
+    """链追踪里「下一个 entry」的显示口径。
+
+    组槽位的成员要等下一圈由均衡器决定，打槽位占位成员会让文案与真实目标不符，读者会
+    据此误判组内只有那一个成员在被用。实际成员紧随其后由 `Model node binding rebound` 报出。
+    """
+    slot = _route_slot_at(slots, index)
+    if slot is not None and slot.get("kind") == "load_balance":
+        group_key = str(slot.get("group_key") or "").strip()
+        return f"group:{group_key or '?'}"
+    if 0 <= index < len(refs):
+        return str(refs[index] or "")
+    return ""
+
+
 def _log_model_chain_fallback(
     *,
     messages: list[dict[str, Any]] | None,
@@ -1126,7 +1141,7 @@ class ConfigChatBackend:
                         _log_model_chain_fallback(
                             messages=messages,
                             model_ref=ref,
-                            next_model_ref=refs[model_index + 1],
+                            next_model_ref=_route_slot_display_ref(route_slots, refs, model_index + 1),
                             reason=exc,
                         )
                         model_index += 1
@@ -1488,7 +1503,7 @@ class ConfigChatBackend:
                     _log_model_chain_fallback(
                         messages=messages,
                         model_ref=ref,
-                        next_model_ref=refs[model_index],
+                        next_model_ref=_route_slot_display_ref(route_slots, refs, model_index),
                         reason=(
                             model_last_failure_reason
                             if model_last_failure_reason is not None

@@ -274,7 +274,7 @@ chat 调用有两类边界：**单次（单轮）provider 请求的响应时间�
 
 进程边界：balancer 与并发控制器只在 `execution_mode == 'worker'` 时存在。`embedded` / `web` 角色下选择层退化成无并发计数的直连绑定，不报错也不排队。多 worker 副本之间不共享这份内存态。
 
-排障入口：日志锚点 `Model route selected` / `Model node binding rebound` / `Model route lease released` / `Model load-balance group exhausted`，每条都带决策时刻的负载读数与重绑原因；跨进程读数看 worker 心跳里的 `model_route_groups`，管理面接口为 `GET /api/models/load-balance/status`。运行操作口径见 `operations-and-maintenance.md`。
+排障入口：日志锚点 `Model route selected` / `Model node binding rebound` / `Model route lease released` / `Model load-balance group exhausted`，每条都带决策时刻的负载读数与重绑原因；链追踪 `MODEL CHAIN: FALLBACK` 的 `next_model_ref` 在下一跳是组槽位时写 `group:<组名>` 而不是成员（成员此刻还没定），真实落点看紧随其后的那条 `Model node binding rebound`；跨进程读数看 worker 心跳里的 `model_route_groups`，管理面接口为 `GET /api/models/load-balance/status`。运行操作口径见 `operations-and-maintenance.md`。
 
 ## 6. 运行时里的状态与持久化
 

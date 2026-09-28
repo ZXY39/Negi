@@ -496,3 +496,55 @@ async def test_boundary_chain_refresh_keeps_second_group_aligned(monkeypatch) ->
     assert lease.selected_model_ref == "m_d"
     members = {row["model_key"]: row for row in balancer.snapshot()["groups"]["g2"]["members"]}
     assert members["m_c"]["rolling_rpm_60s"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_trace_names_the_group_not_an_unselected_member(monkeypatch) -> None:
+    """下一个 entry 是组时，FALLBACK 追踪要写组标识而不是槽位占位成员。
+
+    组槽位的实际成员由均衡器在下一圈才定，把占位成员写成「下一个模型」会让文案与真实
+    目标不符，读者会据此误判组内只有那一个成员在被使用。
+    """
+    g1 = _group("m_a", "m_b", max_rounds=1, group_key="g1")
+    g2 = _group("m_c", "m_d", max_rounds=1, group_key="g2")
+    plan = ModelRoutePlan(routes=[_group_route(0, g1), _group_route(1, g2)], config_revision=1)
+    turn_controller, controller, _balancer, lease = _wiring(g1, plan=plan, extra_groups=(g2,))
+    calls: list[str] = []
+    monkeypatch.setattr(chat_backend_module, "model_retry_backoff_seconds", lambda attempt: 0.0)
+    _patch(
+        monkeypatch,
+        {
+            "m_a": _target("m_a", _RateLimitedProvider("m_a", calls)),
+            "m_b": _target("m_b", _RateLimitedProvider("m_b", calls)),
+            "m_c": _target("m_c", _OkProvider("m_c", calls)),
+            "m_d": _target("m_d", _OkProvider("m_d", calls)),
+        },
+    )
+    logged: list[str] = []
+
+    def _record(template, *args, **kwargs):
+        _ = kwargs
+        try:
+            logged.append(str(template).format(*args))
+        except Exception:
+            logged.append(str(template))
+
+    monkeypatch.setattr(chat_backend_module, "logger", SimpleNamespace(info=_record, warning=_record, error=_record))
+
+    response = await _backend().chat(
+        messages=[{"role": "user", "content": "demo"}],
+        tools=None,
+        model_refs=list(plan.candidate_model_keys),
+        model_routes=plan,
+        model_routes_supplier=lambda: plan,
+        model_refs_resolver=lambda: list(plan.candidate_model_keys),
+        node_turn_lease=lease,
+        node_turn_controller=turn_controller,
+        model_concurrency_controller=controller,
+    )
+
+    assert response.content == "ok"
+    traces = [item for item in logged if "next_model_ref" in item]
+    assert traces, "expected a FALLBACK trace when leaving the first group"
+    assert any("next_model_ref: group:g2" in item for item in traces)
+    assert not any("next_model_ref: m_c" in item for item in traces)
