@@ -164,3 +164,40 @@ def run_update_check(
     except OSError:
         return payload
     return payload
+
+
+APPLY_RESULT_FILE = 'update-apply-result.json'
+
+
+def apply_result_path() -> Path:
+    from g3ku.config.loader import get_data_dir
+
+    return get_data_dir() / APPLY_RESULT_FILE
+
+
+def read_apply_result(path: Path | None = None) -> dict[str, Any] | None:
+    """上一次「重启并更新」的结局，没有记录时返回 None。
+
+    与台账同一个道理：没有文件就是"没发生过"，调用方不许把它渲染成"已经升级好了"。
+    """
+    target = path or apply_result_path()
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_apply_result(payload: dict[str, Any], path: Path | None = None) -> None:
+    """执行体的终态回写：让"点了没反应"在设置行里变成可读的一句。
+
+    写失败不影响升级本身，所以这里只吞 OSError。
+    """
+    target = path or apply_result_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f"{target.name}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        return

@@ -17,7 +17,7 @@ from loguru import logger
 
 from g3ku import __version__
 from g3ku.update_apply import spawn_runner
-from g3ku.update_check import read_update_ledger, run_update_check
+from g3ku.update_check import read_apply_result, read_update_ledger, run_update_check
 
 router = APIRouter()
 
@@ -49,6 +49,8 @@ def _status_payload() -> dict[str, Any]:
         "error": str((ledger or {}).get("error") or ""),
         "enabled": enabled,
         "interval_hours": interval_hours,
+        # 执行体自己写的终态：apply 端点回 restarting 时不代表升级成功过。
+        "last_apply": read_apply_result(),
     }
 
 

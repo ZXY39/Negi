@@ -86,6 +86,8 @@ function loadApp() {
             U,
             renderUpdateNavDot,
             updateSettingsLineText,
+            updateApplyOutcomeText,
+            updateSettingsLineTitle,
             renderProjectSettingsUpdate,
         };`,
         context
@@ -182,4 +184,26 @@ test("确认框层级压过叫它起来的弹窗，但仍在 toast 之下", () =
         `确认框必须压过弹窗族：${confirm} vs ${dialog}/${rename}/${memoryEdit}`);
     assert.ok(confirm < toast && confirm < approval,
         `toast 与审批浮层必须仍在确认框之上：${toast}/${approval} vs ${confirm}`);
+});
+
+test("升级终态不回落成\"正在重启\"：失败占行、成功让回版本对", () => {
+    const api = loadApp();
+    const base = { has_ledger: true, newer: true, current_version: "1.0.11", latest_tag: "v1.0.12", checked_at: "2026-09-28T13:15:20+08:00" };
+
+    // 没有记录 / ok：这一行仍归版本对
+    assert.equal(api.updateApplyOutcomeText(base), "");
+    assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "ok", at: "2026-09-28T13:30:00+08:00" } }), "");
+    assert.match(api.updateSettingsLineText(base), /当前 v1\.0\.11 · 最新 v1\.0\.12/);
+
+    // 脏树被守卫拒掉的那次：端口没退干净 ⇒ 代码未动
+    const busy = { ...base, last_apply: { outcome: "port_busy", at: "2026-09-28T13:19:05+08:00", detail: "exit_accepted_200; port 18790 still busy" } };
+    assert.equal(api.updateApplyOutcomeText(busy), "升级未完成：服务没退干净");
+    assert.equal(api.updateSettingsLineText(busy), "升级未完成：服务没退干净");
+    assert.match(api.updateSettingsLineTitle(busy), /上次升级 port_busy .*：exit_accepted_200/);
+
+    // 执行体刚起来：只说执行中，不谎报完成
+    assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "started", detail: "port=18790" } }), "升级执行中");
+
+    // 未知终态兜底：宁可露出原码，也不要显示成"已是最新"
+    assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "weird_code" } }), "升级未完成：weird_code");
 });

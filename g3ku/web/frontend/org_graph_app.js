@@ -15413,9 +15413,28 @@ function formatUpdateCheckedAt(value) {
     return `${month}-${day} ${time}`;
 }
 
+const UPDATE_APPLY_OUTCOME_TEXT = {
+    started: "升级执行中",
+    upgrade_failed: "升级未完成：安装脚本非零退出",
+    exit_refused: "升级未完成：服务拒绝退出",
+    port_busy: "升级未完成：服务没退干净",
+    port_unknown: "升级未完成：端口未知",
+    not_this_service: "升级未完成：端口上没有本服务",
+};
+
+function updateApplyOutcomeText(item) {
+    // apply 端点回的是"已踢起执行体"，不是"升级成功"。执行体把终态写进结果文件，
+    // 这里照实说，否则失败时界面永远停在"正在重启"。ok 与没有记录都不占这一行。
+    const outcome = item?.last_apply?.outcome;
+    if (!outcome || outcome === "ok") return "";
+    return UPDATE_APPLY_OUTCOME_TEXT[outcome] || `升级未完成：${outcome}`;
+}
+
 function updateSettingsLineText(item) {
     // 一行只放版本对：整行可用宽 412px，两个控件占 78+91+12，带上检查时间就要
     // 443px 必然换行。时间、错误码这些细节走 title。
+    const outcomeText = updateApplyOutcomeText(item);
+    if (outcomeText) return outcomeText;
     if (!item?.has_ledger) return "尚未检查过版本";
     if (item.error) return "上次检查失败";
     if (item.newer) return `当前 v${item.current_version} · 最新 ${item.latest_tag}`;
@@ -15425,8 +15444,12 @@ function updateSettingsLineText(item) {
 function updateSettingsLineTitle(item) {
     if (!item?.has_ledger) return "还没查过远端标签；点「检查更新」立即查一次。";
     const checked = `检查于 ${formatUpdateCheckedAt(item.checked_at)}`;
-    if (item.error) return `${item.error} · ${checked}`;
-    return `${item.latest_tag || "无标签"} · ${checked}`;
+    const apply = item?.last_apply;
+    const applyNote = apply && apply.outcome && apply.outcome !== "ok"
+        ? ` · 上次升级 ${apply.outcome} ${formatUpdateCheckedAt(apply.at)}${apply.detail ? `：${apply.detail}` : ""}`
+        : "";
+    if (item.error) return `${item.error} · ${checked}${applyNote}`;
+    return `${item.latest_tag || "无标签"} · ${checked}${applyNote}`;
 }
 
 function renderProjectSettingsUpdate(item) {

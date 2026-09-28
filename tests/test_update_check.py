@@ -378,3 +378,92 @@ def test_relaunched_web_output_lands_in_the_app_log_not_the_apply_log(tmp_path: 
 
     apply_mod.spawn_runner("v1.0.2", port=18790)
     assert Path(handles[-1].name).name == "update-apply.log", "执行体自身的输出不许跑偏"
+
+
+def _result_file(tmp_path: Path, monkeypatch) -> Path:
+    from g3ku.update_check import apply_result_path  # noqa: F401 - 只证符号存在
+
+    target = tmp_path / "update-apply-result.json"
+    monkeypatch.setattr("g3ku.update_check.apply_result_path", lambda: target)
+    return target
+
+
+def test_apply_records_a_refused_exit_as_its_own_terminal_outcome(tmp_path: Path, monkeypatch):
+    """执行体停在"服务拒绝退出"时，web 侧要能看见，而不是只剩 restarting。"""
+    import json
+
+    import g3ku.update_apply as apply_mod
+
+    result_file = _result_file(tmp_path, monkeypatch)
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
+    monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_refused_409")
+    monkeypatch.setattr(
+        apply_mod, "_run_upgrade", lambda ref: (_ for _ in ()).throw(AssertionError("被拒不许动代码"))
+    )
+
+    assert apply_mod.run("v1.0.12", port=18999) == 2
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    assert data["outcome"] == "exit_refused"
+    assert data["ref"] == "v1.0.12"
+    assert data["detail"] == "exit_refused_409"
+
+
+def test_failed_upgrade_is_recorded_even_though_the_service_comes_back(tmp_path: Path, monkeypatch):
+    """升级失败但旧版本已重拉起：终态是 upgrade_failed，不是 ok。"""
+    import json
+
+    import g3ku.update_apply as apply_mod
+
+    result_file = _result_file(tmp_path, monkeypatch)
+    relaunched = []
+    monkeypatch.setattr(apply_mod, "LOG_FILE", tmp_path / "apply.log")
+    monkeypatch.setattr(apply_mod, "STARTUP_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(apply_mod, "_probe_self", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_request_exit", lambda port, pause: "exit_accepted_200")
+    monkeypatch.setattr(apply_mod, "_wait_for_release", lambda port: True)
+    monkeypatch.setattr(apply_mod, "_run_upgrade", lambda ref: False)
+    monkeypatch.setattr(apply_mod, "_relaunch_web", lambda port: relaunched.append(port))
+
+    assert apply_mod.run("v1.0.12", port=18790) == 1
+    assert relaunched == [18790], "失败也要把服务拉回来"
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    assert data["outcome"] == "upgrade_failed"
+    assert "exit_accepted_200" in data["detail"]
+
+
+def test_spawn_runner_marks_the_attempt_as_started(tmp_path: Path, monkeypatch):
+    import json
+
+    import g3ku.update_apply as apply_mod
+
+    result_file = _result_file(tmp_path, monkeypatch)
+    spawned = []
+    monkeypatch.setattr(apply_mod, "_spawn_detached", lambda *args, **kwargs: spawned.append(args))
+
+    apply_mod.spawn_runner("v1.0.12", port=18790)
+
+    assert spawned, "执行体已踢起"
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    assert data["outcome"] == "started"
+    assert data["ref"] == "v1.0.12"
+
+
+async def test_status_endpoint_carries_the_last_apply_outcome(monkeypatch, tmp_path: Path):
+    import json
+
+    import main.api.update_rest as update_api
+
+    monkeypatch.setattr("g3ku.update_check.ledger_path", lambda: tmp_path / "update-check.json")
+    result_file = _result_file(tmp_path, monkeypatch)
+    result_file.write_text(
+        json.dumps(
+            {"at": "2026-09-28T13:19:05+08:00", "ref": "v1.0.12", "outcome": "port_busy", "detail": "x"},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    payload = update_api._status_payload()
+    assert payload["last_apply"]["outcome"] == "port_busy"

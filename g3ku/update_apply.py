@@ -46,6 +46,26 @@ def _log(message: str) -> None:
         pass
 
 
+def _record(outcome: str, ref: str, detail: str = "") -> None:
+    """把这一跳的结局写给 web 侧读，界面才有"没升级成"可说。
+
+    `apply` 端点在踢起执行体那一刻只能回 `restarting: true`；之后执行体无论停在
+    哪一步，前端都看不见（实盘两次都是"正在重启"挂在那里，真相在日志里 2 秒就
+    结束了）。终态码：started / ok / upgrade_failed / exit_refused / port_busy /
+    port_unknown / not_this_service。
+    """
+    from datetime import datetime
+
+    from g3ku.update_check import write_apply_result
+
+    write_apply_result({
+        "at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "ref": ref,
+        "outcome": outcome,
+        "detail": detail,
+    })
+
+
 def _read_config_port() -> int | None:
     """Read the bind port straight from the project config.
 
@@ -264,6 +284,7 @@ def spawn_runner(ref: str, *, port: int | None = None, pause_running_work: bool 
     if not pause_running_work:
         args.append("--no-pause")
     _spawn_detached(*args)
+    _record("started", ref, f"port={port} pause_running_work={pause_running_work}")
 
 
 def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -> int:
@@ -271,23 +292,31 @@ def run(ref: str, *, port: int | None = None, pause_running_work: bool = True) -
     resolved = _resolve_port(port)
     if resolved is None:
         _log("apply aborted: web port unknown (no --port and no readable .g3ku/config.json)")
+        _record("port_unknown", ref, "no --port and no readable config port")
         return 4
     if not _probe_self(resolved):
         _log(f"apply aborted: no Negi bootstrap endpoint answering on port {resolved}")
+        _record("not_this_service", ref, f"port {resolved}")
         return 5
     time.sleep(STARTUP_GRACE_SECONDS)
     label = _request_exit(resolved, pause_running_work)
     _log(f"exit request: {label}")
     if label.startswith("exit_refused"):
         # 服务仍在跑（未确认暂停）：不动代码，用户侧保持原状。
+        _record("exit_refused", ref, label)
         return 2
     if not _wait_for_release(resolved):
         _log(f"abort: port {resolved} still busy after {EXIT_WAIT_SECONDS}s; leaving the running service alone")
+        _record("port_busy", ref, f"{label}; port {resolved} still busy")
         return 3
     upgraded = _run_upgrade(ref)
     if not upgraded:
         _log("upgrade failed; relaunching the previous version")
     _relaunch_web(resolved)
+    if upgraded:
+        _record("ok", ref, f"relaunched on port {resolved}")
+    else:
+        _record("upgrade_failed", ref, f"{label}; install -Upgrade 非零退出，旧版本已重新拉起")
     return 0 if upgraded else 1
 
 
