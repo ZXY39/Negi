@@ -117,31 +117,46 @@
 
 目录分两个根：
 
-- **安装根**：进程 cwd（`g3ku web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，以及配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`。
-- **数据根**：体积数据的落点——`.g3ku/main-runtime/`、`.g3ku/web-ceo-*`、`.g3ku/logs/`、`.g3ku/cache/`、`temp/tasks/` 与下面列出的各 sidecar。相对布局与单根时代一致，只是根换了。
+- **安装根**：进程 cwd（`g3ku web` 启动时固定为代码检出目录）。承载代码与 `skills/`、`tools/`、`externaltools/`，配置和密钥材料——`.g3ku/config.json`、`.g3ku/llm-config/`（主密钥信封与 `auto-unlock.key`）、`.g3ku/secret-realms/`、`resources.state.json`、`resource-locks/`、`start.lock`、`internal-callback.json`——以及按 `config.workspace_path`（`agents.defaults.workspace`，默认 `.`）或 `Path.cwd()` 解析的其余状态：`memory/`、`sessions/`、`temp/ceo/`、`.g3ku/cron/`、`.g3ku/errors/`、`.g3ku/audit.jsonl`、`.g3ku/memory-requests/`、`.g3ku/cache/`、`.g3ku/tmp/`、`.g3ku/logs/`、`.g3ku/external-sessions/`、`.g3ku/external-uploads/`、`.g3ku/external-outbox/`。换数据根不带动这些。
+- **数据根**：只收体积数据，判据是解析入口——经 `g3ku/deployment/data_root.py` 的 `data_root()` / `data_g3ku_path()` / `data_work_path()` / `resolve_data_path()` 落盘的那几类：`.g3ku/main-runtime/`（任务库、artifacts、deliverables、governance 库、`managed-worker.log`）、其余 `.g3ku/web-ceo-*` sidecar、`.g3ku/stt/`、`temp/tasks/`。新增挂载点不走这四个函数之一就会静默留在安装根。
+
+两半都写成 `.g3ku/<相对路径>` 的形状，但根不同，因此**自定义过数据目录的安装在盘上有两个 `.g3ku`**：`<安装根>/.g3ku/` 与 `<数据根>/.g3ku/`。数据根那一侧同样带 `.g3ku` 这一层（`<数据根>/.g3ku/main-runtime/`，不是 `<数据根>/main-runtime/`）；`temp/` 则直接挂数据根。未配置时数据根等于安装根，两个 `.g3ku` 合一，也就是历史布局本身，换锚因此不产生迁移、也不改变相对布局。
+
+命名陷阱：`g3ku.utils.helpers.get_data_path()` 与 CLI 侧的 `get_data_dir()` 返回 `Path.cwd() / ".g3ku"`，属**安装根**，跟数据根无关（`.g3ku/cron/jobs.json` 与 `.g3ku/update-check.json` 因此留在安装根）。数据根只有 `g3ku/deployment/data_root.py` 一个来源。
 
 数据根由 `g3ku/deployment/data_root.py` 解析，进程内缓存一次，顺序是：
 
 1. 环境变量 `G3KU_DATA_DIR`
-2. 安装根下的 `.g3ku/data-root.json`（首次初始化时操作员选定的目录）
+2. 安装根下的 `.g3ku/data-root.json` 的 `data_dir` 字段（首次初始化时操作员选定的目录）
 3. 进程 cwd
 
-未配置时数据根等于安装根，也就是历史布局本身，换锚因此不产生迁移。指针文件刻意留在安装根一侧：它要在解锁之前就读得到，而主密钥信封、配置与导出/导入合同都不随数据根移动——`config_bundle` 的包内路径仍以 `.g3ku/` 为相对根。
+指针文件刻意留在安装根一侧：它要在解锁之前就读得到，而主密钥信封、配置与导出/导入合同都不随数据根移动——`config_bundle` 的包内路径仍以 `.g3ku/` 为相对根。
+
+想知道一台机器上真正的数据目录，按可得性取一条：
+
+- 进程在跑：`GET /api/bootstrap/status` 的 `data_root` 段（`data_root`、`source`、`default_root`、`pointer_path`），锁屏状态下同样可读。
+- 进程没跑：读 `<安装根>/.g3ku/data-root.json` 的 `data_dir`；该文件缺失再看 `G3KU_DATA_DIR`；两者都空即 cwd。
+- `g3ku status` 不打印这一项。
+
+日志因此分两半，别在数据根下等 `console.log`：`.g3ku/logs/console.log` 与 `.g3ku/logs/update-apply.log` 由启动器按代码检出目录锚定（`g3ku_bootstrap.py`、`g3ku/update_apply.py` 用 `PROJECT_ROOT`），与数据根无关；`.g3ku/main-runtime/managed-worker.log` 跟数据根。
+
+其它架构文档里的 `.g3ku/...` 路径不重复标根，一律按本节的两半判读；需要新增挂载点时，先确认它该由哪一侧解析。
 
 - 改数据目录只在 `mode=setup` 的首次初始化入口生效（`POST /api/bootstrap/setup` 的 `data_dir` 字段，非绝对路径、落在 `.g3ku/` 内、包住安装根的候选一律拒绝）。已经建好口令的安装要换根，走人工迁移：停 web 与 worker、搬目录、写指针、再起两个进程。
+- 换根只影响此后按数据根重新解析的读写：库里已写死的绝对路径（memory processed 行的 `request_artifact_paths`、节点 artifact 与 `messages_ref` 指向的文件）继续指向旧根。旧根保持原结构在盘上即可读取，改名或清掉会让历史取证失配。
 - 数据根解析变化后 web 与托管 worker 都要重启才一致：worker 继承 web 的 cwd 与环境，指针则在两边各自首次解析时读取。
-- 排障口径：任务与会话数据"消失"先看 `GET /api/bootstrap/status` 的 `data_root` 段（含 `source` 与 `default_root`），再确认 `.g3ku/data-root.json` 是否被移动或改名——指针丢失会回退到 cwd，旧数据看起来就像空库。
+- 指针丢失、被改名或 JSON 损坏都按未配置处理（静默回退 cwd），于是旧数据看起来像空库；`data_root_source()` 的 `default` 就是这个形态，判读方法见上。
 - 磁盘水位与自动暂停按数据根所在盘判定（契约见 `runtime-overview.md`「磁盘写保护与治理」），把数据搬到大容量盘后紧急线随之按新盘计算。
 
-以下路径均相对各自所属的根：
+以下条目逐项标出所属根：
 
-- `.g3ku/config.json`
+- `.g3ku/config.json`（安装根）
   项目配置
 
-- `.g3ku/llm-config/`
+- `.g3ku/llm-config/`（安装根）
   模型配置仓库（provider/binding record）
 
-- `.g3ku/main-runtime/`
+- `.g3ku/main-runtime/`（数据根）
   任务运行时 SQLite、artifacts、event history
 
   其中 SQLite（`runtime.sqlite3` 或配置指定的 store 路径）里除任务/节点/帧等表外还有 `shutdown_pause_registry` 台账表：记录上次优雅关闭时被暂停的会话与任务，重启自动恢复后逐行删除。排查“重启后任务没有自动恢复”先查这张表（语义见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
@@ -153,25 +168,25 @@
   - `.g3ku/main-runtime/managed-worker.log`
     自动拉起的后台 task worker 日志
 
-- `.g3ku/web-ceo-continuity/`
+- `.g3ku/web-ceo-continuity/`（数据根）
   completed Web CEO session continuity sidecars。重启后继续 completed session、manual pause terminal stop、以及异常中断后的最新 authoritative frontdoor baseline 恢复都先看这里。
 
-- `.g3ku/web-ceo-turn-boundaries/`
+- `.g3ku/web-ceo-turn-boundaries/`（数据根）
   每轮连续性边界快照（`<session>/<turn_id>.json.gz`，每会话保留最近 3 轮）。用户消息编辑重发/Fork 的唯一截断数据源；契约见 `web-and-admin.md`「Message Edit-Resend And Session Fork」。会话删除时随其它 sidecar 一并清理。
 
-- `.g3ku/external-outbox/`
+- `.g3ku/external-outbox/`（安装根，与 `.g3ku/external-sessions/`、`.g3ku/external-uploads/` 同侧）
   外部渠道主动推送的持久账本（append-only jsonl，msg 记录 + ack tombstone）。排查「渠道端收不到主动推送」先看这里有无 pending 滞留；契约与重放语义详见 `external-agent-api.md`「持久 outbox」。
 
-- `memory/`
+- `memory/`（安装根）
   记忆目录；排障入口详见本文档「Memory Queue Workflow」章节。
 
-- `sessions/`
+- `sessions/`（安装根）
   会话持久化数据
 
-- `temp/tasks/`
+- `temp/tasks/`（数据根）
   任务临时目录，每个任务一个 `task_<id>` 子目录；根目录解析与隔离规则见 `runtime-overview.md`「任务侧」。任务进入终态（success/failed）后该目录**默认原样保留**；仅当开启 `main_runtime.disk_guard.terminal_temp_dir_cleanup_enabled`（环境变量 `G3KU_TERMINAL_TEMP_DIR_CLEANUP_ENABLED=1`）时才随终态清理硬删（保留清单与行为契约见 `runtime-overview.md`「磁盘写保护与治理」）。孤儿目录（`runtime.sqlite3` 的 tasks 表中已无对应任务却残留的 `task_*` 目录，含从未走到终态的卡死任务遗留）用 `scripts/cleanup_orphan_task_temp_dirs.py` 清理：默认 dry-run 只报数；`--apply` 删除空孤儿；非空孤儿要么 `--apply --move-non-empty` 移入 `temp/tasks_orphan_backup/`（可逆），要么 `--apply --purge-non-empty` 直接删除（不可逆）。清理脚本保留在库任务目录，以数据库为准，与运行中的任务互不影响。由于终态后目录保留，`temp/tasks/` 会随任务累积增长，磁盘紧张时优先按该脚本处置而非手删。
 
-- `temp/ceo/`
+- `temp/ceo/`（安装根：CEO 循环按 `config.workspace_path` 解析，与 `temp/tasks/` 不同根）
   CEO/frontdoor 会话级临时目录，每个会话一个 `<safe_session_key>` 子目录（如 `web_ceo-xxxx`）。作为 CEO 会话工具 runtime 的 `task_temp_dir`：`exec` 缺省 cwd 与临时文件规范落点，避免临时产物散落到工作区根目录。解析与惰性创建规则见 `runtime-overview.md`「任务侧」。该目录不保证持久保留：正式交付物禁止以此为最终落点（此约束同时写进 CEO 提示词契约）。
 
 ## 4. 测试结构
