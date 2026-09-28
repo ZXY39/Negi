@@ -467,3 +467,65 @@ async def test_status_endpoint_carries_the_last_apply_outcome(monkeypatch, tmp_p
 
     payload = update_api._status_payload()
     assert payload["last_apply"]["outcome"] == "port_busy"
+
+
+async def test_apply_refuses_a_second_run_while_one_is_in_flight(monkeypatch, tmp_path: Path):
+    """单飞闸门：重叠的两个执行体会把服务顶两次。
+
+    实盘 13:36 两下点击：第二个 13:37:00 升完重拉起，第一个跑自己的 uv sync 到
+    13:39:05 又重拉起一次并顶掉前者，中间服务空窗约 2 分钟。
+    """
+    from fastapi import HTTPException
+
+    import g3ku.update_apply as apply_mod
+    import main.api.update_rest as update_api
+
+    monkeypatch.setattr("g3ku.update_check.apply_result_path", lambda: tmp_path / "update-apply-result.json")
+    spawned: list[str] = []
+    checks: list[dict] = []
+    monkeypatch.setattr(
+        update_api,
+        "spawn_runner",
+        lambda ref, port=None, pause_running_work=True: spawned.append(ref),
+    )
+
+    def _check(**kwargs):
+        checks.append(kwargs)
+        return {"latest_tag": "v9.9.9", "newer": True}
+
+    monkeypatch.setattr(update_api, "run_update_check", _check)
+
+    apply_mod._record("started", "v1.0.12", "port=18790")
+    assert apply_mod.apply_in_flight() is not None
+
+    with pytest.raises(HTTPException) as exc:
+        await update_api.update_apply(_FakeRequest(18999), {})
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "apply_in_flight"
+    assert spawned == [] and checks == [], "闸门要挡在最前面，连远端那一次查询都不必花"
+
+    # 终态落定 ⇒ 放行
+    apply_mod._record("upgrade_failed", "v1.0.12", "install -Upgrade 非零退出")
+    assert apply_mod.apply_in_flight() is None
+    result = await update_api.update_apply(_FakeRequest(18999), {})
+    assert result["item"]["ref"] == "v9.9.9"
+
+
+def test_apply_gate_expires_with_the_window(tmp_path: Path, monkeypatch):
+    """执行体被杀或机器重启后，闸门不许把 apply 永久锁死。"""
+    import json
+    from datetime import datetime, timedelta
+
+    import g3ku.update_apply as apply_mod
+
+    result_file = tmp_path / "update-apply-result.json"
+    monkeypatch.setattr("g3ku.update_check.apply_result_path", lambda: result_file)
+    stale_at = (
+        datetime.now().astimezone() - timedelta(seconds=apply_mod.APPLY_IN_FLIGHT_SECONDS + 61)
+    ).isoformat(timespec="seconds")
+    result_file.write_text(
+        json.dumps({"at": stale_at, "ref": "v1.0.12", "outcome": "started", "detail": ""}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert apply_mod.apply_in_flight() is None

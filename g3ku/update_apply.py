@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_FILE = PROJECT_ROOT / ".g3ku" / "logs" / "update-apply.log"
@@ -34,6 +35,9 @@ UPGRADE_HEARTBEAT_SECONDS = 30.0
 UPGRADE_TIMEOUT_SECONDS = 1200.0
 # 让发起 apply 的那次 HTTP 响应先回到浏览器，再动手关停服务。
 STARTUP_GRACE_SECONDS = 3.0
+# apply 单飞闸门：`started` 记录在这么多秒内视为上一次还在跑，拒掉第二个执行体。
+# 上限取"最慢一次升级"的量级（下载 + uv sync 实测到 2 分钟级），留足余量。
+APPLY_IN_FLIGHT_SECONDS = 600.0
 
 
 def _log(message: str) -> None:
@@ -270,6 +274,32 @@ def _relaunch_web(port: int | None = None) -> None:
         args += ["--port", str(int(port))]
     _log(f"relaunch web {' '.join(args)}")
     _spawn_detached(*args, sink_path=WEB_LOG_FILE)
+
+
+def apply_in_flight(window_seconds: float = APPLY_IN_FLIGHT_SECONDS) -> dict[str, Any] | None:
+    """上一次 apply 还挂着吗：结果文件是 ``started`` 且落在闸门内。
+
+    闸门不是锦上添花：实盘 13:36 两次点击起了两个执行体，第二个 10 秒后升级完
+    重拉起服务，第一个跑了自己的 ``uv sync`` 到 13:39 又重拉起一次并顶掉前者，
+    中间服务空窗约 2 分钟；两个进程还各自持有 ``update-apply.log`` 的缓冲写句柄，
+    行会互相覆盖（那次 13:36:07 的执行体连自己的 ``apply start`` 都没留下）。
+    """
+    from datetime import datetime, timedelta
+
+    from g3ku.update_check import read_apply_result
+
+    record = read_apply_result()
+    if not isinstance(record, dict) or str(record.get("outcome") or "") != "started":
+        return None
+    try:
+        last = datetime.fromisoformat(str(record.get("at") or "").strip())
+    except ValueError:
+        return None
+    if last.tzinfo is None:
+        last = last.astimezone()
+    if datetime.now().astimezone() - last <= timedelta(seconds=window_seconds):
+        return record
+    return None
 
 
 def spawn_runner(ref: str, *, port: int | None = None, pause_running_work: bool = True) -> None:

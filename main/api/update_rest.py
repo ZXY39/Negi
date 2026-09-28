@@ -16,7 +16,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from loguru import logger
 
 from g3ku import __version__
-from g3ku.update_apply import spawn_runner
+from g3ku.update_apply import apply_in_flight, spawn_runner
 from g3ku.update_check import read_apply_result, read_update_ledger, run_update_check
 
 router = APIRouter()
@@ -84,6 +84,19 @@ async def update_check_now():
 async def update_apply(request: Request, payload: dict | None = Body(default=None)):
     body = payload or {}
     requested_ref = str(body.get("ref") or "").strip()
+    # 单飞：上一次还挂在 started 就拒掉，不重跑安装、也不起第二个执行体。放在最前面，
+    # 连远端那一次查询都不必花。
+    pending = apply_in_flight()
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "apply_in_flight",
+                "message": "上一次重启并更新还在执行中，请等它结束再点。",
+                "ref": str(pending.get("ref") or ""),
+                "started_at": str(pending.get("at") or ""),
+            },
+        )
     ledger = read_update_ledger()
     if requested_ref:
         ref = requested_ref

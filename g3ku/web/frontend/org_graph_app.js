@@ -15497,6 +15497,59 @@ async function checkForUpdatesNow() {
     }
 }
 
+const UPDATE_APPLY_WATCH_INTERVAL_MS = 3000;
+const UPDATE_APPLY_WATCH_TIMEOUT_MS = 11 * 60 * 1000;
+let updateApplyWatchTimer = null;
+
+function updateApplyTargetVersion(ref) {
+    return String(ref || "").replace(/^v/, "").trim();
+}
+
+function stopUpdateApplyWatch() {
+    if (updateApplyWatchTimer) {
+        clearInterval(updateApplyWatchTimer);
+        updateApplyWatchTimer = null;
+    }
+}
+
+function watchApplyUpdateFinish(targetVersion, { intervalMs = UPDATE_APPLY_WATCH_INTERVAL_MS, timeoutMs = UPDATE_APPLY_WATCH_TIMEOUT_MS } = {}) {
+    // 确认框那句"服务回来本页会自动恢复"要真的做到：目标版本回来就自己刷新一次。
+    // 停机期间 getUpdateStatus 会直接抛，吞掉继续等即可。
+    const deadline = Date.now() + timeoutMs;
+    stopUpdateApplyWatch();
+    updateApplyWatchTimer = setInterval(async () => {
+        if (Date.now() > deadline) {
+            stopUpdateApplyWatch();
+            showToast({ title: "更新未完成", text: `服务没在预期时间内回到 v${targetVersion}，请看 .g3ku/logs/update-apply.log。`, kind: "error", persistent: true });
+            return;
+        }
+        let item = null;
+        try {
+            item = await ApiClient.getUpdateStatus();
+        } catch {
+            return;
+        }
+        if (!item) return;
+        const outcome = String(item.last_apply?.outcome || "");
+        if (outcome && outcome !== "ok" && outcome !== "started") {
+            stopUpdateApplyWatch();
+            showToast({
+                title: "更新未完成",
+                text: item.last_apply?.detail || `执行体停在 ${outcome}`,
+                kind: "error",
+                persistent: true,
+            });
+            void refreshUpdateStatus();
+            return;
+        }
+        if (outcome === "ok" && updateApplyTargetVersion(item.current_version) === targetVersion) {
+            stopUpdateApplyWatch();
+            showToast({ title: `已更新到 v${targetVersion}`, text: "正在刷新页面。", kind: "success" });
+            window.location.reload();
+        }
+    }, intervalMs);
+}
+
 function requestApplyUpdate() {
     const item = S.updateStatus || {};
     openConfirm({
@@ -15506,8 +15559,10 @@ function requestApplyUpdate() {
         confirmKind: "danger",
         onConfirm: async () => {
             try {
-                await ApiClient.applyUpdate({ ref: item.latest_tag || "", pause_running_work: true });
+                const result = await ApiClient.applyUpdate({ ref: item.latest_tag || "", pause_running_work: true });
+                const target = updateApplyTargetVersion(result?.ref || item.latest_tag);
                 showToast({ title: "正在重启", text: "服务回来本页会自动恢复。", kind: "info", persistent: true });
+                if (target) watchApplyUpdateFinish(target);
             } catch (error) {
                 showToast({ title: "更新未启动", text: String(error?.message || error), kind: "error" });
             }

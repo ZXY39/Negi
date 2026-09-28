@@ -207,3 +207,73 @@ test("升级终态不回落成\"正在重启\"：失败占行、成功让回版�
     // 未知终态兜底：宁可露出原码，也不要显示成"已是最新"
     assert.equal(api.updateApplyOutcomeText({ ...base, last_apply: { outcome: "weird_code" } }), "升级未完成：weird_code");
 });
+
+function loadWatchContext() {
+    const context = baseContext();
+    context.window = context;
+    context.__toasts = [];
+    context.__reloads = 0;
+    vm.createContext(context);
+    vm.runInContext(
+        `${APP_CODE}\nthis.__testExports = { watchApplyUpdateFinish, stopUpdateApplyWatch, updateApplyTargetVersion };`,
+        context
+    );
+    vm.runInContext(
+        `showToast = (opts) => { __toasts.push(opts); };
+         refreshUpdateStatus = async () => {};`,
+        context
+    );
+    context.location.reload = () => {
+        context.__reloads += 1;
+    };
+    return context;
+}
+
+const nap = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test("apply 的自动恢复是真的：目标版本回来就刷新页面", async () => {
+    const ctx = loadWatchContext();
+    ctx.ApiClient = {
+        getUpdateStatus: async () => ({ current_version: "1.0.12", last_apply: { outcome: "started" } }),
+    };
+
+    ctx.__testExports.watchApplyUpdateFinish("1.0.12", { intervalMs: 5, timeoutMs: 5000 });
+    await nap(40);
+    assert.equal(ctx.__reloads, 0, "还在 started 不该刷新");
+    assert.deepEqual(ctx.__toasts, [], "started 不该报错");
+
+    ctx.ApiClient = {
+        getUpdateStatus: async () => ({ current_version: "1.0.12", last_apply: { outcome: "ok", ref: "v1.0.12" } }),
+    };
+    await nap(60);
+    assert.equal(ctx.__reloads, 1, "版本对上且终态 ok ⇒ 自动刷新一次");
+    assert.equal(ctx.__toasts.at(-1).title, "已更新到 v1.0.12");
+    ctx.__testExports.stopUpdateApplyWatch();
+});
+
+test("执行体落终态失败时立刻说实话，不再假装正在重启", async () => {
+    const ctx = loadWatchContext();
+    ctx.ApiClient = {
+        getUpdateStatus: async () => ({
+            current_version: "1.0.11",
+            last_apply: { outcome: "upgrade_failed", detail: "exit_accepted_200; install -Upgrade 非零退出" },
+        }),
+    };
+
+    ctx.__testExports.watchApplyUpdateFinish("1.0.12", { intervalMs: 5, timeoutMs: 5000 });
+    await nap(40);
+    assert.equal(ctx.__reloads, 0, "失败不刷新");
+    assert.equal(ctx.__toasts.at(-1).kind, "error");
+    assert.match(ctx.__toasts.at(-1).text, /install -Upgrade 非零退出/);
+
+    const seen = ctx.__toasts.length;
+    await nap(40);
+    assert.equal(ctx.__toasts.length, seen, "报过一次就停表，不反复刷 toast");
+});
+
+test("目标版本号容得下 v 前缀", () => {
+    const ctx = loadWatchContext();
+    assert.equal(ctx.__testExports.updateApplyTargetVersion("v1.0.12"), "1.0.12");
+    assert.equal(ctx.__testExports.updateApplyTargetVersion("1.0.12"), "1.0.12");
+    assert.equal(ctx.__testExports.updateApplyTargetVersion(""), "");
+});
