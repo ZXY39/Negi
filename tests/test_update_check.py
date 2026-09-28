@@ -157,6 +157,15 @@ async def test_apply_requires_a_version_shape_and_rejects_when_current(monkeypat
     assert bad_ref.value.status_code == 400
     assert spawned == []
 
+    # 没点名版本时 apply 会现场查一次：查得到 tag 但 newer=false 才算"已是最新"。
+    checks = []
+
+    def _check(**kwargs):
+        checks.append(kwargs)
+        return {"latest_tag": "v1.0.2", "newer": False, "error": ""}
+
+    monkeypatch.setattr(update_api, "run_update_check", _check)
+
     with pytest.raises(HTTPException) as nothing:
         await update_api.update_apply(request, {})
     assert nothing.value.status_code == 409
@@ -167,6 +176,77 @@ async def test_apply_requires_a_version_shape_and_rejects_when_current(monkeypat
     assert spawned[0][0] == "v1.0.2"
     assert spawned[0][1] == 18999, "执行体必须拿到这次请求真正到达的端口"
     assert spawned[0][2] is False, "用户的未确认决定要传到执行体"
+    assert len(checks) == 1, "点名了版本就不该再查远端"
+
+
+async def test_apply_upgrades_to_the_fresh_tag_not_the_stale_ledger(monkeypatch, tmp_path: Path):
+    """重启后台账要等满一个检查间隔才刷新，陈旧 latest_tag 不许当升级目标。
+
+    实盘：v1.0.10 已发布，12:58 那次 apply 照 11:32 的台账升 v1.0.9，会把带着
+    桥修复的树换回没有修复的旧版。
+    """
+    import json
+
+    import main.api.update_rest as update_api
+
+    ledger_file = tmp_path / "update-check.json"
+    ledger_file.write_text(
+        json.dumps(
+            {
+                "checked_at": "2026-09-28T11:32:18+08:00",
+                "current_version": "1.0.8",
+                "latest_tag": "v1.0.9",
+                "newer": True,
+                "source": "manual",
+                "error": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("g3ku.update_check.ledger_path", lambda: ledger_file)
+    assert read_update_ledger()["latest_tag"] == "v1.0.9", "陈旧台账确实在场"
+
+    spawned = []
+    monkeypatch.setattr(
+        update_api,
+        "spawn_runner",
+        lambda ref, port=None, pause_running_work=True: spawned.append(ref),
+    )
+    monkeypatch.setattr(
+        update_api,
+        "run_update_check",
+        lambda **kwargs: {"latest_tag": "v1.0.10", "newer": True, "error": ""},
+    )
+
+    result = await update_api.update_apply(_FakeRequest(18999), {})
+    assert result["item"]["ref"] == "v1.0.10"
+    assert spawned == ["v1.0.10"]
+
+
+async def test_apply_refuses_when_the_live_check_returns_nothing(monkeypatch, tmp_path: Path):
+    """查不到远端版本 ≠ 照旧台账动手：中止并把原因讲出来（台账三态同一条契约）。"""
+    from fastapi import HTTPException
+
+    import main.api.update_rest as update_api
+
+    spawned = []
+    monkeypatch.setattr(
+        update_api,
+        "spawn_runner",
+        lambda ref, port=None, pause_running_work=True: spawned.append(ref),
+    )
+    monkeypatch.setattr(
+        update_api,
+        "run_update_check",
+        lambda **kwargs: {"latest_tag": "", "newer": False, "error": "remote_unreachable"},
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await update_api.update_apply(_FakeRequest(18999), {})
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "check_failed"
+    assert spawned == [], "查不到就不许踢执行体"
 
 
 async def test_apply_keeps_service_up_when_spawn_fails(monkeypatch, tmp_path: Path):

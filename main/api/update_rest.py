@@ -83,7 +83,26 @@ async def update_apply(request: Request, payload: dict | None = Body(default=Non
     body = payload or {}
     requested_ref = str(body.get("ref") or "").strip()
     ledger = read_update_ledger()
-    ref = requested_ref or str((ledger or {}).get("latest_tag") or "").strip()
+    if requested_ref:
+        ref = requested_ref
+    else:
+        # 用户点「重启并更新」就是"升到当前最新"的动作本身，所以这里现场查一次，
+        # 绝不照台账里的旧 latest_tag 动手：重启后台账要等满一个检查间隔才刷新，
+        # 实盘 12:58 那次就拿 11:32 查出的 v1.0.9 去升，而那一刻 v1.0.10 已经带
+        # 着桥修复发出去了 —— 照陈旧值升级会把带修复的树换回没有修复的旧版。
+        # 不受 update_check.enabled 约束：那个开关管的是自动轮询，而 apply 本身
+        # 就要求能访问远端（安装脚本要 git fetch）。
+        fresh = await asyncio.to_thread(run_update_check, source="manual", force=True)
+        if not fresh or not str(fresh.get("latest_tag") or "").strip():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "check_failed",
+                    "message": "现在查不到远端版本（git ls-remote 没通），先确认这台设备能访问 GitHub 再点。",
+                },
+            )
+        ledger = fresh
+        ref = str(fresh.get("latest_tag") or "").strip()
     if not ref:
         raise HTTPException(
             status_code=409,
