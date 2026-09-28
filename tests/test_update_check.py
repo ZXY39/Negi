@@ -14,6 +14,19 @@ from g3ku.update_check import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_update_files(tmp_path: Path, monkeypatch):
+    """每个用例都有自己的台账与 apply 结果文件。
+
+    两者默认都落在 `get_data_dir()`（跑测试时＝仓库根），不隔离就会跨用例、跨运行
+    串味：一个用例留下的 `started` 会让下一个用例的 apply 被单飞闸门直接拒掉。
+    """
+    monkeypatch.setattr("g3ku.update_check.ledger_path", lambda: tmp_path / "update-check.json")
+    monkeypatch.setattr(
+        "g3ku.update_check.apply_result_path", lambda: tmp_path / "update-apply-result.json"
+    )
+
+
 def test_parse_version_accepts_bare_and_prefixed():
     assert parse_version("1.2.3") == (1, 2, 3)
     assert parse_version(" v1.2.10 ") == (1, 2, 10)
