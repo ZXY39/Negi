@@ -87,3 +87,5 @@ image_help.txt
 
 # 本地启动配置（不入库）
 .claude/launch.json
+
+!docs/FIX_PLAN_model-load-balancing.md
