@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 
 from loguru import logger
 from pydantic import BaseModel
@@ -773,6 +773,17 @@ class SQLiteTaskStore:
     def list_nodes(self, task_id: str) -> list[NodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], NodeRecord) for row in rows]
+
+    def iter_nodes(self, task_id: str) -> Iterator[NodeRecord]:
+        """逐条解析任务节点：`list_nodes` 会把整任务的 NodeRecord 一次性建出来。
+
+        恢复路径（`sync_task_read_models`）每个节点只用一次就丢，实盘 deep dump 里
+        `startup → _recover_interrupted_task → sync_task_read_models → list_nodes` 这条链
+        是 Python 侧驻留的头两名之一。行文本仍一次取回（同一条读连接上不能跨锁开游标）。
+        """
+        rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
+        for row in rows:
+            yield self._parse(row['payload_json'], NodeRecord)
 
     def list_children(self, parent_node_id: str) -> list[NodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE parent_node_id = ? ORDER BY created_at ASC, node_id ASC', (parent_node_id,))

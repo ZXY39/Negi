@@ -4072,7 +4072,7 @@ class TaskLogService:
                     for record in list(self._store.list_task_node_details(task_id) or [])
                     if str(record.node_id or '').strip()
                 }
-            for node in list(self._store.list_nodes(task_id) or []):
+            for node in self._store.iter_nodes(task_id):
                 self._sync_node_read_models_locked(
                     node,
                     externalize_execution_trace=externalize_execution_trace,

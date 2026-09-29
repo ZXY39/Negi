@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from main.models import TaskRecord
+from main.models import NodeRecord, TaskRecord
 from main.service.runtime_service import MainRuntimeService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -228,3 +228,44 @@ def test_tool_watchdog_snapshot_coalesces_concurrent_polls(tmp_path) -> None:
 
     asyncio.run(poll_all())
     assert builds['started'] == 2, builds
+
+
+def test_read_model_rebuild_streams_nodes_instead_of_materializing_them(tmp_path) -> None:
+    """恢复期重建读模型时逐条取节点，不一次性建出整任务 NodeRecord。
+
+    实盘 deep dump 的头名链就是 startup → _recover_interrupted_task → sync_task_read_models
+    → list_nodes：284 个节点一次性解析出来实测驻留 88.5MB，逐条只 45.9MB。
+    """
+    service = _make_web_service(tmp_path)
+    service.store.upsert_task(_task('task:stream1', 'web:qq', 'in_progress'))
+    for index in range(4):
+        service.store.upsert_node(
+            NodeRecord(
+                node_id=f'node:{index}',
+                task_id='task:stream1',
+                root_node_id='node:root',
+                goal='g',
+                prompt='p',
+                created_at='2026-09-29T10:00:00+08:00',
+                updated_at='2026-09-29T10:00:00+08:00',
+            )
+        )
+
+    seen: list[str] = []
+    original_iter = service.store.iter_nodes
+
+    def counting(task_id):
+        for node in original_iter(task_id):
+            seen.append(str(node.node_id))
+            yield node
+
+    def _no_whole_task_materialize(*_args, **_kwargs):
+        raise AssertionError('读模型重建不得整任务建出 NodeRecord 列表')
+
+    service.store.iter_nodes = counting  # type: ignore[method-assign]
+    service.store.list_nodes = _no_whole_task_materialize  # type: ignore[method-assign]
+
+    task = service.log_service.sync_task_read_models('task:stream1', externalize_execution_trace=False)
+
+    assert task is not None
+    assert seen == ['node:0', 'node:1', 'node:2', 'node:3']
