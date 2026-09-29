@@ -15,6 +15,8 @@ liveness canary work:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import sqlite3
 import time
 from unittest.mock import MagicMock
@@ -221,3 +223,36 @@ def test_worker_status_bridge_uses_event_loop_after_agent_loop_binding() -> None
 
     asyncio.run(scenario())
     assert published == [{'item': {'worker_id': 'worker:1'}, 'bridge': False}]
+
+
+def test_mem_probe_requires_marker_and_writes_site_rows(tmp_path, monkeypatch) -> None:
+    """分配探针只认数据根里的标记文件，落的一行要能指回申请分配的站点。
+
+    实盘 2.7GB 的恢复峰用 py-spy 归不了因（它给的是 CPU 热点），进程外读数只有总量；
+    能答"那一刻同时驻留的是谁"的只有 tracemalloc 按站点统计。
+    """
+    from main.monitoring.mem_probe import start_mem_probe
+
+    monkeypatch.setenv('G3KU_MEM_PROBE_INTERVAL_SECONDS', '1')
+    assert start_mem_probe(runtime_dir=tmp_path) is None
+
+    (tmp_path / 'mem-probe.on').write_text('', encoding='utf-8')
+    probe = start_mem_probe(runtime_dir=tmp_path)
+    assert probe is not None
+    try:
+        kept = [f'{index:08d}' * 512 for index in range(2000)]
+        time.sleep(1.6)
+    finally:
+        probe.stop()
+
+    files = list((tmp_path / 'mem-probe').glob('mem-probe-*.jsonl'))
+    assert len(files) == 1
+    rows = [json.loads(line) for line in files[0].read_text(encoding='utf-8').splitlines() if line.strip()]
+    assert rows, '探针至少要落一拍'
+    row = rows[-1]
+    assert row['pid'] == os.getpid()
+    assert row['traced_mb'] >= 1
+    assert row['traced_peak_mb'] >= row['traced_mb']
+    assert any('test_worker_observability.py' in str(item['site']) for item in row['top']), row['top']
+    assert all({'site', 'mb', 'blocks'} <= set(item) for item in row['top'])
+    assert kept[0][:8] == '00000000'

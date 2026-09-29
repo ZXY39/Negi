@@ -406,6 +406,18 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 5. `runtime.sqlite3` 收缩用 `scripts/compact_task_database.py`（默认 dry-run 报数；`--apply` 裁剪终态任务早于 `--retention-days`（默认 14，0=跳过裁剪）的五张大行表、`--backup` 先镜像、`--vacuum-full` 对存量库做 VACUUM 迁移，脚本自带 1.2× 空间预检）。**必须在服务停机或排水后运行**（VACUUM 需独占连接）。运行时侧新库自动 `auto_vacuum=INCREMENTAL`；运行时行裁剪由对账 loop 每 23h 卡权执行，且仅当 `detail_retention_days>0` 时生效（紧急水位跳过）。两点会让收缩"看起来无效"：`nodes.payload_json` 不在裁剪清单里，而它持有节点正文的唯一一份 `input`（存储形状见 `runtime-overview.md`「投影表的列只承担主键与索引」与「节点当轮正文只有一个家」）；删行本身只把页还给 freelist，不 `--vacuum-full` / `incremental_vacuum` 就不会向操作系统归还空间，而这些页会被后续写入立刻复用。
 6. 磁盘接近满时不要手工对大 sqlite 库执行 VACUUM——它需要约一倍库大小的临时空间，会立刻打穿剩余水位（脚本内置同款预检）。
 
+### 内存峰值 / 恢复风暴后 RSS 不回落
+
+症状族：暂停→重启→恢复后 worker 内存在分钟级涨到 GB 级，同期事件循环滞后放大（性能条 lag 秒级、`task_model_calls` 一段时间不落行）；风暴过后工作集回落，但承诺内存不还给系统。
+
+判读顺序：
+
+1. 三个量分开看，别混成"泄漏"：`WorkingSet`（OS 可随时换出，看着小）、`PrivateMemorySize`（进程攥着的承诺内存）、`PeakWorkingSet`（历史上限的那一刻）。峰值只说明某一瞬同时驻留过多少，之后不回落是分配器保留；稳态下三个数都在小幅抖动而不同时上爬，就不是泄漏。取数：`Get-Process -Id <pid> | Select WorkingSet64,PrivateMemorySize64,PeakWorkingSet64`。
+2. CPU 热点回答不了内存问题。`py-spy dump/record` 给的是时间去哪（热路径的 O(N²) 形状在那里找），要答"那一刻同时驻留的是谁"只能用进程内分配探针——离线把可疑函数单独量一遍（`tracemalloc` 逐次分配 + RSS 轨迹）同样能排除候选：一条只分配几十 MB 的道撑不起 GB 级峰。
+3. 分配探针：在 `<数据根>/.g3ku/main-runtime/` 下建标记文件 `mem-probe.on`，重启 worker 即开始采样，每拍覆盖写一行 JSONL 到同目录 `mem-probe/mem-probe-<pid>-<启动时刻>.jsonl`。行内字段：`rss_mb` / `private_mb` / `traced_mb`（当前被跟踪的 Python 分配）/ `traced_peak_mb` / `growth_mb`（相对上一拍）/ `top`（按 `文件:行` 排名的驻留榜）/ `growth`（相对上一拍增量榜）。间隔与条数用 `G3KU_MEM_PROBE_INTERVAL_SECONDS`（默认 10，<1 回落默认）与 `G3KU_MEM_PROBE_TOP_LIMIT`（默认 12）覆盖。只在 `execution_mode='worker'` 且标记存在时启动；`tracemalloc` 全程挂在分配路径上，采完删掉标记。
+4. 探针的边界：它统计走 Python 分配器的对象，C 侧缓冲（zlib 压缩、sqlite 读入的大 blob、socket 内核缓冲）不进 `top`，所以 `traced_mb` 明显低于 `rss_mb` 时先想这条口径差，别当成统计漏。站点行号指向的是**申请**处，不一定是持有者。
+5. 为什么是标记文件而不是环境变量：托管 worker 的环境来自 web 进程的 `os.environ.copy()`（`g3ku/web/worker_control.py`），要按环境变量给它开闸就得重启 web；标记文件只需重启 worker，与 `.g3ku/llm-config/auto-unlock.key` 同属"盘上一个文件决定一次行为"的运维开关。手动 `g3ku worker` 同样认这个标记。
+
 ### 任务大厅卡顿 / 冻结（浏览器端）
 
 症状族：从任务详情返回大厅后滚动无响应或「一滑动就卡住」；重者整个 Edge 窗口挂「未响应」数十秒，甚至出现 WerFault 崩溃报告；卡顿有时在用户并未操作浏览器时自行发生。关键辨识：卡顿期间大厅的性能监控数字仍在正常刷新——页面主线程与绘制活着，阻塞在输入/合成层之下，或本质是滚动位置被反复清零。

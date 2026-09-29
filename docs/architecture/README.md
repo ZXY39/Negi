@@ -64,6 +64,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 恢复后节点上下文突然只剩几条消息、`task_model_calls` 里 `request_seed_source` 出现 `fallback_seed_*`、帧 `messages_ref` 为空 → `runtime-overview.md`「任务侧」（帧写入的 messages_ref 保留规则）+ `context-and-cache-troubleshooting.md`「append-only 规则」
 - 磁盘满（Errno 28 / SQLITE_FULL）、0 字节错误日志、节点连锁 error-pause、artifact 变成 .gz、手动删除任务后产出在 deliverables/、任务大厅按大小排序定位大任务、managed-worker.log 轮转、runtime.sqlite3 收缩、task_events 表静默零写入 → `operations-and-maintenance.md`「磁盘满」+ `runtime-overview.md`「磁盘写保护与治理」+ `web-and-admin.md`（治理 UI 与大小/排序契约）
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
+- worker 恢复后内存涨到 GB 级、RSS 风暴后不回落、要判"泄漏还是瞬态峰"、要查某一刻同时驻留的是谁 → `operations-and-maintenance.md`「内存峰值 / 恢复风暴后 RSS 不回落」
 - 任务大厅卡顿/滚动卡死、Edge 窗口「未响应」或崩溃 → `operations-and-maintenance.md`「任务大厅卡顿 / 冻结（浏览器端）」+ `web-and-admin.md`「Web Event Loop Contract」
 - 任务卡片 token 数字在涨却看不到任何反馈 → `web-and-admin.md`「Web Event Loop Contract」（卡片增量补丁的增长提示与 reduced-motion 例外）
 - 打开/切换 CEO 或渠道会话等待数十秒到几分钟、首帧快照体积异常 → `web-and-admin.md`「Web Event Loop Contract」+「CEO Turn Timeline Rendering Contract」（快照只发 delta 与滚动投影合同）

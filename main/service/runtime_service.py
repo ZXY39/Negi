@@ -85,6 +85,7 @@ from main.models import (
 )
 from main.monitoring.file_store import TaskFileStore
 from main.monitoring.log_service import TaskLogService
+from main.monitoring.mem_probe import start_mem_probe
 from main.monitoring.query_service_v2 import TaskQueryServiceV2
 from main.prompts import load_prompt
 from main.protocol import build_envelope, now_iso
@@ -740,6 +741,7 @@ class MainRuntimeService:
         self._runtime_loop = None
         self._event_loop = None
         self._watchdog_snapshot_flights: dict[str, asyncio.Task] = {}
+        self._mem_probe = None
         self._worker_lease_takeover = False
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
@@ -786,6 +788,8 @@ class MainRuntimeService:
             self._runtime_loop = asyncio.get_running_loop()
         self._event_loop = asyncio.get_running_loop()
         if self.execution_mode == 'worker':
+            # 探针要在租约与任务 pickup 之前起：要观测的就是恢复风暴那一刻的分配驻留。
+            self._mem_probe = start_mem_probe(runtime_dir=self.store.path.parent)
             self._acquire_worker_lease_or_raise()
             self.worker_heartbeat_service.start_background()
         self.resource_registry.refresh_from_current_resources()
