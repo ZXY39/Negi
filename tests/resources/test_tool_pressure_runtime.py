@@ -1069,7 +1069,9 @@ async def test_monitor_steps_entry_gate_from_gate_queue_without_tool_waiters() -
 
     for index in range(3):
         sample(float(index))
-    assert controller.snapshot()['tool_pressure_state'] == 'easing'
+    # 工具队列没人等 ⇒ 状态回 normal（回合闸的排队不参与状态迁移，否则一次 critical 之后
+    # 会卡在低 limit 上按分钟爬）
+    assert controller.snapshot()['tool_pressure_state'] == 'normal'
     assert controller.entry_snapshot()['execution']['limit'] == 1
 
     sample(3.0)
@@ -1077,6 +1079,52 @@ async def test_monitor_steps_entry_gate_from_gate_queue_without_tool_waiters() -
     assert admitted.is_set()
     assert controller.entry_snapshot()['execution']['limit'] == 2
     assert controller.snapshot()['tool_pressure_target_limit'] == 1
+
+
+@pytest.mark.asyncio
+async def test_entry_gate_restores_floor_on_first_normal_tick_after_critical() -> None:
+    """critical 之后必须一拍就把闸位恢复到地板，不能靠放大那条道按格爬回来。
+
+    实盘回归（01:44:14）：一次 critical 把 limit 打到 1，122 个节点在闸口排队，
+    而"有排队就不回 normal"的写法让 limit 以 ~1 格/分钟的速度爬，回合数被压在 5。
+    """
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=2, throttled_limit=2, critical_limit=1, step_up=1)
+    monitor = _entry_climb_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 3})
+
+    await controller.acquire_entry_slot(role='execution')
+    controller.critical()
+    assert controller.entry_snapshot()['execution']['limit'] == 1
+
+    admitted = asyncio.Event()
+
+    async def queued() -> None:
+        await controller.acquire_entry_slot(role='execution')
+        admitted.set()
+
+    pending = asyncio.create_task(queued())
+    await asyncio.sleep(0.05)
+    assert controller.entry_snapshot()['execution']['queued'] == 1
+
+    for index in range(3):
+        monitor.observe_sample(
+            machine_cpu_percent=20.0,
+            machine_memory_percent=30.0,
+            machine_disk_busy_percent=10.0,
+            machine_available=True,
+            event_loop_lag_ms=5.0,
+            writer_queue_depth=0,
+            sqlite_write_wait_ms=0.0,
+            sqlite_query_latency_ms=0.0,
+            process_cpu_ratio=0.10,
+            now_mono=float(index),
+            now_iso=f'2026-03-30T00:00:0{index}+08:00',
+        )
+    assert controller.snapshot()['tool_pressure_state'] == 'normal'
+    assert controller.entry_snapshot()['execution']['limit'] == 3
+    await asyncio.wait_for(pending, timeout=2)
+    assert admitted.is_set()
 
 
 def _entry_climb_monitor(controller: AdaptiveToolBudgetController, store) -> WorkerPressureMonitor:
