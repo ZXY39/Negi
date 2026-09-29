@@ -155,6 +155,7 @@ class WorkerPressureMonitor:
         self._local_recovery_enabled = bool(local_recovery_enabled)
         self._last_waiting_count = 0
         self._last_recovery_step_at = 0.0
+        self._last_entry_step_at = 0.0
         self._sample_mono = 0.0
         self._last_disk_sample: Any = None
         self._last_perdisk_sample: dict[str, Any] | None = None
@@ -316,6 +317,11 @@ class WorkerPressureMonitor:
         controller_snapshot = self._controller.snapshot()
         waiting_count = int(controller_snapshot.get('worker_execution_waiting_count') or 0)
         oldest_wait_ms = float(controller_snapshot.get('worker_execution_oldest_wait_ms') or 0.0)
+        # 回合闸的需求侧：工具队列空但闸口排着几十个节点时，`waiting_count>0` 这一道门
+        # 永远不开，向上动态就只存在于名义上（09-29 回放：带闸时代 tool_wait>0 仅 18.9%，
+        # 同期 entry 排队常年 100+）。
+        entry_gate_queued = controller_snapshot.get('entry_gate_queued') or {}
+        entry_queued_count = int(sum(int(v or 0) for v in entry_gate_queued.values()))
         machine_available_bool = bool(machine_available)
         machine_warn = (
             machine_available_bool
@@ -525,18 +531,33 @@ class WorkerPressureMonitor:
                 elif should_ease:
                     if local_recovery_ready and not machine_recovery:
                         heal_reason = 'local_recovery'
-                    if waiting_count > 0:
+                    # 回合闸的放大只认**事件循环自己的积压**：一份上下文的物化压在同一个循环上，
+                    # 机器内存%对它是滞后的旁观量（01:24 实测：limit 涨到 11 那一拍 lag 已 8.0s、
+                    # 机器内存才 73.7%；继续按机器水位涨到 27 ⇒ Private 2.4GB、机器 94.8% ⇒ critical）。
+                    # 节奏取 `safe_consecutive_samples` 个安静拍——复用已有的"连续安全"阈值当节流，
+                    # 不新增配置项。
+                    entry_interval_seconds = self._recover_window_seconds * max(1, self._safe_consecutive_samples)
+                    entry_climb_due = (
+                        entry_queued_count > 0
+                        and self._consecutive_local_safe >= self._safe_consecutive_samples
+                        and current_mono - self._last_entry_step_at >= entry_interval_seconds
+                    )
+                    if waiting_count > 0 or entry_queued_count > 0:
                         if current_state != 'easing':
                             self._controller.begin_easing(at=timestamp)
                             self._last_recovery_step_at = current_mono
-                        elif current_mono - self._last_recovery_step_at >= self._recover_window_seconds:
-                            self._controller.step_easing(at=timestamp)
-                            self._last_recovery_step_at = current_mono
+                        else:
+                            if waiting_count > 0 and current_mono - self._last_recovery_step_at >= self._recover_window_seconds:
+                                self._controller.step_easing(at=timestamp)
+                                self._last_recovery_step_at = current_mono
+                            if entry_climb_due:
+                                self._controller.step_entry_easing()
+                                self._last_entry_step_at = current_mono
                     elif current_state != 'normal':
                         self._controller.set_budget_state('normal', at=timestamp)
                         self._last_recovery_step_at = 0.0
                     self._restricted_since_mono = 0.0
-                elif current_state == 'easing' and waiting_count <= 0:
+                elif current_state == 'easing' and waiting_count <= 0 and entry_queued_count <= 0:
                     self._controller.set_budget_state('normal', at=timestamp)
                     self._last_recovery_step_at = 0.0
             self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
