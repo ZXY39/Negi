@@ -159,6 +159,7 @@ class MemProbe:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._previous_snapshot = None
+        self._last_snapshot = None
         self._previous_traced_bytes: int | None = None
 
     def start(self) -> None:
@@ -185,6 +186,7 @@ class MemProbe:
 
     def sample_once(self) -> dict[str, object] | None:
         snapshot = tracemalloc.take_snapshot()
+        self._last_snapshot = snapshot
         rss_mb, private_mb = _process_memory_mb()
         traced_current, traced_peak = tracemalloc.get_traced_memory()
         previous = self._previous_snapshot
@@ -208,13 +210,14 @@ class MemProbe:
     def dump_path(self) -> Path:
         return self._output_path.with_name(self._output_path.stem + '-dump.txt')
 
-    def _dump_deep_traces(self, traced_current: int) -> None:
+    def _dump_deep_traces(self, snapshot, traced_current: int) -> None:
         """按调用链（不是单行站点）落一份驻留榜：站点榜只说"在哪申请"，这条链才说"谁在申请"。
 
+        用触发那一拍的快照，不再重新 take_snapshot——峰是瞬时的，第二次采样往往已经掉下去
+        （实盘就漏过一次：行里记到 374MB，闸门复查时只剩几十 MB）。
         每进程一次；要有内容，探针必须以 `G3KU_MEM_PROBE_FRAMES`>1 启动，否则链上只有一帧。
         """
         self._dumped = True
-        snapshot = tracemalloc.take_snapshot()
         lines = [
             f'# mem-probe deep dump traced_mb={traced_current / 1048576.0:.2f} '
             f'frames={self._frames} limit={self._dump_limit}',
@@ -230,15 +233,18 @@ class MemProbe:
         while not self._stop_event.wait(self._interval_seconds):
             try:
                 row = self.sample_once()
-                if row is not None:
-                    with self._output_path.open('a', encoding='utf-8') as handle:
-                        handle.write(json.dumps(row, ensure_ascii=False) + '\n')
+                if row is None:
+                    continue
+                with self._output_path.open('a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(row, ensure_ascii=False) + '\n')
+                traced_now = float(row['traced_mb'])
                 if (
                     not self._dumped
                     and self._dump_threshold_bytes > 0
-                    and tracemalloc.get_traced_memory()[0] >= self._dump_threshold_bytes
+                    and traced_now * 1048576 >= self._dump_threshold_bytes
+                    and self._last_snapshot is not None
                 ):
-                    self._dump_deep_traces(tracemalloc.get_traced_memory()[0])
+                    self._dump_deep_traces(self._last_snapshot, int(traced_now * 1048576))
             except Exception:
                 # 静默死掉的探针会让人把"没有行"当成"没有驻留"，那比没有探针更糟。
                 logger.exception('mem probe stopped sampling; rows end here: {}', self._output_path)

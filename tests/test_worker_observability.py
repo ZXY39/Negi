@@ -290,7 +290,46 @@ def test_mem_probe_reads_settings_from_marker_content(tmp_path, monkeypatch) -> 
     assert probe_settings(marker)['interval_seconds'] == 10.0
 
 
-def test_mem_probe_deep_dump_needs_frames_above_one(tmp_path) -> None:
+def test_mem_probe_dump_uses_the_sampling_instant_snapshot(tmp_path) -> None:
+    """峰是瞬时的：闸门必须用触发那一拍的快照，重新采一次往往已经掉回去。
+
+    实盘漏过一次——行里记到 374MB，闸门复查 get_traced_memory() 时只剩几十 MB，deep dump
+    始终不落盘。
+    """
+    import tracemalloc
+
+    from main.monitoring.mem_probe import MemProbe
+
+    probe = MemProbe(
+        output_path=tmp_path / 'p.jsonl',
+        interval_seconds=999,
+        top_limit=8,
+        frames=8,
+        dump_threshold_bytes=0,
+    )
+    probe.start()
+    try:
+        kept = [f'{index:08d}' * 1024 for index in range(3000)]
+        row = probe.sample_once()
+        snapshot_at_peak = probe._last_snapshot
+        assert float(row['traced_mb']) >= 1
+        del kept
+        fresh = tracemalloc.take_snapshot()
+        probe._dump_deep_traces(snapshot_at_peak, int(float(row['traced_mb']) * 1048576))
+        dumped = probe.dump_path().read_text(encoding='utf-8')
+        assert 'test_worker_observability.py' in dumped
+        assert any(
+            'test_worker_observability.py' in line.split('blk', 1)[-1]
+            for line in dumped.splitlines()[1:]
+        )
+        # 反向证据：同一时刻重采的快照已经没有这份驻留
+        assert sum(stat.size for stat in fresh.statistics('lineno')) < sum(
+            stat.size for stat in snapshot_at_peak.statistics('lineno')
+        )
+        assert probe._dumped is True
+    finally:
+        probe.stop()
+
     """阈值触发的一次性调用链快照：站点榜只说在哪申请，链才说谁在申请。"""
     from main.monitoring.mem_probe import MemProbe
 
