@@ -247,3 +247,95 @@ def test_actual_request_keeps_latest_per_node(tmp_path, monkeypatch, policies_gu
     persist(task_id='task:t1', node_id='node:n2', call_index=0, payload=payload)
     assert len(spy.registry) == 2
     assert {item.node_id for item in spy.registry.values()} == {'node:n1', 'node:n2'}
+
+
+# ------------------------------------------------------------------
+# live.patch 热路径：内容未变不推送、缓冲不再整包深拷贝
+# ------------------------------------------------------------------
+
+
+class _NoChatBackend:
+    async def chat(self, **kwargs):
+        raise AssertionError(f'chat backend must not be used here: {kwargs!r}')
+
+
+def _live_service(tmp_path):
+    from main.service.runtime_service import MainRuntimeService
+
+    return MainRuntimeService(
+        chat_backend=_NoChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / 'runtime.sqlite3',
+        files_base_dir=tmp_path / 'tasks',
+        artifact_dir=tmp_path / 'artifacts',
+        governance_store_path=tmp_path / 'governance.sqlite3',
+        execution_mode='embedded',
+        execution_model_refs=['fake'],
+        acceptance_model_refs=['fake'],
+    )
+
+
+@pytest.mark.asyncio
+async def test_frame_rewrite_with_same_content_pushes_no_live_patch(tmp_path):
+    """内容指纹没变的 update_frame 不再组装全任务摘要往外推。
+
+    实盘 135 帧任务上一次推送要 ~174ms / ~18MB，而 await 标记这类写点会反复
+    交回同一个值。
+    """
+    service = _live_service(tmp_path)
+    events: list[dict] = []
+    service.log_service.add_live_snapshot_publisher(
+        lambda task, envelope, immediate: events.append(envelope)
+    )
+    record = await service.create_task('dedupe live patch', session_id='web:ceo-dedupe')
+    task_id = record.task_id
+    node_id = record.root_node_id
+
+    service.log_service.upsert_frame(
+        task_id,
+        {'node_id': node_id, 'phase': 'before_model', 'await_marker': 'context_preparer'},
+        publish_snapshot=True,
+    )
+    assert len(events) == 1
+
+    service.log_service.update_frame(
+        task_id,
+        node_id,
+        lambda frame: {**frame, 'phase': 'before_model', 'await_marker': 'context_preparer'},
+        publish_snapshot=True,
+    )
+    assert len(events) == 1, '同值重写不应再推一份 live.patch'
+
+    service.log_service.update_frame(
+        task_id,
+        node_id,
+        lambda frame: {**frame, 'await_marker': 'react_loop.run'},
+        publish_snapshot=True,
+    )
+    assert len(events) == 2, '内容真变了必须推'
+
+
+@pytest.mark.asyncio
+async def test_live_patch_buffer_holds_dispatched_payload_by_reference(tmp_path):
+    """缓冲与推送共用同一份 payload：整包 deepcopy 已 removed（每次 ~120ms/~18MB）。"""
+    configure_disk_policies(disk_guard.DiskPolicies())
+    service = _live_service(tmp_path)
+    envelopes: list[dict] = []
+    service.log_service.add_live_snapshot_publisher(
+        lambda task, envelope, immediate: envelopes.append(envelope)
+    )
+    record = await service.create_task('shared payload', session_id='web:ceo-share')
+    service.log_service.upsert_frame(
+        record.task_id,
+        {'node_id': record.root_node_id, 'phase': 'before_model'},
+        publish_snapshot=True,
+    )
+    with service.log_service._live_patch_history_guard:
+        entry = service.log_service._pending_live_patch_history.get(record.task_id)
+    assert isinstance(entry, dict)
+    assert entry['payload']['frame'] is envelopes[-1]['data']['frame'], '缓冲应持引用而不是深拷贝'
+    with service.log_service._live_patch_history_guard:
+        timers = list(service.log_service._live_patch_history_timers.values())
+    for timer in timers:
+        timer.cancel()
+    service.log_service._pending_live_patch_history.pop(record.task_id, None)

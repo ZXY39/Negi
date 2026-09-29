@@ -379,7 +379,10 @@ class TaskLogService:
             or self._is_terminal_status(task.status)
         )
         with self._live_patch_history_guard:
-            self._pending_live_patch_history[task_id] = {'payload': copy.deepcopy(payload)}
+            # payload 由 _publish_task_live_patch_locked 每次现装，两个消费者（flush 的
+            # json.dumps、dispatch 的 dict(data) 信封）都只读；整包深拷贝在 135 帧任务上
+            # 实测每次 ~120ms / ~18MB，是热路径最大单项。
+            self._pending_live_patch_history[task_id] = {'payload': payload}
             if not immediate:
                 timer = self._live_patch_history_timers.get(task_id)
                 if timer is not None:
@@ -3906,9 +3909,12 @@ class TaskLogService:
             if not isinstance(mutated, dict):
                 raise TypeError('frame mutator must return a dict')
             record = self._runtime_frame_record(task=task, frame=self._sanitize_runtime_frame(mutated))
-            if current is None or self._runtime_frame_record_fingerprint(current) != self._runtime_frame_record_fingerprint(record):
+            changed = current is None or self._runtime_frame_record_fingerprint(current) != self._runtime_frame_record_fingerprint(record)
+            if changed:
                 self._store.upsert_task_runtime_frame(record)
-            if publish_snapshot:
+            if publish_snapshot and changed:
+                # 内容没变的一整次 no-op 写（重复 await 标记、同值回填）不再推 live.patch：
+                # 一次推送要组装全任务摘要，成本按节点数走。
                 self._publish_task_live_patch_locked(task=task, frame=record)
             result = self.read_runtime_state(task_id) or {}
             self._record_debug('log_service.update_frame', started_at=started_at, started_mono=started_mono)

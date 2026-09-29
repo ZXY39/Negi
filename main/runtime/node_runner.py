@@ -743,7 +743,15 @@ class NodeRunner:
             if self._context_finalizer is not None:
                 self._context_finalizer(task=task, node=node)
 
-    def _set_runtime_await_marker(self, *, task_id: str, node_id: str, marker: str, started_at: str = '') -> None:
+    def _set_runtime_await_marker(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        marker: str,
+        started_at: str = '',
+        publish_snapshot: bool = True,
+    ) -> None:
         normalized_marker = str(marker or '').strip()
         normalized_started_at = str(started_at or '').strip()
 
@@ -753,7 +761,7 @@ class NodeRunner:
             next_frame['await_started_at'] = normalized_started_at if normalized_marker else ''
             return next_frame
 
-        self._log_service.update_frame(task_id, node_id, _mutate, publish_snapshot=True)
+        self._log_service.update_frame(task_id, node_id, _mutate, publish_snapshot=publish_snapshot)
 
     async def _await_with_runtime_marker(self, *, task_id: str, node_id: str, marker: str, awaitable: Any) -> Any:
         started_at = datetime.now().isoformat()
@@ -767,7 +775,13 @@ class NodeRunner:
             return await awaitable
         finally:
             if self._log_service.read_runtime_frame(task_id, node_id) is not None:
-                self._set_runtime_await_marker(task_id=task_id, node_id=node_id, marker='')
+                # 清空标记只落帧不推送：诊断读的是帧行，下一次进入 await 会带着新标记推。
+                self._set_runtime_await_marker(
+                    task_id=task_id,
+                    node_id=node_id,
+                    marker='',
+                    publish_snapshot=False,
+                )
 
     async def _run_nested_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         executor = self.nested_node_executor
