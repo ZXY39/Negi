@@ -144,3 +144,84 @@ async def test_delete_task_refused_while_pause_drain_active(tmp_path, monkeypatc
 
     assert str(excinfo.value) == "task_still_stopping"
     assert deleted == [], "排空未完成前绝不允许删除任务记录/文件"
+
+
+def _make_worker_service(tmp_path) -> MainRuntimeService:
+    return MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+
+
+def _seed_paused_task(service: MainRuntimeService, *, is_paused: bool) -> None:
+    from main.models import NodeRecord, TaskRecord
+    from main.protocol import now_iso
+
+    stamp = now_iso()
+    service.store.upsert_task(
+        TaskRecord(
+            task_id='task:cancel1',
+            session_id='web:demo',
+            title='t',
+            user_request='r',
+            root_node_id='node:root',
+            status='in_progress',
+            created_at=stamp,
+            updated_at=stamp,
+            is_paused=is_paused,
+            pause_requested=is_paused,
+        )
+    )
+    for node_id, parent in (('node:root', None), ('node:child', 'node:root')):
+        service.store.upsert_node(
+            NodeRecord(
+                node_id=node_id,
+                task_id='task:cancel1',
+                root_node_id='node:root',
+                parent_node_id=parent,
+                goal='g',
+                prompt='p',
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminalizes_a_paused_task_and_sweeps_residual_nodes(tmp_path) -> None:
+    """取消暂停中的任务必须落终态并立即收尸残余节点。
+
+    以前带 `not is_paused` 守卫：暂停 → 取消只留下 cancel_requested，没有任何协程会去
+    观察它，任务永久挂在 in_progress + paused；节点也停在 in_progress 等下一次 worker
+    启动才扫。页面没有取消按钮，模型侧 control tool 与 REST 是仅有的两条入口。
+    """
+    service = _make_worker_service(tmp_path)
+    _seed_paused_task(service, is_paused=True)
+
+    record = await service.cancel_task('task:cancel1')
+
+    assert record is not None
+    assert record.status == 'failed'
+    assert bool(record.is_paused) is False
+    assert bool(record.pause_requested) is False
+    nodes = {node.node_id: node for node in service.store.list_nodes('task:cancel1')}
+    assert nodes['node:root'].status == 'failed'
+    assert nodes['node:child'].status == 'failed'
+    assert 'task_terminal_cleanup' in str(nodes['node:child'].failure_reason)
+
+
+@pytest.mark.asyncio
+async def test_cancel_of_running_task_still_terminalizes(tmp_path) -> None:
+    """非暂停路径的既有语义不变。"""
+    service = _make_worker_service(tmp_path)
+    _seed_paused_task(service, is_paused=False)
+
+    record = await service.cancel_task('task:cancel1')
+
+    assert record is not None
+    assert record.status == 'failed'

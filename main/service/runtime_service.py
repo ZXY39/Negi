@@ -2125,8 +2125,17 @@ class MainRuntimeService:
             self.task_actor_service.request_cancel(task_id)
             await self.global_scheduler.cancel_task(task_id)
             current = self.get_task(task_id)
-            if current is not None and current.status == 'in_progress' and not bool(current.is_paused):
-                self.log_service.mark_task_failed(task_id, reason='canceled')
+            if current is not None and current.status == 'in_progress':
+                # 暂停中的任务也必须能取消。以前这里带 `not is_paused` 守卫，于是"暂停 → 取消"
+                # 只留下一个 cancel_requested：没有任何协程会去观察它，任务永久挂在
+                # in_progress + paused（实测 4 个残任务只能绕 worker 命令队列结算）。
+                updated = self.log_service.mark_task_failed(task_id, reason='canceled')
+                if bool(getattr(updated, 'is_paused', False)) or bool(getattr(updated, 'pause_requested', False)):
+                    # 终态任务挂着"已暂停"会让卡片显示成还能恢复的样子。
+                    self.log_service.set_pause_state(task_id, pause_requested=False, is_paused=False)
+                # 残留在 in_progress 的节点不等下一次 worker 启动才收尸：立即扫，
+                # 正文指针保留进 failure_reason。
+                self.log_service.sweep_residual_nodes(task_id)
         else:
             self._assert_worker_available()
             self.log_service.request_cancel(task_id)
