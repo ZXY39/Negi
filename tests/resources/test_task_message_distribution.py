@@ -3916,6 +3916,8 @@ async def test_prepare_messages_keeps_append_notice_tail_before_stage_compaction
                     "system_generated": False,
                     "mode": "自主执行",
                     "status": "完成",
+                    # 裁撤由模型点名：没有这个标记就没有阶段离开可见层，压缩块不会出现。
+                    "context_evicted": True,
                     "stage_goal": "inspect stage one",
                     "completed_stage_summary": "finished stage one",
                     "key_refs": [],

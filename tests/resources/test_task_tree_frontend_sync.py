@@ -1217,7 +1217,8 @@ def test_render_task_token_stats_labels_models_with_user_config_names() -> None:
         const tokenEnd = appCode.indexOf("function ensureTaskTokenUi");
         vm.runInThisContext(appCode.slice(tokenStart, tokenEnd));
         global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
-        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+        // modelDisplayTitle 定义在 ceoModelDisplayTitle 之前：起点必须含它，否则桩里缺被依赖函数。
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function modelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
 
         const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
         const tokenStatsStart = tasksCode.indexOf("function taskModelDisplayName");
