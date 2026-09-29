@@ -370,7 +370,7 @@ def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_prev
     monkeypatch.setattr(
         runner.__class__,
         "_frontdoor_append_only_delta_estimate_tokens",
-        lambda self, **_: (1800, True),
+        lambda self, **_: (1800, True, 0),
         raising=False,
     )
 
@@ -425,7 +425,7 @@ def test_frontdoor_append_only_comparison_tolerates_regenerated_dynamic_blocks()
         {"role": "user", "content": "新增内容 " * 40},
     ]
 
-    delta, comparable = runner._frontdoor_append_only_delta_estimate_tokens(
+    delta, comparable, projection_shrink = runner._frontdoor_append_only_delta_estimate_tokens(
         previous_request_messages=previous_request_messages,
         current_request_messages=current_request_messages,
         previous_tool_schemas=[],
@@ -434,6 +434,163 @@ def test_frontdoor_append_only_comparison_tolerates_regenerated_dynamic_blocks()
 
     assert comparable is True
     assert delta > 0
+    # 没有阶段裁撤参与比对时不产生锚点修正量
+    assert projection_shrink == 0
+
+
+def _stage_round_messages(fat_payload: str) -> list[dict[str, object]]:
+    """system + 首条用户请求 + 5 个阶段（submit 调用/响应 + 文本汇报），阶段 1 带肥肉身。"""
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "bootstrap request"},
+    ]
+    for index in range(1, 6):
+        content = fat_payload if index == 1 else '{"ok": true}'
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": f"call-stage-{index}",
+                        "type": "function",
+                        "function": {"name": "submit_next_stage", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {"role": "tool", "name": "submit_next_stage", "tool_call_id": f"call-stage-{index}", "content": content}
+        )
+        messages.append({"role": "assistant", "content": f"stage {index} raw detail"})
+    return messages
+
+
+def _evicted_first_stage_state() -> dict[str, object]:
+    stages = [
+        {
+            "stage_id": f"frontdoor-stage-{index}",
+            "stage_index": index,
+            "stage_kind": "normal",
+            "system_generated": False,
+            "status": "completed" if index < 5 else "active",
+            "stage_goal": f"inspect stage {index}",
+            "completed_stage_summary": f"finished stage {index}",
+            "key_refs": [],
+            "tool_round_budget": 2,
+            "tool_rounds_used": 1,
+            **({"context_evicted": True} if index == 1 else {}),
+        }
+        for index in range(1, 6)
+    ]
+    return {"active_stage_id": "frontdoor-stage-5", "transition_required": False, "stages": stages}
+
+
+def test_stage_eviction_hop_subtracts_compacted_body_from_usage_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """过期点那一跳：锚点必须扣掉本次被裁撤的肉身，且不许退回 preview。
+
+    比对两侧都过同一份阶段 trim，所以上一跳的真实 usage 里仍留着已被裁掉的工具
+    肉身；直接当锚点会让读数停在裁撤前的大小（实盘 2026-09-29 web_ceo-4678f281bb10：
+    显示 51.4k / 实发 13.5k，下一跳才回落）。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    stage_state = _evicted_first_stage_state()
+    previous_messages = _stage_round_messages('{"ok": true, "body": "' + "x" * 60000 + '"}')
+    compacted_messages, trimmed = CreateAgentCeoFrontDoorRunner._trim_frontdoor_seed_stage_compaction(
+        previous_messages,
+        stage_state,
+    )
+    assert trimmed is True
+    current_messages = [*compacted_messages, {"role": "user", "content": "新增内容 " * 40}]
+    anchor_tokens = 50_000
+    tool_schemas = [{"name": "submit_next_stage", "description": "", "parameters": {"type": "object"}}]
+
+    monkeypatch.setattr(
+        runner,
+        "_resolve_frontdoor_send_model_context_window",
+        lambda **_: {
+            "model_key": "responses:gpt-test",
+            "provider_id": "responses",
+            "provider_model": "responses:gpt-test",
+            "resolved_model": "gpt-test",
+            "context_window_tokens": 200_000,
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_frontdoor_prompt_contract",
+        lambda **kwargs: SimpleNamespace(
+            request_messages=list(kwargs.get("state", {}).get("messages") or []),
+            prompt_cache_key="cache-key",
+            diagnostics={"family": "ok"},
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "_selected_tool_schemas", lambda names: list(tool_schemas), raising=False)
+    monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 12_840, raising=False)
+    monkeypatch.setattr(
+        runner.__class__,
+        "_frontdoor_previous_observed_input_truth",
+        lambda self, **_: {
+            "effective_input_tokens": anchor_tokens,
+            "input_tokens": anchor_tokens,
+            "cache_hit_tokens": 0,
+            "provider_model": "responses:gpt-test",
+            "actual_request_hash": "prev-request-hash",
+            "source": "provider_usage",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner.__class__,
+        "_frontdoor_latest_actual_request_record",
+        lambda self, **_: {
+            "actual_request_hash": "prev-request-hash",
+            "request_messages": list(previous_messages),
+            "tool_schemas": list(tool_schemas),
+        },
+        raising=False,
+    )
+
+    session = SimpleNamespace(
+        state=SimpleNamespace(session_key="web:shared"),
+        _frontdoor_actual_request_history=[],
+        _frontdoor_previous_actual_request_history=[],
+        _frontdoor_previous_actual_request_path="",
+    )
+    runtime = SimpleNamespace(
+        context=CeoRuntimeContext(loop=None, session=session, session_key="web:shared", on_progress=None)
+    )
+    preflight = runner._frontdoor_send_preflight_snapshot(
+        state={
+            "session_key": "web:shared",
+            "model_refs": ["responses:gpt-test"],
+            "messages": list(current_messages),
+            "tool_names": ["submit_next_stage"],
+            "provider_tool_names": ["submit_next_stage"],
+            "parallel_enabled": False,
+            "turn_overlay_text": "",
+            "dynamic_appendix_messages": [],
+            "frontdoor_stage_state": stage_state,
+        },
+        runtime=runtime,
+        langchain_tools=[],
+    )
+
+    shrink = int(preflight["anchor_projection_shrink_tokens"])
+    # 可比性必须保住：过期点不许静默退化成全量 preview
+    assert preflight["comparable_to_previous_request"] is True
+    assert preflight["estimate_source"] == "usage_plus_delta"
+    assert shrink > 5_000
+    assert preflight["effective_input_tokens"] == anchor_tokens - shrink
+    assert (
+        preflight["usage_based_estimate_tokens"]
+        == preflight["effective_input_tokens"] + preflight["delta_estimate_tokens"]
+    )
+    assert preflight["estimated_total_tokens"] < anchor_tokens
 
 
 def test_frontdoor_seed_record_prefers_live_trace_over_stale_previous_slot(tmp_path) -> None:

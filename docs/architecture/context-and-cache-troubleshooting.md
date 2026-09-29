@@ -97,6 +97,7 @@ Disk guard 维护要点（写保护契约本体见 `runtime-overview.md`「磁�
 - 不变量：同一 visible turn 内 request 只增长、不重排；`request_messages` 在真实 transcript（system/user/历次 assistant 工具调用 + 工具结果）上保持 append-only，命中前缀逐轮变长。每个请求尾部区域恰好 1 份最新 `frontdoor_runtime_tool_contract` / `node_runtime_tool_contract`，被携带历史里 0 份；动态件一律排在整份携带正文之后，并按"是否每跳重写"再分两份：回合内常量部分留在 `frontdoor_runtime_tool_contract`，每跳重写的 `callable_tools` / `hydrated_tools` / `stage_summary` 单独成 `frontdoor_runtime_stage_gate` 落在最末位（实盘 1,001 跳里 stage_summary 重写 362 次、callable_tools 301 次，其余段一次都没变）。两条车道同形同块：各两份，稳定块在前、活状态尾块在后（节点 `upsert_node_dynamic_contract_message` 同样是剥旧后追加这两份，当轮 turn-only note 再压在其后）。原因：把带活状态的块锚在携带正文中间（例如最新 user 消息之前）会让该消息之后的整段同 turn 正文从那里断缓存——实测契约落在 index 2 时每次重写只剩契约之前的前缀命中，其余整段重传。尾块可能诱导模型回显抬头，这条风险由识别 + 修复道兜住：`is_frontdoor_tool_contract_echo_text` / `is_node_dynamic_contract_echo_text` 判回显，`tool_contract_echo_attempt_count` 计数，修复 overlay 要求只输出用户可见正文；回显文本不得进入用户可见正文，而携带工具调用的回显消息不得当成契约剥离（会留下孤儿工具结果）。契约块以 `## Runtime Tool Contract` 开头的 system 消息形式出现（运行时元数据、非对话内容，避免模型把它错当"自己上一轮说的话/发给用户的清单"），仍属于 stable prefix 之外的动态契约尾记录，每轮整份替换；剥离尾部契约/note 不算非法 shrink，也不算前缀断裂。durable baseline / continuity 持久化前必须剥掉契约 summary，以及 `## 长期记忆` 这类当轮 overlay 的 assistant 记录（它们只在当轮请求可见，落史会逐轮累积）；后续轮若把旧 summary / overlay 当普通稳定历史重放而没有 `token_compression` / `stage_compaction`，按非法上下文携带排查。节点同 turn 请求同样走 append-only scaffold：上一请求 body + 上一轮 assistant/tool delta + 尾部三件（稳定契约、活状态块、当轮 turn-only note，末位是 user 角色提示）。
 - 症状：命中前缀不再逐轮变长；前缀在契约或 overlay 位置提前分叉；旧契约出现在历史中段；或模型最终文本 / 渠道消息以 `## Runtime Tool Contract` 开头。
 - 不变量（send preflight 的 append-only 比对）：比对两方必须在同一投影下取值——已发出的真实请求与下一轮请求（由 durable baseline 拼装）都要先剥契约 / 回合内 note，再剥 `## 长期记忆` 这类每轮重新生成的动态块，然后做前缀比对。真实请求带当轮动态块、durable baseline 不带，两侧投影不一致会让前缀恒不等，`comparable_to_previous_request` 恒为 false，usage-first 估算静默退化成全量 preview（空闲 composer 预估表现为长期偏低且不随真实请求增长）。同一份最新 actual request 还必须是重建种子（`_frontdoor_seed_actual_request_record`）：fresh visible turn 开始才把实时轨迹搬进 previous 槽位，而空闲 composer 预估发生在回合开始之前，只认 previous 槽位会种到上一轮之前的陈旧请求上，比对随之失效。
+- 不变量（锚点与阶段投影同源）：让两侧可比的那次阶段 trim 若真从上一跳正文里移除过消息，上一跳的真实 usage 就仍含着那份已被裁掉的肉身，锚点必须在同一投影下按「未裁体量 − 已裁体量」扣回（差额记在 `anchor_projection_shrink_tokens`，扣完的锚点即 `effective_input_tokens`）。判据是 `usage_based_estimate_tokens == effective_input_tokens + delta_estimate_tokens` 恒成立。不扣的表现为可比性判真而读数停在裁撤前的大小：过期点那一跳高报数倍、下一跳才回落，且触发发送前压缩的是同一个数，高占用会话会被顶得提前压缩。扣回只发生在 trim 真正移除过消息的跳上，其余跳锚点等于真实 usage；读数在阶段边界冲高而 `comparable_to_previous_request` 仍为 `true` 时，先看 `anchor_projection_shrink_tokens` 是否为 0，再怀疑 estimator。
 
 ### 3.2 assistant 空文本 + tool_calls 被当成“空消息”丢掉
 
@@ -330,7 +331,8 @@ CEO/frontdoor 在真正发 provider 请求前有最后一层 token preflight。�
 
 | 字段 | 排查含义 |
 | --- | --- |
-| `effective_input_tokens` | 上一轮 provider 输入规模的真值 |
+| `effective_input_tokens` | 用作锚点的上一轮 provider 输入规模真值（阶段裁撤扣回之后的值） |
+| `anchor_projection_shrink_tokens` | 锚点从真实 usage 里扣回的体量：只在阶段过期点那一跳非 0，非 0 而读数仍按裁撤前规模报＝扣回没生效（见「同 turn 的 append-only 规则被破坏」锚点同源不变量） |
 | `delta_estimate_tokens` | 相对上一请求的增量估算 |
 | `comparable_to_previous_request` | 为 `false` 说明触发源退回 preview-only 估算（usage-first 合同的前提不成立）；先查不可比原因，而不是先怀疑阈值 |
 | `estimate_source=usage_plus_delta` | 可 append-only 比对且上一请求 usage 真值可用：触发源＝上一请求有效输入（input + cache read）＋增量估算，preview 不覆盖它 |

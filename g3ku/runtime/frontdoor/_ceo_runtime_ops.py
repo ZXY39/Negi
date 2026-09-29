@@ -1798,6 +1798,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         previous_effective_input_tokens = int(previous_truth.get("effective_input_tokens") or 0)
         delta_estimate_tokens = 0
         comparable_to_previous_request = False
+        anchor_projection_shrink_tokens = 0
         previous_provider_model = str(previous_truth.get("provider_model") or "").strip()
         previous_truth_hash = str(previous_truth.get("actual_request_hash") or "").strip()
         latest_record_hash = str(latest_record.get("actual_request_hash") or "").strip()
@@ -1809,7 +1810,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             and latest_record_hash
             and previous_truth_hash == latest_record_hash
         ):
-            delta_estimate_tokens, comparable_to_previous_request = self._frontdoor_append_only_delta_estimate_tokens(
+            (
+                delta_estimate_tokens,
+                comparable_to_previous_request,
+                anchor_projection_shrink_tokens,
+            ) = self._frontdoor_append_only_delta_estimate_tokens(
                 previous_request_messages=[
                     dict(item)
                     for item in list(latest_record.get("request_messages") or latest_record.get("messages") or [])
@@ -1824,6 +1829,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 current_tool_schemas=actual_tool_schemas,
                 stage_state=dict(state_for_request.get("frontdoor_stage_state") or {}),
             )
+        # 锚点取的是上一跳的真实 usage，其中含这一跳已被阶段裁撤掉的工具肉身；
+        # 不扣回就直接把裁撤前的规模当读数挂到下一跳，且压缩触发用的是同一个数。
+        previous_effective_input_tokens = max(
+            0,
+            previous_effective_input_tokens - anchor_projection_shrink_tokens,
+        )
         hybrid_estimate = build_runtime_hybrid_send_token_estimate(
             preview_estimate_tokens=int(preview_estimate_tokens or 0),
             previous_effective_input_tokens=previous_effective_input_tokens,
@@ -1856,6 +1867,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "usage_based_estimate_tokens": int(hybrid_estimate.usage_based_estimate_tokens or 0),
             "delta_estimate_tokens": int(hybrid_estimate.delta_estimate_tokens or 0),
             "effective_input_tokens": int(previous_effective_input_tokens or 0),
+            "anchor_projection_shrink_tokens": int(anchor_projection_shrink_tokens or 0),
             "estimate_source": str(hybrid_estimate.estimate_source or "preview_estimate"),
             "comparable_to_previous_request": bool(hybrid_estimate.comparable_to_previous_request),
             "final_estimate_tokens": int(hybrid_estimate.final_estimate_tokens or 0),
@@ -2939,18 +2951,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         previous_tool_schemas: list[dict[str, Any]] | None,
         current_tool_schemas: list[dict[str, Any]] | None,
         stage_state: dict[str, Any] | None = None,
-    ) -> tuple[int, bool]:
+    ) -> tuple[int, bool, int]:
+        """返回 (本跳相对上一跳的增量, 是否可比, 上一跳被阶段裁撤掉的投影体量)。
+
+        第三项是 usage-first 锚点的修正量：锚点取的是上一跳的真实 provider usage，
+        里面还留着这一跳已被裁掉的工具肉身，不扣回去就会把整段被裁体量算回读数。
+        """
         # 两侧走同一跨轮可比性投影（契约 / turn-only / 记忆快照 / 多模态 / 动态
         # overlay 剥离 + 内部提示折叠）。长期记忆快照与工具契约块是每轮重新生成
         # 的动态块，只存在于已发出的真实请求里，而下一轮请求由 durable 基线重新
         # 拼装，按原始形态比对会让前缀恒不等，usage-first 估算静默退化成全量 preview。
-        previous_records = cls._frontdoor_comparable_request_records(previous_request_messages)
+        previous_projection = cls._frontdoor_comparable_request_records(previous_request_messages)
         current_records = cls._frontdoor_comparable_request_records(current_request_messages)
         # 阶段窗口重写是原位块重写：两侧在同一份阶段状态下做同一 trim（幂等）后才
         # 可能前缀相等，否则阶段压缩会让历史中段字节漂移、可比性失效。
+        previous_records = previous_projection
+        previous_stage_trimmed = False
         if isinstance(stage_state, dict) and list(stage_state.get("stages") or []):
-            previous_records, _previous_trimmed = cls._trim_frontdoor_seed_stage_compaction(
-                previous_records,
+            previous_records, previous_stage_trimmed = cls._trim_frontdoor_seed_stage_compaction(
+                previous_projection,
                 stage_state,
             )
             current_records, _current_trimmed = cls._trim_frontdoor_seed_stage_compaction(
@@ -2958,9 +2977,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 stage_state,
             )
         if not previous_records or len(current_records) < len(previous_records):
-            return 0, False
+            return 0, False, 0
         if not cls._fresh_turn_seed_records_match(current_records[: len(previous_records)], previous_records):
-            return 0, False
+            return 0, False, 0
         previous_tool_schema_hash = str(
             build_actual_request_diagnostics(
                 request_messages=[],
@@ -2984,16 +3003,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             or ""
         ).strip()
         if previous_tool_schema_hash != current_tool_schema_hash:
-            return 0, False
+            return 0, False, 0
+        normalized_previous_tool_schemas = [
+            dict(item)
+            for item in list(previous_tool_schemas or [])
+            if isinstance(item, dict)
+        ]
         previous_estimate_tokens = int(
             _estimate_frontdoor_provider_request_tokens(
                 provider_request_body=None,
                 request_messages=previous_records,
-                tool_schemas=[
-                    dict(item)
-                    for item in list(previous_tool_schemas or [])
-                    if isinstance(item, dict)
-                ],
+                tool_schemas=normalized_previous_tool_schemas,
             )
             or 0
         )
@@ -3009,7 +3029,27 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             )
             or 0
         )
-        return max(0, current_estimate_tokens - previous_estimate_tokens), True
+        projection_shrink_tokens = 0
+        if previous_stage_trimmed:
+            # 同一投影下再量一次「未裁」版本：裁撤掉的肉身仍算在上一跳的真实 usage 里，
+            # 差额不扣回锚点就会在每个过期点把整段被裁体量算回读数。
+            untrimmed_previous_estimate_tokens = int(
+                _estimate_frontdoor_provider_request_tokens(
+                    provider_request_body=None,
+                    request_messages=previous_projection,
+                    tool_schemas=normalized_previous_tool_schemas,
+                )
+                or 0
+            )
+            projection_shrink_tokens = max(
+                0,
+                untrimmed_previous_estimate_tokens - previous_estimate_tokens,
+            )
+        return (
+            max(0, current_estimate_tokens - previous_estimate_tokens),
+            True,
+            projection_shrink_tokens,
+        )
 
     @staticmethod
     def _provider_tool_exposure_revision(tool_names: list[str] | None) -> str:
@@ -7327,6 +7367,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "usage_based_estimate_tokens": int(preflight_snapshot.get("usage_based_estimate_tokens") or 0),
                 "delta_estimate_tokens": int(preflight_snapshot.get("delta_estimate_tokens") or 0),
                 "effective_input_tokens": int(preflight_snapshot.get("effective_input_tokens") or 0),
+                "anchor_projection_shrink_tokens": int(
+                    preflight_snapshot.get("anchor_projection_shrink_tokens") or 0
+                ),
                 "estimate_source": str(preflight_snapshot.get("estimate_source") or "preview_estimate"),
                 "comparable_to_previous_request": bool(preflight_snapshot.get("comparable_to_previous_request")),
                 "final_estimate_tokens": int(preflight_snapshot.get("final_estimate_tokens") or estimated_total_tokens),
@@ -7383,6 +7426,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "usage_based_estimate_tokens": 0,
                     "delta_estimate_tokens": 0,
                     "effective_input_tokens": 0,
+                    "anchor_projection_shrink_tokens": 0,
                     "estimate_source": "preview_estimate",
                     "comparable_to_previous_request": False,
                     "final_estimate_tokens": int(post_compaction_tokens or 0),

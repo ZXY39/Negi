@@ -141,6 +141,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
 - 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
+- 脑图标读数在阶段边界那一跳冲高数倍、下一跳回落，而 `comparable_to_previous_request` 仍为 `true` → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」（锚点与阶段投影同源）
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
 - 一个回合跑了一两百跳、请求字符与 `effective_input_tokens` 全程只涨不降 → 先确认有没有阶段被模型点名裁撤过：**没点名的阶段一直逐轮重发是设计**（只有点名或压缩收口会让它降）。确有裁撤却仍不降，按 `runtime-overview.md`「stage_compaction」（两条车道都在过期点换基线；节点另看投影与发送体是否分叉）查
 - 模型或节点声称"已把某阶段移出"却找不到 `archive_ref`、或点名裁撤后那批工具帧仍逐轮重发、提交时写的阶段总结在账本里是空的 → `runtime-overview.md`「stage_compaction」（跨结清的收尾对象判据与 `stage_closure` 回执，前门与节点同一条）+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（粘着的 shrink 原因不能当"裁过"的证据）
