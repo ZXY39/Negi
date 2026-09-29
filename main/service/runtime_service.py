@@ -641,8 +641,13 @@ class MainRuntimeService:
             log_service=self.log_service,
             node_runner=self.node_runner,
             stall_notifier=self.task_stall_notifier,
-            node_dispatch_execution_limit=None if execution_runtime_enabled else int(node_dispatch_limits['execution']),
-            node_dispatch_inspection_limit=None if execution_runtime_enabled else int(node_dispatch_limits['inspection']),
+            # 节点回合闸改由压力状态机实时驱动：worker 模式以前把这两个 limit 置 None
+            # （等于完全不闸），于是一次 resume/pickup 放出的每个执行器都会先物化自己的
+            # 上下文，工具与模型槽位的自适应根本来不及拦。现在天花板取配置值，容量随
+            # critical/throttled/磁盘紧急收缩。
+            node_dispatch_execution_limit=int(node_dispatch_limits['execution']),
+            node_dispatch_inspection_limit=int(node_dispatch_limits['inspection']),
+            node_dispatch_entry_budget=self.adaptive_tool_budget_controller,
         )
         self.global_scheduler = GlobalScheduler(
             runner=self.task_actor_service,

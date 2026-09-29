@@ -36,6 +36,13 @@ class _QueuedToolRequest:
     queued_mono: float
 
 
+@dataclass(slots=True)
+class _QueuedEntryRequest:
+    future: asyncio.Future[None]
+    role: str
+    queued_mono: float
+
+
 class AdaptiveToolBudgetController:
     def __init__(
         self,
@@ -62,6 +69,125 @@ class AdaptiveToolBudgetController:
         # （新工具调用排队等待而非拒绝），退出时按当前 pressure_state 恢复。
         self._disk_emergency_active = False
         self._disk_emergency_since = ''
+        # 节点回合维度：一次 resume/pickup 放出的节点数可以远大于槽位数，而每个执行器
+        # 在拿到任何槽位之前就要把自己那份上下文物化出来（`_run_entry` → `run_node`）。
+        # 只拧工具/模型槽位拦不住这份"存在成本"，所以同一套状态迁移也驱动一份
+        # 按角色的回合闸（ceiling 来自配置里的 node_dispatch_concurrency）。
+        self._entry_dims: dict[str, dict[str, Any]] = {}
+
+    def configure_entry_ceilings(self, ceilings: dict[str, int]) -> None:
+        """设定各角色回合闸的天花板（正常态上限），并按当前压力状态重算实际 limit。"""
+        ready: list[_QueuedEntryRequest] = []
+        with self._lock:
+            for role, ceiling in dict(ceilings or {}).items():
+                normalized_role = str(role or '').strip().lower()
+                if not normalized_role:
+                    continue
+                dim = self._entry_dims.setdefault(
+                    normalized_role,
+                    {'ceiling': 1, 'limit': 1, 'running': 0, 'waiters': deque()},
+                )
+                dim['ceiling'] = max(1, int(ceiling or 1))
+                ready.extend(self._resolve_entry_dim_locked(normalized_role, dim))
+        self._resolve_entry_waiters(ready)
+
+    def _entry_limit_for_locked(self, dim: dict[str, Any]) -> int:
+        if self._disk_emergency_active:
+            return 0
+        ceiling = max(1, int(dim.get('ceiling') or 1))
+        state = self._pressure_state
+        if state == 'critical':
+            return 1
+        if state == 'throttled':
+            # 与工具槽同规则：冻结在当前在跑数上，只减不增。
+            return max(1, int(dim.get('running') or 0))
+        if state == 'easing':
+            # 恢复期不跳回天花板：由 step_easing 一格一格抬（工具槽同一口径）。
+            return min(ceiling, max(1, int(dim.get('limit') or 1)))
+        return ceiling
+
+    def _step_entry_easing_locked(self) -> None:
+        for dim in self._entry_dims.values():
+            ceiling = max(1, int(dim.get('ceiling') or 1))
+            dim['limit'] = min(ceiling, max(1, int(dim.get('limit') or 1) + 1))
+
+    def _resolve_entry_dim_locked(self, role: str, dim: dict[str, Any]) -> list[_QueuedEntryRequest]:
+        dim['limit'] = self._entry_limit_for_locked(dim)
+        ready: list[_QueuedEntryRequest] = []
+        waiters: deque[_QueuedEntryRequest] = dim['waiters']
+        while waiters and int(dim['running']) < int(dim['limit']):
+            dim['running'] = int(dim['running']) + 1
+            ready.append(waiters.popleft())
+        return ready
+
+    def _resolve_entry_waiters(self, ready: list[_QueuedEntryRequest]) -> None:
+        for request in ready:
+            if request.future.done():
+                continue
+            try:
+                request.future.get_loop().call_soon_threadsafe(
+                    _set_future_result_if_pending, request.future, None
+                )
+            except Exception:
+                _set_future_result_if_pending(request.future, None)
+
+    async def acquire_entry_slot(self, *, role: str) -> None:
+        """按角色取一个"节点回合"闸位：拿到才允许进入 run_node（上下文物化之前）。"""
+        normalized_role = str(role or '').strip().lower() or 'execution'
+        future: asyncio.Future[None] | None = None
+        with self._lock:
+            dim = self._entry_dims.setdefault(
+                normalized_role,
+                {'ceiling': 1, 'limit': 1, 'running': 0, 'waiters': deque()},
+            )
+            dim['limit'] = self._entry_limit_for_locked(dim)
+            if int(dim['running']) < int(dim['limit']):
+                dim['running'] = int(dim['running']) + 1
+                return
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            dim['waiters'].append(
+                _QueuedEntryRequest(future=future, role=normalized_role, queued_mono=time.perf_counter())
+            )
+        try:
+            await future
+        except Exception:
+            with self._lock:
+                dim = self._entry_dims.get(normalized_role)
+                if dim is not None:
+                    dim['waiters'] = deque(
+                        item for item in dim['waiters'] if item is not None and item.future is not future
+                    )
+            raise
+
+    def release_entry_slot(self, *, role: str) -> None:
+        normalized_role = str(role or '').strip().lower() or 'execution'
+        ready: list[_QueuedEntryRequest] = []
+        with self._lock:
+            dim = self._entry_dims.get(normalized_role)
+            if dim is None:
+                return
+            dim['running'] = max(0, int(dim['running']) - 1)
+            ready = self._resolve_entry_dim_locked(normalized_role, dim)
+        self._resolve_entry_waiters(ready)
+
+    def entry_snapshot(self) -> dict[str, dict[str, int]]:
+        with self._lock:
+            return {
+                role: {
+                    'ceiling': int(dim.get('ceiling') or 0),
+                    'limit': int(dim.get('limit') or 0),
+                    'running': int(dim.get('running') or 0),
+                    'queued': len(dim.get('waiters') or ()),
+                }
+                for role, dim in self._entry_dims.items()
+            }
+
+    def _sync_entry_dims_locked(self) -> list[_QueuedEntryRequest]:
+        ready: list[_QueuedEntryRequest] = []
+        for role, dim in self._entry_dims.items():
+            ready.extend(self._resolve_entry_dim_locked(role, dim))
+        return ready
 
     def configure(
         self,
@@ -73,12 +199,15 @@ class AdaptiveToolBudgetController:
         step_up: int,
     ) -> None:
         ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
+        entry_ready: list[_QueuedEntryRequest] = []
         with self._lock:
             self._normal_limit = max(1, int(normal_limit or 1))
             if self._running_tools_count <= 0 and not self._waiting_queue and not self._disk_emergency_active:
                 self._reset_idle_locked()
             ready = self._drain_waiters_locked()
+            entry_ready = self._sync_entry_dims_locked()
         self._resolve_waiters(ready)
+        self._resolve_entry_waiters(entry_ready)
 
     async def acquire_tool_slot(
         self,
@@ -156,6 +285,7 @@ class AdaptiveToolBudgetController:
         退出 → 按当前 pressure_state 恢复 limit 并 drain 等待队列。"""
         timestamp = str(at or _now_iso()).strip() or _now_iso()
         ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
+        entry_ready: list[_QueuedEntryRequest] = []
         with self._lock:
             if active and not self._disk_emergency_active:
                 self._disk_emergency_active = True
@@ -174,10 +304,12 @@ class AdaptiveToolBudgetController:
                     self._target_running_tools_limit = max(int(self._normal_limit), 1)
                 if self._running_tools_count <= 0 and not self._waiting_queue:
                     self._reset_idle_locked()
-                ready = self._drain_waiters_locked()
             else:
                 return
+            ready = self._drain_waiters_locked()
+            entry_ready = self._sync_entry_dims_locked()
         self._resolve_waiters(ready)
+        self._resolve_entry_waiters(entry_ready)
 
     def abort_task_waiters(self, task_id: str, exc: BaseException) -> int:
         """把指定任务在排队中的工具调用以异常唤醒（防死锁）。
@@ -256,19 +388,24 @@ class AdaptiveToolBudgetController:
             ):
                 self._reset_idle_locked()
             ready = self._drain_waiters_locked()
+            entry_ready = self._sync_entry_dims_locked()
         self._resolve_waiters(ready)
+        self._resolve_entry_waiters(entry_ready)
 
     def begin_easing(self, *, at: str | None = None) -> None:
         timestamp = str(at or _now_iso()).strip() or _now_iso()
         with self._lock:
             self._pressure_state = 'easing'
             self._last_transition_at = timestamp
+            entry_ready = self._sync_entry_dims_locked()
+        self._resolve_entry_waiters(entry_ready)
 
     def begin_recovery(self, *, at: str | None = None) -> None:
         self.begin_easing(at=at)
 
     def step_easing(self, *, at: str | None = None) -> bool:
         ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
+        entry_ready: list[_QueuedEntryRequest] = []
         changed = False
         timestamp = str(at or _now_iso()).strip() or _now_iso()
         with self._lock:
@@ -279,7 +416,10 @@ class AdaptiveToolBudgetController:
             self._pressure_state = 'easing'
             self._last_transition_at = timestamp
             ready = self._drain_waiters_locked()
+            self._step_entry_easing_locked()
+            entry_ready = self._sync_entry_dims_locked()
         self._resolve_waiters(ready)
+        self._resolve_entry_waiters(entry_ready)
         return changed
 
     def step_recovery(self, *, at: str | None = None) -> bool:
@@ -307,6 +447,16 @@ class AdaptiveToolBudgetController:
                 'worker_execution_oldest_wait_ms': round(oldest_wait_ms, 3),
                 'disk_emergency_active': bool(self._disk_emergency_active),
                 'disk_emergency_since': self._disk_emergency_since,
+                # 节点回合闸：恢复风暴时的"同时在物化上下文的执行器数"，与工具槽分开的两个数。
+                'entry_gate_running': {
+                    role: int(dim.get('running') or 0) for role, dim in self._entry_dims.items()
+                },
+                'entry_gate_limit': {
+                    role: int(dim.get('limit') or 0) for role, dim in self._entry_dims.items()
+                },
+                'entry_gate_queued': {
+                    role: len(dim.get('waiters') or ()) for role, dim in self._entry_dims.items()
+                },
             }
 
     def _reset_idle_locked(self) -> None:

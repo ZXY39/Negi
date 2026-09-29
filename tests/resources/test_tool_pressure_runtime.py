@@ -867,3 +867,120 @@ def test_node_turn_gate_allows_when_monitor_missing() -> None:
         _pressure_gate_close_on_machine_critical=False,
     )
     assert MainRuntimeService._node_turn_gate_allowed(stub) is True
+
+
+@pytest.mark.asyncio
+async def test_entry_gate_bounds_concurrent_node_turns() -> None:
+    """节点回合闸：一次放 5 个执行器，同时在跑的不超过天花板。"""
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    controller.configure_entry_ceilings({'execution': 2})
+
+    inside = 0
+    peak = 0
+    started = asyncio.Event()
+
+    async def turn(index: int) -> None:
+        nonlocal inside, peak
+        await controller.acquire_entry_slot(role='execution')
+        try:
+            inside += 1
+            peak = max(peak, inside)
+            if inside == 2:
+                started.set()
+            await asyncio.sleep(0.02)
+        finally:
+            inside -= 1
+            controller.release_entry_slot(role='execution')
+
+    tasks = [asyncio.create_task(turn(index)) for index in range(5)]
+    await asyncio.wait_for(started.wait(), timeout=2)
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=3)
+
+    assert peak == 2
+    assert controller.entry_snapshot()['execution']['running'] == 0
+    assert controller.entry_snapshot()['execution']['queued'] == 0
+
+
+@pytest.mark.asyncio
+async def test_entry_gate_follows_pressure_state_and_disk_emergency() -> None:
+    """critical 收到 1、磁盘紧急收到 0、恢复按步抬回天花板。"""
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    controller.configure_entry_ceilings({'execution': 3})
+
+    await controller.acquire_entry_slot(role='execution')
+    await controller.acquire_entry_slot(role='execution')
+    await controller.acquire_entry_slot(role='execution')
+    assert controller.entry_snapshot()['execution']['limit'] == 3
+
+    blocked = asyncio.Event()
+
+    async def waiter() -> None:
+        await controller.acquire_entry_slot(role='execution')
+        blocked.set()
+        controller.release_entry_slot(role='execution')
+
+    pending = asyncio.create_task(waiter())
+    await asyncio.sleep(0.05)
+    assert not blocked.is_set()
+
+    controller.critical()
+    assert controller.entry_snapshot()['execution']['limit'] == 1
+
+    controller.set_disk_emergency(True)
+    assert controller.entry_snapshot()['execution']['limit'] == 0
+
+    controller.set_disk_emergency(False)
+    controller.set_budget_state('normal')
+    assert controller.entry_snapshot()['execution']['limit'] == 3
+
+    controller.release_entry_slot(role='execution')
+    controller.release_entry_slot(role='execution')
+    controller.release_entry_slot(role='execution')
+    await asyncio.wait_for(pending, timeout=2)
+    assert blocked.is_set()
+    controller.release_entry_slot(role='execution')
+
+
+def test_dispatcher_uses_adaptive_gate_only_when_budget_wired() -> None:
+    """接上预算控制器才换闸；没接时保持原来的固定信号量语义。"""
+    from main.runtime.adaptive_tool_budget import AdaptiveToolBudgetController
+    from main.runtime.task_actor_service import TaskNodeDispatcher, _AdaptiveRoleGate
+
+    def stub_dispatcher_parts():
+        return SimpleNamespace(), SimpleNamespace(update_task_runtime_meta=lambda *_a, **_k: None), SimpleNamespace()
+
+    budget = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    store, log_service, node_runner = stub_dispatcher_parts()
+    dispatcher = TaskNodeDispatcher(
+        task_id='task:gate',
+        store=store,
+        log_service=log_service,
+        node_runner=node_runner,
+        execution_limit=3,
+        inspection_limit=1,
+        entry_budget=budget,
+    )
+    assert isinstance(dispatcher._semaphores['execution'], _AdaptiveRoleGate)
+    assert budget.entry_snapshot()['execution']['ceiling'] == 3
+    assert budget.entry_snapshot()['inspection']['ceiling'] == 1
+
+    plain = TaskNodeDispatcher(
+        task_id='task:gate2',
+        store=store,
+        log_service=log_service,
+        node_runner=node_runner,
+        execution_limit=3,
+        inspection_limit=1,
+    )
+    assert isinstance(plain._semaphores['execution'], asyncio.Semaphore)
+
+    off = TaskNodeDispatcher(
+        task_id='task:gate3',
+        store=store,
+        log_service=log_service,
+        node_runner=node_runner,
+        execution_limit=None,
+        inspection_limit=None,
+        entry_budget=budget,
+    )
+    assert off._semaphores['execution'] is None

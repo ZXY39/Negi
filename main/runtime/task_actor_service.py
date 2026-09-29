@@ -83,6 +83,27 @@ def _normalize_dispatch_limit(value: int | None, *, default: int) -> int | None:
     return max(1, int(value or default or 1))
 
 
+class _AdaptiveRoleGate:
+    """角色闸：与 `asyncio.Semaphore` 同形（await acquire() / 同步 release()），
+    但容量由压力状态机实时决定（critical→1、throttled→冻结、磁盘紧急→0、恢复按步 +1）。
+
+    换成它是因为 worker 模式下角色信号量被置 None：一次 resume 放出的节点数远大于槽位数时，
+    每个执行器在拿到任何槽位之前就已经把自己那份上下文物化出来，工具/模型槽位的闸门拦不住
+    这份"存在成本"。放在这里而不是新造控制器：`_DispatchLease` 的"嵌套等待时释放、回来重取"
+    语义直接复用，等子节点的节点不会占着闸位。
+    """
+
+    def __init__(self, budget, role: str) -> None:
+        self._budget = budget
+        self._role = str(role or '').strip().lower()
+
+    async def acquire(self) -> None:
+        await self._budget.acquire_entry_slot(role=self._role)
+
+    def release(self) -> None:
+        self._budget.release_entry_slot(role=self._role)
+
+
 @dataclass(slots=True)
 class _DispatchEntry:
     node_id: str
@@ -241,6 +262,7 @@ class TaskNodeDispatcher:
         node_runner,
         execution_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['execution'],
         inspection_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
+        entry_budget=None,
     ) -> None:
         self._task_id = str(task_id or '').strip()
         self._store = store
@@ -250,8 +272,20 @@ class TaskNodeDispatcher:
             'execution': _normalize_dispatch_limit(execution_limit, default=_DEFAULT_NODE_DISPATCH_LIMITS['execution']),
             'inspection': _normalize_dispatch_limit(inspection_limit, default=_DEFAULT_NODE_DISPATCH_LIMITS['inspection']),
         }
+        if entry_budget is not None:
+            entry_budget.configure_entry_ceilings(
+                {
+                    role: int(limit)
+                    for role, limit in self._limits.items()
+                    if limit is not None
+                }
+            )
         self._semaphores = {
-            role: (asyncio.Semaphore(limit) if limit is not None else None)
+            role: (
+                _AdaptiveRoleGate(entry_budget, role)
+                if entry_budget is not None and limit is not None
+                else (asyncio.Semaphore(limit) if limit is not None else None)
+            )
             for role, limit in self._limits.items()
         }
         self._entries: dict[str, _DispatchEntry] = {}
@@ -561,12 +595,14 @@ class TaskActorService:
         stall_notifier=None,
         node_dispatch_execution_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['execution'],
         node_dispatch_inspection_limit: int | None = _DEFAULT_NODE_DISPATCH_LIMITS['inspection'],
+        node_dispatch_entry_budget=None,
     ) -> None:
         self._store = store
         self._log_service = log_service
         self._node_runner = node_runner
         self._stall_notifier = stall_notifier
         self._dispatchers: dict[str, TaskNodeDispatcher] = {}
+        self._node_dispatch_entry_budget = node_dispatch_entry_budget
         self._node_dispatch_limits = {
             'execution': _normalize_dispatch_limit(
                 node_dispatch_execution_limit,
@@ -758,6 +794,16 @@ class TaskActorService:
             'execution': _normalize_dispatch_limit(execution, default=_DEFAULT_NODE_DISPATCH_LIMITS['execution']),
             'inspection': _normalize_dispatch_limit(inspection, default=_DEFAULT_NODE_DISPATCH_LIMITS['inspection']),
         }
+        # 已经活着的闸位对象要跟着改：配置刷新只重建"以后"的 dispatcher，不重建闸。
+        budget = self._node_dispatch_entry_budget
+        if budget is not None:
+            budget.configure_entry_ceilings(
+                {
+                    role: int(limit)
+                    for role, limit in self._node_dispatch_limits.items()
+                    if limit is not None
+                }
+            )
 
     async def run_task(self, task_id: str) -> None:
         task_record = self._store.get_task(task_id)
@@ -1144,6 +1190,7 @@ class TaskActorService:
             node_runner=self._node_runner,
             execution_limit=self._node_dispatch_limits['execution'],
             inspection_limit=self._node_dispatch_limits['inspection'],
+            entry_budget=self._node_dispatch_entry_budget,
         )
 
     def _distribution_runtime_state(self, task_id: str) -> dict[str, object]:

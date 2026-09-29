@@ -65,6 +65,8 @@
 
 定义任务运行时存储与调度参数。其中 `main_runtime.duplicate_precheck.llm_review_enabled`（默认 `true`）控制 `create_async_task` 重复预检的第二层语义审查：关闭后只保留确定性精确匹配层，模糊重复与 `reject_use_append_notice` 识别随之消失，预检对放行结果 fail-open。字段契约与拒绝语义详见 `tool-and-skill-system.md`「fixed builtin tools」。
 
+`main_runtime.node_dispatch_concurrency.execution` / `.inspection`（默认 8 / 4）是**节点回合闸的天花板**：同时在物化上下文的执行器数按角色封顶，容量随机器/本地压力收缩（`runtime-overview.md`「节点回合闸」）。它在 worker 模式同样生效——曾经该模式下这两个数被忽略（不闸），一次大规模 resume 会让所有执行器同时构建上下文。
+
 `main_runtime.disk_guard` 子节控制磁盘写保护与治理（行为契约见 `runtime-overview.md`「磁盘写保护与治理」）：`write_guard_enabled`（默认 `true`；关闭后写异常恢复原样上抛、不做应急预算预检）、`emergency_min_bytes`（默认 300MB）与 `emergency_min_ratio`（默认 0.01，紧急线取两者较大值）、`usage_ttl_seconds`（水位探测缓存 TTL，默认 5s）、`artifact_gzip_threshold_bytes`（默认 1MiB；`<=0` 关闭 artifact gzip 压缩）、`terminal_cleanup_enabled`（默认 `true`；关闭后任务终态不自动清理确定不再使用的数据）、`terminal_temp_dir_cleanup_enabled`（默认 `false`；开启后终态硬删 `temp/tasks/<id>`）、`auto_pause_enabled`（默认 `true`；关闭后紧急态只检测告警不自动暂停任务）、`emergency_streak_samples` / `emergency_recovery_samples`（进入/解除紧急态的连续采样拍数，默认 3/5）、`alert_on_disk_emergency`（默认 `true`）、`detail_retention_days`（终态任务大行保留天数，默认 `0`=停用裁剪——任务明细与任务同生命周期，仅随手动删除清除；配置 `>0` 恢复按天裁剪）。磁盘治理没有清理线/自动删任务相关配置；删除台账保留期（7 天）是 `runtime_service` 模块常量，不进配置。`G3KU_*` 同名环境变量仅作测试与应急覆盖，配置源真值以本子节为准。
 
 ### `external_api`
