@@ -269,3 +269,34 @@ def test_read_model_rebuild_streams_nodes_instead_of_materializing_them(tmp_path
 
     assert task is not None
     assert seen == ['node:0', 'node:1', 'node:2', 'node:3']
+
+
+def test_residual_node_sweep_streams_nodes(tmp_path) -> None:
+    """终态任务的残余节点清扫也逐条取行：它只在节点真的被改状态时留在结果里。
+
+    worker 启动自愈会对每个终态任务跑一次，整任务物化与恢复期重建是同一个形状。
+    """
+    service = _make_web_service(tmp_path)
+    service.store.upsert_task(_task('task:sweep1', 'web:qq', 'success'))
+    for index in range(3):
+        service.store.upsert_node(
+            NodeRecord(
+                node_id=f'node:{index}',
+                task_id='task:sweep1',
+                root_node_id='node:root',
+                goal='g',
+                prompt='p',
+                created_at='2026-09-29T10:00:00+08:00',
+                updated_at='2026-09-29T10:00:00+08:00',
+            )
+        )
+
+    def _no_whole_task_materialize(*_args, **_kwargs):
+        raise AssertionError('残余节点清扫不得整任务建出 NodeRecord 列表')
+
+    service.store.list_nodes = _no_whole_task_materialize  # type: ignore[method-assign]
+
+    swept = service.log_service.sweep_residual_nodes('task:sweep1')
+
+    assert sorted(str(node.node_id) for node in swept) == ['node:0', 'node:1', 'node:2']
+    assert all(str(node.status) == 'failed' for node in swept)

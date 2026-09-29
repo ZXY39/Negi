@@ -1493,7 +1493,7 @@ class TaskQueryService:
         pending_root_counts: dict[str, int | None] = {}
         if missing_pending_ids:
             runtime_by_id: dict[str, NodeRecord] = {}
-            for node in list(self._store.list_nodes(task_id) or []):
+            for node in self._store.iter_nodes(task_id):
                 normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
                 if normalized_node_id and normalized_node_id in missing_pending_ids:
                     runtime_by_id[normalized_node_id] = node

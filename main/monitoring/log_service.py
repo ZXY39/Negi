@@ -3603,7 +3603,7 @@ class TaskLogService:
         so the partial work stays traceable. Must be called with the task lock held.
         """
         swept: list[NodeRecord] = []
-        for node in list(self._store.list_nodes(task.task_id) or []):
+        for node in self._store.iter_nodes(task.task_id):
             if str(node.status or '').strip().lower() in {'success', 'failed'}:
                 continue
             preserved_refs = [
