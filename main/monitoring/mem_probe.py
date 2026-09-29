@@ -16,6 +16,8 @@ import tracemalloc
 from datetime import datetime
 from pathlib import Path
 
+from loguru import logger
+
 try:  # pragma: no cover - optional dependency in local dev before reinstall
     import psutil
 except Exception:  # pragma: no cover - handled by runtime fallback
@@ -92,6 +94,7 @@ class MemProbe:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._previous_snapshot = None
+        self._previous_traced_bytes: int | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -120,7 +123,9 @@ class MemProbe:
         rss_mb, private_mb = _process_memory_mb()
         traced_current, traced_peak = tracemalloc.get_traced_memory()
         previous = self._previous_snapshot
+        previous_total = self._previous_traced_bytes
         self._previous_snapshot = snapshot
+        self._previous_traced_bytes = traced_current
         growth = snapshot.compare_to(previous, 'lineno')[: self._top_limit] if previous is not None else []
         row: dict[str, object] = {
             'ts': datetime.now().astimezone().isoformat(timespec='seconds'),
@@ -129,27 +134,22 @@ class MemProbe:
             'private_mb': private_mb,
             'traced_mb': round(traced_current / 1048576.0, 2),
             'traced_peak_mb': round(traced_peak / 1048576.0, 2),
-            'growth_mb': 0.0,
+            'growth_mb': round((traced_current - previous_total) / 1048576.0, 2) if previous_total is not None else 0.0,
             'top': _top_entries(snapshot.statistics('lineno')[: self._top_limit]),
             'growth': _top_entries(growth),
         }
-        if previous is not None:
-            previous_total = sum(stat.size for stat in previous.statistics('total'))
-            row['growth_mb'] = round((traced_current - previous_total) / 1048576.0, 2)
         return row
 
     def _thread_main(self) -> None:
         while not self._stop_event.wait(self._interval_seconds):
             try:
                 row = self.sample_once()
+                if row is not None:
+                    with self._output_path.open('a', encoding='utf-8') as handle:
+                        handle.write(json.dumps(row, ensure_ascii=False) + '\n')
             except Exception:
-                return
-            if row is None:
-                continue
-            try:
-                with self._output_path.open('a', encoding='utf-8') as handle:
-                    handle.write(json.dumps(row, ensure_ascii=False) + '\n')
-            except Exception:
+                # 静默死掉的探针会让人把"没有行"当成"没有驻留"，那比没有探针更糟。
+                logger.exception('mem probe stopped sampling; rows end here: {}', self._output_path)
                 return
 
 

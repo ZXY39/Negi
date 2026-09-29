@@ -240,19 +240,25 @@ def test_mem_probe_requires_marker_and_writes_site_rows(tmp_path, monkeypatch) -
     probe = start_mem_probe(runtime_dir=tmp_path)
     assert probe is not None
     try:
+        time.sleep(1.2)
         kept = [f'{index:08d}' * 512 for index in range(2000)]
-        time.sleep(1.6)
+        time.sleep(2.2)
     finally:
         probe.stop()
 
     files = list((tmp_path / 'mem-probe').glob('mem-probe-*.jsonl'))
     assert len(files) == 1
     rows = [json.loads(line) for line in files[0].read_text(encoding='utf-8').splitlines() if line.strip()]
-    assert rows, '探针至少要落一拍'
+    assert len(rows) >= 2, rows
     row = rows[-1]
     assert row['pid'] == os.getpid()
     assert row['traced_mb'] >= 1
     assert row['traced_peak_mb'] >= row['traced_mb']
     assert any('test_worker_observability.py' in str(item['site']) for item in row['top']), row['top']
+    # growth 榜只记相邻两拍的增量：落在申请之后的那一拍，具体是哪一拍取决于线程调度。
+    assert any(
+        any('test_worker_observability.py' in str(item['site']) for item in earlier['growth'])
+        for earlier in rows
+    ), rows
     assert all({'site', 'mb', 'blocks'} <= set(item) for item in row['top'])
     assert kept[0][:8] == '00000000'
