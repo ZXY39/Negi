@@ -72,15 +72,11 @@ class AdaptiveToolBudgetController:
         # 节点回合维度：一次 resume/pickup 放出的节点数可以远大于槽位数，而每个执行器
         # 在拿到任何槽位之前就要把自己那份上下文物化出来（`_run_entry` → `run_node`）。
         # 只拧工具/模型槽位拦不住这份"存在成本"，所以同一套状态迁移也驱动一份
-        # 按角色的回合闸。闸位的地板来自配置里的 `node_dispatch_concurrency`，
-        # 向上由 easing 每格 +1 爬（与工具槽同一口径），向下由 throttled 冻结/critical→1/
-        # 磁盘紧急→0 收缩，队列排空时复位到地板。
+        # 按角色的回合闸（ceiling 来自配置里的 node_dispatch_concurrency）。
         self._entry_dims: dict[str, dict[str, Any]] = {}
 
     def configure_entry_ceilings(self, ceilings: dict[str, int]) -> None:
-        """设定各角色回合闸的地板（正常态起步值），并按当前压力状态重算实际 limit。
-        地板数值本身变了 ⇒ 当场把高水位钳到新地板（operator 改数就是改意图）；
-        地板没变（同一份配置的刷新）⇒ 保留已经爬到的高水位。"""
+        """设定各角色回合闸的天花板（正常态上限），并按当前压力状态重算实际 limit。"""
         ready: list[_QueuedEntryRequest] = []
         with self._lock:
             for role, ceiling in dict(ceilings or {}).items():
@@ -91,10 +87,7 @@ class AdaptiveToolBudgetController:
                     normalized_role,
                     {'ceiling': 1, 'limit': 1, 'running': 0, 'waiters': deque()},
                 )
-                next_ceiling = max(1, int(ceiling or 1))
-                if int(dim.get('ceiling') or 1) != next_ceiling:
-                    dim['limit'] = min(next_ceiling, max(1, int(dim.get('limit') or 1)))
-                dim['ceiling'] = next_ceiling
+                dim['ceiling'] = max(1, int(ceiling or 1))
                 ready.extend(self._resolve_entry_dim_locked(normalized_role, dim))
         self._resolve_entry_waiters(ready)
 
@@ -109,21 +102,14 @@ class AdaptiveToolBudgetController:
             # 与工具槽同规则：冻结在当前在跑数上，只减不增。
             return max(1, int(dim.get('running') or 0))
         if state == 'easing':
-            # 恢复期保持已爬到的位置，由 step 一格一格抬（工具槽同一口径）。
-            return max(1, int(dim.get('limit') or 1))
-        # normal：配置值是**地板**不是上限——已经爬上去的位置不掉回来，
-        # 掉只掉到 idle 复位（`_reset_entry_dim_idle_locked`）或压力收缩。
-        return max(ceiling, int(dim.get('limit') or 1))
+            # 恢复期不跳回天花板：由 step_easing 一格一格抬（工具槽同一口径）。
+            return min(ceiling, max(1, int(dim.get('limit') or 1)))
+        return ceiling
 
     def _step_entry_easing_locked(self) -> None:
         for dim in self._entry_dims.values():
-            dim['limit'] = max(1, int(dim.get('limit') or 1) + 1)
-
-    def _reset_entry_dim_idle_locked(self, dim: dict[str, Any]) -> None:
-        """队列排空后把闸位收到地板：下一次风暴必须从配置值起步、按格爬，
-        而不是继承上一次爬到的高水位一次性放出去（21:31 无闸事故的形态）。"""
-        if int(dim.get('running') or 0) == 0 and not (dim.get('waiters') or ()):
-            dim['limit'] = max(1, int(dim.get('ceiling') or 1))
+            ceiling = max(1, int(dim.get('ceiling') or 1))
+            dim['limit'] = min(ceiling, max(1, int(dim.get('limit') or 1) + 1))
 
     def _resolve_entry_dim_locked(self, role: str, dim: dict[str, Any]) -> list[_QueuedEntryRequest]:
         dim['limit'] = self._entry_limit_for_locked(dim)
@@ -182,7 +168,6 @@ class AdaptiveToolBudgetController:
             if dim is None:
                 return
             dim['running'] = max(0, int(dim['running']) - 1)
-            self._reset_entry_dim_idle_locked(dim)
             ready = self._resolve_entry_dim_locked(normalized_role, dim)
         self._resolve_entry_waiters(ready)
 
@@ -436,18 +421,6 @@ class AdaptiveToolBudgetController:
         self._resolve_waiters(ready)
         self._resolve_entry_waiters(entry_ready)
         return changed
-
-    def step_entry_easing(self) -> bool:
-        """只抬"节点回合闸"，不动工具槽：队列里全是卡在闸口的节点、工具队列却空着时，
-        工具轴的 `waiting_count>0` 触发不到，回合闸就没机会往上爬（回放实测这种状态占多数）。
-        与 `step_easing` 共用同一格宽度和同一收缩链，只是被抬的维度不同；
-        压力状态的迁移权仍属 monitor，这里不改状态。"""
-        entry_ready: list[_QueuedEntryRequest] = []
-        with self._lock:
-            self._step_entry_easing_locked()
-            entry_ready = self._sync_entry_dims_locked()
-        self._resolve_entry_waiters(entry_ready)
-        return bool(entry_ready)
 
     def step_recovery(self, *, at: str | None = None) -> bool:
         return self.step_easing(at=at)
