@@ -574,6 +574,7 @@ class TaskQueryService:
         task_id: str,
         *,
         mark_read: bool = True,
+        model_call_limit: int | None = None,
     ) -> dict[str, Any] | None:
         started_at = datetime.now().astimezone().isoformat(timespec='seconds')
         started_mono = time.perf_counter()
@@ -624,7 +625,10 @@ class TaskQueryService:
             'root_node': root_node.model_dump(mode='json') if root_node is not None else None,
             'frontier': frontier,
             'counts': counts,
-            'recent_model_calls': [item.model_dump(mode='json') for item in self._recent_model_calls(task.task_id, limit=None)],
+            'recent_model_calls': [
+                item.model_dump(mode='json')
+                for item in self._recent_model_calls(task.task_id, limit=model_call_limit)
+            ],
         }
         self._record_debug('query_service.get_task_snapshot', started_at=started_at, started_mono=started_mono)
         return payload
@@ -1557,7 +1561,9 @@ class TaskQueryService:
 
     def _recent_model_calls(self, task_id: str, *, limit: int | None = 50) -> list[TaskModelCallRecord]:
         records: list[TaskModelCallRecord] = []
-        store_limit = None if limit is None else max(1, int(limit or 50))
+        if limit is not None and int(limit) <= 0:
+            return records
+        store_limit = None if limit is None else max(1, int(limit))
         for event in list(self._store.list_task_model_calls(task_id, limit=store_limit) or []):
             payload = dict(event.get('payload') or {})
             records.append(

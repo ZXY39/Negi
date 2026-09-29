@@ -632,7 +632,7 @@ class MainRuntimeService:
             workspace_root_getter=lambda: self._workspace_root(),
         )
         self._apply_model_route_plans(initial_execution_routes, initial_acceptance_routes, revision=0)
-        self.node_runner._tool_snapshot_supplier = lambda task_id: self.get_task_detail_payload(task_id, mark_read=False)
+        self.node_runner._tool_snapshot_supplier = self._tool_watchdog_snapshot_supplier
         self.node_runner.distribution_delivery_callback = self._deliver_distribution_message
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(app_config)
         self.task_actor_service = TaskActorService(
@@ -8755,16 +8755,30 @@ class MainRuntimeService:
             'items': [item.model_dump(mode='json') for item in items],
         }
 
+    async def _tool_watchdog_snapshot_supplier(self, task_id: str) -> dict[str, Any] | None:
+        # 工具看门狗每 poll_interval_seconds（默认 5s）取一次运行快照。整份任务详情里
+        # recent_model_calls 是全量账本（实盘单任务 1545 行 / 1.43 MB，且随任务增长），
+        # 而 summarize_runtime_snapshot 只读 task / root_node / frontier——建完就丢。
+        # 快照是只读观测旁路，不放线程里就会占住事件循环。
+        return await asyncio.to_thread(
+            self.get_task_detail_payload,
+            task_id,
+            mark_read=False,
+            model_call_limit=0,
+        )
+
     def get_task_detail_payload(
         self,
         task_id: str,
         *,
         mark_read: bool = False,
+        model_call_limit: int | None = None,
     ) -> dict[str, Any] | None:
         task_id = self.normalize_task_id(task_id)
         payload = self.query_service.get_task_snapshot(
             task_id,
             mark_read=mark_read,
+            model_call_limit=model_call_limit,
         )
         if payload is None:
             return None

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,3 +158,27 @@ async def test_resource_tools_scope_param() -> None:
     await list_handler.execute(__g3ku_runtime=runtime, **{'任务类型': 1, '查询范围': '全局'})
     assert stub.get_tasks_calls == [('ext:qq-official:abc', 1), (None, 1)]
     assert '查询范围' in list_handler.parameters['properties']
+
+
+def test_tool_watchdog_snapshot_skips_model_call_ledger(tmp_path) -> None:
+    """看门狗的运行快照不带全量模型调用账本，REST 详情照旧带。
+
+    实盘单任务 recent_model_calls 1545 行 / 1.43 MB，每 5 秒 poll 建一次又丢掉；
+    账本里累计 1.1 万次调用时这一项就是每 poll 数 MB 的分配。
+    """
+    service = _make_web_service(tmp_path)
+    service.store.upsert_task(_task('task:snap1', 'web:qq', 'in_progress'))
+    for index in range(3):
+        service.store.append_task_model_call(
+            task_id='task:snap1',
+            node_id='node-root',
+            created_at=f'2026-09-29T10:0{index}:00+08:00',
+            payload={'call_index': index, 'node_id': 'node-root'},
+        )
+
+    detail = service.get_task_detail_payload('task:snap1')
+    assert len(detail['recent_model_calls']) == 3
+
+    slim = asyncio.run(service._tool_watchdog_snapshot_supplier('task:snap1'))
+    assert slim['recent_model_calls'] == []
+    assert slim['task']['task_id'] == 'task:snap1'
