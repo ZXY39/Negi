@@ -373,6 +373,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 
 - **写入点紧跟状态落库**：`WorkerHeartbeatServiceV2` 一拍里，`upsert_worker_status` 之后第一件事就是 `_record_perf_history`（同一份 payload，白名单 `_PERF_HISTORY_FIELDS`），节拍门 15s，每写满 240 行顺带按 24h 保留期裁剪。顺序是契约而不是风格：`worker_status`/租约写入之后的 lease 续期与状态桥接投递任何一步抛异常，本拍就提前结束，排在它后面的步骤会长期不执行且无人知晓（实盘出现过心跳新鲜、历史 0 行、存活金丝雀一行没有的三连）。采样线程本身保持零写入。
 - **节拍异常必须可见**：本拍最外层 `except` 不再静默——首次与此后每 60 次连续失败各打一条 WARNING `worker heartbeat beat failed (N consecutive): <类型>: <消息>`（最坏约每分钟一行），节拍成功即清零计数。没有这条限流日志，"心跳看起来正常"与"心跳每拍都断在同一个地方"在日志上完全同形。
+- **状态桥接读事件循环，不读 AgentLoop**：一拍的最后一步是 `MainRuntimeService._publish_worker_status_from_any_thread`，它要 `is_running()` 与 `call_soon_threadsafe`；而 `_runtime_loop` 承载的是 `bind_runtime_loop` 绑进来的 **AgentLoop**（frontdoor 侧读者要它的 `sessions` / `web_session_heartbeat` / `tool_execution_manager`）。跨线程投递与 `_schedule_loop_task` 一律走 `startup()` 记下的 `_event_loop`。两件事共用一个字段的结果是：`worker_status` 行照常每秒新鲜，但最后一步恒抛 `AttributeError: 'AgentLoop' object has no attribute 'is_running'`——WS 状态推送长期不动，而看数据库会以为心跳是好的。
 - **15s 而不是 1s**：判"停滞是不是性能造成的"只需要知道某段窗口处于哪个档位、队列有没有等待，1s 粒度对结论无增益，却把行数与库体积乘 15。实测代价：一行 731 字节、一天 5760 行 ≈ 4.15 MiB（24h 封顶）、writer 占空比 0.05%；读侧 10min 窗口 3ms、24h 窗口 ~100ms——因此工具执行体必须走 `asyncio.to_thread`，同步跑会把 web 事件循环按住（与 `rest.py` 卸载 worker-status 同一理由）。
 - **落库而不是进程内环形缓冲**：web 与 task worker 是两个进程，读端（CEO 工具、失速判读）在 web 进程，跨进程可读依赖的正是这块共享 sqlite（`task_worker_status_outbox` 同前提）；内存缓冲在进程重启后即消失，而"重启后回看昨晚"恰是主用途。
 - **行不是任务作用域**：性能是机器级事实，因此不进 `delete_task` 的级联删除，只随保留期裁剪。

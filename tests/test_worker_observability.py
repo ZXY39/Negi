@@ -185,3 +185,39 @@ def test_web_mode_does_not_emit_alive_log_line(monkeypatch):
         asyncio.run(service.close())
 
     assert fake_logger.info.call_count == 0
+
+
+def test_worker_status_bridge_uses_event_loop_after_agent_loop_binding() -> None:
+    """`_runtime_loop` 装 AgentLoop 时，worker 状态桥接不得静默失效。
+
+    `bind_runtime_loop` 绑的是 AgentLoop（frontdoor 要读它的 sessions/heartbeat），
+    而跨线程投递要的是 asyncio 事件循环——两者曾共用一个字段，导致实盘每拍
+    `AttributeError: 'AgentLoop' object has no attribute 'is_running'`，WS 侧
+    状态推送长期不动。
+    """
+    from types import MethodType, SimpleNamespace
+
+    from main.service.runtime_service import MainRuntimeService
+
+    published: list[dict] = []
+    harness = SimpleNamespace(
+        _runtime_loop=SimpleNamespace(tool_execution_manager=None, sessions={}),
+        _event_loop=None,
+        publish_worker_status_event=lambda **kwargs: published.append(kwargs),
+    )
+    publish = MethodType(MainRuntimeService._publish_worker_status_from_any_thread, harness)
+    schedule = MethodType(MainRuntimeService._schedule_loop_task, harness)
+
+    async def scenario() -> None:
+        harness._event_loop = asyncio.get_running_loop()
+        publish({'worker_id': 'worker:1'})
+        scheduled: list[str] = []
+        schedule(lambda: _noop(scheduled))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    async def _noop(sink: list[str]):
+        sink.append('ok')
+
+    asyncio.run(scenario())
+    assert published == [{'item': {'worker_id': 'worker:1'}, 'bridge': False}]

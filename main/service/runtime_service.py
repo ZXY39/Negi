@@ -734,7 +734,11 @@ class MainRuntimeService:
             lease_heartbeat=self._renew_worker_lease_from_thread,
         )
         self._started = False
+        # _runtime_loop 装的是 AgentLoop（frontdoor/心跳桥要读它的 sessions、
+        # web_session_heartbeat、tool_execution_manager 等属性）；要往事件循环里
+        # 线程安全投递的读者一律走 _event_loop，两者不得混用同一个字段。
         self._runtime_loop = None
+        self._event_loop = None
         self._worker_lease_takeover = False
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
@@ -779,6 +783,7 @@ class MainRuntimeService:
         self._started = True
         if self._runtime_loop is None:
             self._runtime_loop = asyncio.get_running_loop()
+        self._event_loop = asyncio.get_running_loop()
         if self.execution_mode == 'worker':
             self._acquire_worker_lease_or_raise()
             self.worker_heartbeat_service.start_background()
@@ -986,7 +991,7 @@ class MainRuntimeService:
         await self.worker_heartbeat_service.run_forever()
 
     def _publish_worker_status_from_any_thread(self, item: dict[str, Any]) -> None:
-        loop = self._runtime_loop
+        loop = self._event_loop
         payload = dict(item or {})
         if loop is None or not loop.is_running():
             return
@@ -7423,7 +7428,7 @@ class MainRuntimeService:
 
     def _schedule_loop_task(self, coro_factory: Callable[[], Any]) -> None:
         """线程安全：从任意线程（monitor 采样线程）把协程调度回运行时事件循环。"""
-        loop = getattr(self, '_runtime_loop', None)
+        loop = getattr(self, '_event_loop', None)
         if loop is None:
             return
         try:
