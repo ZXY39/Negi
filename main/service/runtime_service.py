@@ -5568,9 +5568,10 @@ class MainRuntimeService:
         self.node_runner._execution_max_concurrency = config.get_role_max_concurrency('execution')
         self.node_runner._acceptance_max_concurrency = config.get_role_max_concurrency('inspection')
         self.node_runner._tool_default_timeout_seconds = self._tool_default_timeout_seconds(config)
+        dispatch_limits = self._node_dispatch_concurrency_settings(config)
         self.task_actor_service.configure_node_dispatch_limits(
-            execution=None,
-            inspection=None,
+            execution=dispatch_limits['execution'],
+            inspection=dispatch_limits['inspection'],
         )
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(config)
         self._react_loop._parallel_tool_calls_enabled = parallel_enabled

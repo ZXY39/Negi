@@ -316,6 +316,11 @@ class WorkerPressureMonitor:
         controller_snapshot = self._controller.snapshot()
         waiting_count = int(controller_snapshot.get('worker_execution_waiting_count') or 0)
         oldest_wait_ms = float(controller_snapshot.get('worker_execution_oldest_wait_ms') or 0.0)
+        # 回合闸的需求侧：工具队列空但闸口排着几十个节点时，`waiting_count>0` 这一道门
+        # 永远不开，向上动态就只存在于名义上（09-29 回放：带闸时代 tool_wait>0 仅 18.9%，
+        # 同期 entry 排队常年 100+）。
+        entry_gate_queued = controller_snapshot.get('entry_gate_queued') or {}
+        entry_queued_count = int(sum(int(v or 0) for v in entry_gate_queued.values()))
         machine_available_bool = bool(machine_available)
         machine_warn = (
             machine_available_bool
@@ -525,18 +530,22 @@ class WorkerPressureMonitor:
                 elif should_ease:
                     if local_recovery_ready and not machine_recovery:
                         heal_reason = 'local_recovery'
-                    if waiting_count > 0:
+                    if waiting_count > 0 or entry_queued_count > 0:
                         if current_state != 'easing':
                             self._controller.begin_easing(at=timestamp)
                             self._last_recovery_step_at = current_mono
                         elif current_mono - self._last_recovery_step_at >= self._recover_window_seconds:
-                            self._controller.step_easing(at=timestamp)
+                            if waiting_count > 0:
+                                # 工具队列有人等：两轴一起抬（step_easing 内含回合闸）。
+                                self._controller.step_easing(at=timestamp)
+                            else:
+                                self._controller.step_entry_easing()
                             self._last_recovery_step_at = current_mono
                     elif current_state != 'normal':
                         self._controller.set_budget_state('normal', at=timestamp)
                         self._last_recovery_step_at = 0.0
                     self._restricted_since_mono = 0.0
-                elif current_state == 'easing' and waiting_count <= 0:
+                elif current_state == 'easing' and waiting_count <= 0 and entry_queued_count <= 0:
                     self._controller.set_budget_state('normal', at=timestamp)
                     self._last_recovery_step_at = 0.0
             self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
