@@ -31,27 +31,41 @@ DEFAULT_FRAMES = 1
 DEFAULT_DUMP_LIMIT = 40
 
 
-def _int_env(name: str, default: int, *, minimum: int) -> int:
-    raw = str(os.environ.get(name) or '').strip()
+def _marker_settings(marker_path: Path) -> dict[str, str]:
+    """标记文件正文按 `key=value` 读（逗号/换行分隔）。
+
+    托管 worker 的环境来自 web 进程的 os.environ.copy()，调参光靠环境变量就得重启 web；
+    写在标记里只要重启 worker。优先级：环境变量 > 标记 > 默认值。
+    """
+    settings: dict[str, str] = {}
+    try:
+        text = Path(marker_path).read_text(encoding='utf-8')
+    except OSError:
+        return settings
+    for chunk in text.replace(',', '\n').splitlines():
+        key, sep, value = chunk.partition('=')
+        if sep:
+            settings[key.strip().lower()] = value.strip()
+    return settings
+
+
+def _number(
+    settings: dict[str, str],
+    *,
+    env_name: str,
+    marker_key: str,
+    default: float,
+    cast: str = 'int',
+    minimum: float,
+) -> float:
+    raw = str(os.environ.get(env_name) or '').strip() or settings.get(marker_key, '')
     if not raw:
         return default
     try:
-        value = int(raw)
+        value = int(raw) if cast == 'int' else float(raw)
     except ValueError:
         return default
-    return value if value >= minimum else default
-
-
-def _dump_threshold_bytes() -> int:
-    """`G3KU_MEM_PROBE_DUMP_MB`>0 时被跟踪驻留越过该阈值就落一份调用链快照（每进程一次）。"""
-    raw = str(os.environ.get('G3KU_MEM_PROBE_DUMP_MB') or '').strip()
-    if not raw:
-        return 0
-    try:
-        value = float(raw)
-    except ValueError:
-        return 0
-    return int(value * 1048576) if value > 0 else 0
+    return float(value) if value >= minimum else default
 
 
 def mem_probe_marker(runtime_dir: Path) -> Path:
@@ -62,15 +76,40 @@ def mem_probe_requested(marker_path: Path) -> bool:
     return Path(marker_path).exists()
 
 
-def _interval_seconds() -> float:
-    raw = str(os.environ.get('G3KU_MEM_PROBE_INTERVAL_SECONDS') or '').strip()
-    if not raw:
-        return DEFAULT_INTERVAL_SECONDS
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_INTERVAL_SECONDS
-    return value if value >= 1 else DEFAULT_INTERVAL_SECONDS
+def probe_settings(marker_path: Path) -> dict[str, float]:
+    settings = _marker_settings(marker_path)
+    return {
+        'interval_seconds': _number(
+            settings,
+            env_name='G3KU_MEM_PROBE_INTERVAL_SECONDS',
+            marker_key='interval',
+            default=DEFAULT_INTERVAL_SECONDS,
+            cast='float',
+            minimum=1.0,
+        ),
+        'top_limit': _number(
+            settings,
+            env_name='G3KU_MEM_PROBE_TOP_LIMIT',
+            marker_key='top',
+            default=DEFAULT_TOP_LIMIT,
+            minimum=1,
+        ),
+        'frames': _number(
+            settings,
+            env_name='G3KU_MEM_PROBE_FRAMES',
+            marker_key='frames',
+            default=DEFAULT_FRAMES,
+            minimum=1,
+        ),
+        'dump_mb': _number(
+            settings,
+            env_name='G3KU_MEM_PROBE_DUMP_MB',
+            marker_key='dump_mb',
+            default=0,
+            cast='float',
+            minimum=0,
+        ),
+    }
 
 
 def _process_memory_mb() -> tuple[float, float]:
@@ -212,14 +251,23 @@ def start_mem_probe(*, runtime_dir: Path) -> MemProbe | None:
     marker = mem_probe_marker(runtime_dir)
     if not mem_probe_requested(marker):
         return None
+    values = probe_settings(marker)
     stamp = time.strftime('%Y%m%d-%H%M%S')
     output_path = Path(runtime_dir) / OUTPUT_DIR_NAME / f'mem-probe-{os.getpid()}-{stamp}.jsonl'
     probe = MemProbe(
         output_path=output_path,
-        interval_seconds=_interval_seconds(),
-        top_limit=_int_env('G3KU_MEM_PROBE_TOP_LIMIT', DEFAULT_TOP_LIMIT, minimum=1),
-        frames=_int_env('G3KU_MEM_PROBE_FRAMES', DEFAULT_FRAMES, minimum=1),
-        dump_threshold_bytes=_dump_threshold_bytes(),
+        interval_seconds=values['interval_seconds'],
+        top_limit=int(values['top_limit']),
+        frames=int(values['frames']),
+        dump_threshold_bytes=int(values['dump_mb'] * 1048576),
     )
     probe.start()
+    logger.info(
+        'mem probe started: interval={}s frames={} top={} dump_mb={} out={}',
+        values['interval_seconds'],
+        int(values['frames']),
+        int(values['top_limit']),
+        values['dump_mb'],
+        output_path,
+    )
     return probe

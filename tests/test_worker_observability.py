@@ -264,6 +264,32 @@ def test_mem_probe_requires_marker_and_writes_site_rows(tmp_path, monkeypatch) -
     assert kept[0][:8] == '00000000'
 
 
+def test_mem_probe_reads_settings_from_marker_content(tmp_path, monkeypatch) -> None:
+    """调参写进标记正文也要生效：托管 worker 的环境来自 web，改不动。"""
+    from main.monitoring.mem_probe import mem_probe_marker, probe_settings
+
+    marker = mem_probe_marker(tmp_path)
+    assert probe_settings(marker) == {
+        'interval_seconds': 10.0,
+        'top_limit': 12,
+        'frames': 1,
+        'dump_mb': 0,
+    }
+
+    marker.write_text('interval=3, frames=8, dump_mb=250, top=5', encoding='utf-8')
+    assert probe_settings(marker) == {
+        'interval_seconds': 3.0,
+        'top_limit': 5,
+        'frames': 8,
+        'dump_mb': 250.0,
+    }
+
+    monkeypatch.setenv('G3KU_MEM_PROBE_FRAMES', '2')
+    assert probe_settings(marker)['frames'] == 2
+    marker.write_text('interval=0', encoding='utf-8')
+    assert probe_settings(marker)['interval_seconds'] == 10.0
+
+
 def test_mem_probe_deep_dump_needs_frames_above_one(tmp_path) -> None:
     """阈值触发的一次性调用链快照：站点榜只说在哪申请，链才说谁在申请。"""
     from main.monitoring.mem_probe import MemProbe
