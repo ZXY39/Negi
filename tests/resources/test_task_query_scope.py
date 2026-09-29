@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -182,3 +184,47 @@ def test_tool_watchdog_snapshot_skips_model_call_ledger(tmp_path) -> None:
     slim = asyncio.run(service._tool_watchdog_snapshot_supplier('task:snap1'))
     assert slim['recent_model_calls'] == []
     assert slim['task']['task_id'] == 'task:snap1'
+
+
+def test_tool_watchdog_snapshot_coalesces_concurrent_polls(tmp_path) -> None:
+    """同任务并发的看门狗拍共用一次构建，且合流表不留条目。
+
+    快照只按 task_id 取值，N 个等待者要的是同一份东西。实盘恢复风暴一次 py-spy 采样
+    抓到 6 条执行器线程各自在建整份详情（生产规模副本实测单份 250–360ms / 30MB 分配，
+    并发驻留按倍数走：6 份并发 120MB、10 份 193MB 且 wall 3.5s）。
+    """
+    service = _make_web_service(tmp_path)
+    service.store.upsert_task(_task('task:snap2', 'web:qq', 'in_progress'))
+
+    builds = {'started': 0, 'in_flight': 0, 'max_in_flight': 0}
+    guard = threading.Lock()
+    original = service.get_task_detail_payload
+
+    def counting(task_id, **kwargs):
+        with guard:
+            builds['started'] += 1
+            builds['in_flight'] += 1
+            builds['max_in_flight'] = max(builds['max_in_flight'], builds['in_flight'])
+        try:
+            time.sleep(0.05)
+            return original(task_id, **kwargs)
+        finally:
+            with guard:
+                builds['in_flight'] -= 1
+
+    service.get_task_detail_payload = counting
+
+    async def poll_all():
+        return await asyncio.gather(
+            *(service._tool_watchdog_snapshot_supplier('task:snap2') for _ in range(6))
+        )
+
+    results = asyncio.run(poll_all())
+
+    assert builds['started'] == 1, builds
+    assert builds['max_in_flight'] == 1, builds
+    assert service._watchdog_snapshot_flights == {}
+    assert [item['task']['task_id'] for item in results] == ['task:snap2'] * 6
+
+    asyncio.run(poll_all())
+    assert builds['started'] == 2, builds

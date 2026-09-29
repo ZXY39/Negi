@@ -739,6 +739,7 @@ class MainRuntimeService:
         # 线程安全投递的读者一律走 _event_loop，两者不得混用同一个字段。
         self._runtime_loop = None
         self._event_loop = None
+        self._watchdog_snapshot_flights: dict[str, asyncio.Task] = {}
         self._worker_lease_takeover = False
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
@@ -8761,6 +8762,26 @@ class MainRuntimeService:
         }
 
     async def _tool_watchdog_snapshot_supplier(self, task_id: str) -> dict[str, Any] | None:
+        # 快照内容只按 task_id 取值，同任务并发的每一拍要的是同一份东西：合流成一次构建，
+        # 而不是每个等待者各起一条 to_thread。shield 掉单个等待者的取消，取消不能连带
+        # 掐掉别人正在等的同一份构建。
+        normalized = self.normalize_task_id(str(task_id or '').strip())
+        flight = self._watchdog_snapshot_flights.get(normalized)
+        if flight is None:
+            flight = asyncio.create_task(self._build_tool_watchdog_snapshot(normalized))
+            self._watchdog_snapshot_flights[normalized] = flight
+            flight.add_done_callback(
+                lambda done, key=normalized: self._release_watchdog_snapshot_flight(key, done)
+            )
+        return await asyncio.shield(flight)
+
+    def _release_watchdog_snapshot_flight(self, task_id: str, done: asyncio.Task) -> None:
+        if self._watchdog_snapshot_flights.get(task_id) is done:
+            self._watchdog_snapshot_flights.pop(task_id, None)
+        if not done.cancelled():
+            done.exception()
+
+    async def _build_tool_watchdog_snapshot(self, task_id: str) -> dict[str, Any] | None:
         # 工具看门狗每 poll_interval_seconds（默认 5s）取一次运行快照。整份任务详情里
         # recent_model_calls 是全量账本（实盘单任务 1545 行 / 1.43 MB，且随任务增长），
         # 而 summarize_runtime_snapshot 只读 task / root_node / frontier——建完就丢。
