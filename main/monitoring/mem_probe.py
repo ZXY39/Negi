@@ -27,7 +27,31 @@ MARKER_NAME = 'mem-probe.on'
 OUTPUT_DIR_NAME = 'mem-probe'
 DEFAULT_INTERVAL_SECONDS = 10.0
 DEFAULT_TOP_LIMIT = 12
-_NFRAMES = 1
+DEFAULT_FRAMES = 1
+DEFAULT_DUMP_LIMIT = 40
+
+
+def _int_env(name: str, default: int, *, minimum: int) -> int:
+    raw = str(os.environ.get(name) or '').strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
+def _dump_threshold_bytes() -> int:
+    """`G3KU_MEM_PROBE_DUMP_MB`>0 时被跟踪驻留越过该阈值就落一份调用链快照（每进程一次）。"""
+    raw = str(os.environ.get('G3KU_MEM_PROBE_DUMP_MB') or '').strip()
+    if not raw:
+        return 0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 0
+    return int(value * 1048576) if value > 0 else 0
 
 
 def mem_probe_marker(runtime_dir: Path) -> Path:
@@ -47,17 +71,6 @@ def _interval_seconds() -> float:
     except ValueError:
         return DEFAULT_INTERVAL_SECONDS
     return value if value >= 1 else DEFAULT_INTERVAL_SECONDS
-
-
-def _top_limit() -> int:
-    raw = str(os.environ.get('G3KU_MEM_PROBE_TOP_LIMIT') or '').strip()
-    if not raw:
-        return DEFAULT_TOP_LIMIT
-    try:
-        value = int(raw)
-    except ValueError:
-        return DEFAULT_TOP_LIMIT
-    return value if value >= 1 else DEFAULT_TOP_LIMIT
 
 
 def _process_memory_mb() -> tuple[float, float]:
@@ -87,10 +100,23 @@ def _top_entries(stats) -> list[dict[str, object]]:
 class MemProbe:
     """按固定间隔落一行 JSONL；失败只停自己，绝不影响被观测的进程。"""
 
-    def __init__(self, *, output_path: Path, interval_seconds: float, top_limit: int) -> None:
+    def __init__(
+        self,
+        *,
+        output_path: Path,
+        interval_seconds: float,
+        top_limit: int,
+        frames: int = DEFAULT_FRAMES,
+        dump_threshold_bytes: int = 0,
+        dump_limit: int = DEFAULT_DUMP_LIMIT,
+    ) -> None:
         self._output_path = Path(output_path)
         self._interval_seconds = float(interval_seconds)
         self._top_limit = int(top_limit)
+        self._frames = int(frames)
+        self._dump_threshold_bytes = int(dump_threshold_bytes)
+        self._dump_limit = int(dump_limit)
+        self._dumped = False
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._previous_snapshot = None
@@ -101,7 +127,7 @@ class MemProbe:
             return
         self._stop_event.clear()
         if not tracemalloc.is_tracing():
-            tracemalloc.start(_NFRAMES)
+            tracemalloc.start(self._frames)
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
         self._thread = threading.Thread(
             target=self._thread_main,
@@ -140,6 +166,27 @@ class MemProbe:
         }
         return row
 
+    def dump_path(self) -> Path:
+        return self._output_path.with_name(self._output_path.stem + '-dump.txt')
+
+    def _dump_deep_traces(self, traced_current: int) -> None:
+        """按调用链（不是单行站点）落一份驻留榜：站点榜只说"在哪申请"，这条链才说"谁在申请"。
+
+        每进程一次；要有内容，探针必须以 `G3KU_MEM_PROBE_FRAMES`>1 启动，否则链上只有一帧。
+        """
+        self._dumped = True
+        snapshot = tracemalloc.take_snapshot()
+        lines = [
+            f'# mem-probe deep dump traced_mb={traced_current / 1048576.0:.2f} '
+            f'frames={self._frames} limit={self._dump_limit}',
+        ]
+        for stat in snapshot.statistics('traceback')[: self._dump_limit]:
+            chain = ' <- '.join(reversed(stat.traceback.format()))
+            lines.append(f'{stat.size / 1048576.0:.2f}MB {stat.count}blk {chain}')
+        path = self.dump_path()
+        path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        logger.info('mem probe deep dump written: {}', path)
+
     def _thread_main(self) -> None:
         while not self._stop_event.wait(self._interval_seconds):
             try:
@@ -147,6 +194,12 @@ class MemProbe:
                 if row is not None:
                     with self._output_path.open('a', encoding='utf-8') as handle:
                         handle.write(json.dumps(row, ensure_ascii=False) + '\n')
+                if (
+                    not self._dumped
+                    and self._dump_threshold_bytes > 0
+                    and tracemalloc.get_traced_memory()[0] >= self._dump_threshold_bytes
+                ):
+                    self._dump_deep_traces(tracemalloc.get_traced_memory()[0])
             except Exception:
                 # 静默死掉的探针会让人把"没有行"当成"没有驻留"，那比没有探针更糟。
                 logger.exception('mem probe stopped sampling; rows end here: {}', self._output_path)
@@ -164,7 +217,9 @@ def start_mem_probe(*, runtime_dir: Path) -> MemProbe | None:
     probe = MemProbe(
         output_path=output_path,
         interval_seconds=_interval_seconds(),
-        top_limit=_top_limit(),
+        top_limit=_int_env('G3KU_MEM_PROBE_TOP_LIMIT', DEFAULT_TOP_LIMIT, minimum=1),
+        frames=_int_env('G3KU_MEM_PROBE_FRAMES', DEFAULT_FRAMES, minimum=1),
+        dump_threshold_bytes=_dump_threshold_bytes(),
     )
     probe.start()
     return probe

@@ -262,3 +262,32 @@ def test_mem_probe_requires_marker_and_writes_site_rows(tmp_path, monkeypatch) -
     ), rows
     assert all({'site', 'mb', 'blocks'} <= set(item) for item in row['top'])
     assert kept[0][:8] == '00000000'
+
+
+def test_mem_probe_deep_dump_needs_frames_above_one(tmp_path) -> None:
+    """阈值触发的一次性调用链快照：站点榜只说在哪申请，链才说谁在申请。"""
+    from main.monitoring.mem_probe import MemProbe
+
+    output = tmp_path / 'probe.jsonl'
+    probe = MemProbe(
+        output_path=output,
+        interval_seconds=1,
+        top_limit=5,
+        frames=8,
+        dump_threshold_bytes=1,
+    )
+    probe.start()
+    try:
+        kept = [f'{index:08d}' * 256 for index in range(500)]
+        time.sleep(1.4)
+    finally:
+        probe.stop()
+
+    dump = probe.dump_path()
+    assert dump.exists(), '越过阈值那一拍要落 deep dump'
+    text = dump.read_text(encoding='utf-8')
+    assert 'frames=8' in text
+    assert 'test_worker_observability.py' in text
+    assert ' <- ' in text, '链要有多个帧'
+    assert len(dump.read_text(encoding='utf-8').splitlines()) > 1
+    assert kept[0][:8] == '00000000'
