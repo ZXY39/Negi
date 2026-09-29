@@ -192,6 +192,41 @@ def test_singleton_replace_switches_encoding(tmp_path, policies_guard):
         store.close()
 
 
+def test_singleton_lookup_scans_only_its_own_node(tmp_path, policies_guard):
+    """单例正文查重只按 (task, node) 取行。
+
+    这条查重跑在每次帧写里（`_summarize_content` 外置正文 → `_runtime_frame_record`），
+    按整任务取行会让成本随任务节点数线性放大。
+    """
+    configure_disk_policies(DiskPolicies())
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    try:
+        artifacts = TaskArtifactStore(artifact_dir=tmp_path / 'artifacts', store=store)
+        for index in range(20):
+            artifacts.create_text_artifact(
+                task_id='task:t1',
+                node_id=f'node:other{index}',
+                kind='node_output',
+                title='other',
+                content='x' * 40,
+            )
+        first = artifacts.create_or_replace_singleton_text_artifact(
+            task_id='task:t1', node_id='node:n1', kind='task_runtime_messages', title='frames', content='a' * 10,
+        )
+
+        def _no_whole_task_scan(*_args, **_kwargs):
+            raise AssertionError('singleton 查重不得整任务扫 artifacts')
+
+        store.list_artifacts = _no_whole_task_scan  # type: ignore[method-assign]
+        second = artifacts.create_or_replace_singleton_text_artifact(
+            task_id='task:t1', node_id='node:n1', kind='task_runtime_messages', title='frames', content='b' * 12,
+        )
+        assert second.artifact_id == first.artifact_id
+        assert read_artifact_text(second) == 'b' * 12
+    finally:
+        store.close()
+
+
 # 6. 终态清理：保留清单 + 后台清理体
 
 

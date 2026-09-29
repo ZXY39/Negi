@@ -840,6 +840,20 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, artifact_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskArtifactRecord) for row in rows]
 
+    def list_artifacts_for_node(self, task_id: str, node_id: str | None) -> list[TaskArtifactRecord]:
+        """按 (task, node) 取 artifact 行；node_id 为空即任务级（NULL）。
+
+        单例正文 artifact 的查重要走这条：`list_artifacts(task_id)` 会把整任务
+        几百行读出来逐行 pydantic 解析，而它在每次帧写里都会被调用一次。
+        """
+        normalized_node_id = str(node_id or '').strip() or None
+        rows = self._fetchall(
+            'SELECT payload_json FROM artifacts WHERE task_id = ? AND node_id IS ? '
+            'ORDER BY created_at ASC, artifact_id ASC',
+            (task_id, normalized_node_id),
+        )
+        return [self._parse(row['payload_json'], TaskArtifactRecord) for row in rows]
+
     def delete_artifacts_by_ids(self, artifact_ids: list[str]) -> int:
         """按 id 批量删除 artifact 行（文件删除由调用方完成）。幂等；500/批防 SQL 变量上限。"""
         ids = sorted({str(item or '').strip() for item in (artifact_ids or []) if str(item or '').strip()})

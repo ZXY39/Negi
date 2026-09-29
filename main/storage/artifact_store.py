@@ -240,6 +240,9 @@ class TaskArtifactStore:
     def list_artifacts(self, task_id: str) -> list[TaskArtifactRecord]:
         return self._store.list_artifacts(task_id)
 
+    def list_artifacts_for_node(self, task_id: str, node_id: str | None) -> list[TaskArtifactRecord]:
+        return self._store.list_artifacts_for_node(task_id, node_id)
+
     def get_artifact(self, artifact_id: str) -> TaskArtifactRecord | None:
         return self._store.get_artifact(artifact_id)
 
@@ -282,7 +285,7 @@ class TaskArtifactStore:
     ) -> TaskArtifactRecord | None:
         normalized_node_id = str(node_id or '').strip() or None
         normalized_kind = str(kind or '').strip()
-        for artifact in self.list_artifacts(task_id):
+        for artifact in self.list_artifacts_for_node(task_id, normalized_node_id):
             if str(getattr(artifact, 'kind', '') or '').strip() != normalized_kind:
                 continue
             artifact_node_id = str(getattr(artifact, 'node_id', '') or '').strip() or None
