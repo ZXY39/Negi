@@ -316,8 +316,36 @@ async def test_frame_rewrite_with_same_content_pushes_no_live_patch(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_frame_writers_do_not_build_runtime_state(tmp_path):
+    """帧写路径不再返回/构造整份 runtime state（135 帧实测 233ms/次，且无读者）。"""
+    service = _live_service(tmp_path)
+    reads: list[str] = []
+    real_read = type(service.log_service).read_runtime_state
+
+    def _counting_read(task_id: str):
+        reads.append(task_id)
+        return real_read(service.log_service, task_id)
+
+    service.log_service.read_runtime_state = _counting_read
+    record = await service.create_task('no state read', session_id='web:ceo-noread')
+    task_id = record.task_id
+    node_id = record.root_node_id
+
+    service.log_service.upsert_frame(task_id, {'node_id': node_id, 'phase': 'before_model'}, publish_snapshot=True)
+    service.log_service.update_frame(
+        task_id, node_id, lambda frame: {**frame, 'phase': 'after_model'}, publish_snapshot=True,
+    )
+    service.log_service.replace_runtime_frames(
+        task_id, frames=[{'node_id': node_id, 'phase': 'before_model'}],
+        active_node_ids=[node_id], publish_snapshot=True,
+    )
+    service.log_service.remove_frame(task_id, node_id, publish_snapshot=True)
+    assert reads == [], '帧写点不该再水合全任务状态'
+
+
+@pytest.mark.asyncio
 async def test_live_patch_buffer_holds_dispatched_payload_by_reference(tmp_path):
-    """缓冲与推送共用同一份 payload：整包 deepcopy 已 removed（每次 ~120ms/~18MB）。"""
+    """缓冲与推送共用同一份 payload：整包 deepcopy 已去掉（每次 ~120ms/~18MB）。"""
     configure_disk_policies(disk_guard.DiskPolicies())
     service = _live_service(tmp_path)
     envelopes: list[dict] = []

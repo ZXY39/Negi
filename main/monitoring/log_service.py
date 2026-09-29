@@ -3794,12 +3794,12 @@ class TaskLogService:
         runnable_node_ids: list[str] | set[str] | tuple[str, ...] | None = None,
         waiting_node_ids: list[str] | set[str] | tuple[str, ...] | None = None,
         publish_snapshot: bool = False,
-    ) -> dict[str, Any]:
+    ) -> None:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             if self._is_terminal_status(task.status):
                 self._store.replace_task_runtime_frames(task.task_id, [])
-                return self.read_runtime_state(task_id) or {}
+                return
             provided_frames = {
                 str(item.get('node_id') or '').strip(): self._sanitize_runtime_frame(item)
                 for item in list(frames or [])
@@ -3837,7 +3837,6 @@ class TaskLogService:
             self._projector.replace_runtime_frames(task.task_id, frame_records)
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task)
-            return self.read_runtime_state(task_id) or {}
 
     def read_runtime_state(self, task_id: str) -> dict[str, Any] | None:
         task = self._store.get_task(task_id)
@@ -3867,24 +3866,21 @@ class TaskLogService:
         record = self._store.get_task_runtime_frame(task_id, node_id)
         return self._hydrate_runtime_frame_record(record) if record is not None else None
 
-    def upsert_frame(self, task_id: str, frame: dict[str, Any], *, publish_snapshot: bool = False) -> dict[str, Any]:
+    def upsert_frame(self, task_id: str, frame: dict[str, Any], *, publish_snapshot: bool = False) -> None:
         started_at = _precise_now_iso()
         started_mono = time.perf_counter()
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             if self._is_terminal_status(task.status):
                 self._store.replace_task_runtime_frames(task.task_id, [])
-                result = self.read_runtime_state(task_id) or {}
                 self._record_debug('log_service.upsert_frame', started_at=started_at, started_mono=started_mono)
-                return result
+                return
             sanitized = self._sanitize_runtime_frame(frame)
             record = self._runtime_frame_record(task=task, frame=sanitized)
             self._store.upsert_task_runtime_frame(record)
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task, frame=record)
-            result = self.read_runtime_state(task_id) or {}
             self._record_debug('log_service.upsert_frame', started_at=started_at, started_mono=started_mono)
-            return result
 
     def update_frame(
         self,
@@ -3893,16 +3889,15 @@ class TaskLogService:
         frame_mutator: Callable[[dict[str, Any]], dict[str, Any]],
         *,
         publish_snapshot: bool = False,
-    ) -> dict[str, Any]:
+    ) -> None:
         started_at = _precise_now_iso()
         started_mono = time.perf_counter()
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             if self._is_terminal_status(task.status):
                 self._store.replace_task_runtime_frames(task.task_id, [])
-                result = self.read_runtime_state(task_id) or {}
                 self._record_debug('log_service.update_frame', started_at=started_at, started_mono=started_mono)
-                return result
+                return
             current = self._store.get_task_runtime_frame(task_id, node_id)
             target = self._hydrate_runtime_frame_record(current) if current is not None else self._default_frame(node_id=node_id)
             mutated = frame_mutator(copy.deepcopy(target))
@@ -3916,11 +3911,9 @@ class TaskLogService:
                 # 内容没变的一整次 no-op 写（重复 await 标记、同值回填）不再推 live.patch：
                 # 一次推送要组装全任务摘要，成本按节点数走。
                 self._publish_task_live_patch_locked(task=task, frame=record)
-            result = self.read_runtime_state(task_id) or {}
             self._record_debug('log_service.update_frame', started_at=started_at, started_mono=started_mono)
-            return result
 
-    def remove_frame(self, task_id: str, node_id: str, *, publish_snapshot: bool = False) -> dict[str, Any]:
+    def remove_frame(self, task_id: str, node_id: str, *, publish_snapshot: bool = False) -> None:
         with self._task_lock(task_id):
             task = self._require_task(task_id)
             current = self._store.get_task_runtime_frame(task_id, node_id)
@@ -3973,7 +3966,6 @@ class TaskLogService:
             self._store.delete_task_runtime_frame(task_id, node_id)
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task, removed_node_id=node_id)
-            return self.read_runtime_state(task_id) or {}
 
     def refresh_task_view(self, task_id: str, *, mark_unread: bool) -> TaskRecord | None:
         started_at = _precise_now_iso()
