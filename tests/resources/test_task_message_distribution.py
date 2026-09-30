@@ -1182,6 +1182,54 @@ async def test_resume_after_failed_distribution_downgrades_to_resume_ready(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_frozen_drain_ledger_survives_meta_republish(tmp_path: Path) -> None:
+    """排空账本要跟 meta 一起写：整包通道漏掉这个键 = 每波刷新把 epoch 里已记的账擦成空。
+
+    实盘形态（task:1d9cddf9858e，2026-09-30）：epoch 行 `frozen_node_ids` 已 173 条，
+    而横幅读的那份 meta 是 0，因为驱动侧唯一写入口与每波决策落库处都只重算了 blocked。
+    """
+    service = _build_service(tmp_path)
+    try:
+        record = await service.create_task("整理重点客户流失信号", session_id="web:ceo-demo")
+        epoch = service.store.upsert_task_message_distribution_epoch(
+            TaskMessageDistributionEpoch(
+                epoch_id="epoch:ledger-demo",
+                task_id=record.task_id,
+                root_node_id=record.root_node_id,
+                root_message="外网注意使用 clash 端口 7897",
+                state="distributing",
+                created_at=now_iso(),
+                payload={
+                    "target_node_ids": [record.root_node_id],
+                    "barrier_node_ids": [record.root_node_id, "node:child-a"],
+                    "frozen_node_ids": ["node:child-a", record.root_node_id],
+                },
+            )
+        )
+
+        # ① 从权威 epoch 行重建的读数通道必须带分子，否则横幅恒为 0/N
+        state = service._task_distribution_state(record.task_id)
+        assert set(state["frozen_node_ids"]) == {record.root_node_id, "node:child-a"}
+
+        # ② 驱动侧全量覆盖 meta 之后，账本不能被整包通道吃掉
+        service.task_actor_service._publish_distribution_meta(
+            record.task_id,
+            epoch_id=epoch.epoch_id,
+            state="distributing",
+            targets=[record.root_node_id],
+            frontier=["node:child-a"],
+            blocked=[record.root_node_id, "node:child-a"],
+            pending_notice=[record.root_node_id],
+        )
+        meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
+        published = meta.get("distribution") or {}
+        assert set(published.get("blocked_node_ids") or []) == {record.root_node_id, "node:child-a"}
+        assert set(published.get("frozen_node_ids") or []) == {record.root_node_id, "node:child-a"}
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_task_distribution_state_surfaces_latest_failed_epoch_while_paused(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     try:

@@ -3453,6 +3453,13 @@ class NodeRunner:
                     for item in list(distribution.get('blocked_node_ids') or [])
                     if str(item or '').strip()
                 ],
+                # 排空账本取 epoch 行，不取 meta 副本：meta 是整包通道，这一项漏写
+                # 就等于每波决策都把 `record_frozen_node_id` 写进去的账本擦一次。
+                'frozen_node_ids': [
+                    str(item or '').strip()
+                    for item in list(epoch_payload.get('frozen_node_ids') or [])
+                    if str(item or '').strip()
+                ],
                 'pending_notice_node_ids': [
                     str(item or '').strip()
                     for item in list(distribution.get('pending_notice_node_ids') or [])

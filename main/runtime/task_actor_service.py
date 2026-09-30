@@ -1571,6 +1571,10 @@ class TaskActorService:
                 'target_node_ids': [str(item or '').strip() for item in list(targets or []) if str(item or '').strip()],
                 'frontier_node_ids': [str(item or '').strip() for item in list(frontier or []) if str(item or '').strip()],
                 'blocked_node_ids': blocked_ids,
+                # 排空账本随本入口一起重算：meta 的 distribution 是整包通道，这个字典
+                # 没列出的键会被 `_sanitize_distribution_state` 吃掉——漏写就等于每波驱动
+                # 刷新都把 `record_frozen_node_id` 刚写进来的账本擦成空（横幅分子恒 0）。
+                'frozen_node_ids': self._epoch_frozen_ledger(task_id, epoch_id),
                 'pending_notice_node_ids': (
                     [str(item or '').strip() for item in list(pending_notice or []) if str(item or '').strip()]
                     if pending_notice is not None
@@ -1583,6 +1587,24 @@ class TaskActorService:
                 'error_text': str(error_text or '').strip(),
             },
         )
+
+    def _epoch_frozen_ledger(self, task_id: str, epoch_id: str) -> list[str]:
+        """从权威 epoch 行读排空账本（`record_frozen_node_id` 的落点）。
+
+        账本的单一真源是 epoch 行，meta 只是给读路径的副本——所以重启后也能重建，
+        不依赖进程内状态。取不到就返回空列表：这是读数通道，绝不让控制流失败。
+        """
+        normalized_epoch_id = str(epoch_id or '').strip()
+        if not normalized_epoch_id:
+            return []
+        try:
+            epoch = self._store.get_task_message_distribution_epoch(str(task_id or '').strip(), normalized_epoch_id)
+            if epoch is None:
+                return []
+            payload = dict(epoch.payload or {}) if isinstance(epoch.payload, dict) else {}
+            return _sorted_unique_node_ids(payload.get('frozen_node_ids'))
+        except Exception:
+            return []
 
     def _reset_stall_clock(self, task_id: str) -> None:
         notifier = self._stall_notifier

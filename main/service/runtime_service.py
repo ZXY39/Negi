@@ -3821,6 +3821,11 @@ class MainRuntimeService:
                         for item in list(failed_payload.get('pending_notice_node_ids') or [])
                         if str(item or '').strip()
                     ]
+                    failed_frozen = [
+                        str(item or '').strip()
+                        for item in list(failed_payload.get('frozen_node_ids') or [])
+                        if str(item or '').strip()
+                    ]
                     if not failed_pending:
                         failed_pending = list(failed_targets)
                     if not failed_pending:
@@ -3833,6 +3838,7 @@ class MainRuntimeService:
                         'target_node_ids': failed_targets,
                         'frontier_node_ids': [],
                         'blocked_node_ids': failed_barrier,
+                        'frozen_node_ids': failed_frozen,
                         'pending_notice_node_ids': failed_pending,
                         'queued_epoch_count': 0,
                         'pending_mailbox_count': 0,
@@ -3852,6 +3858,7 @@ class MainRuntimeService:
             )
         frontier_node_ids = []
         blocked_node_ids = []
+        frozen_node_ids = []
         pending_notice_node_ids = []
         target_node_ids = []
         mode = ''
@@ -3860,6 +3867,12 @@ class MainRuntimeService:
             frontier_node_ids = [
                 str(item or '').strip()
                 for item in list(active.payload.get('frontier_node_ids') or [])
+                if str(item or '').strip()
+            ]
+            # 排空账本与 blocked 同源于 epoch 行：只搬 blocked 的话，横幅分子恒 0。
+            frozen_node_ids = [
+                str(item or '').strip()
+                for item in list(active.payload.get('frozen_node_ids') or [])
                 if str(item or '').strip()
             ]
             target_node_ids = [
@@ -3897,6 +3910,7 @@ class MainRuntimeService:
             'target_node_ids': target_node_ids,
             'frontier_node_ids': frontier_node_ids,
             'blocked_node_ids': blocked_node_ids,
+            'frozen_node_ids': frozen_node_ids,
             'pending_notice_node_ids': pending_notice_node_ids,
             'queued_epoch_count': queued_epoch_count,
             'pending_mailbox_count': pending_mailbox_count,
