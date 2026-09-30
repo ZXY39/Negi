@@ -6317,3 +6317,81 @@ def test_task_recovery_notice_dismissal_survives_page_reload() -> None:
     # 记账按提示文本，文案换版后老任务会再提示一次。
     assert result["rewordedShown"] is True
     assert result["stored"] == {"task:crashed": "本任务遇到异常停止，已回退到稳定步骤继续。"}
+
+
+def test_fit_task_tree_anchors_root_when_tree_cannot_fit() -> None:
+    """树大到 TREE_SCALE_MIN 也放不下时，fit 必须把根节点摆进视野。
+
+    回归：几百节点的宽幅组织图（实测内容 40488×2347）需要 scale 0.013，被夹到 0.12，
+    旧实现仍居中"内容盒"——内容中心是分支之间的空白，用户看到整片空树。
+    """
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+
+        const pan = { offsetX: 0, offsetY: 0, baseOffsetX: 0, baseOffsetY: 0, baseScale: 1, scale: 1 };
+        global.S = { treeRootNodeId: "node:root", treePan: pan };
+        class Element {}
+        class HTMLElement extends Element {}
+        global.Element = Element;
+        global.HTMLElement = HTMLElement;
+        // clamp 与两个缩放常量定义在 org_graph_app.js，本用例只加载 task_view.js
+        global.TREE_SCALE_MIN = 0.12;
+        global.TREE_SCALE_MAX = 3.5;
+        global.clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+        const VIEW = { left: 0, top: 0, width: 600, height: 120 };
+        const LAYOUT = { treeW: 40000, treeH: 2000, rootX: 100, rootY: 20, rootW: 26, rootH: 14 };
+        const rect = (left, top, width, height) => ({
+          left, top, width, height, right: left + width, bottom: top + height,
+        });
+
+        const rootEl = new HTMLElement();
+        rootEl.getBoundingClientRect = () => rect(
+          pan.offsetX + pan.scale * LAYOUT.rootX,
+          pan.offsetY + pan.scale * LAYOUT.rootY,
+          pan.scale * LAYOUT.rootW,
+          pan.scale * LAYOUT.rootH,
+        );
+        const content = new HTMLElement();
+        content.getBoundingClientRect = () => rect(
+          pan.offsetX, pan.offsetY, pan.scale * LAYOUT.treeW, pan.scale * LAYOUT.treeH,
+        );
+        const wrapper = new HTMLElement();
+        wrapper.style = {};
+        wrapper.firstElementChild = content;
+        wrapper.getBoundingClientRect = () => rect(
+          pan.offsetX, pan.offsetY, pan.scale * LAYOUT.treeW, pan.scale * LAYOUT.treeH,
+        );
+        global.U = {
+          tree: {
+            getBoundingClientRect: () => rect(VIEW.left, VIEW.top, VIEW.width, VIEW.height),
+            querySelector: (selector) => {
+              if (String(selector).includes("node:root")) return rootEl;
+              if (String(selector) === ".execution-tree") return wrapper;
+              return null;
+            },
+          },
+        };
+        global.executionTreeNodeSelector = (nodeId) => `.execution-tree-node[data-id="${nodeId}"]`;
+
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8"));
+        const applied = fitTaskTreeToView();
+        const rootRect = rootEl.getBoundingClientRect();
+        console.log(JSON.stringify({
+          applied,
+          scale: pan.scale,
+          transform: wrapper.style.transform,
+          rootCenterX: rootRect.left + rootRect.width / 2,
+          rootCenterY: rootRect.top + rootRect.height / 2,
+          viewCenter: [VIEW.left + VIEW.width / 2, VIEW.top + VIEW.height / 2],
+        }));
+        """
+    )
+
+    assert result["applied"] is True
+    assert abs(float(result["scale"]) - 0.12) < 1e-6, "放不下时应停在 TREE_SCALE_MIN 下限"
+    assert abs(float(result["rootCenterX"]) - float(result["viewCenter"][0])) < 1.0
+    assert abs(float(result["rootCenterY"]) - float(result["viewCenter"][1])) < 1.0

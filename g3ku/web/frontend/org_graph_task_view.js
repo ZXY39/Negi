@@ -3046,15 +3046,22 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
     const availW = viewport.width - marginPx * 2;
     const availH = viewport.height - marginPx * 2;
     if (availW <= 0 || availH <= 0 || treeW <= 0 || treeH <= 0) return false;
-    const nextScale = clamp(
-        Math.min(availW / treeW, availH / treeH, 1),
-        TREE_SCALE_MIN,
-        TREE_SCALE_MAX,
-    );
+    const fitScale = Math.min(availW / treeW, availH / treeH, 1);
+    const nextScale = clamp(fitScale, TREE_SCALE_MIN, TREE_SCALE_MAX);
+    // 树大到连 TREE_SCALE_MIN 都放不下时，居中"内容盒"等于把用户对准分支之间的空白：
+    // 几百节点的宽幅组织图会整片看不见（实测内容 40488×2347、视口 611×131 ⇒ 需要 0.013，
+    // 被夹到 0.12）。这时改为把根节点摆进视野：先按原公式落一次 transform，再按渲染像素
+    // 差值平移——差值法不依赖 min-scale 夹住时的 T/D 布局不变量口径。
+    const anchorRootId = fitScale < TREE_SCALE_MIN - 1e-6
+        ? String(S.treeRootNodeId || "").trim()
+        : "";
+    const anchorButton = anchorRootId
+        ? U.tree.querySelector(executionTreeNodeSelector(anchorRootId))
+        : null;
     const nextOffsetX = viewport.width / 2 - W - nextScale * (C + treeW / 2);
     const nextOffsetY = viewport.height / 2 - T - nextScale * (D + treeH / 2);
-    if (
-        Math.abs(nextScale - state.scale) < 0.001
+    if (!anchorButton
+        && Math.abs(nextScale - state.scale) < 0.001
         && Math.abs(nextOffsetX - state.offsetX) < 0.5
         && Math.abs(nextOffsetY - state.offsetY) < 0.5
     ) return true;
@@ -3065,6 +3072,18 @@ function fitTaskTreeToView({ marginPx = 40 } = {}) {
     state.baseOffsetX = nextOffsetX;
     state.baseOffsetY = nextOffsetY;
     wrapper.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px) scale(${state.scale})`;
+    if (anchorButton instanceof HTMLElement) {
+        const nodeRect = anchorButton.getBoundingClientRect();
+        const dx = (viewport.left + viewport.width / 2) - (nodeRect.left + nodeRect.width / 2);
+        const dy = (viewport.top + viewport.height / 2) - (nodeRect.top + nodeRect.height / 2);
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            state.offsetX += dx;
+            state.offsetY += dy;
+            state.baseOffsetX = state.offsetX;
+            state.baseOffsetY = state.offsetY;
+            wrapper.style.transform = `translate(${Math.round(state.offsetX)}px, ${Math.round(state.offsetY)}px) scale(${state.scale})`;
+        }
+    }
     return true;
 }
 
