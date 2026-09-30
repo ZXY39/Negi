@@ -472,7 +472,12 @@ class SubmitMessageDistributionTool(Tool):
 
     @property
     def description(self) -> str:
-        return 'Submit per-child message delivery decisions for the current distribution turn.'
+        return (
+            'Submit per-child message delivery decisions for the current distribution turn. '
+            '每个子节点恰好一条 children 决策，target_node_id 必须原样取自 live_children。'
+            '字段必填是条件式的：action=distribute（或 should_distribute=true）时该条的 message 必须非空'
+            '（写给这个子节点的话，不是给你的理由）；action=skip/terminate 时 reason 必须非空。'
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:

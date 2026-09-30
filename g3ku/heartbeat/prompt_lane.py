@@ -375,6 +375,38 @@ def _task_distribution_error_lines(event: dict[str, Any], retrieval_parts: list[
     return lines
 
 
+def _task_distribution_skipped_lines(event: dict[str, Any], retrieval_parts: list[str], *, output_inline_limit: int) -> list[str]:
+    task_id = _non_empty_text(event.get('task_id'))
+    task_title = _non_empty_text(event.get('title') or task_id) or 'task'
+    items = [dict(item) for item in list(event.get('skipped') or []) if isinstance(item, dict)]
+    count = int(event.get('skipped_count') or len(items) or 0)
+    message = _non_empty_text(event.get('root_message'))
+    if len(message) > output_inline_limit:
+        message = f"{message[:output_inline_limit].rstrip()}..."
+    _append_retrieval_parts(
+        retrieval_parts,
+        'task_distribution_skipped',
+        task_title,
+        task_id,
+        f"已跳过 {count} 个节点；消息本体：{message[:output_inline_limit]}",
+    )
+    lines = [
+        f'- Task {task_title} ({task_id}) 的消息分发已完成，但**已跳过 {count} 个节点**：'
+        '这些子树根节点的转发回合多次未提交有效决策，本轮消息没有进入它们的子树',
+        f'  消息本体（未下发给下列子树）: {message or "<空>"}',
+    ]
+    for item in items[:10]:
+        node_id = _non_empty_text(item.get('node_id'))
+        reason = _non_empty_text(item.get('reason')) or 'distribution turn failed'
+        lines.append(f'    - Node {node_id}: {reason}')
+    lines.append(
+        '  处置：这条降级**不会自动重投、也不会自动关闭**，任务与各节点都在继续跑。'
+        '若这些子树确实需要收到该消息，用定向追加通知（append notice，target 填上面的节点）逐支重投；'
+        '判断不需要就什么都不用做。'
+    )
+    return lines
+
+
 def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: int) -> tuple[str, str]:
     # 唤醒时刻锚点：模型上下文里没有其他"现在几点"来源，事件里又可能引用几小时前
     # 的时间（如 finished_at），头部给出本次唤醒的本地时间供模型直接对照。
@@ -397,6 +429,9 @@ def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: 
             continue
         if reason == "task_distribution_error":
             lines.extend(_task_distribution_error_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
+            continue
+        if reason == "task_distribution_skipped":
+            lines.extend(_task_distribution_skipped_lines(event, retrieval_parts, output_inline_limit=output_inline_limit))
             continue
         lines.extend(
             _task_terminal_lines(

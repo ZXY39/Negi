@@ -285,10 +285,17 @@ class WebSessionHeartbeatService:
         dedupe_key = str(normalized_payload.get("dedupe_key") or "").strip()
         if not session_id or not task_id or not dedupe_key:
             return False
+        # notice_kind=skipped 走独立的 event_reason：分发已完成、任务没暂停，提示词与失败态
+        # 不是一套（把降级说成失败暂停会诱导模型不再重投）。
+        reason = (
+            "task_distribution_skipped"
+            if str(normalized_payload.get("notice_kind") or "").strip().lower() == "skipped"
+            else "task_distribution_error"
+        )
         event = self._events.enqueue(
             session_id=session_id,
             source="main_runtime",
-            reason="task_distribution_error",
+            reason=reason,
             dedupe_key=dedupe_key,
             payload=dict(normalized_payload),
             delay_seconds=0.0,

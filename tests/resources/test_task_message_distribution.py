@@ -1002,7 +1002,9 @@ async def test_distribution_turn_requires_explicit_decision_for_each_live_child(
 
         refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
         assert result.status == "failed"
-        assert result.blocking_reason == "distribution_decision_missing_child_decisions"
+        assert result.blocking_reason.startswith("distribution_decision_missing_child_decisions:")
+        # 原因码要点名到具体子节点，否则一个回合覆盖多个孩子时模型无从定位
+        assert "node:" in result.blocking_reason
         assert len(backend.calls) == _DISTRIBUTION_DECISION_MAX_ATTEMPTS
         repair_messages = [
             message
@@ -1097,7 +1099,12 @@ async def test_distribution_turn_repairs_invalid_decision_on_retry(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_distribution_epoch_failure_keeps_task_paused_and_queues_root_notice(tmp_path: Path) -> None:
+async def test_distribution_exhaustion_degrades_to_skipped_and_completes_epoch(tmp_path: Path) -> None:
+    """单节点决策耗尽不再打死 epoch：降级跳过、屏障照常释放、任务不暂停。
+
+    旧合同是 `state=failed` + 任务 paused 等人工介入；一支子树的模型输出不合规
+    会把几百个节点的屏障整体冻住（09-30 实盘：235 节点继续冻结、消息只送到 85 个）。
+    """
     empty_response = SimpleNamespace(tool_calls=[], content="")
     backend = _QueuedChatBackend([empty_response] * _DISTRIBUTION_DECISION_MAX_ATTEMPTS)
     service = _build_service_with_backend(tmp_path, chat_backend=backend)
@@ -1110,7 +1117,7 @@ async def test_distribution_epoch_failure_keeps_task_paused_and_queues_root_noti
             frontier_node_ids=[root.node_id],
         )
 
-        await _drive_distribution_to_terminal(service, record.task_id)
+        outcome = await _drive_distribution_to_terminal(service, record.task_id)
 
         refreshed_epoch = service.store.get_task_message_distribution_epoch(record.task_id, epoch.epoch_id)
         latest_task = service.get_task(record.task_id)
@@ -1118,26 +1125,25 @@ async def test_distribution_epoch_failure_keeps_task_paused_and_queues_root_noti
         runtime_meta = service.log_service.read_task_runtime_meta(record.task_id) or {}
         distribution = dict(runtime_meta.get("distribution") or {})
 
+        assert outcome == "completed"
         assert refreshed_epoch is not None
-        assert refreshed_epoch.state == "failed"
-        assert refreshed_epoch.error_text == "distribution_decision_missing_child_decisions"
-        assert refreshed_epoch.payload.get("failure_node_id") == root.node_id
-        # the task must stay paused for explicit intervention — never silently resume
+        assert refreshed_epoch.state == "completed"
+        skipped = list(refreshed_epoch.payload.get("skipped_distribution_turns") or [])
+        assert [str(item.get("node_id")) for item in skipped] == [root.node_id]
+        assert str(skipped[0].get("reason")).startswith("distribution_decision_missing_child_decisions")
+        # 任务不再因为降级而暂停；屏障已释放
         assert latest_task is not None
-        assert latest_task.pause_requested is True
-        assert latest_task.is_paused is True
-        # the undistributed message stays durable as a root pending notice held for children
+        assert latest_task.pause_requested is False
+        assert latest_task.is_paused is False
+        assert distribution.get("state") == ""
+        assert distribution.get("active_epoch_id") == ""
+        # 正文不丢：落到该节点自己的 pending notice，由它后续回合消费
         pending_records = list((latest_root.metadata or {}).get("pending_append_notice_records") or [])
         assert [item["message"] for item in pending_records] == ["new global constraint"]
         pending_notice_state = dict((latest_root.metadata or {}).get(PENDING_NOTICE_STATE_KEY) or {})
         assert pending_notice_state.get("resume_mode") == RESUME_MODE_WAIT_FOR_CHILDREN
         assert pending_notice_state.get("holding_round_id") == "round-live"
-        # failure is visible in runtime meta for the operator surface
-        assert distribution.get("state") == "failed"
-        assert distribution.get("error_text") == "distribution_decision_missing_child_decisions"
-        assert distribution.get("active_epoch_id") == epoch.epoch_id
-        assert distribution.get("pending_notice_node_ids") == [root.node_id]
-        # nothing reached the live children
+        # 诚实的代价：这一支的子节点本轮确实没收到
         assert service.store.list_task_node_notifications(record.task_id, branch_a.node_id) == []
         assert service.store.list_task_node_notifications(record.task_id, branch_b.node_id) == []
     finally:
@@ -1157,8 +1163,14 @@ async def test_resume_after_failed_distribution_downgrades_to_resume_ready(tmp_p
             message="new global constraint",
             frontier_node_ids=[root.node_id],
         )
-        outcome = await _drive_distribution_to_terminal(service, record.task_id)
-        assert outcome == "failed"
+        # 单节点决策耗尽已不再产生 failed epoch（降级跳过）；failed 现在只代表
+        # 波次崩溃这类真异常，这里直接构造该形态来验证恢复侧的降级合同。
+        service.task_actor_service._fail_distribution_epoch(
+            record.task_id,
+            epoch_id=epoch.epoch_id,
+            failed_node_id=root.node_id,
+            failure_reason="distribution wave crashed",
+        )
 
         resumed = await service.resume_task(record.task_id)
 
@@ -1176,9 +1188,40 @@ async def test_resume_after_failed_distribution_downgrades_to_resume_ready(tmp_p
         # ...while the epoch row keeps the failure as the durable forensic record
         assert refreshed_epoch is not None
         assert refreshed_epoch.state == "failed"
-        assert refreshed_epoch.error_text == "distribution_decision_missing_child_decisions"
+        assert refreshed_epoch.error_text == "distribution wave crashed"
     finally:
         await service.close()
+
+
+def test_distribution_skipped_payload_uses_notice_kind_not_kind() -> None:
+    """payload 的档位键必须叫 `notice_kind`：prompt lane 解析 reason 的顺序是
+    `event_reason → kind → reason`（`g3ku/heartbeat/prompt_lane.py`），payload 里出现
+    `kind` 会把真正的 event reason 顶掉，降级提醒会落到"任务终态"那套文案里。
+    """
+    from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
+
+    normalized = normalize_task_distribution_error_payload(
+        {
+            "task_id": "task:1d9cddf9858e",
+            "session_id": "web:ceo-demo",
+            "epoch_id": "epoch:19a6f750cd85",
+            "notice_kind": "skipped",
+            "root_message": "外网注意使用clash端口7897",
+            "skipped": [
+                {"node_id": "node:623979e93a3d", "reason": "distribution_decision_missing_message:node:741f61e01d86"},
+                {"node_id": "", "reason": "ignored"},
+            ],
+        }
+    )
+    assert "kind" not in normalized
+    assert normalized["notice_kind"] == "skipped"
+    assert normalized["skipped_count"] == 1
+    assert [item["node_id"] for item in normalized["skipped"]] == ["node:623979e93a3d"]
+    assert normalized["root_message"] == "外网注意使用clash端口7897"
+
+    legacy = normalize_task_distribution_error_payload({"task_id": "task:x", "epoch_id": "epoch:x", "error_text": "boom"})
+    assert legacy["notice_kind"] == "failed"
+    assert "skipped" not in legacy
 
 
 @pytest.mark.asyncio
@@ -1506,7 +1549,8 @@ async def test_distribution_turn_terminate_requires_reason(tmp_path: Path) -> No
         result = await service.node_runner._run_distribution_node(task=task, node=root)
 
         assert result.status == "failed"
-        assert result.blocking_reason == "distribution_decision_missing_reason"
+        assert result.blocking_reason.startswith("distribution_decision_missing_reason:")
+        assert result.blocking_reason.split(":", 1)[1] in {branch_a.node_id, branch_b.node_id}
         # nothing was delivered or terminated
         assert service.store.list_task_node_notifications(record.task_id, branch_a.node_id) == []
         assert service.store.get_node(branch_b.node_id).status == "in_progress"
@@ -1562,7 +1606,7 @@ async def test_distribution_turn_rejects_invalid_action(tmp_path: Path) -> None:
         result = await service.node_runner._run_distribution_node(task=task, node=root)
 
         assert result.status == "failed"
-        assert result.blocking_reason == "distribution_decision_invalid_action"
+        assert result.blocking_reason == f"distribution_decision_invalid_action:{branch_a.node_id}"
     finally:
         await service.close()
 
@@ -4308,13 +4352,25 @@ def test_task_distribution_error_prompt_lane_renders_reminder() -> None:
 
 
 @pytest.mark.asyncio
-async def test_distribution_failure_marks_paused_and_invokes_notifier(tmp_path: Path) -> None:
+async def test_distribution_skipped_invokes_aggregate_notifier_without_pausing(tmp_path: Path) -> None:
+    """降级跳过的节点在分发结束时汇总成一条提醒交给会话 agent：任务不暂停、不自动重投。"""
     empty_response = SimpleNamespace(tool_calls=[], content="")
     backend = _QueuedChatBackend([empty_response] * _DISTRIBUTION_DECISION_MAX_ATTEMPTS)
     service = _build_service_with_backend(tmp_path, chat_backend=backend)
-    notified = []
+    failure_notified: list[tuple] = []
+    skipped_notified: list[dict] = []
     service.task_actor_service.distribution_failure_notifier = lambda task_id, epoch_id, error_text: (
-        notified.append((task_id, epoch_id, error_text))
+        failure_notified.append((task_id, epoch_id, error_text))
+    )
+    service.task_actor_service.distribution_skipped_notifier = lambda task_id, epoch_id, root_message, items: (
+        skipped_notified.append(
+            {
+                "task_id": task_id,
+                "epoch_id": epoch_id,
+                "root_message": root_message,
+                "items": list(items),
+            }
+        )
     )
     try:
         record, root, _branch_a, _branch_b = await seed_live_root_with_two_running_children(service)
@@ -4329,15 +4385,16 @@ async def test_distribution_failure_marks_paused_and_invokes_notifier(tmp_path: 
 
         latest = service.get_task(record.task_id)
         assert latest is not None
-        assert latest.pause_requested is True
-        assert latest.is_paused is True
-        assert notified == [
-            (
-                record.task_id,
-                epoch.epoch_id,
-                "distribution_decision_missing_child_decisions",
-            )
-        ]
+        assert latest.pause_requested is False
+        assert latest.is_paused is False
+        assert failure_notified == []
+        assert len(skipped_notified) == 1
+        notice = skipped_notified[0]
+        assert notice["task_id"] == record.task_id
+        assert notice["epoch_id"] == epoch.epoch_id
+        assert notice["root_message"] == "new global constraint"
+        assert [str(item.get("node_id")) for item in notice["items"]] == [root.node_id]
+        assert str(notice["items"][0].get("reason")).startswith("distribution_decision_missing_child_decisions")
     finally:
         await service.close()
 

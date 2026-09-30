@@ -200,3 +200,35 @@ def test_node_error_bundle_keeps_error_excerpt_after_failure_class_slot() -> Non
     text = str(_field(lane, "event_bundle_text"))
     assert "Error excerpt:" in text
     assert "Failure class: runtime_fault" in text
+
+
+def test_distribution_skipped_event_reads_as_degraded_not_paused() -> None:
+    """降级跳过要说清「已跳过 N 个节点 + 消息本体 + 不自动重投」，且不得说成任务暂停。"""
+    from g3ku.heartbeat.prompt_lane import build_heartbeat_prompt_lane
+
+    lane = build_heartbeat_prompt_lane(
+        provider_model="",
+        stable_rules_text="rules",
+        events=[
+            {
+                "reason": "task_distribution_skipped",
+                "notice_kind": "skipped",
+                "task_id": "task:1d9cddf9858e",
+                "title": "AI 时代行业选择研究",
+                "epoch_id": "epoch:19a6f750cd85",
+                "root_message": "外网注意使用clash端口7897",
+                "skipped_count": 2,
+                "skipped": [
+                    {"node_id": "node:623979e93a3d", "reason": "distribution_decision_missing_message:node:741f61e01d86"},
+                    {"node_id": "node:0496de93d81a", "reason": "distribution_decision_missing_child_decisions:node:a301e72969dd"},
+                ],
+            }
+        ],
+    )
+    text = str(_field(lane, "event_bundle_text"))
+    assert "已跳过 2 个节点" in text
+    assert "node:623979e93a3d" in text
+    assert "外网注意使用clash端口7897" in text
+    assert "不会自动重投" in text
+    assert "epoch state=failed" not in text
+    assert "任务已暂停" not in text

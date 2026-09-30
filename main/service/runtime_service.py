@@ -668,6 +668,14 @@ class MainRuntimeService:
                 error_text=error_text,
             )
         )
+        self.task_actor_service.distribution_skipped_notifier = (
+            lambda task_id, epoch_id, root_message, items: self.emit_task_distribution_skipped(
+                task_id=task_id,
+                epoch_id=epoch_id,
+                root_message=root_message,
+                items=items,
+            )
+        )
         self.task_actor_service.interrupted_task_requeue_callback = (
             lambda task_id: asyncio.get_running_loop().call_soon(
                 lambda normalized_task_id=str(task_id or '').strip(): asyncio.create_task(
@@ -4388,6 +4396,52 @@ class MainRuntimeService:
             "title": str(getattr(task, "title", "") or task_id).strip() or task_id,
             "epoch_id": epoch_id,
             "error_text": error_text,
+        }
+        normalized = normalize_task_distribution_error_payload(payload)
+        if not normalized:
+            return False
+        if self.execution_mode == 'worker':
+            self._enqueue_task_distribution_error_callback(normalized)
+            return True
+        loop = getattr(self, '_runtime_loop', None)
+        heartbeat = getattr(loop, 'web_session_heartbeat', None) if loop is not None else None
+        if heartbeat is None or not hasattr(heartbeat, 'enqueue_task_distribution_error_payload'):
+            return False
+        return bool(heartbeat.enqueue_task_distribution_error_payload(normalized))
+
+    def emit_task_distribution_skipped(
+        self,
+        *,
+        task_id: str,
+        epoch_id: str,
+        root_message: str,
+        items: list[dict[str, Any]],
+    ) -> bool:
+        """本轮降级跳过的子树根节点汇总：交给会话 agent，不自动重投也不自动关闭。
+
+        与 `emit_task_distribution_error` 同一条通道（worker 走 outbox 回调、web 直接入
+        心跳队列），差别只在 payload 的 `kind='skipped'`：分发 epoch 已经完成、任务并未
+        暂停，所以提示词不能写成失败暂停那一套。
+        """
+        normalized_items = [
+            {
+                'node_id': str(item.get('node_id') or '').strip(),
+                'reason': str(item.get('reason') or '').strip() or 'distribution turn failed',
+            }
+            for item in list(items or [])
+            if isinstance(item, dict) and str(item.get('node_id') or '').strip()
+        ]
+        if not normalized_items:
+            return False
+        task = self.get_task(task_id)
+        payload = {
+            'task_id': task_id,
+            'session_id': self._task_origin_session_id(task),
+            'title': str(getattr(task, 'title', '') or task_id).strip() or task_id,
+            'epoch_id': epoch_id,
+            'notice_kind': 'skipped',
+            'root_message': str(root_message or '').strip(),
+            'skipped': normalized_items,
         }
         normalized = normalize_task_distribution_error_payload(payload)
         if not normalized:

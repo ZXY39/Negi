@@ -615,6 +615,8 @@ class TaskActorService:
         }
         self.distribution_resume_callback = None
         self.distribution_failure_notifier = None
+        # 降级跳过（单节点决策耗尽）的汇总提醒：一个 epoch 一条，交给会话 agent 决策。
+        self.distribution_skipped_notifier = None
         # 引擎级中断（无取消/暂停标志的 CancelledError）后的尽力即时重排钩子：
         # 由 MainRuntimeService 接到 global_scheduler.enqueue_task。进程退出中
         # 调度器关闭时自然无效，任务由下一个 worker 启动恢复兜底。
@@ -2467,8 +2469,7 @@ class TaskActorService:
             for item in list(payload.get('frontier_node_ids') or [])
             if str(item or '').strip()
         ]
-        failure_reason = ''
-        failure_node_id = ''
+        skipped_turns: list[dict[str, str]] = []
         turn_deferred: list[str] = []
         for node_id in list(frontier):
             node = self._store.get_node(node_id)
@@ -2490,31 +2491,30 @@ class TaskActorService:
             if turn_result is None:
                 continue
             if str(getattr(turn_result, 'status', '') or '').strip().lower() == 'failed':
-                failure_reason = (
-                    str(getattr(turn_result, 'blocking_reason', '') or '').strip()
-                    or 'distribution turn failed'
+                # 一支子树的决策不合规不再打死整个 epoch：屏障覆盖几百个节点，代价远
+                # 大于收益（09-30 实盘：一个 depth 4 节点 5 次耗尽 ⇒ 235 节点继续冻结、
+                # 任务落 paused、消息只送到 85 个节点）。降级做法：把这条消息落到该节点
+                # 自己的 pending notice（正文不丢，它下一回合看得到），记进 skipped 桶，
+                # 其余 frontier 照常推进，epoch 正常 completed 并释放屏障。
+                # 不能塞进 deferred_frontier：那条语义让波次永远返回 'deferred'、
+                # 驱动器无限轮询、屏障永不释放。
+                skipped_turns.append({
+                    'node_id': node_id,
+                    'reason': (
+                        str(getattr(turn_result, 'blocking_reason', '') or '').strip()
+                        or 'distribution turn failed'
+                    ),
+                })
+                self._node_runner.queue_pending_target_distribution_notices(
+                    epoch=epoch,
+                    node_ids=[node_id],
+                    created_at=now_iso(),
                 )
-                failure_node_id = node_id
-                break
+                continue
         merged_deferred = list(dict.fromkeys([
             *([str(item or '').strip() for item in list(payload.get('deferred_frontier_node_ids') or []) if str(item or '').strip()]),
             *turn_deferred,
         ]))
-        if failure_reason:
-            refreshed = self._store.get_task_message_distribution_epoch(task_id, epoch_id)
-            if refreshed is not None:
-                refreshed_payload = dict(refreshed.payload or {})
-                refreshed_payload['deferred_frontier_node_ids'] = merged_deferred
-                self._store.upsert_task_message_distribution_epoch(
-                    refreshed.model_copy(update={'payload': refreshed_payload})
-                )
-            self._fail_distribution_epoch(
-                task_id,
-                epoch_id=epoch_id,
-                failed_node_id=failure_node_id,
-                failure_reason=failure_reason,
-            )
-            return 'failed'
         # 决策与副作用分账执行：本波新落的 resume_execution 与崩溃重放漏做的副作用
         # 走同一条补齐路径，幂等由 wave_effects 保证。
         await self._apply_notice_interrupt_effects(task_id=task_id, epoch_id=epoch_id)
@@ -2529,6 +2529,12 @@ class TaskActorService:
         ]
         payload['frontier_node_ids'] = list(next_frontier)
         payload['deferred_frontier_node_ids'] = merged_deferred
+        # 降级账本跨波累计（[{node_id, reason}]）：完成时按它给会话 agent 发一条汇总提醒。
+        payload['skipped_distribution_turns'] = self._merge_skipped_turns(
+            payload.get('skipped_distribution_turns'),
+            skipped_turns,
+        )
+        merged_skipped = list(payload['skipped_distribution_turns'])
         if next_frontier or merged_deferred:
             self._store.upsert_task_message_distribution_epoch(
                 refreshed_epoch.model_copy(update={'state': 'distributing', 'payload': payload})
@@ -2609,7 +2615,64 @@ class TaskActorService:
         self._reset_stall_clock(task_id)
         await self._resume_distribution_if_needed(task_id)
         self._clear_release_pending(task_id, epoch_id=epoch_id)
+        # 屏障已释放、树重新活起来，此刻才是把降级交给会话 agent 的时机：
+        # 它要做的动作（定向追加通知重放）需要一个非冻结的任务。
+        self._notify_distribution_skipped(
+            task_id=task_id,
+            epoch=completed_epoch,
+            items=merged_skipped,
+        )
         return 'completed'
+
+    @staticmethod
+    def _merge_skipped_turns(existing: Any, new_items: list[dict[str, str]]) -> list[dict[str, str]]:
+        """降级账本按节点去重合并（同一节点反复失败保留首次原因，波次重放不重复计）。"""
+        merged: dict[str, dict[str, str]] = {}
+        for raw in list(existing or []) + list(new_items or []):
+            if not isinstance(raw, dict):
+                continue
+            node_id = str(raw.get('node_id') or '').strip()
+            if not node_id or node_id in merged:
+                continue
+            merged[node_id] = {
+                'node_id': node_id,
+                'reason': str(raw.get('reason') or '').strip() or 'distribution turn failed',
+            }
+        return list(merged.values())
+
+    def _notify_distribution_skipped(
+        self,
+        *,
+        task_id: str,
+        epoch: Any,
+        items: list[dict[str, str]],
+    ) -> None:
+        """把本轮降级跳过的子树根节点连同消息本体交给会话 agent（一个 epoch 一条）。
+
+        不自动重投、不自动关闭：系统只把"哪一支没收到、原话是什么"报上去，
+        要不要定向追加通知由会话 agent 决定。通知失败不影响已完成的分发。
+        """
+        if not items:
+            return
+        notifier = self.distribution_skipped_notifier
+        if not callable(notifier):
+            return
+        try:
+            result = notifier(
+                task_id=str(task_id or '').strip(),
+                epoch_id=str(getattr(epoch, 'epoch_id', '') or '').strip(),
+                root_message=self._node_runner._distribution_root_message(epoch=epoch),
+                items=list(items),
+            )
+            if asyncio.iscoroutine(result):
+                asyncio.get_running_loop().create_task(result)
+        except Exception:
+            logger.warning(
+                'distribution skipped notifier failed: task={} epoch={} skipped={}',
+                task_id,
+                str(getattr(epoch, 'epoch_id', '') or '').strip(),
+                len(items),
+            )
 
     async def _run_final_acceptance_if_needed(self, task_id: str) -> NodeFinalResult:
         task = self._store.get_task(task_id)

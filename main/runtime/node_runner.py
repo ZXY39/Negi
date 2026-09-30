@@ -2727,6 +2727,7 @@ class NodeRunner:
             '对 live_children 清单中的每一个子节点提交恰好一条 children 决策，'
             'target_node_id 必须原样取自清单且全部覆盖，不能遗漏或重复；'
             'action=distribute 时 message 必须非空，action=skip/terminate 时 reason 必须非空。'
+            '括号里 `:node:` 之后就是需要修正的那一条子决策，只改它、其余原样保留。'
             '不要输出解释性普通文本，不要调用其他工具，现在重新提交完整决策。'
         )
 
@@ -2736,6 +2737,12 @@ class NodeRunner:
         submitted_children: list[Any],
         live_child_node_ids: list[str],
     ) -> str:
+        """返回原因码；单条子决策的问题一律带 `:node:xxx` 点名。
+
+        一个回合要覆盖 4-10 个子节点，只回笼统 token 时模型无从定位，实测会把它
+        推到 5 次耗尽（09-29/09-30 实盘：50 个回合 51 次校验失败）。原因码本体保持
+        前缀不变，便于按 token 归类。
+        """
         expected_child_ids = [
             str(item or '').strip()
             for item in list(live_child_node_ids or [])
@@ -2752,25 +2759,30 @@ class NodeRunner:
                 return 'distribution_decision_invalid_child_decision'
             target_node_id = str(item.get('target_node_id') or '').strip()
             if not target_node_id or target_node_id not in expected:
-                return 'distribution_decision_invalid_child_target'
+                return f'distribution_decision_invalid_child_target:{target_node_id or "<empty>"}'
             if target_node_id in seen:
-                return 'distribution_decision_duplicate_child_decision'
+                return f'distribution_decision_duplicate_child_decision:{target_node_id}'
             seen.add(target_node_id)
             if not isinstance(item.get('should_distribute'), bool):
-                return 'distribution_decision_missing_should_distribute'
+                return f'distribution_decision_missing_should_distribute:{target_node_id}'
             raw_action = str(item.get('action') or '').strip().lower()
             if raw_action and raw_action not in _DISTRIBUTION_ACTION_VALUES:
-                return 'distribution_decision_invalid_action'
+                return f'distribution_decision_invalid_action:{target_node_id}'
             action = NodeRunner._resolve_distribution_action(item)
             message = str(item.get('message') or '').strip()
             reason = str(item.get('reason') or '').strip()
             if action == DISTRIBUTION_ACTION_DISTRIBUTE:
                 if not message:
-                    return 'distribution_decision_missing_message'
+                    return f'distribution_decision_missing_message:{target_node_id}'
             elif not reason:
-                return 'distribution_decision_missing_reason'
+                return f'distribution_decision_missing_reason:{target_node_id}'
         if seen != expected:
-            return 'distribution_decision_missing_child_decisions'
+            missing = [
+                child_id
+                for child_id in expected_child_ids
+                if child_id not in seen
+            ]
+            return f'distribution_decision_missing_child_decisions:{",".join(missing[:3])}'
         return ''
 
     def _distribution_root_message(self, *, epoch) -> str:
