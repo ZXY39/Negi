@@ -133,7 +133,7 @@
 - 只有真正改写指纹树之外的记忆相关设置时才显式传 `True`：`run_llm_migration`、`model_config.migrate_legacy`，以及 `update_llm_config` 命中的是绑定引用的记录时。
 - 原因：强制重置会在回合进行中重置 memory manager 与 commit service，干扰在途会话的记忆读写；因此纯模型路由/链调整不应强制重置。
 
-还要额外记住一个运行时边界——模型链变更何时作用于在途回合：
+### 模型链变更何时作用于在途回合
 
 - 配置刷新不会把一个“已经发出去的单次 provider 请求”中途热切换到新模型；切换只作用于边界处重建的下一个请求。
 - CEO/frontdoor 在每次 `call_model` 迭代边界（含 provider-failure retry / empty-response retry 边界）对比 runtime revision：revision 变化时重新解析当前角色模型链并写回轮状态，下一次 provider 请求、上下文窗口估算与绑定模型链的能力判定（如 `content_open` 的多模态闸门）都跟随新链。轮状态用 `model_refs_revision` 记录解析时的 revision，作为下一次边界对比的基线。

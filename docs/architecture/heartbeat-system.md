@@ -22,6 +22,9 @@ This document describes the maintenance boundary around the Web CEO heartbeat pa
 - If no authoritative frontdoor baseline exists yet, internal turns fall back to the ordinary CEO/frontdoor exposure assembly path for that round.
 - Recovery of that baseline follows one strict restore order before a heartbeat turn runs: paused snapshot, then inflight snapshot, then completed continuity sidecar, then latest actual-request artifact. A stale sidecar lacking `frontdoor_request_body_messages` does not block recovery from a richer later source.
 - Heartbeat still appends two hidden durable messages before the model call: a `system` rule message and a `user` event-bundle message. The rule text lives only in the `system` message; the `user` message carries the `[SESSION EVENTS]` bundle alone, so the rules text is never duplicated into the user turn.
+
+### Internal-turn time anchors
+
 - Internal-turn time anchors: the model context has no other "what time is it now" source, so internal injections carry pre-converted local wall-clock time (UTC offset + weekday, via `g3ku/core/timefmt.py`). The event bundle header carries the wakeup moment right after the `[SESSION EVENTS]` / `## EVENT BUNDLE` markers (markers stay first — compaction and startswith detection depend on them). The cron rule message carries the delivery moment plus an instruction to read dates from these fields instead of mentally converting epoch milliseconds. The cron event block keeps the raw `*_ms` fields and adds converted `delivered_at_local` / `scheduled_run_at_local` / `last_delivered_at_local` siblings; dispatch metadata `cron_delivered_at_ms` is the single delivery-time source shared by the live seed and the persisted transcript, so both render identical text.
 - Cron appends two hidden durable `system` messages:
   - a cron rule message
