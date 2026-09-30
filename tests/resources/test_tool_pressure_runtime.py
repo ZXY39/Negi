@@ -902,8 +902,13 @@ async def test_entry_gate_bounds_concurrent_node_turns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_entry_gate_follows_pressure_state_and_disk_emergency() -> None:
-    """critical 收到 1、磁盘紧急收到 0、恢复按步抬回天花板。"""
+async def test_entry_gate_ignores_tool_pressure_state_and_yields_only_to_disk_emergency() -> None:
+    """回合闸不再被工具压力状态踩到地板以下。
+
+    实盘（09-30 17:06:15）：一次 141 秒的 SQLite 读让 budget 落 critical，双闸被踩成 1/1
+    约 9 分钟，而那时内存与上游都还空着——工具槽量的是"一次工具调用"的积压，不该决定
+    同时在物化上下文的执行器数。现在只有磁盘紧急还能把回合闸直接踩到 0。
+    """
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     controller.configure_entry_ceilings({'execution': 3})
 
@@ -924,7 +929,10 @@ async def test_entry_gate_follows_pressure_state_and_disk_emergency() -> None:
     assert not blocked.is_set()
 
     controller.critical()
-    assert controller.entry_snapshot()['execution']['limit'] == 1
+    assert controller.entry_snapshot()['execution']['limit'] == 3
+
+    controller.throttle()
+    assert controller.entry_snapshot()['execution']['limit'] == 3
 
     controller.set_disk_emergency(True)
     assert controller.entry_snapshot()['execution']['limit'] == 0
@@ -942,11 +950,14 @@ async def test_entry_gate_follows_pressure_state_and_disk_emergency() -> None:
 
 
 @pytest.mark.asyncio
-async def test_entry_gate_climbs_above_configured_floor_while_demand_exists() -> None:
-    """配置值是地板不是上限：闸口还有排队时，easing 每格 +1 要能越过地板。"""
+async def test_entry_gate_follows_published_target_with_slew() -> None:
+    """目标是资源判据，跳幅才是控制：上行每拍最多 +2，下行每拍 -1。
+
+    一次模型调用实测 p50 37 s / p90 84 s，反馈远慢于 1 s 采样；不限跳幅就会在上一拍的
+    后果可见之前继续放人（凌晨那次 90 秒爬到 27 格、Private 2.4 GB 的形态）。
+    """
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     controller.configure_entry_ceilings({'execution': 2})
-
     await controller.acquire_entry_slot(role='execution')
     await controller.acquire_entry_slot(role='execution')
 
@@ -960,26 +971,27 @@ async def test_entry_gate_climbs_above_configured_floor_while_demand_exists() ->
     pending = asyncio.create_task(waiter())
     await asyncio.sleep(0.05)
     assert not admitted.is_set()
-    assert controller.entry_snapshot()['execution']['limit'] == 2
 
-    assert controller.step_entry_easing() is True
-    assert controller.entry_snapshot()['execution']['limit'] == 3
+    assert controller.set_entry_targets({'execution': 6}) == {'execution': 4}
     await asyncio.wait_for(pending, timeout=2)
     assert admitted.is_set()
-    # 只抬回合闸，不带动工具槽
+    # 只动回合闸，不带动工具槽
     assert controller.snapshot()['tool_pressure_target_limit'] == 1
+
+    assert controller.set_entry_targets({'execution': 6}) == {'execution': 6}
+    assert controller.set_entry_targets({'execution': 1}) == {'execution': 5}
+    assert controller.set_entry_targets({'execution': 1}) == {'execution': 4}
 
 
 @pytest.mark.asyncio
 async def test_entry_gate_resets_to_floor_when_queue_drains() -> None:
-    """排空后必须回到地板：下一次风暴从地板按格爬，不继承上次的高水位一次放出（21:31 形态）。"""
+    """排空后回到地板：下一次风暴不继承上次的高水位一次放出去（21:31 无闸事故的形态）。"""
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     controller.configure_entry_ceilings({'execution': 2})
 
     await controller.acquire_entry_slot(role='execution')
     await controller.acquire_entry_slot(role='execution')
-    controller.step_entry_easing()
-    controller.step_entry_easing()
+    assert controller.set_entry_targets({'execution': 9}) == {'execution': 4}
     snapshot = controller.entry_snapshot()['execution']
     assert snapshot['limit'] == 4
     assert snapshot['running'] == 2
@@ -996,139 +1008,30 @@ async def test_entry_gate_resets_to_floor_when_queue_drains() -> None:
     assert snapshot['limit'] == 2
 
 
-@pytest.mark.asyncio
-async def test_entry_gate_high_water_freezes_on_throttle_and_collapses_on_critical() -> None:
-    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
-    controller.configure_entry_ceilings({'execution': 1})
-
-    await controller.acquire_entry_slot(role='execution')
-    controller.step_entry_easing()
-    await controller.acquire_entry_slot(role='execution')
-    controller.step_entry_easing()
-    await controller.acquire_entry_slot(role='execution')
-    assert controller.entry_snapshot()['execution']['limit'] == 3
-    assert controller.entry_snapshot()['execution']['running'] == 3
-
-    controller.throttle()
-    assert controller.entry_snapshot()['execution']['limit'] == 3
-
-    controller.critical()
-    assert controller.entry_snapshot()['execution']['limit'] == 1
-
-    controller.set_budget_state('normal')
-    assert controller.entry_snapshot()['execution']['limit'] == 1
-
-
 def test_configure_entry_ceilings_clamps_high_water_only_when_floor_changed() -> None:
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     controller.configure_entry_ceilings({'execution': 8})
-    for _ in range(4):
-        controller.step_entry_easing()
+    controller.set_entry_targets({'execution': 20})
+    controller.set_entry_targets({'execution': 20})
     assert controller.entry_snapshot()['execution']['limit'] == 12
 
+    # 同一份配置的刷新：保留已经爬到的位置（operator 没改意图）
     controller.configure_entry_ceilings({'execution': 8})
     assert controller.entry_snapshot()['execution']['limit'] == 12
 
-    controller.configure_entry_ceilings({'execution': 4})
-    assert controller.entry_snapshot()['execution']['limit'] == 4
+    # 地板本身变了：当场钳到新地板（operator 改数就是改意图）
+    controller.configure_entry_ceilings({'execution': 5})
+    assert controller.entry_snapshot()['execution']['limit'] == 5
 
 
-@pytest.mark.asyncio
-async def test_monitor_steps_entry_gate_from_gate_queue_without_tool_waiters() -> None:
-    """回合闸的向上车道必须看自己的排队数：工具队列常年为空时，只看 tool waiting 会锁死这条道。"""
-    store = _FakeStore()
-    controller = AdaptiveToolBudgetController(normal_limit=2, throttled_limit=2, critical_limit=1, step_up=1)
-    monitor = _entry_climb_monitor(controller, store)
-    controller.configure_entry_ceilings({'execution': 1})
-    await controller.acquire_entry_slot(role='execution')
-
-    admitted = asyncio.Event()
-
-    async def waiter() -> None:
-        await controller.acquire_entry_slot(role='execution')
-        admitted.set()
-
-    pending = asyncio.create_task(waiter())
-    await asyncio.sleep(0.05)
-    assert not admitted.is_set()
-
-    def sample(mono: float) -> None:
-        monitor.observe_sample(
-            machine_cpu_percent=20.0,
-            machine_memory_percent=30.0,
-            machine_disk_busy_percent=10.0,
-            machine_available=True,
-            event_loop_lag_ms=10.0,
-            writer_queue_depth=0,
-            sqlite_write_wait_ms=0.0,
-            sqlite_query_latency_ms=0.0,
-            process_cpu_ratio=0.10,
-            now_mono=mono,
-            now_iso=f'2026-03-30T00:00:{int(mono):02d}+08:00',
-        )
-
-    for index in range(3):
-        sample(float(index))
-    # 工具队列没人等 ⇒ 状态回 normal（回合闸的排队不参与状态迁移，否则一次 critical 之后
-    # 会卡在低 limit 上按分钟爬）
-    assert controller.snapshot()['tool_pressure_state'] == 'normal'
-    assert controller.entry_snapshot()['execution']['limit'] == 1
-
-    sample(3.0)
-    await asyncio.wait_for(pending, timeout=2)
-    assert admitted.is_set()
-    assert controller.entry_snapshot()['execution']['limit'] == 2
-    assert controller.snapshot()['tool_pressure_target_limit'] == 1
-
-
-@pytest.mark.asyncio
-async def test_entry_gate_restores_floor_on_first_normal_tick_after_critical() -> None:
-    """critical 之后必须一拍就把闸位恢复到地板，不能靠放大那条道按格爬回来。
-
-    实盘回归（01:44:14）：一次 critical 把 limit 打到 1，122 个节点在闸口排队，
-    而"有排队就不回 normal"的写法让 limit 以 ~1 格/分钟的速度爬，回合数被压在 5。
-    """
-    store = _FakeStore()
-    controller = AdaptiveToolBudgetController(normal_limit=2, throttled_limit=2, critical_limit=1, step_up=1)
-    monitor = _entry_climb_monitor(controller, store)
-    controller.configure_entry_ceilings({'execution': 3})
-
-    await controller.acquire_entry_slot(role='execution')
-    controller.critical()
-    assert controller.entry_snapshot()['execution']['limit'] == 1
-
-    admitted = asyncio.Event()
-
-    async def queued() -> None:
-        await controller.acquire_entry_slot(role='execution')
-        admitted.set()
-
-    pending = asyncio.create_task(queued())
-    await asyncio.sleep(0.05)
-    assert controller.entry_snapshot()['execution']['queued'] == 1
-
-    for index in range(3):
-        monitor.observe_sample(
-            machine_cpu_percent=20.0,
-            machine_memory_percent=30.0,
-            machine_disk_busy_percent=10.0,
-            machine_available=True,
-            event_loop_lag_ms=5.0,
-            writer_queue_depth=0,
-            sqlite_write_wait_ms=0.0,
-            sqlite_query_latency_ms=0.0,
-            process_cpu_ratio=0.10,
-            now_mono=float(index),
-            now_iso=f'2026-03-30T00:00:0{index}+08:00',
-        )
-    assert controller.snapshot()['tool_pressure_state'] == 'normal'
-    assert controller.entry_snapshot()['execution']['limit'] == 3
-    await asyncio.wait_for(pending, timeout=2)
-    assert admitted.is_set()
-
-
-def _entry_climb_monitor(controller: AdaptiveToolBudgetController, store) -> WorkerPressureMonitor:
-    """阈值取线上默认值（warn 3 拍、safe 3 拍、recover 窗口 1s、lag warn 250ms/critical 1500ms）。"""
+def _entry_target_monitor(
+    controller: AdaptiveToolBudgetController,
+    store,
+    *,
+    rate_observer=None,
+) -> WorkerPressureMonitor:
+    """阈值全部取线上默认值（lag warn 250ms、写入队列 warn 50、SQLite 写 warn 200ms /
+    读 warn 150ms、机器内存 warn 88%）；回合闸的余量目标就用这些线算，不另起一套数字。"""
     return WorkerPressureMonitor(
         controller=controller,
         store=store,
@@ -1160,55 +1063,298 @@ def _entry_climb_monitor(controller: AdaptiveToolBudgetController, store) -> Wor
         machine_disk_busy_critical_percent=90.0,
         process_cpu_warn_ratio=0.85,
         process_cpu_safe_ratio=0.50,
+        rate_limit_observer=rate_observer,
+    )
+
+
+# 8 GiB 总内存、剩 4 GiB 可用：按 warn(88%) 保留 0.96 GiB 后还能容 ~28 格（兜底成本 110 MB/格），
+# 所以内存轴在这些用例里不构成约束。
+_ROOMY_MEMORY = {
+    'memory_total_bytes': 8 * 1024 ** 3,
+    'memory_available_bytes': 4 * 1024 ** 3,
+}
+
+
+def _observe_pressure(
+    monitor: WorkerPressureMonitor,
+    mono: float,
+    *,
+    lag_ms: float = 0.0,
+    writer_depth: int = 0,
+    sqlite_write_ms: float = 0.0,
+    sqlite_query_ms: float = 0.0,
+    process_cpu_ratio: float = 0.10,
+    memory_total_bytes: int | None = None,
+    memory_available_bytes: int | None = None,
+    worker_memory_bytes: int | None = None,
+    rate_pressure: dict[str, float] | None = None,
+) -> dict:
+    return monitor.observe_sample(
+        machine_cpu_percent=20.0,
+        machine_memory_percent=30.0,
+        machine_disk_busy_percent=10.0,
+        machine_available=True,
+        event_loop_lag_ms=lag_ms,
+        writer_queue_depth=writer_depth,
+        sqlite_write_wait_ms=sqlite_write_ms,
+        sqlite_query_latency_ms=sqlite_query_ms,
+        process_cpu_ratio=process_cpu_ratio,
+        now_mono=mono,
+        now_iso=f'2026-09-30T00:00:{int(mono) % 60:02d}+08:00',
+        machine_memory_total_bytes=memory_total_bytes,
+        machine_memory_available_bytes=memory_available_bytes,
+        worker_memory_bytes=worker_memory_bytes,
+        rate_pressure=rate_pressure,
     )
 
 
 @pytest.mark.asyncio
-async def test_entry_gate_does_not_climb_while_event_loop_is_backing_up() -> None:
-    """机器水位安全但事件循环在积压时不许放大：01:24 实测 limit=11 那拍 lag 已 8.0s、
-    机器内存才 73.7%——只有循环积压能预测"再多放一份上下文构建"的代价。"""
+async def test_monitor_grows_entry_gate_toward_headroom_and_records_the_verdict() -> None:
+    """闸被需求顶住、四条积压轴都安静时目标翻倍，闸位每拍 +2；目标与落到的闸位都进快照，
+    否则操作员只能看到"节点数没变"，看不到是哪条轴拦的。"""
     store = _FakeStore()
-    controller = AdaptiveToolBudgetController(normal_limit=2, throttled_limit=2, critical_limit=1, step_up=1)
-    monitor = _entry_climb_monitor(controller, store)
-    controller.configure_entry_ceilings({'execution': 1})
-    await controller.acquire_entry_slot(role='execution')
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
 
-    blocked = asyncio.Event()
-
-    async def waiter() -> None:
+    for _ in range(8):
         await controller.acquire_entry_slot(role='execution')
-        blocked.set()
-
-    pending = asyncio.create_task(waiter())
+    # 4 个执行器排在闸口：这才是"闸卡住需求"的证据，也是继续抬闸的唯一理由
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(4)]
     await asyncio.sleep(0.05)
 
-    def sample(mono: float, lag_ms: float) -> None:
-        monitor.observe_sample(
-            machine_cpu_percent=20.0,
-            machine_memory_percent=30.0,
-            machine_disk_busy_percent=10.0,
-            machine_available=True,
-            event_loop_lag_ms=lag_ms,
-            writer_queue_depth=0,
-            sqlite_write_wait_ms=0.0,
-            sqlite_query_latency_ms=0.0,
-            process_cpu_ratio=0.10,
-            now_mono=mono,
-            now_iso=f'2026-03-30T00:00:{int(mono):02d}+08:00',
+    snapshot = _observe_pressure(monitor, 100.0, **_ROOMY_MEMORY)
+    assert snapshot['entry_gate_targets'] == {'execution': 16}
+    assert snapshot['entry_gate_limits'] == {'execution': 10}
+
+    snapshot = _observe_pressure(monitor, 101.0, **_ROOMY_MEMORY)
+    assert snapshot['entry_gate_targets'] == {'execution': 20}
+    assert snapshot['entry_gate_limits'] == {'execution': 12}
+
+    for task in waiting:
+        await asyncio.wait_for(task, timeout=5)
+    for _ in range(12):
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_monitor_does_not_raise_the_entry_gate_without_demand() -> None:
+    """闸口没人在等、在飞的也没占满时不抬闸位：那只会攒出一把"随时可以一次放出几百份
+    上下文物化"的空权限（21:31 无闸事故的形态），而不是并发。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    for index in range(6):
+        snapshot = _observe_pressure(monitor, 100.0 + index, **_ROOMY_MEMORY)
+    assert snapshot['entry_gate_targets'] == {'execution': 8}
+    assert snapshot['entry_gate_limits'] == {'execution': 8}
+
+    # 需求一到（排队或占满）才开始抬
+    held = [await controller.acquire_entry_slot(role='execution') for _ in range(8)]
+    snapshot = _observe_pressure(monitor, 110.0, **_ROOMY_MEMORY)
+    assert snapshot['entry_gate_limits'] == {'execution': 10}
+    for _ in held:
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_monitor_keeps_entry_gate_at_the_floor_when_memory_headroom_is_unreadable() -> None:
+    """读不到内存读数时不许越过地板：v1 那版正是在"内存读数不可用/滞后"的状态下
+    90 秒爬到 27 格、把 worker Private 推到 2.4 GB 的（01:24 实盘）。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    held = [await controller.acquire_entry_slot(role='execution') for _ in range(8)]
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(2)]
+    await asyncio.sleep(0.05)
+    for index in range(4):
+        snapshot = _observe_pressure(monitor, 100.0 + index)
+    assert snapshot['entry_gate_targets'] == {'execution': 8}
+    assert snapshot['entry_gate_limits'] == {'execution': 8}
+    for task in waiting:
+        task.cancel()
+    for _ in held:
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_monitor_holds_entry_gate_once_an_axis_reaches_its_warn_line() -> None:
+    """lag 越过 warn(250ms) 但没到 critical(1500ms) ⇒ 只"保持"当前节点数。
+
+    用例里需求是顶着的（8 格占满 + 2 个排队），否则"没长"这件事不需要这条轴来解释。
+    没有这层夹住，warn 级落后（300ms 对 250ms 线）会被一路削到 1 并钉死——292 个节点
+    排队时"循环落后 0.3 秒"是常态，不是紧急，削到 1 是塌方而不是控制。
+    """
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(2)]
+    await asyncio.sleep(0.05)
+
+    for index in range(4):
+        snapshot = _observe_pressure(monitor, 100.0 + index, lag_ms=300.0, **_ROOMY_MEMORY)
+    assert snapshot['entry_gate_targets'] == {'execution': 8}
+    assert snapshot['entry_gate_limits'] == {'execution': 8}
+
+    for task in waiting:
+        task.cancel()
+    for _ in range(8):
+        controller.release_entry_slot(role='execution')
+
+
+def test_monitor_walks_entry_gate_down_and_below_the_floor_when_the_loop_backs_up() -> None:
+    """事件循环积压是本进程自己造成的，允许一路缓减到地板以下（最低 1），每拍一格。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    limits = []
+    for index in range(5):
+        snapshot = _observe_pressure(monitor, 100.0 + index, lag_ms=12_000.0, **_ROOMY_MEMORY)
+        limits.append(snapshot['entry_gate_limits']['execution'])
+    assert limits == [7, 6, 5, 4, 3]
+
+
+@pytest.mark.asyncio
+async def test_upstream_rate_limit_penalty_holds_then_shrinks_the_entry_gate() -> None:
+    """429 惩罚按实测分布分档：p50=0 / p90=0.18 / p99=4.16 / max=13.57（6255 条路由观测）。
+    越过 1.0 只保持，越过 4.0 才开始缓减；其余四轴此刻仍然安静。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    held = [await controller.acquire_entry_slot(role='execution') for _ in range(8)]
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(2)]
+    await asyncio.sleep(0.05)
+
+    for index in range(3):
+        snapshot = _observe_pressure(
+            monitor, 100.0 + index, rate_pressure={'penalty_429_max': 1.5}, **_ROOMY_MEMORY
         )
+    assert snapshot['entry_gate_limits'] == {'execution': 8}
 
-    # 30 拍全部 machine-safe（cpu 20%、mem 30%）但 lag=1500ms（≥warn 250ms，未到 critical 1500ms 之上那条线）
-    for index in range(30):
-        sample(float(index) + 100.0, 1500.0)
-    assert not blocked.is_set()
-    assert controller.entry_snapshot()['execution']['limit'] == 1
+    shrunk = _observe_pressure(monitor, 110.0, rate_pressure={'penalty_429_max': 5.0}, **_ROOMY_MEMORY)
+    assert shrunk['entry_gate_limits'] == {'execution': 7}
 
-    # 循环转安静后，按 `safe_consecutive_samples` 的节奏一格一格抬
-    for index in range(8):
-        sample(float(index) + 200.0, 5.0)
-    assert blocked.is_set() or controller.entry_snapshot()['execution']['limit'] > 1
-    await asyncio.wait_for(pending, timeout=2)
-    assert controller.entry_snapshot()['execution']['limit'] >= 2
+    for task in waiting:
+        task.cancel()
+    for _ in held:
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_memory_headroom_caps_entry_growth_but_never_pushes_below_the_floor() -> None:
+    """内存余量只限制增长：机器内存吃紧多半是外部进程造成的，那该走磁盘/内存紧急道，
+    不该把操作员配的地板压掉。保留量直接取机器内存 warn 线之上那一段，不新设阈值。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+    total = 8 * 1024 ** 3
+
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(2)]
+    await asyncio.sleep(0.05)
+
+    # available 恰好等于 warn(88%) 以下的保留量 ⇒ 还能容 0 格，闸位停在地板而不是被压下去
+    pinned = _observe_pressure(
+        monitor,
+        100.0,
+        memory_total_bytes=total,
+        memory_available_bytes=int(total * 0.12),
+    )
+    assert pinned['entry_gate_limits'] == {'execution': 8}
+
+    roomy = _observe_pressure(
+        monitor,
+        101.0,
+        memory_total_bytes=total,
+        memory_available_bytes=4 * 1024 ** 3,
+    )
+    assert roomy['entry_gate_limits'] == {'execution': 10}
+
+    for task in waiting:
+        await asyncio.wait_for(task, timeout=5)
+    for _ in range(10):
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_entry_slot_memory_cost_is_estimated_from_running_slots_and_rss() -> None:
+    """一格内存成本用滑动窗口里 (在飞格数, RSS) 的跨度回归：实测 9 格 RSS 1.04 GB、
+    凌晨 27 格 Private 2.4 GB（≈89–115 MB/格）。样本跨度不足或斜率出格时保留上一值。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 12})
+
+    for _ in range(2):
+        await controller.acquire_entry_slot(role='execution')
+    _observe_pressure(monitor, 100.0, worker_memory_bytes=400 * 1024 ** 2)
+
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    snapshot = _observe_pressure(monitor, 101.0, worker_memory_bytes=1200 * 1024 ** 2)
+
+    assert snapshot['entry_gate_running_total'] == 10
+    assert snapshot['entry_slot_memory_bytes'] == 100 * 1024 ** 2
+    assert snapshot['worker_memory_bytes'] == 1200 * 1024 ** 2
+
+
+def test_perf_history_records_why_the_entry_gate_moved() -> None:
+    """目标、落到的闸位、一格成本、进程 RSS、上游限流惩罚与本进程占核数都要能在历史里读到。"""
+    from main.service.worker_heartbeat_service_v2 import _PERF_HISTORY_FIELDS
+
+    for key in (
+        'entry_gate_targets',
+        'entry_gate_limits',
+        'entry_gate_running_total',
+        'entry_slot_memory_bytes',
+        'worker_memory_bytes',
+        'machine_memory_available_bytes',
+        'model_rate_penalty_429_max',
+        'model_rolling_rpm_60s_max',
+        'tool_pressure_process_cpu_ratio',
+    ):
+        assert key in _PERF_HISTORY_FIELDS, f'{key} 没进性能历史，闸为什么动读不出来'
+
+def test_dispatcher_reports_live_entry_gate_limit_not_the_config_floor() -> None:
+    """界面读的"限"必须是闸现在真开到第几格：余量目标每拍推它，只报地板的话
+    "闸在动"这件事在 UI 上完全读不出来。磁盘紧急时它要如实显示 0。"""
+    from main.runtime.task_actor_service import TaskNodeDispatcher
+
+    def stub_parts():
+        return SimpleNamespace(), SimpleNamespace(update_task_runtime_meta=lambda *_a, **_k: None), SimpleNamespace()
+
+    store, log_service, node_runner = stub_parts()
+    budget = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    dispatcher = TaskNodeDispatcher(
+        task_id='task:live-limit',
+        store=store,
+        log_service=log_service,
+        node_runner=node_runner,
+        execution_limit=3,
+        inspection_limit=1,
+        entry_budget=budget,
+    )
+    assert dispatcher.snapshot()['dispatch_limits'] == {'execution': 3, 'inspection': 1}
+
+    budget.set_entry_targets({'execution': 5})
+    assert dispatcher.snapshot()['dispatch_limits']['execution'] == 5
+
+    budget.set_disk_emergency(True)
+    assert dispatcher.snapshot()['dispatch_limits']['execution'] == 0
 
 
 def test_dispatcher_uses_adaptive_gate_only_when_budget_wired() -> None:

@@ -45,9 +45,23 @@ _PERF_HISTORY_FIELDS = (
     'worker_execution_oldest_wait_ms',
     'tool_pressure_event_loop_lag_ms',
     'tool_pressure_writer_queue_depth',
+    # 本进程占了几核参与 local 判据，却从来没进过历史：全天 4585 拍读不到它，
+    # 而它正是高并发时最先撞上的那根轴。
+    'tool_pressure_process_cpu_ratio',
     'sqlite_write_wait_ms',
     'sqlite_query_latency_ms',
     'active_task_count',
+    # 回合闸为什么动：目标、真正落到的闸位、一格内存成本、进程 RSS 与上游限流读数。
+    # 以前这些只存在于 controller 内存里，操作员看到"节点数没变"却读不到是哪条轴拦的。
+    'entry_gate_targets',
+    'entry_gate_limits',
+    'entry_gate_running_total',
+    'entry_slot_memory_bytes',
+    'worker_memory_bytes',
+    'machine_memory_total_bytes',
+    'machine_memory_available_bytes',
+    'model_rate_penalty_429_max',
+    'model_rolling_rpm_60s_max',
 )
 
 

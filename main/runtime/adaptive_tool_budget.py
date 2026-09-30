@@ -13,6 +13,13 @@ def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec='seconds')
 
 
+# 回合闸每拍最多挪这么多格。上行限的是"一步跳多少"而不是"一格多久"：反馈比采样慢
+# 得多（一次模型调用实测 p50 37 s / p90 84 s，15 s 采一拍），不限跳幅就会在上一拍的
+# 后果可见之前继续放人。下行按操作员要的"缓慢"，一拍退一格。
+_ENTRY_STEP_UP_SLOTS = 2
+_ENTRY_STEP_DOWN_SLOTS = 1
+
+
 @dataclass(slots=True)
 class ToolSlotLease:
     lease_id: int
@@ -71,10 +78,13 @@ class AdaptiveToolBudgetController:
         self._disk_emergency_since = ''
         # 节点回合维度：一次 resume/pickup 放出的节点数可以远大于槽位数，而每个执行器
         # 在拿到任何槽位之前就要把自己那份上下文物化出来（`_run_entry` → `run_node`）。
-        # 只拧工具/模型槽位拦不住这份"存在成本"，所以同一套状态迁移也驱动一份
-        # 按角色的回合闸。闸位的地板来自配置里的 `node_dispatch_concurrency`，
-        # 向上由 easing 每格 +1 爬（与工具槽同一口径），向下由 throttled 冻结/critical→1/
-        # 磁盘紧急→0 收缩，队列排空时复位到地板。
+        # 只拧工具/模型槽位拦不住这份"存在成本"，所以另立一份按角色的回合闸。
+        # 闸位不再由工具压力状态机驱动：工具槽的 normal/easing/throttled 度量的是
+        # 「一次工具调用」的积压，而回合闸要的是「同时在物化上下文的执行器」的余量，
+        # 两者共用会让一次工具队列抖动把节点并发钉死（09-30 实盘：一次 141 秒的
+        # SQLite 读把双闸踩到 1/1，持续约 9 分钟）。现在回合闸跟随 monitor 每拍发布的
+        # 余量目标（`set_entry_targets`），地板只是无监控时的起步值与空闲复位位；
+        # 磁盘紧急仍是唯一能直接把回合闸踩到 0 的硬闸。
         self._entry_dims: dict[str, dict[str, Any]] = {}
 
     def configure_entry_ceilings(self, ceilings: dict[str, int]) -> None:
@@ -102,26 +112,52 @@ class AdaptiveToolBudgetController:
         if self._disk_emergency_active:
             return 0
         ceiling = max(1, int(dim.get('ceiling') or 1))
-        state = self._pressure_state
-        if state == 'critical':
-            return 1
-        if state == 'throttled':
-            # 与工具槽同规则：冻结在当前在跑数上，只减不增。
-            return max(1, int(dim.get('running') or 0))
-        if state == 'easing':
-            # 恢复期保持已爬到的位置，由 step 一格一格抬（工具槽同一口径）。
-            return max(1, int(dim.get('limit') or 1))
-        # normal：配置值是**地板**不是上限——已经爬上去的位置不掉回来，
-        # 掉只掉到 idle 复位（`_reset_entry_dim_idle_locked`）或压力收缩。
-        return max(ceiling, int(dim.get('limit') or 1))
+        if dim.get('target') is None:
+            # 监控还没发布目标（非 worker 模式、或启动后第一拍之前）：配置值是地板，
+            # 已爬到的位置不掉回来。
+            return max(ceiling, int(dim.get('limit') or 1))
+        # 有余量目标时，闸位就是发布进来的那个数——地板已经作为下限参与过目标计算，
+        # 这里不再抬，否则一次外部内存压力永远压不住回合闸。
+        return max(1, int(dim.get('limit') or 1))
 
-    def _step_entry_easing_locked(self) -> None:
-        for dim in self._entry_dims.values():
-            dim['limit'] = max(1, int(dim.get('limit') or 1) + 1)
+    def set_entry_targets(self, targets: dict[str, Any]) -> dict[str, int]:
+        """按角色接受本轮的余量目标，并把它按"变化率"落成实际闸位。
+
+        目标本身是 monitor 用自家积压轴（事件循环 lag / 写入队列 / SQLite / 上游限流）
+        和内存余量算出来的，可以高于也可以低于地板；这里只负责不许一步跳太多——一次模型
+        调用实测 p50 37 s，反馈比采样慢得多，上跳不限速就会在反馈回来前过冲（凌晨那次
+        90 秒爬到 27 格、Private 2.4 GB 就是这么来的）。下行按操作员要求的"缓慢"。
+        返回每个角色这一拍真正落到的闸位，供观测。
+        """
+        applied: dict[str, int] = {}
+        ready: list[_QueuedEntryRequest] = []
+        with self._lock:
+            for role, raw_target in dict(targets or {}).items():
+                normalized_role = str(role or '').strip().lower()
+                if not normalized_role:
+                    continue
+                dim = self._entry_dims.setdefault(
+                    normalized_role,
+                    {'ceiling': 1, 'limit': 1, 'running': 0, 'waiters': deque(), 'target': None},
+                )
+                try:
+                    target = max(1, int(raw_target))
+                except (TypeError, ValueError):
+                    continue
+                dim['target'] = target
+                current = max(1, int(dim.get('limit') or 1))
+                if target > current:
+                    dim['limit'] = min(target, current + _ENTRY_STEP_UP_SLOTS)
+                elif target < current:
+                    dim['limit'] = max(target, current - _ENTRY_STEP_DOWN_SLOTS)
+                applied[normalized_role] = int(dim['limit'])
+                ready.extend(self._resolve_entry_dim_locked(normalized_role, dim))
+        self._resolve_entry_waiters(ready)
+        return applied
 
     def _reset_entry_dim_idle_locked(self, dim: dict[str, Any]) -> None:
-        """队列排空后把闸位收到地板：下一次风暴必须从配置值起步、按格爬，
-        而不是继承上一次爬到的高水位一次性放出去（21:31 无闸事故的形态）。"""
+        """队列排空后把闸位收回地板：下一次风暴必须从配置值起步、按余量目标与变化率
+        重新抬，而不是继承上一次爬到的高水位一次性放出去（21:31 无闸事故的形态）。"""
         if int(dim.get('running') or 0) == 0 and not (dim.get('waiters') or ()):
             dim['limit'] = max(1, int(dim.get('ceiling') or 1))
 
@@ -419,8 +455,8 @@ class AdaptiveToolBudgetController:
         self.begin_easing(at=at)
 
     def step_easing(self, *, at: str | None = None) -> bool:
-        """只抬工具槽。回合闸的放大走 `step_entry_easing`，由 monitor 按"事件循环是否积压"
-        单独判定——两轴的成本量级不同（一个槽≈几十毫秒的等待 vs 一份上下文物化≈70MB 与
+        """只抬工具槽。回合闸由 monitor 每拍发布的余量目标驱动（`set_entry_targets`）——
+        两轴的成本量级不同（一个槽≈几十毫秒的等待 vs 一份上下文物化≈70MB 与
         秒级 CPU），共用一次抬格会让闸跟着工具的节奏跑。"""
         ready: list[tuple[asyncio.Future[ToolSlotLease], ToolSlotLease]] = []
         changed = False
@@ -435,18 +471,6 @@ class AdaptiveToolBudgetController:
             ready = self._drain_waiters_locked()
         self._resolve_waiters(ready)
         return changed
-
-    def step_entry_easing(self) -> bool:
-        """只抬"节点回合闸"，不动工具槽：队列里全是卡在闸口的节点、工具队列却空着时，
-        工具轴的 `waiting_count>0` 触发不到，回合闸就没机会往上爬（回放实测这种状态占多数）。
-        与 `step_easing` 共用同一收缩链，只是被抬的维度不同；
-        压力状态的迁移权仍属 monitor，这里不改状态。"""
-        entry_ready: list[_QueuedEntryRequest] = []
-        with self._lock:
-            self._step_entry_easing_locked()
-            entry_ready = self._sync_entry_dims_locked()
-        self._resolve_entry_waiters(entry_ready)
-        return bool(entry_ready)
 
     def step_recovery(self, *, at: str | None = None) -> bool:
         return self.step_easing(at=at)
@@ -477,11 +501,19 @@ class AdaptiveToolBudgetController:
                 'entry_gate_running': {
                     role: int(dim.get('running') or 0) for role, dim in self._entry_dims.items()
                 },
+                'entry_gate_ceiling': {
+                    role: int(dim.get('ceiling') or 1) for role, dim in self._entry_dims.items()
+                },
                 'entry_gate_limit': {
                     role: int(dim.get('limit') or 0) for role, dim in self._entry_dims.items()
                 },
                 'entry_gate_queued': {
                     role: len(dim.get('waiters') or ()) for role, dim in self._entry_dims.items()
+                },
+                'entry_gate_targets': {
+                    role: (
+                        None if dim.get('target') is None else int(dim.get('target') or 0)
+                    ) for role, dim in self._entry_dims.items()
                 },
             }
 

@@ -718,6 +718,12 @@ class MainRuntimeService:
             max_pressure_dwell_seconds=float(adaptive_budget_settings['max_pressure_dwell_seconds']),
             max_tool_wait_ms=float(adaptive_budget_settings['max_tool_wait_ms']),
             local_recovery_enabled=bool(adaptive_budget_settings['local_recovery_enabled']),
+            # 回合闸的上游限流轴：读负载均衡器已有的衰减 429 惩罚与滚动 RPM，不另起计数。
+            rate_limit_observer=(
+                self.model_load_balancer.rate_pressure
+                if getattr(self, 'model_load_balancer', None) is not None
+                else None
+            ),
             disk_watermark_paths=[
                 str(data_root()),
                 str(resolved_store_path.parent),

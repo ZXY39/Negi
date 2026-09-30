@@ -381,6 +381,22 @@ class ModelLoadBalancer:
 
     # ------------------------------------------------------------------ 诊断
 
+    def rate_pressure(self) -> dict[str, Any]:
+        """给回合闸用的聚合上游读数：全部组成员里最大的衰减 429 惩罚与最大滚动 RPM。
+
+        监控每秒调一次，所以这里只取聚合数，不重建 `snapshot()` 那份给人看的完整载荷。
+        惩罚本身已在 60 秒半衰（对齐上游的分钟窗口），不需要这里再算窗口。
+        """
+        penalty_max = 0.0
+        rpm_max = 0.0
+        with self._lock:
+            for group in self._groups.values():
+                for member in group.members:
+                    metrics = self._metrics(member.model_key)
+                    penalty_max = max(penalty_max, float(metrics.penalty or 0.0))
+                    rpm_max = max(rpm_max, float(metrics.rolling_rpm or 0.0))
+        return {'penalty_429_max': penalty_max, 'rolling_rpm_60s_max': rpm_max}
+
     def snapshot(self, *, group_key: str | None = None, filters: RouteCandidateFilters | None = None) -> dict[str, Any]:
         effective_filters = filters or RouteCandidateFilters()
         with self._lock:

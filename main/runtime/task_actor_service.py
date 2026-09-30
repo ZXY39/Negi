@@ -280,6 +280,7 @@ class TaskNodeDispatcher:
                     if limit is not None
                 }
             )
+        self._entry_budget = entry_budget
         self._semaphores = {
             role: (
                 _AdaptiveRoleGate(entry_budget, role)
@@ -295,7 +296,7 @@ class TaskNodeDispatcher:
 
     def snapshot(self) -> dict[str, dict[str, int]]:
         return {
-            'dispatch_limits': dict(self._limits),
+            'dispatch_limits': self._effective_dispatch_limits(),
             'dispatch_running': {
                 role: sum(1 for entry in self._entries.values() if entry.role == role and entry.running_counted)
                 for role in self._limits
@@ -305,6 +306,35 @@ class TaskNodeDispatcher:
                 for role in self._limits
             },
         }
+
+    def _effective_dispatch_limits(self) -> dict[str, int]:
+        """配置值是地板，界面上要读的是闸现在真开到第几格。
+
+        接了回合闸就存活闸位（余量目标每拍推它），没接就回落到配置——两者在无自适应
+        部署里本来就相同。只报地板会让"闸在动"这件事在 UI 上读不出来。
+        """
+        getter = getattr(self._entry_budget, 'entry_snapshot', None)
+        if not callable(getter):
+            return dict(self._limits)
+        try:
+            live = dict(getter() or {})
+        except Exception:
+            return dict(self._limits)
+        effective: dict[str, int | None] = {}
+        for role, limit in self._limits.items():
+            if limit is None:
+                # 不限制该角色：保持原来的键与 None 值，读侧按 0 处理。
+                effective[role] = None
+                continue
+            dim = live.get(str(role))
+            if isinstance(dim, dict) and dim.get('limit') is not None:
+                try:
+                    effective[role] = max(0, int(dim.get('limit') or 0))
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            effective[role] = int(limit)
+        return effective
 
     async def execute_node(self, task_id: str, node_id: str) -> NodeFinalResult:
         normalized_task_id = str(task_id or '').strip()

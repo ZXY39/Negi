@@ -155,6 +155,21 @@ def test_rate_limited_member_is_skipped_by_next_node_without_config_change() -> 
     assert second.selection_reason == "least_load"
 
 
+def test_rate_pressure_aggregates_the_worst_member_for_the_entry_gate() -> None:
+    """回合闸每拍调一次：只取跨成员的最大惩罚与最大滚动 RPM，不重建给人看的完整 snapshot。"""
+    balancer = _balancer(_group("g1", "m_a", "m_b"))
+    assert balancer.rate_pressure() == {"penalty_429_max": 0.0, "rolling_rpm_60s_max": 0.0}
+
+    first = _select(balancer, "node:1")
+    balancer.record_request_start(first)
+    balancer.record_outcome(first, status_code=429, error_text="Error code: 429 - rpm limit")
+    balancer.release(first, outcome=LEASE_OUTCOME_SUCCESS)
+
+    pressure = balancer.rate_pressure()
+    assert pressure["penalty_429_max"] > 0.0
+    assert pressure["rolling_rpm_60s_max"] >= 1.0
+
+
 def test_first_bindings_spread_across_equal_capacity_members() -> None:
     balancer = _balancer(_group("g1", "m_a", "m_b", "m_c"))
 
