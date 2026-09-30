@@ -338,6 +338,9 @@ class TaskModelCallRecord(Model):
     call_index: int = 0
     node_id: str = ''
     created_at: str = ''
+    # 请求类型：'' 表示常规节点回合（历史行没有这个键），'message_distribution' 表示
+    # 分发控制回合。前端「类型」列据此标注并允许按它筛选。
+    call_kind: str = ''
     prepared_message_count: int = 0
     prepared_message_chars: int = 0
     response_tool_call_count: int = 0

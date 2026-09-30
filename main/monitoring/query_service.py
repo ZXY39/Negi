@@ -1595,6 +1595,7 @@ class TaskQueryService:
                     call_index=int(payload.get('call_index') or 0),
                     node_id=str(event.get('node_id') or payload.get('node_id') or '').strip(),
                     created_at=str(event.get('created_at') or ''),
+                    call_kind=str(payload.get('call_kind') or '').strip(),
                     prepared_message_count=int(payload.get('prepared_message_count') or 0),
                     prepared_message_chars=int(payload.get('prepared_message_chars') or 0),
                     response_tool_call_count=int(payload.get('response_tool_call_count') or 0),

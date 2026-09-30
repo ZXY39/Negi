@@ -1099,6 +1099,97 @@ async def test_distribution_turn_repairs_invalid_decision_on_retry(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_distribution_control_turn_is_billed_in_model_call_ledger(tmp_path: Path) -> None:
+    """分发控制回合要进逐次调用账本：Token统计读得到、用量算得进，但不产出节点输出。
+
+    控制回合不走 react_loop.run()，因此不会经过 append_node_output；少了这一步，分发期的
+    模型调用与 token 用量在界面上完全隐形（09-30 实盘：13:19 后账本零行，而回合一直在跑）。
+    """
+    attempt = SimpleNamespace(
+        usage={"input_tokens": 900, "output_tokens": 40, "cache_hit_tokens": 600},
+        model_key="test-model",
+        provider_id="",
+        provider_model="",
+        duration_ms=1500,
+        first_token_ms=300,
+    )
+    empty_response = SimpleNamespace(
+        tool_calls=[], content="不需要调整任何子节点。", attempts=[attempt]
+    )
+    valid_response = SimpleNamespace(
+        tool_calls=[
+            {
+                "name": "submit_message_distribution",
+                "arguments": {
+                    "children": [
+                        {
+                            "target_node_id": "CHILD_ONE",
+                            "should_distribute": True,
+                            "action": "distribute",
+                            "message": "branch-a tailored update",
+                            "reason": "affected by the new constraint",
+                        },
+                        {
+                            "target_node_id": "CHILD_TWO",
+                            "should_distribute": False,
+                            "action": "skip",
+                            "message": "",
+                            "reason": "branch b is unaffected",
+                        },
+                    ],
+                    "notes": "billed control turn",
+                },
+            }
+        ],
+        content="",
+        attempts=[attempt],
+    )
+    backend = _QueuedChatBackend([empty_response, valid_response])
+    service = _build_service_with_backend(tmp_path, chat_backend=backend)
+    try:
+        record, root, branch_a, branch_b = await seed_live_root_with_two_running_children(service)
+        await _seed_distributing_epoch(
+            service,
+            task_id=record.task_id,
+            message="new global constraint",
+            frontier_node_ids=[root.node_id],
+        )
+        valid_response.tool_calls[0]["arguments"]["children"][0]["target_node_id"] = branch_a.node_id
+        valid_response.tool_calls[0]["arguments"]["children"][1]["target_node_id"] = branch_b.node_id
+
+        task = service.get_task(record.task_id)
+        assert task is not None
+        result = await service.node_runner._run_distribution_node(task=task, node=root)
+        assert result.status == "success"
+
+        calls = service.store.list_task_model_calls(record.task_id, limit=20)
+        assert len(calls) == 2, "两次尝试（含修复重试）都要入账"
+        assert [item["payload"]["call_index"] for item in calls] == [1, 2]
+        for item in calls:
+            payload = item["payload"]
+            assert payload["call_kind"] == "message_distribution"
+            assert payload["node_id"] == root.node_id
+            assert payload["delta_usage"]["input_tokens"] == 900
+            assert payload["duration_ms"] == 1500
+            assert payload["first_token_ms"] == 300
+
+        root_after = service.store.get_node(root.node_id)
+        assert root_after is not None
+        assert list(root_after.output or []) == [], "入账不得产出节点输出"
+        assert root_after.token_usage.input_tokens == 1800
+        assert root_after.token_usage.call_count == 2
+        task_after = service.get_task(record.task_id)
+        assert task_after is not None
+        assert task_after.token_usage.input_tokens == 1800
+
+        detail = service.get_task_detail_payload(record.task_id, mark_read=False)
+        assert detail is not None
+        assert detail["recent_model_calls"][0]["call_kind"] == "message_distribution"
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_distribution_exhaustion_degrades_to_skipped_and_completes_epoch(tmp_path: Path) -> None:
     """单节点决策耗尽不再打死 epoch：降级跳过、屏障照常释放、任务不暂停。
 

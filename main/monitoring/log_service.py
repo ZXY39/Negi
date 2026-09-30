@@ -1363,6 +1363,106 @@ class TaskLogService:
                 self.refresh_task_view(task_id, mark_unread=True)
             return updated
 
+    def record_distribution_model_call(
+        self,
+        task_id: str,
+        node_id: str,
+        *,
+        call_index: int,
+        usage_attempts: list[Any] | None,
+        request_messages: list[dict[str, Any]] | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        actual_tool_schemas: list[dict[str, Any]] | None = None,
+        callable_tool_names: list[str] | None = None,
+        provider_tool_names: list[str] | None = None,
+        request_message_count: int | None = None,
+        request_message_chars: int | None = None,
+    ) -> NodeRecord | None:
+        """分发控制回合的模型调用入账：只写逐次调用账本与 token 用量，不产出节点输出。
+
+        控制回合不经过 react_loop.run()，因此不会走 append_node_output；少了这一步，分发期
+        的模型调用在 Token统计里完全隐形，节点与任务的用量也不含它。不带 prompt cache 键、
+        不写 actual-request 工件、不标未读：这三项都是常规回合的副作用。
+        """
+        with self._task_lock(task_id):
+            current = self._store.get_node(node_id)
+            if current is None or not bool(getattr(current.token_usage, 'tracked', False)):
+                return None
+            changed_at = now_iso()
+            delta_usage, delta_usage_by_model = build_token_usage_from_attempts(
+                list(usage_attempts or []), tracked=True
+            )
+            current_frame = self._store.get_task_runtime_frame(task_id, node_id)
+            current_frame_payload = dict(current_frame.payload or {}) if current_frame is not None else {}
+            active_preflight_diagnostics = dict(current_frame_payload.get('token_preflight_diagnostics') or {})
+            request_list = list(request_messages or [])
+            observed_input_truth = self._build_observed_input_truth_from_attempts(
+                usage_attempts=usage_attempts,
+                actual_request_hash='',
+                fallback_estimated_input_tokens=int(
+                    active_preflight_diagnostics.get('final_request_tokens')
+                    or active_preflight_diagnostics.get('estimated_total_tokens')
+                    or 0
+                ),
+                fallback_provider_model=str(active_preflight_diagnostics.get('provider_model') or '').strip(),
+            )
+            payload = self._model_call_payload(
+                task_id=task_id,
+                node_id=node_id,
+                call_index=call_index,
+                call_kind='message_distribution',
+                model_messages=request_list,
+                request_messages=request_list,
+                prompt_cache_key='',
+                tool_calls=tool_calls,
+                delta_usage=delta_usage,
+                delta_usage_by_model=delta_usage_by_model,
+                request_message_count=request_message_count,
+                request_message_chars=request_message_chars,
+                actual_tool_schemas=actual_tool_schemas,
+                callable_tool_names=callable_tool_names,
+                provider_tool_names=provider_tool_names,
+                observed_input_truth=observed_input_truth,
+                usage_attempts=usage_attempts,
+            )
+
+            def _mutate(record: NodeRecord) -> NodeRecord:
+                return record.model_copy(
+                    update={
+                        'token_usage': merge_token_usage_records([record.token_usage, delta_usage], tracked=True),
+                        'token_usage_by_model': merge_token_usage_by_model(
+                            [*list(record.token_usage_by_model or []), *delta_usage_by_model],
+                            tracked=True,
+                        ),
+                        'updated_at': changed_at,
+                    }
+                )
+
+            updated = self._store.update_node(node_id, _mutate)
+            self._event_writer.append_task_model_call(
+                task_id=task_id,
+                node_id=node_id,
+                created_at=changed_at,
+                payload=payload,
+            )
+            task = self._store.update_task(
+                task_id,
+                lambda current_task: current_task.model_copy(
+                    update={
+                        'token_usage': merge_token_usage_records(
+                            [current_task.token_usage, delta_usage], tracked=True
+                        ),
+                        'updated_at': changed_at,
+                    }
+                ),
+            )
+            if task is not None:
+                if updated is not None:
+                    self._sync_node_read_models_locked(updated)
+                    self._publish_task_node_patch_locked(task=task, node=updated)
+                self._publish_task_token_patch_locked(task=task)
+            return updated
+
     def update_node_check_result(self, task_id: str, node_id: str, check_result: str) -> NodeRecord | None:
         with self._task_lock(task_id):
             changed_at = now_iso()
@@ -2288,6 +2388,7 @@ class TaskLogService:
         task_id: str,
         node_id: str,
         call_index: int,
+        call_kind: str = '',
         model_messages: list[dict[str, Any]] | None,
         request_messages: list[dict[str, Any]] | None,
         prompt_cache_key: str | None,
@@ -2332,6 +2433,7 @@ class TaskLogService:
             'task_id': task_id,
             'node_id': node_id,
             'call_index': int(call_index or 0),
+            'call_kind': str(call_kind or '').strip(),
             'model_message_count': len(message_list),
             'model_message_chars': len(model_payload),
             'prepared_message_count': prepared_message_count,

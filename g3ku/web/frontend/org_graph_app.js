@@ -13297,6 +13297,7 @@ function normalizeTaskModelCall(raw) {
         call_index: toInt(source.call_index),
         node_id: String(source.node_id || "").trim(),
         created_at: String(source.created_at || "").trim(),
+        call_kind: String(source.call_kind || "").trim(),
         prepared_message_count: toInt(source.prepared_message_count),
         prepared_message_chars: toInt(source.prepared_message_chars),
         response_tool_call_count: toInt(source.response_tool_call_count),

@@ -814,6 +814,7 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
             "序号",
             "时间",
             "节点ID",
+            "类型",
             "预处理字符数",
             "新增输入 Token",
             "缓存命中",
@@ -834,7 +835,7 @@ def test_render_task_token_stats_paginates_model_calls_and_uses_chinese_labels()
             || /<td>\\d{2}-\\d{2} \\d{1,2}:\\d{2}:\\d{2}<\\/td>/.test(tableBody),
           nodeIdColumnRendered: tableBody.includes("node:demo:"),
           searchBoxRendered: html.includes("data-task-model-call-search")
-            && html.includes("搜索序号 / 节点 ID / 模型名称"),
+            && html.includes("搜索序号 / 节点 ID / 类型 / 模型名称"),
           refreshButtonRendered: html.includes("data-task-model-call-refresh"),
           rowCount: callIndexValues.length,
           firstCallIndex: callIndexValues[0],
@@ -1260,6 +1261,111 @@ def test_render_task_token_stats_labels_models_with_user_config_names() -> None:
     assert "<h3>orphan-key</h3>" in html
     # 搜索命中的是配置名：该串不出现在任何 key / provider_model 里
     assert result["byConfigName"] == [{"title": "glm-5.2-2", "text": "glm 5.21"}]
+
+
+def test_render_task_token_stats_labels_call_kind_and_filters_by_it() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        const usage = (input, output) => ({
+          tracked: true,
+          input_tokens: input,
+          output_tokens: output,
+          cache_hit_tokens: 0,
+          call_count: 1,
+          calls_with_usage: 1,
+          calls_without_usage: 0,
+          is_partial: false,
+        });
+        global.S = {
+          currentTask: { token_usage: usage(1400, 90) },
+          modelCatalog: { catalog: [] },
+          taskSummary: { token_usage_by_model: [] },
+          recentModelCalls: [
+            {
+              call_index: 7,
+              node_id: "node:normal",
+              created_at: "2026-09-14T00:00:01.000Z",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 1,
+              delta_usage: usage(500, 50),
+              delta_usage_by_model: [{ ...usage(500, 50), model_key: "glm-5.2" }],
+            },
+            {
+              call_index: 1,
+              node_id: "node:root",
+              created_at: "2026-09-14T00:00:02.000Z",
+              call_kind: "message_distribution",
+              prepared_message_count: 1,
+              prepared_message_chars: 10,
+              response_tool_call_count: 1,
+              delta_usage: usage(900, 40),
+              delta_usage_by_model: [{ ...usage(900, 40), model_key: "glm-5.2" }],
+            },
+          ],
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        vm.runInThisContext(appCode.slice(appCode.indexOf("const EMPTY_TOKEN_USAGE"), appCode.indexOf("function ensureTaskTokenUi")));
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function modelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function taskModelDisplayName"), tasksCode.indexOf("async function loadTaskDetail")));
+
+        const readKindCells = (markup) => {
+          const tableBody = markup.match(/<tbody>([\\s\\S]*?)<\\/tbody>/)?.[1] || "";
+          return Array.from(tableBody.matchAll(/<td class="task-token-call-kind" title="([^"]*)">([^<]*)<\\/td>/g))
+            .map((match) => ({ title: match[1], text: match[2] }));
+        };
+
+        renderTaskTokenStats();
+        const html = U.taskTokenContent.innerHTML;
+
+        S.taskModelCallsQuery = "分发";
+        S.taskModelCallsPage = 1;
+        renderTaskTokenStats({ force: true });
+        const filtered = readKindCells(U.taskTokenContent.innerHTML);
+
+        S.taskModelCallsQuery = "message_distribution";
+        renderTaskTokenStats({ force: true });
+        const byRawKind = readKindCells(U.taskTokenContent.innerHTML);
+
+        console.log(JSON.stringify({
+          hasHeader: html.includes("<th>类型</th>"),
+          placeholder: html.includes("搜索序号 / 节点 ID / 类型 / 模型名称"),
+          kindCells: readKindCells(html),
+          filtered,
+          byRawKind,
+        }));
+        """
+    )
+
+    assert result["hasHeader"] is True
+    assert result["placeholder"] is True
+    # 空 call_kind（含历史行）读成普通回合，分发控制回合单独一类，悬停保留账本原值
+    assert result["kindCells"] == [
+        {"title": "message_distribution", "text": "分发消息"},
+        {"title": "普通回合", "text": "普通回合"},
+    ]
+    # 中文标签与账本 key 都能筛：明细表混着两类请求时靠这一列定位分发期调用
+    assert result["filtered"] == [{"title": "message_distribution", "text": "分发消息"}]
+    assert result["byRawKind"] == [{"title": "message_distribution", "text": "分发消息"}]
 
 
 def test_render_task_token_stats_freezes_auto_refresh_while_open() -> None:

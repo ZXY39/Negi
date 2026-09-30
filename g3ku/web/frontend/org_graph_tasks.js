@@ -1727,7 +1727,7 @@ function renderTaskTokenStats(options = {}) {
                     </div>
                     <div class="task-token-call-tools">
                         <input type="search" class="task-token-call-search" data-task-model-call-search
-                            placeholder="搜索序号 / 节点 ID / 模型名称" aria-label="搜索模型调用明细"
+                            placeholder="搜索序号 / 节点 ID / 类型 / 模型名称" aria-label="搜索模型调用明细"
                             value="${esc(modelCallQuery)}">
                         <button class="toolbar-btn ghost" type="button" data-task-model-call-refresh title="刷新模型调用明细">刷新</button>
                     </div>
@@ -1752,10 +1752,23 @@ function taskModelCallTimeValue(call) {
     return Number.isFinite(parsed) ? parsed : 0;
 }
 
+// 请求类型：账本里的空串（含历史行）都读成常规节点回合，只有分发控制回合带
+// message_distribution。标签同时用于「类型」列展示和搜索框筛选。
+const TASK_MODEL_CALL_KIND_LABELS = {
+    message_distribution: "分发消息",
+};
+
+function taskModelCallKindLabel(call) {
+    const kind = String(call?.call_kind || "").trim();
+    return TASK_MODEL_CALL_KIND_LABELS[kind] || "普通回合";
+}
+
 function taskModelCallMatchesQuery(call, query) {
     const needle = String(query || "").trim().toLowerCase();
     if (!needle) return true;
     if (String(call?.call_index ?? "").includes(needle)) return true;
+    if (String(call?.call_kind || "").toLowerCase().includes(needle)) return true;
+    if (taskModelCallKindLabel(call).toLowerCase().includes(needle)) return true;
     if (String(call?.node_id || "").toLowerCase().includes(needle)) return true;
     return (Array.isArray(call?.delta_usage_by_model) ? call.delta_usage_by_model : []).some((row) =>
         [taskModelDisplayName(row), row?.model_key, row?.provider_model, row?.provider_id]
@@ -1809,6 +1822,7 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
                 <td data-task-call-index>${esc(formatTokenCount(item.call_index))}</td>
                 <td>${esc(formatModelCallTime(item.created_at))}</td>
                 <td class="task-token-call-node-id" title="${esc(item.node_id)}">${esc(item.node_id || "--")}</td>
+                <td class="task-token-call-kind" title="${esc(String(item.call_kind || "").trim() || "普通回合")}">${esc(taskModelCallKindLabel(item))}</td>
                 <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
                 <td>${esc(formatTokenCount(item.delta_usage.input_tokens))}</td>
                 <td>${esc(formatTokenCount(item.delta_usage.cache_hit_tokens))}</td>
@@ -1829,6 +1843,7 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
                         <th>序号</th>
                         <th>时间</th>
                         <th>节点ID</th>
+                        <th>类型</th>
                         <th>预处理字符数</th>
                         <th>新增输入 Token</th>
                         <th>缓存命中</th>

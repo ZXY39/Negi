@@ -3270,6 +3270,19 @@ class NodeRunner:
                 ],
             )
             arguments = self._distribution_response_arguments(response)
+            self._log_service.record_distribution_model_call(
+                task.task_id,
+                node.node_id,
+                call_index=attempt,
+                usage_attempts=list(getattr(response, 'attempts', None) or []),
+                request_messages=attempt_messages,
+                tool_calls=normalized_tool_calls,
+                actual_tool_schemas=distribution_tools,
+                callable_tool_names=[decision_tool.name],
+                provider_tool_names=[decision_tool.name],
+                request_message_count=getattr(response, 'request_message_count', None),
+                request_message_chars=getattr(response, 'request_message_chars', None),
+            )
             submitted = await decision_tool.execute(
                 children=list(arguments.get('children') or []),
                 notes=str(arguments.get('notes') or ''),
