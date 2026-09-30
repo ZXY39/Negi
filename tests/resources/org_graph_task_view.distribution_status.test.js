@@ -24,7 +24,9 @@ function autoStub() {
 }
 
 function loadExports(names) {
-  const context = { console, JSON, Math, Number, String, Boolean, Array, Object, Date, RegExp, Set, Map, isNaN, parseInt, parseFloat };
+  // S 给空 treeNodesById：聚合读数会读渲染态剔除已终态的应冻节点，空表即退回快照分母
+  // （终态剔除那条合同由 test_task_tree_frontend_sync.py 覆盖，这里不重演）。
+  const context = { console, JSON, Math, Number, String, Boolean, Array, Object, Date, RegExp, Set, Map, isNaN, parseInt, parseFloat, S: { treeNodesById: {} } };
   context.window = context;
   context.document = autoStub();
   context.globalThis = context;
