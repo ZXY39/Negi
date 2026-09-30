@@ -1225,6 +1225,25 @@ async def test_frozen_drain_ledger_survives_meta_republish(tmp_path: Path) -> No
         published = meta.get("distribution") or {}
         assert set(published.get("blocked_node_ids") or []) == {record.root_node_id, "node:child-a"}
         assert set(published.get("frozen_node_ids") or []) == {record.root_node_id, "node:child-a"}
+
+        # ③ 读数侧兜底：meta 那份是空的（epoch 已失败、驱动不再重算，或进程重启后没刷过）
+        #    也要能从 epoch 行把账本捞回来，否则横幅永远停在 0/N。
+        service.log_service.update_task_runtime_meta(
+            record.task_id,
+            distribution={
+                "active_epoch_id": epoch.epoch_id,
+                "state": "failed",
+                "mode": "subtree_barrier",
+                "target_node_ids": [record.root_node_id],
+                "blocked_node_ids": [record.root_node_id, "node:child-a"],
+                "frozen_node_ids": [],
+            },
+        )
+        stale_state = service.query_service._distribution_state_with_ledger(
+            record.task_id,
+            service.log_service.read_task_runtime_meta(record.task_id) or {},
+        )
+        assert set(stale_state.frozen_node_ids) == {record.root_node_id, "node:child-a"}
     finally:
         await service.close()
 
