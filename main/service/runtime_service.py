@@ -8897,6 +8897,18 @@ class MainRuntimeService:
             return None
         return payload
 
+    def get_task_token_ledger_payload(
+        self,
+        task_id: str,
+        *,
+        model_call_limit: int = 300,
+    ) -> dict[str, Any] | None:
+        task_id = self.normalize_task_id(task_id)
+        return self.query_service.get_task_token_ledger(
+            task_id,
+            model_call_limit=model_call_limit,
+        )
+
     def get_task_tree_snapshot_payload(
         self,
         task_id: str,

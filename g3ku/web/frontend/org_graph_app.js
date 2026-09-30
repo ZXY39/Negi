@@ -259,6 +259,7 @@ const S = {
     taskWorkerStatusPollId: null,
     taskPerformanceRefreshId: null,
     taskTokenStatsOpen: false,
+    taskTokenLedgerRefreshing: false,
     taskErrorLogs: [],
     taskErrorLogOpen: false,
     taskModelCallsPage: 1,
@@ -16269,8 +16270,8 @@ function bind() {
             return;
         }
         if (target.closest("[data-task-model-call-refresh]")) {
-            // 手动刷新：窗口打开期间唯一的数据更新入口（强制重建，保留搜索条件）。
-            renderTaskTokenStats({ force: true });
+            // 手动刷新：窗口打开期间唯一的数据更新入口，重新取数后再强制重建。
+            void refreshTaskTokenLedger();
         }
     });
     // 搜索输入走事件委托：只重建表格区域，输入框本身不销毁，焦点与内容不丢失。

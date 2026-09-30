@@ -1642,8 +1642,11 @@ function renderTaskTokenStats(options = {}) {
     // 清空搜索框内容与筛选结果；手动更新走「刷新」按钮（force）。
     if (!force && S.taskTokenStatsOpen) return;
     const summary = taskTokenDisplayUsage(S.currentTask, null);
-    U.taskTokenSummaryText.textContent = taskTokenSummaryLine(summary);
-    if (U.taskTokenButton) U.taskTokenButton.title = taskTokenSummaryLine(summary);
+    // taskTokenSummaryLine 自己会换算成显示口径，这里必须喂未换算的用量：传 summary
+    // 会把缓存命中再加一次（实盘同一任务顶部 46,834、副标题 84,082）。
+    const summaryLine = taskTokenSummaryLine(taskTokenUsage(S.currentTask, null));
+    U.taskTokenSummaryText.textContent = summaryLine;
+    if (U.taskTokenButton) U.taskTokenButton.title = summaryLine;
     if (!summary.tracked) {
         U.taskTokenContent.innerHTML = `
             <div class="task-token-topline">
@@ -1729,7 +1732,7 @@ function renderTaskTokenStats(options = {}) {
                         <input type="search" class="task-token-call-search" data-task-model-call-search
                             placeholder="搜索序号 / 节点 ID / 类型 / 模型名称" aria-label="搜索模型调用明细"
                             value="${esc(modelCallQuery)}">
-                        <button class="toolbar-btn ghost" type="button" data-task-model-call-refresh title="刷新模型调用明细">刷新</button>
+                        <button class="toolbar-btn ghost" type="button" data-task-model-call-refresh title="重新取数：总量与最近 300 条调用明细">刷新</button>
                     </div>
                 </div>
                 <div class="task-token-call-table-region" data-task-model-call-region>
@@ -1743,6 +1746,72 @@ function renderTaskTokenStats(options = {}) {
         <div class="task-token-model-list">${rowsMarkup}</div>
         ${recentCallMarkup}
     `;
+}
+
+// 账本行的身份是「节点 + 该节点自己的轮次序号」：call_index 每节点从 1 重新计
+// （实盘单任务 8071 行只覆盖 259 个不同序号），只按 call_index 去重会让一条新调用
+// 顶掉其他节点的同序号行。实时合流与手动刷新共用这个键。
+function taskModelCallRowKey(call) {
+    return `${String(call?.node_id || "").trim()}:${Number(call?.call_index || 0)}`;
+}
+
+function mergeTaskModelCallRows(existing, incoming) {
+    const rows = Array.isArray(existing) ? existing : [];
+    const added = (Array.isArray(incoming) ? incoming : []).filter(Boolean);
+    if (!added.length) return rows.slice();
+    const addedKeys = new Set(added.map(taskModelCallRowKey));
+    return [...rows.filter((item) => item && !addedKeys.has(taskModelCallRowKey(item))), ...added];
+}
+
+function setTaskTokenRefreshBusy(busy) {
+    const button = U.taskTokenContent?.querySelector?.("[data-task-model-call-refresh]") || null;
+    if (!button) return;
+    button.disabled = !!busy;
+    button.textContent = busy ? "刷新中" : "刷新";
+}
+
+// 「刷新」按契约要重新取数，而不是重绘内存：窗口冻结期间 WS 漏掉的行只有取数才补得回。
+// 走窄接口（总量 + 按模型明细 + 最近若干条），整份任务详情带的是全量账本。
+async function refreshTaskTokenLedger() {
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!taskId || S.taskTokenLedgerRefreshing) return;
+    S.taskTokenLedgerRefreshing = true;
+    setTaskTokenRefreshBusy(true);
+    let payload = null;
+    let failure = null;
+    try {
+        payload = await ApiClient.getTaskTokenLedger(taskId);
+    } catch (error) {
+        failure = error;
+    } finally {
+        // 无论取回、报错还是在飞期间切走任务，按钮都不能停在「刷新中」。
+        S.taskTokenLedgerRefreshing = false;
+        setTaskTokenRefreshBusy(false);
+    }
+    if (!payload) {
+        showToast({ title: "刷新失败", text: failure?.message || "未知错误", kind: "error" });
+        return;
+    }
+    if (String(S.currentTaskId || "").trim() !== taskId) return;
+    const rows = (Array.isArray(payload.model_calls) ? payload.model_calls : []).map(normalizeTaskModelCall);
+    S.currentTask = {
+        ...(S.currentTask || {}),
+        token_usage: payload.token_usage || S.currentTask?.token_usage || null,
+    };
+    S.taskSummary = {
+        ...(S.taskSummary || {}),
+        token_usage_by_model: Array.isArray(payload.token_usage_by_model)
+            ? payload.token_usage_by_model
+            : (S.taskSummary?.token_usage_by_model || []),
+    };
+    S.recentModelCalls = mergeTaskModelCallRows(S.recentModelCalls, rows);
+    renderTaskTokenStats({ force: true });
+    showToast({
+        title: "Token 统计已刷新",
+        text: `明细已对齐到最近 ${formatTokenCount(rows.length)} 条调用`,
+        kind: "success",
+        durationMs: 2200,
+    });
 }
 
 // 模型调用明细视图状态：默认按时间倒序（同一秒内按调用序号倒序），
@@ -2021,11 +2090,7 @@ function handleTaskEvent(payload) {
     }
     if (payload.type === "task.model.call") {
         const nextCall = normalizeTaskModelCall(payload.data || {});
-        const existing = Array.isArray(S.recentModelCalls) ? S.recentModelCalls : [];
-        const withoutSame = existing.filter((item) => Number(item?.call_index || 0) !== Number(nextCall.call_index || 0));
-        const merged = [...withoutSame, nextCall]
-            .sort((a, b) => Number(a?.call_index || 0) - Number(b?.call_index || 0));
-        S.recentModelCalls = merged;
+        S.recentModelCalls = mergeTaskModelCallRows(S.recentModelCalls, [nextCall]);
         renderTaskTokenStats();
         return;
     }

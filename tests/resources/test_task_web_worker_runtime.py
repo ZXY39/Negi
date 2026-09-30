@@ -3320,6 +3320,113 @@ def test_task_detail_summary_exposes_token_usage_by_model(tmp_path: Path):
     assert by_model[0]["output_tokens"] == 60
 
 
+def test_task_token_ledger_payload_returns_totals_by_model_and_capped_calls(tmp_path: Path, monkeypatch):
+    """Token 统计窗口「刷新」的窄取数口：任务级总量 + 按模型明细 + 最近 limit 条调用。
+
+    整份任务详情带的是全量账本（实盘单任务 8071 行 / 6.79 MB / 6.5s），窗口内每次手动
+    刷新不该重付那次传输，所以这里必须按 limit 截断（取最新 limit 条，按 seq 升序回）并且不回带详情字段。
+    """
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+
+    record = asyncio.run(_create_web_task(service))
+    root = service.get_node(record.root_node_id)
+    assert root is not None
+    node = root.model_copy(
+        update={
+            "token_usage": TokenUsageSummary(
+                tracked=True,
+                input_tokens=120,
+                output_tokens=60,
+                cache_hit_tokens=30,
+                call_count=2,
+                calls_with_usage=2,
+            ),
+            "token_usage_by_model": [
+                ModelTokenUsageRecord(
+                    tracked=True,
+                    input_tokens=120,
+                    output_tokens=60,
+                    cache_hit_tokens=30,
+                    call_count=2,
+                    calls_with_usage=2,
+                    model_key="deepseek-v4-flash-2",
+                    provider_id="openai",
+                    provider_model="deepseek-v4-flash",
+                )
+            ],
+        }
+    )
+    service.store.upsert_node(node)
+    service.log_service._sync_node_read_models_locked(node)
+    service.store.update_task(
+        record.task_id,
+        lambda current: current.model_copy(
+            update={
+                "token_usage": TokenUsageSummary(
+                    tracked=True,
+                    input_tokens=500,
+                    output_tokens=50,
+                    cache_hit_tokens=100,
+                    call_count=5,
+                    calls_with_usage=5,
+                )
+            }
+        ),
+    )
+    for index in range(1, 6):
+        service.store.append_task_model_call(
+            task_id=record.task_id,
+            node_id=root.node_id,
+            created_at=f"2026-09-30T10:00:{index:02d}+08:00",
+            payload={
+                "call_index": index,
+                "prepared_message_chars": 100 * index,
+                "delta_usage": {
+                    "tracked": True,
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "call_count": 1,
+                    "calls_with_usage": 1,
+                },
+                "delta_usage_by_model": [],
+            },
+        )
+
+    payload = service.get_task_token_ledger_payload(record.task_id, model_call_limit=2)
+    assert payload is not None
+    assert payload["token_usage"]["input_tokens"] == 500
+    assert [item["model_key"] for item in payload["token_usage_by_model"]] == ["deepseek-v4-flash-2"]
+    # 取的是最新两条（返回按 seq 升序），不是账本开头。
+    assert [item["call_index"] for item in payload["model_calls"]] == [4, 5]
+    assert "task" not in payload and "recent_model_calls" not in payload
+
+    # limit 是闸门不是开关：越界夹到 1..1000，不给"顺手拉全量账本"留口子。
+    capped = service.get_task_token_ledger_payload(record.task_id, model_call_limit=5000)
+    assert capped is not None
+    assert len(capped["model_calls"]) == 5
+    assert service.get_task_token_ledger_payload("task:missing") is None
+
+    # 路由层：窗口点「刷新」打的是这条，响应带 ok 信封；任务不存在要 404 而不是空账本。
+    monkeypatch.setattr("main.api.rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+    client = TestClient(_build_app())
+    response = client.get(f"/api/tasks/{record.task_id}/token-ledger", params={"limit": 2})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["token_usage"]["input_tokens"] == 500
+    assert [item["call_index"] for item in body["model_calls"]] == [4, 5]
+    assert "task" not in body
+    assert client.get("/api/tasks/task:does-not-exist/token-ledger").status_code == 404
+
+
 def test_tool_result_batch_uses_canonical_output_ref_for_wrapped_content(tmp_path: Path):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),

@@ -103,6 +103,29 @@ async def get_task(
     return {'ok': True, **payload}
 
 
+@router.get('/tasks/{task_id}/token-ledger')
+async def get_task_token_ledger(
+    task_id: str,
+    limit: int = Query(300),
+):
+    """Token 统计窗口的手动刷新取数口：任务级总量 + 按模型明细 + 最近 limit 条调用。
+
+    整份任务详情带的是全量账本（实盘单任务 6.79 MB / 6.5s），刷新只补窗口要渲染的列。
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = await asyncio.to_thread(
+        service.get_task_token_ledger_payload,
+        task_id,
+        model_call_limit=limit,
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, **payload}
+
+
 @router.get('/tasks/{task_id}/tree-snapshot')
 async def get_task_tree_snapshot(
     task_id: str,

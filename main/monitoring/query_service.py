@@ -633,6 +633,27 @@ class TaskQueryService:
         self._record_debug('query_service.get_task_snapshot', started_at=started_at, started_mono=started_mono)
         return payload
 
+    def get_task_token_ledger(self, task_id: str, *, model_call_limit: int = 300) -> dict[str, Any] | None:
+        # Token 统计窗口的「刷新」取数口。整份任务详情带的是全量账本（实盘单任务
+        # 8071 行 / 6.79 MB / 6.5s），窗口打开期间的手动刷新不该重付那次传输，
+        # 所以只回窗口要渲染的三样：任务级总量、按模型明细、最近若干条调用。
+        task = self._store.get_task(task_id)
+        if task is None:
+            return None
+        limit = max(1, min(int(model_call_limit or 0), 1000))
+        return {
+            'task_id': task.task_id,
+            'token_usage': task.token_usage.model_dump(mode='json'),
+            'token_usage_by_model': [
+                item.model_dump(mode='json')
+                for item in self._projection_token_usage_by_model(task.task_id)
+            ],
+            'model_calls': [
+                item.model_dump(mode='json')
+                for item in self._recent_model_calls(task.task_id, limit=limit)
+            ],
+        }
+
     def get_node_detail(self, task_id: str, node_id: str, *, detail_level: str = 'summary') -> TaskNodeDetail | None:
         task = self._store.get_task(task_id)
         detail_record = self._store.get_task_node_detail(node_id)

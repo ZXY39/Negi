@@ -1540,6 +1540,155 @@ def test_refresh_task_token_call_table_rerenders_only_table_region() -> None:
     assert result["regionSummary"] is True
 
 
+def test_task_token_ledger_refresh_refetches_and_keys_rows_by_node_and_index() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        // 三个节点各自把 call_index 计到 5：真实任务里序号是每节点独立的（实盘单任务
+        // 8071 行只覆盖 259 个不同序号），它们必须作为不同行共存。
+        const makeRow = (nodeId, idx, seconds, input) => ({
+          call_index: idx,
+          node_id: nodeId,
+          created_at: new Date(Date.UTC(2026, 8, 14, 0, 0, seconds)).toISOString(),
+          prepared_message_count: 1,
+          prepared_message_chars: 10,
+          response_tool_call_count: 0,
+          duration_ms: 900,
+          first_token_ms: 200,
+          thinking_tokens: 3,
+          delta_usage: { tracked: true, input_tokens: input, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+          delta_usage_by_model: [{ model_key: "model-a" }],
+        });
+        global.S = {
+          currentTaskId: "task:test",
+          currentTask: {
+            token_usage: { tracked: true, input_tokens: 100, output_tokens: 10, cache_hit_tokens: 0, call_count: 2, calls_with_usage: 2, calls_without_usage: 0, is_partial: false },
+          },
+          taskSummary: { token_usage_by_model: [] },
+          recentModelCalls: [makeRow("node:a", 5, 10, 100), makeRow("node:b", 5, 11, 200)],
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+          taskModelCallsQuery: "",
+          taskTokenStatsOpen: true,
+          taskTokenLedgerRefreshing: false,
+        };
+        const refreshButton = { disabled: false, textContent: "刷新" };
+        global.U = {
+          taskTokenContent: {
+            innerHTML: "",
+            querySelector: (selector) => (selector === "[data-task-model-call-refresh]" ? refreshButton : null),
+          },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+        const requests = [];
+        const toasts = [];
+        global.ApiClient = {
+          getTaskTokenLedger: async (taskId) => {
+            requests.push(taskId);
+            return {
+              token_usage: { tracked: true, input_tokens: 999, output_tokens: 20, cache_hit_tokens: 5, call_count: 3, calls_with_usage: 3, calls_without_usage: 0, is_partial: false },
+              token_usage_by_model: [],
+              model_calls: [makeRow("node:a", 5, 12, 300), makeRow("node:c", 5, 13, 400)],
+            };
+          },
+        };
+        global.showToast = (options) => toasts.push(options);
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        vm.runInThisContext(appCode.slice(appCode.indexOf("const EMPTY_TOKEN_USAGE"), appCode.indexOf("function ensureTaskTokenUi")));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function taskModelDisplayName"), tasksCode.indexOf("async function loadTaskDetail")));
+
+        (async () => {
+          // 同序号不同节点共存，同节点同序号只被替换一次。
+          const mergedSize = mergeTaskModelCallRows(S.recentModelCalls, [makeRow("node:b", 5, 99, 500)]).length;
+
+          await refreshTaskTokenLedger();
+          const afterSuccess = {
+            requests: requests.slice(),
+            rowKeys: S.recentModelCalls.map((row) => `${row.node_id}#${row.call_index}`),
+            totalsInput: S.currentTask.token_usage.input_tokens,
+            buttonLabel: refreshButton.textContent,
+            buttonDisabled: refreshButton.disabled,
+            successToast: toasts.some((item) => item.kind === "success"),
+            summaryText: U.taskTokenSummaryText.textContent,
+            toplineInput: (U.taskTokenContent.innerHTML.match(/<strong>([\\d,]+)<\\/strong><span>总输入/)||[])[1],
+            stillFlagged: S.taskTokenLedgerRefreshing,
+          };
+
+          // 在飞期间切走任务：旧任务的取数结果不得应用到新任务上。
+          let resolveFetch = null;
+          global.ApiClient.getTaskTokenLedger = () => new Promise((resolve) => { resolveFetch = resolve; });
+          const pending = refreshTaskTokenLedger();
+          S.currentTaskId = "task:other";
+          resolveFetch({
+            token_usage: { tracked: true, input_tokens: 1234, output_tokens: 1, cache_hit_tokens: 0, call_count: 1, calls_with_usage: 1, calls_without_usage: 0, is_partial: false },
+            token_usage_by_model: [],
+            model_calls: [],
+          });
+          await pending;
+          const staleTotals = S.currentTask.token_usage.input_tokens;
+          const staleFlagged = S.taskTokenLedgerRefreshing;
+
+          // 失败侧：中文 toast + 按钮回到可用态，不能停在「刷新中」。
+          S.currentTaskId = "task:test";
+          global.ApiClient.getTaskTokenLedger = async (taskId) => {
+            requests.push(taskId);
+            throw new Error("gateway down");
+          };
+          await refreshTaskTokenLedger();
+
+          console.log(JSON.stringify({
+            mergedSize,
+            afterSuccess,
+            staleTotals,
+            staleFlagged,
+            failure: {
+              errorToast: toasts[toasts.length - 1]?.kind,
+              errorText: toasts[toasts.length - 1]?.text,
+              buttonLabel: refreshButton.textContent,
+              buttonDisabled: refreshButton.disabled,
+              stillFlagged: S.taskTokenLedgerRefreshing,
+              requestCount: requests.length,
+            },
+          }));
+        })();
+        """
+    )
+
+    assert result["mergedSize"] == 2
+    assert result["afterSuccess"]["requests"] == ["task:test"]
+    # node:a#5 被服务端版本替换，node:b#5 没被同序号顶掉，node:c#5 新增。
+    assert result["afterSuccess"]["rowKeys"] == ["node:b#5", "node:a#5", "node:c#5"]
+    assert result["afterSuccess"]["totalsInput"] == 999
+    # 副标题按 effective 口径 = 输入 999 + 缓存命中 5；不得把缓存命中再加第二次。
+    assert result["afterSuccess"]["summaryText"] == "总输入 1,004 · 总输出 20 · 缓存命中 5"
+    assert result["afterSuccess"]["buttonLabel"] == "刷新"
+    assert result["afterSuccess"]["buttonDisabled"] is False
+    assert result["afterSuccess"]["successToast"] is True
+    assert result["afterSuccess"]["stillFlagged"] is False
+    assert result["staleTotals"] == 999
+    assert result["staleFlagged"] is False
+    assert result["failure"]["errorToast"] == "error"
+    assert result["failure"]["errorText"] == "gateway down"
+    assert result["failure"]["buttonLabel"] == "刷新"
+    assert result["failure"]["buttonDisabled"] is False
+    assert result["failure"]["stillFlagged"] is False
+    assert result["failure"]["requestCount"] == 2
+
+
 def test_render_tasks_uses_effective_input_tokens_for_task_card_metric() -> None:
     result = _run_node_script(
         """

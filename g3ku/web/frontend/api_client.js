@@ -665,6 +665,16 @@ class ApiClient {
         });
     }
 
+    static async getTaskTokenLedger(taskId, { limit = 300 } = {}) {
+        // 独立的 requestKey：同 key 的后发请求会 abort 前一条，蹭 tasks:detail:* 会让
+        // 点「刷新」打断一次正在加载的大任务详情。
+        return this._request("GET", `/api/tasks/${taskId}/token-ledger`, {
+            params: { limit },
+            requestKey: `tasks:token-ledger:${taskId}`,
+            timeoutMs: 30000,
+        });
+    }
+
     static async getTaskNodeDetail(taskId, nodeId, { detailLevel = "summary" } = {}) {
         const normalizedDetailLevel = String(detailLevel || "summary").trim().toLowerCase() === "full"
             ? "full"
