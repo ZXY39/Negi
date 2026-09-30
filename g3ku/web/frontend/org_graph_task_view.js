@@ -2898,21 +2898,33 @@ function distributionAffectedNodeIds(distributionState = activeTaskDistributionS
     return affected;
 }
 
-// 分发横幅的聚合读数：分母取应冻集（blocked_node_ids，epoch 创建时的快照），分子取
-// 排空账本与该快照的**交集**（账本可能残留已不在应冻集的节点，取交集才不会分子超分母）。
-// 分子语义上是下界：未经检查点停住的节点不入账、worker 重启后也不重建，
-// 所以这行只能读成「至少这些已经停了」，不是精确进度条。合同见
-// docs/architecture/runtime-overview.md「frontdoor 与任务运行时的关系」。
+// 节点终态口径与后端 `main/types.py` 的 NodeStatus 一致（in_progress | success | failed）。
+const TREE_TERMINAL_STATUSES = new Set(["success", "failed"]);
+
+// 分发横幅的聚合读数：分母取应冻集中**仍非终态**的节点（blocked_node_ids 是 epoch 创建时的
+// 快照，会残留已经跑完的分支），分子取排空账本与该集合的**交集**（账本可能残留已不在应冻集的
+// 节点，取交集才不会分子超分母）。树里查不到任何节点状态时退回快照口径，不猜。
+// 分子语义上是下界：未经检查点停住的节点不入账，所以这行只能读成「至少这些已经停了」，
+// 不是精确进度条。合同见 docs/architecture/runtime-overview.md「frontdoor 与任务运行时的关系」。
 function summarizeDistributionProgress(distributionState) {
     const state = distributionState && typeof distributionState === "object" ? distributionState : {};
     const asIds = (value) => (Array.isArray(value)
         ? value.map((item) => String(item || "").trim()).filter(Boolean)
         : []);
     const blockedIds = asIds(state.blocked_node_ids);
-    const blockedCount = blockedIds.length;
+    if (!blockedIds.length) return { frozenCount: 0, blockedCount: 0, text: "" };
+    const nodesById = S.treeNodesById && typeof S.treeNodesById === "object" ? S.treeNodesById : null;
+    let denominatorIds = blockedIds;
+    if (nodesById && Object.keys(nodesById).length) {
+        denominatorIds = blockedIds.filter((nodeId) => {
+            const status = String(nodesById[nodeId]?.status || "").trim().toLowerCase();
+            return !status || !TREE_TERMINAL_STATUSES.has(status);
+        });
+    }
+    const blockedCount = denominatorIds.length;
     if (!blockedCount) return { frozenCount: 0, blockedCount: 0, text: "" };
-    const blockedSet = new Set(blockedIds);
-    const frozenCount = asIds(state.frozen_node_ids).filter((nodeId) => blockedSet.has(nodeId)).length;
+    const denominatorSet = new Set(denominatorIds);
+    const frozenCount = asIds(state.frozen_node_ids).filter((nodeId) => denominatorSet.has(nodeId)).length;
     const phase = String(state.state || "").trim();
     const tail = frozenCount < blockedCount
         ? "其余节点仍有在飞请求未落"

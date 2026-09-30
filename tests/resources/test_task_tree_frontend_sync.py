@@ -6395,3 +6395,55 @@ def test_fit_task_tree_anchors_root_when_tree_cannot_fit() -> None:
     assert abs(float(result["scale"]) - 0.12) < 1e-6, "放不下时应停在 TREE_SCALE_MIN 下限"
     assert abs(float(result["rootCenterX"]) - float(result["viewCenter"][0])) < 1.0
     assert abs(float(result["rootCenterY"]) - float(result["viewCenter"][1])) < 1.0
+
+
+def test_distribution_progress_denominator_excludes_terminal_blocked_nodes() -> None:
+    """已停步的分母要剔掉应冻集里已终态的分支，否则分子涨不满、尾句把"已成功"说成"在飞未落"。
+
+    实盘 task:1d9cddf9858e / epoch:949c69fef214：blocked 235 里有 69 个 success，
+    frozen 172∩235=166 ⇒ 横幅恒显「已停步 166/235 · 其余节点仍有在飞请求未落」且永远不动。
+    """
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.S = {
+          treeNodesById: {
+            "node:a": { node_id: "node:a", status: "in_progress" },
+            "node:b": { node_id: "node:b", status: "success" },
+            "node:c": { node_id: "node:c", status: "in_progress" },
+          },
+        };
+        vm.runInThisContext(fs.readFileSync("g3ku/web/frontend/org_graph_task_view.js", "utf8"));
+        const summary = summarizeDistributionProgress({
+          state: "distributing",
+          blocked_node_ids: ["node:a", "node:b", "node:c"],
+          frozen_node_ids: ["node:a", "node:b", "node:c"],
+        });
+        const unknown = summarizeDistributionProgress({
+          state: "barrier_draining",
+          blocked_node_ids: ["node:x", "node:y"],
+          frozen_node_ids: ["node:x"],
+        });
+        global.S = { treeNodesById: null };
+        const noTree = summarizeDistributionProgress({
+          state: "barrier_draining",
+          blocked_node_ids: ["node:x", "node:y"],
+          frozen_node_ids: ["node:x", "node:y"],
+        });
+        console.log(JSON.stringify({ summary, unknown, noTree }));
+        """
+    )
+
+    summary = result["summary"]
+    assert summary["blockedCount"] == 2, "node:b 已 success，不该留在分母"
+    assert summary["frozenCount"] == 2, "终态节点也不该贡献分子"
+    assert summary["text"] == "新消息分发中 · 已停步 2/2 · 已进入分发决策回合"
+
+    # 账本里有、但已不在应冻集快照里的节点仍然被交集挡掉
+    assert result["unknown"]["frozenCount"] == 1
+    assert result["unknown"]["blockedCount"] == 2
+    # 树状态未知时退回快照口径，不猜
+    assert result["noTree"]["blockedCount"] == 2
+    assert result["noTree"]["frozenCount"] == 2
