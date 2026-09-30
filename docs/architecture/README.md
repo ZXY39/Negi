@@ -5,26 +5,32 @@ Start here when you are new to the repository or when a change crosses subsystem
 ## Reading Order
 
 1. `runtime-overview.md`
-2. `operations-and-maintenance.md` when you need to run, debug, or deploy the system
-3. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
-4. `tool-and-skill-system.md`
-5. `web-and-admin.md`
-6. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
-7. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
-8. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
-9. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`g3ku mcp serve`)
-10. `speech-to-text.md` when the change touches local voice transcription: the composer mic button, inbound channel voice, the `stt` config section, or the vendored whisper.cpp binary
+2. `main-task-runtime.md` when the change touches task message distribution / append notices, acceptance handoff and spawn review, node-level pause and recovery, or shutdown pause / startup auto-resume
+3. `operations-and-maintenance.md` when you need to run, debug, or deploy the system
+4. `context-and-cache-troubleshooting.md` when the change touches prompt caching, context retention, append-only request growth, or request artifact forensics
+5. `tool-and-skill-system.md`
+6. `tool-hydration-and-callable-chain.md` when the change touches tool hydration and promotion, parameter-error guidance, the universal tool timeout, or stage gating
+7. `web-and-admin.md`
+8. `heartbeat-system.md` when the change touches heartbeat, long-running CEO tool wakeups, or live reminder behavior
+9. `config-and-models.md` when the change touches runtime config, provider/model routing, or model bindings
+10. `external-agent-api.md` when the change touches the external bridge API (`/api/v1`), external sessions, outbound routing to bridges, or the built-in official QQ adapter
+11. `agent-gateway.md` when the change touches the OpenAI-compatible endpoint (`/api/v1/chat/completions`) or the MCP stdio gateway (`g3ku mcp serve`)
+12. `speech-to-text.md` when the change touches local voice transcription: the composer mic button, inbound channel voice, the `stt` config section, or the vendored whisper.cpp binary
 
 ## Topic Guide
 
 - `runtime-overview.md`
-  Use for session lifecycle, frontdoor/runtime flow, tool execution flow, cross-module runtime behavior, and graceful shutdown pause / startup auto-resume.
+  Use for session lifecycle, frontdoor/runtime flow, tool execution flow, cross-module runtime behavior, frontdoor context compression, and node model route resolution.
+- `main-task-runtime.md`
+  Use for the task side of the runtime: append-notice distribution epochs, mailbox delivery and barriers, acceptance node lifecycle and spawn review, node-level pause/resume/cancel, and graceful shutdown pause with startup auto-resume.
 - `operations-and-maintenance.md`
   Use for startup workflows, troubleshooting order, high-risk change types, memory queue/reset workflows, and Docker deployment.
 - `context-and-cache-troubleshooting.md`
   Use for prompt cache misses, context shrink/continuity regressions, actual-request artifact forensics, and before changing node or CEO context strategies.
 - `tool-and-skill-system.md`
-  Use for candidate tools, hydrated tools, skill loading, tool RBAC, and runtime tool contracts.
+  Use for the four tool/skill concepts, fixed builtin tool contracts, candidate tools, skill loading, tool RBAC, and resource-directory generation checks.
+- `tool-hydration-and-callable-chain.md`
+  Use for how one successful `load_tool_context` becomes a next-turn callable: hydration ledger, promotion and re-read, parameter-error lane, externalized result envelope, universal tool timeout, stage gating, and the context→callable chain.
 - `web-and-admin.md`
   Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
 - `heartbeat-system.md`
@@ -43,16 +49,16 @@ Start here when you are new to the repository or when a change crosses subsystem
 - Reminder UI or `ceo.tool.reminder` timeout-stop failures → `heartbeat-system.md` (+ `web-and-admin.md` for UI rendering)
 - Node cache misses, restart-seed continuity, token preflight/compression questions → `context-and-cache-troubleshooting.md` (+ `runtime-overview.md`)
 - Append-notice delivery, `waiting_children` replay, task-tree banner after distribution → `runtime-overview.md` + `operations-and-maintenance.md`
-- 追加通知后任务停在 paused、任务树出现红色「消息分发失败」横幅、epoch state=failed → `runtime-overview.md`「frontdoor 与任务运行时的关系」+ `operations-and-maintenance.md`「task_append_notice / task message distribution 维护要点」
+- 追加通知后任务停在 paused、任务树出现红色「消息分发失败」横幅、epoch state=failed → `main-task-runtime.md`「分发状态机与屏障」+ `operations-and-maintenance.md`「task_append_notice / 任务消息分发维护要点」
 - 分发期间想知道"每个节点到底卡在哪一步"（消息已受理但未投递 / 节点停在检查点等屏障释放 / 还压在一枚在飞模型请求上）、或节点详情已显示重试中而 toast 不出现 → `web-and-admin.md`「Task Message Distribution UI Contract」+「Model Retry Visibility UI Contract」
-- 任务非终态、一批验收节点长期 `in_progress` 而派发计数为 0（worker 日志只有 `node frozen by distribution hold`，零 ERROR 零告警）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（屏障释放集=冻结集）
-- 同一工具反复返回同一条 `Error executing <tool>`、节点长期 `in_progress` 且从不进错误暂停 → `runtime-overview.md`「Node-Level Pause and Recovery」（`runtime_fault:` 断路器）
-- 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `runtime-overview.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
+- 任务非终态、一批验收节点长期 `in_progress` 而派发计数为 0（worker 日志只有 `node frozen by distribution hold`，零 ERROR 零告警）→ `main-task-runtime.md`「子树级控制事务与排空账本」（屏障释放集=冻结集）
+- 同一工具反复返回同一条 `Error executing <tool>`、节点长期 `in_progress` 且从不进错误暂停 → `main-task-runtime.md`「Node-Level Pause and Recovery」（`runtime_fault:` 断路器）
+- 操作员点了暂停、节点 `pause_requested=True` 而 `is_paused` 长期不变 → `main-task-runtime.md`「Node-Level Pause and Recovery」（脱离派发面后的暂停直落）
 - 渠道会话（`ext:`）任务长期静默却收不到失速提醒 → `heartbeat-system.md`「Task Stall Detection」（受众谓词与它要过的两道闸门）
-- 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round`（含节点被 resume 后白跑一段再落该原因）、或 `resume` 返回 `entry_settled` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `runtime-overview.md`「Node-Level Pause and Recovery」
-- 派生评审把整批候选全拦下来、把带 `requires_acceptance` 的候选判成"验收内嵌/自产自销"、或想知道评审请求本身有多大/重发过几次 → `runtime-overview.md`「frontdoor 与任务运行时的关系」（送审候选的解析结构、派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
-- 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `runtime-overview.md`「Node-Level Pause and Recovery」
-- `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `runtime-overview.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）
+- 父节点在验收节点仍非终态时提前进入 `before_model`、或出现意外 `superseded by newer spawn round`（含节点被 resume 后白跑一段再落该原因）、或 `resume` 返回 `entry_settled` → `operations-and-maintenance.md`「spawn 轮次过早完成或子节点被意外 supersede」+ `main-task-runtime.md`「Node-Level Pause and Recovery」
+- 派生评审把整批候选全拦下来、把带 `requires_acceptance` 的候选判成"验收内嵌/自产自销"、或想知道评审请求本身有多大/重发过几次 → `main-task-runtime.md`「任务树深度上限」（送审候选的解析结构、派生审查的 fail-closed 默认结果与 `review_attempts` / `review_request_chars`）
+- 任务已终态但仍有节点显示处理中（`in_progress`）→ `operations-and-maintenance.md`「残留节点自愈」+ `main-task-runtime.md`「Node-Level Pause and Recovery」
+- `task_progress` 显示的运行/检验状态与真实执行不符（陈旧帧被当作运行中、未派发的验收节点被当作检验中）→ `main-task-runtime.md`「Node-Level Pause and Recovery」（活性标注与判读合同）+ `tools/task_progress_cn/resource.yaml`（工具描述判读规则）
 - 任务树节点徽标与真实执行不符（未派发的检验节点显示「检验中」、被检验的执行节点跟着显示「检验中」、非终态节点出现 `IN_PROGRESS` 原文、检验节点不见了）→ `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」+「Task Message Distribution UI Contract」
 - 任务树刷新时轮次下拉框自己收起/跳回默认轮次 → `web-and-admin.md`「Task Tree Live Sync And Self-Healing Contract」（重绘后的稳定身份与展开态恢复）
 - 本地会话列表拖动后的顺序被打回原样、或换浏览器顺序不一致 → `web-and-admin.md`「CEO Session List Interaction Contract」（手动顺序只存前端 localStorage）
@@ -60,7 +66,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务与会话数据不在代码检出目录里、首次初始化时选过别的盘、重启后旧任务像空库一样找不到、或按文档路径找不到 `console.log`/`managed-worker.log` → `operations-and-maintenance.md`「关键状态文件与目录」（安装根与数据根各装什么、`G3KU_DATA_DIR`→指针→cwd 的解析顺序、盘上两个 `.g3ku` 的嵌套、`get_data_dir()` 其实是安装根、指针丢失即回退 cwd 的形态）
 - 导出配置包报 `project_locked`、导入后旧登录密码解不开、导入的包被判成越界路径、新设备导入只报一个没有 detail 的 `HTTP 500`（该机还没走完首屏、`config.json` 不存在）、或导入完成后 worker 仍走旧模型链 → `config-and-models.md`「Config Bundle Export And Import」（包带的是主密钥本身、master.key 与 auto-unlock.key 不进包、导入是整体替换且需重启）
 - 保存模型密钥报 `secret overlay is undecryptable with the current master key; refusing to overwrite`、或所有 apikey 同时变空 → `config-and-models.md`「secret 的真实去向」（覆盖层被截成 0 字节时守卫会拒绝一切写入；先取证改名该文件再 锁定→解锁 解除，写入耐久性与残留缺口同段）
-- 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `runtime-overview.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）
+- 任务疑似卡死、要定位任务在等哪个节点，或要查某节点最后一批工具调用的完整入参/状态/出参 → `main-task-runtime.md`「Node-Level Pause and Recovery」（等待节点输出行）+「任务侧」（`task_node_detail` summary 档 `latest_tool_calls_full`）
 - 恢复后节点上下文突然只剩几条消息、`task_model_calls` 里 `request_seed_source` 出现 `fallback_seed_*`、帧 `messages_ref` 为空 → `runtime-overview.md`「任务侧」（帧写入的 messages_ref 保留规则）+ `context-and-cache-troubleshooting.md`「append-only 规则」
 - 磁盘满（Errno 28 / SQLITE_FULL）、0 字节错误日志、节点连锁 error-pause、artifact 变成 .gz、手动删除任务后产出在 deliverables/、任务大厅按大小排序定位大任务、managed-worker.log 轮转、runtime.sqlite3 收缩、task_events 表静默零写入 → `operations-and-maintenance.md`「磁盘满」+ `runtime-overview.md`「磁盘写保护与治理」+ `web-and-admin.md`（治理 UI 与大小/排序契约）
 - Execution/final-acceptance reflation (node vanishing from browser tree, acceptance visibility) → `runtime-overview.md` + `web-and-admin.md`
@@ -84,12 +90,12 @@ Start here when you are new to the repository or when a change crosses subsystem
 - MCP 工具全部 connection_failed、MCP 客户端协议解析错误（stdout 被污染）→ `agent-gateway.md`「常见排障入口」+「MCP stdio 网关契约」
 - 渠道会话短暂出现在本地 web 会话列表、刷新后激活会话被切回本地会话、渠道回合无法在网页暂停 → `web-and-admin.md`「CEO Session List Interaction Contract」+「Active-Turn Button Semantics」
 - 网页在渠道会话里发不出消息（回 `channel_session_readonly`）、或发出去了但渠道端没有回复 → `external-agent-api.md`「会话注册表与 key 命名空间」+「回合契约」
-- 节点反复调用文件编辑类工具失败、或同一编辑被重复提交 → `tool-and-skill-system.md`「filesystem_edit 契约」（模型面平面字段与校验面宽车道的分工、`Already applied:` 幂等车道）
+- 节点反复调用文件编辑类工具失败、或同一编辑被重复提交 → `tool-and-skill-system.md`「fixed builtin tools」（`filesystem_edit` 平面字段契约）（模型面平面字段与校验面宽车道的分工、`Already applied:` 幂等车道）
 - 用户连续发送消息时助手只看到最后一条、或渠道消息收到重复回复 → `runtime-overview.md`「prompt_batch 批次回合内容合并」+ `external-agent-api.md`「回合契约」与「内置官方 QQ 适配器」
 - Node error pause is not delivered to the source session, or node-error heartbeats retry forever -> `heartbeat-system.md`「Task Node Error Delivery」
-- 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
-- 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-and-skill-system.md`「阶段门控与 callable 收紧」
-- 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `runtime-overview.md`「frontdoor 与任务运行时的关系」（验收段：交接通知与回合尾块只给 ref + 有界摘要）
+- 验收反复打回同一交付、任务长时间停在「执行→验收」循环而没有判失败（是否存在打回次数上限）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（验收拒收无次数上限：打回只发反馈并复活执行节点，不终态化任务）
+- 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
+- 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `main-task-runtime.md`「信箱投递、重激活与上行传播」（交接通知与回合尾块只给 ref + 有界摘要）
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
 - 想判断任务停滞是不是资源排队造成、或性能条只看得到「现在」而要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（失速事件已自带一行窗口判读，更长的窗口用 `perf_inspect`）
 - worker `worker_status` 行看着一直新鲜，但存活日志/状态桥接/性能历史长期不涨 → `runtime-overview.md`「Worker Performance History」（心跳节拍在哪一步断掉、两条 worker 日志锚点）
@@ -98,33 +104,33 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」
 - 真实回合 HTTP 400 而保存时的探测没拦住（配置来自手改或迁移）、或要确认探测到底发了什么字段 → `config-and-models.md`「llm_config 子系统」
 - 模型配置弹窗里一打开下拉，整张表单就往上跳或弹窗变高 → `web-and-admin.md`「Frontend Theme And Layout Contract」（展开面板必须脱离滚动容器挂到 body）
-- 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-and-skill-system.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
+- 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-hydration-and-callable-chain.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
 - 节点 error_text 是不带 `Error executing` 前缀的裸异常（`FileNotFoundError: …png` 一类）而对应工具结果显示 success、或 `content_open` 声称图片已打开却没有进上下文 → `tool-and-skill-system.md`「fixed builtin tools」（图片 reopen 的存在性校验与 overlay 单图降级）
 - Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、模型调用明细按时间倒序/搜索跨全部记录的行为疑问、任务级统计有数字却显示「尚无按模型明细」、分发期那一段调用在明细里读不到或「类型」列分不清，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
-- Node pause or resume behaves unexpectedly -> `runtime-overview.md`「Node-Level Pause and Recovery」
-- 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan reaped at task resume` 收尸）→ `runtime-overview.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
-- 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `runtime-overview.md`「Node-Level Pause and Recovery」（各拒收车道共用同一 strike 预算）+ `tool-and-skill-system.md`「参数错误与状态分类」（必填契约回贴）
-- 模型反复提交空串 / 空数组 / `start_line=0` 这类越界值、而它看到的 schema 里没有那条边界 → `tool-and-skill-system.md`「参数错误与状态分类」（模型面投影只裁篇幅不裁判定；字段级 description 到不了模型）
-- 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `runtime-overview.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
-- 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
-- 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `runtime-overview.md`「frontdoor 与任务运行时的关系」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `final acceptance round re-dispatched after interruption`
-- 任务显示「已取消」但无人取消过（payload `cancel_requested=false`，常伴随 `Managed task worker exited` 日志）→ `runtime-overview.md`「Node-Level Pause and Recovery」
+- Node pause or resume behaves unexpectedly -> `main-task-runtime.md`「Node-Level Pause and Recovery」
+- 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan reaped at task resume` 收尸）→ `main-task-runtime.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
+- 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（各拒收车道共用同一 strike 预算）+ `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（必填契约回贴）
+- 模型反复提交空串 / 空数组 / `start_line=0` 这类越界值、而它看到的 schema 里没有那条边界 → `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（模型面投影只裁篇幅不裁判定；字段级 description 到不了模型）
+- 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `main-task-runtime.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
+- 重启后任务未自动恢复、优雅重启后仍停在 paused、或出现「本任务遇到异常停止」toast → `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
+- 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `final acceptance round re-dispatched after interruption`
+- 任务显示「已取消」但无人取消过（payload `cancel_requested=false`，常伴随 `Managed task worker exited` 日志）→ `main-task-runtime.md`「Node-Level Pause and Recovery」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启、managed-worker.log 长时间不滚动但心跳与进程仍在 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
-- 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime Notes」
+- 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime State」
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」
-- 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime Notes」（快照会话级冻结与采纳点）+ `context-and-cache-troubleshooting.md`「长期记忆快照的会话级冻结」
+- 用户说「记住/忘掉」但模型照旧，或某轮命中前缀在第二条消息就分叉 → `runtime-overview.md`「Memory Runtime State」（快照会话级冻结与采纳点）+ `context-and-cache-troubleshooting.md`「长期记忆快照的会话级冻结」
 - 日志审计侧栏角标不更新、原始日志为空或翻页停在空白页、时间显示与事件时间戳不一致、`/api/audit` 503 → `web-and-admin.md`「Log Audit Page And Event Contract」
-- Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md` "Inline Markdown Image Rendering Contract"
+- Broken image icons, file-route 400s, snapshot path mismatch → `web-and-admin.md`「Inline Markdown Image Rendering And Media Middle Layer」
 - 模型重复处理已回答的问题、连续请求尾部反复出现同一条无回复的用户消息、渠道会话里旧提问冒到最新回复下面（像用户重发）；或反向——某轮失败后用户发"继续"，模型答的是上一件成功的事 → `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目与未回答的用户输入」
 - 同一份 heartbeat 规则 / event bundle 在请求体里重复多份、token 逐轮线性上涨而对话无实质推进、或模型被已 success 节点的过期暂停通知误导 → `context-and-cache-troubleshooting.md`「heartbeat / cron 上下文残骸」
-- CEO 阶段卡里被裁撤/收口的阶段显示「当前阶段暂无工具轮次」 → 显示层必须继续带行，回填口径与未闭合范围见 `web-and-admin.md`「CEO Live Lane」的阶段轨道条目
+- CEO 阶段卡里被裁撤/收口的阶段显示「当前阶段暂无工具轮次」 → 显示层必须继续带行，回填口径与未闭合范围见 `web-and-admin.md`「CEO Stage Trace Round Rendering Contract」的阶段轨道条目
 - 回合进行中最新气泡夹着历史阶段一起出现（新阶段带着旧阶段），刷新网页才恢复正常 → 同上条目：live 帧 delta 只按投影互比，源正文的回填发生在 delta 定型之后
 - 项目一启动会话就自动回一条几小时前的旧任务结果、或某个任务结果迟迟没汇报却也没报错 → `heartbeat-system.md`「Task Terminal Repair Contract」（终态 outbox 投递耐久性与 `abandoned` 留痕）+ `operations-and-maintenance.md`「会话无回复」
 - 会话该静默却发话、或该发话却整轮无声；模型写了像哨兵的文本却没静默 → `runtime-overview.md`「3.3 静默回复（`silent` 工具）」+ `web-and-admin.md`「CEO Turn Silent Reply Contract」
 - 新增常驻内置控制工具后模型从不使用它、或调用即报错 → `tool-and-skill-system.md`「3.1.1 为什么"常驻"需要独立机制」
-- 某工具上一轮还能调、这一轮报 `tool not available`，且 `load_tool_context` 回 `ok:true` 也不把它提升 → `tool-and-skill-system.md`「hydrated tools」「加载门控」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」（压缩不是这条的原因）
+- 某工具上一轮还能调、这一轮报 `tool not available`，且 `load_tool_context` 回 `ok:true` 也不把它提升 → `tool-hydration-and-callable-chain.md`「hydrated tools」「加载门控」+ `context-and-cache-troubleshooting.md`「节点侧排查要点」（压缩不是这条的原因）
 - 模型报告的日期/时间与事实不符（心算毫秒时间戳出错、引用陈旧时间、日报归属日期错误）→ `heartbeat-system.md`「Internal-turn time anchors」+ `runtime-overview.md`「用户消息时间锚点」
 - 用户消息在请求体里同时出现原文与带 `[消息送达时间]` 行的两个版本，或装饰后缓存命中率骤降 → `context-and-cache-troubleshooting.md`「用户消息时间装饰破坏前缀稳定或相等性去重」
 - 入站到首个 provider 请求发出耗时异常 → `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」
@@ -140,7 +146,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 上下文脑图标只按新输入变化、读数长期低于上一请求的真实输入规模 → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」+ `web-and-admin.md`「Composer Context Usage Meter」
 - 长按脑图标不发起压缩、区分线停在「压缩已暂停」、压缩中区分线凭空消失刷新后才出现、渠道会话脑图标没有读数 → `web-and-admin.md`「Manual Context Compression」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 压缩报成功、`post_tokens` 也降了，但下一回合请求体又回到原大小；或压缩途中发的消息没被回答 → `runtime-overview.md`「压缩窗口：入站闸门与基线写入仲裁」+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
-- 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
+- 压缩后 `[G3KU_STAGE_COMPACT_V1]` 块数量没下降、模型报告"压缩了但历史阶段还在"、或摘要里查不到某条证据引用 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（阶段收口判读）+ `runtime-overview.md`「Frontdoor Context Compression」；节点 artifact 带 `stage_archive` 而账本没有 `context_visible` 不属该症状（节点不应用收口标记，见同节）
 - 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 脑图标读数在阶段边界那一跳冲高数倍、下一跳回落，而 `comparable_to_previous_request` 仍为 `true` → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」（锚点与阶段投影同源）
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
@@ -170,17 +176,19 @@ These rules prevent the docs from re-accumulating redundancy. Every edit to this
 3. Pointers name topics, never section numbers.
 4. Present tense only. No "now / no longer / previously / 现在 / 不再 / 曾经" — that is changelog language.
 5. Superseded text is deleted outright, never left as "obsolete notes".
-6. Size bands, not hard caps. Metric: bytes via `wc -c docs/architecture/*.md` (stable for mixed CJK/English prose; word counts are not). Reference sizes: `runtime-overview` 68 KB / `web-and-admin` 210 KB (raised from 160 KB: one contract per operator-visible web surface, and the CEO live lane now carries its own three — single-writer frame delivery, per-connection patch coalescing, and the first-paint feed window) / `tool-and-skill-system` 54 KB / `context-and-cache-troubleshooting` 55 KB / `operations-and-maintenance` 24 KB / `heartbeat-system` 26 KB / `config-and-models` 41 KB (raised from 30 KB: the config-bundle contract — master-key transport, the two load-bearing exclusions and whole-replace import — is one new section with no prior home, and the doc's existing sections are all live facts; raised again for the `stt` section, whose per-field measured defaults have no other home and whose serializer-whitelist trap is a live maintenance hazard) / `external-agent-api` 34 KB (raised from 16 KB: the built-in official QQ adapter contract — inbound idempotency, per-session SSE pump survival, durable outbox reconciliation — grew past the band while all of it is still one consumer-facing contract; raised again for the inbound attachment lane, whose `content_type`-is-a-category-word rule, byte-level voice judgement, retry budget and the model-visibility exclusion for voice clips are one flow that no other doc can host) / `agent-gateway` 10 KB / `speech-to-text` 16 KB (raised from 8.5 KB: the channel-voice contract grew the facts no other doc can carry — QQ's `content_type` is a category word and its media header lies about the container, so the byte-level judgement rules and the measured decode/provisioning numbers are all live contract; raised again for on-demand provisioning, whose measured download sizes, single-flight lane and unauthenticated-port boundary belong to no other doc). Check sizes when you edit a doc. Within reference +30%: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update this README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
+6. Structure is the metric; bytes are only an observation. Two invariants: **(a) one doc = one subsystem** — when a doc is being asked to hold a second subsystem, split it into a new doc and register it here (Reading Order, Topic Guide, Topic Ownership). **(b) one leaf section = one contract, at most 25 KB** — a leaf section (a heading whose body contains no deeper heading) above 25 KB is subdivided into `###` sections or split out; a single bullet that carries a whole contract body is a misplaced contract: give it its own heading, or move it to the owning doc and leave a pointer. This README's Debugging Entry Points is a pointer index (rule 5), not a contract leaf. Measure with `python scripts/check_architecture_docs.py` — it walks headings and reports oversized leaves, dangling pointers, and pointers that name a doc which no longer exists; raw totals come from `wc -c docs/architecture/*.md` (bytes are stable for mixed CJK/English prose; word counts are not). Within the invariants: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes, and contract facts are never deleted to satisfy a size. When a doc outgrows itself, work the ladder in order: (a) delete dead/duplicated/superseded content, (b) move misplaced content to its owning doc, (c) split the genuinely grown subsystem into a new doc, (d) subdivide an oversized leaf into one contract per section. Observed sizes when this rule was rewritten (informational, not caps): `web-and-admin` 238 KB / `runtime-overview` 158 KB / `context-and-cache-troubleshooting` 88 KB / `operations-and-maintenance` 71 KB / `main-task-runtime` 66 KB / `tool-and-skill-system` 60 KB / `config-and-models` 47 KB / `tool-hydration-and-callable-chain` 46 KB / `heartbeat-system` 39 KB / `external-agent-api` 36 KB / `speech-to-text` 16 KB / `agent-gateway` 10 KB / `README` 40 KB. The previous per-doc byte table (`runtime-overview` 68 KB, `operations-and-maintenance` 24 KB, …) was deleted here: it had never constrained anything — `runtime-overview` entered this directory at 168 KB with a 68 KB reference, and five of eleven docs ended up over band while every one of their sections was live contract.
 
 ## Topic Ownership
 
 | Topic | Owning doc |
 |---|---|
-| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, distribution / append-notice contract, provider timeout boundary, worker performance history (`perf_samples` sampling, retention, and the shared perf read model), silent reply via the `silent` tool (turn-terminal semantics, transcript trace row, compaction exemption, turn-end stage closure with an empty summary slot) | `runtime-overview.md` |
+| Runtime layering, message execution chain, session/task relationship, task temp directory resolution, provider timeout boundary, worker performance history (`perf_samples` sampling, retention, and the shared perf read model), silent reply via the `silent` tool (turn-terminal semantics, transcript trace row, compaction exemption, turn-end stage closure with an empty summary slot) | `runtime-overview.md` |
+| Append-notice distribution contract: sub-tree control transaction and drain ledger, epoch state machine and barriers, single-flight epoch driver with wave-retry/degraded skip, mailbox delivery and uplink propagation, epoch-completed vs deferred consumption, acceptance node lifecycle and handshake re-dispatch, spawn review, task tree depth ceiling, force-delete precedence, node-level pause/resume/cancel and circuit breakers, graceful shutdown pause and startup auto-resume | `main-task-runtime.md` |
 | Frontdoor context compression contract (`token_compression` / `stage_compaction`, 阶段收口 `context_visible` 与证据索引回填) | `runtime-overview.md` |
 | Memory queue state/file semantics (`runtime-overview`); queue/reset operator workflows (`operations-and-maintenance`) | both, split as shown |
 | Heartbeat continuation contract, cron at-most-once delivery, reminder sidecar decision semantics, timeout stop, task terminal repair (including terminal-outbox delivery durability and the `abandoned` state), node-error, distribution-error, and task-stall detection/delivery | `heartbeat-system.md` |
-| Tool/skill four concepts, candidate→callable chain, Tool Admin RBAC semantics, duplicate-call guard, universal tool timeout contract, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool) | `tool-and-skill-system.md` |
+| Tool/skill four concepts, fixed builtin tool contracts, candidate tools and candidate skills, Tool Admin RBAC semantics, duplicate-call guard, resource-directory generation checks and semantic catalog freshness, always-callable resident internal control tools (`silent`, and why fixed-builtin membership does not inject a tool) | `tool-and-skill-system.md` |
+| Tool hydration ledger and promotion, re-read and fingerprints, parameter-error guidance lane, externalized tool result envelope, universal tool timeout contract, stage gating and callable tightening, context→callable chain | `tool-hydration-and-callable-chain.md` |
 | Actual-request forensics, append-only rule, cache-miss triage, token preflight diagnostics | `context-and-cache-troubleshooting.md` |
 | Websocket/UI contracts, composer/media rendering, image upload gating, frontend theme and layout contract, model config admin draft contract, log audit event sink and audit page contract, node output content-read API contract, per-call model-call ledger (its writer lanes and `call_kind`) and the Token统计 window, container deployment | `web-and-admin.md` |
 | Config schema, hot refresh, model bindings, secret location, deployment unlock, config bundle export/import, role route entries and load-balance group config semantics | `config-and-models.md` |

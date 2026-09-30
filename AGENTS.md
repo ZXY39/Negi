@@ -19,12 +19,18 @@ Use this mapping:
 
 - Runtime, session, frontdoor, main runtime, task execution:
   `docs/architecture/runtime-overview.md`
+- Task message distribution / append notices, acceptance handoff, spawn review, node pause-resume-cancel, shutdown pause and auto-resume:
+  `docs/architecture/main-task-runtime.md`
 - Heartbeat, heartbeat prompts, session wakeup/reply flow:
   `docs/architecture/heartbeat-system.md`
-- Tool registry, skills, candidate pools, tool hydration, context selection:
+- Tool registry, skills, candidate pools, resource reload and RBAC:
   `docs/architecture/tool-and-skill-system.md`
+- Tool hydration and promotion, parameter-error guidance, universal tool timeout, stage gating:
+  `docs/architecture/tool-hydration-and-callable-chain.md`
 - Web server, admin APIs, frontend/runtime integration:
   `docs/architecture/web-and-admin.md`
+- Local speech-to-text: composer mic, inbound channel voice, `stt` config, whisper.cpp provisioning:
+  `docs/architecture/speech-to-text.md`
 - Config loading, runtime refresh, model bindings, provider resolution:
   `docs/architecture/config-and-models.md`
 - External bridge API (`/api/v1`), external sessions, outbound routing, built-in official QQ adapter:
@@ -119,10 +125,11 @@ If you are taking over this repository for the first time and need the shortest 
 
 1. Read `docs/architecture/README.md`
 2. Read `docs/architecture/runtime-overview.md`
-3. Read `docs/architecture/tool-and-skill-system.md`
-4. Read `docs/architecture/web-and-admin.md`
-5. If the task touches heartbeat, config/models, the external bridge API, or the agent gateway, read those topic docs before opening source files
-6. After the docs pass, inspect the concrete entrypoints:
+3. Read `docs/architecture/main-task-runtime.md` for anything on the task side (distribution, acceptance, node pause/resume, shutdown resume)
+4. Read `docs/architecture/tool-and-skill-system.md`, plus `docs/architecture/tool-hydration-and-callable-chain.md` when the change touches hydration, timeouts, parameter errors or stage gating
+5. Read `docs/architecture/web-and-admin.md`
+6. If the task touches heartbeat, config/models, the external bridge API, the agent gateway, or speech-to-text, read those topic docs before opening source files
+7. After the docs pass, inspect the concrete entrypoints:
    - `g3ku/cli/commands.py`
    - `g3ku/shells/web.py`
    - `g3ku/runtime/session_agent.py`

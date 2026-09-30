@@ -58,7 +58,7 @@
 维护上要记住：
 
 - 这两个脚本是普通用户首选入口
-- 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程，但**先请求优雅退出**：脚本向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
+- 它们会在启动前默认清理当前仓库下已有的 g3ku web / worker 进程，但**先请求优雅退出**：脚本向 `POST /api/bootstrap/exit`（`pause_running_work=true`）发起请求并等待运行时把全部会话与任务持久化暂停、自行退出；只有在接口不可达、返回失败或等待超时（约 40 秒）时才回退到强制杀进程。因此“重跑启动脚本”对运行中的工作是一次优雅暂停而不是异常中断，下次启动会自动恢复（生命周期合同见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）
 - 强制回退路径（强杀）对应的是异常中断：下次启动任务走恢复清洗，任务卡片会以 toast 提示「本任务遇到异常停止」；toast 可点击关闭（UI 合同见 `web-and-admin.md`「Task Recovery Notice UI Contract」）
 - 它们最终仍然是调用 `g3ku` bootstrap，再进入 `g3ku web`
 - 当脚本使用 reload 模式时，Web 侧自动托管 worker 会关闭；这时要单独运行 `g3ku worker`
@@ -109,7 +109,7 @@
 当前 `g3ku status` 的记忆区块应按 queued Markdown runtime 理解：
 
 - 它会显示 `Memory Notebook`、`Memory Notes Dir`、`Memory Queue`、`Memory Ops Log`
-- `Memory Mode`、`Memory Store(SQLite)`、`Memory Store(Qdrant)`、`pending_facts.jsonl`、`audit.jsonl`、`Memory Checkpointer` 不作为当前长期记忆健康指标
+- `g3ku status` 的 `Memory Notebook` 一行只说明笔记文件在不在，不是长期记忆健康指标；健康判断走 `g3ku memory`，它的命令面是 `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`
 
 ## 3. 关键状态文件与目录
 
@@ -159,7 +159,7 @@
 - `.g3ku/main-runtime/`（数据根）
   任务运行时 SQLite、artifacts、event history
 
-  其中 SQLite（`runtime.sqlite3` 或配置指定的 store 路径）里除任务/节点/帧等表外还有 `shutdown_pause_registry` 台账表：记录上次优雅关闭时被暂停的会话与任务，重启自动恢复后逐行删除。排查“重启后任务没有自动恢复”先查这张表（语义见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
+  其中 SQLite（`runtime.sqlite3` 或配置指定的 store 路径）里除任务/节点/帧等表外还有 `shutdown_pause_registry` 台账表：记录上次优雅关闭时被暂停的会话与任务，重启自动恢复后逐行删除。排查“重启后任务没有自动恢复”先查这张表（语义见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
 
   通过 `g3ku web` 启动并启用 auto worker 时，这里还应重点关注两份日志：
 
@@ -239,13 +239,13 @@
   - 尤其是 `at` 单次提醒，如果真正执行 `add_job()` 时目标时间已经过去，服务会直接拒绝创建并提示 `任务定时已过期，当前时间为<service-local time>，请立即执行或视情况废弃而不要创建过期任务`；这时应优先排查前门/tool 调用延迟、重试、参数错误，而不是先怀疑 scheduler 没触发
   - 同一 session 在同一个 `at` 时间点已存在启用的一次性提醒时，重复注册会被拒绝并提示 `同一会话在 <time> 已存在一次性提醒 (id: …)`（按 `(session_key, at_ms)` 结构化匹配，不看 message 文案）。这是有意的防双触发约束而非 bug：如需改期，先 `remove` 旧 job 再重新创建，或改用其他时间；不要为了绕过它去禁用或删改冲突检查
 
-Maintenance note for `task_append_notice` / task message distribution:
+### task_append_notice / 任务消息分发维护要点
 
 - If a task appears stuck in `barrier_requested`, `barrier_draining`, or `distributing`, do not blame the model first.
-- 分发 epoch 处于 `failed`（任务树红色横幅、`runtime_meta.distribution.error_text` 非空）表示控制回合的修复重试（最多 5 次）耗尽、发送 preflight 失败，或波次异常超出重试预算（`error_text` 以 `distribution wave crashed` 开头，`payload.wave_crash_count` 记累计次数）；此时任务被置为 paused（任务大厅显示「任务暂停」）、消息未向子节点投放，并向源会话投递一次 `task_distribution_error` 心跳（详见 `heartbeat-system.md`「Task Distribution Error Delivery」）。先读该 epoch 的 `payload.debug_trace` 逐轮取证（每轮 attempt 都有 `control_turn_response` / `control_turn_validation_failed` / `control_turn_retry` 记录），`wave_crash_count` 形态的失败另需 grep worker 日志取该波的 traceback，再二选一介入：恢复任务（降级为根节点按 pending-notice 语义延迟消费）或重新追加通知（创建新 epoch 重新走完整分发）。如果 `error_text` 是 `inspection_decision_invalid_action`，优先确认 frontier 节点的 acceptance handshake 是否处于 `waiting_acceptance` / `waiting_block_verification`，并确认验收中通知决策回合收到并解析的是 `submit_notice_inspection_decision`；这是分发屏障内的决策校验失败，不是外部 bridge 回调失败。
-- 冻结/复活/收尸类异常在 worker 日志有固定签名，先 grep 再看 DB：`node frozen by distribution hold`（hold 冻结落点，带 task/node/epoch）、`barrier drain self-heal: kicking stalled spawn-round parent`（drain 阶段踢起持有未物化 spawn 轮、已被停摆的父节点去完成子节点物化；同一 父节点+轮 有冷却期，记账为 epoch payload 的 `drain_kick_rounds`，踢了没进展会在冷却过后自动再踢）、`stale subtree hold ignored`（meta 与 epochs 表脱同步被防御放行）、`release verification`（释放后节点未复活，先 WARN 再 resume、仍卡死落 ERROR）、`distribution driver wave crashed`（波次异常，带 `crash_count`；预算耗尽后 epoch 显式 `failed`）、`distribution driver missing for active epoch, re-arming`（周期对账接管了缺席驱动器——同一任务反复出现说明每一波都在同一处崩，取该波 traceback）、`distribution release ledger unfinished, re-releasing`（完成序列在清 meta 之后、释放之中抛过，对账器补跑释放；反复出现要查该任务的节点行是否缺失或数据库写入是否失败）、`dispatch future was cancelled while node non-terminal` / `stranded exception`（搁浅 future 被释放路径重建）、`orphan node reaped` / `orphan node re-dispatched`（run_task 入口对孤儿子节点的决断，收尸同时写 `task_error_logs`）。子节点"显示进行中但无模型调用/无帧更新"时按此顺序核对：先把每条 `frozen` 的 node 与该 epoch 的释放集对齐（释放集按目标子树反算，合同见 `runtime-overview.md`「frontdoor 与任务运行时的关系」），落在释放集外即是释放漏跑，对这些节点直接下发 resume 即可在原 future 上重跑（meta 已清则不会二次冻结）。
+- 分发 epoch 处于 `failed`（任务树红色横幅、`runtime_meta.distribution.error_text` 非空）表示发送 preflight 失败，或波次异常超出有界重试预算。单个节点的决策耗尽不落 `failed`：它降级跳过并记进 `payload.skipped_distribution_turns`（合同见 `main-task-runtime.md`「epoch 驱动器、波次与降级车道」）（`error_text` 以 `distribution wave crashed` 开头，`payload.wave_crash_count` 记累计次数）；此时任务被置为 paused（任务大厅显示「任务暂停」）、消息未向子节点投放，并向源会话投递一次 `task_distribution_error` 心跳（详见 `heartbeat-system.md`「Task Distribution Error Delivery」）。先读该 epoch 的 `payload.debug_trace` 逐轮取证（每轮 attempt 都有 `control_turn_response` / `control_turn_validation_failed` / `control_turn_retry` 记录），`wave_crash_count` 形态的失败另需 grep worker 日志取该波的 traceback，再二选一介入：恢复任务（降级为根节点按 pending-notice 语义延迟消费）或重新追加通知（创建新 epoch 重新走完整分发）。如果 `error_text` 是 `inspection_decision_invalid_action`，优先确认 frontier 节点的 acceptance handshake 是否处于 `waiting_acceptance` / `waiting_block_verification`，并确认验收中通知决策回合收到并解析的是 `submit_notice_inspection_decision`；这是分发屏障内的决策校验失败，不是外部 bridge 回调失败。
+- 冻结/复活/收尸类异常在 worker 日志有固定签名，先 grep 再看 DB：`node frozen by distribution hold`（hold 冻结落点，带 task/node/epoch）、`barrier drain self-heal: kicking stalled spawn-round parent`（drain 阶段踢起持有未物化 spawn 轮、已被停摆的父节点去完成子节点物化；同一 父节点+轮 有冷却期，记账为 epoch payload 的 `drain_kick_rounds`，踢了没进展会在冷却过后自动再踢）、`stale subtree hold ignored`（meta 与 epochs 表脱同步被防御放行）、`release verification`（释放后节点未复活，先 WARN 再 resume、仍卡死落 ERROR）、`distribution driver wave crashed`（波次异常，带 `crash_count`；预算耗尽后 epoch 显式 `failed`）、`distribution driver missing for active epoch, re-arming`（周期对账接管了缺席驱动器——同一任务反复出现说明每一波都在同一处崩，取该波 traceback）、`distribution release ledger unfinished, re-releasing`（完成序列在清 meta 之后、释放之中抛过，对账器补跑释放；反复出现要查该任务的节点行是否缺失或数据库写入是否失败）、`dispatch future was cancelled while node non-terminal` / `stranded exception`（搁浅 future 被释放路径重建）、`orphan node reaped` / `orphan node re-dispatched`（run_task 入口对孤儿子节点的决断，收尸同时写 `task_error_logs`）。子节点"显示进行中但无模型调用/无帧更新"时按此顺序核对：先把每条 `frozen` 的 node 与该 epoch 的释放集对齐（释放集按目标子树反算，合同见 `main-task-runtime.md`「分发状态机与屏障」），落在释放集外即是释放漏跑，对这些节点直接下发 resume 即可在原 future 上重跑（meta 已清则不会二次冻结）。
 - `barrier_draining` 期间「在飞 spawn 批次的子节点尚未物化」不是死锁征兆：该批次豁免 hold 直到物化完成，停摆的父节点由 drain 自愈踢起，两者都落上面两条日志。若 epoch 仍长期停在同一 `drain_pending_node_ids` 上，核对 `task_node_tool_results` 是否残留 `status='running'` 的 `spawn_child_nodes`，以及该父节点 runtime frame 是否仍保留该轮的 `pending_tool_calls` / `phase='waiting_children'`（重放意图）；帧里已无该轮时自愈不介入，需人工处置（恢复任务或重新追加通知）。
-- barrier/epoch/spawn/acceptance 的契约字段与完整排查路径详见 `runtime-overview.md`「frontdoor 与任务运行时的关系」。
+- barrier/epoch/spawn/acceptance 的契约字段与完整排查路径详见 `main-task-runtime.md`「追加通知与消息分发（distribution epoch 合同）」。
 
 如果任务已经创建，但表现为“响应明显变慢”“长时间停在 `model.chat.await_response`”或“前端只看到 task-event 在刷”，优先同时对照：
 
@@ -257,7 +257,7 @@ Maintenance note for `task_append_notice` / task message distribution:
 排查时优先搜索：
 
 - `responses stream diagnostics`
-- `openai_codex stream diagnostics`
+- `openai_chat stream diagnostics` / `responses stream diagnostics`（前缀就是 provider 车道名，只有这两档）
 - `Error calling Responses API`
 - `model attempt timeout`
 
@@ -267,7 +267,7 @@ Provider retry troubleshooting note:
 - 因此如果你看到 `Error calling Responses API` 连续刷屏，但任务/会话迟迟不结束，不要先假设“它还在无限自动重试”。先确认这些日志是否真的属于同一个 task/session。
 - 当前 task 如果已经落到 `is_paused=true` / `pause_requested=true`，那说明另一个控制动作已经介入了；这和 provider retry 本身是两条不同的因果链。排查时应同时看 `task_commands` 是否出现 `pause_task`，而不是只盯着 provider 日志。
 
-并结合 provider 超时边界判断“慢”是不是异常；超时语义详见 `runtime-overview.md`「Provider 超时边界」。
+并结合 provider 超时边界判断“慢”是不是异常；超时语义详见 `runtime-overview.md`「Chat provider 超时与重试边界」。
 
 日志里优先看这些字段：
 
@@ -293,11 +293,11 @@ Provider retry troubleshooting note:
 - `title=spawn_pause_reached_settlement_lane`：某条车道把子节点的暂停当成可结清的异常送到结算面（正常形态是子节点派发 future 保持 pending、父管线原地停等）。命中说明该轮会被父节点读成"子节点失败"，而节点其实可被 resume；核对是哪个调用点绕开了派发 entry。
 - `title=spawn_supersede_forced_live_node`：新轮清扫时该子树取消后仍未落终态（协程当时真在执行），仍按 `superseded` 强判，`detail` 给出被掐断的节点 id 与深度。读法：拿该节点在 `task_model_calls` 的最后一格时间戳与 `task_commands` 里的 `resume_node` 行对照，可判断这是一次人工/agent 复活与重派的竞态，还是旧轮长期挂死。
 
-修复语义详见 `runtime-overview.md`「Node-Level Pause and Recovery」。这四条 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
+修复语义详见 `main-task-runtime.md`「Node-Level Pause and Recovery」。这四条 warning 只作诊断，不会自行终结节点；真正的修复在恢复逻辑——等待现有绑定节点到终态，而不是重新评审或重放合成结果。
 
 ### 残留节点自愈
 
-任务终态仅由根节点 + 最终验收推导，终态流转本身不强制收尾残留节点（见 `runtime-overview.md`「Node-Level Pause and Recovery」）。真正“不会再被驱动”的残留节点由 worker 启动自愈清理：启动引导对每个终态任务调用 `log_service.sweep_residual_nodes`，把仍 `in_progress` 的节点置为 `failed`，`failure_reason` 带 `task_terminal_cleanup` 前缀并附产物定位（`execution_trace_ref` / `result_payload_ref`），只改状态、不删转录/产物，并发布 node patch 事件。因此终端里“重启后残留节点自动落终态”是预期行为，不是数据丢失；进行中任务不参与清扫。
+任务终态仅由根节点 + 最终验收推导，终态流转本身不强制收尾残留节点（见 `main-task-runtime.md`「Node-Level Pause and Recovery」）。真正“不会再被驱动”的残留节点由 worker 启动自愈清理：启动引导对每个终态任务调用 `log_service.sweep_residual_nodes`，把仍 `in_progress` 的节点置为 `failed`，`failure_reason` 带 `task_terminal_cleanup` 前缀并附产物定位（`execution_trace_ref` / `result_payload_ref`），只改状态、不删转录/产物，并发布 node patch 事件。因此终端里“重启后残留节点自动落终态”是预期行为，不是数据丢失；进行中任务不参与清扫。
 
 ### 任务执行了全局进程清理 / Web 与 worker 同时退出
 
@@ -311,7 +311,7 @@ Provider retry troubleshooting note:
 
 先分清这次退出是优雅暂停还是异常中断：
 
-- 优雅路径（重启脚本先调 `/api/bootstrap/exit`、或 Ctrl+C 让信号处理器收尾）：所有运行中的任务与会话被暂停并写 `shutdown_pause_registry` 台账，启动时自动恢复、不出现“异常停止”提示。退出前还有一次 ≤10 秒的排水等待（轮询 `pause_task` 命令直到 worker 真正停完 actor），停完才关闭托管 worker。若此时任务仍停在 paused：查台账行与任务 id 是否一致、`task_commands` 是否有未消费的 `pause_task` 残余、worker 是否拿到 lease 完成 startup（详见 `runtime-overview.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
+- 优雅路径（重启脚本先调 `/api/bootstrap/exit`、或 Ctrl+C 让信号处理器收尾）：所有运行中的任务与会话被暂停并写 `shutdown_pause_registry` 台账，启动时自动恢复、不出现“异常停止”提示。退出前还有一次 ≤10 秒的排水等待（轮询 `pause_task` 命令直到 worker 真正停完 actor），停完才关闭托管 worker。若此时任务仍停在 paused：查台账行与任务 id 是否一致、`task_commands` 是否有未消费的 `pause_task` 残余、worker 是否拿到 lease 完成 startup（详见 `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」）。
 - 异常路径（进程被强杀、worker 单进程被单独杀死）：任务恢复清洗照常执行，`metadata.recovery_notice` 写「本任务遇到异常停止…」，UI 以可关闭 toast 呈现（`web-and-admin.md`「Task Recovery Notice UI Contract」）。这是预期行为，点击关闭即可。托管 worker 被单杀后 Web 会由看门狗自动重启、无需人工拉起（见本节「托管 worker 看门狗」），但该 worker 当时正在跑的任务仍按异常中断走恢复清洗。
 - 会话侧的自动恢复走 heartbeat `shutdown_resume` 内部轮（`heartbeat-system.md`「Shutdown Resume Wake」）：会话尾气泡会再现一条由系统恢复产生的回复；若没有出现，查启动日志里 `resume_shutdown_paused_sessions` / `auto-resumed` 与 heartbeat 事件投递日志。
 
@@ -388,7 +388,7 @@ worker 静默不等于 worker 死亡：空闲 worker 除心跳线程每 1–2s �
 
 ### 外部渠道桥接异常
 
-内置渠道子系统已移除，IM 渠道由独立桥接进程经 External Agent API 接入。先看：
+IM 渠道有两条：内置官方 QQ 适配器（`g3ku/qq_official/`，进程内 botpy 桥，见 `external-agent-api.md`）与第三方独立桥接进程（经 `/api/v1` External Agent API 接入）。早期的 china bridge 子系统已下线，配置里出现 `chinaBridge` 会被直接剥掉。先看：
 
 - `docs/architecture/external-agent-api.md`「常见排障入口」
 - 桥接应用自身的日志与配置（如 `bridges/qq-onebot/README.md`）
@@ -614,7 +614,7 @@ The memory CLI keeps only the queued Markdown runtime operator surface:
 - `g3ku memory import-legacy <path>`
 - `g3ku memory cleanup-legacy`
 
-The old legacy-only commands such as runtime stats/trace/explain, `migrate-v2`, `reset-runtime`, decay, and pending-fact review are not part of the active operator contract.
+The active memory operator surface is `g3ku memory` with `current` / `queue` / `flush` / `doctor` / `reconcile-notes` / `import-legacy` / `cleanup-legacy`; there is no reset subcommand, and legacy-only commands (runtime stats/trace/explain, decay, pending-fact review) are not part of the operator contract.
 
 The operator-oriented maintenance commands beyond `current`, `queue`, and `flush` are:
 
@@ -654,7 +654,7 @@ G3KU has two supported operator startup modes:
 
 For the container path, the maintenance contract is:
 
-- the `web` container owns Web shell startup, heartbeat, cron, and China bridge supervision
+- the `web` container owns Web shell startup, heartbeat and cron
 - the `worker` container owns the background task worker only
 - both containers must share the same workspace state
 
@@ -692,7 +692,7 @@ If Docker startup appears healthy but detached tasks never report back, inspect 
 
 Operator expectations:
 
-- Use the explicit memory maintenance command to fully reset `memory/`; do not manually delete a subset of files.
+- `memory/` has no reset command: `g3ku memory cleanup-legacy` (dry-run unless `--apply`) removes legacy artifacts it lists, and `g3ku memory doctor` reports queue/health. Do not manually delete a subset of files.
 - The reset recreates baseline managed files and sync state, but it does not immediately rebuild tool/skill catalog retrieval inside the command itself.
 - After reset, user long-term memory is empty.
 - After reset, tool/skill semantic retrieval is also empty until the next runtime startup.

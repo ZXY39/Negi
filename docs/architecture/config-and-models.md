@@ -411,7 +411,7 @@ If an operator reports frontdoor send failures after a model or chain change, ch
 3. The role chain only references models that have a valid window configured.
 4. The actual provider request estimate crossed the model's window.
 
-Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Frontdoor Context Compression (Current Contract)」.
+Behavior once the estimate crosses the window: 详见 `runtime-overview.md`「Frontdoor Context Compression」.
 
 ## Memory Runtime Settings Anchor
 

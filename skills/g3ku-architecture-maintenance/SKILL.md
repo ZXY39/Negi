@@ -64,6 +64,23 @@ Focus on:
 - Frontdoor vs main runtime responsibilities
 - Recovery, pause/resume, continuation, orchestration semantics
 
+### `docs/architecture/main-task-runtime.md`
+
+Update when touching:
+
+- `main/runtime/task_actor_service.py` (distribution epochs, barriers, mailbox delivery)
+- `main/runtime/subtree_hold.py`, `main/runtime/nodes.py`, `main/runtime/react_loop.py` pause/resume paths
+- append-notice contract lanes (`task_append_notice`, distribution drivers, degraded skip)
+- acceptance node lifecycle, spawn round bookkeeping and spawn review payloads
+- graceful shutdown pause ledger and startup auto-resume replay
+
+Focus on:
+
+- The epoch state machine and which set of nodes a barrier releases
+- Freeze/drain/distribute/resume transitions and their failure lanes
+- Acceptance activation, handshake re-dispatch and rejection feedback
+- Node pause/resume/cancel boundaries, circuit breakers and recovery invariants
+
 ### `docs/architecture/context-and-cache-troubleshooting.md`
 
 Update when touching:
@@ -117,6 +134,23 @@ Focus on:
 - Skill loading semantics
 - Hydration and next-turn visibility
 - RBAC/governance interaction
+
+### `docs/architecture/tool-hydration-and-callable-chain.md`
+
+Update when touching:
+
+- `g3ku/runtime/tool_error_guidance.py`, tool parameter validation and model-facing schema projection
+- hydration ledger / promotion paths in `main/service/runtime_service.py` and `g3ku/runtime/frontdoor/`
+- the universal tool timeout ladder (`g3ku/agent/tools/` timeout enforcement, `resource.yaml` `timeout_policy`)
+- stage gating, grace rounds and turn-end finalization in the frontdoor and node loops
+- externalized tool result envelopes (`artifact:` refs, `content_open` / `content_read`)
+
+Focus on:
+
+- candidate -> hydrated -> callable transitions and what promotes a tool for the next turn
+- What an error text must tell the model so it can fix the call in place
+- Timeout ownership: self-enforced, runner-enforced, or exempt
+- Stage budget, grace and the gates that must not silently block a turn-end
 
 ### `docs/architecture/web-and-admin.md`
 
@@ -231,7 +265,7 @@ The docs previously bloat by appending a new addendum section after every fix. T
 3. Pointers use topic phrases, never section numbers. Numbers shift as docs are renumbered.
 4. Present tense only. Never write “now / no longer / previously / since 2026-XX / 现在 / 不再 / 曾经”. Needing those phrases means you are writing a changelog — rewrite as the current contract or delete.
 5. README notes are pointers only. The maintenance/debugging-notes area of `README.md` holds one-line symptom → doc pointers. No implementation details, ever.
-6. Size bands, not hard caps. Each doc has a reference size and a +30% tolerance band, measured in bytes (`wc -c docs/architecture/*.md` — stable for mixed CJK/English; word counts are not). The current reference table lives in `docs/architecture/README.md`「Maintenance Rules」rule 6. Check sizes when you edit a doc. Within the band: take no size action — never trim wording or drop facts just to hit a number; per-contract clarity beats bytes. Over the band: run the structural ladder in order — (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc; (c) split a genuinely grown subsystem topic into a new doc and update the README; (d) if none applies the doc legitimately needs the size — raise its reference with a one-line justification in the commit. Contract facts are never deleted to satisfy a size.
+6. Structure is the metric; bytes are only an observation. Two invariants hold the docs: one doc = one subsystem, and one leaf section = one contract at no more than 25 KB. Run `python scripts/check_architecture_docs.py` after editing this directory: it walks headings and reports leaf sections over 25 KB, pointers whose topic phrase exists in no doc, and pointers that name a doc file which does not exist. Current reference byte totals are listed in `docs/architecture/README.md`「Maintenance Rules」rule 6 as observations, not caps. Take no size action to fit a number — never trim wording or drop facts just to shrink bytes. When a doc or section outgrows its boundary, work the ladder in order: (a) delete dead/duplicated/superseded content; (b) move misplaced content to its owning doc and leave a pointer; (c) split a genuinely grown subsystem into a new doc and register it in the README (Reading Order, Topic Guide, Topic Ownership) and in this skill's doc map; (d) subdivide an oversized leaf section so each `###` carries one contract. Contract facts are never deleted to satisfy a size.
 7. Superseded content is deleted, not annotated. Never leave “obsolete notes to ignore” markers — remove the dead text outright.
 
 ## Update Decision Checklist

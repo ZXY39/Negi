@@ -106,7 +106,7 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。各工具
 | --- | --- | --- |
 | `create_async_task` | CEO/frontdoor 创建 detached 任务的固定 builtin。参数：`task`、`core_requirement`、`execution_policy`、可选 final-acceptance 字段、可选结构化 `file_targets`；`file_targets` 条目若带 `path`，必须已是绝对路径且指向已存在的文件。frontdoor 运行时合同的 `attachment_reopen_targets` 提供可 reopen 的上传条目，模型需自己把精确 `path` / `ref` 抄进 `file_targets`；`user_uploads`、`current_uploads`、`user_image_and_docx` 等占位符不是有效目标（出现时按 frontdoor prompt/contract 引导失败处理，不是 content 工具漂移）。 | 创建前对当前会话**正在运行**的任务池做两层重复预检：已暂停（`is_paused`）或已进入终态（success/failed）的任务不参与匹配，暂停旧任务或等待其失败后即可重新创建同一需求的任务。第一层是确定性精确匹配（规范化目标文本 + 精确关键词指纹），命中后不再短路首条：收集池中**全部**命中任务的 id（`matched_task_ids`，`matched_task_id` 只保留第一个做兼容），`reason` 标注命中类型。第二层是巡检模型语义审查（返回 `approve_new` / `reject_duplicate` / `reject_use_append_notice`），仅当 `main_runtime.duplicate_precheck.llm_review_enabled=true`（默认）且池非空时执行；关闭或巡检不可用时 fail-open 放行（`decision_source` 分别为 `rule` / `fallback`），关闭语义审查后丢失模糊重复与 append-notice 识别。`create_task(...)` 前再做一次确定性精确重验，拦截预检放行后的陈旧读视图或重放竞争。唯一实现是资源工具 `tools/create_async_task_cn`（委托 `MainRuntimeService.precheck_async_task_creation(...)` / `revalidate_async_task_creation_before_create(...)`）；出现重复 detached 任务时，先核对创建是否走这条预检路径而非并行的 create 路径。`reject_duplicate` 拒绝文案枚举全部重复 id，并把拦截口径同步回传给调用模型（只有正在运行的任务才会拦截；暂停旧任务或等待其进入终态（如失败）后即可重新创建），再给出两条出路：补充约束/验收细节 → `task_append_notice`；确需重做 → 先暂停旧任务或等待其失败后重新创建，文案不引导模型自行删除，删除旧任务仍需用户同意（删除侧另有 paused/terminal 守卫与 preview+confirm 两段式）。前门解析按消息前缀区分拒绝语义（`任务未创建：现有任务` 才是 append-notice），重复拒绝文案里出现的 `task_append_notice` 引导词不改变分类。`file_targets` 路径校验是 reject-only，不做自动改写/补全。前门解析只把显式成功形式 `创建任务成功task:...` 当作已核实派发；拒绝消息里提到的 `task:...` id 不算新建任务。派发核实成功后，graph 与 legacy 两条执行路径都会在下一次请求尾部注入一次性提示 `Dispatch result is already available. Reply naturally based on the verified task id ...`，明确允许模型直接以文本收尾（轮末收尾契约见「阶段门控与 callable 收紧」）。 |
 | `task_append_notice` | CEO-only 固定 builtin：向当前会话中既有的未完成任务追加新需求、约束或验收预期。成功文本形如 `已向任务 task:xxx 追加通知。`。普通执行/验收节点的内置集合不包含此工具。 | 成功文本必须停留在“更新既有任务”车道，不能形似 detached 任务创建，不产生 `verified_task_ids` / `route_kind=task_dispatch`。`reject_use_append_notice` 表示调用方应改为更新既有任务；拒绝措辞与前门解析显式指向本工具。失败任务的后续跟进一律走普通新规划/执行，没有隐藏续跑车道。 |
-| `submit_final_result` | 执行/验收节点结束当前回合的结构化结果工具。验收节点的 `success + final` 表示通过；`failed + final` 表示已汇总全部可修复问题、继续打回；`failed + blocked` 仅表示执行结果异常或不可通过再次提交解决，作为终局失败且不再进入拒收循环。普通拒收没有次数上限。 | 结果协议要求 `summary`、`answer`、`evidence`、`remaining_work`、`blocking_reason`；终局失败的 `blocking_reason` 必须说明证据与不再打回原因，`remaining_work` 不得要求执行节点重复提交。可打回拒绝（`failed + final`）的 `blocking_reason` 传空串，给执行节点的反馈正文由 `summary` 与 `remaining_work` 承载。详见 `runtime-overview.md`「frontdoor 与任务运行时的关系」。 |
+| `submit_final_result` | 执行/验收节点结束当前回合的结构化结果工具。验收节点的 `success + final` 表示通过；`failed + final` 表示已汇总全部可修复问题、继续打回；`failed + blocked` 仅表示执行结果异常或不可通过再次提交解决，作为终局失败且不再进入拒收循环。普通拒收没有次数上限。 | 结果协议要求 `summary`、`answer`、`evidence`、`remaining_work`、`blocking_reason`；终局失败的 `blocking_reason` 必须说明证据与不再打回原因，`remaining_work` 不得要求执行节点重复提交。可打回拒绝（`failed + final`）的 `blocking_reason` 传空串，给执行节点的反馈正文由 `summary` 与 `remaining_work` 承载。详见 `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」。 |
 | `task_summary` / `task_list` | CEO 任务查询工具（资源工具 `tools/task_summary_cn` / `tools/task_fetch_cn`；`runtime_service` 内另有同名内嵌 handler，两处参数契约必须同步修改）。默认按当前 `session_key` 只查**本会话**任务；模型可传 `查询范围=全局` 跨会话查询全部任务。summary 文本自带口径标注（`Tasks[global]` / `Tasks[session <id>]`）并把 in_progress 中处于 paused 的数量单列。 | 全局口径的 task_list 每行输出 `[status] (session_id)`，in_progress 且 paused 标为 `in_progress/paused`——paused 任务并没有真在跑，转述时不得当作运行中任务。「某会话查不到其它会话的任务」是默认口径而非数据丢失，先确认调用是否带了 `查询范围=全局`。 |
 | `perf_inspect` | CEO-only 普通候选工具（资源 `tools/perf_inspect_cn`，family `task_runtime`，action `perf_inspect_cn`；先 `load_tool_context(tool_id="perf_inspect")`，hydration 后下一轮可调）。用途：读任务大厅顶部性能条背后的同一份数据，判断任务停滞是资源排队还是节点/工具逻辑造成。参数 `mode` ∈ `window`（默认，只读降采样历史）/ `live`（当前 worker 快照 + 同一窗口历史），`window_minutes` 1-1440（默认 10）。返回有界文本报告：档位区间与 `restricted_share`、工具/节点队列等待、CPU/内存/磁盘、库层写等待与事件循环延迟、采样空档、最多 40 行的序列。数据源、采样节拍与聚合口径的唯一契约见 `runtime-overview.md`「Worker Performance History」。 | 不进 fixed builtin：停滞判读是低频排障动作，常驻会挤占 provider `tools[]` 前缀稳定性，代价是起手多一轮 load。`allowed_roles` 只含 `ceo`，执行/验收节点拿不到它（不暴露资源排障能力到每条子任务上下文）。报告里的 `Samples=0` 与采样空档只表示"没有记录"，不得转述成"当时没有压力"；窗口超过 24h 保留期时读到的是空区间而非错误。 |
 | `submit_message_distribution` | 节点消息分发模式的内部控制工具，配合 compact prompt `main/prompts/node_message_distribution.md`：检查当前 mailbox 消息与当前 live 执行子节点，决定哪些子节点收到改写后的后续消息。 | 分发模式是 control-only 车道，不暴露普通节点工具；分发轮次中出现 `exec`、`spawn_child_nodes`、content 工具或其他普通执行器，按契约回归处理。决策输入 `live_children` 对每个子节点携带 `latest_tool_round`（运行时帧的最新工具轮实况：`phase`、活跃轮 id、`tool_calls` 的 `tool_name`/`status`/`started_at`，`status=running` 即该子节点正在等待该工具输出）；分发决策以该实况为准，不得依据落后一步的静态输出快照臆断子节点尚未开始工作。 |
@@ -132,7 +132,7 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。各工具
 当前选择规则：
 
 - `candidate_tool_names` 的上界是 RBAC 治理可见集，**不是**本轮已构建的可执行对象字典：候选 = 治理可见 concrete executor −（本轮 callable ∪ 已提升），并剔除已拆出 concrete executor 的家族 id / legacy 单体名。候选生成是 inventory-only，没有语义召回层。`candidate_skill_ids` 与它同一语义。
-- 由此得到一条必须成立的三态划分：任一治理可见的 concrete executor 在任一时刻恰属于「本轮可调用」/「本轮可加载并在下一轮提升」/「不可见（RBAC 关闭或 repair-required）」之一。存在第四态（可加载、不提升、也调不动）就是水合合同被破坏，排查路径见 `context-and-cache-troubleshooting.md`「某工具某轮突然调不动」。
+- 由此得到一条必须成立的三态划分：任一治理可见的 concrete executor 在任一时刻恰属于「本轮可调用」/「本轮可加载并在下一轮提升」/「不可见（RBAC 关闭或 repair-required）」之一。存在第四态（可加载、不提升、也调不动）就是水合合同被破坏，排查路径见 `context-and-cache-troubleshooting.md`「节点侧排查要点」。
 - 普通候选数量由 RBAC 可见家族/执行器决定，节点与 CEO/frontdoor 都不再按语义 top-k 截断。
 - 当 query 明显表达写入、改写、删除、移动、复制、补丁等变更意图时，本地候选打分优先推 `filesystem_write` / `filesystem_edit` / `filesystem_delete` / `filesystem_move` / `filesystem_copy` / `filesystem_propose_patch` 这类 concrete ids；`exec` 虽然可作为固定 builtin 保持可调用，但在这类意图下不作为候选文件变更方案的首选。
 
@@ -174,75 +174,10 @@ exec 与 memory 工具家族：
 - repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引（`skill_repair_required` payload 携带 `warnings` / `errors` / `next_actions`），不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
 - 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）、`tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）与 `skills/skill-creator/references/g3ku-resource-spec.md`（创建后三态复核 + `requires` 探测声明规则）承载
 
+
 ### 3.4 hydrated tools
 
-某工具在前一轮成功 `load_tool_context` 后，会进入 hydration 状态；下一轮它进入 `model_visible_tool_names`，模型可以直接调用它。这是工具系统里最容易被误解的概念：`load_tool_context` 不是执行工具，而是把它提升成后续 turn 的 callable tool。
-
-canonical 状态与 LRU：
-
-- 节点：runtime frame 里的 `hydrated_executor_state` 是**节点生命周期级台账**，唯一作者是 `_promote_tool_context_hydration`（它同时维护 LRU 与 `hydration_evicted_executor_names`）；`hydrated_executor_names` 是**本轮 promoted 视图**，每轮由工具选择重写。两者不同义：视图可以窄于台账，但窄视图绝不回写台账——否则一次曝光收窄就把已水合的工具永久抹掉。台账跨多轮、阶段切换、pause/resume、frame restore 保留。
-- CEO/frontdoor：`RuntimeAgentSession._frontdoor_hydrated_tool_names` 与前门 persistent state 的 `hydrated_tool_names`，session 生命周期级 LRU，跨 turn 保留，每轮按当前 RBAC 可见集合过滤。
-- 两侧 LRU 都只接受 concrete tool names；family id 不进入 canonical hydration state。默认上限都是 16；promoted tool 在第 17 个之后被逐出时，优先检查对应运行时对象上的 `_hydrated_tool_limit` 是否被显式改小。
-- resource-backed fixed builtin executors 不进入 hydration LRU：为已经 fixed-callable 的工具加载 toolskill 可能返回契约/帮助文本，但不占 hydration 槽位、不产生下一轮 promotion 条目（节点 frame 与 frontdoor session state 两侧同规则）。排查缺失的 hydration promotion 时，先区分“普通扩展执行器”与“资源支撑固定内置”，后者按设计留在 LRU 之外；`content_describe` / `content_open` / `content_search` 属于前者，成功的 `load_tool_context(tool_id="content_*")` 应占用普通 hydration 槽位并在下一轮 promote 该 concrete tool。
-- RBAC 可见集合（`rbac_visible_tool_names` / `rbac_visible_skill_ids`）、`lightweight_tool_ids`、`model_visible_tool_selection_trace` 等内部状态保留在运行时，供过滤 hydration 与恢复链路使用，但不进入 agent-facing 合同（`frontdoor_runtime_tool_contract` / `node_runtime_tool_contract`）。
-
-重读与指纹：
-
-- 成功的 `load_tool_context` payload 携带内部 `tool_context_fingerprint`（不是 provider-facing schema 字段），运行时只用它判断当前 toolskill 契约是否变化到值得重读。指纹只覆盖**契约正文**：`tool_id` / 正文 / 参数契约 markdown / 必填项 / 示例 / warnings / errors / exec 运行模式。刻意不含 `callable`、`available`、`callable_now`、`will_be_hydrated_next_turn`、`hydration_targets`——那几项是本轮视角，逐轮会变；守卫拿指纹跨轮比对，掺进轮次状态会让同一份正文每轮算出不同指纹、重复读守卫就永远不生效。
-- `load_tool_context` 的成功 payload 自带提升结论，`ok:true` 不承载"不承诺"：`promotion` ∈ `promoted_next_turn` / `already_callable` / `already_hydrated` / `not_in_this_turn_candidates` / `not_promotable`，并随附一行 `promotion_help`；`will_be_hydrated_next_turn` 由 `promotion` 单一驱动。`callable_this_turn` 表示本轮是否真能调用，`callable_now` 只表示"该执行器对这个角色可调用"（治理层视图）——新维护者最常把这两者混为一谈，混了就会反复给模型"说它可用、调它报错"的回执。
-- 对 callable / hydrated / fixed-builtin 的 direct-load，节点运行时与 CEO/frontdoor 都会扫描当前未压缩的 inline 历史，找同一 resolved `tool_id` 最近一次成功结果：fingerprint 未变时软拦截重读，提示模型复用既有 toolskill；fingerprint 变化，或旧结果已被 `token_compression` / `stage_compaction` 压缩掉，则允许再次重读。
-
-promotion 与前门状态：
-
-- 工具 promotion 的权威来源是执行循环里的 `raw_result.ok / raw_result.hydration_targets`，不从尾部 `ToolMessage` / `result_text` 反推。生产前门的唯一 promotion 入口是自研 frontdoor 步骤循环的 `execute_tools` 节点（`_graph_execute_tools()`），它必须复用与模型暴露阶段相同的 runtime-visible tool bundle（含运行时注入的 `submit_next_stage`）；执行环节只按 `state.tool_names` 重建工具映射，会重新制造“模型能看到 `submit_next_stage`，执行时报 `tool not available`”的分裂。
-- frontdoor 会把成功 `load_tool_context` 的 concrete tool 写进自己的持久状态，并在同一用户 turn 的后续模型轮次里直接并入 callable tool 集合；frontdoor approval interrupt、session inflight snapshot、paused execution context 都会携带这份 hydrated 状态。排查“load 成功但下一轮又看不见工具”时，不能只看 candidate tool 提示块，还要看 frontdoor 当前保存的 hydrated tool state。
-
-参数错误与状态分类：
-
-- 工具参数校验错误在 `ToolRegistry`、CEO/frontdoor 直接工具执行、节点 `ReActToolLoop` 之间共享同一维护契约，咽喉是 `g3ku/runtime/tool_error_guidance.parameter_error_guidance`：`validate_params(...)` 返回错误、`validate_params(...)` 自身崩溃，或工具执行抛出 `ValueError` / `TypeError` 时，错误文本保留原始错误，再按「本次错在哪 → 去哪儿看契约」的顺序追加修复材料。三条调用道都传 `tool` + 本次 `arguments` + 每次调用的 runtime payload，新增调用点必须同样传齐，否则指针分支会静默退化成加载模板。
-  - 指针按工具与状态取三分支。资源工具（实例带 `_descriptor`）且其 toolskill **已在本轮上下文中**（`hydrated_executor_names` / `hydrated_tool_names` 命中该工具名）→ 给出 `content_open(path="<descriptor.toolskills_main_path>")` 定点读，并明确不要再调 `load_tool_context`：同版本重复读取被节点道与 frontdoor 的重复守卫直接拒绝（文案「上下文中已有该工具当前版本的未压缩 toolskill，禁止重复读取」），把模型指向那条调用等于指向一堵墙。资源工具尚未水化 → 仍是 `load_tool_context(tool_id="<tool_name>")`。无 `_descriptor` 的纯内部控制工具（运行时注入的 `spawn_child_nodes` / `submit_next_stage` / `submit_final_result`，门禁见「candidate tools」）没有任何可加载文档，不给指针，直接以 `Tool.parameters`（`validate_params` 拒收时用的就是它，不是可能被裁剪的 model-visible `model_parameters`）渲染必填参数名、类型、enum 取值与数组元素结构；只渲染必填项且有长度上限，超限或渲染不出必填项时退回泛化的核对入参提示。
-  - 未识别参数名提示列出本次提交中 schema 未定义的键并给近似建议（上限 5 个）。它存在的原因是校验器只遍历 schema 认识的 `properties`、多余键被静默放过，所以键名拼错（`status`→`startus`）的表象是 `missing required status` 而不是"这个键你不认识"；该提示只补因果，**不改变校验结论**——这些键在提示前后都同样被忽略。
-  - 提交里一个参数都没有、且走的是内联契约分支时，额外说明"参数 JSON 可能没有被成功解析"：`_normalize_tool_call_arguments` 与 `base_chat_model_adapter` 都把解析失败静默降级成 `{}`，从结果上无法与"模型真发了空对象"区分，不说破就会让模型逐字段去补一个根本没收到的参数串。这句只在内联契约分支出现，指针分支下不出现（那里下方没有结构可指）。
-  - 这条分支链的不变式是"原地可修"：只提醒「核对必填项」而不给出必填项等于没有可核对的材料，而指向一条必然被拒的加载链路比不指向更糟。权限错误、路径策略错误、超时停止、watchdog 停止、pause/cancel 信号与普通 `RuntimeError` 保持原语义，不误标为参数错误。
-- 模型可见投影裁的是篇幅，不是判定：`Tool.model_parameters` 必须原样带上 `Tool.parameters` 在同一键位声明的边界约束（`minimum` / `minLength` / `minItems` / `maximum` / `enum` / `required`）。拒收按权威 `parameters` 判、模型只看投影，投影少一条边界就等于让模型去撞一堵它看不见的墙（`evidence[].start_line=0` 撞 `minimum: 1` 是实发形态，与「filesystem_edit 契约」里把 `start_line=0` 当自动填充噪声读是同一类噪声）。字段级 `description` 不要求镜像：`g3ku/json_schema_utils.sanitize_provider_parameters_schema` 在 provider 出口逐层剥掉 `parameters` 内的全部 `description` 并压平组合关键字，所以能到达模型的说明只有 `function.description`（工具级，见「阶段门控与 callable 收紧」）与提示词 / toolskill 正文两处；把字段语义写进 schema description 是死文字。平价由 `tests/resources/test_control_tool_model_schema_parity.py` 对全部注入式控制工具断言，不靠注释维持；新增控制工具若重写投影，同一断言自动覆盖。
-- 任何顶层为 `{"ok": false, ...}` 的结构化工具结果，在三条路径上都按 error-lane 工具结果处理；这条规则有意比参数引导规则更宽，让以 JSON payload 编码失败的内嵌工具也进入错误车道。
-
-外置工具结果信封：
-
-- 超出内联闸门的工具结果统一外部化为 `artifact:` 内容引用，信封摘要对所有工具一视同仁（不按工具类别特殊化）：显式标注调用成败（`Tool call succeeded` / `Tool call failed`，成败由执行路径按 error-lane 判定后随投递元数据传入）、外置 ref、总行数与总字符数，要求用 `content_open(ref=...)` 读取完整输出，并附结果正文头部预览（6 行、≤800 字符）。信封不回显调用入参——入参是模型刚提交的内容，回显只挤占上下文并诱发「载荷过大导致调用失败」一类误读；嵌套信封的 canonical summary / origin ref 行保留。信封以 `content_ref` 形态进入上下文，重复外部化免疫（已是信封的结果原样透传）。
-- 二进制/图片内容目标另有一套展示契约：路径目标解不出 UTF-8 文本时，正文位置放占位串（`[二进制文件：…]` / `[图片文件：…]`），`content_describe` / `content_open` 结果随之带 `binary` / `content_display_replaced` 标记，`size_bytes` 是**磁盘真实字节数**，而 `line_count` / `char_count` 只描述占位串。读端不得用占位串统计推断文件的体积、类型或有效性——合法 PDF 与 34 字节空壳在文本通道里输出逐字相同；判定二进制交付物只能依据 `size_bytes` 与字节级证据。二进制目标上的 `content_search` 扫原始字节：结果带 `byte_level`、命中为 `byte_offset` + 上下文片段、`line_count` / `char_count` 归零，`%PDF` 一类签名可被实证，文本搜索的 `line` 语义对它们不成立。
-- 只读测量通道 `filesystem_stat`：`paths` 逐条返回存在性、`size_bytes`（磁盘真实字节数）、`mtime`，目录另给 `file_count` / `total_bytes` / 最大最小文件与有界条目清单；只做 stat/遍历，不写不删。它挂在 `filesystem` 家族的 `stat` 动作上，`allowed_roles` 含 `inspection`——与 `write` / `edit` / `delete` / `propose_patch` 等写动作的 inspection 拒绝互不影响，验收节点因此能测量「这批产物有几个、多大、哪些是本轮写的、真实文件名是什么」，而不必依赖内容通道的占位串统计或凭清单外推文件名。
-
-统一工具 Timeout 合同：
-
-- 每次工具调用都有最大运行时长保底：显式传入的 `timeout_seconds` 参数（秒，**支持小数/亚秒、无上限**；下限 `MIN_TOOL_TIMEOUT_SECONDS=0.05s`，更小的值抬到下限）优先，否则用全局默认（`agents.tool_default_timeout_seconds`，默认 600，热更新生效；`G3KU_TOOL_DEFAULT_TIMEOUT_SECONDS` 环境变量是应急覆盖）。参数名自带单位（`_seconds`）以杜绝秒/毫秒歧义：裸 `timeout` 名一旦被模型误当毫秒就会把上限放大千倍（想要 60s 却传 60000，在秒语义下 ≈16.6h，既卡住工具、又把失速判定截止一并推到同样 16h 之后，见 `heartbeat-system.md`「Task Stall Detection」）。解析只认 `timeout_seconds`，不读旧名 `timeout`（无兜底）。`timeout_seconds` 经 `Tool.to_model_schema()` 统一注入模型可见 schema，两类工具不注入：瞬时内部协议工具（`submit_next_stage` / `submit_final_result` / `submit_message_distribution` / `task_append_notice`）与内部入队工具（`memory_write` / `memory_delete` / `memory_note`）带 `hide_universal_timeout_parameter`，不向模型暴露该参数，但机械保底仍然适用；长时编排/控制类工具带 `exempt_universal_timeout`，整体豁免外层时限（见下条）。
-- 执行分工按工具标志三分：**自持工具**（`self_enforced_timeout`，持有子进程/网络会话、需要结构化收尾的 `exec` 与 `web_fetch`）自己消费统一解析后的有效值（执行层以 `timeout_seconds` 入参显式传入 handler）并负责收尾——`exec` 走进程树终止（Windows `taskkill /T /F`、POSIX 进程组 `killpg`，仅对进程组组长杀组，绝不误杀宿主进程组）+ 管道排空 + 部分输出抢救；单次调用墙钟有界 ≈ `timeout_seconds + 排空宽限`：`timeout_seconds` 约束「等进程退出」，进程退出后的尾部排空另有 `_POST_EXIT_DRAIN_GRACE_SECONDS`（5s）宽限——孙进程继承输出管道写端、管道迟迟不到 EOF 时，到点杀进程树释放句柄、返回已抢救的部分输出并打 `drain_timed_out` 标记 + 反应式指引（要常驻进程就 detach、把输出重定向到文件再轮询，别让它继承 exec 管道）；`web_fetch` 把统一值喂给 `httpx.Timeout`（连接段内部另留 10s 小分段）。外层强制层对自持工具让位，但 pause/cancel 轮询与 CEO 侧车道巡检照旧。**豁免工具**（`exempt_universal_timeout`）不叠加任何外层 deadline：`spawn_child_nodes` 在一次调用内跑完整个子节点流水线（含嵌套派生与验收节点），运行时长天然无界；`wait_tool_execution` / `stop_tool_execution` 自带受控等待窗口（`wait_seconds` 上限 600s），外层保底会与内层窗口赛跑并在中途掐断等待、连带丢失 detached 执行登记。豁免工具的合法中断途径只有任务级取消链（cancel_token 级联 / pause / stop）；标志由三条执行路径（节点 `ReActToolLoop`、CEO/frontdoor 直接执行、`ToolRegistry`）同等生效，包装层（`ManifestBackedTool` / `EmbeddedMCPTool`）透传该标志；豁免工具登记进 CEO inline registry 时 live-state `timeout_seconds=None`，侧车道提醒不向模型宣称不存在的运行上限。**其余所有工具**由外层在 deadline 硬停（取消令牌级联 + 任务硬取消，无宽限），覆盖三条执行路径，包括验收（inspection）节点。
-- 清单声明式 timeout 策略：`resource.yaml` 顶层 `timeout_policy` 块可声明 `exempt_universal` / `self_enforced` / `hide_parameter`（布尔），服务清单/内嵌 MCP 添加的工具——其 handler 是普通 `build()` 对象或 `execute()` 函数，通常不携带标志类属性。`ManifestBackedTool` / `EmbeddedMCPTool` 按「handler 属性 OR 清单声明」解析三个标志，OR 语义有方向性：清单只能追加 opt-in 特殊行为，不能撤销 handler 代码级已声明的合同。清单声明 `self_enforced: true` 要求 handler 自行消费 `timeout_seconds` 入参并结构化收尾（统一参数会并入 FastMCP 注册 schema），否则该工具处于无任何时限状态。
-- 注册 schema 与实现签名的漂移防线：`EmbeddedMCPTool` 按注册 schema 构建 FastMCP 签名，FastMCP 会对每次调用做**默认值填充**——schema 里声明、实现不接受的参数（如退役残留的 `timeout_ms` 带 `default`）会被强注进每一次调用，让工具对所有入参组合无差别报错。防线有两道：构建期把「schema properties − handler 实际 dispatch 签名」的差集打成 WARNING（handler 带 `**kwargs` 时豁免）；执行期把 handler 签名不接受的参数过滤掉再调用（同一漂移键只告警一次）。契约测试 `tests/resources/test_tool_schema_signature_contract.py` 断言全仓 `tools/*/resource.yaml` 的 properties ⊆ handler 签名参数（含参数名卫生：非标识符且非关键字的键视为清单损坏）、自持 handler 必须接受统一 `timeout_seconds`，并复刻 `timeout_ms` 事故形态做回归。
-- 工具级独立超时配置已并入本合同：`ExecToolSettings.timeout`、`AgentBrowserToolSettings.default_timeout_seconds`、`web_fetch` 的旧 `timeout_ms` 均已移除，统一模型可见参数是运行时注入的 `timeout_seconds`；`web_fetch` 的 `resource.yaml` `parameters` 块只声明 `url` / `max_chars`（清单不得自行声明带上限的 timeout）；`skill-installer` 的下载/git 超时与 filesystem 校验子进程超时属于内部操作性超时，不在本合同内。
-- 超时被停止的工具结果必须带延长指引：统一文案 `Error executing {tool}: timed out after {N}s ... 请在下一次调用时显式传入更大的 "timeout_seconds" 参数（单位秒、支持小数）`，亚秒上限按小数渲染（不压成 `0s`），由外层与自持工具共用同一构造器保证口径一致；该文案按 error-lane 处理，但**不**附加 `load_tool_context` 参数修复指引（超时不是参数错误）。
-- CEO 侧车道与本合同的关系：侧车道巡检只能在硬上限之内排程、不能延长它；巡检语义归 `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」。detached `ToolExecutionManager` 条目同样携带本次调用的上限，`wait_tool_execution` 续等窗口到点即终态化并返回超时结果，不轮询死条目。
-- 已知边界：同步阻塞型工具的超时只能在下一个 await 点生效；模型可传任意大 `timeout_seconds`（无上限是合同的一部分），串行化调度下的队头阻塞由 pause/cancel 兜底。`exec` 的两段等待都已有界（`timeout_seconds` 约束等进程退出、5s 宽限约束退出后排空，孙进程吊管道时到点杀树自愈），但「进程根本不退出」这一段的上限仍等于模型传的 `timeout_seconds`——短命令配大 `timeout_seconds` 会让卡死等到那个上限才自愈，故短命令务必配小值（无进度时长的失速提前告警属另一条防线，尚未接入）。
-
-阶段门控与 callable 收紧：
-
-- CEO/frontdoor 的 stage gate 由 `execute_tools` 真正执行：普通工具在无活动阶段或预算耗尽时不可自由调用。模型把 `submit_next_stage` 与目标工具在同一条消息里一起提交时，先执行 `submit_next_stage`，再把同批普通工具当作新阶段的第一批调用，并在该新阶段上记账预算。若模型未同批提交 `submit_next_stage` 就单独调用普通工具，撞闸的普通工具获得一次「宽限执行」：工具照常执行、结果照常返回，但结果尾部附阶段闸门提醒（`STAGELESS_FREE_PASS_REMINDER` / `STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER`）；宽限用尽后（已有待入账计预算轮，或耗尽阶段已有溢出轮）仍单独调用普通工具，才收到 `no active stage` / `current stage budget is exhausted` gate error。
-- 预告提醒（`STAGE_BUDGET_EXHAUSTION_PREDICTED_REMINDER_TEMPLATE`）是这条阶梯的第一档，位于宽限之前：活动阶段存在、`transition_required` 为假、本轮批内不含 `submit_next_stage`、且本轮计预算的普通调用会把 `tool_rounds_used` 推到 `tool_round_budget` 时，随本轮成功的工具结果附上「下轮须同批 `submit_next_stage`」。判据在两条车道各自持有（CEO `_frontdoor_predicted_exhaustion_reminder` / 节点 `_execution_stage_exhaustion_predicted_reminder`），触发点恒为 `used == budget - 1`，即模型还来得及行动的最早一轮。同批已含 `submit_next_stage` 时整批不产出预告：那批普通工具记在刚开的新阶段上，按旧阶段预算算出的结论既失配，又会贴进 `submit_next_stage` 自己的返回值、与同一条结果里的 `tool_rounds_used=0` 直接矛盾，使模型读到与账本相反的陈述。文案口径必须与执行期宽限政策一致——说明单独调用仍会宽限执行一次并记为本阶段溢出轮、此后再单独调用才被拦截；写成「否则调用将被拦截」会让阶梯第一档的承诺被第二档当场推翻。预算已满（`transition_required` 为真）后本提醒不再产出，改由上一条的宽限执行提醒接管。
-- 宽限执行的记账归属：无活动阶段 → 记入 `frontdoor_stage_state.pending_orphan_rounds`（标 `orphan`），下一次 `submit_next_stage` 开新阶段时把这些孤儿轮嫁接为靠前的 rounds（标 `orphan_grafted`）并消耗该新阶段预算，故提醒要求模型在 `stage_goal` / `completed_stage_summary` 中涵盖待入账调用、并把 `tool_round_budget` 设为不小于待入账轮数 + 后续所需轮数；预算耗尽 → 记回耗尽阶段自身为溢出轮（标 `overflow`、`budget_counted=false`、`tool_rounds_used` 保持封顶、`transition_required` 不变），下一次 `submit_next_stage` 正常关闭旧阶段并开新阶段。上下文加载型工具（`load_tool_context` / `load_skill_context` 及其 `_v2` 变体）在闸门豁免集合内：纯 loader 轮不构成撞闸轮、不记孤儿/溢出、不消耗宽限；混合批内的 loader 调用照常随批执行，也不追加宽限提醒。
-- 节点侧（execution / acceptance）复用同一套宽限与记账语义，但落在 `main/runtime/react_loop.py`（执行放行与提醒）与 `main/monitoring/log_service.py`（记账）：无阶段 → `ExecutionStageState.pending_orphan_rounds`（标 `orphan`），下一次 `submit_next_stage` 嫁接进新阶段；预算耗尽 → 溢出轮 attach 回耗尽阶段（`overflow=true`、`budget_counted=false`）；节点终态 `finalize_execution_stage` 把残留孤儿轮兜底吸收进一个 `system_generated` 收纳阶段。阶段状态整体序列化进 `node.metadata['execution_stages']`（SQLite `nodes.payload_json`，纯 JSON 无需迁移）。“宽限”只作用于真正会被闸门拦截的普通工具，永久豁免工具（`submit_next_stage` / `submit_final_result` / `spawn_child_nodes` / control tools / 上下文加载器）原样放行、不追加宽限提醒、不记孤儿/溢出轮。
-- 轮末收尾契约：CEO/frontdoor 的纯文本回复不受阶段预算耗尽拦截——耗尽只约束继续调用工具，文本收尾直接进入 finalize，活动阶段以**空摘要**关闭：该阶段的最终回复本身就是紧随 compact 块之后的 assistant 消息原件，块不复述结论，写「结论已交付」式指针只会让块指不到任何东西（它宣称指向的助手回复会被上下文压缩吃掉）。`STAGE_TURN_END_SUMMARY_POINTER` 只作为存量持久化数据的识别标记保留——历史会话里的旧指针块在渲染与候选可见文本筛选中仍被过滤，不当摘要内容、不投递给用户。阶段压缩只删工具肉身、原样保留纯文本对话。唯一保留的文本打回是 B 类：阶段刚创建、尚无实质工具轮（rounds 里除 `submit_next_stage` / final / control 外没有任何工具）时，第一次纯文本收尾会被打回一次并注入提醒，提醒自带逃生句（确不需要工具时再次直接输出回复即放行）；打回次数由独立的 `stage_reply_bounce_count` 计数（上限 `STAGE_REPLY_BOUNCE_LIMIT=1`，整回合累计、不随工具轮重置），`heartbeat_internal` / `cron_internal` 内部轮豁免。A 类「耗尽即打回文本」与 B 类互相封堵出口：一旦某个阶段既不能再调工具又不被允许用文本收尾，模型每次尝试收尾都被丢弃、被迫不断开新阶段凑工具轮，构成无解死循环，因此耗尽态绝不参与文本打回判定。轮末若仍有 `pending_orphan_rounds`，finalize 会自动补开一个 `system_generated` 阶段收纳这些孤儿轮（`stage_kind` 仍是 `normal`，保证被阶段压缩正常回收；`stage_goal` 派生自当轮叙述）。阶段压缩块（`[G3KU_STAGE_*]` 前缀）是运行时注入的阶段上下文标记、不是对话内容；模型把阶段块原文当成整条文本回复输出属内部消息回显，由 frontdoor 回显守卫收口——首次转向要求改用 `submit_next_stage` 或面向用户自然语言的私有修复提示，重复回显转用户友好回退，块原文不作为最终回复持久化或投递（详见 `runtime-overview.md`「frontdoor 与任务运行时的关系」）。
-- 节点车道的轮末语义相反，不能套用上一条：纯文本回复本身不构成节点交付，交付只能由 `submit_final_result` 工具调用表达。轮末打回按阶段状态分两条道，两条都注入提醒后自动续跑、都不把文本升格成结果：`build_execution_stage_result_block_message`（`main/runtime/stage_messages.py`）负责 `has_active_stage=false` 或 `transition_required`，累计 `_INVALID_STAGE_SUBMISSION_LIMIT` 次由 `_invalid_stage_submission_failure` 收口；`build_node_plain_text_reply_block_message` 负责「有活动阶段且预算未耗尽」，累计 `_PLAIN_TEXT_REPLY_STRIKE_LIMIT` 次由 `_plain_text_reply_failure` 收口。两条道都产出 `failed + blocked` + `failure_disposition='pause'`，即节点转入错误暂停而非正常交付；两个计数都在任一普通工具轮归零，且只在阶段模式（`stage_gate.enabled`）内参与判定。`_wrap_plain_text_final_result_tool_call` 只剩两个入口：阶段门控未启用（非 execution/acceptance 节点，或缺少 stage gate 的日志实现），以及文本本身就是可解析的 final 载荷（`matched_raw_final_result_payload`）。提醒文案必须同时给出三个合法出口——继续调用普通工具、直接 `submit_final_result`、同批 `submit_next_stage` + 目标工具——否则「打回文本」与「无阶段可继续」互为出口封堵，会在只剩一轮预算的阶段上重演上一条 CEO 车道那种无解死循环。`node_execution.md` / `acceptance_execution.md` 的纯文本条款与本合同同口径。
-- 当前没有「有效阶段」（含预算耗尽、必须换阶段）时，CEO/frontdoor 的 agent-facing `frontdoor_runtime_tool_contract.callable_tool_names` 不再收紧到只剩 `submit_next_stage`，而是保留全量 callable 并把 `submit_next_stage` 置首，配合同批提交协议与执行期宽限兜底；execution / acceptance 节点同样不再收紧，`submit_next_stage` 置首。任何阶段都不收紧 provider body 里的 `tools[]`：为保持 prompt cache 前缀稳定，provider-facing 继续使用稳定的 runtime-visible tool bundle（束名集合按会话稳定：实盘 500 回合里只有 11 次回合边界换束），阶段控制交给动态合同与执行门控（详见下文「CEO Provider Tool Surface」）。束里每个 schema 都带 `function.description`（= 工具的 model description），它是工具说明的唯一载体：正文侧的 `candidate_tools` 只列名字，不再抄第二份描述。
-- execution / acceptance 节点不必把 `submit_next_stage` 单独拆成一轮：阶段切换成功时，同批普通工具作为新阶段首轮执行；切换失败时，同批剩余普通工具被批内阻断，不回退旧阶段继续执行。执行层的 `stage_gate_error_for_tool()` 是 schema 收紧与提示协议之外的兜底防线：两条路径都在宽限用尽后由同一条兜底闸门拦截（返回 `no active stage` / `current stage budget is exhausted`）。同一批内多次提交 `submit_next_stage` 只执行第一次，其余返回「至多一次」错误。
-- 兜底闸门的三处豁免：① 上下文加载型工具（`load_tool_context` / `load_tool_context_v2` / `load_skill_context` / `load_skill_context_v2`）在共享豁免集合内（`stage_budget.py` 的 `DEFAULT_STAGE_GATE_BYPASS_TOOLS`，节点与 CEO/frontdoor 同效），无论有无活动阶段都可调用——加载器是曝光层恒定可调的 fixed builtin、不计入阶段预算，且工具合同要求普通工具先 load 后调，把加载器挡在闸门后会造成起手轮必然撞闸、白白消耗一次性宽限；② 落库类工具 `memory_write` / `memory_delete` / `memory_note` 是 CEO/frontdoor 全局白名单（`FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES`），无活动阶段也可调用——保证"用户口头给一条长期指令 → 写记忆"不会被 `no active stage` 拦下后一次性放弃、永久丢失；③ 节点暂停（`task_node_error`）心跳轮 `allow_stageless` 放行首个实质性工具，阶段由 `_frontdoor_stage_state_after_tool_cycle` 自动补开（`system_generated`，预算 10，标题=「任务 ID xxx 中的节点出现自动暂停，检查原因并处理」），预算耗尽后 `transition_required` 置真、回到普通闸门。这三处豁免只改执行门控，不改变节点快照 / CEO 合同的 callable 列表，也不改 provider `tools[]` 前缀稳定性。
-- 这组收紧不改变 candidate 语义：`candidate_tool_names` / `candidate_skill_ids` 仍表达 RBAC 可见集合的候选集，只是无有效阶段时这些候选不同时出现在 agent-facing callable contract 里。
-- 内部轮次继承：当前 session 已有权威 frontdoor baseline 与前序 contract state 时，`heartbeat_internal` / `cron_internal` 不被收紧、也不重跑 candidate/hydration/skill selection，而是直接继承上一轮的 callable / candidate / hydrated / provider-tool / visible-skill 状态；从 agent 视角看，它们就是在上一轮 frontdoor contract 上追加隐藏内部提示后的普通 CEO/frontdoor 轮次，可以直接输出，也可以立即开始阶段并调用已继承的普通工具。尚无权威 baseline 时，内部轮次回退到普通 exposure assembly。`cron_internal` 的其余特例只有两点：reminder 正文是隐藏的结构化 `system` 事件块；cron 任务的停止与删除由 scheduler 侧的 `payload.max_runs` / `state.delivered_runs` 计数器负责。
-- `submit_next_stage` 的阶段预算在 execution / acceptance / CEO-frontdoor 三条路径统一为 `10-30`（`stage_budget.py` 的 `STAGE_TOOL_ROUND_BUDGET_MIN` / `STAGE_TOOL_ROUND_BUDGET_MAX`），允许在预算未耗尽前提前切到下一阶段；预算是“本阶段声明的上限窗口”，不是“必须烧满的最小轮数”。窗口两端不对称：超上限由两个提交收口（`log_service.submit_next_stage` / `_submit_frontdoor_next_stage_state`）抛错，低于下限则是抬升——按 `MIN` 起算并照常开阶段，所以工具 schema 只声明 `maximum`，补上 `minimum` 会让抬升在参数校验环节就变成错误、永远到不了收口。系统自动补开的阶段（孤儿轮收纳、节点错误阶段、节点侧默认提交）也落在同一窗口内。窗口数字在 `node_execution.md` / `acceptance_execution.md` / `ceo_frontdoor.md` 三份提示词里是字面写的，每轮 overlay（`stage_messages.py`）按常量插值，改窗口要同步前者。
-- `submit_next_stage` 另有一个可选布尔参数 `drop_completed_stage_tool_detail`（三条路径同一个 `SubmitNextStageTool`，schema 与校验只有一份）：为真时把**正在关闭**的那条阶段的工具肉身移出 provider 上下文，只留下阶段块里的总结。它要求同批带非空 `completed_stage_summary`，否则 `validate_params` 判参数非法走既有的参数错误回贴车道——库里 46.2% 的终态阶段总结本就为空，没总结就裁等于移走该阶段唯一的记录。提交落点还会再收一次（`drop and summary` 同时成立才写标记），所以绕过工具层的写入者造不出黑洞态。它与收口是两个不同的账本字段、两种信息损失边界，机制与实测见 `runtime-overview.md`「stage_compaction」。**这个参数是阶段肉身离开上下文的唯一主动出口**：运行时没有"最近 N 条完成阶段"式的自动过期，模型不点名的阶段一直逐轮重发，直到 `token_compression` 把那段历史写进摘要并收口。
-- `read_completed_stage` **不存在的教训**：前门曾打算加一个按 `stage_index` 读回已裁撤阶段的内置工具，实盘验证否掉了——送给 provider 的工具 schema 由 `_selected_tool_schemas` 用 `loop.tools.get(name)` 从**全局**注册表解析，工具必须先在注册表里存在才可能进 schema（`bootstrap_bridge.register_default_tools` 里给 `silent` 写的那句注释就是这条），而阶段账本是每会话的：把带闭包的实例注册进全局表会让 A 会话的账本被 B 会话读到。最终形态是裁撤时导档 + 块带 `archive_ref` + `content_open` 回读，机制见 `runtime-overview.md`「stage_compaction」。要加前门内置工具时必须同时满足两点：全局注册表里有可解析的实例，且该实例不携带任何会话态。
-- `load_tool_context` / `load_skill_context` 属于上下文加载型工具调用：写入 round 历史，但不增加当前阶段的 `tool_rounds_used`；节点与 CEO/frontdoor 记账同一规则，预算结论只看 `rounds[*].budget_counted` 与聚合后的 `tool_rounds_used`，不按 transcript 里的 loader 调用次数自行推断。CEO UI 上，成功 loader 调用在输入框上方显示短暂的 live-only notice（尽量带 `tool_id` / `skill_id`），不作为长期保留的工具步骤；loader 失败时仍优先检查原始 round/tool 数据与 runtime snapshot。
-- 前门要区分两份工具集合：`tool_names` 保存阶段内可恢复的完整 callable pool；“当前轮合同暴露给模型的 callable tools”要通过前门 callable-tool helper 结合 `frontdoor_stage_state` 再算一次。不要把前者直接当作当前轮模型可见函数列表；无有效阶段时 `submit_next_stage` 的置首只影响 agent-facing 合同，provider `tools[]` 始终不同步收紧。
-- `frontdoor_stage_state`、`compression_state`、`hydrated_tool_names` 是受保护运行时状态：工具合同刷新不能覆盖、清空或重置这些字段。
+hydration 把一次成功的 `load_tool_context` 变成下一轮的 callable：候选在派发时定格、加载后进入水合台账、下一轮并入模型可见集合。台账、提升、重读、参数错误、外置结果信封、统一 timeout 与阶段门控的合同见 `tool-hydration-and-callable-chain.md`。
 
 ### 3.5 `cron` 工具合同
 
@@ -257,64 +192,16 @@ promotion 与前门状态：
 `tools/manage_task_nodes_cn` 提供给 agent 处理错误暂停节点的 callable tool。它调用 `MainRuntimeService.control_nodes(...)`，一次请求可以包含多个同一任务的节点，并按节点返回结果。
 
 - 三种互斥参数形态：单动作批量 `node_ids` + 单一 `action`（无级联时逐节点独立校验，单节点冲突不阻断批次其余节点；`cascade=true` 时同样进入原子路径）；`targets: [{node_id, action, cascade?}]`（每节点独立动作，一次调用可混合 pause/fail 等）；以及**整任务形态**——只给 `task_id` + `action`，不给 `node_ids`/`targets`。整任务形态与「传任务根节点 + `cascade=true`」是同一条代码路径：服务层解析 `task.root_node_id` 后进入同一个原子批次，两种写法语义完全一致。显式空 `targets` 数组按要求打回，不被静默升级为整任务。`cascade=true` 把动作向下传递到以该节点为根的整棵子树：批量形态用顶层 `cascade`，targets 条目未声明 `cascade` 时继承顶层值（显式参数不得被静默忽略）。子树成员是调用时快照，之后新 spawn 的后代不在集内（暂停的祖先会延迟其分发）。`remark` 是批级共享注记（fail 失败原因 / keep_paused 登记备注 / pause 注记），不支持逐条目独立 remark。
-- 整任务作用域带任务级副作用，与 `pause_task` / `resume_task` 是同一实现：动作覆盖任务根节点时（整任务形态，或对根节点 `cascade=true`），除逐节点落暂停态外还调用 `pause_task` / `resume_task`，任务自身的暂停标志、调度排队取消、排队等待唤醒与分发失败态复位一并生效——「根节点 + cascade ≡ 全局」在状态与运行时行为两层都成立，不是只改显示。整任务 `fail` 终结整个任务，整任务 `keep_paused` 同样要求非空 `remark`。任务级暂停标志与根节点暂停态的恒等关系、以及任务大厅 Paused 徽章的判读归 `runtime-overview.md`「Node-Level Pause and Recovery」。
+- 整任务作用域带任务级副作用，与 `pause_task` / `resume_task` 是同一实现：动作覆盖任务根节点时（整任务形态，或对根节点 `cascade=true`），除逐节点落暂停态外还调用 `pause_task` / `resume_task`，任务自身的暂停标志、调度排队取消、排队等待唤醒与分发失败态复位一并生效——「根节点 + cascade ≡ 全局」在状态与运行时行为两层都成立，不是只改显示。整任务 `fail` 终结整个任务，整任务 `keep_paused` 同样要求非空 `remark`。任务级暂停标志与根节点暂停态的恒等关系、以及任务大厅 Paused 徽章的判读归 `main-task-runtime.md`「Node-Level Pause and Recovery」。
 - `action` 取 `resume`、`keep_paused`、`fail`、`pause`。`keep_paused` 必须提供非空 `remark`；该备注写入节点暂停登记，供后续 heartbeat 决策使用。
-- `resume` 清除暂停并让运行中的 dispatcher 从持久化 runtime frame 续跑；节点属于「父节点已拿到结果的派生轮」且其 entry 已记为失败时，`resume` 在清旗前被拒（`entry_settled`），复活它得到的工作不会被任何等待方采纳，判据归 `runtime-overview.md`「Node-Level Pause and Recovery」；`fail` 将暂停节点置为终态并释放父节点等待；`pause` 以 `pause_reason=agent` 登记 agent 发起的暂停。
+- `resume` 清除暂停并让运行中的 dispatcher 从持久化 runtime frame 续跑；节点属于「父节点已拿到结果的派生轮」且其 entry 已记为失败时，`resume` 在清旗前被拒（`entry_settled`），复活它得到的工作不会被任何等待方采纳，判据归 `main-task-runtime.md`「Node-Level Pause and Recovery」；`fail` 将暂停节点置为终态并释放父节点等待；`pause` 以 `pause_reason=agent` 登记 agent 发起的暂停。
 - targets/级联路径是原子两阶段：先整体校验（节点存在、子树重叠、根节点前置条件、级联 fail 要求子树内所有非终态后代已暂停），任何一项不满足整批打回不生效，返回结构化错误码——`subtree_overlap` 携带 `conflicts`（哪些节点被哪些条目的子树覆盖）、`subtree_not_fully_paused` 携带 `blocking_node_ids`，另有 `node_not_found` / `node_terminal` / `node_already_paused` / `node_not_paused` / `entry_settled`（携带 `detail` 指明是哪个轮次、`hint` 给出口）。重叠判定只针对**跨动作**声明（同一节点被两个不同动作覆盖才是无法消解的二义性）；同动作的子树包含关系自动合并——树结构下两棵子树要么不相交要么一方包含另一方，子集条目被覆盖条目吸收、免根校验，响应 `merged` 列表记录吸收关系。通过校验的批次内，后代的状态冲突逐个跳过并在 `items` 报告，不打回整批。失败一棵子树是两步流程：先级联 `pause`，再级联 `fail`。
-- 级联有两处不对称保护：级联 `pause` 容忍已暂停的根节点（跳过根继续级联后代），且跳过已暂停后代不覆写，保留其 `pause_reason=error` 登记与心跳重试计数；级联 `resume` 清除整棵子树的暂停标志，error-pause 登记与心跳重试追踪随之清除。级联 `fail` 按根先、后代 BFS 后的顺序施加（顺序理由见 `runtime-overview.md`「Node-Level Pause and Recovery」）；对任务根节点执行 fail 会终结整个任务。
-- web 模式下只有 `resume` / `fail` / `pause` 会入队 worker 命令（`resume_node` / `fail_node` / `pause_node`，worker 无 `keep_paused` 命令类型）；`keep_paused` 是 leader 本地操作，不产生任何 worker 命令。targets/级联路径每条目入队一条命令，payload 携带 leader 已展开的显式 `node_ids` 且 `cascade=false`，worker 不重展开子树（防两次展开漂移），保条目顺序与 remark 保真。`fail` 的备注随命令下发并作为失败原因兜底；命令派发细节见 `runtime-overview.md`「Node-Level Pause and Recovery」。
-- 工具层只负责参数与结果契约，节点暂停的安全边界、future 等待和恢复语义归 `runtime-overview.md`「Node-Level Pause and Recovery」；错误暂停事件的投递归 `heartbeat-system.md`「Task Node Error Delivery」。不要通过普通 task 工具或直接改 SQLite 表替代此入口。
+- 级联有两处不对称保护：级联 `pause` 容忍已暂停的根节点（跳过根继续级联后代），且跳过已暂停后代不覆写，保留其 `pause_reason=error` 登记与心跳重试计数；级联 `resume` 清除整棵子树的暂停标志，error-pause 登记与心跳重试追踪随之清除。级联 `fail` 按根先、后代 BFS 后的顺序施加（顺序理由见 `main-task-runtime.md`「Node-Level Pause and Recovery」）；对任务根节点执行 fail 会终结整个任务。
+- web 模式下只有 `resume` / `fail` / `pause` 会入队 worker 命令（`resume_node` / `fail_node` / `pause_node`，worker 无 `keep_paused` 命令类型）；`keep_paused` 是 leader 本地操作，不产生任何 worker 命令。targets/级联路径每条目入队一条命令，payload 携带 leader 已展开的显式 `node_ids` 且 `cascade=false`，worker 不重展开子树（防两次展开漂移），保条目顺序与 remark 保真。`fail` 的备注随命令下发并作为失败原因兜底；命令派发细节见 `main-task-runtime.md`「Node-Level Pause and Recovery」。
+- 工具层只负责参数与结果契约，节点暂停的安全边界、future 等待和恢复语义归 `main-task-runtime.md`「Node-Level Pause and Recovery」；错误暂停事件的投递归 `heartbeat-system.md`「Task Node Error Delivery」。不要通过普通 task 工具或直接改 SQLite 表替代此入口。
 
-## 4. 一条从上下文到 callable tools 的链路
 
-1. 节点/CEO 进入一次新 turn。
-2. `runtime/context` 模块根据 query、历史、治理规则挑出候选工具/技能。
-3. prompt builder 把它们以 candidate 列表形式展示给模型。
-4. 模型若决定需要某候选工具，先调用 `load_tool_context(tool_id="...")`。
-5. 只有当该工具仍属于 canonical candidate，且解析到的是普通 concrete extension executor 时，系统才记录 hydration 状态。
-6. 下一轮 `model_visible_tool_names = fixed builtin tools + hydrated tools`。
-7. 只有这一轮，工具才真正成为 callable tool。
-
-四条不变量：
-
-- “看得见”不等于“现在就能调用”。
-- “load_tool_context 成功”不等于“这一轮立刻可调”。
-- “RBAC 可见且 surfaced”不等于“必然会被 promotion”；它也可能只是一个 read-only toolskill load。
-- prompt 里的候选池与实际 callable tool 集合是两套集合。
-
-frontdoor 边界：
-
-- frontdoor 的 callable tool 集合不只来自 fixed builtin，还会并入当前 turn 内已 hydration 的 concrete tools；`candidate_tool_names` 必须排除已进入 hydrated state 的工具。一个工具同时出现在 candidate 列表和 callable tool schemas 里，通常表示状态推进漏了。
-- 排查“`load_tool_context` 成功后下一轮仍只会 `exec` / 再次 load”：优先检查 frontdoor persistent state 里的 `hydrated_tool_names`、`tool_names`、`candidate_tool_names` 是否一起更新，而不是只看 toolskill 内容。模型反复对同一 callable / hydrated / fixed-builtin 工具再次 load 时，先检查消息历史里是否还保留同一 resolved `tool_id` 且 fingerprint 未变化的未压缩结果——那是预期中的 duplicate direct-load 软拦截，不是 registry 丢失。
-- 线上 frontdoor 表现与测试 helper 不一致时，先确认 runner 是否真的走自研步骤循环；生产只有这一条 promotion 路径。
-
-节点边界：
-
-- 对执行/验收节点，当轮合同分两块尾部注入：`candidate_tools` / `candidate_skills` / 修复名单在稳定的 `node_runtime_tool_contract`，`callable_tool_names` / `hydrated_executor_names` / `execution_stage` 在每跳重写的 `node_runtime_stage_gate`（再后面才是当轮 turn-only note）。稳定 bootstrap user JSON 只保留稳定节点上下文。与运行时合同同轮出现的 overlay / repair overlay 只允许作为 request-tail 临时消息追加，不原地改写 bootstrap user 或任何更早的持久化消息，否则破坏稳定前缀与 prompt cache 命中。
-- `candidate_tool_names` / `candidate_skill_ids` 是唯一 gate truth source；`candidate_tool_items` / `candidate_skill_items` 只是描述文本投影。canonical 列表为空时，重建后的合同也必须把 `candidate_tools` / `candidate_skills` 渲染为空，不从旧 contract item 列表或旧 frame item 缓存复活失效候选。
-- 恢复链路：restored `selected_tool_names` 保持“恢复的 callable 工具 ∪ 恢复的 candidate concrete 工具”，不塌缩成“仅 callable”，让下一轮 node tool-provider 能把两个集合一起交回 schema selection；node tool provider 也要把恢复的 candidate executors 作为可见工具暴露，即使当前只有 `callable_tool_names` 立即可调——否则一次成功的 hydration promotion 就可能把下一轮候选池清空，后续 `load_tool_context(tool_id="content_open")` / `load_tool_context(tool_id="filesystem_write")` 会在人为缩小的候选集上失败。
-- 区分“当前轮对模型暴露的 callable 合同”与“内部可恢复的完整 callable pool”：前者在无有效阶段时保留全量并把 `submit_next_stage` 置首；后者只保留在本地 `model_visible_tool_selection_trace.full_callable_tool_names` 供排障。节点 `runtime frame`、动态 `node_runtime_tool_contract` 与 `runtime-frame-messages:{node_id}` artifact 必须写入同一份 callable 列表；三者不一致按运行时合同分裂排查，而不是先怀疑 prompt 文本。frame 与重建合同对 skill 候选也必须一致：`candidate_skill_ids` / `candidate_skill_items` 在 frame 中存在时，不应因阶段压缩或 active window 裁剪而在下一轮合同中无故清空；但“从 frame 恢复”的前提是 frame 本身已是 authoritative skill-contract frame——当前 frame 只是初始化的默认空字段、而本轮已携带 fresh skill 合同时，rebuild 必须优先保留 fresh 合同。
-
-CEO/frontdoor 合同载体：
-
-- `turn overlay` / `repair overlay` 属于 dynamic appendix 一侧的当前轮临时内容；请求体中它们排在全部携带正文之后（尾部），不能回写已有 stable/request user 消息。
-- `dynamic_appendix_messages` 的持久化形态只保留当前 `frontdoor_runtime_tool_contract`；retrieved context 这类需要在同一 turn 后续模型轮次保留的内容，留在 `messages` / stage state / canonical context 的重建链路里，不作为第二份 appendix 尾插。每个 provider-bound request 在动态区域只携带一份最新 contract：每轮重建先剥掉携带历史里的旧 contract 与 turn-only note，再把当前 authoritative contract 追加到请求体尾部（为什么必须在尾部、断点在哪儿的判据详见 `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」）；turn 结束写回 durable transcript 时全部剥离。同一 turn 内，最新摘要块就是权威合同。
-- 模型面向的运行时合同是以 `## Runtime Tool Contract` 开头的 system 摘要块（运行时元数据、非对话内容，避免模型把它错当成“自己上一轮说过/发给用户的消息”），用紧凑文本向模型解释 candidate / 修复 / 附件 / 临时目录 / 执行策略（稳定块）与 callable / hydrated / 活动阶段（活状态尾块）；provider 原生 callable schema 仍走 provider `tools[]`。静态行为规则（`load_tool_context` 怎么用、别复读 toolskill、候选 skill 不水合、静默没有文本写法、临时目录落盘纪律）不在这里重复——它们只在 `ceo_frontdoor.md` 说一次，实测发送体 system 头部携带；一处规则一个载体，压缩块里才不会只剩唯一权威。合同识别有一条硬不变量：运行时注入的合同消息从不携带 `tool_calls`，因此任何携带 `tool_calls` 的 assistant 消息都是模型回合本身——即使其文本回显了合同抬头或合同 JSON，也不得判为合同消息而剥离，否则该回合只剩孤儿工具结果，会触发节点孤儿子工具结果熔断。execution / acceptance 节点使用同样的摘要式合同车道：节点摘要只以 names-only 暴露 `hydrated_executor_names`，详细 provider-call schema 留在节点 `provider_tool_names` 与 provider `tools[]`。摘要块还可携带：`attachment_reopen_targets`（runtime-owned 的上传 reopen 元数据，覆盖当前轮与 transcript 历史上传，是模型可见引导，不是浏览器/UI 表面；创建 detached 任务需要 reopen 上传文件/图片时，模型应把精确目标字符串抄进 `create_async_task.file_targets`，运行时不自动注入任务记录）；`repair_required_tools` / `repair_required_skills`（agent-facing-only 的修复车道，让模型看到“先修复再使用/查看正文”的资源，而不误读成普通能力）；`session_temp_dir`（CEO 会话级临时目录的绝对路径，仅在运行时解析出会话临时目录时渲染；落盘纪律与"正式交付物禁止以 temp 为落点"两条规则只在 `ceo_frontdoor.md` 说一次，并反过来指向这里给出的路径；目录解析见 `runtime-overview.md`「任务侧」）。两类候选的不对称语义口径：`candidate_tools` 是 candidate executor 摘要，通常仍需 `load_tool_context(...)` 后等待下一轮 hydration/promotion；`candidate_skills` 是 loadable skill 摘要，列出的 `skill_id` 应直接理解为 `load_skill_context(skill_id="...")` 的正文入口——这套措辞由基础提示词承载，块里只给名单。
-- CEO/frontdoor 还把下一轮 body baseline 持久化为 session-owned 的 `frontdoor_request_body_messages`：body-only，写回 session state 时剥掉动态 `frontdoor_runtime_tool_contract` 消息，让下一轮重建一份新的权威尾部合同。fresh visible CEO/frontdoor turn 通过直接 continuation 路径消费这份 baseline；在记录任何显式 shrink 原因之前，fresh visible turn 却从 transcript/stage replay 重建，就是 frontdoor continuity bug。direct-reply turn finalization 必须保住这份权威 baseline，并在 session sync 前追加最终 assistant 回复。baseline 变短只在 `token_compression` 与 `stage_compaction` 两种理由下合法（记录在配套的 `frontdoor_history_shrink_reason`）；没有这两个理由的变短按运行时上下文丢失处理，不是正常合同重建。
-- approval interrupt 与 pause/recovery payload 携带这些 runtime-owned frontdoor 字段：`frontdoor_stage_state`、`compression_state`、`hydrated_tool_names`、`tool_call_payloads`、`frontdoor_selection_debug`；恢复后丢失按“frontdoor canonical runtime contract / runtime state 损坏”排查。
-
-排查顺序：
-
-- 当前轮合同先看 request 动态区域中唯一的 `frontdoor_runtime_tool_contract`，它排在请求体尾部；再看 internal state 的 `tool_names` / `candidate_tool_names` / `candidate_tool_items` / `hydrated_tool_names`；稳定 prompt 前缀、旧 overlay 文本、旧 transcript 里的 tool/skill 名单都不是当前轮权威合同。“load 成功但下一轮没调用”时，对照 canonical runtime frame / frontdoor state 与 runtime messages snapshot；旧 bootstrap 文本与当前 snapshot 冲突时，以当前 snapshot 为准。“某工具为什么没进前门候选集”看 `frontdoor_selection_debug.tool_selection`（命中项为什么没进 `candidate_tool_names`）。
-- 排查 CEO/frontdoor cache drop 时区分：`messages` 保存的是“下一次重建 request body 的基线”，`dynamic_appendix_messages` 只是“当前轮唯一尾部合同”；两边都出现完整候选/合同副本，说明 runtime contract 重复注入。
-
-优先级边界：
-
-- `ceo_frontdoor.md` 中的 stage-first 协议高于本轮 skill/tool 暴露提示，是稳定协议。前门动态提示里的“如需完整 workflow 正文可调用 `load_skill_context`”“如需工具契约可调用 `load_tool_context`”，真实语义都是“仅在活动阶段已经存在后，才进入下一步可执行顺序”。当前没有活动阶段时，即使已经看到候选 skill 和候选 tool，也应先走 `submit_next_stage`；否则运行时会在执行时返回 `no active stage` 门控错误。
-
-- restore / recovery 只接受 frame 或 CEO/session state 中的 canonical callable/candidate/hydrated/skill 字段；缺失时直接视为“运行时工具合同损坏/缺失”，不回退 bootstrap 或旧动态文本。
-
-## 5. 当前系统为什么这么设计
+## 4. 当前系统为什么这么设计
 
 当前设计针对几个反复出现的问题：
 
@@ -336,7 +223,7 @@ CEO/frontdoor 合同载体：
 - `load_tool_context("filesystem")` 返回的仍是 family 级说明，不意味着会把 monolith `filesystem` 提升成下一轮可调工具。
 - 真正会进入 `model_visible_tool_names` 的，只能是 `filesystem_write` / `filesystem_edit` / `filesystem_copy` / `filesystem_move` / `filesystem_delete` / `filesystem_propose_patch` 这些 concrete executors。
 
-## 6. skill 与 tool 的差异
+## 5. skill 与 tool 的差异
 
 ### tool
 
@@ -352,7 +239,7 @@ CEO/frontdoor 合同载体：
 - 不是直接 executable tool
 - 是否使用取决于 prompt 约束和 agent 行为
 
-## 7. 维护时最容易踩坑的点
+## 6. 维护时最容易踩坑的点
 
 - 把 candidate 当 callable。
 - 把 skill 当 tool。
@@ -365,7 +252,7 @@ CEO/frontdoor 合同载体：
 - `content_*` 从新一轮 callable 列表消失时，先查候选选择与 hydration 状态，而不是 fixed-builtin 暴露。
 - 用 transcript 里 loader 调用次数推断阶段预算；`load_tool_context` / `load_skill_context` 不计入 `tool_rounds_used`。
 
-## 8. 维护高风险区域
+## 7. 维护高风险区域
 
 - `main/service/runtime_service.py`
   因为 fixed builtin、candidate、governance、hydration 都在这里汇合。
@@ -376,7 +263,7 @@ CEO/frontdoor 合同载体：
 - `g3ku/agent/tools/registry.py`
   一旦 runtime context、watchdog 或 schema 处理出错，会影响所有工具执行。
 
-## 9. Duplicate Tool Call Guard
+## 8. Duplicate Tool Call Guard
 
 Tool visibility and callable status do not guarantee that the runtime will keep executing the exact same call forever. `main/runtime/react_loop.py` guards duplicate ordinary calls at two layers keyed on the same signature: `tool_name` plus the normalized arguments serialized as sorted-key JSON. Control/stage/final tools (`stop_tool_execution`, `submit_next_stage`, `submit_final_result`) are exempt from both layers.
 
@@ -389,7 +276,7 @@ Tool visibility and callable status do not guarantee that the runtime will keep 
 
 `runtime-overview.md`「Repeated Tool Call Guard」一节是指向本节守卫的摘要引用。
 
-## 11. Tool Admin RBAC For Surfaced Tool Families
+## 9. Tool Admin RBAC For Surfaced Tool Families
 
 There is an explicit maintenance boundary between:
 
@@ -444,3 +331,14 @@ The provider-facing bundle is intentionally minimal:
 - Rich tool and skill descriptions stay in the tail runtime contract; provider `tools[]` keeps only the smallest callable schema required for function calling. Repair-required tool/skill exposure is not implemented by churning provider `tools[]`; repair-required lists are runtime-summary-only guidance, and provider bundle stability wins for cache continuity.
 - `stage_compaction` must not be used as a shortcut to publish a new provider bundle. If artifacts show a new `actual_tool_schema_hash` together with `history_shrink_reason=stage_compaction`, treat that as a provider-bundle refresh regression.
 - Provider-facing schemas are sanitized before transport: descriptive text and unsupported JSON Schema combinators such as `anyOf`, `oneOf`, and `allOf` are stripped or flattened into a simpler supported shape. Runtime-side tool validation remains the authority for argument correctness; do not assume a provider-facing schema still preserves every branch of the richer internal contract. If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.
+
+## 10. 资源目录代检查与语义目录新鲜度
+
+skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册表不会自己收到通知，所以运行时按节拍做一次"代"比对：
+
+- 节拍由 `resources.reload.poll_interval_ms`（JSON 侧 `resources.reload.pollIntervalMs`）节流，默认 1000ms；配成 0 表示每个调用点都允许比对。
+- 比对面是 `capture_resource_tree_state()` 产出的 `{"skills": {name: 目录树指纹}, "tools": {...}}`，指纹来自 `ResourceRegistry._tree_fingerprint(资源目录)`。注册表缺失或目录为空时快照为空，比对直接返回"无变化"，这不是错误态。
+- 首次调用只落基线：没有上一份快照就没有可比对象，因此第一拍永远不报刷新。
+- 指纹变化时才动作：`refresh_changed_resources(trigger='external-resource-generation-check')` 重建受影响资源，随后清空 `_node_context_selection_cache`（节点上下文选择里缓存着旧的候选/水合结论），并只对名字出现在差异集里的 skill / tool 重新同步语义目录条目。
+- 管理端保存或编辑资源走的是显式路径（`refresh_resource_paths` / `refresh_paths`，trigger 为 `path-change`），它同步刷新注册表并当场重记基线；两条路径共用同一份基线，所以编辑后的一拍不会因为节流而漏掉变化。
+- 维护要点：新增会进入上下文选择的缓存时，必须在这条差异路径上一起失效，否则外部改动的 skill/tool 正文会长期以旧指纹参与候选与描述投影。
