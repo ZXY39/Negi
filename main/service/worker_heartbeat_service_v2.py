@@ -62,6 +62,10 @@ _PERF_HISTORY_FIELDS = (
     'machine_memory_available_bytes',
     'model_rate_penalty_429_max',
     'model_rolling_rpm_60s_max',
+    'model_rolling_rpm_60s_sum',
+    'entry_throughput_rpm_60s',
+    'entry_rpm_at_last_growth',
+    'entry_seconds_since_step',
 )
 
 

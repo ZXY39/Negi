@@ -156,9 +156,13 @@ def test_rate_limited_member_is_skipped_by_next_node_without_config_change() -> 
 
 
 def test_rate_pressure_aggregates_the_worst_member_for_the_entry_gate() -> None:
-    """回合闸每拍调一次：只取跨成员的最大惩罚与最大滚动 RPM，不重建给人看的完整 snapshot。"""
+    """回合闸每拍调一次：只取跨成员的最大惩罚、最大与合计滚动 RPM，不重建给人看的完整 snapshot。"""
     balancer = _balancer(_group("g1", "m_a", "m_b"))
-    assert balancer.rate_pressure() == {"penalty_429_max": 0.0, "rolling_rpm_60s_max": 0.0}
+    assert balancer.rate_pressure() == {
+        'penalty_429_max': 0.0,
+        'rolling_rpm_60s_max': 0.0,
+        'rolling_rpm_60s_sum': 0,
+    }
 
     first = _select(balancer, "node:1")
     balancer.record_request_start(first)
@@ -167,7 +171,20 @@ def test_rate_pressure_aggregates_the_worst_member_for_the_entry_gate() -> None:
 
     pressure = balancer.rate_pressure()
     assert pressure["penalty_429_max"] > 0.0
+    # 合计 RPM 是回合闸的吞吐判据：本进程每分钟实际发起了多少个模型请求
+    assert pressure["rolling_rpm_60s_sum"] >= 1
     assert pressure["rolling_rpm_60s_max"] >= 1.0
+
+
+def test_rate_pressure_counts_a_shared_key_once_when_groups_overlap() -> None:
+    """同一把 key 挂在多个组里时，合计只算一次：否则 rpm_sum 会翻倍，吞吐判据就失真。"""
+    balancer = _balancer(_group("g1", "m_a", "m_b"), _group("g2", "m_a"))
+    lease = _select(balancer, "node:1")
+    balancer.record_request_start(lease)
+    balancer.release(lease, outcome=LEASE_OUTCOME_SUCCESS)
+
+    pressure = balancer.rate_pressure()
+    assert pressure["rolling_rpm_60s_sum"] == pressure["rolling_rpm_60s_max"]
 
 
 def test_first_bindings_spread_across_equal_capacity_members() -> None:

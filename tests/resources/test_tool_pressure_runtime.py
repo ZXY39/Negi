@@ -1088,7 +1088,12 @@ def _observe_pressure(
     memory_available_bytes: int | None = None,
     worker_memory_bytes: int | None = None,
     rate_pressure: dict[str, float] | None = None,
+    throughput_rpm: float = 0.0,
 ) -> dict:
+    merged = dict(rate_pressure or {})
+    merged.setdefault('penalty_429_max', 0.0)
+    merged.setdefault('rolling_rpm_60s_max', 0.0)
+    merged['rolling_rpm_60s_sum'] = float(throughput_rpm)
     return monitor.observe_sample(
         machine_cpu_percent=20.0,
         machine_memory_percent=30.0,
@@ -1104,7 +1109,7 @@ def _observe_pressure(
         machine_memory_total_bytes=memory_total_bytes,
         machine_memory_available_bytes=memory_available_bytes,
         worker_memory_bytes=worker_memory_bytes,
-        rate_pressure=rate_pressure,
+        rate_pressure=merged,
     )
 
 
@@ -1119,16 +1124,20 @@ async def test_monitor_grows_entry_gate_toward_headroom_and_records_the_verdict(
 
     for _ in range(8):
         await controller.acquire_entry_slot(role='execution')
-    # 4 个执行器排在闸口：这才是"闸卡住需求"的证据，也是继续抬闸的唯一理由
+    # 4 个执行器排在闸口：闸确实卡住需求
     waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(4)]
     await asyncio.sleep(0.05)
 
-    snapshot = _observe_pressure(monitor, 100.0, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_targets'] == {'execution': 16}
+    # 第一拍还没有"上次抬闸"的吞吐基准，可以直接抬；此后每拍都要证明吞吐在涨
+    snapshot = _observe_pressure(monitor, 100.0, throughput_rpm=7.0, **_ROOMY_MEMORY)
     assert snapshot['entry_gate_limits'] == {'execution': 10}
 
-    snapshot = _observe_pressure(monitor, 101.0, **_ROOMY_MEMORY)
-    assert snapshot['entry_gate_targets'] == {'execution': 20}
+    # 节拍没满（才过 1 拍）时不许再动：一次移动之后要隔满一个反馈周期
+    snapshot = _observe_pressure(monitor, 101.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
+    assert snapshot['entry_gate_limits'] == {'execution': 10}
+
+    # 满节拍且发起数比上次抬闸时多了 2 次/分（阈值 0.5）⇒ 继续抬
+    snapshot = _observe_pressure(monitor, 146.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
     assert snapshot['entry_gate_limits'] == {'execution': 12}
 
     for task in waiting:
@@ -1218,10 +1227,16 @@ def test_monitor_walks_entry_gate_down_and_below_the_floor_when_the_loop_backs_u
     controller.configure_entry_ceilings({'execution': 8})
 
     limits = []
-    for index in range(5):
-        snapshot = _observe_pressure(monitor, 100.0 + index, lag_ms=12_000.0, **_ROOMY_MEMORY)
+    for index in range(100):
+        snapshot = _observe_pressure(
+            monitor, 100.0 + index, lag_ms=12_000.0, **_ROOMY_MEMORY
+        )
         limits.append(snapshot['entry_gate_limits']['execution'])
-    assert limits == [7, 6, 5, 4, 3]
+    # 一拍（1 s）一格太快：实测一次调用 p50 37 s，反馈没回来就连着退就是塌方。
+    # 前 45 拍只退了一格，之后每满 45 s 才再退一格。
+    assert limits[:45] == [7] * 45
+    assert limits[45:90] == [6] * 45
+    assert limits[90:] == [5] * 10
 
 
 @pytest.mark.asyncio
@@ -1250,6 +1265,100 @@ async def test_upstream_rate_limit_penalty_holds_then_shrinks_the_entry_gate() -
         task.cancel()
     for _ in held:
         controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_entry_gate_backs_off_when_a_wider_gate_buys_no_throughput() -> None:
+    """抬一格必须换来边际吞吐：实盘把在飞从 8 抬到 46，完成频率只 6.93→7.23 次/分，
+    单次调用 p50 从 38.6 s 涨到 138 s——"闸卡住需求"在饱和时恒真，不能当增长理由。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(4)]
+    await asyncio.sleep(0.05)
+
+    first = _observe_pressure(monitor, 100.0, throughput_rpm=7.0, **_ROOMY_MEMORY)
+    assert first['entry_gate_limits'] == {'execution': 10}
+    assert first['entry_rpm_at_last_growth'] == 7.0
+
+    # 满节拍，但发起数一点没涨（窗口均值 7.05，低于 0.5 的增益门槛）⇒ 不抬，反而退一格
+    stalled = _observe_pressure(monitor, 150.0, throughput_rpm=7.1, **_ROOMY_MEMORY)
+    assert stalled['entry_gate_limits'] == {'execution': 9}
+    # 吞吐基准留在原地：换不来产出的一次抬闸，不能靠"清基准"马上再试一次
+    assert stalled['entry_rpm_at_last_growth'] == 7.0
+
+    rising = _observe_pressure(monitor, 200.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
+    assert rising['entry_gate_limits'] == {'execution': 11}
+
+    for task in waiting:
+        task.cancel()
+    for _ in range(11):
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_unproductive_growth_backs_off_to_the_floor_and_stops_there() -> None:
+    """换不来吞吐的退让止于地板：地板是操作员的最低意图，只有越过 critical 线才允许下穿。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(6)]
+    await asyncio.sleep(0.05)
+
+    # rpm 从 7 跳到 9 后长期平坦：先按"确实涨了"抬几格，随后每节拍退一格，
+    # 退到地板 8 就停住——地板以下只有越过 critical 线才允许去。
+    limits = []
+    for index in range(24):
+        mono = 100.0 + index * 46.0
+        rpm = 7.0 if index == 0 else 9.0
+        snapshot = _observe_pressure(monitor, mono, throughput_rpm=rpm, **_ROOMY_MEMORY)
+        limits.append(snapshot['entry_gate_limits']['execution'])
+
+    assert limits[:6] == [10, 12, 14, 13, 12, 11]
+    assert min(limits) == 8, f"退让下穿了地板：{limits}"
+    assert limits.count(8) >= 6, f"退到地板后没停住：{limits}"
+    steps = [b - a for a, b in zip(limits, limits[1:])]
+    assert all(-1 <= step <= 2 for step in steps), f"单拍跳幅越界：{steps}"
+
+    for task in waiting:
+        task.cancel()
+    for _ in range(14):
+        controller.release_entry_slot(role='execution')
+
+
+@pytest.mark.asyncio
+async def test_entry_slot_memory_cost_keeps_the_largest_window_estimate() -> None:
+    """一格成本取窗口内各估计的最大值：实盘 21:46 起 running 恒 46–48、RSS 恒 2.0–2.1 GB，
+    跨度回归只算出 9–29 MB/格，于是内存轴反过来抬高了上限（真实边际 ≈110 MB/格）。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+
+    slot = 110 * 1024 ** 2
+    idle = 200 * 1024 ** 2
+    # 空载基线：running 归零时见过的最小 RSS
+    monitor._update_entry_slot_memory(current_mono=100.0, running_slots=0, worker_memory_bytes=idle)
+    monitor._update_entry_slot_memory(current_mono=146.0, running_slots=46, worker_memory_bytes=idle + 46 * slot)
+    assert monitor.snapshot()['entry_slot_memory_bytes'] == slot
+
+    # 之后 running 与 RSS 都不再变化：跨度回归掉到接近 0，估计必须留在已量到的最大值
+    for index in range(20):
+        monitor._update_entry_slot_memory(
+            current_mono=200.0 + index * 46.0,
+            running_slots=46,
+            worker_memory_bytes=idle + 46 * slot,
+        )
+    snapshot = monitor.snapshot()
+    assert snapshot['entry_slot_memory_bytes'] == slot
+    assert monitor._entry_idle_memory_bytes == idle
 
 
 @pytest.mark.asyncio
@@ -1325,6 +1434,10 @@ def test_perf_history_records_why_the_entry_gate_moved() -> None:
         'machine_memory_available_bytes',
         'model_rate_penalty_429_max',
         'model_rolling_rpm_60s_max',
+        'model_rolling_rpm_60s_sum',
+        'entry_throughput_rpm_60s',
+        'entry_rpm_at_last_growth',
+        'entry_seconds_since_step',
         'tool_pressure_process_cpu_ratio',
     ):
         assert key in _PERF_HISTORY_FIELDS, f'{key} 没进性能历史，闸为什么动读不出来'

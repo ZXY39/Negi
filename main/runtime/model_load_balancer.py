@@ -382,20 +382,34 @@ class ModelLoadBalancer:
     # ------------------------------------------------------------------ 诊断
 
     def rate_pressure(self) -> dict[str, Any]:
-        """给回合闸用的聚合上游读数：全部组成员里最大的衰减 429 惩罚与最大滚动 RPM。
+        """给回合闸用的聚合上游读数：最大衰减 429 惩罚、最大滚动 RPM，以及跨成员合计的 RPM。
 
         监控每秒调一次，所以这里只取聚合数，不重建 `snapshot()` 那份给人看的完整载荷。
         惩罚本身已在 60 秒半衰（对齐上游的分钟窗口），不需要这里再算窗口。
+        `rolling_rpm_60s_sum` 就是"本进程每分钟实际发起了多少个模型请求"——回合闸用它
+        判断"抬一格有没有换来吞吐"，不另起一套计数器。同一 key 可能挂在多个组里，按
+        model_key 去重后再相加，否则合计会翻倍。
         """
         penalty_max = 0.0
         rpm_max = 0.0
+        rpm_sum = 0
         with self._lock:
+            seen: set[str] = set()
             for group in self._groups.values():
                 for member in group.members:
-                    metrics = self._metrics(member.model_key)
+                    model_key = str(member.model_key or '').strip()
+                    if not model_key or model_key in seen:
+                        continue
+                    seen.add(model_key)
+                    metrics = self._metrics(model_key)
                     penalty_max = max(penalty_max, float(metrics.penalty or 0.0))
                     rpm_max = max(rpm_max, float(metrics.rolling_rpm or 0.0))
-        return {'penalty_429_max': penalty_max, 'rolling_rpm_60s_max': rpm_max}
+                    rpm_sum += int(metrics.rolling_rpm or 0)
+        return {
+            'penalty_429_max': penalty_max,
+            'rolling_rpm_60s_max': rpm_max,
+            'rolling_rpm_60s_sum': rpm_sum,
+        }
 
     def snapshot(self, *, group_key: str | None = None, filters: RouteCandidateFilters | None = None) -> dict[str, Any]:
         effective_filters = filters or RouteCandidateFilters()

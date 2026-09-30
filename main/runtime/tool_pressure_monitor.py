@@ -24,7 +24,7 @@ def _now_iso() -> str:
 
 
 # 回合闸的余量目标算法常量。压力轴的阈值一律复用上面 observe 用的那一份 warn/safe 线，
-# 只有这几组是新的，且都按 09-30 全天实测标定：
+# 只有这几组是新的，且都按实盘标定：
 # - 轴比上下限：安静时一拍最多翻倍，最挤时一拍最多收到 1/4（实测 lag 见过 12.0 s、
 #   一次 SQLite 读 141 s，靠变化率而不是靠跳幅兜底）。
 _ENTRY_AXIS_FLOOR_RATIO = 0.25
@@ -40,6 +40,23 @@ _ENTRY_SLOT_MEMORY_MIN_BYTES = 8 * 1024 * 1024
 _ENTRY_SLOT_MEMORY_MAX_BYTES = 2 * 1024 * 1024 * 1024
 _ENTRY_MEMORY_SAMPLE_WINDOW_SECONDS = 600.0
 _ENTRY_MEMORY_MIN_SPAN_SLOTS = 2
+_ENTRY_MEMORY_MIN_DELTA_BYTES = 64 * 1024 * 1024
+_ENTRY_MEMORY_MIN_AVG_SLOTS = 4
+_ENTRY_MEMORY_ESTIMATE_WINDOW_SECONDS = 600.0
+# - 节拍：一次移动之后至少隔一个反馈周期再动。21:19 重启后按拍(1s)动时，38 格→1 格
+#   只用了一次性能采样窗口（21:40→21:41），lag 常态 1.1–7.9 s，闸位在 1↔38 之间抖振——
+#   那是塌方不是控制。一拍 = 1 s，故 45 s ≈ 一个实测调用时长（p50 37 s）加余量。
+_ENTRY_BEAT_SECONDS = 45.0
+_ENTRY_GROWTH_SLOTS_PER_BEAT = 2
+_ENTRY_SHRINK_SLOTS_PER_BEAT = 1
+# - 抬闸必须换来吞吐：实盘把在飞从 8 抬到 46，完成频率只从 6.93 涨到 7.23 次/分（+4%），
+#   单次调用 p50 却从 38.6 s 涨到 138 s。所以"闸卡住需求"不能当增长判据（饱和时它恒真），
+#   改用它替代：这一拍比上一次抬闸时至少多这么多"每分钟发起的模型请求"（0.5 ≈ 基线 7/min 的 7%）。
+_ENTRY_MIN_THROUGHPUT_GAIN = 0.5
+_ENTRY_THROUGHPUT_WINDOW_SECONDS = 90.0
+# 吞吐基准不能永久钉住：真实负载会自己降下来（树快跑完了）。过了这个时长就再放行一次
+# 试探性抬格，间隔取 4 个节拍，比抖振（此前 45 s 一次来回）慢一个量级。
+_ENTRY_PROBE_AFTER_SECONDS = 180.0
 
 
 class _EventLoopLagSampler:
@@ -126,7 +143,13 @@ class WorkerPressureMonitor:
         self._rate_limit_observer = rate_limit_observer
         self._process_handle: Any = None
         self._entry_memory_samples: deque[tuple[float, int, int]] = deque()
+        self._entry_slot_memory_estimates: deque[tuple[float, int]] = deque()
         self._entry_slot_memory_bytes = _ENTRY_SLOT_MEMORY_FALLBACK_BYTES
+        self._entry_idle_memory_bytes = 0
+        self._entry_last_step_at = 0.0
+        self._entry_rpm_samples: deque[tuple[float, float]] = deque()
+        self._entry_rpm_at_last_growth = None
+        self._entry_rpm_bar_set_at = 0.0
         # 磁盘治理（P1）：水位探测路径（工作区/存储目录，通常同盘）与紧急态状态。
         # 紧急态是 monitor 侧独立布尔镜像（controller 侧另有硬闸字段）——不进
         # pressure_state 白名单，避免被 dwell/starvation 逃逸阀与 idle reset 冲掉。
@@ -216,11 +239,16 @@ class WorkerPressureMonitor:
             'entry_gate_limits': {},
             'entry_gate_running_total': 0,
             'entry_slot_memory_bytes': int(_ENTRY_SLOT_MEMORY_FALLBACK_BYTES),
+            'entry_idle_memory_bytes': 0,
+            'entry_throughput_rpm_60s': 0.0,
+            'entry_rpm_at_last_growth': None,
+            'entry_seconds_since_step': 0.0,
             'worker_memory_bytes': -1,
             'machine_memory_total_bytes': -1,
             'machine_memory_available_bytes': -1,
             'model_rate_penalty_429_max': 0.0,
             'model_rolling_rpm_60s_max': 0.0,
+            'model_rolling_rpm_60s_sum': 0,
         }
 
     def set_disk_emergency_hooks(
@@ -358,10 +386,14 @@ class WorkerPressureMonitor:
         running_slots: int,
         worker_memory_bytes: Any,
     ) -> None:
-        """把滑动窗口里的 (在飞格数, worker RSS) 拟成一格内存成本。
+        """估一格内存成本，取窗口内各估计的最大值。
 
-        样本跨度不足或斜率出格就保留旧值。RSS 也会因缓存与工件而上涨，所以这个系数只会
-        偏向高估成本（少放人），不会反过来把闸门抬高。
+        两种估计：(a) 滑动窗口里 (在飞格数, RSS) 的跨度回归；(b) 相对"空载 RSS 基线"
+        （running 归零时见过的最小 RSS）的平均成本 (rss - idle) / running。平坦期跨度
+        回归会失真——实盘 21:46 起 running 一直 46–48、RSS 稳定在 2.0–2.1 GB，(a) 只算出
+        9–29 MB/格，于是内存轴反过来抬高了上限（真实边际 ≈110 MB），所以两个估计取大、
+        并且窗口内保有过往最大值，过期再丢。RSS 也会因缓存与工件上涨，因此偏保守（高估
+        成本 ⇒ 少放人）是可接受的方向。
         """
         if worker_memory_bytes is None:
             return
@@ -371,20 +403,36 @@ class WorkerPressureMonitor:
             return
         if rss <= 0:
             return
+        running = max(0, int(running_slots))
+        if running == 0 and (self._entry_idle_memory_bytes <= 0 or rss < self._entry_idle_memory_bytes):
+            self._entry_idle_memory_bytes = rss
         samples = self._entry_memory_samples
-        samples.append((float(current_mono), max(0, int(running_slots)), rss))
+        samples.append((float(current_mono), running, rss))
         cutoff = float(current_mono) - _ENTRY_MEMORY_SAMPLE_WINDOW_SECONDS
         while len(samples) > 1 and samples[0][0] < cutoff:
             samples.popleft()
+        estimates: list[int] = []
         low = min(samples, key=lambda item: item[1])
         high = max(samples, key=lambda item: item[1])
         slot_span = high[1] - low[1]
-        if slot_span < _ENTRY_MEMORY_MIN_SPAN_SLOTS:
-            return
-        estimated = int((high[2] - low[2]) // slot_span)
-        if estimated < _ENTRY_SLOT_MEMORY_MIN_BYTES or estimated > _ENTRY_SLOT_MEMORY_MAX_BYTES:
-            return
-        self._entry_slot_memory_bytes = estimated
+        if slot_span >= _ENTRY_MEMORY_MIN_SPAN_SLOTS and (high[2] - low[2]) >= _ENTRY_MEMORY_MIN_DELTA_BYTES:
+            estimates.append(int((high[2] - low[2]) // slot_span))
+        if running >= _ENTRY_MEMORY_MIN_AVG_SLOTS and 0 < self._entry_idle_memory_bytes < rss:
+            estimates.append(int((rss - self._entry_idle_memory_bytes) // running))
+        if estimates:
+            accepted = [
+                value for value in estimates
+                if _ENTRY_SLOT_MEMORY_MIN_BYTES <= value <= _ENTRY_SLOT_MEMORY_MAX_BYTES
+            ]
+            if accepted:
+                self._entry_slot_memory_estimates.append((float(current_mono), max(accepted)))
+        estimate_cutoff = float(current_mono) - _ENTRY_MEMORY_ESTIMATE_WINDOW_SECONDS
+        while len(self._entry_slot_memory_estimates) > 1 and self._entry_slot_memory_estimates[0][0] < estimate_cutoff:
+            self._entry_slot_memory_estimates.popleft()
+        if self._entry_slot_memory_estimates:
+            self._entry_slot_memory_bytes = max(
+                value for _mono, value in self._entry_slot_memory_estimates
+            )
 
     def _entry_memory_slot_ceiling(
         self,
@@ -408,10 +456,33 @@ class WorkerPressureMonitor:
         slot_bytes = max(_ENTRY_SLOT_MEMORY_MIN_BYTES, int(self._entry_slot_memory_bytes or 0))
         return int(running_slots) + int(usable_bytes // slot_bytes)
 
-    def _compute_entry_targets(
+    def _update_entry_throughput(self, *, current_mono: float, rate_pressure: dict[str, Any] | None) -> float:
+        """把"本进程每分钟实际发起的模型请求数"记进滑动窗口，返回窗口均值。
+
+        回合闸的增长判据用它而不是"闸口有没有排队"：抬一格到底换没换来吞吐，只有实际
+        发出去的请求数说了算（实盘 8→46 格，完成频率 6.93→7.23 次/分，等于没换来）。
+        """
+        raw = dict(rate_pressure or {}).get('rolling_rpm_60s_sum')
+        try:
+            rpm = max(0.0, float(raw if raw is not None else 0.0))
+        except (TypeError, ValueError):
+            rpm = 0.0
+        samples = self._entry_rpm_samples
+        samples.append((float(current_mono), rpm))
+        cutoff = float(current_mono) - max(_ENTRY_THROUGHPUT_WINDOW_SECONDS, 2.0 * _ENTRY_BEAT_SECONDS)
+        while len(samples) > 1 and samples[0][0] < cutoff:
+            samples.popleft()
+        window_start = float(current_mono) - _ENTRY_THROUGHPUT_WINDOW_SECONDS
+        recent = [value for mono, value in samples if mono >= window_start]
+        if not recent:
+            return rpm
+        return sum(recent) / len(recent)
+
+    def _decide_entry_targets(
         self,
         *,
         controller_snapshot: dict[str, Any],
+        current_mono: float,
         event_loop_lag_ms: float,
         writer_queue_depth: int,
         sqlite_write_wait_ms: float,
@@ -420,13 +491,18 @@ class WorkerPressureMonitor:
         machine_memory_total_bytes: Any,
         machine_memory_available_bytes: Any,
         running_slots: int,
+        throughput_rpm: float,
     ) -> dict[str, int]:
-        """按角色算这一拍的回合闸目标。
+        """按节拍决定回合闸目标：一次移动之后隔满一个反馈周期才允许再动。
 
-        四条"自家积压"轴（事件循环 lag、写入队列、SQLite 写等、SQLite 读延迟）与上游限流
-        轴取最小比例——它们都直接由本进程的并发造成，因此允许把闸位压到地板以下（最低 1）。
-        内存余量只限制增长、不下压地板：机器内存吃紧多半是外部进程造成的，那该由磁盘/内存
-        紧急道和处理，不该由操作员配置的地板替它背锅。
+        - 任一轴越过 critical 线（或 429 惩罚到 p99 档）⇒ 每节拍退一格，可下穿地板（最低 1）；
+          越过 warn 线但没到 critical ⇒ 保持当前节点数。
+        - 闸确实卡住需求、各轴都在 warn 线以下时，抬一格的前提是它换来了边际吞吐：这一拍的
+          rpm 均值要比上一次抬闸那一刻高出 `_ENTRY_MIN_THROUGHPUT_GAIN`；换不来就退回地板为止
+          （山脊搜索，停在有效的那一档而不是停在最高档）。基准不会因退让而清空，但过了
+          `_ENTRY_PROBE_AFTER_SECONDS` 会再放行一次试探，免得真实负载下降后永远抬不起来。
+        - 内存余量只限制增长、不下压地板：机器内存吃紧多半是外部进程造成的，那该走磁盘/内存
+          紧急道，不该由操作员配置的地板替它背锅。
         """
         backlog_ratio = min(
             self._entry_axis_ratio(self._event_loop_warn_ms, event_loop_lag_ms),
@@ -434,11 +510,8 @@ class WorkerPressureMonitor:
             self._entry_axis_ratio(self._sqlite_write_wait_warn_ms, sqlite_write_wait_ms),
             self._entry_axis_ratio(self._sqlite_query_warn_ms, sqlite_query_latency_ms),
         )
-        rate_ratio = self._entry_rate_ratio(dict(rate_pressure or {}).get('penalty_429_max') or 0.0)
-        ratio = min(backlog_ratio, rate_ratio)
-        # 收缩只由"紧急"触发：越过 warn 线只保持当前节点数（操作员要的正是这个档位），
-        # 越过 critical 线或 429 惩罚到 p99 档才开始每拍缓减一格。
         penalty = max(0.0, float(dict(rate_pressure or {}).get('penalty_429_max') or 0.0))
+        ratio = min(backlog_ratio, self._entry_rate_ratio(penalty))
         critical = (
             float(event_loop_lag_ms or 0.0) >= self._event_loop_critical_ms
             or int(writer_queue_depth or 0) >= self._writer_queue_critical
@@ -448,41 +521,72 @@ class WorkerPressureMonitor:
         )
         limits = dict(controller_snapshot.get('entry_gate_limit') or {})
         ceilings = dict(controller_snapshot.get('entry_gate_ceiling') or {})
+        roles = sorted(set(limits) | set(ceilings))
+        running_by_role = dict(controller_snapshot.get('entry_gate_running') or {})
+        queued_by_role = dict(controller_snapshot.get('entry_gate_queued') or {})
         memory_ceiling = self._entry_memory_slot_ceiling(
             machine_memory_total_bytes=machine_memory_total_bytes,
             machine_memory_available_bytes=machine_memory_available_bytes,
             running_slots=running_slots,
         )
+        beat_due = (float(current_mono) - self._entry_last_step_at) >= _ENTRY_BEAT_SECONDS
+        binding = any(
+            int(queued_by_role.get(role) or 0) > 0
+            or int(running_by_role.get(role) or 0) >= max(1, int(limits.get(role) or 1))
+            for role in roles
+        )
+        headroom = ratio > 1.0
+        previous_growth_rpm = self._entry_rpm_at_last_growth
+        stale_bar = (current_mono - self._entry_rpm_bar_set_at) >= _ENTRY_PROBE_AFTER_SECONDS
+        productive = (
+            previous_growth_rpm is None
+            or stale_bar
+            or throughput_rpm >= float(previous_growth_rpm) + _ENTRY_MIN_THROUGHPUT_GAIN
+        )
+        grow_now = beat_due and binding and headroom and productive and not critical
+
         targets: dict[str, int] = {}
-        running_by_role = dict(controller_snapshot.get('entry_gate_running') or {})
-        queued_by_role = dict(controller_snapshot.get('entry_gate_queued') or {})
-        # 收缩只由"紧急"授权：越过 warn 线时把比例夹到 1.0 ⇒ 目标＝当前 ⇒ 保持现有节点数；
-        # 越过 critical 线（或 429 惩罚到 p99 档）才让比例真正小于 1，逐拍下穿地板。
-        # 不加这层夹：warn 级 lag（300ms 对 250ms 线）会一路把闸位削到 1 并钉死——
-        # 292 个节点在排队时"循环落后 0.3 秒"是常态，不是紧急，削到 1 是塌方而不是控制。
-        effective_ratio = ratio if critical else max(1.0, ratio)
-        for role in sorted(set(limits) | set(ceilings)):
+        for role in roles:
             normalized_role = str(role or '').strip().lower()
             if not normalized_role:
                 continue
             ceiling = max(1, int(ceilings.get(normalized_role) or 1))
             current = max(1, int(limits.get(normalized_role) or ceiling))
-            candidate = max(1, int(current * effective_ratio))
-            # 增长只在闸真的卡住需求时发生：没人在闸口等、在飞的也没占满时抬闸位，
-            # 得到的只是"随时可以一次放出几百份上下文物化"的空权限（21:31 无闸事故的形态）。
-            queued = int(queued_by_role.get(normalized_role) or 0)
-            running = int(running_by_role.get(normalized_role) or 0)
-            binding = queued > 0 or running >= current
-            if candidate > current:
-                if not binding:
-                    candidate = current
-                elif memory_ceiling is None:
-                    # 读不到内存读数时不许越过地板：v1 那版按机器水位放大，正是在
-                    # "内存读数不可用/滞后"的状态下 90 秒爬到 27 格、把 Private 推到 2.4 GB。
+            if not beat_due:
+                targets[normalized_role] = current
+                continue
+            if critical:
+                # 只有"紧急"能下穿地板：这时多放一个执行器就是在压垮自己
+                targets[normalized_role] = max(1, current - _ENTRY_SHRINK_SLOTS_PER_BEAT)
+                continue
+            if binding and headroom and not productive:
+                # 抬闸换不来吞吐 ⇒ 退回地板为止：地板是操作员的最低意图，不该由"没涨"来背锅
+                targets[normalized_role] = max(ceiling, current - _ENTRY_SHRINK_SLOTS_PER_BEAT)
+                continue
+            if grow_now:
+                candidate = min(current + _ENTRY_GROWTH_SLOTS_PER_BEAT, max(current, int(current * ratio)))
+                if memory_ceiling is None:
+                    # 读不到内存读数时不许越过地板：v1 正是在"内存读数滞后/不可用"的状态下
+                    # 90 秒爬到 27 格、把 worker Private 推到 2.4 GB。
                     candidate = ceiling
                 else:
                     candidate = max(ceiling, min(candidate, memory_ceiling))
-            targets[normalized_role] = candidate
+                targets[normalized_role] = max(current, candidate)
+                continue
+            targets[normalized_role] = current
+
+        moved = any(
+            int(targets.get(role) or 0) != max(1, int(limits.get(role) or 1))
+            for role in targets
+        )
+        if beat_due and moved:
+            self._entry_last_step_at = float(current_mono)
+            if grow_now:
+                self._entry_rpm_at_last_growth = float(throughput_rpm)
+            # 只要这一节拍做过判断（抬成、抬不动、或紧急退让），就重置计时：
+            # 试探性抬格的间隔因此是 `_ENTRY_PROBE_AFTER_SECONDS` 而不是每个节拍，
+            # 避免"退一格→基准过期→又抬两格"的短周期来回。
+            self._entry_rpm_bar_set_at = float(current_mono)
         return targets
 
     def observe_sample(
@@ -749,8 +853,13 @@ class WorkerPressureMonitor:
                 running_slots=entry_running_total,
                 worker_memory_bytes=worker_memory_bytes,
             )
-            entry_targets = self._compute_entry_targets(
+            throughput_rpm = self._update_entry_throughput(
+                current_mono=current_mono,
+                rate_pressure=rate_pressure,
+            )
+            entry_targets = self._decide_entry_targets(
                 controller_snapshot=controller_snapshot,
+                current_mono=current_mono,
                 event_loop_lag_ms=event_loop_lag_ms,
                 writer_queue_depth=writer_queue_depth,
                 sqlite_write_wait_ms=sqlite_write_wait_ms,
@@ -759,12 +868,21 @@ class WorkerPressureMonitor:
                 machine_memory_total_bytes=machine_memory_total_bytes,
                 machine_memory_available_bytes=machine_memory_available_bytes,
                 running_slots=entry_running_total,
+                throughput_rpm=throughput_rpm,
             )
             entry_limits = self._controller.set_entry_targets(entry_targets)
             self._snapshot['entry_gate_targets'] = dict(entry_targets)
             self._snapshot['entry_gate_limits'] = dict(entry_limits)
             self._snapshot['entry_gate_running_total'] = int(entry_running_total)
             self._snapshot['entry_slot_memory_bytes'] = int(self._entry_slot_memory_bytes)
+            self._snapshot['entry_idle_memory_bytes'] = int(self._entry_idle_memory_bytes)
+            self._snapshot['entry_throughput_rpm_60s'] = round(float(throughput_rpm), 3)
+            self._snapshot['entry_rpm_at_last_growth'] = (
+                None if self._entry_rpm_at_last_growth is None else round(float(self._entry_rpm_at_last_growth), 3)
+            )
+            self._snapshot['entry_seconds_since_step'] = round(
+                max(0.0, current_mono - self._entry_last_step_at), 3
+            )
             self._snapshot['worker_memory_bytes'] = (
                 int(worker_memory_bytes) if worker_memory_bytes is not None and int(worker_memory_bytes) >= 0 else -1
             )
