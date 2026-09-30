@@ -49,8 +49,10 @@ def normalize_task_distribution_error_payload(payload: dict[str, Any] | None) ->
     error_text = str(source.get("error_text") or source.get("errorText") or "").strip()
     # notice_kind 决定会话侧读的是哪一套文案：failed（任务暂停）还是 skipped（分发已完成、
     # 只有若干支被降级）。缺省按 failed，保持旧 payload 的行为。
-    # 键名不能叫 kind：prompt lane 解析事件 reason 的顺序是 `event_reason → kind → reason`
-    # （`g3ku/heartbeat/prompt_lane.py`），payload 里叫 kind 会把真正的 reason 顶掉。
+    # 键名避开 kind：那是 prompt lane 解析事件 reason 的中间优先级键
+    # （`g3ku/heartbeat/prompt_lane.py`，顺序 event_reason → kind → reason）。真实投递路径
+    # 总会补上 event_reason（`g3ku/heartbeat/session_service.py` 的事件富化），所以带 kind
+    # 不会顶掉 reason；但载荷与事件同键存放时，离线/手工构造的字典会把档位误读成事件类型。
     notice_kind = str(source.get("notice_kind") or source.get("kind") or "").strip().lower() or "failed"
     root_message = str(source.get("root_message") or source.get("rootMessage") or "").strip()
     skipped_items: list[dict[str, str]] = []

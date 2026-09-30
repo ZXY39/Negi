@@ -1128,6 +1128,9 @@ async def test_distribution_exhaustion_degrades_to_skipped_and_completes_epoch(t
         assert outcome == "completed"
         assert refreshed_epoch is not None
         assert refreshed_epoch.state == "completed"
+        # 降级节点绝不进 deferred_frontier：那条语义会让波次恒返回 'deferred'、
+        # 驱动器无限轮询、屏障永不释放。
+        assert list(refreshed_epoch.payload.get("deferred_frontier_node_ids") or []) == []
         skipped = list(refreshed_epoch.payload.get("skipped_distribution_turns") or [])
         assert [str(item.get("node_id")) for item in skipped] == [root.node_id]
         assert str(skipped[0].get("reason")).startswith("distribution_decision_missing_child_decisions")
@@ -1194,9 +1197,12 @@ async def test_resume_after_failed_distribution_downgrades_to_resume_ready(tmp_p
 
 
 def test_distribution_skipped_payload_uses_notice_kind_not_kind() -> None:
-    """payload 的档位键必须叫 `notice_kind`：prompt lane 解析 reason 的顺序是
-    `event_reason → kind → reason`（`g3ku/heartbeat/prompt_lane.py`），payload 里出现
-    `kind` 会把真正的 event reason 顶掉，降级提醒会落到"任务终态"那套文案里。
+    """payload 的档位键叫 `notice_kind`，不再写 `kind`。
+
+    `kind` 是 prompt lane 解析事件 reason 的中间优先级键（`event_reason → kind → reason`，
+    `g3ku/heartbeat/prompt_lane.py`）。真实投递总会补 `event_reason`
+    （`g3ku/heartbeat/session_service.py` 的事件富化），所以带 `kind` 不会顶掉 reason；
+    避开它是因为载荷与事件同键存放时，手工/离线构造的字典会把档位误当事件类型。
     """
     from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
 
