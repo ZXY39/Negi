@@ -174,7 +174,6 @@ exec 与 memory 工具家族：
 - repair-required skill 有更强的门控：它仍可作为“待修复资源”出现在 agent-facing `repair_required_skills` 中，但修复完成前 `load_skill_context(...)` / `load_skill_context_v2(...)` 直接返回 repair-required 错误与修复指引（`skill_repair_required` payload 携带 `warnings` / `errors` / `next_actions`），不返回正文；遇到“模型知道这个 skill 存在却无法 load”，先检查 skill 资源本身的 `available` / warnings / errors，而不是先怀疑 selector 没选中
 - 节点运行中的 skill 自愈闭环依赖上面两条语义配合：候选快照在节点派发时定格（persisted frame），中途新装 skill 靠加载门禁的实时治理可见性回退获得真实状态——可加载则返回正文，`available=false`（如 `missing required bins`：`requires.bins` 声明了 `shutil.which` 解析不到的命令）则返回修复指引；节点用 `filesystem_*` 修正 manifest 声明或用 `exec` 补依赖（filesystem mutation 自动触发 `refresh_resource_paths` 重探可用性），再次 load 复核。修复规则文本由 `main/prompts/shared_repair_required.md`（执行/验收节点提示词共享块）、`tools/skill-installer/toolskills/SKILL.md`（安装后三态复核）与 `skills/skill-creator/references/g3ku-resource-spec.md`（创建后三态复核 + `requires` 探测声明规则）承载
 
-
 ### 3.4 hydrated tools
 
 hydration 把一次成功的 `load_tool_context` 变成下一轮的 callable：候选在派发时定格、加载后进入水合台账、下一轮并入模型可见集合。台账、提升、重读、参数错误、外置结果信封、统一 timeout 与阶段门控的合同见 `tool-hydration-and-callable-chain.md`。
@@ -199,7 +198,6 @@ hydration 把一次成功的 `load_tool_context` 变成下一轮的 callable：�
 - 级联有两处不对称保护：级联 `pause` 容忍已暂停的根节点（跳过根继续级联后代），且跳过已暂停后代不覆写，保留其 `pause_reason=error` 登记与心跳重试计数；级联 `resume` 清除整棵子树的暂停标志，error-pause 登记与心跳重试追踪随之清除。级联 `fail` 按根先、后代 BFS 后的顺序施加（顺序理由见 `main-task-runtime.md`「Node-Level Pause and Recovery」）；对任务根节点执行 fail 会终结整个任务。
 - web 模式下只有 `resume` / `fail` / `pause` 会入队 worker 命令（`resume_node` / `fail_node` / `pause_node`，worker 无 `keep_paused` 命令类型）；`keep_paused` 是 leader 本地操作，不产生任何 worker 命令。targets/级联路径每条目入队一条命令，payload 携带 leader 已展开的显式 `node_ids` 且 `cascade=false`，worker 不重展开子树（防两次展开漂移），保条目顺序与 remark 保真。`fail` 的备注随命令下发并作为失败原因兜底；命令派发细节见 `main-task-runtime.md`「Node-Level Pause and Recovery」。
 - 工具层只负责参数与结果契约，节点暂停的安全边界、future 等待和恢复语义归 `main-task-runtime.md`「Node-Level Pause and Recovery」；错误暂停事件的投递归 `heartbeat-system.md`「Task Node Error Delivery」。不要通过普通 task 工具或直接改 SQLite 表替代此入口。
-
 
 ## 4. 当前系统为什么这么设计
 

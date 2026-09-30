@@ -699,4 +699,3 @@ Operator expectations:
 - On startup, the runtime should rebuild catalog retrieval automatically by syncing the resource catalog back into the unified context store.
 
 If tool/skill retrieval does not return after restart, first inspect resource runtime initialization and then confirm that the memory runtime reaches a healthy catalog-bridge state.
-
