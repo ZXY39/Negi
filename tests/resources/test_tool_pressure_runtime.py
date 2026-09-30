@@ -1219,8 +1219,13 @@ async def test_monitor_holds_entry_gate_once_an_axis_reaches_its_warn_line() -> 
         controller.release_entry_slot(role='execution')
 
 
-def test_monitor_walks_entry_gate_down_and_below_the_floor_when_the_loop_backs_up() -> None:
-    """事件循环积压是本进程自己造成的，允许一路缓减到地板以下（最低 1），每拍一格。"""
+def test_monitor_walks_entry_gate_down_to_the_floor_and_stops_there_when_the_loop_backs_up() -> None:
+    """事件循环长期积压时每节拍退一格，但退到地板就停。
+
+    实盘教训（22:50 重启后）：lag 常态 1.3–6.7 s（Qoder 占满机器 + 185 个节点在闸口等物化），
+    当时把 critical 授权成下穿地板，四个节拍里 8→5 且还在往下，模型调用行从 2–14 次/分
+    直接归零——闸越收队列越长、lag 越高，是自锁不是控制。地板就是操作员给的最低意图。
+    """
     store = _FakeStore()
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     monitor = _entry_target_monitor(controller, store)
@@ -1232,17 +1237,37 @@ def test_monitor_walks_entry_gate_down_and_below_the_floor_when_the_loop_backs_u
             monitor, 100.0 + index, lag_ms=12_000.0, **_ROOMY_MEMORY
         )
         limits.append(snapshot['entry_gate_limits']['execution'])
-    # 一拍（1 s）一格太快：实测一次调用 p50 37 s，反馈没回来就连着退就是塌方。
-    # 前 45 拍只退了一格，之后每满 45 s 才再退一格。
-    assert limits[:45] == [7] * 45
-    assert limits[45:90] == [6] * 45
-    assert limits[90:] == [5] * 10
+    assert set(limits) == {8}
+
+
+def test_monitor_shrinks_an_above_floor_gate_back_to_the_floor_one_slot_per_beat() -> None:
+    """闸位高于地板时，紧急态每节拍退一格（不是一拍一格）：一拍一格时实测 38 格→1 格
+    只用了一次性能采样窗口，那就是塌方。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+    # 先把闸位抬到 14（内存宽裕、吞吐持续上涨），再用 lag critical 往回收
+    for index in range(4):
+        controller.set_entry_targets({'execution': 14})
+    assert controller.entry_snapshot()['execution']['limit'] == 14
+
+    limits = []
+    for index in range(100):
+        snapshot = _observe_pressure(
+            monitor, 1000.0 + index, lag_ms=12_000.0, **_ROOMY_MEMORY
+        )
+        limits.append(snapshot['entry_gate_limits']['execution'])
+    assert limits[:45] == [13] * 45
+    assert limits[45:90] == [12] * 45
+    assert limits[90:] == [11] * 10
 
 
 @pytest.mark.asyncio
-async def test_upstream_rate_limit_penalty_holds_then_shrinks_the_entry_gate() -> None:
+async def test_upstream_rate_limit_penalty_holds_the_entry_gate_at_the_floor() -> None:
     """429 惩罚按实测分布分档：p50=0 / p90=0.18 / p99=4.16 / max=13.57（6255 条路由观测）。
-    越过 1.0 只保持，越过 4.0 才开始缓减；其余四轴此刻仍然安静。"""
+    越过 1.0 只保持，越过 4.0 也不再抬；两者都止于地板（高于地板时的缓减见下一条用例）。
+    其余四轴此刻仍然安静。"""
     store = _FakeStore()
     controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
     monitor = _entry_target_monitor(controller, store)
@@ -1258,8 +1283,9 @@ async def test_upstream_rate_limit_penalty_holds_then_shrinks_the_entry_gate() -
         )
     assert snapshot['entry_gate_limits'] == {'execution': 8}
 
-    shrunk = _observe_pressure(monitor, 110.0, rate_pressure={'penalty_429_max': 5.0}, **_ROOMY_MEMORY)
-    assert shrunk['entry_gate_limits'] == {'execution': 7}
+    p99 = _observe_pressure(monitor, 150.0, rate_pressure={'penalty_429_max': 5.0}, **_ROOMY_MEMORY)
+    assert p99['entry_gate_limits'] == {'execution': 8}, "地板以下只有磁盘紧急能去"
+    assert p99['entry_gate_targets'] == {'execution': 8}
 
     for task in waiting:
         task.cancel()
@@ -1284,6 +1310,9 @@ async def test_entry_gate_backs_off_when_a_wider_gate_buys_no_throughput() -> No
     first = _observe_pressure(monitor, 100.0, throughput_rpm=7.0, **_ROOMY_MEMORY)
     assert first['entry_gate_limits'] == {'execution': 10}
     assert first['entry_rpm_at_last_growth'] == 7.0
+    # 吞吐判据的输入本身也要进历史，否则事后读不出"当时为什么敢抬"
+    assert first['model_rolling_rpm_60s_sum'] == 7
+    assert first['entry_throughput_rpm_60s'] == 7.0
 
     # 满节拍，但发起数一点没涨（窗口均值 7.05，低于 0.5 的增益门槛）⇒ 不抬，反而退一格
     stalled = _observe_pressure(monitor, 150.0, throughput_rpm=7.1, **_ROOMY_MEMORY)

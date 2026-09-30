@@ -495,7 +495,7 @@ class WorkerPressureMonitor:
     ) -> dict[str, int]:
         """按节拍决定回合闸目标：一次移动之后隔满一个反馈周期才允许再动。
 
-        - 任一轴越过 critical 线（或 429 惩罚到 p99 档）⇒ 每节拍退一格，可下穿地板（最低 1）；
+        - 任一轴越过 critical 线（或 429 惩罚到 p99 档）⇒ 每节拍退一格，一律止于地板；
           越过 warn 线但没到 critical ⇒ 保持当前节点数。
         - 闸确实卡住需求、各轴都在 warn 线以下时，抬一格的前提是它换来了边际吞吐：这一拍的
           rpm 均值要比上一次抬闸那一刻高出 `_ENTRY_MIN_THROUGHPUT_GAIN`；换不来就退回地板为止
@@ -555,12 +555,12 @@ class WorkerPressureMonitor:
             if not beat_due:
                 targets[normalized_role] = current
                 continue
-            if critical:
-                # 只有"紧急"能下穿地板：这时多放一个执行器就是在压垮自己
-                targets[normalized_role] = max(1, current - _ENTRY_SHRINK_SLOTS_PER_BEAT)
-                continue
-            if binding and headroom and not productive:
-                # 抬闸换不来吞吐 ⇒ 退回地板为止：地板是操作员的最低意图，不该由"没涨"来背锅
+            if critical or (binding and headroom and not productive) or not headroom:
+                # 退让永远止于地板：地板就是操作员给的"最少也要这么多"。实盘教训（22:50 重启后）
+                # 是 lag 常态 1.3–6.7 s（Qoder 占满机器 + 185 个节点在闸口等物化），当时把
+                # critical 授权成下穿地板，结果 4 个节拍里 8→5 且一路往下，模型调用行从
+                # 2–14 次/分直接归零——闸越收，排队越长，lag 越高，形成自锁。
+                # 真正能一次踩到 0 的只有磁盘紧急那把硬闸（controller 侧）。
                 targets[normalized_role] = max(ceiling, current - _ENTRY_SHRINK_SLOTS_PER_BEAT)
                 continue
             if grow_now:
@@ -901,6 +901,9 @@ class WorkerPressureMonitor:
             )
             self._snapshot['model_rolling_rpm_60s_max'] = round(
                 float(dict(rate_pressure or {}).get('rolling_rpm_60s_max') or 0.0), 3
+            )
+            self._snapshot['model_rolling_rpm_60s_sum'] = int(
+                float(dict(rate_pressure or {}).get('rolling_rpm_60s_sum') or 0.0)
             )
             self._snapshot['budget_state'] = str(self._controller.snapshot().get('tool_pressure_state') or 'normal')
             self._snapshot['tool_pressure_self_heal_reason'] = heal_reason
