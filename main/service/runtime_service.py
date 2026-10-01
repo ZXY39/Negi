@@ -3166,7 +3166,37 @@ class MainRuntimeService:
             'loopback_established_count': float(established),
             'loopback_web_port': float(port),
         })
+        stats.update(self._callback_pool_snapshot())
         return stats
+
+    def _callback_pool_snapshot(self) -> dict[str, float]:
+        """共享回调客户端的连接池读数——只有这两个数能分"被借走没还"和"空闲没修剪"。
+
+        实盘现场：worker→web 的 ESTABLISHED 单调爬到 32/67/101，而 census 的挂起点榜显示
+        回调车道上 0 个任务在等 ⇒ socket 不在服务任何请求。httpcore 的池要么留着空闲连接
+        等下次借出时修剪（那时 `is_available()` 为真），要么被一个再也没回来的请求占着
+        （`is_available()` 恒假）。前者该设 `Limits`，后者必须修取消路径，
+        把 `max_connections` 调小只会把泄漏换成静默丢事件。
+        """
+        snapshot = {
+            'loopback_pool_connections': -1.0,
+            'loopback_pool_leased': -1.0,
+        }
+        transport = getattr(self._callback_client, '_transport', None)
+        pool = getattr(transport, '_pool', None)
+        connections = getattr(pool, 'connections', None)
+        if connections is None:
+            return snapshot
+        leased = 0
+        for connection in connections:
+            try:
+                if not bool(connection.is_available()):
+                    leased += 1
+            except Exception:
+                continue
+        snapshot['loopback_pool_connections'] = float(len(connections))
+        snapshot['loopback_pool_leased'] = float(leased)
+        return snapshot
 
     async def _post_internal_callback(
         self,

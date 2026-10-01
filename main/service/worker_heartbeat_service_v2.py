@@ -68,6 +68,8 @@ _PERF_HISTORY_FIELDS = (
     'entry_seconds_since_step',
     # 回环连接条数与事件车道计数：套接字耗尽只能在崩溃前从这两个数看到。
     'entry_loopback_established',
+    'entry_loopback_pool_total',
+    'entry_loopback_pool_leased',
     'entry_event_queue_depth',
     'entry_event_dropped_total',
     'entry_event_batch_request_total',

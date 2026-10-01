@@ -1619,6 +1619,8 @@ async def test_loopback_and_event_lane_counters_are_published() -> None:
             'task_event_batch_request_count': 11.0,
             'task_event_batch_item_count': 40.0,
             'task_event_single_fallback_count': 3.0,
+            'loopback_pool_connections': 67.0,
+            'loopback_pool_leased': 65.0,
         },
         **_ROOMY_MEMORY,
     )
@@ -1629,3 +1631,5 @@ async def test_loopback_and_event_lane_counters_are_published() -> None:
     assert snapshot['entry_event_batch_request_total'] == 11
     assert snapshot['entry_event_batch_item_total'] == 40
     assert snapshot['entry_event_single_fallback_total'] == 3
+    assert snapshot['entry_loopback_pool_total'] == 67
+    assert snapshot['entry_loopback_pool_leased'] == 65

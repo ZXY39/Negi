@@ -254,6 +254,8 @@ class WorkerPressureMonitor:
             'entry_rpm_at_last_growth': None,
             'entry_seconds_since_step': 0.0,
             'entry_loopback_established': 0,
+            'entry_loopback_pool_total': -1,
+            'entry_loopback_pool_leased': -1,
             'entry_event_queue_depth': 0,
             'entry_event_dropped_total': 0,
             'entry_event_batch_request_total': 0,
@@ -917,6 +919,8 @@ class WorkerPressureMonitor:
                 ('task_event_batch_item_count', 'entry_event_batch_item_total'),
                 ('task_event_single_fallback_count', 'entry_event_single_fallback_total'),
                 ('task_event_coalesced_count', 'entry_event_coalesced_total'),
+                ('loopback_pool_connections', 'entry_loopback_pool_total'),
+                ('loopback_pool_leased', 'entry_loopback_pool_leased'),
             ):
                 if _stat_key in (loop_stats or {}):
                     self._snapshot[_snapshot_key] = int(float(loop_stats.get(_stat_key) or 0.0))
