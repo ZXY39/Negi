@@ -38,6 +38,45 @@ def test_suspend_site_labels_finished_and_missing_tasks() -> None:
     assert second == 'missing'
 
 
+def test_pool_census_counts_every_pool_in_the_process(monkeypatch) -> None:
+    """OS 上的 socket 比一个客户端的池多时，得把所有池都点出来才能归因。"""
+    import gc
+
+    class AsyncConnectionPool:
+        # 类型名就是扫描的判据（httpcore 的池类），别改。
+        def __init__(self, conns) -> None:
+            self.connections = conns
+
+    class _Conn:
+        def __init__(self, available: bool) -> None:
+            self._available = available
+
+        def is_available(self) -> bool:
+            return self._available
+
+    pools = [AsyncConnectionPool([_Conn(True), _Conn(False)]), AsyncConnectionPool([_Conn(True)])]
+
+    def _objects(*_args, _pools=pools):
+        return [object()] + list(_pools)
+
+    monkeypatch.setattr(gc, 'get_objects', _objects)
+
+    assert MainRuntimeService._connection_pool_census() == [(2, 1), (1, 0)]
+
+
+def test_pool_census_survives_a_pool_that_raises(monkeypatch) -> None:
+    import gc
+
+    class AsyncConnectionPool:
+        @property
+        def connections(self):
+            raise RuntimeError('pool is closing')
+
+    monkeypatch.setattr(gc, 'get_objects', lambda *_args: [AsyncConnectionPool()])
+
+    assert MainRuntimeService._connection_pool_census() == []
+
+
 def test_census_line_reports_top_sites_when_marker_is_present(tmp_path, monkeypatch) -> None:
     """标记在的时候那一行必须带挂起点榜——任务名前缀只说"谁建的"，回环连接归因要的是"卡在哪个调用"。"""
     import main.service.runtime_service as module

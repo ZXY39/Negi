@@ -218,6 +218,8 @@ _LOOP_CENSUS_MARKER_NAME = 'loop-census.on'
 _LOOP_CENSUS_INTERVAL_SECONDS = 20.0
 _LOOP_CENSUS_SAMPLE_TASKS = 6
 _LOOP_CENSUS_TOP_SITES = 10
+# gc 全量扫一次要持 GIL 一两秒，所以池榜每 5 拍（约 100 秒）才点一次，其余拍报空列表。
+_LOOP_CENSUS_POOL_SCAN_EVERY = 5
 _TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
 _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
@@ -1066,6 +1068,39 @@ class MainRuntimeService:
         code = frame.f_code
         return f'{os.path.basename(code.co_filename)}:{frame.f_lineno} in {code.co_name}'
 
+    @staticmethod
+    def _connection_pool_census() -> list[tuple[int, int]]:
+        """进程里每个 httpcore 连接池的 `(总连接, 已租出)`。
+
+        只数 `self._callback_client` 那一个池不够：实盘 OS 上有 45 条 ESTABLISHED 挂在
+        web 端口，而那个池只认 3 条（0 条租出）⇒ 剩下的 socket 不归它管。多一个客户端
+        实例就多一个池，所以要把进程里所有池都点出来。gc 全量扫一次不便宜（百万级对象、
+        持 GIL 一两秒），因此只在标记文件在的时候按 `_LOOP_CENSUS_POOL_SCAN_EVERY` 拍一次。
+        """
+        import gc
+
+        pools: list[tuple[int, int]] = []
+        try:
+            objects = gc.get_objects()
+        except Exception:
+            return pools
+        for item in objects:
+            try:
+                if type(item).__name__ != 'AsyncConnectionPool':
+                    continue
+                connections = list(item.connections)
+            except Exception:
+                continue
+            leased = 0
+            for connection in connections:
+                try:
+                    if not bool(connection.is_available()):
+                        leased += 1
+                except Exception:
+                    continue
+            pools.append((len(connections), leased))
+        return pools
+
     async def _loop_census_loop(self) -> None:
         """标记文件在的时候把 loop 上的任务点名打一行；不在就只是睡着。
 
@@ -1073,11 +1108,16 @@ class MainRuntimeService:
         这条车道自己出现在输出里，就证明前者不成立，嫌疑只剩后者。
         """
 
+        ticks = 0
         while True:
             await asyncio.sleep(_LOOP_CENSUS_INTERVAL_SECONDS)
             try:
                 if not self._loop_census_marker_path().exists():
                     continue
+                ticks += 1
+                pools: list[tuple[int, int]] = []
+                if ticks % _LOOP_CENSUS_POOL_SCAN_EVERY == 0:
+                    pools = self._connection_pool_census()
                 tasks = list(asyncio.all_tasks())
                 prefixes: dict[str, int] = {}
                 site_counts: dict[str, int] = {}
@@ -1096,10 +1136,11 @@ class MainRuntimeService:
                     for task in tasks[:_LOOP_CENSUS_SAMPLE_TASKS]
                 ]
                 logger.warning(
-                    'loop census: worker={} poller={} total={} prefixes={} top_sites={} sample={}',
+                    'loop census: worker={} poller={} total={} pools={} prefixes={} top_sites={} sample={}',
                     self.worker_id or 'worker',
                     poller_site,
                     len(tasks),
+                    pools,
                     dict(sorted(prefixes.items(), key=lambda item: -item[1])[:8]),
                     dict(sorted(site_counts.items(), key=lambda item: -item[1])[:_LOOP_CENSUS_TOP_SITES]),
                     sites,
