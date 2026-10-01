@@ -11151,6 +11151,8 @@ async def test_worker_commands_call_pause_and_cancel_handlers(tmp_path: Path):
 
     service.pause_task = _pause
     service.cancel_task = _cancel
+    # pause 命令只在任务仍带暂停意图时才派发，否则它属于已被恢复作废的死账。
+    service.get_task = lambda task_id: SimpleNamespace(pause_requested=True, is_paused=True)
 
     await service._process_worker_command({"command_type": "pause_task", "task_id": "demo"})
     await service._process_worker_command({"command_type": "cancel_task", "task_id": "demo"})

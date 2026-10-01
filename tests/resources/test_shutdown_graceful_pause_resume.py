@@ -197,6 +197,68 @@ async def test_worker_startup_abnormal_interruption_still_sets_recovery_notice(t
     await service.close()
 
 
+# ---------------------------------------------------------------------------
+# leftover pause commands vs startup auto-resume
+# ---------------------------------------------------------------------------
+
+def _enqueue_pause_command_for(service: MainRuntimeService, task_id: str, command_id: str) -> None:
+    service.store.enqueue_task_command(
+        command_id=command_id,
+        task_id=task_id,
+        session_id="web:shared",
+        command_type="pause_task",
+        created_at=now_iso(),
+        payload={"task_id": task_id},
+    )
+
+
+async def _drain_commands(service: MainRuntimeService) -> None:
+    commands = service.store.claim_pending_task_commands(
+        worker_id=service.worker_id or "worker",
+        claimed_at=now_iso(),
+    )
+    for command in commands:
+        await service._process_worker_command(command)
+
+
+@pytest.mark.asyncio
+async def test_startup_resume_supersedes_pause_command_left_by_previous_process(tmp_path: Path) -> None:
+    """优雅停机没等到 drain 就把 pause 命令留给了下一个 worker：恢复之后它不得再落暂停。"""
+    service = _make_worker_service(tmp_path)
+    _seed_task(service, "task:graceful", "node:graceful", is_paused=True)
+    service.store.record_shutdown_pause_entry(kind="task", ref_id="task:graceful")
+    _enqueue_pause_command_for(service, "task:graceful", "cmd:stale-pause")
+
+    await service.startup()
+    await _drain_commands(service)
+
+    task = service.store.get_task("task:graceful")
+    assert task is not None
+    assert bool(task.is_paused) is False
+    assert bool(task.pause_requested) is False
+    assert service.global_scheduler.cancelled == []
+    settled = service.store.get_task_command("cmd:stale-pause")
+    assert settled is not None
+    assert settled["status"] == "completed"
+    assert settled["result"].get("skipped") == "pause_intent_cleared"
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pause_command_applies_while_pause_intent_is_still_set(tmp_path: Path) -> None:
+    service = _make_worker_service(tmp_path)
+    _seed_task(service, "task:queued-pause", "node:queued-pause", is_paused=True)
+    _enqueue_pause_command_for(service, "task:queued-pause", "cmd:queued-pause")
+
+    await _drain_commands(service)
+
+    assert "task:queued-pause" in service.global_scheduler.cancelled
+    settled = service.store.get_task_command("cmd:queued-pause")
+    assert settled is not None
+    assert settled["result"] == {}
+    await service.close()
+
+
 @pytest.mark.asyncio
 async def test_force_pause_task_durably_works_without_live_worker(tmp_path: Path) -> None:
     service = MainRuntimeService(

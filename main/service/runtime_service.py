@@ -1134,7 +1134,13 @@ class MainRuntimeService:
                 success = True
             elif command_type == 'pause_task':
                 if task_id:
-                    await self.pause_task(task_id)
+                    task = self.get_task(task_id)
+                    # 暂停意图由持久标志承载：被恢复清空后，还在队列里的 pause 命令
+                    # 就是上一个进程的死账，落回来会把刚自动恢复的任务再打成暂停。
+                    if task is None or not (bool(task.pause_requested) or bool(task.is_paused)):
+                        result_payload = {'skipped': 'pause_intent_cleared'}
+                    else:
+                        await self.pause_task(task_id)
                 success = True
             elif command_type == 'cancel_task':
                 if task_id:

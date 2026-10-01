@@ -65,8 +65,9 @@
 
 - 会话：对每个正在运行的会话执行 manual pause（等价于 UI 暂停按钮）：本轮上下文按暂停语义归档（`_transcript_state=paused` 的 user 行、暂停 archive 气泡、completed continuity sidecar），会话收为 `completed` + `user_pause`。
 - 任务：web 模式走 `force_pause_task_durably`（worker 离线/starting 也生效：先直接落 `pause_requested=true / is_paused=true`，再下发 `pause_task` 命令让活着的 actor 在下一个安全边界停）；embedded / worker 模式走普通 `pause_task`（request_pause + scheduler cancel 等 actor 停）。
-- **真实暂停保证（排水等待）**：落盘标志只是账本，不代表 actor 已停。shutdown 路径在把全部 `pause_task` 命令入队后轮询 `task_commands`（上限约 10 秒），直到这批命令全部 `completed`——命令 finished 意味着 worker 侧 `cancel_task` 已 await 完 actor 收尾（CancelledError → 持久化暂停 → dispatcher close）。wait 期间 worker 状态为 `offline/stopped` 时提前放弃（没有活的消费方，落盘标志 + 台账已保证重启正确）；超时只告警、不阻断退出。同一保证下才轮到关闭托管 worker。会话侧 manual pause 本身 await 了已注册 turn 任务的收尾（`cancel_session_tasks` gather），返回即该会话的模型/工具执行已停止。
+- **真实暂停保证（排水等待）**：落盘标志只是账本，不代表 actor 已停。shutdown 路径在把全部 `pause_task` 命令入队后轮询 `task_commands`（上限约 10 秒），直到这批命令全部 `completed`——命令 finished 意味着 worker 侧 `cancel_task` 已 await 完 actor 收尾（CancelledError → 持久化暂停 → dispatcher close）。wait 期间 worker 状态为 `offline/stopped` 时提前放弃（没有活的消费方，落盘标志 + 台账已保证重启正确）；超时只告警、不阻断退出。同一保证下才轮到关闭托管 worker。会话侧 manual pause 本身 await 了已注册 turn 任务的收尾（`cancel_session_tasks` gather），返回即该会话的模型/工具执行已停止。已知边界：`claim_pending_task_commands` 只取 `pending`，被已死 worker claim 走的命令既不落地也不结清，于是同一任务后续的每次停机排水都会耗尽这 10 秒并留下超时告警。
 - 语义边界：普通 UI 手动暂停仍是“落盘标志先行、安全边界后生效”的异步设计——UI 立即显示 paused 不等同于 actor 已停，两者之间有秒级的命令处理窗口；只有 shutdown 排水等待提供“全部真实暂停后才退出”的保证。安全边界的前提是**确实还有协程在跑这个节点**：`_land_pause_for_stranded_nodes` 在派发面里查不到该节点的 dispatcher entry、且它非终态时，把已置 `pause_requested` 的旗直接落成 `is_paused`（否则脱离派发面的节点再没有检查点，暂停永久挂着）。该判定只在看得见派发面的 embedded / worker 模式生效——web 进程看不见 worker 的 entry，在那里直落会把正在运行的节点谎标成已暂停。
+- **暂停命令的有效期**：`pause_task` 命令不携带世代，它表达的意图由任务的持久暂停标志承载。worker 应用前必须重读该意图（`pause_requested` 与 `is_paused` 至少一个为真，含节点控制回填到任务标志的形态），否则直接以 `skipped: pause_intent_cleared` 结清命令。这道闸门的前提是排水等待并不总成立：超时或 worker 当时不可用时，命令会被留给下一个进程，而那个进程已经在 `startup()` 里按台账自动恢复过该任务（恢复会消费掉台账行）；没有这道闸门时遗留命令会把刚恢复的任务重新打成暂停，且此后它与「用户暂停」不可区分、任何重启都不会再自动恢复。web 侧两条生产者（`pause_task` / `force_pause_task_durably`）都先落标志再入队，因此真实暂停不会被闸门吞掉；恢复后操作员再次暂停会重新置位标志并带一条新命令，此时旧命令落回只是幂等地再暂停一次。
 - 台账：每条被暂停的工作写一行 `shutdown_pause_registry`（主运行时 SQLite 表，key 形如 `task:<task_id>` / `session:<session_key>`，会话行带 channel/chat_id）。**用户/agent 手动暂停的工作不写台账**——只有 shutdown 路径亲自暂停的才写。
 - 每次 shutdown 都会尝试一遍（信号、atexit、`/bootstrap/exit`、lifespan 收尾都会经过 `shutdown_web_runtime`）；已经暂停的工作跳过，因此多次收尾幂等。
 
@@ -80,6 +81,6 @@
 
 - “重启后任务自动继续”依赖台账与共享 SQLite（WAL），不依赖内存：web 进程写台账、worker 进程消费，二者交接的媒介是 store。
 - 关闭托管 worker 之前，web 会先释放该 worker 的 `task_worker` lease 行（`keep_worker` 关闭且确实存在托管进程时）——否则新 worker 在 lease TTL（20 秒）内启动会撞 `worker_lease_unavailable`。
-- 若重启后任务仍停在 paused 且不自动恢复：先查台账行是否与任务 id 一致、`task_commands` 是否有未消费的 `pause_task` 残余、worker 是否真正拿到 lease 完成 startup。
+- 若重启后任务仍停在 paused 且不自动恢复：先查台账行是否与任务 id 一致——台账为空而任务 paused 就是「按设计视作用户暂停」，其中一类其实是被遗留暂停命令打回的；判据是把 `task_commands` 里该任务 `pause_task` 的 `created_at`（上一个进程入队）与 `claimed_at`（下一个 worker 才取走）对齐，看它们是否跨了一次重启，并在 `managed-worker.log` 里确认 `node resume triage outcome=resumed` 之后紧跟着一批 `TaskPausedError`。闸门生效的判据是该命令行 `result_json` 落成 `pause_intent_cleared`。也要查 worker 是否真正拿到 lease 完成 startup。
 - 若“优雅重启”后仍出现异常停止 toast：说明该任务的暂停早于本次 shutdown（例如早已被暂停、退出前又被手动 resume），或退出路径没有经过 web runtime 收尾（如单独强杀 worker 进程）。
 - 启动脚本的优雅退出协议（先调 `/api/bootstrap/exit` 再强制清理）归 `operations-and-maintenance.md`「基本启动方式」。
