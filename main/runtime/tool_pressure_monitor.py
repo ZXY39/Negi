@@ -262,6 +262,7 @@ class WorkerPressureMonitor:
             'entry_event_batch_item_total': 0,
             'entry_event_single_fallback_total': 0,
             'entry_event_coalesced_total': 0,
+            'entry_callback_error_total': 0,
             'worker_memory_bytes': -1,
             'machine_memory_total_bytes': -1,
             'machine_memory_available_bytes': -1,
@@ -921,6 +922,7 @@ class WorkerPressureMonitor:
                 ('task_event_coalesced_count', 'entry_event_coalesced_total'),
                 ('loopback_pool_connections', 'entry_loopback_pool_total'),
                 ('loopback_pool_leased', 'entry_loopback_pool_leased'),
+                ('callback_delivery_error_count', 'entry_callback_error_total'),
             ):
                 if _stat_key in (loop_stats or {}):
                     self._snapshot[_snapshot_key] = int(float(loop_stats.get(_stat_key) or 0.0))

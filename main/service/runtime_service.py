@@ -208,6 +208,17 @@ _TASK_EVENT_QUEUE_MAX_ITEMS = 4096
 # 载荷本身就是"该任务当前全量状态"的事件类型：队列里同任务的旧一份可以直接被新的覆盖。
 # 只列 live.patch——node.patch/terminal/model.call 的载荷是增量或事实行，覆盖会丢账。
 _TASK_EVENT_COALESCED_EVENT_TYPES = frozenset({'task.live.patch'})
+# 共享回调客户端的连接池档位。`keepalive_expiry` 必须**小于** uvicorn 的
+# `timeout_keep_alive`（默认 5s）：谁先关空闲连接是可定的，反之连接被对端悄悄 FIN 掉、
+# 池里还留着一条"可用"的 socket，下一次复用才撞上，表现是偶发一次失败的 POST。
+# `max_connections` 只是兜底闸：实盘并发只有 1–3，卡到 32 就已经是事故，
+# 宁可排队到 `pool` 超时丢一条事件，也不许再攒出一条没人认领的 socket。
+_CALLBACK_POOL_MAX_CONNECTIONS = 32
+_CALLBACK_POOL_MAX_KEEPALIVE_CONNECTIONS = 4
+_CALLBACK_POOL_KEEPALIVE_EXPIRY_SECONDS = 2.0
+# 回调投递异常按类型计数，限流打一行。这条车道原来的失败全部落在 `logger.debug`，
+# 实盘按 "delivery skipped" 搜整窗口得 0 命中——那是级别问题不是没发生。
+_CALLBACK_ERROR_WARN_INTERVAL_SECONDS = 60.0
 # 回环连接普查：超过这一条就限流打一行存活任务名分组，用来点名占连接的车道。
 _LOOPBACK_CENSUS_WARN_CONNECTIONS = 2000
 _LOOPBACK_CENSUS_INTERVAL_SECONDS = 60.0
@@ -817,8 +828,11 @@ class MainRuntimeService:
             'task_event_dropped_count': 0.0,
             'task_event_single_fallback_count': 0.0,
             'task_event_coalesced_count': 0.0,
+            'callback_delivery_error_count': 0.0,
         }
         self._loopback_census_logged_mono = 0.0
+        self._callback_delivery_errors: dict[str, int] = {}
+        self._callback_error_logged_mono = 0.0
         self._callback_client: httpx.AsyncClient | None = None
         self._pending_task_summaries: dict[str, dict[str, Any]] = {}
         self._task_summary_flush_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -1071,6 +1085,11 @@ class MainRuntimeService:
     @staticmethod
     def _census_referrer_label(obj: Any) -> str:
         name = type(obj).__name__
+        if name == 'method':
+            # 挂起中的 proactor 操作就写在这里：recv_into / sendall / connect 三种
+            # 形状给出的修法完全不同（等响应 / 请求体没写完 / 没连上），只报类型名
+            # 说不清是哪一种。
+            return f'method<{getattr(obj, "__name__", "?")}>'
         if name != 'dict':
             return name
         import gc
@@ -3207,9 +3226,17 @@ class MainRuntimeService:
     def _get_callback_client(self) -> httpx.AsyncClient:
         client = self._callback_client
         if client is None:
-            client = httpx.AsyncClient()
+            client = httpx.AsyncClient(limits=self._callback_client_limits())
             self._callback_client = client
         return client
+
+    @staticmethod
+    def _callback_client_limits() -> httpx.Limits:
+        return httpx.Limits(
+            max_connections=_CALLBACK_POOL_MAX_CONNECTIONS,
+            max_keepalive_connections=_CALLBACK_POOL_MAX_KEEPALIVE_CONNECTIONS,
+            keepalive_expiry=_CALLBACK_POOL_KEEPALIVE_EXPIRY_SECONDS,
+        )
 
     def _loopback_web_port(self) -> int:
         """本进程内部回调要打到的那个 web 端口。"""
@@ -3322,7 +3349,33 @@ class MainRuntimeService:
             )
             raise CallbackUrlNotAllowedError(f'internal callback URL not allowed: {reason}')
         client = self._get_callback_client()
-        return await client.post(url, json=payload, headers=headers, timeout=float(timeout or _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS))
+        try:
+            return await client.post(url, json=payload, headers=headers, timeout=float(timeout or _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._note_callback_delivery_error(type(exc).__name__)
+            raise
+
+    def _note_callback_delivery_error(self, error_type: str) -> None:
+        """回调投递异常计数 + 限流一行，用来把这条车道的失败从 debug 里捞出来。
+
+        实盘回环 socket 单调爬（20:18 起 3 条/分）而池里只认 5 条，说明有连接被池
+        丢掉却没关；这类形状一定先在某个投递异常上露头，计数是唯一能证明它的方式。
+        """
+        counts = self._callback_delivery_errors
+        counts[error_type] = counts.get(error_type, 0) + 1
+        self._task_event_stats['callback_delivery_error_count'] = float(sum(counts.values()))
+        now_mono = time.monotonic()
+        if now_mono - self._callback_error_logged_mono < _CALLBACK_ERROR_WARN_INTERVAL_SECONDS:
+            return
+        self._callback_error_logged_mono = now_mono
+        logger.warning(
+            'internal callback delivery errors: total={} by_type={} pool={}',
+            int(sum(counts.values())),
+            dict(sorted(counts.items(), key=lambda item: -item[1])[:6]),
+            self._callback_pool_snapshot(),
+        )
 
     def _schedule_task_event_callback(self, payload: dict[str, Any] | None) -> None:
         if self.execution_mode != 'worker':
