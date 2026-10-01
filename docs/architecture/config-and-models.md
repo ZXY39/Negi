@@ -178,6 +178,8 @@ G3KU 的模型系统分两层：
 - 把 secrets 存进安全 overlay，而不是明文长期放在 record 中
 - 为管理面「添加模型」流程提供 draft 校验、连接探测、最大并发探测与供应商模型目录拉取（管理面契约详见 `web-and-admin.md`「Model Config Page And Admin Contract」）
 
+facade 的存活期是**每 workspace 一个实例**，热路径一律经 `get_llm_config_facade(workspace)` 取用而不是就地构造：构造它会连带构造配置仓储，而仓储构造要无条件 `mkdir` records 目录并探测 `index.json` 是否存在。记录内容不做缓存——每次 `get()`/`list_summaries()` 都从磁盘读并重新校验，所以管理面改完配置运行侧立刻可见；被固定在构造时刻的只有 legacy master key 这一项，因此安全域必须在首次模型解析之前建好。
+
 协议（`protocol_adapter`）是记录级派生字段：它由 `provider_id` 命中的 provider 模板唯一决定，draft 里同名参数不参与解析，因此切换协议等于换模板而不是写一个独立字段；归一化后的值随 runtime target 导出，由 `g3ku/providers/provider_factory.py` 决定构建 Chat Completions 还是 Responses provider。模板同时决定 `parameters` 的字段集合与 `reasoning_effort` 白名单，两者必须保持一致，否则管理面会给出保存得了但校验不过的字段。
 
 Responses 协议的请求体只带各家 `/responses` 共同支持的字段：`text.*` 这类 OpenAI 扩展会被代理到 Chat Completions 后端的供应商整单拒绝，`instructions` 同样会被判成 `inference request is invalid`，因此系统提示词只以 `input` 首位的 `[SYSTEM]…[END SYSTEM]` user 块送达，深度思考走 `reasoning.effort`。连接探测发的是同一个请求形状——一条 ping 加一个走各自协议 normalizer 的占位函数工具——并且模型目录可读不算通过：目录之后还要过一次真实形状的推理，被拒时把上游原文带回消息，字段级不兼容因此在保存前就暴露，而不是等第一个真实回合。管理面「完整上下文」侧的预览请求体与真实发送体保持同形状，否则预览给出的字段清单不可信。

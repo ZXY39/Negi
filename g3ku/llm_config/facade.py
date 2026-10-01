@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from g3ku.config.schema import normalize_reasoning_effort
+from g3ku.llm_config.export import to_generic_runtime_config
 from g3ku.llm_config.models import (
     GenericRuntimeConfig,
     ModelBindingDraft,
@@ -14,7 +16,6 @@ from g3ku.llm_config.models import (
     ProviderConfigDraft,
     RuntimeTarget,
 )
-from g3ku.llm_config.export import to_generic_runtime_config
 from g3ku.llm_config.repositories import EncryptedConfigRepository
 from g3ku.llm_config.secret_store import EncryptedFileSecretStore
 from g3ku.llm_config.service import ConfigService, TemplateService
@@ -26,7 +27,6 @@ from g3ku.utils.api_keys import (
     resolve_api_key_concurrency_layout,
 )
 from g3ku.utils.retry_keywords import DEFAULT_RETRY_ON_KEYWORDS, split_retry_keywords
-
 
 MASKED_SECRET_VALUE = "********"
 
@@ -96,6 +96,28 @@ def _resolve_legacy_master_key(storage_root: Path) -> str | None:
             return None
         return raw
     return None
+
+
+_FACADES: dict[str, "LLMConfigFacade"] = {}
+_FACADES_LOCK = threading.Lock()
+
+
+def get_llm_config_facade(workspace: Path | None = None) -> "LLMConfigFacade":
+    """按 workspace 复用同一个 facade（与 get_bootstrap_security_service 同形）。
+
+    构造 facade 会连带构造配置仓储，而仓储 __init__ 无条件做 records 目录
+    `mkdir(parents=True, exist_ok=True)` 与 index 存在性检查。模型路由解析每拍都要
+    为每条绑定新建一个，实测零流量空转窗口里这条路径占主线程样本 43.4%、`mkdir`
+    叶子 23.2%。锁内构造：仓储不持外部资源，且首次之后的调用只查字典。
+    """
+    root = (workspace or Path.cwd()).resolve()
+    key = str(root).lower()
+    with _FACADES_LOCK:
+        facade = _FACADES.get(key)
+        if facade is None:
+            facade = LLMConfigFacade(root)
+            _FACADES[key] = facade
+        return facade
 
 
 class LLMConfigFacade:
