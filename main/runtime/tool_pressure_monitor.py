@@ -988,9 +988,13 @@ class WorkerPressureMonitor:
             wall_delta = max(1e-6, current_wall - last_wall)
             cpu_delta = max(0.0, current_cpu - last_cpu)
             lag_sampler = self._lag_sampler
+            # 先取读数、再发探针：ping() 记的 `sent_at` 晚于本拍的 current_wall，
+            # 拿 ping 之前的时刻去差就永远是负数，被 max(0,·) 截成 0——实测后果是
+            # 「250 ms–1 s」这一整段真实滞后读成 0（warn 线 250 ms 落在这段里），
+            # 只有滞后跨过整整一个节拍（≥1 s）才会露出来。
+            event_loop_lag_ms = lag_sampler.sample() if lag_sampler is not None else 0.0
             if lag_sampler is not None:
                 lag_sampler.ping()
-            event_loop_lag_ms = lag_sampler.sample(current_wall) if lag_sampler is not None else 0.0
             runtime_metrics = self._runtime_metrics_snapshot()
             machine = self._sample_machine_metrics(current_wall)
             machine.update(self._disk_waterline_fields())
