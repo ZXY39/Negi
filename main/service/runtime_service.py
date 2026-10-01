@@ -205,6 +205,9 @@ _TASK_EVENT_BATCH_WINDOW_SECONDS = 0.25
 _TASK_EVENT_BATCH_MAX_ITEMS = 128
 _TASK_EVENT_BATCH_MAX_BYTES = 64 * 1024
 _TASK_EVENT_QUEUE_MAX_ITEMS = 4096
+# 载荷本身就是"该任务当前全量状态"的事件类型：队列里同任务的旧一份可以直接被新的覆盖。
+# 只列 live.patch——node.patch/terminal/model.call 的载荷是增量或事实行，覆盖会丢账。
+_TASK_EVENT_COALESCED_EVENT_TYPES = frozenset({'task.live.patch'})
 # 回环连接普查：超过这一条就限流打一行存活任务名分组，用来点名占连接的车道。
 _LOOPBACK_CENSUS_WARN_CONNECTIONS = 2000
 _LOOPBACK_CENSUS_INTERVAL_SECONDS = 60.0
@@ -810,6 +813,7 @@ class MainRuntimeService:
             'task_event_batch_item_count': 0.0,
             'task_event_dropped_count': 0.0,
             'task_event_single_fallback_count': 0.0,
+            'task_event_coalesced_count': 0.0,
         }
         self._loopback_census_logged_mono = 0.0
         self._callback_client: httpx.AsyncClient | None = None
@@ -3194,6 +3198,17 @@ class MainRuntimeService:
 
     def _enqueue_task_event_callback(self, payload: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
         pending = self._task_event_pending
+        event_type = str(payload.get('event_type') or '').strip()
+        if event_type in _TASK_EVENT_COALESCED_EVENT_TYPES:
+            slot = self._find_task_event_coalesce_slot(pending, payload)
+            if slot is not None:
+                # 一份 live.patch 载荷就是该任务的全量运行时摘要（实盘单任务 4.3 MB）。
+                # 排空口每 0.25 s 只能投一条（合批按 64 KB 封顶，MB 级载荷永远凑不进第二条），
+                # 生产端比它快时旧份只是占着队列的过期状态：就地换成最新一份，位置不变。
+                pending[slot] = payload
+                self._task_event_stats['task_event_coalesced_count'] += 1.0
+                self._ensure_task_event_flush_task(loop)
+                return
         if len(pending) >= _TASK_EVENT_QUEUE_MAX_ITEMS:
             # 满了丢最新一条非终态事件；终态事件必须挤出一个位置，丢了任务就永不收口。
             if str(payload.get('event_type') or '').strip() != 'task.terminal':
@@ -3210,6 +3225,25 @@ class MainRuntimeService:
         pending.append(payload)
         self._task_event_stats['task_event_queued_count'] = float(len(pending))
         self._ensure_task_event_flush_task(loop)
+
+    @staticmethod
+    def _find_task_event_coalesce_slot(
+        pending: list[dict[str, Any]],
+        payload: dict[str, Any],
+    ) -> int | None:
+        """从队尾往前找同任务同类型的旧载荷槽位；撞到别的同任务事件就放弃（不许跨过它）。"""
+        task_id = str(payload.get('task_id') or '').strip()
+        event_type = str(payload.get('event_type') or '').strip()
+        if not task_id or not event_type:
+            return None
+        for index in range(len(pending) - 1, -1, -1):
+            item = pending[index]
+            if str(item.get('task_id') or '').strip() != task_id:
+                continue
+            if str(item.get('event_type') or '').strip() == event_type:
+                return index
+            return None
+        return None
 
     def _ensure_task_event_flush_task(self, loop: asyncio.AbstractEventLoop) -> None:
         current = self._task_event_flush_task

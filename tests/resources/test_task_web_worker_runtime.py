@@ -14652,8 +14652,10 @@ async def test_worker_merges_live_events_into_one_batch_post(tmp_path, monkeypat
     monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
 
     for index in range(5):
-        service._schedule_task_event_callback(_live_event(frame=index))
-    # 调度本身不发请求，只入队；一条事件一个 HTTP 往返的旧形态在这里就断了
+        service._schedule_task_event_callback(_live_event(f"task:batch{index}", frame=index))
+    # 调度本身不发请求，只入队；一条事件一个 HTTP 往返的旧形态在这里就断了。
+    # 用 5 个不同任务：同一任务的重复 live.patch 会被就地合并（见
+    # test_same_task_live_patches_coalesce_into_one_slot），凑不出 5 条批量。
     assert len(service._task_event_pending) == 5
     assert posted == []
 
@@ -14667,6 +14669,44 @@ async def test_worker_merges_live_events_into_one_batch_post(tmp_path, monkeypat
     assert service._task_event_stats["task_event_batch_item_count"] == 5.0
     assert service._task_event_stats["task_event_single_fallback_count"] == 0.0
     assert service._task_event_pending == []
+
+
+@pytest.mark.asyncio
+async def test_same_task_live_patches_coalesce_into_one_slot(tmp_path, monkeypatch) -> None:
+    """同任务的旧快照不许在队列里排队：一份就是全量摘要（实盘单任务 4.3 MB）。"""
+    service = await _event_lane_service(tmp_path, monkeypatch)
+
+    for index in range(5):
+        service._schedule_task_event_callback(_live_event(frame=index))
+    service._schedule_task_event_callback(
+        _live_event("task:other", frame=99, event_type="task.model.call")
+    )
+
+    pending = service._task_event_pending
+    assert [str(item.get("event_type") or "") for item in pending] == ["task.live.patch", "task.model.call"]
+    assert pending[0]["data"]["frame_index"] == 4
+    assert service._task_event_stats["task_event_coalesced_count"] == 4.0
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_stops_earlier_live_patch_from_being_rewritten(tmp_path, monkeypatch) -> None:
+    """同任务中间夹了别的事件时不许跨过它合并，否则终态会被后面的快照盖到前面去。"""
+    service = await _event_lane_service(tmp_path, monkeypatch)
+
+    service._schedule_task_event_callback(_live_event(frame=0))
+    service._schedule_task_event_callback(_live_event(frame=1, event_type="task.terminal"))
+    service._schedule_task_event_callback(_live_event(frame=2))
+
+    pending = service._task_event_pending
+    assert [str(item.get("event_type") or "") for item in pending] == [
+        "task.live.patch",
+        "task.terminal",
+        "task.live.patch",
+    ]
+    assert [item["data"]["frame_index"] for item in pending] == [0, 1, 2]
+    assert service._task_event_stats["task_event_coalesced_count"] == 0.0
+    await service.close()
 
 
 @pytest.mark.asyncio
@@ -14687,7 +14727,7 @@ async def test_worker_live_events_fall_back_to_single_posts_when_batch_rejected(
     monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
 
     for index in range(3):
-        service._schedule_task_event_callback(_live_event(frame=index))
+        service._schedule_task_event_callback(_live_event(f"task:batch{index}", frame=index))
     await service._deliver_task_event_batches()
 
     assert posted.count("http://127.0.0.1:18790/api/internal/task-event-batch") == 1
@@ -14700,12 +14740,13 @@ async def test_worker_event_queue_overflow_drops_live_events_but_never_terminal(
     service = await _event_lane_service(tmp_path, monkeypatch)
     monkeypatch.setattr("main.service.runtime_service._TASK_EVENT_QUEUE_MAX_ITEMS", 2)
 
-    service._schedule_task_event_callback(_live_event(frame=0))
-    service._schedule_task_event_callback(_live_event(frame=1))
+    # 三个不同任务：同任务的重复 live.patch 会被就地合并，凑不出"满队"（合并本身另有用例）
+    service._schedule_task_event_callback(_live_event("task:overflow-a", frame=0))
+    service._schedule_task_event_callback(_live_event("task:overflow-b", frame=1))
     # 满了：新的非终态事件被丢弃
-    service._schedule_task_event_callback(_live_event(frame=2))
+    service._schedule_task_event_callback(_live_event("task:overflow-c", frame=2))
     # 终态事件必须挤出一个位置——丢了任务就永不收口
-    service._schedule_task_event_callback(_live_event(frame=3, event_type="task.terminal"))
+    service._schedule_task_event_callback(_live_event("task:overflow-a", frame=3, event_type="task.terminal"))
 
     queued = [str(item.get("event_type") or "") for item in service._task_event_pending]
     assert queued == ["task.live.patch", "task.terminal"]
@@ -14728,5 +14769,6 @@ async def test_worker_loopback_snapshot_reports_port_and_lane_counters(tmp_path,
         "task_event_batch_request_count",
         "task_event_batch_item_count",
         "task_event_single_fallback_count",
+        "task_event_coalesced_count",
     ):
         assert key in snapshot

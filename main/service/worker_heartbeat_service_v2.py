@@ -73,6 +73,7 @@ _PERF_HISTORY_FIELDS = (
     'entry_event_batch_request_total',
     'entry_event_batch_item_total',
     'entry_event_single_fallback_total',
+    'entry_event_coalesced_total',
 )
 
 
