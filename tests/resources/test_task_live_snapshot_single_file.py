@@ -197,6 +197,7 @@ def test_actual_request_keeps_latest_per_node(tmp_path, monkeypatch, policies_gu
             self.registry: dict[str, SimpleNamespace] = {}
             self._content_index: dict = {}
             self._counter = 0
+            self.task_wide_reads = 0
 
         def create_json_artifact(self, **kwargs):
             self._counter += 1
@@ -214,7 +215,16 @@ def test_actual_request_keeps_latest_per_node(tmp_path, monkeypatch, policies_gu
             return record
 
         def list_artifacts(self, task_id):
+            self.task_wide_reads += 1
             return [item for item in self.registry.values() if item.task_id == task_id]
+
+        def list_artifacts_for_node(self, task_id, node_id):
+            # 与 SQLiteTaskStore 同语义：`node_id IS ?`，任务级 artifact 走 NULL。
+            normalized = str(node_id or '').strip() or None
+            return [
+                item for item in self.registry.values()
+                if item.task_id == task_id and (item.node_id or None) == normalized
+            ]
 
     spy = _SpyArtifactStore()
 
@@ -247,6 +257,8 @@ def test_actual_request_keeps_latest_per_node(tmp_path, monkeypatch, policies_gu
     persist(task_id='task:t1', node_id='node:n2', call_index=0, payload=payload)
     assert len(spy.registry) == 2
     assert {item.node_id for item in spy.registry.values()} == {'node:n1', 'node:n2'}
+    # 剪枝只按 (task, node) 取行：整任务清单一次都不许读（它在每次模型调用上都要走）
+    assert spy.task_wide_reads == 0
 
 
 # ------------------------------------------------------------------

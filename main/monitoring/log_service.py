@@ -2307,10 +2307,12 @@ class TaskLogService:
         keep_id = str(keep_artifact_id or '').strip()
         normalized_node_id = str(node_id or '').strip()
         try:
+            # 按 (task, node) 取，别用整任务清单：这条剪枝每次模型调用都要走一遍，
+            # `list_artifacts(task_id)` 会把任务几百行 artifact 逐行建模（负载窗口
+            # py-spy 实测 5.4%），而判据只看这一节点的 kind 与 keep 指针。
             stale = [
-                item for item in artifact_store.list_artifacts(task_id)
+                item for item in artifact_store.list_artifacts_for_node(task_id, normalized_node_id)
                 if str(getattr(item, 'kind', '') or '').strip() == 'task_actual_request'
-                and str(getattr(item, 'node_id', '') or '').strip() == normalized_node_id
                 and str(getattr(item, 'artifact_id', '') or '').strip() != keep_id
             ]
         except Exception:

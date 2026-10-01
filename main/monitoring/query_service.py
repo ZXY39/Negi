@@ -80,6 +80,9 @@ _NON_PROJECTABLE_EPOCH_STATES = frozenset({
     'cancelled_by_task_delete',
     'failed',
 })
+# 快照逐帧投影的复用上限（按任务存，FIFO 淘汰）：一帧正文几十 KB，实盘单任务 196 帧
+# 合计 8.7 MB，热任务通常只有最近几个在跑。
+_LIVE_FRAME_CACHE_MAX_TASKS = 4
 
 
 def project_pending_distribution_entries(
@@ -148,6 +151,8 @@ class TaskQueryService:
         self._file_store = file_store
         self._log_service = log_service
         self._debug_recorder = debug_recorder
+        # task_id → (node_id → (payload_digest, 已建好的 TaskLiveFrame))
+        self._live_frame_cache: dict[str, dict[str, tuple[str, Any]]] = {}
 
     def summary(self, session_id: str | None = None) -> TaskSummaryResult:
         # session_id 为空 = 全局口径（跨会话全量任务）；非空 = 该会话口径。
@@ -1682,13 +1687,14 @@ class TaskQueryService:
         return items
 
     def _projection_live_state(self, task_id: str) -> TaskLiveState | None:
-        frames = self._store.list_task_runtime_frames(task_id)
+        heads = list(self._store.list_task_runtime_frame_heads(task_id) or [])
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
         dispatch_limits = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_limits'))
         dispatch_running = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_running'))
         dispatch_queued = self._sanitize_dispatch_counters(runtime_meta.get('dispatch_queued'))
         distribution = TaskDistributionState.model_validate(runtime_meta.get('distribution') or {})
-        if not frames:
+        if not heads:
+            self._live_frame_cache.pop(task_id, None)
             if any(dispatch_limits.values()) or any(dispatch_running.values()) or any(dispatch_queued.values()):
                 return TaskLiveState(
                     active_node_ids=[],
@@ -1712,63 +1718,29 @@ class TaskQueryService:
                     distribution=distribution,
                 )
             return None
+        cache = self._live_frame_cache_for(task_id)
         live_frames: list[TaskLiveFrame] = []
         active_node_ids: list[str] = []
         runnable_node_ids: list[str] = []
         waiting_node_ids: list[str] = []
-        for record in frames:
-            payload = dict(record.payload or {})
-            if record.active:
-                active_node_ids.append(record.node_id)
-            if record.runnable:
-                runnable_node_ids.append(record.node_id)
-            if record.waiting:
-                waiting_node_ids.append(record.node_id)
-            live_frames.append(
-                TaskLiveFrame(
-                    node_id=record.node_id,
-                    depth=int(record.depth or 0),
-                    node_kind=str(record.node_kind or 'execution'),
-                    phase=str(record.phase or ''),
-                    stale=frame_is_stale(record.updated_at),
-                    await_marker=str(payload.get('await_marker') or ''),
-                    await_started_at=str(payload.get('await_started_at') or ''),
-                    # 重试态过同一个白名单：直接展开原始 dict 会把未列出的字段带进快照。
-                    model_retry_status=self._log_service._sanitize_model_retry_status(
-                        payload.get('model_retry_status')
-                    ),
-                    stage_mode=str(payload.get('stage_mode') or ''),
-                    stage_status=str(payload.get('stage_status') or ''),
-                    stage_goal=str(payload.get('stage_goal') or ''),
-                    stage_total_steps=int(payload.get('stage_total_steps') or 0),
-                    tool_calls=[
-                        TaskLiveToolCall(
-                            tool_call_id=str(item.get('tool_call_id') or ''),
-                            tool_name=str(item.get('tool_name') or ''),
-                            status=str(item.get('status') or 'queued'),
-                            started_at=str(item.get('started_at') or ''),
-                            finished_at=str(item.get('finished_at') or ''),
-                            elapsed_seconds=self._coerce_elapsed_seconds(item.get('elapsed_seconds')),
-                        )
-                        for item in list(payload.get('tool_calls') or [])
-                        if isinstance(item, dict)
-                    ],
-                    child_pipelines=[
-                        TaskLiveChildPipeline(
-                            index=int(item.get('index') or 0),
-                            goal=str(item.get('goal') or ''),
-                            status=str(item.get('status') or 'queued'),
-                            child_node_id=str(item.get('child_node_id') or ''),
-                            acceptance_node_id=str(item.get('acceptance_node_id') or ''),
-                            check_status=str(item.get('check_status') or ''),
-                            started_at=str(item.get('started_at') or ''),
-                            finished_at=str(item.get('finished_at') or ''),
-                        )
-                        for item in list(payload.get('child_pipelines') or [])
-                        if isinstance(item, dict)
-                    ],
-                )
-            )
+        live_node_ids: set[str] = set()
+        for head in heads:
+            node_id = str(head['node_id'] or '').strip()
+            if not node_id:
+                continue
+            live_node_ids.add(node_id)
+            if bool(head['active']):
+                active_node_ids.append(node_id)
+            if bool(head['runnable']):
+                runnable_node_ids.append(node_id)
+            if bool(head['waiting']):
+                waiting_node_ids.append(node_id)
+            frame = self._live_frame_from_head(task_id, head, cache)
+            if frame is None:
+                continue
+            live_frames.append(frame)
+        for gone_node_id in [key for key in cache if key not in live_node_ids]:
+            cache.pop(gone_node_id, None)
         return TaskLiveState(
             active_node_ids=sorted(active_node_ids),
             runnable_node_ids=sorted(runnable_node_ids),
@@ -1779,6 +1751,98 @@ class TaskQueryService:
             frames=live_frames,
             distribution=distribution,
         )
+
+    def _live_frame_cache_for(self, task_id: str) -> dict[str, tuple[str, TaskLiveFrame]]:
+        cache = self._live_frame_cache.get(task_id)
+        if cache is not None:
+            return cache
+        while len(self._live_frame_cache) >= _LIVE_FRAME_CACHE_MAX_TASKS:
+            self._live_frame_cache.pop(next(iter(self._live_frame_cache)), None)
+        cache = {}
+        self._live_frame_cache[task_id] = cache
+        return cache
+
+    def _live_frame_from_head(
+        self,
+        task_id: str,
+        head: Any,
+        cache: dict[str, tuple[str, TaskLiveFrame]],
+    ) -> TaskLiveFrame | None:
+        """帧头列 + `payload_digest` 决定要不要回表把这一帧正文建成模型。
+
+        实盘一个任务 196 帧合计 8.7 MB，逐帧建模在负载窗口占 worker 的 10.3%
+        （`get_task_snapshot → _projection_live_state → list_task_runtime_frames`），
+        而一次快照之间通常只有一两个节点的正文真的变了。判据用 digest 不用
+        `updated_at`（秒级粒度会把同秒的两次写入读成没变）；digest 为空（迁移前的行）
+        一律按没缓存处理。
+        """
+        node_id = str(head['node_id'] or '').strip()
+        depth = int(head['depth'] or 0)
+        node_kind = str(head['node_kind'] or 'execution')
+        phase = str(head['phase'] or '')
+        stale = frame_is_stale(str(head['updated_at'] or ''))
+        digest = str(head['payload_digest'] or '').strip()
+        cached = cache.get(node_id)
+        frame = cached[1] if cached is not None and digest and cached[0] == digest else None
+        if frame is None:
+            record = self._store.get_task_runtime_frame(task_id, node_id)
+            if record is None:
+                return None
+            payload = dict(record.payload or {})
+            frame = TaskLiveFrame(
+                node_id=node_id,
+                depth=depth,
+                node_kind=node_kind,
+                phase=phase,
+                stale=stale,
+                await_marker=str(payload.get('await_marker') or ''),
+                await_started_at=str(payload.get('await_started_at') or ''),
+                # 重试态过同一个白名单：直接展开原始 dict 会把未列出的字段带进快照。
+                model_retry_status=self._log_service._sanitize_model_retry_status(
+                    payload.get('model_retry_status')
+                ),
+                stage_mode=str(payload.get('stage_mode') or ''),
+                stage_status=str(payload.get('stage_status') or ''),
+                stage_goal=str(payload.get('stage_goal') or ''),
+                stage_total_steps=int(payload.get('stage_total_steps') or 0),
+                tool_calls=[
+                    TaskLiveToolCall(
+                        tool_call_id=str(item.get('tool_call_id') or ''),
+                        tool_name=str(item.get('tool_name') or ''),
+                        status=str(item.get('status') or 'queued'),
+                        started_at=str(item.get('started_at') or ''),
+                        finished_at=str(item.get('finished_at') or ''),
+                        elapsed_seconds=self._coerce_elapsed_seconds(item.get('elapsed_seconds')),
+                    )
+                    for item in list(payload.get('tool_calls') or [])
+                    if isinstance(item, dict)
+                ],
+                child_pipelines=[
+                    TaskLiveChildPipeline(
+                        index=int(item.get('index') or 0),
+                        goal=str(item.get('goal') or ''),
+                        status=str(item.get('status') or 'queued'),
+                        child_node_id=str(item.get('child_node_id') or ''),
+                        acceptance_node_id=str(item.get('acceptance_node_id') or ''),
+                        check_status=str(item.get('check_status') or ''),
+                        started_at=str(item.get('started_at') or ''),
+                        finished_at=str(item.get('finished_at') or ''),
+                    )
+                    for item in list(payload.get('child_pipelines') or [])
+                    if isinstance(item, dict)
+                ],
+            )
+            if digest:
+                cache[node_id] = (digest, frame)
+            return frame
+        # 抬头派生的四个字段每拍重算后覆盖：写进缓存会把一帧的"过期"时刻与阶段
+        # 冻结在第一次读取那一刻。
+        return frame.model_copy(update={
+            'depth': depth,
+            'node_kind': node_kind,
+            'phase': phase,
+            'stale': stale,
+        })
 
     @staticmethod
     def _sanitize_dispatch_counters(payload: Any) -> dict[str, int]:
