@@ -4034,7 +4034,10 @@ class TaskLogService:
                 self._record_debug('log_service.update_frame', started_at=started_at, started_mono=started_mono)
                 return
             current = self._store.get_task_runtime_frame(task_id, node_id)
-            target = self._hydrate_runtime_frame_record(current) if current is not None else self._default_frame(node_id=node_id)
+            # 读-改-写只需要正文里那几十个字段：会话历史的家在 `messages_ref` 指向的
+            # 内容存储里，不在这一行。mutator 没带 `messages` 时 `_runtime_frame_record`
+            # 会保留原指针（并有 WARNING 兜底），所以轻读不会把历史写没。
+            target = self._hydrate_runtime_frame_record(current, include_messages=False) if current is not None else self._default_frame(node_id=node_id)
             mutated = frame_mutator(copy.deepcopy(target))
             if not isinstance(mutated, dict):
                 raise TypeError('frame mutator must return a dict')
