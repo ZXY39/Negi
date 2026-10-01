@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import queue
 import sqlite3
@@ -350,6 +351,7 @@ class SQLiteTaskStore:
                 waiting INTEGER NOT NULL,
                 updated_at TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
+                payload_digest TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (task_id, node_id)
             )
             ''',
@@ -526,6 +528,7 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_commands', 'result_json', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'accepted', "INTEGER")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'rejected_reason', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_runtime_frames', 'payload_digest', "TEXT NOT NULL DEFAULT ''")
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
             self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
 
@@ -2787,13 +2790,22 @@ class SQLiteTaskStore:
                 _append((payload.get('payload') or {}).get('token_usage_by_model'))
         return usage_lists
 
+    @staticmethod
+    def _frame_payload_digest(payload_json: str) -> str:
+        """帧正文的短摘要，给摘要组装的复用缓存当变更判据。
+
+        不能用 `updated_at` 顶替：它是秒级粒度，同一秒内的两次写入读回同一个值。
+        """
+        return hashlib.blake2b(str(payload_json or '').encode('utf-8'), digest_size=8).hexdigest()
+
     def replace_task_runtime_frames(self, task_id: str, records: list[TaskProjectionRuntimeFrameRecord]) -> None:
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute('DELETE FROM task_runtime_frames WHERE task_id = ?', (task_id,))
             for record in records:
+                payload_json = record.model_dump_json()
                 conn.execute(
-                    'INSERT INTO task_runtime_frames (task_id, node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_json) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    'INSERT INTO task_runtime_frames (task_id, node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_json, payload_digest) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (
                         record.task_id,
                         record.node_id,
@@ -2804,16 +2816,18 @@ class SQLiteTaskStore:
                         1 if record.runnable else 0,
                         1 if record.waiting else 0,
                         record.updated_at,
-                        record.model_dump_json(),
+                        payload_json,
+                        self._frame_payload_digest(payload_json),
                     ),
                 )
         self._run_write(operation)
 
     def upsert_task_runtime_frame(self, record: TaskProjectionRuntimeFrameRecord) -> TaskProjectionRuntimeFrameRecord:
         def operation(conn: sqlite3.Connection) -> None:
+            payload_json = record.model_dump_json()
             conn.execute(
-                'INSERT INTO task_runtime_frames (task_id, node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_json) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                'INSERT INTO task_runtime_frames (task_id, node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_json, payload_digest) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(task_id, node_id) DO UPDATE SET '
                 'depth=excluded.depth, '
                 'node_kind=excluded.node_kind, '
@@ -2822,7 +2836,8 @@ class SQLiteTaskStore:
                 'runnable=excluded.runnable, '
                 'waiting=excluded.waiting, '
                 'updated_at=excluded.updated_at, '
-                'payload_json=excluded.payload_json',
+                'payload_json=excluded.payload_json, '
+                'payload_digest=excluded.payload_digest',
                 (
                     record.task_id,
                     record.node_id,
@@ -2833,11 +2848,26 @@ class SQLiteTaskStore:
                     1 if record.runnable else 0,
                     1 if record.waiting else 0,
                     record.updated_at,
-                    record.model_dump_json(),
+                    payload_json,
+                    self._frame_payload_digest(payload_json),
                 ),
             )
         self._run_write(operation)
         return record
+
+    def list_task_runtime_frame_heads(self, task_id: str) -> list[sqlite3.Row]:
+        """帧台账的「抬头」：只取列与正文摘要，不取 payload_json 本体。
+
+        单帧正文实测几十 KB（实盘一个任务 180 帧合计 7.45 MB），把正文搬回 Python 一次
+        71 ms，而只读抬头是 0.42 ms。正文换没换由 payload_digest 判，命中才回表单帧。
+        """
+        return list(
+            self._fetchall_light(
+                'SELECT node_id, depth, node_kind, phase, active, runnable, waiting, updated_at, payload_digest '
+                'FROM task_runtime_frames WHERE task_id = ? ORDER BY depth ASC, node_id ASC',
+                (str(task_id or '').strip(),),
+            )
+        )
 
     def _task_node_tool_result_fields(self, record: TaskProjectionToolResultRecord) -> dict[str, object]:
         return {

@@ -135,6 +135,10 @@ _STAGE_GOAL_CHAR_LIMIT = 240
 _STAGE_ROUND_TEXT_CHAR_LIMIT = 800
 _STAGE_KEY_REF_LIMIT = 4
 
+# 运行时帧摘要的复用上限（按任务）。一个 180 帧任务的公开帧合计约 4.3 MB，
+# 只留最近几个任务的账，超出按插入序淘汰。
+_SUMMARY_FRAME_CACHE_MAX_TASKS = 4
+
 
 def _default_governance_state(*, node_count_baseline: int = 1) -> dict[str, Any]:
     return {
@@ -229,6 +233,7 @@ class TaskLogService:
         self._live_patch_history_guard = threading.Lock()
         self._pending_live_patch_history: dict[str, dict[str, Any]] = {}
         self._live_patch_history_timers: dict[str, threading.Timer] = {}
+        self._summary_frame_cache: dict[str, dict[str, tuple[str, dict[str, Any]]]] = {}
         # 磁盘治理（P0）：事件写失败计数与限流告警（计数随心跳 debug 块入库，
         # 告警每 _EVENT_WRITE_FAILURE_WARN_INTERVAL_SECONDS 至多一条，防磁盘满刷屏）。
         self._event_write_failures = 0
@@ -5624,26 +5629,81 @@ class TaskLogService:
         except Exception:
             return None
 
-    def _runtime_summary_payload(self, task_id: str, *, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
-        if isinstance(runtime_state, dict):
-            state = runtime_state
+    def _summary_cache_for_task(self, task_id: str) -> dict[str, tuple[str, dict[str, Any]]]:
+        cache = self._summary_frame_cache.get(task_id)
+        if cache is not None:
+            return cache
+        while len(self._summary_frame_cache) >= _SUMMARY_FRAME_CACHE_MAX_TASKS:
+            self._summary_frame_cache.pop(next(iter(self._summary_frame_cache)), None)
+        cache = {}
+        self._summary_frame_cache[task_id] = cache
+        return cache
+
+    def _runtime_summary_from_frame_heads(self, task_id: str) -> dict[str, Any]:
+        """按帧头拼运行时状态：正文没换过的帧直接复用上一次装配好的公开帧。
+
+        旧路径每次 live.patch 都要把全任务帧正文读回 Python（实盘 180 帧 / 7.45 MB：读
+        71 ms、装配 189–333 ms），而一次推送通常只有一个节点的正文变了（回表单帧
+        0.07 ms）。变更判据取 `payload_digest` 而不是 `updated_at`——后者是秒级粒度，
+        同一秒内的两次写入读回同一个值，会把新内容当旧内容。
+        """
+        heads = list(self._store.list_task_runtime_frame_heads(task_id) or [])
+        cache = self._summary_cache_for_task(task_id)
+        frames: list[dict[str, Any]] = []
+        active_node_ids: list[str] = []
+        runnable_node_ids: list[str] = []
+        waiting_node_ids: list[str] = []
+        live_node_ids: set[str] = set()
+        for head in heads:
+            node_id = str(head['node_id'] or '').strip()
+            if not node_id:
+                continue
+            live_node_ids.add(node_id)
+            digest = str(head['payload_digest'] or '')
+            cached = cache.get(node_id)
+            if cached is not None and digest and cached[0] == digest:
+                public = dict(cached[1])
+            else:
+                record = self._store.get_task_runtime_frame(task_id, node_id)
+                if record is None:
+                    continue
+                public = self._public_runtime_frame(dict(record.payload or {}))
+                # stale 是按当下时刻算出来的，不进缓存，否则一帧会永远"不 stale"。
+                public.pop('stale', None)
+                if digest:
+                    cache[node_id] = (digest, public)
+                public = dict(public)
+            public['stale'] = frame_is_stale(str(head['updated_at'] or ''))
+            frames.append(public)
+            if bool(head['active']):
+                active_node_ids.append(node_id)
+            if bool(head['runnable']):
+                runnable_node_ids.append(node_id)
+            if bool(head['waiting']):
+                waiting_node_ids.append(node_id)
+        if not heads:
+            self._summary_frame_cache.pop(task_id, None)
         else:
-            frame_records = list(self._store.list_task_runtime_frames(task_id) or [])
-            runtime_meta = self.read_task_runtime_meta(task_id) or self._default_runtime_meta()
-            state = {
-                'active_node_ids': [record.node_id for record in frame_records if bool(record.active)],
-                'runnable_node_ids': [record.node_id for record in frame_records if bool(record.runnable)],
-                'waiting_node_ids': [record.node_id for record in frame_records if bool(record.waiting)],
-                'dispatch_limits': dict(runtime_meta.get('dispatch_limits') or {}),
-                'dispatch_running': dict(runtime_meta.get('dispatch_running') or {}),
-                'dispatch_queued': dict(runtime_meta.get('dispatch_queued') or {}),
-                'governance': dict(runtime_meta.get('governance') or {}),
-                'distribution': dict(runtime_meta.get('distribution') or {}),
-                'frames': [
-                    {**dict(record.payload or {}), 'stale': frame_is_stale(record.updated_at)}
-                    for record in frame_records
-                ],
-            }
+            for gone_node_id in [key for key in cache if key not in live_node_ids]:
+                cache.pop(gone_node_id, None)
+        runtime_meta = self.read_task_runtime_meta(task_id) or self._default_runtime_meta()
+        return self._runtime_summary_from_state({
+            'active_node_ids': active_node_ids,
+            'runnable_node_ids': runnable_node_ids,
+            'waiting_node_ids': waiting_node_ids,
+            'dispatch_limits': dict(runtime_meta.get('dispatch_limits') or {}),
+            'dispatch_running': dict(runtime_meta.get('dispatch_running') or {}),
+            'dispatch_queued': dict(runtime_meta.get('dispatch_queued') or {}),
+            'governance': dict(runtime_meta.get('governance') or {}),
+            'distribution': dict(runtime_meta.get('distribution') or {}),
+            # 这里的 frames 已经是公开形状，再投影一次是白活一遍（实测每次 15 ms）。
+            'frames_already_public': True,
+            'frames': frames,
+        })
+
+    def _runtime_summary_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        raw_frames = [item for item in list(state.get('frames') or []) if isinstance(item, dict)]
+        frames = raw_frames if state.get('frames_already_public') else [self._public_runtime_frame(item) for item in raw_frames]
         return {
             'active_node_ids': [str(item) for item in list(state.get('active_node_ids') or []) if str(item or '').strip()],
             'runnable_node_ids': [str(item) for item in list(state.get('runnable_node_ids') or []) if str(item or '').strip()],
@@ -5653,8 +5713,13 @@ class TaskLogService:
             'dispatch_queued': self._sanitize_dispatch_counters(state.get('dispatch_queued')),
             'governance': self._sanitize_governance_state(state.get('governance')),
             'distribution': self._sanitize_distribution_state(state.get('distribution')),
-            'frames': [self._public_runtime_frame(item) for item in list(state.get('frames') or []) if isinstance(item, dict)],
+            'frames': frames,
         }
+
+    def _runtime_summary_payload(self, task_id: str, *, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
+        if isinstance(runtime_state, dict):
+            return self._runtime_summary_from_state(runtime_state)
+        return self._runtime_summary_from_frame_heads(task_id)
 
     @classmethod
     def _sanitize_runtime_state(cls, payload: dict[str, Any]) -> dict[str, Any]:
