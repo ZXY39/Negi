@@ -208,6 +208,12 @@ _TASK_EVENT_QUEUE_MAX_ITEMS = 4096
 # 回环连接普查：超过这一条就限流打一行存活任务名分组，用来点名占连接的车道。
 _LOOPBACK_CENSUS_WARN_CONNECTIONS = 2000
 _LOOPBACK_CENSUS_INTERVAL_SECONDS = 60.0
+# 取证车道（默认关死）：数据根里放一个 `loop-census.on` 才开，逐点名 loop 上的任务。
+# 用途是「worker 心跳正常但命令车道不消费」这类现场：光看 worker_status 分不出
+# 事件循环死了还是某条车道任务不在了，而这条车道本身也顺便回答这个问题。
+_LOOP_CENSUS_MARKER_NAME = 'loop-census.on'
+_LOOP_CENSUS_INTERVAL_SECONDS = 20.0
+_LOOP_CENSUS_SAMPLE_TASKS = 6
 _TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
 _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
@@ -780,6 +786,7 @@ class MainRuntimeService:
         self._event_loop = None
         self._watchdog_snapshot_flights: dict[str, asyncio.Task] = {}
         self._mem_probe = None
+        self._loop_census_task = None
         self._worker_lease_takeover = False
         self._worker_lease_acquired = False
         self._command_poller_task: asyncio.Task[Any] | None = None
@@ -909,6 +916,8 @@ class MainRuntimeService:
             self._command_poller_task = asyncio.create_task(self._worker_command_loop(), name=f'main-runtime-command-poller:{self.worker_id or "worker"}')
         if self._worker_heartbeat_task is None or self._worker_heartbeat_task.done():
             self._worker_heartbeat_task = asyncio.create_task(self._worker_heartbeat_loop(), name=f'main-runtime-worker-heartbeat:{self.worker_id or "worker"}')
+        if self._loop_census_task is None or self._loop_census_task.done():
+            self._loop_census_task = asyncio.create_task(self._loop_census_loop(), name=f'main-runtime-loop-census:{self.worker_id or "worker"}')
 
     async def _requeue_interrupted_task(self, task_id: str) -> None:
         """引擎级中断任务的尽力即时重排（进程仍活着时）。
@@ -1038,6 +1047,55 @@ class MainRuntimeService:
             except Exception:
                 idle_index = 0
                 await asyncio.sleep(0.5)
+
+    def _loop_census_marker_path(self) -> Path:
+        return Path(self.store.path.parent) / _LOOP_CENSUS_MARKER_NAME
+
+    @staticmethod
+    def _task_suspend_site(task: asyncio.Task) -> str:
+        if task.done():
+            return 'done'
+        frame = getattr(task.get_coro(), 'cr_frame', None)
+        if frame is None:
+            return 'not-started'
+        code = frame.f_code
+        return f'{os.path.basename(code.co_filename)}:{frame.f_lineno} in {code.co_name}'
+
+    async def _loop_census_loop(self) -> None:
+        """标记文件在的时候把 loop 上的任务点名打一行；不在就只是睡着。
+
+        要分的现场是「事件循环停了」和「循环在转但某条车道的任务不在了」：
+        这条车道自己出现在输出里，就证明前者不成立，嫌疑只剩后者。
+        """
+
+        while True:
+            await asyncio.sleep(_LOOP_CENSUS_INTERVAL_SECONDS)
+            try:
+                if not self._loop_census_marker_path().exists():
+                    continue
+                tasks = list(asyncio.all_tasks())
+                prefixes: dict[str, int] = {}
+                poller_site = 'missing'
+                for task in tasks:
+                    name = str(task.get_name() or '')
+                    key = name.split(':', 1)[0] or '(unnamed)'
+                    prefixes[key] = prefixes.get(key, 0) + 1
+                    if 'command-poller' in name:
+                        poller_site = self._task_suspend_site(task)
+                sites = [
+                    f'{task.get_name()}@{self._task_suspend_site(task)}'
+                    for task in tasks[:_LOOP_CENSUS_SAMPLE_TASKS]
+                ]
+                logger.warning(
+                    'loop census: worker={} poller={} total={} prefixes={} sample={}',
+                    self.worker_id or 'worker',
+                    poller_site,
+                    len(tasks),
+                    dict(sorted(prefixes.items(), key=lambda item: -item[1])[:8]),
+                    sites,
+                )
+            except Exception:
+                pass
 
     async def _worker_heartbeat_loop(self) -> None:
         await self.worker_heartbeat_service.run_forever()
