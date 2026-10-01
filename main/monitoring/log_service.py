@@ -3945,13 +3945,22 @@ class TaskLogService:
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task)
 
-    def read_runtime_state(self, task_id: str) -> dict[str, Any] | None:
+    def read_runtime_state(self, task_id: str, *, include_frame_messages: bool = True) -> dict[str, Any] | None:
+        """整任务运行时状态。`include_frame_messages=False` 给只要帧内状态的读点。
+
+        默认带正文是给"恢复节点上下文"那一类读点留的；失速判定这类只要 `paused`/
+        `cancel_requested` 与帧里 `tool_calls` 的读点传 False——台账有 195 帧时，
+        逐帧解析会话历史是整个判定成本的四分之三。
+        """
         task = self._store.get_task(task_id)
         if task is None:
             return None
         meta = self.read_task_runtime_meta(task_id) or self._default_runtime_meta()
         frame_records = list(self._store.list_task_runtime_frames(task_id) or [])
-        frames = [self._hydrate_runtime_frame_record(record) for record in frame_records]
+        frames = [
+            self._hydrate_runtime_frame_record(record, include_messages=include_frame_messages)
+            for record in frame_records
+        ]
         return {
             'task_id': task.task_id,
             'root_node_id': task.root_node_id,
@@ -5031,7 +5040,19 @@ class TaskLogService:
         }
         return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
 
-    def _hydrate_runtime_frame_record(self, record: TaskProjectionRuntimeFrameRecord) -> dict[str, Any]:
+    def _hydrate_runtime_frame_record(
+        self,
+        record: TaskProjectionRuntimeFrameRecord,
+        *,
+        include_messages: bool = True,
+    ) -> dict[str, Any]:
+        """`include_messages=False` 时不碰 `messages_ref` 指向的会话历史。
+
+        正文解析（读盘 + 解码 + `json.loads` + 建导航索引）是这条链最贵的一段：负载窗口
+        py-spy 里 `_resolve_content_ref` 一层就占 hydration 总开销的四分之三。只读帧内
+        状态（阶段、工具调用、指针本身）的读点都该传 False——指针与计数是写帧时就在
+        payload 里的字段，解析正文不会改变它们。
+        """
         payload = dict(record.payload or {})
         messages: list[dict[str, Any]] = []
         callable_tool_snapshots: list[dict[str, Any]] = self._sanitize_callable_tool_snapshots(payload.get('callable_tool_snapshots') or [])
@@ -5045,7 +5066,7 @@ class TaskLogService:
         )
         ref = str(payload.get('messages_ref') or '').strip()
         stored_messages_count = int(payload.get('messages_count') or 0)
-        if ref:
+        if ref and include_messages:
             text = self._resolve_content_ref(ref)
             if text:
                 try:
