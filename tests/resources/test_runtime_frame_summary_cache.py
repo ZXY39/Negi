@@ -182,3 +182,99 @@ def test_cache_holds_only_a_handful_of_tasks(tmp_path: Path) -> None:
         service._runtime_summary_payload(task_id)
 
     assert len(service._summary_frame_cache) <= _SUMMARY_FRAME_CACHE_MAX_TASKS
+
+
+def _capturing_service(tmp_path: Path) -> tuple[TaskLogService, list[dict]]:
+    service = _service(tmp_path)
+    envelopes: list[dict] = []
+
+    def _publisher(_task, envelope, _immediate):
+        envelopes.append(dict(envelope or {}))
+
+    service.add_live_snapshot_publisher(_publisher)
+    return service, envelopes
+
+
+def test_existing_node_update_publishes_delta_without_frames(tmp_path: Path) -> None:
+    service, envelopes = _capturing_service(tmp_path)
+    for node_id in ('node:a', 'node:b', 'node:c'):
+        service.upsert_frame(TASK_ID, _frame(node_id, goal=f'goal-{node_id}'))
+
+    service.update_frame(TASK_ID, 'node:b', lambda frame: {**frame, 'stage_goal': 'changed'}, publish_snapshot=True)
+
+    assert len(envelopes) == 1
+    data = dict(envelopes[0].get('data') or {})
+    summary = dict(data.get('runtime_summary') or {})
+    assert summary.get('frames_partial') is True
+    assert 'frames' not in summary
+    assert (data.get('frame') or {}).get('node_id') == 'node:b'
+    assert (data.get('frame') or {}).get('stage_goal') == 'changed'
+    # active 由"有 node_id 就是活跃帧"决定（runnable 取决于 phase 集合），这里只验名单在
+    assert sorted(summary.get('active_node_ids') or []) == ['node:a', 'node:b', 'node:c']
+
+
+def test_first_frame_of_a_node_still_publishes_full_summary(tmp_path: Path) -> None:
+    service, envelopes = _capturing_service(tmp_path)
+    service.upsert_frame(TASK_ID, _frame('node:a', goal='goal-a'))
+
+    service.upsert_frame(TASK_ID, _frame('node:new', goal='goal-new'), publish_snapshot=True)
+
+    data = dict(envelopes[-1].get('data') or {})
+    summary = dict(data.get('runtime_summary') or {})
+    assert summary.get('frames_partial') is None
+    assert sorted(item['node_id'] for item in summary.get('frames') or []) == ['node:a', 'node:new']
+
+
+def test_update_frame_on_existing_node_publishes_delta_end_to_end(tmp_path: Path) -> None:
+    """变化发生在已存在的节点上时才允许增量：首帧必须带全量。"""
+    service, envelopes = _capturing_service(tmp_path)
+    for node_id in ('node:a', 'node:b'):
+        service.upsert_frame(TASK_ID, _frame(node_id, goal=f'goal-{node_id}'))
+
+    service.update_frame(TASK_ID, 'node:a', lambda frame: {**frame, 'phase': 'before_model'}, publish_snapshot=True)
+
+    summary = dict((envelopes[-1].get('data') or {}).get('runtime_summary') or {})
+    assert summary.get('frames_partial') is True
+
+
+def test_delta_summary_reads_no_frame_payloads(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    for node_id in ('node:a', 'node:b', 'node:c'):
+        service.upsert_frame(TASK_ID, _frame(node_id, goal=f'goal-{node_id}'))
+
+    reads: list[str] = []
+    original = service._store.get_task_runtime_frame
+
+    def counting(task_id: str, node_id: str):
+        reads.append(str(node_id))
+        return original(task_id, node_id)
+
+    service._store.get_task_runtime_frame = counting  # type: ignore[method-assign]
+    summary = service._runtime_summary_payload(TASK_ID, include_frames=False)
+
+    assert reads == []
+    assert 'frames' not in summary
+    assert summary.get('stale_node_ids') == []
+
+
+def test_stale_node_ids_are_reported_in_both_modes(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    service.upsert_frame(TASK_ID, _frame('node:a', goal='goal-a'))
+    service.upsert_frame(TASK_ID, _frame('node:b', goal='goal-b'))
+
+    connection = sqlite3.connect(str(service._store.path))
+    try:
+        connection.execute(
+            'UPDATE task_runtime_frames SET updated_at = ? WHERE task_id = ? AND node_id = ?',
+            ('2026-01-01T00:00:00+08:00', TASK_ID, 'node:b'),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    delta = service._runtime_summary_payload(TASK_ID, include_frames=False)
+    full = service._runtime_summary_payload(TASK_ID)
+
+    assert delta.get('stale_node_ids') == ['node:b']
+    stale_flags = {item['node_id']: item['stale'] for item in full['frames']}
+    assert stale_flags == {'node:a': False, 'node:b': True}

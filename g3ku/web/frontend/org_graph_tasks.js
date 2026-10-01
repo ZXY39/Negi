@@ -2099,17 +2099,29 @@ function handleTaskEvent(payload) {
             ? activeTaskDistributionState()
             : null;
         const runtimeSummary = payload.data?.runtime_summary || {};
-        const frames = Array.isArray(runtimeSummary?.frames) ? runtimeSummary.frames : [];
+        const isDelta = runtimeSummary.frames_partial === true;
+        const deltaFrame = payload.data?.frame && typeof payload.data.frame === "object" ? payload.data.frame : null;
         const activeNodeIds = Array.isArray(runtimeSummary?.active_node_ids) ? runtimeSummary.active_node_ids : [];
         const runnableNodeIds = Array.isArray(runtimeSummary?.runnable_node_ids) ? runtimeSummary.runnable_node_ids : [];
         const waitingNodeIds = Array.isArray(runtimeSummary?.waiting_node_ids) ? runtimeSummary.waiting_node_ids : [];
         const hasTreeContext = !!String(S.treeRootNodeId || "").trim();
-        S.frontier = frames;
+        if (isDelta && !Object.keys(S.liveFrameMap || {}).length) {
+            // 手里还没有帧表（详情没打开过、或断线窗口里错过了全量）：增量并不出正确状态，
+            // 直接重拉一次详情，让全量摘要补齐。
+            const currentTaskId = String(S.currentTaskId || "").trim();
+            if (currentTaskId) void reconcileTaskDetailAfterWsReconnect(currentTaskId);
+            return;
+        }
+        const frames = isDelta ? null : (Array.isArray(runtimeSummary?.frames) ? runtimeSummary.frames : []);
+        const frameList = mergeTaskLiveFrameDelta({
+            frames,
+            frame: deltaFrame,
+            staleNodeIds: runtimeSummary.stale_node_ids,
+        });
         S.taskRuntimeSummary = runtimeSummary || null;
-        S.liveFrameMap = indexTaskLiveFrames(frames);
         const selectedNodeId = String(S.selectedNodeId || "").trim();
         if (selectedNodeId && typeof renderTaskNodeModelRetryToast === "function") {
-            const matchingFrames = frames.filter((item) => (
+            const matchingFrames = frameList.filter((item) => (
                 String(item?.node_id || "").trim() === selectedNodeId
             ));
             const selectedFrame = matchingFrames[matchingFrames.length - 1] || null;
@@ -2132,7 +2144,7 @@ function handleTaskEvent(payload) {
             const distributionUiChanged = String(previousDistributionState?.ui_mode || "").trim() !== String(nextDistributionState?.ui_mode || "").trim()
                 || String(previousDistributionState?.active_epoch_id || "").trim() !== String(nextDistributionState?.active_epoch_id || "").trim()
                 || String(previousDistributionState?.state || "").trim() !== String(nextDistributionState?.state || "").trim();
-            const sawDistributionFrame = frames.some((item) => String(item?.phase || "").trim() === "message_distribution");
+            const sawDistributionFrame = frameList.some((item) => String(item?.phase || "").trim() === "message_distribution");
             const rootNodeId = String(S.treeRootNodeId || "").trim();
             const candidateNodeIds = [...new Set([...activeNodeIds, ...runnableNodeIds, ...waitingNodeIds]
                 .map((item) => String(item || "").trim())

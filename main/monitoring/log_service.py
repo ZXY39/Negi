@@ -4017,7 +4017,13 @@ class TaskLogService:
             if publish_snapshot and changed:
                 # 内容没变的一整次 no-op 写（重复 await 标记、同值回填）不再推 live.patch：
                 # 一次推送要组装全任务摘要，成本按节点数走。
-                self._publish_task_live_patch_locked(task=task, frame=record)
+                # 已存在的节点走增量档（读者自己按 stale 名单刷新帧表）；首帧仍发全量，
+                # 因为节点集合变了——少一份全量就会让读者永远缺那一行。
+                self._publish_task_live_patch_locked(
+                    task=task,
+                    frame=record,
+                    counts_only=current is not None,
+                )
             self._record_debug('log_service.update_frame', started_at=started_at, started_mono=started_mono)
 
     def remove_frame(self, task_id: str, node_id: str, *, publish_snapshot: bool = False) -> None:
@@ -5316,10 +5322,13 @@ class TaskLogService:
         task: TaskRecord,
         frame: TaskProjectionRuntimeFrameRecord | None = None,
         removed_node_id: str = '',
+        counts_only: bool = False,
     ) -> None:
         payload = {
             'task_id': task.task_id,
-            'runtime_summary': self._runtime_summary_payload(task.task_id),
+            # counts_only＝增量档：摘要里不带 frames 数组，只带变化的那一帧（`frame`）
+            # 与角色/计数/stale 名单。实盘一份全量摘要 4.3 MB，而单帧只有几十 KB。
+            'runtime_summary': self._runtime_summary_payload(task.task_id, include_frames=not counts_only),
             'frame': self._public_runtime_frame(self._hydrate_runtime_frame_record(frame)) if frame is not None else None,
             'removed_node_id': str(removed_node_id or '').strip(),
         }
@@ -5639,26 +5648,42 @@ class TaskLogService:
         self._summary_frame_cache[task_id] = cache
         return cache
 
-    def _runtime_summary_from_frame_heads(self, task_id: str) -> dict[str, Any]:
+    def _runtime_summary_from_frame_heads(self, task_id: str, *, include_frames: bool = True) -> dict[str, Any]:
         """按帧头拼运行时状态：正文没换过的帧直接复用上一次装配好的公开帧。
 
         旧路径每次 live.patch 都要把全任务帧正文读回 Python（实盘 180 帧 / 7.45 MB：读
         71 ms、装配 189–333 ms），而一次推送通常只有一个节点的正文变了（回表单帧
         0.07 ms）。变更判据取 `payload_digest` 而不是 `updated_at`——后者是秒级粒度，
         同一秒内的两次写入读回同一个值，会把新内容当旧内容。
+
+        `include_frames=False` 是增量档：只给三个角色列表、计数块与 `stale_node_ids`，
+        一帧正文都不读、也不碰摘要缓存（那次 SELECT 就是全部成本）。
         """
         heads = list(self._store.list_task_runtime_frame_heads(task_id) or [])
-        cache = self._summary_cache_for_task(task_id)
+        cache = self._summary_cache_for_task(task_id) if include_frames else None
         frames: list[dict[str, Any]] = []
         active_node_ids: list[str] = []
         runnable_node_ids: list[str] = []
         waiting_node_ids: list[str] = []
+        stale_node_ids: list[str] = []
         live_node_ids: set[str] = set()
         for head in heads:
             node_id = str(head['node_id'] or '').strip()
             if not node_id:
                 continue
             live_node_ids.add(node_id)
+            # stale 每帧按帧头现算：增量档没有帧体，就单独把过期名单交给读者刷新自己那份帧表。
+            is_stale = frame_is_stale(str(head['updated_at'] or ''))
+            if is_stale:
+                stale_node_ids.append(node_id)
+            if bool(head['active']):
+                active_node_ids.append(node_id)
+            if bool(head['runnable']):
+                runnable_node_ids.append(node_id)
+            if bool(head['waiting']):
+                waiting_node_ids.append(node_id)
+            if cache is None:
+                continue
             digest = str(head['payload_digest'] or '')
             cached = cache.get(node_id)
             if cached is not None and digest and cached[0] == digest:
@@ -5668,22 +5693,16 @@ class TaskLogService:
                 if record is None:
                     continue
                 public = self._public_runtime_frame(dict(record.payload or {}))
-                # stale 是按当下时刻算出来的，不进缓存，否则一帧会永远"不 stale"。
+                # stale 不进缓存，否则一帧会永远读成"不 stale"。
                 public.pop('stale', None)
                 if digest:
                     cache[node_id] = (digest, public)
                 public = dict(public)
-            public['stale'] = frame_is_stale(str(head['updated_at'] or ''))
+            public['stale'] = is_stale
             frames.append(public)
-            if bool(head['active']):
-                active_node_ids.append(node_id)
-            if bool(head['runnable']):
-                runnable_node_ids.append(node_id)
-            if bool(head['waiting']):
-                waiting_node_ids.append(node_id)
         if not heads:
             self._summary_frame_cache.pop(task_id, None)
-        else:
+        elif cache is not None:
             for gone_node_id in [key for key in cache if key not in live_node_ids]:
                 cache.pop(gone_node_id, None)
         runtime_meta = self.read_task_runtime_meta(task_id) or self._default_runtime_meta()
@@ -5698,13 +5717,16 @@ class TaskLogService:
             'distribution': dict(runtime_meta.get('distribution') or {}),
             # 这里的 frames 已经是公开形状，再投影一次是白活一遍（实测每次 15 ms）。
             'frames_already_public': True,
+            'frames_partial': cache is None,
+            # 全量档每帧自带 stale，不必再报名单；只有不带帧体时才需要。
+            'stale_node_ids': stale_node_ids if cache is None else None,
             'frames': frames,
         })
 
     def _runtime_summary_from_state(self, state: dict[str, Any]) -> dict[str, Any]:
         raw_frames = [item for item in list(state.get('frames') or []) if isinstance(item, dict)]
         frames = raw_frames if state.get('frames_already_public') else [self._public_runtime_frame(item) for item in raw_frames]
-        return {
+        summary: dict[str, Any] = {
             'active_node_ids': [str(item) for item in list(state.get('active_node_ids') or []) if str(item or '').strip()],
             'runnable_node_ids': [str(item) for item in list(state.get('runnable_node_ids') or []) if str(item or '').strip()],
             'waiting_node_ids': [str(item) for item in list(state.get('waiting_node_ids') or []) if str(item or '').strip()],
@@ -5715,11 +5737,28 @@ class TaskLogService:
             'distribution': self._sanitize_distribution_state(state.get('distribution')),
             'frames': frames,
         }
+        # 只有增量档自带过期名单；全量档每帧自己有 stale 字段，别的生产者（read_runtime_state）
+        # 更没有时不许凭空报"无人过期"。
+        if state.get('stale_node_ids') is not None:
+            summary['stale_node_ids'] = [
+                str(item) for item in list(state.get('stale_node_ids') or []) if str(item or '').strip()
+            ]
+        if state.get('frames_partial'):
+            summary['frames_partial'] = True
+            # 增量档不给空 frames 数组：那会被读成"这任务一帧都没有"，而不是"没带帧"。
+            summary.pop('frames', None)
+        return summary
 
-    def _runtime_summary_payload(self, task_id: str, *, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _runtime_summary_payload(
+        self,
+        task_id: str,
+        *,
+        runtime_state: dict[str, Any] | None = None,
+        include_frames: bool = True,
+    ) -> dict[str, Any]:
         if isinstance(runtime_state, dict):
             return self._runtime_summary_from_state(runtime_state)
-        return self._runtime_summary_from_frame_heads(task_id)
+        return self._runtime_summary_from_frame_heads(task_id, include_frames=include_frames)
 
     @classmethod
     def _sanitize_runtime_state(cls, payload: dict[str, Any]) -> dict[str, Any]:

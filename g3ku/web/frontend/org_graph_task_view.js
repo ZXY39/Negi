@@ -1171,6 +1171,39 @@ function indexTaskLiveFrames(frames) {
     );
 }
 
+// live.patch 有两种载荷：全量（带 frames 数组）与增量（frames_partial=true，只带变化的
+// 那一帧 + 三个角色名单 + stale 名单）。实盘一份全量摘要 4.3 MB / 173 帧，而单帧几十 KB，
+// 所以节点集合不变时服务端不再重发整表。增量并进现有帧表：顺序保持原样，stale 就地刷新
+// （后端每帧的 stale 是按写入选的当下时刻算的，增量档靠 stale_node_ids 带过来）。
+function mergeTaskLiveFrameDelta({ frames, frame, staleNodeIds } = {}) {
+    if (Array.isArray(frames)) {
+        S.frontier = frames;
+        S.liveFrameMap = indexTaskLiveFrames(frames);
+        return frames;
+    }
+    const frontier = Array.isArray(S.frontier) ? S.frontier : [];
+    const stale = new Set(
+        (Array.isArray(staleNodeIds) ? staleNodeIds : [])
+            .map((item) => String(item || "").trim())
+            .filter(Boolean),
+    );
+    frontier.forEach((item) => {
+        if (!item || item === frame) return;
+        item.stale = stale.has(String(item.node_id || "").trim());
+    });
+    const nodeId = String(frame?.node_id || "").trim();
+    if (!nodeId) return frontier;
+    let replaced = false;
+    frontier.forEach((item, index) => {
+        if (replaced || String(item?.node_id || "").trim() !== nodeId) return;
+        frontier[index] = frame;
+        replaced = true;
+    });
+    S.frontier = replaced ? frontier : [...frontier, frame];
+    S.liveFrameMap = { ...(S.liveFrameMap || {}), [nodeId]: frame };
+    return S.frontier;
+}
+
 function liveFramesByNodeId() {
     const frames = Object.entries(S.liveFrameMap || {});
     return new Map(
