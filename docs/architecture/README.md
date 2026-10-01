@@ -99,7 +99,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
 - 想判断任务停滞是不是资源排队造成、或性能条只看得到「现在」而要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（失速事件已自带一行窗口判读，更长的窗口用 `perf_inspect`）
 - 同时在跑节点数上不去、或界面「限」这个数与配置 `node_dispatch_concurrency` 不一致、想知道闸位这一拍为什么加/为什么收 → `runtime-overview.md`「节点回合闸」
-- worker `worker_status` 行看着一直新鲜，但存活日志/状态桥接/性能历史长期不涨 → `runtime-overview.md`「Worker Performance History」（心跳节拍在哪一步断掉、两条 worker 日志锚点）
+- 网页刷新打不开（服务端一条 `GET /` 都没记下来，而 `/api/*` 仍照常 200）、日志刷 `WinError 10055`、模型调用频率同时塌下去 → `runtime-overview.md`「worker→web 事件回流车道」（回环连接攒满内核缓冲的取证与判读口径都在那里）
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」
 - 任务树过大打不开（`Failed to open task: Request timeout`）、打开时长时间无树或「加载中(x/xx)」进度异常、从任务树返回任务大厅后长时间卡顿 → `web-and-admin.md`「Task Tree Chunked Load Contract」
 - `/api/tasks` 系列请求长时间挂起、任务大厅列表或 worker-status 数据迟迟不到、浏览器标签页唤醒/切回任务大厅后整个页面短暂失联 → `web-and-admin.md`「Web Event Loop Contract」

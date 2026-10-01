@@ -5,7 +5,10 @@ from fastapi import APIRouter, Header, HTTPException
 from g3ku.shells.web import ensure_web_runtime_services, get_agent, get_web_heartbeat_service
 from main.protocol import now_iso
 from main.service.task_distribution_error_callback import normalize_task_distribution_error_payload
-from main.service.task_event_callback import normalize_task_event_payload
+from main.service.task_event_callback import (
+    TASK_EVENT_BATCH_ALLOWED_EVENT_TYPES,
+    normalize_task_event_payload,
+)
 from main.service.task_stall_callback import normalize_task_stall_payload
 from main.service.task_terminal_callback import (
     normalize_task_terminal_payload,
@@ -54,7 +57,7 @@ async def post_task_event_batch_callback(
     normalized_items: list[dict[str, object]] = []
     for item in raw_items:
         normalized = normalize_task_event_payload(item if isinstance(item, dict) else None)
-        if not normalized or str(normalized.get('event_type') or '').strip() != 'task.summary.patch':
+        if not normalized or str(normalized.get('event_type') or '').strip() not in TASK_EVENT_BATCH_ALLOWED_EVENT_TYPES:
             raise HTTPException(status_code=400, detail='task_event_batch_payload_invalid')
         normalized_items.append(normalized)
 

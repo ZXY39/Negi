@@ -198,6 +198,16 @@ _TASK_SUMMARY_MAX_WAIT_SECONDS = 1.0
 _TASK_SUMMARY_BATCH_WINDOW_SECONDS = 0.25
 _TASK_SUMMARY_BATCH_MAX_ITEMS = 128
 _TASK_SUMMARY_BATCH_MAX_BYTES = 64 * 1024
+# 实时事件车道：一个事件一个 create_task 的派发方式在实盘留下 3 846 条不关的回环
+# ESTABLISHED（worker→自家 web），两小时 26→3 846，最终把机器的套接字缓冲吃空
+# （WinError 10055）。合并窗与批量上限把连接需求从 O(事件数) 降到 O(批次数)。
+_TASK_EVENT_BATCH_WINDOW_SECONDS = 0.25
+_TASK_EVENT_BATCH_MAX_ITEMS = 128
+_TASK_EVENT_BATCH_MAX_BYTES = 64 * 1024
+_TASK_EVENT_QUEUE_MAX_ITEMS = 4096
+# 回环连接普查：超过这一条就限流打一行存活任务名分组，用来点名占连接的车道。
+_LOOPBACK_CENSUS_WARN_CONNECTIONS = 2000
+_LOOPBACK_CENSUS_INTERVAL_SECONDS = 60.0
 _TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
 _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
@@ -731,6 +741,8 @@ class MainRuntimeService:
                 if getattr(self, 'model_load_balancer', None) is not None
                 else None
             ),
+            # 回环连接读数：内部回调车道占用的 ESTABLISHED 条数，套接字耗尽的提前信号。
+            loop_observer=self.loopback_pressure_snapshot,
             disk_watermark_paths=[
                 str(data_root()),
                 str(resolved_store_path.parent),
@@ -783,7 +795,16 @@ class MainRuntimeService:
         self._task_distribution_error_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_worker_status_delivery_tasks: dict[str, asyncio.Task[Any]] = {}
         self._task_summary_delivery_task: asyncio.Task[Any] | None = None
-        self._task_event_dispatch_tasks: set[asyncio.Task[Any]] = set()
+        self._task_event_pending: list[dict[str, Any]] = []
+        self._task_event_flush_task: asyncio.Task[Any] | None = None
+        self._task_event_stats: dict[str, float] = {
+            'task_event_queued_count': 0.0,
+            'task_event_batch_request_count': 0.0,
+            'task_event_batch_item_count': 0.0,
+            'task_event_dropped_count': 0.0,
+            'task_event_single_fallback_count': 0.0,
+        }
+        self._loopback_census_logged_mono = 0.0
         self._callback_client: httpx.AsyncClient | None = None
         self._pending_task_summaries: dict[str, dict[str, Any]] = {}
         self._task_summary_flush_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -3009,6 +3030,70 @@ class MainRuntimeService:
             self._callback_client = client
         return client
 
+    def _loopback_web_port(self) -> int:
+        """本进程内部回调要打到的那个 web 端口。"""
+        for kind in ('event', 'terminal'):
+            targets = self._internal_callback_targets(workspace=Path.cwd(), callback_kind=kind)
+            for url, _token in targets:
+                try:
+                    port = urlparse(str(url or '')).port
+                except ValueError:
+                    continue
+                if port:
+                    return int(port)
+        return 0
+
+    def loopback_pressure_snapshot(self) -> dict[str, Any]:
+        """回环连接读数：本进程挂在自家 web 端口上的 ESTABLISHED 条数。
+
+        这是套接字耗尽（WinError 10055）唯一能提前看到的量——10055 本身要到
+        0.25 次/分才出现一次，等它响已经太晚。超阈值时限流打一行存活任务名分组，
+        用来点名是哪条车道在占连接。
+        """
+        port = self._loopback_web_port()
+        established = 0
+        if port:
+            try:
+                import psutil
+
+                process = psutil.Process()
+                getter = getattr(process, 'net_connections', None) or process.connections
+                for conn in getter('tcp'):
+                    remote = getattr(conn, 'raddr', None)
+                    if remote is None:
+                        continue
+                    if int(getattr(remote, 'port', 0) or 0) == port and str(conn.status) == psutil.CONN_ESTABLISHED:
+                        established += 1
+            except Exception:
+                established = 0
+        now_mono = time.monotonic()
+        if (
+            established >= _LOOPBACK_CENSUS_WARN_CONNECTIONS
+            and now_mono - self._loopback_census_logged_mono >= _LOOPBACK_CENSUS_INTERVAL_SECONDS
+        ):
+            self._loopback_census_logged_mono = now_mono
+            try:
+                prefixes: dict[str, int] = {}
+                for task in asyncio.all_tasks():
+                    name = str(task.get_name() or '')
+                    key = name.split(':', 1)[0] or '(unnamed)'
+                    prefixes[key] = prefixes.get(key, 0) + 1
+                top = sorted(prefixes.items(), key=lambda item: -item[1])[:8]
+                logger.warning(
+                    'loopback connection census: established={} port={} live_tasks={}',
+                    established,
+                    port,
+                    dict(top),
+                )
+            except Exception:
+                pass
+        stats = dict(self._task_event_stats)
+        stats.update({
+            'loopback_established_count': float(established),
+            'loopback_web_port': float(port),
+        })
+        return stats
+
     async def _post_internal_callback(
         self,
         url: str,
@@ -3041,13 +3126,82 @@ class MainRuntimeService:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        suffix = str(normalized.get('task_id') or normalized.get('event_type') or 'task-event').strip() or 'task-event'
-        task = loop.create_task(
-            self._deliver_task_event_callback(normalized),
-            name=f'main-runtime-task-event:{suffix}',
+        self._enqueue_task_event_callback(normalized, loop)
+
+    def _enqueue_task_event_callback(self, payload: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+        pending = self._task_event_pending
+        if len(pending) >= _TASK_EVENT_QUEUE_MAX_ITEMS:
+            # 满了丢最新一条非终态事件；终态事件必须挤出一个位置，丢了任务就永不收口。
+            if str(payload.get('event_type') or '').strip() != 'task.terminal':
+                self._task_event_stats['task_event_dropped_count'] += 1.0
+                return
+            dropped = next(
+                (index for index, item in enumerate(pending)
+                 if str(item.get('event_type') or '').strip() != 'task.terminal'),
+                None,
+            )
+            if dropped is not None:
+                pending.pop(dropped)
+                self._task_event_stats['task_event_dropped_count'] += 1.0
+        pending.append(payload)
+        self._task_event_stats['task_event_queued_count'] = float(len(pending))
+        self._ensure_task_event_flush_task(loop)
+
+    def _ensure_task_event_flush_task(self, loop: asyncio.AbstractEventLoop) -> None:
+        current = self._task_event_flush_task
+        if current is not None and not current.done():
+            return
+        self._task_event_flush_task = loop.create_task(
+            self._deliver_task_event_batches(),
+            name=f'main-runtime-task-event-batch:{self.worker_id or "worker"}',
         )
-        self._task_event_dispatch_tasks.add(task)
-        task.add_done_callback(self._task_event_dispatch_tasks.discard)
+
+    async def _deliver_task_event_batches(self) -> None:
+        while self._task_event_pending:
+            await asyncio.sleep(_TASK_EVENT_BATCH_WINDOW_SECONDS)
+            batch = self._drain_task_event_batch()
+            if not batch:
+                continue
+            callback_targets = self._internal_callback_targets(
+                workspace=Path.cwd(), callback_kind='event_batch'
+            )
+            delivered = False
+            if callback_targets:
+                headers = self._callback_headers(token=str(callback_targets[0][1] or ''))
+                try:
+                    response = await self._post_internal_callback(
+                        callback_targets[0][0],
+                        payload={'items': batch},
+                        headers=headers,
+                        timeout=_WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS,
+                    )
+                    delivered = 200 <= int(response.status_code or 0) < 300
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    delivered = False
+                if delivered:
+                    self._task_event_stats['task_event_batch_request_count'] += 1.0
+                    self._task_event_stats['task_event_batch_item_count'] += float(len(batch))
+            if not delivered:
+                # 批量口不可用（旧版 web 只认 summary.patch）时逐条回落，语义与改动前一致。
+                self._task_event_stats['task_event_single_fallback_count'] += float(len(batch))
+                for item in batch:
+                    await self._deliver_task_event_callback(item)
+            self._task_event_stats['task_event_queued_count'] = float(len(self._task_event_pending))
+
+    def _drain_task_event_batch(self) -> list[dict[str, Any]]:
+        batch: list[dict[str, Any]] = []
+        bytes_total = 0
+        while self._task_event_pending and len(batch) < _TASK_EVENT_BATCH_MAX_ITEMS:
+            payload = self._task_event_pending[0]
+            encoded_size = len(json.dumps(payload, ensure_ascii=False, default=str).encode('utf-8'))
+            if batch and bytes_total + encoded_size > _TASK_EVENT_BATCH_MAX_BYTES:
+                break
+            self._task_event_pending.pop(0)
+            batch.append(payload)
+            bytes_total += encoded_size
+        return batch
 
     async def _deliver_task_event_callback(self, payload: dict[str, Any]) -> None:
         callback_targets = self._internal_callback_targets(workspace=Path.cwd(), callback_kind='event')
@@ -10591,12 +10745,14 @@ class MainRuntimeService:
             task_summary_delivery_task.cancel()
             await asyncio.gather(task_summary_delivery_task, return_exceptions=True)
         self._task_summary_delivery_task = None
-        callback_tasks = [task for task in list(self._task_event_dispatch_tasks) if task is not None and not task.done()]
-        for task in callback_tasks:
-            task.cancel()
-        if callback_tasks:
-            await asyncio.gather(*callback_tasks, return_exceptions=True)
-        self._task_event_dispatch_tasks.clear()
+        flush_task = self._task_event_flush_task
+        self._task_event_flush_task = None
+        if flush_task is not None and not flush_task.done():
+            flush_task.cancel()
+            await asyncio.gather(flush_task, return_exceptions=True)
+        # 队列里没来得及投的实时补丁随进程一起丢掉，不跨重启补投：它们是"最新覆盖"的
+        # 视图刷新，下一个补丁自然补齐；任务收口走持久车道 task_terminal_outbox。
+        self._task_event_pending.clear()
         callback_client = self._callback_client
         self._callback_client = None
         if callback_client is not None:

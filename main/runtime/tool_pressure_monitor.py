@@ -33,6 +33,12 @@ _ENTRY_AXIS_CEILING_RATIO = 2.0
 #   越过 p90 档只"保持"当前并发，越过 p99 档才开始缓减。
 _ENTRY_RATE_HOLD_PENALTY = 1.0
 _ENTRY_RATE_STEP_DOWN_PENALTY = 4.0
+# - 回环连接轴：本进程挂在自家 web 端口上的 ESTABLISHED 条数。标定依据是同一天两次
+#   实测——07:21 重启后 35 分钟攒到 527、2 小时 3 846（≈1470 条/小时，两侧都不关），
+#   而 23:26 那份实例按同样斜率跑到 ~5 000 时机器开始报 WinError 10055（套接字缓冲耗尽，
+#   表现是网页打不开 + 模型调用从 363 次/小时掉到 32）。warn 取崩溃点的四成。
+_ENTRY_LOOPBACK_WARN_CONNECTIONS = 2000.0
+_ENTRY_LOOPBACK_CRITICAL_CONNECTIONS = 4000.0
 # - 单格内存成本的兜底值：实测 9 格在飞时 worker RSS 1.04 GB，凌晨 27 格时 Private 2.4 GB
 #   （≈89–115 MB/格）。有回归样本时用回归值，没有时用这一档。
 _ENTRY_SLOT_MEMORY_FALLBACK_BYTES = 110 * 1024 * 1024
@@ -134,6 +140,7 @@ class WorkerPressureMonitor:
         system_metrics_sampler: Callable[[], dict[str, Any]] | None = None,
         disk_watermark_paths: Sequence[str] | None = None,
         rate_limit_observer: Callable[[], dict[str, Any]] | None = None,
+        loop_observer: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._controller = controller
         self._store = store
@@ -141,6 +148,9 @@ class WorkerPressureMonitor:
         # 上游限流观测（回合闸的第四条轴）：由 runtime_service 注入模型负载均衡器的
         # 聚合读数，取不到就当没有这条约束。回合闸不许为了它去新起一套 429 计数。
         self._rate_limit_observer = rate_limit_observer
+        # 回环连接观测（第五根积压轴）：读 runtime_service 现数的 ESTABLISHED 条数与
+        # 事件队列计数，取不到就当没有这条约束。
+        self._loop_observer = loop_observer
         self._process_handle: Any = None
         self._entry_memory_samples: deque[tuple[float, int, int]] = deque()
         self._entry_slot_memory_estimates: deque[tuple[float, int]] = deque()
@@ -243,6 +253,12 @@ class WorkerPressureMonitor:
             'entry_throughput_rpm_60s': 0.0,
             'entry_rpm_at_last_growth': None,
             'entry_seconds_since_step': 0.0,
+            'entry_loopback_established': 0,
+            'entry_event_queue_depth': 0,
+            'entry_event_dropped_total': 0,
+            'entry_event_batch_request_total': 0,
+            'entry_event_batch_item_total': 0,
+            'entry_event_single_fallback_total': 0,
             'worker_memory_bytes': -1,
             'machine_memory_total_bytes': -1,
             'machine_memory_available_bytes': -1,
@@ -492,6 +508,7 @@ class WorkerPressureMonitor:
         machine_memory_available_bytes: Any,
         running_slots: int,
         throughput_rpm: float,
+        loop_backlog_count: float = 0.0,
     ) -> dict[str, int]:
         """按节拍决定回合闸目标：一次移动之后隔满一个反馈周期才允许再动。
 
@@ -509,6 +526,9 @@ class WorkerPressureMonitor:
             self._entry_axis_ratio(float(self._writer_queue_warn), writer_queue_depth),
             self._entry_axis_ratio(self._sqlite_write_wait_warn_ms, sqlite_write_wait_ms),
             self._entry_axis_ratio(self._sqlite_query_warn_ms, sqlite_query_latency_ms),
+            # 第五根积压轴＝回环连接条数。它量的是"内核还能不能再开一条套接字"，
+            # 10055 是它耗尽之后的事后异常，实测只有 0.25 次/分，等它响已经太晚。
+            self._entry_axis_ratio(_ENTRY_LOOPBACK_WARN_CONNECTIONS, loop_backlog_count),
         )
         penalty = max(0.0, float(dict(rate_pressure or {}).get('penalty_429_max') or 0.0))
         ratio = min(backlog_ratio, self._entry_rate_ratio(penalty))
@@ -517,6 +537,7 @@ class WorkerPressureMonitor:
             or int(writer_queue_depth or 0) >= self._writer_queue_critical
             or float(sqlite_write_wait_ms or 0.0) >= self._sqlite_write_wait_critical_ms
             or float(sqlite_query_latency_ms or 0.0) >= self._sqlite_query_critical_ms
+            or float(loop_backlog_count or 0.0) >= _ENTRY_LOOPBACK_CRITICAL_CONNECTIONS
             or penalty >= _ENTRY_RATE_STEP_DOWN_PENALTY
         )
         limits = dict(controller_snapshot.get('entry_gate_limit') or {})
@@ -612,6 +633,7 @@ class WorkerPressureMonitor:
         machine_memory_available_bytes: int | None = None,
         worker_memory_bytes: int | None = None,
         rate_pressure: dict[str, Any] | None = None,
+        loop_stats: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         current_mono = float(now_mono if now_mono is not None else time.perf_counter())
         timestamp = str(now_iso or _now_iso()).strip() or _now_iso()
@@ -869,6 +891,7 @@ class WorkerPressureMonitor:
                 machine_memory_available_bytes=machine_memory_available_bytes,
                 running_slots=entry_running_total,
                 throughput_rpm=throughput_rpm,
+                loop_backlog_count=float(dict(loop_stats or {}).get('loopback_established_count') or 0.0),
             )
             entry_limits = self._controller.set_entry_targets(entry_targets)
             self._snapshot['entry_gate_targets'] = dict(entry_targets)
@@ -883,6 +906,18 @@ class WorkerPressureMonitor:
             self._snapshot['entry_seconds_since_step'] = round(
                 max(0.0, current_mono - self._entry_last_step_at), 3
             )
+            self._snapshot['entry_loopback_established'] = int(
+                float(dict(loop_stats or {}).get('loopback_established_count') or 0.0)
+            )
+            for _stat_key, _snapshot_key in (
+                ('task_event_queued_count', 'entry_event_queue_depth'),
+                ('task_event_dropped_count', 'entry_event_dropped_total'),
+                ('task_event_batch_request_count', 'entry_event_batch_request_total'),
+                ('task_event_batch_item_count', 'entry_event_batch_item_total'),
+                ('task_event_single_fallback_count', 'entry_event_single_fallback_total'),
+            ):
+                if _stat_key in (loop_stats or {}):
+                    self._snapshot[_snapshot_key] = int(float(loop_stats.get(_stat_key) or 0.0))
             self._snapshot['worker_memory_bytes'] = (
                 int(worker_memory_bytes) if worker_memory_bytes is not None and int(worker_memory_bytes) >= 0 else -1
             )
@@ -973,6 +1008,7 @@ class WorkerPressureMonitor:
                     machine_memory_available_bytes=machine.get('memory_available_bytes'),
                     worker_memory_bytes=self._sample_worker_memory(),
                     rate_pressure=self._sample_rate_pressure(),
+                    loop_stats=self._sample_loop_pressure(),
                 )
             except Exception:
                 time.sleep(min(1.0, self._sample_seconds))
@@ -1016,6 +1052,15 @@ class WorkerPressureMonitor:
 
     def _sample_rate_pressure(self) -> dict[str, Any]:
         observer = self._rate_limit_observer
+        if not callable(observer):
+            return {}
+        try:
+            return dict(observer() or {})
+        except Exception:
+            return {}
+
+    def _sample_loop_pressure(self) -> dict[str, Any]:
+        observer = self._loop_observer
         if not callable(observer):
             return {}
         try:

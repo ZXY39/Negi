@@ -1089,11 +1089,15 @@ def _observe_pressure(
     worker_memory_bytes: int | None = None,
     rate_pressure: dict[str, float] | None = None,
     throughput_rpm: float = 0.0,
+    loop_backlog_count: float = 0.0,
+    loop_stats: dict[str, float] | None = None,
 ) -> dict:
     merged = dict(rate_pressure or {})
     merged.setdefault('penalty_429_max', 0.0)
     merged.setdefault('rolling_rpm_60s_max', 0.0)
     merged['rolling_rpm_60s_sum'] = float(throughput_rpm)
+    merged_loop_stats = {'loopback_established_count': float(loop_backlog_count)}
+    merged_loop_stats.update(loop_stats or {})
     return monitor.observe_sample(
         machine_cpu_percent=20.0,
         machine_memory_percent=30.0,
@@ -1110,6 +1114,7 @@ def _observe_pressure(
         machine_memory_available_bytes=memory_available_bytes,
         worker_memory_bytes=worker_memory_bytes,
         rate_pressure=merged,
+        loop_stats=merged_loop_stats,
     )
 
 
@@ -1541,3 +1546,86 @@ def test_dispatcher_uses_adaptive_gate_only_when_budget_wired() -> None:
         entry_budget=budget,
     )
     assert off._semaphores['execution'] is None
+
+
+@pytest.mark.asyncio
+async def test_loopback_axis_at_warn_line_holds_the_gate() -> None:
+    """回环连接贴到 warn 线（2000）时比例被夹回 1.0 ⇒ 保持，不许抬。
+
+    同一拍其它轴全安静、吞吐也在涨——没有这根轴的话正是抬闸的形态。它量的是"内核还能
+    不能再开一条套接字"，10055 是它耗尽之后的事后异常。
+    """
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(4)]
+    await asyncio.sleep(0.05)
+
+    snapshot = _observe_pressure(
+        monitor, 100.0, throughput_rpm=9.0, loop_backlog_count=2000.0, **_ROOMY_MEMORY
+    )
+    assert snapshot['entry_gate_limits']['execution'] == 8
+
+    for waiter in waiting:
+        waiter.cancel()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_loopback_axis_over_critical_line_retreats_one_slot_per_beat_to_floor() -> None:
+    """越过 critical 线（4000 条实测对应 WinError 10055）每拍退一格，且止于配置地板。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+    for _ in range(8):
+        await controller.acquire_entry_slot(role='execution')
+    waiting = [asyncio.create_task(controller.acquire_entry_slot(role='execution')) for _ in range(4)]
+    await asyncio.sleep(0.05)
+
+    quiet = _observe_pressure(monitor, 100.0, throughput_rpm=9.0, **_ROOMY_MEMORY)
+    assert quiet['entry_gate_limits']['execution'] == 10
+
+    second = _observe_pressure(monitor, 146.0, loop_backlog_count=4000.0, **_ROOMY_MEMORY)
+    assert second['entry_gate_limits']['execution'] == 9
+    third = _observe_pressure(monitor, 192.0, loop_backlog_count=4000.0, **_ROOMY_MEMORY)
+    assert third['entry_gate_limits']['execution'] == 8
+    fourth = _observe_pressure(monitor, 238.0, loop_backlog_count=9000.0, **_ROOMY_MEMORY)
+    assert fourth['entry_gate_limits']['execution'] == 8
+
+    for waiter in waiting:
+        waiter.cancel()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_loopback_and_event_lane_counters_are_published() -> None:
+    """读数必须进快照：只报闸位的话，操作员看到"网页打不开"却读不到连接条数。"""
+    store = _FakeStore()
+    controller = AdaptiveToolBudgetController(normal_limit=6, step_up=1)
+    monitor = _entry_target_monitor(controller, store)
+    controller.configure_entry_ceilings({'execution': 8})
+
+    snapshot = _observe_pressure(
+        monitor,
+        100.0,
+        loop_backlog_count=4321.0,
+        loop_stats={
+            'task_event_queued_count': 7.0,
+            'task_event_dropped_count': 2.0,
+            'task_event_batch_request_count': 11.0,
+            'task_event_batch_item_count': 40.0,
+            'task_event_single_fallback_count': 3.0,
+        },
+        **_ROOMY_MEMORY,
+    )
+
+    assert snapshot['entry_loopback_established'] == 4321
+    assert snapshot['entry_event_queue_depth'] == 7
+    assert snapshot['entry_event_dropped_total'] == 2
+    assert snapshot['entry_event_batch_request_total'] == 11
+    assert snapshot['entry_event_batch_item_total'] == 40
+    assert snapshot['entry_event_single_fallback_total'] == 3

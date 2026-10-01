@@ -66,6 +66,13 @@ _PERF_HISTORY_FIELDS = (
     'entry_throughput_rpm_60s',
     'entry_rpm_at_last_growth',
     'entry_seconds_since_step',
+    # 回环连接条数与事件车道计数：套接字耗尽只能在崩溃前从这两个数看到。
+    'entry_loopback_established',
+    'entry_event_queue_depth',
+    'entry_event_dropped_total',
+    'entry_event_batch_request_total',
+    'entry_event_batch_item_total',
+    'entry_event_single_fallback_total',
 )
 
 

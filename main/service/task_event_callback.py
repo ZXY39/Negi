@@ -23,6 +23,10 @@ _ALLOWED_TASK_EVENT_TYPES = {
     "task.worker.status",
 }
 
+# 批量端点与单条端点走的是同一个 ``forward_live_task_event``，所以可收类型集合相同；
+# 曾经批量口只认 task.summary.patch，实时事件因此只能一条一个连接地投。
+TASK_EVENT_BATCH_ALLOWED_EVENT_TYPES = frozenset(_ALLOWED_TASK_EVENT_TYPES)
+
 
 def _replace_callback_path(url: str, *, expected_path: str, target_path: str) -> str:
     text = str(url or "").strip()

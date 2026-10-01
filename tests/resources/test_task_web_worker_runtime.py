@@ -1146,6 +1146,54 @@ def test_internal_task_event_batch_callback_forwards_summary_patches(tmp_path: P
         assert briefs[second.task_id] == "patched-two"
 
 
+def test_internal_task_event_batch_accepts_live_events_and_rejects_unknown(tmp_path: Path, monkeypatch):
+    """批量口曾经只认 task.summary.patch，实时事件因此只能一条一个连接地投。
+
+    放宽到与单条口同一份类型集合（两者最终都走 ``forward_live_task_event``），未知类型
+    仍然 400——这条是防止有人把批量口重新收窄。
+    """
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="web",
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.api.internal_rest.get_agent", lambda: SimpleNamespace(main_task_service=service))
+
+    async def _ensure_services(_agent=None) -> None:
+        return None
+
+    monkeypatch.setattr("main.api.internal_rest.ensure_web_runtime_services", _ensure_services)
+    client = TestClient(_build_app())
+
+    def _item(event_type: str) -> dict:
+        return {
+            "event_type": event_type,
+            "session_id": "web:shared",
+            "task_id": "task:demo-mixed",
+            "data": {"frame_index": 1},
+        }
+
+    accepted = client.post(
+        "/api/internal/task-event-batch",
+        json={"items": [_item("task.summary.patch"), _item("task.live.patch"), _item("task.node.patch")]},
+        headers={"x-g3ku-internal-token": "secret-token"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["items"] == 3
+
+    rejected = client.post(
+        "/api/internal/task-event-batch",
+        json={"items": [_item("task.nope")]},
+        headers={"x-g3ku-internal-token": "secret-token"},
+    )
+    assert rejected.status_code == 400
+
+
 def test_task_list_websocket_streams_token_patch_events(tmp_path: Path, monkeypatch):
     service = MainRuntimeService(
         chat_backend=_DummyChatBackend(),
@@ -14556,3 +14604,127 @@ async def test_node_detail_includes_latest_direct_child_results(tmp_path: Path, 
         assert all(str(item["node_output_ref"] or "").startswith("artifact:") for item in direct_child_results)
     finally:
         await service.close()
+
+
+def _live_event(task_id: str = "task:batch", *, event_type: str = "task.live.patch", frame: int = 0) -> dict:
+    return {
+        "event_type": event_type,
+        "session_id": "web:shared",
+        "task_id": task_id,
+        "data": {"frame_index": frame},
+    }
+
+
+async def _event_lane_service(tmp_path, monkeypatch):
+    """worker 模式的服务，回调口固定指向回环 18790；自动拉起的 flush 任务先按住，
+    让用例自己决定何时冲刷（否则它会和用例抢 `_task_event_pending`）。"""
+    service = MainRuntimeService(
+        chat_backend=_DummyChatBackend(),
+        workspace_root=tmp_path,
+        store_path=tmp_path / "runtime.sqlite3",
+        files_base_dir=tmp_path / "tasks",
+        artifact_dir=tmp_path / "artifacts",
+        governance_store_path=tmp_path / "governance.sqlite3",
+        execution_mode="worker",
+    )
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_URL_ENV, "http://127.0.0.1:18790/api/internal/task-terminal")
+    monkeypatch.setenv(TASK_TERMINAL_CALLBACK_TOKEN_ENV, "secret-token")
+    monkeypatch.setattr("main.service.runtime_service.Path.cwd", lambda: tmp_path)
+    service._ensure_task_event_flush_task = lambda _loop: None
+    return service
+
+
+@pytest.mark.asyncio
+async def test_worker_merges_live_events_into_one_batch_post(tmp_path, monkeypatch):
+    service = await _event_lane_service(tmp_path, monkeypatch)
+    posted: list[tuple[str, dict]] = []
+
+    async def _post(url, *, payload, headers, timeout):
+        posted.append((str(url), dict(payload or {})))
+        return httpx.Response(200, json={"ok": True})
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_post_internal_callback", _post)
+    monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
+
+    for index in range(5):
+        service._schedule_task_event_callback(_live_event(frame=index))
+    # 调度本身不发请求，只入队；一条事件一个 HTTP 往返的旧形态在这里就断了
+    assert len(service._task_event_pending) == 5
+    assert posted == []
+
+    await service._deliver_task_event_batches()
+
+    assert len(posted) == 1
+    url, body = posted[0]
+    assert url.endswith("/api/internal/task-event-batch")
+    assert [item["data"]["frame_index"] for item in body["items"]] == [0, 1, 2, 3, 4]
+    assert service._task_event_stats["task_event_batch_request_count"] == 1.0
+    assert service._task_event_stats["task_event_batch_item_count"] == 5.0
+    assert service._task_event_stats["task_event_single_fallback_count"] == 0.0
+    assert service._task_event_pending == []
+
+
+@pytest.mark.asyncio
+async def test_worker_live_events_fall_back_to_single_posts_when_batch_rejected(tmp_path, monkeypatch):
+    service = await _event_lane_service(tmp_path, monkeypatch)
+    posted: list[str] = []
+
+    async def _post(url, *, payload, headers, timeout):
+        posted.append(str(url))
+        if url.endswith("/api/internal/task-event-batch"):
+            return httpx.Response(500, json={"error": "unsupported"})
+        return httpx.Response(200, json={"ok": True})
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_post_internal_callback", _post)
+    monkeypatch.setattr("main.service.runtime_service.asyncio.sleep", _no_sleep)
+
+    for index in range(3):
+        service._schedule_task_event_callback(_live_event(frame=index))
+    await service._deliver_task_event_batches()
+
+    assert posted.count("http://127.0.0.1:18790/api/internal/task-event-batch") == 1
+    assert sum(1 for item in posted if item.endswith("/api/internal/task-event")) == 3
+    assert service._task_event_stats["task_event_single_fallback_count"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_worker_event_queue_overflow_drops_live_events_but_never_terminal(tmp_path, monkeypatch):
+    service = await _event_lane_service(tmp_path, monkeypatch)
+    monkeypatch.setattr("main.service.runtime_service._TASK_EVENT_QUEUE_MAX_ITEMS", 2)
+
+    service._schedule_task_event_callback(_live_event(frame=0))
+    service._schedule_task_event_callback(_live_event(frame=1))
+    # 满了：新的非终态事件被丢弃
+    service._schedule_task_event_callback(_live_event(frame=2))
+    # 终态事件必须挤出一个位置——丢了任务就永不收口
+    service._schedule_task_event_callback(_live_event(frame=3, event_type="task.terminal"))
+
+    queued = [str(item.get("event_type") or "") for item in service._task_event_pending]
+    assert queued == ["task.live.patch", "task.terminal"]
+    assert service._task_event_pending[0]["data"]["frame_index"] == 1
+    assert service._task_event_stats["task_event_dropped_count"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_worker_loopback_snapshot_reports_port_and_lane_counters(tmp_path, monkeypatch):
+    service = await _event_lane_service(tmp_path, monkeypatch)
+    service._schedule_task_event_callback(_live_event())
+
+    snapshot = service.loopback_pressure_snapshot()
+
+    assert int(snapshot["loopback_web_port"]) == 18790
+    assert int(snapshot["loopback_established_count"]) >= 0
+    assert int(snapshot["task_event_queued_count"]) == 1
+    for key in (
+        "task_event_dropped_count",
+        "task_event_batch_request_count",
+        "task_event_batch_item_count",
+        "task_event_single_fallback_count",
+    ):
+        assert key in snapshot
