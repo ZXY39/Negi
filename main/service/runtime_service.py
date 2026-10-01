@@ -205,6 +205,19 @@ _TASK_EVENT_BATCH_WINDOW_SECONDS = 0.25
 _TASK_EVENT_BATCH_MAX_ITEMS = 128
 _TASK_EVENT_BATCH_MAX_BYTES = 64 * 1024
 _TASK_EVENT_QUEUE_MAX_ITEMS = 4096
+# 条数闸门在实盘不够用：一条 live.patch 载荷就是该任务的全量摘要（MB 级），4096 条
+# 的上限允许队列驻留住几 GB。夜里的实测是 `entry_event_queue_depth` 打满 4096、
+# `entry_event_dropped_total` 累计 18715 条被丢，而且没有任何"丢了哪一类"的记录
+# （`delivery skipped` 是 logger.debug，搜不到不等于没发生）。
+# 字节水位用**观测到的均值**估（排空时本来就算过 `encoded_size`），不在入队路径上
+# 再做一次 json.dumps——那是我们刚砍掉的开销。
+_TASK_EVENT_QUEUE_MAX_BYTES = 32 * 1024 * 1024
+_TASK_EVENT_QUEUE_PRESSURE_ITEMS = 256
+_TASK_EVENT_DROP_WARN_INTERVAL_SECONDS = 60.0
+_TASK_EVENT_UNKNOWN_ITEM_BYTES = 8 * 1024
+# 只要出现过 MB 级载荷的类型，就每拍都算一遍字节水位：三条 16 MB 的摘要就能把队列
+# 撑到危险，而它远没碰到 256 条的危险区闸门。夜里那次打满就是这个形状。
+_TASK_EVENT_HEAVY_ITEM_BYTES = 1024 * 1024
 # 载荷本身就是"该任务当前全量状态"的事件类型：队列里同任务的旧一份可以直接被新的覆盖。
 # 只列 live.patch——node.patch/terminal/model.call 的载荷是增量或事实行，覆盖会丢账。
 _TASK_EVENT_COALESCED_EVENT_TYPES = frozenset({'task.live.patch'})
@@ -829,7 +842,14 @@ class MainRuntimeService:
             'task_event_single_fallback_count': 0.0,
             'task_event_coalesced_count': 0.0,
             'callback_delivery_error_count': 0.0,
+            'task_event_dropped_coalesced_count': 0.0,
+            'task_event_dropped_other_count': 0.0,
         }
+        # 排空时学到的每类平均字节数与丢弃归属：字节水位靠估，不在入队路径序列化。
+        self._task_event_avg_item_bytes: dict[str, int] = {}
+        self._task_event_dropped_by_type: dict[str, int] = {}
+        self._task_event_heavy_types: set[str] = set()
+        self._task_event_drop_logged_mono = 0.0
         self._loopback_census_logged_mono = 0.0
         self._callback_delivery_errors: dict[str, int] = {}
         self._callback_error_logged_mono = 0.0
@@ -3296,6 +3316,10 @@ class MainRuntimeService:
             except Exception:
                 pass
         stats = dict(self._task_event_stats)
+        # 队列的字节水位（估）：光看条数看不出一批 MB 级摘要和一批几 KB 事实的区别，
+        # 而夜里打满 4096 那次就是靠条数闸门才没提前露出来。
+        estimated_bytes, _counts = self._task_event_queue_pressure(self._task_event_pending)
+        stats['task_event_queue_bytes_estimated'] = float(estimated_bytes)
         stats.update({
             'loopback_established_count': float(established),
             'loopback_web_port': float(port),
@@ -3414,22 +3438,96 @@ class MainRuntimeService:
                 self._task_event_stats['task_event_coalesced_count'] += 1.0
                 self._ensure_task_event_flush_task(loop)
                 return
-        if len(pending) >= _TASK_EVENT_QUEUE_MAX_ITEMS:
-            # 满了丢最新一条非终态事件；终态事件必须挤出一个位置，丢了任务就永不收口。
-            if str(payload.get('event_type') or '').strip() != 'task.terminal':
-                self._task_event_stats['task_event_dropped_count'] += 1.0
-                return
-            dropped = next(
+        pressure_due = (
+            len(pending) >= _TASK_EVENT_QUEUE_PRESSURE_ITEMS
+            or bool(self._task_event_heavy_types)
+        )
+        estimated_bytes, counts = self._task_event_queue_pressure(pending) if pressure_due else (0, {})
+        if len(pending) >= _TASK_EVENT_QUEUE_MAX_ITEMS or estimated_bytes > _TASK_EVENT_QUEUE_MAX_BYTES:
+            # 优先扔**最旧的可合类**（`task.live.patch` 按定义就是"该任务当前全量状态"，
+            # 旧一份永远会被新一份覆盖，留着只是占字节的过期视图）；没有可扔的才回到
+            # 原规则。原规则只按条数封顶，夜里打出过 18715 条无名丢弃。
+            victim = next(
                 (index for index, item in enumerate(pending)
-                 if str(item.get('event_type') or '').strip() != 'task.terminal'),
+                 if str(item.get('event_type') or '').strip() in _TASK_EVENT_COALESCED_EVENT_TYPES),
                 None,
             )
-            if dropped is not None:
-                pending.pop(dropped)
-                self._task_event_stats['task_event_dropped_count'] += 1.0
+            if victim is not None:
+                evicted = pending.pop(victim)
+                self._note_task_event_drop(
+                    pending, counts,
+                    event_type=event_type,
+                    evicted_type=str(evicted.get('event_type') or '').strip(),
+                    estimated_bytes=estimated_bytes,
+                )
+            elif event_type != 'task.terminal':
+                # 满了丢最新一条非终态事件（维持原语义），但要能点名丢的是哪一类。
+                self._note_task_event_drop(
+                    pending, counts, event_type=event_type, evicted_type='', estimated_bytes=estimated_bytes,
+                )
+                return
+            else:
+                # 终态事件必须挤出一个位置，丢了任务就永不收口。
+                dropped = next(
+                    (index for index, item in enumerate(pending)
+                     if str(item.get('event_type') or '').strip() != 'task.terminal'),
+                    None,
+                )
+                if dropped is not None:
+                    evicted = pending.pop(dropped)
+                    self._note_task_event_drop(
+                        pending, counts,
+                        event_type=event_type,
+                        evicted_type=str(evicted.get('event_type') or '').strip(),
+                        estimated_bytes=estimated_bytes,
+                    )
         pending.append(payload)
         self._task_event_stats['task_event_queued_count'] = float(len(pending))
         self._ensure_task_event_flush_task(loop)
+
+    def _task_event_queue_pressure(self, pending: list[dict[str, Any]]) -> tuple[int, dict[str, int]]:
+        """(估算字节数, 按类型的队列组成)。只在危险区调用，一次 O(n) 扫描。
+
+        字节数是**估**的：每类的平均载荷大小由排空口本来就算过的 `encoded_size` 学出来
+        （EWMA），没见过的类按 `_TASK_EVENT_UNKNOWN_ITEM_BYTES` 计。入队路径上绝不再
+        `json.dumps` 一遍——那正是这一串性能工作砍掉的开销。
+        """
+        counts: dict[str, int] = {}
+        total = 0
+        for item in pending:
+            key = str(item.get('event_type') or '').strip() or '(unnamed)'
+            counts[key] = counts.get(key, 0) + 1
+            total += self._task_event_avg_item_bytes.get(key, _TASK_EVENT_UNKNOWN_ITEM_BYTES)
+        return total, counts
+
+    def _note_task_event_drop(
+        self,
+        pending: list[dict[str, Any]],
+        counts: dict[str, int],
+        *,
+        event_type: str,
+        evicted_type: str,
+        estimated_bytes: int,
+    ) -> None:
+        key = (evicted_type or event_type or '(unnamed)').strip() or '(unnamed)'
+        self._task_event_dropped_by_type[key] = self._task_event_dropped_by_type.get(key, 0) + 1
+        stats = self._task_event_stats
+        stats['task_event_dropped_count'] += 1.0
+        if key in _TASK_EVENT_COALESCED_EVENT_TYPES:
+            stats['task_event_dropped_coalesced_count'] += 1.0
+        else:
+            stats['task_event_dropped_other_count'] += 1.0
+        now_mono = time.monotonic()
+        if now_mono - self._task_event_drop_logged_mono < _TASK_EVENT_DROP_WARN_INTERVAL_SECONDS:
+            return
+        self._task_event_drop_logged_mono = now_mono
+        logger.warning(
+            'task event queue over budget: depth={} estimated_bytes={} queued_by_type={} dropped_by_type={}',
+            len(pending),
+            estimated_bytes,
+            dict(sorted(counts.items(), key=lambda item: -item[1])[:6]),
+            dict(sorted(self._task_event_dropped_by_type.items(), key=lambda item: -item[1])[:6]),
+        )
 
     @staticmethod
     def _find_task_event_coalesce_slot(
@@ -3504,6 +3602,14 @@ class MainRuntimeService:
             self._task_event_pending.pop(0)
             batch.append(payload)
             bytes_total += encoded_size
+            # 顺手学会"这一类平均多大"：入队侧的字节水位要靠它估，而这里是本来就算好的。
+            type_key = str(payload.get('event_type') or '').strip() or '(unnamed)'
+            previous = self._task_event_avg_item_bytes.get(type_key)
+            self._task_event_avg_item_bytes[type_key] = (
+                int((previous * 3 + encoded_size) / 4) if previous else encoded_size
+            )
+            if self._task_event_avg_item_bytes[type_key] >= _TASK_EVENT_HEAVY_ITEM_BYTES:
+                self._task_event_heavy_types.add(type_key)
         return batch
 
     async def _deliver_task_event_callback(self, payload: dict[str, Any]) -> None:

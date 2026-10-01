@@ -77,6 +77,9 @@ _PERF_HISTORY_FIELDS = (
     'entry_event_single_fallback_total',
     'entry_event_coalesced_total',
     'entry_callback_error_total',
+    'entry_event_dropped_coalesced_total',
+    'entry_event_dropped_other_total',
+    'entry_event_queue_bytes_estimated',
 )
 
 
