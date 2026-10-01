@@ -5931,8 +5931,9 @@ class MainRuntimeService:
         return list_effective_tool_names(subject=self._subject(actor_role=actor_role, session_id=session_id), supported_tool_names=supported, resource_registry=resource_registry, policy_engine=policy_engine, mutation_allowed=True)
 
     def list_visible_skill_resources(self, *, actor_role: str, session_id: str):
-        visible_ids = set(list_effective_skill_ids(subject=self._subject(actor_role=actor_role, session_id=session_id), available_skill_ids=[item.skill_id for item in self.resource_registry.list_skill_resources()], policy_engine=self.policy_engine))
-        return [item for item in self.resource_registry.list_skill_resources() if item.skill_id in visible_ids]
+        records = list(self.resource_registry.list_skill_resources() or [])
+        visible_ids = set(list_effective_skill_ids(subject=self._subject(actor_role=actor_role, session_id=session_id), available_skill_ids=[item.skill_id for item in records], policy_engine=self.policy_engine))
+        return [item for item in records if item.skill_id in visible_ids]
 
     def list_contract_visible_skill_resources(self, *, actor_role: str, session_id: str):
         resource_registry = getattr(self, 'resource_registry', None)

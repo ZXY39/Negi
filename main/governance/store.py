@@ -93,6 +93,7 @@ class GovernanceStore:
             'CREATE INDEX IF NOT EXISTS idx_exec_approvals_status ON exec_command_approvals(status, created_at)',
             'CREATE INDEX IF NOT EXISTS idx_exec_approvals_command ON exec_command_approvals(command_norm, status)',
             'CREATE INDEX IF NOT EXISTS idx_exec_approvals_context ON exec_command_approvals(context_id)',
+            'CREATE INDEX IF NOT EXISTS idx_role_policy_lookup ON role_policy_matrix(actor_role, resource_kind, resource_id)',
         ]
         with self._lock, self._conn:
             for statement in statements:
@@ -170,6 +171,22 @@ class GovernanceStore:
 
     def list_role_policies(self) -> list[RolePolicyMatrixRecord]:
         rows = self._fetchall('SELECT payload_json FROM role_policy_matrix ORDER BY actor_role, resource_kind, resource_id, action_id ASC')
+        return [self._parse(row['payload_json'], RolePolicyMatrixRecord) for row in rows]
+
+    def find_role_policies(self, *, actor_role: str, resource_kind: str, resource_id: str, action_id: str) -> list[RolePolicyMatrixRecord]:
+        """鉴权用的窄查询：只取这个主体对这个资源可能命中的行。
+
+        列里的 actor_role 就是公开形态（与 payload 一致），所以按列过滤等价于
+        解析后再过滤。排序 action_id DESC 让精确动作排在通配（NULL 动作）之前，
+        与调用方原先「精确动作优先」的取法一致。
+        """
+        rows = self._fetchall(
+            'SELECT payload_json FROM role_policy_matrix '
+            'WHERE actor_role = ? AND resource_kind = ? AND resource_id = ? '
+            'AND (action_id IS NULL OR action_id = ?) '
+            'ORDER BY action_id DESC',
+            (str(actor_role or ''), str(resource_kind or ''), str(resource_id or ''), str(action_id or '')),
+        )
         return [self._parse(row['payload_json'], RolePolicyMatrixRecord) for row in rows]
 
     def get_meta(self, key: str) -> str | None:

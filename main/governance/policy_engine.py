@@ -75,10 +75,10 @@ class MainRuntimePolicyEngine:
         return AccessDecision(allowed=False, reason_code='policy_denied', source='rbac', requires_request=False, manual_policy_change_required=False)
 
     def _find_role_policy(self, *, subject: PermissionSubject, resource_kind: str, resource_id: str, action_id: str) -> RolePolicyMatrixRecord | None:
-        policies = [
-            policy
-            for policy in self._store.list_role_policies()
-            if policy.actor_role == subject.actor_role and policy.resource_kind == resource_kind and policy.resource_id == resource_id and (policy.action_id in {None, action_id})
-        ]
-        policies.sort(key=lambda item: 1 if item.action_id == action_id else 0, reverse=True)
+        policies = self._store.find_role_policies(
+            actor_role=subject.actor_role,
+            resource_kind=resource_kind,
+            resource_id=resource_id,
+            action_id=action_id,
+        )
         return policies[0] if policies else None
