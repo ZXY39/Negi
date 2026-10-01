@@ -1532,7 +1532,13 @@ def read_turn_boundary_snapshot(session_id: str, turn_id: str) -> dict[str, Any]
 
 
 def list_turn_boundary_snapshot_turn_ids(session_id: str) -> set[str]:
-    """返回当前保留边界快照的 turn_id 集合（≤ KEEP 份，读取成本可忽略）。"""
+    """返回当前保留边界快照的 turn_id 集合（≤ KEEP 份）。
+
+    标识只取文件名：turn_id 是 ``uuid4().hex``，``safe_filename`` 不会改写它，而逐个
+    解压载荷只为读一个字段，在最坏的会话上实测约 23ms/份（KEEP=12 ⇒ 门槛帧一次 1.3s）。
+    老数据里名字被消毒过的文件（含 ``:followup:`` 复合 turn_id，那类轮次现在也不写快照）
+    解不出可匹配的名字，按"快照不在"处理，不会误给资格。
+    """
     key = str(session_id or "").strip()
     if not key:
         return set()
@@ -1541,19 +1547,7 @@ def list_turn_boundary_snapshot_turn_ids(session_id: str) -> set[str]:
         return set()
     turn_ids: set[str] = set()
     for path in list(directory.glob("*.json.gz")) + list(directory.glob("*.json")):
-        turn_id = ""
-        try:
-            if path.suffix == ".gz":
-                with gzip.open(path, "rt", encoding="utf-8") as handle:
-                    payload = json.load(handle)
-            else:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                turn_id = str(payload.get("turn_id") or "").strip()
-        except Exception:
-            turn_id = ""
-        if not turn_id:
-            turn_id = path.name.split(".json")[0]
+        turn_id = path.name.split(".json")[0].strip()
         if turn_id:
             turn_ids.add(turn_id)
     return turn_ids
