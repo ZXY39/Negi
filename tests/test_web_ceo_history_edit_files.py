@@ -73,16 +73,19 @@ def test_turn_boundary_snapshot_roundtrip_gzip_and_turn_id(workspace):
     assert wcs.list_turn_boundary_snapshot_turn_ids("web:ceo-x") == {"turn1"}
 
 
-def test_turn_boundary_snapshot_upsert_and_prune_keeps_three(workspace):
+def test_turn_boundary_snapshot_upsert_and_prune_keeps_the_window(workspace):
     directory = wcs.turn_boundary_dir_for_session("web:ceo-x")
-    for index in range(5):
+    total = wcs.TURN_BOUNDARY_SNAPSHOT_KEEP + 2
+    for index in range(total):
         wcs.write_turn_boundary_snapshot("web:ceo-x", f"turn{index}", _payload())
         # 显式拉开 mtime,避免文件系统时间粒度导致修剪顺序不稳定。
         path = directory / f"turn{index}.json.gz"
         os.utime(path, (1_700_000_000 + index * 60, 1_700_000_000 + index * 60))
         wcs._prune_turn_boundary_snapshots(directory)
     remaining = wcs.list_turn_boundary_snapshot_turn_ids("web:ceo-x")
-    assert remaining == {"turn2", "turn3", "turn4"}
+    assert len(remaining) == wcs.TURN_BOUNDARY_SNAPSHOT_KEEP
+    assert f"turn{total - 1}" in remaining
+    assert "turn0" not in remaining
 
 
 def test_turn_boundary_snapshot_normalizes_shrink_reason_whitelist(workspace):
@@ -112,14 +115,14 @@ def test_clear_turn_boundary_snapshots_selective_and_full(workspace):
 # ---------- 转录截断 ----------
 
 
-def _truncation_env(workspace, *, task_ids_on_first_reply: bool = False):
+def _truncation_env(workspace, *, task_ids_on: str = ""):
     manager = SessionManager(workspace)
     key = "web:ceo-trunc"
     messages = [
         _user("t1", "第一条"),
-        _assistant("t1", "回复一", **({"task_ids": ["task:zzz"]} if task_ids_on_first_reply else {})),
+        _assistant("t1", "回复一", **({"task_ids": ["task:zzz"]} if task_ids_on == "t1" else {})),
         _user("t2", "第二条"),
-        _assistant("t2", "回复二"),
+        _assistant("t2", "回复二", **({"task_ids": ["task:zzz"]} if task_ids_on == "t2" else {})),
         _user("t3", "第三条"),
     ]
     session = _make_session(manager, key, messages)
@@ -206,7 +209,8 @@ def test_truncate_first_message_is_fresh_path_and_wipes_artifacts(workspace):
 
 
 def test_truncate_blocked_by_task_gate(workspace):
-    manager, key, _session = _truncation_env(workspace, task_ids_on_first_reply=True)
+    # 首次派发落在被截断区间内（t2 自己的回复轮），任务服务读不到时按仍未跑完拦。
+    manager, key, _session = _truncation_env(workspace, task_ids_on="t2")
     with pytest.raises(history_edit.HistoryEditError) as excinfo:
         history_edit.truncate_web_ceo_session_history(
             session_manager=manager,
@@ -219,6 +223,19 @@ def test_truncate_blocked_by_task_gate(workspace):
     assert excinfo.value.status_code == 409
     # 拒绝时转录不动。
     assert len(manager.get_or_create(key).messages) == 5
+
+
+def test_truncate_allows_task_established_before_the_boundary(workspace):
+    # 同一个任务号出现在 t1 的回复轮（边界之前）：派发记录留在保留前缀里，放行。
+    manager, key, _session = _truncation_env(workspace, task_ids_on="t1")
+    result = history_edit.truncate_web_ceo_session_history(
+        session_manager=manager,
+        runtime_manager=SimpleNamespace(get=lambda _key: None),
+        agent=None,
+        session_id=key,
+        turn_id="t2",
+    )
+    assert result["removed_message_count"] == 3
 
 
 def test_truncate_without_boundary_snapshot_is_rejected(workspace):
@@ -447,12 +464,10 @@ def test_apply_history_truncation_state_nonempty_baseline_uses_restore_path():
 # ---------- 每轮边界快照 hook（_sync_completed_continuity_snapshot） ----------
 
 
-def test_sync_completed_continuity_snapshot_upserts_turn_boundary(workspace):
-    from g3ku.runtime.session_agent import RuntimeAgentSession
-
+def _continuity_hook_stub(session_key="web:ceo-hook", turn_id="turn-h1"):
     stub = SimpleNamespace()
-    stub._state = SimpleNamespace(session_key="web:ceo-hook")
-    stub._active_turn_id = "turn-h1"
+    stub._state = SimpleNamespace(session_key=session_key)
+    stub._active_turn_id = turn_id
     stub._frontdoor_request_body_messages = [{"role": "user", "content": "基线"}]
     stub._frontdoor_history_shrink_reason = ""
     stub._frontdoor_pending_shrink_reason = ""
@@ -471,6 +486,13 @@ def test_sync_completed_continuity_snapshot_upserts_turn_boundary(workspace):
     stub._frontdoor_restore_source = "none"
     stub._frontdoor_baseline_sync_decision = ""
     stub._normalized_name_list = lambda values, sort_values=False: list(values or [])
+    return stub
+
+
+def test_sync_completed_continuity_snapshot_upserts_turn_boundary(workspace):
+    from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    stub = _continuity_hook_stub()
 
     RuntimeAgentSession._sync_completed_continuity_snapshot(stub, source_reason="finalize")
 
@@ -483,6 +505,18 @@ def test_sync_completed_continuity_snapshot_upserts_turn_boundary(workspace):
     stub._frontdoor_request_body_messages = [{"role": "user", "content": "基线"}, {"role": "assistant", "content": "回复"}]
     RuntimeAgentSession._sync_completed_continuity_snapshot(stub, source_reason="finalize")
     assert wcs.list_turn_boundary_snapshot_turn_ids("web:ceo-hook") == {"turn-h1"}
+
+
+def test_internal_turn_sync_writes_sidecar_but_no_boundary_snapshot(workspace):
+    # 心跳/cron 内部轮：连续性照旧落盘，边界快照不写、不占每会话的保留窗口。
+    from g3ku.runtime.session_agent import RuntimeAgentSession
+
+    stub = _continuity_hook_stub(session_key="web:ceo-internal", turn_id="turn-hb")
+    RuntimeAgentSession._sync_completed_continuity_snapshot(
+        stub, source_reason="finalize", internal_turn=True
+    )
+    assert wcs.read_completed_continuity_snapshot("web:ceo-internal") is not None
+    assert wcs.list_turn_boundary_snapshot_turn_ids("web:ceo-internal") == set()
     boundary2 = wcs.read_turn_boundary_snapshot("web:ceo-hook", "turn-h1")
     assert len(boundary2["frontdoor_request_body_messages"]) == 2
 

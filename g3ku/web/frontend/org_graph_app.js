@@ -6299,7 +6299,7 @@ function applyCeoEditForkGates(payload = {}, sessionId = "") {
     // 回合收尾后服务端补发的权威门槛：把它落到缓存里对应的用户行上，再走
     // renderCeoSnapshot 的签名重建，编辑/Fork 按钮就不必等手动刷新才出现。
     // 整份替换语义（不在列表里的行一律收 flag）与 snapshot.ceo 一致：新回合会让
-    // 上一轮失去"最近 3 轮"窗口，任务派发会收回整批资格。
+    // 上一轮失去"最近 12 轮"窗口，其后新建且仍未跑完的任务会收回整批资格。
     // 两份列表各自独立：turn_ids 额外吃会话稳定态，fork_turn_ids 只看内容判据。
     const key = String(sessionId || activeSessionId() || "").trim();
     if (!key || key !== String(activeSessionId() || "").trim()) return;
@@ -6358,9 +6358,9 @@ function editForkErrorText(error) {
         : "";
     const code = String(error?.code || fallbackCode || "").trim();
     const known = {
-        edit_fork_blocked_by_async_task: "该消息之前（或其回复轮中）已创建过异步任务，不能再编辑或 Fork。",
+        edit_fork_blocked_by_async_task: "这条消息之后新建的任务还没跑完，编辑或 Fork 会截掉它的执行记录。",
         turn_not_run_first: "同批连续消息只支持在第一条上编辑/Fork。",
-        boundary_unavailable: "该消息的上下文边界快照已超出保留窗口（最近 3 轮），无法编辑/Fork。",
+        boundary_unavailable: "该消息的上下文边界快照已超出保留窗口（最近 12 轮），无法编辑/Fork。",
         turn_not_editable: "该消息当前不支持编辑/Fork。",
         turn_not_found: "消息不存在或已被清空，请刷新后重试。",
         ceo_turn_in_progress: "回合进行中，请等待结束或先暂停后再操作。",
@@ -6440,7 +6440,7 @@ function handleCeoEditResendClick(turnId) {
         // 陈旧快照兜底:服务端仍会复验,这里先行拦截给出可读提示。
         showToast({
             title: "无法编辑",
-            text: "该消息当前不可编辑重发（已创建异步任务、非批次首条，或已超出最近 3 轮的可编辑窗口）。",
+            text: "该消息当前不可编辑重发（其后创建的任务仍未跑完、非批次首条，或已超出最近 12 轮的可编辑窗口）。",
             kind: "warn",
             durationMs: 4200,
         });

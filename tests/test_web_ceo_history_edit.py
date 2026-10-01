@@ -63,13 +63,13 @@ def test_boundary_expands_user_run_and_requires_run_first():
     assert middle.boundary_index == 2
 
 
-def test_boundary_internal_messages_break_run():
-    # 心跳内部 user 消息不属于 run,也不让两侧可见 user 合并。
+def test_boundary_crosses_internal_rows_to_last_user_turn():
+    # 内部轮不写边界快照：锚点跨过心跳的内部 user 行与可见回复，回到 t1。
     messages = [_user("t1"), _internal_user("h1"), _assistant("h1", source="heartbeat"), _user("t2")]
-    resolution = resolve_truncation_boundary(messages, "t2", available_boundary_turn_ids={"h1"})
+    resolution = resolve_truncation_boundary(messages, "t2", available_boundary_turn_ids={"t1"})
     assert resolution.boundary_index == 3
     assert resolution.eligible is True
-    assert resolution.prev_turn_id == "h1"
+    assert resolution.prev_turn_id == "t1"
 
 
 def test_boundary_first_message_needs_no_snapshot():
@@ -87,13 +87,17 @@ def test_boundary_missing_snapshot_is_ineligible():
     assert resolution.reason == "boundary_unavailable"
 
 
-def test_boundary_followup_archive_prev_is_not_clean():
-    # prev 消息是 follow-up 归档(派生 turn id 含 :followup:),不在边界快照集合中 → 不合格。
-    archive = _assistant("t1:followup:9", source="follow_up_archive")
+def test_boundary_followup_archive_resolves_archived_turn():
+    # 归档行自己的复合 turn id 从不落快照：按 archived_from_turn_id 解包到被归档的轮。
+    archive = _assistant("t1:followup:9", source="follow_up_archive", archived_from_turn_id="t1")
     messages = [_user("t1"), archive, _user("t2")]
-    resolution = resolve_truncation_boundary(messages, "t2", available_boundary_turn_ids={"t1"})
-    assert resolution.eligible is False
-    assert resolution.reason == "boundary_unavailable"
+    hit = resolve_truncation_boundary(messages, "t2", available_boundary_turn_ids={"t1"})
+    assert hit.eligible is True
+    assert hit.prev_turn_id == "t1"
+    # 解包指向的轮次出窗时依旧不合格，不退回复合 id 去猜。
+    stale = resolve_truncation_boundary(messages, "t2", available_boundary_turn_ids=set())
+    assert stale.eligible is False
+    assert stale.reason == "boundary_unavailable"
 
 
 def test_boundary_unknown_turn_returns_none():
@@ -122,8 +126,8 @@ def test_gates_disabled_returns_empty():
     assert compute_edit_fork_gates(messages, enabled=False) == {}
 
 
-def test_gates_strict_task_rule_closes_own_reply_turn():
-    # t2 的回复轮创建了任务 → t2 自己与其后所有消息全部关门(严格判定)。
+def test_gates_dispatch_in_own_region_blocks_only_while_unfinished():
+    # 截断删掉 [该消息, 末尾]：只有区间内的首次派发、且任务仍未跑完才关门。
     messages = [
         _user("t1"),
         _assistant("t1"),
@@ -131,14 +135,49 @@ def test_gates_strict_task_rule_closes_own_reply_turn():
         _assistant("t2", task_ids=["task:abc"]),
         _user("t3"),
     ]
-    gates = compute_edit_fork_gates(messages, enabled=True, available_boundary_turn_ids={"t1", "t2"})
-    assert gates[0] is True
-    assert gates[2] is False
-    assert gates[4] is False
+    available = {"t1", "t2"}
+    live = compute_edit_fork_gates(
+        messages,
+        enabled=True,
+        available_boundary_turn_ids=available,
+        unfinished_task_ids={"task:abc"},
+    )
+    assert live[0] is False
+    assert live[2] is False
+    assert live[4] is True
+    settled = compute_edit_fork_gates(
+        messages,
+        enabled=True,
+        available_boundary_turn_ids=available,
+        unfinished_task_ids=set(),
+    )
+    assert settled == {0: True, 2: True, 4: True}
+    # 读不到任务服务时按仍未跑完保守处理。
+    unknown = compute_edit_fork_gates(messages, enabled=True, available_boundary_turn_ids=available)
+    assert unknown[2] is False
 
 
-def test_gates_internal_reply_does_not_clear_pending_group():
-    # 心跳可见回复不清组:t2 的用户轮回复创建任务时,回溯仍要关掉 t2。
+def test_gates_echo_rows_are_not_dispatch_points():
+    # 心跳回复顺口提到的任务号（已在 t1 的回复里出现过）不建立新派发。
+    messages = [
+        _user("t1"),
+        _assistant("t1", task_ids=["task:x"]),
+        _assistant("h1", source="heartbeat", task_ids=["task:x"]),
+        _user("t2"),
+        _assistant("t2"),
+        _user("t3"),
+    ]
+    gates = compute_edit_fork_gates(
+        messages,
+        enabled=True,
+        available_boundary_turn_ids={"t1", "t2"},
+        unfinished_task_ids=set(),
+    )
+    assert gates == {0: True, 3: True, 5: True}
+
+
+def test_gates_dispatch_recorded_after_internal_reply_still_counts():
+    # 派发记录可以在心跳回复之后才落进转录：它仍属被点击消息自己的区间。
     messages = [
         _user("t1"),
         _assistant("t1"),
@@ -146,13 +185,18 @@ def test_gates_internal_reply_does_not_clear_pending_group():
         _assistant("h1", source="heartbeat"),
         _assistant("t2", task_ids=["task:x"]),
     ]
-    gates = compute_edit_fork_gates(messages, enabled=True, available_boundary_turn_ids={"t1"})
-    assert gates[0] is True
+    gates = compute_edit_fork_gates(
+        messages,
+        enabled=True,
+        available_boundary_turn_ids={"t1"},
+        unfinished_task_ids={"task:x"},
+    )
+    assert gates[0] is False
     assert gates[2] is False
 
 
-def test_gates_internal_dispatch_blocks_later_messages():
-    # cron 内部轮派发任务:其后的用户消息按前缀规则关门。
+def test_gates_internal_dispatch_before_the_message_does_not_block():
+    # cron 内部轮派发的任务：在其之后的用户消息看来是边界之前建立的，记录留在前缀里。
     messages = [
         _user("t1"),
         _assistant("t1"),
@@ -160,9 +204,14 @@ def test_gates_internal_dispatch_blocks_later_messages():
         _assistant("c1", source="cron", task_ids=["task:y"]),
         _user("t2"),
     ]
-    gates = compute_edit_fork_gates(messages, enabled=True, available_boundary_turn_ids={"c1"})
-    assert gates[0] is True
-    assert gates[4] is False
+    gates = compute_edit_fork_gates(
+        messages,
+        enabled=True,
+        available_boundary_turn_ids={"t1"},
+        unfinished_task_ids={"task:y"},
+    )
+    assert gates[0] is False
+    assert gates[4] is True
 
 
 def test_gates_run_first_and_boundary_availability():
@@ -186,15 +235,15 @@ def test_gates_legacy_timestamp_fallback():
         _assistant("t2"),
     ]
     assert transcript_has_task_ids_field(messages) is False
-    # 任务在 t1 回复之后、t2 回复之前创建 → t2 关门,t1 保留。
+    # 仍未跑完的任务在 t1 发出之后、t2 发出之前创建 → 落在 t1 的区间里,t2 不受影响。
     gates = compute_edit_fork_gates(
         messages,
         enabled=True,
-        task_created_ats=["2026-09-14T10:01:t15"],
+        task_created_ats=["2026-09-14T10:00:t15"],
         available_boundary_turn_ids={"t1"},
     )
-    assert gates[0] is True
-    assert gates[2] is False
+    assert gates[0] is False
+    assert gates[2] is True
     # 有 task_ids 字段时兜底不启用(即使传入 created_ats)。
     messages_with_field = messages + [_assistant("t3", task_ids=[])]
     assert transcript_has_task_ids_field(messages_with_field) is True

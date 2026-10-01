@@ -4228,7 +4228,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     sync_completed_continuity(
                         source_reason=(
                             "actual_request_sync" if incoming_has_authoritative_actual_request else "finalize"
-                        )
+                        ),
+                        internal_turn=bool(heartbeat_internal or cron_internal),
                     )
 
     @staticmethod

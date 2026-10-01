@@ -816,7 +816,7 @@ class RuntimeAgentSession:
             ),
         }
 
-    def _sync_completed_continuity_snapshot(self, *, source_reason: str) -> None:
+    def _sync_completed_continuity_snapshot(self, *, source_reason: str, internal_turn: bool = False) -> None:
         session_key = str(self._state.session_key or "").strip()
         if not _frontdoor_continuity_session_key(session_key):
             return
@@ -891,11 +891,13 @@ class RuntimeAgentSession:
         # 每轮边界快照：与 completed continuity sidecar 同一份载荷按当前 turn_id upsert。
         # 同轮多次写互相覆盖，轮末 finalize 的写入即该轮终态；为编辑重发/Fork 提供
         # "截止该轮"的精确截断数据源。best-effort：失败只影响截断资格，不影响回合。
+        # 内部轮（heartbeat/cron）不写：它们没有可点击的用户消息，却按同一个窗口修剪，
+        # 心跳跑得比用户回合密，会把用户轮的快照全挤掉。
         try:
             from g3ku.runtime.web_ceo_sessions import write_turn_boundary_snapshot
 
             turn_id = str(getattr(self, "_active_turn_id", "") or "").strip()
-            if turn_id and isinstance(payload, dict) and payload:
+            if turn_id and not internal_turn and isinstance(payload, dict) and payload:
                 write_turn_boundary_snapshot(session_key, turn_id, payload)
         except Exception:
             logger.debug("Skipped turn boundary snapshot for {}", session_key)

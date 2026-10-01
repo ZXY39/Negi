@@ -44,8 +44,10 @@ WEB_CEO_TURN_BOUNDARY_ROOT = Path(".g3ku") / "web-ceo-turn-boundaries"
 FRONTDOOR_REQUEST_ARTIFACT_KEEP = 300
 # Per-turn continuity boundary snapshots are the authoritative truncation source
 # for user message edit-resend / session fork. They carry the full request-body
-# baseline, so only the most recent few turns are kept (gzip-compressed).
-TURN_BOUNDARY_SNAPSHOT_KEEP = 3
+# baseline, so the retained window is bounded (gzip-compressed). Heartbeat/cron
+# internal turns never write one, so every slot belongs to a user turn; a
+# heartbeat-heavy session used to evict its own last user turns within a day.
+TURN_BOUNDARY_SNAPSHOT_KEEP = 12
 # Pruning has to read the restorable sidecars, so it runs once per this many
 # persisted requests instead of on every model round. The on-disk bound stays
 # keep + interval.

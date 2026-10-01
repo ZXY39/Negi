@@ -105,6 +105,16 @@ def env(tmp_path, monkeypatch):
         runtime=runtime_stub,
         state_store=state_store,
         workspace=tmp_path,
+        agent=agent,
+    )
+
+
+def _stub_unfinished_tasks(env, task_ids):
+    """让门槛读到「这些任务仍未跑完」；任务服务缺席时门槛按仍未跑完保守处理。"""
+    env.agent.main_task_service = SimpleNamespace(
+        list_unfinished_tasks_for_session=lambda _key: [
+            SimpleNamespace(task_id=task_id, created_at="") for task_id in task_ids
+        ]
     )
 
 
@@ -153,14 +163,35 @@ def test_truncate_blocked_with_queued_follow_ups(env):
     assert response.json()["detail"] == "ceo_turn_in_progress"
 
 
-def test_truncate_blocked_by_task_gate(env):
-    # t1 回复轮创建过任务 → t2 不可截断(严格判定:门槛复验在服务端)。
+def test_truncate_blocked_by_unfinished_task_inside_the_region(env):
+    # 首次派发落在被截断区间内（t2 自己的回复轮）且任务仍未跑完 → 409。
     messages = env.manager.get_or_create(env.key).messages
-    messages[1]["metadata"]["task_ids"] = ["task:aaa"]
+    messages[3]["metadata"]["task_ids"] = ["task:aaa"]
     env.manager.save(env.manager.get_or_create(env.key))
+    _stub_unfinished_tasks(env, ["task:aaa"])
     response = env.client.post(f"/api/ceo/sessions/{env.key}/truncate", json={"turn_id": "t2"})
     assert response.status_code == 409
     assert response.json()["detail"] == "edit_fork_blocked_by_async_task"
+
+
+def test_truncate_allows_dispatch_once_the_task_is_finished(env):
+    # 同一个派发，任务已终态 → 放行。
+    messages = env.manager.get_or_create(env.key).messages
+    messages[3]["metadata"]["task_ids"] = ["task:aaa"]
+    env.manager.save(env.manager.get_or_create(env.key))
+    _stub_unfinished_tasks(env, [])
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/truncate", json={"turn_id": "t2"})
+    assert response.status_code == 200, response.text
+
+
+def test_truncate_allows_task_established_before_the_boundary(env):
+    # 边界之前建立的任务（t1 的回复轮）：派发记录留在保留前缀里，即使任务仍在跑。
+    messages = env.manager.get_or_create(env.key).messages
+    messages[1]["metadata"]["task_ids"] = ["task:aaa"]
+    env.manager.save(env.manager.get_or_create(env.key))
+    _stub_unfinished_tasks(env, ["task:aaa"])
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/truncate", json={"turn_id": "t2"})
+    assert response.status_code == 200, response.text
 
 
 def test_truncate_channel_session_readonly(env):
@@ -206,13 +237,27 @@ def test_fork_endpoint_success(env):
     assert len(env.manager.get_or_create(env.key).messages) == 4
 
 
-def test_fork_blocked_by_task_gate(env):
+def test_fork_blocked_by_unfinished_task_inside_the_region(env):
     messages = env.manager.get_or_create(env.key).messages
-    messages[1]["metadata"]["task_ids"] = ["task:aaa"]
+    messages[3]["metadata"]["task_ids"] = ["task:aaa"]
     env.manager.save(env.manager.get_or_create(env.key))
+    _stub_unfinished_tasks(env, ["task:aaa"])
     response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t2"})
     assert response.status_code == 409
     assert response.json()["detail"] == "edit_fork_blocked_by_async_task"
+
+
+def test_fork_allows_echoed_task_ids_on_internal_rows(env):
+    # 心跳回复把同一个任务号再盖一次：不是新派发，Fork 资格不受影响。
+    messages = env.manager.get_or_create(env.key).messages
+    messages[1]["metadata"]["task_ids"] = ["task:aaa"]
+    messages.append({"role": "assistant", "content": "心跳回写", "turn_id": "h1",
+                     "timestamp": "2026-09-14T10:02:0h1",
+                     "metadata": {"source": "heartbeat", "task_ids": ["task:aaa"]}})
+    env.manager.save(env.manager.get_or_create(env.key))
+    _stub_unfinished_tasks(env, ["task:aaa"])
+    response = env.client.post(f"/api/ceo/sessions/{env.key}/fork", json={"turn_id": "t2"})
+    assert response.status_code == 200, response.text
 
 
 def test_fork_ignores_source_runtime_state_while_truncate_does_not(env):

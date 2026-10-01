@@ -297,7 +297,7 @@ worker 进程（任务执行侧）把任务态变化推给 web 进程（浏览�
 - paused execution context
 - inflight turn snapshot
 - frontdoor completed continuity sidecar（`frontdoor_request_body_messages` 基线、actual-request trace、阶段/规范化/压缩状态）
-- 每轮边界快照 `.g3ku/web-ceo-turn-boundaries/<session>/<turn_id>.json.gz`（与 continuity sidecar 同一份载荷按 `_active_turn_id` upsert，轮末 finalize 写入即该轮终态；gzip、每会话保留最近 3 轮）。它是用户消息编辑重发/Fork 的唯一截断数据源：截断到某轮之前 = 读取该轮 prev_turn 的边界快照整体替换 continuity 状态；快照缺失的轮次不可截断（不做启发式重建）。失败轮拿不到 actual-request，但它同样按当前（= 上一成功轮的）基线写一份边界快照，否则一次失败会让紧随其后的那条用户消息失去截断资格；基线为空时不写（那等于把会话截成零上下文）。契约详情见 `web-and-admin.md`「Message Edit-Resend And Session Fork」
+- 每轮边界快照 `.g3ku/web-ceo-turn-boundaries/<session>/<turn_id>.json.gz`（与 continuity sidecar 同一份载荷按 `_active_turn_id` upsert，轮末 finalize 写入即该轮终态；gzip、每会话保留最近 12 份，且只由用户轮写入——心跳/cron 内部轮不写、不占名额）。它是用户消息编辑重发/Fork 的唯一截断数据源：截断到某轮之前 = 读取该轮 prev_turn 的边界快照整体替换 continuity 状态；快照缺失的轮次不可截断（不做启发式重建）。失败轮拿不到 actual-request，但它同样按当前（= 上一成功轮的）基线写一份边界快照，否则一次失败会让紧随其后的那条用户消息失去截断资格；基线为空时不写（那等于把会话截成零上下文）。契约详情见 `web-and-admin.md`「Message Edit-Resend And Session Fork」
 - latest message / pending interrupts
 
 主要由 `RuntimeAgentSession` 和 `g3ku/session/manager.py` 协调。frontdoor continuity 的写盘与恢复覆盖所有 frontdoor 会话命名空间（`web:`、`china:`、`cron:`、`ext:`），渠道会话（含存量 `china:*` 归档）的基线同样跨进程重启存活；恢复顺序详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。

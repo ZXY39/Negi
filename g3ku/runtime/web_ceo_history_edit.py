@@ -3,16 +3,17 @@
 本模块是「编辑重发 / Fork」的服务端核心：
 
 - 截断数据源 = 每轮边界快照（``.g3ku/web-ceo-turn-boundaries/<session>/<turn_id>.json.gz``，
-  由 ``RuntimeAgentSession._sync_completed_continuity_snapshot`` 每轮 upsert，
-  只保留最近 ``TURN_BOUNDARY_SNAPSHOT_KEEP`` 轮）。不做任何启发式基线重建：
-  prev_turn 边界快照缺失即视为不合格（前端不显示按钮、端点 409）。
+  由 ``RuntimeAgentSession._sync_completed_continuity_snapshot`` 每个用户轮 upsert，
+  只保留最近 ``TURN_BOUNDARY_SNAPSHOT_KEEP`` 份；心跳/cron 内部轮不写、不占名额）。
+  不做任何启发式基线重建：锚点轮的快照缺失即视为不合格（前端不显示按钮、端点 409）。
 - 截断点必须落在干净的轮边界上：被点击消息必须是其所在 user-run
   （极大连续可见 user 消息段）的首条；批次兄弟与中途消费的 follow-up
   没有自己的轮边界，不显示按钮。
-- 异步任务门槛（严格判定）：被点击消息之前、或被点击消息自己触发的
-  回复轮中实际成功创建过异步任务（转录 assistant ``metadata.task_ids``），
-  则该消息不可编辑/Fork。legacy 转录（整份无 task_ids 字段）用
-  ``list_tasks_for_session`` 的 created_at 时间戳兜底。
+- 异步任务门槛：只有当**落在被截断区间里的首次派发**仍未完成（任务 ``in_progress``，
+  含树被暂停的任务）时才不可编辑/Fork。转录行 ``metadata.task_ids`` 的首次出现即派发点，
+  因此心跳回复顺口提到的任务号、暂停/补充归档行重新盖上的任务号都不算新派发；
+  边界之前建立的任务记录留在前缀里，截断不动它。legacy 转录（整份无 task_ids 字段）
+  用未完成任务的 created_at 与被点击消息的发送时间比较兜底。
 
 所有函数只做同步文件/内存操作，由 API 层负责在 ``_turn_lock`` 内调用。
 """
@@ -143,6 +144,71 @@ def transcript_has_task_ids_field(messages: list[Any]) -> bool:
     return False
 
 
+def task_dispatch_first_indices(messages: list[Any]) -> dict[str, int]:
+    """每个任务号在转录中「首次作为派发记录出现」的下标。
+
+    只在 assistant 行上收集，且保留最早一次：心跳回复顺口提到的任务号、暂停归档与
+    待发送补充归档行重新盖上的任务号，都在更早的派发行里出现过，因此不会把回声
+    当成新的建立点。
+    """
+    first: dict[str, int] = {}
+    for index, raw in enumerate(list(messages or [])):
+        if message_role(raw) != "assistant":
+            continue
+        for task_id in transcript_task_ids(raw):
+            first.setdefault(task_id, index)
+    return first
+
+
+def session_unfinished_task_ids(agent: Any, session_id: str) -> set[str] | None:
+    """本会话仍未完成的任务号（任务 ``in_progress``，含执行树被暂停的任务）。
+
+    读不到任务服务时返回 None，调用方按「仍活」保守处理。
+    """
+    service = getattr(agent, "main_task_service", None)
+    lister = getattr(service, "list_unfinished_tasks_for_session", None)
+    if not callable(lister):
+        return None
+    try:
+        tasks = list(lister(session_id) or [])
+    except Exception as exc:
+        logger.warning("list_unfinished_tasks_for_session failed for {}: {}", session_id, exc)
+        return None
+    return {str(getattr(task, "task_id", "") or "").strip() for task in tasks} - {""}
+
+
+def _is_internal_transcript_row(message: Any) -> bool:
+    """内部轮留下的行：心跳/cron 回复、内部 prompt 的 system/user 行。"""
+    role = message_role(message)
+    if role == "assistant":
+        return is_internal_assistant_message(message)
+    if role == "user":
+        return not is_visible_user_message(message)
+    return role == "system"
+
+
+def boundary_anchor_turn_id(messages: list[Any], index: int) -> str:
+    """被点击 user-run 首条 ``index`` 的截断基线来源轮次。
+
+    从上一条行往回走，跨过内部轮的行（它们不写边界快照）；遇到可见用户行或普通
+    助手行就交回它的轮次——那个轮的快照不在盘上时就是真出了保留窗口。归档行
+    （``follow_up_archive`` 的复合 turn_id 从不落盘）按它归档的轮次解包。
+    """
+    msgs = list(messages or [])
+    cursor = index - 1
+    while cursor >= 0:
+        raw = msgs[cursor]
+        if not isinstance(raw, dict):
+            cursor -= 1
+            continue
+        if _is_internal_transcript_row(raw):
+            cursor -= 1
+            continue
+        archived = str(message_metadata(raw).get("archived_from_turn_id") or "").strip()
+        return archived or message_turn_id(raw)
+    return ""
+
+
 @dataclass
 class BoundaryResolution:
     boundary_index: int
@@ -175,7 +241,7 @@ def resolve_truncation_boundary(
     返回 None 表示转录中不存在该 turn_id 对应的可见用户消息（端点应 404）。
     ``eligible=False`` 时 ``reason`` 给出拒绝码：
     - ``turn_not_run_first``：被点击消息不是所在 user-run 的首条；
-    - ``boundary_unavailable``：prev_turn 的边界快照缺失（超出保留窗口或旧数据）。
+    - ``boundary_unavailable``：锚点轮的边界快照缺失（超出保留窗口或旧数据）。
     """
     normalized_turn_id = str(turn_id or "").strip()
     msgs = list(messages or [])
@@ -203,7 +269,7 @@ def resolve_truncation_boundary(
         ):
             if candidate and candidate not in removed_turn_ids:
                 removed_turn_ids.append(candidate)
-    prev_turn_id = message_turn_id(msgs[run_start - 1]) if run_start > 0 else ""
+    prev_turn_id = boundary_anchor_turn_id(msgs, run_start) if run_start > 0 else ""
     eligible = True
     reason = ""
     if clicked_index != run_start:
@@ -248,80 +314,64 @@ def compute_edit_fork_gates(
     enabled: bool,
     task_created_ats: list[str] | None = None,
     available_boundary_turn_ids: set[str] | None = None,
+    unfinished_task_ids: set[str] | None = None,
 ) -> dict[int, bool]:
-    """为每条可见用户消息计算 can_edit_fork（键 = 原始转录下标）。
+    """为每条可见用户消息计算编辑/Fork 资格（键 = 原始转录下标）。
 
-    在原始转录（含 ui_visible=False 的内部消息）上单遍行走：
-    - ``dispatched_prefix``：此前已出现核实派发（assistant metadata.task_ids 非空）；
-    - ``pending_users`` 回溯关门：出现派发时，尚未被用户轮回复关闭的 user 消息
-      全部置 False —— 覆盖"任务在被点击消息自己的回复轮中创建"的严格判定；
-    - 内部轮（heartbeat/cron）的可见回复不清组、不阻断回溯；
-    - legacy 兜底：整份转录无 task_ids 字段时，用任务 created_at 与
-      "关闭该消息所在 run 的首条 assistant 回复时间戳"比较。
-
-    最终 gate = 任务门槛 && run 首条 && 边界快照可用（或截断到会话开头）。
+    三条判据，任一不过即 False：
+    - 任务门槛：截断删掉的是 ``[该消息, 转录末尾]``，所以只有「首次派发落在这个区间
+      里、且该任务仍未完成」才拦。边界之前建立的任务，其派发记录留在保留前缀里，
+      不受截断影响。``unfinished_task_ids`` 为 None（读不到任务服务）时按仍未完成
+      保守处理。整份转录没有 task_ids 字段时走 legacy：用仍未完成任务的 created_at
+      与该条消息的发送时间比较。
+    - run 首条：一个 user-run 只有一个干净边界。
+    - 边界快照：锚点轮（跨过内部轮往回找，见 ``boundary_anchor_turn_id``）的快照还在
+      盘上，或截断边界就是会话开头。
     """
     msgs = list(messages or [])
     gates: dict[int, bool] = {}
     if not enabled or not msgs:
         return gates
-    user_gate: dict[int, bool] = {}
-    pending_users: list[int] = []
-    dispatched_prefix = False
-    seen_task_ids_field = False
-    for index, raw in enumerate(msgs):
-        if not isinstance(raw, dict):
-            continue
-        role = message_role(raw)
-        if role == "user" and is_visible_user_message(raw):
-            user_gate[index] = not dispatched_prefix
-            pending_users.append(index)
-            continue
-        if role == "assistant":
-            if "task_ids" in message_metadata(raw):
-                seen_task_ids_field = True
-            if transcript_task_ids(raw):
-                dispatched_prefix = True
-                for pending_index in pending_users:
-                    user_gate[pending_index] = False
-            if not is_internal_assistant_message(raw):
-                pending_users = []
+    run_firsts = visible_user_run_first_indices(msgs)
+    first_dispatch = task_dispatch_first_indices(msgs)
+    seen_task_ids_field = any(
+        isinstance(raw, dict) and "task_ids" in message_metadata(raw) for raw in msgs
+    )
+    unfinished_known = unfinished_task_ids is not None
+    unfinished = unfinished_task_ids or set()
     created_ats = sorted(
         str(item or "").strip() for item in list(task_created_ats or []) if str(item or "").strip()
     )
-    if created_ats and not seen_task_ids_field:
-        for index in list(user_gate):
-            if not user_gate[index]:
-                continue
-            reply_ts = ""
-            cursor = index
-            while cursor < len(msgs) and is_visible_user_message(msgs[cursor]):
-                cursor += 1
-            while cursor < len(msgs):
-                if message_role(msgs[cursor]) == "assistant":
-                    reply_ts = str((msgs[cursor] or {}).get("timestamp") or "").strip()
-                    break
-                cursor += 1
-            if not reply_ts:
-                reply_ts = str((msgs[index] or {}).get("timestamp") or "").strip()
-            if reply_ts and any(item <= reply_ts for item in created_ats):
-                user_gate[index] = False
-    run_firsts = visible_user_run_first_indices(msgs)
-    for index, allowed in user_gate.items():
-        if not allowed or index not in run_firsts:
+    for index, raw in enumerate(msgs):
+        if not isinstance(raw, dict) or not is_visible_user_message(raw):
+            continue
+        if index not in run_firsts:
+            gates[index] = False
+            continue
+        if seen_task_ids_field:
+            blocked_by_task = any(
+                start >= index and (task_id in unfinished if unfinished_known else True)
+                for task_id, start in first_dispatch.items()
+            )
+        elif created_ats:
+            sent_ts = str(raw.get("timestamp") or "").strip()
+            blocked_by_task = not sent_ts or any(item >= sent_ts for item in created_ats)
+        else:
+            blocked_by_task = False
+        if blocked_by_task:
             gates[index] = False
             continue
         if index == 0:
             gates[index] = True
             continue
-        prev_turn = message_turn_id(msgs[index - 1])
-        if not prev_turn:
+        anchor = boundary_anchor_turn_id(msgs, index)
+        if not anchor:
             gates[index] = False
             continue
         if available_boundary_turn_ids is None:
             gates[index] = True
             continue
-        gates[index] = prev_turn in available_boundary_turn_ids
+        gates[index] = anchor in available_boundary_turn_ids
     return gates
 
 
@@ -400,17 +450,22 @@ def delete_actual_request_artifacts_for_turns(session_id: str, removed_turn_ids:
 
 
 def legacy_task_created_ats(agent: Any, session_id: str, messages: list[Any]) -> list[str] | None:
-    """legacy 转录（无 task_ids 字段）的任务创建时间兜底，否则返回 None。"""
+    """legacy 转录（整份无 task_ids 字段）的兜底：仍未完成任务的创建时间。
+
+    读不到未完成清单时退回全部任务——宁可多拦，不可把仍在跑的任务截掉。
+    """
     if transcript_has_task_ids_field(messages):
         return None
     service = getattr(agent, "main_task_service", None)
-    lister = getattr(service, "list_tasks_for_session", None)
+    lister = getattr(service, "list_unfinished_tasks_for_session", None)
+    if not callable(lister):
+        lister = getattr(service, "list_tasks_for_session", None)
     if not callable(lister):
         return None
     try:
         tasks = list(lister(session_id) or [])
     except Exception as exc:
-        logger.warning("list_tasks_for_session failed for {}: {}", session_id, exc)
+        logger.warning("legacy task listing failed for {}: {}", session_id, exc)
         return None
     return sorted(
         str(getattr(task, "created_at", "") or "").strip()
@@ -483,6 +538,7 @@ def truncate_web_ceo_session_history(
         enabled=True,
         task_created_ats=legacy_task_created_ats(agent, key, messages),
         available_boundary_turn_ids=available,
+        unfinished_task_ids=session_unfinished_task_ids(agent, key),
     )
     if not gates.get(resolution.boundary_index, False):
         raise HistoryEditError("edit_fork_blocked_by_async_task", status_code=409)
@@ -605,6 +661,7 @@ def fork_web_ceo_session(
         enabled=True,
         task_created_ats=legacy_task_created_ats(agent, key, messages),
         available_boundary_turn_ids=available,
+        unfinished_task_ids=session_unfinished_task_ids(agent, key),
     )
     if not gates.get(resolution.boundary_index, False):
         raise HistoryEditError("edit_fork_blocked_by_async_task", status_code=409)

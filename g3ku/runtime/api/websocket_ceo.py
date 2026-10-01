@@ -967,7 +967,11 @@ def _session_edit_fork_gates(
     key = str(session_id or "").strip()
     if is_channel_session or not key.startswith("web:"):
         return None, None
-    from g3ku.runtime.web_ceo_history_edit import compute_edit_fork_gates, legacy_task_created_ats
+    from g3ku.runtime.web_ceo_history_edit import (
+        compute_edit_fork_gates,
+        legacy_task_created_ats,
+        session_unfinished_task_ids,
+    )
     from g3ku.runtime.web_ceo_sessions import list_turn_boundary_snapshot_turn_ids
 
     raw_messages = list(messages or [])
@@ -976,6 +980,7 @@ def _session_edit_fork_gates(
         enabled=True,
         task_created_ats=legacy_task_created_ats(agent, key, raw_messages),
         available_boundary_turn_ids=list_turn_boundary_snapshot_turn_ids(key),
+        unfinished_task_ids=session_unfinished_task_ids(agent, key),
     )
     if not _session_fully_stable_for_history_edit(session, turn_payload):
         return None, fork_gates

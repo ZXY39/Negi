@@ -350,8 +350,8 @@ test("R5 syncCeoFeedTurnActiveClass 回合进行中隐藏按钮行", () => {
 
 test("R6 editForkErrorText 映射服务端错误码", () => {
     const api = setup();
-    assert.match(api.editForkErrorText({ code: "edit_fork_blocked_by_async_task" }), /异步任务/);
-    assert.match(api.editForkErrorText({ code: "boundary_unavailable" }), /最近 3 轮/);
+    assert.match(api.editForkErrorText({ code: "edit_fork_blocked_by_async_task" }), /任务还没跑完/);
+    assert.match(api.editForkErrorText({ code: "boundary_unavailable" }), /最近 12 轮/);
     assert.match(api.editForkErrorText({ code: "ceo_turn_in_progress" }), /回合进行中/);
     assert.equal(api.editForkErrorText({ message: "boom" }), "boom");
     assert.equal(api.editForkErrorText(null), "unknown error");
@@ -442,7 +442,7 @@ test("R8 applyCeoEditForkGates 收尾后补发门槛:按钮不等手动刷新", 
     api.applyCeoEditForkGates({ turn_ids: ["t2"] });
     assert.equal(feed.resetCount, rebuilds);
 
-    // 空集合 = 整份收回（本轮派发了任务，或旧行掉出"最近 3 轮"窗口）。
+    // 空集合 = 整份收回（本轮派发了还没跑完的任务，或旧行掉出"最近 12 轮"窗口）。
     api.applyCeoEditForkGates({ turn_ids: [] });
     assert.equal(api.getCeoSessionSnapshotCache("web:ceo-s1").messages[0].can_edit_fork, undefined);
     assert.ok(!feed.children.map((child) => child.innerHTML).join("\n").includes("msg-actions"));
