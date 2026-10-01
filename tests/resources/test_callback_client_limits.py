@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from main.service.runtime_service import (
+    _CALLBACK_CONNECT_TIMEOUT_SECONDS,
     _CALLBACK_POOL_KEEPALIVE_EXPIRY_SECONDS,
     _CALLBACK_POOL_MAX_CONNECTIONS,
     _CALLBACK_POOL_MAX_KEEPALIVE_CONNECTIONS,
@@ -51,9 +52,11 @@ class _RaisingClient:
     def __init__(self, error: Exception) -> None:
         self._error = error
         self.posts = 0
+        self.timeouts: list[object] = []
 
     async def post(self, *args, **kwargs):
         self.posts += 1
+        self.timeouts.append(kwargs.get('timeout'))
         raise self._error
 
 
@@ -127,6 +130,26 @@ def test_error_note_is_rate_limited_but_always_counted(monkeypatch) -> None:
     assert service._task_event_stats['callback_delivery_error_count'] == 3.0
     assert len(logged) == 1
     assert "by_type={'ReadTimeout': 1}" in logged[0]
+
+
+def test_connect_gets_its_own_longer_budget() -> None:
+    """漏 socket 的那一下发生在 connect：握手必须比读/写有更大的余量。
+
+    单条 1.5 s、批量 2.0 s 的整包超时把四档一起压死，web 侧接受稍慢就先判 connect
+    超时，而那次取消会留下一条没人认领的 ESTABLISHED（census 标签
+    `method<_loop_reading>`）。read/write 仍按调用方给的值，不许被顺带放宽。
+    """
+    client = _RaisingClient(httpx.ConnectTimeout('slow accept'))
+    service = _Stub(client)
+
+    with pytest.raises(httpx.ConnectTimeout):
+        asyncio.run(_post(service))
+
+    timeout = client.timeouts[0]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect >= _CALLBACK_CONNECT_TIMEOUT_SECONDS
+    assert timeout.read == 1.5
+    assert timeout.write == 1.5
 
 
 def test_referrer_labels_name_the_pending_proactor_operation() -> None:

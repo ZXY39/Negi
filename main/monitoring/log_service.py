@@ -5369,7 +5369,9 @@ class TaskLogService:
             # counts_only＝增量档：摘要里不带 frames 数组，只带变化的那一帧（`frame`）
             # 与角色/计数/stale 名单。实盘一份全量摘要 4.3 MB，而单帧只有几十 KB。
             'runtime_summary': self._runtime_summary_payload(task.task_id, include_frames=not counts_only),
-            'frame': self._public_runtime_frame(self._hydrate_runtime_frame_record(frame)) if frame is not None else None,
+            # 单帧走公开投影：`_public_runtime_frame` 是字段白名单，不含 `messages`，
+            # 所以这里解析会话历史纯属白活——每条 live.patch 都要付一次。
+            'frame': self._public_runtime_frame(self._hydrate_runtime_frame_record(frame, include_messages=False)) if frame is not None else None,
             'removed_node_id': str(removed_node_id or '').strip(),
         }
         self._buffer_task_live_patch_locked(task=task, payload=payload)

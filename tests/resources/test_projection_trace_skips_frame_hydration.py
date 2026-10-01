@@ -172,3 +172,24 @@ def test_payload_reader_still_reports_a_missing_frame_as_none(tmp_path) -> None:
     service, _content_store = _service(tmp_path)
 
     assert service.read_runtime_frame_payload(TASK_ID, 'node:missing') is None
+
+
+def test_public_frame_is_identical_without_the_message_bodies(tmp_path) -> None:
+    """live.patch 的单帧投影是字段白名单，不含 `messages`：解析正文是白活。
+
+    这条断言把"公开投影读不到正文"钉在形状上——将来谁往 `_public_runtime_frame`
+    里加 `messages`，这里就会红，那时才需要在发布车道把正文读回来。
+    """
+    service, content_store = _service(tmp_path)
+    record = service._store.get_task_runtime_frame(TASK_ID, NODE_ID)
+
+    light = service._public_runtime_frame(
+        service._hydrate_runtime_frame_record(record, include_messages=False)
+    )
+    light_hits = content_store.hits
+    heavy = service._public_runtime_frame(service._hydrate_runtime_frame_record(record))
+
+    assert light_hits == 0
+    assert content_store.hits == 1
+    assert light == heavy
+    assert 'messages' not in light

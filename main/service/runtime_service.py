@@ -216,6 +216,9 @@ _TASK_EVENT_COALESCED_EVENT_TYPES = frozenset({'task.live.patch'})
 _CALLBACK_POOL_MAX_CONNECTIONS = 32
 _CALLBACK_POOL_MAX_KEEPALIVE_CONNECTIONS = 4
 _CALLBACK_POOL_KEEPALIVE_EXPIRY_SECONDS = 2.0
+# 回环 connect 的下限：单条 1.5 s、批量 2.0 s 的整包超时在 web 侧接受慢时会先把
+# connect 判死，而那次取消就是漏 socket 的那一下（见 `_post_internal_callback`）。
+_CALLBACK_CONNECT_TIMEOUT_SECONDS = 5.0
 # 回调投递异常按类型计数，限流打一行。这条车道原来的失败全部落在 `logger.debug`，
 # 实盘按 "delivery skipped" 搜整窗口得 0 命中——那是级别问题不是没发生。
 _CALLBACK_ERROR_WARN_INTERVAL_SECONDS = 60.0
@@ -3349,8 +3352,18 @@ class MainRuntimeService:
             )
             raise CallbackUrlNotAllowedError(f'internal callback URL not allowed: {reason}')
         client = self._get_callback_client()
+        timeout_value = float(timeout or _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS)
+        # 单独放宽 connect 这一档：census 的引用者标签显示这些孤儿 transport 全挂在
+        # `method<_loop_reading>` 上，而池里一条都不认账——被取消的是 `open_connection`
+        # 这一步（Windows 上它在完成前被取消不会关 transport）。循环打嗝时握手会晚于
+        # 1.5–2 s 到达，于是每次超时留下一条 ESTABLISHED。read/write 保持各车道原值：
+        # 读超时是否也留 socket 不预设，改完按同一批计数复判。
+        request_timeout = httpx.Timeout(
+            timeout_value,
+            connect=max(timeout_value, _CALLBACK_CONNECT_TIMEOUT_SECONDS),
+        )
         try:
-            return await client.post(url, json=payload, headers=headers, timeout=float(timeout or _WORKER_STATUS_CALLBACK_TIMEOUT_SECONDS))
+            return await client.post(url, json=payload, headers=headers, timeout=request_timeout)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
