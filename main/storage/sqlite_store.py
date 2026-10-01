@@ -2692,6 +2692,27 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM task_nodes WHERE task_id = ? ORDER BY sort_key ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionNodeRecord) for row in rows]
 
+    def count_task_nodes(self, task_id: str) -> int:
+        """只问"这个任务有多少节点"时用这个，别用 `list_task_nodes` 再 `len()`。
+
+        后者要把每行的 `payload_json` 建成 `TaskProjectionNodeRecord`（实盘一个任务 195 个
+        节点），而计数只要一个整数。走主读连接：读模型条数会被控制流与展示读数共用，
+        轻读连接的快照差异见 `memory`/任务 #24，不许用在那类判定上。
+        """
+        row = self._fetchone(
+            'SELECT COUNT(*) AS total FROM task_nodes WHERE task_id = ?',
+            (str(task_id or '').strip(),),
+        )
+        return int(row['total']) if row is not None else 0
+
+    def count_task_node_rounds(self, task_id: str) -> int:
+        """同上：轮次条数不靠整表建模。"""
+        row = self._fetchone(
+            'SELECT COUNT(*) AS total FROM task_node_rounds WHERE task_id = ?',
+            (str(task_id or '').strip(),),
+        )
+        return int(row['total']) if row is not None else 0
+
     def get_task_node(self, node_id: str) -> TaskProjectionNodeRecord | None:
         row = self._fetchone('SELECT payload_json FROM task_nodes WHERE node_id = ?', (node_id,))
         return self._parse(row['payload_json'], TaskProjectionNodeRecord) if row else None

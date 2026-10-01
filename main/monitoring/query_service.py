@@ -602,8 +602,11 @@ class TaskQueryService:
             'frames': [],
         }
         counts = {
-            'total_nodes': len(self._store.list_task_nodes(task.task_id)),
-            'total_rounds': len(self._store.list_task_node_rounds(task.task_id)),
+            # 这两个数以前是 `len(list_task_nodes(...))` / `len(list_task_node_rounds(...))`：
+            # 为了一个整数把全任务节点与轮次整批建模，实测单次 222–443 ms，
+            # 是 `recent_long_blocks` 的头名（`query_service.get_task_snapshot`）。
+            'total_nodes': self._store.count_task_nodes(task.task_id),
+            'total_rounds': self._store.count_task_node_rounds(task.task_id),
             'active_node_count': len(list(runtime_summary.get('active_node_ids') or [])),
             'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
             'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
