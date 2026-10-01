@@ -3973,6 +3973,23 @@ class TaskLogService:
         record = self._store.get_task_runtime_frame(task_id, node_id)
         return self._hydrate_runtime_frame_record(record) if record is not None else None
 
+    def read_runtime_frame_payload(self, task_id: str, node_id: str) -> dict[str, Any] | None:
+        """只要帧正文里本来就有的字段时用这个，别用 `read_runtime_frame`。
+
+        `read_runtime_frame` 会顺带把 `messages_ref` 指向的整份会话历史读盘、解码、
+        解析，再逐字段 sanitize：负载窗口 py-spy（20 s / 1252 样本）里
+        `_hydrate_runtime_frame_record` inclusive 32.9%，其中光 `_resolve_content_ref`
+        一层就占 18.4%。而投影车道要的 `tool_calls` 与几个 ref 标量，写帧时就在
+        payload 里，指针能不能解析、历史有多少条都改不了它们。
+
+        改之前一次节点变更要水合**两遍**同一帧（detail 记录一次、执行轨迹一次），
+        两遍都在读同一份会话历史。
+        """
+        record = self._store.get_task_runtime_frame(task_id, node_id)
+        if record is None:
+            return None
+        return dict(record.payload or {})
+
     def upsert_frame(self, task_id: str, frame: dict[str, Any], *, publish_snapshot: bool = False) -> None:
         started_at = _precise_now_iso()
         started_mono = time.perf_counter()
@@ -4369,7 +4386,7 @@ class TaskLogService:
         latest_spawn_round_id, direct_child_results = self._latest_direct_child_results_payload(node)
         spawn_review_rounds = self._spawn_review_rounds_payload(node)
         execution_trace_ref = str(preserved_execution_trace_ref or '').strip()
-        runtime_frame = self.read_runtime_frame(node.task_id, node.node_id) or {}
+        runtime_frame = self.read_runtime_frame_payload(node.task_id, node.node_id) or {}
         node_metadata = dict(node.metadata or {})
         actual_request_ref = str(
             runtime_frame.get('actual_request_ref')
@@ -4440,7 +4457,7 @@ class TaskLogService:
         )
 
     def _projection_execution_trace(self, node: NodeRecord) -> dict[str, Any]:
-        frame = self.read_runtime_frame(node.task_id, node.node_id)
+        frame = self.read_runtime_frame_payload(node.task_id, node.node_id)
         live_tool_calls = [dict(item) for item in list((frame or {}).get('tool_calls') or []) if isinstance(item, dict)]
         tool_results = list(self._store.list_task_node_tool_results(node.task_id, node.node_id) or [])
         return build_execution_trace(node, tool_results=tool_results, live_tool_calls=live_tool_calls)
