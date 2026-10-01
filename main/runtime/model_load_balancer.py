@@ -48,6 +48,10 @@ PENALTY_RETENTION_SECONDS = PENALTY_HALF_LIFE_SECONDS * 6
 RATE_LIMIT_RETRY_ON = ["429"]
 
 UNRESOLVED_BUCKET_PREFIX = "unresolved:"
+# 桶身份要靠配置记录（磁盘 JSON + 解锁后的 overlay）算出来，实测一组 19 条绑定全扫
+# 一次 9.9 ms，而 snapshot 每次 worker 状态发布都要扫。换 key 只写 overlay、不 bump
+# config_revision，所以除重绑时的整表清空外，再给一条一分钟的重解析上限。
+QUOTA_BUCKET_CACHE_TTL_SECONDS = 60.0
 
 THROTTLE_DIMENSION_RPM = "rpm"
 THROTTLE_DIMENSION_TPM = "tpm"
@@ -168,6 +172,7 @@ class ModelLoadBalancer:
         self._buckets: dict[str, _BucketState] = {}
         self._members: dict[str, _MemberState] = {}
         self._bindings: dict[str, _NodeBinding] = {}
+        self._quota_bucket_cache: dict[str, tuple[float, list[str]]] = {}
 
     # ------------------------------------------------------------------ 配置
 
@@ -181,6 +186,7 @@ class ModelLoadBalancer:
         with self._lock:
             self._groups = dict(groups or {})
             self._config_revision = int(config_revision or 0)
+            self._quota_bucket_cache.clear()
             live_members = {
                 member.model_key
                 for group in self._groups.values()
@@ -576,18 +582,29 @@ class ModelLoadBalancer:
             items.popleft()
 
     def _buckets_for(self, model_key: str) -> list[str]:
+        key = str(model_key or "").strip()
+        cached = self._quota_bucket_cache.get(key)
+        if cached is not None and cached[0] > self._monotonic():
+            return list(cached[1])
         if self._resolve_quota_buckets is None:
-            return [f"{UNRESOLVED_BUCKET_PREFIX}{model_key}"]
+            return [f"{UNRESOLVED_BUCKET_PREFIX}{key}"]
         try:
-            raw = list(self._resolve_quota_buckets(str(model_key or "").strip()) or [])
+            raw = list(self._resolve_quota_buckets(key) or [])
         except Exception:
-            return [f"{UNRESOLVED_BUCKET_PREFIX}{model_key}"]
+            return [f"{UNRESOLVED_BUCKET_PREFIX}{key}"]
         buckets = [str(item or "").strip() for item in raw if str(item or "").strip()]
-        if buckets:
-            return buckets
-        # 解析不到密钥材料时（未解锁、或不在 worker 进程里）每个成员各自成桶。空值互并
-        # 会把整组塌成一个「空 key」桶，产出假阳性的重复配额结论。
-        return [f"{UNRESOLVED_BUCKET_PREFIX}{model_key}"]
+        if not buckets:
+            # 解析不到密钥材料时（未解锁、或不在 worker 进程里）每个成员各自成桶。空值互并
+            # 会把整组塌成一个「空 key」桶，产出假阳性的重复配额结论。
+            return [f"{UNRESOLVED_BUCKET_PREFIX}{key}"]
+        # 未解析的结果不进缓存：解锁之后的第一次解析必须真去读，否则进程会带着
+        # 「身份未知」的桶一直到 TTL 到期。
+        if buckets and not str(buckets[0]).startswith(UNRESOLVED_BUCKET_PREFIX):
+            self._quota_bucket_cache[key] = (
+                self._monotonic() + QUOTA_BUCKET_CACHE_TTL_SECONDS,
+                list(buckets),
+            )
+        return buckets
 
     def _primary_bucket(self, model_key: str) -> str:
         buckets = self._buckets_for(model_key)

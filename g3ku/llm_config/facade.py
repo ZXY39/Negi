@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,15 +109,16 @@ def get_llm_config_facade(workspace: Path | None = None) -> "LLMConfigFacade":
     构造 facade 会连带构造配置仓储，而仓储 __init__ 无条件做 records 目录
     `mkdir(parents=True, exist_ok=True)` 与 index 存在性检查。模型路由解析每拍都要
     为每条绑定新建一个，实测零流量空转窗口里这条路径占主线程样本 43.4%、`mkdir`
-    叶子 23.2%。锁内构造：仓储不持外部资源，且首次之后的调用只查字典。
+    叶子 23.2%。锁内构造：仓储不持外部资源，且首次之后的调用只查字典。字典键用
+    normcase 的原样路径而不是 `Path.resolve()`——后者每次要走 realpath，实测 0.13 ms，
+    和缓存本身的收益同量级。
     """
-    root = (workspace or Path.cwd()).resolve()
-    key = str(root).lower()
+    root = str(os.path.normcase(str(workspace if workspace is not None else Path.cwd())))
     with _FACADES_LOCK:
-        facade = _FACADES.get(key)
+        facade = _FACADES.get(root)
         if facade is None:
-            facade = LLMConfigFacade(root)
-            _FACADES[key] = facade
+            facade = LLMConfigFacade(Path(workspace) if workspace is not None else Path.cwd())
+            _FACADES[root] = facade
         return facade
 
 
