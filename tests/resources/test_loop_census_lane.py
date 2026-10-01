@@ -77,6 +77,33 @@ def test_pool_census_survives_a_pool_that_raises(monkeypatch) -> None:
     assert MainRuntimeService._connection_pool_census() == []
 
 
+def test_socket_owner_census_counts_only_sockets_to_that_port() -> None:
+    """OS 上的条数与 Python 认得的条数必须能对上——对不上就是"没人持有"的证据。"""
+    import socket as socket_module
+
+    listener = socket_module.socket()
+    listener.bind(('127.0.0.1', 0))
+    listener.listen(1)
+    port = int(listener.getsockname()[1])
+    client = socket_module.socket()
+    client.connect(('127.0.0.1', port))
+    try:
+        owners = dict(MainRuntimeService._socket_owner_census(port))
+        other = dict(MainRuntimeService._socket_owner_census(port + 1))
+    finally:
+        client.close()
+        listener.close()
+
+    assert owners.get('TOTAL') == 1, owners
+    assert other.get('TOTAL') == 0, other
+    # 引用者链至少能报出持有者类型（局部变量在 frame 的字典里）
+    assert any(key != 'TOTAL' for key in owners), owners
+
+
+def test_socket_owner_census_ignores_a_zero_port() -> None:
+    assert MainRuntimeService._socket_owner_census(0) == []
+
+
 def test_census_line_reports_top_sites_when_marker_is_present(tmp_path, monkeypatch) -> None:
     """标记在的时候那一行必须带挂起点榜——任务名前缀只说"谁建的"，回环连接归因要的是"卡在哪个调用"。"""
     import main.service.runtime_service as module

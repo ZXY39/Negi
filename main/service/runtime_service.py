@@ -1101,6 +1101,59 @@ class MainRuntimeService:
             pools.append((len(connections), leased))
         return pools
 
+    @staticmethod
+    def _socket_owner_census(port: int) -> list[tuple[str, int]]:
+        """把"挂在 web 端口上的 socket 到底被谁引用"点名出来。
+
+        实盘 19:26–19:45：OS 上 29→45 条 ESTABLISHED，而进程里 3 个 httpcore 池一共只认
+        2 条连接、0 条租出，census 的挂起点榜里也没有任何任务停在 socket 上 ⇒ 这些 fd
+        既不在池里、也没人在等。只有从 socket 对象反查引用者，才说得出它挂在什么对象上。
+        """
+        import gc
+        import socket as socket_module
+
+        if not port:
+            return []
+        try:
+            objects = gc.get_objects()
+        except Exception:
+            return []
+        sockets: list[Any] = []
+        for item in objects:
+            try:
+                if not isinstance(item, socket_module.socket):
+                    continue
+                peer = item.getpeername()
+            except Exception:
+                continue
+            if not peer or int(peer[1] or 0) != int(port):
+                continue
+            sockets.append(item)
+        owners: dict[str, int] = {}
+        for sock in sockets:
+            trail: list[str] = []
+            try:
+                referrers = list(gc.get_referrers(sock))[:3]
+            except Exception:
+                referrers = []
+            for referrer in referrers:
+                label = type(referrer).__name__
+                if label == 'dict':
+                    try:
+                        holders = [
+                            type(other).__name__
+                            for other in list(gc.get_referrers(referrer))[:3]
+                            if not isinstance(other, list)
+                        ]
+                        label = f'dict<{holders[0] if holders else "?"}>'
+                    except Exception:
+                        label = 'dict<?>'
+                trail.append(label)
+            key = ' or '.join(trail) or '(no referrer)'
+            owners[key] = owners.get(key, 0) + 1
+        owners['TOTAL'] = len(sockets)
+        return sorted(owners.items(), key=lambda item: -item[1])[:8]
+
     async def _loop_census_loop(self) -> None:
         """标记文件在的时候把 loop 上的任务点名打一行；不在就只是睡着。
 
@@ -1116,8 +1169,10 @@ class MainRuntimeService:
                     continue
                 ticks += 1
                 pools: list[tuple[int, int]] = []
+                sock_owners: list[tuple[str, int]] = []
                 if ticks % _LOOP_CENSUS_POOL_SCAN_EVERY == 0:
                     pools = self._connection_pool_census()
+                    sock_owners = self._socket_owner_census(self._loopback_web_port())
                 tasks = list(asyncio.all_tasks())
                 prefixes: dict[str, int] = {}
                 site_counts: dict[str, int] = {}
@@ -1136,11 +1191,12 @@ class MainRuntimeService:
                     for task in tasks[:_LOOP_CENSUS_SAMPLE_TASKS]
                 ]
                 logger.warning(
-                    'loop census: worker={} poller={} total={} pools={} prefixes={} top_sites={} sample={}',
+                    'loop census: worker={} poller={} total={} pools={} socks={} prefixes={} top_sites={} sample={}',
                     self.worker_id or 'worker',
                     poller_site,
                     len(tasks),
                     pools,
+                    sock_owners,
                     dict(sorted(prefixes.items(), key=lambda item: -item[1])[:8]),
                     dict(sorted(site_counts.items(), key=lambda item: -item[1])[:_LOOP_CENSUS_TOP_SITES]),
                     sites,
