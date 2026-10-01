@@ -217,6 +217,7 @@ _LOOPBACK_CENSUS_INTERVAL_SECONDS = 60.0
 _LOOP_CENSUS_MARKER_NAME = 'loop-census.on'
 _LOOP_CENSUS_INTERVAL_SECONDS = 20.0
 _LOOP_CENSUS_SAMPLE_TASKS = 6
+_LOOP_CENSUS_TOP_SITES = 10
 _TASK_SUMMARY_RECONCILE_IDLE_SECONDS = 15.0
 _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
@@ -1079,6 +1080,7 @@ class MainRuntimeService:
                     continue
                 tasks = list(asyncio.all_tasks())
                 prefixes: dict[str, int] = {}
+                site_counts: dict[str, int] = {}
                 poller_site = 'missing'
                 for task in tasks:
                     name = str(task.get_name() or '')
@@ -1086,16 +1088,20 @@ class MainRuntimeService:
                     prefixes[key] = prefixes.get(key, 0) + 1
                     if 'command-poller' in name:
                         poller_site = self._task_suspend_site(task)
+                    # 挂起点榜：任务名前缀只说"谁建的"，这个才说"卡在什么调用上"。
+                    site = self._task_suspend_site(task)
+                    site_counts[site] = site_counts.get(site, 0) + 1
                 sites = [
                     f'{task.get_name()}@{self._task_suspend_site(task)}'
                     for task in tasks[:_LOOP_CENSUS_SAMPLE_TASKS]
                 ]
                 logger.warning(
-                    'loop census: worker={} poller={} total={} prefixes={} sample={}',
+                    'loop census: worker={} poller={} total={} prefixes={} top_sites={} sample={}',
                     self.worker_id or 'worker',
                     poller_site,
                     len(tasks),
                     dict(sorted(prefixes.items(), key=lambda item: -item[1])[:8]),
+                    dict(sorted(site_counts.items(), key=lambda item: -item[1])[:_LOOP_CENSUS_TOP_SITES]),
                     sites,
                 )
             except Exception:
