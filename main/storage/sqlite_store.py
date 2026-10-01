@@ -2892,6 +2892,18 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM task_runtime_frames WHERE task_id = ? ORDER BY depth ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionRuntimeFrameRecord) for row in rows]
 
+    def has_task_runtime_frame(self, task_id: str, node_id: str) -> bool:
+        """只问这个节点有没有运行时帧，不取 payload_json。
+
+        帧行的 payload 平均几十 KB（实盘一个任务 180 行合计 7.8 MB），而存在性判定
+        只要主键命中，所以走轻量读连接、不解析正文。
+        """
+        row = self._fetchone_light(
+            'SELECT 1 FROM task_runtime_frames WHERE task_id = ? AND node_id = ?',
+            (str(task_id or '').strip(), str(node_id or '').strip()),
+        )
+        return row is not None
+
     def replace_task_node_rounds(self, task_id: str, records: list[TaskProjectionRoundRecord]) -> None:
         def operation(conn: sqlite3.Connection) -> None:
             conn.execute('DELETE FROM task_node_rounds WHERE task_id = ?', (task_id,))

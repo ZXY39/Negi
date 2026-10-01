@@ -6092,11 +6092,6 @@ class NodeRunner:
         if not isinstance(operations, dict):
             return False
         normalized_round_filter = str(round_id or '').strip()
-        frame_by_node_id = {
-            str(item.node_id or '').strip(): item
-            for item in list(self._store.list_task_runtime_frames(task.task_id) or [])
-            if str(item.node_id or '').strip()
-        }
         changed = False
         next_operations = copy.deepcopy(operations)
         for raw_round_id, raw_payload in list(next_operations.items()):
@@ -6122,9 +6117,9 @@ class NodeRunner:
                 if not candidates:
                     continue
                 canonical = self._canonical_spawn_child_for_entry(
+                    task_id=task.task_id,
                     entry=entry,
                     candidates=candidates,
-                    frame_by_node_id=frame_by_node_id,
                 )
                 if canonical is None:
                     continue
@@ -6178,9 +6173,9 @@ class NodeRunner:
     def _canonical_spawn_child_for_entry(
         self,
         *,
+        task_id: str,
         entry: dict[str, Any],
         candidates: list[NodeRecord],
-        frame_by_node_id: dict[str, Any],
     ) -> NodeRecord | None:
         if not candidates:
             return None
@@ -6194,8 +6189,7 @@ class NodeRunner:
             node_id = str(node.node_id or '').strip()
             status = str(node.status or '').strip().lower()
             metadata = dict(node.metadata or {}) if isinstance(node.metadata, dict) else {}
-            frame = frame_by_node_id.get(node_id)
-            has_runtime_frame = 1 if frame is not None else 0
+            has_runtime_frame = 1 if self._store.has_task_runtime_frame(task_id, node_id) else 0
             is_nonterminal = 1 if status not in {STATUS_SUCCESS, STATUS_FAILED} else 0
             is_unmarked_duplicate = 1 if not bool(metadata.get('duplicate_spawn_child')) else 0
             return (has_runtime_frame, is_nonterminal, str(node.updated_at or ''), str(node.created_at or ''), node_id if is_unmarked_duplicate else '')
