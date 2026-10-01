@@ -354,3 +354,87 @@ async def test_bridge_retry_backoff_resets_after_healthy_run(monkeypatch: pytest
     # 第 2 轮若未重置，应睡 2.0；重置后序列为 1, 1, 2, 4。
     assert delays == [1.0, 1.0, 2.0, 4.0]
     assert calls["n"] == 5
+
+
+@pytest.mark.asyncio
+async def test_repeated_identical_bridge_crash_folds_traceback_but_keeps_every_line(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一异常连续重发：一行都不能少（退避节律要可 grep），但 traceback 只在首见与每 20 次重复。"""
+    from loguru import logger
+
+    account = QqBotAccountConfig(app_secret="s", sandbox=False)
+    service = QqOfficialService(app_id="1", base_url="http://127.0.0.1:1/api/v1")
+
+    calls = {"n": 0}
+    total = 45
+
+    async def fake_bridge(**kwargs) -> None:
+        calls["n"] += 1
+        if calls["n"] > total:
+            return
+        raise RuntimeError("same fault")
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+    _shrink_retry_backoff(monkeypatch)
+
+    records: list[tuple[str, bool]] = []
+    sink_id = logger.add(lambda m: records.append((m.record["message"], m.record["exception"] is not None)), level="ERROR")
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    try:
+        await service._run(account, "tok")
+    finally:
+        logger.remove(sink_id)
+
+    crash_lines = [text for text, _ in records if "crashed; retrying in" in text]
+    assert len(crash_lines) == total, "每一次崩溃都要留下一行"
+    tracebacks = [flag for _, flag in records if flag]
+    # repeat_failures 0/20/40 → 3 份全栈，其余折叠
+    assert len(tracebacks) == 3
+    assert "traceback 已折叠" in crash_lines[1]
+    assert "相同异常第 21 次" in crash_lines[20]
+
+
+@pytest.mark.asyncio
+async def test_changed_bridge_crash_signature_gets_full_traceback_again(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """签名一变就必须重新给全栈，折叠不能把新故障也藏起来。"""
+    from loguru import logger
+
+    account = QqBotAccountConfig(app_secret="s", sandbox=False)
+    service = QqOfficialService(app_id="1", base_url="http://127.0.0.1:1/api/v1")
+
+    calls = {"n": 0}
+
+    async def fake_bridge(**kwargs) -> None:
+        calls["n"] += 1
+        if calls["n"] > 3:
+            return
+        if calls["n"] == 2:
+            raise RuntimeError("same fault")
+        raise ValueError("different fault")
+
+    monkeypatch.setattr(qq_bridge, "run_qq_official_bridge", fake_bridge)
+    _shrink_retry_backoff(monkeypatch)
+
+    records: list[tuple[str, bool]] = []
+    sink_id = logger.add(lambda m: records.append((m.record["message"], m.record["exception"] is not None)), level="ERROR")
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    try:
+        await service._run(account, "tok")
+    finally:
+        logger.remove(sink_id)
+
+    assert len(records) == 3
+    assert all(flag for _, flag in records), "三种签名各不相同 ⇒ 三份全栈，一条都不折叠"

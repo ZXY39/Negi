@@ -27,6 +27,9 @@ from g3ku.qq_official.messages import bridge_id_for_app_id
 _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS = 1.0
 _BRIDGE_RETRY_MAX_BACKOFF_SECONDS = 60.0
 _BRIDGE_RETRY_HEALTHY_RUN_SECONDS = 60.0
+# 同一异常连续重发时，每这么多次才再落一份完整 traceback。实盘两条桥按 60s 封顶
+# 重连，一晚 445 次崩溃 × 约 40 行带变量表的栈，全打在 console.log 上。
+_BRIDGE_RETRY_TRACEBACK_EVERY = 20
 
 
 class QqOfficialService:
@@ -118,6 +121,8 @@ class QqOfficialService:
         from g3ku.qq_official.bridge import run_qq_official_bridge
 
         backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
+        last_failure_signature: str | None = None
+        repeat_failures = 0
         while True:
             started = time.monotonic()
             try:
@@ -136,9 +141,28 @@ class QqOfficialService:
             except Exception as exc:  # noqa: BLE001 - the service must survive bridge crashes
                 if time.monotonic() - started >= _BRIDGE_RETRY_HEALTHY_RUN_SECONDS:
                     backoff = _BRIDGE_RETRY_INITIAL_BACKOFF_SECONDS
-                logger.exception(
-                    "qq-official bridge {} crashed; retrying in {:.0f}s", self._bridge_id, backoff
-                )
+                    # 够久的一次健康运行就是一段新的事故，折叠状态作废：下一次崩溃重新给全栈。
+                    last_failure_signature = None
+                    repeat_failures = 0
+                signature = f"{type(exc).__name__}: {exc}"[:300]
+                if signature == last_failure_signature:
+                    repeat_failures += 1
+                else:
+                    last_failure_signature = signature
+                    repeat_failures = 0
+                # 每条崩溃都留一行（退避节律仍可 grep），同签名只在首见和每
+                # ``_BRIDGE_RETRY_TRACEBACK_EVERY`` 次重复时带完整栈。
+                if repeat_failures % _BRIDGE_RETRY_TRACEBACK_EVERY == 0:
+                    logger.opt(exception=exc).error(
+                        "qq-official bridge {} crashed; retrying in {:.0f}s (相同异常第 {} 次)",
+                        self._bridge_id, backoff, repeat_failures + 1,
+                    )
+                else:
+                    logger.error(
+                        "qq-official bridge {} crashed; retrying in {:.0f}s "
+                        "(相同异常第 {} 次，traceback 已折叠，每 {} 次重复给一份)",
+                        self._bridge_id, backoff, repeat_failures + 1, _BRIDGE_RETRY_TRACEBACK_EVERY,
+                    )
                 self._set("error", f"{exc}（将在 {backoff:.0f}s 后重试）")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2.0, _BRIDGE_RETRY_MAX_BACKOFF_SECONDS)
