@@ -38,70 +38,57 @@ def test_suspend_site_labels_finished_and_missing_tasks() -> None:
     assert second == 'missing'
 
 
-def test_pool_census_counts_every_pool_in_the_process(monkeypatch) -> None:
-    """OS 上的 socket 比一个客户端的池多时，得把所有池都点出来才能归因。"""
-    import gc
+def test_loopback_census_names_the_holder_of_each_socket() -> None:
+    """一次扫描要同时给出 socket 条数、引用者链、每个池的连接数与客户端个数。
 
-    class AsyncConnectionPool:
-        # 类型名就是扫描的判据（httpcore 的池类），别改。
-        def __init__(self, conns) -> None:
-            self.connections = conns
-
-    class _Conn:
-        def __init__(self, available: bool) -> None:
-            self._available = available
-
-        def is_available(self) -> bool:
-            return self._available
-
-    pools = [AsyncConnectionPool([_Conn(True), _Conn(False)]), AsyncConnectionPool([_Conn(True)])]
-
-    def _objects(*_args, _pools=pools):
-        return [object()] + list(_pools)
-
-    monkeypatch.setattr(gc, 'get_objects', _objects)
-
-    assert MainRuntimeService._connection_pool_census() == [(2, 1), (1, 0)]
-
-
-def test_pool_census_survives_a_pool_that_raises(monkeypatch) -> None:
-    import gc
-
-    class AsyncConnectionPool:
-        @property
-        def connections(self):
-            raise RuntimeError('pool is closing')
-
-    monkeypatch.setattr(gc, 'get_objects', lambda *_args: [AsyncConnectionPool()])
-
-    assert MainRuntimeService._connection_pool_census() == []
-
-
-def test_socket_owner_census_counts_only_sockets_to_that_port() -> None:
-    """OS 上的条数与 Python 认得的条数必须能对上——对不上就是"没人持有"的证据。"""
+    用真的 loopback socket 与真的 httpx 客户端，不桩掉被测的东西。socket 挂在持有对象的
+    `__dict__` 上（实盘 asyncio transport 就是这个形状）——只挂在函数局部变量上的 socket
+    gc 报不出引用者，那是仪器的边界不是缺陷。
+    """
     import socket as socket_module
+
+    import httpx
 
     listener = socket_module.socket()
     listener.bind(('127.0.0.1', 0))
     listener.listen(1)
     port = int(listener.getsockname()[1])
-    client = socket_module.socket()
-    client.connect(('127.0.0.1', port))
+    raw = socket_module.socket()
+    raw.connect(('127.0.0.1', port))
+
+    class Holder:
+        pass
+
+    holder = Holder()
+    holder.sock = raw
+    _pool_client = httpx.AsyncClient()
     try:
-        owners = dict(MainRuntimeService._socket_owner_census(port))
-        other = dict(MainRuntimeService._socket_owner_census(port + 1))
+        lane = MainRuntimeService._loopback_socket_census(port)
+        other = MainRuntimeService._loopback_socket_census(port + 1)
     finally:
-        client.close()
+        raw.close()
         listener.close()
 
-    assert owners.get('TOTAL') == 1, owners
-    assert other.get('TOTAL') == 0, other
-    # 引用者链至少能报出持有者类型（局部变量在 frame 的字典里）
-    assert any(key != 'TOTAL' for key in owners), owners
+    assert lane['sockets'] == 1, lane
+    assert other['sockets'] == 0, other
+    # 引用者可能是持有者的实例本身，也可能是它的 __dict__（CPython 的内联字典两种都报得出）
+    assert any('Holder' in trail for trail in lane['owners']), lane['owners']
+    assert lane['clients'] >= 1, lane
+    assert any(pool['conns'] == 0 for pool in lane['pools']), lane['pools']
+    assert all('trail' in pool for pool in lane['pools']), lane['pools']
 
 
-def test_socket_owner_census_ignores_a_zero_port() -> None:
-    assert MainRuntimeService._socket_owner_census(0) == []
+def test_loopback_census_returns_an_empty_shape_without_a_port() -> None:
+    lane = MainRuntimeService._loopback_socket_census(0)
+
+    assert lane == {'sockets': 0, 'owners': {}, 'pools': [], 'clients': 0}
+
+
+def test_referrer_trail_walks_up_through_dictionaries() -> None:
+    holder = type('Holder', (), {})()
+    holder.x = 1
+
+    assert MainRuntimeService._census_referrer_trail(holder.__dict__) == 'Holder'
 
 
 def test_census_line_reports_top_sites_when_marker_is_present(tmp_path, monkeypatch) -> None:
@@ -124,6 +111,14 @@ def test_census_line_reports_top_sites_when_marker_is_present(tmp_path, monkeypa
         @staticmethod
         def _task_suspend_site(task):
             return module.MainRuntimeService._task_suspend_site(task)
+
+        @staticmethod
+        def _loopback_web_port():
+            return 0
+
+        @staticmethod
+        def _loopback_socket_census(_port):
+            return {'sockets': 0, 'owners': {}, 'pools': [], 'clients': 0}
 
     (tmp_path / 'loop-census.on').write_text('', encoding='utf-8')
     monkeypatch.setattr(module, 'logger', _Recorder())
@@ -154,5 +149,6 @@ def test_census_line_reports_top_sites_when_marker_is_present(tmp_path, monkeypa
     assert len(logged) == 1, logged
     line = logged[0]
     assert 'top_sites=' in line
+    assert 'lane=' in line
     assert 'in _parked' in line
     assert 'poller=missing' in line

@@ -1069,58 +1069,86 @@ class MainRuntimeService:
         return f'{os.path.basename(code.co_filename)}:{frame.f_lineno} in {code.co_name}'
 
     @staticmethod
-    def _connection_pool_census() -> list[tuple[int, int]]:
-        """进程里每个 httpcore 连接池的 `(总连接, 已租出)`。
-
-        只数 `self._callback_client` 那一个池不够：实盘 OS 上有 45 条 ESTABLISHED 挂在
-        web 端口，而那个池只认 3 条（0 条租出）⇒ 剩下的 socket 不归它管。多一个客户端
-        实例就多一个池，所以要把进程里所有池都点出来。gc 全量扫一次不便宜（百万级对象、
-        持 GIL 一两秒），因此只在标记文件在的时候按 `_LOOP_CENSUS_POOL_SCAN_EVERY` 拍一次。
-        """
+    def _census_referrer_label(obj: Any) -> str:
+        name = type(obj).__name__
+        if name != 'dict':
+            return name
         import gc
 
-        pools: list[tuple[int, int]] = []
         try:
-            objects = gc.get_objects()
+            holders = [
+                type(other).__name__
+                for other in gc.get_referrers(obj)
+                if not isinstance(other, (list, tuple, dict))
+            ]
         except Exception:
-            return pools
-        for item in objects:
+            holders = []
+        return f'dict<{holders[0] if holders else "?"}>'
+
+    @classmethod
+    def _census_referrer_trail(cls, obj: Any, *, hops: int = 3) -> str:
+        """沿引用者往上走 hops 层，每层记类型名（字典记成 `dict<持有者>`）。"""
+        import gc
+
+        trail: list[str] = []
+        current: Any = obj
+        seen: set[int] = {id(obj)}
+        for _ in range(hops):
             try:
-                if type(item).__name__ != 'AsyncConnectionPool':
-                    continue
-                connections = list(item.connections)
+                referrers = [
+                    ref for ref in gc.get_referrers(current)
+                    if id(ref) not in seen and not isinstance(ref, (list, tuple))
+                ]
             except Exception:
-                continue
-            leased = 0
-            for connection in connections:
-                try:
-                    if not bool(connection.is_available()):
-                        leased += 1
-                except Exception:
-                    continue
-            pools.append((len(connections), leased))
-        return pools
+                break
+            if not referrers:
+                break
+            current = referrers[0]
+            seen.add(id(current))
+            trail.append(cls._census_referrer_label(current))
+        return ' <- '.join(trail) or '(none)'
 
-    @staticmethod
-    def _socket_owner_census(port: int) -> list[tuple[str, int]]:
-        """把"挂在 web 端口上的 socket 到底被谁引用"点名出来。
+    @classmethod
+    def _loopback_socket_census(cls, port: int) -> dict[str, Any]:
+        """一次 gc 扫同时回答三件事，用来给"挂在自家 web 端口上的连接"归因。
 
-        实盘 19:26–19:45：OS 上 29→45 条 ESTABLISHED，而进程里 3 个 httpcore 池一共只认
-        2 条连接、0 条租出，census 的挂起点榜里也没有任何任务停在 socket 上 ⇒ 这些 fd
-        既不在池里、也没人在等。只有从 socket 对象反查引用者，才说得出它挂在什么对象上。
+        ① 这些 socket 由谁持有（引用者链，走到 transport 之上）；② 进程里每个 httpcore
+        池有多少连接、多少被租出、这个池本身挂在哪个对象上；③ AsyncClient 实例有几个。
+        实盘 19:5x 的形状：OS 22 条 ESTABLISHED，socket 全被 `_ProactorSocketTransport`
+        持有，而 5 个池加起来只有 1 条连接 ⇒ 池已经丢了这些连接、transport 却从没 close，
+        所以"租着没还"和"野 fd"两种说法都不成立，得连池的持有者一起看才能说出是谁的。
+        gc 全量扫一次要持 GIL 一两秒，因此只在标记文件在的时候按 5 拍一次。
         """
         import gc
         import socket as socket_module
 
+        result: dict[str, Any] = {'sockets': 0, 'owners': {}, 'pools': [], 'clients': 0}
         if not port:
-            return []
+            return result
         try:
             objects = gc.get_objects()
         except Exception:
-            return []
+            return result
         sockets: list[Any] = []
+        pools: list[dict[str, Any]] = []
+        clients = 0
         for item in objects:
             try:
+                type_name = type(item).__name__
+                if type_name == 'AsyncClient':
+                    clients += 1
+                    continue
+                if type_name == 'AsyncConnectionPool':
+                    connections = list(item.connections)
+                    leased = 0
+                    for connection in connections:
+                        try:
+                            if not bool(connection.is_available()):
+                                leased += 1
+                        except Exception:
+                            continue
+                    pools.append({'conns': len(connections), 'leased': leased, 'trail': cls._census_referrer_trail(item)})
+                    continue
                 if not isinstance(item, socket_module.socket):
                     continue
                 peer = item.getpeername()
@@ -1131,28 +1159,13 @@ class MainRuntimeService:
             sockets.append(item)
         owners: dict[str, int] = {}
         for sock in sockets:
-            trail: list[str] = []
-            try:
-                referrers = list(gc.get_referrers(sock))[:3]
-            except Exception:
-                referrers = []
-            for referrer in referrers:
-                label = type(referrer).__name__
-                if label == 'dict':
-                    try:
-                        holders = [
-                            type(other).__name__
-                            for other in list(gc.get_referrers(referrer))[:3]
-                            if not isinstance(other, list)
-                        ]
-                        label = f'dict<{holders[0] if holders else "?"}>'
-                    except Exception:
-                        label = 'dict<?>'
-                trail.append(label)
-            key = ' or '.join(trail) or '(no referrer)'
-            owners[key] = owners.get(key, 0) + 1
-        owners['TOTAL'] = len(sockets)
-        return sorted(owners.items(), key=lambda item: -item[1])[:8]
+            trail = cls._census_referrer_trail(sock)
+            owners[trail] = owners.get(trail, 0) + 1
+        result['sockets'] = len(sockets)
+        result['owners'] = dict(sorted(owners.items(), key=lambda item: -item[1])[:4])
+        result['pools'] = pools[:8]
+        result['clients'] = clients
+        return result
 
     async def _loop_census_loop(self) -> None:
         """标记文件在的时候把 loop 上的任务点名打一行；不在就只是睡着。
@@ -1168,11 +1181,9 @@ class MainRuntimeService:
                 if not self._loop_census_marker_path().exists():
                     continue
                 ticks += 1
-                pools: list[tuple[int, int]] = []
-                sock_owners: list[tuple[str, int]] = []
+                lane: dict[str, Any] = {}
                 if ticks % _LOOP_CENSUS_POOL_SCAN_EVERY == 0:
-                    pools = self._connection_pool_census()
-                    sock_owners = self._socket_owner_census(self._loopback_web_port())
+                    lane = self._loopback_socket_census(self._loopback_web_port())
                 tasks = list(asyncio.all_tasks())
                 prefixes: dict[str, int] = {}
                 site_counts: dict[str, int] = {}
@@ -1191,12 +1202,11 @@ class MainRuntimeService:
                     for task in tasks[:_LOOP_CENSUS_SAMPLE_TASKS]
                 ]
                 logger.warning(
-                    'loop census: worker={} poller={} total={} pools={} socks={} prefixes={} top_sites={} sample={}',
+                    'loop census: worker={} poller={} total={} lane={} prefixes={} top_sites={} sample={}',
                     self.worker_id or 'worker',
                     poller_site,
                     len(tasks),
-                    pools,
-                    sock_owners,
+                    lane,
                     dict(sorted(prefixes.items(), key=lambda item: -item[1])[:8]),
                     dict(sorted(site_counts.items(), key=lambda item: -item[1])[:_LOOP_CENSUS_TOP_SITES]),
                     sites,
