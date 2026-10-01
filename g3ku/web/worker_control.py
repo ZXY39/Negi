@@ -96,7 +96,7 @@ def _managed_worker_log_path() -> Path:
     return data_root() / _MANAGED_WORKER_LOG_RELATIVE_PATH
 
 
-_MANAGED_WORKER_LOG_MAX_BYTES = 50 * 1024 * 1024       # 对齐 g3ku_bootstrap console.log rotation="50 MB"
+_MANAGED_WORKER_LOG_MAX_BYTES = 50 * 1024 * 1024       # 对齐 g3ku_bootstrap RUNTIME_CONSOLE_LOG_MAX_BYTES
 _MANAGED_WORKER_LOG_RETENTION_SECONDS = 7 * 24 * 3600  # 对齐 retention="7 days"
 
 

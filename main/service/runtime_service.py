@@ -46,6 +46,7 @@ from g3ku.runtime.tool_visibility import (
 )
 from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from g3ku.security import get_bootstrap_security_service
+from g3ku.update_apply import WEB_LOG_FILE
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
 from g3ku.web.worker_control import managed_worker_snapshot
 from main.errors import TaskPausedError
@@ -202,6 +203,12 @@ _TASK_DELETE_CONFIRM_TTL_SECONDS = 600.0
 # 删除前等待暂停排空的上限：到期未排空按 task_still_stopping 拒绝，
 # 调用方可在暂停生效后重试；避免无限等待离线/卡死的排空。
 _DELETE_PAUSE_DRAIN_TIMEOUT_SECONDS = 10.0
+# web 自身 stdout 落点（g3ku_bootstrap 把它交给子进程句柄）的长跑封顶：正文写在
+# 一个继承来的 append 句柄上，改名换不掉，所以这里只就地截尾。实盘 187 MB/23h
+# 的那次是 QQ 桥重连风暴把 loguru 全量 traceback 灌进来的量级。
+_CONSOLE_LOG_CAP_BYTES = 100 * 1024 * 1024
+_CONSOLE_LOG_KEEP_BYTES = 25 * 1024 * 1024
+_CONSOLE_LOG_CAP_MIN_INTERVAL_SECONDS = 3600.0
 _WORKER_STATE_STARTING = 'starting'
 _WORKER_STATE_ONLINE = 'online'
 _WORKER_STATE_STALE = 'stale'
@@ -7612,6 +7619,7 @@ class MainRuntimeService:
                     await asyncio.to_thread(self._reconcile_task_disk_usage, task_id)
                 await self._run_detail_retention_if_due()
                 await self._run_delete_ledger_sweep_if_due()
+                await self._run_console_log_cap_if_due()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -8084,6 +8092,56 @@ class MainRuntimeService:
                 expired,
                 orphan_dirs,
             )
+
+    async def _run_console_log_cap_if_due(self) -> None:
+        """web 自身 stdout 落点的长跑封顶（跨进程卡权，模式对齐明细裁剪）。
+
+        只就地截尾、不改名：文件是 bootstrap 交给 web 子进程的 append 句柄，
+        句柄在就换不掉（Windows 上被占用的文件 rename 失败）。整份改名轮转发生在
+        下一次启动（``g3ku_bootstrap._rotate_runtime_console_log``）。
+        """
+        try:
+            claimed = await asyncio.to_thread(
+                self.store.claim_maintenance_run,
+                'console_log_cap',
+                min_interval_seconds=_CONSOLE_LOG_CAP_MIN_INTERVAL_SECONDS,
+            )
+        except Exception:
+            return
+        if not claimed:
+            return
+        try:
+            dropped = await asyncio.to_thread(
+                self._cap_console_log_file,
+                WEB_LOG_FILE,
+                cap_bytes=_CONSOLE_LOG_CAP_BYTES,
+                keep_bytes=_CONSOLE_LOG_KEEP_BYTES,
+            )
+        except Exception:
+            return
+        if dropped:
+            logger.info('disk governance: console.log capped, dropped {} bytes', dropped)
+
+    @staticmethod
+    def _cap_console_log_file(log_path: Path, *, cap_bytes: int, keep_bytes: int) -> int:
+        """超过 cap 时只留尾部 keep_bytes（对齐到整行），返回丢掉的字节数；未超返回 0。"""
+        try:
+            size = int(log_path.stat().st_size)
+        except OSError:
+            return 0
+        if size <= cap_bytes:
+            return 0
+        with log_path.open('rb') as handle:
+            handle.seek(max(0, size - keep_bytes))
+            handle.readline()  # 丢掉 seek 落在半行处的那半行
+            tail = handle.read()
+        stamp = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        marker = f'\n[log-cap] {stamp} 此前 {size - len(tail)} 字节已丢弃，仅保留尾部\n'.encode('utf-8')
+        with log_path.open('r+b') as handle:
+            handle.truncate(0)
+            handle.write(marker + tail)
+            handle.flush()
+        return size - len(tail)
 
     def _compensate_wipe(self, task_id: str) -> bool:
         """仅凭 task_id 幂等重放 wipe 的文件/DB/governance 子集（不导出、不发 task.deleted）。"""

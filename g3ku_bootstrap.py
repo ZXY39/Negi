@@ -20,6 +20,8 @@ else:
 BOOTSTRAP_MARKER = VENV_DIR / ".g3ku_bootstrap_complete"
 RUNTIME_LOG_DIR = PROJECT_ROOT / ".g3ku" / "logs"
 RUNTIME_CONSOLE_LOG_FILE = RUNTIME_LOG_DIR / "console.log"
+RUNTIME_CONSOLE_LOG_MAX_BYTES = 50 * 1024 * 1024
+RUNTIME_CONSOLE_LOG_RETENTION_SECONDS = 7 * 24 * 3600
 MIN_PYTHON = (3, 11)
 RUNTIME_IMPORT_PROBES = (
     "langchain_core.messages",
@@ -159,28 +161,31 @@ def _load_bootstrap_config() -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _configure_runtime_log_loguru_sink() -> None:
-    """Add a rolling loguru file sink to .g3ku/logs/console.log when available.
+def _rotate_runtime_console_log() -> None:
+    """console.log 超上限时改名成一枚时间戳代，并清掉 7 天以上的旧代。
 
-    Guarded: unavailability or misconfiguration must never break bootstrap. The
-    real web runtime capture is handled by stream redirection in main(); this
-    sink keeps the owning process loguru records persistent as well.
+    必须赶在 ``_open_runtime_console_log_stream()`` 之前跑：正文是 web 子进程继承的
+    stdout 句柄写进去的，句柄一旦建立就换不掉（Windows 上被占用的文件 rename 直接失败），
+    所以改名轮转只有在下一次启动、句柄还不存在时才做得动。长跑期间的封顶另有
+    runtime_service 的 ``console_log_cap`` 维护位负责。best-effort：任何失败都不挡启动。
     """
     try:
-        from loguru import logger as _loguru_logger
-    except Exception:
+        if (
+            RUNTIME_CONSOLE_LOG_FILE.is_file()
+            and RUNTIME_CONSOLE_LOG_FILE.stat().st_size > RUNTIME_CONSOLE_LOG_MAX_BYTES
+        ):
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            RUNTIME_CONSOLE_LOG_FILE.rename(
+                RUNTIME_CONSOLE_LOG_FILE.with_name(f"{RUNTIME_CONSOLE_LOG_FILE.name}.{stamp}")
+            )
+    except OSError:
         return
     try:
-        RUNTIME_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        _loguru_logger.add(
-            str(RUNTIME_CONSOLE_LOG_FILE),
-            rotation="50 MB",
-            retention="7 days",
-            encoding="utf-8",
-            backtrace=False,
-            diagnose=False,
-        )
-    except Exception:
+        cutoff = time.time() - RUNTIME_CONSOLE_LOG_RETENTION_SECONDS
+        for generation in RUNTIME_LOG_DIR.glob(f"{RUNTIME_CONSOLE_LOG_FILE.name}.*"):
+            if generation.is_file() and generation.stat().st_mtime < cutoff:
+                generation.unlink(missing_ok=True)
+    except OSError:
         return
 
 
@@ -236,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args:
         args = ["web"]
         print("[g3ku] no command given, starting web UI (use `g3ku.cmd <command>` for others)")
-    _configure_runtime_log_loguru_sink()
+    _rotate_runtime_console_log()
     console_log_stream: object | None = None
     process_env: dict[str, str] | None = None
     is_web_command = bool(args) and str(args[0] or "").strip().lower() == "web"

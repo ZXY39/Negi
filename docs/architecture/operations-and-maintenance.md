@@ -140,6 +140,10 @@
 
 日志因此分两半，别在数据根下等 `console.log`：`.g3ku/logs/console.log` 与 `.g3ku/logs/update-apply.log` 由启动器按代码检出目录锚定（`g3ku_bootstrap.py`、`g3ku/update_apply.py` 用 `PROJECT_ROOT`），与数据根无关；`.g3ku/main-runtime/managed-worker.log` 跟数据根。
 
+`console.log` 的大小由两道机制分别管，别指望其中一道代替另一道。启动时 `g3ku_bootstrap._rotate_runtime_console_log()` 把超过 `RUNTIME_CONSOLE_LOG_MAX_BYTES`（50 MB）的当前代改名成 `console.log.<UTC 时间戳>`，并清掉 `RUNTIME_CONSOLE_LOG_RETENTION_SECONDS`（7 天）以外的旧代。长跑期间由小时级维护循环挂载的 `console_log_cap`（`claim_maintenance_run` 跨进程卡权）在超过上限时就地保留尾部，并落一行 `[log-cap]` 标明丢了多少字节。
+
+改名只在启动那一刻能使上劲：正文写在 bootstrap 交给 web 子进程的 append 句柄上，句柄活着就换不掉这个文件（Windows 上被占用的文件 rename 直接失败），所以运行内只能就地截尾、不能归档。截尾把 seek 落点推到下一个换行，绝不留下半行；随后子进程仍按 append 语义写在新 EOF 之后。loguru 的 `rotation=` 对这份文件不起作用——它按"下一条记录"检查尺寸，而 bootstrap 进程自己不发 loguru 记录，所以只在文件上挂着这句参数等于没有轮转。
+
 其它架构文档里的 `.g3ku/...` 路径不重复标根，一律按本节的两半判读；需要新增挂载点时，先确认它该由哪一侧解析。
 
 - 改数据目录只在 `mode=setup` 的首次初始化入口生效（`POST /api/bootstrap/setup` 的 `data_dir` 字段，非绝对路径、落在 `.g3ku/` 内、包住安装根的候选一律拒绝）。已经建好口令的安装要换根，走人工迁移：停 web 与 worker、搬目录、写指针、再起两个进程。
