@@ -64,3 +64,19 @@ def test_snapshot_counts_survive_the_swap(tmp_path: Path) -> None:
     assert payload is not None
     assert payload['summary']['total_nodes'] == store.count_task_nodes(TASK_ID) == 4
     assert payload['summary']['total_rounds'] == store.count_task_node_rounds(TASK_ID) == 0
+    # 帧表只投影一次：两处必须是同一份内容
+    assert payload['runtime_summary']['frames'] == payload['frontier']
+    assert [item['node_id'] for item in payload['runtime_summary']['frames']] == [
+        item['node_id'] for item in payload['frontier']
+    ]
+
+
+def test_frontier_and_summary_share_one_projection(tmp_path: Path) -> None:
+    """空台账时 `runtime_summary` 的兜底形状不许因为重构丢掉任何一个键。"""
+    store, log_service, query_service = _services(tmp_path / 'empty-summary', nodes=1)
+    payload = query_service.get_task_snapshot(TASK_ID, mark_read=False)
+    assert payload is not None
+    summary = payload['runtime_summary']
+    for key in ('active_node_ids', 'runnable_node_ids', 'waiting_node_ids', 'dispatch_limits',
+                'dispatch_running', 'dispatch_queued', 'distribution', 'frames'):
+        assert key in summary, key

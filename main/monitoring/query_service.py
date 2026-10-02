@@ -591,16 +591,29 @@ class TaskQueryService:
             task = self._store.get_task(task_id) or task
         live_state = self._projection_live_state(task.task_id)
         root_node = self.get_node_detail(task.task_id, task.root_node_id)
-        runtime_summary = live_state.model_dump(mode='json') if live_state is not None else {
-            'active_node_ids': [],
-            'runnable_node_ids': [],
-            'waiting_node_ids': [],
-            'dispatch_limits': {'execution': 0, 'inspection': 0},
-            'dispatch_running': {'execution': 0, 'inspection': 0},
-            'dispatch_queued': {'execution': 0, 'inspection': 0},
-            'distribution': TaskDistributionState().model_dump(mode='json'),
-            'frames': [],
-        }
+        # 帧表先投影成 JSON 一次，`runtime_summary` 与 `frontier` 共用这一份。
+        # 旧写法是 `live_state.model_dump()`（含 195 帧）再为 frontier 逐帧 dump 第二遍：
+        # 两遍序列化同一个列表，是 `get_task_snapshot` 长块里除整表建模之外的另一头。
+        frontier = [
+            frame.model_dump(mode='json')
+            for frame in list(live_state.frames or [])
+        ] if live_state is not None else []
+        if live_state is None:
+            runtime_summary = {
+                'active_node_ids': [],
+                'runnable_node_ids': [],
+                'waiting_node_ids': [],
+                'dispatch_limits': {'execution': 0, 'inspection': 0},
+                'dispatch_running': {'execution': 0, 'inspection': 0},
+                'dispatch_queued': {'execution': 0, 'inspection': 0},
+                'distribution': TaskDistributionState().model_dump(mode='json'),
+                'frames': [],
+            }
+        else:
+            runtime_summary = {
+                **live_state.model_dump(mode='json', exclude={'frames'}),
+                'frames': list(frontier),
+            }
         counts = {
             # 这两个数以前是 `len(list_task_nodes(...))` / `len(list_task_node_rounds(...))`：
             # 为了一个整数把全任务节点与轮次整批建模，实测单次 222–443 ms，
@@ -611,10 +624,6 @@ class TaskQueryService:
             'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
             'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
         }
-        frontier = [
-            frame.model_dump(mode='json')
-            for frame in list(live_state.frames or [])
-        ] if live_state is not None else []
         token_usage_by_model = [
             item.model_dump(mode='json')
             for item in self._projection_token_usage_by_model(task.task_id)
