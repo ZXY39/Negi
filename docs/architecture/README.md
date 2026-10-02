@@ -139,6 +139,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 渠道/会话收到英文 "The turn completed without visible assistant text…"，或回合以「这一轮处理失败：响应流未正常终止」结束 → `runtime-overview.md`「Chat provider 超时与重试边界」（空响应与未终止流两条车道、`finish_reason_seen` 日志锚点）
 - `temp/tasks/` 出现大量无主 `task_*` 目录（目录数远超任务数）→ `operations-and-maintenance.md`「关键状态文件与目录」+ `runtime-overview.md`「任务侧」
 - 临时文件散落在工作区根目录（`.tmp_*` / `tmp_*`、命令重定向落盘）→ `runtime-overview.md`「任务侧」+ `tool-and-skill-system.md`「四个概念必须分清」
+- 直接编辑 `skills/` 或 `tools/` 下的文件后注册表不认（新 skill 看不到、改过的正文仍以旧内容参与）→ `tool-and-skill-system.md`「资源目录代检查与语义目录新鲜度」
 - 会话固定了指定模型却仍走模型链、固定模型被删除/禁用后未回退、或切换后用量表按旧模型窗口显示 → `config-and-models.md`「会话级固定模型优先于角色链」+ `web-and-admin.md`「Composer Model Mode Panel」
 - 模型面板显示的不是模型链链首、或显示名与实跑绑定对不上（多条绑定共用同一 provider 模型名）→ `config-and-models.md`「角色路由：有序 fallback 与负载均衡组」+ `web-and-admin.md`「Composer Model Mode Panel」
 - 节点一直打同一个模型、组内分布不均、或"改了组配置没生效" → `runtime-overview.md`「节点模型路由与准入绑定」+ `operations-and-maintenance.md`「节点模型负载不均 / 一直打同一个模型」

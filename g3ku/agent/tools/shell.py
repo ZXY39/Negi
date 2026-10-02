@@ -256,7 +256,6 @@ class ExecTool(Tool):
                         error=blocked_text,
                     )
 
-        resource_state = self._capture_resource_tree_state()
         env = self._build_subprocess_env(runtime=runtime, cwd=cwd)
 
         try:
@@ -340,7 +339,7 @@ class ExecTool(Tool):
                 error=f"Error executing command: {str(e)}",
             )
         finally:
-            self._notify_resource_change(resource_state, runtime=runtime, trigger="tool:exec")
+            self._notify_resource_change(runtime=runtime, trigger="tool:exec")
 
     async def _collect_process_output(
         self,
@@ -1037,18 +1036,8 @@ class ExecTool(Tool):
             stderr_text = f"{stderr_capture.head_text()}\n{stderr_capture.tail_text()}"
         return "syntaxerror" in stderr_text.lower()
 
-    def _capture_resource_tree_state(self) -> dict[str, dict[str, str]]:
-        service = self.main_task_service
-        if service is None or not hasattr(service, "capture_resource_tree_state"):
-            return {}
-        try:
-            return service.capture_resource_tree_state()
-        except Exception:
-            return {}
-
     def _notify_resource_change(
         self,
-        before_state: dict[str, dict[str, str]] | None,
         *,
         runtime: dict[str, Any],
         trigger: str,
@@ -1058,7 +1047,7 @@ class ExecTool(Tool):
             return
         session_id = str(runtime.get("session_key") or "web:shared").strip() or "web:shared"
         try:
-            service.refresh_changed_resources(before_state, trigger=trigger, session_id=session_id)
+            service.refresh_changed_resources(None, trigger=trigger, session_id=session_id)
         except Exception:
             return
 

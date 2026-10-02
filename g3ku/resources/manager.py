@@ -216,9 +216,12 @@ class ResourceManager:
         before_state: dict[str, dict[str, str]] | None,
         *,
         trigger: str = "path-change",
+        after_state: dict[str, dict[str, str]] | None = None,
     ) -> ResourceSnapshot:
         previous = before_state if isinstance(before_state, dict) else {}
-        after_state = self.capture_resource_tree_state()
+        # 调用方已经扫过一遍时把结果传进来：一次全量指纹在实盘是 skills 1659 文件
+        # + tools 93 文件 ≈ 122 ms，且落在 worker 的事件循环线程上。
+        after_state = self.capture_resource_tree_state() if after_state is None else after_state
         skill_roots = self._changed_roots(previous.get("skills"), after_state.get("skills"), self._registry.skills_dir)
         tool_roots = self._changed_roots(previous.get("tools"), after_state.get("tools"), self._registry.tools_dir)
         if not skill_roots and not tool_roots:

@@ -380,26 +380,37 @@ class ResourceRegistry:
 
     @staticmethod
     def _tree_fingerprint(root: Path) -> str:
+        # 指纹跑在 worker 的事件循环线程上（每条 exec 命令都要扫 skills + tools），
+        # 所以这里省的每一毫秒都是循环的。旧写法先 os.walk 收集再 path.stat()：
+        # walk 内部 scandir 已经拿到目录项的 mtime/size，却被丢掉又重新查一遍。
+        # 改用 DirEntry.stat() 直接吃那份缓存。
+        entries: list[str] = []
+        ResourceRegistry._collect_tree_entries(str(root), "", entries)
         digest = hashlib.sha256()
-        files: list[tuple[str, Path]] = []
-        for current, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(
-                name
-                for name in dirnames
-                if name not in ResourceRegistry._FINGERPRINT_IGNORED_DIRS
-            )
-            current_path = Path(current)
-            rel_base = current_path.relative_to(root)
-            for filename in sorted(filenames):
-                path = current_path / filename
-                rel = (rel_base / filename).as_posix() if str(rel_base) != "." else filename
-                files.append((rel, path))
-        for rel, path in files:
-            stat = path.stat()
-            digest.update(rel.encode("utf-8"))
-            digest.update(str(stat.st_mtime_ns).encode("utf-8"))
-            digest.update(str(stat.st_size).encode("utf-8"))
+        digest.update("\n".join(sorted(entries)).encode("utf-8"))
         return digest.hexdigest()
+
+    @staticmethod
+    def _collect_tree_entries(root: str, prefix: str, out: list[str]) -> None:
+        try:
+            with os.scandir(root) as scandir_iter:
+                children = list(scandir_iter)
+        except OSError:
+            # os.walk 对打不开的目录是静默跳过的；一次权限/长路径失败不该让整棵树的
+            # 指纹抛错——那会让上层整个自动重载车道哑掉。
+            return
+        sub_dirs: list[os.DirEntry] = []
+        for entry in children:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir():
+                if entry.name not in ResourceRegistry._FINGERPRINT_IGNORED_DIRS:
+                    sub_dirs.append(entry)
+                continue
+            stat = entry.stat()
+            out.append(f"{prefix}{entry.name}|{stat.st_mtime_ns}|{stat.st_size}")
+        for entry in sub_dirs:
+            ResourceRegistry._collect_tree_entries(entry.path, f"{prefix}{entry.name}/", out)
 
     def _resolve_install_dir(self, raw_value: Any) -> Path | None:
         text = str(raw_value or "").strip()

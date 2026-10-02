@@ -337,7 +337,10 @@ skill / tool 目录可能被编辑器、git 或外部进程直接改动，注册
 
 - 节拍由 `resources.reload.poll_interval_ms`（JSON 侧 `resources.reload.pollIntervalMs`）节流，默认 1000ms；配成 0 表示每个调用点都允许比对。
 - 比对面是 `capture_resource_tree_state()` 产出的 `{"skills": {name: 目录树指纹}, "tools": {...}}`，指纹来自 `ResourceRegistry._tree_fingerprint(资源目录)`。注册表缺失或目录为空时快照为空，比对直接返回"无变化"，这不是错误态。
+- 指纹覆盖目录树里每个文件的相对路径、`mtime_ns` 与字节数，`__pycache__` / `node_modules` / `.git` / `.venv` / `venv` / `env` / `.pytest_cache` / `.ruff_cache` 这些目录整体不参与；软链接目录不进入递归。也就是说"改了正文一个字节"能被发现，而"原地替换成一个同大小且 mtime 未变的文件"不能。
+- 这条扫描跑在 worker 的事件循环线程上，且是每条 `exec` 命令都要付的成本，所以它的单价必须按实盘规模看：skills 60 个目录 1659 个文件 + tools 33 个目录 93 个文件，一次全量扫描实测 45–50 ms。指纹吃 `os.scandir` 随目录枚举一并返回的目录项元数据；改成"先收集路径再逐个 `stat()`"实测回到 132–150 ms。
 - 首次调用只落基线：没有上一份快照就没有可比对象，因此第一拍永远不报刷新。
+- 三个比对点共用服务侧那一份基线（`_resource_tree_state_cache`）：CEO 前门的节流拍、`exec` 工具每条命令结束（`trigger='tool:exec'`）、管理端显式路径。命令侧不携带自己的快照，所以一条命令只付一次扫描；又因为基线就是"上一次扫描时的树"，命令执行前后之外发生的外部编辑同样会在下一个比对点被抓到，不存在被跳过的变更。
 - 指纹变化时才动作：`refresh_changed_resources(trigger='external-resource-generation-check')` 重建受影响资源，随后清空 `_node_context_selection_cache`（节点上下文选择里缓存着旧的候选/水合结论），并只对名字出现在差异集里的 skill / tool 重新同步语义目录条目。
-- 管理端保存或编辑资源走的是显式路径（`refresh_resource_paths` / `refresh_paths`，trigger 为 `path-change`），它同步刷新注册表并当场重记基线；两条路径共用同一份基线，所以编辑后的一拍不会因为节流而漏掉变化。
+- 管理端保存或编辑资源走的是显式路径（`refresh_resource_paths` / `refresh_paths`，trigger 为 `path-change`），它同步刷新注册表并当场重记基线；各条路径共用同一份基线，所以编辑后的一拍不会因为节流而漏掉变化。
 - 维护要点：新增会进入上下文选择的缓存时，必须在这条差异路径上一起失效，否则外部改动的 skill/tool 正文会长期以旧指纹参与候选与描述投影。

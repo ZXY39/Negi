@@ -7787,7 +7787,7 @@ class MainRuntimeService:
 
     def refresh_changed_resources(
         self,
-        before_state: dict[str, dict[str, str]] | None,
+        before_state: dict[str, dict[str, str]] | None = None,
         *,
         trigger: str = 'path-change',
         session_id: str = 'web:shared',
@@ -7796,12 +7796,19 @@ class MainRuntimeService:
         registry = getattr(self, 'resource_registry', None)
         policy_engine = getattr(self, 'policy_engine', None)
         if manager is not None and hasattr(manager, 'refresh_changed_tree_state'):
-            manager.refresh_changed_tree_state(before_state, trigger=trigger)
+            # 基线归服务侧：调用方（exec 工具）只报"命令跑完了"，不带自己的快照，
+            # 所以一条命令只付一次全树扫描。拿上一次记下的状态当 before，检测力只增
+            # 不减——命令间隙里发生的外部编辑同样会在这一轮被抓到。
+            # 没有基线时只记不比：磁盘状态还在，下一次扫描会补上。
+            baseline = dict(before_state or {}) or dict(getattr(self, '_resource_tree_state_cache', None) or {})
+            after_state = self._resource_tree_state_snapshot()
+            if baseline:
+                manager.refresh_changed_tree_state(baseline, trigger=trigger, after_state=after_state)
             if registry is not None and hasattr(registry, 'refresh_from_current_resources'):
                 skills, tools = registry.refresh_from_current_resources()
                 if policy_engine is not None and hasattr(policy_engine, 'sync_default_role_policies'):
                     policy_engine.sync_default_role_policies()
-                self._record_resource_tree_state()
+                self._record_resource_tree_state(after_state)
                 return {'ok': True, 'session_id': session_id, 'skills': len(skills), 'tools': len(tools)}
         fallback = getattr(self, 'reload_resources', None)
         if callable(fallback):

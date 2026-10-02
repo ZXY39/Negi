@@ -350,11 +350,18 @@ class _ResourceSyncService(_VisibleToolService):
         snapshot = self.resource_manager.refresh_paths(list(paths or []), trigger=trigger)
         return {'ok': True, 'skills': len(snapshot.skills), 'tools': len(snapshot.tools)}
 
-    def refresh_changed_resources(self, before_state, *, trigger: str = 'path-change', session_id: str = 'web:shared'):
+    def refresh_changed_resources(self, before_state=None, *, trigger: str = 'path-change', session_id: str = 'web:shared'):
         _ = session_id
         if self.resource_manager is None:
             return {'ok': False}
-        snapshot = self.resource_manager.refresh_changed_tree_state(before_state, trigger=trigger)
+        baseline = dict(before_state or {}) or dict(getattr(self, '_tree_state_baseline', None) or {})
+        after_state = self.resource_manager.capture_resource_tree_state()
+        self._tree_state_baseline = after_state
+        snapshot = self.resource_manager.refresh_changed_tree_state(
+            baseline,
+            trigger=trigger,
+            after_state=after_state,
+        )
         return {'ok': True, 'skills': len(snapshot.skills), 'tools': len(snapshot.tools)}
 
 
