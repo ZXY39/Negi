@@ -84,6 +84,11 @@ _NON_PROJECTABLE_EPOCH_STATES = frozenset({
 # 合计 8.7 MB，热任务通常只有最近几个在跑。
 _LIVE_FRAME_CACHE_MAX_TASKS = 4
 
+# 任务快照带的逐次调用条数上限。账本按任务全量读回的实测：在飞单任务 31686 行 / 75 MB，
+# SQL 235 ms + 建模 1463 ms + 序列化 281 ms（冷页首次 18.4 s），而任务详情面板每页 100 条、
+# 「刷新」走的 token 账本口本来就按 300 取数。要更多请显式传 `model_call_limit`。
+_TASK_SNAPSHOT_MODEL_CALL_ROWS = 300
+
 
 def project_pending_distribution_entries(
     entries_by_id: dict[str, dict[str, Any]],
@@ -615,11 +620,14 @@ class TaskQueryService:
                 'frames': list(frontier),
             }
         counts = {
-            # 这两个数以前是 `len(list_task_nodes(...))` / `len(list_task_node_rounds(...))`：
-            # 为了一个整数把全任务节点与轮次整批建模，实测单次 222–443 ms，
-            # 是 `recent_long_blocks` 的头名（`query_service.get_task_snapshot`）。
+            # 这几个数一律走计数口，不靠整表建模：为了一个整数把全任务节点/轮次/调用
+            # 建成模型，实测单次 222–443 ms（节点与轮次）到秒级（调用账本 31686 行 /
+            # 75 MB），是 `recent_long_blocks` 的头名（`query_service.get_task_snapshot`）。
+            # `total_model_calls` 也是界面那句"任务开始以来共 N 次调用"的出处——明细行
+            # 只带最近一窗，条数不能从明细行的长度反推。
             'total_nodes': self._store.count_task_nodes(task.task_id),
             'total_rounds': self._store.count_task_node_rounds(task.task_id),
+            'total_model_calls': self._store.count_task_model_calls(task.task_id),
             'active_node_count': len(list(runtime_summary.get('active_node_ids') or [])),
             'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
             'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
@@ -1622,11 +1630,15 @@ class TaskQueryService:
             return
 
     def _recent_model_calls(self, task_id: str, *, limit: int | None = 50) -> list[TaskModelCallRecord]:
+        """最近若干条逐次调用。`limit=None` 按 `_TASK_SNAPSHOT_MODEL_CALL_ROWS` 收口，
+        不等于"整任务账本"——账本随调用数线性增长（实盘单任务 31686 行 / 75 MB），
+        读口一旦不带 LIMIT 就是每次详情一跳的秒级块。`0` 才是"不取"。
+        """
         records: list[TaskModelCallRecord] = []
         if limit is not None and int(limit) <= 0:
             return records
-        store_limit = None if limit is None else max(1, int(limit))
-        for event in list(self._store.list_task_model_calls(task_id, limit=store_limit) or []):
+        rows = max(1, int(limit)) if limit is not None else _TASK_SNAPSHOT_MODEL_CALL_ROWS
+        for event in list(self._store.list_task_model_calls(task_id, limit=rows) or []):
             payload = dict(event.get('payload') or {})
             records.append(
                 TaskModelCallRecord(
@@ -1648,9 +1660,7 @@ class TaskQueryService:
                     thinking_tokens=_optional_int(payload.get('thinking_tokens')),
                 )
             )
-        if limit is None:
-            return records
-        return records[-max(1, int(limit or 1)) :]
+        return records[-rows:]
 
     def _projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:
         aggregates: dict[tuple[str, str, str], dict[str, Any]] = {}

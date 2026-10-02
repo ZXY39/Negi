@@ -1635,6 +1635,23 @@ function taskModelDisplayName(row) {
     return ceoModelUsageHeadlineTitle(raw) || raw;
 }
 
+// 「任务开始以来共 N 次调用」按服务端计数说，不按明细行的长度说：快照只带最近一窗
+// （`_TASK_SNAPSHOT_MODEL_CALL_ROWS`，300 条），实盘在飞单任务的账本是 31686 行——
+// 拿行数反推会把三万次调用印成三百次。计数缺失时（旧快照）只声称"已收到多少条明细"。
+function taskModelCallLedgerNote(carriedCount, totalCount, pageSize) {
+    const carried = Number(carriedCount || 0);
+    const total = Number(totalCount || 0);
+    const page = Number(pageSize || 0);
+    const pageNote = page > 0 ? ` · 每页 ${formatTokenCount(page)} 条` : "";
+    if (total > 0 && total > carried) {
+        return `任务开始以来共 ${formatTokenCount(total)} 次调用 · 明细带最近 ${formatTokenCount(carried)} 条${pageNote}`;
+    }
+    if (total > 0) {
+        return `任务开始以来共 ${formatTokenCount(total)} 次调用${pageNote}`;
+    }
+    return `已收到 ${formatTokenCount(carried)} 次调用明细${pageNote}`;
+}
+
 function renderTaskTokenStats(options = {}) {
     const force = !!(options && options.force);
     if (!U.taskTokenContent || !U.taskTokenSummaryText) return;
@@ -1726,7 +1743,7 @@ function renderTaskTokenStats(options = {}) {
                 <div class="task-token-call-head">
                     <div class="task-token-call-head-title">
                         <h3>模型调用明细</h3>
-                        <p>任务开始以来共 ${esc(formatTokenCount(recentModelCalls.length))} 次调用 · 每页 ${esc(formatTokenCount(modelCallPageMeta.pageSize))} 条</p>
+                        <p>${esc(taskModelCallLedgerNote(recentModelCalls.length, S.taskSummary?.total_model_calls, modelCallPageMeta.pageSize))}</p>
                     </div>
                     <div class="task-token-call-tools">
                         <input type="search" class="task-token-call-search" data-task-model-call-search

@@ -2734,6 +2734,19 @@ class SQLiteTaskStore:
         )
         return int(row['total']) if row is not None else 0
 
+    def count_task_model_calls(self, task_id: str) -> int:
+        """逐次调用条数走计数口。
+
+        `list_task_model_calls(limit=None)` 会把整任务账本读回（实盘单任务 31686 行 /
+        75 MB，冷页一次 18.4 s），而界面只需要"任务开始以来共 N 次调用"这一个数。
+        COUNT 走覆盖索引 `idx_task_model_calls_task_id_seq`，实测热 1.4–4 ms。
+        """
+        row = self._fetchone(
+            'SELECT COUNT(*) AS total FROM task_model_calls WHERE task_id = ?',
+            (str(task_id or '').strip(),),
+        )
+        return int(row['total']) if row is not None else 0
+
     def get_task_node(self, node_id: str) -> TaskProjectionNodeRecord | None:
         row = self._fetchone('SELECT payload_json FROM task_nodes WHERE node_id = ?', (node_id,))
         return self._parse(row['payload_json'], TaskProjectionNodeRecord) if row else None
