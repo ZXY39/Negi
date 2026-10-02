@@ -489,7 +489,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - 专用内部 memory agent 以 FIFO 同-op 批次（`write` 与 `delete` 不混批）消费队列，走 `memory` 模型路由，只有读写 `MEMORY.md` 与 note 文件的受限工具面；它把自然语言删除请求解析成具体 SQLite id，并可报告实质影响该批次的 `inspired_memory_ids`。
 - `memory_apply_batch` 的零变更出口按批次类型分岔：write 批次交 `noop_reason`，delete 批次不接受"本轮无需变更"，只能交 `already_satisfied` 声明待删目标已不在当前正文（已被更早批次改写或删除），该批次按 applied 收尾且快照不变。op 专属规则与参数形状同在暂存层返回字段错误，模型可在同一批内改提交而不消耗跨批尝试次数；落盘前的校验再独立复查同一组规则。
 - 每次非读变更后，运行时先改 SQLite、再重建 `MEMORY.md`、最后检查快照大小：超过 `document.compress_trigger_chars`（默认 `16000`）时按 `passed_count DESC`、`refresh_count ASC` 顺序压缩，先把整行替换为 `minimal_memory`，再只删除已压缩的非 `from_user` 行，直到回到 `document.compress_target_chars`（默认 `13000`）或没有安全压缩工作。
-- 队列消费跨进程单活：每次 `run_due_batch_once()` 必须先拿 workspace 级 memory-worker 文件锁；拿不到锁的进程保持队列不动并报告 `worker_lease_unavailable`。`request_id` 是持久幂等键：处理批次前会丢弃 `memory/ops.jsonl` 中已出现过 `request_id` 的队列行。
+- 队列消费跨进程单活：每次 `run_due_batch_once()` 必须先拿 workspace 级 memory-worker 文件锁；拿不到锁的进程保持队列不动并报告 `worker_lease_unavailable`。`request_id` 是持久幂等键：处理批次前会丢弃 `memory/ops.jsonl` 中已出现过 `request_id` 的队列行。该集合在进程内按台账文件的 `(size, mtime_ns)` 缓存——台账的每次写（终态落行、7 天剪枝、管理员放弃）都重写整个文件，这两个值必变，所以别的进程的写入同样让下一次读失效；缓存只是把"每次节拍全量读+解析台账"换成"台账动过才读"（实盘 20 行就 1.69 MB，每行连批次正文一起存），幂等判据本身不变。
 
 ### 队列状态机与失败停车语义
 

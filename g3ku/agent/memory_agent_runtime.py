@@ -1075,6 +1075,7 @@ class MemoryManager:
         )
         self.review_state_file = self.mem_dir / "review_state.json"
         self._io_lock = threading.RLock()
+        self._processed_request_ids_cache: tuple[tuple[int, int], set[str]] | None = None
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._strategy = MemoryStrategyV2(config)
@@ -1836,7 +1837,27 @@ class MemoryManager:
             self._write_processed_batches(kept_rows)
         return kept_rows
 
+    def _processed_batches_file_key(self) -> tuple[int, int] | None:
+        try:
+            stat = self.ops_file.stat()
+        except OSError:
+            return None
+        return (int(stat.st_size), int(stat.st_mtime_ns))
+
     def _processed_request_ids(self) -> set[str]:
+        """已处理批次的 request_id 集合，按台账文件的 (size, mtime_ns) 缓存。
+
+        `ops.jsonl` 每行连批次正文一起存，实盘 20 行就是 1.69 MB，而这个集合每次
+        due-batch 节拍都要过一遍——全量读+解析因此成了循环上的头几名。失效判据只用
+        文件身份就够：写入走 `_write_processed_batches`（同进程、同 `_io_lock`），
+        size 与 mtime 必变；跨进程追加同样会变。剪枝窗口按天计（
+        `_PROCESSED_BATCH_RETENTION_DAYS`），所以"文件没动就不重读"不会让任何一条
+        过期判定迟到到有意义的粒度。返回副本，调用方改集合不会污染缓存。
+        """
+        key = self._processed_batches_file_key()
+        cached = self._processed_request_ids_cache
+        if key is not None and cached is not None and cached[0] == key:
+            return set(cached[1])
         request_ids: set[str] = set()
         for payload in self._read_processed_batches():
             if not isinstance(payload, dict):
@@ -1845,7 +1866,9 @@ class MemoryManager:
                 normalized = str(raw_request_id or "").strip()
                 if normalized:
                     request_ids.add(normalized)
-        return request_ids
+        if key is not None:
+            self._processed_request_ids_cache = (key, request_ids)
+        return set(request_ids)
 
     def _drop_processed_queue_requests(self, *, processed_request_ids: set[str] | None = None) -> list[str]:
         known_processed = set(processed_request_ids or set())
