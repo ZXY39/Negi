@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from loguru import logger
 
@@ -4271,29 +4271,55 @@ class TaskLogService:
             except Exception:
                 continue
 
-    def sync_task_read_models(self, task_id: str, *, externalize_execution_trace: bool = True) -> TaskRecord | None:
+    def sync_task_read_models(
+        self, task_id: str, *, externalize_execution_trace: bool = True, force: bool = False
+    ) -> TaskRecord | None:
+        """重建任务的读模型投影。
+
+        默认只重做"投影落后于节点行"的那几行（`list_stale_task_node_ids`）：投影是从
+        节点行派生的，节点行没被写过就没有新的可派生输入。实盘在跑的任务上，旧写法把
+        986 行 / 229 MB 整批读回逐行重建，量出 11.2 s 的 `sqlite.query.fetchall:nodes`，
+        而那些行的投影戳 1,912/1,912 已经等于节点戳。
+        `force=True` 是无条件全量重建——派生口径变了要重刷存量投影时用那一次，
+        而不是把它当每次启动的默认。
+        """
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)
             if task is None:
                 return None
-            preserved_execution_trace_refs: dict[str, str] = {}
-            if not externalize_execution_trace:
-                preserved_execution_trace_refs = {
-                    str(record.node_id or '').strip(): str(record.execution_trace_ref or '').strip()
-                    for record in list(self._store.list_task_node_details(task_id) or [])
-                    if str(record.node_id or '').strip()
-                }
-            for node in self._store.iter_nodes(task_id):
+            node_ids: list[str] | None = None
+            if not force:
+                node_ids = self._store.list_stale_task_node_ids(task_id)
+                if not node_ids:
+                    self.refresh_task_view(task_id, mark_unread=False)
+                    if self._store.get_task_runtime_meta(task.task_id) is None:
+                        self.update_task_runtime_meta(task.task_id, last_stall_notice_bucket_minutes=0)
+                    return self._store.get_task(task_id)
+            for node in self._iter_nodes_for_projection_rebuild(task_id, node_ids):
+                if node is None:
+                    continue
+                preserved_execution_trace_ref = ''
+                if not externalize_execution_trace:
+                    detail_record = self._store.get_task_node_detail(node.node_id)
+                    if detail_record is not None:
+                        preserved_execution_trace_ref = str(detail_record.execution_trace_ref or '').strip()
                 self._sync_node_read_models_locked(
                     node,
                     externalize_execution_trace=externalize_execution_trace,
-                    preserved_execution_trace_ref=preserved_execution_trace_refs.get(str(node.node_id or '').strip(), ''),
+                    preserved_execution_trace_ref=preserved_execution_trace_ref,
                 )
                 self._sync_task_node_rounds_locked(node)
             self.refresh_task_view(task_id, mark_unread=False)
             if self._store.get_task_runtime_meta(task.task_id) is None:
                 self.update_task_runtime_meta(task.task_id, last_stall_notice_bucket_minutes=0)
             return self._store.get_task(task_id)
+
+    def _iter_nodes_for_projection_rebuild(self, task_id: str, node_ids: list[str] | None) -> Iterator[NodeRecord | None]:
+        if node_ids is None:
+            yield from self._store.iter_nodes(task_id)
+            return
+        for node_id in node_ids:
+            yield self._store.get_node(node_id)
 
     def sync_node_read_model(
         self,

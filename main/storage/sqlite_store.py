@@ -797,6 +797,28 @@ class SQLiteTaskStore:
             'pause_reason': str(row['pause_reason'] or ''),
         }
 
+    _STALE_TASK_NODE_PROJECTION_WHERE = (
+        'WHERE n.task_id = ? AND (d.updated_at IS NULL OR tn.updated_at IS NULL '
+        'OR d.updated_at <> n.updated_at OR tn.updated_at <> n.updated_at)'
+    )
+
+    def list_stale_task_node_ids(self, task_id: str) -> list[str]:
+        """需要重做投影的节点 id（与 `count_stale_task_node_projections` 同一判据）。
+
+        恢复/启动的读模型重建靠它把"整任务读回 payload_json 再逐行派生"缩到只差的那几行：
+        实盘一条 11.2 s 的 `sqlite.query.fetchall:nodes` 就是在跑的任务上 986 行 / 229 MB
+        被整批读回，而那些行的投影戳已经等于节点戳。
+        """
+        rows = self._fetchall(
+            'SELECT n.node_id AS node_id FROM nodes n '
+            'LEFT JOIN task_node_details AS d ON d.node_id = n.node_id '
+            'LEFT JOIN task_nodes AS tn ON tn.node_id = n.node_id '
+            + self._STALE_TASK_NODE_PROJECTION_WHERE
+            + ' ORDER BY n.created_at ASC, n.node_id ASC',
+            (str(task_id or '').strip(),),
+        )
+        return [str(row['node_id'] or '').strip() for row in rows if str(row['node_id'] or '').strip()]
+
     def count_stale_task_node_projections(self, task_id: str) -> int:
         """投影需要重做的节点条数：缺行，或投影戳与节点戳不一致。
 
@@ -809,8 +831,7 @@ class SQLiteTaskStore:
             'SELECT COUNT(*) AS stale FROM nodes n '
             'LEFT JOIN task_node_details AS d ON d.node_id = n.node_id '
             'LEFT JOIN task_nodes AS tn ON tn.node_id = n.node_id '
-            'WHERE n.task_id = ? AND (d.updated_at IS NULL OR tn.updated_at IS NULL '
-            'OR d.updated_at <> n.updated_at OR tn.updated_at <> n.updated_at)',
+            + self._STALE_TASK_NODE_PROJECTION_WHERE,
             (str(task_id or '').strip(),),
         )
         if row is None:

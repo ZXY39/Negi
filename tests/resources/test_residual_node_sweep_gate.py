@@ -165,6 +165,51 @@ async def test_projection_staleness_gate(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_sync_only_rebuilds_projection_stale_nodes(tmp_path: Path):
+    """读模型重建默认只重做落后的那几行，`force=True` 才是全量。"""
+    service = _service(tmp_path)
+    service.store.upsert_worker_status(
+        worker_id='worker:test',
+        role='task_worker',
+        status='running',
+        updated_at=now_iso(),
+        payload={'execution_mode': 'worker', 'active_task_count': 0},
+    )
+    record = await service.create_task('增量重建', session_id='web:shared')
+    service.store.upsert_node(_node(record.task_id, 'node:a', 'success'))
+    service.store.upsert_node(_node(record.task_id, 'node:b', 'success'))
+    service.log_service.sync_task_read_models(record.task_id, force=True)
+
+    rebuilt: list[str] = []
+    original = service.log_service._sync_node_read_models_locked
+
+    def _spy(node, **kwargs):
+        rebuilt.append(str(node.node_id))
+        return original(node, **kwargs)
+
+    service.log_service._sync_node_read_models_locked = _spy  # type: ignore[method-assign]
+    try:
+        # 戳全部一致：默认口径下一行都不该重做。
+        service.log_service.sync_task_read_models(record.task_id, externalize_execution_trace=False)
+        assert rebuilt == []
+
+        # 造一行漂移（把投影戳改旧），只该重做那一行。
+        service.store._execute_write(  # noqa: SLF001
+            'UPDATE task_node_details SET updated_at = ? WHERE node_id = ?',
+            ('2020-01-01T00:00:00+08:00', 'node:b'),
+        )
+        rebuilt.clear()
+        service.log_service.sync_task_read_models(record.task_id, externalize_execution_trace=False)
+        assert rebuilt == ['node:b']
+
+        rebuilt.clear()
+        service.log_service.sync_task_read_models(record.task_id, force=True)
+        assert set(rebuilt) >= {'node:a', 'node:b', record.root_node_id}
+    finally:
+        service.log_service._sync_node_read_models_locked = original  # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
 async def test_sweep_still_flips_a_residual_node(tmp_path: Path):
     service = _service(tmp_path)
     service.store.upsert_worker_status(
