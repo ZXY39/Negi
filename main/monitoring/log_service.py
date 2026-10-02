@@ -3731,6 +3731,8 @@ class TaskLogService:
         so the partial work stays traceable. Must be called with the task lock held.
         """
         swept: list[NodeRecord] = []
+        if not self._store.count_unsettled_task_nodes(task.task_id):
+            return swept
         for node in self._store.iter_nodes(task.task_id):
             if str(node.status or '').strip().lower() in {'success', 'failed'}:
                 continue

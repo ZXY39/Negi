@@ -797,6 +797,23 @@ class SQLiteTaskStore:
             'pause_reason': str(row['pause_reason'] or ''),
         }
 
+    def count_unsettled_task_nodes(self, task_id: str) -> int:
+        """终态任务下还没结算（非 success/failed）的节点条数，判定用，不搬正文。
+
+        `_sweep_residual_nodes_locked` 在 worker 启动时对**每个**终态任务都要问一次
+        "有没有残余"。旧写法为此把整任务的 payload_json 读回并逐行建模：实盘 63 个终态
+        任务合计 234.8 MB，而实盘命中的残余节点是 **0** 条。status 走 SQL 侧
+        `lower(trim(...))`，与 `TaskLogService._is_terminal_status` 同一口径。
+        """
+        row = self._fetchone(
+            "SELECT COUNT(*) AS unsettled FROM nodes WHERE task_id = ? "
+            "AND lower(trim(status)) NOT IN ('success', 'failed')",
+            (str(task_id or '').strip(),),
+        )
+        if row is None:
+            return 0
+        return int(row['unsettled'] or 0)
+
     def list_nodes(self, task_id: str) -> list[NodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], NodeRecord) for row in rows]
