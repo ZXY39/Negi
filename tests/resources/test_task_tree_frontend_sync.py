@@ -7,6 +7,7 @@ import textwrap
 from pathlib import Path
 
 from main.monitoring.query_service import TaskQueryService
+from main.runtime.execution_trace_compaction import build_execution_trace_summary
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -3020,8 +3021,9 @@ def test_summary_execution_trace_round_with_tool_names_only_renders_placeholder_
 
 
 def test_execution_trace_summary_drops_empty_round_shells_before_ui() -> None:
-    summary = TaskQueryService._execution_trace_summary(
-        {
+    summary = TaskQueryService._sanitize_execution_trace_summary(
+        build_execution_trace_summary(
+            {
             "stages": [
                 {
                     "stage_id": "stage:1",
@@ -3052,6 +3054,7 @@ def test_execution_trace_summary_drops_empty_round_shells_before_ui() -> None:
                 },
             ],
         }
+        )
     )
 
     rounds = summary["stages"][0]["rounds"]

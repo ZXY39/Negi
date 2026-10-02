@@ -114,3 +114,77 @@ def compact_tool_step_for_summary(step: dict[str, Any] | None) -> dict[str, Any]
         payload["source"] = source
 
     return payload
+
+
+def build_execution_trace_summary(execution_trace: dict[str, Any] | None) -> dict[str, Any]:
+    """整份轨迹 → 节点详情用的摘要台账。写侧存的那份与读侧现算的那份必须是这一个函数。
+
+    两条读路（行内存量摘要 / 从外置轨迹现算）过去各用一个构造器，现算那份保留完整
+    入参与出参，同一个节点的 `execution_trace_summary` 实测 430 KB 对 2.29 MB；而压实
+    存量摘要时又只认 `arguments_text`，把行内的 `arguments_preview` 丢掉，实盘
+    `node:8e2382a036e3` 的 425 条工具行 0 条保住参数。
+    """
+    trace = execution_trace if isinstance(execution_trace, dict) else {}
+    stages_payload: list[dict[str, Any]] = []
+    for stage in list(trace.get("stages") or []):
+        if not isinstance(stage, dict):
+            continue
+        tool_calls: list[dict[str, Any]] = []
+        rounds_payload: list[dict[str, Any]] = []
+        for round_item in list(stage.get("rounds") or []):
+            if not isinstance(round_item, dict):
+                continue
+            compact_tools: list[dict[str, Any]] = []
+            for step in list(round_item.get("tools") or []):
+                compact_step = compact_tool_step_for_summary(step)
+                if compact_step is not None:
+                    tool_calls.append(compact_step)
+                    compact_tools.append(compact_step)
+            rounds_payload.append(
+                {
+                    "round_id": str(round_item.get("round_id") or ""),
+                    "round_index": int(round_item.get("round_index") or 0),
+                    "created_at": str(round_item.get("created_at") or ""),
+                    "text": str(round_item.get("text") or ""),
+                    "budget_counted": bool(round_item.get("budget_counted")),
+                    "tools": compact_tools,
+                }
+            )
+        stages_payload.append(
+            {
+                "stage_id": str(stage.get("stage_id") or ""),
+                "stage_index": int(stage.get("stage_index") or 0),
+                "mode": str(stage.get("mode") or ""),
+                "status": str(stage.get("status") or ""),
+                "stage_goal": str(stage.get("stage_goal") or ""),
+                "completed_stage_summary": str(stage.get("completed_stage_summary") or ""),
+                "tool_round_budget": int(stage.get("tool_round_budget") or 0),
+                "tool_rounds_used": int(stage.get("tool_rounds_used") or 0),
+                "created_at": str(stage.get("created_at") or ""),
+                "finished_at": str(stage.get("finished_at") or ""),
+                "rounds": rounds_payload,
+                "tool_calls": tool_calls,
+            }
+        )
+    if stages_payload:
+        return {"stages": stages_payload}
+    fallback_tool_calls: list[dict[str, Any]] = []
+    for step in list(trace.get("tool_steps") or []):
+        compact_step = compact_tool_step_for_summary(step)
+        if compact_step is not None:
+            fallback_tool_calls.append(compact_step)
+    if fallback_tool_calls:
+        return {
+            "stages": [{
+                "stage_goal": "",
+                "rounds": [{
+                    "round_id": "",
+                    "round_index": 1,
+                    "created_at": "",
+                    "budget_counted": False,
+                    "tools": fallback_tool_calls,
+                }],
+                "tool_calls": fallback_tool_calls,
+            }]
+        }
+    return {"stages": []}

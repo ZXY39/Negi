@@ -49,6 +49,7 @@ from main.runtime.append_notice_context import (
     normalize_append_notice_context,
     normalize_pending_append_notice_records,
 )
+from main.runtime.execution_trace_compaction import build_execution_trace_summary
 from main.token_usage import aggregate_node_token_usage
 
 _CONTROL_TOOL_NAMES = {'wait_tool_execution', 'stop_tool_execution'}
@@ -747,7 +748,9 @@ class TaskQueryService:
                 payload=payload,
             )
             if not execution_trace_summary:
-                execution_trace_summary = self._execution_trace_summary(execution_trace)
+                execution_trace_summary = self._sanitize_execution_trace_summary(
+                    build_execution_trace_summary(execution_trace)
+                )
             execution_trace = self._hydrate_execution_trace_output_texts(execution_trace)
         elif not execution_trace_summary or not self._execution_trace_summary_has_rounds(execution_trace_summary):
             execution_trace = self._resolve_execution_trace(
@@ -756,7 +759,9 @@ class TaskQueryService:
                 payload=payload,
             )
             if execution_trace:
-                execution_trace_summary = self._execution_trace_summary(execution_trace)
+                execution_trace_summary = self._sanitize_execution_trace_summary(
+                    build_execution_trace_summary(execution_trace)
+                )
         if normalized_detail_level == 'summary' and not execution_trace:
             # 现成摘要已含 rounds 时此前不会解析完整轨迹;summary 档要附带
             # 「最新一批」工具调用的完整入参/状态/出参,兜底解析一次
@@ -1105,73 +1110,6 @@ class TaskQueryService:
         return dict(parsed) if isinstance(parsed, dict) else {}
 
     @staticmethod
-    def _execution_trace_summary(execution_trace: dict[str, Any] | None) -> dict[str, Any]:
-        trace = execution_trace if isinstance(execution_trace, dict) else {}
-        stages_payload: list[dict[str, Any]] = []
-        for stage in list(trace.get('stages') or []):
-            if not isinstance(stage, dict):
-                continue
-            tool_calls: list[dict[str, str]] = []
-            rounds_payload: list[dict[str, Any]] = []
-            for round_item in list(stage.get('rounds') or []):
-                if not isinstance(round_item, dict):
-                    continue
-                compact_tools: list[dict[str, str]] = []
-                for step in list(round_item.get('tools') or []):
-                    compact_step = TaskQueryService._compact_execution_trace_tool_call(step)
-                    if compact_step is not None:
-                        tool_calls.append(compact_step)
-                        compact_tools.append(compact_step)
-                rounds_payload.append(
-                    {
-                        'round_id': str(round_item.get('round_id') or ''),
-                        'round_index': int(round_item.get('round_index') or 0),
-                        'created_at': str(round_item.get('created_at') or ''),
-                        'text': str(round_item.get('text') or ''),
-                        'budget_counted': bool(round_item.get('budget_counted')),
-                        'tools': compact_tools,
-                    }
-                )
-            stages_payload.append(
-                {
-                    'stage_id': str(stage.get('stage_id') or ''),
-                    'stage_index': int(stage.get('stage_index') or 0),
-                    'mode': str(stage.get('mode') or ''),
-                    'status': str(stage.get('status') or ''),
-                    'stage_goal': str(stage.get('stage_goal') or ''),
-                    'completed_stage_summary': str(stage.get('completed_stage_summary') or ''),
-                    'tool_round_budget': int(stage.get('tool_round_budget') or 0),
-                    'tool_rounds_used': int(stage.get('tool_rounds_used') or 0),
-                    'created_at': str(stage.get('created_at') or ''),
-                    'finished_at': str(stage.get('finished_at') or ''),
-                    'rounds': rounds_payload,
-                    'tool_calls': tool_calls,
-                }
-            )
-        if stages_payload:
-            return TaskQueryService._sanitize_execution_trace_summary({'stages': stages_payload})
-        fallback_tool_calls: list[dict[str, str]] = []
-        for step in list(trace.get('tool_steps') or []):
-            compact_step = TaskQueryService._compact_execution_trace_tool_call(step)
-            if compact_step is not None:
-                fallback_tool_calls.append(compact_step)
-        if fallback_tool_calls:
-            return {
-                'stages': [{
-                    'stage_goal': '',
-                    'rounds': [{
-                        'round_id': '',
-                        'round_index': 1,
-                        'created_at': '',
-                        'budget_counted': False,
-                        'tools': fallback_tool_calls,
-                    }],
-                    'tool_calls': fallback_tool_calls,
-                }]
-            }
-        return {'stages': []}
-
-    @staticmethod
     def _sanitize_execution_trace_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
         payload = summary if isinstance(summary, dict) else {}
         stages_payload: list[dict[str, Any]] = []
@@ -1251,6 +1189,13 @@ class TaskQueryService:
 
     @staticmethod
     def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
+        """工具步 → 显示档（`arguments_text` / `output_text`）。
+
+        入站有两种档：写侧存的 `*_preview`（已按 160 字截过，幂等）与整份轨迹的
+        `*_text`（原文）。这里只做**改名与取值**，不再二次截断——二次截断会把存量
+        摘要里的 160 字参数砍成 24 字。只认 `arguments_text` 而漏掉 `arguments_preview`
+        会让存量摘要的参数整列变空（实盘 node:8e2382a036e3 的 425 条工具行 0 条有参数）。
+        """
         if not isinstance(step, dict):
             return None
         output_ref = str(step.get('output_ref') or '').strip()
@@ -1263,7 +1208,7 @@ class TaskQueryService:
         return {
             'tool_call_id': str(step.get('tool_call_id') or '').strip(),
             'tool_name': str(step.get('tool_name') or '').strip() or 'tool',
-            'arguments_text': str(step.get('arguments_text') or ''),
+            'arguments_text': str(step.get('arguments_text') or step.get('arguments_preview') or ''),
             'output_text': output_text,
             'output_ref': output_ref,
             'status': str(step.get('status') or '').strip(),

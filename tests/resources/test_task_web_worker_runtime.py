@@ -40,6 +40,7 @@ from main.runtime.acceptance_handshake import (
     set_acceptance_handshake_state,
 )
 from main.monitoring.query_service import TaskQueryService
+from main.runtime.execution_trace_compaction import build_execution_trace_summary
 from main.prompts import load_prompt
 from main.protocol import now_iso
 from main.runtime.append_notice_context import (
@@ -6366,6 +6367,7 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
     record = asyncio.run(_create_web_task(service))
     root = service.get_node(record.root_node_id)
     assert root is not None
+    long_path = str(tmp_path) + "/" + "d" * 400
     _create_pending_tool_round(
         service,
         task_id=record.task_id,
@@ -6374,7 +6376,7 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
             {
                 "id": "call-1",
                 "name": "filesystem",
-                "arguments": {"path": str(tmp_path)},
+                "arguments": {"path": long_path},
             }
         ],
         live_tool_calls=[{"tool_call_id": "call-1", "tool_name": "filesystem", "status": "running"}],
@@ -6386,7 +6388,7 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
         tool_call_id="call-1",
         tool_name="filesystem",
         status="success",
-        arguments_text=json.dumps({"path": str(tmp_path)}, ensure_ascii=False),
+        arguments_text=json.dumps({"path": long_path}, ensure_ascii=False),
         output_text="very long inline output",
         output_ref="artifact:artifact:tool-output",
         started_at=now_iso(),
@@ -6407,7 +6409,11 @@ def test_node_detail_summary_compacts_tool_payloads_from_trace(tmp_path: Path):
 
     assert tool["tool_call_id"] == "call-1"
     assert tool["tool_name"] == "filesystem"
-    assert tool["arguments_text"] == ""
+    # 摘要档带的是 160 字预览，不是整列空白（实盘回归：只显示「无参数」），
+    # 也不是完整入参——长参数必须被截住。
+    assert tool["arguments_text"]
+    assert len(tool["arguments_text"]) <= 160
+    assert long_path not in tool["arguments_text"]
     assert tool["output_text"] == "output captured in ref"
     assert tool["output_ref"] == "artifact:artifact:tool-output"
 
@@ -11043,7 +11049,9 @@ def test_execution_trace_summary_does_not_inline_hydrated_full_text_when_output_
         ]
     }
 
-    summary = TaskQueryService._execution_trace_summary(hydrated_trace)
+    summary = TaskQueryService._sanitize_execution_trace_summary(
+        build_execution_trace_summary(hydrated_trace)
+    )
 
     summary_tool = summary["stages"][0]["rounds"][0]["tools"][0]
     assert summary_tool["output_ref"] == "artifact:artifact:exec-output"
