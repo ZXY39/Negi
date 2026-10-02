@@ -2914,7 +2914,7 @@ class TaskLogService:
             ),
         )
         if updated is not None:
-            self._sync_node_read_models_locked(updated)
+            self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
             self._publish_task_node_patch_locked(task=task, node=updated)
         return updated
 
@@ -3524,7 +3524,7 @@ class TaskLogService:
                     if previous_metadata.get(key) != next_metadata.get(key)
                 }
                 if spawn_changed or execution_stage_changed or any(key not in result_payload_only_keys for key in changed_keys):
-                    self._sync_node_read_models_locked(updated)
+                    self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 if spawn_changed:
                     self._sync_task_node_rounds_locked(updated)
                     self._publish_task_node_patch_locked(task=task, node=updated)
@@ -3905,7 +3905,7 @@ class TaskLogService:
                 return None
             updated = self._store.update_node(node_id, _mutate)
             if updated is not None:
-                self._sync_node_read_models_locked(updated)
+                self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
@@ -4175,7 +4175,7 @@ class TaskLogService:
                         ),
                     )
                     if updated_node is not None:
-                        self._sync_node_read_models_locked(updated_node)
+                        self._sync_node_read_models_locked(updated_node, invalidate_execution_trace_ref=True)
                         self._publish_task_node_patch_locked(task=task, node=updated_node)
             self._store.delete_task_runtime_frame(task_id, node_id)
             if publish_snapshot:
