@@ -1376,31 +1376,53 @@ class SQLiteTaskStore:
     def sum_task_detail_bytes(self, task_ids: list[str]) -> dict[str, int]:
         """按任务汇总五张明细大行表的 payload 字节数。
 
-        全删渐进 size×age 排序的 size 输入；调用方候选集有界（≤50），
-        五表均有 task_id 索引，代价可控。
+        全删渐进 size×age 排序的 size 输入。口径：只计 `payload_json`，即每段正文的一份；
+        详情表去重前同一正文按列与 payload 重复计数，所以本值（以及 `task_disk_usage` 里的
+        DB 分量）在去重后低于磁盘上的历史占用，不能用来推断收缩量。
 
-        口径：只计 payload_json，即每段正文的一份。详情表去重前同一正文按列与
-        payload 重复计数，因此本值（以及 task_disk_usage 里的 DB 分量）在去重后
-        会低于磁盘上的历史占用，不能用来推断收缩量。
+        **"五表都有 task_id 索引 ⇒ 代价可控"是错的**（原来这句话在这个 docstring 里）。
+        `SUM(LENGTH(payload_json))` 必须把每个 payload 的页真读一遍，索引帮不上。实盘在跑任务
+        `task:1d9cddf9858e` 的 DB 份额 **526.79 MB**（tool_results 351.15 MB / 62,498 行、
+        model_calls 97.68 MB / 39,146 行、details 74.20 MB / 1,011 行）：页热时整句 1.1 s，
+        冷页时同一句实测 **20,999 ms / 36,859 ms**。所以这条读走**自己的只读连接**，不走共享读口——
+        共享读锁上挂 36.9 秒会把无关的 `fetchone:tasks[from=_require_task]`（实测等 36,680 ms）
+        和 `log_service.update_frame`（36,792 ms）一起钉死。每次新开连接读到的是当前已提交快照，
+        不引入轻读口那种"可能报旧值"的问题（见 `_fetchall_light` 的用法边界）。
         """
         ids = [str(item or '').strip() for item in task_ids or [] if str(item or '').strip()]
         if not ids:
             return {}
         totals: dict[str, int] = {item: 0 for item in ids}
         marks = ','.join('?' * len(ids))
-        for table in self._DETAIL_PRUNE_TABLES:
+        conn = self._open_read_conn()
+        try:
             try:
-                rows = self._fetchall(
-                    f'SELECT task_id, SUM(LENGTH(payload_json)) AS total FROM {table} '
-                    f'WHERE task_id IN ({marks}) GROUP BY task_id',
-                    tuple(ids),
-                )
+                conn.execute('PRAGMA busy_timeout=5000')
             except sqlite3.Error:
-                continue
-            for row in rows or []:
-                key = str(row['task_id'] or '')
-                if key in totals:
-                    totals[key] += int(row['total'] or 0)
+                pass
+            for table in self._DETAIL_PRUNE_TABLES:
+                sql = (
+                    f'SELECT task_id, SUM(LENGTH(payload_json)) AS total FROM {table} '
+                    f'WHERE task_id IN ({marks}) GROUP BY task_id'
+                )
+                started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+                started = time.perf_counter()
+                try:
+                    rows = conn.execute(sql, tuple(ids)).fetchall()
+                except sqlite3.Error:
+                    continue
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                self._record_query_latency(
+                    self._with_reader_lane(self._query_section('sqlite.query.fetchall', sql), elapsed_ms),
+                    elapsed_ms,
+                    started_at,
+                )
+                for row in rows or []:
+                    key = str(row['task_id'] or '')
+                    if key in totals:
+                        totals[key] += int(row['total'] or 0)
+        finally:
+            conn.close()
         return totals
 
     def delete_task(self, task_id: str) -> None:

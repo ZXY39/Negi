@@ -389,6 +389,19 @@ def _prepare_task_runtime_v3_root(
     marker_path = runtime_root / _TASK_RUNTIME_V3_MARKER
     if marker_path.exists():
         return
+    # 只有"这块根上确实没有库"时才清残留。库存在而标记不在，是两种正常操作留下的样子：
+    # 从备份恢复 runtime.sqlite3、或把数据根指向一个已有库的目录。旧写法在这里会先 unlink
+    # 库文件与 -wal/-shm、再 rmtree 掉 tasks/artifacts/event-history —— 2026-10-03 一份用
+    # sqlite3 backup API 造的 1.88 GB 生产副本就是这么被构造一次删成 364 KB / 0 行的。
+    # 库在就只补标记，一个字节都不删。
+    if store_path.exists() and int(store_path.stat().st_size or 0) > 0:
+        logger.warning(
+            'task runtime v3 marker missing but store exists: keeping {} untouched',
+            store_path,
+        )
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text('task-runtime-v3\n', encoding='utf-8')
+        return
     runtime_root.mkdir(parents=True, exist_ok=True)
     for candidate in (
         store_path,
