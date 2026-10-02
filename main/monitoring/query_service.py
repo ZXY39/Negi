@@ -495,7 +495,17 @@ class TaskQueryService:
             task = self._store.get_task(task_id) or task
         node_map, rounds_by_parent, direct_children = self._projection_maps(task.task_id)
         token_usage = task.token_usage
+        node_modeling_started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        node_modeling_started_mono = time.perf_counter()
         runtime_nodes = self._store.list_nodes(task.task_id)
+        # 这条车道把整任务的 NodeRecord 建出来（实盘在跑任务 932 行 / 225 MB），而记录器
+        # 原先只有 5–6 个 section，秒级块落在这里时榜上完全无名——`worst_long_blocks` 之外
+        # 还得先有名字。
+        self._record_debug(
+            'query_service.view_progress.list_nodes',
+            started_at=node_modeling_started_at,
+            started_mono=node_modeling_started_mono,
+        )
         _runtime_token_usage, token_usage_by_model = aggregate_node_token_usage(
             runtime_nodes,
             tracked=bool(getattr(token_usage, 'tracked', False)),

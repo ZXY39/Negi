@@ -802,6 +802,7 @@ class MainRuntimeService:
             pressure_snapshot_supplier=self._tool_pressure_snapshot,
             debug_snapshot_supplier=lambda: {
                 'recent_long_blocks': self.runtime_debug_recorder.snapshot(),
+                'worst_long_blocks': self.runtime_debug_recorder.worst_snapshot(),
                 # 事件写失败与库层写失败计数随心跳入库，排障信号（磁盘满/静默写丢事件）无新增查询路径。
                 'event_write_failures': int(self.log_service.event_write_failure_count() or 0),
                 'sqlite_write_failures': dict(self.store.write_failure_counts() or {}),
