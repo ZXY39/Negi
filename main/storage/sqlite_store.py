@@ -858,7 +858,8 @@ class SQLiteTaskStore:
         return int(row['unsettled'] or 0)
 
     _SELF_FILE = os.path.abspath(__file__)
-    _bulk_node_reader_lanes: set[str] = set()
+    _slow_read_lanes: set[str] = set()
+    _SLOW_READ_MS = 200.0
 
     @classmethod
     def _outer_caller(cls) -> str:
@@ -874,21 +875,9 @@ class SQLiteTaskStore:
             frame = frame.f_back
         return 'unknown'
 
-    def _note_bulk_node_read(self, lane: str, elapsed_ms: float, started_at: str) -> None:
-        key = f'{lane}'
-        if key not in self._bulk_node_reader_lanes:
-            self._bulk_node_reader_lanes.add(key)
-            logger.info(f'bulk node-table read: new reader lane={lane}')
-        self._record_query_latency(f'store.bulk_nodes_read[from={lane}]', elapsed_ms, started_at)
-
     def list_nodes(self, task_id: str) -> list[NodeRecord]:
-        lane = self._outer_caller()
-        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
-        started_mono = time.perf_counter()
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
-        records = [self._parse(row['payload_json'], NodeRecord) for row in rows]
-        self._note_bulk_node_read(lane, (time.perf_counter() - started_mono) * 1000.0, started_at)
-        return records
+        return [self._parse(row['payload_json'], NodeRecord) for row in rows]
 
     def iter_nodes(self, task_id: str) -> Iterator[NodeRecord]:
         """逐条解析任务节点：`list_nodes` 会把整任务的 NodeRecord 一次性建出来。
@@ -897,15 +886,9 @@ class SQLiteTaskStore:
         `startup → _recover_interrupted_task → sync_task_read_models → list_nodes` 这条链
         是 Python 侧驻留的头两名之一。行文本仍一次取回（同一条读连接上不能跨锁开游标）。
         """
-        lane = self._outer_caller()
-        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
-        started_mono = time.perf_counter()
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
-        try:
-            for row in rows:
-                yield self._parse(row['payload_json'], NodeRecord)
-        finally:
-            self._note_bulk_node_read(lane, (time.perf_counter() - started_mono) * 1000.0, started_at)
+        for row in rows:
+            yield self._parse(row['payload_json'], NodeRecord)
 
     def list_children(self, parent_node_id: str) -> list[NodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE parent_node_id = ? ORDER BY created_at ASC, node_id ASC', (parent_node_id,))
@@ -3383,7 +3366,7 @@ class SQLiteTaskStore:
                 raise
         elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
         self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
-        self._record_query_latency(section, elapsed_ms, started_at)
+        self._record_query_latency(self._with_reader_lane(section, elapsed_ms), elapsed_ms, started_at)
         return row, elapsed_ms
 
     def _fetch_many_on(
@@ -3404,8 +3387,24 @@ class SQLiteTaskStore:
                 raise
         elapsed_ms = max(0.0, (time.perf_counter() - started_mono) * 1000.0)
         self._update_runtime_metrics(sqlite_query_latency_ms=elapsed_ms)
-        self._record_query_latency(section, elapsed_ms, started_at)
+        self._record_query_latency(self._with_reader_lane(section, elapsed_ms), elapsed_ms, started_at)
         return rows, elapsed_ms
+
+    def _with_reader_lane(self, section: str, elapsed_ms: float) -> str:
+        """慢读（>=200 ms）才付一次栈遍历：`…fetchall:nodes[from=<谁>]`。
+
+        `fetchone:tasks` 这种单行小查都能花到 4 秒时，"哪张表"已经答不了问题——
+        要么是大读在共享 `_read_lock` 上把它排住了，要么是进程在缺页。两者修法不同，
+        先要调用方名字。快读不付这个开销。
+        """
+        if elapsed_ms < self._SLOW_READ_MS:
+            return section
+        lane = self._outer_caller()
+        key = f'{section}:{lane}'
+        if key not in self._slow_read_lanes:
+            self._slow_read_lanes.add(key)
+            logger.info(f'slow read: new reader lane section={section} from={lane}')
+        return f'{section}[from={lane}]'
 
     def _record_query_latency(self, section: str, elapsed_ms: float, started_at: str) -> None:
         recorder = self._debug_recorder

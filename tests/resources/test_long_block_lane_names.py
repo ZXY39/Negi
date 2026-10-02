@@ -88,15 +88,22 @@ async def test_task_level_rebuild_lane_is_named(tmp_path: Path):
     assert 'log_service.sync_task_read_models' in set(recorder.sections)
 
 
-def test_bulk_node_reads_name_their_caller(tmp_path: Path):
-    """整任务读 nodes 必须带"是谁叫我"，否则判不了它该不该存在。"""
-    recorder = _CapturingRecorder()
-    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3', debug_recorder=recorder)
+def test_slow_reads_name_their_caller_and_fast_ones_do_not_pay(tmp_path: Path):
+    """慢读带 `[from=<谁>]`；快读不付栈遍历的开销。
+
+    `fetchone:tasks` 这种单行小查都能花 4 秒时，"哪张表"已经答不了问题：
+    是大读在共享 `_read_lock` 上把它排住了，还是进程在缺页——两者修法不同。
+    """
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     try:
-        store.list_nodes('task:none')
-        list(store.iter_nodes('task:none'))
+        assert store._with_reader_lane('sqlite.query.fetchall:nodes', 120.0) == 'sqlite.query.fetchall:nodes'
+        named = store._with_reader_lane('sqlite.query.fetchall:nodes', 900.0)
+        assert named == 'sqlite.query.fetchall:nodes[from=test_slow_reads_name_their_caller_and_fast_ones_do_not_pay]', named
+        # 同一个 (表, 车道) 只报一次首现日志：集合去重，不每拍刷日志。
+        assert ('sqlite.query.fetchall:nodes:test_slow_reads_name_their_caller_and_fast_ones_do_not_pay'
+                in store._slow_read_lanes)
+        before = len(store._slow_read_lanes)
+        store._with_reader_lane('sqlite.query.fetchall:nodes', 900.0)
+        assert len(store._slow_read_lanes) == before
     finally:
         store.close()
-    names = [s for s in recorder.sections if s.startswith('store.bulk_nodes_read[from=')]
-    assert 'store.bulk_nodes_read[from=test_bulk_node_reads_name_their_caller]' in names, names
-    assert len(names) == 2, names
