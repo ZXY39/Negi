@@ -474,10 +474,19 @@ def test_legacy_artifact_row_defaults(tmp_path):
         first = artifacts.create_text_artifact(
             task_id='task:t2', node_id=None, kind='node_output', title='legacy2', content=content,
         )
-        # 模拟旧行：清空 content_hash 后仍能命中去重（回读比对路径）
-        legacy_like = first.model_copy(update={'content_hash': ''})
-        assert artifacts._artifact_matches_content(legacy_like, content=content,
-                                                   content_hash=first.content_hash)
+        # 模拟旧行：把库里的 content_hash 抹成空串，去重仍要命中——但只读一次正文，
+        # 读出来的哈希记进进程内记忆，之后判等不再回读文件。
+        store.upsert_artifact(first.model_copy(update={'content_hash': ''}))
+        artifacts._content_index.clear()
+        found = artifacts._find_existing_text_artifact(
+            task_id='task:t2', content=content, content_hash=first.content_hash,
+        )
+        assert found is not None and found.artifact_id == first.artifact_id
+        assert artifacts._artifact_hash_by_id[first.artifact_id] == first.content_hash
+        miss = artifacts._find_existing_text_artifact(
+            task_id='task:t2', content='other content', content_hash='deadbeef',
+        )
+        assert miss is None
     finally:
         store.close()
 

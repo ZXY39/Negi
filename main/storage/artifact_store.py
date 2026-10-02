@@ -43,6 +43,8 @@ class TaskArtifactStore:
         self._artifact_dir = Path(artifact_dir)
         self._artifact_dir.mkdir(parents=True, exist_ok=True)
         self._store = store
+        # 存量空哈希行的哈希记忆：一行最多读一次正文，之后判等只比哈希
+        self._artifact_hash_by_id: dict[str, str] = {}
         self._content_index: dict[tuple[str, str], TaskArtifactRecord] = {}
 
     def _write_artifact_content(self, *, base_path: Path, text: str) -> tuple[Path, int, str]:
@@ -268,14 +270,65 @@ class TaskArtifactStore:
         return self._artifact_dir / safe_task_id
 
     def _find_existing_text_artifact(self, *, task_id: str, content: str, content_hash: str) -> TaskArtifactRecord | None:
+        """按哈希判断"这份正文是否已存过"，全程不把候选正文读回来。
+
+        旧写法对每个候选调 `_artifact_matches_content`，而迁移前落库的行
+        `content_hash` 是空串，那条兜底分支会把候选文件整个读回并解码比对；
+        加上候选集来自 `list_artifacts(task_id)` 的整任务建模，实测这条链占
+        事件循环约 35%（负载窗口 py-spy：`create_text_artifact ->
+        _find_existing_text_artifact`）。现在：窄读取四列 -> 比字节数 -> 比哈希
+        （空哈希的行只读一次，哈希记进 `_artifact_hash_by_id`，同进程不复读）
+        -> 只有命中才验文件存在并回表取那一行。
+        """
         cached = self._content_index.get((task_id, content_hash))
-        if cached is not None and self._artifact_matches_content(cached, content=content, content_hash=content_hash):
+        if cached is not None and self._artifact_is_readable(cached):
             return cached
-        for artifact in self.list_artifacts(task_id):
-            if self._artifact_matches_content(artifact, content=content, content_hash=content_hash):
-                self._content_index[(task_id, content_hash)] = artifact
-                return artifact
+        size_bytes = len(str(content or '').encode('utf-8'))
+        for row in self._store.list_artifact_dedupe_rows(task_id):
+            recorded = str(row['content_hash'] or '').strip() or self._legacy_content_hash(row)
+            if not recorded or recorded != content_hash:
+                continue
+            if int(row['size_bytes'] or 0) != size_bytes:
+                continue
+            artifact = self._store.get_artifact(str(row['artifact_id'] or '').strip())
+            if artifact is None or not self._artifact_is_readable(artifact):
+                continue
+            self._content_index[(task_id, content_hash)] = artifact
+            return artifact
         return None
+
+    def _legacy_content_hash(self, row) -> str:
+        """给 `content_hash` 为空的存量行算一次哈希并记住：判等从此只看哈希。
+
+        不回写库——这些行只读不改，进程内记一次就把复读成本清零。
+        """
+        artifact_id = str(row['artifact_id'] or '').strip()
+        if not artifact_id:
+            return ''
+        known = self._artifact_hash_by_id.get(artifact_id)
+        if known is not None:
+            return known
+        digest = ''
+        path = Path(str(row['path'] or '').strip())
+        if path.is_file():
+            encoding = str(row['content_encoding'] or '').strip().lower() or ('gzip' if path.suffix == '.gz' else 'plain')
+            try:
+                if encoding == 'gzip':
+                    with gzip.open(path, 'rt', encoding='utf-8') as handle:
+                        text = handle.read()
+                else:
+                    text = path.read_text(encoding='utf-8')
+                digest = hashlib.sha256(str(text or '').encode('utf-8')).hexdigest()
+            except Exception:
+                digest = ''
+        self._artifact_hash_by_id[artifact_id] = digest
+        return digest
+
+    @staticmethod
+    def _artifact_is_readable(artifact: TaskArtifactRecord) -> bool:
+        path = Path(str(getattr(artifact, 'path', '') or '').strip())
+        return bool(str(path)) and path.is_file()
+
     def _find_singleton_text_artifact(
         self,
         *,
@@ -304,27 +357,3 @@ class TaskArtifactStore:
             if str(getattr(value, 'artifact_id', '') or '').strip() != normalized_artifact_id
         }
 
-    @staticmethod
-    def _artifact_matches_content(artifact: TaskArtifactRecord, *, content: str, content_hash: str) -> bool:
-        if not artifact.path:
-            return False
-        # 快路径：新记录携带 content_hash，直接比对，免回读文件（gz 无需解压）。
-        recorded_hash = str(getattr(artifact, 'content_hash', '') or '').strip()
-        if recorded_hash:
-            if recorded_hash != content_hash:
-                return False
-            path = Path(artifact.path)
-            return path.exists() and path.is_file()
-        # 旧行兜底（content_hash 为空）：按统一读端解压回读比对。
-        path = Path(artifact.path)
-        if not path.exists() or not path.is_file():
-            return False
-        try:
-            existing = read_artifact_text(artifact)
-        except Exception:
-            return False
-        if not existing:
-            return False
-        if hashlib.sha256(existing.encode('utf-8')).hexdigest() != content_hash:
-            return False
-        return existing == content

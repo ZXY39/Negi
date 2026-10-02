@@ -854,6 +854,27 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, artifact_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskArtifactRecord) for row in rows]
 
+    def list_artifact_dedupe_rows(self, task_id: str) -> list[sqlite3.Row]:
+        """正文查重用的窄读：只取判等要用的四列，不把整任务 artifact 建成模型。
+
+        `list_artifacts(task_id)` 每写一份正文就要把该任务全部行建模成
+        `TaskArtifactRecord`；判等只需要 artifact_id / path / content_hash /
+        size_bytes / content_encoding，交给 SQLite 的 `json_extract` 在库里取。
+        走主读连接：这个结果决定要不要落一份新文件，属写侧判定（轻读连接的
+        快照差异见任务 #24，判定类读取不走它）。
+        """
+        return list(
+            self._fetchall(
+                "SELECT artifact_id, "
+                "json_extract(payload_json, '$.path') AS path, "
+                "json_extract(payload_json, '$.content_hash') AS content_hash, "
+                "json_extract(payload_json, '$.size_bytes') AS size_bytes, "
+                "json_extract(payload_json, '$.content_encoding') AS content_encoding "
+                "FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, artifact_id ASC",
+                (str(task_id or '').strip(),),
+            )
+        )
+
     def list_artifacts_for_node(self, task_id: str, node_id: str | None) -> list[TaskArtifactRecord]:
         """按 (task, node) 取 artifact 行；node_id 为空即任务级（NULL）。
 
