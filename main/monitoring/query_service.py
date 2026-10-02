@@ -2254,13 +2254,14 @@ class TaskQueryService:
         live_state: TaskLiveState | None = None,
     ) -> dict[str, str]:
         goals: dict[str, str] = {}
-        for detail in list(self._store.list_task_node_details(task_id) or []):
-            node_id = str(getattr(detail, 'node_id', '') or '').strip()
+        # 阶段文案读投影表，不再读整任务明细：明细里那份内联轨迹摘要（实盘 71.0 MB/989 行
+        # 里占 85%）已经不是它的家，取一个字符串要为整表买单（投影同任务 1.26 MB / 8.3 ms）。
+        for item in list(self._store.list_task_nodes(task_id) or []):
+            node_id = str(getattr(item, 'node_id', '') or '').strip()
             if not node_id:
                 continue
-            payload = dict(getattr(detail, 'payload', {}) or {})
-            execution_trace = payload.get('execution_trace_summary') if isinstance(payload.get('execution_trace_summary'), dict) else {}
-            stage_goal = self._latest_stage_goal_from_execution_trace(execution_trace)
+            payload = dict(getattr(item, 'payload', {}) or {})
+            stage_goal = str(payload.get('latest_stage_goal') or '').strip()
             if stage_goal:
                 goals[node_id] = stage_goal
         if live_state is None:
@@ -2271,26 +2272,6 @@ class TaskQueryService:
             if node_id and stage_goal:
                 goals[node_id] = stage_goal
         return goals
-
-    @staticmethod
-    def _latest_stage_goal_from_execution_trace(execution_trace: dict[str, Any] | None) -> str:
-        if not isinstance(execution_trace, dict):
-            return ''
-        scored: list[tuple[int, str, str]] = []
-        for stage in list(execution_trace.get('stages') or []):
-            if not isinstance(stage, dict):
-                continue
-            stage_goal = str(stage.get('stage_goal') or '').strip()
-            if not stage_goal:
-                continue
-            try:
-                stage_index = int(stage.get('stage_index') or 0)
-            except (TypeError, ValueError):
-                stage_index = 0
-            scored.append((stage_index, str(stage.get('stage_id') or ''), stage_goal))
-        if not scored:
-            return ''
-        return max(scored, key=lambda item: (item[0], item[1]))[2]
 
     @staticmethod
     def _tree_display_stage_goal(

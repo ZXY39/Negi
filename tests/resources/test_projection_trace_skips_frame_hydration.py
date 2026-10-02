@@ -165,7 +165,9 @@ def test_detail_record_is_identical_to_the_hydrated_one(tmp_path) -> None:
     assert hydrated == trimmed
     assert trimmed.get('actual_request_ref') == 'content:actual-request/node-a'
     assert trimmed.get('actual_request_message_count') == 7
-    assert 'call-1' in json.dumps(trimmed.get('execution_trace_summary') or '', ensure_ascii=False)
+    # 明细行的 payload 不再内联整份轨迹摘要——它的家是外置 artifact，读侧按 ref 现算
+    # （构造函数与存进去的逐字节相同，见 test_execution_trace_summary_compaction.py）。
+    assert 'execution_trace_summary' not in trimmed
 
 
 def test_payload_reader_still_reports_a_missing_frame_as_none(tmp_path) -> None:

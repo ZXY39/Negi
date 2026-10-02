@@ -532,6 +532,7 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_terminal_outbox', 'accepted', "INTEGER")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'rejected_reason', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_runtime_frames', 'payload_digest', "TEXT NOT NULL DEFAULT ''")
+            self._retire_inline_execution_trace_summaries(self._conn)
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
             self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
 
@@ -541,6 +542,78 @@ class SQLiteTaskStore:
         if str(column or '') in columns:
             return
         conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+    # 一次性迁移的版本号写在 SQLite 头里（PRAGMA user_version）：判"要不要跑"必须
+    # 是 O(1)，不能靠扫明细表——要迁的正是那些大字节的行。
+    _DETAIL_TRACE_SUMMARY_RETIREMENT_VERSION = 1
+
+    @classmethod
+    def _retire_inline_execution_trace_summaries(cls, conn: sqlite3.Connection) -> None:
+        """存量明细行删掉内联轨迹摘要，并把树上那行阶段文案补进节点投影。
+
+        `payload.execution_trace_summary` 是外置轨迹的可重算副本（读侧按 ref 现算出的
+        与存进去的逐字节相同），实盘一个在跑任务 989 行 / 71.0 MB 里它占 60.4 MB，其中
+        65 MB 落在永不再改写的终态行上，于是任何整任务详情读都得连它一起扫。写侧已经不再
+        存它，这里只处理存量那一份。全程走 SQL 的 json 函数，不把 71 MB 建成 Python 对象。
+
+        比较键 `(stage_index, stage_id)` 与 `log_service._latest_execution_stage_goal`
+        逐字一致。json1 不可用或磁盘吃紧时只告警并跳过：读侧本来就按 ref 现算，跳过不影响
+        正确性，只影响体积。
+        """
+        try:
+            version = int(conn.execute('PRAGMA user_version').fetchone()[0] or 0)
+        except sqlite3.Error:
+            return
+        if version >= cls._DETAIL_TRACE_SUMMARY_RETIREMENT_VERSION:
+            return
+        started = time.perf_counter()
+        try:
+            conn.execute('DROP TABLE IF EXISTS temp._detail_stage_goal')
+            conn.execute(
+                """
+                CREATE TEMP TABLE _detail_stage_goal AS
+                SELECT d.node_id AS node_id,
+                       (SELECT j.value ->> '$.stage_goal'
+                          FROM json_each(json_extract(d.payload_json, '$.payload.execution_trace_summary.stages')) AS j
+                         WHERE coalesce(j.value ->> '$.stage_goal', '') <> ''
+                         ORDER BY CAST(coalesce(j.value ->> '$.stage_index', '0') AS INTEGER) DESC,
+                                  coalesce(j.value ->> '$.stage_id', '') DESC
+                         LIMIT 1) AS goal,
+                       (SELECT j.value ->> '$.stage_id'
+                          FROM json_each(json_extract(d.payload_json, '$.payload.execution_trace_summary.stages')) AS j
+                         WHERE coalesce(j.value ->> '$.stage_goal', '') <> ''
+                         ORDER BY CAST(coalesce(j.value ->> '$.stage_index', '0') AS INTEGER) DESC,
+                                  coalesce(j.value ->> '$.stage_id', '') DESC
+                         LIMIT 1) AS stage_id
+                  FROM task_node_details AS d
+                 WHERE json_extract(d.payload_json, '$.payload.execution_trace_summary') IS NOT NULL
+                """
+            )
+            stamped = conn.execute(
+                """
+                UPDATE task_nodes AS n
+                   SET payload_json = json_set(n.payload_json, '$.payload.latest_stage_goal', src.goal)
+                  FROM _detail_stage_goal AS src
+                 WHERE n.node_id = src.node_id
+                   AND coalesce(src.goal, '') <> ''
+                """
+            ).rowcount
+            slimmed = conn.execute(
+                """
+                UPDATE task_node_details
+                   SET payload_json = json_remove(payload_json, '$.payload.execution_trace_summary')
+                 WHERE json_extract(payload_json, '$.payload.execution_trace_summary') IS NOT NULL
+                """
+            ).rowcount
+            conn.execute(f'PRAGMA user_version = {cls._DETAIL_TRACE_SUMMARY_RETIREMENT_VERSION}')
+            logger.info(
+                'detail trace summary retired: rows={} projection goals stamped={} elapsed_ms={:.0f}',
+                slimmed,
+                stamped,
+                (time.perf_counter() - started) * 1000,
+            )
+        except sqlite3.Error as exc:
+            logger.warning('detail trace summary retirement skipped: {}', exc)
 
     @staticmethod
     def _drop_legacy_columns(conn: sqlite3.Connection, table: str, legacy: tuple[str, ...]) -> None:

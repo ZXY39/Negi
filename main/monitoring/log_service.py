@@ -74,10 +74,6 @@ from main.runtime.append_notice_context import (
     roll_append_notice_context_for_compression_stage,
 )
 from main.runtime.chat_backend import build_actual_request_diagnostics
-from main.runtime.execution_trace_compaction import (
-    build_execution_trace_summary,
-    compact_tool_step_for_summary,
-)
 from main.runtime.send_token_preflight import (
     build_runtime_estimated_input_truth,
     build_runtime_observed_input_truth,
@@ -109,6 +105,24 @@ def _single_line_text(value: Any, *, max_chars: int = 120) -> str:
 
 def _precise_now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec='microseconds')
+
+
+def _latest_execution_stage_goal(node: NodeRecord) -> str:
+    """节点树上那一行阶段文案：阶段台账里 `(stage_index, stage_id)` 最大且写了 goal 的那一条。
+
+    比较键与 `SQLiteTaskStore` 那条一次性补戳语句必须逐字一致，否则存量补出来的标签会
+    和新写出来的同节点不同名。
+    """
+    metadata = node.metadata if isinstance(node.metadata, dict) else {}
+    state = normalize_execution_stage_metadata(metadata.get(_EXECUTION_STAGE_METADATA_KEY))
+    scored = [
+        (int(stage.stage_index or 0), str(stage.stage_id or ''), str(stage.stage_goal or '').strip())
+        for stage in list(state.stages or [])
+        if str(stage.stage_goal or '').strip()
+    ]
+    if not scored:
+        return ''
+    return max(scored, key=lambda item: (item[0], item[1]))[2]
 
 
 _EXECUTION_STAGE_METADATA_KEY = 'execution_stages'
@@ -4506,6 +4520,10 @@ class TaskLogService:
                 # 快照构建不必为每个节点全量读 nodes.payload（大 payload IO 是大树
                 # tree-snapshot 超时的根因之一）。
                 'pending_append_notice_count': len(pending_records),
+                # 树上那一行「当前阶段」文案的家也在投影：明细行不再内联整份轨迹摘要之后，
+                # 树文本按节点取阶段只剩这一条字符串可读（实盘整任务投影 1.26 MB / 8.3 ms，
+                # 对比整任务明细 71.0 MB / 447–725 ms）。
+                'latest_stage_goal': _latest_execution_stage_goal(node),
             },
         )
 
@@ -4519,7 +4537,6 @@ class TaskLogService:
         prompt_summary = _single_line_text(node.prompt or node.goal or '', max_chars=400)
         tool_file_changes = normalize_tool_file_changes((node.metadata or {}).get('tool_file_changes'))
         execution_trace = self._projection_execution_trace(node)
-        execution_trace_summary = build_execution_trace_summary(execution_trace)
         latest_spawn_round_id, direct_child_results = self._latest_direct_child_results_payload(node)
         spawn_review_rounds = self._spawn_review_rounds_payload(node)
         execution_trace_ref = str(preserved_execution_trace_ref or '').strip()
@@ -4573,12 +4590,17 @@ class TaskLogService:
                 # 只放没有平铺字段承载的键。与上面构造参数同名的键一律不得再写进
                 # payload：读侧按 payload[k] or record.k 取值，重复一份就等于把正文
                 # 多存一遍（node input 曾因此在库内出现 4 份）。
+                #
+                # 整份轨迹摘要也不在这里：**它的家是外置 artifact**，读侧按 ref 现算
+                # （构造函数与存进去的那份逐字节相同，见 runtime-overview「轨迹摘要只有一个
+                # 构造函数」）。实盘一个在跑任务 989 行 / 71.0 MB 里 60.4 MB（85%）是这份
+                # 可重算的摘要，而其中 65 MB 落在永不再改写的终态行上——任何整任务详情读
+                # （token 汇总 793.8 ms）都得连它一起扫。
                 'parent_node_id': node.parent_node_id,
                 'depth': int(node.depth or 0),
                 'node_kind': str(node.node_kind or 'execution'),
                 'status': node.status,
                 'goal': str(node.goal or ''),
-                'execution_trace_summary': execution_trace_summary,
                 'actual_request_ref': actual_request_ref,
                 'prompt_cache_key_hash': prompt_cache_key_hash,
                 'actual_request_hash': actual_request_hash,
@@ -4805,10 +4827,6 @@ class TaskLogService:
                 }
             )
         return latest_round_id, results
-
-    @staticmethod
-    def _compact_execution_trace_tool_call(step: Any) -> dict[str, Any] | None:
-        return compact_tool_step_for_summary(step if isinstance(step, dict) else None)
 
     def _projection_entry_effective_status(self, entry: dict[str, Any]) -> str:
         """D：spawn entry 的投影有效状态——绑定节点真实状态优先。
