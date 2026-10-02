@@ -7990,7 +7990,9 @@ class MainRuntimeService:
     def _terminal_artifact_keep_policy(self, task: TaskRecord | None, record: TaskArtifactRecord) -> bool:
         """纯判定：该 artifact 是否属于终态后必须保留的核心内容。"""
         kind = str(getattr(record, 'kind', '') or '').strip()
-        if kind in {'patch', 'final_output'}:
+        # node_input 是 `nodes.input` 外置后的唯一正文副本（行内只剩 envelope 摘要），
+        # 删掉就等于把已交付节点的输入正文一起清没——终态后节点详情与恢复取证仍要读它。
+        if kind in {'patch', 'final_output', 'node_input'}:
             return True
         final_ref = str(getattr(task, 'final_output_ref', '') or '').strip() if task is not None else ''
         if final_ref:

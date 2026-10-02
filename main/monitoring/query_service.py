@@ -765,7 +765,7 @@ class TaskQueryService:
         # payload → 平铺 → 运行节点依次取，避免同一任务内两种来源打架。
         node_input_text = str(
             payload.get('input_text') or detail_record.input_text
-            or (runtime_node.input if runtime_node is not None else '') or ''
+            or (self._log_service.resolve_node_input_text(runtime_node) if runtime_node is not None else '') or ''
         )
         node_input_ref = str(
             payload.get('input_ref') or detail_record.input_ref

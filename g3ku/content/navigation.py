@@ -1576,7 +1576,10 @@ class ContentNavigationService:
         artifact = None
         if self._artifact_store is not None:
             create_singleton = getattr(self._artifact_store, "create_or_replace_singleton_text_artifact", None)
-            if source_kind in {"task_runtime_messages", "task_execution_trace"} and callable(create_singleton):
+            # node_input 每回合都被 update_node_input 重写，必须单例：否则一个节点一晚上攒下
+            # 上千份正文副本，DB 行数与磁盘文件都按回合数线性增长。
+            singleton_kinds = {"task_runtime_messages", "task_execution_trace", "node_input"}
+            if source_kind in singleton_kinds and callable(create_singleton):
                 artifact = create_singleton(
                     task_id=_runtime_task_id(runtime),
                     node_id=_runtime_node_id(runtime),

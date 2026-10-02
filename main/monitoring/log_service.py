@@ -1832,15 +1832,15 @@ class TaskLogService:
         )
 
     def _summarize_node_input(self, *, task_id: str, node_id: str, content: str) -> tuple[str, str]:
-        text = str(content or '')
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            return text, ''
+        """节点 input 的存储形态：超过内联阈值就外置成 `input_ref`，消息列表也不例外。
+
+        这里曾是 `nodes` 表体积的唯一来源：六个写入点送进来的全是
+        `json.dumps(prepared_messages)`，而旧写法见到"能解析成 list"就原样内联并把
+        ref 留空，实盘 input>2 KB 的 1750 行合计 262.9 MB。要正文的读点走
+        `resolve_node_input_text`（行内只剩 envelope 摘要）。
+        """
         return self._summarize_content(
-            text,
+            str(content or ''),
             task_id=task_id,
             node_id=node_id,
             display_name=f'node-input:{node_id}',
@@ -3783,6 +3783,18 @@ class TaskLogService:
             )
             return self.read_task_runtime_meta(task.task_id) or current
 
+    def resolve_node_input_text(self, node: NodeRecord) -> str:
+        """节点 input 的全文。
+
+        `input_ref` 为空时行内就是正文（旧行与短正文）；非空时行内是 envelope 摘要，
+        正文在 artifact 里。所有需要 verbatim 的读点都必须走这里，别直接读 `node.input`。
+        """
+        text = str(getattr(node, 'input', '') or '')
+        ref = str(getattr(node, 'input_ref', '') or '').strip()
+        if not ref:
+            return text
+        return self._resolve_content_ref(ref) or text
+
     def capture_retry_resume_snapshot(self, task_id: str, node_id: str, *, failure_reason: str = '') -> dict[str, Any] | None:
         with self._task_lock(task_id):
             task = self._store.get_task(task_id)
@@ -3790,10 +3802,11 @@ class TaskLogService:
             if task is None or node is None:
                 return None
             frame = self.read_runtime_frame(task_id, node_id) or {}
+            node_input_text = self.resolve_node_input_text(node)
             messages = [dict(item) for item in list(frame.get('messages') or []) if isinstance(item, dict)]
             if not messages:
                 try:
-                    parsed_input = json.loads(str(node.input or ''))
+                    parsed_input = json.loads(node_input_text)
                 except Exception:
                     parsed_input = []
                 if isinstance(parsed_input, list):
@@ -3805,7 +3818,7 @@ class TaskLogService:
                 'failure_reason': str(failure_reason or '').strip(),
                 'task_metadata': copy.deepcopy(dict(task.metadata or {})),
                 'node_metadata': copy.deepcopy(dict(node.metadata or {})),
-                'node_input_text': str(node.input or ''),
+                'node_input_text': node_input_text,
                 'frame': self._sanitize_runtime_frame({**dict(frame or {}), 'messages': messages}),
             }
             current = dict(self._store.get_task_runtime_meta(task.task_id) or self._default_runtime_meta())
