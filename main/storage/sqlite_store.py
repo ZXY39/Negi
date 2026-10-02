@@ -176,7 +176,8 @@ class SQLiteTaskStore:
             CREATE TABLE IF NOT EXISTS task_disk_usage (
                 task_id TEXT PRIMARY KEY,
                 total_bytes INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL DEFAULT ''
+                updated_at TEXT NOT NULL DEFAULT '',
+                db_anchor TEXT NOT NULL DEFAULT ''
             )
             ''',
             '''
@@ -532,6 +533,7 @@ class SQLiteTaskStore:
             self._ensure_column(self._conn, 'task_terminal_outbox', 'accepted', "INTEGER")
             self._ensure_column(self._conn, 'task_terminal_outbox', 'rejected_reason', "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(self._conn, 'task_runtime_frames', 'payload_digest', "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(self._conn, 'task_disk_usage', 'db_anchor', "TEXT NOT NULL DEFAULT ''")
             self._retire_inline_execution_trace_summaries(self._conn)
             self._node_detail_columns = self._live_columns(self._conn, 'task_node_details')
             self._tool_result_columns = self._live_columns(self._conn, 'task_node_tool_results')
@@ -1098,20 +1100,33 @@ class SQLiteTaskStore:
 
         self._run_write(operation)
 
-    def upsert_task_disk_usage(self, task_id: str, total_bytes: int) -> None:
-        """磁盘治理（P1）对账：以目录实测绝对值覆盖增量记账（每小时 + 终态各一次）。"""
+    def upsert_task_disk_usage(self, task_id: str, total_bytes: int, *, anchor: dict[str, Any] | None = None) -> None:
+        """磁盘治理（P1）对账：以目录实测绝对值覆盖增量记账（每小时 + 终态各一次）。
+
+        `anchor` 是这次对账用的字节锚点（见 `reconcile_task_detail_bytes`）；只在传进来时写，
+        不传就保留原值——目录 bump 那条车道不带锚点。
+        """
         normalized_task_id = str(task_id or '').strip()
         if not normalized_task_id:
             return
         updated_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        anchor_json = json.dumps(anchor, ensure_ascii=False, sort_keys=True) if anchor else ''
 
         def operation(conn: sqlite3.Connection) -> None:
+            if anchor_json:
+                conn.execute(
+                    'INSERT INTO task_disk_usage (task_id, total_bytes, updated_at, db_anchor) '
+                    'VALUES (?, MAX(0, ?), ?, ?) '
+                    'ON CONFLICT(task_id) DO UPDATE SET total_bytes = MAX(0, excluded.total_bytes), '
+                    'updated_at = excluded.updated_at, db_anchor = excluded.db_anchor',
+                    (normalized_task_id, int(total_bytes or 0), updated_at, anchor_json),
+                )
+                return
             conn.execute(
                 'INSERT INTO task_disk_usage (task_id, total_bytes, updated_at) VALUES (?, MAX(0, ?), ?) '
                 'ON CONFLICT(task_id) DO UPDATE SET total_bytes = MAX(0, excluded.total_bytes), updated_at = excluded.updated_at',
                 (normalized_task_id, int(total_bytes or 0), updated_at),
             )
-
         self._run_write(operation)
 
     def get_task_disk_usages(self, task_ids: list[str] | None = None) -> dict[str, int]:
@@ -1376,18 +1391,17 @@ class SQLiteTaskStore:
     def sum_task_detail_bytes(self, task_ids: list[str]) -> dict[str, int]:
         """按任务汇总五张明细大行表的 payload 字节数。
 
-        全删渐进 size×age 排序的 size 输入。口径：只计 `payload_json`，即每段正文的一份；
+        精确重扫口径，只在锚点建立/过期/少行时走；小时级常态走 `reconcile_task_detail_bytes`
+        的水位增量。这值是任务大小展示与人工删除判断的输入，不是任何裁剪的判据
+        （`prune_task_detail_rows` 按 age cutoff，且默认停用）。
         详情表去重前同一正文按列与 payload 重复计数，所以本值（以及 `task_disk_usage` 里的
         DB 分量）在去重后低于磁盘上的历史占用，不能用来推断收缩量。
 
         **"五表都有 task_id 索引 ⇒ 代价可控"是错的**（原来这句话在这个 docstring 里）。
         `SUM(LENGTH(payload_json))` 必须把每个 payload 的页真读一遍，索引帮不上。实盘在跑任务
-        `task:1d9cddf9858e` 的 DB 份额 **526.79 MB**（tool_results 351.15 MB / 62,498 行、
-        model_calls 97.68 MB / 39,146 行、details 74.20 MB / 1,011 行）：页热时整句 1.1 s，
-        冷页时同一句实测 **20,999 ms / 36,859 ms**。所以这条读走**自己的只读连接**，不走共享读口——
-        共享读锁上挂 36.9 秒会把无关的 `fetchone:tasks[from=_require_task]`（实测等 36,680 ms）
-        和 `log_service.update_frame`（36,792 ms）一起钉死。每次新开连接读到的是当前已提交快照，
-        不引入轻读口那种"可能报旧值"的问题（见 `_fetchall_light` 的用法边界）。
+        `task:1d9cddf9858e` 的 DB 份额 **467.01 MB**（tool_results 353.76 MB / 64,945 行、
+        model_calls 101.50 MB / 39,536 行、details 迁移后 11.14 MB / 1,011 行、frames 3.58 MB）：
+        页热时整任务重扫 782 ms + 163 ms，冷页实测 **55,602 ms / 12,956 ms**。
         """
         ids = [str(item or '').strip() for item in task_ids or [] if str(item or '').strip()]
         if not ids:
@@ -1424,6 +1438,140 @@ class SQLiteTaskStore:
         finally:
             conn.close()
         return totals
+
+    # 字节锚点：只有这两张表真的大到必须增量（实盘在跑任务 tool_results 353.76 MB /
+    # model_calls 98.46 MB），其余三张整任务重扫实测 45 ms 量级（details 11.14 MB /
+    # frames 3.58 MB / rounds 0.07 MB），不值得为它们维护锚点。
+    _BYTE_ANCHOR_TABLES = ('task_node_tool_results', 'task_model_calls')
+    _BYTE_INLINE_TABLES = ('task_runtime_frames', 'task_node_rounds', 'task_node_details')
+    # 锚点最长存活时间：同一条 (task,node,tool_call) 的行会被 ON CONFLICT 原地改写
+    # （`upsert_task_node_tool_result`，log_service 两处调用），改写不改 rowid 也不改行数，
+    # 水位增量看不见它。这个窗口就是那条盲区的全部长度。
+    _BYTE_ANCHOR_MAX_AGE_SECONDS = 24 * 3600
+
+    def read_task_disk_anchor(self, task_id: str) -> dict[str, Any]:
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return {}
+        row = self._fetchone(
+            'SELECT db_anchor FROM task_disk_usage WHERE task_id = ?',
+            (normalized_task_id,),
+        )
+        if row is None:
+            return {}
+        raw = str(row['db_anchor'] or '').strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    def reconcile_task_detail_bytes(self, task_id: str, anchor: dict[str, Any]) -> tuple[int, dict[str, Any], str]:
+        """返回 (这条任务的 DB 份额字节, 新锚点, 模式)。
+
+        锚点可用（两张大表都没少行、锚点没过期）⇒ 大表只读 `rowid > 水位` 的新行，小表整任务重扫；
+        否则 ⇒ 走 `sum_task_detail_bytes` 精确重锚。增量口径的实测形状：最近 2,000 行只触
+        13.45 MB / 35.7 ms，而整任务重扫是 367.24 MB / 782 ms（冷页 55,602 ms）。
+
+        模式串是给自己看的：`mode=delta|exact` 加每小时一行的日志，就是这条车道在实盘的取证。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return 0, {}, 'empty'
+        started = time.perf_counter()
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        conn = self._open_read_conn()
+        try:
+            try:
+                conn.execute('PRAGMA busy_timeout=5000')
+            except sqlite3.Error:
+                pass
+            counts: dict[str, int] = {}
+            for table in self._BYTE_ANCHOR_TABLES:
+                counts[table] = int(
+                    conn.execute(
+                        f'SELECT COUNT(*) AS c FROM {table} WHERE task_id = ?',
+                        (normalized_task_id,),
+                    ).fetchone()[0] or 0
+                )
+            small_bytes = 0
+            for table in self._BYTE_INLINE_TABLES:
+                row = conn.execute(
+                    f'SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS total FROM {table} WHERE task_id = ?',
+                    (normalized_task_id,),
+                ).fetchone()
+                small_bytes += int(row['total'] or 0)
+
+            anchor_rows = dict(anchor.get('rows') or {})
+            anchor_marks = dict(anchor.get('marks') or {})
+            anchored_at = str(anchor.get('anchored_at') or '').strip()
+            big_bytes = anchor.get('big_bytes')
+            expired = True
+            if anchored_at:
+                try:
+                    age = (datetime.now().astimezone() - datetime.fromisoformat(anchored_at)).total_seconds()
+                    expired = age > self._BYTE_ANCHOR_MAX_AGE_SECONDS
+                except ValueError:
+                    expired = True
+            usable = (
+                isinstance(big_bytes, (int, float))
+                and bool(anchor_marks)
+                and not expired
+                and all(int(anchor_rows.get(table, -1)) <= counts[table] for table in self._BYTE_ANCHOR_TABLES)
+            )
+            if not usable:
+                totals = self.sum_task_detail_bytes([normalized_task_id])
+                db_bytes = int(totals.get(normalized_task_id) or 0)
+                marks = {}
+                for table in self._BYTE_ANCHOR_TABLES:
+                    row = conn.execute(
+                        f'SELECT COALESCE(MAX(rowid), 0) AS m FROM {table} WHERE task_id = ?',
+                        (normalized_task_id,),
+                    ).fetchone()
+                    marks[table] = int(row['m'] or 0)
+                new_anchor = {
+                    'big_bytes': db_bytes - small_bytes,
+                    'rows': dict(counts),
+                    'marks': marks,
+                    'anchored_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+                }
+                mode = 'exact'
+                scanned_rows = -1
+            else:
+                big_total = int(big_bytes or 0)
+                marks_new: dict[str, int] = {}
+                scanned_rows = 0
+                for table in self._BYTE_ANCHOR_TABLES:
+                    mark = int(anchor_marks.get(table) or 0)
+                    row = conn.execute(
+                        f'SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS total, '
+                        f'COALESCE(MAX(rowid), ?) AS max_rowid, COUNT(*) AS c '
+                        f'FROM {table} WHERE task_id = ? AND rowid > ?',
+                        (mark, normalized_task_id, mark),
+                    ).fetchone()
+                    big_total += int(row['total'] or 0)
+                    scanned_rows += int(row['c'] or 0)
+                    marks_new[table] = max(mark, int(row['max_rowid'] or 0))
+                db_bytes = big_total + small_bytes
+                new_anchor = {
+                    'big_bytes': big_total,
+                    'rows': dict(counts),
+                    'marks': marks_new,
+                    'anchored_at': anchored_at,
+                }
+                mode = 'delta'
+        finally:
+            conn.close()
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self._record_query_latency(
+            self._with_reader_lane(f'sqlite.query.task_detail_bytes[{mode}]', elapsed_ms),
+            elapsed_ms,
+            started_at,
+        )
+        new_anchor['last'] = {'mode': mode, 'db_bytes': db_bytes, 'scanned_rows': scanned_rows, 'elapsed_ms': round(elapsed_ms, 1)}
+        return db_bytes, new_anchor, mode
 
     def delete_task(self, task_id: str) -> None:
         def operation(conn: sqlite3.Connection) -> None:

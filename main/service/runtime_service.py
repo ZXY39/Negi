@@ -8295,23 +8295,39 @@ class MainRuntimeService:
         """对账口径 = 目录实测（files/artifacts/event-history/temp）+ 数据库
         明细字节（五张大行表 payload）。DB 部分失败时回落纯目录值，绝不抛。
 
-        增量记账（bump）只覆盖目录写入差值，DB 字节滞后 ≤1h（与列表端
-        「展示延迟≤1h」契约一致）；终态任务在终态清理后对账一次拿到终值。
+        DB 分量走锚点：小时级常态只读两张大表水位之后的新行（实盘最近 2,000 行 = 13.45 MB /
+        35.7 ms，整任务重扫是 367.24 MB / 冷页 55,602 ms），三张小表整任务重扫（45 ms 量级）。
+        锚点在三种情况下重建：没有锚点、锚点超过 24 h、大表行数减少（裁剪或删除）。
+        盲区只有一条：同一行被 ON CONFLICT 原地改写，既不改 rowid 也不改行数 ⇒ 最长 24 h 后归零。
         """
         normalized_task_id = self.normalize_task_id(task_id)
         try:
             total = self._task_disk_usage_bytes(normalized_task_id)
         except Exception:
             return
+        anchor: dict[str, Any] | None = None
+        db_bytes = 0
+        mode = 'fallback'
         try:
-            detail_bytes = self.store.sum_task_detail_bytes([normalized_task_id]) or {}
-            total += int(detail_bytes.get(normalized_task_id) or 0)
+            anchor = self.store.read_task_disk_anchor(normalized_task_id)
+            db_bytes, anchor, mode = self.store.reconcile_task_detail_bytes(normalized_task_id, anchor)
+            total += int(db_bytes or 0)
         except Exception:
-            pass
+            anchor = None
         try:
-            self.store.upsert_task_disk_usage(normalized_task_id, int(total))
+            self.store.upsert_task_disk_usage(normalized_task_id, int(total or 0), anchor=anchor)
         except Exception:
             return
+        if anchor:
+            last = dict(anchor.get('last') or {})
+            logger.info(
+                'disk reconcile: task={} mode={} db_bytes={:.2f} MB new_rows={} elapsed_ms={}',
+                normalized_task_id,
+                mode,
+                int(db_bytes or 0) / 1e6,
+                last.get('scanned_rows'),
+                last.get('elapsed_ms'),
+            )
 
     # ------------------------------------------------------------------
     # 磁盘治理：任务删除全量清除。
