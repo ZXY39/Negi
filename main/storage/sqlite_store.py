@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import json
 import queue
+import re
 import sqlite3
 import threading
 import time
@@ -3174,20 +3175,48 @@ class SQLiteTaskStore:
         sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) ON CONFLICT({conflict_target}) DO UPDATE SET {updates}"
         conn.execute(sql, values)
 
+    @staticmethod
+    def _query_section(prefix: str, sql: str) -> str:
+        """长块榜上的查询名字必须带表名。
+
+        只写 `sqlite.query.fetchall` 时，一块 1,872 ms 的段在榜上是没有主人的——
+        实测它占满最近 8 格里 6 格。取第一个 FROM 的表名作标签，认不出就退回原名。
+        """
+        match = re.search(r'\bfrom\s+([A-Za-z_][A-Za-z0-9_]*)', str(sql or ''), re.IGNORECASE)
+        if match is None:
+            return prefix
+        return f'{prefix}:{match.group(1)}'
+
     def _fetchone(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
-        row, _elapsed = self._fetch_one_on(self._read_conn, self._read_lock, sql, params, 'sqlite.query.fetchone')
+        row, _elapsed = self._fetch_one_on(
+            self._read_conn, self._read_lock, sql, params, self._query_section('sqlite.query.fetchone', sql)
+        )
         return row
 
     def _fetchone_light(self, sql: str, params: tuple[object, ...] = ()) -> sqlite3.Row | None:
-        row, _elapsed = self._fetch_one_on(self._light_read_conn, self._light_read_lock, sql, params, 'sqlite.query.fetchone.light')
+        row, _elapsed = self._fetch_one_on(
+            self._light_read_conn,
+            self._light_read_lock,
+            sql,
+            params,
+            self._query_section('sqlite.query.fetchone.light', sql),
+        )
         return row
 
     def _fetchall(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
-        rows, _elapsed = self._fetch_many_on(self._read_conn, self._read_lock, sql, params, 'sqlite.query.fetchall')
+        rows, _elapsed = self._fetch_many_on(
+            self._read_conn, self._read_lock, sql, params, self._query_section('sqlite.query.fetchall', sql)
+        )
         return rows
 
     def _fetchall_light(self, sql: str, params: tuple[object, ...] = ()) -> list[sqlite3.Row]:
-        rows, _elapsed = self._fetch_many_on(self._light_read_conn, self._light_read_lock, sql, params, 'sqlite.query.fetchall.light')
+        rows, _elapsed = self._fetch_many_on(
+            self._light_read_conn,
+            self._light_read_lock,
+            sql,
+            params,
+            self._query_section('sqlite.query.fetchall.light', sql),
+        )
         return rows
 
     def _fetch_one_on(
