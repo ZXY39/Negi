@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from main.models import (
     ModelTokenUsageRecord,
@@ -615,8 +616,10 @@ class TaskQueryService:
         if mark_read:
             self._log_service.mark_task_read(task_id)
             task = self._store.get_task(task_id) or task
-        live_state = self._projection_live_state(task.task_id)
-        root_node = self.get_node_detail(task.task_id, task.root_node_id)
+        with self._debug_track('query_service.get_task_snapshot.live_state'):
+            live_state = self._projection_live_state(task.task_id)
+        with self._debug_track('query_service.get_task_snapshot.root_node_detail'):
+            root_node = self.get_node_detail(task.task_id, task.root_node_id)
         # 帧表先投影成 JSON 一次，`runtime_summary` 与 `frontier` 共用这一份。
         # 旧写法是 `live_state.model_dump()`（含 195 帧）再为 frontier 逐帧 dump 第二遍：
         # 两遍序列化同一个列表，是 `get_task_snapshot` 长块里除整表建模之外的另一头。
@@ -653,10 +656,11 @@ class TaskQueryService:
             'runnable_node_count': len(list(runtime_summary.get('runnable_node_ids') or [])),
             'waiting_node_count': len(list(runtime_summary.get('waiting_node_ids') or [])),
         }
-        token_usage_by_model = [
-            item.model_dump(mode='json')
-            for item in self._projection_token_usage_by_model(task.task_id)
-        ]
+        with self._debug_track('query_service.get_task_snapshot.token_rollup'):
+            token_usage_by_model = [
+                item.model_dump(mode='json')
+                for item in self._projection_token_usage_by_model(task.task_id)
+            ]
         payload = {
             'task': task.model_dump(mode='json'),
             'summary': {
@@ -1636,6 +1640,15 @@ class TaskQueryService:
             total_node_count=total_node_count,
             next_after_node_id=next_after_node_id,
         )
+
+    @contextmanager
+    def _debug_track(self, section: str) -> Iterator[None]:
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        started_mono = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._record_debug(section, started_at=started_at, started_mono=started_mono)
 
     def _record_debug(self, section: str, *, started_at: str, started_mono: float) -> None:
         recorder = self._debug_recorder
