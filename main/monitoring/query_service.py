@@ -89,6 +89,15 @@ _LIVE_FRAME_CACHE_MAX_TASKS = 4
 # 「刷新」走的 token 账本口本来就按 300 取数。要更多请显式传 `model_call_limit`。
 _TASK_SNAPSHOT_MODEL_CALL_ROWS = 300
 
+# 按模型 token 明细的记忆化上限（按任务存，FIFO 淘汰）。这份聚合每次都要用 JSON1 把该任务
+# 全部 `task_node_details.payload_json` 解一遍（实盘在跑任务 938 行 / 61.07 MB），
+# wall 采样里同一条栈累计 10.5 s / 180 s；快照是被反复读的一侧，节点写才是变更源。
+_TASK_TOKEN_ROLLUP_CACHE_MAX_TASKS = 8
+
+# 键用节点写戳，但 `updated_at` 只有秒级粒度：同一秒内的两次写入会读成同一个戳。
+# 所以戳只保证"变了就一定重算"，另有 TTL 给"同秒没变戳"封顶——别把它当精确判据。
+_TASK_TOKEN_ROLLUP_MAX_AGE_SECONDS = 2.0
+
 
 def project_pending_distribution_entries(
     entries_by_id: dict[str, dict[str, Any]],
@@ -158,6 +167,8 @@ class TaskQueryService:
         self._debug_recorder = debug_recorder
         # task_id → (node_id → (payload_digest, 已建好的 TaskLiveFrame))
         self._live_frame_cache: dict[str, dict[str, tuple[str, Any]]] = {}
+        # task_id → ((节点写戳, 节点行数), 聚合好的按模型明细, 算出的时刻)
+        self._token_rollup_cache: dict[str, tuple[tuple[str, int], list[Any], float]] = {}
 
     def summary(self, session_id: str | None = None) -> TaskSummaryResult:
         # session_id 为空 = 全局口径（跨会话全量任务）；非空 = 该会话口径。
@@ -1673,6 +1684,31 @@ class TaskQueryService:
         return records[-rows:]
 
     def _projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:
+        """按模型 token 明细，按节点写戳记忆化。
+
+        每次都从 `task_node_details` 重聚合一次实测要 200–400 ms（在跑任务 938 行 /
+        61.07 MB 全部用 JSON1 解析），而快照是常被反复读的那一侧：同一个节点写戳下重算
+        出来的东西逐字节相同。键用 `(MAX(nodes.updated_at), COUNT(*))` 两个平铺列——
+        所有会改到 `token_usage_by_model` 的写点都同时推进节点 `updated_at`。
+        """
+        normalized_task_id = str(task_id or '').strip()
+        if not normalized_task_id:
+            return []
+        fingerprint = self._store.read_task_node_write_fingerprint(normalized_task_id)
+        cached = self._token_rollup_cache.get(normalized_task_id)
+        if (
+            cached is not None
+            and cached[0] == fingerprint
+            and (time.monotonic() - cached[2]) < _TASK_TOKEN_ROLLUP_MAX_AGE_SECONDS
+        ):
+            return cached[1]
+        items = self._compute_projection_token_usage_by_model(normalized_task_id)
+        while len(self._token_rollup_cache) >= _TASK_TOKEN_ROLLUP_CACHE_MAX_TASKS:
+            self._token_rollup_cache.pop(next(iter(self._token_rollup_cache)), None)
+        self._token_rollup_cache[normalized_task_id] = (fingerprint, items, time.monotonic())
+        return items
+
+    def _compute_projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:
         aggregates: dict[tuple[str, str, str], dict[str, Any]] = {}
         for usage_items in list(self._store.list_task_node_token_usage_payloads(task_id) or []):
             for item in usage_items:

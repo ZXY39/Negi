@@ -2795,6 +2795,21 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM task_nodes WHERE task_id = ? ORDER BY sort_key ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskProjectionNodeRecord) for row in rows]
 
+    def read_task_node_write_fingerprint(self, task_id: str) -> tuple[str, int]:
+        """节点行的写戳指纹：`(最新 updated_at, 行数)`，只读两个平铺列。
+
+        给"按节点派生、但要反复读"的聚合当失效键——任何一次 `update_node` 都会推进
+        `updated_at`（三处 token 合并各自都带 `'updated_at': now_iso()`），所以它变了
+        就是派生输入变了。走主读连接：这是展示读数的键，不许用轻读连接（任务 #24）。
+        """
+        row = self._fetchone(
+            'SELECT MAX(updated_at) AS last_updated, COUNT(*) AS total FROM nodes WHERE task_id = ?',
+            (str(task_id or '').strip(),),
+        )
+        if row is None:
+            return '', 0
+        return str(row['last_updated'] or ''), int(row['total'] or 0)
+
     def count_task_nodes(self, task_id: str) -> int:
         """只问"这个任务有多少节点"时用这个，别用 `list_task_nodes` 再 `len()`。
 
