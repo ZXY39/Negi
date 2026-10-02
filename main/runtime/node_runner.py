@@ -4633,9 +4633,14 @@ class NodeRunner:
         }
 
     def _spawn_review_tree_summary(self, *, task_id: str, parent: NodeRecord) -> dict[str, Any]:
-        list_nodes = getattr(self._store, 'list_nodes', None)
+        # 读投影表而不是运行时 `nodes`：这里只要"前 10 行分支文本 + 一个计数"，
+        # 旧写法却把全任务 975 行 / 229 MB 建成 NodeRecord（长块榜点名：
+        # `sqlite.query.fetchall:nodes[from=_spawn_review_tree_summary]` 1,715 ms）。
+        # 投影行的 `title` 就是 `goal or node_id`、`sort_key` 就是 `created_at:node_id`，
+        # 所以按 (depth, sort_key) 排出来的分支集合与原来一致。
+        list_task_nodes = getattr(self._store, 'list_task_nodes', None)
         try:
-            nodes = list(list_nodes(task_id) or []) if callable(list_nodes) else []
+            nodes = list(list_task_nodes(task_id) or []) if callable(list_task_nodes) else []
         except Exception:
             nodes = []
         path_ids: set[str] = set()
@@ -4654,7 +4659,7 @@ class NodeRunner:
         others.sort(
             key=lambda item: (
                 int(getattr(item, 'depth', 0) or 0),
-                str(getattr(item, 'created_at', '') or ''),
+                str(getattr(item, 'sort_key', '') or ''),
                 str(getattr(item, 'node_id', '') or ''),
             )
         )
@@ -4667,7 +4672,11 @@ class NodeRunner:
                     int(getattr(node, 'depth', 0) or 0),
                     getattr(node, 'node_id', ''),
                     getattr(node, 'status', ''),
-                    self._trim_diagnostic_text(getattr(node, 'goal', ''), max_chars=80),
+                    self._trim_diagnostic_text(
+                        '' if str(getattr(node, 'title', '') or '') == str(getattr(node, 'node_id', '') or '')
+                        else str(getattr(node, 'title', '') or ''),
+                        max_chars=80,
+                    ),
                     self._trim_diagnostic_text(stage_goal, max_chars=60),
                 )
             )
