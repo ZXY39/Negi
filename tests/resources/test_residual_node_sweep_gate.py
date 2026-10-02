@@ -132,6 +132,39 @@ async def test_sweep_does_not_read_node_bodies_when_nothing_is_unsettled(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_projection_staleness_gate(tmp_path: Path):
+    """启动重建的跳过判据：投影戳 == 节点戳，且两张投影都在。"""
+    service = _service(tmp_path)
+    service.store.upsert_worker_status(
+        worker_id='worker:test',
+        role='task_worker',
+        status='running',
+        updated_at=now_iso(),
+        payload={'execution_mode': 'worker', 'active_task_count': 0},
+    )
+    record = await service.create_task('投影戳判定', session_id='web:shared')
+    service.store.upsert_node(_node(record.task_id, 'node:sync', 'success'))
+    service.log_service.sync_node_read_model(record.task_id, 'node:sync')
+    assert service.store.count_stale_task_node_projections(record.task_id) == 0
+
+    # 投影落后于节点（崩溃在"写完节点、没来得及写投影"之间）必须判为需要重建。
+    # 这里直接改旧投影行的戳：`updated_at` 是秒级粒度，同秒内两次写入会读成相等，
+    # 所以不能用"再写一次节点"来造漂移。
+    service.store._execute_write(  # noqa: SLF001
+        'UPDATE task_node_details SET updated_at = ? WHERE node_id = ?',
+        ('2020-01-01T00:00:00+08:00', 'node:sync'),
+    )
+    assert service.store.count_stale_task_node_projections(record.task_id) == 1
+
+    service.log_service.sync_node_read_model(record.task_id, 'node:sync')
+    assert service.store.count_stale_task_node_projections(record.task_id) == 0
+
+    # 缺投影行同样要判脏（明细在、task_nodes 被删的情况）。
+    service.store._execute_write('DELETE FROM task_nodes WHERE node_id = ?', ('node:sync',))  # noqa: SLF001
+    assert service.store.count_stale_task_node_projections(record.task_id) == 1
+
+
+@pytest.mark.asyncio
 async def test_sweep_still_flips_a_residual_node(tmp_path: Path):
     service = _service(tmp_path)
     service.store.upsert_worker_status(

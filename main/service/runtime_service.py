@@ -899,8 +899,12 @@ class MainRuntimeService:
                 if str(item.get('ref_id') or '').strip()
             }
             for task in self.store.list_tasks():
-                self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
                 if str(task.status or '').strip().lower() != 'in_progress':
+                    # 终态任务的节点行不会再被写：投影戳与节点戳一致就说明派生已是最新，
+                    # 启动不再整任务重读重写（实盘 1,912/1,912 行一致，旧写法每次启动
+                    # 为此读掉 nodes 全表 486 MB 并重写 1,912 行投影）。
+                    if self.store.count_stale_task_node_projections(task.task_id):
+                        self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
                     # Self-heal: a terminal task must not retain orphaned in_progress
                     # nodes. This only flips bookkeeping status and never deletes
                     # transcripts/artifacts; see log_service._sweep_residual_nodes_locked.
@@ -910,6 +914,7 @@ class MainRuntimeService:
                     # reconciled against a later task id reuse.
                     self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=task.task_id)
                     continue
+                self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
                 if bool(task.is_paused) or bool(task.pause_requested):
                     if task.task_id not in shutdown_paused_task_ids:
                         # A user/agent-initiated pause must survive restarts.

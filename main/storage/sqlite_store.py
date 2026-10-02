@@ -797,6 +797,26 @@ class SQLiteTaskStore:
             'pause_reason': str(row['pause_reason'] or ''),
         }
 
+    def count_stale_task_node_projections(self, task_id: str) -> int:
+        """投影需要重做的节点条数：缺行，或投影戳与节点戳不一致。
+
+        启动对每个任务都要问一次「派生投影要不要重建」。终态任务的节点行不会再被写，
+        所以戳一致即已派生过——实盘 1,912/1,912 行都一致、0 行缺投影，而旧写法为此
+        整任务读回 payload_json 并重写全部投影行（该表 486 MB，单任务详情行 61 MB）。
+        判定走主读连接与三张表的 `updated_at` 平铺列，不搬正文。
+        """
+        row = self._fetchone(
+            'SELECT COUNT(*) AS stale FROM nodes n '
+            'LEFT JOIN task_node_details AS d ON d.node_id = n.node_id '
+            'LEFT JOIN task_nodes AS tn ON tn.node_id = n.node_id '
+            'WHERE n.task_id = ? AND (d.updated_at IS NULL OR tn.updated_at IS NULL '
+            'OR d.updated_at <> n.updated_at OR tn.updated_at <> n.updated_at)',
+            (str(task_id or '').strip(),),
+        )
+        if row is None:
+            return 0
+        return int(row['stale'] or 0)
+
     def count_unsettled_task_nodes(self, task_id: str) -> int:
         """终态任务下还没结算（非 success/failed）的节点条数，判定用，不搬正文。
 
