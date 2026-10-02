@@ -141,3 +141,44 @@ def test_narrow_read_survives_a_dead_light_connection(tmp_path: Path) -> None:
         'is_paused': True,
         'pause_reason': '',
     }
+
+
+def test_frame_existence_check_is_a_judgment_read(tmp_path: Path) -> None:
+    """`has_task_runtime_frame` 是派生结果绑定评分的输入，同暂停判定一个口径（#24）。
+
+    唯一调用方 `node_runner._select_bound_spawn_child` 用它给候选排序，决定一次派生结果
+    绑到哪个子节点；轻读连接快照滞后会绑错节点，那是控制流不是显示。
+    """
+    from main.monitoring.models import TaskProjectionRuntimeFrameRecord
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    store.upsert_task_runtime_frame(
+        TaskProjectionRuntimeFrameRecord(task_id=TASK_ID, node_id='node:framed', payload={'phase': 'before_model'})
+    )
+
+    def broken_light(*args, **kwargs):
+        raise AssertionError('判定类读取不许走轻读连接')
+
+    store._fetchone_light = broken_light  # type: ignore[method-assign]
+    assert store.has_task_runtime_frame(TASK_ID, 'node:framed') is True
+    assert store.has_task_runtime_frame(TASK_ID, 'node:absent') is False
+    store.close()
+
+
+def test_frame_existence_check_does_not_read_payload(tmp_path: Path) -> None:
+    """省的是正文，不是连接：SQL 里不得出现 payload_json。"""
+    from main.monitoring.models import TaskProjectionRuntimeFrameRecord
+
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
+    seen: list[str] = []
+
+    def spy(sql, params=()):
+        seen.append(sql)
+        return None
+
+    store._fetchone = spy  # type: ignore[method-assign]
+    store.has_task_runtime_frame(TASK_ID, 'node:x')
+    store.upsert_task_runtime_frame(
+        TaskProjectionRuntimeFrameRecord(task_id=TASK_ID, node_id='node:framed', payload={'phase': 'before_model'})
+    )
+    assert seen and 'payload_json' not in seen[0], seen

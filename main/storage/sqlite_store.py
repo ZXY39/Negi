@@ -3165,12 +3165,14 @@ class SQLiteTaskStore:
         return [self._parse(row['payload_json'], TaskProjectionRuntimeFrameRecord) for row in rows]
 
     def has_task_runtime_frame(self, task_id: str, node_id: str) -> bool:
-        """只问这个节点有没有运行时帧，不取 payload_json。
+        """这个节点有没有运行时帧——**判定类读取，走主读连接**。
 
-        帧行的 payload 平均几十 KB（实盘一个任务 180 行合计 7.8 MB），而存在性判定
-        只要主键命中，所以走轻量读连接、不解析正文。
+        省的部分是 `SELECT 1`（帧 payload 平均几十 KB，实盘一任务 180 行合计 7.8 MB，
+        不取正文就够了），不是换连接：它的唯一调用方 `node_runner._select_bound_spawn_child`
+        拿这个布尔给候选打分，决定一次派生结果绑到哪个子节点——light 连接的快照滞后
+        会把结果绑错节点，那是控制流不是显示（同 `get_node_pause_flags` 的口径）。
         """
-        row = self._fetchone_light(
+        row = self._fetchone(
             'SELECT 1 FROM task_runtime_frames WHERE task_id = ? AND node_id = ?',
             (str(task_id or '').strip(), str(node_id or '').strip()),
         )
