@@ -144,6 +144,19 @@ def _base_type_label(schema: dict[str, Any]) -> str:
     return label
 
 
+def _typed_name_list(properties: dict[str, Any], names: list[str]) -> str:
+    """`a=string,b=integer(>=1)`：可选字段也必须带类型。
+
+    被 `X should be integer` 拒收的提交，下一轮收到的契约里如果只列字段名，模型没有
+    可核对的材料，只能猜——`start_line` 那类就是这么反复的。
+    """
+    parts: list[str] = []
+    for name in names:
+        spec = properties.get(name)
+        parts.append(f"{name}={_base_type_label(spec)}" if isinstance(spec, dict) else str(name))
+    return ",".join(parts)
+
+
 def _object_shape_suffix(schema: dict[str, Any]) -> str:
     properties = schema.get("properties")
     if not isinstance(properties, dict) or not properties:
@@ -159,7 +172,7 @@ def _object_shape_suffix(schema: dict[str, Any]) -> str:
     if parts:
         body += "必填:" + ",".join(parts)
     if optional:
-        body += (";" if body else "") + "可选:" + ",".join(str(name) for name in optional)
+        body += (";" if body else "") + "可选:" + _typed_name_list(properties, [str(name) for name in optional])
     return f"<object{{{body}}}>"
 
 
@@ -198,7 +211,7 @@ def _render_parameter_contract(tool: Any) -> str:
         text = _PARAMETER_CONTRACT_PREFIX + "、".join(chunks)
         optional = [str(name) for name in properties if str(name) not in set(required)]
         if optional:
-            text += _PARAMETER_CONTRACT_OPTIONAL_PREFIX + "、".join(optional)
+            text += _PARAMETER_CONTRACT_OPTIONAL_PREFIX + _typed_name_list(properties, optional)
         if len(text) > _PARAMETER_CONTRACT_MAX_CHARS:
             return ""
         return text

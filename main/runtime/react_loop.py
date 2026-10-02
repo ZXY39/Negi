@@ -140,6 +140,15 @@ _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
+# 回包形态故障（参数串被 marker 截走 / 只有 reasoning 没有正文 / 提交体被输出上限截尾）
+# 与模型交付违约分账：形态问题占不了模型的预算，但同值封顶，否则上游持续故障会把
+# 节点挂在轮次循环里出不来。
+_PAYLOAD_SHAPE_FAULT_LIMIT = _INVALID_FINAL_SUBMISSION_LIMIT
+_TRUNCATED_SUBMISSION_CLAUSE = (
+    'This payload was cut off by the provider output limit (finish_reason=length), so fields after '
+    'the cut never reached the validator. Resubmit with a shorter `answer`/`summary` and reference the '
+    'long content through an `evidence` ref instead of inlining it.'
+)
 # 与上面两条同档：一次抖动不该熔断，但运行时自身缺陷必须在一分钟内被叫停。
 # 实盘基线：2026-09-23 task:321604599eb0 同一 NameError 连撞 18 次无人发现。
 _TOOL_FAULT_LIMIT = 5
@@ -278,7 +287,7 @@ class ReActToolLoop:
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
         invalid_stage_submission_count = 0
-        provider_parse_fault_count = 0
+        payload_shape_fault_count = 0
         plain_text_reply_strikes = 0
         stage_only_transition_streak = 0
         last_invalid_final_submission_reason = ''
@@ -1075,7 +1084,7 @@ class ReActToolLoop:
                 if ordinary_tool_turn:
                     invalid_final_submission_count = 0
                     invalid_stage_submission_count = 0
-                    provider_parse_fault_count = 0
+                    payload_shape_fault_count = 0
                     plain_text_reply_strikes = 0
                     stage_only_transition_streak = 0
                     last_invalid_final_submission_reason = ''
@@ -1216,26 +1225,24 @@ class ReActToolLoop:
                         return terminal_result
                     marker_fault = self._tool_call_marker_fault(response_tool_calls[0])
                     if marker_fault:
-                        # provider 序列化故障不占模型的无效提交预算，但另设同值上限，
+                        # 回包形态故障不占模型的无效提交预算，但另设同值上限，
                         # 否则上游持续故障会把节点挂在轮次循环里出不来。
-                        provider_parse_fault_count += 1
                         fault_reason = (
                             f'provider tool-call serialization fault: {FINAL_RESULT_TOOL_NAME} '
                             f'arguments end with a parameter marker: {marker_fault}'
                         )
-                        self._record_invalid_final_submission_error_log(
-                            task_id=task.task_id,
-                            node_id=node.node_id,
-                            node_title=node.goal,
-                            count=provider_parse_fault_count,
+                        payload_shape_fault_count = self._record_payload_shape_fault(
+                            task=task,
+                            node=node,
                             reason=fault_reason,
                             response=response,
                             response_tool_calls=response_tool_calls,
+                            count=payload_shape_fault_count,
                         )
-                        if provider_parse_fault_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
+                        if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
                             return self._invalid_final_submission_failure(
                                 reason=fault_reason,
-                                count=provider_parse_fault_count,
+                                count=payload_shape_fault_count,
                             )
                         last_invalid_final_submission_reason = fault_reason
                         repair_overlay_text = self._result_protocol_message(node_kind=node.node_kind)
@@ -1244,6 +1251,38 @@ class ReActToolLoop:
                     if protocol_error:
                         reason_parts.append(protocol_error)
                     reason = '; '.join(reason_parts) or f'{FINAL_RESULT_TOOL_NAME} rejected'
+                    if self._response_output_truncated(response):
+                        # 参数 JSON 被输出上限截尾时，缺字段是截断的后果而不是模型的裁定：
+                        # 记在形态故障上，并如实告诉它被截断了、把长内容改走 evidence ref。
+                        # 判据只看这一次的回包，不看计数器是否热过：否则一次上游故障会把
+                        # 该节点之后的真实交付违约永久免罚。
+                        shape_reason = (
+                            f'provider output limit truncated the {FINAL_RESULT_TOOL_NAME} payload '
+                            f'(finish_reason=length): {reason}'
+                        )
+                        payload_shape_fault_count = self._record_payload_shape_fault(
+                            task=task,
+                            node=node,
+                            reason=shape_reason,
+                            response=response,
+                            response_tool_calls=response_tool_calls,
+                            count=payload_shape_fault_count,
+                        )
+                        if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
+                            return self._invalid_final_submission_failure(
+                                reason=shape_reason,
+                                count=payload_shape_fault_count,
+                            )
+                        last_invalid_final_submission_reason = shape_reason
+                        repair_overlay_text = (
+                            self._result_contract_violation_message(
+                                reason_parts,
+                                node_kind=node.node_kind,
+                            )
+                            if reason_parts
+                            else self._result_protocol_message(node_kind=node.node_kind)
+                        ) + ' ' + _TRUNCATED_SUBMISSION_CLAUSE
+                        continue
                     invalid_final_submission_count = self._apply_invalid_final_submission_strike(
                         task_id=task.task_id,
                         node_id=node.node_id,
@@ -1682,6 +1721,31 @@ class ReActToolLoop:
                     if reason_parts
                     else self._result_protocol_message(node_kind=node.node_kind)
                 )
+                continue
+
+            if not str(getattr(response, 'content', None) or '').strip():
+                # 只有 reasoning、正文为空且零工具调用：runtime 拿不到任何提交体，
+                # 这不是模型的交付违约。`_is_empty_model_response` 把思考内容算作
+                # 非空，所以这种回包不会被空响应重放道接住，必须由这条形态计数兜住。
+                shape_reason = (
+                    f'reply carried no tool call and no text (reasoning-only), '
+                    f'so no {FINAL_RESULT_TOOL_NAME} payload could be evaluated'
+                )
+                payload_shape_fault_count = self._record_payload_shape_fault(
+                    task=task,
+                    node=node,
+                    reason=shape_reason,
+                    response=response,
+                    response_tool_calls=response_tool_calls,
+                    count=payload_shape_fault_count,
+                )
+                if payload_shape_fault_count >= _PAYLOAD_SHAPE_FAULT_LIMIT:
+                    return self._invalid_final_submission_failure(
+                        reason=shape_reason,
+                        count=payload_shape_fault_count,
+                    )
+                last_invalid_final_submission_reason = shape_reason
+                repair_overlay_text = self._result_protocol_message(node_kind=node.node_kind)
                 continue
 
             last_contract_violations = []
@@ -2266,6 +2330,38 @@ class ReActToolLoop:
         )
         return strikes
 
+    @staticmethod
+    def _response_output_truncated(response: Any) -> bool:
+        return str(getattr(response, 'finish_reason', '') or '').strip().lower() == 'length'
+
+    def _record_payload_shape_fault(
+        self,
+        *,
+        task,
+        node,
+        reason: str,
+        response: Any,
+        response_tool_calls: list[Any],
+        count: int,
+    ) -> int:
+        """Take one shape-fault tick and return the new count.
+
+        写入同一份节点错误历史（操作员看到的仍是 `Invalid final result submission
+        detected`，靠 reason 分辨类别），但不写 `_persist_invalid_final_submission_state`：
+        那一帧的计数是模型的交付违约预算，形态故障不能替它涨。
+        """
+        strikes = max(0, int(count or 0)) + 1
+        self._record_invalid_final_submission_error_log(
+            task_id=task.task_id,
+            node_id=node.node_id,
+            node_title=node.goal,
+            count=strikes,
+            reason=reason,
+            response=response,
+            response_tool_calls=response_tool_calls,
+        )
+        return strikes
+
     def _record_invalid_final_submission_error_log(
         self,
         *,
@@ -2306,6 +2402,7 @@ class ReActToolLoop:
             ]
             if provider_model:
                 parts.append(f'provider_model={provider_model}')
+            truncated = False
             if sent_max_tokens is not None:
                 try:
                     limit = max(0, int(sent_max_tokens))
@@ -2313,8 +2410,11 @@ class ReActToolLoop:
                     limit = 0
                 if limit > 0:
                     parts.append(f'sent_max_tokens={limit}')
-                    if output_tokens >= limit:
-                        parts.append('疑似触及输出token上限被截断')
+                    truncated = output_tokens >= limit
+            # 节点这条道多数拿不到 provider 请求体（实盘 53 条里 sent_max_tokens 出现 0 次），
+            # 只按上限判等会让截断永远不可见；finish_reason 是 response 上一定在的字段。
+            if truncated or finish_reason == 'length':
+                parts.append('疑似触及输出token上限被截断')
             self._log_service.append_task_error_log(
                 task_id,
                 node_id,
@@ -6031,6 +6131,7 @@ class ReActToolLoop:
                 raw_payload=raw_tool_arguments,
                 message_history=message_history,
                 response_content=assistant_content,
+                node_kind=node.node_kind,
             ),
         }
         assistant_tool_calls = [
@@ -6214,6 +6315,7 @@ class ReActToolLoop:
             raw_payload=raw_payload,
             message_history=message_history,
             response_content=assistant_content,
+            node_kind=node.node_kind,
         )
         result = self._coerce_final_result_payload(raw_payload)
         if result is None:
@@ -7219,9 +7321,25 @@ class ReActToolLoop:
         raw_payload: dict[str, Any],
         message_history: list[dict[str, Any]],
         response_content: Any,
+        node_kind: str = 'execution',
     ) -> dict[str, Any]:
         payload = dict(raw_payload or {})
         status = str(payload.get('status') or '').strip().lower()
+        delivery_status = str(payload.get('delivery_status') or '').strip().lower()
+
+        # 只收大小写与空白：值本身不在 enum（`partial` 那类）必须留给校验拒收，
+        # 否则就是替模型改裁定。
+        if status in {'success', 'failed'}:
+            payload['status'] = status
+        if delivery_status in {'final', 'blocked'}:
+            payload['delivery_status'] = delivery_status
+        elif not delivery_status and str(node_kind or '').strip().lower() != 'acceptance':
+            # 执行节点正文 §5.2 把两个必填写成一一对应（success⇒final、failed⇒blocked），
+            # 少写一个由另一个唯一决定。验收节点 failed 时 final(打回) 与 blocked(终止循环)
+            # 语义相反，运行时无权替它选。
+            paired = {'success': 'final', 'failed': 'blocked'}.get(status)
+            if paired:
+                payload['delivery_status'] = paired
 
         payload.setdefault('answer', '')
         payload.setdefault('remaining_work', [])
@@ -7248,8 +7366,8 @@ class ReActToolLoop:
             remaining_work = payload.get('remaining_work')
             if not isinstance(remaining_work, list):
                 payload['remaining_work'] = []
-            delivery_status = str(payload.get('delivery_status') or '').strip().lower()
-            if delivery_status == 'blocked' and not str(payload.get('blocking_reason') or '').strip():
+            current_delivery_status = str(payload.get('delivery_status') or '').strip().lower()
+            if current_delivery_status == 'blocked' and not str(payload.get('blocking_reason') or '').strip():
                 payload['blocking_reason'] = str(payload.get('summary') or payload.get('answer') or '').strip()
 
         return payload
@@ -7258,6 +7376,12 @@ class ReActToolLoop:
     def _normalize_final_result_evidence_item(item: dict[str, Any]) -> dict[str, Any]:
         payload = dict(item or {})
         kind = str(payload.get('kind') or '').strip().lower()
+        for field in ('start_line', 'end_line'):
+            if field not in payload:
+                continue
+            coerced = ReActToolLoop._coerce_evidence_line_number(payload.get(field))
+            if coerced is not None:
+                payload[field] = coerced
         if kind in {'file', 'artifact', 'url'}:
             payload['kind'] = kind
             return payload
@@ -7274,6 +7398,20 @@ class ReActToolLoop:
         if inferred:
             payload['kind'] = inferred
         return payload
+
+    @staticmethod
+    def _coerce_evidence_line_number(value: Any) -> int | None:
+        """把 `'12'` 这类纯数字字符串行号收敛成 int，与落地模型的同名收敛一致。
+
+        `'12-15'` 这种把区间塞进一个字段的返回 None（原样留着被拒收）：猜哪头是
+        start 就是替模型编内容，而 `NodeEvidenceItem` 的 `int | None` 也只吃数字串。
+        """
+        if isinstance(value, bool) or isinstance(value, int):
+            return None
+        text = str(value or '').strip()
+        if text.isdigit():
+            return int(text)
+        return None
 
     @staticmethod
     def _parse_final_result(content: str) -> tuple[NodeFinalResult, dict[str, Any]] | None:
