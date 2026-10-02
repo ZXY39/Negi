@@ -7383,7 +7383,14 @@ class ReActToolLoop:
         for field in ('start_line', 'end_line'):
             if field not in payload:
                 continue
-            coerced = ReActToolLoop._coerce_evidence_line_number(payload.get(field))
+            value = payload.get(field)
+            if value is None:
+                # url 类证据常写成 `"start_line": null`；落地模型把 null 当成缺字段
+                # （model_dump 完全一致），所以删键与保留 null 等价，而 schema 的
+                # `type: integer` 会对 null 报 `should be integer`。
+                del payload[field]
+                continue
+            coerced = ReActToolLoop._coerce_evidence_line_number(value)
             if coerced is not None:
                 payload[field] = coerced
         if kind in {'file', 'artifact', 'url'}:
@@ -7405,13 +7412,18 @@ class ReActToolLoop:
 
     @staticmethod
     def _coerce_evidence_line_number(value: Any) -> int | None:
-        """把 `'12'` 这类纯数字字符串行号收敛成 int，与落地模型的同名收敛一致。
+        """把落地模型本来就会收敛的写法收成 int，与 `NodeEvidenceItem` 的 `int | None` 对齐。
 
-        `'12-15'` 这种把区间塞进一个字段的返回 None（原样留着被拒收）：猜哪头是
-        start 就是替模型编内容，而 `NodeEvidenceItem` 的 `int | None` 也只吃数字串。
+        可收：`'12'`、`' 12 '`、整值浮点 `12.0`。
+        不可收（返回 None，原样留给校验器拒收）：`'12-15'` 这类把区间塞进一个字段、
+        `12.5` 这类非整值、`'40 行'` 这类带文字的——猜哪一个才是行号就是替模型编内容。
         """
-        if isinstance(value, bool) or isinstance(value, int):
+        if isinstance(value, bool):
             return None
+        if isinstance(value, int):
+            return None
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else None
         text = str(value or '').strip()
         if text.isdigit():
             return int(text)

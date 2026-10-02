@@ -366,3 +366,35 @@ async def test_react_loop_still_strikes_model_violation_after_a_shape_fault() ->
     frame = logs.read_runtime_frame("task-shape-then-violation", "node-shape-then-violation")
     assert int(frame.get("invalid_final_submission_count") or 0) == 1
     assert result.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_react_loop_accepts_explicit_null_line_numbers_on_url_evidence() -> None:
+    # 实盘 node:0d5b47f98bb7 2026-10-02 20:10:55：url 证据写成 `"start_line": null`，
+    # 三条各占 2 个字段，被 `should be integer` 连拒 6 项。落地模型把 null 当缺字段，
+    # 所以删键等价；区间串 '12-15' 仍必须拒收（见上一条测试）。
+    payload = _good_final_arguments()
+    payload["evidence"] = [
+        {"ref": "artifact:artifact:demo-ref", "start_line": 10, "end_line": 20},
+        {"kind": "url", "path": "", "ref": "https://example.com/a", "start_line": None, "end_line": None},
+        {"kind": "url", "path": "", "ref": "https://example.com/b", "start_line": None, "end_line": None},
+    ]
+    result, requests, logs = await _run_final_result_loop(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:null-lines", payload)],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+        ],
+        node_kind="acceptance",
+        task_id="task-null-lines",
+        node_id="node-null-lines",
+        max_iterations=1,
+    )
+
+    assert result.status == "success"
+    assert len(requests) == 1
+    assert logs.error_logs == []
+    assert [item.start_line for item in result.evidence] == [10, None, None]
