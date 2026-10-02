@@ -592,6 +592,19 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 
 这套分离只为在不削弱阶段门控与工具 hydration 规则的前提下提高 prompt cache 稳定性。同轮内节点多轮循环的 provider 请求构造走 append-only scaffold：上一份真实请求体 + 上一轮新增的 assistant / 工具结果消息 + 最新尾部三件（稳定契约、活状态块、当轮 turn-only note，末位是 user 角色提示）。跨 run 的第一跳（notice 唤醒、restart/resume、恢复重放）骑同一条链：请求以持久 actual-request scaffold（内部形态 `request_messages`）为前缀经头探针 + 多锚点尾对齐 adoption，投影超出 scaffold 覆盖点的记录（held notice、重放轮、当前 user 回合）作为显式 delta 追加；每轮请求的来源落 `request_seed_source` / `request_seed_message_count` 诊断（runtime frame、actual-request artifact、`task.model.call` 行同源），种子不可用（缺失、guard 降级、头漂移、对齐失败）时回退投影重组装并带 `fallback_*` 标记。scaffold 只是请求构造脚手架——不替代节点持久/压缩后的 `message_history`，也不重新定义哪些工具可调用；它存在的唯一目的是：当阶段压缩在回合边界修剪历史时，provider 看到的是 append-only 增长而不是早期前缀重写。`provider_tool_bundle_seeded` 只是兼容/诊断提示，真实行为由活跃/待定曝光状态加 token 压缩提交门控驱动。链式前缀在一种情况下让位：阶段过期点（见下节「stage_compaction」的"过期点换基线"），那一跳 `request_seed_source=same_turn_stage_compacted`，除此之外任何一轮的首个分叉点都必须落在历史尾部。完整规则详见 `context-and-cache-troubleshooting.md`「append-only 规则」。
 
+## 思考内容（reasoning）的上下文回放
+
+前门与节点两条车道都把 provider 回包的思考内容（chat 协议里的 `reasoning_content`）写在**产生它的那条 assistant 消息上**，随历史按原顺序一起重发。它不进 `content`，所以所有按正文起头判读的车道（转录、渠道出站、阶段轨道、内部提示折叠、长期记忆快照识别）看不见它。
+
+- **写入闸门按整条模型链取交集**：`chat_backend.model_chain_replays_reasoning()` 要求本请求解析出的候选链每一条 binding 都在 `models.catalog[].reasoning_context_enabled` 上开启；判定结果随应答落在 `LLMResponse.reasoning_context_allowed`（默认 `False`＝fail-closed），再经 adapter 的 `additional_kwargs` 与前门的 `response_payload` 传到落盘点。按整条链而不是按实际应答那一位判定，是因为行一旦落库就会被后续每一跳原样重发，其中包含降级到链上其他位的那些跳——按应答位判定会让上一跳的合法形状变成这一跳的畸形请求，而 400/422 在这里按请求形状错误处理（跳过同模型其余 key、直接前进下一个模型，见「Chat provider 超时与重试边界」）。
+- **闸门只决定写不写行，绝不抹掉当跳响应里的思考**：`_is_empty_model_response` 把 `reasoning_content` 算作非空，抹掉它会让 reasoning-only 回包被空响应重放道误伤；同一条判据也撑着节点侧的回包形态故障计数（`main-task-runtime.md`「Node-Level Pause and Recovery」）。
+- 三种不写的形态：只有思考、没有正文也没有工具调用的行照旧被投影丢弃；正文被外置成 artifact 指针的行不带思考（否则造出「看得见思路、看不见结论」的行）；前门轮末的可见正文行只在该跳正文与可见正文逐字相同时才带（多跳攒出的正文不与任何单一跳对齐，配错比不配更坏）。
+- **移出侧没有一行专用代码**：阶段压缩按 call_id 整条移除消息、保留行按整份 dict 复写；token 压缩保留的尾部同样是整份 dict，尾部截断只改 `tool` 行。思考因此随它所在那一跳的阶段过期点或摘要区间一起自然退出——把字段挂在消息行上而不是挂在别处，就是为了这一点。
+- **发送咽喉点无条件透传**：`sanitize_provider_messages()` 对 assistant 行的 `reasoning_content` 只做存在性透传、不带模型策略参数，`actual_request_hash` / `dynamic_appendix_hash` / token preflight 与线上体因此同源。同源是硬要求：让哈希侧与线上侧走两套投影，等于制造 `provider_request_body` 与 `request_messages` 的隐藏分叉（见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」）。
+- LangChain 转换在中间会掉一次：`convert_to_openai_messages` 丢 `additional_kwargs`（入向 `convert_to_messages` 会把 `reasoning_content` 收进 `additional_kwargs`，出向不回贴），`base_chat_model_adapter._as_message_dicts` 按原位置补回。漏补的表现是"字段明明写进了 durable，线上体里却没有"。
+- Responses 协议车道不回放思考：请求带 `include:["reasoning.encrypted_content"]`，但消费层不接这份内容，历史项转换也不产出 reasoning item（`responses_protocol_helpers._convert_messages` 的 assistant 分支只产出 message 与 function_call）；`thinking_blocks` 全仓无赋值点。接入 encrypted reasoning 重放需要单独判成本与形状风险。
+- 成本按"保留跳数 × 每条思考长度"计，且压缩请求体原样带着历史，开启后压缩触发点前移。`thinking_tokens` 的计量与展示口径见 `web-and-admin.md`「Task Token Stats Window Contract」。
+
 ## Frontdoor Context Compression
 
 - 压缩只有两条车道：`token_compression` 与 `stage_compaction`，不存在中间的"按消息条数压缩"阶段。`stage_prompt_compaction` 是 stage-window 修剪的唯一真相源，不要再引入一条平行的结构式压缩车道与它共享 helper。

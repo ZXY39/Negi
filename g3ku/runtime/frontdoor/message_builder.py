@@ -227,12 +227,14 @@ class CeoMessageBuilder:
                     continue
             elif content is None:
                 continue
-            records.append(
-                {
-                    "role": role,
-                    "content": content,
-                }
-            )
+            record: dict[str, Any] = {
+                "role": role,
+                "content": content,
+            }
+            reasoning = raw.get("reasoning_content")
+            if role == "assistant" and isinstance(reasoning, str) and reasoning.strip():
+                record["reasoning_content"] = reasoning
+            records.append(record)
         return records
 
     @classmethod
@@ -269,6 +271,9 @@ class CeoMessageBuilder:
                 record["tool_call_id"] = tool_call_id
             if tool_name:
                 record["name"] = tool_name
+            reasoning = raw.get("reasoning_content")
+            if role == "assistant" and isinstance(reasoning, str) and reasoning.strip():
+                record["reasoning_content"] = reasoning
             records.append(record)
         return records
 

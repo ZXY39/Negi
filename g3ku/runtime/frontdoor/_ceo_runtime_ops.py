@@ -6268,6 +6268,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "error_text": str(payload.get("error_text", "") or ""),
                     "reasoning_content": payload.get("reasoning_content"),
                     "thinking_blocks": payload.get("thinking_blocks"),
+                    "reasoning_context_allowed": bool(payload.get("reasoning_context_allowed") or False),
                     "stream_incomplete": bool(payload.get("stream_incomplete") or False),
                     "provider_request_meta": payload.get("provider_request_meta"),
                     "provider_request_body": payload.get("provider_request_body"),
@@ -6285,6 +6286,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "error_text": str(response_metadata.get("error_text", "") or ""),
                 "reasoning_content": additional_kwargs.get("reasoning_content"),
                 "thinking_blocks": additional_kwargs.get("thinking_blocks"),
+                "reasoning_context_allowed": bool(additional_kwargs.get("reasoning_context_allowed") or False),
                 "stream_incomplete": bool(additional_kwargs.get("stream_incomplete") or False),
                 "provider_request_meta": response_metadata.get("provider_request_meta"),
                 "provider_request_body": response_metadata.get("provider_request_body"),
@@ -6355,10 +6357,20 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "error_text": str(response_view.error_text or ""),
             "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
             "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
+            "reasoning_context_allowed": bool(getattr(response_view, "reasoning_context_allowed", False)),
             "stream_incomplete": bool(getattr(response_view, "stream_incomplete", False)),
             "provider_request_meta": _checkpoint_safe_value(response_view.provider_request_meta),
             "provider_request_body": self._checkpoint_safe_provider_request_body(response_view.provider_request_body),
         }
+
+    @staticmethod
+    def _frontdoor_assistant_reasoning_field(response_payload: dict[str, Any]) -> dict[str, Any]:
+        """该跳的思考要不要落进这条 assistant 行——只看发送侧链级闸门的判定结果。"""
+        if not bool(response_payload.get("reasoning_context_allowed")):
+            return {}
+        if not str(response_payload.get("reasoning_content") or "").strip():
+            return {}
+        return {"reasoning_content": response_payload.get("reasoning_content")}
 
     @staticmethod
     def _tool_call_payloads_from_calls(calls: list[Any]) -> list[dict[str, Any]]:
@@ -8295,6 +8307,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 if state.get("synthetic_tool_calls_used")
                 else self._model_content(response_payload.get("content", ""))
             ),
+            **self._frontdoor_assistant_reasoning_field(response_payload),
             "tool_calls": self._assistant_tool_calls_from_payloads(original_tool_call_payloads),
         }
         messages = list(state.get("messages") or [])
@@ -8503,10 +8516,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         is_silent_internal_ack = is_internal_turn and not str(output or "").strip()
         should_append_visible_output = bool(visible_output) and not is_silent_internal_ack
         if should_append_visible_output:
-            messages.append({"role": "assistant", "content": visible_output})
+            final_response_payload = dict(state.get("response_payload") or {})
+            visible_row = {"role": "assistant", "content": visible_output}
+            # 轮末行只在该跳正文与可见正文逐字相同时带思考：多跳攒出来的正文不与任何单一跳
+            # 对齐，配错比不配更坏。
+            hop_text = self._content_text(final_response_payload.get("content", "")).strip()
+            if hop_text and hop_text == str(visible_output or "").strip():
+                visible_row.update(self._frontdoor_assistant_reasoning_field(final_response_payload))
+            messages.append(dict(visible_row))
             authoritative_request_body_messages = [
                 *list(authoritative_request_body_messages),
-                {"role": "assistant", "content": visible_output},
+                dict(visible_row),
             ]
         if visible_output and route_kind == "direct_reply":
             result["messages"] = list(messages)

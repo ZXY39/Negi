@@ -59,6 +59,9 @@ class LLMResponse:
     attempts: list[LLMModelAttempt] = field(default_factory=list)
     reasoning_content: str | None = None
     thinking_blocks: list[dict] | None = None
+    # 本跳的思考是否允许写进 assistant 历史行（发送侧链级闸门的判定结果，默认关）。与
+    # reasoning_content 分开是必须的：抹掉正文会让 reasoning-only 回包被空响应重放道误伤。
+    reasoning_context_allowed: bool = False
     request_message_count: int | None = None
     request_message_chars: int | None = None
     provider_request_meta: dict[str, Any] = field(default_factory=dict)

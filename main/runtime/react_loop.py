@@ -1449,14 +1449,17 @@ class ReActToolLoop:
                     results=results,
                     runtime_context=runtime_context,
                 )
+                assistant_body = None if synthetic_tool_calls_used else response.content
+                assistant_sent_body = self._externalize_message_content(
+                    assistant_body,
+                    runtime_context=runtime_context,
+                    display_name=f'assistant:{node.node_id}',
+                    source_kind='assistant_message',
+                )
                 assistant_message = {
                     'role': 'assistant',
-                    'content': self._externalize_message_content(
-                        None if synthetic_tool_calls_used else response.content,
-                        runtime_context=runtime_context,
-                        display_name=f'assistant:{node.node_id}',
-                        source_kind='assistant_message',
-                    ),
+                    'content': assistant_sent_body,
+                    **self._node_assistant_reasoning_field(response, assistant_body, assistant_sent_body),
                     'tool_calls': assistant_tool_calls,
                 }
                 record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
@@ -6245,14 +6248,16 @@ class ReActToolLoop:
                 ],
             )
 
+        assistant_sent_body = self._externalize_message_content(
+            assistant_content,
+            runtime_context=runtime_context,
+            display_name=f'assistant:{node.node_id}',
+            source_kind='assistant_message',
+        )
         assistant_message = {
             'role': 'assistant',
-            'content': self._externalize_message_content(
-                assistant_content,
-                runtime_context=runtime_context,
-                display_name=f'assistant:{node.node_id}',
-                source_kind='assistant_message',
-            ),
+            'content': assistant_sent_body,
+            **self._node_assistant_reasoning_field(response, assistant_content, assistant_sent_body),
             'tool_calls': assistant_tool_calls,
         }
         tool_messages = [
@@ -6403,6 +6408,26 @@ class ReActToolLoop:
         )
         return prepared_history
 
+    def _node_assistant_reasoning_field(
+        self,
+        response,
+        original_body: Any,
+        sent_body: Any,
+    ) -> dict[str, Any]:
+        """该跳的思考落不落进这条 assistant 行。
+
+        两个条件缺一不可：发送侧链级闸门在应答时判为允许；正文没有被外置。外置行的正文已经
+        是指向 artifact 的指针，再挂一段完整思考会造出「看得见思路、看不见结论」的行。
+        """
+        if sent_body is not original_body:
+            return {}
+        if not bool(getattr(response, 'reasoning_context_allowed', False)):
+            return {}
+        reasoning = getattr(response, 'reasoning_content', None)
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            return {}
+        return {'reasoning_content': reasoning}
+
     def _rejected_tool_turn_delta_messages(
         self,
         *,
@@ -6424,14 +6449,16 @@ class ReActToolLoop:
             }
             for call in list(response_tool_calls or [])
         ]
+        assistant_sent_body = self._externalize_message_content(
+            response.content,
+            runtime_context=runtime_context,
+            display_name=f'assistant:{node.node_id}',
+            source_kind='assistant_message',
+        )
         assistant_message = {
             'role': 'assistant',
-            'content': self._externalize_message_content(
-                response.content,
-                runtime_context=runtime_context,
-                display_name=f'assistant:{node.node_id}',
-                source_kind='assistant_message',
-            ),
+            'content': assistant_sent_body,
+            **self._node_assistant_reasoning_field(response, response.content, assistant_sent_body),
             'tool_calls': assistant_tool_calls,
         }
         tool_messages = [
