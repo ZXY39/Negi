@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,6 +119,33 @@ async def test_full_detail_still_returns_trace_without_a_ref(tmp_path: Path):
     steps = list(trace.get('tool_steps') or [])
     assert [item.get('tool_call_id') for item in steps] == ['call:live']
     assert 'echo live' in str(steps[0].get('arguments_text') or '')
+
+
+@pytest.mark.asyncio
+async def test_later_in_flight_round_invalidates_a_ref_written_by_a_state_change(tmp_path: Path):
+    """反"说谎"那条：状态转换写过真快照之后，节点又跑了一拍 ⇒ 那份 artifact 已经过期，
+    行内 ref 必须再次作废，否则 `full` 详情会永远读到旧轨迹。
+    """
+    service, record = await _boot(tmp_path)
+    node_id = record.root_node_id
+    service.log_service.append_node_output(record.task_id, node_id, content='第一拍', tool_calls=[])
+    service.log_service.update_node_status(record.task_id, node_id, status='in_progress')
+    assert _detail_ref(service, record.task_id, node_id).startswith('artifact:')
+
+    service.log_service.append_node_output(record.task_id, node_id, content='第二拍', tool_calls=[])
+    assert _detail_ref(service, record.task_id, node_id) == ''
+
+    # 工具结果批量那条在飞车道同理（实盘就是它先把作废覆盖掉的）。
+    service.log_service.update_node_status(record.task_id, node_id, status='in_progress')
+    assert _detail_ref(service, record.task_id, node_id).startswith('artifact:')
+    service.log_service.record_tool_result_batch(
+        task_id=record.task_id,
+        node_id=node_id,
+        response_tool_calls=[SimpleNamespace(id='call:batch', name='exec', arguments={'command': 'pwd'})],
+        results=[{'live_state': {'tool_call_id': 'call:batch', 'status': 'success'},
+                  'tool_message': {'tool_call_id': 'call:batch', 'name': 'exec', 'content': '/tmp'}}],
+    )
+    assert _detail_ref(service, record.task_id, node_id) == ''
 
 
 @pytest.mark.asyncio

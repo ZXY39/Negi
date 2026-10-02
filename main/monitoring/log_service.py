@@ -931,7 +931,7 @@ class TaskLogService:
             )
             task = self._store.get_task(task_id)
             if updated is not None and task is not None:
-                self._sync_node_read_models_locked(updated)
+                self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 self._publish_task_node_patch_locked(task=task, node=updated)
             return updated
 
@@ -1010,7 +1010,7 @@ class TaskLogService:
                 persisted.append(record)
 
             if persisted:
-                self._sync_node_read_models_locked(node)
+                self._sync_node_read_models_locked(node, invalidate_execution_trace_ref=True)
                 self._publish_task_node_patch_locked(task=task, node=node)
                 self.refresh_task_view(task_id, mark_unread=True)
             return persisted
@@ -1483,7 +1483,7 @@ class TaskLogService:
             )
             if task is not None:
                 if updated is not None:
-                    self._sync_node_read_models_locked(updated)
+                    self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                     self._publish_task_node_patch_locked(task=task, node=updated)
                 self._publish_task_token_patch_locked(task=task)
             return updated
@@ -1617,7 +1617,7 @@ class TaskLogService:
 
             updated = self._store.update_node(node_id, _mutate)
             if updated is not None:
-                self._sync_node_read_models_locked(updated)
+                self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 self._publish_task_node_patch_locked(task=task, node=updated)
                 self.refresh_task_view(task_id, mark_unread=True)
             return updated
