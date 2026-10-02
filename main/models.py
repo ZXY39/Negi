@@ -16,6 +16,10 @@ class NodeOutputEntry(Model):
     content: str = ''
     content_ref: str = ''
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
+    # 当跳思考原样存在行上：正文被外置成 content_ref 时思考不跟着走，且中断轮恢复重建
+    # assistant 行时只能从这里取回（写侧闸门判定见 react_loop._node_assistant_reasoning_field）。
+    reasoning_content: str = ''
+    reasoning_items: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str
 
 

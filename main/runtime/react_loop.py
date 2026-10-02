@@ -1039,11 +1039,14 @@ class ReActToolLoop:
                 }
                 for call in response_tool_calls
             ]
+            ledger_reasoning_field = self._node_assistant_reasoning_field(response)
             updated_node = self._log_service.append_node_output(
                 task.task_id,
                 node.node_id,
                 content=str(response.content or ''),
                 tool_calls=tool_calls,
+                reasoning_content=str(ledger_reasoning_field.get('reasoning_content') or ''),
+                reasoning_items=list(ledger_reasoning_field.get('reasoning_items') or []),
                 usage_attempts=list(response.attempts or []),
                 model_messages=model_messages,
                 request_messages=request_messages,
@@ -1459,7 +1462,7 @@ class ReActToolLoop:
                 assistant_message = {
                     'role': 'assistant',
                     'content': assistant_sent_body,
-                    **self._node_assistant_reasoning_field(response, assistant_body, assistant_sent_body),
+                    **self._node_assistant_reasoning_field(response),
                     'tool_calls': assistant_tool_calls,
                 }
                 record_tool_results = getattr(self._log_service, 'record_tool_result_batch', None)
@@ -1986,6 +1989,10 @@ class ReActToolLoop:
             {
                 'role': 'assistant',
                 'content': assistant_content,
+                **self._pending_tool_turn_reasoning_field(
+                    node=node,
+                    pending_tool_calls=pending_tool_calls,
+                ),
                 'tool_calls': assistant_tool_calls,
             }
         )
@@ -2169,6 +2176,10 @@ class ReActToolLoop:
             {
                 'role': 'assistant',
                 'content': assistant_content,
+                **self._pending_tool_turn_reasoning_field(
+                    node=node,
+                    pending_tool_calls=pending_tool_calls,
+                ),
                 'tool_calls': assistant_tool_calls,
             }
         )
@@ -2560,6 +2571,45 @@ class ReActToolLoop:
             if text.strip():
                 return text
         return ''
+
+    def _pending_tool_turn_reasoning_field(
+        self,
+        *,
+        node,
+        pending_tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """恢复/重放中断那一跳时，从 output 账本把当跳思考原样取回。
+
+        与 `_pending_tool_turn_content` 同一套 call_id 序列匹配（倒序找第一条同组条目），
+        只是这里要的是思考而不是正文，所以空条目跳过继续往前找。
+        """
+        pending_ids = [
+            str(item.get('id') or '').strip()
+            for item in list(pending_tool_calls or [])
+            if str(item.get('id') or '').strip()
+        ]
+        for entry in reversed(list(getattr(node, 'output', []) or [])):
+            entry_tool_calls = [
+                str(item.get('id') or '').strip()
+                for item in list(getattr(entry, 'tool_calls', []) or [])
+                if isinstance(item, dict) and str(item.get('id') or '').strip()
+            ]
+            if pending_ids and entry_tool_calls != pending_ids:
+                continue
+            field: dict[str, Any] = {}
+            reasoning = str(getattr(entry, 'reasoning_content', '') or '')
+            if reasoning.strip():
+                field['reasoning_content'] = reasoning
+            items = [
+                dict(item)
+                for item in list(getattr(entry, 'reasoning_items', None) or [])
+                if isinstance(item, dict)
+            ]
+            if items:
+                field['reasoning_items'] = items
+            if field:
+                return field
+        return {}
 
     def _resolve_content_ref(self, ref: str) -> str:
         content_store = getattr(self._log_service, '_content_store', None)
@@ -6257,7 +6307,7 @@ class ReActToolLoop:
         assistant_message = {
             'role': 'assistant',
             'content': assistant_sent_body,
-            **self._node_assistant_reasoning_field(response, assistant_content, assistant_sent_body),
+            **self._node_assistant_reasoning_field(response),
             'tool_calls': assistant_tool_calls,
         }
         tool_messages = [
@@ -6408,25 +6458,27 @@ class ReActToolLoop:
         )
         return prepared_history
 
-    def _node_assistant_reasoning_field(
-        self,
-        response,
-        original_body: Any,
-        sent_body: Any,
-    ) -> dict[str, Any]:
-        """该跳的思考落不落进这条 assistant 行。
+    def _node_assistant_reasoning_field(self, response) -> dict[str, Any]:
+        """该跳的思考落不落进这条 assistant 行——只看发送侧链级闸门的判定结果。
 
-        两个条件缺一不可：发送侧链级闸门在应答时判为允许；正文没有被外置。外置行的正文已经
-        是指向 artifact 的指针，再挂一段完整思考会造出「看得见思路、看不见结论」的行。
+        正文被外置成 artifact 指针时思考照样原样完整留在行上：外置是为正文体量服务的，不该顺带
+        把思路一起丢掉。chat 协议给的是 `reasoning_content` 文本，Responses 协议给的是加密
+        reasoning 项，两种都整段随行。
         """
-        if sent_body is not original_body:
-            return {}
         if not bool(getattr(response, 'reasoning_context_allowed', False)):
             return {}
+        field: dict[str, Any] = {}
         reasoning = getattr(response, 'reasoning_content', None)
-        if not isinstance(reasoning, str) or not reasoning.strip():
-            return {}
-        return {'reasoning_content': reasoning}
+        if isinstance(reasoning, str) and reasoning.strip():
+            field['reasoning_content'] = reasoning
+        items = [
+            dict(item)
+            for item in list(getattr(response, 'reasoning_items', None) or [])
+            if isinstance(item, dict)
+        ]
+        if items:
+            field['reasoning_items'] = items
+        return field
 
     def _rejected_tool_turn_delta_messages(
         self,
@@ -6458,7 +6510,7 @@ class ReActToolLoop:
         assistant_message = {
             'role': 'assistant',
             'content': assistant_sent_body,
-            **self._node_assistant_reasoning_field(response, response.content, assistant_sent_body),
+            **self._node_assistant_reasoning_field(response),
             'tool_calls': assistant_tool_calls,
         }
         tool_messages = [

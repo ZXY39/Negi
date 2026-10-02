@@ -1075,6 +1075,7 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
         "error_text": "",
         "reasoning_content": "reasoning trace",
         "thinking_blocks": [{"type": "thinking", "text": "step one"}],
+        "reasoning_items": None,
         "reasoning_context_allowed": False,
         "stream_incomplete": False,
         "provider_request_meta": {

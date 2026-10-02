@@ -325,6 +325,13 @@ def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[di
             reasoning = item.get('reasoning_content')
             if isinstance(reasoning, str) and reasoning.strip():
                 payload['reasoning_content'] = reasoning
+            reasoning_items = [
+                entry
+                for entry in list(item.get('reasoning_items') or [])
+                if isinstance(entry, dict)
+            ]
+            if reasoning_items:
+                payload['reasoning_items'] = reasoning_items
             # 思考内容按原位置随行重发。这里不带模型策略参数、只做无条件透传，是为了让
             # actual_request_hash / dynamic_appendix_hash / preflight 估算与线上体同源；
             # 决定「写不写进行」的闸门在落盘点，不在这条咽喉点。

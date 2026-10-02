@@ -234,6 +234,13 @@ class CeoMessageBuilder:
             reasoning = raw.get("reasoning_content")
             if role == "assistant" and isinstance(reasoning, str) and reasoning.strip():
                 record["reasoning_content"] = reasoning
+            reasoning_items = [
+                entry
+                for entry in list(raw.get("reasoning_items") or [])
+                if isinstance(entry, dict)
+            ]
+            if role == "assistant" and reasoning_items:
+                record["reasoning_items"] = reasoning_items
             records.append(record)
         return records
 
@@ -274,6 +281,13 @@ class CeoMessageBuilder:
             reasoning = raw.get("reasoning_content")
             if role == "assistant" and isinstance(reasoning, str) and reasoning.strip():
                 record["reasoning_content"] = reasoning
+            reasoning_items = [
+                entry
+                for entry in list(raw.get("reasoning_items") or [])
+                if isinstance(entry, dict)
+            ]
+            if role == "assistant" and reasoning_items:
+                record["reasoning_items"] = reasoning_items
             records.append(record)
         return records
 

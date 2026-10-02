@@ -29,6 +29,9 @@ def _as_message_dicts(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
         reasoning = extra.get("reasoning_content")
         if isinstance(reasoning, str) and reasoning.strip():
             payload["reasoning_content"] = reasoning
+        items = extra.get("reasoning_items")
+        if isinstance(items, list) and items:
+            payload["reasoning_items"] = [dict(item) for item in items if isinstance(item, dict)]
     return dicts
 
 
@@ -161,6 +164,8 @@ class G3kuChatModelAdapter(BaseChatModel):
             additional_kwargs["reasoning_content"] = response.reasoning_content
         if getattr(response, "thinking_blocks", None):
             additional_kwargs["thinking_blocks"] = response.thinking_blocks
+        if getattr(response, "reasoning_items", None):
+            additional_kwargs["reasoning_items"] = response.reasoning_items
         if getattr(response, "reasoning_context_allowed", False):
             additional_kwargs["reasoning_context_allowed"] = True
         if getattr(response, "stream_incomplete", False):

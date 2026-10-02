@@ -6268,6 +6268,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "error_text": str(payload.get("error_text", "") or ""),
                     "reasoning_content": payload.get("reasoning_content"),
                     "thinking_blocks": payload.get("thinking_blocks"),
+                    "reasoning_items": payload.get("reasoning_items"),
                     "reasoning_context_allowed": bool(payload.get("reasoning_context_allowed") or False),
                     "stream_incomplete": bool(payload.get("stream_incomplete") or False),
                     "provider_request_meta": payload.get("provider_request_meta"),
@@ -6286,6 +6287,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "error_text": str(response_metadata.get("error_text", "") or ""),
                 "reasoning_content": additional_kwargs.get("reasoning_content"),
                 "thinking_blocks": additional_kwargs.get("thinking_blocks"),
+                "reasoning_items": additional_kwargs.get("reasoning_items"),
                 "reasoning_context_allowed": bool(additional_kwargs.get("reasoning_context_allowed") or False),
                 "stream_incomplete": bool(additional_kwargs.get("stream_incomplete") or False),
                 "provider_request_meta": response_metadata.get("provider_request_meta"),
@@ -6357,6 +6359,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "error_text": str(response_view.error_text or ""),
             "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
             "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
+            "reasoning_items": _checkpoint_safe_value(response_view.reasoning_items),
             "reasoning_context_allowed": bool(getattr(response_view, "reasoning_context_allowed", False)),
             "stream_incomplete": bool(getattr(response_view, "stream_incomplete", False)),
             "provider_request_meta": _checkpoint_safe_value(response_view.provider_request_meta),
@@ -6365,12 +6368,24 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _frontdoor_assistant_reasoning_field(response_payload: dict[str, Any]) -> dict[str, Any]:
-        """该跳的思考要不要落进这条 assistant 行——只看发送侧链级闸门的判定结果。"""
+        """该跳的思考要不要落进这条 assistant 行——只看发送侧链级闸门的判定结果。
+
+        chat 协议落 `reasoning_content` 文本，Responses 协议落加密 `reasoning_items` 项；正文被
+        截断或外置都不影响它——思考整段随行，随它所在那一跳的阶段过期点或摘要区间一起退出。
+        """
         if not bool(response_payload.get("reasoning_context_allowed")):
             return {}
-        if not str(response_payload.get("reasoning_content") or "").strip():
-            return {}
-        return {"reasoning_content": response_payload.get("reasoning_content")}
+        field: dict[str, Any] = {}
+        if str(response_payload.get("reasoning_content") or "").strip():
+            field["reasoning_content"] = response_payload.get("reasoning_content")
+        items = [
+            dict(item)
+            for item in list(response_payload.get("reasoning_items") or [])
+            if isinstance(item, dict)
+        ]
+        if items:
+            field["reasoning_items"] = items
+        return field
 
     @staticmethod
     def _tool_call_payloads_from_calls(calls: list[Any]) -> list[dict[str, Any]]:

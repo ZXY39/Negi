@@ -1159,6 +1159,8 @@ class TaskLogService:
         *,
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        reasoning_content: str = '',
+        reasoning_items: list[dict[str, Any]] | None = None,
         usage_attempts: list[Any] | None = None,
         model_messages: list[dict[str, Any]] | None = None,
         request_messages: list[dict[str, Any]] | None = None,
@@ -1284,6 +1286,12 @@ class TaskLogService:
                         content=text,
                         content_ref=ref,
                         tool_calls=list(tool_calls or []),
+                        reasoning_content=str(reasoning_content or ''),
+                        reasoning_items=[
+                            dict(item)
+                            for item in list(reasoning_items or [])
+                            if isinstance(item, dict)
+                        ],
                         created_at=changed_at,
                     )
                 )

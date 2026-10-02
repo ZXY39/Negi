@@ -59,6 +59,10 @@ class LLMResponse:
     attempts: list[LLMModelAttempt] = field(default_factory=list)
     reasoning_content: str | None = None
     thinking_blocks: list[dict] | None = None
+    # Responses 协议的回包思考形态：`type="reasoning"` 输出项原样副本（含 id 与
+    # encrypted_content），另带一个 `g3ku_reasoning_model` 戳——加密内容只有产生它的模型能解，
+    # 回放松要按戳筛。chat 协议用上面的 reasoning_content 文本，两者互斥。
+    reasoning_items: list[dict] | None = None
     # 本跳的思考是否允许写进 assistant 历史行（发送侧链级闸门的判定结果，默认关）。与
     # reasoning_content 分开是必须的：抹掉正文会让 reasoning-only 回包被空响应重放道误伤。
     reasoning_context_allowed: bool = False

@@ -100,7 +100,11 @@ def _system_message_text(content: Any) -> str:
     return ""
 
 
-def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def _convert_messages(
+    messages: list[dict[str, Any]],
+    *,
+    model: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
     messages = _sanitize_tool_call_history(messages)
     system_parts: list[str] = []
     input_items: list[dict[str, Any]] = []
@@ -126,6 +130,8 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
             continue
 
         if role == "assistant":
+            # 思考项必须排在它所属的 assistant 正文之前，顺序本身就是这条契约。
+            input_items.extend(_replayable_reasoning_items(msg.get("reasoning_items"), model))
             # Handle text first.
             if isinstance(content, str) and content:
                 input_items.append(
@@ -210,7 +216,12 @@ def _sanitize_tool_call_history(messages: list[dict[str, Any]]) -> list[dict[str
 
             updated = dict(msg)
             updated.pop("tool_calls", None)
-            if updated.get("content") or updated.get("reasoning_content") or updated.get("thinking_blocks"):
+            if (
+                updated.get("content")
+                or updated.get("reasoning_content")
+                or updated.get("thinking_blocks")
+                or updated.get("reasoning_items")
+            ):
                 sanitized.append(updated)
             continue
 
@@ -335,12 +346,13 @@ async def _consume_sse(
     response: httpx.Response,
     *,
     on_text_delta: Any = None,
-) -> tuple[str, list[ToolCallRequest], str, dict[str, int]]:
+) -> tuple[str, list[ToolCallRequest], str, dict[str, int], list[dict[str, Any]]]:
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
     finish_reason = "stop"
     usage: dict[str, int] = {}
+    reasoning_items: list[dict[str, Any]] = []
 
     async for event in _iter_sse(response):
         event_type = event.get("type")
@@ -372,6 +384,17 @@ async def _consume_sse(
                 tool_call_buffers[call_id]["arguments"] = event.get("arguments") or ""
         elif event_type == "response.output_item.done":
             item = event.get("item") or {}
+            if item.get("type") == "reasoning":
+                stored = next(
+                    (entry for entry in reasoning_items if entry.get("id") == item.get("id")),
+                    None,
+                )
+                if stored is None:
+                    reasoning_items.append(dict(item))
+                elif item.get("encrypted_content") and not stored.get("encrypted_content"):
+                    # 密文只在带 include 的那一拍出现，早到的空壳条目就地补齐。
+                    stored["encrypted_content"] = item["encrypted_content"]
+                continue
             if item.get("type") == "function_call":
                 call_id = item.get("call_id")
                 if not call_id:
@@ -394,6 +417,25 @@ async def _consume_sse(
             status = response_payload.get("status")
             finish_reason = _map_finish_reason(status)
             usage = normalize_usage_payload(response_payload.get("usage") or event.get("usage"))
+            response_model = str(response_payload.get("model") or "").strip()
+            for output_item in list(response_payload.get("output") or []):
+                if not isinstance(output_item, dict) or output_item.get("type") != "reasoning":
+                    continue
+                stored = next(
+                    (entry for entry in reasoning_items if entry.get("id") == output_item.get("id")),
+                    None,
+                )
+                if stored is None:
+                    reasoning_items.append(dict(output_item))
+                else:
+                    # 终止事件带的是权威完整项（含 summary / encrypted_content），逐键补齐早到的分片。
+                    for key, value in output_item.items():
+                        if value not in (None, "", [], {}):
+                            stored[key] = value
+            for stored in reasoning_items:
+                # 密文绑模型：戳在终止事件这一步才打得起来，没有它就没有重放资格。
+                if response_model:
+                    stored["g3ku_reasoning_model"] = response_model
         elif event_type in {"error", "response.failed"}:
             summary, full_body = _codex_failure_summary(event)
             raise CodexStreamError(
@@ -402,7 +444,31 @@ async def _consume_sse(
                 error_body=full_body,
             )
 
-    return content, tool_calls, finish_reason, usage
+    return content, tool_calls, finish_reason, usage, reasoning_items
+
+
+def _replayable_reasoning_items(raw_items: Any, model: str | None) -> list[dict[str, Any]]:
+    """把行上存的加密 reasoning 项还原成可回放的 input 项。
+
+    只回给产生它的那个模型：密文由签发模型的服务端密钥加密，换个模型解不开，会被当成畸形项。
+    戳（`g3ku_reasoning_model`）是我们的记账字段，回放前摘掉。
+    """
+    items: list[dict[str, Any]] = []
+    for raw in list(raw_items or []):
+        if not isinstance(raw, dict):
+            continue
+        source_model = str(raw.get("g3ku_reasoning_model") or "").strip()
+        if not source_model:
+            continue
+        if model and source_model != str(model).strip():
+            continue
+        item = {key: value for key, value in raw.items() if key != "g3ku_reasoning_model"}
+        if item.get("type") != "reasoning":
+            continue
+        if not (item.get("encrypted_content") or item.get("summary")):
+            continue
+        items.append(item)
+    return items
 
 
 _FINISH_REASON_MAP = {"completed": "stop", "incomplete": "length", "failed": "error", "cancelled": "error"}

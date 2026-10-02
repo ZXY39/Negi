@@ -598,11 +598,12 @@ CEO/frontdoor 直连长时工具有一条独立的 live-only 内联提醒侧车�
 
 - **写入闸门按整条模型链取交集**：`chat_backend.model_chain_replays_reasoning()` 要求本请求解析出的候选链每一条 binding 都在 `models.catalog[].reasoning_context_enabled` 上开启；判定结果随应答落在 `LLMResponse.reasoning_context_allowed`（默认 `False`＝fail-closed），再经 adapter 的 `additional_kwargs` 与前门的 `response_payload` 传到落盘点。按整条链而不是按实际应答那一位判定，是因为行一旦落库就会被后续每一跳原样重发，其中包含降级到链上其他位的那些跳——按应答位判定会让上一跳的合法形状变成这一跳的畸形请求，而 400/422 在这里按请求形状错误处理（跳过同模型其余 key、直接前进下一个模型，见「Chat provider 超时与重试边界」）。
 - **闸门只决定写不写行，绝不抹掉当跳响应里的思考**：`_is_empty_model_response` 把 `reasoning_content` 算作非空，抹掉它会让 reasoning-only 回包被空响应重放道误伤；同一条判据也撑着节点侧的回包形态故障计数（`main-task-runtime.md`「Node-Level Pause and Recovery」）。
-- 三种不写的形态：只有思考、没有正文也没有工具调用的行照旧被投影丢弃；正文被外置成 artifact 指针的行不带思考（否则造出「看得见思路、看不见结论」的行）；前门轮末的可见正文行只在该跳正文与可见正文逐字相同时才带（多跳攒出的正文不与任何单一跳对齐，配错比不配更坏）。
+- 两种不写的形态：只有思考、没有正文也没有工具调用的行照旧被投影丢弃；前门轮末的可见正文行只在该跳正文与可见正文逐字相同时才带（多跳攒出的正文不与任何单一跳对齐，配错比不配更坏）。正文被外置成 artifact 指针**不参与**这条判定——外置是为正文体量服务的，思考整段留在行上。
+- 节点的中断轮恢复与账本同源：每跳的 `NodeOutputEntry` 除正文/`content_ref`/`tool_calls` 外还带 `reasoning_content` 与 `reasoning_items`，暂停在工具执行中间再恢复时，重建的那条 assistant 行按同一套 call_id 序列匹配条目把思路原样取回（`_pending_tool_turn_reasoning_field`）；条目上没有思路就建不带字段的行，不编造。
 - **移出侧没有一行专用代码**：阶段压缩按 call_id 整条移除消息、保留行按整份 dict 复写；token 压缩保留的尾部同样是整份 dict，尾部截断只改 `tool` 行。思考因此随它所在那一跳的阶段过期点或摘要区间一起自然退出——把字段挂在消息行上而不是挂在别处，就是为了这一点。
 - **发送咽喉点无条件透传**：`sanitize_provider_messages()` 对 assistant 行的 `reasoning_content` 只做存在性透传、不带模型策略参数，`actual_request_hash` / `dynamic_appendix_hash` / token preflight 与线上体因此同源。同源是硬要求：让哈希侧与线上侧走两套投影，等于制造 `provider_request_body` 与 `request_messages` 的隐藏分叉（见 `context-and-cache-troubleshooting.md`「Prompt Cache Family 与 Actual Request」）。
 - LangChain 转换在中间会掉一次：`convert_to_openai_messages` 丢 `additional_kwargs`（入向 `convert_to_messages` 会把 `reasoning_content` 收进 `additional_kwargs`，出向不回贴），`base_chat_model_adapter._as_message_dicts` 按原位置补回。漏补的表现是"字段明明写进了 durable，线上体里却没有"。
-- Responses 协议车道不回放思考：请求带 `include:["reasoning.encrypted_content"]`，但消费层不接这份内容，历史项转换也不产出 reasoning item（`responses_protocol_helpers._convert_messages` 的 assistant 分支只产出 message 与 function_call）；`thinking_blocks` 全仓无赋值点。接入 encrypted reasoning 重放需要单独判成本与形状风险。
+- Responses 协议车道的思考是**加密项**而不是文本：请求里的 `include:["reasoning.encrypted_content"]` 现在真被接住——消费层收下 `type="reasoning"` 的输出项（`response.output_item.done` 先到、`response.completed` 补齐权威内容），并打一个 `g3ku_reasoning_model` 戳。落盘后随行存成 `reasoning_items`，`_convert_messages` 在所属 assistant 正文**之前**原位回放出该项（戳摘掉），且只回给签发它的那个模型：密文由签发模型的服务端密钥加密，换模型解不开、会被当成畸形项；没有戳（流未走到终止事件）就没有回放资格。chat 协议的 `reasoning_content` 文本与 Responses 的 `reasoning_items` 互斥，共用同一套链级闸门与退出规则；`thinking_blocks` 仍全仓无赋值点。
 - 成本按"保留跳数 × 每条思考长度"计，且压缩请求体原样带着历史，开启后压缩触发点前移。`thinking_tokens` 的计量与展示口径见 `web-and-admin.md`「Task Token Stats Window Contract」。
 
 ## Frontdoor Context Compression
