@@ -1887,6 +1887,42 @@ class SQLiteTaskStore:
 
         return self._run_write(operation)
 
+    # 消息三态里「还没真正并入模型上下文」的那两格，与
+    # `node_runner._notification_awaits_injection` 同口径（delivered 待处理；
+    # consumed 而 merged_at 为空 = 已处理待并入）。`merged_at` 在 payload_json 里，
+    # 所以整任务只解一次，不逐节点回表。
+    _NOTIFICATION_AWAITS_INJECTION_SQL = (
+        "(TRIM(status) = 'delivered' OR (TRIM(status) = 'consumed' "
+        "AND TRIM(COALESCE(json_extract(payload_json, '$.merged_at'), '')) = ''))"
+    )
+
+    def count_task_notifications_awaiting_injection(self, task_id: str) -> int:
+        """整任务「还等在飞信箱里的通知」条数，一条 SQL 一个整数。
+
+        旧口径是 `list_task_nodes` 后逐节点 `list_task_node_notifications(task_id, node_id)`：
+        实盘在跑任务 938 个节点 ⇒ 每次判定 938 条查询，wall 采样里累计 4.06 s / 180 s。
+        """
+        row = self._fetchone(
+            'SELECT COUNT(*) AS awaiting FROM task_node_notifications WHERE task_id = ? AND '
+            + self._NOTIFICATION_AWAITS_INJECTION_SQL,
+            (str(task_id or '').strip(),),
+        )
+        return int(row['awaiting'] or 0) if row is not None else 0
+
+    def map_task_notifications_awaiting_injection(self, task_id: str) -> dict[str, int]:
+        """同上按节点分组：一次查询拿全任务的 `node_id → 条数`。"""
+        rows = self._fetchall(
+            'SELECT node_id, COUNT(*) AS awaiting FROM task_node_notifications WHERE task_id = ? AND '
+            + self._NOTIFICATION_AWAITS_INJECTION_SQL
+            + ' GROUP BY node_id',
+            (str(task_id or '').strip(),),
+        )
+        return {
+            str(row['node_id'] or '').strip(): int(row['awaiting'] or 0)
+            for row in rows
+            if str(row['node_id'] or '').strip()
+        }
+
     def list_task_node_notifications(
         self,
         task_id: str,

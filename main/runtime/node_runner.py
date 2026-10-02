@@ -2451,34 +2451,47 @@ class NodeRunner:
         self._log_service.update_node_metadata(normalized_node_id, _mutate)
 
     def pending_distribution_mailbox_count(self, *, task_id: str) -> int:
-        count = 0
-        for record in list(self._store.list_task_nodes(task_id) or []):
-            node_id = str(getattr(record, 'node_id', '') or '').strip()
-            if not node_id:
-                continue
-            count += sum(
-                1
-                for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-                if _notification_awaits_injection(item)
-            )
-        return count
+        return self._store.count_task_notifications_awaiting_injection(task_id)
 
     def nodes_with_pending_distribution_notices(self, *, task_id: str) -> list[str]:
+        """哪些节点还欠一次「把补充消息并入上下文」的注入。
+
+        两半都不回运行时节点表：子节点那半走一次按节点分组的通知查询；根节点那半走
+        投影行的 `pending_append_notice_count`（写通知时同步）。只有旧投影行没有该字段
+        时才批量补读一次运行时元数据——逐节点 `get_node` 在实盘要把 246 KB/行的 payload
+        读回并建模 938 次。
+        """
+        awaiting_children = self._store.map_task_notifications_awaiting_injection(task_id)
+        records = [
+            record
+            for record in list(self._store.list_task_nodes(task_id) or [])
+            if str(getattr(record, 'node_id', '') or '').strip()
+        ]
+        pending_root_counts: dict[str, int] = {}
+        missing_pending_ids: list[str] = []
+        for record in records:
+            node_id = str(getattr(record, 'node_id', '') or '').strip()
+            payload = dict(getattr(record, 'payload', None) or {})
+            count = payload.get('pending_append_notice_count')
+            if isinstance(count, int):
+                pending_root_counts[node_id] = count
+            else:
+                missing_pending_ids.append(node_id)
+        if missing_pending_ids:
+            wanted = set(missing_pending_ids)
+            for node in self._store.iter_nodes(task_id):
+                normalized_node_id = str(getattr(node, 'node_id', '') or '').strip()
+                if normalized_node_id in wanted:
+                    pending_root_counts[normalized_node_id] = len(
+                        self._pending_root_notice_records(node=node)
+                    )
         node_ids: list[str] = []
         seen: set[str] = set()
-        for record in list(self._store.list_task_nodes(task_id) or []):
+        for record in records:
             node_id = str(getattr(record, 'node_id', '') or '').strip()
             if not node_id or node_id in seen:
                 continue
-            node = self._store.get_node(node_id)
-            if node is None:
-                continue
-            has_pending_root = bool(self._pending_root_notice_records(node=node))
-            has_pending_child = any(
-                _notification_awaits_injection(item)
-                for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-            )
-            if not has_pending_root and not has_pending_child:
+            if not pending_root_counts.get(node_id) and not awaiting_children.get(node_id):
                 continue
             seen.add(node_id)
             node_ids.append(node_id)
