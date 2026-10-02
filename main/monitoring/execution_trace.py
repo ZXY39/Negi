@@ -35,11 +35,15 @@ def build_execution_trace(
             record = tool_result_map.get(tool_call_id)
             live_state = dict(live_tool_call_map.get(tool_call_id) or {})
             payload = dict(record.payload.get('parsed_payload') or {}) if record is not None else {}
-            arguments = call.get('arguments')
-            if isinstance(arguments, (dict, list)):
-                arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2)
-            else:
-                arguments_text = str(arguments or '')
+            # 入参的家是投影行；行内 arguments 只在"这一拍刚写、还没执行回来"和迁移前的
+            # 存量条目里存在，两种都由下面的兜底读到。
+            arguments_text = str(record.arguments_text or '') if record is not None else ''
+            if not arguments_text.strip():
+                arguments = call.get('arguments')
+                if isinstance(arguments, (dict, list)):
+                    arguments_text = json.dumps(arguments, ensure_ascii=False, indent=2)
+                else:
+                    arguments_text = str(arguments or '')
             output_text = str(record.output_preview_text or '') if record is not None else ''
             output_ref = _execution_trace_output_ref(record) if record is not None else ''
 

@@ -1135,6 +1135,20 @@ class TaskLogService:
                 normalized[key_text] = value
         return normalized
 
+    @staticmethod
+    def _tool_call_headers(tool_calls: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        return [
+            {key: value for key, value in item.items() if key != 'arguments'}
+            for item in list(tool_calls or [])
+            if isinstance(item, dict)
+        ]
+
+    @classmethod
+    def _entry_without_arguments(cls, entry: NodeOutputEntry) -> NodeOutputEntry:
+        if not any('arguments' in item for item in list(entry.tool_calls or []) if isinstance(item, dict)):
+            return entry
+        return entry.model_copy(update={'tool_calls': cls._tool_call_headers(entry.tool_calls)})
+
     def append_node_output(
         self,
         task_id: str,
@@ -1255,7 +1269,12 @@ class TaskLogService:
             ).strip()
 
             def _mutate(record: NodeRecord) -> NodeRecord:
-                output = list(record.output)
+                # 行内最多留「最新一拍」的入参：这一拍的投影行要等工具执行回来才写
+                # （record_tool_result_batch），界面要在飞回合显示入参；下一拍追加时旧条目
+                # 一律摘掉。不摘就是每拍把全部历史入参重读重抄一遍——实盘在跑的任务
+                # task:1d9cddf9858e 在 output 里内联 52,449 条调用的入参共 54.0 MB，
+                # 而这批条目自己的正文只有 2.25 MB。
+                output = [self._entry_without_arguments(entry) for entry in record.output]
                 output.append(
                     NodeOutputEntry(
                         seq=len(output) + 1,
