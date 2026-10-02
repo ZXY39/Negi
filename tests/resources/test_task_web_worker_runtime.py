@@ -14750,7 +14750,9 @@ async def test_worker_event_queue_overflow_drops_live_events_but_never_terminal(
 
     queued = [str(item.get("event_type") or "") for item in service._task_event_pending]
     assert queued == ["task.live.patch", "task.terminal"]
-    assert service._task_event_pending[0]["data"]["frame_index"] == 1
+    # 队列有压力时扔的是队首那条（最旧的快照），刚到的留下：live.patch 按任务都是
+    # 整份快照，队首那份的内容已被后面的写覆盖，丢它不丢状态。
+    assert service._task_event_pending[0]["data"]["frame_index"] == 2
     assert service._task_event_stats["task_event_dropped_count"] == 2.0
 
 

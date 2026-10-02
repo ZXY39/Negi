@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-
 from main.service.runtime_service import (
     _TASK_EVENT_QUEUE_MAX_BYTES,
     _TASK_EVENT_QUEUE_MAX_ITEMS,
     MainRuntimeService,
 )
+
+_NO_LOOP = object()
 
 
 class _Queue:
@@ -39,8 +39,11 @@ class _Queue:
     def _ensure_task_event_flush_task(self, loop) -> None:
         return None
 
-    def enqueue(self, payload: dict, loop=None) -> None:
-        MainRuntimeService._enqueue_task_event_callback(self, payload, loop or asyncio.get_event_loop())
+    def enqueue(self, payload: dict) -> None:
+        # loop 在本文件里没人读（上面的桩件吃掉它），所以给一个显式假值：
+        # `asyncio.get_event_loop()` 依赖线程上的环境循环，同进程里前一个 asyncio
+        # 用例关掉循环后它会抛 RuntimeError。
+        MainRuntimeService._enqueue_task_event_callback(self, payload, _NO_LOOP)
 
 
 def test_byte_budget_evicts_the_oldest_superseded_patch_first() -> None:
