@@ -21,6 +21,17 @@ class _FakeTaskStore:
         _ = task_id
         return self._task
 
+    def get_node_pause_flags(self, node_id: str):
+        # 与真 Store 同形：只回暂停判定要的三键，不建整行模型。
+        node = self.get_node(node_id)
+        if node is None:
+            return None
+        return {
+            'pause_requested': bool(getattr(node, 'pause_requested', False)),
+            'is_paused': bool(getattr(node, 'is_paused', False)),
+            'pause_reason': str(getattr(node, 'pause_reason', '') or ''),
+        }
+
     def get_node(self, node_id: str):
         _ = node_id
         return self._node

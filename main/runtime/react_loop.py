@@ -4401,15 +4401,16 @@ class ReActToolLoop:
             raise TaskPausedError(task_id)
         normalized_node_id = str(node_id or '').strip()
         if normalized_node_id:
-            node = self._log_service._store.get_node(normalized_node_id)
-            if node is not None and (bool(getattr(node, 'pause_requested', False)) or bool(getattr(node, 'is_paused', False))):
+            # 只要暂停三键：整行正文平均 254 KB，而这一跳每回合、每次看门狗轮询都跑。
+            pause_flags = self._log_service._store.get_node_pause_flags(normalized_node_id)
+            if pause_flags is not None and (pause_flags['pause_requested'] or pause_flags['is_paused']):
                 existing = self._log_service._store.get_task_node_pause(normalized_node_id)
                 self._log_service.set_node_pause_state(
                     task_id,
                     normalized_node_id,
                     pause_requested=True,
                     is_paused=True,
-                    pause_reason=str(getattr(node, 'pause_reason', '') or (getattr(existing, 'pause_reason', '') if existing is not None else '') or 'manual'),
+                    pause_reason=str(pause_flags['pause_reason'] or (getattr(existing, 'pause_reason', '') if existing is not None else '') or 'manual'),
                     remark=str(getattr(existing, 'remark', '') if existing is not None else ''),
                     delivered=bool(getattr(existing, 'delivered', False)) if existing is not None else False,
                 )
@@ -4443,6 +4444,9 @@ class ReActToolLoop:
                 on_stale_hold=make_stale_hold_logger(logger.warning),
             )
             if hold_epoch_id:
+                # 这条豁免要读整行（spawn 轮有没有未物化条目），所以整行读跟着这个稀有分支
+                # 取一次，而不是在每个检查点上先搬平均 254 KB 的正文。
+                node = hold_store.get_node(normalized_node_id)
                 # 要点 5 豁免：持有未物化 spawn 轮的节点不得在物化前被中止——
                 # 它的子节点只可能由它自己的协程产出，而屏障 drain 正等着那些
                 # 子节点（否则互等死锁，2026-09-18 task:d596a609bbb3 事故）。

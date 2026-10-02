@@ -773,6 +773,29 @@ class SQLiteTaskStore:
         row = self._fetchone('SELECT payload_json FROM nodes WHERE node_id = ?', (node_id,))
         return self._parse(row['payload_json'], NodeRecord) if row else None
 
+    def get_node_pause_flags(self, node_id: str) -> dict[str, object] | None:
+        """只问这个节点有没有被人工暂停——三个键，不搬整行正文。
+
+        `nodes.payload_json` 平均 254 KB（实盘单任务 888 行 220 MB，大头是 input/output
+        正文），而 ReAct 的每个安全检查点和每次工具看门狗轮询都要问一次"该停吗"。
+        走主读连接而不是轻读连接：这三个键决定节点要不要停摆，轻读连接可能落后于写者
+        （同一类不一致在 #24 上已经咬过一口）。
+        """
+        row = self._fetchone(
+            "SELECT json_extract(payload_json, '$.pause_requested') AS pause_requested, "
+            "json_extract(payload_json, '$.is_paused') AS is_paused, "
+            "json_extract(payload_json, '$.pause_reason') AS pause_reason "
+            "FROM nodes WHERE node_id = ?",
+            (str(node_id or '').strip(),),
+        )
+        if row is None:
+            return None
+        return {
+            'pause_requested': bool(row['pause_requested']),
+            'is_paused': bool(row['is_paused']),
+            'pause_reason': str(row['pause_reason'] or ''),
+        }
+
     def list_nodes(self, task_id: str) -> list[NodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
         return [self._parse(row['payload_json'], NodeRecord) for row in rows]
