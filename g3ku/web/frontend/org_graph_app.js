@@ -15299,7 +15299,9 @@ function formatAuditTimestamp(value) {
         + ` ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
 }
 
-function renderAuditEventCard(item = {}) {
+const AUDIT_EVENT_EXPAND_SELECTOR = "details.audit-event-expand";
+
+function renderAuditEventCard(item = {}, { open = false } = {}) {
     // 原始日志：一行一条（时间 | 级别 | 来源 | 摘要），detail 可展开
     const level = String(item.level || "info");
     const timestamp = formatAuditTimestamp(item.timestamp);
@@ -15315,9 +15317,9 @@ function renderAuditEventCard(item = {}) {
         } catch {
             pretty = String(detail);
         }
-        detailHtml = `<details class="audit-event-expand"><summary>详情</summary><pre class="audit-event-detail">${esc(pretty)}</pre></details>`;
+        detailHtml = `<details class="audit-event-expand"${open ? " open" : ""}><summary>详情</summary><pre class="audit-event-detail">${esc(pretty)}</pre></details>`;
     }
-    return `<article class="audit-log-line ${auditEventLevelClass(level)}">
+    return `<article class="audit-log-line ${auditEventLevelClass(level)}" data-audit-event-id="${esc(String(item.event_id || ""))}">
         <span class="audit-log-time">${esc(timestamp)}</span>
         <span class="audit-log-level">${esc(auditEventLevelLabel(level))}</span>
         <span class="audit-log-source">${esc(source)}</span>
@@ -15332,7 +15334,17 @@ function renderAuditEventList(items = [], { preserveScroll = false } = {}) {
     // 静默轮询保留滚动位置，避免每 15s 把正在翻看旧日志的人弹回顶部；
     // 换页/显式刷新（preserveScroll 为假）回到列表顶部。
     const previousScrollTop = preserveScroll ? U.auditEventList.scrollTop : 0;
-    U.auditEventList.innerHTML = items.map((item) => renderAuditEventCard(item)).join("");
+    // 展开态必须跟着 event_id 走：整表 innerHTML 重建会把已展开的「详情」收起，
+    // 而一份 detail JSON 能有几万像素高，收起瞬间会把下方内容整体上提，
+    // 数字 scrollTop 没变、眼里却是跳了一屏。
+    const openEventIds = new Set(
+        Array.from(U.auditEventList.querySelectorAll(`${AUDIT_EVENT_EXPAND_SELECTOR}[open]`))
+            .map((node) => String(node.closest?.("[data-audit-event-id]")?.dataset.auditEventId || "").trim())
+            .filter(Boolean)
+    );
+    U.auditEventList.innerHTML = items.map((item) => renderAuditEventCard(item, {
+        open: openEventIds.has(String(item.event_id || "").trim()),
+    })).join("");
     U.auditEventList.scrollTop = previousScrollTop;
 }
 

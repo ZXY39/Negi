@@ -255,6 +255,38 @@ test("renderAuditEventList preserves or resets the list scroll offset", () => {
     assert.equal(list.scrollTop, 0);
 });
 
+test("renderAuditEventList carries expanded 详情 across the 15s repaint", () => {
+    const api = loadApp();
+    const list = new StubHTMLElement();
+    api.U.auditEventList = list;
+    const items = [
+        { event_id: "evt_a", timestamp: "2026-09-17T10:00:00+08:00", subsystem: "task", summary: "a", detail: { k: 1 } },
+        { event_id: "evt_b", timestamp: "2026-09-17T10:00:01+08:00", subsystem: "task", summary: "b", detail: { k: 2 } },
+    ];
+
+    api.renderAuditEventList(items, { preserveScroll: true });
+    // 每行都带稳定身份，收起/展开才可能对回同一条事件
+    assert.match(list.innerHTML, /data-audit-event-id="evt_a"/);
+    assert.equal((list.innerHTML.match(/class="audit-event-expand" open/g) || []).length, 0);
+
+    // 模拟用户展开 evt_b 的详情后，轮询再来一次
+    const opened = new StubHTMLElement();
+    opened.closest = () => ({ dataset: { auditEventId: "evt_b" } });
+    list._qsAll["details.audit-event-expand[open]"] = [opened];
+    api.renderAuditEventList(items, { preserveScroll: true });
+
+    const cardOf = (eventId) => list.innerHTML
+        .split('<article class="audit-log-line')
+        .find((chunk) => chunk.includes(`data-audit-event-id="${eventId}"`)) || "";
+    assert.match(cardOf("evt_b"), /class="audit-event-expand" open/);
+    assert.doesNotMatch(cardOf("evt_a"), /class="audit-event-expand" open/);
+
+    // 展开态按 event_id 认领：换一页事件、旧展开态不会挂到别的行上
+    list._qsAll["details.audit-event-expand[open]"] = [];
+    api.renderAuditEventList(items, { preserveScroll: true });
+    assert.equal((list.innerHTML.match(/class="audit-event-expand" open/g) || []).length, 0);
+});
+
 test("auditPageSummary reports page window and total", () => {
     const api = loadApp();
 
