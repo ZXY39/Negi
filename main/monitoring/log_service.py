@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -1344,7 +1345,7 @@ class TaskLogService:
                             }
                         ),
                     ) or task
-                self._sync_node_read_models_locked(updated)
+                self._sync_node_read_models_locked(updated, invalidate_execution_trace_ref=True)
                 self._publish_task_node_patch_locked(task=task, node=updated)
                 if delta_usage is not None:
                     self._publish_task_token_patch_locked(task=task)
@@ -4264,6 +4265,16 @@ class TaskLogService:
         except Exception:
             return
 
+    @contextmanager
+    def _debug_track(self, section: str) -> Iterator[None]:
+        """把一条车道整体挂上长块榜（`RuntimeDebugRecorder` 的 worst 榜按耗时留位）。"""
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        started_mono = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._record_debug(section, started_at=started_at, started_mono=started_mono)
+
     def _report_summary_metric(self, key: str, amount: float = 1.0) -> None:
         for reporter in list(self._summary_metric_reporters):
             try:
@@ -4272,6 +4283,12 @@ class TaskLogService:
                 continue
 
     def sync_task_read_models(
+        self, task_id: str, *, externalize_execution_trace: bool = True, force: bool = False
+    ) -> TaskRecord | None:
+        with self._debug_track('log_service.sync_task_read_models'):
+            return self._sync_task_read_models(task_id, externalize_execution_trace=externalize_execution_trace, force=force)
+
+    def _sync_task_read_models(
         self, task_id: str, *, externalize_execution_trace: bool = True, force: bool = False
     ) -> TaskRecord | None:
         """重建任务的读模型投影。
@@ -4350,15 +4367,23 @@ class TaskLogService:
         *,
         externalize_execution_trace: bool = True,
         preserved_execution_trace_ref: str = '',
+        invalidate_execution_trace_ref: bool = False,
     ) -> None:
-        self._projector.sync_node(
-            self._task_projection_node_record(node),
-            self._task_projection_node_detail_record(
-                node,
-                externalize_execution_trace=externalize_execution_trace,
-                preserved_execution_trace_ref=preserved_execution_trace_ref,
-            ),
-        )
+        # `invalidate_execution_trace_ref` 是给"每拍都会再来一次"的在飞车道用的：不抢跑外置，
+        # 而且**必须同时把行内 ref 作废**。只关外置、留着旧 ref（`externalize_execution_trace=False`
+        # 的现有语义，见上面 `preserved_execution_trace_ref`）会让 `full` 详情照旧 ref 读到一份
+        # 过期轨迹——空 ref 才会让读方走 `query_service` 的按需重建那条路。
+        externalize = False if invalidate_execution_trace_ref else externalize_execution_trace
+        preserved_ref = '' if invalidate_execution_trace_ref else preserved_execution_trace_ref
+        with self._debug_track('log_service.sync_node_read_models'):
+            self._projector.sync_node(
+                self._task_projection_node_record(node),
+                self._task_projection_node_detail_record(
+                    node,
+                    externalize_execution_trace=externalize,
+                    preserved_execution_trace_ref=preserved_ref,
+                ),
+            )
 
     def _sync_task_node_rounds_locked(self, node: NodeRecord) -> None:
         if node is None:
@@ -4570,6 +4595,11 @@ class TaskLogService:
         return build_execution_trace(node, tool_results=tool_results, live_tool_calls=live_tool_calls)
 
     def _externalize_execution_trace(self, node: NodeRecord, execution_trace: dict[str, Any]) -> str:
+        # 命名上榜：这一格量的是"整份轨迹序列化 + gzip 落盘"，P-A 之后它只该在状态转换/读时出现。
+        with self._debug_track('log_service.externalize_execution_trace'):
+            return self._externalize_execution_trace_locked(node, execution_trace)
+
+    def _externalize_execution_trace_locked(self, node: NodeRecord, execution_trace: dict[str, Any]) -> str:
         store = self._content_store
         if store is None:
             return ''
