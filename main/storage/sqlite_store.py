@@ -4,7 +4,9 @@ import gzip
 import hashlib
 import json
 import queue
+import os
 import re
+import sys
 import sqlite3
 import threading
 import time
@@ -855,9 +857,38 @@ class SQLiteTaskStore:
             return 0
         return int(row['unsettled'] or 0)
 
+    _SELF_FILE = os.path.abspath(__file__)
+    _bulk_node_reader_lanes: set[str] = set()
+
+    @classmethod
+    def _outer_caller(cls) -> str:
+        """第一个不在本文件里的栈帧的函数名。
+
+        `sqlite.query.fetchall:nodes` 这种块只说得出"读了哪张表"，说不出"谁读的"；
+        判一次整任务 bulk 读该不该存在，必须先知道调用方。
+        """
+        frame = sys._getframe(1)
+        while frame is not None:
+            if os.path.abspath(frame.f_code.co_filename or '') != cls._SELF_FILE:
+                return str(frame.f_code.co_name or 'unknown')
+            frame = frame.f_back
+        return 'unknown'
+
+    def _note_bulk_node_read(self, lane: str, elapsed_ms: float, started_at: str) -> None:
+        key = f'{lane}'
+        if key not in self._bulk_node_reader_lanes:
+            self._bulk_node_reader_lanes.add(key)
+            logger.info(f'bulk node-table read: new reader lane={lane}')
+        self._record_query_latency(f'store.bulk_nodes_read[from={lane}]', elapsed_ms, started_at)
+
     def list_nodes(self, task_id: str) -> list[NodeRecord]:
+        lane = self._outer_caller()
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        started_mono = time.perf_counter()
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
-        return [self._parse(row['payload_json'], NodeRecord) for row in rows]
+        records = [self._parse(row['payload_json'], NodeRecord) for row in rows]
+        self._note_bulk_node_read(lane, (time.perf_counter() - started_mono) * 1000.0, started_at)
+        return records
 
     def iter_nodes(self, task_id: str) -> Iterator[NodeRecord]:
         """逐条解析任务节点：`list_nodes` 会把整任务的 NodeRecord 一次性建出来。
@@ -866,9 +897,15 @@ class SQLiteTaskStore:
         `startup → _recover_interrupted_task → sync_task_read_models → list_nodes` 这条链
         是 Python 侧驻留的头两名之一。行文本仍一次取回（同一条读连接上不能跨锁开游标）。
         """
+        lane = self._outer_caller()
+        started_at = datetime.now().astimezone().isoformat(timespec='seconds')
+        started_mono = time.perf_counter()
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE task_id = ? ORDER BY created_at ASC, node_id ASC', (task_id,))
-        for row in rows:
-            yield self._parse(row['payload_json'], NodeRecord)
+        try:
+            for row in rows:
+                yield self._parse(row['payload_json'], NodeRecord)
+        finally:
+            self._note_bulk_node_read(lane, (time.perf_counter() - started_mono) * 1000.0, started_at)
 
     def list_children(self, parent_node_id: str) -> list[NodeRecord]:
         rows = self._fetchall('SELECT payload_json FROM nodes WHERE parent_node_id = ? ORDER BY created_at ASC, node_id ASC', (parent_node_id,))

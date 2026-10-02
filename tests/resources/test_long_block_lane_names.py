@@ -12,6 +12,7 @@ import pytest
 
 from main.protocol import now_iso
 from main.service.runtime_service import MainRuntimeService
+from main.storage.sqlite_store import SQLiteTaskStore
 
 
 class _CapturingRecorder:
@@ -85,3 +86,17 @@ async def test_task_level_rebuild_lane_is_named(tmp_path: Path):
     service.log_service._debug_recorder = recorder  # noqa: SLF001
     service.log_service.sync_task_read_models('task:absent')
     assert 'log_service.sync_task_read_models' in set(recorder.sections)
+
+
+def test_bulk_node_reads_name_their_caller(tmp_path: Path):
+    """整任务读 nodes 必须带"是谁叫我"，否则判不了它该不该存在。"""
+    recorder = _CapturingRecorder()
+    store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3', debug_recorder=recorder)
+    try:
+        store.list_nodes('task:none')
+        list(store.iter_nodes('task:none'))
+    finally:
+        store.close()
+    names = [s for s in recorder.sections if s.startswith('store.bulk_nodes_read[from=')]
+    assert 'store.bulk_nodes_read[from=test_bulk_node_reads_name_their_caller]' in names, names
+    assert len(names) == 2, names
