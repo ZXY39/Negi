@@ -67,7 +67,10 @@ async def test_append_and_snapshot_lanes_are_named(tmp_path: Path):
     # 阈值以下（200 ms）的段本来就不入库，所以这里断言的是"这条车道被 track 过"：
     # 用 capture 记录器看 record() 有没有被拿正确的名字调用，不看榜上留没留。
     assert 'log_service.sync_node_read_models' in sections
-    assert 'log_service.externalize_execution_trace' in sections
+    # 外置那一格带"是谁叫我"的车道名，没有它就只能再挂一次 py-spy 才能回答这个问题。
+    writer_names = [name for name in sections if name.startswith('log_service.externalize_execution_trace[from=')]
+    assert writer_names, sorted(sections)
+    assert any('from=initialize_task' in name for name in writer_names), writer_names
     assert {
         'query_service.get_task_snapshot.live_state',
         'query_service.get_task_snapshot.root_node_detail',

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
 import threading
 import time
 import uuid
@@ -221,6 +222,7 @@ class TaskLogService:
         self._registry = registry
         self._content_store = content_store
         self._debug_recorder = debug_recorder
+        self._trace_writer_lanes_seen: set[str] = set()
         self._event_writer = TaskEventWriter(store=store)
         self._projector = TaskProjector(store=store)
         self._live_snapshot_publishers: list[Callable[[TaskRecord, dict[str, Any], bool], None]] = []
@@ -4594,9 +4596,28 @@ class TaskLogService:
         tool_results = list(self._store.list_task_node_tool_results(node.task_id, node.node_id) or [])
         return build_execution_trace(node, tool_results=tool_results, live_tool_calls=live_tool_calls)
 
+    _TRACE_WRAPPING_HELPERS = frozenset({
+        '_externalize_execution_trace',
+        '_externalize_execution_trace_locked',
+        '_task_projection_node_detail_record',
+        '_sync_node_read_models_locked',
+        '_sync_node_read_models',
+    })
+
+    @classmethod
+    def _execution_trace_writer_lane(cls) -> str:
+        """谁把整份轨迹落盘的——外置只该由状态转换与读时发起，越界的那几条要靠这个名字抓出来。"""
+        frame = sys._getframe(1)
+        while frame is not None and frame.f_code.co_name in cls._TRACE_WRAPPING_HELPERS:
+            frame = frame.f_back
+        return str(frame.f_code.co_name if frame is not None else 'unknown')
+
     def _externalize_execution_trace(self, node: NodeRecord, execution_trace: dict[str, Any]) -> str:
-        # 命名上榜：这一格量的是"整份轨迹序列化 + gzip 落盘"，P-A 之后它只该在状态转换/读时出现。
-        with self._debug_track('log_service.externalize_execution_trace'):
+        lane = self._execution_trace_writer_lane()
+        if lane not in self._trace_writer_lanes_seen:
+            self._trace_writer_lanes_seen.add(lane)
+            logger.info(f'execution trace externalized: new writer lane={lane}')
+        with self._debug_track(f'log_service.externalize_execution_trace[from={lane}]'):
             return self._externalize_execution_trace_locked(node, execution_trace)
 
     def _externalize_execution_trace_locked(self, node: NodeRecord, execution_trace: dict[str, Any]) -> str:
