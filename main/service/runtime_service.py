@@ -904,7 +904,13 @@ class MainRuntimeService:
                     # 启动不再整任务重读重写（实盘 1,912/1,912 行一致，旧写法每次启动
                     # 为此读掉 nodes 全表 486 MB 并重写 1,912 行投影）。
                     if self.store.count_stale_task_node_projections(task.task_id):
-                        self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
+                        # 整任务投影重建是同步 sqlite 读 + 逐行派生：冷页下实盘 4,851 ms，
+                        # 而启动循环跑在事件循环线程上，这段时间里任务树推送与命令轮询全部停摆。
+                        await asyncio.to_thread(
+                            self.log_service.sync_task_read_models,
+                            task.task_id,
+                            externalize_execution_trace=False,
+                        )
                     # Self-heal: a terminal task must not retain orphaned in_progress
                     # nodes. This only flips bookkeeping status and never deletes
                     # transcripts/artifacts; see log_service._sweep_residual_nodes_locked.
@@ -914,7 +920,11 @@ class MainRuntimeService:
                     # reconciled against a later task id reuse.
                     self.store.mark_shutdown_pause_entry_consumed(kind='task', ref_id=task.task_id)
                     continue
-                self.log_service.sync_task_read_models(task.task_id, externalize_execution_trace=False)
+                await asyncio.to_thread(
+                    self.log_service.sync_task_read_models,
+                    task.task_id,
+                    externalize_execution_trace=False,
+                )
                 if bool(task.is_paused) or bool(task.pause_requested):
                     if task.task_id not in shutdown_paused_task_ids:
                         # A user/agent-initiated pause must survive restarts.
