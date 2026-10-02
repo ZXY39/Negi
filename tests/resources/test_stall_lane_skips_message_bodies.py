@@ -28,32 +28,67 @@ class _ContentStore:
         return json.dumps({'messages': self._messages}, ensure_ascii=False), None
 
 
-def _frames(count: int = 3) -> list[dict]:
-    out = []
-    for index in range(count):
-        out.append({
-            'node_id': f'node:{index}',
+def _frames() -> list[dict]:
+    """三帧：0 有带截止时间的 running 调用（判定档唯一要读的那帧）、
+    1 running 但豁免时限（无 timeout_seconds，不参与静默锚点）、2 已完成。"""
+    return [
+        {
+            'node_id': 'node:0',
             'depth': 0,
             'node_kind': 'execution',
             'phase': 'running',
-            'active': index == 0,
             'runnable': True,
             'waiting': False,
-            'stage_goal': f'goal-{index}',
-            'messages_ref': f'content:messages/node-{index}',
+            'stage_goal': 'goal-0',
+            'messages_ref': 'content:messages/node-0',
             'messages_count': 2,
             'tool_calls': [{
-                'tool_call_id': f'call-{index}',
+                'tool_call_id': 'call-0',
                 'name': 'filesystem_read',
                 'status': 'running',
                 'started_at': STARTED_AT,
                 'timeout_seconds': 300,
             }],
-        })
-    return out
+        },
+        {
+            'node_id': 'node:1',
+            'depth': 0,
+            'node_kind': 'execution',
+            'phase': 'running',
+            'runnable': True,
+            'waiting': False,
+            'stage_goal': 'goal-1',
+            'messages_ref': 'content:messages/node-1',
+            'messages_count': 2,
+            'tool_calls': [{
+                'tool_call_id': 'call-1',
+                'name': 'exec',
+                'status': 'running',
+                'started_at': STARTED_AT,
+            }],
+        },
+        {
+            'node_id': 'node:2',
+            'depth': 0,
+            'node_kind': 'execution',
+            'phase': 'idle',
+            'runnable': False,
+            'waiting': False,
+            'stage_goal': 'goal-2',
+            'messages_ref': 'content:messages/node-2',
+            'messages_count': 2,
+            'tool_calls': [{
+                'tool_call_id': 'call-2',
+                'name': 'filesystem_read',
+                'status': 'success',
+                'started_at': STARTED_AT,
+                'timeout_seconds': 300,
+            }],
+        },
+    ]
 
 
-def _service(tmp_path, *, frame_count: int = 3) -> tuple[TaskLogService, _ContentStore]:
+def _service(tmp_path) -> tuple[TaskLogService, _ContentStore]:
     store = SQLiteTaskStore(tmp_path / 'runtime.sqlite3')
     store.upsert_task(TaskRecord(
         task_id=TASK_ID,
@@ -68,7 +103,7 @@ def _service(tmp_path, *, frame_count: int = 3) -> tuple[TaskLogService, _Conten
         token_usage=TokenUsageSummary(tracked=True),
         metadata={},
     ))
-    for index in range(frame_count):
+    for index in range(3):
         store.upsert_node(NodeRecord(
             node_id=f'node:{index}',
             task_id=TASK_ID,
@@ -99,25 +134,41 @@ def _service(tmp_path, *, frame_count: int = 3) -> tuple[TaskLogService, _Conten
         event_history_enabled=False,
         content_store=content_store,
     )
-    for frame in _frames(frame_count):
+    for frame in _frames():
         service.upsert_frame(TASK_ID, frame)
     return service, content_store
 
 
-def test_light_state_skips_every_message_body_but_keeps_frame_state(tmp_path) -> None:
+def test_stall_mode_carries_only_deadline_frames_and_never_touches_message_bodies(tmp_path) -> None:
     service, content_store = _service(tmp_path)
 
-    state = service.read_runtime_state(TASK_ID, include_frame_messages=False) or {}
+    state = service.read_runtime_state(TASK_ID, frame_mode='stall') or {}
 
     assert content_store.hits == 0
-    assert len(state['frames']) == 3
-    frame = state['frames'][0]
-    assert frame['messages'] == []
-    # 指针与计数是 payload 里的字段，不解析正文也必须在
-    assert frame['messages_ref'] == 'content:messages/node-0'
-    assert frame['messages_count'] == 2
-    assert frame['tool_calls'][0]['status'] == 'running'
-    assert 'node:0' in state['active_node_ids']
+    assert [frame['node_id'] for frame in state['frames']] == ['node:0']
+    assert state['frames'][0]['tool_calls'][0]['status'] == 'running'
+    # 三张节点表来自列：active 是"这个节点有帧行"，与正文无关
+    assert state['active_node_ids'] == ['node:0', 'node:1', 'node:2']
+    assert 'node:0' in state['runnable_node_ids']
+    assert 'node:2' not in state['runnable_node_ids']
+
+
+def test_stall_mode_never_reads_frame_payloads_row_by_row(tmp_path) -> None:
+    """成本断言：判定档一次帧正文都不该搬回 Python。"""
+    service, _content_store = _service(tmp_path)
+    seen: list[str] = []
+    store = service._store
+    original_list = store.list_task_runtime_frames
+
+    def spying(task_id: str):
+        seen.append('list_task_runtime_frames')
+        return original_list(task_id)
+
+    store.list_task_runtime_frames = spying  # type: ignore[method-assign]
+
+    service.read_runtime_state(TASK_ID, frame_mode='stall')
+
+    assert seen == []
 
 
 def test_default_state_still_resolves_each_frame(tmp_path) -> None:
@@ -128,19 +179,20 @@ def test_default_state_still_resolves_each_frame(tmp_path) -> None:
 
     assert content_store.hits == 3
     assert len(state['frames'][0]['messages']) == 2
+    assert len(state['frames']) == 3
 
 
 def test_running_tool_deadline_is_identical_on_both_reads(tmp_path) -> None:
     """失速判据依赖的唯一帧内字段：两种读法必须给出同一个截止时间。"""
     service, _content_store = _service(tmp_path)
 
-    light = service.read_runtime_state(TASK_ID, include_frame_messages=False) or {}
-    heavy = service.read_runtime_state(TASK_ID) or {}
+    stall = service.read_runtime_state(TASK_ID, frame_mode='stall') or {}
+    full = service.read_runtime_state(TASK_ID) or {}
 
-    light_deadline = running_tool_deadline(light)
-    assert light_deadline is not None
-    assert light_deadline == running_tool_deadline(heavy)
-    assert effective_silence_start(light, STARTED_AT) == effective_silence_start(heavy, STARTED_AT)
+    stall_deadline = running_tool_deadline(stall)
+    assert stall_deadline is not None
+    assert stall_deadline == running_tool_deadline(full)
+    assert effective_silence_start(stall, STARTED_AT) == effective_silence_start(full, STARTED_AT)
 
 
 class _NotifierService:
@@ -167,14 +219,14 @@ class _NotifierService:
         return {}
 
 
-def test_the_stall_lane_asks_for_the_light_state(tmp_path) -> None:
-    service, content_store = _service(tmp_path, frame_count=3)
+def test_the_stall_lane_asks_for_the_stall_mode(tmp_path) -> None:
+    service, content_store = _service(tmp_path)
     original = service.read_runtime_state
-    seen: list[bool] = []
+    seen: list[str] = []
 
-    def spying(task_id: str, *, include_frame_messages: bool = True):
-        seen.append(include_frame_messages)
-        return original(task_id, include_frame_messages=include_frame_messages)
+    def spying(task_id: str, *, frame_mode: str = 'full'):
+        seen.append(frame_mode)
+        return original(task_id, frame_mode=frame_mode)
 
     service.read_runtime_state = spying  # type: ignore[method-assign]
 
@@ -182,6 +234,6 @@ def test_the_stall_lane_asks_for_the_light_state(tmp_path) -> None:
     notifier = TaskStallNotifier(service=_NotifierService(service, task))
     notifier._schedule(TASK_ID)
 
-    assert seen == [False]
+    assert seen == ['stall']
     assert content_store.hits == 0
     notifier.cancel_task(TASK_ID)

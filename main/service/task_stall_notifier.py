@@ -230,7 +230,7 @@ class TaskStallNotifier:
         task = self._service.get_task(key)
         if task is None or not self._has_notice_audience(self._service, task):
             return
-        runtime_state = self._service.log_service.read_runtime_state(key, include_frame_messages=False) or {}
+        runtime_state = self._service.log_service.read_runtime_state(key, frame_mode='stall') or {}
         is_actionable = getattr(self._service, "is_task_stall_actionable", None)
         if callable(is_actionable):
             try:
@@ -280,7 +280,7 @@ class TaskStallNotifier:
         task = self._service.get_task(task_id)
         if task is None or not self._has_notice_audience(self._service, task):
             return
-        runtime_state = self._service.log_service.read_runtime_state(task_id, include_frame_messages=False) or {}
+        runtime_state = self._service.log_service.read_runtime_state(task_id, frame_mode='stall') or {}
         is_actionable = getattr(self._service, "is_task_stall_actionable", None)
         if callable(is_actionable):
             try:

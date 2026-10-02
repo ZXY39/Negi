@@ -3947,20 +3947,53 @@ class TaskLogService:
             if publish_snapshot:
                 self._publish_task_live_patch_locked(task=task)
 
-    def read_runtime_state(self, task_id: str, *, include_frame_messages: bool = True) -> dict[str, Any] | None:
-        """整任务运行时状态。`include_frame_messages=False` 给只要帧内状态的读点。
+    def read_runtime_state(self, task_id: str, *, frame_mode: str = 'full') -> dict[str, Any] | None:
+        """整任务运行时状态。`frame_mode='stall'` 是失速判定档。
 
-        默认带正文是给"恢复节点上下文"那一类读点留的；失速判定这类只要 `paused`/
-        `cancel_requested` 与帧里 `tool_calls` 的读点传 False——台账有 195 帧时，
-        逐帧解析会话历史是整个判定成本的四分之三。
+        默认档把帧台账逐帧建模（含会话历史），给"恢复节点上下文"那一类读点用。判定档
+        只读两样：帧的 `active/runnable/waiting` 三张节点表（列，一帧正文都不搬）与
+        "带截止时间的 running 工具调用"那几帧的 `tool_calls`——失速静默锚点
+        （`effective_silence_start` → `running_tool_deadline`）要用的帧内字段就只有它。
+        实盘 161 帧 / 6.39 MB 的台账：默认档 121 ms，判定档 0.2 ms + 23 ms，且后者花在
+        sqlite 步骤里（放掉 GIL）。判定档的 `frames` 因此只含命中帧，字段也只有
+        `node_id` 与 `tool_calls`；要整帧请走默认档。
         """
         task = self._store.get_task(task_id)
         if task is None:
             return None
         meta = self.read_task_runtime_meta(task_id) or self._default_runtime_meta()
+        if str(frame_mode or 'full') == 'stall':
+            frame_rows = list(self._store.list_task_runtime_frame_columns(task_id) or [])
+            frames = [
+                {
+                    'node_id': str(row['node_id'] or '').strip(),
+                    'tool_calls': [
+                        item for item in json.loads(str(row['tool_calls'] or '[]'))
+                        if isinstance(item, dict)
+                    ],
+                }
+                for row in list(self._store.list_running_tool_frame_calls(task_id) or [])
+                if row['tool_calls']
+            ]
+            return {
+                'task_id': task.task_id,
+                'root_node_id': task.root_node_id,
+                'updated_at': str(meta.get('updated_at') or now_iso()),
+                'paused': bool(task.is_paused),
+                'pause_requested': bool(task.pause_requested),
+                'cancel_requested': bool(task.cancel_requested),
+                'last_visible_output_at': str(meta.get('last_visible_output_at') or '').strip(),
+                'last_stall_notice_bucket_minutes': max(0, int(meta.get('last_stall_notice_bucket_minutes') or 0)),
+                'governance': self._sanitize_governance_state(meta.get('governance')),
+                'distribution': self._sanitize_distribution_state(meta.get('distribution')),
+                'frames': frames,
+                'active_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['active'])],
+                'runnable_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['runnable'])],
+                'waiting_node_ids': [str(row['node_id']) for row in frame_rows if bool(row['waiting'])],
+            }
         frame_records = list(self._store.list_task_runtime_frames(task_id) or [])
         frames = [
-            self._hydrate_runtime_frame_record(record, include_messages=include_frame_messages)
+            self._hydrate_runtime_frame_record(record, include_messages=True)
             for record in frame_records
         ]
         return {

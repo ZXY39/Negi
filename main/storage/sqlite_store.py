@@ -2911,6 +2911,40 @@ class SQLiteTaskStore:
             )
         )
 
+    def list_task_runtime_frame_columns(self, task_id: str) -> list[sqlite3.Row]:
+        """帧台账的列，一帧正文都不搬。
+
+        和 `list_task_runtime_frame_heads` 的区别是连接：这三列决定要不要给用户发失速
+        通知，所以走主读连接，不拿轻读连接可能落后的快照去做判定。
+        """
+        return list(
+            self._fetchall(
+                'SELECT node_id, active, runnable, waiting, updated_at '
+                'FROM task_runtime_frames WHERE task_id = ? ORDER BY depth ASC, node_id ASC',
+                (str(task_id or '').strip(),),
+            )
+        )
+
+    def list_running_tool_frame_calls(self, task_id: str) -> list[sqlite3.Row]:
+        """只回「带截止时间的 running 工具调用」那几帧，并且只回 `tool_calls` 那一段。
+
+        失速判定读的帧内字段就只有这一个，而整帧正文里 99% 是候选/可见性诊断那类数组：
+        实盘 161 帧 / 6.39 MB 的台账里 `tool_calls` 合计 52 KB。在 SQLite 侧按
+        `$.payload.tool_calls` 取，实测 23 ms 对 Python 全量解析 121 ms，且这 23 ms 花在
+        sqlite 步骤里（放掉 GIL）。
+        """
+        return list(
+            self._fetchall(
+                "SELECT node_id, json_extract(payload_json, '$.payload.tool_calls') AS tool_calls "
+                'FROM task_runtime_frames AS t '
+                'WHERE t.task_id = ? '
+                "AND EXISTS (SELECT 1 FROM json_each(json_extract(t.payload_json, '$.payload.tool_calls')) AS j "
+                "WHERE lower(trim(json_extract(j.value, '$.status'))) = 'running' "
+                "AND CAST(json_extract(j.value, '$.timeout_seconds') AS REAL) > 0)",
+                (str(task_id or '').strip(),),
+            )
+        )
+
     def _task_node_tool_result_fields(self, record: TaskProjectionToolResultRecord) -> dict[str, object]:
         return {
             'task_id': record.task_id,

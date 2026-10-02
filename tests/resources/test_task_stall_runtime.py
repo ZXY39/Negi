@@ -502,7 +502,7 @@ class _FakeStallLogService:
     def __init__(self, state_getter):
         self._state_getter = state_getter
 
-    def read_runtime_state(self, task_id: str):
+    def read_runtime_state(self, task_id: str, *, frame_mode: str = 'full'):
         return self._state_getter()
 
     def read_task_runtime_meta(self, task_id: str):

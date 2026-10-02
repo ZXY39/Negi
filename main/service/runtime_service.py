@@ -5043,7 +5043,7 @@ class MainRuntimeService:
         if str(getattr(task, 'status', '') or '').strip().lower() != 'in_progress':
             return TASK_STALL_REASON_NOT_IN_PROGRESS
         current_runtime_state = runtime_state if isinstance(runtime_state, dict) else (
-            self.log_service.read_runtime_state(task.task_id, include_frame_messages=False) or {}
+            self.log_service.read_runtime_state(task.task_id, frame_mode='stall') or {}
         )
         if bool(getattr(task, 'is_paused', False)) or bool(getattr(task, 'pause_requested', False)):
             return TASK_STALL_REASON_USER_PAUSED
@@ -5095,7 +5095,7 @@ class MainRuntimeService:
         origin_session_id = self._task_origin_session_id(task)
         if not task_notice_audience_ok(origin_session_id):
             return {}
-        runtime_state = self.log_service.read_runtime_state(task.task_id, include_frame_messages=False) or {}
+        runtime_state = self.log_service.read_runtime_state(task.task_id, frame_mode='stall') or {}
         stall_reason = self.classify_task_stall_reason(task.task_id, runtime_state=runtime_state)
         if stall_reason != TASK_STALL_REASON_SUSPECTED_STALL:
             return {}
