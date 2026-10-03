@@ -535,3 +535,49 @@ async def test_react_loop_emits_nothing_when_the_submission_is_already_clean(
     assert result.status == "success"
     assert logs.error_logs == []
     assert events == []
+
+
+def _loop_for_dedupe() -> ReActToolLoop:
+    return ReActToolLoop(chat_backend=SimpleNamespace(), log_service=_FakeLogService(), max_iterations=2)
+
+
+def test_control_tool_rejection_receipt_is_not_collapsed_on_repeat() -> None:
+    # 实盘形状：同一份拒收文本第二次进来时，旧行为折成 250 字 reused 信封，
+    # 把契约尾段（answer/evidence/...）整段丢掉。
+    text = (
+        "Error: summary must be at least 1 chars\n"
+        "该工具没有可加载的扩展说明，参数契约如下（必填项及其类型与取值结构）："
+        "status=string(success|failed)、delivery_status=string(final|blocked)、summary=string(非空)、"
+        "answer=string、evidence=array<object{必填:kind=string(file|artifact|url)}>、"
+        "remaining_work=array<string>、blocking_reason=string"
+    )
+    first = {"role": "tool", "tool_call_id": "call-a", "name": "submit_final_result", "content": text}
+    again = {"role": "tool", "tool_call_id": "call-b", "name": "submit_final_result", "content": text}
+
+    out = _loop_for_dedupe()._dedupe_tool_messages([again], existing_messages=[first])
+
+    assert out[0]["content"] == text
+    assert '"reused"' not in out[0]["content"]
+
+
+def test_stage_tool_error_receipt_also_survives_repeat() -> None:
+    text = "Error: tool_round_budget must be >= 1"
+    first = {"role": "tool", "tool_call_id": "call-a", "name": "submit_next_stage", "content": text}
+    again = {"role": "tool", "tool_call_id": "call-b", "name": "submit_next_stage", "content": text}
+
+    out = _loop_for_dedupe()._dedupe_tool_messages([again], existing_messages=[first])
+
+    assert out[0]["content"] == text
+
+
+def test_ordinary_tool_duplicate_result_still_collapses() -> None:
+    # 豁免只针对控制工具的拒收回执；普通工具逐字相同的输出仍要走复用折叠，
+    # 否则这条道省上下文的本职就没了。
+    text = '{"status": "success", "exit_code": 0, "head_preview": "same", "stdout": "same"}'
+    first = {"role": "tool", "tool_call_id": "call-a", "name": "exec", "content": text}
+    again = {"role": "tool", "tool_call_id": "call-b", "name": "exec", "content": text}
+
+    out = _loop_for_dedupe()._dedupe_tool_messages([again], existing_messages=[first])
+
+    assert '"reused"' in out[0]["content"]
+    assert '"same_as": "call-a"' in out[0]["content"]

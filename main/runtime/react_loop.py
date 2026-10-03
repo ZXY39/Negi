@@ -7967,12 +7967,28 @@ class ReActToolLoop:
             or content.startswith('你上一条回复虽然能解析成 JSON，但违反了结果协议 v')
         )
 
+    # 控制工具的拒收回执不参与复用折叠：这类文本没有第二份可回读的地方（折叠出来的
+    # 信封里 ref 是空的），而模型重复同一份提交时，最新一拍正是它会读的那行。
+    # 实盘 node:ce794e2526f2（2026-10-03）：第 3 次拒收给的是 369 字完整契约，
+    # 第 4/5 次被折成 250 字 reused 信封、summary 在契约中段就截断了。
+    _NO_DEDUPE_RECEIPT_TOOL_NAMES = frozenset({FINAL_RESULT_TOOL_NAME, STAGE_TOOL_NAME})
+
+    @classmethod
+    def _is_no_dedupe_receipt_message(cls, message: Any) -> bool:
+        if not isinstance(message, dict):
+            return False
+        if str(message.get('name') or '').strip() not in cls._NO_DEDUPE_RECEIPT_TOOL_NAMES:
+            return False
+        return str(message.get('content') or '').strip().startswith('Error')
+
     def _dedupe_tool_messages(self, tool_messages: list[dict[str, Any]], *, existing_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen_signatures: dict[str, dict[str, str]] = {}
         for message in list(existing_messages or []):
             if not isinstance(message, dict):
                 continue
             if str(message.get('role') or '').strip().lower() != 'tool':
+                continue
+            if self._is_no_dedupe_receipt_message(message):
                 continue
             signature = self._tool_result_signature(message.get('content'))
             if not signature:
@@ -7991,6 +8007,9 @@ class ReActToolLoop:
             if not isinstance(message, dict):
                 continue
             payload = dict(message or {})
+            if self._is_no_dedupe_receipt_message(payload):
+                deduped.append(payload)
+                continue
             signature = self._tool_result_signature(payload.get('content'))
             if not signature:
                 deduped.append(payload)

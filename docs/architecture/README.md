@@ -155,6 +155,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 阶段边界那一跳 `cache_hit` 塌下去、非缓存 `input` 冲高，但下一跳就回血，且此后正文天花板明显更低 → 这是裁撤生效的正常账单（断点位置不动、动的是断点后面的载荷），读数口径见 `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」
 - 脑图标读数在阶段边界那一跳冲高数倍、下一跳回落，而 `comparable_to_previous_request` 仍为 `true` → `context-and-cache-troubleshooting.md`「同 turn 的 append-only 规则被破坏」（锚点与阶段投影同源）
 - 节点反复收到"缺必填参数"式拒绝、错误首行逐字相同而 arguments 后缀不同，眼看要被无效提交上限判死 → `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（provider 参数块未转义 + 宽容解析吞参数，按协议故障单独计数）
+- 节点连续多轮重交同一份被拒载荷、越到后面收到的参数契约越短（只剩 `summary` 残段、`ref` 为空） → `tool-and-skill-system.md`「Duplicate Tool Call Guard」（控制工具 error 回执不参与消息级折叠）
 - 模型报告"上一轮我想到哪了"却读不到任何思路、或开了思考回放的 binding 一上线就整条链报 400 → `runtime-overview.md`「思考内容（reasoning）的上下文回放」（写入闸门按整条链取交集，咽喉点只透传）
 - 一个回合跑了一两百跳、请求字符与 `effective_input_tokens` 全程只涨不降 → 先确认有没有阶段被模型点名裁撤过：**没点名的阶段一直逐轮重发是设计**（只有点名或压缩收口会让它降）。确有裁撤却仍不降，按 `runtime-overview.md`「stage_compaction」（两条车道都在过期点换基线；节点另看投影与发送体是否分叉）查
 - 模型或节点声称"已把某阶段移出"却找不到 `archive_ref`、或点名裁撤后那批工具帧仍逐轮重发、提交时写的阶段总结在账本里是空的 → `runtime-overview.md`「stage_compaction」（跨结清的收尾对象判据与 `stage_closure` 回执，前门与节点同一条）+ `context-and-cache-troubleshooting.md`「Shrink 原因与压缩边界」（粘着的 shrink 原因不能当"裁过"的证据）
