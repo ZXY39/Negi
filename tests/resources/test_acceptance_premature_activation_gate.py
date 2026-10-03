@@ -81,17 +81,9 @@ def _acceptance(accepted_node_id: str = EXEC_ID, **overrides) -> NodeRecord:
     return NodeRecord(**payload)
 
 
-def _runner(
-    execution: NodeRecord,
-    *,
-    pending_notice_ids: tuple[str, ...] = (),
-    pending_tool_calls: tuple[dict, ...] = (),
-) -> NodeRunner:
+def _runner(execution: NodeRecord, *, pending_notice_ids: tuple[str, ...] = ()) -> NodeRunner:
     runner = object.__new__(NodeRunner)
     runner._store = _FakeStore({execution.node_id: execution, ACC_ID: _acceptance(execution.node_id)})  # type: ignore[attr-defined]
-    runner._log_service = SimpleNamespace(  # type: ignore[attr-defined]
-        read_runtime_frame_payload=lambda task_id, node_id: {'pending_tool_calls': list(pending_tool_calls)}
-    )
     runner.nodes_with_pending_distribution_notices = lambda task_id: list(pending_notice_ids)  # type: ignore[attr-defined]
     return runner
 
@@ -120,7 +112,7 @@ def _freeze(runner: NodeRunner, *, root: bool = False) -> str:
 
 def test_freezes_while_accepted_node_has_no_submission() -> None:
     """实盘那 7 份判词的形状：验收节点已存在、对方一次都没提交过。"""
-    assert '尚未提交' in _freeze(_runner(_execution()))
+    assert '没有待裁定的闭合提交' in _freeze(_runner(_execution()))
 
 
 def test_registration_of_submission_releases_the_gate() -> None:
@@ -131,29 +123,28 @@ def test_registration_of_submission_releases_the_gate() -> None:
 def test_registered_state_without_a_resolvable_pointer_still_freezes() -> None:
     """登记过 state 但指针为空 = 尾块无内容可给，放行只会产出一轮看不见交付的裁定。"""
     reason = _freeze(_runner(_execution(metadata=_handshake(latest_execution_result_ref=''))))
-    assert '尚未提交' in reason
+    assert '没有待裁定的闭合提交' in reason
 
 
-def test_open_non_submit_tool_round_freezes_even_with_a_registered_submission() -> None:
-    """打回续跑时握手仍留着上一轮 ref：对方又开工了，就不许拿旧指针再裁一次。
+def test_rework_state_with_a_previous_pointer_freezes() -> None:
+    """打回续跑时握手仍留着上一轮 ref：对方正在重做，不许拿旧指针再裁一次。
 
-    实盘样本：验收 node:9b3f22b1c0be 的对方 in_progress、帧里未闭合调用是
-    `submit_next_stage`（收阶段不是收交付），握手 `waiting_execution_retry` + 旧 ref。
+    实盘样本：验收 node:193834990895 的对方 in_progress、相位 before_model、握手
+    `waiting_execution_retry` + 上一轮的 ref；重启后普查这类有 3 对。
     """
-    runner = _runner(
-        _execution(metadata=_handshake(state='waiting_execution_retry')),
-        pending_tool_calls=({'id': 'call_1', 'name': 'submit_next_stage', 'arguments': {}},),
-    )
-    assert '未闭合的工具轮' in _freeze(runner)
+    reason = _freeze(_runner(_execution(metadata=_handshake(state='waiting_execution_retry'))))
+    assert '没有待裁定的闭合提交' in reason
 
 
-def test_final_submission_in_flight_is_not_an_open_round() -> None:
-    """阻塞核验与根验收都在 `submit_final_result` 仍挂着时派验，那条就是闭合动作。"""
-    runner = _runner(
-        _execution(metadata=_handshake(state='waiting_block_verification')),
-        pending_tool_calls=({'id': 'call_2', 'name': 'submit_final_result', 'arguments': {}},),
-    )
-    assert _freeze(runner) == ''
+def test_block_verification_state_releases_the_gate() -> None:
+    """阻塞核验车道派验前写 waiting_block_verification：那是待裁定状态。"""
+    assert _freeze(_runner(_execution(metadata=_handshake(state='waiting_block_verification')))) == ''
+
+
+def test_landed_verdict_states_do_not_reopen_the_gate() -> None:
+    """裁定已落过的状态不再派验：重验必须由登记新一轮提交的车道重新开门。"""
+    for state in ('accepted', 'rejected_terminal', 'canceled_by_execution_failure'):
+        assert '没有待裁定的闭合提交' in _freeze(_runner(_execution(metadata=_handshake(state=state))))
 
 
 def test_terminal_accepted_node_is_never_frozen() -> None:
@@ -240,7 +231,7 @@ def test_child_pipeline_waits_instead_of_consuming_a_frozen_acceptance() -> None
     runner._spawn_failure_info_from_node = lambda **kwargs: None  # type: ignore[attr-defined]
 
     dispatched: list[str] = []
-    reasons = iter(['验收冻结：被检验执行节点仍有未闭合的工具轮，需待其提交 final 结果后再继续核验。', ''])
+    reasons = iter(['验收冻结：被检验执行节点没有待裁定的闭合提交，需待其提交 final 结果并登记交接后再继续核验。', ''])
     runner._final_acceptance_freeze_reason = lambda **kwargs: next(reasons)  # type: ignore[attr-defined]
 
     async def _run_nested(task_id: str, node_id: str) -> NodeFinalResult:

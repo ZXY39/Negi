@@ -36,7 +36,6 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
-    ACCEPTANCE_STATE_IDLE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
@@ -1293,39 +1292,26 @@ class NodeRunner:
             return None
         return acceptance
 
-    def _execution_node_has_open_tool_round(self, *, task_id: str, node_id: str) -> bool:
-        """对方帧里还挂着**未闭合且不是 final 提交**的工具调用 ⇒ 它仍在执行中。
-
-        读的是帧 payload，不水合会话历史（`read_runtime_frame` 会顺带把整份历史读盘）。
-        `submit_final_result` 按名字豁免：阻塞核验与根验收都在"提交调用本身还在飞"的
-        状态里派验，那条调用就是闭合动作，不是仍在执行的证据。`submit_next_stage`
-        收的是阶段不是交付，算未闭合。
-        """
-        reader = getattr(self._log_service, 'read_runtime_frame_payload', None)
-        if not callable(reader):
-            return False
-        try:
-            frame = dict(reader(task_id, node_id) or {})
-        except Exception:
-            return False
-        for item in list(frame.get('pending_tool_calls') or []):
-            if not isinstance(item, dict):
-                continue
-            if str(item.get('name') or '').strip() == 'submit_final_result':
-                continue
-            return True
-        return False
+    # 握手里唯一表示"已登记一次待裁定的 final 提交"的两个状态。其余都在冻结侧：
+    # `idle`＝从没提交过，`waiting_execution_retry`＝已被打回、正在重做（此时派验
+    # 拿的是上一轮的旧指针），`accepted` / `rejected_terminal`＝裁定已经落过。
+    _PENDING_VERDICT_STATES = frozenset({
+        ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
+        ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
+    })
 
     def _final_acceptance_freeze_reason(self, *, task, node: NodeRecord) -> str:
-        """验收抢跑闸门：被检验节点没有一次**已闭合的 final 提交**时，验收不开回合。
+        """验收抢跑闸门：被检验节点没有一次**待裁定的闭合提交**时，验收不开回合。
 
-        不变式与节点状态、暂停与否无关：只要对方还在执行，它的验收节点就不允许激活。
-        闭合只有两种读法——对方已终态；或握手登记过一次指针可解析的 final 提交，
-        且它的帧里没有未闭合的非提交工具轮。违反它的代价实测过：验收节点与子节点
-        同批物化，bootstrap 定稿时必然是空交接（`_ensure_spawn_acceptance_node`），
-        此时开回合只能对"什么都没有"下结论——实盘 37 个被误恢复的验收节点里 16 个
-        当场开跑、150 次模型调用，7 份判词全是「交付物不存在」，其中 2 份是
-        `failed + blocked` 终局形态，会在对方真提交时把它直接打死。
+        不变式与节点状态、暂停与否无关：对方还在执行，它的验收节点就不允许激活。
+        闭合只有两种读法——对方已终态；或握手处于待裁定状态且登记了可解析的
+        `latest_execution_result_ref`。判据落在握手状态机本身而不是登记位：三条派验
+        车道（根最终验收、spawn 首轮、阻塞核验）都在派发前写这两个状态之一，而重做中的
+        节点写的是 `waiting_execution_retry`。违反它的代价实测过：验收节点与子节点同批
+        物化，bootstrap 定稿时必然是空交接（`_ensure_spawn_acceptance_node`），此时开
+        回合只能对"什么都没有"下结论——实盘 37 个被误恢复的验收节点里 16 个当场开跑、
+        150 次模型调用，7 份判词全是「交付物不存在」，其中 2 份是 `failed + blocked`
+        终局形态，会在对方真提交时把它直接打死。
 
         只按根节点的最终验收另有一条：执行节点还压着未消费通知，需等它消费完并重提交。
         """
@@ -1337,19 +1323,14 @@ class NodeRunner:
         execution_node_id = str(getattr(execution, 'node_id', '') or '').strip()
         if self._normalized_status(getattr(execution, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
             return ''
-        if self._execution_node_has_open_tool_round(task_id=task.task_id, node_id=execution_node_id):
-            return (
-                '验收冻结：被检验执行节点仍有未闭合的工具轮，'
-                '需待其提交 final 结果后再继续核验。'
-            )
         handshake = normalize_acceptance_handshake((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         if (
-            str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_IDLE
+            str(handshake.get('state') or '').strip() not in self._PENDING_VERDICT_STATES
             or not str(handshake.get('latest_execution_result_ref') or '').strip()
         ):
             return (
-                '验收冻结：被检验执行节点尚未提交可核验的结果，'
-                '需待其提交并登记交接后再继续核验。'
+                '验收冻结：被检验执行节点没有待裁定的闭合提交，'
+                '需待其提交 final 结果并登记交接后再继续核验。'
             )
         if execution_node_id != str(getattr(task, 'root_node_id', '') or '').strip():
             return ''
