@@ -5,10 +5,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from g3ku.config.schema import ManagedModelConfig
 from langchain_core.messages import AIMessage, HumanMessage
 
 from g3ku.providers.responses_protocol_helpers import (
@@ -50,6 +52,46 @@ class _StubConfig:
 
 def _profile(enabled: bool) -> SimpleNamespace:
     return SimpleNamespace(reasoning_context_enabled=enabled)
+
+
+def test_replay_capability_defaults_on_per_binding() -> None:
+    assert ManagedModelConfig(key="demo", llm_config_id="c1").reasoning_context_enabled is True
+    assert (
+        model_chain_replays_reasoning(
+            _StubConfig({"a": ManagedModelConfig(key="a", llm_config_id="c1"), "b": ManagedModelConfig(key="b", llm_config_id="c1")}),
+            ["a", "b"],
+        )
+        is True
+    )
+    assert (
+        model_chain_replays_reasoning(
+            _StubConfig({"a": ManagedModelConfig(key="a", llm_config_id="c1", reasoning_context_enabled=False)}),
+            ["a"],
+        )
+        is False
+    )
+    # 解析不到 profile 的 ref 按关处理：闸门宁可少带，也不能把整条链打成畸形请求。
+    assert model_chain_replays_reasoning(_StubConfig({}), ["a"]) is False
+
+
+def test_stream_collects_both_reasoning_dialects() -> None:
+    from g3ku.providers.streaming_timeouts import StreamingDiagnostics, consume_openai_like_chat_stream
+
+    async def run(key: str) -> str | None:
+        async def gen():
+            yield SimpleNamespace(choices=[{"delta": {key: "先算 2+3"}}])
+            yield SimpleNamespace(choices=[{"delta": {"content": "等于 5"}}])
+
+        _content, _calls, _finish, _usage, reasoning = await consume_openai_like_chat_stream(
+            gen(),
+            diagnostics=StreamingDiagnostics.start("openai_chat"),
+            first_chunk_timeout_seconds=5,
+            idle_chunk_timeout_seconds=5,
+        )
+        return reasoning
+
+    assert asyncio.run(run("reasoning_content")) == "先算 2+3"
+    assert asyncio.run(run("reasoning")) == "先算 2+3"
 
 
 def test_chain_predicate_requires_every_ref_to_allow_replay() -> None:
