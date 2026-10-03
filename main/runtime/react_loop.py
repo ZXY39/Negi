@@ -140,6 +140,11 @@ _STAGE_SPAWN_TOOL_NAME = 'spawn_child_nodes'
 _READ_ONLY_REPEAT_SOFT_REJECT_LIMIT = 3
 _INVALID_FINAL_SUBMISSION_LIMIT = 5
 _INVALID_STAGE_SUBMISSION_LIMIT = 5
+# 载荷**逐字相同**地被连着拒收时的早停上限，比总预算更低：第 2 次起上下文里已经躺着
+# 一条同形状的反例，再发同一份提示只是白烧一轮（实测 node:ce794e2526f2 2026-10-03：
+# 同一份 `summary=''` 的裁定连交 9 次，每击新输入 123K-143K token）。
+# 只作用于"提交体被拒且理由与上一击完全相同"这一支；不同原因的拒收仍走总预算。
+_IDENTICAL_FINAL_SUBMISSION_STRIKE_LIMIT = 3
 # 回包形态故障（参数串被 marker 截走 / 只有 reasoning 没有正文 / 提交体被输出上限截尾）
 # 与模型交付违约分账：形态问题占不了模型的预算，但同值封顶，否则上游持续故障会把
 # 节点挂在轮次循环里出不来。
@@ -287,6 +292,7 @@ class ReActToolLoop:
         repair_overlay_text: str | None = None
         invalid_final_submission_count = 0
         invalid_stage_submission_count = 0
+        identical_final_submission_streak = 0
         payload_shape_fault_count = 0
         plain_text_reply_strikes = 0
         stage_only_transition_streak = 0
@@ -1087,6 +1093,7 @@ class ReActToolLoop:
                 if ordinary_tool_turn:
                     invalid_final_submission_count = 0
                     invalid_stage_submission_count = 0
+                    identical_final_submission_streak = 0
                     payload_shape_fault_count = 0
                     plain_text_reply_strikes = 0
                     stage_only_transition_streak = 0
@@ -1296,20 +1303,30 @@ class ReActToolLoop:
                         response=response,
                         response_tool_calls=response_tool_calls,
                     )
+                    identical_final_submission_streak = (
+                        identical_final_submission_streak + 1
+                        if reason == last_invalid_final_submission_reason
+                        else 1
+                    )
                     last_invalid_final_submission_reason = reason
                     last_contract_violations = reason_parts
+                    if identical_final_submission_streak >= _IDENTICAL_FINAL_SUBMISSION_STRIKE_LIMIT:
+                        return self._invalid_final_submission_failure(
+                            reason=(
+                                f'{reason} (同一份载荷连续第 {identical_final_submission_streak} 次被拒；'
+                                '重复同一形状不再新增信息，收口为可恢复的错误暂停)'
+                            ),
+                            count=invalid_final_submission_count,
+                        )
                     if invalid_final_submission_count >= _INVALID_FINAL_SUBMISSION_LIMIT:
                         return self._invalid_final_submission_failure(
                             reason=reason,
                             count=invalid_final_submission_count,
                         )
-                    repair_overlay_text = (
-                        self._result_contract_violation_message(
-                            reason_parts,
-                            node_kind=node.node_kind,
-                        )
-                        if reason_parts
-                        else self._result_protocol_message(node_kind=node.node_kind)
+                    repair_overlay_text = self._final_submission_repair_message(
+                        reason_parts,
+                        node_kind=node.node_kind,
+                        identical_streak=identical_final_submission_streak,
                     )
                     continue
                 duplicate_call_violations: list[dict[str, Any]] = []
@@ -7180,6 +7197,55 @@ class ReActToolLoop:
             'Never fill the fields with placeholder text such as "placeholder": `summary` and `answer` must carry the real, verifiable conclusion, and a success+final submission goes straight to acceptance. '
             f'{guidance}'
         )
+
+    # 正文两个字段的角色在契约里从来没写过，只写过"非空"和"别拿占位符糊"。实盘
+    # node:ce794e2526f2（2026-10-03）：同一节点早先交过 682 字 summary + 2186 字 answer
+    # 的合格裁定，之后 9 次把整份裁定搬进 `evidence[].note`（329→1381 字，每击都在重写、
+    # 不是复读）并把两个正文留空——它把"重复内容"理解成了占位。补角色说明才对症。
+    _PROSE_FIELD_ROLE_CLAUSE = (
+        'Field roles, so this is not a guess: `summary` and `answer` are the hand-off fields the runtime '
+        'forwards to the requester and the node rail - `summary` is the one-line verdict, `answer` the full '
+        'verdict text. Restating content that already sits in `evidence[].note` inside them is expected and is '
+        'NOT a placeholder; a placeholder is filler such as "placeholder" or "see evidence". Only an empty '
+        '`summary`/`answer` makes the submission invalid.'
+    )
+
+    @staticmethod
+    def _identical_payload_clause(*, identical_streak: int) -> str:
+        # 骨架里裁定值一律留空：告诉它该判 success 还是 failed 就是替它下结论。
+        return (
+            f'This payload was rejected {int(identical_streak)} times in a row unchanged, so sending the same '
+            'shape again will be rejected again. Fill only the two prose fields and keep everything else as is: '
+            '{"status":"<success|failed>","delivery_status":"<final|blocked>",'
+            '"summary":"<一句话裁定，允许与 evidence 重叠>","answer":"<完整裁定>",'
+            '"evidence":[...原样保留...],"remaining_work":[...],"blocking_reason":"..."}.'
+        )
+
+    @classmethod
+    def _final_submission_repair_message(
+        cls,
+        reason_parts: list[str],
+        *,
+        node_kind: str,
+        identical_streak: int,
+    ) -> str:
+        base = (
+            cls._result_contract_violation_message(reason_parts, node_kind=node_kind)
+            if reason_parts
+            else cls._result_protocol_message(node_kind=node_kind)
+        )
+        if int(identical_streak or 0) >= 2:
+            return (
+                f'{base} {cls._PROSE_FIELD_ROLE_CLAUSE} '
+                f'{cls._identical_payload_clause(identical_streak=int(identical_streak))}'
+            )
+        if any(
+            token in str(item or '')
+            for item in reason_parts
+            for token in ('summary', 'answer')
+        ):
+            return f'{base} {cls._PROSE_FIELD_ROLE_CLAUSE}'
+        return base
 
     @staticmethod
     def _result_repair_guidance(*, node_kind: str) -> str:

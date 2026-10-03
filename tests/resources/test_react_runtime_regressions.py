@@ -3642,7 +3642,24 @@ async def test_react_loop_recovers_when_a_rejected_final_submission_is_resubmitt
 
 @pytest.mark.asyncio
 async def test_react_loop_trips_final_submission_guard_only_after_the_full_strike_budget() -> None:
+    """逐字相同的拒收另有更早的出口（见 test_final_result_shape_faults.py），这里刻意让
+    每一击的 violation 都不同，守住"总预算耗尽才收口"这条主路。"""
     turns: list[int] = []
+    distinct_payloads = [
+        {'answer': 'still no envelope', 'evidence': '[]'},
+        {'status': 'maybe', 'answer': 'x', 'evidence': []},
+        {'status': 'success', 'delivery_status': 'blocked', 'answer': 'x', 'evidence': []},
+        {'status': 'success', 'delivery_status': 'final', 'summary': '', 'answer': 'x', 'evidence': []},
+        {
+            'status': 'success',
+            'delivery_status': 'final',
+            'summary': 'ok',
+            'answer': 'x',
+            'evidence': [{'kind': 'nope', 'note': 'n'}],
+            'remaining_work': [],
+            'blocking_reason': '',
+        },
+    ]
 
     class _Backend:
         def __init__(self) -> None:
@@ -3658,7 +3675,7 @@ async def test_react_loop_trips_final_submission_guard_only_after_the_full_strik
                     ToolCallRequest(
                         id=f'call:bad:{self.turn}',
                         name='submit_final_result',
-                        arguments={'answer': 'still no envelope', 'evidence': '[]'},
+                        arguments=dict(distinct_payloads[min(self.turn, len(distinct_payloads)) - 1]),
                     )
                 ],
                 finish_reason='tool_calls',
@@ -3684,7 +3701,7 @@ async def test_react_loop_trips_final_submission_guard_only_after_the_full_strik
     assert result.delivery_status == 'blocked'
     assert result.summary == 'final result submission guard triggered'
     assert len(turns) == _INVALID_FINAL_SUBMISSION_LIMIT
-    assert 'missing required status' in result.blocking_reason
+    assert 'evidence[0].kind must be one of' in result.blocking_reason
     frame = log_service.read_runtime_frame('task-budget', 'node-budget')
     assert int(frame.get('invalid_final_submission_count') or 0) == _INVALID_FINAL_SUBMISSION_LIMIT
 

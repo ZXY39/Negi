@@ -581,3 +581,66 @@ def test_ordinary_tool_duplicate_result_still_collapses() -> None:
 
     assert '"reused"' in out[0]["content"]
     assert '"same_as": "call-a"' in out[0]["content"]
+
+
+def _empty_prose_verdict() -> dict[str, object]:
+    """实盘 node:ce794e2526f2 的形状：裁定全搬进 evidence.note，两个正文留空。"""
+    payload = _good_final_arguments()
+    payload['summary'] = ''
+    payload['answer'] = ''
+    payload['evidence'] = [{'kind': 'file', 'path': 'C_tax_compliance.md', 'note': '通过：4 项不符合已逐项修正'}]
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_second_identical_rejection_escalates_the_repair_overlay() -> None:
+    bad = _empty_prose_verdict()
+    result, requests, logs = await _run_final_result_loop(
+        responses=[
+            LLMResponse(content='', tool_calls=[_final_call('call:dup-1', bad)], finish_reason='tool_calls',
+                         usage={'input_tokens': 8, 'output_tokens': 4}),
+            LLMResponse(content='', tool_calls=[_final_call('call:dup-2', bad)], finish_reason='tool_calls',
+                         usage={'input_tokens': 8, 'output_tokens': 4}),
+            LLMResponse(content='', tool_calls=[_final_call('call:dup-3', _good_final_arguments())],
+                         finish_reason='tool_calls', usage={'input_tokens': 8, 'output_tokens': 4}),
+        ],
+        node_kind='acceptance',
+        task_id='task-dup-overlay',
+        node_id='node-dup-overlay',
+        max_iterations=4,
+    )
+
+    assert result.status == 'success'
+    assert len(requests) == 3
+    first_repair = json.dumps(requests[1].get('messages') or [], ensure_ascii=False)
+    # 第一次被拒就要回答"这两个字段是干什么的"，否则模型会把"别写占位"读成"别重复内容"
+    assert 'Field roles' in first_repair
+    assert 'is NOT a placeholder' in first_repair
+    second_repair = json.dumps(requests[2].get('messages') or [], ensure_ascii=False)
+    assert 'rejected 2 times in a row' in second_repair
+    assert '"<一句话裁定' in second_repair
+    assert len(logs.error_logs) == 2
+
+
+@pytest.mark.asyncio
+async def test_identical_rejection_early_stops_on_the_third_strike() -> None:
+    bad = _empty_prose_verdict()
+    responses = [
+        LLMResponse(content='', tool_calls=[_final_call(f'call:same-{i}', bad)], finish_reason='tool_calls',
+                     usage={'input_tokens': 8, 'output_tokens': 4})
+        for i in range(6)
+    ]
+    result, requests, logs = await _run_final_result_loop(
+        responses=responses,
+        node_kind='acceptance',
+        task_id='task-dup-early-stop',
+        node_id='node-dup-early-stop',
+        max_iterations=8,
+    )
+
+    assert result.status == 'failed'
+    assert result.summary == 'final result submission guard triggered'
+    assert '同一份载荷连续第 3 次被拒' in result.blocking_reason
+    # 早停比总预算少两拍：每拍新输入 12 万 token 起，重复同一形状不会再新增信息
+    assert len(requests) == 3
+    assert len(logs.error_logs) == 3
