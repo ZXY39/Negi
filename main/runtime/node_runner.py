@@ -1293,37 +1293,66 @@ class NodeRunner:
             return None
         return acceptance
 
-    def _final_acceptance_freeze_reason(self, *, task, node: NodeRecord) -> str:
-        """验收抢跑闸门：还没有可核验的提交时，验收节点不开回合。
+    def _execution_node_has_open_tool_round(self, *, task_id: str, node_id: str) -> bool:
+        """对方帧里还挂着**未闭合且不是 final 提交**的工具调用 ⇒ 它仍在执行中。
 
-        两条判据覆盖面不同：
-        - 所有验收：被检验的执行节点仍非终态，且握手里没有登记过任何提交（state 还是
-          `idle`、也没有 result ref）。验收节点在派发方 spawn 子节点的那一刻就被创建
-          （`_ensure_spawn_acceptance_node`），bootstrap 正文此时必然带的是空交接；
-          让它开回合只能对"什么都没有"下结论，判词通常是「交付物不存在」。而这份终态
-          判词会留在 spawn entry 的 `acceptance_node_id` 上，等被检验节点真正提交时被
-          当成本轮裁定复用。
-        - 只按根节点的最终验收：执行节点还压着未消费通知，需等它消费完并重新提交。
+        读的是帧 payload，不水合会话历史（`read_runtime_frame` 会顺带把整份历史读盘）。
+        `submit_final_result` 按名字豁免：阻塞核验与根验收都在"提交调用本身还在飞"的
+        状态里派验，那条调用就是闭合动作，不是仍在执行的证据。`submit_next_stage`
+        收的是阶段不是交付，算未闭合。
+        """
+        reader = getattr(self._log_service, 'read_runtime_frame_payload', None)
+        if not callable(reader):
+            return False
+        try:
+            frame = dict(reader(task_id, node_id) or {})
+        except Exception:
+            return False
+        for item in list(frame.get('pending_tool_calls') or []):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('name') or '').strip() == 'submit_final_result':
+                continue
+            return True
+        return False
+
+    def _final_acceptance_freeze_reason(self, *, task, node: NodeRecord) -> str:
+        """验收抢跑闸门：被检验节点没有一次**已闭合的 final 提交**时，验收不开回合。
+
+        不变式与节点状态、暂停与否无关：只要对方还在执行，它的验收节点就不允许激活。
+        闭合只有两种读法——对方已终态；或握手登记过一次指针可解析的 final 提交，
+        且它的帧里没有未闭合的非提交工具轮。违反它的代价实测过：验收节点与子节点
+        同批物化，bootstrap 定稿时必然是空交接（`_ensure_spawn_acceptance_node`），
+        此时开回合只能对"什么都没有"下结论——实盘 37 个被误恢复的验收节点里 16 个
+        当场开跑、150 次模型调用，7 份判词全是「交付物不存在」，其中 2 份是
+        `failed + blocked` 终局形态，会在对方真提交时把它直接打死。
+
+        只按根节点的最终验收另有一条：执行节点还压着未消费通知，需等它消费完并重提交。
         """
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
             return ''
         execution = self._accepted_execution_node(task_id=task.task_id, acceptance=node)
         if execution is None:
             return ''
+        execution_node_id = str(getattr(execution, 'node_id', '') or '').strip()
         if self._normalized_status(getattr(execution, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
             return ''
+        if self._execution_node_has_open_tool_round(task_id=task.task_id, node_id=execution_node_id):
+            return (
+                '验收冻结：被检验执行节点仍有未闭合的工具轮，'
+                '需待其提交 final 结果后再继续核验。'
+            )
         handshake = normalize_acceptance_handshake((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
         if (
             str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_IDLE
-            and not str(handshake.get('latest_execution_result_ref') or '').strip()
+            or not str(handshake.get('latest_execution_result_ref') or '').strip()
         ):
             return (
                 '验收冻结：被检验执行节点尚未提交可核验的结果，'
                 '需待其提交并登记交接后再继续核验。'
             )
-        if str(getattr(execution, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
+        if execution_node_id != str(getattr(task, 'root_node_id', '') or '').strip():
             return ''
-        execution_node_id = str(getattr(execution, 'node_id', '') or '').strip()
         pending_node_ids = set(self.nodes_with_pending_distribution_notices(task_id=task.task_id))
         if execution_node_id not in pending_node_ids:
             return ''
@@ -1377,8 +1406,9 @@ class NodeRunner:
         if bool(getattr(acceptance, 'pause_requested', False)) or bool(getattr(acceptance, 'is_paused', False)):
             return ''
         if self._final_acceptance_freeze_reason(task=task, node=acceptance):
-            # 冻结中的验收一被派发就返回 partial 回合，会被
-            # _handle_acceptance_node_result 读成一次打回，凭空多一轮 rejection。
+            # 冻结中的验收一被派发就返回 success + partial，而
+            # _handle_acceptance_node_result 的首个分支只看 status==success，会把这份
+            # "还没验"读成一次通过（握手直接落 accepted）。所以这里绝不复活冻结中的验收。
             return ''
         return node_id
 
@@ -5898,15 +5928,21 @@ class NodeRunner:
                     rejection_count=int(handshake.get('rejection_count') or 0),
                 )
 
-                acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
-                acceptance = self._store.get_node(acceptance.node_id) or acceptance
-                acceptance_result = self._handle_acceptance_node_result(
-                    task=task,
-                    acceptance=acceptance,
-                    result=acceptance_result,
-                )
-                if str(acceptance_result.delivery_status or '').strip() != 'partial':
-                    break
+                # 派发即消费：闸门冻结返回的是 success + partial，而
+                # _handle_acceptance_node_result 的首个分支只看 status==success，会把
+                # "还没验"读成一次通过。所以对方未闭合提交时先不派验，等它重跑闭合后
+                # 回到本循环——这条等待不产生拒收，因此也不发续接通知。
+                precheck_reason = self._final_acceptance_freeze_reason(task=task, node=acceptance)
+                if not precheck_reason:
+                    acceptance_result = await self._run_nested_node(task.task_id, acceptance.node_id)
+                    acceptance = self._store.get_node(acceptance.node_id) or acceptance
+                    acceptance_result = self._handle_acceptance_node_result(
+                        task=task,
+                        acceptance=acceptance,
+                        result=acceptance_result,
+                    )
+                    if str(acceptance_result.delivery_status or '').strip() != 'partial':
+                        break
 
                 # 打回后的重跑同样必须经 dispatch entry：内联 `run_node` 会让子节点
                 # 的暂停直接落进 `_run_spec` 的异常兜底，被父管线当成"子节点失败"交付。
@@ -5946,6 +5982,10 @@ class NodeRunner:
                         runtime_error_text='',
                     )
                     return result
+                if precheck_reason:
+                    # 只是等对方闭合，没有拒收要反馈：新一轮交付到达后回到循环顶部
+                    # 重新判定，那时握手登记的就是这次的提交。
+                    continue
                 # 打回后的重提交到达：先作废验收节点上下文中来自本执行节点的旧
                 # 交接通知，再以显式消息把新交付交给验收节点续验（对齐根节点最终
                 # 验收的续接语义），避免续验轮次只靠静默刷新的 prompt 而丢失
