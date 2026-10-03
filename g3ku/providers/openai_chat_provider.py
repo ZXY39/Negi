@@ -207,7 +207,20 @@ class OpenAIChatProvider(LLMProvider):
         return LLMResponse(
             content=msg.content, tool_calls=tool_calls, finish_reason=choice.finish_reason or "stop",
             usage=normalize_usage_payload(getattr(response, "usage", None)),
-            reasoning_content=getattr(msg, "reasoning_content", None) or None,
+            # 与流式同一套方言（`reasoning_content` / `reasoning`），对象形态一律忽略。
+            reasoning_content=(
+                next(
+                    (
+                        value
+                        for value in (
+                            getattr(msg, "reasoning_content", None),
+                            getattr(msg, "reasoning", None),
+                        )
+                        if isinstance(value, str) and value
+                    ),
+                    None,
+                )
+            ),
         )
 
     def get_default_model(self) -> str:

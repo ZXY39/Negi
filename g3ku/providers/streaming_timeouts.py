@@ -185,6 +185,20 @@ def _content_delta_text(content: Any) -> str:
     return ""
 
 
+def _reasoning_delta_text(delta: Any) -> str:
+    """收当跳思考：上游方言不统一，两种键都要认。
+
+    DeepSeek / GLM 走 `reasoning_content`，SenseNova 走 `reasoning`（实测同一个网关两种都出现过，
+    且 usage 里 `completion_tokens_details.reasoning_tokens` 一直有值）。只认一个键的结果是
+    "思考按 token 计费、正文一个字都收不到"，闸门开了也没有内容可回放。
+    """
+    for name in ("reasoning_content", "reasoning"):
+        text = _content_delta_text(_maybe_get(delta, name, None))
+        if text:
+            return text
+    return ""
+
+
 async def consume_openai_like_chat_stream(
     stream: Any,
     *,
@@ -214,7 +228,7 @@ async def consume_openai_like_chat_stream(
         choice = choices[0]
         delta = _maybe_get(choice, "delta", None)
         text_delta = _content_delta_text(_maybe_get(delta, "content", None))
-        reasoning_delta = _content_delta_text(_maybe_get(delta, "reasoning_content", None))
+        reasoning_delta = _reasoning_delta_text(delta)
         tool_call_deltas = list(_maybe_get(delta, "tool_calls", []) or [])
         if text_delta:
             content_parts.append(text_delta)
