@@ -9433,6 +9433,8 @@ textarea {
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.01em;
     padding-inline: 0.12em;
+    /* 个位数前面是留空而不是零，默认的规则会把前导空格吃掉，宽度预留就白做了。 */
+    white-space: pre;
 }
 
 .task-performance-item--freshness {

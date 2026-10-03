@@ -493,9 +493,9 @@ function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
 function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
     const ageMs = taskWorkerSampleAgeMsLive(metrics);
     if (ageMs == null) return "未采样";
-    // 每档都预留两位数字宽度（99 秒内、59 分内、24 时内都不改胶囊长度），等宽数字
-    // 再由 CSS 的 tabular-nums 保证；不预留的话 9→10 那一跳会把整条性能条推得抖一下。
-    const pad2 = (value) => String(value).padStart(2, "0");
+    // 每档预留两位数字宽度（99 秒内、59 分内、24 时内都不改胶囊宽度），个位数前面
+    // 留空不补零；等宽数字与前导空格由 CSS 的 tabular-nums + white-space: pre 保住。
+    const pad2 = (value) => String(value).padStart(2, " ");
     const seconds = Math.round(ageMs / 1000);
     if (seconds < 100) return `${pad2(seconds)}秒前`;
     const minutes = Math.round(seconds / 60);

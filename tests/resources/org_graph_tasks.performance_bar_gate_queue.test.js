@@ -86,45 +86,45 @@ test("闸位读数缺失时三项都显示 --，不回落到模型侧队列", ()
     assert.ok(html.includes(">--</span>当前容量"), html);
 });
 
-test("刚收到的读数显示 00秒前，不再显示「刚刚更新」", () => {
+test("刚收到的读数显示 0秒前（前导留空），不再显示「刚刚更新」", () => {
     const html = section(createPerfBar({}).render({ ...baseMetrics, pressure_sample_age_ms: 20 }), "监控新鲜度");
-    assert.ok(html.includes(">00秒前<"), html);
+    assert.ok(html.includes("> 0秒前<"), html);
     assert.ok(!html.includes("刚刚更新"), html);
 });
 
 test("读数停更后本地继续走整数秒，并且不切到「监控过期」", () => {
     const metrics = { ...baseMetrics, pressure_sample_age_ms: 1200 };
     const bar = createPerfBar(metrics);
-    assert.ok(section(bar.render(), "监控新鲜度").includes(">01秒前<"));
+    assert.ok(section(bar.render(), "监控新鲜度").includes("> 1秒前<"));
     bar.advanceMs(4000);
     const later = section(bar.render(), "监控新鲜度");
-    assert.ok(later.includes(">05秒前<"), later);
+    assert.ok(later.includes("> 5秒前<"), later);
     assert.ok(!later.includes("监控过期"), later);
     assert.ok(!/\d+\.\d+秒前/.test(later), "新鲜度不显示小数");
 });
 
 test("收到新的更旧读数会重新归零起计", () => {
     const bar = createPerfBar({ ...baseMetrics, pressure_sample_age_ms: 9_400 });
-    assert.ok(section(bar.render(), "监控新鲜度").includes(">09秒前<"));
+    assert.ok(section(bar.render(), "监控新鲜度").includes("> 9秒前<"));
     bar.advanceMs(1000);
-    assert.ok(section(bar.render({ ...baseMetrics, pressure_sample_age_ms: 300 }), "监控新鲜度").includes(">00秒前<"));
+    assert.ok(section(bar.render({ ...baseMetrics, pressure_sample_age_ms: 300 }), "监控新鲜度").includes("> 0秒前<"));
 });
 
 test("更久的断供按整数分钟计时；一次读数都没有时才是未采样", () => {
     const bar = createPerfBar({ ...baseMetrics, pressure_sample_age_ms: 1200 });
     bar.render();
     bar.advanceMs(5 * 60_000);
-    assert.ok(section(bar.render(), "监控新鲜度").includes(">05分钟前<"));
+    assert.ok(section(bar.render(), "监控新鲜度").includes("> 5分钟前<"));
     assert.ok(section(bar.render({ ...baseMetrics }), "监控新鲜度").includes(">未采样<"));
 });
 
 test("9 秒、10 秒与 99 秒渲染出的文本等长：秒表不改变胶囊宽度", () => {
     const texts = [9_400, 10_400, 99_400].map((ageMs) => {
         const html = section(createPerfBar({ ...baseMetrics, pressure_sample_age_ms: ageMs }).render(), "监控新鲜度");
-        const matched = html.match(/>(\d+秒前)</);
+        const matched = html.match(/>([ 0-9][0-9]秒前)</);
         assert.ok(matched, html.slice(0, 200));
         return matched[1];
     });
-    assert.deepEqual(texts, ["09秒前", "10秒前", "99秒前"]);
+    assert.deepEqual(texts, [" 9秒前", "10秒前", "99秒前"]);
     assert.equal(new Set(texts.map((text) => text.length)).size, 1, JSON.stringify(texts));
 });
