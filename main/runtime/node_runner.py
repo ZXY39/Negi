@@ -36,6 +36,7 @@ from main.runtime.acceptance_handshake import (
     ACCEPTANCE_HANDSHAKE_KEY,
     ACCEPTANCE_STATE_ACCEPTED,
     ACCEPTANCE_STATE_CANCELED_BY_EXECUTION_FAILURE,
+    ACCEPTANCE_STATE_IDLE,
     ACCEPTANCE_STATE_REJECTED_TERMINAL,
     ACCEPTANCE_STATE_WAITING_ACCEPTANCE,
     ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
@@ -1293,16 +1294,34 @@ class NodeRunner:
         return acceptance
 
     def _final_acceptance_freeze_reason(self, *, task, node: NodeRecord) -> str:
-        # 仅对"根执行节点的最终验收"生效：被检验节点仍有未消费通知时冻结验收，
-        # 等执行节点消费完通知并重新提交后再放行，避免验收抢跑在最终提交之前。
+        """验收抢跑闸门：还没有可核验的提交时，验收节点不开回合。
+
+        两条判据覆盖面不同：
+        - 所有验收：被检验的执行节点仍非终态，且握手里没有登记过任何提交（state 还是
+          `idle`、也没有 result ref）。验收节点在派发方 spawn 子节点的那一刻就被创建
+          （`_ensure_spawn_acceptance_node`），bootstrap 正文此时必然带的是空交接；
+          让它开回合只能对"什么都没有"下结论，判词通常是「交付物不存在」。而这份终态
+          判词会留在 spawn entry 的 `acceptance_node_id` 上，等被检验节点真正提交时被
+          当成本轮裁定复用。
+        - 只按根节点的最终验收：执行节点还压着未消费通知，需等它消费完并重新提交。
+        """
         if str(getattr(node, 'node_kind', '') or '').strip().lower() != KIND_ACCEPTANCE:
             return ''
         execution = self._accepted_execution_node(task_id=task.task_id, acceptance=node)
         if execution is None:
             return ''
-        if str(getattr(execution, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
-            return ''
         if self._normalized_status(getattr(execution, 'status', '')) in {STATUS_SUCCESS, STATUS_FAILED}:
+            return ''
+        handshake = normalize_acceptance_handshake((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY))
+        if (
+            str(handshake.get('state') or '').strip() == ACCEPTANCE_STATE_IDLE
+            and not str(handshake.get('latest_execution_result_ref') or '').strip()
+        ):
+            return (
+                '验收冻结：被检验执行节点尚未提交可核验的结果，'
+                '需待其提交并登记交接后再继续核验。'
+            )
+        if str(getattr(execution, 'node_id', '') or '').strip() != str(getattr(task, 'root_node_id', '') or '').strip():
             return ''
         execution_node_id = str(getattr(execution, 'node_id', '') or '').strip()
         pending_node_ids = set(self.nodes_with_pending_distribution_notices(task_id=task.task_id))
@@ -1990,7 +2009,7 @@ class NodeRunner:
                     acceptance_node_id=acceptance.node_id,
                     status=ACCEPTANCE_STATE_WAITING_BLOCK_VERIFICATION,
                 )
-            acceptance = self._reset_acceptance_for_blocked_verification(task=task, acceptance=acceptance)
+            acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
             acceptance = self._refresh_acceptance_node_metadata(task=task, node=acceptance)
             self._persist_node_notification_direct(
                 task_id=task_id,
@@ -2127,7 +2146,13 @@ class NodeRunner:
             return accepted_node_id == str(node.node_id or '').strip()
         return str(getattr(acceptance, 'parent_node_id', '') or '').strip() == str(node.node_id or '').strip()
 
-    def _reset_acceptance_for_blocked_verification(self, *, task, acceptance: NodeRecord) -> NodeRecord:
+    def _reset_terminal_acceptance_for_reverify(self, *, task, acceptance: NodeRecord) -> NodeRecord:
+        """将已终态的验收节点作废回 in_progress，让它重新验本轮交付。
+
+        终态验收节点不会再开回合，而它的判词可能是在本轮交付之前下的（空手验收、
+        或上一轮的拒收）。两条车道共用这里：阻塞核验在派验前调用，spawn 验收在
+        复用 entry 已绑定的节点时调用。旧判词先进 `rejection_history` 再清。
+        """
         if self._normalized_status(getattr(acceptance, 'status', '')) not in {STATUS_SUCCESS, STATUS_FAILED}:
             return acceptance
         self._stash_node_verdict_history(acceptance.node_id)
@@ -6462,6 +6487,10 @@ class NodeRunner:
         entry = dict((entries or [])[index] or {})
         acceptance_id = str(entry.get('acceptance_node_id') or '').strip()
         acceptance = self._store.get_node(acceptance_id) if acceptance_id else None
+        if acceptance is not None:
+            # 绑定的验收节点可能已是终态：那是它更早（甚至对着空交接）下的结论，
+            # 不能当成本轮裁定。先作废回 in_progress，本轮交付才有人重验。
+            acceptance = self._reset_terminal_acceptance_for_reverify(task=task, acceptance=acceptance)
         if acceptance is None:
             acceptance_goal = _spawn_acceptance_goal(spec.goal)
             acceptance_prompt = str(spec.acceptance_prompt or '')
