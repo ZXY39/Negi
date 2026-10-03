@@ -469,25 +469,27 @@ function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
     return ageMs <= 3000 && metrics?.machine_pressure_available !== false;
 }
 
-// 新鲜度是一根只走整数的秒表：服务端算出的年龄 <1s 就是"刚收到新读数"，计数归零重起；
-// 其余时间在本地累加，所以读数停更后数字照旧往上走，也只报"多久之前"，不切成
-// 不带时长的说法——操作员要判断的是断了多久。整数意味着 1s 的刷新节拍就够，不必另起
-// 一条更快的钟。
-const TASK_PERF_FRESH_RESET_MS = 1000;
-
+// 新鲜度量的是「距离上一次收到新读数过了多久」：读数身份（pressure_sample_at）一变就归零重计，
+// 身份不变只在本地累加；读数断了数字照旧往上走，也不切「刚刚更新」/「监控过期」这类不带时长的
+// 文案——操作员要判断的是断了多久。归零的判据必须是读数的身份，不能拿读数的年龄当阈值：心跳
+// 1–2s 一拍、时间戳又只有整秒精度，实盘 REST 回来的年龄恒定在 2.4s 上下，「年龄 <1s」永不会命中。
 function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
-    const serverAgeMs = taskWorkerPressureSampleAgeMs(metrics);
-    if (serverAgeMs == null) {
+    const sampleAt = String(metrics?.pressure_sample_at || metrics?.tool_pressure_sample_at || "").trim();
+    const reportedAgeMs = Number(metrics?.pressure_sample_age_ms);
+    if (!sampleAt && !Number.isFinite(reportedAgeMs)) {
         S.taskPerfFreshness = null;
         return null;
     }
     const nowMs = Date.now();
     const anchor = S.taskPerfFreshness;
-    if (!anchor || serverAgeMs < TASK_PERF_FRESH_RESET_MS || serverAgeMs > anchor.serverAgeMs) {
-        S.taskPerfFreshness = { baseMs: serverAgeMs, atMs: nowMs, serverAgeMs };
-        return serverAgeMs;
+    // 没有身份串时只认「年龄变小」这一件事：同一份读数只会越走越旧，变年轻只可能是来了新读数。
+    const isNewReading = !anchor
+        || (sampleAt ? sampleAt !== anchor.sampleAt : reportedAgeMs < anchor.reportedAgeMs);
+    if (isNewReading) {
+        S.taskPerfFreshness = { sampleAt, reportedAgeMs, atMs: nowMs };
+        return 0;
     }
-    return anchor.baseMs + (nowMs - anchor.atMs);
+    return nowMs - anchor.atMs;
 }
 
 function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
