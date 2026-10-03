@@ -454,25 +454,20 @@ function taskWorkerStatusMetrics() {
     return { ...workerPayload, ...topLevel };
 }
 
-function taskWorkerPressureSampleAgeMs(metrics = taskWorkerStatusMetrics()) {
-    const sampleAt = String(metrics?.pressure_sample_at || metrics?.tool_pressure_sample_at || "").trim();
-    const parsedMs = sampleAt ? Date.parse(sampleAt) : Number.NaN;
-    if (Number.isFinite(parsedMs)) return Math.max(0, Date.now() - parsedMs);
-    const rawAge = Number(metrics?.pressure_sample_age_ms);
-    return Number.isFinite(rawAge) && rawAge >= 0 ? rawAge : null;
-}
+// 读数身份超过 15s 没变才算停更：实盘正常节拍是心跳 1–2s 一拍，WS 断了退到 5s 轮询再叠加
+// 秒级截断也才 7s 上下。旧的「服务端年龄 ≤3s」量的其实是这条流水线本身的多长，读数一直在
+// 更新也会翻成过期，所以压力状态改与新鲜度共用同一根按身份归零的秒表。
+const TASK_PRESSURE_STALE_AFTER_MS = 15_000;
 
 function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
-    if (metrics?.pressure_snapshot_fresh != null) return !!metrics.pressure_snapshot_fresh;
-    const ageMs = taskWorkerPressureSampleAgeMs(metrics);
-    if (ageMs == null) return false;
-    return ageMs <= 3000 && metrics?.machine_pressure_available !== false;
+    const ageMs = taskWorkerSampleAgeMsLive(metrics);
+    return ageMs != null && ageMs < TASK_PRESSURE_STALE_AFTER_MS;
 }
 
 // 新鲜度量的是「距离上一次收到新读数过了多久」：读数身份（pressure_sample_at）一变就归零重计，
-// 身份不变只在本地累加；读数断了数字照旧往上走，也不切「刚刚更新」/「监控过期」这类不带时长的
-// 文案——操作员要判断的是断了多久。归零的判据必须是读数的身份，不能拿读数的年龄当阈值：心跳
-// 1–2s 一拍、时间戳又只有整秒精度，实盘 REST 回来的年龄恒定在 2.4s 上下，「年龄 <1s」永不会命中。
+// 身份不变只在本地累加；读数断了数字照旧往上走，也不切成「刚刚更新」这类不带时长的说法——
+// 操作员要判断的是断了多久。归零的判据必须是读数的身份，不能拿读数的年龄当阈值：心跳 1–2s 一拍、
+// 时间戳又只有整秒精度，实盘 REST 回来的年龄恒定在 2.4s 上下，「年龄 <1s」永不会命中。
 function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
     const sampleAt = String(metrics?.pressure_sample_at || metrics?.tool_pressure_sample_at || "").trim();
     const reportedAgeMs = Number(metrics?.pressure_sample_age_ms);
@@ -492,17 +487,22 @@ function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
     return nowMs - anchor.atMs;
 }
 
+// 时长只算一次，两枚胶囊各说各的：新鲜度报「多久之前的读数」，压力状态报「停更多久」。
+function taskWorkerAgeParts(ageMs) {
+    const seconds = Math.round(ageMs / 1000);
+    if (seconds < 100) return { value: seconds, unit: "秒" };
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 100) return { value: minutes, unit: "分钟" };
+    return { value: Math.round(minutes / 60), unit: "小时" };
+}
+
 function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
     const ageMs = taskWorkerSampleAgeMsLive(metrics);
     if (ageMs == null) return "未采样";
     // 每档预留两位数字宽度（99 秒内、59 分内、24 时内都不改胶囊宽度），个位数前面
     // 留空不补零；等宽数字与前导空格由 CSS 的 tabular-nums + white-space: pre 保住。
-    const pad2 = (value) => String(value).padStart(2, " ");
-    const seconds = Math.round(ageMs / 1000);
-    if (seconds < 100) return `${pad2(seconds)}秒前`;
-    const minutes = Math.round(seconds / 60);
-    if (minutes < 100) return `${pad2(minutes)}分钟前`;
-    return `${pad2(Math.round(minutes / 60))}小时前`;
+    const parts = taskWorkerAgeParts(ageMs);
+    return `${String(parts.value).padStart(2, " ")}${parts.unit}前`;
 }
 
 function formatTaskWorkerPercent(value) {
@@ -531,7 +531,13 @@ function taskWorkerPressureStateMeta(metrics = taskWorkerStatusMetrics()) {
     if (workerState === "offline" || workerState === "stopped") return { key: "offline", label: "离线" };
     if (workerState === "starting") return { key: "starting", label: "启动中" };
     if (workerState === "stale") return { key: "stale", label: "连接过期" };
-    if (!taskWorkerPressureSnapshotFresh(metrics)) return { key: "unfresh", label: "监控过期" };
+    if (metrics?.machine_pressure_available === false) return { key: "unfresh", label: "无资源读数" };
+    if (!taskWorkerPressureSnapshotFresh(metrics)) {
+        const ageMs = taskWorkerSampleAgeMsLive(metrics);
+        if (ageMs == null) return { key: "unfresh", label: "未采样" };
+        const parts = taskWorkerAgeParts(ageMs);
+        return { key: "unfresh", label: `停更${parts.value}${parts.unit}` };
+    }
     const state = String(metrics?.budget_state || metrics?.tool_pressure_state || metrics?.worker_execution_state || "normal").trim().toLowerCase();
     if (state === "critical") return { key: "critical", label: "强收紧" };
     if (state === "throttled") return { key: "throttled", label: "收紧中" };

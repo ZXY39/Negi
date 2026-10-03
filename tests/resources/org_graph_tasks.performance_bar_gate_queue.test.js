@@ -10,7 +10,8 @@ const vm = require("node:vm");
 //    4000 拍里 3986 拍为 0，其中 662 拍闸已贴顶），当不了「等待」的读数；数字也不许叠成
 //    `N/M`——分不清哪个是占用、哪个是天花板。
 // 2)「监控新鲜度」量「距离上一次收到新读数过了多久」：读数身份 pressure_sample_at 一变就归零
-//    重计，身份不变只在本地累加；不切「刚刚更新」/「监控过期」这类不带时长的文案。
+//    重计，身份不变只在本地累加；不切「刚刚更新」这类不带时长的文案。「压力状态」用同一根秒表
+//    判停更（≥15s 才翻），标签带时长。
 
 const TASKS_PATH = "g3ku/web/frontend/org_graph_tasks.js";
 const TASKS_CODE = fs.readFileSync(TASKS_PATH, "utf8");
@@ -113,7 +114,7 @@ test("刚收到新读数显示 0秒前（前导留空），不再显示「刚刚
     assert.ok(!html.includes("刚刚更新"), html);
 });
 
-test("读数身份没变时本地继续走整数秒，并且不切到「监控过期」", () => {
+test("读数身份没变时本地继续走整数秒，也不换成无时长的说法", () => {
     const bar = createPerfBar(beat(0));
     assert.equal(freshnessValue(freshness(bar)), " 0秒前");
     bar.advanceMs(4_000);
@@ -163,4 +164,37 @@ test("9 秒、10 秒与 99 秒渲染出的文本等长：秒表不改变胶囊�
     });
     assert.deepEqual(texts, [" 9秒前", "10秒前", "99秒前"]);
     assert.equal(new Set(texts.map((text) => text.length)).size, 1, JSON.stringify(texts));
+});
+
+// 「压力状态」与新鲜度共用同一根按读数身份归零的秒表：服务端那枚 pressure_snapshot_fresh
+// 量的是「年龄 ≤3s」，实盘年龄稳态就有 2.4s，读数一直在更新也会翻成过期。
+function pressureLabel(bar, metrics) {
+    return section(bar.render(metrics), "压力状态").match(/task-performance-value">([^<]*)</)[1];
+}
+
+test("读数持续更新时压力状态照报状态，不受服务端过期标记影响", () => {
+    const bar = createPerfBar({ ...beat(0), pressure_snapshot_fresh: false }, BASE_NOW_MS);
+    assert.equal(pressureLabel(bar), "正常");
+    for (let index = 1; index <= 6; index += 1) {
+        bar.advanceMs(1_000);
+        assert.equal(pressureLabel(bar, { ...beat(index), pressure_snapshot_fresh: false }), "正常");
+    }
+    assert.ok(!bar.render().includes("监控过期"), "整条性能条不再出现「监控过期」");
+});
+
+test("读数身份 15 秒没变，压力状态改报停更时长", () => {
+    const bar = createPerfBar(beat(0), BASE_NOW_MS);
+    assert.equal(pressureLabel(bar), "正常");
+    bar.advanceMs(14_000);
+    assert.equal(pressureLabel(bar), "正常");
+    bar.advanceMs(2_000);
+    assert.equal(pressureLabel(bar), "停更16秒");
+    assert.equal(freshnessValue(freshness(bar)), "16秒前");
+});
+
+test("机器资源读数缺失时不谎报停更", () => {
+    const bar = createPerfBar({ ...beat(0), machine_pressure_available: false }, BASE_NOW_MS);
+    assert.equal(pressureLabel(bar), "无资源读数");
+    bar.advanceMs(2_000);
+    assert.equal(pressureLabel(bar, { ...beat(2), machine_pressure_available: false }), "无资源读数");
 });
