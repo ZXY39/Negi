@@ -469,9 +469,10 @@ function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
     return ageMs <= 3000 && metrics?.machine_pressure_available !== false;
 }
 
-// 新鲜度是一根自己往前走的秒表：服务端算出的年龄 <1s 就是"刚收到新读数"，计数归零
-// 重起；其余时间在本地累加，心跳与心跳之间也继续走字。读数停更时同样只报"多久之前"，
-// 不切成不带时间的说法——操作员要判断的是断了多久。
+// 新鲜度是一根只走整数的秒表：服务端算出的年龄 <1s 就是"刚收到新读数"，计数归零重起；
+// 其余时间在本地累加，所以读数停更后数字照旧往上走，也只报"多久之前"，不切成
+// 不带时长的说法——操作员要判断的是断了多久。整数意味着 1s 的刷新节拍就够，不必另起
+// 一条更快的钟。
 const TASK_PERF_FRESH_RESET_MS = 1000;
 
 function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
@@ -492,10 +493,14 @@ function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
 function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
     const ageMs = taskWorkerSampleAgeMsLive(metrics);
     if (ageMs == null) return "未采样";
-    if (ageMs < 60_000) return `${(ageMs / 1000).toFixed(1)}秒前`;
-    const minutes = ageMs / 60_000;
-    if (minutes < 60) return `${minutes < 10 ? minutes.toFixed(1) : Math.round(minutes)}分钟前`;
-    return `${Math.round(minutes / 60)}小时前`;
+    // 每档都预留两位数字宽度（99 秒内、59 分内、24 时内都不改胶囊长度），等宽数字
+    // 再由 CSS 的 tabular-nums 保证；不预留的话 9→10 那一跳会把整条性能条推得抖一下。
+    const pad2 = (value) => String(value).padStart(2, "0");
+    const seconds = Math.round(ageMs / 1000);
+    if (seconds < 100) return `${pad2(seconds)}秒前`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 100) return `${pad2(minutes)}分钟前`;
+    return `${pad2(Math.round(minutes / 60))}小时前`;
 }
 
 function formatTaskWorkerPercent(value) {
@@ -559,9 +564,10 @@ function renderTaskPerformanceBar() {
     const diskStateSuffix = diskEmergency ? " · 紧急" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
     const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
-    // 「节点队列」这一段量的是回合闸：等待取闸口排队数（entry_gate_queued_total），
-    // 运行取占住的闸位并带上容量。node_queue_waiting_count 量的是过闸之后等模型
-    // permit 的队列，闸收紧时节点还卡在闸口、它恒 0，当不了「等请求位」的读数。
+    // 「节点队列」这一段量的是回合闸：运行=占住的闸位数，等待=闸口排队数，当前容量=
+    // 闸现在开多大（不是上限）。node_queue_waiting_count 量的是过闸之后等模型 permit 的
+    // 队列，闸收紧时节点还卡在闸口、它恒 0，当不了「等请求位」的读数。三个数各带标签，
+    // 不叠成 `N/M`——那样读的人分不清哪个是占用、哪个是天花板。
     const gateRunningText = queueMetricCount(metrics?.entry_gate_running_total);
     const gateCapacityText = queueMetricCount(metrics?.entry_gate_limits_total);
     const gateWaitingText = queueMetricCount(metrics?.entry_gate_queued_total);
@@ -581,11 +587,11 @@ function renderTaskPerformanceBar() {
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">节点队列</span>
-            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(gateRunningText)}/${esc(gateCapacityText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(gateWaitingText)}</span>等待</strong>
+            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(gateRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(gateWaitingText)}</span>等待 / <span class="task-performance-count">${esc(gateCapacityText)}</span>当前容量</strong>
         </div>
-        <div class="task-performance-item">
+        <div class="task-performance-item task-performance-item--freshness">
             <span class="task-performance-label">监控新鲜度</span>
-            <strong class="task-performance-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
+            <strong class="task-performance-value task-performance-age-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
         </div>
     `;
 }
@@ -2447,14 +2453,6 @@ function startTaskWorkerStatusPolling() {
             ensureTaskListVisibleReconcile();
         }, 1000);
     }
-    if (!S.taskPerformanceTickId) {
-        // 新鲜度那格是一位小数的秒表，1s 的刷新会让它每步跳 1.0；这条 100ms 的钟只重画
-        // 性能条本身（不碰任务网格签名，所以不会重建网格、不拽滚动位置）。
-        S.taskPerformanceTickId = window.setInterval(() => {
-            if (!U.taskPerformanceBar || U.taskPerformanceBar.hidden) return;
-            renderTaskPerformanceBar();
-        }, 100);
-    }
 }
 
 function stopTaskWorkerStatusPolling() {
@@ -2465,10 +2463,6 @@ function stopTaskWorkerStatusPolling() {
     if (S.taskPerformanceRefreshId) {
         window.clearInterval(S.taskPerformanceRefreshId);
         S.taskPerformanceRefreshId = null;
-    }
-    if (S.taskPerformanceTickId) {
-        window.clearInterval(S.taskPerformanceTickId);
-        S.taskPerformanceTickId = null;
     }
 }
 
