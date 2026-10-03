@@ -429,11 +429,16 @@ schema churn 停止后命中仍低时，先比较相邻节点 actual-request art
 
 对于节点上下文策略，建议新增或保留以下检查：每一次实际 provider 调用都应落 artifact；artifact 中应包含 request projection、provider transport payload、tool schemas、prompt-cache diagnostics。否则后续排 cache miss 时很难判断到底是哪一跳出了问题。
 
+### 6.8 行上的扩展字段必须与投影、诊断哈希、线上体同源
+
+给 assistant 行加字段（思考内容就是这一类）时，同一份字段集合必须在三处一致：durable 基线投影、进 `sanitize_provider_messages` 的诊断输入、真正发出的消息体。任何一处多带或少带，跨轮可比性判据（`comparable_to_previous_request`）与 usage-first 估算会静默退化，或让线上体与 artifact 分叉，而外表看不出异常。判据与写入也必须分开：决定"写不写进行"的闸门放在落盘点，咽喉点只做无条件透传——把策略塞进咽喉点就会让同一份历史在不同模型上给出不同形状。契约本体见 `runtime-overview.md`「思考内容（reasoning）的上下文回放」。
+
 ## 7. 建议的测试矩阵
 
 测试矩阵至少逐条覆盖 §3 所列每个坑对应的不变量（含 §6.5 的 same-turn / fresh-turn 两套断言），另需覆盖：
 
 - `provider_request_body.input` 与高层 `request_messages` 的前缀对比结论不能长期分叉。
+- 同一批消息连过两次投影必须逐字节相同（含行上的扩展字段），否则诊断哈希与线上体分叉。
 - usage 记录与 request artifact 必须能在时间线层面对得上。
 - 非 `token_compression` / `stage_compaction` 的 shrink 一律视为失败（唯一例外：因去累积从历史中剥掉 turn-only note / 已膨胀的旧契约且真实 transcript 未缩短，经 note 中性化比较后不算非法）。
 

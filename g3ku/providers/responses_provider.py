@@ -174,7 +174,7 @@ class ResponsesProvider(LLMProvider):
         # {"type":"function","function":{"name":X}}; rewrite it to the flat form
         # this protocol requires before building the request body.
         tool_choice = normalize_forced_function_tool_choice(tool_choice, protocol="responses")
-        system_prompt, input_items = _convert_messages(messages)
+        system_prompt, input_items = _convert_messages(messages, model=model)
         api_key = str(self.api_key or "").strip()
         if not api_key:
             raise ValueError(
@@ -252,7 +252,7 @@ class ResponsesProvider(LLMProvider):
                     consume_kwargs: dict[str, Any] = {}
                     if on_text_delta is not None:
                         consume_kwargs["on_text_delta"] = on_text_delta
-                    content, tool_calls, finish_reason, usage = await _consume_sse(
+                    content, tool_calls, finish_reason, usage, reasoning_items = await _consume_sse(
                         diagnostics,
                         **consume_kwargs,
                     )
@@ -262,6 +262,7 @@ class ResponsesProvider(LLMProvider):
                         tool_calls=tool_calls,
                         finish_reason=finish_reason,
                         usage=usage,
+                        reasoning_items=reasoning_items,
                         provider_request_meta=provider_request_meta,
                         provider_request_body=provider_request_body,
                         visible_text_streamed=diagnostics._diagnostics.first_text_delta_received_at is not None,

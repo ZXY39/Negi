@@ -362,6 +362,12 @@ Routes live at `/api/bootstrap/config-bundle/{export,download,import}` in `main/
 
 Runtime gating of image uploads by this flag: 详见 `web-and-admin.md`「Image Upload Gating」.
 
+## Reasoning Context Binding Flag
+
+`models.catalog[]` carries a third binding-owned flag: `reasoning_context_enabled` (`reasoningContextEnabled` in saved JSON / admin payload aliases), default `false`, same no-backfill and same binding-layer rules as `imageMultimodalEnabled` (it lives in `.g3ku/config.json`, never in `.g3ku/llm-config/records/*.json`).
+
+It declares that this binding accepts its own thinking content being replayed back to it as `reasoning_content` on the assistant history row. The runtime writes the field only when **every** binding in the resolved model chain enables it, because a row once persisted is re-sent to whichever chain member answers later hops, and a gateway that rejects the field answers 400/422 — which this codebase treats as a request-shape fault that skips the remaining keys and advances straight to the next model. The write gate lives at the history-append point; the send-side sanitizer only passes the field through, so request hashes, preflight estimates and the wire body stay identical. Contract body: 详见 `runtime-overview.md`「思考内容（reasoning）的上下文回放」.
+
 ## Model Request Parameter Defaults
 
 Per-model generation parameters (`max_tokens`, `temperature`, `reasoning_effort`) and the per-attempt request timeout (`request_timeout_seconds`) are resolved from the llm-config record's `parameters` and applied to every provider request.

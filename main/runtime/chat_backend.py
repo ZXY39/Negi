@@ -319,6 +319,22 @@ def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[di
             continue
         if role == 'assistant':
             payload['content'] = content
+            # 思考内容按原位置随行重发。这里不带模型策略参数、只做无条件透传，是为了让
+            # actual_request_hash / dynamic_appendix_hash / preflight 估算与线上体同源；
+            # 决定「写不写进行」的闸门在落盘点，不在这条咽喉点。
+            reasoning = item.get('reasoning_content')
+            if isinstance(reasoning, str) and reasoning.strip():
+                payload['reasoning_content'] = reasoning
+            reasoning_items = [
+                entry
+                for entry in list(item.get('reasoning_items') or [])
+                if isinstance(entry, dict)
+            ]
+            if reasoning_items:
+                payload['reasoning_items'] = reasoning_items
+            # 思考内容按原位置随行重发。这里不带模型策略参数、只做无条件透传，是为了让
+            # actual_request_hash / dynamic_appendix_hash / preflight 估算与线上体同源；
+            # 决定「写不写进行」的闸门在落盘点，不在这条咽喉点。
             tool_calls = _normalize_provider_tool_calls(item.get('tool_calls'))
             if tool_calls:
                 payload['tool_calls'] = tool_calls
@@ -344,6 +360,27 @@ def sanitize_provider_messages(messages: list[dict[str, Any]] | None) -> list[di
             payload['name'] = name
         sanitized.append(payload)
     return sanitized
+
+
+def model_chain_replays_reasoning(config: Config, model_refs: list[str] | None) -> bool:
+    """这条请求的思考能否写进 assistant 历史行：解析出的候选链每一位都开启才算允许。
+
+    按整条链而不是按实际应答那一位判定：行一旦落库就会被后续每一跳原样重发，其中包含降级
+    到链上其他位的那些跳。按应答位判定会让上一跳的合法形状变成这一跳的畸形请求，而 400/422
+    在这里按请求形状错误处理——跳过同模型其余 key、直接前进下一个模型。只读内存里的 managed
+    profile，不构造 provider target。
+    """
+    refs = [str(item or '').strip() for item in list(model_refs or []) if str(item or '').strip()]
+    if not refs:
+        return False
+    profile_of = getattr(config, 'get_model_runtime_profile', None)
+    if not callable(profile_of):
+        return False
+    for ref in refs:
+        profile = profile_of(ref)
+        if profile is None or not bool(getattr(profile, 'reasoning_context_enabled', False)):
+            return False
+    return True
 
 
 def _tool_signature(tools: list[dict] | None) -> list[dict[str, object]]:
@@ -1338,6 +1375,9 @@ class ConfigChatBackend:
                         response.usage = normalize_usage_payload(response.usage)
                         response.request_message_count = request_message_count
                         response.request_message_chars = request_message_chars
+                        response.reasoning_context_allowed = model_chain_replays_reasoning(
+                            self._config, refs
+                        )
                         response_attempts = _normalize_model_attempts(response.attempts)
                         if not response_attempts:
                             response_attempts = [

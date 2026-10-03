@@ -18,7 +18,21 @@ from g3ku.json_schema_utils import to_openai_tool_definition
 
 def _as_message_dicts(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
     converted = convert_to_openai_messages(messages, text_format="string", include_id=False)
-    return [converted] if isinstance(converted, dict) else list(converted)
+    dicts = [converted] if isinstance(converted, dict) else list(converted)
+    # convert_to_openai_messages 丢 additional_kwargs（实测：入向 convert_to_messages 会把
+    # reasoning_content 收进 additional_kwargs，出向不回贴）。不在这一步补回，跨跳思考就会
+    # 在每一次 LangChain 转换时被抹平，且必须按原位补回——顺序本身就是这条契约。
+    for message, payload in zip(messages, dicts, strict=False):
+        if not isinstance(payload, dict) or payload.get("role") != "assistant":
+            continue
+        extra = getattr(message, "additional_kwargs", None) or {}
+        reasoning = extra.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            payload["reasoning_content"] = reasoning
+        items = extra.get("reasoning_items")
+        if isinstance(items, list) and items:
+            payload["reasoning_items"] = [dict(item) for item in items if isinstance(item, dict)]
+    return dicts
 
 
 def _normalize_tool_choice(value: Any) -> str | dict[str, Any] | None:
@@ -150,6 +164,10 @@ class G3kuChatModelAdapter(BaseChatModel):
             additional_kwargs["reasoning_content"] = response.reasoning_content
         if getattr(response, "thinking_blocks", None):
             additional_kwargs["thinking_blocks"] = response.thinking_blocks
+        if getattr(response, "reasoning_items", None):
+            additional_kwargs["reasoning_items"] = response.reasoning_items
+        if getattr(response, "reasoning_context_allowed", False):
+            additional_kwargs["reasoning_context_allowed"] = True
         if getattr(response, "stream_incomplete", False):
             additional_kwargs["stream_incomplete"] = True
 

@@ -239,6 +239,10 @@ class ManagedModelConfig(Base):
     # 看门狗与流式首块/块间空闲超时。
     request_timeout_seconds: float | None = None
     image_multimodal_enabled: bool = False
+    # 是否把该 binding 回包的思考内容写进 assistant 历史行并重发给模型（config.json 里写作
+    # reasoningContextEnabled）。operator 显式声明、默认关；实际写不写按整条模型链取交集，
+    # 判据见 main/runtime/chat_backend.py 的 model_chain_replays_reasoning。
+    reasoning_context_enabled: bool = False
     # 显式声明「这条 binding 与哪些 binding 共享上游配额账户」。只由 operator 填写：
     # 运行时不按 provider 名称或 endpoint 猜测共享，猜错会把两个独立配额当一个用。
     quota_pool_key: str | None = None
