@@ -284,6 +284,18 @@ function taskMetricSnapshotValue(task) {
     } : null;
 }
 
+// 卡片上的 token 数最多到 10 位（实盘 task:1d9cddf9858e 缓存 1,703,800,704），而一次
+// 模型调用只动最低几位（同任务实测 delta：缓存 8,192–143,872 / 输入 1,595–72,670）。
+// 整串呼吸等于让没变的位数也跳，所以按位对齐新旧文本，只给换了的那几位挂动画。
+function taskMetricValueMarkup(formatted, previousFormatted) {
+    const text = String(formatted);
+    const previous = previousFormatted ? String(previousFormatted) : "";
+    if (!previous || previous === text) return esc(text);
+    return text.split("").map((char, index) => (
+        previous[index] === char ? esc(char) : `<span class="pc-metric-digit is-increasing">${esc(char)}</span>`
+    )).join("");
+}
+
 function taskCardPatchEligible(previousTask, nextTask) {
     if (!previousTask || !nextTask) return false;
     return String(previousTask.status || "") === String(nextTask.status || "")
@@ -325,23 +337,18 @@ function patchTaskCardElement(taskId) {
     const tokenUsage = taskTokenDisplayUsage(task);
     const previousMetrics = S.taskMetricSnapshot?.[key] || null;
     const nextMetrics = taskMetricSnapshotValue(task);
-    const breathingEls = [];
     ["input_tokens", "output_tokens", "cache_hit_tokens"].forEach((metricKey) => {
         const valueEl = card.querySelector(`[data-task-metric-value="${metricKey}"]`);
         if (!valueEl) return;
         const metricValue = tokenUsage.tracked ? Number(tokenUsage[metricKey] || 0) : null;
         const previousValue = previousMetrics && Number.isFinite(previousMetrics[metricKey]) ? previousMetrics[metricKey] : null;
         const isIncreasing = previousValue !== null && Number.isFinite(metricValue) && metricValue > previousValue;
-        valueEl.textContent = Number.isFinite(metricValue) ? formatTokenCount(metricValue) : "--";
-        valueEl.classList.remove("is-increasing");
-        if (isIncreasing) breathingEls.push(valueEl);
+        // 逐位重写会把数字换成新的 span，动画天生重播，不再需要摘 class 后强制重排。
+        valueEl.innerHTML = taskMetricValueMarkup(
+            Number.isFinite(metricValue) ? formatTokenCount(metricValue) : "--",
+            isIncreasing ? formatTokenCount(previousValue) : "",
+        );
     });
-    if (breathingEls.length) {
-        // 连续增长时 class 一直挂着，CSS animation 不会重放；先摘掉 class、
-        // 每张卡片只强制一次重排，再挂回，保证每次增长都呼吸一轮。
-        void card.offsetWidth;
-        breathingEls.forEach((el) => el.classList.add("is-increasing"));
-    }
     S.taskMetricSnapshot = {
         ...(S.taskMetricSnapshot || {}),
         [key]: nextMetrics,
@@ -913,7 +920,11 @@ function renderTasks() {
             const hasValue = Number.isFinite(item.value);
             const previousValue = previousMetrics && Number.isFinite(previousMetrics[item.key]) ? previousMetrics[item.key] : null;
             const isIncreasing = metricAnimationTaskIds.has(taskId) && previousValue !== null && hasValue && item.value > previousValue;
-            return `<div class="pc-metric" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value${isIncreasing ? " is-increasing" : ""}" data-task-metric-value="${item.key}">${esc(hasValue ? formatTokenCount(item.value) : "--")}</strong></div>`;
+            const valueMarkup = taskMetricValueMarkup(
+                hasValue ? formatTokenCount(item.value) : "--",
+                isIncreasing ? formatTokenCount(previousValue) : "",
+            );
+            return `<div class="pc-metric" data-task-metric="${item.key}"><span class="pc-metric-label">${item.label}</span><strong class="pc-metric-value" data-task-metric-value="${item.key}">${valueMarkup}</strong></div>`;
         }).join("");
         const cardActions = taskCardActions(task);
         const el = document.createElement("div");

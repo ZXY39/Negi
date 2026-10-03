@@ -8950,7 +8950,9 @@ textarea {
     font-variant-numeric: tabular-nums;
 }
 
-.pc-metric-value.is-increasing {
+/* 增长提示只落在本轮真的换了的那几位上（taskMetricValueMarkup 按位对齐新旧文本），
+   未变的前缀保持正文色，所以动画挂在数字位而非整个数值元素上。 */
+.pc-metric-digit.is-increasing {
     animation: pc-token-breathe 1200ms ease-in-out;
 }
 
@@ -8970,7 +8972,7 @@ textarea {
 /* 增长提示要在每一帧补丁上都看得见，所以不进全局 reduce 静默；
    reduce 下只去掉光晕，保留明暗本身的淡入淡出。 */
 @media (prefers-reduced-motion: reduce) {
-    .pc-metric-value.is-increasing {
+    .pc-metric-digit.is-increasing {
         animation: pc-token-breathe 1200ms ease-in-out !important;
         text-shadow: none !important;
     }
