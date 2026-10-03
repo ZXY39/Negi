@@ -95,6 +95,21 @@ _REJECTION_HISTORY_KEY = 'rejection_history'
 # 交给验收节点的交付正文一律只给指针 + 有界摘要：验收节点按 ref 复核当前提交，
 # 而不是靠上下文里堆着的历次全文。
 _ACCEPTANCE_SUMMARY_CHARS = 2000
+
+# 冻结不是裁定。闸门返回的是 `success + partial`，而 `_handle_acceptance_node_result`
+# 的首分支只看 `status == success`：不加识别就会把「还没验」结算成一次通过（握手
+# `accepted`，根验收还会把任务写 `passed` 并终态化）。前缀集中在这里，生产端与
+# 消费端共用，不做散文匹配。
+ACCEPTANCE_FREEZE_PREFIX = '验收冻结：'
+FINAL_ACCEPTANCE_FREEZE_PREFIX = '最终验收冻结：'
+ACCEPTANCE_FREEZE_PREFIXES = (ACCEPTANCE_FREEZE_PREFIX, FINAL_ACCEPTANCE_FREEZE_PREFIX)
+
+
+def is_acceptance_freeze_result(result: Any) -> bool:
+    """这条 partial 表示「还没验」，不是一次裁定。"""
+    if str(getattr(result, 'delivery_status', '') or '').strip().lower() != 'partial':
+        return False
+    return str(getattr(result, 'summary', '') or '').strip().startswith(ACCEPTANCE_FREEZE_PREFIXES)
 _BLOCKED_VERIFICATION_FALLBACK_PROMPT = (
     '核验被检验执行节点提交的 failed+blocked 阻塞声明是否成立：'
     '阻塞成立返回 success 并附证据；阻塞不成立返回 failed+final，'
@@ -1329,7 +1344,7 @@ class NodeRunner:
             or not str(handshake.get('latest_execution_result_ref') or '').strip()
         ):
             return (
-                '验收冻结：被检验执行节点没有待裁定的闭合提交，'
+                f'{ACCEPTANCE_FREEZE_PREFIX}被检验执行节点没有待裁定的闭合提交，'
                 '需待其提交 final 结果并登记交接后再继续核验。'
             )
         if execution_node_id != str(getattr(task, 'root_node_id', '') or '').strip():
@@ -1338,7 +1353,7 @@ class NodeRunner:
         if execution_node_id not in pending_node_ids:
             return ''
         return (
-            '最终验收冻结：被检验执行节点仍有未消费通知，'
+            f'{FINAL_ACCEPTANCE_FREEZE_PREFIX}被检验执行节点仍有未消费通知，'
             '需待其消费通知并重新提交后再继续核验。'
         )
 
@@ -1757,6 +1772,10 @@ class NodeRunner:
         acceptance: NodeRecord,
         result: NodeFinalResult,
     ) -> NodeFinalResult:
+        if is_acceptance_freeze_result(result):
+            # 还没验，不是裁定：不写 accepted / passed，也不计一次拒收，原样退回给
+            # 调用方去等对方闭合提交（暂停一条在飞验收轮后再恢复就走这条）。
+            return result
         execution = self._accepted_execution_node(task_id=task.task_id, acceptance=acceptance)
         handshake = normalize_acceptance_handshake(((execution.metadata or {}).get(ACCEPTANCE_HANDSHAKE_KEY) if execution is not None else {}))
         try:
@@ -5963,9 +5982,11 @@ class NodeRunner:
                         runtime_error_text='',
                     )
                     return result
-                if precheck_reason:
+                if precheck_reason or is_acceptance_freeze_result(acceptance_result):
                     # 只是等对方闭合，没有拒收要反馈：新一轮交付到达后回到循环顶部
-                    # 重新判定，那时握手登记的就是这次的提交。
+                    # 重新判定，那时握手登记的就是这次的提交。后半条覆盖本轮协程被
+                    # 暂停后又恢复的形态——恢复那次在闸门上返回冻结，而父协程正等着
+                    # 它的 future，结果不经循环顶部直接回到这里。
                     continue
                 # 打回后的重提交到达：先作废验收节点上下文中来自本执行节点的旧
                 # 交接通知，再以显式消息把新交付交给验收节点续验（对齐根节点最终

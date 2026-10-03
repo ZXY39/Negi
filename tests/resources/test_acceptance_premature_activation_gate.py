@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 from main.models import NodeFinalResult, NodeRecord
 from main.protocol import now_iso
 from main.runtime.acceptance_handshake import ACCEPTANCE_HANDSHAKE_KEY
-from main.runtime.node_runner import NodeRunner
+from main.runtime.node_runner import NodeRunner, is_acceptance_freeze_result
 
 TASK_ID = 'task:gate'
 ROOT_ID = 'node:root'
@@ -276,3 +276,53 @@ def test_child_pipeline_waits_instead_of_consuming_a_frozen_acceptance() -> None
     # 等待轮没有拒收，所以不该发续接通知
     runner._persist_node_notification_direct.assert_not_called()
     runner._supersede_consumed_notices_from_source.assert_not_called()
+
+
+def _consume(runner: NodeRunner, result: NodeFinalResult) -> NodeFinalResult:
+    passed: list[str] = []
+    runner._finalize_acceptance_pass = lambda **kwargs: passed.append('pass')  # type: ignore[attr-defined]
+    runner._record_acceptance_evidence_audit = lambda **kwargs: None  # type: ignore[attr-defined]
+    runner._consumed_passes = passed  # type: ignore[attr-defined]
+    return runner._handle_acceptance_node_result(task=_task(), acceptance=_acceptance(), result=result)
+
+
+def test_frozen_partial_passes_through_the_verdict_consumer_untouched() -> None:
+    """冻结的 success + partial 不得被结算成通过：握手、拒收计数、审计一律不动。"""
+    runner = _runner(_execution(metadata=_handshake()))
+    frozen = NodeFinalResult(
+        status='success', delivery_status='partial',
+        summary='验收冻结：被检验执行节点没有待裁定的闭合提交，需待其提交 final 结果并登记交接后再继续核验。',
+        answer='', evidence=[], remaining_work=[], blocking_reason='',
+    )
+    out = _consume(runner, frozen)
+    assert out.delivery_status == 'partial'
+    assert runner._consumed_passes == []
+
+
+def test_real_pass_is_still_consumed_as_a_pass() -> None:
+    runner = _runner(_execution(metadata=_handshake()))
+    verdict = NodeFinalResult(
+        status='success', delivery_status='final', summary='验收裁定：通过',
+        answer='正文', evidence=[], remaining_work=[], blocking_reason='',
+    )
+    out = _consume(runner, verdict)
+    assert out.delivery_status == 'final'
+    assert runner._consumed_passes == ['pass']
+
+
+def test_every_gate_reason_is_recognised_as_a_freeze_by_the_consumer() -> None:
+    """前缀是生产端与消费端唯一的耦合点：文案漂了就等于守卫失效。"""
+    root = _execution(metadata=_handshake()).model_copy(update={'node_id': ROOT_ID, 'parent_node_id': ''})
+    reasons = [
+        _freeze(_runner(_execution())),
+        _freeze(_runner(_execution(metadata=_handshake(latest_execution_result_ref='')))),
+        _freeze(_runner(_execution(metadata=_handshake(state='waiting_execution_retry')))),
+        _runner(root, pending_notice_ids=(ROOT_ID,))._final_acceptance_freeze_reason(task=_task(), node=_acceptance(ROOT_ID)),
+    ]
+    assert all(reasons), reasons
+    for reason in reasons:
+        partial = NodeFinalResult(
+            status='success', delivery_status='partial', summary=reason,
+            answer='', evidence=[], remaining_work=[], blocking_reason='',
+        )
+        assert is_acceptance_freeze_result(partial), reason

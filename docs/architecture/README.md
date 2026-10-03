@@ -116,7 +116,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `main-task-runtime.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、恢复跑过一次却又落回暂停（上一个进程遗留的 `pause_task` 命令被新 worker 迟到应用）、或出现「本任务遇到异常停止」toast → `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
 - 验收节点长期停在「待检验」、被检验的执行节点却在一轮轮重跑（半截验收回合无人接手）→ `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（最终验收的两个派发选择器：通知账本 + 握手承诺重派发），worker 日志锚点 `final acceptance round re-dispatched after interruption`
-- 验收节点下了「交付物不存在」的结论、而被检验的执行节点从没提交过结果（批量恢复节点后尤其成串），或一份旧拒收被当成本轮裁定 → `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（闭合提交冻结闸门 + 派验前前置检查 + 终态判词作废）
+- 验收节点下了「交付物不存在」的结论、而被检验的执行节点从没提交过结果（批量恢复节点后尤其成串），或一份旧拒收被当成本轮裁定 → `main-task-runtime.md`「验收节点：提前创建、激活与握手重派发」（闭合提交冻结闸门 + 派验前前置检查与消费点退回 + 终态判词作废）
 - 任务显示「已取消」但无人取消过（payload `cancel_requested=false`，常伴随 `Managed task worker exited` 日志）→ `main-task-runtime.md`「Node-Level Pause and Recovery」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启、managed-worker.log 长时间不滚动但心跳与进程仍在 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
