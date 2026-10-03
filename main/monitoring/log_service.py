@@ -3021,7 +3021,10 @@ class TaskLogService:
         for round_item in list(record.get('rounds') or []):
             current = dict(round_item or {})
             current['tools'] = [
-                {'tool_call_id': str(call_id), **(by_call.get(str(call_id).strip()) or {})}
+                {
+                    'tool_call_id': str(call_id),
+                    **(by_call.get(str(call_id).strip()) or {'status': 'unresolved_at_eviction'}),
+                }
                 for call_id in list(current.get('tool_call_ids') or [])
             ]
             rounds.append(current)
@@ -3078,6 +3081,94 @@ class TaskLogService:
             }
         )
 
+    def _emit_stage_ledger_event(
+        self,
+        event: str,
+        message: str,
+        *,
+        task_id: str,
+        node_id: str,
+        detail: dict[str, Any],
+    ) -> None:
+        """账本侧的静默处置必须可数：抑制重放、拦下结清这两类都不给模型报错，也没有别的落点。"""
+        try:
+            from g3ku.audit_events import emit_audit_event
+
+            emit_audit_event(
+                'task',
+                'info',
+                str(event or ''),
+                str(message or ''),
+                detail={'task_id': str(task_id or ''), 'node_id': str(node_id or ''), **dict(detail or {})},
+            )
+        except Exception:
+            pass
+
+    def stage_transition_already_applied(self, task_id: str, node_id: str, *, stage_goal: str) -> dict[str, Any]:
+        """这条 `submit_next_stage` 是否已经落到账本——恢复车道重放它之前先问这里。
+
+        判据只有一条：账本里已存在一条 `stage_goal` 相同（按落盘同一裁剪口径比较）的阶段。
+        正常路径不可能重复提交同一目标：模型要发出下一跳必须先拿到上一跳的工具结果，而派生
+        调用只会在所有子节点终态后才返回（实测 342 个等待窗口内父节点模型调用为 0 次）。所以
+        "账本里已有这个目标"只能来自绕过模型的写入者——孤儿重派把已记录的入参又跑了一遍。
+        """
+        normalized_goal = str(self._clip_stage_text(stage_goal, limit=_STAGE_GOAL_CHAR_LIMIT) or '').strip()
+        if not normalized_goal:
+            return {}
+        node = self._store.get_node(node_id)
+        if node is None:
+            return {}
+        state = self._execution_stage_state(node)
+        for stage in list(state.stages or []):
+            if str(stage.stage_goal or '').strip() != normalized_goal:
+                continue
+            return {
+                'stage_id': str(stage.stage_id or ''),
+                'stage_index': int(stage.stage_index or 0),
+                'status': str(stage.status or ''),
+                'active': str(state.active_stage_id or '').strip() == str(stage.stage_id or '').strip(),
+            }
+        return {}
+
+    def _unresolved_dispatch_in_stage(
+        self,
+        *,
+        task_id: str,
+        node_id: str,
+        stage: ExecutionStageRecord,
+    ) -> list[str]:
+        """这条阶段里还有哪些调用没把结果送回模型：只看帧的活状态，不查结果表。
+
+        `task_node_tool_results` 有缺行（同一节点 03:09 那次收口就没有行），把它当"未送达"
+        判据会连合法裁撤一起拦住；帧的 `pending_tool_calls` / `tool_calls` 才是运行态真相。
+        """
+        claimed = {
+            str(call_id or '').strip()
+            for round_item in list(stage.rounds or [])
+            for call_id in list(getattr(round_item, 'tool_call_ids', None) or [])
+        }
+        claimed.discard('')
+        if not claimed:
+            return []
+        frame = self.read_runtime_frame_payload(task_id, node_id) or {}
+        pending_ids = {
+            str(item.get('id') or '').strip()
+            for item in list(frame.get('pending_tool_calls') or [])
+            if isinstance(item, dict) and str(item.get('id') or '').strip()
+        }
+        unfinished_ids = {
+            str(item.get('tool_call_id') or '').strip()
+            for item in list(frame.get('tool_calls') or [])
+            if isinstance(item, dict)
+            and str(item.get('tool_call_id') or '').strip()
+            and not str(item.get('finished_at') or '').strip()
+        }
+        unresolved = sorted(claimed & (pending_ids | unfinished_ids))
+        if str(frame.get('phase') or '').strip().lower() == 'waiting_children':
+            # 派生还没等完：整条阶段的调用都算未送达，结果回来之前这条阶段不许移出可见层。
+            unresolved = sorted(set(unresolved) | claimed)
+        return unresolved
+
     def submit_next_stage(
         self,
         task_id: str,
@@ -3121,6 +3212,31 @@ class TaskLogService:
                     'do not call submit_next_stage again before using a non-control tool '
                     'or spawn_child_nodes in this stage'
                 )
+            if active is not None and str(active.status or '') == _EXECUTION_STAGE_STATUS_ACTIVE:
+                unresolved = self._unresolved_dispatch_in_stage(
+                    task_id=task_id,
+                    node_id=node_id,
+                    stage=active,
+                )
+                if unresolved:
+                    # 结果还没送到模型面前就结清，等于让这条阶段带着一个未送达的调用去裁撤：
+                    # 那正是本轮事故里"迟到结果被当成已见过而删掉"的起点。宁可拒绝推进。
+                    self._emit_stage_ledger_event(
+                        'stage_close_blocked_unresolved',
+                        f'阶段结清被拦：{node_id} 阶段 {int(active.stage_index or 0)} 仍持有未送达调用 {len(unresolved)} 条',
+                        task_id=task_id,
+                        node_id=node_id,
+                        detail={
+                            'stage_id': str(active.stage_id or ''),
+                            'stage_index': int(active.stage_index or 0),
+                            'unresolved_call_ids': unresolved[:8],
+                        },
+                    )
+                    raise ValueError(
+                        'submit_next_stage refused: the current stage still owns tool calls whose results '
+                        'have not been delivered yet; wait for them to return (spawn_child_nodes returns only '
+                        'after every child node is terminal) before opening the next stage'
+                    )
             latest_spawn_key_ref = self._latest_spawn_stage_key_ref_locked(
                 task_id=task_id,
                 node_id=node_id,

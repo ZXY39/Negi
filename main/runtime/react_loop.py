@@ -1859,6 +1859,7 @@ class ReActToolLoop:
         ordered_results: list[dict[str, Any] | None] = []
         result_indexes_by_call_id: dict[str, list[int]] = {}
         inspected_items: list[dict[str, Any]] = []
+        suppressed_stage_replays: list[dict[str, Any]] = []
 
         for index, item in enumerate(pending_tool_calls):
             call_id = str(item.get('id') or '').strip()
@@ -1880,6 +1881,35 @@ class ReActToolLoop:
                 )
                 evidence = [{'kind': 'live_tool_result', 'path': '', 'note': f'live status={recorded_status}'}]
                 reuse_content = recorded_content
+            elif tool_name == STAGE_TOOL_NAME and (
+                applied_stage := self._log_service.stage_transition_already_applied(
+                    task.task_id,
+                    node.node_id,
+                    stage_goal=str(dict(arguments or {}).get('stage_goal') or ''),
+                )
+            ):
+                # 重放已落到账本的 submit_next_stage 不是幂等重跑：它会再把阶段往前推一格，
+                # 用上一跳的旧摘要结清当时还持有未送达调用的阶段，并顺手打上裁撤标记——
+                # 于是那条调用的结果迟到三天后，按 call id 命中过期集被移出可见层。
+                # 账本里已有同一个 stage_goal 即"这次结清已应用过"，只补结果、不再推进。
+                decision = RecoveryCheckDecision.VERIFIED_DONE
+                expected_tool_status = 'success'
+                lost_result_summary = (
+                    'Recovery suppressed a replayed submit_next_stage: the stage ledger already carries '
+                    'this stage goal, so re-running it would advance the stage a second time and evict a '
+                    'stage whose tool result has not been delivered yet.'
+                )
+                evidence = [{
+                    'kind': 'execution_stage_ledger',
+                    'path': '',
+                    'note': f"stage_index={applied_stage.get('stage_index')} status={applied_stage.get('status')}",
+                }]
+                reuse_content = json.dumps(
+                    {'ok': True, 'suppressed_replay': True, **dict(applied_stage)},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                suppressed_stage_replays.append({'call_id': call_id, **dict(applied_stage)})
             else:
                 inspection = self._recovery_check_engine.inspect_tool_call(
                     tool_name=tool_name,
@@ -1979,6 +2009,31 @@ class ReActToolLoop:
             overall_decision=overall_decision,
             inspected_items=inspected_items,
         )
+
+        if suppressed_stage_replays:
+            try:
+                from g3ku.audit_events import emit_audit_event
+
+                emit_audit_event(
+                    'task',
+                    'info',
+                    'closure_replay_suppressed',
+                    f'恢复车道抑制重放的阶段收口：{node.node_id}（{len(suppressed_stage_replays)} 次）',
+                    detail={
+                        'task_id': str(task.task_id or ''),
+                        'node_id': str(node.node_id or ''),
+                        'stages': [
+                            {
+                                'stage_index': int(item.get('stage_index') or 0),
+                                'stage_id': str(item.get('stage_id') or ''),
+                                'call_id': str(item.get('call_id') or ''),
+                            }
+                            for item in suppressed_stage_replays
+                        ],
+                    },
+                )
+            except Exception:
+                pass
 
         if replay_calls:
             replay_results = await self._execute_tool_calls(
