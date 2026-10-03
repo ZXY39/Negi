@@ -56,6 +56,12 @@ _PERF_HISTORY_FIELDS = (
     'entry_gate_targets',
     'entry_gate_limits',
     'entry_gate_running_total',
+    # 「在等请求位」的数是闸口排队，不是 node_queue_waiting：后者量的是过闸之后等
+    # 模型 permit 的队列，闸收紧时节点根本走不到那里（实盘 4000 拍里 3986 拍为 0，
+    # 而其中 662 拍 running 已贴顶）。没进白名单时历史里一行都读不到。
+    'entry_gate_queued',
+    'entry_gate_queued_total',
+    'entry_gate_limits_total',
     'entry_slot_memory_bytes',
     'worker_memory_bytes',
     'machine_memory_total_bytes',

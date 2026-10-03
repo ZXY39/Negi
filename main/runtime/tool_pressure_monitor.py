@@ -378,6 +378,14 @@ class WorkerPressureMonitor:
         payload['pressure_sample_age_ms'] = round(sample_age_ms, 3) if sample_mono > 0.0 else None
         payload['pressure_snapshot_fresh'] = bool(sample_fresh)
         payload.update(self._controller.snapshot())
+        # 闸口排队与闸位容量：控制器给的是按角色 dict，面板与 perf_samples 都要一个
+        # 标量才能当轴用。缺这两个数时，闸贴顶排队 185 个节点的窗口在历史里读不出来
+        # （节点侧的 `node_queue_waiting_count` 量的是过闸之后等模型 permit 的队列，
+        # 闸收紧时它恒 0）。
+        queued_by_role = dict(payload.get('entry_gate_queued') or {})
+        limits_by_role = dict(payload.get('entry_gate_limit') or payload.get('entry_gate_limits') or {})
+        payload['entry_gate_queued_total'] = sum(int(value or 0) for value in queued_by_role.values())
+        payload['entry_gate_limits_total'] = sum(int(value or 0) for value in limits_by_role.values())
         return payload
 
     @staticmethod

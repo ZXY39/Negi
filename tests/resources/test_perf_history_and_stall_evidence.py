@@ -452,3 +452,64 @@ def test_perf_inspect_resource_tool_delegates_to_perf_report() -> None:
 
     assert asyncio.run(handler.execute(mode='live', window_minutes=30)) == 'REPORT'
     assert seen == {'mode': 'live', 'window_minutes': 30}
+
+
+def test_perf_history_whitelist_covers_the_entry_gate_queue() -> None:
+    """闸口排队必须进白名单，否则"那段时间闸口排了多少"在历史里一行都读不到。"""
+    for key in ('entry_gate_queued', 'entry_gate_queued_total', 'entry_gate_limits_total'):
+        assert key in heartbeat_module._PERF_HISTORY_FIELDS, key
+
+
+def test_monitor_snapshot_publishes_gate_queue_totals() -> None:
+    """控制器给的是按角色 dict，面板与统计轴都要标量；容量取闸位当前值不是上限。"""
+    import threading
+
+    from main.runtime.tool_pressure_monitor import WorkerPressureMonitor
+
+    class _Controller:
+        def snapshot(self):
+            return {
+                'entry_gate_queued': {'execution': 3, 'inspection': 1},
+                'entry_gate_limit': {'execution': 8, 'inspection': 4},
+                'entry_gate_ceiling': {'execution': 12, 'inspection': 6},
+            }
+
+    monitor = object.__new__(WorkerPressureMonitor)
+    monitor._lock = threading.RLock()
+    monitor._snapshot = {}
+    monitor._sample_mono = 0.0
+    monitor._pressure_snapshot_stale_after_seconds = 3.0
+    monitor._controller = _Controller()
+
+    payload = monitor.snapshot()
+    assert payload['entry_gate_queued_total'] == 4
+    assert payload['entry_gate_limits_total'] == 12
+
+
+@pytest.mark.asyncio
+async def test_worker_status_payload_forwards_the_gate_queue(tmp_path: Path) -> None:
+    """「等待请求位」的数必须在顶层契约里：只藏在 raw payload 时面板读不到。"""
+    service = await _make_service(tmp_path)
+    try:
+        service.store.upsert_worker_status(
+            worker_id=WORKER_ID,
+            role='task_worker',
+            status='running',
+            updated_at=_local_iso(datetime.now()),
+            payload={
+                'node_queue_running_count': 12,
+                'node_queue_waiting_count': 0,
+                'entry_gate_queued': {'execution': 41, 'inspection': 3},
+                'entry_gate_queued_total': 44,
+                'entry_gate_running_total': 12,
+                'entry_gate_limits': {'execution': 8, 'inspection': 4},
+                'entry_gate_limits_total': 12,
+            },
+        )
+        payload = service.worker_status_payload()
+        assert payload['entry_gate_queued_total'] == 44
+        assert payload['entry_gate_queued'] == {'execution': 41, 'inspection': 3}
+        assert payload['entry_gate_limits_total'] == 12
+        assert payload['node_queue_waiting_count'] == 0, '闸口排队不得顶替模型侧队列，两者并存'
+    finally:
+        await service.close()

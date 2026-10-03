@@ -97,7 +97,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点详情里 `submit_final_result` 的 `summary` 是 `auto-wrapped plain-text final result`、`evidence` 全是 `Auto-collected tool result from X.` → 该轮没有真实提交，纯文本被当成规划的残留；判据与两条打回车道见 `tool-hydration-and-callable-chain.md`「阶段门控与 callable 收紧」
 - 验收节点上下文里堆着历次交付全文、或对已被取代的提交下结论、验收 bootstrap 每轮都在变 → `context-and-cache-troubleshooting.md`「验收 bootstrap 定稿与回合尾块」+ `main-task-runtime.md`「信箱投递、重激活与上行传播」（交接通知与回合尾块只给 ref + 有界摘要）
 - False "task may be stalled" heartbeat while a long node tool (e.g. `exec` with a large `timeout_seconds`) legitimately runs, or a genuine hang after a tool timeout goes unreported -> `heartbeat-system.md`「Task Stall Detection」
-- 想判断任务停滞是不是资源排队造成、或性能条只看得到「现在」而要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（失速事件已自带一行窗口判读，更长的窗口用 `perf_inspect`）
+- 想判断任务停滞是不是资源排队造成、或性能条只看得到「现在」而要看过去那段区间 → `runtime-overview.md`「Worker Performance History」（失速事件已自带一行窗口判读，更长的窗口用 `perf_inspect`）；性能条「节点队列」等待恒 0 而闸口其实在排队 → `runtime-overview.md`「节点回合闸（执行器存在的成本也要闸）」
 - 同时在跑节点数上不去、或界面「限」这个数与配置 `node_dispatch_concurrency` 不一致、想知道闸位这一拍为什么加/为什么收 → `runtime-overview.md`「节点回合闸」
 - 网页刷新打不开（服务端一条 `GET /` 都没记下来，而 `/api/*` 仍照常 200）、日志刷 `WinError 10055`、模型调用频率同时塌下去 → `runtime-overview.md`「worker→web 事件回流车道」（回环连接攒满内核缓冲的取证与判读口径都在那里）
 - 节点失败但无系统报错、模型回复疑似被输出上限截断(无工具调用、顶格 output_tokens) → `web-and-admin.md`「Node Detail Error History」+ `config-and-models.md`「Model Request Parameter Defaults」

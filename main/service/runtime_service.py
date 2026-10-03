@@ -286,6 +286,10 @@ _PERF_STAT_AXES = (
     ('nq_run', 'node_queue_running_count', 'count'),
     ('nq_wait', 'node_queue_waiting_count', 'count'),
     ('nq_frozen', 'node_queue_frozen_count', 'count'),
+    # 闸口排队：节点在物化上下文之前就卡在这里，所以它是"等请求位"的真数；
+    # nq_wait 量的是过闸之后等模型 permit，闸收紧时恒 0（4000 拍里 3986 拍为 0）。
+    ('gate_wait', 'entry_gate_queued_total', 'count'),
+    ('gate_slots', 'entry_gate_limits_total', 'count'),
     ('tq_oldest', 'worker_execution_oldest_wait_ms', 'ms'),
     ('lag', 'tool_pressure_event_loop_lag_ms', 'ms'),
     ('db_wait', 'sqlite_write_wait_ms', 'ms'),
@@ -295,11 +299,12 @@ _PERF_STAT_AXES = (
     ('tasks', 'active_task_count', 'count'),
 )
 # 序列只画这 8 个轴（其余留给统计行）：一行一桶，列宽固定，模型不用对齐表头。
-_PERF_SERIES_LABELS = ('cpu', 'mem', 'disk', 'tq_run', 'tq_wait', 'nq_run', 'nq_wait', 'lag')
+# 闸位没有富余时 nq_wait 恒 0（见上面的注释），所以序列这一格给 gate_wait。
+_PERF_SERIES_LABELS = ('cpu', 'mem', 'disk', 'tq_run', 'tq_wait', 'nq_run', 'gate_wait', 'lag')
 _PERF_AXIS_KEY = {label: key for label, key, _kind in _PERF_STAT_AXES}
 _PERF_AXIS_KIND = {label: kind for label, _key, kind in _PERF_STAT_AXES}
 _PERF_GROUPED_AXES = (
-    ('Queues', ('tq_run', 'tq_wait', 'tq_oldest', 'nq_run', 'nq_wait', 'nq_frozen', 'tasks')),
+    ('Queues', ('tq_run', 'tq_wait', 'tq_oldest', 'nq_run', 'nq_wait', 'nq_frozen', 'gate_wait', 'gate_slots', 'tasks')),
     ('Machine', ('cpu', 'mem', 'disk', 'disk_free')),
     ('Library', ('db_wait', 'db_query', 'wq', 'lag')),
 )
@@ -11580,6 +11585,15 @@ class MainRuntimeService:
             'node_queue_running_count': int(merged.get('node_queue_running_count') or 0),
             'node_queue_waiting_count': int(merged.get('node_queue_waiting_count') or 0),
             'node_queue_oldest_wait_ms': float(merged.get('node_queue_oldest_wait_ms') or 0.0),
+            # 回合闸：面板上「等待请求位」的那个数是闸口排队，不是 node_queue_waiting
+            # （后者过闸之后才计）。这些键只活在 worker 心跳的 raw payload 里时，
+            # 顶层契约与前端都读不到，闸贴顶排队的窗口在界面上就显示成 0 等待。
+            'entry_gate_queued': dict(merged.get('entry_gate_queued') or {}),
+            'entry_gate_queued_total': int(merged.get('entry_gate_queued_total') or 0),
+            'entry_gate_running_total': int(merged.get('entry_gate_running_total') or 0),
+            'entry_gate_limits': dict(merged.get('entry_gate_limits') or {}),
+            'entry_gate_limits_total': int(merged.get('entry_gate_limits_total') or 0),
+            'entry_gate_targets': dict(merged.get('entry_gate_targets') or {}),
             # 负载均衡：web 进程只能看到 worker 心跳里带上来的快照（balancer 是进程内态）。
             'model_route_groups': list(merged.get('model_route_groups') or []),
             'model_route_config_revision': int(merged.get('model_route_config_revision') or 0),

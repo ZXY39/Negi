@@ -543,8 +543,12 @@ function renderTaskPerformanceBar() {
     const diskStateSuffix = diskEmergency ? " · 紧急" : "";
     const toolRunningText = queueMetricCount(metrics?.tool_queue_running_count);
     const toolWaitingText = queueMetricCount(metrics?.tool_queue_waiting_count);
-    const nodeRunningText = queueMetricCount(metrics?.node_queue_running_count);
-    const nodeWaitingText = queueMetricCount(metrics?.node_queue_waiting_count);
+    // 「节点队列」这一段量的是回合闸：等待取闸口排队数（entry_gate_queued_total），
+    // 运行取占住的闸位并带上容量。node_queue_waiting_count 量的是过闸之后等模型
+    // permit 的队列，闸收紧时节点还卡在闸口、它恒 0，当不了「等请求位」的读数。
+    const gateRunningText = queueMetricCount(metrics?.entry_gate_running_total);
+    const gateCapacityText = queueMetricCount(metrics?.entry_gate_limits_total);
+    const gateWaitingText = queueMetricCount(metrics?.entry_gate_queued_total);
     U.taskPerformanceBar.hidden = false;
     U.taskPerformanceBar.innerHTML = `
         <div class="task-performance-item task-performance-item--state" data-state="${esc(pressureState.key)}">
@@ -561,7 +565,7 @@ function renderTaskPerformanceBar() {
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">节点队列</span>
-            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(nodeRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(nodeWaitingText)}</span>等待</strong>
+            <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(gateRunningText)}/${esc(gateCapacityText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(gateWaitingText)}</span>等待</strong>
         </div>
         <div class="task-performance-item">
             <span class="task-performance-label">监控新鲜度</span>

@@ -147,7 +147,7 @@
 1. 对应进程是否真的执行到了 runtime refresh（日志 `Loop runtime config refreshed`）
 2. 问题是否发生在单次 still-in-flight 的 provider request 内（该请求不可热切），还是跨过后续迭代边界后仍未换链
 3. 当前运行路径是 CEO/frontdoor、main runtime worker/node，还是 memory queue 内部 worker
-4. 节点全停在 `node_queue_waiting`、`node_queue_running_count=0` 且心跳里 `model_route_groups` 为空时，问题在本地落地而不是上游：启动路径没把组注册进 balancer，`Model route selected` 一条都不会出现
+4. 节点全停在模型侧队列（`node_queue_waiting_count>0` 而 `node_queue_running_count=0`）且心跳里 `model_route_groups` 为空时，问题在本地落地而不是上游：启动路径没把组注册进 balancer，`Model route selected` 一条都不会出现。闸收紧期间的等待不看这条数——`node_queue_waiting` 量的是过闸之后等模型 permit，闸口排队的读数是 `entry_gate_queued_total`（契约见 `runtime-overview.md`「节点回合闸（执行器存在的成本也要闸）」）
 
 ## 5. 模型系统不是只靠 `config.json`
 
