@@ -258,6 +258,8 @@ const S = {
     tasksWorkerStaleAfterSeconds: 15,
     taskWorkerStatusPollId: null,
     taskPerformanceRefreshId: null,
+    taskPerformanceTickId: null,
+    taskPerfFreshness: null,
     taskTokenStatsOpen: false,
     taskTokenLedgerRefreshing: false,
     taskErrorLogs: [],

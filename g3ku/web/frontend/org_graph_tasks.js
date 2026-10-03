@@ -469,17 +469,33 @@ function taskWorkerPressureSnapshotFresh(metrics = taskWorkerStatusMetrics()) {
     return ageMs <= 3000 && metrics?.machine_pressure_available !== false;
 }
 
-function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
-    const ageMs = taskWorkerPressureSampleAgeMs(metrics);
-    if (ageMs == null) return "未采样";
-    if (!taskWorkerPressureSnapshotFresh(metrics)) return "监控过期";
-    if (ageMs < 1000) return "刚刚更新";
-    if (ageMs < 60_000) {
-        const seconds = ageMs / 1000;
-        return seconds < 10 ? `${seconds.toFixed(1)}s 前` : `${Math.round(seconds)}s 前`;
+// 新鲜度是一根自己往前走的秒表：服务端算出的年龄 <1s 就是"刚收到新读数"，计数归零
+// 重起；其余时间在本地累加，心跳与心跳之间也继续走字。读数停更时同样只报"多久之前"，
+// 不切成不带时间的说法——操作员要判断的是断了多久。
+const TASK_PERF_FRESH_RESET_MS = 1000;
+
+function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
+    const serverAgeMs = taskWorkerPressureSampleAgeMs(metrics);
+    if (serverAgeMs == null) {
+        S.taskPerfFreshness = null;
+        return null;
     }
+    const nowMs = Date.now();
+    const anchor = S.taskPerfFreshness;
+    if (!anchor || serverAgeMs < TASK_PERF_FRESH_RESET_MS || serverAgeMs > anchor.serverAgeMs) {
+        S.taskPerfFreshness = { baseMs: serverAgeMs, atMs: nowMs, serverAgeMs };
+        return serverAgeMs;
+    }
+    return anchor.baseMs + (nowMs - anchor.atMs);
+}
+
+function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
+    const ageMs = taskWorkerSampleAgeMsLive(metrics);
+    if (ageMs == null) return "未采样";
+    if (ageMs < 60_000) return `${(ageMs / 1000).toFixed(1)}秒前`;
     const minutes = ageMs / 60_000;
-    return `${minutes < 10 ? minutes.toFixed(1) : Math.round(minutes)}m 前`;
+    if (minutes < 60) return `${minutes < 10 ? minutes.toFixed(1) : Math.round(minutes)}分钟前`;
+    return `${Math.round(minutes / 60)}小时前`;
 }
 
 function formatTaskWorkerPercent(value) {
@@ -2431,6 +2447,14 @@ function startTaskWorkerStatusPolling() {
             ensureTaskListVisibleReconcile();
         }, 1000);
     }
+    if (!S.taskPerformanceTickId) {
+        // 新鲜度那格是一位小数的秒表，1s 的刷新会让它每步跳 1.0；这条 100ms 的钟只重画
+        // 性能条本身（不碰任务网格签名，所以不会重建网格、不拽滚动位置）。
+        S.taskPerformanceTickId = window.setInterval(() => {
+            if (!U.taskPerformanceBar || U.taskPerformanceBar.hidden) return;
+            renderTaskPerformanceBar();
+        }, 100);
+    }
 }
 
 function stopTaskWorkerStatusPolling() {
@@ -2441,6 +2465,10 @@ function stopTaskWorkerStatusPolling() {
     if (S.taskPerformanceRefreshId) {
         window.clearInterval(S.taskPerformanceRefreshId);
         S.taskPerformanceRefreshId = null;
+    }
+    if (S.taskPerformanceTickId) {
+        window.clearInterval(S.taskPerformanceTickId);
+        S.taskPerformanceTickId = null;
     }
 }
 
