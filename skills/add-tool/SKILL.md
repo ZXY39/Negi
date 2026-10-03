@@ -83,6 +83,10 @@ externaltools/
   - `self_enforced: true`：handler 自己消费统一注入的 `timeout_seconds` 入参并负责结构化收尾（终止进程树、关闭会话、抢救部分输出）。声明后 handler 必须真的实现收尾，否则该工具处于无任何时限状态。
   - `hide_parameter: true`：模型 schema 不注入 `timeout_seconds` 参数，机械保底仍适用。用于瞬时完成的内部协议类工具。
   - 清单声明与 handler 类属性是 OR 语义：清单只能追加这些 opt-in 行为，不能撤销代码级已声明的合同；handler 已在代码里设置标志的，清单不必重复声明。
+- `recovery_policy` —— 进程被硬杀或暂停打断一批工具调用后，恢复车道能不能替模型重放这一次调用（只有一个键 `rerun_safe`，布尔，缺省视为 false）：
+  - `rerun_safe: true`：重复这次调用**可证明**无危害——纯读、写入按 `tool_call_id` 归键、或重跑会被持久状态闸门拒掉。三选一并写进声明处的注释。
+  - 保持缺省：会另起一行记录、再发一条消息、再排一个定时器、再建一个节点的工具一律不声明；恢复时把裁定交回模型，运行时不代劳重放。想让它可重放，先给写入加幂等键，再来加声明。
+  - 内置工具（无清单目录的那批）只能写 handler 类属性 `rerun_safe = True`；两条车道同样 OR。`exec` / `shell` 与 filesystem 写族由代码判档，清单声明放不轻它们。合同正文归 `docs/architecture/tool-hydration-and-callable-chain.md`「工具可重放声明」。
 
 额外规则：
 
@@ -212,6 +216,7 @@ externaltools/
 - 工具执行路径不会阻塞事件循环；长耗时步骤已异步化或移到后台线程 / 子进程
 - 网络、子进程和等待逻辑已设置明确超时，不会把整个项目卡住
 - 长时编排类工具已在 `resource.yaml` 声明 `timeout_policy.exempt_universal`；自持收尾类已声明 `self_enforced` 且 handler 确实消费 `timeout` 入参
+- 恢复车道档位已判定：只有能说出"重复这次调用为什么无害"的工具才声明 `recovery_policy.rerun_safe`（或 handler `rerun_safe = True`），其余保持缺省
 - 工具已接入强取消：支持 cancellation token、子进程显式 terminate / kill、长任务阶段性检查取消状态
 - 用户暂停 / 取消时会收到“正在安全停止...”之类的中间反馈
 

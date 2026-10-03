@@ -38,11 +38,25 @@ class Tool(ABC):
       all and no timeout parameter is advertised. They remain cancelable
       through the task-level cancellation chain (cancel_token / pause /
       stop), which is the only legitimate way to interrupt them.
+
+    Recovery rerun contract:
+    - A tool round cut off by a process kill is replayed only one call at a
+      time, and each call is graded before anything is re-executed. A tool
+      that sets `rerun_safe = True` (or declares `recovery_policy.rerun_safe`
+      in its manifest) promises that repeating the call is provably harmless:
+      it reads state, or its write is keyed/upserted, or a durable state guard
+      rejects the second attempt.
+    - The default is False, and it is the load-bearing half of the contract:
+      an undeclared tool is treated as having durable side effects, so the
+      recovery lane hands the decision to the model instead of re-firing it.
+      `exec`/`shell` and the filesystem mutation family are graded in code
+      before this flag is read, so no declaration can lighten them.
     """
 
     self_enforced_timeout: bool = False
     hide_universal_timeout_parameter: bool = False
     exempt_universal_timeout: bool = False
+    rerun_safe: bool = False
 
     _TYPE_MAP = {
         "string": str,

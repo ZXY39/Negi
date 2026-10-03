@@ -1861,10 +1861,11 @@ class ReActToolLoop:
                     tool_name=tool_name,
                     arguments=arguments,
                     runtime_context=runtime_context,
+                    # 档位只有这一个来源：取不到工具对象（本轮不可调用）就等于没声明，
+                    # 判给模型，而不是按"未知即安全"重放。
+                    rerun_safe=bool(getattr(tools.get(tool_name), 'rerun_safe', False)),
                 )
                 decision = inspection.decision
-                if decision == RecoveryCheckDecision.RERUN_SAFE and tool_name not in tools:
-                    decision = RecoveryCheckDecision.MODEL_DECIDE
                 expected_tool_status = (
                     inspection.expected_tool_status
                     if decision != RecoveryCheckDecision.MODEL_DECIDE

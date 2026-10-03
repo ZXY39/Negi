@@ -90,6 +90,23 @@ def resolve_universal_timeout_flag(
     return bool(raw_timeout_policy_from_metadata(metadata).get(policy_key, False))
 
 
+def raw_recovery_policy_from_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """resource.yaml 顶层 `recovery_policy` 声明块（停机恢复车道档位）。"""
+    payload = (metadata or {}).get("recovery_policy") if isinstance(metadata, dict) else None
+    return dict(payload or {}) if isinstance(payload, dict) else {}
+
+
+def resolve_recovery_rerun_safe(handler: Any, metadata: dict[str, Any] | None) -> bool:
+    """可重放判定：handler 类属性或清单 `recovery_policy.rerun_safe` 任一为真即真。
+
+    只有恢复车道读它，且 exec/shell 与 filesystem 写族在代码里先于该判定，
+    清单声明无法把这两族的判档放轻。
+    """
+    if bool(getattr(handler, "rerun_safe", False)):
+        return True
+    return bool(raw_recovery_policy_from_metadata(metadata).get("rerun_safe", False))
+
+
 def raw_tool_settings_from_descriptor(descriptor: ToolResourceDescriptor | None) -> dict[str, Any]:
     return raw_tool_settings_from_metadata(getattr(descriptor, "metadata", None))
 

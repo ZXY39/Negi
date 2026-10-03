@@ -15,6 +15,7 @@ from g3ku.resources.models import ToolResourceDescriptor
 from g3ku.resources.tool_settings import (
     raw_tool_secrets_from_config,
     raw_tool_settings_from_descriptor,
+    resolve_recovery_rerun_safe,
     resolve_universal_timeout_flag,
 )
 
@@ -82,6 +83,10 @@ class ManifestBackedTool(Tool):
             handler_attr="exempt_universal_timeout",
             policy_key="exempt_universal",
         )
+
+    @property
+    def rerun_safe(self) -> bool:  # type: ignore[override]
+        return resolve_recovery_rerun_safe(self._handler, self._descriptor.metadata)
 
     def set_context(self, *args: Any, **kwargs: Any) -> Any:
         if hasattr(self._handler, "set_context"):

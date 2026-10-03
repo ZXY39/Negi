@@ -31,6 +31,9 @@ parameters:
       type: integer
       description: Optional candidate limit for search mode. Defaults to 5.
   required: []
+recovery_policy:
+  rerun_safe: true
+
 exposure:
   agent: true
   org_graph: true

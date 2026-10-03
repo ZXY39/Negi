@@ -12,7 +12,7 @@ import mcp.server.fastmcp.server as fastmcp_server
 
 from g3ku.agent.tools.base import Tool
 from g3ku.resources.models import ToolResourceDescriptor
-from g3ku.resources.tool_settings import resolve_universal_timeout_flag
+from g3ku.resources.tool_settings import resolve_recovery_rerun_safe, resolve_universal_timeout_flag
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +307,10 @@ class EmbeddedMCPTool(Tool):
             handler_attr="exempt_universal_timeout",
             policy_key="exempt_universal",
         )
+
+    @property
+    def rerun_safe(self) -> bool:  # type: ignore[override]
+        return resolve_recovery_rerun_safe(self._handler, self._descriptor.metadata)
 
     def close(self) -> Any:
         if hasattr(self._handler, "close"):

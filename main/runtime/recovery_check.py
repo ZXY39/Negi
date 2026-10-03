@@ -30,6 +30,7 @@ class RecoveryCheckEngine:
         tool_name: str,
         arguments: dict[str, Any] | None,
         runtime_context: dict[str, Any] | None,
+        rerun_safe: bool = False,
     ) -> RecoveryCheckResult:
         normalized_tool_name = str(tool_name or "").strip().lower()
         payload = dict(arguments or {})
@@ -45,9 +46,22 @@ class RecoveryCheckEngine:
                     "The model must verify whether the previous side effect already completed before retrying."
                 ),
             )
+        if rerun_safe:
+            return RecoveryCheckResult(
+                decision=RecoveryCheckDecision.RERUN_SAFE,
+                lost_result_summary=(
+                    "The interrupted tool call declares itself rerun-safe (Tool.rerun_safe / "
+                    "resource.yaml recovery_policy.rerun_safe), so repeating it cannot duplicate a side effect."
+                ),
+            )
         return RecoveryCheckResult(
-            decision=RecoveryCheckDecision.RERUN_SAFE,
-            lost_result_summary="The interrupted tool call has no known durable side effect and is safe to rerun.",
+            decision=RecoveryCheckDecision.MODEL_DECIDE,
+            expected_tool_status="interrupted",
+            lost_result_summary=(
+                f"The interrupted {normalized_tool_name or 'tool'} call carries no rerun-safe declaration. "
+                "Its side effect may already have landed before the shutdown, so the model must verify the "
+                "target state before repeating the call."
+            ),
         )
 
     def _inspect_split_filesystem_call(self, tool_name: str, arguments: dict[str, Any]) -> RecoveryCheckResult:

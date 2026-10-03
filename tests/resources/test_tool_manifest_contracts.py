@@ -174,6 +174,85 @@ def test_all_manifest_parameters_have_descriptions():
             assert str(payload.get('description') or '').strip(), f'{manifest_path.parent.name}.{param_name} is missing description'
 
 
+def test_recovery_policy_blocks_only_declare_a_boolean_rerun_safe():
+    for manifest_path in TOOLS_ROOT.glob('*/resource.yaml'):
+        manifest = yaml.safe_load(manifest_path.read_text(encoding='utf-8')) or {}
+        block = manifest.get('recovery_policy')
+        if block is None:
+            continue
+        assert set(block) == {'rerun_safe'}, f'{manifest_path.parent.name}.recovery_policy has unknown keys'
+        assert isinstance(block.get('rerun_safe'), bool), f'{manifest_path.parent.name}.rerun_safe must be a bool'
+
+
+def test_rerunnable_tool_family_is_exactly_the_declared_list():
+    # 这份名单就是"重放这一次调用可证明无危害"的全部范围：加一条要写清理由，
+    # 少一条说明某个工具的可重放性被撤掉了。名单外的工具一律交给模型裁定。
+    declared = set()
+    for manifest_path in TOOLS_ROOT.glob('*/resource.yaml'):
+        block = (yaml.safe_load(manifest_path.read_text(encoding='utf-8')) or {}).get('recovery_policy') or {}
+        if block.get('rerun_safe') is True:
+            declared.add(manifest_path.parent.name)
+    assert declared == {
+        'content',
+        'content_describe',
+        'content_open',
+        'content_search',
+        'filesystem_stat',
+        'load_skill_context',
+        'load_tool_context',
+        'memory_note',
+        'perf_inspect_cn',
+        'task_failed_nodes_cn',
+        'task_fetch_cn',
+        'task_node_detail_cn',
+        'task_progress_cn',
+        'task_stats_cn',
+        'task_summary_cn',
+        'web_fetch',
+    }
+
+
+def test_recovery_policy_declaration_reaches_the_callable_tool_object(tmp_path):
+    from g3ku.resources.embedded_mcp import EmbeddedMCPTool
+    from g3ku.resources.loader import ManifestBackedTool
+
+    registry = ResourceRegistry(workspace=tmp_path, skills_dir=tmp_path / 'skills', tools_dir=tmp_path / 'tools')
+    tool_root = tmp_path / 'tools' / 'demo_tool'
+    main_root = tool_root / 'main'
+    main_root.mkdir(parents=True)
+    (main_root / 'tool.py').write_text('def build(runtime):\n    return None\n', encoding='utf-8')
+
+    class _PlainHandler:
+        async def execute(self, **kwargs):
+            return 'ok'
+
+    class _RerunnableHandler(_PlainHandler):
+        rerun_safe = True
+
+    manifest = {
+        'schema_version': 1,
+        'kind': 'tool',
+        'name': 'demo_tool',
+        'description': 'Demo tool',
+    }
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+    descriptor = registry.build_tool_descriptor(tool_root)
+    assert descriptor is not None
+
+    assert ManifestBackedTool(descriptor, _PlainHandler()).rerun_safe is False
+    assert EmbeddedMCPTool(descriptor, _PlainHandler()).rerun_safe is False
+
+    manifest['recovery_policy'] = {'rerun_safe': True}
+    (tool_root / 'resource.yaml').write_text(yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8')
+    declared = registry.build_tool_descriptor(tool_root)
+    assert declared is not None
+    assert ManifestBackedTool(declared, _PlainHandler()).rerun_safe is True
+    assert EmbeddedMCPTool(declared, _PlainHandler()).rerun_safe is True
+
+    # handler 代码级声明同样生效，无需清单参与
+    assert ManifestBackedTool(descriptor, _RerunnableHandler()).rerun_safe is True
+
+
 def test_task_runtime_resource_tools_are_self_describing_and_not_host_wrapped():
     expected = {
         'create_async_task_cn': ('create_async_task', 'create_async_task'),

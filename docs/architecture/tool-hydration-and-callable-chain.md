@@ -53,6 +53,13 @@
 - CEO 侧车道与本合同的关系：侧车道巡检只能在硬上限之内排程、不能延长它；巡检语义归 `heartbeat-system.md`「CEO Inline Tool Reminder Sidecar」。detached `ToolExecutionManager` 条目同样携带本次调用的上限，`wait_tool_execution` 续等窗口到点即终态化并返回超时结果，不轮询死条目。
 - 已知边界：同步阻塞型工具的超时只能在下一个 await 点生效；模型可传任意大 `timeout_seconds`（无上限是合同的一部分），串行化调度下的队头阻塞由 pause/cancel 兜底。`exec` 的两段等待都已有界（`timeout_seconds` 约束等进程退出、5s 宽限约束退出后排空，孙进程吊管道时到点杀树自愈），但「进程根本不退出」这一段的上限仍等于模型传的 `timeout_seconds`——短命令配大 `timeout_seconds` 会让卡死等到那个上限才自愈，故短命令务必配小值（无进度时长的失速提前告警属另一条防线，尚未接入）。
 
+### 工具可重放声明（恢复车道档位）
+
+- 进程被硬杀时正在跑的工具批，恢复后逐条决定"能不能替模型重放这一次调用"。唯一的判据是工具自己的声明：`Tool.rerun_safe` 类属性，或 `resource.yaml` 顶层 `recovery_policy.rerun_safe: true`（布尔）。两条车道与 timeout 标志同构，`ManifestBackedTool` / `EmbeddedMCPTool` 按「handler 属性 OR 清单声明」解析；代码内置工具（无清单目录的那批，如 `spawn_child_nodes`）只能走类属性。
+- **缺省即最重**：没有声明的工具一律按"副作用可能已经落地"处理，判给模型裁定，运行时不代劳重放。这条是合同的全部价值所在——今后新加的工具（含用户装的、外部注册的）默认落在这一档，作者想让它可自动重放就必须先证明重复调用无危害再声明。本轮取不到该工具对象（尚未水合成 callable）同样按无声明处理。
+- 声明放不轻两条代码判档，它们先于声明执行：`exec` / `shell` 固定交给模型；filesystem 写族按磁盘证据判（能证已完成记 `verified_done`，证不了记模型裁定，"已经写对了"比"再写一遍"更安全）。判档语义与整条恢复链路的其余部分归 `main-task-runtime.md`「Node-Level Pause and Recovery」。
+- 一句声明要对应一种可证明的理由，而不是"看起来无害"：纯读（`content*` / `filesystem_stat` / `load_*_context` / `task_*` 读类 / `memory_note` / `perf_inspect_cn`）、写但按 `tool_call_id` 归键（`spawn_child_nodes` 命中父节点 `spawn_operations` 缓存）、或重跑被持久状态闸门拒掉（`submit_next_stage` 在活动阶段无实质进展时报错，不会把阶段再推一格）。会另起一行记录、再发一条消息、再排一个定时器的那类（`cron` 的 add、`task_append_notice`、`create_async_task`、`memory_write` / `memory_delete`、`manage_task_nodes`、`model_config`、`skill-installer`、`task_delete`）都不声明。全仓名单由 `tests/resources/test_tool_manifest_contracts.py` 钉住；工具作者在 `skills/add-tool/SKILL.md` 的清单里逐条对照。
+
 ### 阶段门控与 callable 收紧
 
 - CEO/frontdoor 的 stage gate 由 `execute_tools` 真正执行：普通工具在无活动阶段或预算耗尽时不可自由调用。模型把 `submit_next_stage` 与目标工具在同一条消息里一起提交时，先执行 `submit_next_stage`，再把同批普通工具当作新阶段的第一批调用，并在该新阶段上记账预算。若模型未同批提交 `submit_next_stage` 就单独调用普通工具，撞闸的普通工具获得一次「宽限执行」：工具照常执行、结果照常返回，但结果尾部附阶段闸门提醒（`STAGELESS_FREE_PASS_REMINDER` / `STAGE_BUDGET_EXHAUSTED_FREE_PASS_REMINDER`）；宽限用尽后（已有待入账计预算轮，或耗尽阶段已有溢出轮）仍单独调用普通工具，才收到 `no active stage` / `current stage budget is exhausted` gate error。

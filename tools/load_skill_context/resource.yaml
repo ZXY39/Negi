@@ -26,6 +26,9 @@ parameters:
       description: The exact visible skill id to load.
   required:
     - skill_id
+recovery_policy:
+  rerun_safe: true
+
 exposure:
   agent: true
   org_graph: true

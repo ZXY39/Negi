@@ -25,6 +25,9 @@ def build_detail_level_schema(*, description: str) -> dict[str, Any]:
 
 class SubmitNextStageTool(Tool):
     hide_universal_timeout_parameter = True
+    # 重跑会被 log_service.submit_next_stage 的状态闸门拒掉：刚开的活动阶段没有
+    # 实质进展时第二次调用直接报错，而不是把阶段再往前推一格。
+    rerun_safe = True
 
     def __init__(
         self,
@@ -319,6 +322,9 @@ class SpawnChildNodesTool(Tool):
     # 派生子节点工具在一次调用内跑完整个子节点流水线（含嵌套派生与验收节点），
     # 运行时长天然无界，不得套任何外层机械超时；中断只能走任务级取消链。
     exempt_universal_timeout = True
+    # 重跑按 tool_call_id 命中父节点 metadata 里的 spawn_operations 记录：已完成的
+    # 批次直接复用原 entries，不会再物化一批子节点。
+    rerun_safe = True
 
     def __init__(
         self,

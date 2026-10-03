@@ -57,6 +57,9 @@ governance:
         - ceo
         - execution
         - inspection
+recovery_policy:
+  rerun_safe: true
+
 exposure:
   agent: true
   main_runtime: true

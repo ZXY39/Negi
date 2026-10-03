@@ -157,16 +157,41 @@ def test_recovery_check_exec_defaults_to_model_decide_when_side_effect_is_uncert
     assert result.evidence == []
 
 
-def test_recovery_check_read_only_tools_default_to_rerun_safe(tmp_path: Path) -> None:
+def test_recovery_check_undeclared_tool_is_not_rerun(tmp_path: Path) -> None:
     result = _engine(tmp_path).inspect_tool_call(
         tool_name="content",
         arguments={"action": "search", "path": str(tmp_path), "query": "needle"},
         runtime_context={"task_temp_dir": str(tmp_path)},
     )
 
+    assert result.decision == RecoveryCheckDecision.MODEL_DECIDE
+    assert result.expected_tool_status == "interrupted"
+    assert "no rerun-safe declaration" in result.lost_result_summary
+    assert result.evidence == []
+
+
+def test_recovery_check_declared_rerun_safe_tool_is_rerun(tmp_path: Path) -> None:
+    result = _engine(tmp_path).inspect_tool_call(
+        tool_name="content",
+        arguments={"action": "search", "path": str(tmp_path), "query": "needle"},
+        runtime_context={"task_temp_dir": str(tmp_path)},
+        rerun_safe=True,
+    )
+
     assert result.decision == RecoveryCheckDecision.RERUN_SAFE
     assert result.expected_tool_status == ""
-    assert "safe to rerun" in result.lost_result_summary
+    assert "declares itself rerun-safe" in result.lost_result_summary
+
+
+def test_recovery_check_declaration_cannot_lighten_exec(tmp_path: Path) -> None:
+    result = _engine(tmp_path).inspect_tool_call(
+        tool_name="exec",
+        arguments={"command": "make deploy"},
+        runtime_context={"task_temp_dir": str(tmp_path)},
+        rerun_safe=True,
+    )
+
+    assert result.decision == RecoveryCheckDecision.MODEL_DECIDE
 
 
 
@@ -177,7 +202,7 @@ class _EngineStub:
     def __init__(self) -> None:
         self.asked: list[str] = []
 
-    def inspect_tool_call(self, *, tool_name: str, arguments: dict, runtime_context: dict):
+    def inspect_tool_call(self, *, tool_name: str, arguments: dict, runtime_context: dict, rerun_safe: bool = False):
         self.asked.append(tool_name)
         decision = RecoveryCheckDecision.MODEL_DECIDE if tool_name == "exec" else RecoveryCheckDecision.RERUN_SAFE
         return SimpleNamespace(
@@ -281,3 +306,87 @@ def test_resume_does_not_replay_a_completed_call_even_when_classifier_would() ->
 
     assert "call-done" not in [cid for batch in replayed for cid in batch]
     assert "filesystem_stat" not in engine.asked
+
+
+# --- 可重放档位来自工具声明（Tool.rerun_safe / 清单 recovery_policy） ---
+
+
+def _declaration_loop(tmp_path: Path):
+    replayed: list[list[str]] = []
+    loop = object.__new__(ReActToolLoop)
+    loop._recovery_check_engine = RecoveryCheckEngine(workspace_root=tmp_path)
+    loop._log_service = SimpleNamespace(
+        update_node_input=lambda *args, **kwargs: None,
+        update_frame=lambda *args, **kwargs: None,
+        upsert_synthetic_tool_result=lambda **kwargs: None,
+    )
+    loop._runtime_frame = lambda task_id, node_id: {
+        "active_round_id": "round-1",
+        "pending_tool_calls": [
+            {"id": "call-read", "name": "content_search", "arguments": {"query": "needle"}},
+            {"id": "call-write", "name": "memory_write", "arguments": {"content": "note"}},
+        ],
+        "tool_calls": [],
+    }
+    loop._distribution_priority_blocks_recovery = lambda **kwargs: False
+    loop._pending_tool_turn_content = lambda **kwargs: "round text"
+    loop._collect_content_refs = lambda history: []
+    loop._overflowed_search_signatures = lambda history: set()
+    loop._execution_stage_frame_payload = lambda **kwargs: {}
+    loop._execution_stage_gate = lambda **kwargs: {}
+    loop._recovery_check_tool_call_id = lambda *args, **kwargs: "recovery-check-1"
+    loop._record_recovery_resolution_tool_result = lambda **kwargs: None
+
+    async def _execute(**kwargs):
+        replayed.append([str(call.id) for call in list(kwargs.get("response_tool_calls") or [])])
+        return [
+            {
+                "index": 0,
+                "live_state": {"tool_call_id": "call-read", "tool_name": "content_search", "status": "success"},
+                "tool_message": {"role": "tool", "tool_call_id": "call-read", "name": "content_search",
+                                 "content": "fresh search body"},
+            }
+        ]
+
+    async def _noop_async(**kwargs):
+        return None
+
+    loop._execute_tool_calls = _execute
+    loop._record_tool_result_batch = _noop_async
+    task = SimpleNamespace(task_id="task:x", root_node_id="node:r")
+    node = SimpleNamespace(node_id="node:c", task_id="task:x", depth=1, node_kind="execution",
+                           metadata={}, status="in_progress", goal="g")
+    return loop, replayed, task, node
+
+
+def test_resume_replays_only_calls_whose_tool_declares_rerun_safe(tmp_path: Path) -> None:
+    loop, replayed, task, node = _declaration_loop(tmp_path)
+
+    history = asyncio.run(loop._resume_pending_tool_turn_if_needed(
+        task=task, node=node, message_history=[],
+        tools={
+            "content_search": SimpleNamespace(rerun_safe=True),
+            "memory_write": SimpleNamespace(rerun_safe=False),
+        },
+        runtime_context={"node_id": node.node_id},
+    ))
+
+    messages = _tool_messages(history)
+    assert replayed == [["call-read"]]
+    assert "fresh search body" in messages.get("call-read", "")
+    # 未声明的那条不重放：把裁定交回模型，正文里带"结果在停机中丢失"。
+    assert "may have already produced side effects" in messages.get("call-write", "")
+
+
+def test_resume_treats_a_tool_missing_from_the_callable_map_as_undeclared(tmp_path: Path) -> None:
+    loop, replayed, task, node = _declaration_loop(tmp_path)
+
+    history = asyncio.run(loop._resume_pending_tool_turn_if_needed(
+        task=task, node=node, message_history=[],
+        tools={},
+        runtime_context={"node_id": node.node_id},
+    ))
+
+    messages = _tool_messages(history)
+    assert replayed == []
+    assert "no rerun-safe declaration" in messages.get("call-read", "")
