@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import asyncio
+from types import SimpleNamespace
+
 from main.runtime.recovery_check import RecoveryCheckDecision, RecoveryCheckEngine
+from main.runtime.react_loop import ReActToolLoop
 
 
 def _engine(tmp_path: Path) -> RecoveryCheckEngine:
@@ -163,3 +167,117 @@ def test_recovery_check_read_only_tools_default_to_rerun_safe(tmp_path: Path) ->
     assert result.decision == RecoveryCheckDecision.RERUN_SAFE
     assert result.expected_tool_status == ""
     assert "safe to rerun" in result.lost_result_summary
+
+
+
+# --- 恢复时按批内逐条判档（帧活状态里已完成的调用直接复用其结果） ---
+
+
+class _EngineStub:
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def inspect_tool_call(self, *, tool_name: str, arguments: dict, runtime_context: dict):
+        self.asked.append(tool_name)
+        decision = RecoveryCheckDecision.MODEL_DECIDE if tool_name == "exec" else RecoveryCheckDecision.RERUN_SAFE
+        return SimpleNamespace(
+            decision=decision,
+            expected_tool_status="interrupted" if decision is RecoveryCheckDecision.MODEL_DECIDE else "",
+            lost_result_summary="stub summary",
+            evidence=[],
+        )
+
+
+def _resume_loop():
+    engine = _EngineStub()
+    replayed: list[list[str]] = []
+    loop = object.__new__(ReActToolLoop)
+    loop._recovery_check_engine = engine
+    loop._log_service = SimpleNamespace(
+        update_node_input=lambda *args, **kwargs: None,
+        update_frame=lambda *args, **kwargs: None,
+        upsert_synthetic_tool_result=lambda **kwargs: None,
+    )
+    loop._runtime_frame = lambda task_id, node_id: {
+        "active_round_id": "round-1",
+        "pending_tool_calls": [
+            {"id": "call-done", "name": "filesystem_stat", "arguments": {"paths": []}},
+            {"id": "call-exec", "name": "exec", "arguments": {"command": "make deploy"}},
+            {"id": "call-read", "name": "content_search", "arguments": {"ref": "artifact:x"}},
+        ],
+        "tool_calls": [
+            {"tool_call_id": "call-done", "tool_name": "filesystem_stat", "status": "success",
+             "started_at": "t0", "finished_at": "t1", "elapsed_seconds": 1.0,
+             "result_content": "ALREADY-RECORDED-STAT-BODY"},
+            {"tool_call_id": "call-exec", "tool_name": "exec", "status": "running",
+             "started_at": "t0", "finished_at": "", "elapsed_seconds": None},
+            {"tool_call_id": "call-read", "tool_name": "content_search", "status": "queued",
+             "started_at": "", "finished_at": "", "elapsed_seconds": None},
+        ],
+    }
+    loop._distribution_priority_blocks_recovery = lambda **kwargs: False
+    loop._pending_tool_turn_content = lambda **kwargs: "round text"
+    loop._collect_content_refs = lambda history: []
+    loop._overflowed_search_signatures = lambda history: set()
+    loop._execution_stage_frame_payload = lambda **kwargs: {}
+    loop._execution_stage_gate = lambda **kwargs: {}
+    loop._recovery_check_tool_call_id = lambda *args, **kwargs: "recovery-check-1"
+    loop._record_recovery_resolution_tool_result = lambda **kwargs: None
+
+    async def _execute(**kwargs):
+        replayed.append([str(call.id) for call in list(kwargs.get("response_tool_calls") or [])])
+        return [
+            {
+                "index": 0,
+                "live_state": {"tool_call_id": "call-read", "tool_name": "content_search", "status": "success"},
+                "tool_message": {"role": "tool", "tool_call_id": "call-read", "name": "content_search",
+                                 "content": "fresh search body"},
+            }
+        ]
+
+    async def _noop_async(**kwargs):
+        return None
+
+    loop._execute_tool_calls = _execute
+    loop._record_tool_result_batch = _noop_async
+    task = SimpleNamespace(task_id="task:x", root_node_id="node:r")
+    node = SimpleNamespace(node_id="node:c", task_id="task:x", depth=1, node_kind="execution",
+                           metadata={}, status="in_progress", goal="g")
+    return loop, engine, replayed, task, node
+
+
+def _tool_messages(history):
+    return {str(m.get("tool_call_id")): str(m.get("content") or "") for m in history if m.get("role") == "tool"}
+
+
+def test_resume_reuses_recorded_result_and_asks_per_call() -> None:
+    loop, engine, replayed, task, node = _resume_loop()
+
+    history = asyncio.run(loop._resume_pending_tool_turn_if_needed(
+        task=task, node=node, message_history=[{"role": "user", "content": "start"}],
+        tools={"content_search": object(), "exec": object(), "filesystem_stat": object()},
+        runtime_context={"node_id": node.node_id},
+    ))
+
+    assert history is not None
+    messages = _tool_messages(history)
+    # 1) 已完成的那条：复用停机前留在帧里的结果正文，不问分类器、不重放
+    assert "ALREADY-RECORDED-STAT-BODY" in messages.get("call-done", "")
+    assert "filesystem_stat" not in engine.asked
+    # 2) 发起未完成的 exec 与从未发起的只读调用都照常问分类器（前者 model_decide、后者重放）
+    assert engine.asked == ["exec", "content_search"]
+    # 3) 从未发起的只读调用：整批不再被一锅端，只有这一条被重放
+    assert replayed == [["call-read"]]
+
+
+def test_resume_does_not_replay_a_completed_call_even_when_classifier_would() -> None:
+    loop, engine, replayed, task, node = _resume_loop()
+
+    asyncio.run(loop._resume_pending_tool_turn_if_needed(
+        task=task, node=node, message_history=[],
+        tools={"content_search": object(), "exec": object(), "filesystem_stat": object()},
+        runtime_context={"node_id": node.node_id},
+    ))
+
+    assert "call-done" not in [cid for batch in replayed for cid in batch]
+    assert "filesystem_stat" not in engine.asked

@@ -1785,6 +1785,8 @@ class ReActToolLoop:
             )
         raise RuntimeError('node exceeded maximum ReAct iterations')
 
+    _RECORDED_LIVE_STATUSES = frozenset({'success', 'error', 'reused'})
+
     async def _resume_pending_tool_turn_if_needed(
         self,
         *,
@@ -1839,25 +1841,44 @@ class ReActToolLoop:
             tool_name = str(item.get('name') or '').strip() or 'tool'
             arguments = self._normalize_tool_call_arguments(item.get('arguments'))
             live_state = dict(live_tool_map.get(call_id) or {})
-            inspection = self._recovery_check_engine.inspect_tool_call(
-                tool_name=tool_name,
-                arguments=arguments,
-                runtime_context=runtime_context,
-            )
-            decision = inspection.decision
-            if decision == RecoveryCheckDecision.RERUN_SAFE and tool_name not in tools:
-                decision = RecoveryCheckDecision.MODEL_DECIDE
+            recorded_content = str(live_state.get('result_content') or '').strip()
+            recorded_status = str(live_state.get('status') or '').strip().lower()
+            reuse_content = ''
+            if recorded_content and recorded_status in self._RECORDED_LIVE_STATUSES:
+                # 这条调用其实已经跑完：`_update_tool_live_state` 在每条返回时把状态与
+                # 结果正文写进帧的活状态，恢复车道此前从不读它。批内其余调用被打断时，
+                # 已完成的那条不是未知——直接复用原结果，既不重放也不问模型。
+                decision = RecoveryCheckDecision.VERIFIED_DONE
+                expected_tool_status = 'error' if recorded_status == 'error' else 'success'
+                lost_result_summary = (
+                    'Recovery reused the completed tool result carried in the frame live state '
+                    f'(status={recorded_status}) instead of re-running the tool.'
+                )
+                evidence = [{'kind': 'live_tool_result', 'path': '', 'note': f'live status={recorded_status}'}]
+                reuse_content = recorded_content
+            else:
+                inspection = self._recovery_check_engine.inspect_tool_call(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    runtime_context=runtime_context,
+                )
+                decision = inspection.decision
+                if decision == RecoveryCheckDecision.RERUN_SAFE and tool_name not in tools:
+                    decision = RecoveryCheckDecision.MODEL_DECIDE
+                expected_tool_status = (
+                    inspection.expected_tool_status
+                    if decision != RecoveryCheckDecision.MODEL_DECIDE
+                    else 'interrupted'
+                )
+                lost_result_summary = str(inspection.lost_result_summary or '').strip()
+                evidence = [dict(evidence) for evidence in list(inspection.evidence or []) if isinstance(evidence, dict)]
             inspected_item = {
                 'call': dict(item),
                 'tool_name': tool_name,
                 'decision': decision,
-                'expected_tool_status': (
-                    inspection.expected_tool_status
-                    if decision != RecoveryCheckDecision.MODEL_DECIDE
-                    else 'interrupted'
-                ),
-                'lost_result_summary': str(inspection.lost_result_summary or '').strip(),
-                'evidence': [dict(evidence) for evidence in list(inspection.evidence or []) if isinstance(evidence, dict)],
+                'expected_tool_status': expected_tool_status,
+                'lost_result_summary': lost_result_summary,
+                'evidence': evidence,
                 'live_state': live_state,
             }
             inspected_items.append(inspected_item)
@@ -1872,7 +1893,7 @@ class ReActToolLoop:
                     live_state,
                     call_id=call_id,
                     tool_name=tool_name,
-                    status='success',
+                    status=expected_tool_status,
                 )
                 synthetic_live_state['finished_at'] = now_iso()
                 ordered_results.append(
@@ -1882,8 +1903,8 @@ class ReActToolLoop:
                             synthetic_live_state,
                             call_id=call_id,
                             tool_name=tool_name,
-                            content=self._recovery_checked_tool_content(inspected_item),
-                            status='success',
+                            content=reuse_content or self._recovery_checked_tool_content(inspected_item),
+                            status=expected_tool_status,
                         ),
                     }
                 )
