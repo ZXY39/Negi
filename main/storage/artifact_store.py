@@ -270,21 +270,20 @@ class TaskArtifactStore:
         return self._artifact_dir / safe_task_id
 
     def _find_existing_text_artifact(self, *, task_id: str, content: str, content_hash: str) -> TaskArtifactRecord | None:
-        """按哈希判断"这份正文是否已存过"，全程不把候选正文读回来。
+        """按哈希判断"这份正文是否已存过"，候选集由 SQL 侧按哈希筛。
 
-        旧写法对每个候选调 `_artifact_matches_content`，而迁移前落库的行
-        `content_hash` 是空串，那条兜底分支会把候选文件整个读回并解码比对；
-        加上候选集来自 `list_artifacts(task_id)` 的整任务建模，实测这条链占
-        事件循环约 35%（负载窗口 py-spy：`create_text_artifact ->
-        _find_existing_text_artifact`）。现在：窄读取四列 -> 比字节数 -> 比哈希
-        （空哈希的行只读一次，哈希记进 `_artifact_hash_by_id`，同进程不复读）
-        -> 只有命中才验文件存在并回表取那一行。
+        旧写法把整任务 artifact 行全取回再在 Python 里比（实盘 8,563 行），而且遇到
+        `content_hash` 为空的存量行会把那份文件整个读回来算哈希——984 行一次进程内首扫
+        ≈ 2.2 s，落在长块榜上是 `fetchall:artifacts[from=_find_existing_text_artifact]`
+        2,246.9 / 2,326.4 ms。现在比较下推到 SQL，只有"命中同一哈希"或"该行还没哈希"的行回来。
+        没有哈希的行仍要读一次文件（保守判等，宁可多读也不能把同一份正文存成两件），
+        它们由 `backfill_missing_content_hashes` 补上后这条路就只剩哈希比较。
         """
         cached = self._content_index.get((task_id, content_hash))
         if cached is not None and self._artifact_is_readable(cached):
             return cached
         size_bytes = len(str(content or '').encode('utf-8'))
-        for row in self._store.list_artifact_dedupe_rows(task_id):
+        for row in self._store.find_artifact_dedupe_candidates(task_id, content_hash):
             recorded = str(row['content_hash'] or '').strip() or self._legacy_content_hash(row)
             if not recorded or recorded != content_hash:
                 continue
@@ -296,6 +295,30 @@ class TaskArtifactStore:
             self._content_index[(task_id, content_hash)] = artifact
             return artifact
         return None
+
+    def backfill_missing_content_hashes(self, *, limit: int = 200, batches: int = 5) -> int:
+        """给没有 `content_hash` 的存量 artifact 行补上哈希（一次性，幂等）。
+
+        为什么要它：`_legacy_content_hash` 只把哈希记在进程内，**不回写库**，所以每次重启后的
+        第一次正文查重都要把那些大文件再读一遍算一遍。补进 payload 之后，查重只剩 SQL 比较。
+        每批取 `limit` 行、最多 `batches` 批，返回实际补上的行数（0 表示已无缺口）。
+        """
+        filled = 0
+        for _ in range(max(1, int(batches or 1))):
+            rows = self._store.list_artifacts_missing_content_hash(limit)
+            if not rows:
+                break
+            progressed = False
+            for row in rows:
+                digest = self._legacy_content_hash(row)
+                if not digest:
+                    continue
+                if self._store.set_artifact_content_hash(str(row['artifact_id'] or '').strip(), digest):
+                    filled += 1
+                    progressed = True
+            if not progressed:
+                break
+        return filled
 
     def _legacy_content_hash(self, row) -> str:
         """给 `content_hash` 为空的存量行算一次哈希并记住：判等从此只看哈希。

@@ -8224,6 +8224,7 @@ class MainRuntimeService:
                 await self._run_detail_retention_if_due()
                 await self._run_delete_ledger_sweep_if_due()
                 await self._run_console_log_cap_if_due()
+                await self._run_artifact_hash_backfill_if_due()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -8290,6 +8291,38 @@ class MainRuntimeService:
                 deleted_total,
                 cutoff,
             )
+
+    async def _run_artifact_hash_backfill_if_due(self) -> None:
+        """给没有 `content_hash` 的存量 artifact 行补哈希（24 h 一趟，跨进程卡权）。
+
+        不补就要付两次代价：`_legacy_content_hash` 只把哈希记在进程内、不回写库，所以
+        每次重启后的第一次正文查重要把那批文件整个读回来算一遍——实盘 984 行 ≈ 2.2 s，
+        长块榜上是 `fetchall:artifacts[from=_find_existing_text_artifact]` 2,246.9 / 2,326.4 ms，
+        对得上 09:36:42 那拍 2,519 ms 的事件循环滞后。补进 payload 后查重只剩 SQL 比较。
+        """
+        try:
+            claimed = await asyncio.to_thread(
+                self.store.claim_maintenance_run,
+                'artifact_content_hash_backfill',
+                min_interval_seconds=24 * 3600.0,
+            )
+        except Exception:
+            return
+        if not claimed:
+            return
+        try:
+            filled = await asyncio.to_thread(
+                self.artifact_store.backfill_missing_content_hashes, limit=200, batches=20
+            )
+            remaining = await asyncio.to_thread(self.store.count_artifacts_missing_content_hash)
+        except Exception as exc:
+            logger.warning('artifact content hash backfill failed: {}', exc)
+            return
+        logger.info(
+            'artifact content hash backfill: filled={} remaining={}',
+            int(filled or 0),
+            int(remaining or 0),
+        )
 
     def _reconcile_task_disk_usage(self, task_id: str) -> None:
         """对账口径 = 目录实测（files/artifacts/event-history/temp）+ 数据库

@@ -1031,14 +1031,19 @@ class SQLiteTaskStore:
         rows = self._fetchall('SELECT payload_json FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, artifact_id ASC', (task_id,))
         return [self._parse(row['payload_json'], TaskArtifactRecord) for row in rows]
 
-    def list_artifact_dedupe_rows(self, task_id: str) -> list[sqlite3.Row]:
-        """正文查重用的窄读：只取判等要用的四列，不把整任务 artifact 建成模型。
+    def find_artifact_dedupe_candidates(self, task_id: str, content_hash: str) -> list[sqlite3.Row]:
+        """正文查重的候选集：把哈希比较下推到 SQL，不在 Python 里遍历整任务 artifact。
 
-        `list_artifacts(task_id)` 每写一份正文就要把该任务全部行建模成
-        `TaskArtifactRecord`；判等只需要 artifact_id / path / content_hash /
-        size_bytes / content_encoding，交给 SQLite 的 `json_extract` 在库里取。
-        走主读连接：这个结果决定要不要落一份新文件，属写侧判定（轻读连接的
-        快照差异见任务 #24，判定类读取不走它）。
+        旧写法 `list_artifact_dedupe_rows(task_id)` 每写一份正文就把该任务**全部**行取回
+        （实盘 8,563 行 / 8.10 MB：SQL 66 ms，但 Python 循环里遇到 `content_hash` 为空的存量行
+        会 `_legacy_content_hash` 把那份文件整个读回来算哈希——984 行实测外推 ≈ 2.2 s，
+        正是长块榜上 `fetchall:artifacts[from=_find_existing_text_artifact]` 2,246.9 / 2,326.4 ms
+        的来源，也对应 09:36:42 那拍 2,519 ms 的事件循环滞后）。
+
+        仍然把"没有哈希的行"带进候选集（`content_hash=''`）：那类行由回填任务
+        （`backfill_missing_content_hashes`）补上哈希，补上之前判等必须照旧保守——
+        宁可多读一次文件，不能把同一份正文存成两件。走主读连接：这个结果决定要不要落新文件，
+        属写侧判定（轻读连接不能用于判定，见 `memory` 任务 #24）。
         """
         return list(
             self._fetchall(
@@ -1047,10 +1052,52 @@ class SQLiteTaskStore:
                 "json_extract(payload_json, '$.content_hash') AS content_hash, "
                 "json_extract(payload_json, '$.size_bytes') AS size_bytes, "
                 "json_extract(payload_json, '$.content_encoding') AS content_encoding "
-                "FROM artifacts WHERE task_id = ? ORDER BY created_at ASC, artifact_id ASC",
-                (str(task_id or '').strip(),),
+                "FROM artifacts "
+                "WHERE task_id = ? AND (coalesce(json_extract(payload_json, '$.content_hash'), '') = ? "
+                "OR coalesce(json_extract(payload_json, '$.content_hash'), '') = '') "
+                "ORDER BY created_at ASC, artifact_id ASC",
+                (str(task_id or '').strip(), str(content_hash or '').strip()),
             )
         )
+
+    def list_artifacts_missing_content_hash(self, limit: int = 200) -> list[sqlite3.Row]:
+        """全库找没有 content_hash 的 artifact 行（回填用），带 path/size/encoding。"""
+        return list(
+            self._fetchall(
+                "SELECT artifact_id, task_id, "
+                "json_extract(payload_json, '$.path') AS path, "
+                "json_extract(payload_json, '$.size_bytes') AS size_bytes, "
+                "json_extract(payload_json, '$.content_encoding') AS content_encoding "
+                "FROM artifacts "
+                "WHERE coalesce(json_extract(payload_json, '$.content_hash'), '') = '' "
+                "ORDER BY artifact_id ASC LIMIT ?",
+                (max(1, int(limit or 200)),),
+            )
+        )
+
+    def count_artifacts_missing_content_hash(self) -> int:
+        row = self._fetchone(
+            "SELECT COUNT(*) AS c FROM artifacts "
+            "WHERE coalesce(json_extract(payload_json, '$.content_hash'), '') = ''"
+        )
+        return int(row["c"]) if row is not None else 0
+
+    def set_artifact_content_hash(self, artifact_id: str, content_hash: str) -> bool:
+        """把算好的哈希写回 artifact 行：`content_hash` 的家在 payload 里，这里只补空不新增键。"""
+        normalized_id = str(artifact_id or '').strip()
+        normalized_hash = str(content_hash or '').strip()
+        if not normalized_id or not normalized_hash:
+            return False
+
+        def operation(conn: sqlite3.Connection) -> bool:
+            cursor = conn.execute(
+                "UPDATE artifacts SET payload_json = json_set(payload_json, '$.content_hash', ?) "
+                "WHERE artifact_id = ? AND coalesce(json_extract(payload_json, '$.content_hash'), '') = ''",
+                (normalized_hash, normalized_id),
+            )
+            return int(cursor.rowcount or 0) > 0
+
+        return self._run_write(operation)
 
     def list_artifacts_for_node(self, task_id: str, node_id: str | None) -> list[TaskArtifactRecord]:
         """按 (task, node) 取 artifact 行；node_id 为空即任务级（NULL）。
