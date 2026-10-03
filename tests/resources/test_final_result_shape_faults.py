@@ -228,7 +228,35 @@ async def test_react_loop_keeps_line_range_text_as_a_rejection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_react_loop_does_not_invent_delivery_status_for_acceptance_nodes() -> None:
+async def test_react_loop_derives_final_delivery_status_for_success_acceptance_verdict() -> None:
+    # 实盘 2026-10-03 四条（node:7d51bc29f402 12:36:08 等）全是这个形状：验收节点写了
+    # status='success' 却漏 delivery_status。两份正文里 success 只有一种搭配（通过⇒final、
+    # 阻塞核验成立也是⇒final），补齐不改变裁定。
+    payload = _good_final_arguments()
+    payload.pop("delivery_status")
+    result, requests, logs = await _run_final_result_loop(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:acceptance-success", payload)],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+        ],
+        node_kind="acceptance",
+        task_id="task-acceptance-success",
+        node_id="node-acceptance-success",
+        max_iterations=1,
+    )
+
+    assert result.status == "success"
+    assert result.delivery_status == "final"
+    assert len(requests) == 1
+    assert logs.error_logs == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_does_not_invent_delivery_status_for_failed_acceptance_verdict() -> None:
     payload = {
         "status": "failed",
         "summary": "rejected",

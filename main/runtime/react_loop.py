@@ -7407,6 +7407,7 @@ class ReActToolLoop:
         node_kind: str = 'execution',
     ) -> dict[str, Any]:
         payload = dict(raw_payload or {})
+        normalized_kind = str(node_kind or '').strip().lower()
         status = str(payload.get('status') or '').strip().lower()
         delivery_status = str(payload.get('delivery_status') or '').strip().lower()
 
@@ -7416,11 +7417,15 @@ class ReActToolLoop:
             payload['status'] = status
         if delivery_status in {'final', 'blocked'}:
             payload['delivery_status'] = delivery_status
-        elif not delivery_status and str(node_kind or '').strip().lower() != 'acceptance':
-            # 执行节点正文 §5.2 把两个必填写成一一对应（success⇒final、failed⇒blocked），
-            # 少写一个由另一个唯一决定。验收节点 failed 时 final(打回) 与 blocked(终止循环)
-            # 语义相反，运行时无权替它选。
-            paired = {'success': 'final', 'failed': 'blocked'}.get(status)
+        elif not delivery_status:
+            # 判据是 status 而不是节点类型：`success` 在两份正文里都只有一种搭配
+            # （node_execution.md「delivery_status 搭配规则」与 acceptance_execution.md
+            # 的验收/阻塞核验两条道都写死 success+final），所以缺的那个字段有唯一解。
+            # 歧义只在验收节点的 `failed` 上：final=打回重验、blocked=终局不再打回，
+            # 两个结论相反，运行时无权替它选。
+            paired = 'final' if status == 'success' else ''
+            if not paired and status == 'failed' and normalized_kind != 'acceptance':
+                paired = 'blocked'
             if paired:
                 payload['delivery_status'] = paired
 
