@@ -13,6 +13,7 @@ from g3ku.agent.tools.base import Tool
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from g3ku.runtime.stage_prompt_compaction import completed_stage_blocks
 from main.protocol import now_iso
+from main.runtime.acceptance_handshake import ACCEPTANCE_HANDSHAKE_KEY
 from main.runtime.chat_backend import build_stable_prompt_cache_key
 from main.runtime.node_runner import NodeRunner
 from main.runtime.internal_tools import SpawnChildNodesTool, SubmitFinalResultTool, SubmitNextStageTool
@@ -3431,6 +3432,21 @@ async def test_acceptance_node_supports_allowed_final_result_combinations(
             goal='accept root output',
             acceptance_prompt='verify the root output',
             parent_node_id=root.node_id,
+        )
+        # 验收抢跑闸门要求对方有一笔待裁定的闭合提交，否则 run_node 直接落
+        # success+partial 冻结、三条裁定都到不了模型。三条派验车道在派发前都
+        # 会登记这份握手，这里补的是同一个事实。
+        service.store.update_node(
+            root.node_id,
+            lambda n: n.model_copy(update={'metadata': {
+                **(n.metadata or {}),
+                ACCEPTANCE_HANDSHAKE_KEY: {
+                    'state': 'waiting_acceptance',
+                    'acceptance_node_id': acceptance.node_id,
+                    'latest_execution_result_ref': 'artifact:fixture-result',
+                    'latest_execution_result_summary': 'fixture submission',
+                },
+            }}),
         )
         result = await service.node_runner.run_node(record.task_id, acceptance.node_id)
         latest = service.store.get_node(acceptance.node_id)
