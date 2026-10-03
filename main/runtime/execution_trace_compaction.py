@@ -162,6 +162,9 @@ def build_execution_trace_summary(execution_trace: dict[str, Any] | None) -> dic
                 "tool_rounds_used": int(stage.get("tool_rounds_used") or 0),
                 "created_at": str(stage.get("created_at") or ""),
                 "finished_at": str(stage.get("finished_at") or ""),
+                # 摘要侧也要带上裁撤标记：节点详情在完整轨迹缺席时读的就是这份，
+                # 漏掉它阶段卡只会把"模型点名移出上下文"画成普通"完成"。
+                **({"context_evicted": True} if stage.get("context_evicted") is True else {}),
                 "rounds": rounds_payload,
                 "tool_calls": tool_calls,
             }

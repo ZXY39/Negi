@@ -1332,6 +1332,9 @@ function normalizeSummaryExecutionTrace(summary) {
             stage_index: toInt(stage?.stage_index, stageIndex + 1),
             mode: String(stage?.mode || "执行摘要").trim() || "执行摘要",
             status: String(stage?.status || (String(stage?.finished_at || "").trim() ? "完成" : "进行中")).trim() || "进行中",
+            // 裁撤标记必须穿过这份白名单：阶段卡的状态徽章靠它区分"完成"与"已移出上下文"，
+            // 漏在这里就等于前端永远看不到模型点名移出这件事。
+            context_evicted: stage?.context_evicted === true,
             stage_goal: String(stage?.stage_goal || "").trim(),
             preamble_text: String(stage?.preamble_text || "").trim(),
             completed_stage_summary: String(stage?.completed_stage_summary || "").trim(),
@@ -1440,6 +1443,9 @@ function normalizeExecutionStageTrace(stage, index = 0) {
         stage_index: normalizeInt(stage?.stage_index, index + 1),
         mode: String(stage?.mode || "自主执行").trim() || "自主执行",
         status: String(stage?.status || "进行中").trim() || "进行中",
+        // 这份白名单决定了阶段卡能看到哪些字段：漏掉裁撤标记，前端就只能显示"完成"，
+        // 而模型点名移出上下文这件事恰恰只有这个标记能表达。
+        context_evicted: stage?.context_evicted === true,
         stage_goal: String(stage?.stage_goal || "").trim(),
         preamble_text: String(stage?.preamble_text || "").trim(),
         completed_stage_summary: String(stage?.completed_stage_summary || "").trim(),
@@ -1508,10 +1514,14 @@ function nodeFinalTraceStatus(node) {
     return "success";
 }
 
-function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", stageId = "" }) {
+function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = "", open = false, bodyHtml = "", showRuntime = true, showStatus = true, extraClass = "", leadHtml = "", stageId = "", evicted = false }) {
     const classes = ["interaction-step", "task-trace-step", esc(status)];
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
+    // 阶段被模型点名移出上下文：生命周期状态（完成/失败）保留在 class 上供状态对账用，
+    // 徽章换成黄色 + eye-off 图标，文案改成"已移出上下文"——它说的是"还在账本里、
+    // 但不再进模型上下文"，与"完成"是两件不同的事。
+    if (evicted) classes.push("stage-evicted");
     // data-trace-key 的 key 允许退化成 stage_index 乃至序号，跨回合会撞车；
     // 阶段状态对账需要的是真 stage_id，所以单独落一个属性，不做字符串推断。
     const normalizedStageId = String(stageId || "").trim();
@@ -1519,7 +1529,9 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
     const sideParts = [];
     if (showRuntime) sideParts.push('<span class="task-trace-runtime" hidden></span>');
     if (showStatus) {
-        sideParts.push(`<span class="interaction-step-status">${esc(String(statusLabel || "").trim() || traceStatusLabel(status))}</span>`);
+        const label = String(statusLabel || "").trim() || traceStatusLabel(status);
+        const leadIcon = evicted ? '<i data-lucide="eye-off" aria-hidden="true"></i>' : "";
+        sideParts.push(`<span class="interaction-step-status">${leadIcon}${esc(label)}</span>`);
     }
     return `
         <details class="${classes.join(" ")}" data-trace-key="${esc(traceKey)}"${stageIdAttr} data-default-open="${open ? "true" : "false"}"${open ? " open" : ""}>
@@ -1819,6 +1831,19 @@ function displayTaskStageStatus(status) {
     }[String(status || "").trim()]) || String(status || "").trim() || "进行中";
 }
 
+const STAGE_EVICTED_LABEL = "已移出上下文";
+
+// 裁撤标记由后端账本落到 UI 投影（canonical_context._normalize_stage 只在成立时写
+// context_evicted:true，缺失即未裁撤），前端不做推断。
+function stageIsContextEvicted(stage) {
+    return Boolean(stage && stage.context_evicted === true);
+}
+
+function stageTraceStatusLabel(stage) {
+    if (stageIsContextEvicted(stage)) return STAGE_EVICTED_LABEL;
+    return displayTaskStageStatus(stage?.status);
+}
+
 function formatExecutionStageTitle(stage) {
     const stageGoal = String(stage?.stage_goal || "").trim();
     const fallbackTitle = String(stage?.mode || "自主执行").trim() || "自主执行";
@@ -1866,7 +1891,8 @@ function buildExecutionTraceSteps(trace, node) {
                 traceKey: `stage:${stage.stage_id || stage.stage_index || index}`,
                 title: formatExecutionStageTitle(stage),
                 status: stageTraceStatus(stage),
-                statusLabel: displayTaskStageStatus(stage.status),
+                statusLabel: stageTraceStatusLabel(stage),
+                evicted: stageIsContextEvicted(stage),
                 open: index === trace.stages.length - 1,
                 bodyHtml: renderExecutionStageRounds(stage),
             })),

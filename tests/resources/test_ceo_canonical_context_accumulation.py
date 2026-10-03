@@ -273,6 +273,27 @@ def test_ui_delta_reports_a_closed_stage_only_for_its_visible_change() -> None:
     assert "context_visible" not in stages[0]
 
 
+def test_ui_delta_reports_the_eviction_mark_the_stage_card_badges() -> None:
+    """裁撤标记必须穿过 UI delta：阶段卡靠它把"完成"换成"已移出上下文"。
+
+    与收口不同，`submit_next_stage` 每回合只给正在收口的那一条阶段盖章，不会把整本历史
+    一次性扫进同一帧，所以把它算进展示变化是安全的；把它当簿记位抹掉等于前端永远看不到
+    模型点名移出这件事（live 轨道只读 delta，全量 canonical 只在刷新那一次才到）。
+    """
+    rounds = [{"round_index": 1, "text": "round 1", "tools": [_tool("read-1", output_text="out")]}]
+    before = normalize_frontdoor_canonical_context(
+        {"stages": [_stage("frontdoor-stage-1", 1, rounds=rounds)]}
+    )
+    after = normalize_frontdoor_canonical_context(
+        {"stages": [_stage("frontdoor-stage-1", 1, rounds=rounds, evicted=True)]}
+    )
+
+    stages = list((ui_canonical_context_delta(before, after).get("stages") or []))
+
+    assert len(stages) == 1
+    assert stages[0]["context_evicted"] is True
+
+
 def test_ui_delta_keeps_only_new_stages_and_backfills_live_bodies() -> None:
     old_rounds = [
         {

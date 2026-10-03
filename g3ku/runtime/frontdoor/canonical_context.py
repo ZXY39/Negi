@@ -1067,11 +1067,14 @@ def canonical_tool_identity(tool_payload: dict[str, Any], index: int) -> str:
     return f"{tool_name}:{index}"
 
 
-# 收口标记只决定阶段正文进不进模型上下文，不决定轨道怎么画，前端也完全不读它。
+# 收口标记只决定阶段正文进不进模型上下文，不决定轨道怎么画，前端也不读它。
 # 把它算进 UI delta 的代价实测很贵：一次 token 压缩会把压缩区间内几百个历史阶段一次性
 # 标记收口，全部落进同一行转录，那一行的 delta 变成 429 条阶段 / 302KB，
-# 对应气泡看起来像把整部历史堆在自己身上（QQ 渠道会话）。裁撤标记同一性质。
-UI_INERT_STAGE_FIELDS = frozenset({"context_visible", "context_evicted"})
+# 对应气泡看起来像把整部历史堆在自己身上（QQ 渠道会话）。
+# 裁撤标记不是同一性质，别按同一口径砍：它只在 `submit_next_stage` 点名时落在"正在收口
+# 的那一条"阶段上（每回合至多一条），而前端阶段卡要靠它区分"完成"与"已移出上下文"，
+# 所以必须留在比较面和出帧载荷里。
+UI_INERT_STAGE_FIELDS = frozenset({"context_visible"})
 
 
 def _ui_comparable_stage(stage: dict[str, Any]) -> dict[str, Any]:

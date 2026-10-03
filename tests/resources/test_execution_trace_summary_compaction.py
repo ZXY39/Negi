@@ -177,3 +177,25 @@ def test_stored_summary_and_rebuilt_summary_are_the_same_document() -> None:
     assert stage["tool_rounds_used"] == 1
     second_pass = TaskQueryService._sanitize_execution_trace_summary(from_storage)
     assert second_pass["stages"][0]["tool_rounds_used"] == 0
+
+
+def test_eviction_mark_survives_both_summary_builders() -> None:
+    """节点详情的摘要侧必须带上裁撤标记，阶段卡才能把"完成"画成"已移出上下文"。
+
+    完整轨迹在场时读 `execution_trace`（那条带标记），缺席时读这份摘要；两条道都得带，
+    否则同一个节点在重启前后画成两种状态。只在成立时落键，未裁撤的阶段不涨体积。
+    """
+    evicted_trace = {
+        "stages": [
+            {**stage, "context_evicted": True}
+            for stage in json.loads(json.dumps(_TRACE))["stages"]
+        ]
+    }
+
+    written = build_execution_trace_summary(evicted_trace)
+    read_back = TaskQueryService._sanitize_execution_trace_summary(written)
+    untouched = build_execution_trace_summary(_TRACE)
+
+    assert written["stages"][0]["context_evicted"] is True
+    assert read_back["stages"][0]["context_evicted"] is True
+    assert "context_evicted" not in untouched["stages"][0]

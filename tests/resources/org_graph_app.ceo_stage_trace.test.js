@@ -1066,3 +1066,40 @@ test("ceo silent tool live event creates no interaction step", () => {
     assert.equal(applyCeoToolEventToTurn(turn, { tool_name: "silent", status: "success", text: "已静默" }), null);
     assert.equal(turn.listEl.innerHTML, "");
 });
+
+test("ceo stage card badges model-evicted stages as 已移出上下文 in yellow", () => {
+    const { renderCeoStageTraceIntoTurn } = loadApp();
+    const turn = makeTurn({ text: "" });
+
+    renderCeoStageTraceIntoTurn(turn, {
+        stages: [
+            {
+                stage_id: "stage-9",
+                stage_goal: "测试 agent-browser CLI",
+                status: "completed",
+                completed_stage_summary: "实测全通过",
+                context_evicted: true,
+                rounds: [],
+            },
+            {
+                stage_id: "stage-10",
+                stage_goal: "继续调研",
+                status: "completed",
+                rounds: [],
+            },
+        ],
+    });
+
+    const html = turn.listEl.innerHTML;
+    const evictedStep = html.split("</details>")[0];
+    const plainStep = html.split("</details>")[1] || "";
+
+    // 被点名移出上下文的阶段：黄色徽章换成"已移出上下文" + eye-off 图标
+    assert.match(evictedStep, /已移出上下文/);
+    assert.match(evictedStep, /data-lucide="eye-off"/);
+    // 生命周期类必须留在元素上：跨回合状态对账按 token 读它，evicted 只是叠加样式
+    assert.match(evictedStep, /class="interaction-step task-trace-step success stage-evicted"/);
+    // 没被点名的完成阶段一切照旧
+    assert.match(plainStep, /完成/);
+    assert.doesNotMatch(plainStep, /eye-off|已移出上下文|stage-evicted/);
+});

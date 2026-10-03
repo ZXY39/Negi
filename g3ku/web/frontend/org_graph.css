@@ -46,6 +46,8 @@
     --status-failed-text: #b91c1c;
     --status-pending-bg: rgba(113, 113, 122, 0.1);
     --status-pending-text: #52525b;
+    --status-evicted-bg: rgba(217, 119, 6, 0.12);
+    --status-evicted-text: #b45309;
     
     --ceo-session-running-ring: #0d9488;
     /* CEO 会话 unread 角标:品牌青绿 #39c5bb(点名色;不等同 --brand-primary light=#0d9488 / dark=#2dd4bf)。
@@ -103,6 +105,8 @@
     --status-failed-text: #f87171;
     --status-pending-bg: rgba(161, 161, 170, 0.15);
     --status-pending-text: #a1a1aa;
+    --status-evicted-bg: rgba(245, 158, 11, 0.16);
+    --status-evicted-text: #fbbf24;
     
     --brand-primary: #2dd4bf;
     --brand-primary-hover: #14b8a6;
@@ -3634,6 +3638,21 @@ textarea {
 .interaction-step.error .interaction-step-status {
     background: var(--status-failed-bg);
     color: var(--status-failed-text);
+}
+
+/* 阶段被模型点名移出上下文：黄色徽章 + eye-off，取代"完成"。写在 success/error
+   之后并按 stage-evicted 类提权，生命周期 class 仍留在元素上供状态对账读取。 */
+.interaction-step.stage-evicted .interaction-step-status {
+    gap: 5px;
+    background: var(--status-evicted-bg);
+    color: var(--status-evicted-text);
+}
+
+.interaction-step.stage-evicted .interaction-step-status i,
+.interaction-step.stage-evicted .interaction-step-status svg {
+    width: 12px;
+    height: 12px;
+    stroke-width: 2;
 }
 
 .interaction-step-preview,

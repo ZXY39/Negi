@@ -7372,7 +7372,8 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
         || typeof renderExecutionStageRounds !== "function"
         || typeof stageTraceStatus !== "function"
         || typeof formatExecutionStageTitle !== "function"
-        || typeof displayTaskStageStatus !== "function") {
+        || typeof stageTraceStatusLabel !== "function"
+        || typeof stageIsContextEvicted !== "function") {
         return 0;
     }
     syncCeoTurnLoadingOnlyState(turn, false);
@@ -7390,7 +7391,8 @@ function renderCeoStageTraceIntoTurn(turn, canonicalContext = null, { interrupte
             stageId: String(stage?.stage_id || ""),
             title: `${formatExecutionStageTitle(stage)}${isInterrupted ? " · 收到补充，续跑见下" : ""}`,
             status: stageTraceStatus(stage),
-            statusLabel: displayTaskStageStatus(stage.status),
+            statusLabel: stageTraceStatusLabel(stage),
+            evicted: stageIsContextEvicted(stage),
             open: false,
             extraClass: isInterrupted ? "ceo-stage-interrupted" : "",
             bodyHtml: preambleHtml + renderExecutionStageRounds(stage),

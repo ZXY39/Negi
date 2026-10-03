@@ -1170,6 +1170,7 @@ class TaskQueryService:
                     'tool_rounds_used': tool_rounds_used,
                     'created_at': str(stage.get('created_at') or ''),
                     'finished_at': str(stage.get('finished_at') or ''),
+                    **({'context_evicted': True} if stage.get('context_evicted') is True else {}),
                     'rounds': rounds_payload,
                     'tool_calls': tool_calls if rounds_payload else fallback_tool_calls,
                 }
