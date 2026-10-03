@@ -644,3 +644,70 @@ async def test_identical_rejection_early_stops_on_the_third_strike() -> None:
     # 早停比总预算少两拍：每拍新输入 12 万 token 起，重复同一形状不会再新增信息
     assert len(requests) == 3
     assert len(logs.error_logs) == 3
+
+
+def _fold_probe_payload(note: str) -> dict[str, object]:
+    payload = _good_final_arguments()
+    payload['summary'] = ''
+    payload['answer'] = ''
+    payload['evidence'] = [{'kind': 'file', 'path': 'frag.md', 'note': note}]
+    return payload
+
+
+def _resp(call_id: str, arguments: dict[str, object]) -> LLMResponse:
+    return LLMResponse(
+        content='',
+        tool_calls=[_final_call(call_id, arguments)],
+        finish_reason='tool_calls',
+        usage={'input_tokens': 8, 'output_tokens': 4},
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_identical_submission_is_folded_in_history() -> None:
+    note = 'UNIQUE-NOTE-只应出现一次'
+    bad = _fold_probe_payload(note)
+    result, requests, _logs = await _run_final_result_loop(
+        responses=[
+            _resp('call:fold-1', bad),
+            _resp('call:fold-2', bad),
+            _resp('call:fold-3', _good_final_arguments()),
+        ],
+        node_kind='acceptance',
+        task_id='task-fold',
+        node_id='node-fold',
+        max_iterations=4,
+    )
+
+    assert result.status == 'success'
+    first_repair = json.dumps(requests[1].get('messages') or [], ensure_ascii=False)
+    assert first_repair.count(note) == 1
+    assert 'repeated_submission_folded' not in first_repair
+
+    second_repair = json.dumps(requests[2].get('messages') or [], ensure_ascii=False)
+    # 全文只留最早那份；第二份折成一行，但回执里的契约仍逐字在案
+    assert second_repair.count(note) == 1
+    assert 'repeated_submission_folded' in second_repair
+    assert 'repeated_times' in second_repair
+
+
+@pytest.mark.asyncio
+async def test_different_violation_on_repeat_is_not_folded() -> None:
+    other = _good_final_arguments()
+    other['summary'] = ''
+    other['answer'] = ''
+    other['evidence'] = [{'kind': 'nope', 'note': '另一种错'}]
+    _result, requests, _logs = await _run_final_result_loop(
+        responses=[
+            _resp('call:nd-1', _fold_probe_payload('第一条的理由')),
+            _resp('call:nd-2', other),
+            _resp('call:nd-3', _good_final_arguments()),
+        ],
+        node_kind='acceptance',
+        task_id='task-no-fold',
+        node_id='node-no-fold',
+        max_iterations=4,
+    )
+
+    third = json.dumps(requests[2].get('messages') or [], ensure_ascii=False)
+    assert 'repeated_submission_folded' not in third

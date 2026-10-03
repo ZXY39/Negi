@@ -1323,6 +1323,13 @@ class ReActToolLoop:
                             reason=reason,
                             count=invalid_final_submission_count,
                         )
+                    if int(identical_final_submission_streak or 0) >= 2:
+                        # 只折最新这一条，且是在它刚被追加时折：更早的前缀一个字都不动。
+                        self._fold_repeated_final_submission(
+                            message_history,
+                            streak=identical_final_submission_streak,
+                            reason=reason,
+                        )
                     repair_overlay_text = self._final_submission_repair_message(
                         reason_parts,
                         node_kind=node.node_kind,
@@ -7246,6 +7253,40 @@ class ReActToolLoop:
         ):
             return f'{base} {cls._PROSE_FIELD_ROLE_CLAUSE}'
         return base
+
+    _FOLDED_SUBMISSION_MARKER = 'repeated_submission_folded'
+
+    @classmethod
+    def _fold_repeated_final_submission(cls, message_history: Any, *, streak: int, reason: str) -> bool:
+        """把"与上一条同形"的被拒提交在历史里压成一行，全文只留最早那一份。
+
+        实盘 node:ce794e2526f2 单节点攒了 14 份同形状提交、arguments 合计 34,547 字符
+        （该拍发送体 392,730 字符的 8.6%）。更要紧的是尾部每多一份就多一条"这么交"的反例：
+        把字段角色和裁定值留空的骨架都送过去之后，它照交空 `summary`，还换了模型照交——
+        压住它的是自己的历史，不是没读懂指引。折叠只改刚追加的这一条，更早的消息一字不动，
+        所以前缀缓存不受影响；每击的拒收回执（含契约全文）照旧逐字在案。
+        """
+        for message in reversed(list(message_history or [])):
+            if not isinstance(message, dict) or str(message.get('role') or '').strip().lower() != 'assistant':
+                continue
+            folded = False
+            for call in [item for item in (message.get('tool_calls') or []) if isinstance(item, dict)]:
+                fn = call.get('function') if isinstance(call.get('function'), dict) else call
+                if str(fn.get('name') or '').strip() != FINAL_RESULT_TOOL_NAME:
+                    continue
+                fn['arguments'] = json.dumps(
+                    {
+                        cls._FOLDED_SUBMISSION_MARKER: True,
+                        'repeated_times': int(streak),
+                        'rejected_for': ' '.join(str(reason or '').split())[:120],
+                        'note': '载荷与上一条提交同形，原文已折叠；完整参数契约见本条之后的工具回执。',
+                    },
+                    ensure_ascii=False,
+                )
+                folded = True
+            if folded:
+                return True
+        return False
 
     @staticmethod
     def _result_repair_guidance(*, node_kind: str) -> str:
