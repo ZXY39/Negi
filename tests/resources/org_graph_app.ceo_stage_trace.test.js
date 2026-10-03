@@ -1067,7 +1067,7 @@ test("ceo silent tool live event creates no interaction step", () => {
     assert.equal(turn.listEl.innerHTML, "");
 });
 
-test("ceo stage card badges model-evicted stages as 已移出上下文 in yellow", () => {
+test("ceo stage card badges model-evicted stages as 已移出上下文", () => {
     const { renderCeoStageTraceIntoTurn } = loadApp();
     const turn = makeTurn({ text: "" });
 
@@ -1094,7 +1094,7 @@ test("ceo stage card badges model-evicted stages as 已移出上下文 in yellow
     const evictedStep = html.split("</details>")[0];
     const plainStep = html.split("</details>")[1] || "";
 
-    // 被点名移出上下文的阶段：黄色徽章换成"已移出上下文" + eye-off 图标
+    // 被点名移出上下文的阶段：中性灰徽章换成"已移出上下文" + eye-off 图标
     assert.match(evictedStep, /已移出上下文/);
     assert.match(evictedStep, /data-lucide="eye-off"/);
     // 生命周期类必须留在元素上：跨回合状态对账按 token 读它，evicted 只是叠加样式

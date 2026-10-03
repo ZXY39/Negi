@@ -1519,7 +1519,7 @@ function renderTraceStep({ traceKey = "", title, status = "info", statusLabel = 
     const normalizedExtraClass = String(extraClass || "").trim();
     if (normalizedExtraClass) classes.push(esc(normalizedExtraClass));
     // 阶段被模型点名移出上下文：生命周期状态（完成/失败）保留在 class 上供状态对账用，
-    // 徽章换成黄色 + eye-off 图标，文案改成"已移出上下文"——它说的是"还在账本里、
+    // 徽章换成中性灰 + eye-off 图标，文案改成"已移出上下文"——它说的是"还在账本里、
     // 但不再进模型上下文"，与"完成"是两件不同的事。
     if (evicted) classes.push("stage-evicted");
     // data-trace-key 的 key 允许退化成 stage_index 乃至序号，跨回合会撞车；
