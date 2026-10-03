@@ -267,7 +267,7 @@ async def test_responses_provider_uses_request_timeout_for_http_client(monkeypat
 
     async def _fake_consume_sse(response):
         _ = response
-        return "ok", [], "stop", {}
+        return "ok", [], "stop", {}, []
 
     monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
@@ -312,7 +312,7 @@ async def test_responses_provider_sanitizes_tool_schema_combinators_before_trans
 
     async def _fake_consume_sse(response):
         _ = response
-        return "ok", [], "stop", {}
+        return "ok", [], "stop", {}, []
 
     monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
@@ -443,7 +443,7 @@ async def test_responses_provider_logs_sse_diagnostics_for_success(monkeypatch) 
     async def _fake_consume_sse(response):
         async for _line in response.aiter_lines():
             pass
-        return "ok", [], "stop", {}
+        return "ok", [], "stop", {}, []
 
     monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)
@@ -692,7 +692,7 @@ async def test_responses_provider_preserves_flat_function_tool_schemas_in_transp
     captured: dict[str, object] = {}
 
     async def _fake_consume_sse(_diagnostics):
-        return "ok", [], "stop", {}
+        return "ok", [], "stop", {}, []
 
     class _FakeResponse:
         def __init__(self) -> None:
