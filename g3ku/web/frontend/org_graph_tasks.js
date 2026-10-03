@@ -493,11 +493,14 @@ function taskWorkerSampleAgeMsLive(metrics = taskWorkerStatusMetrics()) {
 function formatTaskWorkerSampleFreshness(metrics = taskWorkerStatusMetrics()) {
     const ageMs = taskWorkerSampleAgeMsLive(metrics);
     if (ageMs == null) return "未采样";
+    // 每档都预留两位数字宽度（99 秒内、59 分内、24 时内都不改胶囊长度），等宽数字
+    // 再由 CSS 的 tabular-nums 保证；不预留的话 9→10 那一跳会把整条性能条推得抖一下。
+    const pad2 = (value) => String(value).padStart(2, "0");
     const seconds = Math.round(ageMs / 1000);
-    if (seconds < 60) return `${seconds}秒前`;
+    if (seconds < 100) return `${pad2(seconds)}秒前`;
     const minutes = Math.round(seconds / 60);
-    if (minutes < 60) return `${minutes}分钟前`;
-    return `${Math.round(minutes / 60)}小时前`;
+    if (minutes < 100) return `${pad2(minutes)}分钟前`;
+    return `${pad2(Math.round(minutes / 60))}小时前`;
 }
 
 function formatTaskWorkerPercent(value) {
@@ -586,9 +589,9 @@ function renderTaskPerformanceBar() {
             <span class="task-performance-label">节点队列</span>
             <strong class="task-performance-value task-performance-queue-value"><span class="task-performance-count task-performance-count--running">${esc(gateRunningText)}</span>运行 / <span class="task-performance-count task-performance-count--waiting">${esc(gateWaitingText)}</span>等待 / <span class="task-performance-count">${esc(gateCapacityText)}</span>当前容量</strong>
         </div>
-        <div class="task-performance-item">
+        <div class="task-performance-item task-performance-item--freshness">
             <span class="task-performance-label">监控新鲜度</span>
-            <strong class="task-performance-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
+            <strong class="task-performance-value task-performance-age-value">${esc(formatTaskWorkerSampleFreshness(metrics))}</strong>
         </div>
     `;
 }

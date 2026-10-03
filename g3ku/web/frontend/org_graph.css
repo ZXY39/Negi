@@ -9426,6 +9426,19 @@ textarea {
     color: var(--text-primary);
 }
 
+/* 监控新鲜度是一根每 1s 走一步的整数秒表：数字与单位之间留一点呼吸，并用等宽
+   数字 + 两位预留（渲染侧 pad 到两位）保证 9→10→99 秒这些跳变不改变胶囊宽度，
+   否则整条性能条会跟着抖。*/
+.task-performance-age-value {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    padding-inline: 0.12em;
+}
+
+.task-performance-item--freshness {
+    padding: 0 16px;
+}
+
 .task-performance-queue-value {
     display: inline-flex;
     align-items: center;
