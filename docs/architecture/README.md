@@ -30,7 +30,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - `tool-and-skill-system.md`
   Use for the four tool/skill concepts, fixed builtin tool contracts, candidate tools, skill loading, tool RBAC, and resource-directory generation checks.
 - `tool-hydration-and-callable-chain.md`
-  Use for how one successful `load_tool_context` becomes a next-turn callable: hydration ledger, promotion and re-read, parameter-error lane, externalized result envelope, universal tool timeout, stage gating, and the context→callable chain.
+  Use for how one successful `load_tool_context` becomes a next-turn callable: hydration ledger, promotion and re-read, parameter-error lane, externalized result envelope, universal tool timeout, tool rerun-safe declaration for the recovery lane, stage gating, and the context→callable chain.
 - `web-and-admin.md`
   Use for websocket contracts, frontend/backend responsibility boundaries, and operator-visible UI behavior.
 - `heartbeat-system.md`
