@@ -426,3 +426,112 @@ async def test_react_loop_accepts_explicit_null_line_numbers_on_url_evidence() -
     assert len(requests) == 1
     assert logs.error_logs == []
     assert [item.start_line for item in result.evidence] == [10, None, None]
+
+
+def test_final_result_repair_tags_cover_only_equivalence_repairs() -> None:
+    raw = {
+        "status": "SUCCESS ",
+        "delivery_status": "Final",
+        "summary": "s",
+        "answer": "a",
+        "evidence": [{"kind": "file", "path": "a.py", "start_line": "12", "end_line": None}],
+        "remaining_work": [],
+        "blocking_reason": "",
+    }
+    normalized = ReActToolLoop._normalize_final_result_payload(
+        raw_payload=raw, message_history=[], response_content="", node_kind="execution"
+    )
+    tags = ReActToolLoop._final_result_repair_tags(raw_payload=raw, normalized_payload=normalized)
+    assert sorted(tags) == [
+        "enum_case:delivery_status",
+        "enum_case:status",
+        "line_null_dropped",
+        "line_to_int",
+    ]
+
+    # 策略性改写（success 清空 remaining_work/blocking_reason）不算补齐
+    policy_raw = {
+        "status": "success",
+        "delivery_status": "final",
+        "summary": "s",
+        "answer": "a",
+        "evidence": [{"ref": "artifact:artifact:demo-ref"}],
+        "remaining_work": ["还有一件事"],
+        "blocking_reason": "理由",
+    }
+    policy_norm = ReActToolLoop._normalize_final_result_payload(
+        raw_payload=policy_raw, message_history=[], response_content="", node_kind="execution"
+    )
+    assert policy_norm["remaining_work"] == [] and policy_norm["blocking_reason"] == ""
+    assert ReActToolLoop._final_result_repair_tags(raw_payload=policy_raw, normalized_payload=policy_norm) == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_records_each_repair_as_audit_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    import g3ku.audit_events as audit_module
+
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        audit_module,
+        "emit_audit_event",
+        lambda *args, **kwargs: events.append({"args": args, "detail": kwargs.get("detail") or {}}),
+    )
+
+    payload = _good_final_arguments()
+    payload.pop("delivery_status")
+    result, _requests, _logs = await _run_final_result_loop(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:repair-audit", payload)],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+        ],
+        node_kind="acceptance",
+        task_id="task-repair-audit",
+        node_id="node-repair-audit",
+        max_iterations=1,
+    )
+
+    assert result.status == "success"
+    assert len(events) == 1
+    args = events[0]["args"]
+    assert args[0] == "task" and args[1] == "info" and args[2] == "node_final_result_repaired"
+    detail = events[0]["detail"]
+    assert detail["node_id"] == "node-repair-audit"
+    assert detail["node_kind"] == "acceptance"
+    assert detail["repairs"] == {"delivery_from_status": 1}
+
+
+@pytest.mark.asyncio
+async def test_react_loop_emits_nothing_when_the_submission_is_already_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import g3ku.audit_events as audit_module
+
+    events: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        audit_module,
+        "emit_audit_event",
+        lambda *args, **kwargs: events.append(dict(kwargs)),
+    )
+
+    result, _requests, logs = await _run_final_result_loop(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:clean-final", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+        ],
+        node_kind="acceptance",
+        task_id="task-clean-final",
+        node_id="node-clean-final",
+        max_iterations=1,
+    )
+
+    assert result.status == "success"
+    assert logs.error_logs == []
+    assert events == []

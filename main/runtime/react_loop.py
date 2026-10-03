@@ -2348,6 +2348,75 @@ class ReActToolLoop:
     def _response_output_truncated(response: Any) -> bool:
         return str(getattr(response, 'finish_reason', '') or '').strip().lower() == 'length'
 
+    @staticmethod
+    def _final_result_repair_tags(*, raw_payload: Any, normalized_payload: Any) -> list[str]:
+        """列出这次补齐动了哪几类字段（不含证据下标，词表有界）。
+
+        只比对运行时会等价收敛的那四个面，其余差异（`success` 清空 remaining_work、
+        证据自动回挂等策略性改写）不算补齐。
+        """
+        tags: list[str] = []
+        if not isinstance(raw_payload, dict) or not isinstance(normalized_payload, dict):
+            return tags
+        for field in ('status', 'delivery_status'):
+            raw_value = str(raw_payload.get(field) or '').strip()
+            norm_value = str(normalized_payload.get(field) or '').strip()
+            if not raw_value and norm_value:
+                if field == 'delivery_status':
+                    tags.append('delivery_from_status')
+                continue
+            if raw_value and norm_value and raw_value != norm_value:
+                tags.append(f'enum_case:{field}')
+        raw_evidence = raw_payload.get('evidence')
+        norm_evidence = normalized_payload.get('evidence')
+        if not isinstance(raw_evidence, list) or not isinstance(norm_evidence, list):
+            return tags
+        if len(raw_evidence) != len(norm_evidence):
+            return tags
+        for raw_item, norm_item in zip(raw_evidence, norm_evidence):
+            if not isinstance(raw_item, dict) or not isinstance(norm_item, dict):
+                continue
+            for field in ('start_line', 'end_line'):
+                if field not in raw_item:
+                    continue
+                raw_value = raw_item.get(field)
+                if raw_value is None and field not in norm_item:
+                    tags.append('line_null_dropped')
+                    continue
+                if isinstance(raw_value, str) and isinstance(norm_item.get(field), int) and not isinstance(raw_value, bool):
+                    tags.append('line_to_int')
+        return tags
+
+    @staticmethod
+    def _emit_final_result_repair_audit(*, task_id: str, node_id: str, node_kind: str, tags: list[str]) -> None:
+        """尽力而为：一次等价补齐写一条日志审计事件，让命中率可事后数。
+
+        补齐本身不写节点错误历史（那不是错误），而归一化后的载荷同时覆盖了
+        `model_messages` 与 `task_node_tool_results.arguments_text`——库里不存在
+        "模型原始写法 vs 落地写法"的差。没有这条事件，"这周替模型补了几次"只能靠
+        错误行消失间接猜，而这一类基线只有 3.2%，样本不到上百次提交就得不出结论。
+        """
+        try:
+            from g3ku.audit_events import emit_audit_event
+
+            counts: dict[str, int] = {}
+            for tag in tags:
+                counts[tag] = counts.get(tag, 0) + 1
+            emit_audit_event(
+                'task',
+                'info',
+                'node_final_result_repaired',
+                f'终态提交体等价补齐：{node_id}（{node_kind}）' + '、'.join(f'{k}x{v}' for k, v in sorted(counts.items())),
+                detail={
+                    'task_id': str(task_id or ''),
+                    'node_id': str(node_id or ''),
+                    'node_kind': str(node_kind or ''),
+                    'repairs': dict(sorted(counts.items())),
+                },
+            )
+        except Exception:
+            pass
+
     def _record_payload_shape_fault(
         self,
         *,
@@ -6198,6 +6267,17 @@ class ReActToolLoop:
                 'function': {'name': tool_payload['name'], 'arguments': json.dumps(tool_payload['arguments'], ensure_ascii=False)},
             }
         ]
+        repair_tags = self._final_result_repair_tags(
+            raw_payload=raw_tool_arguments,
+            normalized_payload=tool_payload['arguments'],
+        )
+        if repair_tags:
+            self._emit_final_result_repair_audit(
+                task_id=task.task_id,
+                node_id=node.node_id,
+                node_kind=node.node_kind,
+                tags=repair_tags,
+            )
         stage_gate = self._execution_stage_gate(
             task_id=task.task_id,
             node_id=node.node_id,
