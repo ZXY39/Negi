@@ -81,7 +81,6 @@ def _fast_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
         return ToolWatchdogConfig(
             enabled=True,
             poll_interval_seconds=0.2,
-            handoff_after_seconds=600.0,
             stop_grace_seconds=0.05,
         )
 
