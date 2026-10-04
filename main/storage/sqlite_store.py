@@ -2233,6 +2233,19 @@ class SQLiteTaskStore:
             if str(row['node_id'] or '').strip()
         }
 
+    def list_task_delivered_notifications(self, task_id: str) -> list[TaskNodeNotification]:
+        """整任务 delivered 通知行，一次查询。
+
+        树快照原先按节点逐条 `list_task_node_notifications(task_id, node_id)` 取待处理数，
+        而 `task_node_notifications` 没有 (task_id, node_id) 索引 ⇒ 每节点一次全表扫。
+        实盘 1227 节点的任务测得 4.64 s，换成这里的一次读是 17 ms。
+        """
+        rows = self._fetchall(
+            "SELECT payload_json FROM task_node_notifications WHERE task_id = ? AND TRIM(status) = 'delivered'",
+            (str(task_id or '').strip(),),
+        )
+        return [self._parse(row['payload_json'], TaskNodeNotification) for row in rows]
+
     def list_task_node_notifications(
         self,
         task_id: str,

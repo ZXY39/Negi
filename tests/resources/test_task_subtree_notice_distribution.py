@@ -396,7 +396,11 @@ async def test_message_list_filters_system_relay_notices(tmp_path: Path) -> None
         legacy_visible = _visible_messages(root.node_id)
         assert not any(msg.startswith(SYSTEM_RELAY_NOTICE_PREFIXES) for msg in legacy_visible)
         # 待处理计数同样不收转述行抬高（树徽标口径）。
-        assert service.query_service._node_pending_notice_count(task_id=record.task_id, node_id=root.node_id) == 0
+        assert service.query_service._node_pending_notice_count(
+            node_id=root.node_id,
+            pending_root_count=None,
+            delivered_child_counts=service.query_service._delivered_notice_counts_by_node(record.task_id),
+        ) == 0
     finally:
         await service.close()
 
