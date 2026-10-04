@@ -12,6 +12,7 @@ import asyncio
 from pathlib import Path
 
 from main.protocol import now_iso
+from main.runtime.debug_recorder import RuntimeDebugRecorder
 from main.service.runtime_service import MainRuntimeService
 
 
@@ -154,3 +155,26 @@ def test_tree_snapshot_subtree_scope_keeps_full_subtree_semantics(tmp_path: Path
     assert not subtree.truncated
     assert subtree.root_node_id == root.node_id
     assert root.node_id in subtree.nodes_by_id
+
+
+def test_tree_snapshot_build_lands_on_the_long_block_board(tmp_path: Path):
+    """树快照的构建三段必须在长块榜上有名字。
+
+    榜只收 ≥200 ms 的段，而这条车道原先整块没有 section：一块 2.5–4.5 s 的树请求
+    在榜上是匿名的（逐节点那次查询只有几 ms，永远够不到阈值），归因只能靠猜。
+    """
+    service = _build_service(tmp_path)
+    task, _root = _create_tree_with_children(service, child_count=3)
+    recorder = RuntimeDebugRecorder()
+    # 构造器把阈值夹在最低 1 ms，小树的三段都跑不到，这里按"这段有没有被记名"来断言。
+    recorder._threshold_ms = 0.0
+    service.query_service._debug_recorder = recorder
+
+    service.query_service.get_tree_snapshot(task.task_id, max_nodes=2)
+
+    sections = {str(item.get('section') or '') for item in recorder.snapshot()}
+    assert {
+        'query_service.get_tree_snapshot',
+        'query_service.build_tree_snapshot.projection_maps',
+        'query_service.build_tree_snapshot.node_materialization',
+    } <= sections

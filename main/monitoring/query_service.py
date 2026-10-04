@@ -921,12 +921,13 @@ class TaskQueryService:
         task = self._store.get_task(task_id)
         if task is None:
             return None
-        return self._build_tree_snapshot(
-            task_id=task.task_id,
-            root_node_id=task.root_node_id,
-            max_nodes=max_nodes,
-            after_node_id=after_node_id,
-        )
+        with self._debug_track('query_service.get_tree_snapshot'):
+            return self._build_tree_snapshot(
+                task_id=task.task_id,
+                root_node_id=task.root_node_id,
+                max_nodes=max_nodes,
+                after_node_id=after_node_id,
+            )
 
     def get_tree_subtree(
         self,
@@ -1482,7 +1483,8 @@ class TaskQueryService:
         max_nodes: int | None = None,
         after_node_id: str = '',
     ) -> TaskTreeSnapshot:
-        node_map, rounds_by_parent, direct_children = self._projection_maps(task_id)
+        with self._debug_track('query_service.build_tree_snapshot.projection_maps'):
+            node_map, rounds_by_parent, direct_children = self._projection_maps(task_id)
         effective_max_nodes = max(1, int(max_nodes)) if max_nodes is not None else None
         included_ids: set[str]
         next_after_node_id = ''
@@ -1563,19 +1565,20 @@ class TaskQueryService:
                 pending_root_counts[node_id] = len(normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)))
         # 只物化本响应包含的节点。旧实现先物化整树再过滤，每个节点都带多次额外
         # 存储查询，是大树 tree-snapshot 超时的根因之一。
-        delivered_child_counts = self._delivered_notice_counts_by_node(task_id)
-        snapshot_nodes = {
-            node_id: self._snapshot_node_from_projection(
-                node_map[node_id],
-                node_map=node_map,
-                rounds_by_parent=rounds_by_parent,
-                direct_children=direct_children,
-                pending_root_counts=pending_root_counts,
-                delivered_child_counts=delivered_child_counts,
-            )
-            for node_id in included_ids
-            if node_id in node_map
-        }
+        with self._debug_track('query_service.build_tree_snapshot.node_materialization'):
+            delivered_child_counts = self._delivered_notice_counts_by_node(task_id)
+            snapshot_nodes = {
+                node_id: self._snapshot_node_from_projection(
+                    node_map[node_id],
+                    node_map=node_map,
+                    rounds_by_parent=rounds_by_parent,
+                    direct_children=direct_children,
+                    pending_root_counts=pending_root_counts,
+                    delivered_child_counts=delivered_child_counts,
+                )
+                for node_id in included_ids
+                if node_id in node_map
+            }
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
         distribution = self._distribution_state_with_ledger(task_id, runtime_meta)
         # subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧持久化

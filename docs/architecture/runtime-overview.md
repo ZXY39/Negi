@@ -435,7 +435,7 @@ main/ 侧所有持久化写在磁盘满（ENOSPC / SQLITE_FULL）条件下的行
 - **时间戳口径**：行按 worker 本地时区的 ISO 秒写入（与 `worker_status.updated_at` 同格式），查询锚点先 `.astimezone()` 再做字符串区间比较；带另一偏移的锚点（例如被规范化成 UTC 的失速静默时间）必须先转本地再比，否则整窗漏行。
 
 - **两块长块榜各答不同的问题，只用"最近"那一块会丢归因**：`debug.recent_long_blocks` 是最近 8 条 ≥200 ms 的段（arrival 序），`debug.worst_long_blocks` 是本进程最长的 8 条（按耗时留位，只有更长的块才挤得掉短的那条，每条带自己的 `started_at`）。实盘的读法事故：`tool_pressure_event_loop_lag_ms` 采到 8,169 ms 的那一分钟，recent 榜上最高只有 543 ms——`query_service.get_task_snapshot` 那种 210–543 ms 的噪声块以每秒级频率把稀有块整体冲掉了。两块都随 `worker_leases.payload_json.status_payload.debug` 入库，排障时不必走 API 鉴权。
-- **榜上没有名字 ≠ 那次没有发生**：section 只有个位数（`sqlite.query.fetchall` / `runtime_service.publish_live_snapshot` / `log_service.update_frame` / `upsert_frame` / `refresh_task_view` / `query_service.get_task_snapshot` / `query_service.view_progress.list_nodes`），没被包住的车道在这块榜上是隐身的。判一条没插桩的段要用 `py-spy record --gil --format raw`（rate 50 ⇒ 每样本 20 ms，同一条栈的样本数就是它连续持有 GIL 的时长代理），并且必须在负载窗口采——空闲窗口只会给背景噪声（同 `runtime-overview.md`「运行时里的状态与持久化」里 py-spy inclusive 占比那条教训）。
+- **榜上没有名字 ≠ 那次没有发生**：section 只有个位数（`sqlite.query.fetchall` / `runtime_service.publish_live_snapshot` / `log_service.update_frame` / `upsert_frame` / `refresh_task_view` / `query_service.get_task_snapshot` / `query_service.get_tree_snapshot` + `query_service.build_tree_snapshot.projection_maps` / `.node_materialization` / `query_service.view_progress.list_nodes`），没被包住的车道在这块榜上是隐身的。判一条没插桩的段要用 `py-spy record --gil --format raw`（rate 50 ⇒ 每样本 20 ms，同一条栈的样本数就是它连续持有 GIL 的时长代理），并且必须在负载窗口采——空闲窗口只会给背景噪声（同 `runtime-overview.md`「运行时里的状态与持久化」里 py-spy inclusive 占比那条教训）。
 节点级暂停与恢复、优雅停机与启动自动恢复的合同见 `main-task-runtime.md`。
 
 ## Prompt Cache Family And Actual Request
