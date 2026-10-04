@@ -203,7 +203,7 @@ async def test_task_stall_heartbeat_prompt_includes_diagnostics_and_actions(tmp_
     assert "suspected_stall" in prompt
     assert "task_progress(task_id)" in prompt
     assert "Perf in stall window" in prompt
-    assert "stop_tool_execution(task_id)" in prompt
+    assert "stop_tool_execution" not in prompt  # 该工具进不了前门 exposure，提示词不许承诺
     assert task.task_id in prompt
     assert "may be stalled" in prompt
     await service.close()

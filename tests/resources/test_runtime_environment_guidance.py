@@ -33,14 +33,15 @@ def test_ceo_prompt_builder_mentions_project_python_guidance(monkeypatch) -> Non
     assert '{{project_python_hint}}' not in prompt
 
 
-def test_ceo_prompt_builder_mentions_task_control_guidance(monkeypatch) -> None:
+def test_ceo_prompt_builder_does_not_advertise_unexposable_control_tools(monkeypatch) -> None:
+    """stop_tool_execution 没有任何 resource.yaml 族，进不了 exposure，
+    前门提示词一旦点名它就是模型发不出的动作。"""
     monkeypatch.setattr(prompt_builder_module, 'current_project_environment', lambda **kwargs: _fake_project_environment())
 
     prompt = CeoPromptBuilder(loop=SimpleNamespace(workspace=r'D:\projects\G3KU')).build(skills=[])
 
-    assert 'task_id' in prompt
-    assert 'stop_tool_execution' in prompt
-    assert 'detached 后台工具协议' in prompt
+    assert 'stop_tool_execution' not in prompt
+    assert 'detached 后台工具协议' not in prompt
 
 
 def test_ceo_prompt_builder_mentions_skill_loading_guidance(monkeypatch) -> None:

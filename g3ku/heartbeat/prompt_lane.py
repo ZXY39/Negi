@@ -141,7 +141,6 @@ def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list
     lines.extend([
         "  Suggested first step: task_progress(task_id)",
         "  In task_progress output, 'in_progress' means non-terminal, not active; only fresh 运行中/检验中 markers indicate real execution.",
-        "  If needed: stop_tool_execution(task_id)",
     ])
     return lines
 

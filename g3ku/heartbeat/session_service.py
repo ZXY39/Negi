@@ -949,7 +949,6 @@ class WebSessionHeartbeatService:
                     "For task_stall events, first inspect the task with task_progress(task_id).",
                     "In task_progress output, 'in_progress' only means non-terminal, not actively running;",
                     "only lines with a fresh 运行中/检验中 marker plus a recent 最近活动 time count as executing.",
-                    "If the task appears stuck and must be stopped, you may call stop_tool_execution with the task_id.",
                     "The 'Perf in stall window' line is the worker resource evidence for that window; when it is missing "
                     "or you need a wider window, load and call perf_inspect(mode=window).",
                     "After any stop decision, explain the likely cause and the next follow-up action.",
@@ -999,7 +998,6 @@ class WebSessionHeartbeatService:
                 if perf_summary:
                     lines.append(f"  Perf in stall window: {perf_summary}")
                 lines.append("  Suggested first step: task_progress(task_id)")
-                lines.append("  If needed: stop_tool_execution(task_id)")
                 continue
             title = str(payload.get("title") or payload.get("task_id") or "task").strip() or "task"
             task_id = str(payload.get("task_id") or "").strip()
