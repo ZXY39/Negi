@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
-_RAW_PARAMETERS_SCHEMA_ATTR = "_g3ku_raw_parameters_schema"
 _DEFAULT_OBJECT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -313,17 +312,6 @@ def build_args_schema_model(tool_name: str, schema: dict[str, Any] | None) -> ty
     return _PydanticSchemaBuilder(f"{tool_name}_args").build(schema)
 
 
-def attach_raw_parameters_schema(tool: Any, schema: dict[str, Any] | None) -> Any:
-    if tool is not None:
-        setattr(tool, _RAW_PARAMETERS_SCHEMA_ATTR, normalize_object_json_schema(schema))
-    return tool
-
-
-def get_attached_raw_parameters_schema(tool: Any) -> dict[str, Any] | None:
-    schema = getattr(tool, _RAW_PARAMETERS_SCHEMA_ATTR, None)
-    return copy.deepcopy(schema) if isinstance(schema, dict) else None
-
-
 def normalize_runtime_tool_argument(value: Any) -> Any:
     """Coerce Pydantic/nested schema values back to plain JSON-like Python values."""
 
@@ -360,31 +348,7 @@ def normalize_runtime_tool_arguments_dict(arguments: dict[str, Any] | None) -> d
     return {}
 
 
-def _tool_definition_from_runtime_tool(tool: Any) -> dict[str, Any]:
-    raw_schema = get_attached_raw_parameters_schema(tool)
-    if raw_schema is not None:
-        return {
-            "type": "function",
-            "function": {
-                "name": str(getattr(tool, "name", "") or ""),
-                "description": str(getattr(tool, "description", "") or ""),
-                "parameters": raw_schema,
-            },
-        }
-    return {
-        "type": "function",
-        "function": {
-            "name": str(getattr(tool, "name", "") or ""),
-            "description": str(getattr(tool, "description", "") or ""),
-            "parameters": copy.deepcopy(getattr(tool, "parameters", {}) or {}),
-        },
-    }
-
-
-def normalize_openai_tool_definition(tool: Any) -> dict[str, Any]:
-    if not isinstance(tool, dict):
-        return _tool_definition_from_runtime_tool(tool)
-
+def normalize_openai_tool_definition(tool: dict[str, Any]) -> dict[str, Any]:
     nested_function = tool.get("function") if isinstance(tool.get("function"), dict) else None
     source_function = dict(nested_function or tool)
     name = str(source_function.get("name") or "").strip()
@@ -407,16 +371,16 @@ def normalize_openai_tool_definition(tool: Any) -> dict[str, Any]:
     return normalized
 
 
-def normalize_openai_tool_definitions(tools: list[Any] | None) -> list[dict[str, Any]]:
+def normalize_openai_tool_definitions(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for tool in list(tools or []):
         record = normalize_openai_tool_definition(tool)
-        if isinstance(record, dict) and record:
+        if record:
             normalized.append(record)
     return normalized
 
 
-def normalize_responses_tool_definition(tool: Any) -> dict[str, Any]:
+def normalize_responses_tool_definition(tool: dict[str, Any]) -> dict[str, Any]:
     normalized_openai = normalize_openai_tool_definition(tool)
     if not normalized_openai:
         return {}
@@ -435,17 +399,15 @@ def normalize_responses_tool_definition(tool: Any) -> dict[str, Any]:
     return normalized_flat
 
 
-def normalize_responses_tool_definitions(tools: list[Any] | None) -> list[dict[str, Any]]:
+def normalize_responses_tool_definitions(
+    tools: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for tool in list(tools or []):
         record = normalize_responses_tool_definition(tool)
-        if isinstance(record, dict) and record:
+        if record:
             normalized.append(record)
     return normalized
-
-
-def to_openai_tool_definition(tool: Any) -> dict[str, Any]:
-    return normalize_openai_tool_definition(tool)
 
 
 def build_example_from_schema(schema: dict[str, Any] | None, *, field_name: str = "") -> Any:

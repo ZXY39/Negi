@@ -9,7 +9,6 @@ from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.memory_write import MemoryWriteTool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.core.messages import UserInputMessage
-from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import ceo_runner
