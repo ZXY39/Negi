@@ -21,7 +21,6 @@ from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
 from g3ku.json_schema_utils import (
-    build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
     sanitize_provider_parameters_schema,
 )
@@ -601,10 +600,6 @@ def _user_input_metadata(value: Any) -> dict[str, Any]:
 def _join_overlay_text(*parts: Any) -> str:
     sections = [str(part or "").strip() for part in parts if str(part or "").strip()]
     return "\n\n".join(sections).strip()
-
-
-def _build_args_schema(tool: Tool):
-    return build_args_schema_model(tool.name, tool.parameters)
 
 
 def _model_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
