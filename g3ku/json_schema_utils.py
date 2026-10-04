@@ -7,7 +7,6 @@ import re
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 _RAW_PARAMETERS_SCHEMA_ATTR = "_g3ku_raw_parameters_schema"
@@ -372,7 +371,14 @@ def _tool_definition_from_runtime_tool(tool: Any) -> dict[str, Any]:
                 "parameters": raw_schema,
             },
         }
-    return convert_to_openai_tool(tool)
+    return {
+        "type": "function",
+        "function": {
+            "name": str(getattr(tool, "name", "") or ""),
+            "description": str(getattr(tool, "description", "") or ""),
+            "parameters": copy.deepcopy(getattr(tool, "parameters", {}) or {}),
+        },
+    }
 
 
 def normalize_openai_tool_definition(tool: Any) -> dict[str, Any]:

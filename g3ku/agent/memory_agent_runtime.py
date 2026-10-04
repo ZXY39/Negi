@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -14,11 +15,10 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, get_type_hints
 
-from langchain_core.tools import tool
-from g3ku.json_schema_utils import to_openai_tool_definition
 from loguru import logger
+from pydantic import BaseModel, create_model
 
 from g3ku.agent.file_locks import _release_file_lock, _try_acquire_file_lock
 from g3ku.agent.markdown_memory import (
@@ -405,6 +405,70 @@ class MemoryStrategyV2:
     @staticmethod
     def _matches_any(patterns: tuple[Any, ...], payload_text: str) -> bool:
         return any(pattern.search(str(payload_text or "")) for pattern in patterns)
+def _strip_schema_titles(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {key: _strip_schema_titles(value) for key, value in node.items() if key != "title"}
+    if isinstance(node, list):
+        return [_strip_schema_titles(item) for item in node]
+    return node
+
+
+def _memory_tool_validator(fn: Callable[..., Any], model_name: str) -> type[BaseModel]:
+    """Build the argument validator straight from the handler signature.
+
+    The field defaults come from the signature, so an omitted optional stays optional
+    and a bare parameter stays required; nothing has to be kept in sync by hand.
+    """
+    hints = get_type_hints(fn)
+    fields: dict[str, tuple[Any, Any]] = {}
+    for name, parameter in inspect.signature(fn).parameters.items():
+        fields[name] = (
+            hints.get(name, Any),
+            ... if parameter.default is inspect.Parameter.empty else parameter.default,
+        )
+    return create_model(model_name, **fields)
+
+
+@dataclass(frozen=True, slots=True)
+class _MemoryTool:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+    validator: type[BaseModel]
+    handler: Callable[..., Any]
+
+    @property
+    def args(self) -> dict[str, Any]:
+        return dict(self.parameters.get("properties") or {})
+
+    def openai_schema(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            },
+        }
+
+    def invoke(self, args: dict[str, Any]) -> Any:
+        validated = self.validator.model_validate(dict(args or {}))
+        return self.handler(**validated.model_dump())
+
+
+def _build_memory_tool(*, name: str, fn: Callable[..., Any]) -> _MemoryTool:
+    validator = _memory_tool_validator(fn, name)
+    parameters = _strip_schema_titles(validator.model_json_schema())
+    parameters.pop("description", None)
+    return _MemoryTool(
+        name=name,
+        description=inspect.cleandoc(str(fn.__doc__ or "")).strip(),
+        parameters=parameters,
+        validator=validator,
+        handler=fn,
+    )
+
+
 
 
 @dataclass(slots=True)
@@ -2089,7 +2153,7 @@ class MemoryManager:
             batch_op=str(batch.op or "").strip().lower(),
         )
         tools = self._memory_agent_tools(session)
-        tool_schemas = [to_openai_tool_definition(item) for item in list(tools or [])]
+        tool_schemas = [item.openai_schema() for item in list(tools or [])]
         model = build_chat_model(runtime_config, role="memory")
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self._memory_agent_system_prompt()},
@@ -3564,14 +3628,12 @@ class MemoryManager:
         self.clear_review_window(session_key=session_key)
         return result
 
-    def _memory_agent_tools(self, session: _MemoryToolSession):
-        @tool("memory_read_note")
+    def _memory_agent_tools(self, session: _MemoryToolSession) -> list[_MemoryTool]:
         def memory_read_note(ref: str) -> str:
             """Read one existing note by ref without the .md suffix."""
 
             return session.read_note(ref)
 
-        @tool("memory_apply_batch")
         def memory_apply_batch(
             adds: list[dict[str, Any]] | None = None,
             rewrites: list[dict[str, Any]] | None = None,
@@ -3593,7 +3655,10 @@ class MemoryManager:
                 already_satisfied=already_satisfied,
             )
 
-        return [memory_read_note, memory_apply_batch]
+        return [
+            _build_memory_tool(name="memory_read_note", fn=memory_read_note),
+            _build_memory_tool(name="memory_apply_batch", fn=memory_apply_batch),
+        ]
 
     def _memory_agent_user_prompt(
         self,
