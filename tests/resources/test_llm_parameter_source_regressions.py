@@ -21,6 +21,7 @@ from g3ku.llm_config.normalization import normalize_draft
 from g3ku.llm_config.template_registry import TemplateRegistry
 from g3ku.providers.base import LLMResponse, ToolCallRequest
 from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
+from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_tool_schemas
 from g3ku.providers.provider_factory import ProviderTarget
 from g3ku.runtime.frontdoor._ceo_support import _DirectProviderChatBackend
 from main.runtime.internal_tools import SubmitFinalResultTool
@@ -775,12 +776,12 @@ async def test_g3ku_chat_model_adapter_preserves_nested_tool_schema_when_sending
 
     registry = ToolRegistry()
     registry.register(_NestedSchemaTool())
-    tool = registry.to_langchain_tools_filtered(["nested_schema_tool"])[0]
+    tool_schemas = _provider_tool_schemas({tool.name: tool for tool in registry.list_tools()})
     adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
 
     await adapter._agenerate(
         [HumanMessage(content="hello")],
-        tools=[tool],
+        tools=tool_schemas,
     )
 
     tool_payload = dict(captured[0]["tools"][0]["function"])

@@ -287,12 +287,12 @@ def test_build_args_schema_preserves_nested_array_object_contracts() -> None:
     assert dict(meta_schema.get("properties") or {}).get("source_excerpt") is not None
 
 
-def test_tool_registry_langchain_tool_preserves_nested_array_object_contracts() -> None:
+def test_registry_args_schema_preserves_nested_array_object_contracts() -> None:
     registry = ToolRegistry()
     registry.register(_NestedContractTool())
 
-    langchain_tool = registry.to_langchain_tools_filtered(["nested_contract_tool"])[0]
-    schema = langchain_tool.args_schema.model_json_schema()
+    tool = registry.get("nested_contract_tool")
+    schema = _build_args_schema(tool).model_json_schema()
     nested_item = _nested_items_item_schema(schema)
     nested_properties = dict(nested_item.get("properties") or {})
 
@@ -692,7 +692,7 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
         captured["messages"] = list(kwargs.get("messages") or [])
         return object()
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",

@@ -162,7 +162,7 @@ def _patch_compression_runner(monkeypatch, runner, *, applied: bool, context_win
         }
 
     monkeypatch.setattr(runner, "_prepare_turn_state", _fake_prepare)
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_frontdoor_send_preflight_snapshot",

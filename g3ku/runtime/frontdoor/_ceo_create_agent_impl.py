@@ -42,8 +42,8 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             return {"system_overlay": combined_overlay}
         return {"system_overlay": default_overlay_text}
 
-    def visible_langchain_tools(self, *, state, runtime) -> list[Any]:
-        return list(self._build_langchain_tools_for_state(state=state, runtime=runtime))
+    def visible_tool_schemas(self, *, state, runtime) -> list[Any]:
+        return list(self._frontdoor_tool_schemas_for_state(state=state, runtime=runtime))
 
     @staticmethod
     def _message_role(value: Any) -> str:
@@ -537,7 +537,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         snapshot = self._frontdoor_send_preflight_snapshot(
             state=state,
             runtime=runtime,
-            langchain_tools=self._build_langchain_tools_for_state(state=state, runtime=runtime),
+            tool_schemas=self._frontdoor_tool_schemas_for_state(state=state, runtime=runtime),
         )
         return state, runtime, snapshot
 

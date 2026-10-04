@@ -22,7 +22,7 @@ def test_frontdoor_send_preflight_snapshot_reports_ratio_and_threshold_flags(
 ) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -64,7 +64,7 @@ def test_frontdoor_send_preflight_snapshot_reports_ratio_and_threshold_flags(
             "dynamic_appendix_messages": [],
         },
         runtime=runtime,
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     assert preflight["estimated_total_tokens"] == 26000
@@ -84,7 +84,7 @@ def test_frontdoor_send_preflight_snapshot_uses_safety_margin_near_trigger(
 ) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -128,7 +128,7 @@ def test_frontdoor_send_preflight_snapshot_uses_safety_margin_near_trigger(
             "dynamic_appendix_messages": [],
         },
         runtime=runtime,
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     assert preflight["trigger_tokens"] == 20_000

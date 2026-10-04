@@ -920,7 +920,7 @@ async def test_ceo_frontdoor_prepare_turn_keeps_runtime_only_objects_out_of_chec
     assert state_update["prompt_cache_key"] == "cache-key"
     assert "runtime_context" not in state_update
     assert "visible_tools" not in state_update
-    assert "langchain_tools" not in state_update
+    assert "tool_schemas" not in state_update
     assert "langchain_tool_map" not in state_update
     checkpoint_state = {"user_input": user_input}
     checkpoint_state.update(state_update)
@@ -1009,7 +1009,7 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -1105,7 +1105,7 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
         lambda **kwargs: "rebuilt-cache-key",
     )
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -1207,7 +1207,7 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_selected_tool_schemas",
@@ -1336,7 +1336,7 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_selected_tool_schemas",
@@ -1457,7 +1457,7 @@ async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage
     tmp_path: Path,
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_selected_tool_schemas",
@@ -1579,7 +1579,7 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -1700,7 +1700,7 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",

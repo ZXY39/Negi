@@ -96,7 +96,7 @@ async def test_graph_call_model_rotates_stale_model_refs_before_send(
     monkeypatch.setattr(runner, "_frontdoor_runtime_config_revision", lambda: 9)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["qwen-vl", "deepseek"])
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",

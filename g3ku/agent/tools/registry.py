@@ -7,12 +7,8 @@ import inspect
 import json
 from typing import Any
 
-from langchain_core.tools import BaseTool, StructuredTool
-
 from g3ku.agent.tools.base import Tool
 from g3ku.json_schema_utils import (
-    attach_raw_parameters_schema,
-    build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
 )
 from g3ku.runtime.tool_error_guidance import (
@@ -40,7 +36,6 @@ class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
         self._dynamic_tools: dict[str, Tool] = {}
-        self._langchain_tools: dict[str, BaseTool] = {}
         self._runtime_context: contextvars.ContextVar[dict[str, Any] | None] = (
             contextvars.ContextVar("tool_runtime_context", default=None)
         )
@@ -57,7 +52,6 @@ class ToolRegistry:
         """Unregister a tool by name."""
         self._tools.pop(name, None)
         self._dynamic_tools.pop(name, None)
-        self._langchain_tools.pop(name, None)
 
     def get(self, name: str) -> Tool | None:
         """Get a tool by name."""
@@ -68,10 +62,6 @@ class ToolRegistry:
         merged = dict(self._tools)
         merged.update(self._dynamic_tools)
         return list(merged.values())
-
-    def register_langchain_tool(self, tool: BaseTool) -> None:
-        """Register an already-built BaseTool (official LangChain tool)."""
-        self._langchain_tools[tool.name] = tool
 
     def has(self, name: str) -> bool:
         """Check if a tool is registered."""
@@ -90,8 +80,8 @@ class ToolRegistry:
             return f"Error: Tool '{name}' not found. Available: {', '.join(self.tool_names)}"
 
         try:
-            # StructuredTool may include optional args as `None`; legacy schema validators
-            # treat these as type mismatches, so drop unset values before validation/dispatch.
+            # Optional args reach the runtime as `None` when the model omits them; legacy
+            # schema validators treat these as type mismatches, so drop unset values first.
             normalized = normalize_runtime_tool_arguments_dict(
                 {k: v for k, v in params.items() if v is not None}
             )
@@ -182,74 +172,6 @@ class ToolRegistry:
                     runtime_context=self._runtime_context.get(),
                 )
             return error_text + _hint
-
-    def to_langchain_tools(self) -> list[BaseTool]:
-        """Convert registered tools to official BaseTool instances."""
-        tools: list[BaseTool] = []
-        runtime_context = dict(self._runtime_context.get() or {})
-        for tool in self.list_tools():
-            args_schema = self._build_args_schema(tool)
-            coroutine = self._build_tool_coroutine(tool.name, runtime_context_snapshot=runtime_context)
-            tools.append(
-                attach_raw_parameters_schema(
-                    StructuredTool.from_function(
-                        coroutine=coroutine,
-                        name=tool.name,
-                        description=tool.description,
-                        args_schema=args_schema,
-                        infer_schema=False,
-                    ),
-                    tool.parameters,
-                )
-            )
-        tools.extend(self._langchain_tools.values())
-        return tools
-
-    def to_langchain_tools_filtered(self, allowed_names: list[str] | set[str]) -> list[BaseTool]:
-        """Convert only the selected registered tools to official BaseTool instances."""
-        visible = {str(name or '').strip() for name in (allowed_names or []) if str(name or '').strip()}
-        tools: list[BaseTool] = []
-        runtime_context = dict(self._runtime_context.get() or {})
-        for tool in self.list_tools():
-            if tool.name not in visible:
-                continue
-            args_schema = self._build_args_schema(tool)
-            coroutine = self._build_tool_coroutine(tool.name, runtime_context_snapshot=runtime_context)
-            tools.append(
-                attach_raw_parameters_schema(
-                    StructuredTool.from_function(
-                        coroutine=coroutine,
-                        name=tool.name,
-                        description=tool.description,
-                        args_schema=args_schema,
-                        infer_schema=False,
-                    ),
-                    tool.parameters,
-                )
-            )
-        for name, tool in self._langchain_tools.items():
-            if name in visible:
-                tools.append(tool)
-        return tools
-
-    def _build_tool_coroutine(self, tool_name: str, *, runtime_context_snapshot: dict[str, Any] | None = None):
-        captured_runtime = dict(runtime_context_snapshot or {})
-
-        async def _invoke(**kwargs: Any) -> Any:
-            token: contextvars.Token | None = None
-            if captured_runtime:
-                current_runtime = self._runtime_context.get() or {}
-                merged_runtime = dict(captured_runtime)
-                merged_runtime.update({key: value for key, value in current_runtime.items() if value not in (None, "")})
-                if merged_runtime != current_runtime:
-                    token = self._runtime_context.set(merged_runtime)
-            try:
-                return await self.execute(tool_name, kwargs)
-            finally:
-                if token is not None:
-                    self._runtime_context.reset(token)
-
-        return _invoke
 
     def push_runtime_context(self, context: dict[str, Any]) -> contextvars.Token:
         """Push per-call runtime context (e.g. progress callback) into current context."""
@@ -426,18 +348,14 @@ class ToolRegistry:
             return "__g3ku_runtime"
         return None
 
-    @staticmethod
-    def _build_args_schema(tool: Tool):
-        return build_args_schema_model(tool.name, tool.parameters)
-
     @property
     def tool_names(self) -> list[str]:
         """Get list of registered tool names."""
-        return list(dict.fromkeys([*self._tools.keys(), *self._dynamic_tools.keys(), *self._langchain_tools.keys()]))
+        return list(dict.fromkeys([*self._tools.keys(), *self._dynamic_tools.keys()]))
 
     def __len__(self) -> int:
-        return len(set(self._tools.keys()) | set(self._dynamic_tools.keys()) | set(self._langchain_tools.keys()))
+        return len(set(self._tools.keys()) | set(self._dynamic_tools.keys()))
 
     def __contains__(self, name: str) -> bool:
-        return name in self._tools or name in self._dynamic_tools or name in self._langchain_tools
+        return name in self._tools or name in self._dynamic_tools
 

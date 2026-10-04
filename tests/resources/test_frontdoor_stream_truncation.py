@@ -157,7 +157,7 @@ def test_abort_ownership_moved_to_the_provider_so_the_frontdoor_has_no_second_pr
 
 
 def _make_runner_state(monkeypatch: pytest.MonkeyPatch, runner: CreateAgentCeoFrontDoorRunner) -> dict:
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",

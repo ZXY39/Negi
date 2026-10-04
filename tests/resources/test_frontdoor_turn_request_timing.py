@@ -21,7 +21,7 @@ async def test_first_frontdoor_request_records_inbound_to_send_latency(
     tmp_path,
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_selected_tool_schemas",
@@ -92,7 +92,7 @@ async def test_request_timing_is_null_without_inbound_metadata(
     tmp_path,
 ) -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **kwargs: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **kwargs: [])
     monkeypatch.setattr(
         runner,
         "_selected_tool_schemas",

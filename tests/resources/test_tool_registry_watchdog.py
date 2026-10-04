@@ -55,8 +55,7 @@ async def test_tool_registry_keeps_watchdog_inline_for_execution_role() -> None:
         }
     )
     try:
-        tools = registry.to_langchain_tools_filtered(["slow_complete"])
-        payload = await tools[0].ainvoke({})
+        payload = await registry.execute("slow_complete", {})
     finally:
         registry.pop_runtime_context(token)
 

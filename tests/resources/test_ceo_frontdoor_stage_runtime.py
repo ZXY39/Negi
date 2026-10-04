@@ -188,17 +188,57 @@ class _DummyChatBackend:
         raise AssertionError(f"chat backend should not be used in this test: {kwargs!r}")
 
 
+def _frontdoor_schema_names(schemas: list[dict[str, object]]) -> set[str]:
+    return {str((item.get("function") or {}).get("name") or "") for item in list(schemas or [])}
+
+
+def _tool_row(update: dict[str, object], call_id: str) -> dict[str, object]:
+    for item in list(update.get("messages") or []):
+        if isinstance(item, dict) and str(item.get("tool_call_id") or "") == call_id:
+            return item
+    return {}
+
+
+async def _execute_one_frontdoor_tool(
+    runner,
+    *,
+    state: dict[str, object],
+    tool_name: str,
+    arguments: dict[str, object],
+    call_id: str,
+):
+    """Run one tool through the production execute_tools node and return its result row."""
+    payload = _tool_call_payload(call_id=call_id, tool_name=tool_name, arguments=arguments)
+    update = await runner._graph_execute_tools(
+        {**state, "tool_call_payloads": [payload]},
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+    return update, _tool_row(update, call_id)
+
+
+def _six_tuple_executor():
+    executed: list[str] = []
+
+    async def _record(arguments: dict[str, object]) -> None:
+        executed.append(str(arguments.get("value") or ""))
+
+    async def _execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, **kwargs):
+        _ = tool_name, runtime_context, on_progress, kwargs
+        raw = await tool.execute(**arguments)
+        result_text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        return raw, result_text, "success", "2026-04-08T10:00:00", "2026-04-08T10:00:01", 1.0
+
+    return executed, _execute_tool_call
+
+
+
 @pytest.mark.asyncio
 async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_state(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
+    executed, _execute_tool_call = _six_tuple_executor()
 
     async def _noop_progress(*args, **kwargs) -> None:
         _ = args, kwargs
-
-    async def _execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress):
-        _ = tool_name, runtime_context, on_progress
-        return await tool.execute(**arguments), "success", "2026-04-08T10:00:00", "2026-04-08T10:00:01", 1.0
 
     monkeypatch.setattr(
         runner,
@@ -206,26 +246,28 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
         lambda tool_names: {"record_tool": _RecordingTool(executed)} if "record_tool" in list(tool_names or []) else {},
     )
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _noop_progress})
-    monkeypatch.setattr(runner, "_execute_tool_call", _execute_tool_call)
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _execute_tool_call)
 
     base_state = initial_persistent_state(user_input={"content": "hello", "metadata": {}})
-    tools = runner._build_langchain_tools_for_state(
+    stage_arguments = {"stage_goal": "Inspect the current request", "tool_round_budget": 12}
+    tools = runner._frontdoor_tool_schemas_for_state(
         state={**base_state, "tool_names": ["record_tool"]},
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
-    tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
 
     # silent 是常驻内置控制工具，执行侧工具对象字典无条件注入（见 79b0f53a），
     # 所以它出现在每一份精确集合断言里，不是这一轮多放出来的可调用工具。
-    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
+    assert _frontdoor_schema_names(tools) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
-    stage_result = await tools_by_name[STAGE_TOOL_NAME].ainvoke(
-        {
-            "stage_goal": "Inspect the current request",
-            "tool_round_budget": 12,
-        }
+    _update, stage_row = await _execute_one_frontdoor_tool(
+        runner,
+        state={**base_state, "tool_names": ["record_tool"]},
+        tool_name=STAGE_TOOL_NAME,
+        arguments=stage_arguments,
+        call_id="call-stage-1",
     )
-    stage_payload = json.loads(str(stage_result["result_text"]))
+    stage_result_text = str(stage_row.get("content") or "")
+    stage_payload = json.loads(stage_result_text)
 
     result = await runner._postprocess_completed_tool_cycle(
         state={
@@ -235,10 +277,7 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
                 _tool_call_payload(
                     call_id="call-stage-1",
                     tool_name=STAGE_TOOL_NAME,
-                    arguments={
-                        "stage_goal": "Inspect the current request",
-                        "tool_round_budget": 12,
-                    },
+                    arguments=stage_arguments,
                 )
             ],
             "messages": [
@@ -246,15 +285,12 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
                 _assistant_tool_call_record(
                     call_id="call-stage-1",
                     tool_name=STAGE_TOOL_NAME,
-                    arguments={
-                        "stage_goal": "Inspect the current request",
-                        "tool_round_budget": 12,
-                    },
+                    arguments=stage_arguments,
                 ),
                 _tool_message(
                     call_id="call-stage-1",
                     tool_name=STAGE_TOOL_NAME,
-                    result_text=str(stage_result["result_text"]),
+                    result_text=stage_result_text,
                 ),
             ],
         }
@@ -278,18 +314,13 @@ async def test_frontdoor_stage_tool_is_visible_and_stage_creation_persists_in_st
     }
     assert executed == []
 
-
 @pytest.mark.asyncio
-async def test_frontdoor_stage_gate_keeps_ordinary_tools_visible_but_blocks_them_before_first_stage(monkeypatch) -> None:
+async def test_frontdoor_stage_gate_graces_first_stageless_tool_then_blocks_the_next(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
+    executed, _execute_tool_call = _six_tuple_executor()
 
     async def _noop_progress(*args, **kwargs) -> None:
         _ = args, kwargs
-
-    async def _execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress):
-        _ = tool_name, runtime_context, on_progress
-        return await tool.execute(**arguments), "success", "2026-04-08T10:00:00", "2026-04-08T10:00:01", 1.0
 
     monkeypatch.setattr(
         runner,
@@ -297,38 +328,51 @@ async def test_frontdoor_stage_gate_keeps_ordinary_tools_visible_but_blocks_them
         lambda tool_names: {"record_tool": _RecordingTool(executed)} if "record_tool" in list(tool_names or []) else {},
     )
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _noop_progress})
-    monkeypatch.setattr(runner, "_execute_tool_call", _execute_tool_call)
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _execute_tool_call)
 
     state = {
         **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
         "tool_names": ["record_tool"],
     }
-    tools = runner._build_langchain_tools_for_state(
+    tools = runner._frontdoor_tool_schemas_for_state(
         state=state,
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
-    tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
-    blocked_result = await tools_by_name["record_tool"].ainvoke({"value": "alpha"})
+    assert _frontdoor_schema_names(tools) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
-    assert set(tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
-    assert blocked_result["status"] == "error"
-    assert str(blocked_result["result_text"]).startswith(
+    first_update, first_row = await _execute_one_frontdoor_tool(
+        runner,
+        state=state,
+        tool_name="record_tool",
+        arguments={"value": "alpha"},
+        call_id="call-ordinary-1",
+    )
+    first_text = str(first_row.get("content") or "")
+    assert first_text.startswith('{\"ok\": true, \"value\": \"alpha\"}')
+    assert "宽限执行" in first_text
+    assert executed == ["alpha"]
+    assert list((first_update.get("frontdoor_stage_state") or {}).get("pending_orphan_rounds") or [])
+
+    second_state = {**state, "frontdoor_stage_state": first_update["frontdoor_stage_state"]}
+    _second_update, second_row = await _execute_one_frontdoor_tool(
+        runner,
+        state=second_state,
+        tool_name="record_tool",
+        arguments={"value": "beta"},
+        call_id="call-ordinary-2",
+    )
+    assert str(second_row.get("content") or "").startswith(
         "Error: no active stage; call submit_next_stage before using other tools"
     )
-    assert executed == []
-
+    assert executed == ["alpha"]
 
 @pytest.mark.asyncio
 async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_ordinary_tool(monkeypatch) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    executed: list[str] = []
+    executed, _execute_tool_call = _six_tuple_executor()
 
     async def _noop_progress(*args, **kwargs) -> None:
         _ = args, kwargs
-
-    async def _execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress):
-        _ = tool_name, runtime_context, on_progress
-        return await tool.execute(**arguments), "success", "2026-04-08T10:00:00", "2026-04-08T10:00:01", 1.0
 
     monkeypatch.setattr(
         runner,
@@ -336,20 +380,28 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
         lambda tool_names: {"record_tool": _RecordingTool(executed)} if "record_tool" in list(tool_names or []) else {},
     )
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _noop_progress})
-    monkeypatch.setattr(runner, "_execute_tool_call", _execute_tool_call)
+    monkeypatch.setattr(runner, "_execute_tool_call_with_raw_result", _execute_tool_call)
 
     active_state = {
         **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
         "tool_names": ["record_tool"],
         "frontdoor_stage_state": _active_frontdoor_stage_state(budget=1),
     }
-    tools = runner._build_langchain_tools_for_state(
+    tools = runner._frontdoor_tool_schemas_for_state(
         state=active_state,
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
-    tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in tools}
+    assert _frontdoor_schema_names(tools) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
-    ordinary_result = await tools_by_name["record_tool"].ainvoke({"value": "alpha"})
+    _run_update, ordinary_row = await _execute_one_frontdoor_tool(
+        runner,
+        state=active_state,
+        tool_name="record_tool",
+        arguments={"value": "alpha"},
+        call_id="call-tool-1",
+    )
+    ordinary_result_text = str(ordinary_row.get("content") or "")
+    assert ordinary_row.get("status") == "success" or ordinary_result_text.startswith('{\"ok\"')
 
     updated = await runner._postprocess_completed_tool_cycle(
         state={
@@ -371,33 +423,41 @@ async def test_frontdoor_stage_budget_exhaustion_updates_gate_and_blocks_next_or
                 _tool_message(
                     call_id="call-tool-1",
                     tool_name="record_tool",
-                    result_text=str(ordinary_result["result_text"]),
+                    result_text=ordinary_result_text,
                 ),
             ],
         }
     )
 
-    assert ordinary_result["status"] == "success"
     assert updated is not None
     assert updated["frontdoor_stage_state"]["transition_required"] is True
     assert updated["frontdoor_stage_state"]["stages"][0]["tool_rounds_used"] == 1
     assert executed == ["alpha"]
 
-    exhausted_tools = runner._build_langchain_tools_for_state(
-        state={
-            **active_state,
-            "frontdoor_stage_state": updated["frontdoor_stage_state"],
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
+    exhausted_state = {**active_state, "frontdoor_stage_state": updated["frontdoor_stage_state"]}
+    grace_update, grace_row = await _execute_one_frontdoor_tool(
+        runner,
+        state=exhausted_state,
+        tool_name="record_tool",
+        arguments={"value": "beta"},
+        call_id="call-tool-2",
     )
-    exhausted_tools_by_name = {str(getattr(tool, "name", "") or ""): tool for tool in exhausted_tools}
-    blocked_after_exhaustion = await exhausted_tools_by_name["record_tool"].ainvoke({"value": "beta"})
-    assert set(exhausted_tools_by_name) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
-    assert blocked_after_exhaustion["status"] == "error"
-    assert str(blocked_after_exhaustion["result_text"]).startswith(
+    grace_text = str(grace_row.get("content") or "")
+    assert "当前阶段预算已耗尽" in grace_text and "宽限执行" in grace_text
+    assert executed == ["alpha", "beta"]
+
+    blocked_state = {**exhausted_state, "frontdoor_stage_state": grace_update["frontdoor_stage_state"]}
+    _blocked_update, blocked_row = await _execute_one_frontdoor_tool(
+        runner,
+        state=blocked_state,
+        tool_name="record_tool",
+        arguments={"value": "gamma"},
+        call_id="call-tool-3",
+    )
+    assert str(blocked_row.get("content") or "").startswith(
         "Error: current stage budget is exhausted; call submit_next_stage before using other tools"
     )
-
+    assert executed == ["alpha", "beta"]
 
 @pytest.mark.asyncio
 async def test_frontdoor_without_valid_stage_keeps_runtime_visible_tools_stable(monkeypatch) -> None:
@@ -410,16 +470,14 @@ async def test_frontdoor_without_valid_stage_keeps_runtime_visible_tools_stable(
     )
     monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": None})
 
-    no_stage_tools = runner._build_langchain_tools_for_state(
+    no_stage_tools = runner._frontdoor_tool_schemas_for_state(
         state={
             **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
             "tool_names": ["record_tool", "load_tool_context", "filesystem_write"],
         },
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
-    no_stage_tool_names = {str(getattr(tool, "name", "") or "") for tool in no_stage_tools}
-
-    exhausted_tools = runner._build_langchain_tools_for_state(
+    exhausted_tools = runner._frontdoor_tool_schemas_for_state(
         state={
             **initial_persistent_state(user_input={"content": "hello", "metadata": {}}),
             "tool_names": ["record_tool", "load_tool_context", "filesystem_write"],
@@ -427,11 +485,9 @@ async def test_frontdoor_without_valid_stage_keeps_runtime_visible_tools_stable(
         },
         runtime=SimpleNamespace(context=SimpleNamespace()),
     )
-    exhausted_tool_names = {str(getattr(tool, "name", "") or "") for tool in exhausted_tools}
 
-    assert no_stage_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
-    assert exhausted_tool_names == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
-
+    assert _frontdoor_schema_names(no_stage_tools) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
+    assert _frontdoor_schema_names(exhausted_tools) == {STAGE_TOOL_NAME, SILENT_TOOL_NAME, "record_tool"}
 
 def test_frontdoor_stage_state_snapshot_preserves_archive_refs() -> None:
     snapshot = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())._frontdoor_stage_state_snapshot(

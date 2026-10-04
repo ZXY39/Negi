@@ -5,7 +5,6 @@ import base64
 import binascii
 import copy
 import hashlib
-import inspect
 import json
 import math
 import re
@@ -13,10 +12,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from langchain_core.messages import AIMessage, convert_to_messages
-from langchain_core.tools import BaseTool, StructuredTool
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
@@ -24,7 +22,6 @@ from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
 from g3ku.json_schema_utils import (
-    attach_raw_parameters_schema,
     build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
     sanitize_provider_parameters_schema,
@@ -165,7 +162,6 @@ from .tool_contract import (
     upsert_frontdoor_tool_contract_message,
 )
 
-ToolExecutor = Callable[..., Awaitable[Any]]
 CeoGraphState = CeoPersistentState
 
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
@@ -224,13 +220,6 @@ _STAGE_BLOCK_ECHO_REPAIR_MESSAGE = (
 FRONTDOOR_STAGELESS_MEMORY_TOOL_NAMES = frozenset({"memory_write", "memory_delete", "memory_note"})
 # 节点暂停事件心跳自动补开阶段的预算。
 FRONTDOOR_NODE_ERROR_AUTO_STAGE_BUDGET = 10
-
-
-@dataclass(slots=True)
-class VisibleToolBundle:
-    native_tools: dict[str, Tool]
-    langchain_tools: list[BaseTool]
-    langchain_tool_map: dict[str, BaseTool]
 
 
 @dataclass(slots=True)
@@ -478,14 +467,6 @@ def _estimate_frontdoor_provider_request_token_breakdown(
     }
 
 
-class _CeoStructuredTool(StructuredTool):
-    def _to_args_and_kwargs(self, tool_input: str | dict, tool_call_id: str | None) -> tuple[tuple, dict]:
-        args, kwargs = super()._to_args_and_kwargs(tool_input, tool_call_id)
-        if tool_call_id is not None:
-            kwargs["tool_call_id"] = tool_call_id
-        return args, kwargs
-
-
 def _hidden_internal_prompt_message_metadata(
     *,
     source: str,
@@ -690,67 +671,20 @@ def _provider_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | N
     )
 
 
-def _build_langchain_tool(tool: Tool, executor: ToolExecutor) -> BaseTool:
-    executor_params = inspect.signature(executor).parameters
-    executor_accepts_tool_call_id = "tool_call_id" in executor_params or any(
-        param.kind is inspect.Parameter.VAR_KEYWORD
-        for param in executor_params.values()
-    )
-
-    async def _invoke(*, tool_call_id: str | None = None, **kwargs: Any) -> Any:
-        filtered_kwargs = {
-            str(key): value
-            for key, value in dict(kwargs or {}).items()
-            if value is not None
-        }
-        normalized_kwargs = normalize_runtime_tool_arguments_dict(filtered_kwargs)
-        if executor_accepts_tool_call_id:
-            return await executor(
-                tool.name,
-                normalized_kwargs,
-                tool_call_id=str(tool_call_id or "").strip() or None,
-            )
-        return await executor(tool.name, normalized_kwargs)
-
-    model_description, compatible_model_parameters = _provider_visible_tool_contract(tool)
-    return attach_raw_parameters_schema(
-        _CeoStructuredTool.from_function(
-            coroutine=_invoke,
-            name=tool.name,
-            description=model_description,
-            args_schema=build_args_schema_model(tool.name, compatible_model_parameters),
-            infer_schema=False,
-        ),
-        compatible_model_parameters,
-    )
-
-
-def _build_visible_tool_bundle(*, tools: dict[str, Tool], executor: ToolExecutor) -> VisibleToolBundle:
-    native_tools = dict(tools or {})
-    langchain_tool_map = {
-        name: _build_langchain_tool(tool, executor)
-        for name, tool in native_tools.items()
+def _provider_tool_schema(tool: Tool) -> dict[str, Any]:
+    model_description, model_parameters = _provider_visible_tool_contract(tool)
+    return {
+        "type": "function",
+        "function": {
+            "name": str(tool.name or "").strip(),
+            "description": model_description,
+            "parameters": dict(model_parameters or {}),
+        },
     }
-    return VisibleToolBundle(
-        native_tools=native_tools,
-        langchain_tools=list(langchain_tool_map.values()),
-        langchain_tool_map=dict(langchain_tool_map),
-    )
 
 
-async def _invoke_execute_tool_call_compat(execute_tool_call: ToolExecutor, /, **kwargs: Any) -> Any:
-    try:
-        parameters = inspect.signature(execute_tool_call).parameters
-    except (TypeError, ValueError):
-        return await execute_tool_call(**kwargs)
-    if "tool_call_id" in parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    ):
-        return await execute_tool_call(**kwargs)
-    legacy_kwargs = dict(kwargs)
-    legacy_kwargs.pop("tool_call_id", None)
-    return await execute_tool_call(**legacy_kwargs)
+def _provider_tool_schemas(tools: dict[str, Tool]) -> list[dict[str, Any]]:
+    return [_provider_tool_schema(tool) for tool in dict(tools or {}).values()]
 
 
 def _normalize_frontdoor_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
@@ -1712,7 +1646,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         *,
         state: CeoGraphState,
         runtime: CeoRuntime,
-        langchain_tools: list[Any] | None = None,
+        tool_schemas: list[Any] | None = None,
     ) -> dict[str, Any]:
         state_for_request = dict(state or {})
         request_messages = list(state_for_request.get("messages") or [])
@@ -1771,7 +1705,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             tool_schemas=actual_tool_schemas,
             model_info=model_info,
             prompt_cache_key=prompt_cache_key,
-            parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None),
+            parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if list(tool_schemas or []) else None),
         )
         context_window_tokens = int(model_info.get("context_window_tokens") or 0)
         preview_estimate_tokens = self._estimate_frontdoor_send_total_tokens(
@@ -2510,7 +2444,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 raise asyncio.CancelledError()
             message = await self._call_model_with_tools(
                 messages=list(messages),
-                langchain_tools=[],
+                tool_schemas=[],
                 model_refs=list(current_model_refs),
                 parallel_tool_calls=None,
                 prompt_cache_key="",
@@ -6118,82 +6052,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise RuntimeError(f"missing merged tool result for {tool_call_id or '<unknown>'}")
         return merged
 
-    def _build_langchain_tools_for_state(
+    def _frontdoor_tool_schemas_for_state(
         self,
         *,
         state: CeoGraphState,
         runtime: CeoRuntime,
-    ) -> list[BaseTool]:
+    ) -> list[dict[str, Any]]:
         execution_bundle = self._frontdoor_execution_bundle(state=state, runtime=runtime)
-        visible_tools = execution_bundle.visible_tools
-        runtime_context = execution_bundle.runtime_context
-        on_progress = execution_bundle.on_progress
-        mutable_stage_state = execution_bundle.mutable_stage_state
-        node_error_context = self._frontdoor_node_error_heartbeat_context(state)
-
-        # 注意:此 LangChain 执行器只用于 schema/preflight(bind_tools 只取 schema,从不触发 arun),
-        # 生产真实执行与 free-pass 宽限的唯一入口是 _graph_execute_tools._run_single。这里保持硬拦,
-        # 不做"宽限执行但无法记账"的不一致语义。
-        async def _tool_executor(
-            tool_name: str,
-            arguments: dict[str, Any],
-            tool_call_id: str | None = None,
-        ) -> dict[str, Any]:
-            tool = visible_tools.get(tool_name)
-            if tool is None:
-                return {
-                    "result_text": f"Error: tool not available: {tool_name}",
-                    "status": "error",
-                    "started_at": "",
-                    "finished_at": "",
-                    "elapsed_seconds": None,
-                }
-            gate_error = self._frontdoor_stage_gate_error(
-                tool_name=tool_name,
-                stage_state=mutable_stage_state,
-                allow_stageless=bool(node_error_context),
-            )
-            if gate_error:
-                return {
-                    "result_text": f"Error: {gate_error}",
-                    "status": "error",
-                    "started_at": "",
-                    "finished_at": "",
-                    "elapsed_seconds": None,
-                }
-            normalized_arguments = _normalize_frontdoor_tool_arguments(tool_name, arguments)
-            result_text, status, started_at, finished_at, elapsed_seconds = await _invoke_execute_tool_call_compat(
-                self._execute_tool_call,
-                tool=tool,
-                tool_name=tool_name,
-                arguments=normalized_arguments,
-                runtime_context=runtime_context,
-                on_progress=on_progress,
-                tool_call_id=tool_call_id,
-            )
-            await self._emit_progress(
-                on_progress,
-                result_text,
-                event_kind="tool_result" if status == "success" else "tool_error",
-                event_data=self._tool_result_progress_event_data(
-                    tool_name=tool_name,
-                    result_text=result_text,
-                    tool_call_id=tool_call_id,
-                ),
-            )
-            return {
-                "result_text": result_text,
-                "status": status,
-                "started_at": started_at,
-                "finished_at": finished_at,
-                "elapsed_seconds": elapsed_seconds,
-            }
-
-        tool_bundle = _build_visible_tool_bundle(
-            tools=visible_tools,
-            executor=_tool_executor,
-        )
-        return list(tool_bundle.langchain_tools)
+        return _provider_tool_schemas(execution_bundle.visible_tools)
 
     def _frontdoor_execution_bundle(
         self,
@@ -6589,7 +6455,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         self,
         *,
         messages: list[dict[str, Any]],
-        langchain_tools: list[Any],
+        tool_schemas: list[Any],
         model_refs: list[str],
         parallel_tool_calls: bool | None,
         prompt_cache_key: str,
@@ -6600,7 +6466,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             chat_backend=self._resolve_chat_backend(),
             model_refs=list(model_refs or []),
         )
-        runnable = chat_model.bind_tools(langchain_tools) if langchain_tools else chat_model
+        runnable = chat_model.bind_tools(tool_schemas) if tool_schemas else chat_model
         return await runnable.ainvoke(
             convert_to_messages(messages),
             parallel_tool_calls=parallel_tool_calls,
@@ -7370,12 +7236,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
         if follow_up_update:
             state_for_request = {**state_for_request, **follow_up_update}
-        langchain_tools = self._build_langchain_tools_for_state(state=state_for_request, runtime=runtime)
+        tool_schemas = self._frontdoor_tool_schemas_for_state(state=state_for_request, runtime=runtime)
         while True:
             preflight_snapshot = self._frontdoor_send_preflight_snapshot(
                 state=state_for_request,
                 runtime=runtime,
-                langchain_tools=langchain_tools,
+                tool_schemas=tool_schemas,
             )
             request_messages = list(preflight_snapshot.get("request_messages") or [])
             durable_request_messages = list(preflight_snapshot.get("durable_request_messages") or request_messages)
@@ -7560,7 +7426,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                             model_info=model_info,
                             prompt_cache_key=compression_prompt_cache_key,
                             parallel_tool_calls=(
-                                bool(state_for_request.get("parallel_enabled")) if list(langchain_tools or []) else None
+                                bool(state_for_request.get("parallel_enabled")) if list(tool_schemas or []) else None
                             ),
                         )
                         compression_total_tokens = self._estimate_frontdoor_send_total_tokens(
@@ -7623,9 +7489,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         provider_request_started_at = now_iso()
                     message = await self._call_model_with_tools(
                         messages=request_messages,
-                        langchain_tools=langchain_tools,
+                        tool_schemas=tool_schemas,
                         model_refs=list(state_for_request.get("model_refs") or []),
-                        parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
+                        parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if tool_schemas else None),
                         prompt_cache_key=prompt_cache_key,
                         on_text_delta=assistant_text_delta_handler,
                         on_model_retry_status=model_retry_status_handler,
@@ -7681,7 +7547,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             tool_schemas=actual_tool_schemas,
             prompt_cache_key=prompt_cache_key,
             prompt_cache_diagnostics=prompt_cache_diagnostics,
-            parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if langchain_tools else None),
+            parallel_tool_calls=(bool(state_for_request.get("parallel_enabled")) if tool_schemas else None),
             provider_request_meta=(
                 dict(response_view.provider_request_meta or {})
                 if isinstance(response_view.provider_request_meta, dict)

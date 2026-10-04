@@ -330,12 +330,14 @@ async def test_tool_registry_execute_treats_ok_false_json_result_as_error_lane()
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_langchain_tool_normalizes_nested_array_object_arguments() -> None:
+async def test_tool_registry_execute_normalizes_nested_array_object_arguments() -> None:
     registry = ToolRegistry()
     registry.register(_NestedArrayObjectTool())
 
-    langchain_tool = registry.to_langchain_tools_filtered(["nested_array_object_tool"])[0]
-    result = await langchain_tool.ainvoke({"items": [{"kind": "memory_write"}]})
+    result = await registry.execute(
+        "nested_array_object_tool",
+        {"items": [{"kind": "memory_write"}]},
+    )
 
     assert result == {"items": [{"kind": "memory_write"}]}
 

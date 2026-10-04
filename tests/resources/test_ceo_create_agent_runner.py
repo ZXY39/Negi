@@ -338,6 +338,52 @@ class _NamedSchemaTool(Tool):
         return kwargs
 
 
+class _RuntimeToolStack:
+    def push_runtime_context(self, _context):
+        return "token"
+
+    def pop_runtime_context(self, _token):
+        return None
+
+
+def _frontdoor_active_stage(goal: str) -> dict[str, object]:
+    return {
+        "active_stage_id": "frontdoor-stage-1",
+        "transition_required": False,
+        "pending_orphan_rounds": [],
+        "stages": [
+            {
+                "stage_id": "frontdoor-stage-1",
+                "stage_index": 1,
+                "stage_goal": goal,
+                "tool_round_budget": 2,
+                "tool_rounds_used": 0,
+                "status": "active",
+                "mode": "自主执行",
+                "completed_stage_summary": "",
+                "key_refs": [],
+                "rounds": [],
+            }
+        ],
+    }
+
+
+async def _run_frontdoor_tool_once(runner, *, tool_name: str, arguments: dict[str, object], call_id: str):
+    """Execute one tool through the production execute_tools node and return its result row."""
+    payload = {"id": call_id, "name": tool_name, "arguments": dict(arguments or {})}
+    update = await runner._graph_execute_tools(
+        {
+            "tool_names": [tool_name],
+            "frontdoor_stage_state": _frontdoor_active_stage(f"Run {tool_name}"),
+            "tool_call_payloads": [payload],
+        },
+        runtime=SimpleNamespace(context=SimpleNamespace()),
+    )
+    rows = [item for item in list(update.get("messages") or []) if str(item.get("role") or "") == "tool"]
+    return update, rows[-1] if rows else {}
+
+
+
 class _BrokenValidationTool(Tool):
     @property
     def name(self) -> str:
@@ -614,20 +660,20 @@ def test_create_agent_runner_build_prompt_context_uses_effective_turn_overlay(mo
     assert "submit_next_stage" in result["system_overlay"]
 
 
-def test_create_agent_runner_visible_langchain_tools_uses_prepared_state(monkeypatch) -> None:
+def test_create_agent_runner_visible_tool_schemas_uses_prepared_state(monkeypatch) -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     captured: dict[str, object] = {}
 
-    def _fake_build_langchain_tools_for_state(*, state, runtime):
+    def _fake_frontdoor_tool_schemas_for_state(*, state, runtime):
         captured["state"] = state
         captured["runtime"] = runtime
         return ["tool-a"]
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", _fake_build_langchain_tools_for_state)
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", _fake_frontdoor_tool_schemas_for_state)
     runtime = SimpleNamespace(context=SimpleNamespace(session_key="web:shared"))
     state = {"tool_names": ["record_tool"]}
 
-    result = runner.visible_langchain_tools(state=state, runtime=runtime)
+    result = runner.visible_tool_schemas(state=state, runtime=runtime)
 
     assert result == ["tool-a"]
     assert captured == {"state": state, "runtime": runtime}
@@ -675,8 +721,14 @@ async def test_create_agent_runner_node_prepare_turn_replaces_messages_instead_o
 
 
 @pytest.mark.asyncio
-async def test_create_agent_langchain_tool_emits_tool_result_progress(monkeypatch) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+async def test_create_agent_frontdoor_execute_tool_emits_tool_result_progress(monkeypatch) -> None:
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
+        loop=SimpleNamespace(
+            tools=_RuntimeToolStack(),
+            resource_manager=None,
+            tool_execution_manager=None,
+        )
+    )
     progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
 
     async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
@@ -684,60 +736,28 @@ async def test_create_agent_langchain_tool_emits_tool_result_progress(monkeypatc
         progress_calls.append((str(content), event_kind, dict(event_data or {})))
 
     monkeypatch.setattr(runner, "_registered_tools_for_state", lambda state: {"demo_tool": _DemoTool()})
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
-
-    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, arguments, runtime_context
-        await on_progress(
-            f"{tool_name} started",
-            event_kind="tool_start",
-            event_data={"tool_name": tool_name, "tool_call_id": tool_call_id},
-        )
-        return "done", "success", "2026-04-05T11:00:00", "2026-04-05T11:00:01", 1.0
-
-    monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
-
-    tools = runner._build_langchain_tools_for_state(
-        state={
-            "tool_names": ["demo_tool"],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Inspect the request",
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 0,
-                        "status": "active",
-                        "mode": "自主执行",
-                        "completed_stage_summary": "",
-                        "key_refs": [],
-                        "rounds": [],
-                    }
-                ],
-            },
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
+    monkeypatch.setattr(runner, "_registered_tools", lambda names: {"demo_tool": _DemoTool()})
+    monkeypatch.setattr(
+        runner,
+        "_build_tool_runtime_context",
+        lambda **kwargs: {"on_progress": _on_progress, "session_key": "web:test"},
     )
 
-    result = await tools[0].ainvoke(
-        {
-            "type": "tool_call",
-            "id": "call-demo-tool-1",
-            "name": "demo_tool",
-            "args": {"value": "alpha"},
-        }
+    _update, row = await _run_frontdoor_tool_once(
+        runner,
+        tool_name="demo_tool",
+        arguments={"value": "alpha"},
+        call_id="call-demo-tool-1",
     )
 
-    assert getattr(result, "tool_call_id", "") == "call-demo-tool-1"
-    assert getattr(result, "status", "") == "success"
     assert [item[1] for item in progress_calls] == ["tool_start", "tool_result"]
-    assert progress_calls[-1][0] == "done"
-    assert progress_calls[0][2] == {"tool_name": "demo_tool", "tool_call_id": "call-demo-tool-1"}
+    assert progress_calls[0][2] == {
+        "tool_name": "demo_tool",
+        "arguments_text": "demo_tool (value=alpha)",
+        "tool_call_id": "call-demo-tool-1",
+    }
     assert progress_calls[-1][2] == {"tool_name": "demo_tool", "tool_call_id": "call-demo-tool-1"}
-
+    assert str(row.get("name") or "") == "demo_tool"
 
 @pytest.mark.asyncio
 async def test_create_agent_graph_execute_tools_preserves_parallel_same_name_tool_call_ids(monkeypatch) -> None:
@@ -1174,80 +1194,29 @@ def test_frontdoor_stage_state_after_loader_only_tool_cycle_does_not_consume_bud
     assert stage["rounds"][0]["budget_counted"] is False
 
 
-@pytest.mark.asyncio
-async def test_create_agent_langchain_tool_normalizes_create_async_task_execution_policy(monkeypatch) -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    captured: dict[str, object] = {}
-
-    async def _on_progress(*args, **kwargs):
-        _ = args, kwargs
-
-    monkeypatch.setattr(
-        runner,
-        "_registered_tools_for_state",
-        lambda state: {"create_async_task": _CreateAsyncTaskLikeTool()},
-    )
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
-
-    async def _fake_execute_tool_call(*, tool, tool_name, arguments, runtime_context, on_progress, tool_call_id):
-        _ = tool, tool_name, runtime_context, on_progress, tool_call_id
-        captured["arguments"] = dict(arguments or {})
-        return "created", "success", "2026-04-05T12:00:00", "2026-04-05T12:00:01", 1.0
-
-    monkeypatch.setattr(runner, "_execute_tool_call", _fake_execute_tool_call)
-
-    tools = runner._build_langchain_tools_for_state(
-        state={
-            "tool_names": ["create_async_task"],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Dispatch follow-up work",
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 0,
-                        "status": "active",
-                        "mode": "自主执行",
-                        "completed_stage_summary": "",
-                        "key_refs": [],
-                        "rounds": [],
-                    }
-                ],
-            },
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
-    )
-
-    result = await tools[0].ainvoke(
+def test_create_agent_frontdoor_tool_arguments_normalize_execution_policy() -> None:
+    normalized = ceo_runtime_ops._normalize_frontdoor_tool_arguments(
+        "create_async_task",
         {
             "task": "continue task",
             "core_requirement": "finish the analysis",
             "execution_policy": "focus",
-        }
+        },
     )
 
-    assert result["status"] == "success"
-    assert captured["arguments"]["execution_policy"] == {"mode": "focus"}
-
+    assert normalized["execution_policy"] == {"mode": "focus"}
 
 @pytest.mark.asyncio
-async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool_error(monkeypatch) -> None:
+async def test_create_agent_frontdoor_tool_degrades_validation_exception_to_tool_error(monkeypatch) -> None:
     progress_calls: list[tuple[str, str | None, dict[str, object]]] = []
 
     async def _on_progress(content: str, *, event_kind=None, event_data=None, **kwargs):
         _ = kwargs
         progress_calls.append((str(content), event_kind, dict(event_data or {})))
 
-    tool_context = SimpleNamespace(
-        push_runtime_context=lambda context: object(),
-        pop_runtime_context=lambda token: None,
-    )
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
-            tools=tool_context,
+            tools=_RuntimeToolStack(),
             resource_manager=None,
             tool_execution_manager=None,
         )
@@ -1257,44 +1226,32 @@ async def test_create_agent_langchain_tool_degrades_validation_exception_to_tool
         "_registered_tools_for_state",
         lambda state: {"broken_validation_tool": _BrokenValidationTool()},
     )
-    monkeypatch.setattr(runner, "_build_tool_runtime_context", lambda **kwargs: {"on_progress": _on_progress})
-
-    tools = runner._build_langchain_tools_for_state(
-        state={
-            "tool_names": ["broken_validation_tool"],
-            "frontdoor_stage_state": {
-                "active_stage_id": "frontdoor-stage-1",
-                "transition_required": False,
-                "stages": [
-                    {
-                        "stage_id": "frontdoor-stage-1",
-                        "stage_index": 1,
-                        "stage_goal": "Validate broken input",
-                        "tool_round_budget": 2,
-                        "tool_rounds_used": 0,
-                        "status": "active",
-                        "mode": "自主执行",
-                        "completed_stage_summary": "",
-                        "key_refs": [],
-                        "rounds": [],
-                    }
-                ],
-            },
-        },
-        runtime=SimpleNamespace(context=SimpleNamespace()),
+    monkeypatch.setattr(
+        runner,
+        "_registered_tools",
+        lambda names: {"broken_validation_tool": _BrokenValidationTool()},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_build_tool_runtime_context",
+        lambda **kwargs: {"on_progress": _on_progress, "session_key": "web:test"},
     )
 
-    result = await tools[0].ainvoke({"value": "alpha"})
+    _update, row = await _run_frontdoor_tool_once(
+        runner,
+        tool_name="broken_validation_tool",
+        arguments={"value": "alpha"},
+        call_id="call-broken-1",
+    )
+    result_text = str(row.get("content") or "")
 
-    assert result["status"] == "error"
-    assert "Error validating broken_validation_tool" in result["result_text"]
-    assert "unhashable type: 'list'" in result["result_text"]
-    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in result["result_text"]
-    assert "value=string" in result["result_text"]
-    assert _PARAMETER_RECHECK_GUIDANCE not in result["result_text"]
-    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="broken_validation_tool") not in result["result_text"]
     assert [item[1] for item in progress_calls] == ["tool_error"]
-
+    assert "Error validating broken_validation_tool" in result_text
+    assert "unhashable type: 'list'" in result_text
+    assert _PARAMETER_CONTRACT_GUIDANCE_PREFIX in result_text
+    assert "value=string" in result_text
+    assert _PARAMETER_RECHECK_GUIDANCE not in result_text
+    assert _PARAMETER_GUIDANCE_TEMPLATE.format(tool_name="broken_validation_tool") not in result_text
 
 @pytest.mark.asyncio
 async def test_create_agent_runner_passes_thread_id_and_context_with_minimal_initial_state(monkeypatch) -> None:
@@ -4339,7 +4296,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
     monkeypatch.setattr(runner, "_resolve_ceo_model_refs", lambda: ["openai_codex:gpt-test"])
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -4556,7 +4513,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
             for name in list(tool_names or [])
         ],
     )
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(
         runner,
@@ -4760,7 +4717,7 @@ async def test_prepare_turn_promotes_uploaded_image_only_into_live_request_when_
     preflight = runner._frontdoor_send_preflight_snapshot(
         state=prepared,
         runtime=runtime,
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     assert prepared["frontdoor_request_body_messages"][-1]["content"] == multimodal_text
@@ -4888,7 +4845,7 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
     preflight = runner._frontdoor_send_preflight_snapshot(
         state=prepared,
         runtime=runtime,
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     assert prepared["frontdoor_request_body_messages"][-1]["content"] == merged_text
@@ -5106,7 +5063,7 @@ def test_frontdoor_send_preflight_snapshot_adds_content_open_image_overlay_only_
     snapshot = runner._frontdoor_send_preflight_snapshot(
         state=state,
         runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     live_blocks = [
@@ -5195,7 +5152,7 @@ def test_frontdoor_send_preflight_snapshot_content_open_image_overlay_anchors_ac
     snapshot = runner._frontdoor_send_preflight_snapshot(
         state=state,
         runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     live_blocks = [
@@ -5261,7 +5218,7 @@ def test_frontdoor_send_preflight_snapshot_rejects_content_open_image_overlay_wi
         runner._frontdoor_send_preflight_snapshot(
             state=state,
             runtime=SimpleNamespace(context=SimpleNamespace(session=None, session_key="web:shared")),
-            langchain_tools=[],
+            tool_schemas=[],
         )
 
 
@@ -5597,7 +5554,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         },
         raising=False,
     )
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     monkeypatch.setattr(
         runner,
@@ -6971,17 +6928,11 @@ def test_create_agent_prompt_contract_keeps_request_body_prefix_before_same_turn
 
 
 
-@pytest.mark.asyncio
 async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_object_arguments() -> None:
     tool = _MemoryWriteLikeTool()
-    captured: dict[str, object] = {}
 
-    async def _executor(_tool_name: str, arguments: dict[str, object]) -> dict[str, object]:
-        captured["arguments"] = arguments
-        return {"result_text": "ok", "status": "success"}
-
-    langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
-    await langchain_tool.ainvoke(
+    normalized_arguments = ceo_runtime_ops._normalize_frontdoor_tool_arguments(
+        "memory_write",
         {
             "facts": [
                 {
@@ -6994,15 +6945,8 @@ async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_
                     "source_excerpt": "remember this preference",
                 }
             ]
-        }
+        },
     )
-
-    class _RuntimeToolStack:
-        def push_runtime_context(self, _context):
-            return "token"
-
-        def pop_runtime_context(self, _token):
-            return None
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
@@ -7015,7 +6959,7 @@ async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_
     result_text, status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
         tool=tool,
         tool_name="memory_write",
-        arguments=dict(captured["arguments"] or {}),
+        arguments=dict(normalized_arguments or {}),
         runtime_context={},
         on_progress=None,
     )
@@ -7024,8 +6968,6 @@ async def test_create_agent_frontdoor_execute_tool_call_normalizes_nested_array_
     assert status == "success"
     assert payload["facts"][0]["attribute"] == "default_document_save_location"
 
-
-@pytest.mark.asyncio
 async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nested_fields() -> None:
     class _FakeMemoryManager:
         async def enqueue_write_request(self, **kwargs):
@@ -7037,26 +6979,11 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
                 "trigger_source": kwargs.get("trigger_source"),
             }
 
-    captured: dict[str, object] = {}
-
-    async def _executor(_tool_name: str, arguments: dict[str, object]) -> dict[str, object]:
-        captured["arguments"] = arguments
-        return {"result_text": "ok", "status": "success"}
-
     tool = MemoryWriteTool(manager=_FakeMemoryManager())
-    langchain_tool = ceo_runtime_ops._build_langchain_tool(tool, _executor)
-    await langchain_tool.ainvoke(
-        {
-            "content": "remember this preference",
-        }
+    normalized_arguments = ceo_runtime_ops._normalize_frontdoor_tool_arguments(
+        "memory_write",
+        {"content": "remember this preference"},
     )
-
-    class _RuntimeToolStack:
-        def push_runtime_context(self, _context):
-            return "token"
-
-        def pop_runtime_context(self, _token):
-            return None
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(
         loop=SimpleNamespace(
@@ -7069,7 +6996,7 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
     result_text, status, _started_at, _finished_at, _elapsed_seconds = await runner._execute_tool_call(
         tool=tool,
         tool_name="memory_write",
-        arguments=dict(captured["arguments"] or {}),
+        arguments=dict(normalized_arguments or {}),
         runtime_context={"session_key": "web:shared"},
         on_progress=None,
     )
@@ -7081,7 +7008,6 @@ async def test_create_agent_frontdoor_execute_tool_call_omits_unset_optional_nes
     assert payload["decision_source"] == "user"
     assert payload["payload_text"] == "remember this preference"
     assert payload["trigger_source"] == "memory_write_tool"
-
 
 @pytest.mark.asyncio
 async def test_create_agent_frontdoor_execute_tool_call_appends_loader_guidance_for_parameter_like_execute_errors() -> None:
@@ -7168,7 +7094,7 @@ async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=loop)
     seen_model_refs: list[list[str]] = []
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_frontdoor_prompt_contract",
@@ -7260,7 +7186,7 @@ async def test_graph_call_model_stops_retrying_provider_chain_exhaustion_after_l
         await real_sleep(0)
 
     monkeypatch.setattr(ceo_runtime_ops.asyncio, "sleep", _fake_sleep)
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_frontdoor_prompt_contract",

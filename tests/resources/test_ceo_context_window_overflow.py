@@ -43,7 +43,7 @@ async def test_graph_call_model_attempts_token_compression_before_context_window
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     compression_attempted = False
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -115,7 +115,7 @@ async def test_graph_call_model_surfaces_resolution_error_when_context_window_is
 ) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -204,7 +204,7 @@ def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
 ) -> None:
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -252,7 +252,7 @@ def test_frontdoor_send_preflight_snapshot_uses_provider_request_preview_tokens(
             "dynamic_appendix_messages": [],
         },
         runtime=runtime,
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     assert preflight["trigger_tokens"] == 20_000
@@ -398,7 +398,7 @@ def test_frontdoor_preflight_prefers_effective_input_tokens_plus_delta_when_prev
             "dynamic_appendix_messages": [],
         },
         runtime=runtime,
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     assert preflight["estimated_total_tokens"] == 22113
@@ -577,7 +577,7 @@ def test_stage_eviction_hop_subtracts_compacted_body_from_usage_anchor(
             "frontdoor_stage_state": stage_state,
         },
         runtime=runtime,
-        langchain_tools=[],
+        tool_schemas=[],
     )
 
     shrink = int(preflight["anchor_projection_shrink_tokens"])
@@ -622,7 +622,7 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     captured_calls: list[list[dict[str, object]]] = []
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -721,7 +721,7 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     persisted_calls: list[dict[str, object]] = []
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -841,7 +841,7 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     captured_calls: list[list[dict[str, object]]] = []
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
@@ -965,7 +965,7 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     captured_calls: list[list[dict[str, object]]] = []
 
-    monkeypatch.setattr(runner, "_build_langchain_tools_for_state", lambda **_: [])
+    monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
         runner,
         "_resolve_frontdoor_send_model_context_window",
