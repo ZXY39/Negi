@@ -33,7 +33,6 @@ G3KU 的工具/技能体系分成几层，而不是一次性把所有东西注�
 
 - 工具注册与动态替换
 - 参数校验
-- 转换成 LangChain `StructuredTool`
 - 注入 runtime context
 - 接入 tool watchdog 和资源管理器
 

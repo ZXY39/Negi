@@ -34,7 +34,7 @@ _UNRECOGNIZED_KEYS_SUFFIX = '；它们不会进入该工具，请改用上方契
 _UNRECOGNIZED_KEYS_MAX = 5
 # 提交里一个参数都没有时，"缺全部必填字段"有两种可能：模型真发了空对象，或参数
 # JSON 在解析处失败被静默降级成 {}（`_normalize_tool_call_arguments` 与
-# `base_chat_model_adapter` 都这么做）。两者无法从结果区分，所以把第二种可能明说，
+# 前门的 `_model_response_payload_dict` 都这么做）。两者无法从结果区分，所以把第二种可能明说，
 # 别让模型逐字段去补一个根本没收到的参数串。
 _EMPTY_SUBMISSION_NOTE = (
     '本次调用未携带任何参数：如果你确实写了参数内容，说明参数 JSON 没有被成功解析，'
