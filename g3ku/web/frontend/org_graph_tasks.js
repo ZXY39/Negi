@@ -1948,6 +1948,12 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
         // 思考 token 为 null 表示 provider 未上报（旧记录 / 非流式 / 不回传
         // reasoning_tokens），显示 "--" 而不是 0；耗时两列的 null 由 formatDurationMs 兜底。
         const thinkingText = item.thinking_tokens === null ? "--" : formatTokenCount(item.thinking_tokens);
+        // 上游中途关掉 SSE 的那一跳根本不会回 usage 块：那三个 0 是"没拿到数"，不是
+        // "这次没花钱"（请求体照发，实测单跳 ~5.3 万 token）。按同一套 null 约定显示 "--"。
+        const abortedStream = !!item.stream_incomplete;
+        const abortedTitle = "上游未回终止分片，这一跳没有 usage 回执";
+        const inputText = abortedStream ? "--" : formatTokenCount(item.delta_usage.input_tokens);
+        const cacheText = abortedStream ? "--" : formatTokenCount(item.delta_usage.cache_hit_tokens);
         return `
             <tr>
                 <td data-task-call-index>${esc(formatTokenCount(item.call_index))}</td>
@@ -1955,8 +1961,8 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
                 <td class="task-token-call-node-id" title="${esc(item.node_id)}">${esc(item.node_id || "--")}</td>
                 <td class="task-token-call-kind" title="${esc(String(item.call_kind || "").trim() || "普通回合")}">${esc(taskModelCallKindLabel(item))}</td>
                 <td>${esc(formatTokenCount(item.prepared_message_chars))}</td>
-                <td>${esc(formatTokenCount(item.delta_usage.input_tokens))}</td>
-                <td>${esc(formatTokenCount(item.delta_usage.cache_hit_tokens))}</td>
+                <td class="task-token-call-token" title="${esc(abortedStream ? abortedTitle : `${formatTokenCount(item.delta_usage.input_tokens)} 新增输入 token`)}">${esc(inputText)}</td>
+                <td class="task-token-call-token" title="${esc(abortedStream ? abortedTitle : `${formatTokenCount(item.delta_usage.cache_hit_tokens)} 缓存命中 token`)}">${esc(cacheText)}</td>
                 <td>${esc((modelCallHitRate(item) * 100).toFixed(1))}%</td>
                 <td class="task-token-call-thinking" title="${esc(item.thinking_tokens === null ? "provider 未上报思考 token" : `${formatTokenCount(item.thinking_tokens)} 思考 token`)}">${esc(thinkingText)}</td>
                 <td>${esc(formatTokenCount(item.response_tool_call_count))}</td>

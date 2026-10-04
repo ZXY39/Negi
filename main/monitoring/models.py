@@ -354,6 +354,10 @@ class TaskModelCallRecord(Model):
     duration_ms: int | None = None
     first_token_ms: int | None = None
     thinking_tokens: int | None = None
+    # 上游在没有任何分片带 finish_reason 的情况下关闭了这条流（长思考被掐断是主因）。
+    # 这类回包不会回 usage 块，所以三个 token 口径全是 0——没有这个标志，前端只能把
+    # 它渲染成一个像"这次没花钱"的真 0，事后也分不出断流与内部 429 重试。
+    stream_incomplete: bool = False
 
 
 class TaskProjectionRoundRecord(Model):

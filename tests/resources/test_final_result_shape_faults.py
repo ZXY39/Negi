@@ -83,6 +83,7 @@ class _FakeLogService:
         self._content_store = None
         self._frames: dict[tuple[str, str], dict[str, object]] = {}
         self.error_logs: list[dict[str, str]] = []
+        self.output_calls: list[dict[str, object]] = []
 
     def upsert_frame(self, task_id: str, payload: dict[str, object], publish_snapshot: bool = True) -> None:
         _ = publish_snapshot
@@ -90,7 +91,8 @@ class _FakeLogService:
         self._frames[(str(task_id), node_id)] = dict(payload or {})
 
     def append_node_output(self, *args, **kwargs) -> None:
-        _ = args, kwargs
+        _ = args
+        self.output_calls.append(dict(kwargs))
 
     def update_frame(self, task_id: str, node_id: str, mutate, publish_snapshot: bool = True) -> None:
         _ = publish_snapshot
@@ -139,7 +141,7 @@ def _good_final_arguments() -> dict[str, object]:
     }
 
 
-async def _run_final_result_loop(*, responses, node_kind, task_id, node_id, max_iterations):
+async def _run_final_result_loop(*, responses, node_kind, task_id, node_id, max_iterations, configure=None):
     requests: list[dict[str, object]] = []
     queue = list(responses)
 
@@ -150,6 +152,8 @@ async def _run_final_result_loop(*, responses, node_kind, task_id, node_id, max_
 
     logs = _FakeLogService()
     loop = ReActToolLoop(chat_backend=_Backend(), log_service=logs, max_iterations=max_iterations)
+    if configure is not None:
+        configure(loop)
     result = await loop.run(
         task=SimpleNamespace(task_id=task_id),
         node=SimpleNamespace(node_id=node_id, depth=0, node_kind=node_kind, goal="demo"),
@@ -711,3 +715,243 @@ async def test_different_violation_on_repeat_is_not_folded() -> None:
 
     third = json.dumps(requests[2].get('messages') or [], ensure_ascii=False)
     assert 'repeated_submission_folded' not in third
+
+
+# ---------------------------------------------------------------------------
+# 上游中途关掉 SSE 的那一跳：它既不是模型的交付违约，也不该在 Token 统计里
+# 长得像"这次没花钱"。实盘 2026-10-04 单日 15 条这种回包（全部落在
+# deepseek-v4-flash-4），逐次调用表里输入/缓存/命中全记 0，而请求体实际发了
+# ~5.3 万 token；其中 node:d6cfe60d2a20 的 3 连断流被纯文本道记满 3 次记分，
+# 节点被错误暂停——那 3 条的日志逐条写着 finish_reason_seen=0。
+# ---------------------------------------------------------------------------
+
+
+def _no_delay(loop) -> None:
+    loop._empty_response_retry_delay_seconds = lambda attempt_count: 0.0
+
+
+def _aborted_reply(*, content: str = "", reasoning: str = "先把三个来源逐条核一遍") -> LLMResponse:
+    """provider 自证的断流形状：没有任何分片带 finish_reason。"""
+    return LLMResponse(
+        content=content,
+        tool_calls=[],
+        finish_reason="stop",
+        usage={},
+        reasoning_content=reasoning,
+        stream_incomplete=True,
+    )
+
+
+def _terminated_reasoning_only_reply(*, output_tokens: int = 203) -> LLMResponse:
+    """流是正常结束的，只是思考把输出配额吃光（实盘 sensenova 那 8 条）。"""
+    return LLMResponse(
+        content="",
+        tool_calls=[],
+        finish_reason="length",
+        usage={"input_tokens": 821, "output_tokens": output_tokens, "cache_hit_tokens": 261120},
+        reasoning_content="整段思考占满了输出预算",
+    )
+
+
+# 长度对齐实盘同日 6 条真纯文本回复（95–1361 字符），断流漏出的半截最长只有 39 字符。
+_SUBSTANTIAL_PROSE = (
+    "核验结果充分，可以裁定。关键实测证据：文件真实存在，逐字摘录了三个来源的段落，"
+    "并且每条 URL 都返回 HTTP 200，标题与正文都对得上；因此本阶段判定为通过。"
+    "补充一点：第二个来源的口径与官方 PDF 一致，差异只在四舍五入。"
+)
+
+
+@pytest.mark.asyncio
+async def test_react_loop_replays_unterminated_stream_reply_without_charging_the_node() -> None:
+    result, requests, logs = await _run_final_result_loop(
+        responses=[
+            _aborted_reply(),
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:after-abort", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            ),
+        ],
+        node_kind="execution",
+        task_id="task-abort-replay",
+        node_id="node-abort-replay",
+        max_iterations=2,
+        configure=_no_delay,
+    )
+
+    assert len(requests) == 2
+    assert result.status == "success"
+    # 断流那一跳不该留下任何"节点没交付"的记录。
+    assert logs.error_logs == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_persistent_stream_abort_ends_as_provider_failure() -> None:
+    result, requests, logs = await _run_final_result_loop(
+        responses=[_aborted_reply(), _aborted_reply(), _aborted_reply(), _aborted_reply()],
+        node_kind="execution",
+        task_id="task-abort-exhausted",
+        node_id="node-abort-exhausted",
+        max_iterations=2,
+        configure=_no_delay,
+    )
+
+    # 走提供侧重放预算（3 次），而不是把节点的 5 次交付预算烧穿。
+    assert len(requests) == 3
+    assert result.status == "failed"
+    assert result.delivery_status == "blocked"
+    assert result.summary == "model stream aborted replay limit reached"
+    assert "closed before finish_reason" in result.blocking_reason
+    assert logs.error_logs == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_replays_aborted_stream_that_leaked_a_fragment() -> None:
+    # 实盘 05:12:11 / 05:23:20 两条：'预算 14/'（6 字符）与那句 39 字符的
+    # "……关键突破口：" ——都是流被掐断前漏出的半截，后者连记满 3 次把节点打进了暂停。
+    result, requests, logs = await _run_final_result_loop(
+        responses=[
+            _aborted_reply(content="hk01 正文不含人民币 2.73%/第六，不可用作条目11来源。关键突破口："),
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:after-fragment", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            ),
+        ],
+        node_kind="execution",
+        task_id="task-abort-fragment",
+        node_id="node-abort-fragment",
+        max_iterations=2,
+        configure=_no_delay,
+    )
+
+    assert len(requests) == 2
+    assert result.status == "success"
+    assert logs.error_logs == []
+
+
+@pytest.mark.asyncio
+async def test_react_loop_does_not_replay_aborted_stream_with_substantial_text() -> None:
+    substantial = _SUBSTANTIAL_PROSE
+    assert len(substantial.strip()) > 64
+
+    result, _requests, logs = await _run_final_result_loop(
+        responses=[
+            _aborted_reply(content=substantial),
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:after-prose", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            ),
+        ],
+        node_kind="execution",
+        task_id="task-abort-with-text",
+        node_id="node-abort-with-text",
+        max_iterations=2,
+        configure=_no_delay,
+    )
+
+    # 谓词必须挂在"这一跳没有有效交付"上：正文够长的回包仍归交付车道判，
+    # 不许被提供侧重放吞掉（同日 6 条真纯文本回复长度 95–1361 字符）。
+    assert result.summary != "model stream aborted replay limit reached"
+    assert "closed before finish_reason" not in str(getattr(result, "blocking_reason", "") or "")
+    assert all("closed before finish_reason" not in row["error_text"] for row in logs.error_logs)
+
+
+@pytest.mark.asyncio
+async def test_react_loop_keeps_terminated_reasoning_only_reply_in_shape_lane() -> None:
+    result, requests, logs = await _run_final_result_loop(
+        responses=[
+            _terminated_reasoning_only_reply(),
+            _terminated_reasoning_only_reply(),
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:after-shape", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            ),
+        ],
+        node_kind="execution",
+        task_id="task-terminated-reasoning-only",
+        node_id="node-terminated-reasoning-only",
+        max_iterations=4,
+        configure=_no_delay,
+    )
+
+    # 今天实盘那 8 条 sensenova（out==think、finish_reason=length、流完整终止）
+    # 仍归形态故障车道：预算不变，也不该伪装成上游断流。
+    assert len(requests) == 3
+    assert result.status == "success"
+    assert len(logs.error_logs) == 2
+    assert "reasoning-only" in logs.error_logs[0]["error_text"]
+
+
+@pytest.mark.asyncio
+async def test_react_loop_forwards_stream_incomplete_flag_to_the_model_call_ledger() -> None:
+    # 用一条正文够长、仍归交付车道判的断流：那一跳会落账本，标志必须跟着落。
+    _result, _requests, logs = await _run_final_result_loop(
+        responses=[
+            _aborted_reply(content=_SUBSTANTIAL_PROSE),
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:ledger-flag", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            ),
+        ],
+        node_kind="execution",
+        task_id="task-ledger-flag",
+        node_id="node-ledger-flag",
+        max_iterations=2,
+        configure=_no_delay,
+    )
+
+    assert logs.output_calls
+    assert bool(logs.output_calls[0].get("stream_incomplete")) is True
+
+    _clean, _clean_requests, clean_logs = await _run_final_result_loop(
+        responses=[
+            LLMResponse(
+                content="",
+                tool_calls=[_final_call("call:ledger-clean", _good_final_arguments())],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 4},
+            )
+        ],
+        node_kind="execution",
+        task_id="task-ledger-clean",
+        node_id="node-ledger-clean",
+        max_iterations=1,
+    )
+    assert clean_logs.output_calls
+    assert bool(clean_logs.output_calls[0].get("stream_incomplete")) is False
+
+
+def test_model_call_payload_and_record_carry_stream_incomplete() -> None:
+    from main.monitoring.log_service import TaskLogService
+    from main.monitoring.models import TaskModelCallRecord, TokenUsageSummary
+
+    usage = TokenUsageSummary.model_validate(
+        {"input_tokens": 0, "output_tokens": 0, "cache_hit_tokens": 0, "call_count": 1, "calls_without_usage": 1}
+    )
+    payload = TaskLogService._model_call_payload(
+        task_id="task-x",
+        node_id="node-x",
+        call_index=1,
+        model_messages=[{"role": "user", "content": "hi"}],
+        request_messages=[{"role": "user", "content": "hi"}],
+        prompt_cache_key=None,
+        tool_calls=[],
+        delta_usage=usage,
+        delta_usage_by_model=[],
+        request_message_count=1,
+        request_message_chars=2,
+        stream_incomplete=True,
+    )
+    assert payload["stream_incomplete"] is True
+    assert TaskModelCallRecord.model_validate(payload).stream_incomplete is True
+    # 旧行没这个键：读侧按 False 处理，不能把历史 0 一律改判成断流。
+    assert TaskModelCallRecord.model_validate({"call_index": 1}).stream_incomplete is False

@@ -1638,6 +1638,7 @@ class TaskQueryService:
                     duration_ms=_optional_int(payload.get('duration_ms')),
                     first_token_ms=_optional_int(payload.get('first_token_ms')),
                     thinking_tokens=_optional_int(payload.get('thinking_tokens')),
+                    stream_incomplete=bool(payload.get('stream_incomplete') or False),
                 )
             )
         return records[-rows:]

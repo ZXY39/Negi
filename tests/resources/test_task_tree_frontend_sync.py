@@ -6705,3 +6705,110 @@ def test_distribution_progress_denominator_excludes_terminal_blocked_nodes() -> 
     # 树状态未知时退回快照口径，不猜
     assert result["noTree"]["blockedCount"] == 2
     assert result["noTree"]["frozenCount"] == 2
+
+
+def test_render_task_token_stats_marks_aborted_stream_rows_as_no_usage() -> None:
+    result = _run_node_script(
+        """
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = global;
+        global.esc = (v) => String(v ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+        const usage = (input, cache) => ({
+          tracked: true,
+          input_tokens: input,
+          output_tokens: 0,
+          cache_hit_tokens: cache,
+          call_count: 1,
+          calls_with_usage: input || cache ? 1 : 0,
+          calls_without_usage: input || cache ? 0 : 1,
+          is_partial: !(input || cache),
+        });
+        global.S = {
+          currentTask: {
+            token_usage: {
+              tracked: true,
+              input_tokens: 4200,
+              output_tokens: 900,
+              cache_hit_tokens: 3300,
+              call_count: 2,
+              calls_with_usage: 1,
+              calls_without_usage: 1,
+              is_partial: true,
+            },
+          },
+          taskSummary: { token_usage_by_model: [] },
+          recentModelCalls: [
+            {
+              call_index: 2,
+              node_id: "node:aborted",
+              created_at: new Date(Date.UTC(2026, 9, 4, 5, 23, 20)).toISOString(),
+              prepared_message_count: 41,
+              prepared_message_chars: 143113,
+              response_tool_call_count: 0,
+              duration_ms: 37773,
+              first_token_ms: null,
+              thinking_tokens: null,
+              stream_incomplete: true,
+              delta_usage: usage(0, 0),
+              delta_usage_by_model: [{ model_key: "deepseek-v4-flash-4" }],
+            },
+            {
+              call_index: 1,
+              node_id: "node:normal",
+              created_at: new Date(Date.UTC(2026, 9, 4, 5, 22, 3)).toISOString(),
+              prepared_message_count: 40,
+              prepared_message_chars: 140000,
+              response_tool_call_count: 1,
+              duration_ms: 41990,
+              first_token_ms: 300,
+              thinking_tokens: 2811,
+              stream_incomplete: false,
+              delta_usage: usage(4200, 3300),
+              delta_usage_by_model: [{ model_key: "deepseek-v4-flash-4" }],
+            },
+          ],
+          taskModelCallPage: 1,
+          taskModelCallsPage: 1,
+          taskModelCallsPageSize: 100,
+          taskModelCallsQuery: "",
+        };
+        global.U = {
+          taskTokenContent: { innerHTML: "" },
+          taskTokenSummaryText: { textContent: "" },
+          taskTokenButton: { title: "" },
+        };
+
+        const appCode = fs.readFileSync("g3ku/web/frontend/org_graph_app.js", "utf8");
+        vm.runInThisContext(appCode.slice(appCode.indexOf("const EMPTY_TOKEN_USAGE"), appCode.indexOf("function ensureTaskTokenUi")));
+        global.S.modelCatalog = global.S.modelCatalog || { catalog: [] };
+        vm.runInThisContext(appCode.slice(appCode.indexOf("function ceoModelDisplayTitle"), appCode.indexOf("function ceoCurrentUsageEstimate")));
+
+        const tasksCode = fs.readFileSync("g3ku/web/frontend/org_graph_tasks.js", "utf8");
+        vm.runInThisContext(tasksCode.slice(tasksCode.indexOf("function taskModelDisplayName"), tasksCode.indexOf("async function loadTaskDetail")));
+
+        renderTaskTokenStats();
+        const html = U.taskTokenContent.innerHTML;
+        const tableBody = html.match(/<tbody>([\\s\\S]*?)<\\/tbody>/)?.[1] || "";
+        const rows = tableBody.split("<tr>").slice(1);
+        const abortedRow = rows.find((row) => row.includes("node:aborted")) || "";
+        const normalRow = rows.find((row) => row.includes("node:normal")) || "";
+
+        console.log(JSON.stringify({
+          abortedInputCellDashed: /<td class="task-token-call-token"[^>]*>--<\\/td>/.test(abortedRow),
+          abortedCellCarriesReason: abortedRow.includes("上游未回终止分片"),
+          normalRowStillNumbers: normalRow.includes("4,200") && normalRow.includes("3,300"),
+          normalHasNoAbortReason: !normalRow.includes("上游未回终止分片"),
+        }));
+        """
+    )
+
+    assert result["abortedInputCellDashed"] is True
+    assert result["abortedCellCarriesReason"] is True
+    assert result["normalRowStillNumbers"] is True
+    assert result["normalHasNoAbortReason"] is True

@@ -1195,6 +1195,7 @@ class TaskLogService:
         provider_request_meta: dict[str, Any] | None = None,
         provider_request_body: dict[str, Any] | None = None,
         token_preflight_diagnostics: dict[str, Any] | None = None,
+        stream_incomplete: bool = False,
     ) -> NodeRecord | None:
         with self._task_lock(task_id):
             current = self._store.get_node(node_id)
@@ -1399,6 +1400,7 @@ class TaskLogService:
                         request_seed_message_count=request_seed_message_count,
                         observed_input_truth=observed_input_truth,
                         usage_attempts=usage_attempts,
+                        stream_incomplete=stream_incomplete,
                     )
                     self._event_writer.append_task_model_call(
                         task_id=task_id,
@@ -2462,6 +2464,7 @@ class TaskLogService:
         actual_request_ref: str = '',
         observed_input_truth: dict[str, Any] | None = None,
         usage_attempts: list[Any] | None = None,
+        stream_incomplete: bool = False,
     ) -> dict[str, Any]:
         message_list = list(model_messages or [])
         request_list = list(request_messages or message_list)
@@ -2519,6 +2522,7 @@ class TaskLogService:
             ),
             'delta_usage': delta_usage.model_dump(mode='json'),
             'delta_usage_by_model': [item.model_dump(mode='json') for item in list(delta_usage_by_model or [])],
+            'stream_incomplete': bool(stream_incomplete),
             **TaskLogService._model_call_attempt_metrics(usage_attempts),
         }
 

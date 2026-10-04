@@ -13308,6 +13308,7 @@ function normalizeTaskModelCall(raw) {
         duration_ms: toOptionalInt(source.duration_ms),
         first_token_ms: toOptionalInt(source.first_token_ms),
         thinking_tokens: toOptionalInt(source.thinking_tokens),
+        stream_incomplete: !!source.stream_incomplete,
         delta_usage: normalizeTokenUsage(source.delta_usage),
         delta_usage_by_model: Array.isArray(source.delta_usage_by_model)
             ? source.delta_usage_by_model.map(normalizeModelTokenUsage)

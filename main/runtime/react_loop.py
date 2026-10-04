@@ -164,6 +164,10 @@ _PLAIN_TEXT_REPLY_STRIKE_LIMIT = 3
 _STAGE_ONLY_TRANSITION_LIMIT = 5
 _NODE_CONTRACT_ECHO_REPAIR_LIMIT = 2
 _PROVIDER_RETRY_LIMIT = 3
+# 上游断流漏出的半截正文按"没有可用交付"处理时容忍的长度上限。实盘 2026-10-04：
+# 15 条未终止流的正文 0–39 字符，同日 6 条正常终止的真纯文本回复 95–1361 字符，
+# 64 取在两堆实测的空档上（32 会漏掉那条 39 字符、真把节点打进暂停的回包）。
+_ABORT_LEAK_MAX_CONTENT_CHARS = 64
 _NODE_SEND_CONTEXT_WINDOW_HARD_MIN_TOKENS = 25000
 _NODE_TOKEN_COMPACT_MARKER = "[G3KU_TOKEN_COMPACT_V2]"
 _NODE_TOKEN_COMPACTION_RECENT_TAIL_COUNT = 12
@@ -925,7 +929,18 @@ class ReActToolLoop:
                         )
                         await asyncio.sleep(delay_seconds)
                         continue
-                    if self._is_empty_model_response(response):
+                    unterminated_reply = self._is_unterminated_stream_reply(response)
+                    if self._is_empty_model_response(response) or unterminated_reply:
+                        retry_subject = (
+                            'Model stream closed before finish_reason with no tool call and no usable text'
+                            if unterminated_reply
+                            else 'Model returned an empty response with no text and no tool calls'
+                        )
+                        retry_exhausted_subject = (
+                            'Model streams closed before finish_reason with no tool call and no usable text'
+                            if unterminated_reply
+                            else 'Model returned consecutive empty responses with no text and no tool calls'
+                        )
                         if self._refresh_runtime_config_for_retry_invalidation():
                             self._log_service.update_frame(
                                 task.task_id,
@@ -939,6 +954,12 @@ class ReActToolLoop:
                             restart_with_refreshed_runtime = True
                             break
                         empty_response_retry_count += 1
+                        if unterminated_reply:
+                            self._emit_stream_abort_replay_audit(
+                                task_id=task.task_id,
+                                node_id=node.node_id,
+                                attempt_count=empty_response_retry_count,
+                            )
                         if empty_response_retry_count >= _PROVIDER_RETRY_LIMIT:
                             self._log_service.update_frame(
                                 task.task_id,
@@ -946,7 +967,7 @@ class ReActToolLoop:
                                 lambda frame: {
                                     **frame,
                                     'last_error': (
-                                        'Model returned an empty response with no text and no tool calls. '
+                                        f'{retry_exhausted_subject}. '
                                         f'Automatic retries exhausted after {empty_response_retry_count} attempts.'
                                     ),
                                 },
@@ -955,12 +976,16 @@ class ReActToolLoop:
                             return NodeFinalResult(
                                 status='failed',
                                 delivery_status='blocked',
-                                summary='empty model response retry limit reached',
+                                summary=(
+                                    'model stream aborted replay limit reached'
+                                    if unterminated_reply
+                                    else 'empty model response retry limit reached'
+                                ),
                                 answer='',
                                 evidence=[],
                                 remaining_work=[],
                                 blocking_reason=(
-                                    'Model returned consecutive empty responses with no text and no tool calls. '
+                                    f'{retry_exhausted_subject}. '
                                     f'Automatic retries exhausted after {empty_response_retry_count} attempts.'
                                 ),
                             )
@@ -971,7 +996,7 @@ class ReActToolLoop:
                             lambda frame: {
                                 **frame,
                                 'last_error': (
-                                    'Model returned an empty response with no text and no tool calls. '
+                                    f'{retry_subject}. '
                                     f'Retrying automatically in {delay_seconds:.1f}s '
                                     f'(attempt {empty_response_retry_count}).'
                                 ),
@@ -1075,6 +1100,7 @@ class ReActToolLoop:
                 request_seed_message_count=int(request_seed_message_count or 0),
                 provider_request_meta=getattr(response, 'provider_request_meta', None),
                 provider_request_body=getattr(response, 'provider_request_body', None),
+                stream_incomplete=bool(getattr(response, 'stream_incomplete', False)),
             )
             if response_tool_calls:
                 if xml_repair_attempt_count > 0:
@@ -2513,6 +2539,32 @@ class ReActToolLoop:
                     'node_id': str(node_id or ''),
                     'node_kind': str(node_kind or ''),
                     'repairs': dict(sorted(counts.items())),
+                },
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _emit_stream_abort_replay_audit(*, task_id: str, node_id: str, attempt_count: int) -> None:
+        """断流重放有自己的落点：一条计数事件，不把证据留在会被删的帧上。
+
+        断流那一跳不进逐次调用账本（重放道在 `append_node_output` 之前 `continue`），
+        所以改道之后 Token 统计里的 0 会一起消失——那是对的（那一跳本来没有 usage 可记），
+        但"少了几条 0"不能等于"看不出上游断过"：次数、节点、第几次重放都落在这里。
+        """
+        try:
+            from g3ku.audit_events import emit_audit_event
+
+            emit_audit_event(
+                'task',
+                'warning',
+                'node_model_stream_aborted',
+                f'上游流式回包未终止（无 finish_reason、零工具调用、正文为空或只剩残片），已按空响应重放：{node_id}（第 {int(attempt_count)} 次）',
+                detail={
+                    'task_id': str(task_id or ''),
+                    'node_id': str(node_id or ''),
+                    'attempt_count': int(attempt_count),
+                    'retry_limit': int(_PROVIDER_RETRY_LIMIT),
                 },
             )
         except Exception:
@@ -7404,6 +7456,27 @@ class ReActToolLoop:
         if isinstance(thinking_blocks, list) and thinking_blocks:
             return False
         return True
+
+    @staticmethod
+    def _is_unterminated_stream_reply(response: Any) -> bool:
+        """上游中途关掉 SSE、这一跳没交付任何有效东西的回包。
+
+        `_is_empty_model_response` 按设计把思考内容算作非空（加密思考项只有签发模型能解，
+        抹掉正文会让正常的一跳被误伤），所以"收到几千个 reasoning 分片后流被掐断"这种
+        回包不会被空响应重放道接住。判据挂在 provider 自己给的 `stream_incomplete`
+        （= 没有任何分片带 finish_reason）上：从不发终止分片的规范链路不会被卷进来。
+
+        允许一小段漏出的正文：实盘 2026-10-04 的 15 条断流正文长度 0–39 字符（'预算 14/'
+        这类半截片段），同日 6 条流完整终止的真纯文本回复长度 95–1361 字符。64 落在两堆
+        实测的空档里，既收全断流，也不碰交付车道该自己判的那一类。
+        """
+        if not bool(getattr(response, 'stream_incomplete', False)):
+            return False
+        if list(getattr(response, 'tool_calls', None) or []):
+            return False
+        if str(getattr(response, 'error_text', None) or '').strip():
+            return False
+        return len(str(getattr(response, 'content', None) or '').strip()) <= _ABORT_LEAK_MAX_CONTENT_CHARS
 
     @staticmethod
     def _repair_tool_choice(
