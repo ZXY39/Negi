@@ -553,40 +553,6 @@ def _mock_workspace(monkeypatch, workspace: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_keeps_background_running_tool_result_as_update() -> None:
-    heartbeat = _HeartbeatRecorder()
-    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None, web_session_heartbeat=heartbeat)
-    session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
-    events: list[AgentEvent] = []
-
-    async def _listener(event: AgentEvent) -> None:
-        events.append(event)
-
-    session.subscribe(_listener)
-    await session._handle_progress(
-        "skill-installer started",
-        event_kind="tool_start",
-        event_data={"tool_name": "skill-installer"},
-    )
-    await session._handle_progress(
-        json.dumps({"status": "background_running", "execution_id": "tool-exec:1"}, ensure_ascii=False),
-        event_kind="tool_result",
-        event_data={"tool_name": "skill-installer"},
-    )
-
-    tool_events = [event for event in events if event.type.startswith("tool_execution")]
-    assert [event.type for event in tool_events] == ["tool_execution_start", "tool_execution_update"]
-    assert tool_events[-1].payload["kind"] == "tool_background"
-    assert session.state.pending_tool_calls == {"skill-installer:1"}
-    assert heartbeat.calls == [
-        (
-            "web:shared",
-            {"status": "background_running", "execution_id": "tool-exec:1", "tool_name": "skill-installer"},
-        )
-    ]
-
-
-@pytest.mark.asyncio
 async def test_runtime_agent_session_exposes_latest_sidecar_tool_observation_in_reminder_snapshot() -> None:
     heartbeat = _HeartbeatRecorder()
     loop = SimpleNamespace(model="gpt-test", reasoning_effort=None, web_session_heartbeat=heartbeat)
@@ -622,9 +588,8 @@ async def test_runtime_agent_session_exposes_latest_sidecar_tool_observation_in_
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_merges_wait_tool_execution_back_into_original_tool_step() -> None:
-    heartbeat = _HeartbeatRecorder()
-    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None, web_session_heartbeat=heartbeat)
+async def test_runtime_agent_session_merges_control_tool_result_back_into_original_tool_step() -> None:
+    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
     events: list[AgentEvent] = []
 
@@ -638,55 +603,23 @@ async def test_runtime_agent_session_merges_wait_tool_execution_back_into_origin
         event_data={"tool_name": "skill-installer"},
     )
     await session._handle_progress(
-        json.dumps(
-            {
-                "status": "background_running",
-                "execution_id": "tool-exec:1",
-                "tool_name": "skill-installer",
-                "recommended_wait_seconds": 60,
-            },
-            ensure_ascii=False,
-        ),
-        event_kind="tool_result",
-        event_data={"tool_name": "skill-installer"},
-    )
-    await session._handle_progress(
-        "wait_tool_execution started",
+        "stop_tool_execution started",
         event_kind="tool_start",
-        event_data={"tool_name": "wait_tool_execution"},
+        event_data={"tool_name": "stop_tool_execution"},
     )
     await session._handle_progress(
-        json.dumps(
-            {
-                "status": "background_running",
-                "execution_id": "tool-exec:1",
-                "tool_name": "skill-installer",
-                "recommended_wait_seconds": 240,
-                "runtime_snapshot": {"summary_text": "still fetching remote repository"},
-            },
-            ensure_ascii=False,
-        ),
+        json.dumps({"status": "stopped", "tool_name": "skill-installer"}, ensure_ascii=False),
         event_kind="tool_result",
-        event_data={"tool_name": "wait_tool_execution"},
+        event_data={"tool_name": "stop_tool_execution"},
     )
 
     tool_events = [event for event in events if event.type.startswith("tool_execution")]
-    assert [event.type for event in tool_events] == [
-        "tool_execution_start",
-        "tool_execution_update",
-        "tool_execution_update",
-    ]
-    assert [event.payload["tool_name"] for event in tool_events] == [
-        "skill-installer",
-        "skill-installer",
-        "skill-installer",
-    ]
-    assert [event.payload["tool_call_id"] for event in tool_events] == [
-        "skill-installer:1",
-        "skill-installer:1",
-        "skill-installer:1",
-    ]
-    assert json.loads(tool_events[-1].payload["text"])["recommended_wait_seconds"] == 240
+    # 控制工具自己的 tool_start 不出帧，它的结果合回被停掉的那一步。
+    assert [event.type for event in tool_events] == ["tool_execution_start", "tool_execution_end"]
+    assert [event.payload["tool_name"] for event in tool_events] == ["skill-installer", "skill-installer"]
+    assert [event.payload["tool_call_id"] for event in tool_events] == ["skill-installer:1", "skill-installer:1"]
+    assert tool_events[-1].payload["is_error"] is True
+    assert session.state.pending_tool_calls == set()
 
 
 @pytest.mark.asyncio
@@ -807,7 +740,7 @@ async def test_runtime_agent_session_progress_resolution_precedence_prefers_tool
 
 
 @pytest.mark.asyncio
-async def test_runtime_agent_session_cancel_clears_pending_and_background_tool_indexes() -> None:
+async def test_runtime_agent_session_cancel_clears_pending_tool_call_indexes() -> None:
     async def _cancel_session_tasks(session_key: str) -> int:
         _ = session_key
         return 0
@@ -845,33 +778,22 @@ async def test_runtime_agent_session_cancel_clears_pending_and_background_tool_i
         "web_fetch-call-1",
         "web_fetch-call-2",
     ]
-    session._remember_background_tool_target(
-        execution_id="tool-exec:2",
-        tool_name="web_fetch",
-        tool_call_id="web_fetch-call-2",
+    resolved_tool_name, resolved_call_id = session._resolve_control_tool_target(
+        tool_name="stop_tool_execution",
+        payload={"tool_name": "web_fetch"},
     )
 
-    resolved_tool_name, resolved_call_id, resolved_execution_id = session._resolve_control_tool_target(
-        tool_name="wait_tool_execution",
-        payload={"execution_id": "tool-exec:2"},
-    )
-
-    assert (resolved_tool_name, resolved_call_id, resolved_execution_id) == (
-        "web_fetch",
-        "web_fetch-call-2",
-        "tool-exec:2",
-    )
+    assert (resolved_tool_name, resolved_call_id) == ("web_fetch", "web_fetch-call-1")
 
     await session.cancel()
 
     assert session.state.pending_tool_calls == set()
     assert session._pending_tool_call_names == {}
     assert session._pending_tool_name_calls == {}
-    assert session._background_tool_targets == {}
     assert session._resolve_control_tool_target(
-        tool_name="wait_tool_execution",
-        payload={"execution_id": "tool-exec:2"},
-    ) == ("wait_tool_execution", "", "tool-exec:2")
+        tool_name="stop_tool_execution",
+        payload={"tool_name": "web_fetch"},
+    ) == ("web_fetch", "")
 
 
 @pytest.mark.asyncio

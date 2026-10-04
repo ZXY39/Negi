@@ -919,7 +919,7 @@ def _session_fully_stable_for_history_edit(session: Any, turn_payload: dict[str,
     """编辑重发/Fork 按钮的防御型显示总开关。
 
     任何进行中请求/回合的迹象（用户轮、heartbeat/cron 内部轮、排队 follow-up、
-    待审批中断、blocking tool）都要求整体隐藏按钮；端点侧另有 409 复验。
+    待审批中断）都要求整体隐藏按钮；端点侧另有 409 复验。
     """
     state = getattr(session, "state", None)
     if bool(getattr(state, "is_running", False)):
@@ -932,13 +932,6 @@ def _session_fully_stable_for_history_edit(session: Any, turn_payload: dict[str,
         return False
     if list(getattr(state, "queued_follow_up_messages", []) or []):
         return False
-    blocking = getattr(session, "has_blocking_tool_execution", None)
-    if callable(blocking):
-        try:
-            if bool(blocking()):
-                return False
-        except Exception:
-            return False
     payload = turn_payload if isinstance(turn_payload, dict) else {}
     for lane in ("inflight_turn", "preserved_turn"):
         lane_payload = payload.get(lane)
@@ -1738,19 +1731,6 @@ async def ceo_websocket(websocket: WebSocket):
                 )
             )
             return
-        if bool(getattr(session, 'has_blocking_tool_execution', lambda: False)()):
-            await _safe_send(
-                build_envelope(
-                    channel='ceo',
-                    session_id=session_id,
-                    type='error',
-                    data={
-                        'code': 'ceo_blocked_by_running_tool',
-                        'message': '当前会话仍在等待长工具结束，暂不接收新的用户输入。',
-                    },
-                )
-            )
-            return
         try:
             service = get_external_turn_service()
         except Exception:
@@ -2135,19 +2115,6 @@ async def ceo_websocket(websocket: WebSocket):
                     preview_text=preview_text,
                     message_count=len(transcript_messages(persisted)),
                     is_running=True,
-                )
-                continue
-            if bool(getattr(session, "has_blocking_tool_execution", lambda: False)()):
-                await _safe_send(
-                    build_envelope(
-                        channel='ceo',
-                        session_id=session_id,
-                        type='error',
-                        data={
-                            'code': 'ceo_blocked_by_running_tool',
-                            'message': '当前会话仍在等待长工具结束，暂不接收新的用户输入。',
-                        },
-                    )
                 )
                 continue
             preview_text = _history_text(user_messages[-1].content)

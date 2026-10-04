@@ -63,9 +63,6 @@ class _RuntimeSessionStub:
         elif lock is not None:
             self._turn_lock = lock
 
-    def has_blocking_tool_execution(self) -> bool:
-        return False
-
     def apply_history_truncation_state(self, payload, *, removed_turn_ids=None):
         self.applied.append((payload, removed_turn_ids))
 

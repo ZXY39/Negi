@@ -96,10 +96,6 @@ def test_stability_gate_rejects_running_and_pending_lanes():
         stable, {"preserved_turn": {"turn_id": "p1"}}
     ) is False
 
-    blocking = _idle_session_stub()
-    blocking.has_blocking_tool_execution = lambda: True
-    assert websocket_ceo._session_fully_stable_for_history_edit(blocking, {}) is False
-
 
 def test_session_edit_fork_gates_channel_and_stability_short_circuit(tmp_path, monkeypatch):
     monkeypatch.setattr(wcs, "workspace_path", lambda: tmp_path)

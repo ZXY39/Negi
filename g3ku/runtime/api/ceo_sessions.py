@@ -585,14 +585,6 @@ def _assert_edit_fork_runtime_idle(runtime_session) -> None:
         raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
     if list(getattr(state, "pending_interrupts", []) or []):
         raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
-    blocking = getattr(runtime_session, "has_blocking_tool_execution", None)
-    if callable(blocking):
-        try:
-            in_progress = bool(blocking())
-        except Exception:
-            in_progress = True
-        if in_progress:
-            raise HTTPException(status_code=409, detail="ceo_turn_in_progress")
 
 
 @router.post("/ceo/sessions/{session_id}/truncate")

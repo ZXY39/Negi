@@ -181,7 +181,6 @@ class RuntimeAgentSession:
         self._event_log: list[dict] = []
         self._pending_tool_call_names: dict[str, str] = {}
         self._pending_tool_name_calls: dict[str, deque[str]] = {}
-        self._background_tool_targets: dict[str, dict[str, str]] = {}
         self._tool_seq: int = 0
         self._active_cancel_token: ToolCancellationToken | None = None
         self._latest_sidecar_tool_observation: dict[str, Any] = {}
@@ -2414,36 +2413,19 @@ class RuntimeAgentSession:
             tool_call_id, tool_name = next(iter(self._pending_tool_call_names.items()))
         return self._normalize_tool_name(tool_name), tool_call_id
 
-    def _remember_background_tool_target(self, *, execution_id: str, tool_name: str, tool_call_id: str) -> None:
-        key = str(execution_id or "").strip()
-        if not key:
-            return
-        self._background_tool_targets[key] = {
-            "tool_name": str(tool_name or "tool").strip() or "tool",
-            "tool_call_id": str(tool_call_id or "").strip(),
-        }
-
-    def _forget_background_tool_target(self, execution_id: str) -> None:
-        self._background_tool_targets.pop(str(execution_id or "").strip(), None)
-
     def _resolve_control_tool_target(
         self,
         *,
         tool_name: str,
         payload: dict[str, Any] | None = None,
-    ) -> tuple[str, str, str]:
-        execution_id = str((payload or {}).get("execution_id") or "").strip()
-        mapped = self._background_tool_targets.get(execution_id, {})
-        target_tool_name = str(mapped.get("tool_name") or "").strip()
-        target_tool_call_id = str(mapped.get("tool_call_id") or "").strip()
-        if not target_tool_name:
-            target_tool_name = str((payload or {}).get("tool_name") or "").strip()
-        if not target_tool_call_id and target_tool_name:
-            target_tool_call_id = self._peek_pending_tool_call_id(target_tool_name)
+    ) -> tuple[str, str]:
+        target_tool_name = str((payload or {}).get("tool_name") or "").strip()
+        target_tool_call_id = (
+            self._peek_pending_tool_call_id(target_tool_name) if target_tool_name else ""
+        )
         return (
             self._normalize_tool_name(target_tool_name or tool_name),
             target_tool_call_id,
-            execution_id,
         )
 
     def _build_execution_context_snapshot(
@@ -2626,12 +2608,6 @@ class RuntimeAgentSession:
             return
         self._preserved_inflight_turn = None
         self._sync_persisted_inflight_turn()
-
-    def has_blocking_tool_execution(self) -> bool:
-        return bool(self._background_tool_targets)
-
-    def clear_blocking_tool_execution(self, execution_id: str) -> None:
-        self._forget_background_tool_target(execution_id)
 
     @staticmethod
     def _parse_progress_payload(content: Any) -> dict[str, Any] | None:
@@ -2955,40 +2931,11 @@ class RuntimeAgentSession:
         if kind == "tool_result":
             payload = self._parse_progress_payload(content)
             payload_status = str((payload or {}).get("status") or "").strip().lower()
-            if payload_status == "background_running":
-                if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
-                    resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
-                        tool_name=tool_name,
-                        payload=payload,
-                    )
-                else:
-                    resolved_tool_name, call_id = self._resolve_progress_tool_target(data)
-                    execution_id = str((payload or {}).get("execution_id") or "").strip()
-                if execution_id:
-                    self._remember_background_tool_target(
-                        execution_id=execution_id,
-                        tool_name=resolved_tool_name,
-                        tool_call_id=call_id,
-                    )
-                self._enqueue_background_tool_heartbeat(payload=payload, tool_name=resolved_tool_name)
-                await self._emit(
-                    "tool_execution_update",
-                    kind="tool_background",
-                    tool_name=resolved_tool_name,
-                    tool_call_id=call_id,
-                    text=str(content or ""),
-                    source=source,
-                    data=data,
-                )
-                await self._emit_state_snapshot()
-                return
             if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
-                resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
+                resolved_tool_name, call_id = self._resolve_control_tool_target(
                     tool_name=tool_name,
                     payload=payload,
                 )
-                if execution_id and payload_status in {"completed", "stopped", "failed", "error", "not_found", "unavailable"}:
-                    self._forget_background_tool_target(execution_id)
                 if call_id:
                     self._state.pending_tool_calls.discard(call_id)
                 await self._emit(
@@ -3023,12 +2970,10 @@ class RuntimeAgentSession:
         if kind == "tool_error":
             if tool_name in _LEGACY_CONTROL_TOOL_NAMES:
                 payload = self._parse_progress_payload(content)
-                resolved_tool_name, call_id, execution_id = self._resolve_control_tool_target(
+                resolved_tool_name, call_id = self._resolve_control_tool_target(
                     tool_name=tool_name,
                     payload=payload,
                 )
-                if execution_id:
-                    self._forget_background_tool_target(execution_id)
                 if call_id:
                     self._state.pending_tool_calls.discard(call_id)
                 error = StructuredError(
@@ -3125,21 +3070,6 @@ class RuntimeAgentSession:
             data=data,
         )
 
-    def _enqueue_background_tool_heartbeat(self, *, payload: dict[str, Any] | None, tool_name: str) -> None:
-        heartbeat = getattr(self._loop, "web_session_heartbeat", None)
-        if heartbeat is None or not hasattr(heartbeat, "enqueue_tool_background"):
-            return
-        session_key = str(self._state.session_key or "").strip()
-        execution_id = str((payload or {}).get("execution_id") or "").strip()
-        if not session_key or not execution_id:
-            return
-        handoff_payload = dict(payload or {})
-        handoff_payload["tool_name"] = str(handoff_payload.get("tool_name") or tool_name or "tool").strip() or "tool"
-        try:
-            heartbeat.enqueue_tool_background(session_id=session_key, payload=handoff_payload)
-        except Exception:
-            logger.debug("Background tool heartbeat enqueue skipped for {}", session_key)
-
     async def _run_message(self, user_input: UserInputMessage) -> str:
         self._multi_agent_runner = getattr(self._loop, "multi_agent_runner", None)
         if self._multi_agent_runner is None:
@@ -3220,7 +3150,6 @@ class RuntimeAgentSession:
         self._state.pending_tool_calls.clear()
         self._pending_tool_call_names.clear()
         self._pending_tool_name_calls.clear()
-        self._background_tool_targets.clear()
         self._state.pending_interrupts = serialized_interrupts
         self._set_paused_execution_context(
             {
@@ -3384,7 +3313,6 @@ class RuntimeAgentSession:
             self._last_stop_reason = ""
             self._pending_tool_call_names.clear()
             self._pending_tool_name_calls.clear()
-            self._background_tool_targets.clear()
             if reset_frontdoor_turn_state:
                 # Fresh visible turns and internal heartbeat/cron turns each start from
                 # their own frontdoor runtime window.
@@ -4120,17 +4048,6 @@ class RuntimeAgentSession:
 
     async def pause(self, *, manual: bool = False) -> None:
         self._frontdoor_model_retry_status = None
-        if self._background_tool_targets:
-            manager = getattr(self._loop, "tool_execution_manager", None)
-            if manager is not None and hasattr(manager, "stop_execution"):
-                for execution_id in list(self._background_tool_targets.keys()):
-                    try:
-                        await manager.stop_execution(
-                            execution_id,
-                            reason="session_pause_requested",
-                        )
-                    except Exception:
-                        logger.debug("background tool stop skipped for {}", execution_id)
         self._state.paused = True
         self._state.is_running = False
         self._state.status = "paused"
@@ -4154,7 +4071,6 @@ class RuntimeAgentSession:
         self._state.pending_tool_calls.clear()
         self._pending_tool_call_names.clear()
         self._pending_tool_name_calls.clear()
-        self._background_tool_targets.clear()
         self._state.pending_interrupts = []
         self._preserved_inflight_turn = None
         if manual:
@@ -4229,7 +4145,6 @@ class RuntimeAgentSession:
             self._state.pending_tool_calls.clear()
             self._pending_tool_call_names.clear()
             self._pending_tool_name_calls.clear()
-            self._background_tool_targets.clear()
             self._state.pending_interrupts = []
             await self._emit("control_ack", action="resume_interrupt", accepted=True)
             await self._emit_state_snapshot()
@@ -4277,7 +4192,6 @@ class RuntimeAgentSession:
         self._state.pending_tool_calls.clear()
         self._pending_tool_call_names.clear()
         self._pending_tool_name_calls.clear()
-        self._background_tool_targets.clear()
         self._state.pending_interrupts = []
         await self._emit("control_ack", action="cancel", accepted=True, reason=reason)
         await self._emit_state_snapshot()
