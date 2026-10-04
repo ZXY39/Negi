@@ -5131,8 +5131,7 @@ textarea {
     height: 24px;
 }
 
-.ceo-context-usage-brain-layer > svg,
-.ceo-context-usage-brain-fill-inner > svg {
+.ceo-context-usage-brain-layer > svg {
     width: 24px;
     height: 24px;
     overflow: visible;
@@ -5163,24 +5162,20 @@ textarea {
     transition: height 260ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* 用量层是一汪水：整块实心色被脑的闭合轮廓裁成容器，液面就是这一层被
+   .ceo-context-usage-brain-fill 裁出来的那条平边。轮廓按 lucide brain 的外边界
+   接成一条闭合环，并靠 stroke-width 2 向外胀 1px，正好对齐基准层 2px 描边的外沿。
+   字形换版时这条 d 要跟着重接——胀过头水位会漏到描边外，缩进去则描边里挂一圈空白。 */
 .ceo-context-usage-brain-fill-inner {
-    display: inline-grid;
-    place-items: center;
     width: 24px;
     height: 24px;
     color: var(--ceo-context-usage-color);
+    background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M12%205%20A3%203%200%201%201%2017.598%206.5%20L17.997%205.125%20A4%204%200%200%201%2020.523%2010.895%20L20%2010.536%20A4%204%200%200%201%2018%2018%20L19.967%2017.483%20A4%204%200%201%201%2012%2018%20A4%204%200%201%201%204.033%2017.483%20L6%2018%20A4%204%200%200%201%204%2010.536%20L3.477%2010.895%20A4%204%200%200%201%206.003%205.125%20L6.402%206.5%20A3%203%200%201%201%2012%205%20Z'%20fill='white'%20stroke='white'%20stroke-width='2'%20stroke-linejoin='round'/%3E%3C/svg%3E") center bottom / 24px 24px no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M12%205%20A3%203%200%201%201%2017.598%206.5%20L17.997%205.125%20A4%204%200%200%201%2020.523%2010.895%20L20%2010.536%20A4%204%200%200%201%2018%2018%20L19.967%2017.483%20A4%204%200%201%201%2012%2018%20A4%204%200%201%201%204.033%2017.483%20L6%2018%20A4%204%200%200%201%204%2010.536%20L3.477%2010.895%20A4%204%200%200%201%206.003%205.125%20L6.402%206.5%20A3%203%200%201%201%2012%205%20Z'%20fill='white'%20stroke='white'%20stroke-width='2'%20stroke-linejoin='round'/%3E%3C/svg%3E") center bottom / 24px 24px no-repeat;
     transition:
         color 220ms ease,
         opacity 180ms ease;
-}
-
-/* 用量层画成水位：从下往上的实心液面，而不是同形状的描边。
-   fill 补上字形内圈，描边加到 3 让脑回笔画并成整块水体；3 是上限——
-   字形左右极值离 24px 盒只剩 1.5px，再粗就会被 .ceo-context-usage-brain-fill
-   的 overflow:hidden 裁平两侧。 */
-.ceo-context-usage-brain-fill-inner > svg path {
-    fill: currentColor;
-    stroke-width: 3;
 }
 
 .ceo-context-usage-brain:not(.is-active) .ceo-context-usage-brain-fill {
@@ -6178,8 +6173,7 @@ textarea {
         height: 24px;
     }
 
-    .ceo-context-usage-brain-layer > svg,
-    .ceo-context-usage-brain-fill-inner > svg {
+    .ceo-context-usage-brain-layer > svg {
         width: 24px;
         height: 24px;
     }

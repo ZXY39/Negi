@@ -379,6 +379,9 @@ test("brain icon uses actual lucide brain markup in composer html", () => {
     assert.equal(section.includes("ceo-context-usage-brain-svg"), false);
     assert.ok(section.includes('id="ceo-context-usage-brain-base"'));
     assert.ok(section.includes('ceo-context-usage-brain-iconbox'));
+    // 用量层不再复制一份字形：它是被轮廓裁出的实心水体，脑只画一次
+    assert.equal((section.match(/data-lucide="brain"/g) || []).length, 1);
+    assert.ok(section.includes('<span class="ceo-context-usage-brain-fill-inner"></span>'));
 });
 
 test("brain icon no longer uses framed button shell styling", () => {
@@ -421,9 +424,24 @@ test("brain icon uses crisp native lucide sizing", () => {
         true
     );
     assert.equal(
-        APP_CSS.includes(".ceo-context-usage-brain-layer > svg,\n.ceo-context-usage-brain-fill-inner > svg {\n    width: 24px;\n    height: 24px;"),
+        APP_CSS.includes(".ceo-context-usage-brain-layer > svg {\n    width: 24px;\n    height: 24px;"),
         true
     );
+});
+
+test("usage layer paints a solid water level masked by the brain outline", () => {
+    const innerBlock = /\.ceo-context-usage-brain-fill-inner \{([\s\S]*?)\n\}/.exec(APP_CSS)?.[1] || "";
+    assert.ok(innerBlock.length > 0, "fill-inner rule is gone");
+    // 水体是实心色块，不是第二份描边字形
+    assert.ok(innerBlock.includes("background: currentColor;"));
+    assert.equal(innerBlock.includes("data-lucide"), false);
+    // 容器是脑的闭合轮廓：路径以 Z 收尾，且贴底对齐，液面才是平的
+    for (const prop of ["-webkit-mask", "mask"]) {
+        const line = new RegExp(`${prop}: ([^;]+);`).exec(innerBlock)?.[1] || "";
+        assert.ok(line.includes("data:image/svg+xml"), `${prop} lost the silhouette mask`);
+        assert.ok(/Z'%20/.test(line) || line.includes("Z'"), `${prop} mask is not a closed path`);
+        assert.ok(line.includes("center bottom / 24px 24px no-repeat"), `${prop} mask is not bottom-anchored`);
+    }
 });
 
 test("brain icon avoids blur-inducing svg drop shadows", () => {
