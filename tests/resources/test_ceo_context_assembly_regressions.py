@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import convert_to_messages
 
 import g3ku.runtime.frontdoor.message_builder as message_builder_module
 from g3ku.core.timefmt import strip_arrival_time_stamp
@@ -3178,7 +3177,6 @@ async def test_message_builder_history_visibility_checkpoint_round_trip_keeps_hi
     builder = CeoMessageBuilder(loop=_loop(memory_manager), prompt_builder=prompt_builder)
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     checkpoint_messages = runner._state_message_records(
-        convert_to_messages(
             [
                 {"role": "user", "content": "checkpoint question"},
                 {"role": "assistant", "content": "checkpoint answer"},
@@ -3188,7 +3186,6 @@ async def test_message_builder_history_visibility_checkpoint_round_trip_keeps_hi
                     "metadata": {"history_visible": False, "source": "heartbeat"},
                 },
             ]
-        )
     )
 
     result = await builder.build_for_ceo(

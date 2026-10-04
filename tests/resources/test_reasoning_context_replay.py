@@ -11,7 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.config.schema import ManagedModelConfig
-from langchain_core.messages import AIMessage
 
 from g3ku.providers.responses_protocol_helpers import (
     _consume_sse,
@@ -191,14 +190,12 @@ def _runner() -> CeoFrontDoorRunner:
 
 def test_gate_verdict_travels_from_response_to_history_row() -> None:
     runner = _runner()
-    message = AIMessage(
-        content="先看索引",
-        additional_kwargs={
-            "reasoning_content": "我要再核一遍来源",
-            "reasoning_items": [_REASONING_ITEM],
-            "reasoning_context_allowed": True,
-        },
-    )
+    message = {
+        "content": "先看索引",
+        "reasoning_content": "我要再核一遍来源",
+        "reasoning_items": [_REASONING_ITEM],
+        "reasoning_context_allowed": True,
+    }
 
     payload = runner._checkpoint_safe_model_response_payload(message)
     assert payload["reasoning_context_allowed"] is True

@@ -58,10 +58,6 @@ dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
     "ruff>=0.1.0",
-    # 生产代码已不依赖 LangChain；tests/ 里还有 9 个文件共 24 处用 langchain_core 消息对象
-    # 伪造模型响应。把它们换成生产真实的 payload dict 之前，core 留在 dev extra，
-    # 免得新装环境跑测试直接 ImportError。
-    "langchain-core>=1.2.17,<2.0.0",
 ]
 
 [project.scripts]

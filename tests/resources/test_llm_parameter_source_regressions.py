@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
-from langchain_core.messages.utils import convert_to_messages
 
 import main.runtime.chat_backend as chat_backend_module
 import g3ku.providers.fallback as fallback_module
@@ -485,7 +484,7 @@ async def test_config_chat_backend_sanitizes_internal_runtime_message_fields_bef
     ]
 
 
-def test_sanitize_provider_messages_preserves_langchain_style_tool_call_args_for_round_trip() -> None:
+def test_sanitize_provider_messages_normalizes_internal_tool_call_shape() -> None:
     sanitized = chat_backend_module.sanitize_provider_messages(
         [
             {
@@ -523,17 +522,6 @@ def test_sanitize_provider_messages_preserves_langchain_style_tool_call_args_for
                     },
                 }
             ],
-        }
-    ]
-    assert convert_to_messages(sanitized)[0].tool_calls == [
-        {
-            "name": "submit_next_stage",
-            "args": {
-                "stage_goal": "create markdown file",
-                "tool_round_budget": 5,
-            },
-            "id": "call-1",
-            "type": "tool_call",
         }
     ]
 

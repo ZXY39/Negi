@@ -6120,54 +6120,29 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _model_response_view(message: dict[str, Any]) -> Any:
-        if isinstance(message, dict):
-            payload = dict(message or {})
-            return type(
-                "ModelResponseView",
-                (),
-                {
-                    "content": payload.get("content", ""),
-                    "tool_calls": list(payload.get("tool_calls", None) or []),
-                    "finish_reason": str(payload.get("finish_reason", "stop") or "stop"),
-                    "error_text": str(payload.get("error_text", "") or ""),
-                    "error_kind": str(payload.get("error_kind", "") or ""),
-                    "reasoning_content": payload.get("reasoning_content"),
-                    "thinking_blocks": payload.get("thinking_blocks"),
-                    "reasoning_items": payload.get("reasoning_items"),
-                    "reasoning_context_allowed": bool(payload.get("reasoning_context_allowed") or False),
-                    "stream_incomplete": bool(payload.get("stream_incomplete") or False),
-                    "provider_request_meta": payload.get("provider_request_meta"),
-                    "provider_request_body": payload.get("provider_request_body"),
-                },
-            )()
-        response_metadata = dict(getattr(message, "response_metadata", {}) or {})
-        additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
+        payload = dict(message or {})
         return type(
             "ModelResponseView",
             (),
             {
-                "content": getattr(message, "content", ""),
-                "tool_calls": list(getattr(message, "tool_calls", None) or []),
-                "finish_reason": str(response_metadata.get("finish_reason", "stop") or "stop"),
-                "error_text": str(response_metadata.get("error_text", "") or ""),
-                "error_kind": str(response_metadata.get("error_kind", "") or ""),
-                "reasoning_content": additional_kwargs.get("reasoning_content"),
-                "thinking_blocks": additional_kwargs.get("thinking_blocks"),
-                "reasoning_items": additional_kwargs.get("reasoning_items"),
-                "reasoning_context_allowed": bool(additional_kwargs.get("reasoning_context_allowed") or False),
-                "stream_incomplete": bool(additional_kwargs.get("stream_incomplete") or False),
-                "provider_request_meta": response_metadata.get("provider_request_meta"),
-                "provider_request_body": response_metadata.get("provider_request_body"),
+                "content": payload.get("content", ""),
+                "tool_calls": list(payload.get("tool_calls", None) or []),
+                "finish_reason": str(payload.get("finish_reason", "stop") or "stop"),
+                "error_text": str(payload.get("error_text", "") or ""),
+                "error_kind": str(payload.get("error_kind", "") or ""),
+                "reasoning_content": payload.get("reasoning_content"),
+                "thinking_blocks": payload.get("thinking_blocks"),
+                "reasoning_items": payload.get("reasoning_items"),
+                "reasoning_context_allowed": bool(payload.get("reasoning_context_allowed") or False),
+                "stream_incomplete": bool(payload.get("stream_incomplete") or False),
+                "provider_request_meta": payload.get("provider_request_meta"),
+                "provider_request_body": payload.get("provider_request_body"),
             },
         )()
 
     @staticmethod
     def _model_response_usage(message: dict[str, Any]) -> dict[str, int]:
-        if isinstance(message, dict):
-            payload = dict(message or {})
-            return normalize_usage_payload(payload.get("usage"))
-        response_metadata = dict(getattr(message, "response_metadata", {}) or {})
-        return normalize_usage_payload(response_metadata.get("usage") or getattr(message, "usage", None))
+        return normalize_usage_payload((dict(message or {})).get("usage"))
 
     def _checkpoint_safe_provider_request_body(
         self,

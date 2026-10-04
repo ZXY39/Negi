@@ -9,7 +9,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from g3ku.providers.base import LLMResponse
 from g3ku.providers.fallback import ModelProviderExhaustedError
@@ -264,8 +263,12 @@ async def test_graph_call_model_still_replays_terminated_empty_responses(monkeyp
     ctx = _make_runner_state(monkeypatch, runner)
 
     calls = [
-        AIMessage(content="", additional_kwargs={}),
-        AIMessage(content="今天的日报如下：", additional_kwargs={}),
+        {
+            "content": "",
+        },
+        {
+            "content": "今天的日报如下：",
+        }
     ]
     seen: list[int] = []
 
@@ -295,7 +298,10 @@ async def test_graph_call_model_still_returns_cleanly_stopped_empty_response(
 
     async def _call_model_with_tools(**_kwargs):
         attempts.append(1)
-        return AIMessage(content="", additional_kwargs={"reasoning_content": "想清楚了但没说话"})
+        return {
+            "content": "",
+            "reasoning_content": "想清楚了但没说话",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 

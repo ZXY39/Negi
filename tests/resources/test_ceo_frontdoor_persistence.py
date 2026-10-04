@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
 
 
 from g3ku.agent.tools.base import Tool
@@ -921,7 +920,6 @@ async def test_ceo_frontdoor_prepare_turn_keeps_runtime_only_objects_out_of_chec
     assert "runtime_context" not in state_update
     assert "visible_tools" not in state_update
     assert "tool_schemas" not in state_update
-    assert "langchain_tool_map" not in state_update
     checkpoint_state = {"user_input": user_input}
     checkpoint_state.update(state_update)
     json.dumps(checkpoint_state)
@@ -1025,26 +1023,22 @@ async def test_ceo_frontdoor_call_model_returns_json_safe_response_payload(
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
-        return AIMessage(
-            content="tool reply",
-            tool_calls=[{"id": "call-1", "name": "filesystem", "args": {"path": "."}}],
-            response_metadata={
-                "finish_reason": "tool_calls",
-                "provider_request_meta": {
-                    "provider": "responses",
-                    "endpoint": "https://example.test/v1/responses",
-                },
-                "provider_request_body": {
-                    "model": "gpt-5.4-mini",
-                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "list files"}]}],
-                    "tool_choice": "auto",
-                },
-            },
-            additional_kwargs={
-                "reasoning_content": "reasoning trace",
-                "thinking_blocks": [{"type": "thinking", "text": "step one"}],
-            },
-        )
+        return {
+            "content": "tool reply",
+            "tool_calls": [{"id": "call-1", "name": "filesystem", "args": {"path": "."}}],
+            "finish_reason": "tool_calls",
+            "provider_request_meta": {
+                                                               "provider": "responses",
+                                                               "endpoint": "https://example.test/v1/responses",
+                                                           },
+            "provider_request_body": {
+                                                               "model": "gpt-5.4-mini",
+                                                               "input": [{"role": "user", "content": [{"type": "input_text", "text": "list files"}]}],
+                                                               "tool_choice": "auto",
+                                                           },
+            "reasoning_content": "reasoning trace",
+            "thinking_blocks": [{"type": "thinking", "text": "step one"}],
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1121,7 +1115,10 @@ async def test_ceo_frontdoor_call_model_rebuilds_request_messages_from_stable_an
 
     async def _call_model_with_tools(**kwargs):
         captured.update(kwargs)
-        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+        return {
+            "content": "plain reply",
+            "finish_reason": "stop",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1233,27 +1230,25 @@ async def test_ceo_frontdoor_call_model_persists_actual_request_to_disk(
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 1200, raising=False)
 
     async def _call_model_with_tools(**kwargs):
-        return AIMessage(
-            content="plain reply",
-            response_metadata={
-                "finish_reason": "stop",
-                "usage": {
-                    "input_tokens": 123,
-                    "output_tokens": 9,
-                    "cache_hit_tokens": 45,
-                },
-                "provider_request_meta": {
-                    "provider": "responses",
-                    "endpoint": "https://example.test/v1/responses",
-                },
-                "provider_request_body": {
-                    "model": "gpt-5.4-mini",
-                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-                    "prompt_cache_key": "cache-key",
-                    "tool_choice": "auto",
-                },
-            },
-        )
+        return {
+            "content": "plain reply",
+            "finish_reason": "stop",
+            "usage": {
+                                               "input_tokens": 123,
+                                               "output_tokens": 9,
+                                               "cache_hit_tokens": 45,
+                                           },
+            "provider_request_meta": {
+                                                               "provider": "responses",
+                                                               "endpoint": "https://example.test/v1/responses",
+                                                           },
+            "provider_request_body": {
+                                                               "model": "gpt-5.4-mini",
+                                                               "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                                                               "prompt_cache_key": "cache-key",
+                                                               "tool_choice": "auto",
+                                                           },
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1362,27 +1357,25 @@ async def test_frontdoor_actual_request_trace_round_trips_usage_ground_truth(
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 1200, raising=False)
 
     async def _call_model_with_tools(**kwargs):
-        return AIMessage(
-            content="plain reply",
-            response_metadata={
-                "finish_reason": "stop",
-                "usage": {
-                    "input_tokens": 123,
-                    "output_tokens": 9,
-                    "cache_read_tokens": 45,
-                },
-                "provider_request_meta": {
-                    "provider": "responses",
-                    "endpoint": "https://example.test/v1/responses",
-                },
-                "provider_request_body": {
-                    "model": "gpt-5.4-mini",
-                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-                    "prompt_cache_key": "cache-key",
-                    "tool_choice": "auto",
-                },
-            },
-        )
+        return {
+            "content": "plain reply",
+            "finish_reason": "stop",
+            "usage": {
+                                               "input_tokens": 123,
+                                               "output_tokens": 9,
+                                               "cache_read_tokens": 45,
+                                           },
+            "provider_request_meta": {
+                                                               "provider": "responses",
+                                                               "endpoint": "https://example.test/v1/responses",
+                                                           },
+            "provider_request_body": {
+                                                               "model": "gpt-5.4-mini",
+                                                               "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                                                               "prompt_cache_key": "cache-key",
+                                                               "tool_choice": "auto",
+                                                           },
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1484,25 +1477,23 @@ async def test_ceo_frontdoor_call_model_falls_back_to_preflight_truth_when_usage
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 1200, raising=False)
 
     async def _call_model_without_input_usage(**kwargs):
-        return AIMessage(
-            content="plain reply",
-            response_metadata={
-                "finish_reason": "stop",
-                "usage": {
-                    "output_tokens": 9,
-                },
-                "provider_request_meta": {
-                    "provider": "responses",
-                    "endpoint": "https://example.test/v1/responses",
-                },
-                "provider_request_body": {
-                    "model": "gpt-5.4-mini",
-                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-                    "prompt_cache_key": "cache-key",
-                    "tool_choice": "auto",
-                },
-            },
-        )
+        return {
+            "content": "plain reply",
+            "finish_reason": "stop",
+            "usage": {
+                                               "output_tokens": 9,
+                                           },
+            "provider_request_meta": {
+                                                               "provider": "responses",
+                                                               "endpoint": "https://example.test/v1/responses",
+                                                           },
+            "provider_request_body": {
+                                                               "model": "gpt-5.4-mini",
+                                                               "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                                                               "prompt_cache_key": "cache-key",
+                                                               "tool_choice": "auto",
+                                                           },
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_without_input_usage)
 
@@ -1595,7 +1586,10 @@ async def test_ceo_frontdoor_call_model_keeps_request_messages_append_only_insid
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
-        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+        return {
+            "content": "plain reply",
+            "finish_reason": "stop",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1725,7 +1719,10 @@ async def test_ceo_frontdoor_call_model_keeps_provider_tool_schema_set_stable_wh
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
-        return AIMessage(content="plain reply", response_metadata={"finish_reason": "stop"})
+        return {
+            "content": "plain reply",
+            "finish_reason": "stop",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1836,30 +1833,28 @@ def test_memory_assembly_config_exposes_frontdoor_runtime_defaults() -> None:
 def test_checkpoint_safe_model_response_payload_summarizes_provider_request_body() -> None:
     runner = CeoFrontDoorRunner(loop=SimpleNamespace())
     payload = runner._checkpoint_safe_model_response_payload(
-        AIMessage(
-            content="ok",
-            response_metadata={
-                "provider_request_meta": {"provider": "responses"},
-                "provider_request_body": {
-                    "model": "gpt-5.4-mini",
-                    "input": [
-                        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "input_image",
-                                    "image_url": "data:image/jpeg;base64," + ("A" * 2000),
-                                }
-                            ],
-                        },
-                    ],
-                    "tools": [{"type": "function", "name": "exec"}],
-                    "prompt_cache_key": "cache-key",
-                    "tool_choice": "auto",
-                },
-            },
-        )
+        {
+            "content": "ok",
+            "provider_request_meta": {"provider": "responses"},
+            "provider_request_body": {
+                                                               "model": "gpt-5.4-mini",
+                                                               "input": [
+                                                                   {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                                                                   {
+                                                                       "role": "user",
+                                                                       "content": [
+                                                                           {
+                                                                               "type": "input_image",
+                                                                               "image_url": "data:image/jpeg;base64," + ("A" * 2000),
+                                                                           }
+                                                                       ],
+                                                                   },
+                                                               ],
+                                                               "tools": [{"type": "function", "name": "exec"}],
+                                                               "prompt_cache_key": "cache-key",
+                                                               "tool_choice": "auto",
+                                                           },
+        }
     )
 
     body = dict(payload["provider_request_body"] or {})

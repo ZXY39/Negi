@@ -8,7 +8,6 @@ import zlib
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
@@ -1118,24 +1117,22 @@ async def test_run_frontdoor_llm_token_compression_persists_internal_request_art
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
-        return AIMessage(
-            content="[压缩后的较早历史摘要]",
-            response_metadata={
-                "usage": {
-                    "input_tokens": 12709,
-                    "output_tokens": 552,
-                    "cache_hit_tokens": 0,
-                },
-                "provider_request_meta": {
-                    "provider": "responses",
-                    "endpoint": "https://example.test/v1/responses",
-                },
-                "provider_request_body": {
-                    "model": "gpt-5.2",
-                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "compress"}]}],
-                },
-            },
-        )
+        return {
+            "content": "[压缩后的较早历史摘要]",
+            "usage": {
+                                               "input_tokens": 12709,
+                                               "output_tokens": 552,
+                                               "cache_hit_tokens": 0,
+                                           },
+            "provider_request_meta": {
+                                                               "provider": "responses",
+                                                               "endpoint": "https://example.test/v1/responses",
+                                                           },
+            "provider_request_body": {
+                                                               "model": "gpt-5.2",
+                                                               "input": [{"role": "user", "content": [{"type": "input_text", "text": "compress"}]}],
+                                                           },
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1220,7 +1217,9 @@ async def test_run_frontdoor_llm_token_compression_aligns_tool_pair_tail_boundar
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
-        return AIMessage(content="[压缩后的较早历史摘要]")
+        return {
+            "content": "[压缩后的较早历史摘要]",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
