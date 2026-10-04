@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
-from langchain_core.messages import HumanMessage
 from langchain_core.messages.utils import convert_to_messages
 
 import main.runtime.chat_backend as chat_backend_module

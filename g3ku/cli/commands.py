@@ -261,7 +261,7 @@ def onboard(
     console.print("\n[dim]需要接入 IM 渠道？参考 External Agent API（docs/architecture/external-agent-api.md）与 bridges/qq-onebot 示例桥。[/dim]")
 
 def _make_provider(config: Config, *, scope: str = "ceo"):
-    """Create the configured BaseChatModel for a runtime scope."""
+    """Create the configured chat backend for a runtime scope."""
     try:
         return _runtime_make_provider(config, scope=scope)
     except (ValueError, RuntimeError) as exc:

@@ -9,7 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 
 from g3ku.providers.base import LLMResponse
 from g3ku.providers.fallback import ModelProviderExhaustedError

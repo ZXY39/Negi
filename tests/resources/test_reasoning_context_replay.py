@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from g3ku.config.schema import ManagedModelConfig
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 
 from g3ku.providers.responses_protocol_helpers import (
     _consume_sse,
