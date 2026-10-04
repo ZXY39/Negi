@@ -37,7 +37,6 @@ TOOL_TIMEOUT_ARGUMENT_NAME = "timeout_seconds"
 class ToolWatchdogConfig:
     enabled: bool = True
     poll_interval_seconds: float = 5.0
-    handoff_after_seconds: float = 30.0
     stop_grace_seconds: float = 2.0
     text_char_limit: int = 280
     list_limit: int = 3
@@ -53,256 +52,6 @@ class ToolWatchdogRunResult:
     snapshot: dict[str, Any] | None = None
     execution_id: str = ""
     timed_out: bool = False
-
-
-@dataclass(slots=True)
-class DetachedToolExecution:
-    execution_id: str
-    tool_name: str
-    arguments: dict[str, Any]
-    task: asyncio.Task[Any]
-    snapshot_supplier: Callable[[], Any] | None
-    cancel_token: Any | None
-    started_at: float
-    created_at: float
-    session_key: str = ""
-    terminal_notifier: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None
-    terminal_notified: bool = False
-    handoff_count: int = 1
-    timeout_seconds: float | None = None
-
-
-DEFAULT_WAIT_WINDOWS_SECONDS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0, 600.0)
-
-
-class ToolExecutionManager:
-    def __init__(self) -> None:
-        self._counter = 0
-        self._executions: dict[str, DetachedToolExecution] = {}
-        self._lock = asyncio.Lock()
-
-    async def register_execution(
-        self,
-        *,
-        tool_name: str,
-        arguments: dict[str, Any],
-        task: asyncio.Task[Any],
-        snapshot_supplier: Callable[[], Any] | None,
-        cancel_token: Any | None,
-        started_at: float,
-        session_key: str = "",
-        terminal_notifier: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
-        timeout_seconds: float | None = None,
-    ) -> DetachedToolExecution:
-        async with self._lock:
-            for entry in self._executions.values():
-                if entry.task is task:
-                    return entry
-            self._counter += 1
-            execution_id = f"tool-exec:{self._counter}"
-            entry = DetachedToolExecution(
-                execution_id=execution_id,
-                tool_name=str(tool_name or "tool"),
-                arguments=dict(arguments or {}),
-                task=task,
-                snapshot_supplier=snapshot_supplier,
-                cancel_token=cancel_token,
-                started_at=float(started_at),
-                created_at=time.monotonic(),
-                session_key=str(session_key or "").strip(),
-                terminal_notifier=terminal_notifier if callable(terminal_notifier) else None,
-                handoff_count=1,
-                timeout_seconds=float(timeout_seconds) if timeout_seconds else None,
-            )
-            self._executions[execution_id] = entry
-            task.add_done_callback(
-                lambda _task, stored_execution_id=execution_id: self._schedule_terminal_notification(
-                    stored_execution_id
-                )
-            )
-            return entry
-
-    async def wait_execution(
-        self,
-        execution_id: str,
-        *,
-        wait_seconds: float = 20.0,
-        poll_interval_seconds: float = 5.0,
-        text_char_limit: int = 280,
-        list_limit: int = 3,
-        on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
-    ) -> dict[str, Any]:
-        entry = await self._get_execution(execution_id)
-        if entry is None:
-            return {
-                "status": "not_found",
-                "execution_id": str(execution_id or ""),
-                "message": "没有找到对应的后台工具执行记录，可能已经完成并被清理，或者 execution_id 无效。",
-            }
-
-        effective_wait_seconds = float(wait_seconds) if wait_seconds and float(wait_seconds) > 0 else self.recommended_wait_seconds(entry)
-        try:
-            result = await _wait_for_task_window(
-                task=entry.task,
-                tool_name=entry.tool_name,
-                started_at=entry.started_at,
-                snapshot_supplier=entry.snapshot_supplier,
-                poll_interval_seconds=poll_interval_seconds,
-                handoff_after_seconds=effective_wait_seconds,
-                text_char_limit=text_char_limit,
-                list_limit=list_limit,
-                on_poll=on_poll,
-                hard_timeout_seconds=entry.timeout_seconds,
-                cancel_token=entry.cancel_token,
-            )
-        except asyncio.CancelledError:
-            await self._remove_execution(entry.execution_id)
-            return {
-                "status": "stopped",
-                "execution_id": entry.execution_id,
-                "tool_name": entry.tool_name,
-                "message": "后台工具已经停止。",
-            }
-        except Exception as exc:
-            await self._remove_execution(entry.execution_id)
-            return {
-                "status": "failed",
-                "execution_id": entry.execution_id,
-                "tool_name": entry.tool_name,
-                "message": "后台工具执行失败。",
-                "error": str(exc),
-            }
-        if result.timed_out:
-            await self._remove_execution(entry.execution_id)
-            return {
-                "status": "timeout",
-                "execution_id": entry.execution_id,
-                "tool_name": entry.tool_name,
-                "message": build_tool_timeout_error_text(
-                    tool_name=entry.tool_name,
-                    timeout_seconds=entry.timeout_seconds or effective_wait_seconds,
-                ),
-                "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
-            }
-        if result.completed:
-            await self._remove_execution(entry.execution_id)
-            return _build_completion_payload(entry=entry, result=result.value)
-        entry.handoff_count += 1
-        return _build_handoff_payload(
-            tool_name=entry.tool_name,
-            arguments=entry.arguments,
-            execution_id=entry.execution_id,
-            elapsed_seconds=result.elapsed_seconds,
-            poll_count=result.poll_count,
-            snapshot=result.snapshot,
-            continued_wait=True,
-            recommended_wait_seconds=self.recommended_wait_seconds(entry),
-        )
-
-    async def stop_execution(
-        self,
-        execution_id: str,
-        *,
-        reason: str = "agent_requested_stop",
-        stop_grace_seconds: float = 2.0,
-    ) -> dict[str, Any]:
-        entry = await self._get_execution(execution_id)
-        if entry is None:
-            return {
-                "status": "not_found",
-                "execution_id": str(execution_id or ""),
-                "message": "没有找到对应的后台工具执行记录，可能已经完成并被清理，或者 execution_id 无效。",
-            }
-
-        if entry.task.done():
-            await self._remove_execution(entry.execution_id)
-            return _build_completion_payload(entry=entry, result=await _await_finished_task(entry.task))
-
-        await request_tool_cancellation(
-            entry.task,
-            cancel_token=entry.cancel_token,
-            reason=reason,
-            grace_seconds=stop_grace_seconds,
-        )
-        snapshot = summarize_runtime_snapshot(
-            await _maybe_await_callable(entry.snapshot_supplier),
-            text_char_limit=280,
-            list_limit=3,
-        )
-        payload = {
-            "status": "stopped",
-            "execution_id": entry.execution_id,
-            "tool_name": entry.tool_name,
-            "message": "已按要求停止该后台工具执行；如果工具启动了子进程，也会一起尝试结束。",
-            "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
-            "runtime_snapshot": snapshot,
-        }
-        await self._remove_execution(entry.execution_id)
-        return payload
-
-    async def stop_session_executions(
-        self,
-        session_key: str,
-        *,
-        reason: str = "session_deleted",
-        stop_grace_seconds: float = 2.0,
-    ) -> list[dict[str, Any]]:
-        key = str(session_key or "").strip()
-        if not key:
-            return []
-        async with self._lock:
-            execution_ids = [
-                entry.execution_id
-                for entry in self._executions.values()
-                if str(entry.session_key or "").strip() == key
-            ]
-        results: list[dict[str, Any]] = []
-        for execution_id in execution_ids:
-            results.append(
-                await self.stop_execution(
-                    execution_id,
-                    reason=reason,
-                    stop_grace_seconds=stop_grace_seconds,
-                )
-            )
-        return results
-
-    async def _get_execution(self, execution_id: str) -> DetachedToolExecution | None:
-        async with self._lock:
-            return self._executions.get(str(execution_id or "").strip())
-
-    async def _remove_execution(self, execution_id: str) -> None:
-        async with self._lock:
-            self._executions.pop(str(execution_id or "").strip(), None)
-
-    def _schedule_terminal_notification(self, execution_id: str) -> None:
-        key = str(execution_id or "").strip()
-        if not key:
-            return
-        try:
-            asyncio.get_running_loop().create_task(self._emit_terminal_notification(key))
-        except RuntimeError:
-            return
-
-    async def _emit_terminal_notification(self, execution_id: str) -> None:
-        async with self._lock:
-            entry = self._executions.get(str(execution_id or "").strip())
-            if entry is None or entry.terminal_notified or entry.terminal_notifier is None:
-                return
-            entry.terminal_notified = True
-            notifier = entry.terminal_notifier
-        payload = await _build_terminal_payload(entry)
-        try:
-            await _maybe_await(notifier(payload))
-        except Exception:
-            return
-
-    @staticmethod
-    def recommended_wait_seconds(entry: DetachedToolExecution | None) -> float:
-        if entry is None:
-            return DEFAULT_WAIT_WINDOWS_SECONDS[1]
-        index = max(0, min(int(entry.handoff_count), len(DEFAULT_WAIT_WINDOWS_SECONDS) - 1))
-        return float(DEFAULT_WAIT_WINDOWS_SECONDS[index])
 
 
 def runtime_context_value(runtime_context: Any, key: str, default: Any = None) -> Any:
@@ -338,12 +87,6 @@ def actor_role_allows_watchdog(runtime_context: Any) -> bool:
     return role in {"ceo", "execution", "acceptance", "inspection"}
 
 
-def actor_role_allows_detached_watchdog(runtime_context: Any) -> bool:
-    role = str(runtime_context_value(runtime_context, "actor_role", "") or "").strip().lower()
-    # Detached watchdog handoff stays limited to the CEO session path. Execution
-    # and acceptance nodes must keep long-running tools inline inside the same
-    # logical tool turn even when watchdog polling is enabled.
-    return role == "ceo"
 
 
 def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
@@ -351,7 +94,6 @@ def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
     payload = dict(raw) if isinstance(raw, dict) else {}
     enabled = payload.get("enabled", True)
     poll_interval = payload.get("poll_interval_seconds", 5.0)
-    handoff_after = payload.get("handoff_after_seconds", payload.get("stale_after_seconds", DEFAULT_WAIT_WINDOWS_SECONDS[0]))
     stop_grace = payload.get("stop_grace_seconds", payload.get("cancel_grace_seconds", 2.0))
     text_char_limit = payload.get("text_char_limit", 280)
     list_limit = payload.get("list_limit", 3)
@@ -359,7 +101,6 @@ def resolve_tool_watchdog_config(runtime_context: Any) -> ToolWatchdogConfig:
     return ToolWatchdogConfig(
         enabled=bool(enabled),
         poll_interval_seconds=max(0.2, float(poll_interval or 5.0)),
-        handoff_after_seconds=max(0.1, float(handoff_after or DEFAULT_WAIT_WINDOWS_SECONDS[0])),
         stop_grace_seconds=max(0.0, float(stop_grace or 0.0)),
         text_char_limit=max(80, int(text_char_limit or 280)),
         list_limit=max(1, int(list_limit or 3)),
@@ -419,27 +160,6 @@ def resolve_snapshot_supplier(runtime_context: Any) -> Callable[[], Any] | None:
     supplier = runtime_context_value(runtime_context, "tool_snapshot_supplier", None)
     return supplier if callable(supplier) else None
 
-
-def resolve_terminal_notifier(
-    runtime_context: Any,
-) -> Callable[[dict[str, Any]], Awaitable[None] | None] | None:
-    session_key = str(runtime_context_value(runtime_context, "session_key", "") or "").strip()
-    if not session_key:
-        return None
-    notifier = runtime_context_value(runtime_context, "tool_terminal_notifier", None)
-    if callable(notifier):
-        return notifier
-    heartbeat = runtime_context_value(runtime_context, "web_session_heartbeat", None)
-    if heartbeat is None:
-        loop = runtime_context_value(runtime_context, "loop", None)
-        heartbeat = getattr(loop, "web_session_heartbeat", None) if loop is not None else None
-    if heartbeat is None or not hasattr(heartbeat, "enqueue_tool_terminal"):
-        return None
-
-    def _notify(payload: dict[str, Any]) -> None:
-        heartbeat.enqueue_tool_terminal(session_id=session_key, payload=dict(payload or {}))
-
-    return _notify
 
 
 async def request_tool_cancellation(
@@ -724,7 +444,6 @@ async def run_tool_with_watchdog(
     arguments: dict[str, Any],
     runtime_context: Any,
     snapshot_supplier: Callable[[], Any] | None = None,
-    manager: ToolExecutionManager | None = None,
     on_poll: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     inline_registry: Any | None = None,
     on_inline_registered: Callable[[Any], Awaitable[None] | None] | None = None,
@@ -747,13 +466,12 @@ async def run_tool_with_watchdog(
     execution_task = asyncio.create_task(awaitable, name=f"tool-watchdog:{tool_name}")
     cancel_token = runtime_context_value(runtime_context, "cancel_token", None)
     session_key = str(runtime_context_value(runtime_context, "session_key", "") or "").strip()
-    terminal_notifier = resolve_terminal_notifier(runtime_context)
     runtime_session = runtime_context_value(runtime_context, "runtime_session", None)
     started_at = time.monotonic()
     inline_entry = None
 
     try:
-        if manager is None and inline_registry is not None and hasattr(inline_registry, "register_execution"):
+        if inline_registry is not None and hasattr(inline_registry, "register_execution"):
             inline_entry = await inline_registry.register_execution(
                 session_key=session_key,
                 turn_id=str(runtime_context_value(runtime_context, "turn_id", "") or "").strip(),
@@ -780,106 +498,39 @@ async def run_tool_with_watchdog(
             )
             if on_inline_registered is not None:
                 await _maybe_await(on_inline_registered(inline_entry))
-        if manager is None:
-            result = await _wait_for_task_window(
-                task=execution_task,
-                tool_name=tool_name,
-                started_at=started_at,
-                snapshot_supplier=supplier,
-                poll_interval_seconds=config.poll_interval_seconds,
-                handoff_after_seconds=10_000_000.0,
-                text_char_limit=config.text_char_limit,
-                list_limit=config.list_limit,
-                on_poll=on_poll,
-                hard_timeout_seconds=hard_timeout_seconds,
-                cancel_token=cancel_token,
-            )
-            if result.timed_out:
-                return ToolWatchdogRunResult(
-                    completed=True,
-                    value=build_tool_timeout_error_text(
-                        tool_name=tool_name,
-                        timeout_seconds=hard_timeout_seconds or config.default_timeout_seconds,
-                    ),
-                    elapsed_seconds=result.elapsed_seconds,
-                    poll_count=result.poll_count,
-                    snapshot=result.snapshot,
-                    execution_id="",
-                    timed_out=True,
-                )
-            return ToolWatchdogRunResult(
-                completed=True,
-                value=result.value,
-                elapsed_seconds=result.elapsed_seconds,
-                poll_count=result.poll_count,
-                snapshot=result.snapshot,
-                execution_id="",
-            )
-
-        wait_result = await _wait_for_task_window(
+        result = await _wait_for_task_window(
             task=execution_task,
             tool_name=tool_name,
             started_at=started_at,
             snapshot_supplier=supplier,
             poll_interval_seconds=config.poll_interval_seconds,
-            handoff_after_seconds=config.handoff_after_seconds,
+            handoff_after_seconds=10_000_000.0,
             text_char_limit=config.text_char_limit,
             list_limit=config.list_limit,
             on_poll=on_poll,
             hard_timeout_seconds=hard_timeout_seconds,
             cancel_token=cancel_token,
         )
-        if wait_result.timed_out:
+        if result.timed_out:
             return ToolWatchdogRunResult(
                 completed=True,
                 value=build_tool_timeout_error_text(
                     tool_name=tool_name,
                     timeout_seconds=hard_timeout_seconds or config.default_timeout_seconds,
                 ),
-                elapsed_seconds=wait_result.elapsed_seconds,
-                poll_count=wait_result.poll_count,
-                snapshot=wait_result.snapshot,
+                elapsed_seconds=result.elapsed_seconds,
+                poll_count=result.poll_count,
+                snapshot=result.snapshot,
                 execution_id="",
                 timed_out=True,
             )
-        if wait_result.completed:
-            return ToolWatchdogRunResult(
-                completed=True,
-                value=wait_result.value,
-                elapsed_seconds=wait_result.elapsed_seconds,
-                poll_count=wait_result.poll_count,
-                snapshot=wait_result.snapshot,
-                execution_id="",
-            )
-
-        entry = await manager.register_execution(
-            tool_name=tool_name,
-            arguments=arguments,
-            task=execution_task,
-            snapshot_supplier=supplier,
-            cancel_token=cancel_token,
-            started_at=started_at,
-            session_key=session_key,
-            terminal_notifier=terminal_notifier,
-            timeout_seconds=hard_timeout_seconds,
-        )
-        payload = _build_handoff_payload(
-            tool_name=tool_name,
-            arguments=arguments,
-            execution_id=entry.execution_id,
-            elapsed_seconds=wait_result.elapsed_seconds,
-            poll_count=wait_result.poll_count,
-            snapshot=wait_result.snapshot,
-            continued_wait=False,
-            recommended_wait_seconds=manager.recommended_wait_seconds(entry),
-        )
         return ToolWatchdogRunResult(
-            completed=False,
-            value=payload,
-            elapsed_seconds=wait_result.elapsed_seconds,
-            poll_count=wait_result.poll_count,
-            snapshot=wait_result.snapshot,
-            execution_id=entry.execution_id,
+            completed=True,
+            value=result.value,
+            elapsed_seconds=result.elapsed_seconds,
+            poll_count=result.poll_count,
+            snapshot=result.snapshot,
+            execution_id="",
         )
     except BaseException:
         if not execution_task.done():
@@ -1040,96 +691,6 @@ async def _wait_for_task_window(
                 )
 
 
-def _build_handoff_payload(
-    *,
-    tool_name: str,
-    arguments: dict[str, Any],
-    execution_id: str,
-    elapsed_seconds: float,
-    poll_count: int,
-    snapshot: dict[str, Any] | None,
-    continued_wait: bool,
-    recommended_wait_seconds: float,
-) -> dict[str, Any]:
-    message = "工具仍在后台运行，我先把当前运行快照交给你判断。"
-    if continued_wait:
-        message = "工具仍在后台运行；你刚才选择继续等待，我把新的运行快照再交给你判断。"
-    return {
-        "status": "background_running",
-        "tool_name": str(tool_name or "tool"),
-        "execution_id": str(execution_id or ""),
-        "message": f"{message} 如果决定继续等待，请调用 wait_tool_execution；如果决定停止，请调用 stop_tool_execution。",
-        "elapsed_seconds": round(float(elapsed_seconds), 1),
-        "poll_count": int(poll_count),
-        "argument_preview": _preview_arguments(arguments),
-        "runtime_snapshot": snapshot,
-        "agent_guidance": "根据 runtime_snapshot 判断是继续等待、改用别的工具，还是调用 stop_tool_execution 主动结束当前后台执行。",
-        "next_actions": ["wait_tool_execution", "stop_tool_execution"],
-        "recommended_wait_seconds": round(float(recommended_wait_seconds), 1),
-    }
-
-
-def _build_completion_payload(*, entry: DetachedToolExecution, result: Any) -> dict[str, Any]:
-    normalized = _normalize_detached_result(result)
-    return {
-        "status": "completed",
-        "execution_id": entry.execution_id,
-        "tool_name": entry.tool_name,
-        "message": "后台工具已经完成，final_result 字段就是该工具的最终输出。",
-        "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
-        "final_result": normalized,
-    }
-
-
-async def _build_terminal_payload(entry: DetachedToolExecution) -> dict[str, Any]:
-    try:
-        result = await asyncio.shield(entry.task)
-    except asyncio.CancelledError:
-        snapshot = summarize_runtime_snapshot(
-            await _maybe_await_callable(entry.snapshot_supplier),
-            text_char_limit=280,
-            list_limit=3,
-        )
-        return {
-            "status": "stopped",
-            "execution_id": entry.execution_id,
-            "tool_name": entry.tool_name,
-            "message": "后台工具执行已停止。",
-            "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
-            "runtime_snapshot": snapshot,
-        }
-    except Exception as exc:
-        snapshot = summarize_runtime_snapshot(
-            await _maybe_await_callable(entry.snapshot_supplier),
-            text_char_limit=280,
-            list_limit=3,
-        )
-        return {
-            "status": "failed",
-            "execution_id": entry.execution_id,
-            "tool_name": entry.tool_name,
-            "message": "后台工具执行失败。",
-            "error": str(exc),
-            "elapsed_seconds": round(max(0.0, time.monotonic() - entry.started_at), 1),
-            "runtime_snapshot": snapshot,
-        }
-    return _build_completion_payload(entry=entry, result=result)
-
-
-def _normalize_detached_result(value: Any) -> Any:
-    if hasattr(value, "content"):
-        content = getattr(value, "content", "")
-        name = str(getattr(value, "name", "") or "")
-        status = str(getattr(value, "status", "") or "")
-        payload: dict[str, Any] = {"content": _json_safe(content)}
-        if name:
-            payload["name"] = name
-        if status:
-            payload["status"] = status
-        return payload
-    return _json_safe(value)
-
-
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -1144,13 +705,6 @@ def _json_safe(value: Any) -> Any:
         return str(value)
 
 
-async def _await_finished_task(task: asyncio.Task[Any]) -> Any:
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        return {"status": "stopped", "message": "后台任务已取消。"}
-    except Exception as exc:
-        return {"status": "failed", "error": str(exc)}
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -1181,16 +735,3 @@ def _compact_error(value: Any) -> dict[str, Any] | None:
     return None
 
 
-def _preview_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    preview: dict[str, Any] = {}
-    for key, value in list((arguments or {}).items())[:5]:
-        if isinstance(value, dict):
-            preview[str(key)] = {
-                str(inner_key): _clip_text(inner_value, limit=80)
-                for inner_key, inner_value in list(value.items())[:3]
-            }
-        elif isinstance(value, list):
-            preview[str(key)] = [_clip_text(item, limit=80) for item in value[:3]]
-        else:
-            preview[str(key)] = _clip_text(value, limit=120)
-    return preview

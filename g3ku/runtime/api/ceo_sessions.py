@@ -426,14 +426,6 @@ async def _delete_single_ceo_session(
     delete_task_records: bool,
     background_tasks: BackgroundTasks | None = None,
 ) -> dict:
-    stopped_background_tool_count = 0
-    tool_execution_manager = getattr(agent, 'tool_execution_manager', None)
-    if tool_execution_manager is not None and hasattr(tool_execution_manager, 'stop_session_executions'):
-        stopped_results = await tool_execution_manager.stop_session_executions(
-            session_key,
-            reason='session_cleared' if is_channel_session else 'session_deleted',
-        )
-        stopped_background_tool_count = len(list(stopped_results or []))
     heartbeat = get_web_heartbeat_service(agent)
     if heartbeat is not None:
         heartbeat.clear_session(session_key)
@@ -462,7 +454,6 @@ async def _delete_single_ceo_session(
         "deleted": not is_channel_session,
         "cleared": is_channel_session,
         "deleted_task_count": deleted_task_count,
-        "stopped_background_tool_count": stopped_background_tool_count,
     }
 
 
@@ -1390,7 +1381,6 @@ async def bulk_delete_ceo_sessions(
                 'deleted': False,
                 'cleared': False,
                 'deleted_task_count': 0,
-                'stopped_background_tool_count': 0,
             })
         except ValueError as exc:
             failed_count += 1
@@ -1401,7 +1391,6 @@ async def bulk_delete_ceo_sessions(
                 'deleted': False,
                 'cleared': False,
                 'deleted_task_count': 0,
-                'stopped_background_tool_count': 0,
             })
     active_session_id = resolve_active_ceo_session_id(session_manager, state_store)
     state_store.set_active_session_id(active_session_id)

@@ -791,7 +791,6 @@ class CeoToolReminderService:
             ephemeral_tail_messages=reminder_messages,
         )
         stop_tool = StopToolExecutionTool(
-            lambda: getattr(self._loop, "tool_execution_manager", None),
             task_service_getter=lambda: getattr(self._loop, "main_task_service", None),
             inline_registry_getter=lambda: getattr(self._loop, "inline_tool_execution_registry", None),
         )

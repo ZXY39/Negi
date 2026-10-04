@@ -16,7 +16,6 @@ from g3ku.runtime.bootstrap_bridge import RuntimeBootstrapBridge
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.inline_tool_reminder import CeoToolReminderService, InlineToolExecutionRegistry
 from g3ku.runtime.manager import SessionRuntimeManager
-from g3ku.runtime.tool_watchdog import ToolExecutionManager
 
 
 class AgentRuntimeEngine:
@@ -72,7 +71,6 @@ class AgentRuntimeEngine:
         self._chat_model_factory = chat_model_factory
 
         self.tools = ToolRegistry()
-        self.tool_execution_manager = ToolExecutionManager()
         self.inline_tool_execution_registry = InlineToolExecutionRegistry()
         self.ceo_tool_reminder_service = CeoToolReminderService(
             loop=self,

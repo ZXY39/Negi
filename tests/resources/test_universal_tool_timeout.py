@@ -219,19 +219,13 @@ def _spawn_tool():
 
 
 def _control_tools():
-    from g3ku.agent.tools.tool_execution_control import (
-        StopToolExecutionTool,
-        WaitToolExecutionTool,
-    )
+    from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool
 
-    return [
-        WaitToolExecutionTool(lambda: None),
-        StopToolExecutionTool(lambda: None),
-    ]
+    return [StopToolExecutionTool(lambda: None)]
 
 
 def test_long_running_orchestration_and_control_tools_are_exempt() -> None:
-    """spawn_child_nodes 与 wait/stop_tool_execution 必须整体豁免外层机械超时；
+    """spawn_child_nodes 与 stop_tool_execution 必须整体豁免外层机械超时；
     瞬时协议工具保留 backstop（豁免=False），自持工具走 self_enforced 语义。"""
     spawn = _spawn_tool()
     assert spawn.exempt_universal_timeout is True

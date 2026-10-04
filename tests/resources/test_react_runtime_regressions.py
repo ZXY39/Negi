@@ -20,7 +20,6 @@ from g3ku.resources.registry import ResourceRegistry
 from g3ku.runtime.context.node_context_selection import NodeContextSelectionResult
 from g3ku.runtime.stage_prompt_compaction import STAGE_COMPACT_PREFIX
 from g3ku.runtime.tool_history import analyze_tool_call_history
-from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from main.errors import TaskPausedError
 from main.monitoring.log_service import (
     _EXECUTION_STAGE_MODE_SELF,
@@ -1135,10 +1134,9 @@ async def test_execution_root_replay_semantic_selection_includes_split_tools_wit
 
 
 @pytest.mark.asyncio
-async def test_react_loop_execution_watchdog_keeps_long_tool_inline_with_manager_present() -> None:
+async def test_react_loop_execution_watchdog_keeps_long_tool_inline() -> None:
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service)
-    loop._tool_execution_manager = ToolExecutionManager()
     heartbeat = _HeartbeatRecorder()
 
     result = await loop._execute_tool_raw(
@@ -1168,10 +1166,9 @@ async def test_react_loop_execution_watchdog_keeps_long_tool_inline_with_manager
 
 
 @pytest.mark.asyncio
-async def test_react_loop_acceptance_watchdog_keeps_long_tool_inline_with_manager_present() -> None:
+async def test_react_loop_acceptance_watchdog_keeps_long_tool_inline() -> None:
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service)
-    loop._tool_execution_manager = ToolExecutionManager()
     heartbeat = _HeartbeatRecorder()
 
     result = await loop._execute_tool_raw(
@@ -5575,7 +5572,6 @@ async def test_react_loop_execution_role_keeps_watchdog_inline_without_handoff(t
     )
     heartbeat = _HeartbeatRecorder()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
-    loop._tool_execution_manager = ToolExecutionManager()
 
     try:
         rendered = await loop._execute_tool(
@@ -5596,14 +5592,7 @@ async def test_react_loop_execution_role_keeps_watchdog_inline_without_handoff(t
             },
         )
 
-        wait_payload = await loop._tool_execution_manager.wait_execution(
-            "tool-exec:1",
-            wait_seconds=0.05,
-            poll_interval_seconds=0.01,
-        )
-
         assert rendered == "done"
-        assert wait_payload["status"] == "not_found"
         assert heartbeat.terminal_calls == []
     finally:
         store.close()
@@ -5631,7 +5620,6 @@ async def test_react_loop_execution_watchdog_poll_can_pause_long_tool_midflight(
 
     log_service = _FakeLogService()
     loop = ReActToolLoop(chat_backend=SimpleNamespace(), log_service=log_service, max_iterations=2)
-    loop._tool_execution_manager = ToolExecutionManager()
 
     async def _request_pause() -> None:
         await asyncio.sleep(0.03)

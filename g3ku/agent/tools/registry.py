@@ -21,7 +21,6 @@ from g3ku.runtime.tool_error_guidance import (
 )
 from g3ku.runtime.tool_result_status import is_error_like_tool_result
 from g3ku.runtime.tool_watchdog import (
-    actor_role_allows_detached_watchdog,
     actor_role_allows_watchdog,
     resolve_effective_tool_timeout,
     run_tool_with_hard_timeout,
@@ -307,11 +306,9 @@ class ToolRegistry:
                     return await tool.execute(**execute_kwargs)
             return await tool.execute(**execute_kwargs)
 
-        execution_manager = self._resolve_tool_execution_manager(runtime_context)
         if not self._should_use_watchdog(
             tool_name=tool_name,
             runtime_context=runtime_context,
-            execution_manager=execution_manager,
         ):
             if is_control_tool or self_enforced:
                 return await _invoke()
@@ -327,7 +324,6 @@ class ToolRegistry:
             tool_name=tool_name,
             arguments=params,
             runtime_context=runtime_context,
-            manager=execution_manager if actor_role_allows_detached_watchdog(runtime_context) else None,
             on_poll=(
                 (lambda poll: self._emit_watchdog_progress(tool_name=tool_name, poll=poll))
                 if runtime_context.get("on_progress")
@@ -342,7 +338,6 @@ class ToolRegistry:
         *,
         tool_name: str,
         runtime_context: dict[str, Any],
-        execution_manager: Any,
     ) -> bool:
         if not runtime_context:
             return False
@@ -352,8 +347,6 @@ class ToolRegistry:
             return False
         if tool_name in _CONTROL_TOOL_NAMES:
             return False
-        if execution_manager is not None:
-            return True
         if callable(runtime_context.get("tool_snapshot_supplier")):
             return True
         if runtime_context.get("cancel_token") is not None:
@@ -397,16 +390,6 @@ class ToolRegistry:
             result = callback(content)
         if inspect.isawaitable(result):
             await result
-
-    @staticmethod
-    def _resolve_tool_execution_manager(runtime_context: dict[str, Any]) -> Any:
-        manager = runtime_context.get("tool_execution_manager")
-        if manager is not None:
-            return manager
-        loop = runtime_context.get("loop")
-        if loop is not None:
-            return getattr(loop, "tool_execution_manager", None)
-        return None
 
     @staticmethod
     def _resolve_resource_manager(runtime_context: dict[str, Any]) -> Any:

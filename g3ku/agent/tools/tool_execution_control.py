@@ -8,23 +8,17 @@ from g3ku.agent.tools.base import Tool
 
 class _ToolExecutionControlTool(Tool):
     hide_universal_timeout_parameter = True
-    # wait/stop 自带受控等待窗口（wait_seconds 上限 600s），外层再套统一硬超时
-    # 会与内层窗口赛跑并把等待中途掐断（还会顺带丢失 detached 执行的登记），
+    # stop 自带受控停止窗口，外层再套统一硬超时会与它赛跑并把动作中途掐断，
     # 因此整族豁免外层机械超时。
     exempt_universal_timeout = True
 
     def __init__(
         self,
-        manager_getter: Callable[[], Any],
         task_service_getter: Callable[[], Any] | None = None,
         inline_registry_getter: Callable[[], Any] | None = None,
     ) -> None:
-        self._manager_getter = manager_getter
         self._task_service_getter = task_service_getter
         self._inline_registry_getter = inline_registry_getter
-
-    def _manager(self) -> Any:
-        return self._manager_getter()
 
     def _task_service(self) -> Any:
         if self._task_service_getter is None:
@@ -37,59 +31,6 @@ class _ToolExecutionControlTool(Tool):
         return self._inline_registry_getter()
 
 
-class WaitToolExecutionTool(_ToolExecutionControlTool):
-    @property
-    def name(self) -> str:
-        return "wait_tool_execution"
-
-    @property
-    def description(self) -> str:
-        return "Wait for a previously detached long-running tool execution. If wait_seconds is omitted, the default window grows as 30s, 60s, 120s, 240s, then 600s."
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "execution_id": {
-                    "type": "string",
-                    "description": "The execution id returned by a previous long-running tool handoff.",
-                },
-                "wait_seconds": {
-                    "type": "number",
-                    "description": "Optional custom wait window in seconds before returning another snapshot. If omitted, the default wait grows as 30s, 60s, 120s, 240s, then 600s.",
-                    "minimum": 0.1,
-                    "maximum": 600,
-                },
-            },
-            "required": ["execution_id"],
-        }
-
-    async def execute(
-        self,
-        execution_id: str,
-        wait_seconds: float | None = None,
-        __g3ku_runtime: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> str:
-        del __g3ku_runtime, kwargs
-        manager = self._manager()
-        if manager is None or not hasattr(manager, "wait_execution"):
-            return json.dumps(
-                {
-                    "status": "unavailable",
-                    "execution_id": str(execution_id or ""),
-                    "message": "后台工具执行管理器当前不可用，无法继续等待该执行。",
-                },
-                ensure_ascii=False,
-            )
-        payload = await manager.wait_execution(
-            str(execution_id or "").strip(),
-            wait_seconds=(max(0.1, float(wait_seconds)) if wait_seconds is not None else 0.0),
-        )
-        return json.dumps(payload, ensure_ascii=False)
-
-
 class StopToolExecutionTool(_ToolExecutionControlTool):
     @property
     def name(self) -> str:
@@ -98,8 +39,8 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
     @property
     def description(self) -> str:
         return (
-            "Stop a previously detached long-running tool execution, including any "
-            "registered subprocesses, when you decide waiting is no longer worthwhile. "
+            "Stop the tool that is currently running inline in this session, including "
+            "any registered subprocesses, when you decide it should end. "
             "If the supplied identifier is actually an async task id, fall back to "
             "cancelling that task."
         )
@@ -112,14 +53,14 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
                 "execution_id": {
                     "type": "string",
                     "description": (
-                        "The execution id returned by a previous long-running tool handoff. "
+                        "The execution id of the running tool. "
                         "If you only have an async task id, this tool will try to cancel "
                         "that task as a fallback."
                     ),
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Optional short reason for stopping the background execution.",
+                    "description": "Optional short reason for stopping the execution.",
                 },
             },
             "required": ["execution_id"],
@@ -196,16 +137,6 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
     ) -> str:
         del __g3ku_runtime, kwargs
         normalized_identifier = str(execution_id or "").strip()
-        manager = self._manager()
-        payload: dict[str, Any] | None = None
-        if manager is not None and hasattr(manager, "stop_execution"):
-            payload = await manager.stop_execution(
-                normalized_identifier,
-                reason=str(reason or "agent_requested_stop").strip() or "agent_requested_stop",
-            )
-            if str((payload or {}).get("status") or "").strip().lower() != "not_found":
-                return json.dumps(payload, ensure_ascii=False)
-
         inline_registry = self._inline_registry()
         if inline_registry is not None and hasattr(inline_registry, "stop_execution"):
             payload = await inline_registry.stop_execution(
@@ -224,9 +155,9 @@ class StopToolExecutionTool(_ToolExecutionControlTool):
 
         return json.dumps(
             {
-                "status": "unavailable",
+                "status": "not_found",
                 "execution_id": str(execution_id or ""),
-                "message": "后台工具执行管理器当前不可用，无法停止该执行。",
+                "message": "既没有找到本会话在跑的内联工具执行，也没有按这个标识找到可取消的异步任务。",
             },
             ensure_ascii=False,
         )

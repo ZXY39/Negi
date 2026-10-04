@@ -437,14 +437,6 @@ class _PersistingHeartbeatSession(_FakeHeartbeatSession):
         return result
 
 
-class _HeartbeatRecorder:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, object]]] = []
-
-    def enqueue_tool_background(self, *, session_id: str, payload: dict[str, object]) -> None:
-        self.calls.append((session_id, dict(payload)))
-
-
 class _HeartbeatController:
     def __init__(self) -> None:
         self.clear_calls: list[str] = []
@@ -461,26 +453,6 @@ class _HeartbeatReplayRecorder:
         _ = limit
         self.replay_calls.append(str(session_id or ""))
         return {"task_terminal": 0, "task_stall": 0}
-
-
-class _FakeToolExecutionManager:
-    def __init__(self, results: list[dict[str, object]]) -> None:
-        self._results = [dict(item) for item in results]
-        self.calls: list[tuple[str, float]] = []
-
-    async def wait_execution(self, execution_id: str, *, wait_seconds: float = 20.0, **kwargs) -> dict[str, object]:
-        _ = kwargs
-        self.calls.append((str(execution_id or ""), float(wait_seconds)))
-        if self._results:
-            return self._results.pop(0)
-        return {
-            "status": "background_running",
-            "execution_id": str(execution_id or ""),
-            "tool_name": "skill-installer",
-            "elapsed_seconds": 0.0,
-            "recommended_wait_seconds": 0.05,
-            "runtime_snapshot": {"summary_text": "still running"},
-        }
 
 
 def _sample_frontdoor_stage_state() -> dict[str, object]:
@@ -554,8 +526,7 @@ def _mock_workspace(monkeypatch, workspace: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_agent_session_exposes_latest_sidecar_tool_observation_in_reminder_snapshot() -> None:
-    heartbeat = _HeartbeatRecorder()
-    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None, web_session_heartbeat=heartbeat)
+    loop = SimpleNamespace(model="gpt-test", reasoning_effort=None)
     session = RuntimeAgentSession(loop, session_key="web:shared", channel="web", chat_id="shared")
     session._state.is_running = True
     session._state.status = "running"

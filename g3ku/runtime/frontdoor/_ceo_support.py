@@ -728,7 +728,6 @@ class CeoFrontDoorSupport:
                     arguments=normalized_arguments,
                     runtime_context=per_call_runtime,
                     snapshot_supplier=runtime_context.get("tool_snapshot_supplier"),
-                    manager=None,
                     inline_registry=inline_registry,
                     on_inline_registered=lambda entry: self._capture_inline_execution_id(
                         entry=entry,

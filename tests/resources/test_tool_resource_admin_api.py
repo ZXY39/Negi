@@ -2096,7 +2096,7 @@ async def test_ceo_session_delete_removes_session_owned_frontdoor_stage_archives
         await service.close()
 
 
-def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: Path, monkeypatch):
+def test_ceo_session_delete_clears_heartbeat_and_task_state(tmp_path: Path, monkeypatch):
     _mock_ceo_catalog_config(monkeypatch)
     class _SessionManager:
         def __init__(self, sessions: list[Session], paths: dict[str, Path]):
@@ -2151,16 +2151,6 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
         def clear_session(self, session_id: str) -> None:
             captured['heartbeat_cleared'] = session_id
 
-    class _ToolExecutionManager:
-        async def stop_session_executions(self, session_key: str, *, reason: str = 'session_deleted', **kwargs):
-            _ = kwargs
-            captured['stopped_session_key'] = session_key
-            captured['stop_reason'] = reason
-            return [
-                {'execution_id': 'tool-exec:1', 'status': 'stopped'},
-                {'execution_id': 'tool-exec:2', 'status': 'stopped'},
-            ]
-
     class _RuntimeManager:
         def get(self, session_id: str):
             _ = session_id
@@ -2181,7 +2171,6 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
     ceo_sessions.get_agent = lambda: SimpleNamespace(
         sessions=manager,
         main_task_service=_TaskService(),
-        tool_execution_manager=_ToolExecutionManager(),
         cancel_session_tasks=_cancel_session_tasks,
     )
     ceo_sessions.get_runtime_manager = lambda _agent: _RuntimeManager()
@@ -2196,10 +2185,7 @@ def test_ceo_session_delete_stops_detached_background_tool_executions(tmp_path: 
     assert response.status_code == 200
     payload = response.json()
     assert payload['deleted'] is True
-    assert payload['stopped_background_tool_count'] == 2
     assert captured == {
-        'stopped_session_key': current.key,
-        'stop_reason': 'session_deleted',
         'heartbeat_cleared': current.key,
         'removed_session': current.key,
         'cancelled_session': current.key,

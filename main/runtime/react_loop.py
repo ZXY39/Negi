@@ -51,7 +51,6 @@ from g3ku.runtime.tool_history import (
     iter_compaction_atomic_groups,
 )
 from g3ku.runtime.tool_watchdog import (
-    actor_role_allows_detached_watchdog,
     actor_role_allows_watchdog,
     resolve_effective_tool_timeout,
     run_tool_with_hard_timeout,
@@ -4368,11 +4367,6 @@ class ReActToolLoop:
                 arguments=arguments,
                 runtime_context=runtime_context,
                 snapshot_supplier=self._snapshot_supplier(runtime_context),
-                manager=(
-                    getattr(self, '_tool_execution_manager', None)
-                    if actor_role_allows_detached_watchdog(runtime_context)
-                    else None
-                ),
                 on_poll=lambda _poll: self._on_tool_watchdog_poll(runtime_context),
                 hard_timeout_seconds=None if (self_enforced or timeout_exempt) else effective_timeout,
                 universal_timeout_exempt=timeout_exempt,

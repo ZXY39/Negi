@@ -20,7 +20,7 @@ import httpx
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
-from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool, WaitToolExecutionTool
+from g3ku.agent.tools.tool_execution_control import StopToolExecutionTool
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.config.loader import get_config_path
 from g3ku.content import ContentNavigationService, artifact_ref_from_id
@@ -44,7 +44,6 @@ from g3ku.runtime.tool_visibility import (
     NODE_FIXED_BUILTIN_TOOL_NAMES,
     fixed_builtin_tool_name_set_for_actor_role,
 )
-from g3ku.runtime.tool_watchdog import ToolExecutionManager
 from g3ku.security import get_bootstrap_security_service
 from g3ku.update_apply import WEB_LOG_FILE
 from g3ku.utils.api_keys import parse_api_keys, resolve_api_key_concurrency_layout
@@ -608,7 +607,6 @@ class MainRuntimeService:
         self.memory_manager = None
         self._default_max_depth = max(0, int(default_max_depth or 0))
         self._hard_max_depth = max(self._default_max_depth, int(hard_max_depth or self._default_max_depth))
-        self.tool_execution_manager = ToolExecutionManager()
         self._builtin_tool_cache: dict[str, Tool] | None = None
         self._node_context_selection_cache: dict[tuple[str, str], dict[str, Any]] = {}
         parallel_enabled, max_parallel_tool_calls, max_parallel_child_pipelines = self._node_parallelism_settings(app_config)
@@ -643,7 +641,6 @@ class MainRuntimeService:
             lambda: self.ensure_runtime_config_current(force=False, reason='provider_retry_invalidation')
         )
         self._chat_backend = chat_backend
-        react_loop._tool_execution_manager = None
         self.model_key_concurrency_controller = ModelKeyConcurrencyController(
             resolve_model_limits=self._resolve_model_limit_payload,
         ) if execution_runtime_enabled else None
@@ -829,7 +826,7 @@ class MainRuntimeService:
         )
         self._started = False
         # _runtime_loop 装的是 AgentLoop（frontdoor/心跳桥要读它的 sessions、
-        # web_session_heartbeat、tool_execution_manager 等属性）；要往事件循环里
+        # web_session_heartbeat 等属性）；要往事件循环里
         # 线程安全投递的读者一律走 _event_loop，两者不得混用同一个字段。
         self._runtime_loop = None
         self._event_loop = None
@@ -4938,15 +4935,6 @@ class MainRuntimeService:
 
     def bind_runtime_loop(self, loop: Any | None) -> None:
         self._runtime_loop = loop
-        if loop is None:
-            return
-        manager = getattr(loop, 'tool_execution_manager', None)
-        if manager is None:
-            setattr(loop, 'tool_execution_manager', self.tool_execution_manager)
-            manager = self.tool_execution_manager
-        self.tool_execution_manager = manager
-        if hasattr(self, '_react_loop') and self._react_loop is not None:
-            setattr(self._react_loop, '_tool_execution_manager', None)
 
     @staticmethod
     def _stall_now_iso() -> str:
@@ -10628,9 +10616,6 @@ class MainRuntimeService:
         if str(actor_role or '').strip().lower() != 'ceo':
             return {}
         if self._builtin_tool_cache is None:
-            def manager_getter():
-                return self.tool_execution_manager
-
             def task_service_getter():
                 return self
 
@@ -10639,9 +10624,7 @@ class MainRuntimeService:
                 return getattr(runtime_loop, "inline_tool_execution_registry", None) if runtime_loop is not None else None
 
             self._builtin_tool_cache = {
-                'wait_tool_execution': WaitToolExecutionTool(manager_getter),
                 'stop_tool_execution': StopToolExecutionTool(
-                    manager_getter,
                     task_service_getter,
                     inline_registry_getter,
                 ),
