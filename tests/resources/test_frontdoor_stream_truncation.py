@@ -12,7 +12,6 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from g3ku.providers.base import LLMResponse
-from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import ModelProviderExhaustedError
 from g3ku.providers.streaming_timeouts import StreamingDiagnostics, consume_openai_like_chat_stream
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
@@ -108,17 +107,24 @@ async def test_diagnostics_histogram_tells_keepalive_only_stream_apart_from_thin
 
 
 @pytest.mark.asyncio
-async def test_adapter_carries_stream_incomplete_onto_ai_message() -> None:
+async def test_frontdoor_call_carries_stream_incomplete_onto_payload() -> None:
     async def _chat(**_kwargs):
         return LLMResponse(content=None, reasoning_content="想了一半", stream_incomplete=True)
 
-    adapter = G3kuChatModelAdapter(chat_backend=SimpleNamespace(chat=_chat), model_refs=["glm-5.2"])
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_chat_backend = lambda: SimpleNamespace(chat=_chat)
 
-    result = await adapter._agenerate([HumanMessage(content="推送日报")])
+    payload = await runner._call_model_with_tools(
+        messages=[{"role": "user", "content": "推送日报"}],
+        tool_schemas=[],
+        model_refs=["glm-5.2"],
+        parallel_tool_calls=None,
+        prompt_cache_key="",
+    )
 
-    message = result.generations[0].message
-    assert message.additional_kwargs["stream_incomplete"] is True
-    assert message.response_metadata["finish_reason"] == "stop"
+    assert payload["stream_incomplete"] is True
+    assert payload["reasoning_content"] == "想了一半"
+    assert payload["finish_reason"] == "stop"
 
 
 def _view(**overrides) -> SimpleNamespace:

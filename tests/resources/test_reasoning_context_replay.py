@@ -18,7 +18,6 @@ from g3ku.providers.responses_protocol_helpers import (
     _convert_messages,
     _sanitize_tool_call_history,
 )
-from g3ku.providers.base_chat_model_adapter import _as_message_dicts
 from g3ku.runtime.frontdoor.ceo_runner import CeoFrontDoorRunner
 from g3ku.runtime.frontdoor.message_builder import CeoMessageBuilder
 from main.models import NodeOutputEntry, NodeRecord, TaskRecord, TokenUsageSummary
@@ -168,23 +167,22 @@ def test_durable_projections_preserve_thinking_in_place() -> None:
     )
 
 
-def test_adapter_round_trip_reattaches_both_shapes() -> None:
-    dicts = _as_message_dicts(
+def test_sanitize_provider_messages_reattaches_both_reasoning_shapes() -> None:
+    sanitized = sanitize_provider_messages(
         [
-            HumanMessage(content="继续"),
-            AIMessage(
-                content="先看索引",
-                additional_kwargs={
-                    "reasoning_content": "我要再核一遍来源",
-                    "reasoning_items": [_REASONING_ITEM],
-                },
-            ),
+            {"role": "user", "content": "继续"},
+            {
+                "role": "assistant",
+                "content": "先看索引",
+                "reasoning_content": "我要再核一遍来源",
+                "reasoning_items": [_REASONING_ITEM],
+            },
         ]
     )
 
-    assert "reasoning_content" not in dicts[0]
-    assert dicts[1]["reasoning_content"] == "我要再核一遍来源"
-    assert dicts[1]["reasoning_items"] == [_REASONING_ITEM]
+    assert "reasoning_content" not in sanitized[0]
+    assert sanitized[1]["reasoning_content"] == "我要再核一遍来源"
+    assert sanitized[1]["reasoning_items"] == [_REASONING_ITEM]
 
 
 def _runner() -> CeoFrontDoorRunner:

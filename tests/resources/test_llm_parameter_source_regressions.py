@@ -5,6 +5,7 @@ import importlib
 from types import SimpleNamespace
 
 import pytest
+from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from langchain_core.messages import HumanMessage
 from langchain_core.messages.utils import convert_to_messages
 
@@ -20,7 +21,6 @@ from g3ku.llm_config.models import NormalizedProviderConfig, ProviderConfigDraft
 from g3ku.llm_config.normalization import normalize_draft
 from g3ku.llm_config.template_registry import TemplateRegistry
 from g3ku.providers.base import LLMResponse, ToolCallRequest
-from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _provider_tool_schemas
 from g3ku.providers.provider_factory import ProviderTarget
 from g3ku.runtime.frontdoor._ceo_support import _DirectProviderChatBackend
@@ -766,7 +766,7 @@ async def test_direct_provider_chat_backend_sanitizes_internal_runtime_message_f
 
 
 @pytest.mark.asyncio
-async def test_g3ku_chat_model_adapter_preserves_nested_tool_schema_when_sending_tools() -> None:
+async def test_frontdoor_call_preserves_nested_tool_schema_when_sending_tools() -> None:
     captured: list[dict[str, object]] = []
 
     class _Backend:
@@ -777,26 +777,30 @@ async def test_g3ku_chat_model_adapter_preserves_nested_tool_schema_when_sending
     registry = ToolRegistry()
     registry.register(_NestedSchemaTool())
     tool_schemas = _provider_tool_schemas({tool.name: tool for tool in registry.list_tools()})
-    adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_chat_backend = lambda: _Backend()
 
-    await adapter._agenerate(
-        [HumanMessage(content="hello")],
-        tools=tool_schemas,
+
+    await runner._call_model_with_tools(
+        messages=[{"role": "user", "content": "hello"}],
+        tool_schemas=tool_schemas,
+        model_refs=["demo:model"],
+        parallel_tool_calls=None,
+        prompt_cache_key="",
     )
 
     tool_payload = dict(captured[0]["tools"][0]["function"])
     parameters = dict(tool_payload["parameters"])
     items_schema = dict((parameters.get("properties") or {}).get("items") or {})
     nested_item = dict(items_schema.get("items") or {})
-    nested_properties = dict(nested_item.get("properties") or {})
 
     assert parameters.get("required") == ["items"]
     assert nested_item.get("required") == ["kind", "value"]
-    assert dict(nested_properties.get("kind") or {}).get("enum") == ["profile", "preference"]
+    assert dict((nested_item.get("properties") or {}).get("kind") or {}).get("enum") == ["profile", "preference"]
 
 
 @pytest.mark.asyncio
-async def test_g3ku_chat_model_adapter_preserves_provider_request_payload_metadata() -> None:
+async def test_frontdoor_call_preserves_provider_request_payload_metadata() -> None:
     class _Backend:
         async def chat(self, **kwargs):
             _ = kwargs
@@ -814,23 +818,31 @@ async def test_g3ku_chat_model_adapter_preserves_provider_request_payload_metada
                 },
             )
 
-    adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_chat_backend = lambda: _Backend()
 
-    result = await adapter._agenerate([HumanMessage(content="hello")])
-    message = result.generations[0].message
 
-    assert message.response_metadata["provider_request_meta"] == {
+    payload = await runner._call_model_with_tools(
+        messages=[{"role": "user", "content": "hello"}],
+        tool_schemas=[],
+        model_refs=["demo:model"],
+        parallel_tool_calls=None,
+        prompt_cache_key="",
+    )
+
+    assert payload["provider_request_meta"] == {
         "provider": "responses",
         "endpoint": "https://example.test/v1/responses",
     }
-    assert message.response_metadata["provider_request_body"] == {
+    assert payload["provider_request_body"] == {
         "model": "gpt-5.4-mini",
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
         "tool_choice": "auto",
     }
 
+
 @pytest.mark.asyncio
-async def test_g3ku_chat_model_adapter_forwards_text_delta_callback() -> None:
+async def test_frontdoor_call_forwards_text_delta_callback() -> None:
     captured: list[dict[str, object]] = []
     deltas: list[str] = []
 
@@ -843,20 +855,25 @@ async def test_g3ku_chat_model_adapter_forwards_text_delta_callback() -> None:
                 callback("K")
             return LLMResponse(content="OK", finish_reason="stop")
 
-    adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_chat_backend = lambda: _Backend()
 
-    result = await adapter._agenerate(
-        [HumanMessage(content="hello")],
+    payload = await runner._call_model_with_tools(
+        messages=[{"role": "user", "content": "hello"}],
+        tool_schemas=[],
+        model_refs=["demo:model"],
+        parallel_tool_calls=None,
+        prompt_cache_key="",
         on_text_delta=deltas.append,
     )
 
-    assert result.generations[0].message.content == "OK"
+    assert payload["content"] == "OK"
     assert callable(captured[0]["on_text_delta"])
     assert deltas == ["O", "K"]
 
 
 @pytest.mark.asyncio
-async def test_g3ku_chat_model_adapter_forwards_model_retry_status_callback() -> None:
+async def test_frontdoor_call_forwards_model_retry_status_callback() -> None:
     captured: list[dict[str, object]] = []
 
     class _Backend:
@@ -867,10 +884,16 @@ async def test_g3ku_chat_model_adapter_forwards_model_retry_status_callback() ->
     async def callback(status):
         return status
 
-    adapter = G3kuChatModelAdapter(chat_backend=_Backend(), default_model="demo:model")
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    runner._resolve_chat_backend = lambda: _Backend()
 
-    await adapter._agenerate(
-        [HumanMessage(content="hello")],
+
+    await runner._call_model_with_tools(
+        messages=[{"role": "user", "content": "hello"}],
+        tool_schemas=[],
+        model_refs=["demo:model"],
+        parallel_tool_calls=None,
+        prompt_cache_key="",
         on_model_retry_status=callback,
     )
 
