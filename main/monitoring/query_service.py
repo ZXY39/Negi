@@ -91,6 +91,10 @@ _LIVE_FRAME_CACHE_MAX_TASKS = 4
 # 「刷新」走的 token 账本口本来就按 300 取数。要更多请显式传 `model_call_limit`。
 _TASK_SNAPSHOT_MODEL_CALL_ROWS = 300
 
+# 按页取明细的单页上限。面板每页渲染 100 条，实测一页 100 行 = 76 KB / 建模 2.6 ms，
+# 200 行是"跳转输入框"能要到的一次最多给多少，避免有人输 size=100000 把窗口变回全量账本。
+_TASK_MODEL_CALL_PAGE_MAX_SIZE = 200
+
 # 按模型 token 明细的记忆化上限（按任务存，FIFO 淘汰）。这份聚合每次都要用 JSON1 把该任务
 # 全部 `task_node_details.payload_json` 解一遍（实盘在跑任务 938 行 / 61.07 MB），
 # wall 采样里同一条栈累计 10.5 s / 180 s；快照是被反复读的一侧，节点写才是变更源。
@@ -1609,6 +1613,29 @@ class TaskQueryService:
         except Exception:
             return
 
+    @staticmethod
+    def _model_call_record(event: dict[str, Any]) -> TaskModelCallRecord:
+        payload = dict(event.get('payload') or {})
+        return TaskModelCallRecord(
+            call_index=int(payload.get('call_index') or 0),
+            node_id=str(event.get('node_id') or payload.get('node_id') or '').strip(),
+            created_at=str(event.get('created_at') or ''),
+            call_kind=str(payload.get('call_kind') or '').strip(),
+            prepared_message_count=int(payload.get('prepared_message_count') or 0),
+            prepared_message_chars=int(payload.get('prepared_message_chars') or 0),
+            response_tool_call_count=int(payload.get('response_tool_call_count') or 0),
+            delta_usage=TokenUsageSummary.model_validate(payload.get('delta_usage') or {}),
+            delta_usage_by_model=[
+                ModelTokenUsageRecord.model_validate(item)
+                for item in list(payload.get('delta_usage_by_model') or [])
+                if isinstance(item, dict)
+            ],
+            duration_ms=_optional_int(payload.get('duration_ms')),
+            first_token_ms=_optional_int(payload.get('first_token_ms')),
+            thinking_tokens=_optional_int(payload.get('thinking_tokens')),
+            stream_incomplete=bool(payload.get('stream_incomplete') or False),
+        )
+
     def _recent_model_calls(self, task_id: str, *, limit: int | None = 50) -> list[TaskModelCallRecord]:
         """最近若干条逐次调用。`limit=None` 按 `_TASK_SNAPSHOT_MODEL_CALL_ROWS` 收口，
         不等于"整任务账本"——账本随调用数线性增长（实盘单任务 31686 行 / 75 MB），
@@ -1619,29 +1646,64 @@ class TaskQueryService:
             return records
         rows = max(1, int(limit)) if limit is not None else _TASK_SNAPSHOT_MODEL_CALL_ROWS
         for event in list(self._store.list_task_model_calls(task_id, limit=rows) or []):
-            payload = dict(event.get('payload') or {})
-            records.append(
-                TaskModelCallRecord(
-                    call_index=int(payload.get('call_index') or 0),
-                    node_id=str(event.get('node_id') or payload.get('node_id') or '').strip(),
-                    created_at=str(event.get('created_at') or ''),
-                    call_kind=str(payload.get('call_kind') or '').strip(),
-                    prepared_message_count=int(payload.get('prepared_message_count') or 0),
-                    prepared_message_chars=int(payload.get('prepared_message_chars') or 0),
-                    response_tool_call_count=int(payload.get('response_tool_call_count') or 0),
-                    delta_usage=TokenUsageSummary.model_validate(payload.get('delta_usage') or {}),
-                    delta_usage_by_model=[
-                        ModelTokenUsageRecord.model_validate(item)
-                        for item in list(payload.get('delta_usage_by_model') or [])
-                        if isinstance(item, dict)
-                    ],
-                    duration_ms=_optional_int(payload.get('duration_ms')),
-                    first_token_ms=_optional_int(payload.get('first_token_ms')),
-                    thinking_tokens=_optional_int(payload.get('thinking_tokens')),
-                    stream_incomplete=bool(payload.get('stream_incomplete') or False),
-                )
-            )
+            records.append(self._model_call_record(event))
         return records[-rows:]
+
+    def get_task_model_call_page(
+        self,
+        task_id: str,
+        *,
+        page: int = 1,
+        size: int = 100,
+        anchor_seq: int | None = None,
+    ) -> dict[str, Any] | None:
+        """逐次调用明细的按页取数口：只回一页，**不回按模型 rollup**。
+
+        翻页要的是"点了才取那一页"，而 `token_usage_by_model` 那份聚合与明细行无关
+        （它读 `task_node_details`，实盘 1,227 行 / 14.33 MB，实测一跳 80–160 ms），
+        带上它就把每页 8 ms 的窄口变成 150 ms。
+
+        `anchor_seq` 是进入翻页态那一刻的账本尾部 seq：计数与偏移都在它之下发生，所以
+        页数不会随新到达的调用往后漂（实盘活跃窗口 2.9 行/分 ⇒ 一整页 34 分钟漂完）。
+        """
+        normalized = str(task_id or '').strip()
+        if self._store.get_task(normalized) is None:
+            return None
+        size = max(1, min(int(size or 0), _TASK_MODEL_CALL_PAGE_MAX_SIZE))
+        anchor = int(anchor_seq or 0)
+        if anchor <= 0:
+            anchor = self._store.get_task_model_call_max_seq(normalized)
+        if anchor <= 0:
+            return {
+                'task_id': normalized,
+                'page': 1,
+                'size': size,
+                'anchor_seq': 0,
+                'total_calls': 0,
+                'total_pages': 1,
+                'model_calls': [],
+            }
+        total = self._store.count_task_model_calls(normalized, max_seq=anchor)
+        total_pages = max(1, (total + size - 1) // size)
+        current = min(max(1, int(page or 1)), total_pages)
+        events = list(
+            self._store.list_task_model_calls(
+                normalized,
+                limit=size,
+                offset=(current - 1) * size,
+                max_seq=anchor,
+            ) or []
+        )
+        return {
+            'task_id': normalized,
+            'page': current,
+            'size': size,
+            'anchor_seq': anchor,
+            'total_calls': total,
+            'total_pages': total_pages,
+            'model_calls': [self._model_call_record(event).model_dump(mode='json') for event in events],
+        }
+
 
     def _projection_token_usage_by_model(self, task_id: str) -> list[ModelTokenUsageRecord]:
         """按模型 token 明细，按节点写戳记忆化。

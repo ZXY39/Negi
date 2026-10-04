@@ -3177,18 +3177,36 @@ class SQLiteTaskStore:
         )
         return int(row['total']) if row is not None else 0
 
-    def count_task_model_calls(self, task_id: str) -> int:
+    def count_task_model_calls(self, task_id: str, *, max_seq: int | None = None) -> int:
         """逐次调用条数走计数口。
 
         `list_task_model_calls(limit=None)` 会把整任务账本读回（实盘单任务 31686 行 /
         75 MB，冷页一次 18.4 s），而界面只需要"任务开始以来共 N 次调用"这一个数。
         COUNT 走覆盖索引 `idx_task_model_calls_task_id_seq`，实测热 1.4–4 ms。
+
+        `max_seq` 给翻页态用：按锚点封顶计数，页数才不会随新到达的调用往后漂。
         """
+        normalized = str(task_id or '').strip()
+        if max_seq is None:
+            row = self._fetchone(
+                'SELECT COUNT(*) AS total FROM task_model_calls WHERE task_id = ?',
+                (normalized,),
+            )
+        else:
+            row = self._fetchone(
+                'SELECT COUNT(*) AS total FROM task_model_calls WHERE task_id = ? AND seq <= ?',
+                (normalized, int(max_seq)),
+            )
+        return int(row['total']) if row is not None else 0
+
+    def get_task_model_call_max_seq(self, task_id: str) -> int:
         row = self._fetchone(
-            'SELECT COUNT(*) AS total FROM task_model_calls WHERE task_id = ?',
+            'SELECT MAX(seq) AS max_seq FROM task_model_calls WHERE task_id = ?',
             (str(task_id or '').strip(),),
         )
-        return int(row['total']) if row is not None else 0
+        if row is None or row['max_seq'] is None:
+            return 0
+        return int(row['max_seq'])
 
     def get_task_node(self, node_id: str) -> TaskProjectionNodeRecord | None:
         row = self._fetchone('SELECT payload_json FROM task_nodes WHERE node_id = ?', (node_id,))
@@ -3552,17 +3570,41 @@ class SQLiteTaskStore:
             return int(cursor.lastrowid or 0)
         return self._run_write(operation)
 
-    def list_task_model_calls(self, task_id: str, *, limit: int | None = 50) -> list[dict[str, object]]:
+    def list_task_model_calls(
+        self,
+        task_id: str,
+        *,
+        limit: int | None = 50,
+        offset: int = 0,
+        max_seq: int | None = None,
+    ) -> list[dict[str, object]]:
+        # `max_seq` 把读窗封顶在一个 seq 上（翻页锚点），`offset` 只在该窗内偏移。
+        # 深页实测：49,458 偏移取 100 行 3.5 ms（走 idx_task_model_calls_task_id_seq）。
         if limit is None:
             rows = self._fetchall(
                 'SELECT seq, task_id, node_id, created_at, payload_json FROM task_model_calls WHERE task_id = ? ORDER BY seq DESC',
                 (task_id,),
             )
-        else:
+        elif max_seq is None and int(offset or 0) <= 0:
             rows = self._fetchall(
                 'SELECT seq, task_id, node_id, created_at, payload_json FROM task_model_calls WHERE task_id = ? ORDER BY seq DESC LIMIT ?',
                 (task_id, max(1, int(limit or 50))),
             )
+        else:
+            sql = (
+                'SELECT seq, task_id, node_id, created_at, payload_json FROM task_model_calls '
+                'WHERE task_id = ?'
+            )
+            params: list[object] = [task_id]
+            if max_seq is not None:
+                sql += ' AND seq <= ?'
+                params.append(int(max_seq))
+            sql += ' ORDER BY seq DESC LIMIT ?'
+            params.append(max(1, int(limit or 50)))
+            if int(offset or 0) > 0:
+                sql += ' OFFSET ?'
+                params.append(int(offset))
+            rows = self._fetchall(sql, tuple(params))
         items: list[dict[str, object]] = []
         for row in rows:
             payload = json.loads(row['payload_json'])

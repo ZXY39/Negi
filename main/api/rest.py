@@ -126,6 +126,34 @@ async def get_task_token_ledger(
     return {'ok': True, **payload}
 
 
+@router.get('/tasks/{task_id}/model-call-page')
+async def get_task_model_call_page(
+    task_id: str,
+    page: int = Query(1, ge=1),
+    size: int = Query(100, ge=1, le=200),
+    anchor: int | None = Query(None),
+):
+    """模型调用明细的按页取数口：一页明细 + 锚点下的总条数/总页数，不带按模型 rollup。
+
+    前端底栏的"共 N 页"用快照计数显示，点了才按 `page` 取；`anchor` 是进入翻页态时的
+    账本尾部 seq，服务端在它之下计数与偏移，页数才不会随新到达的调用往后漂。
+    """
+    task_id = _ensure_task_route_id(task_id)
+    service = _service()
+    await service.startup()
+    task_id = service.normalize_task_id(task_id)
+    payload = await asyncio.to_thread(
+        service.get_task_model_call_page_payload,
+        task_id,
+        page=page,
+        size=size,
+        anchor_seq=anchor,
+    )
+    if payload is None:
+        raise HTTPException(status_code=404, detail='task_not_found')
+    return {'ok': True, **payload}
+
+
 @router.get('/tasks/{task_id}/tree-snapshot')
 async def get_task_tree_snapshot(
     task_id: str,

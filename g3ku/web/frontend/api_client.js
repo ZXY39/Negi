@@ -675,6 +675,18 @@ class ApiClient {
         });
     }
 
+    static async getTaskModelCallPage(taskId, { page = 1, size = 100, anchor = null } = {}) {
+        // 明细按页取数：只回一页，不带按模型 rollup。anchor 为 null 时服务端按当前账本
+        // 尾部起算，之后每次翻页都回传同一个 anchor，页号才不会随新调用漂移。
+        const params = { page, size };
+        if (anchor !== null && anchor !== undefined && Number(anchor) > 0) params.anchor = Number(anchor);
+        return this._request("GET", `/api/tasks/${taskId}/model-call-page`, {
+            params,
+            requestKey: `tasks:model-call-page:${taskId}`,
+            timeoutMs: 30000,
+        });
+    }
+
     static async getTaskNodeDetail(taskId, nodeId, { detailLevel = "summary" } = {}) {
         const normalizedDetailLevel = String(detailLevel || "summary").trim().toLowerCase() === "full"
             ? "full"

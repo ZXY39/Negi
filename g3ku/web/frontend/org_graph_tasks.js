@@ -1494,6 +1494,8 @@ function releaseTaskDetailRetainedState() {
     if (S.taskNodeErrorHistories) S.taskNodeErrorHistories = {};
     S.currentNodeDetail = null;
     S.recentModelCalls = [];
+    S.taskModelCallPaging = null;
+    S.taskModelCallPageRows = [];
     S.taskErrorLogs = [];
     S.taskArtifacts = [];
     S.selectedArtifactId = "";
@@ -1519,6 +1521,9 @@ function resetTaskView() {
     S.frontier = [];
     S.recentModelCalls = [];
     S.taskModelCallsPage = 1;
+    S.taskModelCallPaging = null;
+    S.taskModelCallPageRows = [];
+    S.taskModelCallPageLoading = false;
     S.taskModelCallsQuery = "";
     S.taskModelCallsPageSize = typeof TASK_MODEL_CALLS_PAGE_SIZE === "number" && TASK_MODEL_CALLS_PAGE_SIZE > 0
         ? TASK_MODEL_CALLS_PAGE_SIZE
@@ -1782,19 +1787,25 @@ function renderTaskTokenStats(options = {}) {
             `;
         }).join("")
         : '<div class="empty-state task-token-empty">当前只有任务级统计，尚无按模型明细。</div>';
-    const recentCallMarkup = recentModelCalls.length
+    // 快照态即使取回空页也要保留卡片：底栏的「回到最新」是唯一出口。
+    const recentCallMarkup = (recentModelCalls.length || modelCallPageMeta.historical)
         ? `
             <div class="task-token-call-card">
                 <div class="task-token-call-head">
                     <div class="task-token-call-head-title">
                         <h3>模型调用明细</h3>
-                        <p>${esc(taskModelCallLedgerNote(recentModelCalls.length, S.taskSummary?.total_model_calls, modelCallPageMeta.pageSize))}</p>
+                        <p>${esc(taskModelCallLedgerNote(
+                            modelCallPageMeta.historical ? modelCallPageMeta.grandTotal : recentModelCalls.length,
+                            modelCallPageMeta.historical ? modelCallPageMeta.grandTotal : S.taskSummary?.total_model_calls,
+                            modelCallPageMeta.pageSize,
+                        ))}</p>
                     </div>
                     <div class="task-token-call-tools">
                         <input type="search" class="task-token-call-search" data-task-model-call-search
-                            placeholder="搜索序号 / 节点 ID / 类型 / 模型名称" aria-label="搜索模型调用明细"
+                            placeholder="${modelCallPageMeta.historical ? "搜索本页" : "搜索序号 / 节点 ID / 类型 / 模型名称"}"
+                            aria-label="搜索模型调用明细"
                             value="${esc(modelCallQuery)}">
-                        <button class="toolbar-btn ghost" type="button" data-task-model-call-refresh title="重新取数：总量与最近 300 条调用明细">刷新</button>
+                        <button class="toolbar-btn ghost" type="button" data-task-model-call-refresh title="${modelCallPageMeta.historical ? "按最新账本重算页号并重取本页" : "重新取数：总量与最近 300 条调用明细"}">刷新</button>
                     </div>
                 </div>
                 <div class="task-token-call-table-region" data-task-model-call-region>
@@ -1920,19 +1931,55 @@ function formatModelCallTime(value) {
     return sameDay ? time : `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${time}`;
 }
 
+// 历史快照态：明细页来自服务端按页取数口，行不进 S.recentModelCalls（那条数组只涨
+// 不缩），实时事件也不再插入——页号是按锚点算的，插进来会让整页往后漂。
+function isTaskModelCallHistorical() {
+    const paging = S.taskModelCallPaging;
+    return !!(paging && Number(paging.anchor_seq || 0) > 0);
+}
+
+function compareTaskModelCalls(a, b) {
+    const timeDiff = taskModelCallTimeValue(b) - taskModelCallTimeValue(a);
+    if (timeDiff !== 0) return timeDiff;
+    return Number(b.call_index || 0) - Number(a.call_index || 0);
+}
+
 function taskModelCallViewState() {
+    const query = String(S.taskModelCallsQuery || "").trim();
+    if (isTaskModelCallHistorical()) {
+        const paging = S.taskModelCallPaging;
+        const rows = (Array.isArray(S.taskModelCallPageRows) ? S.taskModelCallPageRows : [])
+            .map(normalizeTaskModelCall)
+            .sort(compareTaskModelCalls);
+        const shown = query ? rows.filter((call) => taskModelCallMatchesQuery(call, query)) : rows.slice();
+        const size = Number(paging.size || taskModelCallsPageSize());
+        const page = Number(paging.page || 1);
+        const grandTotal = Number(paging.total_calls || 0);
+        return {
+            calls: rows,
+            filtered: shown,
+            query,
+            historical: true,
+            meta: {
+                total: rows.length,
+                pageSize: size,
+                totalPages: Math.max(1, Number(paging.total_pages || 1)),
+                currentPage: page,
+                startIndex: rows.length ? ((page - 1) * size) + 1 : 0,
+                endIndex: rows.length ? Math.min(page * size, grandTotal) : 0,
+                grandTotal,
+                historical: true,
+                items: shown,
+            },
+        };
+    }
     const calls = Array.isArray(S.recentModelCalls)
         ? S.recentModelCalls.map(normalizeTaskModelCall)
         : [];
-    calls.sort((a, b) => {
-        const timeDiff = taskModelCallTimeValue(b) - taskModelCallTimeValue(a);
-        if (timeDiff !== 0) return timeDiff;
-        return Number(b.call_index || 0) - Number(a.call_index || 0);
-    });
-    const query = String(S.taskModelCallsQuery || "").trim();
+    calls.sort(compareTaskModelCalls);
     const filtered = query ? calls.filter((call) => taskModelCallMatchesQuery(call, query)) : calls.slice();
-    const meta = paginateTaskModelCalls(filtered);
-    return { calls, filtered, meta, query };
+    const meta = paginateTaskModelCalls(filtered, Number(S.taskSummary?.total_model_calls || 0));
+    return { calls, filtered, meta, query, historical: false };
 }
 
 function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
@@ -1998,10 +2045,14 @@ function renderTaskTokenCallTableMarkup(meta, filteredCalls, query) {
             </table>
         </div>
         <div class="task-token-call-footer">
-            <div class="task-token-call-page-info">${esc(taskModelCallPageSummary(meta))}</div>
+            <div class="task-token-call-page-info">${esc(taskModelCallPageSummary(meta))}${meta.historical ? " · 历史快照" : ""}</div>
             <div class="task-token-call-actions">
+                ${meta.historical ? '<button class="toolbar-btn ghost" type="button" data-task-model-call-live>回到最新</button>' : ""}
                 <button class="toolbar-btn ghost" type="button" data-task-model-call-page="prev" ${meta.currentPage <= 1 ? "disabled" : ""}>上一页</button>
                 <button class="toolbar-btn ghost" type="button" data-task-model-call-page="next" ${meta.currentPage >= meta.totalPages ? "disabled" : ""}>下一页</button>
+                <input class="task-token-call-search task-token-call-jump" type="number" min="1" max="${esc(String(meta.totalPages))}"
+                    data-task-model-call-jump aria-label="跳转到页" placeholder="页">
+                <button class="toolbar-btn ghost" type="button" data-task-model-call-goto ${S.taskModelCallPageLoading ? "disabled" : ""}>跳转</button>
             </div>
         </div>
     `;
@@ -2027,13 +2078,17 @@ function taskModelCallsPageSize() {
     return Number.isInteger(next) && next > 0 ? next : fallback;
 }
 
-function paginateTaskModelCalls(items) {
+function paginateTaskModelCalls(items, grandTotal = 0) {
     const total = Array.isArray(items) ? items.length : 0;
     const pageSize = taskModelCallsPageSize();
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const loadedPages = Math.max(1, Math.ceil(total / pageSize));
+    // 页号按整本账本算，不按已加载的行数算：底栏要显示"共 498 页"，而明细只带最近
+    // 一窗（实盘单任务 49,758 行 / 123.9 MB，300 条窗口只覆盖 1 小时 42 分）。
+    const full = Math.max(Number(grandTotal || 0), total);
+    const totalPages = Math.max(loadedPages, Math.ceil(full / pageSize));
     const requestedPage = Number(S.taskModelCallsPage || 1);
     const currentPage = Number.isFinite(requestedPage)
-        ? Math.min(Math.max(1, Math.floor(requestedPage)), totalPages)
+        ? Math.min(Math.max(1, Math.floor(requestedPage)), loadedPages)
         : 1;
     const startIndex = total ? ((currentPage - 1) * pageSize) + 1 : 0;
     const endIndex = total ? Math.min(currentPage * pageSize, total) : 0;
@@ -2042,24 +2097,92 @@ function paginateTaskModelCalls(items) {
     S.taskModelCallsPageSize = pageSize;
     return {
         total,
+        grandTotal: full,
         pageSize,
         totalPages,
         currentPage,
         startIndex,
         endIndex,
+        historical: false,
         items: total ? items.slice(startOffset, startOffset + pageSize) : [],
     };
 }
 
 function taskModelCallPageSummary(meta) {
-    if (!meta.total) return "第 1/1 页 · 共 0 条";
-    return `第 ${formatTokenCount(meta.currentPage)}/${formatTokenCount(meta.totalPages)} 页 · 显示 ${formatTokenCount(meta.startIndex)}-${formatTokenCount(meta.endIndex)} / 共 ${formatTokenCount(meta.total)} 条`;
+    const grand = Number(meta.grandTotal || meta.total || 0);
+    const pages = Math.max(1, Number(meta.totalPages || 1));
+    if (!meta.total) return `第 1/${formatTokenCount(pages)} 页 · 共 ${formatTokenCount(grand)} 条`;
+    return `第 ${formatTokenCount(meta.currentPage)}/${formatTokenCount(pages)} 页 · 显示 ${formatTokenCount(meta.startIndex)}-${formatTokenCount(meta.endIndex)} / 共 ${formatTokenCount(grand)} 条`;
 }
 
 function setTaskModelCallsPage(page) {
     const next = Number(page);
-    S.taskModelCallsPage = Number.isFinite(next) ? Math.max(1, Math.floor(next)) : 1;
+    const target = Number.isFinite(next) ? Math.max(1, Math.floor(next)) : 1;
+    if (isTaskModelCallHistorical()) {
+        void loadTaskModelCallPage(target);
+        return;
+    }
+    const loadedPages = Math.ceil((Array.isArray(S.recentModelCalls) ? S.recentModelCalls.length : 0) / taskModelCallsPageSize());
+    // 窗口内仍走本地切片（零请求）；越过窗口才发那一跳——点了才加载。
+    if (target <= loadedPages) {
+        S.taskModelCallsPage = target;
+        refreshTaskTokenCallTable();
+        return;
+    }
+    void loadTaskModelCallPage(target);
+}
+
+function setTaskModelCallPagerBusy(busy) {
+    const region = U.taskTokenContent?.querySelector?.("[data-task-model-call-region]") || null;
+    if (!region || typeof region.querySelectorAll !== "function") return;
+    region.querySelectorAll("[data-task-model-call-page],[data-task-model-call-goto]").forEach((node) => {
+        node.disabled = !!busy;
+    });
+}
+
+async function loadTaskModelCallPage(page, { rebase = false } = {}) {
+    const taskId = String(S.currentTaskId || "").trim();
+    if (!taskId || S.taskModelCallPageLoading) return;
+    S.taskModelCallPageLoading = true;
+    setTaskModelCallPagerBusy(true);
+    let payload = null;
+    let failure = null;
+    try {
+        payload = await ApiClient.getTaskModelCallPage(taskId, {
+            page,
+            size: taskModelCallsPageSize(),
+            anchor: rebase ? null : (S.taskModelCallPaging?.anchor_seq || null),
+        });
+    } catch (error) {
+        failure = error;
+    } finally {
+        S.taskModelCallPageLoading = false;
+        setTaskModelCallPagerBusy(false);
+    }
+    if (!payload) {
+        if (failure) showToast({ title: "加载失败", text: failure?.message || "未知错误", kind: "error" });
+        return;
+    }
+    if (String(S.currentTaskId || "").trim() !== taskId) return;
+    S.taskModelCallPaging = {
+        anchor_seq: Number(payload.anchor_seq || 0),
+        page: Number(payload.page || page),
+        size: Number(payload.size || taskModelCallsPageSize()),
+        total_calls: Number(payload.total_calls || 0),
+        total_pages: Number(payload.total_pages || 1),
+    };
+    S.taskModelCallsPage = S.taskModelCallPaging.page;
+    S.taskModelCallPageRows = (Array.isArray(payload.model_calls) ? payload.model_calls : []).map(normalizeTaskModelCall);
     refreshTaskTokenCallTable();
+}
+
+// 「回到最新」：退出快照态、把实时合流打开，并重取最近一窗（刷新口自带尾部 300 条）。
+function exitTaskModelCallHistory() {
+    if (!isTaskModelCallHistorical()) return;
+    S.taskModelCallPaging = null;
+    S.taskModelCallPageRows = [];
+    S.taskModelCallsPage = 1;
+    void refreshTaskTokenLedger();
 }
 
 async function loadTaskDetail(taskId, { preserveView = false, reopenSocket = true } = {}) {
@@ -2157,6 +2280,8 @@ function handleTaskEvent(payload) {
         return;
     }
     if (payload.type === "task.model.call") {
+        // 历史快照态不收实时行：页号按锚点算，插进窗口会让已加载的行整体往后漂。
+        if (isTaskModelCallHistorical()) return;
         const nextCall = normalizeTaskModelCall(payload.data || {});
         S.recentModelCalls = mergeTaskModelCallRows(S.recentModelCalls, [nextCall]);
         renderTaskTokenStats();

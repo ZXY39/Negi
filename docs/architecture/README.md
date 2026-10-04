@@ -107,7 +107,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 模型配置弹窗里一打开下拉，整张表单就往上跳或弹窗变高 → `web-and-admin.md`「Frontend Theme And Layout Contract」（展开面板必须脱离滚动容器挂到 body）
 - 验收/节点把合法 PDF（或图片、xlsx 等二进制交付物）判成几十字节空壳、或在其上搜索 `%PDF` 等签名 0 命中 → `tool-hydration-and-callable-chain.md`「外置工具结果信封」（二进制目标的展示契约、字节级搜索与 `filesystem_stat` 只读测量通道）
 - 节点 error_text 是不带 `Error executing` 前缀的裸异常（`FileNotFoundError: …png` 一类）而对应工具结果显示 success、或 `content_open` 声称图片已打开却没有进上下文 → `tool-and-skill-system.md`「fixed builtin tools」（图片 reopen 的存在性校验与 overlay 单图降级）
-- Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、点「刷新」看似没反应或总数与明细都不动、副标题的总输入比顶部大一个缓存命中、明细行数开着开着变少（跨节点同序号顶行）、模型调用明细按时间倒序/搜索跨全部记录的行为疑问、任务级统计有数字却显示「尚无按模型明细」、分发期那一段调用在明细里读不到或「类型」列分不清，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
+- Token统计窗口打开期间表格不随实时事件变化、搜索/筛选与搜索框内容保留、需点「刷新」才更新、点「刷新」看似没反应或总数与明细都不动、副标题的总输入比顶部大一个缓存命中、明细行数开着开着变少（跨节点同序号顶行）、模型调用明细按时间倒序/搜索只覆盖窗口或本页的行为疑问、底栏共 N 页但翻页时才发消息、停在历史页收不到新调用或「回到最新」后行数变化、任务级统计有数字却显示「尚无按模型明细」、分发期那一段调用在明细里读不到或「类型」列分不清，或总耗时/首 Token 耗时/思考 Token 显示 `--` → `web-and-admin.md`「Task Token Stats Window Contract」
 - Node pause or resume behaves unexpectedly -> `main-task-runtime.md`「Node-Level Pause and Recovery」
 - 节点被恢复后仍不推进（暂停标志已清、再无模型调用，最后被 `orphan reaped at task resume` 收尸）→ `main-task-runtime.md`「Node-Level Pause and Recovery」（恢复的 entry 判读与延迟校验清扫）
 - 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（模型交付违约与回包形态故障分账，各有同值上限）+ `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（必填与可选字段都带类型的契约回贴）

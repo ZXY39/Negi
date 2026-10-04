@@ -9619,6 +9619,22 @@ class MainRuntimeService:
             model_call_limit=model_call_limit,
         )
 
+    def get_task_model_call_page_payload(
+        self,
+        task_id: str,
+        *,
+        page: int = 1,
+        size: int = 100,
+        anchor_seq: int | None = None,
+    ) -> dict[str, Any] | None:
+        task_id = self.normalize_task_id(task_id)
+        return self.query_service.get_task_model_call_page(
+            task_id,
+            page=page,
+            size=size,
+            anchor_seq=anchor_seq,
+        )
+
     def get_task_tree_snapshot_payload(
         self,
         task_id: str,

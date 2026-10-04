@@ -216,6 +216,9 @@ const S = {
     rootNode: null,
     frontier: [],
     recentModelCalls: [],
+    taskModelCallPaging: null,
+    taskModelCallPageRows: [],
+    taskModelCallPageLoading: false,
     liveFrameMap: {},
     currentNodeDetail: null,
     taskDetailRenderToken: 0,
@@ -16281,22 +16284,36 @@ function bind() {
         const control = target.closest("[data-task-model-call-page]");
         if (control) {
             const direction = String(control.dataset.taskModelCallPage || "").trim();
-            if (direction === "prev") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) - 1);
-            if (direction === "next") setTaskModelCallsPage((Number(S.taskModelCallsPage || 1) || 1) + 1);
+            const current = Number(S.taskModelCallsPage || 1) || 1;
+            if (direction === "prev") setTaskModelCallsPage(current - 1);
+            if (direction === "next") setTaskModelCallsPage(current + 1);
+            return;
+        }
+        // 翻页是"点了才取"：窗口内的页本地切片，越过窗口的那一跳走按页取数口。
+        if (target.closest("[data-task-model-call-goto]")) {
+            const box = U.taskTokenContent?.querySelector?.("[data-task-model-call-jump]");
+            const value = Number(box?.value || 0);
+            if (value >= 1) setTaskModelCallsPage(value);
+            return;
+        }
+        if (target.closest("[data-task-model-call-live]")) {
+            exitTaskModelCallHistory();
             return;
         }
         if (target.closest("[data-task-model-call-refresh]")) {
-            // 手动刷新：窗口打开期间唯一的数据更新入口，重新取数后再强制重建。
-            void refreshTaskTokenLedger();
+            // 快照态下「刷新」= 按最新账本重算页号并重取本页，不能把用户弹回最新。
+            if (isTaskModelCallHistorical()) void loadTaskModelCallPage(Number(S.taskModelCallsPage || 1), { rebase: true });
+            else void refreshTaskTokenLedger();
+            return;
         }
     });
     // 搜索输入走事件委托：只重建表格区域，输入框本身不销毁，焦点与内容不丢失。
-    // 搜索作用于全部记录（而非当前页），输入即筛选并回到第 1 页。
+    // 搜索作用于全部记录（而非当前页），输入即筛选并回到第 1 页；快照态只搜已加载那一页、不动页号。
     U.taskTokenContent?.addEventListener("input", (e) => {
         const input = e.target instanceof Element ? e.target.closest("[data-task-model-call-search]") : null;
         if (!input) return;
         S.taskModelCallsQuery = input.value;
-        S.taskModelCallsPage = 1;
+        if (!isTaskModelCallHistorical()) S.taskModelCallsPage = 1;
         refreshTaskTokenCallTable();
     });
     U.nodeContextDisclosure?.addEventListener("toggle", () => void handleNodeContextDisclosureToggle());

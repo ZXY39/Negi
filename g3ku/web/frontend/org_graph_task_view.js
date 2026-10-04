@@ -4277,6 +4277,11 @@ function applyTaskPayload(payload) {
     S.rootNode = rootNode;
     S.frontier = frontier;
     S.recentModelCalls = recentModelCalls;
+    if (taskChanged) {
+        // 换任务必须退出历史快照态：anchor 与页号是按上一本账本算的。
+        S.taskModelCallPaging = null;
+        S.taskModelCallPageRows = [];
+    }
     S.taskModelCallsPageSize = typeof TASK_MODEL_CALLS_PAGE_SIZE === "number" && TASK_MODEL_CALLS_PAGE_SIZE > 0
         ? TASK_MODEL_CALLS_PAGE_SIZE
         : 100;

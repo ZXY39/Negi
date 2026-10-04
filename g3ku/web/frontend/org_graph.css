@@ -11532,6 +11532,14 @@ textarea {
     box-shadow: 0 10px 24px -18px color-mix(in srgb, var(--brand-primary) 44%, transparent);
 }
 
+/* 页码跳转框共用搜索框那一套控件样式（含 V2 层的圆角/字号/appearance），
+   这里只把宽度收到放得下三位页码。 */
+.task-token-call-jump {
+    width: 76px;
+    padding: 0 8px;
+    text-align: center;
+}
+
 .task-token-call-table-wrap {
     overflow-x: auto;
 }
