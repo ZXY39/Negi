@@ -1,7 +1,8 @@
-"""分发信箱的两条判定车道：一次批量读，不逐节点回表。
+"""分发信箱的判定车道：一次批量读，不逐节点回表。
 
 实盘在跑任务 938 个节点，旧写法每次判定要发 938～1,876 条查询（还带逐节点 `get_node`
 把 246 KB/行的 payload 读回建模），wall 采样里两条车道合计 9.24 s / 180 s。
+整树快照的待处理徽标是第三条同款车道（见最后一条用例）。
 """
 
 from __future__ import annotations
@@ -11,7 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from main.models import TaskNodeNotification
+from main.models import TaskNodeNotification, TaskRecord
+from main.monitoring.models import TaskProjectionNodeRecord
+from main.monitoring.query_service import TaskQueryService
 from main.protocol import now_iso
 from main.runtime.node_runner import NodeRunner
 from main.storage.sqlite_store import SQLiteTaskStore
@@ -114,3 +117,82 @@ def test_legacy_projection_row_falls_back_to_runtime_metadata_once(store: SQLite
     assert NodeRunner.nodes_with_pending_distribution_notices(runner, task_id=_TASK) == ['node:legacy']
     # 缺字段的行只批量补读一次，不逐节点 get_node。
     assert scanned == [_TASK]
+
+
+def _seed_projection(store: SQLiteTaskStore, node_ids: list[str]) -> None:
+    store.upsert_task(
+        TaskRecord(
+            task_id=_TASK,
+            title='tree notice batch test',
+            user_request='tree notice batch test',
+            root_node_id=node_ids[0],
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+    )
+    for index, node_id in enumerate(node_ids):
+        store.upsert_task_node(
+            TaskProjectionNodeRecord(
+                node_id=node_id,
+                task_id=_TASK,
+                parent_node_id=None if index == 0 else node_ids[0],
+                root_node_id=node_ids[0],
+                sort_key=f'{index:04d}',
+                title=node_id,
+                updated_at=now_iso(),
+                # 握手状态落投影列，否则快照会逐节点回读运行时节点表。
+                payload={
+                    'acceptance_handshake_state': 'none',
+                    'pending_append_notice_count': 1 if node_id == 'node:7' else 0,
+                },
+            )
+        )
+
+
+def test_tree_snapshot_counts_notices_with_one_batched_read(store: SQLiteTaskStore):
+    """整树快照的待处理徽标：一次分组读，不逐节点扫通知表。
+
+    实盘 task:1d9cddf9858e 有 1227 个节点，而 `task_node_notifications` 没有
+    (task_id, node_id) 索引 ⇒ 逐节点计数就是 1227 次全表扫，只读连接实测 4.64 s；
+    整任务一次读同一张表实测 17 ms。
+    """
+    node_ids = ['node:root', 'node:2', 'node:3', 'node:7', 'node:8', 'node:9']
+    _seed_projection(store, node_ids)
+    store.upsert_task_node_notification(
+        _notice('n:real', 'node:3', 'delivered').model_copy(update={'message': '补充验收口径'})
+    )
+    store.upsert_task_node_notification(
+        _notice('n:relay', 'node:3', 'delivered').model_copy(update={'payload': {'origin': 'system_relay'}})
+    )
+    store.upsert_task_node_notification(_notice('n:merged', 'node:8', 'merged'))
+    # node:7 同时有根节点自己的待处理记录与后代转上来的 delivered 行，验证两半相加。
+    store.upsert_task_node_notification(_notice('n:real-7', 'node:7', 'delivered'))
+
+    batched_calls: list[str] = []
+    original_batched = store.list_task_delivered_notifications
+
+    def _counting_batched(task_id: str):
+        batched_calls.append(task_id)
+        return original_batched(task_id)
+
+    store.list_task_delivered_notifications = _counting_batched  # type: ignore[method-assign]
+
+    def _boom(*args, **kwargs):
+        raise AssertionError('树快照不该再逐节点查通知表')
+
+    store.list_task_node_notifications = _boom  # type: ignore[method-assign]
+    service = TaskQueryService(store=store, file_store=None, log_service=SimpleNamespace(read_task_runtime_meta=lambda task_id: {}))
+
+    snapshot = service.get_tree_snapshot(_TASK)
+    assert snapshot is not None
+    assert batched_calls == [_TASK]
+    counts = {node_id: node.pending_notice_count for node_id, node in snapshot.nodes_by_id.items()}
+    # 转述行不抬高徽标；根节点自己的待处理记录照常计入。
+    assert counts == {
+        'node:root': 0,
+        'node:2': 0,
+        'node:3': 1,
+        'node:7': 2,
+        'node:8': 0,
+        'node:9': 0,
+    }

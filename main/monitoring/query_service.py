@@ -195,24 +195,35 @@ class TaskQueryService:
             text=f'Tasks[{scope_label}]: {total} total, {in_progress} in progress ({paused} paused), {failed} failed, {unread} unread',
         )
 
+    def _delivered_notice_counts_by_node(self, task_id: str) -> dict[str, int]:
+        """整任务「后代转上来的待处理通知」按节点计数：一次查询，不逐节点回表。
+
+        转述族不抬高徽标，所以只在这一层过滤；delivered 行本就稀少（实盘一个 1227 节点的
+        任务里 1288 条通知全是 consumed），一次读的代价可以忽略。
+        """
+        counts: dict[str, int] = {}
+        for item in list(self._store.list_task_delivered_notifications(task_id) or []):
+            if is_system_relay_notice(item):
+                continue
+            node_id = str(getattr(item, 'node_id', '') or '').strip()
+            if not node_id:
+                continue
+            counts[node_id] = counts.get(node_id, 0) + 1
+        return counts
+
     def _node_pending_notice_count(
         self,
         *,
-        task_id: str,
         node_id: str,
-        pending_root_count: int | None = None,
+        pending_root_count: int | None,
+        delivered_child_counts: dict[str, int],
     ) -> int:
         if pending_root_count is None:
             # 旧投影行没有 pending_append_notice_count，退回读运行时节点元数据。
             node = self._store.get_node(node_id)
             metadata = dict(node.metadata or {}) if node is not None and isinstance(node.metadata, dict) else {}
             pending_root_count = len(normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)))
-        pending_child_count = sum(
-            1
-            for item in list(self._store.list_task_node_notifications(task_id, node_id) or [])
-            if str(item.status or '').strip() == 'delivered' and not is_system_relay_notice(item)
-        )
-        return int(pending_root_count or 0) + pending_child_count
+        return int(pending_root_count or 0) + int(delivered_child_counts.get(node_id, 0))
 
     def _message_distribution_deliveries(
         self,
@@ -910,12 +921,13 @@ class TaskQueryService:
         task = self._store.get_task(task_id)
         if task is None:
             return None
-        return self._build_tree_snapshot(
-            task_id=task.task_id,
-            root_node_id=task.root_node_id,
-            max_nodes=max_nodes,
-            after_node_id=after_node_id,
-        )
+        with self._debug_track('query_service.get_tree_snapshot'):
+            return self._build_tree_snapshot(
+                task_id=task.task_id,
+                root_node_id=task.root_node_id,
+                max_nodes=max_nodes,
+                after_node_id=after_node_id,
+            )
 
     def get_tree_subtree(
         self,
@@ -1360,6 +1372,7 @@ class TaskQueryService:
         rounds_by_parent: dict[str, list[Any]],
         direct_children: dict[str, list[str]],
         pending_root_counts: dict[str, int | None] | None = None,
+        delivered_child_counts: dict[str, int],
     ) -> TaskTreeSnapshotNode:
         node_id = str(getattr(record, 'node_id', '') or '').strip()
         parent_rounds = list(rounds_by_parent.get(node_id, []))
@@ -1424,13 +1437,13 @@ class TaskQueryService:
             rounds=snapshot_rounds,
             auxiliary_child_ids=auxiliary_child_ids,
             pending_notice_count=self._node_pending_notice_count(
-                task_id=str(getattr(record, 'task_id', '') or '').strip(),
                 node_id=node_id,
                 pending_root_count=(
                     (pending_root_counts or {}).get(node_id)
                     if payload.get('pending_append_notice_count') is None
                     else payload.get('pending_append_notice_count')
                 ),
+                delivered_child_counts=delivered_child_counts,
             ),
             parent_visible=parent_visible,
             acceptance_handshake_state=handshake_state,
@@ -1470,7 +1483,8 @@ class TaskQueryService:
         max_nodes: int | None = None,
         after_node_id: str = '',
     ) -> TaskTreeSnapshot:
-        node_map, rounds_by_parent, direct_children = self._projection_maps(task_id)
+        with self._debug_track('query_service.build_tree_snapshot.projection_maps'):
+            node_map, rounds_by_parent, direct_children = self._projection_maps(task_id)
         effective_max_nodes = max(1, int(max_nodes)) if max_nodes is not None else None
         included_ids: set[str]
         next_after_node_id = ''
@@ -1551,17 +1565,20 @@ class TaskQueryService:
                 pending_root_counts[node_id] = len(normalize_pending_append_notice_records(metadata.get(PENDING_APPEND_NOTICE_RECORDS_KEY)))
         # 只物化本响应包含的节点。旧实现先物化整树再过滤，每个节点都带多次额外
         # 存储查询，是大树 tree-snapshot 超时的根因之一。
-        snapshot_nodes = {
-            node_id: self._snapshot_node_from_projection(
-                node_map[node_id],
-                node_map=node_map,
-                rounds_by_parent=rounds_by_parent,
-                direct_children=direct_children,
-                pending_root_counts=pending_root_counts,
-            )
-            for node_id in included_ids
-            if node_id in node_map
-        }
+        with self._debug_track('query_service.build_tree_snapshot.node_materialization'):
+            delivered_child_counts = self._delivered_notice_counts_by_node(task_id)
+            snapshot_nodes = {
+                node_id: self._snapshot_node_from_projection(
+                    node_map[node_id],
+                    node_map=node_map,
+                    rounds_by_parent=rounds_by_parent,
+                    direct_children=direct_children,
+                    pending_root_counts=pending_root_counts,
+                    delivered_child_counts=delivered_child_counts,
+                )
+                for node_id in included_ids
+                if node_id in node_map
+            }
         runtime_meta = self._log_service.read_task_runtime_meta(task_id) or {}
         distribution = self._distribution_state_with_ledger(task_id, runtime_meta)
         # subtree_barrier 是统一后的单一分发模式；task_wide_barrier 是旧持久化
