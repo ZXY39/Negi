@@ -31,7 +31,7 @@
 新维护者最应该先看的运行时文件：
 
 - `g3ku/runtime/bootstrap_factory.py`
-  运行时工厂。在这里把 provider、middleware、`AgentLoop` 装起来。
+  运行时工厂。在这里把 provider 和 `AgentLoop` 装起来。
 
 - `g3ku/agent/loop.py`
   是 `AgentRuntimeEngine` 的兼容包装层，本身逻辑不多，但定义了真正运行时类型 `AgentLoop`。

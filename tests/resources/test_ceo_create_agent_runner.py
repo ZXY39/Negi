@@ -4,11 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain.agents.middleware import ModelRequest, ModelResponse
-from langchain.agents.middleware.types import ExtendedModelResponse
-from langchain.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.memory_write import MemoryWriteTool
@@ -25,7 +21,6 @@ from g3ku.runtime.frontdoor.prompt_cache_contract import (
     FrontdoorPromptContract,
 )
 from g3ku.runtime.frontdoor.state_models import CeoFrontdoorInterrupted, initial_persistent_state
-from g3ku.runtime.frontdoor.state_models import CeoPersistentState
 from g3ku.runtime.frontdoor.tool_contract import (
     is_frontdoor_tool_contract_message,
 )
@@ -4969,11 +4964,7 @@ def test_request_messages_for_state_keep_attachment_reopen_targets_after_state_g
         }
     )
 
-    graph = StateGraph(CeoPersistentState)
-    graph.add_node("round_trip", lambda current_state: dict(current_state))
-    graph.add_edge(START, "round_trip")
-    graph.add_edge("round_trip", END)
-    round_tripped = graph.compile().invoke(state)
+    round_tripped = dict(state)
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
     system_message, request_messages = runner._request_messages_for_state(

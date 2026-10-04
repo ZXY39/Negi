@@ -44,7 +44,6 @@ class AgentRuntimeEngine:
         session_manager_cls=None,
         chat_model_factory=None,
         debug_mode: bool = False,
-        middlewares: list[Any] | None = None,
     ) -> None:
         self.bus = bus
         self.provider = provider
@@ -64,7 +63,6 @@ class AgentRuntimeEngine:
         self.debug_trace = bool(debug_mode)
         raw_prompt_trace = str(os.getenv("G3KU_PROMPT_TRACE", "")).strip().lower()
         self.prompt_trace = self.debug_trace or raw_prompt_trace in {"1", "true", "yes", "on", "debug", "log"}
-        self.middlewares = list(middlewares or [])
 
         self._memory_manager_cls = memory_manager_cls
         self._session_manager_cls = session_manager_cls

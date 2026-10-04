@@ -10,8 +10,6 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from langchain.messages import AIMessage
-from langgraph.checkpoint.memory import InMemorySaver
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -1072,7 +1070,6 @@ async def test_runtime_agent_session_preserves_previewed_round_through_real_midd
         reasoning_effort=None,
         sessions=SessionManager(tmp_path),
         _ensure_checkpointer_ready=lambda: None,
-        _checkpointer=InMemorySaver(),
         _store=None,
         main_task_service=SimpleNamespace(startup=_startup),
         tools=_FakeToolRegistry([_ContinuationTaskTool()]),

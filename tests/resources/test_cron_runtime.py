@@ -1133,7 +1133,6 @@ def test_get_agent_injects_web_cron_service(monkeypatch, tmp_path: Path) -> None
                 max_tokens=1024,
                 memory_window=20,
                 reasoning_effort=None,
-                middlewares=[],
             ),
             multi_agent=SimpleNamespace(),
         ),

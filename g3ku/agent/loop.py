@@ -38,7 +38,6 @@ class AgentLoop(AgentRuntimeEngine):
         cron_service: 'CronService | None' = None,
         session_manager: SessionManager | None = None,
         debug_mode: bool = False,
-        middlewares: list[Any] | None = None,
     ) -> None:
         super().__init__(
             bus=bus,
@@ -60,7 +59,6 @@ class AgentLoop(AgentRuntimeEngine):
             session_manager_cls=SessionManager,
             chat_model_factory=ensure_chat_model,
             debug_mode=debug_mode,
-            middlewares=middlewares,
         )
 
 

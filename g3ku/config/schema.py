@@ -82,15 +82,6 @@ class Base(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class AgentMiddlewareConfig(Base):
-    """Config entry for runtime middleware hooks."""
-
-    enabled: bool = False
-    name: str = ""  # e.g. "prepend_system_message", "tool_result_suffix"
-    class_path: str = ""  # optional: "package.module:ClassName"
-    options: dict[str, Any] = Field(default_factory=dict)
-
-
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -102,7 +93,6 @@ class AgentDefaults(Base):
     max_tool_iterations: int = 40
     memory_window: int = 100
     reasoning_effort: str = DEFAULT_REASONING_EFFORT  # none / low / medium / high / xhigh / max; none disables deep thinking
-    middlewares: list[AgentMiddlewareConfig] = Field(default_factory=list)
 
     @field_validator("reasoning_effort", mode="before")
     @classmethod

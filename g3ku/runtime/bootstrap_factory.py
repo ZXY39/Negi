@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from g3ku.audit_events import configure_audit_sink
 from g3ku.config.schema import Config
 
@@ -25,18 +23,6 @@ def make_agent_loop(
     """Create the configured agent runtime without CLI-specific side effects."""
     from g3ku.agent.loop import AgentLoop
 
-    try:
-        from g3ku.agent.middleware import build_middlewares
-    except ModuleNotFoundError as exc:
-        if config.agents.defaults.middlewares:
-            raise RuntimeError(
-                "Runtime middleware requires optional langchain dependency. "
-                "Install project extras before enabling middlewares."
-            ) from exc
-        middlewares: list[Any] = []
-    else:
-        middlewares = build_middlewares(config.agents.defaults.middlewares)
-
     provider_name, model_id = config.get_scope_model_target("ceo")
 
     # 审计事件池：web / CLI / 托管 worker 都经过本工厂，统一在此配置工作区根
@@ -59,7 +45,6 @@ def make_agent_loop(
         cron_service=cron_service,
         session_manager=session_manager,
         debug_mode=debug_mode,
-        middlewares=middlewares,
     )
 
 
