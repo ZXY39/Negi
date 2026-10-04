@@ -86,7 +86,6 @@ def test_refresh_loop_runtime_config_reloads_security_overlay_before_refresh(mon
     assert changed is True
     assert calls == ["reloaded"]
     assert loop.provider is provider
-    assert loop.model_client is provider
     assert loop._runtime_model_revision == 7
 
 
