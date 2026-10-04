@@ -5174,6 +5174,15 @@ textarea {
         opacity 180ms ease;
 }
 
+/* 用量层画成水位：从下往上的实心液面，而不是同形状的描边。
+   fill 补上字形内圈，描边加到 3 让脑回笔画并成整块水体；3 是上限——
+   字形左右极值离 24px 盒只剩 1.5px，再粗就会被 .ceo-context-usage-brain-fill
+   的 overflow:hidden 裁平两侧。 */
+.ceo-context-usage-brain-fill-inner > svg path {
+    fill: currentColor;
+    stroke-width: 3;
+}
+
 .ceo-context-usage-brain:not(.is-active) .ceo-context-usage-brain-fill {
     opacity: 0.56;
 }
