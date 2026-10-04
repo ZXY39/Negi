@@ -6475,6 +6475,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "tool_calls": tool_calls,
             "finish_reason": getattr(response, "finish_reason", "stop"),
             "error_text": getattr(response, "error_text", None) or "",
+            "error_kind": getattr(response, "error_kind", None) or "",
             "usage": getattr(response, "usage", {}),
         }
         for key in ("reasoning_content", "thinking_blocks", "reasoning_items"):
