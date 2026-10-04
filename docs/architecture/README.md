@@ -122,6 +122,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 任务显示「已取消」但无人取消过（payload `cancel_requested=false`，常伴随 `Managed task worker exited` 日志）→ `main-task-runtime.md`「Node-Level Pause and Recovery」
 - 任务大厅持续显示「worker stale」、托管 worker 崩溃后一直不自动重启、managed-worker.log 长时间不滚动但心跳与进程仍在 → `operations-and-maintenance.md`「托管 worker 看门狗」
 - 会话在重启后自动续跑（`shutdown_resume` 内部轮）行为异常 → `heartbeat-system.md`「Shutdown Resume Wake」
+- 一条 CEO 请求在网页上并排画出两个气泡（同一阶段两张卡，上面那张停在一句中途旁白）→ `web-and-admin.md`「CEO Turn Timeline Rendering Contract」+ `runtime-overview.md`「`RuntimeAgentSession` 内部做什么」
 - cron 定时任务到点不触发、`jobs.json` 停在 `running`/`timeout`/`interrupted`、调度器长时间静默或某次投递疑似挂死 → `heartbeat-system.md`「Cron Reminder Contract」+ `operations-and-maintenance.md`「任务没创建或没推进」
 - 记忆复核批次不足窗口阈值轮数就入队，或阶段跨批次重复出现 → `runtime-overview.md`「Memory Runtime State」
 - 限流/上游故障期间某轮记忆没写进去、`memory/failed.jsonl` 有停车记录、或医生检查报 `failed_parked` → `runtime-overview.md`「队列状态机与失败停车语义」+ `operations-and-maintenance.md`「Memory Queue Workflow」

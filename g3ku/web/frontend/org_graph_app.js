@@ -104,6 +104,7 @@ const S = {
     ceoWsLastErrorCode: "",
     ceoWsParseResyncs: 0,
     ceoPendingTurns: [],
+    ceoPausedArchiveTurns: {},
     ceoTurnActive: false,
     ceoPauseBusy: false,
     ceoUploads: [],
@@ -6936,6 +6937,7 @@ function resetCeoFeed() {
     if (!U.ceoFeed) return;
     U.ceoFeed.innerHTML = "";
     S.ceoPendingTurns = [];
+    S.ceoPausedArchiveTurns = {};
 }
 
 function ceoInflightTurnHasVisibleAssistantState(snapshot = null) {
@@ -7450,6 +7452,9 @@ function patchCeoInflightTurn(snapshot = null, { sessionId = "", cacheField = "i
     if (!shouldReuseExistingTurn && !ceoNeedsAssistantTurn(snapshot)) return false;
     let turn = shouldReuseExistingTurn ? existingTurn : null;
     if (!turn) {
+        // 续跑轮的 turn patch 与被截断那一跳同 turn_id：先摘掉那条已渲染的暂停气泡，
+        // 否则实时回合与它并排就是同一个阶段两张卡。
+        if (turnId) discardPausedCeoArchiveTurn(turnId);
         turn = createPendingCeoTurn(source, { scrollMode: "preserve" });
         if (turnId && turn) turn.turnId = turnId;
         if (turn) S.ceoPendingTurns.push(turn);
@@ -7719,6 +7724,10 @@ function renderPersistedCeoAssistantTurn(item = {}) {
         icons();
     }, { scrollMode: "preserve" });
     if (status === "paused") {
+        if (historyTurnId) {
+            // 留档给续跑轮接管：后端复用同一个 turn_id 续跑，这条气泡就是那一轮的上一半。
+            S.ceoPausedArchiveTurns[historyTurnId] = turn;
+        }
         finalizePausedCeoTurn(content || "已暂停", { source: "history" });
         return;
     }
@@ -8431,6 +8440,21 @@ function discardPendingCeoTurns({ force = false, source = null, turnId = "" } = 
     }, { scrollMode: "preserve" });
 }
 
+function discardPausedCeoArchiveTurn(turnId = "") {
+    // 停机截断那一跳的气泡是转录里的历史行，续跑轮与它同 turn_id（后端复用），
+    // 不摘掉它就会和实时回合并排画出同一个阶段两张卡——正是"一个回合被切成两个气泡"。
+    const normalizedTurnId = normalizeCeoTurnId(turnId);
+    if (!normalizedTurnId) return false;
+    const pausedTurn = S.ceoPausedArchiveTurns?.[normalizedTurnId];
+    if (!pausedTurn) return false;
+    delete S.ceoPausedArchiveTurns[normalizedTurnId];
+    return mutateCeoFeed(() => {
+        pausedTurn.finalized = true;
+        pausedTurn.el?.remove?.();
+        return true;
+    }, { scrollMode: "preserve" });
+}
+
 function ensureActiveCeoTurn({ source = "", turnId = "" } = {}) {
     const normalizedSource = normalizeCeoTurnSource(source);
     const normalizedTurnId = normalizeCeoTurnId(turnId);
@@ -8440,6 +8464,7 @@ function ensureActiveCeoTurn({ source = "", turnId = "" } = {}) {
         if (normalizedTurnId) existing.turnId = normalizedTurnId;
         return existing;
     }
+    if (normalizedTurnId) discardPausedCeoArchiveTurn(normalizedTurnId);
     const created = createPendingCeoTurn(normalizedSource);
     if (created && normalizedTurnId) created.turnId = normalizedTurnId;
     if (created) S.ceoPendingTurns.push(created);

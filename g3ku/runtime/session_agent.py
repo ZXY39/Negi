@@ -21,6 +21,7 @@ from g3ku.core.state import AgentState, StructuredError
 from g3ku.prompt_trace import render_output_trace
 from g3ku.runtime.cancellation import ToolCancellationToken
 from g3ku.runtime.frontdoor.canonical_context import (
+    TRANSCRIPT_CC_UPSERT_FIELD,
     TRANSCRIPT_PROJECTION_MODE,
     canonical_context_tool_items,
     default_frontdoor_canonical_context,
@@ -1329,6 +1330,145 @@ class RuntimeAgentSession:
                 continue
             return index
         return None
+
+    @classmethod
+    def _find_resumable_paused_archive_turn_id(cls, persisted_session: Any) -> str:
+        """转录尾部仍是暂停归档行时，返回它所属回合的 turn_id，否则返回空。
+
+        停机账本只记会话键、暂停 sidecar 在 `pause(manual=True)` 收尾时就被删掉，所以
+        被截断回合的 turn_id 在重启后只有这条 `manual_pause_archive` 行还带着。只认最后
+        一条助手行：它后面已经出现过别的助手行，说明这条请求已被别的回合接手。
+        """
+        messages = list(getattr(persisted_session, "messages", []) or [])
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, dict):
+                continue
+            if str(message.get("role") or "").strip().lower() != "assistant":
+                continue
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            is_archive = str(metadata.get("source") or "").strip().lower() == "manual_pause_archive"
+            still_paused = str(message.get("status") or "").strip().lower() == _TRANSCRIPT_STATE_PAUSED
+            if not is_archive or not still_paused:
+                return ""
+            return cls._message_top_level_turn_id(message)
+        return ""
+
+    def _adopt_interrupted_turn_id_for_resume(self, user_input: UserInputMessage) -> str:
+        """停机续跑轮复用被截断回合的 turn_id，让一个请求在转录里只留一行回复。
+
+        只在 `heartbeat_reason` 单独成束为 `shutdown_resume` 时认领：与终态/失速事件混成
+        一束时（reason 变 `mixed`）这一轮答的不是用户那条被截断的提问，并进气泡等于把
+        别人的回复挂到用户的提问下面。
+        """
+        metadata = dict(getattr(user_input, "metadata", None) or {})
+        if not bool(metadata.get("heartbeat_internal")):
+            return ""
+        if str(metadata.get("heartbeat_reason") or "").strip().lower() != "shutdown_resume":
+            return ""
+        if str(self._active_turn_id or "").strip():
+            return ""
+        try:
+            persisted_session = self._loop.sessions.get_or_create(self._state.session_key)
+            turn_id = self._find_resumable_paused_archive_turn_id(persisted_session)
+        except Exception:
+            return ""
+        if not turn_id:
+            return ""
+        self._active_turn_id = turn_id
+        self._seed_turn_usage_from_artifacts(turn_id)
+        return turn_id
+
+    def _seed_turn_usage_from_artifacts(self, turn_id: str) -> None:
+        """把截断前那几跳的用量接回累加器，续跑轮的数字才接着涨而不是从 0 重来。
+
+        `_frontdoor_turn_usage` 只在内存里、重启即空，而同一 turn_id 的历史合计由请求工件
+        给出（会话快照重建读的就是这份）。只在认领时读一次，不进轮内热路径。
+        """
+        if not isinstance(getattr(self, "_frontdoor_turn_usage", None), dict):
+            self._frontdoor_turn_usage = {}
+        if turn_id in self._frontdoor_turn_usage:
+            return
+        try:
+            from g3ku.runtime.web_ceo_sessions import read_session_turn_token_usage
+
+            entry = (read_session_turn_token_usage(self._state.session_key) or {}).get(turn_id)
+        except Exception:
+            return
+        if isinstance(entry, dict) and entry:
+            self._frontdoor_turn_usage[turn_id] = dict(entry)
+
+    def _overwrite_archived_paused_assistant_row(
+        self,
+        persisted_session: Any,
+        *,
+        index: int,
+        assistant_text: str,
+        assistant_payload: dict[str, Any],
+        projected: dict[str, Any],
+    ) -> None:
+        """续跑轮的回复就地写回暂停归档行，取代在尾部另起一行。
+
+        归档行是 append-only 链上的全量 checkpoint，替换它沿用归档写入那套：新行也落全量
+        （`plan_transcript_cc_row` 规划出来的 delta 是相对这行自己编码的，就地写会自指），
+        并让下游 upsert 行按新链重编码。`status: paused` 与 `metadata.history_visible:
+        False` 随 metadata 整体换掉——留着前者气泡一直显示已暂停，留着后者这条回复不进
+        模型种子。
+        """
+        messages = getattr(persisted_session, "messages", None)
+        if not isinstance(messages, list):
+            return
+        replaced_view = materialize_transcript_view(messages, index)
+        row = dict(messages[index])
+        payload = dict(assistant_payload or {})
+        row["content"] = assistant_text
+        row["timestamp"] = self._now()
+        row["turn_id"] = str(payload.get("turn_id") or "")
+        row["metadata"] = dict(payload.get("metadata") or {})
+        row.pop("status", None)
+        for key in ("usage", "compression"):
+            if isinstance(payload.get(key), dict):
+                row[key] = dict(payload[key])
+            else:
+                row.pop(key, None)
+        for key in ("canonical_context", TRANSCRIPT_CC_UPSERT_FIELD, "canonical_context_projection"):
+            row.pop(key, None)
+        if projected:
+            row["canonical_context"] = copy.deepcopy(projected)
+            row["canonical_context_projection"] = TRANSCRIPT_PROJECTION_MODE
+        messages[index] = row
+        repair_transcript_cc_chain(messages, index, replaced_view)
+        if hasattr(persisted_session, "updated_at"):
+            persisted_session.updated_at = datetime.now()
+
+    def _complete_paused_user_message_for_turn(self, persisted_session: Any, turn_id: str) -> int:
+        """把这条请求自己的暂停用户行升成 completed：续跑轮就是它的接手者。
+
+        内部回合走不到 `_complete_lingering_paused_user_messages`（那段只挂在可见用户回合
+        分支上），留着 paused 会让 `_reconcile_paused_user_turns_into_seed` 在之后每一轮把
+        这条已回答的提问重新补进请求体尾部。只按 turn_id 精确升这一条，不做全局清扫。
+        """
+        messages = getattr(persisted_session, "messages", None)
+        if not isinstance(messages, list) or not turn_id:
+            return 0
+        flipped = 0
+        for index, raw in enumerate(list(messages)):
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("role") or "").strip().lower() != "user":
+                continue
+            if self._message_turn_id(raw) != turn_id:
+                continue
+            metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            if str(metadata.get(_TRANSCRIPT_STATE_KEY) or "").strip().lower() != _TRANSCRIPT_STATE_PAUSED:
+                continue
+            updated = dict(raw)
+            updated_metadata = dict(metadata)
+            updated_metadata[_TRANSCRIPT_STATE_KEY] = _TRANSCRIPT_STATE_COMPLETED
+            updated["metadata"] = updated_metadata
+            messages[index] = updated
+            flipped += 1
+        return flipped
 
     def _upsert_transcript_user_message(
         self,
@@ -2771,6 +2911,7 @@ class RuntimeAgentSession:
                 # 而心跳/cron 回合同样会在 prepare 阶段消费排队的 follow-up。
                 self._retire_consumed_pending_user_messages(persisted_session)
             assistant_payload: dict[str, Any] = {}
+            projected: dict[str, Any] = {}
             canonical_context = self._frontdoor_visible_canonical_context_snapshot()
             compression = self._compression_snapshot()
             if canonical_context:
@@ -2805,7 +2946,22 @@ class RuntimeAgentSession:
                     }
             if metadata_payload:
                 assistant_payload["metadata"] = metadata_payload
-            persisted_session.add_message("assistant", assistant_text, **assistant_payload)
+            archived_index = (
+                self._find_archived_paused_assistant_index(persisted_session, turn_id=turn_id)
+                if turn_id
+                else None
+            )
+            if archived_index is None:
+                persisted_session.add_message("assistant", assistant_text, **assistant_payload)
+            else:
+                self._overwrite_archived_paused_assistant_row(
+                    persisted_session,
+                    index=archived_index,
+                    assistant_text=assistant_text,
+                    assistant_payload=assistant_payload,
+                    projected=projected,
+                )
+                self._complete_paused_user_message_for_turn(persisted_session, turn_id)
             # 发送时（自动）压缩在收尾处落线：区分线以上是这轮被折进摘要的历史。
             if str(getattr(self, "_frontdoor_compressed_turn_id", "") or "").strip() == turn_id and turn_id:
                 setattr(self, "_frontdoor_compressed_turn_id", "")
@@ -3295,6 +3451,8 @@ class RuntimeAgentSession:
                 self._configure_user_batch([user_input])
         else:
             self._clear_user_batch_context()
+            if internal_source == "heartbeat":
+                self._adopt_interrupted_turn_id_for_resume(user_input)
         if internal_source is not None:
             current_snapshot = self._current_inflight_turn_snapshot()
             current_source = str((current_snapshot or {}).get("source") or "").strip().lower()

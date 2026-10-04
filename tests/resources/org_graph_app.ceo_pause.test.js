@@ -133,7 +133,7 @@ function loadApp() {
     context.window = context;
     vm.createContext(context);
     vm.runInContext(
-        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, renderCeoSnapshot, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, sendCeoMessage, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, setSetCeoSessionSnapshotCache(fn) { setCeoSessionSnapshotCache = fn; }, setPatchCeoSessionSnapshotCache(fn) { patchCeoSessionSnapshotCache = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
+        `${APP_CODE}\nthis.__testExports = { handleCeoControlAck, patchCeoInflightTurn, finalizeCeoTurn, finalizePausedCeoTurn, renderPersistedCeoAssistantTurn, ensureActiveCeoTurn, renderCeoSnapshot, dedupeInflightUserMessageAgainstMessages, applyCeoState, maybeDispatchQueuedCeoFollowUps, setCeoQueuedFollowUps, getCeoQueuedFollowUps, sendCeoMessage, S, U, WebSocket, setAddMsg(fn) { addMsg = fn; }, setCreatePendingCeoTurn(fn) { createPendingCeoTurn = fn; }, setSetCeoSessionSnapshotCache(fn) { setCeoSessionSnapshotCache = fn; }, setPatchCeoSessionSnapshotCache(fn) { patchCeoSessionSnapshotCache = fn; }, getPatchSnapshotCalls: () => globalThis.__patchSnapshotCalls || 0 };`,
         context
     );
     vm.runInContext(
@@ -423,6 +423,117 @@ test("persisted paused assistant history renders as a paused bubble", () => {
     assert.equal(turn.flowEl.hidden, false);
     assert.equal(turn.flowEl.open, true);
     assert.equal(S.ceoPendingTurns.length, 0);
+});
+
+test("shutdown-resume live turn takes over the paused archive bubble of the same turn_id", () => {
+    const context = loadApp();
+    const { renderPersistedCeoAssistantTurn, ensureActiveCeoTurn, setCreatePendingCeoTurn, S } = context;
+    const paused = makeTurn({ text: "", source: "history", steps: 0 });
+    paused.turnId = "turn-cut";
+    let removed = 0;
+    paused.el = {
+        remove() {
+            removed += 1;
+        },
+    };
+    setCreatePendingCeoTurn(() => paused);
+    S.ceoPendingTurns = [];
+
+    renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: "继续定位：读取探测结果的尾部关键段落。",
+        status: "paused",
+        turn_id: "turn-cut",
+        canonical_context: {
+            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [] }],
+        },
+    });
+    assert.equal(S.ceoPausedArchiveTurns["turn-cut"], paused);
+
+    const live = makeTurn({ text: "", source: "user", steps: 0 });
+    setCreatePendingCeoTurn(() => live);
+
+    const active = ensureActiveCeoTurn({ source: "user", turnId: "turn-cut" });
+
+    // 后端让续跑轮复用同一个 turn_id，这条暂停气泡就是同一回合的上一半：留着它
+    // 就是同一个阶段并排两张卡（实盘 23:26 那次重启的形态）。
+    assert.equal(removed, 1);
+    assert.equal(S.ceoPausedArchiveTurns["turn-cut"], undefined);
+    assert.equal(active, live);
+    assert.equal(active.turnId, "turn-cut");
+});
+
+test("a resume turn patch takes over the paused archive bubble instead of adding a second one", () => {
+    const context = loadApp();
+    const { renderPersistedCeoAssistantTurn, patchCeoInflightTurn, setCreatePendingCeoTurn, S } = context;
+    const paused = makeTurn({ text: "", source: "history", steps: 0 });
+    let removed = 0;
+    paused.el = {
+        remove() {
+            removed += 1;
+        },
+    };
+    setCreatePendingCeoTurn(() => paused);
+    S.ceoPendingTurns = [];
+
+    renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: "继续定位：读取探测结果的尾部关键段落。",
+        status: "paused",
+        turn_id: "turn-cut",
+        canonical_context: {
+            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [] }],
+        },
+    });
+
+    // 实盘那条转圈气泡是 turn patch 建的（心跳轮回合同一个 runtime session），
+    // 所以接管必须发生在这条车道，而不只是 appendCeoToolEvent 那条。
+    const live = makeTurn({ text: "", source: "heartbeat", steps: 0 });
+    setCreatePendingCeoTurn(() => live);
+    const patched = patchCeoInflightTurn({
+        turn_id: "turn-cut",
+        source: "heartbeat",
+        status: "running",
+        canonical_context_delta: {
+            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [{ round_id: "r7" }] }],
+        },
+    });
+
+    assert.equal(patched, true);
+    assert.equal(removed, 1);
+    assert.equal(S.ceoPausedArchiveTurns["turn-cut"], undefined);
+    assert.equal(S.ceoPendingTurns[0], live);
+    assert.equal(live.turnId, "turn-cut");
+});
+
+test("a live turn of another turn_id leaves the paused archive bubble mounted", () => {
+    const context = loadApp();
+    const { renderPersistedCeoAssistantTurn, ensureActiveCeoTurn, setCreatePendingCeoTurn, S } = context;
+    const paused = makeTurn({ text: "", source: "history", steps: 0 });
+    let removed = 0;
+    paused.el = {
+        remove() {
+            removed += 1;
+        },
+    };
+    setCreatePendingCeoTurn(() => paused);
+    S.ceoPendingTurns = [];
+
+    renderPersistedCeoAssistantTurn({
+        role: "assistant",
+        content: "上一件被截断的事",
+        status: "paused",
+        turn_id: "turn-cut",
+        canonical_context: {
+            stages: [{ stage_id: "frontdoor-stage-39", stage_goal: "定位证据目录", rounds: [] }],
+        },
+    });
+    setCreatePendingCeoTurn(() => makeTurn({ text: "", source: "user", steps: 0 }));
+
+    ensureActiveCeoTurn({ source: "heartbeat", turnId: "turn-other" });
+
+    assert.equal(removed, 0);
+    assert.ok(S.ceoPausedArchiveTurns["turn-cut"]);
 });
 
 test("deduped running inflight snapshot is preserved so the assistant placeholder can render", () => {

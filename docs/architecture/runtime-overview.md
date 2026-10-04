@@ -95,6 +95,7 @@
 另外两条不变量：
 
 - 手动 pause 的语义是“冻结上一轮”，不是“等待下一条输入来补写原请求”：session 以 `completed` + `stop_reason=user_pause` 收尾，pause 当下的轮次上下文照常持久化，收尾时立即写 completed continuity sidecar，并把 paused assistant 气泡归档成带 `status=paused`、`history_visible=false`、`source=manual_pause_archive` 的 durable 记录。后续输入必须作为新一轮 user turn 发送，不得走 `resume(additional_context=...)`。被暂停回合的用户消息经续跑种子对账继承进下一轮模型上下文，即使暂停发生在任何 provider 请求发出之前；对账规则详见 `context-and-cache-troubleshooting.md`「Baseline 合同与恢复顺序」。残留的 paused 转录条目随下一个用户可见回合正常完成被对账退役一次；退役边界与反复注入风险详见 `context-and-cache-troubleshooting.md`「残留 paused / pending 转录条目」。
+- 被截断回合的 `turn_id` 只活在那条 `manual_pause_archive` 归档行上（停机账本记的是会话键、暂停 sidecar 收尾时已删），所以重启后的续跑轮认领同一回合只能从转录尾部那条仍是 `status=paused` 的归档行取 id；它后面已出现别的助手行即非截断，认领会把别人的回复挂到这条提问下面。认领后续跑轮**就地替换**那条归档行而不是另起一行：一个请求在转录里始终只有一行助手回复，同 `turn_id` 落两行在前端就是两个气泡。替换沿用归档写入的形态——落全量 checkpoint 并让下游 `cc_upsert` 行按新链重编码（按 delta 规划出来的那份是相对被替换行自己编码的，就地写会自指），并连同 `status` 与 `metadata.history_visible` 一起换掉（留着后者这条回复进不了模型种子）。轮次 token 用量按 `turn_id` 累加且只在内存里，认领时从请求工件读回截断前的合计，续跑气泡的数字才接得上。内部回合走不到“随可见回合退役 paused 用户行”那段，所以认领方按 `turn_id` 精确升自己那条用户行，不做全局清扫。
 - 运行中补充的消息作为一批独立 user message 持久化，在同一轮下一次 `call_model` 前一起注入，不拼接成一条文本；可见用户顺序的权威是 `inflight_turn.user_messages` 与 `ceo.reply.final.user_messages`（兼容字段 `user_message` 只保留批内最后一条），`pending` user rows 只是 durability/continuity 记录。
 
 手动暂停恢复规则、排队补充消息与 follow-up 消费的完整契约详见 `web-and-admin.md`「Manual Pause Resume Rule」与「Queued Follow-Ups」。
