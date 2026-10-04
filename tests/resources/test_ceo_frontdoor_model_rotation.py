@@ -116,16 +116,6 @@ async def test_graph_call_model_rotates_stale_model_refs_before_send(
         return {"content": "ok"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 

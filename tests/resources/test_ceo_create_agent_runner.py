@@ -4289,7 +4289,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _call_model_with_tools(**kwargs):
         captured_model_messages[:] = list(kwargs.get("messages") or [])
-        return {}
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -4305,11 +4305,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         },
     )
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -4485,7 +4480,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
 
     async def _call_model_with_tools(**kwargs):
         captured_model_messages[:] = list(kwargs.get("messages") or [])
-        return {}
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -4513,11 +4508,6 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
     )
     monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
     monkeypatch.setattr(
@@ -5542,7 +5532,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _call_model_with_tools(**kwargs):
         captured_model_messages[:] = list(kwargs.get("messages") or [])
-        return {}
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -5559,11 +5549,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
     )
     monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -7106,19 +7091,9 @@ async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime
         seen_model_refs.append(model_refs)
         if model_refs == ["old-model"]:
             raise RuntimeError(ceo_runtime_ops.PUBLIC_PROVIDER_FAILURE_MESSAGE)
-        return {}
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(
-            content="ok",
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 

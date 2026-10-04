@@ -67,17 +67,6 @@ def _request_messages():
     ]
 
 
-def _view(message):
-    content = message.get("content", "") if isinstance(message, dict) else getattr(message, "content", "")
-    return SimpleNamespace(
-        content=content,
-        tool_calls=[],
-        error_text="",
-        provider_request_meta={},
-        provider_request_body={},
-    )
-
-
 @pytest.mark.asyncio
 async def test_frontdoor_compression_request_is_append_only_with_trailing_instruction(
     monkeypatch: pytest.MonkeyPatch,
@@ -90,7 +79,6 @@ async def test_frontdoor_compression_request_is_append_only_with_trailing_instru
         return {"content": "压缩后的摘要"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(runner, "_model_response_view", _view, raising=False)
     monkeypatch.setattr(
         runner,
         "_estimate_frontdoor_send_total_tokens",
@@ -145,7 +133,6 @@ async def test_frontdoor_compression_retries_empty_response_then_succeeds(
         return {"content": "第二次尝试得到的摘要"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(runner, "_model_response_view", _view, raising=False)
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **kwargs: 10_000, raising=False)
 
     async def _fast_sleep(_seconds):
@@ -178,7 +165,6 @@ async def test_frontdoor_compression_empty_retry_respects_cancel(
         return {"content": ""}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(runner, "_model_response_view", _view, raising=False)
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **kwargs: 10_000, raising=False)
 
     runtime = _build_runtime()
@@ -213,7 +199,6 @@ async def test_frontdoor_compression_chunks_when_single_shot_exceeds_window(
         return {"content": "归并后的总摘要"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(runner, "_model_response_view", _view, raising=False)
 
     def _instance_estimate(**kwargs):
         rendered = json.dumps(list(kwargs.get("request_messages") or []), ensure_ascii=False, default=str)

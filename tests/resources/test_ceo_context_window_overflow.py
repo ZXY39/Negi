@@ -647,16 +647,6 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
         return {"content": "主请求回复"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -753,16 +743,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
         return {"content": "主请求回复"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(
         runner,
@@ -866,16 +846,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
         return {"content": "主请求回复"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -1027,16 +997,6 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
         return {"content": "[late-compression-result]"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 

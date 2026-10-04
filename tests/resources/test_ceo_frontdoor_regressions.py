@@ -536,7 +536,7 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
 
     async def _call_model_with_tools(**kwargs):
         captured["messages"] = list(kwargs.get("messages") or [])
-        return {}
+        return {"content": "done"}
 
     monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
@@ -549,18 +549,6 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
         },
     )
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(
-            content="done",
-            tool_calls=[],
-            finish_reason="stop",
-            error_text="",
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"content": "done"})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
