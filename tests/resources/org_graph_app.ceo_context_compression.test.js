@@ -229,7 +229,6 @@ function loadApp() {
     api.StubHTMLElement = StubHTMLElement;
     api.U.ceoFeed = new StubHTMLElement();
     api.U.ceoComposerUsageBrain = new StubHTMLElement();
-    api.U.ceoComposerUsageBrainBase = new StubHTMLElement();
     api.U.ceoComposerUsageBrainFill = new StubHTMLElement();
     api.U.ceoComposerUsageBrainRing = new StubHTMLElement();
     api.U.ceoModelModeBadge = new StubHTMLElement();

@@ -518,7 +518,6 @@ const U = {
     ceoModelPickerEmpty: document.getElementById("ceo-model-picker-empty"),
     ceoModelModeNote: document.getElementById("ceo-model-mode-note"),
     ceoComposerUsageBrain: document.getElementById("ceo-context-usage-brain"),
-    ceoComposerUsageBrainBase: document.getElementById("ceo-context-usage-brain-base"),
     ceoComposerUsageBrainFill: document.getElementById("ceo-context-usage-brain-fill"),
     ceoComposerUsageBrainRing: document.getElementById("ceo-context-usage-brain-ring"),
     ceoComposerUsageBrainHint: document.getElementById("ceo-context-usage-brain-hint"),
@@ -2514,9 +2513,8 @@ function scheduleSyncCeoComposerUsageOutline() {
 
 function syncCeoComposerUsageOutline() {
     const shell = U.ceoComposerUsageBrain;
-    const base = U.ceoComposerUsageBrainBase;
     const fill = U.ceoComposerUsageBrainFill;
-    if (!shell || !base || !fill) return;
+    if (!shell || !fill) return;
     const estimate = ceoCurrentUsageEstimate();
     const hasEstimate = !!estimate;
     const ratio = hasEstimate ? Math.max(0, Math.min(1, Number(estimate.ratio) || 0)) : 0;
@@ -2528,13 +2526,12 @@ function syncCeoComposerUsageOutline() {
     const usageLive = !!S.ceoTurnActive || !!activeCeoSessionCompressionState();
     const usageColor = usageLive ? `hsl(${hue.toFixed(1)} 82% 58%)` : "var(--text-muted)";
     const fillPercent = Math.max(0, Math.min(100, visualRatio * 100));
-    const basePercent = Math.max(0, Math.min(100, 100 - fillPercent));
     if (typeof shell.style?.setProperty === "function") {
         shell.style.setProperty("--ceo-context-usage-color", usageColor);
     } else {
         shell.style["--ceo-context-usage-color"] = usageColor;
     }
-    base.style.height = `${basePercent}%`;
+    // 只推水位高度：脑的描边整圈常驻，水体在它下面被轮廓裁开，液面才是唯一会动的东西。
     fill.style.height = `${fillPercent}%`;
     shell.classList.toggle("is-active", hasEstimate);
     shell.classList.toggle("is-pending", false);

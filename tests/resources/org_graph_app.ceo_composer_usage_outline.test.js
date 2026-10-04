@@ -170,7 +170,6 @@ test("idle session renders the brain neutral grey while keeping the reading", ()
     S.activeSessionId = "web:test";
     S.ceoTurnActive = false;
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
     S.ceoComposerUsageEstimate = {
         session_id: "web:test",
@@ -205,7 +204,6 @@ test("idle session renders the brain neutral grey while keeping the reading", ()
     S.activeSessionId = "web:test";
     S.ceoTurnActive = false;
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
     S.ceoComposerUsageEstimate = {
         session_id: "web:test",
@@ -240,7 +238,6 @@ test("composer usage brain maps ratio into progressive icon fill", () => {
         provider_model: "openai:gpt-5.2",
     };
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
 
     syncCeoComposerUsageOutline();
@@ -250,7 +247,6 @@ test("composer usage brain maps ratio into progressive icon fill", () => {
     assert.equal(U.ceoComposerUsageBrain.dataset.usageState, "active");
     assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "openai:gpt-5.2 · 8000/32000 TOKEN");
     assert.match(String(U.ceoComposerUsageBrain.style["--ceo-context-usage-color"] || ""), /^hsl\(/);
-    assert.equal(U.ceoComposerUsageBrainBase.style.height, "75%");
     assert.equal(U.ceoComposerUsageBrainFill.style.height, "25%");
 });
 
@@ -266,13 +262,11 @@ test("composer usage brain clamps overflow state to a full fill", () => {
         would_exceed_context_window: true,
     };
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
 
     syncCeoComposerUsageOutline();
 
     assert.equal(U.ceoComposerUsageBrain.dataset.usageState, "overflow");
-    assert.equal(U.ceoComposerUsageBrainBase.style.height, "0%");
     assert.equal(U.ceoComposerUsageBrainFill.style.height, "100%");
 });
 
@@ -287,17 +281,14 @@ test("tiny ratio still renders a visible minimum token fill", () => {
         provider_model: "openai:gpt-5.2",
     };
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
 
     syncCeoComposerUsageOutline();
 
     const visibleHeight = Number.parseFloat(String(U.ceoComposerUsageBrainFill.style.height || "0"));
-    const baseHeight = Number.parseFloat(String(U.ceoComposerUsageBrainBase.style.height || "0"));
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
     assert.ok(visibleHeight >= 6);
     assert.ok(visibleHeight < 100);
-    assert.ok(baseHeight > visibleHeight);
 });
 
 test("brain stays empty when no exact next-request estimate is available", () => {
@@ -306,7 +297,6 @@ test("brain stays empty when no exact next-request estimate is available", () =>
     S.ceoTurnActive = false;
     S.ceoComposerUsageEstimate = null;
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
 
     syncCeoComposerUsageOutline();
@@ -322,7 +312,6 @@ test("active turn stays empty before runtime next-request snapshot arrives", () 
     S.ceoTurnActive = true;
     S.ceoComposerUsageEstimate = null;
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
 
     syncCeoComposerUsageOutline();
@@ -330,7 +319,6 @@ test("active turn stays empty before runtime next-request snapshot arrives", () 
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-active"), false);
     assert.equal(U.ceoComposerUsageBrain.classList.contains("is-pending"), false);
     assert.equal(U.ceoComposerUsageBrain.attributes["aria-label"], "等待 Leader 上下文预估");
-    assert.equal(U.ceoComposerUsageBrainBase.style.height, "100%");
     assert.equal(U.ceoComposerUsageBrainFill.style.height, "0%");
 });
 
@@ -340,7 +328,6 @@ test("running state transition does not show fallback outline before runtime est
     S.ceoTurnActive = false;
     S.ceoComposerUsageEstimate = null;
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
 
     applyCeoState({ status: "running", is_running: true }, { source: "user", turn_id: "turn-1" });
@@ -455,8 +442,9 @@ test("brain icon avoids blur-inducing svg drop shadows", () => {
     );
 });
 
-test("brain icon splits base and fill into non-overlapping clips", () => {
+test("brain outline stays whole and paints above the water", () => {
     const layerBlock = /\.ceo-context-usage-brain-layer \{([\s\S]*?)\n\}/.exec(APP_CSS)?.[1] || "";
+    const baseBlock = /\.ceo-context-usage-brain-base \{([\s\S]*?)\n\}/.exec(APP_CSS)?.[1] || "";
     assert.equal(
         APP_CSS.includes(".ceo-context-usage-brain-base {\n    position: absolute;\n    top: 0;\n    align-items: flex-start;"),
         true
@@ -473,6 +461,11 @@ test("brain icon splits base and fill into non-overlapping clips", () => {
         layerBlock.includes("inset: 0;"),
         false
     );
+    // 描边整圈常驻：基准层不再被液面裁短，且必须盖在水体（默认 z-index 1）之上
+    assert.ok(baseBlock.includes("z-index: 2;"), "brain outline is no longer above the water layer");
+    assert.equal(/\.ceo-context-usage-brain-base \{[^}]*\n\s*height:/.test(APP_CSS), false);
+    assert.equal(APP_CODE.includes("base.style.height"), false);
+    assert.equal(APP_CODE.includes("ceoComposerUsageBrainBase"), false);
 });
 
 test("brain icon color transitions continuously from green to red", () => {
@@ -480,7 +473,6 @@ test("brain icon color transitions continuously from green to red", () => {
     S.activeSessionId = "web:test";
     S.ceoTurnActive = true;
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
 
     S.ceoComposerUsageEstimate = {
@@ -732,7 +724,6 @@ test("active turn prefers runtime next-request snapshot over stale composer esti
         provider_model: "openai:gpt-5.2",
     };
     U.ceoComposerUsageBrain = new StubHTMLElement();
-    U.ceoComposerUsageBrainBase = new StubHTMLElement();
     U.ceoComposerUsageBrainFill = new StubHTMLElement();
     U.ceoCompressionActions = new StubHTMLElement();
     U.ceoCompressionPause = new StubHTMLButtonElement();
