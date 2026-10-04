@@ -5,6 +5,7 @@ from openai import APIError as OpenAISDKAPIError
 from g3ku.providers.base import LLMResponse
 from g3ku.providers.fallback import ModelProviderResponseError
 from g3ku.providers.openai_chat_provider import _structured_error_fields
+from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
 
 
 class _FakeSDKError(OpenAISDKAPIError):
@@ -85,3 +86,24 @@ def test_llm_response_carries_structured_error_fields() -> None:
     # 默认值：未填充时为 None（其他 provider 不设这些字段也不报错）
     plain = LLMResponse(content="ok")
     assert plain.error_code is None and plain.error_status is None and plain.error_kind is None
+
+
+def test_frontdoor_carrier_passes_structured_error_fields_to_the_view() -> None:
+    """前门只从 payload dict 读错误三件套；少一个键，上层分类器就退化成 legacy_session_error。"""
+    response = LLMResponse(
+        content=None,
+        finish_reason="error",
+        error_text="Error code: 429 - rpm exhausted",
+        error_code="8",
+        error_status=429,
+        error_kind="RateLimitError",
+    )
+    payload = CreateAgentCeoFrontDoorRunner._model_response_payload_dict(response)
+    assert payload["error_code"] == "8"
+    assert payload["error_status"] == 429
+
+    view = CreateAgentCeoFrontDoorRunner._model_response_view(payload)
+    assert (view.error_code, view.error_status, view.error_kind) == ("8", 429, "RateLimitError")
+
+    plain = CreateAgentCeoFrontDoorRunner._model_response_payload_dict(LLMResponse(content="hi"))
+    assert "error_code" not in plain and "error_status" not in plain

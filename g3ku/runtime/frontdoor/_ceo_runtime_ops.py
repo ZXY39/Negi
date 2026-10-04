@@ -21,7 +21,6 @@ from g3ku.config.live_runtime import get_runtime_config, peek_runtime_revision
 from g3ku.core.messages import UserInputMessage
 from g3ku.core.timefmt import render_arrival_stamp, strip_arrival_time_stamp
 from g3ku.json_schema_utils import (
-    build_args_schema_model,
     normalize_runtime_tool_arguments_dict,
     sanitize_provider_parameters_schema,
 )
@@ -601,10 +600,6 @@ def _user_input_metadata(value: Any) -> dict[str, Any]:
 def _join_overlay_text(*parts: Any) -> str:
     sections = [str(part or "").strip() for part in parts if str(part or "").strip()]
     return "\n\n".join(sections).strip()
-
-
-def _build_args_schema(tool: Tool):
-    return build_args_schema_model(tool.name, tool.parameters)
 
 
 def _model_visible_tool_contract(tool: Tool) -> tuple[str, dict[str, Any] | None]:
@@ -2484,7 +2479,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 else "",
             )
             compressed_text = self._content_text(response_view.content).strip()
-            has_error_text = bool(str(getattr(response_view, "error_text", None) or "").strip())
+            has_error_text = bool(str(response_view.error_text or "").strip())
             if callable(is_cancelled) and bool(is_cancelled()):
                 raise asyncio.CancelledError()
             if compressed_text and not has_error_text:
@@ -6120,54 +6115,31 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
 
     @staticmethod
     def _model_response_view(message: dict[str, Any]) -> Any:
-        if isinstance(message, dict):
-            payload = dict(message or {})
-            return type(
-                "ModelResponseView",
-                (),
-                {
-                    "content": payload.get("content", ""),
-                    "tool_calls": list(payload.get("tool_calls", None) or []),
-                    "finish_reason": str(payload.get("finish_reason", "stop") or "stop"),
-                    "error_text": str(payload.get("error_text", "") or ""),
-                    "error_kind": str(payload.get("error_kind", "") or ""),
-                    "reasoning_content": payload.get("reasoning_content"),
-                    "thinking_blocks": payload.get("thinking_blocks"),
-                    "reasoning_items": payload.get("reasoning_items"),
-                    "reasoning_context_allowed": bool(payload.get("reasoning_context_allowed") or False),
-                    "stream_incomplete": bool(payload.get("stream_incomplete") or False),
-                    "provider_request_meta": payload.get("provider_request_meta"),
-                    "provider_request_body": payload.get("provider_request_body"),
-                },
-            )()
-        response_metadata = dict(getattr(message, "response_metadata", {}) or {})
-        additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
+        payload = dict(message or {})
         return type(
             "ModelResponseView",
             (),
             {
-                "content": getattr(message, "content", ""),
-                "tool_calls": list(getattr(message, "tool_calls", None) or []),
-                "finish_reason": str(response_metadata.get("finish_reason", "stop") or "stop"),
-                "error_text": str(response_metadata.get("error_text", "") or ""),
-                "error_kind": str(response_metadata.get("error_kind", "") or ""),
-                "reasoning_content": additional_kwargs.get("reasoning_content"),
-                "thinking_blocks": additional_kwargs.get("thinking_blocks"),
-                "reasoning_items": additional_kwargs.get("reasoning_items"),
-                "reasoning_context_allowed": bool(additional_kwargs.get("reasoning_context_allowed") or False),
-                "stream_incomplete": bool(additional_kwargs.get("stream_incomplete") or False),
-                "provider_request_meta": response_metadata.get("provider_request_meta"),
-                "provider_request_body": response_metadata.get("provider_request_body"),
+                "content": payload.get("content", ""),
+                "tool_calls": list(payload.get("tool_calls", None) or []),
+                "finish_reason": str(payload.get("finish_reason", "stop") or "stop"),
+                "error_text": str(payload.get("error_text", "") or ""),
+                "error_kind": str(payload.get("error_kind", "") or ""),
+                "error_code": str(payload.get("error_code", "") or ""),
+                "error_status": payload.get("error_status"),
+                "reasoning_content": payload.get("reasoning_content"),
+                "thinking_blocks": payload.get("thinking_blocks"),
+                "reasoning_items": payload.get("reasoning_items"),
+                "reasoning_context_allowed": bool(payload.get("reasoning_context_allowed") or False),
+                "stream_incomplete": bool(payload.get("stream_incomplete") or False),
+                "provider_request_meta": payload.get("provider_request_meta"),
+                "provider_request_body": payload.get("provider_request_body"),
             },
         )()
 
     @staticmethod
     def _model_response_usage(message: dict[str, Any]) -> dict[str, int]:
-        if isinstance(message, dict):
-            payload = dict(message or {})
-            return normalize_usage_payload(payload.get("usage"))
-        response_metadata = dict(getattr(message, "response_metadata", {}) or {})
-        return normalize_usage_payload(response_metadata.get("usage") or getattr(message, "usage", None))
+        return normalize_usage_payload((dict(message or {})).get("usage"))
 
     def _checkpoint_safe_provider_request_body(
         self,
@@ -6226,8 +6198,8 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "reasoning_content": _checkpoint_safe_value(response_view.reasoning_content),
             "thinking_blocks": _checkpoint_safe_value(response_view.thinking_blocks),
             "reasoning_items": _checkpoint_safe_value(response_view.reasoning_items),
-            "reasoning_context_allowed": bool(getattr(response_view, "reasoning_context_allowed", False)),
-            "stream_incomplete": bool(getattr(response_view, "stream_incomplete", False)),
+            "reasoning_context_allowed": bool(response_view.reasoning_context_allowed),
+            "stream_incomplete": bool(response_view.stream_incomplete),
             "provider_request_meta": _checkpoint_safe_value(response_view.provider_request_meta),
             "provider_request_body": self._checkpoint_safe_provider_request_body(response_view.provider_request_body),
         }
@@ -6481,6 +6453,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         for key in ("reasoning_content", "thinking_blocks", "reasoning_items"):
             value = getattr(response, key, None)
             if value:
+                payload[key] = value
+        for key in ("error_code", "error_status"):
+            value = getattr(response, key, None)
+            if value not in (None, ""):
                 payload[key] = value
         if getattr(response, "reasoning_context_allowed", False):
             payload["reasoning_context_allowed"] = True
@@ -7844,12 +7820,12 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             }
         if str(response_view.finish_reason or "").strip().lower() == "error":
             error_detail = str(
-                getattr(response_view, "error_text", None)
+                response_view.error_text
                 or response_view.content
                 or "model response failed"
             ).strip()
             error_detail = error_detail if error_detail.lower() not in {"error", "error:"} else "model response failed"
-            if str(getattr(response_view, "error_kind", "") or "").strip() == "StreamIncomplete":
+            if str(response_view.error_kind or "").strip() == "StreamIncomplete":
                 # 断流的取证串是英文内部文案，不能原样投给渠道：这里换成与空响应车道同口径的
                 # 中文，原文进 raw_message（.g3ku/errors 与前端排障仍看得到）。
                 raise ModelProviderExhaustedError(
@@ -7864,9 +7840,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             raise ModelProviderResponseError(
                 message=error_detail,
                 raw_message=error_detail,
-                code=str(getattr(response_view, "error_code", "") or ""),
-                status=getattr(response_view, "error_status", None),
-                kind=str(getattr(response_view, "error_kind", "") or ""),
+                code=str(response_view.error_code or ""),
+                status=response_view.error_status,
+                kind=str(response_view.error_kind or ""),
             )
 
         if text.strip():

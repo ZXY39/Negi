@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from g3ku.core.messages import UserInputMessage
 from g3ku.runtime import web_ceo_sessions
@@ -41,7 +40,10 @@ async def test_first_frontdoor_request_records_inbound_to_send_latency(
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 1200, raising=False)
 
     async def _call_model_with_tools(**kwargs):
-        return AIMessage(content="reply", response_metadata={"finish_reason": "stop"})
+        return {
+            "content": "reply",
+            "finish_reason": "stop",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     session = SimpleNamespace(
@@ -108,7 +110,10 @@ async def test_request_timing_is_null_without_inbound_metadata(
     monkeypatch.setattr(runner, "_estimate_frontdoor_send_total_tokens", lambda **_: 1200, raising=False)
 
     async def _call_model_with_tools(**kwargs):
-        return AIMessage(content="reply", response_metadata={"finish_reason": "stop"})
+        return {
+            "content": "reply",
+            "finish_reason": "stop",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
     session = SimpleNamespace(

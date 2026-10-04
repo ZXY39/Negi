@@ -4,13 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from g3ku.agent.tools.base import Tool
 from g3ku.agent.tools.memory_write import MemoryWriteTool
 from g3ku.config.schema import MemoryAssemblyConfig
 from g3ku.core.messages import UserInputMessage
-from g3ku.json_schema_utils import get_attached_raw_parameters_schema
 from g3ku.runtime.frontdoor import _ceo_create_agent_impl as create_agent_impl
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor import ceo_runner
@@ -4291,7 +4289,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _call_model_with_tools(**kwargs):
         captured_model_messages[:] = list(kwargs.get("messages") or [])
-        return SimpleNamespace()
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -4307,11 +4305,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
         },
     )
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -4487,7 +4480,7 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
 
     async def _call_model_with_tools(**kwargs):
         captured_model_messages[:] = list(kwargs.get("messages") or [])
-        return SimpleNamespace()
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -4515,11 +4508,6 @@ async def test_graph_call_model_runs_token_preflight_after_fresh_turn_seed_and_b
     )
     monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
     monkeypatch.setattr(
@@ -5544,7 +5532,7 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
 
     async def _call_model_with_tools(**kwargs):
         captured_model_messages[:] = list(kwargs.get("messages") or [])
-        return SimpleNamespace()
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner._resolver, "resolve_for_actor", _resolve_for_actor)
     monkeypatch.setattr(runner._builder, "build_for_ceo", _build_for_ceo)
@@ -5561,11 +5549,6 @@ async def test_graph_call_model_fresh_turn_reuses_previous_message_artifact_pref
     )
     monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(content="ok", tool_calls=[], provider_request_meta={}, provider_request_body={}),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -6648,8 +6631,8 @@ def test_create_agent_prompt_cache_key_contract_preserves_fallback_system_prompt
         ),
         provider_model="openai:gpt-4.1",
         tool_schemas=[],
-        fallback_system_message=SystemMessage(content="You are the CEO frontdoor agent."),
-        fallback_messages=[HumanMessage(content="ignored fallback")],
+        fallback_system_message={"role": "system", "content": "You are the CEO frontdoor agent."},
+        fallback_messages=[{"role": "user", "content": "ignored fallback"}],
         session_key="web:shared",
     )
 
@@ -7108,19 +7091,9 @@ async def test_graph_call_model_restarts_with_refreshed_model_refs_after_runtime
         seen_model_refs.append(model_refs)
         if model_refs == ["old-model"]:
             raise RuntimeError(ceo_runtime_ops.PUBLIC_PROVIDER_FAILURE_MESSAGE)
-        return SimpleNamespace()
+        return {"content": "ok"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda _message: SimpleNamespace(
-            content="ok",
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 

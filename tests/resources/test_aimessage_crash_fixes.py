@@ -1,14 +1,13 @@
 """Regression tests for the create_async_task retry crash fixes.
 
 Covers FIX_PLAN_create-async-task-aimessage-crash.md:
-- P0.1: message-record helpers tolerate non-dict (LangChain message object) inputs.
+- P0.1: message-record helpers tolerate non-dict message objects.
 - P1.1: create_async_task contract schema types are strict (no string union hints).
 - P1.2: inbound normalization recovers intended types from string JSON arguments.
 """
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage
 
 from g3ku.runtime.context.types import ContextAssemblyResult
 from g3ku.runtime.frontdoor._ceo_runtime_ops import _normalize_frontdoor_tool_arguments
@@ -142,16 +141,16 @@ def test_frontdoor_normalize_treats_none_targets_as_empty() -> None:
 # ---------------------------------------------------------------------------
 
 def test_message_role_guards_non_dict_inputs() -> None:
-    # Non-dict (e.g. LangChain) message objects are skipped, never crashed on.
-    assert _message_role(AIMessage(content="hello")) == ""
+    # Non-dict message objects are skipped, never crashed on.
+    assert _message_role(object()) == ""
     assert _message_role(None) == ""
     assert _message_role(42) == ""
     assert _message_role({"role": "user", "content": "x"}) == "user"
 
 
-def test_repair_split_stage_tool_boundaries_tolerates_langchain_objects() -> None:
+def test_repair_split_stage_tool_boundaries_tolerates_non_dict_objects() -> None:
     messages: list[object] = [
-        AIMessage(content="assistant turn"),
+        object(),
         {"role": "user", "content": "hello"},
     ]
     repaired = repair_split_stage_tool_boundaries(messages)  # type: ignore[arg-type]
@@ -160,11 +159,11 @@ def test_repair_split_stage_tool_boundaries_tolerates_langchain_objects() -> Non
     assert any(str(item.get("role") or "").strip().lower() == "user" for item in repaired)
 
 
-def test_stage_compaction_tolerates_langchain_objects() -> None:
+def test_stage_compaction_tolerates_non_dict_objects() -> None:
     messages: list[object] = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hello"},
-        AIMessage(content="model reply"),
+        object(),
         {"role": "user", "content": "again"},
     ]
     parts = compact_stage_prompt_messages_in_place(messages, stage_state={})  # type: ignore[arg-type]
@@ -175,7 +174,7 @@ def test_stage_compaction_tolerates_langchain_objects() -> None:
 def test_context_assembly_ignores_non_dict_stable_messages() -> None:
     result = ContextAssemblyResult(
         stable_messages=[
-            AIMessage(content="model turn"),
+            object(),
             {"role": "system", "content": "system prompt text"},
             None,
         ]

@@ -8,7 +8,6 @@ import zlib
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from g3ku.runtime.frontdoor import _ceo_runtime_ops as ceo_runtime_ops
 from g3ku.runtime.frontdoor._ceo_create_agent_impl import CreateAgentCeoFrontDoorRunner
@@ -648,16 +647,6 @@ async def test_graph_call_model_runs_llm_token_compression_before_main_send(
         return {"content": "主请求回复"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -754,16 +743,6 @@ async def test_graph_call_model_token_compression_keeps_prior_provider_tool_sche
         return {"content": "主请求回复"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(
         runner,
@@ -867,16 +846,6 @@ async def test_graph_call_model_token_compression_keeps_repair_required_contract
         return {"content": "主请求回复"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -1028,16 +997,6 @@ async def test_graph_call_model_discards_late_compression_result_after_pause(
         return {"content": "[late-compression-result]"}
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-    monkeypatch.setattr(
-        runner,
-        "_model_response_view",
-        lambda message: SimpleNamespace(
-            content=message.get("content", ""),
-            tool_calls=[],
-            provider_request_meta={},
-            provider_request_body={},
-        ),
-    )
     monkeypatch.setattr(runner, "_checkpoint_safe_model_response_payload", lambda _message: {"ok": True})
     monkeypatch.setattr(runner, "_persist_frontdoor_actual_request", lambda **_: {})
 
@@ -1118,24 +1077,22 @@ async def test_run_frontdoor_llm_token_compression_persists_internal_request_art
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
-        return AIMessage(
-            content="[压缩后的较早历史摘要]",
-            response_metadata={
-                "usage": {
-                    "input_tokens": 12709,
-                    "output_tokens": 552,
-                    "cache_hit_tokens": 0,
-                },
-                "provider_request_meta": {
-                    "provider": "responses",
-                    "endpoint": "https://example.test/v1/responses",
-                },
-                "provider_request_body": {
-                    "model": "gpt-5.2",
-                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "compress"}]}],
-                },
-            },
-        )
+        return {
+            "content": "[压缩后的较早历史摘要]",
+            "usage": {
+                                               "input_tokens": 12709,
+                                               "output_tokens": 552,
+                                               "cache_hit_tokens": 0,
+                                           },
+            "provider_request_meta": {
+                                                               "provider": "responses",
+                                                               "endpoint": "https://example.test/v1/responses",
+                                                           },
+            "provider_request_body": {
+                                                               "model": "gpt-5.2",
+                                                               "input": [{"role": "user", "content": [{"type": "input_text", "text": "compress"}]}],
+                                                           },
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 
@@ -1220,7 +1177,9 @@ async def test_run_frontdoor_llm_token_compression_aligns_tool_pair_tail_boundar
 
     async def _call_model_with_tools(**kwargs):
         _ = kwargs
-        return AIMessage(content="[压缩后的较早历史摘要]")
+        return {
+            "content": "[压缩后的较早历史摘要]",
+        }
 
     monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
 

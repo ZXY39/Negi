@@ -24,8 +24,9 @@ RUNTIME_CONSOLE_LOG_MAX_BYTES = 50 * 1024 * 1024
 RUNTIME_CONSOLE_LOG_RETENTION_SECONDS = 7 * 24 * 3600
 MIN_PYTHON = (3, 11)
 RUNTIME_IMPORT_PROBES = (
-    "langchain_core.messages",
+    "fastapi",
     "aiosqlite",
+    "pydantic",
 )
 
 
