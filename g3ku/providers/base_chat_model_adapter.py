@@ -195,6 +195,9 @@ class G3kuChatModelAdapter(BaseChatModel):
             "finish_reason": getattr(response, "finish_reason", "stop"),
             "usage": getattr(response, "usage", {}),
             "error_text": getattr(response, "error_text", None),
+            # 错误类别要跟着走：上层按它区分"断流"与其它提供侧故障（断流对用户说中文，
+            # 其余仍带 provider 原文）。
+            "error_kind": getattr(response, "error_kind", None),
         }
         if isinstance(getattr(response, "provider_request_meta", None), dict) and response.provider_request_meta:
             response_metadata["provider_request_meta"] = dict(response.provider_request_meta)

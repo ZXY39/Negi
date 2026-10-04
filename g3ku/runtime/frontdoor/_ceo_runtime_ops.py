@@ -6266,6 +6266,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     "tool_calls": list(payload.get("tool_calls", None) or []),
                     "finish_reason": str(payload.get("finish_reason", "stop") or "stop"),
                     "error_text": str(payload.get("error_text", "") or ""),
+                    "error_kind": str(payload.get("error_kind", "") or ""),
                     "reasoning_content": payload.get("reasoning_content"),
                     "thinking_blocks": payload.get("thinking_blocks"),
                     "reasoning_items": payload.get("reasoning_items"),
@@ -6285,6 +6286,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 "tool_calls": list(getattr(message, "tool_calls", None) or []),
                 "finish_reason": str(response_metadata.get("finish_reason", "stop") or "stop"),
                 "error_text": str(response_metadata.get("error_text", "") or ""),
+                "error_kind": str(response_metadata.get("error_kind", "") or ""),
                 "reasoning_content": additional_kwargs.get("reasoning_content"),
                 "thinking_blocks": additional_kwargs.get("thinking_blocks"),
                 "reasoning_items": additional_kwargs.get("reasoning_items"),
@@ -7646,8 +7648,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     await asyncio.sleep(float(min(10, max(1, provider_retry_count))))
                     continue
                 response_view = self._model_response_view(message)
-                stream_unterminated = self._is_unterminated_empty_response(response_view)
-                if stream_unterminated or self._is_empty_model_response(response_view):
+                # 未终止的流不再由这里判：provider 已经把它标成提供侧故障（带 error_text），
+                # 模型链在同一次调用内换槽位；整条链都断时走下方 finish_reason=="error" 的
+                # 结构化上抛。这里只留"正常终止但空"的重放——它不是传输故障。
+                if self._is_empty_model_response(response_view):
                     if self._refresh_runtime_config_for_retry_invalidation():
                         state_for_request["model_refs"] = list(
                             self._resolve_ceo_model_refs_for_session(state_for_request.get("session_key"))
@@ -7660,11 +7664,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                         # 与节点车道同构：耗尽后失败上抛，由 session_agent 的错误车道
                         # 落成「这一轮处理失败：…」，不把运行时内部文案当助手回复投递。
                         raise ModelProviderExhaustedError(
-                            message=(
-                                "响应流未正常终止"
-                                if stream_unterminated
-                                else "模型返回空响应（无正文、无工具调用）"
-                            )
+                            message="模型返回空响应（无正文、无工具调用）"
                             + f"，自动重试 {empty_response_retry_count} 次仍未取得可用回复。"
                         )
                     await asyncio.sleep(float(min(10, max(1, empty_response_retry_count))))
@@ -7944,6 +7944,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 or "model response failed"
             ).strip()
             error_detail = error_detail if error_detail.lower() not in {"error", "error:"} else "model response failed"
+            if str(getattr(response_view, "error_kind", "") or "").strip() == "StreamIncomplete":
+                # 断流的取证串是英文内部文案，不能原样投给渠道：这里换成与空响应车道同口径的
+                # 中文，原文进 raw_message（.g3ku/errors 与前端排障仍看得到）。
+                raise ModelProviderExhaustedError(
+                    raw_message=error_detail,
+                    message="响应流未正常终止（未收到终止标记），整条模型链都没有拿到可用回复。",
+                )
             if error_detail == PUBLIC_PROVIDER_FAILURE_MESSAGE:
                 raise ModelProviderExhaustedError(raw_message=error_detail, message=error_detail)
             # 抛结构化异常而非裸 RuntimeError：携带 provider 的 code/status/kind，使上层

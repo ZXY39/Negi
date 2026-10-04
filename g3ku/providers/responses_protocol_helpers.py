@@ -413,6 +413,12 @@ async def _consume_sse(
                     )
                 )
         elif event_type == "response.completed":
+            # 终止事件是这一条协议车道唯一的"说完了"凭据：usage 只在这里出现，
+            # finish_reason 也只在这里被覆盖。把它同时记进流式诊断，未收到终止事件
+            # 的回包才可能被上层当成传输故障（而不是伪装成一次正常 stop）。
+            note_terminal = getattr(response, "note_terminal_event", None)
+            if callable(note_terminal):
+                note_terminal()
             response_payload = event.get("response") or {}
             status = response_payload.get("status")
             finish_reason = _map_finish_reason(status)

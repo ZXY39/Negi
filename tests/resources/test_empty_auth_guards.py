@@ -266,6 +266,11 @@ async def test_responses_provider_uses_request_timeout_for_http_client(monkeypat
             return _FakeStream()
 
     async def _fake_consume_sse(response):
+        # 桩替换掉了真实流消费者：把终止事件补记进诊断，否则这条假流会被 provider
+        # 当成"没说完"（断流现在按提供侧故障处理），测试要的就不是它声称的那条路径了。
+        note_terminal = getattr(response, "note_terminal_event", None)
+        if callable(note_terminal):
+            note_terminal()
         _ = response
         return "ok", [], "stop", {}, []
 
@@ -311,6 +316,11 @@ async def test_responses_provider_sanitizes_tool_schema_combinators_before_trans
             return _FakeStream()
 
     async def _fake_consume_sse(response):
+        # 桩替换掉了真实流消费者：把终止事件补记进诊断，否则这条假流会被 provider
+        # 当成"没说完"（断流现在按提供侧故障处理），测试要的就不是它声称的那条路径了。
+        note_terminal = getattr(response, "note_terminal_event", None)
+        if callable(note_terminal):
+            note_terminal()
         _ = response
         return "ok", [], "stop", {}, []
 
@@ -441,6 +451,11 @@ async def test_responses_provider_logs_sse_diagnostics_for_success(monkeypatch) 
             return _FakeStream()
 
     async def _fake_consume_sse(response):
+        # 桩替换掉了真实流消费者：把终止事件补记进诊断，否则这条假流会被 provider
+        # 当成"没说完"（断流现在按提供侧故障处理），测试要的就不是它声称的那条路径了。
+        note_terminal = getattr(response, "note_terminal_event", None)
+        if callable(note_terminal):
+            note_terminal()
         async for _line in response.aiter_lines():
             pass
         return "ok", [], "stop", {}, []
@@ -512,6 +527,11 @@ async def test_responses_provider_logs_sse_diagnostics_for_stream_failure(monkey
             return _FakeStream()
 
     async def _fake_consume_sse(response):
+        # 桩替换掉了真实流消费者：把终止事件补记进诊断，否则这条假流会被 provider
+        # 当成"没说完"（断流现在按提供侧故障处理），测试要的就不是它声称的那条路径了。
+        note_terminal = getattr(response, "note_terminal_event", None)
+        if callable(note_terminal):
+            note_terminal()
         async for _line in response.aiter_lines():
             pass
         raise RuntimeError("stream stalled")

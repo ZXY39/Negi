@@ -108,7 +108,12 @@ async def _chat_with_captured_client(
             return _FakeStream()
 
     async def _fake_consume_sse(response):
-        return "ok", [], "stop", {}
+        # 桩替换掉了真实流消费者：把终止事件补记进诊断，否则这条假流会被 provider
+        # 当成"没说完"（断流现在按提供侧故障处理），测试要的就不是它声称的那条路径了。
+        note_terminal = getattr(response, "note_terminal_event", None)
+        if callable(note_terminal):
+            note_terminal()
+        return "ok", [], "stop", {}, []
 
     monkeypatch.setattr("g3ku.providers.responses_provider.httpx.AsyncClient", _FakeAsyncClient)
     monkeypatch.setattr("g3ku.providers.responses_provider._consume_sse", _fake_consume_sse)

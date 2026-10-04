@@ -77,6 +77,12 @@ class _SSEDiagnosticsResponseProxy:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._response, name)
 
+    def note_terminal_event(self) -> None:
+        """`response.completed` 到达时由流消费者调用：这一条车道没有 finish_reason 分片，
+        终止事件就是唯一的完成凭据，缺它即"上游没说完"。
+        """
+        self._diagnostics.note_finish_reason()
+
     async def aiter_lines(self):
         iterator = self._response.aiter_lines().__aiter__()
         line_index = 0
@@ -257,15 +263,26 @@ class ResponsesProvider(LLMProvider):
                         **consume_kwargs,
                     )
                     logger.debug(diagnostics.render_summary(outcome="completed"))
+                    # 与 chat 车道同判：没收到终止事件、这一跳又没有工具调用 ⇒ 传输故障，
+                    # 如实标 error 让模型链前进到下一位。error_text 避开 network / 429 关键字。
+                    stream_aborted = not diagnostics._diagnostics.finish_reason_seen and not tool_calls
                     return LLMResponse(
                         content=content,
                         tool_calls=tool_calls,
-                        finish_reason=finish_reason,
+                        finish_reason="error" if stream_aborted else finish_reason,
+                        error_text=(
+                            "stream closed before response.completed after "
+                            f"{int(diagnostics._diagnostics.chunk_count)} chunks"
+                            if stream_aborted
+                            else None
+                        ),
+                        error_kind="StreamIncomplete" if stream_aborted else None,
                         usage=usage,
                         reasoning_items=reasoning_items,
                         provider_request_meta=provider_request_meta,
                         provider_request_body=provider_request_body,
                         visible_text_streamed=diagnostics._diagnostics.first_text_delta_received_at is not None,
+                        stream_incomplete=not diagnostics._diagnostics.finish_reason_seen,
                         first_token_ms=diagnostics._diagnostics.first_token_ms(),
                     )
         except Exception as e:

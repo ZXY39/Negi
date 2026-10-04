@@ -1409,7 +1409,11 @@ class ConfigChatBackend:
                                 # 成功终态：清掉该成员的连续不可用计数，但保留 RPM 观测。
                                 node_turn_controller.record_route_outcome(node_turn_lease)
                             return response  # 成功终态（或内部错误响应按原样返回）
-                        if response.visible_text_streamed:
+                        if callable(on_text_delta) and response.visible_text_streamed:
+                            # 只有"文字真的外发给了可见 sink"（CEO/渠道的流式投递）才禁止透明
+                            # 换槽：重发会把同一篇半截回答再投一遍。节点车道不接 on_text_delta，
+                            # 那里的 visible_text_streamed 只代表 provider 收到过文字分片、没有
+                            # 任何人看到过它——按原样拦会把断流换槽只覆盖到"纯思考段被掐"那一半。
                             return response  # 已出现可见流式文本：不做透明重试/回退
                         model_last_response = response
                         model_last_error = None

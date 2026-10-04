@@ -172,10 +172,23 @@ class OpenAIChatProvider(LLMProvider):
                 )
                 from loguru import logger
                 logger.debug(diagnostics.render_summary(outcome="completed"))
+                # 没有分片携带 finish_reason、这一跳又没给出工具调用 ⇒ 传输故障，不是
+                # "模型说完了"。如实标 error 让模型链按既有判据前进（response_requires_fallback），
+                # 而不是把一个未完成的回包交给上层，让交付/形态车道去反推它算不算交付。
+                # error_text 必须避开 network / 429 的关键字：命中同槽重试会在坏槽位上空转，
+                # 而换到下一位才是这一族的正确处置。
+                # 带工具调用的未终止流故意不在这里：重发会丢掉一次真实交付，宁可原样返回。
+                stream_aborted = not diagnostics.finish_reason_seen and not tool_calls
                 return LLMResponse(
                     content=content,
                     tool_calls=tool_calls,
-                    finish_reason=finish_reason,
+                    finish_reason="error" if stream_aborted else finish_reason,
+                    error_text=(
+                        f"stream closed before finish_reason after {int(diagnostics.chunk_count)} chunks"
+                        if stream_aborted
+                        else None
+                    ),
+                    error_kind="StreamIncomplete" if stream_aborted else None,
                     usage=usage,
                     reasoning_content=reasoning_content,
                     visible_text_streamed=diagnostics.first_text_delta_received_at is not None,

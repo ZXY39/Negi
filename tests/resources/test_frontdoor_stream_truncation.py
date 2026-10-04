@@ -126,6 +126,7 @@ def _view(**overrides) -> SimpleNamespace:
         "content": None,
         "tool_calls": [],
         "error_text": "",
+        "error_kind": "",
         "reasoning_content": "思考内容",
         "thinking_blocks": None,
         "stream_incomplete": True,
@@ -134,16 +135,25 @@ def _view(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**payload)
 
 
-def test_unterminated_empty_response_predicate_is_narrow() -> None:
+def test_abort_ownership_moved_to_the_provider_so_the_frontdoor_has_no_second_predicate() -> None:
+    """断流的归属收到 provider/模型链一层后，前门只留"正常收尾但全空"的重放道。
+
+    钉住两件事：带终止故障标记的回包必然自带 error_text，因此不会被空响应重放道当成
+    "模型返回空响应"再重发三次；而真正正常收尾却全空的响应仍归前门这条道。
+    """
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    assert runner._is_unterminated_empty_response(_view()) is True
-    # 有可用输出时一律不按截断处理：省略 finish_reason 的非规范 provider 不会被误伤。
-    assert runner._is_unterminated_empty_response(_view(content="正文")) is False
-    assert runner._is_unterminated_empty_response(_view(tool_calls=[{"name": "content_open"}])) is False
-    assert runner._is_unterminated_empty_response(_view(error_text="boom")) is False
-    # 正常收尾的 reasoning-only 响应保持既有行为，不进入重放。
-    assert runner._is_unterminated_empty_response(_view(stream_incomplete=False)) is False
+    abort = _view(
+        error_text="stream closed before finish_reason after 66 chunks",
+        error_kind="StreamIncomplete",
+    )
+    assert runner._is_empty_model_response(abort) is False
+
+    terminated_empty = _view(stream_incomplete=False, reasoning_content="", content=None)
+    assert runner._is_empty_model_response(terminated_empty) is True
+
+    # 正常收尾的 reasoning-only 响应仍按非空处理：它不是传输故障。
+    assert runner._is_empty_model_response(_view(stream_incomplete=False)) is False
 
 
 def _make_runner_state(monkeypatch: pytest.MonkeyPatch, runner: CreateAgentCeoFrontDoorRunner) -> dict:
@@ -209,13 +219,47 @@ def _make_runner_state(monkeypatch: pytest.MonkeyPatch, runner: CreateAgentCeoFr
 
 
 @pytest.mark.asyncio
-async def test_graph_call_model_replays_until_terminated_response(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_normalize_output_raises_chinese_error_on_stream_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """断流的归属已收到 provider/模型链一层：到这里时链内已换过槽位仍然失败。
+
+    这里不再自己重发三次（那是"同一条请求打同一扇门"的版本），而是把内部英文取证串换成
+    中文错误上抛，原文留在 raw_message 供 .g3ku/errors 与前端排障。
+    """
+    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
+    ctx = _make_runner_state(monkeypatch, runner)
+    state = dict(ctx["state"])
+    state["response_payload"] = {
+        "content": "核验结果充分，可以裁",
+        "tool_calls": [],
+        "finish_reason": "error",
+        "error_text": "stream closed before finish_reason after 66 chunks",
+        "error_kind": "StreamIncomplete",
+        "stream_incomplete": True,
+        "reasoning_content": "半截思考",
+    }
+
+    with pytest.raises(ModelProviderExhaustedError) as raised:
+        await runner._graph_normalize_model_output(state, runtime=ctx["runtime"])
+
+    # 渠道侧看到的是中文（ModelProviderExhaustedError 把 message 放进 str()），
+    # 不是 provider 的内部英文串，也不是那半截回答。
+    detail = str(raised.value)
+    assert "响应流未正常终止" in detail
+    assert "核验结果充分" not in detail
+    assert "closed before finish_reason" in raised.value.raw_message
+
+
+@pytest.mark.asyncio
+async def test_graph_call_model_still_replays_terminated_empty_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """正常收尾却全空的响应仍归前门这条重放道：它不是传输故障，没带 error_text。"""
     runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
     ctx = _make_runner_state(monkeypatch, runner)
 
     calls = [
-        AIMessage(content="", additional_kwargs={"reasoning_content": "半截思考", "stream_incomplete": True}),
-        AIMessage(content="今天的日报如下：", additional_kwargs={"reasoning_content": "想完了"}),
+        AIMessage(content="", additional_kwargs={}),
+        AIMessage(content="今天的日报如下：", additional_kwargs={}),
     ]
     seen: list[int] = []
 
@@ -231,32 +275,6 @@ async def test_graph_call_model_replays_until_terminated_response(monkeypatch: p
     assert result["empty_response_retry_count"] == 1
     assert result["response_payload"]["content"] == "今天的日报如下："
     assert result["response_payload"]["stream_incomplete"] is False
-
-
-@pytest.mark.asyncio
-async def test_graph_call_model_raises_when_truncated_replies_exhaust_retries(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runner = CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-    ctx = _make_runner_state(monkeypatch, runner)
-
-    attempts: list[int] = []
-
-    async def _call_model_with_tools(**_kwargs):
-        attempts.append(1)
-        return AIMessage(content="", additional_kwargs={"reasoning_content": "半截思考", "stream_incomplete": True})
-
-    monkeypatch.setattr(runner, "_call_model_with_tools", _call_model_with_tools)
-
-    with pytest.raises(ModelProviderExhaustedError) as raised:
-        await runner._graph_call_model(ctx["state"], runtime=ctx["runtime"])
-
-    assert len(attempts) == ceo_runtime_ops._PROVIDER_RETRY_LIMIT
-    detail = str(raised.value)
-    assert "响应流未正常终止" in detail
-    assert "3 次" in detail
-    # 内部兜底文案不再作为助手回复出现在这条路径上。
-    assert "pretending a successful reply" not in detail
 
 
 @pytest.mark.asyncio

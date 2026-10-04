@@ -113,7 +113,7 @@ Start here when you are new to the repository or when a change crosses subsystem
 - 节点因一次 `submit_final_result` 参数错误就终止，或参数错误文本里没有必填项与类型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（模型交付违约与回包形态故障分账，各有同值上限）+ `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（必填与可选字段都带类型的契约回贴）
 - 模型反复提交空串 / 空数组 / `start_line=0` 这类越界值、而它看到的 schema 里没有那条边界 → `tool-hydration-and-callable-chain.md`「参数错误与状态分类」（模型面投影只裁篇幅不裁判定；字段级 description 到不了模型）
 - 节点反复收到 `Invalid final result submission detected` 而任务不被判死、错误首行写 `provider output limit truncated` 或 `reasoning-only` → `main-task-runtime.md`「Node-Level Pause and Recovery」（回包形态故障单独计数，不占模型的无效提交预算）
-- 节点被错误暂停且最后一条理由是"只回纯文本"、而 worker 日志那一跳写着 `finish_reason_seen=0`，或 Token统计里整行输入/输出为 0 → `main-task-runtime.md`「Node-Level Pause and Recovery」（未终止的流走原地重放，不计交付违约）+ `web-and-admin.md`「Task Token Stats Window Contract」（无 usage 回执按 `--` 渲染）
+- 节点被可恢复暂停且理由写着 `closed before finish_reason`、渠道看到「响应流未正常终止」，或 worker 日志某跳写着 `finish_reason_seen=0` 而 Token统计该行输入/缓存为 `--` → `main-task-runtime.md`「Node-Level Pause and Recovery」（未终止的流由 provider 标成提供侧故障、链内换槽，不记交付违约）+ `web-and-admin.md`「Task Token Stats Window Contract」
 - 停机或暂停打断一批工具调用后，已完成的那条被重新执行一遍（重复外部动作）、或新加的工具在恢复时被自动重放／该重放的只读调用被白问一次模型 → `main-task-runtime.md`「Node-Level Pause and Recovery」（帧活状态留痕与恢复逐条判档）+ `tool-hydration-and-callable-chain.md`「工具可重放声明」
 - 任务树节点已显示暂停但任务大厅仍显示处理中、或全局恢复后大厅卡在已暂停 -> `main-task-runtime.md`「Node-Level Pause and Recovery」+ `web-and-admin.md`「Task Hall Action Contract」（状态胶囊判读）
 - 重启后任务未自动恢复、优雅重启后仍停在 paused、恢复跑过一次却又落回暂停（上一个进程遗留的 `pause_task` 命令被新 worker 迟到应用）、或出现「本任务遇到异常停止」toast → `main-task-runtime.md`「Graceful Shutdown Pause and Startup Auto-Resume」+ `operations-and-maintenance.md`「重启后任务未自动恢复 / 出现“异常停止”toast」
