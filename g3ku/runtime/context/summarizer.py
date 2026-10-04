@@ -206,11 +206,12 @@ async def summarize_layered_model_first(
             },
             ensure_ascii=False,
         )
-        response = await model.ainvoke(
+        response = await model.chat(
             [
                 {'role': 'system', 'content': prompt},
                 {'role': 'user', 'content': body},
-            ]
+            ],
+            tools=None,
         )
         raw = getattr(response, 'content', response)
         if isinstance(raw, list):

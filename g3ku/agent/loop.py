@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from g3ku.agent.chatmodel_utils import ensure_chat_model
 from g3ku.agent.memory_agent_runtime import MemoryManager
 from g3ku.runtime.engine import AgentRuntimeEngine
 from g3ku.session.manager import SessionManager
@@ -57,7 +56,6 @@ class AgentLoop(AgentRuntimeEngine):
             session_manager=session_manager,
             memory_manager_cls=MemoryManager,
             session_manager_cls=SessionManager,
-            chat_model_factory=ensure_chat_model,
             debug_mode=debug_mode,
         )
 
@@ -65,7 +63,6 @@ class AgentLoop(AgentRuntimeEngine):
 __all__ = [
     'AgentLoop',
     'AgentRuntimeEngine',
-    'ensure_chat_model',
     'MemoryManager',
     'SessionManager',
 ]

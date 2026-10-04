@@ -1,12 +1,9 @@
-"""Factory for building LangChain BaseChatModel instances from g3ku config."""
+"""Factory for building g3ku chat backends from config."""
 
 from __future__ import annotations
 
-from langchain_core.language_models.chat_models import BaseChatModel
-
 from g3ku.config.schema import Config
 from g3ku.providers.fallback import FallbackProvider
-from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 
 
 def build_chat_model(
@@ -14,8 +11,8 @@ def build_chat_model(
     *,
     role: str | None = None,
     model_key: str | None = None,
-) -> BaseChatModel:
-    """Build a BaseChatModel for a configured runtime role or explicit model key."""
+) -> FallbackProvider:
+    """Build a chat backend for a configured runtime role or explicit model key."""
     role_name = str(role or "").strip()
     direct_model_key = str(model_key or "").strip()
     if bool(role_name) == bool(direct_model_key):
@@ -37,10 +34,4 @@ def build_chat_model(
         default_model_ref=default_key,
         role=role_name,
     )
-    return G3kuChatModelAdapter(
-        chat_backend=provider,
-        default_model=default_key,
-        default_temperature=None,
-        default_max_tokens=None,
-        default_reasoning_effort=None,
-    )
+    return provider

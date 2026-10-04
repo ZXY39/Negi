@@ -14,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, convert_to_messages
 from loguru import logger
 
 from g3ku.agent.tools.base import Tool
@@ -27,7 +26,6 @@ from g3ku.json_schema_utils import (
     sanitize_provider_parameters_schema,
 )
 from g3ku.providers.base import normalize_usage_payload
-from g3ku.providers.base_chat_model_adapter import G3kuChatModelAdapter
 from g3ku.providers.fallback import (
     PUBLIC_PROVIDER_FAILURE_MESSAGE,
     ModelProviderExhaustedError,
@@ -6121,7 +6119,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )
 
     @staticmethod
-    def _model_response_view(message: AIMessage | dict[str, Any]) -> Any:
+    def _model_response_view(message: dict[str, Any]) -> Any:
         if isinstance(message, dict):
             payload = dict(message or {})
             return type(
@@ -6164,7 +6162,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         )()
 
     @staticmethod
-    def _model_response_usage(message: AIMessage | dict[str, Any]) -> dict[str, int]:
+    def _model_response_usage(message: dict[str, Any]) -> dict[str, int]:
         if isinstance(message, dict):
             payload = dict(message or {})
             return normalize_usage_payload(payload.get("usage"))
@@ -6216,7 +6214,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             self._prompt_message_records(messages)
         )
 
-    def _checkpoint_safe_model_response_payload(self, message: AIMessage) -> dict[str, Any]:
+    def _checkpoint_safe_model_response_payload(self, message: dict[str, Any]) -> dict[str, Any]:
         response_view = self._model_response_view(message)
         return {
             "content": _checkpoint_safe_value(response_view.content),
@@ -6451,6 +6449,48 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
 
+    @staticmethod
+    def _model_response_payload_dict(response: Any) -> dict[str, Any]:
+        """Flatten one provider response into the payload shape the frontdoor already reads."""
+        tool_calls: list[dict[str, Any]] = []
+        for call in list(getattr(response, "tool_calls", None) or []):
+            arguments = getattr(call, "arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            tool_calls.append(
+                {
+                    "id": getattr(call, "id", None),
+                    "name": str(getattr(call, "name", "") or ""),
+                    "args": arguments,
+                    "type": "tool_call",
+                }
+            )
+        payload: dict[str, Any] = {
+            "content": getattr(response, "content", None) or "",
+            "tool_calls": tool_calls,
+            "finish_reason": getattr(response, "finish_reason", "stop"),
+            "error_text": getattr(response, "error_text", None) or "",
+            "usage": getattr(response, "usage", {}),
+        }
+        for key in ("reasoning_content", "thinking_blocks", "reasoning_items"):
+            value = getattr(response, key, None)
+            if value:
+                payload[key] = value
+        if getattr(response, "reasoning_context_allowed", False):
+            payload["reasoning_context_allowed"] = True
+        if getattr(response, "stream_incomplete", False):
+            payload["stream_incomplete"] = True
+        for key in ("provider_request_meta", "provider_request_body"):
+            value = getattr(response, key, None)
+            if isinstance(value, dict) and value:
+                payload[key] = dict(value)
+        return payload
+
     async def _call_model_with_tools(
         self,
         *,
@@ -6461,19 +6501,17 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prompt_cache_key: str,
         on_text_delta: Any = None,
         on_model_retry_status: Any = None,
-    ) -> AIMessage:
-        chat_model = G3kuChatModelAdapter(
-            chat_backend=self._resolve_chat_backend(),
+    ) -> dict[str, Any]:
+        response = await self._resolve_chat_backend().chat(
+            messages=[dict(item) for item in list(messages or []) if isinstance(item, dict)],
+            tools=list(tool_schemas or []) or None,
             model_refs=list(model_refs or []),
-        )
-        runnable = chat_model.bind_tools(tool_schemas) if tool_schemas else chat_model
-        return await runnable.ainvoke(
-            convert_to_messages(messages),
-            parallel_tool_calls=parallel_tool_calls,
-            prompt_cache_key=prompt_cache_key,
+            parallel_tool_calls=bool(parallel_tool_calls) if isinstance(parallel_tool_calls, bool) else None,
+            prompt_cache_key=(str(prompt_cache_key).strip() or None) if prompt_cache_key is not None else None,
             on_text_delta=on_text_delta,
             on_model_retry_status=on_model_retry_status,
         )
+        return self._model_response_payload_dict(response)
 
     async def _graph_prepare_turn(
         self,

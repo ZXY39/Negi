@@ -120,6 +120,10 @@ class _FakeToolCallingModel:
         _ = tools
         return self
 
+    async def chat(self, messages, tools=None, **kwargs):
+        _ = tools, kwargs
+        return await self.ainvoke(messages)
+
     async def ainvoke(self, messages):
         _ = messages
         if not self._responses:

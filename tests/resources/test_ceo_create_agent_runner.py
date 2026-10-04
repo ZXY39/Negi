@@ -4853,7 +4853,7 @@ async def test_prepare_turn_keeps_uploaded_image_as_text_only_when_binding_disab
     assert "input_image" not in json.dumps(preflight["provider_request_body"], ensure_ascii=False)
 
 
-def test_request_messages_for_state_keep_attachment_reopen_targets_after_state_graph_round_trip(
+def test_prompt_contract_keeps_attachment_reopen_targets_in_request_messages(
     tmp_path: Path,
 ) -> None:
     docx_path = tmp_path / "resume.docx"
@@ -4924,14 +4924,19 @@ def test_request_messages_for_state_keep_attachment_reopen_targets_after_state_g
     round_tripped = dict(state)
 
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
-    system_message, request_messages = runner._request_messages_for_state(
+    contract = runner._frontdoor_prompt_contract(
         state=round_tripped,
         provider_model="ceo_primary",
         tool_schemas=[],
+        overlay_text="",
     )
-
-    assert system_message is not None
-    rendered = "\n\n".join(str(getattr(item, "content", "") or "") for item in list(request_messages or []))
+    request_messages = list(contract.request_messages or [])
+    assert request_messages
+    rendered = "\n\n".join(
+        str(item.get("content", "") or "")
+        for item in request_messages
+        if isinstance(item, dict)
+    )
     assert "attachment_reopen_targets:" in rendered
     assert str(docx_path) in rendered
     assert str(image_path) in rendered
@@ -6658,40 +6663,11 @@ def test_create_agent_prompt_cache_key_contract_preserves_fallback_system_prompt
     }
 
 
-def test_create_agent_request_render_serializes_frontdoor_tool_contract_message() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
 
-    system_message, request_messages = runner._render_request_records(
-        [
-            {"role": "system", "content": "stable system"},
-            {
-                "role": "user",
-                "content": {
-                    "message_type": "frontdoor_runtime_tool_contract",
-                    "callable_tool_names": ["exec"],
-                    "candidate_tool_names": ["filesystem_write"],
-                    "hydrated_tool_names": [],
-                    "visible_skill_ids": ["memory"],
-                    "stage_summary": {"active_stage_id": "stage:1", "transition_required": False},
-                    "contract_revision": "frontdoor:v1",
-                },
-            },
-        ]
-    )
+def test_sanitize_provider_messages_repairs_null_tool_call_arguments() -> None:
+    from main.runtime import chat_backend as chat_backend_module
 
-    assert str(getattr(system_message, "content", "") or "") == "stable system"
-    assert len(request_messages) == 1
-    rendered_content = str(getattr(request_messages[0], "content", "") or "")
-    payload = json.loads(rendered_content)
-    assert payload["message_type"] == "frontdoor_runtime_tool_contract"
-    assert payload["callable_tool_names"] == ["exec"]
-    assert payload["candidate_tool_names"] == ["filesystem_write"]
-
-
-def test_create_agent_request_render_repairs_null_tool_call_arguments() -> None:
-    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace())
-
-    _, request_messages = runner._render_request_records(
+    sanitized = chat_backend_module.sanitize_provider_messages(
         [
             {
                 "role": "assistant",
@@ -6710,13 +6686,12 @@ def test_create_agent_request_render_repairs_null_tool_call_arguments() -> None:
         ]
     )
 
-    assert len(request_messages) == 1
-    assert getattr(request_messages[0], "tool_calls", None) == [
+    assert len(sanitized) == 1
+    assert sanitized[0]["tool_calls"] == [
         {
-            "name": "submit_next_stage",
-            "args": {},
+            "type": "function",
+            "function": {"name": "submit_next_stage", "arguments": {}},
             "id": "call-1",
-            "type": "tool_call",
         }
     ]
 

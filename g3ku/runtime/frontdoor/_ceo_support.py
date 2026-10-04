@@ -84,7 +84,10 @@ class _DirectProviderChatBackend:
         reasoning_effort: str | None = None,
         parallel_tool_calls: bool | None = None,
         prompt_cache_key: str | None = None,
+        on_text_delta: Any = None,
+        on_model_retry_status: Any = None,
     ):
+        _ = on_text_delta, on_model_retry_status
         model = str(model_refs[0] if model_refs else "").strip() or None
         kwargs: dict[str, Any] = {
             "messages": sanitize_provider_messages(messages),

@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_core.messages import BaseMessage, convert_to_messages
-from langchain_core.messages import SystemMessage as CoreSystemMessage
 
 from g3ku.core.messages import UserInputMessage
 
@@ -300,49 +298,8 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
         )
         return upsert_frontdoor_tool_contract_message(normalized_dynamic_messages, frontdoor_tool_contract)
 
-    def _render_request_records(
-        self,
-        records: list[dict[str, Any]] | None,
-    ) -> tuple[CoreSystemMessage | None, list[BaseMessage]]:
-        normalized_records: list[dict[str, Any]] = []
-        for item in list(records or []):
-            record = self._message_record(item)
-            content = record.get("content", "")
-            if isinstance(content, dict):
-                record["content"] = json.dumps(content, ensure_ascii=False, indent=2)
-            normalized_records.append(record)
-        system_message = None
-        if normalized_records and str(normalized_records[0].get("role") or "").strip().lower() == "system":
-            system_message = CoreSystemMessage(content=normalized_records[0].get("content", ""))
-            normalized_records = normalized_records[1:]
-        return system_message, list(convert_to_messages(normalized_records))
-
     def _replace_messages_update(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
         return {"messages": list(messages or [])}
-
-    def _request_messages_for_state(
-        self,
-        *,
-        state: dict[str, Any],
-        fallback_system_message: Any = None,
-        fallback_messages: list[Any] | None = None,
-        session_key: str | None = None,
-        provider_model: str = "",
-        tool_schemas: list[dict[str, Any]] | None = None,
-        overlay_text: str = "",
-        overlay_section_count: int | None = None,
-    ) -> tuple[CoreSystemMessage | None, list[BaseMessage]]:
-        contract = self._frontdoor_prompt_contract(
-            state=state,
-            provider_model=provider_model,
-            tool_schemas=tool_schemas,
-            overlay_text=overlay_text,
-            fallback_system_message=fallback_system_message,
-            fallback_messages=fallback_messages,
-            session_key=session_key,
-            overlay_section_count=overlay_section_count,
-        )
-        return self._render_request_records(contract.request_messages)
 
     def _frontdoor_prompt_contract(
         self,

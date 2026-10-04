@@ -239,6 +239,10 @@ class _FakeToolCallingModel:
         self.bound_tools = list(tools or [])
         return self
 
+    async def chat(self, messages, tools=None, **kwargs):
+        _ = tools, kwargs
+        return await self.ainvoke(messages)
+
     async def ainvoke(self, messages):
         self.calls.append(list(messages or []))
         if not self._responses:

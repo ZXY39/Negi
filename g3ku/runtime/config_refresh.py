@@ -38,7 +38,6 @@ def refresh_loop_runtime_config(
     provider = build_chat_model(config, role="ceo")
     loop.app_config = config
     loop.provider = provider
-    loop.model_client = provider
     loop.multi_agent_config = config.agents.multi_agent
     loop.provider_name = provider_name
     loop.model = model_name

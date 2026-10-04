@@ -42,7 +42,6 @@ class AgentRuntimeEngine:
         session_manager=None,
         memory_manager_cls=None,
         session_manager_cls=None,
-        chat_model_factory=None,
         debug_mode: bool = False,
     ) -> None:
         self.bus = bus
@@ -66,7 +65,6 @@ class AgentRuntimeEngine:
 
         self._memory_manager_cls = memory_manager_cls
         self._session_manager_cls = session_manager_cls
-        self._chat_model_factory = chat_model_factory
 
         self.tools = ToolRegistry()
         self.inline_tool_execution_registry = InlineToolExecutionRegistry()
@@ -109,17 +107,6 @@ class AgentRuntimeEngine:
             from g3ku.session.manager import SessionManager
 
             self.sessions = SessionManager(self.workspace)
-
-        if callable(chat_model_factory):
-            self.model_client = chat_model_factory(
-                provider,
-                default_model=self.model,
-                default_temperature=self.temperature,
-                default_max_tokens=self.max_tokens,
-                default_reasoning_effort=self.reasoning_effort,
-            )
-        else:
-            self.model_client = None
 
         self._bootstrap = RuntimeBootstrapBridge(self)
         self._bootstrap.init_multi_agent_runtime()

@@ -16,8 +16,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
+from g3ku.json_schema_utils import to_openai_tool_definition
 from loguru import logger
 
 from g3ku.agent.file_locks import _release_file_lock, _try_acquire_file_lock
@@ -2089,16 +2089,18 @@ class MemoryManager:
             batch_op=str(batch.op or "").strip().lower(),
         )
         tools = self._memory_agent_tools(session)
-        model = build_chat_model(runtime_config, role="memory").bind_tools(tools)
-        messages: list[Any] = [
-            SystemMessage(content=self._memory_agent_system_prompt()),
-            HumanMessage(
-                content=self._memory_agent_user_prompt(
+        tool_schemas = [to_openai_tool_definition(item) for item in list(tools or [])]
+        model = build_chat_model(runtime_config, role="memory")
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self._memory_agent_system_prompt()},
+            {
+                "role": "user",
+                "content": self._memory_agent_user_prompt(
                     batch=batch,
                     snapshot_text=before_text,
                     repair_reason=repair_reason,
-                )
-            ),
+                ),
+            },
         ]
         usage_total = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
         request_artifacts: list[dict[str, Any]] = []
@@ -2107,7 +2109,7 @@ class MemoryManager:
         final_text = ""
         for _ in range(round_limit):
             request_messages = self._memory_request_messages(messages)
-            response = await model.ainvoke(messages)
+            response = await model.chat(request_messages, tools=tool_schemas or None)
             self._merge_usage(usage_total, self._extract_usage(response))
             artifact = self._persist_memory_request_artifact(
                 phase="agent",
@@ -2133,15 +2135,34 @@ class MemoryManager:
             tool_calls = self._normalize_tool_calls(response)
             if not tool_calls:
                 break
-            messages.append(AIMessage(content=final_text, tool_calls=tool_calls))
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": final_text,
+                    # provider 要求 arguments 是 JSON 字符串；这一跳以前由适配壳完成，
+                    # 直连后由落盘侧自己规范成 OpenAI 形状（与 worker 车道同一做法）。
+                    "tool_calls": [
+                        {
+                            "id": call.get("id"),
+                            "type": "function",
+                            "function": {
+                                "name": str(call.get("name") or ""),
+                                "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False),
+                            },
+                        }
+                        for call in tool_calls
+                    ],
+                }
+            )
             for tool_call in tool_calls:
                 result = await self._execute_memory_tool(tools, tool_call)
                 messages.append(
-                    ToolMessage(
-                        content=json.dumps(result, ensure_ascii=False),
-                        tool_call_id=str(tool_call.get("id") or ""),
-                        name=str(tool_call.get("name") or ""),
-                    )
+                    {
+                        "role": "tool",
+                        "content": json.dumps(result, ensure_ascii=False),
+                        "tool_call_id": str(tool_call.get("id") or ""),
+                        "name": str(tool_call.get("name") or ""),
+                    }
                 )
         return _MemoryAttemptResult(
             session=session,
@@ -2168,7 +2189,13 @@ class MemoryManager:
         normalized: list[dict[str, Any]] = []
         for index, raw_call in enumerate(raw_calls):
             if not isinstance(raw_call, dict):
-                continue
+                if getattr(raw_call, "name", None) is None:
+                    continue
+                raw_call = {
+                    "name": getattr(raw_call, "name", ""),
+                    "args": getattr(raw_call, "arguments", None),
+                    "id": getattr(raw_call, "id", None),
+                }
             name = str(raw_call.get("name") or "").strip()
             if not name and isinstance(raw_call.get("function"), dict):
                 name = str(raw_call["function"].get("name") or "").strip()
@@ -2195,12 +2222,17 @@ class MemoryManager:
 
     @staticmethod
     def _provider_error_text(response: Any) -> str:
-        """从 chat model 响应中识别 provider 层错误（错误响应被当作正常返回值传回）。
+        """从模型响应中识别 provider 层错误（错误响应被当作正常返回值传回）。
 
-        G3kuChatModelAdapter 把 LLMResponse 的 finish_reason/error_text 放进
-        response_metadata；provider 失败（429、超时、上游 5xx）会以
-        finish_reason="error" 的响应形态到达这里，而不是抛异常。
+        provider 失败（429、超时、上游 5xx）会以 finish_reason="error" 的响应形态
+        到达这里，而不是抛异常；不显式识别就会伪装成"模型没调工具"的协议违规。
         """
+        direct_error_text = str(getattr(response, "error_text", "") or "").strip()
+        if direct_error_text:
+            return direct_error_text
+        if str(getattr(response, "finish_reason", "") or "").strip().lower() == "error":
+            content_text = str(getattr(response, "content", "") or "").strip()
+            return content_text or "provider returned an error response"
         metadata = getattr(response, "response_metadata", None)
         if not isinstance(metadata, dict):
             return ""
@@ -2855,11 +2887,12 @@ class MemoryManager:
     def _message_to_request_dict(message: Any) -> dict[str, Any]:
         if isinstance(message, dict):
             return dict(message)
-        if isinstance(message, SystemMessage):
+        message_type = str(getattr(message, "type", "") or "").strip().lower()
+        if message_type == "system":
             role = "system"
-        elif isinstance(message, HumanMessage):
+        elif message_type == "human":
             role = "user"
-        elif isinstance(message, ToolMessage):
+        elif message_type == "tool":
             role = "tool"
         else:
             role = "assistant"
@@ -2888,6 +2921,13 @@ class MemoryManager:
         metadata = getattr(response, "response_metadata", None)
         if not isinstance(metadata, dict):
             metadata = {}
+        metadata = {
+            **metadata,
+            "provider_request_meta": getattr(response, "provider_request_meta", None)
+            or metadata.get("provider_request_meta"),
+            "provider_request_body": getattr(response, "provider_request_body", None)
+            or metadata.get("provider_request_body"),
+        }
         return {
             "provider_request_id": str(
                 metadata.get("provider_request_id") or metadata.get("request_id") or ""
