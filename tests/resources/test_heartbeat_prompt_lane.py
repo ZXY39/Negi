@@ -57,13 +57,13 @@ def test_build_heartbeat_lane_reuses_stable_prefix_when_only_event_payload_chang
         **base_kwargs,
         events=[
             {
-                "reason": "tool_background",
-                "tool_name": "skill-installer",
-                "execution_id": "tool-exec:1",
-                "status": "background_running",
-                "elapsed_seconds": 30.0,
-                "recommended_wait_seconds": 45.0,
-                "runtime_snapshot": {"summary_text": "still fetching remote repository"},
+                "reason": "task_stall",
+                "task_id": "task:521ee9055b4a",
+                "title": "installer rollout",
+                "stalled_minutes": 20,
+                "bucket_minutes": 20,
+                "latest_node_summary": "node:1 waiting on exec",
+                "runtime_summary_excerpt": "no samples in window",
             }
         ],
     )
@@ -71,13 +71,13 @@ def test_build_heartbeat_lane_reuses_stable_prefix_when_only_event_payload_chang
         **base_kwargs,
         events=[
             {
-                "reason": "tool_background",
-                "tool_name": "skill-installer",
-                "execution_id": "tool-exec:1",
-                "status": "background_running",
-                "elapsed_seconds": 90.0,
-                "recommended_wait_seconds": 45.0,
-                "runtime_snapshot": {"summary_text": "now installing dependencies"},
+                "reason": "task_stall",
+                "task_id": "task:521ee9055b4a",
+                "title": "installer rollout",
+                "stalled_minutes": 30,
+                "bucket_minutes": 30,
+                "latest_node_summary": "node:1 still waiting on exec",
+                "runtime_summary_excerpt": "budget_state=degraded",
             }
         ],
     )

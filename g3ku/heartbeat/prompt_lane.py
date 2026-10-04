@@ -79,47 +79,6 @@ def format_local_timestamp(value: Any) -> str:
     return parsed.astimezone().isoformat(timespec="seconds")
 
 
-def _tool_background_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list[str]:
-    tool_name = _non_empty_text(event.get("tool_name")) or "tool"
-    execution_id = _non_empty_text(event.get("execution_id"))
-    status = _non_empty_text(event.get("status")) or "background_running"
-    snapshot = event.get("runtime_snapshot") if isinstance(event.get("runtime_snapshot"), dict) else {}
-    summary = _non_empty_text(snapshot.get("summary_text") or event.get("message")) or "No snapshot summary."
-    elapsed_seconds = _float_value(event.get("elapsed_seconds"), 0.0)
-    wait_seconds = _float_value(event.get("recommended_wait_seconds"), 0.0)
-    _append_retrieval_parts(
-        retrieval_parts,
-        "tool_background",
-        tool_name,
-        execution_id,
-        status,
-        summary,
-        f"{elapsed_seconds:.1f}s",
-    )
-    return [
-        f"- Background tool {tool_name} ({execution_id}) is still running",
-        f"  Status: {status}",
-        f"  Elapsed: {elapsed_seconds:.1f}s",
-        f"  Next scheduled heartbeat: {wait_seconds:.1f}s",
-        f"  Snapshot: {summary}",
-        "  Current rule: keep waiting in the same turn unless you decide to stop it.",
-        "  Allowed tool: stop_tool_execution",
-    ]
-
-
-def _tool_terminal_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list[str]:
-    tool_name = _non_empty_text(event.get("tool_name")) or "tool"
-    execution_id = _non_empty_text(event.get("execution_id"))
-    status = _non_empty_text(event.get("status")) or "completed"
-    summary = _non_empty_text(event.get("message") or event.get("final_result") or event.get("error")) or "No terminal summary."
-    _append_retrieval_parts(retrieval_parts, "tool_terminal", tool_name, execution_id, status, summary)
-    return [
-        f"- Background tool {tool_name} ({execution_id}) reached a terminal state",
-        f"  Status: {status}",
-        f"  Summary: {summary}",
-    ]
-
-
 def _task_stall_lines(event: dict[str, Any], retrieval_parts: list[str]) -> list[str]:
     task_id = _non_empty_text(event.get("task_id"))
     title = _non_empty_text(event.get("title")) or task_id or "task"
@@ -415,12 +374,6 @@ def _event_bundle_content(events: list[dict[str, Any]], *, output_inline_limit: 
     for raw_event in list(events or []):
         event = dict(raw_event or {})
         reason = _non_empty_text(event.get("event_reason") or event.get("kind") or event.get("reason")).lower()
-        if reason == "tool_background":
-            lines.extend(_tool_background_lines(event, retrieval_parts))
-            continue
-        if reason == "tool_terminal":
-            lines.extend(_tool_terminal_lines(event, retrieval_parts))
-            continue
         if reason == "task_stall":
             lines.extend(_task_stall_lines(event, retrieval_parts))
             continue

@@ -136,7 +136,7 @@ class WebSessionHeartbeatService:
         self._task_node_error_failure_streaks: dict[str, int] = {}
         # 非 node_error 事件失败的内存计数保底（键为 (session_key, reasons)）。node_error
         # 路径已改为按 node 持久计数（heartbeat_node_retry_state 表），本字典仅用于
-        # stall/tool_background/task_terminal 等无 node 维度事件的有界退避（计划 2.2）。
+        # stall/task_terminal 等无 node 维度事件的有界退避（计划 2.2）。
         self._non_node_error_failure_streaks: dict[tuple[str, tuple[str, ...]], int] = {}
 
     async def start(self) -> None:
@@ -345,71 +345,6 @@ class WebSessionHeartbeatService:
             self._wake.request(key, delay_s=0.25)
         return accepted
 
-    def enqueue_tool_background(self, *, session_id: str, payload: dict[str, Any] | None) -> None:
-        key = str(session_id or "").strip()
-        raw_payload = dict(payload or {})
-        execution_id = str(raw_payload.get("execution_id") or "").strip()
-        if not key or not execution_id:
-            return
-        tool_name = str(raw_payload.get("tool_name") or "tool").strip() or "tool"
-        delay_s = self._tool_background_delay_seconds(raw_payload)
-        runtime_snapshot = raw_payload.get("runtime_snapshot") if isinstance(raw_payload.get("runtime_snapshot"), dict) else {}
-        summary = str(runtime_snapshot.get("summary_text") or "").strip()
-        poll_count = self._int_value(raw_payload.get("poll_count"))
-        elapsed_seconds = self._float_value(raw_payload.get("elapsed_seconds"))
-        dedupe_key = (
-            f"tool-background:{execution_id}:{poll_count}:"
-            f"{elapsed_seconds:.1f}:{summary[:120]}"
-        )
-        event = self._events.enqueue(
-            session_id=key,
-            source="tool_watchdog",
-            reason="tool_background",
-            dedupe_key=dedupe_key,
-            payload={
-                **raw_payload,
-                "execution_id": execution_id,
-                "tool_name": tool_name,
-                "runtime_snapshot": runtime_snapshot,
-                "recommended_wait_seconds": delay_s,
-            },
-            delay_seconds=delay_s,
-        )
-        if event is None:
-            return
-        if self._started:
-            self._wake.request(key, delay_s=delay_s if delay_s > 0 else 0.25)
-
-    def enqueue_tool_terminal(self, *, session_id: str, payload: dict[str, Any] | None) -> None:
-        key = str(session_id or "").strip()
-        raw_payload = dict(payload or {})
-        execution_id = str(raw_payload.get("execution_id") or "").strip()
-        if not key or not execution_id:
-            return
-        tool_name = str(raw_payload.get("tool_name") or "tool").strip() or "tool"
-        status = str(raw_payload.get("status") or "completed").strip().lower() or "completed"
-        self._events.remove_where(
-            key,
-            predicate=lambda event: str((event.payload or {}).get("execution_id") or "").strip() == execution_id,
-        )
-        event = self._events.enqueue(
-            session_id=key,
-            source="tool_watchdog",
-            reason="tool_terminal",
-            dedupe_key=f"tool-terminal:{execution_id}:{status}",
-            payload={
-                **raw_payload,
-                "execution_id": execution_id,
-                "tool_name": tool_name,
-                "status": status,
-            },
-            delay_seconds=0.0,
-        )
-        if event is None:
-            return
-        if self._started:
-            self._wake.request(key, delay_s=0.25)
-
     @staticmethod
     def _float_value(value: Any, default: float = 0.0) -> float:
         try:
@@ -423,61 +358,6 @@ class WebSessionHeartbeatService:
             return int(value)
         except (TypeError, ValueError):
             return int(default)
-
-    def _tool_background_delay_seconds(self, payload: dict[str, Any]) -> float:
-        delay = self._float_value(payload.get("recommended_wait_seconds"), 30.0)
-        return max(0.0, delay)
-
-    def _tool_execution_manager(self) -> Any:
-        manager = getattr(self._agent, "tool_execution_manager", None)
-        if manager is not None:
-            return manager
-        loop = getattr(self._runtime_manager, "loop", None)
-        if loop is not None:
-            return getattr(loop, "tool_execution_manager", None)
-        return None
-
-    async def _refresh_tool_background_events(self, events: list[SessionHeartbeatEvent]) -> list[SessionHeartbeatEvent]:
-        manager = self._tool_execution_manager()
-        refreshed: list[SessionHeartbeatEvent] = []
-        for event in events:
-            if str(event.reason or "").strip().lower() != "tool_background":
-                refreshed.append(event)
-                continue
-            payload = dict(event.payload or {})
-            execution_id = str(payload.get("execution_id") or "").strip()
-            if manager is None or not execution_id or not hasattr(manager, "wait_execution"):
-                payload.update(
-                    {
-                        "status": "unavailable",
-                        "execution_id": execution_id,
-                        "tool_name": str(payload.get("tool_name") or "tool").strip() or "tool",
-                        "message": "Background tool execution manager is unavailable.",
-                    }
-                )
-                event.payload = payload
-                event.reason = "tool_terminal"
-                refreshed.append(event)
-                continue
-            try:
-                latest = await manager.wait_execution(execution_id, wait_seconds=0.1)
-            except Exception as exc:
-                latest = {
-                    "status": "failed",
-                    "execution_id": execution_id,
-                    "tool_name": str(payload.get("tool_name") or "tool").strip() or "tool",
-                    "message": f"Failed to refresh background tool execution: {exc}",
-                }
-            merged = dict(payload)
-            if isinstance(latest, dict):
-                merged.update(latest)
-            merged["execution_id"] = str(merged.get("execution_id") or execution_id).strip()
-            merged["tool_name"] = str(merged.get("tool_name") or payload.get("tool_name") or "tool").strip() or "tool"
-            status = str(merged.get("status") or "").strip().lower()
-            event.payload = merged
-            event.reason = "tool_background" if status == "background_running" else "tool_terminal"
-            refreshed.append(event)
-        return refreshed
 
     def _refresh_task_stall_events(
         self,
@@ -598,15 +478,6 @@ class WebSessionHeartbeatService:
                 continue
             refreshed.append(latest)
         return refreshed, discarded_event_ids
-
-    def _requeue_running_background_events(self, session_id: str, events: list[SessionHeartbeatEvent]) -> None:
-        for event in events:
-            if str(event.reason or "").strip().lower() != "tool_background":
-                continue
-            payload = dict(event.payload or {})
-            if str(payload.get("status") or "").strip().lower() != "background_running":
-                continue
-            self.enqueue_tool_background(session_id=session_id, payload=payload)
 
     def clear_session(self, session_id: str) -> None:
         key = str(session_id or "").strip()
@@ -956,7 +827,7 @@ class WebSessionHeartbeatService:
         await self._notify_reply(key, escalation_text)
 
     def _handle_non_node_error_failure(self, key: str, events: list[SessionHeartbeatEvent]) -> float | None:
-        """非 node_error 事件（stall/tool_background/task_terminal）失败时的有界退避（计划 2.2）。
+        """非 node_error 事件（stall/task_terminal）失败时的有界退避（计划 2.2）。
 
         旧实现是固定 `return 10.0` 无限重投。这里改为按 (session, reasons) 计数 + 退避
         1→5min，连续达到上限后出队本批事件、停止重投，避免无 node_error 时的无限循环。
@@ -1003,7 +874,6 @@ class WebSessionHeartbeatService:
         repair_attempt: int = 0,
         invalid_output: str = "",
     ) -> str:
-        has_tool_background = any(str(event.reason or "").strip().lower() == "tool_background" for event in events)
         has_task_stall = any(str(event.reason or "").strip().lower() == "task_stall" for event in events)
         has_task_terminal = bool(self._task_terminal_events(events))
         has_shutdown_resume = bool(self._shutdown_resume_events(events))
@@ -1073,18 +943,6 @@ class WebSessionHeartbeatService:
                     "If a user-facing update is needed, output only the text to show the user.",
                 ]
             )
-        if has_tool_background:
-            lines.extend(
-                [
-                    "For tool_background events, the payload below has already been refreshed just now.",
-                    "Do not start a new tool chain in this heartbeat turn.",
-                    "Only call stop_tool_execution if you are certain the background execution should be terminated.",
-                    (
-                        "If the tool is still running and no user-visible update is needed, "
-                        f"call `{SILENT_TOOL_NAME}`."
-                    ),
-                ]
-            )
         if has_task_stall:
             lines.extend(
                 [
@@ -1105,30 +963,6 @@ class WebSessionHeartbeatService:
         for event in events:
             payload = dict(event.payload or {})
             reason = str(event.reason or "").strip().lower()
-            if reason == "tool_background":
-                tool_name = str(payload.get("tool_name") or "tool").strip() or "tool"
-                execution_id = str(payload.get("execution_id") or "").strip()
-                status = str(payload.get("status") or "background_running").strip().lower() or "background_running"
-                snapshot = payload.get("runtime_snapshot") if isinstance(payload.get("runtime_snapshot"), dict) else {}
-                summary = str(snapshot.get("summary_text") or payload.get("message") or "").strip() or "No snapshot summary."
-                elapsed_seconds = self._float_value(payload.get("elapsed_seconds"))
-                wait_seconds = self._float_value(payload.get("recommended_wait_seconds"))
-                lines.append(f"- Background tool {tool_name} ({execution_id}) is still running")
-                lines.append(f"  Status: {status}")
-                lines.append(f"  Elapsed: {elapsed_seconds:.1f}s")
-                lines.append(f"  Next scheduled heartbeat: {wait_seconds:.1f}s")
-                lines.append(f"  Snapshot: {summary}")
-                lines.append("  Allowed tool: stop_tool_execution")
-                continue
-            if reason == "tool_terminal":
-                tool_name = str(payload.get("tool_name") or "tool").strip() or "tool"
-                execution_id = str(payload.get("execution_id") or "").strip()
-                status = str(payload.get("status") or "completed").strip().lower() or "completed"
-                summary = str(payload.get("message") or payload.get("final_result") or payload.get("error") or "").strip() or "No terminal summary."
-                lines.append(f"- Background tool {tool_name} ({execution_id}) reached a terminal state")
-                lines.append(f"  Status: {status}")
-                lines.append(f"  Summary: {summary}")
-                continue
             if reason == "shutdown_resume":
                 lines.append("- Session resumed automatically after the project process restarted")
                 lines.append("  Complete the user's previously interrupted request now.")
@@ -1290,7 +1124,6 @@ class WebSessionHeartbeatService:
             return
         event_ids = {event.event_id for event in events}
         popped = self._events.pop_many(key, event_ids=event_ids)
-        self._requeue_running_background_events(key, popped if popped else events)
         self._ack_task_terminal_events(popped if popped else events)
 
     def _merge_handled_terminal_keys(self, session: Any, dedupe_keys: list[str]) -> bool:
@@ -1663,7 +1496,6 @@ class WebSessionHeartbeatService:
         events = self._events.peek_ready(key)
         if not events:
             return next_delay
-        events = await self._refresh_tool_background_events(events)
         events, discarded_task_stall_ids = self._refresh_task_stall_events(events)
         if discarded_task_stall_ids:
             discarded_events = self._events.pop_many(key, event_ids=discarded_task_stall_ids)
@@ -1787,23 +1619,9 @@ class WebSessionHeartbeatService:
             silent_reply = bool(getattr(result, "is_silent_reply", False))
         if repair_failed:
             return 10.0
-        event_reasons = {str(event.reason or "").strip().lower() for event in events}
-        tool_only_events = bool(event_reasons) and event_reasons.issubset({"tool_background", "tool_terminal"})
-        if tool_only_events:
-            for event in events:
-                if str(event.reason or "").strip().lower() != "tool_terminal":
-                    continue
-                execution_id = str((event.payload or {}).get("execution_id") or "").strip()
-                clear_blocking = getattr(session, "clear_blocking_tool_execution", None)
-                if execution_id and callable(clear_blocking):
-                    try:
-                        clear_blocking(execution_id)
-                    except Exception:
-                        logger.debug("blocking tool execution clear skipped for {}", execution_id)
         if not self._session_exists(key):
             event_ids = {event.event_id for event in events}
             popped = self._events.pop_many(key, event_ids=event_ids)
-            self._requeue_running_background_events(key, events)
             self._ack_task_stall_events(popped)
             self.clear_session(key)
             return None
@@ -1829,7 +1647,6 @@ class WebSessionHeartbeatService:
                 )
             event_ids = {event.event_id for event in events}
             popped = self._events.pop_many(key, event_ids=event_ids)
-            self._requeue_running_background_events(key, events)
             self._ack_task_terminal_events(events)
             self._ack_task_stall_events(popped)
             next_delay = self._events.next_delay(key)
@@ -1883,7 +1700,6 @@ class WebSessionHeartbeatService:
         await self._notify_reply(key, output)
         event_ids = {event.event_id for event in events}
         popped = self._events.pop_many(key, event_ids=event_ids)
-        self._requeue_running_background_events(key, events)
         self._ack_task_terminal_events(events)
         self._ack_task_stall_events(popped)
         next_delay = self._events.next_delay(key)

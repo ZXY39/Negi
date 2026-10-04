@@ -6795,85 +6795,6 @@ def test_ceo_uploaded_file_endpoint_rejects_paths_outside_upload_and_output(tmp_
     assert response.status_code == 400
 
 
-@pytest.mark.asyncio
-async def test_web_session_heartbeat_delays_background_tool_prompt(tmp_path: Path) -> None:
-    session_id = "web:ceo-heartbeat-tool"
-    session_manager = SessionManager(tmp_path)
-    persisted = session_manager.get_or_create(session_id)
-    session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession()
-    manager = _FakeToolExecutionManager(
-        [
-            {
-                "status": "background_running",
-                "execution_id": "tool-exec:1",
-                "tool_name": "skill-installer",
-                "elapsed_seconds": 90.0,
-                "poll_count": 2,
-                "recommended_wait_seconds": 0.05,
-                "runtime_snapshot": {"summary_text": "still fetching remote repository"},
-            },
-            {
-                "status": "background_running",
-                "execution_id": "tool-exec:1",
-                "tool_name": "skill-installer",
-                "elapsed_seconds": 150.0,
-                "poll_count": 3,
-                "recommended_wait_seconds": 0.05,
-                "runtime_snapshot": {"summary_text": "still fetching remote repository"},
-            },
-        ]
-    )
-    task_service = _TaskService()
-    service = WebSessionHeartbeatService(
-        workspace=tmp_path,
-        agent=SimpleNamespace(tool_execution_manager=manager),
-        runtime_manager=_RuntimeManager(live_session),
-        main_task_service=task_service,
-        session_manager=session_manager,
-    )
-    service.enqueue_tool_background(
-        session_id=session_id,
-        payload={
-            "status": "background_running",
-            "tool_name": "skill-installer",
-            "execution_id": "tool-exec:1",
-            "elapsed_seconds": 30.0,
-            "recommended_wait_seconds": 0.2,
-            "runtime_snapshot": {"summary_text": "still fetching remote repository"},
-        },
-    )
-    service._started = True
-
-    initial_delay = await service._run_session(session_id)
-    assert initial_delay is not None
-    assert initial_delay > 0
-    assert live_session.prompts == []
-
-    await asyncio.sleep(0.21)
-
-    next_delay = await service._run_session(session_id)
-
-    assert next_delay is not None
-    assert next_delay > 0
-    assert len(live_session.prompts) == 1
-    prompt = live_session.prompts[0]
-    assert isinstance(prompt, UserInputMessage)
-    assert "tool-exec:1" in str(prompt.content)
-    stable_rules_text = str(prompt.metadata["heartbeat_stable_rules_text"] or "")
-    assert "already been refreshed" in stable_rules_text
-    assert "Do not start a new tool chain" in stable_rules_text
-    assert "你正在处理内部事件，不是在处理新的用户输入" in stable_rules_text
-    assert manager.calls == [("tool-exec:1", 0.1)]
-    published_types = [envelope["type"] for _session_id, envelope in task_service.registry.published]
-    assert "ceo.internal.ack" in published_types
-
-    await asyncio.sleep(0.22)
-
-    assert len(live_session.prompts) >= 2
-    assert manager.calls[:2] == [("tool-exec:1", 0.1), ("tool-exec:1", 0.1)]
-
-
 def test_web_session_heartbeat_accepts_enqueues_without_manual_pause_reason_gate(tmp_path: Path) -> None:
     session_id = "web:ceo-heartbeat-manual-pause"
     session_manager = SessionManager(tmp_path)
@@ -6908,26 +6829,10 @@ def test_web_session_heartbeat_accepts_enqueues_without_manual_pause_reason_gate
             "dedupe_key": "task-stall:task:manual-pause-stall:15",
         }
     )
-    service.enqueue_tool_background(
-        session_id=session_id,
-        payload={
-            "status": "background_running",
-            "tool_name": "skill-installer",
-            "execution_id": "tool-exec:manual-pause",
-        },
-    )
-    service.enqueue_tool_terminal(
-        session_id=session_id,
-        payload={
-            "status": "completed",
-            "tool_name": "skill-installer",
-            "execution_id": "tool-exec:manual-pause",
-        },
-    )
 
     assert accepted_terminal is True
     assert accepted_stall is False
-    assert len(service._events.peek(session_id)) == 2
+    assert len(service._events.peek(session_id)) == 1
 
 
 def test_web_session_heartbeat_replays_pending_terminal_outbox_and_records_enqueue_result(tmp_path: Path) -> None:
@@ -6986,105 +6891,6 @@ def test_web_session_heartbeat_replays_pending_terminal_outbox_and_records_enque
     assert counts == {"task_terminal": 1, "task_stall": 0}
     assert len(service._events.peek(session_id)) == 1
     assert enqueue_results == [(payload["dedupe_key"], True, "")]
-
-
-@pytest.mark.asyncio
-async def test_web_session_heartbeat_runs_immediately_when_background_tool_turns_terminal(tmp_path: Path) -> None:
-    session_id = "web:ceo-heartbeat-terminal"
-    session_manager = SessionManager(tmp_path)
-    persisted = session_manager.get_or_create(session_id)
-    session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession()
-    task_service = _TaskService()
-    service = WebSessionHeartbeatService(
-        workspace=tmp_path,
-        agent=SimpleNamespace(tool_execution_manager=None),
-        runtime_manager=_RuntimeManager(live_session),
-        main_task_service=task_service,
-        session_manager=session_manager,
-    )
-    service.enqueue_tool_background(
-        session_id=session_id,
-        payload={
-            "status": "background_running",
-            "tool_name": "skill-installer",
-            "execution_id": "tool-exec:1",
-            "elapsed_seconds": 30.0,
-            "recommended_wait_seconds": 600.0,
-            "runtime_snapshot": {"summary_text": "still fetching remote repository"},
-        },
-    )
-    service.enqueue_tool_terminal(
-        session_id=session_id,
-        payload={
-            "status": "completed",
-            "tool_name": "skill-installer",
-            "execution_id": "tool-exec:1",
-            "message": "skill installation finished",
-            "final_result": "installed",
-        },
-    )
-    service._started = True
-
-    next_delay = await service._run_session(session_id)
-
-    assert next_delay is None
-    assert len(live_session.prompts) == 1
-    prompt = live_session.prompts[0]
-    assert "reached a terminal state" in str(prompt.content)
-    assert "still running" not in str(prompt.content)
-    assert service._events.peek(session_id) == []
-
-
-@pytest.mark.asyncio
-async def test_web_session_heartbeat_tool_only_terminal_uses_visible_reply_and_notifier_when_model_returns_text(tmp_path: Path) -> None:
-    session_id = "web:ceo-heartbeat-tool-terminal-no-notify"
-    session_manager = SessionManager(tmp_path)
-    persisted = session_manager.get_or_create(session_id)
-    session_manager.save(persisted)
-    live_session = _FakeHeartbeatSession(output="tool terminal internal note")
-    task_service = _TaskService()
-    notified: list[tuple[str, str]] = []
-
-    async def _notify(current_session_id: str, text: str) -> None:
-        notified.append((current_session_id, text))
-
-    service = WebSessionHeartbeatService(
-        workspace=tmp_path,
-        agent=SimpleNamespace(tool_execution_manager=None),
-        runtime_manager=_RuntimeManager(live_session),
-        main_task_service=task_service,
-        session_manager=session_manager,
-        reply_notifier=_notify,
-    )
-    service.enqueue_tool_background(
-        session_id=session_id,
-        payload={
-            "status": "background_running",
-            "tool_name": "skill-installer",
-            "execution_id": "tool-exec:no-notify",
-            "elapsed_seconds": 30.0,
-            "recommended_wait_seconds": 600.0,
-            "runtime_snapshot": {"summary_text": "still fetching remote repository"},
-        },
-    )
-    service.enqueue_tool_terminal(
-        session_id=session_id,
-        payload={
-            "status": "completed",
-            "tool_name": "skill-installer",
-            "execution_id": "tool-exec:no-notify",
-            "message": "skill installation finished",
-            "final_result": "installed",
-        },
-    )
-    service._started = True
-
-    next_delay = await service._run_session(session_id)
-
-    assert next_delay is None
-    assert notified == [(session_id, "tool terminal internal note")]
-    assert [envelope["type"] for _session, envelope in task_service.registry.published] == ["ceo.reply.final"]
 
 
 @pytest.mark.asyncio
