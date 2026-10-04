@@ -690,7 +690,7 @@ async def test_graph_call_model_injects_running_turn_follow_up_messages_before_p
 
     async def _call_model_with_tools(**kwargs):
         captured["messages"] = list(kwargs.get("messages") or [])
-        return object()
+        return {}
 
     monkeypatch.setattr(runner, "_frontdoor_tool_schemas_for_state", lambda **_: [])
     monkeypatch.setattr(
