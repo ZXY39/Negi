@@ -91,9 +91,23 @@ def _format_availability_group(prefix: str, names: list[str]) -> str:
     return format_name_group(prefix, names)
 
 
-def availability_hint(*, requested: str, callable_names: Any = None, candidate_names: Any = None) -> str:
-    """名称被拒时说明"什么能用"：候选未水化与纯未知名的修法不同，必须分开讲。"""
+def availability_hint(
+    *,
+    requested: str,
+    callable_names: Any = None,
+    candidate_names: Any = None,
+    denied_names: Any = None,
+) -> str:
+    """名称被拒时说明"什么能用"：候选未水化、纯未知名、已声明但无权限三者的修法不同，必须分开讲。"""
     name = str(requested or "").strip()
+    denied_list = _availability_name_list(denied_names)
+    if name and name in set(denied_list):
+        # 名字仍在 tools[] 里（钉住的声明不随权限收回摘名），模型看得见参数表，
+        # 但执行准入已经关掉——不说清就会变成反复重试或换个名字再试。
+        return (
+            f"`{name}` 的参数表仍在本次 tools[] 声明里，但你当前角色已无权限调用它，"
+            "重试或改名都不会放行；请改用 `callable_tools` 列出的工具，或换一种达成路径"
+        )
     callable_list = _availability_name_list(callable_names)
     candidate_list = _availability_name_list(candidate_names)
     parts: list[str] = []

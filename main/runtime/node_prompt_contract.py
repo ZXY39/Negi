@@ -285,8 +285,14 @@ def _render_node_stage_gate_summary(payload: dict[str, Any]) -> str:
         NODE_DYNAMIC_STAGE_GATE_HEADING,
         f'kind: {NODE_DYNAMIC_STAGE_GATE_KIND}',
         f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
-        _render_stage_summary(payload.get('execution_stage')),
     ]
+    denied_tool_names = _normalized_name_list(payload.get('denied_tool_names'))
+    if denied_tool_names:
+        lines.append(
+            'denied_tools (`tools[]` 里带着参数表，但你当前角色无权限，调用一律被拒；'
+            f'不要反复重试或改着名字试): {_render_name_list(denied_tool_names)}'
+        )
+    lines.append(_render_stage_summary(payload.get('execution_stage')))
     return '\n'.join(lines)
 
 
@@ -340,6 +346,7 @@ class NodeRuntimeToolContract:
     lightweight_tool_ids: list[str]
     selection_trace: dict[str, Any]
     contract_visible_skill_ids: list[str] | None = None
+    denied_tool_names: list[str] | None = None
     skill_visibility_diagnostics: dict[str, Any] | None = None
     candidate_tool_items: list[dict[str, str]] | None = None
     candidate_skill_items: list[dict[str, str]] | None = None
@@ -351,6 +358,7 @@ class NodeRuntimeToolContract:
         payload = {
             'message_type': NODE_DYNAMIC_CONTRACT_KIND,
             'callable_tool_names': list(self.callable_tool_names or []),
+            'denied_tool_names': _normalized_name_list(list(self.denied_tool_names or [])),
             'candidate_tools': _normalized_candidate_tool_items(
                 list(self.candidate_tool_items or []),
                 fallback_names=list(self.candidate_tool_names or []),

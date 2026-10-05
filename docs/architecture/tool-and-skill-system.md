@@ -177,7 +177,7 @@ exec 与 memory 工具家族：
 
 hydration 把一次成功的 `load_tool_context` 变成下一轮的 callable：候选在派发时定格、加载后进入水合台账、下一轮并入模型可见集合。台账、提升、重读、参数错误、外置结果信封、统一 timeout 与阶段门控的合同见 `tool-hydration-and-callable-chain.md`。
 
-模型面只有一行 `callable_tools`（= 常驻可调用 ∪ 本轮已提升水合），不再单独渲染水合集，所以"本轮可用"与"已水合"不是两份信息而是一份的两个来源。推论：水合台账被 LRU 淘汰时对模型完全静默——参数表还在 `tools[]` 里（节点清单钉住，删名要等压缩重印），但本轮调不动，只有调用被拒时 `availability_hint` 那两条名单才暴露这个状态。排查"模型看得见却调不了"不要先怀疑 schema，先看该行是否缺这个名字。
+模型面每跳重写的可调用状态只有 `callable_tools` 一行（= 常驻可调用 ∪ 本轮已提升水合），不再单独渲染水合集，所以"本轮可用"与"已水合"不是两份信息而是一份的两个来源。推论：水合台账被 LRU 淘汰时对模型完全静默——参数表还在 `tools[]` 里（节点清单钉住，删名要等压缩重印），但本轮调不动，只有调用被拒时 `availability_hint` 那两条名单才暴露这个状态。排查"模型看得见却调不了"不要先怀疑 schema，先看该行是否缺这个名字。唯一例外是权限收回：它会在尾块多出一行 `denied_tools` 提前点名，因为这类名字既不在 callable 也不在候选，不说的话模型只能靠撞一次拒绝才知道。
 
 ### 3.5 `cron` 工具合同
 
@@ -329,7 +329,7 @@ The surfaced `message` executor and its Tool Admin family `messaging` are absent
 
 - 普通跳只有在成员集合真的变化时才重算 `tools[]`；同名不同序保持持久化顺序原样不动，不为零收益轮换 schema。
 - 节点的 `stage_compaction` 不得轮转 `tools[]`；节点的 `token_compression` 是清单的重印点，取"若此刻重新播种会得到什么"的钉住集（`pinned_provider_tool_names`），而不是退回上一跳的窄清单。前门两条 shrink 原因都不轮转，刷新留到压缩后的第一个普通跳。
-- 清单滞后不是权限滞后：节点执行按当轮待派发字典查名，不校验该名字是否出现在 `tools[]`，RBAC 收回在执行侧当跳即拒。反向要按实盘读：**权限收回会让该名字在一两跳内离开 `tools[]`**——节点的对象字典按当轮 RBAC 可见集构建，名字一旦失去权限就不再交付实例，参数表也就渲不出来。所以钉住保护的是"曝光/水合塌缩不删名"这一类收缩，不是权限收回；实测一条活节点：连续 7 跳 `tools[]` 恒为同一份 22 条而 `callable` 在 6–8 之间波动，收掉某工具的 `execution` 授权后第 2 跳该名字从清单消失（22→21），还原后一跳内回来。
+- 清单滞后不是权限滞后，权限收回也不是删名的理由：节点执行按当轮待派发字典查名，不校验该名字是否出现在 `tools[]`，RBAC 收回在执行侧当跳即拒；同时**收回不会把名字从清单里摘走**。派发字典按当轮 RBAC 取数，收回后连工具实例都不交付，所以参数表由声明侧自带一份（`declared_denied_tool_schemas`）继续挂在 `tools[]` 上，并由尾块 `denied_tools` 点名"已声明、当前角色无权限"，不让模型靠撞一次拒绝才发现。只有实例彻底不存在（资源被整体禁用、拿不到 schema）时名字才真的离开清单。拒绝文案三态分开：候选未水化 ⇒ 先 `load_tool_context`；`denied_tools` ⇒ 重试与改名都不会放行；两者都不在 ⇒ 未知名字。
 - 曝光收窄（候选塌缩、LRU 淘汰 callable）不得把名字从节点清单里删掉；LRU 只管 callable 层，与清单无关。被淘汰但清单仍带 ⇒ 模型看得见参数表、本轮调不动，需重新 `load_tool_context`。
 - 工具曝光漂移改变当轮实际请求，但不因此轮换 caller-side prompt cache family；family 变化只留给稳定前缀重写、车道或模型切换、显式 cache-family revision bump 及其他刻意重置边界。`tool_signature_hash` / `actual_tool_schema_hash` 是观测字段，不是"该有新 family"的证据；缓存侧排查步骤见 `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」。
 

@@ -2645,6 +2645,53 @@ def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
     assert 'content' not in bundle
 
 
+def test_execution_provider_bundle_keeps_revoked_tool_declared_and_flags_it() -> None:
+    """RBAC 收回只该关掉执行准入，不该把名字从钉住的清单里摘走。
+
+    清单排在上下文最前面，删名同样要重铺身后全部正文；而删名的真实成因是派发字典按
+    当轮 RBAC 取数、渲不出参数表。所以声明侧必须自带一份不依赖派发字典的 schema，
+    并把"已声明但本轮无权限"单独列出来交给尾块提醒模型。
+    """
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service._resource_manager = SimpleNamespace(
+        tool_instances=lambda: {'web_fetch': _ModelSchemaRecordingTool(
+            name='web_fetch',
+            authoritative_description='fetch a page',
+            model_description='fetch a page',
+        )}
+    )
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'content_describe', 'web_fetch'],
+        },
+    )
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    bundle = list(selection['provider_tool_names'] or [])
+    assert selection['provider_tool_bundle_mode'] == 'pinned_frozen'
+    # 本轮 RBAC 已不再把 web_fetch 给 execution，但名字必须还留在清单里
+    assert 'web_fetch' not in list(selection['trace']['rbac_visible_tool_names'] or [])
+    assert 'web_fetch' in bundle
+    # 并且要说清它是"无权限"，不是"没水合"
+    assert selection['declared_denied_tool_names'] == ['web_fetch']
+    assert 'web_fetch' in selection['declared_denied_tool_schemas']
+    assert selection['declared_denied_tool_schemas']['web_fetch']['function']['name'] == 'web_fetch'
+
+
 def _collapsed_bundle_selector_service():
     visible_tools = {
         'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
@@ -9109,3 +9156,103 @@ def test_provider_marker_tail_fingerprint_catches_real_corruption_only() -> None
     ]
     for payload in benign:
         assert ReActToolLoop._tool_call_marker_fault(SimpleNamespace(arguments=payload)) == "", payload
+
+
+@pytest.mark.asyncio
+async def test_node_loop_keeps_revoked_tool_declared_but_still_refuses_it() -> None:
+    """权限收回后：tools[] 仍带参数表（钉住的声明），但执行准入照旧拒。
+
+    删名会把身后正文整段重铺，所以声明侧要能脱离派发字典渲染；而派发字典是节点唯一的
+    RBAC 闸门（`_execute_tool_raw` 只按字典查名，不做二次鉴权），所以"能声明"绝不能
+    变成"能执行"。这条同时钉住两端。
+    """
+    calls: list[dict[str, object]] = []
+
+    class _Backend:
+        async def chat(self, **kwargs):
+            calls.append(dict(kwargs))
+            if len(calls) == 1:
+                return LLMResponse(
+                    content="",
+                    tool_calls=[
+                        ToolCallRequest(id="call:wf", name="web_fetch", arguments={"url": "https://example.com"})
+                    ],
+                    finish_reason="tool_calls",
+                    usage={"input_tokens": 8, "output_tokens": 3},
+                )
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call:final",
+                        name="submit_final_result",
+                        arguments={
+                            "status": "success",
+                            "delivery_status": "final",
+                            "summary": "done",
+                            "answer": "done",
+                            "evidence": [],
+                            "remaining_work": [],
+                            "blocking_reason": "",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage={"input_tokens": 8, "output_tokens": 3},
+            )
+
+    loop = ReActToolLoop(chat_backend=_Backend(), log_service=_FakeLogService(), max_iterations=2)
+
+    def _selector(**_kwargs):
+        return {
+            "tool_names": ["submit_final_result"],
+            "provider_tool_names": ["submit_final_result", "web_fetch"],
+            "declared_denied_tool_names": ["web_fetch"],
+            "declared_denied_tool_schemas": {
+                "web_fetch": {
+                    "type": "function",
+                    "function": {
+                        "name": "web_fetch",
+                        "description": "fetch a page",
+                        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}},
+                    },
+                }
+            },
+            "candidate_tool_names": [],
+            "hydrated_executor_names": [],
+            "lightweight_tool_ids": [],
+            "pending_provider_tool_names": [],
+            "provider_tool_exposure_pending": False,
+            "provider_tool_exposure_revision": "",
+            "provider_tool_exposure_commit_reason": "",
+            "trace": {"full_callable_tool_names": ["submit_final_result"]},
+        }
+
+    loop._model_visible_tool_schema_selector = _selector
+
+    result = await loop.run(
+        task=SimpleNamespace(task_id="task-declared-denied"),
+        node=SimpleNamespace(node_id="node-declared-denied", depth=0, node_kind="execution"),
+        messages=[
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": '{"task_id":"task-declared-denied","goal":"demo"}'},
+        ],
+        tools={"submit_final_result": _submit_final_result_tool()},
+        model_refs=["fake"],
+        runtime_context={"task_id": "task-declared-denied", "node_id": "node-declared-denied"},
+        max_iterations=2,
+    )
+
+    assert result.status == "success"
+    assert len(calls) == 2
+    emitted_names = [str((item.get("function") or {}).get("name") or "") for item in list(calls[0].get("tools") or [])]
+    # 声明侧：派发字典里根本没有 web_fetch 实例，schema 仍必须出现在 tools[] 里
+    assert "web_fetch" in emitted_names
+    # 执行侧：第二跳的上下文里必须是一次拒绝，而不是真的抓到了页面
+    tool_messages = [
+        item for item in list(calls[1].get("messages") or []) if isinstance(item, dict) and item.get("role") == "tool"
+    ]
+    refusal_text = "\n".join(str(item.get("content") or "") for item in tool_messages)
+    assert "tool not available: web_fetch" in refusal_text
+    assert "无权限" in refusal_text
+
