@@ -6817,6 +6817,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 recommit_boundary=self._frontdoor_bundle_recommit_boundary(session=session, state=state),
             )
             runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
+            # 算一次、随 exposure 交给装配路：每跳的契约块是在 message_builder 里建的，
+            # 不在这里印的话模型就看不见"已声明但无权限"。
+            provider_tool_exposure["declared_denied_tool_names"] = self._frontdoor_declared_denied_tool_names(
+                declared_tool_names=list(runtime_visible_tool_names or []),
+                granted_tool_names=self._frontdoor_live_granted_tool_names(
+                    session_key=str(state.get("session_key") or ""),
+                ),
+            )
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
             stable_messages = list(messages)
             dynamic_appendix_messages: list[dict[str, Any]] = []
@@ -6972,6 +6980,14 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 recommit_boundary=self._frontdoor_bundle_recommit_boundary(session=session, state=state),
             )
             runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
+            # 算一次、随 exposure 交给装配路：每跳的契约块是在 message_builder 里建的，
+            # 不在这里印的话模型就看不见"已声明但无权限"。
+            provider_tool_exposure["declared_denied_tool_names"] = self._frontdoor_declared_denied_tool_names(
+                declared_tool_names=list(runtime_visible_tool_names or []),
+                granted_tool_names=self._frontdoor_live_granted_tool_names(
+                    session_key=str(state.get("session_key") or ""),
+                ),
+            )
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
             stable_messages = self._prompt_message_records(getattr(assembly, "stable_messages", None)) or list(messages)
             if current_turn_has_multimodal_uploads:
