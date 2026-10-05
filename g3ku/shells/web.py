@@ -17,8 +17,8 @@ from g3ku.bus.events import OutboundMessage
 from g3ku.bus.queue import MessageBus
 from g3ku.runtime.external_events import get_session_event_hub
 from g3ku.runtime.external_outbox import (
+    ack_outbound_message,
     compact_outbox,
-    expire_stale_pending,
     load_pending_outbound,
     record_age_seconds,
     record_outbound_message,
@@ -636,16 +636,79 @@ def _outbox_replay_message(record: dict[str, Any]) -> OutboundMessage:
     )
 
 
+def _pending_record_reachable(record: dict[str, Any]) -> bool:
+    """这条记录还有没有任何会 ack 的消费方能够看见它。
+
+    账本不再有年龄上限（时效会把请求方还在等的回答判死），所以回收必须按能力面
+    判。三条终态：ts 畸形（重放侧按年龄过滤，结构上投不出去）、会话不在注册表、
+    该会话的桥 token 明确停用（换号后旧 bridge_id 就是这个形状）。
+
+    每一处读取失败都 fail-open：判"可达"就把记录留在账本里，代价是多几份副本；
+    判"不可达"判错就是删掉用户还在等的回答。``externalApi.enabled`` 总开关也不算
+    终态——它是运营临时拨的闸，关一次就把积压回复全清掉不可接受。
+    """
+    if record_age_seconds(record) is None:
+        return False
+    session_key = str(record.get("session_key") or "").strip()
+    if not session_key:
+        return False
+    try:
+        registry = get_external_session_registry()
+        if registry.session_count() == 0:
+            # 空注册表和"注册表没读到"不可区分，这种时候一律不清账。
+            return True
+        entry = registry.get_by_session_key(session_key)
+    except Exception:
+        logger.warning("external outbox reachability skipped: registry unreadable")
+        return True
+    if entry is None:
+        return False
+    try:
+        config, _revision, _changed = get_runtime_config(force=False)
+        external_api = getattr(config, "external_api", None)
+        tokens = dict(getattr(external_api, "tokens", None) or {})
+    except Exception:
+        logger.warning("external outbox reachability skipped: config unreadable")
+        return True
+    token = tokens.get(entry.bridge_id)
+    if token is None:
+        return True
+    return bool(getattr(token, "enabled", False))
+
+
+def _retire_unreachable_pending() -> int:
+    """销掉不可达记录，返回销掉条数。终态出口，不是超时出口：每次都留一行 WARNING。"""
+    retired = 0
+    for record in load_pending_outbound():
+        if _pending_record_reachable(record):
+            continue
+        outbox_id = str(record.get("id") or "")
+        if not outbox_id:
+            continue
+        if ack_outbound_message(outbox_id, status="unreachable"):
+            retired += 1
+            logger.warning(
+                "external outbox record retired as unreachable: id={} session={} event={}",
+                outbox_id,
+                str(record.get("session_key") or "") or "-",
+                str(record.get("event") or "outbound.created"),
+            )
+    return retired
+
+
 async def _replay_pending_external_outbox() -> None:
     """Replay the durable external outbox at startup.
 
     bus/hub 都是纯内存：桥 pump 断连或进程重启窗口里滞留的主动推送（心跳升级、
-    cron 提醒、任务终态）随内存清空而蒸发。drain 在发布 hub 前已把每条消息登记
-    进 ``.g3ku/external-outbox/``（见 ``g3ku/runtime/external_outbox.py``）；
-    这里把时效窗口内未 ack 的条目带原 outbox_id 重新注入出站总线（drain 复用
-    该 id，不会重复登记），过期条目标记 expired，然后压实账本。桥侧启动时按
-    ``GET /outbox/pending`` 预热这些会话的 pump，消息经 SSE 重放完成投递后由
-    桥 ack 销账（at-least-once：ack 丢失会在下次重启后重复投递一次）。
+    cron 提醒、任务终态）与回合回复随内存清空而蒸发。drain 与 relay 在发布 hub
+    前已把每条消息登记进 ``.g3ku/external-outbox/``（见
+    ``g3ku/runtime/external_outbox.py``）；这里把所有未 ack 的条目带原 outbox_id
+    重新注入出站总线（drain 复用该 id，不会重复登记），不再有年龄上限——迟到一天
+    的提醒仍要送到，因为请求方还在等它；不可达的条目（会话不在注册表、其 bridge
+    没有启用的 token、或 ts 畸形到投不出去）由 ``_retire_unreachable_pending``
+    销成 ``unreachable``。桥侧启动时按 ``GET /outbox/pending`` 预热这些会话的
+    pump，消息经 SSE 重放完成投递后由桥 ack 销账（at-least-once：ack 丢失会在下
+    次重启后重复投递一次）。
 
     启动重放是一次性的；重启后才产出的滞留推送由 ``_outbox_reconcile_loop``
     的周期对账兜底（见模块顶部常量注释）。
@@ -654,36 +717,36 @@ async def _replay_pending_external_outbox() -> None:
     if bus is None:
         return
     try:
-        expired = expire_stale_pending()
+        retired = _retire_unreachable_pending()
         pending = load_pending_outbound()
         for record in pending:
             await bus.publish_outbound(_outbox_replay_message(record))
         compact_outbox()
-        if pending or expired:
+        if pending or retired:
             logger.warning(
-                "external outbox replay: republished {} pending message(s), expired {}",
+                "external outbox replay: republished {} pending message(s), retired {} unreachable",
                 len(pending),
-                expired,
+                retired,
             )
     except Exception:
         logger.exception("external outbox replay skipped on error")
 
 
 async def _reconcile_external_outbox_once() -> tuple[int, int]:
-    """One periodic reconcile pass; returns ``(republished, expired)``.
+    """One periodic reconcile pass; returns ``(republished, retired)``.
 
     与启动重放的差别：只重放「年龄 > OUTBOX_REPUBLISH_MIN_AGE_SECONDS 且对应
     会话 hub 当前无订阅者」的记录——有订阅者说明 pump/等待方在线，ring buffer
     的 Last-Event-ID 重放已兜底，再注入只会制造重复副本；按记录指数退避压制
     永久无消费者会话（openai-compat 走同一账本但从不开 SSE）的重复注入。
-    过期清理每轮都跑（不再依赖重启）。压实由调用方按周期决定。
+    不可达判定每轮都跑（不再依赖重启），年龄不参与判定。压实由调用方按周期决定。
     """
     bus = _global_bus
     if bus is None:
         return (0, 0)
     loop = asyncio.get_running_loop()
     now = loop.time()
-    expired = expire_stale_pending()
+    retired = _retire_unreachable_pending()
     pending = load_pending_outbound()
     live_ids = {str(record.get("id") or "") for record in pending}
     for stale_id in [key for key in _outbox_republish_backoff if key not in live_ids]:
@@ -708,7 +771,7 @@ async def _reconcile_external_outbox_once() -> tuple[int, int]:
         )
         _outbox_republish_backoff[outbox_id] = (now + next_backoff, next_backoff)
         republished += 1
-    return (republished, expired)
+    return (republished, retired)
 
 
 def _update_check_settings() -> tuple[bool, float]:
@@ -754,12 +817,12 @@ async def _outbox_reconcile_loop() -> None:
             cycles += 1
             # drain 若已死，重放进总线无人路由：每轮幂等复活（done 检查早退）。
             _ensure_outbound_drain_running()
-            republished, expired = await _reconcile_external_outbox_once()
-            if republished or expired:
+            republished, retired = await _reconcile_external_outbox_once()
+            if republished or retired:
                 logger.warning(
-                    "external outbox reconcile: republished {} pending message(s), expired {}",
+                    "external outbox reconcile: republished {} pending message(s), retired {} unreachable",
                     republished,
-                    expired,
+                    retired,
                 )
                 compact_outbox()  # 活动轮立即压实，收敛 tombstone 与重放副本
             elif cycles % OUTBOX_COMPACT_EVERY_N_CYCLES == 0:

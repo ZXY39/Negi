@@ -179,7 +179,7 @@
   每轮连续性边界快照（`<session>/<turn_id>.json.gz`，每会话保留最近 12 份，只由用户轮写入）。用户消息编辑重发/Fork 的唯一截断数据源；契约见 `web-and-admin.md`「Message Edit-Resend And Session Fork」。会话删除时随其它 sidecar 一并清理。
 
 - `.g3ku/external-outbox/`（安装根，与 `.g3ku/external-sessions/`、`.g3ku/external-uploads/` 同侧）
-  外部渠道主动推送的持久账本（append-only jsonl，msg 记录 + ack tombstone）。排查「渠道端收不到主动推送」先看这里有无 pending 滞留；契约与重放语义详见 `external-agent-api.md`「持久 outbox」。
+  外部渠道出站消息（主动推送与回合回复）的持久账本（append-only jsonl，msg 记录 + ack tombstone），没有年龄出口：记录 pending 到被某个消费方 ack 或被判不可达为止。排查「渠道端收不到推送或回复」先看这里有无 pending 滞留、以及它属于哪个 `event`；契约、销账方与重放语义详见 `external-agent-api.md`「持久 outbox」。
 
 - `memory/`（安装根）
   记忆目录；排障入口详见本文档「Memory Queue Workflow」章节。

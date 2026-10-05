@@ -75,7 +75,11 @@ async def test_ack_marks_pending_entry_delivered(env) -> None:
     async with AsyncClient(transport=transport, base_url="http://test") as http:
         response = await http.post(f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack")
         assert response.status_code == 200
-        assert response.json() == {"ok": True, "acked": True, "outbox_id": outbox_id}
+        body = response.json()
+        assert body["ok"] is True and body["acked"] is True
+        assert body["outbox_id"] == outbox_id
+        # 不带 body 的旧请求形状仍按 delivered 销账（桥的默认调用没变）。
+        assert body["status"] == "delivered"
         # 幂等：重复 ack 仍返回 ok。
         response = await http.post(f"/api/v1/sessions/{entry.session_key}/outbox/{outbox_id}/ack")
         assert response.status_code == 200

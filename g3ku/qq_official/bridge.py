@@ -679,10 +679,11 @@ async def run_qq_official_bridge(
                         backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS
                         continue
                     target_key = external_key
-                    outbox_id = ""
+                    # 回合回复也带 outbox_id（relay 发布前登记进账本）：去重与销账
+                    # 必须按同一条 id 走，否则重放副本会被当成新消息重复投递。
+                    outbox_id = str(event.get("outbox_id") or "").strip()
                     if event_type == OUTBOUND_EVENT:
                         target_key = str(event.get("external_key") or external_key)
-                        outbox_id = str(event.get("outbox_id") or "").strip()
                     if outbox_id and outbox_id in acked_outbox_ids:
                         # 已送达并销账的 id：服务端对账/重放产生的副本直接跳过，
                         # 只推进 seq（否则周期对账会造成重复推送）。
@@ -728,6 +729,23 @@ async def run_qq_official_bridge(
                                 session_id,
                                 failed_attempts,
                             )
+                            if outbox_id:
+                                # 账本不再有年龄上限，投递预算就是它唯一的上界：判毒后
+                                # 按终态销账。不销的话，每次桥重建（实测每小时一次网关
+                                # 结束）都会把进程内的 per-id 计数清零，让一个平台永久
+                                # 拒绝的目标拿到新一轮 5 次预算。
+                                try:
+                                    await client.ack_outbox(
+                                        session_id, outbox_id, status="undeliverable"
+                                    )
+                                except Exception as exc:  # noqa: BLE001 - 销账失败只多几份副本
+                                    logger.warning(
+                                        "qq-official undeliverable ack failed for {}: {}",
+                                        outbox_id,
+                                        exc,
+                                    )
+                                else:
+                                    _lru_remember(acked_outbox_ids, outbox_id)
                             seqs[session_id] = seq
                             failed_seq, failed_attempts = 0, 0
                             backoff = _PUMP_RECONNECT_INITIAL_BACKOFF_SECONDS

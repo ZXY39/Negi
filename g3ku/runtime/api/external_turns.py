@@ -181,7 +181,12 @@ class ExternalTurnService:
     async def _execute_turn(self, record: TurnRecord, user_message: str | UserInputMessage) -> None:
         hub = get_session_event_hub(record.session_key)
         session = self._runtime_bridge.get_existing_session(record.session_key)
-        relay = make_session_event_relay(record.session_key, turn_id=record.turn_id, session=session)
+        relay = make_session_event_relay(
+            record.session_key,
+            turn_id=record.turn_id,
+            session=session,
+            external_key=record.external_key,
+        )
         hub.publish("turn.started", turn_id=record.turn_id)
         try:
             await self._runtime_bridge.prompt(

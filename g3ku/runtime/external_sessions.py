@@ -161,6 +161,15 @@ class ExternalSessionRegistry:
         with self._lock:
             return self._entries.get(raw)
 
+    def session_count(self) -> int:
+        """当前加载进来的会话条目数。
+
+        空注册表与「注册表文件没读到」（0 字节、满盘截断）在磁盘上不可区分，
+        而账本的不可达判定要把这两种情况分开：误判会把还在等人取的回复清掉。
+        """
+        with self._lock:
+            return len(self._entries)
+
     def get_session_key(self, *, bridge_id: str, external_key: str) -> str | None:
         bridge = normalize_bridge_id(bridge_id)
         key = str(external_key or "").strip()

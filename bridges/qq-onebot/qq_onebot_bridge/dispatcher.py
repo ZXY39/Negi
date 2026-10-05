@@ -339,6 +339,7 @@ class Dispatcher:
             text = str(event.get("text") or "")
             external_key = self._g3ku.external_key_for(session_id)
             await self._deliver_event(external_key, text, event.get("attachments"))
+            await self._ack_outbox(session_id, event)
             return
         if event_type == "turn.failed":
             await self._flush_progress(session_id)
@@ -355,6 +356,21 @@ class Dispatcher:
             text = str(event.get("text") or "")
             external_key = str(event.get("external_key") or "") or self._g3ku.external_key_for(session_id)
             await self._deliver_event(external_key, text, event.get("attachments"))
+            await self._ack_outbox(session_id, event)
+            return
+
+    async def _ack_outbox(self, session_id: str, event: dict[str, Any]) -> None:
+        """投递已确认 ⇒ 销掉这条账本记录。
+
+        账本已不按年龄回收，未 ack 的记录会被服务端每小时重注入一次；销账失败
+        只意味着以后多几份副本，绝不回头影响这条已经送出去的消息。
+        """
+        outbox_id = str(event.get("outbox_id") or "").strip()
+        if not outbox_id:
+            return
+        try:
+            await self._g3ku.ack_outbox(session_id, outbox_id)
+        except Exception:
             return
 
     async def flush_all_progress(self) -> None:

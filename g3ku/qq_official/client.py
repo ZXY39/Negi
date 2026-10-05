@@ -74,10 +74,17 @@ class ExternalApiClient:
         items = payload.get("items") if isinstance(payload, dict) else None
         return [item for item in list(items or []) if isinstance(item, dict)]
 
-    async def ack_outbox(self, session_id: str, outbox_id: str) -> None:
-        """Mark a durable outbox entry delivered after the channel API confirms."""
+    async def ack_outbox(self, session_id: str, outbox_id: str, *, status: str = "delivered") -> None:
+        """Mark an outbox entry closed after the channel API confirms.
+
+        ``status="undeliverable"`` 是投递预算耗尽时的终态销账：账本已不按年龄
+        清理，判毒的条目若不带状态销掉，每次桥重建都会重新拿到一整轮重试。
+        默认值保持与旧调用完全相同的请求体（不带 body）。
+        """
+        payload = None if status == "delivered" else {"status": status}
         response = await self._client.post(
             f"/sessions/{session_id}/outbox/{outbox_id}/ack",
+            json=payload,
             headers=self._headers(),
         )
         response.raise_for_status()

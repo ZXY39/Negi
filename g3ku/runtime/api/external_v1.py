@@ -480,6 +480,10 @@ async def cancel_external_session(
 
 # -- outbox (durable proactive push ledger) ---------------------------------
 
+# 桥能写回的销账状态。其他值一律按 delivered 处理：账本出口必须是封闭集合，
+# 不能让一个拼错的 status 变成"既没投递也没回收"的第三种状态。
+_OUTBOX_ACK_STATUSES = frozenset({"delivered", "unreachable", "undeliverable"})
+
 
 @router.get("/outbox/pending")
 async def list_pending_outbox_entries(
@@ -513,16 +517,24 @@ async def list_pending_outbox_entries(
 async def ack_outbox_entry(
     session_id: str,
     outbox_id: str,
+    payload: dict[str, Any] | None = Body(default=None),
     principal: ExternalApiPrincipal = Depends(require_external_api),
 ):
-    """Mark one durable outbox entry delivered (idempotent, session-scoped).
+    """Close one durable outbox entry (idempotent, session-scoped).
 
     桥在渠道 API 确认送达后调用；ack 落在 append-only 账本上，启动重放只投
     未 ack 的条目。跨会话的 outbox_id 一律拒绝（``acked=false``）。
+
+    可选 body ``{"status": "undeliverable"}`` 让桥在投递预算耗尽时按终态销账：
+    账本已不按年龄清理记录，这是永久拒投的目标唯一的重试上界。不带 body 时
+    仍是 ``delivered``，旧桥的请求形状不变。
     """
     entry = _own_entry(session_id, principal)
-    acked = ack_outbound_message(outbox_id, session_key=entry.session_key)
-    return {"ok": True, "acked": bool(acked), "outbox_id": str(outbox_id or "")}
+    status = str((payload or {}).get("status") or "").strip().lower()
+    if status not in _OUTBOX_ACK_STATUSES:
+        status = "delivered"
+    acked = ack_outbound_message(outbox_id, session_key=entry.session_key, status=status)
+    return {"ok": True, "acked": bool(acked), "outbox_id": str(outbox_id or ""), "status": status}
 
 
 # -- events (SSE) -----------------------------------------------------------

@@ -80,7 +80,11 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                 turn_id = str(result.get("turn_id") or "") or None
                 if submit_status == "queued":
                     outcome = await client.wait_for_reply(
-                        events, queued=True, after_seq=after_seq, timeout=timeout
+                        events,
+                        queued=True,
+                        after_seq=after_seq,
+                        timeout=timeout,
+                        session_id=session_id,
                     )
                 elif submit_status == "duplicate":
                     outcome = await client.wait_for_reply(
@@ -89,10 +93,15 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
                         queued=str(result.get("original_status") or "") == "queued",
                         after_seq=0,
                         timeout=timeout,
+                        session_id=session_id,
                     )
                 else:
                     outcome = await client.wait_for_reply(
-                        events, turn_id=turn_id, after_seq=after_seq, timeout=timeout
+                        events,
+                        turn_id=turn_id,
+                        after_seq=after_seq,
+                        timeout=timeout,
+                        session_id=session_id,
                     )
             base = {
                 "ok": True,
@@ -142,7 +151,7 @@ def build_mcp_server(client: G3kuMcpClient, *, name: str = "g3ku") -> FastMCP:
             after_seq = client.last_seq(session_id)
             async with client.event_stream(session_id, last_seq=after_seq) as events:
                 outcome = await client.wait_for_reply(
-                    events, queued=True, after_seq=after_seq, timeout=timeout
+                    events, queued=True, after_seq=after_seq, timeout=timeout, session_id=session_id
                 )
             if str(outcome.get("kind") or "") == "reply":
                 return {

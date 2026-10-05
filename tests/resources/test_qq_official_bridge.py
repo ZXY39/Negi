@@ -120,6 +120,7 @@ class FakeExternalApiClient:
         self.sent: list[tuple[str, str, str, list]] = []
         self.events: asyncio.Queue = asyncio.Queue()
         self.acked: list[tuple[str, str]] = []
+        self.ack_status_by_id: dict[str, str] = {}
         self.pending_outbox: list[dict] = []
         self.closed = False
         FakeExternalApiClient.instances.append(self)
@@ -142,8 +143,9 @@ class FakeExternalApiClient:
     async def list_pending_outbox(self) -> list[dict]:
         return list(self.pending_outbox)
 
-    async def ack_outbox(self, session_id: str, outbox_id: str) -> None:
+    async def ack_outbox(self, session_id: str, outbox_id: str, *, status: str = "delivered") -> None:
         self.acked.append((session_id, outbox_id))
+        self.ack_status_by_id[outbox_id] = status
 
     async def stream_events(self, session_id: str, last_seq: int = 0):
         while True:
@@ -685,12 +687,23 @@ async def test_pump_retries_failed_delivery_then_drops_poison(monkeypatch: pytes
         client = FakeClient.instances[-1]
         await client.on_c2c_message_create(_c2c_message("hi", [], message_id="p1"))
         ext = FakeExternalApiClient.instances[-1]
-        ext.feed.append({"type": "outbound.created", "seq": 1, "text": "poison", "external_key": "qq:c2c:u9"})
+        ext.feed.append(
+            {
+                "type": "outbound.created",
+                "seq": 1,
+                "text": "poison",
+                "external_key": "qq:c2c:u9",
+                "outbox_id": "obx-poison-1",
+            }
+        )
         await _wait_until(lambda: attempts.get("poison", 0) >= 2)
         ext.feed.append({"type": "outbound.created", "seq": 2, "text": "正常补投", "external_key": "qq:c2c:u9"})
         await _wait_until(lambda: delivered)
         # 毒消息达到上限即放弃，不再无限重试；后续消息正常投递。
         assert attempts["poison"] == 2
+        # 账本已不按年龄回收，判毒必须留下终态销账：否则每次桥重建（进程内
+        # per-id 计数随桥消失）都会给一个平台永久拒投的目标新一轮预算。
+        await _wait_until(lambda: ext.ack_status_by_id.get("obx-poison-1") == "undeliverable")
         assert delivered == [
             ("post_c2c_message", {"openid": "u9", "content": "正常补投", "msg_type": 0})
         ]
@@ -783,6 +796,35 @@ async def test_pump_acks_outbox_after_confirmed_delivery(monkeypatch: pytest.Mon
             ("post_c2c_message", {"openid": "u9", "content": "带账本的推送", "msg_type": 0})
         ]
         assert ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-test-1")]
+    finally:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_pump_acks_reply_final_carried_outbox_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """回合回复也带 outbox_id（relay 发布前登记进账本）：pump 投递后必须销账，
+    否则该记录会被服务端对账反复重注入。"""
+    media = _media_transport({})
+    task, client = await _start_bridge(monkeypatch, media)
+    try:
+        await client.on_c2c_message_create(_c2c_message("hi", [], message_id="r1"))
+        ext = FakeExternalApiClient.instances[-1]
+        await ext.events.put(
+            {
+                "type": "reply.final",
+                "seq": 1,
+                "text": "下载完成了",
+                "outbox_id": "obx-reply-1",
+            }
+        )
+        await _wait_until(lambda: client.api.calls and ext.acked)
+        assert client.api.calls == [
+            ("post_c2c_message", {"openid": "u9", "content": "下载完成了", "msg_type": 0})
+        ]
+        assert ext.acked == [("ext:qq-official:qq:c2c:u9", "obx-reply-1")]
+        assert ext.ack_status_by_id["obx-reply-1"] == "delivered"
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):
@@ -1067,7 +1109,12 @@ async def test_pump_caps_total_attempts_per_outbox_id_across_seqs(
             ("post_c2c_message", {"openid": "u9", "content": "正常", "msg_type": 0})
         ]
         assert ("ext:qq-official:qq:c2c:u9", "obx-ok") in ext.acked
-        assert ("ext:qq-official:qq:c2c:u9", "obx-p") not in ext.acked
+        # 判毒的 id 必须留下终态销账：账本不按年龄回收，投递预算是它唯一的上界，
+        # 而进程内 per-id 计数随桥重建清零（实测每小时一次），不销账就是无限重试。
+        # 销账状态必须是 undeliverable，不能冒充"已送达"。
+        assert ("ext:qq-official:qq:c2c:u9", "obx-p") in ext.acked
+        assert ext.ack_status_by_id["obx-p"] == "undeliverable"
+        assert ext.ack_status_by_id["obx-ok"] == "delivered"
     finally:
         task.cancel()
         with suppress(asyncio.CancelledError):

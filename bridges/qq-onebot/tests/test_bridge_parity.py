@@ -29,6 +29,7 @@ class _FakeG3ku:
         self.sent: list[dict] = []
         self.paused: list[str] = []
         self.cancelled: list[str] = []
+        self.acked: list[tuple[str, str]] = []
         self.send_status = send_status
         self.turn_id = turn_id
         self._active: dict[str, str] = {}
@@ -67,6 +68,10 @@ class _FakeG3ku:
     async def cancel_session(self, session_id):
         self.cancelled.append(session_id)
         return 1
+
+    async def ack_outbox(self, session_id, outbox_id):
+        self.acked.append((session_id, outbox_id))
+        return True
 
     def active_turn_id(self, session_id):
         return self._active.get(session_id)
@@ -338,6 +343,31 @@ async def test_image_attachment_downloaded_and_base64():
     assert len(attachments) == 1
     assert attachments[0]["kind"] == "image"
     assert attachments[0]["data_base64"]
+
+
+@pytest.mark.asyncio
+async def test_consumed_events_close_their_outbox_records():
+    """投递确认后必须 ack：账本已不按年龄回收，未销账的记录会被服务端每小时
+    重注入一次。回合回复与主动推送现在都带 ``outbox_id``。"""
+    dispatcher, g3ku, onebot = _dispatcher()
+    await dispatcher.handle_onebot_event(
+        {"post_type": "message", "message_type": "group", "group_id": 42,
+         "message": [{"type": "at", "data": {"qq": "999"}}, {"type": "text", "data": {"text": "hi"}}]}
+    )
+    session_id = g3ku.sessions["qq:group:42"]
+
+    await dispatcher._handle_g3ku_event(
+        session_id, {"type": "reply.final", "text": "答案", "outbox_id": "obx-r"}
+    )
+    await dispatcher._handle_g3ku_event(
+        session_id,
+        {"type": "outbound.created", "text": "提醒", "external_key": "qq:group:42", "outbox_id": "obx-p"},
+    )
+    assert g3ku.acked == [(session_id, "obx-r"), (session_id, "obx-p")]
+
+    # 不带 outbox_id 的旧形状无账可销，不得凭空造 ack 调用。
+    await dispatcher._handle_g3ku_event(session_id, {"type": "reply.final", "text": "无账可销"})
+    assert g3ku.acked == [(session_id, "obx-r"), (session_id, "obx-p")]
 
 
 @pytest.mark.asyncio

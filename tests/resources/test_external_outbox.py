@@ -51,45 +51,40 @@ def test_ack_unknown_id_without_session_scope_still_appends() -> None:
     assert external_outbox.load_pending_outbound() == []
 
 
-def test_expire_stale_pending() -> None:
-    external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="old")
-    fresh = external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="fresh")
-    # 手工把第一条的 ts 改到 25 小时前。
+def _rewrite_ts(outbox_id: str, ts: str) -> None:
     path = external_outbox._outbox_path()
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    lines[0]["ts"] = (datetime.now() - timedelta(hours=25)).isoformat()
-    path.write_text(
-        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in lines), encoding="utf-8"
-    )
-    assert external_outbox.expire_stale_pending() == 1
-    pending = external_outbox.load_pending_outbound()
-    assert [item["id"] for item in pending] == [fresh]
+    for line in lines:
+        if line.get("id") == outbox_id:
+            line["ts"] = ts
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in lines), encoding="utf-8")
+
+
+def test_no_age_based_discard_remains() -> None:
+    """账本不按年龄回收：跨一天关机后滞留的回复仍要能投出去。
+
+    原来这里断言 25 小时外的记录被标 expired。回收改按可路由性判定，见
+    ``tests/resources/test_external_reply_outbox_lane.py``。
+    """
+    old = external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="old")
+    external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="fresh")
+    _rewrite_ts(old, (datetime.now() - timedelta(hours=25)).isoformat())
+
+    assert len(external_outbox.load_pending_outbound()) == 2
 
 
 def test_record_age_seconds() -> None:
     now = datetime(2026, 9, 15, 12, 0, 0)
     record = {"ts": (now - timedelta(seconds=90)).isoformat()}
     assert external_outbox.record_age_seconds(record, now=now) == pytest.approx(90.0)
-    # ts 缺失或畸形 → None（调用方决定语义：expire 视为 stale，对账视为跳过）。
+    # ts 缺失或畸形 → None（调用方决定语义：对账侧无法判新鲜度就不重放，
+    # 并由 web 侧的不可达判定销账）。
     assert external_outbox.record_age_seconds({}, now=now) is None
     assert external_outbox.record_age_seconds({"ts": "not-a-ts"}, now=now) is None
     # 不传 now 时以当前时间计算，新鲜记录年龄接近 0。
     fresh = {"ts": datetime.now().isoformat()}
     age = external_outbox.record_age_seconds(fresh)
     assert age is not None and age < 5.0
-
-
-def test_expire_treats_unparseable_ts_as_stale() -> None:
-    """ts 无法解析的记录按既有语义过期清理（helper 重构不得改变该行为）。"""
-    external_outbox.record_outbound_message(session_key="ext:s1", external_key="k", text="bad")
-    path = external_outbox._outbox_path()
-    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    lines[0]["ts"] = "garbage"
-    path.write_text(
-        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in lines), encoding="utf-8"
-    )
-    assert external_outbox.expire_stale_pending() == 1
-    assert external_outbox.load_pending_outbound() == []
 
 
 def test_compact_keeps_only_pending() -> None:
@@ -123,7 +118,6 @@ def test_record_failure_degrades_to_empty_id(monkeypatch: pytest.MonkeyPatch) ->
 def test_missing_file_reads_as_empty(tmp_path: Path) -> None:
     external_outbox.configure_external_outbox_root(tmp_path / "nowhere")
     assert external_outbox.load_pending_outbound() == []
-    assert external_outbox.expire_stale_pending() == 0
     external_outbox.compact_outbox()  # 不存在时静默返回
 
 

@@ -29,6 +29,11 @@ from typing import Any, Awaitable, Callable
 from g3ku.config.live_runtime import get_runtime_config
 from g3ku.core.events import AgentEvent
 from g3ku.runtime.bridge import cli_event_text
+from g3ku.runtime.external_outbox import (
+    REPLY_EVENT,
+    ack_outbound_message,
+    record_outbound_message,
+)
 from g3ku.runtime.session_keys import sanitize_channel_outbound_text
 
 DEFAULT_EVENT_BUFFER_SIZE = 512
@@ -179,6 +184,7 @@ def make_session_event_relay(
     *,
     turn_id: str,
     session: Any | None = None,
+    external_key: str = "",
 ) -> Callable[[AgentEvent], Awaitable[None]]:
     """Build an AgentEvent listener mapping runtime events to external hub events.
 
@@ -188,8 +194,15 @@ def make_session_event_relay(
     - ``message_end`` → ``reply.final`` (sanitized, media rewritten to signed URLs)
     Turn terminal events (``turn.completed`` / ``turn.failed``) are emitted by
     the executor, never by this relay.
+
+    ``external_key`` 非空时，``reply.final`` 在发布前登记进持久账本并带上
+    ``outbox_id``。为什么必须登记：pump 只有两个重建点（渠道入站、账本里有 pending），
+    而网页在渠道会话里发起的回合两个都不满足——回复落进内存环形缓冲后没有消费者，
+    进程一重启就连缓冲一起没了（2026-10-05 实盘：00:16 的回答在网页里可见，QQ 端
+    什么都没有）。没有 external_key（孤儿转录）时无从路由，就只走内存投递。
     """
     hub = get_session_event_hub(session_key)
+    route_key = str(external_key or "").strip()
 
     async def relay(event: AgentEvent) -> None:
         try:
@@ -227,6 +240,21 @@ def make_session_event_relay(
                 usage = _resolve_turn_usage(session, str(payload.get("turn_id") or ""), turn_id)
                 if usage:
                     final_payload["usage"] = usage
+                if route_key:
+                    # 账本失败绝不能吃掉这条发布：登记异常在这里就地吞掉，
+                    # 回复退回仅内存投递（与 drain 侧同一降级语义）。
+                    try:
+                        outbox_id = record_outbound_message(
+                            session_key=session_key,
+                            external_key=route_key,
+                            text=text,
+                            attachments=attachments or None,
+                            event=REPLY_EVENT,
+                        )
+                    except Exception:
+                        outbox_id = ""
+                    if outbox_id:
+                        final_payload["outbox_id"] = outbox_id
                 hub.publish("reply.final", turn_id=turn_id, **final_payload)
                 return
             kind, text = cli_event_text(event)
@@ -319,6 +347,15 @@ async def wait_for_external_reply(
 
     def _reply_outcome(event: dict[str, Any]) -> ExternalReplyOutcome:
         usage = event.get("usage")
+        # 进程内等待方取到回复 = 这条回复已有人消费：就地销账。账本不再有年龄
+        # 上限，而不兼容性端点/MCP 这一侧永远不会有桥来 ack，不销账就是死行堆积
+        # （每条每小时被对账重注入一次）。会话作用域由下面的 session_key 兜住。
+        outbox_id = str(event.get("outbox_id") or "").strip()
+        if outbox_id:
+            try:
+                ack_outbound_message(outbox_id, session_key=session_key)
+            except Exception:
+                pass
         return ExternalReplyOutcome(
             kind="reply",
             text=str(event.get("text") or ""),

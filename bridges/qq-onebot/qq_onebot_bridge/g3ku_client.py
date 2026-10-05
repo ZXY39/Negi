@@ -113,6 +113,19 @@ class G3kuClient:
         response.raise_for_status()
         return int(response.json().get("cancelled") or 0)
 
+    async def ack_outbox(self, session_id: str, outbox_id: str) -> bool:
+        """Close one durable ledger record after the platform confirmed it.
+
+        账本不按年龄回收，桥不 ack 的记录会永久 pending 并被服务端每小时重注入
+        一次。主动推送与回合回复都带 ``outbox_id``，两条都得销。
+        """
+        response = await self._http.post(
+            f"/api/v1/sessions/{session_id}/outbox/{outbox_id}/ack"
+        )
+        if response.status_code >= 400:
+            return False
+        return bool(response.json().get("acked"))
+
     # -- events -------------------------------------------------------------
 
     def _note_turn(self, session_id: str, turn_id: str) -> None:

@@ -4129,7 +4129,19 @@ class RuntimeAgentSession:
         try:
             from g3ku.runtime.external_events import get_session_event_hub, make_session_event_relay
 
-            relay = make_session_event_relay(session_key, turn_id=turn_id, session=self)
+            # 排队补发的回复同样要有兜底：这条车道没有 HTTP 提交方，external_key 只能
+            # 从注册表取（取不到就是孤儿转录，只走内存投递）。
+            route_key = ""
+            try:
+                from g3ku.runtime.external_sessions import get_external_session_registry
+
+                entry = get_external_session_registry().get_by_session_key(session_key)
+                route_key = str(getattr(entry, "external_key", "") or "")
+            except Exception:
+                route_key = ""
+            relay = make_session_event_relay(
+                session_key, turn_id=turn_id, session=self, external_key=route_key
+            )
             unsubscribe = self.subscribe(relay)
             hub = get_session_event_hub(session_key)
             hub.publish("turn.started", turn_id=turn_id)

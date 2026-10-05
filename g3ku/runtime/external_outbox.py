@@ -1,4 +1,4 @@
-"""Durable outbox for external-channel proactive pushes.
+"""Durable ledger for external-channel outbound: proactive pushes and turn replies.
 
 The outbound delivery chain (bus -> drain -> per-session event hub -> bridge
 SSE pump -> channel API) is entirely in-memory: a dead bridge pump or a
@@ -8,11 +8,26 @@ replay path. This module is the durable ledger for that lane:
 - The web shell drain registers every ``outbound.created`` publish here
   before it reaches the hub (``record_outbound_message``); the hub event
   carries the returned ``outbox_id``.
+- The session event relay registers ``reply.final`` the same way
+  (``event="reply.final"``). Turn replies need it for the same reason as
+  pushes, and a pump is not always there to consume them: the only pump
+  rebuild triggers are a channel inbound message and a pending ledger record,
+  so a reply for a web-initiated channel turn has no consumer until this
+  record makes the bridge build one.
 - The bridge acks an id after the channel API confirms delivery
   (``POST /sessions/{id}/outbox/{outbox_id}/ack`` -> ``ack_outbound_message``).
-- On startup the web shell republishes pending (unacked, fresh enough)
-  records onto the outbound bus, and bridges warm pumps for sessions with
-  pending records (``GET /outbox/pending``).
+  In-process reply waiters (OpenAI-compatible endpoint, MCP gateway) ack too:
+  with no age-based cleanup they would otherwise hold their records forever.
+- On startup the web shell republishes pending (unacked) records onto the
+  outbound bus, and bridges warm pumps for sessions with pending records
+  (``GET /outbox/pending``).
+
+Age is deliberately not a discard reason: ``PENDING_MAX_AGE_SECONDS`` used to
+retire everything unacked for 24h, which threw away answers the requester was
+still waiting for. A record leaves the ledger only through an ack, and the
+non-time exits are ``delivered`` (channel confirmed), ``undeliverable`` (bridge
+gave up after its attempt budget) and ``unreachable`` (no enabled bridge token
+can ever see it again — see ``g3ku.shells.web``).
 
 Storage is a single append-only jsonl (``.g3ku/external-outbox/outbox.jsonl``)
 of ``{"kind":"msg",...}`` records plus ``{"kind":"ack","id":...}`` tombstones.
@@ -40,9 +55,10 @@ from loguru import logger
 OUTBOX_DIRNAME = Path(".g3ku") / "external-outbox"
 OUTBOX_FILENAME = "outbox.jsonl"
 
-# 超过该年龄的 pending 推送在启动重放时标记 expired 而不再投递：迟到一天以上
-# 的"提醒"通常只剩打扰价值（与 cron at-most-once 的取舍一致）。
-PENDING_MAX_AGE_SECONDS = 24 * 3600
+# 记录对应哪种出站事件。主动推送是默认值；回合回复由 relay 显式标
+# ``reply.final``，这样「为什么我收到两条同样的回答」事后能从账本里分得清。
+PROACTIVE_EVENT = "outbound.created"
+REPLY_EVENT = "reply.final"
 
 _LOCK = threading.RLock()
 _ROOT_OVERRIDE: Path | None = None
@@ -125,8 +141,9 @@ def record_outbound_message(
     reply_to: str = "",
     dedupe_key: str = "",
     attachments: list[dict[str, Any]] | None = None,
+    event: str = PROACTIVE_EVENT,
 ) -> str:
-    """Register one pending proactive push; returns its outbox id.
+    """Register one pending outbound record; returns its outbox id.
 
     Empty string means registration failed (disk pressure): callers must still
     publish to the hub so live delivery gets its chance. ``attachments`` (the
@@ -138,6 +155,7 @@ def record_outbound_message(
         "kind": "msg",
         "id": outbox_id,
         "ts": datetime.now().isoformat(),
+        "event": str(event or PROACTIVE_EVENT),
         "session_key": str(session_key or ""),
         "external_key": str(external_key or ""),
         "text": str(text or ""),
@@ -185,8 +203,8 @@ def ack_outbound_message(outbox_id: str, *, session_key: str = "", status: str =
 def record_age_seconds(record: dict[str, Any], *, now: datetime | None = None) -> float | None:
     """Age of one ledger record in seconds; None when ts is missing/unparseable.
 
-    周期对账用它做「足够老才重放」过滤；``expire_stale_pending`` 共用同一解析
-    口径，避免两处 datetime 逻辑漂移。
+    周期对账用它做「足够老才重放」过滤。ts 畸形的记录重放不出去（对账侧直接跳过），
+    但年龄不再是删除理由，所以它由 ``g3ku.shells.web`` 的不可达判定一并销账。
     """
     try:
         ts = datetime.fromisoformat(str(record.get("ts") or ""))
@@ -206,21 +224,6 @@ def load_pending_outbound() -> list[dict[str, Any]]:
     ]
     pending.sort(key=lambda record: str(record.get("ts") or ""))
     return pending
-
-
-def expire_stale_pending(max_age_seconds: float = PENDING_MAX_AGE_SECONDS) -> int:
-    """Ack-expire pending records older than the freshness window; returns the
-    number expired."""
-    now = datetime.now()
-    expired = 0
-    for record in load_pending_outbound():
-        age = record_age_seconds(record, now=now)
-        # age None（ts 缺失/畸形）按原语义视为 stale：无法判定新鲜度的记录不留。
-        if age is not None and age <= float(max_age_seconds):
-            continue
-        if ack_outbound_message(str(record.get("id") or ""), status="expired"):
-            expired += 1
-    return expired
 
 
 def compact_outbox() -> None:

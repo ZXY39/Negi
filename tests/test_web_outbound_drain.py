@@ -321,35 +321,33 @@ async def test_reconcile_republishes_only_aged_unsubscribed_records(ext_registry
 
 
 @pytest.mark.asyncio
-async def test_reconcile_expires_stale_and_loop_compacts_ledger(ext_registry, monkeypatch) -> None:
-    """过期清理不再依赖重启：对账循环每轮跑 expire；活动轮立即压实账本。"""
+async def test_reconcile_keeps_aged_records_and_still_republishes_them(
+    ext_registry, monkeypatch
+) -> None:
+    """24h 时效已删：25 小时前的记录仍每轮重放，直到有会 ack 的消费方把它关掉。
+
+    原来这一条断言的是"对账每轮跑 expire，过期即从账本消失"。跨一天关机的机器
+    开机后，请求方还在等的回答不能因为睡了一觉就被判死；回收改按可路由性判定
+    （见 ``_pending_record_reachable``），活动轮仍立即 compact 收敛 tombstone。
+    """
     entry, _ = ext_registry.resolve_or_create(bridge_id="qq", external_key="qq:dm:old")
     oid = external_outbox.record_outbound_message(
         session_key=entry.session_key, external_key="qq:dm:old", text="25小时前的提醒"
     )
     _age_records({oid: 25 * 3600.0})
     monkeypatch.setattr(web_shell, "_outbox_republish_backoff", {})
-    monkeypatch.setattr(web_shell, "OUTBOX_RECONCILE_INTERVAL_SECONDS", 0.01)
-    monkeypatch.setattr(web_shell, "_global_bus", MessageBus())
-    monkeypatch.setattr(web_shell, "_global_outbound_drain_task", None)
-
-    async def fake_sync() -> None:
-        return None
-
-    monkeypatch.setattr(web_shell, "_sync_qq_official_service", fake_sync)
-    task = asyncio.create_task(web_shell._outbox_reconcile_loop(), name="test-reconcile")
+    monkeypatch.setattr(web_shell, "OUTBOX_REPUBLISH_MIN_AGE_SECONDS", 0.0)
+    bus = MessageBus()
+    monkeypatch.setattr(web_shell, "_global_bus", bus)
+    task = _start_outbound_drain(bus)
     try:
-        await _wait_until(lambda: external_outbox.load_pending_outbound() == [])
-        # expired>0 的活动轮立即 compact：msg 与 expired tombstone 一起清掉。
-        await _wait_until(
-            lambda: external_outbox._outbox_path().read_text(encoding="utf-8").strip() == ""
-        )
-        assert not task.done()
+        republished, retired = await web_shell._reconcile_external_outbox_once()
+        assert (republished, retired) == (1, 0)
+        assert [item["id"] for item in external_outbox.load_pending_outbound()] == [oid]
+        message = await asyncio.wait_for(bus.consume_outbound(), timeout=2.0)
+        assert str(message.metadata.get("outbox_id") or "") == oid
     finally:
         await _stop(task)
-        drain_task = web_shell._global_outbound_drain_task
-        if drain_task is not None:
-            await _stop(drain_task)
 
 
 @pytest.mark.asyncio

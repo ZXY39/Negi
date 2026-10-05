@@ -112,6 +112,18 @@ class G3kuMcpClient:
         response.raise_for_status()
         return response.json()
 
+    async def ack_reply(self, session_id: str, outbox_id: str) -> None:
+        """Close the durable ledger record behind a reply this client consumed.
+
+        账本已不按年龄回收：网关取走却不销账的回复会变成永久 pending，被服务端
+        对账每小时重注入一次。走 ``POST /sessions/{id}/outbox/{id}/ack``，与官方
+        桥同一条销账路。
+        """
+        response = await self._client.post(
+            f"/sessions/{session_id}/outbox/{outbox_id}/ack", headers=self._headers()
+        )
+        response.raise_for_status()
+
     @asynccontextmanager
     async def event_stream(self, session_id: str, *, last_seq: int = 0) -> AsyncIterator[AsyncIterator[dict[str, Any]]]:
         """Open the session SSE stream; yields an async iterator of parsed
@@ -155,6 +167,7 @@ class G3kuMcpClient:
         queued: bool = False,
         after_seq: int = 0,
         timeout: float = 120.0,
+        session_id: str = "",
     ) -> dict[str, Any]:
         """Client-side mirror of ``wait_for_external_reply`` (same rules):
 
@@ -163,12 +176,25 @@ class G3kuMcpClient:
           (the running turn's own final for the PREDECESSOR message arrives
           before the drain batch that answers the queued message);
         - ``turn.failed`` → failed; deadline / closed stream → timeout.
+
+        给了 ``session_id`` 时，返回回复前先把它带的账本记录销掉（本消费方不会
+        ack 第二遍，也不会有桥替它 ack）。
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, float(timeout))
         threshold = int(after_seq or 0)
         seen: set[int] = set()
         finals: list[dict[str, Any]] = []
+
+        async def _settle(event: dict[str, Any]) -> None:
+            outbox_id = str(event.get("outbox_id") or "").strip()
+            if not (outbox_id and session_id):
+                return
+            try:
+                await self.ack_reply(session_id, outbox_id)
+            except Exception:
+                # 销账失败只意味着以后多几份副本，绝不能吃掉已经拿到的回复。
+                pass
         iterator = events.__aiter__()
         while True:
             remaining = deadline - loop.time()
@@ -191,6 +217,7 @@ class G3kuMcpClient:
                     finals.append(dict(event))
                     continue
                 if turn_id is None or event_turn_id == str(turn_id):
+                    await _settle(event)
                     return {
                         "kind": "reply",
                         "text": str(event.get("text") or ""),
@@ -202,6 +229,7 @@ class G3kuMcpClient:
                 if queued:
                     if finals:
                         best = max(finals, key=lambda item: int(item.get("seq") or 0))
+                        await _settle(best)
                         return {
                             "kind": "reply",
                             "text": str(best.get("text") or ""),
