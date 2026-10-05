@@ -1977,7 +1977,6 @@ class CeoMessageBuilder:
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
-            denied_tool_names=list(context_sources.get('declared_denied_tool_names') or []),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
                 str(context_sources['capability_snapshot'].exposure_revision or '').strip()
@@ -2152,21 +2151,6 @@ class CeoMessageBuilder:
             hydrated_tool_names=hydrated_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
-        # 已声明但当前角色无权限的名字：清单来自 session 上钉住的那份，授权来自本轮能力快照。
-        # 装配层是 CeoMessageBuilder，没有 runner 的治理 helper，所以这里只做纯差集。
-        _declared_bundle = [
-            str(item or "").strip()
-            for item in list(getattr(session, "_frontdoor_provider_tool_schema_names", []) or [])
-            if str(item or "").strip()
-        ]
-        _granted_now = {
-            str(item or "").strip()
-            for item in list(context_sources["capability_snapshot"].visible_tool_ids or [])
-            if str(item or "").strip()
-        }
-        context_sources['declared_denied_tool_names'] = (
-            [name for name in _declared_bundle if name not in _granted_now] if _granted_now else []
-        )
 
         attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
             persisted_session=persisted_session,
@@ -2323,7 +2307,6 @@ class CeoMessageBuilder:
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
-            denied_tool_names=list(context_sources.get('declared_denied_tool_names') or []),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
                 str(context_sources['capability_snapshot'].exposure_revision or '').strip()

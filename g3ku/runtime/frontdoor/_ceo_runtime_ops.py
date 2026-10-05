@@ -3264,12 +3264,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "candidate_skill_ids": list(state.get("candidate_skill_ids") or []),
             "hydrated_tool_names": list(state.get("hydrated_tool_names") or []),
             # 给拒绝文案用：撞进来路已收的工具时，要能说"是无权限"而不是"还没水合"。
-            "declared_denied_tool_names": self._frontdoor_declared_denied_tool_names(
-                declared_tool_names=list(state.get("provider_tool_names") or []),
-                granted_tool_names=self._frontdoor_live_granted_tool_names(
-                    session_key=str(state.get("session_key") or ""),
-                ),
-            ),
+            "declared_denied_tool_names": self._frontdoor_declared_denied_tool_names_for_state(state),
             "rbac_visible_tool_names": list(state.get("rbac_visible_tool_names") or []),
             "rbac_visible_skill_ids": list(state.get("rbac_visible_skill_ids") or []),
             "channel": getattr(session, "_channel", "cli"),
@@ -3346,6 +3341,19 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         if not declared or not granted:
             return []
         return [name for name in declared if name not in granted]
+
+    def _frontdoor_declared_denied_tool_names_for_state(self, state: CeoGraphState) -> list[str]:
+        """state 版差集：前门每一处要印 denied_tools 的地方都走这里，不再各算各的。
+
+        发送前的 prompt contract 会用 state 重建尾块，重建处若自己另算一份（或干脆不传），
+        装配层算出来的那一行就会在落请求体前被覆盖掉。
+        """
+        return self._frontdoor_declared_denied_tool_names(
+            declared_tool_names=list(state.get("provider_tool_names") or []),
+            granted_tool_names=self._frontdoor_live_granted_tool_names(
+                session_key=str(state.get("session_key") or ""),
+            ),
+        )
 
     def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
         """tools[] 的唯一重新提交点：压缩（内联 preflight 的 token_compression 或手动压缩挂的

@@ -283,6 +283,7 @@ class CreateAgentCeoFrontDoorRunner(CeoFrontDoorRuntimeOps):
             repair_required_skill_items=list(state.get("repair_required_skill_items") or []),
             rbac_visible_tool_names=list(state.get("rbac_visible_tool_names") or []),
             rbac_visible_skill_ids=list(state.get("rbac_visible_skill_ids") or []),
+            denied_tool_names=self._frontdoor_declared_denied_tool_names_for_state(state),
             contract_revision=self._prompt_cache_family_revision(state),
             exec_runtime_policy=(
                 self._loop.main_task_service._current_exec_runtime_policy_payload()

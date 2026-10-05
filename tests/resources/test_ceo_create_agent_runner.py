@@ -4093,6 +4093,39 @@ def test_frontdoor_dispatch_stays_live_while_declaration_is_pinned() -> None:
         granted_tool_names=no_grant["rbac_visible_tool_names"],
     ) == []
 
+def test_frontdoor_send_contract_prints_declared_denied_tools_line() -> None:
+    """发送前重建尾块的那一处也必须带上 denied_tools 行。
+
+    实盘翻过一次：装配层算出了差集，但 `_frontdoor_prompt_contract` 会拿 state 重新
+    upsert 一份契约，重建处不传这一行，算出来的东西被自己覆盖掉了。
+    """
+    service = SimpleNamespace(
+        list_effective_tool_names=lambda *, actor_role, session_id: ["exec", "submit_next_stage"]
+    )
+    runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=service))
+
+    contract = runner._frontdoor_prompt_contract(
+        state=_canonical_frontdoor_state(
+            messages=[{"role": "user", "content": "hello"}],
+            provider_tool_names=["exec", "web_fetch", "submit_next_stage"],
+            rbac_visible_tool_names=["exec", "submit_next_stage"],
+            tool_names=["exec"],
+        ),
+        provider_model="openai:gpt-4.1",
+        tool_schemas=[],
+        session_key="web:shared",
+    )
+
+    stage_gate_texts = [
+        str(item.get("content") or "")
+        for item in list(contract.dynamic_appendix_messages)
+        if "callable_tools" in str(item.get("content") or "")
+    ]
+    assert len(stage_gate_texts) == 1
+    assert "denied_tools" in stage_gate_texts[0]
+    assert "web_fetch" in stage_gate_texts[0]
+
+
 def test_build_frontdoor_request_artifact_payload_includes_provider_tool_exposure_fields() -> None:
     runner = create_agent_impl.CreateAgentCeoFrontDoorRunner(loop=SimpleNamespace(main_task_service=None))
 
