@@ -277,9 +277,9 @@ def test_availability_hint_separates_not_hydrated_from_unknown_name() -> None:
     )
 
     # 候选未水化 → 给出加载动作；同时列出可调用与全部候选（含它自己，便于改选别的）。
-    assert '「web_search」本轮只是候选、尚未水化' in hint
+    assert '「web_search」尚未水化' in hint
     assert '当前可直接调用的工具：exec、content_open' in hint
-    assert '本轮可加载的候选工具：web_search、image_search' in hint
+    assert '本轮其他候选工具（排名选中，可加载）：web_search、image_search' in hint
 
 
 def test_availability_hint_for_unknown_name_lists_no_candidate_group() -> None:
@@ -319,7 +319,7 @@ def test_loadable_tool_gate_error_names_builtin_and_lists_candidates() -> None:
 
     assert '是常驻内置工具' in text
     assert '本轮候选工具：agent_browser、web_search' in text
-    assert 'RBAC 可见 surfaced tools：content_search' in text
+    assert 'RBAC 可见工具：content_search' in text
 
 
 def test_candidate_gate_error_enumerates_the_candidates_it_demands() -> None:

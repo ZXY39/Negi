@@ -582,14 +582,12 @@ class ReActToolLoop:
                 # 请求体因阶段过期点变短必须有合法理由，否则逐轮对账会把它读成非法 shrink。
                 history_shrink_reason = 'stage_compaction'
             if str(history_shrink_reason or '').strip() == 'token_compression':
-                prior_provider_tool_names = self._normalized_name_list(
-                    list((dict(tool_schema_selection.get('trace') or {})).get('prior_provider_tool_names') or [])
-                )
-                compression_provider_tool_names = (
-                    list(prior_provider_tool_names)
-                    if prior_provider_tool_names
-                    else list(provider_tool_names)
-                )
+                # token 压缩是节点清单的唯一重新提交点：正文这一跳已被
+                # `[G3KU_TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正已经断在这里，
+                # 重印说明书不额外破缓存；之后的跳按重印后的清单继续钉住。
+                compression_provider_tool_names = self._normalized_name_list(
+                    list(tool_schema_selection.get('pinned_provider_tool_names') or [])
+                ) or list(provider_tool_names)
                 if compression_provider_tool_names != provider_tool_names:
                     compression_tool_schemas = [
                         current_tools[name].to_model_schema()
@@ -638,7 +636,7 @@ class ReActToolLoop:
                                 'provider_tool_exposure_revision': provider_tool_exposure_revision,
                                 'provider_tool_exposure_commit_reason': '',
                                 'provider_tool_bundle_seeded': False,
-                                'provider_tool_refresh_deferred_due_to': 'token_compression',
+                                'provider_tool_bundle_recommit_reason': 'token_compression',
                             },
                         }
                         token_preflight_diagnostics = {
@@ -664,7 +662,7 @@ class ReActToolLoop:
                             ),
                             'final_estimate_tokens': compression_final_tokens,
                             'final_request_tokens': compression_final_tokens,
-                            'provider_tool_refresh_deferred_due_to': 'token_compression',
+                            'provider_tool_bundle_recommit_reason': 'token_compression',
                         }
             actual_request_diagnostics = build_actual_request_diagnostics(
                 request_messages=request_messages,

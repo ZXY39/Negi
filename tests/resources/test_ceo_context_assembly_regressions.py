@@ -1269,7 +1269,7 @@ async def test_message_builder_appends_frontdoor_runtime_tool_contract_to_dynami
     assert "`filesystem_write`" in contract_text
     # 每跳重写的活状态只在尾块里，稳定块里一份都没有
     assert "callable_tools:" in gate_text and "callable_tools:" not in stable_text
-    assert "hydrated_tools:" in gate_text and "hydrated_tools:" not in stable_text
+    assert "hydrated_tools:" not in gate_text and "callable_tools:" in gate_text
     assert "stage_summary:" in gate_text and "stage_summary:" not in stable_text
     assert 'load_tool_context(tool_id="filesystem_write")' not in contract_text
     # 候选工具的一句话说明由 provider tools[] 承载，契约只列名字
@@ -1371,7 +1371,7 @@ def test_frontdoor_dynamic_appendix_records_prefer_state_tool_contract_over_stal
     assert contract_text.startswith("## Runtime Tool Contract")
     assert "callable_tools: `submit_next_stage`, `filesystem_write`" in contract_text
     assert "candidate_tools: none" in contract_text
-    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "hydrated_tools:" not in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `memory`" in contract_text
     # skill/工具加载规则只在基础提示词里，契约不再抄第二份
     assert "Skills listed in `candidate_skills` do not hydrate" not in contract_text

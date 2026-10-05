@@ -41,10 +41,10 @@ _EMPTY_SUBMISSION_NOTE = (
     '请压缩内容后按下方结构重新提交。'
 )
 _AVAILABILITY_CALLABLE_PREFIX = '当前可直接调用的工具：'
-_AVAILABILITY_CANDIDATE_PREFIX = '本轮可加载的候选工具：'
+_AVAILABILITY_CANDIDATE_PREFIX = '本轮其他候选工具（排名选中，可加载）：'
 _AVAILABILITY_NAME_MAX = 20
 _NOT_HYDRATED_NOTE = (
-    '「{name}」本轮只是候选、尚未水化，因此不可直接调用；'
+    '「{name}」尚未水化，因此不可直接调用；'
     '请先 load_tool_context(tool_id="{name}") 后再使用。'
 )
 _NO_LOAD_NEEDED_NOTE = '「{name}」是常驻内置工具，无需加载说明即可直接调用；它没有可加载的 toolskill。'

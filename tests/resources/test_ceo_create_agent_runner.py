@@ -1660,7 +1660,7 @@ async def test_create_agent_graph_execute_tools_promotes_loaded_tool_context_int
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools: `load_tool_context`, `filesystem_write`" in contract_text
-    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "hydrated_tools:" not in contract_text
     # 静态规则不再抄进契约：加载/复读语义只由基础提示词 `ceo_frontdoor.md` 承载
     assert "load_tool_context_help:" not in contract_text
     assert "Any surfaced RBAC-visible tool may be loaded by exact `tool_id` for docs/help" not in contract_text
@@ -2352,7 +2352,7 @@ async def test_create_agent_runner_graph_prepare_turn_recovers_paused_manual_con
     assert len(contract_messages) == 2  # 一份稳定契约 + 一份活状态块
     contract_text = "\n".join(str(item["content"] or "") for item in contract_messages)
     assert "callable_tools: `submit_next_stage`, `load_tool_context`, `filesystem_write`" in contract_text
-    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "hydrated_tools:" not in contract_text
 
 
 def test_runtime_agent_session_inflight_snapshot_keeps_frontdoor_hydrated_tool_names() -> None:

@@ -285,7 +285,6 @@ def _render_node_stage_gate_summary(payload: dict[str, Any]) -> str:
         NODE_DYNAMIC_STAGE_GATE_HEADING,
         f'kind: {NODE_DYNAMIC_STAGE_GATE_KIND}',
         f'callable_tools: {_render_name_list(payload.get("callable_tool_names"))}',
-        f'hydrated_tools: {_render_name_list(payload.get("hydrated_executor_names"))}',
         _render_stage_summary(payload.get('execution_stage')),
     ]
     return '\n'.join(lines)

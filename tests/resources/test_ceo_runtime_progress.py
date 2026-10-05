@@ -7381,7 +7381,7 @@ async def test_ceo_frontdoor_prepare_turn_heartbeat_inherits_previous_tool_state
         "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
         in contract_text
     )
-    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "hydrated_tools:" not in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
@@ -7603,7 +7603,7 @@ async def test_ceo_frontdoor_prepare_turn_cron_inherits_previous_tool_state_with
         "callable_tools: `create_async_task`, `task_list`, `filesystem_write`, `silent`, `submit_next_stage`"
         in contract_text
     )
-    assert "hydrated_tools: `filesystem_write`" in contract_text
+    assert "hydrated_tools:" not in contract_text
     assert "candidate_skills (loadable with `load_skill_context`): `find-skills`" in contract_text
     # skill 加载规则只在基础提示词里说一次，契约不再抄第二份
     assert 'Call `load_skill_context(skill_id="<skill_id>")`' not in contract_text
