@@ -329,7 +329,7 @@ The surfaced `message` executor and its Tool Admin family `messaging` are absent
 
 - 普通跳只有在成员集合真的变化时才重算 `tools[]`；同名不同序保持持久化顺序原样不动，不为零收益轮换 schema。
 - 节点的 `stage_compaction` 不得轮转 `tools[]`；节点的 `token_compression` 是清单的重印点，取"若此刻重新播种会得到什么"的钉住集（`pinned_provider_tool_names`），而不是退回上一跳的窄清单。前门两条 shrink 原因都不轮转，刷新留到压缩后的第一个普通跳。
-- 清单滞后不是权限滞后：节点执行按当轮待派发字典查名，不校验该名字是否出现在 `tools[]`；RBAC 收回在执行侧当跳即拒，即使 provider schema 尚未收敛。前门的声明与派发同源，所以它的"能力永不旧"由清单本身每轮现算保证。
+- 清单滞后不是权限滞后：节点执行按当轮待派发字典查名，不校验该名字是否出现在 `tools[]`，RBAC 收回在执行侧当跳即拒。反向要按实盘读：**权限收回会让该名字在一两跳内离开 `tools[]`**——节点的对象字典按当轮 RBAC 可见集构建，名字一旦失去权限就不再交付实例，参数表也就渲不出来。所以钉住保护的是"曝光/水合塌缩不删名"这一类收缩，不是权限收回；实测一条活节点：连续 7 跳 `tools[]` 恒为同一份 22 条而 `callable` 在 6–8 之间波动，收掉某工具的 `execution` 授权后第 2 跳该名字从清单消失（22→21），还原后一跳内回来。
 - 曝光收窄（候选塌缩、LRU 淘汰 callable）不得把名字从节点清单里删掉；LRU 只管 callable 层，与清单无关。被淘汰但清单仍带 ⇒ 模型看得见参数表、本轮调不动，需重新 `load_tool_context`。
 - 工具曝光漂移改变当轮实际请求，但不因此轮换 caller-side prompt cache family；family 变化只留给稳定前缀重写、车道或模型切换、显式 cache-family revision bump 及其他刻意重置边界。`tool_signature_hash` / `actual_tool_schema_hash` 是观测字段，不是"该有新 family"的证据；缓存侧排查步骤见 `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」。
 
