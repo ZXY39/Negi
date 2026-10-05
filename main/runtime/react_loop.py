@@ -635,7 +635,7 @@ class ReActToolLoop:
                                 'provider_tool_exposure_pending': False,
                                 'provider_tool_exposure_revision': provider_tool_exposure_revision,
                                 'provider_tool_exposure_commit_reason': '',
-                                'provider_tool_bundle_seeded': False,
+                                'provider_tool_bundle_seeded': True,
                                 'provider_tool_bundle_recommit_reason': 'token_compression',
                             },
                         }
@@ -2997,6 +2997,8 @@ class ReActToolLoop:
         selection_payload: dict[str, Any] = {
             'tool_names': list(selected_tools.keys()),
             'provider_tool_names': list(selected_tools.keys()),
+            'pinned_provider_tool_names': list(selected_tools.keys()),
+            'provider_tool_bundle_mode': '',
             'pending_provider_tool_names': [],
             'provider_tool_exposure_pending': False,
             'provider_tool_exposure_revision': '',
@@ -3043,6 +3045,25 @@ class ReActToolLoop:
                     requested_provider_names.append(normalized)
                 if requested_provider_names:
                     selection_payload['provider_tool_names'] = list(requested_provider_names)
+                requested_pinned_names: list[str] = []
+                seen_pinned_names: set[str] = set()
+                for item in list(
+                    raw_selection.get('pinned_provider_tool_names')
+                    or (dict(raw_selection.get('trace') or {})).get('pinned_provider_tool_names')
+                    or []
+                ):
+                    normalized = str(item or '').strip()
+                    if not normalized or normalized in seen_pinned_names or normalized not in visible_tools:
+                        continue
+                    seen_pinned_names.add(normalized)
+                    requested_pinned_names.append(normalized)
+                if requested_pinned_names:
+                    selection_payload['pinned_provider_tool_names'] = list(requested_pinned_names)
+                selection_payload['provider_tool_bundle_mode'] = str(
+                    raw_selection.get('provider_tool_bundle_mode')
+                    or (dict(raw_selection.get('trace') or {})).get('provider_tool_bundle_mode')
+                    or ''
+                ).strip()
                 selection_payload['lightweight_tool_ids'] = [
                     str(item or '').strip()
                     for item in list(raw_selection.get('lightweight_tool_ids') or [])
@@ -3114,8 +3135,18 @@ class ReActToolLoop:
         ]
         if not provider_tool_names:
             provider_tool_names = list(model_visible_callable_tool_names)
+        pinned_provider_tool_names = [
+            name
+            for name in self._normalized_name_list(
+                list(selection_payload.get('pinned_provider_tool_names') or [])
+            )
+            if name in visible_tools
+        ]
+        if not pinned_provider_tool_names:
+            pinned_provider_tool_names = list(provider_tool_names)
         selection_payload['tool_names'] = list(model_visible_callable_tool_names)
         selection_payload['provider_tool_names'] = list(provider_tool_names)
+        selection_payload['pinned_provider_tool_names'] = list(pinned_provider_tool_names)
         selection_payload['trace'] = {
             **selection_trace,
             'full_callable_tool_names': list(full_callable_tool_names),

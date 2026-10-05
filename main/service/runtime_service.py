@@ -6885,9 +6885,11 @@ class MainRuntimeService:
         else:
             provider_tool_names = list(pinned_provider_tool_names)
             provider_tool_bundle_mode = 'pinned_seeded'
-        provider_tool_bundle_seeded = provider_tool_bundle_mode == 'pinned_seeded'
+        provider_tool_membership_changed = provider_tool_names != list(prior_provider_tool_names)
+        provider_tool_bundle_seeded = bool(provider_tool_membership_changed)
         exposure = {
             'provider_tool_names': list(provider_tool_names),
+            'desired_provider_tool_names': list(pinned_provider_tool_names),
             'pending_provider_tool_names': [],
             'provider_tool_exposure_pending': False,
             'provider_tool_exposure_revision': self._provider_tool_exposure_revision(provider_tool_names),
@@ -6942,6 +6944,8 @@ class MainRuntimeService:
                 'provider_tool_exposure_revision': str(exposure.get('provider_tool_exposure_revision') or ''),
                 'provider_tool_exposure_commit_reason': str(exposure.get('provider_tool_exposure_commit_reason') or ''),
                 'provider_tool_bundle_seeded': bool(provider_tool_bundle_seeded),
+                'provider_tool_bundle_mode': provider_tool_bundle_mode,
+                'provider_tool_membership_changed': bool(provider_tool_membership_changed),
                 'base_schema_chars': int(selection.schema_chars),
                 'top_k': int((selection.trace or {}).get('top_k', 0) or 0),
                 'final_schema_chars': int(final_schema_chars),

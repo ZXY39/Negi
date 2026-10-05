@@ -8142,10 +8142,9 @@ async def test_node_send_preflight_token_compression_recommits_pinned_provider_b
     assert len(calls) == 1
     emitted_tools = list(calls[0].get("tools") or [])
     emitted_tool_names = [item["function"]["name"] for item in emitted_tools]
-    # 压缩跳不再把清单退回上一跳的窄清单：本跳按当轮生效的清单原样发出。
-    # 钉住/重印的取值规则在选择器侧覆盖（见 test_execution_provider_bundle_freezes_across_hops）。
-    assert emitted_tool_names == ["submit_final_result", "web_fetch"]
-    assert observed_frame.get("provider_tool_names") == ["submit_final_result", "web_fetch"]
+    # 压缩跳按钉住清单重印：当轮生效清单里没有的 `content_open` 在这一跳重新出现在 tools[]。
+    assert emitted_tool_names == ["submit_final_result", "web_fetch", "content_open"]
+    assert observed_frame.get("provider_tool_names") == ["submit_final_result", "web_fetch", "content_open"]
     assert observed_frame.get("provider_tool_exposure_commit_reason") == ""
 
 
