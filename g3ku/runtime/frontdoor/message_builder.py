@@ -1977,6 +1977,7 @@ class CeoMessageBuilder:
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
+            denied_tool_names=list(context_sources.get('declared_denied_tool_names') or []),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
                 str(context_sources['capability_snapshot'].exposure_revision or '').strip()
@@ -2151,6 +2152,12 @@ class CeoMessageBuilder:
             hydrated_tool_names=hydrated_tool_names,
         )
         collect_elapsed_ms = self._elapsed_ms(collect_started_at)
+        # 已声明但当前角色无权限的名字由 ops 侧算好、随 exposure 带进来：这一层的类是
+        # CeoMessageBuilder，没有治理读取的 helper；而装配路才是每跳的热线。
+        context_sources['declared_denied_tool_names'] = list(
+            (exposure or {}).get('declared_denied_tool_names') or []
+        )
+
         attachment_reopen_targets = self._frontdoor_attachment_reopen_targets(
             persisted_session=persisted_session,
             user_metadata=user_metadata,
@@ -2306,6 +2313,7 @@ class CeoMessageBuilder:
             repair_required_tool_items=list(context_sources.get('repair_required_tool_items') or []),
             repair_required_skill_items=list(context_sources.get('repair_required_skill_items') or []),
             rbac_visible_tool_names=list(context_sources['capability_snapshot'].visible_tool_ids),
+            denied_tool_names=list(context_sources.get('declared_denied_tool_names') or []),
             rbac_visible_skill_ids=list(context_sources['capability_snapshot'].visible_skill_ids),
             contract_revision=(
                 str(context_sources['capability_snapshot'].exposure_revision or '').strip()
