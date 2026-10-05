@@ -2605,6 +2605,46 @@ def test_execution_selector_keeps_governance_visible_executors_promotable_after_
     assert 'content' not in selection['provider_tool_names']
 
 
+def test_execution_provider_bundle_freezes_when_exposure_collapses() -> None:
+    """非提交跳的清单只允许"补"，不允许"删"。
+
+    清单排在整段上下文最前面，成员一变就把身后正文全部重铺。当轮曝光字典塌缩
+    （候选重排、水合被 LRU 挤掉）都不构成删名的理由——删名要等到 token 压缩那一跳
+    重印；而当轮真的可用的名字必须并进清单，否则模型手里只剩名字、没有参数表。
+    """
+    service, visible_tools = _collapsed_bundle_selector_service()
+    service.log_service.upsert_frame(
+        'task-pin',
+        {
+            'node_id': 'node-pin',
+            'provider_tool_names': ['exec', 'content_describe', 'content_search'],
+        },
+    )
+
+    selection = service._select_model_visible_tool_schema_payload(
+        task_id='task-pin',
+        node_id='node-pin',
+        node_kind='execution',
+        visible_tools=visible_tools,
+        runtime_context={
+            'task_id': 'task-pin',
+            'node_id': 'node-pin',
+            'session_key': 'web:shared',
+            'actor_role': 'execution',
+        },
+    )
+
+    bundle = list(selection['provider_tool_names'] or [])
+    assert selection['provider_tool_bundle_mode'] == 'pinned_frozen'
+    # 上一跳声明过、本轮曝光里已经没有了 —— 仍然不能删
+    assert 'content_describe' in bundle
+    assert 'content_search' in bundle
+    # 本轮常驻工具照常在场
+    assert 'exec' in bundle
+    # monolith 名不会因为"补"被带进来
+    assert 'content' not in bundle
+
+
 def _collapsed_bundle_selector_service():
     visible_tools = {
         'submit_next_stage': _StageProtocolNoopTool('submit_next_stage'),
