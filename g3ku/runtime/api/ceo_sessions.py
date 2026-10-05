@@ -18,6 +18,7 @@ from g3ku.runtime.frontdoor.message_builder import (
 from g3ku.runtime.session_agent import (
     MANUAL_COMPRESSION_RUNNING,
     MANUAL_COMPRESSION_STATE_ATTR,
+    PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR,
 )
 from g3ku.runtime.session_keys import is_channel_session_key
 from g3ku.runtime.web_ceo_sessions import (
@@ -1108,6 +1109,9 @@ async def _execute_manual_context_compression(agent, runtime_session, *, pause_f
         stats=stats,
         reason="",
     )
+    # 手动车道产出的是 `[G3KU_TOKEN_COMPACT_V2]` 全量正文重写，可复用前缀反正已经断在这里：
+    # 挂一个待重印标记，让下一跳顺手把 tools[] 按当前 RBAC 重取一次（钉住期间只有压缩跳重印）。
+    setattr(runtime_session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, True)
     memory_manager = getattr(agent, "memory_manager", None)
     if memory_manager is not None:
         # 采纳点：手动压缩同样把可复用前缀砍到 system 头部，且它跑在回合外，

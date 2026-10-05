@@ -51,6 +51,7 @@ from g3ku.runtime.frontdoor.token_preflight_compaction import (
 )
 from g3ku.runtime.message_token_estimation import estimate_message_tokens
 from g3ku.runtime.project_environment import current_project_environment
+from g3ku.runtime.session_agent import PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR
 from g3ku.runtime.stage_prompt_compaction import (
     ECHO_STRIP_ENABLED,
     STAGE_ARCHIVE_HEADING,
@@ -161,6 +162,11 @@ from .tool_contract import (
 
 CeoGraphState = CeoPersistentState
 
+
+
+
+# 上一跳的工具车道：正常 / 心跳内部 / 定时内部。换车道是清单的重印边界之一。
+PROVIDER_BUNDLE_LANE_ATTR = "_frontdoor_provider_bundle_lane"
 _TASK_ID_PATTERN = re.compile(r"task:[A-Za-z0-9][\w:-]*")
 # 旧文案静默哨兵的字面值。P4 之后它不再是任何判据，只作为"该被清洗掉的噪声"保留一份：
 # 转录里仍存有历史轮次的这类尾巴，模型有模仿上下文的倾向，不剥就会当正文发给用户。
@@ -2997,6 +3003,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         prior_provider_tool_names: list[str] | None,
         desired_provider_tool_names: list[str] | None,
         prior_history_shrink_reason: str = "",
+        recommit_boundary: bool = False,
     ) -> dict[str, Any]:
         prior = [
             str(item or "").strip()
@@ -3009,26 +3016,39 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             if str(item or "").strip()
         ]
         prior_membership = set(prior)
-        desired_membership = set(desired)
-        membership_changed = prior_membership != desired_membership
+        # 唯一的重新提交点：这一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 整段重写（内联压缩），
+        # 或手动压缩车道刚落完基线（它不经过 preflight，所以靠 recommit_boundary 显式接住）。
+        # 可复用前缀反正已经断在这里，重印参数表不额外破缓存。
+        at_recommit_boundary = bool(recommit_boundary) or str(prior_history_shrink_reason or "").strip() == "token_compression"
         if not prior:
             active = list(desired)
-        elif membership_changed:
+            provider_tool_bundle_mode = "pinned_seeded"
+        elif at_recommit_boundary:
             active = list(desired)
+            provider_tool_bundle_mode = "pinned_recommitted"
         else:
-            # Preserve the persisted order verbatim when the membership is
-            # unchanged so frontdoor prompt-cache prefixes stay stable.
+            # 钉住＝只补不删：新增能力即时并入清单，删名（权限收回、资源下架）一律推迟到
+            # 下一次压缩重印。一次工具更新不该把身后整段正文打掉，而清单滞后不影响安全——
+            # 派发字典按当轮治理可见集另行收窄。
             active = list(prior)
+            merged_membership = set(prior_membership)
+            for name in desired:
+                if name in merged_membership:
+                    continue
+                merged_membership.add(name)
+                active.append(name)
+            provider_tool_bundle_mode = "pinned_frozen"
         return {
             "provider_tool_names": list(active),
             "pending_provider_tool_names": [],
             "provider_tool_exposure_pending": False,
             "provider_tool_exposure_revision": cls._provider_tool_exposure_revision(active),
             "provider_tool_exposure_commit_reason": "",
-            "provider_tool_bundle_seeded": bool((not prior and active) or membership_changed),
+            "provider_tool_bundle_seeded": bool(set(active) != prior_membership),
+            "provider_tool_bundle_mode": provider_tool_bundle_mode,
             "desired_provider_tool_names": list(desired),
             "prior_history_shrink_reason": str(prior_history_shrink_reason or "").strip(),
-            "provider_tool_membership_changed": bool(membership_changed),
+            "provider_tool_membership_changed": bool(set(active) != prior_membership),
         }
 
     @classmethod
@@ -3040,10 +3060,11 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
         desired_provider_tool_names: list[str] | None,
         commit_reason: str = "",
     ) -> dict[str, Any]:
-        _ = pending_provider_tool_names, commit_reason
+        _ = pending_provider_tool_names
         return cls._refresh_frontdoor_provider_tool_bundle(
             prior_provider_tool_names=active_provider_tool_names,
             desired_provider_tool_names=desired_provider_tool_names,
+            prior_history_shrink_reason=commit_reason,
         )
 
     @classmethod
@@ -3271,11 +3292,59 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "cron_stop_condition": str(metadata.get("cron_stop_condition") or "").strip(),
         }
 
+    def _frontdoor_dispatch_tool_names(self, state: CeoGraphState) -> list[str]:
+        """派发名单：钉住的声明 ∩ 当轮治理可见集。
+
+        清单可以滞后（删名推迟到压缩重印），执行准入不行——声明滞后绝不能变成权限滞后。
+        治理可见集取不到时按当轮 callable pool 收，不拿声明兜底（宁可窄不可宽）。
+        """
+        declared = self._normalized_tool_name_state_list(list(state.get("provider_tool_names") or []))
+        granted = self._normalized_tool_name_state_list(list(state.get("rbac_visible_tool_names") or []))
+        if granted:
+            granted_set = set(granted)
+            return [name for name in declared if name in granted_set]
+        return self._normalized_tool_name_state_list(list(state.get("tool_names") or []))
+
+    @staticmethod
+    def _frontdoor_declared_denied_tool_names(
+        *,
+        declared_tool_names: list[str] | None,
+        granted_tool_names: list[str] | None,
+    ) -> list[str]:
+        """钉住的清单里带着、但当轮治理已不放行的名字：尾块要提前点名，别靠模型撞一次拒绝。
+
+        治理可见集取不到时不产出这一行——那种情况下一律说"无权限"会误导模型。
+        """
+        declared = [str(item or "").strip() for item in list(declared_tool_names or []) if str(item or "").strip()]
+        granted = {str(item or "").strip() for item in list(granted_tool_names or []) if str(item or "").strip()}
+        if not declared or not granted:
+            return []
+        return [name for name in declared if name not in granted]
+
+    def _frontdoor_bundle_recommit_boundary(self, *, session: Any, state: CeoGraphState) -> bool:
+        """tools[] 的唯一重新提交点：压缩（内联 preflight 的 token_compression 或手动压缩挂的
+        待重印标记）与换车道。
+
+        换车道必须重印：心跳/定时内部轮的工具面是刻意收窄的，钉住不能把上一车道的宽面
+        继承进来——那等于给内部轮多发一份它本来不该看见的执行面。标记读一次即清。
+        """
+        metadata = _user_input_metadata(state.get("user_input"))
+        lane = (
+            "cron_internal"
+            if bool(state.get("cron_internal", metadata.get("cron_internal")))
+            else "heartbeat_internal"
+            if bool(state.get("heartbeat_internal", metadata.get("heartbeat_internal")))
+            else "normal"
+        )
+        prior_lane = str(getattr(session, PROVIDER_BUNDLE_LANE_ATTR, "") or "").strip() or "normal"
+        setattr(session, PROVIDER_BUNDLE_LANE_ATTR, lane)
+        if bool(getattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)):
+            setattr(session, PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR, False)
+            return True
+        return lane != prior_lane
     def _registered_tools_for_state(self, state: CeoGraphState) -> dict[str, Tool]:
         return self._registered_tools(
-            self._frontdoor_provider_visible_tool_names(
-                list(state.get("provider_tool_names") or state.get("tool_names") or [])
-            )
+            self._frontdoor_provider_visible_tool_names(self._frontdoor_dispatch_tool_names(state))
         )
 
     def _frontdoor_provider_visible_tool_names(
@@ -6719,6 +6788,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     or getattr(session, "_frontdoor_history_shrink_reason", "")
                     or ""
                 ).strip(),
+                recommit_boundary=self._frontdoor_bundle_recommit_boundary(session=session, state=state),
             )
             runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
@@ -6873,6 +6943,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     or getattr(session, "_frontdoor_history_shrink_reason", "")
                     or ""
                 ).strip(),
+                recommit_boundary=self._frontdoor_bundle_recommit_boundary(session=session, state=state),
             )
             runtime_visible_tool_names = list(provider_tool_exposure.get("provider_tool_names") or [])
             tool_schemas = self._selected_tool_schemas(runtime_visible_tool_names)
@@ -6901,6 +6972,10 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 repair_required_skill_items=list(repair_required_skill_items),
                 rbac_visible_tool_names=list(rbac_visible_tool_names),
                 rbac_visible_skill_ids=list(rbac_visible_skill_ids),
+                denied_tool_names=self._frontdoor_declared_denied_tool_names(
+                    declared_tool_names=list(runtime_visible_tool_names or []),
+                    granted_tool_names=list(rbac_visible_tool_names or []),
+                ),
                 contract_revision=cache_family_revision,
                 exec_runtime_policy=(
                     self._loop.main_task_service._current_exec_runtime_policy_payload()

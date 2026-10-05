@@ -3935,3 +3935,26 @@ def test_frontdoor_provider_tool_schemas_carry_model_description() -> None:
     assert description == "Browser automation via semantic shortlist."
     assert isinstance(parameters, dict)
     assert (parameters.get("properties") or {}).get("url")
+def test_frontdoor_stage_gate_lists_declared_but_denied_tools() -> None:
+    """前门清单钉住后，无权限的名字要靠尾块提前说，不靠模型撞一次拒绝。"""
+    contract = build_frontdoor_tool_contract(
+        callable_tool_names=["exec"],
+        candidate_tool_names=[],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={},
+        denied_tool_names=["web_fetch"],
+    )
+
+    gate = contract.to_stage_gate_message()["content"]
+    assert "callable_tools: `exec`" in gate
+    assert "denied_tools" in gate
+    assert "web_fetch" in gate.split("denied_tools", 1)[1]
+    assert "无权限" in gate
+
+    clean = build_frontdoor_tool_contract(
+        callable_tool_names=["exec"],
+        candidate_tool_names=[],
+        hydrated_tool_names=[],
+        frontdoor_stage_state={},
+    )
+    assert "denied_tools" not in clean.to_stage_gate_message()["content"]

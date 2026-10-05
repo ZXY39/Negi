@@ -155,7 +155,7 @@ exec 与 memory 工具家族：
 
 状态与显示层：
 
-- 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；暴露给模型的当前轮显示合同是两份运行时块：回合内不变的 `frontdoor_runtime_tool_contract`（候选/待修复/附件/临时目录/执行策略）与每跳重写的 `frontdoor_runtime_stage_gate`（callable / 活动阶段），前者排后者的前面、后者在请求体末位。`candidate_tools` 只列名字，工具的说明文字由 provider `tools[]` 的 `function.description` 承载（同一请求里不抄第二份）。旧轮 candidate/tool/skill catalog 不进入 durable history，后续轮次只继承真实工具调用轨迹与上下文。
+- 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；暴露给模型的当前轮显示合同是两份运行时块：回合内不变的 `frontdoor_runtime_tool_contract`（候选/待修复/附件/临时目录/执行策略）与每跳重写的 `frontdoor_runtime_stage_gate`（callable / 已声明但无权限 / 活动阶段），前者排后者的前面、后者在请求体末位。`candidate_tools` 只列名字，工具的说明文字由 provider `tools[]` 的 `function.description` 承载（同一请求里不抄第二份）。旧轮 candidate/tool/skill catalog 不进入 durable history，后续轮次只继承真实工具调用轨迹与上下文。
 - `candidate_tool_names` 是运行时去重、hydration 排除、恢复和 gate 判断用的 canonical name list；`candidate_tool_items`（`{tool_id, description}`）只是它的显示层缓存，用于 contract rebuild / refresh 后保留描述文本。agent 只应看到结构化 `candidate_tools`；`candidate_tool_items` 不是第二份权威候选集——canonical `candidate_tool_names=[]` 时，agent-facing `candidate_tools` 也必须为空，不从旧 contract、旧 items 或旧动态消息把失效候选补回 prompt。
 - 对执行/验收节点，canonical `candidate_skill_ids` 落在 runtime frame，`candidate_skill_items` 随 frame 持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。`_enrich_node_messages()` 注入、且已携带 `candidate_skills` / `contract_visible_skill_ids` / `skill_visibility_diagnostics` 的 fresh skill 合同是 first-turn truth source：默认空 bootstrap frame 只负责占位与 phase 跟踪，不能把这些字段覆写成空；同一 turn 内 `_prepare_messages()` 裁掉尾部合同消息后，fresh skill 合同摘要沿 runtime context 继续传给 `react_loop`。
 - 字段级排障入口：`contract_visible_skill_ids` 是 `runtime_service._node_context_selection_inputs()` 当轮记下的 contract-visible skill 快照（输入层证据，随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 落盘）；`skill_visibility_diagnostics.entries` 携带 `registry_skill_ids` 与逐 skill 的 `enabled` / `available` / `allowed_for_actor_role` / `policy_effect` / `included_in_contract_visible`，用于定位是 live `resource_registry`、`allowed_roles` 还是治理策略拦掉了 skill；节点 context selection cache 与 `persisted_frame_router` 都带 live-visibility freshness gate——复用旧 selection 前重新对照当前 `session_key` / `actor_role` / `visible_tool_names` / `contract_visible_skill_ids` / `registry_skill_ids`，一旦漂移就丢弃旧 selection，重新跑 `_node_context_selection_inputs()` 与 `build_node_context_selection(...)`。这挡的是“外部 resource/governance refresh 改了可见性，但节点长期沿用旧 cache / 旧 frame”的回归（尤其“首轮 skill 可见集为空，后续轮次一直空”）。
@@ -177,7 +177,7 @@ exec 与 memory 工具家族：
 
 hydration 把一次成功的 `load_tool_context` 变成下一轮的 callable：候选在派发时定格、加载后进入水合台账、下一轮并入模型可见集合。台账、提升、重读、参数错误、外置结果信封、统一 timeout 与阶段门控的合同见 `tool-hydration-and-callable-chain.md`。
 
-模型面每跳重写的可调用状态只有 `callable_tools` 一行（= 常驻可调用 ∪ 本轮已提升水合），不再单独渲染水合集，所以"本轮可用"与"已水合"不是两份信息而是一份的两个来源。推论：水合台账被 LRU 淘汰时对模型完全静默——参数表还在 `tools[]` 里（节点清单钉住，删名要等压缩重印），但本轮调不动，只有调用被拒时 `availability_hint` 那两条名单才暴露这个状态。排查"模型看得见却调不了"不要先怀疑 schema，先看该行是否缺这个名字。唯一例外是权限收回：它会在尾块多出一行 `denied_tools` 提前点名，因为这类名字既不在 callable 也不在候选，不说的话模型只能靠撞一次拒绝才知道。
+模型面每跳重写的可调用状态只有 `callable_tools` 一行（= 常驻可调用 ∪ 本轮已提升水合），不再单独渲染水合集，所以"本轮可用"与"已水合"不是两份信息而是一份的两个来源。推论：水合台账被 LRU 淘汰时对模型完全静默——参数表还在 `tools[]` 里（节点清单钉住，删名要等压缩重印），但本轮调不动，只有调用被拒时 `availability_hint` 那两条名单才暴露这个状态。排查"模型看得见却调不了"不要先怀疑 schema，先看该行是否缺这个名字。权限收回是唯一的显式例外：两条车道的尾块都会多出一行 `denied_tools` 提前点名，因为这类名字既不在 callable 也不在候选，不说的话模型只能靠撞一次拒绝才知道。
 
 ### 3.5 `cron` 工具合同
 
@@ -320,16 +320,16 @@ The surfaced `message` executor and its Tool Admin family `messaging` are absent
 
 发给 provider 的 `tools[]` 声明清单（`provider_tool_names`）与"本轮真能调用"的 `tool_names` 是两份集合，两条车道都用这份区分做排查：`tool_names` 是当前轮权威 callable 合同；`provider_tool_names` 只决定 `tools[]` 里出现哪些名字与参数表。水合提升与阶段门控改动运行时合同尾块，不该每轮都重铺 `tools[]`。运行时合同是插在最新 user 消息之前的 system-role 摘要，不是 provider schema，也不是 durable history；模型若回显它，前门归一化只做一次私有修复，重复回显永不升级为最终输出。
 
-两条车道的清单来源与刷新点不同，这是最容易被误读成"另一条车道也这样"的地方：
+两条车道发的是同一种形状，区别只在重印边界有几条：
 
-- **CEO/frontdoor**：`tools[]` = 每轮现算的 RBAC 可见 concrete executor 全集（`capability_snapshot.visible_tool_ids` 过 provider-visible 合同），声明与派发查表同源。因此新授予的能力当跳即可用，清单只在 RBAC 真变化时重印；相邻跳实测零变化。
-- **执行/验收节点**：`tools[]` 在首跳按角色 RBAC 全集播种，之后**钉住**：钉住只允许"补"不允许"删"——当轮已 callable、已提升、新进入 provider 可见的名字即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点。清单的唯一重新提交点是 `token_compression`：那一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正断在这里，重印说明书不再额外破缓存，之后的跳按重印后的清单继续钉住。节点首跳播种与压缩重印是两个例外，其余跳都沿用上一跳清单原文。
+- **CEO/frontdoor**：首跳按当轮 RBAC 可见 concrete executor 全集播种，之后钉住。重印边界三条——内联压缩（preflight 报 `token_compression`）、手动压缩（车道路在 session 上挂 `PENDING_PROVIDER_BUNDLE_RECOMMIT_ATTR`，读一次即清）、**换车道**（正常 ↔ 心跳/定时内部轮；内部轮的工具面是刻意收窄的，继承上一车道的宽面等于给内部轮多发一份执行面）。
+- **执行/验收节点**：同样首跳按角色 RBAC 全集播种后钉住，重印边界只有 `token_compression` 一条。两条车道的钉住都是**只补不删**：当轮新增能力即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点；那一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 整段重写，可复用前缀反正断在这里，重印不额外破缓存。声明侧渲染脱离派发字典：清单里的名字若当轮已无实例，参数表取自 `declared_denied_tool_schemas`。
 
 漂移规则：
 
 - 普通跳只有在成员集合真的变化时才重算 `tools[]`；同名不同序保持持久化顺序原样不动，不为零收益轮换 schema。
-- 节点的 `stage_compaction` 不得轮转 `tools[]`；节点的 `token_compression` 是清单的重印点，取"若此刻重新播种会得到什么"的钉住集（`pinned_provider_tool_names`），而不是退回上一跳的窄清单。前门两条 shrink 原因都不轮转，刷新留到压缩后的第一个普通跳。
-- 清单滞后不是权限滞后，权限收回也不是删名的理由：节点执行按当轮待派发字典查名，不校验该名字是否出现在 `tools[]`，RBAC 收回在执行侧当跳即拒；同时**收回不会把名字从清单里摘走**。派发字典按当轮 RBAC 取数，收回后连工具实例都不交付，所以参数表由声明侧自带一份（`declared_denied_tool_schemas`）继续挂在 `tools[]` 上，并由尾块 `denied_tools` 点名"已声明、当前角色无权限"，不让模型靠撞一次拒绝才发现。只有实例彻底不存在（资源被整体禁用、拿不到 schema）时名字才真的离开清单。拒绝文案三态分开：候选未水化 ⇒ 先 `load_tool_context`；`denied_tools` ⇒ 重试与改名都不会放行；两者都不在 ⇒ 未知名字。
+- `stage_compaction` 任何一侧都不得轮转 `tools[]`。`token_compression` 是两条车道共同的重印点，前门另加"手动压缩"与"换车道"两条。重印取的是"此刻按当轮 RBAC 重新播种会得到什么"，不是退回上一跳的窄清单。
+- 清单滞后不是权限滞后，权限收回也不是删名的理由：两条车道的执行准入都与声明解耦——节点按当轮待派发字典查名，前门派发按 `_frontdoor_dispatch_tool_names` = 钉住清单 ∩ 当轮治理可见集（治理可见集取不到时退回当轮 callable pool，宁可窄不可宽）。RBAC 收回在执行侧当跳即拒，而清单继续带着该名字，并由尾块 `denied_tools` 点名"已声明、当前角色无权限"。只有实例彻底不存在（资源被整体禁用、拿不到 schema）时名字才真的离开清单。拒绝文案三态分开：候选未水化 ⇒ 先 `load_tool_context`；`denied_tools` ⇒ 重试与改名都不会放行；两者都不在 ⇒ 未知名字。
 - 曝光收窄（候选塌缩、LRU 淘汰 callable）不得把名字从节点清单里删掉；LRU 只管 callable 层，与清单无关。被淘汰但清单仍带 ⇒ 模型看得见参数表、本轮调不动，需重新 `load_tool_context`。
 - 工具曝光漂移改变当轮实际请求，但不因此轮换 caller-side prompt cache family；family 变化只留给稳定前缀重写、车道或模型切换、显式 cache-family revision bump 及其他刻意重置边界。`tool_signature_hash` / `actual_tool_schema_hash` 是观测字段，不是"该有新 family"的证据；缓存侧排查步骤见 `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」。
 
