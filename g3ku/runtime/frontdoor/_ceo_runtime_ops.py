@@ -3263,6 +3263,13 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             "candidate_tool_names": list(state.get("candidate_tool_names") or []),
             "candidate_skill_ids": list(state.get("candidate_skill_ids") or []),
             "hydrated_tool_names": list(state.get("hydrated_tool_names") or []),
+            # 给拒绝文案用：撞进来路已收的工具时，要能说"是无权限"而不是"还没水合"。
+            "declared_denied_tool_names": self._frontdoor_declared_denied_tool_names(
+                declared_tool_names=list(state.get("provider_tool_names") or []),
+                granted_tool_names=self._frontdoor_live_granted_tool_names(
+                    session_key=str(state.get("session_key") or ""),
+                ),
+            ),
             "rbac_visible_tool_names": list(state.get("rbac_visible_tool_names") or []),
             "rbac_visible_skill_ids": list(state.get("rbac_visible_skill_ids") or []),
             "channel": getattr(session, "_channel", "cli"),
@@ -3304,6 +3311,25 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
             granted_set = set(granted)
             return [name for name in declared if name in granted_set]
         return self._normalized_tool_name_state_list(list(state.get("tool_names") or []))
+
+    def _frontdoor_live_granted_tool_names(self, *, session_key: str) -> list[str]:
+        """实时读一次"这个角色现在被允许哪些工具"。
+
+        装配期的 capability_snapshot 是回合内缓存的，权限收回要过一会儿才反映进去；
+        denied_tools 说的就是"现在调不动"，拿旧快照对照必然漏报。
+        """
+        service = getattr(self._loop, "main_task_service", None)
+        lister = getattr(service, "list_effective_tool_names", None) if service is not None else None
+        if not callable(lister):
+            return []
+        try:
+            payload = lister(
+                actor_role="ceo",
+                session_id=str(session_key or "").strip() or "web:shared",
+            )
+        except Exception:
+            return []
+        return [str(item or "").strip() for item in list(payload or []) if str(item or "").strip()]
 
     @staticmethod
     def _frontdoor_declared_denied_tool_names(
@@ -6974,7 +7000,9 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                 rbac_visible_skill_ids=list(rbac_visible_skill_ids),
                 denied_tool_names=self._frontdoor_declared_denied_tool_names(
                     declared_tool_names=list(runtime_visible_tool_names or []),
-                    granted_tool_names=list(rbac_visible_tool_names or []),
+                    granted_tool_names=self._frontdoor_live_granted_tool_names(
+                        session_key=str(state.get("session_key") or ""),
+                    ),
                 ),
                 contract_revision=cache_family_revision,
                 exec_runtime_policy=(
@@ -8144,6 +8172,7 @@ class CeoFrontDoorRuntimeOps(CeoFrontDoorSupport):
                     requested=tool_name,
                     callable_names=list(visible_tools.keys()),
                     candidate_names=(runtime_context or {}).get("candidate_tool_names") or [],
+                    denied_names=(runtime_context or {}).get("declared_denied_tool_names") or [],
                 )
                 return await _error_result(payload, f"tool not available: {tool_name}" + (f"\n{hint}" if hint else ""))
             async with semaphore:
