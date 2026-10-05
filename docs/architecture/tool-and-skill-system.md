@@ -142,7 +142,7 @@ CEO/frontdoor 另有任务生命周期与分发控制类固定工具。各工具
 - 只有普通 candidate tool load 会进入 hydration/promotion、占用 hydration LRU；对已经 callable、已经 hydrated、fixed builtin，或当前仅 RBAC 可见但不在 candidate 里的 direct-load lane，`load_tool_context` 都是 read-only toolskill 加载。
 - 例外：runtime 侧还有一条免模型的 hydration 触发——`exec` 结果发生输出截断（`stdout_truncated` / `stderr_truncated`）时，运行时自动把 `content_open` 水合到下一轮 callable，并在这条 exec 结果里注入提醒，让模型直接从"立即可用但截断的 exec"切换到"能按行/字符精确读本地文件的 content_open"，不必先手动 `load_tool_context`。若 `content_open` 不在当前 candidate 集合则静默跳过；同一结果只注入一次。
 - 节点的可执行对象字典（`_tool_provider` 交付给执行循环的 `tools`）按治理可见集兜底构建，frame 里的候选被写成空时也不塌缩；家族已拆出 concrete executor 时，legacy 单体名不进对象字典也不进候选（模型面只该看到 concrete executor）。这一条与上一条是一对：候选决定"能不能被提升"，对象字典决定"提升后能不能真被解析执行"，两者各自按治理可见集取上界，才不会出现"名字可见却调不动"。
-- repair-required 资源从普通候选中剥离：工具进 `repair_required_tools`（不进入 agent-facing `candidate_tools` / `callable_tools` / `hydrated_tools`），skill 进 `repair_required_skills`（不进入 `candidate_skills`）；这两个列表只影响 agent-facing runtime contract，不等于 provider-facing `tools[]` 变化。
+- repair-required 资源从普通候选中剥离：工具进 `repair_required_tools`（不进入 agent-facing `candidate_tools` / `callable_tools`），skill 进 `repair_required_skills`（不进入 `candidate_skills`）；这两个列表只影响 agent-facing runtime contract，不等于 provider-facing `tools[]` 变化。
 
 exec 与 memory 工具家族：
 
@@ -155,7 +155,7 @@ exec 与 memory 工具家族：
 
 状态与显示层：
 
-- 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；暴露给模型的当前轮显示合同是两份运行时块：回合内不变的 `frontdoor_runtime_tool_contract`（候选/待修复/附件/临时目录/执行策略）与每跳重写的 `frontdoor_runtime_stage_gate`（callable / hydrated / 活动阶段），前者排后者的前面、后者在请求体末位。`candidate_tools` 只列名字，工具的说明文字由 provider `tools[]` 的 `function.description` 承载（同一请求里不抄第二份）。旧轮 candidate/tool/skill catalog 不进入 durable history，后续轮次只继承真实工具调用轨迹与上下文。
+- 对 CEO/frontdoor，`candidate_tool_names` / `candidate_skill_ids` 属于 internal canonical state；暴露给模型的当前轮显示合同是两份运行时块：回合内不变的 `frontdoor_runtime_tool_contract`（候选/待修复/附件/临时目录/执行策略）与每跳重写的 `frontdoor_runtime_stage_gate`（callable / 活动阶段），前者排后者的前面、后者在请求体末位。`candidate_tools` 只列名字，工具的说明文字由 provider `tools[]` 的 `function.description` 承载（同一请求里不抄第二份）。旧轮 candidate/tool/skill catalog 不进入 durable history，后续轮次只继承真实工具调用轨迹与上下文。
 - `candidate_tool_names` 是运行时去重、hydration 排除、恢复和 gate 判断用的 canonical name list；`candidate_tool_items`（`{tool_id, description}`）只是它的显示层缓存，用于 contract rebuild / refresh 后保留描述文本。agent 只应看到结构化 `candidate_tools`；`candidate_tool_items` 不是第二份权威候选集——canonical `candidate_tool_names=[]` 时，agent-facing `candidate_tools` 也必须为空，不从旧 contract、旧 items 或旧动态消息把失效候选补回 prompt。
 - 对执行/验收节点，canonical `candidate_skill_ids` 落在 runtime frame，`candidate_skill_items` 随 frame 持久化，供阶段切换、prompt compaction 之后的下一轮 contract 刷新从 frame 恢复。`_enrich_node_messages()` 注入、且已携带 `candidate_skills` / `contract_visible_skill_ids` / `skill_visibility_diagnostics` 的 fresh skill 合同是 first-turn truth source：默认空 bootstrap frame 只负责占位与 phase 跟踪，不能把这些字段覆写成空；同一 turn 内 `_prepare_messages()` 裁掉尾部合同消息后，fresh skill 合同摘要沿 runtime context 继续传给 `react_loop`。
 - 字段级排障入口：`contract_visible_skill_ids` 是 `runtime_service._node_context_selection_inputs()` 当轮记下的 contract-visible skill 快照（输入层证据，随 runtime frame 与 `runtime-frame-messages:{node_id}` artifact 落盘）；`skill_visibility_diagnostics.entries` 携带 `registry_skill_ids` 与逐 skill 的 `enabled` / `available` / `allowed_for_actor_role` / `policy_effect` / `included_in_contract_visible`，用于定位是 live `resource_registry`、`allowed_roles` 还是治理策略拦掉了 skill；节点 context selection cache 与 `persisted_frame_router` 都带 live-visibility freshness gate——复用旧 selection 前重新对照当前 `session_key` / `actor_role` / `visible_tool_names` / `contract_visible_skill_ids` / `registry_skill_ids`，一旦漂移就丢弃旧 selection，重新跑 `_node_context_selection_inputs()` 与 `build_node_context_selection(...)`。这挡的是“外部 resource/governance refresh 改了可见性，但节点长期沿用旧 cache / 旧 frame”的回归（尤其“首轮 skill 可见集为空，后续轮次一直空”）。
@@ -176,6 +176,8 @@ exec 与 memory 工具家族：
 ### 3.4 hydrated tools
 
 hydration 把一次成功的 `load_tool_context` 变成下一轮的 callable：候选在派发时定格、加载后进入水合台账、下一轮并入模型可见集合。台账、提升、重读、参数错误、外置结果信封、统一 timeout 与阶段门控的合同见 `tool-hydration-and-callable-chain.md`。
+
+模型面只有一行 `callable_tools`（= 常驻可调用 ∪ 本轮已提升水合），不再单独渲染水合集，所以"本轮可用"与"已水合"不是两份信息而是一份的两个来源。推论：水合台账被 LRU 淘汰时对模型完全静默——参数表还在 `tools[]` 里（节点清单钉住，删名要等压缩重印），但本轮调不动，只有调用被拒时 `availability_hint` 那两条名单才暴露这个状态。排查"模型看得见却调不了"不要先怀疑 schema，先看该行是否缺这个名字。
 
 ### 3.5 `cron` 工具合同
 
@@ -314,22 +316,27 @@ Current RBAC rules for surfaced families:
 
 The surfaced `message` executor and its Tool Admin family `messaging` are absent from the resource/tool contract entirely: resource discovery finds no `tools/message/resource.yaml`, Tool Admin lists no `messaging` family, and CEO/frontdoor fixed builtin exposure and the default `frontdoor_interrupt_tool_names` include no `message`; if either still appears in Tool Admin or in provider-facing web tool schemas, treat that as a contract regression rather than a disabled-by-default state. Browser/web replies travel through the websocket session path (`ceo.reply.final`, inflight snapshots, and related runtime events) and external-channel replies through the External Agent API event stream (`outbound.created`, see `external-agent-api.md`), so channel reply delivery is owned by those paths and independent of this tool-family contract.
 
-### CEO Provider Tool Surface
+### Provider Tool Surface
 
-For CEO/frontdoor prompt-cache debugging, maintainers distinguish two tool surfaces: `tool_names` represent the current turn's agent-facing callable pool, while `provider_tool_names` represent the provider-facing stable superset used to build `tools[]` for function calling. Hydration promotion and stage gating change the `frontdoor_runtime_tool_contract` overlay, but must not churn the provider-facing `tools[]` bundle every round. The contract is a system-role runtime summary inserted before the latest user message; it is not a provider tool schema and is not durable history. If a model echoes the summary, frontdoor output normalization performs one private repair attempt and never promotes a repeated contract echo to final output.
+发给 provider 的 `tools[]` 声明清单（`provider_tool_names`）与"本轮真能调用"的 `tool_names` 是两份集合，两条车道都用这份区分做排查：`tool_names` 是当前轮权威 callable 合同；`provider_tool_names` 只决定 `tools[]` 里出现哪些名字与参数表。水合提升与阶段门控改动运行时合同尾块，不该每轮都重铺 `tools[]`。运行时合同是插在最新 user 消息之前的 system-role 摘要，不是 provider schema，也不是 durable history；模型若回显它，前门归一化只做一次私有修复，重复回显永不升级为最终输出。
 
-Drift rules:
+两条车道的清单来源与刷新点不同，这是最容易被误读成"另一条车道也这样"的地方：
 
-- Ordinary turns may refresh provider-facing `tools[]` from the current RBAC-visible concrete tool set only when membership truly changed; if the recomputed bundle has the same names in a different order, keep the persisted order exactly as-is instead of rotating schemas for no behavioral gain.
-- If the current send is already doing `token_compression`, keep that send's provider-facing `tools[]` unchanged and defer any refresh to the first post-compression ordinary turn.
-- If RBAC removed a tool, execution must reject it immediately even if the provider-facing schema has not yet converged.
-- Tool exposure drift changes that round's actual request but does not by itself rotate the caller-side prompt cache family; family changes are reserved for stable-prefix rewrites, lane or model switches, explicit cache-family revision bumps, and other deliberate reset boundaries. Treat `tool_signature_hash` / `actual_tool_schema_hash` as observability fields, not as proof that a new prompt-cache family should exist; cache-side debugging steps 详见 `context-and-cache-troubleshooting.md`「tool schema churn」.
+- **CEO/frontdoor**：`tools[]` = 每轮现算的 RBAC 可见 concrete executor 全集（`capability_snapshot.visible_tool_ids` 过 provider-visible 合同），声明与派发查表同源。因此新授予的能力当跳即可用，清单只在 RBAC 真变化时重印；相邻跳实测零变化。
+- **执行/验收节点**：`tools[]` 在首跳按角色 RBAC 全集播种，之后**钉住**：钉住只允许"补"不允许"删"——当轮已 callable、已提升、新进入 provider 可见的名字即时并入（否则模型手里只剩名字、拼不出合法参数表），删名一律推迟到重印点。清单的唯一重新提交点是 `token_compression`：那一跳正文已被 `[G3KU_TOKEN_COMPACT_V2]` 全量重写，可复用前缀反正断在这里，重印说明书不再额外破缓存，之后的跳按重印后的清单继续钉住。节点首跳播种与压缩重印是两个例外，其余跳都沿用上一跳清单原文。
 
-The provider-facing bundle is intentionally minimal:
+漂移规则：
 
-- Rich tool and skill descriptions stay in the tail runtime contract; provider `tools[]` keeps only the smallest callable schema required for function calling. Repair-required tool/skill exposure is not implemented by churning provider `tools[]`; repair-required lists are runtime-summary-only guidance, and provider bundle stability wins for cache continuity.
-- `stage_compaction` must not be used as a shortcut to publish a new provider bundle. If artifacts show a new `actual_tool_schema_hash` together with `history_shrink_reason=stage_compaction`, treat that as a provider-bundle refresh regression.
-- Provider-facing schemas are sanitized before transport: descriptive text and unsupported JSON Schema combinators such as `anyOf`, `oneOf`, and `allOf` are stripped or flattened into a simpler supported shape. Runtime-side tool validation remains the authority for argument correctness; do not assume a provider-facing schema still preserves every branch of the richer internal contract. If cache misses correlate with a large `actual_tool_schema_hash` delta, first check whether provider schemas accidentally regressed from this minimal/stable form.
+- 普通跳只有在成员集合真的变化时才重算 `tools[]`；同名不同序保持持久化顺序原样不动，不为零收益轮换 schema。
+- 节点的 `stage_compaction` 不得轮转 `tools[]`；节点的 `token_compression` 是清单的重印点，取"若此刻重新播种会得到什么"的钉住集（`pinned_provider_tool_names`），而不是退回上一跳的窄清单。前门两条 shrink 原因都不轮转，刷新留到压缩后的第一个普通跳。
+- 清单滞后不是权限滞后：节点执行按当轮待派发字典查名，不校验该名字是否出现在 `tools[]`；RBAC 收回在执行侧当跳即拒，即使 provider schema 尚未收敛。前门的声明与派发同源，所以它的"能力永不旧"由清单本身每轮现算保证。
+- 曝光收窄（候选塌缩、LRU 淘汰 callable）不得把名字从节点清单里删掉；LRU 只管 callable 层，与清单无关。被淘汰但清单仍带 ⇒ 模型看得见参数表、本轮调不动，需重新 `load_tool_context`。
+- 工具曝光漂移改变当轮实际请求，但不因此轮换 caller-side prompt cache family；family 变化只留给稳定前缀重写、车道或模型切换、显式 cache-family revision bump 及其他刻意重置边界。`tool_signature_hash` / `actual_tool_schema_hash` 是观测字段，不是"该有新 family"的证据；缓存侧排查步骤见 `context-and-cache-troubleshooting.md`「跨普通 fresh turn 的 tool schema churn」。
+
+provider-facing schema 刻意保持最小：
+
+- 富文本说明留在尾部运行时合同里，provider `tools[]` 只保留 function calling 所需的最小 schema。repair-required 资源不靠轮换 provider `tools[]` 来表达：那两份清单只是运行时摘要侧的指引，清单稳定性优先于缓存连续性。
+- 说明性文本与不支持的 JSON Schema 组合子（`anyOf` / `oneOf` / `allOf`）在传输前被剥平，provider-facing schema 只保留 function calling 需要的最小形状；参数正确性的权威仍在运行时校验侧，不要假设线上那份 schema 还保留了内部合同的每个分支。若缓存缺失与 `actual_tool_schema_hash` 的大幅变化同时出现，先查 provider schema 是否从这份最小/稳定形态回归成了富文本形态。
 
 ## 10. 资源目录代检查与语义目录新鲜度
 
